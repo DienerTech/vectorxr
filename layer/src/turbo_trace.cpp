@@ -112,8 +112,9 @@ void TurboTimingTrace::SetDebugEnabledLocked(Logger& logger, bool enabled) {
         }
         logger.Debug("Turbo trace v3: continuous recent history in " + RecorderPath(log_path_, 0).string() +
             " and part 1 (4 MiB each); stalls, faults and recoveries freeze the latest three snapshots. "
-            "Frame Generation's Dynamic stand-downs and confirmed runtime halving freeze the latest two "
-            "snapshots of their own (at most one per 30s), which never replace incident snapshots. "
+            "Frame Generation's Dynamic stand-downs, Dynamic probes and confirmed runtime halving (the "
+            "runtime holding Frame Generation's frames to half rate) freeze the latest two snapshots of "
+            "their own (at most one per 30s), which never replace incident snapshots. "
             "The ordinary log keeps up to 100000 sampled lines per session. "
             "Queue=32768; background flush=250ms; stall threshold=2s. "
             "ns is monotonic since capture start; unixMs anchors exported tails; sequence detects lost history. "

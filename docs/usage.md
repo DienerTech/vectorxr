@@ -867,8 +867,9 @@ headset's own software. Smoothing there, such as Pimax Play's **Smart Smoothing*
 Rate to Half Refresh Rate**, still needs to be off.
 
 A game running below the headset's refresh rate is not, by itself, the runtime halving its frame
-rate. SteamVR, for example, then reports a longer frame period to the game, in whole refreshes;
-VectorXR does not count that as halving.
+rate. SteamVR with a Pimax headset, for example, then reports a longer frame period to the game,
+in whole refreshes, and releases its frame waits at once; VectorXR does not count that as
+halving.
 
 Turn off the smoothing and check that the runtime runs at full refresh. The message clears once
 the runtime gives frames every refresh again: within a few seconds while Frame Generation

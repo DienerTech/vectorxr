@@ -10215,40 +10215,28 @@ void OpenXrLayer::PollFrameGenRecorder() {
     // halving report both come with that engagement in recent history.
     // Without Log Level Debug or Frame Generation this is two atomic loads.
     if (!turbo_trace_.Enabled() || !framegen_owns_pacing_.load(std::memory_order_acquire)) {
-        framegen_recorder_seen_ = false;
+        framegen_recorder_.Reset();
         return;
     }
     const FrameGenStatus status = framegen_.Status();
-    const std::uint64_t stand_downs = status.dynamic_stand_downs + status.dynamic_probes;
-    if (!framegen_recorder_seen_ || stand_downs < framegen_recorder_stand_downs_) {
-        // Recording just began, or a new session reset the counts: the
-        // events so far are not this recording's to freeze.
-        framegen_recorder_seen_ = true;
-        framegen_recorder_stand_downs_ = stand_downs;
-        framegen_recorder_halving_ = status.runtime_halving;
-        return;
-    }
-    // A request the recorder could not take (producers held it) is asked
-    // again at the next poll.
-    if (stand_downs > framegen_recorder_stand_downs_) {
-        // a=stand-downs, b=probes so far this session.
-        if (!turbo_trace_.RequestFrameGenSnapshot("framegen.standdown",
-                                                  static_cast<std::int64_t>(status.dynamic_stand_downs),
-                                                  static_cast<std::int64_t>(status.dynamic_probes))) {
-            return;
-        }
-        framegen_recorder_stand_downs_ = stand_downs;
-    }
-    if (status.runtime_halving && !framegen_recorder_halving_) {
-        // a=frames submitted to the runtime per second, b=the game's frames
-        // per second (both x1000).
-        if (!turbo_trace_.RequestFrameGenSnapshot("framegen.halving",
-                                                  static_cast<std::int64_t>(status.output_fps * 1000.0),
-                                                  static_cast<std::int64_t>(status.app_fps * 1000.0))) {
-            return;
-        }
-    }
-    framegen_recorder_halving_ = status.runtime_halving;
+    // The trigger asks for nothing at the first poll of a recording or after
+    // a new session reset the counts, and asks again at the next poll for a
+    // request the recorder could not take (producers held it).
+    framegen_recorder_.Poll(
+        status.dynamic_stand_downs + status.dynamic_probes, status.runtime_halving,
+        [&](FrameGenSnapshotTrigger::Event event) {
+            if (event == FrameGenSnapshotTrigger::Event::kStandDown) {
+                // a=stand-downs, b=probes so far this session.
+                return turbo_trace_.RequestFrameGenSnapshot(
+                    "framegen.standdown", static_cast<std::int64_t>(status.dynamic_stand_downs),
+                    static_cast<std::int64_t>(status.dynamic_probes));
+            }
+            // a=frames submitted to the runtime per second, b=the game's
+            // frames per second (both x1000).
+            return turbo_trace_.RequestFrameGenSnapshot("framegen.halving",
+                                                        static_cast<std::int64_t>(status.output_fps * 1000.0),
+                                                        static_cast<std::int64_t>(status.app_fps * 1000.0));
+        });
 }
 
 void OpenXrLayer::PollConfigFile() {

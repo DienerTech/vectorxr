@@ -194,8 +194,8 @@ function settingsSummary(settings: FrameGenSettings) {
 
       <SetupGuide class="mb-3" title="Setup guide" summary="Turn it on for one game, then compare in the headset" :open="setupGuideOpen">
         <ol class="list-decimal space-y-1 pl-5 text-sm leading-6">
-          <li><strong>Turn off runtime smoothing</strong> such as SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW or Meta ASW. It fights Frame Generation.</li>
-          <li><strong>Keep the headset at its full refresh rate.</strong> Don't use a runtime's half-rate or fixed 45 fps mode; Frame Generation sets the game's rate itself.</li>
+          <li><strong>Turn off runtime smoothing</strong> for the game, in the runtime and in the headset's own software: SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW or Meta ASW. They fight Frame Generation's pacing.</li>
+          <li><strong>Keep the headset at its full refresh rate.</strong> Don't halve the frame rate with Pimax Play's Lock Frame Rate to Half Refresh Rate or a frame limit in SteamVR's Throttling Behavior; Frame Generation sets the game's rate itself.</li>
           <li><strong>Get the game to half the refresh rate first.</strong> With Frame Generation off, lower the game's settings or the render resolution until it holds at least half the headset's rate (45 fps at 90 Hz). Frame Generation can take it from half to full, but it can't do the first half.</li>
           <li><strong>Turn it on for one game:</strong> leave the Default Profile off, add a custom profile below and assign the game. The default settings suit most games.</li>
           <li><strong>Save and restart the game.</strong> Turning Frame Generation on takes effect at the next launch.</li>
@@ -361,7 +361,7 @@ function settingsSummary(settings: FrameGenSettings) {
           <section class="space-y-3">
             <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Before you start</p>
             <div class="rounded-[1rem] border px-4 py-3 chip-warning" style="border-color: var(--app-border)">
-              <strong>Turn off runtime smoothing</strong> such as SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW and Meta ASW, and keep the headset at its full refresh rate. Frame Generation sets the game's rate itself.
+              <strong>Turn off runtime smoothing</strong> for the game, in the runtime and in the headset's own software (SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW, Meta ASW), and keep the headset at its full refresh rate: don't halve the frame rate with Pimax Play's Lock Frame Rate to Half Refresh Rate or a frame limit in SteamVR's Throttling Behavior. Frame Generation sets the game's rate itself.
             </div>
             <div class="rounded-[1rem] border px-4 py-3 surface-panel">
               <strong>Turbo stays off while Frame Generation runs.</strong> The two pace frames in opposite ways, so Turbo yields in those games and reads Paused for Frame Generation. Your Turbo profiles are not changed.

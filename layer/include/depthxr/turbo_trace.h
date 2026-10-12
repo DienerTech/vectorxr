@@ -124,4 +124,43 @@ private:
     std::filesystem::path log_path_;
     std::chrono::steady_clock::time_point start_{}, burst_until_{}, next_burst_{};
 };
+
+// Decides which Frame Generation events ask for a snapshot
+// (RequestFrameGenSnapshot); the layer polls it from its config watcher.
+// Poll takes the session's Dynamic stand-downs plus probes so far and whether
+// runtime halving is reported. The first poll after Reset, and a count lower
+// than the last one (a new session reset it), set the baseline and ask
+// nothing: those events are not this recording's to freeze. After that, a
+// rise in the count and halving turning on each call request once. A request
+// that returns false (the recorder could not take it) is asked again at the
+// next poll; one that returns true counts as made, even when the rate limit
+// froze nothing (c=0).
+class FrameGenSnapshotTrigger {
+public:
+    enum class Event { kStandDown, kHalving };
+    void Reset() { seen_ = false; }
+    // request: bool(Event).
+    template <typename Request>
+    void Poll(std::uint64_t stand_downs, bool halving, Request&& request) {
+        if (!seen_ || stand_downs < stand_downs_) {
+            seen_ = true;
+            stand_downs_ = stand_downs;
+            halving_ = halving;
+            return;
+        }
+        if (stand_downs > stand_downs_) {
+            if (!request(Event::kStandDown)) return;
+            stand_downs_ = stand_downs;
+        }
+        if (halving && !halving_) {
+            if (!request(Event::kHalving)) return;
+        }
+        halving_ = halving;
+    }
+
+private:
+    bool seen_{false};
+    std::uint64_t stand_downs_{0};
+    bool halving_{false};
+};
 } // namespace depthxr

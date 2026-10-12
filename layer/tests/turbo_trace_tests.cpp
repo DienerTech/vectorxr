@@ -355,6 +355,97 @@ void TestFrameGenSnapshots(const std::filesystem::path& root) {
     Check(!std::filesystem::exists(depthxr::TurboTimingTrace::FrameGenSnapshotPath(log, 0).string() + ".tmp"),
           "A Frame Generation snapshot left its temporary file");
 }
+// PollFrameGenRecorder's decision: which polls ask for a Frame Generation
+// snapshot.
+void TestFrameGenSnapshotTrigger() {
+    using Event = depthxr::FrameGenSnapshotTrigger::Event;
+    depthxr::FrameGenSnapshotTrigger trigger;
+    std::vector<Event> asked;
+    bool accept = true;
+    const auto request = [&](Event event) { asked.push_back(event); return accept; };
+    // The first poll sets the baseline: the session's earlier stand-downs
+    // and a standing halving report are not this recording's.
+    trigger.Poll(3, true, request);
+    trigger.Poll(3, true, request);
+    Check(asked.empty(), "The first poll asked for a snapshot of earlier events");
+    trigger.Poll(4, true, request);
+    trigger.Poll(4, true, request);
+    Check(asked == std::vector<Event>{Event::kStandDown},
+          "A stand-down or probe did not ask for exactly one snapshot");
+    // A new session resets the counts: a lower count is a new baseline.
+    asked.clear();
+    trigger.Poll(1, false, request);
+    Check(asked.empty(), "A count reset asked for a snapshot");
+    trigger.Poll(2, false, request);
+    Check(asked == std::vector<Event>{Event::kStandDown},
+          "A stand-down after a count reset did not ask for a snapshot");
+    // A refused request is asked again at the next poll, until taken.
+    asked.clear();
+    accept = false;
+    trigger.Poll(3, false, request);
+    trigger.Poll(3, false, request);
+    accept = true;
+    trigger.Poll(3, false, request);
+    trigger.Poll(3, false, request);
+    Check(asked == std::vector<Event>(3, Event::kStandDown),
+          "A refused request was not asked again, or a taken one was asked twice");
+    // Halving asks when it turns on, not while it stands or when it clears:
+    // false -> true -> false -> true asks twice.
+    asked.clear();
+    trigger.Poll(3, true, request);
+    trigger.Poll(3, true, request);
+    trigger.Poll(3, false, request);
+    trigger.Poll(3, true, request);
+    Check(asked == std::vector<Event>(2, Event::kHalving),
+          "Halving turning on twice did not ask for exactly two snapshots");
+    // Both in one poll: a taken stand-down is not asked again while a refused
+    // halving request is.
+    trigger.Poll(3, false, request);
+    asked.clear();
+    trigger.Poll(4, true, [&](Event event) { asked.push_back(event); return event == Event::kStandDown; });
+    trigger.Poll(4, true, request);
+    trigger.Poll(4, true, request);
+    Check(asked == std::vector<Event>{Event::kStandDown, Event::kHalving, Event::kHalving},
+          "A refused halving request was not asked again, or its taken stand-down was");
+    // Reset (Debug or Frame Generation off) makes the next poll a baseline.
+    asked.clear();
+    trigger.Reset();
+    trigger.Poll(6, false, request);
+    trigger.Poll(6, false, request);
+    Check(asked.empty(), "The first poll after Reset asked for a snapshot");
+}
+// With the recorder: a request it records but rate-limits (c=0) counts as
+// made and is not asked again.
+void TestFrameGenSnapshotTriggerRateLimit(const std::filesystem::path& root) {
+    depthxr::Logger logger;
+    logger.Initialize(root / "framegen-trigger.log");
+    logger.SetLevel(depthxr::LogLevel::Debug);
+    depthxr::TurboTimingTrace trace;
+    trace.Start(logger);
+    const auto log = logger.ActiveLogPath();
+    depthxr::FrameGenSnapshotTrigger trigger;
+    std::uint64_t asked = 0, taken = 0;
+    const auto request = [&](depthxr::FrameGenSnapshotTrigger::Event) {
+        ++asked;
+        const bool recorded = trace.RequestFrameGenSnapshot("framegen.standdown", 70 + static_cast<std::int64_t>(taken));
+        if (recorded) ++taken;
+        return recorded;
+    };
+    trigger.Poll(0, false, request);
+    // A producer holding the recorder only moves a request to a later poll.
+    for (std::uint64_t stand_downs = 1; stand_downs <= 2; ++stand_downs)
+        for (int poll = 0; poll < 10 && taken < stand_downs; ++poll) trigger.Poll(stand_downs, false, request);
+    Check(taken == 2, "The recorder did not take both Frame Generation requests");
+    const auto handled = asked;
+    trigger.Poll(2, false, request);
+    trigger.Poll(2, false, request);
+    Check(asked == handled, "A rate-limited request the recorder took was asked again");
+    trace.Stop();
+    const auto history = History(log);
+    Check(history.find("event=framegen.standdown a=70 b=0 c=1") != std::string::npos &&
+          history.find("event=framegen.standdown a=71 b=0 c=0") != std::string::npos,
+          "The second request was not the rate-limited one (c=0)");
+}
 void TestReopenedPartStaysBounded(const std::filesystem::path& root) {
     depthxr::Logger logger;
     logger.Initialize(root / "reopen.log");
@@ -430,12 +521,14 @@ int main(int argc, char** argv) {
         TestIncidentSnapshotsRotate(root);
         TestFrameGenSnapshotNames();
         TestFrameGenSnapshots(root);
+        TestFrameGenSnapshotTrigger();
+        TestFrameGenSnapshotTriggerRateLimit(root);
         TestReopenedPartStaysBounded(root);
         TestRetention(root);
         std::cout << "Flight recorder: continuous persistence, rollover, frozen stalls, incident snapshots and "
-                     "rotation, Frame Generation snapshots (names, rate limit, rotation apart from incidents), "
-                     "reopened part bounds, nonblocking producers, Debug lifecycle, writer failure, "
-                     "and retention passed.\n";
+                     "rotation, Frame Generation snapshots (names, rate limit, rotation apart from incidents, "
+                     "trigger baseline, retry and edges), reopened part bounds, nonblocking producers, Debug "
+                     "lifecycle, writer failure, and retention passed.\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

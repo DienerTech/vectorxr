@@ -1014,9 +1014,7 @@ class OpenXrLayer {
     std::optional<std::chrono::steady_clock::time_point> runtime_relay_last_status_write_;
     // The Frame Generation events PollFrameGenRecorder last saw (watcher
     // thread only): Dynamic stand-downs and probes, and runtime halving.
-    bool framegen_recorder_seen_{false};
-    std::uint64_t framegen_recorder_stand_downs_{0};
-    bool framegen_recorder_halving_{false};
+    FrameGenSnapshotTrigger framegen_recorder_;
 
     std::string runtime_name_;
     std::string system_name_;
