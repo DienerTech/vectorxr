@@ -444,6 +444,9 @@ class OpenXrLayer {
     void RefreshResolvedSettings();
     void ResetPivotInputStateForConfigChange();
     void PollRuntimeRelay();
+    // Watcher thread: has the flight recorder freeze a Frame Generation
+    // snapshot when Dynamic stands down or runtime halving is confirmed.
+    void PollFrameGenRecorder();
     // The app's status line for Frame Generation (RuntimeStatusDocument::framegen_reason).
     static std::string FrameGenStatusReason(const FrameGenStatus& framegen);
     void CaptureInstanceFunctions();
@@ -1009,6 +1012,11 @@ class OpenXrLayer {
     std::uint64_t runtime_relay_acknowledged_revision_{0};
     std::atomic<bool> runtime_relay_status_dirty_{false};
     std::optional<std::chrono::steady_clock::time_point> runtime_relay_last_status_write_;
+    // The Frame Generation events PollFrameGenRecorder last saw (watcher
+    // thread only): Dynamic stand-downs and probes, and runtime halving.
+    bool framegen_recorder_seen_{false};
+    std::uint64_t framegen_recorder_stand_downs_{0};
+    bool framegen_recorder_halving_{false};
 
     std::string runtime_name_;
     std::string system_name_;

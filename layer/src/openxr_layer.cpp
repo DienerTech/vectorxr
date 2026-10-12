@@ -10203,7 +10203,52 @@ void OpenXrLayer::ConfigWatcherLoop() {
         }
         PollConfigFile();
         PollRuntimeRelay();
+        PollFrameGenRecorder();
     }
+}
+
+void OpenXrLayer::PollFrameGenRecorder() {
+    // Runs on the watcher thread, never on a frame path. The flight recorder
+    // keeps only seconds of history, so an engagement's presenter waits
+    // (runtime.wait) rotate away unless something freezes them. A Dynamic
+    // stand-down (benefit guard, runtime halving or a probe) and a runtime
+    // halving report both come with that engagement in recent history.
+    // Without Log Level Debug or Frame Generation this is two atomic loads.
+    if (!turbo_trace_.Enabled() || !framegen_owns_pacing_.load(std::memory_order_acquire)) {
+        framegen_recorder_seen_ = false;
+        return;
+    }
+    const FrameGenStatus status = framegen_.Status();
+    const std::uint64_t stand_downs = status.dynamic_stand_downs + status.dynamic_probes;
+    if (!framegen_recorder_seen_ || stand_downs < framegen_recorder_stand_downs_) {
+        // Recording just began, or a new session reset the counts: the
+        // events so far are not this recording's to freeze.
+        framegen_recorder_seen_ = true;
+        framegen_recorder_stand_downs_ = stand_downs;
+        framegen_recorder_halving_ = status.runtime_halving;
+        return;
+    }
+    // A request the recorder could not take (producers held it) is asked
+    // again at the next poll.
+    if (stand_downs > framegen_recorder_stand_downs_) {
+        // a=stand-downs, b=probes so far this session.
+        if (!turbo_trace_.RequestFrameGenSnapshot("framegen.standdown",
+                                                  static_cast<std::int64_t>(status.dynamic_stand_downs),
+                                                  static_cast<std::int64_t>(status.dynamic_probes))) {
+            return;
+        }
+        framegen_recorder_stand_downs_ = stand_downs;
+    }
+    if (status.runtime_halving && !framegen_recorder_halving_) {
+        // a=frames submitted to the runtime per second, b=the game's frames
+        // per second (both x1000).
+        if (!turbo_trace_.RequestFrameGenSnapshot("framegen.halving",
+                                                  static_cast<std::int64_t>(status.output_fps * 1000.0),
+                                                  static_cast<std::int64_t>(status.app_fps * 1000.0))) {
+            return;
+        }
+    }
+    framegen_recorder_halving_ = status.runtime_halving;
 }
 
 void OpenXrLayer::PollConfigFile() {

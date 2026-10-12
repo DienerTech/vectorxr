@@ -8,6 +8,7 @@
 #include <string>
 #include <string_view>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 namespace depthxr {
@@ -44,6 +45,13 @@ std::filesystem::path TurboTimingTrace::SnapshotPath(const std::filesystem::path
     return path;
 }
 
+std::filesystem::path TurboTimingTrace::FrameGenSnapshotPath(const std::filesystem::path& log, unsigned index) {
+    auto path = log;
+    path.replace_extension(index == 0 ? std::string(".flight-recorder.framegen.log")
+                                      : ".flight-recorder.framegen-" + std::to_string(index) + ".log");
+    return path;
+}
+
 std::int64_t TurboTimingTrace::NowNs() const {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now() - start_).count();
@@ -60,6 +68,8 @@ void TurboTimingTrace::Start(Logger& logger) {
         dropped_ = untracked_calls_ = 0;
         next_id_ = 0;
         stopping_ = writer_failed_ = false;
+        framegen_snapshot_due_ = false;
+        last_framegen_snapshot_ns_.reset();
         start_ = std::chrono::steady_clock::now();
         last_event_ns_ = idle_report_ns_ = 0;
         wall_unix_ms_ = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -102,6 +112,8 @@ void TurboTimingTrace::SetDebugEnabledLocked(Logger& logger, bool enabled) {
         }
         logger.Debug("Turbo trace v3: continuous recent history in " + RecorderPath(log_path_, 0).string() +
             " and part 1 (4 MiB each); stalls, faults and recoveries freeze the latest three snapshots. "
+            "Frame Generation's Dynamic stand-downs and confirmed runtime halving freeze the latest two "
+            "snapshots of their own (at most one per 30s), which never replace incident snapshots. "
             "The ordinary log keeps up to 100000 sampled lines per session. "
             "Queue=32768; background flush=250ms; stall threshold=2s. "
             "ns is monotonic since capture start; unixMs anchors exported tails; sequence detects lost history. "
@@ -186,6 +198,22 @@ void TurboTimingTrace::Record(const char* event, std::uint64_t id, std::int64_t 
     const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now - start_).count();
     AppendLocked({event, ns, ThreadId(), id, 0, a, b, c, SampledLocked(now), nullptr});
 }
+bool TurboTimingTrace::RequestFrameGenSnapshot(const char* event, std::int64_t a, std::int64_t b) {
+    if (!Enabled()) return false;
+    auto lock = TryProducerLock();
+    if (!lock) { ++dropped_; return false; }
+    if (!Enabled() || stopping_) return false;
+    const auto ns = NowNs();
+    // Rate-limited here, not by the writer, so the event itself records
+    // whether it froze history.
+    const bool freeze = !last_framegen_snapshot_ns_ || ns - *last_framegen_snapshot_ns_ >= kFrameGenSnapshotIntervalNs;
+    if (freeze) {
+        last_framegen_snapshot_ns_ = ns;
+        framegen_snapshot_due_ = true;
+    }
+    AppendLocked({event, ns, ThreadId(), 0, 0, a, b, freeze ? 1 : 0, true, nullptr});
+    return true;
+}
 
 TurboTimingTrace::Call::Call(TurboTimingTrace& trace, const char* name) : name_(name) {
     trace.BeginCall(*this);
@@ -264,12 +292,14 @@ void TurboTimingTrace::Run(Logger& logger) {
             bytes += text.size();
             if (!file) throw std::runtime_error("Unable to write flight recorder");
         };
-        const auto freeze = [&]() -> bool {
+        using SnapshotName = std::filesystem::path (*)(const std::filesystem::path&, unsigned);
+        const auto freeze = [&](SnapshotName snapshot_path, unsigned snapshots) -> bool {
             // Freeze pre-incident history before later healthy frames can rotate
             // it away. The ordinary rolling files continue independently, and a
-            // snapshot failure never disables them.
+            // snapshot failure never disables them. Incident and Frame
+            // Generation snapshots rotate separately (`snapshot_path`).
             std::error_code error;
-            auto temporary = SnapshotPath(log_path_, 0);
+            auto temporary = snapshot_path(log_path_, 0);
             temporary += ".tmp";
             {
                 std::ofstream frozen(temporary, std::ios::binary | std::ios::trunc);
@@ -292,21 +322,23 @@ void TurboTimingTrace::Run(Logger& logger) {
                 frozen.flush();
                 if (!frozen) return false;
             }
-            for (unsigned index = kSnapshots - 1; index > 0; --index) {
-                std::filesystem::rename(SnapshotPath(log_path_, index - 1), SnapshotPath(log_path_, index), error);
+            for (unsigned index = snapshots - 1; index > 0; --index) {
+                std::filesystem::rename(snapshot_path(log_path_, index - 1), snapshot_path(log_path_, index), error);
                 error.clear();
             }
-            std::filesystem::rename(temporary, SnapshotPath(log_path_, 0), error);
+            std::filesystem::rename(temporary, snapshot_path(log_path_, 0), error);
             return !error;
         };
         bool was_stalled = false;
         bool snapshot_failure_logged = false;
+        bool framegen_failure_logged = false;
         bool sampled_cap_logged = false;
         std::uint64_t sampled_lines = 0;
         std::optional<std::int64_t> last_incident_snapshot_ns;
         for (;;) {
             bool stalled = false;
             bool stopping;
+            bool framegen_snapshot;
             std::uint64_t dropped, untracked;
             batch.clear();
             {
@@ -318,6 +350,8 @@ void TurboTimingTrace::Run(Logger& logger) {
                 dropped = dropped_.exchange(0);
                 untracked = untracked_calls_.exchange(0);
                 stopping = stopping_;
+                // Its request event is in this batch or an earlier one.
+                framegen_snapshot = std::exchange(framegen_snapshot_due_, false);
                 if (Enabled() && !stopping) {
                     const auto ns = NowNs();
                     // Lost attempts are still producer activity, not evidence
@@ -376,13 +410,21 @@ void TurboTimingTrace::Run(Logger& logger) {
                                   (!last_incident_snapshot_ns || now_ns - *last_incident_snapshot_ns >= kReportNs);
             if ((stalled && !was_stalled) || incident) {
                 if (incident) last_incident_snapshot_ns = now_ns;
-                if (!freeze() && !snapshot_failure_logged) {
+                if (!freeze(SnapshotPath, kSnapshots) && !snapshot_failure_logged) {
                     snapshot_failure_logged = true;
                     logger.TryDebug("Turbo flight recorder: an incident snapshot could not be saved; "
                                     "continuous history is unaffected.");
                 }
             }
             was_stalled = stalled;
+            // Frame Generation events keep the history before them (the
+            // presenter thread's runtime waits) in snapshots of their own.
+            // RequestFrameGenSnapshot rate-limits them.
+            if (framegen_snapshot && !freeze(FrameGenSnapshotPath, kFrameGenSnapshots) && !framegen_failure_logged) {
+                framegen_failure_logged = true;
+                logger.TryDebug("Turbo flight recorder: a Frame Generation snapshot could not be saved; "
+                                "continuous history is unaffected.");
+            }
             // Commit continuous history first. Sampled ordinary logging must
             // never make the recorder wait for a lock held by a game thread.
             for (const auto& e : batch) {

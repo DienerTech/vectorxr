@@ -40,6 +40,12 @@ public:
         trace.burst_until_ = std::chrono::steady_clock::now() - 1s;
         trace.next_burst_ = std::chrono::steady_clock::now() + 1h;
     }
+    // The last Frame Generation snapshot happened one interval earlier.
+    static void AgeFrameGenSnapshot(TurboTimingTrace& trace) {
+        std::scoped_lock lock(trace.mutex_);
+        if (trace.last_framegen_snapshot_ns_)
+            *trace.last_framegen_snapshot_ns_ -= TurboTimingTrace::kFrameGenSnapshotIntervalNs;
+    }
 };
 }
 namespace {
@@ -271,6 +277,84 @@ void TestIncidentSnapshotsRotate(const std::filesystem::path& root) {
           "Snapshot rotation created a snapshot without an incident");
     trace.Stop();
 }
+void TestFrameGenSnapshotNames() {
+    const std::filesystem::path log = std::filesystem::path("logs") / "vectorxr-20261011-162004.log";
+    const auto name = [&](unsigned index) {
+        return depthxr::TurboTimingTrace::FrameGenSnapshotPath(log, index).filename().string();
+    };
+    Check(name(0) == "vectorxr-20261011-162004.flight-recorder.framegen.log" &&
+          name(1) == "vectorxr-20261011-162004.flight-recorder.framegen-1.log" &&
+          depthxr::TurboTimingTrace::FrameGenSnapshotPath(log, 0).parent_path() == log.parent_path(),
+          "Frame Generation snapshots are misnamed");
+    for (unsigned index = 0; index < depthxr::TurboTimingTrace::kFrameGenSnapshots; ++index) {
+        const auto path = depthxr::TurboTimingTrace::FrameGenSnapshotPath(log, index);
+        for (unsigned other = 0; other < depthxr::TurboTimingTrace::kSnapshots; ++other)
+            Check(path != depthxr::TurboTimingTrace::SnapshotPath(log, other),
+                  "A Frame Generation snapshot shares an incident snapshot's name");
+        for (unsigned part = 0; part < 2; ++part)
+            Check(path != depthxr::TurboTimingTrace::RecorderPath(log, part),
+                  "A Frame Generation snapshot shares a recorder part's name");
+    }
+}
+void TestFrameGenSnapshots(const std::filesystem::path& root) {
+    depthxr::Logger logger;
+    logger.Initialize(root / "framegen.log");
+    depthxr::TurboTimingTrace trace;
+    trace.Start(logger);
+    Check(!trace.RequestFrameGenSnapshot("framegen.standdown", 1),
+          "A Frame Generation snapshot was accepted without Debug");
+    logger.SetLevel(depthxr::LogLevel::Debug);
+    trace.SetDebugEnabled(logger, true);
+    const auto log = logger.ActiveLogPath();
+    const auto incident = depthxr::TurboTimingTrace::SnapshotPath(log, 0);
+    const auto latest = depthxr::TurboTimingTrace::FrameGenSnapshotPath(log, 0);
+    const auto previous = depthxr::TurboTimingTrace::FrameGenSnapshotPath(log, 1);
+    // Fault evidence first: Frame Generation snapshots must never replace it.
+    trace.Record("fault.begin", 0, -37);
+    Check(Wait([&] { return Read(incident).find("event=fault.begin a=-37") != std::string::npos; }),
+          "A fault did not freeze recorder history");
+    const auto fault = Read(incident);
+    trace.Record("presenter.wait", trace.NextId(), 21);
+    Check(trace.RequestFrameGenSnapshot("framegen.standdown", 1, 0), "A Frame Generation snapshot was refused");
+    Check(Wait([&] { return Read(latest).find("event=framegen.standdown a=1 b=0 c=1") != std::string::npos; }),
+          "A Frame Generation request did not freeze recorder history");
+    Check(Read(latest).find("event=presenter.wait a=21") != std::string::npos,
+          "The Frame Generation snapshot lacks the history before the request");
+    Check(Read(incident) == fault && !std::filesystem::exists(depthxr::TurboTimingTrace::SnapshotPath(log, 1)),
+          "A Frame Generation snapshot rotated the incident snapshots");
+    // Within the interval a request is recorded and freezes nothing.
+    Check(trace.RequestFrameGenSnapshot("framegen.halving", 45000, 90000),
+          "A rate-limited Frame Generation request was not recorded");
+    Check(Wait([&] { return History(log).find("event=framegen.halving a=45000 b=90000 c=0") != std::string::npos; }),
+          "A rate-limited Frame Generation request did not record c=0");
+    std::this_thread::sleep_for(300ms);
+    Check(!std::filesystem::exists(previous) && Read(latest).find("event=framegen.halving") == std::string::npos,
+          "Frame Generation snapshots were not rate-limited");
+    // After the interval the next request freezes again; the previous
+    // snapshot moves to index 1 and the incident snapshot stays.
+    depthxr::TurboTraceTestPeer::AgeFrameGenSnapshot(trace);
+    trace.Record("presenter.wait", trace.NextId(), 31);
+    Check(trace.RequestFrameGenSnapshot("framegen.standdown", 2, 1), "A second Frame Generation snapshot was refused");
+    Check(Wait([&] { return Read(latest).find("event=framegen.standdown a=2 b=1 c=1") != std::string::npos; }),
+          "A Frame Generation request after the interval did not freeze recorder history");
+    Check(Read(previous).find("event=framegen.standdown a=1 b=0 c=1") != std::string::npos &&
+          Read(previous).find("event=framegen.standdown a=2") == std::string::npos,
+          "The earlier Frame Generation snapshot did not move to index 1");
+    Check(!std::filesystem::exists(depthxr::TurboTimingTrace::FrameGenSnapshotPath(log, 2)),
+          "Frame Generation snapshots kept more than two");
+    Check(Read(incident) == fault && !std::filesystem::exists(depthxr::TurboTimingTrace::SnapshotPath(log, 1)),
+          "A later Frame Generation snapshot rotated the incident snapshots");
+    // The events reach the ordinary log too.
+    Check(Wait([&] { return Read(log).find("event=framegen.standdown a=2 b=1 c=1") != std::string::npos; }),
+          "A Frame Generation request was not written to the ordinary log");
+    logger.SetLevel(depthxr::LogLevel::Info);
+    trace.SetDebugEnabled(logger, false);
+    Check(!trace.RequestFrameGenSnapshot("framegen.standdown", 3), "A paused recorder accepted a request");
+    trace.Stop();
+    Check(!trace.RequestFrameGenSnapshot("framegen.standdown", 4), "A stopped recorder accepted a request");
+    Check(!std::filesystem::exists(depthxr::TurboTimingTrace::FrameGenSnapshotPath(log, 0).string() + ".tmp"),
+          "A Frame Generation snapshot left its temporary file");
+}
 void TestReopenedPartStaysBounded(const std::filesystem::path& root) {
     depthxr::Logger logger;
     logger.Initialize(root / "reopen.log");
@@ -301,6 +385,8 @@ void TestRetention(const std::filesystem::path& root) {
         std::ofstream(depthxr::TurboTimingTrace::RecorderPath(old, part)) << "old recorder";
     for (unsigned index = 0; index < depthxr::TurboTimingTrace::kSnapshots; ++index)
         std::ofstream(depthxr::TurboTimingTrace::SnapshotPath(old, index)) << "old frozen history";
+    for (unsigned index = 0; index < depthxr::TurboTimingTrace::kFrameGenSnapshots; ++index)
+        std::ofstream(depthxr::TurboTimingTrace::FrameGenSnapshotPath(old, index)) << "old Frame Generation history";
     std::filesystem::last_write_time(old, std::filesystem::file_time_type::clock::now() - 1h);
     depthxr::Logger logger;
     logger.Initialize(directory / "vectorxr.log");
@@ -311,7 +397,9 @@ void TestRetention(const std::filesystem::path& root) {
           !std::filesystem::exists(depthxr::TurboTimingTrace::RecorderPath(old, 1)) &&
           !std::filesystem::exists(Snapshot(old)) &&
           !std::filesystem::exists(depthxr::TurboTimingTrace::SnapshotPath(old, 1)) &&
-          !std::filesystem::exists(depthxr::TurboTimingTrace::SnapshotPath(old, 2)),
+          !std::filesystem::exists(depthxr::TurboTimingTrace::SnapshotPath(old, 2)) &&
+          !std::filesystem::exists(depthxr::TurboTimingTrace::FrameGenSnapshotPath(old, 0)) &&
+          !std::filesystem::exists(depthxr::TurboTimingTrace::FrameGenSnapshotPath(old, 1)),
           "Log retention orphaned recorder files");
 }
 }
@@ -340,10 +428,13 @@ int main(int argc, char** argv) {
         TestProducersNeverWait(root);
         TestDebugControlAndFailure(root);
         TestIncidentSnapshotsRotate(root);
+        TestFrameGenSnapshotNames();
+        TestFrameGenSnapshots(root);
         TestReopenedPartStaysBounded(root);
         TestRetention(root);
         std::cout << "Flight recorder: continuous persistence, rollover, frozen stalls, incident snapshots and "
-                     "rotation, reopened part bounds, nonblocking producers, Debug lifecycle, writer failure, "
+                     "rotation, Frame Generation snapshots (names, rate limit, rotation apart from incidents), "
+                     "reopened part bounds, nonblocking producers, Debug lifecycle, writer failure, "
                      "and retention passed.\n";
         return 0;
     } catch (const std::exception& error) {

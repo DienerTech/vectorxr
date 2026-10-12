@@ -78,16 +78,22 @@ impl DebugSourceSnapshot {
         // comes before older recorder history, so the size budget can never
         // drop a session's ordinary log in favour of another's recorder files.
         const COMPLETE_SESSIONS: usize = 2;
+        let existing = |path: &Path, extensions: &[&str]| {
+            extensions
+                .iter()
+                .map(|extension| path.with_extension(extension))
+                .filter(|snapshot| snapshot.exists())
+                .collect::<Vec<_>>()
+        };
         let companions = |path: &Path| {
-            let mut files = [
-                "flight-recorder.stall.log",
-                "flight-recorder.stall-1.log",
-                "flight-recorder.stall-2.log",
-            ]
-            .iter()
-            .map(|extension| path.with_extension(extension))
-            .filter(|snapshot| snapshot.exists())
-            .collect::<Vec<_>>();
+            let mut files = existing(
+                path,
+                &[
+                    "flight-recorder.stall.log",
+                    "flight-recorder.stall-1.log",
+                    "flight-recorder.stall-2.log",
+                ],
+            );
             let mut recorders = (0..2)
                 .map(|part| path.with_extension(format!("flight-recorder.{part}.log")))
                 .filter(|recorder| recorder.exists())
@@ -96,6 +102,15 @@ impl DebugSourceSnapshot {
                 std::cmp::Reverse(fs::metadata(recorder).and_then(|m| m.modified()).ok())
             });
             files.extend(recorders);
+            // Frame Generation snapshots come last, so the size budget never
+            // drops incident snapshots or recent history in their favour.
+            files.extend(existing(
+                path,
+                &[
+                    "flight-recorder.framegen.log",
+                    "flight-recorder.framegen-1.log",
+                ],
+            ));
             files
         };
         for (index, path) in paths.iter().enumerate() {
@@ -221,7 +236,7 @@ mod tests {
     }
 
     #[test]
-    fn includes_main_log_then_snapshots_then_recorder_parts_without_unrelated_files() {
+    fn includes_main_log_then_snapshots_then_recorder_parts_then_framegen_snapshots() {
         let root = std::env::temp_dir().join(format!(
             "vectorxr-recorder-export-{}-{}",
             std::process::id(),
@@ -250,10 +265,25 @@ mod tests {
             "previous frozen history",
         )
         .unwrap();
+        fs::write(
+            main.with_extension("flight-recorder.framegen.log"),
+            "latest frame generation history",
+        )
+        .unwrap();
+        fs::write(
+            main.with_extension("flight-recorder.framegen-1.log"),
+            "previous frame generation history",
+        )
+        .unwrap();
         fs::write(root.join("unrelated.flight-recorder.0.log"), "unrelated").unwrap();
+        fs::write(
+            root.join("unrelated.flight-recorder.framegen.log"),
+            "unrelated",
+        )
+        .unwrap();
         let mut snapshot = DebugSourceSnapshot::default();
         snapshot.logs(vec![main]);
-        assert_eq!(snapshot.files.len(), 5);
+        assert_eq!(snapshot.files.len(), 7);
         assert_eq!(snapshot.files[0].content.as_deref(), Some("main log"));
         assert_eq!(
             snapshot.files[1].content.as_deref(),
@@ -263,9 +293,18 @@ mod tests {
             snapshot.files[2].content.as_deref(),
             Some("previous frozen history")
         );
-        assert!(snapshot.files[3..]
+        assert!(snapshot.files[3..5]
             .iter()
-            .all(|f| f.archive_path.contains("flight-recorder.")));
+            .all(|f| f.archive_path.contains("flight-recorder.")
+                && f.content.as_deref().unwrap().ends_with("flight history")));
+        assert_eq!(
+            snapshot.files[5].archive_path,
+            "logs/vectorxr-20261008-190626.flight-recorder.framegen.log"
+        );
+        assert_eq!(
+            snapshot.files[6].content.as_deref(),
+            Some("previous frame generation history")
+        );
         assert!(snapshot.files.iter().all(|f| f.error.is_none()));
         fs::remove_dir_all(root).unwrap();
     }

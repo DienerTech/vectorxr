@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 
 #include "depthxr/logger.h"
@@ -54,6 +55,22 @@ public:
     // previous ones, so a later benign stall cannot erase an earlier incident.
     static constexpr unsigned kSnapshots = 3;
     static std::filesystem::path SnapshotPath(const std::filesystem::path& log, unsigned index);
+    // Frozen Frame Generation history (RequestFrameGenSnapshot): index 0 is
+    // the latest snapshot, 1 the previous one. These files are separate from
+    // the incident snapshots, so Frame Generation events never replace stall
+    // or fault evidence.
+    static constexpr unsigned kFrameGenSnapshots = 2;
+    static std::filesystem::path FrameGenSnapshotPath(const std::filesystem::path& log, unsigned index);
+    // At most one Frame Generation snapshot per interval. Requests in between
+    // are recorded and freeze nothing.
+    static constexpr std::int64_t kFrameGenSnapshotIntervalNs = 30'000'000'000;
+    // Records `event` with a and b, plus c=1 when the event freezes a
+    // snapshot or c=0 when the interval has not passed yet. The writer then
+    // freezes recent history into the Frame Generation snapshots. The event
+    // also goes to the ordinary log. Any thread; never waits. Returns false
+    // when nothing was recorded (the recorder is off, or producers held it),
+    // so the caller can ask again later.
+    bool RequestFrameGenSnapshot(const char* event, std::int64_t a = 0, std::int64_t b = 0);
     // Ordinary-log copies of sampled events per capture session; the recorder
     // files keep recording beyond it.
     static constexpr std::uint64_t kSampledLogLines = 100000;
@@ -97,6 +114,10 @@ private:
     std::atomic<std::uint64_t> next_id_{0}, next_call_{0};
     std::atomic<std::uint64_t> dropped_{0}, untracked_calls_{0};
     bool stopping_{false}, writer_failed_{false};
+    // A Frame Generation snapshot is due at the writer's next batch, and when
+    // the last one was due (both mutex_).
+    bool framegen_snapshot_due_{false};
+    std::optional<std::int64_t> last_framegen_snapshot_ns_;
     std::int64_t wall_unix_ms_{0}, last_event_ns_{0}, idle_report_ns_{0};
     std::size_t head_{0}, count_{0};
     std::uint64_t sequence_{0};
