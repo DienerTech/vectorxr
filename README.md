@@ -109,8 +109,9 @@ PiOpenXR, in DCS (Direct3D 11 with quad views), MSFS 2024 (Direct3D 12), and Sta
 but the bridges that carry Direct3D 11 and Vulkan games' images to Frame Generation have not been
 verified on AMD. Motion is measured on the final images (no game motion vectors yet), text and
 HUDs can shimmer on generated frames, and the real frames it keeps take video memory: about
-0.55 GB each at 6864x6908 per eye. Turn off runtime smoothing such as SteamVR Motion Smoothing or
-ASW (the OSD and log say so when the runtime halves the frame rate), and expect Turbo to stay off
+0.55 GB each at 6864x6908 per eye. Turn off runtime smoothing, in the runtime and in the headset's
+own software, such as SteamVR Motion Smoothing, Pimax Smart Smoothing or ASW (the OSD and log say
+so when the runtime holds Frame Generation's frames to half rate), and expect Turbo to stay off
 where Frame Generation runs. Turning it on needs a game restart. See the
 [Frame Generation guide](docs/usage.md#frame-generation-experimental).
 

@@ -34,7 +34,7 @@
           {
             "html": "<em>Before you turn it on</em>",
             "items": [
-              "Turn off runtime smoothing (SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW, Meta ASW) for games that use Frame Generation, and keep the runtime at full refresh. If a runtime still holds the frame rate down, the On-Screen Display reads <strong>The runtime halves the frame rate: turn off its smoothing</strong>, the log says so, and Dynamic holds off until the runtime gives every refresh again.",
+              "Turn off runtime smoothing (SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW, Meta ASW) for games that use Frame Generation, and keep the runtime at full refresh. Check both the runtime and the headset's own software: SteamVR showing Motion Smoothing as <strong>Not Supported</strong> says nothing about Pimax Play's settings, for example. If the runtime still holds Frame Generation's frames to half rate, the On-Screen Display reads <strong>Runtime holds frames to half rate: check its smoothing</strong>, the log names the settings that can do this, and Dynamic holds off until the runtime gives every refresh again.",
               "Get the game to at least half the headset's refresh rate on its own first, for example 45 fps at 90 Hz. Frame Generation fills the gap from there; below it, artifacts grow quickly.",
               "Turbo stays off in sessions where Frame Generation runs and reads <strong>Paused for Frame Generation</strong>; your Turbo profiles are not changed."
             ]

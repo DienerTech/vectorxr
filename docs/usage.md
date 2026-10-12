@@ -610,11 +610,15 @@ for the frames it keeps: see [Video memory](#video-memory).
 
 #### Set up Frame Generation for a game
 
-1. Turn off runtime smoothing for the game: **SteamVR Motion Smoothing**, **Pimax Smart
-   Smoothing**, **Virtual Desktop SSW**, or **Meta ASW**. They fight Frame Generation's pacing.
-2. Keep the runtime at full refresh. Do not halve the frame rate in **Pimax Play** or with a
-   SteamVR fixed 45 fps setting: Frame Generation lowers the game's rate itself and needs the
-   headset running at its full refresh rate.
+1. Turn off runtime smoothing for the game, in the runtime and in the headset's own software:
+   **SteamVR Motion Smoothing**, **Pimax Smart Smoothing**, **Virtual Desktop SSW**, or **Meta
+   ASW**. They fight Frame Generation's pacing. See
+   [When the runtime holds frames to half rate](#when-the-runtime-holds-frames-to-half-rate) for
+   where these settings are.
+2. Keep the runtime at full refresh. Do not halve the frame rate with Pimax Play's **Lock Frame
+   Rate to Half Refresh Rate** or a frame limit in SteamVR's **Throttling Behavior**: Frame
+   Generation lowers the game's rate itself and needs the headset running at its full refresh
+   rate.
 3. Get the game to half the refresh rate on its own first: at least 45 fps at 90 Hz, with Frame
    Generation off (the On-Screen Display shows it). Frame Generation can take a game from half
    the refresh rate to full, but it cannot do that first half: below it, each generated frame
@@ -823,30 +827,53 @@ Advanced settings. The first enabled custom profile that matches the running gam
 - **Runtime smoothing:** SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW,
   and Meta ASW fight the pacing. Turn them off for games that use Frame Generation.
 - **Runtime frame rate:** keep the headset at its full refresh rate. Do not halve the frame rate
-  in Pimax Play or with a SteamVR fixed 45 fps setting; Frame Generation lowers the game's rate
-  itself.
+  with Pimax Play's **Lock Frame Rate to Half Refresh Rate** or a frame limit in SteamVR's
+  **Throttling Behavior**; Frame Generation lowers the game's rate itself.
 
-When the runtime holds Frame Generation's frames to half its refresh rate anyway (or to a third
-or a quarter of it), as its smoothing does, VectorXR reports it after about 4 seconds of it:
+#### When the runtime holds frames to half rate
 
-- The line under the On-Screen Display's Frame Generation row (expanded layout) reads **The
-  runtime halves the frame rate: turn off its smoothing**, and the app's live status ends with
-  the same words.
-- The log says so once per session, with what it measured: **Frame Generation: the runtime
-  appears to be halving the frame rate, probably through its motion smoothing: ...**.
+Runtime smoothing holds a game's frames to half the headset's refresh rate (or to a third or a
+quarter of it) and fills the refreshes in between itself. When the runtime does that to the
+frames Frame Generation presents, VectorXR reports it after about 4 seconds of it:
+
+- The line under the On-Screen Display's Frame Generation row (expanded layout) reads **Runtime
+  holds frames to half rate: check its smoothing**, and the app's live status ends with **the
+  runtime holds frames to half rate: check its smoothing**.
+- The log says so once per session, with what it measured and the settings that can do this:
+  **Frame Generation: the runtime held Frame Generation's frames to every other refresh at 90 Hz
+  for 4 s (its frame waits blocked). Settings that can do this: ...**.
 - With **Dynamic**, Frame Generation stands down while it lasts (**Frame Generation (dynamic)
-  stands down: the runtime halves the frame rate**): frames pass straight through, as without
+  stands down: the runtime holds frames to half rate**): frames pass straight through, as without
   Frame Generation, and it tries again after a hold, 10 seconds at first and longer after each
   stand-down. While the message stands, a try ends within about a second if the runtime still
-  holds the frame rate down.
+  holds the frames to half rate.
 - Each 30-second summary counts the waits on Frame Generation's own thread that the runtime held
   back, as **runtimeHalved** (held back/measured), followed by **(halving)** while it lasts.
 
-Turn off the runtime's smoothing and check that it runs at full refresh. The message clears once
-the runtime gives Frame Generation's frames every refresh again: within a few seconds while
-Frame Generation presents them, and with **Dynamic** standing by, the next time it engages.
-Standing by, it can clear sooner if the game runs well above half the refresh rate: its own
-frames then show the runtime giving every refresh.
+VectorXR measures that the frames are held, not which setting holds them. Check every setting
+below that your runtime and your headset's own software have:
+
+- **SteamVR:** **Motion Smoothing** off under **Settings > Video**. Under **Settings > Video >
+  Per-Application Video Settings**, for the game, **Motion Smoothing** at **Disabled** (or at
+  **Use global setting** with the global one off) and **Throttling Behavior** at **Auto**.
+- **Pimax Play:** under **Device settings**, on the **Frame rate** card, **Smart Smoothing** and
+  **Lock Frame Rate to Half Refresh Rate** off.
+- **Virtual Desktop:** **SSW** off.
+- **Meta:** **ASW** off.
+
+SteamVR can show Motion Smoothing as **Not Supported**. That is SteamVR saying the graphics card
+or its driver lacks the asynchronous reprojection its smoothing needs; it says nothing about the
+headset's own software. Smoothing there, such as Pimax Play's **Smart Smoothing** or **Lock Frame
+Rate to Half Refresh Rate**, still needs to be off.
+
+A game running below the headset's refresh rate is not, by itself, the runtime halving its frame
+rate. SteamVR, for example, then reports a longer frame period to the game, in whole refreshes;
+VectorXR does not count that as halving.
+
+Turn off the smoothing and check that the runtime runs at full refresh. The message clears once
+the runtime gives frames every refresh again: within a few seconds while Frame Generation
+presents them, and with **Dynamic** standing by, the next time it engages, or sooner once the
+game's own frames show the runtime giving them every refresh.
 
 #### Current limits
 
@@ -910,9 +937,12 @@ Frame Generation runs. Turbo still works for games without Frame Generation.
 
 Yes. Runtime smoothing (SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW,
 Meta ASW) fights Frame Generation's pacing. Also keep the runtime at full refresh: do not halve
-the frame rate in Pimax Play or with a SteamVR fixed 45 fps setting. When a runtime halves the
-frame rate anyway, the On-Screen Display and the log say so (see
-[How Frame Generation works with other features](#how-frame-generation-works-with-other-features)).
+the frame rate with Pimax Play's **Lock Frame Rate to Half Refresh Rate** or a frame limit in
+SteamVR's **Throttling Behavior**. Check both the runtime and the headset's own software: SteamVR
+showing Motion Smoothing as **Not Supported** says nothing about Pimax Play's settings, for
+example. When the runtime holds Frame Generation's frames to half rate anyway, the On-Screen
+Display and the log say so (see
+[When the runtime holds frames to half rate](#when-the-runtime-holds-frames-to-half-rate)).
 
 **How much video memory does it need?**
 
