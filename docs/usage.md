@@ -12,6 +12,16 @@ VectorXR has two parts working together:
 You do not need to keep the desktop app open for the layer to work — the layer reads the saved
 config file directly. Settings are stored locally under `%LOCALAPPDATA%\VectorXR`.
 
+## Online games with anti-cheat
+
+Using VectorXR in online games with anti-cheat, including Star Citizen, is at your own risk, and
+that includes your game account. Official releases are code-signed, and VectorXR has run under
+Star Citizen's Easy Anti-Cheat in testing, but no game developer has endorsed it, and a developer
+can change what its anti-cheat allows at any time.
+
+Report problems with VectorXR, Frame Generation included, to VectorXR rather than to the game's
+developer, and attach **Export Debug** from Home.
+
 ## What you see on first launch
 
 ![VectorXR Home tab on first run](screenshots/home.jpg)
@@ -617,6 +627,10 @@ AMD and Intel GPUs are untested. The **Shader** motion source is vendor-neutral,
 and Vulkan games reach Frame Generation through bridges that share their images with a Direct3D 12
 device, and those bridges have not been verified on AMD. Frame Generation also needs video memory
 for the frames it keeps: see [Video memory](#video-memory).
+
+In Star Citizen and other online games with anti-cheat, Frame Generation, like the rest of
+VectorXR, is at your own risk: see [Online games with anti-cheat](#online-games-with-anti-cheat).
+Report Frame Generation problems to VectorXR rather than to the game's developer.
 
 #### Set up Frame Generation for a game
 

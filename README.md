@@ -113,7 +113,8 @@ HUDs can shimmer on generated frames, and the real frames it keeps take video me
 own software, such as SteamVR Motion Smoothing, Pimax Smart Smoothing or ASW (the OSD and log say
 so when the runtime holds Frame Generation's frames to half rate), and expect Turbo to stay off
 where Frame Generation runs. Turning it on needs a game restart. See the
-[Frame Generation guide](docs/usage.md#frame-generation-experimental).
+[Frame Generation guide](docs/usage.md#frame-generation-experimental). In Star Citizen and other
+online games with anti-cheat, it is at your own risk: see [Current Status](#current-status).
 
 ### On-Screen Display
 
@@ -193,6 +194,13 @@ Feedback and bug reports are welcome — that is what this stage is for.
 Official Windows releases include an app, OpenXR layer, and installer signed by **DienerTech LLC**.
 Local source builds may be unsigned. Broader cross-runtime testing and packaging improvements
 remain part of the road to 1.0.
+
+**Online games with anti-cheat:** Using VectorXR in online games with anti-cheat, including Star
+Citizen, is at your own risk, and that includes your game account. Official releases are
+code-signed, and VectorXR has run under Star Citizen's Easy Anti-Cheat in testing, but no game
+developer has endorsed it, and a developer can change what its anti-cheat allows at any time.
+Report problems with VectorXR, Frame Generation included, to VectorXR rather than to the game's
+developer.
 
 ## Build From Source
 

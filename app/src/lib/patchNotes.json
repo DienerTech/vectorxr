@@ -6,6 +6,13 @@
     "summary": "Adds experimental Frame Generation: VectorXR fills the refreshes a game misses with generated frames, so your headset gets a fresh image every refresh even when the game can't keep up, in Direct3D 11, Direct3D 12, and Vulkan games. Also lets Pivot's Enhanced Motion keep working inside Snap Views, adds Position Assist and soft deadzones, keeps games running when the runtime rejects a Turbo frame, and makes Quadviews eye tracking more dependable.",
     "items": [
       {
+        "html": "<strong>Online games with anti-cheat</strong>",
+        "items": [
+          "Using VectorXR in online games with anti-cheat, including Star Citizen, is at your own risk, and that includes your game account. Official releases are code-signed, and VectorXR has run under Star Citizen's Easy Anti-Cheat in testing, but no game developer has endorsed it, and a developer can change what its anti-cheat allows at any time.",
+          "Report problems with VectorXR, Frame Generation included, to VectorXR rather than to the game's developer."
+        ]
+      },
+      {
         "html": "<strong>Frame Generation (experimental)</strong>",
         "items": [
           {
