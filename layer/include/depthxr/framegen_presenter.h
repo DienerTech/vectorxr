@@ -681,15 +681,18 @@ class FrameGenPresenter {
     // over halving_window_ (while halving is reported, a quarter of it from
     // when the presenter thread's waits start). A wait asked for late shows
     // that only when the runtime reported a multiple and still blocked it;
-    // one it released at once was not held. Only the presenter thread's
-    // waits report halving; the game's own can clear it (they may also wait
-    // for the game's frame before, as MSFS's do).
+    // one it reported a multiple for and released at once, for a display
+    // time off the refresh grid (the period echoing its caller's own
+    // interval), was not held, and any other says nothing. Only the
+    // presenter thread's waits report halving; the game's own can clear it
+    // (they may also wait for the game's frame before, as MSFS's do).
     void NoteRuntimeHalvingLocked(std::chrono::steady_clock::time_point called,
                                   std::chrono::steady_clock::time_point returned, XrTime display_time,
                                   XrDuration period, bool presenter);
     void NotePhaseLocked(std::chrono::steady_clock::time_point called, std::chrono::steady_clock::time_point returned,
                          XrTime display_time, XrDuration period);
-    // What paced submissions are spaced by: the period reported, at most the
+    // What paced submissions are spaced by, and the presenter thread's
+    // half-refresh thresholds judged by: the period reported, at most the
     // refresh period.
     XrDuration SubmitSpacingLocked(XrDuration period) const;
     // When the paced submission for `display_time` goes to the runtime, from

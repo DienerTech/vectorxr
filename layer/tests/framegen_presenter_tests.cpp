@@ -810,8 +810,20 @@ struct Runtime {
     // Paced: each wait blocks until the next refresh, like a compositor.
     std::atomic<bool> paced{false};
     XrDuration period{kPeriod}; // the refresh period (set before the first wait)
+    // Paced: refresh N is at epoch + N periods, and is shown at display time
+    // display_base + N periods (a wait released at it is for the next). A
+    // new refresh period (change_period, taken by the next wait) counts
+    // from the last refresh released.
     std::chrono::steady_clock::time_point epoch{std::chrono::steady_clock::now()};
+    XrTime display_base{1'000'000'000};
+    std::atomic<XrDuration> change_period{0};
     std::int64_t last_tick{0};
+    // The next wait alone reports this period (0: none).
+    std::atomic<XrDuration> next_period{0};
+    // Paced waits released within max(1 ms, a tenth of a refresh) of being
+    // asked for, and waits the echo (below) returned with a multiple.
+    std::atomic<int> quick_releases{0};
+    std::atomic<int> echoed_multiples{0};
     std::atomic<int> outstanding_waits{0};
     std::atomic<bool> ordering_violation{false};
     std::atomic<bool> fail_next_submit{false};
@@ -842,7 +854,9 @@ struct Runtime {
     // the runtime decides itself, as one judging the frames it gets: on after
     // that many late frames (a frame ended after its display time, or less
     // than deadline_lead before it), off after throttle_off_after frames in
-    // a row on time.
+    // a row on time. A wait asked for after the refresh it would be held to
+    // is released at the next one, unless throttle_late_at_once: then at
+    // once, for the refresh just past (on the refresh grid).
     enum class Throttle { kWaits, kPeriod };
     Throttle throttle{Throttle::kWaits};
     int throttle_refreshes{2}; // set before the first wait
@@ -850,6 +864,7 @@ struct Runtime {
     int throttle_on_after{0};  // 0: only `throttled` decides (set before the first wait)
     int throttle_off_after{0};
     XrDuration deadline_lead{0};
+    bool throttle_late_at_once{false}; // set before the first wait
     // SteamVR with Pimax's headset driver, as SteamVR 2.17.10 was seen to
     // behave in a flight (paced runtimes only, a throttle going first): a
     // wait asked for before the refresh after the last one's release blocks
@@ -857,8 +872,15 @@ struct Runtime {
     // returns at once, for a display time as far after the last as its
     // caller took (off the refresh grid), and reports its caller's own
     // interval since the last release, rounded to whole refreshes, as the
-    // period: at most five, and one again after a gap over 60 ms. It holds
-    // nothing back; the period only echoes the caller's own pace.
+    // period: at most kEchoMostRefreshes, and one again after a gap over
+    // kEchoResetAfter. It holds nothing back; the period only echoes the
+    // caller's own pace. The cap and the reset are approximate: in the
+    // flight, intervals of 46-49 ms were reported as five refreshes (where
+    // rounding gives four), and gaps from about 50 ms mostly came back as
+    // one. Tests pin how such periods are handled, not where the runtime's
+    // limits lie.
+    static constexpr std::int64_t kEchoMostRefreshes = 5;
+    static constexpr std::chrono::milliseconds kEchoResetAfter{60};
     std::atomic<bool> echo{false};
     std::chrono::steady_clock::time_point last_release{};
     // Each submission takes this long (a runtime slow to take frames, or a
@@ -866,6 +888,11 @@ struct Runtime {
     std::atomic<int> submit_sleep_us{0};
     // The next submission alone takes this much longer (its caller's hitch).
     std::atomic<int> stall_next_submit_us{0};
+    // The next xrBeginFrame alone takes this long: the frame it begins goes
+    // to xrEndFrame late. Under g_xr_mutex: that frame's index in
+    // submitted_at (-1: none yet).
+    std::atomic<int> stall_next_begin_us{0};
+    std::int64_t stalled_submission{-1};
     // A wait first waits for the frame begun before it to end, as a runtime
     // may (paced runtimes only): a game that waits for its next frame while
     // it renders this one, as MSFS does, is then released at the first
@@ -966,48 +993,70 @@ struct Runtime {
             if (HoldIf(&Runtime::hold_waits)) return XR_ERROR_SESSION_NOT_RUNNING;
             if (++outstanding_waits > 1) ordering_violation = true;
             if (wait_sleep_ms) std::this_thread::sleep_for(std::chrono::milliseconds(wait_sleep_ms));
+            const auto report = [&](XrTime display_time, XrDuration reported) {
+                state->predictedDisplayTime = display_time;
+                const XrDuration once = next_period.exchange(0);
+                state->predictedDisplayPeriod = once ? once : reported;
+                state->shouldRender = should_render ? XR_TRUE : XR_FALSE;
+                return XR_SUCCESS;
+            };
             if (paced) {
                 if (wait_for_end) {
                     std::unique_lock lock(g_xr_mutex);
                     ended_cv.wait_for(lock, 1s, [&] { return !begun; });
                 }
+                if (const XrDuration changed = change_period.exchange(0)) {
+                    std::scoped_lock lock(g_xr_mutex);
+                    epoch += std::chrono::nanoseconds(last_tick * period);
+                    display_base += last_tick * period;
+                    last_tick = 0;
+                    period = changed;
+                }
                 const auto refresh = std::chrono::nanoseconds(period);
+                const auto quick = std::max<std::chrono::nanoseconds>(1ms, refresh / 10);
                 const bool throttling = throttled.load();
                 const auto asked = std::chrono::steady_clock::now();
                 if (echo && !throttling && last_release != std::chrono::steady_clock::time_point{} &&
                     (asked - epoch) / refresh > last_tick) {
                     const auto interval = asked - last_release;
                     std::int64_t refreshes = (interval + refresh / 2) / refresh;
-                    if (refreshes < 1 || interval > 60ms) refreshes = 1;
-                    refreshes = std::min<std::int64_t>(refreshes, 5);
+                    if (refreshes < 1 || interval > kEchoResetAfter) refreshes = 1;
+                    refreshes = std::min(refreshes, kEchoMostRefreshes);
                     last_tick = (asked - epoch) / refresh;
                     last_release = asked;
-                    state->predictedDisplayTime =
-                        1'000'000'000 + std::chrono::duration_cast<std::chrono::nanoseconds>(asked - epoch).count() + period;
-                    state->predictedDisplayPeriod = refreshes * period;
-                    state->shouldRender = should_render ? XR_TRUE : XR_FALSE;
-                    return XR_SUCCESS;
+                    ++quick_releases;
+                    echoed_multiples += refreshes >= 2 ? 1 : 0;
+                    return report(display_base + std::chrono::duration_cast<std::chrono::nanoseconds>(asked - epoch).count() +
+                                      period,
+                                  refreshes * period);
                 }
                 const bool miss = miss_every > 0 && ++paced_waits % miss_every == 0;
+                const std::int64_t held_to = last_tick + (throttling ? throttle_refreshes : 1);
                 std::int64_t tick = (asked - epoch) / refresh + (miss ? 2 : 1);
-                tick = std::max(tick, last_tick + (throttling ? throttle_refreshes : 1));
+                if (throttling && throttle_late_at_once && (asked - epoch) / refresh >= held_to) {
+                    tick = (asked - epoch) / refresh;
+                } else {
+                    tick = std::max(tick, held_to);
+                }
                 last_tick = tick;
                 last_release = epoch + tick * refresh;
+                quick_releases += last_release - asked < quick ? 1 : 0;
                 SleepPrecise(epoch + tick * refresh);
-                state->predictedDisplayTime = 1'000'000'000 + (tick + 1) * period;
-                state->predictedDisplayPeriod =
-                    throttling && throttle == Throttle::kPeriod ? throttle_refreshes * period : period;
-                state->shouldRender = should_render ? XR_TRUE : XR_FALSE;
-                return XR_SUCCESS;
+                return report(display_base + (tick + 1) * period,
+                              throttling && throttle == Throttle::kPeriod ? throttle_refreshes * period : period);
             }
-            state->predictedDisplayTime = next_display.fetch_add(period);
-            state->predictedDisplayPeriod = period;
-            state->shouldRender = should_render ? XR_TRUE : XR_FALSE;
-            return XR_SUCCESS;
+            return report(next_display.fetch_add(period), period);
         };
         calls.begin = [this](XrSession, const XrFrameBeginInfo*) {
             if (outstanding_waits.load() != 1) ordering_violation = true;
             --outstanding_waits;
+            if (const int stall = stall_next_begin_us.exchange(0)) {
+                {
+                    std::scoped_lock lock(g_xr_mutex);
+                    stalled_submission = static_cast<std::int64_t>(submitted_at.size());
+                }
+                SleepPrecise(std::chrono::steady_clock::now() + std::chrono::microseconds(stall));
+            }
             std::scoped_lock lock(g_xr_mutex);
             const bool open = begun;
             begun = true;
@@ -1030,9 +1079,9 @@ struct Runtime {
             ended_cv.notify_all();
             if (fail_next_submit.exchange(false)) return XR_ERROR_TIME_INVALID;
             if (paced) {
-                // Display time t is shown at epoch + (t - 1 s) (the wait for it
-                // was released a refresh before).
-                const auto shown = epoch + std::chrono::nanoseconds(info->displayTime - 1'000'000'000);
+                // Display time t is shown at epoch + (t - display_base) (the
+                // wait for it was released a refresh before).
+                const auto shown = epoch + std::chrono::nanoseconds(info->displayTime - display_base);
                 JudgeFrame(std::chrono::steady_clock::now() + std::chrono::nanoseconds(deadline_lead) > shown);
             }
             submitted_times.push_back(info->displayTime);
@@ -6386,6 +6435,25 @@ std::vector<std::chrono::microseconds> PeriodsOfWork(XrDuration period, double p
     return {std::chrono::microseconds(static_cast<std::int64_t>(static_cast<double>(period) * periods / 1000.0))};
 }
 
+double Median(std::vector<double> values) {
+    if (values.empty()) return 0.0;
+    std::sort(values.begin(), values.end());
+    const std::size_t middle = values.size() / 2;
+    return values.size() % 2 ? values[middle] : (values[middle - 1] + values[middle]) / 2.0;
+}
+
+// The median time between submissions to the runtime from submission
+// `first` on, in milliseconds: the cadence they reach it at.
+double MedianSubmitInterval(Runtime& runtime, std::size_t first) {
+    std::vector<double> intervals;
+    std::scoped_lock lock(g_xr_mutex);
+    for (std::size_t i = first + 1; i < runtime.submitted_at.size(); ++i) {
+        intervals.push_back(
+            std::chrono::duration<double, std::milli>(runtime.submitted_at[i] - runtime.submitted_at[i - 1]).count());
+    }
+    return Median(intervals);
+}
+
 // A runtime that holds the frames Frame Generation presents to half its
 // refresh rate (Runtime::Throttle), for longer than the halving window: its
 // own output is halved too (the runtime makes the frames between), so it is
@@ -6707,6 +6775,72 @@ void TestRuntimeHalvingClears() {
     }
 }
 
+// Reported and stood down for, standing by with a game slower than the rate
+// the runtime holds it to: each of its waits is asked for late. Released
+// just before the held refresh (frames a millisecond short of two
+// refreshes), or at once by a runtime that lets a caller later than its held
+// refresh go at once (frames of two and a half refreshes,
+// Runtime::throttle_late_at_once), such a wait gets a display time on the
+// refresh grid: unlike the waits SteamVR with Pimax's headset driver
+// releases at once (TestEchoRuntimeClearsHalving), it says nothing about
+// halving, and the report stays. Each way a runtime may halve the rate: its
+// waits, and its period reported.
+void TestRuntimeHalvingStaysForSlowGame() {
+    struct Case {
+        const char* name;
+        Runtime::Throttle throttle{Runtime::Throttle::kWaits};
+        bool late_at_once{false};
+    };
+    const std::vector<Case> cases{
+        {"halving stays, waits just in time", Runtime::Throttle::kWaits, false},
+        {"halving stays, period just in time", Runtime::Throttle::kPeriod, false},
+        {"halving stays, waits at once", Runtime::Throttle::kWaits, true},
+        {"halving stays, period at once", Runtime::Throttle::kPeriod, true},
+    };
+    for (const Case& test : cases) {
+        const std::string name = test.name;
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        runtime.throttle = test.throttle;
+        runtime.throttle_late_at_once = test.late_at_once;
+        std::unique_ptr<App> owned;
+        App* app = nullptr;
+        StartHalving(presenter, gpu, runtime, FrameGenMultiplier::kDynamic, app, owned, nullptr);
+        FrameGenDynamicPolicy policy = QuickDynamic();
+        policy.hold = policy.hold_max = 60s; // stood down, it stands by throughout
+        presenter.SetDynamicPolicy(policy);
+        RunWork(*app, 600ms, kLightWork);
+        Check(presenter.Status().standby, name + ": a game holding the refresh rate stands by");
+        runtime.throttled = true;
+        RunWork(*app, 3000ms, kLightWork, [&](const XrFrameState&) { return Engaged(presenter); });
+        RunWork(*app, 3000ms, kLightWork, [&](const XrFrameState&) { return presenter.Status().standby; });
+        FrameGenStatus status = presenter.Status();
+        Check(status.standby && status.runtime_halving && status.dynamic_stand_downs == 1,
+              name + ": reported and stood down (" + status.dynamic_reason + ")");
+        const std::vector<std::chrono::microseconds> work =
+            test.late_at_once ? PeriodsOfWork(kPeriod, 2.5)
+                              : std::vector<std::chrono::microseconds>{std::chrono::microseconds(2 * kPeriod / 1000) - 1ms};
+        const int quick = runtime.quick_releases;
+        bool cleared = false;
+        const int frames = RunWork(*app, 2000ms, work, [&](const XrFrameState&) {
+            cleared = cleared || !presenter.Status().runtime_halving;
+            return false;
+        });
+        const int released = runtime.quick_releases - quick;
+        if (std::getenv("FG_TEST_STATS")) std::cerr << name << ": " << released << " of " << frames << " at once\n";
+        Check(frames > 0 && released * 4 >= frames,
+              name + ": the slow game's waits came late and were released at once (" + std::to_string(released) +
+                  " of " + std::to_string(frames) + ")");
+        status = presenter.Status();
+        Check(!cleared && status.standby && status.dynamic_stand_downs == 1 &&
+                  presenter.OsdDetailText() == kHalvingDetail,
+              name + ": the report stays while the runtime halves the frame rate (" + presenter.OsdDetailText() + ")");
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    }
+}
+
 // Reported and cleared under a fixed multiplier (nothing to stand down to),
 // then Dynamic again, engaged as before: a report gone says nothing about
 // this engagement, and nothing stands down for it.
@@ -6803,6 +6937,58 @@ void TestRuntimeHalvingRetriesBriefly() {
     Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
 }
 
+// A runtime that blocks every wait until its refresh (as Pimax's own,
+// Meta's and Varjo's do), with a quick xrEndFrame: one of Frame
+// Generation's submissions goes 7 ms late (its xrBeginFrame held up, as a
+// write held up on the GPU would hold it), and the submission grid restarts
+// from it. The waits after it keep blocking, so the runtime's own cadence is
+// known and the grid only guards: within a few refreshes, submissions go at
+// their waits' release again, rather than each held past it only a little
+// less than the last.
+void TestLateSubmissionRecovers() {
+    const std::string name = "a late submission recovers";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartHalving(presenter, gpu, runtime, FrameGenMultiplier::k2, app, owned, nullptr);
+    for (int i = 0; i < 3; ++i) app->Frame();
+    RunWork(*app, 500ms, kLightWork);
+    runtime.stall_next_begin_us = 7000;
+    RunWork(*app, 400ms, kLightWork);
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    // How long after the refresh that released its wait each of the twelve
+    // submissions after the late one went (in milliseconds), beyond the usual
+    // (the median of the twelve before it).
+    std::vector<double> after;
+    {
+        std::scoped_lock lock(g_xr_mutex);
+        const auto past_refresh = [&](std::size_t i) {
+            const auto since = (runtime.submitted_at[i] - runtime.epoch) % std::chrono::nanoseconds(kPeriod);
+            return std::chrono::duration<double, std::milli>(since).count();
+        };
+        const std::int64_t late = runtime.stalled_submission;
+        if (late >= 12 && static_cast<std::size_t>(late) + 12 < runtime.submitted_at.size()) {
+            const auto index = static_cast<std::size_t>(late);
+            std::vector<double> before;
+            for (std::size_t i = index - 12; i < index; ++i) before.push_back(past_refresh(i));
+            const double usual = Median(before);
+            for (std::size_t i = index + 1; i <= index + 12; ++i) after.push_back(past_refresh(i) - usual);
+        }
+    }
+    std::string seen;
+    for (const double ms : after) seen += " " + std::to_string(ms).substr(0, 5);
+    if (std::getenv("FG_TEST_STATS")) std::cerr << name << ":" << seen << '\n';
+    Check(after.size() == 12 && after.front() >= 3.0,
+          name + ": the submission after the late one is held past its wait's release (" + seen + ")");
+    if (after.size() == 12) {
+        Check(Median(std::vector<double>(after.begin() + 3, after.begin() + 9)) <= 1.5,
+              name + ": from the fourth refresh after it on, submissions go at their waits' release (" + seen + ")");
+    }
+}
+
 // --- SteamVR with Pimax's headset driver ------------------------------------------
 
 // Its waits asked for late return at once and report the caller's own
@@ -6810,10 +6996,12 @@ void TestRuntimeHalvingRetriesBriefly() {
 // xrEndFrame takes 2.5 ms. Engaged (Dynamic, and a fixed 2x) for a game at
 // 40 fps, Frame Generation's own submissions are back at the refresh rate
 // right after a hitch (one of them 20 ms late: an interval of about 25 ms,
-// which the runtime reports as two refreshes) and stay there. Spaced by the
-// period reported, from when the last xrEndFrame returned, they would keep
-// the hitch's interval, the runtime echoing it back each time. Nothing is
-// reported as halving, and Dynamic does not stand down.
+// which the runtime reports as two refreshes) and stay there, a refresh
+// apart. Spaced by the period reported, they would keep the hitch's
+// interval, the runtime echoing it back each time; spaced from when the
+// last xrEndFrame returned, that call's 2.5 ms would add to each interval,
+// and the runtime would release every wait at once (11.9-13.1 ms apart, not
+// 11.1). Nothing is reported as halving, and Dynamic does not stand down.
 void TestEchoRuntimeKeepsRefresh() {
     for (const FrameGenMultiplier multiplier : {FrameGenMultiplier::kDynamic, FrameGenMultiplier::k2}) {
         const bool dynamic = multiplier == FrameGenMultiplier::kDynamic;
@@ -6839,11 +7027,17 @@ void TestEchoRuntimeKeepsRefresh() {
         RunWork(*app, 300ms, work);
         const double refresh = 1e9 / static_cast<double>(kPeriod);
         for (int window = 1; window <= 2; ++window) {
+            const std::size_t first = runtime.Submissions();
             const double output = SubmissionRate(*app, 1000ms, work);
-            if (std::getenv("FG_TEST_STATS")) std::cerr << name << ": second " << window << ": " << output << " fps\n";
-            Check(output >= 0.85 * refresh, name + ": after the hitch, Frame Generation's frames reach the runtime "
-                                                   "at the refresh rate (second " +
-                                                   std::to_string(window) + ": " + std::to_string(output) + " fps)");
+            const double interval = MedianSubmitInterval(runtime, first);
+            if (std::getenv("FG_TEST_STATS")) {
+                std::cerr << name << ": second " << window << ": " << output << " fps, " << interval << " ms apart\n";
+            }
+            Check(output >= 0.85 * refresh && interval <= 1.03 * static_cast<double>(kPeriod) / 1e6,
+                  name + ": after the hitch, Frame Generation's frames reach the runtime at the refresh rate, a "
+                         "refresh apart (second " +
+                      std::to_string(window) + ": " + std::to_string(output) + " fps, " + std::to_string(interval) +
+                      " ms apart)");
         }
         const FrameGenStatus status = presenter.Status();
         Check(!status.runtime_halving && status.dynamic_stand_downs == 0 &&
@@ -6898,6 +7092,42 @@ void TestEchoRuntimeClearsHalving() {
     Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
 }
 
+// That runtime with the presenter thread late every refresh (a fixed 2x, each
+// xrEndFrame taking 1.6 refreshes, as a GPU-bound presenter's may): each of
+// its waits is asked for late and released at once, reported as two
+// refreshes, for a display time off the refresh grid. The runtime holds
+// nothing back, so nothing is reported as halving.
+void TestEchoRuntimeLatePresenter() {
+    const std::string name = "echo runtime, presenter late";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.echo = true;
+    SessionLog log("echo-late");
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartHalving(presenter, gpu, runtime, FrameGenMultiplier::k2, app, owned, log.logger.get());
+    for (int i = 0; i < 3; ++i) app->Frame();
+    runtime.submit_sleep_us = static_cast<int>(kPeriod * 16 / 10 / 1000);
+    RunWork(*app, 300ms, kLightWork);
+    const int echoed = runtime.echoed_multiples;
+    const std::size_t first = runtime.Submissions();
+    RunWork(*app, 2000ms, kLightWork);
+    const int multiples = runtime.echoed_multiples - echoed;
+    const auto submitted = static_cast<int>(runtime.Submissions() - first);
+    if (std::getenv("FG_TEST_STATS")) std::cerr << name << ": " << multiples << " multiples, " << submitted << " submitted\n";
+    Check(submitted > 0 && multiples * 4 >= submitted * 3,
+          name + ": the presenter thread's waits come late, reported as multiples (" + std::to_string(multiples) +
+              " of " + std::to_string(submitted) + ")");
+    const FrameGenStatus status = presenter.Status();
+    Check(!status.runtime_halving && status.dynamic_stand_downs == 0 && status.state == FrameGenState::kActive &&
+              status.threaded && presenter.OsdDetailText() != kHalvingDetail,
+          name + ": nothing reported, engaged throughout (" + presenter.OsdDetailText() + ")");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    Check(log.Lines(kHalvingLogged).empty(), name + ": nothing logged");
+}
+
 // A hitch on that runtime: one interval of about 55 ms, reported as five
 // refreshes, then a game at about 31 fps, each wait reported as three. The
 // refresh period stays 90 Hz's (a hitch's period is not another refresh
@@ -6914,7 +7144,12 @@ void TestEchoHitchKeepsRefresh() {
     StartHalving(presenter, gpu, runtime, FrameGenMultiplier::kDynamic, app, owned, nullptr);
     RunWork(*app, 600ms, kLightWork);
     Check(presenter.Status().standby, name + ": a game holding the refresh rate stands by");
-    RunWork(*app, 1000ms, {52000us}, [](const XrFrameState&) { return true; });
+    // The hitch's interval (its work and its 2.5-ms end) in the middle of
+    // what the runtime reports as five refreshes: from four and a half to
+    // its reset.
+    const auto five = (std::chrono::nanoseconds(kPeriod * 9 / 2) + Runtime::kEchoResetAfter) / 2;
+    const auto hitch = std::chrono::duration_cast<std::chrono::microseconds>(five) - 2500us;
+    RunWork(*app, 1000ms, {hitch}, [](const XrFrameState&) { return true; });
     std::vector<XrDuration> periods;
     RunWork(*app, 3000ms, PeriodsOfWork(kPeriod, 2.6), [&](const XrFrameState& state) {
         periods.push_back(state.predictedDisplayPeriod);
@@ -6932,6 +7167,82 @@ void TestEchoHitchKeepsRefresh() {
           name + ": Dynamic engages, the game judged against 90 Hz (" + status.dynamic_reason + ")");
     presenter.Stop();
     Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+}
+
+// The refresh period follows a longer period only once the periods reported
+// have agreed with it for a while. On that runtime, one wait reported as
+// four and a half refreshes (no whole number of them, so not its echo of
+// the game's interval), then a game at 40 fps, each wait reported as two:
+// the refresh period stays 90 Hz's, and Dynamic engages for the game,
+// judged against 90 Hz. On a runtime whose refresh rate drops from 90 to
+// 72 Hz, with the game keeping up: the refresh period is 72 Hz's within
+// about a second and a half (Dynamic, engaging after a second below 90% of
+// the refresh rate, would otherwise engage for the game at 72 fps), and a
+// slower game is judged against 72 Hz.
+void TestRefreshPeriodChanges() {
+    {
+        const std::string name = "one longer period";
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        runtime.echo = true;
+        runtime.submit_sleep_us = 2500;
+        std::unique_ptr<App> owned;
+        App* app = nullptr;
+        StartHalving(presenter, gpu, runtime, FrameGenMultiplier::kDynamic, app, owned, nullptr);
+        RunWork(*app, 600ms, kLightWork);
+        Check(presenter.Status().standby, name + ": a game holding the refresh rate stands by");
+        runtime.next_period = kPeriod * 9 / 2;
+        std::vector<XrDuration> periods;
+        RunWork(*app, 3000ms, PeriodsOfWork(kPeriod, 2.0), [&](const XrFrameState& state) {
+            periods.push_back(state.predictedDisplayPeriod);
+            return Engaged(presenter);
+        });
+        Check(periods.size() >= 2 && periods.front() == kPeriod * 9 / 2 &&
+                  std::count(periods.begin() + 1, periods.end(), 2 * kPeriod) * 4 >=
+                      static_cast<std::ptrdiff_t>(periods.size() - 1) * 3,
+              name + ": the runtime reported 4.5 refreshes once, then mostly two (" + std::to_string(periods.size()) +
+                  " waits)");
+        const FrameGenStatus status = presenter.Status();
+        Check(Engaged(presenter) && status.dynamic_reason.find(" of 90.0)") != std::string::npos,
+              name + ": Dynamic engages, the game judged against 90 Hz (" + status.dynamic_reason + ")");
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    }
+    {
+        const std::string name = "refresh rate change";
+        constexpr XrDuration k72Hz = 1'000'000'000 / 72;
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        std::unique_ptr<App> owned;
+        App* app = nullptr;
+        StartHalving(presenter, gpu, runtime, FrameGenMultiplier::kDynamic, app, owned, nullptr);
+        FrameGenDynamicPolicy policy = QuickDynamic();
+        policy.engage_after = 1000ms;
+        presenter.SetDynamicPolicy(policy);
+        RunWork(*app, 600ms, kLightWork);
+        Check(presenter.Status().standby, name + ": a game holding the refresh rate stands by");
+        runtime.change_period = k72Hz;
+        bool engaged = false;
+        RunWork(*app, 2500ms, kLightWork, [&](const XrFrameState&) {
+            engaged = engaged || Engaged(presenter);
+            return engaged;
+        });
+        Check(!engaged && presenter.Status().standby,
+              name + ": the game at the new refresh rate stands by (" + presenter.Status().dynamic_reason + ")");
+        std::vector<std::chrono::microseconds> work;
+        for (const int ticks : {1, 2, 2}) {
+            work.push_back(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::nanoseconds(ticks * k72Hz)) -
+                           3ms);
+        }
+        RunWork(*app, 4000ms, work, [&](const XrFrameState&) { return Engaged(presenter); });
+        const FrameGenStatus status = presenter.Status();
+        Check(Engaged(presenter) && status.dynamic_reason.find(" of 72.0)") != std::string::npos,
+              name + ": Dynamic engages for a slower game, judged against 72 Hz (" + status.dynamic_reason + ")");
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    }
 }
 
 // What the OSD and the app say while the runtime halves the frame rate:
@@ -7135,6 +7446,12 @@ void RunPolicyTests() {
     RUN(TestInterpolateMeasureLagIsOnTime);
     RUN(TestInterpolateLeadMakesRoomForAnalysis);
     RUN(TestBenefitGuardInterpolateMsfs);
+    // Runtime halving, submission pacing and the refresh period (here, not
+    // with the rest of their kind, to keep the two halves' times even).
+    RUN(TestRuntimeHalvingStaysForSlowGame);
+    RUN(TestLateSubmissionRecovers);
+    RUN(TestEchoRuntimeLatePresenter);
+    RUN(TestRefreshPeriodChanges);
 }
 
 // The policy tests in a second process of this executable, alongside the

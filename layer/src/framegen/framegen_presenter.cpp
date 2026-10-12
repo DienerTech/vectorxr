@@ -2516,23 +2516,32 @@ void FrameGenPresenter::NoteRuntimeHalvingLocked(Clock::time_point called, Clock
     // a wait asked for well within a refresh of the last one's release that
     // got a refresh after the next. A wait asked for later says nothing of
     // that by itself: its caller missed the next refresh itself (the
-    // presenter thread ran late, or the game is slow), and a runtime may
-    // report such a caller's own frame interval, in whole refreshes, as the
-    // period (SteamVR with Pimax's headset driver does, releasing the wait
-    // at once). Asked for late, a wait shows the runtime holding frames
-    // only where it reported a multiple and still blocked the wait for half
-    // a refresh or more; released at once, it got the earliest refresh the
-    // runtime had, as one released at the next refresh did: not halved.
+    // presenter thread ran late, or the game is slow). Asked for late, a
+    // wait shows the runtime holding frames where it reported a multiple
+    // and still blocked the wait for half a refresh or more. It shows the
+    // opposite where the runtime reported a multiple, released the wait at
+    // once, and gave it a display time off the refresh grid, as far after
+    // the last as its caller took: the period only echoes the caller's own
+    // frame interval in whole refreshes (SteamVR with Pimax's headset
+    // driver does this), and the wait got the earliest refresh the runtime
+    // had, as one released at the next refresh did: not halved. Released at
+    // once for a display time on the grid, it says nothing: a runtime
+    // holding frames releases a caller that comes just before its held
+    // refresh that way, and may let one that comes after it go at once.
     const auto refreshes = [&](XrDuration duration) {
         return static_cast<std::uint32_t>(std::min<XrDuration>((duration + refresh / 2) / refresh, 64));
     };
+    const XrDuration step = display_time - previous->display_time;
     const bool reported = period >= refresh + refresh / 2;
-    const std::uint32_t held = reported ? refreshes(period) : refreshes(display_time - previous->display_time);
+    const std::uint32_t held = reported ? refreshes(period) : refreshes(step);
     const auto waited = returned - called;
     const bool blocked = waited >= std::chrono::nanoseconds(refresh / 2);
     bool halved = held >= 2;
     if (halved && called - previous->returned >= std::chrono::nanoseconds(refresh * 3 / 4)) {
-        if (waited < std::max<std::chrono::nanoseconds>(std::chrono::milliseconds(1),
+        const XrDuration past = step % refresh;
+        const bool off_grid = std::min(past, refresh - past) > refresh / 20;
+        if (reported && off_grid &&
+            waited < std::max<std::chrono::nanoseconds>(std::chrono::milliseconds(1),
                                                         std::chrono::nanoseconds(refresh / 10))) {
             halved = false;
         } else if (!reported || !blocked) {
@@ -2635,7 +2644,9 @@ std::pair<Clock::time_point, bool> FrameGenPresenter::ScheduleSubmissionLocked(C
     // submission goes when the runtime would have released its wait, from
     // the last wait that did block, and on a refresh grid: most of a
     // refresh after the last submission was due where the runtime's own
-    // cadence is known (the grid then only guards), and nearly a refresh
+    // cadence is known (this wait blocked, or one before it did: the grid
+    // then only guards, and a grid restarted late by a hitch falls back to
+    // the runtime's releases within a few refreshes), and nearly a refresh
     // otherwise (a little less, so that waits come a little earlier each
     // refresh until a runtime that holds early ones does, and its cadence
     // is known). Due from when the last one was due, not from when its
@@ -2644,7 +2655,14 @@ std::pair<Clock::time_point, bool> FrameGenPresenter::ScheduleSubmissionLocked(C
     // waits rarely sleep.
     const auto ns = [](XrDuration duration) { return std::chrono::nanoseconds(duration); };
     const XrDuration spacing = SubmitSpacingLocked(period);
-    const bool phased = phase_wall_ != Clock::time_point{} && now - phase_wall_ <= kPhaseLifetime && display_time > phase_xr_;
+    const bool fresh = phase_wall_ != Clock::time_point{} && now - phase_wall_ <= kPhaseLifetime;
+    // Aimed at (phased): a wait after the one that set the phase. A wait
+    // that blocked set the phase itself: it was released on the runtime's
+    // own cadence, which is then known, but there is nothing to aim at and
+    // nothing to be late for (the game's own slot, submitted long after its
+    // wait returned, is not late).
+    const bool phased = fresh && display_time > phase_xr_;
+    const bool known = fresh && display_time >= phase_xr_;
     Clock::time_point at = now;
     bool late = false;
     if (phased) {
@@ -2653,7 +2671,7 @@ std::pair<Clock::time_point, bool> FrameGenPresenter::ScheduleSubmissionLocked(C
         at = std::max(at, ideal);
     }
     if (submit_grid_ != Clock::time_point{}) {
-        at = std::max(at, submit_grid_ + ns(spacing * (phased ? 17 : 19) / 20));
+        at = std::max(at, submit_grid_ + ns(spacing * (known ? 17 : 19) / 20));
     }
     // A wrong phase never costs more than about one refresh.
     at = std::min(at, now + ns(spacing * 6 / 5));
@@ -5805,7 +5823,7 @@ void FrameGenPresenter::CompositorLoop() {
         return threaded_frames_.empty() &&
                (!jit_ || (!generation_pending_ &&
                           (jit_frames_.empty() ||
-                           jit_frames_.back().time <= slot_time_ + std::max<XrDuration>(slot_period_, 1) / 2)));
+                           jit_frames_.back().time <= slot_time_ + SubmitSpacingLocked(slot_period_) / 2)));
     };
     while (!compositor_stop_ && !(compositor_drain_ && drained())) {
         // A runtime frame the application began before the switch owns the
@@ -5853,7 +5871,11 @@ void FrameGenPresenter::CompositorLoop() {
         }
         slot_should_render_ = frame_state.shouldRender == XR_TRUE;
         slot_cv_.notify_all();
-        const XrDuration period = std::max<XrDuration>(slot_period_, 1);
+        // What this refresh's half-refresh thresholds are judged by: at most
+        // the refresh period, as submissions are spaced (a period echoing a
+        // late caller's own interval would widen them by refreshes). The
+        // slots' display times keep the period reported (ThreadedWaitLocked).
+        const XrDuration period = SubmitSpacingLocked(slot_period_);
 
         // Submit when the runtime would have released this wait, on a refresh
         // grid from the previous submission (ScheduleSubmissionLocked).
