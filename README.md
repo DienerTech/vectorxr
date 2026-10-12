@@ -104,7 +104,7 @@ diagnostic views. The On-Screen Display shows **FG ON** and the headset's frame 
 FPS. It works with Direct3D 11, Direct3D 12, and Vulkan games, in stereo or Quadviews.
 
 It is experimental, and tested on one PC so far: an NVIDIA RTX 5090 with a Pimax Crystal Super on
-PiOpenXR, in DCS (Direct3D 11 with quad views), MSFS 2024 (Direct3D 12), and Star Citizen
+PiOpenXR and SteamVR, in DCS (Direct3D 11 with quad views), MSFS 2024 (Direct3D 12), and Star Citizen
 (Vulkan). AMD and Intel GPUs are untested: measuring motion on the shader cores works on any GPU,
 but the bridges that carry Direct3D 11 and Vulkan games' images to Frame Generation have not been
 verified on AMD. Motion is measured on the final images (no game motion vectors yet), text and

@@ -372,9 +372,11 @@ in-headset view labels the rendered regions and tracking pipeline with color:
 - Cyan ring: raw eye gaze; yellow cross: gaze after deadzone and smoothing.
 
 The diagnostic view is available only for VectorXR's synthesized D3D11 Quadviews compositor. It is
-not currently supported on Varjo headsets, where the Varjo runtime owns native composition, or
-while Frame Generation runs in a D3D11 game such as DCS: Frame Generation composes the quad views
-itself there. Turn Frame Generation off for the game to use the visualization.
+not currently supported on Varjo headsets, where the Varjo runtime owns native composition, or in a
+D3D11 game such as DCS that started with Frame Generation on: Frame Generation composes the quad
+views itself there. To use the visualization, turn Frame Generation off for the game and restart
+the game. Turning it off in a running game, or with the A/B toggle, does not make the
+visualization available.
 
 Quadviews and Pivot are designed to compose: unlike running separate foveation and neck-assist
 layers, VectorXR keeps the foveated focus region aligned with your gaze while Pivot rotates the
@@ -416,6 +418,9 @@ API-layer, runtime, and in-game VR changes also require a full game restart.
 Live app control requires an active VectorXR synthesized D3D11 Quadviews session. Start a compatible
 quad-view application with the VectorXR profile enabled. Native Varjo composition does not expose
 this visualization; the saved in-headset shortcut also begins each new session with the overlay off.
+In a D3D11 game such as DCS that started with Frame Generation on, the visualization is unavailable
+for the whole session, and the app reads **Unavailable in the active OpenXR session**. Turn Frame
+Generation off for the game and restart it.
 
 **What else should I disable while troubleshooting?**
 
@@ -567,10 +572,12 @@ last Safety marker, not a confirmed crash time. The Turbo Safety screenshot show
 Before clearing logs, use **Home > Export Debug** to save an **Export Debug Information** ZIP
 when reporting a problem. It includes Turbo metrics, pacing decisions, safety records,
 live and saved runtime diagnostics, current and saved settings, and retained VectorXR logs.
-With Debug logging, the export also includes continuous recent frame-call history and up to three
-frozen snapshots taken at stalls, faults, and recoveries. These recorder files follow the
-configured log retention. The two most recent sessions are exported in full, then the remaining
-session logs, then older recorder history.
+With Debug logging, the export also includes continuous recent frame-call history, up to three
+frozen snapshots taken at stalls, faults, and recoveries, and, with Frame Generation on, up to two
+snapshots taken when Dynamic stands down or the runtime holds frames to half rate. These recorder
+files follow the configured log retention. The two most recent sessions' logs, incident snapshots,
+and recent history come first, then the remaining session logs, then those two sessions' Frame
+Generation snapshots, then older recorder history.
 Raw capture is limited to 8 MiB per file and 64 MiB total; the ZIP inventory lists any
 unavailable or limited files. Review the ZIP for private information before sharing it.
 
@@ -601,7 +608,8 @@ Frame Generation is experimental. Keep the Default Profile off and enable it per
 comparing it in the headset. It has been tested on one PC so far:
 
 - **GPU:** NVIDIA GeForce RTX 5090.
-- **Headset and runtime:** Pimax Crystal Super on PiOpenXR, Pimax's OpenXR runtime.
+- **Headset and runtimes:** Pimax Crystal Super on PiOpenXR, Pimax's OpenXR runtime, and on
+  SteamVR.
 - **Games:** DCS (Direct3D 11 with quad views), MSFS 2024 (Direct3D 12), and Star Citizen
   (Vulkan).
 
@@ -656,8 +664,9 @@ the OSD and in the live status.
 The page's collapsible **Setup guide** repeats this checklist; it starts open until a Frame
 Generation profile is enabled. **In-headset controls** lists running VR applications with
 their live Frame Generation status, in the On-Screen Display's words: **On** (with the mode,
-frame rate, and game-to-headset frame rates), **Standby** (the game holds the refresh rate on
-its own, so nothing is generated), **Starting**, **Paused**, **Unavailable** (with the reason),
+frame rate, and game-to-headset frame rates), **Standby** (frames pass straight through and
+nothing is generated: the game holds the refresh rate on its own, or Dynamic has stood down for a
+while, for example while the runtime holds frames to half rate), **Starting**, **Paused**, **Unavailable** (with the reason),
 or **Off**. **Needs the updated VectorXR layer** means the running layer predates Frame
 Generation.
 
@@ -819,7 +828,10 @@ Advanced settings. The first enabled custom profile that matches the running gam
   Turbo profiles are not changed. The Turbo and Frame Generation pages show a notice when an
   application has both turned on; it never blocks saving.
 - **Quadviews:** works with VectorXR's synthesized quad views and with Varjo-native quad views,
-  because generation runs on the final images sent to the headset.
+  because generation runs on the final images sent to the headset. On Varjo headsets, **Foveate
+  Sharpness** is off in Direct3D 11 games such as DCS while Frame Generation is on, and the
+  Quadviews diagnostic visualization is unavailable in Direct3D 11 games that started with Frame
+  Generation on.
 - **Graphics APIs:** Direct3D 11, Direct3D 12, and Vulkan.
 - **On-Screen Display:** in games where Frame Generation is on, both layouts show its state
   beside the FPS value (**FG ON** with the frames per second the headset shows, or **FG STBY**,
@@ -869,7 +881,8 @@ headset's own software. Smoothing there, such as Pimax Play's **Smart Smoothing*
 Rate to Half Refresh Rate**, still needs to be off.
 
 A game running below the headset's refresh rate is not, by itself, the runtime halving its frame
-rate. SteamVR with a Pimax headset, for example, then reports a longer frame period to the game,
+rate. SteamVR with Pimax's own SteamVR driver, for example, then reports a longer frame period to
+the game,
 in whole refreshes, and releases its frame waits at once; VectorXR does not count that as
 halving.
 
@@ -894,6 +907,9 @@ game's own frames show the runtime giving them every refresh.
   images to video memory.
 - Only the first projection layer is generated; other layers, such as menus drawn as quads,
   repeat unchanged. Generated frames keep the real frame's depth for the runtime.
+- On SteamVR with Pimax's own SteamVR driver, the On-Screen Display can lag behind head turns
+  or show a double image on generated frames. Hide the panel with its binding (**Ctrl+Alt+F10**
+  by default) if it gets in the way.
 
 ### Frame Generation FAQ
 

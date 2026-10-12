@@ -34,7 +34,7 @@
           {
             "html": "<em>Before you turn it on</em>",
             "items": [
-              "Turn off runtime smoothing (SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW, Meta ASW) for games that use Frame Generation, and keep the runtime at full refresh. Check both the runtime and the headset's own software: SteamVR showing Motion Smoothing as <strong>Not Supported</strong> says nothing about Pimax Play's settings, for example. If the runtime still holds Frame Generation's frames to half rate, the On-Screen Display reads <strong>Runtime holds frames to half rate: check its smoothing</strong>, the log names the settings that can do this, and Dynamic holds off until the runtime gives every refresh again.",
+              "Turn off runtime smoothing (SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW, Meta ASW) for games that use Frame Generation, and keep the runtime at full refresh. Check both the runtime and the headset's own software: SteamVR showing Motion Smoothing as <strong>Not Supported</strong> says nothing about Pimax Play's settings, for example. If the runtime still holds Frame Generation's frames to half rate, the On-Screen Display's expanded layout reads <strong>Runtime holds frames to half rate: check its smoothing</strong>, the log names the settings that can do this, and Dynamic holds off until the runtime gives every refresh again.",
               "Get the game to at least half the headset's refresh rate on its own first, for example 45 fps at 90 Hz. Frame Generation fills the gap from there; below it, artifacts grow quickly.",
               "Turbo stays off in sessions where Frame Generation runs and reads <strong>Paused for Frame Generation</strong>; your Turbo profiles are not changed."
             ]
@@ -42,9 +42,11 @@
           {
             "html": "<em>Hardware and limits</em>",
             "items": [
-              "So far tested on an NVIDIA RTX 5090 with a Pimax Crystal Super on PiOpenXR, in DCS (Direct3D 11 with Quadviews), MSFS 2024 (Direct3D 12), and Star Citizen (Vulkan). AMD and Intel GPUs are untested: the Shader motion source works on any GPU, but the bridges that carry Direct3D 11 and Vulkan games to Frame Generation have not been verified on AMD.",
+              "So far tested on an NVIDIA RTX 5090 with a Pimax Crystal Super on PiOpenXR and SteamVR, in DCS (Direct3D 11 with Quadviews), MSFS 2024 (Direct3D 12), and Star Citizen (Vulkan). AMD and Intel GPUs are untested: the Shader motion source works on any GPU, but the bridges that carry Direct3D 11 and Vulkan games to Frame Generation have not been verified on AMD.",
               "It needs video memory for the real frames it keeps (three to five, about 6 bytes per pixel per eye each) and for its output images: about 3 to 4 GB in all at 6864x6908 per eye (about 4 to 5 GB for Direct3D 11 and Vulkan games, whose bridge keeps a shared copy of the game's images), and under 1 GB at 3000x3000. The log reports what it uses.",
               "Known limits: it does not use game motion vectors or mask HUDs yet, so text, HUDs, and gauges can shimmer on generated frames, and fast motion and newly revealed areas can warp, more so with Extrapolate.",
+              "On SteamVR with Pimax's own SteamVR driver, the On-Screen Display can lag behind head turns or show a double image while Frame Generation runs. Hide it with its binding (<strong>Ctrl+Alt+F10</strong> by default) if it gets in the way.",
+              "In DCS with Quadviews, the Quadviews diagnostic visualization is unavailable while Frame Generation is on for the game, because Frame Generation composes the quad views itself. Turn Frame Generation off for the game and restart the game to use the visualization.",
               "When you report a problem, say whether Frame Generation was on, and attach <strong>Export Debug</strong> from Home."
             ]
           }
@@ -79,13 +81,14 @@
         "html": "<strong>Quadviews</strong>",
         "items": [
           "Eye tracking works alongside games that set up their own eye-tracking bindings, recovers after the headset loses and regains focus, and keeps working when a game recreates its VR session. The log now explains why gaze is unavailable when it is.",
-          "Focus Resolution goes up to 300% and both resolutions adjust in 1% steps. Above 200% the app explains the extra GPU memory and compositing cost."
+          "Focus Resolution goes up to 300% and both resolutions adjust in 1% steps. Above 200% the app explains the extra GPU memory and compositing cost.",
+          "In DCS with Quadviews, the On-Screen Display is now its own layer, as in every other game. On Pimax headsets its edges can now show the same slight color fringing as in other games."
         ]
       },
       {
         "html": "<strong>Diagnostics</strong>",
         "items": [
-          "With <strong>Log Level: Debug</strong>, a flight recorder keeps recent frame-call history and freezes snapshots of stalls, faults, and recoveries, so problems that appear after a long session can be reported with <strong>Export Debug</strong>.",
+          "With <strong>Log Level: Debug</strong>, a flight recorder keeps recent frame-call history and freezes snapshots of stalls, faults, and recoveries, and, with Frame Generation on, of Dynamic stand-downs and runtime halving, so problems that appear after a long session can be reported with <strong>Export Debug</strong>.",
           "Export Debug keeps every session's main log ahead of older recorder history.",
           "Each session's log names the graphics card, its driver version and video memory, and the OpenXR runtime in a <strong>Session graphics</strong> line, with a second line for the Direct3D 12 device Frame Generation uses in Direct3D 11 and Vulkan games."
         ]
