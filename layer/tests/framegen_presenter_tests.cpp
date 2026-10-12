@@ -5070,7 +5070,7 @@ struct QuadApp {
     std::uint32_t image{0};
     std::uint32_t composed_image{0};
     double eye_speed{0.5};
-    bool offer{true};       // false: the layer declines (kDeclined, its diagnostic overlay on)
+    bool offer{true};       // false: the layer declines (kDeclined)
     std::optional<FrameGenQuadRoute> force; // the layer routes the frame so without offering it
     std::array<bool, 4> uncaptured_release{};
     std::function<float(int)> inset; // each frame's focus rectangle (left edge in output uv)
@@ -5708,7 +5708,7 @@ void TestQuadKeepsRealFramesInset() {
     Check(!runtime.ordering_violation && !g_release_violation, "inset: calls stayed ordered");
 }
 
-// The layer declines its frames (its diagnostic overlay on): the presenter
+// The layer declines its frames: the presenter
 // thread restarts on the layer's composed views (canvas), then, offered
 // again, composing quad views itself; the output images serve both.
 void TestQuadDeclinedSwitchesToCanvas() {

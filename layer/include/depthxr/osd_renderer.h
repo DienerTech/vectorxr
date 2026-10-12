@@ -144,7 +144,10 @@ class OsdRenderer {
         bool toggle_down, bool cycle_down, std::uint64_t settings_revision = 0);
     bool SnapshotDue() const;
     // The returned layer and its image remain valid until the next Append/Shutdown.
-    // Only called on the application's end-frame thread, after game-layer transforms.
+    // Called for every runtime xrEndFrame, after game-layer transforms: on the
+    // application's end-frame thread, or Frame Generation's presenter thread.
+    // Makes runtime calls (swapchain images; a world-anchored panel's space and
+    // head location) under the renderer's lock.
     const XrCompositionLayerBaseHeader* Append(const XrFrameEndInfo&, bool should_render);
     OsdStatus Status() const;
     // Places the panel in the world at each frame's head pose, located at
@@ -187,7 +190,7 @@ class OsdRenderer {
     std::chrono::steady_clock::time_point image_updated_{};
     XrCompositionLayerQuad quad_{XR_TYPE_COMPOSITION_LAYER_QUAD};
     // This worker touches only CPU pixels. OpenXR and graphics uploads remain on the
-    // application thread. No frame waits for text drawing or font setup.
+    // thread that ends frames. No frame waits for text drawing or font setup.
     struct RasterRequest {
         OsdSettings settings;
         bool compact{}, rgba{};

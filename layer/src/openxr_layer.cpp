@@ -6158,9 +6158,9 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
     // Runtime wait/begin can fail before TraceRuntimeEndFrame is reached: a
     // quad views frame Frame Generation claimed that never reached
     // TraceRuntimeEndFrame is abandoned.
-    struct PendingImageGuard {
+    struct PendingQuadGuard {
         OpenXrLayer& layer;
-        ~PendingImageGuard() {
+        ~PendingQuadGuard() {
             layer.DropPendingFrameGenQuad(true);
         }
     } pending_guard{*this};
@@ -13251,31 +13251,26 @@ void OpenXrLayer::StartFrameGen(XrSession session, const void* binding_chain, co
 }
 
 void OpenXrLayer::ConfigureOsdAnchor() {
-    // SteamVR draws a head-locked (VIEW) quad at the pose its frame carries,
-    // and with a driver that asks for app poses the whole image is then
-    // turned to the display pose. A generated frame carries its real frame's
-    // pose, so the OSD would land off by the head's turn in between: a
-    // double image in Extrapolate, a smear in Interpolate. Placed in the
-    // world at each frame's head pose instead, it lands head-locked whatever
-    // pose the frame carries. VECTORXR_OSD_ANCHOR=view or world overrides.
-    bool world = framegen_owns_pacing_.load(std::memory_order_acquire) &&
-                 runtime_name_.find("SteamVR") != std::string::npos;
-    std::string source = "Frame Generation on SteamVR";
+    // SteamVR with Pimax's own driver (driver direct mode) draws a head-locked
+    // (VIEW) quad at the pose its frame carries, and the driver then turns the
+    // whole image to the display pose. A generated frame carries its real
+    // frame's pose, so the OSD lands off by the head's turn in between: a
+    // double image in Extrapolate, a smear in Interpolate. Placed in the world
+    // at each frame's head pose, it lands head-locked whatever pose the frame
+    // carries. SteamVR in its own direct mode (sboys3's driver, for one) shows
+    // a VIEW quad steady, and both report the same system, so the placement
+    // is opt-in: VECTORXR_OSD_ANCHOR=world (or view, the default).
+    bool world = false;
     if (const char* anchor = std::getenv("VECTORXR_OSD_ANCHOR"); anchor && *anchor) {
         const std::string value(anchor);
-        if (value == "view" || value == "world") {
-            world = value == "world";
-            source = "VECTORXR_OSD_ANCHOR=" + value;
+        if (value == "world") {
+            world = true;
+            logger_.Info("OSD is placed in the world at each frame's head pose (VECTORXR_OSD_ANCHOR=world).");
+        } else if (value != "view") {
+            logger_.Info("VECTORXR_OSD_ANCHOR=" + value + " is ignored: use view or world.");
         }
     }
     osd_.SetWorldAnchored(world);
-    if (world) {
-        logger_.Info("OSD is placed in the world at each frame's head pose (" + source +
-                     "): the runtime draws a head-locked panel at the pose a frame carries, and generated "
-                     "frames carry their real frame's pose.");
-    } else if (source != "Frame Generation on SteamVR") {
-        logger_.Info("OSD stays head-locked (" + source + ").");
-    }
 }
 
 void OpenXrLayer::EndVulkanBridge() {

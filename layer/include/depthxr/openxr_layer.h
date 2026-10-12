@@ -850,7 +850,7 @@ class OpenXrLayer {
     // `unavailable`: Frame Generation cannot run this session (a Vulkan
     // session without the Vulkan bridge), for that reason.
     void StartFrameGen(XrSession session, const void* binding_chain, const std::string& unavailable = {});
-    // After StartFrameGen: whether the OSD panel is placed in the world.
+    // Whether the OSD panel is placed in the world (VECTORXR_OSD_ANCHOR).
     void ConfigureOsdAnchor();
     // A session (or its instance) is going: Frame Generation's presenter
     // thread is stopped within its teardown wait. One a runtime holds inside

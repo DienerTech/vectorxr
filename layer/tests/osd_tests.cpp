@@ -434,7 +434,7 @@ int main(int argc, char** argv) {
         // at each frame's own display time; head-locked otherwise.
         OsdDispatch anchored=dispatch; anchored.locate=Locate;
         OsdRenderer renderer; unsupported=false; renderer.Initialize(session,device,4,anchored);
-        auto settings=OsdSettings{}; settings.enabled=true; settings.show_clock=false; settings.horizontal_degrees=20;
+        auto settings=OsdSettings{}; settings.enabled=true; settings.show_clock=false; settings.horizontal_degrees=20; settings.vertical_degrees=0;
         renderer.Prepare(settings,Snapshot(),false,false);
         XrCompositionLayerProjection game{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
         const auto* original=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&game);
@@ -448,11 +448,12 @@ int main(int argc, char** argv) {
         // Turned 90 degrees left about +Y: x' = z, z' = -x.
         Check(std::abs(quad->pose.position.x-(1+panel.position.z))<1e-5f && std::abs(quad->pose.position.y-(2+panel.position.y))<1e-5f &&
               std::abs(quad->pose.position.z-(3-panel.position.x))<1e-5f,"The panel's position did not follow the head");
-        const XrQuaternionf& q=head_pose.orientation; const XrQuaternionf& p=panel.orientation;
-        const XrQuaternionf expected{q.w*p.x+q.x*p.w+q.y*p.z-q.z*p.y, q.w*p.y-q.x*p.z+q.y*p.w+q.z*p.x,
-                                     q.w*p.z+q.x*p.y-q.y*p.x+q.z*p.w, q.w*p.w-q.x*p.x-q.y*p.y-q.z*p.z};
-        Check(std::abs(quad->pose.orientation.x-expected.x)<1e-5f && std::abs(quad->pose.orientation.y-expected.y)<1e-5f &&
-              std::abs(quad->pose.orientation.z-expected.z)<1e-5f && std::abs(quad->pose.orientation.w-expected.w)<1e-5f,
+        // The panel sits 20 degrees right, level (a -20 degree yaw); the head turned
+        // 90 degrees left: 70 degrees left of LOCAL's forward in all.
+        const double half=35.0*3.14159265358979323846/180;
+        const XrQuaternionf& o=quad->pose.orientation;
+        Check(std::abs(o.x)<1e-5f && std::abs(o.z)<1e-5f && std::abs(std::abs(o.y)-static_cast<float>(std::sin(half)))<1e-5f &&
+              std::abs(std::abs(o.w)-static_cast<float>(std::cos(half)))<1e-5f && o.y*o.w>0,
               "The panel's orientation did not follow the head");
         // Every frame is located at its own display time: none reuses another's.
         frame.displayTime=2000;
