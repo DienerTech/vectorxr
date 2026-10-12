@@ -1048,6 +1048,11 @@ class FrameGenPresenter {
     // would return at phase_wall_ + (t - phase_xr_).
     std::chrono::steady_clock::time_point phase_wall_{};
     XrTime phase_xr_{0};
+    // Since the phase was measured, a wait came back for a display time off
+    // its refresh grid: the runtime echoes its caller's own interval, and
+    // submissions are not held to the phase until a wait blocks again
+    // (ScheduleSubmissionLocked).
+    bool phase_echoed_{false};
 
     // Automatic multiplier: steps up while the app misses its cadence, probes
     // one step down after a steady stretch, backing off when a probe fails.

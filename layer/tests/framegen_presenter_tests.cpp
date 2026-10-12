@@ -888,6 +888,10 @@ struct Runtime {
     std::atomic<int> submit_sleep_us{0};
     // The next submission alone takes this much longer (its caller's hitch).
     std::atomic<int> stall_next_submit_us{0};
+    // The next wait that blocks (paced runtimes only) alone returns this long
+    // after its refresh: its caller's thread woken late, as a system-wide
+    // hitch holds it. The runtime released it on time (last_release).
+    std::atomic<int> oversleep_next_release_us{0};
     // The next xrBeginFrame alone takes this long: the frame it begins goes
     // to xrEndFrame late. Under g_xr_mutex: that frame's index in
     // submitted_at (-1: none yet).
@@ -1042,6 +1046,9 @@ struct Runtime {
                 last_release = epoch + tick * refresh;
                 quick_releases += last_release - asked < quick ? 1 : 0;
                 SleepPrecise(epoch + tick * refresh);
+                if (const int over = oversleep_next_release_us.exchange(0)) {
+                    SleepPrecise(epoch + tick * refresh + std::chrono::microseconds(over));
+                }
                 return report(display_base + (tick + 1) * period,
                               throttling && throttle == Throttle::kPeriod ? throttle_refreshes * period : period);
             }
@@ -7050,6 +7057,61 @@ void TestEchoRuntimeKeepsRefresh() {
     }
 }
 
+// That runtime, the presenter thread woken late from a wait that blocked
+// (Runtime::oversleep_next_release_us), 9 ms and then 24 ms after its
+// refresh, as a system-wide hitch would hold it: the phase that wait sets is
+// that late. Held to it, each submission would go that late, the next wait
+// would come after the next refresh and return at once (no wait blocking to
+// set the phase again), and submissions would stay 12-17 ms apart until the
+// phase expired, two seconds on. Within a fifth of a second of each, they
+// are back at the refresh rate, a refresh apart.
+void TestEchoRuntimeLateWake() {
+    for (const FrameGenMultiplier multiplier : {FrameGenMultiplier::kDynamic, FrameGenMultiplier::k2}) {
+        const bool dynamic = multiplier == FrameGenMultiplier::kDynamic;
+        const std::string name = std::string("echo runtime, late wake, ") + (dynamic ? "dynamic" : "fixed 2x");
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        runtime.echo = true;
+        runtime.submit_sleep_us = 2500;
+        std::unique_ptr<App> owned;
+        App* app = nullptr;
+        StartHalving(presenter, gpu, runtime, multiplier, app, owned, nullptr);
+        const auto work = PeriodsOfWork(kPeriod, 2.0);
+        if (dynamic) {
+            RunWork(*app, 3000ms, work, [&](const XrFrameState&) { return Engaged(presenter); });
+            Check(Engaged(presenter), name + ": a game at 40 fps engages Dynamic");
+        } else {
+            for (int i = 0; i < 3; ++i) app->Frame();
+        }
+        RunWork(*app, 500ms, work);
+        const double refresh = 1e9 / static_cast<double>(kPeriod);
+        for (const int late_ms : {9, 24}) {
+            runtime.oversleep_next_release_us = late_ms * 1000;
+            RunWork(*app, 1000ms, work, [&](const XrFrameState&) { return runtime.oversleep_next_release_us == 0; });
+            Check(runtime.oversleep_next_release_us == 0, name + ": a wait blocked (" + std::to_string(late_ms) + " ms)");
+            RunWork(*app, 200ms, work);
+            const std::size_t first = runtime.Submissions();
+            const double output = SubmissionRate(*app, 1000ms, work);
+            const double interval = MedianSubmitInterval(runtime, first);
+            if (std::getenv("FG_TEST_STATS")) {
+                std::cerr << name << ": " << late_ms << " ms: " << output << " fps, " << interval << " ms apart\n";
+            }
+            Check(output >= 0.85 * refresh && interval <= 1.03 * static_cast<double>(kPeriod) / 1e6,
+                  name + ": woken " + std::to_string(late_ms) +
+                      " ms late, Frame Generation's frames are back at the refresh rate, a refresh apart (" +
+                      std::to_string(output) + " fps, " + std::to_string(interval) + " ms apart)");
+        }
+        const FrameGenStatus status = presenter.Status();
+        Check(!status.runtime_halving && status.dynamic_stand_downs == 0 &&
+                  (dynamic ? Engaged(presenter) : status.state == FrameGenState::kActive && status.threaded),
+              name + ": nothing reported, engaged throughout (" + presenter.OsdDetailText() + " | " +
+                  status.dynamic_reason + ")");
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    }
+}
+
 // That runtime once a throttle that reports its period (Runtime::Throttle::
 // kPeriod) has been reported and stood down for: the throttle off, a game at
 // 50 fps passing frames through asks for each wait late, and the runtime
@@ -7575,6 +7637,7 @@ int main(int argc, char** argv) {
     RUN(TestRuntimeHalvingRetriesBriefly);
     // SteamVR with Pimax's headset driver.
     RUN(TestEchoRuntimeKeepsRefresh);
+    RUN(TestEchoRuntimeLateWake);
     RUN(TestEchoRuntimeClearsHalving);
     RUN(TestEchoHitchKeepsRefresh);
     // Quad views Frame Generation composes itself.

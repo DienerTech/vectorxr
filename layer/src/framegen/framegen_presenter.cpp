@@ -471,6 +471,7 @@ void FrameGenPresenter::Stop() {
     logged_runtime_halving_ = false;
     phase_wall_ = {};
     phase_xr_ = 0;
+    phase_echoed_ = false;
     auto_multiplier_ = 1;
     auto_memory_ceiling_ = kMaxMultiplier;
     memory_budget_.reset();
@@ -2622,6 +2623,7 @@ void FrameGenPresenter::NotePhaseLocked(Clock::time_point called, Clock::time_po
     if (period > 0 && returned - called >= blocked) {
         phase_wall_ = returned;
         phase_xr_ = display_time;
+        phase_echoed_ = false;
     }
 }
 
@@ -2668,7 +2670,23 @@ std::pair<Clock::time_point, bool> FrameGenPresenter::ScheduleSubmissionLocked(C
     if (phased) {
         const auto ideal = phase_wall_ + ns(display_time - phase_xr_);
         late = now > ideal + ns(period / 2);
-        at = std::max(at, ideal);
+        // Held to it only while display times stay on the phase's refresh
+        // grid. One off it (more than refresh/20 from a whole number of
+        // refreshes) is no refresh's: the runtime echoed a late caller's own
+        // interval and returned at once (SteamVR with Pimax's headset
+        // driver), for a display time as far after its last release as the
+        // caller took, so its waits are due when they return. From then on,
+        // until a wait blocks and measures the phase anew, nothing is held to
+        // it. The phase is off by however late the blocked wait that set it
+        // was seen (its thread held up in a hitch): each submission held to
+        // it would carry that error, the next wait would come late and
+        // return at once again, and submissions would stay up to 1.5
+        // refreshes apart until the phase expired.
+        const XrDuration past = (display_time - phase_xr_) % spacing;
+        phase_echoed_ = phase_echoed_ || std::min(past, spacing - past) > spacing / 20;
+        if (!phase_echoed_) {
+            at = std::max(at, ideal);
+        }
     }
     if (submit_grid_ != Clock::time_point{}) {
         at = std::max(at, submit_grid_ + ns(spacing * (known ? 17 : 19) / 20));
