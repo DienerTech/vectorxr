@@ -2507,7 +2507,7 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
     }
     if (d3d11_bridge_.Active()) {
         logger_.Info("Frame Generation's Direct3D 11 bridge: the session is Direct3D 12 and the game renders into "
-                     "images shared with it (the OSD's eye-image composite and Varjo focus sharpening are off); " +
+                     "images shared with it (Varjo focus sharpening is off); " +
                      bridge_description);
     }
     if (vulkan_bridge_.Active()) {
@@ -8933,7 +8933,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
                                (route == FrameGenQuadRoute::kNotPresenting && framegen_.ShowsOwnImagesOnly());
             const bool composed = planned && ComposeQuadViewsD3D11(
                 projection_layer, frame_end_info->displayTime, plan, &depth_anchor_restored_view_count,
-                i == 0 && !framegen_owns_pacing_.load(std::memory_order_acquire) && !d3d11_bridge_.Active(),
+                false,  // The OSD is its own layer here too, as in every other game.
                 &adjusted_projection_layers.back(), &adjusted_projection_views.back());
             // Frame Generation shows it as the layer composed it (or split
             // it), and sets the views up from it when their releases were not

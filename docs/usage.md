@@ -1050,9 +1050,8 @@ Pauses longer than one second reset the history.
 
 Panel refresh is independent of frame sampling. The default **5 Hz** redraw rate keeps
 the information readable without updating the text every frame; 1–20 Hz is available.
-Drawing runs on a background worker. The panel normally occupies its own composition layer,
-so it stays independent of application resolution and foveation. In VectorXR's synthesized
-D3D11 Quadviews sessions it is drawn into the combined eye images instead. Viewing distance
+Drawing runs on a background worker. The panel occupies its own composition layer in every
+game, so it stays independent of application resolution and foveation. Viewing distance
 changes its stereo depth while preserving its apparent size. The panel follows the headset,
 not the world, and does not appear in every game's desktop mirror. If a refresh cannot
 finish in the current frame, the previous panel image stays on screen until it does.
