@@ -87,7 +87,7 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         URL_HASH SHA256=2ad177c0e468ac2eb3db9b5be6b8a18a6730d339378ac670e5fbda3503ac7d64
         DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
     FetchContent_MakeAvailable(vulkan_headers)
-    add_library(depthxr_osd STATIC src/osd_renderer.cpp src/osd_graphics.cpp src/osd_vulkan.cpp src/osd_composite.cpp)
+    add_library(depthxr_osd STATIC src/osd_renderer.cpp src/osd_graphics.cpp src/osd_vulkan.cpp)
     target_include_directories(depthxr_osd PUBLIC include)
     target_compile_features(depthxr_osd PUBLIC cxx_std_20)
     target_compile_definitions(depthxr_osd PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 XR_USE_GRAPHICS_API_D3D12 XR_USE_GRAPHICS_API_VULKAN)
@@ -221,13 +221,6 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
     target_compile_definitions(depthxr_framegen PRIVATE DEPTHXR_NVOF)
     target_compile_definitions(depthxr_framegen PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 XR_USE_GRAPHICS_API_D3D12 XR_USE_GRAPHICS_API_VULKAN)
     target_link_libraries(depthxr_framegen PUBLIC depthxr_core OpenXR::openxr_loader Vulkan::Headers d3d11 d3d12 dxgi)
-
-    if(BUILD_TESTING)
-        add_executable(depthxr_osd_composite_tests tests/osd_composite_tests.cpp)
-        target_link_libraries(depthxr_osd_composite_tests PRIVATE depthxr_osd)
-        target_compile_definitions(depthxr_osd_composite_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
-        add_test(NAME depthxr_osd_composite_tests COMMAND depthxr_osd_composite_tests)
-    endif()
 
     add_library(
         XR_APILAYER_DIENERTECH_VECTORXR

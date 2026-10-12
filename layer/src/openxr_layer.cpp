@@ -2222,7 +2222,6 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
     framegen_session_enabled_ = false;
     turbo_yielded_to_framegen_ = false;
     osd_.Shutdown();
-    ReleasePendingOsdImages();osd_composite_.Reset();osd_composite_logged_=false;osd_composite_fallback_logged_=false;
     DestroyEyeGazeResources();
     DestroyVarjoNativeFoveationResources();
     DestroyInternalReferenceSpaces();
@@ -2683,7 +2682,6 @@ XrResult OpenXrLayer::DestroySession(XrSession session) {
             framegen_session_enabled_ = false;
             turbo_yielded_to_framegen_ = false;
             osd_.Shutdown();
-            ReleasePendingOsdImages();osd_composite_.Reset();osd_composite_logged_=false;osd_composite_fallback_logged_=false;
             DestroyEyeGazeResources();
             DestroyVarjoNativeFoveationResources();
             DestroyInternalReferenceSpaces();
@@ -4868,7 +4866,6 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
                                         XrTime display_time,
                                         const QuadViewsComposePlan& plan,
                                         uint32_t* restored_view_count,
-                                        bool allow_osd_composite,
                                         XrCompositionLayerProjection* composed_layer,
                                         std::vector<XrCompositionLayerProjectionView>* composed_views) {
     const auto compose_start = std::chrono::steady_clock::now();
@@ -4899,37 +4896,6 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
     }
 
     const uint32_t restored = plan.restored;
-    // Temporary diagnostic limited to the first D3D11 quadviews projection.
-    // Other rendering paths retain the normal independently submitted quad.
-    bool composite_osd = false;
-    PendingOsdComposite pending_osd;
-    std::array<bool,2> deferred_release{};
-    if (allow_osd_composite && osd_monitoring_.load(std::memory_order_relaxed)) {
-        XrFrameEndInfo frame{XR_TYPE_FRAME_END_INFO};frame.displayTime=display_time;frame.layerCount=1;
-        const auto* source=reinterpret_cast<const XrCompositionLayerBaseHeader*>(source_layer);frame.layers=&source;
-        if (const auto* overlay=osd_.Append(frame,osd_should_render_.load(std::memory_order_relaxed))) {
-            const auto& quad=*reinterpret_cast<const XrCompositionLayerQuad*>(overlay);
-            XrSpaceLocation relation{XR_TYPE_SPACE_LOCATION};
-            const auto valid=XR_SPACE_LOCATION_POSITION_VALID_BIT|XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
-            std::string error="OSD space unavailable";
-            if(next_locate_space_ && XR_SUCCEEDED(next_locate_space_(quad.space,source_layer->space,display_time,&relation)) &&
-               (relation.locationFlags&valid)==valid) {
-                bool rgba=false;auto bitmap=osd_.PresentedBitmap(rgba);
-                pending_osd.frame_time=display_time;pending_osd.layer_space=source_layer->space;
-                pending_osd.quad=quad;pending_osd.early_panel_pose=MultiplyPoses(quad.pose,relation.pose);
-                pending_osd.bitmap=std::move(bitmap);pending_osd.rgba=rgba;
-                pending_osd.eyes={(*composed_views)[0],(*composed_views)[1]};
-                pending_osd.width=output_width;pending_osd.height=output_height;
-                composite_osd=osd_composite_.Prepare(d3d11_quadviews_compositor_.device,pending_osd.bitmap,rgba,
-                    pending_osd.early_panel_pose,quad.size,pending_osd.eyes,error);
-            }
-            if(!composite_osd && !osd_composite_fallback_logged_) {
-                logger_.Info("OSD presentation diagnostic=eye-image composite fallback: "+error);
-                osd_composite_fallback_logged_=true;
-            }
-        }
-    }
-
     struct SavedD3D11State {
         ID3D11RenderTargetView* render_targets[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
         ID3D11DepthStencilView* depth_stencil{nullptr};
@@ -5316,15 +5282,6 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
         context->UpdateSubresource(d3d11_quadviews_compositor_.constants, 0, nullptr, &constants, 0, 0);
         context->PSSetConstantBuffers(0, 1, &d3d11_quadviews_compositor_.constants);
         context->Draw(3, 0);
-        // Leave the OSD out of this early scene pass. Turbo may still wait for
-        // the runtime; head-locked placement must be sampled after that wait.
-        if(composite_osd) {
-            pending_osd.swapchains[eye]=target.swapchain;
-            pending_osd.indices[eye]=output_indices[eye];
-            pending_osd.targets[eye]=render_target;
-            pending_osd.output_images[eye]=target.d3d11_images[output_indices[eye]];
-            pending_osd.private_images[eye]=direct_output?nullptr:target.render_texture;
-        }
 
         ID3D11ShaderResourceView* null_resources[2]{nullptr, nullptr};
         context->PSSetShaderResources(0, 2, null_resources);
@@ -5366,10 +5323,6 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
             }
         }
 
-        if(composite_osd) {
-            deferred_release[eye]=true;
-            continue;
-        }
         result = ReleaseLayerSwapchainImage(target.swapchain, output_indices[eye], true, plan.shown_later);
         if (XR_FAILED(result)) {
             failure_reason = "outputRelease eye=" + std::to_string(eye) +
@@ -5401,12 +5354,6 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
 
     restore_state();
     if (!rendered) {
-        // A partial scene failure must not strand the first eye's acquired image.
-        XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-        for(unsigned eye=0;eye<2;++eye)
-            if(deferred_release[eye] &&
-               XR_SUCCEEDED(next_release_swapchain_image_(pending_osd.swapchains[eye],&release)))
-                NoteFrameGenRelease(pending_osd.swapchains[eye],pending_osd.indices[eye]);
         if (d3d11_quadviews_compositor_.failure_logs_remaining > 0) {
             logger_.Error("D3D11 quadviews composition failed; falling back to projection-layer split. reason=" +
                           failure_reason);
@@ -5499,7 +5446,6 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
     }
 
     if(restored_view_count)*restored_view_count+=restored;
-    if(composite_osd)pending_osd_composite_=std::move(pending_osd);
     *composed_layer = *source_layer;
     composed_layer->viewCount = static_cast<uint32_t>(composed_views->size());
     composed_layer->views = composed_views->data();
@@ -5539,67 +5485,6 @@ XrResult OpenXrLayer::TraceRuntimeBeginFrame(XrSession session, const XrFrameBeg
     if (XR_FAILED(result)) turbo_trace_.Burst();
     turbo_trace_.Record("runtime.begin.return", id, result);
     return result;
-}
-
-XrResult OpenXrLayer::ReleasePendingOsdImages() {
-    if(!pending_osd_composite_)return XR_SUCCESS;
-    // Clear ownership before calling downstream; cleanup must never release twice.
-    auto pending=std::move(*pending_osd_composite_);pending_osd_composite_.reset();
-    XrResult result=XR_SUCCESS;
-    XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-    for(unsigned eye=0;eye<2;++eye) {
-        const auto swapchain=pending.swapchains[eye];
-        if(!swapchain || !next_release_swapchain_image_)continue;
-        const auto released=next_release_swapchain_image_(swapchain,&release);
-        if(XR_FAILED(released) && XR_SUCCEEDED(result))result=released;
-        // As of every release of the compositor's outputs, Frame Generation is told.
-        if(XR_SUCCEEDED(released))NoteFrameGenRelease(swapchain,pending.indices[eye]);
-    }
-    if(XR_FAILED(result))logger_.Error("OSD eye-image release failed: "+std::to_string(result));
-    return result;
-}
-
-XrResult OpenXrLayer::FinishOsdComposite(const XrFrameEndInfo* info, bool& drawn) {
-    drawn=false;
-    if(!pending_osd_composite_)return XR_SUCCESS;
-    auto& pending=*pending_osd_composite_;
-    if(info && info->layerCount && info->displayTime==pending.frame_time && osd_should_render_.load()) {
-        // The scene's render pose stays unchanged. Only the HUD anchor follows
-        // the most recent real runtime prediction, after Turbo's wait/drain.
-        // A fabricated app timestamp may lag or lead that prediction.
-        XrTime pose_time=info->displayTime;
-        {
-            std::scoped_lock lock(turbo_mutex_);
-            if(turbo_last_predicted_display_time_>0)pose_time=turbo_last_predicted_display_time_;
-        }
-        XrSpaceLocation relation{XR_TYPE_SPACE_LOCATION};
-        const auto valid=XR_SPACE_LOCATION_POSITION_VALID_BIT|XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
-        bool prepared=true, late_pose=false;
-        std::string error;
-        if(next_locate_space_ && XR_SUCCEEDED(next_locate_space_(pending.quad.space,pending.layer_space,pose_time,&relation)) &&
-           (relation.locationFlags&valid)==valid) {
-            prepared=osd_composite_.Prepare(d3d11_quadviews_compositor_.device,pending.bitmap,pending.rgba,
-                MultiplyPoses(pending.quad.pose,relation.pose),pending.quad.size,pending.eyes,error);
-            late_pose=prepared;
-            if(!prepared)prepared=osd_composite_.Prepare(d3d11_quadviews_compositor_.device,pending.bitmap,pending.rgba,
-                pending.early_panel_pose,pending.quad.size,pending.eyes,error);
-        }
-        if(prepared) {
-            for(unsigned eye=0;eye<2;++eye) {
-                osd_composite_.Draw(eye,pending.targets[eye],pending.width,pending.height);
-                if(pending.private_images[eye])d3d11_quadviews_compositor_.context->CopyResource(
-                    pending.output_images[eye],pending.private_images[eye]);
-            }
-            drawn=true;
-            if(!osd_composite_logged_) {
-                logger_.Info("OSD presentation diagnostic=eye-image composite active; pose sampled after frame wait; latePose="+
-                    std::to_string(late_pose)+" renderTime="+std::to_string(info->displayTime)+
-                    " poseTime="+std::to_string(pose_time)+"; no separate OSD layer");
-                osd_composite_logged_=true;
-            }
-        }
-    }
-    return ReleasePendingOsdImages();
 }
 
 void OpenXrLayer::DropPendingFrameGenQuad(bool abandon) {
@@ -5703,12 +5588,7 @@ XrResult OpenXrLayer::SubmitRuntimeFrame(XrSession session, const XrFrameEndInfo
     if(osd_vulkan_.load())queue_lock.lock();
     XrFrameEndInfo with_osd{};
     std::vector<const XrCompositionLayerBaseHeader*> layers;
-    bool osd_in_eye_images=false;
-    // A failed eye-image release is logged by ReleasePendingOsdImages. Still
-    // submit: skipping xrEndFrame would drop the app's frame and leave the
-    // runtime frame open; the runtime reports any resulting layer error.
-    FinishOsdComposite(info,osd_in_eye_images);
-    if (info && !osd_in_eye_images && osd_monitoring_.load(std::memory_order_relaxed)) {
+    if (info && osd_monitoring_.load(std::memory_order_relaxed)) {
         if (const auto* overlay=osd_.Append(*info, osd_should_render_.load(std::memory_order_relaxed))) {
             with_osd=*info;
             layers.assign(info->layers, info->layers+info->layerCount);
@@ -6272,14 +6152,12 @@ void OpenXrLayer::ObserveCompositionLayerTopology(const XrFrameEndInfo* frame_en
 XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                                       const XrFrameEndInfo* frame_end_info,
                                       std::unique_lock<std::mutex>& config_lock) {
-    // Runtime wait/begin can fail before TraceRuntimeEndFrame is reached.
-    // Release any held output images on every early-return path as well.
-    // Likewise a quad views frame Frame Generation claimed: one that never
-    // reached TraceRuntimeEndFrame is abandoned.
+    // Runtime wait/begin can fail before TraceRuntimeEndFrame is reached: a
+    // quad views frame Frame Generation claimed that never reached
+    // TraceRuntimeEndFrame is abandoned.
     struct PendingImageGuard {
         OpenXrLayer& layer;
         ~PendingImageGuard() {
-            layer.ReleasePendingOsdImages();
             layer.DropPendingFrameGenQuad(true);
         }
     } pending_guard{*this};
@@ -8275,10 +8153,6 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     RefreshResolvedSettings();
     PollFrameGenToggle();
     PrepareOsd();
-    // Eye images held for the OSD composite belong to one submission. If an
-    // earlier EndFrame returned before forwarding, release them now so the
-    // next composition cannot strand them or submit a stale image.
-    ReleasePendingOsdImages();
     // Capture application-submitted rectangles before synthesized Quadviews
     // rewrites them into two runtime views. Report allocated sizes separately.
     if (frame_end_info && frame_end_info->layers) {
@@ -8933,7 +8807,6 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
                                (route == FrameGenQuadRoute::kNotPresenting && framegen_.ShowsOwnImagesOnly());
             const bool composed = planned && ComposeQuadViewsD3D11(
                 projection_layer, frame_end_info->displayTime, plan, &depth_anchor_restored_view_count,
-                false,  // The OSD is its own layer here too, as in every other game.
                 &adjusted_projection_layers.back(), &adjusted_projection_views.back());
             // Frame Generation shows it as the layer composed it (or split
             // it), and sets the views up from it when their releases were not
@@ -9046,7 +8919,6 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     PruneDepthSubmissionGeometry(frame_end_info->displayTime);
     PruneQuadViewsFrames(frame_end_info->displayTime);
     if (XR_FAILED(release_result)) {
-        ReleasePendingOsdImages();
         // A frame Frame Generation claimed is abandoned with it.
         DropPendingFrameGenQuad(false);
         framegen_.AbandonFrame(frame_end_info->displayTime);
@@ -10839,7 +10711,6 @@ void OpenXrLayer::ResetSessionState() {
     }
     application_action_spaces_.clear();
     osd_.Shutdown();
-    ReleasePendingOsdImages();osd_composite_.Reset();osd_composite_logged_=false;osd_composite_fallback_logged_=false;
     osd_monitoring_.store(false);
     osd_should_render_.store(true);
     osd_last_input_poll_.reset();

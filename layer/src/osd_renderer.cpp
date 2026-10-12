@@ -390,7 +390,7 @@ void OsdRenderer::ShutdownLocked() {
     }
     raster_cv_.notify_one();
     if (raster_thread_.joinable()) raster_thread_.join();
-    raster_stop_=false; raster_requested_=false; raster_request_.reset(); raster_completed_.reset(); upload_.reset(); presented_bitmap_.reset();
+    raster_stop_=false; raster_requested_=false; raster_request_.reset(); raster_completed_.reset(); upload_.reset();
     if(graphics_) graphics_->Reset();
     if (swapchain_ && api_.destroy) api_.destroy(swapchain_);
     if (space_ && api_.destroy_space) api_.destroy_space(space_);
@@ -589,7 +589,7 @@ const XrCompositionLayerBaseHeader* OsdRenderer::Append(const XrFrameEndInfo& in
                 const auto release_start=Clock::now();const auto released=api_.release(swapchain_,&release);stats.release.Add(Milliseconds(release_start));
                 if (XR_FAILED(released)) { Fail("OSD release",released); return nullptr; }
                 acquired_.reset(); acquired_waited_=false; ++stats.refreshed; ready_=true; image_height_=bitmap.height; image_width_=bitmap.content_width; updated_=now; image_updated_=Clock::now();
-                presented_bitmap_=std::make_shared<OsdBitmap>(std::move(*upload_));upload_.reset();
+                upload_.reset();
             }
         }
     }
@@ -616,7 +616,4 @@ const XrCompositionLayerBaseHeader* OsdRenderer::Append(const XrFrameEndInfo& in
 }
 
 OsdStatus OsdRenderer::Status() const { std::scoped_lock lock(mutex_); return status_; }
-std::shared_ptr<const OsdBitmap> OsdRenderer::PresentedBitmap(bool& rgba) const {
-    std::scoped_lock lock(mutex_);rgba=rgba_;return ready_?presented_bitmap_:nullptr;
-}
 } // namespace depthxr

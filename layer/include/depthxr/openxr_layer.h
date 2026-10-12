@@ -33,7 +33,6 @@
 #include "depthxr/runtime_pacing.h"
 #include "depthxr/runtime_relay.h"
 #include "depthxr/osd_renderer.h"
-#include "depthxr/osd_composite.h"
 #include "depthxr/framegen_d3d11_bridge.h"
 #include "depthxr/framegen_vulkan_bridge.h"
 #include "depthxr/framegen_presenter.h"
@@ -766,7 +765,6 @@ class OpenXrLayer {
                                XrTime display_time,
                                const QuadViewsComposePlan& plan,
                                uint32_t* restored_view_count,
-                               bool allow_osd_composite,
                                XrCompositionLayerProjection* composed_layer,
                                std::vector<XrCompositionLayerProjectionView>* composed_views);
 
@@ -797,27 +795,6 @@ class OpenXrLayer {
     ThreadCensus thread_census_;
     // Immutable between BeginSession and teardown; live edits apply next session.
     OsdRenderer osd_;
-    OsdComposite osd_composite_;
-    struct PendingOsdComposite {
-        XrTime frame_time{};
-        XrSpace layer_space{XR_NULL_HANDLE};
-        XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
-        XrPosef early_panel_pose{};
-        std::shared_ptr<const OsdBitmap> bitmap;
-        bool rgba{};
-        std::array<XrCompositionLayerProjectionView,2> eyes;
-        std::array<XrSwapchain,2> swapchains{};
-        std::array<uint32_t,2> indices{}; // the images acquired, released by ReleasePendingOsdImages
-        std::array<ID3D11RenderTargetView*,2> targets{};
-        std::array<ID3D11Texture2D*,2> output_images{}, private_images{};
-        uint32_t width{},height{};
-    };
-    // Owned by the application's end-frame thread; images remain acquired until
-    // the last pose update and draw immediately before downstream xrEndFrame.
-    std::optional<PendingOsdComposite> pending_osd_composite_;
-    XrResult ReleasePendingOsdImages();
-    XrResult FinishOsdComposite(const XrFrameEndInfo*, bool& drawn);
-    bool osd_composite_logged_{false}, osd_composite_fallback_logged_{false};
     std::atomic<bool> osd_vulkan_{false}, turbo_metrics_active_{false};
     std::mutex osd_vulkan_queue_mutex_;
     std::atomic<bool> osd_monitoring_{false};

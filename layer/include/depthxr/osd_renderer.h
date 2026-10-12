@@ -144,7 +144,6 @@ class OsdRenderer {
     // Only called on the application's end-frame thread, after game-layer transforms.
     const XrCompositionLayerBaseHeader* Append(const XrFrameEndInfo&, bool should_render);
     OsdStatus Status() const;
-    std::shared_ptr<const OsdBitmap> PresentedBitmap(bool& rgba) const;
   private:
     void ShutdownLocked();
     bool CreateResources();
@@ -187,7 +186,6 @@ class OsdRenderer {
     std::condition_variable raster_cv_;
     bool raster_stop_{false}, raster_requested_{false};
     std::optional<RasterRequest> raster_request_;
-    std::shared_ptr<const OsdBitmap> presented_bitmap_;
     std::optional<OsdBitmap> raster_completed_, upload_;
     Logger* logger_{};
     std::string identity_;
