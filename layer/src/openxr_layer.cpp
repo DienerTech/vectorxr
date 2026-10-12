@@ -13071,7 +13071,7 @@ void OpenXrLayer::PollQuadViewsDiagnosticVisualizationToggle() {
     }
     if (FrameGenComposesQuadViews()) {
         logger_.Info("Quadviews diagnostic visualization is unavailable while Frame Generation composes the quad "
-                     "views (" + BindingLabel(binding) + "); turn Frame Generation off for this game to use it.");
+                     "views (" + BindingLabel(binding) + "); turn Frame Generation off for this game and restart it to use it.");
         return;
     }
 
