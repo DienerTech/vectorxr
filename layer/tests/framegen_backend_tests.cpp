@@ -181,6 +181,34 @@ Pixels Shimmer(int frame) {
     return pixels;
 }
 
+// A helicopter's main rotor seen from its cockpit against a smooth sky: two
+// thin dark blades about the image's center, at `angle` degrees. A Huey's
+// rotor (324 rpm) turns 43 degrees between two frames at 45 fps.
+Pixels Rotor(float angle) {
+    Pixels pixels(kSize * kSize);
+    const float radians = angle * 3.14159265f / 180.0f;
+    const float c = std::cos(radians), s = std::sin(radians);
+    for (std::uint32_t y = 0; y < kSize; ++y) {
+        for (std::uint32_t x = 0; x < kSize; ++x) {
+            float blade = 0.0f;
+            for (int sample = 0; sample < 4; ++sample) { // antialiased across the blade
+                const float dx = x + (sample % 2 + 0.5f) / 2.0f - kSize / 2.0f;
+                const float dy = y + (sample / 2 + 0.5f) / 2.0f - kSize / 2.0f;
+                const float along = dx * c + dy * s;
+                const float across = -dx * s + dy * c;
+                blade += (std::abs(across) < 4.0f && std::abs(along) < 170.0f) || dx * dx + dy * dy < 100.0f ? 0.25f : 0.0f;
+            }
+            const float t = static_cast<float>(y) / kSize;
+            const float n = 0.015f * Noise(x / 9.0f, y / 9.0f);
+            const float r = (0.55f + 0.2f * t + n) * (1.0f - blade) + 0.08f * blade;
+            const float g = (0.68f + 0.15f * t + n) * (1.0f - blade) + 0.08f * blade;
+            const float b = (0.88f + 0.05f * t + n) * (1.0f - blade) + 0.09f * blade;
+            pixels[y * kSize + x] = Pack(r, g, b);
+        }
+    }
+    return pixels;
+}
+
 // Tangent of the test views' half field of view.
 constexpr float kTan = 0.8f;
 
@@ -647,6 +675,44 @@ int RunScenarios(Harness& harness) {
                   << first_hold << ", " << facade_hold << std::endl;
         Check(first_error < 2.2 * first_hold && facade_error < 2.2 * facade_hold,
               harness.name + " repeating windows alias worse than before");
+    }
+
+    // 3c'. A helicopter's rotor over the sky (FG_TEST_ROTOR=1 prints how
+    // generated frames compare with showing the newest frame again; no
+    // verdict yet). Dark pixels: sky in the true frame that the generated
+    // one shows as blade (a dark flash).
+    if (std::getenv("FG_TEST_ROTOR")) {
+        const auto dark = [](const Pixels& shown, const Pixels& truth) {
+            std::size_t count = 0;
+            for (std::size_t i = 0; i < shown.size(); ++i) {
+                const int truth_g = (truth[i] >> 8) & 255, shown_g = (shown[i] >> 8) & 255;
+                count += truth_g > 150 && shown_g < truth_g - 60 ? 1 : 0;
+            }
+            return count;
+        };
+        for (const FrameGenSynthesisMode mode : {FrameGenSynthesisMode::kInterpolate, FrameGenSynthesisMode::kExtrapolate}) {
+            for (const float step : {10.0f, 25.0f, 43.0f}) {
+                harness.upload(g_swapchains[kSource][0], Rotor(0.0f));
+                harness.upload(g_swapchains[kSource][1], Rotor(step));
+                harness.upload(g_swapchains[kSource][2], Rotor(2 * step));
+                tuning = {};
+                tuning.mode = mode;
+                tuning.fractions[0] = 0.5f;
+                gpu->ResetHistory();
+                run(0, true, 0, 0);
+                run(1, true, 0, 0);
+                const Pixels generated = run(2, true, 0, 0);
+                const bool interpolate = mode == FrameGenSynthesisMode::kInterpolate;
+                const Pixels truth = Rotor(interpolate ? 1.5f * step : 2.5f * step);
+                const Pixels newest = Rotor(2 * step);
+                const std::string what = std::string(interpolate ? "interpolated" : "extrapolated") + " rotor at " +
+                                         std::to_string(static_cast<int>(step)) + " deg";
+                Dump(harness.name + "-" + what, generated);
+                std::cout << harness.name << " " << what << ": error " << MeanError(generated, truth, 0, 0, kSize, kSize)
+                          << " vs hold " << MeanError(newest, truth, 0, 0, kSize, kSize) << ", dark pixels "
+                          << dark(generated, truth) << " vs hold " << dark(newest, truth) << std::endl;
+            }
+        }
     }
 
     // 3d. Shimmering still detail, extrapolated frame after frame: the
