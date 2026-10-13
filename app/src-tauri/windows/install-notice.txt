@@ -1,0 +1,11 @@
+Before you install VectorXR
+
+VectorXR is an OpenXR API layer. While it is enabled, it loads into every OpenXR game you run and works on the frames and calls that pass between the game and your headset's runtime. It does not read or change the game's memory or code.
+
+Using VectorXR in online games with anti-cheat is at your own risk, and that includes your game account. Each game's developer decides what its anti-cheat allows and can change that at any time, and no game developer has endorsed VectorXR.
+
+Report problems with VectorXR to VectorXR, not to the game's developer.
+
+VectorXR is free, open-source software from DienerTech LLC, licensed under the Mozilla Public License 2.0, which is installed with it as LICENSE.txt. It is provided "as is", without warranty of any kind (sections 6 and 7 of the license).
+
+Click I Agree to confirm that you have read this and accept these risks.

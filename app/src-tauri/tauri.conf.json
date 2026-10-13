@@ -18,6 +18,7 @@
       "icons/icon.png",
       "icons/icon.ico"
     ],
+    "licenseFile": "windows/install-notice.txt",
     "resources": {
       "../../LICENSE": "LICENSE.txt",
       "../../THIRD-PARTY-NOTICES.txt": "THIRD-PARTY-NOTICES.txt",
