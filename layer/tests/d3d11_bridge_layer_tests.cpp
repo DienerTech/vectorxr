@@ -372,6 +372,16 @@ bool MakeGame(bool hardware, Game& game) {
     return true;
 }
 
+// The game's adapter renders in software (WARP).
+bool SoftwareAdapter(const Game& game) {
+    ComPtr<IDXGIFactory4> factory;
+    ComPtr<IDXGIAdapter1> adapter;
+    DXGI_ADAPTER_DESC1 desc{};
+    return FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) ||
+           FAILED(factory->EnumAdapterByLuid(game.luid, IID_PPV_ARGS(&adapter))) || FAILED(adapter->GetDesc1(&desc)) ||
+           test_adapter::SoftwareDxgiAdapter(desc);
+}
+
 // Only errors and corruption are stored: nothing the checks look for is
 // crowded out by the message limit.
 void StoreErrorsOnly(ID3D12InfoQueue* queue) {
@@ -4406,8 +4416,18 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
               !Contains(log, "Frame Generation could not capture") && !Contains(log, "[error] Direct3D 11 bridge:") &&
               !Contains(log, "Frame Generation paused"),
           "nothing was refused, failed or paused");
-    // The layer logged no error of its own (the test's reads of the log are logged as errors).
-    Check(Count(log, "[error]") == Count(log, "[error] D3D11 bridge layer tests: log read"),
+    // The layer logged no error of its own (the test's reads of the log are logged as errors). In
+    // software, the GPU-bound frames above can outlast Frame Generation's wait for its own work of
+    // three frames before (100 ms): it skips that frame, as after a GPU stall (a hosted CI runner's
+    // WARP, 2026-10-13). On a GPU that is an error here too.
+    const std::size_t software_waits =
+        SoftwareAdapter(game)
+            ? Count(log, "[error] Frame Generation could not generate a frame: D3D12 Frame Generation GPU work did "
+                         "not finish in time") +
+                  Count(log, "[error] Frame Generation could not generate a frame: D3D12 Frame Generation synthesis "
+                             "did not finish in time")
+            : 0;
+    Check(Count(log, "[error]") == Count(log, "[error] D3D11 bridge layer tests: log read") + software_waits,
           "the layer logged no error" + LayerErrors(log));
     CheckValidation(game, "depth");
     for (const Target* target : {&session.eyes, &session.ui, &session.depth}) {
@@ -4635,16 +4655,6 @@ int RunQuadDeviceLostProcess() {
     const std::string quoted = std::string("\"") + path + "\"";
     std::cout << std::flush;
     return static_cast<int>(_spawnl(_P_WAIT, path, quoted.c_str(), "hw", kQuadDeviceLost, nullptr));
-}
-
-// The game's adapter renders in software (WARP).
-bool SoftwareAdapter(const Game& game) {
-    ComPtr<IDXGIFactory4> factory;
-    ComPtr<IDXGIAdapter1> adapter;
-    DXGI_ADAPTER_DESC1 desc{};
-    return FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) ||
-           FAILED(factory->EnumAdapterByLuid(game.luid, IID_PPV_ARGS(&adapter))) || FAILED(adapter->GetDesc1(&desc)) ||
-           test_adapter::SoftwareDxgiAdapter(desc);
 }
 
 } // namespace
