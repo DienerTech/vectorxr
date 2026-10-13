@@ -427,6 +427,19 @@ class OpenXrLayer {
         std::array<double, 2> min_focus_height{};
         std::array<double, 2> max_focus_height{};
         std::optional<std::chrono::steady_clock::time_point> last_summary_wall_time;
+        // The focus FOVs the runtime returned for the last few display times,
+        // and how the application's submitted focus views compare for the same
+        // display time: checked, other FOVs submitted (mbucchia's Varjo layers
+        // patched DCS for submitting focus FOVs other than located), and no
+        // locate kept for that display time.
+        static constexpr size_t kLocatedFocusKept = 8;
+        std::array<XrTime, kLocatedFocusKept> located_focus_times{};
+        std::array<std::array<XrFovf, 2>, kLocatedFocusKept> located_focus_fovs{};
+        size_t located_focus_next{0};
+        uint64_t submitted_focus_checked{0};
+        uint64_t submitted_focus_mismatched{0};
+        uint64_t submitted_focus_unlocated{0};
+        bool submitted_focus_mismatch_logged{false};
     };
 
     void ReloadConfigIfNeeded();
@@ -699,6 +712,11 @@ class OpenXrLayer {
                                             const uint32_t* view_count_output,
                                             const XrView* views);
     void LogVarjoNativeFoveationSummaryLocked(std::string_view reason, bool info_level);
+    // A native quad projection layer the application submitted for
+    // `display_time`: its focus views' FOVs against the ones located for that
+    // display time (VarjoNativeFoveationDiagnosticState). Caller holds mutex_.
+    void NoteVarjoNativeSubmittedFocusLocked(XrTime display_time, const XrCompositionLayerProjectionView* views,
+                                            uint32_t view_count);
     bool EnsureD3D11QuadViewsPixelProbeResources(int64_t format);
     void ReleaseD3D11QuadViewsPixelProbeResources(bool preserve_history);
     void PollD3D11QuadViewsPixelProbe();
