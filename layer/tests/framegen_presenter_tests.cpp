@@ -896,6 +896,13 @@ struct Runtime {
     std::chrono::milliseconds clock_jump_after{0}; // 0: off (set before the first wait)
     double clock_jump_factor{2.0};
     std::atomic<XrDuration> jump_next{0};
+    // SteamVR (2.17.10, Pimax's headset driver) after a wait asked for more
+    // than lag_after_gap after the last one's release: it reports a display
+    // time only a refresh after the last, as if no time had passed, and the
+    // next wait its refresh's own again: display times lag, then catch up
+    // (in flights, by up to two seconds). Nothing ran ahead.
+    std::chrono::milliseconds lag_after_gap{0}; // 0: off (set before the first wait)
+    std::atomic<int> lagged_waits{0};
     XrTime clock_floor{0};          // under g_xr_mutex: the last display time reported
     std::atomic<int> crept_waits{0}; // waits reported at the floor instead of their refresh's time
     // Each submission takes this long (a runtime slow to take frames, or a
@@ -1077,6 +1084,11 @@ struct Runtime {
                         clock_floor = std::max(clock_floor, display + ahead);
                     }
                     if (jump > 0) clock_floor = std::max(clock_floor, display + jump);
+                    if (lag_after_gap > 0ms && clock_floor > 0 && previous_release != std::chrono::steady_clock::time_point{} &&
+                        gap > lag_after_gap && clock_floor + period < display) {
+                        display = clock_floor + period;
+                        ++lagged_waits;
+                    }
                     if (display <= clock_floor) {
                         display = clock_floor + kClockCreep;
                         ++crept_waits;
@@ -7412,6 +7424,49 @@ void TestVarjoClockJumpDynamic() {
           name + ": the log says why Dynamic waited, and when it stopped waiting");
 }
 
+// SteamVR's display times after a game's pause lag (a refresh after the
+// last, as if no time had passed) and then catch up (Runtime::lag_after_gap):
+// the catch-up runs no further ahead than before, so the runtime's clock is
+// never taken as displaced, and Dynamic engages as usual.
+void TestSteamVrLagIsNotDisplaced() {
+    const std::string name = "steamvr lag after pauses";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    runtime.lag_after_gap = 150ms;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kInterpolate, FrameGenMultiplier::kDynamic, app, runtime, owned);
+    // Standing by at full rate, the game pauses for 300-600 ms a few times
+    // (a loading hitch): each time the runtime's next display time lags. The
+    // pauses lower the game's rate over a second; engaging only after longer
+    // below it (as by default) it stays standing by.
+    FrameGenDynamicPolicy standing = GuardDynamic();
+    standing.engage_after = 2000ms;
+    presenter.SetDynamicPolicy(standing);
+    app->eye_speed = 0.5;
+    int frames = 0;
+    RunWork(*app, 3000ms, kLightWork, [&](const XrFrameState&) {
+        if (++frames % 40 == 0) std::this_thread::sleep_for(std::chrono::milliseconds(300 + 100 * (frames / 40 % 4)));
+        return false;
+    });
+    Check(runtime.lagged_waits >= 3, name + ": the runtime's display times lagged after the pauses (" +
+                                         std::to_string(runtime.lagged_waits.load()) + " times, " +
+                                         std::to_string(frames) + " frames, engagements " +
+                                         std::to_string(presenter.Status().dynamic_engagements) + ", " +
+                                         presenter.Status().dynamic_reason + ")");
+    Check(presenter.Status().runtime_clock_displacements == 0 && !presenter.Status().runtime_clock_displaced,
+          name + ": its clock is never taken as displaced");
+    presenter.SetDynamicPolicy(GuardDynamic());
+    RunPipelined(*app, 1500ms, 16ms, 26ms, {}, nullptr, 8ms);
+    const FrameGenStatus status = presenter.Status();
+    Check(status.threaded && !status.standby && status.runtime_clock_displacements == 0,
+          name + ": Dynamic engages for a slower game (" + status.dynamic_reason + ")");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+}
+
 // The same jump while Frame Generation presents (no game pause causes it
 // then, but a runtime may): the presenter thread's refreshes stop advancing,
 // so it stops and frames pass straight through within moments, the game never
@@ -7883,6 +7938,7 @@ int main(int argc, char** argv) {
     RUN(TestVarjoClockJumpDynamic);
     RUN(TestVarjoClockJumpWhilePresenting);
     RUN(TestVarjoTransientThrottle);
+    RUN(TestSteamVrLagIsNotDisplaced);
     // Quad views Frame Generation composes itself.
     RUN(TestQuadClaimAndCompose);
     RUN(TestQuadSetupThroughComposedFrame);

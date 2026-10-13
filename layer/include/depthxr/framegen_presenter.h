@@ -1076,20 +1076,23 @@ class FrameGenPresenter {
     // 10 µs on until its refreshes catch up: refreshes presented from those
     // never reach the game's frames, and the game, told them, renders for a
     // time far ahead. Displaced by a wait whose display time ran far further
-    // ahead than the time passed since the last (or went back), or by
-    // kClockStalledWaits waits in a row a refresh or more apart whose display
-    // times barely moved; steady again after kClockSteadyWaits waits in a row,
-    // over kClockSteadyTime, advanced with the time between them. Displaced,
-    // nothing engages and the presenter thread stops: frames pass straight
-    // through, as without Frame Generation.
+    // past this process's clock than any wait's while steady
+    // (clock_offset_ceiling_: SteamVR lags after a pause and catches up, which
+    // never counts), by one that went back, or by kClockStalledWaits waits in
+    // a row a refresh or more apart whose display times barely moved; steady
+    // again after kClockSteadyWaits waits, over kClockSteadyTime, advanced
+    // with the time between them. Displaced, nothing engages and the presenter
+    // thread stops: frames pass straight through, as without Frame Generation.
     struct ClockWait {
         std::chrono::steady_clock::time_point returned{};
         XrTime display_time{0};
     };
     std::optional<ClockWait> clock_last_;
+    XrDuration clock_offset_ceiling_{0}; // the highest display time minus steady-clock time while steady
+    bool clock_ceiling_set_{false};
     bool clock_displaced_{false};
     std::chrono::steady_clock::time_point clock_displaced_at_{};
-    XrDuration clock_ahead_{0};         // how far display times ran ahead of the time passed (0: they stalled)
+    XrDuration clock_ahead_{0};         // how far display times ran past the ceiling (0: they stalled)
     std::uint32_t clock_stalled_waits_{0}; // in a row
     std::uint32_t clock_steady_waits_{0};  // in a row, while displaced
     std::chrono::steady_clock::time_point clock_steady_since_{};
