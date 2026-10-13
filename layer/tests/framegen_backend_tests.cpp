@@ -217,13 +217,18 @@ XrRect2Di CockpitPanelRect(float head_x, float tan_left = -kTan, float tan_right
     return {{x0, y0}, {x1 - x0, y1 - y0}};
 }
 
-// A panorama at infinity rendered through a camera yawed by `yaw` radians.
-Pixels Panorama(float yaw) {
+// The tangents of a view's field of view: left, right, up, down.
+using Tangents = std::array<float, 4>;
+constexpr Tangents kFullView{-kTan, kTan, kTan, -kTan};
+
+// A panorama at infinity rendered through a camera yawed by `yaw` radians,
+// over the field of view `fov` (by default the whole view's).
+Pixels Panorama(float yaw, const Tangents& fov = kFullView) {
     Pixels pixels(kSize * kSize);
     for (std::uint32_t y = 0; y < kSize; ++y) {
         for (std::uint32_t x = 0; x < kSize; ++x) {
-            const float tx = -kTan + 2 * kTan * (x + 0.5f) / kSize;
-            const float ty = kTan - 2 * kTan * (y + 0.5f) / kSize;
+            const float tx = fov[0] + (fov[1] - fov[0]) * (x + 0.5f) / kSize;
+            const float ty = fov[2] - (fov[2] - fov[3]) * (y + 0.5f) / kSize;
             // View looks down -Z; yaw rotates about +Y (counterclockwise from above).
             const float dx = tx * std::cos(yaw) - std::sin(yaw);
             const float dz = -tx * std::sin(yaw) - std::cos(yaw);
@@ -1101,6 +1106,57 @@ int RunScenarios(Harness& harness) {
     const double rotation_baseline = MeanError(oldest, newest, 48, 48, kSize - 48, kSize - 48);
     std::cout << harness.name << " rotation: error " << rotation_error << " vs uncompensated " << rotation_baseline << '\n';
     Check(rotation_error < 0.3 * rotation_baseline, harness.name + " head rotation leaked into generated frames");
+
+    // 4b. Varjo's eye-tracked focus views: the head still, the inset's field
+    // of view follows the gaze between real frames, and widens when tracking
+    // drops (30 to 60 degrees there). Nothing in the world moved: generated
+    // frames show the newest frame's view of it, and where the previous frame
+    // saw nothing, the newest frame's own content.
+    struct InsetCase {
+        const char* what;
+        Tangents previous;
+        Tangents newest;
+    };
+    for (const InsetCase& inset : {InsetCase{"inset moved", {-0.3f, 0.3f, 0.3f, -0.3f}, {-0.18f, 0.42f, 0.36f, -0.24f}},
+                                   InsetCase{"inset widened", {-0.27f, 0.27f, 0.27f, -0.27f}, {-0.58f, 0.58f, 0.58f, -0.58f}},
+                                   InsetCase{"inset narrowed", {-0.58f, 0.58f, 0.58f, -0.58f}, {-0.27f, 0.27f, 0.27f, -0.27f}}}) {
+        for (const FrameGenSynthesisMode mode : {FrameGenSynthesisMode::kInterpolate, FrameGenSynthesisMode::kExtrapolate}) {
+            const std::string what = std::string(inset.what) +
+                                     (mode == FrameGenSynthesisMode::kInterpolate ? ", interpolated" : ", extrapolated");
+            const auto inset_run = [&](std::uint32_t index, const Tangents& newest, const Tangents& previous) {
+                std::vector<FrameGenViewSubmission> views{Submission(index, harness.format, output_format, true, 0, 0)};
+                const auto set = [](FrameGenViewGeometry& geometry, const Tangents& fov) {
+                    geometry.angle_left = std::atan(fov[0]);
+                    geometry.angle_right = std::atan(fov[1]);
+                    geometry.angle_up = std::atan(fov[2]);
+                    geometry.angle_down = std::atan(fov[3]);
+                };
+                set(views[0].request.newest, newest);
+                set(views[0].request.previous, previous);
+                Check(gpu->Execute(views, tuning, result, error), harness.name + " execute: " + error);
+                return harness.readback(g_swapchains[kOutput][0]);
+            };
+            harness.upload(g_swapchains[kSource][0], Panorama(0, inset.previous));
+            harness.upload(g_swapchains[kSource][1], Panorama(0, inset.newest));
+            tuning = {};
+            tuning.mode = mode;
+            tuning.fractions[0] = 0.5f;
+            gpu->ResetHistory();
+            inset_run(0, inset.previous, inset.previous);
+            const Pixels generated = inset_run(1, inset.newest, inset.previous);
+            const Pixels newest_inset = Panorama(0, inset.newest);
+            const Pixels previous_inset = Panorama(0, inset.previous);
+            Dump(harness.name + "-" + what + "-generated", generated);
+            Dump(harness.name + "-" + what + "-newest", newest_inset);
+            const double inset_error = MeanError(generated, newest_inset, 8, 8, kSize - 8, kSize - 8);
+            const double inset_baseline = MeanError(previous_inset, newest_inset, 8, 8, kSize - 8, kSize - 8);
+            std::cout << harness.name << " " << what << ": error " << inset_error << " vs the image moved "
+                      << inset_baseline << '\n';
+            Check(result.synthesized[0], harness.name + " " + what + ": synthesized");
+            Check(inset_error < 0.3 * inset_baseline,
+                  harness.name + " " + what + ": the inset's own movement leaked into generated frames");
+        }
+    }
 
     // 5. Capture at release gives the same result as copying in EndFrame,
     // and a capture of a different image falls back to the EndFrame copy.
