@@ -61,6 +61,10 @@ constexpr std::uint32_t kLoggedQuadWriteFailures = 3;
 constexpr const char* kHalvingDetail = "Runtime holds frames to half rate: check its smoothing";
 constexpr const char* kHalvingReason = "the runtime holds frames to half rate: check its smoothing";
 constexpr const char* kHalvingStandDown = "the runtime holds frames to half rate";
+// ...and while the runtime's display times do not advance with the time
+// (FrameGenStatus::runtime_clock_displaced).
+constexpr const char* kClockDetail = "Waiting for the runtime's frame timing to recover";
+constexpr const char* kClockReason = "waiting for the runtime's frame timing to recover";
 // A period reported as two to this many times the refresh period is not
 // taken as another refresh rate: a runtime cutting the frame rate (its
 // motion smoothing) holds frames to every second, third or fourth refresh,
@@ -70,6 +74,21 @@ constexpr std::uint32_t kMaxThrottleRefreshes = 5;
 // A longer period that is no such multiple is a new refresh rate only once
 // every period reported for this long agreed with it (a hitch is one wait).
 constexpr std::chrono::seconds kRefreshChangeAfter{1};
+// The runtime's display clock (NoteRuntimeClockLocked): displaced by a wait
+// whose display time ran more than this (or 16 refreshes, if longer) further
+// ahead than the time passed since the last, or by this many waits in a row,
+// each half a refresh or more after the last, whose display times moved less
+// than a quarter refresh; steady again after this many waits in a row over
+// this long advanced with the time between them.
+constexpr XrDuration kClockJumpFloor = 250'000'000; // 250 ms
+constexpr std::uint32_t kClockStalledWaits = 3;
+constexpr std::uint32_t kClockSteadyWaits = 30;
+constexpr std::chrono::milliseconds kClockSteadyTime{500};
+// Draining the presenter thread, the newest real frame waits at most this
+// many refreshes for its own (more than any lead), or until the runtime's
+// display clock is displaced: a refresh that never reaches it would hold the
+// game for the whole drain.
+constexpr std::uint64_t kDrainRefreshes = 24;
 
 std::string MultiplierText(std::uint32_t multiplier) {
     return std::to_string(multiplier) + "x";
@@ -472,6 +491,13 @@ void FrameGenPresenter::Stop() {
     phase_wall_ = {};
     phase_xr_ = 0;
     phase_echoed_ = false;
+    clock_last_.reset();
+    clock_displaced_ = false;
+    clock_ahead_ = 0;
+    clock_gap_ = 0;
+    clock_stalled_waits_ = 0;
+    clock_steady_waits_ = 0;
+    logged_clock_displacements_ = 0;
     auto_multiplier_ = 1;
     auto_memory_ceiling_ = kMaxMultiplier;
     memory_budget_.reset();
@@ -1403,7 +1429,9 @@ bool FrameGenPresenter::RunnableLocked() const {
 }
 
 bool FrameGenPresenter::WantsEngagementLocked() const {
-    return RunnableLocked() && EffectiveMultiplierLocked() >= 2 && !QuadDeclinedLocked();
+    // Never from display times that do not advance with the time: refreshes
+    // presented from them would never reach the game's frames.
+    return RunnableLocked() && EffectiveMultiplierLocked() >= 2 && !QuadDeclinedLocked() && !clock_displaced_;
 }
 
 FrameGenState FrameGenPresenter::IdleStateLocked() const {
@@ -1421,7 +1449,7 @@ bool FrameGenPresenter::StayThreadedLocked() const {
     const bool same_mode = !jit_ || jit_interpolate_ == (settings_.synthesis_mode == FrameGenSynthesisMode::kInterpolate);
     return started_ && gpu_ && user_enabled_ && configured_enabled_ && state_ != FrameGenState::kPaused &&
            state_ != FrameGenState::kUnavailable && EffectiveMultiplierLocked() >= 2 && same_mode &&
-           !quad_switch_pending_ && !QuadDeclinedLocked();
+           !quad_switch_pending_ && !QuadDeclinedLocked() && !clock_displaced_;
 }
 
 bool FrameGenPresenter::ThreadedEligibleLocked() const {
@@ -1470,6 +1498,18 @@ double FrameGenPresenter::StandbySecondsLocked(Clock::time_point now) const {
         seconds += std::chrono::duration<double>(now - *standby_since_).count();
     }
     return seconds;
+}
+
+std::string FrameGenPresenter::ClockSummaryLocked(const Totals& start) const {
+    // runtimeClock: times the runtime's display clock was displaced / its
+    // waits that found it so, in the window (NoteRuntimeClockLocked).
+    const std::uint64_t displaced = totals_.clock_displacements - start.clock_displacements;
+    const std::uint64_t unsteady = totals_.clock_unsteady_waits - start.clock_unsteady_waits;
+    if (!clock_displaced_ && displaced == 0 && unsteady == 0) {
+        return {};
+    }
+    return ", runtimeClock=" + std::to_string(displaced) + "/" + std::to_string(unsteady) +
+           (clock_displaced_ ? " (displaced)" : "");
 }
 
 std::string FrameGenPresenter::DynamicSummaryLocked() const {
@@ -1699,6 +1739,14 @@ void FrameGenPresenter::UpdateDynamicLocked(Clock::time_point now, XrDuration pe
         // A gap (a pause, a loading stall) is not the game's rate; a hitch is.
         if (last_app_end_ && now - *last_app_end_ > std::chrono::nanoseconds(PauseLimitLocked())) {
             dynamic_below_since_.reset();
+        }
+        // Nothing engages from display times that do not advance with the
+        // time (Varjo's after a loading stall): the game's rate is judged
+        // afresh once they do.
+        if (clock_displaced_) {
+            dynamic_below_since_.reset();
+            dynamic_reason_ = RuntimeClockTextLocked();
+            return;
         }
         // Right after a switch the game's frames carry its cost; after a
         // stand-down, nothing engages until the hold ends.
@@ -2119,7 +2167,10 @@ XrResult FrameGenPresenter::WaitFrame(XrSession session, const XrFrameWaitInfo* 
                            declined && multiplier >= 2 ? "the layer composes the quad views for a while: composed frames "
                                                          "could not be written, so frames pass straight through"
                                                        : "");
-        } else if (!engage && state_ == FrameGenState::kActive) {
+        } else if (!engage && clock_displaced_ && RunnableLocked() && multiplier >= 2) {
+            SetStateLocked(FrameGenState::kWaiting, RuntimeClockTextLocked());
+        } else if (!engage && (state_ == FrameGenState::kActive ||
+                               (state_ == FrameGenState::kWaiting && !reason_.empty() && !clock_displaced_))) {
             SetStateLocked(IdleStateLocked(), "");
         }
         sequence = ++wait_sequence_;
@@ -2132,6 +2183,8 @@ XrResult FrameGenPresenter::WaitFrame(XrSession session, const XrFrameWaitInfo* 
     std::scoped_lock lock(mutex_);
     const auto returned = Clock::now();
     NotePhaseLocked(called, returned, state->predictedDisplayTime, state->predictedDisplayPeriod);
+    NoteRuntimeClockLocked(returned, state->predictedDisplayTime, state->predictedDisplayPeriod,
+                           state->shouldRender == XR_TRUE);
     PendingFrame frame;
     frame.slot_time = state->predictedDisplayTime;
     frame.period = state->predictedDisplayPeriod;
@@ -2427,7 +2480,8 @@ XrResult FrameGenPresenter::EndFrame(XrSession session, const XrFrameEndInfo* in
                     ", demoted=" + std::to_string(demoted_) + ", captured=+" +
                     std::to_string(totals_.captured - start.captured) + " (" + std::to_string(captured_) + ")" +
                     ", pauses=" + std::to_string(totals_.pauses - start.pauses) + "/" + Number(pause_longest_ms_, 0) +
-                    ", gpuMs=" + Number(gpu_ms_, 2) + DynamicSummaryLocked() + QuadSummaryLocked(start) + ".");
+                    ", gpuMs=" + Number(gpu_ms_, 2) + ClockSummaryLocked(start) + DynamicSummaryLocked() +
+                    QuadSummaryLocked(start) + ".");
             }
             last_summary_ = now;
             summary_totals_ = totals_;
@@ -2627,6 +2681,96 @@ void FrameGenPresenter::NotePhaseLocked(Clock::time_point called, Clock::time_po
     }
 }
 
+void FrameGenPresenter::NoteRuntimeClockLocked(Clock::time_point returned, XrTime display_time, XrDuration period,
+                                               bool rendered) {
+    const std::optional<ClockWait> previous = clock_last_;
+    clock_last_ = ClockWait{returned, display_time};
+    const XrDuration refresh = refresh_period_ > 0 ? refresh_period_ : period;
+    if (!previous || !rendered || refresh <= 0) {
+        return;
+    }
+    // Display times move on about as far as the time between the waits (a
+    // runtime holding frames, or echoing a late caller's interval, moves them
+    // a whole number of refreshes, still with the time passed). Varjo's,
+    // after nothing waited for a while, ran far ahead of it, then barely moved
+    // while its waits still blocked a refresh each.
+    const XrDuration wall = std::chrono::duration_cast<std::chrono::nanoseconds>(returned - previous->returned).count();
+    const XrDuration step = display_time - previous->display_time;
+    const bool jumped = step > wall + std::max<XrDuration>(kClockJumpFloor, 16 * refresh);
+    const bool judged = wall >= refresh / 2;
+    const bool stalled = judged && step < refresh / 4;
+    clock_stalled_waits_ = stalled ? clock_stalled_waits_ + 1 : 0;
+    const bool back = step < 0;
+    if (jumped || back || clock_stalled_waits_ >= kClockStalledWaits) {
+        clock_steady_waits_ = 0;
+        ++totals_.clock_unsteady_waits;
+        if (jumped) {
+            clock_ahead_ = std::max(clock_ahead_, step - wall);
+        }
+        if (clock_displaced_) {
+            return;
+        }
+        clock_displaced_ = true;
+        clock_displaced_at_ = returned;
+        clock_gap_ = jumped ? wall : 0;
+        if (!jumped) {
+            clock_ahead_ = 0;
+        }
+        ++totals_.clock_displacements;
+        if (logger_ && logged_clock_displacements_ < kLoggedPauses) {
+            ++logged_clock_displacements_;
+            logger_->Info("Frame Generation: " + RuntimeClockTextLocked() +
+                          "; nothing engages and frames pass straight through until they advance with the time "
+                          "again (Varjo's runtime does this after a game stops its frame loop for a while, as while "
+                          "loading).");
+        }
+        return;
+    }
+    if (!clock_displaced_ || !judged) {
+        return;
+    }
+    if (stalled) {
+        clock_steady_waits_ = 0;
+        return;
+    }
+    if (clock_steady_waits_++ == 0) {
+        clock_steady_since_ = returned;
+    }
+    if (clock_steady_waits_ >= kClockSteadyWaits && returned - clock_steady_since_ >= kClockSteadyTime) {
+        clock_displaced_ = false;
+        clock_steady_waits_ = 0;
+        clock_ahead_ = 0;
+        if (logger_ && logged_clock_displacements_ <= kLoggedPauses) {
+            logger_->Info("Frame Generation: the runtime's display times advance with the time again (after " +
+                          Number(std::chrono::duration<double>(returned - clock_displaced_at_).count(), 1) + " s).");
+        }
+    }
+}
+
+std::string FrameGenPresenter::RuntimeClockTextLocked() const {
+    if (clock_ahead_ > 0) {
+        return "the runtime's display times ran " + Number(static_cast<double>(clock_ahead_) / 1e9, 1) +
+               " s ahead of the time that passed" +
+               (clock_gap_ > 0 ? " (after no frame for " + Number(static_cast<double>(clock_gap_) / 1e9, 1) + " s)"
+                               : std::string()) +
+               " and barely advance until the time catches up";
+    }
+    return "the runtime's display times stopped advancing with the time";
+}
+
+XrDuration FrameGenPresenter::GameGridLocked() const {
+    // A period reported as a multiple of the refresh period for a few
+    // refreshes (Varjo's runtime holds frames to every second refresh for a
+    // few after a late submission; SteamVR with Pimax's driver echoes a late
+    // caller's interval) would time the game's frames that many times further
+    // ahead, past what the real frames kept reach, and later frames are never
+    // timed earlier again (last_target_time_, last_returned_time_). A runtime
+    // holding frames to the multiple for a while (runtime_halving_) times
+    // them by it.
+    const XrDuration reported = slot_period_ > 0 ? slot_period_ : std::max<XrDuration>(last_period_, 1);
+    return runtime_halving_ ? reported : SubmitSpacingLocked(reported);
+}
+
 XrDuration FrameGenPresenter::SubmitSpacingLocked(XrDuration period) const {
     // A runtime may report a longer period than the refresh period without
     // holding frames to it: SteamVR with Pimax's headset driver reports a
@@ -2724,7 +2868,10 @@ XrResult FrameGenPresenter::NextSlot(XrSession session, const FrameGenRuntimeCal
     }
     {
         std::scoped_lock lock(mutex_);
-        NotePhaseLocked(called, Clock::now(), state.predictedDisplayTime, state.predictedDisplayPeriod);
+        const auto returned = Clock::now();
+        NotePhaseLocked(called, returned, state.predictedDisplayTime, state.predictedDisplayPeriod);
+        NoteRuntimeClockLocked(returned, state.predictedDisplayTime, state.predictedDisplayPeriod,
+                               state.shouldRender == XR_TRUE);
     }
     PaceSubmission(state.predictedDisplayTime, period);
     XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
@@ -4329,6 +4476,7 @@ bool FrameGenPresenter::StopCompositorLocked(std::unique_lock<std::mutex>& lock,
 
 void FrameGenPresenter::ExitThreadedLocked(std::unique_lock<std::mutex>& lock) {
     compositor_drain_ = true;
+    drain_started_slot_ = slot_index_;
     // This thread also ends frames: one it has not started ending would only
     // end after this wait returns, so it gives up its slot.
     if (std::this_thread::get_id() == end_thread_) {
@@ -4620,7 +4768,8 @@ std::optional<XrResult> FrameGenPresenter::ThreadedWaitLocked(std::unique_lock<s
             }
         }
     }
-    const XrDuration period = slot_period_ > 0 ? slot_period_ : std::max<XrDuration>(last_period_, 1);
+    // The game's frames are timed on the refresh grid (GameGridLocked).
+    const XrDuration period = GameGridLocked();
     const double period_ms = static_cast<double>(period) / 1e6;
     const bool interpolate = settings_.synthesis_mode == FrameGenSynthesisMode::kInterpolate;
     // Interpolating just in time, a frame is shown after the frames between
@@ -4733,7 +4882,7 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
         slack_ms = std::chrono::duration<double, std::milli>(deadline - entered).count();
     }
     const XrTime previous_time = last_real_.display_time;
-    const XrDuration period = slot_period_ > 0 ? slot_period_ : last_period_;
+    const XrDuration period = GameGridLocked();
     // When the runtime releases the wait of the slot shown at `time`.
     auto due = [&](XrTime time) {
         return phase_wall_ != Clock::time_point{} && time > phase_xr_
@@ -5064,7 +5213,7 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
             ", runtimeHalved=" + std::to_string(delta(&Totals::halving_halved)) + "/" +
             std::to_string(delta(&Totals::halving_measured)) + (runtime_halving_ ? " (halving)" : "") +
             ", pauses=" + std::to_string(delta(&Totals::pauses)) + "/" + Number(pause_longest_ms_, 0) +
-            DynamicSummaryLocked() + QuadSummaryLocked(start) + ".");
+            ClockSummaryLocked(start) + DynamicSummaryLocked() + QuadSummaryLocked(start) + ".");
     }
     last_summary_ = now;
     summary_totals_ = totals_;
@@ -5224,7 +5373,7 @@ XrResult FrameGenPresenter::ThreadedEndJit(const XrFrameEndInfo& info, const Thr
                           ", which the presenter thread cannot repeat between real frames.");
         }
     }
-    const XrDuration period = slot_period_ > 0 ? slot_period_ : std::max<XrDuration>(last_period_, 1);
+    const XrDuration period = GameGridLocked();
     // When it is needed: extrapolating, in its own refresh; interpolating,
     // from the refresh after the newest real frame's (its own, the first),
     // for the frames between. Measured, then written on the GPU, by when
@@ -5836,12 +5985,15 @@ void FrameGenPresenter::CompositorLoop() {
     const auto forever = Clock::time_point::max();
     // Draining, every frame in flight is presented, and just in time every
     // real frame kept until its own refresh (the frame thread waits for it):
-    // the newest is shown before frames go straight to the runtime again.
+    // the newest is shown before frames go straight to the runtime again. Not
+    // past kDrainRefreshes refreshes, nor while the runtime's display times
+    // do not advance with the time: refreshes that never reach the newest
+    // frame's would hold the game for the whole drain.
     auto drained = [&] {
-        return threaded_frames_.empty() &&
-               (!jit_ || (!generation_pending_ &&
-                          (jit_frames_.empty() ||
-                           jit_frames_.back().time <= slot_time_ + SubmitSpacingLocked(slot_period_) / 2)));
+        const bool reached = jit_frames_.empty() ||
+                             jit_frames_.back().time <= slot_time_ + SubmitSpacingLocked(slot_period_) / 2 ||
+                             clock_displaced_ || slot_index_ >= drain_started_slot_ + kDrainRefreshes;
+        return threaded_frames_.empty() && (!jit_ || (!generation_pending_ && reached));
     };
     while (!compositor_stop_ && !(compositor_drain_ && drained())) {
         // A runtime frame the application began before the switch owns the
@@ -5879,6 +6031,8 @@ void FrameGenPresenter::CompositorLoop() {
             break;
         }
         NotePhaseLocked(called, returned, frame_state.predictedDisplayTime, frame_state.predictedDisplayPeriod);
+        NoteRuntimeClockLocked(returned, frame_state.predictedDisplayTime, frame_state.predictedDisplayPeriod,
+                               frame_state.shouldRender == XR_TRUE);
         const std::uint64_t slot = ++slot_index_;
         slot_time_ = frame_state.predictedDisplayTime;
         slot_period_ = frame_state.predictedDisplayPeriod;
@@ -6354,6 +6508,8 @@ FrameGenStatus FrameGenPresenter::Status() const {
     status.dynamic_stand_downs = dynamic_stand_downs_;
     status.dynamic_probes = dynamic_probes_;
     status.runtime_halving = runtime_halving_;
+    status.runtime_clock_displaced = clock_displaced_;
+    status.runtime_clock_displacements = totals_.clock_displacements;
     status.threaded = compositor_running_;
     status.lead_slots = lead_slots_;
     status.lead_floor = lead_floor_;
@@ -6445,6 +6601,12 @@ FrameGenOsdText DescribeFrameGen(const FrameGenStatus& status, bool started) {
             text.detail = "The game runs at " + Number(status.app_fps, 0) + " fps";
             text.compact = std::string("Standby") + kOsd + game;
             text.reason = rate + kApp + game;
+            if (status.runtime_clock_displaced) {
+                // Nothing engages until the runtime's display times advance
+                // with the time again (Varjo's, after a loading stall).
+                text.detail = kClockDetail;
+                text.reason += kApp + std::string(kClockReason);
+            }
             return halving(text);
         }
         // Distinct frames: a frame shown twice (generation or the game ran
@@ -6466,9 +6628,9 @@ FrameGenOsdText DescribeFrameGen(const FrameGenStatus& status, bool started) {
     case FrameGenState::kWaiting:
         text.badge = "WAIT";
         text.row = "Starting";
-        text.detail = "Waiting for steady frames";
+        text.detail = status.runtime_clock_displaced ? kClockDetail : "Waiting for steady frames";
         text.compact = "Starting";
-        text.reason = status.reason;
+        text.reason = status.runtime_clock_displaced ? std::string(kClockReason) : status.reason;
         return text;
     case FrameGenState::kPaused:
         text.badge = "PAUSED";
