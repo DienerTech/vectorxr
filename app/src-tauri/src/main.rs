@@ -10,6 +10,7 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 mod debug_sources;
+mod gpu_capabilities;
 mod input_devices;
 mod openxr_layers;
 
@@ -112,6 +113,33 @@ where
     };
     bindings.retain(|binding| !matches!(binding, InputBinding::None));
     Ok(bindings)
+}
+
+// A toggle's bindings (any one of them acts; one per device, say a HOTAS's
+// and a HOSAS's) as a config file holds them: one, or none, under the single
+// legacy key, which layers from before binding lists also read; two or more
+// under the plural key alone. Neither key present means the toggle's default
+// (`absent`), as it does to the layer.
+fn normalize_toggle_bindings(
+    single: &mut Option<InputBinding>,
+    list: &mut Option<Vec<InputBinding>>,
+    absent: impl FnOnce() -> InputBinding,
+) {
+    let present = single.is_some() || list.is_some();
+    let mut bindings: Vec<InputBinding> = single
+        .take()
+        .into_iter()
+        .chain(list.take().unwrap_or_default())
+        .filter(|binding| !matches!(binding, InputBinding::None))
+        .collect();
+    if !present {
+        bindings = vec![absent()];
+    }
+    if bindings.len() <= 1 {
+        *single = Some(bindings.pop().unwrap_or(InputBinding::None));
+    } else {
+        *list = Some(bindings);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -281,6 +309,8 @@ struct OsdSettings {
     show_modules: bool,
     show_clock: bool,
     show_pivot: bool,
+    show_framegen: bool,
+    show_framegen_fps: bool,
     compact_show_runtime: bool,
     compact_show_brand: bool,
     compact_show_app: bool,
@@ -288,13 +318,35 @@ struct OsdSettings {
     compact_show_clock: bool,
     compact_show_turbo: bool,
     compact_show_pivot: bool,
+    compact_show_framegen: bool,
     clock_format: String,
     body_order: Vec<String>,
     custom_color: String,
     custom_presets: Vec<serde_json::Value>,
     accent: String,
-    toggle_binding: InputBinding,
-    cycle_binding: InputBinding,
+    // Toggle binding lists (normalize_toggle_bindings); absent: the defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    toggle_binding: Option<InputBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    toggle_bindings: Option<Vec<InputBinding>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cycle_binding: Option<InputBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cycle_bindings: Option<Vec<InputBinding>>,
+}
+
+fn default_osd_toggle_binding() -> InputBinding {
+    InputBinding::Keyboard {
+        chord: vec!["Ctrl".into(), "Alt".into(), "F10".into()],
+        sound: SoundFeedback::default(),
+    }
+}
+
+fn default_osd_cycle_binding() -> InputBinding {
+    InputBinding::Keyboard {
+        chord: vec!["Ctrl".into(), "Alt".into(), "F11".into()],
+        sound: SoundFeedback::default(),
+    }
 }
 
 impl Default for OsdSettings {
@@ -321,6 +373,8 @@ impl Default for OsdSettings {
             show_modules: true,
             show_clock: true,
             show_pivot: true,
+            show_framegen: true,
+            show_framegen_fps: true,
             compact_show_runtime: true,
             compact_show_brand: true,
             compact_show_app: true,
@@ -328,13 +382,22 @@ impl Default for OsdSettings {
             compact_show_clock: true,
             compact_show_turbo: false,
             compact_show_pivot: false,
+            compact_show_framegen: false,
             clock_format: "24".into(),
-            body_order: vec!["graph".into(), "turbo".into(), "pivot".into(), "modules".into()],
+            body_order: vec![
+                "graph".into(),
+                "turbo".into(),
+                "framegen".into(),
+                "pivot".into(),
+                "modules".into(),
+            ],
             custom_color: "#51ddbd".into(),
             custom_presets: vec![],
             accent: "teal".into(),
-            toggle_binding: binding("F10"),
-            cycle_binding: binding("F11"),
+            toggle_binding: Some(binding("F10")),
+            toggle_bindings: None,
+            cycle_binding: Some(binding("F11")),
+            cycle_bindings: None,
         }
     }
 }
@@ -424,17 +487,24 @@ struct DepthXRModuleConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DepthXRBindings {
-    #[serde(default = "default_depth_toggle_binding")]
-    toggle_enabled: InputBinding,
-    #[serde(default = "default_depth_toggle_binding")]
-    toggle_anchor: InputBinding,
+    // Toggle binding lists (normalize_toggle_bindings).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    toggle_enabled: Option<InputBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    toggle_enabled_bindings: Option<Vec<InputBinding>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    toggle_anchor: Option<InputBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    toggle_anchor_bindings: Option<Vec<InputBinding>>,
 }
 
 impl Default for DepthXRBindings {
     fn default() -> Self {
         Self {
-            toggle_enabled: default_depth_toggle_binding(),
-            toggle_anchor: default_depth_toggle_binding(),
+            toggle_enabled: Some(default_depth_toggle_binding()),
+            toggle_enabled_bindings: None,
+            toggle_anchor: Some(default_depth_toggle_binding()),
+            toggle_anchor_bindings: None,
         }
     }
 }
@@ -732,16 +802,21 @@ struct TurboModuleConfig {
     interrupted_session_recovery: bool,
     #[serde(default = "default_false")]
     enabled: bool,
-    #[serde(default = "default_activation_binding")]
-    toggle_binding: InputBinding,
+    // Toggle binding lists (normalize_toggle_bindings), as is metrics_binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    toggle_binding: Option<InputBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    toggle_bindings: Option<Vec<InputBinding>>,
     #[serde(default = "default_turbo_pacing_mode")]
     pacing_mode: String,
     #[serde(default)]
     runtime_pins: std::collections::BTreeMap<String, String>,
     #[serde(default = "default_turbo_metrics_mode")]
     metrics_mode: String,
-    #[serde(default = "default_activation_binding")]
-    metrics_binding: InputBinding,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    metrics_binding: Option<InputBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    metrics_bindings: Option<Vec<InputBinding>>,
     #[serde(default)]
     profiles: Vec<TurboProfileConfig>,
 }
@@ -777,12 +852,122 @@ impl Default for TurboModuleConfig {
         Self {
             interrupted_session_recovery: true,
             enabled: false,
-            toggle_binding: default_activation_binding(),
+            toggle_binding: Some(default_activation_binding()),
+            toggle_bindings: None,
             experimental: TurboExperimentalSettings::default(),
             pacing_mode: default_turbo_pacing_mode(),
             runtime_pins: std::collections::BTreeMap::new(),
             metrics_mode: default_turbo_metrics_mode(),
-            metrics_binding: default_activation_binding(),
+            metrics_binding: Some(default_activation_binding()),
+            metrics_bindings: None,
+            profiles: Vec::new(),
+        }
+    }
+}
+
+fn default_framegen_synthesis_mode() -> String {
+    "interpolate".into()
+}
+
+fn default_framegen_flow_quality() -> String {
+    "balanced".into()
+}
+
+fn default_framegen_motion_estimation() -> String {
+    "shader".into()
+}
+
+fn default_framegen_frame_multiplier() -> String {
+    "dynamic".into()
+}
+
+fn default_framegen_artifact_suppression() -> i64 {
+    50
+}
+
+fn default_framegen_motion_limit_percent() -> i64 {
+    10
+}
+
+fn default_framegen_diagnostic_view() -> String {
+    "off".into()
+}
+
+// Frame Generation tuning. Older layers reject unknown keys (current ones
+// ignore them with a warning), so these six fields are the complete
+// serialized shape.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FrameGenSettings {
+    #[serde(default = "default_framegen_synthesis_mode")]
+    synthesis_mode: String,
+    #[serde(default = "default_framegen_flow_quality")]
+    flow_quality: String,
+    // "shader" or "hardware" (NVIDIA's optical flow accelerator, experimental).
+    #[serde(default = "default_framegen_motion_estimation")]
+    motion_estimation: String,
+    // "auto", "dynamic", "2x", "3x" or "4x": headset frames per real application frame.
+    #[serde(default = "default_framegen_frame_multiplier")]
+    frame_multiplier: String,
+    #[serde(default = "default_framegen_artifact_suppression")]
+    artifact_suppression: i64,
+    #[serde(default = "default_framegen_motion_limit_percent")]
+    motion_limit_percent: i64,
+}
+
+impl Default for FrameGenSettings {
+    fn default() -> Self {
+        Self {
+            synthesis_mode: default_framegen_synthesis_mode(),
+            flow_quality: default_framegen_flow_quality(),
+            motion_estimation: default_framegen_motion_estimation(),
+            frame_multiplier: default_framegen_frame_multiplier(),
+            artifact_suppression: default_framegen_artifact_suppression(),
+            motion_limit_percent: default_framegen_motion_limit_percent(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FrameGenProfileConfig {
+    #[serde(default)]
+    name: String,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default)]
+    application_ids: Vec<String>,
+    #[serde(default)]
+    settings: FrameGenSettings,
+}
+
+// Optional in older configs: a missing `framegen` block resolves to Off.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FrameGenModuleConfig {
+    #[serde(default = "default_false")]
+    enabled: bool,
+    // A toggle binding list (normalize_toggle_bindings).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    toggle_binding: Option<InputBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    toggle_bindings: Option<Vec<InputBinding>>,
+    #[serde(default = "default_framegen_diagnostic_view")]
+    diagnostic_view: String,
+    #[serde(default)]
+    defaults: FrameGenSettings,
+    #[serde(default)]
+    profiles: Vec<FrameGenProfileConfig>,
+}
+
+impl Default for FrameGenModuleConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            toggle_binding: Some(default_activation_binding()),
+            toggle_bindings: None,
+            diagnostic_view: default_framegen_diagnostic_view(),
+            defaults: FrameGenSettings::default(),
             profiles: Vec::new(),
         }
     }
@@ -799,6 +984,8 @@ struct VectorXRModules {
     quadviews: QuadViewsModuleConfig,
     #[serde(default)]
     turbo: TurboModuleConfig,
+    #[serde(default)]
+    framegen: FrameGenModuleConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1025,6 +1212,16 @@ struct RuntimeState {
     turbo_state: String,
     #[serde(default)]
     turbo_reason: String,
+    // "off" | "waiting" | "active" | "paused" | "unavailable"; empty from
+    // layers without Frame Generation.
+    #[serde(default)]
+    framegen_state: String,
+    #[serde(default)]
+    framegen_reason: String,
+    // "in-use" | "checking" | "not-sent" | "not-readable" | "empty" |
+    // "unusable"; empty before generated frames and from older layers.
+    #[serde(default)]
+    framegen_depth: String,
     #[serde(default)]
     quadviews_diagnostic_visualization: bool,
 }
@@ -1199,6 +1396,18 @@ fn normalize_config(mut config: VectorXRConfig) -> VectorXRConfig {
 
     config.version = 3;
 
+    let osd = &mut config.core.osd;
+    normalize_toggle_bindings(&mut osd.toggle_binding, &mut osd.toggle_bindings, default_osd_toggle_binding);
+    normalize_toggle_bindings(&mut osd.cycle_binding, &mut osd.cycle_bindings, default_osd_cycle_binding);
+    let depth = &mut config.modules.depthxr.bindings;
+    normalize_toggle_bindings(&mut depth.toggle_enabled, &mut depth.toggle_enabled_bindings, default_depth_toggle_binding);
+    normalize_toggle_bindings(&mut depth.toggle_anchor, &mut depth.toggle_anchor_bindings, default_depth_toggle_binding);
+    let turbo = &mut config.modules.turbo;
+    normalize_toggle_bindings(&mut turbo.toggle_binding, &mut turbo.toggle_bindings, default_activation_binding);
+    normalize_toggle_bindings(&mut turbo.metrics_binding, &mut turbo.metrics_bindings, default_activation_binding);
+    let framegen = &mut config.modules.framegen;
+    normalize_toggle_bindings(&mut framegen.toggle_binding, &mut framegen.toggle_bindings, default_activation_binding);
+
     for application in &mut config.applications {
         application.enabled = true;
         if application.id.trim().is_empty() {
@@ -1291,6 +1500,21 @@ fn normalize_config(mut config: VectorXRConfig) -> VectorXRConfig {
         }
 
         profile.r#match = None;
+    }
+
+    for profile in &mut config.modules.framegen.profiles {
+        if profile.name.trim().is_empty() {
+            let first_application = profile.application_ids.first().and_then(|application_id| {
+                config
+                    .applications
+                    .iter()
+                    .find(|application| &application.id == application_id)
+            });
+
+            profile.name = first_application
+                .map(|application| application.name.clone())
+                .unwrap_or_else(|| "New Profile".into());
+        }
     }
 
     config
@@ -1797,6 +2021,20 @@ fn reset_stored_data() -> Result<ResetStoredDataEnvelope, String> {
         seen_apps_path: seen_apps_path.to_string_lossy().into_owned(),
         config,
     })
+}
+
+// Whether any graphics card has NVIDIA's optical flow hardware (Frame
+// Generation's motion source), checked once, off the UI thread.
+#[tauri::command]
+async fn load_gpu_capabilities() -> gpu_capabilities::GpuCapabilities {
+    tauri::async_runtime::spawn_blocking(gpu_capabilities::load)
+        .await
+        .unwrap_or_else(|error| gpu_capabilities::GpuCapabilities {
+            probed: false,
+            adapters: Vec::new(),
+            optical_flow: false,
+            error: format!("the graphics card check failed ({error})"),
+        })
 }
 
 #[tauri::command]
@@ -2637,11 +2875,15 @@ mod tests {
         let legacy: super::CoreConfig = serde_json::from_str(r#"{"enabled":true,"logLevel":"info"}"#).unwrap();
         assert!(!legacy.osd.enabled);
         assert_eq!(legacy.osd.update_hz, 5);
+        assert!(legacy.osd.show_framegen && !legacy.osd.compact_show_framegen);
+        assert!(legacy.osd.show_framegen_fps);
+        assert_eq!(legacy.osd.body_order, ["graph", "turbo", "framegen", "pivot", "modules"]);
         let input = serde_json::json!({"enabled":true,"compact":true,"visibleOnStart":false,
             "horizontalDegrees":-30.0,"verticalDegrees":15.0,"distanceMeters":2.0,"scale":75.0,
             "opacity":70,"updateHz":10,"showGraph":false,"showRuntime":false,"showTurbo":false,
             "showModules":false,"showClock":false,"accent":"blue","toggleBinding":{"type":"none"},
-            "showPivot":false,"clockFormat":"12","customColor":"#aB12Ef","bodyOrder":["pivot","turbo","modules","graph"],
+            "showPivot":false,"clockFormat":"12","customColor":"#aB12Ef","bodyOrder":["pivot","framegen","turbo","modules","graph"],
+            "showFramegen":false,"compactShowFramegen":true,"showFramegenFps":false,
             "compactShowRuntime":true,"compactShowClock":true,"compactShowTurbo":true,"compactShowPivot":true,
             "compactShowBrand":false,"compactShowApp":false,"compactMetrics":"fps",
             "showBrand":false,"showApp":false,
@@ -2814,6 +3056,87 @@ mod tests {
     }
 
     #[test]
+    fn framegen_defaults_and_round_trip() {
+        let defaults: super::FrameGenModuleConfig = serde_json::from_str("{}").unwrap();
+        assert!(!defaults.enabled);
+        assert!(defaults.toggle_binding.is_none() && defaults.toggle_bindings.is_none());
+        assert_eq!(defaults.diagnostic_view, "off");
+        assert_eq!(defaults.defaults.synthesis_mode, "interpolate");
+        assert_eq!(defaults.defaults.flow_quality, "balanced");
+        assert_eq!(defaults.defaults.motion_estimation, "shader");
+        assert_eq!(defaults.defaults.frame_multiplier, "dynamic");
+        assert_eq!(defaults.defaults.artifact_suppression, 50);
+        assert_eq!(defaults.defaults.motion_limit_percent, 10);
+        assert!(defaults.profiles.is_empty());
+
+        // Older layers reject unknown keys (current ones ignore them with a
+        // warning), so the saved shape must match exactly.
+        let input = serde_json::json!({
+            "enabled": true,
+            "toggleBinding": { "type": "keyboard", "chord": ["Ctrl", "F7"] },
+            "diagnosticView": "tint",
+            "defaults": {
+                "synthesisMode": "extrapolate", "flowQuality": "quality", "motionEstimation": "hardware",
+                "frameMultiplier": "4x", "artifactSuppression": 80, "motionLimitPercent": 4
+            },
+            "profiles": [{
+                "name": "DCS", "enabled": false, "applicationIds": ["dcs"],
+                "settings": {
+                    "synthesisMode": "interpolate", "flowQuality": "performance", "motionEstimation": "shader",
+                    "frameMultiplier": "3x", "artifactSuppression": 0, "motionLimitPercent": 25
+                }
+            }]
+        });
+        let config: super::FrameGenModuleConfig = serde_json::from_value(input.clone()).unwrap();
+        assert_eq!(serde_json::to_value(config).unwrap(), input);
+
+        // Settings saved without a frame multiplier load as Dynamic and save it.
+        let older: super::FrameGenSettings = serde_json::from_value(serde_json::json!({
+            "synthesisMode": "extrapolate", "flowQuality": "quality",
+            "artifactSuppression": 80, "motionLimitPercent": 4
+        }))
+        .unwrap();
+        assert_eq!(older.frame_multiplier, "dynamic");
+        assert_eq!(older.motion_estimation, "shader");
+        assert_eq!(serde_json::to_value(older).unwrap()["frameMultiplier"], "dynamic");
+        assert_eq!(
+            serde_json::to_value(super::FrameGenSettings::default()).unwrap()["frameMultiplier"],
+            "dynamic"
+        );
+
+        // Configs written before Frame Generation load with it off and save the defaults.
+        let old: super::VectorXRConfig = serde_json::from_value(serde_json::json!({
+            "version": 3,
+            "core": { "enabled": true, "logLevel": "info", "logRetentionFiles": 7, "trackSeenApps": true },
+            "applications": [{ "id": "dcs", "name": "DCS", "enabled": true, "match": { "exe": "DCS.exe" } }],
+            "modules": { "turbo": { "enabled": true } }
+        }))
+        .unwrap();
+        assert!(!old.modules.framegen.enabled);
+        assert!(old.modules.turbo.enabled);
+        let saved = serde_json::to_value(super::normalize_config(old)).unwrap();
+        assert_eq!(
+            saved["modules"]["framegen"],
+            serde_json::to_value(super::FrameGenModuleConfig::default()).unwrap()
+        );
+        assert_eq!(saved["modules"]["framegen"]["toggleBinding"]["type"], "none");
+        assert_eq!(saved["core"]["osd"]["showFramegen"], true);
+        assert_eq!(saved["core"]["osd"]["compactShowFramegen"], false);
+        assert_eq!(saved["core"]["osd"]["showFramegenFps"], true);
+
+        let unnamed: super::VectorXRConfig = serde_json::from_value(serde_json::json!({
+            "applications": [{ "id": "dcs", "name": "DCS", "enabled": true, "match": { "exe": "DCS.exe" } }],
+            "modules": { "framegen": { "profiles": [{ "name": " ", "applicationIds": ["dcs"] }] } }
+        }))
+        .unwrap();
+        let profile = &super::normalize_config(unnamed).modules.framegen.profiles[0];
+        assert_eq!(profile.name, "DCS");
+        assert!(profile.enabled);
+        assert_eq!(profile.settings.flow_quality, "balanced");
+        assert_eq!(profile.settings.frame_multiplier, "dynamic");
+    }
+
+    #[test]
     fn turbo_recovery_defaults_on_and_preserves_opt_out() {
         let old: super::TurboModuleConfig =
             serde_json::from_value(serde_json::json!({ "enabled": true })).unwrap();
@@ -2860,11 +3183,19 @@ mod tests {
         value["state"]["osdMessage"] = "Visible".into();
         value["state"]["turboState"] = "recovery-disabled".into();
         value["state"]["turboReason"] = "Previous interruption".into();
+        value["state"]["framegenState"] = "unavailable".into();
+        value["state"]["framegenReason"] = "Runtime refresh rate unknown".into();
+        value["state"]["framegenDepth"] = "empty".into();
         value["quadviewsDimensions"] = serde_json::json!([{"width": 1000, "height": 900, "allocatedWidth": 1200, "allocatedHeight": 1000}]);
         let current: super::RuntimeStatusDocument = serde_json::from_value(value).unwrap();
         assert_eq!(current.state.turbo_state, "recovery-disabled");
         assert!(current.capabilities.osd && current.state.osd_visible && current.state.osd_compact);
         assert_eq!(current.state.osd_message,"Visible");
+        assert_eq!(current.state.framegen_state, "unavailable");
+        assert_eq!(current.state.framegen_reason, "Runtime refresh rate unknown");
+        assert!(old.state.framegen_state.is_empty() && old.state.framegen_reason.is_empty());
+        assert_eq!(current.state.framegen_depth, "empty");
+        assert!(old.state.framegen_depth.is_empty());
         assert_eq!(current.quadviews_dimensions[0].allocated_width, 1200);
     }
 
@@ -3020,6 +3351,21 @@ mod tests {
     }
 
     #[test]
+    fn expanded_pivot_settings_survive_the_config_save_round_trip() {
+        let original = serde_json::json!({
+            "applyMotionToSnapViews": true, "deadzoneTransitionDegrees": 4.0,
+            "pitchDeadzoneTransitionDegrees": 2.0,
+            "yawLeft": { "deadzoneTransitionDegrees": 7.0 },
+            "positionAssist": {"enabled": true, "advancedDirections": true,
+                "yaw": {"rightCm": 10.0, "upCm": 4.0, "startAngleDegrees": 15.0, "fullAngleDegrees": 60.0},
+                "pitchUp": {"upCm": 12.0, "forwardCm": -5.0}}
+        });
+        let settings: PivotXRSettings = serde_json::from_value(original.clone()).unwrap();
+        let saved = serde_json::to_value(settings).unwrap();
+        for (key, value) in original.as_object().unwrap() { assert_eq!(&saved[key], value, "{key}"); }
+    }
+
+    #[test]
     fn pivot_step_settings_survive_the_config_save_round_trip() {
         let settings: PivotXRSettings = serde_json::from_value(serde_json::json!({
             "responseMode": "stepped",
@@ -3154,6 +3500,66 @@ mod tests {
         assert_eq!(serialized["toggleAnchor"]["type"], "keyboard");
         assert_eq!(serialized["toggleAnchor"]["chord"][0], "F9");
     }
+
+    fn saved(config: serde_json::Value) -> serde_json::Value {
+        let config: super::VectorXRConfig = serde_json::from_value(config).expect("config should deserialize");
+        serde_json::to_value(super::normalize_config(config)).expect("config should serialize")
+    }
+
+    // A toggle keeps one binding, or none, under its single legacy key, which
+    // layers from before binding lists read too; two or more go under the
+    // plural key alone.
+    #[test]
+    fn toggle_binding_lists_are_written_so_older_layers_read_single_bindings() {
+        let hotas = serde_json::json!({ "type": "device", "deviceGuid": "{1}", "inputPath": "button-23" });
+        let hosas = serde_json::json!({ "type": "device", "deviceGuid": "{2}", "inputPath": "button-5" });
+        let output = saved(serde_json::json!({
+            "version": 3,
+            "core": { "osd": { "toggleBindings": [hotas, hosas], "cycleBindings": [] } },
+            "applications": [],
+            "modules": {
+                "depthxr": { "bindings": { "toggleEnabledBindings": [hotas], "toggleAnchorBindings": [hotas, hosas] } },
+                "turbo": { "toggleBindings": [], "metricsBindings": [hosas] },
+                "framegen": { "toggleBindings": [hotas, hosas] }
+            }
+        }));
+        let osd = &output["core"]["osd"];
+        assert_eq!(osd["toggleBindings"].as_array().map(Vec::len), Some(2));
+        assert!(osd.get("toggleBinding").is_none());
+        assert_eq!(osd["cycleBinding"]["type"], "none", "an emptied list is written as none, not left to the default");
+        assert!(osd.get("cycleBindings").is_none());
+        let depth = &output["modules"]["depthxr"]["bindings"];
+        assert_eq!(depth["toggleEnabled"]["inputPath"], "button-23");
+        assert!(depth.get("toggleEnabledBindings").is_none());
+        assert_eq!(depth["toggleAnchorBindings"][1]["inputPath"], "button-5");
+        assert!(depth.get("toggleAnchor").is_none());
+        let turbo = &output["modules"]["turbo"];
+        assert_eq!(turbo["toggleBinding"]["type"], "none");
+        assert_eq!(turbo["metricsBinding"]["inputPath"], "button-5");
+        assert!(turbo.get("toggleBindings").is_none() && turbo.get("metricsBindings").is_none());
+        let framegen = &output["modules"]["framegen"];
+        assert_eq!(framegen["toggleBindings"].as_array().map(Vec::len), Some(2));
+        assert!(framegen.get("toggleBinding").is_none());
+    }
+
+    #[test]
+    fn toggles_without_either_key_keep_their_defaults() {
+        let output = saved(serde_json::json!({ "version": 3, "core": { "osd": {} }, "applications": [], "modules": {} }));
+        assert_eq!(output["core"]["osd"]["toggleBinding"]["chord"], serde_json::json!(["Ctrl", "Alt", "F10"]));
+        assert_eq!(output["core"]["osd"]["cycleBinding"]["chord"], serde_json::json!(["Ctrl", "Alt", "F11"]));
+        assert_eq!(output["modules"]["depthxr"]["bindings"]["toggleEnabled"]["type"], "none");
+        assert_eq!(output["modules"]["framegen"]["toggleBinding"]["type"], "none");
+        // A legacy binding beside a list (a hand edit) joins it.
+        let merged = saved(serde_json::json!({
+            "version": 3, "applications": [],
+            "modules": { "turbo": {
+                "toggleBinding": { "type": "keyboard", "chord": ["F7"] },
+                "toggleBindings": [{ "type": "keyboard", "chord": ["F8"] }]
+            } }
+        }));
+        assert_eq!(merged["modules"]["turbo"]["toggleBindings"].as_array().map(Vec::len), Some(2));
+        assert!(merged["modules"]["turbo"].get("toggleBinding").is_none());
+    }
 }
 
 fn main() {
@@ -3184,6 +3590,7 @@ fn main() {
             clear_turbo_fault_logs,
             load_debug_sources,
             set_runtime_quadviews_diagnostic_visualization,
+            load_gpu_capabilities,
             list_input_devices,
             capture_device_binding,
             cancel_device_binding_capture,

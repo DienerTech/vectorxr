@@ -46,9 +46,27 @@ XrResult XRAPI_PTR Acquire(XrSwapchain, const XrSwapchainImageAcquireInfo*, std:
 XrResult XRAPI_PTR Wait(XrSwapchain, const XrSwapchainImageWaitInfo* info) { ++waits; Check(info->timeout==0,"OSD blocked the frame thread"); if(timeouts>0) { --timeouts; return XR_TIMEOUT_EXPIRED; } return XR_SUCCESS; }
 XrResult XRAPI_PTR Release(XrSwapchain, const XrSwapchainImageReleaseInfo*) { ++releases; return XR_SUCCESS; }
 XrResult XRAPI_PTR Destroy(XrSwapchain) { ++destroys; for(auto* texture:textures) texture->Release(); textures.clear(); return XR_SUCCESS; }
+bool fail_local{};
+int local_creates{};
 XrResult XRAPI_PTR Space(XrSession, const XrReferenceSpaceCreateInfo* info, XrSpace* space) {
-    Check(info->referenceSpaceType==XR_REFERENCE_SPACE_TYPE_VIEW && info->poseInReferenceSpace.orientation.w==1,"OSD must use an identity VIEW space");
+    Check(info->poseInReferenceSpace.orientation.w==1,"OSD spaces must have an identity pose");
+    if (info->referenceSpaceType==XR_REFERENCE_SPACE_TYPE_LOCAL) {
+        ++local_creates; if (fail_local) return XR_ERROR_REFERENCE_SPACE_UNSUPPORTED;
+        ++spaces; *space=reinterpret_cast<XrSpace>(4); return XR_SUCCESS;
+    }
+    Check(info->referenceSpaceType==XR_REFERENCE_SPACE_TYPE_VIEW,"OSD must use a VIEW space");
     ++spaces; *space=reinterpret_cast<XrSpace>(3); return XR_SUCCESS;
+}
+// The head, 90 degrees to the left (about +Y), at (1, 2, 3).
+XrPosef head_pose{{0,0.70710678f,0,0.70710678f},{1,2,3}};
+bool head_valid{true};
+int locates{};
+XrTime located_at{};
+XrResult XRAPI_PTR Locate(XrSpace space, XrSpace base, XrTime time, XrSpaceLocation* location) {
+    Check(space==reinterpret_cast<XrSpace>(3) && base==reinterpret_cast<XrSpace>(4),"The head was not located in the anchor space");
+    ++locates; located_at=time;
+    location->locationFlags=head_valid?XR_SPACE_LOCATION_POSITION_VALID_BIT|XR_SPACE_LOCATION_ORIENTATION_VALID_BIT:0;
+    location->pose=head_pose; return XR_SUCCESS;
 }
 XrResult XRAPI_PTR DestroySpace(XrSpace) { --spaces; return XR_SUCCESS; }
 const XrCompositionLayerBaseHeader* WaitVisible(OsdRenderer& renderer, const XrFrameEndInfo& frame) {
@@ -122,6 +140,56 @@ int main(int argc, char** argv) {
             Check(RasterizeOsd(choices,true,Snapshot(),stats,false).pixels==compact_before.pixels,"Expanded header choices changed compact output");
         }
         if(argc>1) WriteBitmap(argv[1],bitmap);
+        {
+            // Frame Generation's hint gets a second line under its row.
+            auto framegen=Snapshot(); framegen.framegen_session=true;
+            framegen.framegen="On  /  Extrapolate  /  Auto 4x";
+            const auto one_line=RasterizeOsd(settings,false,framegen,stats,false);
+            framegen.framegen_detail="23 \xE2\x86\x92 90 fps  /  GPU 8.0 ms";
+            const auto two_lines=RasterizeOsd(settings,false,framegen,stats,false);
+            Check(two_lines.Valid() && two_lines.height==one_line.height+28,"Frame Generation's second line did not add its height");
+
+            // Its badge sits beside the FPS value, inside the FPS column, without
+            // changing the panel's size or anything else on it.
+            auto badged=framegen; badged.framegen_badge="ON"; badged.framegen_fps=90;
+            const auto with_badge=RasterizeOsd(settings,false,badged,stats,false);
+            Check(with_badge.Valid() && with_badge.height==two_lines.height,"Frame Generation's FPS badge changed the panel height");
+            bool in_column=false, elsewhere=false;
+            for(int y=0;y<with_badge.height;++y) for(int x=0;x<960;++x)
+                if(with_badge.pixels[y*960+x]!=two_lines.pixels[y*960+x]) (x>=60 && x<315 && y>=57 && y<140?in_column:elsewhere)=true;
+            Check(in_column && !elsewhere,"Frame Generation's FPS badge was not drawn beside the FPS value alone");
+            for(const char* state:{"STBY","WAIT","PAUSED","OFF","N/A"}) {
+                auto other=badged; other.framegen_badge=state; other.framegen_fps=0;
+                const auto raster=RasterizeOsd(settings,false,other,stats,false);
+                Check(raster.pixels!=with_badge.pixels && raster.pixels!=two_lines.pixels,"Frame Generation's FPS badge did not show its state");
+            }
+            settings.show_framegen_fps=false;
+            Check(RasterizeOsd(settings,false,badged,stats,false).pixels==two_lines.pixels,"The FPS badge setting did not hide the badge");
+            settings.show_framegen_fps=true;
+            auto other_session=badged; other_session.framegen_session=false;
+            auto plain_session=framegen; plain_session.framegen_session=false;
+            Check(RasterizeOsd(settings,false,other_session,stats,false).pixels==RasterizeOsd(settings,false,plain_session,stats,false).pixels,
+                "A session without Frame Generation showed its FPS badge");
+            if(const char* path=std::getenv("OSD_FRAMEGEN_BMP")) WriteBitmap(path,with_badge);
+
+            // Compact: the FPS column widens for the badge, only in sessions
+            // with Frame Generation and only while FPS is shown.
+            auto compact_settings=settings;
+            compact_settings.compact_show_brand=compact_settings.compact_show_app=compact_settings.compact_show_runtime=false;
+            constexpr OsdCompactLayoutOptions framegen_options{.framegen_session=true};
+            const auto plain_layout=CompactOsdLayout(compact_settings), badge_layout=CompactOsdLayout(compact_settings,framegen_options);
+            Check(!plain_layout.framegen_badge && badge_layout.framegen_badge && badge_layout.width==plain_layout.width+50 &&
+                  badge_layout.frame_time_x==plain_layout.frame_time_x+50 && badge_layout.height==plain_layout.height,
+                "The compact FPS column did not make room for Frame Generation's badge");
+            const auto compact_badged=RasterizeOsd(compact_settings,true,badged,stats,false);
+            Check(compact_badged.Valid() && compact_badged.content_width==badge_layout.width,"Compact badge raster has the wrong width");
+            if(const char* path=std::getenv("OSD_FRAMEGEN_COMPACT_BMP")) WriteBitmap(path,compact_badged);
+            compact_settings.compact_metrics="frameTime";
+            Check(!CompactOsdLayout(compact_settings,framegen_options).framegen_badge,"Compact badge shown without an FPS value");
+            compact_settings.compact_metrics="fps"; compact_settings.show_framegen_fps=false;
+            Check(!CompactOsdLayout(compact_settings,framegen_options).framegen_badge &&
+                  CompactOsdLayout(compact_settings,framegen_options).width==CompactOsdLayout(compact_settings).width,"Compact badge shown while turned off");
+        }
         settings.accent="custom"; settings.custom_color="#123456";
         settings.body_order={"pivot","modules","turbo","graph"};
         const auto reordered=RasterizeOsd(settings,false,Snapshot(),stats,false);
@@ -157,17 +225,26 @@ int main(int argc, char** argv) {
         settings.compact_show_clock=false;
         const auto expanded=RasterizeOsd(settings,false,Snapshot(),stats,false);
         const auto plain=RasterizeOsd(settings,true,Snapshot(),stats,false);
-        for (bool turbo:{false,true}) for (bool pivot:{false,true}) {
+        for (bool turbo:{false,true}) for (bool pivot:{false,true}) for (bool snap_line:{false,true}) {
             settings.compact_show_turbo=turbo; settings.compact_show_pivot=pivot;
-            auto states=Snapshot(); states.turbo="Recovery blocked / Analyzing"; states.pivot=std::string(150,'W'); states.compact_pivot="Quick view + Nudge";
+            auto states=Snapshot(); states.turbo="Recovery blocked / Analyzing"; states.pivot=std::string(150,'W'); states.compact_pivot="Motion: Cont Active + Position";
+            if(snap_line) states.compact_pivot_secondary="Snap: Active / Stacked + Nudge";
             const auto compact=RasterizeOsd(settings,true,states,stats,false);
-            Check(compact.height==136+48*static_cast<int>(turbo)+48*static_cast<int>(pivot),"Compact states did not get separate rows");
+            Check(compact.height==136+48*static_cast<int>(turbo)+(pivot?(snap_line?80:48):0),
+                  "Compact Pivot must use one row without Snap Views and two with them");
             for(int y=18;y<100;++y) for(int x=28;x<600;++x)
                 Check(plain.pixels[y*960+x]==compact.pixels[y*960+x],"Compact states changed the performance header");
             Check(RasterizeOsd(settings,false,Snapshot(),stats,false).pixels==expanded.pixels,"Compact options changed expanded output");
             for (int y=0;y<compact.height;++y) for (int x=0;x<960;++x)
                 if (x<3 || x>=compact.content_width-3 || y<3 || y>=compact.height-3) Check(compact.pixels[y*960+x]==0,"Compact footer spilled outside the panel");
-            if(argc>2 && turbo && pivot) WriteBitmap(argv[2],compact);
+            if(argc>2 && turbo && pivot && snap_line) WriteBitmap(argv[2],compact);
+        }
+        {
+            auto single=Snapshot(); single.pivot="Motion: Active / Continuous / Flight";
+            auto stacked=single; stacked.pivot_secondary="Snap: Active / Stacked / Check Six / Views";
+            settings.show_pivot=true;
+            Check(RasterizeOsd(settings,false,stacked,stats,false).height==RasterizeOsd(settings,false,single,stats,false).height+32,
+                  "Expanded Pivot must add its snap line only when Snap Views are configured");
         }
         auto micro_settings=OsdSettings{};
         micro_settings.compact_show_brand=micro_settings.compact_show_app=micro_settings.compact_show_runtime=micro_settings.compact_show_clock=false;
@@ -180,20 +257,64 @@ int main(int argc, char** argv) {
         micro_settings.compact_metrics="none";
         const auto empty=RasterizeOsd(micro_settings,true,Snapshot(),stats,false);
         Check(std::all_of(empty.pixels.begin(),empty.pixels.end(),[](auto p){return p==0;}),"Empty compact selection rendered a panel");
-        for(const auto* metrics:{"all","fps","frameTime","none"}) for(int flags=0;flags<64;++flags) {
+        // The tallest compact panel shows the header (18 + 44), metrics (68), the
+        // Turbo and Frame Gen rows (48 each), and Pivot with its snap line (80),
+        // with 6 below. It must fit the OSD texture.
+        constexpr int kWorstCompactHeight=18+44+68+48+48+80+6;
+        static_assert(kWorstCompactHeight<=OsdBitmap::texture_height);
+        int tallest_compact=0;
+        for(const auto* metrics:{"all","fps","frameTime","none"}) for(int flags=0;flags<256;++flags) {
             auto options=OsdSettings{};options.compact_metrics=metrics;
             options.compact_show_brand=flags&1;options.compact_show_app=flags&2;
             options.compact_show_runtime=flags&4;options.compact_show_clock=flags&8;
             options.compact_show_turbo=flags&16;options.compact_show_pivot=flags&32;
-            const auto layout=CompactOsdLayout(options);
-            Check(layout.width>=240 && layout.width<=960 && layout.height>=68 && layout.height<=232,"Compact geometry escaped texture bounds");
+            options.compact_show_framegen=flags&128;
+            const OsdCompactLayoutOptions layout_options{.framegen_session=(flags&64)!=0};
+            auto snap_options=layout_options; snap_options.pivot_snap_line=true;
+            const auto layout=CompactOsdLayout(options,layout_options);
+            const auto snap_layout=CompactOsdLayout(options,snap_options);
+            tallest_compact=std::max(tallest_compact,snap_layout.height);
+            Check(layout.width>=240 && layout.width<=960 && layout.height>=68 && snap_layout.height<=kWorstCompactHeight,"Compact geometry escaped texture bounds");
+            Check(snap_layout.height==layout.height+(options.compact_show_pivot?32:0) && snap_layout.width==layout.width,
+                "Only a shown Pivot row may grow for the snap line");
             if(options.compact_show_turbo && options.compact_show_pivot) {
                 options.compact_show_pivot=false;
-                const auto turbo_only=CompactOsdLayout(options);
-                Check(layout.pivot_y==layout.turbo_y+48 && layout.width==turbo_only.width && layout.height==turbo_only.height+48,
+                const auto turbo_only=CompactOsdLayout(options,layout_options);
+                Check(layout.pivot_y==layout.turbo_y+(options.compact_show_framegen?96:48) && layout.width==turbo_only.width &&
+                      layout.height==turbo_only.height+48,
                     "Adding compact Pivot widened the panel instead of adding a row");
             }
-            Check(layout.empty==(flags==0 && options.compact_metrics=="none"),"Empty compact detection failed");
+            Check(layout.empty==((flags&(63|128))==0 && options.compact_metrics=="none"),"Empty compact detection failed");
+        }
+        Check(tallest_compact==kWorstCompactHeight,"The compact worst case changed; re-derive it against the OSD texture");
+        {
+            // Everything that grows the panel at once, as a Frame Generation
+            // session of an app with Snap Views draws it: rasterized, within
+            // the texture, and nothing past the panel's edges.
+            OsdSettings all{};
+            all.show_brand=all.show_app=all.show_runtime=all.show_clock=true;
+            all.show_graph=all.show_turbo=all.show_framegen=all.show_pivot=all.show_modules=true;
+            all.compact_show_brand=all.compact_show_app=all.compact_show_runtime=all.compact_show_clock=true;
+            all.compact_metrics="all";
+            all.compact_show_turbo=all.compact_show_framegen=all.compact_show_pivot=true;
+            auto busy=Snapshot();
+            busy.framegen_session=true; busy.framegen_badge="ON"; busy.framegen_fps=90;
+            busy.framegen="On  /  Interpolate  /  Dynamic"; busy.framegen_detail="45 -> 90 fps  /  GPU 3.1 ms";
+            busy.compact_framegen="Dynamic  /  45 -> 90 fps";
+            busy.pivot="Motion: Active / Continuous + Position / Flight"; busy.compact_pivot="Motion: Cont Active + Position";
+            busy.pivot_secondary="Snap: Active / Stacked + Nudge / Check Six / Views";
+            busy.compact_pivot_secondary="Snap: Active / Stacked + Nudge";
+            const auto expanded=RasterizeOsd(all,false,busy,stats,false);
+            const auto compact=RasterizeOsd(all,true,busy,stats,false);
+            // Header and metrics 210, graph 156, Turbo 52, Frame Gen with its
+            // detail 80, Pivot with its snap line 84, enhancements 52, restart 48.
+            Check(expanded.Valid() && expanded.height==210+156+52+80+84+52+48 && expanded.height<=OsdBitmap::texture_height,
+                  "The expanded worst case escaped the OSD texture");
+            Check(compact.Valid() && compact.height==kWorstCompactHeight,"The compact worst case rasterized at another height");
+            for(const OsdBitmap* raster:{&expanded,&compact})
+                for(int y=0;y<raster->height;++y) for(int x=0;x<OsdBitmap::width;++x)
+                    if(x<3 || y<3 || x>=raster->content_width-3 || y>=raster->height-3)
+                        Check(raster->pixels[y*OsdBitmap::width+x]==0,"The worst-case OSD drew past its panel");
         }
         std::cout<<"Two rasters (includes initial LUT): "<<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count()<<" ms\n";
         stats.Tick(now+std::chrono::seconds(2)); Check(stats.samples.empty(),"Paused session polluted frame history");
@@ -307,6 +428,61 @@ int main(int argc, char** argv) {
         renderer.Shutdown(); renderer.Initialize(session,nullptr,4,dispatch);
         renderer.Prepare(settings,Snapshot(),false,false);
         Check(!renderer.Append(frame,true) && !renderer.Status().available,"Unsupported graphics API was not isolated");
+    }
+    {
+        // A world-anchored panel goes out in LOCAL, at the head pose located
+        // at each frame's own display time; head-locked otherwise.
+        OsdDispatch anchored=dispatch; anchored.locate=Locate;
+        OsdRenderer renderer; unsupported=false; renderer.Initialize(session,device,4,anchored);
+        auto settings=OsdSettings{}; settings.enabled=true; settings.show_clock=false; settings.horizontal_degrees=20; settings.vertical_degrees=0;
+        renderer.Prepare(settings,Snapshot(),false,false);
+        XrCompositionLayerProjection game{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+        const auto* original=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&game);
+        XrFrameEndInfo frame{XR_TYPE_FRAME_END_INFO}; frame.layerCount=1; frame.layers=&original; frame.displayTime=1000;
+        auto* quad=reinterpret_cast<const XrCompositionLayerQuad*>(WaitVisible(renderer,frame));
+        Check(quad && quad->space==reinterpret_cast<XrSpace>(3) && locates==0 && local_creates==0,"A head-locked panel located the head");
+        const XrPosef panel=quad->pose;
+        renderer.SetWorldAnchored(true);
+        quad=reinterpret_cast<const XrCompositionLayerQuad*>(renderer.Append(frame,true));
+        Check(quad && quad->space==reinterpret_cast<XrSpace>(4) && locates==1 && located_at==1000,"The anchored panel was not placed at its frame's head pose");
+        // Turned 90 degrees left about +Y: x' = z, z' = -x.
+        Check(std::abs(quad->pose.position.x-(1+panel.position.z))<1e-5f && std::abs(quad->pose.position.y-(2+panel.position.y))<1e-5f &&
+              std::abs(quad->pose.position.z-(3-panel.position.x))<1e-5f,"The panel's position did not follow the head");
+        // The panel sits 20 degrees right, level (a -20 degree yaw); the head turned
+        // 90 degrees left: 70 degrees left of LOCAL's forward in all.
+        const double half=35.0*3.14159265358979323846/180;
+        const XrQuaternionf& o=quad->pose.orientation;
+        Check(std::abs(o.x)<1e-5f && std::abs(o.z)<1e-5f && std::abs(std::abs(o.y)-static_cast<float>(std::sin(half)))<1e-5f &&
+              std::abs(std::abs(o.w)-static_cast<float>(std::cos(half)))<1e-5f && o.y*o.w>0,
+              "The panel's orientation did not follow the head");
+        // Every frame is located at its own display time: none reuses another's.
+        frame.displayTime=2000;
+        quad=reinterpret_cast<const XrCompositionLayerQuad*>(renderer.Append(frame,true));
+        Check(quad && locates==2 && located_at==2000 && local_creates==1,"A frame reused another frame's head pose");
+        // Without a located head the panel stays head-locked for that frame.
+        head_valid=false;
+        quad=reinterpret_cast<const XrCompositionLayerQuad*>(renderer.Append(frame,true));
+        Check(quad && quad->space==reinterpret_cast<XrSpace>(3) && std::abs(quad->pose.position.x-panel.position.x)<1e-6f,
+              "An unlocated head moved the panel");
+        head_valid=true;
+        renderer.SetWorldAnchored(false);
+        quad=reinterpret_cast<const XrCompositionLayerQuad*>(renderer.Append(frame,true));
+        Check(quad && quad->space==reinterpret_cast<XrSpace>(3) && locates==3,"Turning anchoring off kept the panel in the world");
+        renderer.Shutdown(); Check(spaces==0,"The anchor space leaked on teardown");
+        // A runtime without a LOCAL space keeps the panel head-locked, and is
+        // asked once.
+        renderer.Initialize(session,device,4,anchored); renderer.SetWorldAnchored(true); fail_local=true; local_creates=0;
+        renderer.Prepare(settings,Snapshot(),false,false);
+        quad=reinterpret_cast<const XrCompositionLayerQuad*>(WaitVisible(renderer,frame));
+        Check(quad && quad->space==reinterpret_cast<XrSpace>(3),"A missing LOCAL space hid the panel");
+        renderer.Append(frame,true);
+        Check(local_creates==1,"A missing LOCAL space was asked for every frame");
+        // A new session starts head-locked until it is set again.
+        renderer.Shutdown(); fail_local=false; local_creates=0; renderer.Initialize(session,device,4,anchored);
+        renderer.Prepare(settings,Snapshot(),false,false);
+        quad=reinterpret_cast<const XrCompositionLayerQuad*>(WaitVisible(renderer,frame));
+        Check(quad && quad->space==reinterpret_cast<XrSpace>(3) && local_creates==0,"A new session kept the last session's anchoring");
+        renderer.Shutdown(); Check(spaces==0,"Spaces leaked on teardown");
     }
     for(const auto preferred:{DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,DXGI_FORMAT_B8G8R8A8_UNORM_SRGB}) {
         // Unsupported higher-ranked formats must be skipped, but the runtime's

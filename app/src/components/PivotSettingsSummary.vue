@@ -63,6 +63,18 @@ const chips = computed(() => {
     title: settings.responseMode === 'stepped' ? 'Pivot activation and release ramp.' : `Tracking smoothing ${settings.smoothing}; activation ramp ${settings.activationRampSeconds}s.`,
   })
 
+  if (settings.positionAssist.enabled) {
+    result.push({ label: 'Position Assist', value: 'On', title: 'Rotation-driven extra lean and height.' })
+  }
+  if (settings.responseMode === 'continuous') {
+    result.push({
+      label: 'Deadzone Transition',
+      value: settings.advancedAxes
+        ? 'Per direction'
+        : `Y ${settings.deadzoneTransitionDegrees}° · P ${settings.pitchDeadzoneTransitionDegrees}°`,
+      title: 'Angular sensitivity ramp beyond the deadzone.',
+    })
+  }
   return result
 })
 </script>

@@ -10,8 +10,8 @@ test('old configs keep OSD off and acquire independent default bindings', () => 
   delete config.core.osd
   assert.deepEqual(normalizeConfig(config).core.osd, defaultOsdSettings())
   const first = defaultOsdSettings()
-  first.toggleBinding.chord.push('X')
-  assert.deepEqual(defaultOsdSettings().toggleBinding.chord, ['Ctrl', 'Alt', 'F10'])
+  first.toggleBindings[0].chord.push('X')
+  assert.deepEqual(defaultOsdSettings().toggleBindings[0].chord, ['Ctrl', 'Alt', 'F10'])
 })
 
 test('all OSD settings and device bindings survive normalization and serialization', () => {
@@ -21,11 +21,13 @@ test('all OSD settings and device bindings survive normalization and serializati
     showGraph: false, showRuntime: false, showTurbo: false, showModules: false, showClock: false,
     accent: 'copper', toggleBinding: { type: 'device', deviceGuid: 'stick', inputPath: 'button-4' },
     cycleBinding: { type: 'none' } }
+  // One binding per toggle, as configs from before binding lists hold them.
   const normalized = normalizeConfig(JSON.parse(JSON.stringify(config)))
-  assert.equal(normalized.core.osd.toggleBinding.inputPath, 'button-4')
+  assert.equal(normalized.core.osd.toggleBindings[0].inputPath, 'button-4')
+  assert.deepEqual(normalized.core.osd.cycleBindings, [])
   assert.deepEqual(normalizeConfig(normalized), normalized)
   for (const [key, value] of Object.entries(config.core.osd)) {
-    if (key !== 'toggleBinding') assert.deepEqual(normalized.core.osd[key], value)
+    if (key !== 'toggleBinding' && key !== 'cycleBinding') assert.deepEqual(normalized.core.osd[key], value)
   }
   assert.deepEqual(validateConfig(normalized), [])
 })
@@ -42,8 +44,8 @@ test('invalid OSD imports fall back safely and invalid edits prevent save', () =
 
 test('OSD bindings participate in global binding conflicts', () => {
   const config = defaultConfig()
-  config.core.osd.cycleBinding = structuredClone(config.core.osd.toggleBinding)
-  assert.ok(savedBindingConflictWarnings(config, [config.core.osd.toggleBinding]).length > 0)
+  config.core.osd.cycleBindings = structuredClone(config.core.osd.toggleBindings)
+  assert.ok(savedBindingConflictWarnings(config, config.core.osd.toggleBindings).length > 0)
 })
 
 test('compact contents have independent defaults and survive presets', () => {
@@ -75,34 +77,48 @@ test('compact layout packs selected rows and preserves a small FPS-only footprin
   assert.equal(osdCompactLayout(settings).headerY, 18)
   assert.equal(osdCompactLayout(settings).metricsY, -1)
   assert.equal(osdCompactLayout(settings).height, 68)
-  for (const compactMetrics of ['all', 'fps', 'frameTime', 'none']) for (let bits = 0; bits < 64; bits++) {
-    const flags = ['compactShowBrand', 'compactShowApp', 'compactShowRuntime', 'compactShowClock', 'compactShowTurbo', 'compactShowPivot']
+  // The tallest compact panel: header (18 + 44), metrics (68), Turbo and Frame
+  // Gen rows (48 each), Pivot with its snap line (80), and 6 below. The layer's
+  // OSD texture is 768 rows tall.
+  const worstCompactHeight = 18 + 44 + 68 + 48 + 48 + 80 + 6
+  assert.ok(worstCompactHeight <= 768)
+  let tallest = 0
+  for (const compactMetrics of ['all', 'fps', 'frameTime', 'none']) for (let bits = 0; bits < 256; bits++) {
+    const flags = ['compactShowBrand', 'compactShowApp', 'compactShowRuntime', 'compactShowClock', 'compactShowTurbo', 'compactShowPivot', 'compactShowFramegen']
     Object.assign(settings, { compactMetrics }, Object.fromEntries(flags.map((key, i) => [key, !!(bits & 1 << i)])))
-    const layout = osdCompactLayout(settings)
+    const options = { framegenSession: !!(bits & 128) }
+    const layout = osdCompactLayout(settings, options)
+    const snapLayout = osdCompactLayout(settings, { ...options, pivotSnapLine: true })
+    tallest = Math.max(tallest, snapLayout.height)
     assert.ok(layout.width >= 240 && layout.width <= 960)
-    assert.ok(layout.height >= 68 && layout.height <= 232)
+    assert.ok(layout.height >= 68 && snapLayout.height <= worstCompactHeight)
+    // The Snap View line only grows a shown Pivot row.
+    assert.equal(snapLayout.height, layout.height + (settings.compactShowPivot ? 32 : 0))
+    assert.equal(snapLayout.width, layout.width)
     if (settings.compactShowTurbo && settings.compactShowPivot) {
-      assert.equal(layout.pivotY, layout.turboY + 48)
-      const turboOnly = osdCompactLayout({ ...settings, compactShowPivot: false })
+      assert.equal(layout.pivotY, layout.turboY + (settings.compactShowFramegen ? 96 : 48))
+      const turboOnly = osdCompactLayout({ ...settings, compactShowPivot: false }, options)
       assert.equal(layout.width, turboOnly.width)
       assert.equal(layout.height, turboOnly.height + 48)
+      assert.equal(snapLayout.height, turboOnly.height + 80)
     }
-    assert.equal(layout.empty, compactMetrics === 'none' && bits === 0)
+    assert.equal(layout.empty, compactMetrics === 'none' && (bits & 127) === 0)
     assert.ok(layout.fields.every(field => field.x + field.width <= layout.width - 28))
   }
+  assert.equal(tallest, worstCompactHeight)
   assert.equal(normalizeOsdSettings({ compactMetrics: 'bad' }).compactMetrics, 'all')
 })
 
 test('custom layouts retain small sizes, row order and colors without capturing controls or recursive presets', () => {
   const osd = defaultOsdSettings()
-  Object.assign(osd, { enabled: true, scale: 25, accent: 'custom', customColor: '#aB12Ef', clockFormat: '12', bodyOrder: ['pivot', 'modules', 'graph', 'turbo'], showBrand: false, showApp: false, showRuntime: false, showClock: false })
+  Object.assign(osd, { enabled: true, scale: 25, accent: 'custom', customColor: '#aB12Ef', clockFormat: '12', bodyOrder: ['pivot', 'modules', 'framegen', 'graph', 'turbo'], showBrand: false, showApp: false, showRuntime: false, showClock: false })
   const layout = osdLayout(osd)
   osd.customPresets.push({ name: 'Small cockpit', settings: layout })
   osd.bodyOrder.reverse()
-  assert.deepEqual(layout.bodyOrder, ['pivot', 'modules', 'graph', 'turbo'])
-  for (const key of ['enabled', 'visibleOnStart', 'toggleBinding', 'cycleBinding', 'customPresets']) assert.ok(!(key in layout))
+  assert.deepEqual(layout.bodyOrder, ['pivot', 'modules', 'framegen', 'graph', 'turbo'])
+  for (const key of ['enabled', 'visibleOnStart', 'toggleBindings', 'cycleBindings', 'customPresets']) assert.ok(!(key in layout))
   assert.deepEqual(normalizeOsdSettings(JSON.parse(JSON.stringify(osd))), osd)
-  assert.deepEqual(normalizeOsdSettings({ bodyOrder: ['pivot', 'pivot', 'unknown', 'turbo'] }).bodyOrder, ['pivot', 'turbo', 'graph', 'modules'])
+  assert.deepEqual(normalizeOsdSettings({ bodyOrder: ['pivot', 'pivot', 'unknown', 'turbo'] }).bodyOrder, ['pivot', 'turbo', 'graph', 'framegen', 'modules'])
   assert.equal(normalizeOsdSettings({ accent: 'toString' }).accent, 'teal')
   const config = defaultConfig(); config.core.osd = osd
   assert.deepEqual(validateConfig(config), [])

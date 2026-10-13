@@ -246,6 +246,89 @@ std::optional<QuadViewsTrackingMode> ParseQuadViewsTrackingMode(const std::strin
     return std::nullopt;
 }
 
+const char* ToString(FrameGenSynthesisMode mode) {
+    return mode == FrameGenSynthesisMode::kExtrapolate ? "extrapolate" : "interpolate";
+}
+
+std::optional<FrameGenSynthesisMode> ParseFrameGenSynthesisMode(const std::string& value) {
+    if (value == "interpolate") return FrameGenSynthesisMode::kInterpolate;
+    if (value == "extrapolate") return FrameGenSynthesisMode::kExtrapolate;
+    return std::nullopt;
+}
+
+const char* ToString(FrameGenFlowQuality quality) {
+    switch (quality) {
+    case FrameGenFlowQuality::kPerformance:
+        return "performance";
+    case FrameGenFlowQuality::kQuality:
+        return "quality";
+    default:
+        return "balanced";
+    }
+}
+
+std::optional<FrameGenFlowQuality> ParseFrameGenFlowQuality(const std::string& value) {
+    if (value == "performance") return FrameGenFlowQuality::kPerformance;
+    if (value == "balanced") return FrameGenFlowQuality::kBalanced;
+    if (value == "quality") return FrameGenFlowQuality::kQuality;
+    return std::nullopt;
+}
+
+const char* ToString(FrameGenMotionEstimation estimation) {
+    return estimation == FrameGenMotionEstimation::kHardware ? "hardware" : "shader";
+}
+
+std::optional<FrameGenMotionEstimation> ParseFrameGenMotionEstimation(const std::string& value) {
+    if (value == "shader") return FrameGenMotionEstimation::kShader;
+    if (value == "hardware") return FrameGenMotionEstimation::kHardware;
+    return std::nullopt;
+}
+
+const char* ToString(FrameGenDiagnosticView view) {
+    switch (view) {
+    case FrameGenDiagnosticView::kFlow:
+        return "flow";
+    case FrameGenDiagnosticView::kConfidence:
+        return "confidence";
+    case FrameGenDiagnosticView::kTint:
+        return "tint";
+    default:
+        return "off";
+    }
+}
+
+std::optional<FrameGenDiagnosticView> ParseFrameGenDiagnosticView(const std::string& value) {
+    if (value == "off") return FrameGenDiagnosticView::kOff;
+    if (value == "flow") return FrameGenDiagnosticView::kFlow;
+    if (value == "confidence") return FrameGenDiagnosticView::kConfidence;
+    if (value == "tint") return FrameGenDiagnosticView::kTint;
+    return std::nullopt;
+}
+
+const char* ToString(FrameGenMultiplier multiplier) {
+    switch (multiplier) {
+    case FrameGenMultiplier::k2:
+        return "2x";
+    case FrameGenMultiplier::k3:
+        return "3x";
+    case FrameGenMultiplier::k4:
+        return "4x";
+    case FrameGenMultiplier::kDynamic:
+        return "dynamic";
+    default:
+        return "auto";
+    }
+}
+
+std::optional<FrameGenMultiplier> ParseFrameGenMultiplier(const std::string& value) {
+    if (value == "auto") return FrameGenMultiplier::kAuto;
+    if (value == "dynamic") return FrameGenMultiplier::kDynamic;
+    if (value == "2x") return FrameGenMultiplier::k2;
+    if (value == "3x") return FrameGenMultiplier::k3;
+    if (value == "4x") return FrameGenMultiplier::k4;
+    return std::nullopt;
+}
+
 const char* ToString(ProfileMode mode) {
     switch (mode) {
     case ProfileMode::Custom:

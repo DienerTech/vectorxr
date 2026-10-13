@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import type { PivotAxisTuning, PivotXRSettings } from '../lib/model'
+import type { PivotAxisTuning, PivotSnapStackingStatus, PivotXRSettings } from '../lib/model'
 import PivotSteppedSettings from './PivotSteppedSettings.vue'
+import PivotPositionAssistEditor from './PivotPositionAssistEditor.vue'
+import PivotSnapStackingControl from './PivotSnapStackingControl.vue'
 
 // Shared Pivot settings editor used by both the Default Profile and each custom
 // profile, so the two stay visually and structurally identical. Fields mutate
@@ -11,7 +13,14 @@ import PivotSteppedSettings from './PivotSteppedSettings.vue'
 // empty.
 const props = defineProps<{
   settings: PivotXRSettings
+  snapStacking: PivotSnapStackingStatus
 }>()
+
+const deadzoneTransitionHint = [
+  'Eases from 1:1 to full sensitivity over this many degrees beyond the deadzone, instead of switching at its edge. 0 keeps the original hard deadzone.',
+  'For example, with an 8° deadzone and an 8° transition, amplification starts gently at 8° and reaches full strength at 16°.',
+  'The gentler start gives up half the transition width × (multiplier − 1) of extra rotation: at ×1.5 with an 8° transition, the view stays 2° behind a hard deadzone until Max Extra is reached.',
+].join('\n\n')
 
 const advancedDirections = [
   { key: 'yawLeft', label: 'Yaw Left', hint: 'Applied when turning your head to the left.', deadzoneMax: 180 },
@@ -35,11 +44,13 @@ function onAdvancedAxesChange(enabled: boolean) {
     rotationMultiplier: props.settings.rotationMultiplier,
     deadzoneDegrees: props.settings.deadzoneDegrees,
     maxExtraDegrees: props.settings.maxExtraYawDegrees,
+    deadzoneTransitionDegrees: props.settings.deadzoneTransitionDegrees,
   }
   const pitch: PivotAxisTuning = {
     rotationMultiplier: props.settings.pitchRotationMultiplier,
     deadzoneDegrees: props.settings.pitchDeadzoneDegrees,
     maxExtraDegrees: props.settings.maxExtraPitchDegrees,
+    deadzoneTransitionDegrees: props.settings.pitchDeadzoneTransitionDegrees,
   }
   props.settings.yawLeft = { ...yaw }
   props.settings.yawRight = { ...yaw }
@@ -54,6 +65,9 @@ function onAdvancedAxesChange(enabled: boolean) {
 
 <template>
   <div class="space-y-3">
+    <section class="rounded-[1rem] border p-4 surface-panel-soft">
+      <PivotSnapStackingControl :settings="settings" :status="snapStacking" />
+    </section>
     <!-- General: applies to both axes -->
     <div class="rounded-[1rem] border p-4 surface-panel-soft">
       <p class="eyebrow text-xs uppercase tracking-[0.18em]">General</p>
@@ -136,7 +150,7 @@ function onAdvancedAxesChange(enabled: boolean) {
     <div v-if="settings.responseMode === 'continuous' && !settings.advancedAxes" class="grid gap-3 md:grid-cols-2">
       <div class="rounded-[1rem] border p-4 surface-panel-soft">
         <p class="eyebrow text-xs uppercase tracking-[0.18em]">Yaw</p>
-        <div class="mt-3 grid gap-3 sm:grid-cols-3">
+        <div class="mt-3 grid gap-3 sm:grid-cols-2">
           <label class="block">
             <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
               Multiplier
@@ -154,6 +168,25 @@ function onAdvancedAxesChange(enabled: boolean) {
               step="0.05"
               type="number"
             />
+          </label>
+          <label class="block">
+            <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+              Max Extra
+              <span
+                title="Cap on the extra yaw degrees pivot can add on top of natural head movement. 180° lets you look directly behind you."
+                class="cursor-help select-none text-xs text-muted"
+                >ⓘ</span
+              >
+            </span>
+            <input
+              v-model.number="settings.maxExtraYawDegrees"
+              class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
+              min="0"
+              max="180"
+              step="0.5"
+              type="number"
+            />
+            <span class="mt-1 block text-xs text-muted">degrees</span>
           </label>
           <label class="block">
             <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
@@ -176,29 +209,29 @@ function onAdvancedAxesChange(enabled: boolean) {
           </label>
           <label class="block">
             <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-              Max Extra
+              Deadzone Transition
               <span
-                title="Cap on the extra yaw degrees pivot can add on top of natural head movement. 180° lets you look directly behind you."
+                :title="deadzoneTransitionHint"
                 class="cursor-help select-none text-xs text-muted"
                 >ⓘ</span
               >
             </span>
             <input
-              v-model.number="settings.maxExtraYawDegrees"
+              v-model.number="settings.deadzoneTransitionDegrees"
               class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
               min="0"
               max="180"
               step="0.5"
               type="number"
             />
-            <span class="mt-1 block text-xs text-muted">degrees</span>
+            <span class="mt-1 block text-xs text-muted">degrees · 0 keeps the original hard deadzone</span>
           </label>
         </div>
       </div>
 
       <div class="rounded-[1rem] border p-4 surface-panel-soft">
         <p class="eyebrow text-xs uppercase tracking-[0.18em]">Pitch</p>
-        <div class="mt-3 grid gap-3 sm:grid-cols-3">
+        <div class="mt-3 grid gap-3 sm:grid-cols-2">
           <label class="block">
             <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
               Multiplier
@@ -216,6 +249,25 @@ function onAdvancedAxesChange(enabled: boolean) {
               step="0.05"
               type="number"
             />
+          </label>
+          <label class="block">
+            <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+              Max Extra
+              <span
+                title="Cap on the extra pitch degrees pivot can add. Useful for looking over the nose or up at the canopy without craning your neck."
+                class="cursor-help select-none text-xs text-muted"
+                >ⓘ</span
+              >
+            </span>
+            <input
+              v-model.number="settings.maxExtraPitchDegrees"
+              class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
+              min="0"
+              max="180"
+              step="0.5"
+              type="number"
+            />
+            <span class="mt-1 block text-xs text-muted">degrees</span>
           </label>
           <label class="block">
             <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
@@ -238,22 +290,22 @@ function onAdvancedAxesChange(enabled: boolean) {
           </label>
           <label class="block">
             <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-              Max Extra
+              Deadzone Transition
               <span
-                title="Cap on the extra pitch degrees pivot can add. Useful for looking over the nose or up at the canopy without craning your neck."
+                :title="deadzoneTransitionHint"
                 class="cursor-help select-none text-xs text-muted"
                 >ⓘ</span
               >
             </span>
             <input
-              v-model.number="settings.maxExtraPitchDegrees"
+              v-model.number="settings.pitchDeadzoneTransitionDegrees"
               class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
               min="0"
               max="180"
               step="0.5"
               type="number"
             />
-            <span class="mt-1 block text-xs text-muted">degrees</span>
+            <span class="mt-1 block text-xs text-muted">degrees · 0 keeps the original hard deadzone</span>
           </label>
         </div>
       </div>
@@ -319,6 +371,25 @@ function onAdvancedAxesChange(enabled: boolean) {
             </label>
             <label class="block">
               <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+                Deadzone Transition
+                <span
+                  :title="deadzoneTransitionHint"
+                  class="cursor-help select-none text-xs text-muted"
+                  >ⓘ</span
+                >
+              </span>
+              <input
+                v-model.number="axisTuning(direction.key).deadzoneTransitionDegrees"
+                class="app-input w-full rounded-[0.75rem] px-3 py-2"
+                min="0"
+                max="180"
+                step="0.5"
+                type="number"
+              />
+              <span class="mt-1 block text-xs text-muted">degrees</span>
+            </label>
+            <label class="block">
+              <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
                 Max Extra
                 <span
                   title="The most extra rotation Motion can add in this direction."
@@ -340,5 +411,6 @@ function onAdvancedAxesChange(enabled: boolean) {
         </div>
       </div>
     </div>
+    <PivotPositionAssistEditor :settings="settings.positionAssist" />
   </div>
 </template>

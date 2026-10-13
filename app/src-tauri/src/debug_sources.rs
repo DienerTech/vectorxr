@@ -68,6 +68,75 @@ impl DebugSourceSnapshot {
         self.files.push(entry);
     }
 
+    fn log_file(&mut self, path: &Path) {
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        self.file(path, format!("logs/{name}"), true);
+    }
+
+    fn logs(&mut self, paths: Vec<std::path::PathBuf>) {
+        // The newest sessions are exported complete. Every remaining main log
+        // comes before older recorder history, so the size budget can never
+        // drop a session's ordinary log in favour of another's recorder files.
+        // The complete sessions' Frame Generation snapshots come after every
+        // main log and after both complete sessions' incident snapshots and
+        // recorder parts, so the budget never drops any of those in their
+        // favour. An older session's come after its own recorder files.
+        const COMPLETE_SESSIONS: usize = 2;
+        let existing = |path: &Path, extensions: &[&str]| {
+            extensions
+                .iter()
+                .map(|extension| path.with_extension(extension))
+                .filter(|snapshot| snapshot.exists())
+                .collect::<Vec<_>>()
+        };
+        let companions = |path: &Path| {
+            let mut files = existing(
+                path,
+                &[
+                    "flight-recorder.stall.log",
+                    "flight-recorder.stall-1.log",
+                    "flight-recorder.stall-2.log",
+                ],
+            );
+            let mut recorders = (0..2)
+                .map(|part| path.with_extension(format!("flight-recorder.{part}.log")))
+                .filter(|recorder| recorder.exists())
+                .collect::<Vec<_>>();
+            recorders.sort_by_key(|recorder| {
+                std::cmp::Reverse(fs::metadata(recorder).and_then(|m| m.modified()).ok())
+            });
+            files.extend(recorders);
+            files
+        };
+        let framegen = |path: &Path| {
+            existing(
+                path,
+                &[
+                    "flight-recorder.framegen.log",
+                    "flight-recorder.framegen-1.log",
+                ],
+            )
+        };
+        let mut deferred = Vec::new();
+        for (index, path) in paths.iter().enumerate() {
+            self.log_file(path);
+            if index < COMPLETE_SESSIONS {
+                for companion in companions(path) {
+                    self.log_file(&companion);
+                }
+                deferred.extend(framegen(path));
+            }
+        }
+        for snapshot in deferred {
+            self.log_file(&snapshot);
+        }
+        for path in paths.iter().skip(COMPLETE_SESSIONS) {
+            for companion in companions(path).into_iter().chain(framegen(path)) {
+                self.log_file(&companion);
+            }
+        }
+    }
+
     fn directory(&mut self, directory: &Path, archive_directory: &str, extension: &str) {
         let entries = match fs::read_dir(directory) {
             Ok(entries) => entries,
@@ -138,12 +207,7 @@ pub fn collect() -> DebugSourceSnapshot {
         "txt",
     );
     match super::log_series_paths(&super::resolve_log_path()) {
-        Ok(paths) => {
-            for path in paths {
-                let name = path.file_name().unwrap().to_string_lossy();
-                snapshot.file(&path, format!("logs/{name}"), true);
-            }
-        }
+        Ok(paths) => snapshot.logs(paths),
         Err(error) => snapshot
             .warnings
             .push(format!("Unable to enumerate logs: {error}")),
@@ -177,6 +241,164 @@ mod tests {
         assert_eq!(snapshot.files[1].content.as_deref(), Some(log.as_str()));
         assert!(!snapshot.files[1].truncated);
         assert!(snapshot.files[2].error.is_some());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn includes_main_logs_then_snapshots_then_recorder_parts_then_framegen_snapshots() {
+        let root = std::env::temp_dir().join(format!(
+            "vectorxr-recorder-export-{}-{}",
+            std::process::id(),
+            super::super::unix_milliseconds()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let main = root.join("vectorxr-20261008-190626.log");
+        let previous = root.join("vectorxr-20261008-180000.log");
+        fs::write(&main, "main log").unwrap();
+        fs::write(
+            main.with_extension("flight-recorder.0.log"),
+            "older flight history",
+        )
+        .unwrap();
+        fs::write(
+            main.with_extension("flight-recorder.1.log"),
+            "recent flight history",
+        )
+        .unwrap();
+        fs::write(
+            main.with_extension("flight-recorder.stall.log"),
+            "latest frozen history",
+        )
+        .unwrap();
+        fs::write(
+            main.with_extension("flight-recorder.stall-1.log"),
+            "previous frozen history",
+        )
+        .unwrap();
+        fs::write(
+            main.with_extension("flight-recorder.framegen.log"),
+            "latest frame generation history",
+        )
+        .unwrap();
+        fs::write(
+            main.with_extension("flight-recorder.framegen-1.log"),
+            "previous frame generation history",
+        )
+        .unwrap();
+        // The previous session: its incident snapshot must not lose the size
+        // budget to the newest session's Frame Generation snapshots.
+        fs::write(&previous, "previous session's main log").unwrap();
+        fs::write(
+            previous.with_extension("flight-recorder.stall.log"),
+            "previous session's frozen history",
+        )
+        .unwrap();
+        fs::write(
+            previous.with_extension("flight-recorder.0.log"),
+            "previous session's flight history",
+        )
+        .unwrap();
+        fs::write(
+            previous.with_extension("flight-recorder.framegen.log"),
+            "previous session's frame generation history",
+        )
+        .unwrap();
+        fs::write(root.join("unrelated.flight-recorder.0.log"), "unrelated").unwrap();
+        fs::write(
+            root.join("unrelated.flight-recorder.framegen.log"),
+            "unrelated",
+        )
+        .unwrap();
+        let mut snapshot = DebugSourceSnapshot::default();
+        snapshot.logs(vec![main, previous]);
+        assert_eq!(snapshot.files.len(), 11);
+        assert_eq!(snapshot.files[0].content.as_deref(), Some("main log"));
+        assert_eq!(
+            snapshot.files[1].content.as_deref(),
+            Some("latest frozen history")
+        );
+        assert_eq!(
+            snapshot.files[2].content.as_deref(),
+            Some("previous frozen history")
+        );
+        assert!(snapshot.files[3..5].iter().all(|f| f
+            .archive_path
+            .starts_with("logs/vectorxr-20261008-190626.flight-recorder.")
+            && f.content.as_deref().unwrap().ends_with("flight history")));
+        let contents = snapshot.files[5..]
+            .iter()
+            .map(|f| f.content.as_deref().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            contents,
+            vec![
+                "previous session's main log",
+                "previous session's frozen history",
+                "previous session's flight history",
+                "latest frame generation history",
+                "previous frame generation history",
+                "previous session's frame generation history",
+            ]
+        );
+        let position = |name: &str| {
+            snapshot
+                .files
+                .iter()
+                .position(|f| f.archive_path == format!("logs/{name}"))
+                .unwrap()
+        };
+        assert!(
+            position("vectorxr-20261008-180000.flight-recorder.stall.log")
+                < position("vectorxr-20261008-190626.flight-recorder.framegen.log")
+        );
+        assert!(snapshot.files.iter().all(|f| f.error.is_none()));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn older_main_logs_come_before_older_recorder_history() {
+        let root = std::env::temp_dir().join(format!(
+            "vectorxr-recorder-priority-{}-{}",
+            std::process::id(),
+            super::super::unix_milliseconds()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let sessions = [
+            "vectorxr-20261009-120000.log",
+            "vectorxr-20261009-110000.log",
+            "vectorxr-20261009-100000.log",
+        ]
+        .map(|name| root.join(name));
+        for session in &sessions {
+            fs::write(session, "main").unwrap();
+            fs::write(session.with_extension("flight-recorder.0.log"), "recorder").unwrap();
+            fs::write(
+                session.with_extension("flight-recorder.framegen.log"),
+                "frame generation",
+            )
+            .unwrap();
+        }
+        let mut snapshot = DebugSourceSnapshot::default();
+        snapshot.logs(sessions.to_vec());
+        let order = snapshot
+            .files
+            .iter()
+            .map(|f| f.archive_path.trim_start_matches("logs/").to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            order,
+            vec![
+                "vectorxr-20261009-120000.log",
+                "vectorxr-20261009-120000.flight-recorder.0.log",
+                "vectorxr-20261009-110000.log",
+                "vectorxr-20261009-110000.flight-recorder.0.log",
+                "vectorxr-20261009-100000.log",
+                "vectorxr-20261009-120000.flight-recorder.framegen.log",
+                "vectorxr-20261009-110000.flight-recorder.framegen.log",
+                "vectorxr-20261009-100000.flight-recorder.0.log",
+                "vectorxr-20261009-100000.flight-recorder.framegen.log",
+            ]
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

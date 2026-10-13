@@ -16,7 +16,8 @@ Developed by DienerTech LLC.
 - Configure enhanced yaw and pitch rotation through the Pivot module.
 - Drive foveated-style rendering with a visible performance budget through the Quadviews module.
 - Override OpenXR runtime frame pacing per application with Turbo and compare strategies using built-in diagnostics.
-- Monitor application frame times, Turbo state, and enhancements with a configurable [in-headset OSD](docs/usage.md#on-screen-display) for Direct3D 11, Direct3D 12, and Vulkan games.
+- Add optical-flow generated frames between real frames with experimental [Frame Generation](docs/usage.md#frame-generation-experimental), so the headset gets a fresh image every refresh even when the game renders fewer.
+- Monitor application frame times, Turbo and Frame Generation state, and enhancements with a configurable [in-headset OSD](docs/usage.md#on-screen-display) for Direct3D 11, Direct3D 12, and Vulkan games.
 - Create per-application profiles so different OpenXR games can use different settings.
 - Track OpenXR apps VectorXR has seen and register them as profile targets.
 - Bind feature toggles to keyboard shortcuts or detected input devices.
@@ -90,13 +91,38 @@ for a fresh strategy test. **Clear Logs** clears fault history while preserving 
 learned pacing decisions. Global and per-profile controls let you bypass persistent protection.
 See the [Turbo setup and Safety guide](docs/usage.md#turbo) for the controls and save/relaunch behavior.
 
+### Frame Generation (experimental)
+
+Frame Generation inserts optical-flow generated frames between a game's frames, so the headset
+gets a fresh image every refresh even when the game renders fewer. By default (**Dynamic**) the
+game runs as fast as it can and generated frames fill the gaps; a **Fixed** rate (Auto, 2x, 3x,
+or 4x) holds it at a fraction of the refresh rate instead. Choose per profile between
+**Interpolate** (smoothest, fewest artifacts, a little latency), which measures motion on the
+GPU's shader cores, and **Extrapolate** (lowest latency, more edge artifacts), which can use an
+NVIDIA RTX GPU's optical flow hardware, and compare them in game with an A/B toggle and
+diagnostic views. The On-Screen Display shows **FG ON** and the headset's frame rate beside its
+FPS. It works with Direct3D 11, Direct3D 12, and Vulkan games, in stereo or Quadviews.
+
+It is experimental, and tested on one PC so far: an NVIDIA RTX 5090 with a Pimax Crystal Super on
+PiOpenXR and SteamVR, in DCS (Direct3D 11 with quad views), MSFS 2024 (Direct3D 12), and Star Citizen
+(Vulkan). AMD and Intel GPUs are untested: measuring motion on the shader cores works on any GPU,
+but the bridges that carry Direct3D 11 and Vulkan games' images to Frame Generation have not been
+verified on AMD. Motion is measured on the final images (no game motion vectors yet), text and
+HUDs can shimmer on generated frames, and the real frames it keeps take video memory: about
+0.55 GB each at 6864x6908 per eye. Turn off runtime smoothing, in the runtime and in the headset's
+own software, such as SteamVR Motion Smoothing, Pimax Smart Smoothing or ASW (the OSD and log say
+so when the runtime holds Frame Generation's frames to half rate), and expect Turbo to stay off
+where Frame Generation runs. Turning it on needs a game restart. See the
+[Frame Generation guide](docs/usage.md#frame-generation-experimental). In Star Citizen and other
+online games with anti-cheat, it is at your own risk: see [Current Status](#current-status).
+
 ### On-Screen Display
 
 ![VectorXR On-Screen Display page](docs/screenshots/osd.jpg)
 
 The On-Screen Display adds an optional head-following panel in Direct3D 11, Direct3D 12, and
-Vulkan games showing application FPS, frame times, a frame-time graph, Turbo state, Pivot, and
-active enhancements. Choose compact or expanded layouts, place the panel with a live preview,
+Vulkan games showing application FPS, frame times, a frame-time graph, Turbo and Frame
+Generation state, Pivot, and active enhancements. Choose compact or expanded layouts, place the panel with a live preview,
 customize its contents and colors, save presets, and show or switch it in game with
 **Ctrl+Alt+F10** and **Ctrl+Alt+F11**. See the [On-Screen Display guide](docs/usage.md#on-screen-display).
 
@@ -139,7 +165,7 @@ The installer registers the VectorXR API layer with Windows so OpenXR runtimes c
 
 ## Usage
 
-For a walkthrough of configuring profiles and each module — Depth, Pivot, Quadviews, Turbo, the application registry, and OpenXR layer management — see the [usage guide](docs/usage.md).
+For a walkthrough of configuring profiles and each module — Depth, Pivot, Quadviews, Turbo, Frame Generation, the application registry, and OpenXR layer management — see the [usage guide](docs/usage.md).
 
 ## Installation
 
@@ -159,7 +185,7 @@ VectorXR does not currently auto-download or auto-install updates. Updates are i
 
 ## Current Status
 
-VectorXR is in **beta**. It is feature-complete for its current scope — the desktop app, Windows installer, OpenXR layer registration, per-application profile model, Depth, Pivot, Quadviews, and Turbo modules, app discovery, logs, update checks, and the OpenXR layer manager are all implemented and working.
+VectorXR is in **beta**. It is feature-complete for its current scope — the desktop app, Windows installer, OpenXR layer registration, per-application profile model, Depth, Pivot, Quadviews, and Turbo modules, app discovery, logs, update checks, and the OpenXR layer manager are all implemented and working. Frame Generation is new and experimental.
 
 Beta means it is ready to use day-to-day, but it is young and has had limited real-world testing across the range of VR runtimes, hardware, and game-specific VR behavior. Some games expose Force IPD or world-scale controls that can override Stereo Boost; disable those controls before testing Depth. VectorXR is designed to be reversible: you can disable any Enhancement, disable the VectorXR layer, or uninstall entirely if anything misbehaves.
 
@@ -168,6 +194,13 @@ Feedback and bug reports are welcome — that is what this stage is for.
 Official Windows releases include an app, OpenXR layer, and installer signed by **DienerTech LLC**.
 Local source builds may be unsigned. Broader cross-runtime testing and packaging improvements
 remain part of the road to 1.0.
+
+**Online games with anti-cheat:** Using VectorXR in online games with anti-cheat, including Star
+Citizen, is at your own risk, and that includes your game account. Official releases are
+code-signed, and VectorXR has run under Star Citizen's Easy Anti-Cheat in testing, but no game
+developer has endorsed it, and a developer can change what its anti-cheat allows at any time.
+Report problems with VectorXR, Frame Generation included, to VectorXR rather than to the game's
+developer.
 
 ## Build From Source
 
@@ -185,6 +218,11 @@ VectorXR is Windows-focused and expects:
 The local `OpenXR.Loader.*.nupkg` package is intentionally not tracked in source control.
 CI and the GitHub release workflow install the OpenXR loader from a pinned vcpkg registry
 before building the layer.
+
+Frame Generation's NVIDIA hardware optical flow builds from the two MIT-licensed interface
+headers of the [NVIDIA Optical Flow SDK](https://developer.nvidia.com/optical-flow-sdk)
+included in `third_party/nvidia-optical-flow/`; no SDK download is needed. The optical flow
+library itself, `nvofapi64.dll`, comes with the NVIDIA driver and is loaded at run time.
 
 Install app dependencies:
 
@@ -261,5 +299,7 @@ Thank you to the maintainers and contributors behind these projects.
 The VectorXR source code is released under the Mozilla Public License 2.0 (MPL-2.0). See [LICENSE](LICENSE).
 
 MPL-2.0 is a file-level copyleft license: you are free to use, modify, and redistribute VectorXR, including as part of a larger work that combines it with proprietary code, provided that modifications to the MPL-covered files themselves remain available under the MPL.
+
+[THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt) lists the third-party code that VectorXR ships, with the notices and license texts it requires. The installer puts it next to the app, together with LICENSE as LICENSE.txt. After changing the app's dependencies or its build setup, regenerate the list with `node scripts/generate-third-party-notices.mjs`.
 
 VectorXR, the VectorXR name, and VectorXR branding are product identifiers of DienerTech LLC. Consistent with MPL-2.0 section 2.3, the license covers the source code but does not grant rights to use DienerTech LLC trademarks, logos, or branding except to refer to the project.

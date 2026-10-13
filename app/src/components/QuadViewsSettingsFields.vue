@@ -160,12 +160,21 @@ function presetActive(preset: QuadViewsPreset) {
             :value="Math.round(settings.focusScale * 100)"
             class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
             min="50"
-            max="200"
-            step="5"
+            max="300"
+            step="1"
             type="number"
             @input="settings.focusScale = Number(($event.target as HTMLInputElement).value) / 100"
           />
           <span class="mt-1 block text-xs text-muted">% of HMD resolution</span>
+          <span
+            v-if="settings.focusScale > 2"
+            class="mt-2 block rounded-[0.75rem] border px-3 py-2 text-xs leading-5 chip-warning"
+          >
+            VectorXR's full-view output image grows with Focus Resolution:
+            {{ Math.round(settings.focusScale * 100) }}% needs about
+            {{ (settings.focusScale * settings.focusScale).toFixed(1) }}× your headset's pixels in GPU memory and
+            compositing, on top of the app render cost shown above.
+          </span>
         </label>
         <label class="block">
           <span class="mb-1.5 flex min-h-[2.5rem] items-start gap-1.5 text-sm font-medium">
@@ -177,7 +186,7 @@ function presetActive(preset: QuadViewsPreset) {
             class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
             min="10"
             max="150"
-            step="5"
+            step="1"
             type="number"
             @input="settings.peripheralScale = Number(($event.target as HTMLInputElement).value) / 100"
           />

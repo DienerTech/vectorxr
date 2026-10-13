@@ -1,3 +1,14 @@
+// Re-declares the loader negotiation interface from the OpenXR SDK's
+// src/common/loader_interfaces.h, which carries this notice:
+//
+// Copyright (c) 2017-2023, The Khronos Group Inc.
+// Copyright (c) 2017 Valve Corporation
+// Copyright (c) 2017 LunarG, Inc.
+//
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+//
+// See THIRD-PARTY-NOTICES.txt in the repository root.
+
 #pragma once
 
 #include <cstddef>

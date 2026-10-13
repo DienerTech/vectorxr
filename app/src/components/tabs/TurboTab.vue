@@ -13,6 +13,7 @@ import TurboRuntimePage from '../TurboRuntimePage.vue'
 import TurboSafetyPage from '../TurboSafetyPage.vue'
 import TurboSafetyToggle from '../TurboSafetyToggle.vue'
 import { turboSafetyBlocks } from '../../lib/turboSafety'
+import { configWarnings } from '../../lib/validation'
 import type { ActiveRuntimeInfo, OpenXrLayerSnapshot } from '../../lib/commands'
 import {
   savedBindingConflictWarnings,
@@ -96,9 +97,7 @@ onUnmounted(() => { disposed = true; clearTimeout(recoveryPoll) })
 const bindingSubPageOpen = ref(false)
 const activeSubPage = ref<'runtime' | 'diagnostics' | 'safety' | null>(null)
 let savedScrollTop = 0
-const toggleBindingWarnings = computed(() => savedBindingConflictWarnings(props.config, [
-  props.config.modules.turbo.toggleBinding,
-]))
+const toggleBindingWarnings = computed(() => savedBindingConflictWarnings(props.config, props.config.modules.turbo.toggleBindings))
 
 
 const turboInUse = computed(
@@ -106,6 +105,12 @@ const turboInUse = computed(
 )
 
 
+
+// Frame Generation owns pacing in its sessions, so Turbo yields there.
+const frameGenInUse = computed(
+  () => props.config.modules.framegen.enabled || props.config.modules.framegen.profiles.some((profile) => profile.enabled),
+)
+const frameGenWarnings = computed(() => configWarnings(props.config))
 
 const toolkitConflict = computed(() => {
   if (!turboInUse.value) {
@@ -193,14 +198,14 @@ function closeSubPage() {
   <ModuleBindingPage
     v-if="bindingSubPageOpen"
     module-label="Turbo"
-    :binding="config.modules.turbo.toggleBinding"
+    :bindings="config.modules.turbo.toggleBindings"
     label="Turbo Toggle Binding"
     description="Flip Turbo on and off while in-game to compare fps and frame feel directly—and to disable it immediately if presentation breaks. The binding requires Turbo to be enabled for the application in its profile. It can also retry Turbo when recovery has blocked it or pacing trouble has suspended it. Switching it mid-session can cause a brief re-synchronization hitch."
     none-text="No binding assigned. Turbo starts automatically where enabled, unless recovery or pacing protection blocks it."
     default-activate-sound="turbo-on.wav"
     default-deactivate-sound="turbo-off.wav"
     :warnings="toggleBindingWarnings"
-    @update:binding="config.modules.turbo.toggleBinding = $event"
+    @update:bindings="config.modules.turbo.toggleBindings = $event"
     @close="closeSubPage"
   />
   <TurboRuntimePage
@@ -254,6 +259,24 @@ function closeSubPage() {
         OpenXR Toolkit is enabled alongside VectorXR Turbo. If OXRTK's Turbo Mode is also on, disable one of them so the two pacing layers do not compete.
       </div>
 
+      <div
+        v-for="warning in frameGenWarnings"
+        :key="warning"
+        class="mb-5 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 chip-warning"
+        style="border-color: var(--app-border)"
+        role="note"
+      >
+        {{ warning }}
+      </div>
+      <p
+        v-if="frameGenInUse && frameGenWarnings.length === 0"
+        class="mb-5 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-soft"
+        style="border-color: var(--app-border)"
+        role="note"
+      >
+        Frame Generation is on for some applications. Turbo stays off in sessions where Frame Generation runs, and its status reads Paused for Frame Generation.
+      </p>
+
       <section class="border-t pt-4" style="border-color: var(--app-border)">
         <div class="mb-3">
           <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Essentials</p>
@@ -282,7 +305,7 @@ function closeSubPage() {
           </div>
           <ModuleBindingPanel
             heading="In-game Turbo Toggle"
-            :binding="config.modules.turbo.toggleBinding"
+            :bindings="config.modules.turbo.toggleBindings"
             hint="Flip Turbo on and off while in-game for a direct comparison."
             @edit="openToggleBinding"
           />

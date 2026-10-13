@@ -6,6 +6,7 @@
 #include <vulkan/vulkan_core.h>
 #include <openxr/openxr_platform.h>
 #include "depthxr/osd_renderer.h"
+#include "test_adapter.h"
 #include <iostream>
 #include <cstdlib>
 #include <cstring>
@@ -49,7 +50,7 @@ int D3D12Test(DXGI_FORMAT format){
     for(int y=bitmap.height;y<OsdBitmap::texture_height;++y)for(int x=0;x<OsdBitmap::width;++x)Check(reinterpret_cast<const std::uint32_t*>(static_cast<const char*>(data)+y*footprint.Footprint.RowPitch)[x]==0,"D3D12 stale pixels outside the OSD rect");
     readback->Unmap(0,nullptr);Check(graphics->Upload(1,bitmap,error)==OsdUpload::Failed,"D3D12 invalid index accepted");graphics->Reset();std::cout<<"D3D12 format="<<format<<" upload, reuse, bounds and GPU readback passed\n";return 0;
 }
-#define VK_TEST_FUNCTIONS(X) X(CreateInstance) X(DestroyInstance) X(EnumeratePhysicalDevices) X(GetPhysicalDeviceQueueFamilyProperties) X(GetPhysicalDeviceMemoryProperties) X(CreateDevice) X(DestroyDevice) X(GetDeviceQueue) X(CreateImage) X(DestroyImage) X(GetImageMemoryRequirements) X(AllocateMemory) X(FreeMemory) X(BindImageMemory) X(CreateBuffer) X(DestroyBuffer) X(GetBufferMemoryRequirements) X(BindBufferMemory) X(MapMemory) X(UnmapMemory) X(InvalidateMappedMemoryRanges) X(CreateCommandPool) X(DestroyCommandPool) X(AllocateCommandBuffers) X(ResetCommandPool) X(BeginCommandBuffer) X(EndCommandBuffer) X(CmdPipelineBarrier) X(CmdCopyImageToBuffer) X(CreateFence) X(DestroyFence) X(ResetFences) X(WaitForFences) X(QueueSubmit)
+#define VK_TEST_FUNCTIONS(X) X(CreateInstance) X(DestroyInstance) X(EnumeratePhysicalDevices) X(GetPhysicalDeviceProperties) X(GetPhysicalDeviceQueueFamilyProperties) X(GetPhysicalDeviceMemoryProperties) X(CreateDevice) X(DestroyDevice) X(GetDeviceQueue) X(CreateImage) X(DestroyImage) X(GetImageMemoryRequirements) X(AllocateMemory) X(FreeMemory) X(BindImageMemory) X(CreateBuffer) X(DestroyBuffer) X(GetBufferMemoryRequirements) X(BindBufferMemory) X(MapMemory) X(UnmapMemory) X(InvalidateMappedMemoryRanges) X(CreateCommandPool) X(DestroyCommandPool) X(AllocateCommandBuffers) X(ResetCommandPool) X(BeginCommandBuffer) X(EndCommandBuffer) X(CmdPipelineBarrier) X(CmdCopyImageToBuffer) X(CreateFence) X(DestroyFence) X(ResetFences) X(WaitForFences) X(QueueSubmit)
 int VulkanTest(VkFormat format){
     auto loader=LoadLibraryExW(L"vulkan-1.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);if(!loader){std::cout<<"Vulkan loader absent\n";return 77;}
 #define LOAD(name) auto vk##name=reinterpret_cast<PFN_vk##name>(GetProcAddress(loader,"vk" #name));Check(!!vk##name,"Vulkan test entry " #name);
@@ -58,7 +59,11 @@ int VulkanTest(VkFormat format){
     VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};app.pApplicationName="VectorXR OSD backend test";app.apiVersion=VK_API_VERSION_1_0;VkInstanceCreateInfo ic{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};ic.pApplicationInfo=&app;VkInstance instance{};
     if(vkCreateInstance(&ic,nullptr,&instance)!=VK_SUCCESS){FreeLibrary(loader);return 77;}
     std::uint32_t count{};Check(vkEnumeratePhysicalDevices(instance,&count,nullptr)==VK_SUCCESS,"Vulkan device enumeration");if(!count){vkDestroyInstance(instance,nullptr);FreeLibrary(loader);return 77;}
-    std::vector<VkPhysicalDevice> devices(count);Check(vkEnumeratePhysicalDevices(instance,&count,devices.data())==VK_SUCCESS,"Vulkan enumerate devices");auto physical=devices.front();vkGetPhysicalDeviceQueueFamilyProperties(physical,&count,nullptr);std::vector<VkQueueFamilyProperties> families(count);vkGetPhysicalDeviceQueueFamilyProperties(physical,&count,families.data());
+    std::vector<VkPhysicalDevice> devices(count);Check(vkEnumeratePhysicalDevices(instance,&count,devices.data())==VK_SUCCESS,"Vulkan enumerate devices");auto physical=devices.front();
+    // FG_TEST_ADAPTER (test_adapter.h): the first device it names; naming none skips.
+    if(const auto wanted=test_adapter::Wanted()){std::vector<test_adapter::Adapter> adapters;for(auto candidate:devices){VkPhysicalDeviceProperties p{};vkGetPhysicalDeviceProperties(candidate,&p);adapters.push_back({p.deviceName,p.deviceType==VK_PHYSICAL_DEVICE_TYPE_CPU});}
+        const auto chosen=test_adapter::FirstMatch(adapters,*wanted);if(!chosen){std::cout<<test_adapter::NoMatch(*wanted,adapters)<<'\n';vkDestroyInstance(instance,nullptr);FreeLibrary(loader);return 77;}physical=devices[*chosen];}
+    vkGetPhysicalDeviceQueueFamilyProperties(physical,&count,nullptr);std::vector<VkQueueFamilyProperties> families(count);vkGetPhysicalDeviceQueueFamilyProperties(physical,&count,families.data());
     std::uint32_t family=0;while(family<count&&!(families[family].queueFlags&VK_QUEUE_GRAPHICS_BIT))++family;Check(family<count,"Vulkan graphics family");float priority=1;VkDeviceQueueCreateInfo qc{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};qc.queueFamilyIndex=family;qc.queueCount=1;qc.pQueuePriorities=&priority;
     VkDeviceCreateInfo dc{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};dc.queueCreateInfoCount=1;dc.pQueueCreateInfos=&qc;VkDevice device{};Check(vkCreateDevice(physical,&dc,nullptr,&device)==VK_SUCCESS,"Vulkan create device");VkQueue queue{};vkGetDeviceQueue(device,family,0,&queue);
     VkPhysicalDeviceMemoryProperties mem{};vkGetPhysicalDeviceMemoryProperties(physical,&mem);

@@ -12,6 +12,16 @@ VectorXR has two parts working together:
 You do not need to keep the desktop app open for the layer to work — the layer reads the saved
 config file directly. Settings are stored locally under `%LOCALAPPDATA%\VectorXR`.
 
+## Online games with anti-cheat
+
+Using VectorXR in online games with anti-cheat, including Star Citizen, is at your own risk, and
+that includes your game account. Official releases are code-signed, and VectorXR has run under
+Star Citizen's Easy Anti-Cheat in testing, but no game developer has endorsed it, and a developer
+can change what its anti-cheat allows at any time.
+
+Report problems with VectorXR, Frame Generation included, to VectorXR rather than to the game's
+developer, and attach **Export Debug** from Home.
+
 ## What you see on first launch
 
 ![VectorXR Home tab on first run](screenshots/home.jpg)
@@ -20,11 +30,11 @@ The **Home** tab is a status dashboard:
 
 - **System Health** shows whether the runtime is enabled and the VectorXR layer is registered.
   Use **View Health** for details or **Export Debug** to collect a support ZIP.
-- The **Active overview** lists the four Enhancements — **Quadviews**, **Turbo**, **Pivot**, and
-  **Depth**, including the default profile and enabled custom-profile counts. These summarize
+- The **Active overview** lists the five Enhancements — **Quadviews**, **Turbo**, **Frame
+  Generation**, **Pivot**, and **Depth**, including the default profile and enabled custom-profile counts. These summarize
   your configuration; an Active badge does not mean a VR application is currently running.
 - The left sidebar holds app sections (Home, Settings, On-Screen Display, Application Registry,
-  OpenXR Layers, About) and the four Enhancements. A green dot marks an Enhancement with an
+  OpenXR Layers, About) and the five Enhancements. A green dot marks an Enhancement with an
   enabled default or custom profile.
 - The bar at the bottom is the **save bar**. Changes you make are staged until you click **Save
   Changes** (or **Discard**). Watch this bar — nothing you change takes effect until it's saved.
@@ -94,7 +104,7 @@ top and a **Custom Profiles** list below. To apply it to the app you just regist
 **Add Profile**, point the profile at that application, tune the values, and save. To apply it
 broadly instead, just turn the **Default Profile** on.
 
-The four Enhancements:
+The five Enhancements:
 
 ### Depth
 
@@ -124,7 +134,10 @@ enabled.
 - Treat per-game profiles as independent calibrations. Different titles may need different
   quadrants—not merely small variations of one universal setting.
 - The **Depth Toggle Binding** at the top lets you toggle Depth on/off at runtime for quick A/B
-  comparisons in headset.
+  comparisons in headset. Like the Depth Lock, Turbo, Turbo metrics capture, Frame Generation,
+  and On-Screen Display toggles, it takes several bindings, one for each device you fly with (a
+  HOTAS throttle's button and a HOSAS stick's, say); any one of them acts. The Quadviews
+  in-headset shortcut takes one.
 - Games with a **Force IPD**, virtual-IPD, stereo-separation, or
   world-scale setting can override Stereo Boost; disable that setting before testing Depth.
   In DCS, uncheck **Force IPD Distance** under **Options > VR**, fully restart DCS, and open
@@ -160,6 +173,37 @@ up/down than your physical neck allows.
   fixed-duration transition that settles without overshoot.
 - **Advanced axes** can tune left, right, up, and down independently. Continuous and Stepped keep
   separate directional values, so switching response modes does not discard either setup.
+- In Continuous response, **Deadzone Transition** gradually increases sensitivity over the
+  specified number of degrees beyond the deadzone. For an 8° deadzone and a 4° transition,
+  movement stays 1:1 through 8° and reaches the configured sensitivity at 12°. The ease-in costs
+  some reach: beyond the transition, the extra rotation is transition/2 × (multiplier − 1) lower
+  than with a hard deadzone, as if the deadzone were half the transition wider. With a 2×
+  multiplier, the example adds 10° of extra rotation at 20° instead of 12°. **0°** preserves the
+  original response. This angle-based transition is separate from tracking Smoothing.
+- Enable **Position Assist** in Motion settings to add sideways lean, height, and forward/back
+  movement as you turn. **Start angle** and **Full-offset angle** define the physical head-angle
+  range; offsets ease in, stop at their configured maximum, and return toward zero at neutral.
+  **Starting points** fill in values to tune from: **Gentle** leans 12 cm toward the
+  turn and rises 4 cm between 20° and 70° of head turn, **Strong** leans 20 cm and rises 8 cm
+  between 15° and 60°, and **No movement** clears every offset. Keep the start angle beyond your
+  normal panel scan, and set the full-offset angle near where you stop turning.
+  Basic sideways lean mirrors left/right. **Advanced directions** supplies independent signed
+  offsets for turning left/right and looking up/down. Physical leaning remains available at 1:1.
+  Offsets stay level with the horizon and face your seated origin's heading, even when the origin
+  was captured looking down; inside a stacked Snap View they face the snapped view instead.
+- Enable **Apply Enhanced Motion to Snap Views** on a custom Enhanced Motion profile to keep its
+  motion running inside a Snap View profile for the same application. Configure and enable both
+  custom profiles for that application; custom profiles replace the default profile, so the
+  default profile cannot combine the two. Motion can already be active when you select a snap, or
+  you can activate it while snapped. The snap captures a temporary physical head reference, so
+  assisted movement works around that pose without altering the normal Pivot origin; switching
+  between opted-in motion profiles keeps that reference. Leaving the snap returns to ordinary
+  motion, and disabling motion leaves the snap selected. Engaging a motion profile without this
+  option while a snap is selected keeps the snap and makes it exclusive, as Snap Views always
+  behaved: the stacked motion eases out, and leaving the snap restores the state from before it.
+- Pivot's OSD adds a second line for snap state when the application has Snap Views. **Stacked**
+  indicates that both effects are applied. The lines also report Position Assist, nudges, and
+  snap entry/return transitions.
 - The **Activation Ramp** (default 0.35s) eases Pivot in and out when it engages or disengages
   rather than snapping the view.
 
@@ -189,9 +233,12 @@ automatically, so leaning stays centered on where you now sit.
 
 ![Editing a Pivot Snap View](screenshots/pivot-snap-view-editor.jpg)
 
-Snap Views keep natural head rotation and translation at 1:1 around the selected pose; they do not
-lock the headset. A Snap View temporarily replaces Enhanced Motion and the accumulated nudge offset.
-Leaving the view returns smoothly to the underlying state. A view with no binding is inert.
+Snap Views keep natural head movement around the selected pose; they do not lock the headset.
+Normally a Snap View temporarily replaces Enhanced Motion and returns smoothly to the underlying
+state on exit. With **Apply Enhanced Motion to Snap Views** enabled on the active motion profile,
+rotation assistance and Position Assist continue around the snapped pose. A view with no binding
+is inert. Shared Nudge Sets are processed once; the snapped profile owns profile-following nudges
+while its view is selected.
 
 #### Setting up Nudges
 
@@ -207,7 +254,9 @@ Leaving the view returns smoothly to the underlying state. A view with no bindin
    clears the accumulated yaw and pitch. Offsets are limited to ±180° yaw and ±85° pitch.
 
 Editing a shared Nudge Set updates every profile linked to it. Nudges are applied after Enhanced
-Motion, but a selected Snap View temporarily takes priority over the accumulated offset.
+Motion, and a selected Snap View uses its own linked Nudge Set while active. When the snap and the
+motion it returns to share a Nudge Set, the nudges carry over; otherwise they ease out with the
+snap.
 
 ### Pivot FAQ
 
@@ -289,6 +338,10 @@ safe, but the running game keeps its launch-time state until it exits.
 - **Focus Window** sets the size and offset of the high-detail region; **Resolution** sets
   **Foveate** (inner) and **Peripheral** (outer) resolution as a percentage of your headset's
   resolution (100% = headset default).
+  Focus Resolution supports 50–300% and Peripheral Resolution supports 10–150%, both in 1% steps.
+  VectorXR's full-view output image grows with Focus Resolution so the focus inset stays sharp:
+  above 200% the app shows a warning, and 300% needs about 9× your headset's pixels in GPU memory
+  and compositing, on top of the game's render cost. Runtime texture limits still apply.
 - The budget indicator at the top right estimates render cost *before* you launch — it reads as a
   **% of stereo pixels** and is color-coded, with a "Detrimental" warning when you exceed budget.
   Watch it while tuning to keep performance positive.
@@ -329,7 +382,11 @@ in-headset view labels the rendered regions and tracking pipeline with color:
 - Cyan ring: raw eye gaze; yellow cross: gaze after deadzone and smoothing.
 
 The diagnostic view is available only for VectorXR's synthesized D3D11 Quadviews compositor. It is
-not currently supported on Varjo headsets, where the Varjo runtime owns native composition.
+not currently supported on Varjo headsets, where the Varjo runtime owns native composition, or in a
+D3D11 game such as DCS that started with Frame Generation on: Frame Generation composes the quad
+views itself there. To use the visualization, turn Frame Generation off for the game and restart
+the game. Turning it off in a running game, or with the A/B toggle, does not make the
+visualization available.
 
 Quadviews and Pivot are designed to compose: unlike running separate foveation and neck-assist
 layers, VectorXR keeps the foveated focus region aligned with your gaze while Pivot rotates the
@@ -371,6 +428,10 @@ API-layer, runtime, and in-game VR changes also require a full game restart.
 Live app control requires an active VectorXR synthesized D3D11 Quadviews session. Start a compatible
 quad-view application with the VectorXR profile enabled. Native Varjo composition does not expose
 this visualization; the saved in-headset shortcut also begins each new session with the overlay off.
+In a D3D11 game such as DCS that started with Frame Generation on, the visualization is unavailable
+for the whole session, and the app reads **Unavailable in the active OpenXR session**. Turn Frame
+Generation off for the game and restart it.
+
 **What else should I disable while troubleshooting?**
 
 Avoid overlapping features: DCS **Force IPD Distance** can mask Depth, another tool's Turbo mode
@@ -418,6 +479,8 @@ unassigned timing is offered as **Use saved timing in this profile** and is not 
 game until selected and saved.
 
 Do not combine VectorXR Turbo with another pacing override such as OpenXR Toolkit Turbo Mode.
+VectorXR [Frame Generation](#frame-generation-experimental) also takes over pacing: Turbo stays
+off in sessions where it runs.
 Turn Turbo off if you see a Waiting overlay, black frames, persistent stutter, or broken
 reprojection. A mid-session toggle can briefly hitch while timing resynchronizes.
 
@@ -477,6 +540,15 @@ and runtime setup, including its headset and graphics configuration. Turbo remai
 in the profile so the in-game binding can retry it. A forced exit or unrelated crash can
 also leave an interrupted-session record; a block does not prove Turbo caused a crash.
 
+Turbo never stops the game's frames. If the runtime rejects or fails a frame call, VectorXR
+re-establishes a valid runtime frame on the game's own frame thread and continues with
+Sequenced pacing for the rest of that session. A runtime frame wait that is late but completes
+is waited for; one that does not complete within two seconds drops that single frame, and
+frames resume as soon as the runtime catches up. These events appear in the **Fault log** as
+recovered and do not block Turbo. After three consecutive failed frame calls, Auto tries
+Sequenced pacing, or Turbo suspends for the session; either way frames continue at the
+runtime's own pace.
+
 The page shows live Turbo status when a game is running, **Blocked setups**, and a separate
 **Fault log**. The overview's block/fault counts describe recorded history, not whether Turbo
 is currently rendering frames. A block marked **Bypassed** is retained but is not enforced
@@ -510,8 +582,407 @@ last Safety marker, not a confirmed crash time. The Turbo Safety screenshot show
 Before clearing logs, use **Home > Export Debug** to save an **Export Debug Information** ZIP
 when reporting a problem. It includes Turbo metrics, pacing decisions, safety records,
 live and saved runtime diagnostics, current and saved settings, and retained VectorXR logs.
+With Debug logging, the export also includes continuous recent frame-call history, up to three
+frozen snapshots taken at stalls, faults, and recoveries, and, with Frame Generation on, up to two
+snapshots taken when Dynamic stands down or the runtime holds frames to half rate. These recorder
+files follow the configured log retention. The two most recent sessions' logs, incident snapshots,
+and recent history come first, then the remaining session logs, then those two sessions' Frame
+Generation snapshots, then older recorder history.
 Raw capture is limited to 8 MiB per file and 64 MiB total; the ZIP inventory lists any
 unavailable or limited files. Review the ZIP for private information before sharing it.
+
+Each session's log names the hardware it runs on, right after the runtime creates the VR
+session, in a line starting `Session graphics:`. It gives the graphics API, the graphics card
+(`adapter`) and its PCI vendor ID, the driver version (in NVIDIA's numbering as well on NVIDIA
+cards; Vulkan games add `vulkanDriver`), the card's dedicated video memory, the process's video
+memory budget and what it uses at that moment, and the OpenXR runtime's name and version.
+Direct3D 11 and Vulkan games with Frame Generation on log a second line for the Direct3D 12
+device Frame Generation runs on. A value that could not be found reads `unknown`, and the line
+ends with the reason. When a Vulkan game's card cannot be identified exactly, it is matched by its
+PCI vendor and device ID instead, and the line ends by saying so.
+
+### Frame Generation (experimental)
+
+Frame Generation adds generated frames between a game's frames, so the headset gets a fresh
+image every refresh even when the game renders fewer. With the default **Dynamic**
+[frame rate](#frame-rate-dynamic-or-fixed) the game runs as fast as it can and generated frames
+fill the refreshes in between; a **Fixed** rate holds the game at a fraction of the refresh rate
+instead (2x, 3x, 4x, or Auto).
+
+Generated frames come from GPU optical flow measured on the final color images the game
+submits. VectorXR removes your head rotation from the flow before matching, because the
+runtime's own reprojection already handles head rotation, so the flow follows world,
+vehicle, and object motion.
+
+Frame Generation is experimental. Keep the Default Profile off and enable it per game after
+comparing it in the headset. It has been tested on one PC so far:
+
+- **GPU:** NVIDIA GeForce RTX 5090.
+- **Headset and runtimes:** Pimax Crystal Super on PiOpenXR, Pimax's OpenXR runtime, and on
+  SteamVR.
+- **Games:** DCS (Direct3D 11 with quad views), MSFS 2024 (Direct3D 12), and Star Citizen
+  (Vulkan).
+
+AMD and Intel GPUs are untested. The **Shader** motion source is vendor-neutral, but Direct3D 11
+and Vulkan games reach Frame Generation through bridges that share their images with a Direct3D 12
+device, and those bridges have not been verified on AMD. Frame Generation also needs video memory
+for the frames it keeps: see [Video memory](#video-memory).
+
+In Star Citizen and other online games with anti-cheat, Frame Generation, like the rest of
+VectorXR, is at your own risk: see [Online games with anti-cheat](#online-games-with-anti-cheat).
+Report Frame Generation problems to VectorXR rather than to the game's developer.
+
+#### Set up Frame Generation for a game
+
+1. Turn off runtime smoothing for the game, in the runtime and in the headset's own software:
+   **SteamVR Motion Smoothing**, **Pimax Smart Smoothing**, **Virtual Desktop SSW**, or **Meta
+   ASW**. They fight Frame Generation's pacing. See
+   [When the runtime holds frames to half rate](#when-the-runtime-holds-frames-to-half-rate) for
+   where these settings are.
+2. Keep the runtime at full refresh. Do not halve the frame rate with Pimax Play's **Lock Frame
+   Rate to Half Refresh Rate** or a frame limit in SteamVR's **Throttling Behavior**: Frame
+   Generation lowers the game's rate itself and needs the headset running at its full refresh
+   rate.
+3. Get the game to half the refresh rate on its own first: at least 45 fps at 90 Hz, with Frame
+   Generation off (the On-Screen Display shows it). Frame Generation can take a game from half
+   the refresh rate to full, but it cannot do that first half: below it, each generated frame
+   covers a longer gap and artifacts grow quickly. Lower the game's graphics settings, its
+   upscaler's quality mode, or the runtime's render resolution until it holds. High-resolution
+   headsets at 100% render resolution can ask for several times a 4K monitor's pixels per eye.
+4. Register the game's executable in **Application Registry**.
+5. On **Frame Generation**, leave **Default Profile** off, click **Add Profile**, and assign the
+   game. An enabled matching custom profile turns Frame Generation on for that game even when
+   the Default Profile is off.
+6. Start with the default settings (**Mode: Interpolate**, **Frame rate: Dynamic**, **Motion
+   source: Shader**), then click **Save Changes**. Interpolate always measures motion on the
+   GPU's shader cores. **NVIDIA hardware** motion, on an NVIDIA RTX GPU, is for **Extrapolate**,
+   which has the lowest latency: try the two together.
+7. Restart the game. Turning Frame Generation on, for the Default Profile or a custom profile,
+   takes effect at the next launch. Turning it off applies to a running game at once: frames
+   pass straight through.
+8. Confirm it is running: with the **On-Screen Display** on, **FG ON** appears beside its FPS
+   value with the frames per second the headset shows. You can also set **Diagnostic view** to
+   **Generated-frame tint**.
+9. Optional: use **A/B toggle > Edit Binding…** to assign a keyboard or controller input, then
+   switch generated frames off and on in the same scene to compare.
+
+Frame Generation engages a few seconds after the game starts rendering steadily. Loading
+screens and other frames without a rendered image pass straight through, and generation
+resumes once the game renders steadily again. If the runtime rejects a generated frame, the
+GPU work fails repeatedly, or the game keeps starting frames before the previous one ends,
+Frame Generation pauses. It retries by itself after a few seconds, up to three times per
+session, and the A/B toggle retries at any time. **Unavailable** means the session cannot generate frames at all, for example
+because the game renders into multisampled or unusual swapchain formats; the reason appears in
+the OSD and in the live status.
+
+The page's collapsible **Setup guide** repeats this checklist; it starts open until a Frame
+Generation profile is enabled. **In-headset controls** lists running VR applications with
+their live Frame Generation status, in the On-Screen Display's words: **On** (with the mode,
+frame rate, and game-to-headset frame rates), **Standby** (frames pass straight through and
+nothing is generated: the game holds the refresh rate on its own, or Dynamic has stood down for a
+while, for example while the runtime holds frames to half rate), **Starting**, **Paused**, **Unavailable** (with the reason),
+or **Off**. **Needs the updated VectorXR layer** means the running layer predates Frame
+Generation.
+
+#### Mode: Interpolate or Extrapolate
+
+| Mode | How it works | Trade-off |
+| --- | --- | --- |
+| **Interpolate** (default) | Blends generated frames between the previous and the newest real frame. | Fewest artifacts. Each real frame is shown after the generated frames leading up to it, so everything appears one real frame interval later (about 33 ms at 4x, 22 ms at 3x); head rotation is still corrected by the headset. |
+| **Extrapolate** | Pushes the newest real frame forward along its motion, like ASW or Smart Smoothing. | No added latency. More edge artifacts on fast motion and in newly revealed areas, and fine near detail depends more on the game's depth (see Game depth). Use it with **NVIDIA hardware** as the motion source; with **Shader**, Interpolate usually looks cleaner. |
+
+Both modes present from Frame Generation's own thread in Direct3D 11, Direct3D 12 and Vulkan
+games: a frame every refresh, each written right before its refresh, while the game renders at
+its own pace, as it would without Frame Generation. When a real frame's motion is not measured
+in time for a refresh, the previous real frame's motion carries it on, so the picture does not
+stand still for a refresh and then jump.
+
+#### Game depth
+
+When a game sends depth to the headset, Frame Generation uses it on Direct3D 12 automatically.
+MSFS 2024 only fills the depth it sends while its **Motion reprojection** setting is **Depth**;
+with it off, the depth is empty and Frame Generation does without. With depth, head movement is
+compensated exactly, so cockpit instruments, panels and text stay still in generated frames
+instead of wobbling. Generated frames also show the
+cockpit from where your eyes will be when each frame is displayed: they keep moving as they did
+between the game's last two frames. Most headset runtimes only correct head rotation between
+frames, so without this, near cockpit detail would jump at the game's frame rate whenever your
+head moved. Direct3D 11 and Vulkan games
+use head rotation only for now.
+
+Games do not always describe their depth correctly, so Frame Generation first checks it against
+the other eye: depth that is right lines the two eyes' images up. It starts using depth once
+that check passes, recognizes depth stored the other way round, corrects depth whose scale is
+described wrongly (MSFS 2024's is 1.2 times further than it says), and ignores depth that does
+not line the eyes up. Where the other eye or the previous frame disproves depth in places, for
+example cockpit glass the game wrote to depth over the scenery behind it, those places are
+treated as far away, and do not move with your eyes. The log reports each
+decision (**Frame Generation checked the game's depth against the other eye**), how much of the
+view the depth affects and how much of it the other eye disproved. Each 30-second summary shows
+**depthUsed**, the share of real frames generated with depth, **eyeShiftMm**, how far
+generated frames moved with your eyes (average/largest, millimeters), **eyeMoveMm**, how far
+your eyes moved between real frames on average, and **eyeMissMm**, how far that was from where
+they were expected to be (the eyes keeping their movement). **gpuStartMs** and **gpuDoneMs**
+(median/largest) say when generation ran on the GPU: its start after the real frame's refresh
+began and its end after the first generated frame's refresh began, measured from when the
+runtime releases that refresh's frame wait (about two refreshes before it is shown on Pimax).
+Generated frames finishing much later than that miss their refresh, and the headset shows the
+previous frame again. **skippedGenerated** counts generated frames passed over because they were
+made for a refresh already past.
+
+The Frame Generation page's session status shows **Using game depth** while depth is in use,
+**Game depth is empty** when the game sends depth but fills it only with its own depth-based
+reprojection on (turn that option on), or **Game depth not used** when the depth does not line
+the eyes up. The log reports every other case.
+
+#### Still detail
+
+In Extrapolate, motion is only pushed forward where it continues the motion of the previous
+pair of real frames. Fine still detail such as instrument faces and text shimmers slightly from
+frame to frame under anti-aliasing and upscaling, and motion estimation reads that as motion
+that changes every frame; extrapolating it would make still cockpit detail jitter. Steady
+motion, including after a real frame arrives late, is extrapolated as before.
+
+#### Frame rate: Dynamic or Fixed
+
+**Dynamic** (default) holds the game at no fixed rate: it runs as fast as it can, and generated
+frames fill the refreshes between its frames, as many as each gap needs. When the game holds the
+headset's refresh rate on its own, Frame Generation stands by and its frames pass straight
+through (the status reads **Standby**). Where Frame Generation cannot present from its own
+thread, Dynamic runs as Auto.
+
+**Fixed** holds the game at a set fraction of the headset refresh rate, for even pacing:
+
+| Fixed rate | Game rate | Example at 90 Hz | Generated frames between real frames |
+| --- | --- | --- | --- |
+| **2x** | 1/2 of the headset refresh rate | 45 fps | One |
+| **3x** | 1/3 | 30 fps | Two |
+| **4x** | 1/4 | 22.5 fps | Three |
+
+**Auto** starts at full rate: while the game holds the headset refresh, frames pass straight
+through and the status reads **Standby**. When it cannot, Auto steps up to 2x, 3x or 4x, and
+steps back down when it can, checking now and then whether a lower rate holds. Output images,
+once allocated, are kept for the session, so changing rate never stalls the game.
+
+Higher rates rescue very heavy games, but each generated frame moves content further, so
+artifacts grow; 4x shows the most. Each generated frame can also need its own set of
+headset-resolution output images, so video memory use grows with the rate. The log reports the
+estimate.
+
+#### Video memory
+
+Frame Generation keeps the last few real frames to generate from: five where video memory
+allows, otherwise three (with quad views always five, of the smaller views the game renders).
+These figures are for just-in-time writing (`justInTime=1` in the session summaries), which
+Direct3D 12 games and both bridges use; otherwise Frame Generation keeps two real frames and a
+set of output images per generated frame, as described under
+[Frame rate](#frame-rate-dynamic-or-fixed). Each kept frame costs about 6 bytes per pixel per eye: the image, plus its depth, trust, and
+motion at lower resolution. That is about 0.55 GB per kept frame at 6864x6908 per eye, and about
+0.1 GB at 3000x3000. The output images generated frames are written into come on top: a swapchain
+per eye at the game's resolution, usually with three images of 4 bytes per pixel, so about 1.1 GB
+at 6864x6908 per eye and 0.2 GB at 3000x3000. In all, plan for about 3 to 4 GB of video memory at
+6864x6908 per eye, and under 1 GB at 3000x3000. Direct3D 11 and Vulkan games (DCS, Star Citizen)
+also keep a shared copy of each of the game's swapchain images for the bridge, about as much again
+as the output images (the bridge logs it as `twinMiB`): plan for about 4 to 5 GB for them at
+6864x6908 per eye.
+
+Outside quad views, the log says how many real frames are kept (**Frame Generation keeps the
+last 5 real frames to generate from**, or 3 with the reason; quad views sessions always keep five), and the **Frame Generation process video memory** lines
+report the game process's video memory use and budget, and how much of it Frame Generation's
+working images and output images take.
+
+#### Frame Generation settings
+
+Every setting below applies live after **Save Changes**. Only turning Frame Generation on
+needs a game restart; turning it off applies at once.
+
+- **Mode** (**Interpolate**, default, or **Extrapolate**). See
+  [Mode](#mode-interpolate-or-extrapolate).
+- **Frame rate** (**Dynamic**, default, or **Fixed** at **Auto**, **2x**, **3x**, or **4x**). See
+  [Frame rate](#frame-rate-dynamic-or-fixed). In `settings.json` both are `frameMultiplier`:
+  `dynamic`, `auto`, `2x`, `3x`, or `4x`.
+- **Motion source**: **Shader** (default) measures motion by block matching on the GPU's
+  shader cores, on any GPU. **NVIDIA hardware** uses the optical flow accelerator of NVIDIA RTX
+  20-50 GPUs for Extrapolate: repeating patterns such as building windows and railings stay put,
+  and Extrapolate needs it to look its best. Interpolate measures motion with Shader even when
+  NVIDIA hardware is chosen: while the game keeps the GPU busy, the accelerator's results arrive
+  too late for the frames between real frames. The accelerator starts on each eye's image as
+  soon as the game releases it, so it mostly runs while the game finishes its frame. With
+  **Performance** flow quality it uses the accelerator's fastest preset, which is less accurate
+  on repeating patterns. Where it cannot be used, Shader is, and the log says why. The page
+  checks every graphics card in the PC with NVIDIA's driver, not only the first one listed, and
+  greys out **NVIDIA hardware**, with each card's reason, when none has the accelerator. While the
+  mode is Interpolate the whole Motion source is greyed out and shows Shader; the choice you made
+  is kept for Extrapolate.
+  In `settings.json`, set `"motionEstimation": "hardware"` in a profile's settings.
+- **Advanced** (collapsed by default):
+  - **Flow quality** sets the resolution motion is measured at: **Performance** (1/16 of the eye
+    image), **Balanced** (1/8, default), or **Quality** (1/4). Higher quality tracks small and
+    thin objects better and costs more GPU time.
+  - **Artifact suppression** (0–100, default 50): higher values fall back to the real image
+    sooner where motion is uncertain. You get fewer warping artifacts and more local judder.
+  - **Motion limit** (2–25% of view width, default 10%) is the farthest a generated frame may
+    move image content. Motion beyond it falls back to the real image.
+  - **Reset advanced settings** returns all three to their defaults.
+- **Diagnostic view** applies to every Frame Generation session: **Off**, **Motion flow**
+  (color-coded motion overlay on generated frames), **Confidence** (heat map of where
+  generation fell back to the real image), or **Generated-frame tint** (a faint tint on
+  generated frames, so you can confirm they are being shown).
+- **A/B toggle** is an optional binding that switches generated frames off and on live. It only
+  works in sessions that started with Frame Generation on. It takes several bindings, one for
+  each device you fly with; any one of them acts.
+
+The Default Profile and each custom profile have their own Mode, Frame rate, Motion source, and
+Advanced settings. The first enabled custom profile that matches the running game wins.
+
+#### How Frame Generation works with other features
+
+- **Turbo:** Turbo and Frame Generation have opposite pacing goals. In a session where Frame
+  Generation runs, Turbo stays off and its status reads **Paused for Frame Generation**. Your
+  Turbo profiles are not changed. The Turbo and Frame Generation pages show a notice when an
+  application has both turned on; it never blocks saving.
+- **Quadviews:** works with VectorXR's synthesized quad views and with Varjo-native quad views,
+  because generation runs on the final images sent to the headset. On Varjo headsets, **Foveate
+  Sharpness** is off in Direct3D 11 games such as DCS while Frame Generation is on, and the
+  Quadviews diagnostic visualization is unavailable in Direct3D 11 games that started with Frame
+  Generation on.
+- **Graphics APIs:** Direct3D 11, Direct3D 12, and Vulkan.
+- **On-Screen Display:** in games where Frame Generation is on, both layouts show its state
+  beside the FPS value (**FG ON** with the frames per second the headset shows, or **FG STBY**,
+  **FG WAIT**, **FG PAUSED**, **FG OFF**, or **FG N/A**), the expanded layout has a Frame
+  Generation row, and the compact
+  layout an optional one-line status. See [On-Screen Display](#on-screen-display).
+- **Runtime smoothing:** SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW,
+  and Meta ASW fight the pacing. Turn them off for games that use Frame Generation.
+- **Runtime frame rate:** keep the headset at its full refresh rate. Do not halve the frame rate
+  with Pimax Play's **Lock Frame Rate to Half Refresh Rate** or a frame limit in SteamVR's
+  **Throttling Behavior**; Frame Generation lowers the game's rate itself.
+
+#### When the runtime holds frames to half rate
+
+Runtime smoothing holds a game's frames to half the headset's refresh rate (or to a third or a
+quarter of it) and fills the refreshes in between itself. When the runtime does that to the
+frames Frame Generation presents, VectorXR reports it after about 4 seconds of it:
+
+- The line under the On-Screen Display's Frame Generation row (expanded layout) reads **Runtime
+  holds frames to half rate: check its smoothing**, and the app's live status ends with **the
+  runtime holds frames to half rate: check its smoothing**.
+- The log says so once per session, with what it measured and the settings that can do this:
+  **Frame Generation: the runtime held Frame Generation's frames to every other refresh at 90 Hz
+  for 4 s (its frame waits blocked). Settings that can do this: ...**.
+- With **Dynamic**, Frame Generation stands down while it lasts (**Frame Generation (dynamic)
+  stands down: the runtime holds frames to half rate**): frames pass straight through, as without
+  Frame Generation, and it tries again after a hold, 10 seconds at first and longer after each
+  stand-down. While the message stands, a try ends within about a second if the runtime still
+  holds the frames to half rate.
+- Each 30-second summary counts the waits on Frame Generation's own thread that the runtime held
+  back, as **runtimeHalved** (held back/measured), followed by **(halving)** while it lasts.
+
+VectorXR measures that the frames are held, not which setting holds them. Check every setting
+below that your runtime and your headset's own software have:
+
+- **SteamVR:** **Motion Smoothing** off under **Settings > Video**. Under **Settings > Video >
+  Per-Application Video Settings**, for the game, **Motion Smoothing** at **Disabled** (or at
+  **Use global setting** with the global one off) and **Throttling Behavior** at **Auto**.
+- **Pimax Play:** under **Device settings**, on the **Frame rate** card, **Smart Smoothing** and
+  **Lock Frame Rate to Half Refresh Rate** off.
+- **Virtual Desktop:** **SSW** off.
+- **Meta:** **ASW** off.
+
+SteamVR can show Motion Smoothing as **Not Supported**. That is SteamVR saying the graphics card
+or its driver lacks the asynchronous reprojection its smoothing needs; it says nothing about the
+headset's own software. Smoothing there, such as Pimax Play's **Smart Smoothing** or **Lock Frame
+Rate to Half Refresh Rate**, still needs to be off.
+
+A game running below the headset's refresh rate is not, by itself, the runtime halving its frame
+rate. SteamVR with Pimax's own SteamVR driver, for example, then reports a longer frame period to
+the game,
+in whole refreshes, and releases its frame waits at once; VectorXR does not count that as
+halving.
+
+Turn off the smoothing and check that the runtime runs at full refresh. The message clears once
+the runtime gives frames every refresh again: within a few seconds while Frame Generation
+presents them, and with **Dynamic** standing by, the next time it engages, or sooner once the
+game's own frames show the runtime giving them every refresh.
+
+#### Current limits
+
+- Frame Generation does not use game motion vectors yet; motion is estimated from color
+  images, with the game's depth (Direct3D 12) used only to remove head movement.
+- There is no HUD masking yet. Text, HUDs, and gauges baked into the 3D image can shimmer on
+  generated frames.
+- Fast motion and newly revealed areas can warp, more so with Extrapolate. Raise **Artifact
+  suppression** or lower **Motion limit** to trade warping for local judder.
+- The game needs enough GPU headroom to hold its multiplier's rate (half rate at 2x) plus the
+  Frame Generation work. On an RTX 5090 at a Pimax Crystal Super's 6240x6280 per eye, 4x
+  Extrapolate on Direct3D 12 takes about 3.1 ms per real frame at Balanced flow quality and
+  3.8 ms at Quality, for both eyes; slower GPUs and Direct3D 11 and Vulkan take more.
+- Higher fixed rates show more artifacts, most at 4x, and can add headset-resolution output
+  images to video memory.
+- Only the first projection layer is generated; other layers, such as menus drawn as quads,
+  repeat unchanged. Generated frames keep the real frame's depth for the runtime.
+- On SteamVR with Pimax's own SteamVR driver, the On-Screen Display can lag behind head turns
+  or show a double image on generated frames. Hide the panel with its binding (**Ctrl+Alt+F10**
+  by default) if it gets in the way.
+
+### Frame Generation FAQ
+
+**Why does the game run at 45 fps or lower?**
+
+With a **Fixed** frame rate that is expected: Frame Generation holds the game at a fraction of
+the headset refresh rate and fills in the frames between: 45, 30, or 22.5 fps on a 90 Hz headset
+at 2x, 3x, or 4x. With **Dynamic**, the game runs as fast as it can. Judge the image in the
+headset, not the game's own FPS counter; the On-Screen Display shows the frames per second the
+headset gets beside **FG ON**.
+
+**Which frame rate should I use?**
+
+Start with Dynamic. If the game's pacing is uneven, try a Fixed rate: Auto, or the lowest of 2x,
+3x, or 4x the game can hold. Each step up adds artifacts, and 4x shows the most.
+
+**I saved, but nothing changed in the running game. Why?**
+
+Turning Frame Generation on takes effect at the next launch. Restart the game, and
+confirm the enabled profile targets the running executable. Other settings apply live.
+
+**Why does the A/B toggle do nothing?**
+
+The toggle only works in sessions that started with Frame Generation on for that game. Turn it
+on, save, restart the game, then use the binding.
+
+**Should I use Interpolate or Extrapolate?**
+
+Interpolate has the fewest artifacts and adds about one real frame interval of latency;
+Extrapolate adds none and has more artifacts, and looks best with **NVIDIA hardware** as the
+motion source.
+
+**Why do HUDs, gauges, and text shimmer?**
+
+HUD masking is not available yet, so text and gauges in the 3D image can wobble on generated
+frames. Raising Artifact suppression under Advanced can help.
+
+**Can I use Turbo with Frame Generation?**
+
+Not in the same session. Frame Generation takes over frame pacing, so Turbo stays off wherever
+Frame Generation runs. Turbo still works for games without Frame Generation.
+
+**Do I need to turn off Motion Smoothing or ASW?**
+
+Yes. Runtime smoothing (SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW,
+Meta ASW) fights Frame Generation's pacing. Also keep the runtime at full refresh: do not halve
+the frame rate with Pimax Play's **Lock Frame Rate to Half Refresh Rate** or a frame limit in
+SteamVR's **Throttling Behavior**. Check both the runtime and the headset's own software: SteamVR
+showing Motion Smoothing as **Not Supported** says nothing about Pimax Play's settings, for
+example. When the runtime holds Frame Generation's frames to half rate anyway, the On-Screen
+Display and the log say so (see
+[When the runtime holds frames to half rate](#when-the-runtime-holds-frames-to-half-rate)).
+
+**How much video memory does it need?**
+
+About 0.55 GB per kept real frame at 6864x6908 per eye and 0.1 GB at 3000x3000, three to five of
+them, plus its output images: about 3 to 4 GB in all at 6864x6908 per eye, and about 4 to 5 GB
+for Direct3D 11 and Vulkan games, whose bridge keeps a shared copy of the game's images. See
+[Video memory](#video-memory).
 
 ## On-Screen Display
 
@@ -560,16 +1031,31 @@ header. Choose 12-hour (with AM/PM) or 24-hour time. Long application and runtim
 truncated within their own fields.
 
 The **Expanded** layout always shows application FPS, average application frame interval,
-and P95, and adds selectable rows for the frame-time graph, Turbo, Pivot, and active
-enhancements. Drag these rows or use their up/down arrows to arrange them. The **Compact**
+and P95, and adds selectable rows for the frame-time graph, Turbo, Frame Generation, Pivot,
+and active enhancements. Drag these rows or use their up/down arrows to arrange them. Saved
+layouts from earlier versions gain the Frame Generation row at the end. The **Compact**
 layout chooses its **Performance** readout (FPS and average frame time, either one, or
-none) and can add one-line Turbo and Pivot status rows. **Just FPS** clears the compact
-header and status rows for the smallest display. Turbo distinguishes **Disabled**, **Enabled / Off**, **Enabled / Waiting**, active
-**Async** or **Sequenced**, and safety states. Enabled enhancements include Turbo even
-when its binding has switched pacing off. Pivot shows the engaged profile and applied
-nudges/quick views without angle measurements; idle enabled Pivot reads **Pivot ready**.
-Disabling Pivot clears its applied-state display. Independently enabled inactive nudges
-remain reported while their offset is still applied.
+none) and can add Turbo, Frame Generation, and Pivot status rows (Pivot adds a Snap View line
+when the application has Snap Views). **Just FPS** clears the compact header and status rows for
+the smallest display. Turbo distinguishes **Disabled**, **Enabled / Off**, **Enabled / Waiting**,
+active **Async** or **Sequenced**, safety states, and **Paused for Frame Generation**. Active
+enhancements include Turbo even when its binding has switched pacing off.
+
+In games where Frame Generation is on, **Frame Generation beside FPS** (on by default, both
+layouts) adds a small badge next to the FPS value: **FG ON** over the frames per second the
+headset shows, generated frames included, or **FG STBY**, **FG WAIT**, **FG PAUSED**, **FG OFF**,
+or **FG N/A**. The Frame Generation row reads, for example, `On / Interpolate / Dynamic` with
+`45 → 90 fps / GPU 3.1 ms` on a second line (the game's and the headset's frame rates, and the
+GPU time Frame Generation took), or **Standby**, **Starting**, **Paused**, or **Unavailable**
+with the reason on the second line. The compact row is shorter, such as `Dynamic / 45 → 90 fps`.
+
+The Pivot row starts with **Motion:**. It reads **Active** or **Releasing**, followed by
+**Continuous** or **Stepped**, **+ Position** while Position Assist moves you, and the profile
+name. Otherwise it reads **Suspended** while an exclusive Snap View holds motion, **Off**, or
+**Disabled** when Pivot is turned off. It shows no angle measurements. Applications with Snap
+Views add a **Snap:** line: **Off**, **Entering**, **Active**, or **Returning**, with
+**Stacked**, **+ Nudge**, the view, and its profile. Without a Snap line, applied nudges show as
+**+ Nudge** on the Motion line, and remain reported while their offset is still applied.
 
 Size ranges from **25–150%**. Choose Teal, Copper, Blue, Violet, Rose, or a custom accent
 using the color wheel, brightness slider, native color picker, or hex field. Presets
@@ -580,8 +1066,8 @@ edits. The trash icon removes the selected preset; **Save Changes** persists the
 Presets do not change enablement, startup visibility, or bindings, and travel with the
 saved configuration rather than becoming application profiles.
 
-Pending changes to Turbo experiments or Quadviews activation appear as a restart notice
-in the expanded layout. Other settings retain the live/restart behavior described on
+Pending changes to Turbo experiments or Quadviews activation, and turning Frame Generation on,
+appear as a restart notice in the expanded layout. Other settings retain the live/restart behavior described on
 their respective pages; this notice is not an exhaustive list of every restart-sensitive
 setting. Settings editing remains in the desktop app.
 
@@ -589,14 +1075,15 @@ setting. Settings editing remains in the desktop app.
 calls over the last 120 frames. FPS is calculated from the average interval; P95 is
 the 95th-percentile interval. Lower, steadier frame times generally indicate smoother
 application cadence. These numbers do not measure GPU execution, compositor FPS, or
-reprojection. Turbo can make application cadence differ from the headset refresh rate.
+reprojection. Turbo and Frame Generation can make application cadence differ from the headset
+refresh rate; with Frame Generation on, **FG ON** beside FPS shows the frames per second the
+headset gets, generated frames included.
 Pauses longer than one second reset the history.
 
 Panel refresh is independent of frame sampling. The default **5 Hz** redraw rate keeps
 the information readable without updating the text every frame; 1–20 Hz is available.
-Drawing runs on a background worker. The panel normally occupies its own composition layer,
-so it stays independent of application resolution and foveation. In VectorXR's synthesized
-D3D11 Quadviews sessions it is drawn into the combined eye images instead. Viewing distance
+Drawing runs on a background worker. The panel occupies its own composition layer in every
+game, so it stays independent of application resolution and foveation. Viewing distance
 changes its stereo depth while preserving its apparent size. The panel follows the headset,
 not the world, and does not appear in every game's desktop mirror. If a refresh cannot
 finish in the current frame, the previous panel image stays on screen until it does.

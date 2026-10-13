@@ -2,7 +2,7 @@
 import { onMounted, onUnmounted } from 'vue'
 
 import PivotSettingsFields from './PivotSettingsFields.vue'
-import type { PivotXRSettings } from '../lib/model'
+import type { PivotSnapStackingStatus, PivotXRSettings } from '../lib/model'
 
 // Full-page editor for one profile's rotation settings; fields mutate the
 // passed-in reactive settings object directly.
@@ -10,6 +10,7 @@ defineProps<{
   settings: PivotXRSettings
   // Names the profile in the breadcrumb/title, e.g. "Default Profile" or "DCS".
   contextLabel: string
+  snapStacking: PivotSnapStackingStatus
 }>()
 
 const emit = defineEmits<{
@@ -59,7 +60,7 @@ onUnmounted(() => {
       </div>
 
       <div class="mt-5">
-        <PivotSettingsFields :settings="settings" />
+        <PivotSettingsFields :settings="settings" :snap-stacking="snapStacking" />
       </div>
 
       <div class="mt-5 flex justify-end border-t pt-4" style="border-color: var(--app-border)">

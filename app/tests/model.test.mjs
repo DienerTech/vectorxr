@@ -19,6 +19,17 @@ const keyboard = (...chord) => ({ type: 'keyboard', chord })
 const none = () => ({ type: 'none' })
 const activation = (behavior, binding) => ({ behavior, binding })
 
+test('Quadviews permits 1% resolution tuning up to 300% focus and rejects values above the cap', () => {
+  const config = defaultConfig()
+  config.modules.quadviews.defaults.focusScale = 3
+  config.modules.quadviews.defaults.peripheralScale = 0.31
+  assert.deepEqual(validateConfig(config), [])
+  config.modules.quadviews.defaults.focusScale = 2.99
+  assert.deepEqual(validateConfig(config), [])
+  config.modules.quadviews.defaults.focusScale = 3.01
+  assert.match(validateConfig(config).join('\n'), /focusScale must be between 0.5 and 3/)
+})
+
 test('replacing a binding input preserves sound enablement and custom files', () => {
   const sound = {
     enabled: true,
@@ -120,22 +131,49 @@ test('legacy Depth settings normalize with Depth Anchor disabled', () => {
 
 test('legacy Depth bindings normalize with the Anchor toggle unbound', () => {
   const config = defaultConfig()
-  delete config.modules.depthxr.bindings.toggleAnchor
+  config.modules.depthxr.bindings = { toggleEnabled: keyboard('Ctrl', 'F8') }
 
   const normalized = normalizeConfig(config)
 
-  assert.deepEqual(normalized.modules.depthxr.bindings.toggleAnchor, none())
+  assert.deepEqual(normalized.modules.depthxr.bindings, { toggleEnabledBindings: [keyboard('Ctrl', 'F8')], toggleAnchorBindings: [] })
+})
+
+test('each module toggle keeps a list of bindings, one per device, and reads single legacy bindings', () => {
+  const device = (deviceGuid, inputPath) => ({ type: 'device', deviceGuid, inputPath, productGuid: '', deviceName: '', inputLabel: '' })
+  const hotas = device('{throttle}', 'button-23')
+  const hosas = device('{left-stick}', 'button-5')
+  const config = defaultConfig()
+  config.core.osd.toggleBindings = [hotas, hosas]
+  config.modules.depthxr.bindings.toggleAnchorBindings = [hotas, hosas]
+  config.modules.turbo.metricsBindings = [hosas, hotas]
+  const normalized = normalizeConfig(JSON.parse(JSON.stringify(config)))
+  assert.deepEqual(normalized.core.osd.toggleBindings, [hotas, hosas])
+  assert.deepEqual(normalized.modules.depthxr.bindings.toggleAnchorBindings, [hotas, hosas])
+  assert.deepEqual(normalized.modules.turbo.metricsBindings, [hosas, hotas])
+  assert.deepEqual(validateConfig(normalized), [])
+
+  // The OSD keeps its default keys when a config names none, but an emptied list stays empty.
+  const legacy = JSON.parse(JSON.stringify(defaultConfig()))
+  delete legacy.core.osd.toggleBindings
+  delete legacy.core.osd.cycleBindings
+  legacy.core.osd.cycleBinding = { type: 'none' }
+  delete legacy.modules.turbo.toggleBindings
+  legacy.modules.turbo.toggleBinding = hotas
+  const migrated = normalizeConfig(legacy)
+  assert.deepEqual(migrated.core.osd.toggleBindings, [keyboard('Ctrl', 'Alt', 'F10')])
+  assert.deepEqual(migrated.core.osd.cycleBindings, [])
+  assert.deepEqual(migrated.modules.turbo.toggleBindings, [hotas])
+  config.core.osd.toggleBindings = []
+  assert.deepEqual(normalizeConfig(JSON.parse(JSON.stringify(config))).core.osd.toggleBindings, [])
 })
 
 test('saved binding warnings scan across modules and profiles without blocking', () => {
   const config = defaultConfig()
-  config.modules.depthxr.bindings.toggleAnchor = keyboard('Shift', 'F8')
-  config.modules.turbo.toggleBinding = keyboard('F8', 'Shift')
+  config.modules.depthxr.bindings.toggleAnchorBindings = [keyboard('Shift', 'F8')]
+  config.modules.turbo.toggleBindings = [keyboard('F8', 'Shift')]
   config.modules.pivotxr.activationBindings = [activation('toggle', keyboard('Shift', 'F8'))]
 
-  const warnings = savedBindingConflictWarnings(config, [
-    config.modules.depthxr.bindings.toggleAnchor,
-  ])
+  const warnings = savedBindingConflictWarnings(config, config.modules.depthxr.bindings.toggleAnchorBindings)
 
   assert.equal(warnings.length, 1)
   assert.match(warnings[0].message, /Depth: Depth Lock A\/B/)
@@ -159,7 +197,7 @@ test('Pivot global warnings suppress conflicts already explained by the local wa
     suppressFocusOnlyConflicts: true,
   }).length, 0)
 
-  config.modules.turbo.toggleBinding = keyboard('Shift', 'F8')
+  config.modules.turbo.toggleBindings = [keyboard('Shift', 'F8')]
   const crossFeatureWarnings = savedBindingConflictWarnings(config, focus, {
     suppressFocusOnlyConflicts: true,
   })
@@ -477,8 +515,8 @@ test('0.15 and 0.15.1 configs preserve existing settings, profiles, and bindings
 
   legacy.modules.depthxr.enabled = true
   legacy.modules.depthxr.defaults = { stereoBoost: 1.37, convergence: -0.22, depthAnchor: true }
-  legacy.modules.depthxr.bindings.toggleEnabled = keyboard('Ctrl', 'F8')
-  legacy.modules.depthxr.bindings.toggleAnchor = keyboard('Alt', 'F8')
+  // 0.15 configs hold one binding per toggle.
+  legacy.modules.depthxr.bindings = { toggleEnabled: keyboard('Ctrl', 'F8'), toggleAnchor: keyboard('Alt', 'F8') }
   legacy.modules.depthxr.profiles = [{
     name: 'DCS Depth',
     enabled: true,
@@ -538,6 +576,8 @@ test('0.15 and 0.15.1 configs preserve existing settings, profiles, and bindings
   delete legacy.modules.quadviews.diagnosticVisualizationBinding
 
   legacy.modules.turbo.enabled = true
+  delete legacy.modules.turbo.toggleBindings
+  delete legacy.modules.turbo.metricsBindings
   legacy.modules.turbo.toggleBinding = keyboard('Shift', 'F12')
   legacy.modules.turbo.pacingMode = 'auto'
   legacy.modules.turbo.runtimePins = { Oculus: 'sequenced' }
@@ -548,7 +588,10 @@ test('0.15 and 0.15.1 configs preserve existing settings, profiles, and bindings
   const normalized = normalizeConfig(legacy)
   assert.deepEqual(normalized.core, { ...legacy.core, osd: defaultConfig().core.osd })
   assert.deepEqual(normalized.applications, legacy.applications)
-  assert.deepEqual(normalized.modules.depthxr, legacy.modules.depthxr)
+  assert.deepEqual(normalized.modules.depthxr, {
+    ...legacy.modules.depthxr,
+    bindings: { toggleEnabledBindings: [keyboard('Ctrl', 'F8')], toggleAnchorBindings: [keyboard('Alt', 'F8')] },
+  })
   assert.deepEqual(normalized.modules.pivotxr.defaults, legacy.modules.pivotxr.defaults)
   assert.deepEqual(normalized.modules.pivotxr.activationBindings, legacy.modules.pivotxr.activationBindings)
   assert.deepEqual(normalized.modules.pivotxr.setOriginBindings, legacy.modules.pivotxr.setOriginBindings)
@@ -557,8 +600,11 @@ test('0.15 and 0.15.1 configs preserve existing settings, profiles, and bindings
   assert.deepEqual(normalized.modules.pivotxr.profiles[0].activationBindings, legacy.modules.pivotxr.profiles[0].activationBindings)
   assert.deepEqual(normalized.modules.quadviews.defaults, legacy.modules.quadviews.defaults)
   assert.deepEqual(normalized.modules.quadviews.profiles, legacy.modules.quadviews.profiles)
+  const { toggleBinding, metricsBinding, ...turbo } = legacy.modules.turbo
   assert.deepEqual(normalized.modules.turbo, {
-    ...legacy.modules.turbo,
+    ...turbo,
+    toggleBindings: [toggleBinding],
+    metricsBindings: [metricsBinding],
     profiles: legacy.modules.turbo.profiles.map(profile => ({ ...profile, disableSafety: false, experimental: defaultConfig().modules.turbo.experimental })),
   })
   assert.deepEqual(normalized.modules.pivotxr.viewControls.quickViews, [])

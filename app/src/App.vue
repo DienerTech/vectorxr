@@ -13,6 +13,7 @@ import AboutTab from './components/tabs/AboutTab.vue'
 import CoreTab from './components/tabs/CoreTab.vue'
 import OsdTab from './components/tabs/OsdTab.vue'
 import DepthXrTab from './components/tabs/DepthXrTab.vue'
+import FrameGenTab from './components/tabs/FrameGenTab.vue'
 import HomeTab from './components/tabs/HomeTab.vue'
 import OpenXrLayersTab from './components/tabs/OpenXrLayersTab.vue'
 import PivotXrTab from './components/tabs/PivotXrTab.vue'
@@ -128,6 +129,13 @@ const tabs = computed(() => [
     subtitle: 'Frame pacing override for stubborn fps caps',
     status: enhancementActive('turbo') ? 'Active' : 'Inactive',
     enhancementActive: enhancementActive('turbo'),
+  },
+  {
+    id: 'framegen' as const,
+    label: 'Frame Generation',
+    subtitle: 'Smoother motion with generated frames',
+    status: enhancementActive('framegen') ? 'Active' : 'Inactive',
+    enhancementActive: enhancementActive('framegen'),
   },
   {
     id: 'pivotxr' as const,
@@ -505,6 +513,15 @@ async function confirmResetConfig() {
           @remove-pivot-profile="store.removePivotProfile"
           @move-pivot-profile="store.movePivotProfile"
           @sync-pivot-profile-name="store.syncPivotProfileName"
+        />
+        <FrameGenTab
+          v-else-if="store.state.activeTab === 'framegen'"
+          :config="store.state.config"
+          :applications="store.state.config.applications"
+          @add-frame-gen-profile="store.addFrameGenProfile"
+          @remove-frame-gen-profile="store.removeFrameGenProfile"
+          @sync-frame-gen-profile-name="store.syncFrameGenProfileName"
+          @navigate="store.setActiveTab"
         />
         <QuadViewsTab
           v-else

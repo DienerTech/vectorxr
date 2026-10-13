@@ -218,6 +218,10 @@
     "osdSettings": {
       "type": "object",
       "additionalProperties": false,
+      "allOf": [
+        { "not": { "required": ["toggleBinding", "toggleBindings"] } },
+        { "not": { "required": ["cycleBinding", "cycleBindings"] } }
+      ],
       "properties": {
         "enabled": {
           "type": "boolean",
@@ -250,6 +254,15 @@
         "showTurbo": {
           "type": "boolean",
           "default": true
+        },
+        "showFramegen": {
+          "type": "boolean",
+          "default": true
+        },
+        "showFramegenFps": {
+          "type": "boolean",
+          "default": true,
+          "description": "Both layouts, in sessions with Frame Generation on: its state (FG ON, STBY, WAIT, PAUSED, OFF or N/A) and the frames per second the headset shows, beside the FPS value."
         },
         "showModules": {
           "type": "boolean",
@@ -309,8 +322,16 @@
         "toggleBinding": {
           "$ref": "#/$defs/inputBinding"
         },
+        "toggleBindings": {
+          "$ref": "#/$defs/inputBindings",
+          "description": "Any one of the list's bindings acts (one per device, say a HOTAS's and a HOSAS's). Configs hold one binding, or none, under toggleBinding instead, which layers before binding lists read; never both."
+        },
         "cycleBinding": {
           "$ref": "#/$defs/inputBinding"
+        },
+        "cycleBindings": {
+          "$ref": "#/$defs/inputBindings",
+          "description": "Any one of the list's bindings acts (one per device, say a HOTAS's and a HOSAS's). Configs hold one binding, or none, under cycleBinding instead, which layers before binding lists read; never both."
         },
         "compactShowBrand": {
           "type": "boolean",
@@ -322,7 +343,12 @@
         },
         "compactMetrics": {
           "type": "string",
-          "enum": ["all", "fps", "frameTime", "none"],
+          "enum": [
+            "all",
+            "fps",
+            "frameTime",
+            "none"
+          ],
           "default": "all"
         },
         "compactShowRuntime": {
@@ -336,6 +362,11 @@
         "compactShowTurbo": {
           "type": "boolean",
           "description": "Show Turbo in the compact status row. Defaults to false."
+        },
+        "compactShowFramegen": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show Frame Generation in the compact status rows. Defaults to false."
         },
         "compactShowPivot": {
           "type": "boolean",
@@ -361,10 +392,12 @@
         "bodyOrder": {
           "type": "array",
           "uniqueItems": true,
+          "description": "Expanded-layout row order. Rows missing from a saved order are appended at the end in default order.",
           "items": {
             "enum": [
               "graph",
               "turbo",
+              "framegen",
               "pivot",
               "modules"
             ]
@@ -372,6 +405,7 @@
           "default": [
             "graph",
             "turbo",
+            "framegen",
             "pivot",
             "modules"
           ]
@@ -420,6 +454,15 @@
                   "showTurbo": {
                     "type": "boolean",
                     "default": true
+                  },
+                  "showFramegen": {
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "showFramegenFps": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Both layouts, in sessions with Frame Generation on: its state (FG ON, STBY, WAIT, PAUSED, OFF or N/A) and the frames per second the headset shows, beside the FPS value."
                   },
                   "showModules": {
                     "type": "boolean",
@@ -486,7 +529,12 @@
                   },
                   "compactMetrics": {
                     "type": "string",
-                    "enum": ["all", "fps", "frameTime", "none"],
+                    "enum": [
+                      "all",
+                      "fps",
+                      "frameTime",
+                      "none"
+                    ],
                     "default": "all"
                   },
                   "compactShowRuntime": {
@@ -500,6 +548,11 @@
                   "compactShowTurbo": {
                     "type": "boolean",
                     "description": "Show Turbo in the compact status row. Defaults to false."
+                  },
+                  "compactShowFramegen": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Show Frame Generation in the compact status rows. Defaults to false."
                   },
                   "compactShowPivot": {
                     "type": "boolean",
@@ -529,6 +582,7 @@
                       "enum": [
                         "graph",
                         "turbo",
+                        "framegen",
                         "pivot",
                         "modules"
                       ]
@@ -536,6 +590,7 @@
                     "default": [
                       "graph",
                       "turbo",
+                      "framegen",
                       "pivot",
                       "modules"
                     ]
@@ -644,15 +699,35 @@
     "depthxrBindings": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "toggleEnabled"
+      "allOf": [
+        { "not": { "required": ["toggleAnchor", "toggleAnchorBindings"] } }
+      ],
+      "oneOf": [
+        {
+          "required": [
+            "toggleEnabled"
+          ]
+        },
+        {
+          "required": [
+            "toggleEnabledBindings"
+          ]
+        }
       ],
       "properties": {
         "toggleEnabled": {
           "$ref": "#/$defs/inputBinding"
         },
+        "toggleEnabledBindings": {
+          "$ref": "#/$defs/inputBindings",
+          "description": "Any one of the list's bindings acts (one per device, say a HOTAS's and a HOSAS's). Configs hold one binding, or none, under toggleEnabled instead, which layers before binding lists read; never both."
+        },
         "toggleAnchor": {
           "$ref": "#/$defs/inputBinding"
+        },
+        "toggleAnchorBindings": {
+          "$ref": "#/$defs/inputBindings",
+          "description": "Any one of the list's bindings acts (one per device, say a HOTAS's and a HOSAS's). Configs hold one binding, or none, under toggleAnchor instead, which layers before binding lists read; never both."
         }
       }
     },
@@ -706,6 +781,12 @@
           "type": "number",
           "minimum": 0.0,
           "maximum": 180.0
+        },
+        "deadzoneTransitionDegrees": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 180,
+          "default": 0
         }
       }
     },
@@ -866,6 +947,25 @@
         },
         "pitchDownStep": {
           "$ref": "#/$defs/pivotStepTuning"
+        },
+        "deadzoneTransitionDegrees": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 180,
+          "default": 0
+        },
+        "pitchDeadzoneTransitionDegrees": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 180,
+          "default": 0
+        },
+        "applyMotionToSnapViews": {
+          "type": "boolean",
+          "default": false
+        },
+        "positionAssist": {
+          "$ref": "#/$defs/pivotPositionAssist"
         }
       }
     },
@@ -1212,7 +1312,7 @@
         "focusScale": {
           "type": "number",
           "minimum": 0.5,
-          "maximum": 2.0
+          "maximum": 3.0
         },
         "peripheralScale": {
           "type": "number",
@@ -1311,6 +1411,10 @@
     "turboModule": {
       "type": "object",
       "additionalProperties": false,
+      "allOf": [
+        { "not": { "required": ["toggleBinding", "toggleBindings"] } },
+        { "not": { "required": ["metricsBinding", "metricsBindings"] } }
+      ],
       "properties": {
         "experimental": {
           "type": "object",
@@ -1371,8 +1475,16 @@
         "toggleBinding": {
           "$ref": "#/$defs/inputBinding"
         },
+        "toggleBindings": {
+          "$ref": "#/$defs/inputBindings",
+          "description": "Any one of the list's bindings acts (one per device, say a HOTAS's and a HOSAS's). Configs hold one binding, or none, under toggleBinding instead, which layers before binding lists read; never both."
+        },
         "metricsBinding": {
           "$ref": "#/$defs/inputBinding"
+        },
+        "metricsBindings": {
+          "$ref": "#/$defs/inputBindings",
+          "description": "Any one of the list's bindings acts (one per device, say a HOTAS's and a HOSAS's). Configs hold one binding, or none, under metricsBinding instead, which layers before binding lists read; never both."
         },
         "pacingMode": {
           "enum": [
@@ -1476,6 +1588,149 @@
         }
       }
     },
+    "framegenSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Frame Generation tuning. Every field applies live during play.",
+      "properties": {
+        "synthesisMode": {
+          "type": "string",
+          "enum": [
+            "interpolate",
+            "extrapolate"
+          ],
+          "default": "interpolate",
+          "description": "interpolate blends between the previous and newest real frame (smoothest, fewest artifacts, a little added latency); extrapolate pushes the newest real frame forward along its motion (lowest latency, more edge artifacts; best with motionEstimation hardware)."
+        },
+        "flowQuality": {
+          "type": "string",
+          "enum": [
+            "performance",
+            "balanced",
+            "quality"
+          ],
+          "default": "balanced",
+          "description": "Optical-flow resolution: 1/16, 1/8, or 1/4 of the eye image."
+        },
+        "motionEstimation": {
+          "type": "string",
+          "enum": [
+            "shader",
+            "hardware"
+          ],
+          "default": "shader",
+          "description": "How motion is measured: block matching on the shader cores (any GPU), or the optical flow accelerator of NVIDIA RTX GPUs (recommended where available, and needed for extrapolate to look its best; shader is used where it cannot be)."
+        },
+        "frameMultiplier": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "dynamic",
+            "2x",
+            "3x",
+            "4x"
+          ],
+          "default": "dynamic",
+          "description": "How the game's frame rate relates to the headset's. dynamic (default) holds the game at no fixed rate: it runs as fast as it can and generated frames fill the refreshes between its frames (where that is unavailable it behaves as auto). The fixed rates hold the game at a fraction of the headset refresh rate: 2x at 1/2 (one generated frame between real frames), 3x at 1/3 (two), 4x at 1/4 (three); auto picks among them as the game needs and passes frames straight through when the game already holds full refresh. Higher multipliers produce more artifacts."
+        },
+        "artifactSuppression": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "default": 50,
+          "description": "Higher values fall back to the real image sooner where motion is uncertain."
+        },
+        "motionLimitPercent": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 25,
+          "default": 10,
+          "description": "Largest content shift, in percent of view width, a generated frame may apply."
+        }
+      }
+    },
+    "framegenProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "enabled",
+        "applicationIds",
+        "settings"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "Session-latched: turning a profile on or off applies when the VR application next starts."
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "custom",
+            "disable"
+          ],
+          "deprecated": true,
+          "description": "Legacy profile mode accepted by the layer for parity with other modules. The desktop app does not write it."
+        },
+        "applicationIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "uniqueItems": true
+        },
+        "settings": {
+          "$ref": "#/$defs/framegenSettings"
+        }
+      }
+    },
+    "framegenModule": {
+      "type": "object",
+      "additionalProperties": false,
+      "allOf": [
+        { "not": { "required": ["toggleBinding", "toggleBindings"] } }
+      ],
+      "description": "Experimental Frame Generation. Optional; configs without it use the defaults.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Default Profile. Session-latched: applies when the VR application next starts."
+        },
+        "toggleBinding": {
+          "$ref": "#/$defs/inputBinding",
+          "description": "Optional in-session A/B toggle. Only effective in sessions that started with Frame Generation on."
+        },
+        "toggleBindings": {
+          "$ref": "#/$defs/inputBindings",
+          "description": "Optional in-session A/B toggle bindings. Only effective in sessions that started with Frame Generation on. Any one of the list's bindings acts (one per device, say a HOTAS's and a HOSAS's). Configs hold one binding, or none, under toggleBinding instead, which layers before binding lists read; never both."
+        },
+        "diagnosticView": {
+          "type": "string",
+          "enum": [
+            "off",
+            "flow",
+            "confidence",
+            "tint"
+          ],
+          "default": "off"
+        },
+        "defaults": {
+          "$ref": "#/$defs/framegenSettings"
+        },
+        "profiles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/framegenProfile"
+          }
+        }
+      }
+    },
     "modules": {
       "type": "object",
       "additionalProperties": false,
@@ -1496,6 +1751,74 @@
         },
         "quadviews": {
           "$ref": "#/$defs/quadviewsModule"
+        },
+        "framegen": {
+          "$ref": "#/$defs/framegenModule"
+        }
+      }
+    },
+    "pivotPositionDirection": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "rightCm": {
+          "type": "number",
+          "minimum": -100,
+          "maximum": 100,
+          "default": 0
+        },
+        "upCm": {
+          "type": "number",
+          "minimum": -100,
+          "maximum": 100,
+          "default": 0
+        },
+        "forwardCm": {
+          "type": "number",
+          "minimum": -100,
+          "maximum": 100,
+          "default": 0
+        },
+        "startAngleDegrees": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 179,
+          "default": 15
+        },
+        "fullAngleDegrees": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 180,
+          "default": 60
+        }
+      }
+    },
+    "pivotPositionAssist": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "advancedDirections": {
+          "type": "boolean",
+          "default": false
+        },
+        "yaw": {
+          "$ref": "#/$defs/pivotPositionDirection"
+        },
+        "yawLeft": {
+          "$ref": "#/$defs/pivotPositionDirection"
+        },
+        "yawRight": {
+          "$ref": "#/$defs/pivotPositionDirection"
+        },
+        "pitchUp": {
+          "$ref": "#/$defs/pivotPositionDirection"
+        },
+        "pitchDown": {
+          "$ref": "#/$defs/pivotPositionDirection"
         }
       }
     }

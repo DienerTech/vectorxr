@@ -34,6 +34,8 @@ struct OsdMetric {
 struct OsdMeasurements {
     OsdMetric prepare, append, raster, acquire, wait, upload, release, submit, cadence, age;
     std::uint64_t submitted{}, refreshed{}, no_render{}, layer_limit{}, image_timeouts{}, upload_busy{}, worker_busy{}, failures{}, frame_rejections{};
+    // Frames a world-anchored panel went out head-locked: its head pose was not located.
+    std::uint64_t anchor_fallbacks{};
 };
 
 struct OsdDispatch {
@@ -46,6 +48,7 @@ struct OsdDispatch {
     PFN_xrDestroySwapchain destroy{};
     PFN_xrCreateReferenceSpace create_space{};
     PFN_xrDestroySpace destroy_space{};
+    PFN_xrLocateSpace locate{};
 };
 
 struct OsdSnapshot {
@@ -53,6 +56,21 @@ struct OsdSnapshot {
     bool experimental{false};
     std::string pivot;
     std::string compact_pivot;
+    // Snap View line; empty (and not drawn) for apps without Snap Views.
+    std::string pivot_secondary;
+    std::string compact_pivot_secondary;
+    std::string framegen{"Disabled"};
+    std::string compact_framegen{"Disabled"};
+    // A second, smaller line under the expanded row (what the game's depth
+    // does), empty for none.
+    std::string framegen_detail;
+    // The expanded row is shown only in sessions with Frame Generation on.
+    bool framegen_session{false};
+    // Beside the FPS counter in those sessions: Frame Generation's state (ON,
+    // STBY, WAIT, PAUSED, OFF or N/A) and, while it generates, the frames per
+    // second the headset shows (0 otherwise).
+    std::string framegen_badge;
+    double framegen_fps{0.0};
 };
 
 struct OsdPresentation {
@@ -84,11 +102,24 @@ struct OsdBitmap {
 };
 
 struct OsdCompactLayout {
-    int width{240}, height{}, header_y{-1}, metrics_y{-1}, status_y{-1}, turbo_y{-1}, pivot_y{-1};
+    int width{240}, height{}, header_y{-1}, metrics_y{-1}, status_y{-1}, turbo_y{-1}, framegen_y{-1}, pivot_y{-1};
+    int status_value_x{128};
+    int frame_time_x{262};
     std::array<int,4> header_x{-1,-1,-1,-1};
-    bool fps{}, frame_time{}, empty{};
+    // framegen_badge: Frame Generation's badge sits beside the FPS value.
+    bool fps{}, frame_time{}, empty{}, framegen_badge{};
 };
-OsdCompactLayout CompactOsdLayout(const OsdSettings&);
+// What a compact layout must make room for beyond the settings. Named fields,
+// not bare bools: 0.19 (the Pivot snap line) and Frame Generation (the FPS
+// badge) each added one, and a positional bool compiled with either meaning.
+struct OsdCompactLayoutOptions {
+    // The second Pivot row used when Snap Views exist.
+    bool pivot_snap_line{false};
+    // The session started with Frame Generation on, so the FPS value has room
+    // for its badge when settings show it.
+    bool framegen_session{false};
+};
+OsdCompactLayout CompactOsdLayout(const OsdSettings&, const OsdCompactLayoutOptions& options = {});
 
 // Produces premultiplied sRGB pixels for an sRGB OpenXR swapchain.
 OsdBitmap RasterizeOsd(const OsdSettings&, bool compact, const OsdSnapshot&, const OsdTelemetry&, bool rgba);
@@ -113,10 +144,19 @@ class OsdRenderer {
         bool toggle_down, bool cycle_down, std::uint64_t settings_revision = 0);
     bool SnapshotDue() const;
     // The returned layer and its image remain valid until the next Append/Shutdown.
-    // Only called on the application's end-frame thread, after game-layer transforms.
+    // Called for every runtime xrEndFrame, after game-layer transforms: on the
+    // application's end-frame thread, or Frame Generation's presenter thread.
+    // Makes runtime calls (swapchain images; a world-anchored panel's space and
+    // head location) under the renderer's lock.
     const XrCompositionLayerBaseHeader* Append(const XrFrameEndInfo&, bool should_render);
     OsdStatus Status() const;
-    std::shared_ptr<const OsdBitmap> PresentedBitmap(bool& rgba) const;
+    // Places the panel in the world at each frame's head pose, located at
+    // that frame's own display time, instead of in the VIEW space. A runtime
+    // that draws a VIEW quad at the pose its frame carries, then turns the
+    // whole image to the display pose, moves a head-locked panel by the turn
+    // in between; generated frames carry their real frame's pose. Reset by
+    // InitializeGraphics.
+    void SetWorldAnchored(bool);
   private:
     void ShutdownLocked();
     bool CreateResources();
@@ -129,6 +169,9 @@ class OsdRenderer {
     XrSession session_{XR_NULL_HANDLE};
     XrSwapchain swapchain_{XR_NULL_HANDLE};
     XrSpace space_{XR_NULL_HANDLE};
+    // LOCAL, created by Append once the panel is world-anchored.
+    XrSpace anchor_space_{XR_NULL_HANDLE};
+    bool world_anchored_{false}, anchor_failed_{false}, anchor_logged_{false};
     std::unique_ptr<OsdGraphics> graphics_;
     OsdDispatch api_;
     std::uint32_t max_layers_{};
@@ -147,7 +190,7 @@ class OsdRenderer {
     std::chrono::steady_clock::time_point image_updated_{};
     XrCompositionLayerQuad quad_{XR_TYPE_COMPOSITION_LAYER_QUAD};
     // This worker touches only CPU pixels. OpenXR and graphics uploads remain on the
-    // application thread. No frame waits for text drawing or font setup.
+    // thread that ends frames. No frame waits for text drawing or font setup.
     struct RasterRequest {
         OsdSettings settings;
         bool compact{}, rgba{};
@@ -159,7 +202,6 @@ class OsdRenderer {
     std::condition_variable raster_cv_;
     bool raster_stop_{false}, raster_requested_{false};
     std::optional<RasterRequest> raster_request_;
-    std::shared_ptr<const OsdBitmap> presented_bitmap_;
     std::optional<OsdBitmap> raster_completed_, upload_;
     Logger* logger_{};
     std::string identity_;

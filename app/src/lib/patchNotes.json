@@ -1,5 +1,114 @@
 [
   {
+    "version": "0.19.0",
+    "date": "2026-10-13",
+    "title": "Experimental Frame Generation, Plus Pivot and Turbo Upgrades",
+    "summary": "Adds experimental Frame Generation: VectorXR fills the refreshes a game misses with generated frames, so your headset gets a fresh image every refresh even when the game can't keep up, in Direct3D 11, Direct3D 12, and Vulkan games. Also lets Pivot's Enhanced Motion keep working inside Snap Views, adds Position Assist and soft deadzones, keeps games running when the runtime rejects a Turbo frame, and makes Quadviews eye tracking more dependable.",
+    "items": [
+      {
+        "html": "<strong>Online games with anti-cheat</strong>",
+        "items": [
+          "Using VectorXR in online games with anti-cheat, including Star Citizen, is at your own risk, and that includes your game account. Official releases are code-signed, and VectorXR has run under Star Citizen's Easy Anti-Cheat in testing, but no game developer has endorsed it, and a developer can change what its anti-cheat allows at any time.",
+          "Report problems with VectorXR, Frame Generation included, to VectorXR rather than to the game's developer."
+        ]
+      },
+      {
+        "html": "<strong>Frame Generation (experimental)</strong>",
+        "items": [
+          {
+            "html": "<em>What it does</em>",
+            "items": [
+              "A new <strong>Frame Generation</strong> page adds generated frames between a game's frames, so the headset gets a fresh image every refresh even when the game renders fewer. It works in Direct3D 11, Direct3D 12, and Vulkan games, in stereo or with Quadviews.",
+              "It stays off until you turn it on for a game: add a profile for the game on the Frame Generation page, save, and restart the game. Turning it off applies at once. The page's <strong>Setup guide</strong> walks through the steps."
+            ]
+          },
+          {
+            "html": "<em>Frame rate and mode</em>",
+            "items": [
+              "<strong>Dynamic</strong> (the default) lets the game run as fast as it can and fills the refreshes it misses; it stands by while the game holds the refresh rate on its own. <strong>Fixed</strong> holds the game at 1/2, 1/3, or 1/4 of the refresh rate (<strong>2x</strong>, <strong>3x</strong>, <strong>4x</strong>) or chooses among them (<strong>Auto</strong>).",
+              "<strong>Interpolate</strong> (the default) has the fewest artifacts and shows everything about one game frame later; it measures motion on the GPU's shader cores. <strong>Extrapolate</strong> adds no latency and shows more edge artifacts; on NVIDIA RTX 20-50 GPUs it can measure motion with the GPU's optical flow hardware (<strong>Motion source: NVIDIA hardware</strong>), which it needs to look its best.",
+              "In Direct3D 12 games that send depth to the headset, such as MSFS 2024 with <strong>Motion reprojection: Depth</strong>, generated frames use it, so cockpit instruments and text stay still as your head moves.",
+              "<strong>Advanced</strong> settings tune flow quality, artifact suppression, and the motion limit."
+            ]
+          },
+          {
+            "html": "<em>Seeing it work</em>",
+            "items": [
+              "The On-Screen Display shows <strong>FG ON</strong> and the frames per second the headset gets beside its FPS (or <strong>FG STBY</strong>, <strong>FG WAIT</strong>, <strong>FG PAUSED</strong>, <strong>FG OFF</strong>, <strong>FG N/A</strong>), a Frame Generation row in the expanded layout, and an optional status line in the compact one.",
+              "The Frame Generation page lists running games with their live status. <strong>Diagnostic view</strong> can tint generated frames or overlay motion and confidence, and an optional <strong>A/B toggle</strong> binding switches generated frames off and on in game."
+            ]
+          },
+          {
+            "html": "<em>Before you turn it on</em>",
+            "items": [
+              "Turn off runtime smoothing (SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW, Meta ASW) for games that use Frame Generation, and keep the runtime at full refresh. Check both the runtime and the headset's own software: SteamVR showing Motion Smoothing as <strong>Not Supported</strong> says nothing about Pimax Play's settings, for example. If the runtime still holds Frame Generation's frames to half rate, the On-Screen Display's expanded layout reads <strong>Runtime holds frames to half rate: check its smoothing</strong>, the log names the settings that can do this, and Dynamic holds off until the runtime gives every refresh again.",
+              "Get the game to at least half the headset's refresh rate on its own first, for example 45 fps at 90 Hz. Frame Generation fills the gap from there; below it, artifacts grow quickly.",
+              "Turbo stays off in sessions where Frame Generation runs and reads <strong>Paused for Frame Generation</strong>; your Turbo profiles are not changed."
+            ]
+          },
+          {
+            "html": "<em>Hardware and limits</em>",
+            "items": [
+              "So far tested on an NVIDIA RTX 5090 with a Pimax Crystal Super on PiOpenXR and SteamVR, in DCS (Direct3D 11 with Quadviews), MSFS 2024 (Direct3D 12), and Star Citizen (Vulkan). AMD and Intel GPUs are untested: the Shader motion source works on any GPU, but the bridges that carry Direct3D 11 and Vulkan games to Frame Generation have not been verified on AMD.",
+              "It needs video memory for the real frames it keeps (three to five, about 6 bytes per pixel per eye each) and for its output images: about 3 to 4 GB in all at 6864x6908 per eye (about 4 to 5 GB for Direct3D 11 and Vulkan games, whose bridge keeps a shared copy of the game's images), and under 1 GB at 3000x3000. The log reports what it uses.",
+              "Known limits: it does not use game motion vectors or mask HUDs yet, so text, HUDs, and gauges can shimmer on generated frames, and fast motion and newly revealed areas can warp, more so with Extrapolate.",
+              "On SteamVR with Pimax's own SteamVR driver, the On-Screen Display can lag behind head turns or show a double image while Frame Generation runs. Hide it with its binding (<strong>Ctrl+Alt+F10</strong> by default) if it gets in the way.",
+              "In DCS with Quadviews, the Quadviews diagnostic visualization is unavailable while Frame Generation is on for the game, because Frame Generation composes the quad views itself. Turn Frame Generation off for the game and restart the game to use the visualization.",
+              "When you report a problem, say whether Frame Generation was on, and attach <strong>Export Debug</strong> from Home."
+            ]
+          }
+        ]
+      },
+      {
+        "html": "<strong>Pivot</strong>",
+        "items": [
+          "New <strong>Apply Enhanced Motion to Snap Views</strong>: a motion profile can keep its rotation assistance and Position Assist working around a selected Snap View for the same application. Motion profiles without it keep Snap Views exclusive, as before.",
+          "New <strong>Position Assist</strong> adds sideways lean, height, and forward/back movement as you turn, with start and full-offset angles, Gentle and Strong starting points, and optional per-direction tuning. It stays level and follows the snapped view.",
+          "New <strong>Deadzone Transition</strong> eases sensitivity in beyond the deadzone instead of switching at its edge, for all directions or each direction separately.",
+          "Instant (0 s) Snap View and nudge transitions apply on the next frame, keeping both eyes and tracked controllers in step.",
+          "Snap View profiles no longer take part in activation or Always Active, and a control shared by an activation, a Snap View, and a nudge triggers only one of them. Only the profile that owns the nudges, the selected Snap View or the engaged motion profile, responds to nudge input.",
+          "The OSD shows Snap View state on a second Pivot line when the application has Snap Views."
+        ]
+      },
+      {
+        "html": "<strong>Turbo</strong>",
+        "items": [
+          "Runtime frame errors no longer stop the game: Turbo re-establishes the frame on the game's own frame thread and continues with Sequenced pacing for the session. Recovered faults appear in the Turbo Safety fault log and do not block Turbo.",
+          "Async pacing on runtimes that reject early frame calls, such as Windows Mixed Reality, now waits for a late runtime frame instead of dropping it with an error.",
+          "Ending a VR session, quitting the game, or a game resizing its render targets can no longer hang on a pending Turbo frame."
+        ]
+      },
+      {
+        "html": "<strong>Controllers and bindings</strong>",
+        "items": [
+          "The On-Screen Display, Depth, Depth Lock, Turbo, Turbo metrics capture, and Frame Generation toggles each take several bindings, one for each device you fly with, so swapping a HOTAS for a HOSAS keeps them working. Any one of a toggle's bindings acts."
+        ]
+      },
+      {
+        "html": "<strong>Quadviews</strong>",
+        "items": [
+          "Eye tracking works alongside games that set up their own eye-tracking bindings, recovers after the headset loses and regains focus, and keeps working when a game recreates its VR session. The log now explains why gaze is unavailable when it is.",
+          "Focus Resolution goes up to 300% and both resolutions adjust in 1% steps. Above 200% the app explains the extra GPU memory and compositing cost.",
+          "In DCS with Quadviews, the On-Screen Display is now its own layer, as in every other game. On Pimax headsets its edges can now show the same slight color fringing as in other games."
+        ]
+      },
+      {
+        "html": "<strong>Diagnostics</strong>",
+        "items": [
+          "With <strong>Log Level: Debug</strong>, a flight recorder keeps recent frame-call history and freezes snapshots of stalls, faults, and recoveries, and, with Frame Generation on, of Dynamic stand-downs and runtime halving, so problems that appear after a long session can be reported with <strong>Export Debug</strong>.",
+          "Export Debug keeps every session's main log ahead of older recorder history.",
+          "Each session's log names the graphics card, its driver version and video memory, and the OpenXR runtime in a <strong>Session graphics</strong> line, with a second line for the Direct3D 12 device Frame Generation uses in Direct3D 11 and Vulkan games."
+        ]
+      },
+      {
+        "html": "<strong>Going back to an earlier version</strong>",
+        "items": [
+          "Earlier versions of VectorXR can't read the settings this version saves, even with Frame Generation off, and turn every enhancement off when they meet them. Export your settings before upgrading; to go back, follow the steps in this release's notes on GitHub."
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.18.0",
     "date": "2026-09-29",
     "title": "In-Headset OSD, Sharper Pivot Views, and Turbo Timing Controls",

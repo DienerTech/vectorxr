@@ -79,6 +79,10 @@ DepthXrResolvedSettings ResolveDepthXrSettings(const ConfigDocument& config, std
 
 void ApplyPivotSettings(PivotXrResolvedProfile& resolved, const PivotXrSettings& settings) {
     resolved.smoothing = settings.smoothing;
+    resolved.apply_motion_to_snap_views = settings.apply_motion_to_snap_views;
+    resolved.position_assist = settings.position_assist;
+    resolved.yaw_deadzone_transition_degrees = settings.yaw_deadzone_transition_degrees;
+    resolved.pitch_deadzone_transition_degrees = settings.pitch_deadzone_transition_degrees;
     resolved.activation_ramp_seconds = settings.activation_ramp_seconds;
     resolved.yaw_rotation_multiplier = settings.yaw_rotation_multiplier;
     resolved.yaw_deadzone_degrees = settings.yaw_deadzone_degrees;
@@ -101,9 +105,9 @@ void ApplyPivotSettings(PivotXrResolvedProfile& resolved, const PivotXrSettings&
         resolved.pitch_step_negative = settings.pitch_down_step;
     } else {
         const PivotAxisTuning yaw{settings.yaw_rotation_multiplier, settings.yaw_deadzone_degrees,
-                                  settings.yaw_max_extra_degrees};
+                                  settings.yaw_max_extra_degrees, settings.yaw_deadzone_transition_degrees};
         const PivotAxisTuning pitch{settings.pitch_rotation_multiplier, settings.pitch_deadzone_degrees,
-                                    settings.pitch_max_extra_degrees};
+                                    settings.pitch_max_extra_degrees, settings.pitch_deadzone_transition_degrees};
         resolved.yaw_positive = yaw;
         resolved.yaw_negative = yaw;
         resolved.pitch_positive = pitch;
@@ -145,7 +149,10 @@ std::vector<PivotActivationBinding> FilterUnclaimedActivationBindings(
         });
         const bool claimed_earlier = std::any_of(
             earlier_profiles.begin(), earlier_profiles.end(), [&](const PivotXrResolvedProfile& earlier) {
-                return std::any_of(earlier.activation_bindings.begin(), earlier.activation_bindings.end(),
+                // Snap View profiles have no motion activation, so they never
+                // claim a binding from a later motion profile.
+                return earlier.behavior == PivotProfileBehavior::EnhancedMotion &&
+                       std::any_of(earlier.activation_bindings.begin(), earlier.activation_bindings.end(),
                                    [&](const PivotActivationBinding& earlier_binding) {
                                        return SameActivationInput(earlier_binding.binding, binding);
                                    });
@@ -215,6 +222,7 @@ PivotXrResolvedSettings ResolvePivotXrSettings(const ConfigDocument& config, std
             }
 
             PivotXrResolvedProfile candidate;
+            candidate.id = profile.id.empty() ? profile.name : profile.id;
             candidate.name = profile.name;
             candidate.behavior = profile.behavior;
             candidate.nudge_set_id = profile.nudge_set_id;
@@ -236,6 +244,7 @@ PivotXrResolvedSettings ResolvePivotXrSettings(const ConfigDocument& config, std
     // participates when no custom profile targets this application.
     if (resolved.profiles.empty() && config.pivotxr.enabled) {
         PivotXrResolvedProfile candidate;
+        candidate.id = "default";
         candidate.name = "Default";
         candidate.behavior = config.pivotxr.behavior;
         candidate.nudge_set_id = config.pivotxr.nudge_set_id;
@@ -311,11 +320,11 @@ TurboResolvedSettings ResolveTurboSettings(const ConfigDocument& config, std::st
     TurboResolvedSettings resolved;
     resolved.enabled = config.turbo.enabled;
     resolved.interrupted_session_recovery = config.turbo.interrupted_session_recovery;
-    resolved.toggle_binding = config.turbo.toggle_binding;
+    resolved.toggle_bindings = config.turbo.toggle_bindings;
     resolved.pacing_mode = config.turbo.pacing_mode;
     resolved.runtime_pins = config.turbo.runtime_pins;
     resolved.metrics_mode = config.turbo.metrics_mode;
-    resolved.metrics_binding = config.turbo.metrics_binding;
+    resolved.metrics_bindings = config.turbo.metrics_bindings;
 
     const RegisteredApplication* application = FindMatchingApplication(config, exe_name);
     // Pre-release 0.18 configs listed applications under a module-level
@@ -352,6 +361,35 @@ TurboResolvedSettings ResolveTurboSettings(const ConfigDocument& config, std::st
     return resolved;
 }
 
+const FrameGenProfile* FindMatchingFrameGenProfile(const ConfigDocument& config, std::string_view exe_name) {
+    const RegisteredApplication* application = FindMatchingApplication(config, exe_name);
+    if (!application) {
+        return nullptr;
+    }
+    for (const FrameGenProfile& profile : config.framegen.profiles) {
+        if (profile.enabled &&
+            std::find(profile.application_ids.begin(), profile.application_ids.end(), application->id) !=
+                profile.application_ids.end()) {
+            return &profile;
+        }
+    }
+    return nullptr;
+}
+
+FrameGenResolvedSettings ResolveFrameGenSettings(const ConfigDocument& config, std::string_view exe_name) {
+    FrameGenResolvedSettings resolved;
+    resolved.enabled = config.framegen.enabled;
+    resolved.toggle_bindings = config.framegen.toggle_bindings;
+    resolved.diagnostic_view = config.framegen.diagnostic_view;
+    static_cast<FrameGenSettings&>(resolved) = config.framegen.defaults;
+    if (const FrameGenProfile* profile = FindMatchingFrameGenProfile(config, exe_name)) {
+        resolved.enabled = true;
+        resolved.profile_name = profile->name;
+        static_cast<FrameGenSettings&>(resolved) = profile->settings;
+    }
+    return resolved;
+}
+
 ResolvedRuntimeConfig ResolveRuntimeConfig(const ConfigDocument& config, std::string_view exe_name) {
     ResolvedRuntimeConfig resolved;
     resolved.core = config.core;
@@ -360,6 +398,7 @@ ResolvedRuntimeConfig ResolveRuntimeConfig(const ConfigDocument& config, std::st
     resolved.pivotxr = ResolvePivotXrSettings(config, exe_name);
     resolved.quadviews = ResolveQuadViewsSettings(config, exe_name);
     resolved.turbo = ResolveTurboSettings(config, exe_name);
+    resolved.framegen = ResolveFrameGenSettings(config, exe_name);
     return resolved;
 }
 

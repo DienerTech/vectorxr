@@ -7,6 +7,7 @@ import {
   type TurboMetricsSession,
   type VectorXRConfig,
 } from './model'
+import type { GpuCapabilities } from './motionSource'
 
 const localKey = 'vectorxr-config'
 
@@ -224,6 +225,16 @@ export async function exportConfigFile(config: VectorXRConfig): Promise<boolean>
   return true
 }
 
+// Every graphics card, and whether any has NVIDIA's optical flow hardware
+// (checked once per app run).
+export async function loadGpuCapabilities(): Promise<GpuCapabilities> {
+  if (!tauriAvailable()) {
+    return { probed: false, adapters: [], opticalFlow: false, error: 'not running in the VectorXR app' }
+  }
+
+  return invoke<GpuCapabilities>('load_gpu_capabilities')
+}
+
 export async function listInputDevices(): Promise<InputDeviceInfo[]> {
   if (!tauriAvailable()) {
     return []
@@ -406,7 +417,11 @@ export interface RuntimeStatusSession {
   updatedAtUnixMilliseconds: number
   acknowledgedRevision: number
   capabilities: { quadviewsDiagnosticVisualization: boolean; osd?: boolean }
-  state: { osdVisible?: boolean; osdCompact?: boolean; osdMessage?: string; quadviewsDiagnosticVisualization: boolean; turboState?: string; turboReason?: string }
+  // turboState may be 'framegen' when Turbo yields to Frame Generation.
+  // framegenState: 'off' | 'waiting' | 'active' | 'standby' | 'paused' | 'unavailable';
+  // framegenDepth: 'in-use' | 'checking' | 'not-sent' | 'not-readable' | 'empty' | 'unusable', or empty
+  // before generated frames; Frame Generation fields are absent with older layers.
+  state: { osdVisible?: boolean; osdCompact?: boolean; osdMessage?: string; quadviewsDiagnosticVisualization: boolean; turboState?: string; turboReason?: string; framegenState?: string; framegenReason?: string; framegenDepth?: string }
 }
 
 export interface RuntimeStatusEnvelope {

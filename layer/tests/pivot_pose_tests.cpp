@@ -307,6 +307,7 @@ int main() {
             Expect(Close(Peer::Apply(alternate_raw,nullptr,false,Space(3)).position,alternate_raw.position),
                    "Failed reference conversion must not apply an anchor from the wrong space");
         }
+        // Snap View stacking scenarios live in pivot_snap_tests.cpp.
         std::cout << "Pivot pose regression tests passed\n";
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n'; return 1;

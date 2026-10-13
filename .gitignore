@@ -10,6 +10,8 @@ app/src-tauri/resources/vectorxr-layer/
 *.VC.db
 *.VC.opendb
 *.nupkg
+.tmp/
+libraries/
 
 # Local internal planning/working notes (not part of the public repo)
 notes/
@@ -22,6 +24,9 @@ Claude outputs/
 # Versioned GitHub release notes are public artifacts
 !release/notes/
 !release/notes/*.md
+
+# Locally signed test builds, their ledger and signing tools (scripts/Sign-LocalLayer.ps1)
+local-signing/
 
 # Scratch dir from local signature/copyright checks
 .tmp-signature-check/

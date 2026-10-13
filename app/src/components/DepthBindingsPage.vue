@@ -2,7 +2,7 @@
 import { computed, onMounted, onUnmounted } from 'vue'
 
 import BindingConflictWarnings from './BindingConflictWarnings.vue'
-import BindingEditor from './BindingEditor.vue'
+import BindingListEditor from './BindingListEditor.vue'
 import { savedBindingConflictWarnings, type VectorXRConfig } from '../lib/model'
 
 const props = defineProps<{
@@ -14,8 +14,8 @@ const emit = defineEmits<{
 }>()
 
 const warnings = computed(() => savedBindingConflictWarnings(props.config, [
-  props.config.modules.depthxr.bindings.toggleEnabled,
-  props.config.modules.depthxr.bindings.toggleAnchor,
+  ...props.config.modules.depthxr.bindings.toggleEnabledBindings,
+  ...props.config.modules.depthxr.bindings.toggleAnchorBindings,
 ]))
 
 function onKeydown(event: KeyboardEvent) {
@@ -61,17 +61,17 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 
         <BindingConflictWarnings :warnings="warnings" />
 
-        <BindingEditor
-          v-model="config.modules.depthxr.bindings.toggleEnabled"
+        <BindingListEditor
+          v-model="config.modules.depthxr.bindings.toggleEnabledBindings"
           label="Depth A/B Toggle"
-          description="Turn the complete Depth enhancement on or off while in-game, preserving your tuned values for a direct comparison."
+          description="Turn the complete Depth enhancement on or off while in-game, preserving your tuned values for a direct comparison. Add a binding for each device you fly with; any one of them acts."
           none-text="No binding assigned. Depth follows the active profile without an in-game A/B toggle."
         />
 
-        <BindingEditor
-          v-model="config.modules.depthxr.bindings.toggleAnchor"
+        <BindingListEditor
+          v-model="config.modules.depthxr.bindings.toggleAnchorBindings"
           label="Depth Lock A/B Toggle"
-          description="Flip only Depth Lock while Stereo Depth and Convergence remain active. This makes it easier to hear and feel what submission locking contributes to the tuned pairing."
+          description="Flip only Depth Lock while Stereo Depth and Convergence remain active. This makes it easier to hear and feel what submission locking contributes to the tuned pairing. Add a binding for each device you fly with; any one of them acts."
           none-text="No binding assigned. Depth Lock follows the active profile."
           default-activate-sound="depth-lock-on.wav"
           default-deactivate-sound="depth-lock-off.wav"

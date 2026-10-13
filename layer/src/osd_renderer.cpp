@@ -26,6 +26,20 @@ case XR_ERROR_TIME_INVALID:return "XR_ERROR_TIME_INVALID";
 default:return "see OpenXR result code";}}
 double Milliseconds(Clock::time_point start){return std::chrono::duration<double,std::milli>(Clock::now()-start).count();}
 struct MetricTimer { OsdMetric& metric; Clock::time_point start; ~MetricTimer(){metric.Add(Milliseconds(start));} };
+// The panel's VIEW-space pose expressed in the space the head was located in.
+XrPosef PanelInWorld(const XrPosef& panel, const XrPosef& head) {
+    const XrQuaternionf& q=head.orientation; const XrQuaternionf& p=panel.orientation;
+    XrPosef out{};
+    out.orientation={q.w*p.x+q.x*p.w+q.y*p.z-q.z*p.y, q.w*p.y-q.x*p.z+q.y*p.w+q.z*p.x,
+                     q.w*p.z+q.x*p.y-q.y*p.x+q.z*p.w, q.w*p.w-q.x*p.x-q.y*p.y-q.z*p.z};
+    // v + 2w(u x v) + 2u x (u x v), for unit q = (u, w).
+    const XrVector3f& v=panel.position;
+    const float tx=2*(q.y*v.z-q.z*v.y), ty=2*(q.z*v.x-q.x*v.z), tz=2*(q.x*v.y-q.y*v.x);
+    out.position={head.position.x+v.x+q.w*tx+(q.y*tz-q.z*ty),
+                  head.position.y+v.y+q.w*ty+(q.z*tx-q.x*tz),
+                  head.position.z+v.z+q.w*tz+(q.x*ty-q.y*tx)};
+    return out;
+}
 }
 void OsdMetric::Add(double ms){if(!std::isfinite(ms)||ms<0)return;++count;sum+=ms;maximum=std::max(maximum,ms);++histogram[std::min<std::size_t>(255,static_cast<std::size_t>(ms<10?ms/.05:200+(ms-10)/2))];}
 double OsdMetric::P95Upper() const {if(!count)return 0;std::uint64_t total{};for(std::size_t i=0;i<256;++i){total+=histogram[i];if(total>=static_cast<std::uint64_t>(std::ceil(count*.95)))return i==255?maximum:std::min(maximum,(i<200?(i+1)*.05:10+(i-199)*2.0));}return maximum;}
@@ -57,7 +71,7 @@ std::vector<std::pair<LogLevel,std::string>> OsdRenderer::CollectDiagnosticsLock
     for(std::size_t i=0;i<3;++i){const auto& m=measurements_[i];if(!m.prepare.count&&!m.append.count&&!m.failures)continue;
         std::ostringstream out;out<<"OSD summary "<<identity_<<" api="<<(graphics_?graphics_->Name():"Unsupported")<<" mode="<<(i==0?"disabled":i==1?"hidden":"visible")<<" final="<<final<<" windowSeconds="<<seconds
             <<" submitted="<<m.submitted<<" refreshed="<<m.refreshed<<" activeSeconds="<<m.cadence.sum/1000.0<<" effectiveRefreshHz="<<(m.cadence.sum>0?m.refreshed*1000.0/m.cadence.sum:0)<<" noRender="<<m.no_render<<" layerLimit="<<m.layer_limit<<" imageTimeouts="<<m.image_timeouts<<" uploadBusy="<<m.upload_busy<<" workerBusy="<<m.worker_busy<<" failures="<<m.failures
-            <<" frameRejections="<<m.frame_rejections<<metric("prepareCpu",m.prepare)<<metric("appendCpu",m.append)<<metric("appCadence",m.cadence)<<metric("runtimeSubmitCpu",m.submit);
+            <<" frameRejections="<<m.frame_rejections<<" anchor="<<(!world_anchored_?"view":anchor_failed_?"unavailable":"world")<<" anchorFallbacks="<<m.anchor_fallbacks<<metric("prepareCpu",m.prepare)<<metric("appendCpu",m.append)<<metric("appCadence",m.cadence)<<metric("runtimeSubmitCpu",m.submit);
         lines.emplace_back(LogLevel::Info,out.str());
         if(logger_->IsDebugEnabled())lines.emplace_back(LogLevel::Debug,"OSD detail "+identity_+" mode="+(i==0?std::string("disabled"):i==1?"hidden":"visible")+metric("rasterWorkerCpu",m.raster)+metric("acquireCpu",m.acquire)+metric("waitCpu",m.wait)+metric("uploadEnqueueCpu",m.upload)+metric("releaseCpu",m.release)+metric("imageAge",m.age)+"; CPU timings do not measure GPU/compositor execution; p95 bins: 0.05ms below 10ms, 2ms below 120ms, overflow=max");
     }
@@ -87,6 +101,9 @@ namespace {
 bool SameInput(const InputBinding& a, const InputBinding& b) {
     return a.type==b.type && a.chord==b.chord && a.device_guid==b.device_guid && a.input_path==b.input_path && a.product_guid==b.product_guid;
 }
+bool SameInputs(const std::vector<InputBinding>& a, const std::vector<InputBinding>& b) {
+    return std::equal(a.begin(),a.end(),b.begin(),b.end(),SameInput);
+}
 std::wstring Wide(const std::string& s) {
     const int size = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
     std::wstring result(size, L' ');
@@ -113,18 +130,31 @@ struct Canvas {
     void Rect(int x, int y, int w, int h, COLORREF color) {
         const auto brush = CreateSolidBrush(color); RECT r{x,y,x+w,y+h}; FillRect(dc,&r,brush); DeleteObject(brush);
     }
-    void Text(int x, int y, int width, int size, const std::string& text, COLORREF color, bool bold=false) {
-        const auto font = CreateFontW(-size,0,0,0,bold?FW_SEMIBOLD:FW_NORMAL,FALSE,FALSE,FALSE,
+    static HFONT Font(int size, bool bold) {
+        return CreateFontW(-size,0,0,0,bold?FW_SEMIBOLD:FW_NORMAL,FALSE,FALSE,FALSE,
             DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,ANTIALIASED_QUALITY,DEFAULT_PITCH,L"Segoe UI");
+    }
+    void Text(int x, int y, int width, int size, const std::string& text, COLORREF color, bool bold=false) {
+        const auto font = Font(size,bold);
         auto previous = SelectObject(dc,font); SetTextColor(dc,color);
         RECT r{x,y,x+width,y+size+12}; const auto wide=Wide(text);
         DrawTextW(dc,wide.c_str(),static_cast<int>(wide.size()),&r,DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
         SelectObject(dc,previous); DeleteObject(font);
     }
+    // The width Text draws `text` at, in pixels.
+    int Width(int size, const std::string& text, bool bold=false) {
+        const auto font = Font(size,bold);
+        auto previous = SelectObject(dc,font); const auto wide=Wide(text); SIZE extent{};
+        GetTextExtentPoint32W(dc,wide.c_str(),static_cast<int>(wide.size()),&extent);
+        SelectObject(dc,previous); DeleteObject(font);
+        return extent.cx;
+    }
 };
+// The compact FPS value's column, and with Frame Generation's badge beside it.
+constexpr int kCompactFpsWidth=210, kCompactFpsBadgeWidth=260;
 }
 
-OsdCompactLayout CompactOsdLayout(const OsdSettings& settings) {
+OsdCompactLayout CompactOsdLayout(const OsdSettings& settings, const OsdCompactLayoutOptions& options) {
     OsdCompactLayout layout;
     const std::array<bool,4> headers{settings.compact_show_brand,settings.compact_show_app,settings.compact_show_runtime,settings.compact_show_clock};
     constexpr std::array<int,4> widths{155,260,297,142};
@@ -132,16 +162,24 @@ OsdCompactLayout CompactOsdLayout(const OsdSettings& settings) {
     for (int i=0;i<4;++i) if(headers[i]) { layout.header_x[i]=x; x+=widths[i]+16; ++count; }
     layout.fps=settings.compact_metrics=="all" || settings.compact_metrics=="fps";
     layout.frame_time=settings.compact_metrics=="all" || settings.compact_metrics=="frameTime";
-    const bool status=settings.compact_show_turbo || settings.compact_show_pivot;
+    // Frame Generation's badge widens the FPS value's column.
+    layout.framegen_badge=layout.fps && options.framegen_session && settings.show_framegen_fps;
+    const int fps_width=layout.framegen_badge?kCompactFpsBadgeWidth:kCompactFpsWidth;
+    layout.frame_time_x=layout.fps?28+fps_width+24:28;
+    const bool status=settings.compact_show_turbo || settings.compact_show_framegen || settings.compact_show_pivot;
     layout.empty=!count && !layout.fps && !layout.frame_time && !status;
     layout.width=std::max({240,count?x+12:0,
-        (layout.fps || layout.frame_time)?56+(layout.fps?210:0)+(layout.frame_time?300:0)+(layout.fps&&layout.frame_time?24:0):0,
+        (layout.fps || layout.frame_time)?56+(layout.fps?fps_width:0)+(layout.frame_time?300:0)+(layout.fps&&layout.frame_time?24:0):0,
         status?520:0});
     if(count) { layout.header_y=y; y+=44; }
     if(layout.fps || layout.frame_time) { layout.metrics_y=y; y+=68; }
+    // Status rows stack Turbo, Frame Gen, then Pivot. "FRAME GEN" is the
+    // widest label, so values move right while that row is shown.
     if(settings.compact_show_turbo) { layout.turbo_y=y; y+=48; }
-    if(settings.compact_show_pivot) { layout.pivot_y=y; y+=48; }
-    layout.status_y=layout.turbo_y>=0?layout.turbo_y:layout.pivot_y;
+    if(settings.compact_show_framegen) { layout.framegen_y=y; y+=48; }
+    if(settings.compact_show_pivot) { layout.pivot_y=y; y+=options.pivot_snap_line?80:48; }
+    layout.status_y=layout.turbo_y>=0?layout.turbo_y:layout.framegen_y>=0?layout.framegen_y:layout.pivot_y;
+    layout.status_value_x=settings.compact_show_framegen?150:128;
     layout.height=layout.empty?80:y+6;
     return layout;
 }
@@ -158,11 +196,16 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
         const auto rgb=std::strtoul(settings.custom_color.c_str()+1,nullptr,16);
         accent=RGB((rgb>>16)&255,(rgb>>8)&255,rgb&255);
     }
-    const auto layout=CompactOsdLayout(settings);
+    // Apps without Snap Views keep the single-line Pivot row.
+    const bool pivot_snap_line=!snapshot.pivot_secondary.empty() || !snapshot.compact_pivot_secondary.empty();
+    const auto layout=CompactOsdLayout(settings,{.pivot_snap_line=pivot_snap_line,.framegen_session=snapshot.framegen_session});
     const int panel_width=compact?layout.width:OsdBitmap::width;
     const int header_shift=(settings.show_brand || settings.show_app || settings.show_runtime || settings.show_clock)?0:40;
+    const int pivot_row_height=pivot_snap_line?84:52;
     const int height=compact?layout.height:210-header_shift+(settings.show_graph?156:0)+
-        (settings.show_turbo?52:0)+(settings.show_pivot?52:0)+(settings.show_modules?52:0)+(!snapshot.restart.empty()?48:0);
+        (settings.show_turbo?52:0)+(settings.show_framegen&&snapshot.framegen_session?(snapshot.framegen_detail.empty()?52:80):0)+
+        (settings.show_pivot?pivot_row_height:0)+(settings.show_modules?52:0)+
+        (!snapshot.restart.empty()?48:0);
     OsdBitmap output; output.height=height; output.content_width=panel_width;
     Canvas canvas(output.width,height);
     if (!canvas.bits || !canvas.dc) return output;
@@ -172,23 +215,49 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
     if (settings.clock_format=="12") snprintf(clock_label,sizeof(clock_label),"%u:%02u %s",time.wHour%12?time.wHour%12:12,time.wMinute,time.wHour<12?"AM":"PM");
     else snprintf(clock_label,sizeof(clock_label),"%02u:%02u",time.wHour,time.wMinute);
     const auto mean=telemetry.Mean();
+    const std::string fps=Number(mean>0?1000/mean:0,0);
+    // Frame Generation's badge beside an FPS value: its state, in the accent
+    // while it generates, over the frames per second the headset shows. Two
+    // lines span the value's digits; a state alone sits at their middle.
+    const auto framegen_badge=[&](int x,int top,int size,int first,int second,int single,int width) {
+        if (snapshot.framegen_badge.empty() || width<=0) return;
+        const bool on=snapshot.framegen_badge=="ON";
+        const std::string state="FG "+snapshot.framegen_badge;
+        if (on && snapshot.framegen_fps>0) {
+            canvas.Text(x,top+first,width,size,state,accent,true);
+            canvas.Text(x,top+second,width,size,Number(snapshot.framegen_fps,0)+" fps",white,true);
+        } else canvas.Text(x,top+single,width,size,state,on?accent:muted,true);
+    };
     if (compact) {
         constexpr std::array<int,4> widths{155,260,297,142};
         const std::array<std::string,4> values{"VECTORXR",snapshot.application,snapshot.runtime,clock_label};
         for(int i=0;i<4;++i) if(layout.header_x[i]>=0)
             canvas.Text(layout.header_x[i],layout.header_y,widths[i],i==0?22:21,values[i],i==0?accent:muted,i==0);
-        if(layout.fps) canvas.Text(28,layout.metrics_y,210,40,Number(mean>0?1000/mean:0,0)+" fps",white,true);
-        if(layout.frame_time) canvas.Text(layout.fps?262:28,layout.metrics_y,300,40,Number(mean)+" ms avg",white,true);
+        if(layout.fps) {
+            const int column=layout.framegen_badge?kCompactFpsBadgeWidth:kCompactFpsWidth;
+            canvas.Text(28,layout.metrics_y,column,40,fps+" fps",white,true);
+            if(layout.framegen_badge) {
+                const int x=28+canvas.Width(40,fps+" fps",true)+14;
+                framegen_badge(x,layout.metrics_y,20,2,26,14,28+column-x);
+            }
+        }
+        if(layout.frame_time) canvas.Text(layout.frame_time_x,layout.metrics_y,300,40,Number(mean)+" ms avg",white,true);
         if(layout.status_y>=0) {
             const int y=layout.status_y;
             if(y>18) canvas.Rect(28,y-8,panel_width-56,1,inset);
+            const int value_x=layout.status_value_x;
             if(settings.compact_show_turbo) {
                 canvas.Text(30,layout.turbo_y+2,90,20,"TURBO",muted);
-                canvas.Text(128,layout.turbo_y,panel_width-156,24,snapshot.turbo+(snapshot.experimental?" / EXP":""),accent,true);
+                canvas.Text(value_x,layout.turbo_y,panel_width-value_x-28,24,snapshot.turbo+(snapshot.experimental?" / EXP":""),accent,true);
+            }
+            if(settings.compact_show_framegen) {
+                canvas.Text(30,layout.framegen_y+2,118,20,"FRAME GEN",muted);
+                canvas.Text(value_x,layout.framegen_y,panel_width-value_x-28,24,snapshot.compact_framegen,white,true);
             }
             if(settings.compact_show_pivot) {
                 canvas.Text(30,layout.pivot_y+2,80,20,"PIVOT",muted);
-                canvas.Text(128,layout.pivot_y,panel_width-156,24,snapshot.compact_pivot.empty()?snapshot.pivot:snapshot.compact_pivot,white,true);
+                canvas.Text(value_x,layout.pivot_y,panel_width-value_x-28,24,snapshot.compact_pivot.empty()?snapshot.pivot:snapshot.compact_pivot,white,true);
+                if(pivot_snap_line) canvas.Text(value_x,layout.pivot_y+32,panel_width-value_x-28,24,snapshot.compact_pivot_secondary.empty()?snapshot.pivot_secondary:snapshot.compact_pivot_secondary,white,true);
             }
         }
     } else {
@@ -199,7 +268,11 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
         if(settings.show_app) canvas.Text(app_x,18,runtime_x-app_x-16,21,snapshot.application,muted);
         if(settings.show_runtime) canvas.Text(runtime_x,18,clock_x-runtime_x-18,21,snapshot.runtime,muted);
         if(settings.show_clock) canvas.Text(clock_x,18,142,21,clock_label,muted);
-        canvas.Text(28,57-header_shift,265,68,Number(mean>0?1000/mean:0,0),white,true);
+        canvas.Text(28,57-header_shift,265,68,fps,white,true);
+        if(settings.show_framegen_fps && snapshot.framegen_session) {
+            const int x=28+canvas.Width(68,fps,true)+16;
+            framegen_badge(x,57-header_shift,24,17,46,31,315-x);
+        }
         canvas.Text(325,57-header_shift,280,68,Number(mean)+" ms",white,true);
         canvas.Text(655,57-header_shift,276,68,Number(telemetry.Percentile95())+" ms",accent,true);
         canvas.Text(30,141-header_shift,270,20,"APP FPS",muted);
@@ -223,11 +296,18 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
                     if (first) { MoveToEx(canvas.dc,x,py,nullptr); first=false; } else LineTo(canvas.dc,x,py);
                 }
                 SelectObject(canvas.dc,old); DeleteObject(pen); y+=156;
-            } else if ((row=="turbo" && settings.show_turbo) || (row=="pivot" && settings.show_pivot) || (row=="modules" && settings.show_modules)) {
-                const auto label=row=="turbo"?"TURBO":row=="pivot"?"PIVOT":"ENHANCEMENTS";
-                const auto value=row=="turbo"?snapshot.turbo+(snapshot.experimental?" / EXPERIMENTAL":""):row=="pivot"?snapshot.pivot:snapshot.modules;
+            } else if ((row=="turbo" && settings.show_turbo) || (row=="framegen" && settings.show_framegen && snapshot.framegen_session) ||
+                       (row=="pivot" && settings.show_pivot) || (row=="modules" && settings.show_modules)) {
+                const auto label=row=="turbo"?"TURBO":row=="framegen"?"FRAME GEN":row=="pivot"?"PIVOT":"ENHANCEMENTS";
+                const auto value=row=="turbo"?snapshot.turbo+(snapshot.experimental?" / EXPERIMENTAL":""):
+                    row=="framegen"?snapshot.framegen:row=="pivot"?snapshot.pivot:snapshot.modules;
                 canvas.Text(30,y,210,20,label,muted);
-                canvas.Text(242,y,680,24,value,row=="turbo"?accent:white,true); y+=52;
+                canvas.Text(242,y,680,24,value,row=="turbo"?accent:white,true);
+                if(row=="pivot" && pivot_snap_line) { canvas.Text(242,y+32,680,24,snapshot.pivot_secondary,white,true); y+=32; }
+                y+=52;
+                if (row=="framegen" && !snapshot.framegen_detail.empty()) {
+                    canvas.Text(242,y-22,680,20,snapshot.framegen_detail,muted); y+=28;
+                }
             }
         }
         if (!snapshot.restart.empty()) canvas.Text(30,y,902,20,"RESTART PENDING  /  "+snapshot.restart,RGB(245,185,108));
@@ -324,12 +404,14 @@ void OsdRenderer::ShutdownLocked() {
     }
     raster_cv_.notify_one();
     if (raster_thread_.joinable()) raster_thread_.join();
-    raster_stop_=false; raster_requested_=false; raster_request_.reset(); raster_completed_.reset(); upload_.reset(); presented_bitmap_.reset();
+    raster_stop_=false; raster_requested_=false; raster_request_.reset(); raster_completed_.reset(); upload_.reset();
     if(graphics_) graphics_->Reset();
     if (swapchain_ && api_.destroy) api_.destroy(swapchain_);
     if (space_ && api_.destroy_space) api_.destroy_space(space_);
-    swapchain_=XR_NULL_HANDLE; space_=XR_NULL_HANDLE; session_=XR_NULL_HANDLE;
     WriteDiagnostics(logger_,CollectDiagnosticsLocked(true)); graphics_.reset();
+    if (anchor_space_ && api_.destroy_space) api_.destroy_space(anchor_space_);
+    swapchain_=XR_NULL_HANDLE; space_=XR_NULL_HANDLE; anchor_space_=XR_NULL_HANDLE; session_=XR_NULL_HANDLE;
+    anchor_failed_=false; anchor_logged_=false;
     acquired_.reset(); acquired_waited_=false; ready_=false; failed_=false; configured_=false; primed_=false;
     telemetry_={}; status_={}; updated_={}; image_updated_={};
 }
@@ -358,7 +440,7 @@ void OsdRenderer::Initialize(XrSession session, ID3D11Device* device, std::uint3
 }
 void OsdRenderer::InitializeGraphics(XrSession session,const void* chain,std::uint32_t max_layers,OsdDispatch api,Logger* logger,std::string identity) {
     std::scoped_lock lock(mutex_);ShutdownLocked();
-    session_=session;max_layers_=max_layers;api_=api;logger_=logger;identity_=std::move(identity);
+    session_=session;max_layers_=max_layers;api_=api;logger_=logger;identity_=std::move(identity);world_anchored_=false;
     measurements_={};events_.clear();dropped_events_=0;report_start_=Clock::now();cadence_last_={};cadence_mode_=3;
     std::string error;graphics_=CreateOsdGraphics(chain,error);
     status_.available=graphics_!=nullptr;status_.message=graphics_?"Disabled":error.empty()?"OSD graphics binding unavailable":error;
@@ -381,13 +463,15 @@ std::pair<OsdPresentation, OsdPresentation> OsdRenderer::Prepare(const OsdSettin
             if(graphics_) graphics_->Reset();
             if (swapchain_ && api_.destroy) api_.destroy(swapchain_);
             if (space_ && api_.destroy_space) api_.destroy_space(space_);
-            swapchain_=XR_NULL_HANDLE; space_=XR_NULL_HANDLE; acquired_.reset(); acquired_waited_=false; ready_=false;
+            if (anchor_space_ && api_.destroy_space) api_.destroy_space(anchor_space_);
+            swapchain_=XR_NULL_HANDLE; space_=XR_NULL_HANDLE; anchor_space_=XR_NULL_HANDLE; anchor_failed_=false;
+            acquired_.reset(); acquired_waited_=false; ready_=false;
         }
         visible_=settings.visible_on_start; compact_=settings.compact; primed_=false; failed_=false; telemetry_={};
     }
     if (settings.compact!=settings_.compact) compact_=settings.compact;
     if (settings.visible_on_start!=settings_.visible_on_start) visible_=settings.visible_on_start;
-    if (!SameInput(settings.toggle_binding,settings_.toggle_binding) || !SameInput(settings.cycle_binding,settings_.cycle_binding)) primed_=false;
+    if (!SameInputs(settings.toggle_bindings,settings_.toggle_bindings) || !SameInputs(settings.cycle_bindings,settings_.cycle_bindings)) primed_=false;
     if (primed_ && settings.enabled) {
         if (toggle && !toggle_down_) visible_=!visible_;
         if (cycle && !cycle_down_) { compact_=!compact_; updated_={}; }
@@ -397,6 +481,8 @@ std::pair<OsdPresentation, OsdPresentation> OsdRenderer::Prepare(const OsdSettin
         (settings.enabled&&visible_)!=status_.shown || settings.update_hz!=settings_.update_hz ||
         settings.scale!=settings_.scale || settings.opacity!=settings_.opacity || settings.body_order!=settings_.body_order ||
         settings.show_graph!=settings_.show_graph || settings.show_turbo!=settings_.show_turbo || settings.show_pivot!=settings_.show_pivot || settings.show_modules!=settings_.show_modules ||
+        settings.show_framegen!=settings_.show_framegen || settings.compact_show_framegen!=settings_.compact_show_framegen ||
+        settings.show_framegen_fps!=settings_.show_framegen_fps ||
         settings.show_runtime!=settings_.show_runtime || settings.show_brand!=settings_.show_brand || settings.show_app!=settings_.show_app || settings.show_clock!=settings_.show_clock || settings.clock_format!=settings_.clock_format ||
         settings.compact_metrics!=settings_.compact_metrics || settings.compact_show_brand!=settings_.compact_show_brand || settings.compact_show_app!=settings_.compact_show_app ||
         settings.compact_show_runtime!=settings_.compact_show_runtime || settings.compact_show_clock!=settings_.compact_show_clock ||
@@ -409,7 +495,7 @@ std::pair<OsdPresentation, OsdPresentation> OsdRenderer::Prepare(const OsdSettin
     if(changed){
         Event(false,"configuration enabled="+std::to_string(settings.enabled)+" shown="+std::to_string(settings.enabled&&visible_)+" compact="+std::to_string(compact_)+
             " refreshHz="+std::to_string(settings.update_hz)+" scale="+std::to_string(settings.scale)+" opacity="+std::to_string(settings.opacity)+
-            " graph="+std::to_string(settings.show_graph)+" turbo="+std::to_string(settings.show_turbo)+" pivot="+std::to_string(settings.show_pivot)+" modules="+std::to_string(settings.show_modules));
+            " graph="+std::to_string(settings.show_graph)+" turbo="+std::to_string(settings.show_turbo)+" framegen="+std::to_string(settings.show_framegen)+" framegenFps="+std::to_string(settings.show_framegen_fps)+" pivot="+std::to_string(settings.show_pivot)+" modules="+std::to_string(settings.show_modules));
         updated_={};
     }
     if (settings.enabled) telemetry_.Tick(Clock::now()); else telemetry_={};
@@ -430,6 +516,7 @@ bool OsdRenderer::CreateResources() {
     // Clean up a failed previous attempt before a user-requested retry.
     if (swapchain_) { api_.destroy(swapchain_); swapchain_=XR_NULL_HANDLE; acquired_.reset(); acquired_waited_=false; ready_=false; }
     if (space_) { api_.destroy_space(space_); space_=XR_NULL_HANDLE; }
+    if (anchor_space_) { api_.destroy_space(anchor_space_); anchor_space_=XR_NULL_HANDLE; }
     std::uint32_t count=0; auto result=api_.formats(session_,0,&count,nullptr);
     if (XR_FAILED(result) || !count) { Fail("OSD formats",result); return false; }
     std::vector<std::int64_t> formats(count); result=api_.formats(session_,count,&count,formats.data());
@@ -521,7 +608,7 @@ const XrCompositionLayerBaseHeader* OsdRenderer::Append(const XrFrameEndInfo& in
                 const auto release_start=Clock::now();const auto released=api_.release(swapchain_,&release);stats.release.Add(Milliseconds(release_start));
                 if (XR_FAILED(released)) { Fail("OSD release",released); return nullptr; }
                 acquired_.reset(); acquired_waited_=false; ++stats.refreshed; ready_=true; image_height_=bitmap.height; image_width_=bitmap.content_width; updated_=now; image_updated_=Clock::now();
-                presented_bitmap_=std::make_shared<OsdBitmap>(std::move(*upload_));upload_.reset();
+                upload_.reset();
             }
         }
     }
@@ -542,13 +629,31 @@ const XrCompositionLayerBaseHeader* OsdRenderer::Append(const XrFrameEndInfo& in
     // Constant angular size when distance changes; depth is independently comfortable.
     quad_.size.width=static_cast<float>(settings_.distance_meters*.55*settings_.scale/100*(image_width_-2)/(OsdBitmap::width-2));
     quad_.size.height=quad_.size.width*(image_height_-2)/(image_width_-2);
+    if (world_anchored_ && !anchor_failed_) {
+        if (!anchor_space_) {
+            XrReferenceSpaceCreateInfo local{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
+            local.referenceSpaceType=XR_REFERENCE_SPACE_TYPE_LOCAL; local.poseInReferenceSpace.orientation.w=1;
+            const auto created=api_.locate?api_.create_space(session_,&local,&anchor_space_):XR_ERROR_FUNCTION_UNSUPPORTED;
+            if (XR_FAILED(created)) {
+                anchor_space_=XR_NULL_HANDLE; anchor_failed_=true;
+                Event(false,"world anchor unavailable XrResult="+std::to_string(created)+"("+XrResultName(created)+"); the panel stays head-locked");
+            }
+        }
+        // The head where this frame is shown: located at its own display
+        // time, never reused for another frame.
+        XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
+        constexpr XrSpaceLocationFlags valid=XR_SPACE_LOCATION_POSITION_VALID_BIT|XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+        if (anchor_space_ && XR_SUCCEEDED(api_.locate(space_,anchor_space_,info.displayTime,&head)) &&
+            (head.locationFlags&valid)==valid) {
+            quad_.space=anchor_space_; quad_.pose=PanelInWorld(quad_.pose,head.pose);
+            if (!anchor_logged_) { anchor_logged_=true; Event(false,"world anchor active space=LOCAL pose=head at each frame's display time"); }
+        } else if (anchor_space_) ++stats.anchor_fallbacks;
+    }
     ++stats.submitted;stats.age.Add(Milliseconds(image_updated_));
     status_.visible=true; status_.message="Visible";
     return reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad_);
 }
 
 OsdStatus OsdRenderer::Status() const { std::scoped_lock lock(mutex_); return status_; }
-std::shared_ptr<const OsdBitmap> OsdRenderer::PresentedBitmap(bool& rgba) const {
-    std::scoped_lock lock(mutex_);rgba=rgba_;return ready_?presented_bitmap_:nullptr;
-}
+void OsdRenderer::SetWorldAnchored(bool anchored) { std::scoped_lock lock(mutex_); world_anchored_=anchored; }
 } // namespace depthxr

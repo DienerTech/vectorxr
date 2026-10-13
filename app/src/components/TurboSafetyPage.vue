@@ -12,7 +12,8 @@ const selected = ref<TurboRecoveryRecord | null>(null)
 function date(value: number) { return value ? new Date(value).toLocaleString() : 'Unknown' }
 function sessionState(state?: string) {
   return ({ 'recovery-disabled': 'Turbo enabled · off after safety block', suspended: 'Turbo enabled · suspended after a fault',
-    async: 'Turbo active · Async', sequenced: 'Turbo active · Sequenced', waiting: 'Turbo waiting to engage', off: 'Turbo off' } as Record<string, string>)[state ?? ''] ?? 'Status unavailable'
+    async: 'Turbo active · Async', sequenced: 'Turbo active · Sequenced', waiting: 'Turbo waiting to engage', off: 'Turbo off',
+    framegen: 'Paused for Frame Generation' } as Record<string, string>)[state ?? ''] ?? 'Status unavailable'
 }
 function onKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape') { if (selected.value) selected.value = null; else emit('close') }
@@ -102,6 +103,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
           <div><dt class="text-muted">Process ID</dt><dd>{{ selected.processId ?? 'Not recorded' }}</dd></div>
         </dl>
         <p v-if="selected.state === 'armed'" class="mt-4 text-xs text-muted">An unclean exit was inferred from a stopped process. This does not establish that Turbo caused a crash.</p>
+        <p v-else-if="selected.state === 'recovered'" class="mt-4 text-xs text-muted">VectorXR recovered from this fault during the same session and kept the game running. It does not block Turbo.</p>
       </section>
     </div>
   </article>
