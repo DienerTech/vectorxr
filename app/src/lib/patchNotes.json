@@ -1,7 +1,7 @@
 [
   {
     "version": "0.19.0",
-    "date": "2026-10-09",
+    "date": "2026-10-13",
     "title": "Experimental Frame Generation, Plus Pivot and Turbo Upgrades",
     "summary": "Adds experimental Frame Generation: VectorXR fills the refreshes a game misses with generated frames, so your headset gets a fresh image every refresh even when the game can't keep up, in Direct3D 11, Direct3D 12, and Vulkan games. Also lets Pivot's Enhanced Motion keep working inside Snap Views, adds Position Assist and soft deadzones, keeps games running when the runtime rejects a Turbo frame, and makes Quadviews eye tracking more dependable.",
     "items": [
