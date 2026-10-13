@@ -6050,7 +6050,7 @@ int D3D12Test() {
         ComPtr<IDXGIAdapter1> adapter;
         for (UINT i = 0; !device && factory->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND; ++i) {
             DXGI_ADAPTER_DESC1 desc{};
-            if (SUCCEEDED(adapter->GetDesc1(&desc)) && !(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) &&
+            if (SUCCEEDED(adapter->GetDesc1(&desc)) && !test_adapter::SoftwareDxgiAdapter(desc) &&
                 SUCCEEDED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device)))) {
                 warp = adapter;
                 char name[128] = {};

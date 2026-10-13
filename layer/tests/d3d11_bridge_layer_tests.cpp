@@ -223,6 +223,20 @@ std::size_t Count(const std::string& text, const std::string& part) {
     return count;
 }
 
+// The layer's own error lines in `log` (not the test's reads of the log), at
+// most `limit`, for a failure's message.
+std::string LayerErrors(const std::string& log, std::size_t limit = 5) {
+    std::string lines;
+    std::istringstream stream(log);
+    for (std::string line; limit > 0 && std::getline(stream, line);) {
+        if (Contains(line, "[error]") && !Contains(line, "[error] D3D11 bridge layer tests: log read")) {
+            lines += "\n  " + line;
+            --limit;
+        }
+    }
+    return lines;
+}
+
 // Logged once for each session the bridge makes Direct3D 12.
 constexpr const char* kBridgedSessionLine =
     "the session is Direct3D 12 and the game renders into images shared with it";
@@ -327,8 +341,14 @@ bool MakeGame(bool hardware, Game& game) {
                 std::cout << why << '\n';
                 return false;
             }
-        } else if (FAILED(factory->EnumAdapters1(0, &adapter))) {
-            return false;
+        } else {
+            // The first hardware adapter: none on a machine with no GPU.
+            std::string why;
+            adapter = test_adapter::FindDxgiAdapter(factory.Get(), "", why);
+            if (!adapter) {
+                std::cout << "no hardware adapter\n";
+                return false;
+            }
         }
     }
     const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
@@ -4388,7 +4408,7 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
           "nothing was refused, failed or paused");
     // The layer logged no error of its own (the test's reads of the log are logged as errors).
     Check(Count(log, "[error]") == Count(log, "[error] D3D11 bridge layer tests: log read"),
-          "the layer logged no error");
+          "the layer logged no error" + LayerErrors(log));
     CheckValidation(game, "depth");
     for (const Target* target : {&session.eyes, &session.ui, &session.depth}) {
         Check(app.api.destroy_swapchain(target->swapchain) == XR_SUCCESS, "a swapchain is destroyed");
@@ -4624,7 +4644,7 @@ bool SoftwareAdapter(const Game& game) {
     DXGI_ADAPTER_DESC1 desc{};
     return FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) ||
            FAILED(factory->EnumAdapterByLuid(game.luid, IID_PPV_ARGS(&adapter))) || FAILED(adapter->GetDesc1(&desc)) ||
-           (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0;
+           test_adapter::SoftwareDxgiAdapter(desc);
 }
 
 } // namespace

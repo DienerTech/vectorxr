@@ -54,6 +54,17 @@ inline std::string Trimmed(std::string_view text) {
     return std::string(text);
 }
 
+// Microsoft's vendor ID: WARP, and the Basic Render Driver of a machine with no
+// GPU.
+inline constexpr UINT kMicrosoftVendorId = 0x1414;
+
+// Whether DXGI's adapter renders on the processor. A hosted CI runner's Basic
+// Render Driver comes without DXGI's software flag, so Microsoft's vendor ID
+// counts too.
+inline bool SoftwareDxgiAdapter(const DXGI_ADAPTER_DESC1& desc) {
+    return (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0 || desc.VendorId == kMicrosoftVendorId;
+}
+
 // A DXGI adapter description (or any UTF-16 text) in UTF-8.
 inline std::string Utf8(const wchar_t* text) {
     const int size = WideCharToMultiByte(CP_UTF8, 0, text, -1, nullptr, 0, nullptr, nullptr);
@@ -113,7 +124,7 @@ Microsoft::WRL::ComPtr<IDXGIAdapter1> FindDxgiAdapter(Enumerate&& enumerate, std
         DXGI_ADAPTER_DESC1 desc{};
         if (FAILED(adapter->GetDesc1(&desc))) continue;
         found.push_back(adapter);
-        adapters.push_back({Utf8(desc.Description), (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0});
+        adapters.push_back({Utf8(desc.Description), SoftwareDxgiAdapter(desc)});
     }
     if (const std::optional<std::size_t> chosen = FirstMatch(adapters, wanted)) return found[*chosen];
     why = NoMatch(wanted, adapters);
