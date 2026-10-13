@@ -7,5 +7,3 @@ Using VectorXR in online games with anti-cheat is at your own risk, and that inc
 Report problems with VectorXR to VectorXR, not to the game's developer.
 
 VectorXR is free, open-source software from DienerTech LLC, licensed under the Mozilla Public License 2.0, which is installed with it as LICENSE.txt. It is provided "as is", without warranty of any kind (sections 6 and 7 of the license).
-
-Click I Agree to confirm that you have read this and accept these risks.
