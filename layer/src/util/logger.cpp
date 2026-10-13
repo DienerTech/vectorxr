@@ -198,11 +198,11 @@ void Logger::PruneLocked() {
             }
             // Incident snapshots: the latest, two previous, and a temporary;
             // Frame Generation snapshots: the latest, one previous, and a
-            // temporary.
+            // temporary; the Frame Generation trace.
             for (const char* suffix : {".flight-recorder.stall.log", ".flight-recorder.stall-1.log",
                                        ".flight-recorder.stall-2.log", ".flight-recorder.stall.log.tmp",
                                        ".flight-recorder.framegen.log", ".flight-recorder.framegen-1.log",
-                                       ".flight-recorder.framegen.log.tmp"}) {
+                                       ".flight-recorder.framegen.log.tmp", ".framegen-trace.csv"}) {
                 auto snapshot = old_log;
                 snapshot.replace_extension(suffix);
                 std::filesystem::remove(snapshot, error);

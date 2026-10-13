@@ -478,6 +478,9 @@ void TestRetention(const std::filesystem::path& root) {
         std::ofstream(depthxr::TurboTimingTrace::SnapshotPath(old, index)) << "old frozen history";
     for (unsigned index = 0; index < depthxr::TurboTimingTrace::kFrameGenSnapshots; ++index)
         std::ofstream(depthxr::TurboTimingTrace::FrameGenSnapshotPath(old, index)) << "old Frame Generation history";
+    auto framegen_trace = old;
+    framegen_trace.replace_extension(".framegen-trace.csv");
+    std::ofstream(framegen_trace) << "old Frame Generation trace";
     std::filesystem::last_write_time(old, std::filesystem::file_time_type::clock::now() - 1h);
     depthxr::Logger logger;
     logger.Initialize(directory / "vectorxr.log");
@@ -490,7 +493,8 @@ void TestRetention(const std::filesystem::path& root) {
           !std::filesystem::exists(depthxr::TurboTimingTrace::SnapshotPath(old, 1)) &&
           !std::filesystem::exists(depthxr::TurboTimingTrace::SnapshotPath(old, 2)) &&
           !std::filesystem::exists(depthxr::TurboTimingTrace::FrameGenSnapshotPath(old, 0)) &&
-          !std::filesystem::exists(depthxr::TurboTimingTrace::FrameGenSnapshotPath(old, 1)),
+          !std::filesystem::exists(depthxr::TurboTimingTrace::FrameGenSnapshotPath(old, 1)) &&
+          !std::filesystem::exists(framegen_trace),
           "Log retention orphaned recorder files");
 }
 }
