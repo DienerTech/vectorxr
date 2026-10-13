@@ -7637,6 +7637,25 @@ void TestOsdDescription() {
     Check(text.row == "Standby  /  Dynamic" && text.detail == "The game runs at 84 fps" && text.badge == "STBY" &&
               text.state == "standby",
           "dynamic stands by: " + text.row);
+    // The runtime's display times do not advance with the time (Varjo's after
+    // a loading stall): standing by and starting say they wait for that.
+    status.runtime_clock_displaced = true;
+    text = describe(status);
+    Check(text.row == "Standby  /  Dynamic" && text.detail == "Waiting for the runtime's frame timing to recover" &&
+              text.reason == "Dynamic" + dot + "game at 84 fps" + dot + "waiting for the runtime's frame timing to recover",
+          "dynamic stands by for the runtime's clock: " + text.detail + " | " + text.reason);
+    {
+        FrameGenStatus starting;
+        starting.state = FrameGenState::kWaiting;
+        starting.runtime_clock_displaced = true;
+        starting.reason = "the runtime's display times ran 2.4 s ahead of the time that passed";
+        const FrameGenOsdText waiting = describe(starting);
+        Check(waiting.row == "Starting" && waiting.badge == "WAIT" &&
+                  waiting.detail == "Waiting for the runtime's frame timing to recover" &&
+                  waiting.reason == "waiting for the runtime's frame timing to recover",
+              "starting waits for the runtime's clock: " + waiting.detail + " | " + waiting.reason);
+    }
+    status.runtime_clock_displaced = false;
     status.quad_declining = true;
     status.reason = "the layer composes the quad views for a while";
     text = describe(status);
