@@ -526,6 +526,7 @@ class FrameGenPresenter {
         FrameCopy copy;            // its layers; the primary projection's views are its own
         std::vector<FrameGenOutputKind> kinds;       // per view
         std::vector<std::array<float, 3>> velocity; // per view (Analysis::velocity)
+        bool depth{false};                          // Analysis::depth
         // Its lead sample (UpdateLeadLocked), taken when a refresh first
         // chooses it: on time only if its game frame had reached the GPU.
         std::uint32_t lead{0};
@@ -735,6 +736,7 @@ class FrameGenPresenter {
         // interval between the two real frames), in its view space, where
         // depth is used (generated frames are seen from where it will be).
         std::vector<std::array<float, 3>> velocity;
+        bool depth{false}; // depth was used for a view
     };
 
     // Generates one frame per fraction into the output swapchain sets from

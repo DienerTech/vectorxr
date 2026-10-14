@@ -2671,6 +2671,55 @@ void TestToggleOffReadsOff() {
     }
 }
 
+// Just in time, frames moved with the eyes (the game's depth in use) say how
+// far in the summary's eyeShiftMm, as frames written together do.
+void TestJitEyeShiftReported() {
+    const std::filesystem::path directory = std::filesystem::temp_directory_path() /
+                                            ("vectorxr-presenter-eyeshift-" + std::to_string(GetCurrentProcessId()));
+    std::error_code ignored;
+    std::filesystem::remove_all(directory, ignored);
+    auto logger = std::make_unique<Logger>();
+    logger->Initialize(directory / "eyeshift.log");
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2, app, runtime, owned,
+             logger.get());
+    presenter.SetSummaryInterval(300ms);
+    app->eye_speed = 0.5;
+    for (int i = 0; i < 3; ++i) app->Frame();
+    const auto start = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - start < 1200ms) {
+        const XrFrameState state = app->Wait();
+        app->Begin();
+        std::this_thread::sleep_for(4ms);
+        app->Release();
+        Check(XR_SUCCEEDED(app->End(state.predictedDisplayTime)), "jit eye shift: end");
+    }
+    presenter.Stop();
+    const std::filesystem::path path = logger->ActiveLogPath();
+    logger.reset(); // flushed
+    std::ifstream file(path);
+    double largest = 0.0;
+    int summaries = 0;
+    const std::string key = "eyeShiftMm=";
+    for (std::string line; std::getline(file, line);) {
+        const std::size_t at = line.find(key);
+        if (line.find("threaded=1") == std::string::npos || at == std::string::npos) continue;
+        ++summaries;
+        largest = std::max(largest, std::stod(line.substr(at + key.size())));
+    }
+    file.close();
+    std::filesystem::remove_all(directory, ignored);
+    // 0.5 m/s, a frame moved half a 45 fps interval on: about 5.6 mm.
+    Check(summaries > 0 && largest > 1.0,
+          "jit eye shift: the summaries say how far frames moved with the eyes (" + std::to_string(largest) +
+              " mm in " + std::to_string(summaries) + " summaries)");
+}
+
 // Extrapolate at 3x, each generated frame written right before its refresh:
 // one output image per eye whatever the multiplier, the game's own frame in
 // its refresh, and every other refresh moved on from it by its time.
@@ -8250,6 +8299,7 @@ int main(int argc, char** argv) {
     RUN(TestThreadedPipelinedApp);
     RUN(TestThreadedInterpolation);
     RUN(TestJitExtrapolation);
+    RUN(TestJitEyeShiftReported);
     RUN(TestJitDynamicExtrapolation);
     RUN(TestJitStaleMotion);
     RUN(TestJitInterpolateCoversLateMotion);
