@@ -425,6 +425,16 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
     endif()
 
     if(DEPTHXR_BUILD_TESTS)
+        # The layer DLL's msvcp140 imports (dumpbin sits beside the linker), without a GPU.
+        get_filename_component(_layer_linker_dir "${CMAKE_LINKER}" DIRECTORY)
+        find_program(DEPTHXR_DUMPBIN dumpbin HINTS "${_layer_linker_dir}")
+        if(DEPTHXR_DUMPBIN)
+            add_test(NAME depthxr_layer_crt_imports_tests
+                     COMMAND "${CMAKE_COMMAND}" "-DDUMPBIN=${DEPTHXR_DUMPBIN}"
+                             -DLAYER=$<TARGET_FILE:XR_APILAYER_DIENERTECH_VECTORXR>
+                             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_crt_imports.cmake")
+            set_tests_properties(depthxr_layer_crt_imports_tests PROPERTIES TIMEOUT 60)
+        endif()
         # FG_TEST_ADAPTER's name matching and environment parsing (test_adapter.h), without a GPU.
         add_executable(depthxr_test_adapter_tests tests/test_adapter_tests.cpp)
         target_compile_definitions(depthxr_test_adapter_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
