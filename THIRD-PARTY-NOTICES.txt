@@ -33,7 +33,7 @@ What this file does not cover
 -----------------------------
 
 - Software that VectorXR uses but does not install, which comes with its own
-  terms: the Microsoft Visual C++ runtime (the layer and the app link it
+  terms: the Windows Universal C Runtime (the app links it
   dynamically), D3DCompiler_47.dll and the other Windows system libraries, the
   Microsoft Edge WebView2 Runtime that shows the app's window (part 2.1
   covers the WebView2 loader in the app, which finds and starts the Runtime),
@@ -48,9 +48,10 @@ What this file does not cover
   interface's code, such as vue-tsc, Autoprefixer and the Tauri CLI. The
   development dependencies that put some of their own code into the
   interface, such as Vite and Tailwind CSS, are listed in part 3.
-- C++ standard library code that the compiler builds into the layer.
-  Microsoft's STL is licensed under Apache-2.0 WITH LLVM-exception, which
-  waives the notice conditions for compiled code.
+- The Microsoft C and C++ runtime code that the compiler builds into the
+  layer (it links the Visual C++ runtime statically) and into the app (its
+  vcruntime part). Microsoft's STL is licensed under Apache-2.0 WITH
+  LLVM-exception, which waives the notice conditions for compiled code.
 - The installer program itself, which the Tauri bundler builds with NSIS.
 
 
