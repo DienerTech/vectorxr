@@ -1982,7 +1982,7 @@ fn load_config() -> Result<ConfigEnvelope, String> {
     let content = fs::read_to_string(&path)
         .map_err(|error| format!("Unable to read {}: {error}", path.to_string_lossy()))?;
     let config = normalize_config(
-        serde_json::from_str::<VectorXRConfig>(&content)
+        parse_config(&content)
             .map_err(|error| format!("Unable to parse {}: {error}", path.to_string_lossy()))?,
     );
 
@@ -1992,17 +1992,50 @@ fn load_config() -> Result<ConfigEnvelope, String> {
     })
 }
 
+// The layer reads a whole number written as a float (a hand-edited
+// "opacity": 90.0) into its integer settings; serde rejects it for the app's
+// u32 fields, so the app could not open a config the layer runs with. Such
+// numbers are read as integers on a second try; float fields take integers
+// unchanged. The first try's error is returned, as it carries the line and
+// column.
+fn parse_config(content: &str) -> Result<VectorXRConfig, serde_json::Error> {
+    fn whole_floats_as_integers(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Number(number) if number.is_f64() => {
+                let float = number.as_f64().unwrap_or(f64::NAN);
+                if float.fract() == 0.0 && float.abs() <= 9_007_199_254_740_992.0 {
+                    *value = serde_json::Value::from(float as i64);
+                }
+            }
+            serde_json::Value::Array(items) => items.iter_mut().for_each(whole_floats_as_integers),
+            serde_json::Value::Object(fields) => {
+                fields.values_mut().for_each(whole_floats_as_integers)
+            }
+            _ => {}
+        }
+    }
+
+    let error = match serde_json::from_str::<VectorXRConfig>(content) {
+        Ok(config) => return Ok(config),
+        Err(error) => error,
+    };
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(content) else {
+        return Err(error);
+    };
+    whole_floats_as_integers(&mut value);
+    serde_json::from_value::<VectorXRConfig>(value).map_err(|_| error)
+}
+
 // Copies a config the app cannot parse to settings.unreadable-<ms>.json
 // before it is replaced. The pre-0.16 backup is written once, so it does not
-// hold a later hand edit (a JSON slip, or a whole number written as 90.0 that
-// the layer accepts but the app's integer fields reject).
+// hold a later hand edit (a JSON slip, or a value of the wrong type).
 fn preserve_unreadable_config(path: &Path) -> Result<Option<PathBuf>, String> {
     if !path.exists() {
         return Ok(None);
     }
     let readable = fs::read_to_string(path)
         .ok()
-        .is_some_and(|content| serde_json::from_str::<VectorXRConfig>(&content).is_ok());
+        .is_some_and(|content| parse_config(&content).is_ok());
     if readable {
         return Ok(None);
     }
@@ -3431,9 +3464,9 @@ mod tests {
         super::write_config_document(&config_path, &saved).unwrap();
         assert!(unreadable_files().is_empty());
 
-        // The layer accepts 90.0 for an integer; the app does not, so the
-        // hand-edited file is kept before the app's defaults replace it.
-        let hand_edited = saved.replacen("\"opacity\": 90", "\"opacity\": 90.0", 1);
+        // A hand edit the app cannot read (here a value of the wrong type) is
+        // kept before the app's defaults replace it.
+        let hand_edited = saved.replacen("\"opacity\": 90", "\"opacity\": \"90%\"", 1);
         assert_ne!(hand_edited, saved, "fixture should change the OSD opacity");
         std::fs::write(&config_path, &hand_edited).unwrap();
         super::write_config_document(&config_path, &saved).unwrap();
@@ -3442,6 +3475,23 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&kept[0]).unwrap(), hand_edited);
         assert_eq!(std::fs::read_to_string(&config_path).unwrap(), saved);
         std::fs::remove_dir_all(directory).expect("temporary directory should be removed");
+    }
+
+    #[test]
+    fn whole_numbers_written_as_floats_load_like_the_layer_reads_them() {
+        let saved = serde_json::to_string_pretty(&default_config()).unwrap();
+        let hand_edited = saved
+            .replacen("\"opacity\": 90", "\"opacity\": 80.0", 1)
+            .replacen("\"updateHz\": 5", "\"updateHz\": 10.0", 1);
+        assert_ne!(hand_edited, saved, "fixture should change the OSD");
+        let config = super::parse_config(&hand_edited).expect("90.0-style integers should load");
+        assert_eq!(config.core.osd.opacity, 80);
+        assert_eq!(config.core.osd.update_hz, 10);
+
+        // A fraction is still an error, with the first parse's line and column.
+        let fractional = saved.replacen("\"opacity\": 90", "\"opacity\": 80.5", 1);
+        let error = super::parse_config(&fractional).unwrap_err().to_string();
+        assert!(error.contains("line"), "{error}");
     }
 
     #[test]
