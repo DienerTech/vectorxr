@@ -4,6 +4,7 @@
 #include <optional>
 #include <span>
 #include <string_view>
+#include <vector>
 
 namespace depthxr {
 
@@ -51,6 +52,14 @@ EyeGazeRequestDecision DecideEyeGazeExtensionRequest(const EyeGazeRequestPolicyI
 std::string_view EyeGazeProbeStateName(EyeGazeProbeState state);
 std::string_view EyeGazeRequestReasonName(EyeGazeRequestReason reason);
 bool ShouldRetryWithoutInjectedEyeGaze(bool injected_request, bool extension_related_failure);
+// The extension lists an instance creation is tried with, in order, after the
+// runtime refused `first` over an extension: `first` without each of the
+// layer's own `additions` (those in `first`) on its own, in the order given,
+// so a refused addition costs only itself (Frame Generation's
+// XR_KHR_D3D12_enable is not lost to a refused eye-gaze extension), then,
+// with more than one addition, without all of them.
+std::vector<std::vector<const char*>> InstanceExtensionRetries(const std::vector<const char*>& first,
+                                                               std::span<const char* const> additions);
 
 
 std::chrono::milliseconds QuadViewsRecoveryStabilizationDelay(std::string_view runtime_name);

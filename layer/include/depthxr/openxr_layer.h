@@ -119,6 +119,7 @@ class OpenXrLayer {
         bool layer_injected_d3d12{false};
         bool retried_without_d3d12{false};
         XrResult d3d12_retry_result{XR_SUCCESS};
+        bool d3d12_refused_alone{false}; // the instance was created with every other addition
         bool d3d12_enabled{false};
         // The application's Vulkan extension: 2 for XR_KHR_vulkan_enable2, 1
         // for XR_KHR_vulkan_enable, 0 for neither (the Vulkan bridge's

@@ -123,6 +123,36 @@ bool ShouldRetryWithoutInjectedEyeGaze(bool injected_request, bool extension_rel
     return injected_request && extension_related_failure;
 }
 
+std::vector<std::vector<const char*>> InstanceExtensionRetries(const std::vector<const char*>& first,
+                                                               std::span<const char* const> additions) {
+    const auto same = [](const char* lhs, const char* rhs) {
+        return lhs && rhs && std::string_view(lhs) == std::string_view(rhs);
+    };
+    const auto without = [&](const std::vector<const char*>& names, const char* removed) {
+        std::vector<const char*> kept;
+        kept.reserve(names.size());
+        for (const char* name : names) {
+            if (!same(name, removed)) {
+                kept.push_back(name);
+            }
+        }
+        return kept;
+    };
+    std::vector<std::vector<const char*>> retries;
+    std::vector<const char*> all_removed = first;
+    for (const char* addition : additions) {
+        if (std::none_of(first.begin(), first.end(), [&](const char* name) { return same(name, addition); })) {
+            continue;
+        }
+        retries.push_back(without(first, addition));
+        all_removed = without(all_removed, addition);
+    }
+    if (retries.size() > 1) {
+        retries.push_back(std::move(all_removed));
+    }
+    return retries;
+}
+
 
 std::chrono::milliseconds QuadViewsRecoveryStabilizationDelay(std::string_view runtime_name) {
     std::string normalized_name;

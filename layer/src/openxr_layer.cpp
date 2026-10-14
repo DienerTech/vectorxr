@@ -1988,7 +1988,11 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
                                     std::to_string(static_cast<int>(diagnostics.first_create_result)) +
                                     "; created again without it, result " +
                                     std::to_string(static_cast<int>(diagnostics.d3d12_retry_result)) +
-                                    "; which extension the runtime refused is not known); " + without_bridge));
+                                    (diagnostics.d3d12_refused_alone
+                                         ? "; the instance has VectorXR's other additions"
+                                         : "; no single one of VectorXR's additions explained the refusal, so the "
+                                           "instance has the application's own extensions") +
+                                    "); " + without_bridge));
         } else if (diagnostics.d3d12_wanted) {
             logger_.Info("Frame Generation's " + bridge_name +
                          " is unavailable: the runtime does not offer XR_KHR_D3D12_enable; " + without_bridge);

@@ -1,5 +1,7 @@
 #include "depthxr/openxr_layer.h"
+#include "depthxr/runtime_compatibility.h"
 
+#include <algorithm>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -371,6 +373,40 @@ int main() {
         Peer::LogTo(logs / "eye-gaze.log");
         std::error_code error;
         std::filesystem::remove_all(logs, error);
+
+        // An instance the runtime refuses over one of the layer's additions is
+        // created without that one alone: a refused eye-gaze extension must
+        // not take Frame Generation's XR_KHR_D3D12_enable (or the clock) along.
+        using Names = std::vector<std::string>;
+        const char* const d3d11 = "XR_KHR_D3D11_enable";
+        const char* const d3d12 = "XR_KHR_D3D12_enable";
+        const char* const gaze = "XR_EXT_eye_gaze_interaction";
+        const char* const clock_extension = "XR_KHR_win32_convert_performance_counter_time";
+        const std::vector<const char*> first{d3d11, d3d12, gaze, clock_extension};
+        const std::vector<const char*> additions{d3d12, gaze, clock_extension};
+        // The list the instance is created with when the runtime refuses `refused`.
+        const auto created_with = [&](std::initializer_list<const char*> refused) {
+            for (const auto& retry : depthxr::InstanceExtensionRetries(first, additions)) {
+                const bool accepted = std::none_of(retry.begin(), retry.end(), [&](const char* name) {
+                    return std::any_of(refused.begin(), refused.end(),
+                                       [&](const char* no) { return std::string(name) == no; });
+                });
+                if (accepted) return Names(retry.begin(), retry.end());
+            }
+            return Names{};
+        };
+        Expect(created_with({gaze}) == Names{d3d11, d3d12, clock_extension},
+               "a refused eye-gaze extension must keep XR_KHR_D3D12_enable and the clock");
+        Expect(created_with({clock_extension}) == Names{d3d11, d3d12, gaze}, "a refused clock must keep the others");
+        const auto retries = depthxr::InstanceExtensionRetries(first, additions);
+        Expect(retries.size() == 4 &&
+                   Names(retries[0].begin(), retries[0].end()) == Names{d3d11, gaze, clock_extension},
+               "XR_KHR_D3D12_enable is dropped alone on the first retry");
+        Expect(created_with({d3d12, gaze}) == Names{d3d11},
+               "when no single addition explains the refusal, the application's own list is used");
+        const std::vector<const char*> without_clock{d3d11, d3d12};
+        Expect(depthxr::InstanceExtensionRetries(without_clock, additions).size() == 1,
+               "additions the first attempt did not carry are not retried");
         std::cout << "Eye-gaze handshake tests passed.\n";
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }
