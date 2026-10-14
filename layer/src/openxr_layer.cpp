@@ -9073,7 +9073,28 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
 
     // Pruning happens above, while the lock is still held: ForwardEndFrame
     // releases mutex_ before forwarding to the runtime.
-    log_depth_runtime_submission(adjusted_frame_end_info, "rewritten");
+    if (depth_submission_info_pending_ && pending_framegen_quad_ &&
+        pending_framegen_quad_->route == FrameGenQuadRoute::kClaimed) {
+        // A quad views frame Frame Generation claimed reaches the runtime as
+        // the stereo frames it composes, with these eye views (Depth's
+        // geometry restored), not as the four source views it was given.
+        XrCompositionLayerProjection composed{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+        composed.viewCount = static_cast<uint32_t>(pending_framegen_quad_->eyes.size());
+        composed.views = pending_framegen_quad_->eyes.data();
+        std::vector<const XrCompositionLayerBaseHeader*> composed_layers(adjusted_layers);
+        for (const XrCompositionLayerBaseHeader*& layer : composed_layers) {
+            if (layer && layer->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION &&
+                reinterpret_cast<const XrCompositionLayerProjection*>(layer)->viewCount > 0) {
+                layer = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&composed);
+                break;
+            }
+        }
+        XrFrameEndInfo composed_frame = adjusted_frame_end_info;
+        composed_frame.layers = composed_layers.data();
+        log_depth_runtime_submission(composed_frame, "framegen-composed");
+    } else {
+        log_depth_runtime_submission(adjusted_frame_end_info, "rewritten");
+    }
     return ForwardEndFrame(session, &adjusted_frame_end_info, lock);
 }
 
