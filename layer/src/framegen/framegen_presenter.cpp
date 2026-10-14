@@ -95,6 +95,22 @@ std::string MultiplierText(std::uint32_t multiplier) {
     return std::to_string(multiplier) + "x";
 }
 
+// A diagnostic view for the log, with what it draws: one left on looks like
+// a fault (the Confidence view's red was reported as flashing, issue #95),
+// and only the OSD, when shown, names it otherwise.
+std::string DiagnosticViewText(FrameGenDiagnosticView view) {
+    switch (view) {
+    case FrameGenDiagnosticView::kFlow:
+        return "flow (generated frames are colored by the motion measured)";
+    case FrameGenDiagnosticView::kConfidence:
+        return "confidence (generated frames are drawn red where they fall back to the real image)";
+    case FrameGenDiagnosticView::kTint:
+        return "tint (generated frames are tinted)";
+    default:
+        return "off";
+    }
+}
+
 // "twice", "three times": how many times the refresh period.
 std::string TimesText(std::uint32_t times) {
     switch (times) {
@@ -401,6 +417,7 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
         logger_->Info(std::string("Frame Generation enabled for this session: backend=") + gpu_->Name() +
                       ", mode=" + ToString(settings_.synthesis_mode) + ", flowQuality=" + ToString(settings_.flow_quality) +
                       ", motionEstimation=" + ToString(settings_.motion_estimation) +
+                      ", diagnosticView=" + DiagnosticViewText(settings_.diagnostic_view) +
                       "; frame pacing is owned by Frame Generation (Turbo stays off).");
         if (!gpu_gate_setting.empty()) {
             logger_->Info("Frame Generation: GPU-aware pacing set by VECTORXR_FRAMEGEN_GPU_AHEAD=" + gpu_gate_setting +
@@ -648,8 +665,14 @@ void FrameGenPresenter::Configure(const FrameGenResolvedSettings& settings) {
     const bool restart = jit_ && compositor_running_ && settings.synthesis_mode != settings_.synthesis_mode;
     const bool was_dynamic = DynamicLocked();
     const FrameGenMultiplier multiplier = settings_.multiplier;
+    const FrameGenDiagnosticView diagnostic_view = settings_.diagnostic_view;
     settings_ = settings;
     const bool dynamic = DynamicLocked();
+    // Diagnostic views change during play: the log says when.
+    if (started_ && logger_ && settings_.diagnostic_view != diagnostic_view) {
+        logger_->Info("Frame Generation diagnostic view changed: " + DiagnosticViewText(diagnostic_view) + " -> " +
+                      DiagnosticViewText(settings_.diagnostic_view) + ".");
+    }
     if (started_ && (settings_.multiplier != multiplier || dynamic != was_dynamic)) {
         // Switched while running: frames held to the old multiplier say
         // nothing about the game's own rate, so Dynamic and Auto settle and

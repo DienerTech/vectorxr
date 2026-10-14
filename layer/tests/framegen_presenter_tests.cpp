@@ -7220,6 +7220,41 @@ void TestAutoStandsDownForRuntimeHalving() {
               (lines.empty() ? std::string() : ": " + lines.front()) + ")");
 }
 
+// The session's first line names the diagnostic view and what it draws, and
+// a change during play is logged once: a view left on looks like a fault
+// (issue #95's red flashing around the eye-tracked foveation was the
+// Confidence view), and the OSD that names it may be off.
+void TestDiagnosticViewLogged() {
+    const std::string name = "diagnostic view logged";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    SessionLog log("diagnostic-view");
+    FrameGenResolvedSettings settings;
+    settings.enabled = true;
+    settings.synthesis_mode = FrameGenSynthesisMode::kExtrapolate;
+    settings.diagnostic_view = FrameGenDiagnosticView::kConfidence;
+    presenter.Configure(settings);
+    presenter.Start(kSession, nullptr, Dispatch(), log.logger.get(), nullptr,
+                    [&](const void*, std::string&) { return std::make_unique<FakeGpu>(&gpu); });
+    presenter.Configure(settings); // unchanged: nothing more
+    settings.diagnostic_view = FrameGenDiagnosticView::kOff;
+    presenter.Configure(settings);
+    presenter.Stop();
+    const std::vector<std::string> lines = log.Lines("Frame Generation");
+    const auto count = [&](const std::string& text) {
+        return std::count_if(lines.begin(), lines.end(),
+                             [&](const std::string& line) { return line.find(text) != std::string::npos; });
+    };
+    Check(count("Frame Generation enabled for this session") == 1 &&
+              count("diagnosticView=confidence (generated frames are drawn red where they fall back to the real "
+                    "image); frame pacing") == 1,
+          name + ": the session's first line names the view and what it draws");
+    Check(count("Frame Generation diagnostic view changed: confidence (generated frames are drawn red where they "
+                "fall back to the real image) -> off.") == 1 &&
+              count("diagnostic view changed") == 1,
+          name + ": a change is logged once");
+}
+
 // A runtime that blocks every wait until its refresh (as Pimax's own,
 // Meta's and Varjo's do), with a quick xrEndFrame: one of Frame
 // Generation's submissions goes 7 ms late (its xrBeginFrame held up, as a
@@ -8333,6 +8368,7 @@ int main(int argc, char** argv) {
     RUN(TestFailuresRetryAndToggle);
     RUN(TestUncapturedFramesAreSkipped);
     RUN(TestSettingsAndSessionChanges);
+    RUN(TestDiagnosticViewLogged);
     RUN(TestUnavailableWithoutBackend);
     RUN(TestOsdDescription);
     RUN(TestOsdRuntimeHalving);
