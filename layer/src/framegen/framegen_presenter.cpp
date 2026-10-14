@@ -2541,16 +2541,7 @@ XrResult FrameGenPresenter::EndFrame(XrSession session, const XrFrameEndInfo* in
                     ", gpuMs=" + Number(gpu_ms_, 2) + ClockSummaryLocked(start) + DynamicSummaryLocked() +
                     QuadSummaryLocked(start) + ".");
             }
-            last_summary_ = now;
-            summary_totals_ = totals_;
-            summary_standby_seconds_ = standby;
-            app_work_ms_ = 0.0;
-            app_work_frames_ = 0;
-            cycles_ = 0;
-            late_cycles_ = 0;
-            repeated_submissions_ = 0;
-            pause_longest_ms_ = 0.0;
-            end_call_ms_.clear();
+            NewSummaryWindowLocked(now, standby);
         }
     }
     idle_cv_.notify_all();
@@ -5368,9 +5359,18 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
             ", pauses=" + std::to_string(delta(&Totals::pauses)) + "/" + Number(pause_longest_ms_, 0) +
             ClockSummaryLocked(start) + DynamicSummaryLocked() + QuadSummaryLocked(start) + ".");
     }
+    NewSummaryWindowLocked(now, standby);
+}
+
+void FrameGenPresenter::NewSummaryWindowLocked(Clock::time_point now, double standby) {
+    // Both summaries share the window: samples one of them does not print
+    // went into the next window the other printed (a stand-down's presenter
+    // thread samples into the next engagement's summary, F56).
     last_summary_ = now;
     summary_totals_ = totals_;
     summary_standby_seconds_ = standby;
+    cycles_ = 0;
+    late_cycles_ = 0;
     eye_move_sum_mm_ = eye_miss_sum_mm_ = 0.0;
     eye_frames_ = 0;
     gpu_start_ms_.clear();

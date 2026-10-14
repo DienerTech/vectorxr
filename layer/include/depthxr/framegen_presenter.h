@@ -941,6 +941,9 @@ class FrameGenPresenter {
     // Just in time: the frame `choice` shows is its real frame unchanged.
     static bool JitCopyOnly(const JitFrame& frame, const JitChoice& choice);
     void SummaryLocked(std::chrono::steady_clock::time_point now);
+    // Starts the next summary window, the presenter thread's or the inline
+    // one's: every window sample and count either prints starts over.
+    void NewSummaryWindowLocked(std::chrono::steady_clock::time_point now, double standby);
     void StartCompositorLocked(const FrameGenRuntimeCalls& calls);
     // Lets the presenter thread present every frame in flight, then stops it.
     void ExitThreadedLocked(std::unique_lock<std::mutex>& lock);
