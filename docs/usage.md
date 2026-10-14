@@ -583,14 +583,27 @@ last Safety marker, not a confirmed crash time. The Turbo Safety screenshot show
 Before clearing logs, use **Home > Export Debug** to save an **Export Debug Information** ZIP
 when reporting a problem. It includes Turbo metrics, pacing decisions, safety records,
 live and saved runtime diagnostics, current and saved settings, and retained VectorXR logs.
+VectorXR keeps the last Turbo and Frame Generation status of a game that crashed or was closed
+from Task Manager for at least a day, so an export made after relaunching the game still
+includes it.
 With Debug logging, the export also includes continuous recent frame-call history, up to three
 frozen snapshots taken at stalls, faults, and recoveries, and, with Frame Generation on, up to two
-snapshots taken when Dynamic stands down or the runtime holds frames to half rate. These recorder
-files follow the configured log retention. The two most recent sessions' logs, incident snapshots,
-and recent history come first, then the remaining session logs, then those two sessions' Frame
-Generation snapshots, then older recorder history.
-Raw capture is limited to 8 MiB per file and 64 MiB total; the ZIP inventory lists any
-unavailable or limited files. Review the ZIP for private information before sharing it.
+snapshots taken when Dynamic stands down or the runtime holds frames to half rate, plus a
+frame-by-frame Frame Generation trace (`*.framegen-trace.csv`) written beside the session's log.
+These recorder files and traces follow the configured log retention.
+
+The export takes two sessions in full: the two newest that reached a VR session (MSFS 2024 first
+starts a short probe instance whose log does not count), or the two newest logs when none did.
+Logs are captured after the settings and runtime files, in this order, so the size limits cut
+the last ones first: every session log, newest first, with each of the two sessions' incident
+snapshots and recent history right after its log; then those two sessions' Frame Generation
+snapshots; then the Frame Generation trace of the newer of them that has one (no other trace is
+exported); then the older sessions' recorder files.
+Raw capture is limited to 8 MiB per file and 64 MiB total. A log or trace over its limit keeps
+its start (the session header, or the trace's column names) and its end, with a marker where the
+middle was left out; the ZIP inventory lists any unavailable or limited files. The ZIP is
+compressed; logs typically shrink to about a tenth of their size. Review the ZIP for private
+information before sharing it.
 
 Each session's log names the hardware it runs on, right after the runtime creates the VR
 session, in a line starting `Session graphics:`. It gives the graphics API, the graphics card
