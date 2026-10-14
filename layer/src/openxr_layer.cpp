@@ -8346,8 +8346,10 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
          pivotxr_quick_view_transition_.active);
     const std::size_t misses_before_lookup = pivotxr_consecutive_pose_delta_misses_;
     // A frame located before Pivot engaged has no delta (and needs none: the
-    // activation ramp starts from zero). Only a frame that misses after one
-    // matched breaks continuity.
+    // activation ramp starts from zero). A frame that misses after one matched
+    // breaks continuity; before any match, so does a run longer than the frames
+    // located before the press took effect (located and submitted display
+    // times never match).
     const bool pose_delta_continuity_established = pivotxr_last_matched_pose_delta_.has_value();
     const PivotPoseDeltaSelection pose_delta_selection = resolved_settings_.pivotxr.enabled
         ? ResolvePivotPoseDeltaValue(cached_pivot_pose_deltas_,
@@ -8371,7 +8373,9 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         // The first miss of a run is logged; the recovery line counts the rest.
         const bool missed = pose_delta_selection == PivotPoseDeltaSelection::HeldPrevious ||
                             pose_delta_selection == PivotPoseDeltaSelection::None;
-        if (missed && pose_delta_continuity_established && !pivotxr_pose_delta_miss_logged_) {
+        const bool miss_unexpected = pose_delta_continuity_established ||
+                                     pivotxr_consecutive_pose_delta_misses_ > kPivotPoseDeltaEngagementMisses;
+        if (missed && miss_unexpected && !pivotxr_pose_delta_miss_logged_) {
             pivotxr_pose_delta_miss_logged_ = true;
             pending_locate_views_diagnostics_ =
                 std::max<uint32_t>(pending_locate_views_diagnostics_, 5);

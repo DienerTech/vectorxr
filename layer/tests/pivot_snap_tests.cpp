@@ -229,6 +229,8 @@ struct FakeRuntime {
         std::memcpy(buffer, &pending_change, sizeof(pending_change));
         return XR_SUCCESS;
     }
+
+    static XrResult XRAPI_CALL EndFrame(XrSession, const XrFrameEndInfo*) { return XR_SUCCESS; }
 };
 
 depthxr::InputBinding Key(const char* name) {
@@ -497,6 +499,20 @@ public:
         layer.PruneQuadViewsFrames(display_time);
         return allocations;
     }
+
+    // xrEndFrame with no layers for `time`, through a runtime that takes it.
+    static void EndFrameAt(XrTime time) {
+        auto& layer = Layer();
+        layer.next_end_frame_ = &FakeRuntime::EndFrame;
+        layer.turbo_frame_interception_required_.store(false, std::memory_order_release);
+        XrFrameEndInfo info{XR_TYPE_FRAME_END_INFO};
+        info.displayTime = time;
+        info.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+        Expect(layer.EndFrame(kSession, &info) == XR_SUCCESS, "xrEndFrame must succeed");
+    }
+
+    // A pose-delta continuity miss was logged and its run has not recovered.
+    static bool ContinuityMissReported() { return Layer().pivotxr_pose_delta_miss_logged_; }
 
     static std::size_t PendingReferenceChanges() { return Layer().pivotxr_reference_changes_.size(); }
     static void DisablePivot() { Layer().resolved_settings_.pivotxr.enabled = false; }
@@ -1321,6 +1337,45 @@ void HoldAfterAnotherProfileToggledReleases() {
     Expect(!Peer::Engaged(), "Releasing Flight's Hold must release it: no stale Toggle latch may keep it engaged");
 }
 
+// xrEndFrame lookups that find no Pivot delta are reported once per run. The
+// frames an app located before a press took effect miss as expected and stay
+// quiet; a miss after frames matched is reported, and so is a session whose
+// submitted display times never match the located ones.
+void ContinuityMissesAreReportedOnlyWhenUnexpected() {
+    Peer::Start({Motion("Flight", Toggle("F1"), false)});
+    // A pipelined app located two frames before the press took effect.
+    Peer::Drive();
+    const XrTime first = Peer::Now();
+    Peer::Drive();
+    const XrTime second = Peer::Now();
+    Peer::TapActivation(kFlight);
+    const XrTime engaged = Peer::Now();
+    Expect(Peer::Engaged(), "Flight's Toggle must engage it");
+    Peer::EndFrameAt(first);
+    Peer::EndFrameAt(second);
+    Expect(!Peer::ContinuityMissReported(), "Frames located before the press were reported as a continuity miss");
+    Peer::EndFrameAt(engaged);
+    Peer::Drive();
+    Peer::EndFrameAt(Peer::Now() + 20'000'000);
+    Expect(Peer::ContinuityMissReported(), "A miss after frames matched was not reported");
+    Peer::Drive();
+    Peer::EndFrameAt(Peer::Now());
+    Expect(!Peer::ContinuityMissReported(), "A matched frame did not end the reported run");
+
+    // Every frame is submitted 20 ms (beyond the match window) after the time
+    // it was located for: no frame ever matches.
+    Peer::Start({Motion("Flight", Toggle("F1"), false)});
+    Peer::TapActivation(kFlight);
+    for (int frame = 1; frame <= 3; ++frame) {
+        Peer::EndFrameAt(Peer::Now() + 20'000'000);
+        Expect(Peer::ContinuityMissReported() == (frame == 3),
+               "Unmatched frame " + std::to_string(frame) +
+                   (frame == 3 ? " was not reported: located and submitted display times never match"
+                               : " was reported, though a press can follow two located frames"));
+        Peer::Drive();
+    }
+}
+
 struct Scenario {
     const char* name;
     std::function<void()> run;
@@ -1361,6 +1416,7 @@ int main() {
         {"steady locates do not allocate", SteadyLocatesDoNotAllocate},
         {"Hold after another profile's Toggle", HoldAfterAnotherProfileToggledReleases},
         {"recenters while idle or off", RecentersDoNotQueueWhileIdleOrOff},
+        {"continuity misses reported only when unexpected", ContinuityMissesAreReportedOnlyWhenUnexpected},
     };
 
     int failures = 0;
