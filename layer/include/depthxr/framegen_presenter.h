@@ -536,6 +536,9 @@ class FrameGenPresenter {
         std::optional<double> slack_ms;  // how much later its end could have come
         std::uint64_t capture_mark{0};   // FrameGenGpu::CaptureMark covering its views' captures
         bool captured_early{false};      // captured a refresh or more before it was needed
+        // Kept while the refresh it is first needed for was still to come: a
+        // refresh passing over it then missed it, not the frame its refresh.
+        bool ahead{false};
         bool scored{false};
         // Quad views: the claimed frame's composition and eye views (its
         // analyzed views are the four source views); null on the canvas path.
@@ -623,6 +626,9 @@ class FrameGenPresenter {
     std::uint32_t DynamicSetCapLocked() const;
     void UpdateAutoLocked(std::chrono::steady_clock::time_point now, const std::optional<PendingFrame>& frame,
                           bool started_late = false);
+    // Auto, presenting from its own thread: whether the game's own time per
+    // frame (auto_busy_) is within reach of `slots` refreshes a frame.
+    bool AutoProbeInReachLocked(std::uint32_t slots, XrDuration period) const;
     // Dynamic: standing by, engages once the game runs below the refresh
     // rate; engaged, the game keeps its own rate (generated frames fill the
     // refreshes it misses) and Dynamic stands down when Frame Generation
@@ -937,6 +943,9 @@ class FrameGenPresenter {
     // Just in time: the frame `choice` shows is its real frame unchanged.
     static bool JitCopyOnly(const JitFrame& frame, const JitChoice& choice);
     void SummaryLocked(std::chrono::steady_clock::time_point now);
+    // Starts the next summary window, the presenter thread's or the inline
+    // one's: every window sample and count either prints starts over.
+    void NewSummaryWindowLocked(std::chrono::steady_clock::time_point now, double standby);
     void StartCompositorLocked(const FrameGenRuntimeCalls& calls);
     // Lets the presenter thread present every frame in flight, then stops it.
     void ExitThreadedLocked(std::unique_lock<std::mutex>& lock);
@@ -1111,6 +1120,7 @@ class FrameGenPresenter {
     std::chrono::steady_clock::time_point clock_steady_since_{};
     XrDuration clock_gap_{0};                 // the time passed before the wait that displaced it
     std::uint32_t logged_clock_displacements_{0}; // logged one by one up to a few, then only in summaries
+    bool clock_displacement_logged_{false};       // this one was: so is its end
 
     // Automatic multiplier: steps up while the app misses its cadence, probes
     // one step down after a steady stretch, backing off when a probe fails.
@@ -1132,6 +1142,12 @@ class FrameGenPresenter {
     std::chrono::milliseconds probe_backoff_{10000};
     bool probing_{false};
     std::uint32_t probe_from_{0};
+    // Presenting from its own thread: the game's last frames' own time per
+    // frame (from one wait to the next, the cadence's hold left out), ms,
+    // and when the last wait's hold ended (AutoProbeInReachLocked).
+    std::array<double, 32> auto_busy_{};
+    std::size_t auto_busy_count_{0};
+    std::chrono::steady_clock::time_point auto_busy_since_{};
     std::size_t auto_late_percent_{0}; // for the log
     // Auto never steps above this again in the session once video memory
     // ran near its budget: each step up allocates more output images.
