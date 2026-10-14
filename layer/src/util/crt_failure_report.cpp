@@ -97,6 +97,10 @@ void LogFailure(const std::string& message) {
 }
 
 void OnAbort(int) {
+    // The runtime resets SIGABRT to its default before it calls this, and the default fails fast: another
+    // thread's abort() would end the process under the game's crash reporter. Installed again, that abort waits
+    // in ReportAndEnd for this report instead.
+    std::signal(SIGABRT, OnAbort);
     ReportAndEnd("abort() was called (std::terminate calls it, for example when an exception leaves a thread)",
                  kStatusFatalAppExit, FAST_FAIL_FATAL_APP_EXIT);
 }

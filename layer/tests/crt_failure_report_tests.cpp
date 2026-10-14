@@ -2,7 +2,9 @@
 // errors, which fail fast by default. crt_failure_report hands them on. Each case runs in a child process that
 // installs it as the layer does, sets an unhandled-exception filter as a game's crash reporter does, and fails on
 // purpose: the filter must see the failure with its status code, and the log must name it. A child run with
-// --no-reporting shows the default: it fails fast past the filter (exit code 0xC0000409).
+// --no-reporting shows the default: it fails fast past the filter (exit code 0xC0000409). In the
+// concurrent-abort case a second thread aborts while the first report is with the filter: it must wait for that
+// report, not fail fast under it.
 #include "depthxr/crt_failure_report.h"
 #include "depthxr/logger.h"
 
@@ -45,9 +47,11 @@ constexpr Case kCases[] = {
     {L"thread-exception", kStatusFatalAppExit, "abort() was called"},
     {L"invalid-parameter", kStatusInvalidCruntimeParameter, "was given an invalid parameter"},
     {L"pure-call", kStatusFatalAppExit, "a pure virtual function was called"},
+    {L"concurrent-abort", kStatusFatalAppExit, "abort() was called"},
 };
 
 DWORD g_expected_code = 0;
+bool g_abort_during_report = false;
 
 void Expect(bool value, const std::string& message) {
     if (!value) {
@@ -71,9 +75,21 @@ std::string Hex(DWORD value) {
 }
 
 LONG WINAPI GameCrashReporter(EXCEPTION_POINTERS* pointers) {
-    const bool expected = pointers && pointers->ExceptionRecord && pointers->ContextRecord &&
-                          pointers->ExceptionRecord->ExceptionCode == g_expected_code &&
-                          (pointers->ExceptionRecord->ExceptionFlags & EXCEPTION_NONCONTINUABLE) != 0;
+    bool expected = pointers && pointers->ExceptionRecord && pointers->ContextRecord &&
+                    pointers->ExceptionRecord->ExceptionCode == g_expected_code &&
+                    (pointers->ExceptionRecord->ExceptionFlags & EXCEPTION_NONCONTINUABLE) != 0;
+    if (g_abort_during_report) {
+        // Another layer thread aborts while the game writes its report. Failing fast would end the process here
+        // with 0xC0000409; it must wait instead, and never return.
+        const HANDLE aborting = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        std::thread second([aborting] {
+            SetEvent(aborting);
+            std::abort();
+        });
+        expected = expected && WaitForSingleObject(aborting, 5000) == WAIT_OBJECT_0 &&
+                   WaitForSingleObject(second.native_handle(), 1000) == WAIT_TIMEOUT;
+        second.detach();
+    }
     TerminateProcess(GetCurrentProcess(), expected ? kReportedExitCode : kWrongReportExitCode);
     return EXCEPTION_EXECUTE_HANDLER;
 }
@@ -100,6 +116,9 @@ int RunChild(std::wstring_view name, const std::filesystem::path& log_directory,
         }
     }
     if (name == L"abort") {
+        std::abort();
+    } else if (name == L"concurrent-abort") {
+        g_abort_during_report = true;
         std::abort();
     } else if (name == L"thread-exception") {
         std::thread([] { throw std::runtime_error("an exception leaves a layer thread"); }).join();
@@ -180,6 +199,7 @@ int wmain(int argc, wchar_t** argv) {
     std::filesystem::remove_all(root, error);
 
     std::cout << "CRT failure report tests passed: abort, an exception leaving a thread, an invalid parameter and a "
-                 "pure virtual call each reach the crash reporter and the log\n";
+                 "pure virtual call each reach the crash reporter and the log, and an abort during a report waits "
+                 "for it\n";
     return 0;
 }
