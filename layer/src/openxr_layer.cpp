@@ -5936,9 +5936,9 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
                             // waiting on this snapshot. The real runtime wait
                             // itself is retained and cannot be cancelled. Nor
                             // may a runtime that holds it hold the app's frame
-                            // loop: in issue #88 (DCS on Windows Mixed Reality,
-                            // after shouldRender turned FALSE) waiting it out
-                            // froze the game before it reached xrEndSession.
+                            // loop: in issue #88, DCS on Windows Mixed Reality
+                            // froze after shouldRender turned FALSE and never
+                            // reached xrEndSession.
                             const std::chrono::steady_clock::time_point deadline = poll_start + poll_bound;
                             for (;;) {
                                 const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
@@ -5975,8 +5975,8 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
                             mark_wait_polled = false;
                         } else if (poll_timed_out && poll_without_wait) {
                             // The runtime is holding this wait. EndFrame drops
-                            // app frames until it completes; later polls give
-                            // up sooner.
+                            // app frames (each a stall) until it completes;
+                            // later polls give up sooner.
                             turbo_async_held_generation_ = pending_generation;
                             turbo_trace_.Burst();
                             turbo_trace_.Record("poll.stuck", trace_id, pending_generation);
@@ -6576,8 +6576,11 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                     std::scoped_lock lock(turbo_mutex_);
                     turbo_async_held_generation_ = pending_async_generation;
                 }
-                if (turbo_engaged && cadence_countable &&
-                    !turbo_auto_suspended_.load(std::memory_order_relaxed) &&
+                // Every frame the runtime holds the wait is a stall, whatever
+                // the app's cadence: the bounded waits themselves break that
+                // cadence (a held wait costs the app whole seconds), so gating
+                // on it let a held wait never fall back or suspend.
+                if (turbo_engaged && !turbo_auto_suspended_.load(std::memory_order_relaxed) &&
                     HandleTurboDrainTimeout(std::chrono::steady_clock::now())) {
                     SoundPlayer::Instance().PlayTransition(turbo_sound, false, dll_directory_, turbo_sound_volume,
                                                            L"turbo-on.wav", L"turbo-off.wav");

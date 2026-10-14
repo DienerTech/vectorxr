@@ -1424,12 +1424,13 @@ void TestStuckWaitDropsFrameThenResumes() {
     ExpectHealthyFrames(runtime, 16, "Stuck wait");
 }
 
-// Issue #88 (DCS on Windows Mixed Reality): the runtime held Turbo's pipelined
-// wait across a visibility change, and the game's next xrWaitFrame blocked on
-// it until the game was killed, so it never reached xrEndSession. While the
-// runtime holds the wait, every app frame call is now bounded: polls report
-// shouldRender FALSE and frames are dropped. Forwarding resumes in order once
-// the runtime completes the wait.
+// Issue #88 (DCS on Windows Mixed Reality): the game froze after shouldRender
+// turned FALSE and never reached xrEndSession, as it does when the runtime
+// holds Turbo's pipelined wait: the game's next xrWaitFrame waited on it with
+// no bound. While the runtime holds the wait, every app frame call is now
+// bounded: polls report shouldRender FALSE, frames are dropped, and each held
+// frame counts as a stall whatever the app's cadence, so Auto falls back and
+// then suspends. Forwarding resumes in order once the runtime completes it.
 void TestHeldWaitKeepsFrameLoopRunning() {
     FakeRuntime runtime;
     TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
@@ -1457,8 +1458,11 @@ void TestHeldWaitKeepsFrameLoopRunning() {
     Expect(state.shouldRender == XR_FALSE, "A frame the runtime never granted did not report shouldRender FALSE");
 
     // The held wait is not waited for again: each frame (submit, begin, the
-    // overlapping next poll) costs about two drain bounds.
-    for (int frame = 0; frame < 4; ++frame) {
+    // overlapping next poll) costs about two drain bounds. Probing Auto falls
+    // back to sequenced pacing after two held frames, and sequenced pacing
+    // suspends Turbo after three more.
+    int frames = 0;
+    while (!depthxr::TurboFrameTestPeer::AutoSuspended() && frames < 8) {
         start = std::chrono::steady_clock::now();
         Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
                "A held runtime wait failed the application's xrEndFrame");
@@ -1466,16 +1470,26 @@ void TestHeldWaitKeepsFrameLoopRunning() {
                "A frame on a held runtime wait was not fabricated with shouldRender FALSE");
         elapsed = ElapsedMs(start);
         Expect(elapsed < 1000.0, "A frame on a held runtime wait took " + std::to_string(elapsed) + "ms");
+        ++frames;
     }
+    Expect(depthxr::TurboFrameTestPeer::AutoSuspended() && frames == 5 &&
+               depthxr::TurboFrameTestPeer::PacingMode() == depthxr::TurboPacingMode::kSequenced,
+           "Held frames did not fall back to sequenced pacing and then suspend Turbo (frames=" +
+               std::to_string(frames) + ")");
     Expect(runtime.EndCalls() == ends_before && runtime.BeginRejections() == 1 && runtime.StackedWaits() == 0 &&
                runtime.MaxConcurrentWaits() == 1 && depthxr::TurboFrameTestPeer::Handoff().wait_valid,
            "A frame was submitted without its runtime wait, a wait was stacked, or the held wait was discarded");
 
+    // Suspended Turbo keeps the held frame's ownership; the completed wait
+    // hands pacing to the frame thread, re-coupled to runtime pacing.
     runtime.ReleaseWait();
     Expect(runtime.WaitForWaitExited(2), "The held wait never returned after release");
     Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS &&
                runtime.EndCalls() == ends_before + 1,
            "Forwarding did not resume once the runtime completed the held wait");
+    Expect(depthxr::TurboFrameTestPeer::SequencedState() == depthxr::TurboFrameTestPeer::ActiveState() &&
+               !depthxr::TurboFrameTestPeer::Handoff().wait_valid,
+           "The completed held wait did not hand pacing to the frame thread");
     Expect(XR_SUCCEEDED(AppBegin()) &&
                depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS &&
                runtime.EndCalls() == ends_before + 2,
