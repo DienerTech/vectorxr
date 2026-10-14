@@ -110,6 +110,38 @@ void WriteBitmap(const char* path, const OsdBitmap& bitmap) {
     std::ofstream out(path,std::ios::binary); out.write(reinterpret_cast<const char*>(&file),sizeof(file));
     out.write(reinterpret_cast<const char*>(&info),sizeof(info)); out.write(reinterpret_cast<const char*>(bitmap.pixels.data()),bitmap.pixels.size()*4);
 }
+// RasterizeOsd's per-pixel loop from before FeatherOsdPixels wrote the panel's
+// interior directly, with only its inputs renamed: the faster loop must match
+// it exactly.
+std::vector<std::uint32_t> ReferenceFeather(const std::vector<std::uint32_t>& bits,int panel_width,int height,int opacity,bool hidden,bool rgba) {
+    std::vector<std::uint32_t> pixels(static_cast<std::size_t>(OsdBitmap::width)*height);
+    static const auto lut=[] {
+    std::array<std::array<unsigned char,256>,256> table{};
+    for (int a=0;a<256;++a) for (int c=0;c<256;++c) {
+        const double s=c/255.0, linear=s<=.04045?s/12.92:std::pow((s+.055)/1.055,2.4);
+        const double p=linear*a/255.0, encoded=p<=.0031308?12.92*p:1.055*std::pow(p,1/2.4)-.055;
+        table[a][c]=static_cast<unsigned char>(std::clamp(std::lround(encoded*255),0l,255l));
+    }
+    return table;
+    }();
+    for(int y=0;y<height;++y) for(int x=0;x<OsdBitmap::width;++x) {
+        constexpr int padding=3;
+        const double dx=std::max({18.0+padding-x,0.0,x-(panel_width-19.0-padding)});
+        const double dy=std::max({18.0+padding-y,0.0,y-(height-19.0-padding)});
+        const double edge=std::min({x-padding+.0,panel_width-1.0-padding-x,y-padding+.0,height-1.0-padding-y,
+            (dx>0 && dy>0)?18.0-std::hypot(dx,dy):18.0});
+        const double ramp=std::clamp(edge/6.0,0.0,1.0);
+        const double coverage=ramp*ramp*(3-2*ramp);
+        const auto alpha=static_cast<unsigned>(std::lround(255*opacity/100.0*coverage*(hidden?0:1)));
+        const double interior=std::clamp((edge-6)/6.0,0.0,1.0);
+        const auto source=bits[y*OsdBitmap::width+x];
+        const auto channel=[&](unsigned shift){return static_cast<unsigned>(std::lround(16+(((source>>shift)&255)-16.0)*interior));};
+        const auto pixel=interior==1.0?source:(channel(16)<<16)|(channel(8)<<8)|channel(0);
+        const unsigned b=lut[alpha][pixel&255],g=lut[alpha][(pixel>>8)&255],r=lut[alpha][(pixel>>16)&255];
+        pixels[y*OsdBitmap::width+x]=(alpha<<24)|(g<<8)|(rgba?(b<<16)|r:(r<<16)|b);
+    }
+    return pixels;
+}
 }
 int main(int argc, char** argv) {
     Check(SUCCEEDED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&device,nullptr,&context)),"WARP device creation failed");
@@ -268,6 +300,21 @@ int main(int argc, char** argv) {
             for(int y=0;y<edged.height;++y)for(int x=0;x<OsdBitmap::width;++x)
                 if(x<3 || y<3 || x>=edged.content_width-3 || y>=edged.height-3)
                     Check(edged.pixels[y*OsdBitmap::width+x]==0,"OSD edge contains color or alpha that can bleed into the scene");
+        }
+        {
+            // Random source colors, panel widths and heights either side of the
+            // interior band's limits, both channel orders and an empty panel.
+            std::vector<std::uint32_t> bits(static_cast<std::size_t>(OsdBitmap::width)*OsdBitmap::texture_height);
+            std::uint32_t seed=0x2545f491;
+            for(auto& pixel:bits) { seed=seed*1664525+1013904223; pixel=seed; }
+            for(int panel_width:{30,31,266,520,960}) for(int height:{42,43,136,602})
+            for(int opacity:{1,25,90,100}) for(bool hidden:{false,true}) for(bool use_rgba:{false,true}) {
+                if(hidden && opacity!=90) continue;
+                std::vector<std::uint32_t> pixels(static_cast<std::size_t>(OsdBitmap::width)*height,0xdeadbeef);
+                FeatherOsdPixels(bits.data(),pixels.data(),panel_width,height,opacity,hidden,use_rgba);
+                Check(pixels==ReferenceFeather(bits,panel_width,height,opacity,hidden,use_rgba),
+                      "The OSD's interior fast path changed feathered or premultiplied pixels");
+            }
         }
         settings.opacity=100;
         Check(reordered.height==bitmap.height,"Reordering changed panel proportions");

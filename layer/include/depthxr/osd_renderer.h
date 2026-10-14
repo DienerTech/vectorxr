@@ -132,6 +132,11 @@ struct OsdCompactLayoutOptions {
 };
 OsdCompactLayout CompactOsdLayout(const OsdSettings&, const OsdCompactLayoutOptions& options = {});
 
+// RasterizeOsd's last step: feathers the panel's edges to transparent black and
+// premultiplies GDI's `bits` into `pixels`, both OsdBitmap::width wide and
+// `height` rows. `hidden` (an empty compact panel) leaves every pixel 0.
+void FeatherOsdPixels(const std::uint32_t* bits, std::uint32_t* pixels, int panel_width, int height, int opacity,
+                      bool hidden, bool rgba);
 // Produces premultiplied sRGB pixels for an sRGB OpenXR swapchain.
 OsdBitmap RasterizeOsd(const OsdSettings&, bool compact, const OsdSnapshot&, const OsdTelemetry&, bool rgba);
 

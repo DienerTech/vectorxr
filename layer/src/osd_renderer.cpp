@@ -206,6 +206,68 @@ OsdCompactLayout CompactOsdLayout(const OsdSettings& settings, const OsdCompactL
     return layout;
 }
 
+void FeatherOsdPixels(const std::uint32_t* bits, std::uint32_t* pixels, int panel_width, int height, int opacity,
+                      bool hidden, bool rgba) {
+    constexpr int width=OsdBitmap::width;
+    // OpenXR premultiplies alpha in linear color space. Encode linear*alpha back
+    // to sRGB; multiplying encoded RGB directly creates dark translucent edges.
+    static const auto lut=[] {
+    std::array<std::array<unsigned char,256>,256> table{};
+    for (int a=0;a<256;++a) for (int c=0;c<256;++c) {
+        const double s=c/255.0, linear=s<=.04045?s/12.92:std::pow((s+.055)/1.055,2.4);
+        const double p=linear*a/255.0, encoded=p<=.0031308?12.92*p:1.055*std::pow(p,1/2.4)-.055;
+        table[a][c]=static_cast<unsigned char>(std::clamp(std::lround(encoded*255),0l,255l));
+    }
+    return table;
+    }();
+    const auto alpha_at=[&](double coverage) {
+        return static_cast<unsigned>(std::lround(255*opacity/100.0*coverage*(hidden?0:1)));
+    };
+    const auto premultiply=[&](unsigned alpha,std::uint32_t pixel) {
+        const unsigned b=lut[alpha][pixel&255],g=lut[alpha][(pixel>>8)&255],r=lut[alpha][(pixel>>16)&255];
+        return (alpha<<24)|(g<<8)|(rgba?(b<<16)|r:(r<<16)|b);
+    };
+    const auto feathered=[&](int x,int y) {
+        // Transparent black surrounds every edge, including the straight sides.
+        // The submitted rect is inset one texel below, so filtering stays inside
+        // initialized pixels even when the unused swapchain rows contain old data.
+        constexpr int padding=3;
+        const double dx=std::max({18.0+padding-x,0.0,x-(panel_width-19.0-padding)});
+        const double dy=std::max({18.0+padding-y,0.0,y-(height-19.0-padding)});
+        const double edge=std::min({x-padding+.0,panel_width-1.0-padding-x,y-padding+.0,height-1.0-padding-y,
+            (dx>0 && dy>0)?18.0-std::hypot(dx,dy):18.0});
+        const double ramp=std::clamp(edge/6.0,0.0,1.0);
+        const double coverage=ramp*ramp*(3-2*ramp);
+        const auto alpha=alpha_at(coverage);
+        // Neutral feathering softens the silhouette. Headset comparisons with
+        // hard and opaque edges did not eliminate the reported color fringe.
+        const double interior=std::clamp((edge-6)/6.0,0.0,1.0);
+        const auto source=bits[y*width+x];
+        const auto channel=[&](unsigned shift){return static_cast<unsigned>(std::lround(16+(((source>>shift)&255)-16.0)*interior));};
+        const auto pixel=interior==1.0?source:(channel(16)<<16)|(channel(8)<<8)|channel(0);
+        return premultiply(alpha,pixel);
+    };
+    // The feather depends only on position, and computing it for every pixel
+    // cost over 30 ms per expanded image. Rows clear of the corners (21 or
+    // more from the top and bottom) are fully covered and interior from 15
+    // pixels inside either side (edge >= 12), so those pixels take the full
+    // alpha and the source color directly. Past the panel's width coverage is
+    // 0, and lut[0] is all 0.
+    const unsigned full=alpha_at(1.0);
+    const int content=std::clamp(panel_width,0,width);
+    for(int y=0;y<height;++y) {
+        const bool clear=y>=21 && y<=height-22;
+        const int inner=clear?std::min(15,content):content, inner_end=clear?std::clamp(panel_width-15,inner,content):content;
+        const auto* row=bits+static_cast<std::size_t>(y)*width;
+        auto* out=pixels+static_cast<std::size_t>(y)*width;
+        int x=0;
+        for(;x<inner;++x) out[x]=feathered(x,y);
+        for(;x<inner_end;++x) out[x]=premultiply(full,row[x]);
+        for(;x<content;++x) out[x]=feathered(x,y);
+        std::fill(out+content,out+width,0u);
+    }
+}
+
 OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnapshot& snapshot,
                        const OsdTelemetry& telemetry, bool rgba) {
     constexpr auto white=RGB(233,240,248), muted=RGB(148,165,184), bg=RGB(13,20,31), inset=RGB(20,31,45);
@@ -349,38 +411,7 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
     // Complete batched GDI writes before reading the DIB directly.
     GdiFlush();
     output.pixels.resize(static_cast<std::size_t>(output.width)*height);
-    // OpenXR premultiplies alpha in linear color space. Encode linear*alpha back
-    // to sRGB; multiplying encoded RGB directly creates dark translucent edges.
-    static const auto lut=[] {
-    std::array<std::array<unsigned char,256>,256> table{};
-    for (int a=0;a<256;++a) for (int c=0;c<256;++c) {
-        const double s=c/255.0, linear=s<=.04045?s/12.92:std::pow((s+.055)/1.055,2.4);
-        const double p=linear*a/255.0, encoded=p<=.0031308?12.92*p:1.055*std::pow(p,1/2.4)-.055;
-        table[a][c]=static_cast<unsigned char>(std::clamp(std::lround(encoded*255),0l,255l));
-    }
-    return table;
-    }();
-    for(int y=0;y<height;++y) for(int x=0;x<output.width;++x) {
-        // Transparent black surrounds every edge, including the straight sides.
-        // The submitted rect is inset one texel below, so filtering stays inside
-        // initialized pixels even when the unused swapchain rows contain old data.
-        constexpr int padding=3;
-        const double dx=std::max({18.0+padding-x,0.0,x-(panel_width-19.0-padding)});
-        const double dy=std::max({18.0+padding-y,0.0,y-(height-19.0-padding)});
-        const double edge=std::min({x-padding+.0,panel_width-1.0-padding-x,y-padding+.0,height-1.0-padding-y,
-            (dx>0 && dy>0)?18.0-std::hypot(dx,dy):18.0});
-        const double ramp=std::clamp(edge/6.0,0.0,1.0);
-        const double coverage=ramp*ramp*(3-2*ramp);
-        const auto alpha=static_cast<unsigned>(std::lround(255*settings.opacity/100.0*coverage*(compact&&layout.empty?0:1)));
-        // Neutral feathering softens the silhouette. Headset comparisons with
-        // hard and opaque edges did not eliminate the reported color fringe.
-        const double interior=std::clamp((edge-6)/6.0,0.0,1.0);
-        const auto source=canvas.bits[y*output.width+x];
-        const auto channel=[&](unsigned shift){return static_cast<unsigned>(std::lround(16+(((source>>shift)&255)-16.0)*interior));};
-        const auto pixel=interior==1.0?source:(channel(16)<<16)|(channel(8)<<8)|channel(0);
-        const unsigned b=lut[alpha][pixel&255],g=lut[alpha][(pixel>>8)&255],r=lut[alpha][(pixel>>16)&255];
-        output.pixels[y*output.width+x]=(alpha<<24)|(g<<8)|(rgba?(b<<16)|r:(r<<16)|b);
-    }
+    FeatherOsdPixels(canvas.bits,output.pixels.data(),panel_width,height,settings.opacity,compact&&layout.empty,rgba);
     return output;
 }
 
