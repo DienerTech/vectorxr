@@ -78,7 +78,7 @@ class D3D11BridgeLayerTestPeer {
     static bool QueueSubstituted() {
         return OpenXrLayer::Instance().framegen_queue_.Active();
     }
-    // What VECTORXR_FRAMEGEN_SHOWN_LAYERS=lazy did in the session so far.
+    // What keeping shown layers lazy did in the session so far.
     static FrameGenQueueSubstitution::ShownLayerCounts ShownLayers() {
         return OpenXrLayer::Instance().framegen_queue_.ShownLayers();
     }
@@ -4360,7 +4360,7 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
         CheckValidation(game, "GPU-bound");
         const depthxr::FrameGenQueueSubstitution::ShownLayerCounts off = Peer::ShownLayers();
         Check(off.releases == 0 && off.cpu_waits == 0 && off.gpu_waits == 0 && quad_behind == 0,
-              "shown layers are not kept lazy by default");
+              "shown layers are not kept lazy with VECTORXR_FRAMEGEN_SHOWN_LAYERS=off");
     }
 
     // Depth in the same shape (one swapchain, each view's depth its half):
