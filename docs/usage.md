@@ -826,9 +826,11 @@ needs a game restart; turning it off applies at once.
     move image content. Motion beyond it falls back to the real image.
   - **Reset advanced settings** returns all three to their defaults.
 - **Diagnostic view** applies to every Frame Generation session: **Off**, **Motion flow**
-  (color-coded motion overlay on generated frames), **Confidence** (heat map of where
-  generation fell back to the real image), or **Generated-frame tint** (a faint tint on
-  generated frames, so you can confirm they are being shown).
+  (color-coded motion overlay on generated frames), **Confidence** (generated frames painted
+  red where generation fell back to the real image), or **Generated-frame tint** (a faint tint
+  on generated frames, so you can confirm they are being shown). The views are for testing:
+  in play they look like glitches, so set it back to **Off** afterwards. The VectorXR log names
+  the view at the start of each Frame Generation session.
 - **A/B toggle** is an optional binding that switches generated frames off and on live. It only
   works in sessions that started with Frame Generation on. It takes several bindings, one for
   each device you fly with; any one of them acts.
