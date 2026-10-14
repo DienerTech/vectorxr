@@ -136,7 +136,8 @@ void TurboTimingTrace::SetDebugEnabledLocked(Logger& logger, bool enabled) {
             "The ordinary log keeps up to 100000 sampled lines per session. "
             "Queue=32768; background flush=250ms; stall threshold=2s. "
             "ns is monotonic since capture start; unixMs anchors exported tails; sequence detects lost history. "
-            "phase=enter/exit/stall tracks calls by id; a=call age ns on exit/stall. "
+            "phase=enter/exit/stall tracks calls by id; a=call age ns on exit/stall; thread is the OS thread id. "
+            "Recorder lines leave out the Turbo-trace prefix of the log's sampled copies. "
             "Clock metadata remains sampled (1s every 30s and on transitions/errors). "
             "Timing diagnostics do not measure GPU execution or ASW activity.");
     }
@@ -407,8 +408,10 @@ void TurboTimingTrace::Run(Logger& logger) {
                     ++sequence_, static_cast<std::int64_t>(dropped), static_cast<std::int64_t>(untracked), 0,
                     true, nullptr});
             }
+            // The recorder files hold nothing else: their lines leave out the
+            // "Turbo-trace " prefix the ordinary log's sampled copies carry.
             const auto format_event = [&](const Event& e) {
-                line = "Turbo-trace ns="; Number(line, e.ns);
+                line = "ns="; Number(line, e.ns);
                 line += " thread="; Number(line, e.thread);
                 line += " id="; Number(line, e.id);
                 line += " event="; line += e.name;
@@ -466,6 +469,7 @@ void TurboTimingTrace::Run(Logger& logger) {
                     break;
                 }
                 format_event(e);
+                line.insert(0, "Turbo-trace ");
                 if (logger.TryDebug(line)) ++sampled_lines;
             }
             if (stopping) break;

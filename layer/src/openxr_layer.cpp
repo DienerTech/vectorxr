@@ -5491,8 +5491,8 @@ XrResult OpenXrLayer::TraceRuntimeWaitFrame(XrSession session, const XrFrameWait
             osd_should_render_.store(state->shouldRender == XR_TRUE, std::memory_order_relaxed);
         return result;
     }
+    // The watched call records the start; the return carries the prediction.
     const auto id = turbo_trace_.NextId();
-    turbo_trace_.Record("runtime.wait.enter", id);
     const auto result = next_wait_frame_(session, info, state);
     if (XR_FAILED(result)) turbo_trace_.Burst();
     turbo_trace_.Record("runtime.wait.return", id, XR_SUCCEEDED(result) ? state->predictedDisplayTime : 0,
@@ -5506,12 +5506,13 @@ XrResult OpenXrLayer::TraceRuntimeBeginFrame(XrSession session, const XrFrameBeg
     const auto trace_call = turbo_trace_.Watch("runtime.begin");
     std::unique_lock queue_lock(osd_vulkan_queue_mutex_,std::defer_lock);
     if(osd_vulkan_.load())queue_lock.lock();
-    if (!turbo_trace_.Enabled()) return next_begin_frame_(session, info);
-    const auto id = turbo_trace_.NextId();
-    turbo_trace_.Record("runtime.begin.enter", id);
+    // The watched call records the start and duration; only a failure adds
+    // a record of its own.
     const auto result = next_begin_frame_(session, info);
-    if (XR_FAILED(result)) turbo_trace_.Burst();
-    turbo_trace_.Record("runtime.begin.return", id, result);
+    if (XR_FAILED(result)) {
+        turbo_trace_.Burst();
+        turbo_trace_.Record("runtime.begin.return", turbo_trace_.NextId(), result);
+    }
     return result;
 }
 
@@ -5649,8 +5650,11 @@ XrResult OpenXrLayer::SubmitRuntimeFrame(XrSession session, const XrFrameEndInfo
         turbo_trace_.Record("submit.clock", id, clock_now, clock_now > 0 ? info->displayTime - clock_now : 0);
     }
     const auto result = submit();
-    if (XR_FAILED(result)) turbo_trace_.Burst();
-    turbo_trace_.Record("submit.return", id, result);
+    // The watched runtime.end records the duration; only a failure adds a return.
+    if (XR_FAILED(result)) {
+        turbo_trace_.Burst();
+        turbo_trace_.Record("submit.return", id, result);
+    }
     return result;
 }
 
@@ -6085,7 +6089,6 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
 
 XrResult OpenXrLayer::BeginFrame(XrSession session, const XrFrameBeginInfo* frame_begin_info) {
     const auto trace_call = turbo_trace_.Watch("app.begin");
-    turbo_trace_.Record("begin.enter", turbo_trace_.NextId());
     NoteThread(ThreadCensus::Call::BeginFrame);
     if (frame_begin_info && frame_begin_info->type != XR_TYPE_FRAME_BEGIN_INFO) {
         return XR_ERROR_VALIDATION_FAILURE;

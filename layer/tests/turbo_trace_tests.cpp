@@ -153,6 +153,11 @@ void TestContinuousPersistenceAndStall(const std::filesystem::path& root) {
               "Frozen snapshot lacks continuous pre-stall history");
         Check(Read(log).find("event=outside.burst") == std::string::npos,
               "Unsampled history flooded the ordinary log");
+        // The recorder holds only records: they leave out the prefix the
+        // ordinary log's sampled copies carry (config_tests reads those).
+        Check(Read(Snapshot(log)).rfind("ns=", 0) == 0 &&
+                  Read(Snapshot(log)).find("Turbo-trace") == std::string::npos,
+              "Recorder lines carry the ordinary log's prefix");
     }
     depthxr::TurboTraceTestPeer::EndBurst(trace);
     const auto frozen = Read(Snapshot(log));
