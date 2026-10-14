@@ -254,12 +254,15 @@ bool TurboRecoveryGuard::Prepare(bool enabled, bool retry, const std::string& mo
         }
         checked_ = true;
         blocked_ = !retry && !interrupted_.empty();
-        // An armed marker outlives only an exit that was not normal: OpenXR
-        // teardown and a normal process exit both remove it.
+        // OpenXR teardown and a normal process exit (ExitProcess) remove an
+        // armed marker. One left behind cannot tell a crash or a forced close
+        // from a game that quits by TerminateProcess or crashes on its way
+        // out, so the reason does not say which.
         if (blocked_) {
             reason_ = std::string(runtime_errors
                 ? "The previous Turbo session stopped Turbo after runtime errors."
-                : "The previous Turbo session did not end normally (a crash, a hang or a forced close).") +
+                : "The previous Turbo session ended without a clean shutdown: a crash, a forced close, or a game "
+                  "that skips OpenXR cleanup when it quits.") +
                 " Turbo is disabled for this application and runtime. Use the Turbo toggle to retry.";
         }
     }
@@ -272,7 +275,8 @@ bool TurboRecoveryGuard::Prepare(bool enabled, bool retry, const std::string& mo
         if (!Write()) { exit_file_.Disarm(); blocked_ = true; return false; }
         armed_ = true;
         // A normal process exit removes the marker the way OpenXR teardown
-        // would: Star Citizen and MSFS never call xrDestroySession.
+        // would, for games that never call xrDestroySession. A game that
+        // quits by TerminateProcess, or crashes on its way out, leaves it.
         exit_file_.Arm(own_path_);
         // Establish the new marker before clearing the evidence it supersedes.
         for (const auto& path : interrupted_) {

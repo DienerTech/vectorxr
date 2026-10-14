@@ -32,9 +32,11 @@ bool TurboProcessAlive(std::uint32_t pid, std::uint64_t created);
 
 // The caller serializes this object. No destructor clears the marker: a crash,
 // forced exit or skipped OpenXR cleanup must leave evidence for the next run.
-// A normal process exit is not one of those: Star Citizen and MSFS exit
-// without OpenXR teardown, so an armed marker is also removed when the
-// process exits normally (see process_exit.h). A failed marker never is.
+// A normal process exit is not one of those: games such as Star Citizen and
+// MSFS exit without OpenXR teardown, so an armed marker is also removed when
+// the process exits through ExitProcess (see process_exit.h). A quit by
+// TerminateProcess, or a crash in the game's exit, still leaves it. A failed
+// marker is never removed by an exit.
 class TurboRecoveryGuard {
 public:
     using ProcessAlive = std::function<bool(std::uint32_t, std::uint64_t)>;

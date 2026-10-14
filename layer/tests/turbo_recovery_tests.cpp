@@ -35,7 +35,9 @@ int main() {
     depthxr::TurboRecoveryGuard next;
     next.Configure(root, identity);
     Expect(!next.Prepare(true, false, "async", dead) && next.Blocked(), "Dead process should block the next run");
-    Expect(next.Reason().find("did not end normally") != std::string::npos, "A dead process's block should say it did not end normally");
+    Expect(next.Reason().find("ended without a clean shutdown") != std::string::npos &&
+           next.Reason().find("skips OpenXR cleanup") != std::string::npos,
+           "A dead process's block should not claim it crashed: a game's own quit can leave the marker too");
     next.Complete();
     Expect(!next.Prepare(true, false, "async", dead), "A clean Turbo-off run must preserve the interruption");
     Expect(next.Prepare(false, false, "async", dead), "Opt-out must bypass recovery");

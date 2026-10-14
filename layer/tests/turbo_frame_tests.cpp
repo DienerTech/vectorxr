@@ -2198,7 +2198,7 @@ void TestRecoveryBlockLogsWhatTurboDoes() {
     Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
            "A frame under a recovery block failed");
     std::string text = depthxr::TurboFrameTestPeer::Log();
-    Expect(text.find("Turbo recovery: The previous Turbo session did not end normally") != std::string::npos,
+    Expect(text.find("Turbo recovery: The previous Turbo session ended without a clean shutdown") != std::string::npos,
            "The recovery block was not logged");
     Expect(text.find("pipelining engages") == std::string::npos,
            "A recovery block that keeps Turbo off logged that pipelining engages");

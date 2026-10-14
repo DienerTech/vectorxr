@@ -9,7 +9,9 @@ namespace depthxr {
 // then sends DLL_PROCESS_DETACH to each DLL under the loader lock, and only
 // then runs this DLL's static destructors. A crash, TerminateProcess or a
 // fail-fast skips all of it. Star Citizen and MSFS exit without OpenXR
-// teardown, so DllMain is the only place a normal exit of theirs shows.
+// teardown, so DllMain is the only place a normal exit of theirs can show,
+// and only if it goes through ExitProcess: a game's quit by TerminateProcess,
+// or a crash in its exit, looks like any other crash here.
 
 // Set by DllMain at a DLL_PROCESS_DETACH whose process is exiting, before the
 // CRT runs static destructors. Those must then not lock or wait on anything an
