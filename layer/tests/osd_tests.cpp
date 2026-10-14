@@ -75,6 +75,15 @@ const XrCompositionLayerBaseHeader* WaitVisible(OsdRenderer& renderer, const XrF
     while(std::chrono::steady_clock::now()<deadline);
     return nullptr;
 }
+// Ends frames until `done`, for up to 3 seconds; returns whether it happened.
+template<class Done> bool PumpUntil(OsdRenderer& renderer, const XrFrameEndInfo& frame, Done done) {
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(3);
+    while (!done()) {
+        if (std::chrono::steady_clock::now()>=deadline) return false;
+        renderer.Append(frame,true); std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return true;
+}
 const OsdDispatch dispatch{Formats,Create,Images,Acquire,Wait,Release,Destroy,Space,DestroySpace};
 void CheckUnusedTexturePixels(int width,int height) {
     D3D11_TEXTURE2D_DESC desc{};textures[0]->GetDesc(&desc);
@@ -601,6 +610,51 @@ int main(int argc, char** argv) {
         CheckUnusedTexturePixels(expected.content_width,expected.height);
     }
     format_override.clear();
+    {
+        // A compact panel showing only the app's name: its raster depends on
+        // the settings and snapshot alone, not the frame times.
+        OsdRenderer renderer; unsupported=false; renderer.Initialize(session,device,4,dispatch);
+        auto settings=OsdSettings{}; settings.enabled=true; settings.compact=true; settings.compact_metrics="none";
+        settings.compact_show_brand=settings.compact_show_runtime=settings.compact_show_clock=false; settings.update_hz=20;
+        XrCompositionLayerProjection game{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+        const auto* original=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&game);
+        XrFrameEndInfo frame{XR_TYPE_FRAME_END_INFO}; frame.layerCount=1; frame.layers=&original;
+        renderer.Prepare(settings,Snapshot(),false,false);
+        Check(WaitVisible(renderer,frame),"The app-name panel was not shown");
+
+        // The refresh interval runs from the request: an upload that waits on
+        // its image past the 50 ms interval leaves the next refresh due.
+        settings.opacity=80; renderer.Prepare(settings,Snapshot(),false,false);
+        timeouts=1000; const int acquired=acquires, released=releases;
+        const auto requested=std::chrono::steady_clock::now();
+        renderer.Append(frame,true);
+        Check(PumpUntil(renderer,frame,[&]{return acquires>acquired && std::chrono::steady_clock::now()-requested>=std::chrono::milliseconds(60);}),
+              "The refresh was not acquired");
+        timeouts=0;
+        Check(renderer.Append(frame,true) && releases==released+1,"The delayed refresh was not uploaded");
+        Check(renderer.SnapshotDue(),"The OSD's refresh interval ran from its upload instead of its request");
+
+        // A hidden panel takes no snapshots, however long it stays hidden.
+        renderer.Prepare(settings,Snapshot(),true,false);
+        Check(!renderer.Append(frame,true),"The toggle did not hide the panel");
+        renderer.Prepare(settings,std::nullopt,false,false);
+        std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        Check(!renderer.SnapshotDue(),"A hidden OSD asked for status snapshots");
+
+        // Shown again, it draws the next snapshot, not the one it held.
+        renderer.Prepare(settings,std::nullopt,true,false);
+        Check(renderer.SnapshotDue(),"A shown OSD did not ask for a status snapshot");
+        const int held=acquires;
+        const auto waited=std::chrono::steady_clock::now()+std::chrono::milliseconds(200);
+        while(std::chrono::steady_clock::now()<waited) { renderer.Append(frame,true); std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
+        Check(acquires==held,"A shown OSD drew the snapshot it held while hidden");
+        auto shown=Snapshot(); shown.application="Shown.exe";
+        renderer.Prepare(settings,shown,false,false);
+        const int before_shown=releases;
+        Check(PumpUntil(renderer,frame,[&]{return releases>before_shown;}),"The shown panel did not refresh");
+        CheckUploadedRaster(RasterizeOsd(settings,true,shown,OsdTelemetry{},false),DXGI_FORMAT_B8G8R8A8_UNORM_SRGB);
+        renderer.Shutdown();
+    }
     for(auto level:{LogLevel::Info,LogLevel::Debug}) {
         std::filesystem::path log;
         {

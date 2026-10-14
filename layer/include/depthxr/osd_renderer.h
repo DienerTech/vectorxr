@@ -154,7 +154,8 @@ class OsdRenderer {
     void SubmissionFailed(XrResult);
     // Called every frame. A nonzero settings_revision that matches the last
     // call skips copying unchanged settings. Pass a snapshot only when
-    // SnapshotDue(): the worker reads it at the refresh rate, not per frame.
+    // SnapshotDue(): the worker reads it at the refresh rate, not per frame,
+    // and not at all while the panel is hidden.
     // Returns the presentation before and after this call's bindings/settings.
     std::pair<OsdPresentation, OsdPresentation> Prepare(const OsdSettings&, std::optional<OsdSnapshot>,
         bool toggle_down, bool cycle_down, std::uint64_t settings_revision = 0);
@@ -197,11 +198,15 @@ class OsdRenderer {
     bool visible_{true}, compact_{false}, toggle_down_{false}, cycle_down_{false}, primed_{false};
     OsdSettings settings_;
     OsdSnapshot snapshot_;
+    // The panel was shown without a snapshot (none are taken while hidden):
+    // the next raster waits for one.
+    bool snapshot_needed_{false};
     OsdTelemetry telemetry_;
     OsdStatus status_;
     std::uint64_t settings_revision_{};
     int image_height_{};
     int image_width_{OsdBitmap::width};
+    // When the last refresh was requested; zero refreshes on the next frame.
     std::chrono::steady_clock::time_point updated_{};
     std::chrono::steady_clock::time_point image_updated_{};
     XrCompositionLayerQuad quad_{XR_TYPE_COMPOSITION_LAYER_QUAD};

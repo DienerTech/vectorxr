@@ -477,7 +477,7 @@ void OsdRenderer::ShutdownLocked() {
     if (anchor_space_ && api_.destroy_space) api_.destroy_space(anchor_space_);
     swapchain_=XR_NULL_HANDLE; space_=XR_NULL_HANDLE; anchor_space_=XR_NULL_HANDLE; session_=XR_NULL_HANDLE;
     anchor_failed_=false; anchor_logged_=false;
-    acquired_.reset(); acquired_waited_=false; ready_=false; failed_=false; configured_=false; primed_=false;
+    acquired_.reset(); acquired_waited_=false; ready_=false; failed_=false; configured_=false; primed_=false; snapshot_needed_=false;
     telemetry_={}; status_={}; updated_={}; image_updated_={};
 }
 void OsdRenderer::Shutdown() { std::scoped_lock lock(mutex_); ShutdownLocked(); }
@@ -515,9 +515,12 @@ std::string OsdRenderer::GraphicsApi() const { std::scoped_lock lock(mutex_);ret
 bool OsdRenderer::SnapshotDue() const {
     std::scoped_lock lock(mutex_);
     // Mirrors Append's refresh condition, so the next raster request sees a
-    // snapshot taken this frame; a disabled renderer needs one on re-enable.
-    return !configured_ || !settings_.enabled || !ready_ || updated_==Clock::time_point{} ||
-        Clock::now()-updated_>=std::chrono::duration<double>(1.0/std::max(1,settings_.update_hz));
+    // snapshot taken this frame; a disabled renderer needs one on re-enable,
+    // and a panel just shown one before it draws. A hidden or failed panel
+    // draws nothing, so it needs none.
+    if (!configured_ || !settings_.enabled || snapshot_needed_) return true;
+    return visible_ && !failed_ && (!ready_ || updated_==Clock::time_point{} ||
+        Clock::now()-updated_>=std::chrono::duration<double>(1.0/std::max(1,settings_.update_hz)));
 }
 std::pair<OsdPresentation, OsdPresentation> OsdRenderer::Prepare(const OsdSettings& settings, std::optional<OsdSnapshot> snapshot,
                                                                  bool toggle, bool cycle, std::uint64_t revision) {
@@ -555,7 +558,10 @@ std::pair<OsdPresentation, OsdPresentation> OsdRenderer::Prepare(const OsdSettin
         settings.accent!=settings_.accent || settings.custom_color!=settings_.custom_color || settings.horizontal_degrees!=settings_.horizontal_degrees ||
         settings.vertical_degrees!=settings_.vertical_degrees || settings.distance_meters!=settings_.distance_meters;
     if (!configured_ || revision==0 || revision!=settings_revision_) { settings_=settings; settings_revision_=revision; }
-    if (snapshot) snapshot_=std::move(*snapshot);
+    // A hidden panel takes no snapshots, so the one it holds can be minutes
+    // old: once shown, it draws after the next one arrives.
+    if (snapshot) { snapshot_=std::move(*snapshot); snapshot_needed_=false; }
+    else if (settings.enabled && visible_ && !before.shown) snapshot_needed_=true;
     configured_=true;
     if(changed){
         Event(false,"configuration enabled="+std::to_string(settings.enabled)+" shown="+std::to_string(settings.enabled&&visible_)+" compact="+std::to_string(compact_)+
@@ -630,14 +636,17 @@ const XrCompositionLayerBaseHeader* OsdRenderer::Append(const XrFrameEndInfo& in
             if (raster_completed_) {
                 stats.raster.Add(raster_completed_->raster_ms); upload_=std::move(raster_completed_); raster_completed_.reset(); raster_requested_=false;
             }
-            if (!upload_ && !raster_requested_ &&
+            // The interval runs from the request, so the raster and upload
+            // time do not stretch it (from the upload, 20 Hz refreshed at
+            // about 10 Hz).
+            if (!upload_ && !raster_requested_ && !snapshot_needed_ &&
                 (!ready_ || now-updated_>=std::chrono::duration<double>(1.0/settings_.update_hz))) {
                 if (!raster_thread_.joinable()) {
                     try { raster_thread_=std::thread([this] { RasterWorker(); }); }
                     catch (...) { Fail("OSD worker",XR_ERROR_OUT_OF_MEMORY); return nullptr; }
                 }
                 raster_request_=RasterRequest{settings_,compact_,rgba_,snapshot_,telemetry_};
-                raster_requested_=true; raster_cv_.notify_one();
+                raster_requested_=true; updated_=now; raster_cv_.notify_one();
             }
         } else ++stats.worker_busy;
     }
@@ -672,7 +681,7 @@ const XrCompositionLayerBaseHeader* OsdRenderer::Append(const XrFrameEndInfo& in
                 XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
                 const auto release_start=Clock::now();const auto released=api_.release(swapchain_,&release);stats.release.Add(Milliseconds(release_start));
                 if (XR_FAILED(released)) { Fail("OSD release",released); return nullptr; }
-                acquired_.reset(); acquired_waited_=false; ++stats.refreshed; ready_=true; image_height_=bitmap.height; image_width_=bitmap.content_width; updated_=now; image_updated_=Clock::now();
+                acquired_.reset(); acquired_waited_=false; ++stats.refreshed; ready_=true; image_height_=bitmap.height; image_width_=bitmap.content_width; image_updated_=Clock::now();
                 upload_.reset();
             }
         }
