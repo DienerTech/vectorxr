@@ -326,6 +326,9 @@ class TurboFrameTestPeer {
         std::scoped_lock lock(layer.mutex_);
         layer.BeginInstanceLogLocked(log);
     }
+    // Closes the log file, so the folder holding it can be removed: the next
+    // line would open `log`, which is in that folder too.
+    static void ReleaseLog(const std::filesystem::path& log) { Layer().logger_.Initialize(log); }
     // The frame that follows a logged wait for a steady cadence.
     static void CadenceJustStabilized() { Layer().turbo_cadence_pause_logged_ = true; }
     static ConfigDocument LoadedConfig() {
@@ -1590,6 +1593,7 @@ void TestOwnershipDesyncRecoversInSession() {
            "Flight recorder omitted the fault or its recovery");
     Expect(std::filesystem::exists(depthxr::TurboFrameTestPeer::SnapshotPath(recorder_log)),
            "A fault did not freeze a recorder snapshot");
+    depthxr::TurboFrameTestPeer::ReleaseLog(recovery_path / "released.log");
     std::error_code error;
     std::filesystem::remove_all(recovery_path, error);
 }
@@ -2188,6 +2192,7 @@ void TestRecoveryBlockLogsWhatTurboDoes() {
     Expect(text.find("Turbo mode enabled via") == std::string::npos && text.find("Turbo mode disabled via") == std::string::npos,
            "The app's clear was logged as a toggle press");
     depthxr::TurboFrameTestPeer::ConfigureRecovery({});
+    depthxr::TurboFrameTestPeer::ReleaseLog(directory / "released.log");
     std::filesystem::remove_all(directory, error);
 }
 
@@ -2214,6 +2219,7 @@ void TestDestroySessionRecordsUntilTheSessionIsGone() {
            "xrDestroySession stopped the flight recorder before the runtime's session (and FG's presenter) was gone");
     Expect(!depthxr::TurboFrameTestPeer::RecorderRunning(), "xrDestroySession left the flight recorder running");
     depthxr::TurboFrameTestPeer::EndRecorder();
+    depthxr::TurboFrameTestPeer::ReleaseLog(directory / "released.log");
     std::filesystem::remove_all(directory, error);
 }
 
@@ -2264,6 +2270,7 @@ void TestFramePacingLineUnderFrameGen() {
                std::string::npos,
            "After Turbo yielded to Frame Generation, its session settings were logged as if in use");
     depthxr::TurboFrameTestPeer::EndRecorder();
+    depthxr::TurboFrameTestPeer::ReleaseLog(directory / "released.log");
     std::filesystem::remove_all(directory, error);
 }
 
