@@ -56,9 +56,11 @@ std::uint64_t RuntimeRelayUnixMilliseconds();
 bool RuntimeRelaySessionAlive(std::uint32_t process_id, std::uint64_t started_unix_milliseconds);
 using RuntimeRelaySessionAliveCheck = std::function<bool(std::uint32_t, std::uint64_t)>;
 // Removes the status and control files (and leftover temporary files) of
-// sessions whose process is gone. Games that exit without OpenXR teardown
-// leave them behind; a hard shutdown can leave them zero-filled. Files whose
-// name is not a session id are left alone. Returns how many were removed.
+// sessions whose process is gone, once they were last written a day ago:
+// until then Export Debug includes them. Games that exit without OpenXR
+// teardown leave them behind; a hard shutdown can leave them zero-filled.
+// Files whose name is not a session id are left alone. Returns how many were
+// removed.
 std::size_t PruneRuntimeRelayFiles(const std::filesystem::path& root,
                                    const RuntimeRelaySessionAliveCheck& alive = RuntimeRelaySessionAlive);
 

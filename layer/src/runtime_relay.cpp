@@ -17,6 +17,11 @@
 namespace depthxr {
 namespace {
 
+// An ended session's files stay this long: Export Debug includes them, the
+// last state of a session that crashed. The app removes any relay file
+// after three days.
+constexpr std::chrono::hours kEndedSessionFileAge{24};
+
 std::optional<std::size_t> ValueStart(std::string_view content, std::string_view key) {
     const std::string token = "\"" + std::string(key) + "\"";
     std::size_t position = content.find(token);
@@ -159,7 +164,13 @@ std::size_t PruneRuntimeRelayFiles(const std::filesystem::path& root, const Runt
              !ec && iterator != std::filesystem::directory_iterator(); iterator.increment(ec)) {
             std::uint32_t process_id = 0;
             std::uint64_t started = 0;
-            if (!ParseSessionFileName(iterator->path(), &process_id, &started) || alive(process_id, started)) continue;
+            if (!ParseSessionFileName(iterator->path(), &process_id, &started)) continue;
+            std::error_code time_error;
+            const auto written = iterator->last_write_time(time_error);
+            if (time_error || std::filesystem::file_time_type::clock::now() - written < kEndedSessionFileAge ||
+                alive(process_id, started)) {
+                continue;
+            }
             std::error_code remove_error;
             if (std::filesystem::remove(iterator->path(), remove_error)) ++removed;
         }
