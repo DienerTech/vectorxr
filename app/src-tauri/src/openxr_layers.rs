@@ -416,6 +416,7 @@ fn rewrite_registry_tail(
     let Err(error) = replace(writer, old_tail, new_tail) else {
         return Ok(());
     };
+    let error = error.trim_end_matches('.');
     match replace(writer, old_tail, old_tail) {
         Ok(()) => Err(format!("{error}. The previous layer order was kept.")),
         Err(restore_error) => Err(format!(
