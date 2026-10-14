@@ -678,6 +678,12 @@ void FrameGenPresenter::Configure(const FrameGenResolvedSettings& settings) {
         logger_->Info("Frame Generation diagnostic view changed: " + DiagnosticViewText(diagnostic_view) + " -> " +
                       DiagnosticViewText(settings_.diagnostic_view) + ".");
     }
+    if (settings_.multiplier != multiplier) {
+        // Interpolate's motion source follows the frame rate: the log says
+        // which it uses again after a switch.
+        logged_interpolate_on_shaders_ = false;
+        logged_interpolate_on_hardware_ = false;
+    }
     if (started_ && (settings_.multiplier != multiplier || dynamic != was_dynamic)) {
         // Switched while running: frames held to the old multiplier say
         // nothing about the game's own rate, so Dynamic and Auto settle and
@@ -3383,9 +3389,15 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
                                   "A fixed or Auto frame rate, or Extrapolate, uses the hardware.");
                 }
             } else if (logger_ && !logged_interpolate_on_hardware_) {
+                // Asked for: whether the hardware takes it is the backend's
+                // own line (optical flow hardware active, or why not).
                 logged_interpolate_on_hardware_ = true;
-                logger_->Info("Frame Generation measures motion with NVIDIA's optical flow hardware while "
-                              "interpolating at a fixed or Auto frame rate (experimental).");
+                logger_->Info(std::string("Frame Generation asks NVIDIA's optical flow hardware for the motion while "
+                                          "interpolating ") +
+                              (settings_.multiplier == FrameGenMultiplier::kDynamic
+                                   ? "in Dynamic (VECTORXR_FRAMEGEN_INTERPOLATE_HARDWARE=1)"
+                                   : "at a fixed or Auto frame rate") +
+                              " (experimental).");
             }
         }
         tuning.diagnostic = settings_.diagnostic_view;

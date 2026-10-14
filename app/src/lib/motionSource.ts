@@ -50,7 +50,7 @@ export function motionSourceState(
   } else if (hardwareUnavailable && settings.motionEstimation === 'hardware') {
     note = 'NVIDIA hardware is chosen, but no graphics card here has it, so Shader measures motion.'
   } else if (interpolate && effective === 'hardware') {
-    note = 'Experimental: Interpolate measures motion with the NVIDIA hardware at a fixed or Auto frame rate. If generated frames arrive late, Frame Generation runs a refresh further ahead; Shader is the safe choice.'
+    note = 'Experimental: Interpolate measures motion with the NVIDIA hardware at a fixed or Auto frame rate. If its motion arrives late, Frame Generation runs a refresh further ahead (more latency); Shader is the safe choice.'
   }
   return { effective, locked, hardwareUnavailable, note }
 }

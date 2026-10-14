@@ -142,7 +142,7 @@ const gpuCapabilities = useGpuCapabilities()
 function settingsSummary(settings: FrameGenSettings) {
   const mode = settings.synthesisMode === 'extrapolate' ? 'Extrapolate' : 'Interpolate'
   const rate = settings.frameMultiplier === 'dynamic' ? 'Dynamic' : settings.frameMultiplier === 'auto' ? 'Fixed Auto' : `Fixed ${settings.frameMultiplier}`
-  // The source in use: Shader while interpolating, or with no card that has the hardware.
+  // The source in use: Shader while interpolating in Dynamic, or with no card that has the hardware.
   const motion = motionSourceState(settings, gpuCapabilities.value).effective === 'hardware' ? 'NVIDIA hardware' : 'Shader'
   return `${mode} · ${rate} · ${motion}`
 }

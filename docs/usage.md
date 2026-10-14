@@ -668,9 +668,10 @@ Report Frame Generation problems to VectorXR rather than to the game's developer
    game. An enabled matching custom profile turns Frame Generation on for that game even when
    the Default Profile is off.
 6. Start with the default settings (**Mode: Interpolate**, **Frame rate: Dynamic**, **Motion
-   source: Shader**), then click **Save Changes**. Interpolate always measures motion on the
-   GPU's shader cores. **NVIDIA hardware** motion, on an NVIDIA RTX GPU, is for **Extrapolate**,
-   which has the lowest latency: try the two together.
+   source: Shader**), then click **Save Changes**. In Dynamic, Interpolate measures motion on the
+   GPU's shader cores. **NVIDIA hardware** motion, on an NVIDIA RTX GPU, is best with
+   **Extrapolate**, which has the lowest latency: try the two together. At a fixed or Auto frame
+   rate Interpolate can use it too (experimental).
 7. Restart the game. Turning Frame Generation on, for the Default Profile or a custom profile,
    takes effect at the next launch. Turning it off applies to a running game at once: frames
    pass straight through.
@@ -823,8 +824,10 @@ needs a game restart; turning it off applies at once.
   too late for the frames between real frames. At a fixed or **Auto** frame rate the game is held
   to every second (or third, fourth) refresh, which leaves the accelerator time, so Interpolate
   uses it there (experimental: if its results arrive late, Frame Generation runs a refresh
-  further ahead, adding latency). With **Performance** flow quality it uses the accelerator's
-  fastest preset, which is less accurate on repeating patterns. Where it cannot be used, Shader
+  further ahead, adding latency; changing the frame rate during play with **Quality** or
+  **Performance** flow quality briefly stutters while it switches). With **Performance** flow
+  quality it uses the accelerator's fastest preset, which is less accurate on repeating
+  patterns. Where it cannot be used, Shader
   is, and the log says why. The page checks every graphics card in the PC with NVIDIA's driver,
   not only the first one listed, and greys out **NVIDIA hardware**, with each card's reason, when
   none has the accelerator. While the mode is Interpolate with a Dynamic frame rate the whole

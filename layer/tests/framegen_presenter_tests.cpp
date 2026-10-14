@@ -4292,6 +4292,46 @@ void TestInterpolateOnShaders() {
     Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
 }
 
+// Interpolate with NVIDIA's optical flow hardware chosen, switched during
+// play between 2x and Dynamic: the motion source follows each switch (a
+// settings change, never per frame), and the presenter keeps running.
+void TestInterpolateSourceFollowsLiveSwitch() {
+    const std::string name = "interpolate source follows live switches";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kInterpolate, FrameGenMultiplier::k2, app, runtime, owned);
+    presenter.SetInterpolateOnShaders(true);
+    FrameGenResolvedSettings settings;
+    settings.enabled = true;
+    settings.synthesis_mode = FrameGenSynthesisMode::kInterpolate;
+    settings.multiplier = FrameGenMultiplier::k2;
+    settings.motion_estimation = FrameGenMotionEstimation::kHardware;
+    presenter.Configure(settings);
+    RunTicks(*app, 300ms, {2});
+    int before = gpu.executes;
+    RunTicks(*app, 300ms, {2});
+    Check(gpu.executes > before && gpu.tuning.hardware_flow, name + ": at 2x on the hardware");
+    settings.multiplier = FrameGenMultiplier::kDynamic;
+    presenter.Configure(settings);
+    EngageDynamic(presenter, *app, name);
+    before = gpu.executes;
+    RunTicks(*app, 300ms, {1, 2, 2});
+    Check(gpu.executes > before && !gpu.tuning.hardware_flow, name + ": in Dynamic on the shader cores");
+    settings.multiplier = FrameGenMultiplier::k2;
+    presenter.Configure(settings);
+    RunTicks(*app, 300ms, {2});
+    before = gpu.executes;
+    RunTicks(*app, 300ms, {2});
+    Check(gpu.executes > before && gpu.tuning.hardware_flow, name + ": back at 2x on the hardware");
+    Check(presenter.Status().threaded, name + ": the presenter thread kept running");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+}
+
 // Engaged without a guard trigger for probe_after, Dynamic stands by to see
 // whether the game holds the refresh rate alone: a game still slow engages
 // again and the next probe waits twice as long; a game holding 0.95x stays
@@ -8961,6 +9001,7 @@ void RunPolicyTests() {
     RUN(TestWinningEngagementStays);
     RUN(TestWinningEngagementSurvivesLateCaptures);
     RUN(TestInterpolateOnShaders);
+    RUN(TestInterpolateSourceFollowsLiveSwitch);
     RUN(TestDynamicToggleStandsBy);
     RUN(TestHitchesAreNotPauses);
     RUN(TestInterpolateMeasureLagIsOnTime);
