@@ -7220,6 +7220,52 @@ void TestAutoStandsDownForRuntimeHalving() {
               (lines.empty() ? std::string() : ": " + lines.front()) + ")");
 }
 
+// Auto against a runtime holding the frames presented to half its refresh
+// rate and reporting twice its period (Runtime::Throttle::kPeriod), with a
+// game slower than that (frames of 2.7 refreshes): once the halving is
+// reported, the game's frames are timed by the period reported and keep it,
+// so Auto stays engaged and its generated frames fill every refresh the
+// runtime takes, twice what the game alone gets through. Nothing stands down.
+void TestAutoKeepsReportedHalving() {
+    const std::string name = "auto keeps reported halving";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.throttle = Runtime::Throttle::kPeriod;
+    SessionLog log("auto-reported-halving");
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartHalving(presenter, gpu, runtime, FrameGenMultiplier::kAuto, app, owned, log.logger.get());
+    // No probing down: only what the halving does to Auto is judged.
+    presenter.SetAutoPolicy(200ms, 30s, 600ms, 300ms);
+    FrameGenDynamicPolicy policy = QuickDynamic();
+    policy.hold = policy.hold_max = 6000ms;
+    presenter.SetDynamicPolicy(policy);
+    // The refresh period is learned at full refresh first.
+    RunWork(*app, 600ms, kLightWork);
+    runtime.throttled = true;
+    const auto work = PeriodsOfWork(kPeriod, 2.7);
+    // Only the presenter thread's waits report it: Auto engaged.
+    RunWork(*app, 4000ms, work, [&](const XrFrameState&) { return presenter.Status().runtime_halving; });
+    FrameGenStatus status = presenter.Status();
+    Check(status.runtime_halving, name + ": the slow game engages Auto, and the halving is reported");
+    bool full_rate = false;
+    RunWork(*app, 1500ms, work, [&](const XrFrameState&) {
+        full_rate = full_rate || presenter.Status().multiplier < 2;
+        return false;
+    });
+    const double output = SubmissionRate(*app, 800ms, work);
+    status = presenter.Status();
+    const double refresh = 1e9 / static_cast<double>(kPeriod);
+    Check(!full_rate && status.runtime_halving && status.multiplier >= 2 && status.threaded,
+          name + ": Auto stays engaged under the halving it is timed by (" + std::to_string(status.multiplier) + "x)");
+    Check(output > 0.4 * refresh,
+          name + ": every refresh the runtime takes gets a frame (" + std::to_string(output) + " fps)");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    Check(log.Lines("-> full rate: the runtime holds frames to half rate").empty(), name + ": nothing stands down");
+}
+
 // The session's first line names the diagnostic view and what it draws, and
 // a change during play is logged once: a view left on looks like a fault
 // (issue #95's red flashing around the eye-tracked foveation was the
@@ -8409,6 +8455,7 @@ int main(int argc, char** argv) {
     RUN(TestRuntimeHalvingClearedDoesNotStandDown);
     RUN(TestRuntimeHalvingRetriesBriefly);
     RUN(TestAutoStandsDownForRuntimeHalving);
+    RUN(TestAutoKeepsReportedHalving);
     // SteamVR with Pimax's headset driver.
     RUN(TestEchoRuntimeKeepsRefresh);
     RUN(TestEchoRuntimeLateWake);

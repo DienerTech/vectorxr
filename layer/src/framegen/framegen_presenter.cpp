@@ -1703,14 +1703,18 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
         }
     }
     // The runtime holds the frames presented to half its refresh rate (or
-    // less), shown by the presenter thread's waits at this multiplier: every
-    // engaged frame then takes twice its refreshes and reads as late, and
-    // stepping up only slows the game more (Pimax Play's smoothing held a
-    // game it let run at 36 fps to 9 at 4x, the output still 36). Engaged
-    // gains nothing while that lasts: back to full rate, frames pass straight
-    // through as Dynamic stands down, and stay so while the runtime halves.
+    // less), shown by the presenter thread's waits at this multiplier, and
+    // reports the refresh period: every engaged frame then takes twice its
+    // refreshes and reads as late, and stepping up only slows the game more
+    // (Pimax Play's smoothing held a game it let run at 36 fps to 9 at 4x,
+    // the output still 36). Engaged gains nothing while that lasts: back to
+    // full rate, frames pass straight through as Dynamic stands down, and
+    // stay so while the runtime halves. One reporting the period it holds
+    // frames to times the game's frames by it (GameGridLocked): they read as
+    // late only where the game misses that rate, and the generated frames
+    // between still fill every refresh the runtime takes.
     if (runtime_halving_ && halving_confirmed_at_ && *halving_confirmed_at_ > multiplier_changed_at_ &&
-        auto_multiplier_ > 1) {
+        auto_multiplier_ > 1 && GameGridLocked() < refresh_period_ + refresh_period_ / 2) {
         const std::uint32_t before = auto_multiplier_;
         const std::chrono::milliseconds hold = auto_halving_hold_;
         auto_multiplier_ = 1;
