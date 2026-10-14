@@ -616,6 +616,34 @@ class TurboFrameTestPeer {
         std::scoped_lock lock(layer.mutex_);
         layer.resolved_settings_.quadviews.foveate_sharpness = 50.0;
     }
+    // The composition-layer topology log (ObserveCompositionLayerTopology)
+    // for a frame whose quad views Frame Generation claimed, or not; its
+    // remaining budget after.
+    static int ObserveTopology(const XrFrameEndInfo* frame, bool claimed) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        if (claimed) {
+            layer.pending_framegen_quad_.emplace().route = FrameGenQuadRoute::kClaimed;
+        }
+        layer.ObserveCompositionLayerTopology(frame);
+        layer.pending_framegen_quad_.reset();
+        return layer.composition_topology_log_budget_;
+    }
+    static void ResetTopology() {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.composition_topology_log_budget_ = 12;
+        layer.last_composition_topology_signature_.reset();
+        layer.last_claimed_composition_topology_signature_.reset();
+    }
+    // Depth on with convergence: LocateViews shifts each eye's projection.
+    static void ConvergeVarjoDepth(double convergence) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.resolved_settings_.depthxr.enabled = true;
+        layer.resolved_settings_.depthxr.stereo_boost = 1.0;
+        layer.resolved_settings_.depthxr.convergence = convergence;
+    }
     // The foveation summary's submittedFocusFov: checked, mismatched, unlocated.
     static std::array<std::uint64_t, 3> VarjoSubmittedFocus() {
         auto& layer = Layer();
@@ -3155,6 +3183,91 @@ void TestFrameGenSessionKeepsShownLayersLazy() {
     _putenv_s("VECTORXR_FRAMEGEN_SHOWN_LAYERS", "");
 }
 
+// Frames whose quad views Frame Generation claims (four views, given to it)
+// and frames forwarded as composed (two views) alternate when Frame
+// Generation's capture misses: that is not a topology change each time, and
+// must not spend the session's twelve topology lines.
+void TestTopologyFollowsFrameGenClaimsApart() {
+    using Peer = depthxr::TurboFrameTestPeer;
+    Peer::ResetTopology();
+    std::array<XrCompositionLayerProjectionView, 4> views{};
+    for (auto& view : views) {
+        view = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+        view.pose.orientation.w = 1.0f;
+    }
+    XrCompositionLayerProjection quad{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    quad.viewCount = 4;
+    quad.views = views.data();
+    XrCompositionLayerProjection stereo = quad;
+    stereo.viewCount = 2;
+    const auto* quad_layer = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
+    const auto* stereo_layer = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&stereo);
+    XrFrameEndInfo quad_frame = FrameEndInfo();
+    quad_frame.layerCount = 1;
+    quad_frame.layers = &quad_layer;
+    XrFrameEndInfo stereo_frame = quad_frame;
+    stereo_frame.layers = &stereo_layer;
+    int budget = 12;
+    for (int flip = 0; flip < 8; ++flip) {
+        budget = Peer::ObserveTopology(&quad_frame, true);
+        budget = Peer::ObserveTopology(&stereo_frame, false);
+    }
+    Expect(budget == 10, "Frames moving between Frame Generation's claim and forwarding spent the topology budget");
+    Expect(Peer::ObserveTopology(&quad_frame, false) == 9,
+           "A forwarded frame's own topology change was not logged");
+    Peer::ResetTopology();
+}
+
+// With Depth's convergence set, the application is given (and submits)
+// focus FOVs LocateViews shifted. The submitted focus check compares them
+// with those, not with the runtime's raw ones: a game that submits what it
+// located is no mismatch (it read as one on every frame).
+void TestVarjoNativeSubmittedFocusWithConvergence() {
+    using Peer = depthxr::TurboFrameTestPeer;
+    Peer::PrepareVarjoNative(&VarjoLocateViews, &VarjoEndFrame);
+    Peer::ConvergeVarjoDepth(0.05);
+    const auto frame = [&](XrTime time, float extra_left) {
+        XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO};
+        locate.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET;
+        locate.displayTime = time;
+        XrViewState state{XR_TYPE_VIEW_STATE};
+        std::array<XrView, 4> located{};
+        for (auto& view : located) view = {XR_TYPE_VIEW};
+        std::uint32_t count = 0;
+        Expect(Peer::Layer().LocateViews(TestSession(), &locate, &state, 4, &count, located.data()) == XR_SUCCESS &&
+                   count == 4,
+               "A native Varjo locate with convergence failed");
+        Expect(located[2].fov.angleLeft != kVarjoFocusFov.angleLeft,
+               "Convergence did not shift the located focus FOV (the test would prove nothing)");
+        std::array<XrCompositionLayerProjectionView, 4> views{};
+        for (std::uint32_t view = 0; view < 4; ++view) {
+            views[view] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+            views[view].pose = located[view].pose;
+            views[view].fov = located[view].fov;
+            views[view].subImage.swapchain = reinterpret_cast<XrSwapchain>(static_cast<std::uintptr_t>(0x91 + view));
+            views[view].subImage.imageRect = {{0, 0}, {1024, 1024}};
+        }
+        views[2].fov.angleLeft += extra_left;
+        XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+        projection.viewCount = 4;
+        projection.views = views.data();
+        const auto* layer = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
+        XrFrameEndInfo info = FrameEndInfo();
+        info.displayTime = time;
+        info.layerCount = 1;
+        info.layers = &layer;
+        Expect(Peer::Layer().EndFrame(TestSession(), &info) == XR_SUCCESS, "A native Varjo frame did not end");
+    };
+    using Counts = std::array<std::uint64_t, 3>;
+    frame(31'000'000'000, 0.0f);
+    Expect(Peer::VarjoSubmittedFocus() == Counts{1, 0, 0},
+           "Focus views submitted as located with convergence were counted as a mismatch");
+    frame(31'011'111'111, -0.01f);
+    Expect(Peer::VarjoSubmittedFocus() == Counts{2, 1, 0},
+           "Focus views submitted with other FOVs than located (with convergence) were not counted");
+    Peer::EndVarjoNative();
+}
+
 // A settings file with a key this layer does not know (a newer app's) still
 // loads. Each unknown key is logged once per log: at the first load, not again
 // on reloads, and a reload that adds one logs only that one; the next
@@ -3281,6 +3394,8 @@ int main() {
     TestVarjoNativeSubmittedFocusCountsEveryFrame();
     TestVarjoDeferredReleasesKeepFrameGenUnblocked();
     TestFrameGenSessionKeepsShownLayersLazy();
+    TestVarjoNativeSubmittedFocusWithConvergence();
+    TestTopologyFollowsFrameGenClaimsApart();
     TestQuadViewsInactiveReasons();
     TestQuadViewsOsdTagFollowsBegunConfiguration();
     // Last: it points the layer's log at a file of its own.

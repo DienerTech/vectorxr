@@ -120,6 +120,7 @@ class OpenXrLayer {
         bool layer_injected_d3d12{false};
         bool retried_without_d3d12{false};
         XrResult d3d12_retry_result{XR_SUCCESS};
+        bool d3d12_refused_alone{false}; // the instance was created with every other addition
         bool d3d12_enabled{false};
         // The application's Vulkan extension: 2 for XR_KHR_vulkan_enable2, 1
         // for XR_KHR_vulkan_enable, 0 for neither (the Vulkan bridge's
@@ -371,6 +372,14 @@ class OpenXrLayer {
         uint32_t consecutive_skipped_frames{0};
         uint32_t failure_logs_remaining{8};
         std::array<QuadViewsCompositionTarget, 2> targets;
+        // The size and format each target could not be built for
+        // (EnsureFocusSharpenTarget): not tried again until they change.
+        struct TargetShape {
+            uint32_t width{0};
+            uint32_t height{0};
+            int64_t format{0};
+        };
+        std::array<std::optional<TargetShape>, 2> failed_shapes;
     };
 
     struct PivotDiagnosticState {
@@ -725,6 +734,7 @@ class OpenXrLayer {
     // A native quad projection layer the application submitted for
     // `display_time`: its focus views' FOVs against the ones located for that
     // display time (VarjoNativeFoveationDiagnosticState). Caller holds mutex_.
+    void NoteVarjoNativeLocatedFocusLocked(XrTime display_time, const XrView* views);
     void NoteVarjoNativeSubmittedFocusLocked(XrTime display_time, const XrCompositionLayerProjectionView* views,
                                             uint32_t view_count);
     bool EnsureD3D11QuadViewsPixelProbeResources(int64_t format);
@@ -751,6 +761,9 @@ class OpenXrLayer {
                                         uint32_t output_height,
                                         int64_t output_format);
     bool EnsureD3D11SwapchainShaderResources(SwapchainInfo& swapchain, uint32_t array_slice = 0);
+    // The first four swapchains of the quad views session that can be the
+    // compositor's inputs; false while fewer exist.
+    bool SelectQuadViewsPrewarmInputs(std::array<SwapchainInfo*, 4>* inputs);
     void TryPrewarmD3D11QuadViewsCompositor();
     // An emulated quad views frame (views 0/1 peripheral, 2/3 focus) as it is
     // composed into stereo, worked out on the CPU alone: what the Direct3D 11
@@ -787,6 +800,9 @@ class OpenXrLayer {
                                    bool has_non_identity_delta,
                                    const DepthSubmissionGeometry* depth_geometry,
                                    QuadViewsComposePlan* plan);
+    // Logs, at Info, how the focus inset moved since the last summary (in
+    // `tracking_mode`), and starts the next one.
+    void LogQuadViewsInsetMotion(std::string_view reason, QuadViewsTrackingMode tracking_mode);
     // The four views' swapchains, when each has a released (or acquired)
     // image of its own to compose from.
     bool FindQuadViewsSourceSwapchains(const XrCompositionLayerProjection* source_layer,
@@ -806,6 +822,9 @@ class OpenXrLayer {
                                   uint32_t width,
                                   uint32_t height,
                                   int64_t format);
+    // Acquires and waits for the image of `target` to draw into; false (with
+    // `reason`) when there is none this frame.
+    bool AcquireFocusSharpenImage(QuadViewsCompositionTarget& target, uint32_t* index, const char** reason);
     // Sharpens native focus views (indices 2/3) in place: renders each into one of
     // our swapchains and repoints its subImage. Best-effort — any view that cannot
     // be sharpened is left untouched (submits the app's unsharpened focus).
@@ -1496,6 +1515,8 @@ class OpenXrLayer {
     std::optional<bool> app_submitting_layers_;
     int composition_topology_log_budget_{12};
     std::optional<std::uint64_t> last_composition_topology_signature_;
+    // Of the frames whose quad views Frame Generation claimed (composes).
+    std::optional<std::uint64_t> last_claimed_composition_topology_signature_;
     bool quad_views_extension_requested_{false};
     bool varjo_foveated_rendering_extension_requested_{false};
     // Either extension above, or OpenXR 1.1 (where the foveated inset is core).
@@ -1584,6 +1605,7 @@ class OpenXrLayer {
     std::unordered_set<std::string> logged_varjo_native_view_configuration_signatures_;
     VarjoNativeFoveationDiagnosticState varjo_native_foveation_diagnostic_;
     bool has_logged_visibility_mask_mapping_{false};
+    uint32_t logged_visibility_mask_shapes_{0}; // one bit per synthesized view and mask type
     bool has_logged_system_properties_{false};
     uint32_t cached_quadviews_stereo_recommended_width_{0};
     uint32_t cached_quadviews_stereo_recommended_height_{0};
@@ -1639,6 +1661,26 @@ class OpenXrLayer {
     std::unordered_set<XrSpace> failed_pivot_space_conversions_;
     std::map<XrTime, std::vector<DepthSubmissionGeometry>> cached_depth_submission_geometry_;
     QuadViewsFrameCache<QuadViewsFrameState> cached_quadviews_frames_;
+    // Quad views placement diagnostics (BuildQuadViewsComposePlan), per session.
+    uint64_t quadviews_placement_mismatch_frames_{0};
+    uint32_t quadviews_placement_mismatch_logs_remaining_{3};
+    std::array<std::array<float, 4>, 2> quadviews_previous_focus_rect_{};
+    std::array<bool, 2> quadviews_has_previous_focus_rect_{};
+    std::array<double, 2> quadviews_focus_max_step_px_{};
+    // The inset's motion since the last Info-level summary
+    // (LogQuadViewsInsetMotion): whether, how often and how far it moves,
+    // without debug logging.
+    struct QuadViewsInsetMotion {
+        uint64_t frames{0};       // planned frames with a previous inset to compare
+        uint64_t moved_frames{0}; // of them, those whose inset moved 1 output pixel or more
+        uint64_t gaze_frames{0};  // of them, those placed by the eye gaze
+        double step_px_sum{0.0};  // the frames' moves (the larger eye's), in output pixels
+        std::array<double, 2> max_step_px{};
+        uint32_t output_width{0};
+        uint32_t output_height{0};
+    };
+    QuadViewsInsetMotion quadviews_inset_motion_{};
+    std::optional<std::chrono::steady_clock::time_point> quadviews_inset_motion_since_;
     std::unordered_map<XrSwapchain, SwapchainInfo> tracked_swapchains_;
     D3D11QuadViewsCompositor d3d11_quadviews_compositor_;
     D3D11FocusSharpen d3d11_focus_sharpen_;

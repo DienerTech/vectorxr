@@ -798,57 +798,54 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
     XrResult result = next_info->nextCreateApiLayerInstance(&downstream_create_info, &chain_info, instance);
     diagnostics.first_create_result = result;
 
-    // A runtime refusing XR_KHR_D3D12_enable gets the instance without it,
-    // with the layer's other additions (they are retried on their own below).
-    if (diagnostics.layer_injected_d3d12 &&
-        (result == XR_ERROR_EXTENSION_NOT_PRESENT || result == XR_ERROR_EXTENSION_DEPENDENCY_NOT_ENABLED)) {
-        first_downstream_extensions.erase(
-            std::remove_if(first_downstream_extensions.begin(), first_downstream_extensions.end(),
-                           [&](const char* name) { return name && std::string_view(name) == d3d12_extension; }),
-            first_downstream_extensions.end());
-        downstream_create_info.enabledExtensionCount = static_cast<uint32_t>(first_downstream_extensions.size());
-        downstream_create_info.enabledExtensionNames =
-            first_downstream_extensions.empty() ? nullptr : first_downstream_extensions.data();
-        *instance = XR_NULL_HANDLE;
-        chain_info = *layer_info;
-        chain_info.nextInfo = next_info->next;
-        result = next_info->nextCreateApiLayerInstance(&downstream_create_info, &chain_info, instance);
-        diagnostics.retried_without_d3d12 = true;
-        diagnostics.d3d12_retry_result = result;
-    }
-
-    // An optional experimental clock must never make an otherwise valid app
-    // fail instance creation when a runtime misadvertises its extensions.
-    if (injected_turbo_clock &&
-        (result == XR_ERROR_EXTENSION_NOT_PRESENT || result == XR_ERROR_EXTENSION_DEPENDENCY_NOT_ENABLED)) {
-        first_downstream_extensions.pop_back();
-        downstream_create_info.enabledExtensionCount = static_cast<uint32_t>(first_downstream_extensions.size());
-        downstream_create_info.enabledExtensionNames = first_downstream_extensions.empty() ? nullptr : first_downstream_extensions.data();
-        *instance = XR_NULL_HANDLE;
-        chain_info = *layer_info;
-        chain_info.nextInfo = next_info->next;
-        result = next_info->nextCreateApiLayerInstance(&downstream_create_info, &chain_info, instance);
-    }
-
+    // The layer's own additions are optional: a runtime refusing one of them
+    // (XR_KHR_D3D12_enable, an eye-gaze extension its probe hid, or the
+    // experimental clock it misadvertised) gets the instance without that one
+    // alone, and the others are kept. Only when no single one explains the
+    // refusal is the instance created with the application's own list.
+    const auto refused_extension = [](XrResult attempt) {
+        return attempt == XR_ERROR_EXTENSION_NOT_PRESENT || attempt == XR_ERROR_EXTENSION_DEPENDENCY_NOT_ENABLED;
+    };
     const std::vector<const char*>* successful_downstream_extensions = &first_downstream_extensions;
-    const bool eye_gaze_extension_related_failure =
-        result == XR_ERROR_EXTENSION_NOT_PRESENT || result == XR_ERROR_EXTENSION_DEPENDENCY_NOT_ENABLED;
-    if (ShouldRetryWithoutInjectedEyeGaze(
-            diagnostics.layer_injected_eye_gaze_request, eye_gaze_extension_related_failure)) {
-        diagnostics.retried_without_eye_gaze = true;
+    std::vector<std::vector<const char*>> retries;
+    if (refused_extension(result)) {
+        std::vector<const char*> additions;
+        if (diagnostics.layer_injected_d3d12) {
+            additions.push_back(d3d12_extension);
+        }
+        if (diagnostics.layer_injected_eye_gaze_request) {
+            additions.push_back(XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME);
+        }
+        if (injected_turbo_clock) {
+            additions.push_back(turbo_clock_extension);
+        }
+        retries = InstanceExtensionRetries(first_downstream_extensions, additions);
+    }
+    for (const std::vector<const char*>& retry : retries) {
         *instance = XR_NULL_HANDLE;
-
-        XrApiLayerCreateInfo retry_chain_info = *layer_info;
-        retry_chain_info.nextInfo = next_info->next;
-
-        XrInstanceCreateInfo retry_create_info = *instance_create_info;
-        retry_create_info.enabledExtensionCount = static_cast<uint32_t>(base_downstream_extensions.size());
-        retry_create_info.enabledExtensionNames =
-            base_downstream_extensions.empty() ? nullptr : base_downstream_extensions.data();
-
-        result = next_info->nextCreateApiLayerInstance(&retry_create_info, &retry_chain_info, instance);
-        diagnostics.retry_create_result = result;
-        successful_downstream_extensions = &base_downstream_extensions;
+        chain_info = *layer_info;
+        chain_info.nextInfo = next_info->next;
+        downstream_create_info.enabledExtensionCount = static_cast<uint32_t>(retry.size());
+        downstream_create_info.enabledExtensionNames = retry.empty() ? nullptr : retry.data();
+        result = next_info->nextCreateApiLayerInstance(&downstream_create_info, &chain_info, instance);
+        successful_downstream_extensions = &retry;
+        if (!refused_extension(result)) {
+            break;
+        }
+    }
+    if (!retries.empty()) {
+        if (diagnostics.layer_injected_d3d12 &&
+            !ExtensionListContains(*successful_downstream_extensions, d3d12_extension)) {
+            diagnostics.retried_without_d3d12 = true;
+            diagnostics.d3d12_retry_result = result;
+            diagnostics.d3d12_refused_alone =
+                successful_downstream_extensions->size() + 1 == first_downstream_extensions.size();
+        }
+        if (diagnostics.layer_injected_eye_gaze_request &&
+            !ExtensionListContains(*successful_downstream_extensions, XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME)) {
+            diagnostics.retried_without_eye_gaze = true;
+            diagnostics.retry_create_result = result;
+        }
     }
 
     if (XR_FAILED(result)) {
