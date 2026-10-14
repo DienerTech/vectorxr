@@ -693,6 +693,17 @@ int main(int argc, char** argv) {
             for(auto brush:brushes) DeleteObject(brush);
             std::cout<<"GDI handle quota not reached; failed-raster retry not tested\n";
         }
+
+        // The diagnostics tag keeps the header row, and so the panel, in a
+        // compact layout with nothing else selected.
+        settings.compact_show_app=false;
+        auto tagged=changed; tagged.diagnostics="DEBUG LOG";
+        Check(RasterizeOsd(settings,true,changed,OsdTelemetry{},false).empty && !RasterizeOsd(settings,true,tagged,OsdTelemetry{},false).empty,
+              "An empty compact raster was not marked, or the diagnostics tag's was");
+        renderer.Prepare(settings,tagged,false,false);
+        Check(WaitVisible(renderer,frame),"The diagnostics tag was hidden in an otherwise empty compact panel");
+        renderer.Prepare(settings,changed,false,false);
+        Check(!renderer.Append(frame,true),"An empty compact panel was submitted once its diagnostics tag went");
         renderer.Shutdown();
     }
     for(auto level:{LogLevel::Info,LogLevel::Debug}) {

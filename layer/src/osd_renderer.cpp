@@ -294,7 +294,7 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
         (settings.show_turbo?52:0)+(settings.show_framegen&&snapshot.framegen_session?(snapshot.framegen_detail.empty()?52:80):0)+
         (settings.show_pivot?pivot_row_height:0)+(settings.show_modules?52:0)+
         (!snapshot.restart.empty()?48:0);
-    OsdBitmap output; output.height=height; output.content_width=panel_width;
+    OsdBitmap output; output.height=height; output.content_width=panel_width; output.empty=compact&&layout.empty;
     Canvas canvas(output.width,height);
     if (!canvas.bits || !canvas.dc) return output;
     canvas.Rect(0,0,output.width,height,bg);
@@ -411,7 +411,7 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
     // Complete batched GDI writes before reading the DIB directly.
     GdiFlush();
     output.pixels.resize(static_cast<std::size_t>(output.width)*height);
-    FeatherOsdPixels(canvas.bits,output.pixels.data(),panel_width,height,settings.opacity,compact&&layout.empty,rgba);
+    FeatherOsdPixels(canvas.bits,output.pixels.data(),panel_width,height,settings.opacity,output.empty,rgba);
     return output;
 }
 
@@ -478,7 +478,7 @@ void OsdRenderer::ShutdownLocked() {
     if (anchor_space_ && api_.destroy_space) api_.destroy_space(anchor_space_);
     swapchain_=XR_NULL_HANDLE; space_=XR_NULL_HANDLE; anchor_space_=XR_NULL_HANDLE; session_=XR_NULL_HANDLE;
     anchor_failed_=false; anchor_logged_=false;
-    acquired_.reset(); acquired_waited_=false; ready_=false; failed_=false; configured_=false; primed_=false; snapshot_needed_=false;
+    acquired_.reset(); acquired_waited_=false; ready_=false; failed_=false; configured_=false; primed_=false; snapshot_needed_=false; image_empty_=false;
     telemetry_={}; status_={}; updated_={}; image_updated_={};
 }
 void OsdRenderer::Shutdown() { std::scoped_lock lock(mutex_); ShutdownLocked(); }
@@ -695,13 +695,17 @@ const XrCompositionLayerBaseHeader* OsdRenderer::Append(const XrFrameEndInfo& in
                 XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
                 const auto release_start=Clock::now();const auto released=api_.release(swapchain_,&release);stats.release.Add(Milliseconds(release_start));
                 if (XR_FAILED(released)) { Fail("OSD release",released); return nullptr; }
-                acquired_.reset(); acquired_waited_=false; ++stats.refreshed; ready_=true; image_height_=bitmap.height; image_width_=bitmap.content_width; image_updated_=Clock::now();
+                acquired_.reset(); acquired_waited_=false; ++stats.refreshed; ready_=true; image_height_=bitmap.height; image_width_=bitmap.content_width; image_empty_=bitmap.empty; image_updated_=Clock::now();
                 upload_.reset();
             }
         }
     }
     if (!ready_) { status_.message=refresh_pending?refresh_pending:"Preparing the overlay"; return nullptr; }
-    if (compact_ && CompactOsdLayout(settings_).empty) { status_.visible=false; status_.message="No compact values selected"; return nullptr; }
+    // Empty as drawn, or as the settings now stand (hidden at once, before
+    // the next raster). The diagnostics tag keeps a compact panel up alone.
+    if (image_empty_ || (compact_ && CompactOsdLayout(settings_,{.diagnostics_width=snapshot_.diagnostics.empty()?0:1}).empty)) {
+        status_.visible=false; status_.message="No compact values selected"; return nullptr;
+    }
     constexpr double rad=3.14159265358979323846/180;
     const auto yaw=-settings_.horizontal_degrees*rad, pitch=settings_.vertical_degrees*rad;
     const auto sy=std::sin(yaw/2),cy=std::cos(yaw/2),sp=std::sin(pitch/2),cp=std::cos(pitch/2);

@@ -104,6 +104,9 @@ struct OsdBitmap {
     double raster_ms{};
     // The renderer's raster generation when it was requested (OsdRenderer).
     std::uint64_t generation{};
+    // An empty compact panel (CompactOsdLayout's empty, the diagnostics tag
+    // included): every pixel is 0, and it is not submitted.
+    bool empty{false};
     bool Valid() const { return content_width>2 && content_width<=width && height>2 && height<=texture_height && pixels.size()==static_cast<std::size_t>(width)*height; }
 };
 
@@ -208,6 +211,8 @@ class OsdRenderer {
     std::uint64_t settings_revision_{};
     int image_height_{};
     int image_width_{OsdBitmap::width};
+    // The image up is an empty compact panel (OsdBitmap::empty).
+    bool image_empty_{false};
     // When the last refresh was requested; zero refreshes on the next frame.
     std::chrono::steady_clock::time_point updated_{};
     std::chrono::steady_clock::time_point image_updated_{};
