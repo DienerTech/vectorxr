@@ -728,6 +728,7 @@ class OpenXrLayer {
     // A native quad projection layer the application submitted for
     // `display_time`: its focus views' FOVs against the ones located for that
     // display time (VarjoNativeFoveationDiagnosticState). Caller holds mutex_.
+    void NoteVarjoNativeLocatedFocusLocked(XrTime display_time, const XrView* views);
     void NoteVarjoNativeSubmittedFocusLocked(XrTime display_time, const XrCompositionLayerProjectionView* views,
                                             uint32_t view_count);
     bool EnsureD3D11QuadViewsPixelProbeResources(int64_t format);

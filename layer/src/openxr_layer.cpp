@@ -9816,6 +9816,9 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
     if (view_locate_info && IsQuadViewConfiguration(view_configuration_type) && count >= 4) {
         CacheQuadViewsFrame(
             view_locate_info->displayTime, std::span<const XrView>(views, count), gaze_diagnostic);
+        if (varjo_compatible_quadviews_active_) {
+            NoteVarjoNativeLocatedFocusLocked(view_locate_info->displayTime, views);
+        }
     }
 
     const XrTime locate_time = view_locate_info ? view_locate_info->displayTime : 0;
@@ -12358,6 +12361,23 @@ void OpenXrLayer::RecordVarjoNativeLocateDiagnostics(const XrViewLocateInfo* vie
         if (logger_.IsDebugEnabled()) {
             LogVarjoNativeFoveationSummaryLocked("periodic-10s", false);
         }
+    }
+}
+
+void OpenXrLayer::NoteVarjoNativeLocatedFocusLocked(XrTime display_time, const XrView* views) {
+    // The focus FOVs the application was given for this display time: the
+    // runtime's, after LocateViews' own adjustments (Depth's convergence
+    // shifts each eye's projection). The application submits these, so they,
+    // not the runtime's, are what its submitted focus views are checked
+    // against; the runtime's stay in the summary's ranges.
+    VarjoNativeFoveationDiagnosticState& diagnostic = varjo_native_foveation_diagnostic_;
+    const size_t kept = diagnostic.located_focus_times.size();
+    if (diagnostic.located_focus_next == 0 || display_time == 0) {
+        return;
+    }
+    const size_t slot = (diagnostic.located_focus_next - 1) % kept;
+    if (diagnostic.located_focus_times[slot] == display_time) {
+        diagnostic.located_focus_fovs[slot] = {views[2].fov, views[3].fov};
     }
 }
 
