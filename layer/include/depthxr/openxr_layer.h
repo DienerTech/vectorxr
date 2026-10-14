@@ -746,6 +746,9 @@ class OpenXrLayer {
                                         uint32_t output_height,
                                         int64_t output_format);
     bool EnsureD3D11SwapchainShaderResources(SwapchainInfo& swapchain, uint32_t array_slice = 0);
+    // The first four swapchains of the quad views session that can be the
+    // compositor's inputs; false while fewer exist.
+    bool SelectQuadViewsPrewarmInputs(std::array<SwapchainInfo*, 4>* inputs);
     void TryPrewarmD3D11QuadViewsCompositor();
     // An emulated quad views frame (views 0/1 peripheral, 2/3 focus) as it is
     // composed into stereo, worked out on the CPU alone: what the Direct3D 11

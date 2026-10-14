@@ -4665,6 +4665,28 @@ bool OpenXrLayer::EnsureD3D11SwapchainShaderResources(SwapchainInfo& swapchain,
     return true;
 }
 
+bool OpenXrLayer::SelectQuadViewsPrewarmInputs(std::array<SwapchainInfo*, 4>* inputs) {
+    // The game's four views are colour images the compositor samples. Other
+    // swapchains made in the quad views session are not among them: another
+    // layer's (OpenKneeboard's are colour-only, 2048x2048 in BGRA) would set
+    // the outputs' format, and a format the first composed frame does not
+    // match reallocates the outputs (hundreds of MiB) at the session's start.
+    uint32_t count = 0;
+    for (auto& [swapchain_handle, swapchain] : tracked_swapchains_) {
+        const XrSwapchainUsageFlags usage = swapchain.usage_flags;
+        if (!swapchain.quadviews_session || swapchain.d3d11_images.empty() ||
+            (usage & XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT) == 0 || (usage & XR_SWAPCHAIN_USAGE_SAMPLED_BIT) == 0 ||
+            (usage & XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0) {
+            continue;
+        }
+        if (count < inputs->size()) {
+            (*inputs)[count] = &swapchain;
+        }
+        ++count;
+    }
+    return count >= inputs->size();
+}
+
 void OpenXrLayer::TryPrewarmD3D11QuadViewsCompositor() {
     if (!d3d11_quadviews_compositor_.device || !d3d11_quadviews_compositor_.context ||
         active_session_ == XR_NULL_HANDLE || cached_quadviews_stereo_recommended_width_ == 0 ||
@@ -4673,16 +4695,7 @@ void OpenXrLayer::TryPrewarmD3D11QuadViewsCompositor() {
     }
 
     std::array<SwapchainInfo*, 4> quad_swapchains{};
-    uint32_t count = 0;
-    for (auto& [swapchain_handle, swapchain] : tracked_swapchains_) {
-        if (!swapchain.quadviews_session || swapchain.d3d11_images.empty()) {
-            continue;
-        }
-        if (count < quad_swapchains.size()) {
-            quad_swapchains[count++] = &swapchain;
-        }
-    }
-    if (count < quad_swapchains.size()) {
+    if (!SelectQuadViewsPrewarmInputs(&quad_swapchains)) {
         return;
     }
 

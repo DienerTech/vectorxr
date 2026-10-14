@@ -209,6 +209,29 @@ public:
         l.UpdateEyeGazeResources(previous);
     }
     static bool Ready() { return Layer().eye_gaze_resources_ready_; }
+    // A swapchain of the quad views session with enumerated images, as
+    // CreateSwapchain and EnumerateSwapchainImages track it.
+    static void QuadSwapchain(uintptr_t handle, XrSwapchainUsageFlags usage) {
+        OpenXrLayer::SwapchainInfo info;
+        info.session = session;
+        info.width = info.height = 2048;
+        info.format = 29;
+        info.usage_flags = usage;
+        info.quadviews_session = true;
+        info.d3d11_images.push_back(nullptr);
+        Layer().tracked_swapchains_[Handle<XrSwapchain>(handle)] = std::move(info);
+    }
+    // The swapchains the compositor prewarm takes as its four inputs.
+    static std::set<uintptr_t> PrewarmInputs() {
+        std::array<OpenXrLayer::SwapchainInfo*, 4> inputs{};
+        std::set<uintptr_t> handles;
+        if (!Layer().SelectQuadViewsPrewarmInputs(&inputs)) return handles;
+        for (const auto& [handle, info] : Layer().tracked_swapchains_) {
+            if (std::find(inputs.begin(), inputs.end(), &info) != inputs.end())
+                handles.insert(reinterpret_cast<uintptr_t>(handle));
+        }
+        return handles;
+    }
     static void WithoutGazeExtension() { Layer().eye_gaze_extension_enabled_ = false; }
     // Logs to a file of its own at `path`; a second call lets the first go.
     static void LogTo(const std::filesystem::path& path) { Layer().logger_.Initialize(path); }
@@ -407,6 +430,20 @@ int main() {
         const std::vector<const char*> without_clock{d3d11, d3d12};
         Expect(depthxr::InstanceExtensionRetries(without_clock, additions).size() == 1,
                "additions the first attempt did not carry are not retried");
+
+        // The compositor prewarm takes the game's four views, not another
+        // layer's colour-only swapchain (OpenKneeboard) or a depth swapchain.
+        Peer::Prepare();
+        constexpr XrSwapchainUsageFlags game_usage =
+            XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+        Peer::QuadSwapchain(200, XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT);
+        Peer::QuadSwapchain(201, XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+        Peer::QuadSwapchain(202, game_usage); Peer::QuadSwapchain(203, game_usage); Peer::QuadSwapchain(204, game_usage);
+        Expect(Peer::PrewarmInputs().empty(), "three game views and two others must not prewarm the compositor");
+        Peer::QuadSwapchain(205, game_usage);
+        Expect(Peer::PrewarmInputs() == std::set<uintptr_t>{202, 203, 204, 205},
+               "the prewarm must take the game's four views only");
+        Peer::Prepare();
         std::cout << "Eye-gaze handshake tests passed.\n";
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }
