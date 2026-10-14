@@ -9,6 +9,7 @@
 #include <fstream>
 #include <iostream>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -673,6 +674,31 @@ class TurboFrameTestPeer {
         std::scoped_lock lock(layer.mutex_);
         layer.has_loaded_config_ = loaded;
         layer.next_locate_space_ = previous;
+        return result;
+    }
+    // The application's xrLocateViews as the layer forwards it to the
+    // runtime (LocateRuntimeViews, before Pivot and Depth), the runtime's
+    // being `runtime`; as LocateSpace above for the settings.
+    static XrResult LocateRuntimeViews(const XrViewLocateInfo& info, std::uint32_t capacity, std::uint32_t* count,
+                                       XrView* views, PFN_xrLocateViews runtime) {
+        auto& layer = Layer();
+        bool loaded = false;
+        PFN_xrLocateViews previous = nullptr;
+        {
+            std::scoped_lock lock(layer.mutex_);
+            loaded = layer.has_loaded_config_;
+            previous = layer.next_locate_views_;
+            layer.has_loaded_config_ = true;
+            layer.resolved_settings_generation_ = layer.config_generation_;
+            layer.resolved_settings_session_ = layer.active_session_;
+            layer.next_locate_views_ = runtime;
+        }
+        XrViewState state{XR_TYPE_VIEW_STATE};
+        const XrResult result =
+            layer.LocateRuntimeViews(XR_NULL_HANDLE, &info, &state, capacity, count, views, nullptr, nullptr);
+        std::scoped_lock lock(layer.mutex_);
+        layer.has_loaded_config_ = loaded;
+        layer.next_locate_views_ = previous;
         return result;
     }
     // Depth on with convergence: LocateViews shifts each eye's projection.
@@ -3408,6 +3434,153 @@ void TestRecorderRecordsViewSpaceLocates() {
     std::filesystem::remove_all(directory, error);
 }
 
+XrResult XRAPI_CALL LocatedStereoViews(XrSession, const XrViewLocateInfo*, XrViewState* state, std::uint32_t capacity,
+                                       std::uint32_t* count, XrView* views) {
+    *count = 2;
+    if (state) {
+        state->viewStateFlags = XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT |
+                                XR_VIEW_STATE_ORIENTATION_TRACKED_BIT | XR_VIEW_STATE_POSITION_TRACKED_BIT;
+    }
+    if (capacity == 0) {
+        return XR_SUCCESS;
+    }
+    for (std::uint32_t eye = 0; eye < 2 && eye < capacity; ++eye) {
+        views[eye].pose.position = {eye ? 0.032f : -0.032f, 1.2f, 0.1f};
+        views[eye].pose.orientation = {0.0f, 0.6f, 0.0f, 0.8f};
+        views[eye].fov = {-0.8f, 0.8f, 0.8f, -0.8f};
+    }
+    return XR_SUCCESS;
+}
+
+// The rows of Frame Generation's trace named `name`, from `id` on (the
+// steady time and thread vary).
+std::vector<std::string> FrameGenTraceRows(const std::string& csv, const std::string& name) {
+    std::vector<std::string> rows;
+    std::istringstream lines(csv);
+    for (std::string line; std::getline(lines, line);) {
+        if (line.rfind(name + ",", 0) != 0) {
+            continue;
+        }
+        std::size_t at = 0;
+        for (int field = 0; field < 3 && at != std::string::npos; ++field) {
+            at = line.find(',', at + 1);
+        }
+        rows.push_back(at == std::string::npos ? std::string() : line.substr(at + 1));
+    }
+    return rows;
+}
+
+// Star Citizen under Frame Generation: is its HUD quad VIEW-space, and does it
+// submit the poses the runtime gave its xrLocateViews? At debug logging, Frame
+// Generation's trace records the game's first quad layer beside its views
+// (end.q, end.q0) and the runtime's own answer to its stereo locate (loc,
+// loc.v0, loc.v1), each with the kind of space. A count query and a quad
+// views locate record nothing.
+void TestFrameGenTraceRecordsQuadAndLocates() {
+    using Peer = depthxr::TurboFrameTestPeer;
+    FakeRuntime runtime;
+    runtime.NoOpenFrame();
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kSequenced);
+    Peer::FreshSession();
+    const auto directory = std::filesystem::temp_directory_path() /
+                           ("vxr-framegen-trace-rows-" + std::to_string(GetCurrentProcessId()));
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    // Debug logging, so the session's trace starts with Frame Generation.
+    const auto log = Peer::StartRecorder(directory / "framegen.log");
+    int executes = 0;
+    Peer::PrepareFrameGen(
+        TestSession(), [&](const void*, std::string&) { return std::make_unique<FgGpu>(&executes); },
+        {FgFormats, FgCreate, FgDestroy, FgImages, FgAcquire, FgWait, FgRelease});
+    auto& framegen = Peer::FrameGen();
+    Expect(Peer::FrameGenOwnsPacing() && framegen.Trace().Enabled(),
+           "Frame Generation did not own pacing with its trace on at debug logging");
+    const XrSpace view = reinterpret_cast<XrSpace>(0x5301), local = reinterpret_cast<XrSpace>(0x5302);
+    Peer::TrackSpaces(view, local);
+
+    XrFrameState state{XR_TYPE_FRAME_STATE};
+    Expect(AppWait(&state) == XR_SUCCESS && AppBegin() == XR_SUCCESS, "The game's frame did not begin");
+    XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO};
+    locate.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    locate.displayTime = state.predictedDisplayTime;
+    locate.space = local;
+    std::array<XrView, 4> located{};
+    for (XrView& eye : located) {
+        eye = {XR_TYPE_VIEW};
+    }
+    std::uint32_t count = 0;
+    Expect(Peer::LocateRuntimeViews(locate, 0, &count, nullptr, &LocatedStereoViews) == XR_SUCCESS && count == 2 &&
+               Peer::LocateRuntimeViews(locate, 2, &count, located.data(), &LocatedStereoViews) == XR_SUCCESS,
+           "The game's stereo locate failed");
+    XrViewLocateInfo quad_locate = locate;
+    quad_locate.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_QUAD_VARJO;
+    Expect(Peer::LocateRuntimeViews(quad_locate, 4, &count, located.data(), &LocatedStereoViews) == XR_SUCCESS,
+           "The game's quad views locate failed");
+
+    const XrSwapchain left = reinterpret_cast<XrSwapchain>(0x81), right = reinterpret_cast<XrSwapchain>(0x82);
+    const XrSwapchain hud = reinterpret_cast<XrSwapchain>(0x83);
+    framegen.TrackSwapchain(left, kFrameGenFormat, 1, XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT);
+    framegen.TrackSwapchain(right, kFrameGenFormat, 1, XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT);
+    framegen.NoteRelease(left, 1);
+    framegen.NoteRelease(right, 1);
+    std::array<XrCompositionLayerProjectionView, 2> views{};
+    for (int eye = 0; eye < 2; ++eye) {
+        views[eye] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+        views[eye].pose = located[eye].pose;
+        views[eye].fov = located[eye].fov;
+        views[eye].subImage.swapchain = eye ? right : left;
+        views[eye].subImage.imageRect = {{0, 0}, {1024, 1024}};
+    }
+    XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    projection.space = local;
+    projection.viewCount = 2;
+    projection.views = views.data();
+    XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+    quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+    quad.space = view;
+    quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+    quad.subImage.swapchain = hud;
+    quad.subImage.imageRect = {{0, 0}, {2560, 1440}};
+    quad.size = {1.6f, 0.9f};
+    quad.pose.position = {0.0f, -0.1f, -1.5f};
+    quad.pose.orientation.w = 1.0f;
+    const std::array<const XrCompositionLayerBaseHeader*, 2> layers{
+        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection),
+        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad)};
+    XrFrameEndInfo info = FrameEndInfo();
+    info.displayTime = state.predictedDisplayTime;
+    info.layerCount = 2;
+    info.layers = layers.data();
+    Expect(Peer::ForwardEndFrame(TestSession(), &info) == XR_SUCCESS, "The game's frame did not end");
+    Peer::StopFrameGen(); // and its trace, whose file is then complete
+    Peer::EndRecorder();
+
+    auto csv_path = log;
+    csv_path.replace_extension(".framegen-trace.csv");
+    std::ifstream stream(csv_path, std::ios::binary);
+    const std::string csv(std::istreambuf_iterator<char>(stream), {});
+    const std::string time = std::to_string(state.predictedDisplayTime);
+    const std::string swapchain = std::to_string(reinterpret_cast<std::int64_t>(hud));
+    using Rows = std::vector<std::string>;
+    // id=layer index, a=kind (1 VIEW), b c=size (um), d=swapchain, e=eye.
+    Expect(FrameGenTraceRows(csv, "end.q") == Rows{"1,1,1600000,900000," + swapchain + ",0,0"},
+           "The trace did not record the game's quad layer with its space's kind, size, swapchain and eye");
+    // id=kind; a b c=position (um), d e f=orientation xyz (1e-6).
+    Expect(FrameGenTraceRows(csv, "end.q0") == Rows{"1,0,-100000,-1500000,0,0,0"},
+           "The trace did not record the game's quad pose");
+    // a=time asked, b=kind (2 LOCAL), c=views, d=view state flags.
+    Expect(FrameGenTraceRows(csv, "loc") == Rows{"0," + time + ",2,2,15,0,0"},
+           "The trace did not record the game's stereo locate once (not its count query or quad views locate)");
+    Expect(FrameGenTraceRows(csv, "loc.v0") == Rows{"0,-32000,1200000,100000,0,600000,0"} &&
+               FrameGenTraceRows(csv, "loc.v1") == Rows{"0,32000,1200000,100000,0,600000,0"},
+           "The trace did not record the runtime's located poses");
+    Expect(FrameGenTraceRows(csv, "end.v0") == Rows{"0,-32000,1200000,100000,0,600000,0"},
+           "The game's submitted pose did not show beside the runtime's (end.v0)");
+    Peer::ForgetSpaces(view, local);
+    Peer::ReleaseLog(directory / "released.log");
+    std::filesystem::remove_all(directory, error);
+}
+
 // With Depth's convergence set, the application is given (and submits)
 // focus FOVs LocateViews shifted. The submitted focus check compares them
 // with those, not with the runtime's raw ones: a game that submits what it
@@ -3599,6 +3772,7 @@ int main() {
     TestDestroySpaceLetsGoBeforeTheRuntime();
     TestTopologyNamesLayerSpaces();
     TestRecorderRecordsViewSpaceLocates();
+    TestFrameGenTraceRecordsQuadAndLocates();
     std::cout << "depthxr_turbo_frame_tests passed\n";
     return 0;
 }

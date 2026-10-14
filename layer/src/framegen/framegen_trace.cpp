@@ -75,7 +75,11 @@ void FrameGenTrace::Start(Logger& logger) {
         "b=copied (rel); cap: id=swapchain a=index b=captured c=jobs d=releases e=GPU mark; "
         "keep: id=real frame a=time b=previousTime c=analyzed d=previousAnalyzed e=asIs, keep.v0: its pose; "
         "pick: id=frame shown a=refresh time b=its time c=flags d=fraction*1e6 e=previousTime f=chosen before "
-        "fallback; sub: a=displayTime b=layerCount c=view0 swapchain d=view0 image width, sub.v0/sub.v1: pose).");
+        "fallback; sub: a=displayTime b=layerCount c=view0 swapchain d=view0 image width, sub.v0/sub.v1: pose; "
+        "end.q (the game's first quad layer): id=layer index a=space kind b=width um c=height um d=swapchain "
+        "e=eyeVisibility, end.q0: its pose (id=space kind); loc (the runtime's answer to the game's stereo "
+        "xrLocateViews): a=displayTime b=space kind c=viewCount d=viewStateFlags, loc.v0/loc.v1: pose; space kinds: "
+        "0 other, 1 VIEW, 2 LOCAL, 3 STAGE).");
 }
 
 void FrameGenTrace::Stop() {

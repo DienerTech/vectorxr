@@ -954,6 +954,15 @@ class OpenXrLayer {
     // forwarding a claimed frame abandons it (`abandon`, when the caller
     // does not abandon the frame itself).
     void DropPendingFrameGenQuad(bool abandon);
+    // While Frame Generation's trace records: the space of the first quad
+    // layer of the frame being ended, and its kind. Classified in
+    // ForwardEndFrame under mutex_, consumed by TraceRuntimeEndFrame (which
+    // runs without it); only the application's end-frame thread touches it.
+    struct TraceQuadSpace {
+        XrSpace space{XR_NULL_HANDLE};
+        TrackedSpaceKind kind{TrackedSpaceKind::kOther};
+    };
+    std::optional<TraceQuadSpace> pending_trace_quad_space_;
     D3D11BridgeQuadFrames d3d11_bridge_quad_frames_;
     D3D11BridgeQuadFrames d3d11_bridge_quad_frames_summarized_;
     // Vulkan games with Frame Generation: the session is Direct3D 12 and the

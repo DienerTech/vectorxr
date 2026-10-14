@@ -950,6 +950,19 @@ const char* TrackedSpaceKindName(TrackedSpaceKind kind) {
 // lock): the topology functions below never see the layer's spaces otherwise.
 using SpaceKindOf = std::function<TrackedSpaceKind(XrSpace)>;
 
+// The frame's first quad layer and its index, or nullptr.
+const XrCompositionLayerQuad* FirstQuadLayer(const XrFrameEndInfo& info, std::uint32_t* index = nullptr) {
+    for (std::uint32_t i = 0; info.layers && i < info.layerCount; ++i) {
+        if (info.layers[i] && info.layers[i]->type == XR_TYPE_COMPOSITION_LAYER_QUAD) {
+            if (index) {
+                *index = i;
+            }
+            return reinterpret_cast<const XrCompositionLayerQuad*>(info.layers[i]);
+        }
+    }
+    return nullptr;
+}
+
 // `value` rounded to `decimals` places; one that rounds to zero prints as 0,
 // not -0.
 std::string FormatFixed(double value, int decimals) {
@@ -5892,6 +5905,8 @@ XrResult OpenXrLayer::TraceRuntimeEndFrame(XrSession session, const XrFrameEndIn
     // This frame's route at the quad views compose site, if it came from it.
     std::optional<FrameGenQuadFrame> quad = std::move(pending_framegen_quad_);
     pending_framegen_quad_.reset();
+    const std::optional<TraceQuadSpace> quad_space = pending_trace_quad_space_;
+    pending_trace_quad_space_.reset();
     // Frame Generation turns one app frame into two runtime frames, each of
     // which goes through SubmitRuntimeFrame (and so carries the OSD).
     if (framegen_owns_pacing_.load(std::memory_order_acquire) && info) {
@@ -5913,6 +5928,17 @@ XrResult OpenXrLayer::TraceRuntimeEndFrame(XrSession session, const XrFrameEndIn
                 if (projection->viewCount > 1) {
                     trace.RecordPose("end.v1", 0, projection->views[1].pose);
                 }
+            }
+            // The game's HUD quad, if it has one. Not on the frame the trace
+            // began in: its space was not classified.
+            std::uint32_t quad_index = 0;
+            const XrCompositionLayerQuad* quad_layer = FirstQuadLayer(*info, &quad_index);
+            if (quad_layer && quad_space && quad_space->space == quad_layer->space) {
+                const auto micro = [](float value) { return static_cast<int64_t>(std::llround(value * 1e6)); };
+                trace.Record("end.q", quad_index, static_cast<int64_t>(quad_space->kind), micro(quad_layer->size.width),
+                             micro(quad_layer->size.height), reinterpret_cast<int64_t>(quad_layer->subImage.swapchain),
+                             quad_layer->eyeVisibility);
+                trace.RecordPose("end.q0", static_cast<std::uint64_t>(quad_space->kind), quad_layer->pose);
             }
         }
         return framegen_.EndFrame(session, info, framegen_calls_, quad ? &*quad : nullptr);
@@ -6612,6 +6638,15 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
         }
     } pending_guard{*this};
     ObserveCompositionLayerTopology(frame_end_info);
+    // Frame Generation's trace records the frame's first quad layer with its
+    // space's kind (TraceRuntimeEndFrame, which runs without mutex_): it is
+    // classified here, under config_lock, for either call below.
+    pending_trace_quad_space_.reset();
+    if (frame_end_info && framegen_owns_pacing_.load(std::memory_order_acquire) && framegen_.Trace().Enabled()) {
+        if (const XrCompositionLayerQuad* quad = FirstQuadLayer(*frame_end_info)) {
+            pending_trace_quad_space_ = TraceQuadSpace{quad->space, ClassifySpace(quad->space)};
+        }
+    }
     if (frame_pacing_debug_enabled_.load(std::memory_order_relaxed) && frame_end_info) {
         std::scoped_lock lock(turbo_mutex_);
         if (turbo_last_predicted_display_period_ > 0 && turbo_max_returned_display_time_ > 0) {
@@ -13008,10 +13043,17 @@ XrResult OpenXrLayer::LocateRuntimeViews(XrSession session,
     // The tuning only: the resolved settings' diagnostic binding would make
     // this per-call copy allocate.
     QuadViewsSettings quadviews_settings;
+    // Frame Generation's trace (debug logging) records the runtime's answer
+    // to the game's stereo locate, with the kind of space it was asked in.
+    const bool trace_locate = view_locate_info && framegen_.Trace().Enabled();
+    TrackedSpaceKind locate_space_kind = TrackedSpaceKind::kOther;
     {
         std::scoped_lock lock(mutex_);
         ReloadConfigIfNeeded();
         RefreshResolvedSettings();
+        if (trace_locate) {
+            locate_space_kind = ClassifySpace(view_locate_info->space);
+        }
         quadviews_emulation_active = IsQuadViewsEmulationActive();
         varjo_compatible = varjo_compatible_quadviews_active_;
         quadviews_settings = resolved_settings_.quadviews;
@@ -13078,6 +13120,23 @@ XrResult OpenXrLayer::LocateRuntimeViews(XrSession session,
             session, downstream_view_locate_info, view_state, view_capacity_input, view_count_output, views);
         if (diag) {
             logger_.Debug("Turbo-diag: app xrLocateViews completed.");
+        }
+        // The runtime's poses, before Pivot or Depth adjust them (LocateViews):
+        // against end.v0 they show whether the game submits what it located.
+        // Not for a count query, which locates no view.
+        if (trace_locate && XR_SUCCEEDED(locate_result) &&
+            !IsQuadViewConfiguration(view_locate_info->viewConfigurationType) && views && view_count_output &&
+            view_capacity_input > 0) {
+            FrameGenTrace& trace = framegen_.Trace();
+            const std::uint32_t located = std::min(*view_count_output, view_capacity_input);
+            trace.Record("loc", 0, view_locate_info->displayTime, static_cast<int64_t>(locate_space_kind), located,
+                         view_state ? static_cast<int64_t>(view_state->viewStateFlags) : 0);
+            if (located > 0) {
+                trace.RecordPose("loc.v0", 0, views[0].pose);
+            }
+            if (located > 1) {
+                trace.RecordPose("loc.v1", 0, views[1].pose);
+            }
         }
         return locate_result;
     }
