@@ -4537,6 +4537,7 @@ void FrameGenPresenter::StartCompositorLocked(const FrameGenRuntimeCalls& calls)
     last_offer_slot_.reset();
     auto_busy_count_ = 0;
     auto_busy_since_ = auto_end_held_from_ = auto_end_held_to_ = {};
+    auto_end_held_frame_ = 0;
     newest_copy_ = passthrough_copy_;
     newest_copy_id_ = 0;
     newest_copy_fresh_ = false;
@@ -4939,12 +4940,17 @@ std::optional<XrResult> FrameGenPresenter::ThreadedWaitLocked(std::unique_lock<s
     // the cadence ended (Auto's probes; its GPU's hold below counts as its).
     // Not just in time, its xrEndFrame is held for its frame's slot too
     // (ThreadedEnd): left out, or a game at 2x reads as taking at least the
-    // refresh to that slot, however light it is.
+    // refresh to that slot, however light it is. Only the end of the frame
+    // the last wait handed out: a pipelined game's earlier frame ends on
+    // another thread while this one is still working, and that time is the
+    // game's own.
     const auto held = Clock::now() - held_from;
     if (auto_busy_since_ != Clock::time_point{} && asked > auto_busy_since_) {
         const Clock::duration end_held =
-            std::max(std::min(auto_end_held_to_, asked) - std::max(auto_end_held_from_, auto_busy_since_),
-                     Clock::duration::zero());
+            auto_end_held_frame_ != threaded_id_
+                ? Clock::duration::zero()
+                : std::max(std::min(auto_end_held_to_, asked) - std::max(auto_end_held_from_, auto_busy_since_),
+                           Clock::duration::zero());
         auto_busy_[auto_busy_count_++ % auto_busy_.size()] = Milliseconds(asked - auto_busy_since_ - end_held);
     }
     auto_busy_since_ = asked + held;
@@ -5190,6 +5196,7 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
     // (ThreadedWaitLocked).
     auto_end_held_from_ = slot_asked;
     auto_end_held_to_ = Clock::now();
+    auto_end_held_frame_ = frame.id;
     if (!slot_offer_ || slot_offer_->frame_id != frame.id) {
         // The presenter thread stopped first; no runtime frame is left for
         // this one.

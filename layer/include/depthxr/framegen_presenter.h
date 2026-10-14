@@ -1168,6 +1168,7 @@ class FrameGenPresenter {
     std::chrono::steady_clock::time_point auto_busy_since_{};
     std::chrono::steady_clock::time_point auto_end_held_from_{};
     std::chrono::steady_clock::time_point auto_end_held_to_{};
+    std::uint64_t auto_end_held_frame_{0}; // the frame whose end was held then
     std::size_t auto_late_percent_{0}; // for the log
     // Auto never steps above this again in the session once video memory
     // ran near its budget: each step up allocates more output images.

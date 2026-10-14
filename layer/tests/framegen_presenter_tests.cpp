@@ -8415,6 +8415,26 @@ void TestAutoProbesNeedRoom() {
     Check(presenter.Status().multiplier == 1,
           name + ": a game that got lighter is probed at full rate and stays there (" +
               std::to_string(presenter.Status().multiplier) + "x)");
+    if (!g_jit) {
+        // A pipelined game (MSFS): its render thread's xrEndFrame waits for
+        // its frame's slot while its main thread works on the next frame.
+        // That wait is not taken off the main thread's time: 14 ms a frame
+        // cannot run at full rate.
+        RunPipelined(*app, 2000ms, 14ms, 12ms);
+        Check(presenter.Status().multiplier == 2,
+              name + ": a pipelined game of 14 ms a frame engages Auto at 2x (" +
+                  std::to_string(presenter.Status().multiplier) + "x)");
+        int pipelined_probes = 0;
+        std::uint32_t pipelined_last = presenter.Status().multiplier;
+        RunPipelined(*app, 3000ms, 14ms, 12ms, [&](int, const XrFrameState&) {
+            const std::uint32_t now = presenter.Status().multiplier;
+            pipelined_probes += now < pipelined_last ? 1 : 0;
+            pipelined_last = now;
+        });
+        Check(pipelined_probes == 0,
+              name + ": a pipelined game that cannot run at full rate is not probed there (" +
+                  std::to_string(pipelined_probes) + " probes)");
+    }
     presenter.Stop();
     Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
 }
