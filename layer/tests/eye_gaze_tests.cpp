@@ -188,6 +188,15 @@ public:
         Layer().last_eye_gaze_self_sync_attempt_time_ = old;
     }
     static void NewSession() { Layer().ResetSessionState(); SetupSession(); runtime_attached.erase(private_set); }
+    // A live Tracking Mode change in an emulated quadviews session.
+    static void Track(QuadViewsTrackingMode mode) {
+        auto& l = Layer();
+        l.quadviews_session_active_ = true; l.d3d11_graphics_extension_requested_ = true;
+        const auto previous = l.resolved_settings_.quadviews.tracking_mode;
+        l.resolved_settings_.quadviews.tracking_mode = mode;
+        l.UpdateEyeGazeResources(previous);
+    }
+    static bool Ready() { return Layer().eye_gaze_resources_ready_; }
 };
 }
 
@@ -312,6 +321,19 @@ int main() {
                "re-suggesting attached application actions must fail as the runtime reports");
         Peer::NewSession(); Peer::Resources(); AttachApp();
         Expect(!Peer::GoodAppSync() && !Peer::GoodPrivateSync(), "session recreation must reset focus and sync freshness");
+
+        using Mode = depthxr::QuadViewsTrackingMode;
+        Peer::Prepare(); Peer::Track(Mode::Head); Peer::Track(Mode::Eye); Peer::Track(Mode::Head);
+        Expect(!Peer::Ready(), "a switch to Head before attachment must release the private gaze set");
+        Peer::Track(Mode::Eye); MakeAction(app_action); Bind({app_action});
+        Expect(AttachApp() == XR_SUCCESS && runtime_sets.size() == 2, "a switch back to Eye before attachment must attach gaze");
+        Peer::Track(Mode::Head); Peer::Track(Mode::Eye); runtime_gaze_active = true;
+        Expect(Peer::Ready() && Peer::Gaze() && gaze_locates == 1 && attachments == 1 && suggestions == 2,
+               "Eye -> Head -> Eye after attachment must keep the attached gaze set");
+        Peer::Prepare(); Peer::Track(Mode::Head); MakeAction(app_action); Bind({app_action}); AttachApp();
+        Peer::Track(Mode::Eye); Peer::Track(Mode::Head); Peer::Track(Mode::Eye); runtime_gaze_active = true;
+        Expect(!Peer::Ready() && !Peer::Gaze() && attachments == 1 && suggestions == 1 && runtime_sets.size() == 1,
+               "Head -> Eye after an attachment without gaze must not create an unattachable set");
         std::cout << "Eye-gaze handshake tests passed.\n";
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

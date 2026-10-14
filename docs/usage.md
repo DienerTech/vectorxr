@@ -324,8 +324,9 @@ starts open until a Quadviews profile is enabled.
 
 #### Live tuning and restarts
 
-- **Fully live:** Horizontal Offset, Vertical Offset, Tracking Mode, Smoothing, Deadzone,
-  Eye Tracking Correction, Foveate Sharpness, and Transition Thickness.
+- **Fully live:** Horizontal Offset, Vertical Offset, Smoothing, Deadzone, Eye Tracking
+  Correction, Foveate Sharpness, and Transition Thickness. Tracking Mode is live too, except that
+  switching to Eye tracked needs a game restart when the game started in Head tracked mode.
 - **Restart required for complete effect:** Focus Width, Focus Height, Focus Resolution,
   Peripheral Resolution, and turning Quadviews or a Quadviews profile on or off. Width and height
   move the visible focus window immediately, but DCS keeps its existing texture dimensions and

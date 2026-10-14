@@ -10479,19 +10479,7 @@ void OpenXrLayer::RefreshResolvedSettings() {
         ResetQuadViewsDebugHeartbeatState();
     }
 
-    if (IsQuadViewsEmulationActive() &&
-        resolved_settings_.quadviews.tracking_mode == QuadViewsTrackingMode::Eye &&
-        active_session_ != XR_NULL_HANDLE && !eye_gaze_resources_ready_) {
-        const XrResult eye_gaze_result = CreateEyeGazeResources(active_session_);
-        if (XR_FAILED(eye_gaze_result)) {
-            logger_.Info("Eye gaze resources unavailable after quadviews tracking-mode change; head/static focus remains active.");
-            DestroyEyeGazeResources();
-        }
-    } else if ((!IsQuadViewsEmulationActive() ||
-                resolved_settings_.quadviews.tracking_mode != QuadViewsTrackingMode::Eye) &&
-               eye_gaze_resources_ready_) {
-        DestroyEyeGazeResources();
-    }
+    UpdateEyeGazeResources(previous.quadviews.tracking_mode);
 
     const bool wants_varjo_rendering_gaze =
         varjo_compatible_quadviews_active_ && varjo_foveated_rendering_extension_requested_ &&
@@ -11146,6 +11134,38 @@ void OpenXrLayer::DestroyEyeGazeResources() {
     }
     if (action_set != XR_NULL_HANDLE && next_destroy_action_set_) {
         next_destroy_action_set_(action_set);
+    }
+}
+
+// Follows a live Tracking Mode change. A session has one
+// xrAttachSessionActionSets: a gaze set attached there is kept through Head
+// tracked (gaze is not located then) for a switch back to Eye, and a set made
+// after an attachment without one could never be attached or bound.
+void OpenXrLayer::UpdateEyeGazeResources(QuadViewsTrackingMode previous_mode) {
+    const bool emulation_active = IsQuadViewsEmulationActive();
+    const bool wants_eye_gaze =
+        emulation_active && resolved_settings_.quadviews.tracking_mode == QuadViewsTrackingMode::Eye;
+    const bool attachment_completed = eye_gaze_action_set_attachment_.SessionAttachmentCompleted();
+    if (wants_eye_gaze && active_session_ != XR_NULL_HANDLE && !eye_gaze_resources_ready_) {
+        if (!eye_gaze_extension_enabled_ || !attachment_completed) {
+            const XrResult eye_gaze_result = CreateEyeGazeResources(active_session_);
+            if (XR_FAILED(eye_gaze_result)) {
+                logger_.Info("Eye gaze resources unavailable after quadviews tracking-mode change; head/static focus remains active.");
+                DestroyEyeGazeResources();
+            }
+        } else if (previous_mode != QuadViewsTrackingMode::Eye) {
+            logger_.Info("Eye-tracked quadviews focus takes effect after the game restarts: this session attached "
+                         "its OpenXR actions without VectorXR's eye-gaze action set; head/static focus remains active.");
+        }
+    } else if (!wants_eye_gaze && eye_gaze_resources_ready_) {
+        if (!emulation_active || !attachment_completed) {
+            DestroyEyeGazeResources();
+            return;
+        }
+        // A switch back to Eye reports gaze afresh, as after creation.
+        has_logged_eye_gaze_focus_active_ = false;
+        has_logged_eye_gaze_focus_unavailable_ = false;
+        eye_gaze_unavailable_streak_ = 0;
     }
 }
 

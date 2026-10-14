@@ -597,6 +597,7 @@ class OpenXrLayer {
     void RecordEyeGazeSyncResult(bool application, XrResult result);
     void ResetEyeGazeInputState();
     void DestroyEyeGazeResources();
+    void UpdateEyeGazeResources(QuadViewsTrackingMode previous_mode); // Called under mutex_.
     void TryAttachEyeGazeActionSetFallback(XrSession session);
     bool LocateEyeGazeFocusOffsets(XrSession session,
                                    XrSpace base_space,
