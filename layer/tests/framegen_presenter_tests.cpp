@@ -5096,6 +5096,9 @@ void TestDynamicToggleStandsBy() {
           "toggle standby: turned on again, a game holding the refresh rate is not engaged (" +
               std::string(status.standby ? "standing by" : "engaged") + ", " +
               std::to_string(status.dynamic_engagements) + " engagements)");
+    // Standing by, the reason is not the engagement's from before the toggle.
+    Check(status.dynamic_reason.find("ran at") == std::string::npos,
+          "toggle standby: standing by again, the old engagement's reason is gone (" + status.dynamic_reason + ")");
     // Slow again: it engages after its own run below the refresh rate.
     EngageDynamic(presenter, *app, "toggle standby");
     Check(presenter.Status().dynamic_engagements == 2, "toggle standby: engages again once the game is slow");

@@ -2020,6 +2020,9 @@ void FrameGenPresenter::DynamicReenableLocked(Clock::time_point now) {
     if (!dynamic_standby_) {
         dynamic_standby_ = true;
         standby_since_ = now;
+        // Standing by now: the engagement's reason (the game's rate then)
+        // would read as why it stands by.
+        dynamic_reason_.clear();
     }
     dynamic_below_since_.reset();
     dynamic_probing_ = false;
