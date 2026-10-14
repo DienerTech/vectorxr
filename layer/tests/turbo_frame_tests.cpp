@@ -147,6 +147,37 @@ class TurboFrameTestPeer {
             capturing ? TurboMetricsMode::kAlways : TurboMetricsMode::kOff, {}, true, 0);
     }
     static void ResetMetrics() { Layer().ResetTurboMetricsState(); }
+    // An application LOCAL space that Pivot also anchors to.
+    static void TrackSpaceAsAnchor(XrSpace space) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.tracked_local_spaces_.insert(space);
+        layer.pivotxr_translation_anchor_ = OpenXrLayer::PivotTranslationAnchor{XrVector3f{}, space};
+    }
+    static bool SpaceTrackedAsLocal(XrSpace space) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        return layer.tracked_local_spaces_.contains(space);
+    }
+    static bool SpaceKnown(XrSpace space) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        return layer.tracked_local_spaces_.contains(space) ||
+               (layer.pivotxr_translation_anchor_ && layer.pivotxr_translation_anchor_->space == space);
+    }
+    static void ForgetAnchor() {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.pivotxr_translation_anchor_.reset();
+    }
+    static XrResult DestroySpace(XrSpace space, PFN_xrDestroySpace runtime) {
+        auto& layer = Layer();
+        const auto previous = layer.next_destroy_space_;
+        layer.next_destroy_space_ = runtime;
+        const XrResult result = layer.DestroySpace(space);
+        layer.next_destroy_space_ = previous;
+        return result;
+    }
     // xrBeginSession's Turbo settings line, in a session Turbo yielded to FG.
     static void SessionSettingsAfterYield() {
         auto& layer = Layer();
@@ -2236,6 +2267,36 @@ void TestFramePacingLineUnderFrameGen() {
     std::filesystem::remove_all(directory, error);
 }
 
+// xrDestroySpace was forwarded before the layer let the space go: another
+// thread could still take it as Pivot's anchor and locate it after the
+// runtime destroyed it, and a space created meanwhile under the same handle
+// lost its tracking to the late cleanup.
+bool g_space_known_at_runtime_destroy = true;
+XrResult XRAPI_CALL CheckingDestroySpace(XrSpace space) {
+    g_space_known_at_runtime_destroy = depthxr::TurboFrameTestPeer::SpaceKnown(space);
+    return XR_SUCCESS;
+}
+XrResult XRAPI_CALL RefusingDestroySpace(XrSpace) { return XR_ERROR_RUNTIME_FAILURE; }
+
+void TestDestroySpaceLetsGoBeforeTheRuntime() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    const XrSpace space = reinterpret_cast<XrSpace>(static_cast<std::uintptr_t>(0x5150));
+    depthxr::TurboFrameTestPeer::TrackSpaceAsAnchor(space);
+    Expect(depthxr::TurboFrameTestPeer::DestroySpace(space, &CheckingDestroySpace) == XR_SUCCESS, "xrDestroySpace failed");
+    Expect(!g_space_known_at_runtime_destroy,
+           "The layer still tracked the space, as Pivot's anchor, while the runtime destroyed it");
+    depthxr::TurboFrameTestPeer::TrackSpaceAsAnchor(space);
+    Expect(depthxr::TurboFrameTestPeer::DestroySpace(space, &RefusingDestroySpace) == XR_ERROR_RUNTIME_FAILURE,
+           "A refused xrDestroySpace must reach the application");
+    Expect(depthxr::TurboFrameTestPeer::SpaceTrackedAsLocal(space),
+           "A space the runtime refused to destroy lost its classification");
+    Expect(depthxr::TurboFrameTestPeer::DestroySpace(space, &CheckingDestroySpace) == XR_SUCCESS &&
+               !depthxr::TurboFrameTestPeer::SpaceTrackedAsLocal(space),
+           "Cleaning up the test space failed");
+    depthxr::TurboFrameTestPeer::ForgetAnchor();
+}
+
 std::size_t Occurrences(const std::string& text, const std::string& needle) {
     std::size_t count = 0;
     for (std::size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + needle.size())) {
@@ -2494,6 +2555,7 @@ int main() {
     TestDestroySessionRecordsUntilTheSessionIsGone();
     TestMetricsBindingResetWaitsForTheFrameThread();
     TestFramePacingLineUnderFrameGen();
+    TestDestroySpaceLetsGoBeforeTheRuntime();
     std::cout << "depthxr_turbo_frame_tests passed\n";
     return 0;
 }

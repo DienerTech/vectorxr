@@ -9997,9 +9997,14 @@ XrResult OpenXrLayer::DestroySpace(XrSpace space) {
                       " is kept until its session ends: Frame Generation's presenter thread may still submit it.");
         return XR_SUCCESS;
     }
-    watch.Step("in the runtime's xrDestroySpace");
-    const XrResult result = next_destroy_space_(space);
-    if (XR_SUCCEEDED(result)) {
+    // The layer lets the space go before the runtime does: once the runtime
+    // has destroyed it, no other thread may pick it up as Pivot's anchor or
+    // classify it, and a space the runtime then creates under the same handle
+    // must not lose its tracking to this cleanup. A refused destroy restores
+    // what classifies the space; the caches refill on their own.
+    bool was_view = false, was_local = false, was_stage = false;
+    std::optional<ApplicationActionSpace> action_space;
+    {
         std::scoped_lock lock(mutex_);
         const auto remove_space_from_frame = [space](PivotPoseDeltaFrame& frame) {
             for (std::size_t index = 0; index < frame.space_pose_delta_count;) {
@@ -10026,10 +10031,10 @@ XrResult OpenXrLayer::DestroySpace(XrSpace space) {
         }
         logged_pivot_space_conversions_.erase(space);
         failed_pivot_space_conversions_.erase(space);
-        tracked_view_spaces_.erase(space);
-        application_action_spaces_.erase(space);
-        tracked_local_spaces_.erase(space);
-        tracked_stage_spaces_.erase(space);
+        was_view = tracked_view_spaces_.erase(space) > 0;
+        if (auto node = application_action_spaces_.extract(space)) action_space = std::move(node.mapped());
+        was_local = tracked_local_spaces_.erase(space) > 0;
+        was_stage = tracked_stage_spaces_.erase(space) > 0;
         if (pivotxr_translation_anchor_ && pivotxr_translation_anchor_->space == space) {
             pivotxr_translation_anchor_.reset();
         }
@@ -10042,6 +10047,15 @@ XrResult OpenXrLayer::DestroySpace(XrSpace space) {
         if (space == internal_stage_space_) {
             internal_stage_space_ = XR_NULL_HANDLE;
         }
+    }
+    watch.Step("in the runtime's xrDestroySpace");
+    const XrResult result = next_destroy_space_(space);
+    if (XR_FAILED(result)) {
+        std::scoped_lock lock(mutex_);
+        if (was_view) tracked_view_spaces_.insert(space);
+        if (action_space) application_action_spaces_.emplace(space, std::move(*action_space));
+        if (was_local) tracked_local_spaces_.insert(space);
+        if (was_stage) tracked_stage_spaces_.insert(space);
     }
 
     return result;
