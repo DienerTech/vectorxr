@@ -4913,6 +4913,9 @@ void TestTelemetryWindows() {
         standby += number(line, "standbyS=");
         standby_windows += " inline " + std::to_string(number(line, "standbyS="));
     }
+    // The session's first window starts with it (it had no start: rates 0.0).
+    Check(number(inline_lines.front(), "appFps=") > 0.0,
+          "telemetry: the first summary's rates cover its window (" + inline_lines.front() + ")");
     const std::string& last = threaded.back();
     // "generated=+N (M)": the window's, then the session's.
     const std::size_t generated_at = last.find("generated=+");

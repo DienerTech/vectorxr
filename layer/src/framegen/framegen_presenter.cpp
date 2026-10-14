@@ -348,6 +348,9 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
     user_enabled_ = true;
     gpu_stalled_ = false; // the last session's stalled work went with its swapchains
     started_at_ = Clock::now();
+    // The first summary's window starts with the session: without a start,
+    // its rates were over no time and read 0.0 (in 14 of 14 sessions).
+    last_summary_ = started_at_;
     healthy_streak_ = 0;
     automatic_retries_ = 0;
     paused_at_.reset();
