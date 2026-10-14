@@ -167,6 +167,19 @@ impl DebugSourceSnapshot {
         for snapshot in deferred {
             self.log_file(&snapshot);
         }
+        // The newest complete session's Frame Generation trace (written with
+        // debug logging): minutes of per-frame history where the recorder
+        // holds seconds. It can reach hundreds of MB, so it gets a log's
+        // capped start-and-end cut (the start holds the CSV header) and comes
+        // after everything above.
+        if let Some(trace) = paths
+            .iter()
+            .take(COMPLETE_SESSIONS)
+            .map(|path| path.with_extension("framegen-trace.csv"))
+            .find(|trace| trace.exists())
+        {
+            self.log_file(&trace);
+        }
         for path in paths.iter().skip(COMPLETE_SESSIONS) {
             for companion in companions(path).into_iter().chain(framegen(path)) {
                 self.log_file(&companion);
@@ -436,6 +449,65 @@ mod tests {
                 "vectorxr-20261009-100000.flight-recorder.framegen.log",
             ]
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_newest_frame_generation_trace_follows_the_complete_sessions() {
+        let root = std::env::temp_dir().join(format!(
+            "vectorxr-debug-trace-{}-{}",
+            std::process::id(),
+            super::super::unix_milliseconds()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let sessions = [
+            "vectorxr-20261014-120000.log",
+            "vectorxr-20261014-110000.log",
+            "vectorxr-20261014-100000.log",
+        ]
+        .map(|name| root.join(name));
+        for session in &sessions {
+            fs::write(session, "main").unwrap();
+            fs::write(session.with_extension("flight-recorder.0.log"), "recorder").unwrap();
+        }
+        // The newest session ran without debug logging; the trace comes from
+        // the previous one, and the oldest one's is never taken.
+        fs::write(
+            sessions[0].with_extension("flight-recorder.framegen.log"),
+            "frame generation",
+        )
+        .unwrap();
+        fs::write(
+            sessions[1].with_extension("framegen-trace.csv"),
+            "name,ns,thread,id,a,b,c,d,e,f\nsession,0,0,0,0,0,0,0,0,0\n",
+        )
+        .unwrap();
+        fs::write(sessions[2].with_extension("framegen-trace.csv"), "old").unwrap();
+        let mut snapshot = DebugSourceSnapshot::default();
+        snapshot.logs(sessions.to_vec());
+        let order = snapshot
+            .files
+            .iter()
+            .map(|f| f.archive_path.trim_start_matches("logs/").to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            order,
+            vec![
+                "vectorxr-20261014-120000.log",
+                "vectorxr-20261014-120000.flight-recorder.0.log",
+                "vectorxr-20261014-110000.log",
+                "vectorxr-20261014-110000.flight-recorder.0.log",
+                "vectorxr-20261014-100000.log",
+                "vectorxr-20261014-120000.flight-recorder.framegen.log",
+                "vectorxr-20261014-110000.framegen-trace.csv",
+                "vectorxr-20261014-100000.flight-recorder.0.log",
+            ]
+        );
+        assert!(snapshot.files[6]
+            .content
+            .as_deref()
+            .unwrap()
+            .starts_with("name,ns,thread,id,"));
         fs::remove_dir_all(root).unwrap();
     }
 

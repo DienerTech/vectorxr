@@ -205,7 +205,7 @@ function reportText(input: DebugPackageInput): string {
     'runtime-status.json includes live sessions, safety blocks, and recorded Turbo faults.',
     'runtime-pacing.json and turbo-metrics.json contain interpreted pacing and metric data.',
     'raw/ includes unfiltered saved data, runtime status/control files (including stale sessions), recovery markers, fault archives, and pacing reset markers.',
-    'logs/ includes all retained VectorXR log files, subject to capture limits.',
+    'logs/ includes all retained VectorXR log files and, when debug logging was on, the newest session\'s Frame Generation trace (*.framegen-trace.csv), subject to capture limits.',
     'Raw capture limits: 8 MiB per file and 64 MiB total. Oversized logs keep their start (the session header) and their end, with a marker where the middle was left out; oversized JSON files are omitted intact.',
     'diagnostic-sources.json lists source paths, original sizes, truncation, missing/unreadable files, and collection errors.',
     'Files are captured during export; live runtime writers may update them between reads. Cleared logs and disabled metric captures cannot be recovered.',
