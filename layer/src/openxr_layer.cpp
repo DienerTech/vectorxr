@@ -849,6 +849,54 @@ std::string FormatDiagnosticDouble(double value) {
     return stream.str();
 }
 
+// The visibility mask a synthesized focus view is given: nothing of it is
+// hidden. The hidden mesh is one zero-area triangle; the visible mesh and the
+// line loop are a square of tangents +-10 (about 84 degrees), wider than any
+// view; counter-clockwise, at z = -1 as XR_KHR_visibility_mask has them.
+XrResult FocusViewVisibilityMask(XrVisibilityMaskTypeKHR type, XrVisibilityMaskKHR* mask) {
+    if (!mask) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+    constexpr float kEdge = 10.0f;
+    static constexpr std::array<XrVector2f, 4> kSquare{{{-kEdge, -kEdge}, {kEdge, -kEdge}, {kEdge, kEdge}, {-kEdge, kEdge}}};
+    static constexpr std::array<uint32_t, 6> kSquareTriangles{0, 1, 2, 0, 2, 3};
+    static constexpr std::array<uint32_t, 4> kSquareLoop{0, 1, 2, 3};
+    static constexpr std::array<XrVector2f, 3> kPoint{};
+    static constexpr std::array<uint32_t, 3> kPointTriangle{0, 1, 2};
+    std::span<const XrVector2f> vertices;
+    std::span<const uint32_t> indices;
+    switch (type) {
+    case XR_VISIBILITY_MASK_TYPE_HIDDEN_TRIANGLE_MESH_KHR:
+        vertices = kPoint;
+        indices = kPointTriangle;
+        break;
+    case XR_VISIBILITY_MASK_TYPE_VISIBLE_TRIANGLE_MESH_KHR:
+        vertices = kSquare;
+        indices = kSquareTriangles;
+        break;
+    case XR_VISIBILITY_MASK_TYPE_LINE_LOOP_KHR:
+        vertices = kSquare;
+        indices = kSquareLoop;
+        break;
+    default:
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+    mask->vertexCountOutput = static_cast<uint32_t>(vertices.size());
+    mask->indexCountOutput = static_cast<uint32_t>(indices.size());
+    if (mask->vertexCapacityInput == 0 || mask->indexCapacityInput == 0) {
+        return XR_SUCCESS; // the sizes, as asked
+    }
+    if (mask->vertexCapacityInput < vertices.size() || mask->indexCapacityInput < indices.size()) {
+        return XR_ERROR_SIZE_INSUFFICIENT;
+    }
+    if (!mask->vertices || !mask->indices) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+    std::copy(vertices.begin(), vertices.end(), mask->vertices);
+    std::copy(indices.begin(), indices.end(), mask->indices);
+    return XR_SUCCESS;
+}
+
 // A cached frame's display time against the frame's own, for diagnostics:
 // "none" when nothing matched (a matched time of 0), not minus the time.
 std::string FormatMatchedDeltaNs(XrTime matched_time, XrTime display_time) {
@@ -3692,6 +3740,27 @@ XrResult OpenXrLayer::GetVisibilityMaskKHR(XrSession session,
                      std::to_string(runtime_view_index) + ").");
         has_logged_visibility_mask_mapping_ = true;
     }
+    const uint32_t shape_bit = view_index < 4 && visibility_mask_type >= 1 && visibility_mask_type <= 3
+                                   ? 1u << (view_index * 4 + static_cast<uint32_t>(visibility_mask_type))
+                                   : 0u;
+    if (synthesize_quad && view_index >= 2 && view_index < 4) {
+        // A focus view lies inside its eye's view, away from the lens edge
+        // its eye's mask covers: nothing of it is hidden. It is not given its
+        // eye's mask, which is right only drawn through the focus view's own
+        // projection, which moves with the gaze every frame: applied in the
+        // view's normalized coordinates (or with a stale projection), it cuts
+        // a ring around the focus view that is never drawn, and the compositor
+        // blends that ring into the transition band.
+        const XrResult result = FocusViewVisibilityMask(visibility_mask_type, visibility_mask);
+        if (XR_SUCCEEDED(result) && visibility_mask && visibility_mask->vertexCapacityInput > 0 && shape_bit != 0 &&
+            (logged_visibility_mask_shapes_ & shape_bit) == 0) {
+            logged_visibility_mask_shapes_ |= shape_bit;
+            logger_.Info("Visibility mask for synthesized quadviews: appViewIndex=" + std::to_string(view_index) +
+                         ", type=" + std::to_string(static_cast<int>(visibility_mask_type)) +
+                         ", a focus view: given a mask that hides nothing (not its eye's).");
+        }
+        return result;
+    }
 
     const XrResult result = next_get_visibility_mask_khr_(
         session, runtime_type, runtime_view_index, visibility_mask_type, visibility_mask);
@@ -3702,12 +3771,9 @@ XrResult OpenXrLayer::GetVisibilityMaskKHR(XrSession session,
                       ", appViewIndex=" + std::to_string(view_index) +
                       ", runtimeViewIndex=" + std::to_string(runtime_view_index));
     }
-    // The shape each synthesized view is given, once per view and mask type:
-    // a focus view gets its eye's mask, whose bounds (view-space tangents at
-    // z=-1) show whether it can reach into the focus view's field of view.
-    const uint32_t shape_bit = view_index < 4 && visibility_mask_type >= 1 && visibility_mask_type <= 3
-                                   ? 1u << (view_index * 4 + static_cast<uint32_t>(visibility_mask_type))
-                                   : 0u;
+    // The eye's mask each synthesized peripheral view is given, once per view
+    // and mask type: its bounds (view-space tangents at z=-1) show how far in
+    // the lens edge reaches.
     if (synthesize_quad && XR_SUCCEEDED(result) && visibility_mask && visibility_mask->vertexCapacityInput > 0 &&
         visibility_mask->vertices && shape_bit != 0 && (logged_visibility_mask_shapes_ & shape_bit) == 0) {
         logged_visibility_mask_shapes_ |= shape_bit;

@@ -138,6 +138,18 @@ XrResult XRAPI_CALL AcquireImage(XrSwapchain, const XrSwapchainImageAcquireInfo*
 }
 XrResult XRAPI_CALL WaitImage(XrSwapchain, const XrSwapchainImageWaitInfo*) { ++sharpen_waits; return sharpen_wait_result; }
 XrResult XRAPI_CALL ReleaseImage(XrSwapchain, const XrSwapchainImageReleaseInfo*) { ++sharpen_releases; return XR_SUCCESS; }
+// A stand-in runtime's stereo visibility mask: a ring at the lens edge.
+int mask_queries = 0;
+uint32_t mask_view_index = 99;
+XrResult XRAPI_CALL VisibilityMask(XrSession, XrViewConfigurationType type, uint32_t view, XrVisibilityMaskTypeKHR,
+                                   XrVisibilityMaskKHR* mask) {
+    ++mask_queries;
+    mask_view_index = view;
+    Expect(type == XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, "a synthesized view's mask must come from stereo");
+    mask->vertexCountOutput = 8;
+    mask->indexCountOutput = 24;
+    return XR_SUCCESS;
+}
 auto& Layer() { return depthxr::OpenXrLayer::Instance(); }
 void MakeAction(XrAction action, XrActionSet set = app_set) {
     app_created_action = action;
@@ -269,6 +281,32 @@ public:
     }
     static bool SharpenImage(uint32_t* index, const char** reason) {
         return Layer().AcquireFocusSharpenImage(Layer().d3d11_focus_sharpen_.targets[0], index, reason);
+    }
+    // xrGetVisibilityMaskKHR in an emulated quad views session, settings as
+    // set here (no file is read); the layer's state is restored after.
+    static XrResult QuadVisibilityMask(uint32_t view, XrVisibilityMaskTypeKHR type, XrVisibilityMaskKHR* mask) {
+        auto& l = Layer();
+        const bool loaded = l.has_loaded_config_;
+        const auto settings = l.resolved_settings_;
+        const auto generation = l.resolved_settings_generation_;
+        const auto resolved_session = l.resolved_settings_session_;
+        l.has_loaded_config_ = true;
+        l.resolved_settings_ = {};
+        l.resolved_settings_.core.enabled = true;
+        l.resolved_settings_.quadviews.enabled = true;
+        l.resolved_settings_generation_ = l.config_generation_;
+        l.resolved_settings_session_ = l.active_session_;
+        l.quadviews_session_active_ = true;
+        l.varjo_compatible_quadviews_active_ = false;
+        l.next_get_visibility_mask_khr_ = &VisibilityMask;
+        const XrResult result = l.GetVisibilityMaskKHR(
+            session, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET, view, type, mask);
+        l.has_loaded_config_ = loaded;
+        l.resolved_settings_ = settings;
+        l.resolved_settings_generation_ = generation;
+        l.resolved_settings_session_ = resolved_session;
+        l.quadviews_session_active_.reset();
+        return result;
     }
     // The swapchains the compositor prewarm takes as its four inputs.
     static std::set<uintptr_t> PrewarmInputs() {
@@ -454,6 +492,41 @@ int main() {
                "the next frame must wait for the same image, not acquire another");
         Expect(Peer::SharpenImage(&image, &reason) && sharpen_acquires == 2, "then images are acquired as usual");
         Peer::SharpenReset();
+
+        // Visibility masks in emulated quad views: a peripheral view gets its
+        // eye's mask from the runtime; a focus view gets one that hides
+        // nothing (its eye's, applied in the focus view's own coordinates,
+        // would cut a never-drawn ring around the inset).
+        Peer::Prepare();
+        mask_queries = 0;
+        XrVisibilityMaskKHR mask{XR_TYPE_VISIBILITY_MASK_KHR};
+        Expect(Peer::QuadVisibilityMask(1, XR_VISIBILITY_MASK_TYPE_HIDDEN_TRIANGLE_MESH_KHR, &mask) == XR_SUCCESS &&
+                   mask_queries == 1 && mask_view_index == 1 && mask.vertexCountOutput == 8,
+               "a peripheral view's mask must be its eye's");
+        mask = {XR_TYPE_VISIBILITY_MASK_KHR};
+        Expect(Peer::QuadVisibilityMask(3, XR_VISIBILITY_MASK_TYPE_HIDDEN_TRIANGLE_MESH_KHR, &mask) == XR_SUCCESS &&
+                   mask_queries == 1 && mask.vertexCountOutput == 3 && mask.indexCountOutput == 3,
+               "a focus view's hidden mesh must not be its eye's");
+        std::array<XrVector2f, 4> vertices{};
+        std::array<uint32_t, 6> indices{};
+        vertices.fill({5.0f, 5.0f});
+        mask.vertexCapacityInput = 3; mask.vertices = vertices.data();
+        mask.indexCapacityInput = 3; mask.indices = indices.data();
+        Expect(Peer::QuadVisibilityMask(2, XR_VISIBILITY_MASK_TYPE_HIDDEN_TRIANGLE_MESH_KHR, &mask) == XR_SUCCESS &&
+                   vertices[0].x == vertices[1].x && vertices[1].x == vertices[2].x &&
+                   vertices[0].y == vertices[1].y && vertices[1].y == vertices[2].y,
+               "a focus view's hidden mesh must hide nothing (one zero-area triangle)");
+        mask = {XR_TYPE_VISIBILITY_MASK_KHR};
+        mask.vertexCapacityInput = 4; mask.vertices = vertices.data();
+        mask.indexCapacityInput = 5; mask.indices = indices.data();
+        Expect(Peer::QuadVisibilityMask(2, XR_VISIBILITY_MASK_TYPE_VISIBLE_TRIANGLE_MESH_KHR, &mask) ==
+                   XR_ERROR_SIZE_INSUFFICIENT && mask.indexCountOutput == 6,
+               "a too-small index array must be refused with the size needed");
+        mask.indexCapacityInput = 6;
+        Expect(Peer::QuadVisibilityMask(2, XR_VISIBILITY_MASK_TYPE_VISIBLE_TRIANGLE_MESH_KHR, &mask) == XR_SUCCESS &&
+                   vertices[0].x <= -10.0f && vertices[2].x >= 10.0f && vertices[0].y <= -10.0f &&
+                   vertices[2].y >= 10.0f && indices[5] == 3 && mask_queries == 1,
+               "a focus view's visible mesh must cover the whole view");
 
         // Without XR_EXT_eye_gaze_interaction downstream, a switch to Eye says
         // once that gaze is unavailable; settings reloads that keep Eye tracked
