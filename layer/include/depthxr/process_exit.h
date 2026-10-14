@@ -45,4 +45,10 @@ private:
 // DllMain at a process exit (and tests): one DeleteFileW per armed file.
 void RemoveProcessExitFiles();
 
+// A fatal error the layer reported (crt_failure_report.h): the process ends
+// as a crash however it ends, even by ExitProcess from the game's crash
+// reporter or a player closing its dialog, so its exit removes no file. One
+// atomic store, safe on a failure path; never undone.
+void KeepProcessExitFiles();
+
 } // namespace depthxr

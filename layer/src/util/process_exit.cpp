@@ -25,6 +25,7 @@ struct ExitFileSlot {
 // Constant-initialized: usable from DllMain whatever the static init order.
 std::array<ExitFileSlot, kExitFileSlots> g_exit_files;
 std::atomic<bool> g_process_exiting{false};
+std::atomic<bool> g_keep_exit_files{false};
 
 } // namespace
 
@@ -75,12 +76,17 @@ void ProcessExitFile::Disarm() {
 }
 
 void RemoveProcessExitFiles() {
+    if (g_keep_exit_files.load(std::memory_order_acquire)) return;
     for (ExitFileSlot& slot : g_exit_files) {
         if (!slot.armed.exchange(false, std::memory_order_acq_rel)) continue;
 #if defined(_WIN32)
         DeleteFileW(slot.path);
 #endif
     }
+}
+
+void KeepProcessExitFiles() {
+    g_keep_exit_files.store(true, std::memory_order_release);
 }
 
 } // namespace depthxr

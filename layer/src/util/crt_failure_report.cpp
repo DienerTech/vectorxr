@@ -1,6 +1,7 @@
 #include "depthxr/crt_failure_report.h"
 
 #include "depthxr/logger.h"
+#include "depthxr/process_exit.h"
 
 #include <atomic>
 #include <csignal>
@@ -71,6 +72,10 @@ void LogFailure(const std::string& message) {
         }
         __fastfail(fast_fail_code);
     }
+
+    // A crash from here on, even if the game's crash reporter (or the player, closing its dialog) then ends the
+    // process with ExitProcess: its exit must leave the Turbo recovery marker and the relay status files.
+    KeepProcessExitFiles();
 
     LogFailure("Fatal error in VectorXR on " + ThreadLabel() + ": " + failure +
                ". The game ends here; its crash report (or Windows') shows where.");
