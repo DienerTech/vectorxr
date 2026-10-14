@@ -167,3 +167,41 @@ test('Position Assist presets fill turning in either direction mode and are reco
   config.modules.pivotxr.defaults.positionAssist.enabled = true
   assert.equal(validateConfig(config).filter((error) => error.includes('positionAssist')).length, 0)
 })
+
+test('cleared number fields fail validation instead of saving as text', () => {
+  // An emptied number input stores '', which compares as 0; the layer rejects
+  // a config holding it and runs every module off.
+  for (const cleared of ['', null, 'abc']) {
+    const config = defaultConfig()
+    const profile = createPivotProfile(config.modules.pivotxr.defaults)
+    config.modules.pivotxr.profiles.push(profile)
+    const { settings } = profile
+    settings.stepGlideMode = 'instant'
+    Object.assign(settings, { smoothing: cleared, maxExtraYawDegrees: cleared, stepGlideSeconds: cleared })
+    Object.assign(settings.yawStep, { amountDegrees: cleared, maxExtraDegrees: cleared })
+    settings.pitchStep.triggerDegrees = cleared
+    settings.yawLeft.maxExtraDegrees = cleared
+    settings.yawLeftStep.amountDegrees = cleared
+    config.modules.pivotxr.defaults.yawStep.maxExtraDegrees = cleared
+    config.modules.quadviews.defaults.focusScale = cleared
+    config.modules.depthxr.defaults.stereoBoost = cleared
+
+    const errors = validateConfig(config)
+    for (const field of [
+      'modules.pivotxr.profiles[0].smoothing',
+      'modules.pivotxr.profiles[0].maxExtraYawDegrees',
+      'modules.pivotxr.profiles[0].stepGlideSeconds',
+      'modules.pivotxr.profiles[0].yawStep.amountDegrees',
+      'modules.pivotxr.profiles[0].yawStep.maxExtraDegrees',
+      'modules.pivotxr.profiles[0].pitchStep.triggerDegrees',
+      'modules.pivotxr.profiles[0].yawLeft.maxExtraDegrees',
+      'modules.pivotxr.profiles[0].yawLeftStep.amountDegrees',
+      'modules.pivotxr.defaults.yawStep.maxExtraDegrees',
+      'modules.quadviews.defaults.focusScale',
+      'modules.depthxr.defaults.stereoBoost',
+    ]) {
+      assert.ok(errors.some((error) => error.startsWith(`${field} must be between`)), `${JSON.stringify(cleared)} ${field}`)
+    }
+    assert.equal(errors.some((error) => error.includes('pitchStep.hysteresisDegrees must be smaller')), false)
+  }
+})
