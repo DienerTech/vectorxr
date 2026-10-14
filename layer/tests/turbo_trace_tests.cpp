@@ -590,6 +590,27 @@ void TestRetentionFollowsTheConfig(const std::filesystem::path& root) {
     logger.Initialize(directory / "vectorxr.log");
     Check(count_logs() == 3, "A later session did not prune to the configured retention");
 }
+// An instance that never asks for a session discards its log, unless an
+// error was written to it.
+void TestDiscardedSessionLog(const std::filesystem::path& root) {
+    const auto directory = root / "discarded";
+    std::error_code ignored;
+    std::filesystem::remove_all(directory, ignored);
+    depthxr::Logger logger;
+    logger.Initialize(directory / "vectorxr.log");
+    logger.Info("probe instance");
+    const auto probe = logger.ActiveLogPath();
+    Check(std::filesystem::exists(probe), "The probe's log was not written");
+    Check(logger.DiscardSessionLog() && !std::filesystem::exists(probe), "A probe instance's log was kept");
+    logger.Info("after the probe");
+    Check(!std::filesystem::exists(probe) && logger.ActiveLogPath().empty(),
+          "A discarded log was written to again");
+    std::this_thread::sleep_for(1100ms); // a session log name per second
+    logger.Initialize(directory / "vectorxr.log");
+    logger.Error("instance creation failed");
+    const auto failed = logger.ActiveLogPath();
+    Check(!logger.DiscardSessionLog() && std::filesystem::exists(failed), "A log holding an error was discarded");
+}
 void TestRetention(const std::filesystem::path& root) {
     const auto directory = root / "retention";
     std::filesystem::create_directory(directory);
@@ -654,6 +675,7 @@ int main(int argc, char** argv) {
         TestReopenedPartStaysBounded(root);
         TestThreadIdsAreOsThreadIds(root);
         TestRetentionFollowsTheConfig(root);
+        TestDiscardedSessionLog(root);
         TestRetention(root);
         std::cout << "Flight recorder: continuous persistence, rollover, frozen stalls, incident snapshots and "
                      "rotation, Frame Generation snapshots (names, rate limit, rotation apart from incidents, "

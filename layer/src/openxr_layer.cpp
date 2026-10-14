@@ -1964,6 +1964,7 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
                << XR_VERSION_MINOR(api_version) << "." << XR_VERSION_PATCH(api_version);
         logger_.Info(stream.str());
 
+        instance_enabled_extension_count_ = create_info->enabledExtensionCount;
         std::ostringstream ext_stream;
         ext_stream << "Application enabled OpenXR extensions (" << create_info->enabledExtensionCount << "):";
         for (uint32_t i = 0; i < create_info->enabledExtensionCount; ++i) {
@@ -2264,6 +2265,14 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
     if (XR_SUCCEEDED(result)) {
         ResetVulkanEnableHooks(XR_NULL_HANDLE, nullptr, false, {});
         turbo_recovery_.Complete();
+        // An instance that enabled no extension cannot create a session:
+        // MSFS 2024 makes one to probe the runtime before its real instance
+        // (4 of the 7 logs in one tester's export). Its log would take a slot
+        // of the log retention and could be picked as one of Export Debug's
+        // complete sessions, so it is removed unless it logged an error.
+        if (!instance_requested_session_ && instance_enabled_extension_count_ == 0) {
+            logger_.DiscardSessionLog();
+        }
         instance_ = XR_NULL_HANDLE;
         next_destroy_instance_ = nullptr;
         next_create_session_ = nullptr;
@@ -2321,6 +2330,7 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
                                     XrSession* session) {
     {
         std::scoped_lock lock(mutex_);
+        instance_requested_session_ = true;
         if (active_session_ != XR_NULL_HANDLE) {
             logger_.Error("VectorXR currently supports one OpenXR session per instance; rejecting a second "
                           "session instead of corrupting the active session state.");
@@ -10851,6 +10861,8 @@ void OpenXrLayer::ResetSessionState() {
 }
 
 void OpenXrLayer::ResetInstanceState() {
+    instance_requested_session_ = false;
+    instance_enabled_extension_count_ = 0;
     application_action_spaces_.clear();
     application_pose_actions_.clear();
     application_action_owners_.clear();

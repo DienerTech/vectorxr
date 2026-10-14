@@ -120,6 +120,7 @@ void Logger::Initialize(const std::filesystem::path& log_path) {
     }
     active_log_path_ = CreateSessionLogPath(base_log_path_);
     last_stream_flush_time_ = {};
+    wrote_error_ = false;
     // Before the config is read the retention is only the default: pruning
     // to it would delete logs a larger configured retention keeps.
     retention_applied_ = retention_configured_;
@@ -174,6 +175,21 @@ bool Logger::IsDebugEnabled() const {
 std::filesystem::path Logger::ActiveLogPath() const {
     std::scoped_lock lock(mutex_);
     return active_log_path_;
+}
+
+bool Logger::DiscardSessionLog() {
+    std::scoped_lock lock(mutex_);
+    FlushPendingDuplicateLocked();
+    if (active_log_path_.empty() || wrote_error_) {
+        return false;
+    }
+    if (stream_.is_open()) {
+        stream_.close();
+    }
+    std::error_code error;
+    const bool removed = std::filesystem::remove(active_log_path_, error) && !error;
+    active_log_path_.clear();
+    return removed;
 }
 
 void Logger::PruneLocked() {
@@ -278,6 +294,7 @@ void Logger::WriteLineLocked(LogLevel level,
     const std::tm tm = LocalTime(time);
 
     stream_ << std::put_time(&tm, "%Y-%m-%d %H:%M:%S") << " [" << ToString(level) << "] " << message << '\n';
+    wrote_error_ = wrote_error_ || level == LogLevel::Error;
     constexpr std::chrono::milliseconds kFlushInterval{250};
     const auto flush_now = std::chrono::steady_clock::now();
     if (level == LogLevel::Error || last_stream_flush_time_ == std::chrono::steady_clock::time_point{} ||

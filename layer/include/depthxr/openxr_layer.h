@@ -1087,6 +1087,10 @@ class OpenXrLayer {
         bool toggle_latched{false};
         bool toggle_suspended{false};
     };
+    // The application called xrCreateSession on this instance, and the
+    // number of extensions it enabled for it.
+    bool instance_requested_session_{false};
+    uint32_t instance_enabled_extension_count_{0};
     std::vector<PivotProfileInputState> pivotxr_profile_input_states_;
     // IsPivotXrActive's per-call claim lists (under mutex_), kept so the
     // locate paths do not allocate.

@@ -30,6 +30,9 @@ class Logger {
     bool TryDebug(const std::string& message);
     [[nodiscard]] bool IsDebugEnabled() const;
     [[nodiscard]] std::filesystem::path ActiveLogPath() const;
+    // Removes the session log unless an error was written to it, and writes
+    // nothing more until the next Initialize. Returns whether it was removed.
+    bool DiscardSessionLog();
 
   private:
     void PruneLocked();
@@ -48,6 +51,7 @@ class Logger {
     int retention_files_{7};
     bool retention_configured_{false};
     bool retention_applied_{false};
+    bool wrote_error_{false};
     LogLevel pending_duplicate_level_{LogLevel::Info};
     std::string pending_duplicate_message_;
     uint64_t pending_duplicate_count_{0};
