@@ -48,7 +48,8 @@ const vectorQuadWarning = computed(() => {
   const warnings: string[] = []
 
   for (const slice of props.snapshot?.slices ?? []) {
-    const vector = slice.layers.find((layer) => layer.isVectorXr)
+    const vector = slice.layers.find((layer) => layer.isVectorXr && layer.enabled)
+      ?? slice.layers.find((layer) => layer.isVectorXr)
     const quad = slice.layers.find(isQuadViewsLayer)
 
     if (vector && quad && vector.order < quad.order) {

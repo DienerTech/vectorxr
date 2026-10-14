@@ -269,8 +269,48 @@ pub fn set_openxr_layer_enabled(
         return Err("Layer manifest is no longer registered in that OpenXR slice".into());
     }
 
+    if enabled {
+        let snapshot = load_openxr_layers()?;
+        if let Some((other_slice, other)) =
+            conflicting_vector_xr_registration(&snapshot.slices, &slice, &manifest_path)
+        {
+            return Err(format!(
+                "Another VectorXR registration is already enabled ({}: {}). OpenXR apps crash when two copies of VectorXR load, so disable that one first.",
+                other_slice.label, other.manifest_path
+            ));
+        }
+    }
+
     write_registry_value(definition, &manifest_path, if enabled { 0 } else { 1 })?;
     load_openxr_layers()
+}
+
+// An enabled VectorXR registration other than the one about to be enabled.
+// A dev build, an old install or a per-user copy can each register VectorXR,
+// and the loader would load every enabled one into the same process.
+fn conflicting_vector_xr_registration<'a>(
+    slices: &'a [OpenXrLayerRegistrySlice],
+    slice: &str,
+    manifest_path: &str,
+) -> Option<(&'a OpenXrLayerRegistrySlice, &'a OpenXrLayerEntry)> {
+    let is_target = |candidate: &OpenXrLayerEntry| {
+        candidate.slice == slice && candidate.manifest_path.eq_ignore_ascii_case(manifest_path)
+    };
+    let target_is_vector_xr = slices
+        .iter()
+        .flat_map(|candidate| candidate.layers.iter())
+        .any(|candidate| is_target(candidate) && candidate.is_vector_xr);
+    if !target_is_vector_xr {
+        return None;
+    }
+
+    slices.iter().find_map(|candidate_slice| {
+        candidate_slice
+            .layers
+            .iter()
+            .find(|candidate| candidate.is_vector_xr && candidate.enabled && !is_target(candidate))
+            .map(|candidate| (candidate_slice, candidate))
+    })
 }
 
 pub fn move_openxr_layer(
@@ -1403,6 +1443,76 @@ mod slice_tests {
             (definition.hive, definition.view),
             (RegistryHive::CurrentUser, RegistryView::Registry32)
         )));
+    }
+
+    fn entry(slice: &str, manifest_path: &str, enabled: bool) -> OpenXrLayerEntry {
+        OpenXrLayerEntry {
+            slice: slice.into(),
+            manifest_path: manifest_path.into(),
+            layer_name: display_name_from_path(manifest_path),
+            description: String::new(),
+            library_path: None,
+            enabled,
+            order: 1,
+            signature_status: "unknown".into(),
+            signature_status_description: String::new(),
+            signature_signer_subject: None,
+            signature_signer_issuer: None,
+            signature_signer_thumbprint: None,
+            signature_signer_not_before: None,
+            signature_signer_not_after: None,
+            is_vector_xr: manifest_path.to_ascii_lowercase().contains("vectorxr"),
+            manifest_exists: true,
+            library_exists: true,
+            error: None,
+        }
+    }
+
+    fn slice(id: &str, layers: Vec<OpenXrLayerEntry>) -> OpenXrLayerRegistrySlice {
+        OpenXrLayerRegistrySlice {
+            id: id.into(),
+            label: id.into(),
+            registry_path: String::new(),
+            recommended: false,
+            uncommon: false,
+            requires_elevation_for_writes: false,
+            layers,
+        }
+    }
+
+    #[test]
+    fn a_second_vector_xr_registration_cannot_be_enabled() {
+        let installed = r"C:\Program Files\VectorXR\vectorxr-layer\XR_APILAYER_DIENERTECH_VECTORXR.json";
+        let dev = r"C:\dev\build\layer\Release\XR_APILAYER_DIENERTECH_VECTORXR.json";
+        let slices = vec![
+            slice(
+                "hklm64",
+                vec![
+                    entry("hklm64", dev, false),
+                    entry("hklm64", r"C:\layers\XR_APILAYER_other.json", true),
+                    entry("hklm64", installed, true),
+                ],
+            ),
+            slice("hkcu64", vec![entry("hkcu64", dev, false)]),
+        ];
+
+        let conflict = conflicting_vector_xr_registration(&slices, "hklm64", dev)
+            .map(|(slice, layer)| (slice.id.as_str(), layer.manifest_path.as_str()));
+        assert_eq!(conflict, Some(("hklm64", installed)));
+        // The same file registered per-user would load a second copy too.
+        assert_eq!(
+            conflicting_vector_xr_registration(&slices, "hkcu64", dev)
+                .map(|(slice, _)| slice.id.as_str()),
+            Some("hklm64")
+        );
+        // Re-enabling the active one, or enabling another vendor's layer, is fine.
+        assert!(conflicting_vector_xr_registration(&slices, "hklm64", installed).is_none());
+        assert!(conflicting_vector_xr_registration(
+            &slices,
+            "hklm64",
+            r"C:\layers\XR_APILAYER_other.json"
+        )
+        .is_none());
     }
 }
 
