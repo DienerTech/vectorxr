@@ -7011,6 +7011,79 @@ void TestRuntimeHalvingClearedDoesNotStandDown() {
     Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
 }
 
+// Switched from Dynamic standing by to 2x and back while running: only
+// Dynamic stands by, so no summary window's standing-by time goes negative
+// and the stretch at 2x is not counted; back in Dynamic the game's rate is
+// judged afresh after the settle, not from the frames held at 2x.
+void TestDynamicSwitchStandby() {
+    const std::string name = "dynamic switch";
+    SessionLog log("dynamic-switch");
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    const auto start = std::chrono::steady_clock::now();
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic, app, runtime, owned,
+             log.logger.get());
+    const FrameGenDynamicPolicy policy = SteadyDynamic();
+    presenter.SetDynamicPolicy(policy);
+    presenter.SetSummaryInterval(300ms);
+    auto configure = [&](FrameGenMultiplier multiplier) {
+        FrameGenResolvedSettings settings;
+        settings.enabled = true;
+        settings.synthesis_mode = FrameGenSynthesisMode::kExtrapolate;
+        settings.multiplier = multiplier;
+        presenter.Configure(settings);
+        return std::chrono::steady_clock::now();
+    };
+    // A game at the refresh rate stands by; then 2x for one at 0.6x of it
+    // (held to half), then Dynamic again.
+    RunWork(*app, 1000ms, kLightWork);
+    const bool stood_by = presenter.Status().standby;
+    const auto fixed = configure(FrameGenMultiplier::k2);
+    RunTicks(*app, 2500ms, {1, 2, 2});
+    const auto switched = configure(FrameGenMultiplier::kDynamic);
+    EngageDynamic(presenter, *app, name);
+    const auto engaged = std::chrono::steady_clock::now();
+    RunTicks(*app, 600ms, {1, 2, 2});
+    presenter.Stop();
+    Check(stood_by, name + ": standing by for a game at the refresh rate");
+    const std::vector<std::string> lines = log.Lines("Frame Generation");
+    double standby = 0.0;
+    std::string windows;
+    std::ptrdiff_t at_2x = -1, standing_by = -1, engages = -1;
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        const std::string& line = lines[i];
+        const auto index = static_cast<std::ptrdiff_t>(i);
+        if (const std::size_t at = line.find("standbyS="); at != std::string::npos) {
+            const double window = std::stod(line.substr(at + 9));
+            Check(window >= 0.0, name + ": no window's standing-by time is negative (" + line + ")");
+            standby += window;
+            windows += " " + std::to_string(window);
+        }
+        if (at_2x < 0 && line.find("multiplier=2x") != std::string::npos) at_2x = index;
+        // The last standing-by line before Dynamic engages: the one after the switch.
+        if (engages < 0 && line.find("(dynamic) standing by") != std::string::npos) standing_by = index;
+        if (engages < 0 && line.find("(dynamic) engages") != std::string::npos) engages = index;
+    }
+    Check(at_2x >= 0 && standing_by > at_2x && engages > standing_by,
+          name + ": back in Dynamic, it stands by before it engages");
+    Check(standing_by >= 0 && lines[standing_by].find("frames pass straight through") != std::string::npos,
+          name + ": standing by after the switch does not report the rate held at 2x (" +
+              (standing_by >= 0 ? lines[standing_by] : std::string()) + ")");
+    const double since_switch = Seconds(engaged - switched);
+    Check(since_switch >= Seconds(policy.settle + policy.engage_after) - 0.05,
+          name + ": it engages only after the settle and a run below the refresh rate (" +
+              std::to_string(since_switch) + " s)");
+    const double counted = Seconds(fixed - start) + since_switch;
+    Check(standby > 1.0 && standby <= counted + 0.4,
+          name + ": the stretch at 2x is not standing by (" + std::to_string(standby) + " of " +
+              std::to_string(counted) + " s:" + windows + ")");
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+}
+
 // A runtime that keeps halving the frame rate: Dynamic stands down after
 // the window, and each time its hold ends it engages again for the game held
 // to half the refresh rate. With the report standing, the presenter thread's
@@ -8056,6 +8129,7 @@ void RunPolicyTests() {
     RUN(TestLeadDoesNotFlap);
     RUN(TestSkipIdenticalExactCopies);
     RUN(TestTelemetryWindows);
+    RUN(TestDynamicSwitchStandby);
     RUN(TestGpuWaitKeepsCadence);
     RUN(TestExtrapolateMeasureLagIsOnTime);
     RUN(TestPauseAndLoadingDoNotStandDown);

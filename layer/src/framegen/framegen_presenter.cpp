@@ -644,7 +644,28 @@ void FrameGenPresenter::Configure(const FrameGenResolvedSettings& settings) {
     // engaged inline in between would keep it from starting again (an app
     // that waits before ending its last frame always has one in flight).
     const bool restart = jit_ && compositor_running_ && settings.synthesis_mode != settings_.synthesis_mode;
+    const bool was_dynamic = DynamicLocked();
+    const FrameGenMultiplier multiplier = settings_.multiplier;
     settings_ = settings;
+    const bool dynamic = DynamicLocked();
+    if (started_ && (settings_.multiplier != multiplier || dynamic != was_dynamic)) {
+        // Switched while running: frames held to the old multiplier say
+        // nothing about the game's own rate, so Dynamic and Auto settle and
+        // judge it afresh. Only Dynamic stands by: time at a fixed multiplier
+        // is not standing by, and standing by up to the switch stays counted.
+        const auto now = Clock::now();
+        multiplier_changed_at_ = now;
+        cadence_.clear();
+        dynamic_below_since_.reset();
+        if (was_dynamic && !dynamic) {
+            if (standby_since_ && dynamic_standby_ && now > *standby_since_) {
+                standby_seconds_ += std::chrono::duration<double>(now - *standby_since_).count();
+            }
+            standby_since_.reset();
+        } else if (dynamic && !was_dynamic && dynamic_standby_) {
+            standby_since_ = now;
+        }
+    }
     if (restart) {
         healthy_streak_ = 0;
         ++totals_.restarts; // the benefit guard's window says nothing about either mode
