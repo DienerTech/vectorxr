@@ -521,19 +521,26 @@ void TestThreadIdsAreOsThreadIds(const std::filesystem::path& root) {
     logger.SetLevel(depthxr::LogLevel::Debug);
     depthxr::TurboTimingTrace trace;
     trace.Start(logger);
-    trace.Record("main.thread", trace.NextId());
+    // Producers drop a record rather than wait for the writer: record a few.
+    for (int i = 0; i < 20; ++i) trace.Record("main.thread", trace.NextId());
     DWORD worker_id = 0;
     std::thread([&] {
         worker_id = GetCurrentThreadId();
-        const auto call = trace.Watch("worker.call");
+        for (int i = 0; i < 20; ++i) const auto call = trace.Watch("worker.call");
     }).join();
     trace.Stop();
     const auto history = History(logger.ActiveLogPath());
-    Check(history.find("thread=" + std::to_string(GetCurrentThreadId()) + " ") != std::string::npos &&
-              history.find("event=main.thread") != std::string::npos,
+    const auto has_line = [&](const std::string& thread, const std::string& event) {
+        std::istringstream lines(history);
+        for (std::string line; std::getline(lines, line);) {
+            if (line.find(" thread=" + thread + " ") != std::string::npos && line.find(event) != std::string::npos)
+                return true;
+        }
+        return false;
+    };
+    Check(has_line(std::to_string(GetCurrentThreadId()), "event=main.thread"),
           "A record's thread is not its OS thread id");
-    Check(history.find("thread=" + std::to_string(worker_id) + " ") != std::string::npos &&
-              history.find("event=worker.call") != std::string::npos,
+    Check(has_line(std::to_string(worker_id), "event=worker.call"),
           "A watched call's thread is not its OS thread id");
 #else
     (void)root;
