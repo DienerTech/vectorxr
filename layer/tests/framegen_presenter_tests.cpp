@@ -4680,6 +4680,55 @@ void TestLeadAfterRepeatedHitches() {
               std::to_string(settled.lead_floor) + ")");
 }
 
+// Refreshes the presenter thread misses (Varjo's runtime under a GPU-bound
+// DCS, 2026-10-14: about one in ten) pass over the real frames made for them
+// when the next real frame is a refresh behind: those frames came in time,
+// and no lead cures a refresh nobody wrote. Scored late, two in ten raised
+// the lead a refresh each time, and it sat at its cap (4 per real frame, 89
+// ms) all flight: leadMoves=+100/-0 every 30 s, with no frame late on the
+// CPU or the GPU.
+void TestPassedOverFramesKeepLead() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic, app, runtime, owned);
+    // GPU-bound at ~70 fps (real frames a refresh or two apart), so its frames
+    // never show the slack that takes a refresh off the lead; no probes.
+    gpu.game_gpu = 14ms;
+    gpu.frames_ahead = 3;
+    FrameGenLeadPolicy policy;
+    policy.probe_after = 600s;
+    presenter.SetLeadPolicy(policy);
+    app->before_release = [&] { gpu.GameFrame(); };
+    const std::vector<std::chrono::microseconds> work{6ms};
+    for (int i = 0; i < 3; ++i) app->Frame();
+    RunWork(*app, 3000ms, work, [&](const XrFrameState&) { return Engaged(presenter); });
+    Check(Engaged(presenter), "passed over: Dynamic engages");
+    RunWork(*app, 1000ms, work);
+    const FrameGenStatus settled = presenter.Status();
+    runtime.miss_every = 9;
+    std::uint32_t highest = settled.lead_slots;
+    RunWork(*app, 3000ms, work, [&](const XrFrameState&) {
+        highest = std::max(highest, presenter.Status().lead_slots);
+        return false;
+    });
+    runtime.miss_every = 0;
+    const FrameGenStatus after = presenter.Status();
+    presenter.Stop();
+    std::cerr << "  passed over: lead " << settled.lead_slots << " -> highest " << highest << ", last "
+              << after.lead_slots << " (cap " << 4 * 2 << "); moves +" << after.lead_ups - settled.lead_ups << "/-"
+              << after.lead_downs - settled.lead_downs << ", late " << after.late_cpu - settled.late_cpu << "/"
+              << after.late_gpu - settled.late_gpu << std::endl;
+    Check(!runtime.ordering_violation && !g_release_violation, "passed over: calls stayed ordered");
+    Check(Engaged(presenter) || after.threaded, "passed over: stays engaged");
+    Check(highest <= settled.lead_slots + 1 && after.lead_slots < 8,
+          "passed over: missed refreshes do not raise the lead (" + std::to_string(settled.lead_slots) + " -> " +
+              std::to_string(highest) + ", last " + std::to_string(after.lead_slots) + ")");
+}
+
 // A game showing its last frame (stalled): its exact copy is written once,
 // then the runtime shows the output images' newest again each refresh.
 void TestSkipIdenticalExactCopies() {
@@ -8305,6 +8354,7 @@ int main(int argc, char** argv) {
     RUN(TestAutoHoldsWhileClockDisplaced);
     RUN(TestSteamVrMissedRefresh);
     RUN(TestLeadAfterRepeatedHitches);
+    RUN(TestPassedOverFramesKeepLead);
     if (!policy) {
         RunPolicyTests();
     } else {

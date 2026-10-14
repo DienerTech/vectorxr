@@ -6209,13 +6209,17 @@ void FrameGenPresenter::CompositorLoop() {
             // nothing is written or shown, and it says nothing about writing
             // or the lead (real frames it passes over are not scored).
             const bool rendered = slot_should_render_;
-            // Real frames a later refresh needs whose game frames are on the
-            // GPU already: their lead had a refresh to spare (ScoreLeadLocked).
+            // Real frames a later refresh needs came ahead of it; those whose
+            // game frames are on the GPU already: their lead had a refresh to
+            // spare (ScoreLeadLocked).
             for (JitFrame& kept : jit_frames_) {
                 if (!rendered) {
                     kept.scored = kept.scored || kept.time <= slot_time_ + period / 2;
-                } else if (!kept.scored && !kept.captured_early && kept.needed > slot_time_ + period / 2) {
-                    kept.captured_early = !gpu_ || !kept.capture_mark || gpu_->CaptureReached(kept.capture_mark);
+                } else if (!kept.scored && kept.needed > slot_time_ + period / 2) {
+                    kept.ahead = true;
+                    if (!kept.captured_early) {
+                        kept.captured_early = !gpu_ || !kept.capture_mark || gpu_->CaptureReached(kept.capture_mark);
+                    }
                 }
             }
             std::optional<JitFrame> source;
@@ -6269,17 +6273,35 @@ void FrameGenPresenter::CompositorLoop() {
                 // motion not measured though the refresh shows it moved
                 // (interpolating, the refresh before its own), or the refresh
                 // it was needed for has passed. Older frames never chosen
-                // were passed over: late.
+                // were passed over: late if they came after the refresh they
+                // were needed for. One that came ahead of it was passed over
+                // because that refresh was missed (the presenter thread or
+                // the runtime was late; one in ten with Varjo's runtime under
+                // a GPU-bound DCS, 2026-10-14) or the next frame's is nearer:
+                // no lead cures that, and it says nothing of the frame's
+                // own, so it is not scored. Scored late, those raised the
+                // lead to its cap and held it there.
                 for (JitFrame& kept : jit_frames_) {
                     if (kept.scored || kept.id > *chosen_id) {
                         continue;
                     }
                     if (kept.id < *chosen_id) {
-                        ScoreLeadLocked(kept, true);
+                        if (kept.ahead) {
+                            kept.scored = true;
+                        } else {
+                            ScoreLeadLocked(kept, true);
+                        }
                         continue;
                     }
-                    const bool late = write.uncaptured || write.unmeasured || write.motion_late ||
-                                      slot_time_ > kept.needed + period / 2;
+                    // Past the refresh it was needed for though it came ahead
+                    // of it: that refresh was missed, as above.
+                    const bool past = slot_time_ > kept.needed + period / 2;
+                    const bool late =
+                        write.uncaptured || write.unmeasured || write.motion_late || (past && !kept.ahead);
+                    if (past && !late) {
+                        kept.scored = true;
+                        continue;
+                    }
                     totals_.late_gpu += late && write.uncaptured ? 1 : 0;
                     ScoreLeadLocked(kept, late);
                 }

@@ -534,6 +534,9 @@ class FrameGenPresenter {
         std::optional<double> slack_ms;  // how much later its end could have come
         std::uint64_t capture_mark{0};   // FrameGenGpu::CaptureMark covering its views' captures
         bool captured_early{false};      // captured a refresh or more before it was needed
+        // Kept while the refresh it is first needed for was still to come: a
+        // refresh passing over it then missed it, not the frame its refresh.
+        bool ahead{false};
         bool scored{false};
         // Quad views: the claimed frame's composition and eye views (its
         // analyzed views are the four source views); null on the canvas path.
