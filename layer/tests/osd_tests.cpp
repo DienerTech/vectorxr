@@ -429,7 +429,7 @@ int main(int argc, char** argv) {
                     if(x<3 || y<3 || x>=raster->content_width-3 || y>=raster->height-3)
                         Check(raster->pixels[y*OsdBitmap::width+x]==0,"The worst-case OSD drew past its panel");
         }
-        std::cout<<"Two rasters (includes initial LUT): "<<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count()<<" ms\n";
+        std::cout<<"Raster checks (include the first, which builds the LUT): "<<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count()<<" ms\n";
         stats.Tick(now+std::chrono::seconds(2)); Check(stats.samples.empty(),"Paused session polluted frame history");
         for(int i=0;i<140;++i) stats.Tick(now+std::chrono::seconds(3)+std::chrono::milliseconds(i*11));
         Check(stats.samples.size()==120,"History grew past bound");
@@ -778,6 +778,8 @@ int main(int argc, char** argv) {
             text.find("top[")!=std::string::npos && text.find("bottom[")!=std::string::npos &&
             text.find("left[")!=std::string::npos && text.find("right[")!=std::string::npos,
             "OSD source edge strips or transparent guard evidence missing");
+        // Passed: the log is no longer needed (a failure keeps it).
+        file.close(); std::error_code ignored; std::filesystem::remove(log,ignored);
     }
     {
         // effectiveRefreshHz counts refreshes on the clock, not against the
@@ -808,6 +810,7 @@ int main(int argc, char** argv) {
         // Frames about 15 ms apart find each refresh due up to a frame late;
         // the next falls due on the set interval all the same.
         Check(hz>=18 && hz<=22,"The OSD lost its 20 Hz refresh rate to frame timing");
+        file.close(); std::error_code ignored; std::filesystem::remove(log,ignored);
     }
     { OsdMetric metric; for(int i=0;i<100;++i)metric.Add(i<95?.11:20);Check(metric.count==100&&std::abs(metric.P95Upper()-.15)<.001&&metric.maximum==20,"OSD bounded metric histogram incorrect"); }
     context->Release(); device->Release();
