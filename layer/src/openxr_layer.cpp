@@ -21,6 +21,7 @@
 #include <openxr/openxr_platform.h>
 
 #include "depthxr/config_path.h"
+#include "depthxr/crt_failure_report.h"
 #include "depthxr/effects.h"
 #include "depthxr/framegen_plan.h"
 #include "depthxr/input_devices.h"
@@ -1762,6 +1763,8 @@ OpenXrLayer::~OpenXrLayer() {
     StopConfigWatcher();
     StopTurboAsyncWorker();
     DrainRuntimePacingWrites();
+    // The logger goes with the members; a later fatal runtime error is still reported, unlogged.
+    SetCrtFailureLogger(nullptr);
 }
 
 void OpenXrLayer::SetLayerDirectory(std::filesystem::path dll_directory) {
@@ -10277,6 +10280,8 @@ void OpenXrLayer::PollConfigFile() {
 
 void OpenXrLayer::BeginInstanceLogLocked(const std::filesystem::path& log_path) {
     logger_.Initialize(log_path);
+    // A fatal runtime error in the layer is named in this log before the game's crash reporting sees it.
+    SetCrtFailureLogger(&logger_);
     // A new log: it shows the config's warnings again.
     logged_config_warnings_.clear();
 }

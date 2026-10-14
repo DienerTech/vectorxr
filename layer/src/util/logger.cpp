@@ -156,6 +156,15 @@ bool Logger::TryDebug(const std::string& message) {
     return true;
 }
 
+bool Logger::TryError(const std::string& message) {
+    std::unique_lock lock(mutex_, std::try_to_lock);
+    if (!lock) return false;
+    if (active_log_path_.empty()) return true;
+    FlushPendingDuplicateLocked();
+    WriteLineLocked(LogLevel::Error, std::chrono::system_clock::now(), message);
+    return true;
+}
+
 bool Logger::IsDebugEnabled() const {
     std::scoped_lock lock(mutex_);
     return Severity(LogLevel::Debug) <= Severity(level_);

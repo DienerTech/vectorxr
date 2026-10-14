@@ -23,6 +23,8 @@ class Logger {
     void Debug(const std::string& message);
     // Background diagnostics may skip an ordinary-log copy under contention.
     bool TryDebug(const std::string& message);
+    // A fatal error's last line: written and flushed at once, or false while another thread holds the log.
+    bool TryError(const std::string& message);
     [[nodiscard]] bool IsDebugEnabled() const;
     [[nodiscard]] std::filesystem::path ActiveLogPath() const;
 

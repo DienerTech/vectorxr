@@ -33,6 +33,7 @@ add_library(
 target_include_directories(depthxr_core PUBLIC include)
 target_compile_features(depthxr_core PUBLIC cxx_std_20)
 if(WIN32)
+    target_sources(depthxr_core PRIVATE src/util/crt_failure_report.cpp)
     target_link_libraries(depthxr_core PUBLIC dinput8 dxguid ole32 winmm)
 endif()
 
@@ -447,6 +448,13 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         add_test(NAME depthxr_layer_load_tests
                  COMMAND depthxr_layer_load_tests $<TARGET_FILE:XR_APILAYER_DIENERTECH_VECTORXR>)
         set_tests_properties(depthxr_layer_load_tests PROPERTIES TIMEOUT 30)
+        # The layer's fatal C runtime errors reach the process's crash reporting and the log, in child
+        # processes that abort on purpose (no GPU).
+        add_executable(depthxr_crt_failure_report_tests tests/crt_failure_report_tests.cpp)
+        target_link_libraries(depthxr_crt_failure_report_tests PRIVATE depthxr_core)
+        target_compile_definitions(depthxr_crt_failure_report_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+        add_test(NAME depthxr_crt_failure_report_tests COMMAND depthxr_crt_failure_report_tests)
+        set_tests_properties(depthxr_crt_failure_report_tests PROPERTIES TIMEOUT 60)
         # FG_TEST_ADAPTER's name matching and environment parsing (test_adapter.h), without a GPU.
         add_executable(depthxr_test_adapter_tests tests/test_adapter_tests.cpp)
         target_compile_definitions(depthxr_test_adapter_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
