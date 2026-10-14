@@ -1078,18 +1078,29 @@ class FrameGenPresenter {
     // time far ahead. Displaced by a wait whose display time ran far further
     // past this process's clock than any wait's while steady
     // (clock_offset_ceiling_: SteamVR lags after a pause and catches up, which
-    // never counts), by one that went back, or by kClockStalledWaits waits in
-    // a row a refresh or more apart whose display times barely moved; steady
-    // again after kClockSteadyWaits waits, over kClockSteadyTime, advanced
-    // with the time between them. Displaced, nothing engages and the presenter
-    // thread stops: frames pass straight through, as without Frame Generation.
+    // never counts; taken over the first kClockWarmupWaits waits, and anew
+    // after each recovery), by one that went back, or by kClockStalledWaits
+    // waits in a row a refresh or more apart whose display times barely
+    // moved; steady again after kClockSteadyWaits waits, over
+    // kClockSteadyTime, advanced with the time between them. Displaced,
+    // nothing engages, Auto holds its multiplier, and the presenter thread
+    // stops: frames pass straight through, as without Frame Generation.
     struct ClockWait {
         std::chrono::steady_clock::time_point returned{};
         XrTime display_time{0};
     };
     std::optional<ClockWait> clock_last_;
     XrDuration clock_offset_ceiling_{0}; // the highest display time minus steady-clock time while steady
-    bool clock_ceiling_set_{false};
+    std::uint32_t clock_warmup_waits_{0};  // waits the ceiling was taken over (kClockWarmupWaits)
+    // The last waits judged (time since the one before, display time step,
+    // offset over the ceiling), logged when the clock is displaced.
+    struct ClockSample {
+        XrDuration wall{0};
+        XrDuration step{0};
+        XrDuration over{0};
+    };
+    std::array<ClockSample, 8> clock_history_{};
+    std::size_t clock_history_next_{0};
     bool clock_displaced_{false};
     std::chrono::steady_clock::time_point clock_displaced_at_{};
     XrDuration clock_ahead_{0};         // how far display times ran past the ceiling (0: they stalled)

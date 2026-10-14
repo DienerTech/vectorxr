@@ -82,6 +82,7 @@ constexpr std::chrono::seconds kRefreshChangeAfter{1};
 // over this long advanced with the time between them.
 constexpr XrDuration kClockJumpFloor = 250'000'000; // 250 ms
 constexpr std::uint32_t kClockStalledWaits = 3;
+constexpr std::uint32_t kClockWarmupWaits = 10; // waits the ceiling is first taken over
 constexpr std::uint32_t kClockSteadyWaits = 30;
 constexpr std::chrono::milliseconds kClockSteadyTime{500};
 // Draining the presenter thread, the newest real frame waits at most this
@@ -492,7 +493,8 @@ void FrameGenPresenter::Stop() {
     phase_xr_ = 0;
     phase_echoed_ = false;
     clock_last_.reset();
-    clock_ceiling_set_ = false;
+    clock_history_next_ = 0;
+    clock_warmup_waits_ = 0;
     clock_offset_ceiling_ = 0;
     clock_displaced_ = false;
     clock_ahead_ = 0;
@@ -1561,10 +1563,16 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
     const bool automatic = settings_.multiplier == FrameGenMultiplier::kAuto ||
                            (settings_.multiplier == FrameGenMultiplier::kDynamic && !dynamic);
     const XrDuration period = frame && frame->period > 0 ? frame->period : last_period_;
-    if (!(automatic || dynamic) || period <= 0 || !RunnableLocked()) {
+    // Nor while the runtime's display times do not advance with the time:
+    // frames pass straight through then, and judged against one refresh each
+    // they would step the multiplier up for nothing.
+    if (!(automatic || dynamic) || period <= 0 || !RunnableLocked() || clock_displaced_) {
         last_app_end_ = now;
         cadence_.clear();
         dynamic_below_since_.reset(); // standing by, the game's rate is measured afresh
+        if (clock_displaced_ && dynamic && dynamic_standby_) {
+            dynamic_reason_ = RuntimeClockTextLocked();
+        }
         return;
     }
     // Paging makes the game late too, and reading that as a reason to step
@@ -2689,6 +2697,7 @@ void FrameGenPresenter::NoteRuntimeClockLocked(Clock::time_point returned, XrTim
     clock_last_ = ClockWait{returned, display_time};
     const XrDuration refresh = refresh_period_ > 0 ? refresh_period_ : period;
     if (!rendered || refresh <= 0) {
+        clock_stalled_waits_ = 0;
         return;
     }
     // How far the display time lies past this process's clock: about
@@ -2696,53 +2705,76 @@ void FrameGenPresenter::NoteRuntimeClockLocked(Clock::time_point returned, XrTim
     // game paused its frame loop, lags (up to seconds) and then catches up
     // to it; Varjo's ran tens of seconds past it, then barely moved while its
     // waits still blocked a refresh each. Only running past the highest
-    // offset seen while steady counts, so a catch-up never does.
+    // offset seen while steady counts, so a catch-up never does; that
+    // ceiling is first taken over kClockWarmupWaits waits (one wait late off
+    // its runtime, or this thread late to see it return, would set it low).
     const XrDuration offset =
         display_time - std::chrono::duration_cast<std::chrono::nanoseconds>(returned.time_since_epoch()).count();
-    if (!previous || !clock_ceiling_set_) {
-        clock_offset_ceiling_ = offset;
-        clock_ceiling_set_ = true;
+    if (!previous) {
         return;
     }
+    const XrDuration jump = std::max<XrDuration>(kClockJumpFloor, 16 * refresh);
     const XrDuration wall = std::chrono::duration_cast<std::chrono::nanoseconds>(returned - previous->returned).count();
     const XrDuration step = display_time - previous->display_time;
-    const bool ahead = offset > clock_offset_ceiling_ + std::max<XrDuration>(kClockJumpFloor, 16 * refresh);
     const bool judged = wall >= refresh / 2;
     const bool stalled = judged && step < refresh / 4;
+    // Moved on with the time between the waits (a whole number of refreshes
+    // where a runtime holds frames or echoes a late caller), not jumping.
+    const bool with_time = judged && !stalled && step <= wall + jump;
     clock_stalled_waits_ = stalled ? clock_stalled_waits_ + 1 : 0;
     const bool back = step < 0;
-    if (ahead || back || clock_stalled_waits_ >= kClockStalledWaits) {
-        clock_steady_waits_ = 0;
-        ++totals_.clock_unsteady_waits;
-        if (ahead) {
-            clock_ahead_ = std::max(clock_ahead_, offset - clock_offset_ceiling_);
-        }
-        if (clock_displaced_) {
+    const bool warm = clock_warmup_waits_ >= kClockWarmupWaits;
+    const bool ahead = warm && offset > clock_offset_ceiling_ + jump;
+    // The last few waits, for the log when the clock is displaced.
+    clock_history_[clock_history_next_++ % clock_history_.size()] = {wall, step, offset - clock_offset_ceiling_};
+    if (!clock_displaced_) {
+        if (ahead || back || clock_stalled_waits_ >= kClockStalledWaits) {
+            ++totals_.clock_unsteady_waits;
+            clock_displaced_ = true;
+            clock_displaced_at_ = returned;
+            clock_steady_waits_ = 0;
+            clock_gap_ = ahead ? wall : 0;
+            clock_ahead_ = ahead ? offset - clock_offset_ceiling_ : 0;
+            ++totals_.clock_displacements;
+            if (logger_ && logged_clock_displacements_ < kLoggedPauses) {
+                ++logged_clock_displacements_;
+                // waits: each recent wait's time since the one before / its
+                // display time's step / its offset over the ceiling, ms.
+                std::string waits;
+                const std::size_t kept = std::min<std::size_t>(clock_history_next_, clock_history_.size());
+                for (std::size_t i = kept; i-- > 0;) {
+                    const ClockSample& sample =
+                        clock_history_[(clock_history_next_ - 1 - i) % clock_history_.size()];
+                    waits += (waits.empty() ? "" : " ") + Number(static_cast<double>(sample.wall) / 1e6, 1) + "/" +
+                             Number(static_cast<double>(sample.step) / 1e6, 1) + "/" +
+                             Number(static_cast<double>(sample.over) / 1e6, 1);
+                }
+                logger_->Info("Frame Generation: " + RuntimeClockTextLocked() +
+                              "; nothing engages and frames pass straight through until they advance with the time "
+                              "again (Varjo's runtime does this after a game stops its frame loop for a while, as while "
+                              "loading). Recent waits (ms since the last / display time step / past the ceiling): " +
+                              waits + ".");
+            }
             return;
         }
-        clock_displaced_ = true;
-        clock_displaced_at_ = returned;
-        clock_gap_ = ahead ? wall : 0;
-        if (!ahead) {
-            clock_ahead_ = 0;
-        }
-        ++totals_.clock_displacements;
-        if (logger_ && logged_clock_displacements_ < kLoggedPauses) {
-            ++logged_clock_displacements_;
-            logger_->Info("Frame Generation: " + RuntimeClockTextLocked() +
-                          "; nothing engages and frames pass straight through until they advance with the time "
-                          "again (Varjo's runtime does this after a game stops its frame loop for a while, as while "
-                          "loading).");
-        }
+        clock_offset_ceiling_ = clock_warmup_waits_ == 0 ? offset : std::max(clock_offset_ceiling_, offset);
+        clock_warmup_waits_ += with_time && !warm ? 1 : 0;
         return;
     }
-    if (!clock_displaced_) {
-        clock_offset_ceiling_ = std::max(clock_offset_ceiling_, offset);
+    // Displaced: steady again after waits that advance with the time, even
+    // past the ceiling (a runtime that moved its clock on for good, or a
+    // ceiling taken low); an odd one that does not is not counted, three
+    // stalled in a row or one going back start over. Varjo's creep never
+    // counts: its display times barely move.
+    if (ahead) {
+        clock_ahead_ = std::max(clock_ahead_, offset - clock_offset_ceiling_);
+    }
+    if (back || clock_stalled_waits_ >= kClockStalledWaits) {
+        ++totals_.clock_unsteady_waits;
+        clock_steady_waits_ = 0;
         return;
     }
-    // Displaced: steady again after waits that advance with the time (an
-    // odd one that does not is not counted; three in a row displace anew).
-    if (!judged || stalled) {
+    if (!with_time) {
         return;
     }
     if (clock_steady_waits_++ == 0) {
@@ -2751,8 +2783,14 @@ void FrameGenPresenter::NoteRuntimeClockLocked(Clock::time_point returned, XrTim
     if (clock_steady_waits_ >= kClockSteadyWaits && returned - clock_steady_since_ >= kClockSteadyTime) {
         clock_displaced_ = false;
         clock_steady_waits_ = 0;
+        clock_stalled_waits_ = 0;
         clock_ahead_ = 0;
-        clock_offset_ceiling_ = std::max(clock_offset_ceiling_, offset);
+        // The ceiling is taken anew from here.
+        clock_offset_ceiling_ = offset;
+        clock_warmup_waits_ = 0;
+        if (dynamic_standby_) {
+            dynamic_reason_ = "the runtime's display times advance with the time again";
+        }
         if (logger_ && logged_clock_displacements_ <= kLoggedPauses) {
             logger_->Info("Frame Generation: the runtime's display times advance with the time again (after " +
                           Number(std::chrono::duration<double>(returned - clock_displaced_at_).count(), 1) + " s).");
