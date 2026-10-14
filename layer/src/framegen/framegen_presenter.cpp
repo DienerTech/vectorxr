@@ -505,6 +505,7 @@ void FrameGenPresenter::Stop() {
     clock_stalled_waits_ = 0;
     clock_steady_waits_ = 0;
     logged_clock_displacements_ = 0;
+    clock_displacement_logged_ = false;
     auto_multiplier_ = 1;
     auto_memory_ceiling_ = kMaxMultiplier;
     memory_budget_.reset();
@@ -2780,7 +2781,8 @@ void FrameGenPresenter::NoteRuntimeClockLocked(Clock::time_point returned, XrTim
             clock_gap_ = ahead ? wall : 0;
             clock_ahead_ = ahead ? offset - clock_offset_ceiling_ : 0;
             ++totals_.clock_displacements;
-            if (logger_ && logged_clock_displacements_ < kLoggedPauses) {
+            clock_displacement_logged_ = logger_ && logged_clock_displacements_ < kLoggedPauses;
+            if (clock_displacement_logged_) {
                 ++logged_clock_displacements_;
                 // waits: each recent wait's time since the one before / its
                 // display time's step / its offset over the ceiling, ms.
@@ -2835,7 +2837,10 @@ void FrameGenPresenter::NoteRuntimeClockLocked(Clock::time_point returned, XrTim
         if (dynamic_standby_) {
             dynamic_reason_ = "the runtime's display times advance with the time again";
         }
-        if (logger_ && logged_clock_displacements_ <= kLoggedPauses) {
+        // Logged when the displacement it ends was (past the first few, a
+        // recovery alone named an end the log never began).
+        if (logger_ && clock_displacement_logged_) {
+            clock_displacement_logged_ = false;
             logger_->Info("Frame Generation: the runtime's display times advance with the time again (after " +
                           Number(std::chrono::duration<double>(returned - clock_displaced_at_).count(), 1) + " s).");
         }

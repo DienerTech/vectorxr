@@ -1115,6 +1115,7 @@ class FrameGenPresenter {
     std::chrono::steady_clock::time_point clock_steady_since_{};
     XrDuration clock_gap_{0};                 // the time passed before the wait that displaced it
     std::uint32_t logged_clock_displacements_{0}; // logged one by one up to a few, then only in summaries
+    bool clock_displacement_logged_{false};       // this one was: so is its end
 
     // Automatic multiplier: steps up while the app misses its cadence, probes
     // one step down after a steady stretch, backing off when a probe fails.

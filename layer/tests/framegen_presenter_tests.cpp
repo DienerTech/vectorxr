@@ -7914,6 +7914,45 @@ void TestAutoHoldsWhileClockDisplaced() {
     Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
 }
 
+// Displaced runtime clocks are logged one by one for the first few, then
+// only in summaries: each logged end ends a logged displacement (past the
+// first three, the ends were logged without them).
+void TestClockLogPairs() {
+    const std::string name = "clock log pairs";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    SessionLog log("clock-pairs");
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic, app, runtime, owned,
+             log.logger.get());
+    RunWork(*app, 600ms, kLightWork);
+    int displacements = 0;
+    for (int i = 0; i < 5; ++i) {
+        runtime.jump_next = 400'000'000; // display times run 0.4 s ahead, then creep
+        RunWork(*app, 3000ms, kLightWork, [&](const XrFrameState&) { return presenter.Status().runtime_clock_displaced; });
+        displacements += presenter.Status().runtime_clock_displaced ? 1 : 0;
+        RunWork(*app, 4000ms, kLightWork, [&](const XrFrameState&) { return !presenter.Status().runtime_clock_displaced; });
+        Check(!presenter.Status().runtime_clock_displaced, name + ": display times advance again");
+        RunWork(*app, 200ms, kLightWork); // the ceiling is taken anew
+    }
+    presenter.Stop();
+    Check(displacements == 5, name + ": each jump displaced the clock (" + std::to_string(displacements) + " of 5)");
+    const std::vector<std::string> lines = log.Lines("Frame Generation: the runtime's display times");
+    const auto count = [&](const char* text) {
+        return std::count_if(lines.begin(), lines.end(),
+                             [&](const std::string& line) { return line.find(text) != std::string::npos; });
+    };
+    const auto began = count("nothing engages");
+    const auto ended = count("advance with the time again (after");
+    Check(began == 3 && ended == began,
+          name + ": the first three are logged, each with its end (" + std::to_string(began) + " began, " +
+              std::to_string(ended) + " ended)");
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+}
+
 // Auto probes a step down once its frames run steady a while: a game whose
 // own frames take longer than that step allows fails every probe, with a
 // second or two of late frames each (DCS on Varjo, 2026-10-14: 2x -> full
@@ -8547,6 +8586,7 @@ int main(int argc, char** argv) {
     RUN(TestStalledClockWhilePresenting);
     RUN(TestAutoHoldsWhileClockDisplaced);
     RUN(TestAutoProbesNeedRoom);
+    RUN(TestClockLogPairs);
     RUN(TestSteamVrMissedRefresh);
     RUN(TestLeadAfterRepeatedHitches);
     RUN(TestPassedOverFramesKeepLead);
