@@ -121,7 +121,17 @@ struct ElevatedOpenXrHelper {
 
 struct ElevatedRequestError {
     message: String,
-    recoverable: bool,
+    kind: ElevatedRequestErrorKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ElevatedRequestErrorKind {
+    // The request failed, but the connection is still in step.
+    Failed,
+    // The connection broke or the helper stopped; a new helper can retry.
+    Disconnected,
+    // The helper did not answer in time and may still make the change.
+    TimedOut,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -157,6 +167,7 @@ struct SliceDefinition {
 const IMPLICIT_KEY: &str = r"Software\Khronos\OpenXR\1\ApiLayers\Implicit";
 const ELEVATED_HELPER_ARG: &str = "--vectorxr-openxr-layer-helper";
 const ELEVATED_HELPER_TIMEOUT: Duration = Duration::from_secs(120);
+const ELEVATED_HELPER_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 static ELEVATED_HELPER: OnceLock<Mutex<Option<ElevatedOpenXrHelper>>> = OnceLock::new();
 static SIGNATURE_CACHE: OnceLock<Mutex<HashMap<String, SignatureCacheEntry>>> = OnceLock::new();
 const SLICES: [SliceDefinition; 4] = [
@@ -581,39 +592,44 @@ fn run_elevated_registry_operation(operation: ElevatedOpenXrOperation) -> Result
         .lock()
         .map_err(|_| "OpenXR elevated helper state is unavailable".to_string())?;
 
-    let had_helper = helper_guard.is_some();
+    send_with_elevated_helper(
+        &mut helper_guard,
+        &ElevatedOpenXrRequest { operation },
+        start_elevated_helper,
+    )
+}
+
+fn send_with_elevated_helper(
+    helper_slot: &mut Option<ElevatedOpenXrHelper>,
+    request: &ElevatedOpenXrRequest,
+    start_helper: impl Fn() -> Result<ElevatedOpenXrHelper, String>,
+) -> Result<(), String> {
+    let had_helper = helper_slot.is_some();
     if !had_helper {
-        *helper_guard = Some(start_elevated_helper()?);
+        *helper_slot = Some(start_helper()?);
     }
 
-    let request = ElevatedOpenXrRequest { operation };
-
-    match send_elevated_request(
-        helper_guard
+    let error = match send_elevated_request(
+        helper_slot
             .as_mut()
             .expect("elevated helper was just initialized"),
-        &request,
+        request,
     ) {
-        Ok(()) => Ok(()),
-        Err(first_error) if first_error.recoverable && had_helper => {
-            *helper_guard = None;
-            let mut helper = start_elevated_helper()?;
-            let retry = send_elevated_request(&mut helper, &request);
-            *helper_guard = Some(helper);
-            retry.map_err(|error| error.message)
-        }
-        Err(first_error) if first_error.recoverable => {
-            std::thread::sleep(Duration::from_millis(150));
-            send_elevated_request(
-                helper_guard
-                    .as_mut()
-                    .expect("elevated helper should still be available"),
-                &request,
-            )
-            .map_err(|error| error.message)
-        }
-        Err(error) => Err(error.message),
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
+    if error.kind == ElevatedRequestErrorKind::Failed {
+        return Err(error.message);
     }
+
+    // The helper may still answer this request, so never send on that
+    // connection again: the next request would read this one's response.
+    *helper_slot = None;
+    if had_helper && error.kind == ElevatedRequestErrorKind::Disconnected {
+        // The helper kept from an earlier change has stopped; start a new one.
+        return send_with_elevated_helper(helper_slot, request, start_helper);
+    }
+    Err(error.message)
 }
 
 fn start_elevated_helper() -> Result<ElevatedOpenXrHelper, String> {
@@ -627,11 +643,25 @@ fn start_elevated_helper() -> Result<ElevatedOpenXrHelper, String> {
         .to_string();
     let token = helper_token();
     launch_elevated_helper_process(&address, &token)?;
+    accept_elevated_helper(&listener, &token)
+}
 
+fn accept_elevated_helper(
+    listener: &TcpListener,
+    token: &str,
+) -> Result<ElevatedOpenXrHelper, String> {
     let started = Instant::now();
     while started.elapsed() < ELEVATED_HELPER_TIMEOUT {
         match listener.accept() {
             Ok((stream, _)) => {
+                // Windows gives the accepted socket the listener's non-blocking
+                // mode, so a read would fail before the helper answered. Wait
+                // for each answer instead, but not forever on a stuck helper.
+                stream
+                    .set_nonblocking(false)
+                    .and_then(|_| stream.set_read_timeout(Some(ELEVATED_HELPER_RESPONSE_TIMEOUT)))
+                    .and_then(|_| stream.set_write_timeout(Some(ELEVATED_HELPER_RESPONSE_TIMEOUT)))
+                    .map_err(|error| error.to_string())?;
                 let mut reader = BufReader::new(stream);
                 let mut received_token = String::new();
                 reader
@@ -690,29 +720,37 @@ fn send_elevated_request(
     helper: &mut ElevatedOpenXrHelper,
     request: &ElevatedOpenXrRequest,
 ) -> Result<(), ElevatedRequestError> {
-    let payload = serde_json::to_string(request).map_err(recoverable_helper_error)?;
+    let payload = serde_json::to_string(request).map_err(|error| ElevatedRequestError {
+        message: error.to_string(),
+        kind: ElevatedRequestErrorKind::Failed,
+    })?;
     helper
         .writer
         .write_all(payload.as_bytes())
         .and_then(|_| helper.writer.write_all(b"\n"))
         .and_then(|_| helper.writer.flush())
-        .map_err(recoverable_helper_error)?;
+        .map_err(helper_connection_error)?;
 
     let mut response_line = String::new();
     helper
         .reader
         .read_line(&mut response_line)
-        .map_err(recoverable_helper_error)?;
+        .map_err(helper_connection_error)?;
 
     if response_line.trim().is_empty() {
         return Err(ElevatedRequestError {
             message: "OpenXR elevated helper stopped before the change completed".into(),
-            recoverable: true,
+            kind: ElevatedRequestErrorKind::Disconnected,
         });
     }
 
-    let response = serde_json::from_str::<ElevatedOpenXrResponse>(response_line.trim())
-        .map_err(recoverable_helper_error)?;
+    let response =
+        serde_json::from_str::<ElevatedOpenXrResponse>(response_line.trim()).map_err(|error| {
+            ElevatedRequestError {
+                message: error.to_string(),
+                kind: ElevatedRequestErrorKind::Disconnected,
+            }
+        })?;
 
     if response.ok {
         Ok(())
@@ -721,15 +759,25 @@ fn send_elevated_request(
             message: response
                 .error
                 .unwrap_or_else(|| "OpenXR elevated registry operation failed".into()),
-            recoverable: false,
+            kind: ElevatedRequestErrorKind::Failed,
         })
     }
 }
 
-fn recoverable_helper_error(error: impl ToString) -> ElevatedRequestError {
-    ElevatedRequestError {
-        message: error.to_string(),
-        recoverable: true,
+fn helper_connection_error(error: std::io::Error) -> ElevatedRequestError {
+    if matches!(
+        error.kind(),
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+    ) {
+        ElevatedRequestError {
+            message: "OpenXR elevated helper did not respond in time".into(),
+            kind: ElevatedRequestErrorKind::TimedOut,
+        }
+    } else {
+        ElevatedRequestError {
+            message: error.to_string(),
+            kind: ElevatedRequestErrorKind::Disconnected,
+        }
     }
 }
 
@@ -1327,4 +1375,158 @@ fn runtime_name_from_manifest(manifest_path: &str) -> Option<String> {
         .get("name")?
         .as_str()
         .map(|name| name.to_string())
+}
+
+#[cfg(test)]
+mod elevated_helper_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    // Stands in for the elevated process: answers one request per delay, then
+    // disconnects. A DeleteValue is answered with an error naming its manifest,
+    // so a test can tell which request a response belongs to.
+    fn start_fake_helper(
+        delays: Vec<Duration>,
+        runs: Arc<AtomicUsize>,
+    ) -> Result<ElevatedOpenXrHelper, String> {
+        let listener = TcpListener::bind("127.0.0.1:0").map_err(|error| error.to_string())?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|error| error.to_string())?;
+        let address = listener.local_addr().map_err(|error| error.to_string())?;
+        std::thread::spawn(move || {
+            let mut stream = TcpStream::connect(address).unwrap();
+            stream.write_all(b"fake-token\n").unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            for delay in delays {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    return;
+                }
+                std::thread::sleep(delay);
+                runs.fetch_add(1, Ordering::SeqCst);
+                let error = match serde_json::from_str::<ElevatedOpenXrRequest>(line.trim()) {
+                    Ok(ElevatedOpenXrRequest {
+                        operation: ElevatedOpenXrOperation::DeleteValue { manifest_path, .. },
+                    }) => Some(manifest_path),
+                    _ => None,
+                };
+                let response = ElevatedOpenXrResponse {
+                    ok: error.is_none(),
+                    error,
+                };
+                let payload = serde_json::to_string(&response).unwrap();
+                if stream.write_all(format!("{payload}\n").as_bytes()).is_err() {
+                    return;
+                }
+            }
+        });
+        accept_elevated_helper(&listener, "fake-token")
+    }
+
+    fn ping() -> ElevatedOpenXrRequest {
+        ElevatedOpenXrRequest {
+            operation: ElevatedOpenXrOperation::Ping,
+        }
+    }
+
+    fn delete(manifest_path: &str) -> ElevatedOpenXrRequest {
+        ElevatedOpenXrRequest {
+            operation: ElevatedOpenXrOperation::DeleteValue {
+                slice: "hklm64".into(),
+                manifest_path: manifest_path.into(),
+            },
+        }
+    }
+
+    // The accepted socket used to keep the listener's non-blocking mode, so the
+    // first read failed before the helper answered, the request was sent again
+    // and every later change read the previous change's response.
+    #[test]
+    fn each_request_reads_its_own_response() {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let starts = AtomicUsize::new(0);
+        let start = || {
+            starts.fetch_add(1, Ordering::SeqCst);
+            start_fake_helper(vec![Duration::from_millis(20); 4], runs.clone())
+        };
+        let mut helper = None;
+
+        assert_eq!(
+            send_with_elevated_helper(&mut helper, &ping(), &start),
+            Ok(())
+        );
+        for index in 0..3 {
+            let manifest_path = format!("layer-{index}.json");
+            assert_eq!(
+                send_with_elevated_helper(&mut helper, &delete(&manifest_path), &start),
+                Err(manifest_path)
+            );
+        }
+        assert_eq!(runs.load(Ordering::SeqCst), 4);
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        assert!(helper.is_some());
+    }
+
+    #[test]
+    fn stopped_helper_is_replaced_once() {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let starts = AtomicUsize::new(0);
+        let start = || {
+            starts.fetch_add(1, Ordering::SeqCst);
+            start_fake_helper(vec![Duration::ZERO], runs.clone())
+        };
+        let mut helper = None;
+
+        assert_eq!(
+            send_with_elevated_helper(&mut helper, &ping(), &start),
+            Ok(())
+        );
+        assert_eq!(
+            send_with_elevated_helper(&mut helper, &delete("layer.json"), &start),
+            Err("layer.json".to_string())
+        );
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+        assert_eq!(starts.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn timed_out_helper_is_dropped_without_sending_again() {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let starts = AtomicUsize::new(0);
+        let start = || -> Result<ElevatedOpenXrHelper, String> {
+            // The first helper answers its second request too late.
+            let delays = if starts.fetch_add(1, Ordering::SeqCst) == 0 {
+                vec![Duration::ZERO, Duration::from_millis(500)]
+            } else {
+                vec![Duration::ZERO]
+            };
+            let helper = start_fake_helper(delays, runs.clone())?;
+            helper
+                .reader
+                .get_ref()
+                .set_read_timeout(Some(Duration::from_millis(100)))
+                .map_err(|error| error.to_string())?;
+            Ok(helper)
+        };
+        let mut helper = None;
+
+        assert_eq!(
+            send_with_elevated_helper(&mut helper, &ping(), &start),
+            Ok(())
+        );
+        assert_eq!(
+            send_with_elevated_helper(&mut helper, &delete("late.json"), &start),
+            Err("OpenXR elevated helper did not respond in time".to_string())
+        );
+        assert!(helper.is_none());
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+
+        assert_eq!(
+            send_with_elevated_helper(&mut helper, &delete("layer.json"), &start),
+            Err("layer.json".to_string())
+        );
+        assert_eq!(starts.load(Ordering::SeqCst), 2);
+    }
 }
