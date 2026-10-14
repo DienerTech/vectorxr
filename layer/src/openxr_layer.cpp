@@ -3696,6 +3696,36 @@ XrResult OpenXrLayer::GetVisibilityMaskKHR(XrSession session,
                       ", appViewIndex=" + std::to_string(view_index) +
                       ", runtimeViewIndex=" + std::to_string(runtime_view_index));
     }
+    // The shape each synthesized view is given, once per view and mask type:
+    // a focus view gets its eye's mask, whose bounds (view-space tangents at
+    // z=-1) show whether it can reach into the focus view's field of view.
+    const uint32_t shape_bit = view_index < 4 && visibility_mask_type >= 1 && visibility_mask_type <= 3
+                                   ? 1u << (view_index * 4 + static_cast<uint32_t>(visibility_mask_type))
+                                   : 0u;
+    if (synthesize_quad && XR_SUCCEEDED(result) && visibility_mask && visibility_mask->vertexCapacityInput > 0 &&
+        visibility_mask->vertices && shape_bit != 0 && (logged_visibility_mask_shapes_ & shape_bit) == 0) {
+        logged_visibility_mask_shapes_ |= shape_bit;
+        const uint32_t vertex_count =
+            std::min(visibility_mask->vertexCountOutput, visibility_mask->vertexCapacityInput);
+        float min_x = 0.0f, max_x = 0.0f, min_y = 0.0f, max_y = 0.0f;
+        for (uint32_t i = 0; i < vertex_count; ++i) {
+            const XrVector2f& vertex = visibility_mask->vertices[i];
+            min_x = i == 0 ? vertex.x : std::min(min_x, vertex.x);
+            max_x = i == 0 ? vertex.x : std::max(max_x, vertex.x);
+            min_y = i == 0 ? vertex.y : std::min(min_y, vertex.y);
+            max_y = i == 0 ? vertex.y : std::max(max_y, vertex.y);
+        }
+        const char* type_name = visibility_mask_type == XR_VISIBILITY_MASK_TYPE_HIDDEN_TRIANGLE_MESH_KHR ? "hidden"
+                                : visibility_mask_type == XR_VISIBILITY_MASK_TYPE_VISIBLE_TRIANGLE_MESH_KHR
+                                    ? "visible"
+                                    : "lineLoop";
+        logger_.Info("Visibility mask for synthesized quadviews: appViewIndex=" + std::to_string(view_index) +
+                     ", runtimeViewIndex=" + std::to_string(runtime_view_index) + ", type=" + type_name +
+                     ", vertices=" + std::to_string(visibility_mask->vertexCountOutput) +
+                     ", indices=" + std::to_string(visibility_mask->indexCountOutput) +
+                     ", tangentBounds=(" + FormatDiagnosticDouble(min_x) + ", " + FormatDiagnosticDouble(max_x) +
+                     ", " + FormatDiagnosticDouble(min_y) + ", " + FormatDiagnosticDouble(max_y) + ")");
+    }
     return result;
 }
 
@@ -4842,6 +4872,48 @@ bool OpenXrLayer::BuildQuadViewsComposePlan(const XrCompositionLayerProjection* 
                                            resolved_settings_.quadviews.foveate_sharpness);
         composed.peripheral = eye;
         composed.focus = eye + 2;
+
+        // Where the game's own submission would put the focus view, against
+        // where the located FOVs put it: they differ only when the game drew
+        // with FOVs other than the last ones located for the frame.
+        const FrameGenComposeEye submitted =
+            BuildFrameGenComposeEye(ToFrameGenFov(source_layer->views[eye].fov),
+                                    ToFrameGenFov(source_layer->views[eye + 2].fov),
+                                    plan->composition.output,
+                                    FrameGenExtent{focus_content_width, focus_content_height},
+                                    resolved_settings_.quadviews.transition_thickness_percent,
+                                    resolved_settings_.quadviews.foveate_sharpness);
+        double placement_delta_px = 0.0;
+        for (uint32_t edge = 0; edge < 4; ++edge) {
+            const double size = edge % 2 == 0 ? plan->width : plan->height;
+            const double delta = static_cast<double>(submitted.focus_rect[edge]) - composed.focus_rect[edge];
+            placement_delta_px = std::max(placement_delta_px, std::abs(delta) * size);
+        }
+        if (placement_delta_px > 1.0) {
+            ++quadviews_placement_mismatch_frames_;
+            if (quadviews_placement_mismatch_logs_remaining_ > 0) {
+                --quadviews_placement_mismatch_logs_remaining_;
+                logger_.Info("Quadviews focus placement differs from the game's submission: frameTime=" +
+                             std::to_string(display_time) + ", eye=" + std::to_string(eye) +
+                             ", deltaPx=" + FormatDiagnosticDouble(placement_delta_px) +
+                             ", mismatchedFrames=" + std::to_string(quadviews_placement_mismatch_frames_) +
+                             ", locatedFocusFov=" + FormatFov(plan->fovs[eye + 2]) +
+                             ", submittedFocusFov=" + FormatFov(source_layer->views[eye + 2].fov) +
+                             ", cachedFovHit=" + std::to_string(plan->has_cached_fovs));
+            }
+        }
+        // The inset's largest frame-to-frame move since the last diagnostic
+        // line, in output pixels: a moving inset (eye tracking) shows here.
+        if (quadviews_has_previous_focus_rect_[eye]) {
+            for (uint32_t edge = 0; edge < 4; ++edge) {
+                const double size = edge % 2 == 0 ? plan->width : plan->height;
+                const double step =
+                    static_cast<double>(composed.focus_rect[edge]) - quadviews_previous_focus_rect_[eye][edge];
+                quadviews_focus_max_step_px_[eye] = std::max(quadviews_focus_max_step_px_[eye], std::abs(step) * size);
+            }
+        }
+        quadviews_previous_focus_rect_[eye] = composed.focus_rect;
+        quadviews_has_previous_focus_rect_[eye] = true;
         if (!plan->log_diagnostic) {
             continue;
         }
@@ -4880,8 +4952,11 @@ bool OpenXrLayer::BuildQuadViewsComposePlan(const XrCompositionLayerProjection* 
                << ", fullFov=" << FormatFov(plan->fovs[eye])
                << ", focusFov=" << FormatFov(plan->fovs[eye + 2])
                << ", sourceFullFov=" << FormatFov(source_layer->views[eye].fov)
-               << ", sourceFocusFov=" << FormatFov(source_layer->views[eye + 2].fov);
+               << ", sourceFocusFov=" << FormatFov(source_layer->views[eye + 2].fov)
+               << ", maxStepPx=" << FormatDiagnosticDouble(quadviews_focus_max_step_px_[eye])
+               << ", placementMismatchFrames=" << quadviews_placement_mismatch_frames_;
         logger_.Debug(stream.str());
+        quadviews_focus_max_step_px_[eye] = 0.0;
     }
     return true;
 }
@@ -5392,6 +5467,21 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
     }
     d3d11_quadviews_compositor_.failure_logs_remaining = 8;
     if (!d3d11_quadviews_compositor_.has_logged_capabilities) {
+        // What the game's four views are drawn into, as the device sees them,
+        // and the part of each the compositor samples.
+        std::ostringstream sources;
+        for (uint32_t view = 0; view < 4; ++view) {
+            const XrSwapchainSubImage& sub_image = source_layer->views[view].subImage;
+            D3D11_TEXTURE2D_DESC desc{};
+            if (selected_source_textures[view]) {
+                selected_source_textures[view]->GetDesc(&desc);
+            }
+            sources << ", source" << view << "{created=" << swapchains[view]->width << "x" << swapchains[view]->height
+                    << ",format=" << swapchains[view]->format << ",rect=(" << sub_image.imageRect.offset.x << ","
+                    << sub_image.imageRect.offset.y << "," << sub_image.imageRect.extent.width << "x"
+                    << sub_image.imageRect.extent.height << "),slice=" << sub_image.imageArrayIndex << ","
+                    << FormatTextureDesc(desc) << "}";
+        }
         logger_.Info("D3D11 quadviews compositor capabilities: outputSize=" +
                      std::to_string(output_width) + "x" + std::to_string(output_height) +
                      ", cachedStereoSize=" + std::to_string(cached_quadviews_stereo_recommended_width_) + "x" +
@@ -5404,11 +5494,12 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
                      ", directOutputs=" + std::to_string(direct_output_count) + "/2" +
                      ", outputCopyFallbacks=" + std::to_string(output_copy_count) +
                      ", gpuTiming=" + std::to_string(d3d11_quadviews_compositor_.gpu_timing_available) +
+                     ", bridged=" + std::to_string(d3d11_bridge_.Active()) +
                      ", appPixelBudget=" + FormatDiagnosticDouble(
                          (static_cast<double>(swapchains[0]->width) * swapchains[0]->height +
                           static_cast<double>(swapchains[2]->width) * swapchains[2]->height) /
                          std::max(1.0, static_cast<double>(output_width) * output_height) * 100.0) +
-                     "%");
+                     "%" + sources.str());
         d3d11_quadviews_compositor_.has_logged_capabilities = true;
     }
     if (should_log_compositor_diagnostic) {
@@ -10830,6 +10921,7 @@ void OpenXrLayer::ResetSessionState() {
     has_logged_pivotxr_spike_mode_ = false;
     has_logged_quadviews_view_configuration_capabilities_ = false;
     has_logged_visibility_mask_mapping_ = false;
+    logged_visibility_mask_shapes_ = 0;
     tracked_view_spaces_.clear();
     tracked_local_spaces_.clear();
     tracked_stage_spaces_.clear();
@@ -10840,6 +10932,10 @@ void OpenXrLayer::ResetSessionState() {
     failed_pivot_space_conversions_.clear();
     cached_depth_submission_geometry_.clear();
     cached_quadviews_frames_.Clear();
+    quadviews_placement_mismatch_frames_ = 0;
+    quadviews_placement_mismatch_logs_remaining_ = 3;
+    quadviews_has_previous_focus_rect_ = {};
+    quadviews_focus_max_step_px_ = {};
     ResetEyeGazeInputState();
     ResetSwapchainState();
 }

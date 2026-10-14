@@ -1565,6 +1565,7 @@ class OpenXrLayer {
     std::unordered_set<std::string> logged_varjo_native_view_configuration_signatures_;
     VarjoNativeFoveationDiagnosticState varjo_native_foveation_diagnostic_;
     bool has_logged_visibility_mask_mapping_{false};
+    uint32_t logged_visibility_mask_shapes_{0}; // one bit per synthesized view and mask type
     bool has_logged_system_properties_{false};
     uint32_t cached_quadviews_stereo_recommended_width_{0};
     uint32_t cached_quadviews_stereo_recommended_height_{0};
@@ -1620,6 +1621,12 @@ class OpenXrLayer {
     std::unordered_set<XrSpace> failed_pivot_space_conversions_;
     std::map<XrTime, std::vector<DepthSubmissionGeometry>> cached_depth_submission_geometry_;
     QuadViewsFrameCache<QuadViewsFrameState> cached_quadviews_frames_;
+    // Quad views placement diagnostics (BuildQuadViewsComposePlan), per session.
+    uint64_t quadviews_placement_mismatch_frames_{0};
+    uint32_t quadviews_placement_mismatch_logs_remaining_{3};
+    std::array<std::array<float, 4>, 2> quadviews_previous_focus_rect_{};
+    std::array<bool, 2> quadviews_has_previous_focus_rect_{};
+    std::array<double, 2> quadviews_focus_max_step_px_{};
     std::unordered_map<XrSwapchain, SwapchainInfo> tracked_swapchains_;
     D3D11QuadViewsCompositor d3d11_quadviews_compositor_;
     D3D11FocusSharpen d3d11_focus_sharpen_;
