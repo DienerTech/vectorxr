@@ -567,6 +567,32 @@ class TurboFrameTestPeer {
         layer.framegen_queue_.Flush(swapchain, layer.FrameGenQueueCalls(), true);
     }
     static FrameGenQueueSubstitution::ShownLayerCounts ShownLayers() { return Layer().framegen_queue_.ShownLayers(); }
+    static bool ShownLayersLazy() { return Layer().framegen_queue_.ShownLayersLazy(); }
+    // xrCreateSession through the layer's own hook with Frame Generation on
+    // (no file is read), the runtime's being `create_session`. The settings
+    // are put back after.
+    static XrResult CreateFrameGenSession(const XrSessionCreateInfo* info, PFN_xrCreateSession create_session) {
+        auto& layer = Layer();
+        ConfigDocument previous;
+        bool loaded = false;
+        {
+            std::scoped_lock lock(layer.mutex_);
+            previous = layer.config_;
+            loaded = layer.has_loaded_config_;
+            layer.has_loaded_config_ = true;
+            layer.config_ = {};
+            layer.config_.core.enabled = true;
+            layer.config_.framegen.enabled = true;
+            layer.next_create_session_ = create_session;
+        }
+        XrSession session = XR_NULL_HANDLE;
+        const XrResult result = layer.CreateSession(XR_NULL_HANDLE, info, &session);
+        std::scoped_lock lock(layer.mutex_);
+        layer.config_ = previous;
+        layer.has_loaded_config_ = loaded;
+        layer.next_create_session_ = nullptr;
+        return result;
+    }
     static void EndVarjoReleases(XrSwapchain swapchain) {
         auto& layer = Layer();
         layer.framegen_queue_.Reset();
@@ -2685,6 +2711,62 @@ void TestVarjoDeferredReleasesKeepFrameGenUnblocked() {
     Peer::EndVarjoNative();
 }
 
+namespace {
+
+// What the runtime's xrCreateSession was given: the queue named in its
+// Direct3D 12 binding and that queue's priority, and whether the session's
+// shown layers were lazy.
+ID3D12CommandQueue* g_created_queue = nullptr;
+INT g_created_priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
+bool g_created_shown_lazy = false;
+
+// Records what it was given and refuses the session (the layer then lets
+// the queue substitution go).
+XrResult XRAPI_PTR RefusingCreateSession(XrInstance, const XrSessionCreateInfo* info, XrSession*) {
+    const auto* binding = static_cast<const XrGraphicsBindingD3D12KHR*>(info->next);
+    if (binding->type == XR_TYPE_GRAPHICS_BINDING_D3D12_KHR && binding->queue) {
+        g_created_queue = binding->queue;
+        g_created_priority = binding->queue->GetDesc().Priority;
+    }
+    g_created_shown_lazy = depthxr::TurboFrameTestPeer::ShownLayersLazy();
+    return XR_ERROR_RUNTIME_FAILURE;
+}
+
+} // namespace
+
+// A Direct3D 12 game with Frame Generation on: the runtime gets a queue of
+// Frame Generation's own, and the layers it shows but Frame Generation does
+// not capture are kept lazy (OpenKneeboard's kneeboard in MSFS or DCS), not
+// only in Vulkan games as in 0.19.1; VECTORXR_FRAMEGEN_SHOWN_LAYERS=off keeps
+// them as they were.
+void TestFrameGenSessionKeepsShownLayersLazy() {
+    using Peer = depthxr::TurboFrameTestPeer;
+    const auto device = MakeFake<FakeD3D12Device>();
+    const auto game = MakeFake<FakeD3D12Queue>(
+        device.Get(), D3D12_COMMAND_QUEUE_DESC{D3D12_COMMAND_LIST_TYPE_DIRECT, 0, D3D12_COMMAND_QUEUE_FLAG_NONE, 0});
+    XrGraphicsBindingD3D12KHR binding{XR_TYPE_GRAPHICS_BINDING_D3D12_KHR};
+    binding.device = device.Get();
+    binding.queue = game.Get();
+    XrSessionCreateInfo create{XR_TYPE_SESSION_CREATE_INFO};
+    create.next = &binding;
+    for (const char* setting : {"", "off"}) {
+        _putenv_s("VECTORXR_FRAMEGEN_SHOWN_LAYERS", setting);
+        g_created_queue = nullptr;
+        g_created_priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
+        g_created_shown_lazy = false;
+        const XrResult result = Peer::CreateFrameGenSession(&create, &RefusingCreateSession);
+        const bool lazy = *setting == '\0';
+        Expect(result == XR_ERROR_RUNTIME_FAILURE && g_created_queue && g_created_queue != game.Get() &&
+                   g_created_priority == D3D12_COMMAND_QUEUE_PRIORITY_HIGH && g_created_shown_lazy == lazy,
+               std::string("A Direct3D 12 Frame Generation session ") +
+                   (lazy ? "did not keep shown layers lazy by default"
+                         : "kept shown layers lazy with VECTORXR_FRAMEGEN_SHOWN_LAYERS=off") +
+                   (g_created_queue == game.Get() ? " (the runtime got the game's queue)" : ""));
+        Expect(!Peer::ShownLayersLazy(), "A refused session's queue substitution was kept");
+    }
+    _putenv_s("VECTORXR_FRAMEGEN_SHOWN_LAYERS", "");
+}
+
 // A settings file with a key this layer does not know (a newer app's) still
 // loads. Each unknown key is logged once per log: at the first load, not again
 // on reloads, and a reload that adds one logs only that one; the next
@@ -2808,6 +2890,7 @@ int main() {
     Expect(depthxr::TurboFrameTestPeer::OsdStateTransitions(), "OSD lost enabled/off Turbo or applied/ready/disabled Pivot state");
     TestVarjoNativeSubmittedFocusCountsEveryFrame();
     TestVarjoDeferredReleasesKeepFrameGenUnblocked();
+    TestFrameGenSessionKeepsShownLayersLazy();
     TestQuadViewsInactiveReasons();
     TestQuadViewsOsdTagFollowsBegunConfiguration();
     // Last: it points the layer's log at a file of its own.
