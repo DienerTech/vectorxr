@@ -5516,8 +5516,11 @@ XrResult OpenXrLayer::TraceRuntimeWaitFrame(XrSession session, const XrFrameWait
             osd_should_render_.store(state->shouldRender == XR_TRUE, std::memory_order_relaxed);
         return result;
     }
-    // The watched call records the start; the return carries the prediction.
+    // The watched call records the start in the recorder files. Watched
+    // records never reach the ordinary log, so its sampled bursts keep an
+    // enter of their own. The return carries the prediction.
     const auto id = turbo_trace_.NextId();
+    if (turbo_trace_.Capturing()) turbo_trace_.Record("runtime.wait.enter", id);
     const auto result = next_wait_frame_(session, info, state);
     if (XR_FAILED(result)) turbo_trace_.Burst();
     turbo_trace_.Record("runtime.wait.return", id, XR_SUCCEEDED(result) ? state->predictedDisplayTime : 0,
@@ -5531,13 +5534,15 @@ XrResult OpenXrLayer::TraceRuntimeBeginFrame(XrSession session, const XrFrameBeg
     const auto trace_call = turbo_trace_.Watch("runtime.begin");
     std::unique_lock queue_lock(osd_vulkan_queue_mutex_,std::defer_lock);
     if(osd_vulkan_.load())queue_lock.lock();
-    // The watched call records the start and duration; only a failure adds
-    // a record of its own.
+    // The watched call records the start and duration in the recorder files.
+    // Watched records never reach the ordinary log, so its sampled bursts keep
+    // an enter and a return of their own; outside them only a failure adds one.
+    const bool sampled = turbo_trace_.Capturing();
+    const auto id = turbo_trace_.NextId();
+    if (sampled) turbo_trace_.Record("runtime.begin.enter", id);
     const auto result = next_begin_frame_(session, info);
-    if (XR_FAILED(result)) {
-        turbo_trace_.Burst();
-        turbo_trace_.Record("runtime.begin.return", turbo_trace_.NextId(), result);
-    }
+    if (XR_FAILED(result)) turbo_trace_.Burst();
+    if (sampled || XR_FAILED(result)) turbo_trace_.Record("runtime.begin.return", id, result);
     return result;
 }
 
@@ -5670,16 +5675,17 @@ XrResult OpenXrLayer::SubmitRuntimeFrame(XrSession session, const XrFrameEndInfo
     if (!turbo_trace_.Enabled()) return submit();
     const auto id = turbo_trace_.NextId();
     turbo_trace_.Record("submit.enter", id, info->displayTime, info->layerCount);
-    if (turbo_trace_.Capturing()) {
+    const bool sampled = turbo_trace_.Capturing();
+    if (sampled) {
         const XrTime clock_now = TurboClockNow();
         turbo_trace_.Record("submit.clock", id, clock_now, clock_now > 0 ? info->displayTime - clock_now : 0);
     }
     const auto result = submit();
-    // The watched runtime.end records the duration; only a failure adds a return.
-    if (XR_FAILED(result)) {
-        turbo_trace_.Burst();
-        turbo_trace_.Record("submit.return", id, result);
-    }
+    if (XR_FAILED(result)) turbo_trace_.Burst();
+    // The watched runtime.end records the duration in the recorder files; the
+    // ordinary log's sampled bursts, which never get watched records, keep the
+    // return. Outside them only a failure adds one.
+    if (sampled || XR_FAILED(result)) turbo_trace_.Record("submit.return", id, result);
     return result;
 }
 
@@ -6114,6 +6120,9 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
 
 XrResult OpenXrLayer::BeginFrame(XrSession session, const XrFrameBeginInfo* frame_begin_info) {
     const auto trace_call = turbo_trace_.Watch("app.begin");
+    // The ordinary log's sampled bursts never get watched records: they keep
+    // the app's begin as a record of its own.
+    if (turbo_trace_.Capturing()) turbo_trace_.Record("begin.enter", turbo_trace_.NextId());
     NoteThread(ThreadCensus::Call::BeginFrame);
     if (frame_begin_info && frame_begin_info->type != XR_TYPE_FRAME_BEGIN_INFO) {
         return XR_ERROR_VALIDATION_FAILURE;
