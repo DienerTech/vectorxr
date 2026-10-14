@@ -4848,6 +4848,80 @@ void TestPassedOverFramesKeepLead() {
               std::to_string(highest) + ", last " + std::to_string(after.lead_slots) + ")");
 }
 
+// Frames with no projection (a loading screen or a menu: nothing to generate
+// from) say nothing about the lead the game's frames need. Scored, late ones
+// raised it a refresh every two, to its cap: Star Citizen on Virtual Desktop
+// (2026-10-14) showed a cylinder layer alone for 93 s, the lead went from 2
+// to 8 and stayed at 7-8 for 12 s of play, and the game predicted its poses
+// 152 ms ahead (about 65 ms without Frame Generation). The lead holds across
+// them. The game ends its frames a period after the time it is told, as Star
+// Citizen does, and renders for that time. Just in time, then with frames
+// written after each real frame.
+void TestLoadingFramesDoNotRaiseLead() {
+    const std::string name =
+        std::string("loading frames keep the lead") + (g_jit ? "" : ", written after each real frame");
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    if (g_jit) {
+        StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2, app, runtime, owned);
+    } else {
+        StartThreaded(presenter, gpu, FrameGenMultiplier::k2);
+        owned = std::make_unique<App>(presenter, runtime);
+        app = owned.get();
+    }
+    app->end_offset_periods = 1;
+    for (int i = 0; i < 3; ++i) app->Frame();
+    RunWork(*app, 2000ms, kLightWork);
+    const FrameGenStatus settled = presenter.Status();
+    Check(settled.threaded, name + ": the presenter thread runs");
+    // Each loading frame ends three refreshes after its own refresh was due.
+    std::uint32_t peak = settled.lead_slots;
+    app->before_begin = [&] {
+        const std::uint32_t lead = presenter.Status().lead_slots;
+        peak = std::max(peak, lead);
+        SleepPrecise(std::chrono::steady_clock::now() + std::chrono::nanoseconds((lead + 3) * kPeriod));
+    };
+    const auto loading = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - loading < 1500ms) app->Frame(false);
+    app->before_begin = nullptr;
+    const FrameGenStatus loaded = presenter.Status();
+    // The game's frames again: the lead each is told, and how far past the
+    // runtime's newest display time it renders (in refreshes).
+    std::uint32_t lead = 0;
+    double horizon = 0.0;
+    for (int i = 0; i < 20; ++i) {
+        const XrFrameState state = app->Wait();
+        {
+            std::scoped_lock lock(g_xr_mutex);
+            const XrTime rendered_for =
+                state.predictedDisplayTime + state.predictedDisplayPeriod * app->end_offset_periods;
+            horizon = std::max(horizon, static_cast<double>(rendered_for - runtime.clock_floor) /
+                                            static_cast<double>(kPeriod));
+        }
+        lead = std::max(lead, presenter.Status().lead_slots);
+        app->Begin();
+        SleepPrecise(std::chrono::steady_clock::now() + kLightWork[0]);
+        app->Release();
+        Check(XR_SUCCEEDED(app->End(state.predictedDisplayTime)), name + ": end");
+    }
+    presenter.Stop();
+    std::cerr << "  " << name << ": lead " << settled.lead_slots << " -> " << peak << " loading ("
+              << loaded.late_cpu - settled.late_cpu << " late) -> " << lead << " after, horizon " << horizon
+              << " refreshes" << std::endl;
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    Check(loaded.late_cpu - settled.late_cpu >= 8, name + ": the loading frames came late");
+    Check(lead <= settled.lead_slots + 1, name + ": loading frames do not raise the lead (" +
+                                              std::to_string(settled.lead_slots) + " -> " + std::to_string(peak) +
+                                              " loading, " + std::to_string(lead) + " after)");
+    Check(horizon <= settled.lead_slots + 1.0,
+          name + ": the game renders no further ahead after loading (" + std::to_string(horizon) + " refreshes, lead " +
+              std::to_string(settled.lead_slots) + ")");
+}
+
 // A game showing its last frame (stalled): its exact copy is written once,
 // then the runtime shows the output images' newest again each refresh.
 void TestSkipIdenticalExactCopies() {
@@ -9048,6 +9122,11 @@ int main(int argc, char** argv) {
     RUN(TestLeadAfterRepeatedHitches);
     RUN(TestPassedOverFramesKeepLead);
     RUN(TestLeadFollowsLoweredCap);
+    for (const bool jit : {true, false}) {
+        g_jit = jit;
+        RUN(TestLoadingFramesDoNotRaiseLead);
+    }
+    g_jit = false;
     if (!policy) {
         RunPolicyTests();
     } else {
