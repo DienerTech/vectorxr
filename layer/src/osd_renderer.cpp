@@ -654,8 +654,8 @@ const XrCompositionLayerBaseHeader* OsdRenderer::Append(const XrFrameEndInfo& in
                 if (raster_completed_->generation==raster_generation_) upload_=std::move(raster_completed_);
                 raster_completed_.reset(); raster_requested_=false;
             }
-            // The interval runs from the request, so the raster and upload
-            // time do not stretch it (from the upload, 20 Hz refreshed at
+            // The interval is not timed from the upload, so the raster and
+            // upload time do not stretch it (that way 20 Hz refreshed at
             // about 10 Hz).
             const auto period=std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(1.0/settings_.update_hz));
             const bool due=now-updated_>=period;
