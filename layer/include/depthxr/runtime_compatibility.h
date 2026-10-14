@@ -55,5 +55,11 @@ bool ShouldRetryWithoutInjectedEyeGaze(bool injected_request, bool extension_rel
 
 std::chrono::milliseconds QuadViewsRecoveryStabilizationDelay(std::string_view runtime_name);
 bool ResolveQuadViewsSessionActive(bool configured_active, std::optional<bool> session_latched_active);
+// Why a session with Quadviews on began in stereo, for its log line. An
+// application can select quad views when it enabled XR_VARJO_quad_views (or
+// XR_VARJO_foveated_rendering) or uses OpenXR 1.1, where the foveated-inset
+// configuration is core; offered is whether the view configurations it listed
+// included it.
+std::string_view QuadViewsInactiveReason(bool application_can_select_quad_views, bool quad_views_offered);
 
 } // namespace depthxr

@@ -1478,6 +1478,10 @@ class OpenXrLayer {
     std::optional<std::uint64_t> last_composition_topology_signature_;
     bool quad_views_extension_requested_{false};
     bool varjo_foveated_rendering_extension_requested_{false};
+    // Either extension above, or OpenXR 1.1 (where the foveated inset is core).
+    bool application_can_select_quad_views_{false};
+    // The last xrEnumerateViewConfigurations listed the foveated inset.
+    bool quad_view_configuration_offered_{false};
     bool d3d11_graphics_extension_requested_{false};
     // XR_KHR_D3D12_enable is enabled on the instance (the Direct3D 11 bridge needs it).
     bool d3d12_extension_enabled_{false};

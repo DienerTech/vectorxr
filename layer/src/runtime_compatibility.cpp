@@ -141,4 +141,17 @@ bool ResolveQuadViewsSessionActive(bool configured_active, std::optional<bool> s
     return session_latched_active.value_or(configured_active);
 }
 
+std::string_view QuadViewsInactiveReason(bool application_can_select_quad_views, bool quad_views_offered) {
+    if (!application_can_select_quad_views) {
+        return "The application did not enable XR_VARJO_quad_views (in DCS: Options > VR > Use Quad View), so it "
+               "cannot select quad views; restarting alone will not change this.";
+    }
+    if (!quad_views_offered) {
+        return "The foveated-inset configuration was not offered when the application listed view configurations; "
+               "if quadviews was enabled after the app started, restart the app.";
+    }
+    return "The application could select quad views and was offered the foveated-inset configuration, but chose "
+           "stereo; check its own quad-view setting.";
+}
+
 } // namespace depthxr

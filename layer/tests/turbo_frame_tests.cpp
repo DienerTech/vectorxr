@@ -306,6 +306,20 @@ class TurboFrameTestPeer {
         std::scoped_lock lock(layer.mutex_);
         return layer.BuildOsdSnapshot();
     }
+    // The OSD's modules line for a Quadviews session, before it begins
+    // (nullopt) or once it has begun with `begun`.
+    static std::string QuadViewsSessionModules(std::optional<XrViewConfigurationType> begun) {
+        OpenXrLayer& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.quadviews_session_active_ = true;
+        layer.has_active_primary_view_configuration_ = begun.has_value();
+        layer.active_primary_view_configuration_type_ = begun.value_or(XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO);
+        std::string modules = layer.BuildOsdSnapshot().modules;
+        layer.quadviews_session_active_ = false;
+        layer.has_active_primary_view_configuration_ = false;
+        layer.active_primary_view_configuration_type_ = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+        return modules;
+    }
 
     static XrResult ForwardEndFrame(XrSession session, const XrFrameEndInfo* frame_end_info) {
         OpenXrLayer& layer = Layer();
@@ -2070,6 +2084,41 @@ std::size_t Occurrences(const std::string& text, const std::string& needle) {
     return count;
 }
 
+// --- Quadviews sessions that began in stereo -------------------------------------
+
+// Why a session with Quadviews on began in stereo. A game that did not enable
+// XR_VARJO_quad_views (DCS without Use Quad View) cannot select quad views, so
+// restarting it alone changes nothing; the restart advice is for a game that
+// could select them but was not offered them.
+void TestQuadViewsInactiveReasons() {
+    const std::string not_enabled(depthxr::QuadViewsInactiveReason(false, true));
+    Expect(not_enabled.find("did not enable XR_VARJO_quad_views") != std::string::npos &&
+               not_enabled.find("restarting alone will not change this") != std::string::npos &&
+               depthxr::QuadViewsInactiveReason(false, false) == not_enabled,
+           "A game that cannot select quad views was not told so");
+    const std::string not_offered(depthxr::QuadViewsInactiveReason(true, false));
+    Expect(not_offered.find("not offered") != std::string::npos && not_offered.find("restart the app") != std::string::npos,
+           "A game that was not offered quad views lost the restart advice");
+    const std::string chose_stereo(depthxr::QuadViewsInactiveReason(true, true));
+    Expect(chose_stereo.find("chose stereo") != std::string::npos && chose_stereo.find("restart") == std::string::npos,
+           "A game that was offered quad views and chose stereo was told to restart");
+}
+
+// The OSD tags Quadviews only while quad views can be rendered: before the
+// session begins, or once it began with the foveated inset. A Quadviews session
+// that began in stereo is not tagged.
+void TestQuadViewsOsdTagFollowsBegunConfiguration() {
+    using Peer = depthxr::TurboFrameTestPeer;
+    const auto tagged = [](std::optional<XrViewConfigurationType> begun) {
+        return Peer::QuadViewsSessionModules(begun).find("Quadviews") != std::string::npos;
+    };
+    Expect(tagged(std::nullopt), "A Quadviews session was not tagged before it began");
+    Expect(tagged(XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET),
+           "A session that began with the foveated inset was not tagged Quadviews");
+    Expect(!tagged(XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO),
+           "A Quadviews session that began in stereo was tagged Quadviews");
+}
+
 // --- Native Varjo foveation diagnostics ------------------------------------------
 
 // The focus views' FOV a fake Varjo runtime locates for every display time.
@@ -2277,6 +2326,8 @@ int main() {
     TestSequencedStallPolicySuspends();
     Expect(depthxr::TurboFrameTestPeer::OsdStateTransitions(), "OSD lost enabled/off Turbo or applied/ready/disabled Pivot state");
     TestVarjoNativeSubmittedFocusCountsEveryFrame();
+    TestQuadViewsInactiveReasons();
+    TestQuadViewsOsdTagFollowsBegunConfiguration();
     // Last: it points the layer's log at a file of its own.
     TestConfigWarningsLoggedOncePerKey();
     std::cout << "depthxr_turbo_frame_tests passed\n";

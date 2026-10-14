@@ -1,13 +1,23 @@
 #include "depthxr/openxr_layer.h"
 
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <set>
 #include <stdexcept>
+#include <string>
+#include <Windows.h>
 
 namespace {
 void Expect(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
+std::size_t Occurrences(const std::string& text, const std::string& needle) {
+    std::size_t count = 0;
+    for (auto at = text.find(needle); at != std::string::npos; at = text.find(needle, at + needle.size())) ++count;
+    return count;
+}
 template<class T> T Handle(uintptr_t n) { return reinterpret_cast<T>(n); }
 const auto instance = Handle<XrInstance>(1);
 const auto session = Handle<XrSession>(2);
@@ -197,6 +207,17 @@ public:
         l.UpdateEyeGazeResources(previous);
     }
     static bool Ready() { return Layer().eye_gaze_resources_ready_; }
+    static void WithoutGazeExtension() { Layer().eye_gaze_extension_enabled_ = false; }
+    // Logs to a file of its own at `path`; a second call lets the first go.
+    static void LogTo(const std::filesystem::path& path) { Layer().logger_.Initialize(path); }
+    // The log so far: an error reaches the file at once, with everything
+    // logged before it.
+    static std::string Log() {
+        static int reads = 0;
+        Layer().logger_.Error("Eye-gaze tests: log read " + std::to_string(++reads) + ".");
+        std::ifstream stream(Layer().logger_.ActiveLogPath(), std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(stream), {});
+    }
 };
 }
 
@@ -334,6 +355,22 @@ int main() {
         Peer::Track(Mode::Eye); Peer::Track(Mode::Head); Peer::Track(Mode::Eye); runtime_gaze_active = true;
         Expect(!Peer::Ready() && !Peer::Gaze() && attachments == 1 && suggestions == 1 && runtime_sets.size() == 1,
                "Head -> Eye after an attachment without gaze must not create an unattachable set");
+
+        // Without XR_EXT_eye_gaze_interaction downstream, a switch to Eye says
+        // once that gaze is unavailable; settings reloads that keep Eye tracked
+        // neither retry nor log a tracking-mode change.
+        const auto logs = std::filesystem::temp_directory_path() /
+                          ("vectorxr-eye-gaze-tests-" + std::to_string(GetCurrentProcessId()));
+        std::filesystem::remove_all(logs);
+        Peer::Prepare(); Peer::WithoutGazeExtension(); Peer::LogTo(logs / "eye-gaze.log");
+        Peer::Track(Mode::Head); Peer::Track(Mode::Eye); Peer::Track(Mode::Eye); Peer::Track(Mode::Eye);
+        const std::string text = Peer::Log();
+        Expect(Occurrences(text, "is not enabled downstream") == 1 &&
+                   Occurrences(text, "after quadviews tracking-mode change") == 1 && !Peer::Ready(),
+               "settings reloads without the eye-gaze extension must not retry gaze or log a mode change");
+        Peer::LogTo(logs / "eye-gaze.log");
+        std::error_code error;
+        std::filesystem::remove_all(logs, error);
         std::cout << "Eye-gaze handshake tests passed.\n";
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

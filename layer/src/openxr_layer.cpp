@@ -1951,6 +1951,9 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
 
         std::ostringstream stream;
         const XrVersion api_version = create_info->applicationInfo.apiVersion;
+        application_can_select_quad_views_ = quad_views_extension_requested_ ||
+                                             varjo_foveated_rendering_extension_requested_ ||
+                                             api_version >= XR_MAKE_VERSION(1, 1, 0);
         stream << "Application=" << create_info->applicationInfo.applicationName << ", Engine="
                << create_info->applicationInfo.engineName
                << ", AppVersion=" << create_info->applicationInfo.applicationVersion
@@ -2839,9 +2842,10 @@ XrResult OpenXrLayer::BeginSession(XrSession session, const XrSessionBeginInfo* 
                                                              : "stereo-composite emulation)."));
         } else {
             logger_.Info(
-                "Quadviews INACTIVE (application began a STEREO session; it did not select the foveated-inset "
-                "configuration). If you expected quadviews, this usually means the app must be restarted after "
-                "enabling quadviews.");
+                std::string("Quadviews INACTIVE (application began a STEREO session; it did not select the "
+                            "foveated-inset configuration). ") +
+                std::string(QuadViewsInactiveReason(application_can_select_quad_views_,
+                                                    quad_view_configuration_offered_)));
         }
     }
     return result;
@@ -3267,6 +3271,9 @@ XrResult OpenXrLayer::EnumerateViewConfigurations(XrInstance instance,
             exposed_types.insert(exposed_types.begin(), quad_type);
         }
     }
+    quad_view_configuration_offered_ =
+        std::find(exposed_types.begin(), exposed_types.end(),
+                  XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET) != exposed_types.end();
 
     if (quadviews_active && !has_logged_quadviews_view_configuration_capabilities_) {
         std::ostringstream stream;
@@ -10240,7 +10247,10 @@ OsdSnapshot OpenXrLayer::BuildOsdSnapshot() const {
     if (resolved_settings_.core.enabled && resolved_settings_.pivotxr.enabled) add("Pivot");
     if (turbo_enabled) add("Turbo");
     if (framegen_owns_pacing_.load(std::memory_order_acquire)) add("Frame Gen");
-    if (quadviews_session_active_.value_or(false)) add("Quadviews");
+    // A session that began in stereo renders no quad views, though the module is on.
+    if (quadviews_session_active_.value_or(false) &&
+        (!has_active_primary_view_configuration_ ||
+         IsQuadViewConfiguration(active_primary_view_configuration_type_))) add("Quadviews");
     const FrameGenOsdText framegen=framegen_.OsdDescription();
     snapshot.framegen=framegen.row;
     snapshot.compact_framegen=framegen.compact;
@@ -10839,6 +10849,8 @@ void OpenXrLayer::ResetInstanceState() {
     application_eye_gaze_binding_chain_unsupported_ = false;
     quad_views_extension_requested_ = false;
     varjo_foveated_rendering_extension_requested_ = false;
+    application_can_select_quad_views_ = false;
+    quad_view_configuration_offered_ = false;
     d3d11_graphics_extension_requested_ = false;
     d3d12_extension_enabled_ = false;
     vulkan_enable_version_ = 0;
@@ -11149,14 +11161,23 @@ void OpenXrLayer::UpdateEyeGazeResources(QuadViewsTrackingMode previous_mode) {
     const bool wants_eye_gaze =
         emulation_active && resolved_settings_.quadviews.tracking_mode == QuadViewsTrackingMode::Eye;
     const bool attachment_completed = eye_gaze_action_set_attachment_.SessionAttachmentCompleted();
+    const bool switched_to_eye = previous_mode != QuadViewsTrackingMode::Eye;
     if (wants_eye_gaze && active_session_ != XR_NULL_HANDLE && !eye_gaze_resources_ready_) {
         if (!eye_gaze_extension_enabled_ || !attachment_completed) {
-            const XrResult eye_gaze_result = CreateEyeGazeResources(active_session_);
-            if (XR_FAILED(eye_gaze_result)) {
-                logger_.Info("Eye gaze resources unavailable after quadviews tracking-mode change; head/static focus remains active.");
-                DestroyEyeGazeResources();
+            // Without XR_EXT_eye_gaze_interaction creation cannot succeed, and
+            // xrCreateSession or the switch to Eye has said so: a settings
+            // reload that keeps Eye tracked neither retries nor logs it again.
+            if (eye_gaze_extension_enabled_ || switched_to_eye) {
+                const XrResult eye_gaze_result = CreateEyeGazeResources(active_session_);
+                if (XR_FAILED(eye_gaze_result)) {
+                    if (switched_to_eye) {
+                        logger_.Info("Eye gaze resources unavailable after quadviews tracking-mode change; "
+                                     "head/static focus remains active.");
+                    }
+                    DestroyEyeGazeResources();
+                }
             }
-        } else if (previous_mode != QuadViewsTrackingMode::Eye) {
+        } else if (switched_to_eye) {
             logger_.Info("Eye-tracked quadviews focus takes effect after the game restarts: this session attached "
                          "its OpenXR actions without VectorXR's eye-gaze action set; head/static focus remains active.");
         }
