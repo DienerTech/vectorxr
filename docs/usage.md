@@ -1132,8 +1132,8 @@ excludes the paused interval. File writes run in the background.
 ![VectorXR OpenXR Layer Manager tab](screenshots/openxr-layer-manager.jpg)
 
 The **OpenXR Layers** tab manages the implicit API layers installed on your system across the
-four Windows registry slices (Machine-wide / Per-user × 64-bit / 32-bit — *Machine-wide 64-bit*
-is the recommended one for most PCVR). For each layer you can see its name, path, and signature
+three Windows registry slices (Machine-wide 64-bit, Machine-wide 32-bit, and Per-user, which
+64-bit and 32-bit apps share — *Machine-wide 64-bit* is the recommended one for most PCVR). For each layer you can see its name, path, and signature
 status, and you can enable, disable, reorder, or remove its registry registration.
 Signature verification is optional: Refresh on this page requests it, with a
 four-second limit per binary; startup readiness does not wait for verification. Removal asks

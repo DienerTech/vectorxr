@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { clearTurboFaultLogs, clearTurboSafetyBlock, loadRuntimeStatus, type RuntimeStatusEnvelope } from '../../lib/commands'
+import { errorText } from '../../lib/errors'
 
 import DefaultProfileExclusions from '../DefaultProfileExclusions.vue'
 import ModuleBindingPage from '../ModuleBindingPage.vue'
@@ -57,7 +58,7 @@ async function clearSafety(fingerprint: string) {
     runtimeStatus.value = await loadRuntimeStatus()
     recoveryError.value = ''
   } catch (error) {
-    recoveryError.value = error instanceof Error ? error.message : String(error)
+    recoveryError.value = errorText(error, String(error))
   } finally { clearing.value = null }
 }
 async function clearFaultLogs() {
@@ -69,7 +70,7 @@ async function clearFaultLogs() {
     runtimeStatus.value = await loadRuntimeStatus()
     recoveryError.value = ''
   } catch (error) {
-    recoveryError.value = error instanceof Error ? error.message : String(error)
+    recoveryError.value = errorText(error, String(error))
   } finally { clearingLogs.value = false }
 }
 let recoveryPoll: ReturnType<typeof setTimeout> | undefined

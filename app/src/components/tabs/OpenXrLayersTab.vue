@@ -15,6 +15,7 @@ import {
   type OpenXrLayerSignatureStatus,
   type OpenXrLayerSnapshot,
 } from '../../lib/commands'
+import { errorText } from '../../lib/errors'
 
 const props = defineProps<{
   snapshot: OpenXrLayerSnapshot | null
@@ -47,7 +48,8 @@ const vectorQuadWarning = computed(() => {
   const warnings: string[] = []
 
   for (const slice of props.snapshot?.slices ?? []) {
-    const vector = slice.layers.find((layer) => layer.isVectorXr)
+    const vector = slice.layers.find((layer) => layer.isVectorXr && layer.enabled)
+      ?? slice.layers.find((layer) => layer.isVectorXr)
     const quad = slice.layers.find(isQuadViewsLayer)
 
     if (vector && quad && vector.order < quad.order) {
@@ -89,7 +91,7 @@ async function unlockMachineWrites() {
     emit('status', 'Machine-wide OpenXR layer writes are unlocked for this app session.')
     await nextTick()
   } catch (error) {
-    emit('status', error instanceof Error ? error.message : 'Administrator approval was not granted')
+    emit('status', errorText(error, 'Administrator approval was not granted'))
   } finally {
     unlockingMachineWrites.value = false
   }
@@ -110,12 +112,13 @@ async function toggleLayer(slice: OpenXrLayerRegistrySliceId, layer: OpenXrLayer
   }
 
   try {
+    // The backend reads the registry after the change is written, so show
+    // what it found: a write that did not take shows as such.
     const nextSnapshot = await setOpenXrLayerEnabled(slice, layer.manifestPath, !layer.enabled)
-    const visibleSnapshot = applyLayerEnabled(nextSnapshot, slice, layer.manifestPath, !layer.enabled)
-    emit('snapshotUpdated', visibleSnapshot)
-    updateSelectedLayer(visibleSnapshot, slice, layer.manifestPath)
+    emit('snapshotUpdated', nextSnapshot)
+    updateSelectedLayer(nextSnapshot, slice, layer.manifestPath)
   } catch (error) {
-    emit('status', error instanceof Error ? error.message : 'Failed to update OpenXR layer')
+    emit('status', errorText(error, 'Failed to update OpenXR layer'))
     queueRefresh()
   } finally {
     busyKey.value = null
@@ -138,13 +141,10 @@ async function moveLayer(slice: OpenXrLayerRegistrySliceId, layer: OpenXrLayerEn
 
   try {
     const nextSnapshot = await moveOpenXrLayer(slice, layer.manifestPath, direction)
-    const visibleSnapshot = findLayer(nextSnapshot, slice, layer.manifestPath)?.order === layer.order
-      ? applyLayerMove(nextSnapshot, slice, layer.manifestPath, direction)
-      : nextSnapshot
-    emit('snapshotUpdated', visibleSnapshot)
-    updateSelectedLayer(visibleSnapshot, slice, layer.manifestPath)
+    emit('snapshotUpdated', nextSnapshot)
+    updateSelectedLayer(nextSnapshot, slice, layer.manifestPath)
   } catch (error) {
-    emit('status', error instanceof Error ? error.message : 'Failed to reorder OpenXR layer')
+    emit('status', errorText(error, 'Failed to reorder OpenXR layer'))
     queueRefresh()
   } finally {
     busyKey.value = null
@@ -189,7 +189,7 @@ async function confirmLayerDeletion() {
     emit('status', `Removed "${layer.layerName}" from ${activeSlice.value?.label ?? 'the OpenXR registry'}.`)
     emit('refresh')
   } catch (error) {
-    emit('status', error instanceof Error ? error.message : 'Failed to remove OpenXR layer registration')
+    emit('status', errorText(error, 'Failed to remove OpenXR layer registration'))
     queueRefresh()
   } finally {
     busyKey.value = null
@@ -204,7 +204,7 @@ async function openFolder(path: string | undefined) {
   try {
     await openFileDirectory(path)
   } catch (error) {
-    emit('status', error instanceof Error ? error.message : 'Unable to open folder')
+    emit('status', errorText(error, 'Unable to open folder'))
   }
 }
 

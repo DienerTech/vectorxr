@@ -6,6 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -1750,27 +1751,27 @@ fn write_text_safely(path: &Path, content: &str) -> Result<(), String> {
         return Err(error.to_string());
     }
 
-    match fs::rename(&temporary_path, path) {
-        Ok(()) => Ok(()),
-        Err(first_error) => {
-            if path.exists() {
-                fs::remove_file(path).map_err(|error| {
-                    let _ = fs::remove_file(&temporary_path);
-                    format!(
-                        "Unable to replace {}: {}; original rename error: {}",
-                        path.to_string_lossy(),
-                        error,
-                        first_error
-                    )
-                })?;
-
-                fs::rename(&temporary_path, path).map_err(|error| {
-                    let _ = fs::remove_file(&temporary_path);
-                    error.to_string()
-                })
-            } else {
+    // Replacing fails for a moment while another process has either file open
+    // without delete sharing: the layer reloading the settings, or an
+    // antivirus scanning the file just written. Retry briefly, and never
+    // delete the original first: the old fallback did, and when the replace
+    // then failed again (the scan still running) both files were gone.
+    const REPLACE_ATTEMPTS: u32 = 20;
+    const REPLACE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(25);
+    let mut attempt = 1;
+    loop {
+        match fs::rename(&temporary_path, path) {
+            Ok(()) => return Ok(()),
+            Err(_) if attempt < REPLACE_ATTEMPTS => {
+                attempt += 1;
+                std::thread::sleep(REPLACE_RETRY_DELAY);
+            }
+            Err(error) => {
                 let _ = fs::remove_file(&temporary_path);
-                Err(first_error.to_string())
+                return Err(format!(
+                    "Unable to replace {}: {error}",
+                    path.to_string_lossy()
+                ));
             }
         }
     }
@@ -1976,9 +1977,13 @@ fn load_config() -> Result<ConfigEnvelope, String> {
     let path = resolve_config_path();
     ensure_default_file(&path)?;
 
-    let content = fs::read_to_string(&path).map_err(|error| error.to_string())?;
+    // Name the file: the app shows this text, and a JSON error's line and
+    // column mean nothing without it.
+    let content = fs::read_to_string(&path)
+        .map_err(|error| format!("Unable to read {}: {error}", path.to_string_lossy()))?;
     let config = normalize_config(
-        serde_json::from_str::<VectorXRConfig>(&content).map_err(|error| error.to_string())?,
+        parse_config(&content)
+            .map_err(|error| format!("Unable to parse {}: {error}", path.to_string_lossy()))?,
     );
 
     Ok(ConfigEnvelope {
@@ -1987,14 +1992,88 @@ fn load_config() -> Result<ConfigEnvelope, String> {
     })
 }
 
+// The layer reads a whole number written as a float (a hand-edited
+// "opacity": 90.0) into its integer settings; serde rejects it for the app's
+// u32 fields, so the app could not open a config the layer runs with. Such
+// numbers are read as integers on a second try; float fields take integers
+// unchanged. The first try's error is returned, as it carries the line and
+// column.
+fn parse_config(content: &str) -> Result<VectorXRConfig, serde_json::Error> {
+    fn whole_floats_as_integers(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Number(number) if number.is_f64() => {
+                let float = number.as_f64().unwrap_or(f64::NAN);
+                if float.fract() == 0.0 && float.abs() <= 9_007_199_254_740_992.0 {
+                    *value = serde_json::Value::from(float as i64);
+                }
+            }
+            serde_json::Value::Array(items) => items.iter_mut().for_each(whole_floats_as_integers),
+            serde_json::Value::Object(fields) => {
+                fields.values_mut().for_each(whole_floats_as_integers)
+            }
+            _ => {}
+        }
+    }
+
+    let error = match serde_json::from_str::<VectorXRConfig>(content) {
+        Ok(config) => return Ok(config),
+        Err(error) => error,
+    };
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(content) else {
+        return Err(error);
+    };
+    whole_floats_as_integers(&mut value);
+    serde_json::from_value::<VectorXRConfig>(value).map_err(|_| error)
+}
+
+// Copies a config the app cannot parse to settings.unreadable-<ms>.json
+// before it is replaced. The pre-0.16 backup is written once, so it does not
+// hold a later hand edit (a JSON slip, or a value of the wrong type).
+fn preserve_unreadable_config(path: &Path) -> Result<Option<PathBuf>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let readable = fs::read_to_string(path)
+        .ok()
+        .is_some_and(|content| parse_config(&content).is_ok());
+    if readable {
+        return Ok(None);
+    }
+
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("settings");
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("json");
+    let preserved = path.with_file_name(format!(
+        "{stem}.unreadable-{}.{extension}",
+        unix_milliseconds()
+    ));
+    fs::copy(path, &preserved).map_err(|error| {
+        format!(
+            "Unable to keep a copy of the unreadable config at {}: {error}",
+            preserved.to_string_lossy()
+        )
+    })?;
+    Ok(Some(preserved))
+}
+
+fn write_config_document(path: &Path, content: &str) -> Result<(), String> {
+    preserve_unreadable_config(path)?;
+    ensure_config_backup(path)?;
+    write_text_safely(path, content)
+}
+
 #[tauri::command]
 fn save_config(config: VectorXRConfig) -> Result<String, String> {
     let path = resolve_config_path();
 
     let content = serde_json::to_string_pretty(&normalize_config(config))
         .map_err(|error| error.to_string())?;
-    ensure_config_backup(&path)?;
-    write_text_safely(&path, &content)?;
+    write_config_document(&path, &content)?;
     Ok(path.to_string_lossy().into_owned())
 }
 
@@ -2006,8 +2085,7 @@ fn reset_stored_data() -> Result<ResetStoredDataEnvelope, String> {
 
     let config_content =
         serde_json::to_string_pretty(&config).map_err(|error| error.to_string())?;
-    ensure_config_backup(&config_path)?;
-    write_text_safely(&config_path, &config_content)?;
+    write_config_document(&config_path, &config_content)?;
 
     let seen_apps_content = serde_json::to_string_pretty(&SeenAppsDocument {
         version: 1,
@@ -2037,9 +2115,22 @@ async fn load_gpu_capabilities() -> gpu_capabilities::GpuCapabilities {
         })
 }
 
+// Tauri runs a command that is not async on the app's main thread, which
+// also runs the window: enumerating DirectInput devices (about 240 ms, every
+// 5 s while a device binding is shown), a UAC prompt with its elevated helper
+// (up to 120 s), or a sound preview froze the whole app. These run on a
+// blocking worker instead.
+async fn run_blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|error| error.to_string())?
+}
+
 #[tauri::command]
-fn list_input_devices() -> Result<Vec<input_devices::InputDeviceInfo>, String> {
-    input_devices::list_input_devices()
+async fn list_input_devices() -> Result<Vec<input_devices::InputDeviceInfo>, String> {
+    run_blocking(input_devices::list_input_devices).await
 }
 
 #[tauri::command]
@@ -2586,8 +2677,49 @@ fn read_turbo_recovery() -> Vec<serde_json::Value> {
     records
 }
 
+// The layer rewrites a live session's status file every second, so a file
+// last written well before the freshness window cannot hold a live session
+// and is not read at all.
+const RUNTIME_STATUS_UNREAD_AGE: Duration =
+    Duration::from_millis(RUNTIME_STATUS_FRESHNESS_MILLISECONDS + 10_000);
+// Status and control files of sessions that ended without OpenXR teardown
+// (every Star Citizen and MSFS exit; a hard shutdown can leave one
+// zero-filled) are deleted once this old. Export Debug still gets recent ones.
+const STALE_RUNTIME_RELAY_FILE_AGE: Duration = Duration::from_secs(3 * 24 * 60 * 60);
+static RUNTIME_RELAY_PRUNED: std::sync::Once = std::sync::Once::new();
+
+fn file_age(metadata: &fs::Metadata) -> Option<Duration> {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+}
+
+fn prune_stale_runtime_relay_files(directory: &Path, max_age: Duration) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if metadata.is_file() && file_age(&metadata).is_some_and(|age| age > max_age) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
 fn read_live_runtime_statuses() -> Vec<RuntimeStatusDocument> {
-    let status_directory = resolve_runtime_relay_root().join("status");
+    let relay = resolve_runtime_relay_root();
+    RUNTIME_RELAY_PRUNED.call_once(|| {
+        for directory in ["status", "control"] {
+            prune_stale_runtime_relay_files(&relay.join(directory), STALE_RUNTIME_RELAY_FILE_AGE);
+        }
+    });
+    read_live_runtime_statuses_in(&relay.join("status"))
+}
+
+fn read_live_runtime_statuses_in(status_directory: &Path) -> Vec<RuntimeStatusDocument> {
     let Ok(entries) = fs::read_dir(status_directory) else {
         return Vec::new();
     };
@@ -2597,6 +2729,14 @@ fn read_live_runtime_statuses() -> Vec<RuntimeStatusDocument> {
         .filter_map(|entry| {
             let path = entry.path();
             if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                return None;
+            }
+            if entry
+                .metadata()
+                .ok()
+                .and_then(|metadata| file_age(&metadata))
+                .is_some_and(|age| age > RUNTIME_STATUS_UNREAD_AGE)
+            {
                 return None;
             }
             let content = fs::read_to_string(&path).ok()?;
@@ -2700,34 +2840,35 @@ async fn load_openxr_layers(
 }
 
 #[tauri::command]
-fn ensure_openxr_layer_elevation() -> Result<(), String> {
-    openxr_layers::ensure_openxr_layer_elevation()
+async fn ensure_openxr_layer_elevation() -> Result<(), String> {
+    run_blocking(openxr_layers::ensure_openxr_layer_elevation).await
 }
 
 #[tauri::command]
-fn set_openxr_layer_enabled(
+async fn set_openxr_layer_enabled(
     slice: String,
     manifest_path: String,
     enabled: bool,
 ) -> Result<openxr_layers::OpenXrLayerSnapshot, String> {
-    openxr_layers::set_openxr_layer_enabled(slice, manifest_path, enabled)
+    run_blocking(move || openxr_layers::set_openxr_layer_enabled(slice, manifest_path, enabled))
+        .await
 }
 
 #[tauri::command]
-fn move_openxr_layer(
+async fn move_openxr_layer(
     slice: String,
     manifest_path: String,
     direction: openxr_layers::MoveDirection,
 ) -> Result<openxr_layers::OpenXrLayerSnapshot, String> {
-    openxr_layers::move_openxr_layer(slice, manifest_path, direction)
+    run_blocking(move || openxr_layers::move_openxr_layer(slice, manifest_path, direction)).await
 }
 
 #[tauri::command]
-fn delete_openxr_layer(
+async fn delete_openxr_layer(
     slice: String,
     manifest_path: String,
 ) -> Result<openxr_layers::OpenXrLayerSnapshot, String> {
-    openxr_layers::delete_openxr_layer(slice, manifest_path)
+    run_blocking(move || openxr_layers::delete_openxr_layer(slice, manifest_path)).await
 }
 
 // Loads a WAV into memory and scales 16-bit PCM samples by `gain`. Returns None
@@ -2786,7 +2927,17 @@ fn load_and_scale_wav(path: &Path, gain: f32) -> Option<Vec<u8>> {
 /// path falls back to the bundled default for the given transition; `volume`
 /// (0-100) scales the preview to match the configured level.
 #[tauri::command]
-fn play_test_sound(
+async fn play_test_sound(
+    app: tauri::AppHandle,
+    path: Option<String>,
+    activate: bool,
+    volume: Option<u32>,
+    default_name: Option<String>,
+) -> Result<(), String> {
+    run_blocking(move || play_test_sound_blocking(app, path, activate, volume, default_name)).await
+}
+
+fn play_test_sound_blocking(
     app: tauri::AppHandle,
     path: Option<String>,
     activate: bool,
@@ -2839,8 +2990,8 @@ fn play_test_sound(
         let gain = (volume.unwrap_or(100).min(100) as f32) / 100.0;
 
         // Scaled in-memory playback is synchronous (no SND_ASYNC) so the buffer
-        // stays valid for the lifetime of the call; the clip is a fraction of a
-        // second, so briefly blocking this command thread is fine.
+        // stays valid for the lifetime of the call; it blocks only this worker
+        // thread, not the window.
         if let Some(image) = load_and_scale_wav(&resolved, gain) {
             let _ = unsafe {
                 PlaySoundW(
@@ -3200,6 +3351,53 @@ mod tests {
     }
 
     #[test]
+    fn runtime_status_polls_skip_and_prune_files_of_ended_sessions() {
+        let root = std::env::temp_dir().join(format!(
+            "vectorxr-relay-prune-{}-{}",
+            std::process::id(),
+            super::unix_milliseconds()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let status = |session: &str| {
+            serde_json::json!({
+                "protocolVersion": super::RUNTIME_RELAY_PROTOCOL_VERSION, "sessionId": session,
+                "processId": 1, "application": "StarCitizen.exe",
+                "updatedAtUnixMilliseconds": super::unix_milliseconds(), "acknowledgedRevision": 0,
+                "capabilities": { "quadviewsDiagnosticVisualization": false },
+                "state": { "quadviewsDiagnosticVisualization": false }
+            })
+            .to_string()
+        };
+        let age = |name: &str, seconds: u64| {
+            let file = std::fs::File::options().write(true).open(root.join(name)).unwrap();
+            file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(seconds))
+                .unwrap();
+        };
+        std::fs::write(root.join("live.json"), status("live")).unwrap();
+        // A file nobody has written for a minute is not even read, whatever
+        // it says inside.
+        std::fs::write(root.join("ended.json"), status("ended")).unwrap();
+        age("ended.json", 60);
+        std::fs::write(root.join("old.json"), status("old")).unwrap();
+        age("old.json", 4 * 24 * 60 * 60);
+        std::fs::write(root.join("zeroed.json"), vec![0u8; 512]).unwrap();
+        age("zeroed.json", 4 * 24 * 60 * 60);
+
+        let live = super::read_live_runtime_statuses_in(&root);
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].session_id, "live");
+
+        super::prune_stale_runtime_relay_files(&root, super::STALE_RUNTIME_RELAY_FILE_AGE);
+        let mut left = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        left.sort();
+        assert_eq!(left, ["ended.json", "live.json"]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     #[cfg(windows)]
     fn recovery_does_not_mistake_a_live_process_for_a_crash() {
         assert!(super::recovery_process_alive(std::process::id(), "0"));
@@ -3240,6 +3438,100 @@ mod tests {
             "pre-0.16 config"
         );
         std::fs::remove_dir_all(directory).expect("temporary directory should be removed");
+    }
+
+    #[test]
+    fn saving_over_an_unreadable_config_keeps_a_copy_of_it() {
+        let directory = std::env::temp_dir().join(format!(
+            "vectorxr-unreadable-config-{}-{}",
+            std::process::id(),
+            super::unix_milliseconds()
+        ));
+        std::fs::create_dir_all(&directory).expect("temporary directory should be created");
+        let config_path = directory.join("settings.json");
+        let saved = serde_json::to_string_pretty(&default_config()).unwrap();
+        let unreadable_files = || {
+            std::fs::read_dir(&directory)
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.file_name().to_string_lossy().contains(".unreadable-"))
+                .map(|entry| entry.path())
+                .collect::<Vec<_>>()
+        };
+
+        // A readable config is replaced without an extra copy.
+        std::fs::write(&config_path, &saved).unwrap();
+        super::write_config_document(&config_path, &saved).unwrap();
+        assert!(unreadable_files().is_empty());
+
+        // A hand edit the app cannot read (here a value of the wrong type) is
+        // kept before the app's defaults replace it.
+        let hand_edited = saved.replacen("\"opacity\": 90", "\"opacity\": \"90%\"", 1);
+        assert_ne!(hand_edited, saved, "fixture should change the OSD opacity");
+        std::fs::write(&config_path, &hand_edited).unwrap();
+        super::write_config_document(&config_path, &saved).unwrap();
+        let kept = unreadable_files();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(std::fs::read_to_string(&kept[0]).unwrap(), hand_edited);
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), saved);
+        std::fs::remove_dir_all(directory).expect("temporary directory should be removed");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn saving_waits_out_a_brief_lock_and_never_deletes_the_original() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 1;
+        let directory = std::env::temp_dir().join(format!(
+            "vectorxr-replace-{}-{}",
+            std::process::id(),
+            super::unix_milliseconds()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("settings.json");
+        std::fs::write(&path, "original").unwrap();
+        let open_without_delete_sharing = || {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(FILE_SHARE_READ)
+                .open(&path)
+                .unwrap()
+        };
+
+        // Another process reads the file for a moment (the layer reloading).
+        let reader = open_without_delete_sharing();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            drop(reader);
+        });
+        super::write_text_safely(&path, "saved").expect("the save should wait out a brief lock");
+        release.join().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "saved");
+
+        // A lock that outlasts the retries fails the save but keeps the file.
+        let reader = open_without_delete_sharing();
+        assert!(super::write_text_safely(&path, "lost").is_err());
+        drop(reader);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "saved");
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1, "no temporary file left");
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn whole_numbers_written_as_floats_load_like_the_layer_reads_them() {
+        let saved = serde_json::to_string_pretty(&default_config()).unwrap();
+        let hand_edited = saved
+            .replacen("\"opacity\": 90", "\"opacity\": 80.0", 1)
+            .replacen("\"updateHz\": 5", "\"updateHz\": 10.0", 1);
+        assert_ne!(hand_edited, saved, "fixture should change the OSD");
+        let config = super::parse_config(&hand_edited).expect("90.0-style integers should load");
+        assert_eq!(config.core.osd.opacity, 80);
+        assert_eq!(config.core.osd.update_hz, 10);
+
+        // A fraction is still an error, with the first parse's line and column.
+        let fractional = saved.replacen("\"opacity\": 90", "\"opacity\": 80.5", 1);
+        let error = super::parse_config(&fractional).unwrap_err().to_string();
+        assert!(error.contains("line"), "{error}");
     }
 
     #[test]

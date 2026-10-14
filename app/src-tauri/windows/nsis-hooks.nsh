@@ -19,12 +19,20 @@ done:
   DetailPrint "Registered VectorXR OpenXR layer manifest: $0"
 !macroend
 
-!macro NSIS_HOOK_PREUNINSTALL
-  !insertmacro VECTORXR_RESOLVE_LAYER_MANIFEST
-
-  SetRegView 64
-  DeleteRegValue HKLM "Software\Khronos\OpenXR\1\ApiLayers\Implicit" "$0"
-  DetailPrint "Unregistered VectorXR OpenXR layer manifest: $0"
+; Runs after the uninstaller has asked the user to close VectorXR and removed
+; the files. As a pre-uninstall hook it ran before that check, so Cancel there
+; left VectorXR installed but unregistered. The files are gone by now, so
+; remove every manifest location VECTORXR_RESOLVE_LAYER_MANIFEST can register.
+; An update keeps the registration, and with it VectorXR's place in the OpenXR
+; layer order; the new version's install then rewrites it in place.
+!macro NSIS_HOOK_POSTUNINSTALL
+  ${If} $UpdateMode <> 1
+    SetRegView 64
+    DeleteRegValue HKLM "Software\Khronos\OpenXR\1\ApiLayers\Implicit" "$INSTDIR\resources\vectorxr-layer\XR_APILAYER_DIENERTECH_VECTORXR.json"
+    DeleteRegValue HKLM "Software\Khronos\OpenXR\1\ApiLayers\Implicit" "$INSTDIR\vectorxr-layer\XR_APILAYER_DIENERTECH_VECTORXR.json"
+    DeleteRegValue HKLM "Software\Khronos\OpenXR\1\ApiLayers\Implicit" "$INSTDIR\resources\resources\vectorxr-layer\XR_APILAYER_DIENERTECH_VECTORXR.json"
+    DetailPrint "Unregistered the VectorXR OpenXR layer manifest from $INSTDIR"
+  ${EndIf}
 !macroend
 !include "FileFunc.nsh"
 !include "LogicLib.nsh"

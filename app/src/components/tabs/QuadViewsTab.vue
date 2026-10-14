@@ -6,6 +6,7 @@ import {
   setRuntimeQuadViewsDiagnosticVisualization,
   type RuntimeStatusSession,
 } from "../../lib/commands";
+import { errorText } from "../../lib/errors";
 
 import DefaultProfileExclusions from "../DefaultProfileExclusions.vue";
 import ModuleBindingPage from "../ModuleBindingPage.vue";
@@ -93,7 +94,7 @@ async function refreshRuntimeStatus() {
     runtimeStatusError.value = "";
   } catch (error) {
     runtimeSessions.value = [];
-    runtimeStatusError.value = error instanceof Error ? error.message : "Unable to read runtime status";
+    runtimeStatusError.value = errorText(error, "Unable to read runtime status");
   }
 }
 
@@ -117,7 +118,7 @@ async function setDiagnosticVisualization() {
     }
     throw new Error("The OpenXR session did not acknowledge the control request");
   } catch (error) {
-    runtimeStatusError.value = error instanceof Error ? error.message : "Unable to control the visualization";
+    runtimeStatusError.value = errorText(error, "Unable to control the visualization");
   } finally {
     runtimeCommandPending.value = false;
   }

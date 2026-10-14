@@ -31,8 +31,19 @@ interface BuildHealthSummaryInput {
   seenApps: SeenApplication[]
 }
 
-function findVectorXrLayer(snapshot: OpenXrLayerSnapshot | null): OpenXrLayerEntry | null {
-  return snapshot?.slices.flatMap((slice) => slice.layers).find((layer) => layer.isVectorXr) ?? null
+export function vectorXrLayers(snapshot: OpenXrLayerSnapshot | null): OpenXrLayerEntry[] {
+  return snapshot?.slices.flatMap((slice) => slice.layers).filter((layer) => layer.isVectorXr) ?? []
+}
+
+// A dev build or an old install can leave more than one VectorXR registration.
+// Report the one OpenXR apps will load: an enabled entry whose files resolve,
+// then any enabled entry, and a disabled one only when nothing is enabled.
+export function findVectorXrLayer(snapshot: OpenXrLayerSnapshot | null): OpenXrLayerEntry | null {
+  const layers = vectorXrLayers(snapshot)
+  return layers.find((layer) => layer.enabled && layer.manifestExists && layer.libraryExists)
+    ?? layers.find((layer) => layer.enabled)
+    ?? layers[0]
+    ?? null
 }
 
 function mostRecentSeenApp(seenApps: SeenApplication[]): SeenApplication | null {
@@ -41,6 +52,8 @@ function mostRecentSeenApp(seenApps: SeenApplication[]): SeenApplication | null 
 
 export function buildHealthSummary(input: BuildHealthSummaryInput): HealthSummary {
   const vectorXrLayer = findVectorXrLayer(input.openXrLayerSnapshot)
+  // A registration whose manifest is gone cannot load, so it is no duplicate.
+  const enabledVectorXrLayers = vectorXrLayers(input.openXrLayerSnapshot).filter((layer) => layer.enabled && layer.manifestExists)
   const lastSeenApp = mostRecentSeenApp(input.seenApps)
   const checks: HealthCheckItem[] = [
     {
@@ -71,6 +84,14 @@ export function buildHealthSummary(input: BuildHealthSummaryInput): HealthSummar
           ? 'The VectorXR API layer is enabled for future OpenXR launches.'
           : 'The VectorXR API layer is disabled or unavailable.',
     },
+    ...(enabledVectorXrLayers.length > 1 && !input.openXrLayersLoading
+      ? [{
+          id: 'layer-duplicates',
+          label: 'One VectorXR layer enabled',
+          state: 'fail' as const,
+          detail: `${enabledVectorXrLayers.length} VectorXR registrations are enabled (${enabledVectorXrLayers.map((layer) => layer.manifestPath).join('; ')}). OpenXR apps crash when two copies load; disable all but one on the OpenXR Layers page.`,
+        }]
+      : []),
     {
       id: 'layer-files',
       label: 'Layer files',
@@ -128,7 +149,7 @@ export function buildHealthSummary(input: BuildHealthSummaryInput): HealthSummar
     : overall === 'attention'
       ? 'VectorXR can run, but one or more diagnostics may need review.'
       : overall === 'inactive'
-        ? 'VectorXR is not currently ready to apply OpenXR Enhancements .'
+        ? 'VectorXR is not currently ready to apply OpenXR Enhancements.'
         : 'VectorXR is still collecting system status.'
 
   return {
