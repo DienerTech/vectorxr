@@ -4536,7 +4536,7 @@ void FrameGenPresenter::StartCompositorLocked(const FrameGenRuntimeCalls& calls)
     last_release_slot_.reset();
     last_offer_slot_.reset();
     auto_busy_count_ = 0;
-    auto_busy_since_ = {};
+    auto_busy_since_ = auto_end_held_from_ = auto_end_held_to_ = {};
     newest_copy_ = passthrough_copy_;
     newest_copy_id_ = 0;
     newest_copy_fresh_ = false;
@@ -4937,9 +4937,15 @@ std::optional<XrResult> FrameGenPresenter::ThreadedWaitLocked(std::unique_lock<s
     }
     // The game's own time for its last frame: since the last wait's hold for
     // the cadence ended (Auto's probes; its GPU's hold below counts as its).
+    // Not just in time, its xrEndFrame is held for its frame's slot too
+    // (ThreadedEnd): left out, or a game at 2x reads as taking at least the
+    // refresh to that slot, however light it is.
     const auto held = Clock::now() - held_from;
     if (auto_busy_since_ != Clock::time_point{} && asked > auto_busy_since_) {
-        auto_busy_[auto_busy_count_++ % auto_busy_.size()] = Milliseconds(asked - auto_busy_since_);
+        const Clock::duration end_held =
+            std::max(std::min(auto_end_held_to_, asked) - std::max(auto_end_held_from_, auto_busy_since_),
+                     Clock::duration::zero());
+        auto_busy_[auto_busy_count_++ % auto_busy_.size()] = Milliseconds(asked - auto_busy_since_ - end_held);
     }
     auto_busy_since_ = asked + held;
     // The cadence counts from the refresh it released this wait in, not from
@@ -5171,6 +5177,7 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
     // Ask for the first slot at or after the first one this frame fills.
     slot_request_ = SlotRequest{frame.id, frame.first_slot};
     WakeSlots();
+    const auto slot_asked = Clock::now();
     while (!slot_cv_.wait_for(lock, std::chrono::seconds(2), [&] {
         return !compositor_running_ || (slot_offer_ && slot_offer_->frame_id == frame.id);
     })) {
@@ -5179,6 +5186,10 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
             logger_->Error("Frame Generation: a real frame has waited 2 s for a slot (" + PresenterActivity() + ").");
         }
     }
+    // Held for the cadence, as the game's waits are: not its own time
+    // (ThreadedWaitLocked).
+    auto_end_held_from_ = slot_asked;
+    auto_end_held_to_ = Clock::now();
     if (!slot_offer_ || slot_offer_->frame_id != frame.id) {
         // The presenter thread stopped first; no runtime frame is left for
         // this one.

@@ -1160,10 +1160,14 @@ class FrameGenPresenter {
     std::uint32_t probe_from_{0};
     // Presenting from its own thread: the game's last frames' own time per
     // frame (from one wait to the next, the cadence's hold left out), ms,
-    // and when the last wait's hold ended (AutoProbeInReachLocked).
+    // and when the last wait's hold ended (AutoProbeInReachLocked). Not just
+    // in time, the game's xrEndFrame is held for its frame's slot too
+    // (ThreadedEnd): the last such hold, left out of the time it falls in.
     std::array<double, 32> auto_busy_{};
     std::size_t auto_busy_count_{0};
     std::chrono::steady_clock::time_point auto_busy_since_{};
+    std::chrono::steady_clock::time_point auto_end_held_from_{};
+    std::chrono::steady_clock::time_point auto_end_held_to_{};
     std::size_t auto_late_percent_{0}; // for the log
     // Auto never steps above this again in the session once video memory
     // ran near its budget: each step up allocates more output images.

@@ -8372,15 +8372,26 @@ void TestClockLogPairs() {
 // rate and back every 35 s, "37% / 87% of frames late", at 17-22 ms a frame
 // against 11.1 ms refreshes). Auto probes only a game within reach of the
 // step, as Dynamic does; one that gets lighter is probed and steps down.
+// Run just in time, then with frames written after each real frame, where
+// the game's xrEndFrame also waits for its frame's slot (the cadence's hold,
+// like its waits', not its own time) and hands the frame to the runtime
+// itself (3 ms here: its own time).
 void TestAutoProbesNeedRoom() {
-    const std::string name = "auto probes need room";
+    const std::string name = std::string("auto probes need room") + (g_jit ? "" : ", written after each real frame");
     FrameGenPresenter presenter;
     GpuLog gpu;
     Runtime runtime;
     runtime.paced = true;
     std::unique_ptr<App> owned;
     App* app = nullptr;
-    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kAuto, app, runtime, owned);
+    if (g_jit) {
+        StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kAuto, app, runtime, owned);
+    } else {
+        runtime.submit_sleep_us = 3000;
+        StartThreaded(presenter, gpu, FrameGenMultiplier::kAuto);
+        owned = std::make_unique<App>(presenter, runtime);
+        app = owned.get();
+    }
     presenter.SetAutoPolicy(200ms, 500ms, 600ms, 300ms);
     RunWork(*app, 2000ms, PeriodsOfWork(kPeriod, 1.6));
     const std::uint32_t settled = presenter.Status().multiplier;
@@ -9007,7 +9018,11 @@ int main(int argc, char** argv) {
     RUN(TestLowFirstClockSample);
     RUN(TestStalledClockWhilePresenting);
     RUN(TestAutoHoldsWhileClockDisplaced);
-    RUN(TestAutoProbesNeedRoom);
+    for (const bool jit : {true, false}) {
+        g_jit = jit;
+        RUN(TestAutoProbesNeedRoom);
+    }
+    g_jit = false;
     RUN(TestClockLogPairs);
     RUN(TestSteamVrMissedRefresh);
     RUN(TestLeadAfterRepeatedHitches);
