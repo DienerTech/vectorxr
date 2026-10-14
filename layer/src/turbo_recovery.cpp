@@ -173,6 +173,7 @@ void TurboRecoveryGuard::Configure(std::filesystem::path root, TurboRecoveryReco
     static std::atomic<std::uint64_t> sequence{0};
     own_path_ = root_ / (std::to_string(record_.process_id) + "-" +
         std::to_string(record_.process_created) + "-" + std::to_string(++sequence) + ".json");
+    exit_file_.Disarm();
     checked_ = armed_ = blocked_ = failed_ = false;
     interrupted_.clear();
     reason_.clear();
@@ -208,6 +209,7 @@ bool TurboRecoveryGuard::Prepare(bool enabled, bool retry, const std::string& mo
     if (!enabled) {
         record_.mode = mode;
         std::error_code ec;
+        exit_file_.Disarm();
         if (armed_) std::filesystem::remove(own_path_, ec);
         armed_ = blocked_ = failed_ = checked_ = false;
         reason_.clear();
@@ -264,8 +266,11 @@ bool TurboRecoveryGuard::Prepare(bool enabled, bool retry, const std::string& mo
         record_.mode = mode;
         record_.state = "armed";
         record_.reason.clear();
-        if (!Write()) { blocked_ = true; return false; }
+        if (!Write()) { exit_file_.Disarm(); blocked_ = true; return false; }
         armed_ = true;
+        // A normal process exit removes the marker the way OpenXR teardown
+        // would: Star Citizen and MSFS never call xrDestroySession.
+        exit_file_.Arm(own_path_);
         // Establish the new marker before clearing the evidence it supersedes.
         for (const auto& path : interrupted_) {
             // Preserve evidence before an explicit retry clears a block.
@@ -278,6 +283,8 @@ bool TurboRecoveryGuard::Prepare(bool enabled, bool retry, const std::string& mo
 
 void TurboRecoveryGuard::Fail(const std::string& reason) {
     reason_ = reason;
+    // First, so an exit while the failure is being written keeps the marker.
+    exit_file_.Disarm();
     if (root_.empty()) return;
     if (!armed_) {
         // Opt-outs still retain diagnostics without creating a persistent block.
@@ -331,12 +338,14 @@ bool TurboRecoveryGuard::ConsumeClearRequest() {
             if (std::filesystem::exists(path, ec) || ec) return false;
         }
     }
+    exit_file_.Disarm();
     checked_ = blocked_ = failed_ = armed_ = false;
     reason_.clear();
     return true;
 }
 
 void TurboRecoveryGuard::Complete() {
+    exit_file_.Disarm();
     if (armed_ && !failed_) { std::error_code ec; std::filesystem::remove(own_path_, ec); }
     armed_ = false;
     checked_ = false;

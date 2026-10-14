@@ -1,4 +1,5 @@
 #include "depthxr/turbo_recovery.h"
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -108,6 +109,57 @@ int main() {
     Expect(std::filesystem::is_empty(clear_root / "faults"), "Retry must not resurrect cleared fault history");
     still_blocked.Fail("New fault after clearing");
     Expect(!std::filesystem::is_empty(clear_root / "faults"), "New faults must still be archived");
+
+    // Star Citizen and MSFS exit without OpenXR teardown. A normal process
+    // exit (DllMain's DLL_PROCESS_DETACH) is not an interrupted run, but a
+    // crash or forced termination still is, and a failure survives any exit.
+    const auto exit_root = root / "process-exit";
+    {
+        depthxr::TurboRecoveryGuard exited;
+        exited.Configure(exit_root, identity);
+        Expect(exited.Prepare(true, false, "async", dead), "Exit scenario should arm");
+        depthxr::RemoveProcessExitFiles(); // What DllMain does at a normal exit.
+    }
+    {
+        depthxr::TurboRecoveryGuard after_exit;
+        after_exit.Configure(exit_root, identity);
+        Expect(after_exit.Prepare(true, false, "async", dead), "A normal exit without OpenXR teardown must not block Turbo");
+        // No exit and no Complete: a crash or TerminateProcess.
+    }
+    {
+        depthxr::TurboRecoveryGuard after_crash;
+        after_crash.Configure(exit_root, identity);
+        Expect(!after_crash.Prepare(true, false, "async", dead) && after_crash.Blocked(), "A crash must still block the next run");
+        Expect(after_crash.Prepare(true, true, "async", dead), "A crash block can be retried");
+        after_crash.Fail("Runtime failure before a normal exit");
+        depthxr::RemoveProcessExitFiles();
+    }
+    {
+        depthxr::TurboRecoveryGuard after_failure;
+        after_failure.Configure(exit_root, identity);
+        Expect(!after_failure.Prepare(true, false, "async", alive), "A normal exit must keep a runtime failure's marker");
+        Expect(after_failure.Prepare(true, true, "async", dead), "The failure can be retried");
+        after_failure.Prepare(false, false, "async", dead); // Watch turned off mid-run.
+        depthxr::TurboRecoveryGuard sibling;
+        sibling.Configure(exit_root, identity);
+        Expect(sibling.Prepare(true, false, "async", alive), "A second guard should arm");
+        sibling.Complete();
+        depthxr::RemoveProcessExitFiles();
+        Expect(std::none_of(std::filesystem::directory_iterator(exit_root), std::filesystem::directory_iterator(),
+                            [](const auto& entry) { return entry.path().extension() == ".json"; }),
+               "Disarmed guards must leave nothing behind");
+    }
+    {
+        depthxr::TurboRecoveryGuard after_disarm;
+        after_disarm.Configure(exit_root, identity);
+        Expect(after_disarm.Prepare(true, false, "async", dead), "Disarmed guards must not block the next run");
+        const auto own = std::find_if(std::filesystem::directory_iterator(exit_root), std::filesystem::directory_iterator(),
+                                      [](const auto& entry) { return entry.path().extension() == ".json"; });
+        Expect(own != std::filesystem::directory_iterator(), "An armed guard keeps its marker until the process exits");
+        depthxr::RemoveProcessExitFiles();
+        depthxr::RemoveProcessExitFiles(); // DllMain runs once; the table must not care.
+        after_disarm.Complete();
+    }
 
     const auto invalid_root = root / "not-a-directory";
     std::ofstream(invalid_root) << "file";

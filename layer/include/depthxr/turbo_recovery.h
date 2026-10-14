@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+#include "depthxr/process_exit.h"
+
 namespace depthxr {
 
 struct TurboRecoveryRecord {
@@ -30,6 +32,9 @@ bool TurboProcessAlive(std::uint32_t pid, std::uint64_t created);
 
 // The caller serializes this object. No destructor clears the marker: a crash,
 // forced exit or skipped OpenXR cleanup must leave evidence for the next run.
+// A normal process exit is not one of those: Star Citizen and MSFS exit
+// without OpenXR teardown, so an armed marker is also removed when the
+// process exits normally (see process_exit.h). A failed marker never is.
 class TurboRecoveryGuard {
 public:
     using ProcessAlive = std::function<bool(std::uint32_t, std::uint64_t)>;
@@ -56,6 +61,7 @@ private:
     bool failed_{false};
     std::chrono::steady_clock::time_point last_clear_check_{};
     std::string reason_;
+    ProcessExitFile exit_file_;
 };
 
 } // namespace depthxr
