@@ -136,6 +136,17 @@ struct SoundPlayerState {
     std::vector<unsigned char> playing; // outlives the async PlaySound call; worker-thread only
 };
 
+void ReplacePlayingSound(std::vector<unsigned char>& playing,
+                         std::vector<unsigned char>&& next,
+                         const std::function<void()>& stop,
+                         const std::function<void(const unsigned char*)>& play) {
+    if (!playing.empty()) {
+        stop();
+    }
+    playing = std::move(next);
+    play(playing.data());
+}
+
 SoundPlayer& SoundPlayer::Instance() {
     static SoundPlayer instance;
     return instance;
@@ -179,11 +190,14 @@ SoundPlayer::SoundPlayer() : state_(std::make_shared<SoundPlayerState>()) {
                 ScalePcm16(*bytes, info, std::clamp(gain, 0.0, 1.0));
             }
 
-            state->playing = std::move(*bytes);
-            // SND_ASYNC returns immediately and replaces any sound already
-            // playing from this call, so toggling on/off never stacks audio.
-            PlaySoundW(reinterpret_cast<LPCWSTR>(state->playing.data()), nullptr,
-                       SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
+            // The clip being replaced is stopped before its buffer is freed,
+            // so toggling on/off never stacks audio or plays from freed
+            // memory; SND_ASYNC returns immediately.
+            ReplacePlayingSound(
+                state->playing, std::move(*bytes), [] { PlaySoundW(nullptr, nullptr, 0); },
+                [](const unsigned char* clip) {
+                    PlaySoundW(reinterpret_cast<LPCWSTR>(clip), nullptr, SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
+                });
         }
     }).detach();
 #endif
