@@ -498,6 +498,9 @@ public:
         return allocations;
     }
 
+    static std::size_t PendingReferenceChanges() { return Layer().pivotxr_reference_changes_.size(); }
+    static void DisablePivot() { Layer().resolved_settings_.pivotxr.enabled = false; }
+
     static bool SnapSelected() { return Layer().pivotxr_quick_view_active_; }
     static bool SnapEffectActive() {
         const auto& layer = Layer();
@@ -1269,6 +1272,29 @@ void SteadyLocatesDoNotAllocate() {
     }
 }
 
+// Runtime recenters reach Pivot only while it is on, and an idle Pivot
+// consumes them as frames pass them instead of queueing them until the next
+// engagement (the queue filled to 16 and then dropped every later recenter).
+void RecentersDoNotQueueWhileIdleOrOff() {
+    Peer::Start({Motion("Flight", Toggle("F1"), true)});
+    for (int recenter = 0; recenter < 20; ++recenter) {
+        Peer::Recenter(Peer::Now() + kFrameNanoseconds);
+        Peer::Drive();
+        Peer::Drive();
+    }
+    Expect(Peer::PendingReferenceChanges() == 0, "An idle Pivot left " +
+                                                     std::to_string(Peer::PendingReferenceChanges()) +
+                                                     " passed recenters queued");
+    EngageFlight();
+    Peer::Head(12.0);
+    ExpectViewYaw(Peer::Drive(), 24.0, "Motion must work after recenters while idle");
+
+    Peer::Start({Motion("Flight", Toggle("F1"), true)});
+    Peer::DisablePivot();
+    Peer::Recenter(Peer::Now() + kFrameNanoseconds);
+    Expect(Peer::PendingReferenceChanges() == 0, "A recenter was queued for Pivot while it is off");
+}
+
 // A Toggle latch belongs to the engaged profile only. Toggling another
 // profile on and off again must not leave the first profile latched, or its
 // Hold binding would keep it engaged after release.
@@ -1334,6 +1360,7 @@ int main() {
         {"per-direction deadzone transition", PerDirectionDeadzoneTransitionShapesTheExtraAngle},
         {"steady locates do not allocate", SteadyLocatesDoNotAllocate},
         {"Hold after another profile's Toggle", HoldAfterAnotherProfileToggledReleases},
+        {"recenters while idle or off", RecentersDoNotQueueWhileIdleOrOff},
     };
 
     int failures = 0;

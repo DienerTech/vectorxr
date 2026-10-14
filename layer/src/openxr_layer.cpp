@@ -9293,7 +9293,13 @@ XrResult OpenXrLayer::PollEvent(XrInstance instance, XrEventDataBuffer* event_da
         return result;
     }
     std::scoped_lock lock(mutex_);
-    if (change.session == active_session_ && pivotxr_reference_changes_.size() < 16) {
+    // Only Pivot keeps a seated position to re-anchor.
+    if (change.session == active_session_ && resolved_settings_.core.enabled && resolved_settings_.pivotxr.enabled) {
+        // A bounded queue keeps the newest changes: a later recenter must
+        // not be dropped for older ones.
+        if (pivotxr_reference_changes_.size() >= 16) {
+            pivotxr_reference_changes_.erase(pivotxr_reference_changes_.begin());
+        }
         pivotxr_reference_changes_.push_back({change.referenceSpaceType, change.changeTime});
         logger_.Info("Runtime reference space change pending: type=" +
                      std::to_string(static_cast<int>(change.referenceSpaceType)) +
@@ -9683,6 +9689,20 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
             pivot_diagnostic_.recomposition_mode = "locate_space_failed";
         }
     } else if (!pivotxr_envelope_engaged) {
+        // Idle, Pivot applies no change: one that has reached this frame
+        // drops the anchor (kept with a captured origin), which the next
+        // engagement takes anew, instead of queueing until then.
+        if (view_locate_info && !pivotxr_reference_changes_.empty()) {
+            std::erase_if(pivotxr_reference_changes_, [&](const PivotReferenceChange& change) {
+                if (view_locate_info->displayTime < change.change_time) {
+                    return false;
+                }
+                if (PivotAnchorAffectedBy(change.type)) {
+                    pivotxr_translation_anchor_.reset();
+                }
+                return true;
+            });
+        }
         if (!pivotxr_origin_) pivotxr_translation_anchor_.reset();
         pivotxr_smoothed_extra_yaw_radians_ = 0.0;
         pivotxr_smoothed_extra_pitch_radians_ = 0.0;
