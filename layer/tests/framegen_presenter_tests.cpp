@@ -941,6 +941,9 @@ struct Runtime {
     // Every Nth wait misses a refresh: it is released a refresh later than
     // asked for (paced runtimes only; 0: none).
     std::atomic<int> miss_every{0};
+    // ...and reports twice the period for that wait, as SteamVR with Pimax's
+    // driver does after its compositor misses a refresh.
+    std::atomic<bool> miss_reports_multiple{false};
     std::int64_t paced_waits{0};
     // A runtime holding a call (as one may while its session stops, until
     // the session ends): the next waits (hold_waits) or submissions
@@ -1105,8 +1108,9 @@ struct Runtime {
                     }
                     clock_floor = display;
                 }
-                return report(display,
-                              throttling && throttle == Throttle::kPeriod ? throttle_refreshes * period : period);
+                return report(display, throttling && throttle == Throttle::kPeriod ? throttle_refreshes * period
+                                       : miss && miss_reports_multiple   ? 2 * period
+                                                                         : period);
             }
             return report(next_display.fetch_add(period), period);
         };
@@ -7716,6 +7720,65 @@ void TestVarjoTransientThrottle() {
     }
 }
 
+// SteamVR with Pimax's driver, its GPU busy: now and then its compositor
+// misses a refresh, and the wait it releases a refresh late reports twice
+// the period, once. The game's frames were timed by that period: the next
+// one ran five refreshes further ahead, and the four after it came a
+// refresh apart instead of two while the lead came back (a stutter each
+// time; seen every 0.3-0.5 s in a DCS flight on SteamVR 2.18). Timed on the
+// refresh grid, the game's lead stays put.
+void TestSteamVrMissedRefresh() {
+    struct Case {
+        FrameGenSynthesisMode mode;
+        FrameGenMultiplier multiplier;
+        const char* name;
+    };
+    for (const Case test : {Case{FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2, "extrapolate 2x"},
+                            Case{FrameGenSynthesisMode::kInterpolate, FrameGenMultiplier::kDynamic, "interpolate dynamic"}}) {
+        const std::string name = std::string("steamvr missed refresh, ") + test.name;
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        runtime.paced = true;
+        runtime.miss_reports_multiple = true;
+        std::unique_ptr<App> owned;
+        App* app = nullptr;
+        StartJit(presenter, gpu, test.mode, test.multiplier, app, runtime, owned);
+        app->eye_speed = 0.5;
+        RunPipelined(*app, 900ms, 16ms, 26ms, {}, nullptr, 8ms);
+        Check(presenter.Status().threaded && !presenter.Status().standby, name + ": engages");
+        // About every 0.4 s, one of the runtime's waits misses a refresh.
+        runtime.miss_every = 37;
+        std::vector<XrDuration> leads;
+        RunPipelined(
+            *app, 3000ms, 16ms, 26ms,
+            [&](int, const XrFrameState& state) {
+                std::scoped_lock lock(g_xr_mutex);
+                if (!runtime.submitted_times.empty()) leads.push_back(state.predictedDisplayTime - runtime.submitted_times.back());
+            },
+            nullptr, 8ms);
+        const FrameGenStatus status = presenter.Status();
+        Check(status.threaded && !status.standby && !status.runtime_halving,
+              name + ": stays engaged, the misses too rare to be halving (" + status.dynamic_reason + ")");
+        std::vector<XrDuration> sorted = leads;
+        std::sort(sorted.begin(), sorted.end());
+        const XrDuration median = sorted.empty() ? 0 : sorted[sorted.size() / 2];
+        const auto ahead = std::count_if(leads.begin(), leads.end(),
+                                         [&](XrDuration lead) { return lead > median + 2 * kPeriod; });
+        // Timed by the reported period, 8-20% of the frames ran more than 2
+        // refreshes past the median (up to 9); on the refresh grid none do.
+        Check(!leads.empty() && ahead <= 2,
+              name + ": the game's frames stay about as far ahead of the refreshes (" + std::to_string(ahead) + " of " +
+                  std::to_string(leads.size()) + " over 2 refreshes past the median of " +
+                  std::to_string(static_cast<double>(median) / kPeriod) + ")");
+        Check(status.distinct_fps > 0.8 * status.output_fps,
+              name + ": refreshes show new frames (" + std::to_string(status.distinct_fps) + " of " +
+                  std::to_string(status.output_fps) + " fps)");
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    }
+}
+
 // What the OSD and the app say while the runtime halves the frame rate:
 // engaged and standing by, the line under the row says so and the app's
 // line ends with it; other states keep their own reasons.
@@ -8098,6 +8161,7 @@ int main(int argc, char** argv) {
     RUN(TestLowFirstClockSample);
     RUN(TestStalledClockWhilePresenting);
     RUN(TestAutoHoldsWhileClockDisplaced);
+    RUN(TestSteamVrMissedRefresh);
     if (!policy) {
         RunPolicyTests();
     } else {
