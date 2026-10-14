@@ -26,6 +26,11 @@ public:
         return std::unique_lock(trace.mutex_);
     }
     static std::uint64_t Dropped(const TurboTimingTrace& trace) { return trace.dropped_.load(); }
+    // Records waiting for the writer reach half the queue, where it is woken.
+    static bool QueueHalfFull(TurboTimingTrace& trace) {
+        std::scoped_lock lock(trace.mutex_);
+        return trace.count_ >= TurboTimingTrace::kCapacity / 2;
+    }
     static std::size_t Active(const TurboTimingTrace& trace) {
         std::size_t active = 0;
         for (const auto& p : trace.pending_) if (p.token.load()) ++active;
@@ -161,15 +166,23 @@ void TestContinuousPersistenceAndStall(const std::filesystem::path& root) {
     }
     depthxr::TurboTraceTestPeer::EndBurst(trace);
     const auto frozen = Read(Snapshot(log));
-    // Exercise both disk rollovers. Steady producers keep the consumer ahead.
+    // Exercise both disk rollovers. The producer waits while the queue is
+    // half full (the writer is woken then) instead of sleeping: a Windows
+    // sleep lasts a 15.6 ms timer tick, about 6 s of this test's 15 s.
     for (int i = 0; i < 100000; ++i) {
         trace.Record("after.stall", trace.NextId(), i);
-        if (i % 256 == 0) std::this_thread::sleep_for(2ms);
+        if (i % 1024 == 0) {
+            while (depthxr::TurboTraceTestPeer::QueueHalfFull(trace)) std::this_thread::yield();
+        }
     }
-    trace.Record("latest.marker", trace.NextId());
-    trace.Stop();
-    Check(History(log).find("event=latest.marker") != std::string::npos,
+    // A producer drops a record rather than wait while the writer holds the
+    // queue (what failed on CI): record the marker until the writer has it.
+    Check(Wait([&] {
+              trace.Record("latest.marker", trace.NextId());
+              return History(log).find("event=latest.marker") != std::string::npos;
+          }),
           "Newest history did not drain");
+    trace.Stop();
     Check(Read(Snapshot(log)) == frozen, "Later frames overwrote frozen stall evidence");
     for (unsigned part = 0; part < 2; ++part) {
         const auto path = depthxr::TurboTimingTrace::RecorderPath(log, part);
@@ -661,7 +674,13 @@ int main(int argc, char** argv) {
             Benchmark(argv[2]);
             return 0;
         }
-        const auto root = std::filesystem::current_path() / "turbo-trace-tests";
+        // In the temporary folder, not the working directory (a run from the
+        // repository root left turbo-trace-tests/ in the checkout); removed
+        // after a passing run.
+        const auto root = std::filesystem::temp_directory_path() /
+                          ("vectorxr-turbo-trace-tests-" + std::to_string(GetCurrentProcessId()));
+        std::error_code ignored;
+        std::filesystem::remove_all(root, ignored);
         std::filesystem::create_directories(root);
         TestContinuousPersistenceAndStall(root);
         TestProducersNeverWait(root);
@@ -681,6 +700,7 @@ int main(int argc, char** argv) {
                      "rotation, Frame Generation snapshots (names, rate limit, rotation apart from incidents, "
                      "trigger baseline, retry and edges), reopened part bounds, nonblocking producers, Debug "
                      "lifecycle, writer failure, and retention passed.\n";
+        std::filesystem::remove_all(root, ignored);
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
