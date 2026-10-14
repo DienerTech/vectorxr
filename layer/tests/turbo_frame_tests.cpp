@@ -13,6 +13,10 @@
 #include <thread>
 #include <vector>
 #include <Windows.h>
+#include <d3d11.h>
+#include <d3d12.h>
+#include <wrl/client.h>
+#include <openxr/openxr_platform.h>
 
 #include "depthxr/openxr_layer.h"
 #include "depthxr/framegen_gpu.h"
@@ -531,6 +535,49 @@ class TurboFrameTestPeer {
         layer.varjo_native_foveation_diagnostic_ = {};
         layer.next_locate_views_ = nullptr;
         layer.next_end_frame_ = nullptr;
+    }
+
+    // After PrepareVarjoNative: `session` is the quad views session on a
+    // Varjo runtime, whose swapchains' releases are deferred until the game's
+    // xrEndFrame; `swapchain` is one of its swapchains, its calls reaching
+    // the runtime as `xr`. Frame Generation's queue substitution is prepared
+    // from `create` (a Direct3D 12 binding) as xrCreateSession prepares it.
+    static bool DeferVarjoReleases(XrSession session, XrSwapchain swapchain, std::uint32_t image_count,
+                                   const XrSessionCreateInfo* create, const FrameGenQueueSubstitution::Calls& xr) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.active_session_ = session;
+        layer.resolved_settings_session_ = session;
+        layer.defer_quadviews_swapchain_releases_ = true;
+        OpenXrLayer::SwapchainInfo& info = layer.tracked_swapchains_[swapchain];
+        info = {};
+        info.session = session;
+        info.quadviews_session = true;
+        info.image_count = image_count;
+        layer.next_acquire_swapchain_image_ = xr.acquire;
+        layer.next_wait_swapchain_image_ = xr.wait;
+        layer.next_release_swapchain_image_ = xr.release;
+        std::string note;
+        return layer.framegen_queue_.Prepare(create, note, true) != create && layer.framegen_queue_.ShownLayersLazy();
+    }
+    // A frame of Frame Generation's shows `swapchain` in a layer it does not
+    // capture, while it shows images of its own only (SubmitRuntimeFrame).
+    static void ShowLayerLazily(XrSwapchain swapchain) {
+        auto& layer = Layer();
+        layer.framegen_queue_.Flush(swapchain, layer.FrameGenQueueCalls(), true);
+    }
+    static FrameGenQueueSubstitution::ShownLayerCounts ShownLayers() { return Layer().framegen_queue_.ShownLayers(); }
+    static void EndVarjoReleases(XrSwapchain swapchain) {
+        auto& layer = Layer();
+        layer.framegen_queue_.Reset();
+        std::scoped_lock lock(layer.mutex_);
+        layer.tracked_swapchains_.erase(swapchain);
+        layer.defer_quadviews_swapchain_releases_ = false;
+        layer.active_session_ = XR_NULL_HANDLE;
+        layer.resolved_settings_session_ = XR_NULL_HANDLE;
+        layer.next_acquire_swapchain_image_ = nullptr;
+        layer.next_wait_swapchain_image_ = nullptr;
+        layer.next_release_swapchain_image_ = nullptr;
     }
 };
 
@@ -2204,6 +2251,413 @@ void TestVarjoNativeSubmittedFocusCountsEveryFrame() {
     Peer::EndVarjoNative();
 }
 
+// --- Varjo's deferred releases with Frame Generation's queue substitution ----------
+
+namespace {
+
+// Direct3D 12 stand-ins with no device behind them, as far as Frame
+// Generation's queue substitution uses them: a queue's signals reach their
+// fence at once, or, while the test holds the queue (the game's GPU still
+// rendering), once it lets the queue run; a queue counts its waits.
+template <class Interface>
+class FakeD3D12 : public Interface {
+  public:
+    virtual ~FakeD3D12() = default;
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** object) override {
+        if (!object) return E_POINTER;
+        if (riid != __uuidof(IUnknown) && riid != __uuidof(Interface)) {
+            *object = nullptr;
+            return E_NOINTERFACE;
+        }
+        *object = static_cast<Interface*>(this);
+        AddRef();
+        return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++references_; }
+    ULONG STDMETHODCALLTYPE Release() override {
+        const ULONG left = --references_;
+        if (left == 0) delete this;
+        return left;
+    }
+    HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID, UINT*, void*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID, UINT, const void*) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE SetPrivateDataInterface(REFGUID, const IUnknown*) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE SetName(LPCWSTR) override { return S_OK; }
+
+  private:
+    std::atomic<ULONG> references_{1};
+};
+
+template <class T, class... Args>
+Microsoft::WRL::ComPtr<T> MakeFake(Args&&... args) {
+    Microsoft::WRL::ComPtr<T> object;
+    object.Attach(new T(std::forward<Args>(args)...));
+    return object;
+}
+
+class FakeD3D12Fence final : public FakeD3D12<ID3D12Fence> {
+  public:
+    FakeD3D12Fence(ID3D12Device* device, UINT64 value) : device_(device), value_(value) {}
+    HRESULT STDMETHODCALLTYPE GetDevice(REFIID riid, void** device) override {
+        return device_->QueryInterface(riid, device);
+    }
+    UINT64 STDMETHODCALLTYPE GetCompletedValue() override {
+        std::scoped_lock lock(mutex_);
+        return value_;
+    }
+    HRESULT STDMETHODCALLTYPE SetEventOnCompletion(UINT64 value, HANDLE event) override {
+        std::scoped_lock lock(mutex_);
+        if (value <= value_) {
+            SetEvent(event);
+        } else {
+            waiters_.emplace_back(value, event);
+        }
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE Signal(UINT64 value) override {
+        std::scoped_lock lock(mutex_);
+        value_ = value;
+        for (auto it = waiters_.begin(); it != waiters_.end();) {
+            if (it->first <= value_) {
+                SetEvent(it->second);
+                it = waiters_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        return S_OK;
+    }
+
+  private:
+    ID3D12Device* device_;
+    std::mutex mutex_;
+    UINT64 value_;
+    std::vector<std::pair<UINT64, HANDLE>> waiters_;
+};
+
+class FakeD3D12Queue final : public FakeD3D12<ID3D12CommandQueue> {
+  public:
+    FakeD3D12Queue(ID3D12Device* device, const D3D12_COMMAND_QUEUE_DESC& desc) : device_(device), desc_(desc) {}
+    // The work queued from now on runs only at Run.
+    void Hold() { held_ = true; }
+    void Run() {
+        held_ = false;
+        for (const auto& [fence, value] : pending_) fence->Signal(value);
+        pending_.clear();
+    }
+    std::uint64_t Waits() const { return waits_; }
+
+    HRESULT STDMETHODCALLTYPE GetDevice(REFIID riid, void** device) override {
+        return device_->QueryInterface(riid, device);
+    }
+    void STDMETHODCALLTYPE UpdateTileMappings(ID3D12Resource*, UINT, const D3D12_TILED_RESOURCE_COORDINATE*,
+                                              const D3D12_TILE_REGION_SIZE*, ID3D12Heap*, UINT,
+                                              const D3D12_TILE_RANGE_FLAGS*, const UINT*, const UINT*,
+                                              D3D12_TILE_MAPPING_FLAGS) override {}
+    void STDMETHODCALLTYPE CopyTileMappings(ID3D12Resource*, const D3D12_TILED_RESOURCE_COORDINATE*, ID3D12Resource*,
+                                            const D3D12_TILED_RESOURCE_COORDINATE*, const D3D12_TILE_REGION_SIZE*,
+                                            D3D12_TILE_MAPPING_FLAGS) override {}
+    void STDMETHODCALLTYPE ExecuteCommandLists(UINT, ID3D12CommandList* const*) override {}
+    void STDMETHODCALLTYPE SetMarker(UINT, const void*, UINT) override {}
+    void STDMETHODCALLTYPE BeginEvent(UINT, const void*, UINT) override {}
+    void STDMETHODCALLTYPE EndEvent() override {}
+    HRESULT STDMETHODCALLTYPE Signal(ID3D12Fence* fence, UINT64 value) override {
+        if (held_) {
+            pending_.emplace_back(fence, value);
+        } else {
+            fence->Signal(value);
+        }
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE Wait(ID3D12Fence*, UINT64) override {
+        ++waits_;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetTimestampFrequency(UINT64* frequency) override {
+        *frequency = 1;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetClockCalibration(UINT64* gpu, UINT64* cpu) override {
+        *gpu = *cpu = 0;
+        return S_OK;
+    }
+    D3D12_COMMAND_QUEUE_DESC STDMETHODCALLTYPE GetDesc() override { return desc_; }
+
+  private:
+    ID3D12Device* device_;
+    D3D12_COMMAND_QUEUE_DESC desc_;
+    bool held_{false};
+    std::vector<std::pair<Microsoft::WRL::ComPtr<ID3D12Fence>, UINT64>> pending_;
+    std::uint64_t waits_{0};
+};
+
+class FakeD3D12Device final : public FakeD3D12<ID3D12Device> {
+  public:
+    // The queue created on it last (the runtime's, once a session is prepared).
+    FakeD3D12Queue* LastQueue() const { return last_queue_; }
+
+    HRESULT STDMETHODCALLTYPE CreateCommandQueue(const D3D12_COMMAND_QUEUE_DESC* desc, REFIID riid,
+                                                 void** queue) override {
+        last_queue_ = new FakeD3D12Queue(this, *desc);
+        const HRESULT result = last_queue_->QueryInterface(riid, queue);
+        last_queue_->Release();
+        return result;
+    }
+    HRESULT STDMETHODCALLTYPE CreateFence(UINT64 value, D3D12_FENCE_FLAGS, REFIID riid, void** fence) override {
+        auto* created = new FakeD3D12Fence(this, value);
+        const HRESULT result = created->QueryInterface(riid, fence);
+        created->Release();
+        return result;
+    }
+    // Nothing else is used.
+    UINT STDMETHODCALLTYPE GetNodeCount() override { return 1; }
+    HRESULT STDMETHODCALLTYPE CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE, REFIID, void** out) override {
+        return None(out);
+    }
+    HRESULT STDMETHODCALLTYPE CreateGraphicsPipelineState(const D3D12_GRAPHICS_PIPELINE_STATE_DESC*, REFIID,
+                                                          void** out) override {
+        return None(out);
+    }
+    HRESULT STDMETHODCALLTYPE CreateComputePipelineState(const D3D12_COMPUTE_PIPELINE_STATE_DESC*, REFIID,
+                                                         void** out) override {
+        return None(out);
+    }
+    HRESULT STDMETHODCALLTYPE CreateCommandList(UINT, D3D12_COMMAND_LIST_TYPE, ID3D12CommandAllocator*,
+                                                ID3D12PipelineState*, REFIID, void** out) override {
+        return None(out);
+    }
+    HRESULT STDMETHODCALLTYPE CheckFeatureSupport(D3D12_FEATURE, void*, UINT) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE CreateDescriptorHeap(const D3D12_DESCRIPTOR_HEAP_DESC*, REFIID, void** out) override {
+        return None(out);
+    }
+    UINT STDMETHODCALLTYPE GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE) override { return 0; }
+    HRESULT STDMETHODCALLTYPE CreateRootSignature(UINT, const void*, SIZE_T, REFIID, void** out) override {
+        return None(out);
+    }
+    void STDMETHODCALLTYPE CreateConstantBufferView(const D3D12_CONSTANT_BUFFER_VIEW_DESC*,
+                                                    D3D12_CPU_DESCRIPTOR_HANDLE) override {}
+    void STDMETHODCALLTYPE CreateShaderResourceView(ID3D12Resource*, const D3D12_SHADER_RESOURCE_VIEW_DESC*,
+                                                    D3D12_CPU_DESCRIPTOR_HANDLE) override {}
+    void STDMETHODCALLTYPE CreateUnorderedAccessView(ID3D12Resource*, ID3D12Resource*,
+                                                     const D3D12_UNORDERED_ACCESS_VIEW_DESC*,
+                                                     D3D12_CPU_DESCRIPTOR_HANDLE) override {}
+    void STDMETHODCALLTYPE CreateRenderTargetView(ID3D12Resource*, const D3D12_RENDER_TARGET_VIEW_DESC*,
+                                                  D3D12_CPU_DESCRIPTOR_HANDLE) override {}
+    void STDMETHODCALLTYPE CreateDepthStencilView(ID3D12Resource*, const D3D12_DEPTH_STENCIL_VIEW_DESC*,
+                                                  D3D12_CPU_DESCRIPTOR_HANDLE) override {}
+    void STDMETHODCALLTYPE CreateSampler(const D3D12_SAMPLER_DESC*, D3D12_CPU_DESCRIPTOR_HANDLE) override {}
+    void STDMETHODCALLTYPE CopyDescriptors(UINT, const D3D12_CPU_DESCRIPTOR_HANDLE*, const UINT*, UINT,
+                                           const D3D12_CPU_DESCRIPTOR_HANDLE*, const UINT*,
+                                           D3D12_DESCRIPTOR_HEAP_TYPE) override {}
+    void STDMETHODCALLTYPE CopyDescriptorsSimple(UINT, D3D12_CPU_DESCRIPTOR_HANDLE, D3D12_CPU_DESCRIPTOR_HANDLE,
+                                                 D3D12_DESCRIPTOR_HEAP_TYPE) override {}
+    D3D12_RESOURCE_ALLOCATION_INFO STDMETHODCALLTYPE GetResourceAllocationInfo(UINT, UINT,
+                                                                               const D3D12_RESOURCE_DESC*) override {
+        return {};
+    }
+    D3D12_HEAP_PROPERTIES STDMETHODCALLTYPE GetCustomHeapProperties(UINT, D3D12_HEAP_TYPE) override { return {}; }
+    HRESULT STDMETHODCALLTYPE CreateCommittedResource(const D3D12_HEAP_PROPERTIES*, D3D12_HEAP_FLAGS,
+                                                      const D3D12_RESOURCE_DESC*, D3D12_RESOURCE_STATES,
+                                                      const D3D12_CLEAR_VALUE*, REFIID, void** out) override {
+        return None(out);
+    }
+    HRESULT STDMETHODCALLTYPE CreateHeap(const D3D12_HEAP_DESC*, REFIID, void** out) override { return None(out); }
+    HRESULT STDMETHODCALLTYPE CreatePlacedResource(ID3D12Heap*, UINT64, const D3D12_RESOURCE_DESC*,
+                                                   D3D12_RESOURCE_STATES, const D3D12_CLEAR_VALUE*, REFIID,
+                                                   void** out) override {
+        return None(out);
+    }
+    HRESULT STDMETHODCALLTYPE CreateReservedResource(const D3D12_RESOURCE_DESC*, D3D12_RESOURCE_STATES,
+                                                     const D3D12_CLEAR_VALUE*, REFIID, void** out) override {
+        return None(out);
+    }
+    HRESULT STDMETHODCALLTYPE CreateSharedHandle(ID3D12DeviceChild*, const SECURITY_ATTRIBUTES*, DWORD, LPCWSTR,
+                                                 HANDLE* handle) override {
+        if (handle) *handle = nullptr;
+        return E_NOTIMPL;
+    }
+    HRESULT STDMETHODCALLTYPE OpenSharedHandle(HANDLE, REFIID, void** out) override { return None(out); }
+    HRESULT STDMETHODCALLTYPE OpenSharedHandleByName(LPCWSTR, DWORD, HANDLE* handle) override {
+        if (handle) *handle = nullptr;
+        return E_NOTIMPL;
+    }
+    HRESULT STDMETHODCALLTYPE MakeResident(UINT, ID3D12Pageable* const*) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE Evict(UINT, ID3D12Pageable* const*) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE GetDeviceRemovedReason() override { return S_OK; }
+    void STDMETHODCALLTYPE GetCopyableFootprints(const D3D12_RESOURCE_DESC*, UINT, UINT, UINT64,
+                                                 D3D12_PLACED_SUBRESOURCE_FOOTPRINT*, UINT*, UINT64*,
+                                                 UINT64*) override {}
+    HRESULT STDMETHODCALLTYPE CreateQueryHeap(const D3D12_QUERY_HEAP_DESC*, REFIID, void** out) override {
+        return None(out);
+    }
+    HRESULT STDMETHODCALLTYPE SetStablePowerState(BOOL) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE CreateCommandSignature(const D3D12_COMMAND_SIGNATURE_DESC*, ID3D12RootSignature*,
+                                                     REFIID, void** out) override {
+        return None(out);
+    }
+    void STDMETHODCALLTYPE GetResourceTiling(ID3D12Resource*, UINT*, D3D12_PACKED_MIP_INFO*, D3D12_TILE_SHAPE*,
+                                             UINT*, UINT, D3D12_SUBRESOURCE_TILING*) override {}
+    LUID STDMETHODCALLTYPE GetAdapterLuid() override { return {}; }
+
+  private:
+    static HRESULT None(void** out) {
+        if (out) *out = nullptr;
+        return E_NOTIMPL;
+    }
+    FakeD3D12Queue* last_queue_{nullptr};
+};
+
+// The runtime's calls on one swapchain, held to OpenXR's order as strictly as
+// runtimes may: an image is acquired only while the application holds fewer
+// than all of them, waited for only when none is waited for and not yet
+// released, and released only once waited for.
+struct VarjoSwapchainRuntime {
+    std::uint32_t images{3};
+    std::uint32_t acquired{0};
+    std::uint32_t next{0};
+    bool waited{false};
+    std::string calls; // a(cquire), w(ait), r(elease), as the runtime saw them
+    int refused{0};
+};
+VarjoSwapchainRuntime g_varjo_swapchain;
+
+XrResult XRAPI_PTR VarjoAcquire(XrSwapchain, const XrSwapchainImageAcquireInfo*, std::uint32_t* index) {
+    auto& runtime = g_varjo_swapchain;
+    if (runtime.acquired == runtime.images) {
+        ++runtime.refused;
+        return XR_ERROR_CALL_ORDER_INVALID;
+    }
+    ++runtime.acquired;
+    if (index) *index = runtime.next;
+    runtime.next = (runtime.next + 1) % runtime.images;
+    runtime.calls += 'a';
+    return XR_SUCCESS;
+}
+XrResult XRAPI_PTR VarjoWait(XrSwapchain, const XrSwapchainImageWaitInfo*) {
+    auto& runtime = g_varjo_swapchain;
+    if (runtime.waited || runtime.acquired == 0) {
+        ++runtime.refused;
+        return XR_ERROR_CALL_ORDER_INVALID;
+    }
+    runtime.waited = true;
+    runtime.calls += 'w';
+    return XR_SUCCESS;
+}
+XrResult XRAPI_PTR VarjoRelease(XrSwapchain, const XrSwapchainImageReleaseInfo*) {
+    auto& runtime = g_varjo_swapchain;
+    if (!runtime.waited) {
+        ++runtime.refused;
+        return XR_ERROR_CALL_ORDER_INVALID;
+    }
+    runtime.waited = false;
+    --runtime.acquired;
+    runtime.calls += 'r';
+    return XR_SUCCESS;
+}
+
+} // namespace
+
+// On Varjo the releases of a quad views session's swapchains reach the runtime
+// only at the game's xrEndFrame. There they go as the game's own releases go
+// with Frame Generation's queue substitution: a layer Frame Generation shows
+// but does not capture (OpenKneeboard's kneeboard) is released once the game's
+// GPU work on it has run, and the runtime's queue, on which Frame Generation
+// writes its frames, never waits for the game's frame. 0.19.1 queued that wait
+// for every deferred release (issue #96: in Dynamic on a Varjo Aero, the
+// presenter's xrEndFrame waited for the game's GPU frame before nearly every
+// missed refresh).
+void TestVarjoDeferredReleasesKeepFrameGenUnblocked() {
+    using Peer = depthxr::TurboFrameTestPeer;
+    Peer::PrepareVarjoNative(&VarjoLocateViews, &VarjoEndFrame);
+    g_varjo_ends = 0;
+    g_varjo_swapchain = {};
+    const auto device = MakeFake<FakeD3D12Device>();
+    const auto game = MakeFake<FakeD3D12Queue>(
+        device.Get(), D3D12_COMMAND_QUEUE_DESC{D3D12_COMMAND_LIST_TYPE_DIRECT, 0, D3D12_COMMAND_QUEUE_FLAG_NONE, 0});
+    XrGraphicsBindingD3D12KHR binding{XR_TYPE_GRAPHICS_BINDING_D3D12_KHR};
+    binding.device = device.Get();
+    binding.queue = game.Get();
+    XrSessionCreateInfo create{XR_TYPE_SESSION_CREATE_INFO};
+    create.next = &binding;
+    const XrSwapchain kneeboard = reinterpret_cast<XrSwapchain>(static_cast<std::uintptr_t>(0x95));
+    Expect(Peer::DeferVarjoReleases(TestSession(), kneeboard, g_varjo_swapchain.images, &create,
+                                    {&VarjoAcquire, &VarjoWait, &VarjoRelease}),
+           "Varjo deferred releases: the session did not get Frame Generation's queue with shown layers lazy");
+    FakeD3D12Queue* runtime_queue = device->LastQueue();
+    auto& layer = Peer::Layer();
+    const std::string& calls = g_varjo_swapchain.calls;
+
+    // The game's frame: its projection's four views (the kneeboard is shown
+    // in Frame Generation's frames, ShowLayerLazily).
+    std::array<XrCompositionLayerProjectionView, 4> views{};
+    for (std::uint32_t view = 0; view < 4; ++view) {
+        views[view] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+        views[view].pose.orientation.w = 1.0f;
+        views[view].fov = view < 2 ? XrFovf{-0.9f, 0.9f, 0.9f, -0.9f} : kVarjoFocusFov;
+        views[view].subImage.swapchain = reinterpret_cast<XrSwapchain>(static_cast<std::uintptr_t>(0x81 + view));
+        views[view].subImage.imageRect = {{0, 0}, {1024, 1024}};
+    }
+    XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    projection.viewCount = 4;
+    projection.views = views.data();
+    const auto* projection_layer = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
+    XrTime time = 40'000'000'000;
+    // The kneeboard drawn (its GPU work queued) and released, then the frame
+    // ended.
+    auto frame = [&](const std::string& what) {
+        std::uint32_t index = 0;
+        const XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO, nullptr, XR_INFINITE_DURATION};
+        const XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+        Expect(layer.AcquireSwapchainImage(kneeboard, nullptr, &index) == XR_SUCCESS &&
+                   layer.WaitSwapchainImage(kneeboard, &wait) == XR_SUCCESS,
+               "Varjo deferred releases: " + what + ": the kneeboard's image was not handed out (" + calls + ")");
+        const std::size_t before = calls.size();
+        Expect(layer.ReleaseSwapchainImage(kneeboard, &release) == XR_SUCCESS && calls.size() == before,
+               "Varjo deferred releases: " + what + ": the release was not deferred until xrEndFrame (" + calls + ")");
+        XrFrameEndInfo info = FrameEndInfo();
+        info.displayTime = (time += 11'111'111);
+        info.layerCount = 1;
+        info.layers = &projection_layer;
+        Expect(layer.EndFrame(TestSession(), &info) == XR_SUCCESS, "Varjo deferred releases: " + what + ": the frame did not end");
+    };
+
+    // Before a frame of Frame Generation's showed the kneeboard lazily, its
+    // release goes at xrEndFrame with the runtime's queue waiting for the
+    // game's work on it.
+    game->Hold();
+    frame("first frame");
+    Expect(calls == "awr" && runtime_queue->Waits() == 1,
+           "Varjo deferred releases: a release before the layer was shown lazily did not go at xrEndFrame after the "
+           "game's work (" + calls + ", " + std::to_string(runtime_queue->Waits()) + " runtime queue waits)");
+    game->Run();
+    Peer::ShowLayerLazily(kneeboard);
+
+    // Shown lazily: a deferred release whose work has not run is held back
+    // at xrEndFrame, and the runtime's queue does not wait for the game.
+    game->Hold();
+    frame("second frame");
+    Expect(calls == "awraw" && runtime_queue->Waits() == 1,
+           "Varjo deferred releases: a deferred release of a layer shown lazily made the runtime's queue wait for "
+           "the game's frame (" + calls + ", " + std::to_string(runtime_queue->Waits()) + " runtime queue waits)");
+    Peer::ShowLayerLazily(kneeboard);
+    Expect(calls == "awraw", "Varjo deferred releases: a frame showing the layer got a release whose work has not run");
+    // Its work runs: the release reaches the runtime at the game's next call
+    // on the swapchain, before it; the next one, done by xrEndFrame, goes there.
+    game->Run();
+    frame("third frame");
+    const auto shown = Peer::ShownLayers();
+    Expect(calls == "awrawrawr" && runtime_queue->Waits() == 1 && g_varjo_swapchain.refused == 0,
+           "Varjo deferred releases: released work did not reach the runtime in order, unwaited (" + calls + ", " +
+               std::to_string(runtime_queue->Waits()) + " runtime queue waits, " +
+               std::to_string(g_varjo_swapchain.refused) + " refused)");
+    Expect(shown.releases == 2 && shown.cpu_waits == 0 && shown.gpu_waits == 0,
+           "Varjo deferred releases: the shown-layer counts are off (" + std::to_string(shown.releases) + " lazy, " +
+               std::to_string(shown.cpu_waits) + " CPU waits, " + std::to_string(shown.gpu_waits) + " queue waits)");
+    Expect(g_varjo_ends == 3, "Varjo deferred releases: every frame must reach the runtime");
+    Peer::EndVarjoReleases(kneeboard);
+    Peer::EndVarjoNative();
+}
+
 // A settings file with a key this layer does not know (a newer app's) still
 // loads. Each unknown key is logged once per log: at the first load, not again
 // on reloads, and a reload that adds one logs only that one; the next
@@ -2326,6 +2780,7 @@ int main() {
     TestSequencedStallPolicySuspends();
     Expect(depthxr::TurboFrameTestPeer::OsdStateTransitions(), "OSD lost enabled/off Turbo or applied/ready/disabled Pivot state");
     TestVarjoNativeSubmittedFocusCountsEveryFrame();
+    TestVarjoDeferredReleasesKeepFrameGenUnblocked();
     TestQuadViewsInactiveReasons();
     TestQuadViewsOsdTagFollowsBegunConfiguration();
     // Last: it points the layer's log at a file of its own.
