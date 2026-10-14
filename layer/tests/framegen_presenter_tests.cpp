@@ -4441,11 +4441,11 @@ void TestLeadResetOnRestart() {
 // engaged at its own ~52 fps) whose GPU slows to 45 ms a frame for a while
 // (the hitches: the lead climbs), then back. Its frames reach the GPU
 // history at the GPU's pace whatever the lead (an early frame is held until
-// its slot, which delays the game's next one), so they never show the slack
-// that takes a slot off: without probes (FrameGenLeadPolicy) the lead stays
-// up; with them it steps back down to the lowest lead that holds (a probe
-// below it fails, and is tried again only rarely), costing a few late
-// frames per probe.
+// its slot, which delays the game's next one), so above Dynamic's cap they
+// show little of the slack that takes a slot off; with probes
+// (FrameGenLeadPolicy) the lead steps back down to the lowest lead that
+// holds (a probe below it fails, and is tried again only rarely), costing a
+// few late frames per probe.
 struct LeadRun {
     std::uint32_t settled{0}; // before the hitches
     std::uint32_t peak{0};    // after them
@@ -4505,9 +4505,13 @@ void TestLeadStepsDownAfterHitches() {
               << probed.final << " (floor " << probed.after.lead_floor << ", probes " << probed.after.lead_probes
               << ", failed " << probed.after.lead_probes_failed << ", late " << late(probed) << ")" << std::endl;
     Check(held.peak > held.settled && probed.peak > probed.settled, "lead probes: the hitches grow the lead");
-    Check(held.final >= held.peak && held.after.lead_probes == 0,
-          "lead probes: without probes or hysteresis the lead stays up after the hitches (" +
-              std::to_string(held.settled) +
+    // Without probes the lead comes down only by slack: once the game's rate
+    // is back, Dynamic's cap (4 refreshes per real frame) is 8 again, below
+    // the peak, and the lead comes down with it; frames scored there show
+    // slack. (Until 0.19.2 a lead above a lowered cap was never scored again,
+    // so it stayed up.)
+    Check(held.after.lead_probes == 0 && held.final <= 8,
+          "lead probes: without probes the lead still comes down with the cap (" + std::to_string(held.settled) +
               " -> " + std::to_string(held.peak) + " -> " + std::to_string(held.final) + ")");
     Check(probed.after.lead_probes > probed.before.lead_probes && probed.final < probed.peak &&
               probed.final <= probed.settled,
@@ -4678,6 +4682,45 @@ void TestLeadAfterRepeatedHitches() {
     Check(mean <= static_cast<double>(settled.lead_floor) + 1.5,
           "repeated hitches: between hitches the lead comes back down (mean " + std::to_string(mean) + ", floor " +
               std::to_string(settled.lead_floor) + ")");
+}
+
+// Dynamic caps the lead at 4 refreshes per real frame, its refreshes per real
+// frame rounded (2-4): 8, 12 or 16. A lead raised past a cap that then drops
+// (the game speeding up) was told to the game as the cap, matched no frame's,
+// and so was never scored again: it stayed above the cap until a probe, and
+// raises at the cap were counted though nothing moved (DCS 231933 and 220716,
+// 0.19.1: leadSlots=9 while the game was told 8; +54/-0 at the cap).
+void TestLeadFollowsLoweredCap() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic, app, runtime, owned);
+    FrameGenLeadPolicy policy;
+    policy.probe_after = 600s; // no probes: only scored frames move the lead
+    presenter.SetLeadPolicy(policy);
+    for (int i = 0; i < 3; ++i) app->Frame();
+    // A game at a third of the refresh rate (cap 12), its frames reaching the
+    // GPU history late: the lead climbs past 8.
+    RunTicks(*app, 3000ms, {3}, [&](const XrFrameState&) { return Engaged(presenter); });
+    Check(Engaged(presenter), "lowered cap: Dynamic engages");
+    gpu.capture_lag = 100ms;
+    RunTicks(*app, 4000ms, {3}, [&](const XrFrameState&) { return presenter.Status().lead_slots > 9; });
+    const FrameGenStatus raised = presenter.Status();
+    gpu.capture_lag = 0us;
+    Check(raised.lead_slots > 8, "lowered cap: the lead climbs past 8 (" + std::to_string(raised.lead_slots) + ")");
+    // At 1.5 refreshes a frame the cap is 8.
+    RunTicks(*app, 2500ms, {1, 2});
+    const FrameGenStatus after = presenter.Status();
+    presenter.Stop();
+    std::cerr << "  lowered cap: lead " << raised.lead_slots << " -> " << after.lead_slots << " (floor "
+              << after.lead_floor << "), moves +" << after.lead_ups << "/-" << after.lead_downs << std::endl;
+    Check(!runtime.ordering_violation && !g_release_violation, "lowered cap: calls stayed ordered");
+    Check(after.lead_slots <= 8 && after.lead_floor <= 8,
+          "lowered cap: the lead comes down with the cap (" + std::to_string(raised.lead_slots) + " -> " +
+              std::to_string(after.lead_slots) + ", floor " + std::to_string(after.lead_floor) + ")");
 }
 
 // Refreshes the presenter thread misses (Varjo's runtime under a GPU-bound
@@ -8398,6 +8441,7 @@ int main(int argc, char** argv) {
     RUN(TestSteamVrMissedRefresh);
     RUN(TestLeadAfterRepeatedHitches);
     RUN(TestPassedOverFramesKeepLead);
+    RUN(TestLeadFollowsLoweredCap);
     if (!policy) {
         RunPolicyTests();
     } else {

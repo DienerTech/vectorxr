@@ -4643,8 +4643,9 @@ void FrameGenPresenter::UpdateLeadLocked(bool late, std::optional<double> slack_
                 lead_floor_ = std::max(lead_floor_, std::min({lead_slots_ + 1, 4 * multiplier, most}));
                 lead_floor_failed_ = true;
             }
+            // At the cap nothing moves: not counted (the summary marks the cap).
+            totals_.lead_ups += lead_slots_ < 4 * multiplier ? 1 : 0;
             lead_slots_ = std::min(lead_slots_ + 1, 4 * multiplier);
-            ++totals_.lead_ups;
             lead_history_.clear();
             lead_calm_since_ = now;
             return;
@@ -4895,6 +4896,17 @@ std::optional<XrResult> FrameGenPresenter::ThreadedWaitLocked(std::unique_lock<s
         const double interval = interpolate_jit ? (dynamic ? latency : period_ms * multiplier) : 0.0;
         lead_slots_ = static_cast<std::uint32_t>(std::clamp(
             std::ceil((latency + interval + 1.0) / period_ms) - (interpolate_jit ? 1.0 : 0.0), 1.0, 4.0 * multiplier));
+    }
+    // The cap follows the multiplier (Dynamic's refreshes per real frame, 2-4):
+    // a lead above a lowered cap is the cap, or no frame (each told the cap)
+    // would match it to be scored, and it would come down only by a probe (DCS
+    // 231933: leadSlots=9 in the summary while the game was told 8).
+    if (lead_slots_ > 4 * multiplier) {
+        lead_slots_ = 4 * multiplier;
+        lead_floor_ = std::min(lead_floor_, lead_slots_);
+        lead_floor_proven_ = std::min(lead_floor_proven_, lead_slots_);
+        lead_probe_.reset();
+        lead_history_.clear();
     }
     // Predict the first slot the frame will really reach. Interpolated
     // frames before it are shown first, so the frame itself is shown (and
@@ -5285,7 +5297,9 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
             ", distinctFps=" + Number(PerSecond(delta(&Totals::distinct), seconds), 1) +
             ", standbyS=" + Number(standby - summary_standby_seconds_, 1) +
             ", repeatedFrames=" + std::to_string(repeated_submissions_) + ", appLatencyMs=" + Number(app_latency_ms_, 1) +
-            ", leadSlots=" + std::to_string(lead_slots_) + ", leadFloor=" + std::to_string(lead_floor_) +
+            ", leadSlots=" + std::to_string(lead_slots_) +
+            (lead_slots_ >= 4 * std::max(2u, EffectiveMultiplierLocked()) ? " (cap)" : "") +
+            ", leadFloor=" + std::to_string(lead_floor_) +
             ", leadMoves=+" + std::to_string(delta(&Totals::lead_ups)) + "/-" +
             std::to_string(delta(&Totals::lead_downs)) + ", leadProbes=" + std::to_string(delta(&Totals::lead_probes)) +
             "/" + std::to_string(delta(&Totals::lead_probes_failed)) +
