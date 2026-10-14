@@ -653,6 +653,28 @@ int main(int argc, char** argv) {
         const int before_shown=releases;
         Check(PumpUntil(renderer,frame,[&]{return releases>before_shown;}),"The shown panel did not refresh");
         CheckUploadedRaster(RasterizeOsd(settings,true,shown,OsdTelemetry{},false),DXGI_FORMAT_B8G8R8A8_UNORM_SRGB);
+
+        // A raster finished before a change is dropped, not uploaded after it.
+        settings.opacity=70; renderer.Prepare(settings,shown,false,false);
+        renderer.Append(frame,true);
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        auto changed=shown; changed.application="Changed.exe"; settings.opacity=60;
+        renderer.Prepare(settings,changed,false,false);
+        const int before_change=releases;
+        Check(PumpUntil(renderer,frame,[&]{return releases>before_change;}),"The changed panel did not refresh");
+        CheckUploadedRaster(RasterizeOsd(settings,true,changed,OsdTelemetry{},false),DXGI_FORMAT_B8G8R8A8_UNORM_SRGB);
+
+        // Moving or resizing the panel applies to the image already up.
+        settings.update_hz=1; renderer.Prepare(settings,changed,false,false);
+        const int before_slow=releases;
+        Check(PumpUntil(renderer,frame,[&]{return releases>before_slow;}),"The 1 Hz panel did not refresh");
+        const int placed=acquires;
+        settings.horizontal_degrees=-20; settings.scale=50; renderer.Prepare(settings,changed,false,false);
+        const auto* quad=reinterpret_cast<const XrCompositionLayerQuad*>(renderer.Append(frame,true));
+        Check(quad && quad->pose.position.x<0,"Moving the panel did not apply at once");
+        const auto settled=std::chrono::steady_clock::now()+std::chrono::milliseconds(200);
+        while(std::chrono::steady_clock::now()<settled) { renderer.Append(frame,true); std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
+        Check(acquires==placed,"Moving or resizing the panel rasterized it again");
         renderer.Shutdown();
     }
     for(auto level:{LogLevel::Info,LogLevel::Debug}) {

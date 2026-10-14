@@ -432,6 +432,7 @@ void OsdRenderer::RasterWorker() {
         try { bitmap=RasterizeOsd(request.settings,request.compact,request.snapshot,request.telemetry,request.rgba); }
         catch (...) { /* Report a failed image through the normal OSD status path. */ }
         bitmap.raster_ms=std::chrono::duration<double,std::milli>(Clock::now()-raster_start).count();
+        bitmap.generation=request.generation;
         if(!edge_logged && bitmap.Valid() && logger_ && logger_->IsDebugEnabled()) {
             // Inspect the actual game's CPU image once, off the submission
             // thread. Opposing edge strips distinguish source-image bands
@@ -545,9 +546,13 @@ std::pair<OsdPresentation, OsdPresentation> OsdRenderer::Prepare(const OsdSettin
         if (cycle && !cycle_down_) { compact_=!compact_; updated_={}; }
     }
     toggle_down_=toggle; cycle_down_=cycle; primed_=true;
+    // Where the panel sits and how large it is apply to the image already
+    // up; everything else needs a new raster.
+    const bool placed=settings.scale!=settings_.scale || settings.horizontal_degrees!=settings_.horizontal_degrees ||
+        settings.vertical_degrees!=settings_.vertical_degrees || settings.distance_meters!=settings_.distance_meters;
     const bool changed=!configured_ || settings.enabled!=settings_.enabled || compact_!=status_.compact ||
         (settings.enabled&&visible_)!=status_.shown || settings.update_hz!=settings_.update_hz ||
-        settings.scale!=settings_.scale || settings.opacity!=settings_.opacity || settings.body_order!=settings_.body_order ||
+        settings.opacity!=settings_.opacity || settings.body_order!=settings_.body_order ||
         settings.show_graph!=settings_.show_graph || settings.show_turbo!=settings_.show_turbo || settings.show_pivot!=settings_.show_pivot || settings.show_modules!=settings_.show_modules ||
         settings.show_framegen!=settings_.show_framegen || settings.compact_show_framegen!=settings_.compact_show_framegen ||
         settings.show_framegen_fps!=settings_.show_framegen_fps ||
@@ -555,19 +560,22 @@ std::pair<OsdPresentation, OsdPresentation> OsdRenderer::Prepare(const OsdSettin
         settings.compact_metrics!=settings_.compact_metrics || settings.compact_show_brand!=settings_.compact_show_brand || settings.compact_show_app!=settings_.compact_show_app ||
         settings.compact_show_runtime!=settings_.compact_show_runtime || settings.compact_show_clock!=settings_.compact_show_clock ||
         settings.compact_show_turbo!=settings_.compact_show_turbo || settings.compact_show_pivot!=settings_.compact_show_pivot ||
-        settings.accent!=settings_.accent || settings.custom_color!=settings_.custom_color || settings.horizontal_degrees!=settings_.horizontal_degrees ||
-        settings.vertical_degrees!=settings_.vertical_degrees || settings.distance_meters!=settings_.distance_meters;
+        settings.accent!=settings_.accent || settings.custom_color!=settings_.custom_color;
     if (!configured_ || revision==0 || revision!=settings_revision_) { settings_=settings; settings_revision_=revision; }
     // A hidden panel takes no snapshots, so the one it holds can be minutes
     // old: once shown, it draws after the next one arrives.
     if (snapshot) { snapshot_=std::move(*snapshot); snapshot_needed_=false; }
     else if (settings.enabled && visible_ && !before.shown) snapshot_needed_=true;
     configured_=true;
-    if(changed){
+    if(changed || placed){
         Event(false,"configuration enabled="+std::to_string(settings.enabled)+" shown="+std::to_string(settings.enabled&&visible_)+" compact="+std::to_string(compact_)+
             " refreshHz="+std::to_string(settings.update_hz)+" scale="+std::to_string(settings.scale)+" opacity="+std::to_string(settings.opacity)+
             " graph="+std::to_string(settings.show_graph)+" turbo="+std::to_string(settings.show_turbo)+" framegen="+std::to_string(settings.show_framegen)+" framegenFps="+std::to_string(settings.show_framegen_fps)+" pivot="+std::to_string(settings.show_pivot)+" modules="+std::to_string(settings.show_modules));
-        updated_={};
+    }
+    if(changed){
+        // Refresh now, and drop a raster requested before the change: it
+        // holds the old layout, settings or (after a show) old values.
+        updated_={}; ++raster_generation_;
     }
     if (settings.enabled) telemetry_.Tick(Clock::now()); else telemetry_={};
     status_.compact=compact_;
@@ -628,13 +636,17 @@ const XrCompositionLayerBaseHeader* OsdRenderer::Append(const XrFrameEndInfo& in
     if (info.layerCount>=max_layers_) { if(!stats.layer_limit)Event(false,"composition layer limit reached appLayers="+std::to_string(info.layerCount)+" runtimeMax="+std::to_string(max_layers_)); ++stats.layer_limit; status_.message="Runtime composition layer limit reached"; return nullptr; }
     if (!swapchain_ && !CreateResources()) return nullptr;
     const auto now=Clock::now();
+    // A raster from before a change never goes up: the next is requested now.
+    if (upload_ && upload_->generation!=raster_generation_) upload_.reset();
     // Swap only a finished CPU buffer. The worker never holds raster_mutex_
     // while drawing, and the submission path does not wait to acquire it.
     {
         std::unique_lock raster_lock(raster_mutex_,std::try_to_lock);
         if (raster_lock.owns_lock()) {
             if (raster_completed_) {
-                stats.raster.Add(raster_completed_->raster_ms); upload_=std::move(raster_completed_); raster_completed_.reset(); raster_requested_=false;
+                stats.raster.Add(raster_completed_->raster_ms);
+                if (raster_completed_->generation==raster_generation_) upload_=std::move(raster_completed_);
+                raster_completed_.reset(); raster_requested_=false;
             }
             // The interval runs from the request, so the raster and upload
             // time do not stretch it (from the upload, 20 Hz refreshed at
@@ -645,7 +657,7 @@ const XrCompositionLayerBaseHeader* OsdRenderer::Append(const XrFrameEndInfo& in
                     try { raster_thread_=std::thread([this] { RasterWorker(); }); }
                     catch (...) { Fail("OSD worker",XR_ERROR_OUT_OF_MEMORY); return nullptr; }
                 }
-                raster_request_=RasterRequest{settings_,compact_,rgba_,snapshot_,telemetry_};
+                raster_request_=RasterRequest{settings_,compact_,rgba_,snapshot_,telemetry_,raster_generation_};
                 raster_requested_=true; updated_=now; raster_cv_.notify_one();
             }
         } else ++stats.worker_busy;

@@ -102,6 +102,8 @@ struct OsdBitmap {
     int height{};
     std::vector<std::uint32_t> pixels;
     double raster_ms{};
+    // The renderer's raster generation when it was requested (OsdRenderer).
+    std::uint64_t generation{};
     bool Valid() const { return content_width>2 && content_width<=width && height>2 && height<=texture_height && pixels.size()==static_cast<std::size_t>(width)*height; }
 };
 
@@ -217,7 +219,11 @@ class OsdRenderer {
         bool compact{}, rgba{};
         OsdSnapshot snapshot;
         OsdTelemetry telemetry;
+        std::uint64_t generation{};
     };
+    // Advanced by each change that needs a new raster (a show, a layout
+    // cycle, new settings): a raster requested before it is dropped.
+    std::uint64_t raster_generation_{};
     std::thread raster_thread_;
     std::mutex raster_mutex_;
     std::condition_variable raster_cv_;
