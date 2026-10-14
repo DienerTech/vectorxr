@@ -3708,6 +3708,19 @@ XrResult OpenXrLayer::GetVisibilityMaskKHR(XrSession session,
     return result;
 }
 
+void OpenXrLayer::LogSwapchainFormatsOnChange(const std::string& line) {
+    // Star Citizen asks before every swapchain it creates (about 250 times a
+    // session): the list is logged when it changes.
+    {
+        std::scoped_lock lock(mutex_);
+        if (line == last_logged_swapchain_formats_) {
+            return;
+        }
+        last_logged_swapchain_formats_ = line;
+    }
+    logger_.Info(line);
+}
+
 XrResult OpenXrLayer::EnumerateSwapchainFormats(XrSession session,
                                                 uint32_t format_capacity_input,
                                                 uint32_t* format_count_output,
@@ -3749,7 +3762,7 @@ XrResult OpenXrLayer::EnumerateSwapchainFormats(XrSession session,
         for (const int64_t format : game_formats) {
             stream << ' ' << format;
         }
-        logger_.Info(stream.str());
+        LogSwapchainFormatsOnChange(stream.str());
         return XR_SUCCESS;
     }
     const XrResult result = next_enumerate_swapchain_formats_(
@@ -3770,7 +3783,7 @@ XrResult OpenXrLayer::EnumerateSwapchainFormats(XrSession session,
         for (uint32_t i = 0; i < count; ++i) {
             stream << ' ' << formats[i];
         }
-        logger_.Info(stream.str());
+        LogSwapchainFormatsOnChange(stream.str());
     }
     return result;
 }
@@ -10782,6 +10795,7 @@ void OpenXrLayer::CaptureInstanceFunctions() {
 }
 
 void OpenXrLayer::ResetSessionState() {
+    last_logged_swapchain_formats_.clear();
     // Both xrDestroySession and an xrDestroyInstance that skipped it end a session here.
     if (active_session_ != XR_NULL_HANDLE) {
         logger_.Info("Thread census at session end: " + thread_census_.Summary());

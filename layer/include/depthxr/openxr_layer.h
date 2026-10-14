@@ -565,6 +565,8 @@ class OpenXrLayer {
     bool FrameGenComposesQuadViews() const;
     void ResetSwapchainState();
     void LogSwapchainSummary(XrSwapchain swapchain, const SwapchainInfo& info, std::string_view event_name);
+    // Logs xrEnumerateSwapchainFormats' list when it differs from the last one this session.
+    void LogSwapchainFormatsOnChange(const std::string& line);
     // Counts an application call on the calling thread; logs the first call of each kind on each thread.
     void NoteThread(ThreadCensus::Call call);
     bool ShouldDeferSwapchainRelease(const SwapchainInfo& info) const;
@@ -1089,6 +1091,8 @@ class OpenXrLayer {
         bool toggle_latched{false};
         bool toggle_suspended{false};
     };
+    // The swapchain format list last logged this session.
+    std::string last_logged_swapchain_formats_;
     // The application called xrCreateSession on this instance, and the
     // number of extensions it enabled for it.
     bool instance_requested_session_{false};
