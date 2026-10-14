@@ -1759,7 +1759,12 @@ bool VulkanBridge::Escape() {
     }
     // The game's queue did not get past its last release (or never will):
     // what it drew no longer matters, and Frame Generation's waits on the
-    // bridge's queue must end.
+    // bridge's queue must end. Deliberately so, though the game imported
+    // "written" as a timeline semaphore: should its queue still run the
+    // signals of those releases later, they no longer raise its value,
+    // which Vulkan's rules for timeline semaphores forbid. Only after the
+    // game's queue missed kRetireWaitMs; an escape from a hang, never seen
+    // in a log, and the GPU bridge tests cover it on NVIDIA.
     std::scoped_lock lock(impl_->mutex);
     impl_->written->Signal(impl_->written_value);
     if (!lost) {
