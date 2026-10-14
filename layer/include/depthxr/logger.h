@@ -25,6 +25,10 @@ class Logger {
     bool TryDebug(const std::string& message);
     // A fatal error's last line: written and flushed at once, or false while another thread holds the log.
     bool TryError(const std::string& message);
+    // At a process exit, where the logger is left alive: writes the pending
+    // "repeated N times" summary and flushes, unless another thread (one the
+    // exit ended) holds the lock. Never waits.
+    void FlushAtProcessExit();
     [[nodiscard]] bool IsDebugEnabled() const;
     [[nodiscard]] std::filesystem::path ActiveLogPath() const;
 

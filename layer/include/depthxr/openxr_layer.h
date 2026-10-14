@@ -33,6 +33,7 @@
 #include "depthxr/runtime_pacing.h"
 #include "depthxr/runtime_relay.h"
 #include "depthxr/osd_renderer.h"
+#include "depthxr/process_exit.h"
 #include "depthxr/framegen_d3d11_bridge.h"
 #include "depthxr/framegen_vulkan_bridge.h"
 #include "depthxr/framegen_presenter.h"
@@ -529,7 +530,9 @@ class OpenXrLayer {
     // EndSession only: releases an interlocked off-thread wait with a balancing
     // begin/empty submit, then waits a bounded time for it to complete.
     void ReleaseTurboPendingWaitForSessionEnd(XrSession session);
-    void ResetTurboFrameState();
+    // stop_recorder=false leaves the flight recorder running (xrDestroySession
+    // stops it once Frame Generation's presenter is down).
+    void ResetTurboFrameState(bool stop_recorder = true);
     // Frame pacing telemetry: logs a summary line (debug level) every ~5s so a
     // judder report can be localized to our drain, the runtime's end-frame, the
     // runtime's wait pacing, or upstream of the layer entirely.
@@ -1016,6 +1019,11 @@ class OpenXrLayer {
     std::uint64_t runtime_relay_acknowledged_revision_{0};
     std::atomic<bool> runtime_relay_status_dirty_{false};
     std::optional<std::chrono::steady_clock::time_point> runtime_relay_last_status_write_;
+    // The session's status and control files, removed by a normal process
+    // exit (games that skip OpenXR teardown). Guarded by mutex_.
+    ProcessExitFile runtime_relay_exit_status_;
+    ProcessExitFile runtime_relay_exit_control_;
+    bool runtime_relay_pruned_{false}; // Watcher thread only.
     // The Frame Generation events PollFrameGenRecorder last saw (watcher
     // thread only): Dynamic stand-downs and probes, and runtime halving.
     FrameGenSnapshotTrigger framegen_recorder_;
@@ -1453,6 +1461,9 @@ class OpenXrLayer {
     std::optional<std::chrono::steady_clock::time_point> turbo_metrics_binding_last_poll_time_;
     bool turbo_metrics_binding_down_cached_{false};
     std::optional<InputBinding> turbo_metrics_pressed_; // its list's binding that last went down (ActingBinding)
+    // The fields above belong to the frame thread. A settings refresh (any
+    // thread) asks for their reset here; the frame thread performs it.
+    std::atomic<bool> turbo_metrics_binding_reset_pending_{false};
     // Cleared whenever capture pauses so the first frame interval after a
     // resume (which spans the pause) never lands in the stats.
     bool turbo_metrics_was_capturing_{false};

@@ -7,6 +7,7 @@
 #include <string_view>
 #include <thread>
 
+#include "depthxr/atomic_file.h"
 #include "depthxr/config_path.h"
 
 #if defined(_WIN32)
@@ -88,30 +89,83 @@ bool WriteAtomically(const std::filesystem::path& path, const std::string& conte
     std::error_code ec;
     std::filesystem::create_directories(path.parent_path(), ec);
     if (ec) { if (error) *error = "Unable to create runtime relay directory: " + ec.message(); return false; }
-    std::filesystem::path temporary_path = path;
-    temporary_path += ".tmp." + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "." + std::to_string(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+    const std::filesystem::path temporary_path = UniqueTemporaryPath(path);
     {
         std::ofstream stream(temporary_path, std::ios::trunc);
         if (!stream) { if (error) *error = "Unable to write runtime relay temporary file"; return false; }
         stream << content;
     }
-#if defined(_WIN32)
-    if (!MoveFileExW(temporary_path.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        const DWORD move_error = GetLastError();
-        std::filesystem::remove(temporary_path, ec);
+    std::uint32_t move_error = 0;
+    if (!ReplaceFileAtomically(temporary_path, path, &move_error)) {
         if (error) *error = "Unable to replace runtime relay file: Win32 error " + std::to_string(move_error);
         return false;
     }
-#else
-    std::filesystem::remove(path, ec);
-    ec.clear();
-    std::filesystem::rename(temporary_path, path, ec);
-    if (ec) { std::filesystem::remove(temporary_path, ec); if (error) *error = "Unable to replace runtime relay file: " + ec.message(); return false; }
-#endif
     return true;
 }
 
+// "<pid>-<unix ms>-..." from a status or control file name (or its temporary).
+bool ParseSessionFileName(const std::filesystem::path& path, std::uint32_t* process_id, std::uint64_t* started) {
+    const std::wstring name = path.filename().wstring();
+    std::size_t position = 0;
+    const auto read_number = [&](std::uint64_t limit, std::uint64_t* value) {
+        const std::size_t start = position;
+        *value = 0;
+        while (position < name.size() && name[position] >= L'0' && name[position] <= L'9') {
+            const std::uint64_t digit = static_cast<std::uint64_t>(name[position] - L'0');
+            if (*value > (limit - digit) / 10) return false;
+            *value = *value * 10 + digit;
+            ++position;
+        }
+        return position > start && position < name.size() && name[position++] == L'-';
+    };
+    std::uint64_t pid = 0;
+    if (!read_number(UINT32_MAX, &pid) || !read_number(UINT64_MAX, started)) return false;
+    *process_id = static_cast<std::uint32_t>(pid);
+    return name.find(L".json") != std::wstring::npos;
+}
+
 } // namespace
+
+bool RuntimeRelaySessionAlive(std::uint32_t process_id, std::uint64_t started_unix_milliseconds) {
+#if defined(_WIN32)
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process_id);
+    if (!process) return GetLastError() != ERROR_INVALID_PARAMETER;
+    DWORD exit_code = 0;
+    const bool running = GetExitCodeProcess(process, &exit_code) == FALSE || exit_code == STILL_ACTIVE;
+    FILETIME created{}, exited{}, kernel{}, user{};
+    bool same = true;
+    if (GetProcessTimes(process, &created, &exited, &kernel, &user)) {
+        // FILETIME counts 100 ns since 1601; 11644473600000 ms separate the epochs.
+        const std::uint64_t ticks = (static_cast<std::uint64_t>(created.dwHighDateTime) << 32) | created.dwLowDateTime;
+        const std::uint64_t created_unix_milliseconds = ticks / 10000 - 11644473600000ull;
+        same = created_unix_milliseconds <= started_unix_milliseconds;
+    }
+    CloseHandle(process);
+    return running && same;
+#else
+    (void)process_id;
+    (void)started_unix_milliseconds;
+    return true;
+#endif
+}
+
+std::size_t PruneRuntimeRelayFiles(const std::filesystem::path& root, const RuntimeRelaySessionAliveCheck& alive) {
+    std::size_t removed = 0;
+    for (const char* folder : {"status", "control"}) {
+        std::error_code ec;
+        const std::filesystem::path directory = root / folder;
+        if (!std::filesystem::is_directory(directory, ec)) continue;
+        for (auto iterator = std::filesystem::directory_iterator(directory, ec);
+             !ec && iterator != std::filesystem::directory_iterator(); iterator.increment(ec)) {
+            std::uint32_t process_id = 0;
+            std::uint64_t started = 0;
+            if (!ParseSessionFileName(iterator->path(), &process_id, &started) || alive(process_id, started)) continue;
+            std::error_code remove_error;
+            if (std::filesystem::remove(iterator->path(), remove_error)) ++removed;
+        }
+    }
+    return removed;
+}
 
 std::filesystem::path ResolveRuntimeRelayRoot() {
     if (std::filesystem::path env_path = EnvironmentPath(L"VECTORXR_RUNTIME_RELAY_PATH"); !env_path.empty()) return env_path;

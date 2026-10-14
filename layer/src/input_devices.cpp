@@ -1,4 +1,5 @@
 #include "depthxr/input_devices.h"
+#include "depthxr/process_exit.h"
 
 #include <algorithm>
 #include <array>
@@ -382,8 +383,10 @@ class DirectInputPoller {
     ~DirectInputPoller() {
         // Static destruction. At process exit the connector thread may have been
         // terminated mid-call (possibly holding mutex_), so never lock or wait
-        // here; if it could still be running, leak rather than race it.
-        if (connector_running_.load()) {
+        // here; if it could still be running, leak rather than race it. Nor
+        // release devices at a process exit: the frame thread may have been
+        // ended inside DirectInput holding its locks, and the exit frees all.
+        if (connector_running_.load() || ProcessExiting()) {
             return;
         }
         for (IDirectInputDevice8W* device : retired_) {

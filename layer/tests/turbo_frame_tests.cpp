@@ -147,6 +147,65 @@ class TurboFrameTestPeer {
             capturing ? TurboMetricsMode::kAlways : TurboMetricsMode::kOff, {}, true, 0);
     }
     static void ResetMetrics() { Layer().ResetTurboMetricsState(); }
+    // An application LOCAL space that Pivot also anchors to.
+    static void TrackSpaceAsAnchor(XrSpace space) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.tracked_local_spaces_.insert(space);
+        layer.pivotxr_translation_anchor_ = OpenXrLayer::PivotTranslationAnchor{XrVector3f{}, space};
+    }
+    static bool SpaceTrackedAsLocal(XrSpace space) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        return layer.tracked_local_spaces_.contains(space);
+    }
+    static bool SpaceKnown(XrSpace space) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        return layer.tracked_local_spaces_.contains(space) ||
+               (layer.pivotxr_translation_anchor_ && layer.pivotxr_translation_anchor_->space == space);
+    }
+    static void ForgetAnchor() {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.pivotxr_translation_anchor_.reset();
+    }
+    static XrResult DestroySpace(XrSpace space, PFN_xrDestroySpace runtime) {
+        auto& layer = Layer();
+        const auto previous = layer.next_destroy_space_;
+        layer.next_destroy_space_ = runtime;
+        const XrResult result = layer.DestroySpace(space);
+        layer.next_destroy_space_ = previous;
+        return result;
+    }
+    // xrBeginSession's Turbo settings line, in a session Turbo yielded to FG.
+    static void SessionSettingsAfterYield() {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.turbo_yielded_to_framegen_ = true;
+        layer.ConfigureTurboExperiment();
+        layer.turbo_yielded_to_framegen_ = false;
+    }
+    // Two frames five seconds apart: the second ends a pacing window.
+    static void PacingWindow(bool framegen_owns_pacing, bool turbo_engaged) {
+        auto& layer = Layer();
+        layer.framegen_owns_pacing_.store(framegen_owns_pacing);
+        layer.pacing_window_start_.reset();
+        layer.pacing_last_end_time_.reset();
+        const auto start = std::chrono::steady_clock::now();
+        layer.RecordFramePacing(start, start, start + 1ms, turbo_engaged);
+        layer.RecordFramePacing(start + 6s, start + 6s, start + 6s + 70ms, turbo_engaged);
+        layer.framegen_owns_pacing_.store(false);
+    }
+    // Binding-gated metrics capture, started by a press.
+    static void ArmMetricsBinding() {
+        auto& layer = Layer();
+        layer.turbo_metrics_capture_armed_ = true;
+        layer.turbo_metrics_binding_was_down_ = true;
+    }
+    static bool MetricsBindingArmed() { return Layer().turbo_metrics_capture_armed_; }
+    // The frame thread's poll of the capture binding.
+    static bool PollMetricsBinding() { return Layer().IsTurboMetricsCaptureArmed({}, 100); }
     static void WaitMetrics() {
         if (Layer().turbo_metrics_write_future_.valid()) Layer().turbo_metrics_write_future_.wait();
     }
@@ -261,6 +320,17 @@ class TurboFrameTestPeer {
     }
     // The settings file is read again now (as the layer's watcher does).
     static void PollConfigFile() { Layer().PollConfigFile(); }
+    // Logs to `log` from now on, as a new instance does.
+    static void StartLog(const std::filesystem::path& log) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.BeginInstanceLogLocked(log);
+    }
+    // Closes the log file, so the folder holding it can be removed: the next
+    // line would open `log`, which is in that folder too.
+    static void ReleaseLog(const std::filesystem::path& log) { Layer().logger_.Initialize(log); }
+    // The frame that follows a logged wait for a steady cadence.
+    static void CadenceJustStabilized() { Layer().turbo_cadence_pause_logged_ = true; }
     static ConfigDocument LoadedConfig() {
         auto& layer = Layer();
         std::scoped_lock lock(layer.mutex_);
@@ -442,6 +512,34 @@ class TurboFrameTestPeer {
         layer.logger_.SetLevel(LogLevel::Debug);
         layer.turbo_trace_.Start(layer.logger_);
         return layer.logger_.ActiveLogPath();
+    }
+    static bool RecorderRunning() { return Layer().turbo_trace_.Enabled(); }
+    static XrResult DestroySession(XrSession session, PFN_xrDestroySession runtime) {
+        auto& layer = Layer();
+        const auto previous = layer.next_destroy_session_;
+        layer.next_destroy_session_ = runtime;
+        const XrResult result = layer.DestroySession(session);
+        layer.next_destroy_session_ = previous;
+        return result;
+    }
+    static XrResult EndSession(XrSession session, PFN_xrEndSession runtime) {
+        auto& layer = Layer();
+        const auto previous = layer.next_end_session_;
+        layer.next_end_session_ = runtime;
+        const XrResult result = layer.EndSession(session);
+        layer.next_end_session_ = previous;
+        return result;
+    }
+    // While held, Frame Generation's presenter looks like a thread a runtime
+    // keeps inside a call: stopping it gives up after `wait`.
+    static void HoldPresenterInRuntime(bool held, std::chrono::milliseconds wait) {
+        FrameGenPresenter& framegen = Layer().framegen_;
+        {
+            std::scoped_lock lock(framegen.mutex_);
+            framegen.compositor_running_ = held;
+            framegen.compositor_stop_ = false;
+        }
+        framegen.SetTeardownWait(wait);
     }
     static void EndRecorder() {
         Layer().turbo_trace_.Stop();
@@ -1621,6 +1719,7 @@ void TestOwnershipDesyncRecoversInSession() {
            "Flight recorder omitted the fault or its recovery");
     Expect(std::filesystem::exists(depthxr::TurboFrameTestPeer::SnapshotPath(recorder_log)),
            "A fault did not freeze a recorder snapshot");
+    depthxr::TurboFrameTestPeer::ReleaseLog(recovery_path / "released.log");
     std::error_code error;
     std::filesystem::remove_all(recovery_path, error);
 }
@@ -2183,6 +2282,188 @@ void TestConfigReloadWhileFrameGenOwnsPacing() {
     std::filesystem::remove_all(recovery, error);
 }
 
+// velocity7's Star Citizen launch after a normal exit logged "frame cadence
+// stabilized; pipelining engages" right before the recovery block that kept
+// Turbo off, and nothing when the app's Turbo Safety clear let Turbo retry.
+void TestRecoveryBlockLogsWhatTurboDoes() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    const auto directory = std::filesystem::temp_directory_path() /
+                           ("vxr-recovery-log-" + std::to_string(GetCurrentProcessId()));
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    std::filesystem::create_directories(directory / "recovery");
+    depthxr::TurboFrameTestPeer::StartLog(directory / "recovery.log");
+    depthxr::TurboFrameTestPeer::ConfigureRecovery(directory / "recovery");
+    // An earlier process of this setup ended with Turbo armed. Process ids
+    // are multiples of four, so this one never runs.
+    const auto marker = directory / "recovery" / "4294967291-1-1.json";
+    std::ofstream(marker) << R"({"version": 1, "fingerprint": "turbo-frame-failure-simulation", "state": "armed", )"
+                          << R"("processCreated": "1", "processId": 4294967291, "updatedAtUnixMilliseconds": 1})";
+    depthxr::TurboFrameTestPeer::CadenceJustStabilized();
+    const auto end_info = FrameEndInfo();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
+           "A frame under a recovery block failed");
+    std::string text = depthxr::TurboFrameTestPeer::Log();
+    Expect(text.find("Turbo recovery: The previous Turbo session ended without a clean shutdown") != std::string::npos,
+           "The recovery block was not logged");
+    Expect(text.find("pipelining engages") == std::string::npos,
+           "A recovery block that keeps Turbo off logged that pipelining engages");
+
+    std::filesystem::remove(marker); // The app's Turbo Safety clear.
+    Expect(AppFrame(end_info) == XR_SUCCESS, "The frame after the app's clear failed");
+    text = depthxr::TurboFrameTestPeer::Log();
+    Expect(text.find("Turbo recovery block cleared via the VectorXR app; Turbo retries.") != std::string::npos,
+           "The app's clear of the recovery block was not logged");
+    Expect(text.find("Turbo mode enabled via") == std::string::npos && text.find("Turbo mode disabled via") == std::string::npos,
+           "The app's clear was logged as a toggle press");
+    depthxr::TurboFrameTestPeer::ConfigureRecovery({});
+    depthxr::TurboFrameTestPeer::ReleaseLog(directory / "released.log");
+    std::filesystem::remove_all(directory, error);
+}
+
+// Every FG session's flight recorder ended with the presenter's runtime.wait
+// open: xrDestroySession stopped it before the presenter was torn down.
+bool g_recorder_running_at_runtime_destroy = false;
+XrResult XRAPI_CALL RecordingDestroySession(XrSession) {
+    g_recorder_running_at_runtime_destroy = depthxr::TurboFrameTestPeer::RecorderRunning();
+    return XR_SUCCESS;
+}
+
+void TestDestroySessionRecordsUntilTheSessionIsGone() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    const auto directory = std::filesystem::temp_directory_path() /
+                           ("vxr-destroy-recorder-" + std::to_string(GetCurrentProcessId()));
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    depthxr::TurboFrameTestPeer::StartRecorder(directory / "frame.log");
+    Expect(depthxr::TurboFrameTestPeer::RecorderRunning(), "The flight recorder did not start");
+    Expect(depthxr::TurboFrameTestPeer::DestroySession(TestSession(), &RecordingDestroySession) == XR_SUCCESS,
+           "xrDestroySession failed");
+    Expect(g_recorder_running_at_runtime_destroy,
+           "xrDestroySession stopped the flight recorder before the runtime's session (and FG's presenter) was gone");
+    Expect(!depthxr::TurboFrameTestPeer::RecorderRunning(), "xrDestroySession left the flight recorder running");
+    depthxr::TurboFrameTestPeer::EndRecorder();
+    depthxr::TurboFrameTestPeer::ReleaseLog(directory / "released.log");
+    std::filesystem::remove_all(directory, error);
+}
+
+// DCS ends a session with xrEndSession, then xrDestroySession. A presenter
+// thread the runtime still holds after its xrEndSession is stopped or left
+// behind at xrDestroySession: xrEndSession must not stop the recorder first.
+XrResult XRAPI_CALL EndedSession(XrSession) { return XR_SUCCESS; }
+
+void TestEndSessionRecordsAPresenterLeftInTheRuntime() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    const auto directory = std::filesystem::temp_directory_path() /
+                           ("vxr-end-recorder-" + std::to_string(GetCurrentProcessId()));
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    depthxr::TurboFrameTestPeer::StartRecorder(directory / "frame.log");
+    depthxr::TurboFrameTestPeer::HoldPresenterInRuntime(true, std::chrono::milliseconds(40));
+    Expect(depthxr::TurboFrameTestPeer::EndSession(TestSession(), &EndedSession) == XR_SUCCESS, "xrEndSession failed");
+    Expect(depthxr::TurboFrameTestPeer::RecorderRunning(),
+           "xrEndSession stopped the flight recorder while Frame Generation's presenter was still in the runtime");
+    // The runtime lets the thread go; xrDestroySession tears it down.
+    depthxr::TurboFrameTestPeer::HoldPresenterInRuntime(false, std::chrono::milliseconds(2000));
+    g_recorder_running_at_runtime_destroy = false;
+    Expect(depthxr::TurboFrameTestPeer::DestroySession(TestSession(), &RecordingDestroySession) == XR_SUCCESS,
+           "xrDestroySession failed");
+    Expect(g_recorder_running_at_runtime_destroy, "The flight recorder stopped before the runtime's xrDestroySession");
+    Expect(!depthxr::TurboFrameTestPeer::RecorderRunning(), "xrDestroySession left the flight recorder running");
+
+    // A presenter that stopped: xrEndSession still stops the recorder.
+    depthxr::TurboFrameTestPeer::StartRecorder(directory / "frame.log");
+    Expect(depthxr::TurboFrameTestPeer::EndSession(TestSession(), &EndedSession) == XR_SUCCESS, "xrEndSession failed");
+    Expect(!depthxr::TurboFrameTestPeer::RecorderRunning(), "xrEndSession left the flight recorder running");
+    depthxr::TurboFrameTestPeer::EndRecorder();
+    depthxr::TurboFrameTestPeer::ReleaseLog(directory / "released.log");
+    std::filesystem::remove_all(directory, error);
+}
+
+// A settings refresh runs on whichever thread loaded the settings (often the
+// config watcher's), while the frame thread polls the metrics binding's edge
+// detector without the lock: the reset a refresh asks for happens on the
+// frame thread.
+void TestMetricsBindingResetWaitsForTheFrameThread() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    depthxr::TurboFrameTestPeer::ArmMetricsBinding();
+    depthxr::ConfigDocument config;
+    config.version = 3; // Metrics capture "always", where the harness had it off.
+    depthxr::TurboFrameTestPeer::ReloadConfig(config);
+    Expect(depthxr::TurboFrameTestPeer::MetricsBindingArmed(),
+           "A settings refresh reset the metrics binding's state outside the frame thread");
+    Expect(!depthxr::TurboFrameTestPeer::PollMetricsBinding() && !depthxr::TurboFrameTestPeer::MetricsBindingArmed(),
+           "The frame thread did not apply the reset a metrics setting change asked for");
+}
+
+// The debug "Frame pacing" line read FG's game-facing xrEndFrame (FG holding
+// the game to its rate, 59-118 ms in MSFS) as runtimeEndFrame, a runtime
+// stall, and printed Turbo's async handoff counters with Turbo off.
+void TestFramePacingLineUnderFrameGen() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    const auto directory = std::filesystem::temp_directory_path() /
+                           ("vxr-pacing-line-" + std::to_string(GetCurrentProcessId()));
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    depthxr::TurboFrameTestPeer::StartRecorder(directory / "pacing.log");
+    depthxr::TurboFrameTestPeer::PacingWindow(true, false);
+    std::string text = depthxr::TurboFrameTestPeer::Log();
+    Expect(text.find("framegen=1, frameGenEndFrame avg/max=") != std::string::npos,
+           "Under Frame Generation the pacing line should name FG's xrEndFrame");
+    Expect(text.find("runtimeEndFrame") == std::string::npos && text.find("asyncHandoff") == std::string::npos,
+           "Under Frame Generation the pacing line printed Turbo's runtime fields");
+    depthxr::TurboFrameTestPeer::PacingWindow(false, false);
+    text = depthxr::TurboFrameTestPeer::Log();
+    Expect(text.find("runtimeEndFrame avg/max=") != std::string::npos && text.find("asyncHandoff") == std::string::npos,
+           "With Turbo off the pacing line should keep the runtime's fields and leave out async handoffs");
+    depthxr::TurboFrameTestPeer::PacingWindow(false, true);
+    text = depthxr::TurboFrameTestPeer::Log();
+    Expect(text.find("asyncHandoff") != std::string::npos, "An engaged async pipeline should report its handoffs");
+    depthxr::TurboFrameTestPeer::SessionSettingsAfterYield();
+    text = depthxr::TurboFrameTestPeer::Log();
+    Expect(text.find("Turbo session settings (unused: Frame Generation paces this session): application=") !=
+               std::string::npos,
+           "After Turbo yielded to Frame Generation, its session settings were logged as if in use");
+    depthxr::TurboFrameTestPeer::EndRecorder();
+    depthxr::TurboFrameTestPeer::ReleaseLog(directory / "released.log");
+    std::filesystem::remove_all(directory, error);
+}
+
+// xrDestroySpace was forwarded before the layer let the space go: another
+// thread could still take it as Pivot's anchor and locate it after the
+// runtime destroyed it, and a space created meanwhile under the same handle
+// lost its tracking to the late cleanup.
+bool g_space_known_at_runtime_destroy = true;
+XrResult XRAPI_CALL CheckingDestroySpace(XrSpace space) {
+    g_space_known_at_runtime_destroy = depthxr::TurboFrameTestPeer::SpaceKnown(space);
+    return XR_SUCCESS;
+}
+XrResult XRAPI_CALL RefusingDestroySpace(XrSpace) { return XR_ERROR_RUNTIME_FAILURE; }
+
+void TestDestroySpaceLetsGoBeforeTheRuntime() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    const XrSpace space = reinterpret_cast<XrSpace>(static_cast<std::uintptr_t>(0x5150));
+    depthxr::TurboFrameTestPeer::TrackSpaceAsAnchor(space);
+    Expect(depthxr::TurboFrameTestPeer::DestroySpace(space, &CheckingDestroySpace) == XR_SUCCESS, "xrDestroySpace failed");
+    Expect(!g_space_known_at_runtime_destroy,
+           "The layer still tracked the space, as Pivot's anchor, while the runtime destroyed it");
+    depthxr::TurboFrameTestPeer::TrackSpaceAsAnchor(space);
+    Expect(depthxr::TurboFrameTestPeer::DestroySpace(space, &RefusingDestroySpace) == XR_ERROR_RUNTIME_FAILURE,
+           "A refused xrDestroySpace must reach the application");
+    Expect(depthxr::TurboFrameTestPeer::SpaceTrackedAsLocal(space),
+           "A space the runtime refused to destroy lost its classification");
+    Expect(depthxr::TurboFrameTestPeer::DestroySpace(space, &CheckingDestroySpace) == XR_SUCCESS &&
+               !depthxr::TurboFrameTestPeer::SpaceTrackedAsLocal(space),
+           "Cleaning up the test space failed");
+    depthxr::TurboFrameTestPeer::ForgetAnchor();
+}
+
 std::size_t Occurrences(const std::string& text, const std::string& needle) {
     std::size_t count = 0;
     for (std::size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + needle.size())) {
@@ -2439,6 +2720,12 @@ int main() {
     TestQuadViewsOsdTagFollowsBegunConfiguration();
     // Last: it points the layer's log at a file of its own.
     TestConfigWarningsLoggedOncePerKey();
+    TestRecoveryBlockLogsWhatTurboDoes();
+    TestDestroySessionRecordsUntilTheSessionIsGone();
+    TestEndSessionRecordsAPresenterLeftInTheRuntime();
+    TestMetricsBindingResetWaitsForTheFrameThread();
+    TestFramePacingLineUnderFrameGen();
+    TestDestroySpaceLetsGoBeforeTheRuntime();
     std::cout << "depthxr_turbo_frame_tests passed\n";
     return 0;
 }

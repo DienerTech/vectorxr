@@ -165,6 +165,18 @@ bool Logger::TryError(const std::string& message) {
     return true;
 }
 
+void Logger::FlushAtProcessExit() {
+    // A thread the exit ended inside Write still holds the lock: waiting on
+    // it would end the process (0xC000004B). Owning it means no thread of
+    // ours was inside the stream either.
+    std::unique_lock lock(mutex_, std::try_to_lock);
+    if (!lock) return;
+    FlushPendingDuplicateLocked();
+    if (stream_.is_open()) {
+        stream_.flush();
+    }
+}
+
 bool Logger::IsDebugEnabled() const {
     std::scoped_lock lock(mutex_);
     return Severity(LogLevel::Debug) <= Severity(level_);

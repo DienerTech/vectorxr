@@ -25,6 +25,7 @@
 #include "depthxr/effects.h"
 #include "depthxr/framegen_plan.h"
 #include "depthxr/input_devices.h"
+#include "depthxr/process_exit.h"
 #include "depthxr/process_info.h"
 #include "depthxr/pivot_step.h"
 #include "depthxr/pivot_view.h"
@@ -1751,15 +1752,33 @@ constexpr std::chrono::milliseconds kTurboLateWaitTimeout{2000};
 } // namespace
 
 OpenXrLayer& OpenXrLayer::Instance() {
-    static OpenXrLayer layer;
-    return layer;
+    struct Owner {
+        OpenXrLayer* layer{new OpenXrLayer()};
+        ~Owner() {
+            // Static destruction. At a process exit (Star Citizen and MSFS
+            // skip xrDestroyInstance) every other thread is already gone,
+            // perhaps inside this layer holding its locks, and runtime or
+            // driver modules loaded after this layer have already run their
+            // DLL_PROCESS_DETACH. Tearing down here would call into them (the
+            // OSD's xrDestroySwapchain, GPU waits), end the process on a dead
+            // thread's lock (0xC000004B) or wait forever for a dead worker.
+            // Leave everything to the exit, except the log's pending
+            // "repeated N times" line and buffered lines, written without
+            // waiting on its lock.
+            // An unload after xrDestroyInstance still destroys the layer.
+            if (!ProcessExiting()) delete layer;
+            else layer->logger_.FlushAtProcessExit();
+        }
+    };
+    static Owner owner;
+    return *owner.layer;
 }
 
 OpenXrLayer::~OpenXrLayer() {
-    // Safety net for apps that exit without xrDestroyInstance: join the watcher
+    // Safety net for an unload without xrDestroyInstance: join the watcher
     // before members are destroyed so a still-joinable std::thread can't trip
     // terminate(). The watcher only touches this object's own members, all of
-    // which outlive this destructor body.
+    // which outlive this destructor body. Never runs at a process exit.
     StopConfigWatcher();
     StopTurboAsyncWorker();
     DrainRuntimePacingWrites();
@@ -2246,14 +2265,18 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
     framegen_owns_pacing_.store(false, std::memory_order_release);
     framegen_session_enabled_ = false;
     turbo_yielded_to_framegen_ = false;
-    osd_.Shutdown();
-    DestroyEyeGazeResources();
-    DestroyVarjoNativeFoveationResources();
-    DestroyInternalReferenceSpaces();
-    ResetSwapchainState();
-    watch.Step("draining the bridges");
-    d3d11_bridge_.Drain();
-    vulkan_bridge_.Drain();
+    // A presenter thread left inside the runtime may be submitting the OSD's
+    // swapchain or using the layer's spaces: they stay with the session.
+    if (!framegen_.PresenterAbandoned()) {
+        osd_.Shutdown();
+        DestroyEyeGazeResources();
+        DestroyVarjoNativeFoveationResources();
+        DestroyInternalReferenceSpaces();
+        ResetSwapchainState();
+        watch.Step("draining the bridges");
+        d3d11_bridge_.Drain();
+        vulkan_bridge_.Drain();
+    }
     if (framegen_.PresenterAbandoned()) {
         // The thread left behind may still be inside the runtime: its
         // instance (and the runtime's module, and this one) stay for the
@@ -2653,6 +2676,8 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
     runtime_relay_session_id_ = std::to_string(GetCurrentProcessId()) + "-" +
         std::to_string(RuntimeRelayUnixMilliseconds()) + "-" +
         std::to_string(++runtime_relay_session_sequence_);
+    runtime_relay_exit_status_.Arm(RuntimeStatusPath(runtime_relay_root_, runtime_relay_session_id_));
+    runtime_relay_exit_control_.Arm(RuntimeControlPath(runtime_relay_root_, runtime_relay_session_id_));
     quadviews_dimensions_.clear();
     quadviews_dimensions_at_ = 0;
     runtime_relay_last_applied_revision_ = 0;
@@ -2676,8 +2701,10 @@ XrResult OpenXrLayer::DestroySession(XrSession session) {
                         [this] { return framegen_.PresenterActivity(); },
                         framegen_teardowns_watched_.load(std::memory_order_acquire));
     // Join any in-flight turbo async wait before tearing the session down.
+    // The flight recorder keeps running until the runtime's session is gone:
+    // a hang in Frame Generation's presenter teardown is what it is for.
     watch.Step("joining Turbo's in-flight wait");
-    ResetTurboFrameState();
+    ResetTurboFrameState(false);
     bool ending_active = false;
     {
         std::scoped_lock lock(mutex_);
@@ -2708,17 +2735,22 @@ XrResult OpenXrLayer::DestroySession(XrSession session) {
             framegen_owns_pacing_.store(false, std::memory_order_release);
             framegen_session_enabled_ = false;
             turbo_yielded_to_framegen_ = false;
-            osd_.Shutdown();
-            DestroyEyeGazeResources();
-            DestroyVarjoNativeFoveationResources();
-            DestroyInternalReferenceSpaces();
-            FlushDeferredSwapchainReleasesLocked("session teardown");
-            ResetD3D11QuadViewsCompositor();
-            ResetSwapchainState();
-            // The bridge's copies into the runtime's images finish before the
-            // runtime frees them with the session.
-            d3d11_bridge_.Drain();
-            vulkan_bridge_.Drain();
+            // A presenter thread left inside the runtime may be submitting
+            // the OSD's swapchain or using the layer's spaces: they stay, with
+            // the runtime's session, for the process's exit (below).
+            if (!framegen_.PresenterAbandoned()) {
+                osd_.Shutdown();
+                DestroyEyeGazeResources();
+                DestroyVarjoNativeFoveationResources();
+                DestroyInternalReferenceSpaces();
+                FlushDeferredSwapchainReleasesLocked("session teardown");
+                ResetD3D11QuadViewsCompositor();
+                ResetSwapchainState();
+                // The bridge's copies into the runtime's images finish before
+                // the runtime frees them with the session.
+                d3d11_bridge_.Drain();
+                vulkan_bridge_.Drain();
+            }
         }
     }
 
@@ -2734,10 +2766,12 @@ XrResult OpenXrLayer::DestroySession(XrSession session) {
         PinModulesForAbandonedPresenter();
         logger_.Error("xrDestroySession: the runtime's session is kept for the process's exit (Frame Generation's "
                       "presenter thread never left the runtime).");
+        turbo_trace_.Stop();
         return XR_SUCCESS;
     }
     watch.Step("in the runtime's xrDestroySession");
     const XrResult result = next_destroy_session_(session);
+    turbo_trace_.Stop();
     watch.Step("ending the bridges");
     if (destroying_active && XR_SUCCEEDED(result)) {
         if (const std::string shown = framegen_queue_.ShownLayersSummary(); !shown.empty()) logger_.Info(shown);
@@ -2926,12 +2960,14 @@ XrResult OpenXrLayer::EndSession(XrSession session) {
 
     watch.Step("in the runtime's xrEndSession");
     const XrResult result = next_end_session_(session);
+    bool presenter_left_in_runtime = false;
     if (!presenter_stopped) {
         // The runtime's session has ended (or refused to): a runtime that
         // held the presenter thread lets it go now. One it still holds is
         // left behind at xrDestroySession.
         watch.Step("stopping Frame Generation's presenter thread after the runtime's xrEndSession");
         const bool stopped = framegen_.ResetFrames();
+        presenter_left_in_runtime = !stopped;
         logger_.Info(std::string("xrEndSession: Frame Generation's presenter thread was still in the runtime; ") +
                      (stopped ? "it stopped once the runtime's session ended."
                               : "it is still there (" + framegen_.PresenterActivity() + ")."));
@@ -2943,7 +2979,9 @@ XrResult OpenXrLayer::EndSession(XrSession session) {
     }
 
     watch.Step("resetting Turbo's frame state");
-    ResetTurboFrameState();
+    // A presenter thread still in the runtime is stopped or left behind at
+    // xrDestroySession: the flight recorder keeps running until then.
+    ResetTurboFrameState(!presenter_left_in_runtime);
     {
         std::scoped_lock lock(mutex_);
         turbo_recovery_.Complete();
@@ -5721,7 +5759,12 @@ void OpenXrLayer::ConfigureTurboExperiment() {
         turbo_pacing_resolved_ = false;
         turbo_pacing_verdict_pending_ = false;
     }
-    logger_.Info("Turbo session settings: application=" + current_exe_name_ +
+    // After "Turbo yields to Frame Generation" (xrCreateSession), these are
+    // settings the session does not use; say so rather than list them as live.
+    logger_.Info(std::string(turbo_yielded_to_framegen_
+                                 ? "Turbo session settings (unused: Frame Generation paces this session): "
+                                 : "Turbo session settings: ") +
+        "application=" + current_exe_name_ +
         ", profile=" + resolved_settings_.turbo.profile_name +
         ", experimental=" + std::to_string(turbo_experiment_.enabled) +
         ", waitForSubmit=" + std::to_string(turbo_experiment_.wait_for_submit) +
@@ -6370,16 +6413,22 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                                turbo_seq_state_ == TurboSequencedState::kEngaging;
     }
     const bool cadence_countable = turbo_cadence_ready_;
+    // While a recovery block holds, Turbo engages on nothing but a retry, so
+    // the cadence lines below would only promise an engagement.
+    const bool recovery_blocked_before = turbo_recovery_blocked_.load();
+    bool cadence_stabilized = false;
     if (turbo_engaged && !turbo_cadence_ready_ && !pipeline_established) {
         // Delay the first engage until the app renders steadily.
         turbo_engaged = false;
         if (!turbo_cadence_pause_logged_) {
-            logger_.Info("Turbo: waiting for a stable renderable frame cadence before pipelining "
-                         "(app loading, hidden, or hitching); engages automatically.");
+            if (!recovery_blocked_before) {
+                logger_.Info("Turbo: waiting for a stable renderable frame cadence before pipelining "
+                             "(app loading, hidden, or hitching); engages automatically.");
+            }
             turbo_cadence_pause_logged_ = true;
         }
     } else if (turbo_engaged && turbo_cadence_pause_logged_) {
-        logger_.Info("Turbo: frame cadence stabilized; pipelining engages.");
+        cadence_stabilized = true;
         turbo_cadence_pause_logged_ = false;
     }
 
@@ -6401,6 +6450,12 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
             turbo_engaged = false;
             if (!was_blocked) logger_.Info("Turbo recovery: " + turbo_recovery_.Reason());
         }
+    }
+    // Only now is it known whether pipelining really engages: a recorded
+    // verdict can suspend Turbo and a recovery block keep it off, and each
+    // logs its own reason.
+    if (cadence_stabilized && turbo_engaged) {
+        logger_.Info("Turbo: frame cadence stabilized; pipelining engages.");
     }
     turbo_effective_async_.store(turbo_pacing_mode_ == TurboPacingMode::kAsync);
     const bool was_effective = turbo_effective_active_.exchange(turbo_engaged);
@@ -7516,30 +7571,41 @@ void OpenXrLayer::RecordFramePacing(std::chrono::steady_clock::time_point frame_
             stream << ", pacing=" << ToString(turbo_pacing_mode_);
         }
         stream << ", endFrameDelta avg/max=" << FormatDiagnosticDouble(pacing_delta_sum_ms_ / pacing_frames_)
-               << "/" << FormatDiagnosticDouble(pacing_delta_max_ms_)
-               << "ms, preRuntimeEndFrame avg/max="
-               << FormatDiagnosticDouble(pacing_drain_sum_ms_ / pacing_frames_) << "/"
-               << FormatDiagnosticDouble(pacing_drain_max_ms_)
-               << "ms, runtimeEndFrame avg/max=" << FormatDiagnosticDouble(pacing_end_sum_ms_ / pacing_frames_)
-               << "/" << FormatDiagnosticDouble(pacing_end_max_ms_) << "ms, runtimeWaitFrame avg/max=";
-        if (wait_samples > 0) {
-            stream << FormatDiagnosticDouble(wait_sum_ms / wait_samples) << "/"
-                   << FormatDiagnosticDouble(wait_max_ms) << "ms over " << wait_samples << " calls";
+               << "/" << FormatDiagnosticDouble(pacing_delta_max_ms_) << "ms";
+        if (framegen_owns_pacing_.load(std::memory_order_acquire)) {
+            // The game's xrEndFrame ends in Frame Generation, which paces it:
+            // that time is FG holding the game to its rate, not a runtime
+            // stall, and Turbo's waits, handoffs and display-time checks do
+            // not run.
+            stream << ", framegen=1, frameGenEndFrame avg/max="
+                   << FormatDiagnosticDouble(pacing_end_sum_ms_ / pacing_frames_) << "/"
+                   << FormatDiagnosticDouble(pacing_end_max_ms_) << "ms";
         } else {
-            stream << "n/a";
-        }
-        stream << ", fabricatedWaits=" << fabricated_waits;
-        if (turbo_pacing_mode_ == TurboPacingMode::kAsync || async_handoff_armed > 0) {
-            stream << ", asyncHandoff active/armed/waits/begins/secondPollBlocks/cancels="
-                   << (async_handoff_active ? 1 : 0) << "/" << async_handoff_armed << "/"
-                   << async_handoff_waits << "/" << async_handoff_begins << "/"
-                   << async_handoff_second_poll_blocks << "/" << async_handoff_cancellations;
-        }
-        if (submit_delta_samples > 0) {
-            stream << ", submittedDisplayTimeVsLatestWait avg/min/max="
-                   << FormatDiagnosticDouble(submit_delta_sum_periods / submit_delta_samples) << "/"
-                   << FormatDiagnosticDouble(submit_delta_min_periods) << "/"
-                   << FormatDiagnosticDouble(submit_delta_max_periods) << " periods";
+            stream << ", preRuntimeEndFrame avg/max="
+                   << FormatDiagnosticDouble(pacing_drain_sum_ms_ / pacing_frames_) << "/"
+                   << FormatDiagnosticDouble(pacing_drain_max_ms_)
+                   << "ms, runtimeEndFrame avg/max=" << FormatDiagnosticDouble(pacing_end_sum_ms_ / pacing_frames_)
+                   << "/" << FormatDiagnosticDouble(pacing_end_max_ms_) << "ms, runtimeWaitFrame avg/max=";
+            if (wait_samples > 0) {
+                stream << FormatDiagnosticDouble(wait_sum_ms / wait_samples) << "/"
+                       << FormatDiagnosticDouble(wait_max_ms) << "ms over " << wait_samples << " calls";
+            } else {
+                stream << "n/a";
+            }
+            stream << ", fabricatedWaits=" << fabricated_waits;
+            // Only where a handoff can arm: an engaged async pipeline.
+            if ((turbo_engaged && turbo_pacing_mode_ == TurboPacingMode::kAsync) || async_handoff_armed > 0) {
+                stream << ", asyncHandoff active/armed/waits/begins/secondPollBlocks/cancels="
+                       << (async_handoff_active ? 1 : 0) << "/" << async_handoff_armed << "/"
+                       << async_handoff_waits << "/" << async_handoff_begins << "/"
+                       << async_handoff_second_poll_blocks << "/" << async_handoff_cancellations;
+            }
+            if (submit_delta_samples > 0) {
+                stream << ", submittedDisplayTimeVsLatestWait avg/min/max="
+                       << FormatDiagnosticDouble(submit_delta_sum_periods / submit_delta_samples) << "/"
+                       << FormatDiagnosticDouble(submit_delta_min_periods) << "/"
+                       << FormatDiagnosticDouble(submit_delta_max_periods) << " periods";
+            }
         }
         logger_.Debug(stream.str());
     } else {
@@ -7659,6 +7725,13 @@ void OpenXrLayer::RecordTurboMetricsFrame(bool turbo_engaged,
 }
 
 bool OpenXrLayer::IsTurboMetricsCaptureArmed(const std::vector<InputBinding>& bindings, int sound_volume) {
+    if (turbo_metrics_binding_reset_pending_.exchange(false, std::memory_order_acq_rel)) {
+        turbo_metrics_capture_armed_ = false;
+        turbo_metrics_binding_was_down_ = false;
+        turbo_metrics_binding_last_poll_time_.reset();
+        turbo_metrics_binding_down_cached_ = false;
+        turbo_metrics_pressed_.reset();
+    }
 #if defined(_WIN32)
     const auto now = std::chrono::steady_clock::now();
     // Prime the edge detector on the first poll so a button held from the
@@ -7709,6 +7782,7 @@ void OpenXrLayer::FlushTurboMetrics(bool final_flush, bool queue_after_pending) 
     session.collection_mode = ToString(turbo_metrics_collection_mode_);
     session.timing_configuration = TurboTimingConfiguration();
     session.live = !final_flush && turbo_metrics_active_.load();
+    session.process_id = GetCurrentProcessId();
     session.started_unix_seconds = turbo_metrics_started_unix_seconds_;
     session.updated_unix_seconds =
         std::chrono::duration_cast<std::chrono::seconds>(
@@ -8040,7 +8114,7 @@ void OpenXrLayer::ReleaseTurboPendingWaitForSessionEnd(XrSession session) {
     }
 }
 
-void OpenXrLayer::ResetTurboFrameState() {
+void OpenXrLayer::ResetTurboFrameState(bool stop_recorder) {
     // Final metrics flush first (it takes turbo_mutex_ itself and joins the
     // async writer); a second call at teardown is a no-op.
     ResetTurboMetricsState();
@@ -8064,7 +8138,7 @@ void OpenXrLayer::ResetTurboFrameState() {
                       "continuing without it.");
     }
     // Stop the recorder only after the drain so a teardown stall is captured.
-    turbo_trace_.Stop();
+    if (stop_recorder) turbo_trace_.Stop();
     turbo_async_waits_before_begin_ = false;
     turbo_dropped_frame_log_budget_ = 5;
     end_frame_error_log_budget_ = 5;
@@ -9994,9 +10068,14 @@ XrResult OpenXrLayer::DestroySpace(XrSpace space) {
                       " is kept until its session ends: Frame Generation's presenter thread may still submit it.");
         return XR_SUCCESS;
     }
-    watch.Step("in the runtime's xrDestroySpace");
-    const XrResult result = next_destroy_space_(space);
-    if (XR_SUCCEEDED(result)) {
+    // The layer lets the space go before the runtime does: once the runtime
+    // has destroyed it, no other thread may pick it up as Pivot's anchor or
+    // classify it, and a space the runtime then creates under the same handle
+    // must not lose its tracking to this cleanup. A refused destroy restores
+    // what classifies the space; the caches refill on their own.
+    bool was_view = false, was_local = false, was_stage = false;
+    std::optional<ApplicationActionSpace> action_space;
+    {
         std::scoped_lock lock(mutex_);
         const auto remove_space_from_frame = [space](PivotPoseDeltaFrame& frame) {
             for (std::size_t index = 0; index < frame.space_pose_delta_count;) {
@@ -10023,10 +10102,10 @@ XrResult OpenXrLayer::DestroySpace(XrSpace space) {
         }
         logged_pivot_space_conversions_.erase(space);
         failed_pivot_space_conversions_.erase(space);
-        tracked_view_spaces_.erase(space);
-        application_action_spaces_.erase(space);
-        tracked_local_spaces_.erase(space);
-        tracked_stage_spaces_.erase(space);
+        was_view = tracked_view_spaces_.erase(space) > 0;
+        if (auto node = application_action_spaces_.extract(space)) action_space = std::move(node.mapped());
+        was_local = tracked_local_spaces_.erase(space) > 0;
+        was_stage = tracked_stage_spaces_.erase(space) > 0;
         if (pivotxr_translation_anchor_ && pivotxr_translation_anchor_->space == space) {
             pivotxr_translation_anchor_.reset();
         }
@@ -10039,6 +10118,15 @@ XrResult OpenXrLayer::DestroySpace(XrSpace space) {
         if (space == internal_stage_space_) {
             internal_stage_space_ = XR_NULL_HANDLE;
         }
+    }
+    watch.Step("in the runtime's xrDestroySpace");
+    const XrResult result = next_destroy_space_(space);
+    if (XR_FAILED(result)) {
+        std::scoped_lock lock(mutex_);
+        if (was_view) tracked_view_spaces_.insert(space);
+        if (action_space) application_action_spaces_.emplace(space, std::move(*action_space));
+        if (was_local) tracked_local_spaces_.insert(space);
+        if (was_stage) tracked_stage_spaces_.insert(space);
     }
 
     return result;
@@ -10141,6 +10229,8 @@ void OpenXrLayer::StopConfigWatcher() {
         if (!runtime_relay_session_id_.empty()) {
             relay_session_ids.push_back(std::move(runtime_relay_session_id_));
         }
+        runtime_relay_exit_status_.Disarm();
+        runtime_relay_exit_control_.Disarm();
         runtime_relay_last_applied_revision_ = 0;
         runtime_relay_acknowledged_revision_ = 0;
         runtime_relay_status_dirty_.store(false, std::memory_order_release);
@@ -10524,12 +10614,10 @@ void OpenXrLayer::RefreshResolvedSettings() {
     if (!SameInputBindings(previous.turbo.metrics_bindings, resolved_settings_.turbo.metrics_bindings) ||
         previous.turbo.metrics_mode != resolved_settings_.turbo.metrics_mode) {
         // Re-prime the capture binding's edge detector; a mode change also
-        // disarms binding-gated capture so it always starts paused.
-        turbo_metrics_capture_armed_ = false;
-        turbo_metrics_binding_was_down_ = false;
-        turbo_metrics_binding_last_poll_time_.reset();
-        turbo_metrics_binding_down_cached_ = false;
-        turbo_metrics_pressed_.reset();
+        // disarms binding-gated capture so it always starts paused. This may
+        // run on the config watcher's thread while the frame thread polls the
+        // detector without the lock, so the frame thread does the reset.
+        turbo_metrics_binding_reset_pending_.store(true, std::memory_order_release);
     }
     if (previous.turbo.pacing_mode != resolved_settings_.turbo.pacing_mode ||
         previous.turbo.runtime_pins != resolved_settings_.turbo.runtime_pins) {
@@ -10810,6 +10898,8 @@ void OpenXrLayer::ResetSessionState() {
     if (!runtime_relay_session_id_.empty()) {
         runtime_relay_sessions_to_remove_.push_back(runtime_relay_session_id_);
         runtime_relay_session_id_.clear();
+        runtime_relay_exit_status_.Disarm();
+        runtime_relay_exit_control_.Disarm();
         runtime_relay_last_applied_revision_ = 0;
         runtime_relay_acknowledged_revision_ = 0;
         runtime_relay_status_dirty_.store(false, std::memory_order_release);
@@ -13625,11 +13715,17 @@ bool OpenXrLayer::IsTurboActive() {
     const bool was_pressed_this_call = binding_down && !turbo_toggle_binding_was_down_;
     turbo_toggle_binding_was_down_ = binding_down;
 
-    if (was_pressed_this_call || turbo_recovery_.ConsumeClearRequest()) {
+    // The app's Turbo Safety clear retries like a press, but never toggles.
+    const bool cleared_in_app = !was_pressed_this_call && turbo_recovery_.ConsumeClearRequest();
+    if (was_pressed_this_call || cleared_in_app) {
+        const std::string source = cleared_in_app
+            ? std::string("the VectorXR app")
+            : BindingLabel(ActingBinding(turbo_toggle_pressed_, resolved_settings_.turbo.toggle_bindings));
         if (turbo_recovery_blocked_.load()) {
             turbo_recovery_retry_requested_ = true;
             turbo_toggle_enabled_ = true;
             turbo_recovery_blocked_.store(false);
+            logger_.Info("Turbo recovery block cleared via " + source + "; Turbo retries.");
         } else if (turbo_auto_suspended_.load(std::memory_order_relaxed)) {
             // A toggle press after an auto-suspend re-arms turbo rather than
             // flipping the enable state.
@@ -13646,9 +13742,8 @@ bool OpenXrLayer::IsTurboActive() {
                 turbo_pacing_verdict_pending_ = true;
             }
             turbo_toggle_enabled_ = true;
-            logger_.Info("Turbo mode re-armed after auto-suspend via " +
-                         BindingLabel(ActingBinding(turbo_toggle_pressed_, resolved_settings_.turbo.toggle_bindings)) + ".");
-        } else {
+            logger_.Info("Turbo mode re-armed after auto-suspend via " + source + ".");
+        } else if (was_pressed_this_call) {
             turbo_toggle_enabled_ = !turbo_toggle_enabled_;
             logger_.Info(std::string("Turbo mode ") + (turbo_toggle_enabled_ ? "enabled" : "disabled") +
                          " via " + BindingLabel(ActingBinding(turbo_toggle_pressed_, resolved_settings_.turbo.toggle_bindings)) + ".");
@@ -15245,6 +15340,16 @@ void OpenXrLayer::PollRuntimeRelay() {
         ec.clear();
         std::filesystem::remove(RuntimeControlPath(root, stale_session_id), ec);
         ec.clear();
+    }
+    if (!root.empty() && !runtime_relay_pruned_) {
+        // Once per process: files of earlier sessions that ended by a crash,
+        // TerminateProcess or a hard shutdown, which the app reads every poll.
+        runtime_relay_pruned_ = true;
+        const std::size_t pruned = PruneRuntimeRelayFiles(root);
+        if (pruned > 0) {
+            logger_.Info("Removed " + std::to_string(pruned) +
+                         " runtime status/control file(s) left by ended game sessions.");
+        }
     }
     if (root.empty() || session_id.empty()) return;
 

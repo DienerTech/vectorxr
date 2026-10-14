@@ -66,6 +66,7 @@ Control documents target that exact session and express desired state rather tha
 - Desired-state commands are idempotent, so retries do not invert state accidentally.
 - The layer acknowledges a revision only after applying it. The app treats status as authoritative.
 - Status heartbeats let the app reject crashed or exited processes without trusting leftover files.
+- A session's files go when it ends. A game that exits without OpenXR teardown still has them removed when its process exits normally, and the next game to start a session removes the files of sessions whose process has exited (a crash, a forced close or a power loss).
 - Capabilities are runtime facts. The app must disable a control when the active session does not advertise it.
 - File reads, parsing, and writes never occur on the render path.
 - Atomic replacement prevents either side from consuming partially written JSON.

@@ -1,4 +1,5 @@
 #include "depthxr/sound_player.h"
+#include "depthxr/process_exit.h"
 
 #include <algorithm>
 #include <cmath>
@@ -205,6 +206,12 @@ SoundPlayer::SoundPlayer() : state_(std::make_shared<SoundPlayerState>()) {
 
 SoundPlayer::~SoundPlayer() {
 #if defined(_WIN32)
+    // At a process exit the worker is gone, perhaps holding the mutex (taking
+    // it would end the process on the spot), and so is PlaySound's own
+    // thread, which a purge could wait on. Nothing is left to stop.
+    if (ProcessExiting()) {
+        return;
+    }
     {
         std::lock_guard<std::mutex> lock(state_->mutex);
         state_->stop = true;

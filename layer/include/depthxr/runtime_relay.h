@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -48,6 +49,18 @@ std::filesystem::path ResolveRuntimeRelayRoot();
 std::filesystem::path RuntimeControlPath(const std::filesystem::path& root, const std::string& session_id);
 std::filesystem::path RuntimeStatusPath(const std::filesystem::path& root, const std::string& session_id);
 std::uint64_t RuntimeRelayUnixMilliseconds();
+
+// Session ids begin "<process id>-<session start, Unix ms>-". Unknown or
+// access-denied processes count as alive; a process created after the session
+// started is a reused process id, not the session's.
+bool RuntimeRelaySessionAlive(std::uint32_t process_id, std::uint64_t started_unix_milliseconds);
+using RuntimeRelaySessionAliveCheck = std::function<bool(std::uint32_t, std::uint64_t)>;
+// Removes the status and control files (and leftover temporary files) of
+// sessions whose process is gone. Games that exit without OpenXR teardown
+// leave them behind; a hard shutdown can leave them zero-filled. Files whose
+// name is not a session id are left alone. Returns how many were removed.
+std::size_t PruneRuntimeRelayFiles(const std::filesystem::path& root,
+                                   const RuntimeRelaySessionAliveCheck& alive = RuntimeRelaySessionAlive);
 
 bool ReadRuntimeControl(const std::filesystem::path& path, RuntimeControlDocument* document, std::string* error = nullptr);
 bool WriteRuntimeStatus(const std::filesystem::path& path, const RuntimeStatusDocument& document, std::string* error = nullptr);

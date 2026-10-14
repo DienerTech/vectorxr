@@ -22,6 +22,8 @@ add_library(
     src/util/config_path.cpp
     src/util/logger.cpp
     src/util/process_info.cpp
+    src/util/process_exit.cpp
+    src/util/atomic_file.cpp
     src/math/stereo_boost.cpp
     src/math/convergence.cpp
     src/math/depth_submission.cpp
@@ -706,6 +708,18 @@ if(DEPTHXR_BUILD_TESTS)
     target_link_libraries(depthxr_turbo_recovery_tests PRIVATE depthxr_core)
     add_test(NAME depthxr_turbo_recovery_tests COMMAND depthxr_turbo_recovery_tests)
     set_tests_properties(depthxr_turbo_recovery_tests PROPERTIES TIMEOUT 10)
+    add_executable(depthxr_runtime_relay_tests tests/runtime_relay_tests.cpp)
+    target_link_libraries(depthxr_runtime_relay_tests PRIVATE depthxr_core)
+    add_test(NAME depthxr_runtime_relay_tests COMMAND depthxr_runtime_relay_tests)
+    set_tests_properties(depthxr_runtime_relay_tests PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        add_library(depthxr_process_exit_probe SHARED tests/process_exit_probe.cpp src/dll_main.cpp)
+        target_link_libraries(depthxr_process_exit_probe PRIVATE depthxr_core)
+        add_executable(depthxr_process_exit_tests tests/process_exit_tests.cpp)
+        add_dependencies(depthxr_process_exit_tests depthxr_process_exit_probe)
+        add_test(NAME depthxr_process_exit_tests COMMAND depthxr_process_exit_tests)
+        set_tests_properties(depthxr_process_exit_tests PROPERTIES TIMEOUT 30)
+    endif()
     add_executable(depthxr_path_unicode_tests tests/path_unicode_tests.cpp)
     target_link_libraries(depthxr_path_unicode_tests PRIVATE depthxr_core)
     add_test(NAME depthxr_path_unicode_tests COMMAND depthxr_path_unicode_tests)
