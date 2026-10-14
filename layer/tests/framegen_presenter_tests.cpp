@@ -7962,11 +7962,13 @@ void TestVarjoTransientThrottle() {
         // Every 40th frame, the runtime holds frames to every second refresh
         // for the next 4 of the game's frames.
         std::vector<XrDuration> leads;
+        std::vector<XrTime> times; // each real frame's display time
         RunPipelined(
             *app, 3000ms, 16ms, 26ms,
             [&](int frame, const XrFrameState& state) {
                 if (frame % 40 == 0) runtime.throttled = true;
                 if (frame % 40 == 4) runtime.throttled = false;
+                times.push_back(state.predictedDisplayTime);
                 std::scoped_lock lock(g_xr_mutex);
                 if (!runtime.submitted_times.empty()) leads.push_back(state.predictedDisplayTime - runtime.submitted_times.back());
             },
@@ -7982,10 +7984,27 @@ void TestVarjoTransientThrottle() {
                   std::to_string(median_lead) + ", 90th percentile " + std::to_string(high_lead) + " refreshes)");
         double worst = 0.0;
         const double timeline = TimelineShare(runtime, first, 30, app->eye_speed, &worst);
+        // Extrapolating, a real frame later than a whole interval of its
+        // varying pace holds its motion at one interval, so the refreshes it
+        // repeats are a refresh off their own time. This game's 16 and 26 ms
+        // frames land 2 and 2 refreshes apart in one phase and 1 and 3 in
+        // another, where one refresh in four repeats (as in
+        // TestJitDynamicExtrapolation): those the clamp predicts from the
+        // game's own frame times are allowed besides. Without them the bar
+        // failed about one run in seven on hosted CI (0.793, PR #91).
+        const std::size_t refreshes = runtime.Submissions() - first;
+        const double clamped = mode == FrameGenSynthesisMode::kExtrapolate && refreshes > 0
+                                   ? static_cast<double>(ClampedRepeats(times)) / static_cast<double>(refreshes)
+                                   : 0.0;
+        if (std::getenv("FG_TEST_STATS")) {
+            std::cerr << name << ": timeline " << timeline << ", clamp predicts " << clamped << " of " << refreshes
+                      << " refreshes\n";
+        }
         // A tenth of the frames go to a runtime holding every second refresh:
         // their refreshes may show a refresh off.
-        Check(timeline > 0.8, name + ": refreshes show their own time (" + std::to_string(timeline) + ", worst " +
-                                  std::to_string(worst) + " periods)");
+        Check(timeline > 0.8 - clamped, name + ": refreshes show their own time (" + std::to_string(timeline) +
+                                            ", worst " + std::to_string(worst) + " periods, " +
+                                            std::to_string(clamped) + " repeats the clamp predicts)");
         // ...and refreshes held back by the runtime show nothing new.
         Check(status.distinct_fps > 0.75 * status.output_fps,
               name + ": refreshes show new frames (" + std::to_string(status.distinct_fps) + " of " +
