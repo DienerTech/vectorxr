@@ -54,8 +54,10 @@ export function startInputDeviceDiscovery(): Promise<void> {
   if (subscriberCount > 1) return refreshInFlight ?? Promise.resolve()
 
   const initialRefresh = refreshInputDevices({ showLoading: !hasCompletedInitialScan.value })
+  // A device list nobody can see (the window is minimized or hidden) need
+  // not be refreshed; the next tick after it is shown again catches up.
   refreshIntervalId = window.setInterval(() => {
-    if (activeCaptureCount === 0) void refreshInputDevices()
+    if (activeCaptureCount === 0 && !document.hidden) void refreshInputDevices()
   }, DEVICE_REFRESH_INTERVAL_MS)
   return initialRefresh
 }

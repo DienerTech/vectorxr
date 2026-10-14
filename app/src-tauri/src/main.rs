@@ -2081,9 +2081,22 @@ async fn load_gpu_capabilities() -> gpu_capabilities::GpuCapabilities {
         })
 }
 
+// Tauri runs a command that is not async on the app's main thread, which
+// also runs the window: enumerating DirectInput devices (about 240 ms, every
+// 5 s while a device binding is shown), a UAC prompt with its elevated helper
+// (up to 120 s), or a sound preview froze the whole app. These run on a
+// blocking worker instead.
+async fn run_blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|error| error.to_string())?
+}
+
 #[tauri::command]
-fn list_input_devices() -> Result<Vec<input_devices::InputDeviceInfo>, String> {
-    input_devices::list_input_devices()
+async fn list_input_devices() -> Result<Vec<input_devices::InputDeviceInfo>, String> {
+    run_blocking(input_devices::list_input_devices).await
 }
 
 #[tauri::command]
@@ -2744,34 +2757,35 @@ async fn load_openxr_layers(
 }
 
 #[tauri::command]
-fn ensure_openxr_layer_elevation() -> Result<(), String> {
-    openxr_layers::ensure_openxr_layer_elevation()
+async fn ensure_openxr_layer_elevation() -> Result<(), String> {
+    run_blocking(openxr_layers::ensure_openxr_layer_elevation).await
 }
 
 #[tauri::command]
-fn set_openxr_layer_enabled(
+async fn set_openxr_layer_enabled(
     slice: String,
     manifest_path: String,
     enabled: bool,
 ) -> Result<openxr_layers::OpenXrLayerSnapshot, String> {
-    openxr_layers::set_openxr_layer_enabled(slice, manifest_path, enabled)
+    run_blocking(move || openxr_layers::set_openxr_layer_enabled(slice, manifest_path, enabled))
+        .await
 }
 
 #[tauri::command]
-fn move_openxr_layer(
+async fn move_openxr_layer(
     slice: String,
     manifest_path: String,
     direction: openxr_layers::MoveDirection,
 ) -> Result<openxr_layers::OpenXrLayerSnapshot, String> {
-    openxr_layers::move_openxr_layer(slice, manifest_path, direction)
+    run_blocking(move || openxr_layers::move_openxr_layer(slice, manifest_path, direction)).await
 }
 
 #[tauri::command]
-fn delete_openxr_layer(
+async fn delete_openxr_layer(
     slice: String,
     manifest_path: String,
 ) -> Result<openxr_layers::OpenXrLayerSnapshot, String> {
-    openxr_layers::delete_openxr_layer(slice, manifest_path)
+    run_blocking(move || openxr_layers::delete_openxr_layer(slice, manifest_path)).await
 }
 
 // Loads a WAV into memory and scales 16-bit PCM samples by `gain`. Returns None
@@ -2830,7 +2844,17 @@ fn load_and_scale_wav(path: &Path, gain: f32) -> Option<Vec<u8>> {
 /// path falls back to the bundled default for the given transition; `volume`
 /// (0-100) scales the preview to match the configured level.
 #[tauri::command]
-fn play_test_sound(
+async fn play_test_sound(
+    app: tauri::AppHandle,
+    path: Option<String>,
+    activate: bool,
+    volume: Option<u32>,
+    default_name: Option<String>,
+) -> Result<(), String> {
+    run_blocking(move || play_test_sound_blocking(app, path, activate, volume, default_name)).await
+}
+
+fn play_test_sound_blocking(
     app: tauri::AppHandle,
     path: Option<String>,
     activate: bool,
@@ -2883,8 +2907,8 @@ fn play_test_sound(
         let gain = (volume.unwrap_or(100).min(100) as f32) / 100.0;
 
         // Scaled in-memory playback is synchronous (no SND_ASYNC) so the buffer
-        // stays valid for the lifetime of the call; the clip is a fraction of a
-        // second, so briefly blocking this command thread is fine.
+        // stays valid for the lifetime of the call; it blocks only this worker
+        // thread, not the window.
         if let Some(image) = load_and_scale_wav(&resolved, gain) {
             let _ = unsafe {
                 PlaySoundW(
