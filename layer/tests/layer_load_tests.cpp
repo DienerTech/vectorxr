@@ -24,7 +24,11 @@ using NegotiateFn = XrResult(XRAPI_PTR*)(const depthxr::XrNegotiateLoaderInfo* l
                                          const char* api_layer_name,
                                          depthxr::XrNegotiateApiLayerRequest* api_layer_request);
 
-constexpr const char* kRuntimeDlls[] = {"msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll"};
+// The Debug runtime DLLs too, so a Debug build checks its own configuration (/MTd, not /MDd). ucrtbase.dll is
+// not listed: Windows' own DLLs load it.
+constexpr const char* kRuntimeDlls[] = {"msvcp140.dll",  "vcruntime140.dll",  "vcruntime140_1.dll",
+                                        "msvcp140d.dll", "vcruntime140d.dll", "vcruntime140_1d.dll",
+                                        "ucrtbased.dll"};
 
 } // namespace
 
