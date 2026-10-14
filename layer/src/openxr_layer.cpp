@@ -2251,14 +2251,18 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
     framegen_owns_pacing_.store(false, std::memory_order_release);
     framegen_session_enabled_ = false;
     turbo_yielded_to_framegen_ = false;
-    osd_.Shutdown();
-    DestroyEyeGazeResources();
-    DestroyVarjoNativeFoveationResources();
-    DestroyInternalReferenceSpaces();
-    ResetSwapchainState();
-    watch.Step("draining the bridges");
-    d3d11_bridge_.Drain();
-    vulkan_bridge_.Drain();
+    // A presenter thread left inside the runtime may be submitting the OSD's
+    // swapchain or using the layer's spaces: they stay with the session.
+    if (!framegen_.PresenterAbandoned()) {
+        osd_.Shutdown();
+        DestroyEyeGazeResources();
+        DestroyVarjoNativeFoveationResources();
+        DestroyInternalReferenceSpaces();
+        ResetSwapchainState();
+        watch.Step("draining the bridges");
+        d3d11_bridge_.Drain();
+        vulkan_bridge_.Drain();
+    }
     if (framegen_.PresenterAbandoned()) {
         // The thread left behind may still be inside the runtime: its
         // instance (and the runtime's module, and this one) stay for the
@@ -2717,17 +2721,22 @@ XrResult OpenXrLayer::DestroySession(XrSession session) {
             framegen_owns_pacing_.store(false, std::memory_order_release);
             framegen_session_enabled_ = false;
             turbo_yielded_to_framegen_ = false;
-            osd_.Shutdown();
-            DestroyEyeGazeResources();
-            DestroyVarjoNativeFoveationResources();
-            DestroyInternalReferenceSpaces();
-            FlushDeferredSwapchainReleasesLocked("session teardown");
-            ResetD3D11QuadViewsCompositor();
-            ResetSwapchainState();
-            // The bridge's copies into the runtime's images finish before the
-            // runtime frees them with the session.
-            d3d11_bridge_.Drain();
-            vulkan_bridge_.Drain();
+            // A presenter thread left inside the runtime may be submitting
+            // the OSD's swapchain or using the layer's spaces: they stay, with
+            // the runtime's session, for the process's exit (below).
+            if (!framegen_.PresenterAbandoned()) {
+                osd_.Shutdown();
+                DestroyEyeGazeResources();
+                DestroyVarjoNativeFoveationResources();
+                DestroyInternalReferenceSpaces();
+                FlushDeferredSwapchainReleasesLocked("session teardown");
+                ResetD3D11QuadViewsCompositor();
+                ResetSwapchainState();
+                // The bridge's copies into the runtime's images finish before
+                // the runtime frees them with the session.
+                d3d11_bridge_.Drain();
+                vulkan_bridge_.Drain();
+            }
         }
     }
 
