@@ -119,6 +119,9 @@ private:
     bool framegen_snapshot_due_{false};
     std::optional<std::int64_t> last_framegen_snapshot_ns_;
     std::int64_t wall_unix_ms_{0}, last_event_ns_{0}, idle_report_ns_{0};
+    // When the producers' current stretch of activity began: capture start,
+    // a Debug resume, or the first record after an idle (mutex_).
+    std::int64_t active_since_ns_{0};
     std::size_t head_{0}, count_{0};
     std::uint64_t sequence_{0};
     std::filesystem::path log_path_;

@@ -31,6 +31,16 @@ public:
         for (const auto& p : trace.pending_) if (p.token.load()) ++active;
         return active;
     }
+    // The producers last recorded three seconds ago: the writer sees them idle.
+    static void AgeIdle(TurboTimingTrace& trace) {
+        std::scoped_lock lock(trace.mutex_);
+        trace.last_event_ns_ -= 3'000'000'000;
+    }
+    // The producers' current stretch of activity began 20 s earlier.
+    static void AgeActivity(TurboTimingTrace& trace) {
+        std::scoped_lock lock(trace.mutex_);
+        trace.active_since_ns_ -= 20'000'000'000;
+    }
     static void AgeCalls(TurboTimingTrace& trace) {
         std::scoped_lock lock(trace.mutex_);
         for (auto& p : trace.pending_) if (p.token.load()) p.started_ns -= 3'000'000'000;
@@ -275,6 +285,41 @@ void TestIncidentSnapshotsRotate(const std::filesystem::path& root) {
           "A later stall overwrote the earlier fault snapshot");
     Check(!std::filesystem::exists(depthxr::TurboTimingTrace::SnapshotPath(log, 2)),
           "Snapshot rotation created a snapshot without an incident");
+    trace.Stop();
+}
+// Games stop calling OpenXR while they load. Only an idle that follows a
+// sustained stretch of calls freezes history: not the first frames before a
+// load, and not one frame between two loading pauses.
+void TestIdleSnapshotsNeedActivity(const std::filesystem::path& root) {
+    depthxr::Logger logger;
+    logger.Initialize(root / "idle.log");
+    logger.SetLevel(depthxr::LogLevel::Debug);
+    depthxr::TurboTimingTrace trace;
+    trace.Start(logger);
+    const auto log = logger.ActiveLogPath();
+    const auto latest = depthxr::TurboTimingTrace::SnapshotPath(log, 0);
+    const auto previous = depthxr::TurboTimingTrace::SnapshotPath(log, 1);
+    trace.Record("first.frames", trace.NextId(), 1);
+    depthxr::TurboTraceTestPeer::AgeIdle(trace);
+    Check(Wait([&] { return History(log).find("event=producer.idle") != std::string::npos; }),
+          "An idle producer was not reported");
+    Check(!std::filesystem::exists(latest), "An idle right after the first frames froze a snapshot");
+
+    trace.Record("steady.frames", trace.NextId(), 2);
+    Check(Wait([&] { return History(log).find("event=steady.frames") != std::string::npos; }),
+          "Resumed frames were not recorded");
+    depthxr::TurboTraceTestPeer::AgeActivity(trace);
+    depthxr::TurboTraceTestPeer::AgeIdle(trace);
+    Check(Wait([&] { return Read(latest).find("event=steady.frames a=2") != std::string::npos; }),
+          "An idle after a sustained stretch of calls did not freeze history");
+
+    trace.Record("one.frame", trace.NextId(), 3);
+    Check(Wait([&] { return History(log).find("event=one.frame") != std::string::npos; }),
+          "The frame between two idles was not recorded");
+    depthxr::TurboTraceTestPeer::AgeIdle(trace);
+    std::this_thread::sleep_for(600ms);
+    Check(!std::filesystem::exists(previous) && Read(latest).find("event=one.frame") == std::string::npos,
+          "One frame between two idles froze a second snapshot");
     trace.Stop();
 }
 void TestFrameGenSnapshotNames() {
@@ -550,6 +595,7 @@ int main(int argc, char** argv) {
         TestProducersNeverWait(root);
         TestDebugControlAndFailure(root);
         TestIncidentSnapshotsRotate(root);
+        TestIdleSnapshotsNeedActivity(root);
         TestFrameGenSnapshotNames();
         TestFrameGenSnapshots(root);
         TestFrameGenSnapshotTrigger();
