@@ -711,6 +711,36 @@ int main(int argc, char** argv) {
         renderer.Shutdown();
     }
     {
+        // Frame Generation's presenter ends frames between the app's, and can
+        // find a refresh due, and request it, before the app's next frame
+        // takes a snapshot. Every refresh still draws a snapshot taken since
+        // the one before: one per refresh, not one per frame, and not none.
+        OsdRenderer renderer; unsupported=false; renderer.Initialize(session,device,4,dispatch);
+        auto settings=OsdSettings{}; settings.enabled=true; settings.compact=true; settings.compact_metrics="none";
+        settings.compact_show_brand=settings.compact_show_runtime=settings.compact_show_clock=false; settings.update_hz=2;
+        XrCompositionLayerProjection game{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+        const auto* original=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&game);
+        XrFrameEndInfo frame{XR_TYPE_FRAME_END_INFO}; frame.layerCount=1; frame.layers=&original;
+        renderer.Prepare(settings,Snapshot(),false,false);
+        Check(WaitVisible(renderer,frame),"The presenter test's panel was not shown");
+        auto drawn=Snapshot();
+        for(int i=0;i<4;++i) {
+            // The presenter's frames, up to the next refresh's upload: it
+            // draws the snapshot the app's last frame took.
+            const int before=releases;
+            Check(PumpUntil(renderer,frame,[&]{return releases>before;}),"The presenter did not refresh the panel");
+            CheckUploadedRaster(RasterizeOsd(settings,true,drawn,OsdTelemetry{},false),DXGI_FORMAT_B8G8R8A8_UNORM_SRGB);
+            // Then the app's frames: the first takes the next refresh's
+            // snapshot, the second none.
+            Check(renderer.SnapshotDue(),"A refresh the presenter requested first left the next without a status snapshot");
+            drawn=Snapshot(); drawn.application="Frame"+std::to_string(i)+".exe";
+            renderer.Prepare(settings,drawn,false,false);
+            Check(!renderer.SnapshotDue(),"A refresh asked for a second status snapshot");
+            renderer.Prepare(settings,std::nullopt,false,false);
+        }
+        renderer.Shutdown();
+    }
+    {
         // Uploads copy the panel's rows and clear only what each image's last,
         // taller panel left: across images and heights, every image matches
         // its bitmap and is 0 below it.

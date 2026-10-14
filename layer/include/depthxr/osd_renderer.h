@@ -208,6 +208,12 @@ class OsdRenderer {
     // The panel was shown without a snapshot (none are taken while hidden):
     // the next raster waits for one.
     bool snapshot_needed_{false};
+    // When Prepare last received a snapshot.
+    std::chrono::steady_clock::time_point snapshot_at_{};
+    // The last periodic refresh drew a snapshot from before it fell due
+    // (Frame Generation's presenter found it due before the app's frame took
+    // one): the app's next frame takes one for the next refresh.
+    bool snapshot_wanted_{false};
     OsdTelemetry telemetry_;
     OsdStatus status_;
     std::uint64_t settings_revision_{};

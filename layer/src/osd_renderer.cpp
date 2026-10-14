@@ -481,8 +481,8 @@ void OsdRenderer::ShutdownLocked() {
     if (anchor_space_ && api_.destroy_space) api_.destroy_space(anchor_space_);
     swapchain_=XR_NULL_HANDLE; space_=XR_NULL_HANDLE; anchor_space_=XR_NULL_HANDLE; session_=XR_NULL_HANDLE;
     anchor_failed_=false; anchor_logged_=false;
-    acquired_.reset(); acquired_waited_=false; ready_=false; failed_=false; configured_=false; primed_=false; snapshot_needed_=false; image_empty_=false;
-    telemetry_={}; status_={}; updated_={}; image_updated_={}; refresh_last_={};
+    acquired_.reset(); acquired_waited_=false; ready_=false; failed_=false; configured_=false; primed_=false; snapshot_needed_=false; snapshot_wanted_=false; image_empty_=false;
+    telemetry_={}; status_={}; updated_={}; image_updated_={}; refresh_last_={}; snapshot_at_={};
 }
 void OsdRenderer::Shutdown() { std::scoped_lock lock(mutex_); ShutdownLocked(); }
 void OsdRenderer::ResetPresentation() {
@@ -523,7 +523,7 @@ bool OsdRenderer::SnapshotDue() const {
     // and a panel just shown one before it draws. A hidden or failed panel
     // draws nothing, so it needs none.
     if (!configured_ || !settings_.enabled || snapshot_needed_) return true;
-    return visible_ && !failed_ && (!ready_ || updated_==Clock::time_point{} ||
+    return visible_ && !failed_ && (!ready_ || updated_==Clock::time_point{} || snapshot_wanted_ ||
         Clock::now()-updated_>=std::chrono::duration<double>(1.0/std::max(1,settings_.update_hz)));
 }
 std::pair<OsdPresentation, OsdPresentation> OsdRenderer::Prepare(const OsdSettings& settings, std::optional<OsdSnapshot> snapshot,
@@ -569,7 +569,7 @@ std::pair<OsdPresentation, OsdPresentation> OsdRenderer::Prepare(const OsdSettin
     if (!configured_ || revision==0 || revision!=settings_revision_) { settings_=settings; settings_revision_=revision; }
     // A hidden panel takes no snapshots, so the one it holds can be minutes
     // old: once shown, it draws after the next one arrives.
-    if (snapshot) { snapshot_=std::move(*snapshot); snapshot_needed_=false; }
+    if (snapshot) { snapshot_=std::move(*snapshot); snapshot_at_=Clock::now(); snapshot_needed_=false; snapshot_wanted_=false; }
     else if (settings.enabled && visible_ && !before.shown) snapshot_needed_=true;
     configured_=true;
     if(changed || placed){
@@ -666,6 +666,14 @@ const XrCompositionLayerBaseHeader* OsdRenderer::Append(const XrFrameEndInfo& in
                 }
                 raster_request_=RasterRequest{settings_,compact_,rgba_,snapshot_,telemetry_,raster_generation_};
                 raster_requested_=true; raster_cv_.notify_one();
+                // Frame Generation's presenter ends frames between the app's,
+                // and can find a refresh due before the app's next frame takes
+                // its snapshot: this raster then draws the one held, and the
+                // app's next frame takes one for the next refresh. Every
+                // refresh so draws a snapshot about an interval old at most
+                // (without this, none was taken again while the presenter
+                // kept finding refreshes due first).
+                snapshot_wanted_=due && updated_!=Clock::time_point{} && snapshot_at_<updated_+period;
                 // Keep the set rate on average: the next refresh falls due an
                 // interval after this one did, not after the frame that found
                 // it due (half a frame late each time, 20 Hz gave 16-18 Hz).
