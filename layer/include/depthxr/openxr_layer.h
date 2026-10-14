@@ -1213,6 +1213,12 @@ class OpenXrLayer {
     // idle one.
     std::shared_future<void> turbo_async_worker_job_;
     std::uint64_t turbo_async_wait_generation_{0};
+    // (turbo_mutex_) The pipelined wait generation the runtime held past a
+    // late-wait bound (0: none). Later app polls and submits for that same
+    // wait give up after the short drain bound, so the application's frame
+    // loop keeps running while the runtime holds it (issue #88). Generations
+    // never repeat, so a newer wait is never mistaken for this one.
+    std::uint64_t turbo_async_held_generation_{0};
     bool turbo_async_wait_polled_{false};
     bool turbo_async_wait_completed_{false};
     XrResult turbo_async_wait_result_{XR_SUCCESS};

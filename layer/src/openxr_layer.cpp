@@ -1739,6 +1739,14 @@ void AppendViewSummary(std::ostringstream& stream, std::span<const ViewAdjustmen
     }
 }
 
+// Bounds on waiting for Turbo's pipelined runtime xrWaitFrame. The drain is
+// the first frame-thread wait in xrEndFrame (submit-interlocked runtimes need
+// a submit to release it); the late-wait bound is how long a wait may run
+// late before the runtime is treated as holding it. Once it has, later polls
+// and submits for that wait give up after the drain bound alone.
+constexpr std::chrono::milliseconds kTurboDrainTimeout{250};
+constexpr std::chrono::milliseconds kTurboLateWaitTimeout{2000};
+
 } // namespace
 
 OpenXrLayer& OpenXrLayer::Instance() {
@@ -5816,6 +5824,8 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
         bool wait_pipelined = turbo_async_wait_.valid();
         bool async_handoff = turbo_async_handoff_active_;
         bool async_interception_cancelled = false;
+        // A second poll that gave up on the runtime's pipelined wait.
+        bool poll_without_wait = false;
         // Fabricate while a pipelined wait is outstanding (async pacing) or
         // the sequenced pipeline is established — in both cases the runtime
         // already owns this frame's pacing and this wait must never reach it.
@@ -5911,16 +5921,41 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
                         const std::shared_future<void> pending_wait = turbo_async_wait_;
                         const std::uint64_t pending_generation = turbo_async_wait_generation_;
                         const bool recouple = !turbo_valve_open_;
+                        // Bounded like EndFrame's late wait, and only by the
+                        // drain once the runtime has already held this wait
+                        // past that bound.
+                        const std::chrono::milliseconds poll_bound =
+                            turbo_async_held_generation_ == pending_generation ? kTurboDrainTimeout
+                                                                                : kTurboLateWaitTimeout;
                         const auto poll_start = std::chrono::steady_clock::now();
+                        bool poll_timed_out = false;
                         lock.unlock();
                         turbo_trace_.Record("poll.worker.enter", trace_id, pending_generation);
                         if (!recouple) {
                             // A safety stop must also release app polls already
                             // waiting on this snapshot. The real runtime wait
-                            // itself is retained and cannot be cancelled.
-                            while (pending_wait.wait_for(std::chrono::milliseconds(100)) != std::future_status::ready) {
+                            // itself is retained and cannot be cancelled. Nor
+                            // may a runtime that holds it hold the app's frame
+                            // loop: in issue #88 (DCS on Windows Mixed Reality,
+                            // after shouldRender turned FALSE) waiting it out
+                            // froze the game before it reached xrEndSession.
+                            const std::chrono::steady_clock::time_point deadline = poll_start + poll_bound;
+                            for (;;) {
+                                const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+                                if (now >= deadline) {
+                                    poll_timed_out = true;
+                                    break;
+                                }
+                                const std::chrono::steady_clock::time_point slice =
+                                    now + std::chrono::milliseconds(100);
+                                if (pending_wait.wait_until(std::min(deadline, slice)) ==
+                                    std::future_status::ready) {
+                                    break;
+                                }
                                 if (turbo_auto_suspended_.load()) break;
                             }
+                            poll_without_wait = pending_wait.wait_for(std::chrono::milliseconds(0)) !=
+                                                std::future_status::ready;
                         } else {
                             // Keep ownership of waits/begins stable when Turbo
                             // is switched off, but re-couple the app to runtime
@@ -5938,6 +5973,13 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
                             // launched the following one. Do not mark that newer
                             // wait as having been polled by this older call.
                             mark_wait_polled = false;
+                        } else if (poll_timed_out && poll_without_wait) {
+                            // The runtime is holding this wait. EndFrame drops
+                            // app frames until it completes; later polls give
+                            // up sooner.
+                            turbo_async_held_generation_ = pending_generation;
+                            turbo_trace_.Burst();
+                            turbo_trace_.Record("poll.stuck", trace_id, pending_generation);
                         }
                     }
                 }
@@ -5981,7 +6023,10 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
                 frame_state->predictedDisplayTime =
                     std::max(predicted, turbo_max_returned_display_time_ + 1);
                 frame_state->predictedDisplayPeriod = turbo_last_predicted_display_period_;
-                frame_state->shouldRender = turbo_last_should_render_ ? XR_TRUE : XR_FALSE;
+                // A poll that gave up on the runtime's wait returns a frame the
+                // runtime has not granted: the app skips rendering it, and
+                // EndFrame drops it unless the wait completes first.
+                frame_state->shouldRender = turbo_last_should_render_ && !poll_without_wait ? XR_TRUE : XR_FALSE;
                 turbo_max_returned_display_time_ = frame_state->predictedDisplayTime;
                 turbo_trace_.Record("predict.adjust", trace_id, extrapolated_prediction, predicted,
                                     frame_state->predictedDisplayTime - predicted);
@@ -5999,7 +6044,8 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
                     logger_.Debug("Turbo: fabricated xrWaitFrame return, predictedDisplayTime=" +
                                   std::to_string(frame_state->predictedDisplayTime) +
                                   ", asyncWaitCompleted=" + (turbo_async_wait_completed_ ? "1" : "0") +
-                                  ", asyncHandoff=" + (async_handoff ? "1" : "0"));
+                                  ", asyncHandoff=" + (async_handoff ? "1" : "0") +
+                                  ", runtimeWaitPending=" + (poll_without_wait ? "1" : "0"));
                 }
                 return XR_SUCCESS;
             }
@@ -6401,6 +6447,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
     bool valve_open = false;
     std::shared_future<void> pending_async_wait;
     std::uint64_t pending_async_generation = 0;
+    bool pending_wait_held = false;
     TurboSequencedState seq_state = TurboSequencedState::kInactive;
     {
         std::scoped_lock lock(turbo_mutex_);
@@ -6408,6 +6455,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
         if (has_pending_wait) {
             pending_async_wait = turbo_async_wait_;
             pending_async_generation = turbo_async_wait_generation_;
+            pending_wait_held = turbo_async_held_generation_ == pending_async_generation;
         }
         // This submit consumes the begun-frame marker (set by our pre-begin,
         // a compensation begin, or the app's own begin passing through).
@@ -6466,9 +6514,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
         // rejects a begin without a completed wait (XR_ERROR_CALL_ORDER_INVALID,
         // no state change) and completes the wait on its own. Cap the first
         // frame-thread wait for the former; wait longer, but still bounded,
-        // for the latter.
-        constexpr std::chrono::milliseconds kTurboDrainTimeout{250};
-        constexpr std::chrono::milliseconds kTurboLateWaitTimeout{2000};
+        // for the latter (kTurboDrainTimeout, kTurboLateWaitTimeout).
         const bool diag_drain = TurboSequencedDebugTick();
         if (diag_drain) {
             logger_.Debug("Turbo-diag: async drain starting (250ms cap).");
@@ -6509,18 +6555,27 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
             }
         }
         if (drain_timed_out && !frame_begun) {
-            const auto late_start = std::chrono::steady_clock::now();
-            ready = pending_async_wait.wait_for(kTurboLateWaitTimeout) == std::future_status::ready;
-            const double late_ms =
-                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - late_start)
-                    .count();
-            frame_blocked_ms += late_ms;
-            turbo_trace_.Record("drain.late", pending_async_generation, ready);
+            // A wait the runtime already held past the late bound (here or in
+            // a bounded app poll) is not waited for again: each frame it stays
+            // held costs the app only the drain.
+            if (!pending_wait_held) {
+                const auto late_start = std::chrono::steady_clock::now();
+                ready = pending_async_wait.wait_for(kTurboLateWaitTimeout) == std::future_status::ready;
+                const double late_ms =
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - late_start)
+                        .count();
+                frame_blocked_ms += late_ms;
+                turbo_trace_.Record("drain.late", pending_async_generation, ready);
+            }
             if (!ready) {
                 // The runtime still owns this frame. Submitting without a begun
                 // runtime frame is invalid, so drop the application's frame;
                 // the retained wait keeps app frame calls intercepted and
                 // forwarding resumes as soon as the runtime completes it.
+                {
+                    std::scoped_lock lock(turbo_mutex_);
+                    turbo_async_held_generation_ = pending_async_generation;
+                }
                 if (turbo_engaged && cadence_countable &&
                     !turbo_auto_suspended_.load(std::memory_order_relaxed) &&
                     HandleTurboDrainTimeout(std::chrono::steady_clock::now())) {
@@ -6531,8 +6586,10 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                     --turbo_dropped_frame_log_budget_;
                     logger_.Info("Turbo: the runtime's pipelined xrWaitFrame is still pending after " +
                                  std::to_string(static_cast<int>(frame_blocked_ms)) +
-                                 "ms; this application frame was not submitted. Frame forwarding resumes "
-                                 "when the runtime completes the wait.");
+                                 "ms" + (pending_wait_held ? " more" : "") +
+                                 "; this application frame was not submitted. Until the runtime completes "
+                                 "the wait, application frames are dropped after a short bound instead of "
+                                 "blocking; frame forwarding then resumes.");
                 }
                 turbo_trace_.Record("frame.dropped", pending_async_generation);
                 turbo_last_frame_blocked_ms_ = frame_blocked_ms;

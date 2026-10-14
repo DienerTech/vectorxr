@@ -1386,8 +1386,9 @@ void TestConformantLateWaitIsWaitedFor() {
 }
 
 // A runtime wait that never completes must not freeze the application inside
-// VectorXR: the frame is dropped after a bounded wait, and forwarding resumes
-// as soon as the runtime completes the wait.
+// VectorXR: the frame is dropped after a bounded wait, the next app poll still
+// waits briefly for the runtime, and forwarding resumes as soon as the runtime
+// completes the wait.
 void TestStuckWaitDropsFrameThenResumes() {
     FakeRuntime runtime;
     TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
@@ -1408,20 +1409,112 @@ void TestStuckWaitDropsFrameThenResumes() {
     Expect(elapsed >= 2000.0 && elapsed < 3000.0, "Stuck-wait xrEndFrame was not bounded");
     Expect(runtime.EndCalls() == ends_before && depthxr::TurboFrameTestPeer::Handoff().wait_valid,
            "A frame was submitted without its wait, or the retained wait was discarded");
-    auto poll = std::async(std::launch::async, [] {
-        XrFrameState next{XR_TYPE_FRAME_STATE};
-        return AppWait(&next);
-    });
+    XrFrameState next{XR_TYPE_FRAME_STATE};
+    auto poll = std::async(std::launch::async, [&next] { return AppWait(&next); });
     Expect(poll.wait_for(50ms) == std::future_status::timeout,
-           "The next app poll ran ahead of the runtime's outstanding wait");
+           "The next app poll did not wait for the runtime's outstanding wait at all");
     runtime.ReleaseWait();
     Expect(poll.wait_for(2s) == std::future_status::ready && poll.get() == XR_SUCCESS,
            "The app poll did not resume when the runtime completed its wait");
+    Expect(next.shouldRender == XR_TRUE, "A poll that got its runtime wait asked the app not to render");
     Expect(XR_SUCCEEDED(AppBegin()) &&
                depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS &&
                runtime.EndCalls() == ends_before + 1,
            "Forwarding did not resume after the stuck wait completed");
     ExpectHealthyFrames(runtime, 16, "Stuck wait");
+}
+
+// Issue #88 (DCS on Windows Mixed Reality): the runtime held Turbo's pipelined
+// wait across a visibility change, and the game's next xrWaitFrame blocked on
+// it until the game was killed, so it never reached xrEndSession. While the
+// runtime holds the wait, every app frame call is now bounded: polls report
+// shouldRender FALSE and frames are dropped. Forwarding resumes in order once
+// the runtime completes the wait.
+void TestHeldWaitKeepsFrameLoopRunning() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    depthxr::TurboFrameTestPeer::SetPolicy(depthxr::TurboPacingMode::kAsync,
+                                          depthxr::TurboFrameTestPeer::Source::kProbing);
+    const auto end_info = FrameEndInfo();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS &&
+               runtime.WaitForWaitExited(1), "Held-wait test could not establish async pacing");
+    XrFrameState state{XR_TYPE_FRAME_STATE};
+    Expect(AppWait(&state) == XR_SUCCESS && XR_SUCCEEDED(AppBegin()), "Held-wait first frame failed");
+    runtime.BlockWait();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS &&
+               runtime.WaitForWaitEntered(2), "Held-wait frame before the hold failed");
+    const int ends_before = runtime.EndCalls();
+
+    // DCS polls its next frame before it submits this one. The first poll is
+    // fabricated; the second used to wait for the runtime indefinitely.
+    Expect(AppWait(&state) == XR_SUCCESS && state.shouldRender == XR_TRUE && XR_SUCCEEDED(AppBegin()),
+           "Held-wait app frame was not fabricated");
+    auto start = std::chrono::steady_clock::now();
+    Expect(AppWait(&state) == XR_SUCCESS, "A held runtime wait failed the application's xrWaitFrame");
+    double elapsed = ElapsedMs(start);
+    Expect(elapsed >= 1900.0 && elapsed < 2600.0,
+           "A poll on a held runtime wait took " + std::to_string(elapsed) + "ms instead of its bound");
+    Expect(state.shouldRender == XR_FALSE, "A frame the runtime never granted did not report shouldRender FALSE");
+
+    // The held wait is not waited for again: each frame (submit, begin, the
+    // overlapping next poll) costs about two drain bounds.
+    for (int frame = 0; frame < 4; ++frame) {
+        start = std::chrono::steady_clock::now();
+        Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
+               "A held runtime wait failed the application's xrEndFrame");
+        Expect(XR_SUCCEEDED(AppBegin()) && AppWait(&state) == XR_SUCCESS && state.shouldRender == XR_FALSE,
+               "A frame on a held runtime wait was not fabricated with shouldRender FALSE");
+        elapsed = ElapsedMs(start);
+        Expect(elapsed < 1000.0, "A frame on a held runtime wait took " + std::to_string(elapsed) + "ms");
+    }
+    Expect(runtime.EndCalls() == ends_before && runtime.BeginRejections() == 1 && runtime.StackedWaits() == 0 &&
+               runtime.MaxConcurrentWaits() == 1 && depthxr::TurboFrameTestPeer::Handoff().wait_valid,
+           "A frame was submitted without its runtime wait, a wait was stacked, or the held wait was discarded");
+
+    runtime.ReleaseWait();
+    Expect(runtime.WaitForWaitExited(2), "The held wait never returned after release");
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS &&
+               runtime.EndCalls() == ends_before + 1,
+           "Forwarding did not resume once the runtime completed the held wait");
+    Expect(XR_SUCCEEDED(AppBegin()) &&
+               depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS &&
+               runtime.EndCalls() == ends_before + 2,
+           "The frame polled during the hold was not submitted after it");
+    ExpectHealthyFrames(runtime, 16, "Held wait");
+    Expect(runtime.EndRejections() == 0 && runtime.BeginRejections() == 1 && runtime.ValidStructs(),
+           "Recovery from a held wait violated runtime frame order");
+}
+
+// Issue #88's exit: with the runtime still holding the wait, the game's frame
+// loop keeps running, reaches xrEndSession, and the session ends without it.
+void TestHeldWaitStillReachesSessionEnd() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    const auto end_info = FrameEndInfo();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS &&
+               runtime.WaitForWaitExited(1), "Held-exit test could not establish async pacing");
+    runtime.BlockWait();
+    Expect(AppFrame(end_info) == XR_SUCCESS && runtime.WaitForWaitEntered(2),
+           "Held-exit frame before the hold failed");
+    // One late-wait bound, then each frame costs only the drain bounds.
+    const auto start = std::chrono::steady_clock::now();
+    for (int frame = 0; frame < 3; ++frame) {
+        Expect(AppFrame(end_info) == XR_SUCCESS, "A frame on a held runtime wait failed");
+    }
+    const double loop_ms = ElapsedMs(start);
+    Expect(loop_ms < 4500.0, "Three frames on a held runtime wait took " + std::to_string(loop_ms) + "ms");
+    const auto end_start = std::chrono::steady_clock::now();
+    Expect(depthxr::TurboFrameTestPeer::EndFaultedSession() == XR_SUCCESS,
+           "xrEndSession failed while the runtime held Turbo's wait");
+    const double end_ms = ElapsedMs(end_start);
+    Expect(end_ms < 6000.0, "xrEndSession waited " + std::to_string(end_ms) + "ms on the held wait");
+    Expect(runtime.StackedWaits() == 0 && runtime.EndRejections() == 0 && runtime.MaxConcurrentWaits() == 1,
+           "Ending the session around a held wait violated runtime frame order");
+    runtime.ReleaseWait();
+    Expect(runtime.WaitForWaitExited(2), "The held wait never returned after release");
+    std::this_thread::sleep_for(50ms);
+    Expect(!depthxr::TurboFrameTestPeer::StaleCompletionPublished(),
+           "A held wait from an ended session published into the next session's state");
 }
 
 // PiOpenXR/Oculus/Varjo: the off-thread wait completes only after a submit.
@@ -2282,6 +2375,8 @@ int main() {
     // forwarding, block the application unboundedly, or stack a runtime wait.
     TestConformantLateWaitIsWaitedFor();
     TestStuckWaitDropsFrameThenResumes();
+    TestHeldWaitKeepsFrameLoopRunning();
+    TestHeldWaitStillReachesSessionEnd();
     TestInterlockedRuntimeAutoFallsBackToSequenced();
     TestInterlockedForcedAsyncSuspendsAndKeepsRunning();
     TestOwnershipDesyncRecoversInSession();
