@@ -143,11 +143,11 @@ std::string_view VarjoNativeViewRole(uint32_t index) {
     }
 }
 
-double QuadViewsFocusWidthScale(const QuadViewsResolvedSettings& settings) {
+double QuadViewsFocusWidthScale(const QuadViewsSettings& settings) {
     return settings.focus_scale * Clamp(settings.focus_horizontal_size_percent, 1.0, 100.0) / 100.0;
 }
 
-double QuadViewsFocusHeightScale(const QuadViewsResolvedSettings& settings) {
+double QuadViewsFocusHeightScale(const QuadViewsSettings& settings) {
     return settings.focus_scale * Clamp(settings.focus_vertical_size_percent, 1.0, 100.0) / 100.0;
 }
 
@@ -201,7 +201,7 @@ AngularWindow ClampProjectedWindow(float base_negative,
 }
 
 XrFovf BuildFocusFov(const XrFovf& base_fov,
-                     const QuadViewsResolvedSettings& settings,
+                     const QuadViewsSettings& settings,
                      double focus_yaw_radians,
                      double focus_pitch_radians) {
     const double horizontal_center = DegreesToRadians(settings.horizontal_offset_degrees) + focus_yaw_radians;
@@ -1788,7 +1788,10 @@ bool OpenXrLayer::PollInputBindingDown(const InputBinding& binding) {
         return poll.down;
     }
 
-    const std::string key = binding.device_guid.empty() ? BindingLabel(binding) : binding.device_guid;
+    // Device bindings are polled from the locate paths: key them by the GUID
+    // they already hold rather than copying it on every poll.
+    std::string label_key;
+    const std::string& key = binding.device_guid.empty() ? (label_key = BindingLabel(binding)) : binding.device_guid;
     const auto now = std::chrono::steady_clock::now();
     std::scoped_lock diagnostic_lock(input_binding_diagnostic_mutex_);
     InputBindingDiagnosticLogState& state = input_binding_diagnostic_states_[key];
@@ -11196,7 +11199,7 @@ void OpenXrLayer::UpdateEyeGazeResources(QuadViewsTrackingMode previous_mode) {
 bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
                                             XrSpace base_space,
                                             XrTime time,
-                                            const QuadViewsResolvedSettings& settings,
+                                            const QuadViewsSettings& settings,
                                             double* yaw_radians,
                                             double* pitch_radians) {
     if (!yaw_radians || !pitch_radians) {
@@ -11774,10 +11777,8 @@ bool OpenXrLayer::EnsureEyeOffsets(XrSession session,
         return true;
     }
 
-    std::vector<XrView> eye_views(view_count);
-    for (XrView& eye_view : eye_views) {
-        eye_view = {XR_TYPE_VIEW};
-    }
+    std::vector<XrView>& eye_views = eye_offset_views_scratch_;
+    eye_views.assign(view_count, XrView{XR_TYPE_VIEW});
     XrViewState eye_view_state{XR_TYPE_VIEW_STATE};
     uint32_t eye_view_count = 0;
     XrViewLocateInfo eye_view_locate_info{XR_TYPE_VIEW_LOCATE_INFO};
@@ -11820,6 +11821,17 @@ bool OpenXrLayer::CachePivotPoseDelta(XrTime time,
         ReexpressPoseDelta(source_pose_delta, InvertPose(view_pose_in_source));
     frame.space_pose_deltas[0] = {source_space, source_pose_delta};
     frame.space_pose_delta_count = 1;
+    if (!pivot_pose_delta_spare_.empty() && !cached_pivot_pose_deltas_.contains(time)) {
+        // One frame per Pivot drive: reuse a pruned frame's node instead of
+        // allocating one under mutex_.
+        pivot_pose_delta_spare_.key() = time;
+        pivot_pose_delta_spare_.mapped() = frame;
+        cached_pivot_pose_deltas_.insert(std::move(pivot_pose_delta_spare_));
+        while (cached_pivot_pose_deltas_.size() > kPivotPoseDeltaMaxEntries) {
+            cached_pivot_pose_deltas_.erase(cached_pivot_pose_deltas_.begin());
+        }
+        return true;
+    }
     return CachePivotPoseDeltaValue(cached_pivot_pose_deltas_, time, frame);
 }
 
@@ -11856,6 +11868,10 @@ void OpenXrLayer::CachePivotPoseDeltaForSpace(PivotPoseDeltaFrame& frame,
 }
 
 void OpenXrLayer::PrunePivotPoseDeltas(XrTime time) {
+    const auto keep_from = cached_pivot_pose_deltas_.upper_bound(time);
+    if (pivot_pose_delta_spare_.empty() && keep_from != cached_pivot_pose_deltas_.begin()) {
+        pivot_pose_delta_spare_ = cached_pivot_pose_deltas_.extract(std::prev(keep_from));
+    }
     PrunePivotPoseDeltaValues(cached_pivot_pose_deltas_, time);
 }
 
@@ -11890,9 +11906,36 @@ void OpenXrLayer::CacheDepthSubmissionGeometry(
         return;
     }
 
-    DepthSubmissionGeometry geometry;
-    geometry.space = space;
-    geometry.view_configuration_type = view_configuration_type;
+    // This runs for every located frame while depth is anchored. A frame
+    // reuses the node, and the geometry's storage, of one that was pruned.
+    auto frame = cached_depth_submission_geometry_.find(time);
+    if (frame == cached_depth_submission_geometry_.end()) {
+        if (depth_submission_geometry_spare_.empty()) {
+            frame = cached_depth_submission_geometry_.try_emplace(time).first;
+        } else {
+            depth_submission_geometry_spare_.key() = time;
+            std::vector<DepthSubmissionGeometry>& reused = depth_submission_geometry_spare_.mapped();
+            reused.resize(std::min<std::size_t>(reused.size(), 1));
+            if (!reused.empty()) {
+                reused.front().space = space;
+                reused.front().view_configuration_type = view_configuration_type;
+            }
+            frame = cached_depth_submission_geometry_.insert(std::move(depth_submission_geometry_spare_)).position;
+        }
+    }
+    std::vector<DepthSubmissionGeometry>& frame_geometry = frame->second;
+    auto existing = std::find_if(
+        frame_geometry.begin(), frame_geometry.end(),
+        [space, view_configuration_type](const DepthSubmissionGeometry& candidate) {
+            return candidate.space == space &&
+                   candidate.view_configuration_type == view_configuration_type;
+        });
+    if (existing == frame_geometry.end()) {
+        existing = frame_geometry.emplace(frame_geometry.end());
+        existing->space = space;
+        existing->view_configuration_type = view_configuration_type;
+    }
+    DepthSubmissionGeometry& geometry = *existing;
     geometry.native_poses.resize(native_views.size());
     geometry.render_poses.resize(render_views.size());
     geometry.native_fovs.resize(native_views.size());
@@ -11919,20 +11962,6 @@ void OpenXrLayer::CacheDepthSubmissionGeometry(
     for (size_t i = 0; i < native_views.size(); ++i) {
         copy_view(native_views[i], &geometry.native_poses[i], &geometry.native_fovs[i]);
         copy_view(render_views[i], &geometry.render_poses[i], &geometry.render_fovs[i]);
-    }
-
-    std::vector<DepthSubmissionGeometry>& frame_geometry =
-        cached_depth_submission_geometry_[time];
-    const auto existing = std::find_if(
-        frame_geometry.begin(), frame_geometry.end(),
-        [space, view_configuration_type](const DepthSubmissionGeometry& candidate) {
-            return candidate.space == space &&
-                   candidate.view_configuration_type == view_configuration_type;
-        });
-    if (existing != frame_geometry.end()) {
-        *existing = std::move(geometry);
-    } else {
-        frame_geometry.push_back(std::move(geometry));
     }
     while (cached_depth_submission_geometry_.size() > kMaxCachedDepthSubmissionFrames) {
         cached_depth_submission_geometry_.erase(cached_depth_submission_geometry_.begin());
@@ -11996,6 +12025,9 @@ void OpenXrLayer::PruneDepthSubmissionGeometry(XrTime time) {
     const auto keep_from = cached_depth_submission_geometry_.upper_bound(time);
     if (keep_from == cached_depth_submission_geometry_.begin()) {
         return;
+    }
+    if (depth_submission_geometry_spare_.empty()) {
+        depth_submission_geometry_spare_ = cached_depth_submission_geometry_.extract(std::prev(keep_from));
     }
     cached_depth_submission_geometry_.erase(cached_depth_submission_geometry_.begin(), keep_from);
 }
@@ -12365,7 +12397,9 @@ XrResult OpenXrLayer::LocateRuntimeViews(XrSession session,
     if (view_locate_info) turbo_trace_.Record("locate", turbo_trace_.NextId(), view_locate_info->displayTime);
     bool varjo_compatible = false;
     bool request_native_foveated_locates = false;
-    QuadViewsResolvedSettings quadviews_settings;
+    // The tuning only: the resolved settings' diagnostic binding would make
+    // this per-call copy allocate.
+    QuadViewsSettings quadviews_settings;
     {
         std::scoped_lock lock(mutex_);
         ReloadConfigIfNeeded();
@@ -12554,7 +12588,7 @@ XrResult OpenXrLayer::LocateRuntimeViews(XrSession session,
 }
 
 bool OpenXrLayer::SynthesizeQuadViewsFromStereo(std::span<const XrView> stereo_views,
-                                                const QuadViewsResolvedSettings& quadviews_settings,
+                                                const QuadViewsSettings& quadviews_settings,
                                                 double focus_yaw_radians,
                                                 double focus_pitch_radians,
                                                 uint32_t view_capacity_input,
@@ -14900,27 +14934,30 @@ bool OpenXrLayer::IsPivotXrActive() {
         SoundPlayer::Instance().PlayTransition(trigger.sound, false, dll_directory_,
                                                resolved_settings_.core.sound_volume);
     };
-    std::vector<InputBinding> claimed_view_inputs;
-    std::vector<std::string> polled_nudge_sets;
+    // This runs on every xrLocateSpace and xrLocateViews, under mutex_: the
+    // claim lists reuse their storage instead of allocating per call.
+    std::vector<const InputBinding*>& claimed_view_inputs = pivotxr_claimed_view_inputs_scratch_;
+    std::vector<std::string_view>& polled_nudge_sets = pivotxr_polled_nudge_sets_scratch_;
+    claimed_view_inputs.clear();
+    polled_nudge_sets.clear();
     auto claim_view_input = [&](const InputBinding& binding) {
         if (std::any_of(claimed_view_inputs.begin(), claimed_view_inputs.end(),
-                        [&](const InputBinding& claimed) { return SameInputBinding(claimed, binding); })) {
+                        [&](const InputBinding* claimed) { return SameInputBinding(*claimed, binding); })) {
             return false;
         }
-        claimed_view_inputs.push_back(binding);
+        claimed_view_inputs.push_back(&binding);
         return true;
     };
 
     // Arbitrate across all candidates: last pressed wins. The resolver prunes
     // colliding activation bindings while retaining every independent binding.
-    std::vector<size_t> profile_input_order;
-    if (pivotxr_active_profile_index_ < pivot.profiles.size()) {
-        profile_input_order.push_back(pivotxr_active_profile_index_);
-    }
-    for (size_t index = 0; index < pivot.profiles.size(); ++index) {
-        if (index != pivotxr_active_profile_index_) profile_input_order.push_back(index);
-    }
-    for (size_t i : profile_input_order) {
+    // The engaged profile reads its input first, then the others in order.
+    const size_t first_profile = pivotxr_active_profile_index_;
+    for (size_t step = 0; step < pivot.profiles.size(); ++step) {
+        const size_t i = first_profile >= pivot.profiles.size() ? step
+                         : step == 0                            ? first_profile
+                         : step <= first_profile                ? step - 1
+                                                                : step;
         const PivotXrResolvedProfile& profile = pivot.profiles[i];
         PivotProfileInputState& input_state = pivotxr_profile_input_states_[i];
         if (first_poll) {
@@ -14991,7 +15028,7 @@ bool OpenXrLayer::IsPivotXrActive() {
         if (nudge_set_input_owner && !profile.nudge_set_id.empty()) {
             nudge_set_input_owner =
                 std::find(polled_nudge_sets.begin(), polled_nudge_sets.end(),
-                          profile.nudge_set_id) == polled_nudge_sets.end();
+                          std::string_view(profile.nudge_set_id)) == polled_nudge_sets.end();
             if (nudge_set_input_owner) polled_nudge_sets.push_back(profile.nudge_set_id);
         }
         const bool behavior_active =

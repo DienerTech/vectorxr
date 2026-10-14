@@ -3,16 +3,43 @@
 #include "depthxr/settings_resolver.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <iostream>
+#include <new>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
+
+// Counts this executable's heap allocations while a scenario measures a call.
+namespace {
+std::atomic<bool> g_counting_allocations{false};
+std::atomic<std::size_t> g_allocations{0};
+} // namespace
+
+void* operator new(std::size_t size) {
+    if (g_counting_allocations.load(std::memory_order_relaxed)) {
+        g_allocations.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (void* memory = std::malloc(size == 0 ? 1 : size)) {
+        return memory;
+    }
+    throw std::bad_alloc();
+}
+
+void operator delete(void* memory) noexcept {
+    std::free(memory);
+}
+
+void operator delete(void* memory, std::size_t) noexcept {
+    std::free(memory);
+}
 
 // Scenario tests for Snap Views and their interplay with Enhanced Motion.
 // Every scenario drives the real xrLocateViews (Pivot drive) and xrLocateSpace
@@ -404,6 +431,67 @@ public:
         XrEventDataBuffer buffer{XR_TYPE_EVENT_DATA_BUFFER};
         Expect(layer.PollEvent(XR_NULL_HANDLE, &buffer) == XR_SUCCESS, "Recenter event must pass through");
         layer.next_poll_event_ = nullptr;
+    }
+
+    template <typename Call>
+    static std::size_t CountAllocations(Call&& call) {
+        g_allocations.store(0);
+        g_counting_allocations.store(true);
+        call();
+        g_counting_allocations.store(false);
+        return g_allocations.load();
+    }
+
+    // Depth's stereo boost with Depth Lock, so xrLocateViews also caches
+    // the frame's submission geometry.
+    static void EnableAnchoredDepth() {
+        auto& settings = Layer().resolved_settings_.depthxr;
+        settings.enabled = true;
+        settings.stereo_boost = 1.2;
+        settings.depth_anchor = true;
+    }
+
+    struct FrameAllocations {
+        std::size_t locate_views{0};
+        std::size_t locate_space{0};
+        bool depth_cached{false};
+    };
+
+    // One frame as an application makes it: xrLocateViews for a new
+    // displayTime, three xrLocateSpace calls for it, then xrEndFrame's
+    // pruning of the per-frame caches.
+    static FrameAllocations LocateFrame() {
+        auto& layer = Layer();
+        if (layer.pivotxr_last_smoothing_wall_time_.has_value()) {
+            layer.pivotxr_last_smoothing_wall_time_ =
+                std::chrono::steady_clock::now() - std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                                       std::chrono::duration<double>(kFrameSeconds));
+        }
+        display_time += kFrameNanoseconds;
+        XrViewLocateInfo info{XR_TYPE_VIEW_LOCATE_INFO};
+        info.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+        info.displayTime = display_time;
+        info.space = kLocalSpace;
+        XrViewState state{XR_TYPE_VIEW_STATE};
+        XrView views[2]{{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};
+        uint32_t count = 0;
+        XrResult views_result = XR_ERROR_RUNTIME_FAILURE;
+        FrameAllocations allocations;
+        allocations.locate_views = CountAllocations(
+            [&] { views_result = layer.LocateViews(kSession, &info, &state, 2, &count, views); });
+        Expect(views_result == XR_SUCCESS && count == 2, "xrLocateViews must succeed");
+        allocations.depth_cached = !layer.cached_depth_submission_geometry_.empty();
+        for (int call = 0; call < 3; ++call) {
+            XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
+            XrResult space_result = XR_ERROR_RUNTIME_FAILURE;
+            allocations.locate_space += CountAllocations(
+                [&] { space_result = layer.LocateSpace(kViewSpace, kLocalSpace, display_time, &location); });
+            Expect(space_result == XR_SUCCESS, "xrLocateSpace must succeed");
+        }
+        layer.PrunePivotPoseDeltas(display_time);
+        layer.PruneDepthSubmissionGeometry(display_time);
+        layer.PruneQuadViewsFrames(display_time);
+        return allocations;
     }
 
     static bool SnapSelected() { return Layer().pivotxr_quick_view_active_; }
@@ -1149,6 +1237,34 @@ void PerDirectionDeadzoneTransitionShapesTheExtraAngle() {
     ExpectViewYaw(Peer::Drive(), -12.0, "Yaw Right without a transition must keep the hard deadzone");
 }
 
+// xrLocateSpace runs several times per frame and xrLocateViews at least
+// once, both under the layer's lock. Once frames are steady neither may
+// allocate: two motion profiles sharing a Nudge Set, a Snap Views profile
+// and anchored depth exercise every per-call list and per-frame cache.
+void SteadyLocatesDoNotAllocate() {
+    auto flight = Motion("Flight", Toggle("F1"), true);
+    auto second = Motion("Second", Hold("F4"), false);
+    AddYawLeftNudge(flight, "shared-cockpit-nudge-set", "F6");
+    AddYawLeftNudge(second, "shared-cockpit-nudge-set", "F6");
+    Peer::Start({flight, Snaps({View("Right", 90.0, Hold("F2"))}), second});
+    Peer::EnableAnchoredDepth();
+    EngageFlight();
+    Peer::Head(12.0);
+    for (int frame = 0; frame < 40; ++frame) {
+        const Peer::FrameAllocations allocations = Peer::LocateFrame();
+        Expect(allocations.depth_cached, "Anchored depth must cache the frame's submission geometry");
+        // The first frames size the reused storage.
+        if (frame < 5) {
+            continue;
+        }
+        Expect(allocations.locate_views == 0,
+               "A steady xrLocateViews made " + std::to_string(allocations.locate_views) + " heap allocations");
+        Expect(allocations.locate_space == 0,
+               "Three steady xrLocateSpace calls made " + std::to_string(allocations.locate_space) +
+                   " heap allocations");
+    }
+}
+
 struct Scenario {
     const char* name;
     std::function<void()> run;
@@ -1186,6 +1302,7 @@ int main() {
         {"OSD motion and snap lines", OsdReportsMotionImmediatelyAndOnlyShowsSnapsWhenConfigured},
         {"mid-flight config edits", MidFlightEditsKeepTheSnap},
         {"per-direction deadzone transition", PerDirectionDeadzoneTransitionShapesTheExtraAngle},
+        {"steady locates do not allocate", SteadyLocatesDoNotAllocate},
     };
 
     int failures = 0;

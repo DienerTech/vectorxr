@@ -21,7 +21,18 @@ public:
             return;
         }
 
-        frames_[time] = std::move(payload);
+        const auto existing = frames_.find(time);
+        if (existing != frames_.end()) {
+            existing->second = std::move(payload);
+        } else if (spare_.empty()) {
+            frames_.emplace(time, std::move(payload));
+        } else {
+            // One frame is stored per located display time: reuse a pruned
+            // frame's node instead of allocating one.
+            spare_.key() = time;
+            spare_.mapped() = std::move(payload);
+            frames_.insert(std::move(spare_));
+        }
         while (frames_.size() > max_entries) {
             frames_.erase(frames_.begin());
         }
@@ -70,12 +81,16 @@ public:
     void PruneThrough(std::int64_t time) {
         const auto keep_from = frames_.upper_bound(time);
         if (keep_from != frames_.begin()) {
+            if (spare_.empty()) {
+                spare_ = frames_.extract(std::prev(keep_from));
+            }
             frames_.erase(frames_.begin(), keep_from);
         }
     }
 
     void Clear() {
         frames_.clear();
+        spare_ = {};
     }
 
     [[nodiscard]] std::size_t Size() const {
@@ -84,6 +99,7 @@ public:
 
 private:
     std::map<std::int64_t, Payload> frames_;
+    typename std::map<std::int64_t, Payload>::node_type spare_;
 };
 
 } // namespace depthxr
