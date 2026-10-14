@@ -3573,6 +3573,28 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
     } else {
         repeated_ += count;
     }
+    if (logger_ && synthesized && !logged_first_generation_) {
+        // Just in time (analyze) as well. Each view as the game submits it:
+        // its region of the swapchain image and its field of view, where an
+        // eye-tracked focus view's movement shows (issue #95).
+        logged_first_generation_ = true;
+        std::string views;
+        for (std::uint32_t i = 0; i < projection.viewCount; ++i) {
+            const XrCompositionLayerProjectionView& view = projection.views[i];
+            const auto degrees = [](float radians) { return Number(radians * 57.2957795, 1); };
+            views += std::string(views.empty() ? "" : "; ") + std::to_string(view.subImage.imageRect.extent.width) +
+                     "x" + std::to_string(view.subImage.imageRect.extent.height) + " at " +
+                     std::to_string(view.subImage.imageRect.offset.x) + "," +
+                     std::to_string(view.subImage.imageRect.offset.y) + " fov " + degrees(view.fov.angleLeft) + "/" +
+                     degrees(view.fov.angleRight) + "/" + degrees(view.fov.angleUp) + "/" +
+                     degrees(view.fov.angleDown);
+        }
+        logger_->Info("Frame Generation produced its first frames: views=" + std::to_string(projection.viewCount) + " (" +
+                      views + "), generatedPerFrame=" + (analyze ? std::string("just in time") : std::to_string(count)) +
+                      ", backend=" + gpu_->Name() +
+                      (fractions.empty() ? std::string() : ", firstFraction=" + Number(fractions.front(), 3)) +
+                      ", capturedAtRelease=" + std::to_string(captured_ > 0) + ".");
+    }
     if (analyze) {
         analyze->frame = executed.frame;
         analyze->synthesized = synthesized;
@@ -3617,18 +3639,6 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         shift_window_sum_mm_ += moved_mm;
         shift_window_max_mm_ = std::max(shift_window_max_mm_, moved_mm);
         ++shift_window_frames_;
-    }
-    if (logger_ && synthesized && !logged_first_generation_) {
-        logged_first_generation_ = true;
-        std::string extents;
-        for (const auto& submission : submissions) {
-            extents += (extents.empty() ? "" : ",") + std::to_string(submission.request.extent.width) + "x" +
-                       std::to_string(submission.request.extent.height);
-        }
-        logger_->Info("Frame Generation produced its first frames: views=" + std::to_string(projection.viewCount) + " (" +
-                      extents + "), generatedPerFrame=" + std::to_string(count) + ", backend=" + gpu_->Name() +
-                      ", firstFraction=" + Number(fractions.front(), 3) + ", capturedAtRelease=" +
-                      std::to_string(captured_ > 0) + ".");
     }
     return true;
 }

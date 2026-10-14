@@ -7255,6 +7255,34 @@ void TestDiagnosticViewLogged() {
           name + ": a change is logged once");
 }
 
+// The first frames Frame Generation makes are logged once, just in time
+// (the default) too, with each view as the game submits it: its region of
+// the swapchain image and its field of view in degrees (left/right/up/down),
+// where a focus view an eye-tracked foveation moves would show.
+void TestFirstFramesLogged() {
+    const std::string name = "first frames logged";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    SessionLog log("first-frames");
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2, app, runtime, owned,
+             log.logger.get());
+    RunWork(*app, 3000ms, kLightWork, [&](const XrFrameState&) { return presenter.Status().generated >= 4; });
+    Check(presenter.Status().generated >= 4, name + ": generates");
+    RunWork(*app, 200ms, kLightWork);
+    presenter.Stop();
+    const std::vector<std::string> lines = log.Lines("Frame Generation produced its first frames");
+    const std::string view = "1600x1600 at 0,0 fov -45.8/45.8/45.8/-45.8";
+    Check(lines.size() == 1 &&
+              lines.front().find("views=2 (" + view + "; " + view + "), generatedPerFrame=just in time") !=
+                  std::string::npos,
+          name + ": once, with each view's region and field of view (" +
+              (lines.empty() ? std::string("none") : lines.front()) + ")");
+}
+
 // A runtime that blocks every wait until its refresh (as Pimax's own,
 // Meta's and Varjo's do), with a quick xrEndFrame: one of Frame
 // Generation's submissions goes 7 ms late (its xrBeginFrame held up, as a
@@ -8369,6 +8397,7 @@ int main(int argc, char** argv) {
     RUN(TestUncapturedFramesAreSkipped);
     RUN(TestSettingsAndSessionChanges);
     RUN(TestDiagnosticViewLogged);
+    RUN(TestFirstFramesLogged);
     RUN(TestUnavailableWithoutBackend);
     RUN(TestOsdDescription);
     RUN(TestOsdRuntimeHalving);
