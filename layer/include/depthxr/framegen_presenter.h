@@ -624,6 +624,9 @@ class FrameGenPresenter {
     std::uint32_t DynamicSetCapLocked() const;
     void UpdateAutoLocked(std::chrono::steady_clock::time_point now, const std::optional<PendingFrame>& frame,
                           bool started_late = false);
+    // Auto, presenting from its own thread: whether the game's own time per
+    // frame (auto_busy_) is within reach of `slots` refreshes a frame.
+    bool AutoProbeInReachLocked(std::uint32_t slots, XrDuration period) const;
     // Dynamic: standing by, engages once the game runs below the refresh
     // rate; engaged, the game keeps its own rate (generated frames fill the
     // refreshes it misses) and Dynamic stands down when Frame Generation
@@ -1133,6 +1136,12 @@ class FrameGenPresenter {
     std::chrono::milliseconds probe_backoff_{10000};
     bool probing_{false};
     std::uint32_t probe_from_{0};
+    // Presenting from its own thread: the game's last frames' own time per
+    // frame (from one wait to the next, the cadence's hold left out), ms,
+    // and when the last wait's hold ended (AutoProbeInReachLocked).
+    std::array<double, 32> auto_busy_{};
+    std::size_t auto_busy_count_{0};
+    std::chrono::steady_clock::time_point auto_busy_since_{};
     std::size_t auto_late_percent_{0}; // for the log
     // Auto never steps above this again in the session once video memory
     // ran near its budget: each step up allocates more output images.

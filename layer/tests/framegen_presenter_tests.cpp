@@ -7782,6 +7782,48 @@ void TestAutoHoldsWhileClockDisplaced() {
     Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
 }
 
+// Auto probes a step down once its frames run steady a while: a game whose
+// own frames take longer than that step allows fails every probe, with a
+// second or two of late frames each (DCS on Varjo, 2026-10-14: 2x -> full
+// rate and back every 35 s, "37% / 87% of frames late", at 17-22 ms a frame
+// against 11.1 ms refreshes). Auto probes only a game within reach of the
+// step, as Dynamic does; one that gets lighter is probed and steps down.
+void TestAutoProbesNeedRoom() {
+    const std::string name = "auto probes need room";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kAuto, app, runtime, owned);
+    presenter.SetAutoPolicy(200ms, 500ms, 600ms, 300ms);
+    RunWork(*app, 2000ms, PeriodsOfWork(kPeriod, 1.6));
+    const std::uint32_t settled = presenter.Status().multiplier;
+    Check(settled == 2 && presenter.Status().threaded,
+          name + ": a game of 1.6 refreshes a frame engages Auto at 2x (" + std::to_string(settled) + "x)");
+    int probes = 0;
+    std::uint32_t last = settled;
+    const auto count_probes = [&](const XrFrameState&) {
+        const std::uint32_t now = presenter.Status().multiplier;
+        probes += now < last ? 1 : 0;
+        last = now;
+        return false;
+    };
+    // Probes would come every 0.3 s, then 0.6, 1.2 and 2.4 s.
+    RunWork(*app, 3000ms, PeriodsOfWork(kPeriod, 1.6), count_probes);
+    Check(probes == 0 && presenter.Status().multiplier == 2,
+          name + ": a game that cannot run at full rate is not probed there (" + std::to_string(probes) + " probes)");
+    RunWork(*app, 3000ms, PeriodsOfWork(kPeriod, 0.4), [&](const XrFrameState&) {
+        return presenter.Status().multiplier == 1;
+    });
+    Check(presenter.Status().multiplier == 1,
+          name + ": a game that got lighter is probed at full rate and stays there (" +
+              std::to_string(presenter.Status().multiplier) + "x)");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+}
+
 // The same jump while Frame Generation presents (no game pause causes it
 // then, but a runtime may): the presenter thread's refreshes stop advancing,
 // so it stops and frames pass straight through within moments, the game never
@@ -8352,6 +8394,7 @@ int main(int argc, char** argv) {
     RUN(TestLowFirstClockSample);
     RUN(TestStalledClockWhilePresenting);
     RUN(TestAutoHoldsWhileClockDisplaced);
+    RUN(TestAutoProbesNeedRoom);
     RUN(TestSteamVrMissedRefresh);
     RUN(TestLeadAfterRepeatedHitches);
     RUN(TestPassedOverFramesKeepLead);

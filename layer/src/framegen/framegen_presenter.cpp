@@ -1733,8 +1733,10 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
         probe_backoff_ = auto_initial_backoff_;
         probe_not_before_ = now + probe_backoff_;
     } else if (!probing_ && auto_multiplier_ > 1 && now >= probe_not_before_ && !cadence_.empty() &&
-               now - cadence_.front().time >= auto_steady_ && steady >= 8 && steady_late * 50 <= steady) {
-        // Five steady seconds with at most 2% of frames late: try one step down.
+               now - cadence_.front().time >= auto_steady_ && steady >= 8 && steady_late * 50 <= steady &&
+               AutoProbeInReachLocked(auto_multiplier_ - 1, refresh_period_ > 0 ? refresh_period_ : last_period_)) {
+        // Five steady seconds with at most 2% of frames late, and a game
+        // whose own time per frame is within reach of one step down: try it.
         probe_from_ = auto_multiplier_;
         --auto_multiplier_;
         probing_ = true;
@@ -1762,6 +1764,23 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
                               : " (probing a lower multiplier)."));
         }
     }
+}
+
+bool FrameGenPresenter::AutoProbeInReachLocked(std::uint32_t slots, XrDuration period) const {
+    // Inline, the game's frame thread is held for the generated slots, so its
+    // waits say nothing of its own time; until measured, probes go as before.
+    const std::size_t count = std::min(auto_busy_count_, auto_busy_.size());
+    if (!compositor_running_ || count < 8 || period <= 0) {
+        return true;
+    }
+    // A probe a game cannot keep up with costs seconds of late frames (each
+    // about 2 s at 37-87% late in DCS on Varjo, 2026-10-14: 17-22 ms a frame
+    // at 2x, against 11.1 ms refreshes). Within reach as Dynamic judges its
+    // probes: the game's own rate at least that share of the step's.
+    std::array<double, 32> sorted = auto_busy_;
+    std::nth_element(sorted.begin(), sorted.begin() + count / 2, sorted.begin() + count);
+    const double reach = dynamic_policy_.stay_above - kProbeReach;
+    return sorted[count / 2] * reach <= static_cast<double>(slots) * static_cast<double>(period) / 1e6;
 }
 
 void FrameGenPresenter::UpdateDynamicLocked(Clock::time_point now, XrDuration period) {
@@ -4412,6 +4431,8 @@ void FrameGenPresenter::StartCompositorLocked(const FrameGenRuntimeCalls& calls)
     offer_done_ = false;
     last_release_slot_.reset();
     last_offer_slot_.reset();
+    auto_busy_count_ = 0;
+    auto_busy_since_ = {};
     newest_copy_ = passthrough_copy_;
     newest_copy_id_ = 0;
     newest_copy_fresh_ = false;
@@ -4764,6 +4785,7 @@ void FrameGenPresenter::NoteGpuEvidenceLocked(std::uint64_t real_frames, std::ui
 
 std::optional<XrResult> FrameGenPresenter::ThreadedWaitLocked(std::unique_lock<std::mutex>& lock, XrFrameState* state,
                                                             const FrameGenRuntimeCalls& calls) {
+    const auto asked = Clock::now();
     if (!compositor_running_) {
         JoinCompositorLocked(lock);
         if (!compositor_running_) {
@@ -4796,6 +4818,7 @@ std::optional<XrResult> FrameGenPresenter::ThreadedWaitLocked(std::unique_lock<s
     const std::uint32_t cadence = dynamic ? 1 : multiplier;
     std::uint64_t release = last_release_slot_ ? *last_release_slot_ + cadence : slot_index_ + 1;
     release = std::max(release, slot_index_);
+    const auto held_from = Clock::now();
     while (!slot_cv_.wait_for(lock, std::chrono::seconds(2),
                               [&] { return !compositor_running_ || slot_index_ >= release; })) {
         if (logger_ && !logged_watchdog_) {
@@ -4807,6 +4830,13 @@ std::optional<XrResult> FrameGenPresenter::ThreadedWaitLocked(std::unique_lock<s
     if (!compositor_running_) {
         return std::nullopt;
     }
+    // The game's own time for its last frame: since the last wait's hold for
+    // the cadence ended (Auto's probes; its GPU's hold below counts as its).
+    const auto held = Clock::now() - held_from;
+    if (auto_busy_since_ != Clock::time_point{} && asked > auto_busy_since_) {
+        auto_busy_[auto_busy_count_++ % auto_busy_.size()] = Milliseconds(asked - auto_busy_since_);
+    }
+    auto_busy_since_ = asked + held;
     // The cadence counts from the refresh it released this wait in, not from
     // the end of a GPU wait below: a game held for its GPU is not also held
     // back a cadence.
