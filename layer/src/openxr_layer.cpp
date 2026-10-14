@@ -8169,6 +8169,9 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     PrepareOsd();
     // Capture application-submitted rectangles before synthesized Quadviews
     // rewrites them into two runtime views. Report allocated sizes separately.
+    // Native Varjo focus views are checked here too, once per frame: most of
+    // those frames take the pass-through path below and never reach the
+    // projection rewrite.
     if (frame_end_info && frame_end_info->layers) {
         for (std::uint32_t i = 0; i < frame_end_info->layerCount; ++i) {
             const auto* base = frame_end_info->layers[i];
@@ -8188,6 +8191,10 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
                 }
             }
             quadviews_dimensions_at_ = RuntimeRelayUnixMilliseconds();
+            if (varjo_compatible_quadviews_active_) {
+                NoteVarjoNativeSubmittedFocusLocked(frame_end_info->displayTime, projection->views,
+                                                    projection->viewCount);
+            }
             break;
         }
     }
@@ -8878,10 +8885,6 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         append_projection_layer(projection_layer, 0, projection_layer->viewCount,
                                 layer_pivot_delta.reverse,
                                 layer_pivot_delta.non_identity);
-        if (varjo_compatible_quadviews_active_ && projection_layer->viewCount >= 4) {
-            NoteVarjoNativeSubmittedFocusLocked(frame_end_info->displayTime, projection_layer->views,
-                                                projection_layer->viewCount);
-        }
         // Varjo compatible quadviews: sharpen the runtime's focus views in place when
         // foveate_sharpness > 0. No-op (pure passthrough) when sharpness is 0 or the
         // layer is not a native quad projection.

@@ -470,6 +470,54 @@ class TurboFrameTestPeer {
         layer.ResolveTurboPacingModeLocked();
         layer.runtime_name_.clear();
     }
+
+    // A native Varjo quad views session (Varjo compatible quadviews) with
+    // Pivot, DepthXR and focus sharpening off, located and ended through the
+    // layer's own hooks. The settings stay as set here: no file is read.
+    static void PrepareVarjoNative(PFN_xrLocateViews locate_views, PFN_xrEndFrame end_frame) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.has_loaded_config_ = true;
+        layer.resolved_settings_ = {};
+        layer.resolved_settings_.core.enabled = true;
+        layer.resolved_settings_.depthxr.enabled = false;
+        layer.resolved_settings_.quadviews.enabled = true;
+        layer.resolved_settings_.quadviews.foveate_sharpness = 0.0;
+        layer.resolved_settings_generation_ = layer.config_generation_;
+        layer.resolved_settings_session_ = layer.active_session_;
+        layer.quadviews_session_active_ = true;
+        layer.varjo_compatible_quadviews_active_ = true;
+        layer.varjo_foveated_rendering_extension_requested_ = false;
+        layer.varjo_native_foveation_diagnostic_ = {};
+        layer.next_locate_views_ = locate_views;
+        layer.next_end_frame_ = end_frame;
+        layer.turbo_frame_interception_required_.store(false, std::memory_order_release);
+    }
+    // Varjo focus sharpening asked for: frames take the projection rewrite
+    // (the sharpen itself is skipped, with no Direct3D 11 device here).
+    static void SharpenVarjoFocus() {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.resolved_settings_.quadviews.foveate_sharpness = 50.0;
+    }
+    // The foveation summary's submittedFocusFov: checked, mismatched, unlocated.
+    static std::array<std::uint64_t, 3> VarjoSubmittedFocus() {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        const auto& diagnostic = layer.varjo_native_foveation_diagnostic_;
+        return {diagnostic.submitted_focus_checked, diagnostic.submitted_focus_mismatched,
+                diagnostic.submitted_focus_unlocated};
+    }
+    static void EndVarjoNative() {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.resolved_settings_ = {};
+        layer.quadviews_session_active_ = false;
+        layer.varjo_compatible_quadviews_active_ = false;
+        layer.varjo_native_foveation_diagnostic_ = {};
+        layer.next_locate_views_ = nullptr;
+        layer.next_end_frame_ = nullptr;
+    }
 };
 
 } // namespace depthxr
@@ -2022,6 +2070,91 @@ std::size_t Occurrences(const std::string& text, const std::string& needle) {
     return count;
 }
 
+// --- Native Varjo foveation diagnostics ------------------------------------------
+
+// The focus views' FOV a fake Varjo runtime locates for every display time.
+constexpr XrFovf kVarjoFocusFov{-0.3f, 0.3f, 0.25f, -0.25f};
+int g_varjo_ends = 0;
+
+XrResult XRAPI_PTR VarjoLocateViews(XrSession, const XrViewLocateInfo*, XrViewState*, std::uint32_t capacity,
+                                    std::uint32_t* count, XrView* views) {
+    *count = 4;
+    if (capacity < 4) return capacity ? XR_ERROR_SIZE_INSUFFICIENT : XR_SUCCESS;
+    for (std::uint32_t view = 0; view < 4; ++view) {
+        views[view].pose = {{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
+        views[view].fov = view < 2 ? XrFovf{-0.9f, 0.9f, 0.9f, -0.9f} : kVarjoFocusFov;
+    }
+    return XR_SUCCESS;
+}
+XrResult XRAPI_PTR VarjoEndFrame(XrSession, const XrFrameEndInfo*) {
+    ++g_varjo_ends;
+    return XR_SUCCESS;
+}
+
+// Native Varjo quad views pass through xrEndFrame untouched while Pivot is
+// idle and focus sharpening is off. The submitted focus FOV check must still
+// count each frame, once, whichever path the frame takes (it sat in the
+// projection rewrite only, and read 0/0/0 for such sessions).
+void TestVarjoNativeSubmittedFocusCountsEveryFrame() {
+    using Peer = depthxr::TurboFrameTestPeer;
+    Peer::PrepareVarjoNative(&VarjoLocateViews, &VarjoEndFrame);
+    g_varjo_ends = 0;
+    std::array<XrCompositionLayerProjectionView, 4> views{};
+    for (std::uint32_t view = 0; view < 4; ++view) {
+        views[view] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+        views[view].pose.orientation.w = 1.0f;
+        views[view].fov = view < 2 ? XrFovf{-0.9f, 0.9f, 0.9f, -0.9f} : kVarjoFocusFov;
+        views[view].subImage.swapchain = reinterpret_cast<XrSwapchain>(static_cast<std::uintptr_t>(0x81 + view));
+        views[view].subImage.imageRect = {{0, 0}, {1024, 1024}};
+    }
+    XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    projection.viewCount = 4;
+    projection.views = views.data();
+    const auto* layer = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
+
+    // A frame located (unless `located` is false) and submitted for `time`,
+    // with its left focus view's left edge at `focus_left`.
+    auto frame = [&](XrTime time, bool located, float focus_left) {
+        if (located) {
+            XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO};
+            locate.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET;
+            locate.displayTime = time;
+            XrViewState state{XR_TYPE_VIEW_STATE};
+            std::array<XrView, 4> located_views{};
+            for (auto& view : located_views) view = {XR_TYPE_VIEW};
+            std::uint32_t count = 0;
+            const XrResult result =
+                Peer::Layer().LocateViews(TestSession(), &locate, &state, 4, &count, located_views.data());
+            Expect(result == XR_SUCCESS && count == 4 && located_views[2].fov.angleLeft == kVarjoFocusFov.angleLeft,
+                   "A native Varjo locate did not return the runtime's four views");
+        }
+        views[2].fov.angleLeft = focus_left;
+        XrFrameEndInfo info = FrameEndInfo();
+        info.displayTime = time;
+        info.layerCount = 1;
+        info.layers = &layer;
+        Expect(Peer::Layer().EndFrame(TestSession(), &info) == XR_SUCCESS, "A native Varjo frame did not end");
+    };
+    using Counts = std::array<std::uint64_t, 3>;
+
+    frame(30'000'000'000, true, kVarjoFocusFov.angleLeft);
+    Expect(Peer::VarjoSubmittedFocus() == Counts{1, 0, 0},
+           "A passed-through native Varjo frame's focus views were not checked");
+    frame(30'011'111'111, true, kVarjoFocusFov.angleLeft - 0.01f);
+    Expect(Peer::VarjoSubmittedFocus() == Counts{2, 1, 0},
+           "A passed-through native Varjo frame's other focus FOV was not counted");
+    frame(30'022'222'222, false, kVarjoFocusFov.angleLeft);
+    Expect(Peer::VarjoSubmittedFocus() == Counts{2, 1, 1},
+           "A native Varjo frame for a display time never located was not counted unlocated");
+    // Sharpening sends the frame through the projection rewrite: still one check.
+    Peer::SharpenVarjoFocus();
+    frame(30'033'333'333, true, kVarjoFocusFov.angleLeft);
+    Expect(Peer::VarjoSubmittedFocus() == Counts{3, 1, 1},
+           "A rewritten native Varjo frame's focus views were not checked exactly once");
+    Expect(g_varjo_ends == 4, "Every native Varjo frame must reach the runtime");
+    Peer::EndVarjoNative();
+}
+
 // A settings file with a key this layer does not know (a newer app's) still
 // loads. Each unknown key is logged once per log: at the first load, not again
 // on reloads, and a reload that adds one logs only that one; the next
@@ -2143,6 +2276,7 @@ int main() {
     TestAutoHasNoRuntimeMappings();
     TestSequencedStallPolicySuspends();
     Expect(depthxr::TurboFrameTestPeer::OsdStateTransitions(), "OSD lost enabled/off Turbo or applied/ready/disabled Pivot state");
+    TestVarjoNativeSubmittedFocusCountsEveryFrame();
     // Last: it points the layer's log at a file of its own.
     TestConfigWarningsLoggedOncePerKey();
     std::cout << "depthxr_turbo_frame_tests passed\n";
