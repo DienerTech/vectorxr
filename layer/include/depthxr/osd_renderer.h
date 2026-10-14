@@ -33,6 +33,8 @@ struct OsdMetric {
 };
 struct OsdMeasurements {
     OsdMetric prepare, append, raster, acquire, wait, upload, release, submit, cadence, age;
+    // Between periodic refreshes, on the clock (effectiveRefreshHz).
+    OsdMetric refresh_interval;
     std::uint64_t submitted{}, refreshed{}, no_render{}, layer_limit{}, image_timeouts{}, upload_busy{}, worker_busy{}, failures{}, frame_rejections{};
     // Frames a world-anchored panel went out head-locked: its head pose was not located.
     std::uint64_t anchor_fallbacks{};
@@ -102,6 +104,11 @@ struct OsdBitmap {
     int height{};
     std::vector<std::uint32_t> pixels;
     double raster_ms{};
+    // The renderer's raster generation when it was requested (OsdRenderer).
+    std::uint64_t generation{};
+    // An empty compact panel (CompactOsdLayout's empty, the diagnostics tag
+    // included): every pixel is 0, and it is not submitted.
+    bool empty{false};
     bool Valid() const { return content_width>2 && content_width<=width && height>2 && height<=texture_height && pixels.size()==static_cast<std::size_t>(width)*height; }
 };
 
@@ -154,7 +161,8 @@ class OsdRenderer {
     void SubmissionFailed(XrResult);
     // Called every frame. A nonzero settings_revision that matches the last
     // call skips copying unchanged settings. Pass a snapshot only when
-    // SnapshotDue(): the worker reads it at the refresh rate, not per frame.
+    // SnapshotDue(): the worker reads it at the refresh rate, not per frame,
+    // and not at all while the panel is hidden.
     // Returns the presentation before and after this call's bindings/settings.
     std::pair<OsdPresentation, OsdPresentation> Prepare(const OsdSettings&, std::optional<OsdSnapshot>,
         bool toggle_down, bool cycle_down, std::uint64_t settings_revision = 0);
@@ -197,13 +205,28 @@ class OsdRenderer {
     bool visible_{true}, compact_{false}, toggle_down_{false}, cycle_down_{false}, primed_{false};
     OsdSettings settings_;
     OsdSnapshot snapshot_;
+    // The panel was shown without a snapshot (none are taken while hidden):
+    // the next raster waits for one.
+    bool snapshot_needed_{false};
+    // When Prepare last received a snapshot.
+    std::chrono::steady_clock::time_point snapshot_at_{};
+    // The last periodic refresh drew a snapshot from before it fell due
+    // (Frame Generation's presenter found it due before the app's frame took
+    // one): the app's next frame takes one for the next refresh.
+    bool snapshot_wanted_{false};
     OsdTelemetry telemetry_;
     OsdStatus status_;
     std::uint64_t settings_revision_{};
     int image_height_{};
     int image_width_{OsdBitmap::width};
+    // The image up is an empty compact panel (OsdBitmap::empty).
+    bool image_empty_{false};
+    // When the last refresh fell due (it is requested on the first frame
+    // after); zero refreshes on the next frame.
     std::chrono::steady_clock::time_point updated_{};
     std::chrono::steady_clock::time_point image_updated_{};
+    // The last periodic refresh's upload (zero after a change).
+    std::chrono::steady_clock::time_point refresh_last_{};
     XrCompositionLayerQuad quad_{XR_TYPE_COMPOSITION_LAYER_QUAD};
     // This worker touches only CPU pixels. OpenXR and graphics uploads remain on the
     // thread that ends frames. No frame waits for text drawing or font setup.
@@ -212,7 +235,11 @@ class OsdRenderer {
         bool compact{}, rgba{};
         OsdSnapshot snapshot;
         OsdTelemetry telemetry;
+        std::uint64_t generation{};
     };
+    // Advanced by each change that needs a new raster (a show, a layout
+    // cycle, new settings): a raster requested before it is dropped.
+    std::uint64_t raster_generation_{};
     std::thread raster_thread_;
     std::mutex raster_mutex_;
     std::condition_variable raster_cv_;

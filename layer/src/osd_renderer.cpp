@@ -70,10 +70,13 @@ std::vector<std::pair<LogLevel,std::string>> OsdRenderer::CollectDiagnosticsLock
     auto metric=[](const char* name,const OsdMetric& m){std::ostringstream out;out<<std::fixed<<std::setprecision(4)<<" "<<name<<"{n="<<m.count<<",avgMs="<<(m.count?m.sum/m.count:0)<<",p95UpperMs="<<m.P95Upper()<<",maxMs="<<m.maximum<<"}";return out.str();};
     for(std::size_t i=0;i<3;++i){const auto& m=measurements_[i];if(!m.prepare.count&&!m.append.count&&!m.failures)continue;
         std::ostringstream out;out<<"OSD summary "<<identity_<<" api="<<(graphics_?graphics_->Name():"Unsupported")<<" mode="<<(i==0?"disabled":i==1?"hidden":"visible")<<" final="<<final<<" windowSeconds="<<seconds
-            <<" submitted="<<m.submitted<<" refreshed="<<m.refreshed<<" activeSeconds="<<m.cadence.sum/1000.0<<" effectiveRefreshHz="<<(m.cadence.sum>0?m.refreshed*1000.0/m.cadence.sum:0)<<" noRender="<<m.no_render<<" layerLimit="<<m.layer_limit<<" imageTimeouts="<<m.image_timeouts<<" uploadBusy="<<m.upload_busy<<" workerBusy="<<m.worker_busy<<" failures="<<m.failures
+            <<" submitted="<<m.submitted<<" refreshed="<<m.refreshed<<" activeSeconds="<<m.cadence.sum/1000.0<<" effectiveRefreshHz="<<(m.refresh_interval.sum>0?m.refresh_interval.count*1000.0/m.refresh_interval.sum:0)<<" noRender="<<m.no_render<<" layerLimit="<<m.layer_limit<<" imageTimeouts="<<m.image_timeouts<<" uploadBusy="<<m.upload_busy<<" workerBusy="<<m.worker_busy<<" failures="<<m.failures
             <<" frameRejections="<<m.frame_rejections<<" anchor="<<(!world_anchored_?"view":anchor_failed_?"unavailable":"world")<<" anchorFallbacks="<<m.anchor_fallbacks<<metric("prepareCpu",m.prepare)<<metric("appendCpu",m.append)<<metric("appCadence",m.cadence)<<metric("runtimeSubmitCpu",m.submit);
-        lines.emplace_back(LogLevel::Info,out.str());
-        if(logger_->IsDebugEnabled())lines.emplace_back(LogLevel::Debug,"OSD detail "+identity_+" mode="+(i==0?std::string("disabled"):i==1?"hidden":"visible")+metric("rasterWorkerCpu",m.raster)+metric("acquireCpu",m.acquire)+metric("waitCpu",m.wait)+metric("uploadEnqueueCpu",m.upload)+metric("releaseCpu",m.release)+metric("imageAge",m.age)+"; CPU timings do not measure GPU/compositor execution; p95 bins: 0.05ms below 10ms, 2ms below 120ms, overflow=max");
+        // A disabled OSD's window is all zeros but its baseline timings:
+        // those go out every 30 s only with debug logging, and once at the
+        // end of the session.
+        lines.emplace_back(i==0 && !final?LogLevel::Debug:LogLevel::Info,out.str());
+        if(logger_->IsDebugEnabled())lines.emplace_back(LogLevel::Debug,"OSD detail "+identity_+" mode="+(i==0?std::string("disabled"):i==1?"hidden":"visible")+metric("rasterWorkerCpu",m.raster)+metric("acquireCpu",m.acquire)+metric("waitCpu",m.wait)+metric("uploadEnqueueCpu",m.upload)+metric("releaseCpu",m.release)+metric("imageAge",m.age)+metric("refreshInterval",m.refresh_interval)+"; CPU timings do not measure GPU/compositor execution; p95 bins: 0.05ms below 10ms, 2ms below 120ms, overflow=max");
     }
     measurements_={};report_start_=now;return lines;
 }
@@ -294,7 +297,7 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
         (settings.show_turbo?52:0)+(settings.show_framegen&&snapshot.framegen_session?(snapshot.framegen_detail.empty()?52:80):0)+
         (settings.show_pivot?pivot_row_height:0)+(settings.show_modules?52:0)+
         (!snapshot.restart.empty()?48:0);
-    OsdBitmap output; output.height=height; output.content_width=panel_width;
+    OsdBitmap output; output.height=height; output.content_width=panel_width; output.empty=compact&&layout.empty;
     Canvas canvas(output.width,height);
     if (!canvas.bits || !canvas.dc) return output;
     canvas.Rect(0,0,output.width,height,bg);
@@ -411,7 +414,7 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
     // Complete batched GDI writes before reading the DIB directly.
     GdiFlush();
     output.pixels.resize(static_cast<std::size_t>(output.width)*height);
-    FeatherOsdPixels(canvas.bits,output.pixels.data(),panel_width,height,settings.opacity,compact&&layout.empty,rgba);
+    FeatherOsdPixels(canvas.bits,output.pixels.data(),panel_width,height,settings.opacity,output.empty,rgba);
     return output;
 }
 
@@ -432,6 +435,7 @@ void OsdRenderer::RasterWorker() {
         try { bitmap=RasterizeOsd(request.settings,request.compact,request.snapshot,request.telemetry,request.rgba); }
         catch (...) { /* Report a failed image through the normal OSD status path. */ }
         bitmap.raster_ms=std::chrono::duration<double,std::milli>(Clock::now()-raster_start).count();
+        bitmap.generation=request.generation;
         if(!edge_logged && bitmap.Valid() && logger_ && logger_->IsDebugEnabled()) {
             // Inspect the actual game's CPU image once, off the submission
             // thread. Opposing edge strips distinguish source-image bands
@@ -477,8 +481,8 @@ void OsdRenderer::ShutdownLocked() {
     if (anchor_space_ && api_.destroy_space) api_.destroy_space(anchor_space_);
     swapchain_=XR_NULL_HANDLE; space_=XR_NULL_HANDLE; anchor_space_=XR_NULL_HANDLE; session_=XR_NULL_HANDLE;
     anchor_failed_=false; anchor_logged_=false;
-    acquired_.reset(); acquired_waited_=false; ready_=false; failed_=false; configured_=false; primed_=false;
-    telemetry_={}; status_={}; updated_={}; image_updated_={};
+    acquired_.reset(); acquired_waited_=false; ready_=false; failed_=false; configured_=false; primed_=false; snapshot_needed_=false; snapshot_wanted_=false; image_empty_=false;
+    telemetry_={}; status_={}; updated_={}; image_updated_={}; refresh_last_={}; snapshot_at_={};
 }
 void OsdRenderer::Shutdown() { std::scoped_lock lock(mutex_); ShutdownLocked(); }
 void OsdRenderer::ResetPresentation() {
@@ -515,9 +519,12 @@ std::string OsdRenderer::GraphicsApi() const { std::scoped_lock lock(mutex_);ret
 bool OsdRenderer::SnapshotDue() const {
     std::scoped_lock lock(mutex_);
     // Mirrors Append's refresh condition, so the next raster request sees a
-    // snapshot taken this frame; a disabled renderer needs one on re-enable.
-    return !configured_ || !settings_.enabled || !ready_ || updated_==Clock::time_point{} ||
-        Clock::now()-updated_>=std::chrono::duration<double>(1.0/std::max(1,settings_.update_hz));
+    // snapshot taken this frame; a disabled renderer needs one on re-enable,
+    // and a panel just shown one before it draws. A hidden or failed panel
+    // draws nothing, so it needs none.
+    if (!configured_ || !settings_.enabled || snapshot_needed_) return true;
+    return visible_ && !failed_ && (!ready_ || updated_==Clock::time_point{} || snapshot_wanted_ ||
+        Clock::now()-updated_>=std::chrono::duration<double>(1.0/std::max(1,settings_.update_hz)));
 }
 std::pair<OsdPresentation, OsdPresentation> OsdRenderer::Prepare(const OsdSettings& settings, std::optional<OsdSnapshot> snapshot,
                                                                  bool toggle, bool cycle, std::uint64_t revision) {
@@ -530,7 +537,9 @@ std::pair<OsdPresentation, OsdPresentation> OsdRenderer::Prepare(const OsdSettin
             if (space_ && api_.destroy_space) api_.destroy_space(space_);
             if (anchor_space_ && api_.destroy_space) api_.destroy_space(anchor_space_);
             swapchain_=XR_NULL_HANDLE; space_=XR_NULL_HANDLE; anchor_space_=XR_NULL_HANDLE; anchor_failed_=false;
-            acquired_.reset(); acquired_waited_=false; ready_=false;
+            // A failed raster stays here: retrying must raster again, not
+            // upload the empty image that failed.
+            acquired_.reset(); acquired_waited_=false; ready_=false; upload_.reset();
         }
         visible_=settings.visible_on_start; compact_=settings.compact; primed_=false; failed_=false; telemetry_={};
     }
@@ -542,9 +551,13 @@ std::pair<OsdPresentation, OsdPresentation> OsdRenderer::Prepare(const OsdSettin
         if (cycle && !cycle_down_) { compact_=!compact_; updated_={}; }
     }
     toggle_down_=toggle; cycle_down_=cycle; primed_=true;
+    // Where the panel sits and how large it is apply to the image already
+    // up; everything else needs a new raster.
+    const bool placed=settings.scale!=settings_.scale || settings.horizontal_degrees!=settings_.horizontal_degrees ||
+        settings.vertical_degrees!=settings_.vertical_degrees || settings.distance_meters!=settings_.distance_meters;
     const bool changed=!configured_ || settings.enabled!=settings_.enabled || compact_!=status_.compact ||
         (settings.enabled&&visible_)!=status_.shown || settings.update_hz!=settings_.update_hz ||
-        settings.scale!=settings_.scale || settings.opacity!=settings_.opacity || settings.body_order!=settings_.body_order ||
+        settings.opacity!=settings_.opacity || settings.body_order!=settings_.body_order ||
         settings.show_graph!=settings_.show_graph || settings.show_turbo!=settings_.show_turbo || settings.show_pivot!=settings_.show_pivot || settings.show_modules!=settings_.show_modules ||
         settings.show_framegen!=settings_.show_framegen || settings.compact_show_framegen!=settings_.compact_show_framegen ||
         settings.show_framegen_fps!=settings_.show_framegen_fps ||
@@ -552,20 +565,31 @@ std::pair<OsdPresentation, OsdPresentation> OsdRenderer::Prepare(const OsdSettin
         settings.compact_metrics!=settings_.compact_metrics || settings.compact_show_brand!=settings_.compact_show_brand || settings.compact_show_app!=settings_.compact_show_app ||
         settings.compact_show_runtime!=settings_.compact_show_runtime || settings.compact_show_clock!=settings_.compact_show_clock ||
         settings.compact_show_turbo!=settings_.compact_show_turbo || settings.compact_show_pivot!=settings_.compact_show_pivot ||
-        settings.accent!=settings_.accent || settings.custom_color!=settings_.custom_color || settings.horizontal_degrees!=settings_.horizontal_degrees ||
-        settings.vertical_degrees!=settings_.vertical_degrees || settings.distance_meters!=settings_.distance_meters;
+        settings.accent!=settings_.accent || settings.custom_color!=settings_.custom_color;
     if (!configured_ || revision==0 || revision!=settings_revision_) { settings_=settings; settings_revision_=revision; }
-    if (snapshot) snapshot_=std::move(*snapshot);
+    // A hidden panel takes no snapshots, so the one it holds can be minutes
+    // old: once shown, it draws after the next one arrives.
+    if (snapshot) { snapshot_=std::move(*snapshot); snapshot_at_=Clock::now(); snapshot_needed_=false; snapshot_wanted_=false; }
+    else if (settings.enabled && visible_ && !before.shown) snapshot_needed_=true;
     configured_=true;
-    if(changed){
+    if(changed || placed){
         Event(false,"configuration enabled="+std::to_string(settings.enabled)+" shown="+std::to_string(settings.enabled&&visible_)+" compact="+std::to_string(compact_)+
             " refreshHz="+std::to_string(settings.update_hz)+" scale="+std::to_string(settings.scale)+" opacity="+std::to_string(settings.opacity)+
             " graph="+std::to_string(settings.show_graph)+" turbo="+std::to_string(settings.show_turbo)+" framegen="+std::to_string(settings.show_framegen)+" framegenFps="+std::to_string(settings.show_framegen_fps)+" pivot="+std::to_string(settings.show_pivot)+" modules="+std::to_string(settings.show_modules));
-        updated_={};
+    }
+    if(changed){
+        // Refresh now, and drop a raster requested before the change: it
+        // holds the old layout, settings or (after a show) old values. That
+        // refresh is not on the interval, so the rate is measured afresh.
+        updated_={}; ++raster_generation_; refresh_last_={};
     }
     if (settings.enabled) telemetry_.Tick(Clock::now()); else telemetry_={};
     status_.compact=compact_;
     status_.shown=settings.enabled && visible_;
+    // The image a panel shown again holds is from before it was hidden or
+    // disabled: submit none until the new raster is up, rather than flash
+    // the old values for the frames that takes.
+    if (status_.shown && !before.shown) ready_=false;
     if (graphics_ && (!settings.enabled || !visible_)) { status_.visible=false; status_.message=settings.enabled?"Hidden by binding":"Disabled"; }
     return {before, OsdPresentation{status_.compact, status_.shown}};
 }
@@ -622,22 +646,43 @@ const XrCompositionLayerBaseHeader* OsdRenderer::Append(const XrFrameEndInfo& in
     if (info.layerCount>=max_layers_) { if(!stats.layer_limit)Event(false,"composition layer limit reached appLayers="+std::to_string(info.layerCount)+" runtimeMax="+std::to_string(max_layers_)); ++stats.layer_limit; status_.message="Runtime composition layer limit reached"; return nullptr; }
     if (!swapchain_ && !CreateResources()) return nullptr;
     const auto now=Clock::now();
+    // A raster from before a change never goes up: the next is requested now.
+    if (upload_ && upload_->generation!=raster_generation_) upload_.reset();
     // Swap only a finished CPU buffer. The worker never holds raster_mutex_
     // while drawing, and the submission path does not wait to acquire it.
     {
         std::unique_lock raster_lock(raster_mutex_,std::try_to_lock);
         if (raster_lock.owns_lock()) {
             if (raster_completed_) {
-                stats.raster.Add(raster_completed_->raster_ms); upload_=std::move(raster_completed_); raster_completed_.reset(); raster_requested_=false;
+                stats.raster.Add(raster_completed_->raster_ms);
+                if (raster_completed_->generation==raster_generation_) upload_=std::move(raster_completed_);
+                raster_completed_.reset(); raster_requested_=false;
             }
-            if (!upload_ && !raster_requested_ &&
-                (!ready_ || now-updated_>=std::chrono::duration<double>(1.0/settings_.update_hz))) {
+            // The interval is not timed from the upload, so the raster and
+            // upload time do not stretch it (that way 20 Hz refreshed at
+            // about 10 Hz).
+            const auto period=std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(1.0/settings_.update_hz));
+            const bool due=now-updated_>=period;
+            if (!upload_ && !raster_requested_ && !snapshot_needed_ && (!ready_ || due)) {
                 if (!raster_thread_.joinable()) {
                     try { raster_thread_=std::thread([this] { RasterWorker(); }); }
                     catch (...) { Fail("OSD worker",XR_ERROR_OUT_OF_MEMORY); return nullptr; }
                 }
-                raster_request_=RasterRequest{settings_,compact_,rgba_,snapshot_,telemetry_};
+                raster_request_=RasterRequest{settings_,compact_,rgba_,snapshot_,telemetry_,raster_generation_};
                 raster_requested_=true; raster_cv_.notify_one();
+                // Frame Generation's presenter ends frames between the app's,
+                // and can find a refresh due before the app's next frame takes
+                // its snapshot: this raster then draws the one held, and the
+                // app's next frame takes one for the next refresh. Every
+                // refresh so draws a snapshot about an interval old at most
+                // (without this, none was taken again while the presenter
+                // kept finding refreshes due first).
+                snapshot_wanted_=due && updated_!=Clock::time_point{} && snapshot_at_<updated_+period;
+                // Keep the set rate on average: the next refresh falls due an
+                // interval after this one did, not after the frame that found
+                // it due (half a frame late each time, 20 Hz gave 16-18 Hz).
+                // After a change or a pause, it is an interval from now.
+                updated_=due && updated_!=Clock::time_point{} && now-updated_<2*period?updated_+period:now;
             }
         } else ++stats.worker_busy;
     }
@@ -664,7 +709,7 @@ const XrCompositionLayerBaseHeader* OsdRenderer::Append(const XrFrameEndInfo& in
         }
         if(!refresh_pending) {
             const auto& bitmap=*upload_;
-            if(bitmap.pixels.empty()){Fail("OSD rasterization",XR_ERROR_OUT_OF_MEMORY);return nullptr;}
+            if(bitmap.pixels.empty()){upload_.reset();Fail("OSD rasterization",XR_ERROR_OUT_OF_MEMORY);return nullptr;}
             std::string error;const auto upload_start=Clock::now();const auto uploaded=graphics_->Upload(*acquired_,bitmap,error);stats.upload.Add(Milliseconds(upload_start));
             if(uploaded==OsdUpload::Busy){++stats.upload_busy;refresh_pending="Waiting for previous OSD upload";}
             else if(uploaded==OsdUpload::Failed){Fail(error.c_str(),XR_ERROR_GRAPHICS_DEVICE_INVALID);return nullptr;}
@@ -672,13 +717,25 @@ const XrCompositionLayerBaseHeader* OsdRenderer::Append(const XrFrameEndInfo& in
                 XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
                 const auto release_start=Clock::now();const auto released=api_.release(swapchain_,&release);stats.release.Add(Milliseconds(release_start));
                 if (XR_FAILED(released)) { Fail("OSD release",released); return nullptr; }
-                acquired_.reset(); acquired_waited_=false; ++stats.refreshed; ready_=true; image_height_=bitmap.height; image_width_=bitmap.content_width; updated_=now; image_updated_=Clock::now();
+                acquired_.reset(); acquired_waited_=false; ++stats.refreshed; ready_=true; image_height_=bitmap.height; image_width_=bitmap.content_width; image_empty_=bitmap.empty; image_updated_=Clock::now();
+                // The effective refresh rate, from refresh to refresh on the
+                // clock: the app's frames can stall while Frame Generation's
+                // presenter keeps ending frames. Past a pause it is no interval.
+                if (refresh_last_!=Clock::time_point{}) {
+                    const double ms=std::chrono::duration<double,std::milli>(image_updated_-refresh_last_).count();
+                    if (ms<=std::max(1000.0,3000.0/std::max(1,settings_.update_hz))) stats.refresh_interval.Add(ms);
+                }
+                refresh_last_=image_updated_;
                 upload_.reset();
             }
         }
     }
     if (!ready_) { status_.message=refresh_pending?refresh_pending:"Preparing the overlay"; return nullptr; }
-    if (compact_ && CompactOsdLayout(settings_).empty) { status_.visible=false; status_.message="No compact values selected"; return nullptr; }
+    // Empty as drawn, or as the settings now stand (hidden at once, before
+    // the next raster). The diagnostics tag keeps a compact panel up alone.
+    if (image_empty_ || (compact_ && CompactOsdLayout(settings_,{.diagnostics_width=snapshot_.diagnostics.empty()?0:1}).empty)) {
+        status_.visible=false; status_.message="No compact values selected"; return nullptr;
+    }
     constexpr double rad=3.14159265358979323846/180;
     const auto yaw=-settings_.horizontal_degrees*rad, pitch=settings_.vertical_degrees*rad;
     const auto sy=std::sin(yaw/2),cy=std::cos(yaw/2),sp=std::sin(pitch/2),cp=std::cos(pitch/2);

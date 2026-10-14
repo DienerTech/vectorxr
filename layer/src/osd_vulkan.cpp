@@ -5,6 +5,7 @@
 #include <openxr/openxr_platform.h>
 #include "depthxr/osd_graphics.h"
 #include "depthxr/osd_renderer.h"
+#include <algorithm>
 #include <cstring>
 #include <limits>
 
@@ -28,6 +29,10 @@ class VulkanGraphics final : public OsdGraphics {
     void* mapped{};
     bool pending{},coherent{};
     std::vector<XrSwapchainImageVulkanKHR> images;
+    // As in the D3D11 backend: each image's rows are 0 below image_rows, and
+    // the staging buffer's below staging_rows.
+    std::vector<int> image_rows;
+    int staging_rows{};
 #define DECLARE(name) PFN_vk##name vk##name{};
     OSD_VK_FUNCTIONS(DECLARE)
 #undef DECLARE
@@ -65,12 +70,13 @@ public:
         if(fence)vkDestroyFence(binding.device,fence,nullptr);fence=VK_NULL_HANDLE;
         if(pool)vkDestroyCommandPool(binding.device,pool,nullptr);pool=VK_NULL_HANDLE;commands=VK_NULL_HANDLE;
         if(staging)vkDestroyBuffer(binding.device,staging,nullptr);staging=VK_NULL_HANDLE;
-        if(memory)vkFreeMemory(binding.device,memory,nullptr);memory=VK_NULL_HANDLE;images.clear();
+        if(memory)vkFreeMemory(binding.device,memory,nullptr);memory=VK_NULL_HANDLE;images.clear();image_rows.clear();staging_rows=0;
     }
     bool Images(XrSwapchain s,const OsdDispatch& api,std::string& error) override {
         std::uint32_t count{};auto xr=api.images(s,0,&count,nullptr);
         if(XR_FAILED(xr)||!count){error="Vulkan image enumeration count XrResult="+std::to_string(xr);return false;}
         images.assign(count,{XR_TYPE_SWAPCHAIN_IMAGE_VULKAN_KHR});
+        image_rows.assign(count,OsdBitmap::texture_height);staging_rows=OsdBitmap::texture_height;
         xr=api.images(s,count,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data()));
         if(XR_FAILED(xr)){error="Vulkan image enumeration XrResult="+std::to_string(xr);return false;}
         VkBufferCreateInfo buffer{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};buffer.size=OsdBitmap::width*4*768;buffer.usage=VK_BUFFER_USAGE_TRANSFER_SRC_BIT;buffer.sharingMode=VK_SHARING_MODE_EXCLUSIVE;
@@ -98,8 +104,12 @@ public:
         if(index>=images.size()||!images[index].image){error="Invalid Vulkan image index";return OsdUpload::Failed;}
         if(pending){auto r=vkGetFenceStatus(binding.device,fence);if(r==VK_NOT_READY)return OsdUpload::Busy;if(!Check(r,"vkGetFenceStatus",error))return OsdUpload::Failed;pending=false;}
         if(!Check(vkResetCommandPool(binding.device,pool,0),"vkResetCommandPool",error))return OsdUpload::Failed;
+        constexpr std::size_t pitch=OsdBitmap::width*4;
         std::memcpy(mapped,b.pixels.data(),b.pixels.size()*4);
-        std::memset(static_cast<std::byte*>(mapped)+b.pixels.size()*4,0,(OsdBitmap::width*OsdBitmap::texture_height-b.pixels.size())*4);
+        if(staging_rows>b.height)std::memset(static_cast<std::byte*>(mapped)+b.height*pitch,0,(staging_rows-b.height)*pitch);
+        staging_rows=b.height;
+        const auto rows=static_cast<std::uint32_t>(std::max(b.height,image_rows[index]));
+        image_rows[index]=b.height;
         if(!coherent){VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};range.memory=memory;range.size=VK_WHOLE_SIZE;if(!Check(vkFlushMappedMemoryRanges(binding.device,1,&range),"vkFlushMappedMemoryRanges",error))return OsdUpload::Failed;}
         VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};begin.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         if(!Check(vkBeginCommandBuffer(commands,&begin),"vkBeginCommandBuffer",error))return OsdUpload::Failed;
@@ -107,7 +117,7 @@ public:
         barrier.oldLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;barrier.newLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
         barrier.srcQueueFamilyIndex=barrier.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;barrier.image=images[index].image;barrier.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
         vkCmdPipelineBarrier(commands,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,0,nullptr,0,nullptr,1,&barrier);
-        VkBufferImageCopy copy{};copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};copy.imageExtent={OsdBitmap::width,OsdBitmap::texture_height,1};
+        VkBufferImageCopy copy{};copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};copy.imageExtent={OsdBitmap::width,rows,1};
         vkCmdCopyBufferToImage(commands,staging,images[index].image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&copy);
         barrier.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;barrier.dstAccessMask=VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT;
         barrier.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;barrier.newLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
