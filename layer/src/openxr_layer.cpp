@@ -714,7 +714,7 @@ FrameGenFov ToFrameGenFov(const XrFovf& fov) {
 
 // The compositor's constants for one eye of a quad views compose plan
 // (BuildFrameGenComposeEye: one builder for this compositor and Frame
-// Generation's quad views compose).
+// Generation's quad views compose), the diagnostics its overlay's.
 FocusRectConstants FocusRectConstantsFor(const FrameGenComposeEye& eye) {
     FocusRectConstants constants{};
     std::copy(eye.focus_rect.begin(), eye.focus_rect.end(), constants.focus_rect);
@@ -737,6 +737,14 @@ FocusRectConstants FocusRectConstantsFor(const FrameGenComposeEye& eye) {
     constants.focus_src_rect[1] = 0.0f;
     constants.focus_src_rect[2] = 1.0f;
     constants.focus_src_rect[3] = 1.0f;
+    if (eye.overlay.shown) {
+        constants.diagnostic_params[0] = 1.0f;
+        constants.diagnostic_params[1] = eye.overlay.eye_tracking ? 1.0f : 0.0f;
+        constants.diagnostic_params[2] = eye.overlay.gaze ? 1.0f : 0.0f;
+        std::copy(eye.overlay.gaze_markers.begin(), eye.overlay.gaze_markers.end(), constants.gaze_markers);
+        std::copy(eye.overlay.reference_markers.begin(), eye.overlay.reference_markers.end(),
+                  constants.reference_markers);
+    }
     return constants;
 }
 
@@ -5039,6 +5047,29 @@ bool OpenXrLayer::BuildQuadViewsComposePlan(const XrCompositionLayerProjection* 
                                            resolved_settings_.quadviews.foveate_sharpness);
         composed.peripheral = eye;
         composed.focus = eye + 2;
+        // The diagnostic overlay over the eye, drawn by whichever composes
+        // it: the Direct3D 11 compositor, or Frame Generation for the frame
+        // and every frame it generates from it.
+        if (quadviews_diagnostic_visualization_enabled_) {
+            const XrFovf& full_fov = plan->fovs[eye];
+            const QuadViewsGazeDiagnostic& gaze = plan->gaze;
+            FrameGenComposeOverlay& overlay = composed.overlay;
+            overlay.shown = true;
+            overlay.eye_tracking = resolved_settings_.quadviews.tracking_mode == QuadViewsTrackingMode::Eye;
+            overlay.gaze = overlay.eye_tracking && gaze.valid;
+            const std::array<float, 2> raw_gaze_uv =
+                ProjectViewAnglesToUv(full_fov, gaze.raw_yaw_radians, gaze.raw_pitch_radians);
+            const std::array<float, 2> smoothed_gaze_uv =
+                ProjectViewAnglesToUv(full_fov, gaze.smoothed_yaw_radians, gaze.smoothed_pitch_radians);
+            const std::array<float, 2> head_center_uv = ProjectViewAnglesToUv(full_fov, 0.0, 0.0);
+            const std::array<float, 2> configured_offset_uv = ProjectViewAnglesToUv(
+                full_fov,
+                DegreesToRadians(resolved_settings_.quadviews.horizontal_offset_degrees),
+                DegreesToRadians(resolved_settings_.quadviews.vertical_offset_degrees));
+            overlay.gaze_markers = {raw_gaze_uv[0], raw_gaze_uv[1], smoothed_gaze_uv[0], smoothed_gaze_uv[1]};
+            overlay.reference_markers = {head_center_uv[0], head_center_uv[1], configured_offset_uv[0],
+                                         configured_offset_uv[1]};
+        }
 
         // Where the game's own submission would put the focus view, against
         // where the located FOVs put it: they differ only when the game drew
@@ -5212,6 +5243,12 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
         };
         (*composed_views)[eye].subImage.imageArrayIndex = 0;
     }
+    // The plan's diagnostic overlay, unless Frame Generation captures the
+    // composed images to generate frames from: it would measure the
+    // overlay's motion.
+    const bool overlay_withheld = std::any_of(plan.composition.eyes.begin(), plan.composition.eyes.end(),
+                                              [](const FrameGenComposeEye& eye) { return eye.overlay.shown; }) &&
+                                  QuadViewsOverlayWithheld();
 
     const uint32_t restored = plan.restored;
     struct SavedD3D11State {
@@ -5552,39 +5589,14 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
         context->PSSetShaderResources(0, 2, resources);
         context->PSSetSamplers(0, 1, &d3d11_quadviews_compositor_.sampler);
 
-        const XrFovf& full_fov = plan.fovs[eye];
         const XrSwapchainSubImage& peripheral_sub_image = source_layer->views[eye].subImage;
         const XrSwapchainSubImage& focus_sub_image = source_layer->views[eye + 2].subImage;
         FocusRectConstants constants = FocusRectConstantsFor(plan.composition.eyes[eye]);
-
-        const QuadViewsGazeDiagnostic& gaze_diagnostic = plan.gaze;
-        const bool eye_tracking_mode =
-            resolved_settings_.quadviews.tracking_mode == QuadViewsTrackingMode::Eye;
-        const bool raw_gaze_valid = eye_tracking_mode && gaze_diagnostic.valid;
-        constants.diagnostic_params[0] =
-            quadviews_diagnostic_visualization_enabled_ && !FrameGenComposesQuadViews() ? 1.0f : 0.0f;
-        constants.diagnostic_params[1] = eye_tracking_mode ? 1.0f : 0.0f;
-        constants.diagnostic_params[2] = raw_gaze_valid ? 1.0f : 0.0f;
+        if (overlay_withheld) {
+            constants.diagnostic_params[0] = 0.0f;
+        }
         constants.output_texel[0] = 1.0f / static_cast<float>(std::max<uint32_t>(1, target.width));
         constants.output_texel[1] = 1.0f / static_cast<float>(std::max<uint32_t>(1, target.height));
-
-        const std::array<float, 2> raw_gaze_uv = ProjectViewAnglesToUv(
-            full_fov, gaze_diagnostic.raw_yaw_radians, gaze_diagnostic.raw_pitch_radians);
-        const std::array<float, 2> smoothed_gaze_uv = ProjectViewAnglesToUv(
-            full_fov, gaze_diagnostic.smoothed_yaw_radians, gaze_diagnostic.smoothed_pitch_radians);
-        const std::array<float, 2> head_center_uv = ProjectViewAnglesToUv(full_fov, 0.0, 0.0);
-        const std::array<float, 2> configured_offset_uv = ProjectViewAnglesToUv(
-            full_fov,
-            DegreesToRadians(resolved_settings_.quadviews.horizontal_offset_degrees),
-            DegreesToRadians(resolved_settings_.quadviews.vertical_offset_degrees));
-        constants.gaze_markers[0] = raw_gaze_uv[0];
-        constants.gaze_markers[1] = raw_gaze_uv[1];
-        constants.gaze_markers[2] = smoothed_gaze_uv[0];
-        constants.gaze_markers[3] = smoothed_gaze_uv[1];
-        constants.reference_markers[0] = head_center_uv[0];
-        constants.reference_markers[1] = head_center_uv[1];
-        constants.reference_markers[2] = configured_offset_uv[0];
-        constants.reference_markers[3] = configured_offset_uv[1];
 
         const auto set_source_rect = [](float (&destination)[4],
                                         const XrSwapchainSubImage& sub_image,
@@ -9223,9 +9235,9 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
             // Frame Generation may compose the frame itself (just in time, on
             // a bridged session whose pacing it owns), from the four views as
             // the layer would submit them, with the alpha bits the composed
-            // layer clears. The diagnostic overlay is unavailable there: it is
-            // the layer's compositor's alone, and declining frames for it
-            // restarted Frame Generation on the composed full-size views.
+            // layer clears, and draws the plan's diagnostic overlay over it
+            // (never declined for the overlay: that restarted Frame
+            // Generation on the composed full-size views).
             const bool from_site = primary_projection && d3d11_bridge_.Active() &&
                                    framegen_owns_pacing_.load(std::memory_order_acquire);
             const bool offer = planned && from_site;
@@ -11400,13 +11412,23 @@ bool OpenXrLayer::IsQuadViewsActive() const {
     return ResolveQuadViewsSessionActive(configured_active, quadviews_session_active_);
 }
 
-bool OpenXrLayer::FrameGenComposesQuadViews() const {
-    return d3d11_bridge_.Active() && framegen_owns_pacing_.load(std::memory_order_acquire);
-}
-
 bool OpenXrLayer::IsQuadViewsEmulationActive() const {
     return IsQuadViewsActive() && !varjo_compatible_quadviews_active_ &&
            d3d11_graphics_extension_requested_;
+}
+
+bool OpenXrLayer::QuadViewsOverlayWithheld() const {
+    // Composing the quad views itself, Frame Generation captures their views
+    // instead (ClaimQuadFrame), and draws the overlay into its own images.
+    return std::any_of(d3d11_quadviews_compositor_.targets.begin(), d3d11_quadviews_compositor_.targets.end(),
+                       [this](const QuadViewsCompositionTarget& target) {
+                           return target.swapchain != XR_NULL_HANDLE && framegen_.CapturesFrom(target.swapchain);
+                       });
+}
+
+bool OpenXrLayer::QuadViewsDiagnosticVisualizationAvailable() const {
+    return IsQuadViewsEmulationActive() && d3d11_quadviews_compositor_.context != nullptr &&
+           !QuadViewsOverlayWithheld();
 }
 
 bool OpenXrLayer::IsVarjoCompatibleQuadviewsEligible() {
@@ -13761,17 +13783,15 @@ void OpenXrLayer::PollQuadViewsDiagnosticVisualizationToggle() {
     if (!was_pressed) {
         return;
     }
-    if (FrameGenComposesQuadViews()) {
-        logger_.Info("Quadviews diagnostic visualization is unavailable while Frame Generation composes the quad "
-                     "views (" + BindingLabel(binding) + "); turn Frame Generation off for this game and restart it to use it.");
-        return;
-    }
 
     quadviews_diagnostic_visualization_enabled_ = !quadviews_diagnostic_visualization_enabled_;
     runtime_relay_status_dirty_.store(true, std::memory_order_release);
     logger_.Info(std::string("Quadviews diagnostic visualization ") +
                  (quadviews_diagnostic_visualization_enabled_ ? "shown" : "hidden") +
-                 " via " + BindingLabel(binding) + ".");
+                 " via " + BindingLabel(binding) +
+                 (quadviews_diagnostic_visualization_enabled_ && QuadViewsOverlayWithheld()
+                      ? "; it stays out of the composed images while Frame Generation generates frames from them."
+                      : "."));
     SoundPlayer::Instance().PlayTransition(binding.sound,
                                            quadviews_diagnostic_visualization_enabled_,
                                            dll_directory_,
@@ -15841,8 +15861,7 @@ void OpenXrLayer::PollRuntimeRelay() {
         control.expires_at_unix_milliseconds >= RuntimeRelayUnixMilliseconds()) {
         std::scoped_lock lock(mutex_);
         const bool available = runtime_relay_session_id_ == session_id &&
-            active_session_ != XR_NULL_HANDLE && IsQuadViewsEmulationActive() &&
-            d3d11_quadviews_compositor_.context != nullptr && !FrameGenComposesQuadViews();
+            active_session_ != XR_NULL_HANDLE && QuadViewsDiagnosticVisualizationAvailable();
         if (available && control.revision > runtime_relay_last_applied_revision_ &&
             control.quadviews_diagnostic_visualization.has_value()) {
             runtime_relay_last_applied_revision_ = control.revision;
@@ -15903,9 +15922,7 @@ void OpenXrLayer::PollRuntimeRelay() {
 
         status.updated_at_unix_milliseconds = RuntimeRelayUnixMilliseconds();
         status.acknowledged_revision = runtime_relay_acknowledged_revision_;
-        status.quadviews_diagnostic_visualization_available =
-            IsQuadViewsEmulationActive() && d3d11_quadviews_compositor_.context != nullptr &&
-            !FrameGenComposesQuadViews();
+        status.quadviews_diagnostic_visualization_available = QuadViewsDiagnosticVisualizationAvailable();
         status.quadviews_diagnostic_visualization_enabled = quadviews_diagnostic_visualization_enabled_;
     }
 

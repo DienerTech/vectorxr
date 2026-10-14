@@ -139,7 +139,35 @@ class D3D11BridgeLayerTestPeer {
     }
     // The quad views diagnostic overlay, as its binding or the app would set it.
     static void SetQuadViewsDiagnosticVisualization(bool shown) {
-        OpenXrLayer::Instance().quadviews_diagnostic_visualization_enabled_ = shown;
+        OpenXrLayer& layer = OpenXrLayer::Instance();
+        std::scoped_lock lock(layer.mutex_);
+        layer.quadviews_diagnostic_visualization_enabled_ = shown;
+    }
+    static bool QuadViewsDiagnosticVisualization() {
+        OpenXrLayer& layer = OpenXrLayer::Instance();
+        std::scoped_lock lock(layer.mutex_);
+        return layer.quadviews_diagnostic_visualization_enabled_;
+    }
+    // Whether the app's live control can show the overlay in the session.
+    static bool QuadViewsDiagnosticVisualizationAvailable() {
+        OpenXrLayer& layer = OpenXrLayer::Instance();
+        std::scoped_lock lock(layer.mutex_);
+        return layer.QuadViewsDiagnosticVisualizationAvailable();
+    }
+    // The overlay's binding (CaseSettings::diagnostic_binding) held down, or
+    // let go, as its polls in xrEndFrame read it from now on, without reading
+    // the keyboard; none: they read the keyboard again, as at a session's
+    // start (the first poll only notes whether it is down).
+    static void HoldQuadViewsDiagnosticBinding(std::optional<bool> down) {
+        OpenXrLayer& layer = OpenXrLayer::Instance();
+        std::scoped_lock lock(layer.mutex_);
+        if (!down) {
+            layer.quadviews_diagnostic_visualization_binding_last_poll_time_.reset();
+            return;
+        }
+        layer.quadviews_diagnostic_visualization_binding_down_cached_ = *down;
+        layer.quadviews_diagnostic_visualization_binding_last_poll_time_ =
+            std::chrono::steady_clock::now() + std::chrono::hours(1);
     }
     // The bridged session's quad views frames Frame Generation composed so far.
     static std::uint64_t QuadFramesComposedByFrameGen() {
@@ -288,6 +316,15 @@ bool Near(const std::optional<Color>& texel, const Color& expected) {
         if (std::abs(static_cast<int>((*texel)[i]) - static_cast<int>(expected[i])) > 1) return false;
     }
     return true;
+}
+
+// A linear-light colour as an 8-bit sRGB image holds it (opaque).
+Color SrgbColor(float r, float g, float b) {
+    const auto encode = [](float c) {
+        const float v = c <= 0.0031308f ? 12.92f * c : 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f;
+        return static_cast<std::uint8_t>(std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f));
+    };
+    return {encode(r), encode(g), encode(b), 255};
 }
 
 // Each frame's colour differs from those of the frames before it in the same image.
@@ -2112,6 +2149,9 @@ struct CaseSettings {
     bool debug_log{false};
     // Quadviews' stereo-composite emulation, the focus fixed at the centre.
     bool quadviews{false};
+    // With quadviews: the diagnostic visualization's binding is Ctrl+F8
+    // (Peer::HoldQuadViewsDiagnosticBinding presses it).
+    bool diagnostic_binding{false};
     // Frame Generation's (its default when empty). The cases were written when
     // Auto was the default, so they keep it unless they choose another.
     std::string frame_multiplier{"auto"};
@@ -2138,7 +2178,11 @@ void BeginCase(const std::string& name, const Game& game, const CaseSettings& ca
              << R"(", "trackSeenApps": false}, "applications": [], "modules": {"depthxr": {"enabled": false}, )"
              << R"("pivotxr": {"enabled": false}, )";
     if (case_settings.quadviews) {
-        settings << R"("quadviews": {"enabled": true, "defaults": {"trackingMode": "head", "focusScale": )"
+        settings << R"("quadviews": {"enabled": true, )"
+                 << (case_settings.diagnostic_binding
+                         ? R"("diagnosticVisualizationBinding": {"type": "keyboard", "chord": ["Ctrl", "F8"]}, )"
+                         : "")
+                 << R"("defaults": {"trackingMode": "head", "focusScale": )"
                  << kQuadFocusScale << R"(, "transitionThicknessPercent": )" << kQuadTransitionPercent
                  << R"(, "foveateSharpness": )" << kQuadSharpness << "}}, ";
     } else {
@@ -2837,8 +2881,9 @@ depthxr::FrameGenFov ToFov(const XrFovf& fov) {
 // the two, all of the frame just ended. Frame Generation toggled off, the
 // frames are shown as they are; at 2x (the stand-in backend, inline), engaged
 // after two steady frames, each frame also has a frame of Frame Generation's
-// own outputs before it. The compositor's readbacks are printed as a digest
-// to compare builds by.
+// own outputs before it, and the diagnostic overlay stays out of the
+// compositor's images it generates from. The compositor's readbacks are
+// printed as a digest to compare builds by.
 void TestBridgedQuadViewsComposed(Game& game, bool framegen) {
     CaseSettings settings;
     settings.quadviews = true;
@@ -3063,6 +3108,36 @@ void TestBridgedQuadViewsComposed(Game& game, bool framegen) {
                                               std::to_string(told));
     }
 
+    // Frame Generation here (the stand-in backend, inline) cannot compose the
+    // quad views: it generates frames from the compositor's images. The
+    // diagnostic overlay stays out of them (Frame Generation would measure
+    // its motion), and the app cannot show it.
+    if (framegen) {
+        Peer::SetQuadViewsDiagnosticVisualization(true);
+        Check(!Peer::QuadViewsDiagnosticVisualizationAvailable(),
+              "overlay: the app cannot show it while Frame Generation generates frames from the composed images");
+        for (int frame = kFrames + 5; frame < kFrames + 8; ++frame) {
+            const std::string at = "overlay, quad frame " + std::to_string(frame);
+            const std::size_t before = ShownCount();
+            Check(QuadFrame(app, game, targets, frame) == XR_SUCCESS, at + ": xrEndFrame");
+            int composed = 0;
+            for (const ShownFrame& shown : Shown(before)) {
+                if (shown.views.size() != 2 || shown.views[0].swapchain != outputs[0]) {
+                    continue; // Frame Generation's own outputs
+                }
+                ++composed;
+                for (int eye = 0; eye < 2; ++eye) {
+                    const ShownView& view = shown.views[eye];
+                    Check(view.texel && !view.probed.empty() && Near(view.texel, FocusColor(frame, eye)) &&
+                              Near(view.probed[0], PeripheryColor(frame, eye)),
+                          at + " eye " + std::to_string(eye) + ": the composed image holds no overlay");
+                }
+            }
+            Check(composed >= 1, at + ": the runtime shows the composed frame");
+        }
+        Peer::SetQuadViewsDiagnosticVisualization(false);
+    }
+
     for (const Target& target : targets) {
         Check(app.api.destroy_swapchain(target.swapchain) == XR_SUCCESS, "a quad view's swapchain is destroyed");
     }
@@ -3113,13 +3188,15 @@ bool BetweenFrames(const std::optional<Color>& corner, const std::optional<Color
 // views naming Frame Generation's own output images, and each shows, in its
 // centre, the focus colour and, at a corner, the periphery colour of one same
 // real frame (interpolating, of the same two real frames it lies between).
-// Output acquires the runtime refuses fall back to the last frame written
-// (logged), and when they keep failing the layer composes for a while.
-// Toggled off, the Direct3D 11 compositor composes again, with the right
-// colours, and no frame shown on the way is black.
+// Its binding shows the diagnostic overlay in every frame, Frame Generation
+// still composing them. Output acquires the runtime refuses fall back to the
+// last frame written (logged), and when they keep failing the layer composes
+// for a while. Toggled off, the Direct3D 11 compositor composes again, with
+// the right colours, and no frame shown on the way is black.
 void TestBridgedQuadFrameGen(Game& game, const std::string& mode) {
     CaseSettings settings;
     settings.quadviews = true;
+    settings.diagnostic_binding = true;
     settings.frame_multiplier = "2x";
     settings.synthesis_mode = mode;
     BeginCase("quad-views-framegen-composed-" + mode, game, settings);
@@ -3251,22 +3328,97 @@ void TestBridgedQuadFrameGen(Game& game, const std::string& mode) {
     const std::array<XrSwapchain, 2> outputs{last_own->views[0].swapchain, last_own->views[1].swapchain};
     CheckValidation(game, "composing");
 
-    // The diagnostic overlay is the Direct3D 11 compositor's alone, and is
-    // unavailable while Frame Generation composes the quad views: frames are
-    // never handed back for it (that restarted Frame Generation on the
-    // composed full-size views, and stalled SteamVR for seconds).
+    // The diagnostic overlay while Frame Generation composes the quad views,
+    // shown and hidden with its binding: every frame shown draws it, Frame
+    // Generation's own (real and generated, each with the overlay of the real
+    // frame it comes from) as the Direct3D 11 compositor would, and Frame
+    // Generation keeps composing: frames are never handed back for it (that
+    // restarted Frame Generation on the composed full-size views, and stalled
+    // SteamVR for seconds). The centre shows the head's centre (a white
+    // cross), the inset's left edge on the centre row its outline (green: the
+    // focus follows the head). Hidden again, the frames show the views alone.
     {
+        const depthxr::QuadViewsCanvasDimensions canvas =
+            depthxr::ComputeQuadViewsCanvasDimensions(kQuadStereoSize, kQuadStereoSize, 4096, 4096, kQuadFocusScale);
+        XrTime located_at = 0;
+        {
+            std::scoped_lock lock(g_runtime_mutex);
+            located_at = g_runtime.time;
+        }
+        const std::array<XrView, 4> located = LocateQuadViews(app, located_at);
+        const depthxr::FrameGenComposeEye placed = depthxr::BuildFrameGenComposeEye(
+            ToFov(located[0].fov), ToFov(located[2].fov), {canvas.width, canvas.height},
+            {configuration[2].recommendedImageRectWidth, configuration[2].recommendedImageRectHeight},
+            kQuadTransitionPercent, kQuadSharpness);
+        Check((0.5f - placed.focus_rect[0]) * static_cast<float>(canvas.width) > 20.0f,
+              "overlay: the inset's left edge lies clear of the head's centre marker");
+        const std::array<float, 2> edge{placed.focus_rect[0], 0.5f};
+        const Color white{255, 255, 255, 255};
+        const Color outline = SrgbColor(0.15f, 1.0f, 0.3f);
+
         const std::uint64_t d3d11_before = Peer::QuadFrames().first;
         const std::uint64_t fg_before = Peer::QuadFramesComposedByFrameGen();
-        const std::uint64_t setups_before = Peer::FrameGen().quad_setups;
-        Peer::SetQuadViewsDiagnosticVisualization(true);
-        run(8, "overlay");
-        Peer::SetQuadViewsDiagnosticVisualization(false);
-        const depthxr::FrameGenStatus overlay = Peer::FrameGen();
-        Check(Peer::QuadFrames().first == d3d11_before && Peer::QuadFramesComposedByFrameGen() == fg_before + 8 &&
-                  overlay.quad && overlay.quad_setups == setups_before,
-              "overlay: Frame Generation keeps composing the quad views (setups " +
-                  std::to_string(overlay.quad_setups) + ", was " + std::to_string(setups_before) + ")");
+        const depthxr::FrameGenStatus before = Peer::FrameGen();
+        Check(Peer::QuadViewsDiagnosticVisualizationAvailable(),
+              "overlay: the app can show it while Frame Generation composes the quad views");
+        {
+            std::scoped_lock lock(g_runtime_mutex);
+            g_runtime.probes = {{0.03f, 0.03f}, edge};
+        }
+        Peer::HoldQuadViewsDiagnosticBinding(true);
+        run(1, "overlay shown");
+        Peer::HoldQuadViewsDiagnosticBinding(false);
+        Check(Peer::QuadViewsDiagnosticVisualization(),
+              "overlay: its binding shows it while Frame Generation composes");
+        // Frames ended before it may still be shown for a few refreshes.
+        run(7, "overlay shown");
+        const std::size_t shown_from = ShownCount();
+        run(8, "overlay shown");
+        const std::array<XrSwapchain, 2> compositor = Peer::CompositorOutputs();
+        std::size_t own_overlaid = 0;
+        for (const ShownFrame& shown : Shown(shown_from)) {
+            Check(shown.views.size() == 2, "overlay shown: the runtime gets two views");
+            for (int eye = 0; eye < 2; ++eye) {
+                const ShownView& view = shown.views[eye];
+                const std::string where = "overlay shown, eye " + std::to_string(eye);
+                Check(view.texel && view.probed.size() == 2, where + ": the runtime read the frame back");
+                Check(Near(view.texel, white),
+                      where + ": the centre shows the head's centre marked, " + Text(*view.texel));
+                Check(Near(view.probed[1], outline),
+                      where + ": the inset's edge shows its outline " + Text(outline) + ", " + Text(view.probed[1]));
+            }
+            own_overlaid += shown.views[0].swapchain != compositor[0] ? 1 : 0;
+        }
+        Check(own_overlaid > 0, "overlay shown: Frame Generation's own frames show it");
+
+        Peer::HoldQuadViewsDiagnosticBinding(true);
+        run(1, "overlay hidden");
+        Peer::HoldQuadViewsDiagnosticBinding(std::nullopt);
+        Check(!Peer::QuadViewsDiagnosticVisualization(), "overlay: its binding hides it again");
+        {
+            std::scoped_lock lock(g_runtime_mutex);
+            g_runtime.probes = {{0.03f, 0.03f}};
+        }
+        run(7, "overlay hidden");
+        const std::size_t hidden_from = ShownCount();
+        run(8, "overlay hidden");
+        Check(check_shown(hidden_from, "overlay hidden") > 0,
+              "overlay hidden: Frame Generation's frames show the views alone");
+
+        const depthxr::FrameGenStatus after = Peer::FrameGen();
+        Check(Peer::QuadFrames().first == d3d11_before && Peer::QuadFramesComposedByFrameGen() == fg_before + 32 &&
+                  after.quad && after.quad_setups == before.quad_setups &&
+                  after.quad_write_declines == before.quad_write_declines,
+              "overlay: Frame Generation keeps composing the quad views (Direct3D 11 composed " +
+                  std::to_string(Peer::QuadFrames().first - d3d11_before) + ", setups " +
+                  std::to_string(after.quad_setups) + ", was " + std::to_string(before.quad_setups) + ")");
+        const std::string log = Peer::Log();
+        Check(Count(log, "Quadviews diagnostic visualization shown via ") == 1 &&
+                  Count(log, "Quadviews diagnostic visualization hidden via ") == 1 &&
+                  !Contains(log, "is unavailable while Frame Generation"),
+              "overlay: its binding shows and hides it (logged)");
+        Check(!Contains(log, "restarts on the layer's composed quad views"),
+              "overlay: Frame Generation never restarts on the composed views for it");
     }
 
     // A frame whose views' rectangles change cannot be claimed (their
