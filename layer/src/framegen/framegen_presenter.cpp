@@ -5107,9 +5107,12 @@ std::optional<XrResult> FrameGenPresenter::ThreadedWaitLocked(std::unique_lock<s
             phase_xr_ + std::chrono::duration_cast<std::chrono::nanoseconds>(frame.wait_return - phase_wall_).count();
         const double ahead_ms = static_cast<double>(frame.target_time - runtime_time) / 1e6;
         AddSample(game_ahead_ms_, ahead_ms, kMaxFrameSamples);
-        // Against the frame told before, unless a pause came between.
+        // Against the frame told before, unless a pause came between: one by
+        // the game's own pace (PauseLimitLocked), not Dynamic's refresh
+        // period, or a game slower than four refreshes a frame (Star Citizen
+        // at 28 fps at 120 Hz) had none.
         if (last_ahead_at_ != Clock::time_point{} &&
-            frame.wait_return - last_ahead_at_ <= std::chrono::nanoseconds(4 * frame.reported_period)) {
+            frame.wait_return - last_ahead_at_ <= std::chrono::nanoseconds(PauseLimitLocked())) {
             AddSample(ahead_jitter_ms_, std::abs(ahead_ms - last_ahead_ms_), kMaxFrameSamples);
         }
         last_ahead_ms_ = ahead_ms;

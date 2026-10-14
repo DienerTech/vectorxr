@@ -2145,6 +2145,58 @@ void TestDynamicHorizonJitterReported() {
     }
 }
 
+// A game slower than four refreshes a frame in Dynamic (Star Citizen at
+// 28 fps on Virtual Desktop at 120 Hz: a frame every 4.3 refreshes) is at
+// its own pace, not pausing between frames: the summary shows its horizon's
+// jitter too. Pairs of frames more than four of Dynamic's told periods (one
+// refresh each, 33 ms at 120 Hz) apart were left out as pauses, so its
+// summaries printed aheadJitterMs=- throughout.
+void TestSlowDynamicHorizonJitterReported() {
+    for (const FrameGenSynthesisMode mode : {FrameGenSynthesisMode::kExtrapolate, FrameGenSynthesisMode::kInterpolate}) {
+        const bool interpolate = mode == FrameGenSynthesisMode::kInterpolate;
+        const std::string name = std::string("horizon slow dynamic ") + (interpolate ? "interpolate" : "extrapolate");
+        HorizonLog log(interpolate ? "slow-dynamic-interpolate" : "slow-dynamic-extrapolate");
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        runtime.paced = true;
+        runtime.period = 1'000'000'000 / 120;
+        std::unique_ptr<App> owned;
+        App* app = nullptr;
+        StartJit(presenter, gpu, mode, FrameGenMultiplier::kDynamic, app, runtime, owned, log.logger.get());
+        presenter.SetDynamicPolicy(GuardDynamic());
+        // Windows of about 28 game frames (27 pairs), as in the fixed test.
+        presenter.SetSummaryInterval(1000ms);
+        EngageDynamic(presenter, *app, name);
+        const auto start = std::chrono::steady_clock::now();
+        const int frames = RunWork(*app, 2100ms, PeriodsOfWork(runtime.period, 4.3), {});
+        const double rate = frames / Seconds(std::chrono::steady_clock::now() - start);
+        const bool engaged = presenter.Status().threaded && !presenter.Status().standby;
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+        Check(engaged, name + ": stays engaged");
+        const double period_ms = static_cast<double>(runtime.period) / 1e6;
+        Check(rate < 1000.0 / (4.0 * period_ms),
+              name + ": the game asks less often than every four refreshes (" + std::to_string(rate) + " fps)");
+        const std::vector<std::string> summaries = log.Summaries();
+        Check(!summaries.empty(), name + ": summaries while engaged");
+        if (summaries.empty()) continue;
+        const std::string& last = summaries.back();
+        const auto ahead = SummaryValues(last, "gameAheadMs");
+        const auto jitter = SummaryValues(last, "aheadJitterMs");
+        Check(ahead && jitter, name + ": the summary has the horizon and its jitter at the game's pace (" + last + ")");
+        if (!ahead || !jitter) continue;
+        std::cerr << "  " << name << ": " << rate << " fps, gameAheadMs " << ahead->first << "/" << ahead->second
+                  << ", aheadJitterMs " << jitter->first << "/" << jitter->second << " (p95 "
+                  << jitter->second / period_ms << " refreshes)" << std::endl;
+        // Released 0.3 of a refresh later in one each frame: the horizon
+        // moves 0.3 or 0.7 of a refresh from one frame to the next.
+        Check(jitter->second >= 0.4 * period_ms,
+              name + ": the summary shows the horizon moving with where in a refresh the game is released (" + last +
+                  ")");
+    }
+}
+
 // Interpolate presents from the presenter thread too: each real frame is
 // shown after the frames interpolated between it and the previous one, at
 // the display time it was rendered for, and the game keeps its overlap.
@@ -9221,6 +9273,7 @@ int main(int argc, char** argv) {
     RUN(TestThreadedPipelinedApp);
     RUN(TestHorizonTelemetryFixed);
     RUN(TestDynamicHorizonJitterReported);
+    RUN(TestSlowDynamicHorizonJitterReported);
     RUN(TestThreadedInterpolation);
     RUN(TestJitExtrapolation);
     RUN(TestJitEyeShiftReported);
