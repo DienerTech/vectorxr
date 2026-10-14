@@ -3608,6 +3608,39 @@ void TestFrameGenComposeEye() {
     Expect(constants.options == std::array<std::uint32_t, 4>{} && constants.rot1 == std::array<float, 4>{} &&
                constants.rot2 == std::array<float, 4>{} && constants.tuning == std::array<float, 4>{},
            "The compose constants' other fields should be zero");
+
+    // The diagnostic overlay: its flags, markers and the output pixel the
+    // Direct3D 11 compositor computes (1 / the extent, in float).
+    depthxr::FrameGenComposeEye overlaid = eye;
+    overlaid.overlay.gaze_markers = {0.4f, 0.45f, 0.42f, 0.46f};
+    overlaid.overlay.reference_markers = {0.5f, 0.5f, 0.55f, 0.48f};
+    Expect(depthxr::BuildFrameGenComposeConstants(overlaid, {2000, 1000}).options == std::array<std::uint32_t, 4>{},
+           "An overlay that is not shown should leave the compose constants as they are");
+    overlaid.overlay.shown = true;
+    const struct {
+        bool eye_tracking, gaze;
+        std::uint32_t flags;
+    } overlay_cases[] = {
+        {false, false, depthxr::kFrameGenComposeOverlay},
+        {true, false, depthxr::kFrameGenComposeOverlay | depthxr::kFrameGenComposeOverlayEyeTracking},
+        {true, true,
+         depthxr::kFrameGenComposeOverlay | depthxr::kFrameGenComposeOverlayEyeTracking |
+             depthxr::kFrameGenComposeOverlayGaze},
+    };
+    for (const auto& overlay_case : overlay_cases) {
+        overlaid.overlay.eye_tracking = overlay_case.eye_tracking;
+        overlaid.overlay.gaze = overlay_case.gaze;
+        const depthxr::FrameGenConstants shown = depthxr::BuildFrameGenComposeConstants(overlaid, {2000, 1000});
+        Expect(shown.options == std::array<std::uint32_t, 4>{overlay_case.flags, 0, 0, 0},
+               "The compose constants should carry the overlay's flags");
+        Expect(shown.rot1 == overlaid.overlay.gaze_markers && shown.rot2 == overlaid.overlay.reference_markers,
+               "The compose constants should carry the overlay's markers");
+        Expect(shown.tuning == std::array<float, 4>{1.0f / 2000.0f, 1.0f / 1000.0f, 0.0f, 0.0f},
+               "The compose constants should carry one output pixel for the overlay's shapes");
+        Expect(shown.fov_current == constants.fov_current && shown.fov_previous == constants.fov_previous &&
+                   shown.rot0 == constants.rot0 && shown.size == constants.size,
+               "The overlay should leave the compose itself as it is");
+    }
 }
 
 // The quad views compositor's focus rectangle arithmetic before the shared
