@@ -1047,7 +1047,9 @@ layouts) adds a small badge next to the FPS value: **FG ON** over the frames per
 headset shows, generated frames included, or **FG STBY**, **FG WAIT**, **FG PAUSED**, **FG OFF**,
 or **FG N/A**. The Frame Generation row reads, for example, `On / Interpolate / Dynamic` with
 `45 → 90 fps / GPU 3.1 ms` on a second line (the game's and the headset's frame rates, and the
-GPU time Frame Generation took), or **Standby**, **Starting**, **Paused**, or **Unavailable**
+GPU time of Frame Generation's motion analysis of the latest real frame: writing each generated
+frame comes on top of it, and with NVIDIA optical flow most of it is the hardware's latency), or
+**Standby**, **Starting**, **Paused**, or **Unavailable**
 with the reason on the second line. The compact row is shorter, such as `Dynamic / 45 → 90 fps`.
 
 The Pivot row starts with **Motion:**. It reads **Active** or **Releasing**, followed by

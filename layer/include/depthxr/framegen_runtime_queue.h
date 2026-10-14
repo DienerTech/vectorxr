@@ -42,10 +42,11 @@ namespace depthxr {
 // A layer the runtime shows that Frame Generation does not capture (a quad,
 // say, released every frame) still makes the runtime's queue wait for the
 // game's work at each release, and every frame Frame Generation writes after
-// it with it. Lazy shown layers (Prepare's `shown_layers_lazy`: Vulkan games,
-// whose interfaces are such layers, Star Citizen's; VECTORXR_FRAMEGEN_SHOWN_
-// LAYERS=lazy or =off, read as the session is created, decides for any
-// game): such a swapchain's releases are lazy too once
+// it with it. Lazy shown layers (Prepare's `shown_layers_lazy`, which the
+// layer asks for in every game: Star Citizen's interface and OpenKneeboard's
+// kneeboard are such layers; VECTORXR_FRAMEGEN_SHOWN_LAYERS=lazy or =off,
+// read as the session is created, decides for any game): such a
+// swapchain's releases are lazy too once
 // a frame showed it so (Flush's `shown_lazily`): a frame showing it gets
 // only the releases whose work has run, so the runtime shows the newest
 // finished image (at most one game frame old), and the game's next wait on
@@ -108,16 +109,12 @@ class FrameGenQueueSubstitution {
     // waits for the game's work), and the swapchain's next waits are not
     // held back until each image was waited for again. `shown_lazily`: the
     // frame shows it in a layer Frame Generation does not capture while it
-    // shows only images of its own; with VECTORXR_FRAMEGEN_SHOWN_LAYERS=lazy
+    // shows only images of its own; with shown layers lazy (Prepare)
     // only releases whose work has run go (all of them while the runtime
     // has none of the swapchain's yet), and its releases until the next
     // frame showing it otherwise are lazy.
     void Flush(XrSwapchain swapchain, const Calls& next, bool shown_lazily = false);
     void Forget(XrSwapchain swapchain);
-    // Before a release of `swapchain` made elsewhere (deferred releases):
-    // held-back calls go first, and the runtime's queue waits for the game's
-    // work so far.
-    void BeforeRelease(XrSwapchain swapchain, const Calls& next);
     // After xrDestroySession (or a failed xrCreateSession): waits for the
     // runtime's queue and lets everything go.
     void Reset();

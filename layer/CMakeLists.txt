@@ -526,6 +526,10 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
             tests/turbo_frame_tests.cpp
             src/openxr_layer.cpp
         )
+        # The harness's Direct3D 12 binding (Frame Generation's queue
+        # substitution, against stand-in objects): only the test sees it.
+        set_source_files_properties(tests/turbo_frame_tests.cpp PROPERTIES
+            COMPILE_DEFINITIONS XR_USE_GRAPHICS_API_D3D12)
         target_include_directories(depthxr_turbo_frame_tests PRIVATE include)
         target_link_libraries(
             depthxr_turbo_frame_tests

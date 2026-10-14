@@ -593,6 +593,7 @@ void FrameGenPresenter::Stop() {
     analysis_lag_ms_ = 0.0;
     gpu_wait_ms_.clear();
     end_call_ms_.clear();
+    runtime_end_ms_.clear();
     synth_lock_ms_.clear();
     pause_longest_ms_ = 0.0;
     logged_pauses_ = 0;
@@ -3413,6 +3414,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
     bool ok = true;
     double gpu_ms = -1.0;
     std::uint64_t working_bytes = 0;
+    double execute_ms = 0.0; // the backend's Execute, on this thread
     std::optional<FrameGenGpuWindow> window;
     std::vector<FrameGenAnalysisTiming> timings;
     FrameGenDepthStatus depth;
@@ -3445,13 +3447,20 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
                 gpu_->DumpNextExecute(directory);
             }
         }
+        const auto execute_start = Clock::now();
         ok = ok && gpu_->Execute(submissions, tuning, executed, error);
+        execute_ms = Milliseconds(Clock::now() - execute_start);
         if (gpu_) {
             gpu_ms = gpu_->LastGpuMilliseconds();
             window = gpu_->LastGpuWindow();
             timings = gpu_->TakeTimings();
             depth = gpu_->DepthStatus();
-            working_bytes = gpu_->WorkingMemoryBytes();
+            // Only the log reads it, and the backend asks the driver about
+            // each of its images for it (50-200 of them): once a second.
+            if (const auto now = Clock::now(); now >= working_bytes_due_) {
+                working_bytes = gpu_->WorkingMemoryBytes();
+                working_bytes_due_ = now + std::chrono::seconds(1);
+            }
             if (tuning.hardware_flow) {
                 hardware_status = gpu_->HardwareFlowStatus();
             }
@@ -3490,9 +3499,13 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
     NoteGpuTimingLocked(executed.submission, frame, window, timings);
     if (logger_ && !hardware_status.empty() && hardware_status != logged_hardware_status_) {
         logged_hardware_status_ = hardware_status;
+        // Its setup (the driver's optical flow API and sessions) runs in
+        // the Execute that first reports it active: how long that held up
+        // the calling thread (the game's, in its xrEndFrame).
         logger_->Info(hardware_status == "active"
                           ? "Frame Generation measures motion with NVIDIA's optical flow hardware (experimental): it "
-                            "starts matching each eye's image as soon as the game releases it."
+                            "starts matching each eye's image as soon as the game releases it (setting it up took " +
+                                Number(execute_ms, 1) + " ms on this frame)."
                           : "Frame Generation cannot use NVIDIA's optical flow hardware (" + hardware_status +
                                 "); block matching measures motion instead.");
     }
@@ -3547,6 +3560,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         for (std::size_t i = 0; i < analyze->velocity.size() && i < executed.depth.size(); ++i) {
             if (executed.depth[i]) analyze->velocity[i] = shifts[i];
         }
+        analyze->depth = std::any_of(executed.depth.begin(), executed.depth.end(), [](bool value) { return value; });
         sets.clear();
         exact.clear();
         return executed.frame != 0;
@@ -4232,6 +4246,7 @@ XrResult FrameGenPresenter::RuntimeEnd(const FrameGenRuntimeCalls& calls, XrSess
     }
     {
         std::scoped_lock lock(mutex_);
+        AddSample(runtime_end_ms_, Milliseconds(Clock::now() - entered));
         // Counted even when the runtime rejects the frame: it is over either way.
         if (runtime_ends_ < runtime_begins_) {
             ++runtime_ends_;
@@ -5303,7 +5318,9 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
         // frames written unmoved (motion not measured yet). unwritten: an
         // output not handed back in time / writing failed / no outputs /
         // nothing to write. endCallMs: the game's xrEndFrame in Frame
-        // Generation. synthLockMs: the presenter thread's wait for the GPU
+        // Generation. runtimeEndMs: the runtime's xrEndFrame for the frames
+        // Frame Generation submits (long where the runtime waits for its
+        // queue). synthLockMs: the presenter thread's wait for the GPU
         // lock before writing. ringExhausted: refreshes whose real frame's
         // images newer captures had replaced (written unmoved, or the frame
         // before). staleSkipped: refreshes not submitted, nothing current to
@@ -5342,7 +5359,8 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
             (gpu_wait_ms_.empty() ? std::string("-") : Number(*Median(gpu_wait_ms_), 1)) + "/" +
             std::to_string(delta(&Totals::gpu_wait_timeouts)) +
             (gpu_gate_enabled_ && gpu_gate_armed_ ? "" : gpu_gate_enabled_ ? " (not armed)" : " (off)") +
-            ", endCallMs=" + MedianAndMax(end_call_ms_) + ", synthLockMs=" + MedianAndMax(synth_lock_ms_) +
+            ", endCallMs=" + MedianAndMax(end_call_ms_) + ", runtimeEndMs=" + MedianAndMax(runtime_end_ms_) +
+            ", synthLockMs=" + MedianAndMax(synth_lock_ms_) +
             (jit_ ? ", justInTime=1, covers=" + std::to_string(jit_covers_) + ", unwritten=" +
                         std::to_string(delta(&Totals::unwritten_wait)) + "/" +
                         std::to_string(delta(&Totals::unwritten_failed)) + "/" +
@@ -5381,6 +5399,7 @@ void FrameGenPresenter::NewSummaryWindowLocked(Clock::time_point now, double sta
     ofa_ms_.clear();
     gpu_wait_ms_.clear();
     end_call_ms_.clear();
+    runtime_end_ms_.clear();
     synth_lock_ms_.clear();
     pause_longest_ms_ = 0.0;
     app_work_ms_ = 0.0;
@@ -5474,6 +5493,7 @@ bool FrameGenPresenter::AnalyzeJit(const XrCompositionLayerProjection& projectio
     jit.copy = std::move(copy);
     jit.kinds = std::move(analysis.kinds);
     jit.velocity = std::move(analysis.velocity);
+    jit.depth = analysis.depth;
     jit.quad = std::move(quad);
     if (trace_.Enabled()) {
         trace_.Record("keep", jit.id, jit.time, jit.previous_time, static_cast<std::int64_t>(jit.analyzed),
@@ -6078,6 +6098,7 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
     // Frames moved by the previous real frame's motion too (their eye shift
     // reads its depth: FrameGenGpu::SynthesizeStale).
     const float eye_time = write.exact ? 0.0f : extrapolate ? choice.fraction : choice.fraction - 1.0f;
+    double moved_mm = 0.0;
     if (quad) {
         views.assign(quad->eyes.begin(), quad->eyes.end());
     } else {
@@ -6098,6 +6119,8 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
             views[i].pose.position.x += static_cast<float>(world[0]);
             views[i].pose.position.y += static_cast<float>(world[1]);
             views[i].pose.position.z += static_cast<float>(world[2]);
+            moved_mm = std::max(moved_mm, 1000.0 * std::sqrt(local[0] * local[0] + local[1] * local[1] +
+                                                             local[2] * local[2]));
         }
     }
     // Output images replaced since the last frame written: nothing shows
@@ -6108,6 +6131,13 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
     std::scoped_lock lock(mutex_);
     consecutive_failures_ = 0;
     AddSample(synth_lock_ms_, lock_wait_ms);
+    // How far a moved frame of a real frame generated with depth followed
+    // the eyes (eyeShiftMm), as Generate counts the frames it writes.
+    if (frame.depth && eye_time != 0.0f) {
+        shift_window_sum_mm_ += moved_mm;
+        shift_window_max_mm_ = std::max(shift_window_max_mm_, moved_mm);
+        ++shift_window_frames_;
+    }
     totals_.unmeasured += unmeasured ? 1 : 0;
     totals_.stale_motion += write.stale || write.motion_late ? 1 : 0;
     if (logger_ && !logged_jit_ && !write.exact) {

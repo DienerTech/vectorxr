@@ -78,7 +78,7 @@ class D3D11BridgeLayerTestPeer {
     static bool QueueSubstituted() {
         return OpenXrLayer::Instance().framegen_queue_.Active();
     }
-    // What VECTORXR_FRAMEGEN_SHOWN_LAYERS=lazy did in the session so far.
+    // What keeping shown layers lazy did in the session so far.
     static FrameGenQueueSubstitution::ShownLayerCounts ShownLayers() {
         return OpenXrLayer::Instance().framegen_queue_.ShownLayers();
     }
@@ -3959,7 +3959,8 @@ std::string Spread(std::vector<double> values) {
 // for comparison. Depth the game submits in the same shape (one swapchain,
 // each eye's half) never reaches the runtime, Frame Generation on or off,
 // and colour is still captured and shown through Frame Generation.
-// `shown_lazy` (VECTORXR_FRAMEGEN_SHOWN_LAYERS=lazy): the quad layer's
+// `shown_lazy` (the default since 0.19.2; VECTORXR_FRAMEGEN_SHOWN_LAYERS=off
+// otherwise, for what that costs): the quad layer's
 // releases are kept lazy instead, so under the same load no frame of Frame
 // Generation's waits for the game's work on the runtime's queue (the
 // game's next wait on the quad's swapchain waits for its release on the
@@ -3971,7 +3972,7 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
     settings.frame_multiplier = "2x";
     settings.synthesis_mode = mode;
     BeginCase("side-by-side-framegen-" + mode + (shown_lazy ? "-shown-lazy" : ""), game, settings);
-    SetEnv("VECTORXR_FRAMEGEN_SHOWN_LAYERS", shown_lazy ? "lazy" : "");
+    SetEnv("VECTORXR_FRAMEGEN_SHOWN_LAYERS", shown_lazy ? "" : "off");
     g_runtime.recommended_width = kSideBySideEyeWidth;
     g_runtime.recommended_height = kSideBySideEyeHeight;
     g_runtime.paced = true;
@@ -4336,18 +4337,19 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
                   describe(without_quad));
         CheckValidation(game, "GPU-bound");
     } else {
-        std::cout << g_case << ": KNOWN LIMITATION (the uncaptured-layer backlog, by default): the game's GPU work "
-                  << "held back " << kGameLoadMs << " ms a frame, the runtime's queue waited for it before frames of "
-                  << "Frame Generation's ended meanwhile: with a quad layer released every frame "
+        std::cout << g_case << ": KNOWN LIMITATION (the uncaptured-layer backlog, shown layers not lazy): the "
+                  << "game's GPU work held back " << kGameLoadMs << " ms a frame, the runtime's queue waited for it "
+                  << "before frames of Frame Generation's ended meanwhile: with a quad layer released every frame "
                   << describe(with_quad) << "; without it " << describe(without_quad)
                   << ". While a layer Frame Generation does not capture is shown, its frames wait for the game's "
-                  << "(unless VECTORXR_FRAMEGEN_SHOWN_LAYERS=lazy).\n";
-        // What the code does by default: each release of a swapchain Frame
-        // Generation does not capture queues a wait for the game's work on the
-        // runtime's queue (FrameGenQueueSubstitution::Release), and every frame
-        // of its own queued after it waits there (`shown_lazy` keeps them
-        // lazy instead). Without the quad layer nothing of the game's is
-        // waited for before them.
+                  << "(with VECTORXR_FRAMEGEN_SHOWN_LAYERS=off).\n";
+        // What the code does with shown layers not lazy: each release of a
+        // swapchain Frame Generation does not capture queues a wait for the
+        // game's work on the runtime's queue
+        // (FrameGenQueueSubstitution::Release), and every frame of its own
+        // queued after it waits there (`shown_lazy` keeps them lazy
+        // instead). Without the quad layer nothing of the game's is waited
+        // for before them.
         Check(with_quad.waited > 0,
               "GPU-bound, with the quad layer: frames of Frame Generation's wait for the game's work on the runtime's "
               "queue: " +
@@ -4358,7 +4360,7 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
         CheckValidation(game, "GPU-bound");
         const depthxr::FrameGenQueueSubstitution::ShownLayerCounts off = Peer::ShownLayers();
         Check(off.releases == 0 && off.cpu_waits == 0 && off.gpu_waits == 0 && quad_behind == 0,
-              "shown layers are not kept lazy by default");
+              "shown layers are not kept lazy with VECTORXR_FRAMEGEN_SHOWN_LAYERS=off");
     }
 
     // Depth in the same shape (one swapchain, each view's depth its half):

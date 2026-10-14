@@ -2460,15 +2460,17 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
             }
             std::string note;
             framegen_queue_.SetLog([this](const std::string& message) { logger_.Error(message); });
-            // A Vulkan game's interface (Star Citizen's, a quad over its
-            // projection every frame) would otherwise make every frame
-            // Frame Generation writes wait for the game's GPU work.
-            downstream_info = framegen_queue_.Prepare(game_info, note, vulkan_bridge_.Active());
+            // A layer the runtime shows over the projection every frame (Star
+            // Citizen's interface, OpenKneeboard's kneeboard in any game)
+            // would otherwise make every frame Frame Generation writes wait
+            // for the game's GPU work: on a GPU-bound game, a refresh missed
+            // wherever the runtime's xrEndFrame waits for its queue (Varjo).
+            downstream_info = framegen_queue_.Prepare(game_info, note, true);
             if (!note.empty()) logger_.Info(note);
             if (framegen_queue_.ShownLayersLazy()) {
-                logger_.Info("Frame Generation keeps releases of layers it does not capture lazy (on for Vulkan "
-                             "games; VECTORXR_FRAMEGEN_SHOWN_LAYERS=lazy or =off decides for any): the runtime shows "
-                             "each layer's newest finished image, at most one game frame old.");
+                logger_.Info("Frame Generation keeps releases of layers it does not capture lazy "
+                             "(VECTORXR_FRAMEGEN_SHOWN_LAYERS=off turns this off): the runtime shows each layer's "
+                             "newest finished image, at most one game frame old.");
             }
             if (d3d11_bridge_.Active() && !framegen_queue_.Active()) {
                 // The runtime must never be given the bridge's queue: it
@@ -4231,14 +4233,7 @@ XrResult OpenXrLayer::ReleaseSwapchainImage(XrSwapchain swapchain,
         logger_.Debug("Turbo-diag: xrReleaseSwapchainImage(" +
                       std::to_string(reinterpret_cast<uintptr_t>(swapchain)) + ") starting.");
     }
-    // The runtime's queue reads the image only after the game's rendering
-    // into it (and Frame Generation's capture of it) has run; while Frame
-    // Generation shows only images of its own, an image it captures reaches
-    // the runtime once that has run, without the runtime's queue waiting.
-    const XrResult result =
-        UnmirroredSwapchain(swapchain)
-            ? next_release_swapchain_image_(swapchain, release_info)
-            : framegen_queue_.Release(swapchain, FrameGenLazy(swapchain), FrameGenQueueCalls(), release_info);
+    const XrResult result = ForwardAppRelease(swapchain, release_info);
     if (diag) {
         logger_.Debug("Turbo-diag: xrReleaseSwapchainImage completed.");
     }
@@ -13776,6 +13771,16 @@ bool OpenXrLayer::ShouldDeferSwapchainRelease(const SwapchainInfo& info) const {
            IsQuadViewsActive();
 }
 
+XrResult OpenXrLayer::ForwardAppRelease(XrSwapchain swapchain, const XrSwapchainImageReleaseInfo* release_info) {
+    // The runtime's queue reads the image only after the game's rendering
+    // into it (and Frame Generation's capture of it) has run; while Frame
+    // Generation shows only images of its own, an image it captures reaches
+    // the runtime once that has run, without the runtime's queue waiting.
+    return UnmirroredSwapchain(swapchain)
+               ? next_release_swapchain_image_(swapchain, release_info)
+               : framegen_queue_.Release(swapchain, FrameGenLazy(swapchain), FrameGenQueueCalls(), release_info);
+}
+
 XrResult OpenXrLayer::FlushDeferredSwapchainReleaseLocked(XrSwapchain swapchain,
                                                           SwapchainInfo& info,
                                                           std::string_view reason) {
@@ -13790,8 +13795,9 @@ XrResult OpenXrLayer::FlushDeferredSwapchainReleaseLocked(XrSwapchain swapchain,
 
     while (info.deferred_release_count > 0) {
         XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-        framegen_queue_.BeforeRelease(swapchain, FrameGenQueueCalls());
-        const XrResult result = next_release_swapchain_image_(swapchain, &release_info);
+        // As the application's own release would have gone: deferring it must
+        // not make Frame Generation's runtime queue wait for the game's frame.
+        const XrResult result = ForwardAppRelease(swapchain, &release_info);
         if (XR_FAILED(result)) {
             logger_.Error("Deferred swapchain release failed: handle=" + FormatHandle(swapchain) +
                           ", reason=" + std::string(reason) +

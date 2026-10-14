@@ -571,6 +571,9 @@ class OpenXrLayer {
     // Counts an application call on the calling thread; logs the first call of each kind on each thread.
     void NoteThread(ThreadCensus::Call call);
     bool ShouldDeferSwapchainRelease(const SwapchainInfo& info) const;
+    // An application's release of `swapchain`'s image (forwarded as it came,
+    // or deferred until its xrEndFrame), on to the runtime.
+    XrResult ForwardAppRelease(XrSwapchain swapchain, const XrSwapchainImageReleaseInfo* release_info);
     XrResult FlushDeferredSwapchainReleaseLocked(XrSwapchain swapchain,
                                                  SwapchainInfo& info,
                                                  std::string_view reason);
@@ -953,7 +956,7 @@ class OpenXrLayer {
     }
     // A layer's swapchain (not a projection's) a frame shows while Frame
     // Generation shows images of its own only and does not capture it: kept
-    // lazy under VECTORXR_FRAMEGEN_SHOWN_LAYERS=lazy (FrameGenQueueSubstitution::Flush).
+    // lazy unless VECTORXR_FRAMEGEN_SHOWN_LAYERS=off (FrameGenQueueSubstitution::Flush).
     bool FrameGenShownLazily(XrSwapchain swapchain) {
         return framegen_queue_.ShownLayersLazy() && framegen_.ShowsOwnImagesOnly() &&
                !framegen_.CapturesFrom(swapchain);

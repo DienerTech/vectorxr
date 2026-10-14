@@ -400,19 +400,6 @@ void FrameGenQueueSubstitution::Forget(XrSwapchain swapchain) {
     impl_->swapchains.erase(swapchain);
 }
 
-void FrameGenQueueSubstitution::BeforeRelease(XrSwapchain swapchain, const Calls& next) {
-    if (!impl_) {
-        return;
-    }
-    if (const auto state = impl_->Find(swapchain, false)) {
-        std::scoped_lock calls(state->calls);
-        impl_->Forward(swapchain, *state, next, Impl::Until::kAll);
-        state->held = state->held ? state->held - 1 : 0;
-        state->runtime_released = true;
-    }
-    impl_->runtime->Wait(impl_->released.Get(), impl_->MarkGameWork());
-}
-
 bool FrameGenQueueSubstitution::ShownLayersLazy() const {
     return impl_ && impl_->shown_layers_lazy;
 }

@@ -528,6 +528,7 @@ class FrameGenPresenter {
         FrameCopy copy;            // its layers; the primary projection's views are its own
         std::vector<FrameGenOutputKind> kinds;       // per view
         std::vector<std::array<float, 3>> velocity; // per view (Analysis::velocity)
+        bool depth{false};                          // Analysis::depth
         // Its lead sample (UpdateLeadLocked), taken when a refresh first
         // chooses it: on time only if its game frame had reached the GPU.
         std::uint32_t lead{0};
@@ -743,6 +744,7 @@ class FrameGenPresenter {
         // interval between the two real frames), in its view space, where
         // depth is used (generated frames are seen from where it will be).
         std::vector<std::array<float, 3>> velocity;
+        bool depth{false}; // depth was used for a view
     };
 
     // Generates one frame per fraction into the output swapchain sets from
@@ -1155,6 +1157,8 @@ class FrameGenPresenter {
     std::optional<FrameGenMemoryBudget> memory_budget_;
     std::chrono::steady_clock::time_point memory_checked_at_{};
     std::uint64_t working_bytes_{0}; // the backend's own images after the last Execute (log)
+    // When Generate next asks the backend for working_bytes_ (under gpu_mutex_).
+    std::chrono::steady_clock::time_point working_bytes_due_{};
     std::uint64_t output_bytes_{0};  // output swapchain images, estimated from their size (log)
     std::uint64_t output_set_bytes_{0}; // one set of them
     // Since when the budget has had room for another set (UpdateAutoLocked),
@@ -1504,10 +1508,12 @@ class FrameGenPresenter {
     // a real frame moved at its first refresh needs that much more lead.
     double analysis_lag_ms_{0.0};
     // Since the last summary: game waits held for its GPU, the game's
-    // xrEndFrame time in EndFrame, the presenter thread's wait for the GPU
-    // lock to write a frame, and the longest pause, milliseconds.
+    // xrEndFrame time in EndFrame, the runtime's xrEndFrame time for frames
+    // submitted (RuntimeEnd), the presenter thread's wait for the GPU lock to
+    // write a frame, and the longest pause, milliseconds.
     std::vector<double> gpu_wait_ms_;
     std::vector<double> end_call_ms_;
+    std::vector<double> runtime_end_ms_;
     std::vector<double> synth_lock_ms_;
     double pause_longest_ms_{0.0};
     std::uint32_t logged_pauses_{0};

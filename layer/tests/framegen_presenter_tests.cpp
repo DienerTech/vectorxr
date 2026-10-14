@@ -166,6 +166,7 @@ struct GpuLog {
     bool threaded{false};
     bool depth{false};
     std::atomic<bool> memory_pressure{false}; // process video memory near its budget
+    std::atomic<int> working_memory_queries{0}; // WorkingMemoryBytes calls
     std::atomic<int> depth_captures{0};
     std::vector<FrameGenViewSubmission> last;
     FrameGenImage last_capture;
@@ -708,6 +709,10 @@ class FakeGpu final : public FrameGenGpu {
     std::optional<FrameGenMemoryBudget> MemoryBudget() const override {
         constexpr std::uint64_t gigabyte = 1024ull * 1024 * 1024;
         return FrameGenMemoryBudget{log_->memory_pressure ? 31 * gigabyte + gigabyte / 2 : 16 * gigabyte, 32 * gigabyte};
+    }
+    std::uint64_t WorkingMemoryBytes() const override {
+        ++log_->working_memory_queries;
+        return 64ull * 1024 * 1024;
     }
     bool SupportsDepth() const override { return log_->depth; }
     XrSwapchainUsageFlags RequiredDepthUsage() const override {
@@ -1435,6 +1440,28 @@ void TestInterpolationPacing() {
     Check(!runtime.ordering_violation && !g_release_violation, "runtime and image calls stayed ordered");
     presenter.Stop();
     Check(!presenter.Started(), "stop releases the session");
+}
+
+// The backend's working memory (a driver query per image it holds) feeds
+// only the log: asked for at most once a second, not on every real frame.
+void TestWorkingMemoryAskedOncePerSecond() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate);
+    App app(presenter, runtime);
+    const auto start = std::chrono::steady_clock::now();
+    for (int i = 0; i < 40; ++i) {
+        app.Frame();
+    }
+    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    const int executes = gpu.executes.load();
+    const int queries = gpu.working_memory_queries.load();
+    Check(executes >= 30, "working memory: frames were generated (" + std::to_string(executes) + ")");
+    Check(queries >= 1 && queries <= 1 + static_cast<int>(seconds),
+          "working memory: asked " + std::to_string(queries) + " times for " + std::to_string(executes) +
+              " executes in " + std::to_string(seconds) + " s");
+    presenter.Stop();
 }
 
 void TestExtrapolationPacing() {
@@ -2642,6 +2669,55 @@ void TestToggleOffReadsOff() {
         presenter.Stop();
         Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
     }
+}
+
+// Just in time, frames moved with the eyes (the game's depth in use) say how
+// far in the summary's eyeShiftMm, as frames written together do.
+void TestJitEyeShiftReported() {
+    const std::filesystem::path directory = std::filesystem::temp_directory_path() /
+                                            ("vectorxr-presenter-eyeshift-" + std::to_string(GetCurrentProcessId()));
+    std::error_code ignored;
+    std::filesystem::remove_all(directory, ignored);
+    auto logger = std::make_unique<Logger>();
+    logger->Initialize(directory / "eyeshift.log");
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2, app, runtime, owned,
+             logger.get());
+    presenter.SetSummaryInterval(300ms);
+    app->eye_speed = 0.5;
+    for (int i = 0; i < 3; ++i) app->Frame();
+    const auto start = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - start < 1200ms) {
+        const XrFrameState state = app->Wait();
+        app->Begin();
+        std::this_thread::sleep_for(4ms);
+        app->Release();
+        Check(XR_SUCCEEDED(app->End(state.predictedDisplayTime)), "jit eye shift: end");
+    }
+    presenter.Stop();
+    const std::filesystem::path path = logger->ActiveLogPath();
+    logger.reset(); // flushed
+    std::ifstream file(path);
+    double largest = 0.0;
+    int summaries = 0;
+    const std::string key = "eyeShiftMm=";
+    for (std::string line; std::getline(file, line);) {
+        const std::size_t at = line.find(key);
+        if (line.find("threaded=1") == std::string::npos || at == std::string::npos) continue;
+        ++summaries;
+        largest = std::max(largest, std::stod(line.substr(at + key.size())));
+    }
+    file.close();
+    std::filesystem::remove_all(directory, ignored);
+    // 0.5 m/s, a frame moved half a 45 fps interval on: about 5.6 mm.
+    Check(summaries > 0 && largest > 1.0,
+          "jit eye shift: the summaries say how far frames moved with the eyes (" + std::to_string(largest) +
+              " mm in " + std::to_string(summaries) + " summaries)");
 }
 
 // Extrapolate at 3x, each generated frame written right before its refresh:
@@ -4890,7 +4966,8 @@ void TestTelemetryWindows() {
     Check(!inline_lines.empty(), "telemetry: summaries while standing by");
     for (const char* field : {"appFps=", "outputFps=", "distinctFps=", "standbyS=", "generated=+", "copiesSkipped=",
                               "lateReal=", "gpuWaits=", "captureDoneMs=", "analysisMs=", "measureLagMs=", "ofaMs=",
-                              "gpuStartMs=", "gpuDoneMs=", "endCallMs=", "synthLockMs=", "unwritten=", "unready=", "pauses=",
+                              "gpuStartMs=", "gpuDoneMs=", "endCallMs=", "runtimeEndMs=", "synthLockMs=", "unwritten=",
+                              "unready=", "pauses=",
                               "leadSlots=", "leadFloor=", "leadMoves=+", "leadProbes=", "leadUndone=",
                               "dynamic=engaged (the game ran at"}) {
         Check(threaded.back().find(field) != std::string::npos,
@@ -8492,6 +8569,7 @@ int main(int argc, char** argv) {
     }
     const HANDLE policy = std::getenv("FG_TEST_SERIAL") ? nullptr : StartPolicyTests();
     RUN(TestInterpolationPacing);
+    RUN(TestWorkingMemoryAskedOncePerSecond);
     RUN(TestExtrapolationPacing);
     RUN(TestTripleInterpolation);
     RUN(TestQuadExtrapolation);
@@ -8505,6 +8583,7 @@ int main(int argc, char** argv) {
     RUN(TestThreadedPipelinedApp);
     RUN(TestThreadedInterpolation);
     RUN(TestJitExtrapolation);
+    RUN(TestJitEyeShiftReported);
     RUN(TestJitDynamicExtrapolation);
     RUN(TestJitStaleMotion);
     RUN(TestJitInterpolateCoversLateMotion);
