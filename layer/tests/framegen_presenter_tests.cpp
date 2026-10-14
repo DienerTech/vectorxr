@@ -8401,6 +8401,77 @@ void TestAutoHoldsWhileClockDisplaced() {
     Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
 }
 
+// Auto at 3x when the runtime's clock recovers: engaging again is a change
+// too, and its first frames carry its cost (velocity7 in Star Citizen on
+// Virtual Desktop, 2026-10-14: "62% of frames late" stepped 3x up to 4x in
+// the second the clock recovered, and the game ran at 22-24 fps instead of
+// 48 with no probe down in reach). Here the game's first half second after
+// the recovery works 4 refreshes a frame, late at 3x (3.75 at most): left
+// out as any change's first frames are. Lateness that lasts past the
+// settle still steps the multiplier up.
+void TestAutoSettlesAfterClockRecovery() {
+    const std::string name = "auto settles after the clock recovers";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    SessionLog log("auto-clock-recovery");
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kInterpolate, FrameGenMultiplier::kAuto, app, runtime, owned,
+             log.logger.get());
+    // A 30 s probe backoff: no probe down within the test.
+    constexpr auto kSettle = 700ms;
+    presenter.SetAutoPolicy(kSettle, 500ms, 600ms, 30s);
+    const auto needs_3x = PeriodsOfWork(kPeriod, 2.6);
+    const auto late_at_3x = PeriodsOfWork(kPeriod, 4.0);
+    // Full rate, then 2x, then 3x (each step settles first). The clock stalls
+    // as soon as it is 3x, within that step's settle: judged at 3x a second
+    // first, bursts of hitches on a busy machine (frames 40-70 ms apart)
+    // stepped it to 4x before the test began, twice in about fifteen runs.
+    RunWork(*app, 4000ms, needs_3x, [&](const XrFrameState&) {
+        return presenter.Status().multiplier == 3 && presenter.Status().threaded;
+    });
+    const std::uint32_t settled = presenter.Status().multiplier;
+    const bool settled_threaded = presenter.Status().threaded;
+    runtime.stall_clock = true;
+    RunWork(*app, 2000ms, needs_3x, [&](const XrFrameState&) { return presenter.Status().runtime_clock_displaced; });
+    const bool displaced = presenter.Status().runtime_clock_displaced;
+    RunWork(*app, 500ms, needs_3x);
+    runtime.stall_clock = false;
+    RunWork(*app, 3000ms, needs_3x, [&](const XrFrameState&) { return !presenter.Status().runtime_clock_displaced; });
+    const auto recovered = std::chrono::steady_clock::now();
+    const bool recovered_seen = !presenter.Status().runtime_clock_displaced;
+    std::uint32_t highest = 0;
+    const auto watch = [&](const XrFrameState&) {
+        highest = std::max(highest, presenter.Status().multiplier);
+        return false;
+    };
+    RunWork(*app, 500ms, late_at_3x, watch);
+    const auto judged = recovered + kSettle + 300ms;
+    const auto now = std::chrono::steady_clock::now();
+    if (now < judged) {
+        RunWork(*app, std::chrono::duration_cast<std::chrono::milliseconds>(judged - now), needs_3x, watch);
+    }
+    // The control: lateness that lasts still does.
+    RunWork(*app, 2500ms, late_at_3x, [&](const XrFrameState&) { return presenter.Status().multiplier == 4; });
+    const std::uint32_t stepped = presenter.Status().multiplier;
+    presenter.Stop();
+    std::string said;
+    for (const std::string& line : log.Lines("Frame Generation")) {
+        if (line.find("automatic multiplier") != std::string::npos || line.find("display times") != std::string::npos) {
+            said += " | " + line.substr(line.find("Frame Generation"));
+        }
+    }
+    Check(settled == 3 && settled_threaded,
+          name + ": a game needing 3x gets it (" + std::to_string(settled) + "x" + said + ")");
+    Check(displaced && recovered_seen, name + ": display times that stand still displace the clock, then recover");
+    Check(highest == 3, name + ": the frames right after the recovery do not step it up (3x, then " +
+                            std::to_string(highest) + "x within the settle and 300 ms" + said + ")");
+    Check(stepped == 4, name + ": a game late for longer steps up (" + std::to_string(stepped) + "x" + said + ")");
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+}
+
 // Displaced runtime clocks are logged one by one for the first few, then
 // only in summaries: each logged end ends a logged displacement (past the
 // first three, the ends were logged without them).
@@ -9112,6 +9183,7 @@ int main(int argc, char** argv) {
     RUN(TestLowFirstClockSample);
     RUN(TestStalledClockWhilePresenting);
     RUN(TestAutoHoldsWhileClockDisplaced);
+    RUN(TestAutoSettlesAfterClockRecovery);
     for (const bool jit : {true, false}) {
         g_jit = jit;
         RUN(TestAutoProbesNeedRoom);

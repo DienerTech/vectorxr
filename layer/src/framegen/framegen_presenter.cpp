@@ -2906,6 +2906,11 @@ void FrameGenPresenter::NoteRuntimeClockLocked(Clock::time_point returned, XrTim
         // The ceiling is taken anew from here.
         clock_offset_ceiling_ = offset;
         clock_warmup_waits_ = 0;
+        // Engaging again is a change too: its first frames carry its cost
+        // and say nothing about the game (velocity7 on Virtual Desktop,
+        // 2026-10-14: Auto went 3x -> 4x in the second the clock recovered).
+        multiplier_changed_at_ = returned;
+        cadence_.clear();
         if (dynamic_standby_) {
             dynamic_reason_ = "the runtime's display times advance with the time again";
         }
