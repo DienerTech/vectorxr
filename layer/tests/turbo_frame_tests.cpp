@@ -2516,10 +2516,16 @@ struct VarjoSwapchainRuntime {
     std::uint32_t acquired{0};
     std::uint32_t next{0};
     bool waited{false};
-    std::string calls; // a(cquire), w(ait), r(elease), as the runtime saw them
+    // a(cquire), w(ait), r(elease) and the frames' e(nd), as the runtime saw them
+    std::string calls;
     int refused{0};
 };
 VarjoSwapchainRuntime g_varjo_swapchain;
+
+XrResult XRAPI_PTR VarjoSwapchainEndFrame(XrSession, const XrFrameEndInfo*) {
+    g_varjo_swapchain.calls += 'e';
+    return XR_SUCCESS;
+}
 
 XrResult XRAPI_PTR VarjoAcquire(XrSwapchain, const XrSwapchainImageAcquireInfo*, std::uint32_t* index) {
     auto& runtime = g_varjo_swapchain;
@@ -2568,8 +2574,7 @@ XrResult XRAPI_PTR VarjoRelease(XrSwapchain, const XrSwapchainImageReleaseInfo*)
 // missed refresh).
 void TestVarjoDeferredReleasesKeepFrameGenUnblocked() {
     using Peer = depthxr::TurboFrameTestPeer;
-    Peer::PrepareVarjoNative(&VarjoLocateViews, &VarjoEndFrame);
-    g_varjo_ends = 0;
+    Peer::PrepareVarjoNative(&VarjoLocateViews, &VarjoSwapchainEndFrame);
     g_varjo_swapchain = {};
     const auto device = MakeFake<FakeD3D12Device>();
     const auto game = MakeFake<FakeD3D12Queue>(
@@ -2601,7 +2606,22 @@ void TestVarjoDeferredReleasesKeepFrameGenUnblocked() {
     projection.viewCount = 4;
     projection.views = views.data();
     const auto* projection_layer = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
+    XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+    quad.pose.orientation.w = 1.0f;
+    quad.subImage.swapchain = kneeboard;
+    quad.subImage.imageRect = {{0, 0}, {512, 512}};
+    quad.size = {0.3f, 0.3f};
+    const std::array<const XrCompositionLayerBaseHeader*, 2> shown_layers{
+        projection_layer, reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad)};
     XrTime time = 40'000'000'000;
+    auto end = [&](std::uint32_t layer_count, const std::string& what) {
+        XrFrameEndInfo info = FrameEndInfo();
+        info.displayTime = (time += 11'111'111);
+        info.layerCount = layer_count;
+        info.layers = shown_layers.data();
+        Expect(layer.EndFrame(TestSession(), &info) == XR_SUCCESS,
+               "Varjo deferred releases: " + what + ": the frame did not end");
+    };
     // The kneeboard drawn (its GPU work queued) and released, then the frame
     // ended.
     auto frame = [&](const std::string& what) {
@@ -2614,21 +2634,18 @@ void TestVarjoDeferredReleasesKeepFrameGenUnblocked() {
         const std::size_t before = calls.size();
         Expect(layer.ReleaseSwapchainImage(kneeboard, &release) == XR_SUCCESS && calls.size() == before,
                "Varjo deferred releases: " + what + ": the release was not deferred until xrEndFrame (" + calls + ")");
-        XrFrameEndInfo info = FrameEndInfo();
-        info.displayTime = (time += 11'111'111);
-        info.layerCount = 1;
-        info.layers = &projection_layer;
-        Expect(layer.EndFrame(TestSession(), &info) == XR_SUCCESS, "Varjo deferred releases: " + what + ": the frame did not end");
+        end(1, what);
     };
+    auto waits = [&] { return std::to_string(runtime_queue->Waits()) + " runtime queue waits"; };
 
     // Before a frame of Frame Generation's showed the kneeboard lazily, its
     // release goes at xrEndFrame with the runtime's queue waiting for the
     // game's work on it.
     game->Hold();
     frame("first frame");
-    Expect(calls == "awr" && runtime_queue->Waits() == 1,
+    Expect(calls == "awre" && runtime_queue->Waits() == 1,
            "Varjo deferred releases: a release before the layer was shown lazily did not go at xrEndFrame after the "
-           "game's work (" + calls + ", " + std::to_string(runtime_queue->Waits()) + " runtime queue waits)");
+           "game's work (" + calls + ", " + waits() + ")");
     game->Run();
     Peer::ShowLayerLazily(kneeboard);
 
@@ -2636,24 +2653,34 @@ void TestVarjoDeferredReleasesKeepFrameGenUnblocked() {
     // at xrEndFrame, and the runtime's queue does not wait for the game.
     game->Hold();
     frame("second frame");
-    Expect(calls == "awraw" && runtime_queue->Waits() == 1,
+    Expect(calls == "awreawe" && runtime_queue->Waits() == 1,
            "Varjo deferred releases: a deferred release of a layer shown lazily made the runtime's queue wait for "
-           "the game's frame (" + calls + ", " + std::to_string(runtime_queue->Waits()) + " runtime queue waits)");
+           "the game's frame (" + calls + ", " + waits() + ")");
     Peer::ShowLayerLazily(kneeboard);
-    Expect(calls == "awraw", "Varjo deferred releases: a frame showing the layer got a release whose work has not run");
+    Expect(calls == "awreawe", "Varjo deferred releases: a frame showing the layer got a release whose work has not run");
     // Its work runs: the release reaches the runtime at the game's next call
     // on the swapchain, before it; the next one, done by xrEndFrame, goes there.
     game->Run();
     frame("third frame");
+    Expect(calls == "awreawerawre" && runtime_queue->Waits() == 1,
+           "Varjo deferred releases: releases whose work has run did not reach the runtime unwaited (" + calls + ", " +
+               waits() + ")");
+
+    // A frame passing through (Frame Generation not showing its own images)
+    // that shows the kneeboard: the release held back goes first, the
+    // runtime's queue waiting for its work, before the frame reaches the runtime.
+    game->Hold();
+    frame("fourth frame");
+    end(2, "a frame passing through");
+    Expect(calls == "awreawerawreawere" && runtime_queue->Waits() == 2,
+           "Varjo deferred releases: a frame passing through reached the runtime before the release it shows (" +
+               calls + ", " + waits() + ")");
+    game->Run();
     const auto shown = Peer::ShownLayers();
-    Expect(calls == "awrawrawr" && runtime_queue->Waits() == 1 && g_varjo_swapchain.refused == 0,
-           "Varjo deferred releases: released work did not reach the runtime in order, unwaited (" + calls + ", " +
-               std::to_string(runtime_queue->Waits()) + " runtime queue waits, " +
-               std::to_string(g_varjo_swapchain.refused) + " refused)");
-    Expect(shown.releases == 2 && shown.cpu_waits == 0 && shown.gpu_waits == 0,
+    Expect(shown.releases == 3 && shown.cpu_waits == 0 && shown.gpu_waits == 0 && g_varjo_swapchain.refused == 0,
            "Varjo deferred releases: the shown-layer counts are off (" + std::to_string(shown.releases) + " lazy, " +
-               std::to_string(shown.cpu_waits) + " CPU waits, " + std::to_string(shown.gpu_waits) + " queue waits)");
-    Expect(g_varjo_ends == 3, "Varjo deferred releases: every frame must reach the runtime");
+               std::to_string(shown.cpu_waits) + " CPU waits, " + std::to_string(shown.gpu_waits) +
+               " queue waits, " + std::to_string(g_varjo_swapchain.refused) + " calls refused)");
     Peer::EndVarjoReleases(kneeboard);
     Peer::EndVarjoNative();
 }
