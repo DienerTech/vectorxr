@@ -1455,6 +1455,9 @@ class OpenXrLayer {
     std::optional<std::chrono::steady_clock::time_point> turbo_metrics_binding_last_poll_time_;
     bool turbo_metrics_binding_down_cached_{false};
     std::optional<InputBinding> turbo_metrics_pressed_; // its list's binding that last went down (ActingBinding)
+    // The fields above belong to the frame thread. A settings refresh (any
+    // thread) asks for their reset here; the frame thread performs it.
+    std::atomic<bool> turbo_metrics_binding_reset_pending_{false};
     // Cleared whenever capture pauses so the first frame interval after a
     // resume (which spans the pause) never lands in the stats.
     bool turbo_metrics_was_capturing_{false};

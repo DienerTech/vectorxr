@@ -147,6 +147,15 @@ class TurboFrameTestPeer {
             capturing ? TurboMetricsMode::kAlways : TurboMetricsMode::kOff, {}, true, 0);
     }
     static void ResetMetrics() { Layer().ResetTurboMetricsState(); }
+    // Binding-gated metrics capture, started by a press.
+    static void ArmMetricsBinding() {
+        auto& layer = Layer();
+        layer.turbo_metrics_capture_armed_ = true;
+        layer.turbo_metrics_binding_was_down_ = true;
+    }
+    static bool MetricsBindingArmed() { return Layer().turbo_metrics_capture_armed_; }
+    // The frame thread's poll of the capture binding.
+    static bool PollMetricsBinding() { return Layer().IsTurboMetricsCaptureArmed({}, 100); }
     static void WaitMetrics() {
         if (Layer().turbo_metrics_write_future_.valid()) Layer().turbo_metrics_write_future_.wait();
     }
@@ -2158,6 +2167,23 @@ void TestDestroySessionRecordsUntilTheSessionIsGone() {
     std::filesystem::remove_all(directory, error);
 }
 
+// A settings refresh runs on whichever thread loaded the settings (often the
+// config watcher's), while the frame thread polls the metrics binding's edge
+// detector without the lock: the reset a refresh asks for happens on the
+// frame thread.
+void TestMetricsBindingResetWaitsForTheFrameThread() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    depthxr::TurboFrameTestPeer::ArmMetricsBinding();
+    depthxr::ConfigDocument config;
+    config.version = 3; // Metrics capture "always", where the harness had it off.
+    depthxr::TurboFrameTestPeer::ReloadConfig(config);
+    Expect(depthxr::TurboFrameTestPeer::MetricsBindingArmed(),
+           "A settings refresh reset the metrics binding's state outside the frame thread");
+    Expect(!depthxr::TurboFrameTestPeer::PollMetricsBinding() && !depthxr::TurboFrameTestPeer::MetricsBindingArmed(),
+           "The frame thread did not apply the reset a metrics setting change asked for");
+}
+
 std::size_t Occurrences(const std::string& text, const std::string& needle) {
     std::size_t count = 0;
     for (std::size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + needle.size())) {
@@ -2414,6 +2440,7 @@ int main() {
     TestConfigWarningsLoggedOncePerKey();
     TestRecoveryBlockLogsWhatTurboDoes();
     TestDestroySessionRecordsUntilTheSessionIsGone();
+    TestMetricsBindingResetWaitsForTheFrameThread();
     std::cout << "depthxr_turbo_frame_tests passed\n";
     return 0;
 }

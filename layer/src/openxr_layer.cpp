@@ -7639,6 +7639,13 @@ void OpenXrLayer::RecordTurboMetricsFrame(bool turbo_engaged,
 }
 
 bool OpenXrLayer::IsTurboMetricsCaptureArmed(const std::vector<InputBinding>& bindings, int sound_volume) {
+    if (turbo_metrics_binding_reset_pending_.exchange(false, std::memory_order_acq_rel)) {
+        turbo_metrics_capture_armed_ = false;
+        turbo_metrics_binding_was_down_ = false;
+        turbo_metrics_binding_last_poll_time_.reset();
+        turbo_metrics_binding_down_cached_ = false;
+        turbo_metrics_pressed_.reset();
+    }
 #if defined(_WIN32)
     const auto now = std::chrono::steady_clock::now();
     // Prime the edge detector on the first poll so a button held from the
@@ -10504,12 +10511,10 @@ void OpenXrLayer::RefreshResolvedSettings() {
     if (!SameInputBindings(previous.turbo.metrics_bindings, resolved_settings_.turbo.metrics_bindings) ||
         previous.turbo.metrics_mode != resolved_settings_.turbo.metrics_mode) {
         // Re-prime the capture binding's edge detector; a mode change also
-        // disarms binding-gated capture so it always starts paused.
-        turbo_metrics_capture_armed_ = false;
-        turbo_metrics_binding_was_down_ = false;
-        turbo_metrics_binding_last_poll_time_.reset();
-        turbo_metrics_binding_down_cached_ = false;
-        turbo_metrics_pressed_.reset();
+        // disarms binding-gated capture so it always starts paused. This may
+        // run on the config watcher's thread while the frame thread polls the
+        // detector without the lock, so the frame thread does the reset.
+        turbo_metrics_binding_reset_pending_.store(true, std::memory_order_release);
     }
     if (previous.turbo.pacing_mode != resolved_settings_.turbo.pacing_mode ||
         previous.turbo.runtime_pins != resolved_settings_.turbo.runtime_pins) {
