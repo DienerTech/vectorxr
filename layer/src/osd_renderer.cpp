@@ -534,7 +534,9 @@ std::pair<OsdPresentation, OsdPresentation> OsdRenderer::Prepare(const OsdSettin
             if (space_ && api_.destroy_space) api_.destroy_space(space_);
             if (anchor_space_ && api_.destroy_space) api_.destroy_space(anchor_space_);
             swapchain_=XR_NULL_HANDLE; space_=XR_NULL_HANDLE; anchor_space_=XR_NULL_HANDLE; anchor_failed_=false;
-            acquired_.reset(); acquired_waited_=false; ready_=false;
+            // A failed raster stays here: retrying must raster again, not
+            // upload the empty image that failed.
+            acquired_.reset(); acquired_waited_=false; ready_=false; upload_.reset();
         }
         visible_=settings.visible_on_start; compact_=settings.compact; primed_=false; failed_=false; telemetry_={};
     }
@@ -685,7 +687,7 @@ const XrCompositionLayerBaseHeader* OsdRenderer::Append(const XrFrameEndInfo& in
         }
         if(!refresh_pending) {
             const auto& bitmap=*upload_;
-            if(bitmap.pixels.empty()){Fail("OSD rasterization",XR_ERROR_OUT_OF_MEMORY);return nullptr;}
+            if(bitmap.pixels.empty()){upload_.reset();Fail("OSD rasterization",XR_ERROR_OUT_OF_MEMORY);return nullptr;}
             std::string error;const auto upload_start=Clock::now();const auto uploaded=graphics_->Upload(*acquired_,bitmap,error);stats.upload.Add(Milliseconds(upload_start));
             if(uploaded==OsdUpload::Busy){++stats.upload_busy;refresh_pending="Waiting for previous OSD upload";}
             else if(uploaded==OsdUpload::Failed){Fail(error.c_str(),XR_ERROR_GRAPHICS_DEVICE_INVALID);return nullptr;}

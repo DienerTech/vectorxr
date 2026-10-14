@@ -675,6 +675,24 @@ int main(int argc, char** argv) {
         const auto settled=std::chrono::steady_clock::now()+std::chrono::milliseconds(200);
         while(std::chrono::steady_clock::now()<settled) { renderer.Append(frame,true); std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
         Check(acquires==placed,"Moving or resizing the panel rasterized it again");
+
+        // A raster that fails (here GDI's per-process handle quota is spent)
+        // disables the panel until it is turned off and on, which then
+        // rasterizes again.
+        std::vector<HBRUSH> brushes;
+        while(brushes.size()<100000) { const HBRUSH brush=CreateSolidBrush(RGB(1,2,3)); if(!brush) break; brushes.push_back(brush); }
+        if(brushes.size()<100000) {
+            settings.opacity=50; renderer.Prepare(settings,changed,false,false);
+            const bool failed=PumpUntil(renderer,frame,[&]{return renderer.Status().message.find("rasterization")!=std::string::npos;});
+            for(auto brush:brushes) DeleteObject(brush);
+            Check(failed,"A failed OSD raster was not reported");
+            settings.enabled=false; renderer.Prepare(settings,changed,false,false);
+            settings.enabled=true; renderer.Prepare(settings,changed,false,false);
+            Check(WaitVisible(renderer,frame),"Turning the OSD off and on did not recover from a failed raster");
+        } else {
+            for(auto brush:brushes) DeleteObject(brush);
+            std::cout<<"GDI handle quota not reached; failed-raster retry not tested\n";
+        }
         renderer.Shutdown();
     }
     for(auto level:{LogLevel::Info,LogLevel::Debug}) {
