@@ -849,6 +849,12 @@ std::string FormatDiagnosticDouble(double value) {
     return stream.str();
 }
 
+// A cached frame's display time against the frame's own, for diagnostics:
+// "none" when nothing matched (a matched time of 0), not minus the time.
+std::string FormatMatchedDeltaNs(XrTime matched_time, XrTime display_time) {
+    return matched_time == 0 ? std::string("none") : std::to_string(matched_time - display_time);
+}
+
 std::string FormatHex(uint64_t value) {
     std::ostringstream stream;
     stream << "0x" << std::hex << std::uppercase << value;
@@ -4944,7 +4950,7 @@ bool OpenXrLayer::BuildQuadViewsComposePlan(const XrCompositionLayerProjection* 
                << ", eye=" << eye
                << ", cachedFovHit=" << plan->has_cached_fovs
                << ", matchedTime=" << plan->matched_time
-               << ", matchedDeltaNs=" << (plan->matched_time - display_time)
+               << ", matchedDeltaNs=" << FormatMatchedDeltaNs(plan->matched_time, display_time)
                << ", rect=(" << FormatDiagnosticDouble(composed.focus_rect[0]) << ", "
                << FormatDiagnosticDouble(composed.focus_rect[1]) << ", "
                << FormatDiagnosticDouble(composed.focus_rect[2]) << ", "
@@ -9028,10 +9034,10 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         std::ostringstream stream;
         stream << "EndFrame projection rewrite applied: frameTime=" << frame_end_info->displayTime
                << ", matchedTime=" << matched_time
-               << ", matchedDeltaNs=" << (matched_time - frame_end_info->displayTime)
+               << ", matchedDeltaNs=" << FormatMatchedDeltaNs(matched_time, frame_end_info->displayTime)
                << ", depthAnchorMatchedTime=" << matched_depth_submission_time
                << ", depthAnchorMatchedDeltaNs="
-               << (matched_depth_submission_time - frame_end_info->displayTime)
+               << FormatMatchedDeltaNs(matched_depth_submission_time, frame_end_info->displayTime)
                << ", canonicalSpace=" << DescribeSpace(canonical_view_space)
                << ", sourceSpace=" << DescribeSpace(pose_delta_frame.source_space)
                << ", canonicalDeltaYaw="
