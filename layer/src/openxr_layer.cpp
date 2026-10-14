@@ -14627,6 +14627,12 @@ void OpenXrLayer::EngagePivotMotionProfile(size_t index) {
         pivotxr_snap_reference_pending_ = false;
         pivotxr_snap_reference_valid_ = false;
     }
+    // Only the engaged profile can hold a toggle latch, as with Snap Views.
+    // A latch left on a profile this one replaced would make that profile's
+    // Hold binding act as a toggle the next time it engages.
+    for (size_t other = 0; other < pivotxr_profile_input_states_.size(); ++other) {
+        if (other != index) pivotxr_profile_input_states_[other].toggle_latched = false;
+    }
     pivotxr_active_profile_index_ = index;
     pivotxr_engaged_ = true;
 }

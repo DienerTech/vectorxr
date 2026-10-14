@@ -345,7 +345,11 @@ public:
     }
 
     static void SetActivation(size_t profile, bool down) {
-        Layer().pivotxr_profile_input_states_[profile].activation[0].down_cached = down;
+        SetActivation(profile, 0, down);
+    }
+
+    static void SetActivation(size_t profile, size_t binding, bool down) {
+        Layer().pivotxr_profile_input_states_[profile].activation[binding].down_cached = down;
     }
 
     static void SetSnap(size_t profile, size_t view, bool down) {
@@ -1265,6 +1269,32 @@ void SteadyLocatesDoNotAllocate() {
     }
 }
 
+// A Toggle latch belongs to the engaged profile only. Toggling another
+// profile on and off again must not leave the first profile latched, or its
+// Hold binding would keep it engaged after release.
+void HoldAfterAnotherProfileToggledReleases() {
+    depthxr::PivotXrResolvedProfile flight = Motion("Flight", Toggle("F1"), false, 0.0);
+    flight.activation_bindings.push_back(Hold("F3"));
+    Peer::Start({flight, Motion("Second", Toggle("F4"), false, 0.0)});
+    const auto tap = [](size_t profile) {
+        Peer::TapActivation(profile);
+        Peer::Drive(0.0);
+    };
+    tap(0);
+    Expect(Peer::Engaged() && Peer::MotionOwner() == 0, "Flight's Toggle must engage it");
+    tap(1);
+    Expect(Peer::Engaged() && Peer::MotionOwner() == 1, "Second's Toggle must take over");
+    tap(1);
+    Expect(!Peer::Engaged(), "Second's Toggle must release it again");
+
+    Peer::SetActivation(0, 1, true);
+    Peer::Drive(0.0);
+    Expect(Peer::Engaged() && Peer::MotionOwner() == 0, "Flight's Hold must engage it");
+    Peer::SetActivation(0, 1, false);
+    Peer::Drive(0.0);
+    Expect(!Peer::Engaged(), "Releasing Flight's Hold must release it: no stale Toggle latch may keep it engaged");
+}
+
 struct Scenario {
     const char* name;
     std::function<void()> run;
@@ -1303,6 +1333,7 @@ int main() {
         {"mid-flight config edits", MidFlightEditsKeepTheSnap},
         {"per-direction deadzone transition", PerDirectionDeadzoneTransitionShapesTheExtraAngle},
         {"steady locates do not allocate", SteadyLocatesDoNotAllocate},
+        {"Hold after another profile's Toggle", HoldAfterAnotherProfileToggledReleases},
     };
 
     int failures = 0;
