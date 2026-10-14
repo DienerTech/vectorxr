@@ -13897,8 +13897,9 @@ void OpenXrLayer::StartFrameGen(XrSession session, const void* binding_chain, co
         framegen_calls_.begin = [this](XrSession s, const XrFrameBeginInfo* i) { return TraceRuntimeBeginFrame(s, i); };
         framegen_calls_.submit = [this](XrSession s, const XrFrameEndInfo* i) { return SubmitRuntimeFrame(s, i); };
         framegen_.Configure(resolved_settings_.framegen);
-        // Interpolating, motion is measured on the shader cores
-        // (FrameGenPresenter::SetInterpolateOnShaders).
+        // Interpolating in Dynamic, motion is measured on the shader cores
+        // (FrameGenPresenter::SetInterpolateOnShaders); =1 keeps the hardware
+        // there too.
         const char* interpolate_hardware = std::getenv("VECTORXR_FRAMEGEN_INTERPOLATE_HARDWARE");
         framegen_.SetInterpolateOnShaders(!(interpolate_hardware && std::string(interpolate_hardware) == "1"));
         // How long a teardown waits on the presenter thread (2 s unless set).

@@ -4235,9 +4235,9 @@ void TestWinningEngagementSurvivesLateCaptures() {
     Check(!runtime.ordering_violation && !g_release_violation, "winning late captures: calls stayed ordered");
 }
 
-// A Direct3D 11 game's session (SetInterpolateOnShaders) with NVIDIA's
-// optical flow hardware chosen: interpolating, motion is measured on the
-// shader cores; extrapolating, on the hardware.
+// NVIDIA's optical flow hardware chosen (SetInterpolateOnShaders, the
+// default): interpolating in Dynamic, motion is measured on the shader cores;
+// extrapolating, and interpolating at a fixed rate, on the hardware.
 void TestInterpolateOnShaders() {
     for (const FrameGenSynthesisMode mode : {FrameGenSynthesisMode::kInterpolate, FrameGenSynthesisMode::kExtrapolate}) {
         const bool interpolate = mode == FrameGenSynthesisMode::kInterpolate;
@@ -4265,6 +4265,31 @@ void TestInterpolateOnShaders() {
               name + ": motion measured on the " + (gpu.tuning.hardware_flow ? "hardware" : "shader cores"));
         Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
     }
+    // At a fixed rate the game is held to every second refresh: interpolating
+    // keeps the hardware.
+    const std::string name = "interpolate at 2x on hardware";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kInterpolate, FrameGenMultiplier::k2, app, runtime, owned);
+    presenter.SetInterpolateOnShaders(true);
+    FrameGenResolvedSettings settings;
+    settings.enabled = true;
+    settings.synthesis_mode = FrameGenSynthesisMode::kInterpolate;
+    settings.multiplier = FrameGenMultiplier::k2;
+    settings.motion_estimation = FrameGenMotionEstimation::kHardware;
+    presenter.Configure(settings);
+    RunTicks(*app, 300ms, {2});
+    const int before = gpu.executes;
+    RunTicks(*app, 300ms, {2});
+    presenter.Stop();
+    Check(gpu.executes > before, name + ": real frames were analyzed");
+    Check(gpu.tuning.hardware_flow,
+          name + ": motion measured on the " + (gpu.tuning.hardware_flow ? "hardware" : "shader cores"));
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
 }
 
 // Engaged without a guard trigger for probe_after, Dynamic stands by to see

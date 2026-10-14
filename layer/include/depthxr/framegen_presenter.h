@@ -1468,6 +1468,7 @@ class FrameGenPresenter {
     std::chrono::steady_clock::time_point quad_declined_until_{};
     bool interpolate_on_shaders_{false};
     bool logged_interpolate_on_shaders_{false};
+    bool logged_interpolate_on_hardware_{false};
     std::chrono::milliseconds quad_decline_first_{10000};
     std::chrono::milliseconds quad_decline_longest_{80000};
     std::chrono::milliseconds quad_decline_{10000};

@@ -780,6 +780,7 @@ void FrameGenPresenter::SetInterpolateOnShaders(bool on) {
     std::scoped_lock lock(mutex_);
     interpolate_on_shaders_ = on;
     logged_interpolate_on_shaders_ = false;
+    logged_interpolate_on_hardware_ = false;
 }
 
 void FrameGenPresenter::SetEngagementPolicy(std::uint32_t steady_frames, std::chrono::milliseconds minimum_session_age) {
@@ -3366,14 +3367,25 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         tuning.spare = frame.spare;
         tuning.quality = settings_.flow_quality;
         tuning.hardware_flow = settings_.motion_estimation == FrameGenMotionEstimation::kHardware;
-        if (tuning.hardware_flow && interpolate_on_shaders_ && mode == FrameGenSynthesisMode::kInterpolate) {
-            tuning.hardware_flow = false;
-            if (logger_ && !logged_interpolate_on_shaders_) {
-                logged_interpolate_on_shaders_ = true;
-                logger_->Info("Frame Generation measures motion on the shader cores while interpolating, though "
-                              "NVIDIA's optical flow hardware is chosen: beside the game's rendering the hardware's "
-                              "vectors come too late for the frames between real frames. Extrapolate uses the "
-                              "hardware; VECTORXR_FRAMEGEN_INTERPOLATE_HARDWARE=1 keeps it for Interpolate too.");
+        // Interpolating in Dynamic, the frames between real frames need the
+        // motion within a refresh of the newer frame, sooner than the
+        // hardware delivers it beside the game's rendering. At a fixed or
+        // automatic rate the game is held to every Nth refresh, which leaves
+        // the hardware that time (experimental, 2026-10-14).
+        if (tuning.hardware_flow && mode == FrameGenSynthesisMode::kInterpolate) {
+            if (interpolate_on_shaders_ && settings_.multiplier == FrameGenMultiplier::kDynamic) {
+                tuning.hardware_flow = false;
+                if (logger_ && !logged_interpolate_on_shaders_) {
+                    logged_interpolate_on_shaders_ = true;
+                    logger_->Info("Frame Generation measures motion on the shader cores while interpolating in "
+                                  "Dynamic, though NVIDIA's optical flow hardware is chosen: beside the game's "
+                                  "rendering the hardware's vectors come too late for the frames between real frames. "
+                                  "A fixed or Auto frame rate, or Extrapolate, uses the hardware.");
+                }
+            } else if (logger_ && !logged_interpolate_on_hardware_) {
+                logged_interpolate_on_hardware_ = true;
+                logger_->Info("Frame Generation measures motion with NVIDIA's optical flow hardware while "
+                              "interpolating at a fixed or Auto frame rate (experimental).");
             }
         }
         tuning.diagnostic = settings_.diagnostic_view;

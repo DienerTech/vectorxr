@@ -817,17 +817,19 @@ needs a game restart; turning it off applies at once.
   `dynamic`, `auto`, `2x`, `3x`, or `4x`.
 - **Motion source**: **Shader** (default) measures motion by block matching on the GPU's
   shader cores, on any GPU. **NVIDIA hardware** uses the optical flow accelerator of NVIDIA RTX
-  20-50 GPUs for Extrapolate: repeating patterns such as building windows and railings stay put,
-  and Extrapolate needs it to look its best. Interpolate measures motion with Shader even when
+  20-50 GPUs: repeating patterns such as building windows and railings stay put, and Extrapolate
+  needs it to look its best. Interpolate in **Dynamic** measures motion with Shader even when
   NVIDIA hardware is chosen: while the game keeps the GPU busy, the accelerator's results arrive
-  too late for the frames between real frames. The accelerator starts on each eye's image as
-  soon as the game releases it, so it mostly runs while the game finishes its frame. With
-  **Performance** flow quality it uses the accelerator's fastest preset, which is less accurate
-  on repeating patterns. Where it cannot be used, Shader is, and the log says why. The page
-  checks every graphics card in the PC with NVIDIA's driver, not only the first one listed, and
-  greys out **NVIDIA hardware**, with each card's reason, when none has the accelerator. While the
-  mode is Interpolate the whole Motion source is greyed out and shows Shader; the choice you made
-  is kept for Extrapolate.
+  too late for the frames between real frames. At a fixed or **Auto** frame rate the game is held
+  to every second (or third, fourth) refresh, which leaves the accelerator time, so Interpolate
+  uses it there (experimental: if its results arrive late, Frame Generation runs a refresh
+  further ahead, adding latency). With **Performance** flow quality it uses the accelerator's
+  fastest preset, which is less accurate on repeating patterns. Where it cannot be used, Shader
+  is, and the log says why. The page checks every graphics card in the PC with NVIDIA's driver,
+  not only the first one listed, and greys out **NVIDIA hardware**, with each card's reason, when
+  none has the accelerator. While the mode is Interpolate with a Dynamic frame rate the whole
+  Motion source is greyed out and shows Shader; the choice you made is kept for Extrapolate and
+  for fixed rates.
   In `settings.json`, set `"motionEstimation": "hardware"` in a profile's settings.
 - **Advanced** (collapsed by default):
   - **Flow quality** sets the resolution motion is measured at: **Performance** (1/16 of the eye
