@@ -589,6 +589,7 @@ void FrameGenPresenter::Stop() {
     analysis_lag_ms_ = 0.0;
     gpu_wait_ms_.clear();
     end_call_ms_.clear();
+    runtime_end_ms_.clear();
     synth_lock_ms_.clear();
     pause_longest_ms_ = 0.0;
     logged_pauses_ = 0;
@@ -2525,6 +2526,7 @@ XrResult FrameGenPresenter::EndFrame(XrSession session, const XrFrameEndInfo* in
             repeated_submissions_ = 0;
             pause_longest_ms_ = 0.0;
             end_call_ms_.clear();
+            runtime_end_ms_.clear();
         }
     }
     idle_cv_.notify_all();
@@ -4211,6 +4213,7 @@ XrResult FrameGenPresenter::RuntimeEnd(const FrameGenRuntimeCalls& calls, XrSess
     }
     {
         std::scoped_lock lock(mutex_);
+        AddSample(runtime_end_ms_, Milliseconds(Clock::now() - entered));
         // Counted even when the runtime rejects the frame: it is over either way.
         if (runtime_ends_ < runtime_begins_) {
             ++runtime_ends_;
@@ -5243,7 +5246,9 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
         // frames written unmoved (motion not measured yet). unwritten: an
         // output not handed back in time / writing failed / no outputs /
         // nothing to write. endCallMs: the game's xrEndFrame in Frame
-        // Generation. synthLockMs: the presenter thread's wait for the GPU
+        // Generation. runtimeEndMs: the runtime's xrEndFrame for the frames
+        // Frame Generation submits (long where the runtime waits for its
+        // queue). synthLockMs: the presenter thread's wait for the GPU
         // lock before writing. ringExhausted: refreshes whose real frame's
         // images newer captures had replaced (written unmoved, or the frame
         // before). staleSkipped: refreshes not submitted, nothing current to
@@ -5280,7 +5285,8 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
             (gpu_wait_ms_.empty() ? std::string("-") : Number(*Median(gpu_wait_ms_), 1)) + "/" +
             std::to_string(delta(&Totals::gpu_wait_timeouts)) +
             (gpu_gate_enabled_ && gpu_gate_armed_ ? "" : gpu_gate_enabled_ ? " (not armed)" : " (off)") +
-            ", endCallMs=" + MedianAndMax(end_call_ms_) + ", synthLockMs=" + MedianAndMax(synth_lock_ms_) +
+            ", endCallMs=" + MedianAndMax(end_call_ms_) + ", runtimeEndMs=" + MedianAndMax(runtime_end_ms_) +
+            ", synthLockMs=" + MedianAndMax(synth_lock_ms_) +
             (jit_ ? ", justInTime=1, covers=" + std::to_string(jit_covers_) + ", unwritten=" +
                         std::to_string(delta(&Totals::unwritten_wait)) + "/" +
                         std::to_string(delta(&Totals::unwritten_failed)) + "/" +
@@ -5310,6 +5316,7 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
     ofa_ms_.clear();
     gpu_wait_ms_.clear();
     end_call_ms_.clear();
+    runtime_end_ms_.clear();
     synth_lock_ms_.clear();
     pause_longest_ms_ = 0.0;
     app_work_ms_ = 0.0;

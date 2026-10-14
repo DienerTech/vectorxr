@@ -1486,10 +1486,12 @@ class FrameGenPresenter {
     // a real frame moved at its first refresh needs that much more lead.
     double analysis_lag_ms_{0.0};
     // Since the last summary: game waits held for its GPU, the game's
-    // xrEndFrame time in EndFrame, the presenter thread's wait for the GPU
-    // lock to write a frame, and the longest pause, milliseconds.
+    // xrEndFrame time in EndFrame, the runtime's xrEndFrame time for frames
+    // submitted (RuntimeEnd), the presenter thread's wait for the GPU lock to
+    // write a frame, and the longest pause, milliseconds.
     std::vector<double> gpu_wait_ms_;
     std::vector<double> end_call_ms_;
+    std::vector<double> runtime_end_ms_;
     std::vector<double> synth_lock_ms_;
     double pause_longest_ms_{0.0};
     std::uint32_t logged_pauses_{0};

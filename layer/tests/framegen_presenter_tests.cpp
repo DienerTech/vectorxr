@@ -4798,7 +4798,8 @@ void TestTelemetryWindows() {
     Check(!inline_lines.empty(), "telemetry: summaries while standing by");
     for (const char* field : {"appFps=", "outputFps=", "distinctFps=", "standbyS=", "generated=+", "copiesSkipped=",
                               "lateReal=", "gpuWaits=", "captureDoneMs=", "analysisMs=", "measureLagMs=", "ofaMs=",
-                              "gpuStartMs=", "gpuDoneMs=", "endCallMs=", "synthLockMs=", "unwritten=", "unready=", "pauses=",
+                              "gpuStartMs=", "gpuDoneMs=", "endCallMs=", "runtimeEndMs=", "synthLockMs=", "unwritten=",
+                              "unready=", "pauses=",
                               "leadSlots=", "leadFloor=", "leadMoves=+", "leadProbes=", "leadUndone=",
                               "dynamic=engaged (the game ran at"}) {
         Check(threaded.back().find(field) != std::string::npos,
