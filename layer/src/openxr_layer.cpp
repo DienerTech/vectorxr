@@ -5741,7 +5741,12 @@ void OpenXrLayer::ConfigureTurboExperiment() {
         turbo_pacing_resolved_ = false;
         turbo_pacing_verdict_pending_ = false;
     }
-    logger_.Info("Turbo session settings: application=" + current_exe_name_ +
+    // After "Turbo yields to Frame Generation" (xrCreateSession), these are
+    // settings the session does not use; say so rather than list them as live.
+    logger_.Info(std::string(turbo_yielded_to_framegen_
+                                 ? "Turbo session settings (unused: Frame Generation paces this session): "
+                                 : "Turbo session settings: ") +
+        "application=" + current_exe_name_ +
         ", profile=" + resolved_settings_.turbo.profile_name +
         ", experimental=" + std::to_string(turbo_experiment_.enabled) +
         ", waitForSubmit=" + std::to_string(turbo_experiment_.wait_for_submit) +
@@ -7496,30 +7501,41 @@ void OpenXrLayer::RecordFramePacing(std::chrono::steady_clock::time_point frame_
             stream << ", pacing=" << ToString(turbo_pacing_mode_);
         }
         stream << ", endFrameDelta avg/max=" << FormatDiagnosticDouble(pacing_delta_sum_ms_ / pacing_frames_)
-               << "/" << FormatDiagnosticDouble(pacing_delta_max_ms_)
-               << "ms, preRuntimeEndFrame avg/max="
-               << FormatDiagnosticDouble(pacing_drain_sum_ms_ / pacing_frames_) << "/"
-               << FormatDiagnosticDouble(pacing_drain_max_ms_)
-               << "ms, runtimeEndFrame avg/max=" << FormatDiagnosticDouble(pacing_end_sum_ms_ / pacing_frames_)
-               << "/" << FormatDiagnosticDouble(pacing_end_max_ms_) << "ms, runtimeWaitFrame avg/max=";
-        if (wait_samples > 0) {
-            stream << FormatDiagnosticDouble(wait_sum_ms / wait_samples) << "/"
-                   << FormatDiagnosticDouble(wait_max_ms) << "ms over " << wait_samples << " calls";
+               << "/" << FormatDiagnosticDouble(pacing_delta_max_ms_) << "ms";
+        if (framegen_owns_pacing_.load(std::memory_order_acquire)) {
+            // The game's xrEndFrame ends in Frame Generation, which paces it:
+            // that time is FG holding the game to its rate, not a runtime
+            // stall, and Turbo's waits, handoffs and display-time checks do
+            // not run.
+            stream << ", framegen=1, frameGenEndFrame avg/max="
+                   << FormatDiagnosticDouble(pacing_end_sum_ms_ / pacing_frames_) << "/"
+                   << FormatDiagnosticDouble(pacing_end_max_ms_) << "ms";
         } else {
-            stream << "n/a";
-        }
-        stream << ", fabricatedWaits=" << fabricated_waits;
-        if (turbo_pacing_mode_ == TurboPacingMode::kAsync || async_handoff_armed > 0) {
-            stream << ", asyncHandoff active/armed/waits/begins/secondPollBlocks/cancels="
-                   << (async_handoff_active ? 1 : 0) << "/" << async_handoff_armed << "/"
-                   << async_handoff_waits << "/" << async_handoff_begins << "/"
-                   << async_handoff_second_poll_blocks << "/" << async_handoff_cancellations;
-        }
-        if (submit_delta_samples > 0) {
-            stream << ", submittedDisplayTimeVsLatestWait avg/min/max="
-                   << FormatDiagnosticDouble(submit_delta_sum_periods / submit_delta_samples) << "/"
-                   << FormatDiagnosticDouble(submit_delta_min_periods) << "/"
-                   << FormatDiagnosticDouble(submit_delta_max_periods) << " periods";
+            stream << ", preRuntimeEndFrame avg/max="
+                   << FormatDiagnosticDouble(pacing_drain_sum_ms_ / pacing_frames_) << "/"
+                   << FormatDiagnosticDouble(pacing_drain_max_ms_)
+                   << "ms, runtimeEndFrame avg/max=" << FormatDiagnosticDouble(pacing_end_sum_ms_ / pacing_frames_)
+                   << "/" << FormatDiagnosticDouble(pacing_end_max_ms_) << "ms, runtimeWaitFrame avg/max=";
+            if (wait_samples > 0) {
+                stream << FormatDiagnosticDouble(wait_sum_ms / wait_samples) << "/"
+                       << FormatDiagnosticDouble(wait_max_ms) << "ms over " << wait_samples << " calls";
+            } else {
+                stream << "n/a";
+            }
+            stream << ", fabricatedWaits=" << fabricated_waits;
+            // Only where a handoff can arm: an engaged async pipeline.
+            if ((turbo_engaged && turbo_pacing_mode_ == TurboPacingMode::kAsync) || async_handoff_armed > 0) {
+                stream << ", asyncHandoff active/armed/waits/begins/secondPollBlocks/cancels="
+                       << (async_handoff_active ? 1 : 0) << "/" << async_handoff_armed << "/"
+                       << async_handoff_waits << "/" << async_handoff_begins << "/"
+                       << async_handoff_second_poll_blocks << "/" << async_handoff_cancellations;
+            }
+            if (submit_delta_samples > 0) {
+                stream << ", submittedDisplayTimeVsLatestWait avg/min/max="
+                       << FormatDiagnosticDouble(submit_delta_sum_periods / submit_delta_samples) << "/"
+                       << FormatDiagnosticDouble(submit_delta_min_periods) << "/"
+                       << FormatDiagnosticDouble(submit_delta_max_periods) << " periods";
+            }
         }
         logger_.Debug(stream.str());
     } else {

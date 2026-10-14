@@ -147,6 +147,25 @@ class TurboFrameTestPeer {
             capturing ? TurboMetricsMode::kAlways : TurboMetricsMode::kOff, {}, true, 0);
     }
     static void ResetMetrics() { Layer().ResetTurboMetricsState(); }
+    // xrBeginSession's Turbo settings line, in a session Turbo yielded to FG.
+    static void SessionSettingsAfterYield() {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.turbo_yielded_to_framegen_ = true;
+        layer.ConfigureTurboExperiment();
+        layer.turbo_yielded_to_framegen_ = false;
+    }
+    // Two frames five seconds apart: the second ends a pacing window.
+    static void PacingWindow(bool framegen_owns_pacing, bool turbo_engaged) {
+        auto& layer = Layer();
+        layer.framegen_owns_pacing_.store(framegen_owns_pacing);
+        layer.pacing_window_start_.reset();
+        layer.pacing_last_end_time_.reset();
+        const auto start = std::chrono::steady_clock::now();
+        layer.RecordFramePacing(start, start, start + 1ms, turbo_engaged);
+        layer.RecordFramePacing(start + 6s, start + 6s, start + 6s + 70ms, turbo_engaged);
+        layer.framegen_owns_pacing_.store(false);
+    }
     // Binding-gated metrics capture, started by a press.
     static void ArmMetricsBinding() {
         auto& layer = Layer();
@@ -2184,6 +2203,39 @@ void TestMetricsBindingResetWaitsForTheFrameThread() {
            "The frame thread did not apply the reset a metrics setting change asked for");
 }
 
+// The debug "Frame pacing" line read FG's game-facing xrEndFrame (FG holding
+// the game to its rate, 59-118 ms in MSFS) as runtimeEndFrame, a runtime
+// stall, and printed Turbo's async handoff counters with Turbo off.
+void TestFramePacingLineUnderFrameGen() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    const auto directory = std::filesystem::temp_directory_path() /
+                           ("vxr-pacing-line-" + std::to_string(GetCurrentProcessId()));
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    depthxr::TurboFrameTestPeer::StartRecorder(directory / "pacing.log");
+    depthxr::TurboFrameTestPeer::PacingWindow(true, false);
+    std::string text = depthxr::TurboFrameTestPeer::Log();
+    Expect(text.find("framegen=1, frameGenEndFrame avg/max=") != std::string::npos,
+           "Under Frame Generation the pacing line should name FG's xrEndFrame");
+    Expect(text.find("runtimeEndFrame") == std::string::npos && text.find("asyncHandoff") == std::string::npos,
+           "Under Frame Generation the pacing line printed Turbo's runtime fields");
+    depthxr::TurboFrameTestPeer::PacingWindow(false, false);
+    text = depthxr::TurboFrameTestPeer::Log();
+    Expect(text.find("runtimeEndFrame avg/max=") != std::string::npos && text.find("asyncHandoff") == std::string::npos,
+           "With Turbo off the pacing line should keep the runtime's fields and leave out async handoffs");
+    depthxr::TurboFrameTestPeer::PacingWindow(false, true);
+    text = depthxr::TurboFrameTestPeer::Log();
+    Expect(text.find("asyncHandoff") != std::string::npos, "An engaged async pipeline should report its handoffs");
+    depthxr::TurboFrameTestPeer::SessionSettingsAfterYield();
+    text = depthxr::TurboFrameTestPeer::Log();
+    Expect(text.find("Turbo session settings (unused: Frame Generation paces this session): application=") !=
+               std::string::npos,
+           "After Turbo yielded to Frame Generation, its session settings were logged as if in use");
+    depthxr::TurboFrameTestPeer::EndRecorder();
+    std::filesystem::remove_all(directory, error);
+}
+
 std::size_t Occurrences(const std::string& text, const std::string& needle) {
     std::size_t count = 0;
     for (std::size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + needle.size())) {
@@ -2441,6 +2493,7 @@ int main() {
     TestRecoveryBlockLogsWhatTurboDoes();
     TestDestroySessionRecordsUntilTheSessionIsGone();
     TestMetricsBindingResetWaitsForTheFrameThread();
+    TestFramePacingLineUnderFrameGen();
     std::cout << "depthxr_turbo_frame_tests passed\n";
     return 0;
 }
