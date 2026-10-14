@@ -13782,6 +13782,7 @@ void OpenXrLayer::ResetD3D11FocusSharpen() {
         }
         target = {};
     }
+    d3d11_focus_sharpen_.failed_shapes = {};
     SafeRelease(d3d11_focus_sharpen_.constants);
     SafeRelease(d3d11_focus_sharpen_.sampler);
     SafeRelease(d3d11_focus_sharpen_.pixel_shader);
@@ -13887,15 +13888,33 @@ bool OpenXrLayer::EnsureFocusSharpenTarget(QuadViewsCompositionTarget& target,
         target.format == format && !target.image_render_target_views.empty()) {
         return true;
     }
+    // A target that could not be built is tried again only for another size
+    // or format: not a runtime swapchain created and destroyed, and an error
+    // logged, for each eye on every frame.
+    const size_t target_index = static_cast<size_t>(&target - d3d11_focus_sharpen_.targets.data());
+    auto& failed_shape = d3d11_focus_sharpen_.failed_shapes[target_index];
+    if (failed_shape && failed_shape->width == width && failed_shape->height == height &&
+        failed_shape->format == format) {
+        return false;
+    }
 
     // Recreate on any size/format change.
-    SafeReleaseVector(target.image_render_target_views);
-    SafeRelease(target.render_target_view);
-    SafeRelease(target.render_texture);
-    if (target.swapchain != XR_NULL_HANDLE && next_destroy_swapchain_) {
-        DestroyLayerSwapchain(target.swapchain);
-    }
-    target = {};
+    const auto release_target = [&]() {
+        SafeReleaseVector(target.image_render_target_views);
+        SafeRelease(target.render_target_view);
+        SafeRelease(target.render_texture);
+        if (target.swapchain != XR_NULL_HANDLE && next_destroy_swapchain_) {
+            DestroyLayerSwapchain(target.swapchain);
+        }
+        target = {};
+    };
+    release_target();
+    // A failure leaves no half-built target behind, and is remembered.
+    const auto fail = [&]() {
+        release_target();
+        failed_shape = D3D11FocusSharpen::TargetShape{width, height, format};
+        return false;
+    };
 
     XrSwapchainCreateInfo create_info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
     create_info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
@@ -13910,8 +13929,8 @@ bool OpenXrLayer::EnsureFocusSharpenTarget(QuadViewsCompositionTarget& target,
     if (XR_FAILED(result) || target.swapchain == XR_NULL_HANDLE) {
         logger_.Error("D3D11 focus sharpen output swapchain creation failed: result=" +
                       FormatHex(static_cast<uint64_t>(result)));
-        target = {};
-        return false;
+        target.swapchain = XR_NULL_HANDLE;
+        return fail();
     }
 
     framegen_.TrackSwapchain(target.swapchain, format, 1, create_info.usageFlags);
@@ -13919,7 +13938,7 @@ bool OpenXrLayer::EnsureFocusSharpenTarget(QuadViewsCompositionTarget& target,
     result = next_enumerate_swapchain_images_(target.swapchain, 0, &image_count, nullptr);
     if (XR_FAILED(result) || image_count == 0) {
         logger_.Error("D3D11 focus sharpen output image count query failed.");
-        return false;
+        return fail();
     }
     std::vector<XrSwapchainImageD3D11KHR> images(image_count);
     for (XrSwapchainImageD3D11KHR& image : images) {
@@ -13929,7 +13948,7 @@ bool OpenXrLayer::EnsureFocusSharpenTarget(QuadViewsCompositionTarget& target,
         target.swapchain, image_count, &image_count, reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data()));
     if (XR_FAILED(result)) {
         logger_.Error("D3D11 focus sharpen output image enumeration failed.");
-        return false;
+        return fail();
     }
 
     target.width = width;
@@ -13947,11 +13966,11 @@ bool OpenXrLayer::EnsureFocusSharpenTarget(QuadViewsCompositionTarget& target,
         if (FAILED(hr)) {
             logger_.Error("D3D11 focus sharpen output RTV creation failed: hr=" +
                           FormatHex(static_cast<uint32_t>(hr)));
-            SafeReleaseVector(target.image_render_target_views);
-            return false;
+            return fail();
         }
         target.image_render_target_views.push_back(rtv);
     }
+    failed_shape.reset();
     return true;
 }
 

@@ -119,6 +119,25 @@ XrResult XRAPI_CALL Poll(XrInstance, XrEventDataBuffer* out) {
     if (!event_pending) return XR_EVENT_UNAVAILABLE;
     *out = event; event_pending = false; return XR_SUCCESS;
 }
+// A stand-in runtime for Varjo focus sharpening's output swapchains.
+int sharpen_creates = 0, sharpen_destroys = 0, sharpen_acquires = 0, sharpen_waits = 0, sharpen_releases = 0;
+uint32_t sharpen_next_image = 0;
+XrResult sharpen_wait_result = XR_SUCCESS;
+XrResult XRAPI_CALL CreateSwapchain(XrSession, const XrSwapchainCreateInfo*, XrSwapchain* out) {
+    ++sharpen_creates; *out = Handle<XrSwapchain>(300); return XR_SUCCESS;
+}
+// Images with no texture (the layer's zeroed structures): with no device, no
+// render target view can be made for them.
+XrResult XRAPI_CALL EnumerateImages(XrSwapchain, uint32_t, uint32_t* count, XrSwapchainImageBaseHeader*) {
+    *count = 3;
+    return XR_SUCCESS;
+}
+XrResult XRAPI_CALL DestroySwapchain(XrSwapchain) { ++sharpen_destroys; return XR_SUCCESS; }
+XrResult XRAPI_CALL AcquireImage(XrSwapchain, const XrSwapchainImageAcquireInfo*, uint32_t* index) {
+    ++sharpen_acquires; *index = sharpen_next_image++ % 3; return XR_SUCCESS;
+}
+XrResult XRAPI_CALL WaitImage(XrSwapchain, const XrSwapchainImageWaitInfo*) { ++sharpen_waits; return sharpen_wait_result; }
+XrResult XRAPI_CALL ReleaseImage(XrSwapchain, const XrSwapchainImageReleaseInfo*) { ++sharpen_releases; return XR_SUCCESS; }
 auto& Layer() { return depthxr::OpenXrLayer::Instance(); }
 void MakeAction(XrAction action, XrActionSet set = app_set) {
     app_created_action = action;
@@ -220,6 +239,27 @@ public:
         info.quadviews_session = true;
         info.d3d11_images.push_back(nullptr);
         Layer().tracked_swapchains_[Handle<XrSwapchain>(handle)] = std::move(info);
+    }
+    // Varjo focus sharpening's left output target, against the stand-in runtime.
+    static void SharpenRuntime() {
+        auto& l = Layer();
+        l.next_create_swapchain_ = &CreateSwapchain;
+        l.next_enumerate_swapchain_images_ = &EnumerateImages;
+        l.next_destroy_swapchain_ = &DestroySwapchain;
+        l.next_acquire_swapchain_image_ = &AcquireImage;
+        l.next_wait_swapchain_image_ = &WaitImage;
+        l.next_release_swapchain_image_ = &ReleaseImage;
+        sharpen_creates = sharpen_destroys = sharpen_acquires = sharpen_waits = sharpen_releases = 0;
+        sharpen_next_image = 0;
+        sharpen_wait_result = XR_SUCCESS;
+        SharpenReset();
+    }
+    static void SharpenReset() {
+        Layer().d3d11_focus_sharpen_.targets = {};
+        Layer().d3d11_focus_sharpen_.failed_shapes = {};
+    }
+    static bool SharpenTarget(uint32_t width, uint32_t height) {
+        return Layer().EnsureFocusSharpenTarget(Layer().d3d11_focus_sharpen_.targets[0], width, height, 29);
     }
     // The swapchains the compositor prewarm takes as its four inputs.
     static std::set<uintptr_t> PrewarmInputs() {
@@ -380,6 +420,17 @@ int main() {
         Peer::Track(Mode::Eye); Peer::Track(Mode::Head); Peer::Track(Mode::Eye); runtime_gaze_active = true;
         Expect(!Peer::Ready() && !Peer::Gaze() && attachments == 1 && suggestions == 1 && runtime_sets.size() == 1,
                "Head -> Eye after an attachment without gaze must not create an unattachable set");
+
+        // Varjo focus sharpening: an output target that cannot be built
+        // (here: no device for its render target views) leaves no runtime
+        // swapchain behind and is not rebuilt every frame; a new size is.
+        Peer::Prepare(); Peer::SharpenRuntime();
+        Expect(!Peer::SharpenTarget(1000, 800) && sharpen_creates == 1 && sharpen_destroys == 1,
+               "a sharpen target that cannot be built must leave no swapchain behind");
+        Expect(!Peer::SharpenTarget(1000, 800) && sharpen_creates == 1 && sharpen_destroys == 1,
+               "a sharpen target must not be rebuilt every frame for the same size and format");
+        Expect(!Peer::SharpenTarget(1200, 800) && sharpen_creates == 2, "a new size must be tried again");
+        Peer::SharpenReset();
 
         // Without XR_EXT_eye_gaze_interaction downstream, a switch to Eye says
         // once that gaze is unavailable; settings reloads that keep Eye tracked

@@ -371,6 +371,14 @@ class OpenXrLayer {
         uint32_t consecutive_skipped_frames{0};
         uint32_t failure_logs_remaining{8};
         std::array<QuadViewsCompositionTarget, 2> targets;
+        // The size and format each target could not be built for
+        // (EnsureFocusSharpenTarget): not tried again until they change.
+        struct TargetShape {
+            uint32_t width{0};
+            uint32_t height{0};
+            int64_t format{0};
+        };
+        std::array<std::optional<TargetShape>, 2> failed_shapes;
     };
 
     struct PivotDiagnosticState {
