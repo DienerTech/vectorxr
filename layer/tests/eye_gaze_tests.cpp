@@ -532,8 +532,8 @@ int main() {
 
         // Visibility masks in emulated quad views: a peripheral view gets its
         // eye's mask from the runtime; a focus view gets one that hides
-        // nothing (its eye's, applied in the focus view's own coordinates,
-        // would cut a never-drawn ring around the inset).
+        // nothing (a precaution against a game that applies its eye's mask
+        // in the focus view's own coordinates).
         Peer::Prepare();
         mask_queries = 0;
         XrVisibilityMaskKHR mask{XR_TYPE_VISIBILITY_MASK_KHR};

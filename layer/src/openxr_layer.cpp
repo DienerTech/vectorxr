@@ -3745,13 +3745,16 @@ XrResult OpenXrLayer::GetVisibilityMaskKHR(XrSession session,
                                    ? 1u << (view_index * 4 + static_cast<uint32_t>(visibility_mask_type))
                                    : 0u;
     if (synthesize_quad && view_index >= 2 && view_index < 4) {
-        // A focus view lies inside its eye's view, away from the lens edge
-        // its eye's mask covers: nothing of it is hidden. It is not given its
-        // eye's mask, which is right only drawn through the focus view's own
-        // projection, which moves with the gaze every frame: applied in the
-        // view's normalized coordinates (or with a stale projection), it cuts
-        // a ring around the focus view that is never drawn, and the compositor
-        // blends that ring into the transition band.
+        // A focus view lies inside its eye's view. Its eye's mask (the lens
+        // edge, in view-space tangents) drawn through the focus view's own
+        // projection, as specified, hides nothing of it until the focus view
+        // reaches the lens edge, and then only pixels the lens hides anyway.
+        // So it is given a mask that hides nothing: the same picture for a
+        // game that applies masks as specified, and no never-drawn region for
+        // one that applies them otherwise (in the view's own normalized
+        // coordinates, say). A precaution: no game is known to do that, and
+        // this mapping (the eye's mask, unchanged since 0.17) is not a
+        // confirmed cause of artifacts around the inset.
         const XrResult result = FocusViewVisibilityMask(visibility_mask_type, visibility_mask);
         if (XR_SUCCEEDED(result) && visibility_mask && visibility_mask->vertexCapacityInput > 0 && shape_bit != 0 &&
             (logged_visibility_mask_shapes_ & shape_bit) == 0) {
