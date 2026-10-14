@@ -6,6 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -2643,8 +2644,49 @@ fn read_turbo_recovery() -> Vec<serde_json::Value> {
     records
 }
 
+// The layer rewrites a live session's status file every second, so a file
+// last written well before the freshness window cannot hold a live session
+// and is not read at all.
+const RUNTIME_STATUS_UNREAD_AGE: Duration =
+    Duration::from_millis(RUNTIME_STATUS_FRESHNESS_MILLISECONDS + 10_000);
+// Status and control files of sessions that ended without OpenXR teardown
+// (every Star Citizen and MSFS exit; a hard shutdown can leave one
+// zero-filled) are deleted once this old. Export Debug still gets recent ones.
+const STALE_RUNTIME_RELAY_FILE_AGE: Duration = Duration::from_secs(3 * 24 * 60 * 60);
+static RUNTIME_RELAY_PRUNED: std::sync::Once = std::sync::Once::new();
+
+fn file_age(metadata: &fs::Metadata) -> Option<Duration> {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+}
+
+fn prune_stale_runtime_relay_files(directory: &Path, max_age: Duration) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if metadata.is_file() && file_age(&metadata).is_some_and(|age| age > max_age) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
 fn read_live_runtime_statuses() -> Vec<RuntimeStatusDocument> {
-    let status_directory = resolve_runtime_relay_root().join("status");
+    let relay = resolve_runtime_relay_root();
+    RUNTIME_RELAY_PRUNED.call_once(|| {
+        for directory in ["status", "control"] {
+            prune_stale_runtime_relay_files(&relay.join(directory), STALE_RUNTIME_RELAY_FILE_AGE);
+        }
+    });
+    read_live_runtime_statuses_in(&relay.join("status"))
+}
+
+fn read_live_runtime_statuses_in(status_directory: &Path) -> Vec<RuntimeStatusDocument> {
     let Ok(entries) = fs::read_dir(status_directory) else {
         return Vec::new();
     };
@@ -2654,6 +2696,14 @@ fn read_live_runtime_statuses() -> Vec<RuntimeStatusDocument> {
         .filter_map(|entry| {
             let path = entry.path();
             if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                return None;
+            }
+            if entry
+                .metadata()
+                .ok()
+                .and_then(|metadata| file_age(&metadata))
+                .is_some_and(|age| age > RUNTIME_STATUS_UNREAD_AGE)
+            {
                 return None;
             }
             let content = fs::read_to_string(&path).ok()?;
@@ -3265,6 +3315,53 @@ mod tests {
         assert_eq!(current.state.framegen_depth, "empty");
         assert!(old.state.framegen_depth.is_empty());
         assert_eq!(current.quadviews_dimensions[0].allocated_width, 1200);
+    }
+
+    #[test]
+    fn runtime_status_polls_skip_and_prune_files_of_ended_sessions() {
+        let root = std::env::temp_dir().join(format!(
+            "vectorxr-relay-prune-{}-{}",
+            std::process::id(),
+            super::unix_milliseconds()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let status = |session: &str| {
+            serde_json::json!({
+                "protocolVersion": super::RUNTIME_RELAY_PROTOCOL_VERSION, "sessionId": session,
+                "processId": 1, "application": "StarCitizen.exe",
+                "updatedAtUnixMilliseconds": super::unix_milliseconds(), "acknowledgedRevision": 0,
+                "capabilities": { "quadviewsDiagnosticVisualization": false },
+                "state": { "quadviewsDiagnosticVisualization": false }
+            })
+            .to_string()
+        };
+        let age = |name: &str, seconds: u64| {
+            let file = std::fs::File::options().write(true).open(root.join(name)).unwrap();
+            file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(seconds))
+                .unwrap();
+        };
+        std::fs::write(root.join("live.json"), status("live")).unwrap();
+        // A file nobody has written for a minute is not even read, whatever
+        // it says inside.
+        std::fs::write(root.join("ended.json"), status("ended")).unwrap();
+        age("ended.json", 60);
+        std::fs::write(root.join("old.json"), status("old")).unwrap();
+        age("old.json", 4 * 24 * 60 * 60);
+        std::fs::write(root.join("zeroed.json"), vec![0u8; 512]).unwrap();
+        age("zeroed.json", 4 * 24 * 60 * 60);
+
+        let live = super::read_live_runtime_statuses_in(&root);
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].session_id, "live");
+
+        super::prune_stale_runtime_relay_files(&root, super::STALE_RUNTIME_RELAY_FILE_AGE);
+        let mut left = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        left.sort();
+        assert_eq!(left, ["ended.json", "live.json"]);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
