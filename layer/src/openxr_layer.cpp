@@ -7712,6 +7712,7 @@ void OpenXrLayer::FlushTurboMetrics(bool final_flush, bool queue_after_pending) 
     session.collection_mode = ToString(turbo_metrics_collection_mode_);
     session.timing_configuration = TurboTimingConfiguration();
     session.live = !final_flush && turbo_metrics_active_.load();
+    session.process_id = GetCurrentProcessId();
     session.started_unix_seconds = turbo_metrics_started_unix_seconds_;
     session.updated_unix_seconds =
         std::chrono::duration_cast<std::chrono::seconds>(

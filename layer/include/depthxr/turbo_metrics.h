@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -49,6 +50,9 @@ struct TurboMetricsSession {
     // True while the session is still running (the layer flushes
     // periodically); the final flush at session teardown clears it.
     bool live{false};
+    // The recording process (0 in files from before 0.19.2): a live session
+    // whose process is gone ended without teardown (Star Citizen, MSFS).
+    std::uint32_t process_id{0};
     std::int64_t started_unix_seconds{0};
     std::int64_t updated_unix_seconds{0};
     std::vector<TurboMetricsBucket> buckets;
@@ -61,8 +65,13 @@ std::filesystem::path ResolveTurboMetricsPath();
 std::vector<TurboMetricsSession> ReadTurboMetricsSessions(const std::filesystem::path& path);
 
 // Upserts by session_id, newest-first, truncating to the retention cap.
+// Other sessions still marked live whose process has exited (a game that
+// skips OpenXR teardown never writes its final flush) are marked ended; one
+// without a process id is ended by a newer session of the same application.
+// `alive` gets a process id and the session's start in Unix milliseconds.
 bool RecordTurboMetricsSession(const std::filesystem::path& path,
                                const TurboMetricsSession& session,
-                               std::string* error);
+                               std::string* error,
+                               const std::function<bool(std::uint32_t, std::uint64_t)>& alive = {});
 
 } // namespace depthxr

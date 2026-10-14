@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <set>
 #include <string>
 #include <thread>
@@ -136,6 +137,42 @@ int main() {
     const auto sessions = depthxr::ReadTurboMetricsSessions(metrics);
     Expect(recorded && sessions.size() == 2, "A briefly scanned turbo-metrics.json should still take the new session");
 #endif
+
+    // Star Citizen and MSFS never send the final metrics flush (live=false):
+    // the app showed their flights in progress forever.
+    {
+        const auto history = root / "metrics-history.json";
+        const auto make = [](const char* id, const char* app, std::uint32_t pid, std::int64_t started) {
+            depthxr::TurboMetricsSession session;
+            session.session_id = id;
+            session.app_name = app;
+            session.process_id = pid;
+            session.live = true;
+            session.started_unix_seconds = started;
+            return session;
+        };
+        std::set<std::uint32_t> dead{1234};
+        std::uint64_t asked_started_ms = 0;
+        const auto alive = [&](std::uint32_t pid, std::uint64_t started_ms) {
+            if (pid == 1234) asked_started_ms = started_ms;
+            return dead.count(pid) == 0;
+        };
+        Expect(depthxr::RecordTurboMetricsSession(history, make("sc-exited", "StarCitizen.exe", 1234, 100), nullptr, alive) &&
+                   depthxr::RecordTurboMetricsSession(history, make("dcs-running", "DCS.exe", 5678, 110), nullptr, alive) &&
+                   depthxr::RecordTurboMetricsSession(history, make("msfs-legacy", "FlightSimulator2024.exe", 0, 120), nullptr, alive) &&
+                   depthxr::RecordTurboMetricsSession(history, make("sc-legacy", "StarCitizen.exe", 0, 90), nullptr, alive),
+               "Metrics sessions should be written");
+        Expect(depthxr::RecordTurboMetricsSession(history, make("sc-next", "StarCitizen.exe", 4321, 200), nullptr, alive),
+               "The next Star Citizen session should be written");
+        std::map<std::string, depthxr::TurboMetricsSession> by_id;
+        for (const auto& session : depthxr::ReadTurboMetricsSessions(history)) by_id[session.session_id] = session;
+        Expect(by_id.size() == 5 && by_id["sc-exited"].process_id == 1234, "Sessions should keep their process id");
+        Expect(!by_id["sc-exited"].live, "A flight whose process exited should be marked ended");
+        Expect(asked_started_ms == 100999, "The liveness check should get the session's start in milliseconds");
+        Expect(by_id["dcs-running"].live && by_id["sc-next"].live, "Running flights should stay live");
+        Expect(!by_id["sc-legacy"].live, "An older live flight of the same game with no process id should be ended");
+        Expect(by_id["msfs-legacy"].live, "Another game's flight with no process id should be left alone");
+    }
 
     std::filesystem::remove_all(root);
     std::cout << "runtime_relay_tests passed\n";
