@@ -70,11 +70,12 @@ void FrameGenTrace::Start(Logger& logger) {
     logger.Info(
         "Frame Generation trace (debug logging): writing " + PathToUtf8(path) +
         " (wait: id=app frame a=predictedDisplayTime b=period c=shouldRender; begin: a=result; "
-        "end: a=displayTime b=layerCount c=projectionViews d=view0 swapchain; end.v0/end.v1: pose; "
-        "acq/rel: id=swapchain a=index b=copied (rel); cap: id=swapchain a=index b=captured; "
+        "end: a=displayTime b=layerCount c=projectionViews d=view0 swapchain e=view1 swapchain; "
+        "end.v0/end.v1: pose; acq/rel (only while frames are generated or about to be): id=swapchain a=index "
+        "b=copied (rel); cap: id=swapchain a=index b=captured c=jobs d=releases e=GPU mark; "
         "keep: id=real frame a=time b=previousTime c=analyzed d=previousAnalyzed e=asIs, keep.v0: its pose; "
         "pick: id=frame shown a=refresh time b=its time c=flags d=fraction*1e6 e=previousTime f=chosen before "
-        "fallback; sub: a=displayTime b=layerCount c=view0 swapchain d=presenter thread, sub.v0/sub.v1: pose).");
+        "fallback; sub: a=displayTime b=layerCount c=view0 swapchain d=view0 image width, sub.v0/sub.v1: pose).");
 }
 
 void FrameGenTrace::Stop() {

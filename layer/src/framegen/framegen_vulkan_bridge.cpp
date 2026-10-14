@@ -18,6 +18,7 @@
 #include <mutex>
 #include <sstream>
 #include <unordered_map>
+#include <utility>
 
 // The Vulkan bridge's GPU parts: the Direct3D 12 device, queue and shared
 // fences, the twins imported into the game's Vulkan device, the submissions on
@@ -45,7 +46,8 @@ constexpr DWORD kRecordingWaitMs = 100;
 // covers it).
 constexpr std::uint32_t kInitialFences = 16;
 constexpr std::uint32_t kMaxFences = 64;
-// Timing samples kept for the summary's percentiles.
+// Timing samples kept for the summary's percentiles: the most recent ones
+// (about 3.7 s of submits). Each summary's maximum covers its whole window.
 constexpr std::size_t kTimingSamples = 1024;
 
 std::string Hex(std::uint64_t value) {
@@ -190,7 +192,8 @@ double Percentile(std::vector<double> samples, double fraction) {
     return samples[at];
 }
 
-void AddSample(std::vector<double>& samples, std::size_t& next, double value) {
+void AddSample(std::vector<double>& samples, std::size_t& next, double& window_max, double value) {
+    window_max = std::max(window_max, value);
     if (samples.size() < kTimingSamples) {
         samples.push_back(value);
     } else {
@@ -424,6 +427,9 @@ struct VulkanBridge::Impl {
     std::size_t next_submit_sample{0};
     std::vector<double> copy_gpu_us;
     std::size_t next_copy_sample{0};
+    // Since the last summary.
+    double submit_us_window_max{0.0};
+    double copy_gpu_us_window_max{0.0};
     std::function<void(const std::string&)> log;
     std::function<void(const std::string&)> info_log;
 
@@ -592,7 +598,7 @@ struct VulkanBridge::Impl {
         const VkFence fence = TakeFence();
         const auto start = std::chrono::steady_clock::now();
         const VkResult result = vk.vkQueueSubmit(game_queue, 1, &submit, fence);
-        AddSample(submit_us, next_submit_sample,
+        AddSample(submit_us, next_submit_sample, submit_us_window_max,
                   std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count());
         if (result != VK_SUCCESS) {
             if (fence) {
@@ -655,7 +661,7 @@ struct VulkanBridge::Impl {
             const UINT64 begin = chain.stamp_data[copy.query];
             const UINT64 end = chain.stamp_data[copy.query + 1];
             if (end >= begin && timestamp_frequency) {
-                AddSample(copy_gpu_us, next_copy_sample,
+                AddSample(copy_gpu_us, next_copy_sample, copy_gpu_us_window_max,
                           static_cast<double>(end - begin) * 1e6 / static_cast<double>(timestamp_frequency));
             }
         }
@@ -2287,11 +2293,13 @@ std::string VulkanBridge::Summary() const {
            << ", doneWaits=" << impl_->done_waits << ", unmatchedReleases=" << impl_->unmatched_releases
            << ", submits=" << impl_->submits << ", failedSubmits=" << impl_->failed_submits
            << ", submitUs p50/max=" << whole(Percentile(impl_->submit_us, 0.5)) << "/"
-           << whole(Percentile(impl_->submit_us, 1.0)) << ", liveFences=" << impl_->fence_count
+           << whole(std::exchange(impl_->submit_us_window_max, 0.0)) << ", liveFences=" << impl_->fence_count
            << ", fenceGrowth=" << impl_->fence_growth << ", unfencedSubmits=" << impl_->unfenced_submits
            << ", semaphores=" << (impl_->timeline ? "timeline" : "binary")
            << ", copyGpuUs p50/p99=" << whole(Percentile(impl_->copy_gpu_us, 0.5)) << "/"
-           << whole(Percentile(impl_->copy_gpu_us, 0.99)) << ", writtenValue=" << impl_->written_value
+           << whole(Percentile(impl_->copy_gpu_us, 0.99))
+           << ", copyGpuUsMax=" << whole(std::exchange(impl_->copy_gpu_us_window_max, 0.0))
+           << ", writtenValue=" << impl_->written_value
            << ", doneValue=" << impl_->done_value
            << ", doneCompleted=" << (impl_->done ? impl_->done->GetCompletedValue() : 0)
            << ", secondThread=" << (impl_->reported_second_thread ? "yes" : "no")

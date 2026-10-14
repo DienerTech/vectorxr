@@ -3,16 +3,43 @@
 #include "depthxr/settings_resolver.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <iostream>
+#include <new>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
+
+// Counts this executable's heap allocations while a scenario measures a call.
+namespace {
+std::atomic<bool> g_counting_allocations{false};
+std::atomic<std::size_t> g_allocations{0};
+} // namespace
+
+void* operator new(std::size_t size) {
+    if (g_counting_allocations.load(std::memory_order_relaxed)) {
+        g_allocations.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (void* memory = std::malloc(size == 0 ? 1 : size)) {
+        return memory;
+    }
+    throw std::bad_alloc();
+}
+
+void operator delete(void* memory) noexcept {
+    std::free(memory);
+}
+
+void operator delete(void* memory, std::size_t) noexcept {
+    std::free(memory);
+}
 
 // Scenario tests for Snap Views and their interplay with Enhanced Motion.
 // Every scenario drives the real xrLocateViews (Pivot drive) and xrLocateSpace
@@ -202,6 +229,8 @@ struct FakeRuntime {
         std::memcpy(buffer, &pending_change, sizeof(pending_change));
         return XR_SUCCESS;
     }
+
+    static XrResult XRAPI_CALL EndFrame(XrSession, const XrFrameEndInfo*) { return XR_SUCCESS; }
 };
 
 depthxr::InputBinding Key(const char* name) {
@@ -318,7 +347,11 @@ public:
     }
 
     static void SetActivation(size_t profile, bool down) {
-        Layer().pivotxr_profile_input_states_[profile].activation[0].down_cached = down;
+        SetActivation(profile, 0, down);
+    }
+
+    static void SetActivation(size_t profile, size_t binding, bool down) {
+        Layer().pivotxr_profile_input_states_[profile].activation[binding].down_cached = down;
     }
 
     static void SetSnap(size_t profile, size_t view, bool down) {
@@ -405,6 +438,84 @@ public:
         Expect(layer.PollEvent(XR_NULL_HANDLE, &buffer) == XR_SUCCESS, "Recenter event must pass through");
         layer.next_poll_event_ = nullptr;
     }
+
+    template <typename Call>
+    static std::size_t CountAllocations(Call&& call) {
+        g_allocations.store(0);
+        g_counting_allocations.store(true);
+        call();
+        g_counting_allocations.store(false);
+        return g_allocations.load();
+    }
+
+    // Depth's stereo boost with Depth Lock, so xrLocateViews also caches
+    // the frame's submission geometry.
+    static void EnableAnchoredDepth() {
+        auto& settings = Layer().resolved_settings_.depthxr;
+        settings.enabled = true;
+        settings.stereo_boost = 1.2;
+        settings.depth_anchor = true;
+    }
+
+    struct FrameAllocations {
+        std::size_t locate_views{0};
+        std::size_t locate_space{0};
+        bool depth_cached{false};
+    };
+
+    // One frame as an application makes it: xrLocateViews for a new
+    // displayTime, three xrLocateSpace calls for it, then xrEndFrame's
+    // pruning of the per-frame caches.
+    static FrameAllocations LocateFrame() {
+        auto& layer = Layer();
+        if (layer.pivotxr_last_smoothing_wall_time_.has_value()) {
+            layer.pivotxr_last_smoothing_wall_time_ =
+                std::chrono::steady_clock::now() - std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                                       std::chrono::duration<double>(kFrameSeconds));
+        }
+        display_time += kFrameNanoseconds;
+        XrViewLocateInfo info{XR_TYPE_VIEW_LOCATE_INFO};
+        info.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+        info.displayTime = display_time;
+        info.space = kLocalSpace;
+        XrViewState state{XR_TYPE_VIEW_STATE};
+        XrView views[2]{{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};
+        uint32_t count = 0;
+        XrResult views_result = XR_ERROR_RUNTIME_FAILURE;
+        FrameAllocations allocations;
+        allocations.locate_views = CountAllocations(
+            [&] { views_result = layer.LocateViews(kSession, &info, &state, 2, &count, views); });
+        Expect(views_result == XR_SUCCESS && count == 2, "xrLocateViews must succeed");
+        allocations.depth_cached = !layer.cached_depth_submission_geometry_.empty();
+        for (int call = 0; call < 3; ++call) {
+            XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
+            XrResult space_result = XR_ERROR_RUNTIME_FAILURE;
+            allocations.locate_space += CountAllocations(
+                [&] { space_result = layer.LocateSpace(kViewSpace, kLocalSpace, display_time, &location); });
+            Expect(space_result == XR_SUCCESS, "xrLocateSpace must succeed");
+        }
+        layer.PrunePivotPoseDeltas(display_time);
+        layer.PruneDepthSubmissionGeometry(display_time);
+        layer.PruneQuadViewsFrames(display_time);
+        return allocations;
+    }
+
+    // xrEndFrame with no layers for `time`, through a runtime that takes it.
+    static void EndFrameAt(XrTime time) {
+        auto& layer = Layer();
+        layer.next_end_frame_ = &FakeRuntime::EndFrame;
+        layer.turbo_frame_interception_required_.store(false, std::memory_order_release);
+        XrFrameEndInfo info{XR_TYPE_FRAME_END_INFO};
+        info.displayTime = time;
+        info.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+        Expect(layer.EndFrame(kSession, &info) == XR_SUCCESS, "xrEndFrame must succeed");
+    }
+
+    // A pose-delta continuity miss was logged and its run has not recovered.
+    static bool ContinuityMissReported() { return Layer().pivotxr_pose_delta_miss_logged_; }
+
+    static std::size_t PendingReferenceChanges() { return Layer().pivotxr_reference_changes_.size(); }
+    static void DisablePivot() { Layer().resolved_settings_.pivotxr.enabled = false; }
 
     static bool SnapSelected() { return Layer().pivotxr_quick_view_active_; }
     static bool SnapEffectActive() {
@@ -1149,6 +1260,122 @@ void PerDirectionDeadzoneTransitionShapesTheExtraAngle() {
     ExpectViewYaw(Peer::Drive(), -12.0, "Yaw Right without a transition must keep the hard deadzone");
 }
 
+// xrLocateSpace runs several times per frame and xrLocateViews at least
+// once, both under the layer's lock. Once frames are steady neither may
+// allocate: two motion profiles sharing a Nudge Set, a Snap Views profile
+// and anchored depth exercise every per-call list and per-frame cache.
+void SteadyLocatesDoNotAllocate() {
+    auto flight = Motion("Flight", Toggle("F1"), true);
+    auto second = Motion("Second", Hold("F4"), false);
+    AddYawLeftNudge(flight, "shared-cockpit-nudge-set", "F6");
+    AddYawLeftNudge(second, "shared-cockpit-nudge-set", "F6");
+    Peer::Start({flight, Snaps({View("Right", 90.0, Hold("F2"))}), second});
+    Peer::EnableAnchoredDepth();
+    EngageFlight();
+    Peer::Head(12.0);
+    for (int frame = 0; frame < 40; ++frame) {
+        const Peer::FrameAllocations allocations = Peer::LocateFrame();
+        Expect(allocations.depth_cached, "Anchored depth must cache the frame's submission geometry");
+        // The first frames size the reused storage.
+        if (frame < 5) {
+            continue;
+        }
+        Expect(allocations.locate_views == 0,
+               "A steady xrLocateViews made " + std::to_string(allocations.locate_views) + " heap allocations");
+        Expect(allocations.locate_space == 0,
+               "Three steady xrLocateSpace calls made " + std::to_string(allocations.locate_space) +
+                   " heap allocations");
+    }
+}
+
+// Runtime recenters reach Pivot only while it is on, and an idle Pivot
+// consumes them as frames pass them instead of queueing them until the next
+// engagement (the queue filled to 16 and then dropped every later recenter).
+void RecentersDoNotQueueWhileIdleOrOff() {
+    Peer::Start({Motion("Flight", Toggle("F1"), true)});
+    for (int recenter = 0; recenter < 20; ++recenter) {
+        Peer::Recenter(Peer::Now() + kFrameNanoseconds);
+        Peer::Drive();
+        Peer::Drive();
+    }
+    Expect(Peer::PendingReferenceChanges() == 0, "An idle Pivot left " +
+                                                     std::to_string(Peer::PendingReferenceChanges()) +
+                                                     " passed recenters queued");
+    EngageFlight();
+    Peer::Head(12.0);
+    ExpectViewYaw(Peer::Drive(), 24.0, "Motion must work after recenters while idle");
+
+    Peer::Start({Motion("Flight", Toggle("F1"), true)});
+    Peer::DisablePivot();
+    Peer::Recenter(Peer::Now() + kFrameNanoseconds);
+    Expect(Peer::PendingReferenceChanges() == 0, "A recenter was queued for Pivot while it is off");
+}
+
+// A Toggle latch belongs to the engaged profile only. Toggling another
+// profile on and off again must not leave the first profile latched, or its
+// Hold binding would keep it engaged after release.
+void HoldAfterAnotherProfileToggledReleases() {
+    depthxr::PivotXrResolvedProfile flight = Motion("Flight", Toggle("F1"), false, 0.0);
+    flight.activation_bindings.push_back(Hold("F3"));
+    Peer::Start({flight, Motion("Second", Toggle("F4"), false, 0.0)});
+    const auto tap = [](size_t profile) {
+        Peer::TapActivation(profile);
+        Peer::Drive(0.0);
+    };
+    tap(0);
+    Expect(Peer::Engaged() && Peer::MotionOwner() == 0, "Flight's Toggle must engage it");
+    tap(1);
+    Expect(Peer::Engaged() && Peer::MotionOwner() == 1, "Second's Toggle must take over");
+    tap(1);
+    Expect(!Peer::Engaged(), "Second's Toggle must release it again");
+
+    Peer::SetActivation(0, 1, true);
+    Peer::Drive(0.0);
+    Expect(Peer::Engaged() && Peer::MotionOwner() == 0, "Flight's Hold must engage it");
+    Peer::SetActivation(0, 1, false);
+    Peer::Drive(0.0);
+    Expect(!Peer::Engaged(), "Releasing Flight's Hold must release it: no stale Toggle latch may keep it engaged");
+}
+
+// xrEndFrame lookups that find no Pivot delta are reported once per run. The
+// frames an app located before a press took effect miss as expected and stay
+// quiet; a miss after frames matched is reported, and so is a session whose
+// submitted display times never match the located ones.
+void ContinuityMissesAreReportedOnlyWhenUnexpected() {
+    Peer::Start({Motion("Flight", Toggle("F1"), false)});
+    // A pipelined app located two frames before the press took effect.
+    Peer::Drive();
+    const XrTime first = Peer::Now();
+    Peer::Drive();
+    const XrTime second = Peer::Now();
+    Peer::TapActivation(kFlight);
+    const XrTime engaged = Peer::Now();
+    Expect(Peer::Engaged(), "Flight's Toggle must engage it");
+    Peer::EndFrameAt(first);
+    Peer::EndFrameAt(second);
+    Expect(!Peer::ContinuityMissReported(), "Frames located before the press were reported as a continuity miss");
+    Peer::EndFrameAt(engaged);
+    Peer::Drive();
+    Peer::EndFrameAt(Peer::Now() + 20'000'000);
+    Expect(Peer::ContinuityMissReported(), "A miss after frames matched was not reported");
+    Peer::Drive();
+    Peer::EndFrameAt(Peer::Now());
+    Expect(!Peer::ContinuityMissReported(), "A matched frame did not end the reported run");
+
+    // Every frame is submitted 20 ms (beyond the match window) after the time
+    // it was located for: no frame ever matches.
+    Peer::Start({Motion("Flight", Toggle("F1"), false)});
+    Peer::TapActivation(kFlight);
+    for (int frame = 1; frame <= 3; ++frame) {
+        Peer::EndFrameAt(Peer::Now() + 20'000'000);
+        Expect(Peer::ContinuityMissReported() == (frame == 3),
+               "Unmatched frame " + std::to_string(frame) +
+                   (frame == 3 ? " was not reported: located and submitted display times never match"
+                               : " was reported, though a press can follow two located frames"));
+        Peer::Drive();
+    }
+}
+
 struct Scenario {
     const char* name;
     std::function<void()> run;
@@ -1186,6 +1413,10 @@ int main() {
         {"OSD motion and snap lines", OsdReportsMotionImmediatelyAndOnlyShowsSnapsWhenConfigured},
         {"mid-flight config edits", MidFlightEditsKeepTheSnap},
         {"per-direction deadzone transition", PerDirectionDeadzoneTransitionShapesTheExtraAngle},
+        {"steady locates do not allocate", SteadyLocatesDoNotAllocate},
+        {"Hold after another profile's Toggle", HoldAfterAnotherProfileToggledReleases},
+        {"recenters while idle or off", RecentersDoNotQueueWhileIdleOrOff},
+        {"continuity misses reported only when unexpected", ContinuityMissesAreReportedOnlyWhenUnexpected},
     };
 
     int failures = 0;

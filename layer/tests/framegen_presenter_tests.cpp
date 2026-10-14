@@ -6685,22 +6685,17 @@ constexpr const char* kHalvingDetail = "Runtime holds frames to half rate: check
 constexpr const char* kHalvingReason = "the runtime holds frames to half rate: check its smoothing";
 constexpr const char* kHalvingStandDown = "the runtime holds frames to half rate";
 
-// The directory of this executable (in the build tree).
-std::filesystem::path ExecutableDirectory() {
-    wchar_t path[MAX_PATH] = {};
-    GetModuleFileNameW(nullptr, path, MAX_PATH);
-    return std::filesystem::path(path).parent_path();
-}
-
-// A session log of its own beside this executable, read back once the
-// presenter has stopped.
+// A session log of its own in the temporary folder (not beside this
+// executable: on a worktree whose build is the installed layer that is the
+// active layer folder), read back once the presenter has stopped.
 struct SessionLog {
     std::filesystem::path directory;
     std::unique_ptr<Logger> logger{std::make_unique<Logger>()};
+    std::filesystem::path path; // the log, once Lines closed it
 
     explicit SessionLog(const std::string& name)
-        : directory(ExecutableDirectory() /
-                    ("presenter-test-log-" + std::to_string(GetCurrentProcessId()) + "-" + name)) {
+        : directory(std::filesystem::temp_directory_path() /
+                    ("vectorxr-presenter-test-log-" + std::to_string(GetCurrentProcessId()) + "-" + name)) {
         std::error_code ignored;
         std::filesystem::remove_all(directory, ignored);
         logger->Initialize(directory / "session.log");
@@ -6710,10 +6705,13 @@ struct SessionLog {
         std::error_code ignored;
         std::filesystem::remove_all(directory, ignored);
     }
-    // The lines holding `text` (closes the log: call once the presenter has stopped).
+    // The lines holding `text` (closes the log: call once the presenter has
+    // stopped). Later calls read the closed log again.
     std::vector<std::string> Lines(const std::string& text) {
-        const std::filesystem::path path = logger->ActiveLogPath();
-        logger.reset(); // flushed
+        if (logger) {
+            path = logger->ActiveLogPath();
+            logger.reset(); // flushed
+        }
         std::ifstream file(path);
         std::vector<std::string> lines;
         for (std::string line; std::getline(file, line);) {
@@ -6817,6 +6815,33 @@ void StartHalving(FrameGenPresenter& presenter, GpuLog& gpu, Runtime& runtime, F
     runtime.paced = true;
     StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, multiplier, app, runtime, owned, logger);
     presenter.SetHalvingWindow(1000ms);
+}
+
+// The trace records the game's swapchain acquires and releases only while
+// frames are generated or about to be: standing by they are every image of
+// every frame, and tell nothing about Frame Generation.
+void TestTraceSwapchainCallsOnlyWhileCapturing() {
+    SessionLog log("trace-swapchain-calls");
+    log.logger->SetLevel(LogLevel::Debug);
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic, app, runtime, owned,
+             log.logger.get());
+    presenter.SetDynamicPolicy(SteadyDynamic());
+    Check(presenter.Trace().Enabled(), "trace: debug logging starts the session's trace");
+    RunTicks(*app, 600ms, {1});
+    const FrameGenStatus standing_by = presenter.Status();
+    Check(standing_by.standby && !presenter.TracesSwapchainCalls(),
+          "trace: standing by, the game's acquires and releases are not traced");
+    presenter.SetDynamicPolicy(QuickDynamic());
+    EngageDynamic(presenter, *app, "trace");
+    Check(presenter.TracesSwapchainCalls(), "trace: engaged, the game's acquires and releases are traced");
+    presenter.Stop();
+    Check(!presenter.TracesSwapchainCalls(), "trace: a stopped session traces nothing");
 }
 
 // Submissions the runtime got per second while the game ran `work` for `duration`.
@@ -8728,6 +8753,7 @@ void RunPolicyTests() {
     RUN(TestUncapturedAtOwnRefreshIsLate);
     RUN(TestDynamicPassThroughNearRefresh);
     RUN(TestDynamicEngagesBelow);
+    RUN(TestTraceSwapchainCallsOnlyWhileCapturing);
     RUN(TestDynamicOwnRate);
     RUN(TestDynamicHysteresis);
     RUN(TestBenefitGuardBacksOff);

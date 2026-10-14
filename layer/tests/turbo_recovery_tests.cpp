@@ -5,14 +5,25 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <string>
 
 void Expect(bool value, const char* message) {
     if (!value) { std::cerr << message << '\n'; std::exit(1); }
 }
 
+// A guard that would not arm says why (a recovery path too long for the
+// file system failed CI's "First run should arm" with no reason).
+void Expect(bool value, const char* message, const std::string& reason) {
+    if (!value) {
+        std::cerr << message << " (" << (reason.empty() ? "no reason given" : reason) << ")\n";
+        std::exit(1);
+    }
+}
+
 int main() {
-    const auto root = std::filesystem::temp_directory_path() / ("vectorxr-recovery-test-" +
-        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    // Short, so a long %TEMP% leaves room for the records' own names.
+    const auto root = std::filesystem::temp_directory_path() / ("vxr-recovery-" +
+        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count() % 1'000'000'000));
     const auto dead = [](std::uint32_t, std::uint64_t) { return false; };
     const auto alive = [](std::uint32_t, std::uint64_t) { return true; };
     depthxr::TurboRecoveryRecord identity;
@@ -24,12 +35,12 @@ int main() {
     {
         depthxr::TurboRecoveryGuard first;
         first.Configure(root, identity);
-        Expect(first.Prepare(true, false, "async", dead), "First run should arm");
+        Expect(first.Prepare(true, false, "async", dead), "First run should arm", first.Reason());
         // Intentionally no Complete: simulate a crash without destructor cleanup.
     }
     depthxr::TurboRecoveryGuard concurrent;
     concurrent.Configure(root, identity);
-    Expect(concurrent.Prepare(true, false, "async", alive), "A live process is not an interrupted run");
+    Expect(concurrent.Prepare(true, false, "async", alive), "A live process is not an interrupted run", concurrent.Reason());
     concurrent.Complete();
 
     depthxr::TurboRecoveryGuard next;
@@ -40,21 +51,21 @@ int main() {
            "A dead process's block should not claim it crashed: a game's own quit can leave the marker too");
     next.Complete();
     Expect(!next.Prepare(true, false, "async", dead), "A clean Turbo-off run must preserve the interruption");
-    Expect(next.Prepare(false, false, "async", dead), "Opt-out must bypass recovery");
+    Expect(next.Prepare(false, false, "async", dead), "Opt-out must bypass recovery", next.Reason());
     Expect(!next.Prepare(true, false, "async", dead), "Re-enabling recovery must restore the unresolved interruption");
 
     auto other_identity = identity;
     other_identity.fingerprint = "other:steamvr:d3d11";
     depthxr::TurboRecoveryGuard other;
     other.Configure(root, other_identity);
-    Expect(other.Prepare(true, false, "async", dead), "An interruption must not block a different app/setup");
+    Expect(other.Prepare(true, false, "async", dead), "An interruption must not block a different app/setup", other.Reason());
     other.Complete();
 
-    Expect(next.Prepare(true, true, "sequenced", dead), "Explicit retry should supersede the previous interruption");
+    Expect(next.Prepare(true, true, "sequenced", dead), "Explicit retry should supersede the previous interruption", next.Reason());
     next.Complete();
     depthxr::TurboRecoveryGuard clean;
     clean.Configure(root, identity);
-    Expect(clean.Prepare(true, false, "async", dead), "A clean retry should clear recovery history");
+    Expect(clean.Prepare(true, false, "async", dead), "A clean retry should clear recovery history", clean.Reason());
     clean.Fail("Repeated runtime submission errors");
     clean.Complete();
     depthxr::TurboRecoveryGuard failed;
@@ -65,7 +76,7 @@ int main() {
     failed.Prepare(false, false, "async", dead);
     depthxr::TurboRecoveryGuard bypassed;
     bypassed.Configure(root, identity);
-    Expect(bypassed.Prepare(true, false, "async", dead), "Disabling the watch during a run removes its own marker");
+    Expect(bypassed.Prepare(true, false, "async", dead), "Disabling the watch during a run removes its own marker", bypassed.Reason());
     bypassed.Complete();
 
     Expect(std::filesystem::exists(root / "faults"), "Retries must retain fault history");
@@ -73,14 +84,14 @@ int main() {
     Expect(fault_count >= 2, "Crash and runtime failure must both be archived");
     depthxr::TurboRecoveryGuard ui_clear;
     ui_clear.Configure(root, identity);
-    Expect(ui_clear.Prepare(true, false, "async", dead), "UI clear test should start clean");
+    Expect(ui_clear.Prepare(true, false, "async", dead), "UI clear test should start clean", ui_clear.Reason());
     ui_clear.Fail("UI clear test failure");
     // Model the UI archive-and-remove action. Faults already archived by Fail.
     for (const auto& entry : std::filesystem::directory_iterator(root)) {
         if (entry.path().extension() == ".json") std::filesystem::remove(entry.path());
     }
     Expect(ui_clear.ConsumeClearRequest(), "A live suspended session should observe UI clearing its failed marker");
-    Expect(ui_clear.Prepare(true, true, "async", dead), "UI clear should allow the session to re-arm");
+    Expect(ui_clear.Prepare(true, true, "async", dead), "UI clear should allow the session to re-arm", ui_clear.Reason());
     ui_clear.Complete();
     Expect(std::distance(std::filesystem::directory_iterator(root / "faults"), std::filesystem::directory_iterator()) > fault_count,
            "UI clear must retain the failure details");
@@ -90,13 +101,13 @@ int main() {
     opted_out.Fail("Fault with safety bypassed");
     depthxr::TurboRecoveryGuard after_opt_out;
     after_opt_out.Configure(root, identity);
-    Expect(after_opt_out.Prepare(true, false, "async", dead), "Opt-out diagnostics must not create a block");
+    Expect(after_opt_out.Prepare(true, false, "async", dead), "Opt-out diagnostics must not create a block", after_opt_out.Reason());
     after_opt_out.Complete();
 
     const auto clear_root = root / "clear-logs";
     depthxr::TurboRecoveryGuard logged;
     logged.Configure(clear_root, identity);
-    Expect(logged.Prepare(true, false, "async", dead), "Clear log scenario should arm");
+    Expect(logged.Prepare(true, false, "async", dead), "Clear log scenario should arm", logged.Reason());
     logged.Fail("Fault to clear");
     // Model the UI's per-event clear markers, preserving recovery records.
     std::filesystem::create_directories(clear_root / "faults-cleared");
@@ -109,7 +120,7 @@ int main() {
     depthxr::TurboRecoveryGuard still_blocked;
     still_blocked.Configure(clear_root, identity);
     Expect(!still_blocked.Prepare(true, false, "async", dead), "Clearing fault logs must preserve protection");
-    Expect(still_blocked.Prepare(true, true, "async", dead), "Cleared fault can still be explicitly retried");
+    Expect(still_blocked.Prepare(true, true, "async", dead), "Cleared fault can still be explicitly retried", still_blocked.Reason());
     Expect(std::filesystem::is_empty(clear_root / "faults"), "Retry must not resurrect cleared fault history");
     still_blocked.Fail("New fault after clearing");
     Expect(!std::filesystem::is_empty(clear_root / "faults"), "New faults must still be archived");
@@ -170,7 +181,7 @@ int main() {
     depthxr::TurboRecoveryGuard unwritable;
     unwritable.Configure(invalid_root, identity);
     Expect(!unwritable.Prepare(true, false, "async", dead), "An unusable recovery path must fail safely");
-    Expect(unwritable.Prepare(false, false, "async", dead), "Opt-out must work even with unavailable storage");
+    Expect(unwritable.Prepare(false, false, "async", dead), "Opt-out must work even with unavailable storage", unwritable.Reason());
     std::filesystem::remove_all(root);
     std::cout << "turbo_recovery_tests passed\n";
 }

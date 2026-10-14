@@ -549,6 +549,8 @@ class TurboFrameTestPeer {
         Layer().turbo_trace_.Stop();
         Layer().logger_.SetLevel(LogLevel::Info);
     }
+    // Keeps the ordinary log's sampled burst open for another second.
+    static void SampleNextSecond() { Layer().turbo_trace_.Burst(); }
     static void NeedSequencedCompensation() {
         auto& layer = Layer();
         std::scoped_lock lock(layer.turbo_mutex_);
@@ -1823,6 +1825,35 @@ void TestOwnershipDesyncRecoversInSession() {
     depthxr::TurboFrameTestPeer::ReleaseLog(recovery_path / "released.log");
     std::error_code error;
     std::filesystem::remove_all(recovery_path, error);
+}
+
+// Watched calls' enter and exit records stay in the flight recorder files.
+// The ordinary log's sampled bursts, the only timing history that outlives
+// the recorder's rotation, must still time each runtime wait, begin and
+// submission with records of their own.
+void TestSampledBurstsKeepRuntimeCalls() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kSequenced);
+    const auto directory = std::filesystem::temp_directory_path() /
+        ("vxr-burst-" + std::to_string(GetCurrentProcessId()));
+    std::filesystem::remove_all(directory);
+    depthxr::TurboFrameTestPeer::StartRecorder(directory / "frame.log");
+    const auto end_info = FrameEndInfo();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
+           "Sampled burst test could not establish pacing");
+    for (int frame = 0; frame < 4; ++frame) {
+        depthxr::TurboFrameTestPeer::SampleNextSecond();
+        Expect(AppFrame(end_info) == XR_SUCCESS, "Sampled burst test frame failed");
+    }
+    depthxr::TurboFrameTestPeer::EndRecorder();
+    const std::string log = depthxr::TurboFrameTestPeer::Log();
+    for (const char* event : {"begin.enter", "runtime.wait.enter", "runtime.wait.return", "runtime.begin.enter",
+                              "runtime.begin.return", "submit.enter", "submit.return"}) {
+        Expect(log.find(std::string(" event=") + event + " ") != std::string::npos,
+               std::string("The ordinary log's sampled burst has no ") + event + " record");
+    }
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
 }
 
 // An app poll already blocked on the async handoff when a failure hands frame
@@ -3351,6 +3382,7 @@ int main() {
     TestInterlockedRuntimeAutoFallsBackToSequenced();
     TestInterlockedForcedAsyncSuspendsAndKeepsRunning();
     TestOwnershipDesyncRecoversInSession();
+    TestSampledBurstsKeepRuntimeCalls();
     TestFailedBeginProbesBeforeWaiting(false);
     TestFailedBeginProbesBeforeWaiting(true);
     TestAsyncWaitFailureRecoversOnFrameThread();

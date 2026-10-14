@@ -19,6 +19,11 @@ constexpr bool ShouldDrivePivotFromLocateViews(bool has_locate_info,
 inline constexpr std::int64_t kPivotPoseDeltaMatchWindow = 5'000'000;
 inline constexpr std::size_t kPivotPoseDeltaMaxEntries = 180;
 inline constexpr std::size_t kPivotPoseDeltaMaxHeldMisses = 1;
+// Frames an application can have located before a Pivot press took effect and
+// not yet ended: the frame it ends next and, when it pipelines, the one after
+// (located after that frame's xrWaitFrame; a later frame begins only after
+// this xrEndFrame). Their xrEndFrame lookups miss as expected.
+inline constexpr std::size_t kPivotPoseDeltaEngagementMisses = 2;
 
 enum class PivotPoseDeltaSelection {
     None,

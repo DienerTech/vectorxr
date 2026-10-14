@@ -487,10 +487,10 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         set_tests_properties(depthxr_framegen_vulkan_tests PROPERTIES SKIP_RETURN_CODE 77)
         # The Direct3D 12 scenarios on the GPU: variable-rate shading, the optical flow hardware (a
         # session per view, four for quad views) and a GPU's fence budgets, none of which WARP has.
-        # Passes with a message without a hardware adapter (and without the optical flow hardware,
-        # its checks are skipped with one).
+        # Skipped (77) without a hardware adapter, as on hosted CI (without the optical flow
+        # hardware, its checks are skipped with a message).
         add_test(NAME depthxr_framegen_d3d12_hw_tests COMMAND depthxr_framegen_tests hw-d3d12)
-        set_tests_properties(depthxr_framegen_d3d12_hw_tests PROPERTIES TIMEOUT 180)
+        set_tests_properties(depthxr_framegen_d3d12_hw_tests PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 77)
         # Direct3D 11 <-> 12 sharing probe for the D3D11 bridge. It needs a real GPU, so it is
         # built here but is not a CTest (`depthxr_bridge_probe --help`).
         add_executable(depthxr_bridge_probe tests/bridge_probe.cpp)
@@ -703,6 +703,8 @@ if(DEPTHXR_BUILD_TESTS)
         )
     endif()
     add_test(NAME depthxr_layer_tests COMMAND depthxr_layer_tests)
+    # About 5 s on hosted CI; a hang must not hold the runner for its 25 minutes.
+    set_tests_properties(depthxr_layer_tests PROPERTIES TIMEOUT 120)
     add_executable(depthxr_turbo_trace_tests tests/turbo_trace_tests.cpp)
     target_link_libraries(depthxr_turbo_trace_tests PRIVATE depthxr_core)
     add_test(NAME depthxr_turbo_trace_tests COMMAND depthxr_turbo_trace_tests)
@@ -743,4 +745,5 @@ if(DEPTHXR_BUILD_TESTS)
     )
     target_include_directories(depthxr_action_set_attachment_tests PRIVATE include)
     add_test(NAME depthxr_action_set_attachment_tests COMMAND depthxr_action_set_attachment_tests)
+    set_tests_properties(depthxr_action_set_attachment_tests PROPERTIES TIMEOUT 10)
 endif()

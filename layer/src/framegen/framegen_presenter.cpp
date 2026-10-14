@@ -1108,21 +1108,31 @@ std::optional<FrameGenOutputKind> FrameGenPresenter::OutputKindLocked(std::size_
     return requested;
 }
 
+bool FrameGenPresenter::CapturingLocked() const {
+    if (!started_ || !gpu_ || !user_enabled_ || !configured_enabled_ || state_ == FrameGenState::kPaused ||
+        state_ == FrameGenState::kUnavailable) {
+        return false;
+    }
+    // Only while frames are generated or about to be: the wait that engages
+    // comes before the game's release, so the first engaged frame is
+    // captured. Passing frames straight through (Auto at full rate, Dynamic
+    // standing by, waiting for steady frames) captures nothing.
+    return compositor_running_ || WantsEngagementLocked() ||
+           std::any_of(frames_.begin(), frames_.end(),
+                       [](const PendingFrame& frame) { return frame.engaged && !frame.demoted; });
+}
+
+bool FrameGenPresenter::TracesSwapchainCalls() const {
+    if (!trace_.Enabled()) {
+        return false;
+    }
+    std::scoped_lock lock(mutex_);
+    return CapturingLocked();
+}
+
 void FrameGenPresenter::CaptureOnRelease(XrSwapchain swapchain, std::uint32_t image_index) {
     auto capturing = [&] {
-        if (!started_ || !gpu_ || !user_enabled_ || !configured_enabled_ || state_ == FrameGenState::kPaused ||
-            state_ == FrameGenState::kUnavailable) {
-            return false;
-        }
-        // Only while frames are generated or about to be: the wait that
-        // engages comes before the game's release, so the first engaged
-        // frame is captured. Passing frames straight through (Auto at full
-        // rate, Dynamic standing by, waiting for steady frames) captures
-        // nothing.
-        const bool armed = compositor_running_ || WantsEngagementLocked() ||
-                           std::any_of(frames_.begin(), frames_.end(),
-                                       [](const PendingFrame& frame) { return frame.engaged && !frame.demoted; });
-        if (!armed) {
+        if (!CapturingLocked()) {
             return false;
         }
         const auto record = swapchains_.find(swapchain);
@@ -3566,8 +3576,8 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         // the Execute that first reports it active: how long that held up
         // the calling thread (the game's, in its xrEndFrame).
         logger_->Info(hardware_status == "active"
-                          ? "Frame Generation measures motion with NVIDIA's optical flow hardware (experimental): it "
-                            "starts matching each eye's image as soon as the game releases it (setting it up took " +
+                          ? "Frame Generation measures motion with NVIDIA's optical flow hardware (experimental; "
+                            "setting it up took " +
                                 Number(execute_ms, 1) + " ms on this frame)."
                           : "Frame Generation cannot use NVIDIA's optical flow hardware (" + hardware_status +
                                 "); block matching measures motion instead.");

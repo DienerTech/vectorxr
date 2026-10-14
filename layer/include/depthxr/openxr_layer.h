@@ -577,6 +577,8 @@ class OpenXrLayer {
     bool FrameGenComposesQuadViews() const;
     void ResetSwapchainState();
     void LogSwapchainSummary(XrSwapchain swapchain, const SwapchainInfo& info, std::string_view event_name);
+    // Logs xrEnumerateSwapchainFormats' list when it differs from the last one this session.
+    void LogSwapchainFormatsOnChange(const std::string& line);
     // Counts an application call on the calling thread; logs the first call of each kind on each thread.
     void NoteThread(ThreadCensus::Call call);
     bool ShouldDeferSwapchainRelease(const SwapchainInfo& info) const;
@@ -617,7 +619,7 @@ class OpenXrLayer {
     bool LocateEyeGazeFocusOffsets(XrSession session,
                                    XrSpace base_space,
                                    XrTime time,
-                                   const QuadViewsResolvedSettings& settings,
+                                   const QuadViewsSettings& settings,
                                    double* yaw_radians,
                                    double* pitch_radians);
     bool EnsureEyeOffsets(XrSession session,
@@ -741,7 +743,7 @@ class OpenXrLayer {
     void ReleaseD3D11QuadViewsPixelProbeResources(bool preserve_history);
     void PollD3D11QuadViewsPixelProbe();
     bool SynthesizeQuadViewsFromStereo(std::span<const XrView> stereo_views,
-                                       const QuadViewsResolvedSettings& quadviews_settings,
+                                       const QuadViewsSettings& quadviews_settings,
                                        double focus_yaw_radians,
                                        double focus_pitch_radians,
                                        uint32_t view_capacity_input,
@@ -1090,6 +1092,8 @@ class OpenXrLayer {
     // entry. Bridge one such miss so amplified poses do not flash to identity.
     std::optional<PivotPoseDeltaFrame> pivotxr_last_matched_pose_delta_;
     std::size_t pivotxr_consecutive_pose_delta_misses_{0};
+    // A continuity miss was logged and its recovery is not yet.
+    bool pivotxr_pose_delta_miss_logged_{false};
     // Per resolved-profile input edge state, index-aligned with
     // resolved_settings_.pivotxr.profiles. Arbitration is last-pressed-wins:
     // pressing another candidate's binding retargets the engaged profile and
@@ -1117,7 +1121,17 @@ class OpenXrLayer {
         bool toggle_latched{false};
         bool toggle_suspended{false};
     };
+    // The swapchain format list last logged this session.
+    std::string last_logged_swapchain_formats_;
+    // The application called xrCreateSession on this instance, and the
+    // number of extensions it enabled for it.
+    bool instance_requested_session_{false};
+    uint32_t instance_enabled_extension_count_{0};
     std::vector<PivotProfileInputState> pivotxr_profile_input_states_;
+    // IsPivotXrActive's per-call claim lists (under mutex_), kept so the
+    // locate paths do not allocate.
+    std::vector<const InputBinding*> pivotxr_claimed_view_inputs_scratch_;
+    std::vector<std::string_view> pivotxr_polled_nudge_sets_scratch_;
     // Engaged profile index; retains the last-engaged profile during the
     // release ramp so the easing keeps using that profile's settings. While a
     // stacked Snap View is selected it names the motion profile; the snap's
@@ -1634,6 +1648,7 @@ class OpenXrLayer {
     std::unordered_set<XrSpace> tracked_local_spaces_;
     std::unordered_set<XrSpace> tracked_stage_spaces_;
     std::vector<XrPosef> cached_eye_offset_poses_;
+    std::vector<XrView> eye_offset_views_scratch_;
     XrTime cached_eye_offsets_display_time_{0};
     XrViewConfigurationType cached_eye_offsets_view_configuration_{XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
     std::optional<std::chrono::steady_clock::time_point> last_app_action_sync_time_;
@@ -1655,11 +1670,15 @@ class OpenXrLayer {
     std::vector<const XrCompositionLayerBaseHeader*> end_frame_layers_scratch_;
     std::vector<ResolvedPivotSpaceDelta> end_frame_pivot_space_deltas_scratch_;
     std::map<XrTime, PivotPoseDeltaFrame> cached_pivot_pose_deltas_;
+    // A pruned frame kept for the next one CachePivotPoseDelta stores.
+    std::map<XrTime, PivotPoseDeltaFrame>::node_type pivot_pose_delta_spare_;
     // Info-level breadcrumbs are emitted once per submitted space, while
     // debug diagnostics retain per-frame details without spamming normal logs.
     std::unordered_set<XrSpace> logged_pivot_space_conversions_;
     std::unordered_set<XrSpace> failed_pivot_space_conversions_;
     std::map<XrTime, std::vector<DepthSubmissionGeometry>> cached_depth_submission_geometry_;
+    // A pruned frame kept for the next one CacheDepthSubmissionGeometry stores.
+    std::map<XrTime, std::vector<DepthSubmissionGeometry>>::node_type depth_submission_geometry_spare_;
     QuadViewsFrameCache<QuadViewsFrameState> cached_quadviews_frames_;
     // Quad views placement diagnostics (BuildQuadViewsComposePlan), per session.
     uint64_t quadviews_placement_mismatch_frames_{0};

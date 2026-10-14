@@ -145,11 +145,11 @@ std::string_view VarjoNativeViewRole(uint32_t index) {
     }
 }
 
-double QuadViewsFocusWidthScale(const QuadViewsResolvedSettings& settings) {
+double QuadViewsFocusWidthScale(const QuadViewsSettings& settings) {
     return settings.focus_scale * Clamp(settings.focus_horizontal_size_percent, 1.0, 100.0) / 100.0;
 }
 
-double QuadViewsFocusHeightScale(const QuadViewsResolvedSettings& settings) {
+double QuadViewsFocusHeightScale(const QuadViewsSettings& settings) {
     return settings.focus_scale * Clamp(settings.focus_vertical_size_percent, 1.0, 100.0) / 100.0;
 }
 
@@ -203,7 +203,7 @@ AngularWindow ClampProjectedWindow(float base_negative,
 }
 
 XrFovf BuildFocusFov(const XrFovf& base_fov,
-                     const QuadViewsResolvedSettings& settings,
+                     const QuadViewsSettings& settings,
                      double focus_yaw_radians,
                      double focus_pitch_radians) {
     const double horizontal_center = DegreesToRadians(settings.horizontal_offset_degrees) + focus_yaw_radians;
@@ -1873,7 +1873,10 @@ bool OpenXrLayer::PollInputBindingDown(const InputBinding& binding) {
         return poll.down;
     }
 
-    const std::string key = binding.device_guid.empty() ? BindingLabel(binding) : binding.device_guid;
+    // Device bindings are polled from the locate paths: key them by the GUID
+    // they already hold rather than copying it on every poll.
+    std::string label_key;
+    const std::string& key = binding.device_guid.empty() ? (label_key = BindingLabel(binding)) : binding.device_guid;
     const auto now = std::chrono::steady_clock::now();
     std::scoped_lock diagnostic_lock(input_binding_diagnostic_mutex_);
     InputBindingDiagnosticLogState& state = input_binding_diagnostic_states_[key];
@@ -2046,6 +2049,7 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
                << XR_VERSION_MINOR(api_version) << "." << XR_VERSION_PATCH(api_version);
         logger_.Info(stream.str());
 
+        instance_enabled_extension_count_ = create_info->enabledExtensionCount;
         std::ostringstream ext_stream;
         ext_stream << "Application enabled OpenXR extensions (" << create_info->enabledExtensionCount << "):";
         for (uint32_t i = 0; i < create_info->enabledExtensionCount; ++i) {
@@ -2244,7 +2248,9 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
             logger_.Info("No config file found. Using default settings.");
         }
     }
-    if (config_.core.track_seen_apps) {
+    // An instance with no extension cannot create a session: MSFS 2024's
+    // probe of the runtime is not a launch (it doubled MSFS's count).
+    if (config_.core.track_seen_apps && instance_enabled_extension_count_ > 0) {
         std::string seen_apps_error;
         if (!RecordSeenApp(current_exe_name_, &seen_apps_error)) {
             logger_.Debug("Unable to record seen app: " + seen_apps_error);
@@ -2354,6 +2360,14 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
     if (XR_SUCCEEDED(result)) {
         ResetVulkanEnableHooks(XR_NULL_HANDLE, nullptr, false, {});
         turbo_recovery_.Complete();
+        // An instance that enabled no extension cannot create a session:
+        // MSFS 2024 makes one to probe the runtime before its real instance
+        // (4 of the 7 logs in one tester's export). Its log would take a slot
+        // of the log retention and could be picked as one of Export Debug's
+        // complete sessions, so it is removed unless it logged an error.
+        if (!instance_requested_session_ && instance_enabled_extension_count_ == 0) {
+            logger_.DiscardSessionLog();
+        }
         instance_ = XR_NULL_HANDLE;
         next_destroy_instance_ = nullptr;
         next_create_session_ = nullptr;
@@ -2411,6 +2425,7 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
                                     XrSession* session) {
     {
         std::scoped_lock lock(mutex_);
+        instance_requested_session_ = true;
         if (active_session_ != XR_NULL_HANDLE) {
             logger_.Error("VectorXR currently supports one OpenXR session per instance; rejecting a second "
                           "session instead of corrupting the active session state.");
@@ -3856,6 +3871,19 @@ XrResult OpenXrLayer::GetVisibilityMaskKHR(XrSession session,
     return result;
 }
 
+void OpenXrLayer::LogSwapchainFormatsOnChange(const std::string& line) {
+    // Star Citizen asks before every swapchain it creates (about 250 times a
+    // session): the list is logged when it changes.
+    {
+        std::scoped_lock lock(mutex_);
+        if (line == last_logged_swapchain_formats_) {
+            return;
+        }
+        last_logged_swapchain_formats_ = line;
+    }
+    logger_.Info(line);
+}
+
 XrResult OpenXrLayer::EnumerateSwapchainFormats(XrSession session,
                                                 uint32_t format_capacity_input,
                                                 uint32_t* format_count_output,
@@ -3897,7 +3925,7 @@ XrResult OpenXrLayer::EnumerateSwapchainFormats(XrSession session,
         for (const int64_t format : game_formats) {
             stream << ' ' << format;
         }
-        logger_.Info(stream.str());
+        LogSwapchainFormatsOnChange(stream.str());
         return XR_SUCCESS;
     }
     const XrResult result = next_enumerate_swapchain_formats_(
@@ -3918,7 +3946,7 @@ XrResult OpenXrLayer::EnumerateSwapchainFormats(XrSession session,
         for (uint32_t i = 0; i < count; ++i) {
             stream << ' ' << formats[i];
         }
-        logger_.Info(stream.str());
+        LogSwapchainFormatsOnChange(stream.str());
     }
     return result;
 }
@@ -4244,7 +4272,9 @@ XrResult OpenXrLayer::AcquireSwapchainImage(XrSwapchain swapchain,
         // A bridged image is rendered again only after the bridge's last copy of it.
         d3d11_bridge_.Acquired(swapchain, *index);
         vulkan_bridge_.Acquired(swapchain, *index);
-        framegen_.Trace().Record("acq", reinterpret_cast<uint64_t>(swapchain), *index);
+        if (framegen_.TracesSwapchainCalls()) {
+            framegen_.Trace().Record("acq", reinterpret_cast<uint64_t>(swapchain), *index);
+        }
     }
 
     std::scoped_lock lock(mutex_);
@@ -4320,7 +4350,9 @@ XrResult OpenXrLayer::ReleaseSwapchainImage(XrSwapchain swapchain,
                 it->second.last_released_image_index = *released_index;
                 it->second.has_last_released_image_index = true;
                 NoteFrameGenRelease(swapchain, *released_index);
-                framegen_.Trace().Record("rel", reinterpret_cast<uint64_t>(swapchain), *released_index, copied);
+                if (framegen_.TracesSwapchainCalls()) {
+                    framegen_.Trace().Record("rel", reinterpret_cast<uint64_t>(swapchain), *released_index, copied);
+                }
                 // Before forwarding (or deferring) the release: the image is
                 // still the application's and in its pre-release state.
                 if (copied) {
@@ -5766,8 +5798,11 @@ XrResult OpenXrLayer::TraceRuntimeWaitFrame(XrSession session, const XrFrameWait
             osd_should_render_.store(state->shouldRender == XR_TRUE, std::memory_order_relaxed);
         return result;
     }
+    // The watched call records the start in the recorder files. Watched
+    // records never reach the ordinary log, so its sampled bursts keep an
+    // enter of their own. The return carries the prediction.
     const auto id = turbo_trace_.NextId();
-    turbo_trace_.Record("runtime.wait.enter", id);
+    if (turbo_trace_.Capturing()) turbo_trace_.Record("runtime.wait.enter", id);
     const auto result = next_wait_frame_(session, info, state);
     if (XR_FAILED(result)) turbo_trace_.Burst();
     turbo_trace_.Record("runtime.wait.return", id, XR_SUCCEEDED(result) ? state->predictedDisplayTime : 0,
@@ -5781,12 +5816,15 @@ XrResult OpenXrLayer::TraceRuntimeBeginFrame(XrSession session, const XrFrameBeg
     const auto trace_call = turbo_trace_.Watch("runtime.begin");
     std::unique_lock queue_lock(osd_vulkan_queue_mutex_,std::defer_lock);
     if(osd_vulkan_.load())queue_lock.lock();
-    if (!turbo_trace_.Enabled()) return next_begin_frame_(session, info);
+    // The watched call records the start and duration in the recorder files.
+    // Watched records never reach the ordinary log, so its sampled bursts keep
+    // an enter and a return of their own; outside them only a failure adds one.
+    const bool sampled = turbo_trace_.Capturing();
     const auto id = turbo_trace_.NextId();
-    turbo_trace_.Record("runtime.begin.enter", id);
+    if (sampled) turbo_trace_.Record("runtime.begin.enter", id);
     const auto result = next_begin_frame_(session, info);
     if (XR_FAILED(result)) turbo_trace_.Burst();
-    turbo_trace_.Record("runtime.begin.return", id, result);
+    if (sampled || XR_FAILED(result)) turbo_trace_.Record("runtime.begin.return", id, result);
     return result;
 }
 
@@ -5919,13 +5957,17 @@ XrResult OpenXrLayer::SubmitRuntimeFrame(XrSession session, const XrFrameEndInfo
     if (!turbo_trace_.Enabled()) return submit();
     const auto id = turbo_trace_.NextId();
     turbo_trace_.Record("submit.enter", id, info->displayTime, info->layerCount);
-    if (turbo_trace_.Capturing()) {
+    const bool sampled = turbo_trace_.Capturing();
+    if (sampled) {
         const XrTime clock_now = TurboClockNow();
         turbo_trace_.Record("submit.clock", id, clock_now, clock_now > 0 ? info->displayTime - clock_now : 0);
     }
     const auto result = submit();
     if (XR_FAILED(result)) turbo_trace_.Burst();
-    turbo_trace_.Record("submit.return", id, result);
+    // The watched runtime.end records the duration in the recorder files; the
+    // ordinary log's sampled bursts, which never get watched records, keep the
+    // return. Outside them only a failure adds one.
+    if (sampled || XR_FAILED(result)) turbo_trace_.Record("submit.return", id, result);
     return result;
 }
 
@@ -6403,7 +6445,9 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
 
 XrResult OpenXrLayer::BeginFrame(XrSession session, const XrFrameBeginInfo* frame_begin_info) {
     const auto trace_call = turbo_trace_.Watch("app.begin");
-    turbo_trace_.Record("begin.enter", turbo_trace_.NextId());
+    // The ordinary log's sampled bursts never get watched records: they keep
+    // the app's begin as a record of its own.
+    if (turbo_trace_.Capturing()) turbo_trace_.Record("begin.enter", turbo_trace_.NextId());
     NoteThread(ThreadCensus::Call::BeginFrame);
     if (frame_begin_info && frame_begin_info->type != XR_TYPE_FRAME_BEGIN_INFO) {
         return XR_ERROR_VALIDATION_FAILURE;
@@ -8682,6 +8726,12 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
          pivotxr_quick_view_transitioning_ ||
          pivotxr_quick_view_transition_.active);
     const std::size_t misses_before_lookup = pivotxr_consecutive_pose_delta_misses_;
+    // A frame located before Pivot engaged has no delta (and needs none: the
+    // activation ramp starts from zero). A frame that misses after one matched
+    // breaks continuity; before any match, so does a run longer than the frames
+    // located before the press took effect (located and submitted display
+    // times never match).
+    const bool pose_delta_continuity_established = pivotxr_last_matched_pose_delta_.has_value();
     const PivotPoseDeltaSelection pose_delta_selection = resolved_settings_.pivotxr.enabled
         ? ResolvePivotPoseDeltaValue(cached_pivot_pose_deltas_,
                                      frame_end_info->displayTime,
@@ -8701,8 +8751,13 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
             : (matched_time > frame_end_info->displayTime
                    ? matched_time - frame_end_info->displayTime
                    : frame_end_info->displayTime - matched_time);
-        if (pose_delta_selection == PivotPoseDeltaSelection::HeldPrevious ||
-            pose_delta_selection == PivotPoseDeltaSelection::None) {
+        // The first miss of a run is logged; the recovery line counts the rest.
+        const bool missed = pose_delta_selection == PivotPoseDeltaSelection::HeldPrevious ||
+                            pose_delta_selection == PivotPoseDeltaSelection::None;
+        const bool miss_unexpected = pose_delta_continuity_established ||
+                                     pivotxr_consecutive_pose_delta_misses_ > kPivotPoseDeltaEngagementMisses;
+        if (missed && miss_unexpected && !pivotxr_pose_delta_miss_logged_) {
+            pivotxr_pose_delta_miss_logged_ = true;
             pending_locate_views_diagnostics_ =
                 std::max<uint32_t>(pending_locate_views_diagnostics_, 5);
             pending_end_frame_diagnostics_ =
@@ -8736,7 +8791,8 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
                    << ", cachedSpaceExpressions="
                    << pose_delta_frame.space_pose_delta_count;
             logger_.Info(stream.str());
-        } else if (misses_before_lookup > 0) {
+        } else if (!missed && misses_before_lookup > 0 && pivotxr_pose_delta_miss_logged_) {
+            pivotxr_pose_delta_miss_logged_ = false;
             std::ostringstream stream;
             stream << "PivotXR pose-delta continuity recovered: frameTime="
                    << frame_end_info->displayTime
@@ -8747,6 +8803,8 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
                    << ", cachedDeltas=" << cached_pivot_pose_deltas_.size();
             logger_.Info(stream.str());
         }
+    } else {
+        pivotxr_pose_delta_miss_logged_ = false;
     }
     const bool has_non_identity_delta =
         has_pose_delta && !IsIdentityPose(canonical_pose_delta);
@@ -9665,7 +9723,13 @@ XrResult OpenXrLayer::PollEvent(XrInstance instance, XrEventDataBuffer* event_da
         return result;
     }
     std::scoped_lock lock(mutex_);
-    if (change.session == active_session_ && pivotxr_reference_changes_.size() < 16) {
+    // Only Pivot keeps a seated position to re-anchor.
+    if (change.session == active_session_ && resolved_settings_.core.enabled && resolved_settings_.pivotxr.enabled) {
+        // A bounded queue keeps the newest changes: a later recenter must
+        // not be dropped for older ones.
+        if (pivotxr_reference_changes_.size() >= 16) {
+            pivotxr_reference_changes_.erase(pivotxr_reference_changes_.begin());
+        }
         pivotxr_reference_changes_.push_back({change.referenceSpaceType, change.changeTime});
         logger_.Info("Runtime reference space change pending: type=" +
                      std::to_string(static_cast<int>(change.referenceSpaceType)) +
@@ -10055,6 +10119,20 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
             pivot_diagnostic_.recomposition_mode = "locate_space_failed";
         }
     } else if (!pivotxr_envelope_engaged) {
+        // Idle, Pivot applies no change: one that has reached this frame
+        // drops the anchor (kept with a captured origin), which the next
+        // engagement takes anew, instead of queueing until then.
+        if (view_locate_info && !pivotxr_reference_changes_.empty()) {
+            std::erase_if(pivotxr_reference_changes_, [&](const PivotReferenceChange& change) {
+                if (view_locate_info->displayTime < change.change_time) {
+                    return false;
+                }
+                if (PivotAnchorAffectedBy(change.type)) {
+                    pivotxr_translation_anchor_.reset();
+                }
+                return true;
+            });
+        }
         if (!pivotxr_origin_) pivotxr_translation_anchor_.reset();
         pivotxr_smoothed_extra_yaw_radians_ = 0.0;
         pivotxr_smoothed_extra_pitch_radians_ = 0.0;
@@ -11158,6 +11236,7 @@ void OpenXrLayer::CaptureInstanceFunctions() {
 }
 
 void OpenXrLayer::ResetSessionState() {
+    last_logged_swapchain_formats_.clear();
     // Both xrDestroySession and an xrDestroyInstance that skipped it end a session here.
     if (active_session_ != XR_NULL_HANDLE) {
         logger_.Info("Thread census at session end: " + thread_census_.Summary());
@@ -11279,6 +11358,8 @@ void OpenXrLayer::ResetSessionState() {
 }
 
 void OpenXrLayer::ResetInstanceState() {
+    instance_requested_session_ = false;
+    instance_enabled_extension_count_ = 0;
     application_action_spaces_.clear();
     application_pose_actions_.clear();
     application_action_owners_.clear();
@@ -11634,7 +11715,7 @@ void OpenXrLayer::UpdateEyeGazeResources(QuadViewsTrackingMode previous_mode) {
 bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
                                             XrSpace base_space,
                                             XrTime time,
-                                            const QuadViewsResolvedSettings& settings,
+                                            const QuadViewsSettings& settings,
                                             double* yaw_radians,
                                             double* pitch_radians) {
     if (!yaw_radians || !pitch_radians) {
@@ -12212,10 +12293,8 @@ bool OpenXrLayer::EnsureEyeOffsets(XrSession session,
         return true;
     }
 
-    std::vector<XrView> eye_views(view_count);
-    for (XrView& eye_view : eye_views) {
-        eye_view = {XR_TYPE_VIEW};
-    }
+    std::vector<XrView>& eye_views = eye_offset_views_scratch_;
+    eye_views.assign(view_count, XrView{XR_TYPE_VIEW});
     XrViewState eye_view_state{XR_TYPE_VIEW_STATE};
     uint32_t eye_view_count = 0;
     XrViewLocateInfo eye_view_locate_info{XR_TYPE_VIEW_LOCATE_INFO};
@@ -12258,6 +12337,17 @@ bool OpenXrLayer::CachePivotPoseDelta(XrTime time,
         ReexpressPoseDelta(source_pose_delta, InvertPose(view_pose_in_source));
     frame.space_pose_deltas[0] = {source_space, source_pose_delta};
     frame.space_pose_delta_count = 1;
+    if (!pivot_pose_delta_spare_.empty() && !cached_pivot_pose_deltas_.contains(time)) {
+        // One frame per Pivot drive: reuse a pruned frame's node instead of
+        // allocating one under mutex_.
+        pivot_pose_delta_spare_.key() = time;
+        pivot_pose_delta_spare_.mapped() = frame;
+        cached_pivot_pose_deltas_.insert(std::move(pivot_pose_delta_spare_));
+        while (cached_pivot_pose_deltas_.size() > kPivotPoseDeltaMaxEntries) {
+            cached_pivot_pose_deltas_.erase(cached_pivot_pose_deltas_.begin());
+        }
+        return true;
+    }
     return CachePivotPoseDeltaValue(cached_pivot_pose_deltas_, time, frame);
 }
 
@@ -12294,6 +12384,10 @@ void OpenXrLayer::CachePivotPoseDeltaForSpace(PivotPoseDeltaFrame& frame,
 }
 
 void OpenXrLayer::PrunePivotPoseDeltas(XrTime time) {
+    const auto keep_from = cached_pivot_pose_deltas_.upper_bound(time);
+    if (pivot_pose_delta_spare_.empty() && keep_from != cached_pivot_pose_deltas_.begin()) {
+        pivot_pose_delta_spare_ = cached_pivot_pose_deltas_.extract(std::prev(keep_from));
+    }
     PrunePivotPoseDeltaValues(cached_pivot_pose_deltas_, time);
 }
 
@@ -12328,9 +12422,36 @@ void OpenXrLayer::CacheDepthSubmissionGeometry(
         return;
     }
 
-    DepthSubmissionGeometry geometry;
-    geometry.space = space;
-    geometry.view_configuration_type = view_configuration_type;
+    // This runs for every located frame while depth is anchored. A frame
+    // reuses the node, and the geometry's storage, of one that was pruned.
+    auto frame = cached_depth_submission_geometry_.find(time);
+    if (frame == cached_depth_submission_geometry_.end()) {
+        if (depth_submission_geometry_spare_.empty()) {
+            frame = cached_depth_submission_geometry_.try_emplace(time).first;
+        } else {
+            depth_submission_geometry_spare_.key() = time;
+            std::vector<DepthSubmissionGeometry>& reused = depth_submission_geometry_spare_.mapped();
+            reused.resize(std::min<std::size_t>(reused.size(), 1));
+            if (!reused.empty()) {
+                reused.front().space = space;
+                reused.front().view_configuration_type = view_configuration_type;
+            }
+            frame = cached_depth_submission_geometry_.insert(std::move(depth_submission_geometry_spare_)).position;
+        }
+    }
+    std::vector<DepthSubmissionGeometry>& frame_geometry = frame->second;
+    auto existing = std::find_if(
+        frame_geometry.begin(), frame_geometry.end(),
+        [space, view_configuration_type](const DepthSubmissionGeometry& candidate) {
+            return candidate.space == space &&
+                   candidate.view_configuration_type == view_configuration_type;
+        });
+    if (existing == frame_geometry.end()) {
+        existing = frame_geometry.emplace(frame_geometry.end());
+        existing->space = space;
+        existing->view_configuration_type = view_configuration_type;
+    }
+    DepthSubmissionGeometry& geometry = *existing;
     geometry.native_poses.resize(native_views.size());
     geometry.render_poses.resize(render_views.size());
     geometry.native_fovs.resize(native_views.size());
@@ -12357,20 +12478,6 @@ void OpenXrLayer::CacheDepthSubmissionGeometry(
     for (size_t i = 0; i < native_views.size(); ++i) {
         copy_view(native_views[i], &geometry.native_poses[i], &geometry.native_fovs[i]);
         copy_view(render_views[i], &geometry.render_poses[i], &geometry.render_fovs[i]);
-    }
-
-    std::vector<DepthSubmissionGeometry>& frame_geometry =
-        cached_depth_submission_geometry_[time];
-    const auto existing = std::find_if(
-        frame_geometry.begin(), frame_geometry.end(),
-        [space, view_configuration_type](const DepthSubmissionGeometry& candidate) {
-            return candidate.space == space &&
-                   candidate.view_configuration_type == view_configuration_type;
-        });
-    if (existing != frame_geometry.end()) {
-        *existing = std::move(geometry);
-    } else {
-        frame_geometry.push_back(std::move(geometry));
     }
     while (cached_depth_submission_geometry_.size() > kMaxCachedDepthSubmissionFrames) {
         cached_depth_submission_geometry_.erase(cached_depth_submission_geometry_.begin());
@@ -12434,6 +12541,9 @@ void OpenXrLayer::PruneDepthSubmissionGeometry(XrTime time) {
     const auto keep_from = cached_depth_submission_geometry_.upper_bound(time);
     if (keep_from == cached_depth_submission_geometry_.begin()) {
         return;
+    }
+    if (depth_submission_geometry_spare_.empty()) {
+        depth_submission_geometry_spare_ = cached_depth_submission_geometry_.extract(std::prev(keep_from));
     }
     cached_depth_submission_geometry_.erase(cached_depth_submission_geometry_.begin(), keep_from);
 }
@@ -12820,7 +12930,9 @@ XrResult OpenXrLayer::LocateRuntimeViews(XrSession session,
     if (view_locate_info) turbo_trace_.Record("locate", turbo_trace_.NextId(), view_locate_info->displayTime);
     bool varjo_compatible = false;
     bool request_native_foveated_locates = false;
-    QuadViewsResolvedSettings quadviews_settings;
+    // The tuning only: the resolved settings' diagnostic binding would make
+    // this per-call copy allocate.
+    QuadViewsSettings quadviews_settings;
     {
         std::scoped_lock lock(mutex_);
         ReloadConfigIfNeeded();
@@ -13009,7 +13121,7 @@ XrResult OpenXrLayer::LocateRuntimeViews(XrSession session,
 }
 
 bool OpenXrLayer::SynthesizeQuadViewsFromStereo(std::span<const XrView> stereo_views,
-                                                const QuadViewsResolvedSettings& quadviews_settings,
+                                                const QuadViewsSettings& quadviews_settings,
                                                 double focus_yaw_radians,
                                                 double focus_pitch_radians,
                                                 uint32_t view_capacity_input,
@@ -13552,6 +13664,7 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
 void OpenXrLayer::ResetPivotPoseDeltaContinuityState() {
     pivotxr_last_matched_pose_delta_.reset();
     pivotxr_consecutive_pose_delta_misses_ = 0;
+    pivotxr_pose_delta_miss_logged_ = false;
 }
 
 void OpenXrLayer::ResetPivotActivationState() {
@@ -15108,6 +15221,12 @@ void OpenXrLayer::EngagePivotMotionProfile(size_t index) {
         pivotxr_snap_reference_pending_ = false;
         pivotxr_snap_reference_valid_ = false;
     }
+    // Only the engaged profile can hold a toggle latch, as with Snap Views.
+    // A latch left on a profile this one replaced would make that profile's
+    // Hold binding act as a toggle the next time it engages.
+    for (size_t other = 0; other < pivotxr_profile_input_states_.size(); ++other) {
+        if (other != index) pivotxr_profile_input_states_[other].toggle_latched = false;
+    }
     pivotxr_active_profile_index_ = index;
     pivotxr_engaged_ = true;
 }
@@ -15415,27 +15534,30 @@ bool OpenXrLayer::IsPivotXrActive() {
         SoundPlayer::Instance().PlayTransition(trigger.sound, false, dll_directory_,
                                                resolved_settings_.core.sound_volume);
     };
-    std::vector<InputBinding> claimed_view_inputs;
-    std::vector<std::string> polled_nudge_sets;
+    // This runs on every xrLocateSpace and xrLocateViews, under mutex_: the
+    // claim lists reuse their storage instead of allocating per call.
+    std::vector<const InputBinding*>& claimed_view_inputs = pivotxr_claimed_view_inputs_scratch_;
+    std::vector<std::string_view>& polled_nudge_sets = pivotxr_polled_nudge_sets_scratch_;
+    claimed_view_inputs.clear();
+    polled_nudge_sets.clear();
     auto claim_view_input = [&](const InputBinding& binding) {
         if (std::any_of(claimed_view_inputs.begin(), claimed_view_inputs.end(),
-                        [&](const InputBinding& claimed) { return SameInputBinding(claimed, binding); })) {
+                        [&](const InputBinding* claimed) { return SameInputBinding(*claimed, binding); })) {
             return false;
         }
-        claimed_view_inputs.push_back(binding);
+        claimed_view_inputs.push_back(&binding);
         return true;
     };
 
     // Arbitrate across all candidates: last pressed wins. The resolver prunes
     // colliding activation bindings while retaining every independent binding.
-    std::vector<size_t> profile_input_order;
-    if (pivotxr_active_profile_index_ < pivot.profiles.size()) {
-        profile_input_order.push_back(pivotxr_active_profile_index_);
-    }
-    for (size_t index = 0; index < pivot.profiles.size(); ++index) {
-        if (index != pivotxr_active_profile_index_) profile_input_order.push_back(index);
-    }
-    for (size_t i : profile_input_order) {
+    // The engaged profile reads its input first, then the others in order.
+    const size_t first_profile = pivotxr_active_profile_index_;
+    for (size_t step = 0; step < pivot.profiles.size(); ++step) {
+        const size_t i = first_profile >= pivot.profiles.size() ? step
+                         : step == 0                            ? first_profile
+                         : step <= first_profile                ? step - 1
+                                                                : step;
         const PivotXrResolvedProfile& profile = pivot.profiles[i];
         PivotProfileInputState& input_state = pivotxr_profile_input_states_[i];
         if (first_poll) {
@@ -15506,7 +15628,7 @@ bool OpenXrLayer::IsPivotXrActive() {
         if (nudge_set_input_owner && !profile.nudge_set_id.empty()) {
             nudge_set_input_owner =
                 std::find(polled_nudge_sets.begin(), polled_nudge_sets.end(),
-                          profile.nudge_set_id) == polled_nudge_sets.end();
+                          std::string_view(profile.nudge_set_id)) == polled_nudge_sets.end();
             if (nudge_set_input_owner) polled_nudge_sets.push_back(profile.nudge_set_id);
         }
         const bool behavior_active =

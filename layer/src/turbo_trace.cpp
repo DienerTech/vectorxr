@@ -13,13 +13,29 @@
 
 #include "depthxr/config_path.h"
 
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
 namespace depthxr {
 using namespace std::chrono_literals;
 namespace {
 constexpr std::int64_t kStallNs = 2'000'000'000;
 constexpr std::int64_t kReportNs = 5'000'000'000;
+// An idle producer (no OpenXR calls at all) freezes a snapshot only after
+// this much activity. Games stop calling while they load far more often
+// than they hang, and an idle producer rotates no history away: the first
+// frames before a load, or one frame between two loading pauses, would
+// otherwise fill every incident slot with near-identical copies.
+constexpr std::int64_t kIdleSnapshotActiveNs = 10'000'000'000;
+// The OS thread id, as the Threads census and the Frame Generation trace
+// print it, so recorder lines join to both.
 std::uint64_t ThreadId() {
+#if defined(_WIN32)
+    return GetCurrentThreadId();
+#else
     return static_cast<std::uint64_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+#endif
 }
 template <typename T> void Number(std::string& line, T value) {
     char buffer[32];
@@ -73,7 +89,7 @@ void TurboTimingTrace::Start(Logger& logger) {
         framegen_snapshot_due_ = false;
         last_framegen_snapshot_ns_.reset();
         start_ = std::chrono::steady_clock::now();
-        last_event_ns_ = idle_report_ns_ = 0;
+        last_event_ns_ = idle_report_ns_ = active_since_ns_ = 0;
         wall_unix_ms_ = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
         burst_until_ = start_ + 1s;
@@ -120,14 +136,15 @@ void TurboTimingTrace::SetDebugEnabledLocked(Logger& logger, bool enabled) {
             "The ordinary log keeps up to 100000 sampled lines per session. "
             "Queue=32768; background flush=250ms; stall threshold=2s. "
             "ns is monotonic since capture start; unixMs anchors exported tails; sequence detects lost history. "
-            "phase=enter/exit/stall tracks calls by id; a=call age ns on exit/stall. "
+            "phase=enter/exit/stall tracks calls by id; a=call age ns on exit/stall; thread is the OS thread id. "
+            "Recorder lines leave out the Turbo-trace prefix of the log's sampled copies. "
             "Clock metadata remains sampled (1s every 30s and on transitions/errors). "
             "Timing diagnostics do not measure GPU execution or ASW activity.");
     }
     {
         std::scoped_lock lock(mutex_);
         if (writer_failed_) return;
-        last_event_ns_ = NowNs();
+        last_event_ns_ = active_since_ns_ = NowNs();
         idle_report_ns_ = 0;
         burst_until_ = std::chrono::steady_clock::now() + 1s;
         enabled_.store(true, std::memory_order_release);
@@ -332,14 +349,17 @@ void TurboTimingTrace::Run(Logger& logger) {
             std::filesystem::rename(temporary, snapshot_path(log_path_, 0), error);
             return !error;
         };
-        bool was_stalled = false;
+        bool was_call_stalled = false;
+        bool was_idle = false;
         bool snapshot_failure_logged = false;
         bool framegen_failure_logged = false;
         bool sampled_cap_logged = false;
         std::uint64_t sampled_lines = 0;
         std::optional<std::int64_t> last_incident_snapshot_ns;
         for (;;) {
-            bool stalled = false;
+            bool call_stalled = false;
+            bool idle = false;
+            bool idle_snapshot = false;
             bool stopping;
             bool framegen_snapshot;
             std::uint64_t dropped, untracked;
@@ -362,7 +382,7 @@ void TurboTimingTrace::Run(Logger& logger) {
                     if (dropped || untracked) last_event_ns_ = ns;
                     for (auto& p : pending_) {
                         const auto token = p.token.load(std::memory_order_acquire);
-                        if (token && ns - p.started_ns >= kStallNs) stalled = true;
+                        if (token && ns - p.started_ns >= kStallNs) call_stalled = true;
                         if (token && ns - p.started_ns >= kStallNs &&
                             (!p.reported_ns || ns - p.reported_ns >= kReportNs)) {
                             batch.push_back({p.name, ns, p.thread, token, ++sequence_,
@@ -371,7 +391,12 @@ void TurboTimingTrace::Run(Logger& logger) {
                             burst_until_ = std::chrono::steady_clock::now() + 1s;
                         }
                     }
-                    if (ns - last_event_ns_ >= kStallNs) stalled = true;
+                    idle = ns - last_event_ns_ >= kStallNs;
+                    if (was_idle && !idle) {
+                        // Calls resumed: their stretch starts with the first new record.
+                        active_since_ns_ = batch.empty() ? last_event_ns_ : batch.front().ns;
+                    }
+                    idle_snapshot = idle && !was_idle && last_event_ns_ - active_since_ns_ >= kIdleSnapshotActiveNs;
                     if (ns - last_event_ns_ >= kStallNs &&
                         (!idle_report_ns_ || ns - idle_report_ns_ >= kReportNs)) {
                         batch.push_back({"producer.idle", ns, ThreadId(), 0, ++sequence_,
@@ -383,8 +408,10 @@ void TurboTimingTrace::Run(Logger& logger) {
                     ++sequence_, static_cast<std::int64_t>(dropped), static_cast<std::int64_t>(untracked), 0,
                     true, nullptr});
             }
+            // The recorder files hold nothing else: their lines leave out the
+            // "Turbo-trace " prefix the ordinary log's sampled copies carry.
             const auto format_event = [&](const Event& e) {
-                line = "Turbo-trace ns="; Number(line, e.ns);
+                line = "ns="; Number(line, e.ns);
                 line += " thread="; Number(line, e.thread);
                 line += " id="; Number(line, e.id);
                 line += " event="; line += e.name;
@@ -411,7 +438,7 @@ void TurboTimingTrace::Run(Logger& logger) {
             const bool incident = std::any_of(batch.begin(), batch.end(),
                                               [](const Event& e) { return IsIncident(e.name); }) &&
                                   (!last_incident_snapshot_ns || now_ns - *last_incident_snapshot_ns >= kReportNs);
-            if ((stalled && !was_stalled) || incident) {
+            if ((call_stalled && !was_call_stalled) || idle_snapshot || incident) {
                 if (incident) last_incident_snapshot_ns = now_ns;
                 if (!freeze(SnapshotPath, kSnapshots) && !snapshot_failure_logged) {
                     snapshot_failure_logged = true;
@@ -419,7 +446,8 @@ void TurboTimingTrace::Run(Logger& logger) {
                                     "continuous history is unaffected.");
                 }
             }
-            was_stalled = stalled;
+            was_call_stalled = call_stalled;
+            was_idle = idle;
             // Frame Generation events keep the history before them (the
             // presenter thread's runtime waits) in snapshots of their own.
             // RequestFrameGenSnapshot rate-limits them.
@@ -441,6 +469,7 @@ void TurboTimingTrace::Run(Logger& logger) {
                     break;
                 }
                 format_event(e);
+                line.insert(0, "Turbo-trace ");
                 if (logger.TryDebug(line)) ++sampled_lines;
             }
             if (stopping) break;

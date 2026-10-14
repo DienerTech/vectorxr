@@ -15,7 +15,11 @@ class Logger {
   public:
     ~Logger();
 
+    // Starts a session log. It does not prune: the folder is pruned at the
+    // next SetRetentionFiles, to the configured value.
     void Initialize(const std::filesystem::path& log_path);
+    // Prunes on the first call after Initialize and when the value changes,
+    // not on every config reload (those run on the game's frame thread).
     void SetRetentionFiles(int retention_files);
     void SetLevel(LogLevel level);
     void Error(const std::string& message);
@@ -31,6 +35,9 @@ class Logger {
     void FlushAtProcessExit();
     [[nodiscard]] bool IsDebugEnabled() const;
     [[nodiscard]] std::filesystem::path ActiveLogPath() const;
+    // Removes the session log unless an error was written to it, and writes
+    // nothing more until the next Initialize. Returns whether it was removed.
+    bool DiscardSessionLog();
 
   private:
     void PruneLocked();
@@ -47,6 +54,8 @@ class Logger {
     std::chrono::steady_clock::time_point last_stream_flush_time_{};
     LogLevel level_{LogLevel::Info};
     int retention_files_{7};
+    bool retention_applied_{false};
+    bool wrote_error_{false};
     LogLevel pending_duplicate_level_{LogLevel::Info};
     std::string pending_duplicate_message_;
     uint64_t pending_duplicate_count_{0};
