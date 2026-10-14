@@ -451,6 +451,15 @@ class TurboFrameTestPeer {
         layer.turbo_trace_.Start(layer.logger_);
         return layer.logger_.ActiveLogPath();
     }
+    static bool RecorderRunning() { return Layer().turbo_trace_.Enabled(); }
+    static XrResult DestroySession(XrSession session, PFN_xrDestroySession runtime) {
+        auto& layer = Layer();
+        const auto previous = layer.next_destroy_session_;
+        layer.next_destroy_session_ = runtime;
+        const XrResult result = layer.DestroySession(session);
+        layer.next_destroy_session_ = previous;
+        return result;
+    }
     static void EndRecorder() {
         Layer().turbo_trace_.Stop();
         Layer().logger_.SetLevel(LogLevel::Info);
@@ -2123,6 +2132,32 @@ void TestRecoveryBlockLogsWhatTurboDoes() {
     std::filesystem::remove_all(directory, error);
 }
 
+// Every FG session's flight recorder ended with the presenter's runtime.wait
+// open: xrDestroySession stopped it before the presenter was torn down.
+bool g_recorder_running_at_runtime_destroy = false;
+XrResult XRAPI_CALL RecordingDestroySession(XrSession) {
+    g_recorder_running_at_runtime_destroy = depthxr::TurboFrameTestPeer::RecorderRunning();
+    return XR_SUCCESS;
+}
+
+void TestDestroySessionRecordsUntilTheSessionIsGone() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    const auto directory = std::filesystem::temp_directory_path() /
+                           ("vxr-destroy-recorder-" + std::to_string(GetCurrentProcessId()));
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    depthxr::TurboFrameTestPeer::StartRecorder(directory / "frame.log");
+    Expect(depthxr::TurboFrameTestPeer::RecorderRunning(), "The flight recorder did not start");
+    Expect(depthxr::TurboFrameTestPeer::DestroySession(TestSession(), &RecordingDestroySession) == XR_SUCCESS,
+           "xrDestroySession failed");
+    Expect(g_recorder_running_at_runtime_destroy,
+           "xrDestroySession stopped the flight recorder before the runtime's session (and FG's presenter) was gone");
+    Expect(!depthxr::TurboFrameTestPeer::RecorderRunning(), "xrDestroySession left the flight recorder running");
+    depthxr::TurboFrameTestPeer::EndRecorder();
+    std::filesystem::remove_all(directory, error);
+}
+
 std::size_t Occurrences(const std::string& text, const std::string& needle) {
     std::size_t count = 0;
     for (std::size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + needle.size())) {
@@ -2378,6 +2413,7 @@ int main() {
     // Last: it points the layer's log at a file of its own.
     TestConfigWarningsLoggedOncePerKey();
     TestRecoveryBlockLogsWhatTurboDoes();
+    TestDestroySessionRecordsUntilTheSessionIsGone();
     std::cout << "depthxr_turbo_frame_tests passed\n";
     return 0;
 }

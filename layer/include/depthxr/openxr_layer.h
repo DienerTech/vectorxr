@@ -530,7 +530,9 @@ class OpenXrLayer {
     // EndSession only: releases an interlocked off-thread wait with a balancing
     // begin/empty submit, then waits a bounded time for it to complete.
     void ReleaseTurboPendingWaitForSessionEnd(XrSession session);
-    void ResetTurboFrameState();
+    // stop_recorder=false leaves the flight recorder running (xrDestroySession
+    // stops it once Frame Generation's presenter is down).
+    void ResetTurboFrameState(bool stop_recorder = true);
     // Frame pacing telemetry: logs a summary line (debug level) every ~5s so a
     // judder report can be localized to our drain, the runtime's end-frame, the
     // runtime's wait pacing, or upstream of the layer entirely.

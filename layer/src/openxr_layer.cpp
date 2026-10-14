@@ -2683,8 +2683,10 @@ XrResult OpenXrLayer::DestroySession(XrSession session) {
                         [this] { return framegen_.PresenterActivity(); },
                         framegen_teardowns_watched_.load(std::memory_order_acquire));
     // Join any in-flight turbo async wait before tearing the session down.
+    // The flight recorder keeps running until the runtime's session is gone:
+    // a hang in Frame Generation's presenter teardown is what it is for.
     watch.Step("joining Turbo's in-flight wait");
-    ResetTurboFrameState();
+    ResetTurboFrameState(false);
     bool ending_active = false;
     {
         std::scoped_lock lock(mutex_);
@@ -2741,10 +2743,12 @@ XrResult OpenXrLayer::DestroySession(XrSession session) {
         PinModulesForAbandonedPresenter();
         logger_.Error("xrDestroySession: the runtime's session is kept for the process's exit (Frame Generation's "
                       "presenter thread never left the runtime).");
+        turbo_trace_.Stop();
         return XR_SUCCESS;
     }
     watch.Step("in the runtime's xrDestroySession");
     const XrResult result = next_destroy_session_(session);
+    turbo_trace_.Stop();
     watch.Step("ending the bridges");
     if (destroying_active && XR_SUCCEEDED(result)) {
         if (const std::string shown = framegen_queue_.ShownLayersSummary(); !shown.empty()) logger_.Info(shown);
@@ -8007,7 +8011,7 @@ void OpenXrLayer::ReleaseTurboPendingWaitForSessionEnd(XrSession session) {
     }
 }
 
-void OpenXrLayer::ResetTurboFrameState() {
+void OpenXrLayer::ResetTurboFrameState(bool stop_recorder) {
     // Final metrics flush first (it takes turbo_mutex_ itself and joins the
     // async writer); a second call at teardown is a no-op.
     ResetTurboMetricsState();
@@ -8031,7 +8035,7 @@ void OpenXrLayer::ResetTurboFrameState() {
                       "continuing without it.");
     }
     // Stop the recorder only after the drain so a teardown stall is captured.
-    turbo_trace_.Stop();
+    if (stop_recorder) turbo_trace_.Stop();
     turbo_async_waits_before_begin_ = false;
     turbo_dropped_frame_log_budget_ = 5;
     end_frame_error_log_budget_ = 5;
