@@ -307,7 +307,8 @@ pub fn set_openxr_layer_enabled(
 
 // An enabled VectorXR registration other than the one about to be enabled.
 // A dev build, an old install or a per-user copy can each register VectorXR,
-// and the loader would load every enabled one into the same process.
+// and the loader would load every enabled one into the same process. One
+// whose manifest is gone cannot load, so it does not block.
 fn conflicting_vector_xr_registration<'a>(
     slices: &'a [OpenXrLayerRegistrySlice],
     slice: &str,
@@ -328,7 +329,12 @@ fn conflicting_vector_xr_registration<'a>(
         candidate_slice
             .layers
             .iter()
-            .find(|candidate| candidate.is_vector_xr && candidate.enabled && !is_target(candidate))
+            .find(|candidate| {
+                candidate.is_vector_xr
+                    && candidate.enabled
+                    && candidate.manifest_exists
+                    && !is_target(candidate)
+            })
             .map(|candidate| (candidate_slice, candidate))
     })
 }
@@ -1659,6 +1665,10 @@ mod slice_tests {
         );
         // Re-enabling the active one, or enabling another vendor's layer, is fine.
         assert!(conflicting_vector_xr_registration(&slices, "hklm64", installed).is_none());
+        // An enabled registration whose manifest is gone cannot load.
+        let mut removed_install = slices.clone();
+        removed_install[0].layers[2].manifest_exists = false;
+        assert!(conflicting_vector_xr_registration(&removed_install, "hklm64", dev).is_none());
         assert!(conflicting_vector_xr_registration(
             &slices,
             "hklm64",

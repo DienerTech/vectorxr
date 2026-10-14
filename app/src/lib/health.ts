@@ -52,7 +52,8 @@ function mostRecentSeenApp(seenApps: SeenApplication[]): SeenApplication | null 
 
 export function buildHealthSummary(input: BuildHealthSummaryInput): HealthSummary {
   const vectorXrLayer = findVectorXrLayer(input.openXrLayerSnapshot)
-  const enabledVectorXrLayers = vectorXrLayers(input.openXrLayerSnapshot).filter((layer) => layer.enabled)
+  // A registration whose manifest is gone cannot load, so it is no duplicate.
+  const enabledVectorXrLayers = vectorXrLayers(input.openXrLayerSnapshot).filter((layer) => layer.enabled && layer.manifestExists)
   const lastSeenApp = mostRecentSeenApp(input.seenApps)
   const checks: HealthCheckItem[] = [
     {
