@@ -9815,6 +9815,15 @@ XrResult OpenXrLayer::LocateSpace(XrSpace space, XrSpace base_space, XrTime time
         std::scoped_lock lock(mutex_);
         ReloadConfigIfNeeded();
         RefreshResolvedSettings();
+        // The flight recorder's view of where the app places its camera: the
+        // time it locates VIEW space at, against its views' (`locate`). Once
+        // per time: DCS locates VIEW space several times a frame.
+        if (turbo_trace_.Enabled() && time != last_locspace_time_ &&
+            (IsTrackedViewSpace(space) || IsTrackedViewSpace(base_space))) {
+            last_locspace_time_ = time;
+            turbo_trace_.Record("locspace", turbo_trace_.NextId(), time, static_cast<std::int64_t>(ClassifySpace(space)),
+                                static_cast<std::int64_t>(ClassifySpace(base_space)));
+        }
         // Head-relative eye direction must stay attached to the virtual head.
         // Applying the inverse camera rotation here moves MSFS's focus region
         // away from the user's eyes. Preserve the complete runtime result,

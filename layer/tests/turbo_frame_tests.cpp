@@ -652,6 +652,29 @@ class TurboFrameTestPeer {
         layer.tracked_view_spaces_.erase(view);
         layer.tracked_local_spaces_.erase(local);
     }
+    // The application's xrLocateSpace through the layer's hook, the
+    // runtime's being `runtime` (no settings file is read, and the settings
+    // are not resolved again).
+    static XrResult LocateSpace(XrSpace space, XrSpace base_space, XrTime time, PFN_xrLocateSpace runtime) {
+        auto& layer = Layer();
+        bool loaded = false;
+        PFN_xrLocateSpace previous = nullptr;
+        {
+            std::scoped_lock lock(layer.mutex_);
+            loaded = layer.has_loaded_config_;
+            previous = layer.next_locate_space_;
+            layer.has_loaded_config_ = true;
+            layer.resolved_settings_generation_ = layer.config_generation_;
+            layer.resolved_settings_session_ = layer.active_session_;
+            layer.next_locate_space_ = runtime;
+        }
+        XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
+        const XrResult result = layer.LocateSpace(space, base_space, time, &location);
+        std::scoped_lock lock(layer.mutex_);
+        layer.has_loaded_config_ = loaded;
+        layer.next_locate_space_ = previous;
+        return result;
+    }
     // Depth on with convergence: LocateViews shifts each eye's projection.
     static void ConvergeVarjoDepth(double convergence) {
         auto& layer = Layer();
@@ -3335,6 +3358,56 @@ void TestTopologyNamesLayerSpaces() {
     std::filesystem::remove_all(directory, error);
 }
 
+XrResult XRAPI_CALL LocatedSpace(XrSpace, XrSpace, XrTime, XrSpaceLocation* location) {
+    location->locationFlags = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT;
+    location->pose.orientation.w = 1.0f;
+    return XR_SUCCESS;
+}
+
+// Star Citizen's images turn less far than the head poses it submits. The
+// flight recorder's `locspace` row tells when the game locates VIEW space
+// (its camera), against its xrLocateViews (`locate`): once per time, with
+// both spaces' kinds, and never for locates of other spaces.
+void TestRecorderRecordsViewSpaceLocates() {
+    using Peer = depthxr::TurboFrameTestPeer;
+    const auto directory = std::filesystem::temp_directory_path() /
+                           ("vxr-locspace-" + std::to_string(GetCurrentProcessId()));
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    const auto log = Peer::StartRecorder(directory / "frame.log");
+    const XrSpace view = reinterpret_cast<XrSpace>(0x5201), local = reinterpret_cast<XrSpace>(0x5202);
+    const XrSpace action = reinterpret_cast<XrSpace>(0x5203);
+    Peer::TrackSpaces(view, local);
+    constexpr XrTime kFrame = 30'000'000'000, kNext = 30'011'111'111, kLater = 30'022'222'222;
+    // VIEW in LOCAL, then again and the other way round at the same time
+    // (DCS locates VIEW space several times a frame): one row.
+    Expect(Peer::LocateSpace(view, local, kFrame, &LocatedSpace) == XR_SUCCESS &&
+               Peer::LocateSpace(view, local, kFrame, &LocatedSpace) == XR_SUCCESS &&
+               Peer::LocateSpace(local, view, kFrame, &LocatedSpace) == XR_SUCCESS,
+           "A VIEW-space locate failed");
+    // An action space in LOCAL: no row.
+    Expect(Peer::LocateSpace(action, local, kNext, &LocatedSpace) == XR_SUCCESS, "An action-space locate failed");
+    // LOCAL in VIEW at a new time: a row.
+    Expect(Peer::LocateSpace(local, view, kLater, &LocatedSpace) == XR_SUCCESS, "A later VIEW-space locate failed");
+    Peer::EndRecorder();
+    std::string recording;
+    for (unsigned part = 0; part < 2; ++part) {
+        std::ifstream stream(depthxr::TurboTimingTrace::RecorderPath(log, part));
+        recording.append(std::istreambuf_iterator<char>(stream), {});
+    }
+    Expect(Occurrences(recording, " event=locspace ") == 2,
+           "The recorder did not hold one locspace row per VIEW-space locate time");
+    Expect(recording.find(" event=locspace a=" + std::to_string(kFrame) + " b=1 c=2 ") != std::string::npos,
+           "VIEW located in LOCAL was not recorded with its time and kinds (1 VIEW, 2 LOCAL)");
+    Expect(recording.find(" event=locspace a=" + std::to_string(kLater) + " b=2 c=1 ") != std::string::npos,
+           "LOCAL located in VIEW was not recorded with its time and kinds");
+    Expect(recording.find(" event=locspace a=" + std::to_string(kNext) + " ") == std::string::npos,
+           "An action space's locate was recorded as a VIEW-space locate");
+    Peer::ForgetSpaces(view, local);
+    Peer::ReleaseLog(directory / "released.log");
+    std::filesystem::remove_all(directory, error);
+}
+
 // With Depth's convergence set, the application is given (and submits)
 // focus FOVs LocateViews shifted. The submitted focus check compares them
 // with those, not with the runtime's raw ones: a game that submits what it
@@ -3525,6 +3598,7 @@ int main() {
     TestFramePacingLineUnderFrameGen();
     TestDestroySpaceLetsGoBeforeTheRuntime();
     TestTopologyNamesLayerSpaces();
+    TestRecorderRecordsViewSpaceLocates();
     std::cout << "depthxr_turbo_frame_tests passed\n";
     return 0;
 }

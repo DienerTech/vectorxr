@@ -1656,6 +1656,9 @@ class OpenXrLayer {
     bool IsHeadRelativeEyeGaze(XrSpace space, XrSpace base_space) const;
     std::unordered_set<XrSpace> tracked_local_spaces_;
     std::unordered_set<XrSpace> tracked_stage_spaces_;
+    // The time of the flight recorder's last `locspace` row (mutex_): an app
+    // that locates VIEW space several times a frame records it once.
+    XrTime last_locspace_time_{0};
     std::vector<XrPosef> cached_eye_offset_poses_;
     std::vector<XrView> eye_offset_views_scratch_;
     XrTime cached_eye_offsets_display_time_{0};
