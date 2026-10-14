@@ -2159,7 +2159,9 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
             logger_.Info("No config file found. Using default settings.");
         }
     }
-    if (config_.core.track_seen_apps) {
+    // An instance with no extension cannot create a session: MSFS 2024's
+    // probe of the runtime is not a launch (it doubled MSFS's count).
+    if (config_.core.track_seen_apps && instance_enabled_extension_count_ > 0) {
         std::string seen_apps_error;
         if (!RecordSeenApp(current_exe_name_, &seen_apps_error)) {
             logger_.Debug("Unable to record seen app: " + seen_apps_error);
