@@ -261,6 +261,14 @@ class TurboFrameTestPeer {
     }
     // The settings file is read again now (as the layer's watcher does).
     static void PollConfigFile() { Layer().PollConfigFile(); }
+    // Logs to `log` from now on, as a new instance does.
+    static void StartLog(const std::filesystem::path& log) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.BeginInstanceLogLocked(log);
+    }
+    // The frame that follows a logged wait for a steady cadence.
+    static void CadenceJustStabilized() { Layer().turbo_cadence_pause_logged_ = true; }
     static ConfigDocument LoadedConfig() {
         auto& layer = Layer();
         std::scoped_lock lock(layer.mutex_);
@@ -2076,6 +2084,45 @@ void TestConfigReloadWhileFrameGenOwnsPacing() {
     std::filesystem::remove_all(recovery, error);
 }
 
+// velocity7's Star Citizen launch after a normal exit logged "frame cadence
+// stabilized; pipelining engages" right before the recovery block that kept
+// Turbo off, and nothing when the app's Turbo Safety clear let Turbo retry.
+void TestRecoveryBlockLogsWhatTurboDoes() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    const auto directory = std::filesystem::temp_directory_path() /
+                           ("vxr-recovery-log-" + std::to_string(GetCurrentProcessId()));
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    std::filesystem::create_directories(directory / "recovery");
+    depthxr::TurboFrameTestPeer::StartLog(directory / "recovery.log");
+    depthxr::TurboFrameTestPeer::ConfigureRecovery(directory / "recovery");
+    // An earlier process of this setup ended with Turbo armed. Process ids
+    // are multiples of four, so this one never runs.
+    const auto marker = directory / "recovery" / "4294967291-1-1.json";
+    std::ofstream(marker) << R"({"version": 1, "fingerprint": "turbo-frame-failure-simulation", "state": "armed", )"
+                          << R"("processCreated": "1", "processId": 4294967291, "updatedAtUnixMilliseconds": 1})";
+    depthxr::TurboFrameTestPeer::CadenceJustStabilized();
+    const auto end_info = FrameEndInfo();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
+           "A frame under a recovery block failed");
+    std::string text = depthxr::TurboFrameTestPeer::Log();
+    Expect(text.find("Turbo recovery: The previous Turbo session ended unexpectedly") != std::string::npos,
+           "The recovery block was not logged");
+    Expect(text.find("pipelining engages") == std::string::npos,
+           "A recovery block that keeps Turbo off logged that pipelining engages");
+
+    std::filesystem::remove(marker); // The app's Turbo Safety clear.
+    Expect(AppFrame(end_info) == XR_SUCCESS, "The frame after the app's clear failed");
+    text = depthxr::TurboFrameTestPeer::Log();
+    Expect(text.find("Turbo recovery block cleared via the VectorXR app; Turbo retries.") != std::string::npos,
+           "The app's clear of the recovery block was not logged");
+    Expect(text.find("Turbo mode enabled via") == std::string::npos && text.find("Turbo mode disabled via") == std::string::npos,
+           "The app's clear was logged as a toggle press");
+    depthxr::TurboFrameTestPeer::ConfigureRecovery({});
+    std::filesystem::remove_all(directory, error);
+}
+
 std::size_t Occurrences(const std::string& text, const std::string& needle) {
     std::size_t count = 0;
     for (std::size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + needle.size())) {
@@ -2330,6 +2377,7 @@ int main() {
     TestQuadViewsOsdTagFollowsBegunConfiguration();
     // Last: it points the layer's log at a file of its own.
     TestConfigWarningsLoggedOncePerKey();
+    TestRecoveryBlockLogsWhatTurboDoes();
     std::cout << "depthxr_turbo_frame_tests passed\n";
     return 0;
 }

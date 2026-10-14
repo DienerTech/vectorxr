@@ -6339,16 +6339,22 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                                turbo_seq_state_ == TurboSequencedState::kEngaging;
     }
     const bool cadence_countable = turbo_cadence_ready_;
+    // While a recovery block holds, Turbo engages on nothing but a retry, so
+    // the cadence lines below would only promise an engagement.
+    const bool recovery_blocked_before = turbo_recovery_blocked_.load();
+    bool cadence_stabilized = false;
     if (turbo_engaged && !turbo_cadence_ready_ && !pipeline_established) {
         // Delay the first engage until the app renders steadily.
         turbo_engaged = false;
         if (!turbo_cadence_pause_logged_) {
-            logger_.Info("Turbo: waiting for a stable renderable frame cadence before pipelining "
-                         "(app loading, hidden, or hitching); engages automatically.");
+            if (!recovery_blocked_before) {
+                logger_.Info("Turbo: waiting for a stable renderable frame cadence before pipelining "
+                             "(app loading, hidden, or hitching); engages automatically.");
+            }
             turbo_cadence_pause_logged_ = true;
         }
     } else if (turbo_engaged && turbo_cadence_pause_logged_) {
-        logger_.Info("Turbo: frame cadence stabilized; pipelining engages.");
+        cadence_stabilized = true;
         turbo_cadence_pause_logged_ = false;
     }
 
@@ -6370,6 +6376,12 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
             turbo_engaged = false;
             if (!was_blocked) logger_.Info("Turbo recovery: " + turbo_recovery_.Reason());
         }
+    }
+    // Only now is it known whether pipelining really engages: a recorded
+    // verdict can suspend Turbo and a recovery block keep it off, and each
+    // logs its own reason.
+    if (cadence_stabilized && turbo_engaged) {
+        logger_.Info("Turbo: frame cadence stabilized; pipelining engages.");
     }
     turbo_effective_async_.store(turbo_pacing_mode_ == TurboPacingMode::kAsync);
     const bool was_effective = turbo_effective_active_.exchange(turbo_engaged);
@@ -13582,11 +13594,17 @@ bool OpenXrLayer::IsTurboActive() {
     const bool was_pressed_this_call = binding_down && !turbo_toggle_binding_was_down_;
     turbo_toggle_binding_was_down_ = binding_down;
 
-    if (was_pressed_this_call || turbo_recovery_.ConsumeClearRequest()) {
+    // The app's Turbo Safety clear retries like a press, but never toggles.
+    const bool cleared_in_app = !was_pressed_this_call && turbo_recovery_.ConsumeClearRequest();
+    if (was_pressed_this_call || cleared_in_app) {
+        const std::string source = cleared_in_app
+            ? std::string("the VectorXR app")
+            : BindingLabel(ActingBinding(turbo_toggle_pressed_, resolved_settings_.turbo.toggle_bindings));
         if (turbo_recovery_blocked_.load()) {
             turbo_recovery_retry_requested_ = true;
             turbo_toggle_enabled_ = true;
             turbo_recovery_blocked_.store(false);
+            logger_.Info("Turbo recovery block cleared via " + source + "; Turbo retries.");
         } else if (turbo_auto_suspended_.load(std::memory_order_relaxed)) {
             // A toggle press after an auto-suspend re-arms turbo rather than
             // flipping the enable state.
@@ -13603,9 +13621,8 @@ bool OpenXrLayer::IsTurboActive() {
                 turbo_pacing_verdict_pending_ = true;
             }
             turbo_toggle_enabled_ = true;
-            logger_.Info("Turbo mode re-armed after auto-suspend via " +
-                         BindingLabel(ActingBinding(turbo_toggle_pressed_, resolved_settings_.turbo.toggle_bindings)) + ".");
-        } else {
+            logger_.Info("Turbo mode re-armed after auto-suspend via " + source + ".");
+        } else if (was_pressed_this_call) {
             turbo_toggle_enabled_ = !turbo_toggle_enabled_;
             logger_.Info(std::string("Turbo mode ") + (turbo_toggle_enabled_ ? "enabled" : "disabled") +
                          " via " + BindingLabel(ActingBinding(turbo_toggle_pressed_, resolved_settings_.turbo.toggle_bindings)) + ".");
