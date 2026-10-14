@@ -7152,8 +7152,9 @@ void TestRuntimeHalvingRetriesBriefly() {
 // of it. Once the presenter thread's waits report the halving, Auto goes
 // back to full rate (frames pass straight through, as Dynamic stands down),
 // logs why once, and stays there through its hold while the runtime still
-// halves; once the runtime gives every refresh again, a slow game engages
-// Auto before the hold would have ended.
+// halves; once the runtime gives every refresh again, a game at 60 fps,
+// whose shorter frames' waits show that, engages Auto before the hold would
+// have ended.
 void TestAutoStandsDownForRuntimeHalving() {
     const std::string name = "auto stands down for halving";
     FrameGenPresenter presenter;
@@ -7215,9 +7216,73 @@ void TestAutoStandsDownForRuntimeHalving() {
     presenter.Stop();
     Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
     const std::vector<std::string> lines = log.Lines("-> full rate: the runtime holds frames to half rate");
-    Check(lines.size() == 1 && lines.front().find("retrying in 6 s") != std::string::npos,
+    Check(lines.size() == 1 &&
+              lines.front().find("frames pass straight through, retrying in 6 s.") != std::string::npos &&
+              lines.front().find("sooner") == std::string::npos,
           name + ": logged once (" + std::to_string(lines.size()) + " lines" +
               (lines.empty() ? std::string() : ": " + lines.front()) + ")");
+}
+
+// Auto stood down for runtime halving, then the runtime gives every refresh
+// again (its smoothing turned off) with a game slower than the refresh rate
+// (frames of 1.35 refreshes), as in issue #95: its waits, asked for late and
+// released two refreshes apart either way, cannot show it, so the report
+// and Auto's hold stay until the hold runs out. Auto then engages, the
+// presenter thread's waits clear the report, and it stays engaged.
+void TestAutoHalvingHoldRunsOut() {
+    const std::string name = "auto halving hold runs out";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.throttled = true;
+    SessionLog log("auto-halving-hold");
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartHalving(presenter, gpu, runtime, FrameGenMultiplier::kAuto, app, owned, log.logger.get());
+    // No probing down: engaged again, it stays engaged unless it stands down.
+    presenter.SetAutoPolicy(200ms, 30s, 600ms, 300ms);
+    FrameGenDynamicPolicy policy = QuickDynamic();
+    policy.hold = policy.hold_max = 3000ms;
+    presenter.SetDynamicPolicy(policy);
+    const auto work = PeriodsOfWork(kPeriod, 1.35);
+    RunWork(*app, 5000ms, work, [&](const XrFrameState&) {
+        const FrameGenStatus status = presenter.Status();
+        return status.runtime_halving && status.full_rate;
+    });
+    const auto stood_down = std::chrono::steady_clock::now();
+    FrameGenStatus status = presenter.Status();
+    Check(status.runtime_halving && status.full_rate && status.multiplier == 1,
+          name + ": reported, Auto goes back to full rate (" + std::to_string(status.multiplier) + "x)");
+    runtime.throttled = false;
+    bool engaged = false;
+    bool cleared = false;
+    RunWork(*app, 1500ms, work, [&](const XrFrameState&) {
+        const FrameGenStatus now = presenter.Status();
+        engaged = engaged || now.multiplier > 1;
+        cleared = cleared || !now.runtime_halving;
+        return false;
+    });
+    Check(!engaged && !cleared,
+          name + ": the slow game's waits leave the report, and Auto stays at full rate through its hold");
+    RunWork(*app, 4000ms, work, [&](const XrFrameState&) {
+        const FrameGenStatus now = presenter.Status();
+        return now.multiplier >= 2 && now.threaded && !now.runtime_halving;
+    });
+    const double after = Seconds(std::chrono::steady_clock::now() - stood_down);
+    status = presenter.Status();
+    Check(status.multiplier >= 2 && status.threaded && !status.runtime_halving && after > 2.5,
+          name + ": once the hold runs out, Auto engages and the presenter thread's waits clear the report (" +
+              std::to_string(status.multiplier) + "x after " + std::to_string(after) + " s)");
+    bool stood_down_again = false;
+    RunWork(*app, 1000ms, work, [&](const XrFrameState&) {
+        stood_down_again = stood_down_again || presenter.Status().multiplier < 2;
+        return false;
+    });
+    Check(!stood_down_again && !presenter.Status().runtime_halving, name + ": Auto stays engaged");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    const std::vector<std::string> lines = log.Lines("-> full rate: the runtime holds frames to half rate");
+    Check(lines.size() == 1, name + ": stood down once (" + std::to_string(lines.size()) + " lines)");
 }
 
 // Auto against a runtime holding the frames presented to half its refresh
@@ -8455,6 +8520,7 @@ int main(int argc, char** argv) {
     RUN(TestRuntimeHalvingClearedDoesNotStandDown);
     RUN(TestRuntimeHalvingRetriesBriefly);
     RUN(TestAutoStandsDownForRuntimeHalving);
+    RUN(TestAutoHalvingHoldRunsOut);
     RUN(TestAutoKeepsReportedHalving);
     // SteamVR with Pimax's headset driver.
     RUN(TestEchoRuntimeKeepsRefresh);

@@ -1727,8 +1727,7 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
         if (logger_) {
             logger_->Info("Frame Generation automatic multiplier " + MultiplierText(before) + " -> full rate: " +
                           kHalvingStandDown + "; frames pass straight through, retrying in " +
-                          Number(std::chrono::duration<double>(hold).count(), 0) +
-                          " s (sooner once the runtime gives every refresh).");
+                          Number(std::chrono::duration<double>(hold).count(), 0) + " s.");
         }
         return;
     }
@@ -1761,7 +1760,12 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
         }
     }
     const std::uint32_t before = auto_multiplier_;
-    // A halving hold ends early once the runtime gives every refresh again.
+    // A halving hold ends early where the game's own waits clear the report.
+    // Only waits asked for well within a refresh, or released at the next
+    // one, can (NoteRuntimeHalvingLocked): a game taking longer than a
+    // refresh for every frame, the kind Auto engages for, gives none that
+    // do, and its hold runs out before the presenter thread's waits judge
+    // the runtime again.
     const bool held = (inline_hold_until_ && now < *inline_hold_until_) ||
                       (runtime_halving_ && auto_halving_hold_until_ && now < *auto_halving_hold_until_);
     bool gave_up_inline = false;
