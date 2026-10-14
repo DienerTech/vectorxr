@@ -35,6 +35,7 @@ int main() {
     depthxr::TurboRecoveryGuard next;
     next.Configure(root, identity);
     Expect(!next.Prepare(true, false, "async", dead) && next.Blocked(), "Dead process should block the next run");
+    Expect(next.Reason().find("did not end normally") != std::string::npos, "A dead process's block should say it did not end normally");
     next.Complete();
     Expect(!next.Prepare(true, false, "async", dead), "A clean Turbo-off run must preserve the interruption");
     Expect(next.Prepare(false, false, "async", dead), "Opt-out must bypass recovery");
@@ -57,6 +58,7 @@ int main() {
     depthxr::TurboRecoveryGuard failed;
     failed.Configure(root, identity);
     Expect(!failed.Prepare(true, false, "async", alive), "Runtime failures survive clean shutdown and do not depend on process death");
+    Expect(failed.Reason().find("runtime errors") != std::string::npos, "A runtime failure's block should name the runtime errors");
     Expect(failed.Prepare(true, true, "async", dead), "Failure recovery can be explicitly retried");
     failed.Prepare(false, false, "async", dead);
     depthxr::TurboRecoveryGuard bypassed;

@@ -220,6 +220,7 @@ bool TurboRecoveryGuard::Prepare(bool enabled, bool retry, const std::string& mo
     }
     if (!checked_) {
         interrupted_.clear();
+        bool runtime_errors = false;
         std::error_code ec;
         if (std::filesystem::exists(root_, ec)) {
             for (auto iterator = std::filesystem::directory_iterator(root_, ec);
@@ -241,6 +242,7 @@ bool TurboRecoveryGuard::Prepare(bool enabled, bool retry, const std::string& mo
                 if (*state == "failed" || (*state == "armed" && !alive(static_cast<std::uint32_t>(*pid), created))) {
                     ArchiveFault(entry.path());
                     interrupted_.push_back(entry.path());
+                    runtime_errors |= *state == "failed";
                 }
             }
         }
@@ -252,7 +254,14 @@ bool TurboRecoveryGuard::Prepare(bool enabled, bool retry, const std::string& mo
         }
         checked_ = true;
         blocked_ = !retry && !interrupted_.empty();
-        if (blocked_) reason_ = "The previous Turbo session ended unexpectedly or encountered runtime errors. Turbo is disabled for this application and runtime. Use the Turbo toggle to retry.";
+        // An armed marker outlives only an exit that was not normal: OpenXR
+        // teardown and a normal process exit both remove it.
+        if (blocked_) {
+            reason_ = std::string(runtime_errors
+                ? "The previous Turbo session stopped Turbo after runtime errors."
+                : "The previous Turbo session did not end normally (a crash, a hang or a forced close).") +
+                " Turbo is disabled for this application and runtime. Use the Turbo toggle to retry.";
+        }
     }
     if (blocked_) return false;
     if (!armed_ || retry) {
