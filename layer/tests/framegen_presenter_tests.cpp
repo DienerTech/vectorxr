@@ -166,6 +166,7 @@ struct GpuLog {
     bool threaded{false};
     bool depth{false};
     std::atomic<bool> memory_pressure{false}; // process video memory near its budget
+    std::atomic<int> working_memory_queries{0}; // WorkingMemoryBytes calls
     std::atomic<int> depth_captures{0};
     std::vector<FrameGenViewSubmission> last;
     FrameGenImage last_capture;
@@ -708,6 +709,10 @@ class FakeGpu final : public FrameGenGpu {
     std::optional<FrameGenMemoryBudget> MemoryBudget() const override {
         constexpr std::uint64_t gigabyte = 1024ull * 1024 * 1024;
         return FrameGenMemoryBudget{log_->memory_pressure ? 31 * gigabyte + gigabyte / 2 : 16 * gigabyte, 32 * gigabyte};
+    }
+    std::uint64_t WorkingMemoryBytes() const override {
+        ++log_->working_memory_queries;
+        return 64ull * 1024 * 1024;
     }
     bool SupportsDepth() const override { return log_->depth; }
     XrSwapchainUsageFlags RequiredDepthUsage() const override {
@@ -1435,6 +1440,28 @@ void TestInterpolationPacing() {
     Check(!runtime.ordering_violation && !g_release_violation, "runtime and image calls stayed ordered");
     presenter.Stop();
     Check(!presenter.Started(), "stop releases the session");
+}
+
+// The backend's working memory (a driver query per image it holds) feeds
+// only the log: asked for at most once a second, not on every real frame.
+void TestWorkingMemoryAskedOncePerSecond() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate);
+    App app(presenter, runtime);
+    const auto start = std::chrono::steady_clock::now();
+    for (int i = 0; i < 40; ++i) {
+        app.Frame();
+    }
+    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    const int executes = gpu.executes.load();
+    const int queries = gpu.working_memory_queries.load();
+    Check(executes >= 30, "working memory: frames were generated (" + std::to_string(executes) + ")");
+    Check(queries >= 1 && queries <= 1 + static_cast<int>(seconds),
+          "working memory: asked " + std::to_string(queries) + " times for " + std::to_string(executes) +
+              " executes in " + std::to_string(seconds) + " s");
+    presenter.Stop();
 }
 
 void TestExtrapolationPacing() {
@@ -8209,6 +8236,7 @@ int main(int argc, char** argv) {
     }
     const HANDLE policy = std::getenv("FG_TEST_SERIAL") ? nullptr : StartPolicyTests();
     RUN(TestInterpolationPacing);
+    RUN(TestWorkingMemoryAskedOncePerSecond);
     RUN(TestExtrapolationPacing);
     RUN(TestTripleInterpolation);
     RUN(TestQuadExtrapolation);

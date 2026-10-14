@@ -3432,7 +3432,12 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
             window = gpu_->LastGpuWindow();
             timings = gpu_->TakeTimings();
             depth = gpu_->DepthStatus();
-            working_bytes = gpu_->WorkingMemoryBytes();
+            // Only the log reads it, and the backend asks the driver about
+            // each of its images for it (50-200 of them): once a second.
+            if (const auto now = Clock::now(); now >= working_bytes_due_) {
+                working_bytes = gpu_->WorkingMemoryBytes();
+                working_bytes_due_ = now + std::chrono::seconds(1);
+            }
             if (tuning.hardware_flow) {
                 hardware_status = gpu_->HardwareFlowStatus();
             }

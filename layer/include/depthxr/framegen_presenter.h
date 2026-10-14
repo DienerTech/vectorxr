@@ -1137,6 +1137,8 @@ class FrameGenPresenter {
     std::optional<FrameGenMemoryBudget> memory_budget_;
     std::chrono::steady_clock::time_point memory_checked_at_{};
     std::uint64_t working_bytes_{0}; // the backend's own images after the last Execute (log)
+    // When Generate next asks the backend for working_bytes_ (under gpu_mutex_).
+    std::chrono::steady_clock::time_point working_bytes_due_{};
     std::uint64_t output_bytes_{0};  // output swapchain images, estimated from their size (log)
     std::uint64_t output_set_bytes_{0}; // one set of them
     // Since when the budget has had room for another set (UpdateAutoLocked),
