@@ -812,6 +812,9 @@ class OpenXrLayer {
                                   uint32_t width,
                                   uint32_t height,
                                   int64_t format);
+    // Acquires and waits for the image of `target` to draw into; false (with
+    // `reason`) when there is none this frame.
+    bool AcquireFocusSharpenImage(QuadViewsCompositionTarget& target, uint32_t* index, const char** reason);
     // Sharpens native focus views (indices 2/3) in place: renders each into one of
     // our swapchains and repoints its subImage. Best-effort — any view that cannot
     // be sharpened is left untouched (submits the app's unsharpened focus).

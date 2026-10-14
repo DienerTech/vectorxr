@@ -13974,6 +13974,46 @@ bool OpenXrLayer::EnsureFocusSharpenTarget(QuadViewsCompositionTarget& target,
     return true;
 }
 
+bool OpenXrLayer::AcquireFocusSharpenImage(QuadViewsCompositionTarget& target,
+                                           uint32_t* index,
+                                           const char** reason) {
+    XrResult result = XR_SUCCESS;
+    if (target.awaiting_wait) {
+        // Acquired before, its wait timed out: waited for again, never
+        // acquired a second time (a second image would leave the runtime
+        // given the older one from then on, one frame stale).
+        *index = target.awaiting_index;
+    } else {
+        XrSwapchainImageAcquireInfo acquire_info{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+        result = next_acquire_swapchain_image_(target.swapchain, &acquire_info, index);
+        if (XR_FAILED(result) || *index >= target.image_render_target_views.size()) {
+            *reason = "sharpen output acquire failed";
+            return false;
+        }
+    }
+    XrSwapchainImageWaitInfo wait_info{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+    wait_info.timeout = kInternalSwapchainWaitTimeout;
+    result = next_wait_swapchain_image_(target.swapchain, &wait_info);
+    if (result == XR_TIMEOUT_EXPIRED) {
+        // The runtime has not handed the image back: it is neither drawn into
+        // nor released, and the focus view goes out unsharpened this frame.
+        target.awaiting_wait = true;
+        target.awaiting_index = *index;
+        *reason = "sharpen output wait timed out";
+        return false;
+    }
+    target.awaiting_wait = false;
+    if (XR_FAILED(result)) {
+        XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+        if (XR_SUCCEEDED(next_release_swapchain_image_(target.swapchain, &release_info))) {
+            NoteFrameGenRelease(target.swapchain, *index);
+        }
+        *reason = "sharpen output wait failed";
+        return false;
+    }
+    return true;
+}
+
 void OpenXrLayer::SharpenNativeFocusViews(std::vector<XrCompositionLayerProjectionView>& views,
                                           XrTime display_time) {
     const double sharpen_amount = Clamp(resolved_settings_.quadviews.foveate_sharpness, 0.0, 100.0) / 100.0;
@@ -14086,21 +14126,7 @@ void OpenXrLayer::SharpenNativeFocusViews(std::vector<XrCompositionLayerProjecti
         }
 
         uint32_t output_index = 0;
-        XrSwapchainImageAcquireInfo acquire_info{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
-        XrResult result = next_acquire_swapchain_image_(target.swapchain, &acquire_info, &output_index);
-        if (XR_FAILED(result) || output_index >= target.image_render_target_views.size()) {
-            reason = "sharpen output acquire failed";
-            continue;
-        }
-        XrSwapchainImageWaitInfo wait_info{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
-        wait_info.timeout = kInternalSwapchainWaitTimeout;
-        result = next_wait_swapchain_image_(target.swapchain, &wait_info);
-        if (XR_FAILED(result)) {
-            XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-            if (XR_SUCCEEDED(next_release_swapchain_image_(target.swapchain, &release_info))) {
-                NoteFrameGenRelease(target.swapchain, output_index);
-            }
-            reason = "sharpen output wait failed";
+        if (!AcquireFocusSharpenImage(target, &output_index, &reason)) {
             continue;
         }
 
@@ -14151,8 +14177,7 @@ void OpenXrLayer::SharpenNativeFocusViews(std::vector<XrCompositionLayerProjecti
 
         framegen_.CaptureOnRelease(target.swapchain, output_index);
         XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-        result = next_release_swapchain_image_(target.swapchain, &release_info);
-        if (XR_FAILED(result)) {
+        if (XR_FAILED(next_release_swapchain_image_(target.swapchain, &release_info))) {
             reason = "sharpen output release failed";
             continue;
         }

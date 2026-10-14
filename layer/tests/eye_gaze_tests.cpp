@@ -261,6 +261,15 @@ public:
     static bool SharpenTarget(uint32_t width, uint32_t height) {
         return Layer().EnsureFocusSharpenTarget(Layer().d3d11_focus_sharpen_.targets[0], width, height, 29);
     }
+    // A built target with three images (render target views stand-ins).
+    static void SharpenTargetBuilt() {
+        auto& target = Layer().d3d11_focus_sharpen_.targets[0];
+        target.swapchain = Handle<XrSwapchain>(300);
+        target.image_render_target_views.assign(3, nullptr);
+    }
+    static bool SharpenImage(uint32_t* index, const char** reason) {
+        return Layer().AcquireFocusSharpenImage(Layer().d3d11_focus_sharpen_.targets[0], index, reason);
+    }
     // The swapchains the compositor prewarm takes as its four inputs.
     static std::set<uintptr_t> PrewarmInputs() {
         std::array<OpenXrLayer::SwapchainInfo*, 4> inputs{};
@@ -430,6 +439,20 @@ int main() {
         Expect(!Peer::SharpenTarget(1000, 800) && sharpen_creates == 1 && sharpen_destroys == 1,
                "a sharpen target must not be rebuilt every frame for the same size and format");
         Expect(!Peer::SharpenTarget(1200, 800) && sharpen_creates == 2, "a new size must be tried again");
+        // A timed-out wait keeps its image: not drawn into, not released, and
+        // waited for again next frame instead of a second image acquired.
+        Peer::SharpenRuntime(); Peer::SharpenTargetBuilt();
+        sharpen_wait_result = XR_TIMEOUT_EXPIRED;
+        uint32_t timed_out_image = 99, image = 99;
+        const char* reason = "ok";
+        Expect(!Peer::SharpenImage(&timed_out_image, &reason) && sharpen_acquires == 1 && sharpen_releases == 0 &&
+                   std::string(reason) == "sharpen output wait timed out",
+               "a timed-out sharpen output wait must not be drawn into or released");
+        sharpen_wait_result = XR_SUCCESS;
+        Expect(Peer::SharpenImage(&image, &reason) && sharpen_acquires == 1 && sharpen_waits == 2 &&
+                   image == timed_out_image,
+               "the next frame must wait for the same image, not acquire another");
+        Expect(Peer::SharpenImage(&image, &reason) && sharpen_acquires == 2, "then images are acquired as usual");
         Peer::SharpenReset();
 
         // Without XR_EXT_eye_gaze_interaction downstream, a switch to Eye says
