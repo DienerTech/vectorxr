@@ -24,6 +24,7 @@
 #include "depthxr/effects.h"
 #include "depthxr/framegen_plan.h"
 #include "depthxr/input_devices.h"
+#include "depthxr/process_exit.h"
 #include "depthxr/process_info.h"
 #include "depthxr/pivot_step.h"
 #include "depthxr/pivot_view.h"
@@ -1742,15 +1743,30 @@ void AppendViewSummary(std::ostringstream& stream, std::span<const ViewAdjustmen
 } // namespace
 
 OpenXrLayer& OpenXrLayer::Instance() {
-    static OpenXrLayer layer;
-    return layer;
+    struct Owner {
+        OpenXrLayer* layer{new OpenXrLayer()};
+        ~Owner() {
+            // Static destruction. At a process exit (Star Citizen and MSFS
+            // skip xrDestroyInstance) every other thread is already gone,
+            // perhaps inside this layer holding its locks, and runtime or
+            // driver modules loaded after this layer have already run their
+            // DLL_PROCESS_DETACH. Tearing down here would call into them (the
+            // OSD's xrDestroySwapchain, GPU waits), end the process on a dead
+            // thread's lock (0xC000004B) or wait forever for a dead worker.
+            // Leave everything to the exit.
+            // An unload after xrDestroyInstance still destroys the layer.
+            if (!ProcessExiting()) delete layer;
+        }
+    };
+    static Owner owner;
+    return *owner.layer;
 }
 
 OpenXrLayer::~OpenXrLayer() {
-    // Safety net for apps that exit without xrDestroyInstance: join the watcher
+    // Safety net for an unload without xrDestroyInstance: join the watcher
     // before members are destroyed so a still-joinable std::thread can't trip
     // terminate(). The watcher only touches this object's own members, all of
-    // which outlive this destructor body.
+    // which outlive this destructor body. Never runs at a process exit.
     StopConfigWatcher();
     StopTurboAsyncWorker();
     DrainRuntimePacingWrites();
