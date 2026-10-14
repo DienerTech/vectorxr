@@ -1751,27 +1751,27 @@ fn write_text_safely(path: &Path, content: &str) -> Result<(), String> {
         return Err(error.to_string());
     }
 
-    match fs::rename(&temporary_path, path) {
-        Ok(()) => Ok(()),
-        Err(first_error) => {
-            if path.exists() {
-                fs::remove_file(path).map_err(|error| {
-                    let _ = fs::remove_file(&temporary_path);
-                    format!(
-                        "Unable to replace {}: {}; original rename error: {}",
-                        path.to_string_lossy(),
-                        error,
-                        first_error
-                    )
-                })?;
-
-                fs::rename(&temporary_path, path).map_err(|error| {
-                    let _ = fs::remove_file(&temporary_path);
-                    error.to_string()
-                })
-            } else {
+    // Replacing fails for a moment while another process has either file open
+    // without delete sharing: the layer reloading the settings, or an
+    // antivirus scanning the file just written. Retry briefly, and never
+    // delete the original first: the old fallback did, and when the replace
+    // then failed again (the scan still running) both files were gone.
+    const REPLACE_ATTEMPTS: u32 = 20;
+    const REPLACE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(25);
+    let mut attempt = 1;
+    loop {
+        match fs::rename(&temporary_path, path) {
+            Ok(()) => return Ok(()),
+            Err(_) if attempt < REPLACE_ATTEMPTS => {
+                attempt += 1;
+                std::thread::sleep(REPLACE_RETRY_DELAY);
+            }
+            Err(error) => {
                 let _ = fs::remove_file(&temporary_path);
-                Err(first_error.to_string())
+                return Err(format!(
+                    "Unable to replace {}: {error}",
+                    path.to_string_lossy()
+                ));
             }
         }
     }
@@ -3475,6 +3475,46 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&kept[0]).unwrap(), hand_edited);
         assert_eq!(std::fs::read_to_string(&config_path).unwrap(), saved);
         std::fs::remove_dir_all(directory).expect("temporary directory should be removed");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn saving_waits_out_a_brief_lock_and_never_deletes_the_original() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 1;
+        let directory = std::env::temp_dir().join(format!(
+            "vectorxr-replace-{}-{}",
+            std::process::id(),
+            super::unix_milliseconds()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("settings.json");
+        std::fs::write(&path, "original").unwrap();
+        let open_without_delete_sharing = || {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(FILE_SHARE_READ)
+                .open(&path)
+                .unwrap()
+        };
+
+        // Another process reads the file for a moment (the layer reloading).
+        let reader = open_without_delete_sharing();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            drop(reader);
+        });
+        super::write_text_safely(&path, "saved").expect("the save should wait out a brief lock");
+        release.join().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "saved");
+
+        // A lock that outlasts the retries fails the save but keeps the file.
+        let reader = open_without_delete_sharing();
+        assert!(super::write_text_safely(&path, "lost").is_err());
+        drop(reader);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "saved");
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1, "no temporary file left");
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
