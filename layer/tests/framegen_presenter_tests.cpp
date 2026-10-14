@@ -7617,6 +7617,65 @@ void TestAutoKeepsReportedHalving() {
     Check(log.Lines("-> full rate: the runtime holds frames to half rate").empty(), name + ": nothing stands down");
 }
 
+// The same runtime and game, Auto probing down: until the halving is
+// reported, every engaged frame reads as late and Auto steps up past 2x.
+// Once it is, the game's frames are timed by the period reported, and so is
+// whether a probe is within reach: 2x (two reported periods, 44 ms, for the
+// game's 30 ms) holds the game, so Auto probes down to it and settles there
+// instead of staying a step higher (two generated frames for each real one,
+// and the game held to 15 fps), and it never probes full rate, which the
+// game cannot hold.
+void TestAutoProbesReportedHalving() {
+    const std::string name = "auto probes reported halving";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.throttle = Runtime::Throttle::kPeriod;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartHalving(presenter, gpu, runtime, FrameGenMultiplier::kAuto, app, owned, nullptr);
+    // Reported after 2 s of halving: Auto has stepped up by then.
+    presenter.SetHalvingWindow(2000ms);
+    // Steady for a second: eight frames or more at 4x (89 ms a frame).
+    presenter.SetAutoPolicy(200ms, 1000ms, 600ms, 300ms);
+    FrameGenDynamicPolicy policy = QuickDynamic();
+    policy.hold = policy.hold_max = 6000ms;
+    presenter.SetDynamicPolicy(policy);
+    RunWork(*app, 600ms, kLightWork);
+    runtime.throttled = true;
+    const auto work = PeriodsOfWork(kPeriod, 2.7);
+    std::uint32_t highest = 0;
+    RunWork(*app, 5000ms, work, [&](const XrFrameState&) {
+        highest = std::max(highest, presenter.Status().multiplier);
+        return presenter.Status().runtime_halving;
+    });
+    Check(presenter.Status().runtime_halving && highest >= 3,
+          name + ": the slow game steps Auto up past 2x until the halving is reported (" + std::to_string(highest) +
+              "x)");
+    // Probes come after a steady second, each confirmed after 0.6 s.
+    std::string steps = std::to_string(presenter.Status().multiplier) + "x";
+    std::uint32_t last = presenter.Status().multiplier;
+    const auto track = [&] {
+        const std::uint32_t now = presenter.Status().multiplier;
+        if (now != last) steps += " -> " + std::to_string(now) + "x";
+        last = now;
+        return now;
+    };
+    RunWork(*app, 8000ms, work, [&](const XrFrameState&) { return track() == 2; });
+    std::uint32_t lowest = last, settled_highest = last;
+    RunWork(*app, 3000ms, work, [&](const XrFrameState&) {
+        const std::uint32_t now = track();
+        lowest = std::min(lowest, now);
+        settled_highest = std::max(settled_highest, now);
+        return false;
+    });
+    const FrameGenStatus status = presenter.Status();
+    Check(lowest == 2 && settled_highest == 2 && status.runtime_halving && status.threaded,
+          name + ": Auto probes down to 2x on the period reported and stays there (" + steps + ")");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+}
+
 // The session's first line names the diagnostic view and what it draws, and
 // a change during play is logged once: a view left on looks like a fault
 // (issue #95's red flashing around the eye-tracked foveation was the
@@ -8912,6 +8971,7 @@ int main(int argc, char** argv) {
     RUN(TestAutoStandsDownForRuntimeHalving);
     RUN(TestAutoHalvingHoldRunsOut);
     RUN(TestAutoKeepsReportedHalving);
+    RUN(TestAutoProbesReportedHalving);
     // SteamVR with Pimax's headset driver.
     RUN(TestEchoRuntimeKeepsRefresh);
     RUN(TestEchoRuntimeLateWake);

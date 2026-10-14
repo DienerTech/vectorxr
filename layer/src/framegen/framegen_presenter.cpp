@@ -1812,9 +1812,13 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
         probe_not_before_ = now + probe_backoff_;
     } else if (!probing_ && auto_multiplier_ > 1 && now >= probe_not_before_ && !cadence_.empty() &&
                now - cadence_.front().time >= auto_steady_ && steady >= 8 && steady_late * 50 <= steady &&
-               AutoProbeInReachLocked(auto_multiplier_ - 1, refresh_period_ > 0 ? refresh_period_ : last_period_)) {
+               AutoProbeInReachLocked(auto_multiplier_ - 1, GameGridLocked())) {
         // Five steady seconds with at most 2% of frames late, and a game
         // whose own time per frame is within reach of one step down: try it.
+        // Within reach on the grid the step's frames are timed by
+        // (GameGridLocked): where the runtime holds frames to twice its
+        // refresh period and reports that, a 2x frame has two such periods,
+        // and judged on the refresh period Auto would stay a step higher.
         probe_from_ = auto_multiplier_;
         --auto_multiplier_;
         probing_ = true;

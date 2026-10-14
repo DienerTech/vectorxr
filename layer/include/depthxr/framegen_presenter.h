@@ -635,7 +635,8 @@ class FrameGenPresenter {
     void UpdateAutoLocked(std::chrono::steady_clock::time_point now, const std::optional<PendingFrame>& frame,
                           bool started_late = false);
     // Auto, presenting from its own thread: whether the game's own time per
-    // frame (auto_busy_) is within reach of `slots` refreshes a frame.
+    // frame (auto_busy_) is within reach of `slots` periods a frame (`period`:
+    // the grid the game's frames are timed by, GameGridLocked).
     bool AutoProbeInReachLocked(std::uint32_t slots, XrDuration period) const;
     // Dynamic: standing by, engages once the game runs below the refresh
     // rate; engaged, the game keeps its own rate (generated frames fill the
