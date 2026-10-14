@@ -41,7 +41,10 @@ interface DebugPackageInput {
 
 interface ZipEntry {
   path: string
+  // The stored data: deflated (method 8) or as is (method 0).
   bytes: Uint8Array
+  method: 0 | 8
+  size: number
   crc32: number
 }
 
@@ -89,12 +92,31 @@ function pushBytes(target: number[], bytes: Uint8Array) {
   }
 }
 
-function stringEntry(path: string, content: unknown): ZipEntry {
+// Logs and JSON deflate to about a tenth of their size, which keeps a tester's
+// bundle small enough to attach. Without CompressionStream the entry is
+// stored as is.
+async function deflateRaw(bytes: Uint8Array): Promise<Uint8Array | null> {
+  if (typeof CompressionStream === 'undefined') {
+    return null
+  }
+  try {
+    const stream = new Blob([bytes as BlobPart]).stream().pipeThrough(new CompressionStream('deflate-raw'))
+    return new Uint8Array(await new Response(stream).arrayBuffer())
+  } catch {
+    return null
+  }
+}
+
+async function stringEntry(path: string, content: unknown): Promise<ZipEntry> {
   const text = typeof content === 'string' ? content : JSON.stringify(content, null, 2)
   const bytes = textEncoder.encode(text)
+  const deflated = await deflateRaw(bytes)
+  const compressed = deflated !== null && deflated.length < bytes.length
   return {
     path,
-    bytes,
+    bytes: compressed ? deflated : bytes,
+    method: compressed ? 8 : 0,
+    size: bytes.length,
     crc32: crc32(bytes),
   }
 }
@@ -113,12 +135,12 @@ function createZip(entries: ZipEntry[]): Blob {
     writeUint32(output, 0x04034b50)
     writeUint16(output, 20)
     writeUint16(output, 0x0800)
-    writeUint16(output, 0)
+    writeUint16(output, entry.method)
     writeUint16(output, timestamp.time)
     writeUint16(output, timestamp.date)
     writeUint32(output, entry.crc32)
     writeUint32(output, entry.bytes.length)
-    writeUint32(output, entry.bytes.length)
+    writeUint32(output, entry.size)
     writeUint16(output, nameBytes.length)
     writeUint16(output, 0)
     pushBytes(output, nameBytes)
@@ -129,12 +151,12 @@ function createZip(entries: ZipEntry[]): Blob {
     writeUint16(centralDirectory, 20)
     writeUint16(centralDirectory, 20)
     writeUint16(centralDirectory, 0x0800)
-    writeUint16(centralDirectory, 0)
+    writeUint16(centralDirectory, entry.method)
     writeUint16(centralDirectory, timestamp.time)
     writeUint16(centralDirectory, timestamp.date)
     writeUint32(centralDirectory, entry.crc32)
     writeUint32(centralDirectory, entry.bytes.length)
-    writeUint32(centralDirectory, entry.bytes.length)
+    writeUint32(centralDirectory, entry.size)
     writeUint16(centralDirectory, nameBytes.length)
     writeUint16(centralDirectory, 0)
     writeUint16(centralDirectory, 0)
@@ -211,8 +233,8 @@ export function defaultDebugPackageName(): string {
   return `VectorXR-debug-report-${timestampName()}.zip`
 }
 
-export function createDebugPackage(input: DebugPackageInput): Blob {
-  const entries: ZipEntry[] = [
+export async function createDebugPackage(input: DebugPackageInput): Promise<Blob> {
+  const entries: Array<Promise<ZipEntry>> = [
     stringEntry('README.txt', reportText(input)),
     stringEntry('health-summary.json', input.healthSummary),
     stringEntry('runtime-status.json', input.runtimeStatus),
@@ -251,7 +273,7 @@ export function createDebugPackage(input: DebugPackageInput): Blob {
     if (file.content !== null) entries.push(stringEntry(file.archivePath, file.content))
   })
 
-  return createZip(entries)
+  return createZip(await Promise.all(entries))
 }
 
 export async function saveDebugPackage(blob: Blob, suggestedName = defaultDebugPackageName()): Promise<boolean> {

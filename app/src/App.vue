@@ -314,7 +314,7 @@ async function exportDebugInformation() {
     ])
     openXrLayerSnapshot.value = layers
     logSnapshot.value = logs
-    const packageBlob = createDebugPackage({
+    const packageBlob = await createDebugPackage({
       runtimeStatus,
       debugSources,
       collectionErrors,
