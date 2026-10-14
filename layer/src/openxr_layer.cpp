@@ -8321,6 +8321,10 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
          pivotxr_quick_view_transitioning_ ||
          pivotxr_quick_view_transition_.active);
     const std::size_t misses_before_lookup = pivotxr_consecutive_pose_delta_misses_;
+    // A frame located before Pivot engaged has no delta (and needs none: the
+    // activation ramp starts from zero). Only a frame that misses after one
+    // matched breaks continuity.
+    const bool pose_delta_continuity_established = pivotxr_last_matched_pose_delta_.has_value();
     const PivotPoseDeltaSelection pose_delta_selection = resolved_settings_.pivotxr.enabled
         ? ResolvePivotPoseDeltaValue(cached_pivot_pose_deltas_,
                                      frame_end_info->displayTime,
@@ -8340,8 +8344,11 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
             : (matched_time > frame_end_info->displayTime
                    ? matched_time - frame_end_info->displayTime
                    : frame_end_info->displayTime - matched_time);
-        if (pose_delta_selection == PivotPoseDeltaSelection::HeldPrevious ||
-            pose_delta_selection == PivotPoseDeltaSelection::None) {
+        // The first miss of a run is logged; the recovery line counts the rest.
+        const bool missed = pose_delta_selection == PivotPoseDeltaSelection::HeldPrevious ||
+                            pose_delta_selection == PivotPoseDeltaSelection::None;
+        if (missed && pose_delta_continuity_established && !pivotxr_pose_delta_miss_logged_) {
+            pivotxr_pose_delta_miss_logged_ = true;
             pending_locate_views_diagnostics_ =
                 std::max<uint32_t>(pending_locate_views_diagnostics_, 5);
             pending_end_frame_diagnostics_ =
@@ -8375,7 +8382,8 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
                    << ", cachedSpaceExpressions="
                    << pose_delta_frame.space_pose_delta_count;
             logger_.Info(stream.str());
-        } else if (misses_before_lookup > 0) {
+        } else if (!missed && misses_before_lookup > 0 && pivotxr_pose_delta_miss_logged_) {
+            pivotxr_pose_delta_miss_logged_ = false;
             std::ostringstream stream;
             stream << "PivotXR pose-delta continuity recovered: frameTime="
                    << frame_end_info->displayTime
@@ -8386,6 +8394,8 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
                    << ", cachedDeltas=" << cached_pivot_pose_deltas_.size();
             logger_.Info(stream.str());
         }
+    } else {
+        pivotxr_pose_delta_miss_logged_ = false;
     }
     const bool has_non_identity_delta =
         has_pose_delta && !IsIdentityPose(canonical_pose_delta);
@@ -13150,6 +13160,7 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
 void OpenXrLayer::ResetPivotPoseDeltaContinuityState() {
     pivotxr_last_matched_pose_delta_.reset();
     pivotxr_consecutive_pose_delta_misses_ = 0;
+    pivotxr_pose_delta_miss_logged_ = false;
 }
 
 void OpenXrLayer::ResetPivotActivationState() {

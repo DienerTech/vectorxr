@@ -1060,6 +1060,8 @@ class OpenXrLayer {
     // entry. Bridge one such miss so amplified poses do not flash to identity.
     std::optional<PivotPoseDeltaFrame> pivotxr_last_matched_pose_delta_;
     std::size_t pivotxr_consecutive_pose_delta_misses_{0};
+    // A continuity miss was logged and its recovery is not yet.
+    bool pivotxr_pose_delta_miss_logged_{false};
     // Per resolved-profile input edge state, index-aligned with
     // resolved_settings_.pivotxr.profiles. Arbitration is last-pressed-wins:
     // pressing another candidate's binding retargets the engaged profile and
