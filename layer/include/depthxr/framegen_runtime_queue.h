@@ -114,10 +114,6 @@ class FrameGenQueueSubstitution {
     // frame showing it otherwise are lazy.
     void Flush(XrSwapchain swapchain, const Calls& next, bool shown_lazily = false);
     void Forget(XrSwapchain swapchain);
-    // Before a release of `swapchain` made elsewhere (deferred releases):
-    // held-back calls go first, and the runtime's queue waits for the game's
-    // work so far.
-    void BeforeRelease(XrSwapchain swapchain, const Calls& next);
     // After xrDestroySession (or a failed xrCreateSession): waits for the
     // runtime's queue and lets everything go.
     void Reset();

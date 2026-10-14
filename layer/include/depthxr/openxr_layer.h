@@ -568,6 +568,9 @@ class OpenXrLayer {
     // Counts an application call on the calling thread; logs the first call of each kind on each thread.
     void NoteThread(ThreadCensus::Call call);
     bool ShouldDeferSwapchainRelease(const SwapchainInfo& info) const;
+    // An application's release of `swapchain`'s image (forwarded as it came,
+    // or deferred until its xrEndFrame), on to the runtime.
+    XrResult ForwardAppRelease(XrSwapchain swapchain, const XrSwapchainImageReleaseInfo* release_info);
     XrResult FlushDeferredSwapchainReleaseLocked(XrSwapchain swapchain,
                                                  SwapchainInfo& info,
                                                  std::string_view reason);

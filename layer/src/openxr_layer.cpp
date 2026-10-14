@@ -4182,14 +4182,7 @@ XrResult OpenXrLayer::ReleaseSwapchainImage(XrSwapchain swapchain,
         logger_.Debug("Turbo-diag: xrReleaseSwapchainImage(" +
                       std::to_string(reinterpret_cast<uintptr_t>(swapchain)) + ") starting.");
     }
-    // The runtime's queue reads the image only after the game's rendering
-    // into it (and Frame Generation's capture of it) has run; while Frame
-    // Generation shows only images of its own, an image it captures reaches
-    // the runtime once that has run, without the runtime's queue waiting.
-    const XrResult result =
-        UnmirroredSwapchain(swapchain)
-            ? next_release_swapchain_image_(swapchain, release_info)
-            : framegen_queue_.Release(swapchain, FrameGenLazy(swapchain), FrameGenQueueCalls(), release_info);
+    const XrResult result = ForwardAppRelease(swapchain, release_info);
     if (diag) {
         logger_.Debug("Turbo-diag: xrReleaseSwapchainImage completed.");
     }
@@ -13616,6 +13609,16 @@ bool OpenXrLayer::ShouldDeferSwapchainRelease(const SwapchainInfo& info) const {
            IsQuadViewsActive();
 }
 
+XrResult OpenXrLayer::ForwardAppRelease(XrSwapchain swapchain, const XrSwapchainImageReleaseInfo* release_info) {
+    // The runtime's queue reads the image only after the game's rendering
+    // into it (and Frame Generation's capture of it) has run; while Frame
+    // Generation shows only images of its own, an image it captures reaches
+    // the runtime once that has run, without the runtime's queue waiting.
+    return UnmirroredSwapchain(swapchain)
+               ? next_release_swapchain_image_(swapchain, release_info)
+               : framegen_queue_.Release(swapchain, FrameGenLazy(swapchain), FrameGenQueueCalls(), release_info);
+}
+
 XrResult OpenXrLayer::FlushDeferredSwapchainReleaseLocked(XrSwapchain swapchain,
                                                           SwapchainInfo& info,
                                                           std::string_view reason) {
@@ -13630,8 +13633,9 @@ XrResult OpenXrLayer::FlushDeferredSwapchainReleaseLocked(XrSwapchain swapchain,
 
     while (info.deferred_release_count > 0) {
         XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-        framegen_queue_.BeforeRelease(swapchain, FrameGenQueueCalls());
-        const XrResult result = next_release_swapchain_image_(swapchain, &release_info);
+        // As the application's own release would have gone: deferring it must
+        // not make Frame Generation's runtime queue wait for the game's frame.
+        const XrResult result = ForwardAppRelease(swapchain, &release_info);
         if (XR_FAILED(result)) {
             logger_.Error("Deferred swapchain release failed: handle=" + FormatHandle(swapchain) +
                           ", reason=" + std::string(reason) +
