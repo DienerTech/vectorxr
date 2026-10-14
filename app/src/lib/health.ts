@@ -148,7 +148,7 @@ export function buildHealthSummary(input: BuildHealthSummaryInput): HealthSummar
     : overall === 'attention'
       ? 'VectorXR can run, but one or more diagnostics may need review.'
       : overall === 'inactive'
-        ? 'VectorXR is not currently ready to apply OpenXR Enhancements .'
+        ? 'VectorXR is not currently ready to apply OpenXR Enhancements.'
         : 'VectorXR is still collecting system status.'
 
   return {
