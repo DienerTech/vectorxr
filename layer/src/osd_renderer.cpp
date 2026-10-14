@@ -70,13 +70,13 @@ std::vector<std::pair<LogLevel,std::string>> OsdRenderer::CollectDiagnosticsLock
     auto metric=[](const char* name,const OsdMetric& m){std::ostringstream out;out<<std::fixed<<std::setprecision(4)<<" "<<name<<"{n="<<m.count<<",avgMs="<<(m.count?m.sum/m.count:0)<<",p95UpperMs="<<m.P95Upper()<<",maxMs="<<m.maximum<<"}";return out.str();};
     for(std::size_t i=0;i<3;++i){const auto& m=measurements_[i];if(!m.prepare.count&&!m.append.count&&!m.failures)continue;
         std::ostringstream out;out<<"OSD summary "<<identity_<<" api="<<(graphics_?graphics_->Name():"Unsupported")<<" mode="<<(i==0?"disabled":i==1?"hidden":"visible")<<" final="<<final<<" windowSeconds="<<seconds
-            <<" submitted="<<m.submitted<<" refreshed="<<m.refreshed<<" activeSeconds="<<m.cadence.sum/1000.0<<" effectiveRefreshHz="<<(m.cadence.sum>0?m.refreshed*1000.0/m.cadence.sum:0)<<" noRender="<<m.no_render<<" layerLimit="<<m.layer_limit<<" imageTimeouts="<<m.image_timeouts<<" uploadBusy="<<m.upload_busy<<" workerBusy="<<m.worker_busy<<" failures="<<m.failures
+            <<" submitted="<<m.submitted<<" refreshed="<<m.refreshed<<" activeSeconds="<<m.cadence.sum/1000.0<<" effectiveRefreshHz="<<(m.refresh_interval.sum>0?m.refresh_interval.count*1000.0/m.refresh_interval.sum:0)<<" noRender="<<m.no_render<<" layerLimit="<<m.layer_limit<<" imageTimeouts="<<m.image_timeouts<<" uploadBusy="<<m.upload_busy<<" workerBusy="<<m.worker_busy<<" failures="<<m.failures
             <<" frameRejections="<<m.frame_rejections<<" anchor="<<(!world_anchored_?"view":anchor_failed_?"unavailable":"world")<<" anchorFallbacks="<<m.anchor_fallbacks<<metric("prepareCpu",m.prepare)<<metric("appendCpu",m.append)<<metric("appCadence",m.cadence)<<metric("runtimeSubmitCpu",m.submit);
         // A disabled OSD's window is all zeros but its baseline timings:
         // those go out every 30 s only with debug logging, and once at the
         // end of the session.
         lines.emplace_back(i==0 && !final?LogLevel::Debug:LogLevel::Info,out.str());
-        if(logger_->IsDebugEnabled())lines.emplace_back(LogLevel::Debug,"OSD detail "+identity_+" mode="+(i==0?std::string("disabled"):i==1?"hidden":"visible")+metric("rasterWorkerCpu",m.raster)+metric("acquireCpu",m.acquire)+metric("waitCpu",m.wait)+metric("uploadEnqueueCpu",m.upload)+metric("releaseCpu",m.release)+metric("imageAge",m.age)+"; CPU timings do not measure GPU/compositor execution; p95 bins: 0.05ms below 10ms, 2ms below 120ms, overflow=max");
+        if(logger_->IsDebugEnabled())lines.emplace_back(LogLevel::Debug,"OSD detail "+identity_+" mode="+(i==0?std::string("disabled"):i==1?"hidden":"visible")+metric("rasterWorkerCpu",m.raster)+metric("acquireCpu",m.acquire)+metric("waitCpu",m.wait)+metric("uploadEnqueueCpu",m.upload)+metric("releaseCpu",m.release)+metric("imageAge",m.age)+metric("refreshInterval",m.refresh_interval)+"; CPU timings do not measure GPU/compositor execution; p95 bins: 0.05ms below 10ms, 2ms below 120ms, overflow=max");
     }
     measurements_={};report_start_=now;return lines;
 }
@@ -482,7 +482,7 @@ void OsdRenderer::ShutdownLocked() {
     swapchain_=XR_NULL_HANDLE; space_=XR_NULL_HANDLE; anchor_space_=XR_NULL_HANDLE; session_=XR_NULL_HANDLE;
     anchor_failed_=false; anchor_logged_=false;
     acquired_.reset(); acquired_waited_=false; ready_=false; failed_=false; configured_=false; primed_=false; snapshot_needed_=false; image_empty_=false;
-    telemetry_={}; status_={}; updated_={}; image_updated_={};
+    telemetry_={}; status_={}; updated_={}; image_updated_={}; refresh_last_={};
 }
 void OsdRenderer::Shutdown() { std::scoped_lock lock(mutex_); ShutdownLocked(); }
 void OsdRenderer::ResetPresentation() {
@@ -579,8 +579,9 @@ std::pair<OsdPresentation, OsdPresentation> OsdRenderer::Prepare(const OsdSettin
     }
     if(changed){
         // Refresh now, and drop a raster requested before the change: it
-        // holds the old layout, settings or (after a show) old values.
-        updated_={}; ++raster_generation_;
+        // holds the old layout, settings or (after a show) old values. That
+        // refresh is not on the interval, so the rate is measured afresh.
+        updated_={}; ++raster_generation_; refresh_last_={};
     }
     if (settings.enabled) telemetry_.Tick(Clock::now()); else telemetry_={};
     status_.compact=compact_;
@@ -699,6 +700,14 @@ const XrCompositionLayerBaseHeader* OsdRenderer::Append(const XrFrameEndInfo& in
                 const auto release_start=Clock::now();const auto released=api_.release(swapchain_,&release);stats.release.Add(Milliseconds(release_start));
                 if (XR_FAILED(released)) { Fail("OSD release",released); return nullptr; }
                 acquired_.reset(); acquired_waited_=false; ++stats.refreshed; ready_=true; image_height_=bitmap.height; image_width_=bitmap.content_width; image_empty_=bitmap.empty; image_updated_=Clock::now();
+                // The effective refresh rate, from refresh to refresh on the
+                // clock: the app's frames can stall while Frame Generation's
+                // presenter keeps ending frames. Past a pause it is no interval.
+                if (refresh_last_!=Clock::time_point{}) {
+                    const double ms=std::chrono::duration<double,std::milli>(image_updated_-refresh_last_).count();
+                    if (ms<=std::max(1000.0,3000.0/std::max(1,settings_.update_hz))) stats.refresh_interval.Add(ms);
+                }
+                refresh_last_=image_updated_;
                 upload_.reset();
             }
         }

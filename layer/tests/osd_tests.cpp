@@ -779,6 +779,33 @@ int main(int argc, char** argv) {
             text.find("left[")!=std::string::npos && text.find("right[")!=std::string::npos,
             "OSD source edge strips or transparent guard evidence missing");
     }
+    {
+        // effectiveRefreshHz counts refreshes on the clock, not against the
+        // app's frames: here no app frame is recorded at all, as when the app
+        // stalls while Frame Generation's presenter keeps ending frames.
+        std::filesystem::path log;
+        {
+            Logger logger; logger.Initialize((std::filesystem::temp_directory_path()/"vectorxr-osd-tests")/"vectorxr-osd-rate.log");
+            logger.SetLevel(LogLevel::Info); log=logger.ActiveLogPath();
+            OsdRenderer renderer; XrGraphicsBindingD3D11KHR binding{XR_TYPE_GRAPHICS_BINDING_D3D11_KHR}; binding.device=device;
+            renderer.InitializeGraphics(session,&binding,4,dispatch,&logger,"rate-session");
+            auto settings=OsdSettings{}; settings.enabled=true; settings.show_clock=false; settings.update_hz=20;
+            renderer.Prepare(settings,Snapshot(),false,false);
+            const XrCompositionLayerProjection game{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+            const auto* original=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&game);
+            XrFrameEndInfo frame{XR_TYPE_FRAME_END_INFO}; frame.layerCount=1; frame.layers=&original;
+            Check(WaitVisible(renderer,frame),"The rate test's panel was not shown");
+            const auto until=std::chrono::steady_clock::now()+std::chrono::milliseconds(700);
+            while(std::chrono::steady_clock::now()<until) { renderer.Append(frame,true); std::this_thread::sleep_for(std::chrono::milliseconds(2)); }
+            renderer.ReportDiagnostics(true);
+        }
+        std::ifstream file(log); std::string text((std::istreambuf_iterator<char>(file)),{});
+        const auto line=text.find("rate-session api=D3D11 mode=visible");
+        const auto rate=text.find("effectiveRefreshHz=",line);
+        Check(line!=std::string::npos && rate!=std::string::npos,"The OSD's visible summary is missing");
+        const double hz=std::atof(text.c_str()+rate+19);
+        Check(hz>8 && hz<=25,"effectiveRefreshHz did not measure the 20 Hz refreshes on the clock");
+    }
     { OsdMetric metric; for(int i=0;i<100;++i)metric.Add(i<95?.11:20);Check(metric.count==100&&std::abs(metric.P95Upper()-.15)<.001&&metric.maximum==20,"OSD bounded metric histogram incorrect"); }
     context->Release(); device->Release();
     std::cout<<"OSD telemetry, rasterization, bindings, live settings, and swapchain lifecycle passed.\n";

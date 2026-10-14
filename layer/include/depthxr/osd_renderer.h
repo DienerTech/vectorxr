@@ -33,6 +33,8 @@ struct OsdMetric {
 };
 struct OsdMeasurements {
     OsdMetric prepare, append, raster, acquire, wait, upload, release, submit, cadence, age;
+    // Between periodic refreshes, on the clock (effectiveRefreshHz).
+    OsdMetric refresh_interval;
     std::uint64_t submitted{}, refreshed{}, no_render{}, layer_limit{}, image_timeouts{}, upload_busy{}, worker_busy{}, failures{}, frame_rejections{};
     // Frames a world-anchored panel went out head-locked: its head pose was not located.
     std::uint64_t anchor_fallbacks{};
@@ -216,6 +218,8 @@ class OsdRenderer {
     // When the last refresh was requested; zero refreshes on the next frame.
     std::chrono::steady_clock::time_point updated_{};
     std::chrono::steady_clock::time_point image_updated_{};
+    // The last periodic refresh's upload (zero after a change).
+    std::chrono::steady_clock::time_point refresh_last_{};
     XrCompositionLayerQuad quad_{XR_TYPE_COMPOSITION_LAYER_QUAD};
     // This worker touches only CPU pixels. OpenXR and graphics uploads remain on the
     // thread that ends frames. No frame waits for text drawing or font setup.
