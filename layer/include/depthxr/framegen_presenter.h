@@ -1158,6 +1158,9 @@ class FrameGenPresenter {
     std::chrono::milliseconds probe_backoff_{10000};
     bool probing_{false};
     std::uint32_t probe_from_{0};
+    // Since when every judgement found the game late with no higher
+    // multiplier to step to (UpdateAutoLocked); before the last change, none.
+    std::optional<std::chrono::steady_clock::time_point> late_at_ceiling_since_;
     // Presenting from its own thread: the game's last frames' own time per
     // frame (from one wait to the next, the cadence's hold left out), ms,
     // and when the last wait's hold ended (AutoProbeInReachLocked). Not just

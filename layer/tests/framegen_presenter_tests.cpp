@@ -8472,6 +8472,90 @@ void TestAutoSettlesAfterClockRecovery() {
     Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
 }
 
+// Auto at 4x with the game late there: nothing higher to step to, and no
+// probe down while it stays late (velocity7 in Star Citizen on Virtual
+// Desktop at 144 Hz, 2026-10-14: at 4x the game ran at 22-24 fps with about
+// 16 ms of its own work a frame, where it had held 48 at 3x, until the user
+// switched 16 s later). Here the runtime takes 1.6 refreshes for each of the
+// presenter thread's frames while at 4x, so the game, whose own frames fit
+// 3x, is released every eighth refresh: once late as long as a probe backs
+// off, Auto probes 3x and stays there. A game too slow for 3x stays at 4x,
+// late or not.
+void TestAutoLeavesLateCeiling() {
+    const std::string name = "auto leaves a ceiling the game is late at";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    SessionLog log("auto-late-ceiling");
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kInterpolate, FrameGenMultiplier::kAuto, app, runtime, owned,
+             log.logger.get());
+    constexpr auto kBackoff = 1000ms;
+    presenter.SetAutoPolicy(500ms, 500ms, 600ms, kBackoff);
+    // 4 refreshes of work a frame are late at 3x (3.75 at most), not at 4x
+    // (5); 2.6 fit 3x and not 2x (2 at most, within reach 2.35); 5.6 are
+    // late at 4x and out of reach of 3x (3.53).
+    const auto needs_4x = PeriodsOfWork(kPeriod, 4.0);
+    const auto fits_3x = PeriodsOfWork(kPeriod, 2.6);
+    const auto too_slow = PeriodsOfWork(kPeriod, 5.6);
+    RunWork(*app, 8000ms, needs_4x, [&](const XrFrameState&) {
+        return presenter.Status().multiplier == 4 && presenter.Status().threaded;
+    });
+    const std::uint32_t climbed = presenter.Status().multiplier;
+    const bool climbed_threaded = presenter.Status().threaded;
+    // Within 4x's settle: the game gets lighter, and the runtime slow.
+    runtime.submit_sleep_us = static_cast<int>(kPeriod * 16 / 10 / 1000);
+    const auto slowed = std::chrono::steady_clock::now();
+    double left_after = -1.0;
+    RunWork(*app, 6000ms, fits_3x, [&](const XrFrameState&) {
+        if (presenter.Status().multiplier == 4) return false;
+        left_after = Seconds(std::chrono::steady_clock::now() - slowed);
+        runtime.submit_sleep_us = 0; // slow at 4x only
+        return true;
+    });
+    runtime.submit_sleep_us = 0;
+    const std::uint32_t left = presenter.Status().multiplier;
+    std::uint32_t lowest = left, highest = left;
+    RunWork(*app, 2000ms, fits_3x, [&](const XrFrameState&) {
+        lowest = std::min(lowest, presenter.Status().multiplier);
+        highest = std::max(highest, presenter.Status().multiplier);
+        return false;
+    });
+    const std::uint32_t kept = presenter.Status().multiplier;
+    // The control: a game too slow for 3x steps up again and stays at 4x,
+    // late there past twice the backoff (a probe failing doubles it).
+    RunWork(*app, 4000ms, too_slow, [&](const XrFrameState&) { return presenter.Status().multiplier == 4; });
+    const std::uint32_t slow_climbed = presenter.Status().multiplier;
+    std::uint32_t slow_lowest = slow_climbed;
+    RunWork(*app, 3500ms, too_slow, [&](const XrFrameState&) {
+        slow_lowest = std::min(slow_lowest, presenter.Status().multiplier);
+        return false;
+    });
+    presenter.Stop();
+    std::string said;
+    for (const std::string& line : log.Lines("Frame Generation")) {
+        if (line.find("automatic multiplier") != std::string::npos) {
+            said += " | " + line.substr(line.find("Frame Generation"));
+        }
+    }
+    if (std::getenv("FG_TEST_STATS")) std::cerr << name << ": left 4x after " << left_after << " s" << said << "\n";
+    Check(climbed == 4 && climbed_threaded,
+          name + ": a game of 4 refreshes a frame gets 4x (" + std::to_string(climbed) + "x" + said + ")");
+    Check(left == 3 && left_after > 0.0 && left_after < 4.0,
+          name + ": late at 4x though its own frames fit 3x, it probes 3x (" + std::to_string(left) + "x after " +
+              std::to_string(left_after) + " s" + said + ")");
+    Check(lowest == 3 && highest == 3 && kept == 3,
+          name + ": and stays there (" + std::to_string(lowest) + "x-" + std::to_string(highest) + "x" + said + ")");
+    Check(slow_climbed == 4 && slow_lowest == 4,
+          name + ": a game too slow for 3x stays at 4x (" + std::to_string(slow_climbed) + "x, then " +
+              std::to_string(slow_lowest) + "x at the lowest" + said + ")");
+    Check(log.Lines("no higher one to step to").size() == 1,
+          name + ": the probe from the ceiling says why, once" + said);
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+}
+
 // Displaced runtime clocks are logged one by one for the first few, then
 // only in summaries: each logged end ends a logged displacement (past the
 // first three, the ends were logged without them).
@@ -9184,6 +9268,7 @@ int main(int argc, char** argv) {
     RUN(TestStalledClockWhilePresenting);
     RUN(TestAutoHoldsWhileClockDisplaced);
     RUN(TestAutoSettlesAfterClockRecovery);
+    RUN(TestAutoLeavesLateCeiling);
     for (const bool jit : {true, false}) {
         g_jit = jit;
         RUN(TestAutoProbesNeedRoom);
