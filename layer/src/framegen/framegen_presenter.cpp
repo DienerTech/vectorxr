@@ -596,6 +596,8 @@ void FrameGenPresenter::Stop() {
     dropped_unbegun_ = 0;
     gpu_ms_ = -1.0;
     inline_hold_until_.reset();
+    auto_halving_hold_until_.reset();
+    auto_halving_hold_ = dynamic_policy_.hold;
     last_cycle_started_late_ = false;
     app_frames_.clear();
     submissions_.clear();
@@ -725,6 +727,7 @@ void FrameGenPresenter::SetDynamicPolicy(const FrameGenDynamicPolicy& policy) {
     std::scoped_lock lock(mutex_);
     dynamic_policy_ = policy;
     dynamic_hold_ = policy.hold;
+    auto_halving_hold_ = policy.hold;
     dynamic_probe_after_ = policy.probe_after;
 }
 
@@ -784,6 +787,7 @@ bool FrameGenPresenter::Toggle() {
             // full-rate hold from before, and Dynamic judges the game's rate
             // again before engaging.
             inline_hold_until_.reset();
+            auto_halving_hold_until_.reset();
             DynamicReenableLocked(Clock::now());
         }
         if (state_ != FrameGenState::kUnavailable) {
@@ -1675,6 +1679,32 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
             return;
         }
     }
+    // The runtime holds the frames presented to half its refresh rate (or
+    // less), shown by the presenter thread's waits at this multiplier: every
+    // engaged frame then takes twice its refreshes and reads as late, and
+    // stepping up only slows the game more (Pimax Play's smoothing held a
+    // game it let run at 36 fps to 9 at 4x, the output still 36). Engaged
+    // gains nothing while that lasts: back to full rate, frames pass straight
+    // through as Dynamic stands down, and stay so while the runtime halves.
+    if (runtime_halving_ && halving_confirmed_at_ && *halving_confirmed_at_ > multiplier_changed_at_ &&
+        auto_multiplier_ > 1) {
+        const std::uint32_t before = auto_multiplier_;
+        const std::chrono::milliseconds hold = auto_halving_hold_;
+        auto_multiplier_ = 1;
+        probing_ = false;
+        auto_halving_hold_until_ = now + hold;
+        auto_halving_hold_ = std::min(auto_halving_hold_ * 2, dynamic_policy_.hold_max);
+        multiplier_changed_at_ = now;
+        last_app_end_ = now;
+        cadence_.clear();
+        if (logger_) {
+            logger_->Info("Frame Generation automatic multiplier " + MultiplierText(before) + " -> full rate: " +
+                          kHalvingStandDown + "; frames pass straight through, retrying in " +
+                          Number(std::chrono::duration<double>(hold).count(), 0) +
+                          " s (sooner once the runtime gives every refresh).");
+        }
+        return;
+    }
     // Frames right after a change (a new multiplier, engaging, new output
     // images) carry its one-off cost and say nothing about the app.
     if (last_app_end_ && now - multiplier_changed_at_ >= auto_settle_) {
@@ -1704,7 +1734,9 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
         }
     }
     const std::uint32_t before = auto_multiplier_;
-    const bool held = inline_hold_until_ && now < *inline_hold_until_;
+    // A halving hold ends early once the runtime gives every refresh again.
+    const bool held = (inline_hold_until_ && now < *inline_hold_until_) ||
+                      (runtime_halving_ && auto_halving_hold_until_ && now < *auto_halving_hold_until_);
     bool gave_up_inline = false;
     // More than 30% of the last second's frames missed the cadence: step up.
     if (recent >= 8 && recent_late * 10 > recent * 3) {

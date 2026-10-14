@@ -1060,6 +1060,11 @@ class FrameGenPresenter {
     // while it is engaged).
     std::optional<std::chrono::steady_clock::time_point> halving_confirmed_at_;
     bool logged_runtime_halving_{false};
+    // Auto back at full rate for one shown while it is engaged: it stays
+    // there until this while the runtime still halves, the hold doubling
+    // from FrameGenDynamicPolicy::hold up to its hold_max each time.
+    std::optional<std::chrono::steady_clock::time_point> auto_halving_hold_until_;
+    std::chrono::milliseconds auto_halving_hold_{10000};
     // The runtime's own cadence: when a runtime wait blocked and returned for
     // display time phase_xr_ at phase_wall_, the wait for display time t
     // would return at phase_wall_ + (t - phase_xr_).
