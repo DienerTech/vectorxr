@@ -319,6 +319,43 @@ public:
         }
         return handles;
     }
+    // Plans an emulated quad views frame from four tracked swapchains (no
+    // device), its focus views `focus_yaw` radians right of centre.
+    static bool PlanQuadFrame(XrTime time, float focus_yaw) {
+        auto& l = Layer();
+        l.cached_quadviews_stereo_recommended_width_ = l.cached_quadviews_stereo_recommended_height_ = 2000;
+        std::array<XrCompositionLayerProjectionView, 4> views{};
+        for (uint32_t i = 0; i < 4; ++i) {
+            const XrSwapchain swapchain = Handle<XrSwapchain>(600 + i);
+            if (!l.tracked_swapchains_.contains(swapchain)) {
+                OpenXrLayer::SwapchainInfo info;
+                info.session = session;
+                info.width = info.height = 1000;
+                info.format = 29;
+                info.quadviews_session = true;
+                info.d3d11_images.push_back(nullptr);
+                info.has_last_released_image_index = true;
+                l.tracked_swapchains_[swapchain] = std::move(info);
+            }
+            views[i] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+            views[i].pose.orientation.w = 1.0f;
+            views[i].fov = i < 2 ? XrFovf{-0.8f, 0.8f, 0.8f, -0.8f}
+                                 : XrFovf{focus_yaw - 0.3f, focus_yaw + 0.3f, 0.3f, -0.3f};
+            views[i].subImage.swapchain = swapchain;
+            views[i].subImage.imageRect.extent = {1000, 1000};
+        }
+        XrCompositionLayerProjection layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+        layer.viewCount = 4;
+        layer.views = views.data();
+        XrPosef identity{};
+        identity.orientation.w = 1.0f;
+        OpenXrLayer::QuadViewsComposePlan plan;
+        return l.BuildQuadViewsComposePlan(&layer, time, identity, false, nullptr, &plan);
+    }
+    // The inset motion summary falls due on the next planned frame.
+    static void InsetMotionDue() {
+        Layer().quadviews_inset_motion_since_ = std::chrono::steady_clock::now() - std::chrono::seconds(31);
+    }
     static void WithoutGazeExtension() { Layer().eye_gaze_extension_enabled_ = false; }
     // Logs to a file of its own at `path`; a second call lets the first go.
     static void LogTo(const std::filesystem::path& path) { Layer().logger_.Initialize(path); }
@@ -590,6 +627,35 @@ int main() {
         Peer::QuadSwapchain(205, game_usage);
         Expect(Peer::PrewarmInputs() == std::set<uintptr_t>{202, 203, 204, 205},
                "the prewarm must take the game's four views only");
+
+        // How the focus inset moves reaches a default (Info) log: every 30 s,
+        // when the settings change and at session end, not only on the
+        // debug-level focus-rect lines.
+        Peer::Prepare(); Peer::LogTo(logs / "inset-motion.log");
+        Expect(Peer::PlanQuadFrame(1000, 0.0f) && Peer::PlanQuadFrame(2000, 0.0f) &&
+                   Peer::PlanQuadFrame(3000, 0.01f) && Peer::PlanQuadFrame(4000, 0.01f),
+               "quad frames must plan from tracked swapchains");
+        std::string motion = Peer::Log();
+        Expect(Occurrences(motion, "Quadviews focus inset motion") == 0, "no summary before it is due");
+        Peer::InsetMotionDue();
+        Expect(Peer::PlanQuadFrame(5000, 0.01f), "a due frame must plan");
+        motion = Peer::Log();
+        const size_t periodic = motion.find("Quadviews focus inset motion: reason=periodic-30s");
+        Expect(periodic != std::string::npos &&
+                   motion.find(", frames=4, gazeFrames=0, movedFrames=1,", periodic) != std::string::npos,
+               "the summary must count the frames compared and the one whose inset moved");
+        const size_t max_step = motion.find("maxStepPx=(", periodic);
+        Expect(max_step != std::string::npos && std::stod(motion.substr(max_step + 11)) > 5.0,
+               "the summary must give the largest move in output pixels");
+        Expect(Peer::PlanQuadFrame(6000, 0.02f), "a frame after the summary must plan");
+        Peer::Prepare();
+        motion = Peer::Log();
+        const size_t ended = motion.find("Quadviews focus inset motion: reason=session-end");
+        Expect(ended != std::string::npos && motion.find(", frames=1, gazeFrames=0, movedFrames=1,", ended) !=
+                                                 std::string::npos,
+               "a session's end must summarize the frames since the last summary");
+        Peer::LogTo(logs / "inset-motion.log");
+        std::filesystem::remove_all(logs, error);
         Peer::Prepare();
         std::cout << "Eye-gaze handshake tests passed.\n";
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }

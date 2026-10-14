@@ -1501,6 +1501,7 @@ constexpr std::chrono::seconds kInputDeviceFailureLogInterval{10};
 // ~100-400ms) so transient gaze loss does not churn the log. ~1/3s at 90Hz.
 constexpr uint32_t kEyeGazeUnavailableLogThreshold = 30;
 constexpr std::chrono::seconds kQuadViewsDebugHeartbeatInterval{2};
+constexpr std::chrono::seconds kQuadViewsInsetMotionSummaryInterval{30};
 // Hot-path throttles. xrLocateSpace/xrLocateViews/xrEndFrame run multiple
 // times per frame; filesystem stats, input-device polls, and downstream
 // helper calls must not.
@@ -4942,6 +4943,8 @@ bool OpenXrLayer::BuildQuadViewsComposePlan(const XrCompositionLayerProjection* 
 
     plan->composition.output = FrameGenExtent{plan->width, plan->height};
     plan->composition.eyes.resize(2);
+    std::array<double, 2> frame_step_px{};
+    bool has_frame_step = false;
     for (uint32_t eye = 0; eye < 2; ++eye) {
         const XrSwapchainSubImage& focus_sub_image = source_layer->views[eye + 2].subImage;
         const uint32_t focus_content_width =
@@ -4987,15 +4990,18 @@ bool OpenXrLayer::BuildQuadViewsComposePlan(const XrCompositionLayerProjection* 
                              ", cachedFovHit=" + std::to_string(plan->has_cached_fovs));
             }
         }
-        // The inset's largest frame-to-frame move since the last diagnostic
-        // line, in output pixels: a moving inset (eye tracking) shows here.
+        // The inset's frame-to-frame move, in output pixels: a moving inset
+        // (eye tracking) shows here, the largest since the last diagnostic
+        // line, and in the Info-level motion summary.
         if (quadviews_has_previous_focus_rect_[eye]) {
             for (uint32_t edge = 0; edge < 4; ++edge) {
                 const double size = edge % 2 == 0 ? plan->width : plan->height;
                 const double step =
                     static_cast<double>(composed.focus_rect[edge]) - quadviews_previous_focus_rect_[eye][edge];
-                quadviews_focus_max_step_px_[eye] = std::max(quadviews_focus_max_step_px_[eye], std::abs(step) * size);
+                frame_step_px[eye] = std::max(frame_step_px[eye], std::abs(step) * size);
             }
+            quadviews_focus_max_step_px_[eye] = std::max(quadviews_focus_max_step_px_[eye], frame_step_px[eye]);
+            has_frame_step = true;
         }
         quadviews_previous_focus_rect_[eye] = composed.focus_rect;
         quadviews_has_previous_focus_rect_[eye] = true;
@@ -5043,7 +5049,56 @@ bool OpenXrLayer::BuildQuadViewsComposePlan(const XrCompositionLayerProjection* 
         logger_.Debug(stream.str());
         quadviews_focus_max_step_px_[eye] = 0.0;
     }
+
+    QuadViewsInsetMotion& motion = quadviews_inset_motion_;
+    if (has_frame_step) {
+        const double step_px = std::max(frame_step_px[0], frame_step_px[1]);
+        ++motion.frames;
+        motion.moved_frames += step_px >= 1.0 ? 1 : 0;
+        motion.gaze_frames += plan->gaze.valid ? 1 : 0;
+        motion.step_px_sum += step_px;
+        for (uint32_t eye = 0; eye < 2; ++eye) {
+            motion.max_step_px[eye] = std::max(motion.max_step_px[eye], frame_step_px[eye]);
+        }
+    }
+    motion.output_width = plan->width;
+    motion.output_height = plan->height;
+    const auto now = std::chrono::steady_clock::now();
+    if (!quadviews_inset_motion_since_.has_value()) {
+        quadviews_inset_motion_since_ = now;
+    } else if (now - *quadviews_inset_motion_since_ >= kQuadViewsInsetMotionSummaryInterval) {
+        LogQuadViewsInsetMotion("periodic-30s", resolved_settings_.quadviews.tracking_mode);
+    }
     return true;
+}
+
+void OpenXrLayer::LogQuadViewsInsetMotion(std::string_view reason, QuadViewsTrackingMode tracking_mode) {
+    // Whether the inset moves every frame (Eye tracking mode, and how much
+    // its gaze smoothing and deadzone hold it), at Info: the focus-rect
+    // debug lines carry the same moves only with debug logging.
+    const QuadViewsInsetMotion& motion = quadviews_inset_motion_;
+    const auto now = std::chrono::steady_clock::now();
+    const double seconds =
+        quadviews_inset_motion_since_.has_value()
+            ? std::chrono::duration<double>(now - *quadviews_inset_motion_since_).count()
+            : 0.0;
+    const double mean_step_px = motion.frames > 0 ? motion.step_px_sum / static_cast<double>(motion.frames) : 0.0;
+    std::ostringstream stream;
+    stream << "Quadviews focus inset motion: reason=" << reason
+           << ", seconds=" << FormatDiagnosticDouble(seconds)
+           << ", trackingMode=" << ToString(tracking_mode)
+           << ", frames=" << motion.frames
+           << ", gazeFrames=" << motion.gaze_frames
+           << ", movedFrames=" << motion.moved_frames
+           << ", meanStepPx=" << FormatDiagnosticDouble(mean_step_px)
+           << ", maxStepPx=(" << FormatDiagnosticDouble(motion.max_step_px[0]) << ", "
+           << FormatDiagnosticDouble(motion.max_step_px[1]) << ")"
+           << ", outputSize=" << motion.output_width << "x" << motion.output_height
+           << ", placementMismatchFrames=" << quadviews_placement_mismatch_frames_
+           << ". A step is the inset's largest edge move from one frame to the next, in output pixels.";
+    logger_.Info(stream.str());
+    quadviews_inset_motion_ = {};
+    quadviews_inset_motion_since_ = now;
 }
 
 bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* source_layer,
@@ -10694,6 +10749,11 @@ void OpenXrLayer::RefreshResolvedSettings() {
     framegen_.SetTraceEnabled(resolved_settings_.core.log_level == LogLevel::Debug);
     logger_.SetRetentionFiles(resolved_settings_.core.log_retention_files);
     if (!last_logged_settings_ || !SameSettings(*last_logged_settings_, resolved_settings_)) {
+        // The inset's motion under the settings it moved with (a switch
+        // between Eye and Head, or new gaze smoothing, starts a new summary).
+        if (quadviews_inset_motion_.frames > 0) {
+            LogQuadViewsInsetMotion("settings-change", previous.quadviews.tracking_mode);
+        }
         LogResolvedSettings(resolved_settings_);
         last_logged_settings_ = resolved_settings_;
         depth_view_info_pending_ = true;
@@ -10972,6 +11032,9 @@ void OpenXrLayer::ResetSessionState() {
         LogVarjoNativeFoveationSummaryLocked("session-teardown", true);
     }
     varjo_native_foveation_diagnostic_ = {};
+    if (quadviews_inset_motion_.frames > 0) {
+        LogQuadViewsInsetMotion("session-end", resolved_settings_.quadviews.tracking_mode);
+    }
     ResetD3D11QuadViewsCompositor();
     active_session_ = XR_NULL_HANDLE;
     quadviews_session_active_.reset();
@@ -11056,6 +11119,8 @@ void OpenXrLayer::ResetSessionState() {
     quadviews_placement_mismatch_logs_remaining_ = 3;
     quadviews_has_previous_focus_rect_ = {};
     quadviews_focus_max_step_px_ = {};
+    quadviews_inset_motion_ = {};
+    quadviews_inset_motion_since_.reset();
     ResetEyeGazeInputState();
     ResetSwapchainState();
 }

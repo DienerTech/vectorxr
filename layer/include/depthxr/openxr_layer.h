@@ -794,6 +794,9 @@ class OpenXrLayer {
                                    bool has_non_identity_delta,
                                    const DepthSubmissionGeometry* depth_geometry,
                                    QuadViewsComposePlan* plan);
+    // Logs, at Info, how the focus inset moved since the last summary (in
+    // `tracking_mode`), and starts the next one.
+    void LogQuadViewsInsetMotion(std::string_view reason, QuadViewsTrackingMode tracking_mode);
     // The four views' swapchains, when each has a released (or acquired)
     // image of its own to compose from.
     bool FindQuadViewsSourceSwapchains(const XrCompositionLayerProjection* source_layer,
@@ -1644,6 +1647,20 @@ class OpenXrLayer {
     std::array<std::array<float, 4>, 2> quadviews_previous_focus_rect_{};
     std::array<bool, 2> quadviews_has_previous_focus_rect_{};
     std::array<double, 2> quadviews_focus_max_step_px_{};
+    // The inset's motion since the last Info-level summary
+    // (LogQuadViewsInsetMotion): whether, how often and how far it moves,
+    // without debug logging.
+    struct QuadViewsInsetMotion {
+        uint64_t frames{0};       // planned frames with a previous inset to compare
+        uint64_t moved_frames{0}; // of them, those whose inset moved 1 output pixel or more
+        uint64_t gaze_frames{0};  // of them, those placed by the eye gaze
+        double step_px_sum{0.0};  // the frames' moves (the larger eye's), in output pixels
+        std::array<double, 2> max_step_px{};
+        uint32_t output_width{0};
+        uint32_t output_height{0};
+    };
+    QuadViewsInsetMotion quadviews_inset_motion_{};
+    std::optional<std::chrono::steady_clock::time_point> quadviews_inset_motion_since_;
     std::unordered_map<XrSwapchain, SwapchainInfo> tracked_swapchains_;
     D3D11QuadViewsCompositor d3d11_quadviews_compositor_;
     D3D11FocusSharpen d3d11_focus_sharpen_;
