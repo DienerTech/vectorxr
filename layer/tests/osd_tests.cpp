@@ -34,7 +34,11 @@ XrResult XRAPI_PTR Create(XrSession, const XrSwapchainCreateInfo* info, XrSwapch
     D3D11_TEXTURE2D_DESC desc{};
     desc.Width=info->width; desc.Height=info->height; desc.MipLevels=1; desc.ArraySize=1;
     desc.Format=static_cast<DXGI_FORMAT>(info->format); desc.SampleDesc.Count=1; desc.BindFlags=D3D11_BIND_RENDER_TARGET;
-    for(int i=0;i<3;++i) { ID3D11Texture2D* texture{}; Check(SUCCEEDED(device->CreateTexture2D(&desc,nullptr,&texture)),"WARP texture failed"); textures.push_back(texture); }
+    // A runtime's new images hold whatever was there: every row the OSD does
+    // not draw must still read 0.
+    const std::vector<std::uint32_t> old(static_cast<std::size_t>(info->width)*info->height,0xffff00ffu);
+    const D3D11_SUBRESOURCE_DATA initial{old.data(),info->width*4,0};
+    for(int i=0;i<3;++i) { ID3D11Texture2D* texture{}; Check(SUCCEEDED(device->CreateTexture2D(&desc,&initial,&texture)),"WARP texture failed"); textures.push_back(texture); }
     *swapchain=reinterpret_cast<XrSwapchain>(2); return XR_SUCCESS;
 }
 XrResult XRAPI_PTR Images(XrSwapchain, std::uint32_t capacity, std::uint32_t* count, XrSwapchainImageBaseHeader* images) {
@@ -705,6 +709,45 @@ int main(int argc, char** argv) {
         renderer.Prepare(settings,changed,false,false);
         Check(!renderer.Append(frame,true),"An empty compact panel was submitted once its diagnostics tag went");
         renderer.Shutdown();
+    }
+    {
+        // Uploads copy the panel's rows and clear only what each image's last,
+        // taller panel left: across images and heights, every image matches
+        // its bitmap and is 0 below it.
+        Check(textures.empty(),"An earlier test left its swapchain");
+        D3D11_TEXTURE2D_DESC desc{};
+        desc.Width=OsdBitmap::width; desc.Height=OsdBitmap::texture_height; desc.MipLevels=1; desc.ArraySize=1;
+        desc.Format=DXGI_FORMAT_B8G8R8A8_UNORM_SRGB; desc.SampleDesc.Count=1; desc.BindFlags=D3D11_BIND_RENDER_TARGET;
+        const std::vector<std::uint32_t> old(static_cast<std::size_t>(OsdBitmap::width)*OsdBitmap::texture_height,0xffff00ffu);
+        const D3D11_SUBRESOURCE_DATA initial{old.data(),OsdBitmap::width*4,0};
+        for(int i=0;i<2;++i) { ID3D11Texture2D* texture{}; Check(SUCCEEDED(device->CreateTexture2D(&desc,&initial,&texture)),"WARP texture failed"); textures.push_back(texture); }
+        auto graphics=CreateOsdD3D11(device); std::string error;
+        Check(graphics && graphics->Images(reinterpret_cast<XrSwapchain>(2),dispatch,error),"D3D11 OSD images were not enumerated");
+        const auto bitmap=[](int height,std::uint32_t seed) {
+            OsdBitmap b; b.height=height; b.pixels.resize(static_cast<std::size_t>(OsdBitmap::width)*height);
+            for(std::size_t i=0;i<b.pixels.size();++i) b.pixels[i]=0xff000000u|static_cast<std::uint32_t>(i*seed);
+            return b;
+        };
+        const auto check=[&](int image,const OsdBitmap& b) {
+            D3D11_TEXTURE2D_DESC staging=desc; staging.Usage=D3D11_USAGE_STAGING; staging.BindFlags=0; staging.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+            ID3D11Texture2D* readback{};
+            Check(SUCCEEDED(device->CreateTexture2D(&staging,nullptr,&readback)),"D3D11 readback allocation failed");
+            context->CopyResource(readback,textures[image]); D3D11_MAPPED_SUBRESOURCE mapped{};
+            Check(SUCCEEDED(context->Map(readback,0,D3D11_MAP_READ,0,&mapped)),"D3D11 readback map failed");
+            for(int y=0;y<OsdBitmap::texture_height;++y) for(int x=0;x<OsdBitmap::width;++x) {
+                const auto pixel=reinterpret_cast<const std::uint32_t*>(static_cast<const char*>(mapped.pData)+y*mapped.RowPitch)[x];
+                Check(pixel==(y<b.height?b.pixels[y*OsdBitmap::width+x]:0u),"An OSD image kept old rows or lost the panel's");
+            }
+            context->Unmap(readback,0); readback->Release();
+        };
+        const std::array<std::pair<int,OsdBitmap>,5> uploads{{{0,bitmap(500,3)},{1,bitmap(100,5)},{0,bitmap(100,7)},{1,bitmap(300,11)},{0,bitmap(766,13)}}};
+        for(const auto& [image,b]:uploads) {
+            Check(graphics->Upload(static_cast<std::uint32_t>(image),b,error)==OsdUpload::Complete,"D3D11 OSD upload failed");
+            check(image,b);
+        }
+        graphics->Reset();
+        for(auto* texture:textures) texture->Release();
+        textures.clear();
     }
     for(auto level:{LogLevel::Info,LogLevel::Debug}) {
         std::filesystem::path log;
