@@ -425,7 +425,7 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
     endif()
 
     if(DEPTHXR_BUILD_TESTS)
-        # The layer DLL's msvcp140 imports (dumpbin sits beside the linker), without a GPU.
+        # The layer DLL imports no C or C++ runtime DLL (dumpbin sits beside the linker), without a GPU.
         get_filename_component(_layer_linker_dir "${CMAKE_LINKER}" DIRECTORY)
         find_program(DEPTHXR_DUMPBIN dumpbin HINTS "${_layer_linker_dir}")
         if(DEPTHXR_DUMPBIN)
@@ -435,6 +435,18 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
                              -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_crt_imports.cmake")
             set_tests_properties(depthxr_layer_crt_imports_tests PROPERTIES TIMEOUT 60)
         endif()
+        # The layer DLL loaded, negotiated and unloaded three times, as the loader does, without loading
+        # msvcp140 or vcruntime140 (it creates no graphics device).
+        add_executable(depthxr_layer_load_tests tests/layer_load_tests.cpp)
+        target_include_directories(depthxr_layer_load_tests PRIVATE include)
+        # The OpenXR headers only: the test calls nothing in the loader.
+        target_link_libraries(depthxr_layer_load_tests PRIVATE OpenXR::openxr_loader)
+        target_compile_features(depthxr_layer_load_tests PRIVATE cxx_std_20)
+        target_compile_definitions(depthxr_layer_load_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+        add_dependencies(depthxr_layer_load_tests XR_APILAYER_DIENERTECH_VECTORXR)
+        add_test(NAME depthxr_layer_load_tests
+                 COMMAND depthxr_layer_load_tests $<TARGET_FILE:XR_APILAYER_DIENERTECH_VECTORXR>)
+        set_tests_properties(depthxr_layer_load_tests PROPERTIES TIMEOUT 30)
         # FG_TEST_ADAPTER's name matching and environment parsing (test_adapter.h), without a GPU.
         add_executable(depthxr_test_adapter_tests tests/test_adapter_tests.cpp)
         target_compile_definitions(depthxr_test_adapter_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)

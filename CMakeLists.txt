@@ -10,11 +10,12 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# The layer binds to whichever msvcp140.dll the game has loaded or ships beside its exe. Since
-# VS 2022 17.10, std::mutex and condition_variable are built inline (constexpr), and a
-# msvcp140 older than 14.38 then locks them through a null pointer: the game crashes in
-# xrCreateInstance. Initialize them in the runtime instead. Every target must agree.
-add_compile_definitions(_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
+# The layer carries its own C and C++ runtime (/MT). Linked as a DLL, it bound to whichever
+# msvcp140.dll the game had loaded or ships beside its exe (one older than 14.38 crashes the
+# game in xrCreateInstance on the first lock), could not load at all on a PC without the VC++
+# redistributable (failing xrCreateInstance in every OpenXR app), and read and wrote numbers
+# in the game's C locale. Every target must agree.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 include(CTest)
 
