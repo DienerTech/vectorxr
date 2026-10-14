@@ -4760,6 +4760,152 @@ void TestLeadAfterRepeatedHitches() {
               std::to_string(settled.lead_floor) + ")");
 }
 
+// Star Citizen at fixed 2x (Virtual Desktop, 2026-10-14): it ends its frames
+// a period after the time it is told, and its GPU work fits a lead but not
+// one less. Probes below that lead fail, each doubling the wait before the
+// lead tries below it again. Returns once two have failed (the wait is then
+// 4x explore_after).
+FrameGenLeadPolicy ProvenLeadPolicy(std::chrono::milliseconds explore_max) {
+    FrameGenLeadPolicy policy;
+    policy.probe_after = 250ms;
+    policy.judge = 200ms;
+    policy.explore_after = 700ms;
+    policy.explore_max = explore_max;
+    return policy;
+}
+
+std::uint64_t LeadProbesUndone(const FrameGenStatus& status) {
+    return status.lead_probes_failed + status.lead_downs_undone;
+}
+
+FrameGenStatus FailProbesBelowProvenLead(FrameGenPresenter& presenter, App& app, const std::string& name) {
+    for (int i = 0; i < 3; ++i) app.Frame();
+    RunWork(app, 8000ms, {6ms}, [&](const XrFrameState&) { return LeadProbesUndone(presenter.Status()) >= 2; });
+    const FrameGenStatus settled = presenter.Status();
+    Check(settled.threaded && LeadProbesUndone(settled) >= 2 && settled.lead_floor >= 2 &&
+              settled.lead_slots == settled.lead_floor,
+          name + ": probes below the lowest lead that holds fail (lead " + std::to_string(settled.lead_slots) +
+              ", floor " + std::to_string(settled.lead_floor) + ", " + std::to_string(LeadProbesUndone(settled)) +
+              " undone)");
+    return settled;
+}
+
+// A hitch makes two frames late at the lowest lead a probe proved, which
+// raises the floor a refresh above it. The way back waited as long as a try
+// below the proven lead, doubled by each that failed there: the lead stayed
+// a refresh up with frames to spare for most of a minute (Star Citizen on
+// Virtual Desktop, 2026-10-14: lead 3 for about 56 s where 2 was proven,
+// after two failed probes to 1). The proven lead is tried again after
+// explore_after; below it the doubled wait still holds.
+void TestHitchReturnsToProvenLead() {
+    const std::string name = "hitch at the proven lead";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    gpu.frames_ahead = 2;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2, app, runtime, owned);
+    app->end_offset_periods = 1;
+    const FrameGenLeadPolicy policy = ProvenLeadPolicy(2800ms);
+    presenter.SetLeadPolicy(policy);
+    bool spike = false;
+    app->before_release = [&] {
+        gpu.game_gpu = spike ? 150ms : 10ms;
+        spike = false;
+        gpu.GameFrame();
+    };
+    const FrameGenStatus settled = FailProbesBelowProvenLead(presenter, *app, name);
+    const std::uint32_t proven = settled.lead_floor;
+    // One frame's GPU work takes 150 ms.
+    spike = true;
+    RunWork(*app, 2000ms, {6ms}, [&](const XrFrameState&) { return presenter.Status().lead_slots > proven; });
+    const auto raised_at = std::chrono::steady_clock::now();
+    const FrameGenStatus raised = presenter.Status();
+    RunWork(*app, policy.explore_max + 1000ms, {6ms},
+            [&](const XrFrameState&) { return presenter.Status().lead_slots <= proven; });
+    const auto back = std::chrono::steady_clock::now() - raised_at;
+    const FrameGenStatus returned = presenter.Status();
+    std::uint32_t lowest = returned.lead_slots;
+    RunWork(*app, 2000ms, {6ms}, [&](const XrFrameState&) {
+        lowest = std::min(lowest, presenter.Status().lead_slots);
+        return false;
+    });
+    const FrameGenStatus after = presenter.Status();
+    presenter.Stop();
+    std::cerr << "  " << name << ": lead " << proven << " (" << LeadProbesUndone(settled)
+              << " probes below undone) -> " << raised.lead_slots << " (floor " << raised.lead_floor << ") -> "
+              << returned.lead_slots << " after " << Seconds(back) << " s, then lowest " << lowest << " (floor "
+              << after.lead_floor << ")" << std::endl;
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    Check(raised.lead_slots > proven && raised.lead_floor == proven + 1,
+          name + ": the hitch raises the lead and its floor a refresh (lead " + std::to_string(raised.lead_slots) +
+              ", floor " + std::to_string(raised.lead_floor) + ")");
+    Check(returned.lead_slots == proven && back <= policy.explore_after + policy.judge + 600ms,
+          name + ": the lead is back at the proven lead after explore_after (" + std::to_string(Seconds(back)) +
+              " s)");
+    Check(lowest == proven && after.lead_floor == proven,
+          name + ": below the proven lead the doubled wait still holds (lowest " + std::to_string(lowest) +
+              ", floor " + std::to_string(after.lead_floor) + ")");
+}
+
+// As TestHitchReturnsToProvenLead, but the game is slower from the hitch on
+// and needs the raised lead: the probe back to the proven lead fails, which
+// proves the raised lead, and below it the doubled wait holds. Retried every
+// explore_after, each try would cost two late frames. (A higher explore_max:
+// the wait after that failure outlasts the 4 s.)
+void TestRaisedFloorReprovedOnce() {
+    const std::string name = "raised floor";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    gpu.frames_ahead = 2;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2, app, runtime, owned);
+    app->end_offset_periods = 1;
+    presenter.SetLeadPolicy(ProvenLeadPolicy(5600ms));
+    bool spike = false;
+    bool slower = false;
+    app->before_release = [&] {
+        gpu.game_gpu = spike ? 150ms : slower ? 18ms : 10ms;
+        spike = false;
+        gpu.GameFrame();
+    };
+    const FrameGenStatus settled = FailProbesBelowProvenLead(presenter, *app, name);
+    const std::uint32_t proven = settled.lead_floor;
+    spike = slower = true;
+    const auto slowed = std::chrono::steady_clock::now();
+    // From the failed probe back on: the lead and its floor stay a refresh up.
+    bool held = true;
+    std::uint32_t lowest = 0;
+    double failed_after = 0.0;
+    RunWork(*app, 4000ms, {6ms}, [&](const XrFrameState&) {
+        const FrameGenStatus now = presenter.Status();
+        if (LeadProbesUndone(now) > LeadProbesUndone(settled)) {
+            if (!lowest) failed_after = Seconds(std::chrono::steady_clock::now() - slowed);
+            held = held && now.lead_slots == proven + 1 && now.lead_floor == proven + 1;
+            lowest = lowest ? std::min(lowest, now.lead_slots) : now.lead_slots;
+        }
+        return false;
+    });
+    const FrameGenStatus after = presenter.Status();
+    presenter.Stop();
+    const std::uint64_t undone = LeadProbesUndone(after) - LeadProbesUndone(settled);
+    std::cerr << "  " << name << ": lead " << proven << " -> " << after.lead_slots << " (floor " << after.lead_floor
+              << "), " << undone << " probes undone in 4 s (the first after " << failed_after << " s), lowest after "
+              << lowest << ", late +" << (after.late_cpu - settled.late_cpu) + (after.late_gpu - settled.late_gpu)
+              << std::endl;
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    Check(undone == 1, name + ": the probe back to the proven lead fails once in 4 s (" + std::to_string(undone) +
+                           " undone)");
+    Check(held && after.lead_slots == proven + 1 && after.lead_floor == proven + 1,
+          name + ": after it the lead and its floor stay a refresh up (lead " + std::to_string(after.lead_slots) +
+              ", floor " + std::to_string(after.lead_floor) + ", lowest " + std::to_string(lowest) + ")");
+}
+
 // Dynamic caps the lead at 4 refreshes per real frame, its refreshes per real
 // frame rounded (2-4): 8, 12 or 16. A lead raised past a cap that then drops
 // (the game speeding up) was told to the game as the cap, matched no frame's,
@@ -9120,6 +9266,8 @@ int main(int argc, char** argv) {
     RUN(TestClockLogPairs);
     RUN(TestSteamVrMissedRefresh);
     RUN(TestLeadAfterRepeatedHitches);
+    RUN(TestHitchReturnsToProvenLead);
+    RUN(TestRaisedFloorReprovedOnce);
     RUN(TestPassedOverFramesKeepLead);
     RUN(TestLeadFollowsLoweredCap);
     for (const bool jit : {true, false}) {

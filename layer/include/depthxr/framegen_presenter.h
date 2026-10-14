@@ -213,16 +213,21 @@ struct FrameGenDynamicPolicy {
 // How the lead steps back down when nothing late made it grow for a while
 // (tests shorten the times). A probe takes one slot off; frames late again
 // within `judge` restore it, and that lead is then the lowest known to hold:
-// below it is tried only every `explore_after`, doubling after each failure.
+// below it is tried only every `explore_after`, doubling after each failure
+// there. A floor late frames raised above the lowest lead a probe proved is
+// tried again after `explore_after`, not the doubled wait, which is for
+// below the proven lead (Star Citizen on Virtual Desktop, 2026-10-14: lead 3
+// held about 56 s where 2 was proven).
 struct FrameGenLeadPolicy {
     std::chrono::milliseconds probe_after{5000};    // no step up this long: one slot less (a probe)
     std::chrono::milliseconds judge{3000};          // a step up this soon after a probe: it failed
     std::chrono::milliseconds explore_after{10000}; // below the lowest lead known to hold: this long, doubling...
-    std::chrono::milliseconds explore_max{60000};   // ...up to this
+    std::chrono::milliseconds explore_max{60000};   // ...(below the proven lead) up to this
     // Steps down for frames with a refresh to spare are judged as probes too,
-    // and frames late at the lowest lead known to hold raise it: below it,
-    // once frames were late there, the lead is retried only after
-    // explore_after, doubling (tests compare without).
+    // and frames late at the lowest lead known to hold raise it a refresh
+    // (above the proven one at most): below it, once frames were late there,
+    // the lead is retried only after explore_after, doubling below the proven
+    // lead (tests compare without).
     bool slack_hysteresis{true};
 };
 
@@ -1374,9 +1379,11 @@ class FrameGenPresenter {
     // lead_floor_ as a probe last set it (held, or undone above it): frames
     // late at the floor lift it one refresh above this at most.
     std::uint32_t lead_floor_proven_{0};
+    // The wait before a try below lead_floor_proven_: explore_after, doubled
+    // by each failure there (above it, explore_after: UpdateLeadLocked).
     std::chrono::milliseconds lead_explore_after_{10000};
     // Frames were late at lead_floor_ or below it (a probe or step down
-    // undone): steps down for slack below it also wait lead_explore_after_.
+    // undone): steps down for slack below it also wait, as calm probes do.
     bool lead_floor_failed_{false};
     // A new run measures its lead afresh (StartCompositorLocked, Start).
     void ResetLeadLocked();
