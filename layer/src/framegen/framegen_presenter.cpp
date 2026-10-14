@@ -4881,6 +4881,14 @@ std::optional<XrResult> FrameGenPresenter::ThreadedWaitLocked(std::unique_lock<s
             }
         }
     }
+    // Turned off, or switched to what this thread does not present, while
+    // the game waited: it leaves the presenter thread now, as its next wait
+    // would, not handed one more frame and logged engaged (6 of 9 presses
+    // turning Frame Generation off in two sessions' logs did).
+    if (!StayThreadedLocked()) {
+        ExitThreadedLocked(lock);
+        return std::nullopt;
+    }
     // The game's frames are timed on the refresh grid (GameGridLocked).
     const XrDuration period = GameGridLocked();
     const double period_ms = static_cast<double>(period) / 1e6;
@@ -4949,7 +4957,15 @@ std::optional<XrResult> FrameGenPresenter::ThreadedWaitLocked(std::unique_lock<s
     state->predictedDisplayTime = frame.predicted;
     state->predictedDisplayPeriod = frame.reported_period;
     state->shouldRender = slot_should_render_ ? XR_TRUE : XR_FALSE;
-    full_rate_ = false;
+    if (full_rate_) {
+        // From standing by (Dynamic's, or Auto at full rate) to a fixed or
+        // automatic multiplier: logged engaged, as the inline path logs it
+        // (Dynamic logs its own engagement).
+        full_rate_ = false;
+        if (state_ == FrameGenState::kActive && !dynamic) {
+            state_ = FrameGenState::kWaiting;
+        }
+    }
     SetStateLocked(FrameGenState::kActive, "");
     return XR_SUCCESS;
 }

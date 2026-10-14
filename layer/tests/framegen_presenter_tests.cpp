@@ -6640,6 +6640,92 @@ struct SessionLog {
     }
 };
 
+// Turned off while the game's wait is held for its cadence (fixed 2x holds
+// it about half of each frame): the wait returned into the presenter thread,
+// was handed one more frame and logged "engaged" right after "disengaged".
+// Each press on logs one engagement and nothing else does. Switched from
+// Dynamic standing by to fixed 2x, the engagement is logged too (it was not:
+// the state read active throughout).
+void TestToggleOffLogsNoEngagement() {
+    const std::string name = "toggle off logs no engagement";
+    SessionLog log("toggle-engaged");
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2, app, runtime, owned,
+             log.logger.get());
+    std::atomic<bool> stop{false};
+    std::thread game([&] {
+        while (!stop) {
+            const XrFrameState state = app->Wait();
+            app->Begin();
+            SleepPrecise(std::chrono::steady_clock::now() + 6ms);
+            app->Release();
+            Check(XR_SUCCEEDED(app->End(state.predictedDisplayTime)), name + ": end");
+        }
+    });
+    const auto threaded = [&] {
+        const auto deadline = std::chrono::steady_clock::now() + 3s;
+        while (std::chrono::steady_clock::now() < deadline) {
+            const FrameGenStatus status = presenter.Status();
+            if (status.state == FrameGenState::kActive && status.threaded) return true;
+            std::this_thread::sleep_for(5ms);
+        }
+        return false;
+    };
+    constexpr int kPresses = 10;
+    int ons = 0;
+    for (int i = 0; i < kPresses; ++i) {
+        Check(threaded(), name + ": engaged before each press");
+        ++ons;
+        std::this_thread::sleep_for(std::chrono::milliseconds(60 + 3 * i));
+        Check(!presenter.Toggle(), name + ": turned off");
+        std::this_thread::sleep_for(100ms);
+        Check(presenter.Status().state == FrameGenState::kOff, name + ": reads off");
+        Check(presenter.Toggle(), name + ": turned on");
+    }
+    Check(threaded(), name + ": engaged after the last press");
+    ++ons;
+    // Dynamic standing by for a game at the refresh rate, then fixed 2x.
+    FrameGenResolvedSettings settings;
+    settings.enabled = true;
+    settings.synthesis_mode = FrameGenSynthesisMode::kExtrapolate;
+    settings.multiplier = FrameGenMultiplier::kDynamic;
+    presenter.Configure(settings);
+    const auto deadline = std::chrono::steady_clock::now() + 3s;
+    const auto standing_by = [&] {
+        const FrameGenStatus status = presenter.Status();
+        return status.standby && !status.threaded && status.state == FrameGenState::kActive;
+    };
+    while (!standing_by() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(5ms);
+    }
+    std::this_thread::sleep_for(100ms);
+    Check(standing_by(), name + ": Dynamic stands by for a game at the refresh rate");
+    settings.multiplier = FrameGenMultiplier::k2;
+    presenter.Configure(settings);
+    Check(threaded(), name + ": fixed 2x engages from standing by");
+    ++ons;
+    std::this_thread::sleep_for(100ms);
+    stop = true;
+    game.join();
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    const std::vector<std::string> lines = log.Lines("Frame Generation");
+    const auto engaged = static_cast<std::size_t>(std::count_if(lines.begin(), lines.end(), [](const std::string& line) {
+        return line.find("Frame Generation engaged") != std::string::npos;
+    }));
+    if (std::getenv("FG_TEST_VERBOSE")) {
+        for (const std::string& line : lines) std::cerr << "  " << line << '\n';
+    }
+    Check(engaged == static_cast<std::size_t>(ons),
+          name + ": one engagement logged for each (" + std::to_string(engaged) + " logged, " + std::to_string(ons) +
+              " expected)");
+}
+
 // A just-in-time Extrapolate session against a paced runtime, the halving
 // window shortened to a second; Dynamic's benefit guard keeps its own windows
 // (it would judge only after these tests' decisions).
@@ -8382,6 +8468,7 @@ int main(int argc, char** argv) {
     RUN(TestJitWaitsForNoGameFrame);
     RUN(TestJitModeSwitchRestarts);
     RUN(TestToggleOffReadsOff);
+    RUN(TestToggleOffLogsNoEngagement);
     // The threaded presenter's lifecycle with frames written together, then
     // just in time.
     for (const bool jit : {false, true}) {
