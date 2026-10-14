@@ -120,12 +120,22 @@ void Logger::Initialize(const std::filesystem::path& log_path) {
     }
     active_log_path_ = CreateSessionLogPath(base_log_path_);
     last_stream_flush_time_ = {};
-    PruneLocked();
+    // Before the config is read the retention is only the default: pruning
+    // to it would delete logs a larger configured retention keeps.
+    retention_applied_ = retention_configured_;
+    if (retention_applied_) {
+        PruneLocked();
+    }
 }
 
 void Logger::SetRetentionFiles(int retention_files) {
     std::scoped_lock lock(mutex_);
-    retention_files_ = std::max(1, retention_files);
+    retention_files = std::max(1, retention_files);
+    if (retention_applied_ && retention_files == retention_files_) {
+        return;
+    }
+    retention_files_ = retention_files;
+    retention_configured_ = retention_applied_ = true;
     PruneLocked();
 }
 

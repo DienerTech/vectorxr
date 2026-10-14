@@ -546,6 +546,45 @@ void TestThreadIdsAreOsThreadIds(const std::filesystem::path& root) {
     (void)root;
 #endif
 }
+// A retention above the default keeps that many logs: the session log does
+// not prune to the default before the config is read. Settings reloads with
+// the same retention do not rescan the folder; a later session prunes to the
+// configured value.
+void TestRetentionFollowsTheConfig(const std::filesystem::path& root) {
+    const auto directory = root / "retention-config";
+    std::error_code ignored;
+    std::filesystem::remove_all(directory, ignored);
+    std::filesystem::create_directories(directory);
+    const auto old_log = [&](int index) {
+        const auto path = directory / ("vectorxr-20000101-0000" + std::string(index < 10 ? "0" : "") +
+                                       std::to_string(index) + ".log");
+        std::ofstream(path) << "old";
+        std::filesystem::last_write_time(path, std::filesystem::file_time_type::clock::now() -
+                                                   std::chrono::hours(100 - index));
+        return path;
+    };
+    const auto count_logs = [&] {
+        int count = 0;
+        for (const auto& entry : std::filesystem::directory_iterator(directory))
+            if (entry.path().extension() == ".log") ++count;
+        return count;
+    };
+    for (int index = 0; index < 10; ++index) old_log(index);
+    depthxr::Logger logger;
+    logger.Initialize(directory / "vectorxr.log");
+    Check(count_logs() == 10, "A session log pruned to the default before the config set the retention");
+    logger.SetRetentionFiles(30);
+    logger.Info("new session");
+    Check(count_logs() == 11, "A retention of 30 did not keep ten older logs");
+
+    logger.SetRetentionFiles(3);
+    Check(count_logs() == 3, "Lowering the retention did not prune to it");
+    for (int index = 10; index < 14; ++index) old_log(index);
+    logger.SetRetentionFiles(3);
+    Check(count_logs() == 7, "A settings reload with the same retention rescanned the log folder");
+    logger.Initialize(directory / "vectorxr.log");
+    Check(count_logs() == 3, "A later session did not prune to the configured retention");
+}
 void TestRetention(const std::filesystem::path& root) {
     const auto directory = root / "retention";
     std::filesystem::create_directory(directory);
@@ -609,6 +648,7 @@ int main(int argc, char** argv) {
         TestFrameGenSnapshotTriggerRateLimit(root);
         TestReopenedPartStaysBounded(root);
         TestThreadIdsAreOsThreadIds(root);
+        TestRetentionFollowsTheConfig(root);
         TestRetention(root);
         std::cout << "Flight recorder: continuous persistence, rollover, frozen stalls, incident snapshots and "
                      "rotation, Frame Generation snapshots (names, rate limit, rotation apart from incidents, "
