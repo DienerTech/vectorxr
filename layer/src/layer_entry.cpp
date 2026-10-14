@@ -1,6 +1,7 @@
 #include "depthxr/openxr_layer.h"
 #include "depthxr/openxr_loader_api_layer.h"
 
+#include "depthxr/crt_failure_report.h"
 #include "depthxr/runtime_compatibility.h"
 #include "depthxr/vulkan_enable_hooks.h"
 
@@ -892,6 +893,8 @@ XrResult __declspec(dllexport) XRAPI_CALL
                                        depthxr::XrNegotiateApiLayerRequest* api_layer_request) {
     using namespace depthxr;
 
+    // Into the layer's own runtime: the game's crash reporting still sees the layer's fatal runtime errors.
+    InstallCrtFailureReporting();
     OpenXrLayer::Instance().SetLayerDirectory(GetModuleDirectory());
 
     if (!loader_info || !api_layer_request || (api_layer_name && std::string_view(api_layer_name) != kLayerName)) {
