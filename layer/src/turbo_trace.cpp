@@ -13,13 +13,23 @@
 
 #include "depthxr/config_path.h"
 
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
 namespace depthxr {
 using namespace std::chrono_literals;
 namespace {
 constexpr std::int64_t kStallNs = 2'000'000'000;
 constexpr std::int64_t kReportNs = 5'000'000'000;
+// The OS thread id, as the Threads census and the Frame Generation trace
+// print it, so recorder lines join to both.
 std::uint64_t ThreadId() {
+#if defined(_WIN32)
+    return GetCurrentThreadId();
+#else
     return static_cast<std::uint64_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+#endif
 }
 template <typename T> void Number(std::string& line, T value) {
     char buffer[32];

@@ -467,6 +467,33 @@ void TestReopenedPartStaysBounded(const std::filesystem::path& root) {
     Check(Read(depthxr::TurboTimingTrace::RecorderPath(log, 1)).find("event=second.session") != std::string::npos,
           "The second session's history was not rotated into the other part");
 }
+// Recorder threads are the OS's thread ids, as the Threads census and the
+// Frame Generation trace print them, so the three can be joined.
+void TestThreadIdsAreOsThreadIds(const std::filesystem::path& root) {
+#ifdef _WIN32
+    depthxr::Logger logger;
+    logger.Initialize(root / "threads.log");
+    logger.SetLevel(depthxr::LogLevel::Debug);
+    depthxr::TurboTimingTrace trace;
+    trace.Start(logger);
+    trace.Record("main.thread", trace.NextId());
+    DWORD worker_id = 0;
+    std::thread([&] {
+        worker_id = GetCurrentThreadId();
+        const auto call = trace.Watch("worker.call");
+    }).join();
+    trace.Stop();
+    const auto history = History(logger.ActiveLogPath());
+    Check(history.find("thread=" + std::to_string(GetCurrentThreadId()) + " ") != std::string::npos &&
+              history.find("event=main.thread") != std::string::npos,
+          "A record's thread is not its OS thread id");
+    Check(history.find("thread=" + std::to_string(worker_id) + " ") != std::string::npos &&
+              history.find("event=worker.call") != std::string::npos,
+          "A watched call's thread is not its OS thread id");
+#else
+    (void)root;
+#endif
+}
 void TestRetention(const std::filesystem::path& root) {
     const auto directory = root / "retention";
     std::filesystem::create_directory(directory);
@@ -528,6 +555,7 @@ int main(int argc, char** argv) {
         TestFrameGenSnapshotTrigger();
         TestFrameGenSnapshotTriggerRateLimit(root);
         TestReopenedPartStaysBounded(root);
+        TestThreadIdsAreOsThreadIds(root);
         TestRetention(root);
         std::cout << "Flight recorder: continuous persistence, rollover, frozen stalls, incident snapshots and "
                      "rotation, Frame Generation snapshots (names, rate limit, rotation apart from incidents, "
