@@ -6510,22 +6510,17 @@ constexpr const char* kHalvingDetail = "Runtime holds frames to half rate: check
 constexpr const char* kHalvingReason = "the runtime holds frames to half rate: check its smoothing";
 constexpr const char* kHalvingStandDown = "the runtime holds frames to half rate";
 
-// The directory of this executable (in the build tree).
-std::filesystem::path ExecutableDirectory() {
-    wchar_t path[MAX_PATH] = {};
-    GetModuleFileNameW(nullptr, path, MAX_PATH);
-    return std::filesystem::path(path).parent_path();
-}
-
-// A session log of its own beside this executable, read back once the
-// presenter has stopped.
+// A session log of its own in the temporary folder (not beside this
+// executable: on a worktree whose build is the installed layer that is the
+// active layer folder), read back once the presenter has stopped.
 struct SessionLog {
     std::filesystem::path directory;
     std::unique_ptr<Logger> logger{std::make_unique<Logger>()};
+    std::filesystem::path path; // the log, once Lines closed it
 
     explicit SessionLog(const std::string& name)
-        : directory(ExecutableDirectory() /
-                    ("presenter-test-log-" + std::to_string(GetCurrentProcessId()) + "-" + name)) {
+        : directory(std::filesystem::temp_directory_path() /
+                    ("vectorxr-presenter-test-log-" + std::to_string(GetCurrentProcessId()) + "-" + name)) {
         std::error_code ignored;
         std::filesystem::remove_all(directory, ignored);
         logger->Initialize(directory / "session.log");
@@ -6535,10 +6530,13 @@ struct SessionLog {
         std::error_code ignored;
         std::filesystem::remove_all(directory, ignored);
     }
-    // The lines holding `text` (closes the log: call once the presenter has stopped).
+    // The lines holding `text` (closes the log: call once the presenter has
+    // stopped). Later calls read the closed log again.
     std::vector<std::string> Lines(const std::string& text) {
-        const std::filesystem::path path = logger->ActiveLogPath();
-        logger.reset(); // flushed
+        if (logger) {
+            path = logger->ActiveLogPath();
+            logger.reset(); // flushed
+        }
         std::ifstream file(path);
         std::vector<std::string> lines;
         for (std::string line; std::getline(file, line);) {
