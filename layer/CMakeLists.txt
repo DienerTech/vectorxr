@@ -465,10 +465,10 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         set_tests_properties(depthxr_framegen_vulkan_tests PROPERTIES SKIP_RETURN_CODE 77)
         # The Direct3D 12 scenarios on the GPU: variable-rate shading, the optical flow hardware (a
         # session per view, four for quad views) and a GPU's fence budgets, none of which WARP has.
-        # Passes with a message without a hardware adapter (and without the optical flow hardware,
-        # its checks are skipped with one).
+        # Skipped (77) without a hardware adapter, as on hosted CI (without the optical flow
+        # hardware, its checks are skipped with a message).
         add_test(NAME depthxr_framegen_d3d12_hw_tests COMMAND depthxr_framegen_tests hw-d3d12)
-        set_tests_properties(depthxr_framegen_d3d12_hw_tests PROPERTIES TIMEOUT 180)
+        set_tests_properties(depthxr_framegen_d3d12_hw_tests PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 77)
         # Direct3D 11 <-> 12 sharing probe for the D3D11 bridge. It needs a real GPU, so it is
         # built here but is not a CTest (`depthxr_bridge_probe --help`).
         add_executable(depthxr_bridge_probe tests/bridge_probe.cpp)

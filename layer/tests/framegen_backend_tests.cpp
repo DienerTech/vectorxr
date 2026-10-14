@@ -5,7 +5,7 @@
 // exits 77 (skipped) when none is present. hw-d3d12 runs the Direct3D 12
 // scenarios on the first hardware adapter (variable-rate shading, the
 // optical flow hardware, a GPU's fence budgets: what WARP does not have) and
-// passes with a message when there is none. FG_TEST_ADAPTER=<text> puts the
+// exits 77 (skipped) when there is none. FG_TEST_ADAPTER=<text> puts the
 // hardware modes and Vulkan on the adapter it names instead (test_adapter.h);
 // naming none fails the hardware modes and skips Vulkan.
 
@@ -6168,7 +6168,8 @@ int D3D12Test() {
     } else if (g_bench || g_hardware) {
         // The first hardware adapter that runs Direct3D 12; without one
         // (a machine with no GPU, or only Microsoft's software adapter)
-        // there is nothing to run on, which is not a failure.
+        // there is nothing to run on, which is not a failure: the hardware
+        // modes report it as skipped, so CTest does not count it a pass.
         ComPtr<IDXGIAdapter1> adapter;
         for (UINT i = 0; !device && factory->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND; ++i) {
             DXGI_ADAPTER_DESC1 desc{};
@@ -6182,7 +6183,7 @@ int D3D12Test() {
         }
         if (!device) {
             std::cout << "skipped: no hardware Direct3D 12 adapter\n";
-            return 0;
+            return g_hardware ? 77 : 0;
         }
     } else {
         Check(SUCCEEDED(factory->EnumWarpAdapter(IID_PPV_ARGS(&warp))), "WARP adapter");
