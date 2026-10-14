@@ -600,8 +600,14 @@ void TestRetentionFollowsTheConfig(const std::filesystem::path& root) {
     for (int index = 10; index < 14; ++index) old_log(index);
     logger.SetRetentionFiles(3);
     Check(count_logs() == 7, "A settings reload with the same retention rescanned the log folder");
+    // A later instance in the process: its SetRetentionFiles has the same
+    // value, and still prunes once its own log exists.
+    std::this_thread::sleep_for(1100ms); // a session log name per second
     logger.Initialize(directory / "vectorxr.log");
-    Check(count_logs() == 3, "A later session did not prune to the configured retention");
+    Check(count_logs() == 7, "A later session pruned before its instance set the retention");
+    logger.Info("later session");
+    logger.SetRetentionFiles(3);
+    Check(count_logs() == 3, "A later session's log left the folder over the configured retention");
 }
 // An instance that never asks for a session discards its log, unless an
 // error was written to it.
