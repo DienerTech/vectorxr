@@ -44,6 +44,21 @@ fn finish_capture(capture_id: u64) {
     let _ = ACTIVE_CAPTURE_ID.compare_exchange(capture_id, 0, Ordering::AcqRel, Ordering::Acquire);
 }
 
+// One capture listens at a time, so starting one in a second binding editor
+// stops the first. That editor used to read the empty result as a timeout.
+const CAPTURE_SUPERSEDED: &str =
+    "Stopped listening: another binding started capturing input. Capture again here to bind this one.";
+
+// The result of a capture that ended without an input: canceled or timed out
+// is None; replaced by a newer capture is an error that says so.
+fn unfinished_capture_result(capture_id: u64) -> Result<Option<CapturedDeviceBinding>, String> {
+    let active = ACTIVE_CAPTURE_ID.load(Ordering::Acquire);
+    if active != 0 && active != capture_id {
+        return Err(CAPTURE_SUPERSEDED.into());
+    }
+    Ok(None)
+}
+
 #[cfg(windows)]
 mod platform {
     use super::{capture_is_active, CapturedDeviceBinding, InputDeviceInfo};
@@ -578,7 +593,7 @@ pub fn capture_device_binding(
     selected_device_guid: String,
 ) -> Result<Option<CapturedDeviceBinding>, String> {
     if !capture_is_active(capture_id) {
-        return Ok(None);
+        return unfinished_capture_result(capture_id);
     }
     if selected_device_guid.trim().is_empty() {
         finish_capture(capture_id);
@@ -587,13 +602,20 @@ pub fn capture_device_binding(
 
     let result =
         platform::capture_device_binding_platform(timeout_ms, capture_id, &selected_device_guid);
+    let result = match result {
+        Ok(None) => unfinished_capture_result(capture_id),
+        other => other,
+    };
     finish_capture(capture_id);
     result
 }
 
 #[cfg(test)]
 mod capture_session_tests {
-    use super::{begin_device_binding_capture, cancel_device_binding_capture, capture_is_active};
+    use super::{
+        begin_device_binding_capture, cancel_device_binding_capture, capture_device_binding,
+        capture_is_active, CAPTURE_SUPERSEDED,
+    };
 
     #[test]
     fn capture_tokens_cancel_and_supersede_safely() {
@@ -603,8 +625,17 @@ mod capture_session_tests {
         let second = begin_device_binding_capture();
         assert!(!capture_is_active(first));
         assert!(capture_is_active(second));
+        // The replaced capture says why it stopped instead of timing out.
+        assert_eq!(
+            capture_device_binding(Some(0), first, "{device}".into()).unwrap_err(),
+            CAPTURE_SUPERSEDED
+        );
+        assert!(capture_is_active(second));
 
         cancel_device_binding_capture();
         assert!(!capture_is_active(second));
+        assert!(capture_device_binding(Some(0), second, "{device}".into())
+            .unwrap()
+            .is_none());
     }
 }
