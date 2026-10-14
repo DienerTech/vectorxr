@@ -72,7 +72,10 @@ std::vector<std::pair<LogLevel,std::string>> OsdRenderer::CollectDiagnosticsLock
         std::ostringstream out;out<<"OSD summary "<<identity_<<" api="<<(graphics_?graphics_->Name():"Unsupported")<<" mode="<<(i==0?"disabled":i==1?"hidden":"visible")<<" final="<<final<<" windowSeconds="<<seconds
             <<" submitted="<<m.submitted<<" refreshed="<<m.refreshed<<" activeSeconds="<<m.cadence.sum/1000.0<<" effectiveRefreshHz="<<(m.cadence.sum>0?m.refreshed*1000.0/m.cadence.sum:0)<<" noRender="<<m.no_render<<" layerLimit="<<m.layer_limit<<" imageTimeouts="<<m.image_timeouts<<" uploadBusy="<<m.upload_busy<<" workerBusy="<<m.worker_busy<<" failures="<<m.failures
             <<" frameRejections="<<m.frame_rejections<<" anchor="<<(!world_anchored_?"view":anchor_failed_?"unavailable":"world")<<" anchorFallbacks="<<m.anchor_fallbacks<<metric("prepareCpu",m.prepare)<<metric("appendCpu",m.append)<<metric("appCadence",m.cadence)<<metric("runtimeSubmitCpu",m.submit);
-        lines.emplace_back(LogLevel::Info,out.str());
+        // A disabled OSD's window is all zeros but its baseline timings:
+        // those go out every 30 s only with debug logging, and once at the
+        // end of the session.
+        lines.emplace_back(i==0 && !final?LogLevel::Debug:LogLevel::Info,out.str());
         if(logger_->IsDebugEnabled())lines.emplace_back(LogLevel::Debug,"OSD detail "+identity_+" mode="+(i==0?std::string("disabled"):i==1?"hidden":"visible")+metric("rasterWorkerCpu",m.raster)+metric("acquireCpu",m.acquire)+metric("waitCpu",m.wait)+metric("uploadEnqueueCpu",m.upload)+metric("releaseCpu",m.release)+metric("imageAge",m.age)+"; CPU timings do not measure GPU/compositor execution; p95 bins: 0.05ms below 10ms, 2ms below 120ms, overflow=max");
     }
     measurements_={};report_start_=now;return lines;
