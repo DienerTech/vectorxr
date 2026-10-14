@@ -1330,6 +1330,9 @@ class FrameGenPresenter {
     };
     std::optional<LeadProbe> lead_probe_; // a probe being judged
     std::uint32_t lead_floor_{0};         // the lowest lead known to hold (0: none yet)
+    // lead_floor_ as a probe last set it (held, or undone above it): frames
+    // late at the floor lift it one refresh above this at most.
+    std::uint32_t lead_floor_proven_{0};
     std::chrono::milliseconds lead_explore_after_{10000};
     // Frames were late at lead_floor_ or below it (a probe or step down
     // undone): steps down for slack below it also wait lead_explore_after_.

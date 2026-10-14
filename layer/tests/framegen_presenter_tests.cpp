@@ -4612,6 +4612,74 @@ void TestLeadDoesNotFlap() {
               std::to_string(flapping.mean_lead) + ")");
 }
 
+// A slow game (GPU-bound near 33 fps) that hitches every 0.6 s: each hitch
+// makes a few of its frames late at the lowest lead known to hold. Taken as
+// that lead no longer holding, each hitch raised it a refresh, and below it
+// the lead is retried only every explore_after: the lead climbed a refresh
+// per hitch and never came back down before the next, past what the kept
+// real frames cover, so refreshes showed old frames unmoved until Dynamic
+// stood down (Star Citizen on Pimax's runtime, 2026-10-13: 6 -> 7 -> 8 -> 9
+// within a minute). A hitch no lead cures lifts that floor one refresh above
+// the lowest lead a probe proved at most; between hitches the lead comes back
+// down to it.
+void TestLeadAfterRepeatedHitches() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    gpu.frames_ahead = 2;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic, app, runtime, owned);
+    FrameGenLeadPolicy policy;
+    policy.probe_after = 250ms;
+    policy.judge = 200ms;
+    policy.explore_after = 700ms;
+    policy.explore_max = 1400ms;
+    presenter.SetLeadPolicy(policy);
+    bool hitches = false;
+    int frames = 0;
+    app->before_release = [&] {
+        gpu.game_gpu = hitches && ++frames % 18 == 0 ? 150ms : 30ms;
+        gpu.GameFrame();
+    };
+    for (int i = 0; i < 3; ++i) app->Frame();
+    RunWork(*app, 3000ms, {6ms}, [&](const XrFrameState&) { return Engaged(presenter); });
+    Check(Engaged(presenter), "repeated hitches: Dynamic engages for the slow game");
+    // Probes find the lowest lead that holds.
+    RunWork(*app, 3000ms, {6ms});
+    const FrameGenStatus settled = presenter.Status();
+    hitches = true;
+    std::uint32_t highest = settled.lead_slots;
+    std::uint32_t highest_floor = settled.lead_floor;
+    std::uint64_t lead_sum = 0;
+    std::uint64_t samples = 0;
+    RunWork(*app, 6000ms, {6ms}, [&](const XrFrameState&) {
+        const FrameGenStatus now = presenter.Status();
+        highest = std::max(highest, now.lead_slots);
+        highest_floor = std::max(highest_floor, now.lead_floor);
+        lead_sum += now.lead_slots;
+        ++samples;
+        return false;
+    });
+    const FrameGenStatus after = presenter.Status();
+    presenter.Stop();
+    const double mean = samples ? static_cast<double>(lead_sum) / static_cast<double>(samples) : 0.0;
+    std::cerr << "  repeated hitches: lead " << settled.lead_slots << " (floor " << settled.lead_floor << ") -> mean "
+              << mean << ", highest " << highest << " (floor " << highest_floor << "), last " << after.lead_slots
+              << " (floor " << after.lead_floor << "); ring exhausted +"
+              << after.ring_exhausted - settled.ring_exhausted << ", stand-downs +"
+              << after.dynamic_stand_downs - settled.dynamic_stand_downs << std::endl;
+    Check(!runtime.ordering_violation && !g_release_violation, "repeated hitches: calls stayed ordered");
+    Check(settled.lead_floor > 0, "repeated hitches: probes found the lowest lead that holds before the hitches");
+    Check(highest_floor <= settled.lead_floor + 1,
+          "repeated hitches: the hitches lift the lowest lead known to hold one refresh at most (" +
+              std::to_string(settled.lead_floor) + " -> " + std::to_string(highest_floor) + ")");
+    Check(mean <= static_cast<double>(settled.lead_floor) + 1.5,
+          "repeated hitches: between hitches the lead comes back down (mean " + std::to_string(mean) + ", floor " +
+              std::to_string(settled.lead_floor) + ")");
+}
+
 // A game showing its last frame (stalled): its exact copy is written once,
 // then the runtime shows the output images' newest again each refresh.
 void TestSkipIdenticalExactCopies() {
@@ -8162,6 +8230,7 @@ int main(int argc, char** argv) {
     RUN(TestStalledClockWhilePresenting);
     RUN(TestAutoHoldsWhileClockDisplaced);
     RUN(TestSteamVrMissedRefresh);
+    RUN(TestLeadAfterRepeatedHitches);
     if (!policy) {
         RunPolicyTests();
     } else {

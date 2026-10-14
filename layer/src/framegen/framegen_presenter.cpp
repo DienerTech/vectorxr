@@ -695,6 +695,7 @@ void FrameGenPresenter::ResetLeadLocked() {
     lead_calm_since_ = {};
     lead_probe_.reset();
     lead_floor_ = 0;
+    lead_floor_proven_ = 0;
     lead_explore_after_ = lead_policy_.explore_after;
     lead_floor_failed_ = false;
 }
@@ -4553,6 +4554,7 @@ void FrameGenPresenter::UpdateLeadLocked(bool late, std::optional<double> slack_
     if (lead_probe_ && now - lead_probe_->at >= lead_policy_.judge) {
         if (lead_floor_ == 0 || lead_slots_ < lead_floor_) {
             lead_floor_ = lead_slots_;
+            lead_floor_proven_ = lead_slots_;
             lead_explore_after_ = lead_policy_.explore_after;
             lead_floor_failed_ = false;
         }
@@ -4581,6 +4583,7 @@ void FrameGenPresenter::UpdateLeadLocked(bool late, std::optional<double> slack_
                 // (more rarely after each failure there).
                 const bool exploring = lead_floor_ != 0 && lead_probe_->from <= lead_floor_;
                 lead_floor_ = lead_probe_->from;
+                lead_floor_proven_ = lead_floor_;
                 lead_floor_failed_ = true;
                 lead_explore_after_ = exploring ? std::min(lead_explore_after_ * 2, lead_policy_.explore_max)
                                                 : lead_policy_.explore_after;
@@ -4588,7 +4591,14 @@ void FrameGenPresenter::UpdateLeadLocked(bool late, std::optional<double> slack_
                 lead_probe_.reset();
             } else if (hysteresis && lead_floor_ != 0 && lead_slots_ <= lead_floor_) {
                 // Late at the lowest lead known to hold: it holds no longer.
-                lead_floor_ = std::min(lead_slots_ + 1, 4 * multiplier);
+                // Late there again lifts it no further than a refresh above
+                // the lowest a probe proved: a hitch no lead cures (Star
+                // Citizen's, every half minute) raised it a refresh each time,
+                // and the lead with it, past what the kept real frames cover
+                // (2026-10-13). A lead that does not hold any more is proved
+                // by its probe failing.
+                const std::uint32_t most = lead_floor_proven_ != 0 ? lead_floor_proven_ + 1 : lead_slots_ + 1;
+                lead_floor_ = std::max(lead_floor_, std::min({lead_slots_ + 1, 4 * multiplier, most}));
                 lead_floor_failed_ = true;
             }
             lead_slots_ = std::min(lead_slots_ + 1, 4 * multiplier);
