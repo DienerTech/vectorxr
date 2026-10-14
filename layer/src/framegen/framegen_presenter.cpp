@@ -95,6 +95,22 @@ std::string MultiplierText(std::uint32_t multiplier) {
     return std::to_string(multiplier) + "x";
 }
 
+// A diagnostic view for the log, with what it draws: one left on looks like
+// a fault (the Confidence view's red was reported as flashing, issue #95),
+// and only the OSD, when shown, names it otherwise.
+std::string DiagnosticViewText(FrameGenDiagnosticView view) {
+    switch (view) {
+    case FrameGenDiagnosticView::kFlow:
+        return "flow (generated frames are colored by the motion measured)";
+    case FrameGenDiagnosticView::kConfidence:
+        return "confidence (generated frames are drawn red where they fall back to the real image)";
+    case FrameGenDiagnosticView::kTint:
+        return "tint (generated frames are tinted)";
+    default:
+        return "off";
+    }
+}
+
 // "twice", "three times": how many times the refresh period.
 std::string TimesText(std::uint32_t times) {
     switch (times) {
@@ -404,6 +420,7 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
         logger_->Info(std::string("Frame Generation enabled for this session: backend=") + gpu_->Name() +
                       ", mode=" + ToString(settings_.synthesis_mode) + ", flowQuality=" + ToString(settings_.flow_quality) +
                       ", motionEstimation=" + ToString(settings_.motion_estimation) +
+                      ", diagnosticView=" + DiagnosticViewText(settings_.diagnostic_view) +
                       "; frame pacing is owned by Frame Generation (Turbo stays off).");
         if (!gpu_gate_setting.empty()) {
             logger_->Info("Frame Generation: GPU-aware pacing set by VECTORXR_FRAMEGEN_GPU_AHEAD=" + gpu_gate_setting +
@@ -601,6 +618,8 @@ void FrameGenPresenter::Stop() {
     dropped_unbegun_ = 0;
     gpu_ms_ = -1.0;
     inline_hold_until_.reset();
+    auto_halving_hold_until_.reset();
+    auto_halving_hold_ = dynamic_policy_.hold;
     last_cycle_started_late_ = false;
     app_frames_.clear();
     submissions_.clear();
@@ -651,8 +670,14 @@ void FrameGenPresenter::Configure(const FrameGenResolvedSettings& settings) {
     const bool restart = jit_ && compositor_running_ && settings.synthesis_mode != settings_.synthesis_mode;
     const bool was_dynamic = DynamicLocked();
     const FrameGenMultiplier multiplier = settings_.multiplier;
+    const FrameGenDiagnosticView diagnostic_view = settings_.diagnostic_view;
     settings_ = settings;
     const bool dynamic = DynamicLocked();
+    // Diagnostic views change during play: the log says when.
+    if (started_ && logger_ && settings_.diagnostic_view != diagnostic_view) {
+        logger_->Info("Frame Generation diagnostic view changed: " + DiagnosticViewText(diagnostic_view) + " -> " +
+                      DiagnosticViewText(settings_.diagnostic_view) + ".");
+    }
     if (started_ && (settings_.multiplier != multiplier || dynamic != was_dynamic)) {
         // Switched while running: frames held to the old multiplier say
         // nothing about the game's own rate, so Dynamic and Auto settle and
@@ -730,6 +755,7 @@ void FrameGenPresenter::SetDynamicPolicy(const FrameGenDynamicPolicy& policy) {
     std::scoped_lock lock(mutex_);
     dynamic_policy_ = policy;
     dynamic_hold_ = policy.hold;
+    auto_halving_hold_ = policy.hold;
     dynamic_probe_after_ = policy.probe_after;
 }
 
@@ -789,6 +815,7 @@ bool FrameGenPresenter::Toggle() {
             // full-rate hold from before, and Dynamic judges the game's rate
             // again before engaging.
             inline_hold_until_.reset();
+            auto_halving_hold_until_.reset();
             DynamicReenableLocked(Clock::now());
         }
         if (state_ != FrameGenState::kUnavailable) {
@@ -1680,6 +1707,35 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
             return;
         }
     }
+    // The runtime holds the frames presented to half its refresh rate (or
+    // less), shown by the presenter thread's waits at this multiplier, and
+    // reports the refresh period: every engaged frame then takes twice its
+    // refreshes and reads as late, and stepping up only slows the game more
+    // (Pimax Play's smoothing held a game it let run at 36 fps to 9 at 4x,
+    // the output still 36). Engaged gains nothing while that lasts: back to
+    // full rate, frames pass straight through as Dynamic stands down, and
+    // stay so while the runtime halves. One reporting the period it holds
+    // frames to times the game's frames by it (GameGridLocked): they read as
+    // late only where the game misses that rate, and the generated frames
+    // between still fill every refresh the runtime takes.
+    if (runtime_halving_ && halving_confirmed_at_ && *halving_confirmed_at_ > multiplier_changed_at_ &&
+        auto_multiplier_ > 1 && GameGridLocked() < refresh_period_ + refresh_period_ / 2) {
+        const std::uint32_t before = auto_multiplier_;
+        const std::chrono::milliseconds hold = auto_halving_hold_;
+        auto_multiplier_ = 1;
+        probing_ = false;
+        auto_halving_hold_until_ = now + hold;
+        auto_halving_hold_ = std::min(auto_halving_hold_ * 2, dynamic_policy_.hold_max);
+        multiplier_changed_at_ = now;
+        last_app_end_ = now;
+        cadence_.clear();
+        if (logger_) {
+            logger_->Info("Frame Generation automatic multiplier " + MultiplierText(before) + " -> full rate: " +
+                          kHalvingStandDown + "; frames pass straight through, retrying in " +
+                          Number(std::chrono::duration<double>(hold).count(), 0) + " s.");
+        }
+        return;
+    }
     // Frames right after a change (a new multiplier, engaging, new output
     // images) carry its one-off cost and say nothing about the app.
     if (last_app_end_ && now - multiplier_changed_at_ >= auto_settle_) {
@@ -1709,7 +1765,14 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
         }
     }
     const std::uint32_t before = auto_multiplier_;
-    const bool held = inline_hold_until_ && now < *inline_hold_until_;
+    // A halving hold ends early where the game's own waits clear the report.
+    // Only waits asked for well within a refresh, or released at the next
+    // one, can (NoteRuntimeHalvingLocked): a game taking longer than a
+    // refresh for every frame, the kind Auto engages for, gives none that
+    // do, and its hold runs out before the presenter thread's waits judge
+    // the runtime again.
+    const bool held = (inline_hold_until_ && now < *inline_hold_until_) ||
+                      (runtime_halving_ && auto_halving_hold_until_ && now < *auto_halving_hold_until_);
     bool gave_up_inline = false;
     // More than 30% of the last second's frames missed the cadence: step up.
     if (recent >= 8 && recent_late * 10 > recent * 3) {
@@ -3552,6 +3615,28 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
     } else {
         repeated_ += count;
     }
+    if (logger_ && synthesized && !logged_first_generation_) {
+        // Just in time (analyze) as well. Each view as the game submits it:
+        // its region of the swapchain image and its field of view, where an
+        // eye-tracked focus view's movement shows (issue #95).
+        logged_first_generation_ = true;
+        std::string views;
+        for (std::uint32_t i = 0; i < projection.viewCount; ++i) {
+            const XrCompositionLayerProjectionView& view = projection.views[i];
+            const auto degrees = [](float radians) { return Number(radians * 57.2957795, 1); };
+            views += std::string(views.empty() ? "" : "; ") + std::to_string(view.subImage.imageRect.extent.width) +
+                     "x" + std::to_string(view.subImage.imageRect.extent.height) + " at " +
+                     std::to_string(view.subImage.imageRect.offset.x) + "," +
+                     std::to_string(view.subImage.imageRect.offset.y) + " fov " + degrees(view.fov.angleLeft) + "/" +
+                     degrees(view.fov.angleRight) + "/" + degrees(view.fov.angleUp) + "/" +
+                     degrees(view.fov.angleDown);
+        }
+        logger_->Info("Frame Generation produced its first frames: views=" + std::to_string(projection.viewCount) + " (" +
+                      views + "), generatedPerFrame=" + (analyze ? std::string("just in time") : std::to_string(count)) +
+                      ", backend=" + gpu_->Name() +
+                      (fractions.empty() ? std::string() : ", firstFraction=" + Number(fractions.front(), 3)) +
+                      ", capturedAtRelease=" + std::to_string(captured_ > 0) + ".");
+    }
     if (analyze) {
         analyze->frame = executed.frame;
         analyze->synthesized = synthesized;
@@ -3597,18 +3682,6 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         shift_window_sum_mm_ += moved_mm;
         shift_window_max_mm_ = std::max(shift_window_max_mm_, moved_mm);
         ++shift_window_frames_;
-    }
-    if (logger_ && synthesized && !logged_first_generation_) {
-        logged_first_generation_ = true;
-        std::string extents;
-        for (const auto& submission : submissions) {
-            extents += (extents.empty() ? "" : ",") + std::to_string(submission.request.extent.width) + "x" +
-                       std::to_string(submission.request.extent.height);
-        }
-        logger_->Info("Frame Generation produced its first frames: views=" + std::to_string(projection.viewCount) + " (" +
-                      extents + "), generatedPerFrame=" + std::to_string(count) + ", backend=" + gpu_->Name() +
-                      ", firstFraction=" + Number(fractions.front(), 3) + ", capturedAtRelease=" +
-                      std::to_string(captured_ > 0) + ".");
     }
     return true;
 }

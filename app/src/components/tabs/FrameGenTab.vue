@@ -47,7 +47,7 @@ const restartNote = 'Turning Frame Generation on takes effect the next time the 
 const diagnosticViews: { value: FrameGenDiagnosticView; label: string; description: string }[] = [
   { value: 'off', label: 'Off', description: 'Generated frames are shown as they are.' },
   { value: 'flow', label: 'Motion flow', description: 'Color-codes the motion Frame Generation measured on generated frames.' },
-  { value: 'confidence', label: 'Confidence', description: 'Shows where generated frames fell back to the real image; useful while tuning the Advanced settings.' },
+  { value: 'confidence', label: 'Confidence', description: 'Paints generated frames red where they fell back to the real image; useful while tuning the Advanced settings.' },
   { value: 'tint', label: 'Generated-frame tint', description: 'Tints generated frames faintly, so you can see they are shown.' },
 ]
 const diagnosticDescription = computed(() => diagnosticViews.find((view) => view.value === framegen.value.diagnosticView)?.description ?? '')
@@ -199,7 +199,7 @@ function settingsSummary(settings: FrameGenSettings) {
           <li><strong>Get the game to half the refresh rate first.</strong> With Frame Generation off, lower the game's settings or the render resolution until it holds at least half the headset's rate (45 fps at 90 Hz). Frame Generation can take it from half to full, but it can't do the first half.</li>
           <li><strong>Turn it on for one game:</strong> leave the Default Profile off, add a custom profile below and assign the game. The default settings suit most games.</li>
           <li><strong>Save and restart the game.</strong> Turning Frame Generation on takes effect at the next launch.</li>
-          <li><strong>Check it in the headset:</strong> the <button class="underline underline-offset-2" type="button" @click="$emit('navigate', 'osd')">On-Screen Display</button> shows FG ON next to its FPS, or pick the Generated-frame tint diagnostic view.</li>
+          <li><strong>Check it in the headset:</strong> the <button class="underline underline-offset-2" type="button" @click="$emit('navigate', 'osd')">On-Screen Display</button> shows FG ON next to its FPS, or pick the Generated-frame tint diagnostic view (and set it back to Off afterwards).</li>
           <li><strong>Compare:</strong> assign the A/B toggle and switch generated frames off and on in the same scene.</li>
         </ol>
         <p class="mt-3 text-xs leading-5 text-muted">
@@ -243,6 +243,9 @@ function settingsSummary(settings: FrameGenSettings) {
               </select>
             </label>
             <p class="mt-2 text-xs leading-5 text-muted">{{ diagnosticDescription }} Applies to every game and updates during play.</p>
+            <p v-if="framegen.diagnosticView !== 'off'" class="mt-2 rounded-[0.75rem] border px-3 py-2 text-xs leading-5 chip-warning" style="border-color: var(--app-border)" role="note">
+              On: generated frames in the headset are drawn with this view's colors, which look like glitches in normal play. Set it to Off when you are done.
+            </p>
           </div>
         </div>
       </div>

@@ -826,9 +826,11 @@ needs a game restart; turning it off applies at once.
     move image content. Motion beyond it falls back to the real image.
   - **Reset advanced settings** returns all three to their defaults.
 - **Diagnostic view** applies to every Frame Generation session: **Off**, **Motion flow**
-  (color-coded motion overlay on generated frames), **Confidence** (heat map of where
-  generation fell back to the real image), or **Generated-frame tint** (a faint tint on
-  generated frames, so you can confirm they are being shown).
+  (color-coded motion overlay on generated frames), **Confidence** (generated frames painted
+  red where generation fell back to the real image), or **Generated-frame tint** (a faint tint
+  on generated frames, so you can confirm they are being shown). The views are for testing:
+  in play they look like glitches, so set it back to **Off** afterwards. The VectorXR log names
+  the view at the start of each Frame Generation session.
 - **A/B toggle** is an optional binding that switches generated frames off and on live. It only
   works in sessions that started with Frame Generation on. It takes several bindings, one for
   each device you fly with; any one of them acts.
@@ -876,6 +878,12 @@ frames Frame Generation presents, VectorXR reports it after about 4 seconds of i
   Frame Generation, and it tries again after a hold, 10 seconds at first and longer after each
   stand-down. While the message stands, a try ends within about a second if the runtime still
   holds the frames to half rate.
+- With **Auto**, Frame Generation goes back to full rate the same way (**Frame Generation
+  automatic multiplier 4x -> full rate: the runtime holds frames to half rate**) and tries again
+  after the same kind of hold. A runtime that reports the halved frame period (the log line above
+  then names it) is the exception: Auto times the game's frames by that period and keeps a rate
+  that fits it. After you turn the smoothing off, Auto waits out its hold; switching Frame
+  Generation off and on with the **A/B toggle** tries again at once.
 - Each 30-second summary counts the waits on Frame Generation's own thread that the runtime held
   back, as **runtimeHalved** (held back/measured), followed by **(halving)** while it lasts.
 
@@ -903,8 +911,8 @@ halving.
 
 Turn off the smoothing and check that the runtime runs at full refresh. The message clears once
 the runtime gives frames every refresh again: within a few seconds while Frame Generation
-presents them, and with **Dynamic** standing by, the next time it engages, or sooner once the
-game's own frames show the runtime giving them every refresh.
+presents them, and with **Dynamic** standing by or **Auto** at full rate, the next time it
+engages, or sooner once the game's own frames show the runtime giving them every refresh.
 
 #### Current limits
 
