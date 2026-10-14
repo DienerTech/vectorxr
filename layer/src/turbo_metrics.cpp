@@ -9,6 +9,8 @@
 #include <sstream>
 #include <system_error>
 
+#include "depthxr/config_path.h"
+
 namespace depthxr {
 namespace {
 
@@ -238,12 +240,13 @@ bool WriteFileAtomically(const std::filesystem::path& path, const std::string& c
         }
     }
 
-    const std::filesystem::path temporary_path = path.string() + ".tmp";
+    std::filesystem::path temporary_path = path;
+    temporary_path += ".tmp";
     {
         std::ofstream stream(temporary_path, std::ios::trunc);
         if (!stream) {
             if (error) {
-                *error = "Unable to write turbo-metrics temp file: " + temporary_path.string();
+                *error = "Unable to write turbo-metrics temp file: " + PathToUtf8(temporary_path);
             }
             return false;
         }
@@ -266,13 +269,13 @@ bool WriteFileAtomically(const std::filesystem::path& path, const std::string& c
 } // namespace
 
 std::filesystem::path ResolveTurboMetricsPath() {
-    if (const char* env_path = std::getenv("VECTORXR_TURBO_METRICS_PATH"); env_path && *env_path != '\0') {
-        return std::filesystem::path(env_path);
+    if (std::filesystem::path env_path = EnvironmentPath(L"VECTORXR_TURBO_METRICS_PATH"); !env_path.empty()) {
+        return env_path;
     }
 
 #if defined(_WIN32)
-    if (const char* local_app_data = std::getenv("LOCALAPPDATA"); local_app_data && *local_app_data != '\0') {
-        return std::filesystem::path(local_app_data) / "VectorXR" / "config" / "turbo-metrics.json";
+    if (const std::filesystem::path local_app_data = LocalAppDataPath(); !local_app_data.empty()) {
+        return local_app_data / "VectorXR" / "config" / "turbo-metrics.json";
     }
 #endif
 

@@ -1926,7 +1926,7 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
         } else {
             stream << interop.modules.size();
             for (const LoadedInteropModule& module : interop.modules) {
-                stream << " [" << module.name << "=" << module.path.string() << "]";
+                stream << " [" << module.name << "=" << PathToUtf8(module.path) << "]";
             }
         }
         stream << ", knownCompanionProcesses=";
@@ -2144,7 +2144,7 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
             logger_.Error("Failed to parse config before log initialization: " + last_failed_config_error_ +
                           ". Using default settings; VectorXR enhancements are disabled until a valid config is loaded.");
         } else if (has_config_timestamp_) {
-            logger_.Info("Loaded config from " + config_path_.string());
+            logger_.Info("Loaded config from " + PathToUtf8(config_path_));
             for (const std::string& line : UnloggedConfigWarningsLocked()) {
                 logger_.Info(line);
             }
@@ -2159,13 +2159,24 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
         }
     }
     RefreshResolvedSettings();
-    logger_.Info("Active log file: " + logger_.ActiveLogPath().string());
+    logger_.Info("Active log file: " + PathToUtf8(logger_.ActiveLogPath()));
 
     // Hand ongoing config hot-reload to the watcher thread now that the initial
     // load and config_path_ are established. From here the render hot path never
     // touches the filesystem for config.
     StartConfigWatcher();
     return XR_SUCCESS;
+}
+
+void OpenXrLayer::AbandonInstance() {
+    // The config watcher is the last thing OnInstanceCreated starts, so it is
+    // not running.
+    std::scoped_lock lock(mutex_);
+    ResetVulkanEnableHooks(XR_NULL_HANDLE, nullptr, false, {});
+    instance_ = XR_NULL_HANDLE;
+    has_loaded_config_ = false;
+    ResetInstanceState();
+    ResetSessionState();
 }
 
 XrResult OpenXrLayer::GetInstanceProcAddr(XrInstance instance, const char* name, PFN_xrVoidFunction* function) {
@@ -10016,7 +10027,7 @@ void OpenXrLayer::ReloadConfigIfNeeded() {
         last_config_write_time_ = timestamp;
     }
     ++config_generation_;
-    logger_.Info("Loaded config from " + config_path_.string());
+    logger_.Info("Loaded config from " + PathToUtf8(config_path_));
     for (const std::string& line : UnloggedConfigWarningsLocked()) {
         logger_.Info(line);
     }
@@ -10187,7 +10198,7 @@ void OpenXrLayer::PollConfigFile() {
     if (log_parse_failure) {
         logger_.Error("Failed to parse config: " + loaded.error);
     } else if (log_reload_success) {
-        logger_.Info("Reloaded config from " + path.string());
+        logger_.Info("Reloaded config from " + PathToUtf8(path));
         for (const std::string& line : warning_lines) {
             logger_.Info(line);
         }

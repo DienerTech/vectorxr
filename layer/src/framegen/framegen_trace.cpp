@@ -2,6 +2,7 @@
 
 #include "depthxr/framegen_trace.h"
 
+#include "depthxr/config_path.h"
 #include "depthxr/logger.h"
 
 #include <algorithm>
@@ -37,7 +38,7 @@ void FrameGenTrace::Start(Logger& logger) {
     // again, writes after what is there.
     std::FILE* file = _wfopen(path.c_str(), L"ab");
     if (!file) {
-        logger.Error("Frame Generation trace: could not open " + path.string() + "; no trace this session.");
+        logger.Error("Frame Generation trace: could not open " + PathToUtf8(path) + "; no trace this session.");
         return;
     }
     // Times: ns is steady time since the trace started; XrTime fields are the
@@ -67,7 +68,7 @@ void FrameGenTrace::Start(Logger& logger) {
     }
     enabled_.store(true, std::memory_order_release);
     logger.Info(
-        "Frame Generation trace (debug logging): writing " + path.string() +
+        "Frame Generation trace (debug logging): writing " + PathToUtf8(path) +
         " (wait: id=app frame a=predictedDisplayTime b=period c=shouldRender; begin: a=result; "
         "end: a=displayTime b=layerCount c=projectionViews d=view0 swapchain; end.v0/end.v1: pose; "
         "acq/rel: id=swapchain a=index b=copied (rel); cap: id=swapchain a=index b=captured; "

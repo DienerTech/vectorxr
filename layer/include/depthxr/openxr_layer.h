@@ -150,6 +150,9 @@ class OpenXrLayer {
                                XrInstance instance,
                                bool eye_gaze_extension_enabled,
                                const InstanceCreateDiagnostics& diagnostics);
+    // OnInstanceCreated failed (or threw): the layer forgets the instance, as
+    // at xrDestroyInstance, so the application can create another.
+    void AbandonInstance();
     XrResult GetInstanceProcAddr(XrInstance instance, const char* name, PFN_xrVoidFunction* function);
     XrResult DestroyInstance(XrInstance instance);
     XrResult CreateSession(XrInstance instance, const XrSessionCreateInfo* create_info, XrSession* session);

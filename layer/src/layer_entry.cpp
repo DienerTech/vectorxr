@@ -862,8 +862,28 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
 
     diagnostics.turbo_clock_enabled =
         ExtensionListContains(*successful_downstream_extensions, turbo_clock_extension);
-    return OpenXrLayer::Instance().OnInstanceCreated(
-        instance_create_info, *instance, eye_gaze_extension_enabled, diagnostics);
+    // The runtime's instance exists from here. An exception must never leave
+    // the layer (the loader turns it into a failure, or the game ends), and a
+    // failure must not keep the instance: the runtime's is destroyed and the
+    // layer forgets it, so the application can try again.
+    XrResult created = XR_ERROR_RUNTIME_FAILURE;
+    try {
+        created = OpenXrLayer::Instance().OnInstanceCreated(
+            instance_create_info, *instance, eye_gaze_extension_enabled, diagnostics);
+    } catch (...) {
+        created = XR_ERROR_RUNTIME_FAILURE;
+    }
+    if (XR_FAILED(created)) {
+        OpenXrLayer::Instance().AbandonInstance();
+        PFN_xrDestroyInstance next_destroy_instance = nullptr;
+        if (XR_SUCCEEDED(next_info->nextGetInstanceProcAddr(
+                *instance, "xrDestroyInstance", reinterpret_cast<PFN_xrVoidFunction*>(&next_destroy_instance))) &&
+            next_destroy_instance) {
+            next_destroy_instance(*instance);
+        }
+        *instance = XR_NULL_HANDLE;
+    }
+    return created;
 }
 
 XrResult __declspec(dllexport) XRAPI_CALL

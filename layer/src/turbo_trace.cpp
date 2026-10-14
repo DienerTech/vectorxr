@@ -11,6 +11,8 @@
 #include <utility>
 #include <vector>
 
+#include "depthxr/config_path.h"
+
 namespace depthxr {
 using namespace std::chrono_literals;
 namespace {
@@ -110,7 +112,7 @@ void TurboTimingTrace::SetDebugEnabledLocked(Logger& logger, bool enabled) {
             logger.Error("Turbo trace: writer could not start; diagnostics disabled.");
             return;
         }
-        logger.Debug("Turbo trace v3: continuous recent history in " + RecorderPath(log_path_, 0).string() +
+        logger.Debug("Turbo trace v3: continuous recent history in " + PathToUtf8(RecorderPath(log_path_, 0)) +
             " and part 1 (4 MiB each); stalls, faults and recoveries freeze the latest three snapshots. "
             "Frame Generation's Dynamic stand-downs, Dynamic probes and confirmed runtime halving (the "
             "runtime holding Frame Generation's frames to half rate) freeze the latest two snapshots of "

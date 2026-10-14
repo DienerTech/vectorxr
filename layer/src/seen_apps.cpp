@@ -202,12 +202,13 @@ bool WriteFileAtomically(const std::filesystem::path& path, const std::string& c
         }
     }
 
-    const std::filesystem::path temporary_path = path.string() + ".tmp";
+    std::filesystem::path temporary_path = path;
+    temporary_path += ".tmp";
     {
         std::ofstream stream(temporary_path, std::ios::trunc);
         if (!stream) {
             if (error) {
-                *error = "Unable to write seen-apps temp file: " + temporary_path.string();
+                *error = "Unable to write seen-apps temp file: " + PathToUtf8(temporary_path);
             }
             return false;
         }

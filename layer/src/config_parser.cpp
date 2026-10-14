@@ -13,6 +13,8 @@
 #include <variant>
 #include <vector>
 
+#include "depthxr/config_path.h"
+
 namespace depthxr {
 namespace {
 
@@ -2760,7 +2762,7 @@ ParseResult ParseConfig(std::string_view json_text) {
 ParseResult LoadConfigFromFile(const std::filesystem::path& path) {
     std::ifstream stream(path);
     if (!stream) {
-        return {.ok = false, .error = "Unable to open config file: " + path.string()};
+        return {.ok = false, .error = "Unable to open config file: " + PathToUtf8(path)};
     }
 
     std::ostringstream buffer;

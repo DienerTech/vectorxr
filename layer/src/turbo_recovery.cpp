@@ -84,7 +84,8 @@ bool WriteAtomically(const std::filesystem::path& path, const std::string& conte
     std::error_code ec;
     std::filesystem::create_directories(path.parent_path(), ec);
     if (ec) { if (error) *error = "Unable to create runtime relay directory: " + ec.message(); return false; }
-    const std::filesystem::path temporary_path = path.string() + ".tmp." + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "." + std::to_string(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+    std::filesystem::path temporary_path = path;
+    temporary_path += ".tmp." + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "." + std::to_string(std::hash<std::thread::id>{}(std::this_thread::get_id()));
     {
         std::ofstream stream(temporary_path, std::ios::trunc);
         if (!stream) { if (error) *error = "Unable to write runtime relay temporary file"; return false; }
@@ -117,8 +118,9 @@ bool ArchiveFault(const std::filesystem::path& path) {
     const auto content = buffer.str();
     const auto timestamp = ReadUnsigned(content, "updatedAtUnixMilliseconds");
     if (!timestamp) return false;
-    const auto destination = path.parent_path() / "faults" /
-        (path.stem().string() + "-" + std::to_string(*timestamp) + ".json");
+    auto name = path.stem();
+    name += "-" + std::to_string(*timestamp) + ".json";
+    const auto destination = path.parent_path() / "faults" / name;
     std::error_code ec;
     auto cleared = path.parent_path() / "faults-cleared" / destination.filename();
     cleared.replace_extension("txt");

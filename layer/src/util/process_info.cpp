@@ -12,6 +12,8 @@
 #include <cwctype>
 #include <string_view>
 
+#include "depthxr/config_path.h"
+
 namespace depthxr {
 namespace {
 
@@ -73,7 +75,9 @@ std::filesystem::path GetCurrentExecutablePath() {
 }
 
 std::string GetCurrentExecutableName() {
-    return GetCurrentExecutablePath().filename().string();
+    // UTF-8, as profiles and seen-apps.json hold it; path::string() throws for
+    // a name outside the ANSI code page.
+    return PathToUtf8(GetCurrentExecutablePath().filename());
 }
 
 ProcessInteropSnapshot GetProcessInteropSnapshot() {
@@ -89,7 +93,7 @@ ProcessInteropSnapshot GetProcessInteropSnapshot() {
             do {
                 const std::wstring lower_name = Lowercase(entry.szModule);
                 if (IsInteropModule(lower_name)) {
-                    result.modules.push_back({std::filesystem::path(entry.szModule).string(),
+                    result.modules.push_back({PathToUtf8(entry.szModule),
                                               std::filesystem::path(entry.szExePath)});
                 }
             } while (Module32NextW(module_snapshot, &entry));
@@ -107,7 +111,7 @@ ProcessInteropSnapshot GetProcessInteropSnapshot() {
                 const std::wstring lower_name = Lowercase(entry.szExeFile);
                 if (IsInteropProcess(lower_name)) {
                     result.processes.push_back(
-                        {std::filesystem::path(entry.szExeFile).string(), entry.th32ProcessID});
+                        {PathToUtf8(entry.szExeFile), entry.th32ProcessID});
                 }
             } while (Process32NextW(process_snapshot, &entry));
         }
