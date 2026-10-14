@@ -50,6 +50,9 @@ constexpr double kProbeReach = 0.10;
 constexpr std::uint32_t kLoggedPauses = 3;
 // Summary sample windows keep at most this many values.
 constexpr std::size_t kMaxSamples = 4096;
+// ...and of those taken once per game frame, this many (a 30 s window at
+// up to 270 fps).
+constexpr std::size_t kMaxFrameSamples = 8192;
 // Composing quad views, this many attempted writes failing in a row (about
 // 110 ms at 90 Hz) hand them back to the layer for a while.
 constexpr std::uint32_t kQuadUnwrittenBeforeDecline = 10;
@@ -216,6 +219,20 @@ std::string MedianAndMax(std::vector<double> values) {
     return Number(values[values.size() / 2], 1) + "/" + Number(values.back(), 1);
 }
 
+// "low/high" percentiles (0-1) of a summary window, "-" when empty.
+std::string Percentiles(std::vector<double> values, double low, double high) {
+    if (values.empty()) {
+        return "-";
+    }
+    const auto at = [&](double share) {
+        const std::size_t index =
+            std::min(values.size() - 1, static_cast<std::size_t>(share * static_cast<double>(values.size())));
+        std::nth_element(values.begin(), values.begin() + static_cast<std::ptrdiff_t>(index), values.end());
+        return values[index];
+    };
+    return Number(at(low), 1) + "/" + Number(at(high), 1);
+}
+
 std::optional<double> Median(std::vector<double> values) {
     if (values.empty()) {
         return std::nullopt;
@@ -224,8 +241,8 @@ std::optional<double> Median(std::vector<double> values) {
     return values[values.size() / 2];
 }
 
-void AddSample(std::vector<double>& samples, double value) {
-    if (samples.size() < kMaxSamples) {
+void AddSample(std::vector<double>& samples, double value, std::size_t limit = kMaxSamples) {
+    if (samples.size() < limit) {
         samples.push_back(value);
     }
 }
@@ -612,6 +629,14 @@ void FrameGenPresenter::Stop() {
     end_call_ms_.clear();
     runtime_end_ms_.clear();
     synth_lock_ms_.clear();
+    told_lead_sum_ = 0;
+    told_lead_frames_ = 0;
+    told_lead_max_ = 0;
+    game_ahead_ms_.clear();
+    ahead_jitter_ms_.clear();
+    end_slack_ms_.clear();
+    last_ahead_ms_ = 0.0;
+    last_ahead_at_ = {};
     pause_longest_ms_ = 0.0;
     logged_pauses_ = 0;
     last_offer_slot_.reset();
@@ -5069,6 +5094,29 @@ std::optional<XrResult> FrameGenPresenter::ThreadedWaitLocked(std::unique_lock<s
         std::max(frame.target_time - DisplayOffsetLocked(frame.reported_period), last_returned_time_ + 1);
     frame.wait_return = Clock::now();
     last_returned_time_ = frame.predicted;
+    // For the summary: the lead told, and how far past the runtime's own
+    // display time for a wait returning now (its last paced wait's, moved on
+    // with the time) the game is told to render: Frame Generation's share of
+    // its pose horizon. Dynamic releases the game anywhere in a refresh, so
+    // that varies by up to a refresh from one frame to the next.
+    told_lead_sum_ += frame.lead;
+    ++told_lead_frames_;
+    told_lead_max_ = std::max(told_lead_max_, frame.lead);
+    if (phase_wall_ != Clock::time_point{} && frame.wait_return - phase_wall_ <= std::chrono::nanoseconds(4 * period)) {
+        const XrTime runtime_time =
+            phase_xr_ + std::chrono::duration_cast<std::chrono::nanoseconds>(frame.wait_return - phase_wall_).count();
+        const double ahead_ms = static_cast<double>(frame.target_time - runtime_time) / 1e6;
+        AddSample(game_ahead_ms_, ahead_ms, kMaxFrameSamples);
+        // Against the frame told before, unless a pause came between.
+        if (last_ahead_at_ != Clock::time_point{} &&
+            frame.wait_return - last_ahead_at_ <= std::chrono::nanoseconds(4 * frame.reported_period)) {
+            AddSample(ahead_jitter_ms_, std::abs(ahead_ms - last_ahead_ms_), kMaxFrameSamples);
+        }
+        last_ahead_ms_ = ahead_ms;
+        last_ahead_at_ = frame.wait_return;
+    } else {
+        last_ahead_at_ = {};
+    }
     threaded_frames_.push_back(frame);
     state->predictedDisplayTime = frame.predicted;
     state->predictedDisplayPeriod = frame.reported_period;
@@ -5433,6 +5481,15 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
         // images newer captures had replaced (written unmoved, or the frame
         // before). staleSkipped: refreshes not submitted, nothing current to
         // show (a frame shown as it is had newer images in its swapchains).
+        // leadAvg/leadMax: the lead told to the game's frames. gameAheadMs
+        // (median/95th percentile): how far past the runtime's own
+        // prediction the game is told to render, Frame Generation's share
+        // of its pose horizon (without Frame Generation 0, or a refresh for
+        // a game that submits a period past its told time, as Star Citizen
+        // does). aheadJitterMs: its change from one game frame to the next
+        // (Dynamic varies it by up to a refresh). endSlackMs (10th
+        // percentile/median): the time to spare when the game's frame
+        // ended, negative when late.
         logger_->Info(
             "Frame Generation: multiplier=" + multiplier + ", threaded=1, appFps=" +
             Number(PerSecond(delta(&Totals::app_frames), seconds), 1) +
@@ -5446,7 +5503,14 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
             ", leadMoves=+" + std::to_string(delta(&Totals::lead_ups)) + "/-" +
             std::to_string(delta(&Totals::lead_downs)) + ", leadProbes=" + std::to_string(delta(&Totals::lead_probes)) +
             "/" + std::to_string(delta(&Totals::lead_probes_failed)) +
-            ", leadUndone=" + std::to_string(delta(&Totals::lead_downs_undone)) +
+            ", leadUndone=" + std::to_string(delta(&Totals::lead_downs_undone)) + ", leadAvg=" +
+            (told_lead_frames_
+                 ? Number(static_cast<double>(told_lead_sum_) / static_cast<double>(told_lead_frames_), 2)
+                 : std::string("-")) +
+            ", leadMax=" + (told_lead_frames_ ? std::to_string(told_lead_max_) : std::string("-")) +
+            ", gameAheadMs=" + Percentiles(game_ahead_ms_, 0.5, 0.95) +
+            ", aheadJitterMs=" + Percentiles(ahead_jitter_ms_, 0.5, 0.95) +
+            ", endSlackMs=" + Percentiles(end_slack_ms_, 0.1, 0.5) +
             ", appWorkMs=" + Number(app_work_frames_ ? app_work_ms_ / app_work_frames_ : 0.0, 1) +
             ", lateReal=" + std::to_string(delta(&Totals::late_cpu)) + "/" + std::to_string(delta(&Totals::late_gpu)) +
             ", skippedGenerated=" + std::to_string(skipped_generated_) + ", generated=+" +
@@ -5509,6 +5573,12 @@ void FrameGenPresenter::NewSummaryWindowLocked(Clock::time_point now, double sta
     end_call_ms_.clear();
     runtime_end_ms_.clear();
     synth_lock_ms_.clear();
+    told_lead_sum_ = 0;
+    told_lead_frames_ = 0;
+    told_lead_max_ = 0;
+    game_ahead_ms_.clear();
+    ahead_jitter_ms_.clear();
+    end_slack_ms_.clear();
     pause_longest_ms_ = 0.0;
     app_work_ms_ = 0.0;
     app_work_frames_ = 0;
@@ -5673,6 +5743,9 @@ XrResult FrameGenPresenter::ThreadedEndJit(const XrFrameEndInfo& info, const Thr
     if (phase_wall_ != Clock::time_point{}) {
         needed_due = phase_wall_ + std::chrono::nanoseconds(needed - phase_xr_);
         slack_ms = std::chrono::duration<double, std::milli>(needed_due - std::chrono::milliseconds(2) - entered).count();
+    }
+    if (renderable && slack_ms) {
+        AddSample(end_slack_ms_, *slack_ms, kMaxFrameSamples);
     }
     // Ending after its refresh was due, it is late at once. Otherwise it is
     // judged when a refresh first chooses it: its game frame must have
