@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <future>
@@ -63,6 +64,11 @@ namespace depthxr {
 #if defined(DEPTHXR_TESTING)
 class TurboFrameTestPeer;
 #endif
+
+// A space by the reference space type the layer tracks it as (its own
+// internal spaces count as their type), for diagnostics. The values are the
+// codes the flight recorder and the Frame Generation trace write.
+enum class TrackedSpaceKind : std::uint8_t { kOther = 0, kView = 1, kLocal = 2, kStage = 3 };
 
 class OpenXrLayer {
   public:
@@ -691,6 +697,9 @@ class OpenXrLayer {
                                      const XrPosef& pose_delta) const;
     void PrunePivotPoseDeltas(XrTime time);
     std::string DescribeSpace(XrSpace space) const;
+    // mutex_: kOther for a space of no tracked reference type (an action
+    // space, LOCAL_FLOOR, or XR_NULL_HANDLE).
+    TrackedSpaceKind ClassifySpace(XrSpace space) const;
     void CacheDepthSubmissionGeometry(XrTime time,
                                       XrSpace space,
                                       XrViewConfigurationType view_configuration_type,

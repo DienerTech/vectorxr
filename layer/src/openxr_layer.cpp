@@ -932,6 +932,33 @@ const char* CompositionLayerTypeName(XrStructureType type) {
     }
 }
 
+const char* TrackedSpaceKindName(TrackedSpaceKind kind) {
+    switch (kind) {
+    case TrackedSpaceKind::kView:
+        return "VIEW";
+    case TrackedSpaceKind::kLocal:
+        return "LOCAL";
+    case TrackedSpaceKind::kStage:
+        return "STAGE";
+    case TrackedSpaceKind::kOther:
+        break;
+    }
+    return "OTHER";
+}
+
+// A composition layer's space by kind, as the caller tracks it (under its
+// lock): the topology functions below never see the layer's spaces otherwise.
+using SpaceKindOf = std::function<TrackedSpaceKind(XrSpace)>;
+
+// `value` rounded to `decimals` places; one that rounds to zero prints as 0,
+// not -0.
+std::string FormatFixed(double value, int decimals) {
+    const double scale = std::pow(10.0, decimals);
+    std::ostringstream stream;
+    stream << std::fixed << std::setprecision(decimals) << std::round(value * scale) / scale + 0.0;
+    return stream.str();
+}
+
 void HashCompositionTopologyValue(std::uint64_t value, std::uint64_t* hash) {
     constexpr std::uint64_t kFnvPrime = 1099511628211ull;
     for (std::size_t byte = 0; byte < sizeof(value); ++byte) {
@@ -940,7 +967,7 @@ void HashCompositionTopologyValue(std::uint64_t value, std::uint64_t* hash) {
     }
 }
 
-std::uint64_t CompositionLayerTopologySignature(const XrFrameEndInfo* frame_end_info) {
+std::uint64_t CompositionLayerTopologySignature(const XrFrameEndInfo* frame_end_info, const SpaceKindOf& kind_of) {
     std::uint64_t hash = 1469598103934665603ull;
     HashCompositionTopologyValue(frame_end_info ? frame_end_info->layerCount : 0, &hash);
     HashCompositionTopologyValue(
@@ -956,11 +983,20 @@ std::uint64_t CompositionLayerTopologySignature(const XrFrameEndInfo* frame_end_
             const auto* projection = reinterpret_cast<const XrCompositionLayerProjection*>(layer);
             HashCompositionTopologyValue(projection->viewCount, &hash);
         }
+        // The space's kind: a quad that moves from VIEW to LOCAL space is a
+        // change. A quad's size and pose are not hashed (they can move every
+        // frame).
+        HashCompositionTopologyValue(
+            !layer ? 0
+            : layer->space == XR_NULL_HANDLE
+                ? 1
+                : 2 + static_cast<std::uint64_t>(kind_of(layer->space)),
+            &hash);
     }
     return hash;
 }
 
-std::string FormatCompositionLayerTopology(const XrFrameEndInfo* frame_end_info) {
+std::string FormatCompositionLayerTopology(const XrFrameEndInfo* frame_end_info, const SpaceKindOf& kind_of) {
     std::ostringstream stream;
     stream << "layerCount=" << (frame_end_info ? frame_end_info->layerCount : 0)
            << ", blendMode="
@@ -979,6 +1015,19 @@ std::string FormatCompositionLayerTopology(const XrFrameEndInfo* frame_end_info)
                 if (layer->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
                     const auto* projection = reinterpret_cast<const XrCompositionLayerProjection*>(layer);
                     stream << ",views=" << projection->viewCount;
+                }
+                stream << ",space="
+                       << (layer->space == XR_NULL_HANDLE ? "NULL" : TrackedSpaceKindName(kind_of(layer->space)));
+                if (layer->type == XR_TYPE_COMPOSITION_LAYER_QUAD) {
+                    // Metres in the layer's space.
+                    const auto* quad = reinterpret_cast<const XrCompositionLayerQuad*>(layer);
+                    const XrVector3f& p = quad->pose.position;
+                    const XrQuaternionf& q = quad->pose.orientation;
+                    stream << ",size=" << FormatFixed(quad->size.width, 2) << "x" << FormatFixed(quad->size.height, 2)
+                           << ",pose=(" << FormatFixed(p.x, 3) << "," << FormatFixed(p.y, 3) << ","
+                           << FormatFixed(p.z, 3) << "|" << FormatFixed(q.x, 3) << "," << FormatFixed(q.y, 3) << ","
+                           << FormatFixed(q.z, 3) << "," << FormatFixed(q.w, 3)
+                           << "),eye=" << static_cast<int>(quad->eyeVisibility);
                 }
                 stream << ")";
             }
@@ -6534,7 +6583,8 @@ void OpenXrLayer::ObserveCompositionLayerTopology(const XrFrameEndInfo* frame_en
     const bool claimed = pending_framegen_quad_ && pending_framegen_quad_->route == FrameGenQuadRoute::kClaimed;
     std::optional<std::uint64_t>& last_signature =
         claimed ? last_claimed_composition_topology_signature_ : last_composition_topology_signature_;
-    const std::uint64_t signature = CompositionLayerTopologySignature(frame_end_info);
+    const SpaceKindOf kind_of = [this](XrSpace space) { return ClassifySpace(space); };
+    const std::uint64_t signature = CompositionLayerTopologySignature(frame_end_info, kind_of);
     if (last_signature == signature) {
         return;
     }
@@ -6543,7 +6593,7 @@ void OpenXrLayer::ObserveCompositionLayerTopology(const XrFrameEndInfo* frame_en
     logger_.Info(std::string(claimed ? "Composition layer topology given to Frame Generation, which composes its "
                                        "quad views into the stereo frames the runtime gets: "
                                      : "Composition layer topology forwarded downstream by VectorXR: ") +
-                 FormatCompositionLayerTopology(frame_end_info) +
+                 FormatCompositionLayerTopology(frame_end_info, kind_of) +
                  (composition_topology_log_budget_ == 0
                       ? "; further topology changes suppressed this session."
                       : "."));
@@ -12410,6 +12460,22 @@ std::string OpenXrLayer::DescribeSpace(XrSpace space) const {
         label = "STAGE";
     }
     return label + "(" + FormatHex(reinterpret_cast<uintptr_t>(space)) + ")";
+}
+
+TrackedSpaceKind OpenXrLayer::ClassifySpace(XrSpace space) const {
+    if (space == XR_NULL_HANDLE) {
+        return TrackedSpaceKind::kOther;
+    }
+    if (space == internal_view_space_ || tracked_view_spaces_.contains(space)) {
+        return TrackedSpaceKind::kView;
+    }
+    if (space == internal_local_space_ || tracked_local_spaces_.contains(space)) {
+        return TrackedSpaceKind::kLocal;
+    }
+    if (space == internal_stage_space_ || tracked_stage_spaces_.contains(space)) {
+        return TrackedSpaceKind::kStage;
+    }
+    return TrackedSpaceKind::kOther;
 }
 
 void OpenXrLayer::CacheDepthSubmissionGeometry(

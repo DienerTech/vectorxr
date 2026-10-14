@@ -638,6 +638,20 @@ class TurboFrameTestPeer {
         layer.last_composition_topology_signature_.reset();
         layer.last_claimed_composition_topology_signature_.reset();
     }
+    // Fake handles tracked as the application's VIEW and LOCAL reference
+    // spaces (as xrCreateReferenceSpace tracks them), until ForgetSpaces.
+    static void TrackSpaces(XrSpace view, XrSpace local) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.tracked_view_spaces_.insert(view);
+        layer.tracked_local_spaces_.insert(local);
+    }
+    static void ForgetSpaces(XrSpace view, XrSpace local) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.tracked_view_spaces_.erase(view);
+        layer.tracked_local_spaces_.erase(local);
+    }
     // Depth on with convergence: LocateViews shifts each eye's projection.
     static void ConvergeVarjoDepth(double convergence) {
         auto& layer = Layer();
@@ -3249,6 +3263,78 @@ void TestTopologyFollowsFrameGenClaimsApart() {
     Peer::ResetTopology();
 }
 
+// Star Citizen submits a projection and a HUD quad layer. The topology line
+// names each layer's space by kind (never the handle), and a quad's size,
+// pose and eye: a VIEW-space HUD moves with the head, a LOCAL one steps at the
+// game's rate. A quad moving between spaces is a topology change; its pose or
+// size changing is not (it would spend the budget every frame).
+void TestTopologyNamesLayerSpaces() {
+    using Peer = depthxr::TurboFrameTestPeer;
+    const auto directory = std::filesystem::temp_directory_path() /
+                           ("vxr-topology-spaces-" + std::to_string(GetCurrentProcessId()));
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    std::filesystem::create_directories(directory);
+    Peer::StartLog(directory / "topology.log");
+    Peer::ResetTopology();
+    const XrSpace view = reinterpret_cast<XrSpace>(0x5101), local = reinterpret_cast<XrSpace>(0x5102);
+    Peer::TrackSpaces(view, local);
+
+    std::array<XrCompositionLayerProjectionView, 2> views{};
+    for (auto& eye : views) {
+        eye = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+        eye.pose.orientation.w = 1.0f;
+    }
+    XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    projection.space = local;
+    projection.viewCount = 2;
+    projection.views = views.data();
+    XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+    quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+    quad.space = view;
+    quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+    quad.size = {1.6f, 0.9f};
+    quad.pose.position = {0.0f, -0.1f, -1.5f};
+    quad.pose.orientation.w = 1.0f;
+    const std::array<const XrCompositionLayerBaseHeader*, 2> layers{
+        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection),
+        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad)};
+    XrFrameEndInfo frame = FrameEndInfo();
+    frame.layerCount = 2;
+    frame.layers = layers.data();
+    const std::string prefix = "Composition layer topology forwarded downstream by VectorXR: ";
+
+    Expect(Peer::ObserveTopology(&frame, false) == 11, "The first frame's topology was not logged");
+    std::string text = Peer::Log();
+    Expect(text.find(prefix + "layerCount=2, blendMode=1, layers=[0:projection(type=35,flags=0x0,views=2,space=LOCAL), "
+                              "1:quad(type=36,flags=0x2,space=VIEW,size=1.60x0.90,"
+                              "pose=(0.000,-0.100,-1.500|0.000,0.000,0.000,1.000),eye=0)].") != std::string::npos,
+           "The topology line did not name the layers' spaces and the quad's size, pose and eye");
+
+    // The HUD moves and resizes: the same topology.
+    quad.size = {2.0f, 1.125f};
+    quad.pose.position = {0.2f, 0.0f, -1.2f};
+    quad.pose.orientation = {0.0f, 0.0871557f, 0.0f, 0.9961947f};
+    Expect(Peer::ObserveTopology(&frame, false) == 11, "A quad's new pose or size spent the topology budget");
+    Expect(Occurrences(Peer::Log(), prefix) == 1, "A quad's new pose or size was logged as a topology change");
+
+    // The HUD moves to LOCAL space: a change, logged once.
+    quad.space = local;
+    quad.pose.position = {-0.0004f, 1.1f, -1.2f};
+    Expect(Peer::ObserveTopology(&frame, false) == 10, "A quad moving to LOCAL space was not one topology change");
+    Expect(Peer::ObserveTopology(&frame, false) == 10, "An unchanged frame spent the topology budget");
+    text = Peer::Log();
+    Expect(Occurrences(text, prefix) == 2 &&
+               text.find("1:quad(type=36,flags=0x2,space=LOCAL,size=2.00x1.13,"
+                         "pose=(0.000,1.100,-1.200|0.000,0.087,0.000,0.996),eye=0)].") != std::string::npos,
+           "A quad moving to LOCAL space was not logged with its new space");
+
+    Peer::ForgetSpaces(view, local);
+    Peer::ResetTopology();
+    Peer::ReleaseLog(directory / "released.log");
+    std::filesystem::remove_all(directory, error);
+}
+
 // With Depth's convergence set, the application is given (and submits)
 // focus FOVs LocateViews shifted. The submitted focus check compares them
 // with those, not with the runtime's raw ones: a game that submits what it
@@ -3438,6 +3524,7 @@ int main() {
     TestMetricsBindingResetWaitsForTheFrameThread();
     TestFramePacingLineUnderFrameGen();
     TestDestroySpaceLetsGoBeforeTheRuntime();
+    TestTopologyNamesLayerSpaces();
     std::cout << "depthxr_turbo_frame_tests passed\n";
     return 0;
 }
