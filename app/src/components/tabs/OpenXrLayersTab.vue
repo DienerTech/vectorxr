@@ -112,10 +112,11 @@ async function toggleLayer(slice: OpenXrLayerRegistrySliceId, layer: OpenXrLayer
   }
 
   try {
+    // The backend reads the registry after the change is written, so show
+    // what it found: a write that did not take shows as such.
     const nextSnapshot = await setOpenXrLayerEnabled(slice, layer.manifestPath, !layer.enabled)
-    const visibleSnapshot = applyLayerEnabled(nextSnapshot, slice, layer.manifestPath, !layer.enabled)
-    emit('snapshotUpdated', visibleSnapshot)
-    updateSelectedLayer(visibleSnapshot, slice, layer.manifestPath)
+    emit('snapshotUpdated', nextSnapshot)
+    updateSelectedLayer(nextSnapshot, slice, layer.manifestPath)
   } catch (error) {
     emit('status', errorText(error, 'Failed to update OpenXR layer'))
     queueRefresh()
@@ -140,11 +141,8 @@ async function moveLayer(slice: OpenXrLayerRegistrySliceId, layer: OpenXrLayerEn
 
   try {
     const nextSnapshot = await moveOpenXrLayer(slice, layer.manifestPath, direction)
-    const visibleSnapshot = findLayer(nextSnapshot, slice, layer.manifestPath)?.order === layer.order
-      ? applyLayerMove(nextSnapshot, slice, layer.manifestPath, direction)
-      : nextSnapshot
-    emit('snapshotUpdated', visibleSnapshot)
-    updateSelectedLayer(visibleSnapshot, slice, layer.manifestPath)
+    emit('snapshotUpdated', nextSnapshot)
+    updateSelectedLayer(nextSnapshot, slice, layer.manifestPath)
   } catch (error) {
     emit('status', errorText(error, 'Failed to reorder OpenXR layer'))
     queueRefresh()
