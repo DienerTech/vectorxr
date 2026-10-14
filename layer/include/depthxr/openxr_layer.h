@@ -953,7 +953,7 @@ class OpenXrLayer {
     }
     // A layer's swapchain (not a projection's) a frame shows while Frame
     // Generation shows images of its own only and does not capture it: kept
-    // lazy under VECTORXR_FRAMEGEN_SHOWN_LAYERS=lazy (FrameGenQueueSubstitution::Flush).
+    // lazy unless VECTORXR_FRAMEGEN_SHOWN_LAYERS=off (FrameGenQueueSubstitution::Flush).
     bool FrameGenShownLazily(XrSwapchain swapchain) {
         return framegen_queue_.ShownLayersLazy() && framegen_.ShowsOwnImagesOnly() &&
                !framegen_.CapturesFrom(swapchain);

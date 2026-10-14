@@ -2426,15 +2426,17 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
             }
             std::string note;
             framegen_queue_.SetLog([this](const std::string& message) { logger_.Error(message); });
-            // A Vulkan game's interface (Star Citizen's, a quad over its
-            // projection every frame) would otherwise make every frame
-            // Frame Generation writes wait for the game's GPU work.
-            downstream_info = framegen_queue_.Prepare(game_info, note, vulkan_bridge_.Active());
+            // A layer the runtime shows over the projection every frame (Star
+            // Citizen's interface, OpenKneeboard's kneeboard in any game)
+            // would otherwise make every frame Frame Generation writes wait
+            // for the game's GPU work: on a GPU-bound game, a refresh missed
+            // wherever the runtime's xrEndFrame waits for its queue (Varjo).
+            downstream_info = framegen_queue_.Prepare(game_info, note, true);
             if (!note.empty()) logger_.Info(note);
             if (framegen_queue_.ShownLayersLazy()) {
-                logger_.Info("Frame Generation keeps releases of layers it does not capture lazy (on for Vulkan "
-                             "games; VECTORXR_FRAMEGEN_SHOWN_LAYERS=lazy or =off decides for any): the runtime shows "
-                             "each layer's newest finished image, at most one game frame old.");
+                logger_.Info("Frame Generation keeps releases of layers it does not capture lazy "
+                             "(VECTORXR_FRAMEGEN_SHOWN_LAYERS=off turns this off): the runtime shows each layer's "
+                             "newest finished image, at most one game frame old.");
             }
             if (d3d11_bridge_.Active() && !framegen_queue_.Active()) {
                 // The runtime must never be given the bridge's queue: it
