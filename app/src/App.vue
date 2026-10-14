@@ -314,6 +314,13 @@ async function exportDebugInformation() {
     ])
     openXrLayerSnapshot.value = layers
     logSnapshot.value = logs
+    // The health summary reads the store's seen apps, which were loaded when
+    // the app started; use the list just read so health-summary.json and the
+    // README agree with seen-apps.json in the same bundle.
+    if (seenApps.path) {
+      store.state.seenAppsPath = seenApps.path
+      store.state.seenApps = seenApps.observations
+    }
     const packageBlob = await createDebugPackage({
       runtimeStatus,
       debugSources,
