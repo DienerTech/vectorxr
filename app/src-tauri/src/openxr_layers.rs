@@ -27,7 +27,7 @@ use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::Win32::System::Registry::{
     RegCloseKey, RegDeleteValueW, RegEnumValueW, RegFlushKey, RegOpenKeyExW, RegSetValueExW, HKEY,
     HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_SET_VALUE, KEY_WOW64_32KEY,
-    KEY_WOW64_64KEY, REG_DWORD, REG_SAM_FLAGS,
+    KEY_WOW64_64KEY, REG_DWORD, REG_SAM_FLAGS, REG_VALUE_TYPE,
 };
 
 #[cfg(windows)]
@@ -97,9 +97,13 @@ enum ElevatedOpenXrOperation {
         manifest_path: String,
         value: i64,
     },
-    RewriteValues {
+    // The helper reads the key itself and moves the one value, so the new
+    // order is computed from what is in the registry at that moment rather
+    // than from a list this process read earlier.
+    MoveValue {
         slice: String,
-        values: Vec<RegistryValue>,
+        manifest_path: String,
+        direction: MoveDirection,
     },
     DeleteValue {
         slice: String,
@@ -134,11 +138,27 @@ enum ElevatedRequestErrorKind {
     TimedOut,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "PascalCase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct RegistryValue {
     name: String,
-    value: i64,
+    // The raw type and data, so a reorder writes every value back exactly as
+    // it was, whatever its type.
+    value_type: u32,
+    data: Vec<u8>,
+}
+
+impl RegistryValue {
+    // The OpenXR loader reads each value into a DWORD and loads the layer when
+    // it reads 0. It asks for no type, so only the size and bytes matter.
+    fn enabled(&self) -> bool {
+        self.data.len() == 4 && self.data.iter().all(|byte| *byte == 0)
+    }
+
+    // A value larger than a DWORD ends the loader's enumeration of the key
+    // (ERROR_MORE_DATA), so neither it nor any value after it is loaded.
+    fn stops_loader(&self) -> bool {
+        self.data.len() > 4
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -319,23 +339,106 @@ pub fn move_openxr_layer(
     direction: MoveDirection,
 ) -> Result<OpenXrLayerSnapshot, String> {
     let definition = find_slice(&slice)?;
-    let mut values = read_registry_values(definition)?;
-    let Some(index) = values
+    let values = read_registry_values(definition)?;
+    if !values
         .iter()
-        .position(|value| value.name.eq_ignore_ascii_case(&manifest_path))
+        .any(|value| value.name.eq_ignore_ascii_case(&manifest_path))
+    {
+        return Err("Layer manifest is no longer registered in that OpenXR slice".into());
+    }
+
+    move_registry_value(definition, &manifest_path, direction)?;
+    load_openxr_layers()
+}
+
+// Registry values enumerate in creation order, and that order is the loader's
+// layer order. Moving one value changes the position of only the values from
+// the first one that moves onward, so only that tail is rewritten. Returns the
+// tail's start and its new order, or None when the value is already at the end
+// it is moving toward.
+fn plan_registry_move(
+    existing: &[RegistryValue],
+    manifest_path: &str,
+    direction: MoveDirection,
+) -> Result<Option<(usize, Vec<RegistryValue>)>, String> {
+    let Some(index) = existing
+        .iter()
+        .position(|value| value.name.eq_ignore_ascii_case(manifest_path))
     else {
         return Err("Layer manifest is no longer registered in that OpenXR slice".into());
     };
-
-    let target_index = match direction {
+    let target = match direction {
         MoveDirection::Up if index > 0 => index - 1,
-        MoveDirection::Down if index + 1 < values.len() => index + 1,
-        _ => return Ok(load_openxr_layers()?),
+        MoveDirection::Down if index + 1 < existing.len() => index + 1,
+        _ => return Ok(None),
     };
 
-    values.swap(index, target_index);
-    rewrite_registry_values(definition, &values)?;
-    load_openxr_layers()
+    let first = index.min(target);
+    let mut tail = existing[first..].to_vec();
+    tail.swap(index - first, target - first);
+    Ok(Some((first, tail)))
+}
+
+trait RegistryWriter {
+    // Deleting a value that is already gone succeeds.
+    fn delete(&mut self, name: &str) -> Result<(), String>;
+    fn set(&mut self, value: &RegistryValue) -> Result<(), String>;
+}
+
+// Replaces `old_tail` with `new_tail`. If any step fails, the old values are
+// written back in their old order, so a failed move never drops a layer (another
+// vendor's included) from the registry.
+fn rewrite_registry_tail(
+    writer: &mut impl RegistryWriter,
+    old_tail: &[RegistryValue],
+    new_tail: &[RegistryValue],
+) -> Result<(), String> {
+    fn replace(
+        writer: &mut impl RegistryWriter,
+        from: &[RegistryValue],
+        to: &[RegistryValue],
+    ) -> Result<(), String> {
+        for value in from {
+            writer.delete(&value.name)?;
+        }
+        for value in to {
+            writer.set(value)?;
+        }
+        Ok(())
+    }
+
+    let Err(error) = replace(writer, old_tail, new_tail) else {
+        return Ok(());
+    };
+    match replace(writer, old_tail, old_tail) {
+        Ok(()) => Err(format!("{error}. The previous layer order was kept.")),
+        Err(restore_error) => Err(format!(
+            "{error}. Restoring the previous layer order also failed: {restore_error}"
+        )),
+    }
+}
+
+// Notes for values the OpenXR loader cannot read as a DWORD. The loader skips
+// a value of another size, and stops reading the key at a larger one.
+fn registry_value_notes(values: &[RegistryValue]) -> Vec<Option<String>> {
+    let mut stopped_at: Option<String> = None;
+    values
+        .iter()
+        .map(|value| {
+            if let Some(name) = &stopped_at {
+                return Some(format!(
+                    "The OpenXR loader stops reading this registry key at {name}, which is not a DWORD value, so this layer is not loaded."
+                ));
+            }
+            if value.stops_loader() {
+                stopped_at = Some(display_name_from_path(&value.name));
+                return Some("This registry value is not a DWORD, so the OpenXR loader stops reading the key here and loads neither this layer nor any listed below it. Disable or enable it to rewrite it as a DWORD.".into());
+            }
+            (value.data.len() != 4).then(|| {
+                "This registry value is not a DWORD, so the OpenXR loader does not load this layer. Disable or enable it to rewrite it as a DWORD.".into()
+            })
+        })
+        .collect()
 }
 
 pub fn delete_openxr_layer(
@@ -361,11 +464,21 @@ fn read_slice(
     include_signatures: bool,
 ) -> Result<OpenXrLayerRegistrySlice, String> {
     let registry_values = read_registry_values(definition)?;
+    let notes = registry_value_notes(&registry_values);
     let layers = registry_values
         .iter()
+        .zip(notes)
         .enumerate()
-        .map(|(index, value)| {
-            layer_entry_from_registry_value(definition, value, index + 1, include_signatures)
+        .map(|(index, (value, note))| {
+            let mut entry =
+                layer_entry_from_registry_value(definition, value, index + 1, include_signatures);
+            if let Some(note) = note {
+                entry.error = Some(match entry.error.take() {
+                    Some(manifest_error) => format!("{note} {manifest_error}"),
+                    None => note,
+                });
+            }
+            entry
         })
         .collect();
 
@@ -387,7 +500,7 @@ fn layer_entry_from_registry_value(
     include_signatures: bool,
 ) -> OpenXrLayerEntry {
     let manifest_path = value.name.clone();
-    let enabled = value.value == 0;
+    let enabled = value.enabled();
     let manifest = read_manifest(&manifest_path);
     let layer_name = manifest
         .as_ref()
@@ -892,9 +1005,13 @@ fn run_elevated_operation(operation: ElevatedOpenXrOperation) -> Result<(), Stri
             let definition = slice_for_elevated_operation(&slice)?;
             write_registry_value_native(definition, &manifest_path, value)
         }
-        ElevatedOpenXrOperation::RewriteValues { slice, values } => {
+        ElevatedOpenXrOperation::MoveValue {
+            slice,
+            manifest_path,
+            direction,
+        } => {
             let definition = slice_for_elevated_operation(&slice)?;
-            rewrite_registry_values_native(definition, &values)
+            move_registry_value_native(definition, &manifest_path, direction)
         }
         ElevatedOpenXrOperation::DeleteValue {
             slice,
@@ -932,32 +1049,39 @@ fn read_registry_values_native(definition: &SliceDefinition) -> Result<Vec<Regis
 
     let mut values = Vec::new();
     let mut index = 0;
+    let mut name_buffer = vec![0u16; 32768];
+    let name_capacity = name_buffer.len() as u32;
 
     loop {
-        let mut name_buffer = vec![0u16; 32768];
-        let mut name_len = name_buffer.len() as u32;
+        let mut name_len = name_capacity;
         let mut value_type = 0u32;
-        let mut data = [0u8; 4];
+        let mut data = vec![0u8; 4];
         let mut data_len = data.len() as u32;
-        let status = unsafe {
+        let mut enumerate = |data: &mut Vec<u8>, name_len: &mut u32, data_len: &mut u32| unsafe {
             RegEnumValueW(
                 key.0,
                 index,
                 Some(PWSTR(name_buffer.as_mut_ptr())),
-                &mut name_len,
+                name_len,
                 None,
                 Some(&mut value_type),
                 Some(data.as_mut_ptr()),
-                Some(&mut data_len),
+                Some(data_len),
             )
         };
+        let mut status = enumerate(&mut data, &mut name_len, &mut data_len);
+
+        // Anything larger than a DWORD (a string, a QWORD) is read again with
+        // room for its data, so one odd value no longer fails the whole list.
+        if status == ERROR_MORE_DATA {
+            data = vec![0u8; data_len as usize];
+            name_len = name_capacity;
+            data_len = data.len() as u32;
+            status = enumerate(&mut data, &mut name_len, &mut data_len);
+        }
 
         if status == ERROR_NO_MORE_ITEMS {
             break;
-        }
-
-        if status == ERROR_MORE_DATA {
-            return Err("OpenXR registry value was larger than expected".into());
         }
 
         if status != WIN32_ERROR(0) {
@@ -965,12 +1089,12 @@ fn read_registry_values_native(definition: &SliceDefinition) -> Result<Vec<Regis
         }
 
         let name = String::from_utf16_lossy(&name_buffer[..name_len as usize]);
-        let value = if value_type == REG_DWORD.0 && data_len >= 4 {
-            u32::from_le_bytes(data) as i64
-        } else {
-            0
-        };
-        values.push(RegistryValue { name, value });
+        data.truncate(data_len as usize);
+        values.push(RegistryValue {
+            name,
+            value_type,
+            data,
+        });
         index += 1;
     }
 
@@ -1029,41 +1153,67 @@ fn delete_registry_value_native(
 }
 
 #[cfg(windows)]
-fn rewrite_registry_values_native(
+struct NativeRegistryWriter<'a>(&'a RegistryKeyHandle);
+
+#[cfg(windows)]
+impl RegistryWriter for NativeRegistryWriter<'_> {
+    fn delete(&mut self, name: &str) -> Result<(), String> {
+        let name = wide_null(name);
+        let status = unsafe { RegDeleteValueW(self.0 .0, PWSTR(name.as_ptr() as *mut u16)) };
+        if status != WIN32_ERROR(0) && status != ERROR_FILE_NOT_FOUND {
+            return Err(registry_error("delete OpenXR registry value", status));
+        }
+        Ok(())
+    }
+
+    fn set(&mut self, value: &RegistryValue) -> Result<(), String> {
+        let name = wide_null(&value.name);
+        let status = unsafe {
+            RegSetValueExW(
+                self.0 .0,
+                PWSTR(name.as_ptr() as *mut u16),
+                None,
+                REG_VALUE_TYPE(value.value_type),
+                Some(&value.data),
+            )
+        };
+        if status == WIN32_ERROR(0) {
+            Ok(())
+        } else {
+            Err(registry_error("set OpenXR registry value", status))
+        }
+    }
+}
+
+// Reads the key fresh, so the move applies to what is registered now (an
+// installer may have added a layer since the app last read it), rewrites
+// only the values whose position changes, and flushes once at the end.
+#[cfg(windows)]
+fn move_registry_value_native(
     definition: &SliceDefinition,
-    values: &[RegistryValue],
+    manifest_path: &str,
+    direction: MoveDirection,
 ) -> Result<(), String> {
     let existing = read_registry_values_native(definition)?;
-
-    {
-        let key = open_registry_key(definition, KEY_READ | KEY_SET_VALUE)
-            .map_err(|error| registry_error("open OpenXR registry key for reordering", error))?;
-
-        for value in existing {
-            let name = wide_null(&value.name);
-            let status = unsafe { RegDeleteValueW(key.0, PWSTR(name.as_ptr() as *mut u16)) };
-            if status != WIN32_ERROR(0) && status != ERROR_FILE_NOT_FOUND {
-                return Err(registry_error("delete OpenXR registry value", status));
-            }
-        }
-
-        flush_registry_key(&key)?;
-    }
-
-    let key = open_registry_key(definition, KEY_SET_VALUE)
-        .map_err(|error| registry_error("reopen OpenXR registry key for reordering", error))?;
-
-    for value in values {
-        set_registry_dword(&key, &value.name, value.value as u32)?;
-    }
-
-    flush_registry_key(&key)
+    let Some((first, new_tail)) = plan_registry_move(&existing, manifest_path, direction)? else {
+        return Ok(());
+    };
+    let key = open_registry_key(definition, KEY_READ | KEY_SET_VALUE)
+        .map_err(|error| registry_error("open OpenXR registry key for reordering", error))?;
+    let result = rewrite_registry_tail(
+        &mut NativeRegistryWriter(&key),
+        &existing[first..],
+        &new_tail,
+    );
+    let flushed = flush_registry_key(&key);
+    result.and(flushed)
 }
 
 #[cfg(not(windows))]
-fn rewrite_registry_values_native(
+fn move_registry_value_native(
     _definition: &SliceDefinition,
-    _values: &[RegistryValue],
+    _manifest_path: &str,
+    _direction: MoveDirection,
 ) -> Result<(), String> {
     Err("OpenXR registry writes are only supported on Windows".into())
 }
@@ -1161,17 +1311,19 @@ fn write_registry_value(
     }
 }
 
-fn rewrite_registry_values(
+fn move_registry_value(
     definition: &SliceDefinition,
-    values: &[RegistryValue],
+    manifest_path: &str,
+    direction: MoveDirection,
 ) -> Result<(), String> {
     if matches!(definition.hive, RegistryHive::LocalMachine) {
-        run_elevated_registry_operation(ElevatedOpenXrOperation::RewriteValues {
+        run_elevated_registry_operation(ElevatedOpenXrOperation::MoveValue {
             slice: definition.id.into(),
-            values: values.to_vec(),
+            manifest_path: manifest_path.into(),
+            direction,
         })
     } else {
-        rewrite_registry_values_native(definition, values)
+        move_registry_value_native(definition, manifest_path, direction)
     }
 }
 
@@ -1513,6 +1665,121 @@ mod slice_tests {
             r"C:\layers\XR_APILAYER_other.json"
         )
         .is_none());
+    }
+}
+
+#[cfg(test)]
+mod registry_order_tests {
+    use super::*;
+
+    const DWORD: u32 = 4;
+    const SZ: u32 = 1;
+
+    fn dword(name: &str, value: u32) -> RegistryValue {
+        RegistryValue {
+            name: name.into(),
+            value_type: DWORD,
+            data: value.to_le_bytes().to_vec(),
+        }
+    }
+
+    // An ordered stand-in for one registry key that can fail one write.
+    struct FakeKey {
+        values: Vec<RegistryValue>,
+        fail_set_of: Option<String>,
+    }
+
+    impl RegistryWriter for FakeKey {
+        fn delete(&mut self, name: &str) -> Result<(), String> {
+            self.values.retain(|value| value.name != name);
+            Ok(())
+        }
+
+        fn set(&mut self, value: &RegistryValue) -> Result<(), String> {
+            if self.fail_set_of.as_deref() == Some(value.name.as_str()) {
+                self.fail_set_of = None;
+                return Err("Unable to set OpenXR registry value: Windows error 5".into());
+            }
+            match self.values.iter_mut().find(|existing| existing.name == value.name) {
+                Some(existing) => *existing = value.clone(),
+                None => self.values.push(value.clone()),
+            }
+            Ok(())
+        }
+    }
+
+    fn names(values: &[RegistryValue]) -> Vec<&str> {
+        values.iter().map(|value| value.name.as_str()).collect()
+    }
+
+    #[test]
+    fn moving_a_layer_rewrites_only_the_values_that_change_position() {
+        let existing = vec![dword("a", 0), dword("b", 1), dword("c", 0), dword("d", 0)];
+        let (first, tail) = plan_registry_move(&existing, "C", MoveDirection::Up)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first, 1);
+        assert_eq!(names(&tail), ["c", "b", "d"]);
+        assert!(plan_registry_move(&existing, "a", MoveDirection::Up).unwrap().is_none());
+        assert!(plan_registry_move(&existing, "d", MoveDirection::Down).unwrap().is_none());
+        assert!(plan_registry_move(&existing, "gone", MoveDirection::Up).is_err());
+
+        let mut key = FakeKey {
+            values: existing.clone(),
+            fail_set_of: None,
+        };
+        rewrite_registry_tail(&mut key, &existing[first..], &tail).unwrap();
+        assert_eq!(names(&key.values), ["a", "c", "b", "d"]);
+        assert_eq!(key.values[2], dword("b", 1));
+    }
+
+    #[test]
+    fn a_failed_move_puts_every_layer_back_in_its_old_order() {
+        let existing = vec![
+            dword("a", 0),
+            dword("b", 0),
+            RegistryValue {
+                name: "odd".into(),
+                value_type: SZ,
+                data: b"0\0".to_vec(),
+            },
+            dword("d", 1),
+        ];
+        let (first, tail) = plan_registry_move(&existing, "b", MoveDirection::Down)
+            .unwrap()
+            .unwrap();
+        let mut key = FakeKey {
+            values: existing.clone(),
+            fail_set_of: Some("b".into()),
+        };
+        let error = rewrite_registry_tail(&mut key, &existing[first..], &tail).unwrap_err();
+        assert!(error.contains("previous layer order was kept"), "{error}");
+        assert_eq!(key.values, existing);
+    }
+
+    #[test]
+    fn values_the_loader_cannot_read_are_flagged_not_failed() {
+        let values = vec![
+            dword("a", 0),
+            RegistryValue {
+                name: "short".into(),
+                value_type: SZ,
+                data: b"\0\0".to_vec(),
+            },
+            RegistryValue {
+                name: r"C:\layers\long.json".into(),
+                value_type: SZ,
+                data: "enabled".encode_utf16().flat_map(u16::to_le_bytes).collect(),
+            },
+            dword("d", 0),
+        ];
+        assert!(values[0].enabled());
+        assert!(!values[1].enabled() && !values[2].enabled());
+        let notes = registry_value_notes(&values);
+        assert!(notes[0].is_none());
+        assert!(notes[1].as_deref().unwrap().contains("does not load this layer"));
+        assert!(notes[2].as_deref().unwrap().contains("stops reading the key here"));
+        assert!(notes[3].as_deref().unwrap().contains("at long"));
     }
 }
 
