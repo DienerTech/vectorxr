@@ -1976,9 +1976,13 @@ fn load_config() -> Result<ConfigEnvelope, String> {
     let path = resolve_config_path();
     ensure_default_file(&path)?;
 
-    let content = fs::read_to_string(&path).map_err(|error| error.to_string())?;
+    // Name the file: the app shows this text, and a JSON error's line and
+    // column mean nothing without it.
+    let content = fs::read_to_string(&path)
+        .map_err(|error| format!("Unable to read {}: {error}", path.to_string_lossy()))?;
     let config = normalize_config(
-        serde_json::from_str::<VectorXRConfig>(&content).map_err(|error| error.to_string())?,
+        serde_json::from_str::<VectorXRConfig>(&content)
+            .map_err(|error| format!("Unable to parse {}: {error}", path.to_string_lossy()))?,
     );
 
     Ok(ConfigEnvelope {
@@ -1987,14 +1991,55 @@ fn load_config() -> Result<ConfigEnvelope, String> {
     })
 }
 
+// Copies a config the app cannot parse to settings.unreadable-<ms>.json
+// before it is replaced. The pre-0.16 backup is written once, so it does not
+// hold a later hand edit (a JSON slip, or a whole number written as 90.0 that
+// the layer accepts but the app's integer fields reject).
+fn preserve_unreadable_config(path: &Path) -> Result<Option<PathBuf>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let readable = fs::read_to_string(path)
+        .ok()
+        .is_some_and(|content| serde_json::from_str::<VectorXRConfig>(&content).is_ok());
+    if readable {
+        return Ok(None);
+    }
+
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("settings");
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("json");
+    let preserved = path.with_file_name(format!(
+        "{stem}.unreadable-{}.{extension}",
+        unix_milliseconds()
+    ));
+    fs::copy(path, &preserved).map_err(|error| {
+        format!(
+            "Unable to keep a copy of the unreadable config at {}: {error}",
+            preserved.to_string_lossy()
+        )
+    })?;
+    Ok(Some(preserved))
+}
+
+fn write_config_document(path: &Path, content: &str) -> Result<(), String> {
+    preserve_unreadable_config(path)?;
+    ensure_config_backup(path)?;
+    write_text_safely(path, content)
+}
+
 #[tauri::command]
 fn save_config(config: VectorXRConfig) -> Result<String, String> {
     let path = resolve_config_path();
 
     let content = serde_json::to_string_pretty(&normalize_config(config))
         .map_err(|error| error.to_string())?;
-    ensure_config_backup(&path)?;
-    write_text_safely(&path, &content)?;
+    write_config_document(&path, &content)?;
     Ok(path.to_string_lossy().into_owned())
 }
 
@@ -2006,8 +2051,7 @@ fn reset_stored_data() -> Result<ResetStoredDataEnvelope, String> {
 
     let config_content =
         serde_json::to_string_pretty(&config).map_err(|error| error.to_string())?;
-    ensure_config_backup(&config_path)?;
-    write_text_safely(&config_path, &config_content)?;
+    write_config_document(&config_path, &config_content)?;
 
     let seen_apps_content = serde_json::to_string_pretty(&SeenAppsDocument {
         version: 1,
@@ -3239,6 +3283,43 @@ mod tests {
             std::fs::read_to_string(&backup_path).expect("backup should still be readable"),
             "pre-0.16 config"
         );
+        std::fs::remove_dir_all(directory).expect("temporary directory should be removed");
+    }
+
+    #[test]
+    fn saving_over_an_unreadable_config_keeps_a_copy_of_it() {
+        let directory = std::env::temp_dir().join(format!(
+            "vectorxr-unreadable-config-{}-{}",
+            std::process::id(),
+            super::unix_milliseconds()
+        ));
+        std::fs::create_dir_all(&directory).expect("temporary directory should be created");
+        let config_path = directory.join("settings.json");
+        let saved = serde_json::to_string_pretty(&default_config()).unwrap();
+        let unreadable_files = || {
+            std::fs::read_dir(&directory)
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.file_name().to_string_lossy().contains(".unreadable-"))
+                .map(|entry| entry.path())
+                .collect::<Vec<_>>()
+        };
+
+        // A readable config is replaced without an extra copy.
+        std::fs::write(&config_path, &saved).unwrap();
+        super::write_config_document(&config_path, &saved).unwrap();
+        assert!(unreadable_files().is_empty());
+
+        // The layer accepts 90.0 for an integer; the app does not, so the
+        // hand-edited file is kept before the app's defaults replace it.
+        let hand_edited = saved.replacen("\"opacity\": 90", "\"opacity\": 90.0", 1);
+        assert_ne!(hand_edited, saved, "fixture should change the OSD opacity");
+        std::fs::write(&config_path, &hand_edited).unwrap();
+        super::write_config_document(&config_path, &saved).unwrap();
+        let kept = unreadable_files();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(std::fs::read_to_string(&kept[0]).unwrap(), hand_edited);
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), saved);
         std::fs::remove_dir_all(directory).expect("temporary directory should be removed");
     }
 

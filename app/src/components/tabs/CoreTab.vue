@@ -3,6 +3,7 @@ import { computed, ref } from "vue";
 
 import ThemeToggle from "../ThemeToggle.vue";
 import { playTestSound } from "../../lib/commands";
+import { errorText } from "../../lib/errors";
 import type { VectorXRConfig } from "../../lib/model";
 import type { ThemePreference } from "../../lib/theme";
 
@@ -41,7 +42,7 @@ async function previewSoundVolume() {
   try {
     await playTestSound("", true, props.config.core.sound.volume);
   } catch (error) {
-    soundPreviewError.value = error instanceof Error ? error.message : "Failed to play sound.";
+    soundPreviewError.value = errorText(error, "Failed to play sound.");
   }
 }
 </script>

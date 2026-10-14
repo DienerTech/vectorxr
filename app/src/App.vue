@@ -21,6 +21,7 @@ import QuadViewsTab from './components/tabs/QuadViewsTab.vue'
 import TurboTab from './components/tabs/TurboTab.vue'
 import { exportConfigFile, loadDebugSources, loadLogSnapshot, loadOpenXrLayers, loadRuntimeStatus, loadSeenApps, loadRuntimePacing, loadTurboMetrics, type LogSnapshot, type OpenXrLayerSnapshot } from './lib/commands'
 import { createDebugPackage, saveDebugPackage } from './lib/debugPackage'
+import { errorText } from './lib/errors'
 import { buildHealthSummary } from './lib/health'
 import { moduleStateForApplication, normalizeConfig, type ModuleId, type VectorXRConfig } from './lib/model'
 import { patchNotes } from './lib/patchNotes'
@@ -242,7 +243,7 @@ async function refreshLogs() {
   try {
     logSnapshot.value = await loadLogSnapshot()
   } catch (error) {
-    store.state.status = error instanceof Error ? error.message : 'Failed to load logs'
+    store.state.status = errorText(error, 'Failed to load logs')
   } finally {
     logViewerLoading.value = false
   }
@@ -262,7 +263,7 @@ async function refreshOpenXrLayers(includeSignatures = false) {
     const complete = await loadOpenXrLayers(true)
     if (revision === layerRefreshRevision) openXrLayerSnapshot.value = complete
   } catch (error) {
-    if (revision === layerRefreshRevision) store.state.status = error instanceof Error ? error.message : 'Failed to load OpenXR layer status'
+    if (revision === layerRefreshRevision) store.state.status = errorText(error, 'Failed to load OpenXR layer status')
   } finally {
     if (revision === layerRefreshRevision) openXrLayersLoading.value = false
   }
@@ -283,7 +284,7 @@ async function exportConfig() {
     const exported = await exportConfigFile(store.state.config)
     store.state.status = exported ? 'Config exported' : 'Export canceled'
   } catch (error) {
-    store.state.status = error instanceof Error ? error.message : 'Failed to export config'
+    store.state.status = errorText(error, 'Failed to export config')
   }
 }
 
@@ -338,7 +339,7 @@ async function exportDebugInformation() {
       debugExportOpen.value = false
     }
   } catch (error) {
-    store.state.status = error instanceof Error ? error.message : 'Failed to export debug information'
+    store.state.status = errorText(error, 'Failed to export debug information')
   } finally {
     debugExporting.value = false
   }
@@ -539,7 +540,7 @@ async function confirmResetConfig() {
         :saving="store.state.saving"
         :loading="store.state.loading"
         :status="store.state.status"
-        :disabled="store.state.loading || store.state.saving || errors.length > 0"
+        :disabled="store.state.loading || store.state.saving || !!store.state.loadError || errors.length > 0"
         :errors="errors"
         @save="saveConfig"
         @discard="store.discardChanges"

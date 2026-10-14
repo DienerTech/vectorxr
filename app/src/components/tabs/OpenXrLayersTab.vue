@@ -15,6 +15,7 @@ import {
   type OpenXrLayerSignatureStatus,
   type OpenXrLayerSnapshot,
 } from '../../lib/commands'
+import { errorText } from '../../lib/errors'
 
 const props = defineProps<{
   snapshot: OpenXrLayerSnapshot | null
@@ -89,7 +90,7 @@ async function unlockMachineWrites() {
     emit('status', 'Machine-wide OpenXR layer writes are unlocked for this app session.')
     await nextTick()
   } catch (error) {
-    emit('status', error instanceof Error ? error.message : 'Administrator approval was not granted')
+    emit('status', errorText(error, 'Administrator approval was not granted'))
   } finally {
     unlockingMachineWrites.value = false
   }
@@ -115,7 +116,7 @@ async function toggleLayer(slice: OpenXrLayerRegistrySliceId, layer: OpenXrLayer
     emit('snapshotUpdated', visibleSnapshot)
     updateSelectedLayer(visibleSnapshot, slice, layer.manifestPath)
   } catch (error) {
-    emit('status', error instanceof Error ? error.message : 'Failed to update OpenXR layer')
+    emit('status', errorText(error, 'Failed to update OpenXR layer'))
     queueRefresh()
   } finally {
     busyKey.value = null
@@ -144,7 +145,7 @@ async function moveLayer(slice: OpenXrLayerRegistrySliceId, layer: OpenXrLayerEn
     emit('snapshotUpdated', visibleSnapshot)
     updateSelectedLayer(visibleSnapshot, slice, layer.manifestPath)
   } catch (error) {
-    emit('status', error instanceof Error ? error.message : 'Failed to reorder OpenXR layer')
+    emit('status', errorText(error, 'Failed to reorder OpenXR layer'))
     queueRefresh()
   } finally {
     busyKey.value = null
@@ -189,7 +190,7 @@ async function confirmLayerDeletion() {
     emit('status', `Removed "${layer.layerName}" from ${activeSlice.value?.label ?? 'the OpenXR registry'}.`)
     emit('refresh')
   } catch (error) {
-    emit('status', error instanceof Error ? error.message : 'Failed to remove OpenXR layer registration')
+    emit('status', errorText(error, 'Failed to remove OpenXR layer registration'))
     queueRefresh()
   } finally {
     busyKey.value = null
@@ -204,7 +205,7 @@ async function openFolder(path: string | undefined) {
   try {
     await openFileDirectory(path)
   } catch (error) {
-    emit('status', error instanceof Error ? error.message : 'Unable to open folder')
+    emit('status', errorText(error, 'Unable to open folder'))
   }
 }
 

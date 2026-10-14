@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 import { cancelDeviceBindingCapture, captureDeviceBinding, type InputDeviceInfo } from '../lib/commands'
+import { errorText } from '../lib/errors'
 import {
   inputDeviceDiscovery,
   pauseInputDeviceDiscovery,
@@ -243,7 +244,7 @@ async function captureBinding() {
     }))
     status.value = `Captured ${binding.deviceName} / ${binding.inputLabel}.`
   } catch (error) {
-    status.value = error instanceof Error ? error.message : 'Failed to capture joystick input.'
+    status.value = errorText(error, 'Failed to capture joystick input.')
   } finally {
     capturing.value = false
     resumeInputDeviceDiscovery()

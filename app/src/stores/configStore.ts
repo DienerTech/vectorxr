@@ -13,12 +13,18 @@ import {
   type ActiveRuntimeInfo,
   type SeenApplication,
 } from '../lib/commands'
+import { errorText } from '../lib/errors'
 import { cloneConfig, createApplication, createFrameGenProfile, createProfile, createPivotProfile, createQuadViewsProfile, createTurboProfile, defaultConfig } from '../lib/model'
 import type { AppTab, ModuleId, RuntimePacingObservation, TurboMetricsSession, VectorXRConfig } from '../lib/model'
 
 interface StoreState {
   loading: boolean
   saving: boolean
+  // Why the saved config could not be read. While set, the editor holds
+  // defaults rather than the user's settings, so Save stays off until a load,
+  // reset or import succeeds; otherwise the first Save would overwrite the
+  // file with defaults.
+  loadError: string
   path: string
   seenAppsPath: string
   seenApps: SeenApplication[]
@@ -38,6 +44,7 @@ interface StoreState {
 const state = reactive<StoreState>({
   loading: false,
   saving: false,
+  loadError: '',
   path: '',
   seenAppsPath: '',
   seenApps: [],
@@ -56,6 +63,10 @@ const state = reactive<StoreState>({
 
 const isDirty = computed(() => JSON.stringify(state.config) !== JSON.stringify(state.originalConfig))
 
+function loadBlockedStatus() {
+  return `Settings could not be loaded, so saving is off to keep the file on disk: ${state.loadError.replace(/\.\s*$/, '')}. Fix the file and reopen VectorXR, import a config, or reset to defaults.`
+}
+
 export function useConfigStore() {
   async function load() {
     state.loading = true
@@ -66,10 +77,12 @@ export function useConfigStore() {
       state.path = envelope.path
       state.config = cloneConfig(envelope.config)
       state.originalConfig = cloneConfig(envelope.config)
+      state.loadError = ''
       state.status = ''
       await Promise.all([refreshSeenApps(), refreshRuntimePacing(), refreshTurboMetrics()])
     } catch (error) {
-      state.status = error instanceof Error ? error.message : 'Failed to load config'
+      state.loadError = errorText(error, 'Failed to load config')
+      state.status = loadBlockedStatus()
     } finally {
       state.loading = false
     }
@@ -83,7 +96,7 @@ export function useConfigStore() {
       state.seenAppsPath = envelope.path
       state.seenApps = envelope.observations
     } catch (error) {
-      state.status = error instanceof Error ? error.message : 'Failed to load seen apps'
+      state.status = errorText(error, 'Failed to load seen apps')
     } finally {
       state.seenAppsLoading = false
     }
@@ -104,7 +117,7 @@ export function useConfigStore() {
         state.activeRuntime = envelope.activeRuntime
       }
     } catch (error) {
-      state.status = error instanceof Error ? error.message : 'Failed to load runtime pacing state'
+      state.status = errorText(error, 'Failed to load runtime pacing state')
     } finally {
       state.runtimePacingLoading = false
     }
@@ -120,7 +133,7 @@ export function useConfigStore() {
         state.turboMetrics = envelope.sessions
       }
     } catch (error) {
-      state.status = error instanceof Error ? error.message : 'Failed to load turbo metrics'
+      state.status = errorText(error, 'Failed to load turbo metrics')
     }
   }
 
@@ -131,7 +144,7 @@ export function useConfigStore() {
       state.turboMetrics = envelope.sessions
       state.status = 'Turbo metrics cleared'
     } catch (error) {
-      state.status = error instanceof Error ? error.message : 'Failed to clear turbo metrics'
+      state.status = errorText(error, 'Failed to clear turbo metrics')
     }
   }
 
@@ -143,11 +156,16 @@ export function useConfigStore() {
       state.activeRuntime = envelope.activeRuntime
       state.status = `Pacing verdict cleared for ${runtimeName}; Auto re-discovers at the next session`
     } catch (error) {
-      state.status = error instanceof Error ? error.message : 'Failed to clear pacing verdict'
+      state.status = errorText(error, 'Failed to clear pacing verdict')
     }
   }
 
   async function save() {
+    if (state.loadError) {
+      state.status = loadBlockedStatus()
+      return
+    }
+
     state.saving = true
     state.status = ''
 
@@ -156,7 +174,7 @@ export function useConfigStore() {
       state.originalConfig = cloneConfig(state.config)
       state.status = 'Config saved'
     } catch (error) {
-      state.status = error instanceof Error ? error.message : 'Failed to save config'
+      state.status = errorText(error, 'Failed to save config')
     } finally {
       state.saving = false
     }
@@ -172,10 +190,11 @@ export function useConfigStore() {
       state.seenAppsPath = envelope.seenAppsPath
       state.config = cloneConfig(envelope.config)
       state.originalConfig = cloneConfig(envelope.config)
+      state.loadError = ''
       state.seenApps = []
       state.status = 'Config reset to defaults'
     } catch (error) {
-      state.status = error instanceof Error ? error.message : 'Failed to reset config'
+      state.status = errorText(error, 'Failed to reset config')
     } finally {
       state.saving = false
     }
@@ -358,8 +377,11 @@ export function useConfigStore() {
     state.activeTab = moduleId
   }
 
+  // Importing is an explicit choice to replace the saved config, so it also
+  // lifts the unreadable-file block (the backend keeps a copy of that file).
   function importConfig(config: VectorXRConfig) {
     state.config = cloneConfig(config)
+    state.loadError = ''
     state.status = 'Config imported — save to write to disk'
   }
 
@@ -378,7 +400,7 @@ export function useConfigStore() {
       state.seenApps = []
       state.status = 'Seen apps cleared'
     } catch (error) {
-      state.status = error instanceof Error ? error.message : 'Failed to clear seen apps'
+      state.status = errorText(error, 'Failed to clear seen apps')
     }
   }
 

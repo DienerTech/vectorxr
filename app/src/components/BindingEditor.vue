@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 
 import DeviceBindingEditor from './DeviceBindingEditor.vue'
 import { pickSoundFile, playTestSound } from '../lib/commands'
+import { errorText } from '../lib/errors'
 import { defaultDeviceBinding, defaultKeyboardBinding, defaultNoneBinding, defaultSoundFeedback, keyboardBindingKeyGroups, keyboardModifierKeys, preserveBindingSound, type InputBinding, type SoundFeedback } from '../lib/model'
 
 const props = defineProps<{
@@ -62,7 +63,7 @@ async function browseSound(which: SoundPath) {
       updateSound({ [which]: picked })
     }
   } catch (error) {
-    soundError.value = error instanceof Error ? error.message : 'Failed to open file picker.'
+    soundError.value = errorText(error, 'Failed to open file picker.')
   }
 }
 
@@ -72,7 +73,7 @@ async function testSound(which: SoundPath) {
     const defaultName = which === 'activateSound' ? props.defaultActivateSound : props.defaultDeactivateSound
     await playTestSound(sound.value?.[which] ?? '', which === 'activateSound', 100, defaultName)
   } catch (error) {
-    soundError.value = error instanceof Error ? error.message : 'Failed to play sound.'
+    soundError.value = errorText(error, 'Failed to play sound.')
   }
 }
 
