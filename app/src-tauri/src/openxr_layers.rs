@@ -391,38 +391,89 @@ trait RegistryWriter {
     fn set(&mut self, value: &RegistryValue) -> Result<(), String>;
 }
 
-// Replaces `old_tail` with `new_tail`. If any step fails, the old values are
-// written back in their old order, so a failed move never drops a layer (another
-// vendor's included) from the registry.
+// Puts `tail`, the key's last values in the key's order, into the order of
+// `wanted` (the same values). Deleting a value and setting it again moves it to
+// the end, so values are moved one at a time, from the first one out of place:
+// at most one layer is missing from the key at any moment, including while a
+// game's OpenXR loader reads it, and a write that fails stops the reorder
+// before another value is deleted. `tail` follows the key: after an error it
+// holds what is registered, and a value whose set failed is no longer in it.
+fn reorder_registry_tail(
+    writer: &mut impl RegistryWriter,
+    tail: &mut Vec<RegistryValue>,
+    wanted: &[RegistryValue],
+) -> Result<(), String> {
+    let in_place = tail
+        .iter()
+        .zip(wanted)
+        .take_while(|(registered, value)| registered == value)
+        .count();
+    for value in &wanted[in_place..] {
+        if let Some(index) = tail
+            .iter()
+            .position(|registered| registered.name == value.name)
+        {
+            writer.delete(&value.name)?;
+            tail.remove(index);
+        }
+        writer.set(value)?;
+        tail.push(value.clone());
+    }
+    Ok(())
+}
+
+// Replaces `old_tail` with `new_tail`. If a step fails, the values are put back
+// in their old order. A failed move loses a layer (another vendor's included)
+// only when Windows refuses to write that value both in the move and in the
+// restore, and the error then names it.
 fn rewrite_registry_tail(
     writer: &mut impl RegistryWriter,
     old_tail: &[RegistryValue],
     new_tail: &[RegistryValue],
 ) -> Result<(), String> {
-    fn replace(
-        writer: &mut impl RegistryWriter,
-        from: &[RegistryValue],
-        to: &[RegistryValue],
-    ) -> Result<(), String> {
-        for value in from {
-            writer.delete(&value.name)?;
-        }
-        for value in to {
-            writer.set(value)?;
-        }
-        Ok(())
-    }
-
-    let Err(error) = replace(writer, old_tail, new_tail) else {
+    let mut tail = old_tail.to_vec();
+    let Err(error) = reorder_registry_tail(writer, &mut tail, new_tail) else {
         return Ok(());
     };
     let error = error.trim_end_matches('.');
-    match replace(writer, old_tail, old_tail) {
-        Ok(()) => Err(format!("{error}. The previous layer order was kept.")),
-        Err(restore_error) => Err(format!(
-            "{error}. Restoring the previous layer order also failed: {restore_error}"
-        )),
+
+    // At most one value is missing: the one whose set failed. It goes back
+    // first, so a restore that cannot write values stops before it deletes any
+    // other one.
+    let missing = |tail: &[RegistryValue]| -> Vec<RegistryValue> {
+        old_tail
+            .iter()
+            .filter(|value| !tail.iter().any(|registered| registered.name == value.name))
+            .cloned()
+            .collect()
+    };
+    let restored = missing(&tail)
+        .into_iter()
+        .try_for_each(|value| {
+            writer.set(&value)?;
+            tail.push(value);
+            Ok::<(), String>(())
+        })
+        .and_then(|()| reorder_registry_tail(writer, &mut tail, old_tail));
+
+    let Err(restore_error) = restored else {
+        return Err(format!("{error}. The previous layer order was kept."));
+    };
+    let restore_error = restore_error.trim_end_matches('.');
+    let lost = missing(&tail);
+    if lost.is_empty() {
+        return Err(format!(
+            "{error}. Restoring the previous layer order also failed ({restore_error}), but every layer is still registered."
+        ));
     }
+    let names = lost
+        .iter()
+        .map(|value| value.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!(
+        "{error}. Restoring the previous layer order also failed ({restore_error}), and Windows did not write back {names}, so that layer is no longer registered. Reinstalling the layer registers it again."
+    ))
 }
 
 // Notes for values the OpenXR loader cannot read as a DWORD. The loader skips
@@ -1694,22 +1745,28 @@ mod registry_order_tests {
         }
     }
 
-    // An ordered stand-in for one registry key that can fail one write.
-    struct FakeKey {
+    // An ordered stand-in for one registry key. `fails` picks the writes that
+    // fail, from the operation ("delete" or "set") and the value's name.
+    struct FakeKey<F> {
         values: Vec<RegistryValue>,
-        fail_set_of: Option<String>,
+        fails: F,
+        // The fewest values the key held at any moment.
+        fewest: usize,
     }
 
-    impl RegistryWriter for FakeKey {
+    impl<F: FnMut(&str, &str) -> bool> RegistryWriter for FakeKey<F> {
         fn delete(&mut self, name: &str) -> Result<(), String> {
+            if (self.fails)("delete", name) {
+                return Err("Unable to delete OpenXR registry value: Windows error 1016".into());
+            }
             self.values.retain(|value| value.name != name);
+            self.fewest = self.fewest.min(self.values.len());
             Ok(())
         }
 
         fn set(&mut self, value: &RegistryValue) -> Result<(), String> {
-            if self.fail_set_of.as_deref() == Some(value.name.as_str()) {
-                self.fail_set_of = None;
-                return Err("Unable to set OpenXR registry value: Windows error 5".into());
+            if (self.fails)("set", &value.name) {
+                return Err("Unable to set OpenXR registry value: Windows error 1016".into());
             }
             match self.values.iter_mut().find(|existing| existing.name == value.name) {
                 Some(existing) => *existing = value.clone(),
@@ -1719,13 +1776,37 @@ mod registry_order_tests {
         }
     }
 
+    // Moves `name` in a fake key that holds `existing`, as the elevated
+    // helper does in the real one.
+    fn move_in<F: FnMut(&str, &str) -> bool>(
+        existing: &[RegistryValue],
+        name: &str,
+        direction: MoveDirection,
+        fails: F,
+    ) -> (FakeKey<F>, Result<(), String>) {
+        let (first, tail) = plan_registry_move(existing, name, direction)
+            .unwrap()
+            .unwrap();
+        let mut key = FakeKey {
+            values: existing.to_vec(),
+            fails,
+            fewest: existing.len(),
+        };
+        let result = rewrite_registry_tail(&mut key, &existing[first..], &tail);
+        (key, result)
+    }
+
     fn names(values: &[RegistryValue]) -> Vec<&str> {
         values.iter().map(|value| value.name.as_str()).collect()
     }
 
+    fn abcd() -> Vec<RegistryValue> {
+        vec![dword("a", 0), dword("b", 1), dword("c", 0), dword("d", 0)]
+    }
+
     #[test]
     fn moving_a_layer_rewrites_only_the_values_that_change_position() {
-        let existing = vec![dword("a", 0), dword("b", 1), dword("c", 0), dword("d", 0)];
+        let existing = abcd();
         let (first, tail) = plan_registry_move(&existing, "C", MoveDirection::Up)
             .unwrap()
             .unwrap();
@@ -1735,13 +1816,15 @@ mod registry_order_tests {
         assert!(plan_registry_move(&existing, "d", MoveDirection::Down).unwrap().is_none());
         assert!(plan_registry_move(&existing, "gone", MoveDirection::Up).is_err());
 
-        let mut key = FakeKey {
-            values: existing.clone(),
-            fail_set_of: None,
-        };
-        rewrite_registry_tail(&mut key, &existing[first..], &tail).unwrap();
+        let (key, result) = move_in(&existing, "C", MoveDirection::Up, |_, name| {
+            assert_ne!(name, "a", "a value before the move was rewritten");
+            false
+        });
+        result.unwrap();
         assert_eq!(names(&key.values), ["a", "c", "b", "d"]);
         assert_eq!(key.values[2], dword("b", 1));
+        // A game whose OpenXR loader reads the key mid-move misses one layer at most.
+        assert_eq!(key.fewest, existing.len() - 1);
     }
 
     #[test]
@@ -1756,16 +1839,69 @@ mod registry_order_tests {
             },
             dword("d", 1),
         ];
-        let (first, tail) = plan_registry_move(&existing, "b", MoveDirection::Down)
-            .unwrap()
-            .unwrap();
-        let mut key = FakeKey {
-            values: existing.clone(),
-            fail_set_of: Some("b".into()),
-        };
-        let error = rewrite_registry_tail(&mut key, &existing[first..], &tail).unwrap_err();
+        let mut failed = false;
+        let (key, result) = move_in(&existing, "b", MoveDirection::Down, |write, name| {
+            let fail = !failed && write == "set" && name == "b";
+            failed |= fail;
+            fail
+        });
+        let error = result.unwrap_err();
         assert!(error.contains("previous layer order was kept"), "{error}");
         assert_eq!(key.values, existing);
+
+        // A delete that keeps failing, before or after the first value moved.
+        for undeletable in ["c", "b"] {
+            let (key, result) = move_in(&abcd(), "c", MoveDirection::Up, |write, name| {
+                write == "delete" && name == undeletable
+            });
+            let error = result.unwrap_err();
+            assert!(error.contains("previous layer order was kept"), "{error}");
+            assert_eq!(key.values, abcd(), "{undeletable}");
+        }
+    }
+
+    #[test]
+    fn only_a_layer_windows_will_not_write_back_is_lost() {
+        let existing = vec![
+            dword("a", 0),
+            dword("b", 0),
+            RegistryValue {
+                name: "odd".into(),
+                value_type: SZ,
+                data: b"0\0".to_vec(),
+            },
+            dword("d", 1),
+        ];
+        let (key, result) = move_in(&existing, "b", MoveDirection::Down, |write, name| {
+            write == "set" && name == "odd"
+        });
+        let error = result.unwrap_err();
+        assert!(
+            error.contains("did not write back odd, so that layer is no longer registered"),
+            "{error}"
+        );
+        assert_eq!(key.values, [&existing[..2], &existing[3..]].concat());
+
+        // Windows refusing every new value (a security product guarding the
+        // key, say) costs the first value moved, not every value after it.
+        let (key, result) = move_in(&abcd(), "b", MoveDirection::Down, |write, _| write == "set");
+        assert!(result.unwrap_err().contains("did not write back c,"));
+        assert_eq!(names(&key.values), ["a", "b", "d"]);
+    }
+
+    #[test]
+    fn a_restore_that_cannot_finish_still_keeps_every_layer() {
+        let (key, result) = move_in(&abcd(), "b", MoveDirection::Down, |write, name| {
+            write == "delete" && name == "d"
+        });
+        let error = result.unwrap_err();
+        assert!(
+            error.contains("but every layer is still registered"),
+            "{error}"
+        );
+        let mut values = key.values.clone();
+        values.sort_by(|left, right| left.name.cmp(&right.name));
+        assert_eq!(values, abcd());
     }
 
     #[test]
