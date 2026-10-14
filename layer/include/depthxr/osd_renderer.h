@@ -215,7 +215,8 @@ class OsdRenderer {
     int image_width_{OsdBitmap::width};
     // The image up is an empty compact panel (OsdBitmap::empty).
     bool image_empty_{false};
-    // When the last refresh was requested; zero refreshes on the next frame.
+    // When the last refresh fell due (it is requested on the first frame
+    // after); zero refreshes on the next frame.
     std::chrono::steady_clock::time_point updated_{};
     std::chrono::steady_clock::time_point image_updated_{};
     // The last periodic refresh's upload (zero after a change).

@@ -795,7 +795,7 @@ int main(int argc, char** argv) {
             const auto* original=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&game);
             XrFrameEndInfo frame{XR_TYPE_FRAME_END_INFO}; frame.layerCount=1; frame.layers=&original;
             Check(WaitVisible(renderer,frame),"The rate test's panel was not shown");
-            const auto until=std::chrono::steady_clock::now()+std::chrono::milliseconds(700);
+            const auto until=std::chrono::steady_clock::now()+std::chrono::milliseconds(1500);
             while(std::chrono::steady_clock::now()<until) { renderer.Append(frame,true); std::this_thread::sleep_for(std::chrono::milliseconds(2)); }
             renderer.ReportDiagnostics(true);
         }
@@ -805,6 +805,9 @@ int main(int argc, char** argv) {
         Check(line!=std::string::npos && rate!=std::string::npos,"The OSD's visible summary is missing");
         const double hz=std::atof(text.c_str()+rate+19);
         Check(hz>8 && hz<=25,"effectiveRefreshHz did not measure the 20 Hz refreshes on the clock");
+        // Frames about 15 ms apart find each refresh due up to a frame late;
+        // the next falls due on the set interval all the same.
+        Check(hz>=18 && hz<=22,"The OSD lost its 20 Hz refresh rate to frame timing");
     }
     { OsdMetric metric; for(int i=0;i<100;++i)metric.Add(i<95?.11:20);Check(metric.count==100&&std::abs(metric.P95Upper()-.15)<.001&&metric.maximum==20,"OSD bounded metric histogram incorrect"); }
     context->Release(); device->Release();

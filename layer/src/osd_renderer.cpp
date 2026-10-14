@@ -657,14 +657,20 @@ const XrCompositionLayerBaseHeader* OsdRenderer::Append(const XrFrameEndInfo& in
             // The interval runs from the request, so the raster and upload
             // time do not stretch it (from the upload, 20 Hz refreshed at
             // about 10 Hz).
-            if (!upload_ && !raster_requested_ && !snapshot_needed_ &&
-                (!ready_ || now-updated_>=std::chrono::duration<double>(1.0/settings_.update_hz))) {
+            const auto period=std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(1.0/settings_.update_hz));
+            const bool due=now-updated_>=period;
+            if (!upload_ && !raster_requested_ && !snapshot_needed_ && (!ready_ || due)) {
                 if (!raster_thread_.joinable()) {
                     try { raster_thread_=std::thread([this] { RasterWorker(); }); }
                     catch (...) { Fail("OSD worker",XR_ERROR_OUT_OF_MEMORY); return nullptr; }
                 }
                 raster_request_=RasterRequest{settings_,compact_,rgba_,snapshot_,telemetry_,raster_generation_};
-                raster_requested_=true; updated_=now; raster_cv_.notify_one();
+                raster_requested_=true; raster_cv_.notify_one();
+                // Keep the set rate on average: the next refresh falls due an
+                // interval after this one did, not after the frame that found
+                // it due (half a frame late each time, 20 Hz gave 16-18 Hz).
+                // After a change or a pause, it is an interval from now.
+                updated_=due && updated_!=Clock::time_point{} && now-updated_<2*period?updated_+period:now;
             }
         } else ++stats.worker_busy;
     }
