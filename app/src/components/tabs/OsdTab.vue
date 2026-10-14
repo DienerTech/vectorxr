@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useOsdPreviewWindow } from '../../lib/osdPreviewWindow'
+import { osdDiagnostics } from '../../lib/osdDiagnostics'
 import { osdCompactLayout } from '../../lib/osdCompactLayout'
 import OsdColorPicker from '../OsdColorPicker.vue'
 import OsdPreview from '../OsdPreview.vue'
@@ -17,7 +18,10 @@ const previewCompact = ref(osd.value.compact)
 const previewSettings = computed(() => ({ ...osd.value, compact: previewCompact.value }))
 const previewLegible = ref(false)
 const previewPivotSnapLine = computed(() => pivotSnapViewsConfigured(props.config))
-const previewWindow = useOsdPreviewWindow(osd, previewCompact, previewLegible, previewPivotSnapLine)
+// Debug logging or a Frame Generation diagnostic view left on: named after
+// the brand, in the headset as here.
+const previewDiagnostics = computed(() => osdDiagnostics(props.config))
+const previewWindow = useOsdPreviewWindow(osd, previewCompact, previewLegible, previewPivotSnapLine, previewDiagnostics)
 watch(() => osd.value.compact, compact => { previewCompact.value = compact })
 function customColor() { osd.value.accent = 'custom'; colorExpanded.value = !colorExpanded.value }
 const editing = ref<'toggleBindings' | 'cycleBindings' | null>(null)
@@ -216,7 +220,7 @@ function preset(name: 'balanced' | 'minimal' | 'performance') {
         </div>
       </div>
       <p v-if="previewWindow.error.value" role="alert" class="chip-danger px-5 py-2 text-xs">{{ previewWindow.error.value }}</p>
-      <OsdPreview v-if="!previewWindow.opened.value" v-model:legible="previewLegible" :settings="previewSettings" :pivot-snap-line="previewPivotSnapLine" @position="(horizontal, vertical) => { osd.horizontalDegrees = horizontal; osd.verticalDegrees = vertical }" />
+      <OsdPreview v-if="!previewWindow.opened.value" v-model:legible="previewLegible" :settings="previewSettings" :pivot-snap-line="previewPivotSnapLine" :diagnostics="previewDiagnostics" @position="(horizontal, vertical) => { osd.horizontalDegrees = horizontal; osd.verticalDegrees = vertical }" />
       <p v-else class="surface-panel-soft border-y px-5 py-4 text-xs text-muted" style="border-color: var(--app-border)">Preview is open in a separate window.</p>
 
       <div class="grid gap-x-8 gap-y-6 border-t p-5 lg:grid-cols-2" style="border-color: var(--app-border)">

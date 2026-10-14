@@ -10290,6 +10290,15 @@ OsdSnapshot OpenXrLayer::BuildOsdSnapshot() const {
         !framegen_session_enabled_)
         snapshot.restart+=(snapshot.restart.empty()?"":" + ")+std::string("Frame Generation");
     snapshot.framegen_session=framegen_session_enabled_;
+    // Diagnostic modes a tester may leave on name themselves after the brand:
+    // debug logging (slower, with large traces) and, in a Frame Generation
+    // session, a diagnostic view drawn into generated frames.
+    if (resolved_settings_.core.log_level==LogLevel::Debug) snapshot.diagnostics="DEBUG LOG";
+    if (framegen_session_enabled_ && resolved_settings_.framegen.diagnostic_view!=FrameGenDiagnosticView::kOff) {
+        const FrameGenDiagnosticView view=resolved_settings_.framegen.diagnostic_view;
+        snapshot.diagnostics+=std::string(snapshot.diagnostics.empty()?"":" \xC2\xB7 ")+
+            (view==FrameGenDiagnosticView::kFlow?"FLOW VIEW":view==FrameGenDiagnosticView::kConfidence?"CONFIDENCE VIEW":"TINT VIEW");
+    }
     return snapshot;
 }
 

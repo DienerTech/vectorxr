@@ -152,14 +152,36 @@ struct Canvas {
 };
 // The compact FPS value's column, and with Frame Generation's badge beside it.
 constexpr int kCompactFpsWidth=210, kCompactFpsBadgeWidth=260;
+// The diagnostics tag: its text size, the padding either side of the text,
+// and its height.
+constexpr int kTagText=17, kTagPad=10, kTagHeight=30;
+// What asks for attention: a pending restart, the diagnostics tag.
+constexpr COLORREF kAttention=RGB(245,185,108);
 }
 
 OsdCompactLayout CompactOsdLayout(const OsdSettings& settings, const OsdCompactLayoutOptions& options) {
     OsdCompactLayout layout;
     const std::array<bool,4> headers{settings.compact_show_brand,settings.compact_show_app,settings.compact_show_runtime,settings.compact_show_clock};
-    constexpr std::array<int,4> widths{155,260,297,142};
+    std::array<int,4>& widths=layout.header_width;
+    // The diagnostics tag may not push the row past the panel: the runtime's
+    // column, then the app's, give up the width (their text then ends in an
+    // ellipsis), down to 80 pixels each; past that the tag's own text does.
+    int tag=options.diagnostics_width;
+    if(tag>0) {
+        int over=28+tag+16+12-OsdBitmap::width;
+        for(int i=0;i<4;++i) if(headers[i]) over+=widths[i]+16;
+        for(const int i:{2,1}) if(over>0 && headers[i]) { const int give=std::min(over,widths[i]-80); widths[i]-=give; over-=give; }
+        if(over>0) tag-=over;
+    }
     int x=28, count=0, y=18;
-    for (int i=0;i<4;++i) if(headers[i]) { layout.header_x[i]=x; x+=widths[i]+16; ++count; }
+    for (int i=0;i<4;++i) {
+        if(headers[i]) { layout.header_x[i]=x; x+=widths[i]+16; ++count; }
+        // The diagnostics tag follows the brand, or leads the row without it.
+        if(i==0 && tag>0) {
+            layout.diagnostics_x=x; layout.diagnostics_width=tag;
+            x+=tag+16; ++count;
+        }
+    }
     layout.fps=settings.compact_metrics=="all" || settings.compact_metrics=="fps";
     layout.frame_time=settings.compact_metrics=="all" || settings.compact_metrics=="frameTime";
     // Frame Generation's badge widens the FPS value's column.
@@ -198,9 +220,13 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
     }
     // Apps without Snap Views keep the single-line Pivot row.
     const bool pivot_snap_line=!snapshot.pivot_secondary.empty() || !snapshot.compact_pivot_secondary.empty();
-    const auto layout=CompactOsdLayout(settings,{.pivot_snap_line=pivot_snap_line,.framegen_session=snapshot.framegen_session});
+    // The diagnostics tag's width, measured before the layouts make room for it.
+    int tag_width=0;
+    if(!snapshot.diagnostics.empty()) { Canvas measure(1,1); tag_width=measure.Width(kTagText,snapshot.diagnostics,true)+2*kTagPad; }
+    const auto layout=CompactOsdLayout(settings,{.pivot_snap_line=pivot_snap_line,.framegen_session=snapshot.framegen_session,
+                                                 .diagnostics_width=tag_width});
     const int panel_width=compact?layout.width:OsdBitmap::width;
-    const int header_shift=(settings.show_brand || settings.show_app || settings.show_runtime || settings.show_clock)?0:40;
+    const int header_shift=(settings.show_brand || settings.show_app || settings.show_runtime || settings.show_clock || tag_width)?0:40;
     const int pivot_row_height=pivot_snap_line?84:52;
     const int height=compact?layout.height:210-header_shift+(settings.show_graph?156:0)+
         (settings.show_turbo?52:0)+(settings.show_framegen&&snapshot.framegen_session?(snapshot.framegen_detail.empty()?52:80):0)+
@@ -228,11 +254,17 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
             canvas.Text(x,top+second,width,size,Number(snapshot.framegen_fps,0)+" fps",white,true);
         } else canvas.Text(x,top+single,width,size,state,on?accent:muted,true);
     };
+    // The diagnostics tag: dark text on the attention colour, level with the
+    // header's text at y.
+    const auto diagnostics_tag=[&](int x,int y,int width) {
+        canvas.Rect(x,y-1,width,kTagHeight,kAttention);
+        canvas.Text(x+kTagPad,y+3,width-2*kTagPad+4,kTagText,snapshot.diagnostics,bg,true);
+    };
     if (compact) {
-        constexpr std::array<int,4> widths{155,260,297,142};
         const std::array<std::string,4> values{"VECTORXR",snapshot.application,snapshot.runtime,clock_label};
         for(int i=0;i<4;++i) if(layout.header_x[i]>=0)
-            canvas.Text(layout.header_x[i],layout.header_y,widths[i],i==0?22:21,values[i],i==0?accent:muted,i==0);
+            canvas.Text(layout.header_x[i],layout.header_y,layout.header_width[i],i==0?22:21,values[i],i==0?accent:muted,i==0);
+        if(layout.diagnostics_x>=0) diagnostics_tag(layout.diagnostics_x,layout.header_y,layout.diagnostics_width);
         if(layout.fps) {
             const int column=layout.framegen_badge?kCompactFpsBadgeWidth:kCompactFpsWidth;
             canvas.Text(28,layout.metrics_y,column,40,fps+" fps",white,true);
@@ -262,8 +294,10 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
         }
     } else {
         if(settings.show_brand) canvas.Text(28,18,155,22,"VECTORXR",accent,true);
+        int lead_x=settings.show_brand?200:28;
+        if(tag_width) { diagnostics_tag(lead_x,18,tag_width); lead_x+=tag_width+18; }
         const int clock_x=settings.show_clock?790:932;
-        const int app_x=settings.show_brand?200:28;
+        const int app_x=lead_x;
         const int runtime_x=settings.show_runtime?(settings.show_app?(app_x+clock_x)/2:app_x):clock_x;
         if(settings.show_app) canvas.Text(app_x,18,runtime_x-app_x-16,21,snapshot.application,muted);
         if(settings.show_runtime) canvas.Text(runtime_x,18,clock_x-runtime_x-18,21,snapshot.runtime,muted);
@@ -310,7 +344,7 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
                 }
             }
         }
-        if (!snapshot.restart.empty()) canvas.Text(30,y,902,20,"RESTART PENDING  /  "+snapshot.restart,RGB(245,185,108));
+        if (!snapshot.restart.empty()) canvas.Text(30,y,902,20,"RESTART PENDING  /  "+snapshot.restart,kAttention);
     }
     // Complete batched GDI writes before reading the DIB directly.
     GdiFlush();

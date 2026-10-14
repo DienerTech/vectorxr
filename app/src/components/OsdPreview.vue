@@ -1,19 +1,23 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, useId } from 'vue'
 import { osdCompactLayout } from '../lib/osdCompactLayout'
+import { osdDiagnosticsTagWidth } from '../lib/osdDiagnostics'
 import { osdAccentColors, type OsdSettings, type OsdBodyRow } from '../lib/model'
 // pivotSnapLine mirrors the layer: the Pivot row gains a Snap View line only
-// when Snap Views are configured.
-const props = withDefaults(defineProps<{ settings: OsdSettings; pivotSnapLine?: boolean }>(), { pivotSnapLine: false })
+// when Snap Views are configured. diagnostics: the tag after the brand
+// (osdDiagnostics), empty for none.
+const props = withDefaults(defineProps<{ settings: OsdSettings; pivotSnapLine?: boolean; diagnostics?: string }>(), { pivotSnapLine: false, diagnostics: '' })
+const tagWidth = computed(() => osdDiagnosticsTagWidth(props.diagnostics))
 const legible = defineModel<boolean>('legible', { default: false })
 const edgeId = useId()
 const emit = defineEmits<{ position: [horizontal: number, vertical: number] }>()
 const accent = computed(() => props.settings.accent === 'custom' ? props.settings.customColor : osdAccentColors[props.settings.accent])
 const flags = { graph: 'showGraph', turbo: 'showTurbo', framegen: 'showFramegen', pivot: 'showPivot', modules: 'showModules' } as const
 const expandedHeader = computed(() => {
-  const s = props.settings, clockX = s.showClock ? 790 : 932, appX = s.showBrand ? 200 : 28
-  return { shift: s.showBrand || s.showApp || s.showRuntime || s.showClock ? 0 : 40,
-    clockX, appX, runtimeX: s.showRuntime ? (s.showApp ? Math.floor((appX + clockX) / 2) : appX) : clockX }
+  const s = props.settings, clockX = s.showClock ? 790 : 932, tagX = s.showBrand ? 200 : 28
+  const appX = tagWidth.value ? tagX + tagWidth.value + 18 : tagX
+  return { shift: s.showBrand || s.showApp || s.showRuntime || s.showClock || tagWidth.value ? 0 : 40,
+    clockX, tagX, appX, runtimeX: s.showRuntime ? (s.showApp ? Math.floor((appX + clockX) / 2) : appX) : clockX }
 })
 // Row heights as the layer draws them; Frame Generation's row has a second
 // line while it generates, and Pivot one for Snap Views.
@@ -25,7 +29,7 @@ const rows = computed(() => {
   })
 })
 // The preview shows a session with Frame Generation on.
-const compactLayout = computed(() => osdCompactLayout(props.settings, { pivotSnapLine: props.pivotSnapLine, framegenSession: true }))
+const compactLayout = computed(() => osdCompactLayout(props.settings, { pivotSnapLine: props.pivotSnapLine, framegenSession: true, diagnosticsWidth: tagWidth.value }))
 const panelWidth = computed(() => props.settings.compact ? compactLayout.value.width : 960)
 const height = computed(() => props.settings.compact ? compactLayout.value.height : 210 - expandedHeader.value.shift + rows.value.reduce((sum, row) => sum + rowHeight(row.key), 0))
 const width = computed(() => 2 * Math.atan(.275 * props.settings.scale / 100 * (panelWidth.value - 2) / 958) * 180 / Math.PI)
@@ -87,6 +91,7 @@ function move(event: PointerEvent) {
         </g>
         <template v-if="settings.compact">
           <foreignObject v-for="field in compactLayout.fields" :key="field.key" :x="field.x" :y="compactLayout.headerY" :width="field.width" height="34"><div class="header-field" :style="field.key === 'brand' ? { color: accent, fontWeight: 600, fontSize: '22px' } : undefined">{{ headerValues[field.key as keyof typeof headerValues] }}</div></foreignObject>
+          <g v-if="compactLayout.diagnostics" :transform="`translate(${compactLayout.diagnostics.x} ${compactLayout.headerY - 1})`"><rect :width="compactLayout.diagnostics.width" height="30" fill="#f5b96c" /><foreignObject x="10" :width="compactLayout.diagnostics.width - 16" height="30"><div class="diagnostics-tag">{{ diagnostics }}</div></foreignObject></g>
           <text v-if="compactLayout.fps" x="28" :y="compactLayout.metricsY + 40" font-size="40" fill="#e9f0f8" font-weight="600">{{ sample.fps }} fps</text>
           <g v-if="compactLayout.framegenBadge" font-size="20" font-weight="600">
             <text x="150" :y="compactLayout.metricsY + 23" :fill="accent">FG ON</text>
@@ -112,6 +117,7 @@ function move(event: PointerEvent) {
         </template>
         <template v-else>
           <text v-if="settings.showBrand" x="28" y="40" font-size="22" :fill="accent" font-weight="600">VECTORXR</text>
+          <g v-if="tagWidth" :transform="`translate(${expandedHeader.tagX} 17)`"><rect :width="tagWidth" height="30" fill="#f5b96c" /><foreignObject x="10" :width="tagWidth - 16" height="30"><div class="diagnostics-tag">{{ diagnostics }}</div></foreignObject></g>
           <foreignObject v-if="settings.showApp" :x="expandedHeader.appX" y="18" :width="expandedHeader.runtimeX - expandedHeader.appX - 16" height="34"><div class="header-field">your-game.exe</div></foreignObject>
           <foreignObject v-if="settings.showRuntime" :x="expandedHeader.runtimeX" y="18" :width="expandedHeader.clockX - expandedHeader.runtimeX - 18" height="34"><div class="header-field">Your OpenXR runtime</div></foreignObject>
           <text v-if="settings.showClock" x="790" y="39" font-size="21" fill="#94a5b8">{{ headerValues.clock }}</text>
@@ -145,6 +151,7 @@ function move(event: PointerEvent) {
 .preview { cursor: grab; touch-action: none; user-select: none; font-family: 'Segoe UI', sans-serif; }
 .preview:active { cursor: grabbing; }
 .header-field { font: 21px 'Segoe UI', sans-serif; color: #94a5b8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.diagnostics-tag { font: 600 17px/30px 'Segoe UI', sans-serif; color: #0d141f; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .body-value { font: 600 24px 'Segoe UI', sans-serif; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
 .body-detail { font: 20px 'Segoe UI', sans-serif; color: #94a5b8; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
 </style>

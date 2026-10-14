@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 import { defaultConfig, defaultOsdSettings, normalizeConfig, normalizeOsdSettings, osdLayout, savedBindingConflictWarnings } from '../src/lib/model.ts'
 import { validateConfig } from '../src/lib/validation.ts'
 import { osdCompactLayout } from '../src/lib/osdCompactLayout.ts'
+import { osdDiagnostics, osdDiagnosticsTagWidth } from '../src/lib/osdDiagnostics.ts'
 
 test('old configs keep OSD off and acquire independent default bindings', () => {
   const config = defaultConfig()
@@ -133,4 +134,43 @@ test('public schema describes every OSD field and keeps it optional for old conf
   assert.equal(definition.properties.enabled.default, false)
   assert.equal(definition.properties.opacity.minimum, 30)
   assert.equal(definition.properties.updateHz.maximum, 20)
+})
+
+test('debug logging and Frame Generation diagnostic views name themselves after the OSD brand', () => {
+  const config = defaultConfig()
+  assert.equal(osdDiagnostics(config), '')
+  config.core.logLevel = 'debug'
+  assert.equal(osdDiagnostics(config), 'DEBUG LOG')
+  config.modules.framegen.diagnosticView = 'tint'
+  // A view only shows where Frame Generation is on.
+  assert.equal(osdDiagnostics(config), 'DEBUG LOG')
+  config.modules.framegen.enabled = true
+  assert.equal(osdDiagnostics(config), 'DEBUG LOG \u00b7 TINT VIEW')
+  config.core.logLevel = 'info'
+  config.modules.framegen.diagnosticView = 'confidence'
+  assert.equal(osdDiagnostics(config), 'CONFIDENCE VIEW')
+  assert.equal(osdDiagnosticsTagWidth(''), 0)
+
+  // Compact: the tag takes a slot after the brand, or leads the row without
+  // it, and keeps the header row with every header item hidden.
+  const settings = defaultOsdSettings()
+  Object.assign(settings, { compactShowBrand: true, compactShowApp: true, compactShowRuntime: false, compactShowClock: false })
+  const plain = osdCompactLayout(settings), tagged = osdCompactLayout(settings, { diagnosticsWidth: 200 })
+  assert.equal(plain.diagnostics, null)
+  assert.deepEqual(tagged.diagnostics, { x: 28 + 155 + 16, width: 200 })
+  assert.equal(tagged.fields[1].x, plain.fields[1].x + 216)
+  assert.equal(tagged.height, plain.height)
+  Object.assign(settings, { compactShowBrand: false, compactShowApp: false })
+  const alone = osdCompactLayout(settings, { diagnosticsWidth: 200 })
+  assert.deepEqual(alone.diagnostics, { x: 28, width: 200 })
+  assert.equal(alone.headerY, 18)
+  assert.equal(alone.height, osdCompactLayout(settings).height + 44)
+  // With every field shown, the longest tag narrows the runtime's column (and
+  // the app's) instead of passing the panel's edge, as the layer does.
+  Object.assign(settings, { compactShowBrand: true, compactShowApp: true, compactShowRuntime: true, compactShowClock: true })
+  for (const width of [200, 300, 400]) {
+    const crowded = osdCompactLayout(settings, { diagnosticsWidth: width })
+    assert.ok(crowded.width <= 960)
+    for (const field of crowded.fields) assert.ok(field.width >= 80)
+  }
 })

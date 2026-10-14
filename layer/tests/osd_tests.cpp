@@ -190,6 +190,59 @@ int main(int argc, char** argv) {
             Check(!CompactOsdLayout(compact_settings,framegen_options).framegen_badge &&
                   CompactOsdLayout(compact_settings,framegen_options).width==CompactOsdLayout(compact_settings).width,"Compact badge shown while turned off");
         }
+        {
+            // Diagnostic modes left on name themselves in a tag after the
+            // brand: only the header row changes, and it stays with every
+            // header item hidden.
+            auto tagged=Snapshot(); tagged.diagnostics="DEBUG LOG \xC2\xB7 TINT VIEW";
+            const auto plain=RasterizeOsd(settings,false,Snapshot(),stats,false);
+            const auto with_tag=RasterizeOsd(settings,false,tagged,stats,false);
+            Check(with_tag.Valid() && with_tag.height==plain.height,"The diagnostics tag changed the panel height");
+            bool in_header=false, below=false, attention=false;
+            for(int y=0;y<plain.height;++y) for(int x=0;x<960;++x) {
+                if(with_tag.pixels[y*960+x]!=plain.pixels[y*960+x]) (y<52?in_header:below)=true;
+                attention|=y<52 && (with_tag.pixels[y*960+x]&0xffffff)==0xf5b96c;
+            }
+            Check(in_header && !below && attention,"The diagnostics tag was not drawn in the header row alone");
+            auto hidden=settings; hidden.show_brand=hidden.show_app=hidden.show_runtime=hidden.show_clock=false;
+            Check(RasterizeOsd(hidden,false,Snapshot(),stats,false).height==plain.height-40 &&
+                  RasterizeOsd(hidden,false,tagged,stats,false).height==plain.height,
+                  "Hiding every header item hid the diagnostics tag");
+            if(const char* path=std::getenv("OSD_DIAGNOSTICS_BMP")) WriteBitmap(path,with_tag);
+
+            // Compact: the tag takes a slot after the brand, and the fields
+            // after it move right by its width.
+            auto compact_settings=settings; compact_settings.compact_show_brand=compact_settings.compact_show_app=true;
+            constexpr OsdCompactLayoutOptions tag_options{.diagnostics_width=200};
+            const auto untagged_layout=CompactOsdLayout(compact_settings), tagged_layout=CompactOsdLayout(compact_settings,tag_options);
+            Check(untagged_layout.diagnostics_x<0 && tagged_layout.diagnostics_x==28+155+16 && tagged_layout.diagnostics_width==200 &&
+                  tagged_layout.header_x[1]==untagged_layout.header_x[1]+216 && tagged_layout.height==untagged_layout.height,
+                  "The compact diagnostics tag did not take its slot after the brand");
+            compact_settings.compact_show_brand=compact_settings.compact_show_app=compact_settings.compact_show_runtime=
+                compact_settings.compact_show_clock=false;
+            const auto no_header=CompactOsdLayout(compact_settings), tag_only=CompactOsdLayout(compact_settings,tag_options);
+            Check(no_header.header_y<0 && tag_only.header_y>=0 && tag_only.diagnostics_x==28 && tag_only.height==no_header.height+44,
+                  "The compact diagnostics tag did not keep the header row");
+            compact_settings.compact_show_brand=compact_settings.compact_show_app=true;
+            const auto compact_tagged=RasterizeOsd(compact_settings,true,tagged,stats,false);
+            Check(compact_tagged.Valid() &&
+                  compact_tagged.content_width>RasterizeOsd(compact_settings,true,Snapshot(),stats,false).content_width,
+                  "The compact panel did not widen for the diagnostics tag");
+            if(const char* path=std::getenv("OSD_DIAGNOSTICS_COMPACT_BMP")) WriteBitmap(path,compact_tagged);
+            // With every field shown, the longest tag narrows the runtime's
+            // column (and the app's) instead of passing the panel's edge.
+            compact_settings.compact_show_runtime=compact_settings.compact_show_clock=true;
+            constexpr OsdCompactLayoutOptions long_tag{.diagnostics_width=300};
+            const auto full=CompactOsdLayout(compact_settings), crowded=CompactOsdLayout(compact_settings,long_tag);
+            Check(full.width<=OsdBitmap::width && crowded.width<=OsdBitmap::width && crowded.header_width[2]<full.header_width[2] &&
+                  crowded.header_width[2]>=80 && crowded.header_width[1]>=80 && crowded.header_width[0]==155 && crowded.header_width[3]==142 &&
+                  crowded.diagnostics_width==300,
+                  "The compact diagnostics tag pushed the header past the panel");
+            auto long_snapshot=tagged; long_snapshot.diagnostics="DEBUG LOG \xC2\xB7 CONFIDENCE VIEW";
+            const auto crowded_raster=RasterizeOsd(compact_settings,true,long_snapshot,stats,false);
+            Check(crowded_raster.Valid() && crowded_raster.content_width<=OsdBitmap::width,"The crowded compact header did not fit the panel");
+            if(const char* path=std::getenv("OSD_DIAGNOSTICS_CROWDED_BMP")) WriteBitmap(path,crowded_raster);
+        }
         settings.accent="custom"; settings.custom_color="#123456";
         settings.body_order={"pivot","modules","turbo","graph"};
         const auto reordered=RasterizeOsd(settings,false,Snapshot(),stats,false);
