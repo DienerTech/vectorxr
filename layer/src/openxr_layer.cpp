@@ -1753,9 +1753,12 @@ OpenXrLayer& OpenXrLayer::Instance() {
             // DLL_PROCESS_DETACH. Tearing down here would call into them (the
             // OSD's xrDestroySwapchain, GPU waits), end the process on a dead
             // thread's lock (0xC000004B) or wait forever for a dead worker.
-            // Leave everything to the exit.
+            // Leave everything to the exit, except the log's pending
+            // "repeated N times" line and buffered lines, written without
+            // waiting on its lock.
             // An unload after xrDestroyInstance still destroys the layer.
             if (!ProcessExiting()) delete layer;
+            else layer->logger_.FlushAtProcessExit();
         }
     };
     static Owner owner;

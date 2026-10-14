@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 
+#include "depthxr/logger.h"
 #include "depthxr/process_exit.h"
 
 namespace {
@@ -25,9 +26,28 @@ struct ExitObserver {
 ExitObserver g_observer;
 depthxr::ProcessExitFile g_exit_file;
 
+// Like the layer's logger: never destroyed at a process exit, only flushed
+// by a static destructor that sees ProcessExiting().
+depthxr::Logger* g_log = nullptr;
+struct ExitLogFlush {
+    ~ExitLogFlush() {
+        if (g_log && depthxr::ProcessExiting()) g_log->FlushAtProcessExit();
+    }
+};
+ExitLogFlush g_exit_log_flush;
+
 } // namespace
 
 extern "C" __declspec(dllexport) int ArmProcessExitFile(const wchar_t* path, const wchar_t* sentinel) {
     g_sentinel = sentinel;
     return g_exit_file.Arm(path) ? 1 : 0;
+}
+
+// A line, then the same line three times: the repeats stay pending (and the
+// last lines buffered) until the logger writes its summary.
+extern "C" __declspec(dllexport) void WriteExitLog(const wchar_t* path) {
+    g_log = new depthxr::Logger();
+    g_log->Initialize(path);
+    g_log->Info("first line");
+    for (int i = 0; i < 3; ++i) g_log->Info("repeated line");
 }

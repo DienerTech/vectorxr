@@ -38,6 +38,13 @@ std::string ReadText(const std::filesystem::path& path) {
 int Child(const std::wstring& how, const std::filesystem::path& file, const std::filesystem::path& sentinel) {
     HMODULE probe = LoadLibraryW((ModuleDirectory() / L"depthxr_process_exit_probe.dll").c_str());
     if (!probe) return 10;
+    if (how == L"log") {
+        using Write = void (*)(const wchar_t*);
+        const auto write = reinterpret_cast<Write>(GetProcAddress(probe, "WriteExitLog"));
+        if (!write) return 13;
+        write(file.c_str());
+        ExitProcess(0);
+    }
     using Arm = int (*)(const wchar_t*, const wchar_t*);
     const auto arm = reinterpret_cast<Arm>(GetProcAddress(probe, "ArmProcessExitFile"));
     if (!arm || !arm(file.c_str(), sentinel.c_str())) return 11;
@@ -94,6 +101,17 @@ int wmain(int argc, wchar_t** argv) {
     const auto [unload_kept, unload_sentinel] = run(L"unload");
     Expect(unload_kept, "An unload is not a process exit");
     Expect(unload_sentinel == "unloading", "Static destructors at an unload must not see ProcessExiting()");
+
+    // The layer's logger outlives a process exit: its pending "repeated N
+    // times" line and buffered lines must still reach the file.
+    const auto log_directory = root / L"log";
+    Expect(RunChild(L"log", log_directory / L"exit.log", root / L"log.sentinel") == 0, "The logging child failed");
+    std::string log_text;
+    for (const auto& entry : std::filesystem::directory_iterator(log_directory)) log_text += ReadText(entry.path());
+    Expect(log_text.find("first line") != std::string::npos && log_text.find("repeated line") != std::string::npos,
+           "A normal exit lost the log's buffered lines");
+    Expect(log_text.find("message repeated 2 additional times") != std::string::npos,
+           "A normal exit lost the log's pending repeated-line summary");
 
     std::filesystem::remove_all(root);
     std::cout << "process_exit_tests passed\n";

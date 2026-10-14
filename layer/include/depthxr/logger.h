@@ -23,6 +23,10 @@ class Logger {
     void Debug(const std::string& message);
     // Background diagnostics may skip an ordinary-log copy under contention.
     bool TryDebug(const std::string& message);
+    // At a process exit, where the logger is left alive: writes the pending
+    // "repeated N times" summary and flushes, unless another thread (one the
+    // exit ended) holds the lock. Never waits.
+    void FlushAtProcessExit();
     [[nodiscard]] bool IsDebugEnabled() const;
     [[nodiscard]] std::filesystem::path ActiveLogPath() const;
 
