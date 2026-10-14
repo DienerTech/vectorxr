@@ -586,6 +586,10 @@ std::pair<OsdPresentation, OsdPresentation> OsdRenderer::Prepare(const OsdSettin
     if (settings.enabled) telemetry_.Tick(Clock::now()); else telemetry_={};
     status_.compact=compact_;
     status_.shown=settings.enabled && visible_;
+    // The image a panel shown again holds is from before it was hidden or
+    // disabled: submit none until the new raster is up, rather than flash
+    // the old values for the frames that takes.
+    if (status_.shown && !before.shown) ready_=false;
     if (graphics_ && (!settings.enabled || !visible_)) { status_.visible=false; status_.message=settings.enabled?"Hidden by binding":"Disabled"; }
     return {before, OsdPresentation{status_.compact, status_.shown}};
 }

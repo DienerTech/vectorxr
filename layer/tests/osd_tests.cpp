@@ -489,11 +489,11 @@ int main(int argc, char** argv) {
         renderer.Prepare(settings,Snapshot(),false,false);
         renderer.Prepare(settings,Snapshot(),true,false); Check(!renderer.Append(frame,true),"Hide binding did not toggle");
         renderer.Prepare(settings,Snapshot(),false,false);
-        renderer.Prepare(settings,Snapshot(),true,true); Check(renderer.Append(frame,true),"Show binding did not toggle");
+        renderer.Prepare(settings,Snapshot(),true,true); Check(WaitVisible(renderer,frame),"Show binding did not toggle");
         Check(renderer.Status().compact,"Cycle binding did not switch layout");
         settings.enabled=false; renderer.Prepare(settings,Snapshot(),false,false); Check(!renderer.Append(frame,true),"Live disable failed");
         settings.enabled=true; settings.compact=false; settings.horizontal_degrees=-30; renderer.Prepare(settings,Snapshot(),false,false);
-        quad=reinterpret_cast<const XrCompositionLayerQuad*>(renderer.Append(frame,true));
+        quad=reinterpret_cast<const XrCompositionLayerQuad*>(WaitVisible(renderer,frame));
         Check(quad && !renderer.Status().compact && quad->pose.position.x<0,"Live enable did not restore saved layout/position");
         settings.scale=25; settings.distance_meters=2;
         renderer.Prepare(settings,Snapshot(),false,false);
@@ -645,17 +645,21 @@ int main(int argc, char** argv) {
         std::this_thread::sleep_for(std::chrono::milliseconds(60));
         Check(!renderer.SnapshotDue(),"A hidden OSD asked for status snapshots");
 
-        // Shown again, it draws the next snapshot, not the one it held.
+        // Shown again, it draws the next snapshot, not the one it held, and
+        // until then submits nothing: not the image from before it was hidden.
         renderer.Prepare(settings,std::nullopt,true,false);
         Check(renderer.SnapshotDue(),"A shown OSD did not ask for a status snapshot");
         const int held=acquires;
+        bool submitted=false;
         const auto waited=std::chrono::steady_clock::now()+std::chrono::milliseconds(200);
-        while(std::chrono::steady_clock::now()<waited) { renderer.Append(frame,true); std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
+        while(std::chrono::steady_clock::now()<waited) { submitted=renderer.Append(frame,true)!=nullptr || submitted; std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
         Check(acquires==held,"A shown OSD drew the snapshot it held while hidden");
+        Check(!submitted,"A shown OSD submitted the image it drew before it was hidden");
         auto shown=Snapshot(); shown.application="Shown.exe";
         renderer.Prepare(settings,shown,false,false);
         const int before_shown=releases;
-        Check(PumpUntil(renderer,frame,[&]{return releases>before_shown;}),"The shown panel did not refresh");
+        Check(PumpUntil(renderer,frame,[&]{return renderer.Append(frame,true)!=nullptr;}) && releases==before_shown+1,
+              "The shown panel was submitted before its new image was up");
         CheckUploadedRaster(RasterizeOsd(settings,true,shown,OsdTelemetry{},false),DXGI_FORMAT_B8G8R8A8_UNORM_SRGB);
 
         // A raster finished before a change is dropped, not uploaded after it.
