@@ -2946,12 +2946,14 @@ XrResult OpenXrLayer::EndSession(XrSession session) {
 
     watch.Step("in the runtime's xrEndSession");
     const XrResult result = next_end_session_(session);
+    bool presenter_left_in_runtime = false;
     if (!presenter_stopped) {
         // The runtime's session has ended (or refused to): a runtime that
         // held the presenter thread lets it go now. One it still holds is
         // left behind at xrDestroySession.
         watch.Step("stopping Frame Generation's presenter thread after the runtime's xrEndSession");
         const bool stopped = framegen_.ResetFrames();
+        presenter_left_in_runtime = !stopped;
         logger_.Info(std::string("xrEndSession: Frame Generation's presenter thread was still in the runtime; ") +
                      (stopped ? "it stopped once the runtime's session ended."
                               : "it is still there (" + framegen_.PresenterActivity() + ")."));
@@ -2963,7 +2965,9 @@ XrResult OpenXrLayer::EndSession(XrSession session) {
     }
 
     watch.Step("resetting Turbo's frame state");
-    ResetTurboFrameState();
+    // A presenter thread still in the runtime is stopped or left behind at
+    // xrDestroySession: the flight recorder keeps running until then.
+    ResetTurboFrameState(!presenter_left_in_runtime);
     {
         std::scoped_lock lock(mutex_);
         turbo_recovery_.Complete();

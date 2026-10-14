@@ -522,6 +522,25 @@ class TurboFrameTestPeer {
         layer.next_destroy_session_ = previous;
         return result;
     }
+    static XrResult EndSession(XrSession session, PFN_xrEndSession runtime) {
+        auto& layer = Layer();
+        const auto previous = layer.next_end_session_;
+        layer.next_end_session_ = runtime;
+        const XrResult result = layer.EndSession(session);
+        layer.next_end_session_ = previous;
+        return result;
+    }
+    // While held, Frame Generation's presenter looks like a thread a runtime
+    // keeps inside a call: stopping it gives up after `wait`.
+    static void HoldPresenterInRuntime(bool held, std::chrono::milliseconds wait) {
+        FrameGenPresenter& framegen = Layer().framegen_;
+        {
+            std::scoped_lock lock(framegen.mutex_);
+            framegen.compositor_running_ = held;
+            framegen.compositor_stop_ = false;
+        }
+        framegen.SetTeardownWait(wait);
+    }
     static void EndRecorder() {
         Layer().turbo_trace_.Stop();
         Layer().logger_.SetLevel(LogLevel::Info);
@@ -2223,6 +2242,40 @@ void TestDestroySessionRecordsUntilTheSessionIsGone() {
     std::filesystem::remove_all(directory, error);
 }
 
+// DCS ends a session with xrEndSession, then xrDestroySession. A presenter
+// thread the runtime still holds after its xrEndSession is stopped or left
+// behind at xrDestroySession: xrEndSession must not stop the recorder first.
+XrResult XRAPI_CALL EndedSession(XrSession) { return XR_SUCCESS; }
+
+void TestEndSessionRecordsAPresenterLeftInTheRuntime() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    const auto directory = std::filesystem::temp_directory_path() /
+                           ("vxr-end-recorder-" + std::to_string(GetCurrentProcessId()));
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    depthxr::TurboFrameTestPeer::StartRecorder(directory / "frame.log");
+    depthxr::TurboFrameTestPeer::HoldPresenterInRuntime(true, std::chrono::milliseconds(40));
+    Expect(depthxr::TurboFrameTestPeer::EndSession(TestSession(), &EndedSession) == XR_SUCCESS, "xrEndSession failed");
+    Expect(depthxr::TurboFrameTestPeer::RecorderRunning(),
+           "xrEndSession stopped the flight recorder while Frame Generation's presenter was still in the runtime");
+    // The runtime lets the thread go; xrDestroySession tears it down.
+    depthxr::TurboFrameTestPeer::HoldPresenterInRuntime(false, std::chrono::milliseconds(2000));
+    g_recorder_running_at_runtime_destroy = false;
+    Expect(depthxr::TurboFrameTestPeer::DestroySession(TestSession(), &RecordingDestroySession) == XR_SUCCESS,
+           "xrDestroySession failed");
+    Expect(g_recorder_running_at_runtime_destroy, "The flight recorder stopped before the runtime's xrDestroySession");
+    Expect(!depthxr::TurboFrameTestPeer::RecorderRunning(), "xrDestroySession left the flight recorder running");
+
+    // A presenter that stopped: xrEndSession still stops the recorder.
+    depthxr::TurboFrameTestPeer::StartRecorder(directory / "frame.log");
+    Expect(depthxr::TurboFrameTestPeer::EndSession(TestSession(), &EndedSession) == XR_SUCCESS, "xrEndSession failed");
+    Expect(!depthxr::TurboFrameTestPeer::RecorderRunning(), "xrEndSession left the flight recorder running");
+    depthxr::TurboFrameTestPeer::EndRecorder();
+    depthxr::TurboFrameTestPeer::ReleaseLog(directory / "released.log");
+    std::filesystem::remove_all(directory, error);
+}
+
 // A settings refresh runs on whichever thread loaded the settings (often the
 // config watcher's), while the frame thread polls the metrics binding's edge
 // detector without the lock: the reset a refresh asks for happens on the
@@ -2560,6 +2613,7 @@ int main() {
     TestConfigWarningsLoggedOncePerKey();
     TestRecoveryBlockLogsWhatTurboDoes();
     TestDestroySessionRecordsUntilTheSessionIsGone();
+    TestEndSessionRecordsAPresenterLeftInTheRuntime();
     TestMetricsBindingResetWaitsForTheFrameThread();
     TestFramePacingLineUnderFrameGen();
     TestDestroySpaceLetsGoBeforeTheRuntime();

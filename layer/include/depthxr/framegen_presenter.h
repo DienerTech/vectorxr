@@ -397,6 +397,8 @@ class FrameGenPresenter {
     std::string OsdDetailText() const;
 
   private:
+    // Holds a presenter thread "in the runtime" for the layer's teardown tests.
+    friend class TurboFrameTestPeer;
     struct SwapchainRecord {
         std::int64_t format{0};
         std::uint32_t sample_count{1};
