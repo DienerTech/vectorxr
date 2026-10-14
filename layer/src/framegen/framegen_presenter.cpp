@@ -5325,7 +5325,10 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
     const Clock::time_point generated_due = due(offer.time + period);
     const bool late = offer.slot > frame.first_slot;
     totals_.late_cpu += late ? 1 : 0;
-    UpdateLeadLocked(late, slack_ms, frame.lead, frame.multiplier);
+    // One with no projection moves the lead neither way (ThreadedEndJit).
+    if (renderable) {
+        UpdateLeadLocked(late, slack_ms, frame.lead, frame.multiplier);
+    }
     erase_frame();
     offer_done_ = true;
     WakeSlots();
@@ -5673,11 +5676,17 @@ XrResult FrameGenPresenter::ThreadedEndJit(const XrFrameEndInfo& info, const Thr
     }
     // Ending after its refresh was due, it is late at once. Otherwise it is
     // judged when a refresh first chooses it: its game frame must have
-    // reached the GPU by then too (CompositorLoop).
+    // reached the GPU by then too (CompositorLoop). One with no projection (a
+    // loading screen or a menu) moves the lead neither way: nothing is
+    // generated from it, and a game's late loading frames raised it to its
+    // cap (Star Citizen's 93 s loading screen, 2026-10-14: 2 -> 8, then a
+    // pose horizon of 152 ms for the first 12 s of play).
     const bool late = slack_ms && *slack_ms < 0.0;
     if (late) {
         ++totals_.late_cpu;
-        UpdateLeadLocked(true, slack_ms, frame.lead, frame.multiplier);
+        if (renderable) {
+            UpdateLeadLocked(true, slack_ms, frame.lead, frame.multiplier);
+        }
     }
     JitFrame score;
     score.lead = frame.lead;
@@ -5754,7 +5763,7 @@ XrResult FrameGenPresenter::ThreadedEndJit(const XrFrameEndInfo& info, const Thr
         jit_shown_as_is_ = false;
         InvalidateContinuityLocked();
     }
-    if (!measure && !late) {
+    if (renderable && !measure && !late) {
         // Not kept: on time.
         UpdateLeadLocked(false, slack_ms, frame.lead, frame.multiplier);
     }
