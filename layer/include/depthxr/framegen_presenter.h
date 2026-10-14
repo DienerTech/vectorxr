@@ -380,6 +380,11 @@ class FrameGenPresenter {
     // The session's frame-by-frame trace (FrameGenTrace), for the layer's
     // own frame calls; it records only while debug logging is on.
     FrameGenTrace& Trace() { return trace_; }
+    // The trace records the game's swapchain acquires and releases only while
+    // frames are generated or about to be (when releases are captured): while
+    // Frame Generation stands by or is off they are every image of every
+    // frame and tell nothing about it.
+    bool TracesSwapchainCalls() const;
     // The log level changed: a started session's trace follows debug logging
     // (a session starts with it as the level is then).
     void SetTraceEnabled(bool enabled);
@@ -609,6 +614,8 @@ class FrameGenPresenter {
     };
 
     bool WantsEngagementLocked() const;
+    // Frames are generated or about to be: the game's releases are captured.
+    bool CapturingLocked() const;
     // The state while no frame is engaged: off when turned off, else waiting.
     FrameGenState IdleStateLocked() const;
     bool RunnableLocked() const;

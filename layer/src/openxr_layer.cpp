@@ -4086,7 +4086,9 @@ XrResult OpenXrLayer::AcquireSwapchainImage(XrSwapchain swapchain,
         // A bridged image is rendered again only after the bridge's last copy of it.
         d3d11_bridge_.Acquired(swapchain, *index);
         vulkan_bridge_.Acquired(swapchain, *index);
-        framegen_.Trace().Record("acq", reinterpret_cast<uint64_t>(swapchain), *index);
+        if (framegen_.TracesSwapchainCalls()) {
+            framegen_.Trace().Record("acq", reinterpret_cast<uint64_t>(swapchain), *index);
+        }
     }
 
     std::scoped_lock lock(mutex_);
@@ -4162,7 +4164,9 @@ XrResult OpenXrLayer::ReleaseSwapchainImage(XrSwapchain swapchain,
                 it->second.last_released_image_index = *released_index;
                 it->second.has_last_released_image_index = true;
                 NoteFrameGenRelease(swapchain, *released_index);
-                framegen_.Trace().Record("rel", reinterpret_cast<uint64_t>(swapchain), *released_index, copied);
+                if (framegen_.TracesSwapchainCalls()) {
+                    framegen_.Trace().Record("rel", reinterpret_cast<uint64_t>(swapchain), *released_index, copied);
+                }
                 // Before forwarding (or deferring) the release: the image is
                 // still the application's and in its pre-release state.
                 if (copied) {

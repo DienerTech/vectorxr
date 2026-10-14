@@ -6558,6 +6558,33 @@ void StartHalving(FrameGenPresenter& presenter, GpuLog& gpu, Runtime& runtime, F
     presenter.SetHalvingWindow(1000ms);
 }
 
+// The trace records the game's swapchain acquires and releases only while
+// frames are generated or about to be: standing by they are every image of
+// every frame, and tell nothing about Frame Generation.
+void TestTraceSwapchainCallsOnlyWhileCapturing() {
+    SessionLog log("trace-swapchain-calls");
+    log.logger->SetLevel(LogLevel::Debug);
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic, app, runtime, owned,
+             log.logger.get());
+    presenter.SetDynamicPolicy(SteadyDynamic());
+    Check(presenter.Trace().Enabled(), "trace: debug logging starts the session's trace");
+    RunTicks(*app, 600ms, {1});
+    const FrameGenStatus standing_by = presenter.Status();
+    Check(standing_by.standby && !presenter.TracesSwapchainCalls(),
+          "trace: standing by, the game's acquires and releases are not traced");
+    presenter.SetDynamicPolicy(QuickDynamic());
+    EngageDynamic(presenter, *app, "trace");
+    Check(presenter.TracesSwapchainCalls(), "trace: engaged, the game's acquires and releases are traced");
+    presenter.Stop();
+    Check(!presenter.TracesSwapchainCalls(), "trace: a stopped session traces nothing");
+}
+
 // Submissions the runtime got per second while the game ran `work` for `duration`.
 double SubmissionRate(App& app, std::chrono::milliseconds duration, const std::vector<std::chrono::microseconds>& work) {
     const std::size_t first = app.runtime.Submissions();
@@ -8118,6 +8145,7 @@ void RunPolicyTests() {
     RUN(TestUncapturedAtOwnRefreshIsLate);
     RUN(TestDynamicPassThroughNearRefresh);
     RUN(TestDynamicEngagesBelow);
+    RUN(TestTraceSwapchainCallsOnlyWhileCapturing);
     RUN(TestDynamicOwnRate);
     RUN(TestDynamicHysteresis);
     RUN(TestBenefitGuardBacksOff);

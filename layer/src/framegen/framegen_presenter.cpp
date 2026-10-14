@@ -1076,21 +1076,31 @@ std::optional<FrameGenOutputKind> FrameGenPresenter::OutputKindLocked(std::size_
     return requested;
 }
 
+bool FrameGenPresenter::CapturingLocked() const {
+    if (!started_ || !gpu_ || !user_enabled_ || !configured_enabled_ || state_ == FrameGenState::kPaused ||
+        state_ == FrameGenState::kUnavailable) {
+        return false;
+    }
+    // Only while frames are generated or about to be: the wait that engages
+    // comes before the game's release, so the first engaged frame is
+    // captured. Passing frames straight through (Auto at full rate, Dynamic
+    // standing by, waiting for steady frames) captures nothing.
+    return compositor_running_ || WantsEngagementLocked() ||
+           std::any_of(frames_.begin(), frames_.end(),
+                       [](const PendingFrame& frame) { return frame.engaged && !frame.demoted; });
+}
+
+bool FrameGenPresenter::TracesSwapchainCalls() const {
+    if (!trace_.Enabled()) {
+        return false;
+    }
+    std::scoped_lock lock(mutex_);
+    return CapturingLocked();
+}
+
 void FrameGenPresenter::CaptureOnRelease(XrSwapchain swapchain, std::uint32_t image_index) {
     auto capturing = [&] {
-        if (!started_ || !gpu_ || !user_enabled_ || !configured_enabled_ || state_ == FrameGenState::kPaused ||
-            state_ == FrameGenState::kUnavailable) {
-            return false;
-        }
-        // Only while frames are generated or about to be: the wait that
-        // engages comes before the game's release, so the first engaged
-        // frame is captured. Passing frames straight through (Auto at full
-        // rate, Dynamic standing by, waiting for steady frames) captures
-        // nothing.
-        const bool armed = compositor_running_ || WantsEngagementLocked() ||
-                           std::any_of(frames_.begin(), frames_.end(),
-                                       [](const PendingFrame& frame) { return frame.engaged && !frame.demoted; });
-        if (!armed) {
+        if (!CapturingLocked()) {
             return false;
         }
         const auto record = swapchains_.find(swapchain);
