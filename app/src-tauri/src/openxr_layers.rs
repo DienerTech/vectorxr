@@ -170,7 +170,11 @@ const ELEVATED_HELPER_TIMEOUT: Duration = Duration::from_secs(120);
 const ELEVATED_HELPER_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 static ELEVATED_HELPER: OnceLock<Mutex<Option<ElevatedOpenXrHelper>>> = OnceLock::new();
 static SIGNATURE_CACHE: OnceLock<Mutex<HashMap<String, SignatureCacheEntry>>> = OnceLock::new();
-const SLICES: [SliceDefinition; 4] = [
+// HKCU\Software is shared by 64-bit and 32-bit processes (it is not
+// redirected under WOW6432Node), so per-user registrations are one slice that
+// both kinds of OpenXR app read. Listing a 32-bit per-user view showed and
+// counted the same values twice.
+const SLICES: [SliceDefinition; 3] = [
     SliceDefinition {
         id: "hklm64",
         label: "Machine-wide 64-bit",
@@ -182,7 +186,7 @@ const SLICES: [SliceDefinition; 4] = [
     },
     SliceDefinition {
         id: "hkcu64",
-        label: "Per-user 64-bit",
+        label: "Per-user",
         hive: RegistryHive::CurrentUser,
         view: RegistryView::Registry64,
         key_path: IMPLICIT_KEY,
@@ -193,15 +197,6 @@ const SLICES: [SliceDefinition; 4] = [
         id: "hklm32",
         label: "Machine-wide 32-bit",
         hive: RegistryHive::LocalMachine,
-        view: RegistryView::Registry32,
-        key_path: IMPLICIT_KEY,
-        recommended: false,
-        uncommon: true,
-    },
-    SliceDefinition {
-        id: "hkcu32",
-        label: "Per-user 32-bit",
-        hive: RegistryHive::CurrentUser,
         view: RegistryView::Registry32,
         key_path: IMPLICIT_KEY,
         recommended: false,
@@ -483,12 +478,16 @@ fn registry_path_label(definition: &SliceDefinition) -> String {
         RegistryHive::CurrentUser => "HKCU",
     };
 
-    let prefix = match definition.view {
-        RegistryView::Registry64 => "",
-        RegistryView::Registry32 => r"WOW6432Node\",
+    // The 32-bit view of HKLM\Software lives at HKLM\Software\WOW6432Node.
+    let key_path = match definition.view {
+        RegistryView::Registry64 => definition.key_path.to_string(),
+        RegistryView::Registry32 => match definition.key_path.split_once('\\') {
+            Some((software, rest)) => format!(r"{software}\WOW6432Node\{rest}"),
+            None => definition.key_path.to_string(),
+        },
     };
 
-    format!(r"{hive}\{prefix}{}", definition.key_path)
+    format!(r"{hive}\{key_path}")
 }
 
 fn escape_powershell_single_quoted(value: &str) -> String {
@@ -1375,6 +1374,36 @@ fn runtime_name_from_manifest(manifest_path: &str) -> Option<String> {
         .get("name")?
         .as_str()
         .map(|name| name.to_string())
+}
+
+#[cfg(test)]
+mod slice_tests {
+    use super::*;
+
+    #[test]
+    fn slices_name_real_and_distinct_registry_keys() {
+        let paths = SLICES
+            .iter()
+            .map(|definition| (definition.id, registry_path_label(definition)))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            vec![
+                ("hklm64", r"HKLM\Software\Khronos\OpenXR\1\ApiLayers\Implicit".to_string()),
+                ("hkcu64", r"HKCU\Software\Khronos\OpenXR\1\ApiLayers\Implicit".to_string()),
+                (
+                    "hklm32",
+                    r"HKLM\Software\WOW6432Node\Khronos\OpenXR\1\ApiLayers\Implicit".to_string()
+                ),
+            ]
+        );
+        // HKCU\Software is not redirected, so a 32-bit per-user view would
+        // read the same values as the per-user slice.
+        assert!(SLICES.iter().all(|definition| !matches!(
+            (definition.hive, definition.view),
+            (RegistryHive::CurrentUser, RegistryView::Registry32)
+        )));
+    }
 }
 
 #[cfg(test)]

@@ -88,7 +88,7 @@ export interface CapturedDeviceBinding {
   inputIndex: number
 }
 
-export type OpenXrLayerRegistrySliceId = 'hklm64' | 'hkcu64' | 'hklm32' | 'hkcu32'
+export type OpenXrLayerRegistrySliceId = 'hklm64' | 'hkcu64' | 'hklm32'
 export type OpenXrLayerSignatureStatus = 'signed' | 'unsigned' | 'invalid' | 'unknown'
 export type OpenXrLayerMoveDirection = 'up' | 'down'
 
