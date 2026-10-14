@@ -15242,6 +15242,12 @@ void OpenXrLayer::PollRuntimeRelay() {
         const FrameGenOsdText described = DescribeFrameGen(framegen, true);
         status.framegen_state = described.state;
         status.framegen_reason = described.reason;
+        // Turned on after the game started: this session runs without Frame
+        // Generation until the game restarts. The OSD says RESTART PENDING;
+        // tell the app too, rather than a bare Off.
+        if (status.framegen_state == "off" && status.framegen_reason.empty() && resolved_settings_.core.enabled &&
+            resolved_settings_.framegen.enabled && !framegen_session_enabled_)
+            status.framegen_reason = "turned on after the game started; restart the game to use it";
         status.framegen_depth = framegen.depth == FrameGenDepthState::kUnknown ? "" : ToString(framegen.depth);
         if (status.turbo_reason.empty() && turbo_auto_suspended_.load())
             status.turbo_reason = "Runtime pacing repeatedly stalled. Use the Turbo toggle to retry.";
