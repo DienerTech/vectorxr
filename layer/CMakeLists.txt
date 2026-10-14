@@ -23,6 +23,7 @@ add_library(
     src/util/logger.cpp
     src/util/process_info.cpp
     src/util/process_exit.cpp
+    src/util/atomic_file.cpp
     src/math/stereo_boost.cpp
     src/math/convergence.cpp
     src/math/depth_submission.cpp

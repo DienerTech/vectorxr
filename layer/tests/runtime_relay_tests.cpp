@@ -1,5 +1,8 @@
 #include "depthxr/runtime_relay.h"
+#include "depthxr/atomic_file.h"
+#include "depthxr/turbo_metrics.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -7,6 +10,7 @@
 #include <iostream>
 #include <set>
 #include <string>
+#include <thread>
 
 #if defined(_WIN32)
 #include <Windows.h>
@@ -81,6 +85,56 @@ int main() {
         CloseHandle(process.hThread);
         CloseHandle(process.hProcess);
     }
+#endif
+
+#if defined(_WIN32)
+    // Antivirus or indexing holding a file open without delete sharing makes
+    // a replace fail for a moment; the shared replace waits it out.
+    const auto busy = root / "busy.json";
+    Touch(busy, "old");
+    for (const bool hold_source : {false, true}) {
+        const auto temporary = depthxr::UniqueTemporaryPath(busy);
+        Touch(temporary, "new");
+        HANDLE held = CreateFileW((hold_source ? temporary : busy).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                  OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        Expect(held != INVALID_HANDLE_VALUE, "Could not hold the file open");
+        std::thread release([held] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(15));
+            CloseHandle(held);
+        });
+        std::uint32_t error_code = 0;
+        const bool replaced = depthxr::ReplaceFileAtomically(temporary, busy, &error_code);
+        release.join();
+        Expect(replaced, "A briefly held file should be replaced after a retry");
+        std::ifstream stream(busy);
+        std::string content;
+        stream >> content;
+        Expect(content == "new", "The replaced file should hold the new content");
+        Touch(busy, "old");
+    }
+
+    // Turbo metrics went through delete-then-rename with no retry: a scan of
+    // the file failed the flush, and a scan of its temporary lost the history.
+    const auto metrics = root / "turbo-metrics.json";
+    depthxr::TurboMetricsSession first;
+    first.session_id = "StarCitizen.exe-1";
+    first.app_name = "StarCitizen.exe";
+    first.started_unix_seconds = 1;
+    Expect(depthxr::RecordTurboMetricsSession(metrics, first, nullptr), "The first metrics session should be written");
+    HANDLE scanner = CreateFileW(metrics.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                                 FILE_ATTRIBUTE_NORMAL, nullptr);
+    Expect(scanner != INVALID_HANDLE_VALUE, "Could not open the metrics file as a scanner would");
+    std::thread scan([scanner] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(15));
+        CloseHandle(scanner);
+    });
+    auto second = first;
+    second.session_id = "StarCitizen.exe-2";
+    second.started_unix_seconds = 2;
+    const bool recorded = depthxr::RecordTurboMetricsSession(metrics, second, nullptr);
+    scan.join();
+    const auto sessions = depthxr::ReadTurboMetricsSessions(metrics);
+    Expect(recorded && sessions.size() == 2, "A briefly scanned turbo-metrics.json should still take the new session");
 #endif
 
     std::filesystem::remove_all(root);

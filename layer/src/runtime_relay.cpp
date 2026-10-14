@@ -7,6 +7,7 @@
 #include <string_view>
 #include <thread>
 
+#include "depthxr/atomic_file.h"
 #include "depthxr/config_path.h"
 
 #if defined(_WIN32)
@@ -88,26 +89,17 @@ bool WriteAtomically(const std::filesystem::path& path, const std::string& conte
     std::error_code ec;
     std::filesystem::create_directories(path.parent_path(), ec);
     if (ec) { if (error) *error = "Unable to create runtime relay directory: " + ec.message(); return false; }
-    std::filesystem::path temporary_path = path;
-    temporary_path += ".tmp." + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "." + std::to_string(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+    const std::filesystem::path temporary_path = UniqueTemporaryPath(path);
     {
         std::ofstream stream(temporary_path, std::ios::trunc);
         if (!stream) { if (error) *error = "Unable to write runtime relay temporary file"; return false; }
         stream << content;
     }
-#if defined(_WIN32)
-    if (!MoveFileExW(temporary_path.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        const DWORD move_error = GetLastError();
-        std::filesystem::remove(temporary_path, ec);
+    std::uint32_t move_error = 0;
+    if (!ReplaceFileAtomically(temporary_path, path, &move_error)) {
         if (error) *error = "Unable to replace runtime relay file: Win32 error " + std::to_string(move_error);
         return false;
     }
-#else
-    std::filesystem::remove(path, ec);
-    ec.clear();
-    std::filesystem::rename(temporary_path, path, ec);
-    if (ec) { std::filesystem::remove(temporary_path, ec); if (error) *error = "Unable to replace runtime relay file: " + ec.message(); return false; }
-#endif
     return true;
 }
 

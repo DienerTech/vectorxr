@@ -9,6 +9,7 @@
 #include <sstream>
 #include <system_error>
 
+#include "depthxr/atomic_file.h"
 #include "depthxr/config_path.h"
 
 namespace depthxr {
@@ -240,8 +241,9 @@ bool WriteFileAtomically(const std::filesystem::path& path, const std::string& c
         }
     }
 
-    std::filesystem::path temporary_path = path;
-    temporary_path += ".tmp";
+    // A temporary of its own: another game's process may be writing the same
+    // file at the same time.
+    const std::filesystem::path temporary_path = UniqueTemporaryPath(path);
     {
         std::ofstream stream(temporary_path, std::ios::trunc);
         if (!stream) {
@@ -253,13 +255,12 @@ bool WriteFileAtomically(const std::filesystem::path& path, const std::string& c
         stream << content;
     }
 
-    std::filesystem::remove(path, ec);
-    ec.clear();
-    std::filesystem::rename(temporary_path, path, ec);
-    if (ec) {
-        std::filesystem::remove(temporary_path, ec);
+    // Replaced in one step: deleting the old file first lost the whole history
+    // whenever the rename then failed (antivirus scanning the new temporary).
+    std::uint32_t move_error = 0;
+    if (!ReplaceFileAtomically(temporary_path, path, &move_error)) {
         if (error) {
-            *error = "Unable to replace turbo-metrics file: " + ec.message();
+            *error = "Unable to replace turbo-metrics file after retries: Win32 error " + std::to_string(move_error);
         }
         return false;
     }
