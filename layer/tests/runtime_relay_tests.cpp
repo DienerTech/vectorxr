@@ -31,6 +31,12 @@ void Touch(const std::filesystem::path& path, const std::string& content = "{}")
     std::ofstream(path, std::ios::binary) << content;
 }
 
+// Last written more than a day ago.
+void TouchOld(const std::filesystem::path& path, const std::string& content = "{}") {
+    Touch(path, content);
+    std::filesystem::last_write_time(path, std::filesystem::file_time_type::clock::now() - std::chrono::hours(25));
+}
+
 } // namespace
 
 int main() {
@@ -39,25 +45,32 @@ int main() {
 
     // Sessions of process 1234 ended without teardown (one status file is
     // zero-filled, as after a hard shutdown); process 5678 is still running.
-    Touch(root / "status" / "1234-1791949116543-1.json", std::string(64, '\0'));
-    Touch(root / "status" / "1234-1791949116543-1.json.tmp.5.6");
-    Touch(root / "control" / "1234-1791949116543-1.json");
-    Touch(root / "status" / "1234-1791949999999-2.json");
-    Touch(root / "status" / "5678-1791950000000-1.json");
+    // The last of 1234's sessions ended within the day, a crash whose last
+    // state Export Debug must still find.
+    TouchOld(root / "status" / "1234-1791949116543-1.json", std::string(64, '\0'));
+    TouchOld(root / "status" / "1234-1791949116543-1.json.tmp.5.6");
+    TouchOld(root / "control" / "1234-1791949116543-1.json");
+    TouchOld(root / "status" / "1234-1791949999999-2.json");
+    Touch(root / "status" / "1234-1791950100000-3.json");
+    Touch(root / "control" / "1234-1791950100000-3.json");
+    TouchOld(root / "status" / "5678-1791950000000-1.json");
     Touch(root / "control" / "5678-1791950000000-1.json");
-    Touch(root / "status" / "notes.txt");
-    Touch(root / "status" / "app-1791949116543-1.json");
-    Touch(root / "status" / "99999999999-1-1.json"); // Not a process id.
+    TouchOld(root / "status" / "notes.txt");
+    TouchOld(root / "status" / "app-1791949116543-1.json");
+    TouchOld(root / "status" / "99999999999-1-1.json"); // Not a process id.
 
     std::set<std::uint64_t> asked;
     const std::size_t removed = depthxr::PruneRuntimeRelayFiles(root, [&](std::uint32_t pid, std::uint64_t started) {
         asked.insert(started);
         return pid == 5678;
     });
-    Expect(removed == 4, "Every file of an ended session should be removed");
+    Expect(removed == 4, "Every day-old file of an ended session should be removed");
     Expect(!std::filesystem::exists(root / "status" / "1234-1791949116543-1.json"), "A zero-filled status file should be removed");
     Expect(!std::filesystem::exists(root / "status" / "1234-1791949116543-1.json.tmp.5.6"), "A leftover temporary should be removed");
     Expect(!std::filesystem::exists(root / "control" / "1234-1791949116543-1.json"), "An ended session's control file should be removed");
+    Expect(std::filesystem::exists(root / "status" / "1234-1791950100000-3.json") &&
+               std::filesystem::exists(root / "control" / "1234-1791950100000-3.json"),
+           "A session that ended within the day keeps its files for Export Debug");
     Expect(std::filesystem::exists(root / "status" / "5678-1791950000000-1.json") &&
                std::filesystem::exists(root / "control" / "5678-1791950000000-1.json"),
            "A running session's files must stay");

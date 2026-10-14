@@ -2,7 +2,8 @@
 // depthxr_process_exit_probe.dll (the layer's DllMain), arms an exit file and
 // ends one way: a normal exit must remove the file before the CRT destroys the
 // DLL's statics, while TerminateProcess (a crash, Task Manager) and an unload
-// must leave it. CPU only.
+// must leave it. So must a fatal error in the layer, even when the game's crash
+// reporter then ends the process with ExitProcess. CPU only.
 #include <Windows.h>
 
 #include <chrono>
@@ -26,6 +27,12 @@ std::filesystem::path ModuleDirectory() {
     wchar_t buffer[MAX_PATH * 4]{};
     GetModuleFileNameW(nullptr, buffer, static_cast<DWORD>(std::size(buffer)));
     return std::filesystem::path(buffer).parent_path();
+}
+
+// A game's crash reporter that ends the process normally once its report is
+// written (or the player closed its dialog).
+LONG WINAPI ExitingCrashReporter(EXCEPTION_POINTERS*) {
+    ExitProcess(0);
 }
 
 std::string ReadText(const std::filesystem::path& path) {
@@ -53,6 +60,15 @@ int Child(const std::wstring& how, const std::filesystem::path& file, const std:
     if (how == L"unload") {
         FreeLibrary(probe);
         ExitProcess(0);
+    }
+    if (how == L"fatal") {
+        using Fail = void (*)();
+        const auto fail = reinterpret_cast<Fail>(GetProcAddress(probe, "FailFatally"));
+        if (!fail) return 14;
+        SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+        SetUnhandledExceptionFilter(ExitingCrashReporter);
+        fail();
+        return 15;
     }
     return 12;
 }
@@ -101,6 +117,12 @@ int wmain(int argc, wchar_t** argv) {
     const auto [unload_kept, unload_sentinel] = run(L"unload");
     Expect(unload_kept, "An unload is not a process exit");
     Expect(unload_sentinel == "unloading", "Static destructors at an unload must not see ProcessExiting()");
+
+    // The layer's fatal error went to the game's crash reporter, which then
+    // exited: a crash, so the Turbo recovery marker must stay for next launch.
+    const auto [fatal_kept, fatal_sentinel] = run(L"fatal");
+    Expect(fatal_kept, "A fatal layer error must leave the exit file, however the game then exits");
+    Expect(fatal_sentinel == "exiting", "The crash reporter's ExitProcess is still a process exit");
 
     // The layer's logger outlives a process exit: its pending "repeated N
     // times" line and buffered lines must still reach the file.

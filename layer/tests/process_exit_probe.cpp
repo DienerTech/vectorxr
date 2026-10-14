@@ -1,11 +1,13 @@
 // A stand-in for the layer DLL in process_exit_tests: the layer's own DllMain
 // (dll_main.cpp) plus one armed exit file, so a child process can show what a
-// normal exit, an unload and a TerminateProcess do to it.
+// normal exit, an unload, a TerminateProcess and a fatal layer error do to it.
 #include <Windows.h>
 
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 
+#include "depthxr/crt_failure_report.h"
 #include "depthxr/logger.h"
 #include "depthxr/process_exit.h"
 
@@ -41,6 +43,16 @@ ExitLogFlush g_exit_log_flush;
 extern "C" __declspec(dllexport) int ArmProcessExitFile(const wchar_t* path, const wchar_t* sentinel) {
     g_sentinel = sentinel;
     return g_exit_file.Arm(path) ? 1 : 0;
+}
+
+// A fatal error in the layer: abort() with the layer's crash reporting
+// installed in this DLL's own runtime, as the loader negotiation does.
+extern "C" __declspec(dllexport) void FailFatally() {
+#if defined(_DEBUG)
+    _set_abort_behavior(0, _WRITE_ABORT_MSG);
+#endif
+    depthxr::InstallCrtFailureReporting();
+    std::abort();
 }
 
 // A line, then the same line three times: the repeats stay pending (and the

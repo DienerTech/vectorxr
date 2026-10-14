@@ -15820,7 +15820,8 @@ void OpenXrLayer::PollRuntimeRelay() {
     }
     if (!root.empty() && !runtime_relay_pruned_) {
         // Once per process: files of earlier sessions that ended by a crash,
-        // TerminateProcess or a hard shutdown, which the app reads every poll.
+        // TerminateProcess or a hard shutdown, once they are a day old
+        // (Export Debug includes newer ones).
         runtime_relay_pruned_ = true;
         const std::size_t pruned = PruneRuntimeRelayFiles(root);
         if (pruned > 0) {

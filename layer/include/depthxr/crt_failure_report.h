@@ -9,7 +9,8 @@ class Logger;
 // leaves a layer thread), a pure virtual call, or an invalid parameter to a runtime function. Left alone,
 // each one fails fast: the game vanishes without its crash report or a line in the VectorXR log. Installed,
 // each one is logged and then handed to the process's unhandled-exception filter (the game's crash reporter,
-// or Windows Error Reporting), and the process ends as before. Installs into the calling module's runtime only.
+// or Windows Error Reporting), and the process ends as before. It is a crash however the process then ends: the
+// exit removes no ProcessExitFile (process_exit.h). Installs into the calling module's runtime only.
 void InstallCrtFailureReporting();
 
 // The log that names such a failure; nullptr detaches it (before the logger is destroyed).
