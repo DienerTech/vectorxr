@@ -5,6 +5,39 @@ use std::path::Path;
 
 const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
+// An oversized log keeps up to this much of its start, which holds the session
+// header (version, runtime, GPU, Frame Generation mode), and spends the rest
+// of its limit on the end.
+const HEAD_BYTES: u64 = 256 * 1024;
+// Below this limit an oversized log keeps only its end.
+const MIN_HEAD_AND_TAIL_BYTES: u64 = 4 * 1024;
+const OMITTED_MARKER_BYTES: u64 = 128;
+
+// Keeps whole lines from the start and the end of `file` within about
+// `limit` bytes, with a marker saying how much of the middle was left out.
+fn read_head_and_tail(file: &mut fs::File, length: u64, limit: u64) -> std::io::Result<Vec<u8>> {
+    let head_limit = HEAD_BYTES.min(limit / 4);
+    let tail_limit = limit - head_limit - OMITTED_MARKER_BYTES;
+    let mut head = Vec::new();
+    file.by_ref().take(head_limit).read_to_end(&mut head)?;
+    if let Some(end) = head.iter().rposition(|byte| *byte == b'\n') {
+        head.truncate(end + 1);
+    }
+    file.seek(SeekFrom::Start(length - tail_limit))?;
+    let mut tail = Vec::new();
+    file.take(tail_limit).read_to_end(&mut tail)?;
+    if let Some(start) = tail.iter().position(|byte| *byte == b'\n') {
+        tail.drain(..=start);
+    }
+    let omitted = length.saturating_sub((head.len() + tail.len()) as u64);
+    let mut bytes = head;
+    bytes.extend_from_slice(
+        format!("... Debug Export left out {omitted} bytes from the middle of this file ...\n")
+            .as_bytes(),
+    );
+    bytes.extend_from_slice(&tail);
+    Ok(bytes)
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -47,6 +80,10 @@ impl DebugSourceSnapshot {
             entry.truncated = entry.original_bytes > limit;
             if entry.truncated && (!tail || limit == 0) {
                 return Err("Omitted: debug export size limit reached".into());
+            }
+            if entry.truncated && limit >= MIN_HEAD_AND_TAIL_BYTES {
+                return read_head_and_tail(&mut file, entry.original_bytes, limit)
+                    .map_err(|e| e.to_string());
             }
             if tail {
                 file.seek(SeekFrom::Start(entry.original_bytes.saturating_sub(limit)))
@@ -399,6 +436,43 @@ mod tests {
                 "vectorxr-20261009-100000.flight-recorder.framegen.log",
             ]
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn oversized_logs_keep_their_session_header_and_their_end() {
+        let root = std::env::temp_dir().join(format!(
+            "vectorxr-debug-head-tail-{}-{}",
+            std::process::id(),
+            super::super::unix_milliseconds()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let header = "[info] VectorXR 0.19.2 | runtime=Pimax OpenXR | GPU=RTX 5090 | FG=Interpolate\n";
+        let mut log = header.to_string();
+        let mut line = 0;
+        while log.len() < (MAX_FILE_BYTES + MAX_FILE_BYTES / 2) as usize {
+            log.push_str(&format!("[debug] frame {line} pacing sample with some padding text\n"));
+            line += 1;
+        }
+        log.push_str("[info] last line before exit\n");
+        let path = root.join("vectorxr-20261014-120000.log");
+        fs::write(&path, &log).unwrap();
+
+        let mut snapshot = DebugSourceSnapshot::default();
+        snapshot.file(&path, "logs/vectorxr.log".into(), true);
+        let file = &snapshot.files[0];
+        let content = file.content.as_deref().unwrap();
+        assert!(file.truncated);
+        assert!(content.starts_with(header), "{}", &content[..200]);
+        assert!(content.ends_with("[info] last line before exit\n"));
+        assert!(content.contains("bytes from the middle of this file ..."));
+        assert!(content.len() as u64 <= MAX_FILE_BYTES);
+        // Both cuts fall on line boundaries.
+        let marker = content.find("... Debug Export left out").unwrap();
+        assert!(content[..marker].ends_with('\n'));
+        let after = &content[marker..];
+        let resumed = &after[after.find('\n').unwrap() + 1..];
+        assert!(resumed.starts_with("[debug] frame "), "{}", &resumed[..80]);
         fs::remove_dir_all(root).unwrap();
     }
 
