@@ -111,7 +111,69 @@ bool WriteAtomically(const std::filesystem::path& path, const std::string& conte
     return true;
 }
 
+// "<pid>-<unix ms>-..." from a status or control file name (or its temporary).
+bool ParseSessionFileName(const std::filesystem::path& path, std::uint32_t* process_id, std::uint64_t* started) {
+    const std::wstring name = path.filename().wstring();
+    std::size_t position = 0;
+    const auto read_number = [&](std::uint64_t limit, std::uint64_t* value) {
+        const std::size_t start = position;
+        *value = 0;
+        while (position < name.size() && name[position] >= L'0' && name[position] <= L'9') {
+            const std::uint64_t digit = static_cast<std::uint64_t>(name[position] - L'0');
+            if (*value > (limit - digit) / 10) return false;
+            *value = *value * 10 + digit;
+            ++position;
+        }
+        return position > start && position < name.size() && name[position++] == L'-';
+    };
+    std::uint64_t pid = 0;
+    if (!read_number(UINT32_MAX, &pid) || !read_number(UINT64_MAX, started)) return false;
+    *process_id = static_cast<std::uint32_t>(pid);
+    return name.find(L".json") != std::wstring::npos;
+}
+
 } // namespace
+
+bool RuntimeRelaySessionAlive(std::uint32_t process_id, std::uint64_t started_unix_milliseconds) {
+#if defined(_WIN32)
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process_id);
+    if (!process) return GetLastError() != ERROR_INVALID_PARAMETER;
+    DWORD exit_code = 0;
+    const bool running = GetExitCodeProcess(process, &exit_code) == FALSE || exit_code == STILL_ACTIVE;
+    FILETIME created{}, exited{}, kernel{}, user{};
+    bool same = true;
+    if (GetProcessTimes(process, &created, &exited, &kernel, &user)) {
+        // FILETIME counts 100 ns since 1601; 11644473600000 ms separate the epochs.
+        const std::uint64_t ticks = (static_cast<std::uint64_t>(created.dwHighDateTime) << 32) | created.dwLowDateTime;
+        const std::uint64_t created_unix_milliseconds = ticks / 10000 - 11644473600000ull;
+        same = created_unix_milliseconds <= started_unix_milliseconds;
+    }
+    CloseHandle(process);
+    return running && same;
+#else
+    (void)process_id;
+    (void)started_unix_milliseconds;
+    return true;
+#endif
+}
+
+std::size_t PruneRuntimeRelayFiles(const std::filesystem::path& root, const RuntimeRelaySessionAliveCheck& alive) {
+    std::size_t removed = 0;
+    for (const char* folder : {"status", "control"}) {
+        std::error_code ec;
+        const std::filesystem::path directory = root / folder;
+        if (!std::filesystem::is_directory(directory, ec)) continue;
+        for (auto iterator = std::filesystem::directory_iterator(directory, ec);
+             !ec && iterator != std::filesystem::directory_iterator(); iterator.increment(ec)) {
+            std::uint32_t process_id = 0;
+            std::uint64_t started = 0;
+            if (!ParseSessionFileName(iterator->path(), &process_id, &started) || alive(process_id, started)) continue;
+            std::error_code remove_error;
+            if (std::filesystem::remove(iterator->path(), remove_error)) ++removed;
+        }
+    }
+    return removed;
+}
 
 std::filesystem::path ResolveRuntimeRelayRoot() {
     if (std::filesystem::path env_path = EnvironmentPath(L"VECTORXR_RUNTIME_RELAY_PATH"); !env_path.empty()) return env_path;

@@ -2658,6 +2658,8 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
     runtime_relay_session_id_ = std::to_string(GetCurrentProcessId()) + "-" +
         std::to_string(RuntimeRelayUnixMilliseconds()) + "-" +
         std::to_string(++runtime_relay_session_sequence_);
+    runtime_relay_exit_status_.Arm(RuntimeStatusPath(runtime_relay_root_, runtime_relay_session_id_));
+    runtime_relay_exit_control_.Arm(RuntimeControlPath(runtime_relay_root_, runtime_relay_session_id_));
     quadviews_dimensions_.clear();
     quadviews_dimensions_at_ = 0;
     runtime_relay_last_applied_revision_ = 0;
@@ -10094,6 +10096,8 @@ void OpenXrLayer::StopConfigWatcher() {
         if (!runtime_relay_session_id_.empty()) {
             relay_session_ids.push_back(std::move(runtime_relay_session_id_));
         }
+        runtime_relay_exit_status_.Disarm();
+        runtime_relay_exit_control_.Disarm();
         runtime_relay_last_applied_revision_ = 0;
         runtime_relay_acknowledged_revision_ = 0;
         runtime_relay_status_dirty_.store(false, std::memory_order_release);
@@ -10761,6 +10765,8 @@ void OpenXrLayer::ResetSessionState() {
     if (!runtime_relay_session_id_.empty()) {
         runtime_relay_sessions_to_remove_.push_back(runtime_relay_session_id_);
         runtime_relay_session_id_.clear();
+        runtime_relay_exit_status_.Disarm();
+        runtime_relay_exit_control_.Disarm();
         runtime_relay_last_applied_revision_ = 0;
         runtime_relay_acknowledged_revision_ = 0;
         runtime_relay_status_dirty_.store(false, std::memory_order_release);
@@ -15196,6 +15202,16 @@ void OpenXrLayer::PollRuntimeRelay() {
         ec.clear();
         std::filesystem::remove(RuntimeControlPath(root, stale_session_id), ec);
         ec.clear();
+    }
+    if (!root.empty() && !runtime_relay_pruned_) {
+        // Once per process: files of earlier sessions that ended by a crash,
+        // TerminateProcess or a hard shutdown, which the app reads every poll.
+        runtime_relay_pruned_ = true;
+        const std::size_t pruned = PruneRuntimeRelayFiles(root);
+        if (pruned > 0) {
+            logger_.Info("Removed " + std::to_string(pruned) +
+                         " runtime status/control file(s) left by ended game sessions.");
+        }
     }
     if (root.empty() || session_id.empty()) return;
 

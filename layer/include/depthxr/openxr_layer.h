@@ -33,6 +33,7 @@
 #include "depthxr/runtime_pacing.h"
 #include "depthxr/runtime_relay.h"
 #include "depthxr/osd_renderer.h"
+#include "depthxr/process_exit.h"
 #include "depthxr/framegen_d3d11_bridge.h"
 #include "depthxr/framegen_vulkan_bridge.h"
 #include "depthxr/framegen_presenter.h"
@@ -1016,6 +1017,11 @@ class OpenXrLayer {
     std::uint64_t runtime_relay_acknowledged_revision_{0};
     std::atomic<bool> runtime_relay_status_dirty_{false};
     std::optional<std::chrono::steady_clock::time_point> runtime_relay_last_status_write_;
+    // The session's status and control files, removed by a normal process
+    // exit (games that skip OpenXR teardown). Guarded by mutex_.
+    ProcessExitFile runtime_relay_exit_status_;
+    ProcessExitFile runtime_relay_exit_control_;
+    bool runtime_relay_pruned_{false}; // Watcher thread only.
     // The Frame Generation events PollFrameGenRecorder last saw (watcher
     // thread only): Dynamic stand-downs and probes, and runtime halving.
     FrameGenSnapshotTrigger framegen_recorder_;
