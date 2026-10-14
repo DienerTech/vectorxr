@@ -3394,6 +3394,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
     bool ok = true;
     double gpu_ms = -1.0;
     std::uint64_t working_bytes = 0;
+    double execute_ms = 0.0; // the backend's Execute, on this thread
     std::optional<FrameGenGpuWindow> window;
     std::vector<FrameGenAnalysisTiming> timings;
     FrameGenDepthStatus depth;
@@ -3426,7 +3427,9 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
                 gpu_->DumpNextExecute(directory);
             }
         }
+        const auto execute_start = Clock::now();
         ok = ok && gpu_->Execute(submissions, tuning, executed, error);
+        execute_ms = Milliseconds(Clock::now() - execute_start);
         if (gpu_) {
             gpu_ms = gpu_->LastGpuMilliseconds();
             window = gpu_->LastGpuWindow();
@@ -3476,9 +3479,13 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
     NoteGpuTimingLocked(executed.submission, frame, window, timings);
     if (logger_ && !hardware_status.empty() && hardware_status != logged_hardware_status_) {
         logged_hardware_status_ = hardware_status;
+        // Its setup (the driver's optical flow API and sessions) runs in
+        // the Execute that first reports it active: how long that held up
+        // the calling thread (the game's, in its xrEndFrame).
         logger_->Info(hardware_status == "active"
                           ? "Frame Generation measures motion with NVIDIA's optical flow hardware (experimental): it "
-                            "starts matching each eye's image as soon as the game releases it."
+                            "starts matching each eye's image as soon as the game releases it (setting it up took " +
+                                Number(execute_ms, 1) + " ms on this frame)."
                           : "Frame Generation cannot use NVIDIA's optical flow hardware (" + hardware_status +
                                 "); block matching measures motion instead.");
     }
