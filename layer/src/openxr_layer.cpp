@@ -8867,6 +8867,10 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         append_projection_layer(projection_layer, 0, projection_layer->viewCount,
                                 layer_pivot_delta.reverse,
                                 layer_pivot_delta.non_identity);
+        if (varjo_compatible_quadviews_active_ && projection_layer->viewCount >= 4) {
+            NoteVarjoNativeSubmittedFocusLocked(frame_end_info->displayTime, projection_layer->views,
+                                                projection_layer->viewCount);
+        }
         // Varjo compatible quadviews: sharpen the runtime's focus views in place when
         // foveate_sharpness > 0. No-op (pure passthrough) when sharpness is 0 or the
         // layer is not a native quad projection.
@@ -10286,6 +10290,15 @@ OsdSnapshot OpenXrLayer::BuildOsdSnapshot() const {
         !framegen_session_enabled_)
         snapshot.restart+=(snapshot.restart.empty()?"":" + ")+std::string("Frame Generation");
     snapshot.framegen_session=framegen_session_enabled_;
+    // Diagnostic modes a tester may leave on name themselves after the brand:
+    // debug logging (slower, with large traces) and, in a Frame Generation
+    // session, a diagnostic view drawn into generated frames.
+    if (resolved_settings_.core.log_level==LogLevel::Debug) snapshot.diagnostics="DEBUG LOG";
+    if (framegen_session_enabled_ && resolved_settings_.framegen.diagnostic_view!=FrameGenDiagnosticView::kOff) {
+        const FrameGenDiagnosticView view=resolved_settings_.framegen.diagnostic_view;
+        snapshot.diagnostics+=std::string(snapshot.diagnostics.empty()?"":" \xC2\xB7 ")+
+            (view==FrameGenDiagnosticView::kFlow?"FLOW VIEW":view==FrameGenDiagnosticView::kConfidence?"CONFIDENCE VIEW":"TINT VIEW");
+    }
     return snapshot;
 }
 
@@ -12104,6 +12117,11 @@ void OpenXrLayer::RecordVarjoNativeLocateDiagnostics(const XrViewLocateInfo* vie
         return;
     }
     ++diagnostic.successful_quad_locates;
+    if (view_locate_info) {
+        const size_t slot = diagnostic.located_focus_next++ % diagnostic.located_focus_times.size();
+        diagnostic.located_focus_times[slot] = view_locate_info->displayTime;
+        diagnostic.located_focus_fovs[slot] = {views[2].fov, views[3].fov};
+    }
 
     std::array<double, 2> focus_yaw{};
     std::array<double, 2> focus_pitch{};
@@ -12175,6 +12193,55 @@ void OpenXrLayer::RecordVarjoNativeLocateDiagnostics(const XrViewLocateInfo* vie
     }
 }
 
+void OpenXrLayer::NoteVarjoNativeSubmittedFocusLocked(XrTime display_time, const XrCompositionLayerProjectionView* views,
+                                                      uint32_t view_count) {
+    VarjoNativeFoveationDiagnosticState& diagnostic = varjo_native_foveation_diagnostic_;
+    if (!views || view_count < 4 || diagnostic.successful_quad_locates == 0) {
+        return;
+    }
+    // An application may locate the same display time more than once (the
+    // focus FOVs following the gaze in between): any of those locates counts,
+    // the newest is the one reported.
+    constexpr float kTolerance = 1e-4f; // radians
+    const auto differs = [&](const XrFovf& a, const XrFovf& b) {
+        return std::abs(a.angleLeft - b.angleLeft) > kTolerance || std::abs(a.angleRight - b.angleRight) > kTolerance ||
+               std::abs(a.angleUp - b.angleUp) > kTolerance || std::abs(a.angleDown - b.angleDown) > kTolerance;
+    };
+    const size_t kept = diagnostic.located_focus_times.size();
+    const std::array<XrFovf, 2>* located = nullptr;
+    bool matched = false;
+    for (size_t back = 1; display_time != 0 && back <= kept; ++back) {
+        const size_t slot = (diagnostic.located_focus_next + kept - back) % kept;
+        if (diagnostic.located_focus_times[slot] != display_time) {
+            continue;
+        }
+        const auto& fovs = diagnostic.located_focus_fovs[slot];
+        located = located ? located : &fovs;
+        if (!differs(views[2].fov, fovs[0]) && !differs(views[3].fov, fovs[1])) {
+            matched = true;
+            break;
+        }
+    }
+    if (!located) {
+        ++diagnostic.submitted_focus_unlocated;
+        return;
+    }
+    ++diagnostic.submitted_focus_checked;
+    if (matched) {
+        return;
+    }
+    ++diagnostic.submitted_focus_mismatched;
+    if (!diagnostic.submitted_focus_mismatch_logged) {
+        diagnostic.submitted_focus_mismatch_logged = true;
+        logger_.Info("Native Varjo focus views submitted with other FOVs than located for their display time: "
+                     "displayTime=" + std::to_string(display_time) + ", submittedFocusView2=" +
+                     FormatFov(views[2].fov) + ", locatedFocusView2=" + FormatFov((*located)[0]) +
+                     ", submittedFocusView3=" + FormatFov(views[3].fov) + ", locatedFocusView3=" +
+                     FormatFov((*located)[1]) + ". The runtime places the focus insets by the FOVs submitted; counts "
+                     "are in the foveation summary (submittedFocusFov=checked/mismatched/unlocated).");
+    }
+}
+
 void OpenXrLayer::LogVarjoNativeFoveationSummaryLocked(std::string_view reason, bool info_level) {
     const VarjoNativeFoveationDiagnosticState& diagnostic = varjo_native_foveation_diagnostic_;
     if (diagnostic.locate_calls == 0) {
@@ -12195,7 +12262,9 @@ void OpenXrLayer::LogVarjoNativeFoveationSummaryLocked(std::string_view reason, 
            << ", renderingGazeFailed=" << diagnostic.rendering_gaze_failed_queries
            << ", successfulQuadLocates=" << diagnostic.successful_quad_locates
            << ", focusFovObserved=" << (diagnostic.focus_ranges_initialized ? 1 : 0)
-           << ", focusFovMotionObserved=" << (diagnostic.focus_motion_logged ? 1 : 0);
+           << ", focusFovMotionObserved=" << (diagnostic.focus_motion_logged ? 1 : 0)
+           << ", submittedFocusFov=" << diagnostic.submitted_focus_checked << "/"
+           << diagnostic.submitted_focus_mismatched << "/" << diagnostic.submitted_focus_unlocated;
     if (diagnostic.focus_ranges_initialized) {
         for (uint32_t eye = 0; eye < 2; ++eye) {
             stream << ", focusView" << (eye + 2)

@@ -9,12 +9,14 @@ const settings = ref(defaultOsdSettings())
 const ready = ref(false)
 const legible = ref(false)
 const pivotSnapLine = ref(false)
+const diagnostics = ref('')
 const channel = new BroadcastChannel(new URLSearchParams(location.search).get('osd-preview')!)
 channel.onmessage = ({ data }) => {
   if (data?.type !== 'settings') return
   settings.value = normalizeOsdSettings(data.settings)
   legible.value = data.legible === true
   pivotSnapLine.value = data.pivotSnapLine === true
+  diagnostics.value = typeof data.diagnostics === 'string' ? data.diagnostics : ''
   document.documentElement.dataset.theme = data.theme === 'dark' ? 'dark' : 'light'
   ready.value = true
 }
@@ -48,7 +50,7 @@ onUnmounted(() => { closed(); channel.close(); window.removeEventListener('befor
       </template>
       <button type="button" class="button-secondary rounded-[0.75rem] px-3 py-1.5 text-xs font-medium" @click="close">Close</button>
     </header>
-    <OsdPreview v-if="ready" v-model:legible="legible" :settings="settings" :pivot-snap-line="pivotSnapLine" @position="position" />
+    <OsdPreview v-if="ready" v-model:legible="legible" :settings="settings" :pivot-snap-line="pivotSnapLine" :diagnostics="diagnostics" @position="position" />
     <p v-else class="p-5 text-sm text-muted">Connecting to OSD controls…</p>
   </main>
 </template>

@@ -71,6 +71,10 @@ struct OsdSnapshot {
     // second the headset shows (0 otherwise).
     std::string framegen_badge;
     double framegen_fps{0.0};
+    // Diagnostic modes left on (debug logging, a Frame Generation diagnostic
+    // view), named in a tag after the brand; empty for none. While there is
+    // one, the header row stays even with every header item hidden.
+    std::string diagnostics;
 };
 
 struct OsdPresentation {
@@ -106,6 +110,10 @@ struct OsdCompactLayout {
     int status_value_x{128};
     int frame_time_x{262};
     std::array<int,4> header_x{-1,-1,-1,-1};
+    // Each header field's column width (narrower beside the diagnostics tag).
+    std::array<int,4> header_width{155,260,297,142};
+    // The diagnostics tag's slot in the header row (-1: none).
+    int diagnostics_x{-1}, diagnostics_width{0};
     // framegen_badge: Frame Generation's badge sits beside the FPS value.
     bool fps{}, frame_time{}, empty{}, framegen_badge{};
 };
@@ -118,6 +126,9 @@ struct OsdCompactLayoutOptions {
     // The session started with Frame Generation on, so the FPS value has room
     // for its badge when settings show it.
     bool framegen_session{false};
+    // The diagnostics tag's width in pixels (OsdSnapshot::diagnostics), 0 for
+    // none: it takes a slot after the brand in the header row.
+    int diagnostics_width{0};
 };
 OsdCompactLayout CompactOsdLayout(const OsdSettings&, const OsdCompactLayoutOptions& options = {});
 

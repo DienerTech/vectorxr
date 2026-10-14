@@ -105,6 +105,11 @@ struct FrameGenStatus {
     // presenter thread's waits, and kept until those or, passing frames
     // through, the game's own show every refresh again.
     bool runtime_halving{false};
+    // The runtime's display times do not advance with the time that passes
+    // (Varjo's after a game paused its frame loop): nothing engages and
+    // frames pass straight through until they do.
+    bool runtime_clock_displaced{false};
+    std::uint64_t runtime_clock_displacements{0};
     bool threaded{false};        // presenting from the presenter thread
     FrameGenDepthState depth{FrameGenDepthState::kUnknown};
     // Session totals for the summaries and tests.
@@ -691,10 +696,22 @@ class FrameGenPresenter {
                                   XrDuration period, bool presenter);
     void NotePhaseLocked(std::chrono::steady_clock::time_point called, std::chrono::steady_clock::time_point returned,
                          XrTime display_time, XrDuration period);
+    // A runtime wait returned for `display_time` (any of them: the presenter
+    // thread's, a generated cycle's, or one of the game's): whether the
+    // runtime's display times advance with the time that passes between its
+    // waits (clock_displaced_). `rendered`: the wait said to render.
+    void NoteRuntimeClockLocked(std::chrono::steady_clock::time_point returned, XrTime display_time, XrDuration period,
+                                bool rendered);
+    // "the runtime's display times ... " for the log and Dynamic's reason.
+    std::string RuntimeClockTextLocked() const;
     // What paced submissions are spaced by, and the presenter thread's
     // half-refresh thresholds judged by: the period reported, at most the
     // refresh period.
     XrDuration SubmitSpacingLocked(XrDuration period) const;
+    // The period the game's frames are timed by just in time and on the
+    // presenter thread: the refresh period, unless the runtime holds frames
+    // to a multiple of it (runtime_halving_), then the period it reports.
+    XrDuration GameGridLocked() const;
     // When the paced submission for `display_time` goes to the runtime, from
     // `now` (recorded as the newest point of submit_grid_), and whether it is
     // already more than half a refresh past the time the runtime would have
@@ -1053,6 +1070,45 @@ class FrameGenPresenter {
     // submissions are not held to the phase until a wait blocks again
     // (ScheduleSubmissionLocked).
     bool phase_echoed_{false};
+    // The runtime's display clock (NoteRuntimeClockLocked). Varjo's runtime,
+    // after nothing waited for a while (a game loading a mission), returns a
+    // display time seconds to a minute ahead, then moves each wait's only
+    // 10 µs on until its refreshes catch up: refreshes presented from those
+    // never reach the game's frames, and the game, told them, renders for a
+    // time far ahead. Displaced by a wait whose display time ran far further
+    // past this process's clock than any wait's while steady
+    // (clock_offset_ceiling_: SteamVR lags after a pause and catches up, which
+    // never counts; taken over the first kClockWarmupWaits waits, and anew
+    // after each recovery), by one that went back, or by kClockStalledWaits
+    // waits in a row a refresh or more apart whose display times barely
+    // moved; steady again after kClockSteadyWaits waits, over
+    // kClockSteadyTime, advanced with the time between them. Displaced,
+    // nothing engages, Auto holds its multiplier, and the presenter thread
+    // stops: frames pass straight through, as without Frame Generation.
+    struct ClockWait {
+        std::chrono::steady_clock::time_point returned{};
+        XrTime display_time{0};
+    };
+    std::optional<ClockWait> clock_last_;
+    XrDuration clock_offset_ceiling_{0}; // the highest display time minus steady-clock time while steady
+    std::uint32_t clock_warmup_waits_{0};  // waits the ceiling was taken over (kClockWarmupWaits)
+    // The last waits judged (time since the one before, display time step,
+    // offset over the ceiling), logged when the clock is displaced.
+    struct ClockSample {
+        XrDuration wall{0};
+        XrDuration step{0};
+        XrDuration over{0};
+    };
+    std::array<ClockSample, 8> clock_history_{};
+    std::size_t clock_history_next_{0};
+    bool clock_displaced_{false};
+    std::chrono::steady_clock::time_point clock_displaced_at_{};
+    XrDuration clock_ahead_{0};         // how far display times ran past the ceiling (0: they stalled)
+    std::uint32_t clock_stalled_waits_{0}; // in a row
+    std::uint32_t clock_steady_waits_{0};  // in a row, while displaced
+    std::chrono::steady_clock::time_point clock_steady_since_{};
+    XrDuration clock_gap_{0};                 // the time passed before the wait that displaced it
+    std::uint32_t logged_clock_displacements_{0}; // logged one by one up to a few, then only in summaries
 
     // Automatic multiplier: steps up while the app misses its cadence, probes
     // one step down after a steady stretch, backing off when a probe fails.
@@ -1154,10 +1210,17 @@ class FrameGenPresenter {
         // halved (NoteRuntimeHalvingLocked).
         std::uint64_t halving_measured{0};
         std::uint64_t halving_halved{0};
+        // Times the runtime's display clock was displaced, and runtime waits
+        // that found it so (NoteRuntimeClockLocked).
+        std::uint64_t clock_displacements{0};
+        std::uint64_t clock_unsteady_waits{0};
     };
     // ", quad=..." for summaries over the window since `start` (empty when
     // no frame of the quad compose site ended in it).
     std::string QuadSummaryLocked(const Totals& start) const;
+    // ", runtimeClock=..." for summaries (empty while the runtime's display
+    // clock stayed steady over the window).
+    std::string ClockSummaryLocked(const Totals& start) const;
     Totals totals_;
     Totals summary_totals_;            // at last_summary_
     double summary_standby_seconds_{0.0};
@@ -1229,6 +1292,7 @@ class FrameGenPresenter {
     bool compositor_running_{false};
     bool compositor_stop_{false};  // close the current slot and exit
     bool compositor_drain_{false}; // exit once no application frame is in flight
+    std::uint64_t drain_started_slot_{0}; // slot_index_ when the drain began (kDrainRefreshes)
     bool threaded_disabled_{false};
     bool logged_threaded_{false};
     std::condition_variable slot_cv_;
@@ -1266,6 +1330,9 @@ class FrameGenPresenter {
     };
     std::optional<LeadProbe> lead_probe_; // a probe being judged
     std::uint32_t lead_floor_{0};         // the lowest lead known to hold (0: none yet)
+    // lead_floor_ as a probe last set it (held, or undone above it): frames
+    // late at the floor lift it one refresh above this at most.
+    std::uint32_t lead_floor_proven_{0};
     std::chrono::milliseconds lead_explore_after_{10000};
     // Frames were late at lead_floor_ or below it (a probe or step down
     // undone): steps down for slack below it also wait lead_explore_after_.

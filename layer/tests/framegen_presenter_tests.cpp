@@ -883,6 +883,35 @@ struct Runtime {
     static constexpr std::chrono::milliseconds kEchoResetAfter{60};
     std::atomic<bool> echo{false};
     std::chrono::steady_clock::time_point last_release{};
+    // Varjo's runtime (4.14.2, an Aero, in DCS), as seen in a flight (paced
+    // runtimes only): a wait asked for more than clock_jump_after after the
+    // last one's release (the game loading a mission) returns a display time
+    // far past its refresh's, clock_jump_factor times that gap ahead. From
+    // then on display times never go back: each wait still blocks until its
+    // refresh, but reports its display time only kClockCreep past the last
+    // until the refreshes' own times pass it again (in the flight, +52 s
+    // after a 26 s gap, then a minute of 10 µs steps). jump_next does the
+    // same once, at the next wait, by that much, without a gap.
+    static constexpr XrDuration kClockCreep = 10'000;
+    std::chrono::milliseconds clock_jump_after{0}; // 0: off (set before the first wait)
+    double clock_jump_factor{2.0};
+    std::atomic<XrDuration> jump_next{0};
+    // SteamVR (2.17.10, Pimax's headset driver) after a wait asked for more
+    // than lag_after_gap after the last one's release: it reports a display
+    // time only a refresh after the last, as if no time had passed, and the
+    // next wait its refresh's own again: display times lag, then catch up
+    // (in flights, by up to two seconds). Nothing ran ahead.
+    std::chrono::milliseconds lag_after_gap{0}; // 0: off (set before the first wait)
+    std::atomic<int> lagged_waits{0};
+    // The next wait alone reports a display time this much earlier than its
+    // refresh's (a session's first wait seen late, or a runtime lagging once).
+    std::atomic<XrDuration> lag_next{0};
+    // While set, display times stop moving (each wait still blocks a
+    // refresh): SteamVR returning the same display time during a game's load.
+    // Cleared, they are their refreshes' own again at once.
+    std::atomic<bool> stall_clock{false};
+    XrTime clock_floor{0};          // under g_xr_mutex: the last display time reported
+    std::atomic<int> crept_waits{0}; // waits reported at the floor instead of their refresh's time
     // Each submission takes this long (a runtime slow to take frames, or a
     // caller held up after each): its caller asks for its next wait late.
     std::atomic<int> submit_sleep_us{0};
@@ -912,6 +941,9 @@ struct Runtime {
     // Every Nth wait misses a refresh: it is released a refresh later than
     // asked for (paced runtimes only; 0: none).
     std::atomic<int> miss_every{0};
+    // ...and reports twice the period for that wait, as SteamVR with Pimax's
+    // driver does after its compositor misses a refresh.
+    std::atomic<bool> miss_reports_multiple{false};
     std::int64_t paced_waits{0};
     // A runtime holding a call (as one may while its session stops, until
     // the session ends): the next waits (hold_waits) or submissions
@@ -1034,6 +1066,7 @@ struct Runtime {
                                       period,
                                   refreshes * period);
                 }
+                const auto previous_release = last_release;
                 const bool miss = miss_every > 0 && ++paced_waits % miss_every == 0;
                 const std::int64_t held_to = last_tick + (throttling ? throttle_refreshes : 1);
                 std::int64_t tick = (asked - epoch) / refresh + (miss ? 2 : 1);
@@ -1049,8 +1082,35 @@ struct Runtime {
                 if (const int over = oversleep_next_release_us.exchange(0)) {
                     SleepPrecise(epoch + tick * refresh + std::chrono::microseconds(over));
                 }
-                return report(display_base + (tick + 1) * period,
-                              throttling && throttle == Throttle::kPeriod ? throttle_refreshes * period : period);
+                XrTime display = display_base + (tick + 1) * period;
+                const XrDuration jump = jump_next.exchange(0);
+                {
+                    std::scoped_lock lock(g_xr_mutex);
+                    const auto gap = asked - previous_release;
+                    if (clock_jump_after > 0ms && previous_release != std::chrono::steady_clock::time_point{} &&
+                        gap > clock_jump_after) {
+                        const auto ahead = static_cast<XrDuration>(
+                            clock_jump_factor * static_cast<double>(std::chrono::nanoseconds(gap).count()));
+                        clock_floor = std::max(clock_floor, display + ahead);
+                    }
+                    if (jump > 0) clock_floor = std::max(clock_floor, display + jump);
+                    if (lag_after_gap > 0ms && clock_floor > 0 && previous_release != std::chrono::steady_clock::time_point{} &&
+                        gap > lag_after_gap && clock_floor + period < display) {
+                        display = clock_floor + period;
+                        ++lagged_waits;
+                    }
+                    if (const XrDuration lag = lag_next.exchange(0)) {
+                        display = std::max(clock_floor + kClockCreep, display - lag);
+                    }
+                    if (display <= clock_floor || (stall_clock && clock_floor > 0)) {
+                        display = clock_floor + kClockCreep;
+                        ++crept_waits;
+                    }
+                    clock_floor = display;
+                }
+                return report(display, throttling && throttle == Throttle::kPeriod ? throttle_refreshes * period
+                                       : miss && miss_reports_multiple   ? 2 * period
+                                                                         : period);
             }
             return report(next_display.fetch_add(period), period);
         };
@@ -4552,6 +4612,74 @@ void TestLeadDoesNotFlap() {
               std::to_string(flapping.mean_lead) + ")");
 }
 
+// A slow game (GPU-bound near 33 fps) that hitches every 0.6 s: each hitch
+// makes a few of its frames late at the lowest lead known to hold. Taken as
+// that lead no longer holding, each hitch raised it a refresh, and below it
+// the lead is retried only every explore_after: the lead climbed a refresh
+// per hitch and never came back down before the next, past what the kept
+// real frames cover, so refreshes showed old frames unmoved until Dynamic
+// stood down (Star Citizen on Pimax's runtime, 2026-10-13: 6 -> 7 -> 8 -> 9
+// within a minute). A hitch no lead cures lifts that floor one refresh above
+// the lowest lead a probe proved at most; between hitches the lead comes back
+// down to it.
+void TestLeadAfterRepeatedHitches() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    gpu.frames_ahead = 2;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic, app, runtime, owned);
+    FrameGenLeadPolicy policy;
+    policy.probe_after = 250ms;
+    policy.judge = 200ms;
+    policy.explore_after = 700ms;
+    policy.explore_max = 1400ms;
+    presenter.SetLeadPolicy(policy);
+    bool hitches = false;
+    int frames = 0;
+    app->before_release = [&] {
+        gpu.game_gpu = hitches && ++frames % 18 == 0 ? 150ms : 30ms;
+        gpu.GameFrame();
+    };
+    for (int i = 0; i < 3; ++i) app->Frame();
+    RunWork(*app, 3000ms, {6ms}, [&](const XrFrameState&) { return Engaged(presenter); });
+    Check(Engaged(presenter), "repeated hitches: Dynamic engages for the slow game");
+    // Probes find the lowest lead that holds.
+    RunWork(*app, 3000ms, {6ms});
+    const FrameGenStatus settled = presenter.Status();
+    hitches = true;
+    std::uint32_t highest = settled.lead_slots;
+    std::uint32_t highest_floor = settled.lead_floor;
+    std::uint64_t lead_sum = 0;
+    std::uint64_t samples = 0;
+    RunWork(*app, 6000ms, {6ms}, [&](const XrFrameState&) {
+        const FrameGenStatus now = presenter.Status();
+        highest = std::max(highest, now.lead_slots);
+        highest_floor = std::max(highest_floor, now.lead_floor);
+        lead_sum += now.lead_slots;
+        ++samples;
+        return false;
+    });
+    const FrameGenStatus after = presenter.Status();
+    presenter.Stop();
+    const double mean = samples ? static_cast<double>(lead_sum) / static_cast<double>(samples) : 0.0;
+    std::cerr << "  repeated hitches: lead " << settled.lead_slots << " (floor " << settled.lead_floor << ") -> mean "
+              << mean << ", highest " << highest << " (floor " << highest_floor << "), last " << after.lead_slots
+              << " (floor " << after.lead_floor << "); ring exhausted +"
+              << after.ring_exhausted - settled.ring_exhausted << ", stand-downs +"
+              << after.dynamic_stand_downs - settled.dynamic_stand_downs << std::endl;
+    Check(!runtime.ordering_violation && !g_release_violation, "repeated hitches: calls stayed ordered");
+    Check(settled.lead_floor > 0, "repeated hitches: probes found the lowest lead that holds before the hitches");
+    Check(highest_floor <= settled.lead_floor + 1,
+          "repeated hitches: the hitches lift the lowest lead known to hold one refresh at most (" +
+              std::to_string(settled.lead_floor) + " -> " + std::to_string(highest_floor) + ")");
+    Check(mean <= static_cast<double>(settled.lead_floor) + 1.5,
+          "repeated hitches: between hitches the lead comes back down (mean " + std::to_string(mean) + ", floor " +
+              std::to_string(settled.lead_floor) + ")");
+}
+
 // A game showing its last frame (stalled): its exact copy is written once,
 // then the runtime shows the output images' newest again each refresh.
 void TestSkipIdenticalExactCopies() {
@@ -7307,6 +7435,418 @@ void TestRefreshPeriodChanges() {
     }
 }
 
+// Varjo's runtime after a game paused its frame loop (a mission loading):
+// display times far ahead, then barely moving until the refreshes catch up
+// (Runtime::clock_jump_after). Dynamic stands by meanwhile (presented from
+// such display times, refreshes would never reach the game's frames: nothing
+// generated, the oldest frame kept shown, and a stand-down waiting for the
+// newest frame's refresh), then engages and generates once they advance.
+void TestVarjoClockJumpDynamic() {
+    const std::string name = "varjo clock jump, dynamic";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    runtime.clock_jump_after = 500ms;
+    runtime.clock_jump_factor = 2.0;
+    SessionLog log("varjo-jump-dynamic");
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kInterpolate, FrameGenMultiplier::kDynamic, app, runtime, owned,
+             log.logger.get());
+    presenter.SetDynamicPolicy(GuardDynamic());
+    app->eye_speed = 0.5;
+    RunWork(*app, 600ms, kLightWork);
+    Check(presenter.Status().standby, name + ": a game holding the refresh rate stands by");
+    // The mission loads: no frame for 1.2 s; the runtime's display times run
+    // 2.4 s ahead and creep until the refreshes catch up.
+    std::this_thread::sleep_for(1200ms);
+    const std::uint64_t generated_before = presenter.Status().generated;
+    const std::uint64_t engagements_before = presenter.Status().dynamic_engagements;
+    bool engaged_while_creeping = false;
+    const auto creep_start = std::chrono::steady_clock::now();
+    RunPipelined(*app, 1800ms, 16ms, 26ms,
+                 [&](int, const XrFrameState&) {
+                     engaged_while_creeping = engaged_while_creeping || presenter.Status().threaded;
+                 },
+                 nullptr, 8ms);
+    Check(runtime.crept_waits > 60, name + ": the runtime's display times crept (" +
+                                        std::to_string(runtime.crept_waits.load()) + " waits)");
+    Check(!engaged_while_creeping && presenter.Status().dynamic_engagements == engagements_before,
+          name + ": Dynamic stands by while the runtime's display times do not advance (" +
+              presenter.Status().dynamic_reason + ")");
+    // The refreshes pass the runtime's last display time about 2.4 s after
+    // the game resumed; then they advance again (the game keeps rendering: an
+    // idle half second would be another stall).
+    for (int crept_before = -1; crept_before != runtime.crept_waits &&
+                                std::chrono::steady_clock::now() - creep_start < 8000ms;) {
+        crept_before = runtime.crept_waits;
+        RunPipelined(*app, 400ms, 16ms, 26ms, {}, nullptr, 8ms);
+    }
+    const int crept = runtime.crept_waits;
+    std::chrono::steady_clock::duration gap{};
+    RunPipelined(*app, 3000ms, 16ms, 26ms, {}, &gap, 8ms);
+    const FrameGenStatus status = presenter.Status();
+    Check(runtime.crept_waits == crept, name + ": the runtime's display times advance again");
+    Check(status.dynamic_engagements > engagements_before && status.threaded && !status.standby,
+          name + ": Dynamic engages once they do (" + status.dynamic_reason + ")");
+    Check(status.generated > generated_before + 40,
+          name + ": and generates (" + std::to_string(status.generated - generated_before) + " frames)");
+    Check(status.distinct_fps > 1.3 * status.app_fps,
+          name + ": refreshes show more distinct frames than the game makes (" + std::to_string(status.distinct_fps) +
+              " of " + std::to_string(status.app_fps) + " fps)");
+    Check(gap < 200ms, name + ": the game is never held (longest frame " +
+                           std::to_string(std::chrono::duration<double, std::milli>(gap).count()) + " ms)");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    const std::vector<std::string> lines = log.Lines("Frame Generation");
+    const auto logged = [&](const std::string& text) {
+        return std::any_of(lines.begin(), lines.end(), [&](const std::string& line) { return line.find(text) != std::string::npos; });
+    };
+    Check(!logged("did not end within"), name + ": no drain timed out");
+    Check(logged("display times ran") && logged("advance with the time again"),
+          name + ": the log says why Dynamic waited, and when it stopped waiting");
+}
+
+// SteamVR's display times after a game's pause lag (a refresh after the
+// last, as if no time had passed) and then catch up (Runtime::lag_after_gap):
+// the catch-up runs no further ahead than before, so the runtime's clock is
+// never taken as displaced, and Dynamic engages as usual.
+void TestSteamVrLagIsNotDisplaced() {
+    const std::string name = "steamvr lag after pauses";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    runtime.lag_after_gap = 150ms;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kInterpolate, FrameGenMultiplier::kDynamic, app, runtime, owned);
+    // Standing by at full rate, the game pauses for 300-600 ms a few times
+    // (a loading hitch): each time the runtime's next display time lags. The
+    // pauses lower the game's rate over a second; engaging only after longer
+    // below it (as by default) it stays standing by.
+    FrameGenDynamicPolicy standing = GuardDynamic();
+    standing.engage_after = 2000ms;
+    presenter.SetDynamicPolicy(standing);
+    app->eye_speed = 0.5;
+    int frames = 0;
+    RunWork(*app, 3000ms, kLightWork, [&](const XrFrameState&) {
+        if (++frames % 40 == 0) std::this_thread::sleep_for(std::chrono::milliseconds(300 + 100 * (frames / 40 % 4)));
+        return false;
+    });
+    Check(runtime.lagged_waits >= 3, name + ": the runtime's display times lagged after the pauses (" +
+                                         std::to_string(runtime.lagged_waits.load()) + " times, " +
+                                         std::to_string(frames) + " frames, engagements " +
+                                         std::to_string(presenter.Status().dynamic_engagements) + ", " +
+                                         presenter.Status().dynamic_reason + ")");
+    Check(presenter.Status().runtime_clock_displacements == 0 && !presenter.Status().runtime_clock_displaced,
+          name + ": its clock is never taken as displaced");
+    presenter.SetDynamicPolicy(GuardDynamic());
+    RunPipelined(*app, 1500ms, 16ms, 26ms, {}, nullptr, 8ms);
+    const FrameGenStatus status = presenter.Status();
+    Check(status.threaded && !status.standby && status.runtime_clock_displacements == 0,
+          name + ": Dynamic engages for a slower game (" + status.dynamic_reason + ")");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+}
+
+// A session's first runtime wait seen with a display time far behind its
+// refresh's (Runtime::lag_next; a hitch while the session starts): the
+// clock's ceiling is taken over its first waits, so the waits after it never
+// look ahead, and Frame Generation presents as usual.
+void TestLowFirstClockSample() {
+    const std::string name = "low first clock sample";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    runtime.lag_next = 800'000'000;
+    SessionLog log("low-first-sample");
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kInterpolate, FrameGenMultiplier::k2, app, runtime, owned,
+             log.logger.get());
+    app->eye_speed = 0.5;
+    RunPipelined(*app, 2000ms, 16ms, 26ms, {}, nullptr, 8ms);
+    const FrameGenStatus status = presenter.Status();
+    presenter.Stop();
+    std::string said;
+    for (const std::string& line : log.Lines("display times")) said += " | " + line;
+    // A displacement that holds Frame Generation off for good would leave
+    // nothing generated. A brief one recovers within a second; it is printed
+    // with the waits that caused it (seen twice in about ten full runs under
+    // the policy tests' load, never alone), not failed.
+    if (status.runtime_clock_displacements > 0) {
+        std::cerr << name << ": note: " << status.runtime_clock_displacements << " displacement(s)" << said << '\n';
+    }
+    Check(status.runtime_clock_displacements <= 1 && !status.runtime_clock_displaced && status.threaded &&
+              status.generated > 20,
+          name + ": Frame Generation presents and generates (" + std::to_string(status.runtime_clock_displacements) +
+              " displacements, " + std::to_string(status.generated) + " generated" + said + ")");
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+}
+
+// Display times that stop moving while each wait still blocks a refresh
+// (SteamVR during a game's load; Runtime::stall_clock): three such waits
+// stop the presenter thread, the game is not held, and presenting resumes
+// once they move with the time again.
+void TestStalledClockWhilePresenting() {
+    const std::string name = "stalled clock while presenting";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    SessionLog log("stalled-clock");
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kInterpolate, FrameGenMultiplier::k2, app, runtime, owned,
+             log.logger.get());
+    app->eye_speed = 0.5;
+    RunPipelined(*app, 1000ms, 16ms, 26ms, {}, nullptr, 8ms);
+    Check(presenter.Status().threaded, name + ": presents from its own thread");
+    runtime.stall_clock = true;
+    std::chrono::steady_clock::duration gap{};
+    bool stopped = false;
+    RunPipelined(*app, 800ms, 16ms, 26ms,
+                 [&](int, const XrFrameState&) { stopped = stopped || !presenter.Status().threaded; }, &gap, 8ms);
+    Check(stopped && presenter.Status().runtime_clock_displaced,
+          name + ": the presenter thread stops while display times stand still");
+    Check(gap < 400ms, name + ": the game is never held long (longest frame " +
+                           std::to_string(std::chrono::duration<double, std::milli>(gap).count()) + " ms)");
+    runtime.stall_clock = false;
+    const std::uint64_t generated = presenter.Status().generated;
+    RunPipelined(*app, 2000ms, 16ms, 26ms, {}, nullptr, 8ms);
+    const FrameGenStatus status = presenter.Status();
+    Check(!status.runtime_clock_displaced && status.threaded && status.generated > generated + 20,
+          name + ": presenting resumes once they move again (" + std::to_string(status.generated - generated) +
+              " frames)");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    const std::vector<std::string> lines = log.Lines("Frame Generation");
+    Check(std::any_of(lines.begin(), lines.end(),
+                      [](const std::string& line) { return line.find("stopped advancing with the time") != std::string::npos; }),
+          name + ": the log says the display times stopped advancing");
+}
+
+// Auto, its multiplier chosen for a slow game, while the runtime's clock is
+// displaced: frames pass straight through, and the multiplier is held (each
+// frame, judged against one refresh, would otherwise step it up to 4x for
+// nothing, and the game would be held to a quarter of the refresh rate when
+// presenting resumed).
+void TestAutoHoldsWhileClockDisplaced() {
+    const std::string name = "auto holds while the clock is displaced";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kAuto, app, runtime, owned);
+    presenter.SetAutoPolicy(200ms, 500ms, 600ms, 300ms);
+    RunWork(*app, 2000ms, PeriodsOfWork(kPeriod, 1.6));
+    const std::uint32_t settled = presenter.Status().multiplier;
+    Check(settled >= 2 && presenter.Status().threaded, name + ": a slow game engages Auto (" +
+                                                           std::to_string(settled) + "x)");
+    runtime.jump_next = 2'000'000'000;
+    std::uint32_t highest = 0;
+    RunWork(*app, 1500ms, PeriodsOfWork(kPeriod, 1.6), [&](const XrFrameState&) {
+        if (presenter.Status().runtime_clock_displaced) highest = std::max(highest, presenter.Status().multiplier);
+        return false;
+    });
+    Check(highest > 0 && highest <= settled, name + ": the multiplier is held (" + std::to_string(settled) + "x, then " +
+                                                 std::to_string(highest) + "x while displaced)");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+}
+
+// The same jump while Frame Generation presents (no game pause causes it
+// then, but a runtime may): the presenter thread's refreshes stop advancing,
+// so it stops and frames pass straight through within moments, the game never
+// held for long, until the display times advance again; then it presents
+// again. Fixed 2x and Dynamic alike.
+void TestVarjoClockJumpWhilePresenting() {
+    for (const FrameGenMultiplier multiplier : {FrameGenMultiplier::k2, FrameGenMultiplier::kDynamic}) {
+        const std::string name =
+            std::string("varjo clock jump while presenting, ") + (multiplier == FrameGenMultiplier::k2 ? "2x" : "dynamic");
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        runtime.paced = true;
+        SessionLog log(multiplier == FrameGenMultiplier::k2 ? "varjo-presenting-2x" : "varjo-presenting-dynamic");
+        std::unique_ptr<App> owned;
+        App* app = nullptr;
+        StartJit(presenter, gpu, FrameGenSynthesisMode::kInterpolate, multiplier, app, runtime, owned,
+                 log.logger.get());
+        presenter.SetDynamicPolicy(GuardDynamic());
+        app->eye_speed = 0.5;
+        RunPipelined(*app, 1200ms, 16ms, 26ms, {}, nullptr, 8ms);
+        Check(presenter.Status().threaded, name + ": presents from its own thread");
+        runtime.jump_next = 2'000'000'000;
+        std::chrono::steady_clock::duration gap{};
+        bool stopped = false;
+        const auto jumped = std::chrono::steady_clock::now();
+        std::chrono::steady_clock::duration stopped_after{};
+        RunPipelined(*app, 1500ms, 16ms, 26ms,
+                     [&](int, const XrFrameState&) {
+                         if (!stopped && !presenter.Status().threaded) {
+                             stopped = true;
+                             stopped_after = std::chrono::steady_clock::now() - jumped;
+                         }
+                     },
+                     &gap, 8ms);
+        Check(stopped && stopped_after < 800ms,
+              name + ": the presenter thread stops soon after the display times stop advancing (" +
+                  std::to_string(std::chrono::duration<double, std::milli>(stopped_after).count()) + " ms)");
+        Check(gap < 400ms, name + ": the game is never held long (longest frame " +
+                               std::to_string(std::chrono::duration<double, std::milli>(gap).count()) + " ms)");
+        // Until the refreshes pass the runtime's last display time, nothing
+        // presents again.
+        bool presented_while_creeping = false;
+        for (int crept_before = -1; crept_before != runtime.crept_waits &&
+                                    std::chrono::steady_clock::now() - jumped < 8000ms;) {
+            crept_before = runtime.crept_waits;
+            RunPipelined(*app, 300ms, 16ms, 26ms,
+                         [&](int, const XrFrameState&) {
+                             presented_while_creeping = presented_while_creeping ||
+                                                        (presenter.Status().threaded &&
+                                                         presenter.Status().runtime_clock_displaced);
+                         },
+                         nullptr, 8ms);
+        }
+        Check(runtime.crept_waits > 0, name + ": the runtime's display times crept");
+        Check(!presented_while_creeping, name + ": nothing presents while they creep");
+        const std::uint64_t generated = presenter.Status().generated;
+        RunPipelined(*app, 2500ms, 16ms, 26ms, {}, nullptr, 8ms);
+        const FrameGenStatus status = presenter.Status();
+        Check(status.threaded && status.generated > generated + 40,
+              name + ": it presents and generates again once they advance (" +
+                  std::to_string(status.generated - generated) + " frames, " + status.dynamic_reason + ")");
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+        Check(log.Lines("did not end within").empty(), name + ": no drain timed out");
+    }
+}
+
+// Varjo's runtime after a late submission holds frames to every second
+// refresh for a few, reporting twice the period (Throttle::kPeriod), then
+// returns to full rate. Dynamic keeps timing the game's frames on the refresh
+// grid: timed by the doubled period, they ran that much further ahead of the
+// refreshes, past the real frames kept, and stayed there (nothing times a
+// frame earlier than the one before), so refreshes showed the oldest kept
+// frame as it is, again and again, and the guard stood down.
+void TestVarjoTransientThrottle() {
+    for (const FrameGenSynthesisMode mode : {FrameGenSynthesisMode::kInterpolate, FrameGenSynthesisMode::kExtrapolate}) {
+        const std::string name = std::string("varjo transient throttle, ") +
+                                 (mode == FrameGenSynthesisMode::kInterpolate ? "interpolate" : "extrapolate");
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        runtime.paced = true;
+        runtime.throttle = Runtime::Throttle::kPeriod;
+        std::unique_ptr<App> owned;
+        App* app = nullptr;
+        StartJit(presenter, gpu, mode, FrameGenMultiplier::kDynamic, app, runtime, owned);
+        presenter.SetHalvingWindow(4000ms);
+        app->eye_speed = 0.5;
+        RunPipelined(*app, 900ms, 16ms, 26ms, {}, nullptr, 8ms);
+        Check(presenter.Status().threaded && !presenter.Status().standby, name + ": engages");
+        const std::size_t first = runtime.Submissions();
+        // Every 40th frame, the runtime holds frames to every second refresh
+        // for the next 4 of the game's frames.
+        std::vector<XrDuration> leads;
+        RunPipelined(
+            *app, 3000ms, 16ms, 26ms,
+            [&](int frame, const XrFrameState& state) {
+                if (frame % 40 == 0) runtime.throttled = true;
+                if (frame % 40 == 4) runtime.throttled = false;
+                std::scoped_lock lock(g_xr_mutex);
+                if (!runtime.submitted_times.empty()) leads.push_back(state.predictedDisplayTime - runtime.submitted_times.back());
+            },
+            nullptr, 8ms);
+        const FrameGenStatus status = presenter.Status();
+        Check(status.threaded && !status.standby && !status.runtime_halving,
+              name + ": stays engaged, the throttles too brief to be halving (" + status.dynamic_reason + ")");
+        std::sort(leads.begin(), leads.end());
+        const double median_lead = leads.empty() ? 0.0 : static_cast<double>(leads[leads.size() / 2]) / kPeriod;
+        const double high_lead = leads.empty() ? 0.0 : static_cast<double>(leads[leads.size() * 9 / 10]) / kPeriod;
+        Check(high_lead < median_lead + 3.0,
+              name + ": the game's frames stay about as far ahead of the refreshes (median " +
+                  std::to_string(median_lead) + ", 90th percentile " + std::to_string(high_lead) + " refreshes)");
+        double worst = 0.0;
+        const double timeline = TimelineShare(runtime, first, 30, app->eye_speed, &worst);
+        // A tenth of the frames go to a runtime holding every second refresh:
+        // their refreshes may show a refresh off.
+        Check(timeline > 0.8, name + ": refreshes show their own time (" + std::to_string(timeline) + ", worst " +
+                                  std::to_string(worst) + " periods)");
+        // ...and refreshes held back by the runtime show nothing new.
+        Check(status.distinct_fps > 0.75 * status.output_fps,
+              name + ": refreshes show new frames (" + std::to_string(status.distinct_fps) + " of " +
+                  std::to_string(status.output_fps) + " fps)");
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    }
+}
+
+// SteamVR with Pimax's driver, its GPU busy: now and then its compositor
+// misses a refresh, and the wait it releases a refresh late reports twice
+// the period, once. The game's frames were timed by that period: the next
+// one ran five refreshes further ahead, and the four after it came a
+// refresh apart instead of two while the lead came back (a stutter each
+// time; seen every 0.3-0.5 s in a DCS flight on SteamVR 2.18). Timed on the
+// refresh grid, the game's lead stays put.
+void TestSteamVrMissedRefresh() {
+    struct Case {
+        FrameGenSynthesisMode mode;
+        FrameGenMultiplier multiplier;
+        const char* name;
+    };
+    for (const Case test : {Case{FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2, "extrapolate 2x"},
+                            Case{FrameGenSynthesisMode::kInterpolate, FrameGenMultiplier::kDynamic, "interpolate dynamic"}}) {
+        const std::string name = std::string("steamvr missed refresh, ") + test.name;
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        runtime.paced = true;
+        runtime.miss_reports_multiple = true;
+        std::unique_ptr<App> owned;
+        App* app = nullptr;
+        StartJit(presenter, gpu, test.mode, test.multiplier, app, runtime, owned);
+        app->eye_speed = 0.5;
+        RunPipelined(*app, 900ms, 16ms, 26ms, {}, nullptr, 8ms);
+        Check(presenter.Status().threaded && !presenter.Status().standby, name + ": engages");
+        // About every 0.4 s, one of the runtime's waits misses a refresh.
+        runtime.miss_every = 37;
+        std::vector<XrDuration> leads;
+        RunPipelined(
+            *app, 3000ms, 16ms, 26ms,
+            [&](int, const XrFrameState& state) {
+                std::scoped_lock lock(g_xr_mutex);
+                if (!runtime.submitted_times.empty()) leads.push_back(state.predictedDisplayTime - runtime.submitted_times.back());
+            },
+            nullptr, 8ms);
+        const FrameGenStatus status = presenter.Status();
+        Check(status.threaded && !status.standby && !status.runtime_halving,
+              name + ": stays engaged, the misses too rare to be halving (" + status.dynamic_reason + ")");
+        std::vector<XrDuration> sorted = leads;
+        std::sort(sorted.begin(), sorted.end());
+        const XrDuration median = sorted.empty() ? 0 : sorted[sorted.size() / 2];
+        const auto ahead = std::count_if(leads.begin(), leads.end(),
+                                         [&](XrDuration lead) { return lead > median + 2 * kPeriod; });
+        // Timed by the reported period, 8-20% of the frames ran more than 2
+        // refreshes past the median (up to 9); on the refresh grid none do.
+        Check(!leads.empty() && ahead <= 2,
+              name + ": the game's frames stay about as far ahead of the refreshes (" + std::to_string(ahead) + " of " +
+                  std::to_string(leads.size()) + " over 2 refreshes past the median of " +
+                  std::to_string(static_cast<double>(median) / kPeriod) + ")");
+        Check(status.distinct_fps > 0.8 * status.output_fps,
+              name + ": refreshes show new frames (" + std::to_string(status.distinct_fps) + " of " +
+                  std::to_string(status.output_fps) + " fps)");
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    }
+}
+
 // What the OSD and the app say while the runtime halves the frame rate:
 // engaged and standing by, the line under the row says so and the app's
 // line ends with it; other states keep their own reasons.
@@ -7417,6 +7957,25 @@ void TestOsdDescription() {
     Check(text.row == "Standby  /  Dynamic" && text.detail == "The game runs at 84 fps" && text.badge == "STBY" &&
               text.state == "standby",
           "dynamic stands by: " + text.row);
+    // The runtime's display times do not advance with the time (Varjo's after
+    // a loading stall): standing by and starting say they wait for that.
+    status.runtime_clock_displaced = true;
+    text = describe(status);
+    Check(text.row == "Standby  /  Dynamic" && text.detail == "Waiting for the runtime's frame timing to recover" &&
+              text.reason == "Dynamic" + dot + "game at 84 fps" + dot + "waiting for the runtime's frame timing to recover",
+          "dynamic stands by for the runtime's clock: " + text.detail + " | " + text.reason);
+    {
+        FrameGenStatus starting;
+        starting.state = FrameGenState::kWaiting;
+        starting.runtime_clock_displaced = true;
+        starting.reason = "the runtime's display times ran 2.4 s ahead of the time that passed";
+        const FrameGenOsdText waiting = describe(starting);
+        Check(waiting.row == "Starting" && waiting.badge == "WAIT" &&
+                  waiting.detail == "Waiting for the runtime's frame timing to recover" &&
+                  waiting.reason == "waiting for the runtime's frame timing to recover",
+              "starting waits for the runtime's clock: " + waiting.detail + " | " + waiting.reason);
+    }
+    status.runtime_clock_displaced = false;
     status.quad_declining = true;
     status.reason = "the layer composes the quad views for a while";
     text = describe(status);
@@ -7661,6 +8220,17 @@ int main(int argc, char** argv) {
     RUN(TestQuadStaleMotion);
     RUN(TestQuadDynamicDeepRing);
     RUN(TestQuadComposeStallOnce);
+    // Runtime clocks that misbehave (Varjo's, SteamVR's): last, so the tests
+    // above keep the timing they had beside the policy tests.
+    RUN(TestVarjoClockJumpDynamic);
+    RUN(TestVarjoClockJumpWhilePresenting);
+    RUN(TestVarjoTransientThrottle);
+    RUN(TestSteamVrLagIsNotDisplaced);
+    RUN(TestLowFirstClockSample);
+    RUN(TestStalledClockWhilePresenting);
+    RUN(TestAutoHoldsWhileClockDisplaced);
+    RUN(TestSteamVrMissedRefresh);
+    RUN(TestLeadAfterRepeatedHitches);
     if (!policy) {
         RunPolicyTests();
     } else {
