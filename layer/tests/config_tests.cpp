@@ -3367,6 +3367,8 @@ void TestDeviceInputPathsAndHatDirections() {
            "HAT values near 360 degrees must wrap to up");
     Expect(!depthxr::DirectInputHatDirection(UINT32_MAX).has_value(),
            "A centered HAT must not report a pressed direction");
+    Expect(!depthxr::DirectInputHatDirection(0x0000FFFFu).has_value(),
+           "A HAT whose driver reports centered as 0xFFFF must not read as up-left");
 
     Expect(std::string(depthxr::ToString(depthxr::InputBindingPollStage::SetCooperativeLevel)) ==
                "set-cooperative-level",

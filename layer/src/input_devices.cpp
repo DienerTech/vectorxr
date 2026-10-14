@@ -94,7 +94,9 @@ std::optional<DeviceInputPath> ParseDeviceInputPath(std::string_view input_path)
 }
 
 std::optional<std::size_t> DirectInputHatDirection(std::uint32_t value) {
-    if (value == UINT32_MAX) {
+    // DirectInput marks a centered HAT by a low word of 0xFFFF; some drivers
+    // report 0x0000FFFF rather than 0xFFFFFFFF, which read as up-left.
+    if ((value & 0xFFFFu) == 0xFFFFu) {
         return std::nullopt;
     }
     return static_cast<std::size_t>((((value % 36'000) + 2'250) / 4'500) % 8);

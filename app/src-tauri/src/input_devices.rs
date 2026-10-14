@@ -291,7 +291,10 @@ mod platform {
     }
 
     fn hat_direction(value: u32) -> Option<HatDirection> {
-        if value == HAT_CENTERED {
+        // DirectInput marks a centered HAT by a low word of 0xFFFF; some
+        // drivers report 0x0000FFFF rather than 0xFFFFFFFF, which read as
+        // up-left, so that HAT's other directions could never be captured.
+        if value & 0xFFFF == 0xFFFF {
             return None;
         }
 
@@ -545,6 +548,7 @@ mod platform {
                 Some("up")
             );
             assert!(hat_direction(HAT_CENTERED).is_none());
+            assert!(hat_direction(0x0000_FFFF).is_none());
         }
     }
 }
