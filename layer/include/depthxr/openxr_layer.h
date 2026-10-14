@@ -1492,6 +1492,8 @@ class OpenXrLayer {
     std::optional<bool> app_submitting_layers_;
     int composition_topology_log_budget_{12};
     std::optional<std::uint64_t> last_composition_topology_signature_;
+    // Of the frames whose quad views Frame Generation claimed (composes).
+    std::optional<std::uint64_t> last_claimed_composition_topology_signature_;
     bool quad_views_extension_requested_{false};
     bool varjo_foveated_rendering_extension_requested_{false};
     // Either extension above, or OpenXR 1.1 (where the foveated inset is core).

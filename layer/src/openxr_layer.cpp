@@ -6265,13 +6265,23 @@ void OpenXrLayer::ObserveCompositionLayerTopology(const XrFrameEndInfo* frame_en
     if (composition_topology_log_budget_ <= 0) {
         return;
     }
+    // A quad views frame Frame Generation claimed goes to it, not to the
+    // runtime: it composes the four views into the stereo frames the runtime
+    // gets. That route's topology is followed apart from the frames forwarded
+    // as they are, so frames moving between the two routes are not logged as
+    // topology changes (each move spent the session's budget).
+    const bool claimed = pending_framegen_quad_ && pending_framegen_quad_->route == FrameGenQuadRoute::kClaimed;
+    std::optional<std::uint64_t>& last_signature =
+        claimed ? last_claimed_composition_topology_signature_ : last_composition_topology_signature_;
     const std::uint64_t signature = CompositionLayerTopologySignature(frame_end_info);
-    if (last_composition_topology_signature_ == signature) {
+    if (last_signature == signature) {
         return;
     }
-    last_composition_topology_signature_ = signature;
+    last_signature = signature;
     --composition_topology_log_budget_;
-    logger_.Info("Composition layer topology forwarded downstream by VectorXR: " +
+    logger_.Info(std::string(claimed ? "Composition layer topology given to Frame Generation, which composes its "
+                                       "quad views into the stereo frames the runtime gets: "
+                                     : "Composition layer topology forwarded downstream by VectorXR: ") +
                  FormatCompositionLayerTopology(frame_end_info) +
                  (composition_topology_log_budget_ == 0
                       ? "; further topology changes suppressed this session."
@@ -8117,6 +8127,7 @@ void OpenXrLayer::ResetTurboFrameState() {
     app_submitting_layers_.reset();
     composition_topology_log_budget_ = 12;
     last_composition_topology_signature_.reset();
+    last_claimed_composition_topology_signature_.reset();
     pacing_last_end_time_.reset();
     pacing_window_start_.reset();
     pacing_frames_ = 0;

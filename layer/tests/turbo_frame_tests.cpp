@@ -514,6 +514,26 @@ class TurboFrameTestPeer {
         std::scoped_lock lock(layer.mutex_);
         layer.resolved_settings_.quadviews.foveate_sharpness = 50.0;
     }
+    // The composition-layer topology log (ObserveCompositionLayerTopology)
+    // for a frame whose quad views Frame Generation claimed, or not; its
+    // remaining budget after.
+    static int ObserveTopology(const XrFrameEndInfo* frame, bool claimed) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        if (claimed) {
+            layer.pending_framegen_quad_.emplace().route = FrameGenQuadRoute::kClaimed;
+        }
+        layer.ObserveCompositionLayerTopology(frame);
+        layer.pending_framegen_quad_.reset();
+        return layer.composition_topology_log_budget_;
+    }
+    static void ResetTopology() {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.composition_topology_log_budget_ = 12;
+        layer.last_composition_topology_signature_.reset();
+        layer.last_claimed_composition_topology_signature_.reset();
+    }
     // Depth on with convergence: LocateViews shifts each eye's projection.
     static void ConvergeVarjoDepth(double convergence) {
         auto& layer = Layer();
@@ -2212,6 +2232,41 @@ void TestVarjoNativeSubmittedFocusCountsEveryFrame() {
     Peer::EndVarjoNative();
 }
 
+// Frames whose quad views Frame Generation claims (four views, given to it)
+// and frames forwarded as composed (two views) alternate when Frame
+// Generation's capture misses: that is not a topology change each time, and
+// must not spend the session's twelve topology lines.
+void TestTopologyFollowsFrameGenClaimsApart() {
+    using Peer = depthxr::TurboFrameTestPeer;
+    Peer::ResetTopology();
+    std::array<XrCompositionLayerProjectionView, 4> views{};
+    for (auto& view : views) {
+        view = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+        view.pose.orientation.w = 1.0f;
+    }
+    XrCompositionLayerProjection quad{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    quad.viewCount = 4;
+    quad.views = views.data();
+    XrCompositionLayerProjection stereo = quad;
+    stereo.viewCount = 2;
+    const auto* quad_layer = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
+    const auto* stereo_layer = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&stereo);
+    XrFrameEndInfo quad_frame = FrameEndInfo();
+    quad_frame.layerCount = 1;
+    quad_frame.layers = &quad_layer;
+    XrFrameEndInfo stereo_frame = quad_frame;
+    stereo_frame.layers = &stereo_layer;
+    int budget = 12;
+    for (int flip = 0; flip < 8; ++flip) {
+        budget = Peer::ObserveTopology(&quad_frame, true);
+        budget = Peer::ObserveTopology(&stereo_frame, false);
+    }
+    Expect(budget == 10, "Frames moving between Frame Generation's claim and forwarding spent the topology budget");
+    Expect(Peer::ObserveTopology(&quad_frame, false) == 9,
+           "A forwarded frame's own topology change was not logged");
+    Peer::ResetTopology();
+}
+
 // With Depth's convergence set, the application is given (and submits)
 // focus FOVs LocateViews shifted. The submitted focus check compares them
 // with those, not with the runtime's raw ones: a game that submits what it
@@ -2385,6 +2440,7 @@ int main() {
     Expect(depthxr::TurboFrameTestPeer::OsdStateTransitions(), "OSD lost enabled/off Turbo or applied/ready/disabled Pivot state");
     TestVarjoNativeSubmittedFocusCountsEveryFrame();
     TestVarjoNativeSubmittedFocusWithConvergence();
+    TestTopologyFollowsFrameGenClaimsApart();
     TestQuadViewsInactiveReasons();
     TestQuadViewsOsdTagFollowsBegunConfiguration();
     // Last: it points the layer's log at a file of its own.
