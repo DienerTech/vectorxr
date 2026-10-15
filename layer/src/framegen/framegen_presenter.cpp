@@ -538,6 +538,7 @@ void FrameGenPresenter::Stop() {
     probe_not_before_ = {};
     probe_backoff_ = auto_initial_backoff_;
     probing_ = false;
+    late_at_ceiling_since_.reset();
     runtime_formats_.clear();
     frames_.clear();
     capture_targets_.clear();
@@ -1791,6 +1792,8 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
     const bool held = (inline_hold_until_ && now < *inline_hold_until_) ||
                       (runtime_halving_ && auto_halving_hold_until_ && now < *auto_halving_hold_until_);
     bool gave_up_inline = false;
+    bool late_at_ceiling = false;
+    std::chrono::duration<double> left_ceiling_after{}; // for the log: a probe down from there
     // More than 30% of the last second's frames missed the cadence: step up.
     if (recent >= 8 && recent_late * 10 > recent * 3) {
         auto_late_percent_ = recent_late * 100 / recent;
@@ -1811,6 +1814,27 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
             probe_backoff_ = std::min(probe_backoff_ * 2, auto_initial_backoff_ * (1 << kAutoMaxBackoffDoublings));
         } else if (!memory_pressure && auto_multiplier_ < auto_memory_ceiling_) {
             ++auto_multiplier_;
+        } else if (auto_multiplier_ > 1) {
+            // Nothing higher to step to, and no probe down from a game that
+            // stays late. A game late here as long as a probe backs off,
+            // though its own time per frame is within reach of a step down,
+            // is held back by the multiplier, not by its own work: probe that
+            // step (velocity7 in Star Citizen on Virtual Desktop at 144 Hz,
+            // 2026-10-14: 22-24 fps at 4x for 16 s with about 16 ms of its own
+            // work a frame, where it had held 48 at 3x). A probe that cannot
+            // keep up goes back and doubles the wait, as any probe. Only where
+            // the game's own time is measured: inline, its waits say nothing
+            // of it.
+            late_at_ceiling = true;
+            if (!late_at_ceiling_since_ || *late_at_ceiling_since_ < multiplier_changed_at_) {
+                late_at_ceiling_since_ = now;
+            } else if (now - *late_at_ceiling_since_ >= probe_backoff_ && compositor_running_ &&
+                       auto_busy_count_ >= 8 && AutoProbeInReachLocked(auto_multiplier_ - 1, GameGridLocked())) {
+                left_ceiling_after = now - *late_at_ceiling_since_;
+                probe_from_ = auto_multiplier_;
+                --auto_multiplier_;
+                probing_ = true;
+            }
         }
         probe_not_before_ = now + probe_backoff_;
     } else if (probing_ && now - multiplier_changed_at_ >= auto_probe_confirm_) {
@@ -1829,6 +1853,9 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
         probe_from_ = auto_multiplier_;
         --auto_multiplier_;
         probing_ = true;
+    }
+    if (!late_at_ceiling) {
+        late_at_ceiling_since_.reset();
     }
     if (auto_multiplier_ != before) {
         multiplier_changed_at_ = now;
@@ -1850,7 +1877,12 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
                                          ? ", next probe in " + std::to_string(probe_backoff_.count() / 1000) + " s"
                                          : std::string()) +
                                     ")."
-                              : " (probing a lower multiplier)."));
+                              : left_ceiling_after.count() > 0.0
+                                    ? " (probing a lower multiplier: " + std::to_string(auto_late_percent_) +
+                                          "% of frames late for " + Number(left_ceiling_after.count(), 1) +
+                                          " s with no higher one to step to, though the game's own time per frame "
+                                          "is within reach of this one)."
+                                    : " (probing a lower multiplier)."));
         }
     }
 }
@@ -2913,6 +2945,11 @@ void FrameGenPresenter::NoteRuntimeClockLocked(Clock::time_point returned, XrTim
         // The ceiling is taken anew from here.
         clock_offset_ceiling_ = offset;
         clock_warmup_waits_ = 0;
+        // Engaging again is a change too: its first frames carry its cost
+        // and say nothing about the game (velocity7 on Virtual Desktop,
+        // 2026-10-14: Auto went 3x -> 4x in the second the clock recovered).
+        multiplier_changed_at_ = returned;
+        cadence_.clear();
         if (dynamic_standby_) {
             dynamic_reason_ = "the runtime's display times advance with the time again";
         }
