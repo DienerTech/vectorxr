@@ -1538,6 +1538,16 @@ class FrameGenPresenter {
     std::vector<double> end_call_ms_;
     std::vector<double> runtime_end_ms_;
     std::vector<double> synth_lock_ms_;
+    // Since the last summary, for the game's frames (ThreadedWaitLocked,
+    // ThreadedEndJit):
+    std::uint64_t told_lead_sum_{0};      // the leads told, summed
+    std::uint64_t told_lead_frames_{0};   // the frames told one
+    std::uint32_t told_lead_max_{0};      // the largest told
+    std::vector<double> game_ahead_ms_;   // the time told past the runtime's own display time at the wait
+    std::vector<double> ahead_jitter_ms_; // that against the frame told before's, unless a pause came between
+    std::vector<double> end_slack_ms_;    // the time to spare when the frame ended (negative: late)
+    double last_ahead_ms_{0.0};           // the frame told last's game_ahead_ms_ sample...
+    std::chrono::steady_clock::time_point last_ahead_at_{}; // ...and its wait's return (none: no sample)
     double pause_longest_ms_{0.0};
     std::uint32_t logged_pauses_{0};
     // Research capture: a file %LOCALAPPDATA%\VectorXR\framegen-capture.request

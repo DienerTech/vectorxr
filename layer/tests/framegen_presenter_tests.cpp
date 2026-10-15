@@ -1946,6 +1946,257 @@ void TestThreadedPipelinedApp() {
     Check(!runtime.ordering_violation && !g_release_violation, "pipelined: runtime and image calls stayed ordered");
 }
 
+// Defined with the just-in-time and Dynamic tests further on.
+void StartJit(FrameGenPresenter& presenter, GpuLog& gpu, FrameGenSynthesisMode mode, FrameGenMultiplier multiplier,
+              App*& app_out, Runtime& runtime, std::unique_ptr<App>& app, Logger* logger);
+int RunWork(App& app, std::chrono::milliseconds duration, const std::vector<std::chrono::microseconds>& work,
+            const std::function<bool(const XrFrameState&)>& each);
+void EngageDynamic(FrameGenPresenter& presenter, App& app, const std::string& name);
+std::vector<std::chrono::microseconds> PeriodsOfWork(XrDuration period, double periods);
+
+// As SessionLog (further on): a session log of its own in the temporary
+// folder, here read back for its presenter-thread summaries.
+struct HorizonLog {
+    std::filesystem::path directory;
+    std::unique_ptr<Logger> logger{std::make_unique<Logger>()};
+
+    explicit HorizonLog(const std::string& name)
+        : directory(std::filesystem::temp_directory_path() /
+                    ("vectorxr-presenter-horizon-" + std::to_string(GetCurrentProcessId()) + "-" + name)) {
+        std::error_code ignored;
+        std::filesystem::remove_all(directory, ignored);
+        logger->Initialize(directory / "session.log");
+    }
+    ~HorizonLog() {
+        logger.reset();
+        std::error_code ignored;
+        std::filesystem::remove_all(directory, ignored);
+    }
+    // Closes the log: call once the presenter has stopped.
+    std::vector<std::string> Summaries() {
+        const std::filesystem::path path = logger->ActiveLogPath();
+        logger.reset(); // flushed
+        std::ifstream file(path);
+        std::vector<std::string> lines;
+        for (std::string line; std::getline(file, line);) {
+            if (line.find("Frame Generation: multiplier=") != std::string::npos &&
+                line.find("threaded=1") != std::string::npos) {
+                lines.push_back(line);
+            }
+        }
+        return lines;
+    }
+};
+
+// A summary's "key=low/high" (or "key=value": both the same); none when
+// missing or "-".
+std::optional<std::pair<double, double>> SummaryValues(const std::string& line, const std::string& key) {
+    const std::size_t at = line.find(", " + key + "=");
+    if (at == std::string::npos) return std::nullopt;
+    const std::string value = line.substr(at + key.size() + 3);
+    const auto digit = [&](std::size_t i) { return i < value.size() && value[i] >= '0' && value[i] <= '9'; };
+    if (!digit(0) && !(value.size() > 1 && value[0] == '-' && digit(1))) return std::nullopt;
+    std::size_t used = 0;
+    const double low = std::stod(value, &used);
+    if (used >= value.size() || value[used] != '/') return std::make_pair(low, low);
+    return std::make_pair(low, std::stod(value.substr(used + 1)));
+}
+
+// The summary says how far past the runtime's own prediction the game is
+// told to render (Frame Generation's share of its pose horizon), how much
+// that changes from one game frame to the next, the lead told and the time
+// the game's frames had to spare: Star Citizen's cockpit shook in Dynamic
+// only, where the horizon varies by up to a refresh (2026-10-13), and the
+// summaries could not show it. At a fixed 2x a game holding it is released
+// on its refresh: the horizon is the lead's, and steady.
+void TestHorizonTelemetryFixed() {
+    for (const FrameGenSynthesisMode mode : {FrameGenSynthesisMode::kExtrapolate, FrameGenSynthesisMode::kInterpolate}) {
+        const bool interpolate = mode == FrameGenSynthesisMode::kInterpolate;
+        const std::string name = std::string("horizon 2x ") + (interpolate ? "interpolate" : "extrapolate");
+        HorizonLog log(interpolate ? "fixed-interpolate" : "fixed-extrapolate");
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        runtime.paced = true;
+        std::unique_ptr<App> owned;
+        App* app = nullptr;
+        StartJit(presenter, gpu, mode, FrameGenMultiplier::k2, app, runtime, owned, log.logger.get());
+        FrameGenLeadPolicy policy;
+        policy.probe_after = 600s; // no probes: the lead holds while measured
+        presenter.SetLeadPolicy(policy);
+        // Windows of about 45 game frames, whose 95th percentile is not their
+        // largest: a 300 ms window holds 13, and one late wake-up beside the
+        // policy tests made its largest 1.9 ms (0.17 of a refresh).
+        presenter.SetSummaryInterval(1000ms);
+        app->end_offset_periods = 1; // as Star Citizen ends its frames
+        for (int i = 0; i < 3; ++i) app->Frame();
+        const auto work = PeriodsOfWork(kPeriod, 1.2);
+        RunWork(*app, 1500ms, work, {});
+        // The leads told from here on (read as each wait returns): the last
+        // summary's window lies within.
+        std::uint32_t low = std::numeric_limits<std::uint32_t>::max();
+        std::uint32_t high = 0;
+        app->before_begin = [&] {
+            const std::uint32_t lead = presenter.Status().lead_slots;
+            low = std::min(low, lead);
+            high = std::max(high, lead);
+        };
+        RunWork(*app, 2100ms, work, {});
+        app->before_begin = nullptr;
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+        const std::vector<std::string> summaries = log.Summaries();
+        Check(!summaries.empty(), name + ": summaries while engaged");
+        if (summaries.empty()) continue;
+        const std::string& last = summaries.back();
+        const auto lead_avg = SummaryValues(last, "leadAvg");
+        const auto lead_max = SummaryValues(last, "leadMax");
+        const auto ahead = SummaryValues(last, "gameAheadMs");
+        const auto jitter = SummaryValues(last, "aheadJitterMs");
+        const auto slack = SummaryValues(last, "endSlackMs");
+        Check(lead_avg && lead_max && ahead && jitter && slack, name + ": the summary has all five fields (" + last + ")");
+        if (!lead_avg || !lead_max || !ahead || !jitter || !slack) continue;
+        const double period_ms = static_cast<double>(kPeriod) / 1e6;
+        std::cerr << "  " << name << ": leads " << low << "-" << high << ", leadAvg " << lead_avg->first << ", leadMax "
+                  << lead_max->first << ", gameAheadMs " << ahead->first << "/" << ahead->second << ", aheadJitterMs "
+                  << jitter->first << "/" << jitter->second << " (p95 " << jitter->second / period_ms
+                  << " refreshes), endSlackMs " << slack->first << "/" << slack->second << std::endl;
+        Check(lead_avg->first >= low - 1e-9 && lead_avg->first <= high + 1e-9,
+              name + ": leadAvg is among the leads told (" + std::to_string(low) + "-" + std::to_string(high) + ", " +
+                  last + ")");
+        // A lead raised after the last summary (a late frame on a busy
+        // machine) is not in its window: exact only while the lead held.
+        Check(low == high ? lead_max->first == static_cast<double>(high)
+                          : lead_max->first >= low && lead_max->first <= high,
+              name + ": leadMax is the largest lead told (" + std::to_string(low) + "-" + std::to_string(high) + ", " +
+                  last + ")");
+        Check(std::abs(ahead->first - lead_avg->first * period_ms) <= 1.1 * period_ms,
+              name + ": the game renders about the lead past the runtime's own prediction (" + last + ")");
+        Check(jitter->second <= 0.15 * period_ms,
+              name + ": released on its refresh, the horizon holds from frame to frame (" + last + ")");
+        Check(slack->first <= slack->second, name + ": endSlackMs is 10th percentile/median (" + last + ")");
+    }
+}
+
+// Dynamic releases a game's wait as soon as it asks, anywhere in a refresh:
+// a game asking 1.6 refreshes after its last is released 0, 0.6, 0.2, 0.8
+// and 0.4 of a refresh past one, and the horizon it is told to render to
+// changes by up to a refresh from one frame to the next (with SteamVR's
+// prediction limit, the shake in Star Citizen's cockpit). The summary says
+// so, and the game still runs at its own rate (pacing is unchanged).
+void TestDynamicHorizonJitterReported() {
+    for (const FrameGenSynthesisMode mode : {FrameGenSynthesisMode::kExtrapolate, FrameGenSynthesisMode::kInterpolate}) {
+        const bool interpolate = mode == FrameGenSynthesisMode::kInterpolate;
+        const std::string name = std::string("horizon dynamic ") + (interpolate ? "interpolate" : "extrapolate");
+        HorizonLog log(interpolate ? "dynamic-interpolate" : "dynamic-extrapolate");
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        runtime.paced = true;
+        std::unique_ptr<App> owned;
+        App* app = nullptr;
+        StartJit(presenter, gpu, mode, FrameGenMultiplier::kDynamic, app, runtime, owned, log.logger.get());
+        presenter.SetDynamicPolicy(GuardDynamic());
+        presenter.SetSummaryInterval(300ms);
+        EngageDynamic(presenter, *app, name);
+        const auto work = PeriodsOfWork(kPeriod, 1.6);
+        // The time the game's waits held it: from its frame's end to its
+        // next wait's return.
+        auto ended = std::chrono::steady_clock::now();
+        double held_ms = 0.0;
+        app->before_begin = [&] { held_ms += Seconds(std::chrono::steady_clock::now() - ended) * 1000.0; };
+        const auto start = std::chrono::steady_clock::now();
+        const int frames = RunWork(*app, 1300ms, work, [&](const XrFrameState&) {
+            ended = std::chrono::steady_clock::now();
+            return false;
+        });
+        const double rate = frames / Seconds(std::chrono::steady_clock::now() - start);
+        app->before_begin = nullptr;
+        const bool engaged = presenter.Status().threaded && !presenter.Status().standby;
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+        Check(engaged, name + ": stays engaged");
+        const double period_ms = static_cast<double>(kPeriod) / 1e6;
+        const double own_rate = 1000.0 / (1.6 * period_ms);
+        const double held = held_ms / std::max(frames, 1) / period_ms;
+        // Pacing unchanged: its waits never hold it (a fixed 2x would, 0.4
+        // of a refresh a frame), and it runs faster than 2x would hold it
+        // (45 fps). Its rate is not held to 90% of its own: beside the policy
+        // tests and other builds it ran at 47-55 fps of 56.25.
+        Check(held < 0.15, name + ": the game's waits never hold it (" + std::to_string(held) + " refreshes a frame)");
+        Check(rate > 1000.0 / (2.0 * period_ms), name + ": the game runs at its own rate, faster than 2x would hold it (" +
+                                                     std::to_string(rate) + " of " + std::to_string(own_rate) +
+                                                     " fps)");
+        const std::vector<std::string> summaries = log.Summaries();
+        Check(!summaries.empty(), name + ": summaries while engaged");
+        if (summaries.empty()) continue;
+        const std::string& last = summaries.back();
+        const auto ahead = SummaryValues(last, "gameAheadMs");
+        const auto jitter = SummaryValues(last, "aheadJitterMs");
+        Check(ahead && jitter, name + ": the summary has the horizon and its jitter (" + last + ")");
+        if (!ahead || !jitter) continue;
+        std::cerr << "  " << name << ": " << rate << " fps, held " << held << " refreshes a frame, gameAheadMs "
+                  << ahead->first << "/" << ahead->second
+                  << ", aheadJitterMs " << jitter->first << "/" << jitter->second << " (p95 "
+                  << jitter->second / period_ms << " refreshes)" << std::endl;
+        Check(jitter->second >= 0.4 * period_ms,
+              name + ": the summary shows the horizon moving with where in a refresh the game is released (" + last +
+                  ")");
+    }
+}
+
+// A game slower than four refreshes a frame in Dynamic (Star Citizen at
+// 28 fps on Virtual Desktop at 120 Hz: a frame every 4.3 refreshes) is at
+// its own pace, not pausing between frames: the summary shows its horizon's
+// jitter too. Pairs of frames more than four of Dynamic's told periods (one
+// refresh each, 33 ms at 120 Hz) apart were left out as pauses, so its
+// summaries printed aheadJitterMs=- throughout.
+void TestSlowDynamicHorizonJitterReported() {
+    for (const FrameGenSynthesisMode mode : {FrameGenSynthesisMode::kExtrapolate, FrameGenSynthesisMode::kInterpolate}) {
+        const bool interpolate = mode == FrameGenSynthesisMode::kInterpolate;
+        const std::string name = std::string("horizon slow dynamic ") + (interpolate ? "interpolate" : "extrapolate");
+        HorizonLog log(interpolate ? "slow-dynamic-interpolate" : "slow-dynamic-extrapolate");
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        runtime.paced = true;
+        runtime.period = 1'000'000'000 / 120;
+        std::unique_ptr<App> owned;
+        App* app = nullptr;
+        StartJit(presenter, gpu, mode, FrameGenMultiplier::kDynamic, app, runtime, owned, log.logger.get());
+        presenter.SetDynamicPolicy(GuardDynamic());
+        // Windows of about 28 game frames (27 pairs), as in the fixed test.
+        presenter.SetSummaryInterval(1000ms);
+        EngageDynamic(presenter, *app, name);
+        const auto start = std::chrono::steady_clock::now();
+        const int frames = RunWork(*app, 2100ms, PeriodsOfWork(runtime.period, 4.3), {});
+        const double rate = frames / Seconds(std::chrono::steady_clock::now() - start);
+        const bool engaged = presenter.Status().threaded && !presenter.Status().standby;
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+        Check(engaged, name + ": stays engaged");
+        const double period_ms = static_cast<double>(runtime.period) / 1e6;
+        Check(rate < 1000.0 / (4.0 * period_ms),
+              name + ": the game asks less often than every four refreshes (" + std::to_string(rate) + " fps)");
+        const std::vector<std::string> summaries = log.Summaries();
+        Check(!summaries.empty(), name + ": summaries while engaged");
+        if (summaries.empty()) continue;
+        const std::string& last = summaries.back();
+        const auto ahead = SummaryValues(last, "gameAheadMs");
+        const auto jitter = SummaryValues(last, "aheadJitterMs");
+        Check(ahead && jitter, name + ": the summary has the horizon and its jitter at the game's pace (" + last + ")");
+        if (!ahead || !jitter) continue;
+        std::cerr << "  " << name << ": " << rate << " fps, gameAheadMs " << ahead->first << "/" << ahead->second
+                  << ", aheadJitterMs " << jitter->first << "/" << jitter->second << " (p95 "
+                  << jitter->second / period_ms << " refreshes)" << std::endl;
+        // Released 0.3 of a refresh later in one each frame: the horizon
+        // moves 0.3 or 0.7 of a refresh from one frame to the next.
+        Check(jitter->second >= 0.4 * period_ms,
+              name + ": the summary shows the horizon moving with where in a refresh the game is released (" + last +
+                  ")");
+    }
+}
+
 // Interpolate presents from the presenter thread too: each real frame is
 // shown after the frames interpolated between it and the previous one, at
 // the display time it was rendered for, and the game keeps its overlap.
@@ -9241,6 +9492,9 @@ int main(int argc, char** argv) {
     RUN(TestThreadedDynamic);
     RUN(TestDynamicFreesOutputsNearBudget);
     RUN(TestThreadedPipelinedApp);
+    RUN(TestHorizonTelemetryFixed);
+    RUN(TestDynamicHorizonJitterReported);
+    RUN(TestSlowDynamicHorizonJitterReported);
     RUN(TestThreadedInterpolation);
     RUN(TestJitExtrapolation);
     RUN(TestJitEyeShiftReported);
