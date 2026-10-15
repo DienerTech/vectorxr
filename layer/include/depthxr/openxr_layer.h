@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <future>
@@ -63,6 +64,11 @@ namespace depthxr {
 #if defined(DEPTHXR_TESTING)
 class TurboFrameTestPeer;
 #endif
+
+// A space by the reference space type the layer tracks it as (its own
+// internal spaces count as their type), for diagnostics. The values are the
+// codes the flight recorder and the Frame Generation trace write.
+enum class TrackedSpaceKind : std::uint8_t { kOther = 0, kView = 1, kLocal = 2, kStage = 3 };
 
 class OpenXrLayer {
   public:
@@ -697,6 +703,9 @@ class OpenXrLayer {
                                      const XrPosef& pose_delta) const;
     void PrunePivotPoseDeltas(XrTime time);
     std::string DescribeSpace(XrSpace space) const;
+    // mutex_: kOther for a space of no tracked reference type (an action
+    // space, LOCAL_FLOOR, or XR_NULL_HANDLE).
+    TrackedSpaceKind ClassifySpace(XrSpace space) const;
     void CacheDepthSubmissionGeometry(XrTime time,
                                       XrSpace space,
                                       XrViewConfigurationType view_configuration_type,
@@ -953,6 +962,15 @@ class OpenXrLayer {
     // forwarding a claimed frame abandons it (`abandon`, when the caller
     // does not abandon the frame itself).
     void DropPendingFrameGenQuad(bool abandon);
+    // While Frame Generation's trace records: the space of the first quad
+    // layer of the frame being ended, and its kind. Classified in
+    // ForwardEndFrame under mutex_, consumed by TraceRuntimeEndFrame (which
+    // runs without it); only the application's end-frame thread touches it.
+    struct TraceQuadSpace {
+        XrSpace space{XR_NULL_HANDLE};
+        TrackedSpaceKind kind{TrackedSpaceKind::kOther};
+    };
+    std::optional<TraceQuadSpace> pending_trace_quad_space_;
     D3D11BridgeQuadFrames d3d11_bridge_quad_frames_;
     D3D11BridgeQuadFrames d3d11_bridge_quad_frames_summarized_;
     // Vulkan games with Frame Generation: the session is Direct3D 12 and the
@@ -1655,6 +1673,9 @@ class OpenXrLayer {
     bool IsHeadRelativeEyeGaze(XrSpace space, XrSpace base_space) const;
     std::unordered_set<XrSpace> tracked_local_spaces_;
     std::unordered_set<XrSpace> tracked_stage_spaces_;
+    // The time of the flight recorder's last `locspace` row (mutex_): an app
+    // that locates VIEW space several times a frame records it once.
+    XrTime last_locspace_time_{0};
     std::vector<XrPosef> cached_eye_offset_poses_;
     std::vector<XrView> eye_offset_views_scratch_;
     XrTime cached_eye_offsets_display_time_{0};

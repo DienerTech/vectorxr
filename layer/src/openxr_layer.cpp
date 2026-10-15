@@ -940,6 +940,46 @@ const char* CompositionLayerTypeName(XrStructureType type) {
     }
 }
 
+const char* TrackedSpaceKindName(TrackedSpaceKind kind) {
+    switch (kind) {
+    case TrackedSpaceKind::kView:
+        return "VIEW";
+    case TrackedSpaceKind::kLocal:
+        return "LOCAL";
+    case TrackedSpaceKind::kStage:
+        return "STAGE";
+    case TrackedSpaceKind::kOther:
+        break;
+    }
+    return "OTHER";
+}
+
+// A composition layer's space by kind, as the caller tracks it (under its
+// lock): the topology functions below never see the layer's spaces otherwise.
+using SpaceKindOf = std::function<TrackedSpaceKind(XrSpace)>;
+
+// The frame's first quad layer and its index, or nullptr.
+const XrCompositionLayerQuad* FirstQuadLayer(const XrFrameEndInfo& info, std::uint32_t* index = nullptr) {
+    for (std::uint32_t i = 0; info.layers && i < info.layerCount; ++i) {
+        if (info.layers[i] && info.layers[i]->type == XR_TYPE_COMPOSITION_LAYER_QUAD) {
+            if (index) {
+                *index = i;
+            }
+            return reinterpret_cast<const XrCompositionLayerQuad*>(info.layers[i]);
+        }
+    }
+    return nullptr;
+}
+
+// `value` rounded to `decimals` places; one that rounds to zero prints as 0,
+// not -0.
+std::string FormatFixed(double value, int decimals) {
+    const double scale = std::pow(10.0, decimals);
+    std::ostringstream stream;
+    stream << std::fixed << std::setprecision(decimals) << std::round(value * scale) / scale + 0.0;
+    return stream.str();
+}
+
 void HashCompositionTopologyValue(std::uint64_t value, std::uint64_t* hash) {
     constexpr std::uint64_t kFnvPrime = 1099511628211ull;
     for (std::size_t byte = 0; byte < sizeof(value); ++byte) {
@@ -948,7 +988,7 @@ void HashCompositionTopologyValue(std::uint64_t value, std::uint64_t* hash) {
     }
 }
 
-std::uint64_t CompositionLayerTopologySignature(const XrFrameEndInfo* frame_end_info) {
+std::uint64_t CompositionLayerTopologySignature(const XrFrameEndInfo* frame_end_info, const SpaceKindOf& kind_of) {
     std::uint64_t hash = 1469598103934665603ull;
     HashCompositionTopologyValue(frame_end_info ? frame_end_info->layerCount : 0, &hash);
     HashCompositionTopologyValue(
@@ -964,11 +1004,20 @@ std::uint64_t CompositionLayerTopologySignature(const XrFrameEndInfo* frame_end_
             const auto* projection = reinterpret_cast<const XrCompositionLayerProjection*>(layer);
             HashCompositionTopologyValue(projection->viewCount, &hash);
         }
+        // The space's kind: a quad that moves from VIEW to LOCAL space is a
+        // change. A quad's size and pose are not hashed (they can move every
+        // frame).
+        HashCompositionTopologyValue(
+            !layer ? 0
+            : layer->space == XR_NULL_HANDLE
+                ? 1
+                : 2 + static_cast<std::uint64_t>(kind_of(layer->space)),
+            &hash);
     }
     return hash;
 }
 
-std::string FormatCompositionLayerTopology(const XrFrameEndInfo* frame_end_info) {
+std::string FormatCompositionLayerTopology(const XrFrameEndInfo* frame_end_info, const SpaceKindOf& kind_of) {
     std::ostringstream stream;
     stream << "layerCount=" << (frame_end_info ? frame_end_info->layerCount : 0)
            << ", blendMode="
@@ -987,6 +1036,19 @@ std::string FormatCompositionLayerTopology(const XrFrameEndInfo* frame_end_info)
                 if (layer->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
                     const auto* projection = reinterpret_cast<const XrCompositionLayerProjection*>(layer);
                     stream << ",views=" << projection->viewCount;
+                }
+                stream << ",space="
+                       << (layer->space == XR_NULL_HANDLE ? "NULL" : TrackedSpaceKindName(kind_of(layer->space)));
+                if (layer->type == XR_TYPE_COMPOSITION_LAYER_QUAD) {
+                    // Metres in the layer's space.
+                    const auto* quad = reinterpret_cast<const XrCompositionLayerQuad*>(layer);
+                    const XrVector3f& p = quad->pose.position;
+                    const XrQuaternionf& q = quad->pose.orientation;
+                    stream << ",size=" << FormatFixed(quad->size.width, 2) << "x" << FormatFixed(quad->size.height, 2)
+                           << ",pose=(" << FormatFixed(p.x, 3) << "," << FormatFixed(p.y, 3) << ","
+                           << FormatFixed(p.z, 3) << "|" << FormatFixed(q.x, 3) << "," << FormatFixed(q.y, 3) << ","
+                           << FormatFixed(q.z, 3) << "," << FormatFixed(q.w, 3)
+                           << "),eye=" << static_cast<int>(quad->eyeVisibility);
                 }
                 stream << ")";
             }
@@ -5855,6 +5917,8 @@ XrResult OpenXrLayer::TraceRuntimeEndFrame(XrSession session, const XrFrameEndIn
     // This frame's route at the quad views compose site, if it came from it.
     std::optional<FrameGenQuadFrame> quad = std::move(pending_framegen_quad_);
     pending_framegen_quad_.reset();
+    const std::optional<TraceQuadSpace> quad_space = pending_trace_quad_space_;
+    pending_trace_quad_space_.reset();
     // Frame Generation turns one app frame into two runtime frames, each of
     // which goes through SubmitRuntimeFrame (and so carries the OSD).
     if (framegen_owns_pacing_.load(std::memory_order_acquire) && info) {
@@ -5876,6 +5940,17 @@ XrResult OpenXrLayer::TraceRuntimeEndFrame(XrSession session, const XrFrameEndIn
                 if (projection->viewCount > 1) {
                     trace.RecordPose("end.v1", 0, projection->views[1].pose);
                 }
+            }
+            // The game's HUD quad, if it has one. Not on the frame the trace
+            // began in: its space was not classified.
+            std::uint32_t quad_index = 0;
+            const XrCompositionLayerQuad* quad_layer = FirstQuadLayer(*info, &quad_index);
+            if (quad_layer && quad_space && quad_space->space == quad_layer->space) {
+                const auto micro = [](float value) { return static_cast<int64_t>(std::llround(value * 1e6)); };
+                trace.Record("end.q", quad_index, static_cast<int64_t>(quad_space->kind), micro(quad_layer->size.width),
+                             micro(quad_layer->size.height), reinterpret_cast<int64_t>(quad_layer->subImage.swapchain),
+                             quad_layer->eyeVisibility);
+                trace.RecordPose("end.q0", static_cast<std::uint64_t>(quad_space->kind), quad_layer->pose);
             }
         }
         return framegen_.EndFrame(session, info, framegen_calls_, quad ? &*quad : nullptr);
@@ -6546,7 +6621,8 @@ void OpenXrLayer::ObserveCompositionLayerTopology(const XrFrameEndInfo* frame_en
     const bool claimed = pending_framegen_quad_ && pending_framegen_quad_->route == FrameGenQuadRoute::kClaimed;
     std::optional<std::uint64_t>& last_signature =
         claimed ? last_claimed_composition_topology_signature_ : last_composition_topology_signature_;
-    const std::uint64_t signature = CompositionLayerTopologySignature(frame_end_info);
+    const SpaceKindOf kind_of = [this](XrSpace space) { return ClassifySpace(space); };
+    const std::uint64_t signature = CompositionLayerTopologySignature(frame_end_info, kind_of);
     if (last_signature == signature) {
         return;
     }
@@ -6555,7 +6631,7 @@ void OpenXrLayer::ObserveCompositionLayerTopology(const XrFrameEndInfo* frame_en
     logger_.Info(std::string(claimed ? "Composition layer topology given to Frame Generation, which composes its "
                                        "quad views into the stereo frames the runtime gets: "
                                      : "Composition layer topology forwarded downstream by VectorXR: ") +
-                 FormatCompositionLayerTopology(frame_end_info) +
+                 FormatCompositionLayerTopology(frame_end_info, kind_of) +
                  (composition_topology_log_budget_ == 0
                       ? "; further topology changes suppressed this session."
                       : "."));
@@ -6574,6 +6650,15 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
         }
     } pending_guard{*this};
     ObserveCompositionLayerTopology(frame_end_info);
+    // Frame Generation's trace records the frame's first quad layer with its
+    // space's kind (TraceRuntimeEndFrame, which runs without mutex_): it is
+    // classified here, under config_lock, for either call below.
+    pending_trace_quad_space_.reset();
+    if (frame_end_info && framegen_owns_pacing_.load(std::memory_order_acquire) && framegen_.Trace().Enabled()) {
+        if (const XrCompositionLayerQuad* quad = FirstQuadLayer(*frame_end_info)) {
+            pending_trace_quad_space_ = TraceQuadSpace{quad->space, ClassifySpace(quad->space)};
+        }
+    }
     if (frame_pacing_debug_enabled_.load(std::memory_order_relaxed) && frame_end_info) {
         std::scoped_lock lock(turbo_mutex_);
         if (turbo_last_predicted_display_period_ > 0 && turbo_max_returned_display_time_ > 0) {
@@ -9777,6 +9862,15 @@ XrResult OpenXrLayer::LocateSpace(XrSpace space, XrSpace base_space, XrTime time
         std::scoped_lock lock(mutex_);
         ReloadConfigIfNeeded();
         RefreshResolvedSettings();
+        // The flight recorder's view of where the app places its camera: the
+        // time it locates VIEW space at, against its views' (`locate`). Once
+        // per time: DCS locates VIEW space several times a frame.
+        if (turbo_trace_.Enabled() && time != last_locspace_time_ &&
+            (IsTrackedViewSpace(space) || IsTrackedViewSpace(base_space))) {
+            last_locspace_time_ = time;
+            turbo_trace_.Record("locspace", turbo_trace_.NextId(), time, static_cast<std::int64_t>(ClassifySpace(space)),
+                                static_cast<std::int64_t>(ClassifySpace(base_space)));
+        }
         // Head-relative eye direction must stay attached to the virtual head.
         // Applying the inverse camera rotation here moves MSFS's focus region
         // away from the user's eyes. Preserve the complete runtime result,
@@ -12434,6 +12528,22 @@ std::string OpenXrLayer::DescribeSpace(XrSpace space) const {
     return label + "(" + FormatHex(reinterpret_cast<uintptr_t>(space)) + ")";
 }
 
+TrackedSpaceKind OpenXrLayer::ClassifySpace(XrSpace space) const {
+    if (space == XR_NULL_HANDLE) {
+        return TrackedSpaceKind::kOther;
+    }
+    if (space == internal_view_space_ || tracked_view_spaces_.contains(space)) {
+        return TrackedSpaceKind::kView;
+    }
+    if (space == internal_local_space_ || tracked_local_spaces_.contains(space)) {
+        return TrackedSpaceKind::kLocal;
+    }
+    if (space == internal_stage_space_ || tracked_stage_spaces_.contains(space)) {
+        return TrackedSpaceKind::kStage;
+    }
+    return TrackedSpaceKind::kOther;
+}
+
 void OpenXrLayer::CacheDepthSubmissionGeometry(
     XrTime time,
     XrSpace space,
@@ -12955,10 +13065,17 @@ XrResult OpenXrLayer::LocateRuntimeViews(XrSession session,
     // The tuning only: the resolved settings' diagnostic binding would make
     // this per-call copy allocate.
     QuadViewsSettings quadviews_settings;
+    // Frame Generation's trace (debug logging) records the runtime's answer
+    // to the game's stereo locate, with the kind of space it was asked in.
+    const bool trace_locate = view_locate_info && framegen_.Trace().Enabled();
+    TrackedSpaceKind locate_space_kind = TrackedSpaceKind::kOther;
     {
         std::scoped_lock lock(mutex_);
         ReloadConfigIfNeeded();
         RefreshResolvedSettings();
+        if (trace_locate) {
+            locate_space_kind = ClassifySpace(view_locate_info->space);
+        }
         quadviews_emulation_active = IsQuadViewsEmulationActive();
         varjo_compatible = varjo_compatible_quadviews_active_;
         quadviews_settings = resolved_settings_.quadviews;
@@ -13025,6 +13142,23 @@ XrResult OpenXrLayer::LocateRuntimeViews(XrSession session,
             session, downstream_view_locate_info, view_state, view_capacity_input, view_count_output, views);
         if (diag) {
             logger_.Debug("Turbo-diag: app xrLocateViews completed.");
+        }
+        // The runtime's poses, before Pivot or Depth adjust them (LocateViews):
+        // against end.v0 they show whether the game submits what it located.
+        // Not for a count query, which locates no view.
+        if (trace_locate && XR_SUCCEEDED(locate_result) &&
+            !IsQuadViewConfiguration(view_locate_info->viewConfigurationType) && views && view_count_output &&
+            view_capacity_input > 0) {
+            FrameGenTrace& trace = framegen_.Trace();
+            const std::uint32_t located = std::min(*view_count_output, view_capacity_input);
+            trace.Record("loc", 0, view_locate_info->displayTime, static_cast<int64_t>(locate_space_kind), located,
+                         view_state ? static_cast<int64_t>(view_state->viewStateFlags) : 0);
+            if (located > 0) {
+                trace.RecordPose("loc.v0", 0, views[0].pose);
+            }
+            if (located > 1) {
+                trace.RecordPose("loc.v1", 0, views[1].pose);
+            }
         }
         return locate_result;
     }
