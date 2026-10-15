@@ -1348,24 +1348,110 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
 #if defined(FG_PASS_COMPOSE_DRAW)
 // Quad views (Direct3D 12): one eye of the composed image from its
 // peripheral view (t0) and focus view (t1), as the layer's Direct3D 11 quad
-// views compositor composes them (without its diagnostics), drawn by
-// FG_PASS_SYNTHESIZE_DRAW's VSMain. Both are read through sRGB views and
-// written to an sRGB target: blending is linear. fov_current: the focus
-// rectangle (left, top, right, bottom) in output uv; fov_previous.xy: the
-// blend band in output uv, .z: sharpening (0-1); rot0.zw: one output pixel
-// in focus uv; size.xy: the output extent.
+// views compositor composes them, drawn by FG_PASS_SYNTHESIZE_DRAW's VSMain.
+// Both are read through sRGB views and written to an sRGB target: blending is
+// linear. fov_current: the focus rectangle (left, top, right, bottom) in
+// output uv; fov_previous.xy: the blend band in output uv, .z: sharpening
+// (0-1); rot0.zw: one output pixel in focus uv; size.xy: the output extent.
+// options.x (FG_COMPOSE_OVERLAY): the layer's quad views diagnostic overlay
+// is drawn over the eye (Overlay).
 FG_BIND(0) Texture2D<float4> g_peripheral : register(t0);
 FG_BIND(1) Texture2D<float4> g_focus : register(t1);
 FG_BIND(6) SamplerState g_linear : register(s0);
+
+#define FG_COMPOSE_OVERLAY 1u
+#define FG_COMPOSE_OVERLAY_EYE_TRACKING 2u
+#define FG_COMPOSE_OVERLAY_GAZE 4u
+
+// The overlay's shapes, as the Direct3D 11 compositor's (RectOutlineMask,
+// CrossMask, RingMask, SegmentMask): 1 on the shape, fading out over the
+// next output pixel; sizes in output pixels, tuning.xy one output pixel in uv.
+float2 OverlayPixel() {
+    return max(g.tuning.xy, float2(0.000001, 0.000001));
+}
+
+float OverlayRectOutline(float2 uv, float2 rect_min, float2 rect_max, float thickness) {
+    const float2 pixel = OverlayPixel();
+    const float2 center = (rect_min + rect_max) * 0.5;
+    const float2 half_size = max((rect_max - rect_min) * 0.5 / pixel, float2(0.0, 0.0));
+    const float2 point_pixels = (uv - center) / pixel;
+    const float2 q = abs(point_pixels) - half_size;
+    const float signed_distance = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0);
+    return 1.0 - smoothstep(thickness, thickness + 1.0, abs(signed_distance));
+}
+
+float OverlayCross(float2 uv, float2 center, float length_pixels, float thickness) {
+    const float2 delta = abs((uv - center) / OverlayPixel());
+    const float horizontal = (1.0 - smoothstep(thickness, thickness + 1.0, delta.y)) *
+                             (1.0 - smoothstep(length_pixels, length_pixels + 1.0, delta.x));
+    const float vertical = (1.0 - smoothstep(thickness, thickness + 1.0, delta.x)) *
+                           (1.0 - smoothstep(length_pixels, length_pixels + 1.0, delta.y));
+    return max(horizontal, vertical);
+}
+
+float OverlayRing(float2 uv, float2 center, float radius, float thickness) {
+    const float2 delta = (uv - center) / OverlayPixel();
+    return 1.0 - smoothstep(thickness, thickness + 1.0, abs(length(delta) - radius));
+}
+
+float OverlaySegment(float2 uv, float2 start, float2 end, float thickness) {
+    const float2 pixel = OverlayPixel();
+    const float2 offset = (uv - start) / pixel;
+    const float2 segment = (end - start) / pixel;
+    const float along = saturate(dot(offset, segment) / max(dot(segment, segment), 0.0001));
+    return 1.0 - smoothstep(thickness, thickness + 1.0, length(offset - segment * along));
+}
+
+// The layer's quad views diagnostic overlay over the composed colour, exactly
+// as its Direct3D 11 compositor draws it: the periphery tinted blue, the
+// blend band orange and the inset green; the inset's outline (green, red
+// while eye tracking has no gaze) and the band's inner edge (amber); the
+// head's centre (white cross), the configured offset (magenta ring, joined
+// to the centre); with a gaze, the raw gaze (cyan ring) and the smoothed one
+// (yellow cross). rot1: the gaze markers, rot2: the centre and the offset.
+// Drawn last, into the output image alone: nothing measures motion there.
+float3 Overlay(float3 composed, float2 uv, bool inside, float alpha) {
+    const float4 rect = g.fov_current;
+    const float2 feather = g.fov_previous.xy;
+    const float eye_tracking = (g.options.x & FG_COMPOSE_OVERLAY_EYE_TRACKING) != 0u ? 1.0 : 0.0;
+    const float gaze = (g.options.x & FG_COMPOSE_OVERLAY_GAZE) != 0u ? 1.0 : 0.0;
+
+    const bool transition = inside && alpha < 0.999;
+    const float3 zone = !inside ? float3(0.08, 0.28, 0.95) : transition ? float3(1.0, 0.55, 0.04) : float3(0.08, 0.85, 0.28);
+    composed = lerp(composed, zone, !inside ? 0.13 : transition ? 0.20 : 0.055);
+
+    const float tracking_unavailable = eye_tracking * (1.0 - gaze);
+    const float3 outline_color = lerp(float3(0.15, 1.0, 0.3), float3(1.0, 0.08, 0.05), tracking_unavailable);
+    composed = lerp(composed, outline_color, OverlayRectOutline(uv, rect.xy, rect.zw, 2.0));
+
+    const float2 inner_min = min(rect.xy + feather, rect.zw);
+    const float2 inner_max = max(rect.zw - feather, rect.xy);
+    const float inner = OverlayRectOutline(uv, inner_min, inner_max, 1.25) * step(g.tuning.x * 2.0, feather.x) *
+                        step(g.tuning.y * 2.0, feather.y);
+    composed = lerp(composed, float3(1.0, 0.65, 0.05), inner * 0.9);
+
+    const float4 reference = g.rot2;
+    const float2 offset_corner = float2(reference.z, reference.y);
+    const float offset_axes = max(OverlaySegment(uv, reference.xy, offset_corner, 1.0),
+                                  OverlaySegment(uv, offset_corner, reference.zw, 1.0));
+    composed = lerp(composed, float3(1.0, 0.1, 0.85), offset_axes * 0.8);
+    composed = lerp(composed, float3(1.0, 1.0, 1.0), OverlayCross(uv, reference.xy, 14.0, 1.5));
+    composed = lerp(composed, float3(1.0, 0.1, 0.85), OverlayRing(uv, reference.zw, 12.0, 1.5));
+    composed = lerp(composed, float3(0.0, 0.95, 1.0), OverlayRing(uv, g.rot1.xy, 7.0, 1.75) * gaze);
+    composed = lerp(composed, float3(1.0, 0.95, 0.05), OverlayCross(uv, g.rot1.zw, 8.0, 1.5) * gaze);
+    return composed;
+}
 
 float4 PSMain(float4 position : SV_Position) : SV_Target {
     // The pixel's centre: the Direct3D 11 compositor's interpolated uv.
     const float2 uv = saturate(position.xy / float2(g.size.xy));
     const float4 rect = g.fov_current;
     float4 composed = g_peripheral.SampleLevel(g_linear, uv, 0.0);
-    if (all(uv >= rect.xy) && all(uv <= rect.zw)) {
+    const bool inside = all(uv >= rect.xy) && all(uv <= rect.zw);
+    float alpha = 0.0;
+    if (inside) {
         const float2 to_edge = min(uv - rect.xy, rect.zw - uv);
-        float alpha = saturate(min(to_edge.x / max(g.fov_previous.x, 0.0001), to_edge.y / max(g.fov_previous.y, 0.0001)));
+        alpha = saturate(min(to_edge.x / max(g.fov_previous.x, 0.0001), to_edge.y / max(g.fov_previous.y, 0.0001)));
         alpha = alpha * alpha * (3.0 - 2.0 * alpha);
         const float2 focus_uv = saturate((uv - rect.xy) / max(rect.zw - rect.xy, float2(0.0001, 0.0001)));
         float4 focus = g_focus.SampleLevel(g_linear, focus_uv, 0.0);
@@ -1386,6 +1472,9 @@ float4 PSMain(float4 position : SV_Position) : SV_Target {
             focus.rgb = saturate(focus.rgb + clamp((focus.rgb - average) * (sharpen * 2.0), -range * 0.5, range * 0.5));
         }
         composed = lerp(composed, focus, alpha);
+    }
+    if ((g.options.x & FG_COMPOSE_OVERLAY) != 0u) {
+        composed.rgb = Overlay(composed.rgb, uv, inside, alpha);
     }
     return composed;
 }

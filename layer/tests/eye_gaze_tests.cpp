@@ -2,12 +2,15 @@
 #include "depthxr/runtime_compatibility.h"
 
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
 #include <map>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -322,6 +325,43 @@ public:
     // Plans an emulated quad views frame from four tracked swapchains (no
     // device), its focus views `focus_yaw` radians right of centre.
     static bool PlanQuadFrame(XrTime time, float focus_yaw) {
+        OpenXrLayer::QuadViewsComposePlan plan;
+        return PlanQuadFrame(time, focus_yaw, &plan);
+    }
+    // The gaze PlanQuadFrame's frame at `time` has: raw yaw and pitch, then
+    // smoothed (radians), or none.
+    using QuadGaze = std::optional<std::array<double, 4>>;
+    // The composition of a frame PlanQuadFrame plans at `time`, centred, the
+    // diagnostic visualization shown or hidden, in `mode` with `gaze` and the
+    // configured offset (degrees); none when it does not plan. The layer's
+    // settings and visualization state are restored after.
+    static std::optional<FrameGenComposition> PlanQuadComposition(XrTime time, bool shown, QuadViewsTrackingMode mode,
+                                                                  const QuadGaze& gaze, double horizontal_offset,
+                                                                  double vertical_offset) {
+        auto& l = Layer();
+        const auto settings = l.resolved_settings_;
+        const bool was_shown = l.quadviews_diagnostic_visualization_enabled_;
+        l.quadviews_diagnostic_visualization_enabled_ = shown;
+        l.resolved_settings_.quadviews.tracking_mode = mode;
+        l.resolved_settings_.quadviews.horizontal_offset_degrees = horizontal_offset;
+        l.resolved_settings_.quadviews.vertical_offset_degrees = vertical_offset;
+        l.quadviews_raw_focus_valid_ = gaze.has_value();
+        l.quadviews_raw_focus_time_ = time;
+        if (gaze) {
+            l.quadviews_raw_focus_yaw_radians_ = (*gaze)[0];
+            l.quadviews_raw_focus_pitch_radians_ = (*gaze)[1];
+            l.quadviews_smoothed_focus_yaw_radians_ = (*gaze)[2];
+            l.quadviews_smoothed_focus_pitch_radians_ = (*gaze)[3];
+        }
+        OpenXrLayer::QuadViewsComposePlan plan;
+        std::optional<FrameGenComposition> composition;
+        if (PlanQuadFrame(time, 0.0f, &plan)) composition = plan.composition;
+        l.resolved_settings_ = settings;
+        l.quadviews_diagnostic_visualization_enabled_ = was_shown;
+        l.quadviews_raw_focus_valid_ = false;
+        return composition;
+    }
+    static bool PlanQuadFrame(XrTime time, float focus_yaw, OpenXrLayer::QuadViewsComposePlan* plan) {
         auto& l = Layer();
         l.cached_quadviews_stereo_recommended_width_ = l.cached_quadviews_stereo_recommended_height_ = 2000;
         std::array<XrCompositionLayerProjectionView, 4> views{};
@@ -349,8 +389,7 @@ public:
         layer.views = views.data();
         XrPosef identity{};
         identity.orientation.w = 1.0f;
-        OpenXrLayer::QuadViewsComposePlan plan;
-        return l.BuildQuadViewsComposePlan(&layer, time, identity, false, nullptr, &plan);
+        return l.BuildQuadViewsComposePlan(&layer, time, identity, false, nullptr, plan);
     }
     // The inset motion summary falls due on the next planned frame.
     static void InsetMotionDue() {
@@ -656,6 +695,64 @@ int main() {
                "a session's end must summarize the frames since the last summary");
         Peer::LogTo(logs / "inset-motion.log");
         std::filesystem::remove_all(logs, error);
+
+        // The diagnostic overlay rides in each composed eye of the plan,
+        // which the Direct3D 11 compositor draws from and Frame Generation
+        // composes a claimed frame from: shown only with the visualization,
+        // with the head's centre, the configured offset and the gaze where
+        // they fall in the eye (its full view: tangents of +-0.8 rad).
+        Peer::Prepare();
+        const auto uv = [](double yaw, double pitch) {
+            const double edge = std::tan(static_cast<double>(0.8f));
+            return std::array<double, 2>{(std::tan(yaw) + edge) / (2.0 * edge),
+                                         (edge - std::tan(pitch)) / (2.0 * edge)};
+        };
+        const auto at = [](const std::array<float, 4>& markers, std::size_t first,
+                           const std::array<double, 2>& expected) {
+            return std::abs(markers[first] - expected[0]) < 1e-6 && std::abs(markers[first + 1] - expected[1]) < 1e-6;
+        };
+        const Peer::QuadGaze quad_gaze = std::array<double, 4>{0.1, -0.05, 0.08, -0.04};
+        const auto hidden =
+            Peer::PlanQuadComposition(7000, false, depthxr::QuadViewsTrackingMode::Eye, quad_gaze, 5.0, -3.0);
+        Expect(hidden && hidden->eyes.size() == 2, "a frame with the visualization hidden must plan");
+        for (const depthxr::FrameGenComposeEye& eye : hidden->eyes) {
+            Expect(!eye.overlay.shown && eye.overlay.gaze_markers == std::array<float, 4>{} &&
+                       eye.overlay.reference_markers == std::array<float, 4>{},
+                   "a hidden visualization must leave the composed eyes without the overlay");
+            Expect(depthxr::BuildFrameGenComposeConstants(eye, hidden->output).options ==
+                       std::array<std::uint32_t, 4>{},
+                   "Frame Generation must compose a hidden visualization's eyes without the overlay");
+        }
+        const auto shown =
+            Peer::PlanQuadComposition(7001, true, depthxr::QuadViewsTrackingMode::Eye, quad_gaze, 5.0, -3.0);
+        Expect(shown && shown->eyes.size() == 2, "a frame with the visualization shown must plan");
+        const double offset_yaw = 5.0 * 3.14159265358979323846 / 180.0;
+        const double offset_pitch = -3.0 * 3.14159265358979323846 / 180.0;
+        for (const depthxr::FrameGenComposeEye& eye : shown->eyes) {
+            Expect(eye.overlay.shown && eye.overlay.eye_tracking && eye.overlay.gaze,
+                   "an eye-tracked frame with a gaze must show the overlay with its gaze");
+            Expect(at(eye.overlay.gaze_markers, 0, uv(0.1, -0.05)) && at(eye.overlay.gaze_markers, 2, uv(0.08, -0.04)),
+                   "the overlay must mark the raw and the smoothed gaze where they fall in the eye");
+            Expect(at(eye.overlay.reference_markers, 0, uv(0.0, 0.0)) &&
+                       at(eye.overlay.reference_markers, 2, uv(offset_yaw, offset_pitch)),
+                   "the overlay must mark the head's centre and the configured offset");
+            const depthxr::FrameGenConstants constants = depthxr::BuildFrameGenComposeConstants(eye, shown->output);
+            Expect(constants.options[0] == (depthxr::kFrameGenComposeOverlay |
+                                             depthxr::kFrameGenComposeOverlayEyeTracking |
+                                             depthxr::kFrameGenComposeOverlayGaze) &&
+                       constants.rot1 == eye.overlay.gaze_markers && constants.rot2 == eye.overlay.reference_markers,
+                   "Frame Generation must compose the shown visualization's eyes with the overlay");
+        }
+        const auto no_gaze =
+            Peer::PlanQuadComposition(7002, true, depthxr::QuadViewsTrackingMode::Eye, std::nullopt, 0.0, 0.0);
+        Expect(no_gaze && no_gaze->eyes[0].overlay.shown && no_gaze->eyes[0].overlay.eye_tracking &&
+                   !no_gaze->eyes[0].overlay.gaze,
+               "an eye-tracked frame without a gaze must show the overlay without its gaze (a red outline)");
+        const auto head =
+            Peer::PlanQuadComposition(7003, true, depthxr::QuadViewsTrackingMode::Head, quad_gaze, 0.0, 0.0);
+        Expect(head && head->eyes[0].overlay.shown && !head->eyes[0].overlay.eye_tracking &&
+                   !head->eyes[0].overlay.gaze,
+               "a head-tracked frame must show the overlay without eye tracking or its gaze");
         Peer::Prepare();
         std::cout << "Eye-gaze handshake tests passed.\n";
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }

@@ -382,12 +382,12 @@ in-headset view labels the rendered regions and tracking pipeline with color:
 - White cross: head-forward center; magenta ring: configured horizontal/vertical offset.
 - Cyan ring: raw eye gaze; yellow cross: gaze after deadzone and smoothing.
 
-The diagnostic view is available only for VectorXR's synthesized D3D11 Quadviews compositor. It is
-not currently supported on Varjo headsets, where the Varjo runtime owns native composition, or in a
-D3D11 game such as DCS that started with Frame Generation on: Frame Generation composes the quad
-views itself there. To use the visualization, turn Frame Generation off for the game and restart
-the game. Turning it off in a running game, or with the A/B toggle, does not make the
-visualization available.
+The diagnostic view is available only for VectorXR's synthesized D3D11 Quadviews. It is not
+currently supported on Varjo headsets, where the Varjo runtime owns native composition. In a D3D11
+game such as DCS with Frame Generation on, Frame Generation composes the quad views itself and draws
+the same visualization into every frame it shows, real and generated. In the rare session where
+Frame Generation generates frames from the composed image instead, the visualization stays off and
+the app shows it as unavailable: Frame Generation would read the overlay as motion.
 
 Quadviews and Pivot are designed to compose: unlike running separate foveation and neck-assist
 layers, VectorXR keeps the foveated focus region aligned with your gaze while Pivot rotates the
@@ -429,9 +429,9 @@ API-layer, runtime, and in-game VR changes also require a full game restart.
 Live app control requires an active VectorXR synthesized D3D11 Quadviews session. Start a compatible
 quad-view application with the VectorXR profile enabled. Native Varjo composition does not expose
 this visualization; the saved in-headset shortcut also begins each new session with the overlay off.
-In a D3D11 game such as DCS that started with Frame Generation on, the visualization is unavailable
-for the whole session, and the app reads **Unavailable in the active OpenXR session**. Turn Frame
-Generation off for the game and restart it.
+It is also unavailable in the rare session where Frame Generation generates frames from the composed
+image instead of composing the quad views itself, and the app reads **Unavailable in the active
+OpenXR session**.
 
 **What else should I disable while troubleshooting?**
 
@@ -864,9 +864,7 @@ Advanced settings. The first enabled custom profile that matches the running gam
   application has both turned on; it never blocks saving.
 - **Quadviews:** works with VectorXR's synthesized quad views and with Varjo-native quad views,
   because generation runs on the final images sent to the headset. On Varjo headsets, **Foveate
-  Sharpness** is off in Direct3D 11 games such as DCS while Frame Generation is on, and the
-  Quadviews diagnostic visualization is unavailable in Direct3D 11 games that started with Frame
-  Generation on.
+  Sharpness** is off in Direct3D 11 games such as DCS while Frame Generation is on.
 - **Graphics APIs:** Direct3D 11, Direct3D 12, and Vulkan.
 - **On-Screen Display:** in games where Frame Generation is on, both layouts show its state
   beside the FPS value (**FG ON** with the frames per second the headset shows, or **FG STBY**,

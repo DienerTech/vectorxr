@@ -572,9 +572,15 @@ class OpenXrLayer {
     void NoteTurboShouldRenderLocked(bool should_render);
     bool IsQuadViewsActive() const;
     bool IsQuadViewsEmulationActive() const;
-    // A bridged session whose pacing Frame Generation owns: it composes the
-    // quad views itself, and the diagnostic overlay is unavailable.
-    bool FrameGenComposesQuadViews() const;
+    // Frame Generation captures the Direct3D 11 quad views compositor's
+    // images (it generates frames from them where it cannot compose the quad
+    // views itself): the diagnostic overlay stays out of them, or its motion
+    // would be measured. Caller holds mutex_.
+    bool QuadViewsOverlayWithheld() const;
+    // The diagnostic visualization can be shown in this session (the app's
+    // live control): an emulated quad views session with the Direct3D 11
+    // compositor, the overlay not withheld. Caller holds mutex_.
+    bool QuadViewsDiagnosticVisualizationAvailable() const;
     void ResetSwapchainState();
     void LogSwapchainSummary(XrSwapchain swapchain, const SwapchainInfo& info, std::string_view event_name);
     // Logs xrEnumerateSwapchainFormats' list when it differs from the last one this session.
@@ -785,7 +791,9 @@ class OpenXrLayer {
         // restored; subImage unset.
         std::array<XrCompositionLayerProjectionView, 2> eye_views{};
         uint32_t restored{0}; // eye views whose depth geometry was restored
-        FrameGenComposition composition; // per eye: views eye and eye + 2
+        // Per eye: views eye and eye + 2, with the diagnostic overlay while
+        // the visualization is shown.
+        FrameGenComposition composition;
         bool log_diagnostic{false};      // the frame logs the compositor's Debug diagnostics
         // Frame Generation's thread shows the composed frame later, between
         // frames it writes itself (left to the layer while that thread
