@@ -3448,7 +3448,7 @@ void CheckDepth(App& app, VulkanGame& game, Target& left, Target& right) {
         }
     }
     g_runtime.read_depth = false;
-    Check(!Contains(Peer::Log(), "keeps the game's multisampled depth to itself"), "no depth is left out");
+    Check(!Contains(Peer::Log(), "keeps the game's depth to itself"), "no depth is left out");
     Check(app.api.destroy_swapchain(depth.swapchain) == XR_SUCCESS, "the depth swapchain is destroyed");
 }
 

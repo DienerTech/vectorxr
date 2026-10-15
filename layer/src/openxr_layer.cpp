@@ -8686,7 +8686,8 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
                 [this](XrSwapchain swapchain) { return vulkan_bridge_.Unmirrored(swapchain); });
             if (without_depth != frame_end_info && !vulkan_bridge_depth_logged_) {
                 vulkan_bridge_depth_logged_ = true;
-                logger_.Info("Frame Generation's Vulkan bridge keeps the game's multisampled depth to itself: it is "
+                logger_.Info("Frame Generation's Vulkan bridge keeps the game's depth to itself (multisampled, or the "
+                             "runtime's depth images are not depth targets: its swapchain line says which): it is "
                              "left out of the frames the runtime and Frame Generation get.");
             }
             frame_end_info = without_depth;
