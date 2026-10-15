@@ -3,7 +3,7 @@
     "version": "0.19.2",
     "date": "2026-10-14",
     "title": "Compatibility, Stability, and Frame Generation Pacing",
-    "summary": "A broad fix release. VectorXR now loads on PCs without the Visual C++ runtime and can no longer be crashed by an old one a game ships. Frame Generation paces better on Varjo and with runtimes that hold frames to half rate, Turbo no longer treats normal Star Citizen and MSFS exits as crashes, the On-Screen Display refreshes at the rate you set, and the app protects your settings and layer list better. Settings carry over from 0.19.1 unchanged.",
+    "summary": "A broad fix release. VectorXR now loads on PCs without the Visual C++ runtime and can no longer be crashed by an old one a game ships. Frame Generation paces better on Varjo, with overlays such as OpenKneeboard, after hitches, and with runtimes that hold frames to half rate; Interpolate can use NVIDIA's optical flow hardware at fixed frame rates (experimental), and the Quadviews diagnostic visualization works with Frame Generation. Turbo no longer treats normal Star Citizen and MSFS exits as crashes, the On-Screen Display refreshes at the rate you set, and the app protects your settings and layer list better. Settings carry over from 0.19.1 unchanged.",
     "items": [
       {
         "html": "<strong>Compatibility and stability</strong>",
