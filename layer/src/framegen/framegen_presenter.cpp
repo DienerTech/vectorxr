@@ -738,6 +738,7 @@ void FrameGenPresenter::SetLeadPolicy(const FrameGenLeadPolicy& policy) {
     std::scoped_lock lock(mutex_);
     lead_policy_ = policy;
     lead_explore_after_ = policy.explore_after;
+    lead_return_after_ = policy.explore_after;
 }
 
 void FrameGenPresenter::ResetLeadLocked() {
@@ -748,6 +749,7 @@ void FrameGenPresenter::ResetLeadLocked() {
     lead_floor_ = 0;
     lead_floor_proven_ = 0;
     lead_explore_after_ = lead_policy_.explore_after;
+    lead_return_after_ = lead_policy_.explore_after;
     lead_floor_failed_ = false;
 }
 
@@ -4703,10 +4705,12 @@ void FrameGenPresenter::UpdateLeadLocked(bool late, std::optional<double> slack_
             // Only back at the lowest lead a probe proved, from a floor late
             // frames raised: below it, tries still wait as long as the
             // failures there made them. A new lowest lead starts afresh.
+            // Either way the next probe back waits explore_after.
             const bool returned =
                 lead_slots_ == lead_floor_proven_ && lead_explore_after_ > lead_policy_.explore_after;
             lead_floor_ = lead_slots_;
             lead_floor_proven_ = lead_slots_;
+            lead_return_after_ = lead_policy_.explore_after;
             if (!returned) {
                 lead_explore_after_ = lead_policy_.explore_after;
                 lead_floor_failed_ = false;
@@ -4716,14 +4720,14 @@ void FrameGenPresenter::UpdateLeadLocked(bool late, std::optional<double> slack_
     }
     // How long a lead at or below the lowest known to hold waits before a
     // try below it. Above the lowest lead a probe proved (a floor late frames
-    // raised): explore_after. The doubled wait is for below the proven lead,
-    // where tries failed; applied above it too, it held a raised floor with a
-    // refresh to spare for most of a minute (Star Citizen on Virtual Desktop,
-    // 2026-10-14: lead 3 held about 56 s where 2 was proven, after two failed
-    // probes to 1 had doubled the wait to 40 s). A failed probe back proves
-    // the raised lead: one more probe per raise at most.
+    // raised): the probe back's own wait, explore_after until one fails. The
+    // doubled wait is for below the proven lead, where tries failed; applied
+    // above it too, it held a raised floor with a refresh to spare for most
+    // of a minute (Star Citizen on Virtual Desktop, 2026-10-14: lead 3 held
+    // about 56 s where 2 was proven, after two failed probes to 1 had doubled
+    // the wait to 40 s).
     const bool above_proven = lead_floor_proven_ != 0 && lead_slots_ > lead_floor_proven_;
-    const auto explore_wait = above_proven ? lead_policy_.explore_after : lead_explore_after_;
+    const auto explore_wait = above_proven ? lead_return_after_ : lead_explore_after_;
     // Frames predicted with another lead say nothing about this one (those
     // in flight across a step would move it twice, or judge a probe by
     // frames it never set).
@@ -4745,12 +4749,28 @@ void FrameGenPresenter::UpdateLeadLocked(bool late, std::optional<double> slack_
                 // The probe (or step down) failed: the lead before it is the
                 // lowest known to hold, and below it is tried only rarely
                 // (more rarely after each failure there).
-                const bool exploring = lead_floor_ != 0 && lead_probe_->from <= lead_floor_;
-                lead_floor_ = lead_probe_->from;
-                lead_floor_proven_ = lead_floor_;
+                const bool returning = lead_floor_proven_ != 0 && lead_probe_->from == lead_floor_ &&
+                                       lead_floor_ > lead_floor_proven_;
+                if (returning) {
+                    // Back to the proven lead from a floor late frames raised:
+                    // the raised floor holds, and the next probe back waits
+                    // twice as long. The proven lead and the wait below it
+                    // stay, as a hitch no lead cures (Star Citizen's, about
+                    // every half minute) can come during the probe back.
+                    // Taken as proving the raised lead, that coincidence gave
+                    // it the wait the failures below the proven lead had
+                    // doubled, so with hitches more often than that it stayed
+                    // up, and the next coincidence lifted it a refresh more.
+                    lead_return_after_ = std::min(lead_return_after_ * 2, lead_policy_.explore_max);
+                } else {
+                    const bool exploring = lead_floor_ != 0 && lead_probe_->from <= lead_floor_;
+                    lead_floor_ = lead_probe_->from;
+                    lead_floor_proven_ = lead_floor_;
+                    lead_explore_after_ = exploring ? std::min(lead_explore_after_ * 2, lead_policy_.explore_max)
+                                                    : lead_policy_.explore_after;
+                    lead_return_after_ = lead_policy_.explore_after;
+                }
                 lead_floor_failed_ = true;
-                lead_explore_after_ = exploring ? std::min(lead_explore_after_ * 2, lead_policy_.explore_max)
-                                                : lead_policy_.explore_after;
                 ++(lead_probe_->slack ? totals_.lead_downs_undone : totals_.lead_probes_failed);
                 lead_probe_.reset();
             } else if (hysteresis && lead_floor_ != 0 && lead_slots_ <= lead_floor_) {
@@ -4759,9 +4779,9 @@ void FrameGenPresenter::UpdateLeadLocked(bool late, std::optional<double> slack_
                 // the lowest a probe proved: a hitch no lead cures (Star
                 // Citizen's, every half minute) raised it a refresh each time,
                 // and the lead with it, past what the kept real frames cover
-                // (2026-10-13). A lead that does not hold any more is proved
-                // by its probe failing; the probe back to the proven lead
-                // comes after explore_after (explore_wait).
+                // (2026-10-13). A game that needs the raised lead fails the
+                // probes back to the proven lead, which then come less often
+                // (explore_wait).
                 const std::uint32_t most = lead_floor_proven_ != 0 ? lead_floor_proven_ + 1 : lead_slots_ + 1;
                 lead_floor_ = std::max(lead_floor_, std::min({lead_slots_ + 1, 4 * multiplier, most}));
                 lead_floor_failed_ = true;

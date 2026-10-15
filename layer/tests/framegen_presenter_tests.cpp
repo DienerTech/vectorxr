@@ -4851,11 +4851,11 @@ void TestHitchReturnsToProvenLead() {
 }
 
 // As TestHitchReturnsToProvenLead, but the game is slower from the hitch on
-// and needs the raised lead: the probe back to the proven lead fails, which
-// proves the raised lead, and below it the doubled wait holds. Retried every
-// explore_after, each try would cost two late frames. (A higher explore_max:
-// the wait after that failure outlasts the 4 s.)
-void TestRaisedFloorReprovedOnce() {
+// and needs the raised lead: the probes back to the proven lead fail, each
+// doubling the wait before the next. Retried every explore_after, each try
+// would cost two late frames. Between them the raised floor holds and rises
+// no further. (A higher explore_max: the waits double within the 7 s.)
+void TestRaisedFloorProbesBackOff() {
     const std::string name = "raised floor";
     FrameGenPresenter presenter;
     GpuLog gpu;
@@ -4866,7 +4866,8 @@ void TestRaisedFloorReprovedOnce() {
     App* app = nullptr;
     StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2, app, runtime, owned);
     app->end_offset_periods = 1;
-    presenter.SetLeadPolicy(ProvenLeadPolicy(5600ms));
+    const FrameGenLeadPolicy policy = ProvenLeadPolicy(5600ms);
+    presenter.SetLeadPolicy(policy);
     bool spike = false;
     bool slower = false;
     app->before_release = [&] {
@@ -4878,32 +4879,135 @@ void TestRaisedFloorReprovedOnce() {
     const std::uint32_t proven = settled.lead_floor;
     spike = slower = true;
     const auto slowed = std::chrono::steady_clock::now();
-    // From the failed probe back on: the lead and its floor stay a refresh up.
+    // From the first failed probe back on: the floor stays a refresh up, and
+    // the lead with it but for the probes back.
     bool held = true;
-    std::uint32_t lowest = 0;
-    double failed_after = 0.0;
-    RunWork(*app, 4000ms, {6ms}, [&](const XrFrameState&) {
+    std::uint64_t undone = LeadProbesUndone(settled);
+    std::vector<double> failed_at; // seconds after the slowdown
+    RunWork(*app, 7000ms, {6ms}, [&](const XrFrameState&) {
         const FrameGenStatus now = presenter.Status();
-        if (LeadProbesUndone(now) > LeadProbesUndone(settled)) {
-            if (!lowest) failed_after = Seconds(std::chrono::steady_clock::now() - slowed);
-            held = held && now.lead_slots == proven + 1 && now.lead_floor == proven + 1;
-            lowest = lowest ? std::min(lowest, now.lead_slots) : now.lead_slots;
+        if (LeadProbesUndone(now) > undone) {
+            undone = LeadProbesUndone(now);
+            failed_at.push_back(Seconds(std::chrono::steady_clock::now() - slowed));
+        }
+        if (!failed_at.empty()) {
+            held = held && now.lead_floor == proven + 1 &&
+                   (now.lead_slots == proven + 1 || now.lead_slots == proven);
         }
         return false;
     });
     const FrameGenStatus after = presenter.Status();
     presenter.Stop();
-    const std::uint64_t undone = LeadProbesUndone(after) - LeadProbesUndone(settled);
+    std::string times;
+    for (const double at : failed_at) times += (times.empty() ? "" : ", ") + std::to_string(at);
     std::cerr << "  " << name << ": lead " << proven << " -> " << after.lead_slots << " (floor " << after.lead_floor
-              << "), " << undone << " probes undone in 4 s (the first after " << failed_after << " s), lowest after "
-              << lowest << ", late +" << (after.late_cpu - settled.late_cpu) + (after.late_gpu - settled.late_gpu)
-              << std::endl;
+              << "), " << failed_at.size() << " probes back undone in 7 s (at " << times << " s), late +"
+              << (after.late_cpu - settled.late_cpu) + (after.late_gpu - settled.late_gpu) << std::endl;
     Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
-    Check(undone == 1, name + ": the probe back to the proven lead fails once in 4 s (" + std::to_string(undone) +
-                           " undone)");
-    Check(held && after.lead_slots == proven + 1 && after.lead_floor == proven + 1,
-          name + ": after it the lead and its floor stay a refresh up (lead " + std::to_string(after.lead_slots) +
-              ", floor " + std::to_string(after.lead_floor) + ", lowest " + std::to_string(lowest) + ")");
+    Check(failed_at.size() >= 2 && failed_at.size() <= 3,
+          name + ": the probes back to the proven lead fail, fewer than one each explore_after (" +
+              std::to_string(failed_at.size()) + " in 7 s, at " + times + " s)");
+    // Each failure doubles the wait before the next probe back, from
+    // 2x explore_after; the probe back still comes.
+    for (std::size_t i = 1; i < failed_at.size(); ++i) {
+        const double wait = Seconds(policy.explore_after) * static_cast<double>(2u << (i - 1));
+        const double gap = failed_at[i] - failed_at[i - 1];
+        Check(gap >= wait - 0.15 && gap <= wait + Seconds(policy.judge) + 0.6,
+              name + ": probe back " + std::to_string(i + 1) + " after the doubled wait (" + std::to_string(gap) +
+                  " s, the wait " + std::to_string(wait) + " s)");
+    }
+    Check(held && after.lead_floor == proven + 1 && after.lead_slots == proven + 1,
+          name + ": between them the lead and its floor stay a refresh up (lead " +
+              std::to_string(after.lead_slots) + ", floor " + std::to_string(after.lead_floor) + ")");
+}
+
+// A hitch no lead cures can come just as the lead tries the proven lead again
+// after the hitch before it, and undo that probe back though the proven lead
+// still holds (Star Citizen hitches about every half minute, irregularly; the
+// probe back comes 10 s after each and is judged for 3 s). Taken as proving
+// the raised lead, that probe's failure doubled the wait from the failures
+// below the proven lead, and every later return to the raised lead kept it:
+// with hitches more often than that wait the lead stayed a refresh up, and the
+// next such coincidence lifted it one more. A failed probe back doubles only
+// the wait before the next probe back; the proven lead and the wait below it
+// stay.
+void TestHitchDuringProbeBack() {
+    const std::string name = "hitch during the probe back";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    gpu.frames_ahead = 2;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2, app, runtime, owned);
+    app->end_offset_periods = 1;
+    const FrameGenLeadPolicy policy = ProvenLeadPolicy(5600ms);
+    presenter.SetLeadPolicy(policy);
+    bool spike = false;
+    app->before_release = [&] {
+        gpu.game_gpu = spike ? 150ms : 10ms;
+        spike = false;
+        gpu.GameFrame();
+    };
+    const FrameGenStatus settled = FailProbesBelowProvenLead(presenter, *app, name);
+    const std::uint32_t proven = settled.lead_floor;
+    std::uint32_t highest_floor = settled.lead_floor;
+    const auto sample = [&] {
+        const FrameGenStatus now = presenter.Status();
+        highest_floor = std::max(highest_floor, now.lead_floor);
+        return now;
+    };
+    // A hitch raises the lead a refresh...
+    spike = true;
+    RunWork(*app, 2000ms, {6ms}, [&](const XrFrameState&) { return sample().lead_slots > proven; });
+    const FrameGenStatus raised = presenter.Status();
+    // ...the next comes as the lead tries the proven lead again...
+    RunWork(*app, policy.explore_after + 1000ms, {6ms},
+            [&](const XrFrameState&) { return sample().lead_slots <= proven; });
+    const FrameGenStatus probing = presenter.Status();
+    spike = true;
+    RunWork(*app, 2000ms, {6ms},
+            [&](const XrFrameState&) { return LeadProbesUndone(sample()) > LeadProbesUndone(probing); });
+    const FrameGenStatus failed = presenter.Status();
+    // ...and one more right after it.
+    spike = true;
+    RunWork(*app, 2000ms, {6ms}, [&](const XrFrameState&) { return sample().lead_slots > failed.lead_slots; });
+    const auto third_at = std::chrono::steady_clock::now();
+    const FrameGenStatus third = presenter.Status();
+    // Then none: back at the proven lead, and below it the wait from the
+    // failures there still holds.
+    RunWork(*app, policy.explore_max + 1000ms, {6ms},
+            [&](const XrFrameState&) { return sample().lead_slots <= proven; });
+    const auto back = std::chrono::steady_clock::now() - third_at;
+    const FrameGenStatus returned = presenter.Status();
+    std::uint32_t lowest = returned.lead_slots;
+    RunWork(*app, 2000ms, {6ms}, [&](const XrFrameState&) {
+        lowest = std::min(lowest, sample().lead_slots);
+        return false;
+    });
+    const FrameGenStatus after = presenter.Status();
+    presenter.Stop();
+    std::cerr << "  " << name << ": lead " << proven << " -> " << raised.lead_slots << ", probe back to "
+              << probing.lead_slots << " undone -> " << failed.lead_slots << " (floor " << failed.lead_floor
+              << "), hitch -> " << third.lead_slots << " (floor " << third.lead_floor << "), highest floor "
+              << highest_floor << ", back at " << returned.lead_slots << " after " << Seconds(back)
+              << " s, then lowest " << lowest << " (floor " << after.lead_floor << ")" << std::endl;
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    Check(raised.lead_slots == proven + 1 && probing.lead_slots == proven &&
+              LeadProbesUndone(failed) == LeadProbesUndone(probing) + 1 && failed.lead_slots == proven + 1,
+          name + ": the second hitch undoes the probe back (lead " + std::to_string(raised.lead_slots) + " -> " +
+              std::to_string(probing.lead_slots) + " -> " + std::to_string(failed.lead_slots) + ")");
+    Check(third.lead_slots > proven + 1, name + ": the third raises the lead again (" +
+                                             std::to_string(third.lead_slots) + ")");
+    Check(highest_floor <= proven + 1, name + ": the floor rises a refresh above the proven lead at most (" +
+                                           std::to_string(proven) + " -> " + std::to_string(highest_floor) + ")");
+    Check(returned.lead_slots == proven && back <= policy.probe_after + 2 * policy.explore_after + policy.judge + 600ms,
+          name + ": the lead is back at the proven lead after the doubled wait before a probe back (" +
+              std::to_string(Seconds(back)) + " s)");
+    Check(lowest == proven && after.lead_floor == proven,
+          name + ": below the proven lead the wait from the failures there holds (lowest " + std::to_string(lowest) +
+              ", floor " + std::to_string(after.lead_floor) + ")");
 }
 
 // Dynamic caps the lead at 4 refreshes per real frame, its refreshes per real
@@ -9267,7 +9371,8 @@ int main(int argc, char** argv) {
     RUN(TestSteamVrMissedRefresh);
     RUN(TestLeadAfterRepeatedHitches);
     RUN(TestHitchReturnsToProvenLead);
-    RUN(TestRaisedFloorReprovedOnce);
+    RUN(TestRaisedFloorProbesBackOff);
+    RUN(TestHitchDuringProbeBack);
     RUN(TestPassedOverFramesKeepLead);
     RUN(TestLeadFollowsLoweredCap);
     for (const bool jit : {true, false}) {
