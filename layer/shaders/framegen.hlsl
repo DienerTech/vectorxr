@@ -1473,6 +1473,7 @@ float4 PSMain(float4 position : SV_Position) : SV_Target {
         }
         composed = lerp(composed, focus, alpha);
     }
+    [branch]
     if ((g.options.x & FG_COMPOSE_OVERLAY) != 0u) {
         composed.rgb = Overlay(composed.rgb, uv, inside, alpha);
     }

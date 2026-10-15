@@ -387,7 +387,9 @@ currently supported on Varjo headsets, where the Varjo runtime owns native compo
 game such as DCS with Frame Generation on, Frame Generation composes the quad views itself and draws
 the same visualization into every frame it shows, real and generated. In the rare session where
 Frame Generation generates frames from the composed image instead, the visualization stays off and
-the app shows it as unavailable: Frame Generation would read the overlay as motion.
+the app and the binding refuse it: Frame Generation would read the overlay as motion. To use it
+there, turn Frame Generation off for the game and restart the game; turning Frame Generation off
+in a running game, or with its A/B toggle, does not make it available.
 
 Quadviews and Pivot are designed to compose: unlike running separate foveation and neck-assist
 layers, VectorXR keeps the foveated focus region aligned with your gaze while Pivot rotates the
@@ -431,7 +433,7 @@ quad-view application with the VectorXR profile enabled. Native Varjo compositio
 this visualization; the saved in-headset shortcut also begins each new session with the overlay off.
 It is also unavailable in the rare session where Frame Generation generates frames from the composed
 image instead of composing the quad views itself, and the app reads **Unavailable in the active
-OpenXR session**.
+OpenXR session**: turn Frame Generation off for the game and restart the game to use it there.
 
 **What else should I disable while troubleshooting?**
 

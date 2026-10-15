@@ -13784,14 +13784,20 @@ void OpenXrLayer::PollQuadViewsDiagnosticVisualizationToggle() {
         return;
     }
 
+    // Refused while Frame Generation generates from the composed images (it
+    // would measure the overlay as motion), as the app's control is; hiding
+    // it always works.
+    if (!quadviews_diagnostic_visualization_enabled_ && QuadViewsOverlayWithheld()) {
+        logger_.Info("Quadviews diagnostic visualization is unavailable (" + BindingLabel(binding) +
+                     "): Frame Generation generates frames from the composed images in this session. Turn Frame "
+                     "Generation off for this game and restart it to use the visualization.");
+        return;
+    }
     quadviews_diagnostic_visualization_enabled_ = !quadviews_diagnostic_visualization_enabled_;
     runtime_relay_status_dirty_.store(true, std::memory_order_release);
     logger_.Info(std::string("Quadviews diagnostic visualization ") +
-                 (quadviews_diagnostic_visualization_enabled_ ? "shown" : "hidden") +
-                 " via " + BindingLabel(binding) +
-                 (quadviews_diagnostic_visualization_enabled_ && QuadViewsOverlayWithheld()
-                      ? "; it stays out of the composed images while Frame Generation generates frames from them."
-                      : "."));
+                 (quadviews_diagnostic_visualization_enabled_ ? "shown" : "hidden") + " via " +
+                 BindingLabel(binding) + ".");
     SoundPlayer::Instance().PlayTransition(binding.sound,
                                            quadviews_diagnostic_visualization_enabled_,
                                            dll_directory_,
