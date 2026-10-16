@@ -582,6 +582,10 @@ void FrameGenPresenter::Stop() {
     auto_multiplier_ = 1;
     auto_memory_ceiling_ = kMaxMultiplier;
     memory_budget_.reset();
+    // The OSD's PERFORMANCE row shows these as Frame Generation's video
+    // memory: none until the next session allocates again.
+    working_bytes_ = output_bytes_ = output_set_bytes_ = 0;
+    working_bytes_due_ = {};
     memory_checked_at_ = {};
     memory_room_since_.reset();
     memory_recoveries_ = 0;
@@ -4369,6 +4373,7 @@ void FrameGenPresenter::DestroyOutputs() {
     output_sets_.clear();
     std::scoped_lock lock(mutex_);
     output_kinds_.clear();
+    output_bytes_ = output_set_bytes_ = 0;
     extrapolated_ = {};
 }
 
@@ -5524,7 +5529,9 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
     const bool renderable = info.layerCount > 0 && projection != nullptr;
     FrameCopy copy;
     std::string unsupported;
-    const bool copied = CopyFrame(info, copy, unsupported);
+    // Refused for composition metadata, nothing is presented from a copy
+    // again, and CopyFrame would only report the refused chain.
+    const bool copied = !pass_through && CopyFrame(info, copy, unsupported);
     std::unique_lock lock(mutex_);
     end_thread_ = std::this_thread::get_id();
     NoteDisplayOffsetLocked(info.displayTime, frame.predicted, frame.reported_period);
@@ -5543,7 +5550,7 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
         // as targets (ClaimQuadFrame).
         RecordCaptureTargetsLocked(*projection);
     }
-    if (!copied && !threaded_disabled_) {
+    if (!copied && !pass_through && !threaded_disabled_) {
         // The next wait returns to inline presentation.
         threaded_disabled_ = true;
         if (logger_) {
@@ -6107,8 +6114,9 @@ XrResult FrameGenPresenter::ThreadedEndJit(const XrFrameEndInfo& info, const Thr
         // as targets (ClaimQuadFrame).
         RecordCaptureTargetsLocked(*projection);
     }
-    if (!copied && !threaded_disabled_) {
-        // The next wait returns to inline presentation.
+    if (!copied && !unsupported_composition_ && !threaded_disabled_) {
+        // The next wait returns to inline presentation (refused for
+        // composition metadata, Frame Generation is unavailable instead).
         threaded_disabled_ = true;
         if (logger_) {
             logger_->Info("Frame Generation presents inline: the game submits " + unsupported +
