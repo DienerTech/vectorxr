@@ -1725,10 +1725,18 @@ class D3D12FrameGen final : public FrameGenGpu {
         }
         if (atlas_in_use_ && effective_tuning.hardware_flow && !EnsureAtlas(views, tuning)) {
             atlas_in_use_ = false;
-            atlas_failed_ = !hardware_failed_;
-            effective_tuning.hardware_flow = !hardware_failed_;
-            for (std::size_t i = 0; i < views.size() && effective_tuning.hardware_flow; ++i) {
-                effective_tuning.hardware_flow = EnsureHardware(views_[i], i, views[i], tuning, true);
+            if (atlas_busy_) {
+                // The GPU did not finish before an atlas switch: no refusal.
+                // This frame measures on the shader cores; the next one
+                // tries the switch again.
+                atlas_busy_ = false;
+                effective_tuning.hardware_flow = false;
+            } else {
+                atlas_failed_ = !hardware_failed_;
+                effective_tuning.hardware_flow = !hardware_failed_;
+                for (std::size_t i = 0; i < views.size() && effective_tuning.hardware_flow; ++i) {
+                    effective_tuning.hardware_flow = EnsureHardware(views_[i], i, views[i], tuning, true);
+                }
             }
         }
         // Captures start matching on the hardware while it is in use.
@@ -3520,6 +3528,11 @@ class D3D12FrameGen final : public FrameGenGpu {
         if ((view.hardware || view.hardware_newest.resource) && !WaitIdle()) {
             return HardwareFailed("the GPU did not finish before the optical flow session was resized");
         }
+        if (hardware_hung_) {
+            // The watchdog released a stalled match (perhaps during that
+            // drain): no new session on that hardware.
+            return HardwareFailed("the optical flow hardware stopped responding");
+        }
         RetireHardware(view);
         if (!own_session) {
             std::string error;
@@ -3663,6 +3676,10 @@ class D3D12FrameGen final : public FrameGenGpu {
         }
 #endif
         view.hardware_extent = {};
+        // Values of the fence just retired: a new session's fence starts
+        // over, and a game-queue wait for the old value would never end.
+        view.raw_last_match = 0;
+        view.raw_reference = 0;
     }
 
 #ifdef DEPTHXR_NVOF
@@ -3699,8 +3716,12 @@ class D3D12FrameGen final : public FrameGenGpu {
             // release a stall, as EnsureHardware drains before replacing a
             // view's session. A quality or layout change costs one drain and
             // applies on this frame (deferring it could last indefinitely
-            // while matches overlap).
-            if (!WaitIdle()) return false;
+            // while matches overlap). A drain that times out is no refusal
+            // (Execute retries next frame).
+            if (!WaitIdle()) {
+                atlas_busy_ = true;
+                return false;
+            }
             // The watchdog released a stalled match meanwhile: the hardware
             // is not used again (Execute falls back to shader flow).
             if (hardware_hung_) return HardwareFailed("the optical flow hardware stopped responding");
@@ -4543,6 +4564,7 @@ class D3D12FrameGen final : public FrameGenGpu {
     bool atlas_enabled_{!(std::getenv("VECTORXR_FRAMEGEN_HARDWARE_ATLAS") &&
                           std::string(std::getenv("VECTORXR_FRAMEGEN_HARDWARE_ATLAS")) == "0")};
     bool atlas_failed_{false}; // the hardware refused the atlas: sessions per view from then on
+    bool atlas_busy_{false};   // EnsureAtlas: the drain before a switch timed out (one frame)
     bool atlas_in_use_{false}; // this Execute matches on the atlas
     std::atomic<ULONGLONG> hardware_allowed_ms_{250};
     bool hardware_active_{false};  // the last Execute used the hardware: captures match early
