@@ -87,7 +87,8 @@ class PerformanceFrameClock {
   public:
     // The game's xrWaitFrame returned; `fabricated`: Turbo made the frame up instead of the runtime.
     void Wait(PerformanceClock::time_point returned, bool fabricated);
-    void Begin();
+    // The game's xrBeginFrame. `thread`: the caller (0: unknown).
+    void Begin(std::uint32_t thread = 0);
     // The game's xrEndFrame was entered: its CPU time ends here. `rendered`: with layers. `thread`: the caller.
     void End(PerformanceClock::time_point entered, bool rendered, std::uint32_t thread);
     // Any runtime xrWaitFrame (the game's, Turbo's or Frame Generation's) returned this predictedDisplayPeriod.
@@ -118,6 +119,11 @@ class PerformanceFrameClock {
     std::mutex mutex_;
     std::deque<PerformanceClock::time_point> waits_;
     bool open_{false};
+    std::uint32_t begin_thread_{0}; // the thread that began the newest frame
+    // A begin over its own thread's open frame: the runtime discards that
+    // frame (OpenComposite does this), so if the same thread ends next, the
+    // waits before this one belong to frames that never end.
+    std::optional<PerformanceClock::time_point> discard_before_;
     std::optional<PerformanceClock::time_point> last_end_;
     RefreshPeriodFilter refresh_;
     Window window_;

@@ -133,6 +133,47 @@ void TestFrameClock() {
            "fabricated waits or unrendered frames were counted wrongly");
     Expect(window.intervals == 0, "a pause was counted as a frame interval");
 
+    // OpenComposite abandoning a frame: it begins over its own open frame (the runtime discards that one), then
+    // ends the newer one. The end is timed from its own wait, and the frames after it are not a frame late.
+    clock.Reset();
+    t = t0 + 20s;
+    clock.Wait(t, false);
+    clock.Begin(42);
+    clock.Wait(t + 11ms, false);
+    clock.Begin(42);
+    clock.End(t + 15ms, true, 42);
+    clock.Wait(t + 22ms, false);
+    clock.Begin(42);
+    clock.End(t + 26ms, true, 42);
+    window = clock.Take();
+    Expect(window.frames == 2 && Near(window.cpu_max_ms, 4.0, 1e-6), "an abandoned frame's wait timed the ends after it");
+    // A loading screen (waits and begins with no end), then ordinary frames.
+    for (int i = 0; i < 10; ++i) {
+        clock.Wait(t + 1s + i * 11ms, false);
+        clock.Begin(42);
+    }
+    clock.Wait(t + 2s, false);
+    clock.Begin(42);
+    clock.End(t + 2s + 5ms, true, 42);
+    clock.Wait(t + 2s + 11ms, false);
+    clock.Begin(42);
+    clock.End(t + 2s + 16ms, true, 42);
+    window = clock.Take();
+    Expect(window.frames == 2 && Near(window.cpu_max_ms, 5.0, 1e-6), "a loading screen left the clock frames behind");
+    // MSFS 2024: it begins on its wait thread and ends on its render thread, the next begin before the last end.
+    // No frame is discarded, so no wait is dropped.
+    clock.Reset();
+    clock.Wait(t + 3s, false);
+    clock.Begin(5);
+    clock.Wait(t + 3s + 11ms, false);
+    clock.Begin(5);
+    clock.End(t + 3s + 14ms, true, 6);
+    clock.Wait(t + 3s + 22ms, false);
+    clock.Begin(5);
+    clock.End(t + 3s + 25ms, true, 6);
+    window = clock.Take();
+    Expect(window.frames == 2 && Near(window.cpu_max_ms, 14.0, 1e-6), "a begin before another thread's end dropped a wait");
+
     // A game that loses frames (waits without ending) never grows the clock past its bound.
     for (int i = 0; i < 100; ++i) clock.Wait(t0 + 10s + i * 1ms, false);
     clock.End(t0 + 10s + 200ms, true, 7);

@@ -2370,7 +2370,8 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
     watch.Step("stopping the layer's background work");
     StopConfigWatcher();
     StopTurboAsyncWorker();
-    performance_.EndSession();
+    performance_.EndSession(); // stops the sampler (wanted again by PrepareOsd)
+    performance_wanted_ = false;
     // The loader may unload the layer after this returns; let in-flight
     // background input-device setup finish first.
     DrainInputDeviceWork(std::chrono::seconds(2));
@@ -2881,7 +2882,8 @@ XrResult OpenXrLayer::DestroySession(XrSession session) {
     ResetTurboFrameState(false);
     // Its sampler thread reads Frame Generation's status: it stops before Frame Generation does.
     watch.Step("stopping the performance sampler");
-    performance_.EndSession();
+    performance_.EndSession(); // stops the sampler (wanted again by PrepareOsd)
+    performance_wanted_ = false;
     bool ending_active = false;
     {
         std::scoped_lock lock(mutex_);
@@ -6597,7 +6599,7 @@ XrResult OpenXrLayer::BeginFrame(XrSession session, const XrFrameBeginInfo* fram
     }
     // A wait that returns from here until this frame's end is pipelined (the performance row).
     if (performance_.Wanted()) {
-        performance_.Frames().Begin();
+        performance_.Frames().Begin(static_cast<std::uint32_t>(GetCurrentThreadId()));
     }
     {
         std::scoped_lock lock(mutex_);
@@ -11268,6 +11270,14 @@ void OpenXrLayer::PrepareOsd() {
     const auto sound=[](const std::optional<SoundFeedback>& pressed, const std::vector<InputBinding>& bindings) {
         return pressed ? *pressed : bindings.empty() ? SoundFeedback{} : bindings.front().sound;
     };
+    // The PERFORMANCE row's sampler runs only while the panel is shown in a
+    // layout that has the row (SetWanted never waits; called on a change).
+    const bool performance_wanted=settings.enabled && after.shown &&
+        (after.compact ? settings.compact_show_performance : settings.show_performance);
+    if (performance_wanted!=performance_wanted_.load(std::memory_order_relaxed)) {
+        performance_wanted_.store(performance_wanted, std::memory_order_relaxed);
+        performance_.SetWanted(performance_wanted);
+    }
     if (before.compact!=after.compact) SoundPlayer::Instance().PlayTransition(sound(osd_cycle_sound_,settings.cycle_bindings),after.compact,dll_directory_,resolved_settings_.core.sound_volume);
     if (before.shown!=after.shown) SoundPlayer::Instance().PlayTransition(sound(osd_toggle_sound_,settings.toggle_bindings),after.shown,dll_directory_,resolved_settings_.core.sound_volume);
 }
@@ -11298,10 +11308,12 @@ void OpenXrLayer::RefreshResolvedSettings() {
     }
 
     osd_monitoring_.store(resolved_settings_.core.osd.enabled, std::memory_order_relaxed);
-    // The performance row's sampler runs while the OSD shows the row in either layout (never waits here).
-    performance_.SetWanted(resolved_settings_.core.osd.enabled &&
-                           (resolved_settings_.core.osd.show_performance ||
-                            resolved_settings_.core.osd.compact_show_performance));
+    // The performance row's sampler stops with the OSD; PrepareOsd starts it
+    // while a shown layout has the row (SetWanted never waits).
+    if (!resolved_settings_.core.osd.enabled && performance_wanted_.load(std::memory_order_relaxed)) {
+        performance_wanted_.store(false, std::memory_order_relaxed);
+        performance_.SetWanted(false);
+    }
     osd_last_input_poll_.reset();
     ++osd_settings_revision_;
     const bool configured_core_active = resolved_settings_.core.enabled;

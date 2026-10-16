@@ -874,6 +874,7 @@ class OpenXrLayer {
     std::atomic<bool> osd_should_render_{true};
     std::optional<std::chrono::steady_clock::time_point> osd_last_input_poll_;
     bool osd_toggle_down_{false}, osd_cycle_down_{false}, osd_was_enabled_{false};
+    std::atomic<bool> performance_wanted_{false}; // last SetWanted: a shown layout has the PERFORMANCE row
     // The binding of each list that last went down: its sound plays for the
     // change it made (none yet: the list's first binding's).
     std::optional<SoundFeedback> osd_toggle_sound_;

@@ -85,9 +85,15 @@ void PerformanceFrameClock::Wait(PerformanceClock::time_point returned, bool fab
     waits_.push_back(returned);
 }
 
-void PerformanceFrameClock::Begin() {
+void PerformanceFrameClock::Begin(std::uint32_t thread) {
     std::scoped_lock lock(mutex_);
+    if (open_ && thread == begin_thread_ && !waits_.empty()) {
+        // Decided at the end: MSFS 2024 also begins a frame before its
+        // other thread ends the last, and none of its frames is discarded.
+        discard_before_ = waits_.back();
+    }
     open_ = true;
+    begin_thread_ = thread;
 }
 
 void PerformanceFrameClock::End(PerformanceClock::time_point entered, bool rendered, std::uint32_t thread) {
@@ -95,6 +101,14 @@ void PerformanceFrameClock::End(PerformanceClock::time_point entered, bool rende
     // Closed at the entry: a wait the game makes on another thread while this end runs (DCS) is not pipelining.
     open_ = false;
     window_.end_thread = thread;
+    if (discard_before_ && thread == begin_thread_) {
+        // The thread that begun over its open frames ends: those frames were
+        // discarded, and their waits would time every later end a frame late.
+        while (waits_.size() > 1 && waits_.front() < *discard_before_) {
+            waits_.pop_front();
+        }
+    }
+    discard_before_.reset();
     if (!waits_.empty()) {
         // The oldest wait is the frame ending, as Frame Generation's presenter matches them.
         const PerformanceClock::time_point wait = waits_.front();
@@ -131,6 +145,8 @@ void PerformanceFrameClock::Reset() {
     std::scoped_lock lock(mutex_);
     waits_.clear();
     open_ = false;
+    begin_thread_ = 0;
+    discard_before_.reset();
     last_end_.reset();
     refresh_.Reset();
     window_ = Window{};

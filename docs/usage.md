@@ -1136,7 +1136,7 @@ utilization from Windows' GPU counters, the runtime's compositor and other apps 
 frame before ending the last (OpenComposite does) or Turbo paces it. **VRAM** is the game's
 video memory use against the budget Windows gives it, with Frame Generation's own images.
 **CPU-BOUND** or **GPU-BOUND** shows only when it is clear. The row is sampled twice a second,
-only while the OSD is enabled with the row turned on in a layout.
+only while the panel is shown in a layout that has the row.
 
 Panel refresh is independent of frame sampling. The default **5 Hz** redraw rate keeps
 the information readable without updating the text every frame; 1–20 Hz is available.
