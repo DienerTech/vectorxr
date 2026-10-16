@@ -3,7 +3,7 @@ import test from 'node:test'
 import { readFileSync } from 'node:fs'
 import { defaultConfig, defaultOsdSettings, normalizeConfig, normalizeOsdSettings, osdLayout, savedBindingConflictWarnings } from '../src/lib/model.ts'
 import { validateConfig } from '../src/lib/validation.ts'
-import { osdCompactLayout } from '../src/lib/osdCompactLayout.ts'
+import { compactPerformanceWidth, osdCompactLayout } from '../src/lib/osdCompactLayout.ts'
 import { osdDiagnostics, osdDiagnosticsTagWidth } from '../src/lib/osdDiagnostics.ts'
 
 test('old configs keep OSD off and acquire independent default bindings', () => {
@@ -78,15 +78,15 @@ test('compact layout packs selected rows and preserves a small FPS-only footprin
   assert.equal(osdCompactLayout(settings).headerY, 18)
   assert.equal(osdCompactLayout(settings).metricsY, -1)
   assert.equal(osdCompactLayout(settings).height, 68)
-  // The tallest compact panel: header (18 + 44), metrics (68), Turbo and Frame
-  // Gen rows (48 each), Pivot with its snap line (80), and 6 below. The layer's
-  // OSD texture is 768 rows tall.
-  const worstCompactHeight = 18 + 44 + 68 + 48 + 48 + 80 + 6
+  // The tallest compact panel: header (18 + 44), metrics (68), Performance,
+  // Turbo and Frame Gen rows (48 each), Pivot with its snap line (80), and 6
+  // below. The layer's OSD texture is 768 rows tall.
+  const worstCompactHeight = 18 + 44 + 68 + 48 + 48 + 48 + 80 + 6
   assert.ok(worstCompactHeight <= 768)
   let tallest = 0
-  for (const compactMetrics of ['all', 'fps', 'frameTime', 'none']) for (let bits = 0; bits < 256; bits++) {
+  for (const compactMetrics of ['all', 'fps', 'frameTime', 'none']) for (let bits = 0; bits < 512; bits++) {
     const flags = ['compactShowBrand', 'compactShowApp', 'compactShowRuntime', 'compactShowClock', 'compactShowTurbo', 'compactShowPivot', 'compactShowFramegen']
-    Object.assign(settings, { compactMetrics }, Object.fromEntries(flags.map((key, i) => [key, !!(bits & 1 << i)])))
+    Object.assign(settings, { compactMetrics, compactShowPerformance: !!(bits & 256) }, Object.fromEntries(flags.map((key, i) => [key, !!(bits & 1 << i)])))
     const options = { framegenSession: !!(bits & 128) }
     const layout = osdCompactLayout(settings, options)
     const snapLayout = osdCompactLayout(settings, { ...options, pivotSnapLine: true })
@@ -103,7 +103,7 @@ test('compact layout packs selected rows and preserves a small FPS-only footprin
       assert.equal(layout.height, turboOnly.height + 48)
       assert.equal(snapLayout.height, turboOnly.height + 80)
     }
-    assert.equal(layout.empty, compactMetrics === 'none' && (bits & 127) === 0)
+    assert.equal(layout.empty, compactMetrics === 'none' && (bits & (127 | 256)) === 0)
     assert.ok(layout.fields.every(field => field.x + field.width <= layout.width - 28))
   }
   assert.equal(tallest, worstCompactHeight)
@@ -112,17 +112,51 @@ test('compact layout packs selected rows and preserves a small FPS-only footprin
 
 test('custom layouts retain small sizes, row order and colors without capturing controls or recursive presets', () => {
   const osd = defaultOsdSettings()
-  Object.assign(osd, { enabled: true, scale: 25, accent: 'custom', customColor: '#aB12Ef', clockFormat: '12', bodyOrder: ['pivot', 'modules', 'framegen', 'graph', 'turbo'], showBrand: false, showApp: false, showRuntime: false, showClock: false })
+  Object.assign(osd, { enabled: true, scale: 25, accent: 'custom', customColor: '#aB12Ef', clockFormat: '12', bodyOrder: ['pivot', 'modules', 'framegen', 'graph', 'turbo', 'performance'], showBrand: false, showApp: false, showRuntime: false, showClock: false })
   const layout = osdLayout(osd)
   osd.customPresets.push({ name: 'Small cockpit', settings: layout })
   osd.bodyOrder.reverse()
-  assert.deepEqual(layout.bodyOrder, ['pivot', 'modules', 'framegen', 'graph', 'turbo'])
+  assert.deepEqual(layout.bodyOrder, ['pivot', 'modules', 'framegen', 'graph', 'turbo', 'performance'])
   for (const key of ['enabled', 'visibleOnStart', 'toggleBindings', 'cycleBindings', 'customPresets']) assert.ok(!(key in layout))
   assert.deepEqual(normalizeOsdSettings(JSON.parse(JSON.stringify(osd))), osd)
-  assert.deepEqual(normalizeOsdSettings({ bodyOrder: ['pivot', 'pivot', 'unknown', 'turbo'] }).bodyOrder, ['pivot', 'turbo', 'graph', 'framegen', 'modules'])
+  assert.deepEqual(normalizeOsdSettings({ bodyOrder: ['pivot', 'pivot', 'unknown', 'turbo'] }).bodyOrder, ['pivot', 'turbo', 'graph', 'performance', 'framegen', 'modules'])
   assert.equal(normalizeOsdSettings({ accent: 'toString' }).accent, 'teal')
   const config = defaultConfig(); config.core.osd = osd
   assert.deepEqual(validateConfig(config), [])
+})
+
+test('the performance row shows in the expanded layout by default and widens a compact panel to fit its line', () => {
+  const osd = defaultOsdSettings()
+  assert.equal(osd.showPerformance, true)
+  assert.equal(osd.compactShowPerformance, false)
+  assert.equal(osd.bodyOrder[1], 'performance')
+  assert.equal(normalizeOsdSettings({ showPerformance: false }).showPerformance, false)
+  assert.equal(normalizeOsdSettings({ showPerformance: 'no' }).showPerformance, true)
+  assert.equal(normalizeOsdSettings({ compactShowPerformance: true }).compactShowPerformance, true)
+  assert.equal(normalizeOsdSettings({ compactShowPerformance: 1 }).compactShowPerformance, false)
+  const restored = normalizeOsdSettings(JSON.parse(JSON.stringify({ ...osd, showPerformance: false, compactShowPerformance: true })))
+  assert.equal(restored.showPerformance, false)
+  assert.equal(restored.compactShowPerformance, true)
+
+  // Compact: first of the status rows, as the layer stacks them, and 760 wide
+  // (kOsdCompactPerformanceWidth) so its widest line fits.
+  const minimal = { ...osd, compactShowBrand: false, compactShowApp: false, compactShowRuntime: false, compactShowClock: false, compactMetrics: 'none' }
+  const only = osdCompactLayout({ ...minimal, compactShowPerformance: true })
+  assert.equal(only.empty, false)
+  assert.equal(only.statusY, only.performanceY)
+  assert.equal(only.width, compactPerformanceWidth)
+  assert.equal(compactPerformanceWidth, 760)
+  const stacked = osdCompactLayout({ ...minimal, compactShowPerformance: true, compactShowTurbo: true, compactShowFramegen: true })
+  assert.equal(stacked.turboY, stacked.performanceY + 48)
+  assert.equal(stacked.framegenY, stacked.turboY + 48)
+  assert.equal(osdCompactLayout({ ...minimal, compactShowTurbo: true }).performanceY, -1)
+  assert.equal(osdCompactLayout({ ...minimal, compactShowTurbo: true }).width, 520)
+
+  const config = defaultConfig()
+  config.core.osd.compactShowPerformance = true
+  assert.deepEqual(validateConfig(config), [])
+  config.core.osd.bodyOrder = ['graph', 'turbo', 'framegen', 'pivot', 'modules']
+  assert.ok(validateConfig(config).includes('OSD body order must contain each row once'))
 })
 
 test('public schema describes every OSD field and keeps it optional for old configs', () => {

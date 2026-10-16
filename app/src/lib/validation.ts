@@ -2,7 +2,7 @@ import type { CoreConfig, DepthXRProfileConfig, DepthXRSettings, FrameGenProfile
 
 // Runtime value imports from './model' are avoided so node:test can load this
 // module directly; keep these lists in sync with model.ts.
-const osdBodyRowNames = ['graph', 'turbo', 'framegen', 'pivot', 'modules']
+const osdBodyRowNames = ['graph', 'performance', 'turbo', 'framegen', 'pivot', 'modules']
 const frameGenSynthesisModeNames = ['interpolate', 'extrapolate']
 const frameGenFlowQualityNames = ['performance', 'balanced', 'quality']
 const frameGenMotionEstimationNames = ['shader', 'hardware']

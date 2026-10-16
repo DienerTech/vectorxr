@@ -232,7 +232,7 @@ test('Turbo overlap produces a non-blocking warning naming the affected applicat
 
 test('the OSD Frame Gen rows default sensibly and old saved orders gain the row at the end', () => {
   const osd = defaultOsdSettings()
-  assert.deepEqual(osd.bodyOrder, ['graph', 'turbo', 'framegen', 'pivot', 'modules'])
+  assert.deepEqual(osd.bodyOrder, ['graph', 'performance', 'turbo', 'framegen', 'pivot', 'modules'])
   assert.equal(osd.showFramegen, true)
   assert.equal(osd.compactShowFramegen, false)
   assert.equal(osd.showFramegenFps, true)
@@ -240,16 +240,16 @@ test('the OSD Frame Gen rows default sensibly and old saved orders gain the row 
   assert.equal(normalizeOsdSettings({ showFramegenFps: 'no' }).showFramegenFps, true)
 
   const legacy = normalizeOsdSettings({ bodyOrder: ['pivot', 'modules', 'graph', 'turbo'], showTurbo: false })
-  assert.deepEqual(legacy.bodyOrder, ['pivot', 'modules', 'graph', 'turbo', 'framegen'])
+  assert.deepEqual(legacy.bodyOrder, ['pivot', 'modules', 'graph', 'turbo', 'performance', 'framegen'])
   assert.equal(legacy.showFramegen, true)
   assert.equal(normalizeOsdSettings({ showFramegen: 'no', compactShowFramegen: 1 }).showFramegen, true)
   assert.equal(normalizeOsdSettings({ showFramegen: false, compactShowFramegen: true }).compactShowFramegen, true)
   const preset = normalizeOsdSettings({ customPresets: [{ name: 'Old', settings: { bodyOrder: ['modules', 'graph'] } }] }).customPresets[0]
-  assert.deepEqual(preset.settings.bodyOrder, ['modules', 'graph', 'turbo', 'framegen', 'pivot'])
+  assert.deepEqual(preset.settings.bodyOrder, ['modules', 'graph', 'performance', 'turbo', 'framegen', 'pivot'])
   assert.equal(preset.settings.showFramegen, true)
 
   const config = defaultConfig()
-  config.core.osd.bodyOrder = ['graph', 'turbo', 'pivot', 'modules']
+  config.core.osd.bodyOrder = ['graph', 'performance', 'turbo', 'pivot', 'modules']
   assert.ok(validateConfig(config).includes('OSD body order must contain each row once'))
   assert.deepEqual(validateConfig(normalizeConfig(config)), [])
 })
