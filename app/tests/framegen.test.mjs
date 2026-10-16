@@ -41,7 +41,8 @@ test('invalid imported values normalize safely: enums fall back, integers clamp'
   assert.deepEqual(normalizeFrameGenSettings({ extendHeadPrediction: true }), { ...defaultFrameGenSettings(), extendHeadPrediction: true })
   assert.equal('extendHeadPrediction' in normalizeFrameGenSettings({ extendHeadPrediction: false }), false)
   assert.equal('extendHeadPrediction' in normalizeFrameGenSettings({ extendHeadPrediction: 'yes' }), false)
-  assert.equal(normalizeFrameGenSettings({}, { ...defaultFrameGenSettings(), extendHeadPrediction: true }).extendHeadPrediction, true)
+  // A profile saved without it is off, as the layer reads it, whatever the defaults say.
+  assert.equal('extendHeadPrediction' in normalizeFrameGenSettings({}, { ...defaultFrameGenSettings(), extendHeadPrediction: true }), false)
   assert.deepEqual(normalizeFrameGenSettings({ artifactSuppression: -5, motionLimitPercent: 99 }), { ...defaultFrameGenSettings(), artifactSuppression: 0, motionLimitPercent: 25 })
   assert.equal(normalizeFrameGenSettings({ artifactSuppression: 33.6 }).artifactSuppression, 34)
   assert.equal(normalizeFrameGenSettings({ motionLimitPercent: Infinity }).motionLimitPercent, 10)

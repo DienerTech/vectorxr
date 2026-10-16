@@ -654,8 +654,8 @@ export interface FrameGenSettings {
   // 2-25: largest content shift, in % of view width, a generated frame may apply.
   motionLimitPercent: number
   // Carry the head's turn over the display time the runtime does not predict.
-  // Off when absent, and present only when on: older layers reject keys they
-  // do not know.
+  // Present only when on; absent means off here and in the layer, so a
+  // profile never inherits it from the defaults.
   extendHeadPrediction?: boolean
 }
 
@@ -721,9 +721,9 @@ export function normalizeFrameGenSettings(value: unknown, fallback: FrameGenSett
       : fallback.frameMultiplier,
     artifactSuppression: normalizeFrameGenInteger(source.artifactSuppression, frameGenLimits.artifactSuppression, fallback.artifactSuppression),
     motionLimitPercent: normalizeFrameGenInteger(source.motionLimitPercent, frameGenLimits.motionLimitPercent, fallback.motionLimitPercent),
-    ...((typeof source.extendHeadPrediction === 'boolean' ? source.extendHeadPrediction : fallback.extendHeadPrediction) === true
-      ? { extendHeadPrediction: true }
-      : {}),
+    // Absent means off, as in the layer: a profile does not inherit it from
+    // the defaults (new profiles copy the defaults' value when created).
+    ...(source.extendHeadPrediction === true ? { extendHeadPrediction: true } : {}),
   }
 }
 

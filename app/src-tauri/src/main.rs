@@ -905,9 +905,9 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-// Frame Generation tuning. Older layers reject unknown keys (current ones
-// ignore them with a warning), so these six fields are the complete
-// serialized shape, and extendHeadPrediction is written only when on.
+// Frame Generation tuning. extendHeadPrediction is written only when on;
+// absent means off in the layer and in the app (a profile does not inherit
+// it from the defaults).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FrameGenSettings {
