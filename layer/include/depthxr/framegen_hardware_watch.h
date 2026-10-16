@@ -39,6 +39,8 @@ class FrameGenHardwareWatch {
     }
 
     bool Current(const Snapshot& snapshot) const {
+        // The epoch is read last again: a reset that began after the other
+        // reads is still caught.
         return !(snapshot.epoch & 1u) && epoch_ == snapshot.epoch && fence_ == snapshot.fence &&
                operations_[snapshot.index].done == snapshot.done && epoch_ == snapshot.epoch;
     }

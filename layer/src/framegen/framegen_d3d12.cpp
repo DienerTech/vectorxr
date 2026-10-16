@@ -3692,15 +3692,21 @@ class D3D12FrameGen final : public FrameGenGpu {
             return true;
         }
         if (hardware_watch_[0].Pending()) {
-            // A live quality change can use the current atlas until its match
-            // finishes. Keep its watchdog: new input may be queued behind its
-            // wait, and replacing that watch would make recovery impossible.
-            if (same_inputs(atlas_)) return true;
-            // Different images cannot use it. Drain with the old watch intact.
+            // The current atlas's match is outstanding, and the next frame's
+            // input may be queued behind its wait: replacing its watch now
+            // would leave nothing to release that wait if the match stalled.
+            // Drain first, with the watch in place so the watchdog can still
+            // release a stall, as EnsureHardware drains before replacing a
+            // view's session. A quality or layout change costs one drain and
+            // applies on this frame (deferring it could last indefinitely
+            // while matches overlap).
             if (!WaitIdle()) return false;
+            // The watchdog released a stalled match meanwhile: the hardware
+            // is not used again (Execute falls back to shader flow).
+            if (hardware_hung_) return HardwareFailed("the optical flow hardware stopped responding");
         }
-        // Another layout's atlas becomes the current one, kept, without
-        // waiting for the GPU; one laid out so already comes back.
+        // Another layout's atlas becomes the current one, kept; one laid out
+        // so already comes back. Nothing is pending on the current atlas here.
         if (atlas_.session) {
             atlas_cache_.push_back(std::move(atlas_));
         }
@@ -3864,6 +3870,9 @@ class D3D12FrameGen final : public FrameGenGpu {
             atlas.fence.Detach();
         }
         if (fence && hardware_watch_[0].ActiveFence() == fence) {
+            // Refused while its work is unfinished: the watch stays on the
+            // fence, which is never freed (detached above), so a stall can
+            // still be released.
             hardware_watch_[0].ResetFence(nullptr);
         }
         atlas = {};
@@ -4523,10 +4532,10 @@ class D3D12FrameGen final : public FrameGenGpu {
 #ifdef DEPTHXR_NVOF
     HardwareAtlas atlas_;
     // Atlases of other layouts (quad views and a canvas in turn), kept for
-    // when their layout comes back, as views keep their sessions. A pending
-    // match keeps its watch until done; performance-only switches defer.
-    // Freed once the GPU is done with them, beyond
-    // the newest few, or at Reset.
+    // when their layout comes back, as views keep their sessions. Switching
+    // drains first while the current atlas's match is outstanding, so its
+    // watch is never replaced early. Freed once the GPU is done with them,
+    // beyond the newest few, or at Reset.
     std::vector<HardwareAtlas> atlas_cache_;
 #endif
     // VECTORXR_FRAMEGEN_HARDWARE_ATLAS=0 (or SetHardwareAtlas): a session
