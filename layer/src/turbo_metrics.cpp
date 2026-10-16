@@ -9,6 +9,10 @@
 #include <sstream>
 #include <system_error>
 
+#include "depthxr/atomic_file.h"
+#include "depthxr/config_path.h"
+#include "depthxr/runtime_relay.h"
+
 namespace depthxr {
 namespace {
 
@@ -191,6 +195,7 @@ std::string SerializeSessions(const std::vector<TurboMetricsSession>& sessions) 
         stream << "      \"collectionMode\": \"" << EscapeJsonString(session.collection_mode) << "\",\n";
         stream << "      \"timingConfiguration\": \"" << EscapeJsonString(session.timing_configuration) << "\",\n";
         stream << "      \"live\": " << (session.live ? "true" : "false") << ",\n";
+        stream << "      \"processId\": " << session.process_id << ",\n";
         stream << "      \"startedUnixSeconds\": " << session.started_unix_seconds << ",\n";
         stream << "      \"updatedUnixSeconds\": " << session.updated_unix_seconds << ",\n";
         stream << "      \"buckets\": [\n";
@@ -238,25 +243,26 @@ bool WriteFileAtomically(const std::filesystem::path& path, const std::string& c
         }
     }
 
-    const std::filesystem::path temporary_path = path.string() + ".tmp";
+    // A temporary of its own: another game's process may be writing the same
+    // file at the same time.
+    const std::filesystem::path temporary_path = UniqueTemporaryPath(path);
     {
         std::ofstream stream(temporary_path, std::ios::trunc);
         if (!stream) {
             if (error) {
-                *error = "Unable to write turbo-metrics temp file: " + temporary_path.string();
+                *error = "Unable to write turbo-metrics temp file: " + PathToUtf8(temporary_path);
             }
             return false;
         }
         stream << content;
     }
 
-    std::filesystem::remove(path, ec);
-    ec.clear();
-    std::filesystem::rename(temporary_path, path, ec);
-    if (ec) {
-        std::filesystem::remove(temporary_path, ec);
+    // Replaced in one step: deleting the old file first lost the whole history
+    // whenever the rename then failed (antivirus scanning the new temporary).
+    std::uint32_t move_error = 0;
+    if (!ReplaceFileAtomically(temporary_path, path, &move_error)) {
         if (error) {
-            *error = "Unable to replace turbo-metrics file: " + ec.message();
+            *error = "Unable to replace turbo-metrics file after retries: Win32 error " + std::to_string(move_error);
         }
         return false;
     }
@@ -266,13 +272,13 @@ bool WriteFileAtomically(const std::filesystem::path& path, const std::string& c
 } // namespace
 
 std::filesystem::path ResolveTurboMetricsPath() {
-    if (const char* env_path = std::getenv("VECTORXR_TURBO_METRICS_PATH"); env_path && *env_path != '\0') {
-        return std::filesystem::path(env_path);
+    if (std::filesystem::path env_path = EnvironmentPath(L"VECTORXR_TURBO_METRICS_PATH"); !env_path.empty()) {
+        return env_path;
     }
 
 #if defined(_WIN32)
-    if (const char* local_app_data = std::getenv("LOCALAPPDATA"); local_app_data && *local_app_data != '\0') {
-        return std::filesystem::path(local_app_data) / "VectorXR" / "config" / "turbo-metrics.json";
+    if (const std::filesystem::path local_app_data = LocalAppDataPath(); !local_app_data.empty()) {
+        return local_app_data / "VectorXR" / "config" / "turbo-metrics.json";
     }
 #endif
 
@@ -302,6 +308,8 @@ std::vector<TurboMetricsSession> ReadTurboMetricsSessions(const std::filesystem:
         session.collection_mode = ExtractString(object, "collectionMode");
         session.timing_configuration = ExtractString(object, "timingConfiguration");
         session.live = ExtractBool(object, "live", false);
+        const std::int64_t process_id = ExtractInteger(object, "processId", 0);
+        session.process_id = process_id > 0 && process_id <= UINT32_MAX ? static_cast<std::uint32_t>(process_id) : 0;
         session.started_unix_seconds = ExtractInteger(object, "startedUnixSeconds", 0);
         session.updated_unix_seconds = ExtractInteger(object, "updatedUnixSeconds", 0);
 
@@ -340,7 +348,8 @@ std::vector<TurboMetricsSession> ReadTurboMetricsSessions(const std::filesystem:
 
 bool RecordTurboMetricsSession(const std::filesystem::path& path,
                                const TurboMetricsSession& session,
-                               std::string* error) {
+                               std::string* error,
+                               const std::function<bool(std::uint32_t, std::uint64_t)>& alive) {
     if (session.session_id.empty()) {
         return true;
     }
@@ -355,6 +364,20 @@ bool RecordTurboMetricsSession(const std::filesystem::path& path,
         sessions.push_back(session);
     } else {
         *existing = session;
+    }
+
+    // Flights a game never closed: it exited without OpenXR teardown, so its
+    // final flush (live=false) never came and the app showed it in progress.
+    for (TurboMetricsSession& other : sessions) {
+        if (!other.live || other.session_id == session.session_id) continue;
+        if (other.process_id != 0) {
+            const std::uint64_t started_ms =
+                static_cast<std::uint64_t>((std::max<std::int64_t>)(other.started_unix_seconds, 0)) * 1000 + 999;
+            other.live = alive ? alive(other.process_id, started_ms)
+                               : RuntimeRelaySessionAlive(other.process_id, started_ms);
+        } else if (other.app_name == session.app_name && other.started_unix_seconds <= session.started_unix_seconds) {
+            other.live = false;
+        }
     }
 
     std::sort(sessions.begin(), sessions.end(),

@@ -33,7 +33,7 @@ What this file does not cover
 -----------------------------
 
 - Software that VectorXR uses but does not install, which comes with its own
-  terms: the Microsoft Visual C++ runtime (the layer and the app link it
+  terms: the Windows Universal C Runtime (the app links it
   dynamically), D3DCompiler_47.dll and the other Windows system libraries, the
   Microsoft Edge WebView2 Runtime that shows the app's window (part 2.1
   covers the WebView2 loader in the app, which finds and starts the Runtime),
@@ -48,9 +48,10 @@ What this file does not cover
   interface's code, such as vue-tsc, Autoprefixer and the Tauri CLI. The
   development dependencies that put some of their own code into the
   interface, such as Vite and Tailwind CSS, are listed in part 3.
-- C++ standard library code that the compiler builds into the layer.
-  Microsoft's STL is licensed under Apache-2.0 WITH LLVM-exception, which
-  waives the notice conditions for compiled code.
+- The Microsoft C and C++ runtime code that the compiler builds into the
+  layer (it links the Visual C++ runtime statically) and into the app (its
+  vcruntime part). Microsoft's STL is licensed under Apache-2.0 WITH
+  LLVM-exception, which waives the notice conditions for compiled code.
 - The installer program itself, which the Tauri bundler builds with NSIS.
 
 
@@ -3698,7 +3699,7 @@ EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 -----------------------------
 
 --------------------------------------------------------------------------------
-source-map-js 1.2.1
+source-map-js 1.2.2
 --------------------------------------------------------------------------------
 
 LICENSE:
@@ -3762,9 +3763,9 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 ----------------------
 
 --------------------------------------------------------------------------------
-@babel/helper-string-parser 7.27.1
-@babel/helper-validator-identifier 7.28.5
-@babel/types 7.29.0
+@babel/helper-string-parser 7.29.7
+@babel/helper-validator-identifier 7.29.7
+@babel/types 7.29.8
 --------------------------------------------------------------------------------
 
 LICENSE:
@@ -3793,7 +3794,7 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 --------------------------------------------------------------------------------
-@babel/parser 7.29.2
+@babel/parser 7.29.9
 --------------------------------------------------------------------------------
 
 LICENSE:
@@ -3873,16 +3874,16 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-@vue/compiler-core 3.5.32
-@vue/compiler-dom 3.5.32
-@vue/compiler-sfc 3.5.32
-@vue/compiler-ssr 3.5.32
-@vue/reactivity 3.5.32
-@vue/runtime-core 3.5.32
-@vue/runtime-dom 3.5.32
-@vue/server-renderer 3.5.32
-@vue/shared 3.5.32
-vue 3.5.32
+@vue/compiler-core 3.5.44
+@vue/compiler-dom 3.5.44
+@vue/compiler-sfc 3.5.44
+@vue/compiler-ssr 3.5.44
+@vue/reactivity 3.5.44
+@vue/runtime-core 3.5.44
+@vue/runtime-dom 3.5.44
+@vue/server-renderer 3.5.44
+@vue/shared 3.5.44
+vue 3.5.44
 --------------------------------------------------------------------------------
 
 LICENSE:
@@ -3964,7 +3965,7 @@ The above copyright notice and this permission notice shall be included in all c
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 --------------------------------------------------------------------------------
-nanoid 3.3.11
+nanoid 3.3.20
 --------------------------------------------------------------------------------
 
 LICENSE:
@@ -3991,14 +3992,14 @@ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 --------------------------------------------------------------------------------
-postcss 8.5.8
+postcss 8.5.30
 --------------------------------------------------------------------------------
 
 LICENSE:
 
 The MIT License (MIT)
 
-Copyright 2013 Andrey Sitnik <andrey@sitnik.ru>
+Copyright 2013 Andrey Sitnik <andrey@sitnik.es>
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of
 this software and associated documentation files (the "Software"), to deal in

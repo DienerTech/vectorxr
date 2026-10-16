@@ -3448,7 +3448,7 @@ void CheckDepth(App& app, VulkanGame& game, Target& left, Target& right) {
         }
     }
     g_runtime.read_depth = false;
-    Check(!Contains(Peer::Log(), "keeps the game's multisampled depth to itself"), "no depth is left out");
+    Check(!Contains(Peer::Log(), "keeps the game's depth to itself"), "no depth is left out");
     Check(app.api.destroy_swapchain(depth.swapchain) == XR_SUCCESS, "the depth swapchain is destroyed");
 }
 
@@ -3827,7 +3827,8 @@ void TestStarCitizenShapes() {
     SessionCreate create(game, app.system);
     Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS && Peer::Bridge().Active(),
           "star citizen: a bridged session (" + Unbridged(Peer::Log()) + ")");
-    Check(Contains(Peer::Log(), "Frame Generation keeps releases of layers it does not capture lazy (on for Vulkan games"),
+    Check(Contains(Peer::Log(), "Frame Generation keeps releases of layers it does not capture lazy "
+                                "(VECTORXR_FRAMEGEN_SHOWN_LAYERS=off turns this off)"),
           "star citizen: a Vulkan game's shown layers are lazy by default");
     BeginSession(app);
     const Renderer vulkan{&game, nullptr};

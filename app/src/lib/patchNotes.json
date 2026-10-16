@@ -1,5 +1,83 @@
 [
   {
+    "version": "0.19.2",
+    "date": "2026-10-14",
+    "title": "Compatibility, Stability, and Frame Generation Pacing",
+    "summary": "A broad fix release. VectorXR now loads on PCs without the Visual C++ runtime and can no longer be crashed by an old one a game ships. Frame Generation paces better on Varjo, with overlays such as OpenKneeboard, after hitches, and with runtimes that hold frames to half rate; Interpolate can use NVIDIA's optical flow hardware at fixed frame rates (experimental), and the Quadviews diagnostic visualization works with Frame Generation. Turbo no longer treats normal Star Citizen and MSFS exits as crashes, the On-Screen Display refreshes at the rate you set, and the app protects your settings and layer list better. Settings carry over from 0.19.1 unchanged.",
+    "items": [
+      {
+        "html": "<strong>Compatibility and stability</strong>",
+        "items": [
+          "<strong>VectorXR carries its own C++ runtime.</strong> On a PC without the Microsoft Visual C++ redistributable, VR failed to start in every OpenXR game while the Health page said Ready. A game that ships an older runtime could also crash VectorXR at startup. Neither can happen now, and a game's regional number format can no longer change how VectorXR reads its settings.",
+          "<strong>Windows user names and game folders with non-English characters</strong> no longer stop VR from starting.",
+          "<strong>Games that quit without closing VR</strong> (Star Citizen, MSFS 2024) exit cleanly: VectorXR no longer does work at process exit that could hang or crash it.",
+          "<strong>A runtime that stops answering no longer freezes the game under Turbo.</strong> After about two seconds the game carries on, and if the runtime keeps holding frames, Turbo turns itself off for the session.",
+          "If VectorXR itself hits a fatal error, it names it in its log and hands it to the game's crash reporting instead of making the game vanish without a trace."
+        ]
+      },
+      {
+        "html": "<strong>Frame Generation</strong>",
+        "items": [
+          "<strong>Fewer missed refreshes on Varjo.</strong> On Varjo headsets, and with overlays such as OpenKneeboard on any headset, Frame Generation's frames waited for the game's GPU work before they could be shown. With a busy GPU in Dynamic, that dropped about one refresh in ten.",
+          "<strong>Lower latency in Dynamic.</strong> When the runtime skipped a refresh, Frame Generation counted the game's frames as late and timed the game further ahead, up to its maximum, where it stayed. Missed refreshes no longer push the game ahead.",
+          "<strong>Auto stops stuttering when it cannot step down.</strong> Auto tried a lower multiplier on a timer, which cost about two seconds of stutter each time the game could not keep up. It now tries only when the game has room to spare.",
+          "<strong>Auto under half-rate smoothing.</strong> With Pimax Smart Smoothing or similar settings that hold frames to half the refresh rate, Auto climbed to 3x or 4x and slowed the game to about 10 fps. It now passes frames straight through, as Dynamic does, and tries again later.",
+          "<strong>Shorter delay after a hitch.</strong> A hitch raised how far ahead the game is timed, and it came back down only after 20 to 60 seconds; it now returns within about 10 seconds, so the head pose the game renders with stays closer to the moment it is shown (Star Citizen in particular).",
+          "<strong>Auto no longer gets stuck at 4x.</strong> After the runtime's frame timing recovered from a stall, Auto could step up on the moment of re-engaging, and once at 4x it had no way down even when 4x itself slowed the game (Star Citizen on Virtual Desktop fell to about 22 fps). It now settles first, and tries 3x again when 4x keeps running late.",
+          "<strong>Interpolate can use NVIDIA's optical flow hardware (experimental).</strong> At a fixed or Auto frame rate the game is held to every second refresh or more, which leaves the hardware time to measure the motion, so Interpolate now uses it when <strong>Motion source: NVIDIA hardware</strong> is chosen. On Star Citizen captures it keeps visor text readable and generated frames as sharp as real ones, at about three times the GPU time for motion and up to one refresh more latency. Dynamic still uses Shader. Profiles that already had NVIDIA hardware chosen use it in Interpolate at fixed rates after updating; pick Shader to keep the previous behaviour.",
+          "<strong>Diagnostic views are easier to spot.</strong> The Frame Generation page warns while a diagnostic view is on, and the log names it. Left on, the Confidence view paints generated frames red where they fall back to the real image.",
+          "Changing the multiplier or turning Frame Generation off while a game runs no longer leaves Dynamic's old state behind, and the log no longer reports engagements that did not happen.",
+          "Frame Generation's summary now shows how far ahead of its display the game renders (and how much that varies), and Debug logs record each layer's space, the game's HUD layer and the views the runtime returns: the data needed to pin down the remaining Star Citizen shake reports."
+        ]
+      },
+      {
+        "html": "<strong>Turbo</strong>",
+        "items": [
+          "<strong>Normal Star Citizen and MSFS exits no longer block Turbo.</strong> These games exit without closing their OpenXR session, so Turbo's crash guard read every normal exit as a crash and kept Turbo off at the next launch. A real crash still blocks it, and the log now says why.",
+          "An antivirus scan of one of Turbo's files no longer turns Turbo off for the session or loses its history."
+        ]
+      },
+      {
+        "html": "<strong>On-Screen Display</strong>",
+        "items": [
+          "<strong>Refreshes at the rate you set.</strong> 20 Hz gave about 10 Hz before.",
+          "No longer shows old values or the previous layout for a moment after you show it, switch layout or change its settings, and recovers when turned off and on after a drawing failure.",
+          "Drawing it costs about a fifth of the CPU it did, and each refresh uploads only the rows the panel uses.",
+          "The DEBUG LOG and diagnostic view tag stays up in a compact layout with nothing else selected."
+        ]
+      },
+      {
+        "html": "<strong>Quadviews and Varjo</strong>",
+        "items": [
+          "Changing Quadviews Tracking Mode during a session keeps eye tracking working.",
+          "<strong>The Quadviews diagnostic visualization works with Frame Generation.</strong> In DCS with Frame Generation on, Frame Generation now draws the visualization into every frame it shows, real and generated, instead of it being unavailable.",
+          "Emulated quad views give the focus views a visibility mask that hides nothing, and the log records how the eye-tracked inset moves (for reports of streaks around the inset on SteamVR).",
+          "OpenKneeboard's swapchains no longer make the quadviews compositor rebuild its outputs.",
+          "Varjo focus sharpening no longer rebuilds its target every frame after a failure, and stays current after a slow frame.",
+          "When a game never asked for quad views, the log says so instead of suggesting a restart."
+        ]
+      },
+      {
+        "html": "<strong>App</strong>",
+        "items": [
+          "<strong>Your settings are safer.</strong> Clearing a number field and saving no longer turns every module off. If settings.json cannot be read, the app shows the real error and Save no longer overwrites the file with defaults.",
+          "<strong>OpenXR Layers page:</strong> machine-wide changes no longer report the previous request's result, moving a layer no longer rewrites other vendors' entries, and Home and Health report the VectorXR registration that actually loads and refuse to enable a second copy.",
+          "Cancelling an uninstall no longer leaves VectorXR unregistered.",
+          "<strong>Export Debug</strong> now includes the Frame Generation trace, keeps the start of long logs, and writes a compressed ZIP.",
+          "The app stays responsive during joystick scans, UAC prompts and sound previews, and a joystick HAT that reports centered as 0xFFFF is no longer read as up-left.",
+          "Log Retention above 7 now keeps that many logs."
+        ]
+      },
+      {
+        "html": "<strong>Known issues</strong>",
+        "items": [
+          "In helicopters, Interpolate can show artifacts around the rotors and in the sky behind them.",
+          "On Varjo headsets with Quadviews, focus sharpening is off in DCS while Frame Generation runs."
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.19.1",
     "date": "2026-10-14",
     "title": "Frame Generation Fixes for Varjo, SteamVR, and Slow Games",

@@ -34,7 +34,11 @@ XrResult XRAPI_PTR Create(XrSession, const XrSwapchainCreateInfo* info, XrSwapch
     D3D11_TEXTURE2D_DESC desc{};
     desc.Width=info->width; desc.Height=info->height; desc.MipLevels=1; desc.ArraySize=1;
     desc.Format=static_cast<DXGI_FORMAT>(info->format); desc.SampleDesc.Count=1; desc.BindFlags=D3D11_BIND_RENDER_TARGET;
-    for(int i=0;i<3;++i) { ID3D11Texture2D* texture{}; Check(SUCCEEDED(device->CreateTexture2D(&desc,nullptr,&texture)),"WARP texture failed"); textures.push_back(texture); }
+    // A runtime's new images hold whatever was there: every row the OSD does
+    // not draw must still read 0.
+    const std::vector<std::uint32_t> old(static_cast<std::size_t>(info->width)*info->height,0xffff00ffu);
+    const D3D11_SUBRESOURCE_DATA initial{old.data(),info->width*4,0};
+    for(int i=0;i<3;++i) { ID3D11Texture2D* texture{}; Check(SUCCEEDED(device->CreateTexture2D(&desc,&initial,&texture)),"WARP texture failed"); textures.push_back(texture); }
     *swapchain=reinterpret_cast<XrSwapchain>(2); return XR_SUCCESS;
 }
 XrResult XRAPI_PTR Images(XrSwapchain, std::uint32_t capacity, std::uint32_t* count, XrSwapchainImageBaseHeader* images) {
@@ -75,6 +79,15 @@ const XrCompositionLayerBaseHeader* WaitVisible(OsdRenderer& renderer, const XrF
     while(std::chrono::steady_clock::now()<deadline);
     return nullptr;
 }
+// Ends frames until `done`, for up to 3 seconds; returns whether it happened.
+template<class Done> bool PumpUntil(OsdRenderer& renderer, const XrFrameEndInfo& frame, Done done) {
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(3);
+    while (!done()) {
+        if (std::chrono::steady_clock::now()>=deadline) return false;
+        renderer.Append(frame,true); std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return true;
+}
 const OsdDispatch dispatch{Formats,Create,Images,Acquire,Wait,Release,Destroy,Space,DestroySpace};
 void CheckUnusedTexturePixels(int width,int height) {
     D3D11_TEXTURE2D_DESC desc{};textures[0]->GetDesc(&desc);
@@ -109,6 +122,38 @@ void WriteBitmap(const char* path, const OsdBitmap& bitmap) {
     BITMAPINFOHEADER info{sizeof(info),OsdBitmap::width,-bitmap.height,1,32,BI_RGB};
     std::ofstream out(path,std::ios::binary); out.write(reinterpret_cast<const char*>(&file),sizeof(file));
     out.write(reinterpret_cast<const char*>(&info),sizeof(info)); out.write(reinterpret_cast<const char*>(bitmap.pixels.data()),bitmap.pixels.size()*4);
+}
+// RasterizeOsd's per-pixel loop from before FeatherOsdPixels wrote the panel's
+// interior directly, with only its inputs renamed: the faster loop must match
+// it exactly.
+std::vector<std::uint32_t> ReferenceFeather(const std::vector<std::uint32_t>& bits,int panel_width,int height,int opacity,bool hidden,bool rgba) {
+    std::vector<std::uint32_t> pixels(static_cast<std::size_t>(OsdBitmap::width)*height);
+    static const auto lut=[] {
+    std::array<std::array<unsigned char,256>,256> table{};
+    for (int a=0;a<256;++a) for (int c=0;c<256;++c) {
+        const double s=c/255.0, linear=s<=.04045?s/12.92:std::pow((s+.055)/1.055,2.4);
+        const double p=linear*a/255.0, encoded=p<=.0031308?12.92*p:1.055*std::pow(p,1/2.4)-.055;
+        table[a][c]=static_cast<unsigned char>(std::clamp(std::lround(encoded*255),0l,255l));
+    }
+    return table;
+    }();
+    for(int y=0;y<height;++y) for(int x=0;x<OsdBitmap::width;++x) {
+        constexpr int padding=3;
+        const double dx=std::max({18.0+padding-x,0.0,x-(panel_width-19.0-padding)});
+        const double dy=std::max({18.0+padding-y,0.0,y-(height-19.0-padding)});
+        const double edge=std::min({x-padding+.0,panel_width-1.0-padding-x,y-padding+.0,height-1.0-padding-y,
+            (dx>0 && dy>0)?18.0-std::hypot(dx,dy):18.0});
+        const double ramp=std::clamp(edge/6.0,0.0,1.0);
+        const double coverage=ramp*ramp*(3-2*ramp);
+        const auto alpha=static_cast<unsigned>(std::lround(255*opacity/100.0*coverage*(hidden?0:1)));
+        const double interior=std::clamp((edge-6)/6.0,0.0,1.0);
+        const auto source=bits[y*OsdBitmap::width+x];
+        const auto channel=[&](unsigned shift){return static_cast<unsigned>(std::lround(16+(((source>>shift)&255)-16.0)*interior));};
+        const auto pixel=interior==1.0?source:(channel(16)<<16)|(channel(8)<<8)|channel(0);
+        const unsigned b=lut[alpha][pixel&255],g=lut[alpha][(pixel>>8)&255],r=lut[alpha][(pixel>>16)&255];
+        pixels[y*OsdBitmap::width+x]=(alpha<<24)|(g<<8)|(rgba?(b<<16)|r:(r<<16)|b);
+    }
+    return pixels;
 }
 }
 int main(int argc, char** argv) {
@@ -269,6 +314,21 @@ int main(int argc, char** argv) {
                 if(x<3 || y<3 || x>=edged.content_width-3 || y>=edged.height-3)
                     Check(edged.pixels[y*OsdBitmap::width+x]==0,"OSD edge contains color or alpha that can bleed into the scene");
         }
+        {
+            // Random source colors, panel widths and heights either side of the
+            // interior band's limits, both channel orders and an empty panel.
+            std::vector<std::uint32_t> bits(static_cast<std::size_t>(OsdBitmap::width)*OsdBitmap::texture_height);
+            std::uint32_t seed=0x2545f491;
+            for(auto& pixel:bits) { seed=seed*1664525+1013904223; pixel=seed; }
+            for(int panel_width:{30,31,266,520,960}) for(int height:{42,43,136,602})
+            for(int opacity:{1,25,90,100}) for(bool hidden:{false,true}) for(bool use_rgba:{false,true}) {
+                if(hidden && opacity!=90) continue;
+                std::vector<std::uint32_t> pixels(static_cast<std::size_t>(OsdBitmap::width)*height,0xdeadbeef);
+                FeatherOsdPixels(bits.data(),pixels.data(),panel_width,height,opacity,hidden,use_rgba);
+                Check(pixels==ReferenceFeather(bits,panel_width,height,opacity,hidden,use_rgba),
+                      "The OSD's interior fast path changed feathered or premultiplied pixels");
+            }
+        }
         settings.opacity=100;
         Check(reordered.height==bitmap.height,"Reordering changed panel proportions");
         Check((reordered.pixels[195*960+31]&0xffffff)!=(bitmap.pixels[195*960+31]&0xffffff),"Body order did not move the graph");
@@ -369,7 +429,7 @@ int main(int argc, char** argv) {
                     if(x<3 || y<3 || x>=raster->content_width-3 || y>=raster->height-3)
                         Check(raster->pixels[y*OsdBitmap::width+x]==0,"The worst-case OSD drew past its panel");
         }
-        std::cout<<"Two rasters (includes initial LUT): "<<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count()<<" ms\n";
+        std::cout<<"Raster checks (include the first, which builds the LUT): "<<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count()<<" ms\n";
         stats.Tick(now+std::chrono::seconds(2)); Check(stats.samples.empty(),"Paused session polluted frame history");
         for(int i=0;i<140;++i) stats.Tick(now+std::chrono::seconds(3)+std::chrono::milliseconds(i*11));
         Check(stats.samples.size()==120,"History grew past bound");
@@ -429,11 +489,11 @@ int main(int argc, char** argv) {
         renderer.Prepare(settings,Snapshot(),false,false);
         renderer.Prepare(settings,Snapshot(),true,false); Check(!renderer.Append(frame,true),"Hide binding did not toggle");
         renderer.Prepare(settings,Snapshot(),false,false);
-        renderer.Prepare(settings,Snapshot(),true,true); Check(renderer.Append(frame,true),"Show binding did not toggle");
+        renderer.Prepare(settings,Snapshot(),true,true); Check(WaitVisible(renderer,frame),"Show binding did not toggle");
         Check(renderer.Status().compact,"Cycle binding did not switch layout");
         settings.enabled=false; renderer.Prepare(settings,Snapshot(),false,false); Check(!renderer.Append(frame,true),"Live disable failed");
         settings.enabled=true; settings.compact=false; settings.horizontal_degrees=-30; renderer.Prepare(settings,Snapshot(),false,false);
-        quad=reinterpret_cast<const XrCompositionLayerQuad*>(renderer.Append(frame,true));
+        quad=reinterpret_cast<const XrCompositionLayerQuad*>(WaitVisible(renderer,frame));
         Check(quad && !renderer.Status().compact && quad->pose.position.x<0,"Live enable did not restore saved layout/position");
         settings.scale=25; settings.distance_meters=2;
         renderer.Prepare(settings,Snapshot(),false,false);
@@ -554,6 +614,175 @@ int main(int argc, char** argv) {
         CheckUnusedTexturePixels(expected.content_width,expected.height);
     }
     format_override.clear();
+    {
+        // A compact panel showing only the app's name: its raster depends on
+        // the settings and snapshot alone, not the frame times.
+        OsdRenderer renderer; unsupported=false; renderer.Initialize(session,device,4,dispatch);
+        auto settings=OsdSettings{}; settings.enabled=true; settings.compact=true; settings.compact_metrics="none";
+        settings.compact_show_brand=settings.compact_show_runtime=settings.compact_show_clock=false; settings.update_hz=20;
+        XrCompositionLayerProjection game{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+        const auto* original=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&game);
+        XrFrameEndInfo frame{XR_TYPE_FRAME_END_INFO}; frame.layerCount=1; frame.layers=&original;
+        renderer.Prepare(settings,Snapshot(),false,false);
+        Check(WaitVisible(renderer,frame),"The app-name panel was not shown");
+
+        // The refresh interval runs from the request: an upload that waits on
+        // its image past the 50 ms interval leaves the next refresh due.
+        settings.opacity=80; renderer.Prepare(settings,Snapshot(),false,false);
+        timeouts=1000; const int acquired=acquires, released=releases;
+        const auto requested=std::chrono::steady_clock::now();
+        renderer.Append(frame,true);
+        Check(PumpUntil(renderer,frame,[&]{return acquires>acquired && std::chrono::steady_clock::now()-requested>=std::chrono::milliseconds(60);}),
+              "The refresh was not acquired");
+        timeouts=0;
+        Check(renderer.Append(frame,true) && releases==released+1,"The delayed refresh was not uploaded");
+        Check(renderer.SnapshotDue(),"The OSD's refresh interval ran from its upload instead of its request");
+
+        // A hidden panel takes no snapshots, however long it stays hidden.
+        renderer.Prepare(settings,Snapshot(),true,false);
+        Check(!renderer.Append(frame,true),"The toggle did not hide the panel");
+        renderer.Prepare(settings,std::nullopt,false,false);
+        std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        Check(!renderer.SnapshotDue(),"A hidden OSD asked for status snapshots");
+
+        // Shown again, it draws the next snapshot, not the one it held, and
+        // until then submits nothing: not the image from before it was hidden.
+        renderer.Prepare(settings,std::nullopt,true,false);
+        Check(renderer.SnapshotDue(),"A shown OSD did not ask for a status snapshot");
+        const int held=acquires;
+        bool submitted=false;
+        const auto waited=std::chrono::steady_clock::now()+std::chrono::milliseconds(200);
+        while(std::chrono::steady_clock::now()<waited) { submitted=renderer.Append(frame,true)!=nullptr || submitted; std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
+        Check(acquires==held,"A shown OSD drew the snapshot it held while hidden");
+        Check(!submitted,"A shown OSD submitted the image it drew before it was hidden");
+        auto shown=Snapshot(); shown.application="Shown.exe";
+        renderer.Prepare(settings,shown,false,false);
+        const int before_shown=releases;
+        Check(PumpUntil(renderer,frame,[&]{return renderer.Append(frame,true)!=nullptr;}) && releases==before_shown+1,
+              "The shown panel was submitted before its new image was up");
+        CheckUploadedRaster(RasterizeOsd(settings,true,shown,OsdTelemetry{},false),DXGI_FORMAT_B8G8R8A8_UNORM_SRGB);
+
+        // A raster finished before a change is dropped, not uploaded after it.
+        settings.opacity=70; renderer.Prepare(settings,shown,false,false);
+        renderer.Append(frame,true);
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        auto changed=shown; changed.application="Changed.exe"; settings.opacity=60;
+        renderer.Prepare(settings,changed,false,false);
+        const int before_change=releases;
+        Check(PumpUntil(renderer,frame,[&]{return releases>before_change;}),"The changed panel did not refresh");
+        CheckUploadedRaster(RasterizeOsd(settings,true,changed,OsdTelemetry{},false),DXGI_FORMAT_B8G8R8A8_UNORM_SRGB);
+
+        // Moving or resizing the panel applies to the image already up.
+        settings.update_hz=1; renderer.Prepare(settings,changed,false,false);
+        const int before_slow=releases;
+        Check(PumpUntil(renderer,frame,[&]{return releases>before_slow;}),"The 1 Hz panel did not refresh");
+        const int placed=acquires;
+        settings.horizontal_degrees=-20; settings.scale=50; renderer.Prepare(settings,changed,false,false);
+        const auto* quad=reinterpret_cast<const XrCompositionLayerQuad*>(renderer.Append(frame,true));
+        Check(quad && quad->pose.position.x<0,"Moving the panel did not apply at once");
+        const auto settled=std::chrono::steady_clock::now()+std::chrono::milliseconds(200);
+        while(std::chrono::steady_clock::now()<settled) { renderer.Append(frame,true); std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
+        Check(acquires==placed,"Moving or resizing the panel rasterized it again");
+
+        // A raster that fails (here GDI's per-process handle quota is spent)
+        // disables the panel until it is turned off and on, which then
+        // rasterizes again.
+        std::vector<HBRUSH> brushes;
+        while(brushes.size()<100000) { const HBRUSH brush=CreateSolidBrush(RGB(1,2,3)); if(!brush) break; brushes.push_back(brush); }
+        if(brushes.size()<100000) {
+            settings.opacity=50; renderer.Prepare(settings,changed,false,false);
+            const bool failed=PumpUntil(renderer,frame,[&]{return renderer.Status().message.find("rasterization")!=std::string::npos;});
+            for(auto brush:brushes) DeleteObject(brush);
+            Check(failed,"A failed OSD raster was not reported");
+            settings.enabled=false; renderer.Prepare(settings,changed,false,false);
+            settings.enabled=true; renderer.Prepare(settings,changed,false,false);
+            Check(WaitVisible(renderer,frame),"Turning the OSD off and on did not recover from a failed raster");
+        } else {
+            for(auto brush:brushes) DeleteObject(brush);
+            std::cout<<"GDI handle quota not reached; failed-raster retry not tested\n";
+        }
+
+        // The diagnostics tag keeps the header row, and so the panel, in a
+        // compact layout with nothing else selected.
+        settings.compact_show_app=false;
+        auto tagged=changed; tagged.diagnostics="DEBUG LOG";
+        Check(RasterizeOsd(settings,true,changed,OsdTelemetry{},false).empty && !RasterizeOsd(settings,true,tagged,OsdTelemetry{},false).empty,
+              "An empty compact raster was not marked, or the diagnostics tag's was");
+        renderer.Prepare(settings,tagged,false,false);
+        Check(WaitVisible(renderer,frame),"The diagnostics tag was hidden in an otherwise empty compact panel");
+        renderer.Prepare(settings,changed,false,false);
+        Check(!renderer.Append(frame,true),"An empty compact panel was submitted once its diagnostics tag went");
+        renderer.Shutdown();
+    }
+    {
+        // Frame Generation's presenter ends frames between the app's, and can
+        // find a refresh due, and request it, before the app's next frame
+        // takes a snapshot. Every refresh still draws a snapshot taken since
+        // the one before: one per refresh, not one per frame, and not none.
+        OsdRenderer renderer; unsupported=false; renderer.Initialize(session,device,4,dispatch);
+        auto settings=OsdSettings{}; settings.enabled=true; settings.compact=true; settings.compact_metrics="none";
+        settings.compact_show_brand=settings.compact_show_runtime=settings.compact_show_clock=false; settings.update_hz=2;
+        XrCompositionLayerProjection game{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+        const auto* original=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&game);
+        XrFrameEndInfo frame{XR_TYPE_FRAME_END_INFO}; frame.layerCount=1; frame.layers=&original;
+        renderer.Prepare(settings,Snapshot(),false,false);
+        Check(WaitVisible(renderer,frame),"The presenter test's panel was not shown");
+        auto drawn=Snapshot();
+        for(int i=0;i<4;++i) {
+            // The presenter's frames, up to the next refresh's upload: it
+            // draws the snapshot the app's last frame took.
+            const int before=releases;
+            Check(PumpUntil(renderer,frame,[&]{return releases>before;}),"The presenter did not refresh the panel");
+            CheckUploadedRaster(RasterizeOsd(settings,true,drawn,OsdTelemetry{},false),DXGI_FORMAT_B8G8R8A8_UNORM_SRGB);
+            // Then the app's frames: the first takes the next refresh's
+            // snapshot, the second none.
+            Check(renderer.SnapshotDue(),"A refresh the presenter requested first left the next without a status snapshot");
+            drawn=Snapshot(); drawn.application="Frame"+std::to_string(i)+".exe";
+            renderer.Prepare(settings,drawn,false,false);
+            Check(!renderer.SnapshotDue(),"A refresh asked for a second status snapshot");
+            renderer.Prepare(settings,std::nullopt,false,false);
+        }
+        renderer.Shutdown();
+    }
+    {
+        // Uploads copy the panel's rows and clear only what each image's last,
+        // taller panel left: across images and heights, every image matches
+        // its bitmap and is 0 below it.
+        Check(textures.empty(),"An earlier test left its swapchain");
+        D3D11_TEXTURE2D_DESC desc{};
+        desc.Width=OsdBitmap::width; desc.Height=OsdBitmap::texture_height; desc.MipLevels=1; desc.ArraySize=1;
+        desc.Format=DXGI_FORMAT_B8G8R8A8_UNORM_SRGB; desc.SampleDesc.Count=1; desc.BindFlags=D3D11_BIND_RENDER_TARGET;
+        const std::vector<std::uint32_t> old(static_cast<std::size_t>(OsdBitmap::width)*OsdBitmap::texture_height,0xffff00ffu);
+        const D3D11_SUBRESOURCE_DATA initial{old.data(),OsdBitmap::width*4,0};
+        for(int i=0;i<2;++i) { ID3D11Texture2D* texture{}; Check(SUCCEEDED(device->CreateTexture2D(&desc,&initial,&texture)),"WARP texture failed"); textures.push_back(texture); }
+        auto graphics=CreateOsdD3D11(device); std::string error;
+        Check(graphics && graphics->Images(reinterpret_cast<XrSwapchain>(2),dispatch,error),"D3D11 OSD images were not enumerated");
+        const auto bitmap=[](int height,std::uint32_t seed) {
+            OsdBitmap b; b.height=height; b.pixels.resize(static_cast<std::size_t>(OsdBitmap::width)*height);
+            for(std::size_t i=0;i<b.pixels.size();++i) b.pixels[i]=0xff000000u|static_cast<std::uint32_t>(i*seed);
+            return b;
+        };
+        const auto check=[&](int image,const OsdBitmap& b) {
+            D3D11_TEXTURE2D_DESC staging=desc; staging.Usage=D3D11_USAGE_STAGING; staging.BindFlags=0; staging.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+            ID3D11Texture2D* readback{};
+            Check(SUCCEEDED(device->CreateTexture2D(&staging,nullptr,&readback)),"D3D11 readback allocation failed");
+            context->CopyResource(readback,textures[image]); D3D11_MAPPED_SUBRESOURCE mapped{};
+            Check(SUCCEEDED(context->Map(readback,0,D3D11_MAP_READ,0,&mapped)),"D3D11 readback map failed");
+            for(int y=0;y<OsdBitmap::texture_height;++y) for(int x=0;x<OsdBitmap::width;++x) {
+                const auto pixel=reinterpret_cast<const std::uint32_t*>(static_cast<const char*>(mapped.pData)+y*mapped.RowPitch)[x];
+                Check(pixel==(y<b.height?b.pixels[y*OsdBitmap::width+x]:0u),"An OSD image kept old rows or lost the panel's");
+            }
+            context->Unmap(readback,0); readback->Release();
+        };
+        const std::array<std::pair<int,OsdBitmap>,5> uploads{{{0,bitmap(500,3)},{1,bitmap(100,5)},{0,bitmap(100,7)},{1,bitmap(300,11)},{0,bitmap(766,13)}}};
+        for(const auto& [image,b]:uploads) {
+            Check(graphics->Upload(static_cast<std::uint32_t>(image),b,error)==OsdUpload::Complete,"D3D11 OSD upload failed");
+            check(image,b);
+        }
+        graphics->Reset();
+        for(auto* texture:textures) texture->Release();
+        textures.clear();
+    }
     for(auto level:{LogLevel::Info,LogLevel::Debug}) {
         std::filesystem::path log;
         {
@@ -583,6 +812,39 @@ int main(int argc, char** argv) {
             text.find("top[")!=std::string::npos && text.find("bottom[")!=std::string::npos &&
             text.find("left[")!=std::string::npos && text.find("right[")!=std::string::npos,
             "OSD source edge strips or transparent guard evidence missing");
+        // Passed: the log is no longer needed (a failure keeps it).
+        file.close(); std::error_code ignored; std::filesystem::remove(log,ignored);
+    }
+    {
+        // effectiveRefreshHz counts refreshes on the clock, not against the
+        // app's frames: here no app frame is recorded at all, as when the app
+        // stalls while Frame Generation's presenter keeps ending frames.
+        std::filesystem::path log;
+        {
+            Logger logger; logger.Initialize((std::filesystem::temp_directory_path()/"vectorxr-osd-tests")/"vectorxr-osd-rate.log");
+            logger.SetLevel(LogLevel::Info); log=logger.ActiveLogPath();
+            OsdRenderer renderer; XrGraphicsBindingD3D11KHR binding{XR_TYPE_GRAPHICS_BINDING_D3D11_KHR}; binding.device=device;
+            renderer.InitializeGraphics(session,&binding,4,dispatch,&logger,"rate-session");
+            auto settings=OsdSettings{}; settings.enabled=true; settings.show_clock=false; settings.update_hz=20;
+            renderer.Prepare(settings,Snapshot(),false,false);
+            const XrCompositionLayerProjection game{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+            const auto* original=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&game);
+            XrFrameEndInfo frame{XR_TYPE_FRAME_END_INFO}; frame.layerCount=1; frame.layers=&original;
+            Check(WaitVisible(renderer,frame),"The rate test's panel was not shown");
+            const auto until=std::chrono::steady_clock::now()+std::chrono::milliseconds(1500);
+            while(std::chrono::steady_clock::now()<until) { renderer.Append(frame,true); std::this_thread::sleep_for(std::chrono::milliseconds(2)); }
+            renderer.ReportDiagnostics(true);
+        }
+        std::ifstream file(log); std::string text((std::istreambuf_iterator<char>(file)),{});
+        const auto line=text.find("rate-session api=D3D11 mode=visible");
+        const auto rate=text.find("effectiveRefreshHz=",line);
+        Check(line!=std::string::npos && rate!=std::string::npos,"The OSD's visible summary is missing");
+        const double hz=std::atof(text.c_str()+rate+19);
+        Check(hz>8 && hz<=25,"effectiveRefreshHz did not measure the 20 Hz refreshes on the clock");
+        // Frames about 15 ms apart find each refresh due up to a frame late;
+        // the next falls due on the set interval all the same.
+        Check(hz>=18 && hz<=22,"The OSD lost its 20 Hz refresh rate to frame timing");
+        file.close(); std::error_code ignored; std::filesystem::remove(log,ignored);
     }
     { OsdMetric metric; for(int i=0;i<100;++i)metric.Add(i<95?.11:20);Check(metric.count==100&&std::abs(metric.P95Upper()-.15)<.001&&metric.maximum==20,"OSD bounded metric histogram incorrect"); }
     context->Release(); device->Release();

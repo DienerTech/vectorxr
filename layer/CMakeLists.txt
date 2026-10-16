@@ -22,6 +22,8 @@ add_library(
     src/util/config_path.cpp
     src/util/logger.cpp
     src/util/process_info.cpp
+    src/util/process_exit.cpp
+    src/util/atomic_file.cpp
     src/math/stereo_boost.cpp
     src/math/convergence.cpp
     src/math/depth_submission.cpp
@@ -33,6 +35,7 @@ add_library(
 target_include_directories(depthxr_core PUBLIC include)
 target_compile_features(depthxr_core PUBLIC cxx_std_20)
 if(WIN32)
+    target_sources(depthxr_core PRIVATE src/util/crt_failure_report.cpp)
     target_link_libraries(depthxr_core PUBLIC dinput8 dxguid ole32 winmm)
 endif()
 
@@ -425,6 +428,35 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
     endif()
 
     if(DEPTHXR_BUILD_TESTS)
+        # The layer DLL imports no C or C++ runtime DLL (dumpbin sits beside the linker), without a GPU.
+        get_filename_component(_layer_linker_dir "${CMAKE_LINKER}" DIRECTORY)
+        find_program(DEPTHXR_DUMPBIN dumpbin HINTS "${_layer_linker_dir}")
+        if(DEPTHXR_DUMPBIN)
+            add_test(NAME depthxr_layer_crt_imports_tests
+                     COMMAND "${CMAKE_COMMAND}" "-DDUMPBIN=${DEPTHXR_DUMPBIN}"
+                             -DLAYER=$<TARGET_FILE:XR_APILAYER_DIENERTECH_VECTORXR>
+                             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_crt_imports.cmake")
+            set_tests_properties(depthxr_layer_crt_imports_tests PROPERTIES TIMEOUT 60)
+        endif()
+        # The layer DLL loaded, negotiated and unloaded three times, as the loader does, without loading
+        # msvcp140 or vcruntime140 (it creates no graphics device).
+        add_executable(depthxr_layer_load_tests tests/layer_load_tests.cpp)
+        target_include_directories(depthxr_layer_load_tests PRIVATE include)
+        # The OpenXR headers only: the test calls nothing in the loader.
+        target_link_libraries(depthxr_layer_load_tests PRIVATE OpenXR::openxr_loader)
+        target_compile_features(depthxr_layer_load_tests PRIVATE cxx_std_20)
+        target_compile_definitions(depthxr_layer_load_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+        add_dependencies(depthxr_layer_load_tests XR_APILAYER_DIENERTECH_VECTORXR)
+        add_test(NAME depthxr_layer_load_tests
+                 COMMAND depthxr_layer_load_tests $<TARGET_FILE:XR_APILAYER_DIENERTECH_VECTORXR>)
+        set_tests_properties(depthxr_layer_load_tests PROPERTIES TIMEOUT 30)
+        # The layer's fatal C runtime errors reach the process's crash reporting and the log, in child
+        # processes that abort on purpose (no GPU).
+        add_executable(depthxr_crt_failure_report_tests tests/crt_failure_report_tests.cpp)
+        target_link_libraries(depthxr_crt_failure_report_tests PRIVATE depthxr_core)
+        target_compile_definitions(depthxr_crt_failure_report_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+        add_test(NAME depthxr_crt_failure_report_tests COMMAND depthxr_crt_failure_report_tests)
+        set_tests_properties(depthxr_crt_failure_report_tests PROPERTIES TIMEOUT 60)
         # FG_TEST_ADAPTER's name matching and environment parsing (test_adapter.h), without a GPU.
         add_executable(depthxr_test_adapter_tests tests/test_adapter_tests.cpp)
         target_compile_definitions(depthxr_test_adapter_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
@@ -455,10 +487,10 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         set_tests_properties(depthxr_framegen_vulkan_tests PROPERTIES SKIP_RETURN_CODE 77)
         # The Direct3D 12 scenarios on the GPU: variable-rate shading, the optical flow hardware (a
         # session per view, four for quad views) and a GPU's fence budgets, none of which WARP has.
-        # Passes with a message without a hardware adapter (and without the optical flow hardware,
-        # its checks are skipped with one).
+        # Skipped (77) without a hardware adapter, as on hosted CI (without the optical flow
+        # hardware, its checks are skipped with a message).
         add_test(NAME depthxr_framegen_d3d12_hw_tests COMMAND depthxr_framegen_tests hw-d3d12)
-        set_tests_properties(depthxr_framegen_d3d12_hw_tests PROPERTIES TIMEOUT 180)
+        set_tests_properties(depthxr_framegen_d3d12_hw_tests PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 77)
         # Direct3D 11 <-> 12 sharing probe for the D3D11 bridge. It needs a real GPU, so it is
         # built here but is not a CTest (`depthxr_bridge_probe --help`).
         add_executable(depthxr_bridge_probe tests/bridge_probe.cpp)
@@ -478,8 +510,8 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         target_link_libraries(depthxr_framegen_presenter_tests PRIVATE depthxr_framegen)
         target_compile_definitions(depthxr_framegen_presenter_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
         add_test(NAME depthxr_framegen_presenter_tests COMMAND depthxr_framegen_presenter_tests)
-        # Paced by the wall clock: about 200 s on a fast desktop, longer on a shared CI runner.
-        set_tests_properties(depthxr_framegen_presenter_tests PROPERTIES TIMEOUT 480)
+        # Paced by the wall clock: about 375 s on a fast desktop (0.19.2), longer on a shared CI runner.
+        set_tests_properties(depthxr_framegen_presenter_tests PROPERTIES TIMEOUT 900)
         add_executable(depthxr_osd_tests tests/osd_tests.cpp)
         target_link_libraries(depthxr_osd_tests PRIVATE depthxr_osd)
         target_compile_definitions(depthxr_osd_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11)
@@ -494,6 +526,10 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
             tests/turbo_frame_tests.cpp
             src/openxr_layer.cpp
         )
+        # The harness's Direct3D 12 binding (Frame Generation's queue
+        # substitution, against stand-in objects): only the test sees it.
+        set_source_files_properties(tests/turbo_frame_tests.cpp PROPERTIES
+            COMPILE_DEFINITIONS XR_USE_GRAPHICS_API_D3D12)
         target_include_directories(depthxr_turbo_frame_tests PRIVATE include)
         target_link_libraries(
             depthxr_turbo_frame_tests
@@ -667,6 +703,8 @@ if(DEPTHXR_BUILD_TESTS)
         )
     endif()
     add_test(NAME depthxr_layer_tests COMMAND depthxr_layer_tests)
+    # About 5 s on hosted CI; a hang must not hold the runner for its 25 minutes.
+    set_tests_properties(depthxr_layer_tests PROPERTIES TIMEOUT 120)
     add_executable(depthxr_turbo_trace_tests tests/turbo_trace_tests.cpp)
     target_link_libraries(depthxr_turbo_trace_tests PRIVATE depthxr_core)
     add_test(NAME depthxr_turbo_trace_tests COMMAND depthxr_turbo_trace_tests)
@@ -676,6 +714,26 @@ if(DEPTHXR_BUILD_TESTS)
     target_link_libraries(depthxr_turbo_recovery_tests PRIVATE depthxr_core)
     add_test(NAME depthxr_turbo_recovery_tests COMMAND depthxr_turbo_recovery_tests)
     set_tests_properties(depthxr_turbo_recovery_tests PROPERTIES TIMEOUT 10)
+    add_executable(depthxr_runtime_relay_tests tests/runtime_relay_tests.cpp)
+    target_link_libraries(depthxr_runtime_relay_tests PRIVATE depthxr_core)
+    add_test(NAME depthxr_runtime_relay_tests COMMAND depthxr_runtime_relay_tests)
+    set_tests_properties(depthxr_runtime_relay_tests PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        add_library(depthxr_process_exit_probe SHARED tests/process_exit_probe.cpp src/dll_main.cpp)
+        target_link_libraries(depthxr_process_exit_probe PRIVATE depthxr_core)
+        add_executable(depthxr_process_exit_tests tests/process_exit_tests.cpp)
+        add_dependencies(depthxr_process_exit_tests depthxr_process_exit_probe)
+        add_test(NAME depthxr_process_exit_tests COMMAND depthxr_process_exit_tests)
+        set_tests_properties(depthxr_process_exit_tests PROPERTIES TIMEOUT 30)
+    endif()
+    add_executable(depthxr_path_unicode_tests tests/path_unicode_tests.cpp)
+    target_link_libraries(depthxr_path_unicode_tests PRIVATE depthxr_core)
+    add_test(NAME depthxr_path_unicode_tests COMMAND depthxr_path_unicode_tests)
+    set_tests_properties(depthxr_path_unicode_tests PROPERTIES TIMEOUT 10)
+    add_executable(depthxr_sound_player_tests tests/sound_player_tests.cpp)
+    target_link_libraries(depthxr_sound_player_tests PRIVATE depthxr_core)
+    add_test(NAME depthxr_sound_player_tests COMMAND depthxr_sound_player_tests)
+    set_tests_properties(depthxr_sound_player_tests PROPERTIES TIMEOUT 10)
     add_executable(depthxr_thread_census_tests tests/thread_census_tests.cpp)
     target_link_libraries(depthxr_thread_census_tests PRIVATE depthxr_core)
     add_test(NAME depthxr_thread_census_tests COMMAND depthxr_thread_census_tests)
@@ -687,4 +745,5 @@ if(DEPTHXR_BUILD_TESTS)
     )
     target_include_directories(depthxr_action_set_attachment_tests PRIVATE include)
     add_test(NAME depthxr_action_set_attachment_tests COMMAND depthxr_action_set_attachment_tests)
+    set_tests_properties(depthxr_action_set_attachment_tests PROPERTIES TIMEOUT 10)
 endif()

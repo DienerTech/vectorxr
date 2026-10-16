@@ -5,6 +5,7 @@ import DiscordJoinButton from '../DiscordJoinButton.vue'
 
 import type { OpenXrLayerEntry, OpenXrLayerSnapshot } from '../../lib/commands'
 import { openExternalUrl } from '../../lib/commands'
+import { findVectorXrLayer } from '../../lib/health'
 import type { AppTab, ModuleId, VectorXRConfig } from '../../lib/model'
 
 const supportLinkError = ref('')
@@ -30,11 +31,7 @@ defineEmits<{
   navigate: [tab: AppTab]
 }>()
 
-const vectorXrLayer = computed<OpenXrLayerEntry | null>(() => {
-  return props.openXrLayerSnapshot?.slices
-    .flatMap((slice) => slice.layers)
-    .find((layer) => layer.isVectorXr) ?? null
-})
+const vectorXrLayer = computed<OpenXrLayerEntry | null>(() => findVectorXrLayer(props.openXrLayerSnapshot))
 
 const vectorXrLayerStatusLabel = computed(() => {
   if (props.openXrLayersLoading) return 'Checking'

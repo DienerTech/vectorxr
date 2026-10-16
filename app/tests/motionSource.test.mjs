@@ -25,15 +25,31 @@ test('with no card that has the hardware, NVIDIA hardware is unavailable and eve
   assert.equal(settings.motionEstimation, 'hardware', 'the saved choice is kept')
 })
 
-test('Interpolate locks the motion source to Shader whatever is chosen, and keeps the choice', () => {
+test('Interpolate in Dynamic locks the motion source to Shader whatever is chosen, and keeps the choice', () => {
   for (const gpus of [cards(rtx), cards(integrated), null]) {
-    const settings = { synthesisMode: 'interpolate', motionEstimation: 'hardware' }
+    const settings = { synthesisMode: 'interpolate', motionEstimation: 'hardware', frameMultiplier: 'dynamic' }
     const state = motionSourceState(settings, gpus)
     assert.equal(state.locked, true)
     assert.equal(state.effective, 'shader')
-    assert.match(state.note, /Interpolate always measures motion with Shader/)
+    assert.match(state.note, /In Dynamic, Interpolate measures motion with Shader/)
     assert.equal(settings.motionEstimation, 'hardware')
   }
+})
+
+test('Interpolate at a fixed or Auto rate can use the NVIDIA hardware (experimental)', () => {
+  for (const frameMultiplier of ['auto', '2x', '3x', '4x']) {
+    const state = motionSourceState({ synthesisMode: 'interpolate', motionEstimation: 'hardware', frameMultiplier }, cards(rtx))
+    assert.equal(state.locked, false)
+    assert.equal(state.effective, 'hardware')
+    assert.match(state.note, /Experimental/)
+    const shader = motionSourceState({ synthesisMode: 'interpolate', motionEstimation: 'shader', frameMultiplier }, cards(rtx))
+    assert.equal(shader.locked, false)
+    assert.equal(shader.effective, 'shader')
+    assert.equal(shader.note, null)
+  }
+  const missing = motionSourceState({ synthesisMode: 'interpolate', motionEstimation: 'hardware', frameMultiplier: '2x' }, cards(integrated))
+  assert.equal(missing.effective, 'shader')
+  assert.match(missing.note, /no graphics card here has it/)
 })
 
 test('cards not known yet, or not checkable, leave the choice as it is', () => {

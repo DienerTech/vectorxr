@@ -27,7 +27,7 @@ use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::Win32::System::Registry::{
     RegCloseKey, RegDeleteValueW, RegEnumValueW, RegFlushKey, RegOpenKeyExW, RegSetValueExW, HKEY,
     HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_SET_VALUE, KEY_WOW64_32KEY,
-    KEY_WOW64_64KEY, REG_DWORD, REG_SAM_FLAGS,
+    KEY_WOW64_64KEY, REG_DWORD, REG_SAM_FLAGS, REG_VALUE_TYPE,
 };
 
 #[cfg(windows)]
@@ -97,9 +97,13 @@ enum ElevatedOpenXrOperation {
         manifest_path: String,
         value: i64,
     },
-    RewriteValues {
+    // The helper reads the key itself and moves the one value, so the new
+    // order is computed from what is in the registry at that moment rather
+    // than from a list this process read earlier.
+    MoveValue {
         slice: String,
-        values: Vec<RegistryValue>,
+        manifest_path: String,
+        direction: MoveDirection,
     },
     DeleteValue {
         slice: String,
@@ -121,14 +125,40 @@ struct ElevatedOpenXrHelper {
 
 struct ElevatedRequestError {
     message: String,
-    recoverable: bool,
+    kind: ElevatedRequestErrorKind,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "PascalCase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ElevatedRequestErrorKind {
+    // The request failed, but the connection is still in step.
+    Failed,
+    // The connection broke or the helper stopped; a new helper can retry.
+    Disconnected,
+    // The helper did not answer in time and may still make the change.
+    TimedOut,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct RegistryValue {
     name: String,
-    value: i64,
+    // The raw type and data, so a reorder writes every value back exactly as
+    // it was, whatever its type.
+    value_type: u32,
+    data: Vec<u8>,
+}
+
+impl RegistryValue {
+    // The OpenXR loader reads each value into a DWORD and loads the layer when
+    // it reads 0. It asks for no type, so only the size and bytes matter.
+    fn enabled(&self) -> bool {
+        self.data.len() == 4 && self.data.iter().all(|byte| *byte == 0)
+    }
+
+    // A value larger than a DWORD ends the loader's enumeration of the key
+    // (ERROR_MORE_DATA), so neither it nor any value after it is loaded.
+    fn stops_loader(&self) -> bool {
+        self.data.len() > 4
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -157,9 +187,14 @@ struct SliceDefinition {
 const IMPLICIT_KEY: &str = r"Software\Khronos\OpenXR\1\ApiLayers\Implicit";
 const ELEVATED_HELPER_ARG: &str = "--vectorxr-openxr-layer-helper";
 const ELEVATED_HELPER_TIMEOUT: Duration = Duration::from_secs(120);
+const ELEVATED_HELPER_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 static ELEVATED_HELPER: OnceLock<Mutex<Option<ElevatedOpenXrHelper>>> = OnceLock::new();
 static SIGNATURE_CACHE: OnceLock<Mutex<HashMap<String, SignatureCacheEntry>>> = OnceLock::new();
-const SLICES: [SliceDefinition; 4] = [
+// HKCU\Software is shared by 64-bit and 32-bit processes (it is not
+// redirected under WOW6432Node), so per-user registrations are one slice that
+// both kinds of OpenXR app read. Listing a 32-bit per-user view showed and
+// counted the same values twice.
+const SLICES: [SliceDefinition; 3] = [
     SliceDefinition {
         id: "hklm64",
         label: "Machine-wide 64-bit",
@@ -171,7 +206,7 @@ const SLICES: [SliceDefinition; 4] = [
     },
     SliceDefinition {
         id: "hkcu64",
-        label: "Per-user 64-bit",
+        label: "Per-user",
         hive: RegistryHive::CurrentUser,
         view: RegistryView::Registry64,
         key_path: IMPLICIT_KEY,
@@ -182,15 +217,6 @@ const SLICES: [SliceDefinition; 4] = [
         id: "hklm32",
         label: "Machine-wide 32-bit",
         hive: RegistryHive::LocalMachine,
-        view: RegistryView::Registry32,
-        key_path: IMPLICIT_KEY,
-        recommended: false,
-        uncommon: true,
-    },
-    SliceDefinition {
-        id: "hkcu32",
-        label: "Per-user 32-bit",
-        hive: RegistryHive::CurrentUser,
         view: RegistryView::Registry32,
         key_path: IMPLICIT_KEY,
         recommended: false,
@@ -263,8 +289,54 @@ pub fn set_openxr_layer_enabled(
         return Err("Layer manifest is no longer registered in that OpenXR slice".into());
     }
 
+    if enabled {
+        let snapshot = load_openxr_layers()?;
+        if let Some((other_slice, other)) =
+            conflicting_vector_xr_registration(&snapshot.slices, &slice, &manifest_path)
+        {
+            return Err(format!(
+                "Another VectorXR registration is already enabled ({}: {}). OpenXR apps crash when two copies of VectorXR load, so disable that one first.",
+                other_slice.label, other.manifest_path
+            ));
+        }
+    }
+
     write_registry_value(definition, &manifest_path, if enabled { 0 } else { 1 })?;
     load_openxr_layers()
+}
+
+// An enabled VectorXR registration other than the one about to be enabled.
+// A dev build, an old install or a per-user copy can each register VectorXR,
+// and the loader would load every enabled one into the same process. One
+// whose manifest is gone cannot load, so it does not block.
+fn conflicting_vector_xr_registration<'a>(
+    slices: &'a [OpenXrLayerRegistrySlice],
+    slice: &str,
+    manifest_path: &str,
+) -> Option<(&'a OpenXrLayerRegistrySlice, &'a OpenXrLayerEntry)> {
+    let is_target = |candidate: &OpenXrLayerEntry| {
+        candidate.slice == slice && candidate.manifest_path.eq_ignore_ascii_case(manifest_path)
+    };
+    let target_is_vector_xr = slices
+        .iter()
+        .flat_map(|candidate| candidate.layers.iter())
+        .any(|candidate| is_target(candidate) && candidate.is_vector_xr);
+    if !target_is_vector_xr {
+        return None;
+    }
+
+    slices.iter().find_map(|candidate_slice| {
+        candidate_slice
+            .layers
+            .iter()
+            .find(|candidate| {
+                candidate.is_vector_xr
+                    && candidate.enabled
+                    && candidate.manifest_exists
+                    && !is_target(candidate)
+            })
+            .map(|candidate| (candidate_slice, candidate))
+    })
 }
 
 pub fn move_openxr_layer(
@@ -273,23 +345,158 @@ pub fn move_openxr_layer(
     direction: MoveDirection,
 ) -> Result<OpenXrLayerSnapshot, String> {
     let definition = find_slice(&slice)?;
-    let mut values = read_registry_values(definition)?;
-    let Some(index) = values
+    let values = read_registry_values(definition)?;
+    if !values
         .iter()
-        .position(|value| value.name.eq_ignore_ascii_case(&manifest_path))
+        .any(|value| value.name.eq_ignore_ascii_case(&manifest_path))
+    {
+        return Err("Layer manifest is no longer registered in that OpenXR slice".into());
+    }
+
+    move_registry_value(definition, &manifest_path, direction)?;
+    load_openxr_layers()
+}
+
+// Registry values enumerate in creation order, and that order is the loader's
+// layer order. Moving one value changes the position of only the values from
+// the first one that moves onward, so only that tail is rewritten. Returns the
+// tail's start and its new order, or None when the value is already at the end
+// it is moving toward.
+fn plan_registry_move(
+    existing: &[RegistryValue],
+    manifest_path: &str,
+    direction: MoveDirection,
+) -> Result<Option<(usize, Vec<RegistryValue>)>, String> {
+    let Some(index) = existing
+        .iter()
+        .position(|value| value.name.eq_ignore_ascii_case(manifest_path))
     else {
         return Err("Layer manifest is no longer registered in that OpenXR slice".into());
     };
-
-    let target_index = match direction {
+    let target = match direction {
         MoveDirection::Up if index > 0 => index - 1,
-        MoveDirection::Down if index + 1 < values.len() => index + 1,
-        _ => return Ok(load_openxr_layers()?),
+        MoveDirection::Down if index + 1 < existing.len() => index + 1,
+        _ => return Ok(None),
     };
 
-    values.swap(index, target_index);
-    rewrite_registry_values(definition, &values)?;
-    load_openxr_layers()
+    let first = index.min(target);
+    let mut tail = existing[first..].to_vec();
+    tail.swap(index - first, target - first);
+    Ok(Some((first, tail)))
+}
+
+trait RegistryWriter {
+    // Deleting a value that is already gone succeeds.
+    fn delete(&mut self, name: &str) -> Result<(), String>;
+    fn set(&mut self, value: &RegistryValue) -> Result<(), String>;
+}
+
+// Puts `tail`, the key's last values in the key's order, into the order of
+// `wanted` (the same values). Deleting a value and setting it again moves it to
+// the end, so values are moved one at a time, from the first one out of place:
+// at most one layer is missing from the key at any moment, including while a
+// game's OpenXR loader reads it, and a write that fails stops the reorder
+// before another value is deleted. `tail` follows the key: after an error it
+// holds what is registered, and a value whose set failed is no longer in it.
+fn reorder_registry_tail(
+    writer: &mut impl RegistryWriter,
+    tail: &mut Vec<RegistryValue>,
+    wanted: &[RegistryValue],
+) -> Result<(), String> {
+    let in_place = tail
+        .iter()
+        .zip(wanted)
+        .take_while(|(registered, value)| registered == value)
+        .count();
+    for value in &wanted[in_place..] {
+        if let Some(index) = tail
+            .iter()
+            .position(|registered| registered.name == value.name)
+        {
+            writer.delete(&value.name)?;
+            tail.remove(index);
+        }
+        writer.set(value)?;
+        tail.push(value.clone());
+    }
+    Ok(())
+}
+
+// Replaces `old_tail` with `new_tail`. If a step fails, the values are put back
+// in their old order. A failed move loses a layer (another vendor's included)
+// only when Windows refuses to write that value both in the move and in the
+// restore, and the error then names it.
+fn rewrite_registry_tail(
+    writer: &mut impl RegistryWriter,
+    old_tail: &[RegistryValue],
+    new_tail: &[RegistryValue],
+) -> Result<(), String> {
+    let mut tail = old_tail.to_vec();
+    let Err(error) = reorder_registry_tail(writer, &mut tail, new_tail) else {
+        return Ok(());
+    };
+    let error = error.trim_end_matches('.');
+
+    // At most one value is missing: the one whose set failed. It goes back
+    // first, so a restore that cannot write values stops before it deletes any
+    // other one.
+    let missing = |tail: &[RegistryValue]| -> Vec<RegistryValue> {
+        old_tail
+            .iter()
+            .filter(|value| !tail.iter().any(|registered| registered.name == value.name))
+            .cloned()
+            .collect()
+    };
+    let restored = missing(&tail)
+        .into_iter()
+        .try_for_each(|value| {
+            writer.set(&value)?;
+            tail.push(value);
+            Ok::<(), String>(())
+        })
+        .and_then(|()| reorder_registry_tail(writer, &mut tail, old_tail));
+
+    let Err(restore_error) = restored else {
+        return Err(format!("{error}. The previous layer order was kept."));
+    };
+    let restore_error = restore_error.trim_end_matches('.');
+    let lost = missing(&tail);
+    if lost.is_empty() {
+        return Err(format!(
+            "{error}. Restoring the previous layer order also failed ({restore_error}), but every layer is still registered."
+        ));
+    }
+    let names = lost
+        .iter()
+        .map(|value| value.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!(
+        "{error}. Restoring the previous layer order also failed ({restore_error}), and Windows did not write back {names}, so that layer is no longer registered. Reinstalling the layer registers it again."
+    ))
+}
+
+// Notes for values the OpenXR loader cannot read as a DWORD. The loader skips
+// a value of another size, and stops reading the key at a larger one.
+fn registry_value_notes(values: &[RegistryValue]) -> Vec<Option<String>> {
+    let mut stopped_at: Option<String> = None;
+    values
+        .iter()
+        .map(|value| {
+            if let Some(name) = &stopped_at {
+                return Some(format!(
+                    "The OpenXR loader stops reading this registry key at {name}, which is not a DWORD value, so this layer is not loaded."
+                ));
+            }
+            if value.stops_loader() {
+                stopped_at = Some(display_name_from_path(&value.name));
+                return Some("This registry value is not a DWORD, so the OpenXR loader stops reading the key here and loads neither this layer nor any listed below it. Disable or enable it to rewrite it as a DWORD.".into());
+            }
+            (value.data.len() != 4).then(|| {
+                "This registry value is not a DWORD, so the OpenXR loader does not load this layer. Disable or enable it to rewrite it as a DWORD.".into()
+            })
+        })
+        .collect()
 }
 
 pub fn delete_openxr_layer(
@@ -315,11 +522,21 @@ fn read_slice(
     include_signatures: bool,
 ) -> Result<OpenXrLayerRegistrySlice, String> {
     let registry_values = read_registry_values(definition)?;
+    let notes = registry_value_notes(&registry_values);
     let layers = registry_values
         .iter()
+        .zip(notes)
         .enumerate()
-        .map(|(index, value)| {
-            layer_entry_from_registry_value(definition, value, index + 1, include_signatures)
+        .map(|(index, (value, note))| {
+            let mut entry =
+                layer_entry_from_registry_value(definition, value, index + 1, include_signatures);
+            if let Some(note) = note {
+                entry.error = Some(match entry.error.take() {
+                    Some(manifest_error) => format!("{note} {manifest_error}"),
+                    None => note,
+                });
+            }
+            entry
         })
         .collect();
 
@@ -341,7 +558,7 @@ fn layer_entry_from_registry_value(
     include_signatures: bool,
 ) -> OpenXrLayerEntry {
     let manifest_path = value.name.clone();
-    let enabled = value.value == 0;
+    let enabled = value.enabled();
     let manifest = read_manifest(&manifest_path);
     let layer_name = manifest
         .as_ref()
@@ -472,12 +689,16 @@ fn registry_path_label(definition: &SliceDefinition) -> String {
         RegistryHive::CurrentUser => "HKCU",
     };
 
-    let prefix = match definition.view {
-        RegistryView::Registry64 => "",
-        RegistryView::Registry32 => r"WOW6432Node\",
+    // The 32-bit view of HKLM\Software lives at HKLM\Software\WOW6432Node.
+    let key_path = match definition.view {
+        RegistryView::Registry64 => definition.key_path.to_string(),
+        RegistryView::Registry32 => match definition.key_path.split_once('\\') {
+            Some((software, rest)) => format!(r"{software}\WOW6432Node\{rest}"),
+            None => definition.key_path.to_string(),
+        },
     };
 
-    format!(r"{hive}\{prefix}{}", definition.key_path)
+    format!(r"{hive}\{key_path}")
 }
 
 fn escape_powershell_single_quoted(value: &str) -> String {
@@ -581,39 +802,44 @@ fn run_elevated_registry_operation(operation: ElevatedOpenXrOperation) -> Result
         .lock()
         .map_err(|_| "OpenXR elevated helper state is unavailable".to_string())?;
 
-    let had_helper = helper_guard.is_some();
+    send_with_elevated_helper(
+        &mut helper_guard,
+        &ElevatedOpenXrRequest { operation },
+        start_elevated_helper,
+    )
+}
+
+fn send_with_elevated_helper(
+    helper_slot: &mut Option<ElevatedOpenXrHelper>,
+    request: &ElevatedOpenXrRequest,
+    start_helper: impl Fn() -> Result<ElevatedOpenXrHelper, String>,
+) -> Result<(), String> {
+    let had_helper = helper_slot.is_some();
     if !had_helper {
-        *helper_guard = Some(start_elevated_helper()?);
+        *helper_slot = Some(start_helper()?);
     }
 
-    let request = ElevatedOpenXrRequest { operation };
-
-    match send_elevated_request(
-        helper_guard
+    let error = match send_elevated_request(
+        helper_slot
             .as_mut()
             .expect("elevated helper was just initialized"),
-        &request,
+        request,
     ) {
-        Ok(()) => Ok(()),
-        Err(first_error) if first_error.recoverable && had_helper => {
-            *helper_guard = None;
-            let mut helper = start_elevated_helper()?;
-            let retry = send_elevated_request(&mut helper, &request);
-            *helper_guard = Some(helper);
-            retry.map_err(|error| error.message)
-        }
-        Err(first_error) if first_error.recoverable => {
-            std::thread::sleep(Duration::from_millis(150));
-            send_elevated_request(
-                helper_guard
-                    .as_mut()
-                    .expect("elevated helper should still be available"),
-                &request,
-            )
-            .map_err(|error| error.message)
-        }
-        Err(error) => Err(error.message),
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
+    if error.kind == ElevatedRequestErrorKind::Failed {
+        return Err(error.message);
     }
+
+    // The helper may still answer this request, so never send on that
+    // connection again: the next request would read this one's response.
+    *helper_slot = None;
+    if had_helper && error.kind == ElevatedRequestErrorKind::Disconnected {
+        // The helper kept from an earlier change has stopped; start a new one.
+        return send_with_elevated_helper(helper_slot, request, start_helper);
+    }
+    Err(error.message)
 }
 
 fn start_elevated_helper() -> Result<ElevatedOpenXrHelper, String> {
@@ -627,11 +853,25 @@ fn start_elevated_helper() -> Result<ElevatedOpenXrHelper, String> {
         .to_string();
     let token = helper_token();
     launch_elevated_helper_process(&address, &token)?;
+    accept_elevated_helper(&listener, &token)
+}
 
+fn accept_elevated_helper(
+    listener: &TcpListener,
+    token: &str,
+) -> Result<ElevatedOpenXrHelper, String> {
     let started = Instant::now();
     while started.elapsed() < ELEVATED_HELPER_TIMEOUT {
         match listener.accept() {
             Ok((stream, _)) => {
+                // Windows gives the accepted socket the listener's non-blocking
+                // mode, so a read would fail before the helper answered. Wait
+                // for each answer instead, but not forever on a stuck helper.
+                stream
+                    .set_nonblocking(false)
+                    .and_then(|_| stream.set_read_timeout(Some(ELEVATED_HELPER_RESPONSE_TIMEOUT)))
+                    .and_then(|_| stream.set_write_timeout(Some(ELEVATED_HELPER_RESPONSE_TIMEOUT)))
+                    .map_err(|error| error.to_string())?;
                 let mut reader = BufReader::new(stream);
                 let mut received_token = String::new();
                 reader
@@ -690,29 +930,37 @@ fn send_elevated_request(
     helper: &mut ElevatedOpenXrHelper,
     request: &ElevatedOpenXrRequest,
 ) -> Result<(), ElevatedRequestError> {
-    let payload = serde_json::to_string(request).map_err(recoverable_helper_error)?;
+    let payload = serde_json::to_string(request).map_err(|error| ElevatedRequestError {
+        message: error.to_string(),
+        kind: ElevatedRequestErrorKind::Failed,
+    })?;
     helper
         .writer
         .write_all(payload.as_bytes())
         .and_then(|_| helper.writer.write_all(b"\n"))
         .and_then(|_| helper.writer.flush())
-        .map_err(recoverable_helper_error)?;
+        .map_err(helper_connection_error)?;
 
     let mut response_line = String::new();
     helper
         .reader
         .read_line(&mut response_line)
-        .map_err(recoverable_helper_error)?;
+        .map_err(helper_connection_error)?;
 
     if response_line.trim().is_empty() {
         return Err(ElevatedRequestError {
             message: "OpenXR elevated helper stopped before the change completed".into(),
-            recoverable: true,
+            kind: ElevatedRequestErrorKind::Disconnected,
         });
     }
 
-    let response = serde_json::from_str::<ElevatedOpenXrResponse>(response_line.trim())
-        .map_err(recoverable_helper_error)?;
+    let response =
+        serde_json::from_str::<ElevatedOpenXrResponse>(response_line.trim()).map_err(|error| {
+            ElevatedRequestError {
+                message: error.to_string(),
+                kind: ElevatedRequestErrorKind::Disconnected,
+            }
+        })?;
 
     if response.ok {
         Ok(())
@@ -721,15 +969,25 @@ fn send_elevated_request(
             message: response
                 .error
                 .unwrap_or_else(|| "OpenXR elevated registry operation failed".into()),
-            recoverable: false,
+            kind: ElevatedRequestErrorKind::Failed,
         })
     }
 }
 
-fn recoverable_helper_error(error: impl ToString) -> ElevatedRequestError {
-    ElevatedRequestError {
-        message: error.to_string(),
-        recoverable: true,
+fn helper_connection_error(error: std::io::Error) -> ElevatedRequestError {
+    if matches!(
+        error.kind(),
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+    ) {
+        ElevatedRequestError {
+            message: "OpenXR elevated helper did not respond in time".into(),
+            kind: ElevatedRequestErrorKind::TimedOut,
+        }
+    } else {
+        ElevatedRequestError {
+            message: error.to_string(),
+            kind: ElevatedRequestErrorKind::Disconnected,
+        }
     }
 }
 
@@ -805,9 +1063,13 @@ fn run_elevated_operation(operation: ElevatedOpenXrOperation) -> Result<(), Stri
             let definition = slice_for_elevated_operation(&slice)?;
             write_registry_value_native(definition, &manifest_path, value)
         }
-        ElevatedOpenXrOperation::RewriteValues { slice, values } => {
+        ElevatedOpenXrOperation::MoveValue {
+            slice,
+            manifest_path,
+            direction,
+        } => {
             let definition = slice_for_elevated_operation(&slice)?;
-            rewrite_registry_values_native(definition, &values)
+            move_registry_value_native(definition, &manifest_path, direction)
         }
         ElevatedOpenXrOperation::DeleteValue {
             slice,
@@ -845,32 +1107,39 @@ fn read_registry_values_native(definition: &SliceDefinition) -> Result<Vec<Regis
 
     let mut values = Vec::new();
     let mut index = 0;
+    let mut name_buffer = vec![0u16; 32768];
+    let name_capacity = name_buffer.len() as u32;
 
     loop {
-        let mut name_buffer = vec![0u16; 32768];
-        let mut name_len = name_buffer.len() as u32;
+        let mut name_len = name_capacity;
         let mut value_type = 0u32;
-        let mut data = [0u8; 4];
+        let mut data = vec![0u8; 4];
         let mut data_len = data.len() as u32;
-        let status = unsafe {
+        let mut enumerate = |data: &mut Vec<u8>, name_len: &mut u32, data_len: &mut u32| unsafe {
             RegEnumValueW(
                 key.0,
                 index,
                 Some(PWSTR(name_buffer.as_mut_ptr())),
-                &mut name_len,
+                name_len,
                 None,
                 Some(&mut value_type),
                 Some(data.as_mut_ptr()),
-                Some(&mut data_len),
+                Some(data_len),
             )
         };
+        let mut status = enumerate(&mut data, &mut name_len, &mut data_len);
+
+        // Anything larger than a DWORD (a string, a QWORD) is read again with
+        // room for its data, so one odd value no longer fails the whole list.
+        if status == ERROR_MORE_DATA {
+            data = vec![0u8; data_len as usize];
+            name_len = name_capacity;
+            data_len = data.len() as u32;
+            status = enumerate(&mut data, &mut name_len, &mut data_len);
+        }
 
         if status == ERROR_NO_MORE_ITEMS {
             break;
-        }
-
-        if status == ERROR_MORE_DATA {
-            return Err("OpenXR registry value was larger than expected".into());
         }
 
         if status != WIN32_ERROR(0) {
@@ -878,12 +1147,12 @@ fn read_registry_values_native(definition: &SliceDefinition) -> Result<Vec<Regis
         }
 
         let name = String::from_utf16_lossy(&name_buffer[..name_len as usize]);
-        let value = if value_type == REG_DWORD.0 && data_len >= 4 {
-            u32::from_le_bytes(data) as i64
-        } else {
-            0
-        };
-        values.push(RegistryValue { name, value });
+        data.truncate(data_len as usize);
+        values.push(RegistryValue {
+            name,
+            value_type,
+            data,
+        });
         index += 1;
     }
 
@@ -942,41 +1211,67 @@ fn delete_registry_value_native(
 }
 
 #[cfg(windows)]
-fn rewrite_registry_values_native(
+struct NativeRegistryWriter<'a>(&'a RegistryKeyHandle);
+
+#[cfg(windows)]
+impl RegistryWriter for NativeRegistryWriter<'_> {
+    fn delete(&mut self, name: &str) -> Result<(), String> {
+        let name = wide_null(name);
+        let status = unsafe { RegDeleteValueW(self.0 .0, PWSTR(name.as_ptr() as *mut u16)) };
+        if status != WIN32_ERROR(0) && status != ERROR_FILE_NOT_FOUND {
+            return Err(registry_error("delete OpenXR registry value", status));
+        }
+        Ok(())
+    }
+
+    fn set(&mut self, value: &RegistryValue) -> Result<(), String> {
+        let name = wide_null(&value.name);
+        let status = unsafe {
+            RegSetValueExW(
+                self.0 .0,
+                PWSTR(name.as_ptr() as *mut u16),
+                None,
+                REG_VALUE_TYPE(value.value_type),
+                Some(&value.data),
+            )
+        };
+        if status == WIN32_ERROR(0) {
+            Ok(())
+        } else {
+            Err(registry_error("set OpenXR registry value", status))
+        }
+    }
+}
+
+// Reads the key fresh, so the move applies to what is registered now (an
+// installer may have added a layer since the app last read it), rewrites
+// only the values whose position changes, and flushes once at the end.
+#[cfg(windows)]
+fn move_registry_value_native(
     definition: &SliceDefinition,
-    values: &[RegistryValue],
+    manifest_path: &str,
+    direction: MoveDirection,
 ) -> Result<(), String> {
     let existing = read_registry_values_native(definition)?;
-
-    {
-        let key = open_registry_key(definition, KEY_READ | KEY_SET_VALUE)
-            .map_err(|error| registry_error("open OpenXR registry key for reordering", error))?;
-
-        for value in existing {
-            let name = wide_null(&value.name);
-            let status = unsafe { RegDeleteValueW(key.0, PWSTR(name.as_ptr() as *mut u16)) };
-            if status != WIN32_ERROR(0) && status != ERROR_FILE_NOT_FOUND {
-                return Err(registry_error("delete OpenXR registry value", status));
-            }
-        }
-
-        flush_registry_key(&key)?;
-    }
-
-    let key = open_registry_key(definition, KEY_SET_VALUE)
-        .map_err(|error| registry_error("reopen OpenXR registry key for reordering", error))?;
-
-    for value in values {
-        set_registry_dword(&key, &value.name, value.value as u32)?;
-    }
-
-    flush_registry_key(&key)
+    let Some((first, new_tail)) = plan_registry_move(&existing, manifest_path, direction)? else {
+        return Ok(());
+    };
+    let key = open_registry_key(definition, KEY_READ | KEY_SET_VALUE)
+        .map_err(|error| registry_error("open OpenXR registry key for reordering", error))?;
+    let result = rewrite_registry_tail(
+        &mut NativeRegistryWriter(&key),
+        &existing[first..],
+        &new_tail,
+    );
+    let flushed = flush_registry_key(&key);
+    result.and(flushed)
 }
 
 #[cfg(not(windows))]
-fn rewrite_registry_values_native(
+fn move_registry_value_native(
     _definition: &SliceDefinition,
-    _values: &[RegistryValue],
+    _manifest_path: &str,
+    _direction: MoveDirection,
 ) -> Result<(), String> {
     Err("OpenXR registry writes are only supported on Windows".into())
 }
@@ -1074,17 +1369,19 @@ fn write_registry_value(
     }
 }
 
-fn rewrite_registry_values(
+fn move_registry_value(
     definition: &SliceDefinition,
-    values: &[RegistryValue],
+    manifest_path: &str,
+    direction: MoveDirection,
 ) -> Result<(), String> {
     if matches!(definition.hive, RegistryHive::LocalMachine) {
-        run_elevated_registry_operation(ElevatedOpenXrOperation::RewriteValues {
+        run_elevated_registry_operation(ElevatedOpenXrOperation::MoveValue {
             slice: definition.id.into(),
-            values: values.to_vec(),
+            manifest_path: manifest_path.into(),
+            direction,
         })
     } else {
-        rewrite_registry_values_native(definition, values)
+        move_registry_value_native(definition, manifest_path, direction)
     }
 }
 
@@ -1327,4 +1624,462 @@ fn runtime_name_from_manifest(manifest_path: &str) -> Option<String> {
         .get("name")?
         .as_str()
         .map(|name| name.to_string())
+}
+
+#[cfg(test)]
+mod slice_tests {
+    use super::*;
+
+    #[test]
+    fn slices_name_real_and_distinct_registry_keys() {
+        let paths = SLICES
+            .iter()
+            .map(|definition| (definition.id, registry_path_label(definition)))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            vec![
+                ("hklm64", r"HKLM\Software\Khronos\OpenXR\1\ApiLayers\Implicit".to_string()),
+                ("hkcu64", r"HKCU\Software\Khronos\OpenXR\1\ApiLayers\Implicit".to_string()),
+                (
+                    "hklm32",
+                    r"HKLM\Software\WOW6432Node\Khronos\OpenXR\1\ApiLayers\Implicit".to_string()
+                ),
+            ]
+        );
+        // HKCU\Software is not redirected, so a 32-bit per-user view would
+        // read the same values as the per-user slice.
+        assert!(SLICES.iter().all(|definition| !matches!(
+            (definition.hive, definition.view),
+            (RegistryHive::CurrentUser, RegistryView::Registry32)
+        )));
+    }
+
+    fn entry(slice: &str, manifest_path: &str, enabled: bool) -> OpenXrLayerEntry {
+        OpenXrLayerEntry {
+            slice: slice.into(),
+            manifest_path: manifest_path.into(),
+            layer_name: display_name_from_path(manifest_path),
+            description: String::new(),
+            library_path: None,
+            enabled,
+            order: 1,
+            signature_status: "unknown".into(),
+            signature_status_description: String::new(),
+            signature_signer_subject: None,
+            signature_signer_issuer: None,
+            signature_signer_thumbprint: None,
+            signature_signer_not_before: None,
+            signature_signer_not_after: None,
+            is_vector_xr: manifest_path.to_ascii_lowercase().contains("vectorxr"),
+            manifest_exists: true,
+            library_exists: true,
+            error: None,
+        }
+    }
+
+    fn slice(id: &str, layers: Vec<OpenXrLayerEntry>) -> OpenXrLayerRegistrySlice {
+        OpenXrLayerRegistrySlice {
+            id: id.into(),
+            label: id.into(),
+            registry_path: String::new(),
+            recommended: false,
+            uncommon: false,
+            requires_elevation_for_writes: false,
+            layers,
+        }
+    }
+
+    #[test]
+    fn a_second_vector_xr_registration_cannot_be_enabled() {
+        let installed = r"C:\Program Files\VectorXR\vectorxr-layer\XR_APILAYER_DIENERTECH_VECTORXR.json";
+        let dev = r"C:\dev\build\layer\Release\XR_APILAYER_DIENERTECH_VECTORXR.json";
+        let slices = vec![
+            slice(
+                "hklm64",
+                vec![
+                    entry("hklm64", dev, false),
+                    entry("hklm64", r"C:\layers\XR_APILAYER_other.json", true),
+                    entry("hklm64", installed, true),
+                ],
+            ),
+            slice("hkcu64", vec![entry("hkcu64", dev, false)]),
+        ];
+
+        let conflict = conflicting_vector_xr_registration(&slices, "hklm64", dev)
+            .map(|(slice, layer)| (slice.id.as_str(), layer.manifest_path.as_str()));
+        assert_eq!(conflict, Some(("hklm64", installed)));
+        // The same file registered per-user would load a second copy too.
+        assert_eq!(
+            conflicting_vector_xr_registration(&slices, "hkcu64", dev)
+                .map(|(slice, _)| slice.id.as_str()),
+            Some("hklm64")
+        );
+        // Re-enabling the active one, or enabling another vendor's layer, is fine.
+        assert!(conflicting_vector_xr_registration(&slices, "hklm64", installed).is_none());
+        // An enabled registration whose manifest is gone cannot load.
+        let mut removed_install = slices.clone();
+        removed_install[0].layers[2].manifest_exists = false;
+        assert!(conflicting_vector_xr_registration(&removed_install, "hklm64", dev).is_none());
+        assert!(conflicting_vector_xr_registration(
+            &slices,
+            "hklm64",
+            r"C:\layers\XR_APILAYER_other.json"
+        )
+        .is_none());
+    }
+}
+
+#[cfg(test)]
+mod registry_order_tests {
+    use super::*;
+
+    const DWORD: u32 = 4;
+    const SZ: u32 = 1;
+
+    fn dword(name: &str, value: u32) -> RegistryValue {
+        RegistryValue {
+            name: name.into(),
+            value_type: DWORD,
+            data: value.to_le_bytes().to_vec(),
+        }
+    }
+
+    // An ordered stand-in for one registry key. `fails` picks the writes that
+    // fail, from the operation ("delete" or "set") and the value's name.
+    struct FakeKey<F> {
+        values: Vec<RegistryValue>,
+        fails: F,
+        // The fewest values the key held at any moment.
+        fewest: usize,
+    }
+
+    impl<F: FnMut(&str, &str) -> bool> RegistryWriter for FakeKey<F> {
+        fn delete(&mut self, name: &str) -> Result<(), String> {
+            if (self.fails)("delete", name) {
+                return Err("Unable to delete OpenXR registry value: Windows error 1016".into());
+            }
+            self.values.retain(|value| value.name != name);
+            self.fewest = self.fewest.min(self.values.len());
+            Ok(())
+        }
+
+        fn set(&mut self, value: &RegistryValue) -> Result<(), String> {
+            if (self.fails)("set", &value.name) {
+                return Err("Unable to set OpenXR registry value: Windows error 1016".into());
+            }
+            match self.values.iter_mut().find(|existing| existing.name == value.name) {
+                Some(existing) => *existing = value.clone(),
+                None => self.values.push(value.clone()),
+            }
+            Ok(())
+        }
+    }
+
+    // Moves `name` in a fake key that holds `existing`, as the elevated
+    // helper does in the real one.
+    fn move_in<F: FnMut(&str, &str) -> bool>(
+        existing: &[RegistryValue],
+        name: &str,
+        direction: MoveDirection,
+        fails: F,
+    ) -> (FakeKey<F>, Result<(), String>) {
+        let (first, tail) = plan_registry_move(existing, name, direction)
+            .unwrap()
+            .unwrap();
+        let mut key = FakeKey {
+            values: existing.to_vec(),
+            fails,
+            fewest: existing.len(),
+        };
+        let result = rewrite_registry_tail(&mut key, &existing[first..], &tail);
+        (key, result)
+    }
+
+    fn names(values: &[RegistryValue]) -> Vec<&str> {
+        values.iter().map(|value| value.name.as_str()).collect()
+    }
+
+    fn abcd() -> Vec<RegistryValue> {
+        vec![dword("a", 0), dword("b", 1), dword("c", 0), dword("d", 0)]
+    }
+
+    #[test]
+    fn moving_a_layer_rewrites_only_the_values_that_change_position() {
+        let existing = abcd();
+        let (first, tail) = plan_registry_move(&existing, "C", MoveDirection::Up)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first, 1);
+        assert_eq!(names(&tail), ["c", "b", "d"]);
+        assert!(plan_registry_move(&existing, "a", MoveDirection::Up).unwrap().is_none());
+        assert!(plan_registry_move(&existing, "d", MoveDirection::Down).unwrap().is_none());
+        assert!(plan_registry_move(&existing, "gone", MoveDirection::Up).is_err());
+
+        let (key, result) = move_in(&existing, "C", MoveDirection::Up, |_, name| {
+            assert_ne!(name, "a", "a value before the move was rewritten");
+            false
+        });
+        result.unwrap();
+        assert_eq!(names(&key.values), ["a", "c", "b", "d"]);
+        assert_eq!(key.values[2], dword("b", 1));
+        // A game whose OpenXR loader reads the key mid-move misses one layer at most.
+        assert_eq!(key.fewest, existing.len() - 1);
+    }
+
+    #[test]
+    fn a_failed_move_puts_every_layer_back_in_its_old_order() {
+        let existing = vec![
+            dword("a", 0),
+            dword("b", 0),
+            RegistryValue {
+                name: "odd".into(),
+                value_type: SZ,
+                data: b"0\0".to_vec(),
+            },
+            dword("d", 1),
+        ];
+        let mut failed = false;
+        let (key, result) = move_in(&existing, "b", MoveDirection::Down, |write, name| {
+            let fail = !failed && write == "set" && name == "b";
+            failed |= fail;
+            fail
+        });
+        let error = result.unwrap_err();
+        assert!(error.contains("previous layer order was kept"), "{error}");
+        assert_eq!(key.values, existing);
+
+        // A delete that keeps failing, before or after the first value moved.
+        for undeletable in ["c", "b"] {
+            let (key, result) = move_in(&abcd(), "c", MoveDirection::Up, |write, name| {
+                write == "delete" && name == undeletable
+            });
+            let error = result.unwrap_err();
+            assert!(error.contains("previous layer order was kept"), "{error}");
+            assert_eq!(key.values, abcd(), "{undeletable}");
+        }
+    }
+
+    #[test]
+    fn only_a_layer_windows_will_not_write_back_is_lost() {
+        let existing = vec![
+            dword("a", 0),
+            dword("b", 0),
+            RegistryValue {
+                name: "odd".into(),
+                value_type: SZ,
+                data: b"0\0".to_vec(),
+            },
+            dword("d", 1),
+        ];
+        let (key, result) = move_in(&existing, "b", MoveDirection::Down, |write, name| {
+            write == "set" && name == "odd"
+        });
+        let error = result.unwrap_err();
+        assert!(
+            error.contains("did not write back odd, so that layer is no longer registered"),
+            "{error}"
+        );
+        assert_eq!(key.values, [&existing[..2], &existing[3..]].concat());
+
+        // Windows refusing every new value (a security product guarding the
+        // key, say) costs the first value moved, not every value after it.
+        let (key, result) = move_in(&abcd(), "b", MoveDirection::Down, |write, _| write == "set");
+        assert!(result.unwrap_err().contains("did not write back c,"));
+        assert_eq!(names(&key.values), ["a", "b", "d"]);
+    }
+
+    #[test]
+    fn a_restore_that_cannot_finish_still_keeps_every_layer() {
+        let (key, result) = move_in(&abcd(), "b", MoveDirection::Down, |write, name| {
+            write == "delete" && name == "d"
+        });
+        let error = result.unwrap_err();
+        assert!(
+            error.contains("but every layer is still registered"),
+            "{error}"
+        );
+        let mut values = key.values.clone();
+        values.sort_by(|left, right| left.name.cmp(&right.name));
+        assert_eq!(values, abcd());
+    }
+
+    #[test]
+    fn values_the_loader_cannot_read_are_flagged_not_failed() {
+        let values = vec![
+            dword("a", 0),
+            RegistryValue {
+                name: "short".into(),
+                value_type: SZ,
+                data: b"\0\0".to_vec(),
+            },
+            RegistryValue {
+                name: r"C:\layers\long.json".into(),
+                value_type: SZ,
+                data: "enabled".encode_utf16().flat_map(u16::to_le_bytes).collect(),
+            },
+            dword("d", 0),
+        ];
+        assert!(values[0].enabled());
+        assert!(!values[1].enabled() && !values[2].enabled());
+        let notes = registry_value_notes(&values);
+        assert!(notes[0].is_none());
+        assert!(notes[1].as_deref().unwrap().contains("does not load this layer"));
+        assert!(notes[2].as_deref().unwrap().contains("stops reading the key here"));
+        assert!(notes[3].as_deref().unwrap().contains("at long"));
+    }
+}
+
+#[cfg(test)]
+mod elevated_helper_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    // Stands in for the elevated process: answers one request per delay, then
+    // disconnects. A DeleteValue is answered with an error naming its manifest,
+    // so a test can tell which request a response belongs to.
+    fn start_fake_helper(
+        delays: Vec<Duration>,
+        runs: Arc<AtomicUsize>,
+    ) -> Result<ElevatedOpenXrHelper, String> {
+        let listener = TcpListener::bind("127.0.0.1:0").map_err(|error| error.to_string())?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|error| error.to_string())?;
+        let address = listener.local_addr().map_err(|error| error.to_string())?;
+        std::thread::spawn(move || {
+            let mut stream = TcpStream::connect(address).unwrap();
+            stream.write_all(b"fake-token\n").unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            for delay in delays {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    return;
+                }
+                std::thread::sleep(delay);
+                runs.fetch_add(1, Ordering::SeqCst);
+                let error = match serde_json::from_str::<ElevatedOpenXrRequest>(line.trim()) {
+                    Ok(ElevatedOpenXrRequest {
+                        operation: ElevatedOpenXrOperation::DeleteValue { manifest_path, .. },
+                    }) => Some(manifest_path),
+                    _ => None,
+                };
+                let response = ElevatedOpenXrResponse {
+                    ok: error.is_none(),
+                    error,
+                };
+                let payload = serde_json::to_string(&response).unwrap();
+                if stream.write_all(format!("{payload}\n").as_bytes()).is_err() {
+                    return;
+                }
+            }
+        });
+        accept_elevated_helper(&listener, "fake-token")
+    }
+
+    fn ping() -> ElevatedOpenXrRequest {
+        ElevatedOpenXrRequest {
+            operation: ElevatedOpenXrOperation::Ping,
+        }
+    }
+
+    fn delete(manifest_path: &str) -> ElevatedOpenXrRequest {
+        ElevatedOpenXrRequest {
+            operation: ElevatedOpenXrOperation::DeleteValue {
+                slice: "hklm64".into(),
+                manifest_path: manifest_path.into(),
+            },
+        }
+    }
+
+    // The accepted socket used to keep the listener's non-blocking mode, so the
+    // first read failed before the helper answered, the request was sent again
+    // and every later change read the previous change's response.
+    #[test]
+    fn each_request_reads_its_own_response() {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let starts = AtomicUsize::new(0);
+        let start = || {
+            starts.fetch_add(1, Ordering::SeqCst);
+            start_fake_helper(vec![Duration::from_millis(20); 4], runs.clone())
+        };
+        let mut helper = None;
+
+        assert_eq!(
+            send_with_elevated_helper(&mut helper, &ping(), &start),
+            Ok(())
+        );
+        for index in 0..3 {
+            let manifest_path = format!("layer-{index}.json");
+            assert_eq!(
+                send_with_elevated_helper(&mut helper, &delete(&manifest_path), &start),
+                Err(manifest_path)
+            );
+        }
+        assert_eq!(runs.load(Ordering::SeqCst), 4);
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        assert!(helper.is_some());
+    }
+
+    #[test]
+    fn stopped_helper_is_replaced_once() {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let starts = AtomicUsize::new(0);
+        let start = || {
+            starts.fetch_add(1, Ordering::SeqCst);
+            start_fake_helper(vec![Duration::ZERO], runs.clone())
+        };
+        let mut helper = None;
+
+        assert_eq!(
+            send_with_elevated_helper(&mut helper, &ping(), &start),
+            Ok(())
+        );
+        assert_eq!(
+            send_with_elevated_helper(&mut helper, &delete("layer.json"), &start),
+            Err("layer.json".to_string())
+        );
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+        assert_eq!(starts.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn timed_out_helper_is_dropped_without_sending_again() {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let starts = AtomicUsize::new(0);
+        let start = || -> Result<ElevatedOpenXrHelper, String> {
+            // The first helper answers its second request too late.
+            let delays = if starts.fetch_add(1, Ordering::SeqCst) == 0 {
+                vec![Duration::ZERO, Duration::from_millis(500)]
+            } else {
+                vec![Duration::ZERO]
+            };
+            let helper = start_fake_helper(delays, runs.clone())?;
+            helper
+                .reader
+                .get_ref()
+                .set_read_timeout(Some(Duration::from_millis(100)))
+                .map_err(|error| error.to_string())?;
+            Ok(helper)
+        };
+        let mut helper = None;
+
+        assert_eq!(
+            send_with_elevated_helper(&mut helper, &ping(), &start),
+            Ok(())
+        );
+        assert_eq!(
+            send_with_elevated_helper(&mut helper, &delete("late.json"), &start),
+            Err("OpenXR elevated helper did not respond in time".to_string())
+        );
+        assert!(helper.is_none());
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+
+        assert_eq!(
+            send_with_elevated_helper(&mut helper, &delete("layer.json"), &start),
+            Err("layer.json".to_string())
+        );
+        assert_eq!(starts.load(Ordering::SeqCst), 2);
+    }
 }

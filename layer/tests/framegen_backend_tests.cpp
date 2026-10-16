@@ -5,7 +5,7 @@
 // exits 77 (skipped) when none is present. hw-d3d12 runs the Direct3D 12
 // scenarios on the first hardware adapter (variable-rate shading, the
 // optical flow hardware, a GPU's fence budgets: what WARP does not have) and
-// passes with a message when there is none. FG_TEST_ADAPTER=<text> puts the
+// exits 77 (skipped) when there is none. FG_TEST_ADAPTER=<text> puts the
 // hardware modes and Vulkan on the adapter it names instead (test_adapter.h);
 // naming none fails the hardware modes and skips Vulkan.
 
@@ -1513,8 +1513,9 @@ Difference Compare(const Pixels& a, const Pixels& b, FrameGenExtent extent,
 }
 
 // The layer's own Direct3D 11 compositor shader (QuadViewsD3D11ShaderSource,
-// diagnostics off) composing one eye from the same images, the source rects
-// whole images: what Frame Generation's compose must reproduce.
+// its diagnostics the eye's overlay) composing one eye from the same images,
+// the source rects whole images: what Frame Generation's compose must
+// reproduce.
 class D3D11Compositor {
   public:
     explicit D3D11Compositor(bool hardware) {
@@ -1569,7 +1570,8 @@ class D3D11Compositor {
                   SUCCEEDED(device_->CreateRenderTargetView(target.Get(), nullptr, &rtv)),
               "D3D11 compositor views");
         // QuadViewsConstants: focusRect, blendParams, focusTexel, the source
-        // rects, diagnostics (off), the output texel, markers.
+        // rects, diagnostics (the eye's overlay, as the layer sets them), the
+        // output texel, markers.
         std::array<float, 36> constants{};
         std::copy(eye.focus_rect.begin(), eye.focus_rect.end(), constants.begin());
         constants[4] = eye.feather[0];
@@ -1581,6 +1583,13 @@ class D3D11Compositor {
         constants[11] = eye.output_pixel_in_focus[1];
         constants[14] = constants[15] = 1.0f; // peripheral source rect (0, 0, 1, 1)
         constants[18] = constants[19] = 1.0f; // focus source rect
+        if (eye.overlay.shown) {
+            constants[20] = 1.0f;
+            constants[21] = eye.overlay.eye_tracking ? 1.0f : 0.0f;
+            constants[22] = eye.overlay.gaze ? 1.0f : 0.0f;
+            std::copy(eye.overlay.gaze_markers.begin(), eye.overlay.gaze_markers.end(), constants.begin() + 28);
+            std::copy(eye.overlay.reference_markers.begin(), eye.overlay.reference_markers.end(), constants.begin() + 32);
+        }
         constants[24] = 1.0f / output.width;
         constants[25] = 1.0f / output.height;
         D3D11_BUFFER_DESC buffer{};
@@ -1868,6 +1877,80 @@ int RunQuadViews(Harness& harness) {
             const Pixels periphery_only = ComposeReference(periphery_linear, focus_linear, no_inset, output);
             Check(Compare(composed, periphery_only, output, region(2)).mean > 0.05,
                   harness.name + " compose " + test.name + ": the focus view is not inset");
+        }
+
+        // The layer's quad views diagnostic overlay over the off-centre
+        // compose, drawn as the Direct3D 11 compositor draws it: eye tracking
+        // with a gaze (green outline, cyan ring, yellow cross) and without
+        // one (red outline, no gaze markers), the head's centre (white cross)
+        // in the middle and the configured offset below right of it. Only a
+        // pixel whose uv lies on one of the shapes' thresholds within float
+        // precision may differ by more than a step.
+        const QuadView overlaid{{std::tan(-0.25f), std::tan(0.3f), std::tan(0.35f), std::tan(-0.1f)}, focus_extent};
+        const std::vector<FrameGenViewSubmission> overlaid_views{
+            submission(periphery_chain, 0, full, full, false), submission(focus_chain, 0, overlaid, overlaid, false)};
+        for (const bool gaze : {true, false}) {
+            const std::string name = harness.name + " compose overlay " + (gaze ? "with a gaze" : "without a gaze");
+            Check(gpu->Execute(overlaid_views, analyze, result, error) && result.frame != 0, name + ": analyze: " + error);
+            FrameGenComposeEye eye =
+                BuildFrameGenComposeEye(QuadFov(full), QuadFov(overlaid), output, focus_extent, 25.0, 50.0);
+            eye.peripheral = 0;
+            eye.focus = 1;
+            const Pixels plain = ComposeReference(periphery_linear, focus_linear, BuildFrameGenComposeConstants(eye, output),
+                                                  output);
+            eye.overlay.shown = true;
+            eye.overlay.eye_tracking = true;
+            eye.overlay.gaze = gaze;
+            eye.overlay.gaze_markers = {0.45f, 0.40f, 0.48f, 0.42f};
+            eye.overlay.reference_markers = {0.5f, 0.5f, 0.55f, 0.6f};
+            FrameGenComposition composition;
+            composition.output = output;
+            composition.eyes = {eye};
+            const FrameGenImage image{output_chain, 0, 0, whole(output), output_format};
+            Check(gpu->SynthesizeComposed(result.frame, FrameGenSynthesisMode::kInterpolate, 1.0f, composition, {image},
+                                          error),
+                  name + ": " + error);
+            const Pixels composed = harness.readback_sized(g_swapchains[output_chain][0]);
+            const Pixels shipped = d3d11.Compose(periphery_pixels, periphery_extent, focus_pixels, focus_extent, eye, output);
+            DumpSized(harness.name + "-compose-overlay-" + (gaze ? "gaze" : "no-gaze"), composed, output);
+            const auto all = [](std::uint32_t, std::uint32_t) { return true; };
+            const Difference to_shipped = Compare(composed, shipped, output, all);
+            std::size_t outliers = 0;
+            for (std::size_t i = 0; i < composed.size(); ++i) {
+                for (int c = 0; c < 3; ++c) {
+                    const int d = std::abs(static_cast<int>((composed[i] >> (8 * c)) & 255) -
+                                           static_cast<int>((shipped[i] >> (8 * c)) & 255));
+                    if (d > 2) {
+                        ++outliers;
+                        break;
+                    }
+                }
+            }
+            std::cout << name << ": Direct3D 11 compositor mean " << to_shipped.mean << " max " << to_shipped.max << ", "
+                      << outliers << " px over 2 steps\n";
+            Check(to_shipped.mean < 0.002 && outliers <= 4, name + " differs from the Direct3D 11 compositor's overlay");
+            // The overlay is there: everything is tinted, the head's centre
+            // is white, the inset's outline green with a gaze, red without.
+            Check(Compare(composed, plain, output, all).mean > 0.01, name + ": the overlay is not drawn");
+            const auto pixel = [&](float u, float v) {
+                const auto x = std::min(static_cast<std::uint32_t>(u * output.width), output.width - 1);
+                const auto y = std::min(static_cast<std::uint32_t>(v * output.height), output.height - 1);
+                return composed[std::size_t{y} * output.width + x];
+            };
+            const auto matches = [](std::uint32_t texel, std::uint32_t expected) {
+                for (int c = 0; c < 3; ++c) {
+                    if (std::abs(static_cast<int>((texel >> (8 * c)) & 255) - static_cast<int>((expected >> (8 * c)) & 255)) >
+                        2) {
+                        return false;
+                    }
+                }
+                return true;
+            };
+            Check(matches(pixel(0.5f, 0.5f), Pack(1.0f, 1.0f, 1.0f)), name + ": the head's centre is not marked");
+            const std::uint32_t outline = gaze ? Pack(LinearToSrgb(0.15f), LinearToSrgb(1.0f), LinearToSrgb(0.3f))
+                                               : Pack(LinearToSrgb(1.0f), LinearToSrgb(0.08f), LinearToSrgb(0.05f));
+            Check(matches(pixel(eye.focus_rect[0], (eye.focus_rect[1] + eye.focus_rect[3]) * 0.5f), outline),
+                  name + ": the inset's outline is not " + (gaze ? "green" : "red"));
         }
         gpu->ResetHistory();
     }
@@ -6168,7 +6251,8 @@ int D3D12Test() {
     } else if (g_bench || g_hardware) {
         // The first hardware adapter that runs Direct3D 12; without one
         // (a machine with no GPU, or only Microsoft's software adapter)
-        // there is nothing to run on, which is not a failure.
+        // there is nothing to run on, which is not a failure: the hardware
+        // modes report it as skipped, so CTest does not count it a pass.
         ComPtr<IDXGIAdapter1> adapter;
         for (UINT i = 0; !device && factory->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND; ++i) {
             DXGI_ADAPTER_DESC1 desc{};
@@ -6182,7 +6266,7 @@ int D3D12Test() {
         }
         if (!device) {
             std::cout << "skipped: no hardware Direct3D 12 adapter\n";
-            return 0;
+            return g_hardware ? 77 : 0;
         }
     } else {
         Check(SUCCEEDED(factory->EnumWarpAdapter(IID_PPV_ARGS(&warp))), "WARP adapter");

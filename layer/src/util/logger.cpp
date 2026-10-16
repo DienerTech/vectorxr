@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <chrono>
-#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -44,10 +43,12 @@ std::filesystem::path CreateSessionLogPath(const std::filesystem::path& base_log
     suffix << std::put_time(&tm, "%Y%m%d-%H%M%S");
 
     const std::filesystem::path directory = base_log_path.parent_path();
-    const std::string stem = base_log_path.stem().string();
-    const std::string extension = base_log_path.has_extension() ? base_log_path.extension().string() : ".log";
+    // Built as a path: a name outside the ANSI code page has no narrow form.
+    std::filesystem::path name = base_log_path.stem();
+    name += "-" + suffix.str();
+    name += base_log_path.has_extension() ? base_log_path.extension() : std::filesystem::path(".log");
 
-    return directory / (stem + "-" + suffix.str() + extension);
+    return directory / name;
 }
 
 bool MatchesLogSeries(const std::filesystem::path& candidate, const std::filesystem::path& base_log_path) {
@@ -55,19 +56,21 @@ bool MatchesLogSeries(const std::filesystem::path& candidate, const std::filesys
         return false;
     }
 
-    const std::string stem = candidate.stem().string();
-    const std::string prefix = base_log_path.stem().string();
+    // Compared wide: any file in the log folder may be named outside the ANSI
+    // code page.
+    const std::wstring stem = candidate.stem().wstring();
+    const std::wstring prefix = base_log_path.stem().wstring();
     if (stem == prefix) {
         return true;
     }
 
-    const std::string expected_prefix = prefix + "-";
+    const std::wstring expected_prefix = prefix + L"-";
     if (!stem.starts_with(expected_prefix)) {
         return false;
     }
 
-    const std::string suffix = stem.substr(expected_prefix.size());
-    if (suffix.size() != 15 || suffix[8] != '-') {
+    const std::wstring suffix = stem.substr(expected_prefix.size());
+    if (suffix.size() != 15 || suffix[8] != L'-') {
         return false;
     }
 
@@ -75,7 +78,7 @@ bool MatchesLogSeries(const std::filesystem::path& candidate, const std::filesys
         if (index == 8) {
             continue;
         }
-        if (!std::isdigit(static_cast<unsigned char>(suffix[index]))) {
+        if (suffix[index] < L'0' || suffix[index] > L'9') {
             return false;
         }
     }
@@ -106,7 +109,10 @@ void Logger::Initialize(const std::filesystem::path& log_path) {
     base_log_path_ = log_path;
 
     if (!base_log_path_.parent_path().empty()) {
-        std::filesystem::create_directories(base_log_path_.parent_path());
+        // A folder that cannot be made leaves the logger without a file,
+        // rather than throwing out of xrCreateInstance.
+        std::error_code error;
+        std::filesystem::create_directories(base_log_path_.parent_path(), error);
     }
 
     if (stream_.is_open()) {
@@ -114,12 +120,22 @@ void Logger::Initialize(const std::filesystem::path& log_path) {
     }
     active_log_path_ = CreateSessionLogPath(base_log_path_);
     last_stream_flush_time_ = {};
-    PruneLocked();
+    wrote_error_ = false;
+    // Pruning waits for the instance's SetRetentionFiles: before the config is
+    // read the retention is only the default, which would delete logs a larger
+    // configured retention keeps, and by then this session's log exists, so
+    // it counts toward the retention.
+    retention_applied_ = false;
 }
 
 void Logger::SetRetentionFiles(int retention_files) {
     std::scoped_lock lock(mutex_);
-    retention_files_ = std::max(1, retention_files);
+    retention_files = std::max(1, retention_files);
+    if (retention_applied_ && retention_files == retention_files_) {
+        return;
+    }
+    retention_files_ = retention_files;
+    retention_applied_ = true;
     PruneLocked();
 }
 
@@ -150,6 +166,27 @@ bool Logger::TryDebug(const std::string& message) {
     return true;
 }
 
+bool Logger::TryError(const std::string& message) {
+    std::unique_lock lock(mutex_, std::try_to_lock);
+    if (!lock) return false;
+    if (active_log_path_.empty()) return true;
+    FlushPendingDuplicateLocked();
+    WriteLineLocked(LogLevel::Error, std::chrono::system_clock::now(), message);
+    return true;
+}
+
+void Logger::FlushAtProcessExit() {
+    // A thread the exit ended inside Write still holds the lock: waiting on
+    // it would end the process (0xC000004B). Owning it means no thread of
+    // ours was inside the stream either.
+    std::unique_lock lock(mutex_, std::try_to_lock);
+    if (!lock) return;
+    FlushPendingDuplicateLocked();
+    if (stream_.is_open()) {
+        stream_.flush();
+    }
+}
+
 bool Logger::IsDebugEnabled() const {
     std::scoped_lock lock(mutex_);
     return Severity(LogLevel::Debug) <= Severity(level_);
@@ -160,33 +197,52 @@ std::filesystem::path Logger::ActiveLogPath() const {
     return active_log_path_;
 }
 
+bool Logger::DiscardSessionLog() {
+    std::scoped_lock lock(mutex_);
+    FlushPendingDuplicateLocked();
+    if (active_log_path_.empty() || wrote_error_) {
+        return false;
+    }
+    if (stream_.is_open()) {
+        stream_.close();
+    }
+    std::error_code error;
+    const bool removed = std::filesystem::remove(active_log_path_, error) && !error;
+    active_log_path_.clear();
+    return removed;
+}
+
 void Logger::PruneLocked() {
     if (base_log_path_.empty()) {
         return;
     }
 
     const std::filesystem::path directory = base_log_path_.parent_path();
-    if (directory.empty() || !std::filesystem::exists(directory)) {
+    std::error_code error;
+    if (directory.empty() || !std::filesystem::exists(directory, error)) {
         return;
     }
 
-    std::vector<std::filesystem::directory_entry> log_files;
-    for (const auto& entry : std::filesystem::directory_iterator(directory)) {
-        if (!entry.is_regular_file()) {
+    std::vector<std::pair<std::filesystem::file_time_type, std::filesystem::path>> log_files;
+    for (auto iterator = std::filesystem::directory_iterator(directory, error);
+         !error && iterator != std::filesystem::directory_iterator(); iterator.increment(error)) {
+        std::error_code entry_error;
+        if (!iterator->is_regular_file(entry_error) || !MatchesLogSeries(iterator->path(), base_log_path_)) {
             continue;
         }
-        if (MatchesLogSeries(entry.path(), base_log_path_)) {
-            log_files.push_back(entry);
+        const auto write_time = iterator->last_write_time(entry_error);
+        if (!entry_error) {
+            log_files.emplace_back(write_time, iterator->path());
         }
     }
 
     std::sort(log_files.begin(), log_files.end(), [](const auto& lhs, const auto& rhs) {
-        return lhs.last_write_time() > rhs.last_write_time();
+        return lhs.first > rhs.first;
     });
 
     for (size_t index = static_cast<size_t>(retention_files_); index < log_files.size(); ++index) {
-        std::error_code error;
-        const auto& old_log = log_files[index].path();
+        error.clear();
+        const auto& old_log = log_files[index].second;
         const bool removed = std::filesystem::remove(old_log, error);
         if (removed && !error) {
             // Recorder parts belong to this session and share its retention.
@@ -258,6 +314,7 @@ void Logger::WriteLineLocked(LogLevel level,
     const std::tm tm = LocalTime(time);
 
     stream_ << std::put_time(&tm, "%Y-%m-%d %H:%M:%S") << " [" << ToString(level) << "] " << message << '\n';
+    wrote_error_ = wrote_error_ || level == LogLevel::Error;
     constexpr std::chrono::milliseconds kFlushInterval{250};
     const auto flush_now = std::chrono::steady_clock::now();
     if (level == LogLevel::Error || last_stream_flush_time_ == std::chrono::steady_clock::time_point{} ||

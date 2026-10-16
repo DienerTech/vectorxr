@@ -1,4 +1,5 @@
 #include "depthxr/turbo_recovery.h"
+#include "depthxr/atomic_file.h"
 #include "depthxr/runtime_relay.h"
 #include <chrono>
 #include <fstream>
@@ -84,7 +85,7 @@ bool WriteAtomically(const std::filesystem::path& path, const std::string& conte
     std::error_code ec;
     std::filesystem::create_directories(path.parent_path(), ec);
     if (ec) { if (error) *error = "Unable to create runtime relay directory: " + ec.message(); return false; }
-    const std::filesystem::path temporary_path = path.string() + ".tmp." + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "." + std::to_string(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+    const std::filesystem::path temporary_path = UniqueTemporaryPath(path);
     {
         std::ofstream stream(temporary_path, std::ios::trunc);
         if (!stream) { if (error) *error = "Unable to write runtime relay temporary file"; return false; }
@@ -92,19 +93,13 @@ bool WriteAtomically(const std::filesystem::path& path, const std::string& conte
         stream.flush();
         if (!stream) { if (error) *error = "Unable to flush recovery record"; return false; }
     }
-#if defined(_WIN32)
-    if (!MoveFileExW(temporary_path.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        const DWORD move_error = GetLastError();
-        std::filesystem::remove(temporary_path, ec);
+    // Retries a replace antivirus or indexing briefly blocks: one failure here
+    // used to keep Turbo off for the whole session.
+    std::uint32_t move_error = 0;
+    if (!ReplaceFileAtomically(temporary_path, path, &move_error)) {
         if (error) *error = "Unable to replace runtime relay file: Win32 error " + std::to_string(move_error);
         return false;
     }
-#else
-    std::filesystem::remove(path, ec);
-    ec.clear();
-    std::filesystem::rename(temporary_path, path, ec);
-    if (ec) { std::filesystem::remove(temporary_path, ec); if (error) *error = "Unable to replace runtime relay file: " + ec.message(); return false; }
-#endif
     return true;
 }
 
@@ -117,8 +112,9 @@ bool ArchiveFault(const std::filesystem::path& path) {
     const auto content = buffer.str();
     const auto timestamp = ReadUnsigned(content, "updatedAtUnixMilliseconds");
     if (!timestamp) return false;
-    const auto destination = path.parent_path() / "faults" /
-        (path.stem().string() + "-" + std::to_string(*timestamp) + ".json");
+    auto name = path.stem();
+    name += "-" + std::to_string(*timestamp) + ".json";
+    const auto destination = path.parent_path() / "faults" / name;
     std::error_code ec;
     auto cleared = path.parent_path() / "faults-cleared" / destination.filename();
     cleared.replace_extension("txt");
@@ -171,6 +167,7 @@ void TurboRecoveryGuard::Configure(std::filesystem::path root, TurboRecoveryReco
     static std::atomic<std::uint64_t> sequence{0};
     own_path_ = root_ / (std::to_string(record_.process_id) + "-" +
         std::to_string(record_.process_created) + "-" + std::to_string(++sequence) + ".json");
+    exit_file_.Disarm();
     checked_ = armed_ = blocked_ = failed_ = false;
     interrupted_.clear();
     reason_.clear();
@@ -206,6 +203,7 @@ bool TurboRecoveryGuard::Prepare(bool enabled, bool retry, const std::string& mo
     if (!enabled) {
         record_.mode = mode;
         std::error_code ec;
+        exit_file_.Disarm();
         if (armed_) std::filesystem::remove(own_path_, ec);
         armed_ = blocked_ = failed_ = checked_ = false;
         reason_.clear();
@@ -222,6 +220,7 @@ bool TurboRecoveryGuard::Prepare(bool enabled, bool retry, const std::string& mo
     }
     if (!checked_) {
         interrupted_.clear();
+        bool runtime_errors = false;
         std::error_code ec;
         if (std::filesystem::exists(root_, ec)) {
             for (auto iterator = std::filesystem::directory_iterator(root_, ec);
@@ -243,6 +242,7 @@ bool TurboRecoveryGuard::Prepare(bool enabled, bool retry, const std::string& mo
                 if (*state == "failed" || (*state == "armed" && !alive(static_cast<std::uint32_t>(*pid), created))) {
                     ArchiveFault(entry.path());
                     interrupted_.push_back(entry.path());
+                    runtime_errors |= *state == "failed";
                 }
             }
         }
@@ -254,7 +254,17 @@ bool TurboRecoveryGuard::Prepare(bool enabled, bool retry, const std::string& mo
         }
         checked_ = true;
         blocked_ = !retry && !interrupted_.empty();
-        if (blocked_) reason_ = "The previous Turbo session ended unexpectedly or encountered runtime errors. Turbo is disabled for this application and runtime. Use the Turbo toggle to retry.";
+        // OpenXR teardown and a normal process exit (ExitProcess) remove an
+        // armed marker. One left behind cannot tell a crash or a forced close
+        // from a game that quits by TerminateProcess or crashes on its way
+        // out, so the reason does not say which.
+        if (blocked_) {
+            reason_ = std::string(runtime_errors
+                ? "The previous Turbo session stopped Turbo after runtime errors."
+                : "The previous Turbo session ended without a clean shutdown: a crash, a forced close, or a game "
+                  "that skips OpenXR cleanup when it quits.") +
+                " Turbo is disabled for this application and runtime. Use the Turbo toggle to retry.";
+        }
     }
     if (blocked_) return false;
     if (!armed_ || retry) {
@@ -262,8 +272,12 @@ bool TurboRecoveryGuard::Prepare(bool enabled, bool retry, const std::string& mo
         record_.mode = mode;
         record_.state = "armed";
         record_.reason.clear();
-        if (!Write()) { blocked_ = true; return false; }
+        if (!Write()) { exit_file_.Disarm(); blocked_ = true; return false; }
         armed_ = true;
+        // A normal process exit removes the marker the way OpenXR teardown
+        // would, for games that never call xrDestroySession. A game that
+        // quits by TerminateProcess, or crashes on its way out, leaves it.
+        exit_file_.Arm(own_path_);
         // Establish the new marker before clearing the evidence it supersedes.
         for (const auto& path : interrupted_) {
             // Preserve evidence before an explicit retry clears a block.
@@ -276,6 +290,8 @@ bool TurboRecoveryGuard::Prepare(bool enabled, bool retry, const std::string& mo
 
 void TurboRecoveryGuard::Fail(const std::string& reason) {
     reason_ = reason;
+    // First, so an exit while the failure is being written keeps the marker.
+    exit_file_.Disarm();
     if (root_.empty()) return;
     if (!armed_) {
         // Opt-outs still retain diagnostics without creating a persistent block.
@@ -329,12 +345,14 @@ bool TurboRecoveryGuard::ConsumeClearRequest() {
             if (std::filesystem::exists(path, ec) || ec) return false;
         }
     }
+    exit_file_.Disarm();
     checked_ = blocked_ = failed_ = armed_ = false;
     reason_.clear();
     return true;
 }
 
 void TurboRecoveryGuard::Complete() {
+    exit_file_.Disarm();
     if (armed_ && !failed_) { std::error_code ec; std::filesystem::remove(own_path_, ec); }
     armed_ = false;
     checked_ = false;

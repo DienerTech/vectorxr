@@ -238,6 +238,7 @@ function presetActive(preset: QuadViewsPreset) {
         <label class="block">
           <span class="mb-1 flex items-center gap-1.5 text-sm font-medium">
             Mode
+            <span class="restart-required-mark" title="Switching to Eye tracked needs a game restart when the game started in Head tracked mode.">&#8635;</span>
             <span
               title="Chooses whether the focus area follows head direction or eye gaze when eye tracking is available."
               class="cursor-help select-none text-xs text-muted"

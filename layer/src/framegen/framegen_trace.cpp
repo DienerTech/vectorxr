@@ -2,6 +2,7 @@
 
 #include "depthxr/framegen_trace.h"
 
+#include "depthxr/config_path.h"
 #include "depthxr/logger.h"
 
 #include <algorithm>
@@ -37,7 +38,7 @@ void FrameGenTrace::Start(Logger& logger) {
     // again, writes after what is there.
     std::FILE* file = _wfopen(path.c_str(), L"ab");
     if (!file) {
-        logger.Error("Frame Generation trace: could not open " + path.string() + "; no trace this session.");
+        logger.Error("Frame Generation trace: could not open " + PathToUtf8(path) + "; no trace this session.");
         return;
     }
     // Times: ns is steady time since the trace started; XrTime fields are the
@@ -67,13 +68,18 @@ void FrameGenTrace::Start(Logger& logger) {
     }
     enabled_.store(true, std::memory_order_release);
     logger.Info(
-        "Frame Generation trace (debug logging): writing " + path.string() +
+        "Frame Generation trace (debug logging): writing " + PathToUtf8(path) +
         " (wait: id=app frame a=predictedDisplayTime b=period c=shouldRender; begin: a=result; "
-        "end: a=displayTime b=layerCount c=projectionViews d=view0 swapchain; end.v0/end.v1: pose; "
-        "acq/rel: id=swapchain a=index b=copied (rel); cap: id=swapchain a=index b=captured; "
+        "end: a=displayTime b=layerCount c=projectionViews d=view0 swapchain e=view1 swapchain; "
+        "end.v0/end.v1: pose; acq/rel (only while frames are generated or about to be): id=swapchain a=index "
+        "b=copied (rel); cap: id=swapchain a=index b=captured c=jobs d=releases e=GPU mark; "
         "keep: id=real frame a=time b=previousTime c=analyzed d=previousAnalyzed e=asIs, keep.v0: its pose; "
         "pick: id=frame shown a=refresh time b=its time c=flags d=fraction*1e6 e=previousTime f=chosen before "
-        "fallback; sub: a=displayTime b=layerCount c=view0 swapchain d=presenter thread, sub.v0/sub.v1: pose).");
+        "fallback; sub: a=displayTime b=layerCount c=view0 swapchain d=view0 image width, sub.v0/sub.v1: pose; "
+        "end.q (the game's first quad layer): id=layer index a=space kind b=width um c=height um d=swapchain "
+        "e=eyeVisibility, end.q0: its pose (id=space kind); loc (the runtime's answer to the game's stereo "
+        "xrLocateViews): a=displayTime b=space kind c=viewCount d=viewStateFlags, loc.v0/loc.v1: pose; space kinds: "
+        "0 other, 1 VIEW, 2 LOCAL, 3 STAGE).");
 }
 
 void FrameGenTrace::Stop() {

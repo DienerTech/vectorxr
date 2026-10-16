@@ -11,6 +11,9 @@
 #include <system_error>
 #include <thread>
 
+#include "depthxr/atomic_file.h"
+#include "depthxr/config_path.h"
+
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -162,73 +165,42 @@ bool WriteFileAtomically(const std::filesystem::path& path, const std::string& c
         }
     }
 
-    const auto unique_suffix = std::to_string(
-        std::chrono::steady_clock::now().time_since_epoch().count()) + "." +
-        std::to_string(std::hash<std::thread::id>{}(std::this_thread::get_id()));
-    const std::filesystem::path temporary_path = path.string() + ".tmp." + unique_suffix;
+    const std::filesystem::path temporary_path = UniqueTemporaryPath(path);
     {
         std::ofstream stream(temporary_path, std::ios::trunc);
         if (!stream) {
             if (error) {
-                *error = "Unable to write runtime-pacing temp file: " + temporary_path.string();
+                *error = "Unable to write runtime-pacing temp file: " + PathToUtf8(temporary_path);
             }
             return false;
         }
         stream << content;
     }
 
-#if defined(_WIN32)
     // Antivirus/indexing can briefly open the just-written JSON without delete
-    // sharing, making an otherwise valid atomic replacement fail with access
-    // denied or a sharing violation. Retry for a short bounded interval; this
+    // sharing; the replace retries that for a short bounded interval, which
     // also keeps rapid test/app restarts from randomly losing a pacing verdict.
-    DWORD move_error = ERROR_SUCCESS;
-    constexpr int kMoveAttempts = 6;
-    for (int attempt = 0; attempt < kMoveAttempts; ++attempt) {
-        if (MoveFileExW(temporary_path.c_str(),
-                        path.c_str(),
-                        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-            return true;
-        }
-        move_error = GetLastError();
-        const bool transient = move_error == ERROR_ACCESS_DENIED || move_error == ERROR_SHARING_VIOLATION ||
-                               move_error == ERROR_LOCK_VIOLATION;
-        if (!transient || attempt + 1 == kMoveAttempts) {
-            break;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(2u << attempt));
-    }
-    std::filesystem::remove(temporary_path, ec);
-    if (error) {
-        *error = "Unable to replace runtime-pacing file after retries: Win32 error " +
-                 std::to_string(move_error);
-    }
-    return false;
-#else
-    std::filesystem::remove(path, ec);
-    ec.clear();
-    std::filesystem::rename(temporary_path, path, ec);
-    if (ec) {
-        std::filesystem::remove(temporary_path, ec);
+    std::uint32_t move_error = 0;
+    if (!ReplaceFileAtomically(temporary_path, path, &move_error)) {
         if (error) {
-            *error = "Unable to replace runtime-pacing file: " + ec.message();
+            *error = "Unable to replace runtime-pacing file after retries: Win32 error " +
+                     std::to_string(move_error);
         }
         return false;
     }
-#endif
     return true;
 }
 
 } // namespace
 
 std::filesystem::path ResolveRuntimePacingPath() {
-    if (const char* env_path = std::getenv("VECTORXR_RUNTIME_PACING_PATH"); env_path && *env_path != '\0') {
-        return std::filesystem::path(env_path);
+    if (std::filesystem::path env_path = EnvironmentPath(L"VECTORXR_RUNTIME_PACING_PATH"); !env_path.empty()) {
+        return env_path;
     }
 
 #if defined(_WIN32)
-    if (const char* local_app_data = std::getenv("LOCALAPPDATA"); local_app_data && *local_app_data != '\0') {
-        return std::filesystem::path(local_app_data) / "VectorXR" / "config" / "runtime-pacing.json";
+    if (const std::filesystem::path local_app_data = LocalAppDataPath(); !local_app_data.empty()) {
+        return local_app_data / "VectorXR" / "config" / "runtime-pacing.json";
     }
 #endif
 

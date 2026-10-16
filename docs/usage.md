@@ -324,8 +324,9 @@ starts open until a Quadviews profile is enabled.
 
 #### Live tuning and restarts
 
-- **Fully live:** Horizontal Offset, Vertical Offset, Tracking Mode, Smoothing, Deadzone,
-  Eye Tracking Correction, Foveate Sharpness, and Transition Thickness.
+- **Fully live:** Horizontal Offset, Vertical Offset, Smoothing, Deadzone, Eye Tracking
+  Correction, Foveate Sharpness, and Transition Thickness. Tracking Mode is live too, except that
+  switching to Eye tracked needs a game restart when the game started in Head tracked mode.
 - **Restart required for complete effect:** Focus Width, Focus Height, Focus Resolution,
   Peripheral Resolution, and turning Quadviews or a Quadviews profile on or off. Width and height
   move the visible focus window immediately, but DCS keeps its existing texture dimensions and
@@ -381,12 +382,14 @@ in-headset view labels the rendered regions and tracking pipeline with color:
 - White cross: head-forward center; magenta ring: configured horizontal/vertical offset.
 - Cyan ring: raw eye gaze; yellow cross: gaze after deadzone and smoothing.
 
-The diagnostic view is available only for VectorXR's synthesized D3D11 Quadviews compositor. It is
-not currently supported on Varjo headsets, where the Varjo runtime owns native composition, or in a
-D3D11 game such as DCS that started with Frame Generation on: Frame Generation composes the quad
-views itself there. To use the visualization, turn Frame Generation off for the game and restart
-the game. Turning it off in a running game, or with the A/B toggle, does not make the
-visualization available.
+The diagnostic view is available only for VectorXR's synthesized D3D11 Quadviews. It is not
+currently supported on Varjo headsets, where the Varjo runtime owns native composition. In a D3D11
+game such as DCS with Frame Generation on, Frame Generation composes the quad views itself and draws
+the same visualization into every frame it shows, real and generated. In the rare session where
+Frame Generation generates frames from the composed image instead, the visualization stays off and
+the app and the binding refuse it: Frame Generation would read the overlay as motion. To use it
+there, turn Frame Generation off for the game and restart the game; turning Frame Generation off
+in a running game, or with its A/B toggle, does not make it available.
 
 Quadviews and Pivot are designed to compose: unlike running separate foveation and neck-assist
 layers, VectorXR keeps the foveated focus region aligned with your gaze while Pivot rotates the
@@ -428,9 +431,9 @@ API-layer, runtime, and in-game VR changes also require a full game restart.
 Live app control requires an active VectorXR synthesized D3D11 Quadviews session. Start a compatible
 quad-view application with the VectorXR profile enabled. Native Varjo composition does not expose
 this visualization; the saved in-headset shortcut also begins each new session with the overlay off.
-In a D3D11 game such as DCS that started with Frame Generation on, the visualization is unavailable
-for the whole session, and the app reads **Unavailable in the active OpenXR session**. Turn Frame
-Generation off for the game and restart it.
+It is also unavailable in the rare session where Frame Generation generates frames from the composed
+image instead of composing the quad views itself, and the app reads **Unavailable in the active
+OpenXR session**: turn Frame Generation off for the game and restart the game to use it there.
 
 **What else should I disable while troubleshooting?**
 
@@ -582,14 +585,27 @@ last Safety marker, not a confirmed crash time. The Turbo Safety screenshot show
 Before clearing logs, use **Home > Export Debug** to save an **Export Debug Information** ZIP
 when reporting a problem. It includes Turbo metrics, pacing decisions, safety records,
 live and saved runtime diagnostics, current and saved settings, and retained VectorXR logs.
+VectorXR keeps the last Turbo and Frame Generation status of a game that crashed or was closed
+from Task Manager for at least a day, so an export made after relaunching the game still
+includes it.
 With Debug logging, the export also includes continuous recent frame-call history, up to three
 frozen snapshots taken at stalls, faults, and recoveries, and, with Frame Generation on, up to two
-snapshots taken when Dynamic stands down or the runtime holds frames to half rate. These recorder
-files follow the configured log retention. The two most recent sessions' logs, incident snapshots,
-and recent history come first, then the remaining session logs, then those two sessions' Frame
-Generation snapshots, then older recorder history.
-Raw capture is limited to 8 MiB per file and 64 MiB total; the ZIP inventory lists any
-unavailable or limited files. Review the ZIP for private information before sharing it.
+snapshots taken when Dynamic stands down or the runtime holds frames to half rate, plus a
+frame-by-frame Frame Generation trace (`*.framegen-trace.csv`) written beside the session's log.
+These recorder files and traces follow the configured log retention.
+
+The export takes two sessions in full: the two newest that reached a VR session (MSFS 2024 first
+starts a short probe instance whose log does not count), or the two newest logs when none did.
+Logs are captured after the settings and runtime files, in this order, so the size limits cut
+the last ones first: every session log, newest first, with each of the two sessions' incident
+snapshots and recent history right after its log; then those two sessions' Frame Generation
+snapshots; then the Frame Generation trace of the newer of them that has one (no other trace is
+exported); then the older sessions' recorder files.
+Raw capture is limited to 8 MiB per file and 64 MiB total. A log or trace over its limit keeps
+its start (the session header, or the trace's column names) and its end, with a marker where the
+middle was left out; the ZIP inventory lists any unavailable or limited files. The ZIP is
+compressed; logs typically shrink to about a tenth of their size. Review the ZIP for private
+information before sharing it.
 
 Each session's log names the hardware it runs on, right after the runtime creates the VR
 session, in a line starting `Session graphics:`. It gives the graphics API, the graphics card
@@ -654,9 +670,10 @@ Report Frame Generation problems to VectorXR rather than to the game's developer
    game. An enabled matching custom profile turns Frame Generation on for that game even when
    the Default Profile is off.
 6. Start with the default settings (**Mode: Interpolate**, **Frame rate: Dynamic**, **Motion
-   source: Shader**), then click **Save Changes**. Interpolate always measures motion on the
-   GPU's shader cores. **NVIDIA hardware** motion, on an NVIDIA RTX GPU, is for **Extrapolate**,
-   which has the lowest latency: try the two together.
+   source: Shader**), then click **Save Changes**. In Dynamic, Interpolate measures motion on the
+   GPU's shader cores. **NVIDIA hardware** motion, on an NVIDIA RTX GPU, is best with
+   **Extrapolate**, which has the lowest latency: try the two together. At a fixed or Auto frame
+   rate Interpolate can use it too (experimental).
 7. Restart the game. Turning Frame Generation on, for the Default Profile or a custom profile,
    takes effect at the next launch. Turning it off applies to a running game at once: frames
    pass straight through.
@@ -803,17 +820,21 @@ needs a game restart; turning it off applies at once.
   `dynamic`, `auto`, `2x`, `3x`, or `4x`.
 - **Motion source**: **Shader** (default) measures motion by block matching on the GPU's
   shader cores, on any GPU. **NVIDIA hardware** uses the optical flow accelerator of NVIDIA RTX
-  20-50 GPUs for Extrapolate: repeating patterns such as building windows and railings stay put,
-  and Extrapolate needs it to look its best. Interpolate measures motion with Shader even when
+  20-50 GPUs: repeating patterns such as building windows and railings stay put, and Extrapolate
+  needs it to look its best. Interpolate in **Dynamic** measures motion with Shader even when
   NVIDIA hardware is chosen: while the game keeps the GPU busy, the accelerator's results arrive
-  too late for the frames between real frames. The accelerator starts on each eye's image as
-  soon as the game releases it, so it mostly runs while the game finishes its frame. With
-  **Performance** flow quality it uses the accelerator's fastest preset, which is less accurate
-  on repeating patterns. Where it cannot be used, Shader is, and the log says why. The page
-  checks every graphics card in the PC with NVIDIA's driver, not only the first one listed, and
-  greys out **NVIDIA hardware**, with each card's reason, when none has the accelerator. While the
-  mode is Interpolate the whole Motion source is greyed out and shows Shader; the choice you made
-  is kept for Extrapolate.
+  too late for the frames between real frames. At a fixed or **Auto** frame rate the game is held
+  to every second (or third, fourth) refresh, which leaves the accelerator time, so Interpolate
+  uses it there (experimental: if its results arrive late, Frame Generation runs a refresh
+  further ahead, adding latency; changing the frame rate during play with **Quality** or
+  **Performance** flow quality briefly stutters while it switches). With **Performance** flow
+  quality it uses the accelerator's fastest preset, which is less accurate on repeating
+  patterns. Where it cannot be used, Shader
+  is, and the log says why. The page checks every graphics card in the PC with NVIDIA's driver,
+  not only the first one listed, and greys out **NVIDIA hardware**, with each card's reason, when
+  none has the accelerator. While the mode is Interpolate with a Dynamic frame rate the whole
+  Motion source is greyed out and shows Shader; the choice you made is kept for Extrapolate and
+  for fixed rates.
   In `settings.json`, set `"motionEstimation": "hardware"` in a profile's settings.
 - **Advanced** (collapsed by default):
   - **Flow quality** sets the resolution motion is measured at: **Performance** (1/16 of the eye
@@ -825,9 +846,11 @@ needs a game restart; turning it off applies at once.
     move image content. Motion beyond it falls back to the real image.
   - **Reset advanced settings** returns all three to their defaults.
 - **Diagnostic view** applies to every Frame Generation session: **Off**, **Motion flow**
-  (color-coded motion overlay on generated frames), **Confidence** (heat map of where
-  generation fell back to the real image), or **Generated-frame tint** (a faint tint on
-  generated frames, so you can confirm they are being shown).
+  (color-coded motion overlay on generated frames), **Confidence** (generated frames painted
+  red where generation fell back to the real image), or **Generated-frame tint** (a faint tint
+  on generated frames, so you can confirm they are being shown). The views are for testing:
+  in play they look like glitches, so set it back to **Off** afterwards. The VectorXR log names
+  the view at the start of each Frame Generation session.
 - **A/B toggle** is an optional binding that switches generated frames off and on live. It only
   works in sessions that started with Frame Generation on. It takes several bindings, one for
   each device you fly with; any one of them acts.
@@ -843,9 +866,7 @@ Advanced settings. The first enabled custom profile that matches the running gam
   application has both turned on; it never blocks saving.
 - **Quadviews:** works with VectorXR's synthesized quad views and with Varjo-native quad views,
   because generation runs on the final images sent to the headset. On Varjo headsets, **Foveate
-  Sharpness** is off in Direct3D 11 games such as DCS while Frame Generation is on, and the
-  Quadviews diagnostic visualization is unavailable in Direct3D 11 games that started with Frame
-  Generation on.
+  Sharpness** is off in Direct3D 11 games such as DCS while Frame Generation is on.
 - **Graphics APIs:** Direct3D 11, Direct3D 12, and Vulkan.
 - **On-Screen Display:** in games where Frame Generation is on, both layouts show its state
   beside the FPS value (**FG ON** with the frames per second the headset shows, or **FG STBY**,
@@ -875,6 +896,12 @@ frames Frame Generation presents, VectorXR reports it after about 4 seconds of i
   Frame Generation, and it tries again after a hold, 10 seconds at first and longer after each
   stand-down. While the message stands, a try ends within about a second if the runtime still
   holds the frames to half rate.
+- With **Auto**, Frame Generation goes back to full rate the same way (**Frame Generation
+  automatic multiplier 4x -> full rate: the runtime holds frames to half rate**) and tries again
+  after the same kind of hold. A runtime that reports the halved frame period (the log line above
+  then names it) is the exception: Auto times the game's frames by that period and keeps a rate
+  that fits it. After you turn the smoothing off, Auto waits out its hold; switching Frame
+  Generation off and on with the **A/B toggle** tries again at once.
 - Each 30-second summary counts the waits on Frame Generation's own thread that the runtime held
   back, as **runtimeHalved** (held back/measured), followed by **(halving)** while it lasts.
 
@@ -902,8 +929,8 @@ halving.
 
 Turn off the smoothing and check that the runtime runs at full refresh. The message clears once
 the runtime gives frames every refresh again: within a few seconds while Frame Generation
-presents them, and with **Dynamic** standing by, the next time it engages, or sooner once the
-game's own frames show the runtime giving them every refresh.
+presents them, and with **Dynamic** standing by or **Auto** at full rate, the next time it
+engages, or sooner once the game's own frames show the runtime giving them every refresh.
 
 #### Current limits
 
@@ -1046,7 +1073,9 @@ layouts) adds a small badge next to the FPS value: **FG ON** over the frames per
 headset shows, generated frames included, or **FG STBY**, **FG WAIT**, **FG PAUSED**, **FG OFF**,
 or **FG N/A**. The Frame Generation row reads, for example, `On / Interpolate / Dynamic` with
 `45 → 90 fps / GPU 3.1 ms` on a second line (the game's and the headset's frame rates, and the
-GPU time Frame Generation took), or **Standby**, **Starting**, **Paused**, or **Unavailable**
+GPU time of Frame Generation's motion analysis of the latest real frame: writing each generated
+frame comes on top of it, and with NVIDIA optical flow most of it is the hardware's latency), or
+**Standby**, **Starting**, **Paused**, or **Unavailable**
 with the reason on the second line. The compact row is shorter, such as `Dynamic / 45 → 90 fps`.
 
 The Pivot row starts with **Motion:**. It reads **Active** or **Releasing**, followed by
@@ -1121,8 +1150,8 @@ excludes the paused interval. File writes run in the background.
 ![VectorXR OpenXR Layer Manager tab](screenshots/openxr-layer-manager.jpg)
 
 The **OpenXR Layers** tab manages the implicit API layers installed on your system across the
-four Windows registry slices (Machine-wide / Per-user × 64-bit / 32-bit — *Machine-wide 64-bit*
-is the recommended one for most PCVR). For each layer you can see its name, path, and signature
+three Windows registry slices (Machine-wide 64-bit, Machine-wide 32-bit, and Per-user, which
+64-bit and 32-bit apps share — *Machine-wide 64-bit* is the recommended one for most PCVR). For each layer you can see its name, path, and signature
 status, and you can enable, disable, reorder, or remove its registry registration.
 Signature verification is optional: Refresh on this page requests it, with a
 four-second limit per binary; startup readiness does not wait for verification. Removal asks

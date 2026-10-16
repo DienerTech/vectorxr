@@ -67,8 +67,11 @@ function Invoke-Git {
 function Assert-MicrosoftSigned {
     param([string]$Path)
     $signature = Get-AuthenticodeSignature -LiteralPath $Path
-    if ($signature.Status -ne "Valid" -or $signature.SignerCertificate.Subject -notmatch '(^|,\s*)CN=Microsoft Corporation(,|$)') {
-        throw "The signing client's '$Path' is not validly signed by Microsoft ($($signature.Status)); delete the tools folder to fetch it again."
+    $subject = if ($signature.SignerCertificate) { $signature.SignerCertificate.Subject } else { "no signer" }
+    # Once Windows catalogs the same VC runtime DLLs, they verify through the catalog: CN=Microsoft Windows.
+    if ($signature.Status -ne "Valid" -or $subject -notmatch '(^|,\s*)CN=Microsoft (Corporation|Windows)(,|$)' -or
+        $subject -notmatch '(^|,\s*)O=Microsoft Corporation(,|$)') {
+        throw "The signing client's '$Path' is not validly signed by Microsoft ($($signature.Status), $subject); delete the tools folder to fetch it again."
     }
 }
 

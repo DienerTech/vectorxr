@@ -5,6 +5,54 @@ use std::path::Path;
 
 const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
+// An oversized log keeps up to this much of its start, which holds the session
+// header (version, runtime, GPU, Frame Generation mode), and spends the rest
+// of its limit on the end.
+const HEAD_BYTES: u64 = 256 * 1024;
+// Below this limit an oversized log keeps only its end.
+const MIN_HEAD_AND_TAIL_BYTES: u64 = 4 * 1024;
+const OMITTED_MARKER_BYTES: u64 = 128;
+
+// The layer logs this, early, once the runtime created the game's session
+// (every layer version since June 2026).
+const SESSION_MARKER: &[u8] = b"xrCreateSession succeeded downstream";
+const SESSION_MARKER_SCAN_BYTES: u64 = 1024 * 1024;
+
+fn reached_session(path: &Path) -> bool {
+    let mut head = Vec::new();
+    fs::File::open(path)
+        .and_then(|file| file.take(SESSION_MARKER_SCAN_BYTES).read_to_end(&mut head))
+        .is_ok()
+        && head
+            .windows(SESSION_MARKER.len())
+            .any(|window| window == SESSION_MARKER)
+}
+
+// Keeps whole lines from the start and the end of `file` within about
+// `limit` bytes, with a marker saying how much of the middle was left out.
+fn read_head_and_tail(file: &mut fs::File, length: u64, limit: u64) -> std::io::Result<Vec<u8>> {
+    let head_limit = HEAD_BYTES.min(limit / 4);
+    let tail_limit = limit - head_limit - OMITTED_MARKER_BYTES;
+    let mut head = Vec::new();
+    file.by_ref().take(head_limit).read_to_end(&mut head)?;
+    if let Some(end) = head.iter().rposition(|byte| *byte == b'\n') {
+        head.truncate(end + 1);
+    }
+    file.seek(SeekFrom::Start(length - tail_limit))?;
+    let mut tail = Vec::new();
+    file.take(tail_limit).read_to_end(&mut tail)?;
+    if let Some(start) = tail.iter().position(|byte| *byte == b'\n') {
+        tail.drain(..=start);
+    }
+    let omitted = length.saturating_sub((head.len() + tail.len()) as u64);
+    let mut bytes = head;
+    bytes.extend_from_slice(
+        format!("... Debug Export left out {omitted} bytes from the middle of this file ...\n")
+            .as_bytes(),
+    );
+    bytes.extend_from_slice(&tail);
+    Ok(bytes)
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -47,6 +95,10 @@ impl DebugSourceSnapshot {
             entry.truncated = entry.original_bytes > limit;
             if entry.truncated && (!tail || limit == 0) {
                 return Err("Omitted: debug export size limit reached".into());
+            }
+            if entry.truncated && limit >= MIN_HEAD_AND_TAIL_BYTES {
+                return read_head_and_tail(&mut file, entry.original_bytes, limit)
+                    .map_err(|e| e.to_string());
             }
             if tail {
                 file.seek(SeekFrom::Start(entry.original_bytes.saturating_sub(limit)))
@@ -117,10 +169,24 @@ impl DebugSourceSnapshot {
                 ],
             )
         };
+        // MSFS 2024 opens a probe instance that never creates a session before
+        // the real one, and each instance writes its own short log. The
+        // complete sessions are the newest logs that reached xrCreateSession
+        // (the newest logs when none did), so a probe never takes a slot from
+        // the session that was flown.
+        let reached = paths
+            .iter()
+            .map(|path| reached_session(path))
+            .collect::<Vec<_>>();
+        let mut complete = vec![false; paths.len()];
+        (0..paths.len())
+            .filter(|&index| reached[index] || !reached.contains(&true))
+            .take(COMPLETE_SESSIONS)
+            .for_each(|index| complete[index] = true);
         let mut deferred = Vec::new();
         for (index, path) in paths.iter().enumerate() {
             self.log_file(path);
-            if index < COMPLETE_SESSIONS {
+            if complete[index] {
                 for companion in companions(path) {
                     self.log_file(&companion);
                 }
@@ -130,7 +196,24 @@ impl DebugSourceSnapshot {
         for snapshot in deferred {
             self.log_file(&snapshot);
         }
-        for path in paths.iter().skip(COMPLETE_SESSIONS) {
+        // The newest complete session's Frame Generation trace (written with
+        // debug logging): minutes of per-frame history where the recorder
+        // holds seconds. It can reach hundreds of MB, so it gets a log's
+        // capped start-and-end cut (the start holds the CSV header) and comes
+        // after everything above.
+        if let Some(trace) = paths
+            .iter()
+            .zip(&complete)
+            .filter(|(_, complete)| **complete)
+            .map(|(path, _)| path.with_extension("framegen-trace.csv"))
+            .find(|trace| trace.exists())
+        {
+            self.log_file(&trace);
+        }
+        for (index, path) in paths.iter().enumerate() {
+            if complete[index] {
+                continue;
+            }
             for companion in companions(path).into_iter().chain(framegen(path)) {
                 self.log_file(&companion);
             }
@@ -399,6 +482,146 @@ mod tests {
                 "vectorxr-20261009-100000.flight-recorder.framegen.log",
             ]
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_newest_frame_generation_trace_follows_the_complete_sessions() {
+        let root = std::env::temp_dir().join(format!(
+            "vectorxr-debug-trace-{}-{}",
+            std::process::id(),
+            super::super::unix_milliseconds()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let sessions = [
+            "vectorxr-20261014-120000.log",
+            "vectorxr-20261014-110000.log",
+            "vectorxr-20261014-100000.log",
+        ]
+        .map(|name| root.join(name));
+        for session in &sessions {
+            fs::write(session, "main").unwrap();
+            fs::write(session.with_extension("flight-recorder.0.log"), "recorder").unwrap();
+        }
+        // The newest session ran without debug logging; the trace comes from
+        // the previous one, and the oldest one's is never taken.
+        fs::write(
+            sessions[0].with_extension("flight-recorder.framegen.log"),
+            "frame generation",
+        )
+        .unwrap();
+        fs::write(
+            sessions[1].with_extension("framegen-trace.csv"),
+            "name,ns,thread,id,a,b,c,d,e,f\nsession,0,0,0,0,0,0,0,0,0\n",
+        )
+        .unwrap();
+        fs::write(sessions[2].with_extension("framegen-trace.csv"), "old").unwrap();
+        let mut snapshot = DebugSourceSnapshot::default();
+        snapshot.logs(sessions.to_vec());
+        let order = snapshot
+            .files
+            .iter()
+            .map(|f| f.archive_path.trim_start_matches("logs/").to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            order,
+            vec![
+                "vectorxr-20261014-120000.log",
+                "vectorxr-20261014-120000.flight-recorder.0.log",
+                "vectorxr-20261014-110000.log",
+                "vectorxr-20261014-110000.flight-recorder.0.log",
+                "vectorxr-20261014-100000.log",
+                "vectorxr-20261014-120000.flight-recorder.framegen.log",
+                "vectorxr-20261014-110000.framegen-trace.csv",
+                "vectorxr-20261014-100000.flight-recorder.0.log",
+            ]
+        );
+        assert!(snapshot.files[6]
+            .content
+            .as_deref()
+            .unwrap()
+            .starts_with("name,ns,thread,id,"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn probe_instances_do_not_take_a_complete_session_slot() {
+        let root = std::env::temp_dir().join(format!(
+            "vectorxr-debug-probe-{}-{}",
+            std::process::id(),
+            super::super::unix_milliseconds()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let session = "[info] xrCreateSession succeeded downstream; configuring VectorXR session resources.\n";
+        let logs = [
+            ("vectorxr-20261014-102320.log", "[info] xrDestroyInstance requested by application.\n"),
+            ("vectorxr-20261014-102300.log", session),
+            ("vectorxr-20261014-092254.log", "[info] xrDestroyInstance requested by application.\n"),
+            ("vectorxr-20261014-090000.log", session),
+        ]
+        .map(|(name, content)| {
+            let path = root.join(name);
+            fs::write(&path, format!("[info] VectorXR layer version: 0.19.1\n{content}")).unwrap();
+            fs::write(path.with_extension("flight-recorder.0.log"), "recorder").unwrap();
+            path
+        });
+        let mut snapshot = DebugSourceSnapshot::default();
+        snapshot.logs(logs.to_vec());
+        let order = snapshot
+            .files
+            .iter()
+            .map(|f| f.archive_path.trim_start_matches("logs/").to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            order,
+            vec![
+                "vectorxr-20261014-102320.log",
+                "vectorxr-20261014-102300.log",
+                "vectorxr-20261014-102300.flight-recorder.0.log",
+                "vectorxr-20261014-092254.log",
+                "vectorxr-20261014-090000.log",
+                "vectorxr-20261014-090000.flight-recorder.0.log",
+                "vectorxr-20261014-102320.flight-recorder.0.log",
+                "vectorxr-20261014-092254.flight-recorder.0.log",
+            ]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn oversized_logs_keep_their_session_header_and_their_end() {
+        let root = std::env::temp_dir().join(format!(
+            "vectorxr-debug-head-tail-{}-{}",
+            std::process::id(),
+            super::super::unix_milliseconds()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let header = "[info] VectorXR 0.19.2 | runtime=Pimax OpenXR | GPU=RTX 5090 | FG=Interpolate\n";
+        let mut log = header.to_string();
+        let mut line = 0;
+        while log.len() < (MAX_FILE_BYTES + MAX_FILE_BYTES / 2) as usize {
+            log.push_str(&format!("[debug] frame {line} pacing sample with some padding text\n"));
+            line += 1;
+        }
+        log.push_str("[info] last line before exit\n");
+        let path = root.join("vectorxr-20261014-120000.log");
+        fs::write(&path, &log).unwrap();
+
+        let mut snapshot = DebugSourceSnapshot::default();
+        snapshot.file(&path, "logs/vectorxr.log".into(), true);
+        let file = &snapshot.files[0];
+        let content = file.content.as_deref().unwrap();
+        assert!(file.truncated);
+        assert!(content.starts_with(header), "{}", &content[..200]);
+        assert!(content.ends_with("[info] last line before exit\n"));
+        assert!(content.contains("bytes from the middle of this file ..."));
+        assert!(content.len() as u64 <= MAX_FILE_BYTES);
+        // Both cuts fall on line boundaries.
+        let marker = content.find("... Debug Export left out").unwrap();
+        assert!(content[..marker].ends_with('\n'));
+        let after = &content[marker..];
+        let resumed = &after[after.find('\n').unwrap() + 1..];
+        assert!(resumed.starts_with("[debug] frame "), "{}", &resumed[..80]);
         fs::remove_dir_all(root).unwrap();
     }
 

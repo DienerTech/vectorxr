@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <future>
@@ -33,6 +34,7 @@
 #include "depthxr/runtime_pacing.h"
 #include "depthxr/runtime_relay.h"
 #include "depthxr/osd_renderer.h"
+#include "depthxr/process_exit.h"
 #include "depthxr/framegen_d3d11_bridge.h"
 #include "depthxr/framegen_vulkan_bridge.h"
 #include "depthxr/framegen_presenter.h"
@@ -62,6 +64,11 @@ namespace depthxr {
 #if defined(DEPTHXR_TESTING)
 class TurboFrameTestPeer;
 #endif
+
+// A space by the reference space type the layer tracks it as (its own
+// internal spaces count as their type), for diagnostics. The values are the
+// codes the flight recorder and the Frame Generation trace write.
+enum class TrackedSpaceKind : std::uint8_t { kOther = 0, kView = 1, kLocal = 2, kStage = 3 };
 
 class OpenXrLayer {
   public:
@@ -119,6 +126,7 @@ class OpenXrLayer {
         bool layer_injected_d3d12{false};
         bool retried_without_d3d12{false};
         XrResult d3d12_retry_result{XR_SUCCESS};
+        bool d3d12_refused_alone{false}; // the instance was created with every other addition
         bool d3d12_enabled{false};
         // The application's Vulkan extension: 2 for XR_KHR_vulkan_enable2, 1
         // for XR_KHR_vulkan_enable, 0 for neither (the Vulkan bridge's
@@ -150,6 +158,9 @@ class OpenXrLayer {
                                XrInstance instance,
                                bool eye_gaze_extension_enabled,
                                const InstanceCreateDiagnostics& diagnostics);
+    // OnInstanceCreated failed (or threw): the layer forgets the instance, as
+    // at xrDestroyInstance, so the application can create another.
+    void AbandonInstance();
     XrResult GetInstanceProcAddr(XrInstance instance, const char* name, PFN_xrVoidFunction* function);
     XrResult DestroyInstance(XrInstance instance);
     XrResult CreateSession(XrInstance instance, const XrSessionCreateInfo* create_info, XrSession* session);
@@ -367,6 +378,14 @@ class OpenXrLayer {
         uint32_t consecutive_skipped_frames{0};
         uint32_t failure_logs_remaining{8};
         std::array<QuadViewsCompositionTarget, 2> targets;
+        // The size and format each target could not be built for
+        // (EnsureFocusSharpenTarget): not tried again until they change.
+        struct TargetShape {
+            uint32_t width{0};
+            uint32_t height{0};
+            int64_t format{0};
+        };
+        std::array<std::optional<TargetShape>, 2> failed_shapes;
     };
 
     struct PivotDiagnosticState {
@@ -526,7 +545,9 @@ class OpenXrLayer {
     // EndSession only: releases an interlocked off-thread wait with a balancing
     // begin/empty submit, then waits a bounded time for it to complete.
     void ReleaseTurboPendingWaitForSessionEnd(XrSession session);
-    void ResetTurboFrameState();
+    // stop_recorder=false leaves the flight recorder running (xrDestroySession
+    // stops it once Frame Generation's presenter is down).
+    void ResetTurboFrameState(bool stop_recorder = true);
     // Frame pacing telemetry: logs a summary line (debug level) every ~5s so a
     // judder report can be localized to our drain, the runtime's end-frame, the
     // runtime's wait pacing, or upstream of the layer entirely.
@@ -557,14 +578,25 @@ class OpenXrLayer {
     void NoteTurboShouldRenderLocked(bool should_render);
     bool IsQuadViewsActive() const;
     bool IsQuadViewsEmulationActive() const;
-    // A bridged session whose pacing Frame Generation owns: it composes the
-    // quad views itself, and the diagnostic overlay is unavailable.
-    bool FrameGenComposesQuadViews() const;
+    // Frame Generation captures the Direct3D 11 quad views compositor's
+    // images (it generates frames from them where it cannot compose the quad
+    // views itself): the diagnostic overlay stays out of them, or its motion
+    // would be measured. Caller holds mutex_.
+    bool QuadViewsOverlayWithheld() const;
+    // The diagnostic visualization can be shown in this session (the app's
+    // live control): an emulated quad views session with the Direct3D 11
+    // compositor, the overlay not withheld. Caller holds mutex_.
+    bool QuadViewsDiagnosticVisualizationAvailable() const;
     void ResetSwapchainState();
     void LogSwapchainSummary(XrSwapchain swapchain, const SwapchainInfo& info, std::string_view event_name);
+    // Logs xrEnumerateSwapchainFormats' list when it differs from the last one this session.
+    void LogSwapchainFormatsOnChange(const std::string& line);
     // Counts an application call on the calling thread; logs the first call of each kind on each thread.
     void NoteThread(ThreadCensus::Call call);
     bool ShouldDeferSwapchainRelease(const SwapchainInfo& info) const;
+    // An application's release of `swapchain`'s image (forwarded as it came,
+    // or deferred until its xrEndFrame), on to the runtime.
+    XrResult ForwardAppRelease(XrSwapchain swapchain, const XrSwapchainImageReleaseInfo* release_info);
     XrResult FlushDeferredSwapchainReleaseLocked(XrSwapchain swapchain,
                                                  SwapchainInfo& info,
                                                  std::string_view reason);
@@ -594,11 +626,12 @@ class OpenXrLayer {
     void RecordEyeGazeSyncResult(bool application, XrResult result);
     void ResetEyeGazeInputState();
     void DestroyEyeGazeResources();
+    void UpdateEyeGazeResources(QuadViewsTrackingMode previous_mode); // Called under mutex_.
     void TryAttachEyeGazeActionSetFallback(XrSession session);
     bool LocateEyeGazeFocusOffsets(XrSession session,
                                    XrSpace base_space,
                                    XrTime time,
-                                   const QuadViewsResolvedSettings& settings,
+                                   const QuadViewsSettings& settings,
                                    double* yaw_radians,
                                    double* pitch_radians);
     bool EnsureEyeOffsets(XrSession session,
@@ -670,6 +703,9 @@ class OpenXrLayer {
                                      const XrPosef& pose_delta) const;
     void PrunePivotPoseDeltas(XrTime time);
     std::string DescribeSpace(XrSpace space) const;
+    // mutex_: kOther for a space of no tracked reference type (an action
+    // space, LOCAL_FLOOR, or XR_NULL_HANDLE).
+    TrackedSpaceKind ClassifySpace(XrSpace space) const;
     void CacheDepthSubmissionGeometry(XrTime time,
                                       XrSpace space,
                                       XrViewConfigurationType view_configuration_type,
@@ -715,13 +751,14 @@ class OpenXrLayer {
     // A native quad projection layer the application submitted for
     // `display_time`: its focus views' FOVs against the ones located for that
     // display time (VarjoNativeFoveationDiagnosticState). Caller holds mutex_.
+    void NoteVarjoNativeLocatedFocusLocked(XrTime display_time, const XrView* views);
     void NoteVarjoNativeSubmittedFocusLocked(XrTime display_time, const XrCompositionLayerProjectionView* views,
                                             uint32_t view_count);
     bool EnsureD3D11QuadViewsPixelProbeResources(int64_t format);
     void ReleaseD3D11QuadViewsPixelProbeResources(bool preserve_history);
     void PollD3D11QuadViewsPixelProbe();
     bool SynthesizeQuadViewsFromStereo(std::span<const XrView> stereo_views,
-                                       const QuadViewsResolvedSettings& quadviews_settings,
+                                       const QuadViewsSettings& quadviews_settings,
                                        double focus_yaw_radians,
                                        double focus_pitch_radians,
                                        uint32_t view_capacity_input,
@@ -741,6 +778,9 @@ class OpenXrLayer {
                                         uint32_t output_height,
                                         int64_t output_format);
     bool EnsureD3D11SwapchainShaderResources(SwapchainInfo& swapchain, uint32_t array_slice = 0);
+    // The first four swapchains of the quad views session that can be the
+    // compositor's inputs; false while fewer exist.
+    bool SelectQuadViewsPrewarmInputs(std::array<SwapchainInfo*, 4>* inputs);
     void TryPrewarmD3D11QuadViewsCompositor();
     // An emulated quad views frame (views 0/1 peripheral, 2/3 focus) as it is
     // composed into stereo, worked out on the CPU alone: what the Direct3D 11
@@ -760,7 +800,9 @@ class OpenXrLayer {
         // restored; subImage unset.
         std::array<XrCompositionLayerProjectionView, 2> eye_views{};
         uint32_t restored{0}; // eye views whose depth geometry was restored
-        FrameGenComposition composition; // per eye: views eye and eye + 2
+        // Per eye: views eye and eye + 2, with the diagnostic overlay while
+        // the visualization is shown.
+        FrameGenComposition composition;
         bool log_diagnostic{false};      // the frame logs the compositor's Debug diagnostics
         // Frame Generation's thread shows the composed frame later, between
         // frames it writes itself (left to the layer while that thread
@@ -777,6 +819,9 @@ class OpenXrLayer {
                                    bool has_non_identity_delta,
                                    const DepthSubmissionGeometry* depth_geometry,
                                    QuadViewsComposePlan* plan);
+    // Logs, at Info, how the focus inset moved since the last summary (in
+    // `tracking_mode`), and starts the next one.
+    void LogQuadViewsInsetMotion(std::string_view reason, QuadViewsTrackingMode tracking_mode);
     // The four views' swapchains, when each has a released (or acquired)
     // image of its own to compose from.
     bool FindQuadViewsSourceSwapchains(const XrCompositionLayerProjection* source_layer,
@@ -796,6 +841,9 @@ class OpenXrLayer {
                                   uint32_t width,
                                   uint32_t height,
                                   int64_t format);
+    // Acquires and waits for the image of `target` to draw into; false (with
+    // `reason`) when there is none this frame.
+    bool AcquireFocusSharpenImage(QuadViewsCompositionTarget& target, uint32_t* index, const char** reason);
     // Sharpens native focus views (indices 2/3) in place: renders each into one of
     // our swapchains and repoints its subImage. Best-effort — any view that cannot
     // be sharpened is left untouched (submits the app's unsharpened focus).
@@ -914,6 +962,15 @@ class OpenXrLayer {
     // forwarding a claimed frame abandons it (`abandon`, when the caller
     // does not abandon the frame itself).
     void DropPendingFrameGenQuad(bool abandon);
+    // While Frame Generation's trace records: the space of the first quad
+    // layer of the frame being ended, and its kind. Classified in
+    // ForwardEndFrame under mutex_, consumed by TraceRuntimeEndFrame (which
+    // runs without it); only the application's end-frame thread touches it.
+    struct TraceQuadSpace {
+        XrSpace space{XR_NULL_HANDLE};
+        TrackedSpaceKind kind{TrackedSpaceKind::kOther};
+    };
+    std::optional<TraceQuadSpace> pending_trace_quad_space_;
     D3D11BridgeQuadFrames d3d11_bridge_quad_frames_;
     D3D11BridgeQuadFrames d3d11_bridge_quad_frames_summarized_;
     // Vulkan games with Frame Generation: the session is Direct3D 12 and the
@@ -946,7 +1003,7 @@ class OpenXrLayer {
     }
     // A layer's swapchain (not a projection's) a frame shows while Frame
     // Generation shows images of its own only and does not capture it: kept
-    // lazy under VECTORXR_FRAMEGEN_SHOWN_LAYERS=lazy (FrameGenQueueSubstitution::Flush).
+    // lazy unless VECTORXR_FRAMEGEN_SHOWN_LAYERS=off (FrameGenQueueSubstitution::Flush).
     bool FrameGenShownLazily(XrSwapchain swapchain) {
         return framegen_queue_.ShownLayersLazy() && framegen_.ShowsOwnImagesOnly() &&
                !framegen_.CapturesFrom(swapchain);
@@ -1012,6 +1069,11 @@ class OpenXrLayer {
     std::uint64_t runtime_relay_acknowledged_revision_{0};
     std::atomic<bool> runtime_relay_status_dirty_{false};
     std::optional<std::chrono::steady_clock::time_point> runtime_relay_last_status_write_;
+    // The session's status and control files, removed by a normal process
+    // exit (games that skip OpenXR teardown). Guarded by mutex_.
+    ProcessExitFile runtime_relay_exit_status_;
+    ProcessExitFile runtime_relay_exit_control_;
+    bool runtime_relay_pruned_{false}; // Watcher thread only.
     // The Frame Generation events PollFrameGenRecorder last saw (watcher
     // thread only): Dynamic stand-downs and probes, and runtime halving.
     FrameGenSnapshotTrigger framegen_recorder_;
@@ -1056,6 +1118,8 @@ class OpenXrLayer {
     // entry. Bridge one such miss so amplified poses do not flash to identity.
     std::optional<PivotPoseDeltaFrame> pivotxr_last_matched_pose_delta_;
     std::size_t pivotxr_consecutive_pose_delta_misses_{0};
+    // A continuity miss was logged and its recovery is not yet.
+    bool pivotxr_pose_delta_miss_logged_{false};
     // Per resolved-profile input edge state, index-aligned with
     // resolved_settings_.pivotxr.profiles. Arbitration is last-pressed-wins:
     // pressing another candidate's binding retargets the engaged profile and
@@ -1083,7 +1147,17 @@ class OpenXrLayer {
         bool toggle_latched{false};
         bool toggle_suspended{false};
     };
+    // The swapchain format list last logged this session.
+    std::string last_logged_swapchain_formats_;
+    // The application called xrCreateSession on this instance, and the
+    // number of extensions it enabled for it.
+    bool instance_requested_session_{false};
+    uint32_t instance_enabled_extension_count_{0};
     std::vector<PivotProfileInputState> pivotxr_profile_input_states_;
+    // IsPivotXrActive's per-call claim lists (under mutex_), kept so the
+    // locate paths do not allocate.
+    std::vector<const InputBinding*> pivotxr_claimed_view_inputs_scratch_;
+    std::vector<std::string_view> pivotxr_polled_nudge_sets_scratch_;
     // Engaged profile index; retains the last-engaged profile during the
     // release ramp so the easing keeps using that profile's settings. While a
     // stacked Snap View is selected it names the motion profile; the snap's
@@ -1209,6 +1283,12 @@ class OpenXrLayer {
     // idle one.
     std::shared_future<void> turbo_async_worker_job_;
     std::uint64_t turbo_async_wait_generation_{0};
+    // (turbo_mutex_) The pipelined wait generation the runtime held past a
+    // late-wait bound (0: none). Later app polls and submits for that same
+    // wait give up after the short drain bound, so the application's frame
+    // loop keeps running while the runtime holds it (issue #88). Generations
+    // never repeat, so a newer wait is never mistaken for this one.
+    std::uint64_t turbo_async_held_generation_{0};
     bool turbo_async_wait_polled_{false};
     bool turbo_async_wait_completed_{false};
     XrResult turbo_async_wait_result_{XR_SUCCESS};
@@ -1443,6 +1523,9 @@ class OpenXrLayer {
     std::optional<std::chrono::steady_clock::time_point> turbo_metrics_binding_last_poll_time_;
     bool turbo_metrics_binding_down_cached_{false};
     std::optional<InputBinding> turbo_metrics_pressed_; // its list's binding that last went down (ActingBinding)
+    // The fields above belong to the frame thread. A settings refresh (any
+    // thread) asks for their reset here; the frame thread performs it.
+    std::atomic<bool> turbo_metrics_binding_reset_pending_{false};
     // Cleared whenever capture pauses so the first frame interval after a
     // resume (which spans the pause) never lands in the stats.
     bool turbo_metrics_was_capturing_{false};
@@ -1472,8 +1555,14 @@ class OpenXrLayer {
     std::optional<bool> app_submitting_layers_;
     int composition_topology_log_budget_{12};
     std::optional<std::uint64_t> last_composition_topology_signature_;
+    // Of the frames whose quad views Frame Generation claimed (composes).
+    std::optional<std::uint64_t> last_claimed_composition_topology_signature_;
     bool quad_views_extension_requested_{false};
     bool varjo_foveated_rendering_extension_requested_{false};
+    // Either extension above, or OpenXR 1.1 (where the foveated inset is core).
+    bool application_can_select_quad_views_{false};
+    // The last xrEnumerateViewConfigurations listed the foveated inset.
+    bool quad_view_configuration_offered_{false};
     bool d3d11_graphics_extension_requested_{false};
     // XR_KHR_D3D12_enable is enabled on the instance (the Direct3D 11 bridge needs it).
     bool d3d12_extension_enabled_{false};
@@ -1556,6 +1645,7 @@ class OpenXrLayer {
     std::unordered_set<std::string> logged_varjo_native_view_configuration_signatures_;
     VarjoNativeFoveationDiagnosticState varjo_native_foveation_diagnostic_;
     bool has_logged_visibility_mask_mapping_{false};
+    uint32_t logged_visibility_mask_shapes_{0}; // one bit per synthesized view and mask type
     bool has_logged_system_properties_{false};
     uint32_t cached_quadviews_stereo_recommended_width_{0};
     uint32_t cached_quadviews_stereo_recommended_height_{0};
@@ -1583,7 +1673,11 @@ class OpenXrLayer {
     bool IsHeadRelativeEyeGaze(XrSpace space, XrSpace base_space) const;
     std::unordered_set<XrSpace> tracked_local_spaces_;
     std::unordered_set<XrSpace> tracked_stage_spaces_;
+    // The time of the flight recorder's last `locspace` row (mutex_): an app
+    // that locates VIEW space several times a frame records it once.
+    XrTime last_locspace_time_{0};
     std::vector<XrPosef> cached_eye_offset_poses_;
+    std::vector<XrView> eye_offset_views_scratch_;
     XrTime cached_eye_offsets_display_time_{0};
     XrViewConfigurationType cached_eye_offsets_view_configuration_{XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
     std::optional<std::chrono::steady_clock::time_point> last_app_action_sync_time_;
@@ -1605,12 +1699,36 @@ class OpenXrLayer {
     std::vector<const XrCompositionLayerBaseHeader*> end_frame_layers_scratch_;
     std::vector<ResolvedPivotSpaceDelta> end_frame_pivot_space_deltas_scratch_;
     std::map<XrTime, PivotPoseDeltaFrame> cached_pivot_pose_deltas_;
+    // A pruned frame kept for the next one CachePivotPoseDelta stores.
+    std::map<XrTime, PivotPoseDeltaFrame>::node_type pivot_pose_delta_spare_;
     // Info-level breadcrumbs are emitted once per submitted space, while
     // debug diagnostics retain per-frame details without spamming normal logs.
     std::unordered_set<XrSpace> logged_pivot_space_conversions_;
     std::unordered_set<XrSpace> failed_pivot_space_conversions_;
     std::map<XrTime, std::vector<DepthSubmissionGeometry>> cached_depth_submission_geometry_;
+    // A pruned frame kept for the next one CacheDepthSubmissionGeometry stores.
+    std::map<XrTime, std::vector<DepthSubmissionGeometry>>::node_type depth_submission_geometry_spare_;
     QuadViewsFrameCache<QuadViewsFrameState> cached_quadviews_frames_;
+    // Quad views placement diagnostics (BuildQuadViewsComposePlan), per session.
+    uint64_t quadviews_placement_mismatch_frames_{0};
+    uint32_t quadviews_placement_mismatch_logs_remaining_{3};
+    std::array<std::array<float, 4>, 2> quadviews_previous_focus_rect_{};
+    std::array<bool, 2> quadviews_has_previous_focus_rect_{};
+    std::array<double, 2> quadviews_focus_max_step_px_{};
+    // The inset's motion since the last Info-level summary
+    // (LogQuadViewsInsetMotion): whether, how often and how far it moves,
+    // without debug logging.
+    struct QuadViewsInsetMotion {
+        uint64_t frames{0};       // planned frames with a previous inset to compare
+        uint64_t moved_frames{0}; // of them, those whose inset moved 1 output pixel or more
+        uint64_t gaze_frames{0};  // of them, those placed by the eye gaze
+        double step_px_sum{0.0};  // the frames' moves (the larger eye's), in output pixels
+        std::array<double, 2> max_step_px{};
+        uint32_t output_width{0};
+        uint32_t output_height{0};
+    };
+    QuadViewsInsetMotion quadviews_inset_motion_{};
+    std::optional<std::chrono::steady_clock::time_point> quadviews_inset_motion_since_;
     std::unordered_map<XrSwapchain, SwapchainInfo> tracked_swapchains_;
     D3D11QuadViewsCompositor d3d11_quadviews_compositor_;
     D3D11FocusSharpen d3d11_focus_sharpen_;

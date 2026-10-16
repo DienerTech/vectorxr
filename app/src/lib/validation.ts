@@ -55,7 +55,7 @@ function validateDepthXRSettings(prefix: string, settings: DepthXRSettings): str
   ] as const
 
   for (const [name, value, min, max] of bounded) {
-    if (Number.isNaN(value) || value < min || value > max) {
+    if (!Number.isFinite(value) || value < min || value > max) {
       errors.push(`${prefix}${name} must be between ${min} and ${max}`)
     }
   }
@@ -131,22 +131,23 @@ function validateInputBindings(prefix: string, bindings: InputBinding[]): string
 
 function validatePivotStepTuning(prefix: string, tuning: PivotXRSettings['yawStep'], deadzoneMax: number): string[] {
   const errors: string[] = []
-  if (Number.isNaN(tuning.deadzoneDegrees) || tuning.deadzoneDegrees < 0 || tuning.deadzoneDegrees > deadzoneMax) {
+  if (!Number.isFinite(tuning.deadzoneDegrees) || tuning.deadzoneDegrees < 0 || tuning.deadzoneDegrees > deadzoneMax) {
     errors.push(`${prefix}deadzoneDegrees must be between 0 and ${deadzoneMax}`)
   }
-  if (Number.isNaN(tuning.triggerDegrees) || tuning.triggerDegrees < 1 || tuning.triggerDegrees > 45) {
+  if (!Number.isFinite(tuning.triggerDegrees) || tuning.triggerDegrees < 1 || tuning.triggerDegrees > 45) {
     errors.push(`${prefix}triggerDegrees must be between 1 and 45`)
   }
-  if (Number.isNaN(tuning.amountDegrees) || tuning.amountDegrees < 0 || tuning.amountDegrees > 60) {
+  if (!Number.isFinite(tuning.amountDegrees) || tuning.amountDegrees < 0 || tuning.amountDegrees > 60) {
     errors.push(`${prefix}amountDegrees must be between 0 and 60`)
   }
-  if (Number.isNaN(tuning.hysteresisDegrees) || tuning.hysteresisDegrees < 0 || tuning.hysteresisDegrees > 20) {
+  if (!Number.isFinite(tuning.hysteresisDegrees) || tuning.hysteresisDegrees < 0 || tuning.hysteresisDegrees > 20) {
     errors.push(`${prefix}hysteresisDegrees must be between 0 and 20`)
   }
-  if (tuning.hysteresisDegrees >= tuning.triggerDegrees) {
+  if (Number.isFinite(tuning.hysteresisDegrees) && Number.isFinite(tuning.triggerDegrees) &&
+    tuning.hysteresisDegrees >= tuning.triggerDegrees) {
     errors.push(`${prefix}hysteresisDegrees must be smaller than triggerDegrees`)
   }
-  if (Number.isNaN(tuning.maxExtraDegrees) || tuning.maxExtraDegrees < 0 || tuning.maxExtraDegrees > 180) {
+  if (!Number.isFinite(tuning.maxExtraDegrees) || tuning.maxExtraDegrees < 0 || tuning.maxExtraDegrees > 180) {
     errors.push(`${prefix}maxExtraDegrees must be between 0 and 180`)
   }
   return errors
@@ -183,35 +184,35 @@ function validatePivotXRSettings(prefix: string, settings: PivotXRSettings): str
     }
   }
 
-  if (Number.isNaN(settings.rotationMultiplier) || settings.rotationMultiplier < 1.0 || settings.rotationMultiplier > 3.0) {
+  if (!Number.isFinite(settings.rotationMultiplier) || settings.rotationMultiplier < 1.0 || settings.rotationMultiplier > 3.0) {
     errors.push(`${prefix}rotationMultiplier must be between 1.0 and 3.0`)
   }
 
-  if (Number.isNaN(settings.smoothing) || settings.smoothing < 0 || settings.smoothing > 1) {
+  if (!Number.isFinite(settings.smoothing) || settings.smoothing < 0 || settings.smoothing > 1) {
     errors.push(`${prefix}smoothing must be between 0 and 1`)
   }
 
-  if (Number.isNaN(settings.activationRampSeconds) || settings.activationRampSeconds < 0 || settings.activationRampSeconds > 2) {
+  if (!Number.isFinite(settings.activationRampSeconds) || settings.activationRampSeconds < 0 || settings.activationRampSeconds > 2) {
     errors.push(`${prefix}activationRampSeconds must be between 0 and 2`)
   }
 
-  if (Number.isNaN(settings.deadzoneDegrees) || settings.deadzoneDegrees < 0 || settings.deadzoneDegrees > 180) {
+  if (!Number.isFinite(settings.deadzoneDegrees) || settings.deadzoneDegrees < 0 || settings.deadzoneDegrees > 180) {
     errors.push(`${prefix}deadzoneDegrees must be between 0 and 180`)
   }
 
-  if (Number.isNaN(settings.maxExtraYawDegrees) || settings.maxExtraYawDegrees < 0 || settings.maxExtraYawDegrees > 180) {
+  if (!Number.isFinite(settings.maxExtraYawDegrees) || settings.maxExtraYawDegrees < 0 || settings.maxExtraYawDegrees > 180) {
     errors.push(`${prefix}maxExtraYawDegrees must be between 0 and 180`)
   }
 
-  if (Number.isNaN(settings.pitchRotationMultiplier) || settings.pitchRotationMultiplier < 1.0 || settings.pitchRotationMultiplier > 3.0) {
+  if (!Number.isFinite(settings.pitchRotationMultiplier) || settings.pitchRotationMultiplier < 1.0 || settings.pitchRotationMultiplier > 3.0) {
     errors.push(`${prefix}pitchRotationMultiplier must be between 1.0 and 3.0`)
   }
 
-  if (Number.isNaN(settings.pitchDeadzoneDegrees) || settings.pitchDeadzoneDegrees < 0 || settings.pitchDeadzoneDegrees > 90) {
+  if (!Number.isFinite(settings.pitchDeadzoneDegrees) || settings.pitchDeadzoneDegrees < 0 || settings.pitchDeadzoneDegrees > 90) {
     errors.push(`${prefix}pitchDeadzoneDegrees must be between 0 and 90`)
   }
 
-  if (Number.isNaN(settings.maxExtraPitchDegrees) || settings.maxExtraPitchDegrees < 0 || settings.maxExtraPitchDegrees > 180) {
+  if (!Number.isFinite(settings.maxExtraPitchDegrees) || settings.maxExtraPitchDegrees < 0 || settings.maxExtraPitchDegrees > 180) {
     errors.push(`${prefix}maxExtraPitchDegrees must be between 0 and 180`)
   }
 
@@ -224,7 +225,7 @@ function validatePivotXRSettings(prefix: string, settings: PivotXRSettings): str
   }
 
   const minimumGlideSeconds = settings.stepGlideMode === 'glide' ? 0.01 : 0
-  if (Number.isNaN(settings.stepGlideSeconds) || settings.stepGlideSeconds < minimumGlideSeconds || settings.stepGlideSeconds > 2) {
+  if (!Number.isFinite(settings.stepGlideSeconds) || settings.stepGlideSeconds < minimumGlideSeconds || settings.stepGlideSeconds > 2) {
     errors.push(`${prefix}stepGlideSeconds must be between ${minimumGlideSeconds} and 2`)
   }
 
@@ -238,13 +239,13 @@ function validatePivotXRSettings(prefix: string, settings: PivotXRSettings): str
     ['pitchDown', settings.pitchDown, 90],
   ]
   for (const [name, tuning, deadzoneMax] of tunings) {
-    if (Number.isNaN(tuning.rotationMultiplier) || tuning.rotationMultiplier < 1.0 || tuning.rotationMultiplier > 3.0) {
+    if (!Number.isFinite(tuning.rotationMultiplier) || tuning.rotationMultiplier < 1.0 || tuning.rotationMultiplier > 3.0) {
       errors.push(`${prefix}${name}.rotationMultiplier must be between 1.0 and 3.0`)
     }
-    if (Number.isNaN(tuning.deadzoneDegrees) || tuning.deadzoneDegrees < 0 || tuning.deadzoneDegrees > deadzoneMax) {
+    if (!Number.isFinite(tuning.deadzoneDegrees) || tuning.deadzoneDegrees < 0 || tuning.deadzoneDegrees > deadzoneMax) {
       errors.push(`${prefix}${name}.deadzoneDegrees must be between 0 and ${deadzoneMax}`)
     }
-    if (Number.isNaN(tuning.maxExtraDegrees) || tuning.maxExtraDegrees < 0 || tuning.maxExtraDegrees > 180) {
+    if (!Number.isFinite(tuning.maxExtraDegrees) || tuning.maxExtraDegrees < 0 || tuning.maxExtraDegrees > 180) {
       errors.push(`${prefix}${name}.maxExtraDegrees must be between 0 and 180`)
     }
   }
@@ -321,7 +322,7 @@ function validateQuadViewsSettings(prefix: string, settings: QuadViewsSettings):
   }
 
   for (const [name, value, min, max] of bounded) {
-    if (Number.isNaN(value) || value < min || value > max) {
+    if (!Number.isFinite(value) || value < min || value > max) {
       errors.push(`${prefix}${name} must be between ${min} and ${max}`)
     }
   }

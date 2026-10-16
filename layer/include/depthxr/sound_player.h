@@ -1,13 +1,25 @@
 #pragma once
 
 #include <filesystem>
+#include <functional>
 #include <memory>
+#include <vector>
 
 #include "depthxr/settings.h"
 
 namespace depthxr {
 
 struct SoundPlayerState;
+
+// The sound worker's hand-off (exposed for tests): makes `next` the clip in
+// `playing` and starts it with `play`. PlaySound reads a SND_MEMORY|SND_ASYNC
+// clip from our buffer while it plays, and starting another sound does not
+// wait for that, so a clip still held is ended with `stop` (synchronous)
+// before its memory is freed.
+void ReplacePlayingSound(std::vector<unsigned char>& playing,
+                         std::vector<unsigned char>&& next,
+                         const std::function<void()>& stop,
+                         const std::function<void(const unsigned char*)>& play);
 
 // Best-effort audible feedback for binding activate/deactivate transitions.
 // PlayTransition is non-blocking and safe to call from the OpenXR hot path:

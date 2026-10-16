@@ -277,6 +277,15 @@ FrameGenConstants BuildFrameGenComposeConstants(const FrameGenComposeEye& eye, F
     constants.rot0 = {eye.focus_texel[0], eye.focus_texel[1], eye.output_pixel_in_focus[0],
                       eye.output_pixel_in_focus[1]};
     constants.size = {output.width, output.height, 0u, 0u};
+    if (eye.overlay.shown) {
+        constants.options[0] = kFrameGenComposeOverlay |
+                               (eye.overlay.eye_tracking ? kFrameGenComposeOverlayEyeTracking : 0u) |
+                               (eye.overlay.gaze ? kFrameGenComposeOverlayGaze : 0u);
+        constants.rot1 = eye.overlay.gaze_markers;
+        constants.rot2 = eye.overlay.reference_markers;
+        constants.tuning = {1.0f / static_cast<float>(std::max<std::uint32_t>(1, output.width)),
+                            1.0f / static_cast<float>(std::max<std::uint32_t>(1, output.height)), 0.0f, 0.0f};
+    }
     return constants;
 }
 

@@ -213,16 +213,22 @@ struct FrameGenDynamicPolicy {
 // How the lead steps back down when nothing late made it grow for a while
 // (tests shorten the times). A probe takes one slot off; frames late again
 // within `judge` restore it, and that lead is then the lowest known to hold:
-// below it is tried only every `explore_after`, doubling after each failure.
+// below it is tried only every `explore_after`, doubling after each failure
+// there. A floor late frames raised above the lowest lead a probe proved is
+// tried again after `explore_after`, not the doubled wait, which is for
+// below the proven lead (Star Citizen on Virtual Desktop, 2026-10-14: lead 3
+// held about 56 s where 2 was proven). That probe back doubles its own wait
+// after each failure; the proven lead and the wait below it stay.
 struct FrameGenLeadPolicy {
     std::chrono::milliseconds probe_after{5000};    // no step up this long: one slot less (a probe)
     std::chrono::milliseconds judge{3000};          // a step up this soon after a probe: it failed
     std::chrono::milliseconds explore_after{10000}; // below the lowest lead known to hold: this long, doubling...
     std::chrono::milliseconds explore_max{60000};   // ...up to this
     // Steps down for frames with a refresh to spare are judged as probes too,
-    // and frames late at the lowest lead known to hold raise it: below it,
-    // once frames were late there, the lead is retried only after
-    // explore_after, doubling (tests compare without).
+    // and frames late at the lowest lead known to hold raise it a refresh
+    // (above the proven one at most): below it, once frames were late there,
+    // the lead is retried only after explore_after, doubling after each
+    // failure (tests compare without).
     bool slack_hysteresis{true};
 };
 
@@ -380,6 +386,11 @@ class FrameGenPresenter {
     // The session's frame-by-frame trace (FrameGenTrace), for the layer's
     // own frame calls; it records only while debug logging is on.
     FrameGenTrace& Trace() { return trace_; }
+    // The trace records the game's swapchain acquires and releases only while
+    // frames are generated or about to be (when releases are captured): while
+    // Frame Generation stands by or is off they are every image of every
+    // frame and tell nothing about it.
+    bool TracesSwapchainCalls() const;
     // The log level changed: a started session's trace follows debug logging
     // (a session starts with it as the level is then).
     void SetTraceEnabled(bool enabled);
@@ -397,6 +408,8 @@ class FrameGenPresenter {
     std::string OsdDetailText() const;
 
   private:
+    // Holds a presenter thread "in the runtime" for the layer's teardown tests.
+    friend class TurboFrameTestPeer;
     struct SwapchainRecord {
         std::int64_t format{0};
         std::uint32_t sample_count{1};
@@ -526,6 +539,7 @@ class FrameGenPresenter {
         FrameCopy copy;            // its layers; the primary projection's views are its own
         std::vector<FrameGenOutputKind> kinds;       // per view
         std::vector<std::array<float, 3>> velocity; // per view (Analysis::velocity)
+        bool depth{false};                          // Analysis::depth
         // Its lead sample (UpdateLeadLocked), taken when a refresh first
         // chooses it: on time only if its game frame had reached the GPU.
         std::uint32_t lead{0};
@@ -534,6 +548,9 @@ class FrameGenPresenter {
         std::optional<double> slack_ms;  // how much later its end could have come
         std::uint64_t capture_mark{0};   // FrameGenGpu::CaptureMark covering its views' captures
         bool captured_early{false};      // captured a refresh or more before it was needed
+        // Kept while the refresh it is first needed for was still to come: a
+        // refresh passing over it then missed it, not the frame its refresh.
+        bool ahead{false};
         bool scored{false};
         // Quad views: the claimed frame's composition and eye views (its
         // analyzed views are the four source views); null on the canvas path.
@@ -609,6 +626,8 @@ class FrameGenPresenter {
     };
 
     bool WantsEngagementLocked() const;
+    // Frames are generated or about to be: the game's releases are captured.
+    bool CapturingLocked() const;
     // The state while no frame is engaged: off when turned off, else waiting.
     FrameGenState IdleStateLocked() const;
     bool RunnableLocked() const;
@@ -621,6 +640,10 @@ class FrameGenPresenter {
     std::uint32_t DynamicSetCapLocked() const;
     void UpdateAutoLocked(std::chrono::steady_clock::time_point now, const std::optional<PendingFrame>& frame,
                           bool started_late = false);
+    // Auto, presenting from its own thread: whether the game's own time per
+    // frame (auto_busy_) is within reach of `slots` periods a frame (`period`:
+    // the grid the game's frames are timed by, GameGridLocked).
+    bool AutoProbeInReachLocked(std::uint32_t slots, XrDuration period) const;
     // Dynamic: standing by, engages once the game runs below the refresh
     // rate; engaged, the game keeps its own rate (generated frames fill the
     // refreshes it misses) and Dynamic stands down when Frame Generation
@@ -735,6 +758,7 @@ class FrameGenPresenter {
         // interval between the two real frames), in its view space, where
         // depth is used (generated frames are seen from where it will be).
         std::vector<std::array<float, 3>> velocity;
+        bool depth{false}; // depth was used for a view
     };
 
     // Generates one frame per fraction into the output swapchain sets from
@@ -935,6 +959,9 @@ class FrameGenPresenter {
     // Just in time: the frame `choice` shows is its real frame unchanged.
     static bool JitCopyOnly(const JitFrame& frame, const JitChoice& choice);
     void SummaryLocked(std::chrono::steady_clock::time_point now);
+    // Starts the next summary window, the presenter thread's or the inline
+    // one's: every window sample and count either prints starts over.
+    void NewSummaryWindowLocked(std::chrono::steady_clock::time_point now, double standby);
     void StartCompositorLocked(const FrameGenRuntimeCalls& calls);
     // Lets the presenter thread present every frame in flight, then stops it.
     void ExitThreadedLocked(std::unique_lock<std::mutex>& lock);
@@ -1060,6 +1087,12 @@ class FrameGenPresenter {
     // while it is engaged).
     std::optional<std::chrono::steady_clock::time_point> halving_confirmed_at_;
     bool logged_runtime_halving_{false};
+    // Auto back at full rate for one shown while it is engaged (where the
+    // runtime reports the refresh period, UpdateAutoLocked): it stays
+    // there until this while the runtime still halves, the hold doubling
+    // from FrameGenDynamicPolicy::hold up to its hold_max each time.
+    std::optional<std::chrono::steady_clock::time_point> auto_halving_hold_until_;
+    std::chrono::milliseconds auto_halving_hold_{10000};
     // The runtime's own cadence: when a runtime wait blocked and returned for
     // display time phase_xr_ at phase_wall_, the wait for display time t
     // would return at phase_wall_ + (t - phase_xr_).
@@ -1109,6 +1142,7 @@ class FrameGenPresenter {
     std::chrono::steady_clock::time_point clock_steady_since_{};
     XrDuration clock_gap_{0};                 // the time passed before the wait that displaced it
     std::uint32_t logged_clock_displacements_{0}; // logged one by one up to a few, then only in summaries
+    bool clock_displacement_logged_{false};       // this one was: so is its end
 
     // Automatic multiplier: steps up while the app misses its cadence, probes
     // one step down after a steady stretch, backing off when a probe fails.
@@ -1130,6 +1164,20 @@ class FrameGenPresenter {
     std::chrono::milliseconds probe_backoff_{10000};
     bool probing_{false};
     std::uint32_t probe_from_{0};
+    // Since when every judgement found the game late with no higher
+    // multiplier to step to (UpdateAutoLocked); before the last change, none.
+    std::optional<std::chrono::steady_clock::time_point> late_at_ceiling_since_;
+    // Presenting from its own thread: the game's last frames' own time per
+    // frame (from one wait to the next, the cadence's hold left out), ms,
+    // and when the last wait's hold ended (AutoProbeInReachLocked). Not just
+    // in time, the game's xrEndFrame is held for its frame's slot too
+    // (ThreadedEnd): the last such hold, left out of the time it falls in.
+    std::array<double, 32> auto_busy_{};
+    std::size_t auto_busy_count_{0};
+    std::chrono::steady_clock::time_point auto_busy_since_{};
+    std::chrono::steady_clock::time_point auto_end_held_from_{};
+    std::chrono::steady_clock::time_point auto_end_held_to_{};
+    std::uint64_t auto_end_held_frame_{0}; // the frame whose end was held then
     std::size_t auto_late_percent_{0}; // for the log
     // Auto never steps above this again in the session once video memory
     // ran near its budget: each step up allocates more output images.
@@ -1137,6 +1185,8 @@ class FrameGenPresenter {
     std::optional<FrameGenMemoryBudget> memory_budget_;
     std::chrono::steady_clock::time_point memory_checked_at_{};
     std::uint64_t working_bytes_{0}; // the backend's own images after the last Execute (log)
+    // When Generate next asks the backend for working_bytes_ (under gpu_mutex_).
+    std::chrono::steady_clock::time_point working_bytes_due_{};
     std::uint64_t output_bytes_{0};  // output swapchain images, estimated from their size (log)
     std::uint64_t output_set_bytes_{0}; // one set of them
     // Since when the budget has had room for another set (UpdateAutoLocked),
@@ -1333,9 +1383,16 @@ class FrameGenPresenter {
     // lead_floor_ as a probe last set it (held, or undone above it): frames
     // late at the floor lift it one refresh above this at most.
     std::uint32_t lead_floor_proven_{0};
+    // The wait before a try below lead_floor_proven_: explore_after, doubled
+    // by each failure there.
     std::chrono::milliseconds lead_explore_after_{10000};
+    // The wait before a probe back to lead_floor_proven_ from a floor late
+    // frames raised: explore_after, doubled by each that failed (a hitch can
+    // come during one), explore_after again once one holds or a probe proves
+    // another lead (UpdateLeadLocked).
+    std::chrono::milliseconds lead_return_after_{10000};
     // Frames were late at lead_floor_ or below it (a probe or step down
-    // undone): steps down for slack below it also wait lead_explore_after_.
+    // undone): steps down for slack below it also wait, as calm probes do.
     bool lead_floor_failed_{false};
     // A new run measures its lead afresh (StartCompositorLocked, Start).
     void ResetLeadLocked();
@@ -1427,6 +1484,7 @@ class FrameGenPresenter {
     std::chrono::steady_clock::time_point quad_declined_until_{};
     bool interpolate_on_shaders_{false};
     bool logged_interpolate_on_shaders_{false};
+    bool logged_interpolate_on_hardware_{false};
     std::chrono::milliseconds quad_decline_first_{10000};
     std::chrono::milliseconds quad_decline_longest_{80000};
     std::chrono::milliseconds quad_decline_{10000};
@@ -1486,11 +1544,23 @@ class FrameGenPresenter {
     // a real frame moved at its first refresh needs that much more lead.
     double analysis_lag_ms_{0.0};
     // Since the last summary: game waits held for its GPU, the game's
-    // xrEndFrame time in EndFrame, the presenter thread's wait for the GPU
-    // lock to write a frame, and the longest pause, milliseconds.
+    // xrEndFrame time in EndFrame, the runtime's xrEndFrame time for frames
+    // submitted (RuntimeEnd), the presenter thread's wait for the GPU lock to
+    // write a frame, and the longest pause, milliseconds.
     std::vector<double> gpu_wait_ms_;
     std::vector<double> end_call_ms_;
+    std::vector<double> runtime_end_ms_;
     std::vector<double> synth_lock_ms_;
+    // Since the last summary, for the game's frames (ThreadedWaitLocked,
+    // ThreadedEndJit):
+    std::uint64_t told_lead_sum_{0};      // the leads told, summed
+    std::uint64_t told_lead_frames_{0};   // the frames told one
+    std::uint32_t told_lead_max_{0};      // the largest told
+    std::vector<double> game_ahead_ms_;   // the time told past the runtime's own display time at the wait
+    std::vector<double> ahead_jitter_ms_; // that against the frame told before's, unless a pause came between
+    std::vector<double> end_slack_ms_;    // the time to spare when the frame ended (negative: late)
+    double last_ahead_ms_{0.0};           // the frame told last's game_ahead_ms_ sample...
+    std::chrono::steady_clock::time_point last_ahead_at_{}; // ...and its wait's return (none: no sample)
     double pause_longest_ms_{0.0};
     std::uint32_t logged_pauses_{0};
     // Research capture: a file %LOCALAPPDATA%\VectorXR\framegen-capture.request

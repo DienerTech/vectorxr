@@ -26,10 +26,25 @@ public:
         return std::unique_lock(trace.mutex_);
     }
     static std::uint64_t Dropped(const TurboTimingTrace& trace) { return trace.dropped_.load(); }
+    // Records waiting for the writer reach half the queue, where it is woken.
+    static bool QueueHalfFull(TurboTimingTrace& trace) {
+        std::scoped_lock lock(trace.mutex_);
+        return trace.count_ >= TurboTimingTrace::kCapacity / 2;
+    }
     static std::size_t Active(const TurboTimingTrace& trace) {
         std::size_t active = 0;
         for (const auto& p : trace.pending_) if (p.token.load()) ++active;
         return active;
+    }
+    // The producers last recorded three seconds ago: the writer sees them idle.
+    static void AgeIdle(TurboTimingTrace& trace) {
+        std::scoped_lock lock(trace.mutex_);
+        trace.last_event_ns_ -= 3'000'000'000;
+    }
+    // The producers' current stretch of activity began 20 s earlier.
+    static void AgeActivity(TurboTimingTrace& trace) {
+        std::scoped_lock lock(trace.mutex_);
+        trace.active_since_ns_ -= 20'000'000'000;
     }
     static void AgeCalls(TurboTimingTrace& trace) {
         std::scoped_lock lock(trace.mutex_);
@@ -143,18 +158,31 @@ void TestContinuousPersistenceAndStall(const std::filesystem::path& root) {
               "Frozen snapshot lacks continuous pre-stall history");
         Check(Read(log).find("event=outside.burst") == std::string::npos,
               "Unsampled history flooded the ordinary log");
+        // The recorder holds only records: they leave out the prefix the
+        // ordinary log's sampled copies carry (config_tests reads those).
+        Check(Read(Snapshot(log)).rfind("ns=", 0) == 0 &&
+                  Read(Snapshot(log)).find("Turbo-trace") == std::string::npos,
+              "Recorder lines carry the ordinary log's prefix");
     }
     depthxr::TurboTraceTestPeer::EndBurst(trace);
     const auto frozen = Read(Snapshot(log));
-    // Exercise both disk rollovers. Steady producers keep the consumer ahead.
+    // Exercise both disk rollovers. The producer waits while the queue is
+    // half full (the writer is woken then) instead of sleeping: a Windows
+    // sleep lasts a 15.6 ms timer tick, about 6 s of this test's 15 s.
     for (int i = 0; i < 100000; ++i) {
         trace.Record("after.stall", trace.NextId(), i);
-        if (i % 256 == 0) std::this_thread::sleep_for(2ms);
+        if (i % 1024 == 0) {
+            while (depthxr::TurboTraceTestPeer::QueueHalfFull(trace)) std::this_thread::yield();
+        }
     }
-    trace.Record("latest.marker", trace.NextId());
-    trace.Stop();
-    Check(History(log).find("event=latest.marker") != std::string::npos,
+    // A producer drops a record rather than wait while the writer holds the
+    // queue (what failed on CI): record the marker until the writer has it.
+    Check(Wait([&] {
+              trace.Record("latest.marker", trace.NextId());
+              return History(log).find("event=latest.marker") != std::string::npos;
+          }),
           "Newest history did not drain");
+    trace.Stop();
     Check(Read(Snapshot(log)) == frozen, "Later frames overwrote frozen stall evidence");
     for (unsigned part = 0; part < 2; ++part) {
         const auto path = depthxr::TurboTimingTrace::RecorderPath(log, part);
@@ -275,6 +303,41 @@ void TestIncidentSnapshotsRotate(const std::filesystem::path& root) {
           "A later stall overwrote the earlier fault snapshot");
     Check(!std::filesystem::exists(depthxr::TurboTimingTrace::SnapshotPath(log, 2)),
           "Snapshot rotation created a snapshot without an incident");
+    trace.Stop();
+}
+// Games stop calling OpenXR while they load. Only an idle that follows a
+// sustained stretch of calls freezes history: not the first frames before a
+// load, and not one frame between two loading pauses.
+void TestIdleSnapshotsNeedActivity(const std::filesystem::path& root) {
+    depthxr::Logger logger;
+    logger.Initialize(root / "idle.log");
+    logger.SetLevel(depthxr::LogLevel::Debug);
+    depthxr::TurboTimingTrace trace;
+    trace.Start(logger);
+    const auto log = logger.ActiveLogPath();
+    const auto latest = depthxr::TurboTimingTrace::SnapshotPath(log, 0);
+    const auto previous = depthxr::TurboTimingTrace::SnapshotPath(log, 1);
+    trace.Record("first.frames", trace.NextId(), 1);
+    depthxr::TurboTraceTestPeer::AgeIdle(trace);
+    Check(Wait([&] { return History(log).find("event=producer.idle") != std::string::npos; }),
+          "An idle producer was not reported");
+    Check(!std::filesystem::exists(latest), "An idle right after the first frames froze a snapshot");
+
+    trace.Record("steady.frames", trace.NextId(), 2);
+    Check(Wait([&] { return History(log).find("event=steady.frames") != std::string::npos; }),
+          "Resumed frames were not recorded");
+    depthxr::TurboTraceTestPeer::AgeActivity(trace);
+    depthxr::TurboTraceTestPeer::AgeIdle(trace);
+    Check(Wait([&] { return Read(latest).find("event=steady.frames a=2") != std::string::npos; }),
+          "An idle after a sustained stretch of calls did not freeze history");
+
+    trace.Record("one.frame", trace.NextId(), 3);
+    Check(Wait([&] { return History(log).find("event=one.frame") != std::string::npos; }),
+          "The frame between two idles was not recorded");
+    depthxr::TurboTraceTestPeer::AgeIdle(trace);
+    std::this_thread::sleep_for(600ms);
+    Check(!std::filesystem::exists(previous) && Read(latest).find("event=one.frame") == std::string::npos,
+          "One frame between two idles froze a second snapshot");
     trace.Stop();
 }
 void TestFrameGenSnapshotNames() {
@@ -467,6 +530,106 @@ void TestReopenedPartStaysBounded(const std::filesystem::path& root) {
     Check(Read(depthxr::TurboTimingTrace::RecorderPath(log, 1)).find("event=second.session") != std::string::npos,
           "The second session's history was not rotated into the other part");
 }
+// Recorder threads are the OS's thread ids, as the Threads census and the
+// Frame Generation trace print them, so the three can be joined.
+void TestThreadIdsAreOsThreadIds(const std::filesystem::path& root) {
+#ifdef _WIN32
+    depthxr::Logger logger;
+    logger.Initialize(root / "threads.log");
+    logger.SetLevel(depthxr::LogLevel::Debug);
+    depthxr::TurboTimingTrace trace;
+    trace.Start(logger);
+    // Producers drop a record rather than wait for the writer: record a few.
+    for (int i = 0; i < 20; ++i) trace.Record("main.thread", trace.NextId());
+    DWORD worker_id = 0;
+    std::thread([&] {
+        worker_id = GetCurrentThreadId();
+        for (int i = 0; i < 20; ++i) const auto call = trace.Watch("worker.call");
+    }).join();
+    trace.Stop();
+    const auto history = History(logger.ActiveLogPath());
+    const auto has_line = [&](const std::string& thread, const std::string& event) {
+        std::istringstream lines(history);
+        for (std::string line; std::getline(lines, line);) {
+            if (line.find(" thread=" + thread + " ") != std::string::npos && line.find(event) != std::string::npos)
+                return true;
+        }
+        return false;
+    };
+    Check(has_line(std::to_string(GetCurrentThreadId()), "event=main.thread"),
+          "A record's thread is not its OS thread id");
+    Check(has_line(std::to_string(worker_id), "event=worker.call"),
+          "A watched call's thread is not its OS thread id");
+#else
+    (void)root;
+#endif
+}
+// A retention above the default keeps that many logs: the session log does
+// not prune to the default before the config is read. Settings reloads with
+// the same retention do not rescan the folder; a later session prunes to the
+// configured value.
+void TestRetentionFollowsTheConfig(const std::filesystem::path& root) {
+    const auto directory = root / "retention-config";
+    std::error_code ignored;
+    std::filesystem::remove_all(directory, ignored);
+    std::filesystem::create_directories(directory);
+    const auto old_log = [&](int index) {
+        const auto path = directory / ("vectorxr-20000101-0000" + std::string(index < 10 ? "0" : "") +
+                                       std::to_string(index) + ".log");
+        std::ofstream(path) << "old";
+        std::filesystem::last_write_time(path, std::filesystem::file_time_type::clock::now() -
+                                                   std::chrono::hours(100 - index));
+        return path;
+    };
+    const auto count_logs = [&] {
+        int count = 0;
+        for (const auto& entry : std::filesystem::directory_iterator(directory))
+            if (entry.path().extension() == ".log") ++count;
+        return count;
+    };
+    for (int index = 0; index < 10; ++index) old_log(index);
+    depthxr::Logger logger;
+    logger.Initialize(directory / "vectorxr.log");
+    Check(count_logs() == 10, "A session log pruned to the default before the config set the retention");
+    logger.SetRetentionFiles(30);
+    logger.Info("new session");
+    Check(count_logs() == 11, "A retention of 30 did not keep ten older logs");
+
+    logger.SetRetentionFiles(3);
+    Check(count_logs() == 3, "Lowering the retention did not prune to it");
+    for (int index = 10; index < 14; ++index) old_log(index);
+    logger.SetRetentionFiles(3);
+    Check(count_logs() == 7, "A settings reload with the same retention rescanned the log folder");
+    // A later instance in the process: its SetRetentionFiles has the same
+    // value, and still prunes once its own log exists.
+    std::this_thread::sleep_for(1100ms); // a session log name per second
+    logger.Initialize(directory / "vectorxr.log");
+    Check(count_logs() == 7, "A later session pruned before its instance set the retention");
+    logger.Info("later session");
+    logger.SetRetentionFiles(3);
+    Check(count_logs() == 3, "A later session's log left the folder over the configured retention");
+}
+// An instance that never asks for a session discards its log, unless an
+// error was written to it.
+void TestDiscardedSessionLog(const std::filesystem::path& root) {
+    const auto directory = root / "discarded";
+    std::error_code ignored;
+    std::filesystem::remove_all(directory, ignored);
+    depthxr::Logger logger;
+    logger.Initialize(directory / "vectorxr.log");
+    logger.Info("probe instance");
+    const auto probe = logger.ActiveLogPath();
+    Check(std::filesystem::exists(probe), "The probe's log was not written");
+    Check(logger.DiscardSessionLog() && !std::filesystem::exists(probe), "A probe instance's log was kept");
+    logger.Info("after the probe");
+    Check(!std::filesystem::exists(probe) && logger.ActiveLogPath().empty(),
+          "A discarded log was written to again");
+    std::this_thread::sleep_for(1100ms); // a session log name per second
+    logger.Initialize(directory / "vectorxr.log");
+    logger.Error("instance creation failed");
+    const auto failed = logger.ActiveLogPath();
+    Check(!logger.DiscardSessionLog() && std::filesystem::exists(failed), "A log holding an error was discarded");
+}
 void TestRetention(const std::filesystem::path& root) {
     const auto directory = root / "retention";
     std::filesystem::create_directory(directory);
@@ -517,22 +680,33 @@ int main(int argc, char** argv) {
             Benchmark(argv[2]);
             return 0;
         }
-        const auto root = std::filesystem::current_path() / "turbo-trace-tests";
+        // In the temporary folder, not the working directory (a run from the
+        // repository root left turbo-trace-tests/ in the checkout); removed
+        // after a passing run.
+        const auto root = std::filesystem::temp_directory_path() /
+                          ("vectorxr-turbo-trace-tests-" + std::to_string(GetCurrentProcessId()));
+        std::error_code ignored;
+        std::filesystem::remove_all(root, ignored);
         std::filesystem::create_directories(root);
         TestContinuousPersistenceAndStall(root);
         TestProducersNeverWait(root);
         TestDebugControlAndFailure(root);
         TestIncidentSnapshotsRotate(root);
+        TestIdleSnapshotsNeedActivity(root);
         TestFrameGenSnapshotNames();
         TestFrameGenSnapshots(root);
         TestFrameGenSnapshotTrigger();
         TestFrameGenSnapshotTriggerRateLimit(root);
         TestReopenedPartStaysBounded(root);
+        TestThreadIdsAreOsThreadIds(root);
+        TestRetentionFollowsTheConfig(root);
+        TestDiscardedSessionLog(root);
         TestRetention(root);
         std::cout << "Flight recorder: continuous persistence, rollover, frozen stalls, incident snapshots and "
                      "rotation, Frame Generation snapshots (names, rate limit, rotation apart from incidents, "
                      "trigger baseline, retry and edges), reopened part bounds, nonblocking producers, Debug "
                      "lifecycle, writer failure, and retention passed.\n";
+        std::filesystem::remove_all(root, ignored);
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

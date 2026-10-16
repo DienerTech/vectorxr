@@ -1748,6 +1748,15 @@ class D3D12FrameGen final : public FrameGenGpu {
         }
         // Captures start matching on the hardware while it is in use.
         hardware_active_ = effective_tuning.hardware_flow;
+        // Measured on the shader cores meanwhile (Interpolate in Dynamic, or
+        // the hardware not ready): the hardware's last vectors are from an
+        // earlier stretch of frames, so its next match starts unhinted.
+        if (!effective_tuning.hardware_flow) {
+            for (auto& view : views_) view.hardware_fresh = true;
+#ifdef DEPTHXR_NVOF
+            atlas_.fresh = true;
+#endif
+        }
         bool ok = true;
         // Depth the other eye disproves is dropped per texel before any view
         // uses it. Needs both eyes' images of this frame, captured at release.

@@ -1,6 +1,7 @@
 import { readonly, ref } from 'vue'
 
 import { listInputDevices, type InputDeviceInfo } from './commands'
+import { errorText } from './errors'
 
 const DEVICE_REFRESH_INTERVAL_MS = 5_000
 
@@ -37,7 +38,7 @@ export function refreshInputDevices(options: { showLoading?: boolean } = {}): Pr
     })
     .catch((error: unknown) => {
       lastRefreshFailed.value = true
-      lastRefreshError.value = error instanceof Error ? error.message : 'Failed to list joystick devices.'
+      lastRefreshError.value = errorText(error, 'Failed to list joystick devices.')
     })
     .finally(() => {
       hasCompletedInitialScan.value = true
@@ -53,8 +54,10 @@ export function startInputDeviceDiscovery(): Promise<void> {
   if (subscriberCount > 1) return refreshInFlight ?? Promise.resolve()
 
   const initialRefresh = refreshInputDevices({ showLoading: !hasCompletedInitialScan.value })
+  // A device list nobody can see (the window is minimized or hidden) need
+  // not be refreshed; the next tick after it is shown again catches up.
   refreshIntervalId = window.setInterval(() => {
-    if (activeCaptureCount === 0) void refreshInputDevices()
+    if (activeCaptureCount === 0 && !document.hidden) void refreshInputDevices()
   }, DEVICE_REFRESH_INTERVAL_MS)
   return initialRefresh
 }

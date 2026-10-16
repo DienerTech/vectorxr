@@ -166,6 +166,7 @@ struct GpuLog {
     bool threaded{false};
     bool depth{false};
     std::atomic<bool> memory_pressure{false}; // process video memory near its budget
+    std::atomic<int> working_memory_queries{0}; // WorkingMemoryBytes calls
     std::atomic<int> depth_captures{0};
     std::vector<FrameGenViewSubmission> last;
     FrameGenImage last_capture;
@@ -708,6 +709,10 @@ class FakeGpu final : public FrameGenGpu {
     std::optional<FrameGenMemoryBudget> MemoryBudget() const override {
         constexpr std::uint64_t gigabyte = 1024ull * 1024 * 1024;
         return FrameGenMemoryBudget{log_->memory_pressure ? 31 * gigabyte + gigabyte / 2 : 16 * gigabyte, 32 * gigabyte};
+    }
+    std::uint64_t WorkingMemoryBytes() const override {
+        ++log_->working_memory_queries;
+        return 64ull * 1024 * 1024;
     }
     bool SupportsDepth() const override { return log_->depth; }
     XrSwapchainUsageFlags RequiredDepthUsage() const override {
@@ -1437,6 +1442,28 @@ void TestInterpolationPacing() {
     Check(!presenter.Started(), "stop releases the session");
 }
 
+// The backend's working memory (a driver query per image it holds) feeds
+// only the log: asked for at most once a second, not on every real frame.
+void TestWorkingMemoryAskedOncePerSecond() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate);
+    App app(presenter, runtime);
+    const auto start = std::chrono::steady_clock::now();
+    for (int i = 0; i < 40; ++i) {
+        app.Frame();
+    }
+    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    const int executes = gpu.executes.load();
+    const int queries = gpu.working_memory_queries.load();
+    Check(executes >= 30, "working memory: frames were generated (" + std::to_string(executes) + ")");
+    Check(queries >= 1 && queries <= 1 + static_cast<int>(seconds),
+          "working memory: asked " + std::to_string(queries) + " times for " + std::to_string(executes) +
+              " executes in " + std::to_string(seconds) + " s");
+    presenter.Stop();
+}
+
 void TestExtrapolationPacing() {
     FrameGenPresenter presenter;
     GpuLog gpu;
@@ -1917,6 +1944,257 @@ void TestThreadedPipelinedApp() {
     CheckOrderedTimes(log, "pipelined");
     presenter.Stop();
     Check(!runtime.ordering_violation && !g_release_violation, "pipelined: runtime and image calls stayed ordered");
+}
+
+// Defined with the just-in-time and Dynamic tests further on.
+void StartJit(FrameGenPresenter& presenter, GpuLog& gpu, FrameGenSynthesisMode mode, FrameGenMultiplier multiplier,
+              App*& app_out, Runtime& runtime, std::unique_ptr<App>& app, Logger* logger);
+int RunWork(App& app, std::chrono::milliseconds duration, const std::vector<std::chrono::microseconds>& work,
+            const std::function<bool(const XrFrameState&)>& each);
+void EngageDynamic(FrameGenPresenter& presenter, App& app, const std::string& name);
+std::vector<std::chrono::microseconds> PeriodsOfWork(XrDuration period, double periods);
+
+// As SessionLog (further on): a session log of its own in the temporary
+// folder, here read back for its presenter-thread summaries.
+struct HorizonLog {
+    std::filesystem::path directory;
+    std::unique_ptr<Logger> logger{std::make_unique<Logger>()};
+
+    explicit HorizonLog(const std::string& name)
+        : directory(std::filesystem::temp_directory_path() /
+                    ("vectorxr-presenter-horizon-" + std::to_string(GetCurrentProcessId()) + "-" + name)) {
+        std::error_code ignored;
+        std::filesystem::remove_all(directory, ignored);
+        logger->Initialize(directory / "session.log");
+    }
+    ~HorizonLog() {
+        logger.reset();
+        std::error_code ignored;
+        std::filesystem::remove_all(directory, ignored);
+    }
+    // Closes the log: call once the presenter has stopped.
+    std::vector<std::string> Summaries() {
+        const std::filesystem::path path = logger->ActiveLogPath();
+        logger.reset(); // flushed
+        std::ifstream file(path);
+        std::vector<std::string> lines;
+        for (std::string line; std::getline(file, line);) {
+            if (line.find("Frame Generation: multiplier=") != std::string::npos &&
+                line.find("threaded=1") != std::string::npos) {
+                lines.push_back(line);
+            }
+        }
+        return lines;
+    }
+};
+
+// A summary's "key=low/high" (or "key=value": both the same); none when
+// missing or "-".
+std::optional<std::pair<double, double>> SummaryValues(const std::string& line, const std::string& key) {
+    const std::size_t at = line.find(", " + key + "=");
+    if (at == std::string::npos) return std::nullopt;
+    const std::string value = line.substr(at + key.size() + 3);
+    const auto digit = [&](std::size_t i) { return i < value.size() && value[i] >= '0' && value[i] <= '9'; };
+    if (!digit(0) && !(value.size() > 1 && value[0] == '-' && digit(1))) return std::nullopt;
+    std::size_t used = 0;
+    const double low = std::stod(value, &used);
+    if (used >= value.size() || value[used] != '/') return std::make_pair(low, low);
+    return std::make_pair(low, std::stod(value.substr(used + 1)));
+}
+
+// The summary says how far past the runtime's own prediction the game is
+// told to render (Frame Generation's share of its pose horizon), how much
+// that changes from one game frame to the next, the lead told and the time
+// the game's frames had to spare: Star Citizen's cockpit shook in Dynamic
+// only, where the horizon varies by up to a refresh (2026-10-13), and the
+// summaries could not show it. At a fixed 2x a game holding it is released
+// on its refresh: the horizon is the lead's, and steady.
+void TestHorizonTelemetryFixed() {
+    for (const FrameGenSynthesisMode mode : {FrameGenSynthesisMode::kExtrapolate, FrameGenSynthesisMode::kInterpolate}) {
+        const bool interpolate = mode == FrameGenSynthesisMode::kInterpolate;
+        const std::string name = std::string("horizon 2x ") + (interpolate ? "interpolate" : "extrapolate");
+        HorizonLog log(interpolate ? "fixed-interpolate" : "fixed-extrapolate");
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        runtime.paced = true;
+        std::unique_ptr<App> owned;
+        App* app = nullptr;
+        StartJit(presenter, gpu, mode, FrameGenMultiplier::k2, app, runtime, owned, log.logger.get());
+        FrameGenLeadPolicy policy;
+        policy.probe_after = 600s; // no probes: the lead holds while measured
+        presenter.SetLeadPolicy(policy);
+        // Windows of about 45 game frames, whose 95th percentile is not their
+        // largest: a 300 ms window holds 13, and one late wake-up beside the
+        // policy tests made its largest 1.9 ms (0.17 of a refresh).
+        presenter.SetSummaryInterval(1000ms);
+        app->end_offset_periods = 1; // as Star Citizen ends its frames
+        for (int i = 0; i < 3; ++i) app->Frame();
+        const auto work = PeriodsOfWork(kPeriod, 1.2);
+        RunWork(*app, 1500ms, work, {});
+        // The leads told from here on (read as each wait returns): the last
+        // summary's window lies within.
+        std::uint32_t low = std::numeric_limits<std::uint32_t>::max();
+        std::uint32_t high = 0;
+        app->before_begin = [&] {
+            const std::uint32_t lead = presenter.Status().lead_slots;
+            low = std::min(low, lead);
+            high = std::max(high, lead);
+        };
+        RunWork(*app, 2100ms, work, {});
+        app->before_begin = nullptr;
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+        const std::vector<std::string> summaries = log.Summaries();
+        Check(!summaries.empty(), name + ": summaries while engaged");
+        if (summaries.empty()) continue;
+        const std::string& last = summaries.back();
+        const auto lead_avg = SummaryValues(last, "leadAvg");
+        const auto lead_max = SummaryValues(last, "leadMax");
+        const auto ahead = SummaryValues(last, "gameAheadMs");
+        const auto jitter = SummaryValues(last, "aheadJitterMs");
+        const auto slack = SummaryValues(last, "endSlackMs");
+        Check(lead_avg && lead_max && ahead && jitter && slack, name + ": the summary has all five fields (" + last + ")");
+        if (!lead_avg || !lead_max || !ahead || !jitter || !slack) continue;
+        const double period_ms = static_cast<double>(kPeriod) / 1e6;
+        std::cerr << "  " << name << ": leads " << low << "-" << high << ", leadAvg " << lead_avg->first << ", leadMax "
+                  << lead_max->first << ", gameAheadMs " << ahead->first << "/" << ahead->second << ", aheadJitterMs "
+                  << jitter->first << "/" << jitter->second << " (p95 " << jitter->second / period_ms
+                  << " refreshes), endSlackMs " << slack->first << "/" << slack->second << std::endl;
+        Check(lead_avg->first >= low - 1e-9 && lead_avg->first <= high + 1e-9,
+              name + ": leadAvg is among the leads told (" + std::to_string(low) + "-" + std::to_string(high) + ", " +
+                  last + ")");
+        // A lead raised after the last summary (a late frame on a busy
+        // machine) is not in its window: exact only while the lead held.
+        Check(low == high ? lead_max->first == static_cast<double>(high)
+                          : lead_max->first >= low && lead_max->first <= high,
+              name + ": leadMax is the largest lead told (" + std::to_string(low) + "-" + std::to_string(high) + ", " +
+                  last + ")");
+        Check(std::abs(ahead->first - lead_avg->first * period_ms) <= 1.1 * period_ms,
+              name + ": the game renders about the lead past the runtime's own prediction (" + last + ")");
+        Check(jitter->second <= 0.15 * period_ms,
+              name + ": released on its refresh, the horizon holds from frame to frame (" + last + ")");
+        Check(slack->first <= slack->second, name + ": endSlackMs is 10th percentile/median (" + last + ")");
+    }
+}
+
+// Dynamic releases a game's wait as soon as it asks, anywhere in a refresh:
+// a game asking 1.6 refreshes after its last is released 0, 0.6, 0.2, 0.8
+// and 0.4 of a refresh past one, and the horizon it is told to render to
+// changes by up to a refresh from one frame to the next (with SteamVR's
+// prediction limit, the shake in Star Citizen's cockpit). The summary says
+// so, and the game still runs at its own rate (pacing is unchanged).
+void TestDynamicHorizonJitterReported() {
+    for (const FrameGenSynthesisMode mode : {FrameGenSynthesisMode::kExtrapolate, FrameGenSynthesisMode::kInterpolate}) {
+        const bool interpolate = mode == FrameGenSynthesisMode::kInterpolate;
+        const std::string name = std::string("horizon dynamic ") + (interpolate ? "interpolate" : "extrapolate");
+        HorizonLog log(interpolate ? "dynamic-interpolate" : "dynamic-extrapolate");
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        runtime.paced = true;
+        std::unique_ptr<App> owned;
+        App* app = nullptr;
+        StartJit(presenter, gpu, mode, FrameGenMultiplier::kDynamic, app, runtime, owned, log.logger.get());
+        presenter.SetDynamicPolicy(GuardDynamic());
+        presenter.SetSummaryInterval(300ms);
+        EngageDynamic(presenter, *app, name);
+        const auto work = PeriodsOfWork(kPeriod, 1.6);
+        // The time the game's waits held it: from its frame's end to its
+        // next wait's return.
+        auto ended = std::chrono::steady_clock::now();
+        double held_ms = 0.0;
+        app->before_begin = [&] { held_ms += Seconds(std::chrono::steady_clock::now() - ended) * 1000.0; };
+        const auto start = std::chrono::steady_clock::now();
+        const int frames = RunWork(*app, 1300ms, work, [&](const XrFrameState&) {
+            ended = std::chrono::steady_clock::now();
+            return false;
+        });
+        const double rate = frames / Seconds(std::chrono::steady_clock::now() - start);
+        app->before_begin = nullptr;
+        const bool engaged = presenter.Status().threaded && !presenter.Status().standby;
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+        Check(engaged, name + ": stays engaged");
+        const double period_ms = static_cast<double>(kPeriod) / 1e6;
+        const double own_rate = 1000.0 / (1.6 * period_ms);
+        const double held = held_ms / std::max(frames, 1) / period_ms;
+        // Pacing unchanged: its waits never hold it (a fixed 2x would, 0.4
+        // of a refresh a frame), and it runs faster than 2x would hold it
+        // (45 fps). Its rate is not held to 90% of its own: beside the policy
+        // tests and other builds it ran at 47-55 fps of 56.25.
+        Check(held < 0.15, name + ": the game's waits never hold it (" + std::to_string(held) + " refreshes a frame)");
+        Check(rate > 1000.0 / (2.0 * period_ms), name + ": the game runs at its own rate, faster than 2x would hold it (" +
+                                                     std::to_string(rate) + " of " + std::to_string(own_rate) +
+                                                     " fps)");
+        const std::vector<std::string> summaries = log.Summaries();
+        Check(!summaries.empty(), name + ": summaries while engaged");
+        if (summaries.empty()) continue;
+        const std::string& last = summaries.back();
+        const auto ahead = SummaryValues(last, "gameAheadMs");
+        const auto jitter = SummaryValues(last, "aheadJitterMs");
+        Check(ahead && jitter, name + ": the summary has the horizon and its jitter (" + last + ")");
+        if (!ahead || !jitter) continue;
+        std::cerr << "  " << name << ": " << rate << " fps, held " << held << " refreshes a frame, gameAheadMs "
+                  << ahead->first << "/" << ahead->second
+                  << ", aheadJitterMs " << jitter->first << "/" << jitter->second << " (p95 "
+                  << jitter->second / period_ms << " refreshes)" << std::endl;
+        Check(jitter->second >= 0.4 * period_ms,
+              name + ": the summary shows the horizon moving with where in a refresh the game is released (" + last +
+                  ")");
+    }
+}
+
+// A game slower than four refreshes a frame in Dynamic (Star Citizen at
+// 28 fps on Virtual Desktop at 120 Hz: a frame every 4.3 refreshes) is at
+// its own pace, not pausing between frames: the summary shows its horizon's
+// jitter too. Pairs of frames more than four of Dynamic's told periods (one
+// refresh each, 33 ms at 120 Hz) apart were left out as pauses, so its
+// summaries printed aheadJitterMs=- throughout.
+void TestSlowDynamicHorizonJitterReported() {
+    for (const FrameGenSynthesisMode mode : {FrameGenSynthesisMode::kExtrapolate, FrameGenSynthesisMode::kInterpolate}) {
+        const bool interpolate = mode == FrameGenSynthesisMode::kInterpolate;
+        const std::string name = std::string("horizon slow dynamic ") + (interpolate ? "interpolate" : "extrapolate");
+        HorizonLog log(interpolate ? "slow-dynamic-interpolate" : "slow-dynamic-extrapolate");
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        runtime.paced = true;
+        runtime.period = 1'000'000'000 / 120;
+        std::unique_ptr<App> owned;
+        App* app = nullptr;
+        StartJit(presenter, gpu, mode, FrameGenMultiplier::kDynamic, app, runtime, owned, log.logger.get());
+        presenter.SetDynamicPolicy(GuardDynamic());
+        // Windows of about 28 game frames (27 pairs), as in the fixed test.
+        presenter.SetSummaryInterval(1000ms);
+        EngageDynamic(presenter, *app, name);
+        const auto start = std::chrono::steady_clock::now();
+        const int frames = RunWork(*app, 2100ms, PeriodsOfWork(runtime.period, 4.3), {});
+        const double rate = frames / Seconds(std::chrono::steady_clock::now() - start);
+        const bool engaged = presenter.Status().threaded && !presenter.Status().standby;
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+        Check(engaged, name + ": stays engaged");
+        const double period_ms = static_cast<double>(runtime.period) / 1e6;
+        Check(rate < 1000.0 / (4.0 * period_ms),
+              name + ": the game asks less often than every four refreshes (" + std::to_string(rate) + " fps)");
+        const std::vector<std::string> summaries = log.Summaries();
+        Check(!summaries.empty(), name + ": summaries while engaged");
+        if (summaries.empty()) continue;
+        const std::string& last = summaries.back();
+        const auto ahead = SummaryValues(last, "gameAheadMs");
+        const auto jitter = SummaryValues(last, "aheadJitterMs");
+        Check(ahead && jitter, name + ": the summary has the horizon and its jitter at the game's pace (" + last + ")");
+        if (!ahead || !jitter) continue;
+        std::cerr << "  " << name << ": " << rate << " fps, gameAheadMs " << ahead->first << "/" << ahead->second
+                  << ", aheadJitterMs " << jitter->first << "/" << jitter->second << " (p95 "
+                  << jitter->second / period_ms << " refreshes)" << std::endl;
+        // Released 0.3 of a refresh later in one each frame: the horizon
+        // moves 0.3 or 0.7 of a refresh from one frame to the next.
+        Check(jitter->second >= 0.4 * period_ms,
+              name + ": the summary shows the horizon moving with where in a refresh the game is released (" + last +
+                  ")");
+    }
 }
 
 // Interpolate presents from the presenter thread too: each real frame is
@@ -2642,6 +2920,55 @@ void TestToggleOffReadsOff() {
         presenter.Stop();
         Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
     }
+}
+
+// Just in time, frames moved with the eyes (the game's depth in use) say how
+// far in the summary's eyeShiftMm, as frames written together do.
+void TestJitEyeShiftReported() {
+    const std::filesystem::path directory = std::filesystem::temp_directory_path() /
+                                            ("vectorxr-presenter-eyeshift-" + std::to_string(GetCurrentProcessId()));
+    std::error_code ignored;
+    std::filesystem::remove_all(directory, ignored);
+    auto logger = std::make_unique<Logger>();
+    logger->Initialize(directory / "eyeshift.log");
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2, app, runtime, owned,
+             logger.get());
+    presenter.SetSummaryInterval(300ms);
+    app->eye_speed = 0.5;
+    for (int i = 0; i < 3; ++i) app->Frame();
+    const auto start = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - start < 1200ms) {
+        const XrFrameState state = app->Wait();
+        app->Begin();
+        std::this_thread::sleep_for(4ms);
+        app->Release();
+        Check(XR_SUCCEEDED(app->End(state.predictedDisplayTime)), "jit eye shift: end");
+    }
+    presenter.Stop();
+    const std::filesystem::path path = logger->ActiveLogPath();
+    logger.reset(); // flushed
+    std::ifstream file(path);
+    double largest = 0.0;
+    int summaries = 0;
+    const std::string key = "eyeShiftMm=";
+    for (std::string line; std::getline(file, line);) {
+        const std::size_t at = line.find(key);
+        if (line.find("threaded=1") == std::string::npos || at == std::string::npos) continue;
+        ++summaries;
+        largest = std::max(largest, std::stod(line.substr(at + key.size())));
+    }
+    file.close();
+    std::filesystem::remove_all(directory, ignored);
+    // 0.5 m/s, a frame moved half a 45 fps interval on: about 5.6 mm.
+    Check(summaries > 0 && largest > 1.0,
+          "jit eye shift: the summaries say how far frames moved with the eyes (" + std::to_string(largest) +
+              " mm in " + std::to_string(summaries) + " summaries)");
 }
 
 // Extrapolate at 3x, each generated frame written right before its refresh:
@@ -4159,9 +4486,9 @@ void TestWinningEngagementSurvivesLateCaptures() {
     Check(!runtime.ordering_violation && !g_release_violation, "winning late captures: calls stayed ordered");
 }
 
-// A Direct3D 11 game's session (SetInterpolateOnShaders) with NVIDIA's
-// optical flow hardware chosen: interpolating, motion is measured on the
-// shader cores; extrapolating, on the hardware.
+// NVIDIA's optical flow hardware chosen (SetInterpolateOnShaders, the
+// default): interpolating in Dynamic, motion is measured on the shader cores;
+// extrapolating, and interpolating at a fixed rate, on the hardware.
 void TestInterpolateOnShaders() {
     for (const FrameGenSynthesisMode mode : {FrameGenSynthesisMode::kInterpolate, FrameGenSynthesisMode::kExtrapolate}) {
         const bool interpolate = mode == FrameGenSynthesisMode::kInterpolate;
@@ -4189,6 +4516,71 @@ void TestInterpolateOnShaders() {
               name + ": motion measured on the " + (gpu.tuning.hardware_flow ? "hardware" : "shader cores"));
         Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
     }
+    // At a fixed rate the game is held to every second refresh: interpolating
+    // keeps the hardware.
+    const std::string name = "interpolate at 2x on hardware";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kInterpolate, FrameGenMultiplier::k2, app, runtime, owned);
+    presenter.SetInterpolateOnShaders(true);
+    FrameGenResolvedSettings settings;
+    settings.enabled = true;
+    settings.synthesis_mode = FrameGenSynthesisMode::kInterpolate;
+    settings.multiplier = FrameGenMultiplier::k2;
+    settings.motion_estimation = FrameGenMotionEstimation::kHardware;
+    presenter.Configure(settings);
+    RunTicks(*app, 300ms, {2});
+    const int before = gpu.executes;
+    RunTicks(*app, 300ms, {2});
+    presenter.Stop();
+    Check(gpu.executes > before, name + ": real frames were analyzed");
+    Check(gpu.tuning.hardware_flow,
+          name + ": motion measured on the " + (gpu.tuning.hardware_flow ? "hardware" : "shader cores"));
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+}
+
+// Interpolate with NVIDIA's optical flow hardware chosen, switched during
+// play between 2x and Dynamic: the motion source follows each switch (a
+// settings change, never per frame), and the presenter keeps running.
+void TestInterpolateSourceFollowsLiveSwitch() {
+    const std::string name = "interpolate source follows live switches";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kInterpolate, FrameGenMultiplier::k2, app, runtime, owned);
+    presenter.SetInterpolateOnShaders(true);
+    FrameGenResolvedSettings settings;
+    settings.enabled = true;
+    settings.synthesis_mode = FrameGenSynthesisMode::kInterpolate;
+    settings.multiplier = FrameGenMultiplier::k2;
+    settings.motion_estimation = FrameGenMotionEstimation::kHardware;
+    presenter.Configure(settings);
+    RunTicks(*app, 300ms, {2});
+    int before = gpu.executes;
+    RunTicks(*app, 300ms, {2});
+    Check(gpu.executes > before && gpu.tuning.hardware_flow, name + ": at 2x on the hardware");
+    settings.multiplier = FrameGenMultiplier::kDynamic;
+    presenter.Configure(settings);
+    EngageDynamic(presenter, *app, name);
+    before = gpu.executes;
+    RunTicks(*app, 300ms, {1, 2, 2});
+    Check(gpu.executes > before && !gpu.tuning.hardware_flow, name + ": in Dynamic on the shader cores");
+    settings.multiplier = FrameGenMultiplier::k2;
+    presenter.Configure(settings);
+    RunTicks(*app, 300ms, {2});
+    before = gpu.executes;
+    RunTicks(*app, 300ms, {2});
+    Check(gpu.executes > before && gpu.tuning.hardware_flow, name + ": back at 2x on the hardware");
+    Check(presenter.Status().threaded, name + ": the presenter thread kept running");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
 }
 
 // Engaged without a guard trigger for probe_after, Dynamic stands by to see
@@ -4441,11 +4833,11 @@ void TestLeadResetOnRestart() {
 // engaged at its own ~52 fps) whose GPU slows to 45 ms a frame for a while
 // (the hitches: the lead climbs), then back. Its frames reach the GPU
 // history at the GPU's pace whatever the lead (an early frame is held until
-// its slot, which delays the game's next one), so they never show the slack
-// that takes a slot off: without probes (FrameGenLeadPolicy) the lead stays
-// up; with them it steps back down to the lowest lead that holds (a probe
-// below it fails, and is tried again only rarely), costing a few late
-// frames per probe.
+// its slot, which delays the game's next one), so above Dynamic's cap they
+// show little of the slack that takes a slot off; with probes
+// (FrameGenLeadPolicy) the lead steps back down to the lowest lead that
+// holds (a probe below it fails, and is tried again only rarely), costing a
+// few late frames per probe.
 struct LeadRun {
     std::uint32_t settled{0}; // before the hitches
     std::uint32_t peak{0};    // after them
@@ -4505,9 +4897,13 @@ void TestLeadStepsDownAfterHitches() {
               << probed.final << " (floor " << probed.after.lead_floor << ", probes " << probed.after.lead_probes
               << ", failed " << probed.after.lead_probes_failed << ", late " << late(probed) << ")" << std::endl;
     Check(held.peak > held.settled && probed.peak > probed.settled, "lead probes: the hitches grow the lead");
-    Check(held.final >= held.peak && held.after.lead_probes == 0,
-          "lead probes: without probes or hysteresis the lead stays up after the hitches (" +
-              std::to_string(held.settled) +
+    // Without probes the lead comes down only by slack: once the game's rate
+    // is back, Dynamic's cap (4 refreshes per real frame) is 8 again, below
+    // the peak, and the lead comes down with it; frames scored there show
+    // slack. (Until 0.19.2 a lead above a lowered cap was never scored again,
+    // so it stayed up.)
+    Check(held.after.lead_probes == 0 && held.final <= 8,
+          "lead probes: without probes the lead still comes down with the cap (" + std::to_string(held.settled) +
               " -> " + std::to_string(held.peak) + " -> " + std::to_string(held.final) + ")");
     Check(probed.after.lead_probes > probed.before.lead_probes && probed.final < probed.peak &&
               probed.final <= probed.settled,
@@ -4680,6 +5076,418 @@ void TestLeadAfterRepeatedHitches() {
               std::to_string(settled.lead_floor) + ")");
 }
 
+// Star Citizen at fixed 2x (Virtual Desktop, 2026-10-14): it ends its frames
+// a period after the time it is told, and its GPU work fits a lead but not
+// one less. Probes below that lead fail, each doubling the wait before the
+// lead tries below it again. Returns once two have failed (the wait is then
+// 4x explore_after).
+FrameGenLeadPolicy ProvenLeadPolicy(std::chrono::milliseconds explore_max) {
+    FrameGenLeadPolicy policy;
+    policy.probe_after = 250ms;
+    policy.judge = 200ms;
+    policy.explore_after = 700ms;
+    policy.explore_max = explore_max;
+    return policy;
+}
+
+std::uint64_t LeadProbesUndone(const FrameGenStatus& status) {
+    return status.lead_probes_failed + status.lead_downs_undone;
+}
+
+FrameGenStatus FailProbesBelowProvenLead(FrameGenPresenter& presenter, App& app, const std::string& name) {
+    for (int i = 0; i < 3; ++i) app.Frame();
+    RunWork(app, 8000ms, {6ms}, [&](const XrFrameState&) { return LeadProbesUndone(presenter.Status()) >= 2; });
+    const FrameGenStatus settled = presenter.Status();
+    Check(settled.threaded && LeadProbesUndone(settled) >= 2 && settled.lead_floor >= 2 &&
+              settled.lead_slots == settled.lead_floor,
+          name + ": probes below the lowest lead that holds fail (lead " + std::to_string(settled.lead_slots) +
+              ", floor " + std::to_string(settled.lead_floor) + ", " + std::to_string(LeadProbesUndone(settled)) +
+              " undone)");
+    return settled;
+}
+
+// A hitch makes two frames late at the lowest lead a probe proved, which
+// raises the floor a refresh above it. The way back waited as long as a try
+// below the proven lead, doubled by each that failed there: the lead stayed
+// a refresh up with frames to spare for most of a minute (Star Citizen on
+// Virtual Desktop, 2026-10-14: lead 3 for about 56 s where 2 was proven,
+// after two failed probes to 1). The proven lead is tried again after
+// explore_after; below it the doubled wait still holds.
+void TestHitchReturnsToProvenLead() {
+    const std::string name = "hitch at the proven lead";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    gpu.frames_ahead = 2;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2, app, runtime, owned);
+    app->end_offset_periods = 1;
+    const FrameGenLeadPolicy policy = ProvenLeadPolicy(2800ms);
+    presenter.SetLeadPolicy(policy);
+    bool spike = false;
+    app->before_release = [&] {
+        gpu.game_gpu = spike ? 150ms : 10ms;
+        spike = false;
+        gpu.GameFrame();
+    };
+    const FrameGenStatus settled = FailProbesBelowProvenLead(presenter, *app, name);
+    const std::uint32_t proven = settled.lead_floor;
+    // One frame's GPU work takes 150 ms.
+    spike = true;
+    RunWork(*app, 2000ms, {6ms}, [&](const XrFrameState&) { return presenter.Status().lead_slots > proven; });
+    const auto raised_at = std::chrono::steady_clock::now();
+    const FrameGenStatus raised = presenter.Status();
+    RunWork(*app, policy.explore_max + 1000ms, {6ms},
+            [&](const XrFrameState&) { return presenter.Status().lead_slots <= proven; });
+    const auto back = std::chrono::steady_clock::now() - raised_at;
+    const FrameGenStatus returned = presenter.Status();
+    std::uint32_t lowest = returned.lead_slots;
+    RunWork(*app, 2000ms, {6ms}, [&](const XrFrameState&) {
+        lowest = std::min(lowest, presenter.Status().lead_slots);
+        return false;
+    });
+    const FrameGenStatus after = presenter.Status();
+    presenter.Stop();
+    std::cerr << "  " << name << ": lead " << proven << " (" << LeadProbesUndone(settled)
+              << " probes below undone) -> " << raised.lead_slots << " (floor " << raised.lead_floor << ") -> "
+              << returned.lead_slots << " after " << Seconds(back) << " s, then lowest " << lowest << " (floor "
+              << after.lead_floor << ")" << std::endl;
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    Check(raised.lead_slots > proven && raised.lead_floor == proven + 1,
+          name + ": the hitch raises the lead and its floor a refresh (lead " + std::to_string(raised.lead_slots) +
+              ", floor " + std::to_string(raised.lead_floor) + ")");
+    Check(returned.lead_slots == proven && back <= policy.explore_after + policy.judge + 600ms,
+          name + ": the lead is back at the proven lead after explore_after (" + std::to_string(Seconds(back)) +
+              " s)");
+    Check(lowest == proven && after.lead_floor == proven,
+          name + ": below the proven lead the doubled wait still holds (lowest " + std::to_string(lowest) +
+              ", floor " + std::to_string(after.lead_floor) + ")");
+}
+
+// As TestHitchReturnsToProvenLead, but the game is slower from the hitch on
+// and needs the raised lead: the probes back to the proven lead fail, each
+// doubling the wait before the next. Retried every explore_after, each try
+// would cost two late frames. Between them the raised floor holds and rises
+// no further. (A higher explore_max: the waits double within the 7 s.)
+void TestRaisedFloorProbesBackOff() {
+    const std::string name = "raised floor";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    gpu.frames_ahead = 2;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2, app, runtime, owned);
+    app->end_offset_periods = 1;
+    const FrameGenLeadPolicy policy = ProvenLeadPolicy(5600ms);
+    presenter.SetLeadPolicy(policy);
+    bool spike = false;
+    bool slower = false;
+    app->before_release = [&] {
+        gpu.game_gpu = spike ? 150ms : slower ? 18ms : 10ms;
+        spike = false;
+        gpu.GameFrame();
+    };
+    const FrameGenStatus settled = FailProbesBelowProvenLead(presenter, *app, name);
+    const std::uint32_t proven = settled.lead_floor;
+    spike = slower = true;
+    const auto slowed = std::chrono::steady_clock::now();
+    // From the first failed probe back on: the floor stays a refresh up, and
+    // the lead with it but for the probes back.
+    bool held = true;
+    std::uint64_t undone = LeadProbesUndone(settled);
+    std::vector<double> failed_at; // seconds after the slowdown
+    RunWork(*app, 7000ms, {6ms}, [&](const XrFrameState&) {
+        const FrameGenStatus now = presenter.Status();
+        if (LeadProbesUndone(now) > undone) {
+            undone = LeadProbesUndone(now);
+            failed_at.push_back(Seconds(std::chrono::steady_clock::now() - slowed));
+        }
+        if (!failed_at.empty()) {
+            held = held && now.lead_floor == proven + 1 &&
+                   (now.lead_slots == proven + 1 || now.lead_slots == proven);
+        }
+        return false;
+    });
+    const FrameGenStatus after = presenter.Status();
+    presenter.Stop();
+    std::string times;
+    for (const double at : failed_at) times += (times.empty() ? "" : ", ") + std::to_string(at);
+    std::cerr << "  " << name << ": lead " << proven << " -> " << after.lead_slots << " (floor " << after.lead_floor
+              << "), " << failed_at.size() << " probes back undone in 7 s (at " << times << " s), late +"
+              << (after.late_cpu - settled.late_cpu) + (after.late_gpu - settled.late_gpu) << std::endl;
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    Check(failed_at.size() >= 2 && failed_at.size() <= 3,
+          name + ": the probes back to the proven lead fail, fewer than one each explore_after (" +
+              std::to_string(failed_at.size()) + " in 7 s, at " + times + " s)");
+    // Each failure doubles the wait before the next probe back, from
+    // 2x explore_after; the probe back still comes.
+    for (std::size_t i = 1; i < failed_at.size(); ++i) {
+        const double wait = Seconds(policy.explore_after) * static_cast<double>(2u << (i - 1));
+        const double gap = failed_at[i] - failed_at[i - 1];
+        Check(gap >= wait - 0.15 && gap <= wait + Seconds(policy.judge) + 0.6,
+              name + ": probe back " + std::to_string(i + 1) + " after the doubled wait (" + std::to_string(gap) +
+                  " s, the wait " + std::to_string(wait) + " s)");
+    }
+    Check(held && after.lead_floor == proven + 1 && after.lead_slots == proven + 1,
+          name + ": between them the lead and its floor stay a refresh up (lead " +
+              std::to_string(after.lead_slots) + ", floor " + std::to_string(after.lead_floor) + ")");
+}
+
+// A hitch no lead cures can come just as the lead tries the proven lead again
+// after the hitch before it, and undo that probe back though the proven lead
+// still holds (Star Citizen hitches about every half minute, irregularly; the
+// probe back comes 10 s after each and is judged for 3 s). Taken as proving
+// the raised lead, that probe's failure doubled the wait from the failures
+// below the proven lead, and every later return to the raised lead kept it:
+// with hitches more often than that wait the lead stayed a refresh up, and the
+// next such coincidence lifted it one more. A failed probe back doubles only
+// the wait before the next probe back; the proven lead and the wait below it
+// stay.
+void TestHitchDuringProbeBack() {
+    const std::string name = "hitch during the probe back";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    gpu.frames_ahead = 2;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2, app, runtime, owned);
+    app->end_offset_periods = 1;
+    const FrameGenLeadPolicy policy = ProvenLeadPolicy(5600ms);
+    presenter.SetLeadPolicy(policy);
+    bool spike = false;
+    app->before_release = [&] {
+        gpu.game_gpu = spike ? 150ms : 10ms;
+        spike = false;
+        gpu.GameFrame();
+    };
+    const FrameGenStatus settled = FailProbesBelowProvenLead(presenter, *app, name);
+    const std::uint32_t proven = settled.lead_floor;
+    std::uint32_t highest_floor = settled.lead_floor;
+    const auto sample = [&] {
+        const FrameGenStatus now = presenter.Status();
+        highest_floor = std::max(highest_floor, now.lead_floor);
+        return now;
+    };
+    // A hitch raises the lead a refresh...
+    spike = true;
+    RunWork(*app, 2000ms, {6ms}, [&](const XrFrameState&) { return sample().lead_slots > proven; });
+    const FrameGenStatus raised = presenter.Status();
+    // ...the next comes as the lead tries the proven lead again...
+    RunWork(*app, policy.explore_after + 1000ms, {6ms},
+            [&](const XrFrameState&) { return sample().lead_slots <= proven; });
+    const FrameGenStatus probing = presenter.Status();
+    spike = true;
+    RunWork(*app, 2000ms, {6ms},
+            [&](const XrFrameState&) { return LeadProbesUndone(sample()) > LeadProbesUndone(probing); });
+    const FrameGenStatus failed = presenter.Status();
+    // ...and one more right after it.
+    spike = true;
+    RunWork(*app, 2000ms, {6ms}, [&](const XrFrameState&) { return sample().lead_slots > failed.lead_slots; });
+    const auto third_at = std::chrono::steady_clock::now();
+    const FrameGenStatus third = presenter.Status();
+    // Then none: back at the proven lead, and below it the wait from the
+    // failures there still holds.
+    RunWork(*app, policy.explore_max + 1000ms, {6ms},
+            [&](const XrFrameState&) { return sample().lead_slots <= proven; });
+    const auto back = std::chrono::steady_clock::now() - third_at;
+    const FrameGenStatus returned = presenter.Status();
+    std::uint32_t lowest = returned.lead_slots;
+    RunWork(*app, 2000ms, {6ms}, [&](const XrFrameState&) {
+        lowest = std::min(lowest, sample().lead_slots);
+        return false;
+    });
+    const FrameGenStatus after = presenter.Status();
+    presenter.Stop();
+    std::cerr << "  " << name << ": lead " << proven << " -> " << raised.lead_slots << ", probe back to "
+              << probing.lead_slots << " undone -> " << failed.lead_slots << " (floor " << failed.lead_floor
+              << "), hitch -> " << third.lead_slots << " (floor " << third.lead_floor << "), highest floor "
+              << highest_floor << ", back at " << returned.lead_slots << " after " << Seconds(back)
+              << " s, then lowest " << lowest << " (floor " << after.lead_floor << ")" << std::endl;
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    Check(raised.lead_slots == proven + 1 && probing.lead_slots == proven &&
+              LeadProbesUndone(failed) == LeadProbesUndone(probing) + 1 && failed.lead_slots == proven + 1,
+          name + ": the second hitch undoes the probe back (lead " + std::to_string(raised.lead_slots) + " -> " +
+              std::to_string(probing.lead_slots) + " -> " + std::to_string(failed.lead_slots) + ")");
+    Check(third.lead_slots > proven + 1, name + ": the third raises the lead again (" +
+                                             std::to_string(third.lead_slots) + ")");
+    Check(highest_floor <= proven + 1, name + ": the floor rises a refresh above the proven lead at most (" +
+                                           std::to_string(proven) + " -> " + std::to_string(highest_floor) + ")");
+    Check(returned.lead_slots == proven && back <= policy.probe_after + 2 * policy.explore_after + policy.judge + 600ms,
+          name + ": the lead is back at the proven lead after the doubled wait before a probe back (" +
+              std::to_string(Seconds(back)) + " s)");
+    Check(lowest == proven && after.lead_floor == proven,
+          name + ": below the proven lead the wait from the failures there holds (lowest " + std::to_string(lowest) +
+              ", floor " + std::to_string(after.lead_floor) + ")");
+}
+
+// Dynamic caps the lead at 4 refreshes per real frame, its refreshes per real
+// frame rounded (2-4): 8, 12 or 16. A lead raised past a cap that then drops
+// (the game speeding up) was told to the game as the cap, matched no frame's,
+// and so was never scored again: it stayed above the cap until a probe, and
+// raises at the cap were counted though nothing moved (DCS 231933 and 220716,
+// 0.19.1: leadSlots=9 while the game was told 8; +54/-0 at the cap).
+void TestLeadFollowsLoweredCap() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic, app, runtime, owned);
+    FrameGenLeadPolicy policy;
+    policy.probe_after = 600s; // no probes: only scored frames move the lead
+    presenter.SetLeadPolicy(policy);
+    for (int i = 0; i < 3; ++i) app->Frame();
+    // A game at a third of the refresh rate (cap 12), its frames reaching the
+    // GPU history late: the lead climbs past 8.
+    RunTicks(*app, 3000ms, {3}, [&](const XrFrameState&) { return Engaged(presenter); });
+    Check(Engaged(presenter), "lowered cap: Dynamic engages");
+    gpu.capture_lag = 100ms;
+    RunTicks(*app, 4000ms, {3}, [&](const XrFrameState&) { return presenter.Status().lead_slots > 9; });
+    const FrameGenStatus raised = presenter.Status();
+    gpu.capture_lag = 0us;
+    Check(raised.lead_slots > 8, "lowered cap: the lead climbs past 8 (" + std::to_string(raised.lead_slots) + ")");
+    // At 1.5 refreshes a frame the cap is 8.
+    RunTicks(*app, 2500ms, {1, 2});
+    const FrameGenStatus after = presenter.Status();
+    presenter.Stop();
+    std::cerr << "  lowered cap: lead " << raised.lead_slots << " -> " << after.lead_slots << " (floor "
+              << after.lead_floor << "), moves +" << after.lead_ups << "/-" << after.lead_downs << std::endl;
+    Check(!runtime.ordering_violation && !g_release_violation, "lowered cap: calls stayed ordered");
+    Check(after.lead_slots <= 8 && after.lead_floor <= 8,
+          "lowered cap: the lead comes down with the cap (" + std::to_string(raised.lead_slots) + " -> " +
+              std::to_string(after.lead_slots) + ", floor " + std::to_string(after.lead_floor) + ")");
+}
+
+// Refreshes the presenter thread misses (Varjo's runtime under a GPU-bound
+// DCS, 2026-10-14: about one in ten) pass over the real frames made for them
+// when the next real frame is a refresh behind: those frames came in time,
+// and no lead cures a refresh nobody wrote. Scored late, two in ten raised
+// the lead a refresh each time, and it sat at its cap (4 per real frame, 89
+// ms) all flight: leadMoves=+100/-0 every 30 s, with no frame late on the
+// CPU or the GPU.
+void TestPassedOverFramesKeepLead() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic, app, runtime, owned);
+    // GPU-bound at ~70 fps (real frames a refresh or two apart), so its frames
+    // never show the slack that takes a refresh off the lead; no probes.
+    gpu.game_gpu = 14ms;
+    gpu.frames_ahead = 3;
+    FrameGenLeadPolicy policy;
+    policy.probe_after = 600s;
+    presenter.SetLeadPolicy(policy);
+    app->before_release = [&] { gpu.GameFrame(); };
+    const std::vector<std::chrono::microseconds> work{6ms};
+    for (int i = 0; i < 3; ++i) app->Frame();
+    RunWork(*app, 3000ms, work, [&](const XrFrameState&) { return Engaged(presenter); });
+    Check(Engaged(presenter), "passed over: Dynamic engages");
+    RunWork(*app, 1000ms, work);
+    const FrameGenStatus settled = presenter.Status();
+    runtime.miss_every = 9;
+    std::uint32_t highest = settled.lead_slots;
+    RunWork(*app, 3000ms, work, [&](const XrFrameState&) {
+        highest = std::max(highest, presenter.Status().lead_slots);
+        return false;
+    });
+    runtime.miss_every = 0;
+    const FrameGenStatus after = presenter.Status();
+    presenter.Stop();
+    std::cerr << "  passed over: lead " << settled.lead_slots << " -> highest " << highest << ", last "
+              << after.lead_slots << " (cap " << 4 * 2 << "); moves +" << after.lead_ups - settled.lead_ups << "/-"
+              << after.lead_downs - settled.lead_downs << ", late " << after.late_cpu - settled.late_cpu << "/"
+              << after.late_gpu - settled.late_gpu << std::endl;
+    Check(!runtime.ordering_violation && !g_release_violation, "passed over: calls stayed ordered");
+    Check(Engaged(presenter) || after.threaded, "passed over: stays engaged");
+    Check(highest <= settled.lead_slots + 1 && after.lead_slots < 8,
+          "passed over: missed refreshes do not raise the lead (" + std::to_string(settled.lead_slots) + " -> " +
+              std::to_string(highest) + ", last " + std::to_string(after.lead_slots) + ")");
+}
+
+// Frames with no projection (a loading screen or a menu: nothing to generate
+// from) say nothing about the lead the game's frames need. Scored, late ones
+// raised it a refresh every two, to its cap: Star Citizen on Virtual Desktop
+// (2026-10-14) showed a cylinder layer alone for 93 s, the lead went from 2
+// to 8 and stayed at 7-8 for 12 s of play, and the game predicted its poses
+// 152 ms ahead (about 65 ms without Frame Generation). The lead holds across
+// them. The game ends its frames a period after the time it is told, as Star
+// Citizen does, and renders for that time. Just in time, then with frames
+// written after each real frame.
+void TestLoadingFramesDoNotRaiseLead() {
+    const std::string name =
+        std::string("loading frames keep the lead") + (g_jit ? "" : ", written after each real frame");
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    if (g_jit) {
+        StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2, app, runtime, owned);
+    } else {
+        StartThreaded(presenter, gpu, FrameGenMultiplier::k2);
+        owned = std::make_unique<App>(presenter, runtime);
+        app = owned.get();
+    }
+    app->end_offset_periods = 1;
+    for (int i = 0; i < 3; ++i) app->Frame();
+    RunWork(*app, 2000ms, kLightWork);
+    const FrameGenStatus settled = presenter.Status();
+    Check(settled.threaded, name + ": the presenter thread runs");
+    // Each loading frame ends three refreshes after its own refresh was due.
+    std::uint32_t peak = settled.lead_slots;
+    app->before_begin = [&] {
+        const std::uint32_t lead = presenter.Status().lead_slots;
+        peak = std::max(peak, lead);
+        SleepPrecise(std::chrono::steady_clock::now() + std::chrono::nanoseconds((lead + 3) * kPeriod));
+    };
+    const auto loading = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - loading < 1500ms) app->Frame(false);
+    app->before_begin = nullptr;
+    const FrameGenStatus loaded = presenter.Status();
+    // The game's frames again: the lead each is told, and how far past the
+    // runtime's newest display time it renders (in refreshes).
+    std::uint32_t lead = 0;
+    double horizon = 0.0;
+    for (int i = 0; i < 20; ++i) {
+        const XrFrameState state = app->Wait();
+        {
+            std::scoped_lock lock(g_xr_mutex);
+            const XrTime rendered_for =
+                state.predictedDisplayTime + state.predictedDisplayPeriod * app->end_offset_periods;
+            horizon = std::max(horizon, static_cast<double>(rendered_for - runtime.clock_floor) /
+                                            static_cast<double>(kPeriod));
+        }
+        lead = std::max(lead, presenter.Status().lead_slots);
+        app->Begin();
+        SleepPrecise(std::chrono::steady_clock::now() + kLightWork[0]);
+        app->Release();
+        Check(XR_SUCCEEDED(app->End(state.predictedDisplayTime)), name + ": end");
+    }
+    presenter.Stop();
+    std::cerr << "  " << name << ": lead " << settled.lead_slots << " -> " << peak << " loading ("
+              << loaded.late_cpu - settled.late_cpu << " late) -> " << lead << " after, horizon " << horizon
+              << " refreshes" << std::endl;
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    Check(loaded.late_cpu - settled.late_cpu >= 8, name + ": the loading frames came late");
+    Check(lead <= settled.lead_slots + 1, name + ": loading frames do not raise the lead (" +
+                                              std::to_string(settled.lead_slots) + " -> " + std::to_string(peak) +
+                                              " loading, " + std::to_string(lead) + " after)");
+    Check(horizon <= settled.lead_slots + 1.0,
+          name + ": the game renders no further ahead after loading (" + std::to_string(horizon) + " refreshes, lead " +
+              std::to_string(settled.lead_slots) + ")");
+}
+
 // A game showing its last frame (stalled): its exact copy is written once,
 // then the runtime shows the output images' newest again each refresh.
 void TestSkipIdenticalExactCopies() {
@@ -4798,7 +5606,8 @@ void TestTelemetryWindows() {
     Check(!inline_lines.empty(), "telemetry: summaries while standing by");
     for (const char* field : {"appFps=", "outputFps=", "distinctFps=", "standbyS=", "generated=+", "copiesSkipped=",
                               "lateReal=", "gpuWaits=", "captureDoneMs=", "analysisMs=", "measureLagMs=", "ofaMs=",
-                              "gpuStartMs=", "gpuDoneMs=", "endCallMs=", "synthLockMs=", "unwritten=", "unready=", "pauses=",
+                              "gpuStartMs=", "gpuDoneMs=", "endCallMs=", "runtimeEndMs=", "synthLockMs=", "unwritten=",
+                              "unready=", "pauses=",
                               "leadSlots=", "leadFloor=", "leadMoves=+", "leadProbes=", "leadUndone=",
                               "dynamic=engaged (the game ran at"}) {
         Check(threaded.back().find(field) != std::string::npos,
@@ -4821,6 +5630,9 @@ void TestTelemetryWindows() {
         standby += number(line, "standbyS=");
         standby_windows += " inline " + std::to_string(number(line, "standbyS="));
     }
+    // The session's first window starts with it (it had no start: rates 0.0).
+    Check(number(inline_lines.front(), "appFps=") > 0.0,
+          "telemetry: the first summary's rates cover its window (" + inline_lines.front() + ")");
     const std::string& last = threaded.back();
     // "generated=+N (M)": the window's, then the session's.
     const std::size_t generated_at = last.find("generated=+");
@@ -5001,6 +5813,9 @@ void TestDynamicToggleStandsBy() {
           "toggle standby: turned on again, a game holding the refresh rate is not engaged (" +
               std::string(status.standby ? "standing by" : "engaged") + ", " +
               std::to_string(status.dynamic_engagements) + " engagements)");
+    // Standing by, the reason is not the engagement's from before the toggle.
+    Check(status.dynamic_reason.find("ran at") == std::string::npos,
+          "toggle standby: standing by again, the old engagement's reason is gone (" + status.dynamic_reason + ")");
     // Slow again: it engages after its own run below the refresh rate.
     EngageDynamic(presenter, *app, "toggle standby");
     Check(presenter.Status().dynamic_engagements == 2, "toggle standby: engages again once the game is slow");
@@ -6510,22 +7325,17 @@ constexpr const char* kHalvingDetail = "Runtime holds frames to half rate: check
 constexpr const char* kHalvingReason = "the runtime holds frames to half rate: check its smoothing";
 constexpr const char* kHalvingStandDown = "the runtime holds frames to half rate";
 
-// The directory of this executable (in the build tree).
-std::filesystem::path ExecutableDirectory() {
-    wchar_t path[MAX_PATH] = {};
-    GetModuleFileNameW(nullptr, path, MAX_PATH);
-    return std::filesystem::path(path).parent_path();
-}
-
-// A session log of its own beside this executable, read back once the
-// presenter has stopped.
+// A session log of its own in the temporary folder (not beside this
+// executable: on a worktree whose build is the installed layer that is the
+// active layer folder), read back once the presenter has stopped.
 struct SessionLog {
     std::filesystem::path directory;
     std::unique_ptr<Logger> logger{std::make_unique<Logger>()};
+    std::filesystem::path path; // the log, once Lines closed it
 
     explicit SessionLog(const std::string& name)
-        : directory(ExecutableDirectory() /
-                    ("presenter-test-log-" + std::to_string(GetCurrentProcessId()) + "-" + name)) {
+        : directory(std::filesystem::temp_directory_path() /
+                    ("vectorxr-presenter-test-log-" + std::to_string(GetCurrentProcessId()) + "-" + name)) {
         std::error_code ignored;
         std::filesystem::remove_all(directory, ignored);
         logger->Initialize(directory / "session.log");
@@ -6535,10 +7345,13 @@ struct SessionLog {
         std::error_code ignored;
         std::filesystem::remove_all(directory, ignored);
     }
-    // The lines holding `text` (closes the log: call once the presenter has stopped).
+    // The lines holding `text` (closes the log: call once the presenter has
+    // stopped). Later calls read the closed log again.
     std::vector<std::string> Lines(const std::string& text) {
-        const std::filesystem::path path = logger->ActiveLogPath();
-        logger.reset(); // flushed
+        if (logger) {
+            path = logger->ActiveLogPath();
+            logger.reset(); // flushed
+        }
         std::ifstream file(path);
         std::vector<std::string> lines;
         for (std::string line; std::getline(file, line);) {
@@ -6548,6 +7361,92 @@ struct SessionLog {
     }
 };
 
+// Turned off while the game's wait is held for its cadence (fixed 2x holds
+// it about half of each frame): the wait returned into the presenter thread,
+// was handed one more frame and logged "engaged" right after "disengaged".
+// Each press on logs one engagement and nothing else does. Switched from
+// Dynamic standing by to fixed 2x, the engagement is logged too (it was not:
+// the state read active throughout).
+void TestToggleOffLogsNoEngagement() {
+    const std::string name = "toggle off logs no engagement";
+    SessionLog log("toggle-engaged");
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2, app, runtime, owned,
+             log.logger.get());
+    std::atomic<bool> stop{false};
+    std::thread game([&] {
+        while (!stop) {
+            const XrFrameState state = app->Wait();
+            app->Begin();
+            SleepPrecise(std::chrono::steady_clock::now() + 6ms);
+            app->Release();
+            Check(XR_SUCCEEDED(app->End(state.predictedDisplayTime)), name + ": end");
+        }
+    });
+    const auto threaded = [&] {
+        const auto deadline = std::chrono::steady_clock::now() + 3s;
+        while (std::chrono::steady_clock::now() < deadline) {
+            const FrameGenStatus status = presenter.Status();
+            if (status.state == FrameGenState::kActive && status.threaded) return true;
+            std::this_thread::sleep_for(5ms);
+        }
+        return false;
+    };
+    constexpr int kPresses = 10;
+    int ons = 0;
+    for (int i = 0; i < kPresses; ++i) {
+        Check(threaded(), name + ": engaged before each press");
+        ++ons;
+        std::this_thread::sleep_for(std::chrono::milliseconds(60 + 3 * i));
+        Check(!presenter.Toggle(), name + ": turned off");
+        std::this_thread::sleep_for(100ms);
+        Check(presenter.Status().state == FrameGenState::kOff, name + ": reads off");
+        Check(presenter.Toggle(), name + ": turned on");
+    }
+    Check(threaded(), name + ": engaged after the last press");
+    ++ons;
+    // Dynamic standing by for a game at the refresh rate, then fixed 2x.
+    FrameGenResolvedSettings settings;
+    settings.enabled = true;
+    settings.synthesis_mode = FrameGenSynthesisMode::kExtrapolate;
+    settings.multiplier = FrameGenMultiplier::kDynamic;
+    presenter.Configure(settings);
+    const auto deadline = std::chrono::steady_clock::now() + 3s;
+    const auto standing_by = [&] {
+        const FrameGenStatus status = presenter.Status();
+        return status.standby && !status.threaded && status.state == FrameGenState::kActive;
+    };
+    while (!standing_by() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(5ms);
+    }
+    std::this_thread::sleep_for(100ms);
+    Check(standing_by(), name + ": Dynamic stands by for a game at the refresh rate");
+    settings.multiplier = FrameGenMultiplier::k2;
+    presenter.Configure(settings);
+    Check(threaded(), name + ": fixed 2x engages from standing by");
+    ++ons;
+    std::this_thread::sleep_for(100ms);
+    stop = true;
+    game.join();
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    const std::vector<std::string> lines = log.Lines("Frame Generation");
+    const auto engaged = static_cast<std::size_t>(std::count_if(lines.begin(), lines.end(), [](const std::string& line) {
+        return line.find("Frame Generation engaged") != std::string::npos;
+    }));
+    if (std::getenv("FG_TEST_VERBOSE")) {
+        for (const std::string& line : lines) std::cerr << "  " << line << '\n';
+    }
+    Check(engaged == static_cast<std::size_t>(ons),
+          name + ": one engagement logged for each (" + std::to_string(engaged) + " logged, " + std::to_string(ons) +
+              " expected)");
+}
+
 // A just-in-time Extrapolate session against a paced runtime, the halving
 // window shortened to a second; Dynamic's benefit guard keeps its own windows
 // (it would judge only after these tests' decisions).
@@ -6556,6 +7455,33 @@ void StartHalving(FrameGenPresenter& presenter, GpuLog& gpu, Runtime& runtime, F
     runtime.paced = true;
     StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, multiplier, app, runtime, owned, logger);
     presenter.SetHalvingWindow(1000ms);
+}
+
+// The trace records the game's swapchain acquires and releases only while
+// frames are generated or about to be: standing by they are every image of
+// every frame, and tell nothing about Frame Generation.
+void TestTraceSwapchainCallsOnlyWhileCapturing() {
+    SessionLog log("trace-swapchain-calls");
+    log.logger->SetLevel(LogLevel::Debug);
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic, app, runtime, owned,
+             log.logger.get());
+    presenter.SetDynamicPolicy(SteadyDynamic());
+    Check(presenter.Trace().Enabled(), "trace: debug logging starts the session's trace");
+    RunTicks(*app, 600ms, {1});
+    const FrameGenStatus standing_by = presenter.Status();
+    Check(standing_by.standby && !presenter.TracesSwapchainCalls(),
+          "trace: standing by, the game's acquires and releases are not traced");
+    presenter.SetDynamicPolicy(QuickDynamic());
+    EngageDynamic(presenter, *app, "trace");
+    Check(presenter.TracesSwapchainCalls(), "trace: engaged, the game's acquires and releases are traced");
+    presenter.Stop();
+    Check(!presenter.TracesSwapchainCalls(), "trace: a stopped session traces nothing");
 }
 
 // Submissions the runtime got per second while the game ran `work` for `duration`.
@@ -7011,6 +7937,79 @@ void TestRuntimeHalvingClearedDoesNotStandDown() {
     Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
 }
 
+// Switched from Dynamic standing by to 2x and back while running: only
+// Dynamic stands by, so no summary window's standing-by time goes negative
+// and the stretch at 2x is not counted; back in Dynamic the game's rate is
+// judged afresh after the settle, not from the frames held at 2x.
+void TestDynamicSwitchStandby() {
+    const std::string name = "dynamic switch";
+    SessionLog log("dynamic-switch");
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    const auto start = std::chrono::steady_clock::now();
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic, app, runtime, owned,
+             log.logger.get());
+    const FrameGenDynamicPolicy policy = SteadyDynamic();
+    presenter.SetDynamicPolicy(policy);
+    presenter.SetSummaryInterval(300ms);
+    auto configure = [&](FrameGenMultiplier multiplier) {
+        FrameGenResolvedSettings settings;
+        settings.enabled = true;
+        settings.synthesis_mode = FrameGenSynthesisMode::kExtrapolate;
+        settings.multiplier = multiplier;
+        presenter.Configure(settings);
+        return std::chrono::steady_clock::now();
+    };
+    // A game at the refresh rate stands by; then 2x for one at 0.6x of it
+    // (held to half), then Dynamic again.
+    RunWork(*app, 1000ms, kLightWork);
+    const bool stood_by = presenter.Status().standby;
+    const auto fixed = configure(FrameGenMultiplier::k2);
+    RunTicks(*app, 2500ms, {1, 2, 2});
+    const auto switched = configure(FrameGenMultiplier::kDynamic);
+    EngageDynamic(presenter, *app, name);
+    const auto engaged = std::chrono::steady_clock::now();
+    RunTicks(*app, 600ms, {1, 2, 2});
+    presenter.Stop();
+    Check(stood_by, name + ": standing by for a game at the refresh rate");
+    const std::vector<std::string> lines = log.Lines("Frame Generation");
+    double standby = 0.0;
+    std::string windows;
+    std::ptrdiff_t at_2x = -1, standing_by = -1, engages = -1;
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        const std::string& line = lines[i];
+        const auto index = static_cast<std::ptrdiff_t>(i);
+        if (const std::size_t at = line.find("standbyS="); at != std::string::npos) {
+            const double window = std::stod(line.substr(at + 9));
+            Check(window >= 0.0, name + ": no window's standing-by time is negative (" + line + ")");
+            standby += window;
+            windows += " " + std::to_string(window);
+        }
+        if (at_2x < 0 && line.find("multiplier=2x") != std::string::npos) at_2x = index;
+        // The last standing-by line before Dynamic engages: the one after the switch.
+        if (engages < 0 && line.find("(dynamic) standing by") != std::string::npos) standing_by = index;
+        if (engages < 0 && line.find("(dynamic) engages") != std::string::npos) engages = index;
+    }
+    Check(at_2x >= 0 && standing_by > at_2x && engages > standing_by,
+          name + ": back in Dynamic, it stands by before it engages");
+    Check(standing_by >= 0 && lines[standing_by].find("frames pass straight through") != std::string::npos,
+          name + ": standing by after the switch does not report the rate held at 2x (" +
+              (standing_by >= 0 ? lines[standing_by] : std::string()) + ")");
+    const double since_switch = Seconds(engaged - switched);
+    Check(since_switch >= Seconds(policy.settle + policy.engage_after) - 0.05,
+          name + ": it engages only after the settle and a run below the refresh rate (" +
+              std::to_string(since_switch) + " s)");
+    const double counted = Seconds(fixed - start) + since_switch;
+    Check(standby > 1.0 && standby <= counted + 0.4,
+          name + ": the stretch at 2x is not standing by (" + std::to_string(standby) + " of " +
+              std::to_string(counted) + " s:" + windows + ")");
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+}
+
 // A runtime that keeps halving the frame rate: Dynamic stands down after
 // the window, and each time its hold ends it engages again for the game held
 // to half the refresh rate. With the report standing, the presenter thread's
@@ -7070,6 +8069,314 @@ void TestRuntimeHalvingRetriesBriefly() {
     }
     presenter.Stop();
     Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+}
+
+// Auto against a runtime holding the frames presented to half its refresh
+// rate (Pimax Play's Smart Smoothing in issue #95): engaged, every frame
+// takes twice its refreshes and reads as late, and Auto stepped up to 4x,
+// holding a game the runtime let run at half the refresh rate to an eighth
+// of it. Once the presenter thread's waits report the halving, Auto goes
+// back to full rate (frames pass straight through, as Dynamic stands down),
+// logs why once, and stays there through its hold while the runtime still
+// halves; once the runtime gives every refresh again, a game at 60 fps,
+// whose shorter frames' waits show that, engages Auto before the hold would
+// have ended.
+void TestAutoStandsDownForRuntimeHalving() {
+    const std::string name = "auto stands down for halving";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.throttled = true;
+    SessionLog log("auto-halving");
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartHalving(presenter, gpu, runtime, FrameGenMultiplier::kAuto, app, owned, log.logger.get());
+    presenter.SetAutoPolicy(200ms, 500ms, 600ms, 300ms);
+    FrameGenDynamicPolicy policy = QuickDynamic();
+    policy.hold = 6000ms;
+    policy.hold_max = 12000ms;
+    presenter.SetDynamicPolicy(policy);
+    // Held to every other refresh, the game's frames at full rate read as
+    // late: Auto engages.
+    RunWork(*app, 3000ms, kLightWork, [&](const XrFrameState&) {
+        return presenter.Status().multiplier >= 2 && presenter.Status().threaded;
+    });
+    Check(presenter.Status().multiplier >= 2 && presenter.Status().threaded,
+          name + ": the game held to half the refresh rate engages Auto (" +
+              std::to_string(presenter.Status().multiplier) + "x)");
+    std::uint32_t highest = 0;
+    RunWork(*app, 4000ms, kLightWork, [&](const XrFrameState&) {
+        const FrameGenStatus status = presenter.Status();
+        highest = std::max(highest, status.multiplier);
+        return status.runtime_halving && status.full_rate;
+    });
+    const auto stood_down = std::chrono::steady_clock::now();
+    FrameGenStatus status = presenter.Status();
+    Check(status.runtime_halving && status.full_rate && status.multiplier == 1 && !status.threaded,
+          name + ": reported, Auto goes back to full rate (" + std::to_string(status.multiplier) + "x, highest " +
+              std::to_string(highest) + "x)");
+    const FrameGenOsdText text = presenter.OsdDescription();
+    Check(text.detail == kHalvingDetail, name + ": the OSD and the app say why (" + text.detail + ")");
+    // Through the hold, still halved: nothing engages again.
+    bool engaged_again = false;
+    RunWork(*app, 1500ms, kLightWork, [&](const XrFrameState&) {
+        engaged_again = engaged_again || presenter.Status().multiplier > 1;
+        return false;
+    });
+    Check(!engaged_again && presenter.Status().runtime_halving,
+          name + ": the runtime still halving, Auto stays at full rate through its hold");
+    // Every refresh again: the game's own waits clear the report (a game at
+    // 60 fps, as in TestRuntimeHalvingClears: its waits released at the
+    // next refresh do), and it engages Auto without waiting out the hold.
+    runtime.throttled = false;
+    const std::vector<std::chrono::microseconds> slow{9500us,
+                                                      std::chrono::microseconds(2 * kPeriod / 1000) - 3ms};
+    RunWork(*app, 4000ms, slow, [&](const XrFrameState&) {
+        return presenter.Status().multiplier >= 2 && presenter.Status().threaded;
+    });
+    const double after = Seconds(std::chrono::steady_clock::now() - stood_down);
+    status = presenter.Status();
+    Check(!status.runtime_halving && status.multiplier >= 2 && status.threaded && after < 5.5,
+          name + ": the halving cleared, a slow game engages Auto again before the hold ends (" +
+              std::to_string(status.multiplier) + "x after " + std::to_string(after) + " s)");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    const std::vector<std::string> lines = log.Lines("-> full rate: the runtime holds frames to half rate");
+    Check(lines.size() == 1 &&
+              lines.front().find("frames pass straight through, retrying in 6 s.") != std::string::npos &&
+              lines.front().find("sooner") == std::string::npos,
+          name + ": logged once (" + std::to_string(lines.size()) + " lines" +
+              (lines.empty() ? std::string() : ": " + lines.front()) + ")");
+}
+
+// Auto stood down for runtime halving, then the runtime gives every refresh
+// again (its smoothing turned off) with a game slower than the refresh rate
+// (frames of 1.35 refreshes), as in issue #95: its waits, asked for late and
+// released two refreshes apart either way, cannot show it, so the report
+// and Auto's hold stay until the hold runs out. Auto then engages, the
+// presenter thread's waits clear the report, and it stays engaged.
+void TestAutoHalvingHoldRunsOut() {
+    const std::string name = "auto halving hold runs out";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.throttled = true;
+    SessionLog log("auto-halving-hold");
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartHalving(presenter, gpu, runtime, FrameGenMultiplier::kAuto, app, owned, log.logger.get());
+    // No probing down: engaged again, it stays engaged unless it stands down.
+    presenter.SetAutoPolicy(200ms, 30s, 600ms, 300ms);
+    FrameGenDynamicPolicy policy = QuickDynamic();
+    policy.hold = policy.hold_max = 3000ms;
+    presenter.SetDynamicPolicy(policy);
+    const auto work = PeriodsOfWork(kPeriod, 1.35);
+    RunWork(*app, 5000ms, work, [&](const XrFrameState&) {
+        const FrameGenStatus status = presenter.Status();
+        return status.runtime_halving && status.full_rate;
+    });
+    const auto stood_down = std::chrono::steady_clock::now();
+    FrameGenStatus status = presenter.Status();
+    Check(status.runtime_halving && status.full_rate && status.multiplier == 1,
+          name + ": reported, Auto goes back to full rate (" + std::to_string(status.multiplier) + "x)");
+    runtime.throttled = false;
+    bool engaged = false;
+    bool cleared = false;
+    RunWork(*app, 1500ms, work, [&](const XrFrameState&) {
+        const FrameGenStatus now = presenter.Status();
+        engaged = engaged || now.multiplier > 1;
+        cleared = cleared || !now.runtime_halving;
+        return false;
+    });
+    Check(!engaged && !cleared,
+          name + ": the slow game's waits leave the report, and Auto stays at full rate through its hold");
+    RunWork(*app, 4000ms, work, [&](const XrFrameState&) {
+        const FrameGenStatus now = presenter.Status();
+        return now.multiplier >= 2 && now.threaded && !now.runtime_halving;
+    });
+    const double after = Seconds(std::chrono::steady_clock::now() - stood_down);
+    status = presenter.Status();
+    Check(status.multiplier >= 2 && status.threaded && !status.runtime_halving && after > 2.5,
+          name + ": once the hold runs out, Auto engages and the presenter thread's waits clear the report (" +
+              std::to_string(status.multiplier) + "x after " + std::to_string(after) + " s)");
+    bool stood_down_again = false;
+    RunWork(*app, 1000ms, work, [&](const XrFrameState&) {
+        stood_down_again = stood_down_again || presenter.Status().multiplier < 2;
+        return false;
+    });
+    Check(!stood_down_again && !presenter.Status().runtime_halving, name + ": Auto stays engaged");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    const std::vector<std::string> lines = log.Lines("-> full rate: the runtime holds frames to half rate");
+    Check(lines.size() == 1, name + ": stood down once (" + std::to_string(lines.size()) + " lines)");
+}
+
+// Auto against a runtime holding the frames presented to half its refresh
+// rate and reporting twice its period (Runtime::Throttle::kPeriod), with a
+// game slower than that (frames of 2.7 refreshes): once the halving is
+// reported, the game's frames are timed by the period reported and keep it,
+// so Auto stays engaged and its generated frames fill every refresh the
+// runtime takes, twice what the game alone gets through. Nothing stands down.
+void TestAutoKeepsReportedHalving() {
+    const std::string name = "auto keeps reported halving";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.throttle = Runtime::Throttle::kPeriod;
+    SessionLog log("auto-reported-halving");
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartHalving(presenter, gpu, runtime, FrameGenMultiplier::kAuto, app, owned, log.logger.get());
+    // No probing down: only what the halving does to Auto is judged.
+    presenter.SetAutoPolicy(200ms, 30s, 600ms, 300ms);
+    FrameGenDynamicPolicy policy = QuickDynamic();
+    policy.hold = policy.hold_max = 6000ms;
+    presenter.SetDynamicPolicy(policy);
+    // The refresh period is learned at full refresh first.
+    RunWork(*app, 600ms, kLightWork);
+    runtime.throttled = true;
+    const auto work = PeriodsOfWork(kPeriod, 2.7);
+    // Only the presenter thread's waits report it: Auto engaged.
+    RunWork(*app, 4000ms, work, [&](const XrFrameState&) { return presenter.Status().runtime_halving; });
+    FrameGenStatus status = presenter.Status();
+    Check(status.runtime_halving, name + ": the slow game engages Auto, and the halving is reported");
+    bool full_rate = false;
+    RunWork(*app, 1500ms, work, [&](const XrFrameState&) {
+        full_rate = full_rate || presenter.Status().multiplier < 2;
+        return false;
+    });
+    const double output = SubmissionRate(*app, 800ms, work);
+    status = presenter.Status();
+    const double refresh = 1e9 / static_cast<double>(kPeriod);
+    Check(!full_rate && status.runtime_halving && status.multiplier >= 2 && status.threaded,
+          name + ": Auto stays engaged under the halving it is timed by (" + std::to_string(status.multiplier) + "x)");
+    Check(output > 0.4 * refresh,
+          name + ": every refresh the runtime takes gets a frame (" + std::to_string(output) + " fps)");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    Check(log.Lines("-> full rate: the runtime holds frames to half rate").empty(), name + ": nothing stands down");
+}
+
+// The same runtime and game, Auto probing down: until the halving is
+// reported, every engaged frame reads as late and Auto steps up past 2x.
+// Once it is, the game's frames are timed by the period reported, and so is
+// whether a probe is within reach: 2x (two reported periods, 44 ms, for the
+// game's 30 ms) holds the game, so Auto probes down to it and settles there
+// instead of staying a step higher (two generated frames for each real one,
+// and the game held to 15 fps), and it never probes full rate, which the
+// game cannot hold.
+void TestAutoProbesReportedHalving() {
+    const std::string name = "auto probes reported halving";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.throttle = Runtime::Throttle::kPeriod;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartHalving(presenter, gpu, runtime, FrameGenMultiplier::kAuto, app, owned, nullptr);
+    // Reported after 2 s of halving: Auto has stepped up by then.
+    presenter.SetHalvingWindow(2000ms);
+    // Steady for a second: eight frames or more at 4x (89 ms a frame).
+    presenter.SetAutoPolicy(200ms, 1000ms, 600ms, 300ms);
+    FrameGenDynamicPolicy policy = QuickDynamic();
+    policy.hold = policy.hold_max = 6000ms;
+    presenter.SetDynamicPolicy(policy);
+    RunWork(*app, 600ms, kLightWork);
+    runtime.throttled = true;
+    const auto work = PeriodsOfWork(kPeriod, 2.7);
+    std::uint32_t highest = 0;
+    RunWork(*app, 5000ms, work, [&](const XrFrameState&) {
+        highest = std::max(highest, presenter.Status().multiplier);
+        return presenter.Status().runtime_halving;
+    });
+    Check(presenter.Status().runtime_halving && highest >= 3,
+          name + ": the slow game steps Auto up past 2x until the halving is reported (" + std::to_string(highest) +
+              "x)");
+    // Probes come after a steady second, each confirmed after 0.6 s.
+    std::string steps = std::to_string(presenter.Status().multiplier) + "x";
+    std::uint32_t last = presenter.Status().multiplier;
+    const auto track = [&] {
+        const std::uint32_t now = presenter.Status().multiplier;
+        if (now != last) steps += " -> " + std::to_string(now) + "x";
+        last = now;
+        return now;
+    };
+    RunWork(*app, 8000ms, work, [&](const XrFrameState&) { return track() == 2; });
+    std::uint32_t lowest = last, settled_highest = last;
+    RunWork(*app, 3000ms, work, [&](const XrFrameState&) {
+        const std::uint32_t now = track();
+        lowest = std::min(lowest, now);
+        settled_highest = std::max(settled_highest, now);
+        return false;
+    });
+    const FrameGenStatus status = presenter.Status();
+    Check(lowest == 2 && settled_highest == 2 && status.runtime_halving && status.threaded,
+          name + ": Auto probes down to 2x on the period reported and stays there (" + steps + ")");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+}
+
+// The session's first line names the diagnostic view and what it draws, and
+// a change during play is logged once: a view left on looks like a fault
+// (issue #95's red flashing around the eye-tracked foveation was the
+// Confidence view), and the OSD that names it may be off.
+void TestDiagnosticViewLogged() {
+    const std::string name = "diagnostic view logged";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    SessionLog log("diagnostic-view");
+    FrameGenResolvedSettings settings;
+    settings.enabled = true;
+    settings.synthesis_mode = FrameGenSynthesisMode::kExtrapolate;
+    settings.diagnostic_view = FrameGenDiagnosticView::kConfidence;
+    presenter.Configure(settings);
+    presenter.Start(kSession, nullptr, Dispatch(), log.logger.get(), nullptr,
+                    [&](const void*, std::string&) { return std::make_unique<FakeGpu>(&gpu); });
+    presenter.Configure(settings); // unchanged: nothing more
+    settings.diagnostic_view = FrameGenDiagnosticView::kOff;
+    presenter.Configure(settings);
+    presenter.Stop();
+    const std::vector<std::string> lines = log.Lines("Frame Generation");
+    const auto count = [&](const std::string& text) {
+        return std::count_if(lines.begin(), lines.end(),
+                             [&](const std::string& line) { return line.find(text) != std::string::npos; });
+    };
+    Check(count("Frame Generation enabled for this session") == 1 &&
+              count("diagnosticView=confidence (generated frames are drawn red where they fall back to the real "
+                    "image); frame pacing") == 1,
+          name + ": the session's first line names the view and what it draws");
+    Check(count("Frame Generation diagnostic view changed: confidence (generated frames are drawn red where they "
+                "fall back to the real image) -> off.") == 1 &&
+              count("diagnostic view changed") == 1,
+          name + ": a change is logged once");
+}
+
+// The first frames Frame Generation makes are logged once, just in time
+// (the default) too, with each view as the game submits it: its region of
+// the swapchain image and its field of view in degrees (left/right/up/down),
+// where a focus view an eye-tracked foveation moves would show.
+void TestFirstFramesLogged() {
+    const std::string name = "first frames logged";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    SessionLog log("first-frames");
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2, app, runtime, owned,
+             log.logger.get());
+    RunWork(*app, 3000ms, kLightWork, [&](const XrFrameState&) { return presenter.Status().generated >= 4; });
+    Check(presenter.Status().generated >= 4, name + ": generates");
+    RunWork(*app, 200ms, kLightWork);
+    presenter.Stop();
+    const std::vector<std::string> lines = log.Lines("Frame Generation produced its first frames");
+    const std::string view = "1600x1600 at 0,0 fov -45.8/45.8/45.8/-45.8";
+    Check(lines.size() == 1 &&
+              lines.front().find("views=2 (" + view + "; " + view + "), generatedPerFrame=just in time") !=
+                  std::string::npos,
+          name + ": once, with each view's region and field of view (" +
+              (lines.empty() ? std::string("none") : lines.front()) + ")");
 }
 
 // A runtime that blocks every wait until its refresh (as Pimax's own,
@@ -7660,6 +8967,273 @@ void TestAutoHoldsWhileClockDisplaced() {
     Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
 }
 
+// Auto at 3x when the runtime's clock recovers: engaging again is a change
+// too, and its first frames carry its cost (velocity7 in Star Citizen on
+// Virtual Desktop, 2026-10-14: "62% of frames late" stepped 3x up to 4x in
+// the second the clock recovered, and the game ran at 22-24 fps instead of
+// 48 with no probe down in reach). Here the game's first half second after
+// the recovery works 4 refreshes a frame, late at 3x (3.75 at most): left
+// out as any change's first frames are. Lateness that lasts past the
+// settle still steps the multiplier up.
+void TestAutoSettlesAfterClockRecovery() {
+    const std::string name = "auto settles after the clock recovers";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    SessionLog log("auto-clock-recovery");
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kInterpolate, FrameGenMultiplier::kAuto, app, runtime, owned,
+             log.logger.get());
+    // A 30 s probe backoff: no probe down within the test.
+    constexpr auto kSettle = 700ms;
+    presenter.SetAutoPolicy(kSettle, 500ms, 600ms, 30s);
+    const auto needs_3x = PeriodsOfWork(kPeriod, 2.6);
+    const auto late_at_3x = PeriodsOfWork(kPeriod, 4.0);
+    // Full rate, then 2x, then 3x (each step settles first). The clock stalls
+    // as soon as it is 3x, within that step's settle: judged at 3x a second
+    // first, bursts of hitches on a busy machine (frames 40-70 ms apart)
+    // stepped it to 4x before the test began, twice in about fifteen runs.
+    RunWork(*app, 4000ms, needs_3x, [&](const XrFrameState&) {
+        return presenter.Status().multiplier == 3 && presenter.Status().threaded;
+    });
+    const std::uint32_t settled = presenter.Status().multiplier;
+    const bool settled_threaded = presenter.Status().threaded;
+    runtime.stall_clock = true;
+    RunWork(*app, 2000ms, needs_3x, [&](const XrFrameState&) { return presenter.Status().runtime_clock_displaced; });
+    const bool displaced = presenter.Status().runtime_clock_displaced;
+    RunWork(*app, 500ms, needs_3x);
+    runtime.stall_clock = false;
+    RunWork(*app, 3000ms, needs_3x, [&](const XrFrameState&) { return !presenter.Status().runtime_clock_displaced; });
+    const auto recovered = std::chrono::steady_clock::now();
+    const bool recovered_seen = !presenter.Status().runtime_clock_displaced;
+    std::uint32_t highest = 0;
+    const auto watch = [&](const XrFrameState&) {
+        highest = std::max(highest, presenter.Status().multiplier);
+        return false;
+    };
+    RunWork(*app, 500ms, late_at_3x, watch);
+    const auto judged = recovered + kSettle + 300ms;
+    const auto now = std::chrono::steady_clock::now();
+    if (now < judged) {
+        RunWork(*app, std::chrono::duration_cast<std::chrono::milliseconds>(judged - now), needs_3x, watch);
+    }
+    // The control: lateness that lasts still does.
+    RunWork(*app, 2500ms, late_at_3x, [&](const XrFrameState&) { return presenter.Status().multiplier == 4; });
+    const std::uint32_t stepped = presenter.Status().multiplier;
+    presenter.Stop();
+    std::string said;
+    for (const std::string& line : log.Lines("Frame Generation")) {
+        if (line.find("automatic multiplier") != std::string::npos || line.find("display times") != std::string::npos) {
+            said += " | " + line.substr(line.find("Frame Generation"));
+        }
+    }
+    Check(settled == 3 && settled_threaded,
+          name + ": a game needing 3x gets it (" + std::to_string(settled) + "x" + said + ")");
+    Check(displaced && recovered_seen, name + ": display times that stand still displace the clock, then recover");
+    Check(highest == 3, name + ": the frames right after the recovery do not step it up (3x, then " +
+                            std::to_string(highest) + "x within the settle and 300 ms" + said + ")");
+    Check(stepped == 4, name + ": a game late for longer steps up (" + std::to_string(stepped) + "x" + said + ")");
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+}
+
+// Auto at 4x with the game late there: nothing higher to step to, and no
+// probe down while it stays late (velocity7 in Star Citizen on Virtual
+// Desktop at 144 Hz, 2026-10-14: at 4x the game ran at 22-24 fps with about
+// 16 ms of its own work a frame, where it had held 48 at 3x, until the user
+// switched 16 s later). Here the runtime takes 1.6 refreshes for each of the
+// presenter thread's frames while at 4x, so the game, whose own frames fit
+// 3x, is released every eighth refresh: once late as long as a probe backs
+// off, Auto probes 3x and stays there. A game too slow for 3x stays at 4x,
+// late or not.
+void TestAutoLeavesLateCeiling() {
+    const std::string name = "auto leaves a ceiling the game is late at";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    SessionLog log("auto-late-ceiling");
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kInterpolate, FrameGenMultiplier::kAuto, app, runtime, owned,
+             log.logger.get());
+    constexpr auto kBackoff = 1000ms;
+    presenter.SetAutoPolicy(500ms, 500ms, 600ms, kBackoff);
+    // 4 refreshes of work a frame are late at 3x (3.75 at most), not at 4x
+    // (5); 2.6 fit 3x and not 2x (2 at most, within reach 2.35); 5.6 are
+    // late at 4x and out of reach of 3x (3.53).
+    const auto needs_4x = PeriodsOfWork(kPeriod, 4.0);
+    const auto fits_3x = PeriodsOfWork(kPeriod, 2.6);
+    const auto too_slow = PeriodsOfWork(kPeriod, 5.6);
+    RunWork(*app, 8000ms, needs_4x, [&](const XrFrameState&) {
+        return presenter.Status().multiplier == 4 && presenter.Status().threaded;
+    });
+    const std::uint32_t climbed = presenter.Status().multiplier;
+    const bool climbed_threaded = presenter.Status().threaded;
+    // Within 4x's settle: the game gets lighter, and the runtime slow.
+    runtime.submit_sleep_us = static_cast<int>(kPeriod * 16 / 10 / 1000);
+    const auto slowed = std::chrono::steady_clock::now();
+    double left_after = -1.0;
+    RunWork(*app, 6000ms, fits_3x, [&](const XrFrameState&) {
+        if (presenter.Status().multiplier == 4) return false;
+        left_after = Seconds(std::chrono::steady_clock::now() - slowed);
+        runtime.submit_sleep_us = 0; // slow at 4x only
+        return true;
+    });
+    runtime.submit_sleep_us = 0;
+    const std::uint32_t left = presenter.Status().multiplier;
+    std::uint32_t lowest = left, highest = left;
+    RunWork(*app, 2000ms, fits_3x, [&](const XrFrameState&) {
+        lowest = std::min(lowest, presenter.Status().multiplier);
+        highest = std::max(highest, presenter.Status().multiplier);
+        return false;
+    });
+    const std::uint32_t kept = presenter.Status().multiplier;
+    // The control: a game too slow for 3x steps up again and stays at 4x,
+    // late there past twice the backoff (a probe failing doubles it).
+    RunWork(*app, 4000ms, too_slow, [&](const XrFrameState&) { return presenter.Status().multiplier == 4; });
+    const std::uint32_t slow_climbed = presenter.Status().multiplier;
+    std::uint32_t slow_lowest = slow_climbed;
+    RunWork(*app, 3500ms, too_slow, [&](const XrFrameState&) {
+        slow_lowest = std::min(slow_lowest, presenter.Status().multiplier);
+        return false;
+    });
+    presenter.Stop();
+    std::string said;
+    for (const std::string& line : log.Lines("Frame Generation")) {
+        if (line.find("automatic multiplier") != std::string::npos) {
+            said += " | " + line.substr(line.find("Frame Generation"));
+        }
+    }
+    if (std::getenv("FG_TEST_STATS")) std::cerr << name << ": left 4x after " << left_after << " s" << said << "\n";
+    Check(climbed == 4 && climbed_threaded,
+          name + ": a game of 4 refreshes a frame gets 4x (" + std::to_string(climbed) + "x" + said + ")");
+    Check(left == 3 && left_after > 0.0 && left_after < 4.0,
+          name + ": late at 4x though its own frames fit 3x, it probes 3x (" + std::to_string(left) + "x after " +
+              std::to_string(left_after) + " s" + said + ")");
+    Check(lowest == 3 && highest == 3 && kept == 3,
+          name + ": and stays there (" + std::to_string(lowest) + "x-" + std::to_string(highest) + "x" + said + ")");
+    Check(slow_climbed == 4 && slow_lowest == 4,
+          name + ": a game too slow for 3x stays at 4x (" + std::to_string(slow_climbed) + "x, then " +
+              std::to_string(slow_lowest) + "x at the lowest" + said + ")");
+    Check(log.Lines("no higher one to step to").size() == 1,
+          name + ": the probe from the ceiling says why, once" + said);
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+}
+
+// Displaced runtime clocks are logged one by one for the first few, then
+// only in summaries: each logged end ends a logged displacement (past the
+// first three, the ends were logged without them).
+void TestClockLogPairs() {
+    const std::string name = "clock log pairs";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    SessionLog log("clock-pairs");
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic, app, runtime, owned,
+             log.logger.get());
+    RunWork(*app, 600ms, kLightWork);
+    int displacements = 0;
+    for (int i = 0; i < 5; ++i) {
+        runtime.jump_next = 400'000'000; // display times run 0.4 s ahead, then creep
+        RunWork(*app, 3000ms, kLightWork, [&](const XrFrameState&) { return presenter.Status().runtime_clock_displaced; });
+        displacements += presenter.Status().runtime_clock_displaced ? 1 : 0;
+        RunWork(*app, 4000ms, kLightWork, [&](const XrFrameState&) { return !presenter.Status().runtime_clock_displaced; });
+        Check(!presenter.Status().runtime_clock_displaced, name + ": display times advance again");
+        RunWork(*app, 200ms, kLightWork); // the ceiling is taken anew
+    }
+    presenter.Stop();
+    Check(displacements == 5, name + ": each jump displaced the clock (" + std::to_string(displacements) + " of 5)");
+    const std::vector<std::string> lines = log.Lines("Frame Generation: the runtime's display times");
+    const auto count = [&](const char* text) {
+        return std::count_if(lines.begin(), lines.end(),
+                             [&](const std::string& line) { return line.find(text) != std::string::npos; });
+    };
+    const auto began = count("nothing engages");
+    const auto ended = count("advance with the time again (after");
+    Check(began == 3 && ended == began,
+          name + ": the first three are logged, each with its end (" + std::to_string(began) + " began, " +
+              std::to_string(ended) + " ended)");
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+}
+
+// Auto probes a step down once its frames run steady a while: a game whose
+// own frames take longer than that step allows fails every probe, with a
+// second or two of late frames each (DCS on Varjo, 2026-10-14: 2x -> full
+// rate and back every 35 s, "37% / 87% of frames late", at 17-22 ms a frame
+// against 11.1 ms refreshes). Auto probes only a game within reach of the
+// step, as Dynamic does; one that gets lighter is probed and steps down.
+// Run just in time, then with frames written after each real frame, where
+// the game's xrEndFrame also waits for its frame's slot (the cadence's hold,
+// like its waits', not its own time) and hands the frame to the runtime
+// itself (3 ms here: its own time).
+void TestAutoProbesNeedRoom() {
+    const std::string name = std::string("auto probes need room") + (g_jit ? "" : ", written after each real frame");
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    if (g_jit) {
+        StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kAuto, app, runtime, owned);
+    } else {
+        runtime.submit_sleep_us = 3000;
+        StartThreaded(presenter, gpu, FrameGenMultiplier::kAuto);
+        owned = std::make_unique<App>(presenter, runtime);
+        app = owned.get();
+    }
+    presenter.SetAutoPolicy(200ms, 500ms, 600ms, 300ms);
+    RunWork(*app, 2000ms, PeriodsOfWork(kPeriod, 1.6));
+    const std::uint32_t settled = presenter.Status().multiplier;
+    Check(settled == 2 && presenter.Status().threaded,
+          name + ": a game of 1.6 refreshes a frame engages Auto at 2x (" + std::to_string(settled) + "x)");
+    int probes = 0;
+    std::uint32_t last = settled;
+    const auto count_probes = [&](const XrFrameState&) {
+        const std::uint32_t now = presenter.Status().multiplier;
+        probes += now < last ? 1 : 0;
+        last = now;
+        return false;
+    };
+    // Probes would come every 0.3 s, then 0.6, 1.2 and 2.4 s.
+    RunWork(*app, 3000ms, PeriodsOfWork(kPeriod, 1.6), count_probes);
+    Check(probes == 0 && presenter.Status().multiplier == 2,
+          name + ": a game that cannot run at full rate is not probed there (" + std::to_string(probes) + " probes)");
+    RunWork(*app, 3000ms, PeriodsOfWork(kPeriod, 0.4), [&](const XrFrameState&) {
+        return presenter.Status().multiplier == 1;
+    });
+    Check(presenter.Status().multiplier == 1,
+          name + ": a game that got lighter is probed at full rate and stays there (" +
+              std::to_string(presenter.Status().multiplier) + "x)");
+    if (!g_jit) {
+        // A pipelined game (MSFS): its render thread's xrEndFrame waits for
+        // its frame's slot while its main thread works on the next frame.
+        // That wait is not taken off the main thread's time: 14 ms a frame
+        // cannot run at full rate.
+        RunPipelined(*app, 2000ms, 14ms, 12ms);
+        Check(presenter.Status().multiplier == 2,
+              name + ": a pipelined game of 14 ms a frame engages Auto at 2x (" +
+                  std::to_string(presenter.Status().multiplier) + "x)");
+        int pipelined_probes = 0;
+        std::uint32_t pipelined_last = presenter.Status().multiplier;
+        RunPipelined(*app, 3000ms, 14ms, 12ms, [&](int, const XrFrameState&) {
+            const std::uint32_t now = presenter.Status().multiplier;
+            pipelined_probes += now < pipelined_last ? 1 : 0;
+            pipelined_last = now;
+        });
+        Check(pipelined_probes == 0,
+              name + ": a pipelined game that cannot run at full rate is not probed there (" +
+                  std::to_string(pipelined_probes) + " probes)");
+    }
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+}
+
 // The same jump while Frame Generation presents (no game pause causes it
 // then, but a runtime may): the presenter thread's refreshes stop advancing,
 // so it stops and frames pass straight through within moments, the game never
@@ -7755,11 +9329,13 @@ void TestVarjoTransientThrottle() {
         // Every 40th frame, the runtime holds frames to every second refresh
         // for the next 4 of the game's frames.
         std::vector<XrDuration> leads;
+        std::vector<XrTime> times; // each real frame's display time
         RunPipelined(
             *app, 3000ms, 16ms, 26ms,
             [&](int frame, const XrFrameState& state) {
                 if (frame % 40 == 0) runtime.throttled = true;
                 if (frame % 40 == 4) runtime.throttled = false;
+                times.push_back(state.predictedDisplayTime);
                 std::scoped_lock lock(g_xr_mutex);
                 if (!runtime.submitted_times.empty()) leads.push_back(state.predictedDisplayTime - runtime.submitted_times.back());
             },
@@ -7775,10 +9351,27 @@ void TestVarjoTransientThrottle() {
                   std::to_string(median_lead) + ", 90th percentile " + std::to_string(high_lead) + " refreshes)");
         double worst = 0.0;
         const double timeline = TimelineShare(runtime, first, 30, app->eye_speed, &worst);
+        // Extrapolating, a real frame later than a whole interval of its
+        // varying pace holds its motion at one interval, so the refreshes it
+        // repeats are a refresh off their own time. This game's 16 and 26 ms
+        // frames land 2 and 2 refreshes apart in one phase and 1 and 3 in
+        // another, where one refresh in four repeats (as in
+        // TestJitDynamicExtrapolation): those the clamp predicts from the
+        // game's own frame times are allowed besides. Without them the bar
+        // failed about one run in seven on hosted CI (0.793, PR #91).
+        const std::size_t refreshes = runtime.Submissions() - first;
+        const double clamped = mode == FrameGenSynthesisMode::kExtrapolate && refreshes > 0
+                                   ? static_cast<double>(ClampedRepeats(times)) / static_cast<double>(refreshes)
+                                   : 0.0;
+        if (std::getenv("FG_TEST_STATS")) {
+            std::cerr << name << ": timeline " << timeline << ", clamp predicts " << clamped << " of " << refreshes
+                      << " refreshes\n";
+        }
         // A tenth of the frames go to a runtime holding every second refresh:
         // their refreshes may show a refresh off.
-        Check(timeline > 0.8, name + ": refreshes show their own time (" + std::to_string(timeline) + ", worst " +
-                                  std::to_string(worst) + " periods)");
+        Check(timeline > 0.8 - clamped, name + ": refreshes show their own time (" + std::to_string(timeline) +
+                                            ", worst " + std::to_string(worst) + " periods, " +
+                                            std::to_string(clamped) + " repeats the clamp predicts)");
         // ...and refreshes held back by the runtime show nothing new.
         Check(status.distinct_fps > 0.75 * status.output_fps,
               name + ": refreshes show new frames (" + std::to_string(status.distinct_fps) + " of " +
@@ -8045,6 +9638,7 @@ void RunPolicyTests() {
     RUN(TestUncapturedAtOwnRefreshIsLate);
     RUN(TestDynamicPassThroughNearRefresh);
     RUN(TestDynamicEngagesBelow);
+    RUN(TestTraceSwapchainCallsOnlyWhileCapturing);
     RUN(TestDynamicOwnRate);
     RUN(TestDynamicHysteresis);
     RUN(TestBenefitGuardBacksOff);
@@ -8056,12 +9650,14 @@ void RunPolicyTests() {
     RUN(TestLeadDoesNotFlap);
     RUN(TestSkipIdenticalExactCopies);
     RUN(TestTelemetryWindows);
+    RUN(TestDynamicSwitchStandby);
     RUN(TestGpuWaitKeepsCadence);
     RUN(TestExtrapolateMeasureLagIsOnTime);
     RUN(TestPauseAndLoadingDoNotStandDown);
     RUN(TestWinningEngagementStays);
     RUN(TestWinningEngagementSurvivesLateCaptures);
     RUN(TestInterpolateOnShaders);
+    RUN(TestInterpolateSourceFollowsLiveSwitch);
     RUN(TestDynamicToggleStandsBy);
     RUN(TestHitchesAreNotPauses);
     RUN(TestInterpolateMeasureLagIsOnTime);
@@ -8134,6 +9730,7 @@ int main(int argc, char** argv) {
     }
     const HANDLE policy = std::getenv("FG_TEST_SERIAL") ? nullptr : StartPolicyTests();
     RUN(TestInterpolationPacing);
+    RUN(TestWorkingMemoryAskedOncePerSecond);
     RUN(TestExtrapolationPacing);
     RUN(TestTripleInterpolation);
     RUN(TestQuadExtrapolation);
@@ -8145,8 +9742,12 @@ int main(int argc, char** argv) {
     RUN(TestThreadedDynamic);
     RUN(TestDynamicFreesOutputsNearBudget);
     RUN(TestThreadedPipelinedApp);
+    RUN(TestHorizonTelemetryFixed);
+    RUN(TestDynamicHorizonJitterReported);
+    RUN(TestSlowDynamicHorizonJitterReported);
     RUN(TestThreadedInterpolation);
     RUN(TestJitExtrapolation);
+    RUN(TestJitEyeShiftReported);
     RUN(TestJitDynamicExtrapolation);
     RUN(TestJitStaleMotion);
     RUN(TestJitInterpolateCoversLateMotion);
@@ -8155,6 +9756,7 @@ int main(int argc, char** argv) {
     RUN(TestJitWaitsForNoGameFrame);
     RUN(TestJitModeSwitchRestarts);
     RUN(TestToggleOffReadsOff);
+    RUN(TestToggleOffLogsNoEngagement);
     // The threaded presenter's lifecycle with frames written together, then
     // just in time.
     for (const bool jit : {false, true}) {
@@ -8184,6 +9786,8 @@ int main(int argc, char** argv) {
     RUN(TestFailuresRetryAndToggle);
     RUN(TestUncapturedFramesAreSkipped);
     RUN(TestSettingsAndSessionChanges);
+    RUN(TestDiagnosticViewLogged);
+    RUN(TestFirstFramesLogged);
     RUN(TestUnavailableWithoutBackend);
     RUN(TestOsdDescription);
     RUN(TestOsdRuntimeHalving);
@@ -8194,6 +9798,10 @@ int main(int argc, char** argv) {
     RUN(TestRuntimeHalvingClears);
     RUN(TestRuntimeHalvingClearedDoesNotStandDown);
     RUN(TestRuntimeHalvingRetriesBriefly);
+    RUN(TestAutoStandsDownForRuntimeHalving);
+    RUN(TestAutoHalvingHoldRunsOut);
+    RUN(TestAutoKeepsReportedHalving);
+    RUN(TestAutoProbesReportedHalving);
     // SteamVR with Pimax's headset driver.
     RUN(TestEchoRuntimeKeepsRefresh);
     RUN(TestEchoRuntimeLateWake);
@@ -8229,8 +9837,26 @@ int main(int argc, char** argv) {
     RUN(TestLowFirstClockSample);
     RUN(TestStalledClockWhilePresenting);
     RUN(TestAutoHoldsWhileClockDisplaced);
+    RUN(TestAutoSettlesAfterClockRecovery);
+    RUN(TestAutoLeavesLateCeiling);
+    for (const bool jit : {true, false}) {
+        g_jit = jit;
+        RUN(TestAutoProbesNeedRoom);
+    }
+    g_jit = false;
+    RUN(TestClockLogPairs);
     RUN(TestSteamVrMissedRefresh);
     RUN(TestLeadAfterRepeatedHitches);
+    RUN(TestHitchReturnsToProvenLead);
+    RUN(TestRaisedFloorProbesBackOff);
+    RUN(TestHitchDuringProbeBack);
+    RUN(TestPassedOverFramesKeepLead);
+    RUN(TestLeadFollowsLoweredCap);
+    for (const bool jit : {true, false}) {
+        g_jit = jit;
+        RUN(TestLoadingFramesDoNotRaiseLead);
+    }
+    g_jit = false;
     if (!policy) {
         RunPolicyTests();
     } else {

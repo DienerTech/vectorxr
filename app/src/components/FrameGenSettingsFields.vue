@@ -79,7 +79,7 @@ const frameRate = computed<FrameRate>({
 })
 const fixedRateDescription = computed(() => fixedRates.find((rate) => rate.value === props.settings.frameMultiplier)?.description ?? '')
 
-// Interpolate always measures with Shader, and NVIDIA hardware needs a card
+// Interpolate in Dynamic always measures with Shader, and NVIDIA hardware needs a card
 // that has it (any card in the PC, as the driver reports): the cards show
 // the source in use, greyed where the choice does nothing; a click still
 // saves the choice.
@@ -99,7 +99,7 @@ const motionSources = computed(() => [
   {
     value: 'hardware' as const,
     label: 'NVIDIA hardware',
-    description: 'Uses the optical flow unit of NVIDIA RTX GPUs: more accurate, especially on repeating patterns. Used by Extrapolate.',
+    description: 'Uses the optical flow unit of NVIDIA RTX GPUs: more accurate, especially on repeating patterns. Used by Extrapolate, and by Interpolate at a fixed or Auto frame rate (experimental).',
     disabled: motionSource.value.hardwareUnavailable !== null,
     disabledReason: motionSource.value.hardwareUnavailable,
   },

@@ -50,6 +50,9 @@ constexpr double kProbeReach = 0.10;
 constexpr std::uint32_t kLoggedPauses = 3;
 // Summary sample windows keep at most this many values.
 constexpr std::size_t kMaxSamples = 4096;
+// ...and of those taken once per game frame, this many (a 30 s window at
+// up to 270 fps).
+constexpr std::size_t kMaxFrameSamples = 8192;
 // Composing quad views, this many attempted writes failing in a row (about
 // 110 ms at 90 Hz) hand them back to the layer for a while.
 constexpr std::uint32_t kQuadUnwrittenBeforeDecline = 10;
@@ -93,6 +96,22 @@ constexpr std::uint64_t kDrainRefreshes = 24;
 
 std::string MultiplierText(std::uint32_t multiplier) {
     return std::to_string(multiplier) + "x";
+}
+
+// A diagnostic view for the log, with what it draws: one left on looks like
+// a fault (the Confidence view's red was reported as flashing, issue #95),
+// and only the OSD, when shown, names it otherwise.
+std::string DiagnosticViewText(FrameGenDiagnosticView view) {
+    switch (view) {
+    case FrameGenDiagnosticView::kFlow:
+        return "flow (generated frames are colored by the motion measured)";
+    case FrameGenDiagnosticView::kConfidence:
+        return "confidence (generated frames are drawn red where they fall back to the real image)";
+    case FrameGenDiagnosticView::kTint:
+        return "tint (generated frames are tinted)";
+    default:
+        return "off";
+    }
 }
 
 // "twice", "three times": how many times the refresh period.
@@ -200,6 +219,20 @@ std::string MedianAndMax(std::vector<double> values) {
     return Number(values[values.size() / 2], 1) + "/" + Number(values.back(), 1);
 }
 
+// "low/high" percentiles (0-1) of a summary window, "-" when empty.
+std::string Percentiles(std::vector<double> values, double low, double high) {
+    if (values.empty()) {
+        return "-";
+    }
+    const auto at = [&](double share) {
+        const std::size_t index =
+            std::min(values.size() - 1, static_cast<std::size_t>(share * static_cast<double>(values.size())));
+        std::nth_element(values.begin(), values.begin() + static_cast<std::ptrdiff_t>(index), values.end());
+        return values[index];
+    };
+    return Number(at(low), 1) + "/" + Number(at(high), 1);
+}
+
 std::optional<double> Median(std::vector<double> values) {
     if (values.empty()) {
         return std::nullopt;
@@ -208,8 +241,8 @@ std::optional<double> Median(std::vector<double> values) {
     return values[values.size() / 2];
 }
 
-void AddSample(std::vector<double>& samples, double value) {
-    if (samples.size() < kMaxSamples) {
+void AddSample(std::vector<double>& samples, double value, std::size_t limit = kMaxSamples) {
+    if (samples.size() < limit) {
         samples.push_back(value);
     }
 }
@@ -348,6 +381,9 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
     user_enabled_ = true;
     gpu_stalled_ = false; // the last session's stalled work went with its swapchains
     started_at_ = Clock::now();
+    // The first summary's window starts with the session: without a start,
+    // its rates were over no time and read 0.0 (in 14 of 14 sessions).
+    last_summary_ = started_at_;
     healthy_streak_ = 0;
     automatic_retries_ = 0;
     paused_at_.reset();
@@ -401,6 +437,7 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
         logger_->Info(std::string("Frame Generation enabled for this session: backend=") + gpu_->Name() +
                       ", mode=" + ToString(settings_.synthesis_mode) + ", flowQuality=" + ToString(settings_.flow_quality) +
                       ", motionEstimation=" + ToString(settings_.motion_estimation) +
+                      ", diagnosticView=" + DiagnosticViewText(settings_.diagnostic_view) +
                       "; frame pacing is owned by Frame Generation (Turbo stays off).");
         if (!gpu_gate_setting.empty()) {
             logger_->Info("Frame Generation: GPU-aware pacing set by VECTORXR_FRAMEGEN_GPU_AHEAD=" + gpu_gate_setting +
@@ -502,6 +539,7 @@ void FrameGenPresenter::Stop() {
     clock_stalled_waits_ = 0;
     clock_steady_waits_ = 0;
     logged_clock_displacements_ = 0;
+    clock_displacement_logged_ = false;
     auto_multiplier_ = 1;
     auto_memory_ceiling_ = kMaxMultiplier;
     memory_budget_.reset();
@@ -517,6 +555,7 @@ void FrameGenPresenter::Stop() {
     probe_not_before_ = {};
     probe_backoff_ = auto_initial_backoff_;
     probing_ = false;
+    late_at_ceiling_since_.reset();
     runtime_formats_.clear();
     frames_.clear();
     capture_targets_.clear();
@@ -589,13 +628,24 @@ void FrameGenPresenter::Stop() {
     analysis_lag_ms_ = 0.0;
     gpu_wait_ms_.clear();
     end_call_ms_.clear();
+    runtime_end_ms_.clear();
     synth_lock_ms_.clear();
+    told_lead_sum_ = 0;
+    told_lead_frames_ = 0;
+    told_lead_max_ = 0;
+    game_ahead_ms_.clear();
+    ahead_jitter_ms_.clear();
+    end_slack_ms_.clear();
+    last_ahead_ms_ = 0.0;
+    last_ahead_at_ = {};
     pause_longest_ms_ = 0.0;
     logged_pauses_ = 0;
     last_offer_slot_.reset();
     dropped_unbegun_ = 0;
     gpu_ms_ = -1.0;
     inline_hold_until_.reset();
+    auto_halving_hold_until_.reset();
+    auto_halving_hold_ = dynamic_policy_.hold;
     last_cycle_started_late_ = false;
     app_frames_.clear();
     submissions_.clear();
@@ -644,7 +694,40 @@ void FrameGenPresenter::Configure(const FrameGenResolvedSettings& settings) {
     // engaged inline in between would keep it from starting again (an app
     // that waits before ending its last frame always has one in flight).
     const bool restart = jit_ && compositor_running_ && settings.synthesis_mode != settings_.synthesis_mode;
+    const bool was_dynamic = DynamicLocked();
+    const FrameGenMultiplier multiplier = settings_.multiplier;
+    const FrameGenDiagnosticView diagnostic_view = settings_.diagnostic_view;
     settings_ = settings;
+    const bool dynamic = DynamicLocked();
+    // Diagnostic views change during play: the log says when.
+    if (started_ && logger_ && settings_.diagnostic_view != diagnostic_view) {
+        logger_->Info("Frame Generation diagnostic view changed: " + DiagnosticViewText(diagnostic_view) + " -> " +
+                      DiagnosticViewText(settings_.diagnostic_view) + ".");
+    }
+    if (settings_.multiplier != multiplier) {
+        // Interpolate's motion source follows the frame rate: the log says
+        // which it uses again after a switch.
+        logged_interpolate_on_shaders_ = false;
+        logged_interpolate_on_hardware_ = false;
+    }
+    if (started_ && (settings_.multiplier != multiplier || dynamic != was_dynamic)) {
+        // Switched while running: frames held to the old multiplier say
+        // nothing about the game's own rate, so Dynamic and Auto settle and
+        // judge it afresh. Only Dynamic stands by: time at a fixed multiplier
+        // is not standing by, and standing by up to the switch stays counted.
+        const auto now = Clock::now();
+        multiplier_changed_at_ = now;
+        cadence_.clear();
+        dynamic_below_since_.reset();
+        if (was_dynamic && !dynamic) {
+            if (standby_since_ && dynamic_standby_ && now > *standby_since_) {
+                standby_seconds_ += std::chrono::duration<double>(now - *standby_since_).count();
+            }
+            standby_since_.reset();
+        } else if (dynamic && !was_dynamic && dynamic_standby_) {
+            standby_since_ = now;
+        }
+    }
     if (restart) {
         healthy_streak_ = 0;
         ++totals_.restarts; // the benefit guard's window says nothing about either mode
@@ -687,6 +770,7 @@ void FrameGenPresenter::SetLeadPolicy(const FrameGenLeadPolicy& policy) {
     std::scoped_lock lock(mutex_);
     lead_policy_ = policy;
     lead_explore_after_ = policy.explore_after;
+    lead_return_after_ = policy.explore_after;
 }
 
 void FrameGenPresenter::ResetLeadLocked() {
@@ -697,6 +781,7 @@ void FrameGenPresenter::ResetLeadLocked() {
     lead_floor_ = 0;
     lead_floor_proven_ = 0;
     lead_explore_after_ = lead_policy_.explore_after;
+    lead_return_after_ = lead_policy_.explore_after;
     lead_floor_failed_ = false;
 }
 
@@ -704,6 +789,7 @@ void FrameGenPresenter::SetDynamicPolicy(const FrameGenDynamicPolicy& policy) {
     std::scoped_lock lock(mutex_);
     dynamic_policy_ = policy;
     dynamic_hold_ = policy.hold;
+    auto_halving_hold_ = policy.hold;
     dynamic_probe_after_ = policy.probe_after;
 }
 
@@ -728,6 +814,7 @@ void FrameGenPresenter::SetInterpolateOnShaders(bool on) {
     std::scoped_lock lock(mutex_);
     interpolate_on_shaders_ = on;
     logged_interpolate_on_shaders_ = false;
+    logged_interpolate_on_hardware_ = false;
 }
 
 void FrameGenPresenter::SetEngagementPolicy(std::uint32_t steady_frames, std::chrono::milliseconds minimum_session_age) {
@@ -763,6 +850,7 @@ bool FrameGenPresenter::Toggle() {
             // full-rate hold from before, and Dynamic judges the game's rate
             // again before engaging.
             inline_hold_until_.reset();
+            auto_halving_hold_until_.reset();
             DynamicReenableLocked(Clock::now());
         }
         if (state_ != FrameGenState::kUnavailable) {
@@ -1055,21 +1143,31 @@ std::optional<FrameGenOutputKind> FrameGenPresenter::OutputKindLocked(std::size_
     return requested;
 }
 
+bool FrameGenPresenter::CapturingLocked() const {
+    if (!started_ || !gpu_ || !user_enabled_ || !configured_enabled_ || state_ == FrameGenState::kPaused ||
+        state_ == FrameGenState::kUnavailable) {
+        return false;
+    }
+    // Only while frames are generated or about to be: the wait that engages
+    // comes before the game's release, so the first engaged frame is
+    // captured. Passing frames straight through (Auto at full rate, Dynamic
+    // standing by, waiting for steady frames) captures nothing.
+    return compositor_running_ || WantsEngagementLocked() ||
+           std::any_of(frames_.begin(), frames_.end(),
+                       [](const PendingFrame& frame) { return frame.engaged && !frame.demoted; });
+}
+
+bool FrameGenPresenter::TracesSwapchainCalls() const {
+    if (!trace_.Enabled()) {
+        return false;
+    }
+    std::scoped_lock lock(mutex_);
+    return CapturingLocked();
+}
+
 void FrameGenPresenter::CaptureOnRelease(XrSwapchain swapchain, std::uint32_t image_index) {
     auto capturing = [&] {
-        if (!started_ || !gpu_ || !user_enabled_ || !configured_enabled_ || state_ == FrameGenState::kPaused ||
-            state_ == FrameGenState::kUnavailable) {
-            return false;
-        }
-        // Only while frames are generated or about to be: the wait that
-        // engages comes before the game's release, so the first engaged
-        // frame is captured. Passing frames straight through (Auto at full
-        // rate, Dynamic standing by, waiting for steady frames) captures
-        // nothing.
-        const bool armed = compositor_running_ || WantsEngagementLocked() ||
-                           std::any_of(frames_.begin(), frames_.end(),
-                                       [](const PendingFrame& frame) { return frame.engaged && !frame.demoted; });
-        if (!armed) {
+        if (!CapturingLocked()) {
             return false;
         }
         const auto record = swapchains_.find(swapchain);
@@ -1654,6 +1752,35 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
             return;
         }
     }
+    // The runtime holds the frames presented to half its refresh rate (or
+    // less), shown by the presenter thread's waits at this multiplier, and
+    // reports the refresh period: every engaged frame then takes twice its
+    // refreshes and reads as late, and stepping up only slows the game more
+    // (Pimax Play's smoothing held a game it let run at 36 fps to 9 at 4x,
+    // the output still 36). Engaged gains nothing while that lasts: back to
+    // full rate, frames pass straight through as Dynamic stands down, and
+    // stay so while the runtime halves. One reporting the period it holds
+    // frames to times the game's frames by it (GameGridLocked): they read as
+    // late only where the game misses that rate, and the generated frames
+    // between still fill every refresh the runtime takes.
+    if (runtime_halving_ && halving_confirmed_at_ && *halving_confirmed_at_ > multiplier_changed_at_ &&
+        auto_multiplier_ > 1 && GameGridLocked() < refresh_period_ + refresh_period_ / 2) {
+        const std::uint32_t before = auto_multiplier_;
+        const std::chrono::milliseconds hold = auto_halving_hold_;
+        auto_multiplier_ = 1;
+        probing_ = false;
+        auto_halving_hold_until_ = now + hold;
+        auto_halving_hold_ = std::min(auto_halving_hold_ * 2, dynamic_policy_.hold_max);
+        multiplier_changed_at_ = now;
+        last_app_end_ = now;
+        cadence_.clear();
+        if (logger_) {
+            logger_->Info("Frame Generation automatic multiplier " + MultiplierText(before) + " -> full rate: " +
+                          kHalvingStandDown + "; frames pass straight through, retrying in " +
+                          Number(std::chrono::duration<double>(hold).count(), 0) + " s.");
+        }
+        return;
+    }
     // Frames right after a change (a new multiplier, engaging, new output
     // images) carry its one-off cost and say nothing about the app.
     if (last_app_end_ && now - multiplier_changed_at_ >= auto_settle_) {
@@ -1683,8 +1810,17 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
         }
     }
     const std::uint32_t before = auto_multiplier_;
-    const bool held = inline_hold_until_ && now < *inline_hold_until_;
+    // A halving hold ends early where the game's own waits clear the report.
+    // Only waits asked for well within a refresh, or released at the next
+    // one, can (NoteRuntimeHalvingLocked): a game taking longer than a
+    // refresh for every frame, the kind Auto engages for, gives none that
+    // do, and its hold runs out before the presenter thread's waits judge
+    // the runtime again.
+    const bool held = (inline_hold_until_ && now < *inline_hold_until_) ||
+                      (runtime_halving_ && auto_halving_hold_until_ && now < *auto_halving_hold_until_);
     bool gave_up_inline = false;
+    bool late_at_ceiling = false;
+    std::chrono::duration<double> left_ceiling_after{}; // for the log: a probe down from there
     // More than 30% of the last second's frames missed the cadence: step up.
     if (recent >= 8 && recent_late * 10 > recent * 3) {
         auto_late_percent_ = recent_late * 100 / recent;
@@ -1705,6 +1841,27 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
             probe_backoff_ = std::min(probe_backoff_ * 2, auto_initial_backoff_ * (1 << kAutoMaxBackoffDoublings));
         } else if (!memory_pressure && auto_multiplier_ < auto_memory_ceiling_) {
             ++auto_multiplier_;
+        } else if (auto_multiplier_ > 1) {
+            // Nothing higher to step to, and no probe down from a game that
+            // stays late. A game late here as long as a probe backs off,
+            // though its own time per frame is within reach of a step down,
+            // is held back by the multiplier, not by its own work: probe that
+            // step (velocity7 in Star Citizen on Virtual Desktop at 144 Hz,
+            // 2026-10-14: 22-24 fps at 4x for 16 s with about 16 ms of its own
+            // work a frame, where it had held 48 at 3x). A probe that cannot
+            // keep up goes back and doubles the wait, as any probe. Only where
+            // the game's own time is measured: inline, its waits say nothing
+            // of it.
+            late_at_ceiling = true;
+            if (!late_at_ceiling_since_ || *late_at_ceiling_since_ < multiplier_changed_at_) {
+                late_at_ceiling_since_ = now;
+            } else if (now - *late_at_ceiling_since_ >= probe_backoff_ && compositor_running_ &&
+                       auto_busy_count_ >= 8 && AutoProbeInReachLocked(auto_multiplier_ - 1, GameGridLocked())) {
+                left_ceiling_after = now - *late_at_ceiling_since_;
+                probe_from_ = auto_multiplier_;
+                --auto_multiplier_;
+                probing_ = true;
+            }
         }
         probe_not_before_ = now + probe_backoff_;
     } else if (probing_ && now - multiplier_changed_at_ >= auto_probe_confirm_) {
@@ -1712,11 +1869,20 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
         probe_backoff_ = auto_initial_backoff_;
         probe_not_before_ = now + probe_backoff_;
     } else if (!probing_ && auto_multiplier_ > 1 && now >= probe_not_before_ && !cadence_.empty() &&
-               now - cadence_.front().time >= auto_steady_ && steady >= 8 && steady_late * 50 <= steady) {
-        // Five steady seconds with at most 2% of frames late: try one step down.
+               now - cadence_.front().time >= auto_steady_ && steady >= 8 && steady_late * 50 <= steady &&
+               AutoProbeInReachLocked(auto_multiplier_ - 1, GameGridLocked())) {
+        // Five steady seconds with at most 2% of frames late, and a game
+        // whose own time per frame is within reach of one step down: try it.
+        // Within reach on the grid the step's frames are timed by
+        // (GameGridLocked): where the runtime holds frames to twice its
+        // refresh period and reports that, a 2x frame has two such periods,
+        // and judged on the refresh period Auto would stay a step higher.
         probe_from_ = auto_multiplier_;
         --auto_multiplier_;
         probing_ = true;
+    }
+    if (!late_at_ceiling) {
+        late_at_ceiling_since_.reset();
     }
     if (auto_multiplier_ != before) {
         multiplier_changed_at_ = now;
@@ -1738,9 +1904,31 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
                                          ? ", next probe in " + std::to_string(probe_backoff_.count() / 1000) + " s"
                                          : std::string()) +
                                     ")."
-                              : " (probing a lower multiplier)."));
+                              : left_ceiling_after.count() > 0.0
+                                    ? " (probing a lower multiplier: " + std::to_string(auto_late_percent_) +
+                                          "% of frames late for " + Number(left_ceiling_after.count(), 1) +
+                                          " s with no higher one to step to, though the game's own time per frame "
+                                          "is within reach of this one)."
+                                    : " (probing a lower multiplier)."));
         }
     }
+}
+
+bool FrameGenPresenter::AutoProbeInReachLocked(std::uint32_t slots, XrDuration period) const {
+    // Inline, the game's frame thread is held for the generated slots, so its
+    // waits say nothing of its own time; until measured, probes go as before.
+    const std::size_t count = std::min(auto_busy_count_, auto_busy_.size());
+    if (!compositor_running_ || count < 8 || period <= 0) {
+        return true;
+    }
+    // A probe a game cannot keep up with costs seconds of late frames (each
+    // about 2 s at 37-87% late in DCS on Varjo, 2026-10-14: 17-22 ms a frame
+    // at 2x, against 11.1 ms refreshes). Within reach as Dynamic judges its
+    // probes: the game's own rate at least that share of the step's.
+    std::array<double, 32> sorted = auto_busy_;
+    std::nth_element(sorted.begin(), sorted.begin() + count / 2, sorted.begin() + count);
+    const double reach = dynamic_policy_.stay_above - kProbeReach;
+    return sorted[count / 2] * reach <= static_cast<double>(slots) * static_cast<double>(period) / 1e6;
 }
 
 void FrameGenPresenter::UpdateDynamicLocked(Clock::time_point now, XrDuration period) {
@@ -1976,6 +2164,9 @@ void FrameGenPresenter::DynamicReenableLocked(Clock::time_point now) {
     if (!dynamic_standby_) {
         dynamic_standby_ = true;
         standby_since_ = now;
+        // Standing by now: the engagement's reason (the game's rate then)
+        // would read as why it stands by.
+        dynamic_reason_.clear();
     }
     dynamic_below_since_.reset();
     dynamic_probing_ = false;
@@ -2494,16 +2685,7 @@ XrResult FrameGenPresenter::EndFrame(XrSession session, const XrFrameEndInfo* in
                     ", gpuMs=" + Number(gpu_ms_, 2) + ClockSummaryLocked(start) + DynamicSummaryLocked() +
                     QuadSummaryLocked(start) + ".");
             }
-            last_summary_ = now;
-            summary_totals_ = totals_;
-            summary_standby_seconds_ = standby;
-            app_work_ms_ = 0.0;
-            app_work_frames_ = 0;
-            cycles_ = 0;
-            late_cycles_ = 0;
-            repeated_submissions_ = 0;
-            pause_longest_ms_ = 0.0;
-            end_call_ms_.clear();
+            NewSummaryWindowLocked(now, standby);
         }
     }
     idle_cv_.notify_all();
@@ -2737,7 +2919,8 @@ void FrameGenPresenter::NoteRuntimeClockLocked(Clock::time_point returned, XrTim
             clock_gap_ = ahead ? wall : 0;
             clock_ahead_ = ahead ? offset - clock_offset_ceiling_ : 0;
             ++totals_.clock_displacements;
-            if (logger_ && logged_clock_displacements_ < kLoggedPauses) {
+            clock_displacement_logged_ = logger_ && logged_clock_displacements_ < kLoggedPauses;
+            if (clock_displacement_logged_) {
                 ++logged_clock_displacements_;
                 // waits: each recent wait's time since the one before / its
                 // display time's step / its offset over the ceiling, ms.
@@ -2789,10 +2972,18 @@ void FrameGenPresenter::NoteRuntimeClockLocked(Clock::time_point returned, XrTim
         // The ceiling is taken anew from here.
         clock_offset_ceiling_ = offset;
         clock_warmup_waits_ = 0;
+        // Engaging again is a change too: its first frames carry its cost
+        // and say nothing about the game (velocity7 on Virtual Desktop,
+        // 2026-10-14: Auto went 3x -> 4x in the second the clock recovered).
+        multiplier_changed_at_ = returned;
+        cadence_.clear();
         if (dynamic_standby_) {
             dynamic_reason_ = "the runtime's display times advance with the time again";
         }
-        if (logger_ && logged_clock_displacements_ <= kLoggedPauses) {
+        // Logged when the displacement it ends was (past the first few, a
+        // recovery alone named an end the log never began).
+        if (logger_ && clock_displacement_logged_) {
+            clock_displacement_logged_ = false;
             logger_->Info("Frame Generation: the runtime's display times advance with the time again (after " +
                           Number(std::chrono::duration<double>(returned - clock_displaced_at_).count(), 1) + " s).");
         }
@@ -3246,14 +3437,31 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         tuning.spare = frame.spare;
         tuning.quality = settings_.flow_quality;
         tuning.hardware_flow = settings_.motion_estimation == FrameGenMotionEstimation::kHardware;
-        if (tuning.hardware_flow && interpolate_on_shaders_ && mode == FrameGenSynthesisMode::kInterpolate) {
-            tuning.hardware_flow = false;
-            if (logger_ && !logged_interpolate_on_shaders_) {
-                logged_interpolate_on_shaders_ = true;
-                logger_->Info("Frame Generation measures motion on the shader cores while interpolating, though "
-                              "NVIDIA's optical flow hardware is chosen: beside the game's rendering the hardware's "
-                              "vectors come too late for the frames between real frames. Extrapolate uses the "
-                              "hardware; VECTORXR_FRAMEGEN_INTERPOLATE_HARDWARE=1 keeps it for Interpolate too.");
+        // Interpolating in Dynamic, the frames between real frames need the
+        // motion within a refresh of the newer frame, sooner than the
+        // hardware delivers it beside the game's rendering. At a fixed or
+        // automatic rate the game is held to every Nth refresh, which leaves
+        // the hardware that time (experimental, 2026-10-14).
+        if (tuning.hardware_flow && mode == FrameGenSynthesisMode::kInterpolate) {
+            if (interpolate_on_shaders_ && settings_.multiplier == FrameGenMultiplier::kDynamic) {
+                tuning.hardware_flow = false;
+                if (logger_ && !logged_interpolate_on_shaders_) {
+                    logged_interpolate_on_shaders_ = true;
+                    logger_->Info("Frame Generation measures motion on the shader cores while interpolating in "
+                                  "Dynamic, though NVIDIA's optical flow hardware is chosen: beside the game's "
+                                  "rendering the hardware's vectors come too late for the frames between real frames. "
+                                  "A fixed or Auto frame rate, or Extrapolate, uses the hardware.");
+                }
+            } else if (logger_ && !logged_interpolate_on_hardware_) {
+                // Asked for: whether the hardware takes it is the backend's
+                // own line (optical flow hardware active, or why not).
+                logged_interpolate_on_hardware_ = true;
+                logger_->Info(std::string("Frame Generation asks NVIDIA's optical flow hardware for the motion while "
+                                          "interpolating ") +
+                              (settings_.multiplier == FrameGenMultiplier::kDynamic
+                                   ? "in Dynamic (VECTORXR_FRAMEGEN_INTERPOLATE_HARDWARE=1)"
+                                   : "at a fixed or Auto frame rate") +
+                              " (experimental).");
             }
         }
         tuning.diagnostic = settings_.diagnostic_view;
@@ -3371,6 +3579,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
     bool ok = true;
     double gpu_ms = -1.0;
     std::uint64_t working_bytes = 0;
+    double execute_ms = 0.0; // the backend's Execute, on this thread
     std::optional<FrameGenGpuWindow> window;
     std::vector<FrameGenAnalysisTiming> timings;
     FrameGenDepthStatus depth;
@@ -3403,13 +3612,20 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
                 gpu_->DumpNextExecute(directory);
             }
         }
+        const auto execute_start = Clock::now();
         ok = ok && gpu_->Execute(submissions, tuning, executed, error);
+        execute_ms = Milliseconds(Clock::now() - execute_start);
         if (gpu_) {
             gpu_ms = gpu_->LastGpuMilliseconds();
             window = gpu_->LastGpuWindow();
             timings = gpu_->TakeTimings();
             depth = gpu_->DepthStatus();
-            working_bytes = gpu_->WorkingMemoryBytes();
+            // Only the log reads it, and the backend asks the driver about
+            // each of its images for it (50-200 of them): once a second.
+            if (const auto now = Clock::now(); now >= working_bytes_due_) {
+                working_bytes = gpu_->WorkingMemoryBytes();
+                working_bytes_due_ = now + std::chrono::seconds(1);
+            }
             if (tuning.hardware_flow) {
                 hardware_status = gpu_->HardwareFlowStatus();
             }
@@ -3448,9 +3664,13 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
     NoteGpuTimingLocked(executed.submission, frame, window, timings);
     if (logger_ && !hardware_status.empty() && hardware_status != logged_hardware_status_) {
         logged_hardware_status_ = hardware_status;
+        // Its setup (the driver's optical flow API and sessions) runs in
+        // the Execute that first reports it active: how long that held up
+        // the calling thread (the game's, in its xrEndFrame).
         logger_->Info(hardware_status == "active"
-                          ? "Frame Generation measures motion with NVIDIA's optical flow hardware (experimental): it "
-                            "starts matching each eye's image as soon as the game releases it."
+                          ? "Frame Generation measures motion with NVIDIA's optical flow hardware (experimental; "
+                            "setting it up took " +
+                                Number(execute_ms, 1) + " ms on this frame)."
                           : "Frame Generation cannot use NVIDIA's optical flow hardware (" + hardware_status +
                                 "); block matching measures motion instead.");
     }
@@ -3497,6 +3717,28 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
     } else {
         repeated_ += count;
     }
+    if (logger_ && synthesized && !logged_first_generation_) {
+        // Just in time (analyze) as well. Each view as the game submits it:
+        // its region of the swapchain image and its field of view, where an
+        // eye-tracked focus view's movement shows (issue #95).
+        logged_first_generation_ = true;
+        std::string views;
+        for (std::uint32_t i = 0; i < projection.viewCount; ++i) {
+            const XrCompositionLayerProjectionView& view = projection.views[i];
+            const auto degrees = [](float radians) { return Number(radians * 57.2957795, 1); };
+            views += std::string(views.empty() ? "" : "; ") + std::to_string(view.subImage.imageRect.extent.width) +
+                     "x" + std::to_string(view.subImage.imageRect.extent.height) + " at " +
+                     std::to_string(view.subImage.imageRect.offset.x) + "," +
+                     std::to_string(view.subImage.imageRect.offset.y) + " fov " + degrees(view.fov.angleLeft) + "/" +
+                     degrees(view.fov.angleRight) + "/" + degrees(view.fov.angleUp) + "/" +
+                     degrees(view.fov.angleDown);
+        }
+        logger_->Info("Frame Generation produced its first frames: views=" + std::to_string(projection.viewCount) + " (" +
+                      views + "), generatedPerFrame=" + (analyze ? std::string("just in time") : std::to_string(count)) +
+                      ", backend=" + gpu_->Name() +
+                      (fractions.empty() ? std::string() : ", firstFraction=" + Number(fractions.front(), 3)) +
+                      ", capturedAtRelease=" + std::to_string(captured_ > 0) + ".");
+    }
     if (analyze) {
         analyze->frame = executed.frame;
         analyze->synthesized = synthesized;
@@ -3505,6 +3747,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         for (std::size_t i = 0; i < analyze->velocity.size() && i < executed.depth.size(); ++i) {
             if (executed.depth[i]) analyze->velocity[i] = shifts[i];
         }
+        analyze->depth = std::any_of(executed.depth.begin(), executed.depth.end(), [](bool value) { return value; });
         sets.clear();
         exact.clear();
         return executed.frame != 0;
@@ -3541,18 +3784,6 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         shift_window_sum_mm_ += moved_mm;
         shift_window_max_mm_ = std::max(shift_window_max_mm_, moved_mm);
         ++shift_window_frames_;
-    }
-    if (logger_ && synthesized && !logged_first_generation_) {
-        logged_first_generation_ = true;
-        std::string extents;
-        for (const auto& submission : submissions) {
-            extents += (extents.empty() ? "" : ",") + std::to_string(submission.request.extent.width) + "x" +
-                       std::to_string(submission.request.extent.height);
-        }
-        logger_->Info("Frame Generation produced its first frames: views=" + std::to_string(projection.viewCount) + " (" +
-                      extents + "), generatedPerFrame=" + std::to_string(count) + ", backend=" + gpu_->Name() +
-                      ", firstFraction=" + Number(fractions.front(), 3) + ", capturedAtRelease=" +
-                      std::to_string(captured_ > 0) + ".");
     }
     return true;
 }
@@ -4190,6 +4421,7 @@ XrResult FrameGenPresenter::RuntimeEnd(const FrameGenRuntimeCalls& calls, XrSess
     }
     {
         std::scoped_lock lock(mutex_);
+        AddSample(runtime_end_ms_, Milliseconds(Clock::now() - entered));
         // Counted even when the runtime rejects the frame: it is over either way.
         if (runtime_ends_ < runtime_begins_) {
             ++runtime_ends_;
@@ -4391,6 +4623,9 @@ void FrameGenPresenter::StartCompositorLocked(const FrameGenRuntimeCalls& calls)
     offer_done_ = false;
     last_release_slot_.reset();
     last_offer_slot_.reset();
+    auto_busy_count_ = 0;
+    auto_busy_since_ = auto_end_held_from_ = auto_end_held_to_ = {};
+    auto_end_held_frame_ = 0;
     newest_copy_ = passthrough_copy_;
     newest_copy_id_ = 0;
     newest_copy_fresh_ = false;
@@ -4553,13 +4788,32 @@ void FrameGenPresenter::UpdateLeadLocked(bool late, std::optional<double> slack_
     // A probe nothing late undid within its judging time: its lead holds.
     if (lead_probe_ && now - lead_probe_->at >= lead_policy_.judge) {
         if (lead_floor_ == 0 || lead_slots_ < lead_floor_) {
+            // Only back at the lowest lead a probe proved, from a floor late
+            // frames raised: below it, tries still wait as long as the
+            // failures there made them. A new lowest lead starts afresh.
+            // Either way the next probe back waits explore_after.
+            const bool returned =
+                lead_slots_ == lead_floor_proven_ && lead_explore_after_ > lead_policy_.explore_after;
             lead_floor_ = lead_slots_;
             lead_floor_proven_ = lead_slots_;
-            lead_explore_after_ = lead_policy_.explore_after;
-            lead_floor_failed_ = false;
+            lead_return_after_ = lead_policy_.explore_after;
+            if (!returned) {
+                lead_explore_after_ = lead_policy_.explore_after;
+                lead_floor_failed_ = false;
+            }
         }
         lead_probe_.reset();
     }
+    // How long a lead at or below the lowest known to hold waits before a
+    // try below it. Above the lowest lead a probe proved (a floor late frames
+    // raised): the probe back's own wait, explore_after until one fails. The
+    // doubled wait is for below the proven lead, where tries failed; applied
+    // above it too, it held a raised floor with a refresh to spare for most
+    // of a minute (Star Citizen on Virtual Desktop, 2026-10-14: lead 3 held
+    // about 56 s where 2 was proven, after two failed probes to 1 had doubled
+    // the wait to 40 s).
+    const bool above_proven = lead_floor_proven_ != 0 && lead_slots_ > lead_floor_proven_;
+    const auto explore_wait = above_proven ? lead_return_after_ : lead_explore_after_;
     // Frames predicted with another lead say nothing about this one (those
     // in flight across a step would move it twice, or judge a probe by
     // frames it never set).
@@ -4581,12 +4835,28 @@ void FrameGenPresenter::UpdateLeadLocked(bool late, std::optional<double> slack_
                 // The probe (or step down) failed: the lead before it is the
                 // lowest known to hold, and below it is tried only rarely
                 // (more rarely after each failure there).
-                const bool exploring = lead_floor_ != 0 && lead_probe_->from <= lead_floor_;
-                lead_floor_ = lead_probe_->from;
-                lead_floor_proven_ = lead_floor_;
+                const bool returning = lead_floor_proven_ != 0 && lead_probe_->from == lead_floor_ &&
+                                       lead_floor_ > lead_floor_proven_;
+                if (returning) {
+                    // Back to the proven lead from a floor late frames raised:
+                    // the raised floor holds, and the next probe back waits
+                    // twice as long. The proven lead and the wait below it
+                    // stay, as a hitch no lead cures (Star Citizen's, about
+                    // every half minute) can come during the probe back.
+                    // Taken as proving the raised lead, that coincidence gave
+                    // it the wait the failures below the proven lead had
+                    // doubled, so with hitches more often than that it stayed
+                    // up, and the next coincidence lifted it a refresh more.
+                    lead_return_after_ = std::min(lead_return_after_ * 2, lead_policy_.explore_max);
+                } else {
+                    const bool exploring = lead_floor_ != 0 && lead_probe_->from <= lead_floor_;
+                    lead_floor_ = lead_probe_->from;
+                    lead_floor_proven_ = lead_floor_;
+                    lead_explore_after_ = exploring ? std::min(lead_explore_after_ * 2, lead_policy_.explore_max)
+                                                    : lead_policy_.explore_after;
+                    lead_return_after_ = lead_policy_.explore_after;
+                }
                 lead_floor_failed_ = true;
-                lead_explore_after_ = exploring ? std::min(lead_explore_after_ * 2, lead_policy_.explore_max)
-                                                : lead_policy_.explore_after;
                 ++(lead_probe_->slack ? totals_.lead_downs_undone : totals_.lead_probes_failed);
                 lead_probe_.reset();
             } else if (hysteresis && lead_floor_ != 0 && lead_slots_ <= lead_floor_) {
@@ -4595,27 +4865,29 @@ void FrameGenPresenter::UpdateLeadLocked(bool late, std::optional<double> slack_
                 // the lowest a probe proved: a hitch no lead cures (Star
                 // Citizen's, every half minute) raised it a refresh each time,
                 // and the lead with it, past what the kept real frames cover
-                // (2026-10-13). A lead that does not hold any more is proved
-                // by its probe failing.
+                // (2026-10-13). A game that needs the raised lead fails the
+                // probes back to the proven lead, which then come less often
+                // (explore_wait).
                 const std::uint32_t most = lead_floor_proven_ != 0 ? lead_floor_proven_ + 1 : lead_slots_ + 1;
                 lead_floor_ = std::max(lead_floor_, std::min({lead_slots_ + 1, 4 * multiplier, most}));
                 lead_floor_failed_ = true;
             }
+            // At the cap nothing moves: not counted (the summary marks the cap).
+            totals_.lead_ups += lead_slots_ < 4 * multiplier ? 1 : 0;
             lead_slots_ = std::min(lead_slots_ + 1, 4 * multiplier);
-            ++totals_.lead_ups;
             lead_history_.clear();
             lead_calm_since_ = now;
             return;
         }
         // Frames with a refresh to spare: one slot less, judged as a probe.
         // Below the lowest lead known to hold, once frames were late there,
-        // only every lead_explore_after_ (as calm probes): a game whose
-        // frames mostly fit a lead but a few in ten need one more otherwise
-        // steps down and back up about once a second, each time with two
-        // late frames (DCS and MSFS 2024, 2026-10-09).
+        // only every explore_wait (as calm probes): a game whose frames
+        // mostly fit a lead but a few in ten need one more otherwise steps
+        // down and back up about once a second, each time with two late
+        // frames (DCS and MSFS 2024, 2026-10-09).
         const bool exploring = lead_floor_ != 0 && lead_slots_ <= lead_floor_ && lead_floor_failed_;
         if (lead_history_.size() >= 8 && count(2) >= 7 && lead_slots_ > 1 &&
-            (!hysteresis || !exploring || now - lead_calm_since_ >= lead_explore_after_)) {
+            (!hysteresis || !exploring || now - lead_calm_since_ >= explore_wait)) {
             if (hysteresis) {
                 lead_probe_ = LeadProbe{now, lead_slots_};
                 lead_probe_->slack = true;
@@ -4628,13 +4900,12 @@ void FrameGenPresenter::UpdateLeadLocked(bool late, std::optional<double> slack_
         }
     }
     // Calm: one slot less (a probe), every probe_after down to the lowest
-    // lead known to hold, below it every lead_explore_after_. A burst of
-    // hitches leaves latency for seconds, not for good.
+    // lead known to hold, below it every explore_wait. A burst of hitches
+    // leaves latency for seconds, not for good.
     if (lead_probe_ || lead_slots_ <= 1) {
         return;
     }
-    const auto wait =
-        lead_floor_ != 0 && lead_slots_ <= lead_floor_ ? lead_explore_after_ : lead_policy_.probe_after;
+    const auto wait = lead_floor_ != 0 && lead_slots_ <= lead_floor_ ? explore_wait : lead_policy_.probe_after;
     if (now - lead_calm_since_ < wait) {
         return;
     }
@@ -4743,6 +5014,7 @@ void FrameGenPresenter::NoteGpuEvidenceLocked(std::uint64_t real_frames, std::ui
 
 std::optional<XrResult> FrameGenPresenter::ThreadedWaitLocked(std::unique_lock<std::mutex>& lock, XrFrameState* state,
                                                             const FrameGenRuntimeCalls& calls) {
+    const auto asked = Clock::now();
     if (!compositor_running_) {
         JoinCompositorLocked(lock);
         if (!compositor_running_) {
@@ -4775,6 +5047,7 @@ std::optional<XrResult> FrameGenPresenter::ThreadedWaitLocked(std::unique_lock<s
     const std::uint32_t cadence = dynamic ? 1 : multiplier;
     std::uint64_t release = last_release_slot_ ? *last_release_slot_ + cadence : slot_index_ + 1;
     release = std::max(release, slot_index_);
+    const auto held_from = Clock::now();
     while (!slot_cv_.wait_for(lock, std::chrono::seconds(2),
                               [&] { return !compositor_running_ || slot_index_ >= release; })) {
         if (logger_ && !logged_watchdog_) {
@@ -4786,6 +5059,24 @@ std::optional<XrResult> FrameGenPresenter::ThreadedWaitLocked(std::unique_lock<s
     if (!compositor_running_) {
         return std::nullopt;
     }
+    // The game's own time for its last frame: since the last wait's hold for
+    // the cadence ended (Auto's probes; its GPU's hold below counts as its).
+    // Not just in time, its xrEndFrame is held for its frame's slot too
+    // (ThreadedEnd): left out, or a game at 2x reads as taking at least the
+    // refresh to that slot, however light it is. Only the end of the frame
+    // the last wait handed out: a pipelined game's earlier frame ends on
+    // another thread while this one is still working, and that time is the
+    // game's own.
+    const auto held = Clock::now() - held_from;
+    if (auto_busy_since_ != Clock::time_point{} && asked > auto_busy_since_) {
+        const Clock::duration end_held =
+            auto_end_held_frame_ != threaded_id_
+                ? Clock::duration::zero()
+                : std::max(std::min(auto_end_held_to_, asked) - std::max(auto_end_held_from_, auto_busy_since_),
+                           Clock::duration::zero());
+        auto_busy_[auto_busy_count_++ % auto_busy_.size()] = Milliseconds(asked - auto_busy_since_ - end_held);
+    }
+    auto_busy_since_ = asked + held;
     // The cadence counts from the refresh it released this wait in, not from
     // the end of a GPU wait below: a game held for its GPU is not also held
     // back a cadence.
@@ -4829,6 +5120,14 @@ std::optional<XrResult> FrameGenPresenter::ThreadedWaitLocked(std::unique_lock<s
             }
         }
     }
+    // Turned off, or switched to what this thread does not present, while
+    // the game waited: it leaves the presenter thread now, as its next wait
+    // would, not handed one more frame and logged engaged (6 of 9 presses
+    // turning Frame Generation off in two sessions' logs did).
+    if (!StayThreadedLocked()) {
+        ExitThreadedLocked(lock);
+        return std::nullopt;
+    }
     // The game's frames are timed on the refresh grid (GameGridLocked).
     const XrDuration period = GameGridLocked();
     const double period_ms = static_cast<double>(period) / 1e6;
@@ -4844,6 +5143,17 @@ std::optional<XrResult> FrameGenPresenter::ThreadedWaitLocked(std::unique_lock<s
         const double interval = interpolate_jit ? (dynamic ? latency : period_ms * multiplier) : 0.0;
         lead_slots_ = static_cast<std::uint32_t>(std::clamp(
             std::ceil((latency + interval + 1.0) / period_ms) - (interpolate_jit ? 1.0 : 0.0), 1.0, 4.0 * multiplier));
+    }
+    // The cap follows the multiplier (Dynamic's refreshes per real frame, 2-4):
+    // a lead above a lowered cap is the cap, or no frame (each told the cap)
+    // would match it to be scored, and it would come down only by a probe (DCS
+    // 231933: leadSlots=9 in the summary while the game was told 8).
+    if (lead_slots_ > 4 * multiplier) {
+        lead_slots_ = 4 * multiplier;
+        lead_floor_ = std::min(lead_floor_, lead_slots_);
+        lead_floor_proven_ = std::min(lead_floor_proven_, lead_slots_);
+        lead_probe_.reset();
+        lead_history_.clear();
     }
     // Predict the first slot the frame will really reach. Interpolated
     // frames before it are shown first, so the frame itself is shown (and
@@ -4882,11 +5192,45 @@ std::optional<XrResult> FrameGenPresenter::ThreadedWaitLocked(std::unique_lock<s
         std::max(frame.target_time - DisplayOffsetLocked(frame.reported_period), last_returned_time_ + 1);
     frame.wait_return = Clock::now();
     last_returned_time_ = frame.predicted;
+    // For the summary: the lead told, and how far past the runtime's own
+    // display time for a wait returning now (its last paced wait's, moved on
+    // with the time) the game is told to render: Frame Generation's share of
+    // its pose horizon. Dynamic releases the game anywhere in a refresh, so
+    // that varies by up to a refresh from one frame to the next.
+    told_lead_sum_ += frame.lead;
+    ++told_lead_frames_;
+    told_lead_max_ = std::max(told_lead_max_, frame.lead);
+    if (phase_wall_ != Clock::time_point{} && frame.wait_return - phase_wall_ <= std::chrono::nanoseconds(4 * period)) {
+        const XrTime runtime_time =
+            phase_xr_ + std::chrono::duration_cast<std::chrono::nanoseconds>(frame.wait_return - phase_wall_).count();
+        const double ahead_ms = static_cast<double>(frame.target_time - runtime_time) / 1e6;
+        AddSample(game_ahead_ms_, ahead_ms, kMaxFrameSamples);
+        // Against the frame told before, unless a pause came between: one by
+        // the game's own pace (PauseLimitLocked), not Dynamic's refresh
+        // period, or a game slower than four refreshes a frame (Star Citizen
+        // at 28 fps at 120 Hz) had none.
+        if (last_ahead_at_ != Clock::time_point{} &&
+            frame.wait_return - last_ahead_at_ <= std::chrono::nanoseconds(PauseLimitLocked())) {
+            AddSample(ahead_jitter_ms_, std::abs(ahead_ms - last_ahead_ms_), kMaxFrameSamples);
+        }
+        last_ahead_ms_ = ahead_ms;
+        last_ahead_at_ = frame.wait_return;
+    } else {
+        last_ahead_at_ = {};
+    }
     threaded_frames_.push_back(frame);
     state->predictedDisplayTime = frame.predicted;
     state->predictedDisplayPeriod = frame.reported_period;
     state->shouldRender = slot_should_render_ ? XR_TRUE : XR_FALSE;
-    full_rate_ = false;
+    if (full_rate_) {
+        // From standing by (Dynamic's, or Auto at full rate) to a fixed or
+        // automatic multiplier: logged engaged, as the inline path logs it
+        // (Dynamic logs its own engagement).
+        full_rate_ = false;
+        if (state_ == FrameGenState::kActive && !dynamic) {
+            state_ = FrameGenState::kWaiting;
+        }
+    }
     SetStateLocked(FrameGenState::kActive, "");
     return XR_SUCCESS;
 }
@@ -4988,6 +5332,7 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
     // Ask for the first slot at or after the first one this frame fills.
     slot_request_ = SlotRequest{frame.id, frame.first_slot};
     WakeSlots();
+    const auto slot_asked = Clock::now();
     while (!slot_cv_.wait_for(lock, std::chrono::seconds(2), [&] {
         return !compositor_running_ || (slot_offer_ && slot_offer_->frame_id == frame.id);
     })) {
@@ -4996,6 +5341,11 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
             logger_->Error("Frame Generation: a real frame has waited 2 s for a slot (" + PresenterActivity() + ").");
         }
     }
+    // Held for the cadence, as the game's waits are: not its own time
+    // (ThreadedWaitLocked).
+    auto_end_held_from_ = slot_asked;
+    auto_end_held_to_ = Clock::now();
+    auto_end_held_frame_ = frame.id;
     if (!slot_offer_ || slot_offer_->frame_id != frame.id) {
         // The presenter thread stopped first; no runtime frame is left for
         // this one.
@@ -5124,7 +5474,10 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
     const Clock::time_point generated_due = due(offer.time + period);
     const bool late = offer.slot > frame.first_slot;
     totals_.late_cpu += late ? 1 : 0;
-    UpdateLeadLocked(late, slack_ms, frame.lead, frame.multiplier);
+    // One with no projection moves the lead neither way (ThreadedEndJit).
+    if (renderable) {
+        UpdateLeadLocked(late, slack_ms, frame.lead, frame.multiplier);
+    }
     erase_frame();
     offer_done_ = true;
     WakeSlots();
@@ -5222,11 +5575,22 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
         // frames written unmoved (motion not measured yet). unwritten: an
         // output not handed back in time / writing failed / no outputs /
         // nothing to write. endCallMs: the game's xrEndFrame in Frame
-        // Generation. synthLockMs: the presenter thread's wait for the GPU
+        // Generation. runtimeEndMs: the runtime's xrEndFrame for the frames
+        // Frame Generation submits (long where the runtime waits for its
+        // queue). synthLockMs: the presenter thread's wait for the GPU
         // lock before writing. ringExhausted: refreshes whose real frame's
         // images newer captures had replaced (written unmoved, or the frame
         // before). staleSkipped: refreshes not submitted, nothing current to
         // show (a frame shown as it is had newer images in its swapchains).
+        // leadAvg/leadMax: the lead told to the game's frames. gameAheadMs
+        // (median/95th percentile): how far past the runtime's own
+        // prediction the game is told to render, Frame Generation's share
+        // of its pose horizon (without Frame Generation 0, or a refresh for
+        // a game that submits a period past its told time, as Star Citizen
+        // does). aheadJitterMs: its change from one game frame to the next
+        // (Dynamic varies it by up to a refresh). endSlackMs (10th
+        // percentile/median): the time to spare when the game's frame
+        // ended, negative when late.
         logger_->Info(
             "Frame Generation: multiplier=" + multiplier + ", threaded=1, appFps=" +
             Number(PerSecond(delta(&Totals::app_frames), seconds), 1) +
@@ -5234,11 +5598,20 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
             ", distinctFps=" + Number(PerSecond(delta(&Totals::distinct), seconds), 1) +
             ", standbyS=" + Number(standby - summary_standby_seconds_, 1) +
             ", repeatedFrames=" + std::to_string(repeated_submissions_) + ", appLatencyMs=" + Number(app_latency_ms_, 1) +
-            ", leadSlots=" + std::to_string(lead_slots_) + ", leadFloor=" + std::to_string(lead_floor_) +
+            ", leadSlots=" + std::to_string(lead_slots_) +
+            (lead_slots_ >= 4 * std::max(2u, EffectiveMultiplierLocked()) ? " (cap)" : "") +
+            ", leadFloor=" + std::to_string(lead_floor_) +
             ", leadMoves=+" + std::to_string(delta(&Totals::lead_ups)) + "/-" +
             std::to_string(delta(&Totals::lead_downs)) + ", leadProbes=" + std::to_string(delta(&Totals::lead_probes)) +
             "/" + std::to_string(delta(&Totals::lead_probes_failed)) +
-            ", leadUndone=" + std::to_string(delta(&Totals::lead_downs_undone)) +
+            ", leadUndone=" + std::to_string(delta(&Totals::lead_downs_undone)) + ", leadAvg=" +
+            (told_lead_frames_
+                 ? Number(static_cast<double>(told_lead_sum_) / static_cast<double>(told_lead_frames_), 2)
+                 : std::string("-")) +
+            ", leadMax=" + (told_lead_frames_ ? std::to_string(told_lead_max_) : std::string("-")) +
+            ", gameAheadMs=" + Percentiles(game_ahead_ms_, 0.5, 0.95) +
+            ", aheadJitterMs=" + Percentiles(ahead_jitter_ms_, 0.5, 0.95) +
+            ", endSlackMs=" + Percentiles(end_slack_ms_, 0.1, 0.5) +
             ", appWorkMs=" + Number(app_work_frames_ ? app_work_ms_ / app_work_frames_ : 0.0, 1) +
             ", lateReal=" + std::to_string(delta(&Totals::late_cpu)) + "/" + std::to_string(delta(&Totals::late_gpu)) +
             ", skippedGenerated=" + std::to_string(skipped_generated_) + ", generated=+" +
@@ -5259,7 +5632,8 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
             (gpu_wait_ms_.empty() ? std::string("-") : Number(*Median(gpu_wait_ms_), 1)) + "/" +
             std::to_string(delta(&Totals::gpu_wait_timeouts)) +
             (gpu_gate_enabled_ && gpu_gate_armed_ ? "" : gpu_gate_enabled_ ? " (not armed)" : " (off)") +
-            ", endCallMs=" + MedianAndMax(end_call_ms_) + ", synthLockMs=" + MedianAndMax(synth_lock_ms_) +
+            ", endCallMs=" + MedianAndMax(end_call_ms_) + ", runtimeEndMs=" + MedianAndMax(runtime_end_ms_) +
+            ", synthLockMs=" + MedianAndMax(synth_lock_ms_) +
             (jit_ ? ", justInTime=1, covers=" + std::to_string(jit_covers_) + ", unwritten=" +
                         std::to_string(delta(&Totals::unwritten_wait)) + "/" +
                         std::to_string(delta(&Totals::unwritten_failed)) + "/" +
@@ -5276,9 +5650,18 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
             ", pauses=" + std::to_string(delta(&Totals::pauses)) + "/" + Number(pause_longest_ms_, 0) +
             ClockSummaryLocked(start) + DynamicSummaryLocked() + QuadSummaryLocked(start) + ".");
     }
+    NewSummaryWindowLocked(now, standby);
+}
+
+void FrameGenPresenter::NewSummaryWindowLocked(Clock::time_point now, double standby) {
+    // Both summaries share the window: samples one of them does not print
+    // went into the next window the other printed (a stand-down's presenter
+    // thread samples into the next engagement's summary, F56).
     last_summary_ = now;
     summary_totals_ = totals_;
     summary_standby_seconds_ = standby;
+    cycles_ = 0;
+    late_cycles_ = 0;
     eye_move_sum_mm_ = eye_miss_sum_mm_ = 0.0;
     eye_frames_ = 0;
     gpu_start_ms_.clear();
@@ -5289,7 +5672,14 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
     ofa_ms_.clear();
     gpu_wait_ms_.clear();
     end_call_ms_.clear();
+    runtime_end_ms_.clear();
     synth_lock_ms_.clear();
+    told_lead_sum_ = 0;
+    told_lead_frames_ = 0;
+    told_lead_max_ = 0;
+    game_ahead_ms_.clear();
+    ahead_jitter_ms_.clear();
+    end_slack_ms_.clear();
     pause_longest_ms_ = 0.0;
     app_work_ms_ = 0.0;
     app_work_frames_ = 0;
@@ -5382,6 +5772,7 @@ bool FrameGenPresenter::AnalyzeJit(const XrCompositionLayerProjection& projectio
     jit.copy = std::move(copy);
     jit.kinds = std::move(analysis.kinds);
     jit.velocity = std::move(analysis.velocity);
+    jit.depth = analysis.depth;
     jit.quad = std::move(quad);
     if (trace_.Enabled()) {
         trace_.Record("keep", jit.id, jit.time, jit.previous_time, static_cast<std::int64_t>(jit.analyzed),
@@ -5454,13 +5845,22 @@ XrResult FrameGenPresenter::ThreadedEndJit(const XrFrameEndInfo& info, const Thr
         needed_due = phase_wall_ + std::chrono::nanoseconds(needed - phase_xr_);
         slack_ms = std::chrono::duration<double, std::milli>(needed_due - std::chrono::milliseconds(2) - entered).count();
     }
+    if (renderable && slack_ms) {
+        AddSample(end_slack_ms_, *slack_ms, kMaxFrameSamples);
+    }
     // Ending after its refresh was due, it is late at once. Otherwise it is
     // judged when a refresh first chooses it: its game frame must have
-    // reached the GPU by then too (CompositorLoop).
+    // reached the GPU by then too (CompositorLoop). One with no projection (a
+    // loading screen or a menu) moves the lead neither way: nothing is
+    // generated from it, and a game's late loading frames raised it to its
+    // cap (Star Citizen's 93 s loading screen, 2026-10-14: 2 -> 8, then a
+    // pose horizon of 152 ms for the first 12 s of play).
     const bool late = slack_ms && *slack_ms < 0.0;
     if (late) {
         ++totals_.late_cpu;
-        UpdateLeadLocked(true, slack_ms, frame.lead, frame.multiplier);
+        if (renderable) {
+            UpdateLeadLocked(true, slack_ms, frame.lead, frame.multiplier);
+        }
     }
     JitFrame score;
     score.lead = frame.lead;
@@ -5537,7 +5937,7 @@ XrResult FrameGenPresenter::ThreadedEndJit(const XrFrameEndInfo& info, const Thr
         jit_shown_as_is_ = false;
         InvalidateContinuityLocked();
     }
-    if (!measure && !late) {
+    if (renderable && !measure && !late) {
         // Not kept: on time.
         UpdateLeadLocked(false, slack_ms, frame.lead, frame.multiplier);
     }
@@ -5986,6 +6386,7 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
     // Frames moved by the previous real frame's motion too (their eye shift
     // reads its depth: FrameGenGpu::SynthesizeStale).
     const float eye_time = write.exact ? 0.0f : extrapolate ? choice.fraction : choice.fraction - 1.0f;
+    double moved_mm = 0.0;
     if (quad) {
         views.assign(quad->eyes.begin(), quad->eyes.end());
     } else {
@@ -6006,6 +6407,8 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
             views[i].pose.position.x += static_cast<float>(world[0]);
             views[i].pose.position.y += static_cast<float>(world[1]);
             views[i].pose.position.z += static_cast<float>(world[2]);
+            moved_mm = std::max(moved_mm, 1000.0 * std::sqrt(local[0] * local[0] + local[1] * local[1] +
+                                                             local[2] * local[2]));
         }
     }
     // Output images replaced since the last frame written: nothing shows
@@ -6016,6 +6419,13 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
     std::scoped_lock lock(mutex_);
     consecutive_failures_ = 0;
     AddSample(synth_lock_ms_, lock_wait_ms);
+    // How far a moved frame of a real frame generated with depth followed
+    // the eyes (eyeShiftMm), as Generate counts the frames it writes.
+    if (frame.depth && eye_time != 0.0f) {
+        shift_window_sum_mm_ += moved_mm;
+        shift_window_max_mm_ = std::max(shift_window_max_mm_, moved_mm);
+        ++shift_window_frames_;
+    }
     totals_.unmeasured += unmeasured ? 1 : 0;
     totals_.stale_motion += write.stale || write.motion_late ? 1 : 0;
     if (logger_ && !logged_jit_ && !write.exact) {
@@ -6188,13 +6598,17 @@ void FrameGenPresenter::CompositorLoop() {
             // nothing is written or shown, and it says nothing about writing
             // or the lead (real frames it passes over are not scored).
             const bool rendered = slot_should_render_;
-            // Real frames a later refresh needs whose game frames are on the
-            // GPU already: their lead had a refresh to spare (ScoreLeadLocked).
+            // Real frames a later refresh needs came ahead of it; those whose
+            // game frames are on the GPU already: their lead had a refresh to
+            // spare (ScoreLeadLocked).
             for (JitFrame& kept : jit_frames_) {
                 if (!rendered) {
                     kept.scored = kept.scored || kept.time <= slot_time_ + period / 2;
-                } else if (!kept.scored && !kept.captured_early && kept.needed > slot_time_ + period / 2) {
-                    kept.captured_early = !gpu_ || !kept.capture_mark || gpu_->CaptureReached(kept.capture_mark);
+                } else if (!kept.scored && kept.needed > slot_time_ + period / 2) {
+                    kept.ahead = true;
+                    if (!kept.captured_early) {
+                        kept.captured_early = !gpu_ || !kept.capture_mark || gpu_->CaptureReached(kept.capture_mark);
+                    }
                 }
             }
             std::optional<JitFrame> source;
@@ -6248,17 +6662,35 @@ void FrameGenPresenter::CompositorLoop() {
                 // motion not measured though the refresh shows it moved
                 // (interpolating, the refresh before its own), or the refresh
                 // it was needed for has passed. Older frames never chosen
-                // were passed over: late.
+                // were passed over: late if they came after the refresh they
+                // were needed for. One that came ahead of it was passed over
+                // because that refresh was missed (the presenter thread or
+                // the runtime was late; one in ten with Varjo's runtime under
+                // a GPU-bound DCS, 2026-10-14) or the next frame's is nearer:
+                // no lead cures that, and it says nothing of the frame's
+                // own, so it is not scored. Scored late, those raised the
+                // lead to its cap and held it there.
                 for (JitFrame& kept : jit_frames_) {
                     if (kept.scored || kept.id > *chosen_id) {
                         continue;
                     }
                     if (kept.id < *chosen_id) {
-                        ScoreLeadLocked(kept, true);
+                        if (kept.ahead) {
+                            kept.scored = true;
+                        } else {
+                            ScoreLeadLocked(kept, true);
+                        }
                         continue;
                     }
-                    const bool late = write.uncaptured || write.unmeasured || write.motion_late ||
-                                      slot_time_ > kept.needed + period / 2;
+                    // Past the refresh it was needed for though it came ahead
+                    // of it: that refresh was missed, as above.
+                    const bool past = slot_time_ > kept.needed + period / 2;
+                    const bool late =
+                        write.uncaptured || write.unmeasured || write.motion_late || (past && !kept.ahead);
+                    if (past && !late) {
+                        kept.scored = true;
+                        continue;
+                    }
                     totals_.late_gpu += late && write.uncaptured ? 1 : 0;
                     ScoreLeadLocked(kept, late);
                 }

@@ -9,10 +9,15 @@
 #include <fstream>
 #include <iostream>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
 #include <Windows.h>
+#include <d3d11.h>
+#include <d3d12.h>
+#include <wrl/client.h>
+#include <openxr/openxr_platform.h>
 
 #include "depthxr/openxr_layer.h"
 #include "depthxr/framegen_gpu.h"
@@ -147,6 +152,65 @@ class TurboFrameTestPeer {
             capturing ? TurboMetricsMode::kAlways : TurboMetricsMode::kOff, {}, true, 0);
     }
     static void ResetMetrics() { Layer().ResetTurboMetricsState(); }
+    // An application LOCAL space that Pivot also anchors to.
+    static void TrackSpaceAsAnchor(XrSpace space) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.tracked_local_spaces_.insert(space);
+        layer.pivotxr_translation_anchor_ = OpenXrLayer::PivotTranslationAnchor{XrVector3f{}, space};
+    }
+    static bool SpaceTrackedAsLocal(XrSpace space) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        return layer.tracked_local_spaces_.contains(space);
+    }
+    static bool SpaceKnown(XrSpace space) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        return layer.tracked_local_spaces_.contains(space) ||
+               (layer.pivotxr_translation_anchor_ && layer.pivotxr_translation_anchor_->space == space);
+    }
+    static void ForgetAnchor() {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.pivotxr_translation_anchor_.reset();
+    }
+    static XrResult DestroySpace(XrSpace space, PFN_xrDestroySpace runtime) {
+        auto& layer = Layer();
+        const auto previous = layer.next_destroy_space_;
+        layer.next_destroy_space_ = runtime;
+        const XrResult result = layer.DestroySpace(space);
+        layer.next_destroy_space_ = previous;
+        return result;
+    }
+    // xrBeginSession's Turbo settings line, in a session Turbo yielded to FG.
+    static void SessionSettingsAfterYield() {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.turbo_yielded_to_framegen_ = true;
+        layer.ConfigureTurboExperiment();
+        layer.turbo_yielded_to_framegen_ = false;
+    }
+    // Two frames five seconds apart: the second ends a pacing window.
+    static void PacingWindow(bool framegen_owns_pacing, bool turbo_engaged) {
+        auto& layer = Layer();
+        layer.framegen_owns_pacing_.store(framegen_owns_pacing);
+        layer.pacing_window_start_.reset();
+        layer.pacing_last_end_time_.reset();
+        const auto start = std::chrono::steady_clock::now();
+        layer.RecordFramePacing(start, start, start + 1ms, turbo_engaged);
+        layer.RecordFramePacing(start + 6s, start + 6s, start + 6s + 70ms, turbo_engaged);
+        layer.framegen_owns_pacing_.store(false);
+    }
+    // Binding-gated metrics capture, started by a press.
+    static void ArmMetricsBinding() {
+        auto& layer = Layer();
+        layer.turbo_metrics_capture_armed_ = true;
+        layer.turbo_metrics_binding_was_down_ = true;
+    }
+    static bool MetricsBindingArmed() { return Layer().turbo_metrics_capture_armed_; }
+    // The frame thread's poll of the capture binding.
+    static bool PollMetricsBinding() { return Layer().IsTurboMetricsCaptureArmed({}, 100); }
     static void WaitMetrics() {
         if (Layer().turbo_metrics_write_future_.valid()) Layer().turbo_metrics_write_future_.wait();
     }
@@ -261,6 +325,17 @@ class TurboFrameTestPeer {
     }
     // The settings file is read again now (as the layer's watcher does).
     static void PollConfigFile() { Layer().PollConfigFile(); }
+    // Logs to `log` from now on, as a new instance does.
+    static void StartLog(const std::filesystem::path& log) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.BeginInstanceLogLocked(log);
+    }
+    // Closes the log file, so the folder holding it can be removed: the next
+    // line would open `log`, which is in that folder too.
+    static void ReleaseLog(const std::filesystem::path& log) { Layer().logger_.Initialize(log); }
+    // The frame that follows a logged wait for a steady cadence.
+    static void CadenceJustStabilized() { Layer().turbo_cadence_pause_logged_ = true; }
     static ConfigDocument LoadedConfig() {
         auto& layer = Layer();
         std::scoped_lock lock(layer.mutex_);
@@ -305,6 +380,20 @@ class TurboFrameTestPeer {
         OpenXrLayer& layer = Layer();
         std::scoped_lock lock(layer.mutex_);
         return layer.BuildOsdSnapshot();
+    }
+    // The OSD's modules line for a Quadviews session, before it begins
+    // (nullopt) or once it has begun with `begun`.
+    static std::string QuadViewsSessionModules(std::optional<XrViewConfigurationType> begun) {
+        OpenXrLayer& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.quadviews_session_active_ = true;
+        layer.has_active_primary_view_configuration_ = begun.has_value();
+        layer.active_primary_view_configuration_type_ = begun.value_or(XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO);
+        std::string modules = layer.BuildOsdSnapshot().modules;
+        layer.quadviews_session_active_ = false;
+        layer.has_active_primary_view_configuration_ = false;
+        layer.active_primary_view_configuration_type_ = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+        return modules;
     }
 
     static XrResult ForwardEndFrame(XrSession session, const XrFrameEndInfo* frame_end_info) {
@@ -429,10 +518,40 @@ class TurboFrameTestPeer {
         layer.turbo_trace_.Start(layer.logger_);
         return layer.logger_.ActiveLogPath();
     }
+    static bool RecorderRunning() { return Layer().turbo_trace_.Enabled(); }
+    static XrResult DestroySession(XrSession session, PFN_xrDestroySession runtime) {
+        auto& layer = Layer();
+        const auto previous = layer.next_destroy_session_;
+        layer.next_destroy_session_ = runtime;
+        const XrResult result = layer.DestroySession(session);
+        layer.next_destroy_session_ = previous;
+        return result;
+    }
+    static XrResult EndSession(XrSession session, PFN_xrEndSession runtime) {
+        auto& layer = Layer();
+        const auto previous = layer.next_end_session_;
+        layer.next_end_session_ = runtime;
+        const XrResult result = layer.EndSession(session);
+        layer.next_end_session_ = previous;
+        return result;
+    }
+    // While held, Frame Generation's presenter looks like a thread a runtime
+    // keeps inside a call: stopping it gives up after `wait`.
+    static void HoldPresenterInRuntime(bool held, std::chrono::milliseconds wait) {
+        FrameGenPresenter& framegen = Layer().framegen_;
+        {
+            std::scoped_lock lock(framegen.mutex_);
+            framegen.compositor_running_ = held;
+            framegen.compositor_stop_ = false;
+        }
+        framegen.SetTeardownWait(wait);
+    }
     static void EndRecorder() {
         Layer().turbo_trace_.Stop();
         Layer().logger_.SetLevel(LogLevel::Info);
     }
+    // Keeps the ordinary log's sampled burst open for another second.
+    static void SampleNextSecond() { Layer().turbo_trace_.Burst(); }
     static void NeedSequencedCompensation() {
         auto& layer = Layer();
         std::scoped_lock lock(layer.turbo_mutex_);
@@ -469,6 +588,213 @@ class TurboFrameTestPeer {
         layer.resolved_settings_.turbo.runtime_pins.clear();
         layer.ResolveTurboPacingModeLocked();
         layer.runtime_name_.clear();
+    }
+
+    // A native Varjo quad views session (Varjo compatible quadviews) with
+    // Pivot, DepthXR and focus sharpening off, located and ended through the
+    // layer's own hooks. The settings stay as set here: no file is read.
+    static void PrepareVarjoNative(PFN_xrLocateViews locate_views, PFN_xrEndFrame end_frame) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.has_loaded_config_ = true;
+        layer.resolved_settings_ = {};
+        layer.resolved_settings_.core.enabled = true;
+        layer.resolved_settings_.depthxr.enabled = false;
+        layer.resolved_settings_.quadviews.enabled = true;
+        layer.resolved_settings_.quadviews.foveate_sharpness = 0.0;
+        layer.resolved_settings_generation_ = layer.config_generation_;
+        layer.resolved_settings_session_ = layer.active_session_;
+        layer.quadviews_session_active_ = true;
+        layer.varjo_compatible_quadviews_active_ = true;
+        layer.varjo_foveated_rendering_extension_requested_ = false;
+        layer.varjo_native_foveation_diagnostic_ = {};
+        layer.next_locate_views_ = locate_views;
+        layer.next_end_frame_ = end_frame;
+        layer.turbo_frame_interception_required_.store(false, std::memory_order_release);
+    }
+    // Varjo focus sharpening asked for: frames take the projection rewrite
+    // (the sharpen itself is skipped, with no Direct3D 11 device here).
+    static void SharpenVarjoFocus() {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.resolved_settings_.quadviews.foveate_sharpness = 50.0;
+    }
+    // The composition-layer topology log (ObserveCompositionLayerTopology)
+    // for a frame whose quad views Frame Generation claimed, or not; its
+    // remaining budget after.
+    static int ObserveTopology(const XrFrameEndInfo* frame, bool claimed) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        if (claimed) {
+            layer.pending_framegen_quad_.emplace().route = FrameGenQuadRoute::kClaimed;
+        }
+        layer.ObserveCompositionLayerTopology(frame);
+        layer.pending_framegen_quad_.reset();
+        return layer.composition_topology_log_budget_;
+    }
+    static void ResetTopology() {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.composition_topology_log_budget_ = 12;
+        layer.last_composition_topology_signature_.reset();
+        layer.last_claimed_composition_topology_signature_.reset();
+    }
+    // Fake handles tracked as the application's VIEW and LOCAL reference
+    // spaces (as xrCreateReferenceSpace tracks them), until ForgetSpaces.
+    static void TrackSpaces(XrSpace view, XrSpace local) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.tracked_view_spaces_.insert(view);
+        layer.tracked_local_spaces_.insert(local);
+    }
+    static void ForgetSpaces(XrSpace view, XrSpace local) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.tracked_view_spaces_.erase(view);
+        layer.tracked_local_spaces_.erase(local);
+    }
+    // The application's xrLocateSpace through the layer's hook, the
+    // runtime's being `runtime` (no settings file is read, and the settings
+    // are not resolved again).
+    static XrResult LocateSpace(XrSpace space, XrSpace base_space, XrTime time, PFN_xrLocateSpace runtime) {
+        auto& layer = Layer();
+        bool loaded = false;
+        PFN_xrLocateSpace previous = nullptr;
+        {
+            std::scoped_lock lock(layer.mutex_);
+            loaded = layer.has_loaded_config_;
+            previous = layer.next_locate_space_;
+            layer.has_loaded_config_ = true;
+            layer.resolved_settings_generation_ = layer.config_generation_;
+            layer.resolved_settings_session_ = layer.active_session_;
+            layer.next_locate_space_ = runtime;
+        }
+        XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
+        const XrResult result = layer.LocateSpace(space, base_space, time, &location);
+        std::scoped_lock lock(layer.mutex_);
+        layer.has_loaded_config_ = loaded;
+        layer.next_locate_space_ = previous;
+        return result;
+    }
+    // The application's xrLocateViews as the layer forwards it to the
+    // runtime (LocateRuntimeViews, before Pivot and Depth), the runtime's
+    // being `runtime`; as LocateSpace above for the settings.
+    static XrResult LocateRuntimeViews(const XrViewLocateInfo& info, std::uint32_t capacity, std::uint32_t* count,
+                                       XrView* views, PFN_xrLocateViews runtime) {
+        auto& layer = Layer();
+        bool loaded = false;
+        PFN_xrLocateViews previous = nullptr;
+        {
+            std::scoped_lock lock(layer.mutex_);
+            loaded = layer.has_loaded_config_;
+            previous = layer.next_locate_views_;
+            layer.has_loaded_config_ = true;
+            layer.resolved_settings_generation_ = layer.config_generation_;
+            layer.resolved_settings_session_ = layer.active_session_;
+            layer.next_locate_views_ = runtime;
+        }
+        XrViewState state{XR_TYPE_VIEW_STATE};
+        const XrResult result =
+            layer.LocateRuntimeViews(XR_NULL_HANDLE, &info, &state, capacity, count, views, nullptr, nullptr);
+        std::scoped_lock lock(layer.mutex_);
+        layer.has_loaded_config_ = loaded;
+        layer.next_locate_views_ = previous;
+        return result;
+    }
+    // Depth on with convergence: LocateViews shifts each eye's projection.
+    static void ConvergeVarjoDepth(double convergence) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.resolved_settings_.depthxr.enabled = true;
+        layer.resolved_settings_.depthxr.stereo_boost = 1.0;
+        layer.resolved_settings_.depthxr.convergence = convergence;
+    }
+    // The foveation summary's submittedFocusFov: checked, mismatched, unlocated.
+    static std::array<std::uint64_t, 3> VarjoSubmittedFocus() {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        const auto& diagnostic = layer.varjo_native_foveation_diagnostic_;
+        return {diagnostic.submitted_focus_checked, diagnostic.submitted_focus_mismatched,
+                diagnostic.submitted_focus_unlocated};
+    }
+    static void EndVarjoNative() {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.resolved_settings_ = {};
+        layer.quadviews_session_active_ = false;
+        layer.varjo_compatible_quadviews_active_ = false;
+        layer.varjo_native_foveation_diagnostic_ = {};
+        layer.next_locate_views_ = nullptr;
+        layer.next_end_frame_ = nullptr;
+    }
+
+    // After PrepareVarjoNative: `session` is the quad views session on a
+    // Varjo runtime, whose swapchains' releases are deferred until the game's
+    // xrEndFrame; `swapchain` is one of its swapchains, its calls reaching
+    // the runtime as `xr`. Frame Generation's queue substitution is prepared
+    // from `create` (a Direct3D 12 binding) as xrCreateSession prepares it.
+    static bool DeferVarjoReleases(XrSession session, XrSwapchain swapchain, std::uint32_t image_count,
+                                   const XrSessionCreateInfo* create, const FrameGenQueueSubstitution::Calls& xr) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.active_session_ = session;
+        layer.resolved_settings_session_ = session;
+        layer.defer_quadviews_swapchain_releases_ = true;
+        OpenXrLayer::SwapchainInfo& info = layer.tracked_swapchains_[swapchain];
+        info = {};
+        info.session = session;
+        info.quadviews_session = true;
+        info.image_count = image_count;
+        layer.next_acquire_swapchain_image_ = xr.acquire;
+        layer.next_wait_swapchain_image_ = xr.wait;
+        layer.next_release_swapchain_image_ = xr.release;
+        std::string note;
+        return layer.framegen_queue_.Prepare(create, note, true) != create && layer.framegen_queue_.ShownLayersLazy();
+    }
+    // A frame of Frame Generation's shows `swapchain` in a layer it does not
+    // capture, while it shows images of its own only (SubmitRuntimeFrame).
+    static void ShowLayerLazily(XrSwapchain swapchain) {
+        auto& layer = Layer();
+        layer.framegen_queue_.Flush(swapchain, layer.FrameGenQueueCalls(), true);
+    }
+    static FrameGenQueueSubstitution::ShownLayerCounts ShownLayers() { return Layer().framegen_queue_.ShownLayers(); }
+    static bool ShownLayersLazy() { return Layer().framegen_queue_.ShownLayersLazy(); }
+    // xrCreateSession through the layer's own hook with Frame Generation on
+    // (no file is read), the runtime's being `create_session`. The settings
+    // are put back after.
+    static XrResult CreateFrameGenSession(const XrSessionCreateInfo* info, PFN_xrCreateSession create_session) {
+        auto& layer = Layer();
+        ConfigDocument previous;
+        bool loaded = false;
+        {
+            std::scoped_lock lock(layer.mutex_);
+            previous = layer.config_;
+            loaded = layer.has_loaded_config_;
+            layer.has_loaded_config_ = true;
+            layer.config_ = {};
+            layer.config_.core.enabled = true;
+            layer.config_.framegen.enabled = true;
+            layer.next_create_session_ = create_session;
+        }
+        XrSession session = XR_NULL_HANDLE;
+        const XrResult result = layer.CreateSession(XR_NULL_HANDLE, info, &session);
+        std::scoped_lock lock(layer.mutex_);
+        layer.config_ = previous;
+        layer.has_loaded_config_ = loaded;
+        layer.next_create_session_ = nullptr;
+        return result;
+    }
+    static void EndVarjoReleases(XrSwapchain swapchain) {
+        auto& layer = Layer();
+        layer.framegen_queue_.Reset();
+        std::scoped_lock lock(layer.mutex_);
+        layer.tracked_swapchains_.erase(swapchain);
+        layer.defer_quadviews_swapchain_releases_ = false;
+        layer.active_session_ = XR_NULL_HANDLE;
+        layer.resolved_settings_session_ = XR_NULL_HANDLE;
+        layer.next_acquire_swapchain_image_ = nullptr;
+        layer.next_wait_swapchain_image_ = nullptr;
+        layer.next_release_swapchain_image_ = nullptr;
     }
 };
 
@@ -1324,8 +1650,9 @@ void TestConformantLateWaitIsWaitedFor() {
 }
 
 // A runtime wait that never completes must not freeze the application inside
-// VectorXR: the frame is dropped after a bounded wait, and forwarding resumes
-// as soon as the runtime completes the wait.
+// VectorXR: the frame is dropped after a bounded wait, the next app poll still
+// waits briefly for the runtime, and forwarding resumes as soon as the runtime
+// completes the wait.
 void TestStuckWaitDropsFrameThenResumes() {
     FakeRuntime runtime;
     TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
@@ -1346,20 +1673,126 @@ void TestStuckWaitDropsFrameThenResumes() {
     Expect(elapsed >= 2000.0 && elapsed < 3000.0, "Stuck-wait xrEndFrame was not bounded");
     Expect(runtime.EndCalls() == ends_before && depthxr::TurboFrameTestPeer::Handoff().wait_valid,
            "A frame was submitted without its wait, or the retained wait was discarded");
-    auto poll = std::async(std::launch::async, [] {
-        XrFrameState next{XR_TYPE_FRAME_STATE};
-        return AppWait(&next);
-    });
+    XrFrameState next{XR_TYPE_FRAME_STATE};
+    auto poll = std::async(std::launch::async, [&next] { return AppWait(&next); });
     Expect(poll.wait_for(50ms) == std::future_status::timeout,
-           "The next app poll ran ahead of the runtime's outstanding wait");
+           "The next app poll did not wait for the runtime's outstanding wait at all");
     runtime.ReleaseWait();
     Expect(poll.wait_for(2s) == std::future_status::ready && poll.get() == XR_SUCCESS,
            "The app poll did not resume when the runtime completed its wait");
+    Expect(next.shouldRender == XR_TRUE, "A poll that got its runtime wait asked the app not to render");
     Expect(XR_SUCCEEDED(AppBegin()) &&
                depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS &&
                runtime.EndCalls() == ends_before + 1,
            "Forwarding did not resume after the stuck wait completed");
     ExpectHealthyFrames(runtime, 16, "Stuck wait");
+}
+
+// Issue #88 (DCS on Windows Mixed Reality): the game froze after shouldRender
+// turned FALSE and never reached xrEndSession, as it does when the runtime
+// holds Turbo's pipelined wait: the game's next xrWaitFrame waited on it with
+// no bound. While the runtime holds the wait, every app frame call is now
+// bounded: polls report shouldRender FALSE, frames are dropped, and each held
+// frame counts as a stall whatever the app's cadence, so Auto falls back and
+// then suspends. Forwarding resumes in order once the runtime completes it.
+void TestHeldWaitKeepsFrameLoopRunning() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    depthxr::TurboFrameTestPeer::SetPolicy(depthxr::TurboPacingMode::kAsync,
+                                          depthxr::TurboFrameTestPeer::Source::kProbing);
+    const auto end_info = FrameEndInfo();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS &&
+               runtime.WaitForWaitExited(1), "Held-wait test could not establish async pacing");
+    XrFrameState state{XR_TYPE_FRAME_STATE};
+    Expect(AppWait(&state) == XR_SUCCESS && XR_SUCCEEDED(AppBegin()), "Held-wait first frame failed");
+    runtime.BlockWait();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS &&
+               runtime.WaitForWaitEntered(2), "Held-wait frame before the hold failed");
+    const int ends_before = runtime.EndCalls();
+
+    // DCS polls its next frame before it submits this one. The first poll is
+    // fabricated; the second used to wait for the runtime indefinitely.
+    Expect(AppWait(&state) == XR_SUCCESS && state.shouldRender == XR_TRUE && XR_SUCCEEDED(AppBegin()),
+           "Held-wait app frame was not fabricated");
+    auto start = std::chrono::steady_clock::now();
+    Expect(AppWait(&state) == XR_SUCCESS, "A held runtime wait failed the application's xrWaitFrame");
+    double elapsed = ElapsedMs(start);
+    Expect(elapsed >= 1900.0 && elapsed < 2600.0,
+           "A poll on a held runtime wait took " + std::to_string(elapsed) + "ms instead of its bound");
+    Expect(state.shouldRender == XR_FALSE, "A frame the runtime never granted did not report shouldRender FALSE");
+
+    // The held wait is not waited for again: each frame (submit, begin, the
+    // overlapping next poll) costs about two drain bounds. Probing Auto falls
+    // back to sequenced pacing after two held frames, and sequenced pacing
+    // suspends Turbo after three more.
+    int frames = 0;
+    while (!depthxr::TurboFrameTestPeer::AutoSuspended() && frames < 8) {
+        start = std::chrono::steady_clock::now();
+        Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
+               "A held runtime wait failed the application's xrEndFrame");
+        Expect(XR_SUCCEEDED(AppBegin()) && AppWait(&state) == XR_SUCCESS && state.shouldRender == XR_FALSE,
+               "A frame on a held runtime wait was not fabricated with shouldRender FALSE");
+        elapsed = ElapsedMs(start);
+        Expect(elapsed < 1000.0, "A frame on a held runtime wait took " + std::to_string(elapsed) + "ms");
+        ++frames;
+    }
+    Expect(depthxr::TurboFrameTestPeer::AutoSuspended() && frames == 5 &&
+               depthxr::TurboFrameTestPeer::PacingMode() == depthxr::TurboPacingMode::kSequenced,
+           "Held frames did not fall back to sequenced pacing and then suspend Turbo (frames=" +
+               std::to_string(frames) + ")");
+    Expect(runtime.EndCalls() == ends_before && runtime.BeginRejections() == 1 && runtime.StackedWaits() == 0 &&
+               runtime.MaxConcurrentWaits() == 1 && depthxr::TurboFrameTestPeer::Handoff().wait_valid,
+           "A frame was submitted without its runtime wait, a wait was stacked, or the held wait was discarded");
+
+    // Suspended Turbo keeps the held frame's ownership; the completed wait
+    // hands pacing to the frame thread, re-coupled to runtime pacing.
+    runtime.ReleaseWait();
+    Expect(runtime.WaitForWaitExited(2), "The held wait never returned after release");
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS &&
+               runtime.EndCalls() == ends_before + 1,
+           "Forwarding did not resume once the runtime completed the held wait");
+    Expect(depthxr::TurboFrameTestPeer::SequencedState() == depthxr::TurboFrameTestPeer::ActiveState() &&
+               !depthxr::TurboFrameTestPeer::Handoff().wait_valid,
+           "The completed held wait did not hand pacing to the frame thread");
+    Expect(XR_SUCCEEDED(AppBegin()) &&
+               depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS &&
+               runtime.EndCalls() == ends_before + 2,
+           "The frame polled during the hold was not submitted after it");
+    ExpectHealthyFrames(runtime, 16, "Held wait");
+    Expect(runtime.EndRejections() == 0 && runtime.BeginRejections() == 1 && runtime.ValidStructs(),
+           "Recovery from a held wait violated runtime frame order");
+}
+
+// Issue #88's exit: with the runtime still holding the wait, the game's frame
+// loop keeps running, reaches xrEndSession, and the session ends without it.
+void TestHeldWaitStillReachesSessionEnd() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    const auto end_info = FrameEndInfo();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS &&
+               runtime.WaitForWaitExited(1), "Held-exit test could not establish async pacing");
+    runtime.BlockWait();
+    Expect(AppFrame(end_info) == XR_SUCCESS && runtime.WaitForWaitEntered(2),
+           "Held-exit frame before the hold failed");
+    // One late-wait bound, then each frame costs only the drain bounds.
+    const auto start = std::chrono::steady_clock::now();
+    for (int frame = 0; frame < 3; ++frame) {
+        Expect(AppFrame(end_info) == XR_SUCCESS, "A frame on a held runtime wait failed");
+    }
+    const double loop_ms = ElapsedMs(start);
+    Expect(loop_ms < 4500.0, "Three frames on a held runtime wait took " + std::to_string(loop_ms) + "ms");
+    const auto end_start = std::chrono::steady_clock::now();
+    Expect(depthxr::TurboFrameTestPeer::EndFaultedSession() == XR_SUCCESS,
+           "xrEndSession failed while the runtime held Turbo's wait");
+    const double end_ms = ElapsedMs(end_start);
+    Expect(end_ms < 6000.0, "xrEndSession waited " + std::to_string(end_ms) + "ms on the held wait");
+    Expect(runtime.StackedWaits() == 0 && runtime.EndRejections() == 0 && runtime.MaxConcurrentWaits() == 1,
+           "Ending the session around a held wait violated runtime frame order");
+    runtime.ReleaseWait();
+    Expect(runtime.WaitForWaitExited(2), "The held wait never returned after release");
+    std::this_thread::sleep_for(50ms);
+    Expect(!depthxr::TurboFrameTestPeer::StaleCompletionPublished(),
+           "A held wait from an ended session published into the next session's state");
 }
 
 // PiOpenXR/Oculus/Varjo: the off-thread wait completes only after a submit.
@@ -1452,8 +1885,38 @@ void TestOwnershipDesyncRecoversInSession() {
            "Flight recorder omitted the fault or its recovery");
     Expect(std::filesystem::exists(depthxr::TurboFrameTestPeer::SnapshotPath(recorder_log)),
            "A fault did not freeze a recorder snapshot");
+    depthxr::TurboFrameTestPeer::ReleaseLog(recovery_path / "released.log");
     std::error_code error;
     std::filesystem::remove_all(recovery_path, error);
+}
+
+// Watched calls' enter and exit records stay in the flight recorder files.
+// The ordinary log's sampled bursts, the only timing history that outlives
+// the recorder's rotation, must still time each runtime wait, begin and
+// submission with records of their own.
+void TestSampledBurstsKeepRuntimeCalls() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kSequenced);
+    const auto directory = std::filesystem::temp_directory_path() /
+        ("vxr-burst-" + std::to_string(GetCurrentProcessId()));
+    std::filesystem::remove_all(directory);
+    depthxr::TurboFrameTestPeer::StartRecorder(directory / "frame.log");
+    const auto end_info = FrameEndInfo();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
+           "Sampled burst test could not establish pacing");
+    for (int frame = 0; frame < 4; ++frame) {
+        depthxr::TurboFrameTestPeer::SampleNextSecond();
+        Expect(AppFrame(end_info) == XR_SUCCESS, "Sampled burst test frame failed");
+    }
+    depthxr::TurboFrameTestPeer::EndRecorder();
+    const std::string log = depthxr::TurboFrameTestPeer::Log();
+    for (const char* event : {"begin.enter", "runtime.wait.enter", "runtime.wait.return", "runtime.begin.enter",
+                              "runtime.begin.return", "submit.enter", "submit.return"}) {
+        Expect(log.find(std::string(" event=") + event + " ") != std::string::npos,
+               std::string("The ordinary log's sampled burst has no ") + event + " record");
+    }
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
 }
 
 // An app poll already blocked on the async handoff when a failure hands frame
@@ -2014,12 +2477,1158 @@ void TestConfigReloadWhileFrameGenOwnsPacing() {
     std::filesystem::remove_all(recovery, error);
 }
 
+// velocity7's Star Citizen launch after a normal exit logged "frame cadence
+// stabilized; pipelining engages" right before the recovery block that kept
+// Turbo off, and nothing when the app's Turbo Safety clear let Turbo retry.
+void TestRecoveryBlockLogsWhatTurboDoes() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    const auto directory = std::filesystem::temp_directory_path() /
+                           ("vxr-recovery-log-" + std::to_string(GetCurrentProcessId()));
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    std::filesystem::create_directories(directory / "recovery");
+    depthxr::TurboFrameTestPeer::StartLog(directory / "recovery.log");
+    depthxr::TurboFrameTestPeer::ConfigureRecovery(directory / "recovery");
+    // An earlier process of this setup ended with Turbo armed. Process ids
+    // are multiples of four, so this one never runs.
+    const auto marker = directory / "recovery" / "4294967291-1-1.json";
+    std::ofstream(marker) << R"({"version": 1, "fingerprint": "turbo-frame-failure-simulation", "state": "armed", )"
+                          << R"("processCreated": "1", "processId": 4294967291, "updatedAtUnixMilliseconds": 1})";
+    depthxr::TurboFrameTestPeer::CadenceJustStabilized();
+    const auto end_info = FrameEndInfo();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
+           "A frame under a recovery block failed");
+    std::string text = depthxr::TurboFrameTestPeer::Log();
+    Expect(text.find("Turbo recovery: The previous Turbo session ended without a clean shutdown") != std::string::npos,
+           "The recovery block was not logged");
+    Expect(text.find("pipelining engages") == std::string::npos,
+           "A recovery block that keeps Turbo off logged that pipelining engages");
+
+    std::filesystem::remove(marker); // The app's Turbo Safety clear.
+    Expect(AppFrame(end_info) == XR_SUCCESS, "The frame after the app's clear failed");
+    text = depthxr::TurboFrameTestPeer::Log();
+    Expect(text.find("Turbo recovery block cleared via the VectorXR app; Turbo retries.") != std::string::npos,
+           "The app's clear of the recovery block was not logged");
+    Expect(text.find("Turbo mode enabled via") == std::string::npos && text.find("Turbo mode disabled via") == std::string::npos,
+           "The app's clear was logged as a toggle press");
+    depthxr::TurboFrameTestPeer::ConfigureRecovery({});
+    depthxr::TurboFrameTestPeer::ReleaseLog(directory / "released.log");
+    std::filesystem::remove_all(directory, error);
+}
+
+// Every FG session's flight recorder ended with the presenter's runtime.wait
+// open: xrDestroySession stopped it before the presenter was torn down.
+bool g_recorder_running_at_runtime_destroy = false;
+XrResult XRAPI_CALL RecordingDestroySession(XrSession) {
+    g_recorder_running_at_runtime_destroy = depthxr::TurboFrameTestPeer::RecorderRunning();
+    return XR_SUCCESS;
+}
+
+void TestDestroySessionRecordsUntilTheSessionIsGone() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    const auto directory = std::filesystem::temp_directory_path() /
+                           ("vxr-destroy-recorder-" + std::to_string(GetCurrentProcessId()));
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    depthxr::TurboFrameTestPeer::StartRecorder(directory / "frame.log");
+    Expect(depthxr::TurboFrameTestPeer::RecorderRunning(), "The flight recorder did not start");
+    Expect(depthxr::TurboFrameTestPeer::DestroySession(TestSession(), &RecordingDestroySession) == XR_SUCCESS,
+           "xrDestroySession failed");
+    Expect(g_recorder_running_at_runtime_destroy,
+           "xrDestroySession stopped the flight recorder before the runtime's session (and FG's presenter) was gone");
+    Expect(!depthxr::TurboFrameTestPeer::RecorderRunning(), "xrDestroySession left the flight recorder running");
+    depthxr::TurboFrameTestPeer::EndRecorder();
+    depthxr::TurboFrameTestPeer::ReleaseLog(directory / "released.log");
+    std::filesystem::remove_all(directory, error);
+}
+
+// DCS ends a session with xrEndSession, then xrDestroySession. A presenter
+// thread the runtime still holds after its xrEndSession is stopped or left
+// behind at xrDestroySession: xrEndSession must not stop the recorder first.
+XrResult XRAPI_CALL EndedSession(XrSession) { return XR_SUCCESS; }
+
+void TestEndSessionRecordsAPresenterLeftInTheRuntime() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    const auto directory = std::filesystem::temp_directory_path() /
+                           ("vxr-end-recorder-" + std::to_string(GetCurrentProcessId()));
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    depthxr::TurboFrameTestPeer::StartRecorder(directory / "frame.log");
+    depthxr::TurboFrameTestPeer::HoldPresenterInRuntime(true, std::chrono::milliseconds(40));
+    Expect(depthxr::TurboFrameTestPeer::EndSession(TestSession(), &EndedSession) == XR_SUCCESS, "xrEndSession failed");
+    Expect(depthxr::TurboFrameTestPeer::RecorderRunning(),
+           "xrEndSession stopped the flight recorder while Frame Generation's presenter was still in the runtime");
+    // The runtime lets the thread go; xrDestroySession tears it down.
+    depthxr::TurboFrameTestPeer::HoldPresenterInRuntime(false, std::chrono::milliseconds(2000));
+    g_recorder_running_at_runtime_destroy = false;
+    Expect(depthxr::TurboFrameTestPeer::DestroySession(TestSession(), &RecordingDestroySession) == XR_SUCCESS,
+           "xrDestroySession failed");
+    Expect(g_recorder_running_at_runtime_destroy, "The flight recorder stopped before the runtime's xrDestroySession");
+    Expect(!depthxr::TurboFrameTestPeer::RecorderRunning(), "xrDestroySession left the flight recorder running");
+
+    // A presenter that stopped: xrEndSession still stops the recorder.
+    depthxr::TurboFrameTestPeer::StartRecorder(directory / "frame.log");
+    Expect(depthxr::TurboFrameTestPeer::EndSession(TestSession(), &EndedSession) == XR_SUCCESS, "xrEndSession failed");
+    Expect(!depthxr::TurboFrameTestPeer::RecorderRunning(), "xrEndSession left the flight recorder running");
+    depthxr::TurboFrameTestPeer::EndRecorder();
+    depthxr::TurboFrameTestPeer::ReleaseLog(directory / "released.log");
+    std::filesystem::remove_all(directory, error);
+}
+
+// A settings refresh runs on whichever thread loaded the settings (often the
+// config watcher's), while the frame thread polls the metrics binding's edge
+// detector without the lock: the reset a refresh asks for happens on the
+// frame thread.
+void TestMetricsBindingResetWaitsForTheFrameThread() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    depthxr::TurboFrameTestPeer::ArmMetricsBinding();
+    depthxr::ConfigDocument config;
+    config.version = 3; // Metrics capture "always", where the harness had it off.
+    depthxr::TurboFrameTestPeer::ReloadConfig(config);
+    Expect(depthxr::TurboFrameTestPeer::MetricsBindingArmed(),
+           "A settings refresh reset the metrics binding's state outside the frame thread");
+    Expect(!depthxr::TurboFrameTestPeer::PollMetricsBinding() && !depthxr::TurboFrameTestPeer::MetricsBindingArmed(),
+           "The frame thread did not apply the reset a metrics setting change asked for");
+}
+
+// The debug "Frame pacing" line read FG's game-facing xrEndFrame (FG holding
+// the game to its rate, 59-118 ms in MSFS) as runtimeEndFrame, a runtime
+// stall, and printed Turbo's async handoff counters with Turbo off.
+void TestFramePacingLineUnderFrameGen() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    const auto directory = std::filesystem::temp_directory_path() /
+                           ("vxr-pacing-line-" + std::to_string(GetCurrentProcessId()));
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    depthxr::TurboFrameTestPeer::StartRecorder(directory / "pacing.log");
+    depthxr::TurboFrameTestPeer::PacingWindow(true, false);
+    std::string text = depthxr::TurboFrameTestPeer::Log();
+    Expect(text.find("framegen=1, frameGenEndFrame avg/max=") != std::string::npos,
+           "Under Frame Generation the pacing line should name FG's xrEndFrame");
+    Expect(text.find("runtimeEndFrame") == std::string::npos && text.find("asyncHandoff") == std::string::npos,
+           "Under Frame Generation the pacing line printed Turbo's runtime fields");
+    depthxr::TurboFrameTestPeer::PacingWindow(false, false);
+    text = depthxr::TurboFrameTestPeer::Log();
+    Expect(text.find("runtimeEndFrame avg/max=") != std::string::npos && text.find("asyncHandoff") == std::string::npos,
+           "With Turbo off the pacing line should keep the runtime's fields and leave out async handoffs");
+    depthxr::TurboFrameTestPeer::PacingWindow(false, true);
+    text = depthxr::TurboFrameTestPeer::Log();
+    Expect(text.find("asyncHandoff") != std::string::npos, "An engaged async pipeline should report its handoffs");
+    depthxr::TurboFrameTestPeer::SessionSettingsAfterYield();
+    text = depthxr::TurboFrameTestPeer::Log();
+    Expect(text.find("Turbo session settings (unused: Frame Generation paces this session): application=") !=
+               std::string::npos,
+           "After Turbo yielded to Frame Generation, its session settings were logged as if in use");
+    depthxr::TurboFrameTestPeer::EndRecorder();
+    depthxr::TurboFrameTestPeer::ReleaseLog(directory / "released.log");
+    std::filesystem::remove_all(directory, error);
+}
+
+// xrDestroySpace was forwarded before the layer let the space go: another
+// thread could still take it as Pivot's anchor and locate it after the
+// runtime destroyed it, and a space created meanwhile under the same handle
+// lost its tracking to the late cleanup.
+bool g_space_known_at_runtime_destroy = true;
+XrResult XRAPI_CALL CheckingDestroySpace(XrSpace space) {
+    g_space_known_at_runtime_destroy = depthxr::TurboFrameTestPeer::SpaceKnown(space);
+    return XR_SUCCESS;
+}
+XrResult XRAPI_CALL RefusingDestroySpace(XrSpace) { return XR_ERROR_RUNTIME_FAILURE; }
+
+void TestDestroySpaceLetsGoBeforeTheRuntime() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    const XrSpace space = reinterpret_cast<XrSpace>(static_cast<std::uintptr_t>(0x5150));
+    depthxr::TurboFrameTestPeer::TrackSpaceAsAnchor(space);
+    Expect(depthxr::TurboFrameTestPeer::DestroySpace(space, &CheckingDestroySpace) == XR_SUCCESS, "xrDestroySpace failed");
+    Expect(!g_space_known_at_runtime_destroy,
+           "The layer still tracked the space, as Pivot's anchor, while the runtime destroyed it");
+    depthxr::TurboFrameTestPeer::TrackSpaceAsAnchor(space);
+    Expect(depthxr::TurboFrameTestPeer::DestroySpace(space, &RefusingDestroySpace) == XR_ERROR_RUNTIME_FAILURE,
+           "A refused xrDestroySpace must reach the application");
+    Expect(depthxr::TurboFrameTestPeer::SpaceTrackedAsLocal(space),
+           "A space the runtime refused to destroy lost its classification");
+    Expect(depthxr::TurboFrameTestPeer::DestroySpace(space, &CheckingDestroySpace) == XR_SUCCESS &&
+               !depthxr::TurboFrameTestPeer::SpaceTrackedAsLocal(space),
+           "Cleaning up the test space failed");
+    depthxr::TurboFrameTestPeer::ForgetAnchor();
+}
+
 std::size_t Occurrences(const std::string& text, const std::string& needle) {
     std::size_t count = 0;
     for (std::size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + needle.size())) {
         ++count;
     }
     return count;
+}
+
+// --- Quadviews sessions that began in stereo -------------------------------------
+
+// Why a session with Quadviews on began in stereo. A game that did not enable
+// XR_VARJO_quad_views (DCS without Use Quad View) cannot select quad views, so
+// restarting it alone changes nothing; the restart advice is for a game that
+// could select them but was not offered them.
+void TestQuadViewsInactiveReasons() {
+    const std::string not_enabled(depthxr::QuadViewsInactiveReason(false, true));
+    Expect(not_enabled.find("did not enable XR_VARJO_quad_views") != std::string::npos &&
+               not_enabled.find("restarting alone will not change this") != std::string::npos &&
+               depthxr::QuadViewsInactiveReason(false, false) == not_enabled,
+           "A game that cannot select quad views was not told so");
+    const std::string not_offered(depthxr::QuadViewsInactiveReason(true, false));
+    Expect(not_offered.find("not offered") != std::string::npos && not_offered.find("restart the app") != std::string::npos,
+           "A game that was not offered quad views lost the restart advice");
+    const std::string chose_stereo(depthxr::QuadViewsInactiveReason(true, true));
+    Expect(chose_stereo.find("chose stereo") != std::string::npos && chose_stereo.find("restart") == std::string::npos,
+           "A game that was offered quad views and chose stereo was told to restart");
+}
+
+// The OSD tags Quadviews only while quad views can be rendered: before the
+// session begins, or once it began with the foveated inset. A Quadviews session
+// that began in stereo is not tagged.
+void TestQuadViewsOsdTagFollowsBegunConfiguration() {
+    using Peer = depthxr::TurboFrameTestPeer;
+    const auto tagged = [](std::optional<XrViewConfigurationType> begun) {
+        return Peer::QuadViewsSessionModules(begun).find("Quadviews") != std::string::npos;
+    };
+    Expect(tagged(std::nullopt), "A Quadviews session was not tagged before it began");
+    Expect(tagged(XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET),
+           "A session that began with the foveated inset was not tagged Quadviews");
+    Expect(!tagged(XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO),
+           "A Quadviews session that began in stereo was tagged Quadviews");
+}
+
+// --- Native Varjo foveation diagnostics ------------------------------------------
+
+// The focus views' FOV a fake Varjo runtime locates for every display time.
+constexpr XrFovf kVarjoFocusFov{-0.3f, 0.3f, 0.25f, -0.25f};
+int g_varjo_ends = 0;
+
+XrResult XRAPI_PTR VarjoLocateViews(XrSession, const XrViewLocateInfo*, XrViewState*, std::uint32_t capacity,
+                                    std::uint32_t* count, XrView* views) {
+    *count = 4;
+    if (capacity < 4) return capacity ? XR_ERROR_SIZE_INSUFFICIENT : XR_SUCCESS;
+    for (std::uint32_t view = 0; view < 4; ++view) {
+        views[view].pose = {{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
+        views[view].fov = view < 2 ? XrFovf{-0.9f, 0.9f, 0.9f, -0.9f} : kVarjoFocusFov;
+    }
+    return XR_SUCCESS;
+}
+XrResult XRAPI_PTR VarjoEndFrame(XrSession, const XrFrameEndInfo*) {
+    ++g_varjo_ends;
+    return XR_SUCCESS;
+}
+
+// Native Varjo quad views pass through xrEndFrame untouched while Pivot is
+// idle and focus sharpening is off. The submitted focus FOV check must still
+// count each frame, once, whichever path the frame takes (it sat in the
+// projection rewrite only, and read 0/0/0 for such sessions).
+void TestVarjoNativeSubmittedFocusCountsEveryFrame() {
+    using Peer = depthxr::TurboFrameTestPeer;
+    Peer::PrepareVarjoNative(&VarjoLocateViews, &VarjoEndFrame);
+    g_varjo_ends = 0;
+    std::array<XrCompositionLayerProjectionView, 4> views{};
+    for (std::uint32_t view = 0; view < 4; ++view) {
+        views[view] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+        views[view].pose.orientation.w = 1.0f;
+        views[view].fov = view < 2 ? XrFovf{-0.9f, 0.9f, 0.9f, -0.9f} : kVarjoFocusFov;
+        views[view].subImage.swapchain = reinterpret_cast<XrSwapchain>(static_cast<std::uintptr_t>(0x81 + view));
+        views[view].subImage.imageRect = {{0, 0}, {1024, 1024}};
+    }
+    XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    projection.viewCount = 4;
+    projection.views = views.data();
+    const auto* layer = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
+
+    // A frame located (unless `located` is false) and submitted for `time`,
+    // with its left focus view's left edge at `focus_left`.
+    auto frame = [&](XrTime time, bool located, float focus_left) {
+        if (located) {
+            XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO};
+            locate.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET;
+            locate.displayTime = time;
+            XrViewState state{XR_TYPE_VIEW_STATE};
+            std::array<XrView, 4> located_views{};
+            for (auto& view : located_views) view = {XR_TYPE_VIEW};
+            std::uint32_t count = 0;
+            const XrResult result =
+                Peer::Layer().LocateViews(TestSession(), &locate, &state, 4, &count, located_views.data());
+            Expect(result == XR_SUCCESS && count == 4 && located_views[2].fov.angleLeft == kVarjoFocusFov.angleLeft,
+                   "A native Varjo locate did not return the runtime's four views");
+        }
+        views[2].fov.angleLeft = focus_left;
+        XrFrameEndInfo info = FrameEndInfo();
+        info.displayTime = time;
+        info.layerCount = 1;
+        info.layers = &layer;
+        Expect(Peer::Layer().EndFrame(TestSession(), &info) == XR_SUCCESS, "A native Varjo frame did not end");
+    };
+    using Counts = std::array<std::uint64_t, 3>;
+
+    frame(30'000'000'000, true, kVarjoFocusFov.angleLeft);
+    Expect(Peer::VarjoSubmittedFocus() == Counts{1, 0, 0},
+           "A passed-through native Varjo frame's focus views were not checked");
+    frame(30'011'111'111, true, kVarjoFocusFov.angleLeft - 0.01f);
+    Expect(Peer::VarjoSubmittedFocus() == Counts{2, 1, 0},
+           "A passed-through native Varjo frame's other focus FOV was not counted");
+    frame(30'022'222'222, false, kVarjoFocusFov.angleLeft);
+    Expect(Peer::VarjoSubmittedFocus() == Counts{2, 1, 1},
+           "A native Varjo frame for a display time never located was not counted unlocated");
+    // Sharpening sends the frame through the projection rewrite: still one check.
+    Peer::SharpenVarjoFocus();
+    frame(30'033'333'333, true, kVarjoFocusFov.angleLeft);
+    Expect(Peer::VarjoSubmittedFocus() == Counts{3, 1, 1},
+           "A rewritten native Varjo frame's focus views were not checked exactly once");
+    Expect(g_varjo_ends == 4, "Every native Varjo frame must reach the runtime");
+    Peer::EndVarjoNative();
+}
+
+// --- Varjo's deferred releases with Frame Generation's queue substitution ----------
+
+namespace {
+
+// Direct3D 12 stand-ins with no device behind them, as far as Frame
+// Generation's queue substitution uses them: a queue's signals reach their
+// fence at once, or, while the test holds the queue (the game's GPU still
+// rendering), once it lets the queue run; a queue counts its waits.
+template <class Interface>
+class FakeD3D12 : public Interface {
+  public:
+    virtual ~FakeD3D12() = default;
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** object) override {
+        if (!object) return E_POINTER;
+        if (riid != __uuidof(IUnknown) && riid != __uuidof(Interface)) {
+            *object = nullptr;
+            return E_NOINTERFACE;
+        }
+        *object = static_cast<Interface*>(this);
+        AddRef();
+        return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++references_; }
+    ULONG STDMETHODCALLTYPE Release() override {
+        const ULONG left = --references_;
+        if (left == 0) delete this;
+        return left;
+    }
+    HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID, UINT*, void*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID, UINT, const void*) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE SetPrivateDataInterface(REFGUID, const IUnknown*) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE SetName(LPCWSTR) override { return S_OK; }
+
+  private:
+    std::atomic<ULONG> references_{1};
+};
+
+template <class T, class... Args>
+Microsoft::WRL::ComPtr<T> MakeFake(Args&&... args) {
+    Microsoft::WRL::ComPtr<T> object;
+    object.Attach(new T(std::forward<Args>(args)...));
+    return object;
+}
+
+class FakeD3D12Fence final : public FakeD3D12<ID3D12Fence> {
+  public:
+    FakeD3D12Fence(ID3D12Device* device, UINT64 value) : device_(device), value_(value) {}
+    HRESULT STDMETHODCALLTYPE GetDevice(REFIID riid, void** device) override {
+        return device_->QueryInterface(riid, device);
+    }
+    UINT64 STDMETHODCALLTYPE GetCompletedValue() override {
+        std::scoped_lock lock(mutex_);
+        return value_;
+    }
+    HRESULT STDMETHODCALLTYPE SetEventOnCompletion(UINT64 value, HANDLE event) override {
+        std::scoped_lock lock(mutex_);
+        if (value <= value_) {
+            SetEvent(event);
+        } else {
+            waiters_.emplace_back(value, event);
+        }
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE Signal(UINT64 value) override {
+        std::scoped_lock lock(mutex_);
+        value_ = value;
+        for (auto it = waiters_.begin(); it != waiters_.end();) {
+            if (it->first <= value_) {
+                SetEvent(it->second);
+                it = waiters_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        return S_OK;
+    }
+
+  private:
+    ID3D12Device* device_;
+    std::mutex mutex_;
+    UINT64 value_;
+    std::vector<std::pair<UINT64, HANDLE>> waiters_;
+};
+
+class FakeD3D12Queue final : public FakeD3D12<ID3D12CommandQueue> {
+  public:
+    FakeD3D12Queue(ID3D12Device* device, const D3D12_COMMAND_QUEUE_DESC& desc) : device_(device), desc_(desc) {}
+    // The work queued from now on runs only at Run.
+    void Hold() { held_ = true; }
+    void Run() {
+        held_ = false;
+        for (const auto& [fence, value] : pending_) fence->Signal(value);
+        pending_.clear();
+    }
+    std::uint64_t Waits() const { return waits_; }
+
+    HRESULT STDMETHODCALLTYPE GetDevice(REFIID riid, void** device) override {
+        return device_->QueryInterface(riid, device);
+    }
+    void STDMETHODCALLTYPE UpdateTileMappings(ID3D12Resource*, UINT, const D3D12_TILED_RESOURCE_COORDINATE*,
+                                              const D3D12_TILE_REGION_SIZE*, ID3D12Heap*, UINT,
+                                              const D3D12_TILE_RANGE_FLAGS*, const UINT*, const UINT*,
+                                              D3D12_TILE_MAPPING_FLAGS) override {}
+    void STDMETHODCALLTYPE CopyTileMappings(ID3D12Resource*, const D3D12_TILED_RESOURCE_COORDINATE*, ID3D12Resource*,
+                                            const D3D12_TILED_RESOURCE_COORDINATE*, const D3D12_TILE_REGION_SIZE*,
+                                            D3D12_TILE_MAPPING_FLAGS) override {}
+    void STDMETHODCALLTYPE ExecuteCommandLists(UINT, ID3D12CommandList* const*) override {}
+    void STDMETHODCALLTYPE SetMarker(UINT, const void*, UINT) override {}
+    void STDMETHODCALLTYPE BeginEvent(UINT, const void*, UINT) override {}
+    void STDMETHODCALLTYPE EndEvent() override {}
+    HRESULT STDMETHODCALLTYPE Signal(ID3D12Fence* fence, UINT64 value) override {
+        if (held_) {
+            pending_.emplace_back(fence, value);
+        } else {
+            fence->Signal(value);
+        }
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE Wait(ID3D12Fence*, UINT64) override {
+        ++waits_;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetTimestampFrequency(UINT64* frequency) override {
+        *frequency = 1;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetClockCalibration(UINT64* gpu, UINT64* cpu) override {
+        *gpu = *cpu = 0;
+        return S_OK;
+    }
+    D3D12_COMMAND_QUEUE_DESC STDMETHODCALLTYPE GetDesc() override { return desc_; }
+
+  private:
+    ID3D12Device* device_;
+    D3D12_COMMAND_QUEUE_DESC desc_;
+    bool held_{false};
+    std::vector<std::pair<Microsoft::WRL::ComPtr<ID3D12Fence>, UINT64>> pending_;
+    std::uint64_t waits_{0};
+};
+
+class FakeD3D12Device final : public FakeD3D12<ID3D12Device> {
+  public:
+    // The queue created on it last (the runtime's, once a session is prepared).
+    FakeD3D12Queue* LastQueue() const { return last_queue_; }
+
+    HRESULT STDMETHODCALLTYPE CreateCommandQueue(const D3D12_COMMAND_QUEUE_DESC* desc, REFIID riid,
+                                                 void** queue) override {
+        last_queue_ = new FakeD3D12Queue(this, *desc);
+        const HRESULT result = last_queue_->QueryInterface(riid, queue);
+        last_queue_->Release();
+        return result;
+    }
+    HRESULT STDMETHODCALLTYPE CreateFence(UINT64 value, D3D12_FENCE_FLAGS, REFIID riid, void** fence) override {
+        auto* created = new FakeD3D12Fence(this, value);
+        const HRESULT result = created->QueryInterface(riid, fence);
+        created->Release();
+        return result;
+    }
+    // Nothing else is used.
+    UINT STDMETHODCALLTYPE GetNodeCount() override { return 1; }
+    HRESULT STDMETHODCALLTYPE CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE, REFIID, void** out) override {
+        return None(out);
+    }
+    HRESULT STDMETHODCALLTYPE CreateGraphicsPipelineState(const D3D12_GRAPHICS_PIPELINE_STATE_DESC*, REFIID,
+                                                          void** out) override {
+        return None(out);
+    }
+    HRESULT STDMETHODCALLTYPE CreateComputePipelineState(const D3D12_COMPUTE_PIPELINE_STATE_DESC*, REFIID,
+                                                         void** out) override {
+        return None(out);
+    }
+    HRESULT STDMETHODCALLTYPE CreateCommandList(UINT, D3D12_COMMAND_LIST_TYPE, ID3D12CommandAllocator*,
+                                                ID3D12PipelineState*, REFIID, void** out) override {
+        return None(out);
+    }
+    HRESULT STDMETHODCALLTYPE CheckFeatureSupport(D3D12_FEATURE, void*, UINT) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE CreateDescriptorHeap(const D3D12_DESCRIPTOR_HEAP_DESC*, REFIID, void** out) override {
+        return None(out);
+    }
+    UINT STDMETHODCALLTYPE GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE) override { return 0; }
+    HRESULT STDMETHODCALLTYPE CreateRootSignature(UINT, const void*, SIZE_T, REFIID, void** out) override {
+        return None(out);
+    }
+    void STDMETHODCALLTYPE CreateConstantBufferView(const D3D12_CONSTANT_BUFFER_VIEW_DESC*,
+                                                    D3D12_CPU_DESCRIPTOR_HANDLE) override {}
+    void STDMETHODCALLTYPE CreateShaderResourceView(ID3D12Resource*, const D3D12_SHADER_RESOURCE_VIEW_DESC*,
+                                                    D3D12_CPU_DESCRIPTOR_HANDLE) override {}
+    void STDMETHODCALLTYPE CreateUnorderedAccessView(ID3D12Resource*, ID3D12Resource*,
+                                                     const D3D12_UNORDERED_ACCESS_VIEW_DESC*,
+                                                     D3D12_CPU_DESCRIPTOR_HANDLE) override {}
+    void STDMETHODCALLTYPE CreateRenderTargetView(ID3D12Resource*, const D3D12_RENDER_TARGET_VIEW_DESC*,
+                                                  D3D12_CPU_DESCRIPTOR_HANDLE) override {}
+    void STDMETHODCALLTYPE CreateDepthStencilView(ID3D12Resource*, const D3D12_DEPTH_STENCIL_VIEW_DESC*,
+                                                  D3D12_CPU_DESCRIPTOR_HANDLE) override {}
+    void STDMETHODCALLTYPE CreateSampler(const D3D12_SAMPLER_DESC*, D3D12_CPU_DESCRIPTOR_HANDLE) override {}
+    void STDMETHODCALLTYPE CopyDescriptors(UINT, const D3D12_CPU_DESCRIPTOR_HANDLE*, const UINT*, UINT,
+                                           const D3D12_CPU_DESCRIPTOR_HANDLE*, const UINT*,
+                                           D3D12_DESCRIPTOR_HEAP_TYPE) override {}
+    void STDMETHODCALLTYPE CopyDescriptorsSimple(UINT, D3D12_CPU_DESCRIPTOR_HANDLE, D3D12_CPU_DESCRIPTOR_HANDLE,
+                                                 D3D12_DESCRIPTOR_HEAP_TYPE) override {}
+    D3D12_RESOURCE_ALLOCATION_INFO STDMETHODCALLTYPE GetResourceAllocationInfo(UINT, UINT,
+                                                                               const D3D12_RESOURCE_DESC*) override {
+        return {};
+    }
+    D3D12_HEAP_PROPERTIES STDMETHODCALLTYPE GetCustomHeapProperties(UINT, D3D12_HEAP_TYPE) override { return {}; }
+    HRESULT STDMETHODCALLTYPE CreateCommittedResource(const D3D12_HEAP_PROPERTIES*, D3D12_HEAP_FLAGS,
+                                                      const D3D12_RESOURCE_DESC*, D3D12_RESOURCE_STATES,
+                                                      const D3D12_CLEAR_VALUE*, REFIID, void** out) override {
+        return None(out);
+    }
+    HRESULT STDMETHODCALLTYPE CreateHeap(const D3D12_HEAP_DESC*, REFIID, void** out) override { return None(out); }
+    HRESULT STDMETHODCALLTYPE CreatePlacedResource(ID3D12Heap*, UINT64, const D3D12_RESOURCE_DESC*,
+                                                   D3D12_RESOURCE_STATES, const D3D12_CLEAR_VALUE*, REFIID,
+                                                   void** out) override {
+        return None(out);
+    }
+    HRESULT STDMETHODCALLTYPE CreateReservedResource(const D3D12_RESOURCE_DESC*, D3D12_RESOURCE_STATES,
+                                                     const D3D12_CLEAR_VALUE*, REFIID, void** out) override {
+        return None(out);
+    }
+    HRESULT STDMETHODCALLTYPE CreateSharedHandle(ID3D12DeviceChild*, const SECURITY_ATTRIBUTES*, DWORD, LPCWSTR,
+                                                 HANDLE* handle) override {
+        if (handle) *handle = nullptr;
+        return E_NOTIMPL;
+    }
+    HRESULT STDMETHODCALLTYPE OpenSharedHandle(HANDLE, REFIID, void** out) override { return None(out); }
+    HRESULT STDMETHODCALLTYPE OpenSharedHandleByName(LPCWSTR, DWORD, HANDLE* handle) override {
+        if (handle) *handle = nullptr;
+        return E_NOTIMPL;
+    }
+    HRESULT STDMETHODCALLTYPE MakeResident(UINT, ID3D12Pageable* const*) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE Evict(UINT, ID3D12Pageable* const*) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE GetDeviceRemovedReason() override { return S_OK; }
+    void STDMETHODCALLTYPE GetCopyableFootprints(const D3D12_RESOURCE_DESC*, UINT, UINT, UINT64,
+                                                 D3D12_PLACED_SUBRESOURCE_FOOTPRINT*, UINT*, UINT64*,
+                                                 UINT64*) override {}
+    HRESULT STDMETHODCALLTYPE CreateQueryHeap(const D3D12_QUERY_HEAP_DESC*, REFIID, void** out) override {
+        return None(out);
+    }
+    HRESULT STDMETHODCALLTYPE SetStablePowerState(BOOL) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE CreateCommandSignature(const D3D12_COMMAND_SIGNATURE_DESC*, ID3D12RootSignature*,
+                                                     REFIID, void** out) override {
+        return None(out);
+    }
+    void STDMETHODCALLTYPE GetResourceTiling(ID3D12Resource*, UINT*, D3D12_PACKED_MIP_INFO*, D3D12_TILE_SHAPE*,
+                                             UINT*, UINT, D3D12_SUBRESOURCE_TILING*) override {}
+    LUID STDMETHODCALLTYPE GetAdapterLuid() override { return {}; }
+
+  private:
+    static HRESULT None(void** out) {
+        if (out) *out = nullptr;
+        return E_NOTIMPL;
+    }
+    FakeD3D12Queue* last_queue_{nullptr};
+};
+
+// The runtime's calls on one swapchain, held to OpenXR's order as strictly as
+// runtimes may: an image is acquired only while the application holds fewer
+// than all of them, waited for only when none is waited for and not yet
+// released, and released only once waited for.
+struct VarjoSwapchainRuntime {
+    std::uint32_t images{3};
+    std::uint32_t acquired{0};
+    std::uint32_t next{0};
+    bool waited{false};
+    // a(cquire), w(ait), r(elease) and the frames' e(nd), as the runtime saw them
+    std::string calls;
+    int refused{0};
+};
+VarjoSwapchainRuntime g_varjo_swapchain;
+
+XrResult XRAPI_PTR VarjoSwapchainEndFrame(XrSession, const XrFrameEndInfo*) {
+    g_varjo_swapchain.calls += 'e';
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_PTR VarjoAcquire(XrSwapchain, const XrSwapchainImageAcquireInfo*, std::uint32_t* index) {
+    auto& runtime = g_varjo_swapchain;
+    if (runtime.acquired == runtime.images) {
+        ++runtime.refused;
+        return XR_ERROR_CALL_ORDER_INVALID;
+    }
+    ++runtime.acquired;
+    if (index) *index = runtime.next;
+    runtime.next = (runtime.next + 1) % runtime.images;
+    runtime.calls += 'a';
+    return XR_SUCCESS;
+}
+XrResult XRAPI_PTR VarjoWait(XrSwapchain, const XrSwapchainImageWaitInfo*) {
+    auto& runtime = g_varjo_swapchain;
+    if (runtime.waited || runtime.acquired == 0) {
+        ++runtime.refused;
+        return XR_ERROR_CALL_ORDER_INVALID;
+    }
+    runtime.waited = true;
+    runtime.calls += 'w';
+    return XR_SUCCESS;
+}
+XrResult XRAPI_PTR VarjoRelease(XrSwapchain, const XrSwapchainImageReleaseInfo*) {
+    auto& runtime = g_varjo_swapchain;
+    if (!runtime.waited) {
+        ++runtime.refused;
+        return XR_ERROR_CALL_ORDER_INVALID;
+    }
+    runtime.waited = false;
+    --runtime.acquired;
+    runtime.calls += 'r';
+    return XR_SUCCESS;
+}
+
+} // namespace
+
+// On Varjo the releases of a quad views session's swapchains reach the runtime
+// only at the game's xrEndFrame. There they go as the game's own releases go
+// with Frame Generation's queue substitution: a layer Frame Generation shows
+// but does not capture (OpenKneeboard's kneeboard) is released once the game's
+// GPU work on it has run, and the runtime's queue, on which Frame Generation
+// writes its frames, never waits for the game's frame. 0.19.1 queued that wait
+// for every deferred release (issue #96: in Dynamic on a Varjo Aero, the
+// presenter's xrEndFrame waited for the game's GPU frame before nearly every
+// missed refresh).
+void TestVarjoDeferredReleasesKeepFrameGenUnblocked() {
+    using Peer = depthxr::TurboFrameTestPeer;
+    Peer::PrepareVarjoNative(&VarjoLocateViews, &VarjoSwapchainEndFrame);
+    g_varjo_swapchain = {};
+    const auto device = MakeFake<FakeD3D12Device>();
+    const auto game = MakeFake<FakeD3D12Queue>(
+        device.Get(), D3D12_COMMAND_QUEUE_DESC{D3D12_COMMAND_LIST_TYPE_DIRECT, 0, D3D12_COMMAND_QUEUE_FLAG_NONE, 0});
+    XrGraphicsBindingD3D12KHR binding{XR_TYPE_GRAPHICS_BINDING_D3D12_KHR};
+    binding.device = device.Get();
+    binding.queue = game.Get();
+    XrSessionCreateInfo create{XR_TYPE_SESSION_CREATE_INFO};
+    create.next = &binding;
+    const XrSwapchain kneeboard = reinterpret_cast<XrSwapchain>(static_cast<std::uintptr_t>(0x95));
+    Expect(Peer::DeferVarjoReleases(TestSession(), kneeboard, g_varjo_swapchain.images, &create,
+                                    {&VarjoAcquire, &VarjoWait, &VarjoRelease}),
+           "Varjo deferred releases: the session did not get Frame Generation's queue with shown layers lazy");
+    FakeD3D12Queue* runtime_queue = device->LastQueue();
+    auto& layer = Peer::Layer();
+    const std::string& calls = g_varjo_swapchain.calls;
+
+    // The game's frame: its projection's four views (the kneeboard is shown
+    // in Frame Generation's frames, ShowLayerLazily).
+    std::array<XrCompositionLayerProjectionView, 4> views{};
+    for (std::uint32_t view = 0; view < 4; ++view) {
+        views[view] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+        views[view].pose.orientation.w = 1.0f;
+        views[view].fov = view < 2 ? XrFovf{-0.9f, 0.9f, 0.9f, -0.9f} : kVarjoFocusFov;
+        views[view].subImage.swapchain = reinterpret_cast<XrSwapchain>(static_cast<std::uintptr_t>(0x81 + view));
+        views[view].subImage.imageRect = {{0, 0}, {1024, 1024}};
+    }
+    XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    projection.viewCount = 4;
+    projection.views = views.data();
+    const auto* projection_layer = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
+    XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+    quad.pose.orientation.w = 1.0f;
+    quad.subImage.swapchain = kneeboard;
+    quad.subImage.imageRect = {{0, 0}, {512, 512}};
+    quad.size = {0.3f, 0.3f};
+    const std::array<const XrCompositionLayerBaseHeader*, 2> shown_layers{
+        projection_layer, reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad)};
+    XrTime time = 40'000'000'000;
+    auto end = [&](std::uint32_t layer_count, const std::string& what) {
+        XrFrameEndInfo info = FrameEndInfo();
+        info.displayTime = (time += 11'111'111);
+        info.layerCount = layer_count;
+        info.layers = shown_layers.data();
+        Expect(layer.EndFrame(TestSession(), &info) == XR_SUCCESS,
+               "Varjo deferred releases: " + what + ": the frame did not end");
+    };
+    // The kneeboard drawn (its GPU work queued) and released, then the frame
+    // ended.
+    auto frame = [&](const std::string& what) {
+        std::uint32_t index = 0;
+        const XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO, nullptr, XR_INFINITE_DURATION};
+        const XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+        Expect(layer.AcquireSwapchainImage(kneeboard, nullptr, &index) == XR_SUCCESS &&
+                   layer.WaitSwapchainImage(kneeboard, &wait) == XR_SUCCESS,
+               "Varjo deferred releases: " + what + ": the kneeboard's image was not handed out (" + calls + ")");
+        const std::size_t before = calls.size();
+        Expect(layer.ReleaseSwapchainImage(kneeboard, &release) == XR_SUCCESS && calls.size() == before,
+               "Varjo deferred releases: " + what + ": the release was not deferred until xrEndFrame (" + calls + ")");
+        end(1, what);
+    };
+    auto waits = [&] { return std::to_string(runtime_queue->Waits()) + " runtime queue waits"; };
+
+    // Before a frame of Frame Generation's showed the kneeboard lazily, its
+    // release goes at xrEndFrame with the runtime's queue waiting for the
+    // game's work on it.
+    game->Hold();
+    frame("first frame");
+    Expect(calls == "awre" && runtime_queue->Waits() == 1,
+           "Varjo deferred releases: a release before the layer was shown lazily did not go at xrEndFrame after the "
+           "game's work (" + calls + ", " + waits() + ")");
+    game->Run();
+    Peer::ShowLayerLazily(kneeboard);
+
+    // Shown lazily: a deferred release whose work has not run is held back
+    // at xrEndFrame, and the runtime's queue does not wait for the game.
+    game->Hold();
+    frame("second frame");
+    Expect(calls == "awreawe" && runtime_queue->Waits() == 1,
+           "Varjo deferred releases: a deferred release of a layer shown lazily made the runtime's queue wait for "
+           "the game's frame (" + calls + ", " + waits() + ")");
+    Peer::ShowLayerLazily(kneeboard);
+    Expect(calls == "awreawe", "Varjo deferred releases: a frame showing the layer got a release whose work has not run");
+    // Its work runs: the release reaches the runtime at the game's next call
+    // on the swapchain, before it; the next one, done by xrEndFrame, goes there.
+    game->Run();
+    frame("third frame");
+    Expect(calls == "awreawerawre" && runtime_queue->Waits() == 1,
+           "Varjo deferred releases: releases whose work has run did not reach the runtime unwaited (" + calls + ", " +
+               waits() + ")");
+
+    // A frame passing through (Frame Generation not showing its own images)
+    // that shows the kneeboard: the release held back goes first, the
+    // runtime's queue waiting for its work, before the frame reaches the runtime.
+    game->Hold();
+    frame("fourth frame");
+    end(2, "a frame passing through");
+    Expect(calls == "awreawerawreawere" && runtime_queue->Waits() == 2,
+           "Varjo deferred releases: a frame passing through reached the runtime before the release it shows (" +
+               calls + ", " + waits() + ")");
+    game->Run();
+    const auto shown = Peer::ShownLayers();
+    Expect(shown.releases == 3 && shown.cpu_waits == 0 && shown.gpu_waits == 0 && g_varjo_swapchain.refused == 0,
+           "Varjo deferred releases: the shown-layer counts are off (" + std::to_string(shown.releases) + " lazy, " +
+               std::to_string(shown.cpu_waits) + " CPU waits, " + std::to_string(shown.gpu_waits) +
+               " queue waits, " + std::to_string(g_varjo_swapchain.refused) + " calls refused)");
+    Peer::EndVarjoReleases(kneeboard);
+    Peer::EndVarjoNative();
+}
+
+namespace {
+
+// What the runtime's xrCreateSession was given: the queue named in its
+// Direct3D 12 binding and that queue's priority, and whether the session's
+// shown layers were lazy.
+ID3D12CommandQueue* g_created_queue = nullptr;
+INT g_created_priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
+bool g_created_shown_lazy = false;
+
+// Records what it was given and refuses the session (the layer then lets
+// the queue substitution go).
+XrResult XRAPI_PTR RefusingCreateSession(XrInstance, const XrSessionCreateInfo* info, XrSession*) {
+    const auto* binding = static_cast<const XrGraphicsBindingD3D12KHR*>(info->next);
+    if (binding->type == XR_TYPE_GRAPHICS_BINDING_D3D12_KHR && binding->queue) {
+        g_created_queue = binding->queue;
+        g_created_priority = binding->queue->GetDesc().Priority;
+    }
+    g_created_shown_lazy = depthxr::TurboFrameTestPeer::ShownLayersLazy();
+    return XR_ERROR_RUNTIME_FAILURE;
+}
+
+} // namespace
+
+// A Direct3D 12 game with Frame Generation on: the runtime gets a queue of
+// Frame Generation's own, and the layers it shows but Frame Generation does
+// not capture are kept lazy (OpenKneeboard's kneeboard in MSFS or DCS), not
+// only in Vulkan games as in 0.19.1; VECTORXR_FRAMEGEN_SHOWN_LAYERS=off keeps
+// them as they were.
+void TestFrameGenSessionKeepsShownLayersLazy() {
+    using Peer = depthxr::TurboFrameTestPeer;
+    const auto device = MakeFake<FakeD3D12Device>();
+    const auto game = MakeFake<FakeD3D12Queue>(
+        device.Get(), D3D12_COMMAND_QUEUE_DESC{D3D12_COMMAND_LIST_TYPE_DIRECT, 0, D3D12_COMMAND_QUEUE_FLAG_NONE, 0});
+    XrGraphicsBindingD3D12KHR binding{XR_TYPE_GRAPHICS_BINDING_D3D12_KHR};
+    binding.device = device.Get();
+    binding.queue = game.Get();
+    XrSessionCreateInfo create{XR_TYPE_SESSION_CREATE_INFO};
+    create.next = &binding;
+    for (const char* setting : {"", "off"}) {
+        _putenv_s("VECTORXR_FRAMEGEN_SHOWN_LAYERS", setting);
+        g_created_queue = nullptr;
+        g_created_priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
+        g_created_shown_lazy = false;
+        const XrResult result = Peer::CreateFrameGenSession(&create, &RefusingCreateSession);
+        const bool lazy = *setting == '\0';
+        Expect(result == XR_ERROR_RUNTIME_FAILURE && g_created_queue && g_created_queue != game.Get() &&
+                   g_created_priority == D3D12_COMMAND_QUEUE_PRIORITY_HIGH && g_created_shown_lazy == lazy,
+               std::string("A Direct3D 12 Frame Generation session ") +
+                   (lazy ? "did not keep shown layers lazy by default"
+                         : "kept shown layers lazy with VECTORXR_FRAMEGEN_SHOWN_LAYERS=off") +
+                   (g_created_queue == game.Get() ? " (the runtime got the game's queue)" : ""));
+        Expect(!Peer::ShownLayersLazy(), "A refused session's queue substitution was kept");
+    }
+    _putenv_s("VECTORXR_FRAMEGEN_SHOWN_LAYERS", "");
+}
+
+// Frames whose quad views Frame Generation claims (four views, given to it)
+// and frames forwarded as composed (two views) alternate when Frame
+// Generation's capture misses: that is not a topology change each time, and
+// must not spend the session's twelve topology lines.
+void TestTopologyFollowsFrameGenClaimsApart() {
+    using Peer = depthxr::TurboFrameTestPeer;
+    Peer::ResetTopology();
+    std::array<XrCompositionLayerProjectionView, 4> views{};
+    for (auto& view : views) {
+        view = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+        view.pose.orientation.w = 1.0f;
+    }
+    XrCompositionLayerProjection quad{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    quad.viewCount = 4;
+    quad.views = views.data();
+    XrCompositionLayerProjection stereo = quad;
+    stereo.viewCount = 2;
+    const auto* quad_layer = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
+    const auto* stereo_layer = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&stereo);
+    XrFrameEndInfo quad_frame = FrameEndInfo();
+    quad_frame.layerCount = 1;
+    quad_frame.layers = &quad_layer;
+    XrFrameEndInfo stereo_frame = quad_frame;
+    stereo_frame.layers = &stereo_layer;
+    int budget = 12;
+    for (int flip = 0; flip < 8; ++flip) {
+        budget = Peer::ObserveTopology(&quad_frame, true);
+        budget = Peer::ObserveTopology(&stereo_frame, false);
+    }
+    Expect(budget == 10, "Frames moving between Frame Generation's claim and forwarding spent the topology budget");
+    Expect(Peer::ObserveTopology(&quad_frame, false) == 9,
+           "A forwarded frame's own topology change was not logged");
+    Peer::ResetTopology();
+}
+
+// Star Citizen submits a projection and a HUD quad layer. The topology line
+// names each layer's space by kind (never the handle), and a quad's size,
+// pose and eye: a VIEW-space HUD moves with the head, a LOCAL one steps at the
+// game's rate. A quad moving between spaces is a topology change; its pose or
+// size changing is not (it would spend the budget every frame).
+void TestTopologyNamesLayerSpaces() {
+    using Peer = depthxr::TurboFrameTestPeer;
+    const auto directory = std::filesystem::temp_directory_path() /
+                           ("vxr-topology-spaces-" + std::to_string(GetCurrentProcessId()));
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    std::filesystem::create_directories(directory);
+    Peer::StartLog(directory / "topology.log");
+    Peer::ResetTopology();
+    const XrSpace view = reinterpret_cast<XrSpace>(0x5101), local = reinterpret_cast<XrSpace>(0x5102);
+    Peer::TrackSpaces(view, local);
+
+    std::array<XrCompositionLayerProjectionView, 2> views{};
+    for (auto& eye : views) {
+        eye = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+        eye.pose.orientation.w = 1.0f;
+    }
+    XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    projection.space = local;
+    projection.viewCount = 2;
+    projection.views = views.data();
+    XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+    quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+    quad.space = view;
+    quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+    quad.size = {1.6f, 0.9f};
+    quad.pose.position = {0.0f, -0.1f, -1.5f};
+    quad.pose.orientation.w = 1.0f;
+    const std::array<const XrCompositionLayerBaseHeader*, 2> layers{
+        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection),
+        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad)};
+    XrFrameEndInfo frame = FrameEndInfo();
+    frame.layerCount = 2;
+    frame.layers = layers.data();
+    const std::string prefix = "Composition layer topology forwarded downstream by VectorXR: ";
+
+    Expect(Peer::ObserveTopology(&frame, false) == 11, "The first frame's topology was not logged");
+    std::string text = Peer::Log();
+    Expect(text.find(prefix + "layerCount=2, blendMode=1, layers=[0:projection(type=35,flags=0x0,views=2,space=LOCAL), "
+                              "1:quad(type=36,flags=0x2,space=VIEW,size=1.60x0.90,"
+                              "pose=(0.000,-0.100,-1.500|0.000,0.000,0.000,1.000),eye=0)].") != std::string::npos,
+           "The topology line did not name the layers' spaces and the quad's size, pose and eye");
+
+    // The HUD moves and resizes: the same topology.
+    quad.size = {2.0f, 1.125f};
+    quad.pose.position = {0.2f, 0.0f, -1.2f};
+    quad.pose.orientation = {0.0f, 0.0871557f, 0.0f, 0.9961947f};
+    Expect(Peer::ObserveTopology(&frame, false) == 11, "A quad's new pose or size spent the topology budget");
+    Expect(Occurrences(Peer::Log(), prefix) == 1, "A quad's new pose or size was logged as a topology change");
+
+    // The HUD moves to LOCAL space: a change, logged once.
+    quad.space = local;
+    quad.pose.position = {-0.0004f, 1.1f, -1.2f};
+    Expect(Peer::ObserveTopology(&frame, false) == 10, "A quad moving to LOCAL space was not one topology change");
+    Expect(Peer::ObserveTopology(&frame, false) == 10, "An unchanged frame spent the topology budget");
+    text = Peer::Log();
+    Expect(Occurrences(text, prefix) == 2 &&
+               text.find("1:quad(type=36,flags=0x2,space=LOCAL,size=2.00x1.13,"
+                         "pose=(0.000,1.100,-1.200|0.000,0.087,0.000,0.996),eye=0)].") != std::string::npos,
+           "A quad moving to LOCAL space was not logged with its new space");
+
+    Peer::ForgetSpaces(view, local);
+    Peer::ResetTopology();
+    Peer::ReleaseLog(directory / "released.log");
+    std::filesystem::remove_all(directory, error);
+}
+
+XrResult XRAPI_CALL LocatedSpace(XrSpace, XrSpace, XrTime, XrSpaceLocation* location) {
+    location->locationFlags = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT;
+    location->pose.orientation.w = 1.0f;
+    return XR_SUCCESS;
+}
+
+// Star Citizen's images turn less far than the head poses it submits. The
+// flight recorder's `locspace` row tells when the game locates VIEW space
+// (its camera), against its xrLocateViews (`locate`): once per time, with
+// both spaces' kinds, and never for locates of other spaces.
+void TestRecorderRecordsViewSpaceLocates() {
+    using Peer = depthxr::TurboFrameTestPeer;
+    const auto directory = std::filesystem::temp_directory_path() /
+                           ("vxr-locspace-" + std::to_string(GetCurrentProcessId()));
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    const auto log = Peer::StartRecorder(directory / "frame.log");
+    const XrSpace view = reinterpret_cast<XrSpace>(0x5201), local = reinterpret_cast<XrSpace>(0x5202);
+    const XrSpace action = reinterpret_cast<XrSpace>(0x5203);
+    Peer::TrackSpaces(view, local);
+    constexpr XrTime kFrame = 30'000'000'000, kNext = 30'011'111'111, kLater = 30'022'222'222;
+    // VIEW in LOCAL, then again and the other way round at the same time
+    // (DCS locates VIEW space several times a frame): one row.
+    Expect(Peer::LocateSpace(view, local, kFrame, &LocatedSpace) == XR_SUCCESS &&
+               Peer::LocateSpace(view, local, kFrame, &LocatedSpace) == XR_SUCCESS &&
+               Peer::LocateSpace(local, view, kFrame, &LocatedSpace) == XR_SUCCESS,
+           "A VIEW-space locate failed");
+    // An action space in LOCAL: no row.
+    Expect(Peer::LocateSpace(action, local, kNext, &LocatedSpace) == XR_SUCCESS, "An action-space locate failed");
+    // LOCAL in VIEW at a new time: a row.
+    Expect(Peer::LocateSpace(local, view, kLater, &LocatedSpace) == XR_SUCCESS, "A later VIEW-space locate failed");
+    Peer::EndRecorder();
+    std::string recording;
+    for (unsigned part = 0; part < 2; ++part) {
+        std::ifstream stream(depthxr::TurboTimingTrace::RecorderPath(log, part));
+        recording.append(std::istreambuf_iterator<char>(stream), {});
+    }
+    Expect(Occurrences(recording, " event=locspace ") == 2,
+           "The recorder did not hold one locspace row per VIEW-space locate time");
+    Expect(recording.find(" event=locspace a=" + std::to_string(kFrame) + " b=1 c=2 ") != std::string::npos,
+           "VIEW located in LOCAL was not recorded with its time and kinds (1 VIEW, 2 LOCAL)");
+    Expect(recording.find(" event=locspace a=" + std::to_string(kLater) + " b=2 c=1 ") != std::string::npos,
+           "LOCAL located in VIEW was not recorded with its time and kinds");
+    Expect(recording.find(" event=locspace a=" + std::to_string(kNext) + " ") == std::string::npos,
+           "An action space's locate was recorded as a VIEW-space locate");
+    Peer::ForgetSpaces(view, local);
+    Peer::ReleaseLog(directory / "released.log");
+    std::filesystem::remove_all(directory, error);
+}
+
+XrResult XRAPI_CALL LocatedStereoViews(XrSession, const XrViewLocateInfo*, XrViewState* state, std::uint32_t capacity,
+                                       std::uint32_t* count, XrView* views) {
+    *count = 2;
+    if (state) {
+        state->viewStateFlags = XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT |
+                                XR_VIEW_STATE_ORIENTATION_TRACKED_BIT | XR_VIEW_STATE_POSITION_TRACKED_BIT;
+    }
+    if (capacity == 0) {
+        return XR_SUCCESS;
+    }
+    for (std::uint32_t eye = 0; eye < 2 && eye < capacity; ++eye) {
+        views[eye].pose.position = {eye ? 0.032f : -0.032f, 1.2f, 0.1f};
+        views[eye].pose.orientation = {0.0f, 0.6f, 0.0f, 0.8f};
+        views[eye].fov = {-0.8f, 0.8f, 0.8f, -0.8f};
+    }
+    return XR_SUCCESS;
+}
+
+// The rows of Frame Generation's trace named `name`, from `id` on (the
+// steady time and thread vary).
+std::vector<std::string> FrameGenTraceRows(const std::string& csv, const std::string& name) {
+    std::vector<std::string> rows;
+    std::istringstream lines(csv);
+    for (std::string line; std::getline(lines, line);) {
+        if (line.rfind(name + ",", 0) != 0) {
+            continue;
+        }
+        std::size_t at = 0;
+        for (int field = 0; field < 3 && at != std::string::npos; ++field) {
+            at = line.find(',', at + 1);
+        }
+        rows.push_back(at == std::string::npos ? std::string() : line.substr(at + 1));
+    }
+    return rows;
+}
+
+// Star Citizen under Frame Generation: is its HUD quad VIEW-space, and does it
+// submit the poses the runtime gave its xrLocateViews? At debug logging, Frame
+// Generation's trace records the game's first quad layer beside its views
+// (end.q, end.q0) and the runtime's own answer to its stereo locate (loc,
+// loc.v0, loc.v1), each with the kind of space. A count query and a quad
+// views locate record nothing.
+void TestFrameGenTraceRecordsQuadAndLocates() {
+    using Peer = depthxr::TurboFrameTestPeer;
+    FakeRuntime runtime;
+    runtime.NoOpenFrame();
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kSequenced);
+    Peer::FreshSession();
+    const auto directory = std::filesystem::temp_directory_path() /
+                           ("vxr-framegen-trace-rows-" + std::to_string(GetCurrentProcessId()));
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    // Debug logging, so the session's trace starts with Frame Generation.
+    const auto log = Peer::StartRecorder(directory / "framegen.log");
+    int executes = 0;
+    Peer::PrepareFrameGen(
+        TestSession(), [&](const void*, std::string&) { return std::make_unique<FgGpu>(&executes); },
+        {FgFormats, FgCreate, FgDestroy, FgImages, FgAcquire, FgWait, FgRelease});
+    auto& framegen = Peer::FrameGen();
+    Expect(Peer::FrameGenOwnsPacing() && framegen.Trace().Enabled(),
+           "Frame Generation did not own pacing with its trace on at debug logging");
+    const XrSpace view = reinterpret_cast<XrSpace>(0x5301), local = reinterpret_cast<XrSpace>(0x5302);
+    Peer::TrackSpaces(view, local);
+
+    XrFrameState state{XR_TYPE_FRAME_STATE};
+    Expect(AppWait(&state) == XR_SUCCESS && AppBegin() == XR_SUCCESS, "The game's frame did not begin");
+    XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO};
+    locate.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    locate.displayTime = state.predictedDisplayTime;
+    locate.space = local;
+    std::array<XrView, 4> located{};
+    for (XrView& eye : located) {
+        eye = {XR_TYPE_VIEW};
+    }
+    std::uint32_t count = 0;
+    Expect(Peer::LocateRuntimeViews(locate, 0, &count, nullptr, &LocatedStereoViews) == XR_SUCCESS && count == 2 &&
+               Peer::LocateRuntimeViews(locate, 2, &count, located.data(), &LocatedStereoViews) == XR_SUCCESS,
+           "The game's stereo locate failed");
+    XrViewLocateInfo quad_locate = locate;
+    quad_locate.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_QUAD_VARJO;
+    Expect(Peer::LocateRuntimeViews(quad_locate, 4, &count, located.data(), &LocatedStereoViews) == XR_SUCCESS,
+           "The game's quad views locate failed");
+
+    const XrSwapchain left = reinterpret_cast<XrSwapchain>(0x81), right = reinterpret_cast<XrSwapchain>(0x82);
+    const XrSwapchain hud = reinterpret_cast<XrSwapchain>(0x83);
+    framegen.TrackSwapchain(left, kFrameGenFormat, 1, XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT);
+    framegen.TrackSwapchain(right, kFrameGenFormat, 1, XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT);
+    framegen.NoteRelease(left, 1);
+    framegen.NoteRelease(right, 1);
+    std::array<XrCompositionLayerProjectionView, 2> views{};
+    for (int eye = 0; eye < 2; ++eye) {
+        views[eye] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+        views[eye].pose = located[eye].pose;
+        views[eye].fov = located[eye].fov;
+        views[eye].subImage.swapchain = eye ? right : left;
+        views[eye].subImage.imageRect = {{0, 0}, {1024, 1024}};
+    }
+    XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    projection.space = local;
+    projection.viewCount = 2;
+    projection.views = views.data();
+    XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+    quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+    quad.space = view;
+    quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+    quad.subImage.swapchain = hud;
+    quad.subImage.imageRect = {{0, 0}, {2560, 1440}};
+    quad.size = {1.6f, 0.9f};
+    quad.pose.position = {0.0f, -0.1f, -1.5f};
+    quad.pose.orientation.w = 1.0f;
+    const std::array<const XrCompositionLayerBaseHeader*, 2> layers{
+        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection),
+        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad)};
+    XrFrameEndInfo info = FrameEndInfo();
+    info.displayTime = state.predictedDisplayTime;
+    info.layerCount = 2;
+    info.layers = layers.data();
+    Expect(Peer::ForwardEndFrame(TestSession(), &info) == XR_SUCCESS, "The game's frame did not end");
+    Peer::StopFrameGen(); // and its trace, whose file is then complete
+    Peer::EndRecorder();
+
+    auto csv_path = log;
+    csv_path.replace_extension(".framegen-trace.csv");
+    std::ifstream stream(csv_path, std::ios::binary);
+    const std::string csv(std::istreambuf_iterator<char>(stream), {});
+    const std::string time = std::to_string(state.predictedDisplayTime);
+    const std::string swapchain = std::to_string(reinterpret_cast<std::int64_t>(hud));
+    using Rows = std::vector<std::string>;
+    // id=layer index, a=kind (1 VIEW), b c=size (um), d=swapchain, e=eye.
+    Expect(FrameGenTraceRows(csv, "end.q") == Rows{"1,1,1600000,900000," + swapchain + ",0,0"},
+           "The trace did not record the game's quad layer with its space's kind, size, swapchain and eye");
+    // id=kind; a b c=position (um), d e f=orientation xyz (1e-6).
+    Expect(FrameGenTraceRows(csv, "end.q0") == Rows{"1,0,-100000,-1500000,0,0,0"},
+           "The trace did not record the game's quad pose");
+    // a=time asked, b=kind (2 LOCAL), c=views, d=view state flags.
+    Expect(FrameGenTraceRows(csv, "loc") == Rows{"0," + time + ",2,2,15,0,0"},
+           "The trace did not record the game's stereo locate once (not its count query or quad views locate)");
+    Expect(FrameGenTraceRows(csv, "loc.v0") == Rows{"0,-32000,1200000,100000,0,600000,0"} &&
+               FrameGenTraceRows(csv, "loc.v1") == Rows{"0,32000,1200000,100000,0,600000,0"},
+           "The trace did not record the runtime's located poses");
+    Expect(FrameGenTraceRows(csv, "end.v0") == Rows{"0,-32000,1200000,100000,0,600000,0"},
+           "The game's submitted pose did not show beside the runtime's (end.v0)");
+    Peer::ForgetSpaces(view, local);
+    Peer::ReleaseLog(directory / "released.log");
+    std::filesystem::remove_all(directory, error);
+}
+
+// With Depth's convergence set, the application is given (and submits)
+// focus FOVs LocateViews shifted. The submitted focus check compares them
+// with those, not with the runtime's raw ones: a game that submits what it
+// located is no mismatch (it read as one on every frame).
+void TestVarjoNativeSubmittedFocusWithConvergence() {
+    using Peer = depthxr::TurboFrameTestPeer;
+    Peer::PrepareVarjoNative(&VarjoLocateViews, &VarjoEndFrame);
+    Peer::ConvergeVarjoDepth(0.05);
+    const auto frame = [&](XrTime time, float extra_left) {
+        XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO};
+        locate.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET;
+        locate.displayTime = time;
+        XrViewState state{XR_TYPE_VIEW_STATE};
+        std::array<XrView, 4> located{};
+        for (auto& view : located) view = {XR_TYPE_VIEW};
+        std::uint32_t count = 0;
+        Expect(Peer::Layer().LocateViews(TestSession(), &locate, &state, 4, &count, located.data()) == XR_SUCCESS &&
+                   count == 4,
+               "A native Varjo locate with convergence failed");
+        Expect(located[2].fov.angleLeft != kVarjoFocusFov.angleLeft,
+               "Convergence did not shift the located focus FOV (the test would prove nothing)");
+        std::array<XrCompositionLayerProjectionView, 4> views{};
+        for (std::uint32_t view = 0; view < 4; ++view) {
+            views[view] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+            views[view].pose = located[view].pose;
+            views[view].fov = located[view].fov;
+            views[view].subImage.swapchain = reinterpret_cast<XrSwapchain>(static_cast<std::uintptr_t>(0x91 + view));
+            views[view].subImage.imageRect = {{0, 0}, {1024, 1024}};
+        }
+        views[2].fov.angleLeft += extra_left;
+        XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+        projection.viewCount = 4;
+        projection.views = views.data();
+        const auto* layer = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
+        XrFrameEndInfo info = FrameEndInfo();
+        info.displayTime = time;
+        info.layerCount = 1;
+        info.layers = &layer;
+        Expect(Peer::Layer().EndFrame(TestSession(), &info) == XR_SUCCESS, "A native Varjo frame did not end");
+    };
+    using Counts = std::array<std::uint64_t, 3>;
+    frame(31'000'000'000, 0.0f);
+    Expect(Peer::VarjoSubmittedFocus() == Counts{1, 0, 0},
+           "Focus views submitted as located with convergence were counted as a mismatch");
+    frame(31'011'111'111, -0.01f);
+    Expect(Peer::VarjoSubmittedFocus() == Counts{2, 1, 0},
+           "Focus views submitted with other FOVs than located (with convergence) were not counted");
+    Peer::EndVarjoNative();
 }
 
 // A settings file with a key this layer does not know (a newer app's) still
@@ -2100,9 +3709,12 @@ int main() {
     // forwarding, block the application unboundedly, or stack a runtime wait.
     TestConformantLateWaitIsWaitedFor();
     TestStuckWaitDropsFrameThenResumes();
+    TestHeldWaitKeepsFrameLoopRunning();
+    TestHeldWaitStillReachesSessionEnd();
     TestInterlockedRuntimeAutoFallsBackToSequenced();
     TestInterlockedForcedAsyncSuspendsAndKeepsRunning();
     TestOwnershipDesyncRecoversInSession();
+    TestSampledBurstsKeepRuntimeCalls();
     TestFailedBeginProbesBeforeWaiting(false);
     TestFailedBeginProbesBeforeWaiting(true);
     TestAsyncWaitFailureRecoversOnFrameThread();
@@ -2143,8 +3755,24 @@ int main() {
     TestAutoHasNoRuntimeMappings();
     TestSequencedStallPolicySuspends();
     Expect(depthxr::TurboFrameTestPeer::OsdStateTransitions(), "OSD lost enabled/off Turbo or applied/ready/disabled Pivot state");
+    TestVarjoNativeSubmittedFocusCountsEveryFrame();
+    TestVarjoDeferredReleasesKeepFrameGenUnblocked();
+    TestFrameGenSessionKeepsShownLayersLazy();
+    TestVarjoNativeSubmittedFocusWithConvergence();
+    TestTopologyFollowsFrameGenClaimsApart();
+    TestQuadViewsInactiveReasons();
+    TestQuadViewsOsdTagFollowsBegunConfiguration();
     // Last: it points the layer's log at a file of its own.
     TestConfigWarningsLoggedOncePerKey();
+    TestRecoveryBlockLogsWhatTurboDoes();
+    TestDestroySessionRecordsUntilTheSessionIsGone();
+    TestEndSessionRecordsAPresenterLeftInTheRuntime();
+    TestMetricsBindingResetWaitsForTheFrameThread();
+    TestFramePacingLineUnderFrameGen();
+    TestDestroySpaceLetsGoBeforeTheRuntime();
+    TestTopologyNamesLayerSpaces();
+    TestRecorderRecordsViewSpaceLocates();
+    TestFrameGenTraceRecordsQuadAndLocates();
     std::cout << "depthxr_turbo_frame_tests passed\n";
     return 0;
 }

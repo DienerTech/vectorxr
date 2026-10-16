@@ -247,6 +247,20 @@ struct FrameGenFov {
     float down{0.0f};
 };
 
+// The quad views diagnostic overlay over one composed eye, drawn last, as the
+// layer's Direct3D 11 compositor draws it (QuadViewsD3D11ShaderSource): the
+// periphery, blend band and inset tinted, the inset's outline and the band's
+// inner edge, and markers for the head's centre, the configured offset and the
+// gaze. Drawn into the composed image only, never into a view whose motion is
+// measured. Positions are in output uv.
+struct FrameGenComposeOverlay {
+    bool shown{false};
+    bool eye_tracking{false}; // the inset follows the eyes: its outline turns red without a gaze
+    bool gaze{false};         // eye tracking had a gaze for the frame: its markers are drawn
+    std::array<float, 4> gaze_markers{};      // the raw gaze (xy) and the smoothed gaze (zw)
+    std::array<float, 4> reference_markers{}; // the head's centre (xy) and the configured offset (zw)
+};
+
 struct FrameGenComposeEye {
     std::uint32_t peripheral{0};                  // analyzed view indices
     std::uint32_t focus{0};
@@ -255,7 +269,13 @@ struct FrameGenComposeEye {
     float sharpen{0.0f};                          // 0-1
     std::array<float, 2> focus_texel{};           // 1 / the focus view's extent
     std::array<float, 2> output_pixel_in_focus{}; // one output pixel in focus uv
+    FrameGenComposeOverlay overlay;               // drawn over the eye when shown
 };
+
+// The compose draw's options.x with the overlay shown (FrameGenComposeOverlay).
+inline constexpr std::uint32_t kFrameGenComposeOverlay = 1u;
+inline constexpr std::uint32_t kFrameGenComposeOverlayEyeTracking = 2u;
+inline constexpr std::uint32_t kFrameGenComposeOverlayGaze = 4u;
 
 struct FrameGenComposition {
     FrameGenExtent output;                // each eye's composed image
@@ -271,7 +291,10 @@ FrameGenComposeEye BuildFrameGenComposeEye(const FrameGenFov& full, const FrameG
                                            double sharpness_percent);
 // The compose draw's constants: fov_current = focus_rect; fov_previous =
 // {feather, sharpen, 0}; rot0 = {focus_texel, output_pixel_in_focus};
-// size = {output.width, output.height, 0, 0}; options = 0.
+// size = {output.width, output.height, 0, 0}; options = 0. With the overlay
+// shown: options.x its kFrameGenComposeOverlay flags, rot1 its gaze markers,
+// rot2 its reference markers, tuning.xy one output pixel in output uv (as
+// the Direct3D 11 compositor computes it).
 FrameGenConstants BuildFrameGenComposeConstants(const FrameGenComposeEye& eye, FrameGenExtent output);
 
 // Pose data for one projection view: unit quaternion (x, y, z, w), position

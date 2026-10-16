@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -187,8 +188,19 @@ constexpr std::size_t kCopyRecordings = 4;
 // still: the bridge's queue is that far behind only when stalled.
 constexpr DWORD kRecordingWaitMs = 100;
 
+// A release's handover to the bridge's queue this long or longer counts as
+// slow in the summary (slowHandovers).
+constexpr double kSlowHandoverMs = 2.0;
+
 std::uint64_t MiB(std::uint64_t bytes) {
     return (bytes + (1u << 19)) >> 20;
+}
+
+// The session's mean and longest handover, "mean/max" in milliseconds.
+std::string HandoverText(double total_ms, std::uint64_t count, double max_ms) {
+    char buffer[48];
+    std::snprintf(buffer, sizeof(buffer), "%.2f/%.1f", count ? total_ms / static_cast<double>(count) : 0.0, max_ms);
+    return buffer;
 }
 
 } // namespace
@@ -267,7 +279,23 @@ struct D3D11Bridge::Impl {
     std::atomic<std::uint64_t> recordings{0}; // also counted outside the mutex, as swapchains are made
     std::uint64_t done_waits{0};
     std::uint64_t unmatched_releases{0};
+    // The game thread's time in a release's handover (Direct3D 11's flush, a
+    // recording of the copy, the bridge queue's submission), milliseconds:
+    // the session's total and longest, and how many took kSlowHandoverMs.
+    double handover_ms_total{0.0};
+    double handover_ms_max{0.0};
+    std::uint64_t handovers{0};
+    std::uint64_t slow_handovers{0};
     std::function<void(const std::string&)> log;
+
+    // Counts a handover that started at `start` (holding `mutex`).
+    void NoteHandover(std::chrono::steady_clock::time_point start) {
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        handover_ms_total += ms;
+        handover_ms_max = std::max(handover_ms_max, ms);
+        ++handovers;
+        slow_handovers += ms >= kSlowHandoverMs ? 1 : 0;
+    }
 
     XrGraphicsBindingD3D12KHR binding{XR_TYPE_GRAPHICS_BINDING_D3D12_KHR};
     XrSessionCreateInfo info{XR_TYPE_SESSION_CREATE_INFO};
@@ -991,11 +1019,13 @@ bool D3D11Bridge::Released(XrSwapchain swapchain) {
         }
     }
     // The game's rendering into the image is handed to the bridge's queue...
+    const auto handover = std::chrono::steady_clock::now();
     const UINT64 written = ++impl_->written_value;
     impl_->context11->Signal(impl_->written11.Get(), written);
     impl_->context11->Flush();
     Impl::Copy* copy = impl_->ReadyCopy(image);
     if (!copy) {
+        impl_->NoteHandover(handover);
         // Every recording of the copy is still queued: the bridge's queue is
         // stalled. The runtime's image keeps what it had.
         ++chain->skipped_copies;
@@ -1019,6 +1049,7 @@ bool D3D11Bridge::Released(XrSwapchain swapchain) {
     chain->last_done = done;
     ++chain->copies;
     ++impl_->copies;
+    impl_->NoteHandover(handover);
     return true;
 }
 
@@ -1106,6 +1137,8 @@ std::string D3D11Bridge::Summary() const {
            << ", releases=" << impl_->releases << ", copies=" << impl_->copies
            << ", skippedCopies=" << impl_->skipped_copies << ", copyRecordings=" << impl_->recordings.load()
            << ", doneWaits=" << impl_->done_waits << ", unmatchedReleases=" << impl_->unmatched_releases
+           << ", handoverMs=" << HandoverText(impl_->handover_ms_total, impl_->handovers, impl_->handover_ms_max)
+           << ", slowHandovers=" << impl_->slow_handovers
            << ", writtenValue=" << impl_->written_value << ", doneValue=" << impl_->done_value
            << ", doneCompleted=" << (impl_->done ? impl_->done->GetCompletedValue() : 0)
            << ", secondThread=" << (impl_->reported_second_thread ? "yes" : "no")
