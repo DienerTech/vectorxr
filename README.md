@@ -121,8 +121,8 @@ online games with anti-cheat, it is at your own risk: see [Current Status](#curr
 ![VectorXR On-Screen Display page](docs/screenshots/osd.jpg)
 
 The On-Screen Display adds an optional head-following panel in Direct3D 11, Direct3D 12, and
-Vulkan games showing application FPS, frame times, a frame-time graph, Turbo and Frame
-Generation state, Pivot, and active enhancements. Choose compact or expanded layouts, place the panel with a live preview,
+Vulkan games showing application FPS, frame times, a frame-time graph, CPU and GPU headroom
+with video memory, Turbo and Frame Generation state, Pivot, and active enhancements. Choose compact or expanded layouts, place the panel with a live preview,
 customize its contents and colors, save presets, and show or switch it in game with
 **Ctrl+Alt+F10** and **Ctrl+Alt+F11**. See the [On-Screen Display guide](docs/usage.md#on-screen-display).
 

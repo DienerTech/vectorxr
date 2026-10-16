@@ -857,7 +857,10 @@ needs a game restart; turning it off applies at once.
     shows black at the edge you turn toward. With this on, VectorXR measures during your first
     head turns how far the runtime predicts, then carries your head's turn over the rest. The
     On-Screen Display's Frame Generation line shows **Head: measuring**, then **Head +NN ms**:
-    how far past the runtime's prediction it extends. Turn it on before you start the game.
+    how far past the runtime's prediction it extends. **Head: runtime predicts** means the
+    runtime already predicts far enough and nothing is extended; **Head: no runtime clock**
+    means it cannot work this session (the runtime lacks the clock it needs, or it was turned
+    on after the game started). Turn it on before you start the game.
     In `settings.json`, set `"extendHeadPrediction": true` in a profile's settings.
   - **Reset advanced settings** returns them all to their defaults.
 - **Diagnostic view** applies to every Frame Generation session: **Off**, **Motion flow**
@@ -1073,11 +1076,11 @@ header. Choose 12-hour (with AM/PM) or 24-hour time. Long application and runtim
 truncated within their own fields.
 
 The **Expanded** layout always shows application FPS, average application frame interval,
-and P95, and adds selectable rows for the frame-time graph, Turbo, Frame Generation, Pivot,
-and active enhancements. Drag these rows or use their up/down arrows to arrange them. Saved
-layouts from earlier versions gain the Frame Generation row at the end. The **Compact**
-layout chooses its **Performance** readout (FPS and average frame time, either one, or
-none) and can add Turbo, Frame Generation, and Pivot status rows (Pivot adds a Snap View line
+and P95, and adds selectable rows for the frame-time graph, performance headroom, Turbo,
+Frame Generation, Pivot, and active enhancements. Drag these rows or use their up/down arrows
+to arrange them. Saved layouts from earlier versions gain rows added since at the end. The
+**Compact** layout chooses its **Performance** readout (FPS and average frame time, either
+one, or none) and can add performance headroom, Turbo, Frame Generation, and Pivot status rows (Pivot adds a Snap View line
 when the application has Snap Views). **Just FPS** clears the compact header and status rows for
 the smallest display. Turbo distinguishes **Disabled**, **Enabled / Off**, **Enabled / Waiting**,
 active **Async** or **Sequenced**, safety states, and **Paused for Frame Generation**. Active
@@ -1118,11 +1121,22 @@ setting. Settings editing remains in the desktop app.
 **What the numbers mean:** the OSD samples the time between application `xrEndFrame`
 calls over the last 120 frames. FPS is calculated from the average interval; P95 is
 the 95th-percentile interval. Lower, steadier frame times generally indicate smoother
-application cadence. These numbers do not measure GPU execution, compositor FPS, or
+application cadence. FPS and P95 do not measure GPU execution, compositor FPS, or
 reprojection. Turbo and Frame Generation can make application cadence differ from the headset
 refresh rate; with Frame Generation on, **FG ON** beside FPS shows the frames per second the
 headset gets, generated frames included.
 Pauses longer than one second reset the history.
+
+**Performance headroom** (on by default in the Expanded layout, off in Compact) compares the
+game's CPU time per frame, from its `xrWaitFrame` returning to its `xrEndFrame`, with the
+frame budget: the headset's refresh period, or with Frame Generation generating, the game's
+own target (45 fps at 90 Hz and 2x). GPU headroom is 100% less the whole GPU's 3D
+utilization from Windows' GPU counters, the runtime's compositor and other apps included;
+**game** is the game's own share. The CPU time is hidden while the game waits for its next
+frame before ending the last (OpenComposite does) or Turbo paces it. **VRAM** is the game's
+video memory use against the budget Windows gives it, with Frame Generation's own images.
+**CPU-BOUND** or **GPU-BOUND** shows only when it is clear. The row is sampled twice a second,
+only while the OSD is enabled with the row turned on in a layout.
 
 Panel refresh is independent of frame sampling. The default **5 Hz** redraw rate keeps
 the information readable without updating the text every frame; 1–20 Hz is available.
