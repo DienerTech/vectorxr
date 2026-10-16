@@ -24,7 +24,7 @@ What this file covers
    1.4  the Khronos Vulkan-Headers.
 2. The VectorXR app, vectorxr-app.exe: the Rust standard library, the
    WebView2 loader from Microsoft's WebView2 SDK (part 2.1) and the
-   139 Rust crates compiled into it.
+   140 Rust crates compiled into it.
 3. The app's user interface: the 30 npm packages it is built from.
 4. The license texts that many of the entries above share.
 
@@ -180,7 +180,7 @@ Copyright The Rust Project Developers and licensed under Apache-2.0 OR MIT
 (the Apache License 2.0 text is in part 4.1). The Rust toolchain lists the
 standard library's full notices in share/doc/rust/COPYRIGHT-library.html.
 
-It also links Microsoft's WebView2 loader (part 2.1) and the 139 crates in
+It also links Microsoft's WebView2 loader (part 2.1) and the 140 crates in
 parts 2.2 to 2.13: the normal dependencies of vectorxr-app for
 x86_64-pc-windows-msvc, with features resolved as in the release build
 (cargo tree -e normal,no-proc-macro). Each crate's source code is at
@@ -450,7 +450,7 @@ express Statement of Purpose.
     this CC0 or use of the Work.
 
 
-2.5  Apache-2.0 OR MIT (94 crates)
+2.5  Apache-2.0 OR MIT (95 crates)
 ----------------------------------
 
 --------------------------------------------------------------------------------
@@ -1746,6 +1746,7 @@ THE SOFTWARE.
 
 --------------------------------------------------------------------------------
 muda 0.17.2
+tray-icon 0.21.3
 --------------------------------------------------------------------------------
 
 LICENSE-APACHE:

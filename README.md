@@ -142,7 +142,7 @@ The OpenXR layer manager inspects installed implicit API layers across the Windo
 
 ![VectorXR Settings tab](docs/screenshots/settings.jpg)
 
-Settings holds the runtime master switch, theme, discovered-app tracking, logging, sound feedback volume, and config import/export/reset.
+Settings holds the runtime master switch, theme, the system tray icon, discovered-app tracking, logging and the debug export, sound feedback volume, and config import/export/reset.
 
 ### About And Updates
 

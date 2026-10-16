@@ -6,22 +6,30 @@ import { playTestSound } from "../../lib/commands";
 import { errorText } from "../../lib/errors";
 import type { VectorXRConfig } from "../../lib/model";
 import type { ThemePreference } from "../../lib/theme";
+import { trayModeOptions, type TrayMode } from "../../lib/tray";
 
 const props = defineProps<{
   config: VectorXRConfig;
   path: string;
   logPath?: string;
   themePreference: ThemePreference;
+  trayMode: TrayMode;
   settingsActionsDisabled: boolean;
 }>();
 
 defineEmits<{
   viewLogs: [];
+  exportDebug: [];
   importConfig: [];
   exportConfig: [];
   resetConfig: [];
   "update:themePreference": [value: ThemePreference];
+  "update:trayMode": [value: TrayMode];
 }>();
+
+const trayModeDescription = computed(
+  () => trayModeOptions.find((option) => option.value === props.trayMode)?.description ?? "",
+);
 
 const logPathShort = computed(() => {
   if (!props.logPath) return null;
@@ -80,6 +88,29 @@ async function previewSoundVolume() {
           </div>
           <div class="flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border p-4 surface-panel-soft">
             <div class="min-w-0 max-w-2xl">
+              <p class="text-sm font-semibold tracking-tight" style="color: var(--app-text)">System Tray</p>
+              <p class="mt-0.5 text-xs leading-5 text-muted">
+                Health, the VectorXR switch, the log level and Export Debug from the notification area.
+                {{ trayModeDescription }} Stored on this PC only.
+              </p>
+            </div>
+            <div class="inline-flex flex-wrap gap-2 rounded-[1rem] border p-1 surface-panel-strong" role="radiogroup" aria-label="System tray">
+              <button
+                v-for="option in trayModeOptions"
+                :key="option.value"
+                class="rounded-[0.75rem] px-3 py-2 text-sm font-medium transition"
+                :class="trayMode === option.value ? 'tab-button-active' : 'tab-button-idle'"
+                type="button"
+                role="radio"
+                :aria-checked="trayMode === option.value"
+                @click="$emit('update:trayMode', option.value)"
+              >
+                {{ option.label }}
+              </button>
+            </div>
+          </div>
+          <div class="flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border p-4 surface-panel-soft">
+            <div class="min-w-0 max-w-2xl">
               <p class="text-sm font-semibold tracking-tight" style="color: var(--app-text)">Track discovered XR apps</p>
               <p class="mt-0.5 text-xs leading-5 text-muted">
                 Notes the executable name and first/last seen time of OpenXR apps you launch, so you can easily
@@ -131,6 +162,14 @@ async function previewSoundVolume() {
           </label>
           <button class="button-secondary h-10 rounded-[0.75rem] px-4 text-sm font-medium" type="button" @click="$emit('viewLogs')">
             View Logs
+          </button>
+          <button
+            class="button-secondary h-10 rounded-[0.75rem] px-4 text-sm font-medium"
+            type="button"
+            title="Saves the logs, settings and diagnostics as one ZIP file to share, as on the Home tab."
+            @click="$emit('exportDebug')"
+          >
+            Export Debug
           </button>
         </div>
         <p class="mt-3 text-xs text-muted">

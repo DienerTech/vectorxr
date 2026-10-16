@@ -14,6 +14,8 @@ mod debug_sources;
 mod gpu_capabilities;
 mod input_devices;
 mod openxr_layers;
+mod single_instance;
+mod tray;
 
 fn default_true() -> bool {
     true
@@ -3882,8 +3884,26 @@ fn main() {
         return;
     }
 
+    let instance = match single_instance::claim() {
+        single_instance::Claim::Signalled => return,
+        single_instance::Claim::First(instance) => Some(instance),
+        single_instance::Claim::Unclaimed => None,
+    };
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .manage(tray::TrayState::default())
+        .on_window_event(tray::on_window_event)
+        .setup(move |app| {
+            if let Some(instance) = instance {
+                let handle = app.handle().clone();
+                instance.listen(move || {
+                    let app = handle.clone();
+                    let _ = handle.run_on_main_thread(move || tray::show_main_window(&app));
+                });
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             load_config,
             save_config,
@@ -3911,7 +3931,9 @@ fn main() {
             set_openxr_layer_enabled,
             move_openxr_layer,
             delete_openxr_layer,
-            play_test_sound
+            play_test_sound,
+            tray::configure_tray,
+            tray::update_tray_status
         ])
         .run(tauri::generate_context!())
         .expect("failed to run VectorXR Tauri app");

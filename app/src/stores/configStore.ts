@@ -14,6 +14,7 @@ import {
   type SeenApplication,
 } from '../lib/commands'
 import { errorText } from '../lib/errors'
+import { createTaskQueue } from '../lib/taskQueue'
 import { cloneConfig, createApplication, createFrameGenProfile, createProfile, createPivotProfile, createQuadViewsProfile, createTurboProfile, defaultConfig } from '../lib/model'
 import type { AppTab, ModuleId, RuntimePacingObservation, TurboMetricsSession, VectorXRConfig } from '../lib/model'
 
@@ -62,6 +63,10 @@ const state = reactive<StoreState>({
 })
 
 const isDirty = computed(() => JSON.stringify(state.config) !== JSON.stringify(state.originalConfig))
+
+// Saves run one at a time, so a tray change and a Save on the page cannot
+// write the file out of order.
+const queueSave = createTaskQueue()
 
 function loadBlockedStatus() {
   return `Settings could not be loaded, so saving is off to keep the file on disk: ${state.loadError.replace(/\.\s*$/, '')}. Fix the file and reopen VectorXR, import a config, or reset to defaults.`
@@ -160,24 +165,58 @@ export function useConfigStore() {
     }
   }
 
-  async function save() {
-    if (state.loadError) {
-      state.status = loadBlockedStatus()
-      return
-    }
+  function save() {
+    return queueSave(async () => {
+      if (state.loadError) {
+        state.status = loadBlockedStatus()
+        return
+      }
 
-    state.saving = true
-    state.status = ''
+      state.saving = true
+      state.status = ''
 
-    try {
-      state.path = await saveConfigEnvelope(state.config)
-      state.originalConfig = cloneConfig(state.config)
-      state.status = 'Config saved'
-    } catch (error) {
-      state.status = errorText(error, 'Failed to save config')
-    } finally {
-      state.saving = false
-    }
+      try {
+        const saved = cloneConfig(state.config)
+        state.path = await saveConfigEnvelope(saved)
+        state.originalConfig = saved
+        state.status = 'Config saved'
+      } catch (error) {
+        state.status = errorText(error, 'Failed to save config')
+      } finally {
+        state.saving = false
+      }
+    })
+  }
+
+  // A change made outside the editor (the tray): saved at once on top of the
+  // saved settings, then made in the editor too, so the editor's other
+  // unsaved edits stay unsaved.
+  function saveSetting(change: (config: VectorXRConfig) => void, description: string): Promise<boolean> {
+    return queueSave(async () => {
+      if (state.loading) {
+        return false
+      }
+      if (state.loadError) {
+        state.status = loadBlockedStatus()
+        return false
+      }
+
+      state.saving = true
+      try {
+        const saved = cloneConfig(state.originalConfig)
+        change(saved)
+        state.path = await saveConfigEnvelope(saved)
+        state.originalConfig = saved
+        change(state.config)
+        state.status = description
+        return true
+      } catch (error) {
+        state.status = errorText(error, 'Failed to save config')
+        return false
+      } finally {
+        state.saving = false
+      }
+    })
   }
 
   async function resetToDefaults() {
@@ -433,6 +472,7 @@ export function useConfigStore() {
     isDirty,
     load,
     save,
+    saveSetting,
     resetToDefaults,
     discardChanges,
     importConfig,

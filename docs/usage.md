@@ -74,8 +74,15 @@ While you're here:
 - **General** also holds the **Theme** (System / Light / Dark, stored on this PC only) and
   **Track discovered XR apps**, which is on by default. It records the executable name of OpenXR
   apps you launch so you can register them in one click later (see Step 2). All data stays local.
-- **Logging** sets the **Log Level** and **Log Retention** and opens the log folder with
-  **View Logs**.
+- **System Tray** (also under General, stored on this PC only) puts a VectorXR icon in the
+  Windows notification area. Its menu shows the health status and holds the **VectorXR enabled**
+  switch, the **Log level** (Info or Debug) and **Export Debug**; a change made there is saved
+  at once. **While open** (the default) shows the icon while the app is open, **Keep running**
+  also keeps VectorXR in the tray when you close its window (use **Quit VectorXR** in the tray
+  menu to exit), and **Off** shows no icon. Starting VectorXR again while it runs brings its
+  window back.
+- **Logging** sets the **Log Level** and **Log Retention**, opens the log folder with
+  **View Logs**, and saves a support ZIP with **Export Debug**, the same as on Home.
 - **Sound Feedback** sets the master volume for the activate/deactivate cues you can attach to
   bindings; **Test** plays a sample.
 - **Config Files** moves your full configuration between machines or backs it up with

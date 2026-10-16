@@ -26,6 +26,7 @@ import { buildHealthSummary } from './lib/health'
 import { moduleStateForApplication, normalizeConfig, type ModuleId, type VectorXRConfig } from './lib/model'
 import { patchNotes } from './lib/patchNotes'
 import { applyThemePreference, loadThemePreference, observeSystemThemeChanges, type ThemePreference } from './lib/theme'
+import { configureTray, loadTrayMode, onTrayAction, storeTrayMode, trayStatus, updateTrayStatus, type TrayAction, type TrayMode } from './lib/tray'
 import { validateConfig } from './lib/validation'
 import { useConfigStore } from './stores/configStore'
 import { useUpdateStore } from './stores/updateStore'
@@ -47,6 +48,7 @@ const patchNotesOpen = ref(false)
 const logViewerLoading = ref(false)
 const logSnapshot = ref<LogSnapshot | null>(null)
 const themePreference = ref<ThemePreference>(loadThemePreference())
+const trayMode = ref<TrayMode>(loadTrayMode())
 const importFileInput = ref<HTMLInputElement | null>(null)
 const importPreviewOpen = ref(false)
 const importedConfig = ref<VectorXRConfig | null>(null)
@@ -71,6 +73,21 @@ const healthSummary = computed(() => buildHealthSummary({
   openXrLayersLoading: openXrLayersLoading.value,
   seenApps: store.state.seenApps,
 }))
+
+// The tray shows what is saved, which is what the layer uses.
+const trayHealthSummary = computed(() => buildHealthSummary({
+  config: store.state.originalConfig,
+  configPath: store.state.path,
+  logSnapshot: logSnapshot.value,
+  openXrLayerSnapshot: openXrLayerSnapshot.value,
+  openXrLayersLoading: openXrLayersLoading.value,
+  seenApps: store.state.seenApps,
+}))
+const currentTrayStatus = computed(() => trayStatus(
+  store.state.originalConfig,
+  trayHealthSummary.value,
+  !store.state.loading && !store.state.loadError && !!store.state.path,
+))
 
 function enabledProfileCount(moduleId: ModuleId) {
   return store.state.config.modules[moduleId].profiles.filter((profile) => profile.enabled).length
@@ -200,6 +217,7 @@ watch(
 )
 
 let stopSystemThemeObservation = () => {}
+let stopTrayActions = () => {}
 
 onMounted(() => {
   stopSystemThemeObservation = observeSystemThemeChanges(() => {
@@ -209,6 +227,7 @@ onMounted(() => {
   })
 
   window.addEventListener('focus', onWindowFocus)
+  void onTrayAction(handleTrayAction).then((unlisten) => { stopTrayActions = unlisten })
 
   void store.load()
   void refreshLogs()
@@ -221,8 +240,61 @@ onMounted(() => {
 onUnmounted(() => {
   stopSystemThemeObservation()
   stopRuntimePacingRefresh()
+  stopTrayActions()
   window.removeEventListener('focus', onWindowFocus)
 })
+
+watch(
+  trayMode,
+  (mode) => {
+    storeTrayMode(mode)
+    configureTray(mode)
+      .then(() => updateTrayStatus(currentTrayStatus.value))
+      .catch((error) => { store.state.status = errorText(error, 'Failed to set up the tray icon') })
+  },
+  { immediate: true },
+)
+
+watch(currentTrayStatus, (status) => { void updateTrayStatus(status).catch(() => {}) }, { deep: true })
+
+// The health can go stale while the window is hidden in the tray; re-read it
+// when the pointer reaches the icon, at most every 10 s.
+let trayRefreshedAt = 0
+function refreshForTray() {
+  const now = Date.now()
+  if (now - trayRefreshedAt < 10_000) return
+  trayRefreshedAt = now
+  void refreshLogs()
+  void refreshOpenXrLayers()
+}
+
+async function handleTrayAction(action: TrayAction) {
+  switch (action.action) {
+    case 'setEnabled':
+      await store.saveSetting(
+        (config) => { config.core.enabled = action.enabled },
+        action.enabled ? 'VectorXR enabled from the tray' : 'VectorXR disabled from the tray',
+      )
+      break
+    case 'setLogLevel':
+      await store.saveSetting(
+        (config) => { config.core.logLevel = action.level },
+        `Log level set to ${action.level === 'debug' ? 'Debug' : 'Info'} from the tray`,
+      )
+      break
+    case 'exportDebug':
+      debugExportOpen.value = true
+      break
+    case 'showHealth':
+      healthCheckOpen.value = true
+      break
+    case 'refresh':
+      refreshForTray()
+      break
+  }
+  // A refused or failed change leaves the tray as it was.
+  void updateTrayStatus(currentTrayStatus.value).catch(() => {})
+}
 
 async function saveConfig() {
   if (errors.value.length > 0) {
@@ -453,12 +525,15 @@ async function confirmResetConfig() {
           :path="store.state.path"
           :log-path="logSnapshot?.activePath"
           :theme-preference="themePreference"
+          :tray-mode="trayMode"
           :settings-actions-disabled="store.state.loading || store.state.saving"
           @view-logs="openLogs"
+          @export-debug="debugExportOpen = true"
           @import-config="triggerImport"
           @export-config="exportConfig"
           @reset-config="confirmResetConfig"
           @update:theme-preference="themePreference = $event"
+          @update:tray-mode="trayMode = $event"
         />
         <OsdTab v-else-if="store.state.activeTab === 'osd'" :config="store.state.config" :saved-config="store.state.originalConfig" />
         <AppRegistryEditor
