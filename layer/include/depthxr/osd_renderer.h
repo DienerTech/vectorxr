@@ -16,6 +16,7 @@
 #include <openxr/openxr.h>
 #include "depthxr/settings.h"
 #include "depthxr/osd_graphics.h"
+#include "depthxr/performance_monitor.h"
 
 struct ID3D11Device;
 struct ID3D11DeviceContext;
@@ -77,6 +78,9 @@ struct OsdSnapshot {
     // view), named in a tag after the brand; empty for none. While there is
     // one, the header row stays even with every header item hidden.
     std::string diagnostics;
+    // The PERFORMANCE row's text (DescribePerformance), filled while a layout
+    // shows the row.
+    PerformanceOsdText performance;
 };
 
 struct OsdPresentation {
@@ -113,7 +117,7 @@ struct OsdBitmap {
 };
 
 struct OsdCompactLayout {
-    int width{240}, height{}, header_y{-1}, metrics_y{-1}, status_y{-1}, turbo_y{-1}, framegen_y{-1}, pivot_y{-1};
+    int width{240}, height{}, header_y{-1}, metrics_y{-1}, status_y{-1}, performance_y{-1}, turbo_y{-1}, framegen_y{-1}, pivot_y{-1};
     int status_value_x{128};
     int frame_time_x{262};
     std::array<int,4> header_x{-1,-1,-1,-1};
@@ -138,6 +142,13 @@ struct OsdCompactLayoutOptions {
     int diagnostics_width{0};
 };
 OsdCompactLayout CompactOsdLayout(const OsdSettings&, const OsdCompactLayoutOptions& options = {});
+// The compact panel's width while it shows the PERFORMANCE row: room for its
+// three values in one line (osd_tests measures the widest).
+constexpr int kOsdCompactPerformanceWidth = 760;
+// The expanded PERFORMANCE row's height: its values over their details.
+constexpr int kOsdPerformanceRowHeight = 80;
+// The width the OSD's GDI text takes (Segoe UI at `size` pixels), for tests.
+int OsdTextWidth(int size, const std::string& text, bool bold);
 
 // RasterizeOsd's last step: feathers the panel's edges to transparent black and
 // premultiplies GDI's `bits` into `pixels`, both OsdBitmap::width wide and

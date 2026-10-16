@@ -17,6 +17,7 @@ add_library(
     src/sound_player.cpp
     src/settings_resolver.cpp
     src/session_graphics.cpp
+    src/performance_monitor.cpp
     src/swapchain_state.cpp
     src/thread_census.cpp
     src/util/config_path.cpp
@@ -35,7 +36,7 @@ add_library(
 target_include_directories(depthxr_core PUBLIC include)
 target_compile_features(depthxr_core PUBLIC cxx_std_20)
 if(WIN32)
-    target_sources(depthxr_core PRIVATE src/util/crt_failure_report.cpp)
+    target_sources(depthxr_core PRIVATE src/util/crt_failure_report.cpp src/performance_sampler.cpp)
     target_link_libraries(depthxr_core PUBLIC dinput8 dxguid ole32 winmm)
 endif()
 
@@ -734,6 +735,13 @@ if(DEPTHXR_BUILD_TESTS)
     target_link_libraries(depthxr_sound_player_tests PRIVATE depthxr_core)
     add_test(NAME depthxr_sound_player_tests COMMAND depthxr_sound_player_tests)
     set_tests_properties(depthxr_sound_player_tests PROPERTIES TIMEOUT 10)
+    if(WIN32)
+        # CPU only: the row's logic. "live" also samples this machine's GPU counters and video memory.
+        add_executable(depthxr_performance_tests tests/performance_tests.cpp)
+        target_link_libraries(depthxr_performance_tests PRIVATE depthxr_core dxgi)
+        add_test(NAME depthxr_performance_tests COMMAND depthxr_performance_tests)
+        set_tests_properties(depthxr_performance_tests PROPERTIES TIMEOUT 30)
+    endif()
     add_executable(depthxr_thread_census_tests tests/thread_census_tests.cpp)
     target_link_libraries(depthxr_thread_census_tests PRIVATE depthxr_core)
     add_test(NAME depthxr_thread_census_tests COMMAND depthxr_thread_census_tests)

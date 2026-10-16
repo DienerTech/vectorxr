@@ -312,6 +312,7 @@ struct OsdSettings {
     show_pivot: bool,
     show_framegen: bool,
     show_framegen_fps: bool,
+    show_performance: bool,
     compact_show_runtime: bool,
     compact_show_brand: bool,
     compact_show_app: bool,
@@ -320,6 +321,7 @@ struct OsdSettings {
     compact_show_turbo: bool,
     compact_show_pivot: bool,
     compact_show_framegen: bool,
+    compact_show_performance: bool,
     clock_format: String,
     body_order: Vec<String>,
     custom_color: String,
@@ -376,6 +378,7 @@ impl Default for OsdSettings {
             show_pivot: true,
             show_framegen: true,
             show_framegen_fps: true,
+            show_performance: true,
             compact_show_runtime: true,
             compact_show_brand: true,
             compact_show_app: true,
@@ -384,9 +387,11 @@ impl Default for OsdSettings {
             compact_show_turbo: false,
             compact_show_pivot: false,
             compact_show_framegen: false,
+            compact_show_performance: false,
             clock_format: "24".into(),
             body_order: vec![
                 "graph".into(),
+                "performance".into(),
                 "turbo".into(),
                 "framegen".into(),
                 "pivot".into(),
@@ -3028,18 +3033,22 @@ mod tests {
         assert_eq!(legacy.osd.update_hz, 5);
         assert!(legacy.osd.show_framegen && !legacy.osd.compact_show_framegen);
         assert!(legacy.osd.show_framegen_fps);
-        assert_eq!(legacy.osd.body_order, ["graph", "turbo", "framegen", "pivot", "modules"]);
-        let input = serde_json::json!({"enabled":true,"compact":true,"visibleOnStart":false,
+        assert!(legacy.osd.show_performance && !legacy.osd.compact_show_performance);
+        assert_eq!(legacy.osd.body_order, ["graph", "performance", "turbo", "framegen", "pivot", "modules"]);
+        let mut input = serde_json::json!({"enabled":true,"compact":true,"visibleOnStart":false,
             "horizontalDegrees":-30.0,"verticalDegrees":15.0,"distanceMeters":2.0,"scale":75.0,
             "opacity":70,"updateHz":10,"showGraph":false,"showRuntime":false,"showTurbo":false,
             "showModules":false,"showClock":false,"accent":"blue","toggleBinding":{"type":"none"},
-            "showPivot":false,"clockFormat":"12","customColor":"#aB12Ef","bodyOrder":["pivot","framegen","turbo","modules","graph"],
+            "showPivot":false,"clockFormat":"12","customColor":"#aB12Ef","bodyOrder":["pivot","framegen","turbo","modules","graph","performance"],
             "showFramegen":false,"compactShowFramegen":true,"showFramegenFps":false,
             "compactShowRuntime":true,"compactShowClock":true,"compactShowTurbo":true,"compactShowPivot":true,
             "compactShowBrand":false,"compactShowApp":false,"compactMetrics":"fps",
             "showBrand":false,"showApp":false,
             "customPresets":[{"name":"Small cockpit","settings":{"scale":25,"accent":"custom","customColor":"#aB12Ef"}}],
             "cycleBinding":{"type":"keyboard","chord":["Ctrl","F11"]}});
+        // Past json!'s recursion limit in the literal.
+        input["showPerformance"] = serde_json::json!(false);
+        input["compactShowPerformance"] = serde_json::json!(true);
         let osd: super::OsdSettings = serde_json::from_value(input.clone()).unwrap();
         let output = serde_json::to_value(osd).unwrap();
         for (key,value) in input.as_object().unwrap() {

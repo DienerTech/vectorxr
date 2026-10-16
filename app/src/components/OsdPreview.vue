@@ -12,7 +12,7 @@ const legible = defineModel<boolean>('legible', { default: false })
 const edgeId = useId()
 const emit = defineEmits<{ position: [horizontal: number, vertical: number] }>()
 const accent = computed(() => props.settings.accent === 'custom' ? props.settings.customColor : osdAccentColors[props.settings.accent])
-const flags = { graph: 'showGraph', turbo: 'showTurbo', framegen: 'showFramegen', pivot: 'showPivot', modules: 'showModules' } as const
+const flags = { graph: 'showGraph', performance: 'showPerformance', turbo: 'showTurbo', framegen: 'showFramegen', pivot: 'showPivot', modules: 'showModules' } as const
 const expandedHeader = computed(() => {
   const s = props.settings, clockX = s.showClock ? 790 : 932, tagX = s.showBrand ? 200 : 28
   const appX = tagWidth.value ? tagX + tagWidth.value + 18 : tagX
@@ -20,8 +20,8 @@ const expandedHeader = computed(() => {
     clockX, tagX, appX, runtimeX: s.showRuntime ? (s.showApp ? Math.floor((appX + clockX) / 2) : appX) : clockX }
 })
 // Row heights as the layer draws them; Frame Generation's row has a second
-// line while it generates, and Pivot one for Snap Views.
-const rowHeight = (row: OsdBodyRow) => row === 'graph' ? 156 : row === 'framegen' ? 80 : row === 'pivot' && props.pivotSnapLine ? 84 : 52
+// line while it generates, Performance its details, and Pivot one for Snap Views.
+const rowHeight = (row: OsdBodyRow) => row === 'graph' ? 156 : row === 'framegen' || row === 'performance' ? 80 : row === 'pivot' && props.pivotSnapLine ? 84 : 52
 const rows = computed(() => {
   let y = 190 - expandedHeader.value.shift
   return props.settings.bodyOrder.filter(row => props.settings[flags[row]]).map(row => {
@@ -52,13 +52,18 @@ const framegenShown = computed(() => {
   const s = props.settings
   return s.compact ? s.compactShowFramegen || compactLayout.value.framegenBadge : s.showFramegen || s.showFramegenFps
 })
-const labels = computed<Record<OsdBodyRow, [string, string]>>(() => ({ graph: ['', ''], turbo: ['TURBO', framegenShown.value ? 'Paused for Frame Generation' : 'Async / Experimental'], framegen: ['FRAME GEN', 'On  /  Interpolate  /  Dynamic'], pivot: ['PIVOT', 'Motion: Active / Continuous + Position / Flight'], modules: ['ENHANCEMENTS', framegenShown.value ? 'Depth / Pivot / Turbo / Frame Gen / Quadviews' : 'Depth / Pivot / Turbo / Quadviews'] }))
+const labels = computed<Record<OsdBodyRow, [string, string]>>(() => ({ graph: ['', ''], performance: ['PERFORMANCE', ''], turbo: ['TURBO', framegenShown.value ? 'Paused for Frame Generation' : 'Async / Experimental'], framegen: ['FRAME GEN', 'On  /  Interpolate  /  Dynamic'], pivot: ['PIVOT', 'Motion: Active / Continuous + Position / Flight'], modules: ['ENHANCEMENTS', framegenShown.value ? 'Depth / Pivot / Turbo / Frame Gen / Quadviews' : 'Depth / Pivot / Turbo / Quadviews'] }))
 const framegenDetail = '45 \u2192 90 fps  /  GPU 3.1 ms'
 // Sample readings: a game Frame Generation doubles while the preview shows
 // Frame Generation, a game at full rate otherwise.
 const sample = computed(() => {
   return framegenShown.value ? { fps: '45', average: '22.2', p95: '24.8' } : { fps: '90', average: '11.1', p95: '12.4' }
 })
+// The PERFORMANCE row's sample, as the layer words it (DescribePerformance):
+// headroom against the game's target, video memory with Frame Generation's share.
+const performance = computed(() => framegenShown.value
+  ? { target: '45 fps target', cells: [['CPU +56%', '9.8 ms, thread 61%'], ['GPU +9%', '91% busy, game 74%'], ['VRAM 11.4 GB', 'of 14.2 GB, FG 612 MB']] }
+  : { target: '90 fps target', cells: [['CPU +32%', '7.6 ms, thread 84%'], ['GPU +18%', '82% busy, game 70%'], ['VRAM 9.8 GB', 'of 14.2 GB']] })
 let drag: { x: number; y: number; h: number; v: number; unit: number } | null = null
 function start(event: PointerEvent) {
   if (event.button !== 0 || legible.value) return
@@ -100,6 +105,10 @@ function move(event: PointerEvent) {
           <text v-if="compactLayout.frameTime" :x="compactLayout.frameTimeX" :y="compactLayout.metricsY + 40" font-size="40" fill="#e9f0f8" font-weight="600">{{ sample.average }} ms avg</text>
           <g v-if="compactLayout.statusY >= 0">
             <path v-if="compactLayout.statusY > 18" :d="`M28 ${compactLayout.statusY - 8} H${panelWidth - 28}`" stroke="#141f2d" />
+            <g v-if="settings.compactShowPerformance" :transform="`translate(0 ${compactLayout.performanceY})`">
+              <text x="30" y="22" font-size="20" fill="#94a5b8">PERF</text>
+              <foreignObject :x="compactLayout.statusValueX" :width="panelWidth - compactLayout.statusValueX - 28" height="36"><div class="body-value" style="color: #e9f0f8">{{ performance.cells[0][0] }}<span class="separator">  /  </span>{{ performance.cells[1][0] }}<span class="separator">  /  </span>{{ performance.cells[2][0] }}</div></foreignObject>
+            </g>
             <g v-if="settings.compactShowTurbo" :transform="`translate(0 ${compactLayout.turboY})`">
               <text x="30" y="22" font-size="20" fill="#94a5b8">TURBO</text>
               <foreignObject :x="compactLayout.statusValueX" :width="panelWidth - compactLayout.statusValueX - 28" height="36"><div class="body-value" :style="{ color: accent }">{{ framegenShown ? 'Paused for Frame Generation' : 'Async / EXP' }}</div></foreignObject>
@@ -129,6 +138,8 @@ function move(event: PointerEvent) {
         </template>
         <template v-if="!settings.compact"><g v-for="row in rows" :key="row.key" :transform="`translate(0 ${row.y})`">
           <template v-if="row.key === 'graph'"><rect x="28" width="904" height="130" fill="#141f2d" /><text x="40" y="22" font-size="18" fill="#94a5b8">FRAME TIME / LAST 120 FRAMES</text><path d="M40 94 L100 90 160 98 220 94 280 92 340 35 400 87 460 91 520 96 580 92 640 90 700 99 760 88 820 94 920 93" fill="none" :stroke="accent" stroke-width="3" /></template>
+          <template v-else-if="row.key === 'performance'"><text x="30" y="20" font-size="20" fill="#94a5b8">PERFORMANCE</text><text x="30" y="50" font-size="20" fill="#94a5b8">{{ performance.target }}</text>
+            <g v-for="(cell, index) in performance.cells" :key="index"><foreignObject :x="242 + index * 230" width="220" height="36"><div class="body-value" style="color: #e9f0f8">{{ cell[0] }}</div></foreignObject><foreignObject :x="242 + index * 230" y="30" width="220" height="30"><div class="body-detail">{{ cell[1] }}</div></foreignObject></g></template>
           <template v-else><text x="30" y="20" font-size="20" fill="#94a5b8">{{ labels[row.key][0] }}</text><foreignObject x="242" width="680" height="36"><div class="body-value" :style="{ color: row.key === 'turbo' ? accent : '#e9f0f8' }">{{ labels[row.key][1] }}</div></foreignObject><foreignObject v-if="row.key === 'pivot' && pivotSnapLine" x="242" y="32" width="680" height="36"><div class="body-value">Snap: Active / Stacked / Check Six</div></foreignObject>
             <foreignObject v-if="row.key === 'framegen'" x="242" y="30" width="680" height="30"><div class="body-detail">{{ framegenDetail }}</div></foreignObject></template>
         </g></template>
@@ -154,4 +165,5 @@ function move(event: PointerEvent) {
 .diagnostics-tag { font: 600 17px/30px 'Segoe UI', sans-serif; color: #0d141f; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .body-value { font: 600 24px 'Segoe UI', sans-serif; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
 .body-detail { font: 20px 'Segoe UI', sans-serif; color: #94a5b8; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+.separator { color: #94a5b8; }
 </style>

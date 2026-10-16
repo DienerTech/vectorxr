@@ -264,6 +264,11 @@
           "default": true,
           "description": "Both layouts, in sessions with Frame Generation on: its state (FG ON, STBY, WAIT, PAUSED, OFF or N/A) and the frames per second the headset shows, beside the FPS value."
         },
+        "showPerformance": {
+          "type": "boolean",
+          "default": true,
+          "description": "Expanded layout: the PERFORMANCE row. CPU and GPU headroom against the frame budget (the headset's refresh period, or the game's base target while Frame Generation generates), video memory with Frame Generation's share, and CPU-BOUND or GPU-BOUND when it is clear. The layer samples GPU counters and video memory only while a layout shows it."
+        },
         "showModules": {
           "type": "boolean",
           "default": true
@@ -368,6 +373,11 @@
           "default": false,
           "description": "Show Frame Generation in the compact status rows. Defaults to false."
         },
+        "compactShowPerformance": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show CPU and GPU headroom and video memory in the compact status rows. Defaults to false."
+        },
         "compactShowPivot": {
           "type": "boolean",
           "description": "Show Pivot in the compact status row. Defaults to false."
@@ -396,6 +406,7 @@
           "items": {
             "enum": [
               "graph",
+              "performance",
               "turbo",
               "framegen",
               "pivot",
@@ -404,6 +415,7 @@
           },
           "default": [
             "graph",
+            "performance",
             "turbo",
             "framegen",
             "pivot",
@@ -463,6 +475,11 @@
                     "type": "boolean",
                     "default": true,
                     "description": "Both layouts, in sessions with Frame Generation on: its state (FG ON, STBY, WAIT, PAUSED, OFF or N/A) and the frames per second the headset shows, beside the FPS value."
+                  },
+                  "showPerformance": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Expanded layout: the PERFORMANCE row. CPU and GPU headroom against the frame budget (the headset's refresh period, or the game's base target while Frame Generation generates), video memory with Frame Generation's share, and CPU-BOUND or GPU-BOUND when it is clear. The layer samples GPU counters and video memory only while a layout shows it."
                   },
                   "showModules": {
                     "type": "boolean",
@@ -554,6 +571,11 @@
                     "default": false,
                     "description": "Show Frame Generation in the compact status rows. Defaults to false."
                   },
+                  "compactShowPerformance": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Show CPU and GPU headroom and video memory in the compact status rows. Defaults to false."
+                  },
                   "compactShowPivot": {
                     "type": "boolean",
                     "description": "Show Pivot in the compact status row. Defaults to false."
@@ -581,6 +603,7 @@
                     "items": {
                       "enum": [
                         "graph",
+                        "performance",
                         "turbo",
                         "framegen",
                         "pivot",
@@ -589,6 +612,7 @@
                     },
                     "default": [
                       "graph",
+                      "performance",
                       "turbo",
                       "framegen",
                       "pivot",

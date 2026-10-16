@@ -3,6 +3,8 @@ import type { OsdSettings } from './model'
 // The FPS value's column, and with Frame Generation's badge beside it.
 export const compactFpsWidth = 210
 export const compactFpsBadgeWidth = 260
+// The panel's width while it shows the PERFORMANCE row (kOsdCompactPerformanceWidth).
+export const compactPerformanceWidth = 760
 
 // Keep dimensions in sync with CompactOsdLayout in the layer rasterizer.
 // What the compact layout makes room for beyond the settings. Named options,
@@ -50,21 +52,22 @@ export function osdCompactLayout(settings: OsdSettings, options: OsdCompactLayou
   const framegenBadge = fps && framegenSession && settings.showFramegenFps
   const fpsWidth = framegenBadge ? compactFpsBadgeWidth : compactFpsWidth
   const frameTimeX = fps ? 28 + fpsWidth + 24 : 28
-  const status = settings.compactShowTurbo || settings.compactShowFramegen || settings.compactShowPivot
+  const status = settings.compactShowPerformance || settings.compactShowTurbo || settings.compactShowFramegen || settings.compactShowPivot
   const headerShown = fields.length > 0 || diagnostics !== null
   const empty = !headerShown && !fps && !frameTime && !status
   const width = Math.max(240, headerShown ? x + 12 : 0,
     fps || frameTime ? 56 + (fps ? fpsWidth : 0) + (frameTime ? 300 : 0) + (fps && frameTime ? 24 : 0) : 0,
-    status ? 520 : 0)
+    status ? 520 : 0, settings.compactShowPerformance ? compactPerformanceWidth : 0)
   let y = 18
   const row = (show: boolean, height: number) => { if (!show) return -1; const top = y; y += height + 12; return top }
   const headerY = row(headerShown, 32), metricsY = row(fps || frameTime, 56)
-  // Status rows stack Turbo, Frame Gen, then Pivot. The "FRAME GEN" label is
-  // wider than "TURBO"/"PIVOT", so every status value starts further right
-  // while the Frame Gen row is shown, keeping the values aligned.
+  // Status rows stack Performance, Turbo, Frame Gen, then Pivot. The "FRAME
+  // GEN" label is wider than the others, so every status value starts further
+  // right while the Frame Gen row is shown, keeping the values aligned.
+  const performanceY = row(settings.compactShowPerformance, 36)
   const turboY = row(settings.compactShowTurbo, 36), framegenY = row(settings.compactShowFramegen, 36)
   const pivotY = row(settings.compactShowPivot, pivotSnapLine ? 68 : 36)
-  const statusY = [turboY, framegenY, pivotY].find(top => top >= 0) ?? -1
+  const statusY = [performanceY, turboY, framegenY, pivotY].find(top => top >= 0) ?? -1
   const statusValueX = settings.compactShowFramegen ? 150 : 128
-  return { width, height: empty ? 80 : y + 6, fields, diagnostics: diagnostics as { x: number; width: number } | null, fps, frameTime, frameTimeX, framegenBadge, headerY, metricsY, statusY, turboY, framegenY, pivotY, statusValueX, empty }
+  return { width, height: empty ? 80 : y + 6, fields, diagnostics: diagnostics as { x: number; width: number } | null, fps, frameTime, frameTimeX, framegenBadge, headerY, metricsY, statusY, performanceY, turboY, framegenY, pivotY, statusValueX, empty }
 }

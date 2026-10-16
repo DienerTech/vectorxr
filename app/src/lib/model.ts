@@ -117,7 +117,7 @@ export interface SoundSettings {
 
 // Default expanded-row order. Saved orders missing a row get it appended at
 // the end (the layer does the same), so new rows never reorder existing ones.
-export const osdBodyRows = ['graph', 'turbo', 'framegen', 'pivot', 'modules'] as const
+export const osdBodyRows = ['graph', 'performance', 'turbo', 'framegen', 'pivot', 'modules'] as const
 export type OsdBodyRow = typeof osdBodyRows[number]
 export type OsdLayout = Omit<OsdSettings, 'enabled' | 'visibleOnStart' | 'toggleBindings' | 'cycleBindings' | 'customPresets'>
 export interface OsdPreset { name: string; settings: OsdLayout }
@@ -150,6 +150,10 @@ export interface OsdSettings {
   // Both layouts, in sessions with Frame Generation on: its state (FG ON,
   // STBY, OFF...) and the frames per second the headset shows, beside FPS.
   showFramegenFps: boolean
+  // The PERFORMANCE row: CPU and GPU headroom against the frame budget, and
+  // video memory with Frame Generation's share. The layer samples only while
+  // a layout shows it.
+  showPerformance: boolean
   compactShowRuntime: boolean
   compactShowBrand: boolean
   compactShowApp: boolean
@@ -158,6 +162,7 @@ export interface OsdSettings {
   compactShowTurbo: boolean
   compactShowPivot: boolean
   compactShowFramegen: boolean
+  compactShowPerformance: boolean
   clockFormat: '12' | '24'
   bodyOrder: OsdBodyRow[]
   accent: keyof typeof osdAccentColors | 'custom'
@@ -172,8 +177,9 @@ export function defaultOsdSettings(): OsdSettings {
   return { enabled: false, visibleOnStart: true, compact: false,
     horizontalDegrees: 20, verticalDegrees: -12, distanceMeters: 1.2, scale: 100, opacity: 90, updateHz: 5,
     showGraph: true, showRuntime: true, showTurbo: true, showModules: true, showClock: true, showPivot: true,
-    showFramegen: true, showFramegenFps: true, showBrand: true, showApp: true,
+    showFramegen: true, showFramegenFps: true, showPerformance: true, showBrand: true, showApp: true,
     compactShowRuntime: true, compactShowClock: true, compactShowTurbo: false, compactShowPivot: false, compactShowFramegen: false,
+    compactShowPerformance: false,
     compactShowBrand: true, compactShowApp: true, compactMetrics: 'all',
     clockFormat: '24', bodyOrder: [...osdBodyRows], accent: 'teal', customColor: '#51ddbd', customPresets: [],
     toggleBindings: [{ type: 'keyboard', chord: ['Ctrl', 'Alt', 'F10'] }],
@@ -189,7 +195,7 @@ export function normalizeOsdSettings(value: unknown): OsdSettings {
       (!integer || Number.isInteger(value)) ? value : fallback[key] as number
   }
   return { ...fallback,
-    ...Object.fromEntries(['enabled', 'visibleOnStart', 'compact', 'showGraph', 'showRuntime', 'showBrand', 'showApp', 'showTurbo', 'showModules', 'showClock', 'showPivot', 'showFramegen', 'showFramegenFps', 'compactShowRuntime', 'compactShowClock', 'compactShowTurbo', 'compactShowPivot', 'compactShowFramegen', 'compactShowBrand', 'compactShowApp']
+    ...Object.fromEntries(['enabled', 'visibleOnStart', 'compact', 'showGraph', 'showRuntime', 'showBrand', 'showApp', 'showTurbo', 'showModules', 'showClock', 'showPivot', 'showFramegen', 'showFramegenFps', 'showPerformance', 'compactShowRuntime', 'compactShowClock', 'compactShowTurbo', 'compactShowPivot', 'compactShowFramegen', 'compactShowPerformance', 'compactShowBrand', 'compactShowApp']
       .map(key => [key, typeof input[key] === 'boolean' ? input[key] : fallback[key as keyof OsdSettings]])),
     compactMetrics: ['all', 'fps', 'frameTime', 'none'].includes(input.compactMetrics as string) ? input.compactMetrics as OsdSettings['compactMetrics'] : 'all',
     horizontalDegrees: number('horizontalDegrees', -40, 40), verticalDegrees: number('verticalDegrees', -35, 35),
