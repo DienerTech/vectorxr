@@ -19,6 +19,7 @@
 #include <openxr/openxr_platform.h>
 
 #include "depthxr/framegen_gpu.h"
+#include "depthxr/framegen_hardware_watch.h"
 #include "depthxr/framegen_runtime_queue.h"
 #include "depthxr/quadviews_compose.h"
 #include "test_adapter.h"
@@ -6220,6 +6221,45 @@ void SubstitutionShownTest(ID3D12Device* device, ID3D12CommandQueue* game_queue)
     std::cout << "D3D12 queue substitution with shown layers kept lazy passed\n";
 }
 
+// CPU fences only: no queue waits or NVIDIA hardware are involved. Replacing
+// an atlas must retain every operation needed to recover its old queue wait.
+void HardwareWatchOwnershipTest() {
+    struct Fence {
+        std::uint64_t completed{0};
+        std::uint64_t GetCompletedValue() const { return completed; }
+    } first, second;
+    FrameGenHardwareWatch<Fence> watch;
+    Check(watch.ResetFence(&first), "the first hardware fence is installed");
+    watch.Watch(7, 10, 250);
+    const auto old = watch.Read(7 % 4);
+    Check(old && old.fence == &first && old.done == 7 && old.input == 10,
+          "the hardware watchdog snapshot names its operation and fence");
+    Check(!watch.ResetFence(&second) && watch.Current(old),
+          "a pending atlas switch discarded the old hardware watchdog operation");
+    // Its input is queued behind the old operation; a switch must preserve
+    // that operation too, even when the earliest match has now finished.
+    watch.Watch(8, 11, 250);
+    first.completed = 7;
+    Check(!watch.ResetFence(&second), "queued hardware input lost its watchdog on an atlas switch");
+    const auto queued = watch.Read(8 % 4);
+    Check(queued && queued.fence == &first && queued.done == 8 && queued.input == 11,
+          "a refused switch changed the queued operation's fence or input");
+    first.completed = 8;
+    Check(watch.ResetFence(&second) && !watch.Current(old) && !watch.Current(queued),
+          "a completed atlas does not release its watch or invalidate old snapshots");
+    Check(!watch.Read(7 % 4) && !watch.Read(8 % 4), "the replacement atlas inherited old operations");
+    // Fence values can repeat in another session: their timeout identity must
+    // still differ, so the new session cannot inherit an old timeout.
+    watch.Watch(7, 10, 3000);
+    const auto replacement = watch.Read(7 % 4);
+    Check(replacement && replacement.fence == &second && replacement.epoch != old.epoch &&
+              replacement.allowed == 3000 && !watch.Current(old),
+          "a replacement atlas reused the old operation's timeout identity");
+    Check(!watch.ResetFence(nullptr), "a pending hardware operation was discarded while retiring its fence");
+    second.completed = 7;
+    Check(watch.ResetFence(nullptr) && !watch.Pending(), "a finished hardware fence cannot be retired");
+}
+
 // A one-shot failure at every working-texture allocation. Check the complete
 // recovered resource set before submitting any capture, so a broken recovery
 // fails safely instead of handing null resources to the graphics driver.
@@ -6289,6 +6329,7 @@ void AllocationFailureRecoveryTest(Harness& harness) {
 }
 
 int D3D12Test() {
+    HardwareWatchOwnershipTest();
     ComPtr<IDXGIFactory4> factory;
     ComPtr<IDXGIAdapter> warp;
     ComPtr<ID3D12Device> device;

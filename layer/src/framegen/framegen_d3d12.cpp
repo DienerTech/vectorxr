@@ -7,6 +7,7 @@
 #include <openxr/openxr_platform.h>
 
 #include "depthxr/framegen_gpu.h"
+#include "depthxr/framegen_hardware_watch.h"
 
 #ifdef DEPTHXR_NVOF
 #include <nvOpticalFlowD3D12.h>
@@ -262,23 +263,7 @@ struct AnalyzedFrame {
 // a later capture queued behind a stalled one never becomes ready itself.
 constexpr std::size_t kWatchedViews = 4;
 constexpr std::size_t kWatchedOperations = 4;
-struct HardwareWatch {
-    struct Operation {
-        std::atomic<UINT64> done{0}; // 0 while being written
-        std::atomic<UINT64> input{0};
-        std::atomic<ULONGLONG> allowed{250};
-    };
-    std::atomic<ID3D12Fence*> fence{nullptr};
-    std::array<Operation, kWatchedOperations> operations;
-
-    void Watch(UINT64 done, UINT64 input, ULONGLONG allowed) {
-        Operation& operation = operations[done % kWatchedOperations];
-        operation.done = 0;
-        operation.input = input;
-        operation.allowed = allowed;
-        operation.done = done;
-    }
-};
+using HardwareWatch = FrameGenHardwareWatch<ID3D12Fence, kWatchedOperations>;
 
 #ifdef DEPTHXR_NVOF
 // One optical flow session for every view (EnsureAtlas): the views'
@@ -3461,26 +3446,28 @@ class D3D12FrameGen final : public FrameGenGpu {
             // which operation.
             std::array<std::array<ULONGLONG, kWatchedOperations>, kWatchedViews> ready_since{};
             std::array<std::array<UINT64, kWatchedOperations>, kWatchedViews> ready_done{};
+            std::array<std::array<UINT64, kWatchedOperations>, kWatchedViews> ready_epoch{};
             while (!hardware_watchdog_stop_) {
                 Sleep(50);
                 for (std::size_t i = 0; i < kWatchedViews; ++i) {
                     HardwareWatch& watch = hardware_watch_[i];
-                    ID3D12Fence* fence = watch.fence;
                     for (std::size_t j = 0; j < kWatchedOperations; ++j) {
-                        HardwareWatch::Operation& operation = watch.operations[j];
+                        const HardwareWatch::Snapshot operation = watch.Read(j);
+                        ID3D12Fence* fence = operation.fence;
                         const UINT64 done = operation.done;
                         const UINT64 needed = operation.input;
                         const ULONGLONG allowed = operation.allowed;
-                        if (!fence || !done || operation.done != done || fence->GetCompletedValue() >= done ||
-                            input->GetCompletedValue() < needed) {
+                        if (!operation || fence->GetCompletedValue() >= done || input->GetCompletedValue() < needed) {
                             ready_since[i][j] = 0;
                             continue;
                         }
                         const ULONGLONG now = GetTickCount64();
-                        if (!ready_since[i][j] || ready_done[i][j] != done) {
+                        if (!ready_since[i][j] || ready_done[i][j] != done || ready_epoch[i][j] != operation.epoch) {
                             ready_since[i][j] = now;
                             ready_done[i][j] = done;
-                        } else if (now - ready_since[i][j] > allowed) {
+                            ready_epoch[i][j] = operation.epoch;
+                        } else if (now - ready_since[i][j] > allowed && watch.Current(operation) &&
+                                   fence->GetCompletedValue() < done) {
                             // Releases every queue wait up to it; the
                             // hardware is not used again, and its session
                             // and images are never freed (it may still be
@@ -3581,10 +3568,10 @@ class D3D12FrameGen final : public FrameGenGpu {
         }
         view.hardware_fence_value = 0;
         if (index < hardware_watch_.size()) {
-            for (auto& operation : hardware_watch_[index].operations) {
-                operation.done = 0;
+            if (!hardware_watch_[index].ResetFence(view.hardware_fence.Get())) {
+                RetireHardware(view);
+                return HardwareFailed("the previous optical flow session still has unfinished work");
             }
-            hardware_watch_[index].fence = view.hardware_fence.Get();
         }
         Texture* images[6] = {&view.hardware_newest, &view.hardware_previous, &view.hardware_flow,
                               &view.raw[0],          &view.raw[1],               &view.raw_flow};
@@ -3687,14 +3674,23 @@ class D3D12FrameGen final : public FrameGenGpu {
         for (const FrameGenViewSubmission& view : views) {
             inputs.push_back(FrameGenPyramid(view.request.extent)[1]);
         }
-        auto laid_out = [&](const HardwareAtlas& atlas) {
-            return atlas.session && atlas.perf == perf && atlas.inputs.size() == inputs.size() &&
+        auto same_inputs = [&](const HardwareAtlas& atlas) {
+            return atlas.session && atlas.inputs.size() == inputs.size() &&
                    std::equal(inputs.begin(), inputs.end(), atlas.inputs.begin(), [](FrameGenExtent a, FrameGenExtent b) {
                        return a.width == b.width && a.height == b.height;
                    });
         };
+        auto laid_out = [&](const HardwareAtlas& atlas) { return atlas.perf == perf && same_inputs(atlas); };
         if (laid_out(atlas_)) {
             return true;
+        }
+        if (hardware_watch_[0].Pending()) {
+            // A live quality change can use the current atlas until its match
+            // finishes. Keep its watchdog: new input may be queued behind its
+            // wait, and replacing that watch would make recovery impossible.
+            if (same_inputs(atlas_)) return true;
+            // Different images cannot use it. Drain with the old watch intact.
+            if (!WaitIdle()) return false;
         }
         // Another layout's atlas becomes the current one, kept, without
         // waiting for the GPU; one laid out so already comes back.
@@ -3707,7 +3703,7 @@ class D3D12FrameGen final : public FrameGenGpu {
             atlas_ = std::move(*cached);
             atlas_cache_.erase(cached);
             atlas_.fresh = true; // its hints are from another sequence of frames
-            WatchAtlas();
+            if (!WatchAtlas()) return false;
             TrimAtlases();
             return true;
         }
@@ -3807,19 +3803,14 @@ class D3D12FrameGen final : public FrameGenGpu {
         atlas_.cells = cells;
         atlas_.fresh = true;
         atlas_.matched = false;
-        WatchAtlas();
+        if (!WatchAtlas()) return false;
         TrimAtlases();
         return true;
     }
 
     // The watchdog watches the current atlas as view 0 (operations of
     // another fence never carry over to it).
-    void WatchAtlas() {
-        for (auto& operation : hardware_watch_[0].operations) {
-            operation.done = 0;
-        }
-        hardware_watch_[0].fence = atlas_.fence.Get();
-    }
+    bool WatchAtlas() { return hardware_watch_[0].ResetFence(atlas_.fence.Get()); }
 
     // Frees kept atlases beyond the newest three once nothing submitted
     // can use them (never waits).
@@ -3865,8 +3856,8 @@ class D3D12FrameGen final : public FrameGenGpu {
             // The watchdog may still look at it: a fence that is never freed.
             atlas.fence.Detach();
         }
-        if (fence && hardware_watch_[0].fence == fence) {
-            hardware_watch_[0].fence = nullptr;
+        if (fence && hardware_watch_[0].ActiveFence() == fence) {
+            hardware_watch_[0].ResetFence(nullptr);
         }
         atlas = {};
     }
@@ -4525,8 +4516,9 @@ class D3D12FrameGen final : public FrameGenGpu {
 #ifdef DEPTHXR_NVOF
     HardwareAtlas atlas_;
     // Atlases of other layouts (quad views and a canvas in turn), kept for
-    // when their layout comes back, as views keep their sessions: switching
-    // never waits for the GPU. Freed once the GPU is done with them, beyond
+    // when their layout comes back, as views keep their sessions. A pending
+    // match keeps its watch until done; performance-only switches defer.
+    // Freed once the GPU is done with them, beyond
     // the newest few, or at Reset.
     std::vector<HardwareAtlas> atlas_cache_;
 #endif
