@@ -1646,6 +1646,11 @@
           "maximum": 25,
           "default": 10,
           "description": "Largest content shift, in percent of view width, a generated frame may apply."
+        },
+        "extendHeadPrediction": {
+          "type": "boolean",
+          "default": false,
+          "description": "Frame Generation has the game render for a display time up to ~150 ms ahead; some runtimes (Pimax's) predict the head only ~20 ms of that. When on, VectorXR measures how far the runtime predicts and carries the head's turn over the rest, which shrinks the black band at the edge you turn toward. Turn it on before the game starts: it needs the runtime's clock, which is requested at startup."
         }
       }
     },

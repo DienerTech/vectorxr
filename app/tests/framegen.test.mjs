@@ -37,6 +37,11 @@ test('invalid imported values normalize safely: enums fall back, integers clamp'
   assert.deepEqual(normalizeFrameGenSettings({ synthesisMode: 'warp', flowQuality: 'ultra', motionEstimation: 'cuda', frameMultiplier: '8x', artifactSuppression: 'high', motionLimitPercent: Number.NaN }), defaultFrameGenSettings())
   assert.deepEqual(normalizeFrameGenSettings({ synthesisMode: 'extrapolate', flowQuality: 'quality', motionEstimation: 'hardware', frameMultiplier: '3x', artifactSuppression: 140, motionLimitPercent: 1 }),
     { synthesisMode: 'extrapolate', flowQuality: 'quality', motionEstimation: 'hardware', frameMultiplier: '3x', artifactSuppression: 100, motionLimitPercent: 2 })
+  // Head prediction is present only when on, so older layers see the six keys they know.
+  assert.deepEqual(normalizeFrameGenSettings({ extendHeadPrediction: true }), { ...defaultFrameGenSettings(), extendHeadPrediction: true })
+  assert.equal('extendHeadPrediction' in normalizeFrameGenSettings({ extendHeadPrediction: false }), false)
+  assert.equal('extendHeadPrediction' in normalizeFrameGenSettings({ extendHeadPrediction: 'yes' }), false)
+  assert.equal(normalizeFrameGenSettings({}, { ...defaultFrameGenSettings(), extendHeadPrediction: true }).extendHeadPrediction, true)
   assert.deepEqual(normalizeFrameGenSettings({ artifactSuppression: -5, motionLimitPercent: 99 }), { ...defaultFrameGenSettings(), artifactSuppression: 0, motionLimitPercent: 25 })
   assert.equal(normalizeFrameGenSettings({ artifactSuppression: 33.6 }).artifactSuppression, 34)
   assert.equal(normalizeFrameGenSettings({ motionLimitPercent: Infinity }).motionLimitPercent, 10)

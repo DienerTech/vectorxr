@@ -27,6 +27,7 @@
 #include "depthxr/pivot_step.h"
 #include "depthxr/pivot_view.h"
 #include "depthxr/effects.h"
+#include "depthxr/head_prediction.h"
 #include "depthxr/logger.h"
 #include "depthxr/quadviews_frame_cache.h"
 #include "depthxr/quadviews_recovery.h"
@@ -246,6 +247,7 @@ class OpenXrLayer {
     friend class EyeGazeTestPeer;
     friend class D3D11BridgeLayerTestPeer;
     friend class VulkanBridgeLayerTestPeer;
+    friend class HeadPredictionTestPeer;
 #endif
 
     OpenXrLayer() = default;
@@ -736,7 +738,8 @@ class OpenXrLayer {
                                 uint32_t* view_count_output,
                                 XrView* views,
                                 bool* synthesized_quad_views,
-                                QuadViewsGazeDiagnostic* gaze_diagnostic);
+                                QuadViewsGazeDiagnostic* gaze_diagnostic,
+                                HeadExtension* head_extension);
     void RecordVarjoNativeLocateDiagnostics(const XrViewLocateInfo* view_locate_info,
                                             bool vector_request_injected,
                                             bool rendering_gaze_queried,
@@ -1442,6 +1445,46 @@ class OpenXrLayer {
     // locates to the known horizon; the sources are smoothed/near-static so
     // <=1 period of staleness is invisible. Cache keys keep the app's time.
     XrTime ClampInternalLocateTime(XrTime app_time);
+
+    // Head prediction past the runtime's limit (Frame Generation's
+    // extendHeadPrediction; see head_prediction.h). Frame Generation tells
+    // games display times far past what some runtimes predict; the head's
+    // rotation is carried over the rest. Planned under mutex_; its runtime
+    // locates run outside it, as the game's own do. Every locate is answered
+    // from that call's own runtime answers for its display time: nothing is
+    // kept from one display time for another, and nothing by wall-clock age.
+    struct HeadPredictionPlan {
+        bool enabled{false};  // setting on, Frame Generation paces, runtime clock, internal VIEW space
+        bool probe{false};    // the runtime's limit is not settled and a probe is due
+        bool limited{false};  // settled: the runtime predicts no further than `limit`
+        XrDuration limit{0};
+        XrSpace view_space{XR_NULL_HANDLE};
+    };
+    struct HeadPredictionStats {
+        std::uint64_t locates{0};   // world-space view locates past the runtime's limit
+        std::uint64_t extended{0};  // ... that were turned
+        double beyond_sum_ms{0.0};  // display time past the runtime's limit
+        double beyond_max_ms{0.0};
+        double degrees_sum{0.0};
+        double degrees_max{0.0};
+    };
+    // The world space a head locate is in: the base of a view locate, or the
+    // non-VIEW side of a VIEW-to-world xrLocateSpace. Null otherwise.
+    XrSpace HeadPredictionWorldSpace(XrSpace space, XrSpace base_space) const;
+    HeadPredictionPlan PlanHeadPredictionLocked(bool allow_probe);
+    std::optional<PredictionLimitEstimate> ProbeRuntimePredictionLimit(const HeadPredictionPlan& plan,
+                                                                       XrSpace world_space);
+    void NotePredictionProbeLocked(const std::optional<PredictionLimitEstimate>& estimate);
+    HeadExtension ExtendHead(const HeadPredictionPlan& plan, XrSpace world_space, XrTime target, XrTime now);
+    void NoteHeadExtensionLocked(const HeadExtension& extension, XrTime target, XrTime now);
+    std::string HeadPredictionOsdDetail() const;
+    PredictionLimitTracker head_prediction_limit_;
+    std::chrono::steady_clock::time_point head_prediction_last_probe_{};
+    HeadPredictionStats head_prediction_stats_;
+    std::chrono::steady_clock::time_point head_prediction_stats_since_{};
+    // Display time past the runtime's limit, smoothed, for the OSD (ms).
+    double head_prediction_beyond_ms_{0.0};
+    bool head_prediction_logged_unavailable_{false};
     XrResult ApplyPivotToLocatedSpace(XrSpace space,
                                       XrSpace base_space,
                                       XrTime time,
