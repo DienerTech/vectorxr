@@ -793,6 +793,7 @@ struct ShownView {
     std::uint32_t slice{0};
     XrStructureType next_type{XR_TYPE_UNKNOWN}; // the first structure of the view's chain
     bool depth{false};                          // the chain had XrCompositionLayerDepthInfoKHR
+    bool application_chain{false};              // the unknown test structure survived anywhere in the chain
     XrSwapchain depth_swapchain{XR_NULL_HANDLE};
     std::optional<Color> texel;       // the centre of the image released last
     std::optional<float> depth_value; // the centre of its depth (StandIn::read_depth)
@@ -1586,6 +1587,7 @@ XrResult XRAPI_CALL RtEndFrame(XrSession, const XrFrameEndInfo* info) {
             const auto* chain = static_cast<const XrBaseInStructure*>(view.next);
             shown.next_type = chain ? chain->type : XR_TYPE_UNKNOWN;
             for (; chain; chain = chain->next) {
+                shown.application_chain = shown.application_chain || chain->type == kApplicationStructType;
                 if (chain->type == XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR) {
                     shown.depth = true;
                     shown.depth_swapchain =
@@ -2372,6 +2374,7 @@ struct FrameOptions {
     const Target* quad{nullptr};
     Color quad_color{255, 255, 255, 255};
     XrCompositionLayerFlags layer_flags{0}; // the projection's and the quad's
+    bool unknown_after_depth{false}; // explicit unsupported metadata, independent of supported depth
 };
 
 // One application frame: each colour target acquired, waited, rendered in
@@ -2440,7 +2443,7 @@ XrResult Frame(App& app, const Renderer& renderer, const std::vector<const Targe
         views[eye].subImage.imageArrayIndex = eyes[eye].slice;
         if (depth) {
             depth_infos[eye] = {XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR};
-            depth_infos[eye].next = &after_depth;
+            depth_infos[eye].next = options.unknown_after_depth ? &after_depth : nullptr;
             depth_infos[eye].subImage.swapchain = depth->swapchain;
             depth_infos[eye].subImage.imageRect = views[eye].subImage.imageRect;
             depth_infos[eye].subImage.imageArrayIndex = eye;
@@ -3432,13 +3435,14 @@ void CheckDepth(App& app, VulkanGame& game, Target& left, Target& right) {
         const std::vector<Color> colors{FrameColor(frame + 10, 0), FrameColor(frame + 10, 1)};
         FrameOptions options;
         options.depth = &depth;
+        options.unknown_after_depth = true;
         options.depth_value = frame % 2 ? 0.25f : 0.75f;
         Check(Frame(app, vulkan, {&left, &right}, colors, {{{&left, 0}, {&right, 0}}}, options) == XR_SUCCESS,
               "depth frame " + std::to_string(frame));
         const ShownFrame& shown = g_runtime.frames.back();
         for (int eye = 0; eye < 2; ++eye) {
             const ShownView& view = shown.views[eye];
-            Check(view.depth && view.depth_swapchain == depth.swapchain,
+            Check(view.depth && view.depth_swapchain == depth.swapchain && view.application_chain,
                   "the runtime gets the game's depth in the views");
             Check(view.depth_value && std::abs(*view.depth_value - options.depth_value) < 1e-6f,
                   "depth frame " + std::to_string(frame) + " eye " + std::to_string(eye) + ": the runtime's depth image holds " +
@@ -3774,6 +3778,50 @@ void RunFrameGen(App& app, const Renderer& renderer, Target& left, Target& right
     Check(shown.increasing, at + ": the runtime's frames have strictly increasing display times");
 }
 
+// Once generation has been verified with supported depth, introduce unknown
+// metadata after it. Both native D3D12 and mirrored Vulkan depth must survive
+// inline pass-through; no snapshot may silently lose the unknown structure.
+void CheckUnknownDepthFallback(App& app, const Renderer& renderer, Target& left, Target& right, Target& depth,
+                                const std::string& at) {
+    FrameOptions options;
+    options.depth = &depth;
+    options.unknown_after_depth = true;
+    auto run = [&](int frames, bool unknown) {
+        options.unknown_after_depth = unknown;
+        for (int frame = 0; frame < frames; ++frame) {
+            Check(Frame(app, renderer, {&left, &right}, {FrameColor(frame, 0), FrameColor(frame, 1)},
+                        {{{&left, 0}, {&right, 0}}}, options) == XR_SUCCESS,
+                  at + ": an unknown-depth-chain frame reaches the runtime");
+        }
+    };
+    run(4, true); // drain frames handed to the presenter before the refusal
+    const auto refused = Peer::FrameGen();
+    const std::size_t from = ShownCount();
+    run(6, true);
+    const auto status = Peer::FrameGen();
+    Check(status.state == depthxr::FrameGenState::kUnavailable && !status.threaded &&
+              Contains(status.reason, "projection view extension type " + std::to_string(kApplicationStructType)) &&
+              status.generated == refused.generated && status.captured == refused.captured,
+          at + ": unknown metadata after depth stops capture/generation with a precise reason");
+    const auto frames = Shown();
+    Check(frames.size() >= from + 6, at + ": unknown metadata pass-through frames were shown");
+    for (std::size_t i = from; i < frames.size(); ++i) {
+        Check(frames[i].views.size() == 2, at + ": unknown metadata pass-through retains both views");
+        for (std::size_t eye = 0; eye < 2; ++eye) {
+            const ShownView& view = frames[i].views[eye];
+            Check(view.swapchain == (eye ? right : left).swapchain && view.depth &&
+                      view.depth_swapchain == depth.swapchain && view.application_chain,
+                  at + ": the game's colour, depth and unknown metadata all reach the runtime");
+        }
+    }
+    const std::size_t supported_from = ShownCount();
+    run(6, false);
+    Check(Peer::FrameGen().state == depthxr::FrameGenState::kUnavailable &&
+              CheckFrameGenShown(supported_from, {left.swapchain, right.swapchain}, at).own == 0,
+          at + ": supported depth alone does not clear the unknown-chain refusal");
+    CheckValidation(at + " unknown metadata after depth");
+}
+
 // 13. Frame Generation on the real Direct3D 12 backend for a bridged Vulkan game.
 void TestBridgedFrameGen(const std::string& mode) {
     CaseSettings settings;
@@ -3798,6 +3846,7 @@ void TestBridgedFrameGen(const std::string& mode) {
     Target depth = MakeTarget(app, DepthInfo(VK_FORMAT_D32_SFLOAT, 2), "depth");
     RunFrameGen(app, vulkan, left, right, &depth, "bridged " + mode);
     CheckValidation("generating");
+    CheckUnknownDepthFallback(app, vulkan, left, right, depth, "bridged " + mode);
     StopApp(app);
     Peer::UseFrameGenGpu(MakeStandInGpu);
     Peer::SetFrameGenEngagement(45, std::chrono::milliseconds(3000)); // the presenter's own
@@ -4063,6 +4112,7 @@ void TestNativeD3D12(const std::string& name) {
           "the game's frame reaches the runtime with its depth");
     RunFrameGen(app, renderer, left, right, &depth, name);
     CheckValidation("generating");
+    CheckUnknownDepthFallback(app, renderer, left, right, depth, name);
     StopApp(app);
     Peer::UseFrameGenGpu(MakeStandInGpu);
     Peer::SetFrameGenEngagement(45, std::chrono::milliseconds(3000)); // the presenter's own
