@@ -3301,12 +3301,19 @@ class D3D12FrameGen final : public FrameGenGpu {
     bool EnsureView(ViewResources& view, const FrameGenViewSubmission& submission, ID3D12Resource* source,
                     const FrameGenTuning& tuning, std::string& error) {
         // Uncaptured calls this before Execute's recording/error cleanup. A
-        // partial allocation must never advertise its new images as ready.
+        // partial allocation must never advertise its new images as ready,
+        // nor keep a capture key that would let the next Execute skip
+        // Uncaptured and copy the game's image after its release.
         struct Setup {
-            FrameGenHistoryState& state;
+            ViewResources& view;
             bool complete{false};
-            ~Setup() { if (!complete) state = {}; }
-        } setup{view.history_state};
+            ~Setup() {
+                if (!complete) {
+                    view.history_state = {};
+                    view.capture.valid = false;
+                }
+            }
+        } setup{view};
         const D3D12_RESOURCE_DESC source_desc = source->GetDesc();
         const FrameGenExtent extent = submission.request.extent;
         const std::uint8_t final_level = FrameGenFinalFlowLevel(tuning);

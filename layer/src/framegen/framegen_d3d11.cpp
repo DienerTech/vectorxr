@@ -401,6 +401,21 @@ class D3D11FrameGen final : public FrameGenGpu {
 
     bool EnsureView(ViewResources& view, const FrameGenViewSubmission& submission, ID3D11Texture2D* source,
                     const FrameGenTuning& tuning, std::string& error) {
+        // Configure commits the new configuration before the textures
+        // exist, and view.output and filtered[0] mark the set ready. After a
+        // failed allocation, forget the configuration (Invalidate keeps it),
+        // so the next call rebuilds the whole set instead of reporting
+        // success with null or old-sized textures.
+        struct Setup {
+            ViewResources& view;
+            bool complete{false};
+            ~Setup() {
+                if (!complete) {
+                    view.history_state = {};
+                    view.capture.valid = false;
+                }
+            }
+        } setup{view};
         D3D11_TEXTURE2D_DESC source_desc{};
         source->GetDesc(&source_desc);
         const FrameGenExtent extent = submission.request.extent;
@@ -436,6 +451,7 @@ class D3D11FrameGen final : public FrameGenGpu {
                 }
             }
         }
+        setup.complete = true;
         return true;
     }
 
@@ -474,8 +490,7 @@ class D3D11FrameGen final : public FrameGenGpu {
         }
         ID3D11Texture2D* source = source_it->second[submission.source.image_index];
         if (!EnsureView(view, submission, source, tuning, error)) {
-            view.history_state.Invalidate();
-            return false;
+            return false; // EnsureView forgot the half-made setup
         }
 
         if (!view.capture.Matches(submission.source)) {
@@ -560,8 +575,7 @@ class D3D11FrameGen final : public FrameGenGpu {
                 return true;
             }
             if (!EnsureView(views_[i], views[i], it->second[views[i].source.image_index], tuning, error)) {
-                views_[i].history_state.Invalidate();
-                return true;
+                return true; // EnsureView forgot the half-made setup
             }
             views_[i].capture.valid = false;
         }
