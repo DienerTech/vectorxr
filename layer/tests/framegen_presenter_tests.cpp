@@ -1241,6 +1241,7 @@ struct App {
         reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection)};
     // MSFS ends each frame one period after the display time it was given.
     int end_offset_periods{0};
+    const void* end_next{nullptr};
     // The eyes move sideways at this many m/s: each frame is rendered from
     // where they are at the display time it was given.
     double eye_speed{0.0};
@@ -1299,6 +1300,7 @@ struct App {
 
     XrResult End(XrTime display_time, bool layers = true) {
         XrFrameEndInfo info{XR_TYPE_FRAME_END_INFO};
+        info.next = end_next;
         info.displayTime = display_time;
         for (auto& view : views) {
             view.pose.position.x = static_cast<float>(eye_speed * static_cast<double>(display_time - 1'000'000'000) * 1e-9);
@@ -6035,6 +6037,8 @@ struct QuadApp {
     // The game renders nothing (told not to, the headset off): it releases
     // no view and ends its frames without layers.
     bool no_layers{false};
+    const void* end_next{nullptr};
+    const void* projection_next{nullptr};
     struct Ended {
         XrTime time{0};
         FrameGenQuadRoute route{FrameGenQuadRoute::kDeclined};
@@ -6091,6 +6095,7 @@ struct QuadApp {
                                                      static_cast<std::int32_t>(extent.height)}};
         }
         XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+        projection.next = projection_next;
         projection.space = kSpace;
         projection.viewCount = 4;
         projection.views = source.data();
@@ -6107,6 +6112,7 @@ struct QuadApp {
             return XR_SUCCESS;
         }
         XrFrameEndInfo info{XR_TYPE_FRAME_END_INFO};
+        info.next = end_next;
         info.displayTime = time;
         info.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
         std::array<XrCompositionLayerProjectionView, 2> composed{};
@@ -6135,6 +6141,7 @@ struct QuadApp {
                                                              static_cast<std::int32_t>(canvas.height)}};
             }
             composed_layer.space = kSpace;
+            composed_layer.next = projection_next;
             composed_layer.viewCount = 2;
             composed_layer.views = composed.data();
             layer = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&composed_layer);
@@ -9866,6 +9873,250 @@ void TestOsdRuntimeHalving() {
     }
 }
 
+// Composition metadata is application-owned only until xrEndFrame returns.
+// Poison its storage between frames: copied/repeated/generated submissions
+// must use owned values, while inline submissions may use the live chain.
+void TestCompositionExtensions() {
+    for (const auto mode : {FrameGenSynthesisMode::kInterpolate, FrameGenSynthesisMode::kExtrapolate}) {
+        for (int path = 0; path < 3; ++path) {
+            const std::string name = "composition metadata path " + std::to_string(path) + " " + ToString(mode);
+            FrameGenPresenter presenter;
+            GpuLog gpu;
+            gpu.threaded = path > 0;
+            gpu.jit = path == 2;
+            Runtime runtime;
+            runtime.paced = true;
+            StartPresenter(presenter, gpu, mode);
+            App app(presenter, runtime);
+            XrCompositionLayerColorScaleBiasKHR color{}, reverse_color{};
+            XrCompositionLayerAlphaBlendFB blend{}, reverse_blend{};
+            const auto restore = [&] {
+                color = {XR_TYPE_COMPOSITION_LAYER_COLOR_SCALE_BIAS_KHR};
+                color.colorScale = {0.25f, 0.5f, 0.75f, 1.0f};
+                color.colorBias = {0.1f, 0.2f, 0.3f, 0.0f};
+                blend = {XR_TYPE_COMPOSITION_LAYER_ALPHA_BLEND_FB};
+                blend.srcFactorColor = XR_BLEND_FACTOR_SRC_ALPHA_FB;
+                blend.dstFactorColor = XR_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA_FB;
+                blend.srcFactorAlpha = XR_BLEND_FACTOR_ONE_FB;
+                blend.dstFactorAlpha = XR_BLEND_FACTOR_ZERO_FB;
+                reverse_color = color;
+                reverse_blend = blend;
+                color.next = &blend;
+                reverse_blend.next = &reverse_color;
+            };
+            restore();
+            app.projection.next = &color;
+            app.quad.next = &reverse_blend;
+            XrCompositionLayerCylinderKHR cylinder{XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR};
+            XrCompositionLayerEquirectKHR equirect{XR_TYPE_COMPOSITION_LAYER_EQUIRECT_KHR};
+            XrCompositionLayerEquirect2KHR equirect2{XR_TYPE_COMPOSITION_LAYER_EQUIRECT2_KHR};
+            XrCompositionLayerCubeKHR cube{XR_TYPE_COMPOSITION_LAYER_CUBE_KHR};
+            cylinder.next = equirect.next = equirect2.next = cube.next = &reverse_blend;
+            for (const void* layer : {static_cast<const void*>(&app.quad), static_cast<const void*>(&cylinder),
+                                      static_cast<const void*>(&equirect), static_cast<const void*>(&equirect2),
+                                      static_cast<const void*>(&cube)}) {
+                app.layers.push_back(reinterpret_cast<const XrCompositionLayerBaseHeader*>(layer));
+            }
+            std::atomic<int> checked{0}, generated{0};
+            const auto submit = app.calls.submit;
+            app.calls.submit = [&](XrSession session, const XrFrameEndInfo* info) {
+                if (info->layerCount) {
+                    Check(info->layerCount == app.layers.size(), name + ": all layers kept");
+                    for (std::uint32_t i = 0; i < info->layerCount; ++i) {
+                        const auto* first = static_cast<const XrBaseInStructure*>(info->layers[i]->next);
+                        Check(first && first->type == (i == 0 ? XR_TYPE_COMPOSITION_LAYER_COLOR_SCALE_BIAS_KHR
+                                                             : XR_TYPE_COMPOSITION_LAYER_ALPHA_BLEND_FB),
+                              name + ": chain starts in application order");
+                        const auto* second = first->next;
+                        Check(second && second->next == nullptr, name + ": both nodes kept, chain terminated");
+                        const auto* colors = reinterpret_cast<const XrCompositionLayerColorScaleBiasKHR*>(i == 0 ? first : second);
+                        const auto* blends = reinterpret_cast<const XrCompositionLayerAlphaBlendFB*>(i == 0 ? second : first);
+                        Check(colors->type == XR_TYPE_COMPOSITION_LAYER_COLOR_SCALE_BIAS_KHR &&
+                                  colors->colorScale.r == 0.25f && colors->colorScale.g == 0.5f &&
+                                  colors->colorScale.b == 0.75f && colors->colorScale.a == 1.0f &&
+                                  colors->colorBias.r == 0.1f && colors->colorBias.g == 0.2f &&
+                                  colors->colorBias.b == 0.3f && colors->colorBias.a == 0.0f,
+                              name + ": color values survive application storage reuse");
+                        Check(blends->type == XR_TYPE_COMPOSITION_LAYER_ALPHA_BLEND_FB &&
+                                  blends->srcFactorColor == XR_BLEND_FACTOR_SRC_ALPHA_FB &&
+                                  blends->dstFactorColor == XR_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA_FB &&
+                                  blends->srcFactorAlpha == XR_BLEND_FACTOR_ONE_FB &&
+                                  blends->dstFactorAlpha == XR_BLEND_FACTOR_ZERO_FB,
+                              name + ": alpha factors survive application storage reuse");
+                    }
+                    const auto* projection = reinterpret_cast<const XrCompositionLayerProjection*>(info->layers[0]);
+                    if (projection->views[0].subImage.swapchain != kLeft) ++generated;
+                    ++checked;
+                }
+                return submit(session, info);
+            };
+            for (int i = 0; i < 12; ++i) {
+                const auto frame = app.Wait();
+                restore();
+                app.Begin();
+                app.Release();
+                Check(XR_SUCCEEDED(app.End(frame.predictedDisplayTime)), name + ": end");
+                color.type = blend.type = reverse_color.type = reverse_blend.type = XR_TYPE_UNKNOWN;
+            }
+            if (path > 0) std::this_thread::sleep_for(60ms);
+            const auto status = presenter.Status();
+            presenter.Stop();
+            Check(checked > 12 && generated > 0 && status.state == FrameGenState::kActive &&
+                      status.threaded == (path > 0), name + ": every presentation path exercised");
+            Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+        }
+    }
+}
+
+// Unsupported frame/layer/view extension semantics use the original frame
+// once, then pass through for this session. A live JIT rejection must get a
+// runtime slot before returning; it may never keep the application's chain.
+void TestCompositionUnsupportedChains() {
+    for (int path = 0; path < 3; ++path) {
+        for (int kind = 0; kind < 3; ++kind) {
+            for (const bool live : {false, true}) {
+                const std::string name = "unsupported composition " + std::to_string(path) + "/" +
+                                         std::to_string(kind) + (live ? " live" : " startup");
+                FrameGenPresenter presenter;
+                GpuLog gpu;
+                gpu.threaded = path > 0;
+                gpu.jit = path == 2;
+                Runtime runtime;
+                runtime.paced = true;
+                StartPresenter(presenter, gpu, FrameGenSynthesisMode::kExtrapolate);
+                App app(presenter, runtime);
+                if (live) {
+                    for (int i = 0; i < 10; ++i) app.Frame();
+                    Check(presenter.Status().state == FrameGenState::kActive, name + ": engaged first");
+                }
+                const auto before = presenter.Status();
+                XrSecondaryViewConfigurationFrameEndInfoMSFT secondary{XR_TYPE_SECONDARY_VIEW_CONFIGURATION_FRAME_END_INFO_MSFT};
+                XrCompositionLayerDepthTestFB depth_test{XR_TYPE_COMPOSITION_LAYER_DEPTH_TEST_FB};
+                XrCompositionLayerSpaceWarpInfoFB space_warp{XR_TYPE_COMPOSITION_LAYER_SPACE_WARP_INFO_FB};
+                const void* expected = kind == 0 ? static_cast<const void*>(&secondary)
+                                               : kind == 1 ? static_cast<const void*>(&depth_test)
+                                                           : static_cast<const void*>(&space_warp);
+                std::atomic<int> originals{0};
+                const auto submit = app.calls.submit;
+                app.calls.submit = [&](XrSession session, const XrFrameEndInfo* info) {
+                    if (info->layerCount) {
+                        const auto* projection = reinterpret_cast<const XrCompositionLayerProjection*>(info->layers[0]);
+                        const void* chain = kind == 0 ? info->next : kind == 1 ? projection->next : projection->views[0].next;
+                        if (chain == expected) ++originals;
+                    }
+                    return submit(session, info);
+                };
+                if (kind == 0) app.end_next = expected;
+                if (kind == 1) app.projection.next = expected;
+                if (kind == 2) app.views[0].next = expected;
+                app.Frame();
+                Check(originals == 1, name + ": first unsupported frame reaches its runtime slot intact");
+                for (int i = 0; i < 6; ++i) app.Frame();
+                const auto after = presenter.Status();
+                Check(after.state == FrameGenState::kUnavailable && !after.threaded && presenter.OwnsPacing() &&
+                          after.reason.find("extension type") != std::string::npos &&
+                          after.demoted == before.demoted && after.failures == before.failures && originals == 7,
+                      name + ": original frames keep flowing with a stable, named compatibility refusal");
+                presenter.Stop();
+                Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+            }
+        }
+    }
+}
+
+void TestCompositionRefusalSurvivesRuntimeFailure() {
+    for (int path = 0; path < 3; ++path) {
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        gpu.threaded = path > 0;
+        gpu.jit = path == 2;
+        Runtime runtime;
+        runtime.paced = true;
+        StartPresenter(presenter, gpu, FrameGenSynthesisMode::kExtrapolate);
+        App app(presenter, runtime);
+        for (int i = 0; i < 10; ++i) app.Frame();
+        XrCompositionLayerDepthTestFB depth_test{XR_TYPE_COMPOSITION_LAYER_DEPTH_TEST_FB};
+        app.projection.next = &depth_test;
+        std::atomic<bool> reject{true};
+        const auto submit = app.calls.submit;
+        app.calls.submit = [&](XrSession session, const XrFrameEndInfo* info) {
+            if (info->layerCount && info->layers[0]->next == &depth_test && reject.exchange(false)) {
+                runtime.fail_next_submit = true;
+            }
+            return submit(session, info);
+        };
+        // Replace the callbacks a running presenter copied at its start:
+        // it hands this unsupported frame to the application's own end.
+        const auto frame = app.Wait();
+        app.Begin();
+        app.Release();
+        Check(app.End(frame.predictedDisplayTime) == XR_ERROR_TIME_INVALID && !reject,
+              "composition refusal: its original submission failure reaches the app");
+        app.projection.next = nullptr;
+        presenter.Toggle();
+        presenter.Toggle();
+        presenter.SetConfigured(false);
+        presenter.SetConfigured(true);
+        FrameGenResolvedSettings settings;
+        settings.enabled = true;
+        settings.synthesis_mode = FrameGenSynthesisMode::kExtrapolate;
+        settings.multiplier = FrameGenMultiplier::k2;
+        presenter.Configure(settings);
+        for (int i = 0; i < 8; ++i) app.Frame();
+        const auto refused = presenter.Status();
+        Check(refused.state == FrameGenState::kUnavailable && !refused.threaded && !refused.retry_pending &&
+                  refused.reason.find("extension type") != std::string::npos && presenter.OwnsPacing(),
+              "composition refusal: submission failures, toggles and settings never re-arm generation");
+        presenter.Stop();
+        StartPresenter(presenter, gpu, FrameGenSynthesisMode::kExtrapolate);
+        for (int i = 0; i < 8; ++i) app.Frame();
+        const auto restarted = presenter.Status();
+        presenter.Stop();
+        Check(restarted.state == FrameGenState::kActive && restarted.threaded == (path > 0),
+              "composition refusal: a new session can generate again without the unsupported metadata");
+        Check(!runtime.ordering_violation && !g_release_violation, "composition refusal: calls stayed ordered");
+    }
+}
+
+void TestCompositionQuadUnsupportedChains() {
+    for (const bool after_claim : {false, true}) {
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        runtime.paced = true;
+        StartQuad(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2);
+        QuadApp app(presenter, runtime);
+        for (int i = 0; i < 3; ++i) app.Frame();
+        app.Run(300ms);
+        Check(presenter.Status().quad && presenter.Status().threaded, "unsupported quad: composing first");
+        XrCompositionLayerDepthTestFB depth_test{XR_TYPE_COMPOSITION_LAYER_DEPTH_TEST_FB};
+        XrSecondaryViewConfigurationFrameEndInfoMSFT secondary{XR_TYPE_SECONDARY_VIEW_CONFIGURATION_FRAME_END_INFO_MSFT};
+        bool claimed = false;
+        if (after_claim) {
+            app.after_claim = [&](FrameGenQuadRoute route) {
+                if (route == FrameGenQuadRoute::kClaimed) {
+                    claimed = true;
+                    app.end_next = &secondary;
+                }
+                return true;
+            };
+        } else {
+            app.projection_next = &depth_test;
+        }
+        app.Frame();
+        Check(after_claim ? claimed : app.ended.back().route != FrameGenQuadRoute::kClaimed,
+              "unsupported quad: source chains are refused before claim, late chains identified after it");
+        app.after_claim = {};
+        app.end_next = nullptr;
+        for (int i = 0; i < 6; ++i) app.Frame();
+        const auto status = presenter.Status();
+        presenter.Stop();
+        Check(status.state == FrameGenState::kUnavailable && !status.threaded && runtime.not_stereo == 0 &&
+                  !runtime.ordering_violation && !g_release_violation,
+              "unsupported quad: following frames pass through composed, four raw views never reach stereo");
+    }
+}
+
 } // namespace
 
 // FG_TEST_ONLY=<name> runs only the tests whose name contains it. Each test
@@ -10104,6 +10355,10 @@ int main(int argc, char** argv) {
         return 0;
     }
     const HANDLE policy = std::getenv("FG_TEST_SERIAL") ? nullptr : StartPolicyTests();
+    RUN(TestCompositionExtensions);
+    RUN(TestCompositionUnsupportedChains);
+    RUN(TestCompositionRefusalSurvivesRuntimeFailure);
+    RUN(TestCompositionQuadUnsupportedChains);
     RUN(TestInterpolationPacing);
     RUN(TestWorkingMemoryAskedOncePerSecond);
     RUN(TestExtrapolationPacing);

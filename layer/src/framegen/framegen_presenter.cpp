@@ -199,6 +199,43 @@ const XrCompositionLayerDepthInfoKHR* DepthInfo(const XrCompositionLayerProjecti
     return nullptr;
 }
 
+// A copied frame outlives xrEndFrame, and generated views name other images.
+// Only metadata whose values and meaning can be kept is accepted. In
+// particular, never silently remove an extension the application enabled.
+bool SupportedLayerChains(const XrCompositionLayerBaseHeader& layer, std::string& unsupported) {
+    for (auto* next = static_cast<const XrBaseInStructure*>(layer.next); next; next = next->next) {
+        if (next->type != XR_TYPE_COMPOSITION_LAYER_COLOR_SCALE_BIAS_KHR &&
+            next->type != XR_TYPE_COMPOSITION_LAYER_ALPHA_BLEND_FB) {
+            unsupported = "composition layer extension type " + std::to_string(next->type);
+            return false;
+        }
+    }
+    if (layer.type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+        const auto& projection = reinterpret_cast<const XrCompositionLayerProjection&>(layer);
+        for (std::uint32_t i = 0; projection.views && i < projection.viewCount; ++i) {
+            for (auto* next = static_cast<const XrBaseInStructure*>(projection.views[i].next); next; next = next->next) {
+                if (next->type != XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR) {
+                    unsupported = "projection view extension type " + std::to_string(next->type);
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+bool SupportedFrameChains(const XrFrameEndInfo& info, std::string& unsupported) {
+    if (info.next) {
+        const auto* next = static_cast<const XrBaseInStructure*>(info.next);
+        unsupported = "frame end extension type " + std::to_string(next->type);
+        return false;
+    }
+    for (std::uint32_t i = 0; info.layers && i < info.layerCount; ++i) {
+        if (info.layers[i] && !SupportedLayerChains(*info.layers[i], unsupported)) return false;
+    }
+    return true;
+}
+
 FrameGenExtent Extent(const XrCompositionLayerProjectionView& view) {
     return {static_cast<std::uint32_t>(std::max(0, view.subImage.imageRect.extent.width)),
             static_cast<std::uint32_t>(std::max(0, view.subImage.imageRect.extent.height))};
@@ -583,6 +620,7 @@ void FrameGenPresenter::Stop() {
     threaded_frames_.clear();
     dropped_unended_ = dropped_superseded_ = 0;
     threaded_disabled_ = logged_threaded_ = false;
+    unsupported_composition_ = false;
     runtime_waits_ = runtime_begins_ = runtime_ends_ = 0;
     presenter_frame_open_ = false;
     logged_order_guard_ = logged_watchdog_ = false;
@@ -663,7 +701,9 @@ void FrameGenPresenter::Stop() {
 
 bool FrameGenPresenter::OwnsPacing() const {
     std::scoped_lock lock(mutex_);
-    return started_ && gpu_ && state_ != FrameGenState::kUnavailable;
+    // A session declined for composition metadata still drains its owned
+    // runtime frames before passing through; Turbo must not race that loop.
+    return started_ && gpu_ && (state_ != FrameGenState::kUnavailable || unsupported_composition_);
 }
 
 bool FrameGenPresenter::Started() const {
@@ -1420,6 +1460,12 @@ FrameGenQuadRoute FrameGenPresenter::ClaimQuadFrame(const XrCompositionLayerProj
     if (!QuadCapableLocked() || source.viewCount < 4 || !source.views) {
         return FrameGenQuadRoute::kNotPresenting;
     }
+    std::string unsupported;
+    if (!SupportedLayerChains(reinterpret_cast<const XrCompositionLayerBaseHeader&>(source), unsupported)) {
+        unsupported_composition_ = true;
+        UnavailableLocked(unsupported + " cannot be preserved; frames pass straight through");
+        return FrameGenQuadRoute::kNotPresenting;
+    }
     quad_offered_ = true;
     RecordQuadCaptureTargetsLocked(source);
     if (!compositor_running_ || !jit_ || !quad_mode_ || quad_switch_pending_ || compositor_drain_ ||
@@ -1529,7 +1575,7 @@ std::string FrameGenPresenter::QuadSummaryLocked(const Totals& start) const {
 }
 
 bool FrameGenPresenter::RunnableLocked() const {
-    return started_ && gpu_ && user_enabled_ && configured_enabled_ && state_ != FrameGenState::kPaused &&
+    return started_ && gpu_ && !unsupported_composition_ && user_enabled_ && configured_enabled_ && state_ != FrameGenState::kPaused &&
            state_ != FrameGenState::kUnavailable && healthy_streak_ >= engage_streak_frames_ &&
            Clock::now() - started_at_ >= engage_min_age_;
 }
@@ -1553,7 +1599,7 @@ bool FrameGenPresenter::StayThreadedLocked() const {
     // they are by the presenter thread, the runtime could show a newer
     // composed image with an older frame's views).
     const bool same_mode = !jit_ || jit_interpolate_ == (settings_.synthesis_mode == FrameGenSynthesisMode::kInterpolate);
-    return started_ && gpu_ && user_enabled_ && configured_enabled_ && state_ != FrameGenState::kPaused &&
+    return started_ && gpu_ && !unsupported_composition_ && user_enabled_ && configured_enabled_ && state_ != FrameGenState::kPaused &&
            state_ != FrameGenState::kUnavailable && EffectiveMultiplierLocked() >= 2 && same_mode &&
            !quad_switch_pending_ && !QuadDeclinedLocked() && !clock_displaced_;
 }
@@ -2234,6 +2280,12 @@ void FrameGenPresenter::SetStateLocked(FrameGenState state, const std::string& r
 }
 
 void FrameGenPresenter::PauseLocked(const std::string& reason) {
+    if (unsupported_composition_) {
+        // A failed pass-through submission must not turn a permanent
+        // compatibility refusal into a pause that Toggle/retry can re-arm.
+        if (logger_) logger_->Error("Frame Generation: " + reason + ".");
+        return;
+    }
     SetStateLocked(FrameGenState::kPaused, reason);
     paused_at_ = Clock::now();
     healthy_streak_ = 0;
@@ -2632,6 +2684,17 @@ XrResult FrameGenPresenter::EndFrame(XrSession session, const XrFrameEndInfo* in
         Clock::time_point entered;
         ~EndCall() { presenter->NoteEndCall(entered); }
     } end_call{this, entered};
+    std::string unsupported;
+    const bool supported = SupportedFrameChains(*info, unsupported);
+    bool pass_through;
+    {
+        std::scoped_lock lock(mutex_);
+        if (!supported && !unsupported_composition_) {
+            unsupported_composition_ = true;
+            UnavailableLocked(unsupported + " cannot be preserved; frames pass straight through");
+        }
+        pass_through = unsupported_composition_;
+    }
     {
         std::optional<ThreadedFrame> threaded;
         {
@@ -2795,7 +2858,7 @@ XrResult FrameGenPresenter::EndFrame(XrSession session, const XrFrameEndInfo* in
                 }
             }
         }
-    } else if (frame->demoted || !frame->should_render || !renderable) {
+    } else if (frame->demoted || !frame->should_render || !renderable || pass_through) {
         // Present in the one slot this frame still holds.
         result = SubmitAt(session, *info, frame->slot_time, calls);
         std::scoped_lock lock(mutex_);
@@ -3324,7 +3387,9 @@ XrResult FrameGenPresenter::RunCycle(XrSession session, const XrFrameEndInfo& in
     auto with_views = [&](const std::vector<XrCompositionLayerProjectionView>& views, XrSpace space,
                           XrCompositionLayerFlags flags, bool depth) {
         generated_layer = projection;
-        generated_layer.next = nullptr;
+        // This inline cycle finishes within the application's xrEndFrame:
+        // supported value-only metadata may keep the application's chain.
+        generated_layer.next = projection.next;
         generated_layer.space = space;
         generated_layer.layerFlags = flags;
         generated_layer.viewCount = static_cast<std::uint32_t>(views.size());
@@ -4396,6 +4461,7 @@ FrameGenPresenter::AsIs FrameGenPresenter::CurrentAsIsLocked(const FrameCopy& co
 
 bool FrameGenPresenter::CopyFrame(const XrFrameEndInfo& info, FrameCopy& copy, std::string& unsupported) {
     copy = {};
+    if (!SupportedFrameChains(info, unsupported)) return false;
     copy.blend_mode = info.environmentBlendMode;
     for (std::uint32_t i = 0; i < info.layerCount; ++i) {
         const XrCompositionLayerBaseHeader* header = info.layers ? info.layers[i] : nullptr;
@@ -4405,6 +4471,18 @@ bool FrameGenPresenter::CopyFrame(const XrFrameEndInfo& info, FrameCopy& copy, s
         }
         FrameCopy::Layer layer;
         layer.type = header->type;
+        for (auto* next = static_cast<const XrBaseInStructure*>(header->next); next; next = next->next) {
+            FrameCopy::Layer::Extension extension;
+            extension.type = next->type;
+            if (next->type == XR_TYPE_COMPOSITION_LAYER_COLOR_SCALE_BIAS_KHR) {
+                extension.color = *reinterpret_cast<const XrCompositionLayerColorScaleBiasKHR*>(next);
+                extension.color.next = nullptr;
+            } else {
+                extension.blend = *reinterpret_cast<const XrCompositionLayerAlphaBlendFB*>(next);
+                extension.blend.next = nullptr;
+            }
+            layer.extensions.push_back(extension);
+        }
         switch (header->type) {
         case XR_TYPE_COMPOSITION_LAYER_PROJECTION: {
             const auto& source = *reinterpret_cast<const XrCompositionLayerProjection*>(header);
@@ -4519,7 +4597,20 @@ XrFrameEndInfo FrameGenPresenter::BuildFrame(FrameCopy& copy, const std::vector<
         default:
             continue;
         }
-        pointers.push_back(static_cast<const XrCompositionLayerBaseHeader*>(header));
+        void* next = nullptr;
+        for (auto extension = layer.extensions.rbegin(); extension != layer.extensions.rend(); ++extension) {
+            if (extension->type == XR_TYPE_COMPOSITION_LAYER_COLOR_SCALE_BIAS_KHR) {
+                extension->color.next = next;
+                next = &extension->color;
+            } else {
+                extension->blend.next = next;
+                next = &extension->blend;
+            }
+        }
+        // All composition layer types share this header prefix.
+        auto* base = reinterpret_cast<XrCompositionLayerBaseHeader*>(const_cast<void*>(header));
+        base->next = next;
+        pointers.push_back(base);
     }
     XrFrameEndInfo info{XR_TYPE_FRAME_END_INFO};
     info.environmentBlendMode = copy.blend_mode;
@@ -5409,7 +5500,15 @@ std::optional<XrResult> FrameGenPresenter::ThreadedWaitLocked(std::unique_lock<s
 XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo& info, const FrameGenRuntimeCalls& calls,
                                         const ThreadedFrame& frame, Clock::time_point entered,
                                         const FrameGenQuadFrame* quad) {
-    if (frame.jit) {
+    bool pass_through;
+    {
+        std::scoped_lock lock(mutex_);
+        pass_through = unsupported_composition_;
+    }
+    if (frame.jit && (!pass_through || frame.quad)) {
+        // A claimed quad frame cannot be sent as four raw views to stereo.
+        // Unsupported projection/view chains were declined before claiming;
+        // a new frame/other-layer chain after that claim skips this refresh.
         return ThreadedEndJit(info, frame, entered, quad);
     }
     const XrCompositionLayerProjection* projection = FindProjection(info);
@@ -5468,7 +5567,7 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
     const Clock::time_point first_due = due(frame.first_time);
     // Interpolating, the frames between the previous real frame and this one
     // fill the slots before it: generated now, the first shown from here.
-    const bool interpolate = frame.interpolate && renderable && copied && frame.multiplier >= 2;
+    const bool interpolate = !pass_through && frame.interpolate && renderable && copied && frame.multiplier >= 2;
     std::vector<std::vector<XrCompositionLayerProjectionView>> between;
     std::vector<std::uint8_t> between_exact;
     std::vector<XrTime> between_targets;
@@ -5574,7 +5673,7 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
         }
         result = RuntimeEnd(calls, session, &real, true);
     }
-    bool generate = !frame.interpolate && XR_SUCCEEDED(result) && renderable && copied && offer.should_render &&
+    bool generate = !pass_through && !frame.interpolate && XR_SUCCEEDED(result) && renderable && copied && offer.should_render &&
                     frame.multiplier >= 2;
 
     lock.lock();
@@ -5651,6 +5750,17 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
     }
     erase_frame();
     offer_done_ = true;
+    if (pass_through) {
+        // The original frame just reached the runtime while its pointers
+        // were alive. Nothing older may replace it as the thread drains.
+        jit_frames_.clear();
+        jit_content_ = {};
+        jit_views_.clear();
+        jit_shown_.reset();
+        newest_copy_ = {};
+        compositor_drain_ = true;
+        drain_started_slot_ = slot_index_;
+    }
     WakeSlots();
     if (renderable && offer.should_render) {
         ++healthy_streak_;
@@ -6191,6 +6301,14 @@ XrResult FrameGenPresenter::ThreadedEndJit(const XrFrameEndInfo& info, const Thr
     }
     lock.lock();
     generation_pending_ = false;
+    if (unsupported_composition_) {
+        // A chain first seen after a quad claim cannot be applied to a raw
+        // four-view frame in a stereo runtime. Keep its last image for this
+        // refresh; the following frames use the layer's normal composition.
+        jit_frames_.clear();
+        compositor_drain_ = true;
+        drain_started_slot_ = slot_index_;
+    }
     WakeSlots();
     app_frames_.push_back(entered);
     ++totals_.app_frames;

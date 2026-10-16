@@ -522,7 +522,15 @@ class FrameGenPresenter {
     // xrEndFrame, for slots the presenter thread fills between real frames.
     struct FrameCopy {
         struct Layer {
+            struct Extension {
+                XrStructureType type{XR_TYPE_UNKNOWN};
+                XrCompositionLayerColorScaleBiasKHR color{};
+                XrCompositionLayerAlphaBlendFB blend{};
+            };
             XrStructureType type{XR_TYPE_UNKNOWN};
+            // Value-only composition metadata, owned in chain order. The
+            // pointers are rebuilt after every copy/move, as for depth.
+            std::vector<Extension> extensions;
             XrCompositionLayerProjection projection{};
             std::vector<XrCompositionLayerProjectionView> views;
             std::vector<XrCompositionLayerDepthInfoKHR> depth;
@@ -1052,6 +1060,7 @@ class FrameGenPresenter {
     bool started_{false};
     bool user_enabled_{true};
     bool configured_enabled_{true};
+    bool unsupported_composition_{false}; // this session must preserve its original submission chains
     FrameGenState state_{FrameGenState::kOff};
     std::string reason_;
     FrameGenResolvedSettings settings_;
