@@ -19,6 +19,9 @@ use tauri::{AppHandle, Emitter, Manager, State, Window, WindowEvent, Wry};
 pub const MAIN_WINDOW: &str = "main";
 const TRAY_ID: &str = "vectorxr";
 const ACTION_EVENT: &str = "tray-action";
+// The 32 px mark (Generate-TauriIcons.ps1). The default window icon is the
+// 16 px frame, which turns blurry when the notification area scales it up.
+const TRAY_ICON: Image<'static> = tauri::include_image!("./icons/tray.png");
 
 const ITEM_HEALTH: &str = "tray-health";
 const ITEM_ENABLED: &str = "tray-enabled";
@@ -217,11 +220,7 @@ fn build(app: &AppHandle, status: &TrayStatus) -> tauri::Result<(TrayIcon<Wry>, 
             &quit,
         ],
     )?;
-    let icon = app
-        .default_window_icon()
-        .cloned()
-        .map(|icon| icon.to_owned())
-        .ok_or_else(|| tauri::Error::AssetNotFound("window icon".to_string()))?;
+    let icon = TRAY_ICON.clone();
     let icon_disabled = Image::new(&greyscale(icon.rgba()), icon.width(), icon.height()).to_owned();
     let tray = TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon.clone())

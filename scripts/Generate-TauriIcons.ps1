@@ -152,6 +152,10 @@ try {
     }
 
     New-IcoFile -PngPaths $icoPngPaths -IcoPath (Join-Path $outputDirPath "icon.ico")
+
+    # Notification-area icon (embedded by src/tray.rs): the mark at 32 px, the
+    # same image as the ICO's 32 px frame.
+    New-ResizedPng -Source $markImage -Size 32 -Path (Join-Path $outputDirPath "tray.png")
   } finally {
     if (Test-Path -LiteralPath $tempDir) {
       Remove-Item -LiteralPath $tempDir -Recurse -Force
