@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
-import { createFrameGenProfile, createPivotQuickView, createTurboProfile, defaultConfig, defaultFrameGenSettings, normalizeToggleBindings } from '../src/lib/model.ts'
+import { createFrameGenProfile, createPivotQuickView, createTurboProfile, defaultConfig, defaultFrameGenSettings, normalizeToggleBindings, savedOsdRowOrder } from '../src/lib/model.ts'
 
 const schema = JSON.parse(readFileSync(new URL('../../config/vectorxr.schema.json', import.meta.url), 'utf8'))
 
@@ -40,7 +40,10 @@ test('schema describes generated Frame Generation settings and keeps the module 
   assert.equal(schema.$defs.framegenModule.properties.diagnosticView.default, framegen.diagnosticView)
 
   const osd = schema.$defs.osdSettings.properties
-  assert.deepEqual(osd.bodyOrder.default, defaultConfig().core.osd.bodyOrder)
+  // Saved split: bodyOrder holds the rows 0.19.0-0.19.2 layers know, rowOrder the full order.
+  assert.deepEqual(osd.bodyOrder.default, savedOsdRowOrder(defaultConfig().core.osd).bodyOrder)
+  assert.deepEqual(osd.rowOrder.default, defaultConfig().core.osd.bodyOrder)
+  assert.deepEqual(osd.customPresets.items.properties.settings.properties.rowOrder.default, defaultConfig().core.osd.bodyOrder)
   assert.deepEqual(osd.bodyOrder.items.enum, defaultConfig().core.osd.bodyOrder)
   assert.deepEqual(osd.customPresets.items.properties.settings.properties.bodyOrder.items.enum, defaultConfig().core.osd.bodyOrder)
   assert.equal(osd.showFramegen.default, true)

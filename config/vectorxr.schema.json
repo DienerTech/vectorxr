@@ -402,7 +402,7 @@
         "bodyOrder": {
           "type": "array",
           "uniqueItems": true,
-          "description": "Expanded-layout row order. Rows missing from a saved order are appended at the end in default order.",
+          "description": "Expanded-layout row order as 0.19.0-0.19.2 layers read it: they reject any row they do not know, so the app writes only graph, turbo, framegen, pivot and modules here. Rows missing from a saved order are appended at the end in default order.",
           "items": {
             "enum": [
               "graph",
@@ -412,6 +412,21 @@
               "pivot",
               "modules"
             ]
+          },
+          "default": [
+            "graph",
+            "turbo",
+            "framegen",
+            "pivot",
+            "modules"
+          ]
+        },
+        "rowOrder": {
+          "type": "array",
+          "uniqueItems": true,
+          "description": "The full expanded-layout row order, including rows newer than 0.19.2 such as performance; read instead of bodyOrder when present. Unknown row names are skipped with a warning.",
+          "items": {
+            "type": "string"
           },
           "default": [
             "graph",
@@ -609,6 +624,20 @@
                         "pivot",
                         "modules"
                       ]
+                    },
+                    "default": [
+                      "graph",
+                      "turbo",
+                      "framegen",
+                      "pivot",
+                      "modules"
+                    ]
+                  },
+                  "rowOrder": {
+                    "type": "array",
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "string"
                     },
                     "default": [
                       "graph",

@@ -186,6 +186,25 @@ export function defaultOsdSettings(): OsdSettings {
     cycleBindings: [{ type: 'keyboard', chord: ['Ctrl', 'Alt', 'F11'] }] }
 }
 
+// The rows 0.19.0-0.19.2 layers know. They reject a config whose bodyOrder
+// names any other row, so saved files keep bodyOrder to these and put the
+// full order in rowOrder, which they ignore (the app's backend splits it on
+// save; Export Config does the same).
+const legacyOsdBodyRows: readonly string[] = ['graph', 'turbo', 'framegen', 'pivot', 'modules']
+
+function savedRowOrder(input: Record<string, unknown>): unknown[] {
+  return Array.isArray(input.rowOrder) ? input.rowOrder : Array.isArray(input.bodyOrder) ? input.bodyOrder : []
+}
+
+// An OSD layout as written to a file: bodyOrder readable by older layers,
+// rowOrder with the full order when it names a newer row.
+export function savedOsdRowOrder<T extends { bodyOrder: string[] }>(layout: T): T & { rowOrder?: string[] } {
+  const legacy = layout.bodyOrder.filter(row => legacyOsdBodyRows.includes(row))
+  return legacy.length === layout.bodyOrder.length
+    ? { ...layout, bodyOrder: legacy }
+    : { ...layout, bodyOrder: legacy, rowOrder: [...layout.bodyOrder] }
+}
+
 export function normalizeOsdSettings(value: unknown): OsdSettings {
   const input = isRecord(value) ? value : {}
   const fallback = defaultOsdSettings()
@@ -204,7 +223,7 @@ export function normalizeOsdSettings(value: unknown): OsdSettings {
     accent: typeof input.accent === 'string' && (Object.prototype.hasOwnProperty.call(osdAccentColors, input.accent) || input.accent === 'custom') ? input.accent as OsdSettings['accent'] : 'teal',
     customColor: typeof input.customColor === 'string' && /^#[0-9a-f]{6}$/i.test(input.customColor) ? input.customColor : fallback.customColor,
     clockFormat: input.clockFormat === '12' ? '12' : '24',
-    bodyOrder: [...new Set([...(Array.isArray(input.bodyOrder) ? input.bodyOrder.filter((row): row is OsdBodyRow => osdBodyRows.includes(row)) : []), ...osdBodyRows])],
+    bodyOrder: [...new Set([...savedRowOrder(input).filter((row): row is OsdBodyRow => osdBodyRows.includes(row as OsdBodyRow)), ...osdBodyRows])],
     customPresets: Array.isArray(input.customPresets) ? input.customPresets.filter(item => isRecord(item) && typeof item.name === 'string' && item.name.trim() && isRecord(item.settings)).slice(0, 50)
       .map(item => ({ name: item.name.trim().slice(0, 60), settings: osdLayout(normalizeOsdSettings({ ...item.settings, customPresets: [] })) })) : [],
     toggleBindings: normalizeToggleBindings(input.toggleBindings, input.toggleBinding, fallback.toggleBindings),

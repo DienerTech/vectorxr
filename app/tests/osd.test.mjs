@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { readFileSync } from 'node:fs'
-import { defaultConfig, defaultOsdSettings, normalizeConfig, normalizeOsdSettings, osdLayout, savedBindingConflictWarnings } from '../src/lib/model.ts'
+import { defaultConfig, defaultOsdSettings, normalizeConfig, normalizeOsdSettings, osdLayout, savedBindingConflictWarnings, savedOsdRowOrder } from '../src/lib/model.ts'
 import { validateConfig } from '../src/lib/validation.ts'
 import { compactPerformanceWidth, osdCompactLayout } from '../src/lib/osdCompactLayout.ts'
 import { osdDiagnostics, osdDiagnosticsTagWidth } from '../src/lib/osdDiagnostics.ts'
@@ -207,4 +207,17 @@ test('debug logging and Frame Generation diagnostic views name themselves after 
     assert.ok(crowded.width <= 960)
     for (const field of crowded.fields) assert.ok(field.width >= 80)
   }
+})
+
+test('saved OSD row orders stay readable by 0.19.0-0.19.2 layers, and rowOrder wins on load', () => {
+  const full = ['pivot', 'performance', 'graph', 'turbo', 'framegen', 'modules']
+  const saved = savedOsdRowOrder({ ...defaultOsdSettings(), bodyOrder: full })
+  assert.deepEqual(saved.bodyOrder, ['pivot', 'graph', 'turbo', 'framegen', 'modules'])
+  assert.deepEqual(saved.rowOrder, full)
+  assert.equal('rowOrder' in savedOsdRowOrder({ ...defaultOsdSettings(), bodyOrder: ['modules', 'graph'] }), false)
+  // Read back as written: the full order, not the legacy list with the new row appended.
+  assert.deepEqual(normalizeOsdSettings(saved).bodyOrder, full)
+  assert.equal('rowOrder' in normalizeOsdSettings(saved), false)
+  const preset = normalizeOsdSettings({ customPresets: [{ name: 'Cockpit', settings: savedOsdRowOrder({ bodyOrder: full }) }] }).customPresets[0]
+  assert.deepEqual(preset.settings.bodyOrder, full)
 })

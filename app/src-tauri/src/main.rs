@@ -325,7 +325,11 @@ struct OsdSettings {
     compact_show_framegen: bool,
     compact_show_performance: bool,
     clock_format: String,
+    // The expanded rows in order: the rows 0.19.0-0.19.2 layers know, in
+    // bodyOrder, and the full order in rowOrder (split_osd_row_order).
     body_order: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    row_order: Option<Vec<String>>,
     custom_color: String,
     custom_presets: Vec<serde_json::Value>,
     accent: String,
@@ -391,14 +395,15 @@ impl Default for OsdSettings {
             compact_show_framegen: false,
             compact_show_performance: false,
             clock_format: "24".into(),
-            body_order: vec![
-                "graph".into(),
-                "performance".into(),
-                "turbo".into(),
-                "framegen".into(),
-                "pivot".into(),
-                "modules".into(),
-            ],
+            // Already split (split_osd_row_order): the default file is
+            // written without normalize_config.
+            body_order: LEGACY_OSD_ROWS.iter().map(|row| row.to_string()).collect(),
+            row_order: Some(
+                ["graph", "performance", "turbo", "framegen", "pivot", "modules"]
+                    .iter()
+                    .map(|row| row.to_string())
+                    .collect(),
+            ),
             custom_color: "#51ddbd".into(),
             custom_presets: vec![],
             accent: "teal".into(),
@@ -1405,6 +1410,46 @@ fn application_id_for_profile_match(
     Some(id)
 }
 
+// The OSD rows 0.19.0-0.19.2 layers know. They fail the whole config on any
+// other name in bodyOrder (and in a preset's), turning every module off, but
+// ignore an unknown key: so bodyOrder keeps only these rows, in order, and
+// rowOrder holds the full order whenever it names another row.
+const LEGACY_OSD_ROWS: [&str; 5] = ["graph", "turbo", "framegen", "pivot", "modules"];
+
+fn split_osd_row_order(full: Vec<String>) -> (Vec<String>, Option<Vec<String>>) {
+    let legacy: Vec<String> = full
+        .iter()
+        .filter(|row| LEGACY_OSD_ROWS.contains(&row.as_str()))
+        .cloned()
+        .collect();
+    let row_order = (legacy != full).then_some(full);
+    (legacy, row_order)
+}
+
+fn rows(value: Option<&serde_json::Value>) -> Option<Vec<String>> {
+    value?
+        .as_array()?
+        .iter()
+        .map(|row| row.as_str().map(str::to_string))
+        .collect()
+}
+
+// A saved OSD layout (a custom preset's settings), split the same way.
+fn split_preset_row_order(preset: &mut serde_json::Value) {
+    let Some(settings) = preset.get_mut("settings").and_then(serde_json::Value::as_object_mut) else {
+        return;
+    };
+    let Some(full) = rows(settings.get("rowOrder")).or_else(|| rows(settings.get("bodyOrder"))) else {
+        return;
+    };
+    let (legacy, row_order) = split_osd_row_order(full);
+    settings.insert("bodyOrder".into(), serde_json::json!(legacy));
+    match row_order {
+        Some(row_order) => settings.insert("rowOrder".into(), serde_json::json!(row_order)),
+        None => settings.remove("rowOrder"),
+    };
+}
+
 fn normalize_config(mut config: VectorXRConfig) -> VectorXRConfig {
     if config.version != 3 {
         return default_config();
@@ -1413,6 +1458,9 @@ fn normalize_config(mut config: VectorXRConfig) -> VectorXRConfig {
     config.version = 3;
 
     let osd = &mut config.core.osd;
+    let full = osd.row_order.take().unwrap_or_else(|| osd.body_order.clone());
+    (osd.body_order, osd.row_order) = split_osd_row_order(full);
+    osd.custom_presets.iter_mut().for_each(split_preset_row_order);
     normalize_toggle_bindings(&mut osd.toggle_binding, &mut osd.toggle_bindings, default_osd_toggle_binding);
     normalize_toggle_bindings(&mut osd.cycle_binding, &mut osd.cycle_bindings, default_osd_cycle_binding);
     let depth = &mut config.modules.depthxr.bindings;
@@ -3044,7 +3092,11 @@ mod tests {
         assert!(legacy.osd.show_framegen && !legacy.osd.compact_show_framegen);
         assert!(legacy.osd.show_framegen_fps);
         assert!(legacy.osd.show_performance && !legacy.osd.compact_show_performance);
-        assert_eq!(legacy.osd.body_order, ["graph", "performance", "turbo", "framegen", "pivot", "modules"]);
+        assert_eq!(legacy.osd.body_order, ["graph", "turbo", "framegen", "pivot", "modules"]);
+        assert_eq!(
+            legacy.osd.row_order.as_deref(),
+            Some(&["graph", "performance", "turbo", "framegen", "pivot", "modules"].map(String::from)[..])
+        );
         let mut input = serde_json::json!({"enabled":true,"compact":true,"visibleOnStart":false,
             "horizontalDegrees":-30.0,"verticalDegrees":15.0,"distanceMeters":2.0,"scale":75.0,
             "opacity":70,"updateHz":10,"showGraph":false,"showRuntime":false,"showTurbo":false,
@@ -3065,6 +3117,40 @@ mod tests {
             if key != "cycleBinding" { assert_eq!(&output[key], value, "{key}"); }
         }
         assert_eq!(output["cycleBinding"]["chord"], input["cycleBinding"]["chord"]);
+    }
+
+    // 0.19.0-0.19.2 layers fail the whole config on a bodyOrder row they do
+    // not know: every file this app writes keeps bodyOrder (presets' too) to
+    // their rows, and the full order goes in rowOrder, which they ignore.
+    #[test]
+    fn saved_osd_row_orders_stay_readable_by_older_layers() {
+        use serde_json::json;
+        let legacy_rows = ["graph", "turbo", "framegen", "pivot", "modules"];
+        let readable = |order: &serde_json::Value| {
+            order.as_array().unwrap().iter().all(|row| legacy_rows.contains(&row.as_str().unwrap()))
+        };
+        let default = serde_json::to_value(super::default_config()).unwrap();
+        assert!(readable(&default["core"]["osd"]["bodyOrder"]));
+        assert_eq!(default["core"]["osd"]["rowOrder"][1], "performance");
+
+        let mut config = default.clone();
+        let osd = config["core"]["osd"].as_object_mut().unwrap();
+        osd.remove("rowOrder");
+        osd.insert("bodyOrder".into(), json!(["pivot", "performance", "graph", "turbo", "framegen", "modules"]));
+        osd.insert("customPresets".into(), json!([
+            { "name": "Cockpit", "settings": { "bodyOrder": ["performance", "modules", "graph", "turbo", "framegen", "pivot"] } },
+            { "name": "Old", "settings": { "bodyOrder": ["modules", "graph"] } }
+        ]));
+        let output = saved(config);
+        let osd = &output["core"]["osd"];
+        assert_eq!(osd["bodyOrder"], json!(["pivot", "graph", "turbo", "framegen", "modules"]));
+        assert_eq!(osd["rowOrder"], json!(["pivot", "performance", "graph", "turbo", "framegen", "modules"]));
+        let preset = &osd["customPresets"][0]["settings"];
+        assert_eq!(preset["bodyOrder"], json!(["modules", "graph", "turbo", "framegen", "pivot"]));
+        assert_eq!(preset["rowOrder"][0], "performance");
+        assert!(osd["customPresets"][1]["settings"].get("rowOrder").is_none());
+        // Read back, rowOrder wins, and saving again changes nothing.
+        assert_eq!(saved(output.clone()), output);
     }
 
     #[test]

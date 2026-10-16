@@ -1542,6 +1542,20 @@ void TestOsdPerformanceRow() {
     Expect(!parse(R"({"bodyOrder":["performance","performance"]})").ok,"A repeated performance row was accepted");
     const auto preset=parse(R"({"customPresets":[{"name":"Numbers","settings":{"showPerformance":true,"compactShowPerformance":true}}]})");
     Expect(preset.ok,"OSD presets should accept the performance row: "+preset.error);
+    // As the app saves it: bodyOrder holds the rows 0.19.0-0.19.2 layers know,
+    // rowOrder the full order, which wins.
+    const auto split=parse(R"({"bodyOrder":["pivot","graph","turbo","framegen","modules"],"rowOrder":["pivot","performance","graph","turbo","framegen","modules"],)"
+                           R"("customPresets":[{"name":"Cockpit","settings":{"bodyOrder":["modules","graph"],"rowOrder":["performance","modules","graph"]}}]})");
+    Expect(split.ok && split.warnings.empty() &&
+               split.document.core.osd.body_order==std::vector<std::string>{"pivot","performance","graph","turbo","framegen","modules"},
+           "rowOrder should give the full row order: "+split.error);
+    // A row a newer app adds is skipped with a warning, not a failed config.
+    const auto newer=parse(R"({"rowOrder":["graph","thermals","performance","turbo","framegen","pivot","modules"]})");
+    Expect(newer.ok && newer.document.core.osd.body_order==std::vector<std::string>{"graph","performance","turbo","framegen","pivot","modules"} &&
+               newer.warnings==std::vector<std::string>{"Unknown value ignored: core.osd.rowOrder \"thermals\""},
+           "An unknown OSD row should be skipped with a warning: "+newer.error);
+    Expect(!parse(R"({"rowOrder":["graph","graph"]})").ok && !parse(R"({"rowOrder":["graph",3]})").ok,
+           "A repeated or non-string rowOrder entry was accepted");
 }
 
 void TestFrameGenOsdRows() {
