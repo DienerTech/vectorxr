@@ -701,8 +701,9 @@ void FrameGenPresenter::Stop() {
 
 bool FrameGenPresenter::OwnsPacing() const {
     std::scoped_lock lock(mutex_);
-    // A session declined for composition metadata still drains its owned
-    // runtime frames before passing through; Turbo must not race that loop.
+    // Mirrors the layer, which reads this once at session creation and keeps
+    // pacing with Frame Generation for the session: a composition refusal
+    // does not hand pacing back.
     return started_ && gpu_ && (state_ != FrameGenState::kUnavailable || unsupported_composition_);
 }
 
@@ -1463,7 +1464,8 @@ FrameGenQuadRoute FrameGenPresenter::ClaimQuadFrame(const XrCompositionLayerProj
     std::string unsupported;
     if (!SupportedLayerChains(reinterpret_cast<const XrCompositionLayerBaseHeader&>(source), unsupported)) {
         unsupported_composition_ = true;
-        UnavailableLocked(unsupported + " cannot be preserved; frames pass straight through");
+        UnavailableLocked(unsupported + " cannot be preserved, so Frame Generation is off until the game restarts; "
+                          "frames pass straight through");
         return FrameGenQuadRoute::kNotPresenting;
     }
     quad_offered_ = true;
@@ -2575,7 +2577,11 @@ XrResult FrameGenPresenter::WaitFrame(XrSession session, const XrFrameWaitInfo* 
     frame.should_render = state->shouldRender == XR_TRUE;
     // Still wanted after the runtime's wait: turned off meanwhile, the frame
     // passes through (and the state stays off).
-    frame.engaged = engage && frame.period > 0 && state_ != FrameGenState::kPaused && user_enabled_ && configured_enabled_;
+    // Refused meanwhile on the ending thread (composition metadata), it
+    // passes through too: engaging would report the multiplied period to the
+    // game and replace the named refusal with an active state.
+    frame.engaged = engage && frame.period > 0 && state_ != FrameGenState::kPaused && user_enabled_ && configured_enabled_ &&
+                    !unsupported_composition_;
     frame.multiplier = multiplier;
     frame.sequence = sequence;
     frame.wait_return = Clock::now();
@@ -2691,7 +2697,8 @@ XrResult FrameGenPresenter::EndFrame(XrSession session, const XrFrameEndInfo* in
         std::scoped_lock lock(mutex_);
         if (!supported && !unsupported_composition_) {
             unsupported_composition_ = true;
-            UnavailableLocked(unsupported + " cannot be preserved; frames pass straight through");
+            UnavailableLocked(unsupported + " cannot be preserved, so Frame Generation is off until the game restarts; "
+                          "frames pass straight through");
         }
         pass_through = unsupported_composition_;
     }
@@ -2833,7 +2840,9 @@ XrResult FrameGenPresenter::EndFrame(XrSession session, const XrFrameEndInfo* in
             std::scoped_lock lock(mutex_);
             eligible = ThreadedEligibleLocked();
         }
-        if (eligible && renderable) {
+        // Refused for composition metadata, nothing is presented from a
+        // copy again (and CopyFrame would only report the refused chain).
+        if (eligible && renderable && !pass_through) {
             // What the presenter thread shows until its first real frame, and
             // a check that it can repeat this application's layers at all.
             FrameCopy copy;

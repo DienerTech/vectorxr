@@ -528,8 +528,9 @@ class FrameGenPresenter {
                 XrCompositionLayerAlphaBlendFB blend{};
             };
             XrStructureType type{XR_TYPE_UNKNOWN};
-            // Value-only composition metadata, owned in chain order. The
-            // pointers are rebuilt after every copy/move, as for depth.
+            // Value-only composition metadata, owned in chain order. As for
+            // depth, BuildFrame relinks the pointers before every submission;
+            // never read a stored copy's next pointers anywhere else.
             std::vector<Extension> extensions;
             XrCompositionLayerProjection projection{};
             std::vector<XrCompositionLayerProjectionView> views;
