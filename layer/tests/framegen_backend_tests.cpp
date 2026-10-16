@@ -6220,6 +6220,74 @@ void SubstitutionShownTest(ID3D12Device* device, ID3D12CommandQueue* game_queue)
     std::cout << "D3D12 queue substitution with shown layers kept lazy passed\n";
 }
 
+// A one-shot failure at every working-texture allocation. Check the complete
+// recovered resource set before submitting any capture, so a broken recovery
+// fails safely instead of handing null resources to the graphics driver.
+void AllocationFailureRecoveryTest(Harness& harness) {
+    const XrSwapchain source = reinterpret_cast<XrSwapchain>(std::uintptr_t{0xfa110c});
+    g_swapchains[source] = {harness.create(192, 192)};
+    auto submission = [&](std::uint32_t size) {
+        FrameGenViewSubmission view;
+        view.source = {source, 0, 0, {{0, 0}, {static_cast<std::int32_t>(size), static_cast<std::int32_t>(size)}},
+                       harness.format};
+        view.request.extent = {size, size};
+        view.request.output = FrameGenOutputKind::kSrgb8;
+        return std::vector<FrameGenViewSubmission>{view};
+    };
+    const auto small_views = submission(128), large_views = submission(192);
+    FrameGenTuning initial;
+    initial.analyze_only = true;
+    auto backend = [&] {
+        std::string error;
+        auto gpu = CreateFrameGenGpu(harness.binding, error);
+        Check(gpu != nullptr && gpu->Track(source, EnumerateImages, error), "allocation recovery backend: " + error);
+        return gpu;
+    };
+    auto setup = [&](FrameGenGpu& gpu, const std::vector<FrameGenViewSubmission>& views, const FrameGenTuning& tuning) {
+        FrameGenExecuteResult result;
+        std::string error;
+        Check(!gpu.Execute(views, tuning, result, error) && result.uncaptured,
+              "allocation recovery setup did not prepare the uncaptured view: " + error);
+    };
+    for (const int stage : {0, 1, 2, 3}) {
+        const auto& target = stage == 1 ? large_views : small_views;
+        FrameGenTuning changed = initial;
+        if (stage == 2) changed.quality = FrameGenFlowQuality::kQuality;
+        if (stage == 3) changed.cover = true;
+        auto reference = backend();
+        setup(*reference, target, changed);
+        const std::uint64_t complete_bytes = reference->WorkingMemoryBytes();
+        Check(complete_bytes > 0, "allocation recovery has no working-resource reference");
+        reference.reset();
+        std::uint32_t failures = 0;
+        for (std::uint32_t ordinal = 1; ordinal < 128; ++ordinal) {
+            auto gpu = backend();
+            if (stage != 0) setup(*gpu, small_views, initial);
+            gpu->FailAllocationForTest(ordinal);
+            FrameGenExecuteResult result;
+            std::string error;
+            const bool ok = gpu->Execute(target, changed, result, error);
+            Check(!ok, "an uncaptured allocation trial unexpectedly submitted work");
+            gpu->FailAllocationForTest(0);
+            if (result.uncaptured) break; // ordinal was beyond the last allocation
+            ++failures;
+            Check(!error.empty(), "an injected texture allocation failure had no error");
+            setup(*gpu, target, changed);
+            Check(gpu->WorkingMemoryBytes() == complete_bytes,
+                  "allocation recovery accepted a partial resource set (stage " + std::to_string(stage) +
+                      ", allocation " + std::to_string(ordinal) + ")");
+            Check(gpu->Capture(0, target[0].source, target[0].request, changed.quality, error),
+                  "a recovered view refused its next capture: " + error);
+            result = {};
+            Check(gpu->Execute(target, changed, result, error) && gpu->WaitIdle(),
+                  "a recovered view could not analyze its capture: " + error);
+        }
+        Check(failures > 0 && failures < 126, "allocation recovery did not exercise every failure ordinal");
+        std::cout << "D3D12 allocation recovery stage " << stage << ": " << failures << " allocation faults checked\n";
+    }
+    g_swapchains.erase(source);
+}
+
 int D3D12Test() {
     ComPtr<IDXGIFactory4> factory;
     ComPtr<IDXGIAdapter> warp;
@@ -6578,6 +6646,7 @@ int D3D12Test() {
         GatesOpenBeforeExitTest(device.Get(), queue.Get());
         SubstitutionTest(device.Get(), queue.Get());
         SubstitutionShownTest(device.Get(), queue.Get());
+        AllocationFailureRecoveryTest(harness);
     }
     int result = g_replay      ? RunReplay(harness)
                  : g_contention ? RunContention(harness)

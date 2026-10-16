@@ -3268,6 +3268,10 @@ class D3D12FrameGen final : public FrameGenGpu {
     bool Create(Texture& texture, FrameGenExtent extent, DXGI_FORMAT format, DXGI_FORMAT view_format, bool uav,
                 std::string& error, bool common = false, bool render_target = false) {
         texture = {};
+        if (allocation_failure_ && --allocation_failure_ == 0) {
+            error = Failure("D3D12 Frame Generation texture", E_OUTOFMEMORY);
+            return false;
+        }
         D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_DEFAULT};
         D3D12_RESOURCE_DESC desc{};
         desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -3311,6 +3315,13 @@ class D3D12FrameGen final : public FrameGenGpu {
 
     bool EnsureView(ViewResources& view, const FrameGenViewSubmission& submission, ID3D12Resource* source,
                     const FrameGenTuning& tuning, std::string& error) {
+        // Uncaptured calls this before Execute's recording/error cleanup. A
+        // partial allocation must never advertise its new images as ready.
+        struct Setup {
+            FrameGenHistoryState& state;
+            bool complete{false};
+            ~Setup() { if (!complete) state = {}; }
+        } setup{view.history_state};
         const D3D12_RESOURCE_DESC source_desc = source->GetDesc();
         const FrameGenExtent extent = submission.request.extent;
         const std::uint8_t final_level = FrameGenFinalFlowLevel(tuning);
@@ -3389,6 +3400,7 @@ class D3D12FrameGen final : public FrameGenGpu {
                 }
             }
         }
+        setup.complete = true;
         return true;
     }
 
@@ -3430,6 +3442,7 @@ class D3D12FrameGen final : public FrameGenGpu {
 
     std::string HardwareFlowStatus() const override { return hardware_status_; }
     void StallHardwareForTest() override { stall_hardware_for_test_ = true; }
+    void FailAllocationForTest(std::uint32_t ordinal) override { allocation_failure_ = ordinal; }
     void SetHardwareAtlas(bool on) override { atlas_enabled_ = on; }
 
     // The game's queue waits on the optical flow hardware's fence: should
@@ -4528,6 +4541,7 @@ class D3D12FrameGen final : public FrameGenGpu {
     std::atomic<bool> hardware_stuck_{false};
     std::atomic<bool> hardware_hung_{false}; // the watchdog ever released a fence
     bool stall_hardware_for_test_{false};
+    std::uint32_t allocation_failure_{0}; // one-shot ordinal among Create calls, tests only
     // Generated frames drawn straight into the output images.
     static constexpr UINT kRenderTargetViews = 16;
     // Hardware clears of the eye-shift textures (CPU-side views).
