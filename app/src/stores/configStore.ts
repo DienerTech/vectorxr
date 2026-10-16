@@ -68,6 +68,18 @@ const isDirty = computed(() => JSON.stringify(state.config) !== JSON.stringify(s
 // write the file out of order.
 const queueSave = createTaskQueue()
 
+// The settings file as last read back (load, after each save, reset), in the
+// same normalized form a later read gives: reloadIfChanged compares with it,
+// so only a change made elsewhere counts.
+let lastDisk = ''
+async function readBack() {
+  try {
+    lastDisk = JSON.stringify((await loadConfigEnvelope()).config)
+  } catch {
+    lastDisk = ''
+  }
+}
+
 function loadBlockedStatus() {
   return `Settings could not be loaded, so saving is off to keep the file on disk: ${state.loadError.replace(/\.\s*$/, '')}. Fix the file and reopen VectorXR, import a config, or reset to defaults.`
 }
@@ -82,6 +94,7 @@ export function useConfigStore() {
       state.path = envelope.path
       state.config = cloneConfig(envelope.config)
       state.originalConfig = cloneConfig(envelope.config)
+      lastDisk = JSON.stringify(envelope.config)
       state.loadError = ''
       state.status = ''
       await Promise.all([refreshSeenApps(), refreshRuntimePacing(), refreshTurboMetrics()])
@@ -179,6 +192,7 @@ export function useConfigStore() {
         const saved = cloneConfig(state.config)
         state.path = await saveConfigEnvelope(saved)
         state.originalConfig = saved
+        await readBack()
         state.status = 'Config saved'
       } catch (error) {
         state.status = errorText(error, 'Failed to save config')
@@ -189,8 +203,10 @@ export function useConfigStore() {
   }
 
   // A change made outside the editor (the tray): saved at once on top of the
-  // saved settings, then made in the editor too, so the editor's other
-  // unsaved edits stay unsaved.
+  // settings on disk, then made in the editor too, so the editor's other
+  // unsaved edits stay unsaved. The disk copy, not the one loaded at start:
+  // an app kept running in the tray for hours must not undo a hand edit or
+  // another copy's save.
   function saveSetting(change: (config: VectorXRConfig) => void, description: string): Promise<boolean> {
     return queueSave(async () => {
       if (state.loading) {
@@ -203,11 +219,17 @@ export function useConfigStore() {
 
       state.saving = true
       try {
-        const saved = cloneConfig(state.originalConfig)
+        const saved = cloneConfig((await loadConfigEnvelope()).config)
         change(saved)
         state.path = await saveConfigEnvelope(saved)
+        await readBack()
+        const edited = isDirty.value
         state.originalConfig = saved
-        change(state.config)
+        if (edited) {
+          change(state.config)
+        } else {
+          state.config = cloneConfig(saved)
+        }
         state.status = description
         return true
       } catch (error) {
@@ -215,6 +237,30 @@ export function useConfigStore() {
         return false
       } finally {
         state.saving = false
+      }
+    })
+  }
+
+  // The file may have changed while the window was hidden (the tray keeps
+  // the app running): pick that up when nothing is edited here.
+  function reloadIfChanged() {
+    return queueSave(async () => {
+      if (state.loading || state.saving || state.loadError || isDirty.value) {
+        return
+      }
+      try {
+        const disk = (await loadConfigEnvelope()).config
+        const read = JSON.stringify(disk)
+        if (!lastDisk || read === lastDisk || isDirty.value) {
+          lastDisk ||= read
+          return
+        }
+        lastDisk = read
+        state.config = cloneConfig(disk)
+        state.originalConfig = cloneConfig(disk)
+        state.status = 'Loaded settings changed on disk'
+      } catch {
+        // Reported by the next load or save.
       }
     })
   }
@@ -231,6 +277,7 @@ export function useConfigStore() {
       state.originalConfig = cloneConfig(envelope.config)
       state.loadError = ''
       state.seenApps = []
+      await readBack()
       state.status = 'Config reset to defaults'
     } catch (error) {
       state.status = errorText(error, 'Failed to reset config')
@@ -473,6 +520,7 @@ export function useConfigStore() {
     load,
     save,
     saveSetting,
+    reloadIfChanged,
     resetToDefaults,
     discardChanges,
     importConfig,

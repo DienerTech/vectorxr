@@ -195,6 +195,7 @@ function stopRuntimePacingRefresh() {
 }
 
 function onWindowFocus() {
+  void store.reloadIfChanged()
   if (store.state.activeTab === 'turbo') {
     void store.refreshRuntimePacing()
     void store.refreshTurboMetrics()

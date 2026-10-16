@@ -152,7 +152,8 @@ fn apply_status(menu: &TrayMenu, tray: &TrayIcon<Wry>, status: &TrayStatus) {
     let _ = menu.log_level.set_enabled(status.available);
     let _ = menu.log_info.set_checked(status.available && status.log_level != "debug");
     let _ = menu.log_debug.set_checked(status.available && status.log_level == "debug");
-    let _ = menu.export.set_enabled(status.available);
+    // The export needs no settings: it is most wanted when they cannot load.
+    let _ = menu.export.set_enabled(true);
     let _ = tray.set_tooltip(Some(tooltip_text(status)));
     let icon = if status.available && !status.enabled { &menu.icon_disabled } else { &menu.icon };
     let _ = tray.set_icon(Some(icon.clone()));
@@ -176,7 +177,7 @@ fn on_menu_event(app: &AppHandle, event: MenuEvent) {
         ITEM_ENABLED if status.available => emit(app, TrayAction::SetEnabled { enabled: !status.enabled }),
         ITEM_LOG_INFO if status.available => emit(app, TrayAction::SetLogLevel { level: "info".to_string() }),
         ITEM_LOG_DEBUG if status.available => emit(app, TrayAction::SetLogLevel { level: "debug".to_string() }),
-        ITEM_EXPORT if status.available => {
+        ITEM_EXPORT => {
             // Saving needs a click on the page (the save picker requires a
             // user gesture), so the export opens there.
             show_main_window(app);
@@ -204,7 +205,7 @@ fn build(app: &AppHandle, status: &TrayStatus) -> tauri::Result<(TrayIcon<Wry>, 
     let log_info = CheckMenuItem::with_id(app, ITEM_LOG_INFO, "Info", true, false, None::<&str>)?;
     let log_debug = CheckMenuItem::with_id(app, ITEM_LOG_DEBUG, "Debug", true, false, None::<&str>)?;
     let log_level = Submenu::with_items(app, log_level_text(status), false, &[&log_info, &log_debug])?;
-    let export = MenuItem::with_id(app, ITEM_EXPORT, "Export Debug...", false, None::<&str>)?;
+    let export = MenuItem::with_id(app, ITEM_EXPORT, "Export Debug...", true, None::<&str>)?;
     let open = MenuItem::with_id(app, ITEM_OPEN, "Open VectorXR", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, ITEM_QUIT, "Quit VectorXR", true, None::<&str>)?;
     let menu = Menu::with_items(
@@ -235,22 +236,19 @@ fn build(app: &AppHandle, status: &TrayStatus) -> tauri::Result<(TrayIcon<Wry>, 
     Ok((tray, menu))
 }
 
+// The icon is built once and hidden while Off: the builder's menu handler is
+// app-wide and is never removed, so a rebuild would run every click again.
 #[tauri::command]
 pub fn configure_tray(app: AppHandle, state: State<'_, TrayState>, mode: TrayMode) -> Result<(), String> {
     let mut inner = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     inner.mode = mode;
-    if mode == TrayMode::Off {
-        inner.menu = None;
-        if let Some(tray) = inner.tray.take() {
-            let _ = tray.set_visible(false);
-        }
-        app.remove_tray_by_id(TRAY_ID);
-        return Ok(());
-    }
-    if inner.tray.is_none() {
+    if mode != TrayMode::Off && inner.tray.is_none() {
         let (tray, menu) = build(&app, &inner.status).map_err(|error| error.to_string())?;
         inner.tray = Some(tray);
         inner.menu = Some(menu);
+    }
+    if let Some(tray) = &inner.tray {
+        tray.set_visible(mode != TrayMode::Off).map_err(|error| error.to_string())?;
     }
     Ok(())
 }
@@ -282,6 +280,13 @@ pub fn on_window_event(window: &Window, event: &WindowEvent) {
         if keep {
             api.prevent_close();
             let _ = window.hide();
+            // The always-on-top OSD preview closes with the page normally;
+            // a hidden page never unloads, so close it here.
+            for (label, preview) in window.app_handle().webview_windows() {
+                if label.starts_with("osd-preview-") {
+                    let _ = preview.close();
+                }
+            }
         }
     }
 }
