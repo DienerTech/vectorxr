@@ -505,10 +505,11 @@ void FrameGenPresenter::Stop() {
             (void)gpu_.release(); // the wait still reads it
         }
     }
-    if (logger_ && (generated_ || repeated_ || failures_ || demoted_)) {
+    if (logger_ && (generated_ || repeated_ || failures_ || demoted_ || abandoned_frames_)) {
         logger_->Info("Frame Generation session summary: generated=" + std::to_string(generated_) + ", repeated=" +
                       std::to_string(repeated_) + ", failures=" + std::to_string(failures_) + ", demoted=" +
-                      std::to_string(demoted_) + ", captured=" + std::to_string(captured_) + ".");
+                      std::to_string(demoted_) + ", abandoned=" + std::to_string(abandoned_frames_) +
+                      ", captured=" + std::to_string(captured_) + ".");
     }
     state_ = FrameGenState::kOff;
     reason_.clear();
@@ -516,6 +517,7 @@ void FrameGenPresenter::Stop() {
     output_kinds_.clear();
     end_thread_ = {};
     logged_claimed_wait_ = false;
+    abandons_frames_ = logged_abandoned_frames_ = false;
     submit_grid_ = {};
     last_period_ = 0;
     refresh_period_ = 0;
@@ -577,9 +579,9 @@ void FrameGenPresenter::Stop() {
     logged_quad_write_failures_ = 0;
     logged_quad_lost_claim_ = logged_quad_unanalyzed_ = false;
     newest_copy_fresh_ = false;
-    generated_ = repeated_ = failures_ = demoted_ = captured_ = 0;
+    generated_ = repeated_ = failures_ = demoted_ = abandoned_frames_ = captured_ = 0;
     threaded_frames_.clear();
-    dropped_unended_ = 0;
+    dropped_unended_ = dropped_superseded_ = 0;
     threaded_disabled_ = logged_threaded_ = false;
     runtime_waits_ = runtime_begins_ = runtime_ends_ = 0;
     presenter_frame_open_ = false;
@@ -870,7 +872,7 @@ bool FrameGenPresenter::ResetFrames() {
     if (!abandoned_ && !StopCompositorLocked(lock, TeardownWait())) {
         return false;
     }
-    dropped_unended_ = 0;
+    dropped_unended_ = dropped_superseded_ = 0;
     dropped_unbegun_ = 0;
     // A new session starts with no runtime frame in flight.
     runtime_waits_ = runtime_begins_ = runtime_ends_ = 0;
@@ -993,6 +995,7 @@ void FrameGenPresenter::AbandonFrame(XrTime display_time) {
                                    threaded_frames_.end());
         } else if (dropped_unended_ > 0) {
             --dropped_unended_;
+            dropped_superseded_ = std::min(dropped_superseded_, dropped_unended_);
         } else if (!frames_.empty()) {
             frames_.pop_front();
         } else {
@@ -2245,6 +2248,121 @@ void FrameGenPresenter::InvalidateContinuityLocked() {
     extrapolated_.valid = false;
 }
 
+bool FrameGenPresenter::SupersedeOwnFramesLocked() {
+    if (std::this_thread::get_id() != end_thread_) {
+        return false;
+    }
+    // What the thread does next decides what these frames were: a begin
+    // over them abandons them (OpenXR discards them), an end ends the oldest
+    // after all (a wait may return before the previous frame's end).
+    // Superseded frames never run extra runtime frames: they hold no wait.
+    // Only the frames it began itself: one another thread began may have its
+    // end on the way in from there (that thread's own order decides).
+    const auto self = std::this_thread::get_id();
+    bool engaged = false;
+    for (PendingFrame& frame : frames_) {
+        if (frame.begun && !frame.claimed && !frame.superseded && frame.begin_thread == self) {
+            frame.superseded = true;
+            if (frame.engaged && !frame.demoted) {
+                frame.demoted = frame.demotion_owed = true;
+                engaged = true;
+            }
+        }
+    }
+    for (ThreadedFrame& frame : threaded_frames_) {
+        if (frame.begun && !frame.claimed && frame.begin_thread == self) {
+            frame.superseded = true;
+        }
+    }
+    return engaged;
+}
+
+std::size_t FrameGenPresenter::DropAbandonedLocked(bool threaded) {
+    // Superseded frames are older than the one beginning, and their thread
+    // began this one instead of ending them: OpenXR discards them, and their
+    // end never comes. Only those: a begin on another thread can come while
+    // a frame's end is on its way in (MSFS 2024 begins its next frame on its
+    // wait thread while its render thread ends the last), before that end
+    // claims the frame.
+    std::size_t dropped = 0;
+    if (threaded) {
+        for (auto it = threaded_frames_.begin(); it != threaded_frames_.end();) {
+            if (it->begun && it->superseded && !it->claimed) {
+                BridgeAbandonedLocked(it->id);
+                it = threaded_frames_.erase(it);
+                ++dropped;
+            } else {
+                ++it;
+            }
+        }
+    } else {
+        for (auto it = frames_.begin(); it != frames_.end();) {
+            if (it->begun && it->superseded && !it->claimed) {
+                BridgeAbandonedLocked(it->sequence);
+                it = frames_.erase(it);
+                ++dropped;
+            } else {
+                ++it;
+            }
+        }
+    }
+    NoteAbandonedLocked(dropped);
+    return dropped;
+}
+
+std::size_t FrameGenPresenter::DropOwnDiscardedLocked() {
+    // Frames this thread began before the newest it began and has not ended:
+    // each later begin on this thread discarded them (OpenXR), so this end
+    // is the newest one's. Superseded frames are dropped at that begin;
+    // these were begun before any end showed which thread ends frames (a
+    // loading screen's waits and begins at a session's start).
+    const auto self = std::this_thread::get_id();
+    auto own = [&](const PendingFrame& frame) { return frame.begun && !frame.claimed && frame.begin_thread == self; };
+    const auto newest = std::find_if(frames_.rbegin(), frames_.rend(), own);
+    if (newest == frames_.rend()) {
+        return 0;
+    }
+    const std::uint64_t keep = newest->sequence;
+    std::size_t dropped = 0;
+    for (auto it = frames_.begin(); it != frames_.end();) {
+        if (own(*it) && it->sequence != keep) {
+            BridgeAbandonedLocked(it->sequence);
+            it = frames_.erase(it);
+            ++dropped;
+        } else {
+            ++it;
+        }
+    }
+    NoteAbandonedLocked(dropped);
+    return dropped;
+}
+
+void FrameGenPresenter::BridgeAbandonedLocked(std::uint64_t sequence) {
+    // Nothing was shown between the real frames on either side of an
+    // abandoned one: they stay continuous.
+    if (last_real_.valid && last_real_.sequence + 1 == sequence) {
+        last_real_.sequence = sequence;
+    }
+}
+
+void FrameGenPresenter::NoteAbandonedLocked(std::size_t count) {
+    if (count == 0) {
+        return;
+    }
+    // No runtime call is made for them, and the game's run of steady frames
+    // goes on.
+    abandoned_frames_ += count;
+    abandons_frames_ = true;
+    if (logger_ && !logged_abandoned_frames_) {
+        logged_abandoned_frames_ = true;
+        logger_->Info("Frame Generation: the application begins frames over frames it has not ended (OpenXR "
+                      "discards those; OpenComposite does this when a game asks for poses again before submitting "
+                      "both eyes); they are dropped.");
+    }
+    idle_cv_.notify_all();
+    WakeSlots(); // the presenter thread no longer waits for them
+}
+
 void FrameGenPresenter::LogMemoryBudgetLocked() {
     if (!logger_ || !gpu_) return;
     if (const auto memory = gpu_->MemoryBudget()) {
@@ -2272,9 +2390,11 @@ void FrameGenPresenter::NoteFailureLocked(const std::string& error) {
 
 XrResult FrameGenPresenter::WaitFrame(XrSession session, const XrFrameWaitInfo* info, XrFrameState* state,
                                       const FrameGenRuntimeCalls& calls) {
+    bool superseded = false;
     if (state) {
         std::unique_lock lock(mutex_);
         MaybeRetryLocked();
+        superseded = SupersedeOwnFramesLocked();
         if (!compositor_running_ && compositor_.joinable()) {
             // The presenter thread stopped itself after a runtime error.
             StopCompositorLocked(lock);
@@ -2321,9 +2441,12 @@ XrResult FrameGenPresenter::WaitFrame(XrSession session, const XrFrameWaitInfo* 
             }
         };
         // The thread that ends frames is waiting again before ending its
-        // engaged frame: holding it would only stall until the timeout.
-        // Apps that wait on one thread and end on another take the hold.
+        // own: holding it would only stall until the timeout. A frame it
+        // began is superseded (never held for, counted only if it ends); one
+        // not even begun is demoted. Apps that wait on one thread and end on
+        // another take the hold.
         if (std::this_thread::get_id() == end_thread_) {
+            superseded = SupersedeOwnFramesLocked() || superseded;
             demote();
         }
         // An engaged frame in progress owns the runtime until its extra
@@ -2354,12 +2477,19 @@ XrResult FrameGenPresenter::WaitFrame(XrSession session, const XrFrameWaitInfo* 
                 PauseLocked("the application starts frames before the previous one ends");
             }
         }
+        // Until superseded frames have proved abandoned, this frame passes
+        // through as one after a demotion does: if the app ends the frame
+        // it superseded instead, that frame is demoted (EndFrame).
+        const bool held_back = demoted || (superseded && !abandons_frames_);
+        if (held_back) {
+            engage = false;
+        }
         multiplier = EffectiveMultiplierLocked();
         // Automatic and at full rate: nothing to generate, but the feature is
         // doing its job, so it reads as active. So does standing by while the
         // layer composes the quad views again for a while.
         const bool declined = RunnableLocked() && QuadDeclinedLocked();
-        const bool full_rate = !demoted && RunnableLocked() && (multiplier < 2 || declined);
+        const bool full_rate = !held_back && RunnableLocked() && (multiplier < 2 || declined);
         if (full_rate != full_rate_) {
             full_rate_ = full_rate;
             if (state_ == FrameGenState::kActive) state_ = FrameGenState::kWaiting; // re-log the transition
@@ -2414,6 +2544,7 @@ XrResult FrameGenPresenter::WaitFrame(XrSession session, const XrFrameWaitInfo* 
     frame.app_time = state->predictedDisplayTime;
     // Frames the application abandoned without an end never block a wait.
     while (!frames_.empty() && frames_.front().sequence + 4 < sequence) {
+        NoteAbandonedLocked(frames_.front().begun ? 1 : 0);
         frames_.pop_front();
     }
     frames_.push_back(frame);
@@ -2429,18 +2560,38 @@ XrResult FrameGenPresenter::BeginFrame(XrSession session, const XrFrameBeginInfo
             --dropped_unbegun_;
             return XR_SUCCESS;
         }
+        // Frames its thread superseded, dropped when the presenter thread
+        // stopped: begun over, they were abandoned, and their ends never come.
+        if (dropped_superseded_ > 0 && std::this_thread::get_id() == end_thread_) {
+            dropped_unended_ -= dropped_superseded_;
+            NoteAbandonedLocked(dropped_superseded_);
+            dropped_superseded_ = 0;
+        }
         // Frames begin in the order they were waited; one the runtime waited
         // for (inline) begins there, one the presenter thread presents only
-        // here.
-        const auto inline_frame =
-            std::find_if(frames_.begin(), frames_.end(), [](const PendingFrame& frame) { return !frame.begun; });
+        // here. Begun over frames its thread superseded, it abandons them:
+        // inline, the runtime discards them itself (XR_FRAME_DISCARDED).
+        auto unbegun = [](const PendingFrame& frame) { return !frame.begun; };
+        auto inline_frame = std::find_if(frames_.begin(), frames_.end(), unbegun);
+        if (inline_frame != frames_.end() && DropAbandonedLocked(false) > 0) {
+            inline_frame = std::find_if(frames_.begin(), frames_.end(), unbegun);
+        }
         if (inline_frame != frames_.end()) {
             inline_frame->begun = true;
+            inline_frame->begin_thread = std::this_thread::get_id();
         } else {
-            const auto threaded = std::find_if(threaded_frames_.begin(), threaded_frames_.end(),
-                                               [](const ThreadedFrame& frame) { return !frame.begun; });
+            auto threaded_unbegun = [](const ThreadedFrame& frame) { return !frame.begun; };
+            auto threaded = std::find_if(threaded_frames_.begin(), threaded_frames_.end(), threaded_unbegun);
+            // The presenter thread presents it: no runtime begin reports the
+            // frames it abandons, so this one does.
+            bool discarded = false;
+            if (threaded != threaded_frames_.end() && DropAbandonedLocked(true) > 0) {
+                discarded = true;
+                threaded = std::find_if(threaded_frames_.begin(), threaded_frames_.end(), threaded_unbegun);
+            }
             if (threaded != threaded_frames_.end()) {
                 threaded->begun = true;
+                threaded->begin_thread = std::this_thread::get_id();
                 // The captures released before it: the next wait may be held
                 // until they have run on the GPU (GpuGateMarkLocked).
                 threaded->capture_mark = last_capture_mark_;
@@ -2449,7 +2600,7 @@ XrResult FrameGenPresenter::BeginFrame(XrSession session, const XrFrameBeginInfo
                     begun_capture_marks_.pop_front();
                 }
                 slot_cv_.notify_all();
-                return XR_SUCCESS;
+                return discarded ? XR_FRAME_DISCARDED : XR_SUCCESS;
             }
             if (compositor_running_) {
                 // The presenter thread owns the runtime frame loop.
@@ -2515,8 +2666,10 @@ XrResult FrameGenPresenter::EndFrame(XrSession session, const XrFrameEndInfo* in
             if (!threaded) {
                 if (dropped_unended_ > 0) {
                     // Its runtime frame went to the frames around it when the
-                    // presenter thread stopped; there is nothing to end.
+                    // presenter thread stopped; there is nothing to end. One
+                    // its thread superseded was ended after all.
                     --dropped_unended_;
+                    dropped_superseded_ = std::min(dropped_superseded_, dropped_unended_);
                     healthy_streak_ = 0;
                     return XR_SUCCESS;
                 }
@@ -2525,6 +2678,7 @@ XrResult FrameGenPresenter::EndFrame(XrSession session, const XrFrameEndInfo* in
                                                  [](const ThreadedFrame& pending) { return !pending.claimed; });
                     if (it != threaded_frames_.end()) {
                         it->claimed = true;
+                        abandons_frames_ = abandons_frames_ && !it->superseded;
                         threaded = *it;
                     }
                 }
@@ -2550,6 +2704,7 @@ XrResult FrameGenPresenter::EndFrame(XrSession session, const XrFrameEndInfo* in
     {
         std::scoped_lock lock(mutex_);
         end_thread_ = std::this_thread::get_id();
+        DropOwnDiscardedLocked();
         // The oldest waited frame is the one ending, as on the threaded path.
         // MSFS ends frames one period after the time it was given, which can
         // equal the prediction of its next pipelined frame: matching by time
@@ -2557,9 +2712,21 @@ XrResult FrameGenPresenter::EndFrame(XrSession session, const XrFrameEndInfo* in
         const auto it = frames_.begin();
         if (it != frames_.end()) {
             // Claiming under the lock: from here a held wait lets this frame
-            // finish its extra runtime frame instead of demoting it.
-            if (it->engaged && !it->demoted) {
-                it->claimed = true;
+            // finish its extra runtime frame instead of demoting it, and a
+            // begin on another thread does not take it for abandoned.
+            it->claimed = true;
+            if (it->superseded) {
+                // Ended after its thread waited again, not abandoned: frames
+                // waited over superseded ones pass through again, and an
+                // engaged one was demoted after all.
+                abandons_frames_ = false;
+                if (it->demotion_owed) {
+                    it->demotion_owed = false;
+                    ++demoted_;
+                    if (++consecutive_demotions_ >= kDemotionsBeforePause) {
+                        PauseLocked("the application starts frames before the previous one ends");
+                    }
+                }
             }
             frame = *it;
             NoteDisplayOffsetLocked(info->displayTime, it->app_time, it->reported_period);
@@ -2679,7 +2846,8 @@ XrResult FrameGenPresenter::EndFrame(XrSession session, const XrFrameEndInfo* in
                     ", lateCycles=" + std::to_string(late_cycles_) + "/" + std::to_string(cycles_) +
                     ", threaded=" + std::to_string(compositor_running_) + ", generated=" + std::to_string(generated_) +
                     ", repeated=" + std::to_string(repeated_) + ", failures=" + std::to_string(failures_) +
-                    ", demoted=" + std::to_string(demoted_) + ", captured=+" +
+                    ", demoted=" + std::to_string(demoted_) + ", abandoned=" + std::to_string(abandoned_frames_) +
+                    ", captured=+" +
                     std::to_string(totals_.captured - start.captured) + " (" + std::to_string(captured_) + ")" +
                     ", pauses=" + std::to_string(totals_.pauses - start.pauses) + "/" + Number(pause_longest_ms_, 0) +
                     ", gpuMs=" + Number(gpu_ms_, 2) + ClockSummaryLocked(start) + DynamicSummaryLocked() +
@@ -4701,11 +4869,14 @@ void FrameGenPresenter::JoinCompositorLocked(std::unique_lock<std::mutex>& lock)
 
 void FrameGenPresenter::DropUnclaimedLocked() {
     // Frames whose end has not started lose their slot; one already in its
-    // end is handed its slot or released without one.
+    // end is handed its slot or released without one. One the ending thread
+    // superseded is the newest it began: that thread's next call says whether
+    // it was abandoned (a begin) or ends after all (BeginFrame, EndFrame).
     for (auto it = threaded_frames_.begin(); it != threaded_frames_.end();) {
         if (!it->claimed) {
             ++dropped_unended_;
             dropped_unbegun_ += it->begun ? 0 : 1;
+            dropped_superseded_ += it->begun && it->superseded ? 1 : 0;
             it = threaded_frames_.erase(it);
         } else {
             ++it;
@@ -6042,9 +6213,10 @@ FrameGenPresenter::JitChoice FrameGenPresenter::ChooseJitLocked(XrTime time, XrD
     // A real frame on its way that this refresh needs: interpolating, any
     // (the frames past the newest are made from the next); extrapolating,
     // one rendered for this refresh or an earlier one.
+    // Not one an app that abandons such frames superseded: its end never comes.
     const bool needed_in_flight =
         generation_pending_ || std::any_of(threaded_frames_.begin(), threaded_frames_.end(), [&](const ThreadedFrame& frame) {
-            return interpolate || frame.target_time <= time + half;
+            return !(frame.superseded && abandons_frames_) && (interpolate || frame.target_time <= time + half);
         });
     if (count == 0) {
         due = needed_in_flight;
@@ -6536,8 +6708,10 @@ void FrameGenPresenter::CompositorLoop() {
         };
         auto eligible = [&] { return slot_request_ && (slot_request_->earliest_slot <= slot || unusable()); };
         auto real_due = [&] {
-            return std::any_of(threaded_frames_.begin(), threaded_frames_.end(),
-                               [&](const ThreadedFrame& frame) { return frame.first_slot <= slot; });
+            // Not one an app that abandons such frames superseded (ChooseJitLocked).
+            return std::any_of(threaded_frames_.begin(), threaded_frames_.end(), [&](const ThreadedFrame& frame) {
+                return frame.first_slot <= slot && !(frame.superseded && abandons_frames_);
+            });
         };
         if (jit_) {
             // Just in time every refresh is this thread's: the next real
@@ -6988,6 +7162,7 @@ FrameGenStatus FrameGenPresenter::Status() const {
     status.repeated = repeated_;
     status.failures = failures_;
     status.demoted = demoted_;
+    status.abandoned = abandoned_frames_;
     status.captured = captured_;
     status.retry_pending = state_ == FrameGenState::kPaused && automatic_retries_ < retry_attempts_;
     status.multiplier = EffectiveMultiplierLocked();

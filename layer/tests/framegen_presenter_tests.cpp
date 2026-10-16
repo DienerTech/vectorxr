@@ -3462,6 +3462,10 @@ void TestSameThreadDoubleWait() {
     app.Release();
     Check(XR_SUCCEEDED(app.End(second.predictedDisplayTime)), "second end");
     Check(!runtime.ordering_violation, "same-thread overlap kept runtime calls ordered");
+    // The frame ended after all: a demotion, not an abandoned frame.
+    const FrameGenStatus status = presenter.Status();
+    Check(status.demoted == 1 && status.abandoned == 0 && runtime.discarded == 0,
+          "a frame ended after the next wait is demoted, not abandoned");
 }
 
 void TestWaitThreadSeparateFromEndThread() {
@@ -7361,6 +7365,377 @@ struct SessionLog {
     }
 };
 
+// OpenComposite (an OpenVR game on OpenXR): IVRCompositor::WaitGetPoses
+// waits and begins a frame every time it is called, and ends one only once
+// both eyes are submitted. A game that asks for poses again first begins a
+// frame over the open one, all on one thread: the runtime discards that one
+// (XR_FRAME_DISCARDED) and its end never comes. Such frames are abandoned,
+// not demoted: nothing pauses, the frames that end are generated from as
+// usual, and no runtime call is made for the abandoned ones.
+void TestOpenCompositeAbandonsFrames() {
+    SessionLog log("opencomposite-abandons");
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate, kFormat, kAppUsage, FrameGenMultiplier::k2,
+                   log.logger.get());
+    App app(presenter, runtime);
+    for (int i = 0; i < 4; ++i) app.Frame();
+    Check(presenter.Status().state == FrameGenState::kActive, "abandoned frames: engaged first");
+    const std::uint64_t generated = presenter.Status().generated;
+    XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};
+    constexpr int kCycles = 24;
+    for (int i = 0; i < kCycles; ++i) {
+        app.Wait(); // WaitGetPoses: wait and begin
+        Check(presenter.BeginFrame(kSession, &begin, app.calls) == XR_SUCCESS, "abandoned frames: first begin");
+        const auto asked = std::chrono::steady_clock::now();
+        const XrFrameState state = app.Wait(); // WaitGetPoses again, the frame still open
+        Check(std::chrono::steady_clock::now() - asked < 150ms, "abandoned frames: the second wait is not held");
+        Check(presenter.BeginFrame(kSession, &begin, app.calls) == XR_FRAME_DISCARDED,
+              "abandoned frames: the begin over the open frame reports it discarded");
+        app.Release(); // Submit for both eyes, then the end
+        Check(XR_SUCCEEDED(app.End(state.predictedDisplayTime)), "abandoned frames: end");
+    }
+    const FrameGenStatus status = presenter.Status();
+    Check(status.state == FrameGenState::kActive && status.demoted == 0,
+          "abandoned frames: neither demoted nor paused (state " + std::string(ToString(status.state)) + ", demoted " +
+              std::to_string(status.demoted) + ")");
+    Check(status.abandoned == kCycles && runtime.discarded == kCycles,
+          "abandoned frames: each counted once, and discarded by the runtime itself (" +
+              std::to_string(status.abandoned) + ", " + std::to_string(runtime.discarded.load()) + ")");
+    // The first frame waited over an open one passes through (the open one
+    // could still have ended); after that, each frame that ends is generated
+    // from, continuous with the real frame before the abandoned one.
+    Check(status.generated >= generated + kCycles - 2,
+          "abandoned frames: the frames that end are generated from (" + std::to_string(status.generated - generated) +
+              " of " + std::to_string(kCycles) + ")");
+    Check(!runtime.ordering_violation && !g_release_violation, "abandoned frames: calls stayed ordered");
+    presenter.Stop();
+    Check(log.Lines("begins frames over frames it has not ended").size() == 1, "abandoned frames: logged once");
+    Check(log.Lines("abandoned=" + std::to_string(kCycles) + ",").size() == 1,
+          "abandoned frames: the session summary counts them");
+}
+
+// A single abandoned frame (WaitGetPoses called twice once, as around a
+// hitch) leaves nothing behind: the frames after it, waited, begun and ended
+// in order, engage and are generated from. Its record once stayed a wait
+// behind, so every later wait found a frame "open", demoted it, and Frame
+// Generation paused within a few frames, again after each retry.
+void TestSingleAbandonedFrameLeavesNothingBehind() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate);
+    App app(presenter, runtime);
+    for (int i = 0; i < 4; ++i) app.Frame();
+    XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};
+    app.Wait();
+    Check(presenter.BeginFrame(kSession, &begin, app.calls) == XR_SUCCESS, "one abandoned frame: begin");
+    const XrFrameState state = app.Wait();
+    Check(presenter.BeginFrame(kSession, &begin, app.calls) == XR_FRAME_DISCARDED,
+          "one abandoned frame: the begin over it reports it discarded");
+    app.Release();
+    Check(XR_SUCCEEDED(app.End(state.predictedDisplayTime)), "one abandoned frame: end");
+    const std::uint64_t generated = presenter.Status().generated;
+    constexpr int kFrames = 12;
+    for (int i = 0; i < kFrames; ++i) app.Frame();
+    const FrameGenStatus status = presenter.Status();
+    Check(status.state == FrameGenState::kActive && status.demoted == 0,
+          "one abandoned frame: later frames neither demote nor pause (state " + std::string(ToString(status.state)) +
+              ", demoted " + std::to_string(status.demoted) + ")");
+    Check(status.abandoned == 1 && status.generated >= generated + kFrames - 2,
+          "one abandoned frame: counted once, and the frames after it are generated from (" +
+              std::to_string(status.generated - generated) + " of " + std::to_string(kFrames) + ")");
+    Check(!runtime.ordering_violation && !g_release_violation, "one abandoned frame: calls stayed ordered");
+}
+
+// A game that only asks for poses while it loads, from the start of a
+// session (OpenComposite's session for the game's input, made while it
+// loads): frames are waited and begun, none ended, before any frame shows
+// which thread ends them. Each begin abandons the frame before it, so once
+// the game renders again its ends match their own frames, and Frame
+// Generation engages as usual.
+void TestAbandonedBeforeFirstEnd() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate);
+    App app(presenter, runtime);
+    XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};
+    constexpr int kLoading = 8;
+    for (int i = 0; i < kLoading; ++i) {
+        app.Wait();
+        const XrResult begun = presenter.BeginFrame(kSession, &begin, app.calls);
+        Check(begun == (i == 0 ? XR_SUCCESS : XR_FRAME_DISCARDED), "loading: each begin over an open frame discards it");
+    }
+    app.Release();
+    const XrFrameState last = app.Wait();
+    Check(presenter.BeginFrame(kSession, &begin, app.calls) == XR_FRAME_DISCARDED, "loading: the last begin discards");
+    Check(XR_SUCCEEDED(app.End(last.predictedDisplayTime)), "loading: the first end");
+    const std::uint64_t generated = presenter.Status().generated;
+    constexpr int kFrames = 12;
+    for (int i = 0; i < kFrames; ++i) app.Frame();
+    const FrameGenStatus status = presenter.Status();
+    Check(status.state == FrameGenState::kActive && status.demoted == 0 && status.abandoned == kLoading,
+          "loading: engaged afterwards, nothing demoted, every loading frame abandoned (state " +
+              std::string(ToString(status.state)) + ", demoted " + std::to_string(status.demoted) + ", abandoned " +
+              std::to_string(status.abandoned) + ")");
+    Check(status.generated >= generated + kFrames - 4,
+          "loading: the frames after it are generated from (" + std::to_string(status.generated - generated) + " of " +
+              std::to_string(kFrames) + ")");
+    Check(!runtime.ordering_violation && !g_release_violation, "loading: calls stayed ordered");
+}
+
+// Frame Generation turned off just as an OpenComposite game abandons a frame
+// the presenter thread was to present: the wait that leaves the presenter
+// thread drops that frame, and the game's next call says what it was. Begun
+// over, it was abandoned: the next frame's end is that frame's own and
+// reaches the runtime (not swallowed as a dropped frame's end).
+void TestThreadedExitAtAbandonedFrame() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    StartThreaded(presenter, gpu, FrameGenMultiplier::k2);
+    App app(presenter, runtime);
+    for (int i = 0; i < 60 && !presenter.Status().threaded; ++i) app.Frame();
+    Check(presenter.Status().threaded, "exit at abandoned: presents from its own thread first");
+    XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};
+    app.Wait();
+    Check(presenter.BeginFrame(kSession, &begin, app.calls) == XR_SUCCESS, "exit at abandoned: begin");
+    Check(!presenter.Toggle(), "exit at abandoned: turned off");
+    const XrFrameState state = app.Wait(); // leaves the presenter thread
+    Check(!presenter.Status().threaded, "exit at abandoned: back inline");
+    presenter.BeginFrame(kSession, &begin, app.calls);
+    app.Release();
+    const std::size_t before = runtime.Submissions();
+    Check(XR_SUCCEEDED(app.End(state.predictedDisplayTime)), "exit at abandoned: end");
+    Check(runtime.Submissions() == before + 1, "exit at abandoned: the next frame's end reaches the runtime");
+    for (int i = 0; i < 4; ++i) {
+        const std::size_t submitted = runtime.Submissions();
+        app.Frame();
+        Check(runtime.Submissions() == submitted + 1, "exit at abandoned: later frames pass straight through");
+    }
+    const FrameGenStatus status = presenter.Status();
+    Check(status.abandoned == 1 && status.demoted == 0,
+          "exit at abandoned: the frame counted abandoned once (abandoned " + std::to_string(status.abandoned) + ")");
+    Check(!runtime.ordering_violation && !g_release_violation, "exit at abandoned: calls stayed ordered");
+}
+
+// A game that waits on its main thread and begins and ends on job threads,
+// whose main thread once ended a frame itself (Star Citizen does, now and
+// then), with the presenter thread presenting: the main thread's next waits
+// come while a job thread's frame is begun. That frame is not the main
+// thread's to supersede: when the next job thread begins its frame before
+// the first one's end reaches Frame Generation, nothing is abandoned, and
+// each end is its own frame's.
+void TestThreadedWaitThreadEndsOneFrame() {
+    SessionLog log("wait-thread-ends");
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    gpu.threaded = true;
+    gpu.jit = g_jit;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, kFormat, kAppUsage, FrameGenMultiplier::k2,
+                   log.logger.get());
+    App app(presenter, runtime);
+    // The main thread's own frames, the last of them ending on it.
+    for (int i = 0; i < 60 && !presenter.Status().threaded; ++i) app.Frame();
+    Check(presenter.Status().threaded, "wait thread ends: presents from its own thread first");
+    XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};
+    auto on_thread = [](const std::function<void()>& call) {
+        std::thread worker(call);
+        worker.join();
+    };
+    int discarded = 0;
+    for (int i = 0; i < 12; ++i) {
+        const XrFrameState first = app.Wait();
+        on_thread([&] { discarded += presenter.BeginFrame(kSession, &begin, app.calls) == XR_FRAME_DISCARDED; });
+        const XrFrameState second = app.Wait(); // the main thread waits on while the job frame is begun
+        on_thread([&] { discarded += presenter.BeginFrame(kSession, &begin, app.calls) == XR_FRAME_DISCARDED; });
+        on_thread([&] {
+            app.Release();
+            Check(XR_SUCCEEDED(app.End(first.predictedDisplayTime)), "wait thread ends: first job end");
+        });
+        on_thread([&] {
+            app.Release();
+            Check(XR_SUCCEEDED(app.End(second.predictedDisplayTime)), "wait thread ends: second job end");
+        });
+        app.Frame(); // and the main thread ends one itself again
+    }
+    const FrameGenStatus status = presenter.Status();
+    Check(status.abandoned == 0 && discarded == 0,
+          "wait thread ends: nothing abandoned or discarded (abandoned " + std::to_string(status.abandoned) +
+              ", discarded " + std::to_string(discarded) + ")");
+    Check(status.threaded && status.state == FrameGenState::kActive, "wait thread ends: still presenting");
+    presenter.Stop();
+    Check(log.Lines("matched no waited frame").empty() && log.Lines("begins frames over").empty(),
+          "wait thread ends: every end found its own frame");
+    Check(!runtime.ordering_violation && !g_release_violation, "wait thread ends: calls stayed ordered");
+}
+
+// MSFS 2024's order with the presenter thread presenting: its wait thread
+// begins frame N + 1 while its render thread's xrEndFrame for frame N is on
+// its way in, before that end reaches Frame Generation. Frame N is not
+// abandoned: no frame is dropped or reported discarded, and each end is its
+// own frame's.
+void TestThreadedBeginBeforeOtherThreadsEnd() {
+    SessionLog log("begin-before-end");
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    gpu.threaded = true;
+    gpu.jit = g_jit;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, kFormat, kAppUsage, FrameGenMultiplier::k2,
+                   log.logger.get());
+    App app(presenter, runtime);
+    // Until the presenter thread runs, a begin reaches the runtime, which
+    // discards a frame begun over (as a real runtime would).
+    for (int i = 0; i < 60 && !presenter.Status().threaded; ++i) app.Frame();
+    Check(presenter.Status().threaded, "begin before end: presents from its own thread first");
+    XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::deque<XrFrameState> begun;
+    int begins = 0; // frames the wait thread has begun
+    bool done = false;
+    std::atomic<int> discarded{0};
+    const auto start = std::chrono::steady_clock::now();
+    std::thread wait_thread([&] {
+        while (std::chrono::steady_clock::now() - start < 1500ms) {
+            const XrFrameState state = app.Wait();
+            discarded += presenter.BeginFrame(kSession, &begin, app.calls) == XR_FRAME_DISCARDED ? 1 : 0;
+            std::scoped_lock lock(mutex);
+            begun.push_back(state);
+            ++begins;
+            cv.notify_all();
+        }
+        std::scoped_lock lock(mutex);
+        done = true;
+        cv.notify_all();
+    });
+    int ended = 0;
+    for (;;) {
+        XrFrameState state{};
+        {
+            std::unique_lock lock(mutex);
+            cv.wait(lock, [&] { return !begun.empty() || done; });
+            if (begun.empty()) break;
+            state = begun.front();
+            begun.pop_front();
+            // The end of frame N comes in only after frame N + 1 has begun
+            // (or the run is over).
+            cv.wait_for(lock, 200ms, [&] { return begins > ended + 1 || done; });
+        }
+        SleepPrecise(std::chrono::steady_clock::now() + 4ms);
+        app.Release();
+        Check(XR_SUCCEEDED(app.End(state.predictedDisplayTime)), "begin before end: end on the render thread");
+        ++ended;
+    }
+    wait_thread.join();
+    const FrameGenStatus status = presenter.Status();
+    Check(status.threaded && status.state == FrameGenState::kActive,
+          "begin before end: presents from its own thread (state " + std::string(ToString(status.state)) + ")");
+    Check(status.abandoned == 0 && discarded == 0 && status.demoted == 0,
+          "begin before end: nothing abandoned, discarded or demoted (abandoned " + std::to_string(status.abandoned) +
+              ", discarded " + std::to_string(discarded.load()) + ", demoted " + std::to_string(status.demoted) + ")");
+    Check(status.generated > static_cast<std::uint64_t>(ended) / 2,
+          "begin before end: the real frames are generated from (" + std::to_string(status.generated) + " for " +
+              std::to_string(ended) + " frames)");
+    presenter.Stop();
+    Check(log.Lines("matched no waited frame").empty() && log.Lines("begins frames over").empty(),
+          "begin before end: every end found its own frame");
+    Check(!runtime.ordering_violation && !g_release_violation, "begin before end: calls stayed ordered");
+}
+
+// As above with the presenter thread presenting (the app's begins never
+// reach the runtime): the begin over an abandoned frame drops it and reports
+// it discarded as a runtime would, the next end is matched to its own frame,
+// and no wait is held for a frame that never ends.
+void TestThreadedOpenCompositeAbandonsFrames() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    StartThreaded(presenter, gpu, FrameGenMultiplier::k2);
+    App app(presenter, runtime);
+    for (int i = 0; i < 3; ++i) app.Frame();
+    XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};
+    int cycles = 0;
+    int discarded = 0;
+    std::chrono::steady_clock::duration longest{};
+    const auto start = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - start < 1500ms) {
+        auto asked = std::chrono::steady_clock::now();
+        app.Wait();
+        longest = std::max(longest, std::chrono::steady_clock::now() - asked);
+        Check(presenter.BeginFrame(kSession, &begin, app.calls) == XR_SUCCESS, "threaded abandoned: first begin");
+        asked = std::chrono::steady_clock::now();
+        const XrFrameState state = app.Wait();
+        longest = std::max(longest, std::chrono::steady_clock::now() - asked);
+        discarded += presenter.BeginFrame(kSession, &begin, app.calls) == XR_FRAME_DISCARDED ? 1 : 0;
+        std::this_thread::sleep_for(4ms);
+        app.Release();
+        Check(XR_SUCCEEDED(app.End(state.predictedDisplayTime)), "threaded abandoned: end");
+        ++cycles;
+    }
+    const FrameGenStatus status = presenter.Status();
+    Check(status.threaded && status.state == FrameGenState::kActive && status.demoted == 0,
+          "threaded abandoned: presents from its own thread, nothing demoted or paused");
+    Check(status.abandoned == static_cast<std::uint64_t>(cycles) && discarded == cycles,
+          "threaded abandoned: every abandoned frame dropped and reported discarded (" +
+              std::to_string(status.abandoned) + ", " + std::to_string(discarded) + " of " + std::to_string(cycles) +
+              ")");
+    Check(longest < 500ms, "threaded abandoned: no wait held for a frame that never ends (longest " +
+                               std::to_string(Seconds(longest)) + " s)");
+    Check(status.generated > static_cast<std::uint64_t>(cycles) / 2,
+          "threaded abandoned: the frames that end are generated from (" + std::to_string(status.generated) + " for " +
+              std::to_string(cycles) + " frames)");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "threaded abandoned: calls stayed ordered");
+}
+
+// Another thread waiting while the ending thread's engaged frame is open
+// keeps today's behaviour: the wait is held, the frame demoted after the hold
+// and counted, and three in a row pause. Nothing is abandoned: such games end
+// the frame after the hold.
+void TestCrossThreadOverlapStillDemotes() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate);
+    App app(presenter, runtime);
+    for (int i = 0; i < 4; ++i) app.Frame();
+    for (int i = 0; i < 3; ++i) {
+        const XrFrameState stalled = app.Wait();
+        app.Begin();
+        XrFrameState next{};
+        std::chrono::steady_clock::duration held{};
+        std::thread waiter([&] {
+            const auto asked = std::chrono::steady_clock::now();
+            next = app.Wait();
+            held = std::chrono::steady_clock::now() - asked;
+        });
+        waiter.join();
+        Check(held >= 200ms, "cross-thread overlap: the wait is held before the frame is demoted");
+        const std::size_t before = runtime.Submissions();
+        app.Release();
+        Check(XR_SUCCEEDED(app.End(stalled.predictedDisplayTime)), "cross-thread overlap: the demoted frame ends");
+        Check(runtime.Submissions() == before + 1, "cross-thread overlap: a demoted frame submits once");
+        app.Begin();
+        app.Release();
+        Check(XR_SUCCEEDED(app.End(next.predictedDisplayTime)), "cross-thread overlap: the next frame ends");
+    }
+    const FrameGenStatus status = presenter.Status();
+    Check(status.state == FrameGenState::kPaused && status.reason == "the application starts frames before the previous one ends",
+          "cross-thread overlap: three demotions in a row pause");
+    Check(status.demoted == 3 && status.abandoned == 0 && runtime.discarded == 0,
+          "cross-thread overlap: demotions counted, nothing abandoned or discarded");
+    Check(!runtime.ordering_violation && !g_release_violation, "cross-thread overlap: calls stayed ordered");
+}
+
 // Turned off while the game's wait is held for its cadence (fixed 2x holds
 // it about half of each frame): the wait returned into the presenter thread,
 // was handed one more frame and logged "engaged" right after "disengaged".
@@ -9779,6 +10154,18 @@ int main(int argc, char** argv) {
     RUN(TestOverlappingWaitIsHeld);
     RUN(TestUnclaimedFrameIsDemoted);
     RUN(TestSameThreadDoubleWait);
+    RUN(TestOpenCompositeAbandonsFrames);
+    RUN(TestSingleAbandonedFrameLeavesNothingBehind);
+    RUN(TestAbandonedBeforeFirstEnd);
+    for (const bool jit : {false, true}) {
+        g_jit = jit;
+        RUN(TestThreadedOpenCompositeAbandonsFrames);
+        RUN(TestThreadedBeginBeforeOtherThreadsEnd);
+        RUN(TestThreadedExitAtAbandonedFrame);
+        RUN(TestThreadedWaitThreadEndsOneFrame);
+    }
+    g_jit = false;
+    RUN(TestCrossThreadOverlapStillDemotes);
     RUN(TestWaitThreadSeparateFromEndThread);
     RUN(TestRefusedCaptureUsage);
     RUN(TestOutputWaitTimeout);

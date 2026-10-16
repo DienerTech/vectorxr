@@ -83,6 +83,9 @@ struct FrameGenStatus {
     std::uint64_t repeated{0};
     std::uint64_t failures{0};
     std::uint64_t demoted{0};
+    // Frames the application began a new frame over before ending them
+    // (OpenXR discards those): dropped, never demotions.
+    std::uint64_t abandoned{0};
     std::uint64_t captured{0};
     bool retry_pending{false};
     std::uint32_t multiplier{2}; // headset frames per real frame in use
@@ -248,8 +251,12 @@ struct FrameGenLeadPolicy {
 // Runtime frame calls must never overlap, so a wait arriving while an engaged
 // frame is in progress is held until that frame has ended. An engaged frame
 // whose end has not started yet can instead be demoted to a single
-// submission: immediately when the same thread waits again before ending it,
-// or after a bounded hold when another thread does.
+// submission after a bounded hold when another thread waits. When the thread
+// that ends frames waits again before ending its own, that frame never holds
+// the wait: if a frame is then begun over it, the app abandoned it (OpenXR
+// discards it) and it is dropped; if the app ends it after all (a wait may
+// return before the previous frame's end), it is demoted then. OpenComposite
+// abandons frames whenever a game asks for poses twice.
 //
 // That inline cycle holds the application's frame thread for the generated
 // slots, so a game whose frame takes longer than the runtime's lead time, or
@@ -436,7 +443,12 @@ class FrameGenPresenter {
         bool begun{false};
         bool engaged{false};
         bool demoted{false}; // falls back to one submission in slot k
-        bool claimed{false}; // its end has started; it will run its extra frames
+        bool claimed{false}; // its end has started (engaged: it will run its extra frames)
+        // Begun, and its thread waited again before ending it: abandoned if a
+        // frame begins over it, else demoted once it ends (SupersedeOwnFramesLocked).
+        bool superseded{false};
+        bool demotion_owed{false}; // superseded while engaged: counted if it ends after all
+        std::thread::id begin_thread; // the thread that began it
         std::uint32_t multiplier{2};
         XrDuration reported_period{0}; // the period the app was given
         std::uint64_t sequence{0};
@@ -578,6 +590,8 @@ class FrameGenPresenter {
         std::uint32_t lead{0};         // refreshes between its release and target_slot
         bool begun{false};
         bool claimed{false}; // its end has started
+        bool superseded{false}; // as PendingFrame::superseded
+        std::thread::id begin_thread; // the thread that began it
         bool quad{false};    // claimed by ClaimQuadFrame: Frame Generation composes its quad views
         std::uint64_t capture_mark{0}; // last_capture_mark_ at its begin: the captures released before it
         std::chrono::steady_clock::time_point wait_return{};
@@ -827,6 +841,20 @@ class FrameGenPresenter {
     void ReleaseOutputs();
     void RecordReal(const XrCompositionLayerProjection& projection, XrTime display_time, std::uint64_t sequence);
     void InvalidateContinuityLocked();
+    // The thread that ends frames waits again: marks the begun, unclaimed
+    // frames it began itself superseded; whether an engaged inline frame
+    // newly was.
+    bool SupersedeOwnFramesLocked();
+    // A frame begins: the superseded frames begun before it were abandoned
+    // (OpenXR discards them). Drops them (inline frames, or with `threaded`
+    // the presenter thread's) and returns how many.
+    std::size_t DropAbandonedLocked(bool threaded);
+    // An inline frame ends: drops the frames this thread began before the
+    // newest it began and has not ended (a later begin discarded them).
+    std::size_t DropOwnDiscardedLocked();
+    void BridgeAbandonedLocked(std::uint64_t sequence);
+    // Counts abandoned frames, logs the first, wakes waiters.
+    void NoteAbandonedLocked(std::size_t count);
     void NoteFailureLocked(const std::string& error);
     void LogMemoryBudgetLocked();
     // `distinct`: the submission shows something the one before did not;
@@ -1039,6 +1067,10 @@ class FrameGenPresenter {
     std::vector<OutputKinds> output_kinds_;
     std::thread::id end_thread_; // the thread that last ended a frame
     bool logged_claimed_wait_{false};
+    // The last superseded frame was abandoned rather than ended: frames
+    // waited over superseded ones engage as usual (WaitFrame).
+    bool abandons_frames_{false};
+    bool logged_abandoned_frames_{false};
 
     // Touched by the frame thread inside EndFrame (one at a time) and by
     // Stop; mutex_ guards the parts other threads read.
@@ -1304,6 +1336,7 @@ class FrameGenPresenter {
     std::uint64_t repeated_{0};
     std::uint64_t failures_{0};
     std::uint64_t demoted_{0};
+    std::uint64_t abandoned_frames_{0};
     std::uint64_t captured_{0};
     mutable std::deque<std::chrono::steady_clock::time_point> app_frames_;
     mutable std::deque<std::chrono::steady_clock::time_point> submissions_;
@@ -1402,6 +1435,9 @@ class FrameGenPresenter {
     std::optional<std::uint64_t> last_offer_slot_;
     std::uint32_t dropped_unbegun_{0}; // dropped frames whose begin is still to come
     std::uint32_t dropped_unended_{0}; // dropped frames whose end is still to come
+    // Of those, begun frames the ending thread had superseded: its next begin
+    // abandons them, its next end ends one.
+    std::uint32_t dropped_superseded_{0};
     // Runtime frame calls that succeeded this session.
     std::uint64_t runtime_waits_{0};
     std::uint64_t runtime_begins_{0};
