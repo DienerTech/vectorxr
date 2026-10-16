@@ -39,6 +39,8 @@ void DescribeAdapter(IDXGIAdapter* adapter, SessionGraphics& graphics) {
         graphics.adapter = Utf8(desc.Description);
         graphics.vendor_id = desc.VendorId;
         graphics.dedicated_video_memory = desc.DedicatedVideoMemory;
+        graphics.adapter_luid = static_cast<std::uint64_t>(static_cast<std::uint32_t>(desc.AdapterLuid.HighPart)) << 32 |
+                                desc.AdapterLuid.LowPart;
     }
     // The interface only names what DXGI is asked about: the answer is the
     // version of the driver's user-mode part.

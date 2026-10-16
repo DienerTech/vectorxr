@@ -1407,7 +1407,7 @@ void TestFrameGenModuleOptional() {
     Expect(resolved.core.osd.show_framegen && !resolved.core.osd.compact_show_framegen,
            "OSD Frame Gen rows should default to full-panel only");
     Expect(resolved.core.osd.show_framegen_fps, "The OSD should show Frame Generation beside FPS by default");
-    Expect(resolved.core.osd.body_order.size() == 5 && resolved.core.osd.body_order[2] == "framegen",
+    Expect(resolved.core.osd.body_order.size() == 6 && resolved.core.osd.body_order[3] == "framegen",
            "Default OSD body order should include the Frame Gen row after Turbo");
 }
 
@@ -1516,6 +1516,34 @@ void TestFrameGenInvalidSettingsRejected() {
            "Unknown Frame Generation keys were not ignored with a warning: " + unknown.error);
 }
 
+// The PERFORMANCE row: on in the expanded layout by default, after the graph;
+// off in the compact layout; appended to saved orders without it.
+void TestOsdPerformanceRow() {
+    const auto parse=[](const std::string& osd) {
+        return depthxr::ParseConfig(R"({"version":3,"core":{"enabled":true,"logLevel":"info","osd":)"+osd+R"(},"applications":[],"modules":{"depthxr":{"enabled":false,"defaults":{"stereoBoost":1,"convergence":0},"bindings":{"toggleEnabled":{"type":"none"}},"profiles":[]},"pivotxr":{"enabled":false,"defaults":{},"profiles":[]}}})");
+    };
+    const auto defaults=parse("{}");
+    const auto& osd=defaults.document.core.osd;
+    Expect(defaults.ok && osd.show_performance && !osd.compact_show_performance,
+           "The performance row should default on in the expanded layout and off in the compact one");
+    Expect(osd.body_order==std::vector<std::string>{"graph","performance","turbo","framegen","pivot","modules"},
+           "The default OSD body order should put the performance row after the graph");
+    const auto configured=parse(R"({"showPerformance":false,"compactShowPerformance":true,"bodyOrder":["performance","graph","turbo","framegen","pivot","modules"]})");
+    Expect(configured.ok && !configured.document.core.osd.show_performance &&
+           configured.document.core.osd.compact_show_performance &&
+           configured.document.core.osd.body_order.front()=="performance",
+           "The performance row's settings were not parsed: "+configured.error);
+    Expect(configured.warnings.empty(),"The performance row's keys were reported unknown");
+    const auto saved=parse(R"({"bodyOrder":["pivot","modules","graph","turbo","framegen"]})");
+    Expect(saved.ok && saved.document.core.osd.body_order.size()==6 && saved.document.core.osd.body_order.back()=="performance",
+           "A saved order without the performance row should get it at the end");
+    Expect(!parse(R"({"showPerformance":"yes"})").ok && !parse(R"({"compactShowPerformance":1})").ok,
+           "A non-boolean performance row setting was accepted");
+    Expect(!parse(R"({"bodyOrder":["performance","performance"]})").ok,"A repeated performance row was accepted");
+    const auto preset=parse(R"({"customPresets":[{"name":"Numbers","settings":{"showPerformance":true,"compactShowPerformance":true}}]})");
+    Expect(preset.ok,"OSD presets should accept the performance row: "+preset.error);
+}
+
 void TestFrameGenOsdRows() {
     const auto result = depthxr::ParseConfig(FrameGenConfigJson(R"json({ "enabled": false })json",
         R"json({ "showFramegen": false, "compactShowFramegen": true, "showFramegenFps": false, "bodyOrder": ["modules", "graph", "turbo", "pivot"] })json"));
@@ -1529,7 +1557,7 @@ void TestFrameGenOsdRows() {
     const auto preset = depthxr::ParseConfig(FrameGenConfigJson(R"json({ "enabled": false })json",
         R"json({ "customPresets": [ { "name": "Quiet", "settings": { "showFramegenFps": false } } ] })json"));
     Expect(preset.ok, "OSD presets should accept showFramegenFps: " + preset.error);
-    Expect(osd.body_order.size() == 5 && osd.body_order.back() == "framegen",
+    Expect(osd.body_order.size() == 6 && osd.body_order.back() == "framegen" && osd.body_order[4] == "performance",
            "Saved OSD orders without the Frame Gen row should append it");
     const auto ordered = depthxr::ParseConfig(FrameGenConfigJson(R"json({ "enabled": false })json",
         R"json({ "bodyOrder": ["framegen", "graph", "turbo", "pivot", "modules"] })json"));
@@ -4102,6 +4130,7 @@ int main() {
     TestFrameGenInvalidSettingsRejected();
     TestFrameGenToggleBindingList();
     TestFrameGenOsdRows();
+    TestOsdPerformanceRow();
     TestFrameGenPlan();
     TestFrameGenHistoryState();
     TestTurboMetricsSettingsParsing();

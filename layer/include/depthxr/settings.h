@@ -95,6 +95,10 @@ struct OsdSettings {
     // Beside the FPS counter, in both layouts, in sessions with Frame
     // Generation on: its state and the frames per second the headset shows.
     bool show_framegen_fps{true};
+    // The PERFORMANCE row: CPU and GPU headroom against the frame budget and
+    // video memory (performance_monitor.h). Its sampler runs only while a
+    // layout shows it.
+    bool show_performance{true};
     bool compact_show_runtime{true};
     bool compact_show_brand{true};
     bool compact_show_app{true};
@@ -103,8 +107,11 @@ struct OsdSettings {
     bool compact_show_turbo{false};
     bool compact_show_pivot{false};
     bool compact_show_framegen{false};
+    bool compact_show_performance{false};
     std::string clock_format{"24"};
-    std::vector<std::string> body_order{"graph", "turbo", "framegen", "pivot", "modules"};
+    // Saved orders without a row get it appended at the end, so a new row
+    // never reorders an existing layout.
+    std::vector<std::string> body_order{"graph", "performance", "turbo", "framegen", "pivot", "modules"};
     std::string accent{"teal"};
     std::string custom_color{"#51ddbd"};
     // Any one of a list's bindings acts (one per device: a HOTAS's button and

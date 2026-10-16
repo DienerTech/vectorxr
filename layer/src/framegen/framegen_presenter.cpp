@@ -7011,8 +7011,14 @@ FrameGenStatus FrameGenPresenter::Status() const {
     status.lead_probes = totals_.lead_probes;
     status.lead_probes_failed = totals_.lead_probes_failed;
     status.lead_downs_undone = totals_.lead_downs_undone;
+    status.app_frames = totals_.app_frames;
     status.late_cpu = totals_.late_cpu;
     status.late_gpu = totals_.late_gpu;
+    status.refresh_period_ns = refresh_period_;
+    status.grid_period_ns = refresh_period_ > 0 ? GameGridLocked() : 0;
+    status.working_bytes = working_bytes_;
+    status.output_bytes = output_bytes_;
+    status.memory = memory_budget_;
     status.gpu_gating = gpu_gate_enabled_ && gpu_gate_armed_;
     status.gpu_waits = totals_.gpu_waits;
     status.gpu_wait_timeouts = totals_.gpu_wait_timeouts;

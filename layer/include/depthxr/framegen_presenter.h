@@ -120,8 +120,20 @@ struct FrameGenStatus {
     std::uint64_t lead_probes{0};     // steps down after a calm while (FrameGenLeadPolicy)
     std::uint64_t lead_probes_failed{0}; // probes undone by late frames
     std::uint64_t lead_downs_undone{0};  // steps down undone by late frames within FrameGenLeadPolicy::judge
+    std::uint64_t app_frames{0};      // real frames this session
     std::uint64_t late_cpu{0};        // real frames ended after their refresh was due
     std::uint64_t late_gpu{0};        // real frames not captured on the GPU when first chosen for a refresh
+    // The runtime's refresh period as kept from its waits (refresh_period_; 0 until known), and the period the
+    // game's frames are timed by (GameGridLocked: the refresh period, or the multiple of it the runtime holds
+    // frames to while it halves the rate). The OSD's performance row takes its budget from them, never from the
+    // period the game is told.
+    std::int64_t refresh_period_ns{0};
+    std::int64_t grid_period_ns{0};
+    // Video memory: Frame Generation's working images as allocated and the output swapchain images it made
+    // (LogMemoryBudgetLocked's share), and the backend's last sample of the process's use and budget.
+    std::uint64_t working_bytes{0};
+    std::uint64_t output_bytes{0};
+    std::optional<FrameGenMemoryBudget> memory;
     bool gpu_gating{false};           // game waits are held until its GPU catches up
     std::uint64_t gpu_waits{0};       // game waits held for its GPU (over 0.5 ms)
     std::uint64_t gpu_wait_timeouts{0};

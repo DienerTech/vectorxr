@@ -2369,6 +2369,7 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
     watch.Step("stopping the layer's background work");
     StopConfigWatcher();
     StopTurboAsyncWorker();
+    performance_.EndSession();
     // The loader may unload the layer after this returns; let in-flight
     // background input-device setup finish first.
     DrainInputDeviceWork(std::chrono::seconds(2));
@@ -2730,6 +2731,32 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
                                   : nullptr,
         d3d11_bridge_.Active() ? "Direct3D 12 (Frame Generation's Direct3D 11 bridge)"
                                : "Direct3D 12 (Frame Generation's Vulkan bridge)");
+    // The performance row's sampler reads the game's adapter (the first entry; a bridge's device is on the same
+    // one) and Frame Generation's figures. Before the lock: it joins a previous session's sampler thread.
+    performance_.BeginSession(
+        session_graphics.empty() ? std::nullopt : session_graphics.front().adapter_luid,
+        [this]() -> std::optional<PerformanceFrameGen> {
+            if (!framegen_owns_pacing_.load(std::memory_order_acquire)) return std::nullopt;
+            const FrameGenStatus status = framegen_.Status();
+            PerformanceFrameGen figures;
+            // Generating: its real frames each fill `multiplier` refreshes. Standing by, at full rate or not
+            // engaged, frames pass straight through at the refresh rate.
+            figures.generating = status.state == FrameGenState::kActive && !status.standby && !status.full_rate &&
+                                 status.multiplier >= 2;
+            figures.refreshes = status.multiplier;
+            figures.refresh_ns = status.refresh_period_ns;
+            figures.grid_ns = status.grid_period_ns;
+            figures.app_frames = status.app_frames;
+            figures.late_cpu = status.late_cpu;
+            figures.late_gpu = status.late_gpu;
+            figures.own_bytes = status.working_bytes + status.output_bytes;
+            if (status.memory) {
+                figures.usage_bytes = status.memory->usage_bytes;
+                figures.budget_bytes = status.memory->budget_bytes;
+            }
+            return figures;
+        },
+        &logger_);
 
     std::scoped_lock lock(mutex_);
     for (const SessionGraphics& graphics : session_graphics) {
@@ -2851,6 +2878,9 @@ XrResult OpenXrLayer::DestroySession(XrSession session) {
     // a hang in Frame Generation's presenter teardown is what it is for.
     watch.Step("joining Turbo's in-flight wait");
     ResetTurboFrameState(false);
+    // Its sampler thread reads Frame Generation's status: it stops before Frame Generation does.
+    watch.Step("stopping the performance sampler");
+    performance_.EndSession();
     bool ending_active = false;
     {
         std::scoped_lock lock(mutex_);
@@ -5866,10 +5896,16 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
 
 XrResult OpenXrLayer::TraceRuntimeWaitFrame(XrSession session, const XrFrameWaitInfo* info, XrFrameState* state) {
     const auto trace_call = turbo_trace_.Watch("runtime.wait");
+    // Every runtime wait (the game's, Turbo's, Frame Generation's) tells the performance row the refresh period.
+    const auto note_period = [this](XrResult result, const XrFrameState* state) {
+        if (XR_SUCCEEDED(result) && state && performance_.Wanted())
+            performance_.Frames().RuntimePeriod(state->predictedDisplayPeriod, std::chrono::steady_clock::now());
+    };
     if (!turbo_trace_.Enabled()) {
         const auto result=next_wait_frame_(session, info, state);
         if (XR_SUCCEEDED(result) && state)
             osd_should_render_.store(state->shouldRender == XR_TRUE, std::memory_order_relaxed);
+        note_period(result, state);
         return result;
     }
     // The watched call records the start in the recorder files. Watched
@@ -5883,6 +5919,7 @@ XrResult OpenXrLayer::TraceRuntimeWaitFrame(XrSession session, const XrFrameWait
                         XR_SUCCEEDED(result) ? state->predictedDisplayPeriod : 0, result);
     if (XR_SUCCEEDED(result) && state) osd_should_render_.store(state->shouldRender == XR_TRUE, std::memory_order_relaxed);
     if (XR_SUCCEEDED(result) && turbo_trace_.Capturing()) turbo_trace_.Record("runtime.wait.state", id, state->shouldRender, TurboClockNow());
+    note_period(result, state);
     return result;
 }
 
@@ -6153,6 +6190,19 @@ void OpenXrLayer::ConfigureTurboExperiment() {
 XrResult OpenXrLayer::WaitFrame(XrSession session,
                                 const XrFrameWaitInfo* frame_wait_info,
                                 XrFrameState* frame_state) {
+    bool fabricated = false;
+    const XrResult result = PaceWaitFrame(session, frame_wait_info, frame_state, fabricated);
+    // The OSD's performance row times the game's frames from here: its CPU time starts as its wait returns.
+    if (XR_SUCCEEDED(result) && performance_.Wanted()) {
+        performance_.Frames().Wait(std::chrono::steady_clock::now(), fabricated);
+    }
+    return result;
+}
+
+XrResult OpenXrLayer::PaceWaitFrame(XrSession session,
+                                    const XrFrameWaitInfo* frame_wait_info,
+                                    XrFrameState* frame_state,
+                                    bool& fabricated) {
     const auto trace_call = turbo_trace_.Watch("app.wait");
     if (!frame_state || (frame_wait_info && frame_wait_info->type != XR_TYPE_FRAME_WAIT_INFO) ||
         frame_state->type != XR_TYPE_FRAME_STATE) {
@@ -6447,6 +6497,7 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
                 if (turbo_trace_.Capturing()) turbo_trace_.Record("clock", trace_id, TurboClockNow());
                 ++pacing_fabricated_waits_;
                 ++turbo_metrics_fabricated_pending_;
+                fabricated = true;
                 if (turbo_fabricated_wait_log_budget_ > 0 && logger_.IsDebugEnabled()) {
                     --turbo_fabricated_wait_log_budget_;
                     logger_.Debug("Turbo: fabricated xrWaitFrame return, predictedDisplayTime=" +
@@ -6538,6 +6589,10 @@ XrResult OpenXrLayer::BeginFrame(XrSession session, const XrFrameBeginInfo* fram
     NoteThread(ThreadCensus::Call::BeginFrame);
     if (frame_begin_info && frame_begin_info->type != XR_TYPE_FRAME_BEGIN_INFO) {
         return XR_ERROR_VALIDATION_FAILURE;
+    }
+    // A wait that returns from here until this frame's end is pipelined (the performance row).
+    if (performance_.Wanted()) {
+        performance_.Frames().Begin();
     }
     {
         std::scoped_lock lock(mutex_);
@@ -8599,6 +8654,12 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     const auto trace_call = turbo_trace_.Watch("app.end");
     if (!frame_end_info || frame_end_info->type != XR_TYPE_FRAME_END_INFO) {
         return XR_ERROR_VALIDATION_FAILURE;
+    }
+    // The game's CPU time for the performance row ends at the entry: what the layer, Frame Generation and the
+    // runtime do from here is not the game's.
+    if (performance_.Wanted()) {
+        performance_.Frames().End(std::chrono::steady_clock::now(), frame_end_info->layerCount > 0,
+                                  static_cast<std::uint32_t>(GetCurrentThreadId()));
     }
     NoteThread(ThreadCensus::Call::EndFrame);
 
@@ -10922,6 +10983,8 @@ OsdSnapshot OpenXrLayer::BuildOsdSnapshot() const {
         !framegen_session_enabled_)
         snapshot.restart+=(snapshot.restart.empty()?"":" + ")+std::string("Frame Generation");
     snapshot.framegen_session=framegen_session_enabled_;
+    if (resolved_settings_.core.osd.show_performance || resolved_settings_.core.osd.compact_show_performance)
+        snapshot.performance=DescribePerformance(performance_.Reading());
     // Diagnostic modes a tester may leave on name themselves after the brand:
     // debug logging (slower, with large traces) and, in a Frame Generation
     // session, a diagnostic view drawn into generated frames.
@@ -10993,6 +11056,10 @@ void OpenXrLayer::RefreshResolvedSettings() {
     }
 
     osd_monitoring_.store(resolved_settings_.core.osd.enabled, std::memory_order_relaxed);
+    // The performance row's sampler runs while the OSD shows the row in either layout (never waits here).
+    performance_.SetWanted(resolved_settings_.core.osd.enabled &&
+                           (resolved_settings_.core.osd.show_performance ||
+                            resolved_settings_.core.osd.compact_show_performance));
     osd_last_input_poll_.reset();
     ++osd_settings_revision_;
     const bool configured_core_active = resolved_settings_.core.enabled;

@@ -34,6 +34,7 @@
 #include "depthxr/runtime_pacing.h"
 #include "depthxr/runtime_relay.h"
 #include "depthxr/osd_renderer.h"
+#include "depthxr/performance_monitor.h"
 #include "depthxr/process_exit.h"
 #include "depthxr/framegen_d3d11_bridge.h"
 #include "depthxr/framegen_vulkan_bridge.h"
@@ -883,6 +884,9 @@ class OpenXrLayer {
     std::optional<std::chrono::steady_clock::time_point> turbo_limit_last_wait_;
     bool turbo_trace_last_engaged_{false};
     XrResult TraceRuntimeWaitFrame(XrSession, const XrFrameWaitInfo*, XrFrameState*);
+    // The game's xrWaitFrame: Frame Generation's, Turbo's or the runtime's pacing. `fabricated`: Turbo returned a
+    // frame the runtime did not.
+    XrResult PaceWaitFrame(XrSession, const XrFrameWaitInfo*, XrFrameState*, bool& fabricated);
     XrResult TraceRuntimeBeginFrame(XrSession, const XrFrameBeginInfo*);
     XrResult TraceRuntimeEndFrame(XrSession, const XrFrameEndInfo*);
     // The layer's final submission: OSD overlay, then the runtime xrEndFrame.
@@ -1011,6 +1015,9 @@ class OpenXrLayer {
     FrameGenPresenter::GpuFactory framegen_gpu_factory_{CreateFrameGenGpu};
     FrameGenRuntimeCalls framegen_calls_;
     std::atomic<bool> framegen_owns_pacing_{false};
+    // The OSD's PERFORMANCE row: fed by the game's frame calls while the row is shown; its sampler thread reads
+    // Frame Generation's status (declared after framegen_, so it stops first).
+    PerformanceMonitor performance_;
     bool framegen_session_enabled_{false};  // mutex_
     // A session of this instance started with Frame Generation on: its
     // teardown calls are watched (TeardownWatch). Sessions without it log

@@ -30,6 +30,9 @@ struct SessionGraphics {
     // the process's budget and what it uses of it, bytes.
     std::optional<std::uint64_t> budget;
     std::optional<std::uint64_t> usage;
+    // DXGI's LUID of the adapter (high part << 32 | low part), for the OSD's
+    // performance row to sample its video memory.
+    std::optional<std::uint64_t> adapter_luid;
     // Why something is missing, or how DXGI's adapter was found when not as
     // usual (a clause, for the end of the line).
     std::string problem;
