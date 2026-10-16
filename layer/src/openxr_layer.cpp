@@ -1738,6 +1738,7 @@ bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig&
            lhs.framegen.multiplier == rhs.framegen.multiplier &&
            lhs.framegen.artifact_suppression == rhs.framegen.artifact_suppression &&
            lhs.framegen.motion_limit_percent == rhs.framegen.motion_limit_percent &&
+           lhs.framegen.extend_head_prediction == rhs.framegen.extend_head_prediction &&
            lhs.framegen.diagnostic_view == rhs.framegen.diagnostic_view &&
            SameInputBindings(lhs.framegen.toggle_bindings, rhs.framegen.toggle_bindings);
 }
@@ -6099,9 +6100,13 @@ bool OpenXrLayer::WantsTurboClockConversion() {
     const auto parsed = LoadConfigFromFile(ResolveConfigPath());
     if (!parsed.ok) return false;
     const auto settings = ResolveTurboSettings(parsed.document, GetCurrentExecutableName());
+    // Head prediction past the runtime's limit measures display times
+    // against the runtime's clock too.
+    const auto framegen = ResolveFrameGenSettings(parsed.document, GetCurrentExecutableName());
     return parsed.document.core.enabled &&
         (parsed.document.core.log_level == LogLevel::Debug ||
-         (settings.experimental.enabled && settings.experimental.prediction_percent != 100));
+         (settings.experimental.enabled && settings.experimental.prediction_percent != 100) ||
+         (framegen.enabled && framegen.extend_head_prediction));
 }
 
 bool OpenXrLayer::WantsD3D11Bridge() {
@@ -7530,6 +7535,209 @@ XrTime OpenXrLayer::ClampInternalLocateTime(XrTime app_time) {
         return turbo_last_predicted_display_time_;
     }
     return app_time;
+}
+
+namespace {
+
+HeadPredictionPose ToHeadPose(const XrPosef& pose) {
+    return {{pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w},
+            {pose.position.x, pose.position.y, pose.position.z}};
+}
+
+XrPosef ToXrPose(const HeadPredictionPose& pose) {
+    return {{static_cast<float>(pose.orientation.x), static_cast<float>(pose.orientation.y),
+             static_cast<float>(pose.orientation.z), static_cast<float>(pose.orientation.w)},
+            {static_cast<float>(pose.position.x), static_cast<float>(pose.position.y),
+             static_cast<float>(pose.position.z)}};
+}
+
+constexpr XrSpaceLocationFlags kHeadPredictionPoseFlags =
+    XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT;
+// A probe is due at most this often until the runtime's limit settles.
+constexpr auto kHeadPredictionProbeInterval = std::chrono::milliseconds(250);
+constexpr auto kHeadPredictionSummaryInterval = std::chrono::seconds(30);
+
+} // namespace
+
+XrSpace OpenXrLayer::HeadPredictionWorldSpace(XrSpace space, XrSpace base_space) const {
+    const TrackedSpaceKind space_kind = ClassifySpace(space);
+    const TrackedSpaceKind base_kind = ClassifySpace(base_space);
+    const auto world = [](TrackedSpaceKind kind) {
+        return kind == TrackedSpaceKind::kLocal || kind == TrackedSpaceKind::kStage;
+    };
+    if (space_kind == TrackedSpaceKind::kView && world(base_kind)) {
+        return base_space;
+    }
+    if (base_kind == TrackedSpaceKind::kView && world(space_kind)) {
+        return space;
+    }
+    return XR_NULL_HANDLE;
+}
+
+OpenXrLayer::HeadPredictionPlan OpenXrLayer::PlanHeadPredictionLocked(bool allow_probe) {
+    HeadPredictionPlan plan;
+    if (!resolved_settings_.core.enabled || !resolved_settings_.framegen.extend_head_prediction ||
+        !framegen_owns_pacing_.load(std::memory_order_acquire)) {
+        return plan;
+    }
+    if (!turbo_convert_counter_time_ || internal_view_space_ == XR_NULL_HANDLE) {
+        if (!head_prediction_logged_unavailable_) {
+            head_prediction_logged_unavailable_ = true;
+            logger_.Info(std::string("Head prediction past the runtime's limit is on, but unavailable: ") +
+                         (!turbo_convert_counter_time_ ? "the runtime gives no clock to measure it against "
+                                                         "(XR_KHR_win32_convert_performance_counter_time)."
+                                                       : "no internal VIEW space."));
+        }
+        return plan;
+    }
+    plan.enabled = true;
+    plan.view_space = internal_view_space_;
+    if (head_prediction_limit_.Settled()) {
+        plan.limited = !head_prediction_limit_.Unlimited();
+        plan.limit = head_prediction_limit_.LimitNs();
+        return plan;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (allow_probe && now - head_prediction_last_probe_ >= kHeadPredictionProbeInterval) {
+        head_prediction_last_probe_ = now;
+        plan.probe = true;
+    }
+    return plan;
+}
+
+std::optional<PredictionLimitEstimate> OpenXrLayer::ProbeRuntimePredictionLimit(const HeadPredictionPlan& plan,
+                                                                               XrSpace world_space) {
+    // The head, asked for at once at each offset past now. Never further
+    // than Frame Generation already has the game ask for.
+    const std::span<const std::int64_t> offsets = PredictionProbeOffsets();
+    std::array<PredictionProbeSample, 13> samples{};
+    if (offsets.size() != samples.size()) {
+        return std::nullopt;
+    }
+    const XrTime now = TurboClockNow();
+    if (now <= 0) {
+        return std::nullopt;
+    }
+    for (std::size_t i = 0; i < offsets.size(); ++i) {
+        XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
+        if (XR_FAILED(next_locate_space_(plan.view_space, world_space, now + offsets[i], &location)) ||
+            (location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) == 0) {
+            return std::nullopt;
+        }
+        samples[i].ahead_ns = offsets[i];
+        samples[i].orientation = ToHeadPose(location.pose).orientation;
+    }
+    return EstimatePredictionLimit(samples);
+}
+
+void OpenXrLayer::NotePredictionProbeLocked(const std::optional<PredictionLimitEstimate>& estimate) {
+    if (!estimate) {
+        return;
+    }
+    if (logger_.IsDebugEnabled()) {
+        logger_.Debug("Head prediction probe: " +
+                      (estimate->unlimited ? std::string("still turning at 100 ms")
+                                           : "stops at " + FormatDiagnosticDouble(estimate->limit_ns / 1e6) + " ms") +
+                      ", turning " + FormatDiagnosticDouble(estimate->speed_degrees_per_second) +
+                      " deg/s, fit " + FormatDiagnosticDouble(estimate->fit) + ".");
+    }
+    if (!head_prediction_limit_.Add(*estimate)) {
+        return;
+    }
+    if (head_prediction_limit_.Unlimited()) {
+        logger_.Info("Head prediction: " + runtime_name_ +
+                     " predicts the head at least 100 ms ahead; nothing to extend (" +
+                     std::to_string(head_prediction_limit_.Probes()) + " probes).");
+    } else {
+        logger_.Info("Head prediction: " + runtime_name_ + " predicts the head " +
+                     FormatDiagnosticDouble(head_prediction_limit_.LimitNs() / 1e6) +
+                     " ms past the moment it is asked and no further (" +
+                     std::to_string(head_prediction_limit_.Probes()) +
+                     " probes); the rest of each told display time is extended.");
+    }
+}
+
+HeadExtension OpenXrLayer::ExtendHead(const HeadPredictionPlan& plan, XrSpace world_space, XrTime target,
+                                      XrTime now) {
+    const HeadPredictionTuning tuning{};
+    if (!plan.limited || now <= 0 || target - now <= plan.limit) {
+        return {};
+    }
+    // The runtime's answer for the target first, nearest the game's own;
+    // then two inside its limit.
+    HeadPredictionAnchors anchors;
+    anchors.target = target;
+    anchors.anchor_time = now + plan.limit - tuning.anchor_margin_ns;
+    const XrTime times[3] = {target, anchors.anchor_time, anchors.anchor_time - tuning.velocity_span_ns};
+    XrSpaceLocation located[3] = {{XR_TYPE_SPACE_LOCATION}, {XR_TYPE_SPACE_LOCATION}, {XR_TYPE_SPACE_LOCATION}};
+    for (int i = 0; i < 3; ++i) {
+        if (XR_FAILED(next_locate_space_(plan.view_space, world_space, times[i], &located[i])) ||
+            (located[i].locationFlags & kHeadPredictionPoseFlags) != kHeadPredictionPoseFlags) {
+            return {};
+        }
+    }
+    anchors.at_target = ToHeadPose(located[0].pose);
+    anchors.anchor = ToHeadPose(located[1].pose).orientation;
+    anchors.before = ToHeadPose(located[2].pose).orientation;
+    return ComputeHeadExtension(anchors, tuning);
+}
+
+void OpenXrLayer::NoteHeadExtensionLocked(const HeadExtension& extension, XrTime target, XrTime now) {
+    if (!head_prediction_limit_.Settled() || head_prediction_limit_.Unlimited() || now <= 0) {
+        return;
+    }
+    const double beyond_ms = static_cast<double>(target - now - head_prediction_limit_.LimitNs()) / 1e6;
+    if (beyond_ms <= 0.0) {
+        return;
+    }
+    const auto wall = std::chrono::steady_clock::now();
+    if (head_prediction_stats_since_ == std::chrono::steady_clock::time_point{}) {
+        head_prediction_stats_since_ = wall;
+    }
+    HeadPredictionStats& stats = head_prediction_stats_;
+    ++stats.locates;
+    stats.beyond_sum_ms += beyond_ms;
+    stats.beyond_max_ms = std::max(stats.beyond_max_ms, beyond_ms);
+    if (extension.applied) {
+        ++stats.extended;
+        stats.degrees_sum += extension.degrees;
+        stats.degrees_max = std::max(stats.degrees_max, extension.degrees);
+    }
+    head_prediction_beyond_ms_ = head_prediction_beyond_ms_ <= 0.0
+        ? beyond_ms
+        : head_prediction_beyond_ms_ + 0.05 * (beyond_ms - head_prediction_beyond_ms_);
+    if (wall - head_prediction_stats_since_ < kHeadPredictionSummaryInterval) {
+        return;
+    }
+    std::ostringstream stream;
+    stream << std::fixed << std::setprecision(1) << "Head prediction: " << stats.locates
+           << " view locates asked " << stats.beyond_sum_ms / static_cast<double>(stats.locates) << " ms (max "
+           << stats.beyond_max_ms << ") past the runtime's " << head_prediction_limit_.LimitNs() / 1e6
+           << " ms; " << stats.extended << " turned by "
+           << (stats.extended > 0 ? stats.degrees_sum / static_cast<double>(stats.extended) : 0.0)
+           << " deg on average (max " << stats.degrees_max << "); the others found the head (nearly) still.";
+    logger_.Info(stream.str());
+    head_prediction_stats_ = {};
+    head_prediction_stats_since_ = wall;
+}
+
+std::string OpenXrLayer::HeadPredictionOsdDetail() const {
+    if (!resolved_settings_.core.enabled || !resolved_settings_.framegen.extend_head_prediction ||
+        !framegen_owns_pacing_.load(std::memory_order_acquire)) {
+        return {};
+    }
+    if (!turbo_convert_counter_time_) {
+        return "Head: no runtime clock";
+    }
+    if (!head_prediction_limit_.Settled()) {
+        return "Head: measuring";
+    }
+    if (head_prediction_limit_.Unlimited()) {
+        return "Head: runtime predicts";
+    }
+    std::ostringstream stream;
+    stream << "Head +" << static_cast<int>(std::lround(head_prediction_beyond_ms_)) << " ms";
+    return stream.str();
 }
 
 bool OpenXrLayer::TurboSequencedDebugTick() {
@@ -9920,10 +10128,18 @@ XrResult OpenXrLayer::LocateSpace(XrSpace space, XrSpace base_space, XrTime time
     XrSpace anchor_space = XR_NULL_HANDLE;
     XrSpace reference_space = XR_NULL_HANDLE;
     XrTime anchor_locate_time = time;
+    HeadPredictionPlan head_plan;
+    XrSpace head_world_space = XR_NULL_HANDLE;
     {
         std::scoped_lock lock(mutex_);
         ReloadConfigIfNeeded();
         RefreshResolvedSettings();
+        // VIEW located in a world space, or the reverse: head prediction
+        // turns it as it turns the views for the same display time.
+        head_world_space = HeadPredictionWorldSpace(space, base_space);
+        if (head_world_space != XR_NULL_HANDLE) {
+            head_plan = PlanHeadPredictionLocked(false);
+        }
         // The flight recorder's view of where the app places its camera: the
         // time it locates VIEW space at, against its views' (`locate`). Once
         // per time: DCS locates VIEW space several times a frame.
@@ -9951,8 +10167,21 @@ XrResult OpenXrLayer::LocateSpace(XrSpace space, XrSpace base_space, XrTime time
         }
     }
 
+    const auto extend_head = [&](XrResult located) {
+        if (XR_FAILED(located) || !location || !head_plan.limited ||
+            (location->locationFlags & kHeadPredictionPoseFlags) != kHeadPredictionPoseFlags) {
+            return;
+        }
+        const HeadExtension extension = ExtendHead(head_plan, head_world_space, time, TurboClockNow());
+        const HeadPredictionPose pose = ToHeadPose(location->pose);
+        location->pose = ToXrPose(space == head_world_space ? ApplyHeadExtensionInverse(extension, pose)
+                                                            : ApplyHeadExtension(extension, pose));
+    };
+
     if (!pivot_processing_required) {
-        return next_locate_space_(space, base_space, time, location);
+        const XrResult result = next_locate_space_(space, base_space, time, location);
+        extend_head(result);
+        return result;
     }
 
     // Quad-view sessions must keep xrLocateSpace consistent with the pivoted
@@ -9977,6 +10206,7 @@ XrResult OpenXrLayer::LocateSpace(XrSpace space, XrSpace base_space, XrTime time
     if (XR_FAILED(result)) {
         return result;
     }
+    extend_head(result);
 
     XrSpaceLocation anchor_relation{XR_TYPE_SPACE_LOCATION};
     if (anchor_space != XR_NULL_HANDLE && anchor_space != reference_space) {
@@ -10000,6 +10230,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
     const auto trace_call = turbo_trace_.Watch("app.locateViews");
     bool synthesized_quad_views = false;
     QuadViewsGazeDiagnostic gaze_diagnostic{};
+    HeadExtension head_extension;
     const XrResult result = LocateRuntimeViews(
         session,
         view_locate_info,
@@ -10008,7 +10239,8 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         view_count_output,
         views,
         &synthesized_quad_views,
-        &gaze_diagnostic);
+        &gaze_diagnostic,
+        &head_extension);
 
     if (XR_FAILED(result) || !views || !view_count_output) {
         return result;
@@ -10136,6 +10368,8 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         XrSpaceLocation origin_location{XR_TYPE_SPACE_LOCATION};
         const XrResult origin_result = next_locate_space_(
             internal_view_space_, view_locate_info->space, internal_locate_time, &origin_location);
+        // The head the views were turned to (head prediction), as below.
+        origin_location.pose = ToXrPose(ApplyHeadExtension(head_extension, ToHeadPose(origin_location.pose)));
         if (XR_SUCCEEDED(origin_result) &&
             (origin_location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) != 0) {
             PivotOrigin origin;
@@ -10176,6 +10410,11 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         XrResult pivot_result = next_locate_space_(
             internal_view_space_, view_locate_info->space, internal_locate_time, &pivot_view_location);
         if (XR_SUCCEEDED(pivot_result)) {
+            // Head prediction turned this call's views; the head they are
+            // recomposed on takes the same turn about the same point, so the
+            // eye offsets derived from them stay the runtime's own.
+            pivot_view_location.pose =
+                ToXrPose(ApplyHeadExtension(head_extension, ToHeadPose(pivot_view_location.pose)));
             runtime_view_pose = pivot_view_location.pose;
             const auto existing_frame =
                 cached_pivot_pose_deltas_.find(view_locate_info->displayTime);
@@ -10924,6 +11163,9 @@ OsdSnapshot OpenXrLayer::BuildOsdSnapshot() const {
     snapshot.framegen=framegen.row;
     snapshot.compact_framegen=framegen.compact;
     snapshot.framegen_detail=framegen.detail;
+    if (const std::string head=HeadPredictionOsdDetail(); !head.empty()) {
+        snapshot.framegen_detail+=(snapshot.framegen_detail.empty()?"":"  /  ")+head;
+    }
     snapshot.framegen_badge=framegen.badge;
     snapshot.framegen_fps=framegen.shown_fps;
     if (snapshot.modules.empty()) snapshot.modules="Off";
@@ -11464,6 +11706,12 @@ void OpenXrLayer::ResetSessionState() {
     pivotxr_activation_gain_ = 0.0;
     pivotxr_position_offset_ = {};
     pivotxr_last_smoothing_wall_time_.reset();
+    head_prediction_limit_.Reset();
+    head_prediction_last_probe_ = {};
+    head_prediction_stats_ = {};
+    head_prediction_stats_since_ = {};
+    head_prediction_beyond_ms_ = 0.0;
+    head_prediction_logged_unavailable_ = false;
     ResetDepthToggleState();
     ResetQuadViewsDiagnosticVisualizationState();
     ResetTurboToggleState();
@@ -13118,12 +13366,16 @@ XrResult OpenXrLayer::LocateRuntimeViews(XrSession session,
                                          uint32_t* view_count_output,
                                          XrView* views,
                                          bool* synthesized_quad_views,
-                                         QuadViewsGazeDiagnostic* gaze_diagnostic) {
+                                         QuadViewsGazeDiagnostic* gaze_diagnostic,
+                                         HeadExtension* head_extension) {
     if (synthesized_quad_views) {
         *synthesized_quad_views = false;
     }
     if (gaze_diagnostic) {
         *gaze_diagnostic = {};
+    }
+    if (head_extension) {
+        *head_extension = {};
     }
 
     bool quadviews_emulation_active = false;
@@ -13137,12 +13389,20 @@ XrResult OpenXrLayer::LocateRuntimeViews(XrSession session,
     // to the game's stereo locate, with the kind of space it was asked in.
     const bool trace_locate = view_locate_info && framegen_.Trace().Enabled();
     TrackedSpaceKind locate_space_kind = TrackedSpaceKind::kOther;
+    HeadPredictionPlan head_plan;
+    XrSpace head_world_space = XR_NULL_HANDLE;
     {
         std::scoped_lock lock(mutex_);
         ReloadConfigIfNeeded();
         RefreshResolvedSettings();
         if (trace_locate) {
             locate_space_kind = ClassifySpace(view_locate_info->space);
+        }
+        if (view_locate_info) {
+            head_world_space = HeadPredictionWorldSpace(internal_view_space_, view_locate_info->space);
+            if (head_world_space != XR_NULL_HANDLE) {
+                head_plan = PlanHeadPredictionLocked(true);
+            }
         }
         quadviews_emulation_active = IsQuadViewsEmulationActive();
         varjo_compatible = varjo_compatible_quadviews_active_;
@@ -13151,6 +13411,51 @@ XrResult OpenXrLayer::LocateRuntimeViews(XrSession session,
             IsQuadViewsActive() && varjo_foveated_rendering_extension_requested_ &&
             quadviews_settings.tracking_mode == QuadViewsTrackingMode::Eye;
     }
+
+    // Head prediction past the runtime's limit: the runtime's views for a
+    // world space, turned on over the part of the display time it does not
+    // predict, before Pivot, Depth or quad views see them. The same turn is
+    // handed back for the Pivot drive's own locates of this call.
+    const auto extend_head = [&](XrView* runtime_views, uint32_t runtime_count) {
+        if (!head_plan.enabled || !runtime_views || runtime_count == 0) {
+            return;
+        }
+        if (head_plan.probe) {
+            const auto estimate = ProbeRuntimePredictionLimit(head_plan, head_world_space);
+            std::scoped_lock lock(mutex_);
+            NotePredictionProbeLocked(estimate);
+            return;
+        }
+        if (!head_plan.limited) {
+            return;
+        }
+        const XrTime now = TurboClockNow();
+        const HeadExtension extension = ExtendHead(head_plan, head_world_space, view_locate_info->displayTime, now);
+        const XrPosef runtime_view0 = runtime_views[0].pose;
+        if (extension.applied) {
+            for (uint32_t i = 0; i < runtime_count; ++i) {
+                runtime_views[i].pose = ToXrPose(ApplyHeadExtension(extension, ToHeadPose(runtime_views[i].pose)));
+            }
+            if (head_extension) {
+                *head_extension = extension;
+            }
+        }
+        // Against "end" (what the game submits): the display time, how far
+        // past the runtime's limit it is, the turn (micro-degrees), the
+        // runtime's speed (milli-deg/s), the limit, and view 0 as the runtime
+        // answered (also for quad views, which have no "loc") and as turned.
+        if (trace_locate && now > 0) {
+            FrameGenTrace& trace = framegen_.Trace();
+            trace.Record("xp", 0, view_locate_info->displayTime, view_locate_info->displayTime - now - head_plan.limit,
+                         extension.applied ? std::llround(extension.degrees * 1e6) : 0,
+                         std::llround(extension.speed_degrees_per_second * 1e3), head_plan.limit,
+                         extension.applied ? 1 : 0);
+            trace.RecordPose("xp.r0", 0, runtime_view0);
+            trace.RecordPose("xp.v0", 0, runtime_views[0].pose);
+        }
+        std::scoped_lock lock(mutex_);
+        NoteHeadExtensionLocked(extension, view_locate_info->displayTime, now);
+    };
 
     // Varjo compatible mode: forward the app's quad locate untouched — including the
     // Varjo foveated-rendering next chain, which the runtime consumes to place the
@@ -13186,6 +13491,9 @@ XrResult OpenXrLayer::LocateRuntimeViews(XrSession session,
             native_view_locate_info, vector_request_injected, rendering_gaze_queried, rendering_gaze_result,
             rendering_gaze_flags, view_state, native_result, view_capacity_input,
             view_count_output, views);
+        if (XR_SUCCEEDED(native_result) && views && view_count_output) {
+            extend_head(views, std::min(*view_count_output, view_capacity_input));
+        }
         return native_result;
     }
 
@@ -13228,6 +13536,9 @@ XrResult OpenXrLayer::LocateRuntimeViews(XrSession session,
                 trace.RecordPose("loc.v1", 0, views[1].pose);
             }
         }
+        if (XR_SUCCEEDED(locate_result) && views && view_count_output) {
+            extend_head(views, std::min(*view_count_output, view_capacity_input));
+        }
         return locate_result;
     }
 
@@ -13267,6 +13578,9 @@ XrResult OpenXrLayer::LocateRuntimeViews(XrSession session,
             *view_count_output = stereo_count;
         }
         return result;
+    }
+    if (views && view_capacity_input >= 4) {
+        extend_head(stereo_views.data(), 2);
     }
 
     if (!view_count_output) {
@@ -13880,6 +14194,7 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
            << ", framegenMultiplier=" << ToString(settings.framegen.multiplier)
            << ", framegenArtifactSuppression=" << settings.framegen.artifact_suppression
            << ", framegenMotionLimitPercent=" << settings.framegen.motion_limit_percent
+           << ", framegenExtendHeadPrediction=" << settings.framegen.extend_head_prediction
            << ", framegenDiagnosticView=" << ToString(settings.framegen.diagnostic_view)
            << ", framegenToggleBindings=" << BindingListLabel(settings.framegen.toggle_bindings);
     logger_.Debug(stream.str());

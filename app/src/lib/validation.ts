@@ -346,6 +346,10 @@ function validateFrameGenSettings(prefix: string, settings: FrameGenSettings): s
     errors.push(`${prefix}frameMultiplier must be auto, dynamic, 2x, 3x, or 4x`)
   }
 
+  if (settings.extendHeadPrediction !== undefined && typeof settings.extendHeadPrediction !== 'boolean') {
+    errors.push(`${prefix}extendHeadPrediction must be true or false`)
+  }
+
   const bounded = [
     ['artifactSuppression', settings.artifactSuppression, 0, 100],
     ['motionLimitPercent', settings.motionLimitPercent, 2, 25],

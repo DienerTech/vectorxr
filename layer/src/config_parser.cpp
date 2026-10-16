@@ -2432,6 +2432,7 @@ bool ParseFrameGenSettings(const JsonValue::Object& object, const char* field, F
         "frameMultiplier",
         "artifactSuppression",
         "motionLimitPercent",
+        "extendHeadPrediction",
     };
     NoteUnknownKeys(object, allowed);
 
@@ -2476,6 +2477,13 @@ bool ParseFrameGenSettings(const JsonValue::Object& object, const char* field, F
             return false;
         }
         out.flow_quality = *parsed;
+    }
+    std::optional<bool> extend_head_prediction;
+    if (!ReadOptionalBool(object, "extendHeadPrediction", extend_head_prediction, error)) {
+        return false;
+    }
+    if (extend_head_prediction) {
+        out.extend_head_prediction = *extend_head_prediction;
     }
     return ReadOptionalBoundedInt(object, "artifactSuppression", field, 0, 100, out.artifact_suppression, error) &&
         ReadOptionalBoundedInt(object, "motionLimitPercent", field, 2, 25, out.motion_limit_percent, error);

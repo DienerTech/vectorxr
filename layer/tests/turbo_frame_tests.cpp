@@ -695,7 +695,8 @@ class TurboFrameTestPeer {
         }
         XrViewState state{XR_TYPE_VIEW_STATE};
         const XrResult result =
-            layer.LocateRuntimeViews(XR_NULL_HANDLE, &info, &state, capacity, count, views, nullptr, nullptr);
+            layer.LocateRuntimeViews(XR_NULL_HANDLE, &info, &state, capacity, count, views, nullptr, nullptr,
+                                     nullptr);
         std::scoped_lock lock(layer.mutex_);
         layer.has_loaded_config_ = loaded;
         layer.next_locate_views_ = previous;

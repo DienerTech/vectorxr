@@ -569,6 +569,10 @@ struct FrameGenSettings {
     int artifact_suppression{50};
     // 2-25: largest content shift, in percent of view width, a generated frame may apply.
     int motion_limit_percent{10};
+    // Carry the head's rotation over the part of the display time Frame
+    // Generation tells the game that the runtime does not predict (see
+    // head_prediction.h). Off by default.
+    bool extend_head_prediction{false};
 };
 
 struct FrameGenProfile {

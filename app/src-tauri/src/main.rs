@@ -899,9 +899,13 @@ fn default_framegen_diagnostic_view() -> String {
     "off".into()
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 // Frame Generation tuning. Older layers reject unknown keys (current ones
 // ignore them with a warning), so these six fields are the complete
-// serialized shape.
+// serialized shape, and extendHeadPrediction is written only when on.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FrameGenSettings {
@@ -919,6 +923,9 @@ struct FrameGenSettings {
     artifact_suppression: i64,
     #[serde(default = "default_framegen_motion_limit_percent")]
     motion_limit_percent: i64,
+    // Head prediction past the runtime's limit.
+    #[serde(default, skip_serializing_if = "is_false")]
+    extend_head_prediction: bool,
 }
 
 impl Default for FrameGenSettings {
@@ -930,6 +937,7 @@ impl Default for FrameGenSettings {
             frame_multiplier: default_framegen_frame_multiplier(),
             artifact_suppression: default_framegen_artifact_suppression(),
             motion_limit_percent: default_framegen_motion_limit_percent(),
+            extend_head_prediction: false,
         }
     }
 }
@@ -3227,6 +3235,7 @@ mod tests {
         assert_eq!(defaults.defaults.frame_multiplier, "dynamic");
         assert_eq!(defaults.defaults.artifact_suppression, 50);
         assert_eq!(defaults.defaults.motion_limit_percent, 10);
+        assert!(!defaults.defaults.extend_head_prediction);
         assert!(defaults.profiles.is_empty());
 
         // Older layers reject unknown keys (current ones ignore them with a
@@ -3243,11 +3252,13 @@ mod tests {
                 "name": "DCS", "enabled": false, "applicationIds": ["dcs"],
                 "settings": {
                     "synthesisMode": "interpolate", "flowQuality": "performance", "motionEstimation": "shader",
-                    "frameMultiplier": "3x", "artifactSuppression": 0, "motionLimitPercent": 25
+                    "frameMultiplier": "3x", "artifactSuppression": 0, "motionLimitPercent": 25,
+                    "extendHeadPrediction": true
                 }
             }]
         });
         let config: super::FrameGenModuleConfig = serde_json::from_value(input.clone()).unwrap();
+        assert!(config.profiles[0].settings.extend_head_prediction);
         assert_eq!(serde_json::to_value(config).unwrap(), input);
 
         // Settings saved without a frame multiplier load as Dynamic and save it.

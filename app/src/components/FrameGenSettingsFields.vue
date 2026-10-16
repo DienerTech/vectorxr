@@ -116,14 +116,17 @@ const advancedDefaults = defaultFrameGenSettings()
 const advancedAtDefaults = computed(() =>
   props.settings.flowQuality === advancedDefaults.flowQuality &&
   props.settings.artifactSuppression === advancedDefaults.artifactSuppression &&
-  props.settings.motionLimitPercent === advancedDefaults.motionLimitPercent)
+  props.settings.motionLimitPercent === advancedDefaults.motionLimitPercent &&
+  !props.settings.extendHeadPrediction)
 const advancedSummary = computed(() =>
-  `${flowQuality.value.label} flow · Suppression ${props.settings.artifactSuppression} · Motion limit ${props.settings.motionLimitPercent}%`)
+  `${flowQuality.value.label} flow · Suppression ${props.settings.artifactSuppression} · Motion limit ${props.settings.motionLimitPercent}%` +
+  (props.settings.extendHeadPrediction ? ' · Head prediction' : ''))
 
 function resetAdvanced() {
   props.settings.flowQuality = advancedDefaults.flowQuality
   props.settings.artifactSuppression = advancedDefaults.artifactSuppression
   props.settings.motionLimitPercent = advancedDefaults.motionLimitPercent
+  delete props.settings.extendHeadPrediction
 }
 </script>
 
@@ -258,6 +261,25 @@ function resetAdvanced() {
           </span>
           <span class="mt-2 block text-xs leading-5 text-muted">
             The farthest a generated frame may move the image, as a share of view width. Faster motion shows the real image.
+          </span>
+        </label>
+
+        <label class="flex cursor-pointer items-start gap-3 rounded-[1rem] border p-4 surface-panel lg:col-span-3">
+          <input
+            v-model="settings.extendHeadPrediction"
+            class="mt-1 h-4 w-4 shrink-0 accent-depthxr-copper"
+            type="checkbox"
+          />
+          <span class="min-w-0">
+            <span class="flex flex-wrap items-center gap-2">
+              <span class="eyebrow text-xs uppercase tracking-[0.18em]">Extend head prediction</span>
+              <span class="chip-warning rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em]">
+                Experimental
+              </span>
+            </span>
+            <span class="mt-2 block text-xs leading-5 text-muted">
+              Frame Generation has the game render up to ~150 ms ahead, and some runtimes, such as Pimax's, predict your head only ~20 ms of that. This carries your head's turn over the rest, for less black at the edge you turn toward. Turn it on before starting the game.
+            </span>
           </span>
         </label>
       </div>
