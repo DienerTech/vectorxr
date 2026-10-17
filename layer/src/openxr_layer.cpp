@@ -11279,7 +11279,13 @@ void OpenXrLayer::PrepareOsd() {
         performance_.SetWanted(performance_wanted);
     }
     if (before.compact!=after.compact) SoundPlayer::Instance().PlayTransition(sound(osd_cycle_sound_,settings.cycle_bindings),after.compact,dll_directory_,resolved_settings_.core.sound_volume);
-    if (before.shown!=after.shown) SoundPlayer::Instance().PlayTransition(sound(osd_toggle_sound_,settings.toggle_bindings),after.shown,dll_directory_,resolved_settings_.core.sound_volume);
+    if (before.shown!=after.shown) {
+        // Research flights mark moments by toggling the OSD where something
+        // looked wrong: exact in the log, and in the trace (row "osd").
+        logger_.Info(std::string("OSD ")+(after.shown?"shown":"hidden")+" (a marker when toggled by its binding).");
+        framegen_.Trace().Record("osd", 0, after.shown?1:0);
+        SoundPlayer::Instance().PlayTransition(sound(osd_toggle_sound_,settings.toggle_bindings),after.shown,dll_directory_,resolved_settings_.core.sound_volume);
+    }
 }
 
 void OpenXrLayer::RefreshResolvedSettings() {
