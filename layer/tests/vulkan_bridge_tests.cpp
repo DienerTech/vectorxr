@@ -2072,6 +2072,10 @@ void TestDepthValues(Game& game) {
                         }
                     }
                     Check(Release(bridge, swapchain), "copied");
+                    // Depth goes back to the game's queue at each release,
+                    // behind its copy (a game may render before acquiring).
+                    Check(Contains(bridge.Describe(swapchain), "handBacks=" + std::to_string(frame + 1) + ","),
+                          "depth is handed back at its release: " + bridge.Describe(swapchain));
                     Check(bridge.WaitIdle(10000), "the bridge's queue finishes");
                     for (std::uint32_t layer = 0; layer < shape.layers; ++layer) {
                         for (std::uint32_t mip = 0; mip < shape.mips; ++mip) {
@@ -2398,7 +2402,11 @@ void TestRingStall(Game& game) {
     double slowest_release = 0.0;
     int slow_acquires = 0; // 5 ms or more
     int slow_releases = 0;
-    constexpr int kFrames = 12; // 48 acquire/release pairs, 96 submissions
+    // 48 acquire/release pairs. Colour: an acquire and a release each.
+    // Depth goes back to the game's queue at its release: each image's
+    // first acquire, then a release and a hand-back each frame.
+    constexpr int kFrames = 12;
+    constexpr int kSubmissions = 2 * (2 * kFrames) + 2 * (3 + 2 * kFrames);
     {
         Gate gate(device, game);
         gate.HoldGame();
@@ -2424,7 +2432,8 @@ void TestRingStall(Game& game) {
         Check(slowest_acquire < 0.050 && slowest_release < 0.050 && slow_acquires <= 2 && slow_releases <= 2,
               "no acquire or release waits while the game's queue is held");
         Check(SummaryValue(summary, "liveFences") == 64 && SummaryValue(summary, "fenceGrowth") == 48 &&
-                  SummaryValue(summary, "unfencedSubmits") == 2 * kFrames * 4 - 64,
+                  SummaryValue(summary, "submits") == kSubmissions &&
+                  SummaryValue(summary, "unfencedSubmits") == kSubmissions - 64,
               "fences are made up to the cap, then submissions go unfenced: " + summary);
         Check(g_log.size() == 3, "the growth and the unfenced submissions (at 1 and 10) are reported");
         g_log.clear();
@@ -2673,6 +2682,9 @@ void TestQfotRecorded(Game& game) {
         const bool depth = chain.kind == RuntimeKind::kDepth;
         const bool resolve = !depth && chain.info.sampleCount > 1;
         const bool private_depth = depth && chain.info.sampleCount > 1;
+        // Mirrored depth goes back to the game's queue at each release,
+        // behind its copy: the next acquire submits nothing.
+        const bool hand_back = depth && !private_depth;
         const VkImageLayout layout =
             depth ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         const VkImageAspectFlags aspect =
@@ -2715,7 +2727,7 @@ void TestQfotRecorded(Game& game) {
                 Acquire(bridge, chain.swapchain, index);
                 std::vector<Submission> acquired = g_recorder.Take();
                 const bool waited = SummaryValue(bridge.Summary(), "doneWaits") > waits_before;
-                if (round == 1 && !private_depth && !waited) {
+                if (round == 1 && !private_depth && !hand_back && !waited) {
                     fail(chain, where + ": an acquire behind a queued copy waits for done");
                 }
                 Command command;
@@ -2743,6 +2755,10 @@ void TestQfotRecorded(Game& game) {
                     }
                 } else if (private_depth) {
                     if (!acquired.empty()) fail(chain, where + ": private depth needs nothing at a later acquire");
+                } else if (hand_back) {
+                    if (!acquired.empty() || waited) {
+                        fail(chain, where + ": an image handed back at its release needs nothing at its acquire");
+                    }
                 } else if (resolve) {
                     // Only the done wait, if any; no barrier.
                     for (const Submission& submission : acquired) {
@@ -2779,8 +2795,29 @@ void TestQfotRecorded(Game& game) {
                     if (!released.empty()) fail(chain, where + ": private depth submits nothing at release");
                     continue;
                 }
-                if (released.size() != 1 || released[0].commands.size() != 1 || released[0].signals != 1 ||
-                    released[0].waits != 0 || released[0].signal_value == 0) {
+                if (hand_back) {
+                    // The release, then the hand-back: from the external queue
+                    // family (GENERAL) to the game's, waiting for the copy.
+                    if (released.size() != 2) {
+                        fail(chain, where + ": the release, then the hand-back");
+                    } else {
+                        single({released[1]}, command, barrier, where + " hand-back");
+                        if (barrier.image != images[index] || barrier.oldLayout != VK_IMAGE_LAYOUT_GENERAL ||
+                            barrier.newLayout != layout || barrier.srcQueueFamilyIndex != VK_QUEUE_FAMILY_EXTERNAL ||
+                            barrier.dstQueueFamilyIndex != family || !covers(barrier, aspect, mips) ||
+                            barrier.srcAccessMask != 0 ||
+                            barrier.dstAccessMask != (VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT) ||
+                            command.source_stages != VK_PIPELINE_STAGE_ALL_COMMANDS_BIT ||
+                            command.destination_stages != VK_PIPELINE_STAGE_ALL_COMMANDS_BIT) {
+                            fail(chain, where + ": the hand-back's barrier");
+                        }
+                        if (released[1].waits != 1 || released[1].signals != 0) {
+                            fail(chain, where + ": the hand-back waits for the copy");
+                        }
+                    }
+                }
+                if (released.size() != (hand_back ? 2u : 1u) || released[0].commands.size() != 1 ||
+                    released[0].signals != 1 || released[0].waits != 0 || released[0].signal_value == 0) {
                     fail(chain, where + ": the release is one submission signalling written");
                 }
                 const std::vector<Command> commands = g_recorder.Commands(released[0].commands[0]);

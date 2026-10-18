@@ -311,6 +311,9 @@ struct VulkanBridge::Impl {
         std::vector<Copy> copies;
         UINT64 done{0}; // the done value after its last copy
         State state{State::kUndefined};
+        // Given back to the game's queue at its release, behind the copy
+        // (Swapchain::hand_back): its next acquire submits nothing.
+        bool handed_back{false};
     };
     // What a swapchain's images are, from the application's create info.
     struct Plan {
@@ -346,6 +349,15 @@ struct VulkanBridge::Impl {
         std::uint64_t copies{0};
         std::uint64_t done_waits{0};         // acquires whose image's copy had not finished (the game's queue waits)
         std::uint64_t skipped_copies{0};     // releases not copied: the bridge's queue was stalled
+        // Each release gives the image back to the game's queue at once,
+        // behind its copy, instead of at the next acquire: a game that
+        // renders into the image before acquiring it (Star Citizen; the
+        // runtime hands back the same image every frame) otherwise writes it
+        // while the copy reads it. Depth twins only: they have no
+        // simultaneous access, so the copy and the game's writes must not
+        // overlap.
+        bool hand_back{false};
+        std::uint64_t hand_backs{0};
         std::uint64_t unmatched_releases{0}; // releases with nothing acquired
         std::uint64_t failed_submits{0};
     };
@@ -418,6 +430,7 @@ struct VulkanBridge::Impl {
     std::uint64_t skipped_copies{0};
     std::uint64_t recordings{0};
     std::uint64_t done_waits{0};
+    std::uint64_t hand_backs{0};
     std::uint64_t unmatched_releases{0};
     std::uint64_t submits{0};
     std::uint64_t failed_submits{0};
@@ -757,6 +770,7 @@ struct VulkanBridge::Impl {
                << ", usage=" << Hex(plan.usage) << ", flags=" << Hex(plan.flags)
                << ", viewFormats=" << plan.view_formats.size() << ", twinMiB=" << MiB(chain.twin_bytes)
                << ", copies=" << chain.copies << ", doneWaits=" << chain.done_waits
+               << ", handBacks=" << chain.hand_backs
                << ", skippedCopies=" << chain.skipped_copies << ", unmatchedReleases=" << chain.unmatched_releases
                << ", failedSubmits=" << chain.failed_submits << ", semaphores=" << (timeline ? "timeline" : "binary");
         if (!chain.private_reason.empty()) {
@@ -1951,6 +1965,7 @@ bool VulkanBridge::AddSwapchain(XrSwapchain swapchain, const XrSwapchainCreateIn
             }
         }
     }
+    chain.hand_back = chain.plan.mode == Impl::Mode::kTwinDepth;
     const Impl::Plan& plan = chain.plan;
 
     // Everything made here is the swapchain's alone until it is added, and
@@ -2126,6 +2141,11 @@ void VulkanBridge::Acquired(XrSwapchain swapchain, std::uint32_t index) {
         }
         return;
     }
+    if (image.handed_back) {
+        // Its release already gave it back, behind the copy.
+        image.handed_back = false;
+        return;
+    }
     // Until the bridge's queue is done reading the image's last release, the
     // game must not write it again. The value's signal is already submitted
     // (at that release), so the wait always ends.
@@ -2215,6 +2235,22 @@ bool VulkanBridge::Released(XrSwapchain swapchain) {
     chain->last_done = done;
     ++chain->copies;
     ++impl.copies;
+    if (chain->hand_back && image.acquire) {
+        // Back to the game's queue now, waiting for the copy (its signal is
+        // queued above, so the wait always ends): whatever the game submits
+        // next, the next frame's rendering included, comes after it.
+        std::uint64_t back = 0;
+        if (impl.Submit(image.acquire, done, 0, back) == VK_SUCCESS) {
+            image.state = Impl::State::kGame;
+            image.handed_back = true;
+            chain->last_serial = back;
+            ++chain->hand_backs;
+            ++impl.hand_backs;
+        } else {
+            // It stays with the bridge: the next acquire gives it back.
+            ++chain->failed_submits;
+        }
+    }
     return true;
 }
 
@@ -2290,7 +2326,8 @@ std::string VulkanBridge::Summary() const {
            << impl_->retired.size() << " kept), liveTwinMiB=" << MiB(twin_bytes)
            << ", releases=" << impl_->releases << ", copies=" << impl_->copies
            << ", skippedCopies=" << impl_->skipped_copies << ", copyRecordings=" << impl_->recordings
-           << ", doneWaits=" << impl_->done_waits << ", unmatchedReleases=" << impl_->unmatched_releases
+           << ", doneWaits=" << impl_->done_waits << ", handBacks=" << impl_->hand_backs
+           << ", unmatchedReleases=" << impl_->unmatched_releases
            << ", submits=" << impl_->submits << ", failedSubmits=" << impl_->failed_submits
            << ", submitUs p50/max=" << whole(Percentile(impl_->submit_us, 0.5)) << "/"
            << whole(std::exchange(impl_->submit_us_window_max, 0.0)) << ", liveFences=" << impl_->fence_count
