@@ -5277,13 +5277,20 @@ void FrameGenPresenter::NoteGpuEvidenceLocked(std::uint64_t real_frames, std::ui
     if (!late_frames && !(capture_done && *capture_done > 0.0)) {
         return;
     }
+    ArmGpuGateLocked(late_frames ? std::to_string(late_gpu) + " of " + std::to_string(real_frames) +
+                                       " real frames were not on the GPU when first needed"
+                                 : "its frames were captured " + Number(*capture_done, 1) +
+                                       " ms after their refresh, typically");
+}
+
+void FrameGenPresenter::ArmGpuGateLocked(const std::string& why) {
+    if (gpu_gate_armed_ || !gpu_gate_enabled_) {
+        return;
+    }
     gpu_gate_armed_ = true;
+    trace_.Record("gate", 0);
     if (logger_) {
-        logger_->Info("Frame Generation holds the game's waits until its GPU catches up (" +
-                      (late_frames ? std::to_string(late_gpu) + " of " + std::to_string(real_frames) +
-                                         " real frames were not on the GPU when first needed"
-                                   : "its frames were captured " + Number(*capture_done, 1) +
-                                         " ms after their refresh, typically") +
+        logger_->Info("Frame Generation holds the game's waits until its GPU catches up (" + why +
                       "): one game frame may stay queued on its GPU, as a runtime's wait allows.");
     }
 }

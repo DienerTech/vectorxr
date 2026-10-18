@@ -1347,6 +1347,7 @@ class FrameGenPresenter {
     // no capture running meanwhile (a slow GPU is held for, a stuck one not).
     bool gpu_gate_enabled_{true};
     bool gpu_gate_armed_{false};
+    void ArmGpuGateLocked(const std::string& why);
     int gpu_frames_ahead_{1};
     std::uint32_t gpu_timeouts_in_row_{0};
     std::uint64_t gpu_reached_mark_{0}; // the newest capture mark seen run (ReachedCaptureMarkLocked)
