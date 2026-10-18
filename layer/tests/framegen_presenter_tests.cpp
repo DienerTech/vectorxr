@@ -7372,6 +7372,43 @@ struct SessionLog {
     }
 };
 
+// A game's depth description is logged with every digit (Star Citizen's
+// near plane hid behind one decimal), and again whenever it changes.
+void TestDepthDescriptionLogged() {
+    SessionLog log("depth-description");
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    gpu.depth = true;
+    Runtime runtime;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, kFormat, kAppUsage, FrameGenMultiplier::k2,
+                   log.logger.get());
+    const XrSwapchain depth_chain = reinterpret_cast<XrSwapchain>(0x21);
+    presenter.TrackSwapchain(depth_chain, 20, 1,
+                             XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+    App app(presenter, runtime);
+    app.depth.subImage.swapchain = depth_chain;
+    app.depth.subImage.imageRect = {{0, 0}, {1200, 1200}};
+    app.depth.minDepth = 0.0f;
+    app.depth.maxDepth = 1.0f;
+    app.depth.nearZ = 999999995904.0f; // reversed infinite, as Star Citizen sends it
+    app.depth.farZ = 0.0125f;
+    for (int i = 0; i < 8; ++i) app.Frame();
+    app.depth.farZ = 0.025f;
+    for (int i = 0; i < 8; ++i) app.Frame();
+    presenter.Stop();
+
+    const auto first = log.Lines("the game submits depth described as");
+    Check(first.size() == 1 && first[0].find("nearZ=9.99999996e+11") != std::string::npos &&
+              first[0].find("farZ=0.0125") != std::string::npos && first[0].find("depth 0x21") != std::string::npos &&
+              first[0].find("region 1200x1200 at 0,0") != std::string::npos,
+          "depth description: the first is logged with every digit (" +
+              (first.empty() ? std::string("none") : first[0]) + ")");
+    const auto changed = log.Lines("depth description changed to");
+    Check(changed.size() == 1 && changed[0].find("farZ=0.025") != std::string::npos &&
+              changed[0].find("1 change in") != std::string::npos,
+          "depth description: a change is logged once (" + std::to_string(changed.size()) + " lines)");
+}
+
 // OpenComposite (an OpenVR game on OpenXR): IVRCompositor::WaitGetPoses
 // waits and begins a frame every time it is called, and ends one only once
 // both eyes are submitted. A game that asks for poses again first begins a
@@ -10409,6 +10446,7 @@ int main(int argc, char** argv) {
     RUN(TestOverlappingWaitIsHeld);
     RUN(TestUnclaimedFrameIsDemoted);
     RUN(TestSameThreadDoubleWait);
+    RUN(TestDepthDescriptionLogged);
     RUN(TestOpenCompositeAbandonsFrames);
     RUN(TestSingleAbandonedFrameLeavesNothingBehind);
     RUN(TestAbandonedBeforeFirstEnd);

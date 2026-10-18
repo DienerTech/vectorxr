@@ -699,6 +699,11 @@ void FrameGenPresenter::Stop() {
     logged_first_generation_ = logged_capture_failure_ = logged_depth_ = logged_uncaptured_ = false;
     logged_depth_decisions_ = 0;
     logged_depth_info_ = false;
+    depth_description_.clear();
+    logged_depth_description_.clear();
+    depth_description_changes_ = depth_description_frames_ = 0;
+    depth_description_lines_ = 0;
+    logged_depth_batches_ = 0;
     session_ = XR_NULL_HANDLE;
     idle_cv_.notify_all();
 }
@@ -1350,21 +1355,111 @@ void FrameGenPresenter::RecordCaptureTargetsLocked(const XrCompositionLayerProje
             target.encoding = {depth->minDepth, depth->maxDepth, depth->nearZ, depth->farZ};
             target.color_extent = Extent(projection.views[i]);
             capture_targets_.push_back(target);
-            if (logger_ && !logged_depth_info_) {
-                logged_depth_info_ = true;
-                const auto record = swapchains_.find(depth->subImage.swapchain);
-                logger_->Info("Frame Generation: the game submits depth described as minDepth=" + Number(depth->minDepth, 3) +
-                              ", maxDepth=" + Number(depth->maxDepth, 3) + ", nearZ=" + Number(depth->nearZ, 4) +
-                              ", farZ=" + Number(depth->farZ, 1) + ", region " +
-                              std::to_string(depth->subImage.imageRect.extent.width) + "x" +
-                              std::to_string(depth->subImage.imageRect.extent.height) + ", format " +
-                              std::to_string(record != swapchains_.end() ? record->second.format : 0) +
-                              (record != swapchains_.end() && record->second.depth_capturable ? ", readable"
-                                                                                               : ", not readable") +
-                              "; it is checked against the other eye before use.");
-            }
         }
     }
+    LogDepthDescriptionLocked(projection);
+}
+
+namespace {
+
+// Every digit a float holds: the game's depth description, read exactly.
+std::string Precise(double value) {
+    char buffer[40];
+    std::snprintf(buffer, sizeof(buffer), "%.9g", value);
+    return buffer;
+}
+
+std::string Handle(const void* handle) {
+    char buffer[24];
+    std::snprintf(buffer, sizeof(buffer), "0x%llx",
+                  static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(handle)));
+    return buffer;
+}
+
+std::string Rect(const std::array<std::int32_t, 4>& rect) {
+    return std::to_string(rect[2]) + "x" + std::to_string(rect[3]) + " at " + std::to_string(rect[0]) + "," +
+           std::to_string(rect[1]);
+}
+
+} // namespace
+
+void FrameGenPresenter::LogDepthDescriptionLocked(const XrCompositionLayerProjection& projection) {
+    if (!logger_) {
+        return;
+    }
+    std::vector<DepthViewDescription> description;
+    bool any_depth = false;
+    for (std::uint32_t i = 0; i < projection.viewCount; ++i) {
+        const XrSwapchainSubImage& color = projection.views[i].subImage;
+        DepthViewDescription view;
+        view.color = color.swapchain;
+        view.color_slice = color.imageArrayIndex;
+        view.color_rect = {color.imageRect.offset.x, color.imageRect.offset.y, color.imageRect.extent.width,
+                           color.imageRect.extent.height};
+        if (const auto* depth = DepthInfo(projection.views[i])) {
+            any_depth = true;
+            const XrSwapchainSubImage& sub = depth->subImage;
+            view.depth = sub.swapchain;
+            view.depth_slice = sub.imageArrayIndex;
+            view.depth_rect = {sub.imageRect.offset.x, sub.imageRect.offset.y, sub.imageRect.extent.width,
+                               sub.imageRect.extent.height};
+            view.encoding = {depth->minDepth, depth->maxDepth, depth->nearZ, depth->farZ};
+        }
+        description.push_back(view);
+    }
+    if (!any_depth) {
+        description.clear();
+    }
+    if (description != depth_description_) {
+        depth_description_ = std::move(description);
+        ++depth_description_changes_;
+    }
+    ++depth_description_frames_;
+    if (depth_description_ == logged_depth_description_) {
+        return;
+    }
+    const auto now = Clock::now();
+    if (depth_description_lines_ >= 20 && now - depth_description_logged_at_ < std::chrono::seconds(5)) {
+        return;
+    }
+    const bool first = !logged_depth_info_;
+    std::string line;
+    if (depth_description_.empty()) {
+        line = "Frame Generation: the game stopped submitting depth";
+    } else {
+        line = first ? "Frame Generation: the game submits depth described as"
+                     : "Frame Generation: the game's depth description changed to";
+        for (std::size_t i = 0; i < depth_description_.size(); ++i) {
+            const DepthViewDescription& view = depth_description_[i];
+            line += (i ? "; view " : " view ") + std::to_string(i) + ": ";
+            if (!view.depth) {
+                line += "no depth";
+            } else {
+                const auto record = swapchains_.find(view.depth);
+                line += "minDepth=" + Precise(view.encoding[0]) + ", maxDepth=" + Precise(view.encoding[1]) +
+                        ", nearZ=" + Precise(view.encoding[2]) + ", farZ=" + Precise(view.encoding[3]) + ", depth " +
+                        Handle(view.depth) + " slice " + std::to_string(view.depth_slice) + " region " +
+                        Rect(view.depth_rect) + ", format " +
+                        std::to_string(record != swapchains_.end() ? record->second.format : 0) +
+                        (record != swapchains_.end() && record->second.depth_capturable ? ", readable"
+                                                                                       : ", not readable");
+            }
+            line += "; color " + Handle(view.color) + " slice " + std::to_string(view.color_slice) + " region " +
+                    Rect(view.color_rect);
+        }
+    }
+    if (!first) {
+        line += " (" + std::to_string(depth_description_changes_) + " change" +
+                (depth_description_changes_ == 1 ? "" : "s") + " in " + std::to_string(depth_description_frames_) +
+                " frames since the last line)";
+    }
+    logger_->Info(line + (first ? "; it is checked against the other eye before use." : "."));
+    logged_depth_info_ = true;
+    logged_depth_description_ = depth_description_;
+    depth_description_changes_ = 0;
+    depth_description_frames_ = 0;
+    ++depth_description_lines_;
+    depth_description_logged_at_ = now;
 }
 
 std::uint8_t FrameGenPresenter::CanvasRingLocked() {
@@ -3943,6 +4038,33 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
                  ? " Some games only fill the depth they send while their own depth reprojection setting is on "
                    "(MSFS 2024: Motion reprojection set to Depth); it is checked again now and then."
                  : ""));
+    }
+    if (logger_ && depth.batches != logged_depth_batches_ && logger_->IsDebugEnabled()) {
+        // Every batch's evidence, decision or not (at most one line a
+        // second), to follow the check through a session.
+        logged_depth_batches_ = depth.batches;
+        if (const auto now = Clock::now(); now - depth_batch_logged_at_ >= std::chrono::seconds(1)) {
+            depth_batch_logged_at_ = now;
+            const FrameGenDepthEvidence& e = depth.evidence;
+            auto score = [&](const FrameGenDepthScore& s) {
+                return "moves " + Number(e.binocular > 0.0 ? 100.0 * s.samples / e.binocular : 0.0, 1) +
+                       "% (" + Number(s.samples, 0) + "), ratio " + Number(s.Ratio(), 3) + " (error " +
+                       Number(s.error, 1) + " / none " + Number(s.none, 1) + "), other eye disproves " +
+                       Number(s.samples > 0.0 ? 100.0 * s.fallback / s.samples : 0.0, 1) + "%";
+            };
+            std::string probes;
+            const double centre = e.probes[kFrameGenDepthScaleProbes / 2];
+            for (const double probe : e.probes) {
+                probes += (probes.empty() ? "" : " ") + Number(centre > 0.0 ? probe / centre : 0.0, 3);
+            }
+            logger_->Debug("Frame Generation depth check batch " + std::to_string(depth.batches) + ": reading " +
+                           ToString(depth.reading) + ", swapped=" + (depth.swapped ? "1" : "0") + ", scale=" +
+                           Number(depth.scale, 4) + ", probeStep=" + Number(depth.probe_step, 3) +
+                           ", binocular=" + Number(e.binocular, 0) + "; as decoded " + score(e.decoded) +
+                           "; swapped " + score(e.swapped) + "; scale probes (error vs centre) " + probes +
+                           " over " + Number(e.probed, 0) + " samples; nearer than 10 m " + Number(e.cockpit, 0) +
+                           ".");
+        }
     }
     const bool synthesized =
         std::any_of(executed.synthesized.begin(), executed.synthesized.end(), [](bool value) { return value; });

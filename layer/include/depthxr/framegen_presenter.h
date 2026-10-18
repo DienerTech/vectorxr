@@ -1382,6 +1382,29 @@ class FrameGenPresenter {
     std::uint32_t logged_depth_decisions_{0};
     std::string logged_hardware_status_; // last optical flow hardware status logged
     bool logged_depth_info_{false};
+    // The game's depth description, logged in full whenever it changes
+    // (RecordCaptureTargetsLocked; every change for the first 20
+    // lines, then at most a line per 5 s with the changes between).
+    struct DepthViewDescription {
+        XrSwapchain color{XR_NULL_HANDLE};
+        std::uint32_t color_slice{0};
+        std::array<std::int32_t, 4> color_rect{}; // x, y, width, height
+        XrSwapchain depth{XR_NULL_HANDLE};
+        std::uint32_t depth_slice{0};
+        std::array<std::int32_t, 4> depth_rect{};
+        std::array<float, 4> encoding{}; // minDepth, maxDepth, nearZ, farZ
+        bool operator==(const DepthViewDescription&) const = default;
+    };
+    std::vector<DepthViewDescription> depth_description_;        // empty: no view has depth
+    std::vector<DepthViewDescription> logged_depth_description_; // the last one logged
+    std::uint64_t depth_description_changes_{0}; // since the last line
+    std::uint64_t depth_description_frames_{0};  // since the last line
+    std::uint32_t depth_description_lines_{0};
+    std::chrono::steady_clock::time_point depth_description_logged_at_{};
+    void LogDepthDescriptionLocked(const XrCompositionLayerProjection& projection);
+    // The depth check's batches, one Debug line each (at most one a second).
+    std::uint32_t logged_depth_batches_{0};
+    std::chrono::steady_clock::time_point depth_batch_logged_at_{};
     bool logged_capture_failure_{false};
     bool logged_uncaptured_{false};
     void* timer_{nullptr}; // high-resolution waitable timer, frame thread only

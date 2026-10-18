@@ -21,6 +21,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <filesystem>
 #include <fstream>
 #include <thread>
 #include <unordered_map>
@@ -157,6 +158,10 @@ struct ViewResources {
     bool depth_fresh{false};  // captured for this Execute's frame (for the check)
     std::uint32_t depth_generation{0}; // FrameGenDepthValidator::Generation() the capture decoded with
     FrameGenDepthEncoding depth_encoding; // as the game describes it
+    // Research capture (depth.txt): the depth capture the newest linear
+    // depth came from, and what it read.
+    UINT64 depth_capture{0};
+    FrameGenImage depth_source;
     // Optical flow hardware (FrameGenTuning::hardware_flow): its inputs,
     // its vectors and its session for this view.
     Texture hardware_newest;
@@ -900,6 +905,12 @@ class D3D12FrameGen final : public FrameGenGpu {
         UnorderedAccess(&linear, base + kFirstUav);
         UnorderedAccess(nullptr, base + kFirstUav + 1);
 
+        // Research capture: the game's own depth texels, as stored.
+        RawDepth raw;
+        const bool dump_raw = raw_depth_left_ > 0 && PrepareRawDepth(desc, depth.array_index, raw);
+        const D3D12_RESOURCE_STATES read =
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
+            (dump_raw ? D3D12_RESOURCE_STATE_COPY_SOURCE : D3D12_RESOURCE_STATE_COMMON);
         std::vector<D3D12_RESOURCE_BARRIER> barriers;
         auto flush = [&] {
             if (!barriers.empty()) {
@@ -907,11 +918,13 @@ class D3D12FrameGen final : public FrameGenGpu {
                 barriers.clear();
             }
         };
-        Transition(barriers, resource, D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        Transition(barriers, resource, D3D12_RESOURCE_STATE_DEPTH_WRITE, read);
         Require(barriers, linear, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         flush();
         view.depth_encoding = encoding;
         view.depth_generation = validator_.Generation();
+        view.depth_capture = capture_count_;
+        view.depth_source = depth;
         FrameGenDepthEncoding depth_encoding = encoding;
         if (validator_.Swapped()) {
             std::swap(depth_encoding.near_z, depth_encoding.far_z);
@@ -926,7 +939,14 @@ class D3D12FrameGen final : public FrameGenGpu {
         capture_commands_->SetComputeRootDescriptorTable(2, Gpu(base + kFirstUav));
         capture_commands_->Dispatch((dispatch.width + kFrameGenThreadGroupSize - 1) / kFrameGenThreadGroupSize,
                                     (dispatch.height + kFrameGenThreadGroupSize - 1) / kFrameGenThreadGroupSize, 1);
-        Transition(barriers, resource, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+        if (dump_raw) {
+            D3D12_TEXTURE_COPY_LOCATION destination{raw.buffer.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
+            destination.PlacedFootprint = raw.footprint;
+            D3D12_TEXTURE_COPY_LOCATION source{resource, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+            source.SubresourceIndex = raw.subresource;
+            capture_commands_->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+        }
+        Transition(barriers, resource, read, D3D12_RESOURCE_STATE_DEPTH_WRITE);
         flush();
         StampCapture(slot_index, true);
         hr = capture_commands_->Close();
@@ -939,9 +959,14 @@ class D3D12FrameGen final : public FrameGenGpu {
         if (FAILED(hr)) {
             error = Failure("D3D12 Frame Generation depth capture signal", hr);
             signal_failed_ = true;
+            if (dump_raw) raw.buffer.Detach(); // the GPU may still write it
             return false;
         }
         slot.timed = capture_query_heap_ != nullptr;
+        if (dump_raw) {
+            --raw_depth_left_;
+            WriteRawDepth(raw, index, depth, encoding, slot.fence_value);
+        }
         ++capture_count_;
         view.depth_ready = true;
         view.depth_fresh = true;
@@ -949,7 +974,81 @@ class D3D12FrameGen final : public FrameGenGpu {
     }
 
     FrameGenDepthStatus DepthStatus() const override {
-        return {validator_.Reading(), validator_.Decisions(), validator_.Evidence(), validator_.Scale()};
+        FrameGenDepthStatus status{validator_.Reading(), validator_.Decisions(), validator_.Evidence(), validator_.Scale()};
+        status.batches = validator_.Batches();
+        status.swapped = validator_.Swapped();
+        status.probe_step = validator_.ProbeStep();
+        return status;
+    }
+
+    // Research capture: a readback buffer for one array slice of the game's
+    // depth image (the depth plane), and where in it the copy lands.
+    struct RawDepth {
+        ComPtr<ID3D12Resource> buffer;
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+        UINT subresource{0};
+        UINT rows{0};
+        UINT64 row_bytes{0};
+    };
+
+    bool PrepareRawDepth(const D3D12_RESOURCE_DESC& desc, std::uint32_t array_index, RawDepth& raw) {
+        raw.subresource = array_index * std::max<UINT>(desc.MipLevels, 1u); // mip 0, depth plane
+        UINT64 bytes = 0;
+        device_->GetCopyableFootprints(&desc, raw.subresource, 1, 0, &raw.footprint, &raw.rows, &raw.row_bytes, &bytes);
+        if (!bytes || bytes == UINT64_MAX) {
+            return false;
+        }
+        D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_READBACK};
+        D3D12_RESOURCE_DESC buffer{};
+        buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        buffer.Width = bytes;
+        buffer.Height = buffer.DepthOrArraySize = buffer.MipLevels = 1;
+        buffer.SampleDesc.Count = 1;
+        buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        return SUCCEEDED(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer,
+                                                          D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                          IID_PPV_ARGS(&raw.buffer)));
+    }
+
+    // Waits for the capture that copied `raw` (the game pauses for it, as
+    // it does for the rest of a research capture), then writes the texels
+    // and what they are next to the capture's frames:
+    // depth-raw-<capture>-view<i>.bin and .txt.
+    void WriteRawDepth(RawDepth& raw, std::size_t index, const FrameGenImage& depth,
+                       const FrameGenDepthEncoding& encoding, UINT64 value) {
+        if (!WaitFence(value, 2000, CaptureFence())) {
+            raw.buffer.Detach(); // the GPU may still write it: never freed under it
+            return;
+        }
+        const std::string stem = raw_depth_root_ + "\\depth-raw-" + std::to_string(capture_count_) + "-view" +
+                                 std::to_string(index);
+        std::ofstream meta(stem + ".txt");
+        meta.precision(9);
+        meta << "capture " << capture_count_ << "\nview " << index << "\nswapchain " << depth.swapchain << "\nimage "
+             << depth.image_index << "\nslice " << depth.array_index << "\nrect " << depth.rect.offset.x << ' '
+             << depth.rect.offset.y << ' ' << depth.rect.extent.width << ' ' << depth.rect.extent.height
+             << "\nformat " << static_cast<int>(raw.footprint.Footprint.Format) << "\nwidth "
+             << raw.footprint.Footprint.Width << "\nheight " << raw.footprint.Footprint.Height << "\nrow_pitch "
+             << raw.footprint.Footprint.RowPitch << "\nrow_bytes " << raw.row_bytes << "\nrows " << raw.rows
+             << "\nmin_depth " << encoding.min_depth << "\nmax_depth " << encoding.max_depth << "\nnear_z "
+             << encoding.near_z << "\nfar_z " << encoding.far_z << "\nreading "
+             << ToString(validator_.Reading()) << "\nswapped " << validator_.Swapped() << "\nscale "
+             << validator_.Scale() << '\n';
+        // Hundreds of megabytes: written by a thread of its own, which
+        // keeps the buffer until it is done.
+        std::thread([buffer = std::move(raw.buffer), footprint = raw.footprint, rows = raw.rows,
+                     row_bytes = raw.row_bytes, path = stem + ".bin"]() {
+            void* mapped = nullptr;
+            if (FAILED(buffer->Map(0, nullptr, &mapped))) {
+                return;
+            }
+            std::ofstream file(path, std::ios::binary);
+            for (UINT row = 0; row < rows && file; ++row) {
+                file.write(static_cast<const char*>(mapped) + footprint.Offset + row * footprint.Footprint.RowPitch,
+                           static_cast<std::streamsize>(row_bytes));
+            }
+            buffer->Unmap(0, nullptr);
+        }).detach();
     }
 
     // Records what `other` says about `view`'s depth (see FG_PASS_DEPTH_TRUST)
@@ -2811,6 +2910,14 @@ class D3D12FrameGen final : public FrameGenGpu {
 
     bool DumpNextExecute(const std::string& directory) override {
         dump_directory_ = directory;
+        // The frames of one capture share a parent: the game's raw depth for
+        // the next three captures of each view goes there (the first dumped
+        // frame's depth was captured before this).
+        const std::string root = std::filesystem::path(directory).parent_path().string();
+        if (root != raw_depth_root_) {
+            raw_depth_root_ = root;
+            raw_depth_left_ = 3 * static_cast<std::uint32_t>(std::max<std::size_t>(views_.size(), 2));
+        }
         return true;
     }
 
@@ -3046,6 +3153,26 @@ class D3D12FrameGen final : public FrameGenGpu {
                  << " shift " << request.shift[0] << ' ' << request.shift[1] << ' ' << request.shift[2] << '\n';
             geometry("newest", request.newest);
             geometry("previous", request.previous);
+        }
+        // What each view's depth was read from and how it was decoded, apart
+        // from frame.txt (the replay reads that): which raw depth dump
+        // (depth-raw-<capture>-view<i> next to the frames) it matches.
+        std::ofstream depth_meta(dump_directory_ + "\\depth.txt");
+        depth_meta.precision(9);
+        depth_meta << "reading " << ToString(validator_.Reading()) << "\nswapped " << validator_.Swapped() << "\nscale "
+                   << validator_.Scale() << "\nprobe_step " << validator_.ProbeStep() << "\ngeneration "
+                   << validator_.Generation() << '\n';
+        for (std::size_t i = 0; i < views.size() && i < views_.size(); ++i) {
+            const ViewResources& view = views_[i];
+            const FrameGenDepthEncoding& e = view.depth_encoding;
+            const FrameGenImage& source = view.depth_source;
+            depth_meta << "view " << i << " requested " << views[i].request.depth << " used "
+                       << (i < result.depth.size() && result.depth[i]) << " capture "
+                       << view.depth_capture << " generation " << view.depth_generation << " swapchain "
+                       << source.swapchain << " image " << source.image_index << " slice " << source.array_index
+                       << " rect " << source.rect.offset.x << ' ' << source.rect.offset.y << ' '
+                       << source.rect.extent.width << ' ' << source.rect.extent.height << " min_depth " << e.min_depth
+                       << " max_depth " << e.max_depth << " near_z " << e.near_z << " far_z " << e.far_z << '\n';
         }
         // Quad views: how each eye is composed from the views.
         if (tuning.composition) {
@@ -4625,6 +4752,10 @@ class D3D12FrameGen final : public FrameGenGpu {
     std::array<std::pair<UINT64, std::chrono::steady_clock::time_point>, kCaptureSlots> capture_ends_{};
     std::size_t capture_end_next_{0};
     std::string dump_directory_; // DumpNextExecute
+    // Research capture: the game's raw depth texels are copied at depth
+    // capture while armed (DumpNextExecute arms it once per capture).
+    std::string raw_depth_root_;
+    std::uint32_t raw_depth_left_{0};
     std::unordered_map<XrSwapchain, std::vector<ID3D12Resource*>> images_;
     std::vector<ViewResources> views_;
 };
