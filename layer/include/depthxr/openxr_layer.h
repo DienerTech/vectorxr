@@ -5,6 +5,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <filesystem>
 #include <functional>
 #include <future>
@@ -279,6 +280,12 @@ class OpenXrLayer {
         bool has_last_acquired_image_index{false};
         bool has_last_released_image_index{false};
         uint32_t deferred_release_count{0};
+        // A bridged swapchain's images the application released, oldest
+        // first, whose hand-over waits for the frame's end: a game may render
+        // into an image after releasing it and before xrEndFrame (Star
+        // Citizen does), which a runtime reading the image at xrEndFrame
+        // still shows; a copy at the release would not have it.
+        std::deque<uint32_t> bridge_handovers;
         bool quadviews_session{false};
         SwapchainImageQueue image_states;
         std::unordered_set<uint32_t> d3d11_shader_resource_slices_attempted;
@@ -604,6 +611,14 @@ class OpenXrLayer {
                                                  SwapchainInfo& info,
                                                  std::string_view reason);
     XrResult FlushDeferredSwapchainReleasesLocked(std::string_view reason);
+    // A bridged swapchain's images the application released, handed over
+    // oldest first (SwapchainInfo::bridge_handovers): the bridge's copy into
+    // the runtime's image, Frame Generation's capture of it, then the release
+    // on to the runtime (or deferred, as ReleaseSwapchainImage would). With
+    // `copy` false (the session's end) only the releases go on.
+    XrResult HandOverBridgedReleasesLocked(XrSwapchain swapchain, SwapchainInfo& info, std::string_view reason,
+                                           bool copy = true);
+    XrResult HandOverBridgedReleasesLocked(std::string_view reason, bool copy = true);
     void PollQuadViewsDiagnosticVisualizationToggle();
     void ResetQuadViewsDiagnosticVisualizationState();
     bool PollInputBindingDown(const InputBinding& binding);

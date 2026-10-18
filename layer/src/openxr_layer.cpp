@@ -2922,6 +2922,9 @@ XrResult OpenXrLayer::DestroySession(XrSession session) {
                 DestroyEyeGazeResources();
                 DestroyVarjoNativeFoveationResources();
                 DestroyInternalReferenceSpaces();
+                // Releases a frame's end never handed over go on, uncopied:
+                // Frame Generation is stopped and nothing shows them.
+                HandOverBridgedReleasesLocked("session teardown", false);
                 FlushDeferredSwapchainReleasesLocked("session teardown");
                 ResetD3D11QuadViewsCompositor();
                 ResetSwapchainState();
@@ -4215,6 +4218,10 @@ XrResult OpenXrLayer::DestroySwapchain(XrSwapchain swapchain) {
         std::scoped_lock lock(mutex_);
         auto it = tracked_swapchains_.find(swapchain);
         if (it != tracked_swapchains_.end()) {
+            const XrResult handed = HandOverBridgedReleasesLocked(swapchain, it->second, "swapchain destroy");
+            if (XR_FAILED(handed)) {
+                return handed;
+            }
             const XrResult flush_result =
                 FlushDeferredSwapchainReleaseLocked(swapchain, it->second, "swapchain destroy");
             if (XR_FAILED(flush_result)) {
@@ -4345,6 +4352,14 @@ XrResult OpenXrLayer::AcquireSwapchainImage(XrSwapchain swapchain,
         auto it = tracked_swapchains_.find(swapchain);
         if (it != tracked_swapchains_.end()) {
             image_count = it->second.image_count;
+            // Acquired again before the frame's end: the image released
+            // before goes on first (the runtime hands out an image only while
+            // the application holds fewer than all, and the bridge copies
+            // the image acquired earliest).
+            const XrResult handed = HandOverBridgedReleasesLocked(swapchain, it->second, "swapchain acquire");
+            if (XR_FAILED(handed)) {
+                return handed;
+            }
             const XrResult flush_result =
                 FlushDeferredSwapchainReleaseLocked(swapchain, it->second, "swapchain acquire");
             if (XR_FAILED(flush_result)) {
@@ -4437,6 +4452,23 @@ XrResult OpenXrLayer::ReleaseSwapchainImage(XrSwapchain swapchain,
     NoteThread(ThreadCensus::Call::ReleaseSwapchainImage);
     {
         std::scoped_lock lock(mutex_);
+        const auto bridged = tracked_swapchains_.find(swapchain);
+        if (bridged != tracked_swapchains_.end() && BridgedSwapchain(swapchain)) {
+            // A bridged image is handed over at the frame's end, where a
+            // runtime reads it (HandOverBridgedReleasesLocked): Star Citizen
+            // releases its images before xrBeginFrame and renders into them
+            // after, so a copy now had the image's previous frame (three
+            // frames old with three images) shown with this frame's pose.
+            if (const std::optional<uint32_t> released_index = bridged->second.image_states.ReleaseOldest()) {
+                bridged->second.last_released_image_index = *released_index;
+                bridged->second.has_last_released_image_index = true;
+                bridged->second.bridge_handovers.push_back(*released_index);
+                if (framegen_.TracesSwapchainCalls()) {
+                    framegen_.Trace().Record("rel", reinterpret_cast<uint64_t>(swapchain), *released_index, 2);
+                }
+                return XR_SUCCESS;
+            }
+        }
         // A bridged image reaches the runtime's image by the bridge's copy,
         // queued ahead of Frame Generation's capture of it, and before the
         // release goes on below (MarkGameWork must come after the copy on the
@@ -8887,6 +8919,15 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     }
     // Each frame's own quad route only (set at the compose site below).
     DropPendingFrameGenQuad(true);
+    // The frame's bridged images reach the runtime's images here, where a
+    // runtime reads them: everything the game submitted before this call is
+    // in them, its rendering after a release included. Frame Generation
+    // captures them here too, before anything below reads or composes them.
+    if (const XrResult handed = HandOverBridgedReleasesLocked("end frame"); XR_FAILED(handed)) {
+        DropPendingFrameGenQuad(false);
+        framegen_.AbandonFrame(frame_end_info->displayTime);
+        return handed;
+    }
     // A bridged session lives on the bridge's device; depth that stays the
     // game's is left out of its frames.
     std::optional<DepthlessFrame> depthless_frame;
@@ -14798,6 +14839,60 @@ XrResult OpenXrLayer::FlushDeferredSwapchainReleasesLocked(std::string_view reas
     XrResult first_failure = XR_SUCCESS;
     for (auto& [swapchain, info] : tracked_swapchains_) {
         const XrResult result = FlushDeferredSwapchainReleaseLocked(swapchain, info, reason);
+        if (XR_FAILED(result) && XR_SUCCEEDED(first_failure)) {
+            first_failure = result;
+        }
+    }
+    return first_failure;
+}
+
+XrResult OpenXrLayer::HandOverBridgedReleasesLocked(XrSwapchain swapchain, SwapchainInfo& info,
+                                                    std::string_view reason, bool copy) {
+    while (!info.bridge_handovers.empty()) {
+        const uint32_t index = info.bridge_handovers.front();
+        info.bridge_handovers.pop_front();
+        if (copy) {
+            // As ReleaseSwapchainImage did at the release: the bridge's copy
+            // into the runtime's image goes ahead of Frame Generation's
+            // capture of it, and of the release (MarkGameWork must come after
+            // the copy on the bridge's queue, or the runtime may read the
+            // image before it). A copy skipped (a stalled queue) leaves an
+            // older frame there: not captured.
+            const bool copied = d3d11_bridge_.Released(swapchain) && vulkan_bridge_.Released(swapchain);
+            NoteFrameGenRelease(swapchain, index);
+            if (framegen_.TracesSwapchainCalls()) {
+                framegen_.Trace().Record("hand", reinterpret_cast<uint64_t>(swapchain), index, copied);
+            }
+            if (copied) {
+                framegen_.CaptureOnRelease(swapchain, index);
+            }
+        }
+        ++info.release_count;
+        if (ShouldDeferSwapchainRelease(info)) {
+            ++info.deferred_release_count;
+            continue;
+        }
+        XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+        const XrResult result = ForwardAppRelease(swapchain, &release_info);
+        if (XR_FAILED(result)) {
+            logger_.Error("Bridged swapchain release failed: handle=" + FormatHandle(swapchain) +
+                          ", reason=" + std::string(reason) +
+                          ", remaining=" + std::to_string(info.bridge_handovers.size()) +
+                          ", result=" + FormatHex(static_cast<uint64_t>(result)));
+            return result;
+        }
+        info.image_states.ReleaseDownstreamOldest();
+        if (info.quadviews_session && info.release_count <= 3) {
+            LogSwapchainSummary(swapchain, info, "released");
+        }
+    }
+    return XR_SUCCESS;
+}
+
+XrResult OpenXrLayer::HandOverBridgedReleasesLocked(std::string_view reason, bool copy) {
+    XrResult first_failure = XR_SUCCESS;
+    for (auto& [swapchain, info] : tracked_swapchains_) {
+        const XrResult result = HandOverBridgedReleasesLocked(swapchain, info, reason, copy);
         if (XR_FAILED(result) && XR_SUCCEEDED(first_failure)) {
             first_failure = result;
         }

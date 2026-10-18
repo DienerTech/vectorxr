@@ -57,6 +57,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -838,6 +839,9 @@ struct StandIn {
                                                        "VK_KHR_external_fence_capabilities"};
     std::vector<const char*> vulkan_device_additions{"VK_KHR_external_memory"};
     bool paced{false}; // xrWaitFrame returns at the next refresh, as a runtime's does (else at once)
+    // xrAcquireSwapchainImage hands out the image released last again, as
+    // Pimax's runtime does (else each in turn, as Virtual Desktop's does).
+    bool same_image{false};
     // Direct3D 12 held back behind it: the next readback is checked to wait
     // for the game's rendering, then the gate is opened.
     Gate* hold{nullptr};
@@ -1771,8 +1775,9 @@ XrResult XRAPI_CALL RtAcquire(XrSwapchain swapchain, const XrSwapchainImageAcqui
     StandInSwapchain* chain = FindSwapchain(swapchain);
     if (!chain) return XR_ERROR_HANDLE_INVALID;
     if (chain->acquired.size() >= chain->Count()) return XR_ERROR_CALL_ORDER_INVALID;
-    *index = chain->next;
-    chain->next = (chain->next + 1) % static_cast<std::uint32_t>(chain->Count());
+    // Pimax's runtime hands the image back released last, every frame.
+    *index = g_runtime.same_image && chain->released && chain->acquired.empty() ? *chain->released : chain->next;
+    chain->next = (*index + 1) % static_cast<std::uint32_t>(chain->Count());
     chain->acquired.push_back(*index);
     ++chain->acquires;
     return XR_SUCCESS;
@@ -2375,7 +2380,32 @@ struct FrameOptions {
     Color quad_color{255, 255, 255, 255};
     XrCompositionLayerFlags layer_flags{0}; // the projection's and the quad's
     bool unknown_after_depth{false}; // explicit unsupported metadata, independent of supported depth
+    // Star Citizen's order: every image (the quad's too) acquired, cleared
+    // to kBeforeRendering and released before xrBeginFrame, then rendered in
+    // its colour between it and xrEndFrame. What a runtime reads at
+    // xrEndFrame is the frame; a copy at the release would be
+    // kBeforeRendering. Not with `depth`, `hold` or `stall`.
+    bool release_before_begin{false};
 };
+
+// What a Star Citizen-ordered frame's images hold when released (FrameOptions::release_before_begin).
+constexpr Color kBeforeRendering{255, 0, 255, 255};
+
+const XrGraphicsBindingD3D12KHR* BridgeBinding();
+
+// Everything queued on the bridge's Direct3D 12 queue so far has run: a
+// copy queued at a release (and its wait for the game's queue) read the
+// image as released, before the game renders into it again. Star Citizen
+// renders milliseconds after its releases; a test game's clear could
+// otherwise beat such a copy.
+void DrainBridgeQueue() {
+    const XrGraphicsBindingD3D12KHR* bridge = BridgeBinding();
+    if (!bridge || !bridge->queue || !bridge->device) return;
+    ComPtr<ID3D12Fence> fence;
+    Check(SUCCEEDED(bridge->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence))) &&
+              SUCCEEDED(bridge->queue->Signal(fence.Get(), 1)) && WaitFence(fence.Get(), 1, 5000),
+          "the bridge's queue ran what was queued on it");
+}
 
 // One application frame: each colour target acquired, waited, rendered in
 // its colour and released, in the order given; then a stereo projection of
@@ -2387,6 +2417,22 @@ XrResult Frame(App& app, const Renderer& renderer, const std::vector<const Targe
     XrFrameState state{XR_TYPE_FRAME_STATE};
     Check(app.api.wait_frame(app.session, &wait_info, &state) == XR_SUCCESS, "xrWaitFrame");
     if (options.display_time) *options.display_time = state.predictedDisplayTime;
+    std::vector<std::uint32_t> released_first;
+    std::uint32_t quad_released_first = 0;
+    if (options.release_before_begin) {
+        Check(!options.depth && !options.hold && !options.stall, "a Star Citizen-ordered frame has no depth or gate");
+        for (const Target* target : targets) {
+            released_first.push_back(Acquire(app, *target));
+            renderer.Clear(*target, released_first.back(), kBeforeRendering);
+            Release(app, *target);
+        }
+        if (options.quad) {
+            quad_released_first = Acquire(app, *options.quad);
+            renderer.Clear(*options.quad, quad_released_first, kBeforeRendering);
+            Release(app, *options.quad);
+        }
+        DrainBridgeQueue();
+    }
     XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
     Check(app.api.begin_frame(app.session, &begin_info) == XR_SUCCESS, "xrBeginFrame");
     XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO};
@@ -2401,32 +2447,42 @@ XrResult Frame(App& app, const Renderer& renderer, const std::vector<const Targe
               located_count == 2,
           "xrLocateViews");
 
-    std::vector<std::uint32_t> indices;
-    for (const Target* target : targets) {
-        indices.push_back(Acquire(app, *target));
-    }
     const Target* depth = options.depth;
-    const std::uint32_t depth_index = depth ? Acquire(app, *depth) : 0;
-    for (std::size_t i = 0; i < targets.size(); ++i) {
-        renderer.Clear(*targets[i], indices[i], colors[i]);
-    }
-    if (options.quad) {
-        renderer.Clear(*options.quad, Acquire(app, *options.quad), options.quad_color);
-    }
-    if (depth) {
-        renderer.ClearDepth(*depth, depth_index, options.depth_value);
-    }
-    for (std::size_t i = 0; i < targets.size(); ++i) {
-        if ((options.hold || options.stall) && i + 1 == targets.size()) {
-            (options.hold ? options.hold : options.stall)->HoldGame();
+    if (options.release_before_begin) {
+        // Rendered after the release, before xrEndFrame.
+        for (std::size_t i = 0; i < targets.size(); ++i) {
+            renderer.Clear(*targets[i], released_first[i], colors[i]);
         }
-        Release(app, *targets[i]);
-    }
-    if (depth) {
-        Release(app, *depth);
-    }
-    if (options.quad) {
-        Release(app, *options.quad);
+        if (options.quad) {
+            renderer.Clear(*options.quad, quad_released_first, options.quad_color);
+        }
+    } else {
+        std::vector<std::uint32_t> indices;
+        for (const Target* target : targets) {
+            indices.push_back(Acquire(app, *target));
+        }
+        const std::uint32_t depth_index = depth ? Acquire(app, *depth) : 0;
+        for (std::size_t i = 0; i < targets.size(); ++i) {
+            renderer.Clear(*targets[i], indices[i], colors[i]);
+        }
+        if (options.quad) {
+            renderer.Clear(*options.quad, Acquire(app, *options.quad), options.quad_color);
+        }
+        if (depth) {
+            renderer.ClearDepth(*depth, depth_index, options.depth_value);
+        }
+        for (std::size_t i = 0; i < targets.size(); ++i) {
+            if ((options.hold || options.stall) && i + 1 == targets.size()) {
+                (options.hold ? options.hold : options.stall)->HoldGame();
+            }
+            Release(app, *targets[i]);
+        }
+        if (depth) {
+            Release(app, *depth);
+        }
+        if (options.quad) {
+            Release(app, *options.quad);
+        }
     }
 
     XrBaseInStructure after_depth{kApplicationStructType};
@@ -3416,6 +3472,49 @@ void CheckFrames(App& app, VulkanGame& game, Target& left, Target& right) {
     Check(Contains(Peer::Log(), "Frame Generation's Vulkan bridge: "), "the bridge's summary is logged");
 }
 
+// 7b. A game rendering into its images after releasing them (Star Citizen
+// releases every image before xrBeginFrame and renders the frame before
+// xrEndFrame): the runtime shows each frame as rendered, never what the
+// images held at the release. The bridge hands an image over at the frame's
+// end, where a runtime reads it; at the release, Virtual Desktop (images in
+// turn) showed an image's frame from three frames before, Pimax (the same
+// image) the frame before: the world lagged the pose it was shown with.
+void CheckRenderAfterRelease(App& app, VulkanGame& game, Target& left, Target& right) {
+    const Renderer vulkan{&game, nullptr};
+    for (const bool same_image : {false, true}) {
+        const std::string name = same_image ? "rendered after release, the same image every frame"
+                                            : "rendered after release, images in turn";
+        {
+            std::scoped_lock lock(g_runtime_mutex);
+            g_runtime.same_image = same_image;
+        }
+        std::set<std::uint32_t> images;
+        for (int frame = 0; frame < 8; ++frame) {
+            const std::vector<Color> colors{FrameColor(frame, 0), FrameColor(frame, 1)};
+            FrameOptions options;
+            options.release_before_begin = true;
+            Check(Frame(app, vulkan, {&left, &right}, colors, {{{&left, 0}, {&right, 0}}}, options) == XR_SUCCESS,
+                  name + ", frame " + std::to_string(frame) + ": xrEndFrame");
+            std::scoped_lock lock(g_runtime_mutex);
+            const ShownFrame& shown = g_runtime.frames.back();
+            Check(shown.views.size() == 2, name + ": two views");
+            for (int eye = 0; eye < 2 && shown.views.size() == 2; ++eye) {
+                Check(Near(shown.views[eye].texel, colors[eye]),
+                      name + ", frame " + std::to_string(frame) + " eye " + std::to_string(eye) + ": the runtime shows " +
+                          Text(shown.views[eye].texel) + ", rendered after the release " + Text(colors[eye]) +
+                          " (released holding " + Text(kBeforeRendering) + ")");
+            }
+            if (const StandInSwapchain* chain = FindSwapchain(left.swapchain); chain && chain->released) {
+                images.insert(*chain->released);
+            }
+        }
+        Check(same_image ? images.size() == 1 : images.size() > 1,
+              name + ": the runtime handed out " + std::to_string(images.size()) + " image(s)");
+    }
+    std::scoped_lock lock(g_runtime_mutex);
+    g_runtime.same_image = false;
+}
+
 // 8. Depth on a bridged session is mirrored: the runtime gets the game's
 // depth, in its views and its images.
 void CheckDepth(App& app, VulkanGame& game, Target& left, Target& right) {
@@ -3467,13 +3566,15 @@ void CheckTeardown(App& app, VulkanGame& game, Target& left, Target& right) {
         gate.HoldQueue(bridge_queue);
         const Color last{1, 2, 3, 255};
         Render(app, vulkan, left, last);
-        const std::uint32_t index = *FindSwapchain(left.swapchain)->released;
         bool destroyed = false;
         std::optional<Color> held;
         g_runtime.on_destroy_swapchain = [&](XrSwapchain swapchain) {
             if (swapchain == left.swapchain) {
                 destroyed = true;
-                held = ReadNow(FindSwapchain(swapchain)->images12[index].Get());
+                // The release, with no frame's end after it, is handed over
+                // as the swapchain is destroyed: the runtime's newest release.
+                const StandInSwapchain* chain = FindSwapchain(swapchain);
+                held = chain->released ? ReadNow(chain->images12[*chain->released].Get()) : std::nullopt;
             }
         };
         std::thread opener = gate.OpenLater(300);
@@ -3540,6 +3641,7 @@ void TestBridgedSession(int enable) {
     Target left = MakeTarget(app, ColorInfo(), "the left eye");
     Target right = MakeTarget(app, ColorInfo(), "the right eye");
     CheckFrames(app, game, left, right);
+    CheckRenderAfterRelease(app, game, left, right);
     if (enable == 2) {
         CheckDepth(app, game, left, right);
     }
@@ -3907,6 +4009,8 @@ void TestStarCitizenShapes() {
             options.quad = &ui;
             options.quad_color = ui_color;
             options.layer_flags = alpha;
+            // As Star Citizen orders its frames: released, then rendered.
+            options.release_before_begin = true;
             Check(Frame(app, vulkan, {&left, &right}, {FrameColor(frame, 0), FrameColor(frame, 1)},
                         {{{&left, 0}, {&right, 0}}}, options) == XR_SUCCESS,
                   "star citizen: frame " + std::to_string(frame));
@@ -3919,6 +4023,22 @@ void TestStarCitizenShapes() {
     const FrameGenShown shown = CheckFrameGenShown(from, {left.swapchain, right.swapchain}, "star citizen");
     Check(shown.own > 0 && shown.increasing,
           "star citizen: Frame Generation's own frames reach the runtime, in display-time order");
+    {
+        // Frame Generation captures each frame where the runtime would read
+        // it: what it shows, generated or real, is the frame as rendered,
+        // never what the images held at their release.
+        std::size_t views = 0;
+        std::size_t at_release = 0;
+        for (const ShownFrame& shown_frame : Shown(from)) {
+            for (const ShownView& view : shown_frame.views) {
+                ++views;
+                at_release += Near(view.texel, kBeforeRendering) ? 1 : 0;
+            }
+        }
+        Check(views > 0 && at_release == 0,
+              "star citizen: no view shown holds what the images held at their release (" + std::to_string(at_release) +
+                  " of " + std::to_string(views) + " did)");
+    }
     {
         std::scoped_lock lock(g_runtime_mutex);
         std::size_t with_projection = 0;
