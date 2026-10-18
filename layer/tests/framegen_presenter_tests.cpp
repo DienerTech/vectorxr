@@ -166,6 +166,19 @@ struct GpuLog {
     bool threaded{false};
     bool depth{false};
     std::atomic<bool> memory_pressure{false}; // process video memory near its budget
+    // Process video memory as a session's would be: with `memory_game` set,
+    // usage is the game's own plus the history the views hold (each view's
+    // ring, a slot an image and a half), out of `memory_budget`. The game's
+    // share may change mid-test (a game whose video memory grows over a
+    // long session).
+    std::atomic<std::uint64_t> memory_game{0};
+    std::atomic<std::uint64_t> memory_budget{0};
+    std::atomic<std::uint64_t> history_bytes{0};
+    // Executes that replaced a view's history images (another ring, size,
+    // format or output kind; a view's first set up too), and the ring the
+    // latest canvas analysis used.
+    std::atomic<int> history_replacements{0};
+    std::atomic<int> canvas_ring{0};
     std::atomic<int> working_memory_queries{0}; // WorkingMemoryBytes calls
     std::atomic<int> depth_captures{0};
     std::vector<FrameGenViewSubmission> last;
@@ -422,9 +435,15 @@ class FakeGpu final : public FrameGenGpu {
         result.synthesized.clear();
         result.depth.clear();
         Analyzed analyzed;
+        std::uint64_t held_bytes = 0;
         for (std::size_t i = 0; i < views.size(); ++i) {
-            history_[i].Configure(views[i].request.extent, views[i].source.format, views[i].request.output, 3,
-                                  ring_size);
+            if (history_[i].Configure(views[i].request.extent, views[i].source.format, views[i].request.output, 3,
+                                      ring_size) &
+                FrameGenHistoryState::kAll) {
+                ++log_->history_replacements;
+            }
+            // As the presenter estimates a slot (an image and a half per view).
+            held_bytes += std::uint64_t{ring_size} * views[i].request.extent.width * views[i].request.extent.height * 6;
             const bool synthesized = history_[i].Effective(views[i].request).synthesize;
             history_[i].Commit(synthesized);
             result.synthesized.push_back(synthesized);
@@ -464,6 +483,8 @@ class FakeGpu final : public FrameGenGpu {
                     views[i].request.newest.position[0] + (result.depth.back() ? time * views[i].request.shift[0] : 0.0f));
             }
         }
+        log_->history_bytes = held_bytes;
+        if (tuning.analyze_only && !tuning.composition) log_->canvas_ring = ring_size;
         if (tuning.analyze_only) {
             ++log_->analyzes;
             analyzed.id = next_frame_++;
@@ -707,6 +728,9 @@ class FakeGpu final : public FrameGenGpu {
     double LastGpuMilliseconds() const override { return 0.75; }
     bool SupportsThreadedPresentation() const override { return log_->threaded; }
     std::optional<FrameGenMemoryBudget> MemoryBudget() const override {
+        if (const std::uint64_t game = log_->memory_game) {
+            return FrameGenMemoryBudget{game + log_->history_bytes, log_->memory_budget};
+        }
         constexpr std::uint64_t gigabyte = 1024ull * 1024 * 1024;
         return FrameGenMemoryBudget{log_->memory_pressure ? 31 * gigabyte + gigabyte / 2 : 16 * gigabyte, 32 * gigabyte};
     }
@@ -7409,6 +7433,246 @@ void TestDepthDescriptionLogged() {
           "depth description: a change is logged once (" + std::to_string(changed.size()) + " lines)");
 }
 
+// A long session's video memory, engagement by engagement. Each start of
+// the presenter thread chooses a canvas's ring (CanvasRingLocked) while the
+// backend keeps its views' history images from the run before, so the
+// process's usage already includes them; the game's own share moves as a
+// long session moves it. Five stay while there is room: counted once, where
+// they were counted twice, and near that line five and three alternated
+// from one start to the next, every history image replaced each time. Three
+// once video memory is short, kept while usage hovers between the lines,
+// and five again once it frees up. Every change is logged, and the
+// summaries name the ring.
+void TestCanvasRingAcrossEngagements() {
+    SessionLog log("canvas-ring");
+    constexpr std::uint64_t kBudget = 4ull << 30;
+    // A slot of the App's two 1600x1600 views, as HistorySlotBytes estimates it.
+    constexpr std::uint64_t kSlot = 2ull * 1600 * 1600 * 6;
+    // The game's own share (the history held is on top) below which five
+    // are chosen (the two extra slots and a tenth of the budget to spare),
+    // and kept (a twentieth); counted twice, five were dropped from
+    // kDoubleCounted on.
+    constexpr std::uint64_t kGrowBelow = kBudget - kBudget / 10 - 5 * kSlot;
+    constexpr std::uint64_t kKeepBelow = kBudget - kBudget / 20 - 5 * kSlot;
+    constexpr std::uint64_t kDoubleCounted = kBudget - kBudget / 10 - 7 * kSlot;
+    static_assert(kDoubleCounted < kGrowBelow && kGrowBelow < kKeepBelow);
+    struct Phase {
+        const char* what;
+        std::uint64_t game;
+        std::uint8_t ring;
+        int engagements;
+    };
+    const Phase phases[] = {
+        {"room", kBudget / 2, 5, 2},
+        {"five counted once", (kDoubleCounted + kGrowBelow) / 2, 5, 4},
+        {"between the lines, five held", (kGrowBelow + kKeepBelow) / 2, 5, 3},
+        {"video memory grown past keeping", kKeepBelow + kSlot, 3, 2},
+        {"between the lines, three held", (kGrowBelow + kKeepBelow) / 2, 3, 3},
+        {"freed", kBudget / 2, 5, 2},
+    };
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    gpu.memory_budget = kBudget;
+    gpu.memory_game = phases[0].game;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2, app, runtime, owned,
+             log.logger.get());
+    presenter.SetSummaryInterval(150ms);
+    for (int i = 0; i < 3; ++i) app->Frame();
+    // Presenting from its thread, with a few frames analyzed since `from`.
+    const auto analyzed = [&](int from) {
+        const auto ready = [&] { return presenter.Status().threaded && gpu.analyzes - from >= 6; };
+        RunWork(*app, 3000ms, kLightWork, [&](const XrFrameState&) { return ready(); });
+        return ready();
+    };
+    Check(analyzed(0), "canvas ring: engaged");
+    int ring = gpu.canvas_ring;
+    Check(ring == 5, "canvas ring: five with room (" + std::to_string(ring) + ")");
+    int changes = 0;
+    for (const Phase& phase : phases) {
+        gpu.memory_game = phase.game;
+        for (int i = 0; i < phase.engagements; ++i) {
+            const std::string name = std::string("canvas ring, ") + phase.what + " (engagement " + std::to_string(i + 1) + ")";
+            const int replacements = gpu.history_replacements;
+            Check(!presenter.Toggle(), name + ": turned off");
+            RunWork(*app, 100ms, kLightWork);
+            Check(presenter.Toggle(), name + ": turned on");
+            Check(analyzed(gpu.analyzes), name + ": presents from its thread again");
+            const int chosen = gpu.canvas_ring;
+            Check(chosen == phase.ring, name + ": keeps " + std::to_string(phase.ring) + " real frames (" +
+                                            std::to_string(chosen) + ")");
+            // The views' images are replaced only when the ring changes: once per view.
+            const int replaced = gpu.history_replacements - replacements;
+            Check(replaced == (chosen != ring ? 2 : 0),
+                  name + ": history images replaced only for a new ring (" + std::to_string(replaced) + ")");
+            changes += chosen != ring ? 1 : 0;
+            ring = chosen;
+        }
+    }
+    Check(changes == 2, "canvas ring: changed twice over the session (" + std::to_string(changes) + ")");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "canvas ring: calls stayed ordered");
+
+    const auto first = log.Lines("Frame Generation keeps the last 5 real frames");
+    const auto short_of_memory = log.Lines("Frame Generation now keeps the last 3 real frames");
+    const auto freed = log.Lines("Frame Generation now keeps the last 5 real frames");
+    Check(first.size() == 1 && short_of_memory.size() == 1 && freed.size() == 1,
+          "canvas ring: the first choice and each change are logged once (" + std::to_string(first.size()) + ", " +
+              std::to_string(short_of_memory.size()) + ", " + std::to_string(freed.size()) + ")");
+    Check(!short_of_memory.empty() && short_of_memory[0].find("video memory is short: usage ") != std::string::npos,
+          "canvas ring: a drop to three says video memory is short (" +
+              (short_of_memory.empty() ? std::string("none") : short_of_memory[0]) + ")");
+    bool five = false, three = false;
+    for (const std::string& line : log.Lines("threaded=1")) {
+        five = five || line.find(", ring=5,") != std::string::npos;
+        three = three || line.find(", ring=3,") != std::string::npos;
+    }
+    Check(five && three, "canvas ring: the summaries name the ring in use");
+}
+
+// A long session's pauses, far apart (a runtime rejecting a frame after a
+// recenter, GPU failures under a loading screen): each retries by itself.
+// The automatic retries were the session's, so the pause after the last
+// one stayed paused until a toggle, however late it came. They come back
+// once the last pause is long enough ago (SetRetryPolicy); pauses close
+// together still stop at the limit.
+void TestRetriesRestoredAfterQuietStretch() {
+    SessionLog log("retries-restored");
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate, kFormat, kAppUsage, FrameGenMultiplier::k2,
+                   log.logger.get());
+    presenter.SetRetryPolicy(0ms, 1, 300ms);
+    App app(presenter, runtime);
+    for (int i = 0; i < 5; ++i) app.Frame();
+    Check(presenter.Status().state == FrameGenState::kActive, "retries: engaged");
+    // GPU failures pause; the retry re-engages once they stop.
+    const auto pause_and_recover = [&](const std::string& name) {
+        gpu.fail = true;
+        for (int i = 0; i < 3; ++i) app.Frame();
+        const FrameGenStatus paused = presenter.Status();
+        gpu.fail = false;
+        Check(paused.state == FrameGenState::kPaused && paused.retry_pending,
+              name + ": paused with a retry pending (" + std::string(ToString(paused.state)) + ")");
+        for (int i = 0; i < 5; ++i) app.Frame();
+        Check(presenter.Status().state == FrameGenState::kActive, name + ": the automatic retry re-engages");
+    };
+    const auto quiet = [&](std::chrono::milliseconds duration) {
+        const auto start = std::chrono::steady_clock::now();
+        while (std::chrono::steady_clock::now() - start < duration) {
+            app.Frame();
+            std::this_thread::sleep_for(4ms);
+        }
+    };
+    constexpr int kPauses = 6;
+    for (int pause = 1; pause <= kPauses; ++pause) {
+        pause_and_recover("retries, pause " + std::to_string(pause) + " of a long session");
+        quiet(400ms);
+    }
+    // Two pauses close together: the second finds the attempt spent.
+    pause_and_recover("retries, the first of two close pauses");
+    gpu.fail = true;
+    for (int i = 0; i < 3; ++i) app.Frame();
+    gpu.fail = false;
+    Check(presenter.Status().state == FrameGenState::kPaused && !presenter.Status().retry_pending,
+          "retries: a second pause soon after stays paused; retries are still bounded");
+    for (int i = 0; i < 4; ++i) {
+        Check(app.Frame().predictedDisplayPeriod == kPeriod, "retries: a paused session passes through");
+    }
+    Check(presenter.Status().state == FrameGenState::kPaused, "retries: no attempt comes back while it stays paused");
+    Check(presenter.Toggle() && presenter.Status().state == FrameGenState::kWaiting, "retries: the toggle still retries");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "retries: calls stayed ordered");
+
+    const auto restored = log.Lines("a later pause retries by itself again");
+    const auto retried = log.Lines("Frame Generation retrying after a pause (1 of 1)");
+    Check(restored.size() == kPauses && retried.size() == kPauses + 1,
+          "retries: restored after each quiet stretch (" + std::to_string(restored.size()) + " restored, " +
+              std::to_string(retried.size()) + " retried)");
+}
+
+// Dynamic's summaries say how long the next stand-down passes frames
+// straight through (doubling after short engagements), how many there
+// were, and how many automatic retries are spent.
+void TestDynamicSummaryShowsHold() {
+    SessionLog log("dynamic-hold");
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic, app, runtime, owned,
+             log.logger.get());
+    presenter.SetDynamicPolicy(GuardDynamic());
+    presenter.SetSummaryInterval(150ms);
+    EngageDynamic(presenter, *app, "dynamic hold");
+    RunWork(*app, 400ms, kLightWork);
+    // Motion never measured: the guard stands down, soon after engaging.
+    gpu.measure_lag = 1s;
+    RunTicks(*app, 3000ms, {3}, [&](const XrFrameState&) { return presenter.Status().standby; });
+    gpu.measure_lag = 0us;
+    Check(presenter.Status().dynamic_stand_downs == 1, "dynamic hold: the guard stood down");
+    RunTicks(*app, 500ms, {3});
+    presenter.Stop();
+
+    // GuardDynamic holds 0.6 s, doubled to 1.2 s by a stand-down soon after engaging.
+    bool before = false, doubled = false, counted = false, retries = false;
+    for (const std::string& line : log.Lines("standDownHoldS=")) {
+        const auto value = [&](const std::string& text) { return line.find(text) != std::string::npos; };
+        before = before || (value(", standDowns=0") && value(", standDownHoldS=0.6"));
+        doubled = doubled || (value(", standDowns=1") && value(", standDownHoldS=1.2"));
+        counted = counted || value(", standDowns=1");
+        retries = retries || value(", autoRetries=0/3");
+    }
+    Check(before, "dynamic hold: the summaries name the next stand-down's hold");
+    Check(doubled && counted, "dynamic hold: a stand-down soon after engaging doubles it, and is counted");
+    Check(retries, "dynamic hold: the summaries say how many automatic retries are spent");
+}
+
+// The game's view sizes are logged as they change: each change replaces
+// Frame Generation's images for its views (a wait for the GPU and a
+// reallocation), so a game varying them every frame (dynamic resolution)
+// shows. The first lines say each change; then a line at most every 5 s
+// counts the changes between.
+void TestViewExtentChangesLogged() {
+    SessionLog log("view-extents");
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate, kFormat, kAppUsage, FrameGenMultiplier::k2,
+                   log.logger.get());
+    App app(presenter, runtime);
+    for (int i = 0; i < 6; ++i) app.Frame();
+    app.views[0].subImage.imageRect.extent.width = 1500;
+    for (int i = 0; i < 6; ++i) app.Frame();
+    app.views[0].subImage.imageRect.extent.width = 1600;
+    for (int i = 0; i < 6; ++i) app.Frame();
+    // Dynamic resolution: another size every frame.
+    for (int i = 0; i < 60; ++i) {
+        app.views[0].subImage.imageRect.extent.width = 1200 + 4 * i;
+        app.views[1].subImage.imageRect.extent.width = 1200 + 4 * i;
+        app.Frame();
+    }
+    presenter.Stop();
+
+    const auto first = log.Lines("Frame Generation: the game's views are ");
+    Check(first.size() == 1 && first[0].find("are 1600x1600, 1600x1600.") != std::string::npos,
+          "view sizes: the first are logged (" + (first.empty() ? std::string("none") : first[0]) + ")");
+    const auto changed = log.Lines("Frame Generation: the game's view sizes changed to ");
+    Check(changed.size() == 19, "view sizes: every change logged for the first lines, then held back (" +
+                                    std::to_string(changed.size()) + " lines)");
+    Check(changed.size() >= 2 && changed[0].find("changed to 1500x1600, 1600x1600 (1 change in 6 frames") !=
+                                     std::string::npos &&
+              changed[1].find("changed to 1600x1600, 1600x1600 (1 change in 6 frames") != std::string::npos,
+          "view sizes: each change says what it changed to (" +
+              (changed.empty() ? std::string("none") : changed[0]) + ")");
+}
+
 // OpenComposite (an OpenVR game on OpenXR): IVRCompositor::WaitGetPoses
 // waits and begins a frame every time it is called, and ends one only once
 // both eyes are submitted. A game that asks for poses again first begins a
@@ -10447,6 +10711,12 @@ int main(int argc, char** argv) {
     RUN(TestUnclaimedFrameIsDemoted);
     RUN(TestSameThreadDoubleWait);
     RUN(TestDepthDescriptionLogged);
+    // A long session: video memory moving between engagements, pauses far
+    // apart, and what the summaries and the log say about both.
+    RUN(TestCanvasRingAcrossEngagements);
+    RUN(TestRetriesRestoredAfterQuietStretch);
+    RUN(TestDynamicSummaryShowsHold);
+    RUN(TestViewExtentChangesLogged);
     RUN(TestOpenCompositeAbandonsFrames);
     RUN(TestSingleAbandonedFrameLeavesNothingBehind);
     RUN(TestAbandonedBeforeFirstEnd);

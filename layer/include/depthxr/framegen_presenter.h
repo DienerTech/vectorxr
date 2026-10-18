@@ -338,8 +338,11 @@ class FrameGenPresenter {
     // grew to 11-14 refreshes to make room. Both looked the same interpolated
     // (MSFS, 2026-10-07). Extrapolate keeps the hardware.
     void SetInterpolateOnShaders(bool on);
-    // Delay before a paused session retries by itself, and how often.
-    void SetRetryPolicy(std::chrono::milliseconds delay, std::uint32_t attempts);
+    // Delay before a paused session retries by itself, and how often; the
+    // attempts are restored once the last retry has held this long without
+    // another pause.
+    void SetRetryPolicy(std::chrono::milliseconds delay, std::uint32_t attempts,
+                        std::chrono::milliseconds restore_after = std::chrono::minutes(5));
     // In-session A/B toggle; also retries after a pause. Returns the new
     // user-enabled state.
     bool Toggle();
@@ -1077,6 +1080,11 @@ class FrameGenPresenter {
     std::uint32_t retry_attempts_{3};
     std::optional<std::chrono::steady_clock::time_point> paused_at_;
     std::uint32_t automatic_retries_{0};
+    // No pause for this long since the last one gives the attempts back
+    // (MaybeRetryLocked): a long session's fourth pause, hours after the
+    // third, still retries by itself.
+    std::chrono::milliseconds retry_restore_after_{std::chrono::minutes(5)};
+    std::optional<std::chrono::steady_clock::time_point> last_pause_at_; // the latest pause's start
     std::uint32_t consecutive_failures_{0};
     std::uint32_t consecutive_demotions_{0};
 
@@ -1402,6 +1410,17 @@ class FrameGenPresenter {
     std::uint32_t depth_description_lines_{0};
     std::chrono::steady_clock::time_point depth_description_logged_at_{};
     void LogDepthDescriptionLocked(const XrCompositionLayerProjection& projection);
+    // The game's view sizes (each projection view's region), logged as the
+    // depth description is: every change replaces the backend's images for
+    // the view (a reallocation and a wait for the GPU), so a game varying
+    // them shows here.
+    std::vector<FrameGenExtent> view_extents_;
+    std::vector<FrameGenExtent> logged_view_extents_;
+    std::uint64_t view_extent_changes_{0}; // since the last line
+    std::uint64_t view_extent_frames_{0};  // since the last line
+    std::uint32_t view_extent_lines_{0};
+    std::chrono::steady_clock::time_point view_extents_logged_at_{};
+    void LogViewExtentsLocked(const XrCompositionLayerProjection& projection);
     // The depth check's batches, one Debug line each (at most one a second).
     std::uint32_t logged_depth_batches_{0};
     std::chrono::steady_clock::time_point depth_batch_logged_at_{};
@@ -1540,7 +1559,14 @@ class FrameGenPresenter {
     // is moved by the previous real frame's (VECTORXR_FRAMEGEN_STALE_MOTION=0:
     // shown unchanged instead).
     bool stale_motion_enabled_{true};
-    bool logged_canvas_ring_{false};
+    // The ring each canvas choice last logged (0: none yet this session).
+    std::uint8_t logged_canvas_ring_{0};
+    // What the backend's views hold since the last Execute (a ring, and the
+    // estimated video memory of one slot of those views): process video
+    // memory includes it until Stop frees it, so CanvasRingLocked counts
+    // those slots once.
+    std::uint8_t held_ring_{0};
+    std::uint64_t held_slot_bytes_{0};
     std::uint8_t CanvasRingLocked();
     // The real frames the backend keeps for a frame of this path.
     std::uint8_t JitRingLocked(bool quad) const {

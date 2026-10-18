@@ -241,6 +241,18 @@ FrameGenExtent Extent(const XrCompositionLayerProjectionView& view) {
             static_cast<std::uint32_t>(std::max(0, view.subImage.imageRect.extent.height))};
 }
 
+// One history slot of these views, estimated: each view's image, and
+// depth, trust and flow at half resolution or less (about one and a half
+// images' worth).
+std::uint64_t HistorySlotBytes(const XrCompositionLayerProjectionView* views, std::size_t count) {
+    std::uint64_t bytes = 0;
+    for (std::size_t i = 0; views && i < count; ++i) {
+        const FrameGenExtent extent = Extent(views[i]);
+        bytes += std::uint64_t{extent.width} * extent.height * 6;
+    }
+    return bytes;
+}
+
 std::string Number(double value, int decimals) {
     char buffer[32];
     std::snprintf(buffer, sizeof(buffer), "%.*f", decimals, value);
@@ -424,6 +436,7 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
     healthy_streak_ = 0;
     automatic_retries_ = 0;
     paused_at_.reset();
+    last_pause_at_.reset();
     state_ = configured_enabled_ ? FrameGenState::kWaiting : FrameGenState::kOff;
     reason_.clear();
     standby_since_ = started_at_;
@@ -589,6 +602,11 @@ void FrameGenPresenter::Stop() {
     memory_checked_at_ = {};
     memory_room_since_.reset();
     memory_recoveries_ = 0;
+    // The backend that held the history went with it; the next session's
+    // first ring choice is logged again.
+    held_ring_ = 0;
+    held_slot_bytes_ = 0;
+    logged_canvas_ring_ = 0;
     full_rate_ = false;
     cadence_.clear();
     last_app_end_.reset();
@@ -703,6 +721,10 @@ void FrameGenPresenter::Stop() {
     logged_depth_description_.clear();
     depth_description_changes_ = depth_description_frames_ = 0;
     depth_description_lines_ = 0;
+    view_extents_.clear();
+    logged_view_extents_.clear();
+    view_extent_changes_ = view_extent_frames_ = 0;
+    view_extent_lines_ = 0;
     logged_depth_batches_ = 0;
     session_ = XR_NULL_HANDLE;
     idle_cv_.notify_all();
@@ -880,10 +902,12 @@ void FrameGenPresenter::SetMemoryRecoveryDelay(std::chrono::milliseconds delay) 
     memory_recovery_delay_ = delay;
 }
 
-void FrameGenPresenter::SetRetryPolicy(std::chrono::milliseconds delay, std::uint32_t attempts) {
+void FrameGenPresenter::SetRetryPolicy(std::chrono::milliseconds delay, std::uint32_t attempts,
+                                       std::chrono::milliseconds restore_after) {
     std::scoped_lock lock(mutex_);
     retry_delay_ = delay;
     retry_attempts_ = attempts;
+    retry_restore_after_ = restore_after;
 }
 
 bool FrameGenPresenter::Toggle() {
@@ -1358,6 +1382,51 @@ void FrameGenPresenter::RecordCaptureTargetsLocked(const XrCompositionLayerProje
         }
     }
     LogDepthDescriptionLocked(projection);
+    LogViewExtentsLocked(projection);
+}
+
+void FrameGenPresenter::LogViewExtentsLocked(const XrCompositionLayerProjection& projection) {
+    if (!logger_) {
+        return;
+    }
+    std::vector<FrameGenExtent> extents;
+    for (std::uint32_t i = 0; projection.views && i < projection.viewCount; ++i) {
+        extents.push_back(Extent(projection.views[i]));
+    }
+    const auto same = [](const std::vector<FrameGenExtent>& a, const std::vector<FrameGenExtent>& b) {
+        return std::equal(a.begin(), a.end(), b.begin(), b.end(), [](FrameGenExtent x, FrameGenExtent y) {
+            return x.width == y.width && x.height == y.height;
+        });
+    };
+    if (!same(extents, view_extents_)) {
+        view_extents_ = std::move(extents);
+        ++view_extent_changes_;
+    }
+    ++view_extent_frames_;
+    if (same(view_extents_, logged_view_extents_)) {
+        return;
+    }
+    // Every change for the first lines, then at most a line per 5 s with
+    // the changes between (a game resizing every frame stays readable).
+    const auto now = Clock::now();
+    if (view_extent_lines_ >= 20 && now - view_extents_logged_at_ < std::chrono::seconds(5)) {
+        return;
+    }
+    const bool first = logged_view_extents_.empty();
+    std::string sizes;
+    for (std::size_t i = 0; i < view_extents_.size(); ++i) {
+        sizes += (i ? ", " : "") + std::to_string(view_extents_[i].width) + "x" + std::to_string(view_extents_[i].height);
+    }
+    logger_->Info(first ? "Frame Generation: the game's views are " + sizes + "."
+                        : "Frame Generation: the game's view sizes changed to " + sizes + " (" +
+                              std::to_string(view_extent_changes_) + " change" +
+                              (view_extent_changes_ == 1 ? "" : "s") + " in " + std::to_string(view_extent_frames_) +
+                              " frames since the last line; each replaces Frame Generation's images for its views).");
+    logged_view_extents_ = view_extents_;
+    view_extent_changes_ = 0;
+    view_extent_frames_ = 0;
+    ++view_extent_lines_;
+    view_extents_logged_at_ = now;
 }
 
 namespace {
@@ -1463,36 +1532,48 @@ void FrameGenPresenter::LogDepthDescriptionLocked(const XrCompositionLayerProjec
 }
 
 std::uint8_t FrameGenPresenter::CanvasRingLocked() {
-    // Each further slot keeps a real frame per view: its image, and depth,
-    // trust and flow at half resolution or less (about one and a half
-    // images' worth).
+    // Each further slot keeps a real frame per view (HistorySlotBytes).
     const FrameCopy& copy = newest_copy_.valid ? newest_copy_ : passthrough_copy_;
-    std::uint64_t slot_bytes = 0;
-    if (copy.valid && copy.has_projection && copy.projection_index < copy.layers.size()) {
-        for (const XrCompositionLayerProjectionView& view : copy.layers[copy.projection_index].views) {
-            const std::uint64_t pixels = static_cast<std::uint64_t>(std::max(view.subImage.imageRect.extent.width, 0)) *
-                                         static_cast<std::uint64_t>(std::max(view.subImage.imageRect.extent.height, 0));
-            slot_bytes += pixels * 6;
-        }
-    }
+    const std::uint64_t slot_bytes =
+        copy.valid && copy.has_projection && copy.projection_index < copy.layers.size()
+            ? HistorySlotBytes(copy.layers[copy.projection_index].views.data(),
+                               copy.layers[copy.projection_index].views.size())
+            : 0;
     const std::uint8_t roomy = kFrameGenCanvasRingRoomy;
     const std::uint8_t lean = FrameGenHistoryRing(false);
     const std::uint64_t extra = slot_bytes * (roomy - lean);
     const std::optional<FrameGenMemoryBudget> memory = gpu_ ? gpu_->MemoryBudget() : std::nullopt;
-    // Unknown sizes or budget: the default. Room means the extra slots and
-    // a tenth of the budget still fit.
+    // The backend keeps its views' images from one presenter thread run to
+    // the next (until Stop): slots it holds beyond three are in the
+    // process's usage already, and are counted once, not again as extra
+    // (which made a ring of five look short of memory at the next start and
+    // a ring of three roomy at the one after: every history image replaced,
+    // a wait for the GPU, each time).
+    const std::uint64_t held =
+        held_ring_ > lean ? std::uint64_t{static_cast<std::uint8_t>(held_ring_ - lean)} * held_slot_bytes_ : 0;
+    const std::uint64_t usage = memory ? memory->usage_bytes - std::min(memory->usage_bytes, held) : 0;
+    // Unknown sizes or budget: the default. Room means the extra slots and a
+    // tenth of the budget still fit; five already held stay while a
+    // twentieth does (the multiplier's own near-budget line), so usage
+    // moving a little between runs does not replace them back and forth.
+    const bool keeping = held_ring_ >= roomy;
     const bool room = slot_bytes && memory && memory->budget_bytes &&
-                      memory->usage_bytes + extra + memory->budget_bytes / 10 < memory->budget_bytes;
+                      usage + extra + memory->budget_bytes / (keeping ? 20 : 10) < memory->budget_bytes;
     const std::uint8_t ring = room ? roomy : lean;
-    if (logger_ && !logged_canvas_ring_ && slot_bytes && memory && memory->budget_bytes) {
-        logged_canvas_ring_ = true;
+    if (logger_ && ring != logged_canvas_ring_ && slot_bytes && memory && memory->budget_bytes) {
+        // Every change is logged: a later one (the game's video memory grown
+        // over a long session) changes what slow games can be moved from.
+        const bool first = logged_canvas_ring_ == 0;
+        logged_canvas_ring_ = ring;
         constexpr double megabytes = 1024.0 * 1024.0;
-        logger_->Info("Frame Generation keeps the last " + std::to_string(ring) + " real frames to generate from" +
+        const std::string budget = "usage " + Number(static_cast<double>(memory->usage_bytes) / megabytes, 0) +
+                                   " of " + Number(static_cast<double>(memory->budget_bytes) / megabytes, 0) + " MB";
+        logger_->Info("Frame Generation " + std::string(first ? "keeps" : "now keeps") + " the last " +
+                      std::to_string(ring) + " real frames to generate from" +
                       (room ? " (" + Number(static_cast<double>(extra) / megabytes, 0) +
-                                  " MB more video memory than three, so slow games keep every frame they need)."
-                            : " (video memory is short: usage " +
-                                  Number(static_cast<double>(memory->usage_bytes) / megabytes, 0) + " of " +
-                                  Number(static_cast<double>(memory->budget_bytes) / megabytes, 0) + " MB)."));
+                                  " MB more video memory than three, so slow games keep every frame they need; " +
+                                  budget + ")."
+                            : " (video memory is short: " + budget + ")."));
     }
     return ring;
 }
@@ -1769,8 +1850,12 @@ std::string FrameGenPresenter::DynamicSummaryLocked() const {
     if (!DynamicLocked()) {
         return {};
     }
+    // standDownHoldS: how long the next stand-down passes frames straight
+    // through (doubling after short engagements, DynamicStandDownLocked).
     return std::string(", dynamic=") + (dynamic_standby_ ? (dynamic_probing_ ? "probing" : "standby") : "engaged") +
-           (dynamic_reason_.empty() ? std::string() : " (" + dynamic_reason_ + ")");
+           (dynamic_reason_.empty() ? std::string() : " (" + dynamic_reason_ + ")") +
+           ", standDownHoldS=" + Number(std::chrono::duration<double>(dynamic_hold_).count(), 1) +
+           ", standDowns=" + std::to_string(dynamic_stand_downs_);
 }
 
 void FrameGenPresenter::NotePauseLocked(XrDuration gap) {
@@ -2327,8 +2412,22 @@ void FrameGenPresenter::DynamicReenableLocked(Clock::time_point now) {
 }
 
 void FrameGenPresenter::MaybeRetryLocked() {
+    const auto now = Clock::now();
+    if (automatic_retries_ && state_ != FrameGenState::kPaused && last_pause_at_ &&
+        now - *last_pause_at_ >= retry_restore_after_) {
+        // The retries held: no pause for that long. A pause later in a long
+        // session (a loading screen's hitch hours on) retries by itself
+        // again, rather than staying paused for the rest of the session.
+        if (logger_) {
+            logger_->Info("Frame Generation has run " +
+                          Number(std::chrono::duration<double>(now - *last_pause_at_).count(), 0) +
+                          " s since its last pause: a later pause retries by itself again (up to " +
+                          std::to_string(retry_attempts_) + " times).");
+        }
+        automatic_retries_ = 0;
+    }
     if (state_ != FrameGenState::kPaused || !paused_at_ || automatic_retries_ >= retry_attempts_ ||
-        Clock::now() - *paused_at_ < retry_delay_) {
+        now - *paused_at_ < retry_delay_) {
         return;
     }
     ++automatic_retries_;
@@ -2388,7 +2487,7 @@ void FrameGenPresenter::PauseLocked(const std::string& reason) {
         return;
     }
     SetStateLocked(FrameGenState::kPaused, reason);
-    paused_at_ = Clock::now();
+    paused_at_ = last_pause_at_ = Clock::now();
     healthy_streak_ = 0;
 }
 
@@ -3021,6 +3120,7 @@ XrResult FrameGenPresenter::EndFrame(XrSession session, const XrFrameEndInfo* in
                     ", captured=+" +
                     std::to_string(totals_.captured - start.captured) + " (" + std::to_string(captured_) + ")" +
                     ", pauses=" + std::to_string(totals_.pauses - start.pauses) + "/" + Number(pause_longest_ms_, 0) +
+                    ", autoRetries=" + std::to_string(automatic_retries_) + "/" + std::to_string(retry_attempts_) +
                     ", gpuMs=" + Number(gpu_ms_, 2) + ClockSummaryLocked(start) + DynamicSummaryLocked() +
                     QuadSummaryLocked(start) + ".");
             }
@@ -3982,6 +4082,13 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
     std::scoped_lock lock(mutex_);
     if (!ok) {
         NoteGpuTimingLocked(0, frame, std::nullopt, timings); // earlier analyses still finished
+    }
+    if (ok || executed.uncaptured) {
+        // The backend's views are set up for this ring now (an uncaptured
+        // frame's Execute sets them up too): CanvasRingLocked counts them as
+        // in use.
+        held_ring_ = FrameGenHistoryRing(tuning);
+        held_slot_bytes_ = HistorySlotBytes(projection.views, projection.viewCount);
     }
     if (!ok && executed.uncaptured) {
         // The first frame of a view, or one whose region changed: its image
@@ -6068,12 +6175,14 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
                         ", unready=" + std::to_string(delta(&Totals::unready)) + "/" +
                         std::to_string(delta(&Totals::unmeasured)) +
                         ", staleMotion=" + std::to_string(delta(&Totals::stale_motion)) +
+                        ", ring=" + std::to_string(JitRingLocked(quad_mode_)) +
                         ", ringExhausted=" + std::to_string(delta(&Totals::ring_exhausted)) +
                         ", staleSkipped=" + std::to_string(delta(&Totals::stale_skipped))
                   : std::string()) +
             ", runtimeHalved=" + std::to_string(delta(&Totals::halving_halved)) + "/" +
             std::to_string(delta(&Totals::halving_measured)) + (runtime_halving_ ? " (halving)" : "") +
             ", pauses=" + std::to_string(delta(&Totals::pauses)) + "/" + Number(pause_longest_ms_, 0) +
+            ", autoRetries=" + std::to_string(automatic_retries_) + "/" + std::to_string(retry_attempts_) +
             ClockSummaryLocked(start) + DynamicSummaryLocked() + QuadSummaryLocked(start) + ".");
     }
     NewSummaryWindowLocked(now, standby);
