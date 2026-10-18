@@ -2,18 +2,17 @@
 import { computed, ref } from "vue";
 
 import ThemeToggle from "../ThemeToggle.vue";
-import { playTestSound } from "../../lib/commands";
+import { playTestSound, requestInputRescan } from "../../lib/commands";
 import { errorText } from "../../lib/errors";
 import type { VectorXRConfig } from "../../lib/model";
 import type { ThemePreference } from "../../lib/theme";
-import { trayModeOptions, type TrayMode } from "../../lib/tray";
 
 const props = defineProps<{
   config: VectorXRConfig;
   path: string;
   logPath?: string;
   themePreference: ThemePreference;
-  trayMode: TrayMode;
+  trayEnabled: boolean;
   settingsActionsDisabled: boolean;
 }>();
 
@@ -24,12 +23,28 @@ defineEmits<{
   exportConfig: [];
   resetConfig: [];
   "update:themePreference": [value: ThemePreference];
-  "update:trayMode": [value: TrayMode];
+  "update:trayEnabled": [value: boolean];
 }>();
 
-const trayModeDescription = computed(
-  () => trayModeOptions.find((option) => option.value === props.trayMode)?.description ?? "",
-);
+// Rescan inputs: running games look again for bound devices that were not
+// connected (a hot-plugged controller Windows did not report).
+const rescanning = ref(false);
+const rescanResult = ref("");
+async function rescanInputs() {
+  rescanning.value = true;
+  rescanResult.value = "";
+  try {
+    const games = await requestInputRescan();
+    rescanResult.value =
+      games === 0
+        ? "No game is running with VectorXR."
+        : `Asked ${games} running game${games === 1 ? "" : "s"} to look again.`;
+  } catch (error) {
+    rescanResult.value = errorText(error, "Rescan inputs failed");
+  } finally {
+    rescanning.value = false;
+  }
+}
 
 const logPathShort = computed(() => {
   if (!props.logPath) return null;
@@ -90,24 +105,45 @@ async function previewSoundVolume() {
             <div class="min-w-0 max-w-2xl">
               <p class="text-sm font-semibold tracking-tight" style="color: var(--app-text)">System Tray</p>
               <p class="mt-0.5 text-xs leading-5 text-muted">
-                Health, the VectorXR switch, the log level and Export Debug from the notification area.
-                {{ trayModeDescription }} Stored on this PC only.
+                Health, the VectorXR switch, the log level and Export Debug from the notification area. On, closing
+                this window keeps the app in the tray, and opening VectorXR again brings the window back; quit from
+                the tray icon. Off, closing the window quits the app. Stored on this PC only.
+              </p>
+              <p class="mt-1 text-xs leading-5 text-muted">
+                The app and its tray are a helper for your settings, not the OpenXR layer: VectorXR keeps working in
+                your games with the app and the tray closed, while VectorXR Enabled is on.
               </p>
             </div>
-            <div class="inline-flex flex-wrap gap-2 rounded-[1rem] border p-1 surface-panel-strong" role="radiogroup" aria-label="System tray">
-              <button
-                v-for="option in trayModeOptions"
-                :key="option.value"
-                class="rounded-[0.75rem] px-3 py-2 text-sm font-medium transition"
-                :class="trayMode === option.value ? 'tab-button-active' : 'tab-button-idle'"
-                type="button"
-                role="radio"
-                :aria-checked="trayMode === option.value"
-                @click="$emit('update:trayMode', option.value)"
-              >
-                {{ option.label }}
-              </button>
+            <label class="pill-toggle inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
+              <input
+                :checked="trayEnabled"
+                class="h-4 w-4 accent-depthxr-copper"
+                type="checkbox"
+                @change="$emit('update:trayEnabled', ($event.target as HTMLInputElement).checked)"
+              />
+              {{ trayEnabled ? "On" : "Off" }}
+            </label>
+          </div>
+          <div class="flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border p-4 surface-panel-soft">
+            <div class="min-w-0 max-w-2xl">
+              <p class="text-sm font-semibold tracking-tight" style="color: var(--app-text)">Input Devices</p>
+              <p class="mt-0.5 text-xs leading-5 text-muted">
+                For use in-game, in case a hot-connected controller wasn't noticed. While a game runs, VectorXR looks
+                for a bound controller that isn't connected only when Windows reports one plugged in (and when the
+                next VR session starts), so it never stalls the game checking. If you plug one in and its bindings
+                don't respond, Rescan inputs asks the running games to look again.
+              </p>
+              <p v-if="rescanResult" class="mt-1 text-xs leading-5" style="color: var(--app-text)">{{ rescanResult }}</p>
             </div>
+            <button
+              class="rounded-full border px-4 py-2 text-sm font-medium transition surface-panel-strong"
+              style="border-color: var(--app-border)"
+              type="button"
+              :disabled="rescanning"
+              @click="rescanInputs"
+            >
+              {{ rescanning ? "Rescanning…" : "Rescan inputs" }}
+            </button>
           </div>
           <div class="flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border p-4 surface-panel-soft">
             <div class="min-w-0 max-w-2xl">

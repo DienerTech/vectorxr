@@ -49,6 +49,13 @@ struct InputBindingPollResult {
     // True while the device's DirectInput setup runs on the background
     // connector. The binding reads inactive until the device is published.
     bool device_connect_pending{false};
+    // The device is not connected and, during a session, is not retried on a
+    // timer: it is tried again when Windows reports a device's arrival, when
+    // the VectorXR app's Rescan inputs asks, or at the next session's start.
+    bool device_waits_for_rescan{false};
+    // Windows reports device arrivals to the layer (false: only Rescan
+    // inputs and a session's start find a device plugged in later).
+    bool device_arrival_notified{false};
     std::int64_t device_retry_delay_ms{0};
     InputBindingPollStage diagnostic_stage{InputBindingPollStage::None};
     std::int64_t result_code{0};
@@ -74,21 +81,39 @@ class InputDeviceRetryBackoff {
 
     bool ShouldAttempt(const std::wstring& device_key, TimePoint now) const;
     std::chrono::milliseconds RecordFailure(const std::wstring& device_key, TimePoint now);
+    // A device DirectInput does not know (unplugged, or never there). During
+    // a session it is not retried on the timer: an attempt every 2 s stalled
+    // the game with it (Star Citizen, 2026-10-18: a 48-70 ms hitch at each
+    // attempt). It waits for Rescan; outside a session the timer still runs.
+    std::chrono::milliseconds RecordAbsent(const std::wstring& device_key, TimePoint now);
     void RecordSuccess(const std::wstring& device_key);
     std::chrono::milliseconds RetryDelayRemaining(const std::wstring& device_key,
                                                    TimePoint now) const;
     std::size_t ConsecutiveFailures(const std::wstring& device_key) const;
+    // The game's OpenXR session runs (absent devices wait for Rescan).
+    void SetSessionActive(bool active);
+    bool SessionActive() const { return session_active_; }
+    // Lets each absent device be tried once more: a device's arrival, the
+    // app's Rescan inputs, a session's start.
+    void Rescan();
+    bool WaitsForRescan(const std::wstring& device_key) const;
 
   private:
     struct Entry {
         TimePoint retry_after{};
         std::chrono::milliseconds delay{0};
         std::size_t consecutive_failures{0};
+        bool absent{false};
+        std::uint64_t rescan_seen{0}; // the rescan it was found absent after
     };
+
+    std::chrono::milliseconds Delay(Entry& entry, TimePoint now);
 
     std::chrono::milliseconds initial_delay_;
     std::chrono::milliseconds maximum_delay_;
     std::unordered_map<std::wstring, Entry> entries_;
+    bool session_active_{false};
+    std::uint64_t rescans_{0};
 };
 
 // A device published by the background connector may already have inputs held
@@ -121,8 +146,14 @@ const char* DirectInputResultName(std::int64_t result_code);
 // frame-time spike. Setup runs on a short-lived background connector instead.
 InputBindingPollResult PollInputBinding(const InputBinding& binding);
 bool IsInputBindingDown(const InputBinding& binding);
-// Waits (bounded) for in-flight background device setup. Call before the
-// layer can be unloaded; never from the frame thread.
+// Waits (bounded) for in-flight background device setup, and stops Windows'
+// device-arrival notifications. Call before the layer can be unloaded; never
+// from the frame thread.
 void DrainInputDeviceWork(std::chrono::milliseconds timeout);
+// The game's OpenXR session started (devices not connected are tried once,
+// then wait for a rescan) or ended (they retry on the reconnect timer).
+void SetInputDeviceSessionActive(bool active);
+// The VectorXR app's Rescan inputs: devices not connected are tried once more.
+void RescanInputDevices();
 
 } // namespace depthxr

@@ -473,6 +473,15 @@ export async function setRuntimeQuadViewsDiagnosticVisualization(
   })
 }
 
+// Rescan inputs: running games look again for bound devices that were not
+// connected. Resolves to how many games are running with VectorXR.
+export async function requestInputRescan(): Promise<number> {
+  if (!tauriAvailable()) {
+    return 0
+  }
+  return invoke<number>('request_input_rescan')
+}
+
 export async function loadOpenXrLayers(includeSignatures = false): Promise<OpenXrLayerSnapshot> {
   if (!tauriAvailable()) {
     return {

@@ -1100,6 +1100,8 @@ class OpenXrLayer {
     ProcessExitFile runtime_relay_exit_status_;
     ProcessExitFile runtime_relay_exit_control_;
     bool runtime_relay_pruned_{false}; // Watcher thread only.
+    // The app's last Rescan inputs request taken (Unix ms). Watcher thread only.
+    std::uint64_t input_rescan_taken_at_{0};
     // The Frame Generation events PollFrameGenRecorder last saw (watcher
     // thread only): Dynamic stand-downs and probes, and runtime halving.
     FrameGenSnapshotTrigger framegen_recorder_;

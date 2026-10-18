@@ -4,38 +4,26 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import type { HealthSummary } from './health'
 import type { VectorXRConfig } from './model'
 
-// The notification-area icon. Like the theme, the choice is stored on this PC
+// The notification-area icon, on or off. On, closing the window keeps the
+// app running in the tray (one window: opening VectorXR again shows it); off,
+// closing the window quits. Like the theme, the choice is stored on this PC
 // only: it belongs to the app, not to the settings the layer reads.
-export type TrayMode = 'off' | 'on' | 'keepRunning'
-
-export const trayModeOptions: { value: TrayMode; label: string; description: string }[] = [
-  { value: 'off', label: 'Off', description: 'No tray icon.' },
-  { value: 'on', label: 'While open', description: 'A tray icon while VectorXR is open. Closing the window quits.' },
-  {
-    value: 'keepRunning',
-    label: 'Keep running',
-    description: 'Closing the window keeps VectorXR in the tray. Quit from the tray icon.',
-  },
-]
-
 const storageKey = 'vectorxr-tray-mode'
 
-function isTrayMode(value: string | null): value is TrayMode {
-  return value === 'off' || value === 'on' || value === 'keepRunning'
-}
-
-export function loadTrayMode(): TrayMode {
+// Stored as 'on' or 'off'. Before 0.19.3 there were three modes: 'on' (a
+// tray icon while the window was open) and 'keepRunning' are now on.
+export function loadTrayEnabled(): boolean {
   try {
     const stored = typeof window === 'undefined' ? null : window.localStorage.getItem(storageKey)
-    return isTrayMode(stored) ? stored : 'on'
+    return stored !== 'off'
   } catch {
-    return 'on'
+    return true
   }
 }
 
-export function storeTrayMode(mode: TrayMode) {
+export function storeTrayEnabled(enabled: boolean) {
   try {
-    window.localStorage.setItem(storageKey, mode)
+    window.localStorage.setItem(storageKey, enabled ? 'on' : 'off')
   } catch {
     // Not remembered; the tray still follows the choice until the app closes.
   }
@@ -70,9 +58,9 @@ function tauriAvailable(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 }
 
-export async function configureTray(mode: TrayMode): Promise<void> {
+export async function configureTray(enabled: boolean): Promise<void> {
   if (!tauriAvailable()) return
-  await invoke('configure_tray', { mode })
+  await invoke('configure_tray', { mode: enabled ? 'on' : 'off' })
 }
 
 export async function updateTrayStatus(status: TrayStatus): Promise<void> {

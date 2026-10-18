@@ -34,14 +34,14 @@ const ITEM_QUIT: &str = "tray-quit";
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TrayMode {
-    // No icon.
+    // No icon; closing the window quits the app.
     Off,
-    // An icon while the app is open; closing the window quits, as before.
+    // An icon, and closing the window hides it: the app keeps running in
+    // the tray (one window: opening VectorXR again shows it) until Quit.
+    // "keepRunning" is the same choice from before it was on or off.
     #[default]
+    #[serde(alias = "keepRunning")]
     On,
-    // Closing the window hides it; the app keeps running in the tray until
-    // Quit.
-    KeepRunning,
 }
 
 // What the page reports. `available` is false until the settings have loaded
@@ -275,7 +275,7 @@ pub fn on_window_event(window: &Window, event: &WindowEvent) {
         let state = window.state::<TrayState>();
         let keep = {
             let inner = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            inner.mode == TrayMode::KeepRunning && inner.tray.is_some()
+            inner.mode == TrayMode::On && inner.tray.is_some()
         };
         if keep {
             api.prevent_close();
@@ -321,8 +321,9 @@ mod tests {
 
     #[test]
     fn modes_and_actions_use_the_page_names() {
+        // On or off; "keepRunning" (from before) is on.
         let modes: Vec<TrayMode> = serde_json::from_str(r#"["off", "on", "keepRunning"]"#).unwrap();
-        assert_eq!(modes, vec![TrayMode::Off, TrayMode::On, TrayMode::KeepRunning]);
+        assert_eq!(modes, vec![TrayMode::Off, TrayMode::On, TrayMode::On]);
         assert_eq!(
             serde_json::to_value(TrayAction::SetEnabled { enabled: false }).unwrap(),
             serde_json::json!({ "action": "setEnabled", "enabled": false })

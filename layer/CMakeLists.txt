@@ -38,7 +38,7 @@ target_include_directories(depthxr_core PUBLIC include)
 target_compile_features(depthxr_core PUBLIC cxx_std_20)
 if(WIN32)
     target_sources(depthxr_core PRIVATE src/util/crt_failure_report.cpp src/performance_sampler.cpp)
-    target_link_libraries(depthxr_core PUBLIC dinput8 dxguid ole32 winmm)
+    target_link_libraries(depthxr_core PUBLIC dinput8 dxguid ole32 winmm cfgmgr32)
 endif()
 
 if(WIN32 AND DEPTHXR_BUILD_LAYER)

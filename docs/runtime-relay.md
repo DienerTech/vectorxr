@@ -10,6 +10,8 @@ The relay uses atomic JSON sidecars under `%LOCALAPPDATA%/VectorXR/runtime`:
 
 - `status/<sessionId>.json` is written by a layer process.
 - `control/<sessionId>.json` is written by the desktop app.
+- `input-rescan.json` is written by the desktop app's **Rescan inputs**, for every running game
+  at once (below).
 - `VECTORXR_RUNTIME_RELAY_PATH` overrides the root for development and tests.
 
 Filesystem polling is appropriate for human-scale controls and status updates. It is inspectable, works across unrelated processes without installing a service, and keeps all I/O on the existing watcher thread. It is not intended for per-frame input, high-volume telemetry, or latency-sensitive streaming; those should use a different transport behind the same session/capability model.
@@ -58,6 +60,20 @@ Control documents target that exact session and express desired state rather tha
   }
 }
 ```
+
+The rescan request is an event for every running game rather than a session's desired state:
+
+```json
+{
+  "protocolVersion": 1,
+  "requestedAtUnixMilliseconds": 1785600000000
+}
+```
+
+Each layer process takes a request once (a later time is a new press) and only while it is less
+than 10 s old, so a game started later never replays it. Taking it, the layer tries each bound
+input device that was not connected once more. During a session those devices are otherwise
+tried only when Windows reports a device arrival or a session starts.
 
 ## Invariants
 

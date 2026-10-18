@@ -26,7 +26,7 @@ import { buildHealthSummary } from './lib/health'
 import { moduleStateForApplication, normalizeConfig, type ModuleId, type VectorXRConfig } from './lib/model'
 import { patchNotes } from './lib/patchNotes'
 import { applyThemePreference, loadThemePreference, observeSystemThemeChanges, type ThemePreference } from './lib/theme'
-import { configureTray, loadTrayMode, onTrayAction, storeTrayMode, trayStatus, updateTrayStatus, type TrayAction, type TrayMode } from './lib/tray'
+import { configureTray, loadTrayEnabled, onTrayAction, storeTrayEnabled, trayStatus, updateTrayStatus, type TrayAction } from './lib/tray'
 import { validateConfig } from './lib/validation'
 import { useConfigStore } from './stores/configStore'
 import { useUpdateStore } from './stores/updateStore'
@@ -48,7 +48,7 @@ const patchNotesOpen = ref(false)
 const logViewerLoading = ref(false)
 const logSnapshot = ref<LogSnapshot | null>(null)
 const themePreference = ref<ThemePreference>(loadThemePreference())
-const trayMode = ref<TrayMode>(loadTrayMode())
+const trayEnabled = ref<boolean>(loadTrayEnabled())
 const importFileInput = ref<HTMLInputElement | null>(null)
 const importPreviewOpen = ref(false)
 const importedConfig = ref<VectorXRConfig | null>(null)
@@ -246,10 +246,10 @@ onUnmounted(() => {
 })
 
 watch(
-  trayMode,
-  (mode) => {
-    storeTrayMode(mode)
-    configureTray(mode)
+  trayEnabled,
+  (enabled) => {
+    storeTrayEnabled(enabled)
+    configureTray(enabled)
       .then(() => updateTrayStatus(currentTrayStatus.value))
       .catch((error) => { store.state.status = errorText(error, 'Failed to set up the tray icon') })
   },
@@ -526,7 +526,7 @@ async function confirmResetConfig() {
           :path="store.state.path"
           :log-path="logSnapshot?.activePath"
           :theme-preference="themePreference"
-          :tray-mode="trayMode"
+          :tray-enabled="trayEnabled"
           :settings-actions-disabled="store.state.loading || store.state.saving"
           @view-logs="openLogs"
           @export-debug="debugExportOpen = true"
@@ -534,7 +534,7 @@ async function confirmResetConfig() {
           @export-config="exportConfig"
           @reset-config="confirmResetConfig"
           @update:theme-preference="themePreference = $event"
-          @update:tray-mode="trayMode = $event"
+          @update:tray-enabled="trayEnabled = $event"
         />
         <OsdTab v-else-if="store.state.activeTab === 'osd'" :config="store.state.config" :saved-config="store.state.originalConfig" />
         <AppRegistryEditor

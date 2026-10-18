@@ -187,6 +187,30 @@ int main() {
         Expect(by_id["msfs-legacy"].live, "Another game's flight with no process id should be left alone");
     }
 
+    {
+        // Rescan inputs: one request file for every running game, each taking
+        // a request once and only while it is fresh.
+        const auto rescan = depthxr::InputRescanRequestPath(root);
+        Expect(rescan == root / "input-rescan.json", "The rescan request should sit at the relay root");
+        std::uint64_t requested_at = 0;
+        Expect(!depthxr::ReadInputRescanRequest(rescan, &requested_at), "No request file should read as no request");
+        Touch(rescan, "{ \"protocolVersion\": 1, \"requestedAtUnixMilliseconds\": 1700000000123 }");
+        Expect(depthxr::ReadInputRescanRequest(rescan, &requested_at) && requested_at == 1700000000123,
+               "The app's request should be read with its time");
+        Touch(rescan, "{ \"protocolVersion\": 2, \"requestedAtUnixMilliseconds\": 1700000000123 }");
+        Expect(!depthxr::ReadInputRescanRequest(rescan, &requested_at),
+               "A request of another protocol version should be ignored");
+        Touch(rescan, "{ \"protocolVersion\": 1 }");
+        Expect(!depthxr::ReadInputRescanRequest(rescan, &requested_at), "A request without a time should be ignored");
+
+        const std::uint64_t at = 1700000000000;
+        Expect(depthxr::InputRescanRequestDue(at, 0, at + 2000), "A new request a moment old should be taken");
+        Expect(!depthxr::InputRescanRequestDue(at, at, at + 2000), "A request already taken should not be taken again");
+        Expect(depthxr::InputRescanRequestDue(at + 5000, at, at + 6000), "A later press should be taken again");
+        Expect(!depthxr::InputRescanRequestDue(at, 0, at + depthxr::kInputRescanFreshMilliseconds + 1),
+               "A stale request (a game started after the press) should not be replayed");
+    }
+
     std::filesystem::remove_all(root);
     std::cout << "runtime_relay_tests passed\n";
     return 0;

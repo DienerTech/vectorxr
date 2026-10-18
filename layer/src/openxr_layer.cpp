@@ -2002,24 +2002,33 @@ bool OpenXrLayer::PollInputBindingDown(const InputBinding& binding) {
     if (poll.diagnostic_stage != InputBindingPollStage::None) {
         std::ostringstream signature_stream;
         signature_stream << ToString(poll.diagnostic_stage) << ":" << poll.result_code << ":"
-                         << poll.reacquire_result_code << ":" << poll.retry_result_code;
+                         << poll.reacquire_result_code << ":" << poll.retry_result_code
+                         << (poll.device_waits_for_rescan ? ":waits" : "");
         const std::string signature = signature_stream.str();
         const bool changed = state.signature != signature;
-        const bool interval_elapsed = !state.last_log_time.has_value() ||
-                                      now - *state.last_log_time >= kInputDeviceFailureLogInterval;
+        // A device waiting to be plugged in makes no attempts: once is enough.
+        const bool interval_elapsed = !poll.device_waits_for_rescan &&
+                                      (!state.last_log_time.has_value() ||
+                                       now - *state.last_log_time >= kInputDeviceFailureLogInterval);
         state.failure_active = true;
         if (!poll.device_retry_deferred) {
             ++state.failed_attempts;
         }
         if (changed || interval_elapsed) {
             std::ostringstream stream;
-            stream << "Input device polling unavailable: ";
+            stream << (poll.device_waits_for_rescan ? "Input device not connected: " : "Input device polling unavailable: ");
             append_context(stream);
             stream << ", failedAttempts=" << state.failed_attempts;
             if (state.suppressed_attempts > 0) {
                 stream << ", suppressedRepeats=" << state.suppressed_attempts;
             }
-            stream << ". The binding will remain inactive while VectorXR retries with reconnect backoff.";
+            if (poll.device_waits_for_rescan) {
+                stream << ". Its bindings stay inactive until it is plugged in: VectorXR looks again when "
+                       << (poll.device_arrival_notified ? "Windows reports a device connected, " : "")
+                       << "the next session starts, or Rescan inputs in the VectorXR app's Settings is pressed.";
+            } else {
+                stream << ". The binding will remain inactive while VectorXR retries with reconnect backoff.";
+            }
             logger_.Info(stream.str());
             state.signature = signature;
             state.last_log_time = now;
@@ -2872,6 +2881,7 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
 
 XrResult OpenXrLayer::DestroySession(XrSession session) {
     logger_.Info("xrDestroySession requested by application.");
+    SetInputDeviceSessionActive(false);
     TeardownWatch watch(logger_, "xrDestroySession", framegen_.TeardownWait(),
                         [this] { return framegen_.PresenterActivity(); },
                         framegen_teardowns_watched_.load(std::memory_order_acquire));
@@ -3011,6 +3021,10 @@ XrResult OpenXrLayer::BeginSession(XrSession session, const XrSessionBeginInfo* 
         }
         return result;
     }
+    // In-game: a bound device that is not connected is tried once now, then
+    // only when Windows reports a device's arrival or the app's Rescan
+    // inputs asks; a timed retry stalled the game every 2 s.
+    SetInputDeviceSessionActive(true);
 
     std::scoped_lock lock(mutex_);
     if (varjo_native_foveation_diagnostic_.locate_calls > 0) {
@@ -3080,6 +3094,7 @@ XrResult OpenXrLayer::BeginSession(XrSession session, const XrSessionBeginInfo* 
 
 XrResult OpenXrLayer::EndSession(XrSession session) {
     logger_.Info("xrEndSession requested by application.");
+    SetInputDeviceSessionActive(false); // devices not connected retry on the reconnect timer again
     TeardownWatch watch(logger_, "xrEndSession", framegen_.TeardownWait(),
                         [this] { return framegen_.PresenterActivity(); },
                         framegen_teardowns_watched_.load(std::memory_order_acquire));
@@ -16484,6 +16499,20 @@ void OpenXrLayer::PollRuntimeRelay() {
         if (pruned > 0) {
             logger_.Info("Removed " + std::to_string(pruned) +
                          " runtime status/control file(s) left by ended game sessions.");
+        }
+    }
+    if (!root.empty()) {
+        // Rescan inputs in the app: every running game, once per press.
+        std::uint64_t requested_at = 0;
+        if (ReadInputRescanRequest(InputRescanRequestPath(root), &requested_at) &&
+            requested_at > input_rescan_taken_at_) {
+            const bool due = InputRescanRequestDue(requested_at, input_rescan_taken_at_, RuntimeRelayUnixMilliseconds());
+            input_rescan_taken_at_ = requested_at;
+            if (due) {
+                RescanInputDevices();
+                logger_.Info("Input devices: looking again for bound devices that were not connected (Rescan inputs "
+                             "in the VectorXR app).");
+            }
         }
     }
     if (root.empty() || session_id.empty()) return;

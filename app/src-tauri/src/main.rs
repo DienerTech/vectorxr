@@ -2891,6 +2891,26 @@ fn set_runtime_quadviews_diagnostic_visualization(
     Ok(revision)
 }
 
+// Rescan inputs: one request for every running game (the layer's
+// InputRescanRequestPath); each takes a request once, while it is fresh.
+fn write_input_rescan_request(relay_root: &Path, requested_at: u64) -> Result<(), String> {
+    let request = serde_json::json!({
+        "protocolVersion": RUNTIME_RELAY_PROTOCOL_VERSION,
+        "requestedAtUnixMilliseconds": requested_at,
+    });
+    let content = serde_json::to_string_pretty(&request).map_err(|error| error.to_string())?;
+    write_text_safely(&relay_root.join("input-rescan.json"), &content)
+}
+
+// Asks the running games to look again for bound input devices that were not
+// connected (a hot-plugged controller Windows did not report). Returns how
+// many games are running with VectorXR.
+#[tauri::command]
+fn request_input_rescan() -> Result<usize, String> {
+    write_input_rescan_request(&resolve_runtime_relay_root(), unix_milliseconds())?;
+    Ok(read_live_runtime_statuses().len())
+}
+
 #[tauri::command]
 async fn load_openxr_layers(
     include_signatures: Option<bool>,
@@ -3084,6 +3104,28 @@ fn play_test_sound_blocking(
 
 #[cfg(test)]
 mod tests {
+    // The request the layer reads (ReadInputRescanRequest): its protocol
+    // version and the press's time, at the relay root.
+    #[test]
+    fn input_rescan_request_is_what_the_layer_reads() {
+        let root = std::env::temp_dir().join(format!(
+            "vectorxr-rescan-{}-{}",
+            std::process::id(),
+            super::unix_milliseconds()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        super::write_input_rescan_request(&root, 1_700_000_000_123).unwrap();
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(root.join("input-rescan.json")).unwrap()).unwrap();
+        assert_eq!(written["protocolVersion"], 1);
+        assert_eq!(written["requestedAtUnixMilliseconds"], 1_700_000_000_123u64);
+        super::write_input_rescan_request(&root, 1_700_000_005_000).unwrap();
+        let again: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(root.join("input-rescan.json")).unwrap()).unwrap();
+        assert_eq!(again["requestedAtUnixMilliseconds"], 1_700_000_005_000u64, "a later press replaces the request");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn osd_defaults_and_round_trip() {
         let legacy: super::CoreConfig = serde_json::from_str(r#"{"enabled":true,"logLevel":"info"}"#).unwrap();
@@ -4008,6 +4050,7 @@ fn main() {
             clear_turbo_fault_logs,
             load_debug_sources,
             set_runtime_quadviews_diagnostic_visualization,
+            request_input_rescan,
             load_gpu_capabilities,
             list_input_devices,
             capture_device_binding,

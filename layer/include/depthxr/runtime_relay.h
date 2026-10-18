@@ -50,6 +50,18 @@ std::filesystem::path RuntimeControlPath(const std::filesystem::path& root, cons
 std::filesystem::path RuntimeStatusPath(const std::filesystem::path& root, const std::string& session_id);
 std::uint64_t RuntimeRelayUnixMilliseconds();
 
+// The VectorXR app's Rescan inputs, for every running game at once
+// (<root>/input-rescan.json): each looks again for bound input devices that
+// were not connected. A request is taken once, and only while fresh, so a
+// game started later never replays an old one.
+constexpr std::uint64_t kInputRescanFreshMilliseconds = 10'000;
+std::filesystem::path InputRescanRequestPath(const std::filesystem::path& root);
+// The request's time (Unix ms); false when there is none or it is unreadable.
+bool ReadInputRescanRequest(const std::filesystem::path& path, std::uint64_t* requested_at_unix_milliseconds);
+// Whether a request at `requested_at` is new since `last_taken` and fresh at
+// `now` (all Unix ms).
+bool InputRescanRequestDue(std::uint64_t requested_at, std::uint64_t last_taken, std::uint64_t now);
+
 // Session ids begin "<process id>-<session start, Unix ms>-". Unknown or
 // access-denied processes count as alive; a process created after the session
 // started is a reused process id, not the session's.

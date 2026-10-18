@@ -189,6 +189,27 @@ std::filesystem::path ResolveRuntimeRelayRoot() {
 std::filesystem::path RuntimeControlPath(const std::filesystem::path& root, const std::string& session_id) { return root / "control" / (session_id + ".json"); }
 std::filesystem::path RuntimeStatusPath(const std::filesystem::path& root, const std::string& session_id) { return root / "status" / (session_id + ".json"); }
 
+std::filesystem::path InputRescanRequestPath(const std::filesystem::path& root) { return root / "input-rescan.json"; }
+
+bool ReadInputRescanRequest(const std::filesystem::path& path, std::uint64_t* requested_at_unix_milliseconds) {
+    std::ifstream stream(path);
+    if (!stream) return false;
+    std::ostringstream buffer;
+    buffer << stream.rdbuf();
+    const std::string content = buffer.str();
+    const auto protocol_version = ReadUnsigned(content, "protocolVersion");
+    const auto requested_at = ReadUnsigned(content, "requestedAtUnixMilliseconds");
+    if (!protocol_version || *protocol_version != kRuntimeRelayProtocolVersion || !requested_at || *requested_at == 0) {
+        return false;
+    }
+    *requested_at_unix_milliseconds = *requested_at;
+    return true;
+}
+
+bool InputRescanRequestDue(std::uint64_t requested_at, std::uint64_t last_taken, std::uint64_t now) {
+    return requested_at > last_taken && requested_at + kInputRescanFreshMilliseconds >= now;
+}
+
 std::uint64_t RuntimeRelayUnixMilliseconds() {
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
 }

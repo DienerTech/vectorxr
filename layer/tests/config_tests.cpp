@@ -3483,6 +3483,75 @@ void TestInputConnectPriming() {
            "Released inputs must work immediately after a reconnect");
 }
 
+// A bound device that is not connected (DirectInput: not registered). In a
+// session it makes no timed attempts: each attempt stalled the game (Star
+// Citizen's frames, 48-70 ms every 2.07 s, 2026-10-18). It is tried once per
+// rescan (a device's arrival, Rescan inputs, a session's start); outside a
+// session the reconnect timer still runs, and a device that is there but
+// failing keeps the timer in a session too.
+void TestInputDeviceAbsentWaitsForRescan() {
+    using Backoff = depthxr::InputDeviceRetryBackoff;
+    using namespace std::chrono_literals;
+    const std::wstring stecs = L"{stecs-guid}";
+    const std::wstring vkb = L"{vkb-guid}";
+    const Backoff::TimePoint start{};
+
+    Backoff backoff(100ms, 400ms);
+    backoff.SetSessionActive(true);
+    backoff.RecordAbsent(stecs, start);
+    Expect(backoff.WaitsForRescan(stecs) && !backoff.ShouldAttempt(stecs, start + 10min) &&
+               backoff.RetryDelayRemaining(stecs, start + 10min) == 0ms,
+           "In a session, an absent device must make no timed attempts, however long it waits");
+    backoff.Rescan();
+    Expect(!backoff.WaitsForRescan(stecs) && backoff.ShouldAttempt(stecs, start + 10min),
+           "A rescan must let an absent device be tried once");
+    backoff.RecordAbsent(stecs, start + 10min);
+    Expect(backoff.WaitsForRescan(stecs) && !backoff.ShouldAttempt(stecs, start + 20min),
+           "Still absent after its rescan attempt, the device must wait for the next rescan");
+
+    backoff.RecordFailure(vkb, start);
+    Expect(!backoff.WaitsForRescan(vkb) && !backoff.ShouldAttempt(vkb, start + 99ms) &&
+               backoff.ShouldAttempt(vkb, start + 100ms),
+           "A device that is there but failing must keep the reconnect timer in a session");
+
+    backoff.SetSessionActive(false);
+    Expect(!backoff.WaitsForRescan(stecs) && backoff.ShouldAttempt(stecs, start + 20min),
+           "Outside a session, an absent device must retry on the reconnect timer");
+    backoff.SetSessionActive(true);
+    Expect(backoff.WaitsForRescan(stecs), "Back in a session, the absent device must wait for a rescan again");
+
+    backoff.Rescan();
+    backoff.RecordSuccess(stecs);
+    Expect(!backoff.WaitsForRescan(stecs) && backoff.ShouldAttempt(stecs, start + 20min) &&
+               backoff.ConsecutiveFailures(stecs) == 0,
+           "A device found on a rescan must clear its absent state");
+    backoff.RecordAbsent(stecs, start + 21min);
+    backoff.RecordFailure(stecs, start + 21min);
+    Expect(!backoff.WaitsForRescan(stecs) && backoff.ShouldAttempt(stecs, start + 21min + 400ms),
+           "A device that is there again after being absent must use the reconnect timer");
+
+    // Ten minutes in a session with ten bindings on an unplugged throttle,
+    // polled every 30 ms, and one device arrival (another controller plugged
+    // in) after five: the session's start and that arrival are the only
+    // attempts. On the timer alone it was one every 2 s (300).
+    Backoff production_policy;
+    production_policy.SetSessionActive(true);
+    production_policy.Rescan(); // the session's start
+    std::size_t attempts = 0;
+    for (int tick = 0; tick <= 20'000; ++tick) {
+        const Backoff::TimePoint now = start + tick * 30ms;
+        if (tick == 10'000) production_policy.Rescan();
+        for (int binding = 0; binding < 10; ++binding) {
+            if (production_policy.ShouldAttempt(stecs, now)) {
+                ++attempts;
+                production_policy.RecordAbsent(stecs, now);
+            }
+        }
+    }
+    Expect(attempts == 2, "An unplugged device in a ten-minute session must be tried only at the session's start "
+                          "and on the one device arrival");
+}
+
 void TestInputDeviceRetryBackoff() {
     using Backoff = depthxr::InputDeviceRetryBackoff;
     using namespace std::chrono_literals;
@@ -4189,6 +4258,7 @@ int main() {
     TestNumpadActivationKeys();
     TestDeviceInputPathsAndHatDirections();
     TestInputDeviceRetryBackoff();
+    TestInputDeviceAbsentWaitsForRescan();
     TestInputConnectPriming();
 #ifdef _WIN32
     TestD3D11SharpenShaderRegression();

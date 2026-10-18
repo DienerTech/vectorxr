@@ -77,10 +77,16 @@ While you're here:
 - **System Tray** (also under General, stored on this PC only) puts a VectorXR icon in the
   Windows notification area. Its menu shows the health status and holds the **VectorXR enabled**
   switch, the **Log level** (Info or Debug) and **Export Debug**; a change made there is saved
-  at once. **While open** (the default) shows the icon while the app is open, **Keep running**
-  also keeps VectorXR in the tray when you close its window (use **Quit VectorXR** in the tray
-  menu to exit), and **Off** shows no icon. Starting VectorXR again while it runs brings its
-  window back.
+  at once. **On** (the default) also keeps the app in the tray when you close its window (use
+  **Quit VectorXR** in the tray menu to exit); **Off** shows no icon, and closing the window quits
+  the app. Starting VectorXR again while it runs brings its window back. The app and its tray are a
+  helper for your settings, not the OpenXR layer: VectorXR keeps working in your games with the
+  app and the tray closed, while **VectorXR Enabled** is on.
+- **Input Devices** (also under General) has **Rescan inputs**, for use in-game. While a game
+  runs, VectorXR looks for a bound controller that isn't connected only when Windows reports one
+  plugged in, and when the next VR session starts, so checking never stalls the game. If you plug a
+  controller in during a session and its bindings don't respond, press **Rescan inputs** and the
+  running games look again.
 - **Logging** sets the **Log Level** and **Log Retention**, opens the log folder with
   **View Logs**, and saves a support ZIP with **Export Debug**, the same as on Home.
 - **Sound Feedback** sets the master volume for the activate/deactivate cues you can attach to

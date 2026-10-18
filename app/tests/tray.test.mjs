@@ -3,7 +3,7 @@ import test from 'node:test'
 
 import { buildHealthSummary } from '../src/lib/health.ts'
 import { defaultConfig } from '../src/lib/model.ts'
-import { loadTrayMode, trayModeOptions, trayStatus } from '../src/lib/tray.ts'
+import { loadTrayEnabled, storeTrayEnabled, trayStatus } from '../src/lib/tray.ts'
 import { createTaskQueue } from '../src/lib/taskQueue.ts'
 
 function health(config) {
@@ -32,9 +32,25 @@ test('the tray shows the saved switch, log level and health', () => {
   assert.equal(trayStatus(saved, health(saved), false).available, false)
 })
 
-test('tray modes default to an icon while the app is open', () => {
-  assert.equal(loadTrayMode(), 'on')
-  assert.deepEqual(trayModeOptions.map((option) => option.value), ['off', 'on', 'keepRunning'])
+test('the tray is on or off: on by default, and both older modes with an icon are on', () => {
+  assert.equal(loadTrayEnabled(), true)
+  const stored = new Map()
+  globalThis.window = {
+    localStorage: { getItem: (key) => stored.get(key) ?? null, setItem: (key, value) => stored.set(key, String(value)) },
+  }
+  try {
+    for (const [value, enabled] of [['off', false], ['on', true], ['keepRunning', true], [null, true]]) {
+      if (value === null) stored.delete('vectorxr-tray-mode')
+      else stored.set('vectorxr-tray-mode', value)
+      assert.equal(loadTrayEnabled(), enabled, `stored ${value}`)
+    }
+    storeTrayEnabled(false)
+    assert.equal(stored.get('vectorxr-tray-mode'), 'off')
+    storeTrayEnabled(true)
+    assert.equal(stored.get('vectorxr-tray-mode'), 'on')
+  } finally {
+    delete globalThis.window
+  }
 })
 
 test('queued saves run one at a time, in order, past a failure', async () => {
