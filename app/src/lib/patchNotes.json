@@ -34,7 +34,8 @@
       {
         "html": "<strong>On-Screen Display</strong>",
         "items": [
-          "<strong>New PERFORMANCE row</strong> (on by default in the expanded layout, optional in compact): how much of the frame budget the game's CPU and GPU use, so you can see which one limits you, plus the game's video memory use against its budget. It samples only while the row is shown."
+          "<strong>New PERFORMANCE row</strong> (on by default in the expanded layout, optional in compact): how much of the frame budget the game's CPU and GPU use, so you can see which one limits you, plus the game's video memory use against its budget. It samples only while the row is shown.",
+          "<strong>The OSD shows in games that restart VR at launch.</strong> OpenVR games through OpenComposite start their VR session twice, and on Virtual Desktop the OSD then stayed off, even when its binding showed it, until a setting was saved."
         ]
       },
       {

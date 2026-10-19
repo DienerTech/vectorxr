@@ -11760,6 +11760,10 @@ void OpenXrLayer::ResetSessionState() {
     osd_should_render_.store(true);
     osd_last_input_poll_.reset();
     osd_toggle_down_=false; osd_cycle_down_=false; osd_was_enabled_=false;osd_vulkan_.store(false);turbo_metrics_active_.store(false);
+    // Resolve the settings again for the next session, even one the runtime
+    // gives this session's handle (Virtual Desktop under OpenComposite):
+    // what the resolve sets, such as osd_monitoring_, starts over here.
+    resolved_settings_generation_ = ~0ull;
     if (!runtime_relay_session_id_.empty()) {
         runtime_relay_sessions_to_remove_.push_back(runtime_relay_session_id_);
         runtime_relay_session_id_.clear();
