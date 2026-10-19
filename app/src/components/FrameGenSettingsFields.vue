@@ -112,6 +112,12 @@ const flowQualities: { value: FrameGenFlowQuality; label: string; resolution: st
 ]
 const flowQuality = computed(() => flowQualities.find((item) => item.value === props.settings.flowQuality) ?? flowQualities[1])
 
+// Extend head prediction stays out of the app until it has flown: on a Pimax
+// PC with Virtual Desktop installed it finds no runtime clock. The layer still
+// reads extendHeadPrediction from settings.json, and a profile that has it on
+// still shows it in the summary and clears it with Reset.
+const showHeadPrediction = false
+
 const advancedDefaults = defaultFrameGenSettings()
 const advancedAtDefaults = computed(() =>
   props.settings.flowQuality === advancedDefaults.flowQuality &&
@@ -264,7 +270,7 @@ function resetAdvanced() {
           </span>
         </label>
 
-        <label class="flex cursor-pointer items-start gap-3 rounded-[1rem] border p-4 surface-panel lg:col-span-3">
+        <label v-if="showHeadPrediction" class="flex cursor-pointer items-start gap-3 rounded-[1rem] border p-4 surface-panel lg:col-span-3">
           <input
             v-model="settings.extendHeadPrediction"
             class="mt-1 h-4 w-4 shrink-0 accent-depthxr-copper"

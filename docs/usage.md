@@ -865,17 +865,6 @@ needs a game restart; turning it off applies at once.
     sooner where motion is uncertain. You get fewer warping artifacts and more local judder.
   - **Motion limit** (2–25% of view width, default 10%) is the farthest a generated frame may
     move image content. Motion beyond it falls back to the real image.
-  - **Extend head prediction** (experimental, off by default). Frame Generation has the game
-    render up to about 150 ms ahead, and some runtimes predict your head only part of that way
-    (Pimax's about 20 ms). The headset then rotates the image to where your head turned, which
-    shows black at the edge you turn toward. With this on, VectorXR measures during your first
-    head turns how far the runtime predicts, then carries your head's turn over the rest. The
-    On-Screen Display's Frame Generation line shows **Head: measuring**, then **Head +NN ms**:
-    how far past the runtime's prediction it extends. **Head: runtime predicts** means the
-    runtime already predicts far enough and nothing is extended; **Head: no runtime clock**
-    means it cannot work this session (the runtime lacks the clock it needs, or it was turned
-    on after the game started). Turn it on before you start the game.
-    In `settings.json`, set `"extendHeadPrediction": true` in a profile's settings.
   - **Reset advanced settings** returns them all to their defaults.
 - **Diagnostic view** applies to every Frame Generation session: **Off**, **Motion flow**
   (color-coded motion overlay on generated frames), **Confidence** (generated frames painted
