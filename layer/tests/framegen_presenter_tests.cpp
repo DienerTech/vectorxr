@@ -162,6 +162,9 @@ struct GpuLog {
     int wait_idles{0};
     bool idle_fails{false}; // WaitIdle reports GPU work that did not finish
     bool fail{false};
+    // A failure frees every view's history, as the Direct3D 12 backend's
+    // failed recording does (its views are rebuilt).
+    bool fail_frees{false};
     bool uncaptured{false}; // views not captured at release: nothing generated
     bool threaded{false};
     bool depth{false};
@@ -423,6 +426,12 @@ class FakeGpu final : public FrameGenGpu {
             }
         }
         if (log_->fail) {
+            if (log_->fail_frees) {
+                history_.clear();
+                log_->history_bytes = 0;
+                std::scoped_lock lock(ring_mutex_);
+                rings_.clear();
+            }
             error = "fake GPU failure";
             return false;
         }
@@ -7556,6 +7565,56 @@ void TestCanvasRingAcrossEngagements() {
     Check(five && three, "canvas ring: the summaries name the ring in use");
 }
 
+// A recording that fails frees every view's history (the Direct3D 12
+// backend rebuilds its views), so the run after the pause holds none: its
+// ring is chosen as for images made anew, with a tenth of the budget to
+// spare, not kept as if five were still held (two slots and a twentieth of
+// the budget short).
+void TestCanvasRingAfterAFailedRecording() {
+    SessionLog log("canvas-ring-failure");
+    constexpr std::uint64_t kBudget = 4ull << 30;
+    // The game's share once five are held: they still fit with a twentieth
+    // to spare, but five made anew do not with a tenth.
+    constexpr std::uint64_t kGame = kBudget - kBudget / 10;
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    gpu.memory_budget = kBudget;
+    gpu.memory_game = kBudget / 2;
+    gpu.fail_frees = true;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2, app, runtime, owned,
+             log.logger.get());
+    // A retry after a delay, as a session's: the presenter thread leaves
+    // while paused, and the retry starts it again (choosing its ring).
+    presenter.SetRetryPolicy(300ms, 3);
+    for (int i = 0; i < 3; ++i) app->Frame();
+    const auto analyzed = [&](int from) {
+        const auto ready = [&] { return presenter.Status().threaded && gpu.analyzes - from >= 6; };
+        RunWork(*app, 3000ms, kLightWork, [&](const XrFrameState&) { return ready(); });
+        return ready();
+    };
+    Check(analyzed(0) && gpu.canvas_ring == 5, "failed recording: five with room (" +
+                                                   std::to_string(gpu.canvas_ring.load()) + ")");
+    gpu.memory_game = kGame;
+    gpu.fail = true;
+    RunWork(*app, 3000ms, kLightWork,
+            [&](const XrFrameState&) { return presenter.Status().state == FrameGenState::kPaused; });
+    gpu.fail = false;
+    Check(presenter.Status().state == FrameGenState::kPaused && gpu.history_bytes == 0,
+          "failed recording: paused, the history freed");
+    RunWork(*app, 3000ms, kLightWork, [&](const XrFrameState&) { return !presenter.Status().threaded; });
+    Check(!presenter.Status().threaded && presenter.Status().state == FrameGenState::kPaused,
+          "failed recording: paused, the presenter thread left");
+    Check(analyzed(gpu.analyzes), "failed recording: the automatic retry presents from its thread again");
+    Check(gpu.canvas_ring == 3, "failed recording: the next run keeps three, its history made anew (" +
+                                    std::to_string(gpu.canvas_ring.load()) + ")");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "failed recording: calls stayed ordered");
+}
+
 // A long session's pauses, far apart (a runtime rejecting a frame after a
 // recenter, GPU failures under a loading screen): each retries by itself.
 // The automatic retries were the session's, so the pause after the last
@@ -10785,6 +10844,7 @@ int main(int argc, char** argv) {
     // A long session: video memory moving between engagements, pauses far
     // apart, and what the summaries and the log say about both.
     RUN(TestCanvasRingAcrossEngagements);
+    RUN(TestCanvasRingAfterAFailedRecording);
     RUN(TestRetriesRestoredAfterQuietStretch);
     RUN(TestRetriesNotRestoredByALongPause);
     RUN(TestDynamicSummaryShowsHold);

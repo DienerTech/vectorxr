@@ -4105,6 +4105,13 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         // in use.
         held_ring_ = FrameGenHistoryRing(tuning);
         held_slot_bytes_ = HistorySlotBytes(projection.views, projection.viewCount);
+    } else if (!ok) {
+        // A failed recording may have freed the views' history (Direct3D 12
+        // rebuilds them): none counts as held, so the next run's ring is
+        // chosen as for images made anew. Counting too little held only
+        // errs toward three.
+        held_ring_ = 0;
+        held_slot_bytes_ = 0;
     }
     if (!ok && executed.uncaptured) {
         // The first frame of a view, or one whose region changed: its image
