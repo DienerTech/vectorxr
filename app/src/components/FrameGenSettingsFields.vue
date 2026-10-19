@@ -57,9 +57,9 @@ const frameRates: { value: FrameRate; label: string; badge?: string; description
 
 const fixedRates: { value: FrameGenFixedMultiplier; label: string; description: string }[] = [
   { value: 'auto', label: 'Auto', description: 'Picks 2x, 3x or 4x as the game needs, and generates nothing while the game keeps up on its own.' },
-  { value: '2x', label: '2x', description: 'The game runs at 1/2 the refresh rate, such as 45 fps at 90 Hz.' },
-  { value: '3x', label: '3x', description: 'The game runs at 1/3 the refresh rate, such as 30 fps at 90 Hz.' },
-  { value: '4x', label: '4x', description: 'The game runs at 1/4 the refresh rate, such as 22.5 fps at 90 Hz. The most artifacts; for the heaviest games.' },
+  { value: '2x', label: '2x', description: 'The game runs at up to 1/2 the refresh rate, such as 45 fps at 90 Hz. Below that, pacing is less even.' },
+  { value: '3x', label: '3x', description: 'The game runs at up to 1/3 the refresh rate, such as 30 fps at 90 Hz. Below that, pacing is less even.' },
+  { value: '4x', label: '4x', description: 'The game runs at up to 1/4 the refresh rate, such as 22.5 fps at 90 Hz. The most artifacts; for the heaviest games.' },
 ]
 
 function isFixed(value: string): value is FrameGenFixedMultiplier {
@@ -112,18 +112,27 @@ const flowQualities: { value: FrameGenFlowQuality; label: string; resolution: st
 ]
 const flowQuality = computed(() => flowQualities.find((item) => item.value === props.settings.flowQuality) ?? flowQualities[1])
 
+// Extend head prediction stays out of the app until it has flown: on a Pimax
+// PC with Virtual Desktop installed it finds no runtime clock. The layer still
+// reads extendHeadPrediction from settings.json, and a profile that has it on
+// still shows it in the summary and clears it with Reset.
+const showHeadPrediction = false
+
 const advancedDefaults = defaultFrameGenSettings()
 const advancedAtDefaults = computed(() =>
   props.settings.flowQuality === advancedDefaults.flowQuality &&
   props.settings.artifactSuppression === advancedDefaults.artifactSuppression &&
-  props.settings.motionLimitPercent === advancedDefaults.motionLimitPercent)
+  props.settings.motionLimitPercent === advancedDefaults.motionLimitPercent &&
+  !props.settings.extendHeadPrediction)
 const advancedSummary = computed(() =>
-  `${flowQuality.value.label} flow · Suppression ${props.settings.artifactSuppression} · Motion limit ${props.settings.motionLimitPercent}%`)
+  `${flowQuality.value.label} flow · Suppression ${props.settings.artifactSuppression} · Motion limit ${props.settings.motionLimitPercent}%` +
+  (props.settings.extendHeadPrediction ? ' · Head prediction' : ''))
 
 function resetAdvanced() {
   props.settings.flowQuality = advancedDefaults.flowQuality
   props.settings.artifactSuppression = advancedDefaults.artifactSuppression
   props.settings.motionLimitPercent = advancedDefaults.motionLimitPercent
+  delete props.settings.extendHeadPrediction
 }
 </script>
 
@@ -258,6 +267,25 @@ function resetAdvanced() {
           </span>
           <span class="mt-2 block text-xs leading-5 text-muted">
             The farthest a generated frame may move the image, as a share of view width. Faster motion shows the real image.
+          </span>
+        </label>
+
+        <label v-if="showHeadPrediction" class="flex cursor-pointer items-start gap-3 rounded-[1rem] border p-4 surface-panel lg:col-span-3">
+          <input
+            v-model="settings.extendHeadPrediction"
+            class="mt-1 h-4 w-4 shrink-0 accent-depthxr-copper"
+            type="checkbox"
+          />
+          <span class="min-w-0">
+            <span class="flex flex-wrap items-center gap-2">
+              <span class="eyebrow text-xs uppercase tracking-[0.18em]">Extend head prediction</span>
+              <span class="chip-warning rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em]">
+                Experimental
+              </span>
+            </span>
+            <span class="mt-2 block text-xs leading-5 text-muted">
+              Frame Generation has the game render up to ~150 ms ahead, and some runtimes, such as Pimax's, predict your head only ~20 ms of that. This carries your head's turn over the rest, for less black at the edge you turn toward. Turn it on before starting the game.
+            </span>
           </span>
         </label>
       </div>

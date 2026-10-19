@@ -1407,7 +1407,7 @@ void TestFrameGenModuleOptional() {
     Expect(resolved.core.osd.show_framegen && !resolved.core.osd.compact_show_framegen,
            "OSD Frame Gen rows should default to full-panel only");
     Expect(resolved.core.osd.show_framegen_fps, "The OSD should show Frame Generation beside FPS by default");
-    Expect(resolved.core.osd.body_order.size() == 5 && resolved.core.osd.body_order[2] == "framegen",
+    Expect(resolved.core.osd.body_order.size() == 6 && resolved.core.osd.body_order[3] == "framegen",
            "Default OSD body order should include the Frame Gen row after Turbo");
 }
 
@@ -1516,6 +1516,48 @@ void TestFrameGenInvalidSettingsRejected() {
            "Unknown Frame Generation keys were not ignored with a warning: " + unknown.error);
 }
 
+// The PERFORMANCE row: on in the expanded layout by default, after the graph;
+// off in the compact layout; appended to saved orders without it.
+void TestOsdPerformanceRow() {
+    const auto parse=[](const std::string& osd) {
+        return depthxr::ParseConfig(R"({"version":3,"core":{"enabled":true,"logLevel":"info","osd":)"+osd+R"(},"applications":[],"modules":{"depthxr":{"enabled":false,"defaults":{"stereoBoost":1,"convergence":0},"bindings":{"toggleEnabled":{"type":"none"}},"profiles":[]},"pivotxr":{"enabled":false,"defaults":{},"profiles":[]}}})");
+    };
+    const auto defaults=parse("{}");
+    const auto& osd=defaults.document.core.osd;
+    Expect(defaults.ok && osd.show_performance && !osd.compact_show_performance,
+           "The performance row should default on in the expanded layout and off in the compact one");
+    Expect(osd.body_order==std::vector<std::string>{"graph","performance","turbo","framegen","pivot","modules"},
+           "The default OSD body order should put the performance row after the graph");
+    const auto configured=parse(R"({"showPerformance":false,"compactShowPerformance":true,"bodyOrder":["performance","graph","turbo","framegen","pivot","modules"]})");
+    Expect(configured.ok && !configured.document.core.osd.show_performance &&
+           configured.document.core.osd.compact_show_performance &&
+           configured.document.core.osd.body_order.front()=="performance",
+           "The performance row's settings were not parsed: "+configured.error);
+    Expect(configured.warnings.empty(),"The performance row's keys were reported unknown");
+    const auto saved=parse(R"({"bodyOrder":["pivot","modules","graph","turbo","framegen"]})");
+    Expect(saved.ok && saved.document.core.osd.body_order.size()==6 && saved.document.core.osd.body_order.back()=="performance",
+           "A saved order without the performance row should get it at the end");
+    Expect(!parse(R"({"showPerformance":"yes"})").ok && !parse(R"({"compactShowPerformance":1})").ok,
+           "A non-boolean performance row setting was accepted");
+    Expect(!parse(R"({"bodyOrder":["performance","performance"]})").ok,"A repeated performance row was accepted");
+    const auto preset=parse(R"({"customPresets":[{"name":"Numbers","settings":{"showPerformance":true,"compactShowPerformance":true}}]})");
+    Expect(preset.ok,"OSD presets should accept the performance row: "+preset.error);
+    // As the app saves it: bodyOrder holds the rows 0.19.0-0.19.2 layers know,
+    // rowOrder the full order, which wins.
+    const auto split=parse(R"({"bodyOrder":["pivot","graph","turbo","framegen","modules"],"rowOrder":["pivot","performance","graph","turbo","framegen","modules"],)"
+                           R"("customPresets":[{"name":"Cockpit","settings":{"bodyOrder":["modules","graph"],"rowOrder":["performance","modules","graph"]}}]})");
+    Expect(split.ok && split.warnings.empty() &&
+               split.document.core.osd.body_order==std::vector<std::string>{"pivot","performance","graph","turbo","framegen","modules"},
+           "rowOrder should give the full row order: "+split.error);
+    // A row a newer app adds is skipped with a warning, not a failed config.
+    const auto newer=parse(R"({"rowOrder":["graph","thermals","performance","turbo","framegen","pivot","modules"]})");
+    Expect(newer.ok && newer.document.core.osd.body_order==std::vector<std::string>{"graph","performance","turbo","framegen","pivot","modules"} &&
+               newer.warnings==std::vector<std::string>{"Unknown value ignored: core.osd.rowOrder \"thermals\""},
+           "An unknown OSD row should be skipped with a warning: "+newer.error);
+    Expect(!parse(R"({"rowOrder":["graph","graph"]})").ok && !parse(R"({"rowOrder":["graph",3]})").ok,
+           "A repeated or non-string rowOrder entry was accepted");
+}
+
 void TestFrameGenOsdRows() {
     const auto result = depthxr::ParseConfig(FrameGenConfigJson(R"json({ "enabled": false })json",
         R"json({ "showFramegen": false, "compactShowFramegen": true, "showFramegenFps": false, "bodyOrder": ["modules", "graph", "turbo", "pivot"] })json"));
@@ -1529,7 +1571,7 @@ void TestFrameGenOsdRows() {
     const auto preset = depthxr::ParseConfig(FrameGenConfigJson(R"json({ "enabled": false })json",
         R"json({ "customPresets": [ { "name": "Quiet", "settings": { "showFramegenFps": false } } ] })json"));
     Expect(preset.ok, "OSD presets should accept showFramegenFps: " + preset.error);
-    Expect(osd.body_order.size() == 5 && osd.body_order.back() == "framegen",
+    Expect(osd.body_order.size() == 6 && osd.body_order.back() == "framegen" && osd.body_order[4] == "performance",
            "Saved OSD orders without the Frame Gen row should append it");
     const auto ordered = depthxr::ParseConfig(FrameGenConfigJson(R"json({ "enabled": false })json",
         R"json({ "bodyOrder": ["framegen", "graph", "turbo", "pivot", "modules"] })json"));
@@ -2577,6 +2619,33 @@ void TestRuntimeRelayControlAndStatusRoundTrip() {
     status_content << status_stream.rdbuf();
     Expect(status_content.str().find("\"acknowledgedRevision\": 17") != std::string::npos,
            "Runtime status acknowledgement was not serialized");
+    Expect(status_content.str().find("\"framegen\":") == std::string::npos,
+           "Runtime status wrote Frame Generation rates for a session without it");
+    status_stream.close(); // an open reader keeps the atomic replace from taking the file
+
+    // Frame Generation's rates as numbers: a game slower than a fixed 2x hold.
+    depthxr::RuntimeFrameGenRates rates;
+    rates.mode = "extrapolate";
+    rates.frame_rate = "2x";
+    rates.generating = true;
+    rates.multiplier = 2;
+    rates.refresh_hz = 80.0;
+    rates.hold_fps = 40.0;
+    rates.app_fps = 34.14;
+    rates.output_fps = 80.0;
+    rates.distinct_fps = 79.56;
+    status.framegen_rates = rates;
+    Expect(depthxr::WriteRuntimeStatus(status_path, status, &relay_error),
+           "Failed to write runtime status with Frame Generation rates: " + relay_error);
+    std::ifstream rates_stream(status_path);
+    std::ostringstream rates_content;
+    rates_content << rates_stream.rdbuf();
+    Expect(rates_content.str().find("\"framegen\": { \"mode\": \"extrapolate\", \"frameRate\": \"2x\", "
+                                    "\"generating\": true, \"multiplier\": 2, \"refreshHz\": 80.0, \"holdFps\": 40.0, "
+                                    "\"appFps\": 34.1, \"outputFps\": 80.0, \"distinctFps\": 79.6 },") != std::string::npos,
+           "Runtime status did not serialize Frame Generation's rates");
+    Expect(rates_content.str().find("\"quadviewsDimensionsAt\": 0,") != std::string::npos,
+           "Runtime status lost the fields after Frame Generation's rates");
     std::filesystem::remove_all(test_directory, filesystem_error);
 }
 
@@ -3441,6 +3510,109 @@ void TestInputConnectPriming() {
            "Released inputs must work immediately after a reconnect");
 }
 
+// A bound device that is not connected (DirectInput: not registered). In a
+// session it makes no timed attempts: each attempt stalled the game (Star
+// Citizen's frames, 48-70 ms every 2.07 s, 2026-10-18). It is tried once per
+// rescan (a device's arrival, Rescan inputs, a session's start); outside a
+// session the reconnect timer still runs, and a device that is there but
+// failing keeps the timer in a session too.
+void TestInputDeviceAbsentWaitsForRescan() {
+    using Backoff = depthxr::InputDeviceRetryBackoff;
+    using namespace std::chrono_literals;
+    const std::wstring stecs = L"{stecs-guid}";
+    const std::wstring vkb = L"{vkb-guid}";
+    const Backoff::TimePoint start{};
+
+    Backoff backoff(100ms, 400ms);
+    backoff.SetSessionActive(true);
+    backoff.RecordAbsent(stecs, start);
+    Expect(backoff.WaitsForRescan(stecs) && !backoff.ShouldAttempt(stecs, start + 10min) &&
+               backoff.RetryDelayRemaining(stecs, start + 10min) == 0ms,
+           "In a session, an absent device must make no timed attempts, however long it waits");
+    backoff.Rescan();
+    Expect(!backoff.WaitsForRescan(stecs) && backoff.ShouldAttempt(stecs, start + 10min),
+           "A rescan must let an absent device be tried once");
+    backoff.RecordAbsent(stecs, start + 10min);
+    Expect(backoff.WaitsForRescan(stecs) && !backoff.ShouldAttempt(stecs, start + 20min),
+           "Still absent after its rescan attempt, the device must wait for the next rescan");
+
+    backoff.RecordFailure(vkb, start);
+    Expect(!backoff.WaitsForRescan(vkb) && !backoff.ShouldAttempt(vkb, start + 99ms) &&
+               backoff.ShouldAttempt(vkb, start + 100ms),
+           "A device that is there but failing must keep the reconnect timer in a session");
+
+    backoff.SetSessionActive(false);
+    Expect(!backoff.WaitsForRescan(stecs) && backoff.ShouldAttempt(stecs, start + 20min),
+           "Outside a session, an absent device must retry on the reconnect timer");
+    backoff.SetSessionActive(true);
+    Expect(backoff.WaitsForRescan(stecs), "Back in a session, the absent device must wait for a rescan again");
+
+    backoff.Rescan();
+    backoff.RecordSuccess(stecs);
+    Expect(!backoff.WaitsForRescan(stecs) && backoff.ShouldAttempt(stecs, start + 20min) &&
+               backoff.ConsecutiveFailures(stecs) == 0,
+           "A device found on a rescan must clear its absent state");
+    backoff.RecordAbsent(stecs, start + 21min);
+    backoff.RecordFailure(stecs, start + 21min);
+    Expect(!backoff.WaitsForRescan(stecs) && backoff.ShouldAttempt(stecs, start + 21min + 400ms),
+           "A device that is there again after being absent must use the reconnect timer");
+
+    // Ten minutes in a session with ten bindings on an unplugged throttle,
+    // polled every 30 ms, and one device arrival (another controller plugged
+    // in) after five: the session's start and that arrival are the only
+    // attempts. On the timer alone it was one every 2 s (300).
+    Backoff production_policy;
+    production_policy.SetSessionActive(true);
+    production_policy.Rescan(); // the session's start
+    std::size_t attempts = 0;
+    for (int tick = 0; tick <= 20'000; ++tick) {
+        const Backoff::TimePoint now = start + tick * 30ms;
+        if (tick == 10'000) production_policy.Rescan();
+        for (int binding = 0; binding < 10; ++binding) {
+            if (production_policy.ShouldAttempt(stecs, now)) {
+                ++attempts;
+                production_policy.RecordAbsent(stecs, now);
+            }
+        }
+    }
+    Expect(attempts == 2, "An unplugged device in a ten-minute session must be tried only at the session's start "
+                          "and on the one device arrival");
+}
+
+// The connector looks for a device off the frame thread (CreateDevice, 13-70
+// ms) while the frame thread keeps counting arrivals. A controller whose HID
+// collections arrive one after another starts an attempt on the first and
+// may still be unknown to DirectInput at it: the second arrival, during the
+// attempt, must get it tried again, or its bindings stay dead for the session
+// (on the 2 s timer of 0.19.2 the next attempt found it).
+void TestInputDeviceArrivalDuringAttemptIsKept() {
+    using Backoff = depthxr::InputDeviceRetryBackoff;
+    using namespace std::chrono_literals;
+    const std::wstring stecs = L"{stecs-guid}";
+    const Backoff::TimePoint start{};
+
+    Backoff backoff(100ms, 400ms);
+    backoff.SetSessionActive(true);
+    backoff.RecordAbsent(stecs, start);
+    backoff.Rescan(); // the controller's first collection arrives
+    Expect(backoff.ShouldAttempt(stecs, start + 1s), "An arrival must let the absent device be tried");
+    const std::uint64_t attempted_after = backoff.Rescans(); // the connector takes the attempt
+    backoff.Rescan();                                        // the joystick's collection arrives meanwhile
+    backoff.RecordAbsent(stecs, start + 1s, attempted_after); // DirectInput did not know it yet
+    Expect(!backoff.WaitsForRescan(stecs) && backoff.ShouldAttempt(stecs, start + 1s),
+           "An arrival while an attempt ran must let the device be tried once more");
+    const std::uint64_t retried_after = backoff.Rescans();
+    backoff.RecordAbsent(stecs, start + 2s, retried_after);
+    Expect(backoff.WaitsForRescan(stecs) && !backoff.ShouldAttempt(stecs, start + 10min),
+           "With no arrival during its attempt, an absent device must wait for the next rescan");
+
+    // An attempt the frame thread makes itself (a read under the poller's
+    // lock, so no rescan between its start and its end) waits as before.
+    backoff.Rescan();
+    backoff.RecordAbsent(stecs, start + 11min);
+    Expect(backoff.WaitsForRescan(stecs), "An absent result with no rescan since must wait for the next rescan");
+}
+
 void TestInputDeviceRetryBackoff() {
     using Backoff = depthxr::InputDeviceRetryBackoff;
     using namespace std::chrono_literals;
@@ -4102,6 +4274,7 @@ int main() {
     TestFrameGenInvalidSettingsRejected();
     TestFrameGenToggleBindingList();
     TestFrameGenOsdRows();
+    TestOsdPerformanceRow();
     TestFrameGenPlan();
     TestFrameGenHistoryState();
     TestTurboMetricsSettingsParsing();
@@ -4146,6 +4319,8 @@ int main() {
     TestNumpadActivationKeys();
     TestDeviceInputPathsAndHatDirections();
     TestInputDeviceRetryBackoff();
+    TestInputDeviceAbsentWaitsForRescan();
+    TestInputDeviceArrivalDuringAttemptIsKept();
     TestInputConnectPriming();
 #ifdef _WIN32
     TestD3D11SharpenShaderRegression();

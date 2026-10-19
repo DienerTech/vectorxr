@@ -599,10 +599,13 @@ class FrameGenDepthValidator {
     bool WantsCheck(std::uint64_t submission) const;
     // Counts decisions that changed something, so callers can log each once.
     std::uint32_t Decisions() const { return decisions_; }
+    // Counts the evidence batches judged (three checks each), changed or not.
+    std::uint32_t Batches() const { return batches_; }
     // The evidence behind the last decision.
     const FrameGenDepthEvidence& Evidence() const { return evidence_; }
 
   private:
+    std::uint32_t batches_{0};
     FrameGenDepthEvidence sums_;
     std::uint32_t checks_{0};
     FrameGenDepthReading reading_{FrameGenDepthReading::kUnknown};
@@ -621,6 +624,10 @@ struct FrameGenDepthStatus {
     std::uint32_t decisions{0};
     FrameGenDepthEvidence evidence;
     float scale{1.0f};
+    // For the depth check's Debug line (one per batch).
+    std::uint32_t batches{0};
+    bool swapped{false};
+    float probe_step{0.0f};
 };
 // The kFlowPackRaw dispatch for a view of this extent (half resolution).
 FrameGenDispatch BuildFrameGenRawPackDispatch(FrameGenExtent view_extent);

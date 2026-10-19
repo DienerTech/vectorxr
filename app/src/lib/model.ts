@@ -117,7 +117,7 @@ export interface SoundSettings {
 
 // Default expanded-row order. Saved orders missing a row get it appended at
 // the end (the layer does the same), so new rows never reorder existing ones.
-export const osdBodyRows = ['graph', 'turbo', 'framegen', 'pivot', 'modules'] as const
+export const osdBodyRows = ['graph', 'performance', 'turbo', 'framegen', 'pivot', 'modules'] as const
 export type OsdBodyRow = typeof osdBodyRows[number]
 export type OsdLayout = Omit<OsdSettings, 'enabled' | 'visibleOnStart' | 'toggleBindings' | 'cycleBindings' | 'customPresets'>
 export interface OsdPreset { name: string; settings: OsdLayout }
@@ -150,6 +150,10 @@ export interface OsdSettings {
   // Both layouts, in sessions with Frame Generation on: its state (FG ON,
   // STBY, OFF...) and the frames per second the headset shows, beside FPS.
   showFramegenFps: boolean
+  // The PERFORMANCE row: CPU and GPU headroom against the frame budget, and
+  // video memory with Frame Generation's share. The layer samples only while
+  // a layout shows it.
+  showPerformance: boolean
   compactShowRuntime: boolean
   compactShowBrand: boolean
   compactShowApp: boolean
@@ -158,6 +162,7 @@ export interface OsdSettings {
   compactShowTurbo: boolean
   compactShowPivot: boolean
   compactShowFramegen: boolean
+  compactShowPerformance: boolean
   clockFormat: '12' | '24'
   bodyOrder: OsdBodyRow[]
   accent: keyof typeof osdAccentColors | 'custom'
@@ -172,12 +177,32 @@ export function defaultOsdSettings(): OsdSettings {
   return { enabled: false, visibleOnStart: true, compact: false,
     horizontalDegrees: 20, verticalDegrees: -12, distanceMeters: 1.2, scale: 100, opacity: 90, updateHz: 5,
     showGraph: true, showRuntime: true, showTurbo: true, showModules: true, showClock: true, showPivot: true,
-    showFramegen: true, showFramegenFps: true, showBrand: true, showApp: true,
+    showFramegen: true, showFramegenFps: true, showPerformance: true, showBrand: true, showApp: true,
     compactShowRuntime: true, compactShowClock: true, compactShowTurbo: false, compactShowPivot: false, compactShowFramegen: false,
+    compactShowPerformance: false,
     compactShowBrand: true, compactShowApp: true, compactMetrics: 'all',
     clockFormat: '24', bodyOrder: [...osdBodyRows], accent: 'teal', customColor: '#51ddbd', customPresets: [],
     toggleBindings: [{ type: 'keyboard', chord: ['Ctrl', 'Alt', 'F10'] }],
     cycleBindings: [{ type: 'keyboard', chord: ['Ctrl', 'Alt', 'F11'] }] }
+}
+
+// The rows 0.19.0-0.19.2 layers know. They reject a config whose bodyOrder
+// names any other row, so saved files keep bodyOrder to these and put the
+// full order in rowOrder, which they ignore (the app's backend splits it on
+// save; Export Config does the same).
+const legacyOsdBodyRows: readonly string[] = ['graph', 'turbo', 'framegen', 'pivot', 'modules']
+
+function savedRowOrder(input: Record<string, unknown>): unknown[] {
+  return Array.isArray(input.rowOrder) ? input.rowOrder : Array.isArray(input.bodyOrder) ? input.bodyOrder : []
+}
+
+// An OSD layout as written to a file: bodyOrder readable by older layers,
+// rowOrder with the full order when it names a newer row.
+export function savedOsdRowOrder<T extends { bodyOrder: string[] }>(layout: T): T & { rowOrder?: string[] } {
+  const legacy = layout.bodyOrder.filter(row => legacyOsdBodyRows.includes(row))
+  return legacy.length === layout.bodyOrder.length
+    ? { ...layout, bodyOrder: legacy }
+    : { ...layout, bodyOrder: legacy, rowOrder: [...layout.bodyOrder] }
 }
 
 export function normalizeOsdSettings(value: unknown): OsdSettings {
@@ -189,7 +214,7 @@ export function normalizeOsdSettings(value: unknown): OsdSettings {
       (!integer || Number.isInteger(value)) ? value : fallback[key] as number
   }
   return { ...fallback,
-    ...Object.fromEntries(['enabled', 'visibleOnStart', 'compact', 'showGraph', 'showRuntime', 'showBrand', 'showApp', 'showTurbo', 'showModules', 'showClock', 'showPivot', 'showFramegen', 'showFramegenFps', 'compactShowRuntime', 'compactShowClock', 'compactShowTurbo', 'compactShowPivot', 'compactShowFramegen', 'compactShowBrand', 'compactShowApp']
+    ...Object.fromEntries(['enabled', 'visibleOnStart', 'compact', 'showGraph', 'showRuntime', 'showBrand', 'showApp', 'showTurbo', 'showModules', 'showClock', 'showPivot', 'showFramegen', 'showFramegenFps', 'showPerformance', 'compactShowRuntime', 'compactShowClock', 'compactShowTurbo', 'compactShowPivot', 'compactShowFramegen', 'compactShowPerformance', 'compactShowBrand', 'compactShowApp']
       .map(key => [key, typeof input[key] === 'boolean' ? input[key] : fallback[key as keyof OsdSettings]])),
     compactMetrics: ['all', 'fps', 'frameTime', 'none'].includes(input.compactMetrics as string) ? input.compactMetrics as OsdSettings['compactMetrics'] : 'all',
     horizontalDegrees: number('horizontalDegrees', -40, 40), verticalDegrees: number('verticalDegrees', -35, 35),
@@ -198,7 +223,7 @@ export function normalizeOsdSettings(value: unknown): OsdSettings {
     accent: typeof input.accent === 'string' && (Object.prototype.hasOwnProperty.call(osdAccentColors, input.accent) || input.accent === 'custom') ? input.accent as OsdSettings['accent'] : 'teal',
     customColor: typeof input.customColor === 'string' && /^#[0-9a-f]{6}$/i.test(input.customColor) ? input.customColor : fallback.customColor,
     clockFormat: input.clockFormat === '12' ? '12' : '24',
-    bodyOrder: [...new Set([...(Array.isArray(input.bodyOrder) ? input.bodyOrder.filter((row): row is OsdBodyRow => osdBodyRows.includes(row)) : []), ...osdBodyRows])],
+    bodyOrder: [...new Set([...savedRowOrder(input).filter((row): row is OsdBodyRow => osdBodyRows.includes(row as OsdBodyRow)), ...osdBodyRows])],
     customPresets: Array.isArray(input.customPresets) ? input.customPresets.filter(item => isRecord(item) && typeof item.name === 'string' && item.name.trim() && isRecord(item.settings)).slice(0, 50)
       .map(item => ({ name: item.name.trim().slice(0, 60), settings: osdLayout(normalizeOsdSettings({ ...item.settings, customPresets: [] })) })) : [],
     toggleBindings: normalizeToggleBindings(input.toggleBindings, input.toggleBinding, fallback.toggleBindings),
@@ -647,6 +672,10 @@ export interface FrameGenSettings {
   artifactSuppression: number
   // 2-25: largest content shift, in % of view width, a generated frame may apply.
   motionLimitPercent: number
+  // Carry the head's turn over the display time the runtime does not predict.
+  // Present only when on; absent means off here and in the layer, so a
+  // profile never inherits it from the defaults.
+  extendHeadPrediction?: boolean
 }
 
 export interface FrameGenProfileConfig {
@@ -711,6 +740,9 @@ export function normalizeFrameGenSettings(value: unknown, fallback: FrameGenSett
       : fallback.frameMultiplier,
     artifactSuppression: normalizeFrameGenInteger(source.artifactSuppression, frameGenLimits.artifactSuppression, fallback.artifactSuppression),
     motionLimitPercent: normalizeFrameGenInteger(source.motionLimitPercent, frameGenLimits.motionLimitPercent, fallback.motionLimitPercent),
+    // Absent means off, as in the layer: a profile does not inherit it from
+    // the defaults (new profiles copy the defaults' value when created).
+    ...(source.extendHeadPrediction === true ? { extendHeadPrediction: true } : {}),
   }
 }
 

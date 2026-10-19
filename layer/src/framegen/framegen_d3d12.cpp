@@ -7,6 +7,7 @@
 #include <openxr/openxr_platform.h>
 
 #include "depthxr/framegen_gpu.h"
+#include "depthxr/framegen_hardware_watch.h"
 
 #ifdef DEPTHXR_NVOF
 #include <nvOpticalFlowD3D12.h>
@@ -20,6 +21,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <filesystem>
 #include <fstream>
 #include <thread>
 #include <unordered_map>
@@ -156,6 +158,10 @@ struct ViewResources {
     bool depth_fresh{false};  // captured for this Execute's frame (for the check)
     std::uint32_t depth_generation{0}; // FrameGenDepthValidator::Generation() the capture decoded with
     FrameGenDepthEncoding depth_encoding; // as the game describes it
+    // Research capture (depth.txt): the depth capture the newest linear
+    // depth came from, and what it read.
+    UINT64 depth_capture{0};
+    FrameGenImage depth_source;
     // Optical flow hardware (FrameGenTuning::hardware_flow): its inputs,
     // its vectors and its session for this view.
     Texture hardware_newest;
@@ -262,23 +268,7 @@ struct AnalyzedFrame {
 // a later capture queued behind a stalled one never becomes ready itself.
 constexpr std::size_t kWatchedViews = 4;
 constexpr std::size_t kWatchedOperations = 4;
-struct HardwareWatch {
-    struct Operation {
-        std::atomic<UINT64> done{0}; // 0 while being written
-        std::atomic<UINT64> input{0};
-        std::atomic<ULONGLONG> allowed{250};
-    };
-    std::atomic<ID3D12Fence*> fence{nullptr};
-    std::array<Operation, kWatchedOperations> operations;
-
-    void Watch(UINT64 done, UINT64 input, ULONGLONG allowed) {
-        Operation& operation = operations[done % kWatchedOperations];
-        operation.done = 0;
-        operation.input = input;
-        operation.allowed = allowed;
-        operation.done = done;
-    }
-};
+using HardwareWatch = FrameGenHardwareWatch<ID3D12Fence, kWatchedOperations>;
 
 #ifdef DEPTHXR_NVOF
 // One optical flow session for every view (EnsureAtlas): the views'
@@ -915,6 +905,12 @@ class D3D12FrameGen final : public FrameGenGpu {
         UnorderedAccess(&linear, base + kFirstUav);
         UnorderedAccess(nullptr, base + kFirstUav + 1);
 
+        // Research capture: the game's own depth texels, as stored.
+        RawDepth raw;
+        const bool dump_raw = raw_depth_left_ > 0 && PrepareRawDepth(desc, depth.array_index, raw);
+        const D3D12_RESOURCE_STATES read =
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
+            (dump_raw ? D3D12_RESOURCE_STATE_COPY_SOURCE : D3D12_RESOURCE_STATE_COMMON);
         std::vector<D3D12_RESOURCE_BARRIER> barriers;
         auto flush = [&] {
             if (!barriers.empty()) {
@@ -922,11 +918,13 @@ class D3D12FrameGen final : public FrameGenGpu {
                 barriers.clear();
             }
         };
-        Transition(barriers, resource, D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        Transition(barriers, resource, D3D12_RESOURCE_STATE_DEPTH_WRITE, read);
         Require(barriers, linear, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         flush();
         view.depth_encoding = encoding;
         view.depth_generation = validator_.Generation();
+        view.depth_capture = capture_count_;
+        view.depth_source = depth;
         FrameGenDepthEncoding depth_encoding = encoding;
         if (validator_.Swapped()) {
             std::swap(depth_encoding.near_z, depth_encoding.far_z);
@@ -941,7 +939,14 @@ class D3D12FrameGen final : public FrameGenGpu {
         capture_commands_->SetComputeRootDescriptorTable(2, Gpu(base + kFirstUav));
         capture_commands_->Dispatch((dispatch.width + kFrameGenThreadGroupSize - 1) / kFrameGenThreadGroupSize,
                                     (dispatch.height + kFrameGenThreadGroupSize - 1) / kFrameGenThreadGroupSize, 1);
-        Transition(barriers, resource, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+        if (dump_raw) {
+            D3D12_TEXTURE_COPY_LOCATION destination{raw.buffer.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
+            destination.PlacedFootprint = raw.footprint;
+            D3D12_TEXTURE_COPY_LOCATION source{resource, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+            source.SubresourceIndex = raw.subresource;
+            capture_commands_->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+        }
+        Transition(barriers, resource, read, D3D12_RESOURCE_STATE_DEPTH_WRITE);
         flush();
         StampCapture(slot_index, true);
         hr = capture_commands_->Close();
@@ -954,9 +959,14 @@ class D3D12FrameGen final : public FrameGenGpu {
         if (FAILED(hr)) {
             error = Failure("D3D12 Frame Generation depth capture signal", hr);
             signal_failed_ = true;
+            if (dump_raw) raw.buffer.Detach(); // the GPU may still write it
             return false;
         }
         slot.timed = capture_query_heap_ != nullptr;
+        if (dump_raw) {
+            --raw_depth_left_;
+            WriteRawDepth(raw, index, depth, encoding, slot.fence_value);
+        }
         ++capture_count_;
         view.depth_ready = true;
         view.depth_fresh = true;
@@ -964,7 +974,81 @@ class D3D12FrameGen final : public FrameGenGpu {
     }
 
     FrameGenDepthStatus DepthStatus() const override {
-        return {validator_.Reading(), validator_.Decisions(), validator_.Evidence(), validator_.Scale()};
+        FrameGenDepthStatus status{validator_.Reading(), validator_.Decisions(), validator_.Evidence(), validator_.Scale()};
+        status.batches = validator_.Batches();
+        status.swapped = validator_.Swapped();
+        status.probe_step = validator_.ProbeStep();
+        return status;
+    }
+
+    // Research capture: a readback buffer for one array slice of the game's
+    // depth image (the depth plane), and where in it the copy lands.
+    struct RawDepth {
+        ComPtr<ID3D12Resource> buffer;
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+        UINT subresource{0};
+        UINT rows{0};
+        UINT64 row_bytes{0};
+    };
+
+    bool PrepareRawDepth(const D3D12_RESOURCE_DESC& desc, std::uint32_t array_index, RawDepth& raw) {
+        raw.subresource = array_index * std::max<UINT>(desc.MipLevels, 1u); // mip 0, depth plane
+        UINT64 bytes = 0;
+        device_->GetCopyableFootprints(&desc, raw.subresource, 1, 0, &raw.footprint, &raw.rows, &raw.row_bytes, &bytes);
+        if (!bytes || bytes == UINT64_MAX) {
+            return false;
+        }
+        D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_READBACK};
+        D3D12_RESOURCE_DESC buffer{};
+        buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        buffer.Width = bytes;
+        buffer.Height = buffer.DepthOrArraySize = buffer.MipLevels = 1;
+        buffer.SampleDesc.Count = 1;
+        buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        return SUCCEEDED(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer,
+                                                          D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                          IID_PPV_ARGS(&raw.buffer)));
+    }
+
+    // Waits for the capture that copied `raw` (the game pauses for it, as
+    // it does for the rest of a research capture), then writes the texels
+    // and what they are next to the capture's frames:
+    // depth-raw-<capture>-view<i>.bin and .txt.
+    void WriteRawDepth(RawDepth& raw, std::size_t index, const FrameGenImage& depth,
+                       const FrameGenDepthEncoding& encoding, UINT64 value) {
+        if (!WaitFence(value, 2000, CaptureFence())) {
+            raw.buffer.Detach(); // the GPU may still write it: never freed under it
+            return;
+        }
+        const std::string stem = raw_depth_root_ + "\\depth-raw-" + std::to_string(capture_count_) + "-view" +
+                                 std::to_string(index);
+        std::ofstream meta(stem + ".txt");
+        meta.precision(9);
+        meta << "capture " << capture_count_ << "\nview " << index << "\nswapchain " << depth.swapchain << "\nimage "
+             << depth.image_index << "\nslice " << depth.array_index << "\nrect " << depth.rect.offset.x << ' '
+             << depth.rect.offset.y << ' ' << depth.rect.extent.width << ' ' << depth.rect.extent.height
+             << "\nformat " << static_cast<int>(raw.footprint.Footprint.Format) << "\nwidth "
+             << raw.footprint.Footprint.Width << "\nheight " << raw.footprint.Footprint.Height << "\nrow_pitch "
+             << raw.footprint.Footprint.RowPitch << "\nrow_bytes " << raw.row_bytes << "\nrows " << raw.rows
+             << "\nmin_depth " << encoding.min_depth << "\nmax_depth " << encoding.max_depth << "\nnear_z "
+             << encoding.near_z << "\nfar_z " << encoding.far_z << "\nreading "
+             << ToString(validator_.Reading()) << "\nswapped " << validator_.Swapped() << "\nscale "
+             << validator_.Scale() << '\n';
+        // Hundreds of megabytes: written by a thread of its own, which
+        // keeps the buffer until it is done.
+        std::thread([buffer = std::move(raw.buffer), footprint = raw.footprint, rows = raw.rows,
+                     row_bytes = raw.row_bytes, path = stem + ".bin"]() {
+            void* mapped = nullptr;
+            if (FAILED(buffer->Map(0, nullptr, &mapped))) {
+                return;
+            }
+            std::ofstream file(path, std::ios::binary);
+            for (UINT row = 0; row < rows && file; ++row) {
+                file.write(static_cast<const char*>(mapped) + footprint.Offset + row * footprint.Footprint.RowPitch,
+                           static_cast<std::streamsize>(row_bytes));
+            }
+            buffer->Unmap(0, nullptr);
+        }).detach();
     }
 
     // Records what `other` says about `view`'s depth (see FG_PASS_DEPTH_TRUST)
@@ -1740,10 +1824,18 @@ class D3D12FrameGen final : public FrameGenGpu {
         }
         if (atlas_in_use_ && effective_tuning.hardware_flow && !EnsureAtlas(views, tuning)) {
             atlas_in_use_ = false;
-            atlas_failed_ = !hardware_failed_;
-            effective_tuning.hardware_flow = !hardware_failed_;
-            for (std::size_t i = 0; i < views.size() && effective_tuning.hardware_flow; ++i) {
-                effective_tuning.hardware_flow = EnsureHardware(views_[i], i, views[i], tuning, true);
+            if (atlas_busy_) {
+                // The GPU did not finish before an atlas switch: no refusal.
+                // This frame measures on the shader cores; the next one
+                // tries the switch again.
+                atlas_busy_ = false;
+                effective_tuning.hardware_flow = false;
+            } else {
+                atlas_failed_ = !hardware_failed_;
+                effective_tuning.hardware_flow = !hardware_failed_;
+                for (std::size_t i = 0; i < views.size() && effective_tuning.hardware_flow; ++i) {
+                    effective_tuning.hardware_flow = EnsureHardware(views_[i], i, views[i], tuning, true);
+                }
             }
         }
         // Captures start matching on the hardware while it is in use.
@@ -2818,6 +2910,14 @@ class D3D12FrameGen final : public FrameGenGpu {
 
     bool DumpNextExecute(const std::string& directory) override {
         dump_directory_ = directory;
+        // The frames of one capture share a parent: the game's raw depth for
+        // the next three captures of each view goes there (the first dumped
+        // frame's depth was captured before this).
+        const std::string root = std::filesystem::path(directory).parent_path().string();
+        if (root != raw_depth_root_) {
+            raw_depth_root_ = root;
+            raw_depth_left_ = 3 * static_cast<std::uint32_t>(std::max<std::size_t>(views_.size(), 2));
+        }
         return true;
     }
 
@@ -3054,6 +3154,26 @@ class D3D12FrameGen final : public FrameGenGpu {
             geometry("newest", request.newest);
             geometry("previous", request.previous);
         }
+        // What each view's depth was read from and how it was decoded, apart
+        // from frame.txt (the replay reads that): which raw depth dump
+        // (depth-raw-<capture>-view<i> next to the frames) it matches.
+        std::ofstream depth_meta(dump_directory_ + "\\depth.txt");
+        depth_meta.precision(9);
+        depth_meta << "reading " << ToString(validator_.Reading()) << "\nswapped " << validator_.Swapped() << "\nscale "
+                   << validator_.Scale() << "\nprobe_step " << validator_.ProbeStep() << "\ngeneration "
+                   << validator_.Generation() << '\n';
+        for (std::size_t i = 0; i < views.size() && i < views_.size(); ++i) {
+            const ViewResources& view = views_[i];
+            const FrameGenDepthEncoding& e = view.depth_encoding;
+            const FrameGenImage& source = view.depth_source;
+            depth_meta << "view " << i << " requested " << views[i].request.depth << " used "
+                       << (i < result.depth.size() && result.depth[i]) << " capture "
+                       << view.depth_capture << " generation " << view.depth_generation << " swapchain "
+                       << source.swapchain << " image " << source.image_index << " slice " << source.array_index
+                       << " rect " << source.rect.offset.x << ' ' << source.rect.offset.y << ' '
+                       << source.rect.extent.width << ' ' << source.rect.extent.height << " min_depth " << e.min_depth
+                       << " max_depth " << e.max_depth << " near_z " << e.near_z << " far_z " << e.far_z << '\n';
+        }
         // Quad views: how each eye is composed from the views.
         if (tuning.composition) {
             const FrameGenComposition& composition = *tuning.composition;
@@ -3268,6 +3388,10 @@ class D3D12FrameGen final : public FrameGenGpu {
     bool Create(Texture& texture, FrameGenExtent extent, DXGI_FORMAT format, DXGI_FORMAT view_format, bool uav,
                 std::string& error, bool common = false, bool render_target = false) {
         texture = {};
+        if (allocation_failure_ && --allocation_failure_ == 0) {
+            error = Failure("D3D12 Frame Generation texture", E_OUTOFMEMORY);
+            return false;
+        }
         D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_DEFAULT};
         D3D12_RESOURCE_DESC desc{};
         desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -3311,6 +3435,20 @@ class D3D12FrameGen final : public FrameGenGpu {
 
     bool EnsureView(ViewResources& view, const FrameGenViewSubmission& submission, ID3D12Resource* source,
                     const FrameGenTuning& tuning, std::string& error) {
+        // Uncaptured calls this before Execute's recording/error cleanup. A
+        // partial allocation must never advertise its new images as ready,
+        // nor keep a capture key that would let the next Execute skip
+        // Uncaptured and copy the game's image after its release.
+        struct Setup {
+            ViewResources& view;
+            bool complete{false};
+            ~Setup() {
+                if (!complete) {
+                    view.history_state = {};
+                    view.capture.valid = false;
+                }
+            }
+        } setup{view};
         const D3D12_RESOURCE_DESC source_desc = source->GetDesc();
         const FrameGenExtent extent = submission.request.extent;
         const std::uint8_t final_level = FrameGenFinalFlowLevel(tuning);
@@ -3389,6 +3527,7 @@ class D3D12FrameGen final : public FrameGenGpu {
                 }
             }
         }
+        setup.complete = true;
         return true;
     }
 
@@ -3430,6 +3569,7 @@ class D3D12FrameGen final : public FrameGenGpu {
 
     std::string HardwareFlowStatus() const override { return hardware_status_; }
     void StallHardwareForTest() override { stall_hardware_for_test_ = true; }
+    void FailAllocationForTest(std::uint32_t ordinal) override { allocation_failure_ = ordinal; }
     void SetHardwareAtlas(bool on) override { atlas_enabled_ = on; }
 
     // The game's queue waits on the optical flow hardware's fence: should
@@ -3448,26 +3588,28 @@ class D3D12FrameGen final : public FrameGenGpu {
             // which operation.
             std::array<std::array<ULONGLONG, kWatchedOperations>, kWatchedViews> ready_since{};
             std::array<std::array<UINT64, kWatchedOperations>, kWatchedViews> ready_done{};
+            std::array<std::array<UINT64, kWatchedOperations>, kWatchedViews> ready_epoch{};
             while (!hardware_watchdog_stop_) {
                 Sleep(50);
                 for (std::size_t i = 0; i < kWatchedViews; ++i) {
                     HardwareWatch& watch = hardware_watch_[i];
-                    ID3D12Fence* fence = watch.fence;
                     for (std::size_t j = 0; j < kWatchedOperations; ++j) {
-                        HardwareWatch::Operation& operation = watch.operations[j];
+                        const HardwareWatch::Snapshot operation = watch.Read(j);
+                        ID3D12Fence* fence = operation.fence;
                         const UINT64 done = operation.done;
                         const UINT64 needed = operation.input;
                         const ULONGLONG allowed = operation.allowed;
-                        if (!fence || !done || operation.done != done || fence->GetCompletedValue() >= done ||
-                            input->GetCompletedValue() < needed) {
+                        if (!operation || fence->GetCompletedValue() >= done || input->GetCompletedValue() < needed) {
                             ready_since[i][j] = 0;
                             continue;
                         }
                         const ULONGLONG now = GetTickCount64();
-                        if (!ready_since[i][j] || ready_done[i][j] != done) {
+                        if (!ready_since[i][j] || ready_done[i][j] != done || ready_epoch[i][j] != operation.epoch) {
                             ready_since[i][j] = now;
                             ready_done[i][j] = done;
-                        } else if (now - ready_since[i][j] > allowed) {
+                            ready_epoch[i][j] = operation.epoch;
+                        } else if (now - ready_since[i][j] > allowed && watch.Current(operation) &&
+                                   fence->GetCompletedValue() < done) {
                             // Releases every queue wait up to it; the
                             // hardware is not used again, and its session
                             // and images are never freed (it may still be
@@ -3512,6 +3654,11 @@ class D3D12FrameGen final : public FrameGenGpu {
         }
         if ((view.hardware || view.hardware_newest.resource) && !WaitIdle()) {
             return HardwareFailed("the GPU did not finish before the optical flow session was resized");
+        }
+        if (hardware_hung_) {
+            // The watchdog released a stalled match (perhaps during that
+            // drain): no new session on that hardware.
+            return HardwareFailed("the optical flow hardware stopped responding");
         }
         RetireHardware(view);
         if (!own_session) {
@@ -3568,10 +3715,10 @@ class D3D12FrameGen final : public FrameGenGpu {
         }
         view.hardware_fence_value = 0;
         if (index < hardware_watch_.size()) {
-            for (auto& operation : hardware_watch_[index].operations) {
-                operation.done = 0;
+            if (!hardware_watch_[index].ResetFence(view.hardware_fence.Get())) {
+                RetireHardware(view);
+                return HardwareFailed("the previous optical flow session still has unfinished work");
             }
-            hardware_watch_[index].fence = view.hardware_fence.Get();
         }
         Texture* images[6] = {&view.hardware_newest, &view.hardware_previous, &view.hardware_flow,
                               &view.raw[0],          &view.raw[1],               &view.raw_flow};
@@ -3656,6 +3803,10 @@ class D3D12FrameGen final : public FrameGenGpu {
         }
 #endif
         view.hardware_extent = {};
+        // Values of the fence just retired: a new session's fence starts
+        // over, and a game-queue wait for the old value would never end.
+        view.raw_last_match = 0;
+        view.raw_reference = 0;
     }
 
 #ifdef DEPTHXR_NVOF
@@ -3674,17 +3825,36 @@ class D3D12FrameGen final : public FrameGenGpu {
         for (const FrameGenViewSubmission& view : views) {
             inputs.push_back(FrameGenPyramid(view.request.extent)[1]);
         }
-        auto laid_out = [&](const HardwareAtlas& atlas) {
-            return atlas.session && atlas.perf == perf && atlas.inputs.size() == inputs.size() &&
+        auto same_inputs = [&](const HardwareAtlas& atlas) {
+            return atlas.session && atlas.inputs.size() == inputs.size() &&
                    std::equal(inputs.begin(), inputs.end(), atlas.inputs.begin(), [](FrameGenExtent a, FrameGenExtent b) {
                        return a.width == b.width && a.height == b.height;
                    });
         };
+        auto laid_out = [&](const HardwareAtlas& atlas) { return atlas.perf == perf && same_inputs(atlas); };
         if (laid_out(atlas_)) {
             return true;
         }
-        // Another layout's atlas becomes the current one, kept, without
-        // waiting for the GPU; one laid out so already comes back.
+        if (hardware_watch_[0].Pending()) {
+            // The current atlas's match is outstanding, and the next frame's
+            // input may be queued behind its wait: replacing its watch now
+            // would leave nothing to release that wait if the match stalled.
+            // Drain first, with the watch in place so the watchdog can still
+            // release a stall, as EnsureHardware drains before replacing a
+            // view's session. A quality or layout change costs one drain and
+            // applies on this frame (deferring it could last indefinitely
+            // while matches overlap). A drain that times out is no refusal
+            // (Execute retries next frame).
+            if (!WaitIdle()) {
+                atlas_busy_ = true;
+                return false;
+            }
+            // The watchdog released a stalled match meanwhile: the hardware
+            // is not used again (Execute falls back to shader flow).
+            if (hardware_hung_) return HardwareFailed("the optical flow hardware stopped responding");
+        }
+        // Another layout's atlas becomes the current one, kept; one laid out
+        // so already comes back. Nothing is pending on the current atlas here.
         if (atlas_.session) {
             atlas_cache_.push_back(std::move(atlas_));
         }
@@ -3694,7 +3864,7 @@ class D3D12FrameGen final : public FrameGenGpu {
             atlas_ = std::move(*cached);
             atlas_cache_.erase(cached);
             atlas_.fresh = true; // its hints are from another sequence of frames
-            WatchAtlas();
+            if (!WatchAtlas()) return false;
             TrimAtlases();
             return true;
         }
@@ -3794,19 +3964,14 @@ class D3D12FrameGen final : public FrameGenGpu {
         atlas_.cells = cells;
         atlas_.fresh = true;
         atlas_.matched = false;
-        WatchAtlas();
+        if (!WatchAtlas()) return false;
         TrimAtlases();
         return true;
     }
 
     // The watchdog watches the current atlas as view 0 (operations of
     // another fence never carry over to it).
-    void WatchAtlas() {
-        for (auto& operation : hardware_watch_[0].operations) {
-            operation.done = 0;
-        }
-        hardware_watch_[0].fence = atlas_.fence.Get();
-    }
+    bool WatchAtlas() { return hardware_watch_[0].ResetFence(atlas_.fence.Get()); }
 
     // Frees kept atlases beyond the newest three once nothing submitted
     // can use them (never waits).
@@ -3852,8 +4017,11 @@ class D3D12FrameGen final : public FrameGenGpu {
             // The watchdog may still look at it: a fence that is never freed.
             atlas.fence.Detach();
         }
-        if (fence && hardware_watch_[0].fence == fence) {
-            hardware_watch_[0].fence = nullptr;
+        if (fence && hardware_watch_[0].ActiveFence() == fence) {
+            // Refused while its work is unfinished: the watch stays on the
+            // fence, which is never freed (detached above), so a stall can
+            // still be released.
+            hardware_watch_[0].ResetFence(nullptr);
         }
         atlas = {};
     }
@@ -4512,9 +4680,10 @@ class D3D12FrameGen final : public FrameGenGpu {
 #ifdef DEPTHXR_NVOF
     HardwareAtlas atlas_;
     // Atlases of other layouts (quad views and a canvas in turn), kept for
-    // when their layout comes back, as views keep their sessions: switching
-    // never waits for the GPU. Freed once the GPU is done with them, beyond
-    // the newest few, or at Reset.
+    // when their layout comes back, as views keep their sessions. Switching
+    // drains first while the current atlas's match is outstanding, so its
+    // watch is never replaced early. Freed once the GPU is done with them,
+    // beyond the newest few, or at Reset.
     std::vector<HardwareAtlas> atlas_cache_;
 #endif
     // VECTORXR_FRAMEGEN_HARDWARE_ATLAS=0 (or SetHardwareAtlas): a session
@@ -4522,12 +4691,14 @@ class D3D12FrameGen final : public FrameGenGpu {
     bool atlas_enabled_{!(std::getenv("VECTORXR_FRAMEGEN_HARDWARE_ATLAS") &&
                           std::string(std::getenv("VECTORXR_FRAMEGEN_HARDWARE_ATLAS")) == "0")};
     bool atlas_failed_{false}; // the hardware refused the atlas: sessions per view from then on
+    bool atlas_busy_{false};   // EnsureAtlas: the drain before a switch timed out (one frame)
     bool atlas_in_use_{false}; // this Execute matches on the atlas
     std::atomic<ULONGLONG> hardware_allowed_ms_{250};
     bool hardware_active_{false};  // the last Execute used the hardware: captures match early
     std::atomic<bool> hardware_stuck_{false};
     std::atomic<bool> hardware_hung_{false}; // the watchdog ever released a fence
     bool stall_hardware_for_test_{false};
+    std::uint32_t allocation_failure_{0}; // one-shot ordinal among Create calls, tests only
     // Generated frames drawn straight into the output images.
     static constexpr UINT kRenderTargetViews = 16;
     // Hardware clears of the eye-shift textures (CPU-side views).
@@ -4581,6 +4752,10 @@ class D3D12FrameGen final : public FrameGenGpu {
     std::array<std::pair<UINT64, std::chrono::steady_clock::time_point>, kCaptureSlots> capture_ends_{};
     std::size_t capture_end_next_{0};
     std::string dump_directory_; // DumpNextExecute
+    // Research capture: the game's raw depth texels are copied at depth
+    // capture while armed (DumpNextExecute arms it once per capture).
+    std::string raw_depth_root_;
+    std::uint32_t raw_depth_left_{0};
     std::unordered_map<XrSwapchain, std::vector<ID3D12Resource*>> images_;
     std::vector<ViewResources> views_;
 };

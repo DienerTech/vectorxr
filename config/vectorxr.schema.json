@@ -264,6 +264,11 @@
           "default": true,
           "description": "Both layouts, in sessions with Frame Generation on: its state (FG ON, STBY, WAIT, PAUSED, OFF or N/A) and the frames per second the headset shows, beside the FPS value."
         },
+        "showPerformance": {
+          "type": "boolean",
+          "default": true,
+          "description": "Expanded layout: the PERFORMANCE row. CPU and GPU headroom against the frame budget (the headset's refresh period, or the game's base target while Frame Generation generates), video memory with Frame Generation's share, and CPU-BOUND or GPU-BOUND when it is clear. The layer samples GPU counters and video memory only while a layout shows it."
+        },
         "showModules": {
           "type": "boolean",
           "default": true
@@ -368,6 +373,11 @@
           "default": false,
           "description": "Show Frame Generation in the compact status rows. Defaults to false."
         },
+        "compactShowPerformance": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show CPU and GPU headroom and video memory in the compact status rows. Defaults to false."
+        },
         "compactShowPivot": {
           "type": "boolean",
           "description": "Show Pivot in the compact status row. Defaults to false."
@@ -392,10 +402,11 @@
         "bodyOrder": {
           "type": "array",
           "uniqueItems": true,
-          "description": "Expanded-layout row order. Rows missing from a saved order are appended at the end in default order.",
+          "description": "Expanded-layout row order as 0.19.0-0.19.2 layers read it: they reject any row they do not know, so the app writes only graph, turbo, framegen, pivot and modules here. Rows missing from a saved order are appended at the end in default order.",
           "items": {
             "enum": [
               "graph",
+              "performance",
               "turbo",
               "framegen",
               "pivot",
@@ -404,6 +415,22 @@
           },
           "default": [
             "graph",
+            "turbo",
+            "framegen",
+            "pivot",
+            "modules"
+          ]
+        },
+        "rowOrder": {
+          "type": "array",
+          "uniqueItems": true,
+          "description": "The full expanded-layout row order, including rows newer than 0.19.2 such as performance; read instead of bodyOrder when present. Unknown row names are skipped with a warning.",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "graph",
+            "performance",
             "turbo",
             "framegen",
             "pivot",
@@ -463,6 +490,11 @@
                     "type": "boolean",
                     "default": true,
                     "description": "Both layouts, in sessions with Frame Generation on: its state (FG ON, STBY, WAIT, PAUSED, OFF or N/A) and the frames per second the headset shows, beside the FPS value."
+                  },
+                  "showPerformance": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Expanded layout: the PERFORMANCE row. CPU and GPU headroom against the frame budget (the headset's refresh period, or the game's base target while Frame Generation generates), video memory with Frame Generation's share, and CPU-BOUND or GPU-BOUND when it is clear. The layer samples GPU counters and video memory only while a layout shows it."
                   },
                   "showModules": {
                     "type": "boolean",
@@ -554,6 +586,11 @@
                     "default": false,
                     "description": "Show Frame Generation in the compact status rows. Defaults to false."
                   },
+                  "compactShowPerformance": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Show CPU and GPU headroom and video memory in the compact status rows. Defaults to false."
+                  },
                   "compactShowPivot": {
                     "type": "boolean",
                     "description": "Show Pivot in the compact status row. Defaults to false."
@@ -581,6 +618,7 @@
                     "items": {
                       "enum": [
                         "graph",
+                        "performance",
                         "turbo",
                         "framegen",
                         "pivot",
@@ -589,6 +627,21 @@
                     },
                     "default": [
                       "graph",
+                      "turbo",
+                      "framegen",
+                      "pivot",
+                      "modules"
+                    ]
+                  },
+                  "rowOrder": {
+                    "type": "array",
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "string"
+                    },
+                    "default": [
+                      "graph",
+                      "performance",
                       "turbo",
                       "framegen",
                       "pivot",
@@ -1646,6 +1699,11 @@
           "maximum": 25,
           "default": 10,
           "description": "Largest content shift, in percent of view width, a generated frame may apply."
+        },
+        "extendHeadPrediction": {
+          "type": "boolean",
+          "default": false,
+          "description": "Frame Generation has the game render for a display time up to ~150 ms ahead; some runtimes (Pimax's) predict the head only ~20 ms of that. When on, VectorXR measures how far the runtime predicts and carries the head's turn over the rest, which shrinks the black band at the edge you turn toward. Turn it on before the game starts: it needs the runtime's clock, which is requested at startup."
         }
       }
     },

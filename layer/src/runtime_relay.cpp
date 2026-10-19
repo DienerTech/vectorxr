@@ -3,6 +3,8 @@
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
+#include <iomanip>
+#include <locale>
 #include <sstream>
 #include <string_view>
 #include <thread>
@@ -189,6 +191,27 @@ std::filesystem::path ResolveRuntimeRelayRoot() {
 std::filesystem::path RuntimeControlPath(const std::filesystem::path& root, const std::string& session_id) { return root / "control" / (session_id + ".json"); }
 std::filesystem::path RuntimeStatusPath(const std::filesystem::path& root, const std::string& session_id) { return root / "status" / (session_id + ".json"); }
 
+std::filesystem::path InputRescanRequestPath(const std::filesystem::path& root) { return root / "input-rescan.json"; }
+
+bool ReadInputRescanRequest(const std::filesystem::path& path, std::uint64_t* requested_at_unix_milliseconds) {
+    std::ifstream stream(path);
+    if (!stream) return false;
+    std::ostringstream buffer;
+    buffer << stream.rdbuf();
+    const std::string content = buffer.str();
+    const auto protocol_version = ReadUnsigned(content, "protocolVersion");
+    const auto requested_at = ReadUnsigned(content, "requestedAtUnixMilliseconds");
+    if (!protocol_version || *protocol_version != kRuntimeRelayProtocolVersion || !requested_at || *requested_at == 0) {
+        return false;
+    }
+    *requested_at_unix_milliseconds = *requested_at;
+    return true;
+}
+
+bool InputRescanRequestDue(std::uint64_t requested_at, std::uint64_t last_taken, std::uint64_t now) {
+    return requested_at > last_taken && requested_at + kInputRescanFreshMilliseconds >= now;
+}
+
 std::uint64_t RuntimeRelayUnixMilliseconds() {
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
 }
@@ -216,6 +239,8 @@ bool ReadRuntimeControl(const std::filesystem::path& path, RuntimeControlDocumen
 
 bool WriteRuntimeStatus(const std::filesystem::path& path, const RuntimeStatusDocument& document, std::string* error) {
     std::ostringstream stream;
+    // A game may set a global locale with a decimal comma or digit grouping.
+    stream.imbue(std::locale::classic());
     stream << "{\n"
            << "  \"protocolVersion\": " << kRuntimeRelayProtocolVersion << ",\n"
            << "  \"sessionId\": \"" << EscapeJson(document.session_id) << "\",\n"
@@ -232,8 +257,17 @@ bool WriteRuntimeStatus(const std::filesystem::path& path, const RuntimeStatusDo
            << "\", \"turboReason\": \"" << EscapeJson(document.turbo_reason)
            << "\", \"framegenState\": \"" << EscapeJson(document.framegen_state)
            << "\", \"framegenReason\": \"" << EscapeJson(document.framegen_reason)
-           << "\", \"framegenDepth\": \"" << EscapeJson(document.framegen_depth) << "\" },\n"
-           << "  \"quadviewsDimensionsAt\": " << document.quadviews_dimensions_at << ",\n"
+           << "\", \"framegenDepth\": \"" << EscapeJson(document.framegen_depth) << "\" },\n";
+    if (const auto& rates = document.framegen_rates) {
+        stream << std::fixed << std::setprecision(1) << "  \"framegen\": { \"mode\": \"" << EscapeJson(rates->mode)
+               << "\", \"frameRate\": \"" << EscapeJson(rates->frame_rate)
+               << "\", \"generating\": " << (rates->generating ? "true" : "false")
+               << ", \"multiplier\": " << rates->multiplier << ", \"refreshHz\": " << rates->refresh_hz
+               << ", \"holdFps\": " << rates->hold_fps << ", \"appFps\": " << rates->app_fps
+               << ", \"outputFps\": " << rates->output_fps << ", \"distinctFps\": " << rates->distinct_fps
+               << " },\n";
+    }
+    stream << "  \"quadviewsDimensionsAt\": " << document.quadviews_dimensions_at << ",\n"
            << "  \"quadviewsDimensions\": [";
     for (std::size_t i = 0; i < document.quadviews_dimensions.size(); ++i) {
         const auto& view = document.quadviews_dimensions[i];

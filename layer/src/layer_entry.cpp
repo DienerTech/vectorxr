@@ -285,10 +285,64 @@ struct RuntimeExtensionScan {
     }
 };
 
-RuntimeExtensionScan ScanRuntimeInstanceExtensions(PFN_xrGetInstanceProcAddr next_get_instance_proc_addr) {
+std::string LayerName(const XrApiLayerNextInfo& info) {
+    return std::string(info.layerName, strnlen(info.layerName, XR_MAX_API_LAYER_NAME_SIZE));
+}
+
+// Layers built from mbucchia's layer template (OpenXR Toolkit,
+// Quad-Views-Foveated) call through a null pointer when asked for a function
+// before their own instance exists: VectorXR directly above one never probes
+// the runtime's extensions that way.
+bool NextLayerNeedsAnInstance(const XrApiLayerNextInfo* next_info) {
+    return next_info && next_info->next && LayerName(*next_info->next).starts_with("XR_APILAYER_MBUCCHIA_");
+}
+
+// OpenXR Toolkit's own bypass for an application: a nonzero DWORD "bypass"
+// under HKCU\SOFTWARE\OpenXR_Toolkit\<application name>, or a Chromium engine.
+bool OpenXrToolkitBypasses(const XrInstanceCreateInfo& create_info) {
+    if (std::string_view(create_info.applicationInfo.engineName) == "Chromium") {
+        return true;
+    }
+    const std::string name(create_info.applicationInfo.applicationName,
+                           strnlen(create_info.applicationInfo.applicationName, XR_MAX_APPLICATION_NAME_SIZE));
+    const int length = MultiByteToWideChar(CP_UTF8, 0, name.data(), static_cast<int>(name.size()), nullptr, 0);
+    std::wstring key = L"SOFTWARE\\OpenXR_Toolkit\\";
+    if (length > 0) {
+        std::wstring wide(static_cast<std::size_t>(length), L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, name.data(), static_cast<int>(name.size()), wide.data(), length);
+        key += wide;
+    }
+    DWORD bypass = 0;
+    DWORD size = sizeof(bypass);
+    return RegGetValueW(HKEY_CURRENT_USER, key.c_str(), L"bypass", RRF_RT_REG_DWORD, nullptr, &bypass, &size) ==
+               ERROR_SUCCESS &&
+           bypass != 0;
+}
+
+// The loader loads every layer's library before it creates the chain, so a
+// loaded Toolkit that is not below VectorXR is above it.
+std::string OpenXrToolkitPosition(const XrInstanceCreateInfo& create_info, const XrApiLayerNextInfo* next_info) {
+    for (const XrApiLayerNextInfo* below = next_info ? next_info->next : nullptr; below; below = below->next) {
+        if (LayerName(*below) == "XR_APILAYER_MBUCCHIA_toolkit") {
+            return "below";
+        }
+    }
+    if (!GetModuleHandleW(L"XR_APILAYER_MBUCCHIA_toolkit.dll")) {
+        return "absent";
+    }
+    return OpenXrToolkitBypasses(create_info) ? "above-bypassed" : "above";
+}
+
+RuntimeExtensionScan ScanRuntimeInstanceExtensions(const XrApiLayerNextInfo* next_info) {
     RuntimeExtensionScan scan;
+    const PFN_xrGetInstanceProcAddr next_get_instance_proc_addr =
+        next_info ? next_info->nextGetInstanceProcAddr : nullptr;
     if (!next_get_instance_proc_addr) {
         scan.detail = "next-get-instance-proc-addr-unavailable";
+        return scan;
+    }
+    if (NextLayerNeedsAnInstance(next_info)) {
+        scan.detail = "next-layer-needs-an-instance"; // the layers-below line names it
         return scan;
     }
 
@@ -622,6 +676,7 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
         }
         diagnostics.layers_below += std::string(below->layerName, strnlen(below->layerName, XR_MAX_API_LAYER_NAME_SIZE));
     }
+    diagnostics.openxr_toolkit = OpenXrToolkitPosition(*instance_create_info, next_info);
     diagnostics.app_requested_quad_views =
         ApplicationRequestedExtension(instance_create_info, XR_VARJO_QUAD_VIEWS_EXTENSION_NAME);
     diagnostics.app_requested_varjo_foveated_rendering =
@@ -642,7 +697,7 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
 
         // Always scan (even when ineligible) so the logs show exactly what the
         // pre-instance probe returned — this is the signal the forward hinges on.
-        extension_scan = ScanRuntimeInstanceExtensions(next_info->nextGetInstanceProcAddr);
+        extension_scan = ScanRuntimeInstanceExtensions(next_info);
         diagnostics.pre_instance_extension_scan_ran = extension_scan.ran;
         diagnostics.pre_instance_extension_scan_complete = extension_scan.complete;
         diagnostics.pre_instance_extension_scan_detail = extension_scan.detail;
@@ -755,7 +810,7 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
                                          : OpenXrLayer::Instance().WantsVulkanBridge())) {
         diagnostics.d3d12_wanted = true;
         const RuntimeExtensionScan d3d12_scan =
-            extension_scan.ran ? extension_scan : ScanRuntimeInstanceExtensions(next_info->nextGetInstanceProcAddr);
+            extension_scan.ran ? extension_scan : ScanRuntimeInstanceExtensions(next_info);
         // A scan is trusted when it lists the extension the application enabled.
         diagnostics.d3d12_scan_trusted = d3d12_scan.complete && d3d12_scan.Contains(bridged_extension);
         if (!diagnostics.d3d12_scan_trusted || d3d12_scan.Contains(d3d12_extension)) {
@@ -782,7 +837,7 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
     bool injected_turbo_clock = false;
     if (OpenXrLayer::Instance().WantsTurboClockConversion() &&
         !ExtensionListContains(first_downstream_extensions, turbo_clock_extension)) {
-        const auto clock_scan = ScanRuntimeInstanceExtensions(next_info->nextGetInstanceProcAddr);
+        const auto clock_scan = ScanRuntimeInstanceExtensions(next_info);
         if (clock_scan.Contains(turbo_clock_extension)) {
             first_downstream_extensions.push_back(turbo_clock_extension);
             injected_turbo_clock = true;

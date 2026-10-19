@@ -51,6 +51,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -628,6 +629,9 @@ struct StandIn {
     std::uint32_t recommended_height{kHeight};
     // xrWaitFrame returns at the next refresh, as a runtime's does (else at once).
     bool paced{false};
+    // xrAcquireSwapchainImage hands out the image released last again, as
+    // Pimax's runtime does (else each in turn, as Virtual Desktop's does).
+    bool same_image{false};
     // Where each shown view's image is read besides its centre (fractions of its size).
     std::vector<std::array<float, 2>> probes;
     // Direct3D 11 held back behind it: the next readback is checked to wait
@@ -653,6 +657,7 @@ struct StandIn {
     int early_releases{0};
 
     std::vector<std::vector<std::string>> instance_attempts; // each attempt's extensions
+    int pre_instance_queries{0}; // functions asked for before the instance
     std::vector<std::string> calls;
     XrInstance instance{XR_NULL_HANDLE};
     XrSession session{XR_NULL_HANDLE};
@@ -969,6 +974,10 @@ XrResult XRAPI_CALL RtEnumerateInstanceExtensions(const char*, std::uint32_t cap
     return XR_SUCCESS;
 }
 
+// Another API layer's entry between the layer and the stand-in (the stand-in
+// answers for it), or none.
+depthxr::XrApiLayerNextInfo* g_layer_below = nullptr;
+
 XrResult XRAPI_CALL RtCreateApiLayerInstance(const XrInstanceCreateInfo* info,
                                              const depthxr::XrApiLayerCreateInfo* layer_info, XrInstance* instance) {
     std::scoped_lock lock(g_runtime_mutex);
@@ -980,7 +989,7 @@ XrResult XRAPI_CALL RtCreateApiLayerInstance(const XrInstanceCreateInfo* info,
     rt.instance_attempts.push_back(extensions);
     rt.calls.push_back("xrCreateApiLayerInstance");
     // The stand-in is the last of the chain: nothing follows it.
-    Check(layer_info && layer_info->nextInfo == nullptr, "the layer hands the rest of the chain on");
+    Check(layer_info && layer_info->nextInfo == g_layer_below, "the layer hands the rest of the chain on");
     if (rt.instance_failure != XR_SUCCESS) return rt.instance_failure;
     if (rt.refuse_d3d12_instance &&
         std::find(extensions.begin(), extensions.end(), kD3D12Extension) != extensions.end()) {
@@ -1466,8 +1475,9 @@ XrResult XRAPI_CALL RtAcquire(XrSwapchain swapchain, const XrSwapchainImageAcqui
         return XR_ERROR_RUNTIME_FAILURE;
     }
     if (chain->acquired.size() >= chain->Count()) return XR_ERROR_CALL_ORDER_INVALID;
-    *index = chain->next;
-    chain->next = (chain->next + 1) % static_cast<std::uint32_t>(chain->Count());
+    // Pimax's runtime hands the image back released last, every frame.
+    *index = g_runtime.same_image && chain->released && chain->acquired.empty() ? *chain->released : chain->next;
+    chain->next = (*index + 1) % static_cast<std::uint32_t>(chain->Count());
     chain->acquired.push_back(*index);
     ++chain->acquires;
     if (Watching(swapchain)) {
@@ -1560,6 +1570,7 @@ XrResult XRAPI_CALL RtGetInstanceProcAddr(XrInstance instance, const char* name,
     if (instance == XR_NULL_HANDLE) {
         // Before the instance: the loader's extension scan.
         std::scoped_lock lock(g_runtime_mutex);
+        ++g_runtime.pre_instance_queries;
         if (std::strcmp(name, "xrEnumerateInstanceExtensionProperties") == 0 && g_runtime.enumeration_offered) {
             *function = Function(RtEnumerateInstanceExtensions);
             return XR_SUCCESS;
@@ -1704,6 +1715,7 @@ XrResult CreateInstance(const std::vector<const char*>& extensions, XrInstance& 
     std::strncpy(next.layerName, "XR_APILAYER_TEST_stand_in_runtime", XR_MAX_API_LAYER_NAME_SIZE - 1);
     next.nextGetInstanceProcAddr = RtGetInstanceProcAddr;
     next.nextCreateApiLayerInstance = RtCreateApiLayerInstance;
+    next.next = g_layer_below;
     depthxr::XrApiLayerCreateInfo create{};
     create.structType = depthxr::XR_LOADER_INTERFACE_STRUCT_API_LAYER_CREATE_INFO;
     create.structVersion = depthxr::XR_API_LAYER_CREATE_INFO_STRUCT_VERSION;
@@ -1903,7 +1915,8 @@ struct Eye {
 // yet, and nothing queued for the releases before it waits for the gate. The
 // stand-in opens the gate once it has seen its readback wait all the same.
 XrResult Frame(App& app, Game& game, const std::vector<const Target*>& targets, const std::vector<Color>& colors,
-               const std::array<Eye, 2>& eyes, const Target* depth = nullptr, Gate* hold = nullptr) {
+               const std::array<Eye, 2>& eyes, const Target* depth = nullptr, Gate* hold = nullptr,
+               bool unknown_after_depth = false) {
     XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
     XrFrameState state{XR_TYPE_FRAME_STATE};
     Check(app.api.wait_frame(app.session, &wait_info, &state) == XR_SUCCESS, "xrWaitFrame");
@@ -1959,7 +1972,7 @@ XrResult Frame(App& app, Game& game, const std::vector<const Target*>& targets, 
         views[eye].subImage.imageArrayIndex = eyes[eye].slice;
         if (depth) {
             depth_infos[eye] = {XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR};
-            depth_infos[eye].next = &after_depth;
+            depth_infos[eye].next = unknown_after_depth ? &after_depth : nullptr;
             depth_infos[eye].subImage.swapchain = depth->swapchain;
             depth_infos[eye].subImage.imageRect = views[eye].subImage.imageRect;
             depth_infos[eye].subImage.imageArrayIndex = eye;
@@ -1989,6 +2002,237 @@ XrResult Frame(App& app, Game& game, const std::vector<const Target*>& targets, 
         Check(!hold || result != XR_SUCCESS, "the runtime read back a frame the game was held back for");
     }
     return result;
+}
+
+// What a Star Citizen-ordered frame's images hold when released (FrameReleasedFirst).
+constexpr Color kBeforeRendering{255, 0, 255, 255};
+
+// One frame in Star Citizen's order: each colour target acquired, cleared to
+// kBeforeRendering and released before xrBeginFrame, then cleared to its
+// colour between it and xrEndFrame. What a runtime reads at xrEndFrame is
+// the frame; a copy at the release would be kBeforeRendering.
+XrResult FrameReleasedFirst(App& app, Game& game, const std::vector<const Target*>& targets,
+                            const std::vector<Color>& colors, const std::array<Eye, 2>& eyes) {
+    XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
+    XrFrameState state{XR_TYPE_FRAME_STATE};
+    Check(app.api.wait_frame(app.session, &wait_info, &state) == XR_SUCCESS, "xrWaitFrame");
+    std::vector<std::uint32_t> indices;
+    for (const Target* target : targets) {
+        indices.push_back(Acquire(app, *target));
+        Draw(game, target->images[indices.back()], kBeforeRendering);
+        Release(app, *target);
+    }
+    XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
+    Check(app.api.begin_frame(app.session, &begin_info) == XR_SUCCESS, "xrBeginFrame");
+    XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO};
+    locate.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    locate.displayTime = state.predictedDisplayTime;
+    locate.space = app.space;
+    XrViewState view_state{XR_TYPE_VIEW_STATE};
+    std::array<XrView, 2> located{};
+    for (XrView& view : located) view.type = XR_TYPE_VIEW;
+    std::uint32_t located_count = 0;
+    Check(app.api.locate_views(app.session, &locate, &view_state, 2, &located_count, located.data()) == XR_SUCCESS &&
+              located_count == 2,
+          "xrLocateViews");
+    for (std::size_t i = 0; i < targets.size(); ++i) {
+        Draw(game, targets[i]->images[indices[i]], colors[i]);
+    }
+    std::array<XrCompositionLayerProjectionView, 2> views{};
+    for (std::uint32_t eye = 0; eye < 2; ++eye) {
+        views[eye] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+        views[eye].pose = located[eye].pose;
+        views[eye].fov = located[eye].fov;
+        views[eye].subImage.swapchain = eyes[eye].target->swapchain;
+        views[eye].subImage.imageRect = {{0, 0},
+                                         {static_cast<std::int32_t>(kWidth), static_cast<std::int32_t>(kHeight)}};
+        views[eye].subImage.imageArrayIndex = eyes[eye].slice;
+    }
+    XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    projection.space = app.space;
+    projection.viewCount = 2;
+    projection.views = views.data();
+    const XrCompositionLayerBaseHeader* layers[] = {reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection)};
+    XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};
+    end.displayTime = state.predictedDisplayTime;
+    end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    end.layerCount = 1;
+    end.layers = layers;
+    return app.api.end_frame(app.session, &end);
+}
+
+// 2b. A game rendering into its images after releasing them, before
+// xrEndFrame (as Star Citizen does): the runtime shows each frame as
+// rendered, never what the images held at the release; with images in turn
+// (Virtual Desktop) and with the same image every frame (Pimax). The bridge
+// hands an image over at the frame's end, where a runtime reads it.
+void CheckRenderAfterRelease(App& app, Game& game, Target& left, Target& right) {
+    for (const bool same_image : {false, true}) {
+        const std::string name = same_image ? "rendered after release, the same image every frame"
+                                            : "rendered after release, images in turn";
+        g_runtime.same_image = same_image;
+        std::set<std::uint32_t> images;
+        for (int frame = 0; frame < 8; ++frame) {
+            const std::vector<Color> colors{FrameColor(frame, 0), FrameColor(frame, 1)};
+            Check(FrameReleasedFirst(app, game, {&left, &right}, colors, {{{&left, 0}, {&right, 0}}}) == XR_SUCCESS,
+                  name + ", frame " + std::to_string(frame) + ": xrEndFrame");
+            const ShownFrame& shown = g_runtime.frames.back();
+            Check(shown.views.size() == 2, name + ": two views");
+            for (int eye = 0; eye < 2 && shown.views.size() == 2; ++eye) {
+                Check(Near(shown.views[eye].texel, colors[eye]),
+                      name + ", frame " + std::to_string(frame) + " eye " + std::to_string(eye) + ": the runtime shows " +
+                          (shown.views[eye].texel ? Text(*shown.views[eye].texel) : "nothing") +
+                          ", rendered after the release " + Text(colors[eye]) + " (released holding " +
+                          Text(kBeforeRendering) + ")");
+            }
+            if (const StandInSwapchain* chain = FindSwapchain(left.swapchain); chain && chain->released) {
+                images.insert(*chain->released);
+            }
+        }
+        Check(same_image ? images.size() == 1 : images.size() > 1,
+              name + ": the runtime handed out " + std::to_string(images.size()) + " image(s)");
+    }
+    g_runtime.same_image = false;
+}
+
+// 2c. A game acquiring an image ahead (OpenXR lets it hold several and wait
+// for each once the one before it is released): acquire A and B, wait for A,
+// render and release it, then wait for B. The runtime gets A's release
+// before B's wait, as it orders them, and shows B.
+void CheckAcquireAhead(App& app, Game& game, Target& left, Target& right) {
+    XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
+    XrFrameState state{XR_TYPE_FRAME_STATE};
+    Check(app.api.wait_frame(app.session, &wait_info, &state) == XR_SUCCESS, "acquire ahead: xrWaitFrame");
+    XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
+    Check(app.api.begin_frame(app.session, &begin_info) == XR_SUCCESS, "acquire ahead: xrBeginFrame");
+    XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO};
+    locate.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    locate.displayTime = state.predictedDisplayTime;
+    locate.space = app.space;
+    XrViewState view_state{XR_TYPE_VIEW_STATE};
+    std::array<XrView, 2> located{};
+    for (XrView& view : located) view.type = XR_TYPE_VIEW;
+    std::uint32_t located_count = 0;
+    Check(app.api.locate_views(app.session, &locate, &view_state, 2, &located_count, located.data()) == XR_SUCCESS &&
+              located_count == 2,
+          "acquire ahead: xrLocateViews");
+    const Color ahead = FrameColor(5, 0);
+    const Color shown_left = FrameColor(6, 0);
+    const Color shown_right = FrameColor(6, 1);
+    XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+    XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+    wait.timeout = XR_INFINITE_DURATION;
+    std::uint32_t first = 0;
+    std::uint32_t second = 0;
+    Check(app.api.acquire(left.swapchain, &acquire, &first) == XR_SUCCESS &&
+              app.api.acquire(left.swapchain, &acquire, &second) == XR_SUCCESS && first != second &&
+              second < left.images.size(),
+          "acquire ahead: two images acquired");
+    Check(app.api.wait(left.swapchain, &wait) == XR_SUCCESS, "acquire ahead: the first image's wait");
+    Draw(game, left.images[first], ahead);
+    Release(app, left);
+    const XrResult second_wait = app.api.wait(left.swapchain, &wait);
+    Check(second_wait == XR_SUCCESS,
+          "acquire ahead: the second image's wait, after the first's release, succeeds (" +
+              std::to_string(second_wait) + ")");
+    Draw(game, left.images[second], shown_left);
+    Release(app, left);
+    const std::uint32_t right_index = Acquire(app, right);
+    Draw(game, right.images[right_index], shown_right);
+    Release(app, right);
+    std::array<XrCompositionLayerProjectionView, 2> views{};
+    const std::array<const Target*, 2> targets{&left, &right};
+    for (std::uint32_t eye = 0; eye < 2; ++eye) {
+        views[eye] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+        views[eye].pose = located[eye].pose;
+        views[eye].fov = located[eye].fov;
+        views[eye].subImage.swapchain = targets[eye]->swapchain;
+        views[eye].subImage.imageRect = {{0, 0},
+                                         {static_cast<std::int32_t>(kWidth), static_cast<std::int32_t>(kHeight)}};
+    }
+    XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    projection.space = app.space;
+    projection.viewCount = 2;
+    projection.views = views.data();
+    const XrCompositionLayerBaseHeader* layers[] = {reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection)};
+    XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};
+    end.displayTime = state.predictedDisplayTime;
+    end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    end.layerCount = 1;
+    end.layers = layers;
+    Check(app.api.end_frame(app.session, &end) == XR_SUCCESS, "acquire ahead: xrEndFrame");
+    const ShownFrame& shown = g_runtime.frames.back();
+    Check(shown.views.size() == 2 && Near(shown.views[0].texel, shown_left) && Near(shown.views[1].texel, shown_right),
+          "acquire ahead: the runtime shows the image released last");
+}
+
+// 2d. A game releasing its images on another thread than it ends frames on:
+// the bridge's copy runs at the frame's end, on the game's immediate context,
+// which the releasing thread uses too. The release's thread still counts, so
+// the bridge turns the game device's multithread protection on (as when the
+// copy ran at the release). The protection stays on for the session, and is
+// put back for the cases after it.
+void CheckReleaseOnAnotherThread(App& app, Game& game, Target& left, Target& right) {
+    ComPtr<ID3D11Multithread> multithread;
+    Check(SUCCEEDED(game.context.As(&multithread)), "release thread: the game's context has multithread protection");
+    const BOOL was_protected = multithread->GetMultithreadProtected();
+    Check(Contains(Peer::Bridge().Summary(), "secondThread=no"),
+          "release thread: one thread so far: " + Peer::Bridge().Summary());
+    XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
+    XrFrameState state{XR_TYPE_FRAME_STATE};
+    Check(app.api.wait_frame(app.session, &wait_info, &state) == XR_SUCCESS, "release thread: xrWaitFrame");
+    XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
+    Check(app.api.begin_frame(app.session, &begin_info) == XR_SUCCESS, "release thread: xrBeginFrame");
+    XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO};
+    locate.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    locate.displayTime = state.predictedDisplayTime;
+    locate.space = app.space;
+    XrViewState view_state{XR_TYPE_VIEW_STATE};
+    std::array<XrView, 2> located{};
+    for (XrView& view : located) view.type = XR_TYPE_VIEW;
+    std::uint32_t located_count = 0;
+    Check(app.api.locate_views(app.session, &locate, &view_state, 2, &located_count, located.data()) == XR_SUCCESS &&
+              located_count == 2,
+          "release thread: xrLocateViews");
+    const std::array<const Target*, 2> targets{&left, &right};
+    const std::array<Color, 2> colors{FrameColor(7, 0), FrameColor(7, 1)};
+    for (std::size_t eye = 0; eye < 2; ++eye) {
+        Draw(game, targets[eye]->images[Acquire(app, *targets[eye])], colors[eye]);
+    }
+    std::thread releaser([&] {
+        Release(app, left);
+        Release(app, right);
+    });
+    releaser.join();
+    std::array<XrCompositionLayerProjectionView, 2> views{};
+    for (std::uint32_t eye = 0; eye < 2; ++eye) {
+        views[eye] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+        views[eye].pose = located[eye].pose;
+        views[eye].fov = located[eye].fov;
+        views[eye].subImage.swapchain = targets[eye]->swapchain;
+        views[eye].subImage.imageRect = {{0, 0},
+                                         {static_cast<std::int32_t>(kWidth), static_cast<std::int32_t>(kHeight)}};
+    }
+    XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    projection.space = app.space;
+    projection.viewCount = 2;
+    projection.views = views.data();
+    const XrCompositionLayerBaseHeader* layers[] = {reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection)};
+    XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};
+    end.displayTime = state.predictedDisplayTime;
+    end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    end.layerCount = 1;
+    end.layers = layers;
+    Check(app.api.end_frame(app.session, &end) == XR_SUCCESS, "release thread: xrEndFrame");
+    const ShownFrame& shown = g_runtime.frames.back();
+    Check(shown.views.size() == 2 && Near(shown.views[0].texel, colors[0]) && Near(shown.views[1].texel, colors[1]),
+          "release thread: the runtime shows the frame");
+    const std::string summary = Peer::Bridge().Summary();
+    Check(Contains(summary, "secondThread=yes") && Contains(summary, "multithreadProtected=yes") &&
+              multithread->GetMultithreadProtected(),
+          "release thread: the release's thread counts, and protection is on: " + summary);
+    Check(Contains(Peer::Log(), "come from more than one thread"), "release thread: the log says so");
+    multithread->SetMultithreadProtected(was_protected);
 }
 
 // Quad views (XR_VARJO_quad_views): views 0/1 peripheral, 2/3 focus, each with
@@ -2439,7 +2683,8 @@ void CheckDepth(App& app, Game& game, Target& left, Target& right, Target& depth
     constexpr int kFrames = 8;
     for (int frame = 0; frame < kFrames; ++frame) {
         const std::vector<Color> colors{FrameColor(frame + 10, 0), FrameColor(frame + 10, 1)};
-        const XrResult result = Frame(app, game, {&left, &right}, colors, {{{&left, 0}, {&right, 0}}}, &depth);
+        const XrResult result = Frame(app, game, {&left, &right}, colors, {{{&left, 0}, {&right, 0}}}, &depth,
+                                     nullptr, true); // explicit unknown metadata: preserve it in pass-through
         Check(result == XR_SUCCESS, "depth frame " + std::to_string(frame) + ": xrEndFrame " + std::to_string(result));
         const ShownFrame& shown = g_runtime.frames.back();
         Check(shown.views.size() == 2, "depth frame: two views");
@@ -2457,7 +2702,9 @@ void CheckDepth(App& app, Game& game, Target& left, Target& right, Target& depth
     Check(runtime && runtime->acquires == kFrames && runtime->waits == kFrames && runtime->releases == kFrames,
           "the depth swapchain's acquires, waits and releases reach the runtime");
     Check(Contains(Peer::Log(), "keeps the game's depth to itself"), "the log tells depth is left out");
-    Check(Contains(Peer::Bridge().Describe(left.swapchain), "copies=" + std::to_string(10 + kFrames)),
+    // CheckFrames' 10 frames, CheckRenderAfterRelease's 16 and
+    // CheckAcquireAhead's two releases before these.
+    Check(Contains(Peer::Bridge().Describe(left.swapchain), "copies=" + std::to_string(10 + 16 + 2 + kFrames)),
           "colour is still copied: " + Peer::Bridge().Describe(left.swapchain));
 }
 
@@ -2554,12 +2801,30 @@ bool TestBridgedSession(Game& game) {
     Target left = MakeTarget(app, ColorInfo(), "the left eye");
     Target right = MakeTarget(app, ColorInfo(), "the right eye");
     CheckFrames(app, game, left, right);
+    CheckRenderAfterRelease(app, game, left, right);
+    CheckAcquireAhead(app, game, left, right);
     Target depth = MakeTarget(app, DepthInfo(2), "depth");
     CheckDepth(app, game, left, right, depth);
     CheckValidation(game, "cases 1 to 4");
     CheckTeardown(app, game, left, right);
     EndCase(game);
     return true;
+}
+
+// 2d in a session of its own: the second thread is logged as an error, and
+// the protection stays on for the session.
+void TestReleaseOnAnotherThread(Game& game) {
+    BeginCase("release-thread", game);
+    App app = StartApp();
+    SessionCreate create(game.device.Get(), app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS && Peer::Bridge().Active(),
+          "release thread: a bridged session");
+    BeginSession(app);
+    Target left = MakeTarget(app, ColorInfo(), "the left eye");
+    Target right = MakeTarget(app, ColorInfo(), "the right eye");
+    CheckReleaseOnAnotherThread(app, game, left, right);
+    StopApp(app);
+    EndCase(game);
 }
 
 // 1a. VECTORXR_FRAMEGEN_QUEUE=game: the runtime would get the bridge's queue,
@@ -2737,6 +3002,29 @@ void TestInstanceExtensions(Game& game) {
     result = InstanceAttempts({kD3D11Extension}, attempts, log);
     Check(result == XR_SUCCESS && attempts.size() == 1 && attempts[0] == Names{kD3D11Extension, kD3D12Extension},
           "added when there is no list: " + Text(attempts));
+    EndCase(game);
+
+    // A layer made from mbucchia's template (OpenXR Toolkit) calls through a
+    // null pointer when asked for a function before its own instance exists
+    // (issue 108): the layer never asks it, and adds the extension as when
+    // there is no list.
+    BeginCase("instance-template-layer-below", game);
+    depthxr::XrApiLayerNextInfo toolkit{};
+    toolkit.structType = depthxr::XR_LOADER_INTERFACE_STRUCT_API_LAYER_NEXT_INFO;
+    toolkit.structVersion = depthxr::XR_API_LAYER_NEXT_INFO_STRUCT_VERSION;
+    toolkit.structSize = sizeof(toolkit);
+    std::strncpy(toolkit.layerName, "XR_APILAYER_MBUCCHIA_toolkit", XR_MAX_API_LAYER_NAME_SIZE - 1);
+    toolkit.nextGetInstanceProcAddr = RtGetInstanceProcAddr;
+    toolkit.nextCreateApiLayerInstance = RtCreateApiLayerInstance;
+    g_layer_below = &toolkit;
+    result = InstanceAttempts({kD3D11Extension}, attempts, log);
+    g_layer_below = nullptr;
+    Check(result == XR_SUCCESS && g_runtime.pre_instance_queries == 0 && attempts.size() == 1 &&
+              attempts[0] == Names{kD3D11Extension, kD3D12Extension},
+          "nothing asked of a template layer before the instance, the extension added: " + Text(attempts));
+    Check(Contains(log, "OpenXR API layers below VectorXR: [XR_APILAYER_MBUCCHIA_toolkit]") &&
+              Contains(log, "OpenXR Toolkit is loaded below VectorXR."),
+          "the log names the layer below and where OpenXR Toolkit is");
     EndCase(game);
 
     BeginCase("instance-bridge-off", game);
@@ -3951,7 +4239,7 @@ struct SideBySideShown {
     bool quad_layer{false};            // the game's quad layer, after the projection
     std::optional<Color> quad_texel;   // what it showed, read on the runtime's queue
     int quad_releases{0};              // the game's releases of its swapchain the runtime had by then
-    int game_quad_releases{0};         // the game's releases of it by then (read first)
+    int game_quad_releases{0};         // the game's releases of it in frames ended by then (read first)
     double latency_ms{0.0};            // from xrEndFrame until the runtime's queue reached the frame
     std::optional<std::size_t> during; // the game's hold (GameLoad) still closed at xrEndFrame
     UINT64 mark{0};
@@ -3971,7 +4259,10 @@ struct SideBySideSession {
     Target depth; // both eyes' depth side by side
     int frames{0};
     int ui_releases{0};
-    std::atomic<int> ui_released{0}; // the game's releases of the UI that returned
+    // The game's releases of the UI whose frame's xrEndFrame returned: a
+    // bridged release reaches the runtime at the frame's end (the layer
+    // hands it over there, as a runtime reads the image).
+    std::atomic<int> ui_released{0};
 };
 
 // What a side-by-side frame does beyond rendering both eyes.
@@ -3979,6 +4270,7 @@ struct SideBySideFrameOptions {
     bool quad_layer{true};   // the UI rendered, released and submitted as a quad layer after the projection
     bool depth{false};       // depth rendered and chained to each view, its half
     GameLoad* load{nullptr}; // the game's work held back from before the eyes' rendering
+    bool unknown_after_depth{false}; // separate from the supported depth-only generation case
 };
 
 // One frame of the X-Plane-shaped game: both eyes rendered into their halves
@@ -4023,7 +4315,6 @@ void SideBySideFrame(SideBySideSession& session, Game& game, const SideBySideFra
     if (options.quad_layer) {
         Draw(game, session.ui.images[ui_index], QuadLayerColor(session.ui_releases++));
         Release(app, session.ui);
-        ++session.ui_released;
     }
 
     XrBaseInStructure after_depth{kApplicationStructType};
@@ -4040,7 +4331,7 @@ void SideBySideFrame(SideBySideSession& session, Game& game, const SideBySideFra
         views[eye].subImage.imageRect = half;
         if (options.depth) {
             depth_infos[eye] = {XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR};
-            depth_infos[eye].next = &after_depth;
+            depth_infos[eye].next = options.unknown_after_depth ? &after_depth : nullptr;
             depth_infos[eye].subImage.swapchain = session.depth.swapchain;
             depth_infos[eye].subImage.imageRect = half;
             depth_infos[eye].minDepth = 0.0f;
@@ -4071,6 +4362,10 @@ void SideBySideFrame(SideBySideSession& session, Game& game, const SideBySideFra
     end.layers = layers;
     const XrResult result = app.api.end_frame(app.session, &end);
     Check(result == XR_SUCCESS, at + ": xrEndFrame " + std::to_string(result));
+    if (options.quad_layer) {
+        // A bridged release reaches the runtime at the frame's end.
+        ++session.ui_released;
+    }
 }
 
 // The real frame (frames mod 8) whose eye `eye` `texel` shows, or none.
@@ -4521,7 +4816,8 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
     // Depth in the same shape (one swapchain, each view's depth its half):
     // colour still captured and shown through Frame Generation; then, Frame
     // Generation toggled off, the game's frames reach the runtime as they
-    // are, without the depth (the rest of each view's chain kept).
+    // are, without the bridge-private depth. Unknown metadata is checked
+    // separately below, once supported depth has passed generation.
     settle({});
     const depthxr::FrameGenStatus before_depth = Peer::FrameGen();
     const std::size_t depth_from = ShownCount();
@@ -4549,8 +4845,8 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
             for (const ShownView& view : g_runtime.frames[i].views) {
                 Check(!view.depth, "depth: the runtime gets no depth in a bridged session's views");
                 if (i >= as_is_from) {
-                    Check(view.next_type == kApplicationStructType,
-                          "depth: the rest of a view's chain reaches the runtime: " + std::to_string(view.next_type));
+                    Check(view.next_type == XR_TYPE_UNKNOWN,
+                          "depth-only, Frame Generation off: the stripped view has no other metadata");
                 }
             }
         }
@@ -4560,10 +4856,6 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
     std::string log = Peer::Log();
     Check(Contains(log, "keeps the game's depth to itself"), "depth: the log tells depth is left out");
 
-    {
-        std::scoped_lock lock(g_runtime_mutex);
-        g_runtime.on_end_frame = nullptr;
-    }
     for (const Target* target : {&session.eyes, &session.ui}) {
         const std::string describe = Peer::Bridge().Describe(target->swapchain);
         Check(Contains(describe, "skippedCopies=0"), "every release copied: " + describe);
@@ -4587,6 +4879,49 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
     Check(Count(log, "[error]") == Count(log, "[error] D3D11 bridge layer tests: log read") + software_waits,
           "the layer logged no error" + LayerErrors(log));
     CheckValidation(game, "depth");
+    if (mode == "extrapolate" && shown_lazy) {
+        // Unknown metadata is a different contract from supported depth.
+        // Re-engage on depth alone, then verify the unknown-chain drain and
+        // pass-through without teaching the presenter to silently drop it.
+        Check(Peer::ToggleFrameGen(), "Frame Generation toggled back on for the unknown-depth-chain check");
+        const auto generated_before = Peer::FrameGen().generated;
+        for (int i = 0; i < 48 && Peer::FrameGen().generated == generated_before; ++i) run(1, with_depth);
+        Check(Peer::FrameGen().generated > generated_before && Peer::FrameGen().threaded,
+              "depth alone re-engages generation before unknown metadata is introduced");
+        SideBySideFrameOptions unknown_depth = with_depth;
+        unknown_depth.unknown_after_depth = true;
+        run(4, unknown_depth); // drain frames already handed to the presenter
+        const std::size_t unknown_from = ShownCount();
+        const auto refused = Peer::FrameGen();
+        run(6, unknown_depth);
+        Check(check_shown(unknown_from, "unknown metadata after depth", true) == 0,
+              "unknown metadata is passed through on the game's own images");
+        const auto after_unknown = Peer::FrameGen();
+        Check(after_unknown.state == depthxr::FrameGenState::kUnavailable && !after_unknown.threaded &&
+                  Contains(after_unknown.reason, "projection view extension type " + std::to_string(kApplicationStructType)) &&
+                  after_unknown.generated == refused.generated && after_unknown.captured == refused.captured,
+              "unknown metadata after depth stops capture/generation with a precise reason");
+        {
+            std::scoped_lock lock(g_runtime_mutex);
+            Check(g_runtime.frames.size() >= unknown_from + 6, "unknown metadata frames reached the runtime");
+            for (std::size_t i = unknown_from; i < g_runtime.frames.size(); ++i) {
+                for (const ShownView& view : g_runtime.frames[i].views) {
+                    Check(!view.depth && view.next_type == kApplicationStructType,
+                          "the bridge strips private depth and preserves the following unknown metadata");
+                }
+            }
+        }
+        const std::size_t supported_from = ShownCount();
+        run(6, with_depth);
+        Check(Peer::FrameGen().state == depthxr::FrameGenState::kUnavailable &&
+                  check_shown(supported_from, "supported depth after the refusal", true) == 0,
+              "a later supported frame cannot silently clear the unsupported-chain latch");
+        CheckValidation(game, "unknown metadata after depth");
+    }
+    {
+        std::scoped_lock lock(g_runtime_mutex);
+        g_runtime.on_end_frame = nullptr;
+    }
     for (const Target* target : {&session.eyes, &session.ui, &session.depth}) {
         Check(app.api.destroy_swapchain(target->swapchain) == XR_SUCCESS, "a swapchain is destroyed");
     }
@@ -4869,6 +5204,7 @@ int main(int argc, char** argv) {
         TestRefusedD3D12Session(game);
         TestInstanceExtensions(game);
         TestDestroyInstanceWithSession(game);
+        TestReleaseOnAnotherThread(game);
         TestBridgedQuadViewsComposed(game, false);
         TestBridgedQuadViewsComposed(game, true);
         TestBridgedQuadFrameGen(game, "extrapolate");

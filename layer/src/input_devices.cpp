@@ -15,6 +15,7 @@
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #if defined(_WIN32)
@@ -30,6 +31,7 @@
 #endif
 #include <dinput.h>
 #include <objbase.h>
+#include <cfgmgr32.h>
 #endif
 
 namespace depthxr {
@@ -183,13 +185,16 @@ InputDeviceRetryBackoff::InputDeviceRetryBackoff(
 bool InputDeviceRetryBackoff::ShouldAttempt(const std::wstring& device_key,
                                             TimePoint now) const {
     const auto entry = entries_.find(device_key);
-    return entry == entries_.end() || now >= entry->second.retry_after;
+    if (entry == entries_.end()) {
+        return true;
+    }
+    if (entry->second.absent && session_active_) {
+        return entry->second.rescan_seen != rescans_;
+    }
+    return now >= entry->second.retry_after;
 }
 
-std::chrono::milliseconds InputDeviceRetryBackoff::RecordFailure(
-    const std::wstring& device_key,
-    TimePoint now) {
-    Entry& entry = entries_[device_key];
+std::chrono::milliseconds InputDeviceRetryBackoff::Delay(Entry& entry, TimePoint now) {
     if (entry.consecutive_failures == 0) {
         entry.delay = initial_delay_;
     } else {
@@ -200,6 +205,40 @@ std::chrono::milliseconds InputDeviceRetryBackoff::RecordFailure(
     return entry.delay;
 }
 
+std::chrono::milliseconds InputDeviceRetryBackoff::RecordFailure(
+    const std::wstring& device_key,
+    TimePoint now) {
+    Entry& entry = entries_[device_key];
+    entry.absent = false;
+    return Delay(entry, now);
+}
+
+std::chrono::milliseconds InputDeviceRetryBackoff::RecordAbsent(const std::wstring& device_key, TimePoint now) {
+    return RecordAbsent(device_key, now, rescans_);
+}
+
+std::chrono::milliseconds InputDeviceRetryBackoff::RecordAbsent(const std::wstring& device_key, TimePoint now,
+                                                                std::uint64_t attempted_after) {
+    Entry& entry = entries_[device_key];
+    entry.absent = true;
+    entry.rescan_seen = std::min(attempted_after, rescans_);
+    return Delay(entry, now);
+}
+
+void InputDeviceRetryBackoff::SetSessionActive(bool active) {
+    session_active_ = active;
+}
+
+void InputDeviceRetryBackoff::Rescan() {
+    ++rescans_;
+}
+
+bool InputDeviceRetryBackoff::WaitsForRescan(const std::wstring& device_key) const {
+    const auto entry = entries_.find(device_key);
+    return entry != entries_.end() && entry->second.absent && session_active_ &&
+           entry->second.rescan_seen == rescans_;
+}
+
 void InputDeviceRetryBackoff::RecordSuccess(const std::wstring& device_key) {
     entries_.erase(device_key);
 }
@@ -208,7 +247,7 @@ std::chrono::milliseconds InputDeviceRetryBackoff::RetryDelayRemaining(
     const std::wstring& device_key,
     TimePoint now) const {
     const auto entry = entries_.find(device_key);
-    if (entry == entries_.end() || now >= entry->second.retry_after) {
+    if (entry == entries_.end() || now >= entry->second.retry_after || WaitsForRescan(device_key)) {
         return std::chrono::milliseconds{0};
     }
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -380,6 +419,27 @@ HWND FindCurrentProcessTopLevelWindow() {
 }
 
 
+// DirectInput does not know the device: it is not connected (or never was,
+// under this instance GUID).
+bool IsAbsentResult(std::int64_t result_code) {
+    return result_code == ResultCode(DIERR_DEVICENOTREG) || result_code == ResultCode(DIERR_NOTFOUND) ||
+           result_code == ResultCode(DIERR_UNPLUGGED);
+}
+
+// GUID_DEVINTERFACE_HID: every game controller DirectInput lists arrives as one.
+constexpr GUID kHidInterfaceClass{0x4D1E55B2, 0xF16F, 0x11CF, {0x88, 0xCB, 0x00, 0x11, 0x11, 0x00, 0x00, 0x30}};
+
+// Counted on Windows' notification thread; the poller reads it on its next poll.
+std::atomic<std::uint64_t> g_device_arrivals{0};
+
+DWORD CALLBACK OnDeviceInterfaceChange(HCMNOTIFICATION, PVOID, CM_NOTIFY_ACTION action, PCM_NOTIFY_EVENT_DATA,
+                                       DWORD) {
+    if (action == CM_NOTIFY_ACTION_DEVICEINTERFACEARRIVAL) {
+        g_device_arrivals.fetch_add(1, std::memory_order_relaxed);
+    }
+    return ERROR_SUCCESS;
+}
+
 class DirectInputPoller {
   public:
     ~DirectInputPoller() {
@@ -419,6 +479,8 @@ class DirectInputPoller {
         // hitting the hardware once per binding.
         const std::wstring cache_key = NormalizeGuidText(binding.device_guid);
         const auto now = std::chrono::steady_clock::now();
+        NoteArrivalsLocked();
+        result.device_arrival_notified = arrival_notification_ != nullptr;
         if (const auto it = state_cache_.find(cache_key); it != state_cache_.end() &&
                                                           now - it->second.read_time < kStateCacheLifetime) {
             result.down = priming_.Filter(cache_key, binding.input_path,
@@ -437,6 +499,8 @@ class DirectInputPoller {
                 result.device_retry_deferred = false;
                 result.device_retry_delay_ms =
                     retry_backoff_.RetryDelayRemaining(cache_key, now).count();
+                result.device_waits_for_rescan = retry_backoff_.WaitsForRescan(cache_key);
+                result.device_arrival_notified = arrival_notification_ != nullptr;
                 return result;
             }
         }
@@ -456,14 +520,23 @@ class DirectInputPoller {
             result.device_retry_deferred = true;
             result.device_retry_delay_ms =
                 retry_backoff_.RetryDelayRemaining(cache_key, now).count();
+            result.device_waits_for_rescan = retry_backoff_.WaitsForRescan(cache_key);
+            result.device_arrival_notified = arrival_notification_ != nullptr;
             return result;
         }
 
-        const auto cache_failure = [&] {
+        const auto cache_failure = [&](bool absent) {
             result.down = false;
             result.device_retry_deferred = false;
-            result.device_retry_delay_ms =
-                retry_backoff_.RecordFailure(cache_key, InputDeviceRetryBackoff::Clock::now()).count();
+            const auto failed_at = InputDeviceRetryBackoff::Clock::now();
+            result.device_retry_delay_ms = (absent ? retry_backoff_.RecordAbsent(cache_key, failed_at)
+                                                   : retry_backoff_.RecordFailure(cache_key, failed_at))
+                                               .count();
+            if (absent) {
+                EnsureArrivalNotificationLocked();
+            }
+            result.device_waits_for_rescan = retry_backoff_.WaitsForRescan(cache_key);
+            result.device_arrival_notified = arrival_notification_ != nullptr;
             failure_diagnostics_[cache_key] = result;
         };
 
@@ -475,7 +548,7 @@ class DirectInputPoller {
             }
             if (binding.device_guid.empty() || !ParseGuid(binding.device_guid).has_value()) {
                 SetDiagnostic(result, InputBindingPollStage::ParseDeviceGuid, E_INVALIDARG);
-                cache_failure();
+                cache_failure(false);
                 return result;
             }
             // CreateDevice, the window lookup, SetCooperativeLevel and Acquire
@@ -494,7 +567,8 @@ class DirectInputPoller {
         cached.valid = ReadState(device->second, cached.state, result);
         if (!cached.valid) {
             RetireDeviceLocked(cache_key);
-            cache_failure();
+            // Unplugged mid-session: not retried on the timer either.
+            cache_failure(IsAbsentResult(result.result_code) || IsAbsentResult(result.retry_result_code));
             return result;
         }
 
@@ -509,8 +583,36 @@ class DirectInputPoller {
     }
 
     void Drain(std::chrono::milliseconds timeout) {
-        std::unique_lock lock(mutex_);
-        connector_idle_.wait_for(lock, timeout, [this] { return !connector_running_.load(); });
+        HCMNOTIFICATION notification = nullptr;
+        HMODULE module = nullptr;
+        {
+            std::unique_lock lock(mutex_);
+            connector_idle_.wait_for(lock, timeout, [this] { return !connector_running_.load(); });
+            notification = std::exchange(arrival_notification_, nullptr);
+            module = std::exchange(arrival_module_, nullptr);
+            arrival_failed_ = false; // a later instance may register again
+        }
+        // Returns once no callback runs (none takes mutex_); then the layer
+        // may be unloaded.
+        if (notification) {
+            CM_Unregister_Notification(notification);
+        }
+        if (module) {
+            FreeLibrary(module);
+        }
+    }
+
+    void SetSessionActive(bool active) {
+        std::scoped_lock lock(mutex_);
+        if (active && !retry_backoff_.SessionActive()) {
+            retry_backoff_.Rescan(); // a session's start tries each absent device once
+        }
+        retry_backoff_.SetSessionActive(active);
+    }
+
+    void Rescan() {
+        std::scoped_lock lock(mutex_);
+        retry_backoff_.Rescan();
     }
 
   private:
@@ -643,6 +745,47 @@ class DirectInputPoller {
         return true;
     }
 
+    // A device arrived since the last look (any game controller): absent
+    // devices are tried once more.
+    void NoteArrivalsLocked() {
+        if (const std::uint64_t arrivals = g_device_arrivals.load(std::memory_order_relaxed);
+            arrivals != seen_arrivals_) {
+            seen_arrivals_ = arrivals;
+            retry_backoff_.Rescan();
+        }
+    }
+
+    // Windows reports device arrivals once a bound device was found absent,
+    // or a reconnect begins in a session: the only way, besides Rescan
+    // inputs and a session's start, that an absent device is tried again
+    // during a session. The layer stays loaded
+    // while the notification is registered (Drain unregisters it), so a
+    // callback never runs unmapped code.
+    void EnsureArrivalNotificationLocked() {
+        if (arrival_notification_ || arrival_failed_) {
+            return;
+        }
+        HMODULE module = nullptr;
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                                reinterpret_cast<LPCWSTR>(&OnDeviceInterfaceChange), &module)) {
+            arrival_failed_ = true;
+            return;
+        }
+        CM_NOTIFY_FILTER filter{};
+        filter.cbSize = sizeof(filter);
+        filter.FilterType = CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE;
+        filter.u.DeviceInterface.ClassGuid = kHidInterfaceClass;
+        HCMNOTIFICATION notification = nullptr;
+        if (CM_Register_Notification(&filter, nullptr, &OnDeviceInterfaceChange, &notification) != CR_SUCCESS ||
+            !notification) {
+            arrival_failed_ = true;
+            FreeLibrary(module);
+            return;
+        }
+        arrival_notification_ = notification;
+        arrival_module_ = module;
+    }
+
     // Unacquire/Release close the HID handle, so they also run on the connector.
     void RetireDeviceLocked(const std::wstring& cache_key) {
         const auto it = devices_.find(cache_key);
@@ -723,12 +866,23 @@ class DirectInputPoller {
         for (;;) {
             std::vector<IDirectInputDevice8W*> retired;
             std::optional<std::pair<std::wstring, std::string>> job;
+            std::uint64_t attempted_after = 0;
             IDirectInput8W* direct_input = nullptr;
             {
                 std::scoped_lock lock(mutex_);
                 retired.swap(retired_);
                 if (!pending_connects_.empty()) {
                     job = *pending_connects_.begin();
+                    // The attempt runs unlocked while the frame thread counts
+                    // arrivals: one during it (a controller's next HID
+                    // collection, or a device back from a drop) gets the
+                    // device tried again if this attempt finds it absent. A
+                    // reconnect in a session needs the notification for that.
+                    if (retry_backoff_.SessionActive() && retry_backoff_.ConsecutiveFailures(job->first) > 0) {
+                        EnsureArrivalNotificationLocked();
+                    }
+                    NoteArrivalsLocked();
+                    attempted_after = retry_backoff_.Rescans();
                 } else if (retired.empty()) {
                     connector_running_.store(false);
                     connector_idle_.notify_all();
@@ -765,8 +919,19 @@ class DirectInputPoller {
             }
             diagnostic.down = false;
             diagnostic.device_retry_deferred = false;
+            // Not connected: no further attempt on the timer during a session.
+            const bool absent = diagnostic.diagnostic_stage == InputBindingPollStage::CreateDevice &&
+                                IsAbsentResult(diagnostic.result_code);
+            const auto failed_at = InputDeviceRetryBackoff::Clock::now();
             diagnostic.device_retry_delay_ms =
-                retry_backoff_.RecordFailure(job->first, InputDeviceRetryBackoff::Clock::now()).count();
+                (absent ? retry_backoff_.RecordAbsent(job->first, failed_at, attempted_after)
+                        : retry_backoff_.RecordFailure(job->first, failed_at))
+                    .count();
+            if (absent) {
+                EnsureArrivalNotificationLocked();
+            }
+            diagnostic.device_waits_for_rescan = retry_backoff_.WaitsForRescan(job->first);
+            diagnostic.device_arrival_notified = arrival_notification_ != nullptr;
             failure_diagnostics_[job->first] = diagnostic;
             unreported_failures_.insert(job->first);
         }
@@ -795,6 +960,12 @@ class DirectInputPoller {
     std::unordered_map<std::wstring, std::string> pending_connects_;
     std::unordered_set<std::wstring> unreported_failures_;
     std::vector<IDirectInputDevice8W*> retired_;
+    // Windows' device-arrival notification (EnsureArrivalNotificationLocked)
+    // and the module reference it holds; the arrivals the poller has seen.
+    HCMNOTIFICATION arrival_notification_{nullptr};
+    HMODULE arrival_module_{nullptr};
+    bool arrival_failed_{false};
+    std::uint64_t seen_arrivals_{0};
 };
 
 DirectInputPoller& Poller() {
@@ -841,6 +1012,20 @@ void DrainInputDeviceWork(std::chrono::milliseconds timeout) {
     Poller().Drain(timeout);
 #else
     (void)timeout;
+#endif
+}
+
+void SetInputDeviceSessionActive(bool active) {
+#if defined(_WIN32)
+    Poller().SetSessionActive(active);
+#else
+    (void)active;
+#endif
+}
+
+void RescanInputDevices() {
+#if defined(_WIN32)
+    Poller().Rescan();
 #endif
 }
 

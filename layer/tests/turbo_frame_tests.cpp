@@ -366,6 +366,33 @@ class TurboFrameTestPeer {
         ++layer.config_generation_;
         layer.RefreshResolvedSettings();
     }
+    // A session ended and the next created with the same handle, as Virtual
+    // Desktop hands one back under OpenComposite, the settings being `config`
+    // (no file is read): whether the OSD is drawn in the first session and in
+    // the second.
+    static std::pair<bool, bool> OsdDrawnAcrossReusedHandle(const ConfigDocument& config, XrSession session) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        const ConfigDocument previous = layer.config_;
+        const bool loaded = layer.has_loaded_config_;
+        layer.config_ = config;
+        layer.has_loaded_config_ = true;
+        ++layer.config_generation_;
+        const auto create = [&] { // xrCreateSession: reset, take the handle, resolve
+            layer.ResetSessionState();
+            layer.active_session_ = session;
+            layer.RefreshResolvedSettings();
+            return layer.osd_monitoring_.load();
+        };
+        const bool first = create();
+        layer.ResetSessionState(); // xrDestroySession
+        const bool second = create();
+        layer.ResetSessionState();
+        layer.config_ = previous;
+        layer.has_loaded_config_ = loaded;
+        ++layer.config_generation_;
+        return {first, second};
+    }
     static bool TurboEffective() { return Layer().turbo_effective_active_.load(); }
     static bool TurboYielded() {
         auto& layer = Layer();
@@ -695,7 +722,8 @@ class TurboFrameTestPeer {
         }
         XrViewState state{XR_TYPE_VIEW_STATE};
         const XrResult result =
-            layer.LocateRuntimeViews(XR_NULL_HANDLE, &info, &state, capacity, count, views, nullptr, nullptr);
+            layer.LocateRuntimeViews(XR_NULL_HANDLE, &info, &state, capacity, count, views, nullptr, nullptr,
+                                     nullptr);
         std::scoped_lock lock(layer.mutex_);
         layer.has_loaded_config_ = loaded;
         layer.next_locate_views_ = previous;
@@ -3703,6 +3731,19 @@ void TestConfigWarningsLoggedOncePerKey() {
     std::filesystem::remove_all(directory, error);
 }
 
+// OpenComposite ends a game's first session and creates the next at once, and
+// Virtual Desktop can hand the same handle back: the OSD is drawn in the new
+// session without a settings reload (it stayed dark in AMS2 until one).
+void TestOsdDrawnWhenTheRuntimeReusesASessionHandle() {
+    depthxr::ConfigDocument config;
+    config.core.enabled = true;
+    config.core.osd.enabled = true;
+    const auto [first, second] =
+        depthxr::TurboFrameTestPeer::OsdDrawnAcrossReusedHandle(config, TestSession());
+    Expect(first, "The OSD was not drawn in a new session");
+    Expect(second, "The OSD stayed off in a session whose handle the runtime reused");
+}
+
 int main() {
     TestHandoverKeepsBlockedPollShielded();
     // Runtime-profile and fault-recovery simulations: none may stop frame
@@ -3762,6 +3803,7 @@ int main() {
     TestTopologyFollowsFrameGenClaimsApart();
     TestQuadViewsInactiveReasons();
     TestQuadViewsOsdTagFollowsBegunConfiguration();
+    TestOsdDrawnWhenTheRuntimeReusesASessionHandle();
     // Last: it points the layer's log at a file of its own.
     TestConfigWarningsLoggedOncePerKey();
     TestRecoveryBlockLogsWhatTurboDoes();

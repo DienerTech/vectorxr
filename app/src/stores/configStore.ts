@@ -14,6 +14,7 @@ import {
   type SeenApplication,
 } from '../lib/commands'
 import { errorText } from '../lib/errors'
+import { createTaskQueue } from '../lib/taskQueue'
 import { cloneConfig, createApplication, createFrameGenProfile, createProfile, createPivotProfile, createQuadViewsProfile, createTurboProfile, defaultConfig } from '../lib/model'
 import type { AppTab, ModuleId, RuntimePacingObservation, TurboMetricsSession, VectorXRConfig } from '../lib/model'
 
@@ -63,6 +64,22 @@ const state = reactive<StoreState>({
 
 const isDirty = computed(() => JSON.stringify(state.config) !== JSON.stringify(state.originalConfig))
 
+// Saves run one at a time, so a tray change and a Save on the page cannot
+// write the file out of order.
+const queueSave = createTaskQueue()
+
+// The settings file as last read back (load, after each save, reset), in the
+// same normalized form a later read gives: reloadIfChanged compares with it,
+// so only a change made elsewhere counts.
+let lastDisk = ''
+async function readBack() {
+  try {
+    lastDisk = JSON.stringify((await loadConfigEnvelope()).config)
+  } catch {
+    lastDisk = ''
+  }
+}
+
 function loadBlockedStatus() {
   return `Settings could not be loaded, so saving is off to keep the file on disk: ${state.loadError.replace(/\.\s*$/, '')}. Fix the file and reopen VectorXR, import a config, or reset to defaults.`
 }
@@ -77,6 +94,7 @@ export function useConfigStore() {
       state.path = envelope.path
       state.config = cloneConfig(envelope.config)
       state.originalConfig = cloneConfig(envelope.config)
+      lastDisk = JSON.stringify(envelope.config)
       state.loadError = ''
       state.status = ''
       await Promise.all([refreshSeenApps(), refreshRuntimePacing(), refreshTurboMetrics()])
@@ -160,24 +178,91 @@ export function useConfigStore() {
     }
   }
 
-  async function save() {
-    if (state.loadError) {
-      state.status = loadBlockedStatus()
-      return
-    }
+  function save() {
+    return queueSave(async () => {
+      if (state.loadError) {
+        state.status = loadBlockedStatus()
+        return
+      }
 
-    state.saving = true
-    state.status = ''
+      state.saving = true
+      state.status = ''
 
-    try {
-      state.path = await saveConfigEnvelope(state.config)
-      state.originalConfig = cloneConfig(state.config)
-      state.status = 'Config saved'
-    } catch (error) {
-      state.status = errorText(error, 'Failed to save config')
-    } finally {
-      state.saving = false
-    }
+      try {
+        const saved = cloneConfig(state.config)
+        state.path = await saveConfigEnvelope(saved)
+        state.originalConfig = saved
+        await readBack()
+        state.status = 'Config saved'
+      } catch (error) {
+        state.status = errorText(error, 'Failed to save config')
+      } finally {
+        state.saving = false
+      }
+    })
+  }
+
+  // A change made outside the editor (the tray): saved at once on top of the
+  // settings on disk, then made in the editor too, so the editor's other
+  // unsaved edits stay unsaved. The disk copy, not the one loaded at start:
+  // an app kept running in the tray for hours must not undo a hand edit or
+  // another copy's save.
+  function saveSetting(change: (config: VectorXRConfig) => void, description: string): Promise<boolean> {
+    return queueSave(async () => {
+      if (state.loading) {
+        return false
+      }
+      if (state.loadError) {
+        state.status = loadBlockedStatus()
+        return false
+      }
+
+      state.saving = true
+      try {
+        const saved = cloneConfig((await loadConfigEnvelope()).config)
+        change(saved)
+        state.path = await saveConfigEnvelope(saved)
+        await readBack()
+        const edited = isDirty.value
+        state.originalConfig = saved
+        if (edited) {
+          change(state.config)
+        } else {
+          state.config = cloneConfig(saved)
+        }
+        state.status = description
+        return true
+      } catch (error) {
+        state.status = errorText(error, 'Failed to save config')
+        return false
+      } finally {
+        state.saving = false
+      }
+    })
+  }
+
+  // The file may have changed while the window was hidden (the tray keeps
+  // the app running): pick that up when nothing is edited here.
+  function reloadIfChanged() {
+    return queueSave(async () => {
+      if (state.loading || state.saving || state.loadError || isDirty.value) {
+        return
+      }
+      try {
+        const disk = (await loadConfigEnvelope()).config
+        const read = JSON.stringify(disk)
+        if (!lastDisk || read === lastDisk || isDirty.value) {
+          lastDisk ||= read
+          return
+        }
+        lastDisk = read
+        state.config = cloneConfig(disk)
+        state.originalConfig = cloneConfig(disk)
+        state.status = 'Loaded settings changed on disk'
+      } catch {
+        // Reported by the next load or save.
+      }
+    })
   }
 
   async function resetToDefaults() {
@@ -192,6 +277,7 @@ export function useConfigStore() {
       state.originalConfig = cloneConfig(envelope.config)
       state.loadError = ''
       state.seenApps = []
+      await readBack()
       state.status = 'Config reset to defaults'
     } catch (error) {
       state.status = errorText(error, 'Failed to reset config')
@@ -433,6 +519,8 @@ export function useConfigStore() {
     isDirty,
     load,
     save,
+    saveSetting,
+    reloadIfChanged,
     resetToDefaults,
     discardChanges,
     importConfig,

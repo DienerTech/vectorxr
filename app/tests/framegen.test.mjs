@@ -37,6 +37,12 @@ test('invalid imported values normalize safely: enums fall back, integers clamp'
   assert.deepEqual(normalizeFrameGenSettings({ synthesisMode: 'warp', flowQuality: 'ultra', motionEstimation: 'cuda', frameMultiplier: '8x', artifactSuppression: 'high', motionLimitPercent: Number.NaN }), defaultFrameGenSettings())
   assert.deepEqual(normalizeFrameGenSettings({ synthesisMode: 'extrapolate', flowQuality: 'quality', motionEstimation: 'hardware', frameMultiplier: '3x', artifactSuppression: 140, motionLimitPercent: 1 }),
     { synthesisMode: 'extrapolate', flowQuality: 'quality', motionEstimation: 'hardware', frameMultiplier: '3x', artifactSuppression: 100, motionLimitPercent: 2 })
+  // Head prediction is present only when on, so older layers see the six keys they know.
+  assert.deepEqual(normalizeFrameGenSettings({ extendHeadPrediction: true }), { ...defaultFrameGenSettings(), extendHeadPrediction: true })
+  assert.equal('extendHeadPrediction' in normalizeFrameGenSettings({ extendHeadPrediction: false }), false)
+  assert.equal('extendHeadPrediction' in normalizeFrameGenSettings({ extendHeadPrediction: 'yes' }), false)
+  // A profile saved without it is off, as the layer reads it, whatever the defaults say.
+  assert.equal('extendHeadPrediction' in normalizeFrameGenSettings({}, { ...defaultFrameGenSettings(), extendHeadPrediction: true }), false)
   assert.deepEqual(normalizeFrameGenSettings({ artifactSuppression: -5, motionLimitPercent: 99 }), { ...defaultFrameGenSettings(), artifactSuppression: 0, motionLimitPercent: 25 })
   assert.equal(normalizeFrameGenSettings({ artifactSuppression: 33.6 }).artifactSuppression, 34)
   assert.equal(normalizeFrameGenSettings({ motionLimitPercent: Infinity }).motionLimitPercent, 10)
@@ -232,7 +238,7 @@ test('Turbo overlap produces a non-blocking warning naming the affected applicat
 
 test('the OSD Frame Gen rows default sensibly and old saved orders gain the row at the end', () => {
   const osd = defaultOsdSettings()
-  assert.deepEqual(osd.bodyOrder, ['graph', 'turbo', 'framegen', 'pivot', 'modules'])
+  assert.deepEqual(osd.bodyOrder, ['graph', 'performance', 'turbo', 'framegen', 'pivot', 'modules'])
   assert.equal(osd.showFramegen, true)
   assert.equal(osd.compactShowFramegen, false)
   assert.equal(osd.showFramegenFps, true)
@@ -240,16 +246,16 @@ test('the OSD Frame Gen rows default sensibly and old saved orders gain the row 
   assert.equal(normalizeOsdSettings({ showFramegenFps: 'no' }).showFramegenFps, true)
 
   const legacy = normalizeOsdSettings({ bodyOrder: ['pivot', 'modules', 'graph', 'turbo'], showTurbo: false })
-  assert.deepEqual(legacy.bodyOrder, ['pivot', 'modules', 'graph', 'turbo', 'framegen'])
+  assert.deepEqual(legacy.bodyOrder, ['pivot', 'modules', 'graph', 'turbo', 'performance', 'framegen'])
   assert.equal(legacy.showFramegen, true)
   assert.equal(normalizeOsdSettings({ showFramegen: 'no', compactShowFramegen: 1 }).showFramegen, true)
   assert.equal(normalizeOsdSettings({ showFramegen: false, compactShowFramegen: true }).compactShowFramegen, true)
   const preset = normalizeOsdSettings({ customPresets: [{ name: 'Old', settings: { bodyOrder: ['modules', 'graph'] } }] }).customPresets[0]
-  assert.deepEqual(preset.settings.bodyOrder, ['modules', 'graph', 'turbo', 'framegen', 'pivot'])
+  assert.deepEqual(preset.settings.bodyOrder, ['modules', 'graph', 'performance', 'turbo', 'framegen', 'pivot'])
   assert.equal(preset.settings.showFramegen, true)
 
   const config = defaultConfig()
-  config.core.osd.bodyOrder = ['graph', 'turbo', 'pivot', 'modules']
+  config.core.osd.bodyOrder = ['graph', 'performance', 'turbo', 'pivot', 'modules']
   assert.ok(validateConfig(config).includes('OSD body order must contain each row once'))
   assert.deepEqual(validateConfig(normalizeConfig(config)), [])
 })

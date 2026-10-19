@@ -74,8 +74,19 @@ While you're here:
 - **General** also holds the **Theme** (System / Light / Dark, stored on this PC only) and
   **Track discovered XR apps**, which is on by default. It records the executable name of OpenXR
   apps you launch so you can register them in one click later (see Step 2). All data stays local.
-- **Logging** sets the **Log Level** and **Log Retention** and opens the log folder with
-  **View Logs**.
+- **System Tray** (also under General, stored on this PC only) puts a VectorXR icon in the
+  Windows notification area. Its menu shows the health status and holds the **VectorXR enabled**
+  switch, the **Log level** (Info or Debug) and **Export Debug**; a change made there is saved
+  at once. **On** (the default): closing the window keeps the app in the tray; exit with **Quit
+  VectorXR** in the tray menu. **Off**: no icon, and closing the window quits the app. Starting
+  VectorXR while it runs brings its window back. The app and tray are a settings helper, not the
+  OpenXR layer: VectorXR works in your games with them closed, while **VectorXR Enabled** is on.
+- **Input Devices** (also under General): **Rescan inputs** is for use in-game. It looks again for a
+  controller connected mid-session that VectorXR didn't detect. VectorXR normally detects one when
+  Windows reports it plugged in; it doesn't poll for missing controllers during a session, which
+  stalled games.
+- **Logging** sets the **Log Level** and **Log Retention**, opens the log folder with
+  **View Logs**, and saves a support ZIP with **Export Debug**, the same as on Home.
 - **Sound Feedback** sets the master volume for the activate/deactivate cues you can attach to
   bindings; **Test** plays a sample.
 - **Config Files** moves your full configuration between machines or backs it up with
@@ -317,6 +328,10 @@ For the recommended **DCS + synthesized VectorXR Quadviews** path, set:
   Quadviews is different and remains runtime-driven.
 - **`XR_APILAYER_MBUCCHIA_quad_views_foveated`:** disabled while VectorXR is the quadviews
   provider. Run one quadviews provider at a time.
+- **OpenXR Toolkit:** disabled for DCS, or set to bypass DCS. Toolkit supports two views only,
+  and VectorXR is usually registered below it, where Toolkit would get DCS's four quad views. In
+  that order VectorXR keeps Quadviews off, so DCS runs stereo; the log says so, and the OpenXR
+  Layers page shows a warning.
 
 Restart DCS after changing its VR settings, the active OpenXR runtime, or API-layer state.
 The page's collapsible **Setup guide** repeats this checklist and the compatible titles; it
@@ -770,11 +785,17 @@ thread, Dynamic runs as Auto.
 
 **Fixed** holds the game at a set fraction of the headset refresh rate, for even pacing:
 
-| Fixed rate | Game rate | Example at 90 Hz | Generated frames between real frames |
+| Fixed rate | Game rate (at most) | Example at 90 Hz | Generated frames between real frames |
 | --- | --- | --- | --- |
 | **2x** | 1/2 of the headset refresh rate | 45 fps | One |
 | **3x** | 1/3 | 30 fps | Two |
 | **4x** | 1/4 | 22.5 fps | Three |
+
+The fraction is the most the game is let run. A game that cannot reach it runs at its own rate,
+and every refresh is still filled: some real frames then get two or more generated frames, each
+made from the newest real frame and placed further ahead, so pacing is less even and artifacts
+grow. Lower the game's settings until it holds the rate, or use the next rate up (or Auto) for
+even pacing. The On-Screen Display's "game → headset" frame rates show the real ratio.
 
 **Auto** starts at full rate: while the game holds the headset refresh, frames pass straight
 through and the status reads **Standby**. When it cannot, Auto steps up to 2x, 3x or 4x, and
@@ -844,7 +865,7 @@ needs a game restart; turning it off applies at once.
     sooner where motion is uncertain. You get fewer warping artifacts and more local judder.
   - **Motion limit** (2–25% of view width, default 10%) is the farthest a generated frame may
     move image content. Motion beyond it falls back to the real image.
-  - **Reset advanced settings** returns all three to their defaults.
+  - **Reset advanced settings** returns them all to their defaults.
 - **Diagnostic view** applies to every Frame Generation session: **Off**, **Motion flow**
   (color-coded motion overlay on generated frames), **Confidence** (generated frames painted
   red where generation fell back to the real image), or **Generated-frame tint** (a faint tint
@@ -958,7 +979,8 @@ engages, or sooner once the game's own frames show the runtime giving them every
 
 With a **Fixed** frame rate that is expected: Frame Generation holds the game at a fraction of
 the headset refresh rate and fills in the frames between: 45, 30, or 22.5 fps on a 90 Hz headset
-at 2x, 3x, or 4x. With **Dynamic**, the game runs as fast as it can. Judge the image in the
+at 2x, 3x, or 4x. A game below that rate runs at its own rate, with more generated frames per
+real one. With **Dynamic**, the game runs as fast as it can. Judge the image in the
 headset, not the game's own FPS counter; the On-Screen Display shows the frames per second the
 headset gets beside **FG ON**.
 
@@ -991,7 +1013,9 @@ frames. Raising Artifact suppression under Advanced can help.
 **Can I use Turbo with Frame Generation?**
 
 Not in the same session. Frame Generation takes over frame pacing, so Turbo stays off wherever
-Frame Generation runs. Turbo still works for games without Frame Generation.
+Frame Generation runs. Turbo still works for games without Frame Generation. If Turbo alone
+gets a game close to the refresh rate, compare it with Frame Generation before choosing: 2x
+holds the game at half the refresh rate, so it trades real frames for generated ones.
 
 **Do I need to turn off Motion Smoothing or ASW?**
 
@@ -1058,11 +1082,11 @@ header. Choose 12-hour (with AM/PM) or 24-hour time. Long application and runtim
 truncated within their own fields.
 
 The **Expanded** layout always shows application FPS, average application frame interval,
-and P95, and adds selectable rows for the frame-time graph, Turbo, Frame Generation, Pivot,
-and active enhancements. Drag these rows or use their up/down arrows to arrange them. Saved
-layouts from earlier versions gain the Frame Generation row at the end. The **Compact**
-layout chooses its **Performance** readout (FPS and average frame time, either one, or
-none) and can add Turbo, Frame Generation, and Pivot status rows (Pivot adds a Snap View line
+and P95, and adds selectable rows for the frame-time graph, performance headroom, Turbo,
+Frame Generation, Pivot, and active enhancements. Drag these rows or use their up/down arrows
+to arrange them. Saved layouts from earlier versions gain rows added since at the end. The
+**Compact** layout chooses its **Performance** readout (FPS and average frame time, either
+one, or none) and can add performance headroom, Turbo, Frame Generation, and Pivot status rows (Pivot adds a Snap View line
 when the application has Snap Views). **Just FPS** clears the compact header and status rows for
 the smallest display. Turbo distinguishes **Disabled**, **Enabled / Off**, **Enabled / Waiting**,
 active **Async** or **Sequenced**, safety states, and **Paused for Frame Generation**. Active
@@ -1103,11 +1127,22 @@ setting. Settings editing remains in the desktop app.
 **What the numbers mean:** the OSD samples the time between application `xrEndFrame`
 calls over the last 120 frames. FPS is calculated from the average interval; P95 is
 the 95th-percentile interval. Lower, steadier frame times generally indicate smoother
-application cadence. These numbers do not measure GPU execution, compositor FPS, or
+application cadence. FPS and P95 do not measure GPU execution, compositor FPS, or
 reprojection. Turbo and Frame Generation can make application cadence differ from the headset
 refresh rate; with Frame Generation on, **FG ON** beside FPS shows the frames per second the
 headset gets, generated frames included.
 Pauses longer than one second reset the history.
+
+**Performance headroom** (on by default in the Expanded layout, off in Compact) compares the
+game's CPU time per frame, from its `xrWaitFrame` returning to its `xrEndFrame`, with the
+frame budget: the headset's refresh period, or with Frame Generation generating, the game's
+own target (45 fps at 90 Hz and 2x). GPU headroom is 100% less the whole GPU's 3D
+utilization from Windows' GPU counters, the runtime's compositor and other apps included;
+**game** is the game's own share. The CPU time is hidden while the game waits for its next
+frame before ending the last (OpenComposite does) or Turbo paces it. **VRAM** is the game's
+video memory use against the budget Windows gives it, with Frame Generation's own images.
+**CPU-BOUND** or **GPU-BOUND** shows only when it is clear. The row is sampled twice a second,
+only while the panel is shown in a layout that has the row.
 
 Panel refresh is independent of frame sampling. The default **5 Hz** redraw rate keeps
 the information readable without updating the text every frame; 1–20 Hz is available.

@@ -17,6 +17,7 @@ add_library(
     src/sound_player.cpp
     src/settings_resolver.cpp
     src/session_graphics.cpp
+    src/performance_monitor.cpp
     src/swapchain_state.cpp
     src/thread_census.cpp
     src/util/config_path.cpp
@@ -30,13 +31,14 @@ add_library(
     src/math/pivot_step.cpp
     src/math/pivot_view.cpp
     src/math/pivot_yaw.cpp
+    src/math/head_prediction.cpp
 )
 
 target_include_directories(depthxr_core PUBLIC include)
 target_compile_features(depthxr_core PUBLIC cxx_std_20)
 if(WIN32)
-    target_sources(depthxr_core PRIVATE src/util/crt_failure_report.cpp)
-    target_link_libraries(depthxr_core PUBLIC dinput8 dxguid ole32 winmm)
+    target_sources(depthxr_core PRIVATE src/util/crt_failure_report.cpp src/performance_sampler.cpp)
+    target_link_libraries(depthxr_core PUBLIC dinput8 dxguid ole32 winmm cfgmgr32)
 endif()
 
 if(WIN32 AND DEPTHXR_BUILD_LAYER)
@@ -590,6 +592,17 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
             WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 VECTORXR_VERSION="${_vectorxr_version}")
         add_test(NAME depthxr_eye_gaze_tests COMMAND depthxr_eye_gaze_tests)
         set_tests_properties(depthxr_eye_gaze_tests PROPERTIES TIMEOUT 15)
+
+        # Head prediction past the runtime's limit through xrLocateViews and
+        # xrLocateSpace, against a stand-in runtime (CPU only).
+        add_executable(depthxr_head_prediction_layer_tests tests/head_prediction_layer_tests.cpp src/openxr_layer.cpp)
+        target_include_directories(depthxr_head_prediction_layer_tests PRIVATE include)
+        target_link_libraries(depthxr_head_prediction_layer_tests PRIVATE depthxr_core depthxr_osd depthxr_framegen
+            OpenXR::openxr_loader d3d11 d3dcompiler dxgi shlwapi)
+        target_compile_definitions(depthxr_head_prediction_layer_tests PRIVATE DEPTHXR_TESTING
+            WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 VECTORXR_VERSION="${_vectorxr_version}")
+        add_test(NAME depthxr_head_prediction_layer_tests COMMAND depthxr_head_prediction_layer_tests)
+        set_tests_properties(depthxr_head_prediction_layer_tests PROPERTIES TIMEOUT 15)
         # Frame Generation's Direct3D 11 bridge through the layer's own hooks
         # (xrCreateApiLayerInstance on) against a stand-in runtime whose
         # swapchain images are Direct3D 12 textures, on WARP
@@ -705,6 +718,10 @@ if(DEPTHXR_BUILD_TESTS)
     add_test(NAME depthxr_layer_tests COMMAND depthxr_layer_tests)
     # About 5 s on hosted CI; a hang must not hold the runner for its 25 minutes.
     set_tests_properties(depthxr_layer_tests PROPERTIES TIMEOUT 120)
+    add_executable(depthxr_head_prediction_tests tests/head_prediction_tests.cpp)
+    target_link_libraries(depthxr_head_prediction_tests PRIVATE depthxr_core)
+    add_test(NAME depthxr_head_prediction_tests COMMAND depthxr_head_prediction_tests)
+    set_tests_properties(depthxr_head_prediction_tests PROPERTIES TIMEOUT 10)
     add_executable(depthxr_turbo_trace_tests tests/turbo_trace_tests.cpp)
     target_link_libraries(depthxr_turbo_trace_tests PRIVATE depthxr_core)
     add_test(NAME depthxr_turbo_trace_tests COMMAND depthxr_turbo_trace_tests)
@@ -734,6 +751,13 @@ if(DEPTHXR_BUILD_TESTS)
     target_link_libraries(depthxr_sound_player_tests PRIVATE depthxr_core)
     add_test(NAME depthxr_sound_player_tests COMMAND depthxr_sound_player_tests)
     set_tests_properties(depthxr_sound_player_tests PROPERTIES TIMEOUT 10)
+    if(WIN32)
+        # CPU only: the row's logic. "live" also samples this machine's GPU counters and video memory.
+        add_executable(depthxr_performance_tests tests/performance_tests.cpp)
+        target_link_libraries(depthxr_performance_tests PRIVATE depthxr_core dxgi)
+        add_test(NAME depthxr_performance_tests COMMAND depthxr_performance_tests)
+        set_tests_properties(depthxr_performance_tests PROPERTIES TIMEOUT 30)
+    endif()
     add_executable(depthxr_thread_census_tests tests/thread_census_tests.cpp)
     target_link_libraries(depthxr_thread_census_tests PRIVATE depthxr_core)
     add_test(NAME depthxr_thread_census_tests COMMAND depthxr_thread_census_tests)

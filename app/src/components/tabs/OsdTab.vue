@@ -51,14 +51,17 @@ function closeBinding() {
   editing.value = null
   void nextTick(() => scroller()?.scrollTo({ top: savedScrollTop }))
 }
-const contents: Record<OsdBodyRow, { key: 'showGraph' | 'showTurbo' | 'showFramegen' | 'showPivot' | 'showModules'; label: string; hint: string }> = {
+const performanceHint = 'CPU and GPU headroom against the frame budget, video memory with Frame Generation\'s share, and CPU-BOUND or GPU-BOUND when it is clear. Sampled twice a second, only while a layout shows it.'
+const contents: Record<OsdBodyRow, { key: 'showGraph' | 'showPerformance' | 'showTurbo' | 'showFramegen' | 'showPivot' | 'showModules'; label: string; hint: string }> = {
   graph: { key: 'showGraph', label: 'Frame-time graph', hint: 'Rolling history of the last 120 application frames.' },
+  performance: { key: 'showPerformance', label: 'Performance headroom', hint: performanceHint },
   turbo: { key: 'showTurbo', label: 'Turbo state', hint: 'Distinguishes disabled, enabled but off, active strategy, safety states, and paused for Frame Generation.' },
   framegen: { key: 'showFramegen', label: 'Frame Generation state', hint: 'On, Standby, Paused or Off, with the mode and frame rate, and a second line with frame rates or the reason. Shown only in games where Frame Generation is on.' },
   pivot: { key: 'showPivot', label: 'Pivot state', hint: 'Motion state, Position Assist, and nudges. Apps with Snap Views add a second line for the snap, stacking, and transitions.' },
   modules: { key: 'showModules', label: 'Active enhancements', hint: 'Depth, Pivot, Turbo, Quadviews, and Frame Generation enabled for this app.' },
 }
 const compactContents = [
+  { key: 'compactShowPerformance', label: 'Performance headroom', hint: 'CPU and GPU headroom and video memory in one line; the bound side says so.' },
   { key: 'compactShowTurbo', label: 'Turbo state', hint: 'Current strategy, off, waiting, safety state, or paused for Frame Generation.' },
   { key: 'compactShowFramegen', label: 'Frame Generation state', hint: 'Frame rate and game-to-headset frame rates, or Standby, Paused or Off.' },
   { key: 'compactShowPivot', label: 'Pivot state', hint: 'Motion state in a short label, plus a Snap View line when Snap Views are configured.' },
@@ -74,7 +77,8 @@ const framegenFpsHint = 'In games with Frame Generation on: FG ON with the frame
 const compactEmpty = computed(() => osdCompactLayout(osd.value).empty)
 function fpsOnly() {
   Object.assign(osd.value, { compactMetrics: 'fps', compactShowBrand: false, compactShowApp: false,
-    compactShowRuntime: false, compactShowClock: false, compactShowTurbo: false, compactShowFramegen: false, compactShowPivot: false })
+    compactShowRuntime: false, compactShowClock: false, compactShowTurbo: false, compactShowFramegen: false, compactShowPivot: false,
+    compactShowPerformance: false })
   previewCompact.value = true
 }
 function moveRow(row: OsdBodyRow, direction: number) {
@@ -138,8 +142,8 @@ function deletePreset() {
 function preset(name: 'balanced' | 'minimal' | 'performance') {
   const shared: Partial<OsdSettings> = { opacity: 90, accent: 'teal', distanceMeters: 1.2, updateHz: 5,
     compactShowRuntime: true, compactShowClock: true, compactShowTurbo: false, compactShowFramegen: false, compactShowPivot: false,
-    compactShowBrand: true, compactShowApp: true, compactMetrics: 'all',
-    showGraph: true, showRuntime: true, showBrand: true, showApp: true, showTurbo: true, showFramegen: true, showFramegenFps: true, showModules: true, showClock: true, showPivot: true, clockFormat: '24', bodyOrder: [...osdBodyRows] }
+    compactShowPerformance: false, compactShowBrand: true, compactShowApp: true, compactMetrics: 'all',
+    showGraph: true, showPerformance: true, showRuntime: true, showBrand: true, showApp: true, showTurbo: true, showFramegen: true, showFramegenFps: true, showModules: true, showClock: true, showPivot: true, clockFormat: '24', bodyOrder: [...osdBodyRows] }
   const layout = name === 'minimal'
     ? { compact: true, horizontalDegrees: 0, verticalDegrees: -23, scale: 80 }
     : name === 'performance'
@@ -199,6 +203,7 @@ function preset(name: 'balanced' | 'minimal' | 'performance') {
         <div class="mt-3 max-w-4xl space-y-2 text-xs leading-5 text-muted">
           <p>Every setting on this page applies after Save, including enabling the OSD in a running game. Bindings change visibility and layout immediately for the current session. The next session uses your saved starting layout and visibility.</p>
           <p>The overlay measures intervals between the application's xrEndFrame calls over the last 120 frames. P95 is the interval at the 95th percentile; lower, steadier frame times are better. These values do not measure GPU work, reprojection, or compositor frame rate. Turbo can make application cadence differ from the headset's refresh rate. With Frame Generation on, FG ON beside FPS shows the frames per second the headset gets, generated ones included.</p>
+          <p>Performance headroom compares the game's CPU time per frame (from its xrWaitFrame's return to its xrEndFrame) with the frame budget: the headset's refresh period, or with Frame Generation generating, the game's own target (45 fps at 90 Hz and 2x). GPU headroom is 100% less the whole GPU's 3D utilization from Windows' GPU counters, the runtime's compositor and other apps included; "game" is the game's own share, and "thread" how busy the game's thread that ends frames is. The CPU time is hidden while the game waits for its next frame before ending the last (OpenComposite does) or Turbo paces it. VRAM is the game's video memory use and the budget Windows gives it, with Frame Generation's own images. CPU-BOUND or GPU-BOUND shows only when it is clear; with Frame Generation, from which side its late frames were late.</p>
           <p>Turbo can be enabled after Save in a running game, and the in-game binding switches it off/on; live enable and Async toggles have been observed in DCS. Experimental timing controls and Quadviews enable/disable changes still require an application restart; the expanded OSD shows these pending changes. Turning Frame Generation on also needs a restart; turning it off applies at once. Other VectorXR controls retain the behavior described on their own settings pages.</p>
           <p>This is an information panel with in-game visibility and layout controls. Edit settings in the desktop app. OpenGL is not supported. A runtime with no spare composition layers cannot show the panel.</p>
         </div>

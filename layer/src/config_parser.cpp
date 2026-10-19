@@ -555,6 +555,7 @@ bool ReadOptionalProfileMode(const JsonValue::Object& object,
 struct UnknownKey {
     const JsonValue::Object* object;
     std::string key;
+    std::string value; // set: an unknown name in that key's list (NoteUnknownValue)
 };
 
 // Where NoteUnknownKeys records the unknown keys of the ParseConfig running on
@@ -586,8 +587,16 @@ void NoteUnknownKeys(const JsonValue::Object& object, const std::unordered_set<s
     }
     for (const auto& [key, _] : object) {
         if (!allowed.contains(key)) {
-            t_unknown_keys->push_back({&object, key});
+            t_unknown_keys->push_back({&object, key, {}});
         }
+    }
+}
+
+// A name in a list that this layer does not know (a newer app's OSD row),
+// ignored the same way and reported as a warning.
+void NoteUnknownValue(const JsonValue::Object& object, const std::string& key, const std::string& value) {
+    if (t_unknown_keys) {
+        t_unknown_keys->push_back({&object, key, value});
     }
 }
 
@@ -741,14 +750,14 @@ bool ParseToggleBindings(const JsonValue::Object& object,
 bool ParseOsdSettings(const JsonValue::Object& object, OsdSettings& out, std::string& error) {
     NoteUnknownKeys(object, {"enabled", "visibleOnStart", "compact", "horizontalDegrees", "verticalDegrees",
         "distanceMeters", "scale", "opacity", "updateHz", "showGraph", "showRuntime", "showBrand", "showApp", "showTurbo", "showModules",
-        "showClock", "showPivot", "showFramegen", "showFramegenFps", "compactShowRuntime", "compactShowClock", "compactShowTurbo", "compactShowPivot",
-        "compactShowFramegen",
+        "showClock", "showPivot", "showFramegen", "showFramegenFps", "showPerformance", "compactShowRuntime", "compactShowClock", "compactShowTurbo", "compactShowPivot",
+        "compactShowFramegen", "compactShowPerformance",
         "compactShowBrand", "compactShowApp", "compactMetrics",
-        "clockFormat", "bodyOrder", "customColor", "customPresets", "accent", "toggleBinding", "cycleBinding", "toggleBindings", "cycleBindings"});
+        "clockFormat", "bodyOrder", "rowOrder", "customColor", "customPresets", "accent", "toggleBinding", "cycleBinding", "toggleBindings", "cycleBindings"});
     for (const auto& [key, target] : {std::pair{"enabled", &out.enabled}, {"visibleOnStart", &out.visible_on_start},
         {"compact", &out.compact}, {"showGraph", &out.show_graph}, {"showRuntime", &out.show_runtime}, {"showBrand", &out.show_brand}, {"showApp", &out.show_app},
         {"showTurbo", &out.show_turbo}, {"showModules", &out.show_modules}, {"showClock", &out.show_clock}, {"showPivot", &out.show_pivot},
-        {"showFramegen", &out.show_framegen}, {"showFramegenFps", &out.show_framegen_fps}}) {
+        {"showFramegen", &out.show_framegen}, {"showFramegenFps", &out.show_framegen_fps}, {"showPerformance", &out.show_performance}}) {
         std::optional<bool> value;
         if (!ReadOptionalBool(object, key, value, error)) return false;
         if (value) *target = *value;
@@ -756,7 +765,7 @@ bool ParseOsdSettings(const JsonValue::Object& object, OsdSettings& out, std::st
     for (const auto& [key, target] : {std::pair{"compactShowRuntime", &out.compact_show_runtime},
         {"compactShowClock", &out.compact_show_clock}, {"compactShowTurbo", &out.compact_show_turbo},
         {"compactShowPivot", &out.compact_show_pivot}, {"compactShowBrand", &out.compact_show_brand}, {"compactShowApp", &out.compact_show_app},
-        {"compactShowFramegen", &out.compact_show_framegen}}) {
+        {"compactShowFramegen", &out.compact_show_framegen}, {"compactShowPerformance", &out.compact_show_performance}}) {
         std::optional<bool> value;
         if (!ReadOptionalBool(object, key, value, error)) return false;
         if (value) *target = *value;
@@ -811,14 +820,22 @@ bool ParseOsdSettings(const JsonValue::Object& object, OsdSettings& out, std::st
         if (*clock!="12" && *clock!="24") { error="Invalid core.osd.clockFormat"; return false; }
         out.clock_format=*clock;
     }
-    if (const auto it=object.find("bodyOrder"); it!=object.end()) {
-        const auto* rows=RequireArray(it->second,"core.osd.bodyOrder",error);
+    // The app writes the rows 0.19.0-0.19.2 layers know to bodyOrder (they
+    // reject any other name) and the full order to rowOrder, which wins. A
+    // row this layer does not know (a newer app's) is skipped with a warning.
+    const char* const order_key=object.contains("rowOrder")?"rowOrder":"bodyOrder";
+    if (const auto it=object.find(order_key); it!=object.end()) {
+        const std::string path=std::string("core.osd.")+order_key;
+        const auto* rows=RequireArray(it->second,path,error);
         if (!rows) return false;
         std::vector<std::string> order;
         for (const auto& row:*rows) {
             const auto* name=row.IsString()?&row.AsString():nullptr;
-            if (!name || (*name!="graph" && *name!="turbo" && *name!="framegen" && *name!="pivot" && *name!="modules") ||
-                std::find(order.begin(),order.end(),*name)!=order.end()) { error="Invalid core.osd.bodyOrder"; return false; }
+            if (!name || std::find(order.begin(),order.end(),*name)!=order.end()) { error="Invalid "+path; return false; }
+            if (*name!="graph" && *name!="performance" && *name!="turbo" && *name!="framegen" && *name!="pivot" && *name!="modules") {
+                NoteUnknownValue(object,order_key,*name);
+                continue;
+            }
             order.push_back(*name);
         }
         for (const auto& name:out.body_order) if (std::find(order.begin(),order.end(),name)==order.end()) order.push_back(name);
@@ -2432,6 +2449,7 @@ bool ParseFrameGenSettings(const JsonValue::Object& object, const char* field, F
         "frameMultiplier",
         "artifactSuppression",
         "motionLimitPercent",
+        "extendHeadPrediction",
     };
     NoteUnknownKeys(object, allowed);
 
@@ -2476,6 +2494,13 @@ bool ParseFrameGenSettings(const JsonValue::Object& object, const char* field, F
             return false;
         }
         out.flow_quality = *parsed;
+    }
+    std::optional<bool> extend_head_prediction;
+    if (!ReadOptionalBool(object, "extendHeadPrediction", extend_head_prediction, error)) {
+        return false;
+    }
+    if (extend_head_prediction) {
+        out.extend_head_prediction = *extend_head_prediction;
     }
     return ReadOptionalBoundedInt(object, "artifactSuppression", field, 0, 100, out.artifact_suppression, error) &&
         ReadOptionalBoundedInt(object, "motionLimitPercent", field, 2, 25, out.motion_limit_percent, error);
@@ -2745,9 +2770,12 @@ ParseResult ParseConfig(std::string_view json_text) {
         IndexObjectPaths(root, "", paths);
         for (const UnknownKey& unknown : unknown_keys) {
             const auto path_it = paths.find(unknown.object);
-            const std::string warning = "Unknown field ignored: " +
-                (path_it == paths.end() || path_it->second.empty() ? unknown.key
-                                                                   : path_it->second + "." + unknown.key);
+            const std::string field = path_it == paths.end() || path_it->second.empty()
+                                          ? unknown.key
+                                          : path_it->second + "." + unknown.key;
+            const std::string warning = unknown.value.empty()
+                                            ? "Unknown field ignored: " + field
+                                            : "Unknown value ignored: " + field + " \"" + unknown.value + "\"";
             if (std::find(result.warnings.begin(), result.warnings.end(), warning) == result.warnings.end()) {
                 result.warnings.push_back(warning);
             }

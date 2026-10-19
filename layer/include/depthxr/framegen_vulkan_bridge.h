@@ -170,8 +170,11 @@ class VulkanBridge {
     // Direct3D 12, waiting (on the GPU) until the bridge's queue is done with
     // its last release.
     void Acquired(XrSwapchain swapchain, std::uint32_t index);
-    // Inside the application's xrReleaseSwapchainImage, before the release
-    // goes on (and before Frame Generation captures the runtime's image): the
+    // At the frame's end after the application released the image (inside
+    // its xrEndFrame, or its next acquire on the swapchain: the layer hands
+    // releases over where a runtime reads the image, as a game may render
+    // into it after releasing it), before the release goes on (and before
+    // Frame Generation captures the runtime's image): the
     // oldest acquired image is handed to Direct3D 12 and copied into the
     // runtime's image on the bridge's queue. False when the copy was skipped
     // (the bridge's queue is stalled, or the game's queue refused the

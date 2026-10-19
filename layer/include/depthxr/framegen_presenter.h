@@ -83,6 +83,9 @@ struct FrameGenStatus {
     std::uint64_t repeated{0};
     std::uint64_t failures{0};
     std::uint64_t demoted{0};
+    // Frames the application began a new frame over before ending them
+    // (OpenXR discards those): dropped, never demotions.
+    std::uint64_t abandoned{0};
     std::uint64_t captured{0};
     bool retry_pending{false};
     std::uint32_t multiplier{2}; // headset frames per real frame in use
@@ -120,8 +123,20 @@ struct FrameGenStatus {
     std::uint64_t lead_probes{0};     // steps down after a calm while (FrameGenLeadPolicy)
     std::uint64_t lead_probes_failed{0}; // probes undone by late frames
     std::uint64_t lead_downs_undone{0};  // steps down undone by late frames within FrameGenLeadPolicy::judge
+    std::uint64_t app_frames{0};      // real frames this session
     std::uint64_t late_cpu{0};        // real frames ended after their refresh was due
     std::uint64_t late_gpu{0};        // real frames not captured on the GPU when first chosen for a refresh
+    // The runtime's refresh period as kept from its waits (refresh_period_; 0 until known), and the period the
+    // game's frames are timed by (GameGridLocked: the refresh period, or the multiple of it the runtime holds
+    // frames to while it halves the rate). The OSD's performance row takes its budget from them, never from the
+    // period the game is told.
+    std::int64_t refresh_period_ns{0};
+    std::int64_t grid_period_ns{0};
+    // Video memory: Frame Generation's working images as allocated and the output swapchain images it made
+    // (LogMemoryBudgetLocked's share), and the backend's last sample of the process's use and budget.
+    std::uint64_t working_bytes{0};
+    std::uint64_t output_bytes{0};
+    std::optional<FrameGenMemoryBudget> memory;
     bool gpu_gating{false};           // game waits are held until its GPU catches up
     std::uint64_t gpu_waits{0};       // game waits held for its GPU (over 0.5 ms)
     std::uint64_t gpu_wait_timeouts{0};
@@ -248,8 +263,12 @@ struct FrameGenLeadPolicy {
 // Runtime frame calls must never overlap, so a wait arriving while an engaged
 // frame is in progress is held until that frame has ended. An engaged frame
 // whose end has not started yet can instead be demoted to a single
-// submission: immediately when the same thread waits again before ending it,
-// or after a bounded hold when another thread does.
+// submission after a bounded hold when another thread waits. When the thread
+// that ends frames waits again before ending its own, that frame never holds
+// the wait: if a frame is then begun over it, the app abandoned it (OpenXR
+// discards it) and it is dropped; if the app ends it after all (a wait may
+// return before the previous frame's end), it is demoted then. OpenComposite
+// abandons frames whenever a game asks for poses twice.
 //
 // That inline cycle holds the application's frame thread for the generated
 // slots, so a game whose frame takes longer than the runtime's lead time, or
@@ -319,8 +338,11 @@ class FrameGenPresenter {
     // grew to 11-14 refreshes to make room. Both looked the same interpolated
     // (MSFS, 2026-10-07). Extrapolate keeps the hardware.
     void SetInterpolateOnShaders(bool on);
-    // Delay before a paused session retries by itself, and how often.
-    void SetRetryPolicy(std::chrono::milliseconds delay, std::uint32_t attempts);
+    // Delay before a paused session retries by itself, and how often; the
+    // attempts are restored once the last retry has held this long without
+    // another pause.
+    void SetRetryPolicy(std::chrono::milliseconds delay, std::uint32_t attempts,
+                        std::chrono::milliseconds restore_after = std::chrono::minutes(5));
     // In-session A/B toggle; also retries after a pause. Returns the new
     // user-enabled state.
     bool Toggle();
@@ -436,7 +458,12 @@ class FrameGenPresenter {
         bool begun{false};
         bool engaged{false};
         bool demoted{false}; // falls back to one submission in slot k
-        bool claimed{false}; // its end has started; it will run its extra frames
+        bool claimed{false}; // its end has started (engaged: it will run its extra frames)
+        // Begun, and its thread waited again before ending it: abandoned if a
+        // frame begins over it, else demoted once it ends (SupersedeOwnFramesLocked).
+        bool superseded{false};
+        bool demotion_owed{false}; // superseded while engaged: counted if it ends after all
+        std::thread::id begin_thread; // the thread that began it
         std::uint32_t multiplier{2};
         XrDuration reported_period{0}; // the period the app was given
         std::uint64_t sequence{0};
@@ -498,7 +525,16 @@ class FrameGenPresenter {
     // xrEndFrame, for slots the presenter thread fills between real frames.
     struct FrameCopy {
         struct Layer {
+            struct Extension {
+                XrStructureType type{XR_TYPE_UNKNOWN};
+                XrCompositionLayerColorScaleBiasKHR color{};
+                XrCompositionLayerAlphaBlendFB blend{};
+            };
             XrStructureType type{XR_TYPE_UNKNOWN};
+            // Value-only composition metadata, owned in chain order. As for
+            // depth, BuildFrame relinks the pointers before every submission;
+            // never read a stored copy's next pointers anywhere else.
+            std::vector<Extension> extensions;
             XrCompositionLayerProjection projection{};
             std::vector<XrCompositionLayerProjectionView> views;
             std::vector<XrCompositionLayerDepthInfoKHR> depth;
@@ -578,6 +614,8 @@ class FrameGenPresenter {
         std::uint32_t lead{0};         // refreshes between its release and target_slot
         bool begun{false};
         bool claimed{false}; // its end has started
+        bool superseded{false}; // as PendingFrame::superseded
+        std::thread::id begin_thread; // the thread that began it
         bool quad{false};    // claimed by ClaimQuadFrame: Frame Generation composes its quad views
         std::uint64_t capture_mark{0}; // last_capture_mark_ at its begin: the captures released before it
         std::chrono::steady_clock::time_point wait_return{};
@@ -827,6 +865,20 @@ class FrameGenPresenter {
     void ReleaseOutputs();
     void RecordReal(const XrCompositionLayerProjection& projection, XrTime display_time, std::uint64_t sequence);
     void InvalidateContinuityLocked();
+    // The thread that ends frames waits again: marks the begun, unclaimed
+    // frames it began itself superseded; whether an engaged inline frame
+    // newly was.
+    bool SupersedeOwnFramesLocked();
+    // A frame begins: the superseded frames begun before it were abandoned
+    // (OpenXR discards them). Drops them (inline frames, or with `threaded`
+    // the presenter thread's) and returns how many.
+    std::size_t DropAbandonedLocked(bool threaded);
+    // An inline frame ends: drops the frames this thread began before the
+    // newest it began and has not ended (a later begin discarded them).
+    std::size_t DropOwnDiscardedLocked();
+    void BridgeAbandonedLocked(std::uint64_t sequence);
+    // Counts abandoned frames, logs the first, wakes waiters.
+    void NoteAbandonedLocked(std::size_t count);
     void NoteFailureLocked(const std::string& error);
     void LogMemoryBudgetLocked();
     // `distinct`: the submission shows something the one before did not;
@@ -1012,6 +1064,7 @@ class FrameGenPresenter {
     bool started_{false};
     bool user_enabled_{true};
     bool configured_enabled_{true};
+    bool unsupported_composition_{false}; // this session must preserve its original submission chains
     FrameGenState state_{FrameGenState::kOff};
     std::string reason_;
     FrameGenResolvedSettings settings_;
@@ -1027,6 +1080,13 @@ class FrameGenPresenter {
     std::uint32_t retry_attempts_{3};
     std::optional<std::chrono::steady_clock::time_point> paused_at_;
     std::uint32_t automatic_retries_{0};
+    // No pause for this long since the last one gives the attempts back
+    // (MaybeRetryLocked): a long session's fourth pause, hours after the
+    // third, still retries by itself.
+    std::chrono::milliseconds retry_restore_after_{std::chrono::minutes(5)};
+    // The latest pause's start, moved on to when Frame Generation ran again
+    // after it (an automatic retry, a toggle): the quiet stretch's start.
+    std::optional<std::chrono::steady_clock::time_point> last_pause_at_;
     std::uint32_t consecutive_failures_{0};
     std::uint32_t consecutive_demotions_{0};
 
@@ -1039,6 +1099,10 @@ class FrameGenPresenter {
     std::vector<OutputKinds> output_kinds_;
     std::thread::id end_thread_; // the thread that last ended a frame
     bool logged_claimed_wait_{false};
+    // The last superseded frame was abandoned rather than ended: frames
+    // waited over superseded ones engage as usual (WaitFrame).
+    bool abandons_frames_{false};
+    bool logged_abandoned_frames_{false};
 
     // Touched by the frame thread inside EndFrame (one at a time) and by
     // Stop; mutex_ guards the parts other threads read.
@@ -1293,6 +1357,7 @@ class FrameGenPresenter {
     // no capture running meanwhile (a slow GPU is held for, a stuck one not).
     bool gpu_gate_enabled_{true};
     bool gpu_gate_armed_{false};
+    void ArmGpuGateLocked(const std::string& why);
     int gpu_frames_ahead_{1};
     std::uint32_t gpu_timeouts_in_row_{0};
     std::uint64_t gpu_reached_mark_{0}; // the newest capture mark seen run (ReachedCaptureMarkLocked)
@@ -1304,6 +1369,7 @@ class FrameGenPresenter {
     std::uint64_t repeated_{0};
     std::uint64_t failures_{0};
     std::uint64_t demoted_{0};
+    std::uint64_t abandoned_frames_{0};
     std::uint64_t captured_{0};
     mutable std::deque<std::chrono::steady_clock::time_point> app_frames_;
     mutable std::deque<std::chrono::steady_clock::time_point> submissions_;
@@ -1326,6 +1392,40 @@ class FrameGenPresenter {
     std::uint32_t logged_depth_decisions_{0};
     std::string logged_hardware_status_; // last optical flow hardware status logged
     bool logged_depth_info_{false};
+    // The game's depth description, logged in full whenever it changes
+    // (RecordCaptureTargetsLocked; every change for the first 20
+    // lines, then at most a line per 5 s with the changes between).
+    struct DepthViewDescription {
+        XrSwapchain color{XR_NULL_HANDLE};
+        std::uint32_t color_slice{0};
+        std::array<std::int32_t, 4> color_rect{}; // x, y, width, height
+        XrSwapchain depth{XR_NULL_HANDLE};
+        std::uint32_t depth_slice{0};
+        std::array<std::int32_t, 4> depth_rect{};
+        std::array<float, 4> encoding{}; // minDepth, maxDepth, nearZ, farZ
+        bool operator==(const DepthViewDescription&) const = default;
+    };
+    std::vector<DepthViewDescription> depth_description_;        // empty: no view has depth
+    std::vector<DepthViewDescription> logged_depth_description_; // the last one logged
+    std::uint64_t depth_description_changes_{0}; // since the last line
+    std::uint64_t depth_description_frames_{0};  // since the last line
+    std::uint32_t depth_description_lines_{0};
+    std::chrono::steady_clock::time_point depth_description_logged_at_{};
+    void LogDepthDescriptionLocked(const XrCompositionLayerProjection& projection);
+    // The game's view sizes (each projection view's region), logged as the
+    // depth description is: every change replaces the backend's images for
+    // the view (a reallocation and a wait for the GPU), so a game varying
+    // them shows here.
+    std::vector<FrameGenExtent> view_extents_;
+    std::vector<FrameGenExtent> logged_view_extents_;
+    std::uint64_t view_extent_changes_{0}; // since the last line
+    std::uint64_t view_extent_frames_{0};  // since the last line
+    std::uint32_t view_extent_lines_{0};
+    std::chrono::steady_clock::time_point view_extents_logged_at_{};
+    void LogViewExtentsLocked(const XrCompositionLayerProjection& projection);
+    // The depth check's batches, one Debug line each (at most one a second).
+    std::uint32_t logged_depth_batches_{0};
+    std::chrono::steady_clock::time_point depth_batch_logged_at_{};
     bool logged_capture_failure_{false};
     bool logged_uncaptured_{false};
     void* timer_{nullptr}; // high-resolution waitable timer, frame thread only
@@ -1402,6 +1502,9 @@ class FrameGenPresenter {
     std::optional<std::uint64_t> last_offer_slot_;
     std::uint32_t dropped_unbegun_{0}; // dropped frames whose begin is still to come
     std::uint32_t dropped_unended_{0}; // dropped frames whose end is still to come
+    // Of those, begun frames the ending thread had superseded: its next begin
+    // abandons them, its next end ends one.
+    std::uint32_t dropped_superseded_{0};
     // Runtime frame calls that succeeded this session.
     std::uint64_t runtime_waits_{0};
     std::uint64_t runtime_begins_{0};
@@ -1458,7 +1561,14 @@ class FrameGenPresenter {
     // is moved by the previous real frame's (VECTORXR_FRAMEGEN_STALE_MOTION=0:
     // shown unchanged instead).
     bool stale_motion_enabled_{true};
-    bool logged_canvas_ring_{false};
+    // The ring each canvas choice last logged (0: none yet this session).
+    std::uint8_t logged_canvas_ring_{0};
+    // What the backend's views hold since the last Execute (a ring, and the
+    // estimated video memory of one slot of those views): process video
+    // memory includes it until Stop frees it, so CanvasRingLocked counts
+    // those slots once.
+    std::uint8_t held_ring_{0};
+    std::uint64_t held_slot_bytes_{0};
     std::uint8_t CanvasRingLocked();
     // The real frames the backend keeps for a frame of this path.
     std::uint8_t JitRingLocked(bool quad) const {

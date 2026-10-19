@@ -288,6 +288,84 @@ int main(int argc, char** argv) {
             Check(crowded_raster.Valid() && crowded_raster.content_width<=OsdBitmap::width,"The crowded compact header did not fit the panel");
             if(const char* path=std::getenv("OSD_DIAGNOSTICS_CROWDED_BMP")) WriteBitmap(path,crowded_raster);
         }
+        {
+            // The PERFORMANCE row: its own band in the expanded layout (values
+            // over details), one line in the compact one, the verdict and video
+            // memory over its budget in the attention colour.
+            PerformanceReading reading;
+            reading.budget_ms=1000.0/90; reading.frame_ms=11.2;
+            reading.cpu_state=PerformanceCpuState::kMeasured; reading.cpu_ms=7.6; reading.thread_busy_percent=84;
+            reading.gpu_percent=82; reading.gpu_game_percent=70;
+            reading.usage_bytes=static_cast<std::uint64_t>(9.8*(1ull<<30)); reading.budget_bytes=static_cast<std::uint64_t>(14.2*(1ull<<30));
+            auto measured=Snapshot(); measured.performance=DescribePerformance(reading);
+            auto row_only=settings; row_only.show_turbo=row_only.show_pivot=row_only.show_modules=false;
+            const auto with_row=RasterizeOsd(row_only,false,measured,stats,false);
+            auto without=row_only; without.show_performance=false;
+            Check(with_row.Valid() && with_row.height==RasterizeOsd(without,false,measured,stats,false).height+kOsdPerformanceRowHeight,
+                  "The performance row did not add its height");
+            // Default order: right after the graph (190 + 156).
+            const auto blank=RasterizeOsd(row_only,false,Snapshot(),stats,false);
+            constexpr int top=190+156;
+            bool in_row=false, elsewhere=false;
+            for(int y=0;y<with_row.height;++y) for(int x=0;x<960;++x)
+                if(with_row.pixels[y*960+x]!=blank.pixels[y*960+x]) (y>=top && y<top+kOsdPerformanceRowHeight?in_row:elsewhere)=true;
+            Check(in_row && !elsewhere,"The performance row's values were not drawn in its own band");
+            if(const char* path=std::getenv("OSD_PERFORMANCE_BMP")) WriteBitmap(path,with_row);
+            const auto attention_in=[](const OsdBitmap& bitmap,int x0,int x1,int y0,int y1) {
+                for(int y=y0;y<y1;++y) for(int x=x0;x<x1;++x) if((bitmap.pixels[y*960+x]&0xffffff)==0xf5b96c) return true;
+                return false;
+            };
+            Check(!attention_in(with_row,0,960,top,top+kOsdPerformanceRowHeight),"A clear reading used the attention colour");
+            auto bound=reading; bound.gpu_percent=99; bound.verdict=PerformanceVerdict::kGpuBound;
+            bound.usage_bytes=static_cast<std::uint64_t>(15.1*(1ull<<30));
+            auto gpu_bound=Snapshot(); gpu_bound.performance=DescribePerformance(bound);
+            const auto bound_row=RasterizeOsd(row_only,false,gpu_bound,stats,false);
+            Check(attention_in(bound_row,30,240,top+28,top+kOsdPerformanceRowHeight) && attention_in(bound_row,472,692,top,top+28) &&
+                  attention_in(bound_row,702,922,top,top+28) && !attention_in(bound_row,242,462,top,top+28),
+                  "The verdict, the bound side or video memory over its budget was not in the attention colour");
+            if(const char* path=std::getenv("OSD_PERFORMANCE_BOUND_BMP")) WriteBitmap(path,bound_row);
+            // Every expanded cell's widest text fits its 220 pixels.
+            for(const char* headline:{"CPU \xE2\x88\x92" "999%","GPU +100%","VRAM 99.9 GB","VRAM 1023 MB"})
+                Check(OsdTextWidth(24,headline,true)<=220,"A performance headline does not fit its cell");
+            for(const char* detail:{"99.9 ms, thread 100%","Turbo paces the game","waiting for frames","100% busy, game 100%",
+                                    "of 99.9 GB, FG 1023 MB","no GPU counters"})
+                Check(OsdTextWidth(20,detail,false)<=220,(std::string("A performance detail does not fit its cell: ")+detail).c_str());
+            for(const char* left:{"CPU-BOUND","GPU-BOUND"}) Check(OsdTextWidth(20,left,true)<=210,"The verdict does not fit under the label");
+            Check(OsdTextWidth(20,"120 fps target",false)<=210,"The target does not fit under the label");
+
+            // Compact: a row of 48 above the other status rows, and the panel
+            // widens so the widest line fits with Frame Gen's row moving values
+            // right.
+            auto compact_settings=settings; compact_settings.compact_show_performance=true;
+            compact_settings.compact_show_brand=compact_settings.compact_show_app=compact_settings.compact_show_runtime=false;
+            auto compact_off=compact_settings; compact_off.compact_show_performance=false;
+            const auto plain_layout=CompactOsdLayout(compact_off), perf_layout=CompactOsdLayout(compact_settings);
+            Check(perf_layout.performance_y>=0 && perf_layout.status_y==perf_layout.performance_y &&
+                  perf_layout.width==kOsdCompactPerformanceWidth && perf_layout.height==plain_layout.height+48,
+                  "The compact performance row did not take its place or width");
+            Check(plain_layout.performance_y<0,"The compact performance row showed while off");
+            auto stacked=compact_settings; stacked.compact_show_turbo=stacked.compact_show_framegen=true;
+            const auto stacked_layout=CompactOsdLayout(stacked);
+            Check(stacked_layout.turbo_y==stacked_layout.performance_y+48 && stacked_layout.status_value_x==150,
+                  "The compact performance row is not first of the status rows");
+            int widest=0;
+            for(const char* cpu:{"CPU \xE2\x88\x92" "999%","CPU +100%","CPU-BOUND"}) for(const char* gpu:{"GPU +100%","GPU-BOUND"})
+                for(const char* vram:{"VRAM 99.9 GB","VRAM 1023 MB"})
+                    widest=std::max(widest,OsdTextWidth(24,cpu,true)+OsdTextWidth(24,gpu,true)+OsdTextWidth(24,vram,true)+2*OsdTextWidth(24,"  /  ",true));
+            std::cout<<"Widest compact performance line: "<<widest<<" px of "<<kOsdCompactPerformanceWidth-150-28<<"\n";
+            Check(150+widest<=kOsdCompactPerformanceWidth-28,"The widest compact performance line does not fit the panel");
+            const auto compact_row=RasterizeOsd(compact_settings,true,measured,stats,false);
+            Check(compact_row.Valid() && compact_row.content_width==kOsdCompactPerformanceWidth,"The compact performance raster has the wrong width");
+            for(int y=0;y<compact_row.height;++y) for(int x=compact_row.content_width-3;x<960;++x)
+                Check(compact_row.pixels[y*960+x]==0,"The compact performance row drew past its panel");
+            if(const char* path=std::getenv("OSD_PERFORMANCE_COMPACT_BMP")) WriteBitmap(path,compact_row);
+            auto compact_bound=stacked; compact_bound.compact_show_turbo=false;
+            const auto compact_bound_row=RasterizeOsd(compact_bound,true,gpu_bound,stats,false);
+            const int bound_y=CompactOsdLayout(compact_bound).performance_y;
+            Check(attention_in(compact_bound_row,150,kOsdCompactPerformanceWidth-28,bound_y,bound_y+30),
+                  "The compact verdict was not in the attention colour");
+            if(const char* path=std::getenv("OSD_PERFORMANCE_COMPACT_BOUND_BMP")) WriteBitmap(path,compact_bound_row);
+        }
         settings.accent="custom"; settings.custom_color="#123456";
         settings.body_order={"pivot","modules","turbo","graph"};
         const auto reordered=RasterizeOsd(settings,false,Snapshot(),stats,false);
@@ -371,17 +449,18 @@ int main(int argc, char** argv) {
         const auto empty=RasterizeOsd(micro_settings,true,Snapshot(),stats,false);
         Check(std::all_of(empty.pixels.begin(),empty.pixels.end(),[](auto p){return p==0;}),"Empty compact selection rendered a panel");
         // The tallest compact panel shows the header (18 + 44), metrics (68), the
-        // Turbo and Frame Gen rows (48 each), and Pivot with its snap line (80),
-        // with 6 below. It must fit the OSD texture.
-        constexpr int kWorstCompactHeight=18+44+68+48+48+80+6;
+        // Performance, Turbo and Frame Gen rows (48 each), and Pivot with its
+        // snap line (80), with 6 below. It must fit the OSD texture.
+        constexpr int kWorstCompactHeight=18+44+68+48+48+48+80+6;
         static_assert(kWorstCompactHeight<=OsdBitmap::texture_height);
         int tallest_compact=0;
-        for(const auto* metrics:{"all","fps","frameTime","none"}) for(int flags=0;flags<256;++flags) {
+        for(const auto* metrics:{"all","fps","frameTime","none"}) for(int flags=0;flags<512;++flags) {
             auto options=OsdSettings{};options.compact_metrics=metrics;
             options.compact_show_brand=flags&1;options.compact_show_app=flags&2;
             options.compact_show_runtime=flags&4;options.compact_show_clock=flags&8;
             options.compact_show_turbo=flags&16;options.compact_show_pivot=flags&32;
             options.compact_show_framegen=flags&128;
+            options.compact_show_performance=flags&256;
             const OsdCompactLayoutOptions layout_options{.framegen_session=(flags&64)!=0};
             auto snap_options=layout_options; snap_options.pivot_snap_line=true;
             const auto layout=CompactOsdLayout(options,layout_options);
@@ -397,7 +476,7 @@ int main(int argc, char** argv) {
                       layout.height==turbo_only.height+48,
                     "Adding compact Pivot widened the panel instead of adding a row");
             }
-            Check(layout.empty==((flags&(63|128))==0 && options.compact_metrics=="none"),"Empty compact detection failed");
+            Check(layout.empty==((flags&(63|128|256))==0 && options.compact_metrics=="none"),"Empty compact detection failed");
         }
         Check(tallest_compact==kWorstCompactHeight,"The compact worst case changed; re-derive it against the OSD texture");
         {
@@ -409,7 +488,7 @@ int main(int argc, char** argv) {
             all.show_graph=all.show_turbo=all.show_framegen=all.show_pivot=all.show_modules=true;
             all.compact_show_brand=all.compact_show_app=all.compact_show_runtime=all.compact_show_clock=true;
             all.compact_metrics="all";
-            all.compact_show_turbo=all.compact_show_framegen=all.compact_show_pivot=true;
+            all.compact_show_turbo=all.compact_show_framegen=all.compact_show_pivot=all.compact_show_performance=true;
             auto busy=Snapshot();
             busy.framegen_session=true; busy.framegen_badge="ON"; busy.framegen_fps=90;
             busy.framegen="On  /  Interpolate  /  Dynamic"; busy.framegen_detail="45 -> 90 fps  /  GPU 3.1 ms";
@@ -419,9 +498,10 @@ int main(int argc, char** argv) {
             busy.compact_pivot_secondary="Snap: Active / Stacked + Nudge";
             const auto expanded=RasterizeOsd(all,false,busy,stats,false);
             const auto compact=RasterizeOsd(all,true,busy,stats,false);
-            // Header and metrics 210, graph 156, Turbo 52, Frame Gen with its
-            // detail 80, Pivot with its snap line 84, enhancements 52, restart 48.
-            Check(expanded.Valid() && expanded.height==210+156+52+80+84+52+48 && expanded.height<=OsdBitmap::texture_height,
+            // Header and metrics 210, graph 156, performance 80, Turbo 52, Frame
+            // Gen with its detail 80, Pivot with its snap line 84, enhancements
+            // 52, restart 48.
+            Check(expanded.Valid() && expanded.height==210+156+80+52+80+84+52+48 && expanded.height<=OsdBitmap::texture_height,
                   "The expanded worst case escaped the OSD texture");
             Check(compact.Valid() && compact.height==kWorstCompactHeight,"The compact worst case rasterized at another height");
             for(const OsdBitmap* raster:{&expanded,&compact})

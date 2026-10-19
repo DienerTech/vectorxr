@@ -112,12 +112,20 @@ class D3D11Bridge {
     // After the runtime handed out image `index`: Direct3D 11 waits (on the
     // GPU) until the bridge's queue is done with the image's last release.
     void Acquired(XrSwapchain swapchain, std::uint32_t index);
-    // Before the release goes on (and before Frame Generation captures the
+    // At the frame's end after the application released the image (the layer
+    // hands releases over inside xrEndFrame, or the next acquire on the
+    // swapchain, as a runtime reads it), before the release goes on (and
+    // before Frame Generation captures the
     // runtime's image): the oldest acquired image is handed to Direct3D 12 and
     // copied into the runtime's image on the bridge's queue. False when the
     // copy was skipped (the bridge's queue is stalled): the runtime's image
     // holds an older frame, which Frame Generation must not capture as new.
     bool Released(XrSwapchain swapchain);
+    // The application's xrReleaseSwapchainImage of a bridged image, whose
+    // hand-over (Released) waits for the frame's end: its thread counts among
+    // the game's swapchain and frame calls' threads, as it did when the copy
+    // ran there (a second thread turns multithread protection on).
+    void ReleaseCalled();
     // A release of an image nothing was drawn into: no copy; the runtime's
     // image keeps what it had.
     void Abandoned(XrSwapchain swapchain);

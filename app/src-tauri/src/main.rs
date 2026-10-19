@@ -14,6 +14,8 @@ mod debug_sources;
 mod gpu_capabilities;
 mod input_devices;
 mod openxr_layers;
+mod single_instance;
+mod tray;
 
 fn default_true() -> bool {
     true
@@ -312,6 +314,7 @@ struct OsdSettings {
     show_pivot: bool,
     show_framegen: bool,
     show_framegen_fps: bool,
+    show_performance: bool,
     compact_show_runtime: bool,
     compact_show_brand: bool,
     compact_show_app: bool,
@@ -320,8 +323,13 @@ struct OsdSettings {
     compact_show_turbo: bool,
     compact_show_pivot: bool,
     compact_show_framegen: bool,
+    compact_show_performance: bool,
     clock_format: String,
+    // The expanded rows in order: the rows 0.19.0-0.19.2 layers know, in
+    // bodyOrder, and the full order in rowOrder (split_osd_row_order).
     body_order: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    row_order: Option<Vec<String>>,
     custom_color: String,
     custom_presets: Vec<serde_json::Value>,
     accent: String,
@@ -376,6 +384,7 @@ impl Default for OsdSettings {
             show_pivot: true,
             show_framegen: true,
             show_framegen_fps: true,
+            show_performance: true,
             compact_show_runtime: true,
             compact_show_brand: true,
             compact_show_app: true,
@@ -384,14 +393,17 @@ impl Default for OsdSettings {
             compact_show_turbo: false,
             compact_show_pivot: false,
             compact_show_framegen: false,
+            compact_show_performance: false,
             clock_format: "24".into(),
-            body_order: vec![
-                "graph".into(),
-                "turbo".into(),
-                "framegen".into(),
-                "pivot".into(),
-                "modules".into(),
-            ],
+            // Already split (split_osd_row_order): the default file is
+            // written without normalize_config.
+            body_order: LEGACY_OSD_ROWS.iter().map(|row| row.to_string()).collect(),
+            row_order: Some(
+                ["graph", "performance", "turbo", "framegen", "pivot", "modules"]
+                    .iter()
+                    .map(|row| row.to_string())
+                    .collect(),
+            ),
             custom_color: "#51ddbd".into(),
             custom_presets: vec![],
             accent: "teal".into(),
@@ -894,9 +906,13 @@ fn default_framegen_diagnostic_view() -> String {
     "off".into()
 }
 
-// Frame Generation tuning. Older layers reject unknown keys (current ones
-// ignore them with a warning), so these six fields are the complete
-// serialized shape.
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+// Frame Generation tuning. extendHeadPrediction is written only when on;
+// absent means off in the layer and in the app (a profile does not inherit
+// it from the defaults).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FrameGenSettings {
@@ -914,6 +930,9 @@ struct FrameGenSettings {
     artifact_suppression: i64,
     #[serde(default = "default_framegen_motion_limit_percent")]
     motion_limit_percent: i64,
+    // Head prediction past the runtime's limit.
+    #[serde(default, skip_serializing_if = "is_false")]
+    extend_head_prediction: bool,
 }
 
 impl Default for FrameGenSettings {
@@ -925,6 +944,7 @@ impl Default for FrameGenSettings {
             frame_multiplier: default_framegen_frame_multiplier(),
             artifact_suppression: default_framegen_artifact_suppression(),
             motion_limit_percent: default_framegen_motion_limit_percent(),
+            extend_head_prediction: false,
         }
     }
 }
@@ -1390,6 +1410,46 @@ fn application_id_for_profile_match(
     Some(id)
 }
 
+// The OSD rows 0.19.0-0.19.2 layers know. They fail the whole config on any
+// other name in bodyOrder (and in a preset's), turning every module off, but
+// ignore an unknown key: so bodyOrder keeps only these rows, in order, and
+// rowOrder holds the full order whenever it names another row.
+const LEGACY_OSD_ROWS: [&str; 5] = ["graph", "turbo", "framegen", "pivot", "modules"];
+
+fn split_osd_row_order(full: Vec<String>) -> (Vec<String>, Option<Vec<String>>) {
+    let legacy: Vec<String> = full
+        .iter()
+        .filter(|row| LEGACY_OSD_ROWS.contains(&row.as_str()))
+        .cloned()
+        .collect();
+    let row_order = (legacy != full).then_some(full);
+    (legacy, row_order)
+}
+
+fn rows(value: Option<&serde_json::Value>) -> Option<Vec<String>> {
+    value?
+        .as_array()?
+        .iter()
+        .map(|row| row.as_str().map(str::to_string))
+        .collect()
+}
+
+// A saved OSD layout (a custom preset's settings), split the same way.
+fn split_preset_row_order(preset: &mut serde_json::Value) {
+    let Some(settings) = preset.get_mut("settings").and_then(serde_json::Value::as_object_mut) else {
+        return;
+    };
+    let Some(full) = rows(settings.get("rowOrder")).or_else(|| rows(settings.get("bodyOrder"))) else {
+        return;
+    };
+    let (legacy, row_order) = split_osd_row_order(full);
+    settings.insert("bodyOrder".into(), serde_json::json!(legacy));
+    match row_order {
+        Some(row_order) => settings.insert("rowOrder".into(), serde_json::json!(row_order)),
+        None => settings.remove("rowOrder"),
+    };
+}
+
 fn normalize_config(mut config: VectorXRConfig) -> VectorXRConfig {
     if config.version != 3 {
         return default_config();
@@ -1398,6 +1458,9 @@ fn normalize_config(mut config: VectorXRConfig) -> VectorXRConfig {
     config.version = 3;
 
     let osd = &mut config.core.osd;
+    let full = osd.row_order.take().unwrap_or_else(|| osd.body_order.clone());
+    (osd.body_order, osd.row_order) = split_osd_row_order(full);
+    osd.custom_presets.iter_mut().for_each(split_preset_row_order);
     normalize_toggle_bindings(&mut osd.toggle_binding, &mut osd.toggle_bindings, default_osd_toggle_binding);
     normalize_toggle_bindings(&mut osd.cycle_binding, &mut osd.cycle_bindings, default_osd_cycle_binding);
     let depth = &mut config.modules.depthxr.bindings;
@@ -2828,6 +2891,26 @@ fn set_runtime_quadviews_diagnostic_visualization(
     Ok(revision)
 }
 
+// Rescan inputs: one request for every running game (the layer's
+// InputRescanRequestPath); each takes a request once, while it is fresh.
+fn write_input_rescan_request(relay_root: &Path, requested_at: u64) -> Result<(), String> {
+    let request = serde_json::json!({
+        "protocolVersion": RUNTIME_RELAY_PROTOCOL_VERSION,
+        "requestedAtUnixMilliseconds": requested_at,
+    });
+    let content = serde_json::to_string_pretty(&request).map_err(|error| error.to_string())?;
+    write_text_safely(&relay_root.join("input-rescan.json"), &content)
+}
+
+// Asks the running games to look again for bound input devices that were not
+// connected (a hot-plugged controller Windows did not report). Returns how
+// many games are running with VectorXR.
+#[tauri::command]
+fn request_input_rescan() -> Result<usize, String> {
+    write_input_rescan_request(&resolve_runtime_relay_root(), unix_milliseconds())?;
+    Ok(read_live_runtime_statuses().len())
+}
+
 #[tauri::command]
 async fn load_openxr_layers(
     include_signatures: Option<bool>,
@@ -3021,6 +3104,28 @@ fn play_test_sound_blocking(
 
 #[cfg(test)]
 mod tests {
+    // The request the layer reads (ReadInputRescanRequest): its protocol
+    // version and the press's time, at the relay root.
+    #[test]
+    fn input_rescan_request_is_what_the_layer_reads() {
+        let root = std::env::temp_dir().join(format!(
+            "vectorxr-rescan-{}-{}",
+            std::process::id(),
+            super::unix_milliseconds()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        super::write_input_rescan_request(&root, 1_700_000_000_123).unwrap();
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(root.join("input-rescan.json")).unwrap()).unwrap();
+        assert_eq!(written["protocolVersion"], 1);
+        assert_eq!(written["requestedAtUnixMilliseconds"], 1_700_000_000_123u64);
+        super::write_input_rescan_request(&root, 1_700_000_005_000).unwrap();
+        let again: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(root.join("input-rescan.json")).unwrap()).unwrap();
+        assert_eq!(again["requestedAtUnixMilliseconds"], 1_700_000_005_000u64, "a later press replaces the request");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn osd_defaults_and_round_trip() {
         let legacy: super::CoreConfig = serde_json::from_str(r#"{"enabled":true,"logLevel":"info"}"#).unwrap();
@@ -3028,24 +3133,66 @@ mod tests {
         assert_eq!(legacy.osd.update_hz, 5);
         assert!(legacy.osd.show_framegen && !legacy.osd.compact_show_framegen);
         assert!(legacy.osd.show_framegen_fps);
+        assert!(legacy.osd.show_performance && !legacy.osd.compact_show_performance);
         assert_eq!(legacy.osd.body_order, ["graph", "turbo", "framegen", "pivot", "modules"]);
-        let input = serde_json::json!({"enabled":true,"compact":true,"visibleOnStart":false,
+        assert_eq!(
+            legacy.osd.row_order.as_deref(),
+            Some(&["graph", "performance", "turbo", "framegen", "pivot", "modules"].map(String::from)[..])
+        );
+        let mut input = serde_json::json!({"enabled":true,"compact":true,"visibleOnStart":false,
             "horizontalDegrees":-30.0,"verticalDegrees":15.0,"distanceMeters":2.0,"scale":75.0,
             "opacity":70,"updateHz":10,"showGraph":false,"showRuntime":false,"showTurbo":false,
             "showModules":false,"showClock":false,"accent":"blue","toggleBinding":{"type":"none"},
-            "showPivot":false,"clockFormat":"12","customColor":"#aB12Ef","bodyOrder":["pivot","framegen","turbo","modules","graph"],
+            "showPivot":false,"clockFormat":"12","customColor":"#aB12Ef","bodyOrder":["pivot","framegen","turbo","modules","graph","performance"],
             "showFramegen":false,"compactShowFramegen":true,"showFramegenFps":false,
             "compactShowRuntime":true,"compactShowClock":true,"compactShowTurbo":true,"compactShowPivot":true,
             "compactShowBrand":false,"compactShowApp":false,"compactMetrics":"fps",
             "showBrand":false,"showApp":false,
             "customPresets":[{"name":"Small cockpit","settings":{"scale":25,"accent":"custom","customColor":"#aB12Ef"}}],
             "cycleBinding":{"type":"keyboard","chord":["Ctrl","F11"]}});
+        // Past json!'s recursion limit in the literal.
+        input["showPerformance"] = serde_json::json!(false);
+        input["compactShowPerformance"] = serde_json::json!(true);
         let osd: super::OsdSettings = serde_json::from_value(input.clone()).unwrap();
         let output = serde_json::to_value(osd).unwrap();
         for (key,value) in input.as_object().unwrap() {
             if key != "cycleBinding" { assert_eq!(&output[key], value, "{key}"); }
         }
         assert_eq!(output["cycleBinding"]["chord"], input["cycleBinding"]["chord"]);
+    }
+
+    // 0.19.0-0.19.2 layers fail the whole config on a bodyOrder row they do
+    // not know: every file this app writes keeps bodyOrder (presets' too) to
+    // their rows, and the full order goes in rowOrder, which they ignore.
+    #[test]
+    fn saved_osd_row_orders_stay_readable_by_older_layers() {
+        use serde_json::json;
+        let legacy_rows = ["graph", "turbo", "framegen", "pivot", "modules"];
+        let readable = |order: &serde_json::Value| {
+            order.as_array().unwrap().iter().all(|row| legacy_rows.contains(&row.as_str().unwrap()))
+        };
+        let default = serde_json::to_value(super::default_config()).unwrap();
+        assert!(readable(&default["core"]["osd"]["bodyOrder"]));
+        assert_eq!(default["core"]["osd"]["rowOrder"][1], "performance");
+
+        let mut config = default.clone();
+        let osd = config["core"]["osd"].as_object_mut().unwrap();
+        osd.remove("rowOrder");
+        osd.insert("bodyOrder".into(), json!(["pivot", "performance", "graph", "turbo", "framegen", "modules"]));
+        osd.insert("customPresets".into(), json!([
+            { "name": "Cockpit", "settings": { "bodyOrder": ["performance", "modules", "graph", "turbo", "framegen", "pivot"] } },
+            { "name": "Old", "settings": { "bodyOrder": ["modules", "graph"] } }
+        ]));
+        let output = saved(config);
+        let osd = &output["core"]["osd"];
+        assert_eq!(osd["bodyOrder"], json!(["pivot", "graph", "turbo", "framegen", "modules"]));
+        assert_eq!(osd["rowOrder"], json!(["pivot", "performance", "graph", "turbo", "framegen", "modules"]));
+        let preset = &osd["customPresets"][0]["settings"];
+        assert_eq!(preset["bodyOrder"], json!(["modules", "graph", "turbo", "framegen", "pivot"]));
+        assert_eq!(preset["rowOrder"][0], "performance");
+        assert!(osd["customPresets"][1]["settings"].get("rowOrder").is_none());
+        // Read back, rowOrder wins, and saving again changes nothing.
+        assert_eq!(saved(output.clone()), output);
     }
 
     #[test]
@@ -3218,6 +3365,7 @@ mod tests {
         assert_eq!(defaults.defaults.frame_multiplier, "dynamic");
         assert_eq!(defaults.defaults.artifact_suppression, 50);
         assert_eq!(defaults.defaults.motion_limit_percent, 10);
+        assert!(!defaults.defaults.extend_head_prediction);
         assert!(defaults.profiles.is_empty());
 
         // Older layers reject unknown keys (current ones ignore them with a
@@ -3234,11 +3382,13 @@ mod tests {
                 "name": "DCS", "enabled": false, "applicationIds": ["dcs"],
                 "settings": {
                     "synthesisMode": "interpolate", "flowQuality": "performance", "motionEstimation": "shader",
-                    "frameMultiplier": "3x", "artifactSuppression": 0, "motionLimitPercent": 25
+                    "frameMultiplier": "3x", "artifactSuppression": 0, "motionLimitPercent": 25,
+                    "extendHeadPrediction": true
                 }
             }]
         });
         let config: super::FrameGenModuleConfig = serde_json::from_value(input.clone()).unwrap();
+        assert!(config.profiles[0].settings.extend_head_prediction);
         assert_eq!(serde_json::to_value(config).unwrap(), input);
 
         // Settings saved without a frame multiplier load as Dynamic and save it.
@@ -3862,8 +4012,26 @@ fn main() {
         return;
     }
 
+    let instance = match single_instance::claim() {
+        single_instance::Claim::Signalled => return,
+        single_instance::Claim::First(instance) => Some(instance),
+        single_instance::Claim::Unclaimed => None,
+    };
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .manage(tray::TrayState::default())
+        .on_window_event(tray::on_window_event)
+        .setup(move |app| {
+            if let Some(instance) = instance {
+                let handle = app.handle().clone();
+                instance.listen(move || {
+                    let app = handle.clone();
+                    let _ = handle.run_on_main_thread(move || tray::show_main_window(&app));
+                });
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             load_config,
             save_config,
@@ -3882,6 +4050,7 @@ fn main() {
             clear_turbo_fault_logs,
             load_debug_sources,
             set_runtime_quadviews_diagnostic_visualization,
+            request_input_rescan,
             load_gpu_capabilities,
             list_input_devices,
             capture_device_binding,
@@ -3891,7 +4060,9 @@ fn main() {
             set_openxr_layer_enabled,
             move_openxr_layer,
             delete_openxr_layer,
-            play_test_sound
+            play_test_sound,
+            tray::configure_tray,
+            tray::update_tray_status
         ])
         .run(tauri::generate_context!())
         .expect("failed to run VectorXR Tauri app");

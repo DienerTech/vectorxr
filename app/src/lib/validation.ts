@@ -2,7 +2,7 @@ import type { CoreConfig, DepthXRProfileConfig, DepthXRSettings, FrameGenProfile
 
 // Runtime value imports from './model' are avoided so node:test can load this
 // module directly; keep these lists in sync with model.ts.
-const osdBodyRowNames = ['graph', 'turbo', 'framegen', 'pivot', 'modules']
+const osdBodyRowNames = ['graph', 'performance', 'turbo', 'framegen', 'pivot', 'modules']
 const frameGenSynthesisModeNames = ['interpolate', 'extrapolate']
 const frameGenFlowQualityNames = ['performance', 'balanced', 'quality']
 const frameGenMotionEstimationNames = ['shader', 'hardware']
@@ -344,6 +344,10 @@ function validateFrameGenSettings(prefix: string, settings: FrameGenSettings): s
   }
   if (!frameGenFrameMultiplierNames.includes(settings.frameMultiplier)) {
     errors.push(`${prefix}frameMultiplier must be auto, dynamic, 2x, 3x, or 4x`)
+  }
+
+  if (settings.extendHeadPrediction !== undefined && typeof settings.extendHeadPrediction !== 'boolean') {
+    errors.push(`${prefix}extendHeadPrediction must be true or false`)
   }
 
   const bounded = [

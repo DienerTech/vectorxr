@@ -162,10 +162,26 @@ struct GpuLog {
     int wait_idles{0};
     bool idle_fails{false}; // WaitIdle reports GPU work that did not finish
     bool fail{false};
+    // A failure frees every view's history, as the Direct3D 12 backend's
+    // failed recording does (its views are rebuilt).
+    bool fail_frees{false};
     bool uncaptured{false}; // views not captured at release: nothing generated
     bool threaded{false};
     bool depth{false};
     std::atomic<bool> memory_pressure{false}; // process video memory near its budget
+    // Process video memory as a session's would be: with `memory_game` set,
+    // usage is the game's own plus the history the views hold (each view's
+    // ring, a slot an image and a half), out of `memory_budget`. The game's
+    // share may change mid-test (a game whose video memory grows over a
+    // long session).
+    std::atomic<std::uint64_t> memory_game{0};
+    std::atomic<std::uint64_t> memory_budget{0};
+    std::atomic<std::uint64_t> history_bytes{0};
+    // Executes that replaced a view's history images (another ring, size,
+    // format or output kind; a view's first set up too), and the ring the
+    // latest canvas analysis used.
+    std::atomic<int> history_replacements{0};
+    std::atomic<int> canvas_ring{0};
     std::atomic<int> working_memory_queries{0}; // WorkingMemoryBytes calls
     std::atomic<int> depth_captures{0};
     std::vector<FrameGenViewSubmission> last;
@@ -410,6 +426,12 @@ class FakeGpu final : public FrameGenGpu {
             }
         }
         if (log_->fail) {
+            if (log_->fail_frees) {
+                history_.clear();
+                log_->history_bytes = 0;
+                std::scoped_lock lock(ring_mutex_);
+                rings_.clear();
+            }
             error = "fake GPU failure";
             return false;
         }
@@ -422,9 +444,15 @@ class FakeGpu final : public FrameGenGpu {
         result.synthesized.clear();
         result.depth.clear();
         Analyzed analyzed;
+        std::uint64_t held_bytes = 0;
         for (std::size_t i = 0; i < views.size(); ++i) {
-            history_[i].Configure(views[i].request.extent, views[i].source.format, views[i].request.output, 3,
-                                  ring_size);
+            if (history_[i].Configure(views[i].request.extent, views[i].source.format, views[i].request.output, 3,
+                                      ring_size) &
+                FrameGenHistoryState::kAll) {
+                ++log_->history_replacements;
+            }
+            // As the presenter estimates a slot (an image and a half per view).
+            held_bytes += std::uint64_t{ring_size} * views[i].request.extent.width * views[i].request.extent.height * 6;
             const bool synthesized = history_[i].Effective(views[i].request).synthesize;
             history_[i].Commit(synthesized);
             result.synthesized.push_back(synthesized);
@@ -464,6 +492,8 @@ class FakeGpu final : public FrameGenGpu {
                     views[i].request.newest.position[0] + (result.depth.back() ? time * views[i].request.shift[0] : 0.0f));
             }
         }
+        log_->history_bytes = held_bytes;
+        if (tuning.analyze_only && !tuning.composition) log_->canvas_ring = ring_size;
         if (tuning.analyze_only) {
             ++log_->analyzes;
             analyzed.id = next_frame_++;
@@ -707,6 +737,9 @@ class FakeGpu final : public FrameGenGpu {
     double LastGpuMilliseconds() const override { return 0.75; }
     bool SupportsThreadedPresentation() const override { return log_->threaded; }
     std::optional<FrameGenMemoryBudget> MemoryBudget() const override {
+        if (const std::uint64_t game = log_->memory_game) {
+            return FrameGenMemoryBudget{game + log_->history_bytes, log_->memory_budget};
+        }
         constexpr std::uint64_t gigabyte = 1024ull * 1024 * 1024;
         return FrameGenMemoryBudget{log_->memory_pressure ? 31 * gigabyte + gigabyte / 2 : 16 * gigabyte, 32 * gigabyte};
     }
@@ -1241,6 +1274,7 @@ struct App {
         reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection)};
     // MSFS ends each frame one period after the display time it was given.
     int end_offset_periods{0};
+    const void* end_next{nullptr};
     // The eyes move sideways at this many m/s: each frame is rendered from
     // where they are at the display time it was given.
     double eye_speed{0.0};
@@ -1299,6 +1333,7 @@ struct App {
 
     XrResult End(XrTime display_time, bool layers = true) {
         XrFrameEndInfo info{XR_TYPE_FRAME_END_INFO};
+        info.next = end_next;
         info.displayTime = display_time;
         for (auto& view : views) {
             view.pose.position.x = static_cast<float>(eye_speed * static_cast<double>(display_time - 1'000'000'000) * 1e-9);
@@ -3462,6 +3497,10 @@ void TestSameThreadDoubleWait() {
     app.Release();
     Check(XR_SUCCEEDED(app.End(second.predictedDisplayTime)), "second end");
     Check(!runtime.ordering_violation, "same-thread overlap kept runtime calls ordered");
+    // The frame ended after all: a demotion, not an abandoned frame.
+    const FrameGenStatus status = presenter.Status();
+    Check(status.demoted == 1 && status.abandoned == 0 && runtime.discarded == 0,
+          "a frame ended after the next wait is demoted, not abandoned");
 }
 
 void TestWaitThreadSeparateFromEndThread() {
@@ -3605,6 +3644,29 @@ void TestFailuresRetryAndToggle() {
     }
     Check(presenter.OsdText() == "Off" && presenter.CompactOsdText() == "Off", "OSD shows off");
     Check(!runtime.ordering_violation && !g_release_violation, "calls stayed ordered through failures");
+}
+
+// OpenComposite without invertUsingShaders flips an image with a negative
+// height (EmuVR, issue 107), which OpenXR does not allow: generation pauses
+// naming the rectangle instead of making zero-height images, and the game's
+// frames still pass through.
+void TestFlippedImageRectPauses() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate);
+    presenter.SetRetryPolicy(0ms, 0);
+    App app(presenter, runtime);
+    for (auto& view : app.views) view.subImage.imageRect = {{0, 1600}, {1600, -1600}};
+    for (int i = 0; i < 10; ++i) app.Frame();
+    const FrameGenStatus status = presenter.Status();
+    Check(gpu.executes == 0, "flipped: nothing is generated");
+    Check(status.state == FrameGenState::kPaused && !status.retry_pending, "flipped: generation pauses");
+    Check(status.reason.find("1600x-1600 at 0,1600") != std::string::npos &&
+              status.reason.find("invertUsingShaders") != std::string::npos,
+          "flipped: the pause names the rectangle and the OpenComposite setting");
+    Check(IsAppImage(runtime.Snapshot().back().swapchains), "flipped: the game's frame is still shown");
+    Check(!runtime.ordering_violation && !g_release_violation, "flipped: calls stayed ordered");
 }
 
 // A frame whose images were not captured when the game released them (a
@@ -6031,6 +6093,8 @@ struct QuadApp {
     // The game renders nothing (told not to, the headset off): it releases
     // no view and ends its frames without layers.
     bool no_layers{false};
+    const void* end_next{nullptr};
+    const void* projection_next{nullptr};
     struct Ended {
         XrTime time{0};
         FrameGenQuadRoute route{FrameGenQuadRoute::kDeclined};
@@ -6087,6 +6151,7 @@ struct QuadApp {
                                                      static_cast<std::int32_t>(extent.height)}};
         }
         XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+        projection.next = projection_next;
         projection.space = kSpace;
         projection.viewCount = 4;
         projection.views = source.data();
@@ -6103,6 +6168,7 @@ struct QuadApp {
             return XR_SUCCESS;
         }
         XrFrameEndInfo info{XR_TYPE_FRAME_END_INFO};
+        info.next = end_next;
         info.displayTime = time;
         info.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
         std::array<XrCompositionLayerProjectionView, 2> composed{};
@@ -6131,6 +6197,7 @@ struct QuadApp {
                                                              static_cast<std::int32_t>(canvas.height)}};
             }
             composed_layer.space = kSpace;
+            composed_layer.next = projection_next;
             composed_layer.viewCount = 2;
             composed_layer.views = composed.data();
             layer = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&composed_layer);
@@ -7360,6 +7427,752 @@ struct SessionLog {
         return lines;
     }
 };
+
+// A game's depth description is logged with every digit (Star Citizen's
+// near plane hid behind one decimal), and again whenever it changes.
+void TestDepthDescriptionLogged() {
+    SessionLog log("depth-description");
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    gpu.depth = true;
+    Runtime runtime;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, kFormat, kAppUsage, FrameGenMultiplier::k2,
+                   log.logger.get());
+    const XrSwapchain depth_chain = reinterpret_cast<XrSwapchain>(0x21);
+    presenter.TrackSwapchain(depth_chain, 20, 1,
+                             XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+    App app(presenter, runtime);
+    app.depth.subImage.swapchain = depth_chain;
+    app.depth.subImage.imageRect = {{0, 0}, {1200, 1200}};
+    app.depth.minDepth = 0.0f;
+    app.depth.maxDepth = 1.0f;
+    app.depth.nearZ = 999999995904.0f; // reversed infinite, as Star Citizen sends it
+    app.depth.farZ = 0.0125f;
+    for (int i = 0; i < 8; ++i) app.Frame();
+    app.depth.farZ = 0.025f;
+    for (int i = 0; i < 8; ++i) app.Frame();
+    presenter.Stop();
+
+    const auto first = log.Lines("the game submits depth described as");
+    Check(first.size() == 1 && first[0].find("nearZ=9.99999996e+11") != std::string::npos &&
+              first[0].find("farZ=0.0125") != std::string::npos && first[0].find("depth 0x21") != std::string::npos &&
+              first[0].find("region 1200x1200 at 0,0") != std::string::npos,
+          "depth description: the first is logged with every digit (" +
+              (first.empty() ? std::string("none") : first[0]) + ")");
+    const auto changed = log.Lines("depth description changed to");
+    Check(changed.size() == 1 && changed[0].find("farZ=0.025") != std::string::npos &&
+              changed[0].find("1 change in") != std::string::npos,
+          "depth description: a change is logged once (" + std::to_string(changed.size()) + " lines)");
+}
+
+// A long session's video memory, engagement by engagement. Each start of
+// the presenter thread chooses a canvas's ring (CanvasRingLocked) while the
+// backend keeps its views' history images from the run before, so the
+// process's usage already includes them; the game's own share moves as a
+// long session moves it. Five stay while there is room: counted once, where
+// they were counted twice, and near that line five and three alternated
+// from one start to the next, every history image replaced each time. Three
+// once video memory is short, kept while usage hovers between the lines,
+// and five again once it frees up. Every change is logged, and the
+// summaries name the ring.
+void TestCanvasRingAcrossEngagements() {
+    SessionLog log("canvas-ring");
+    constexpr std::uint64_t kBudget = 4ull << 30;
+    // A slot of the App's two 1600x1600 views, as HistorySlotBytes estimates it.
+    constexpr std::uint64_t kSlot = 2ull * 1600 * 1600 * 6;
+    // The game's own share (the history held is on top) below which five
+    // are chosen (the two extra slots and a tenth of the budget to spare),
+    // and kept (a twentieth); counted twice, five were dropped from
+    // kDoubleCounted on.
+    constexpr std::uint64_t kGrowBelow = kBudget - kBudget / 10 - 5 * kSlot;
+    constexpr std::uint64_t kKeepBelow = kBudget - kBudget / 20 - 5 * kSlot;
+    constexpr std::uint64_t kDoubleCounted = kBudget - kBudget / 10 - 7 * kSlot;
+    static_assert(kDoubleCounted < kGrowBelow && kGrowBelow < kKeepBelow);
+    struct Phase {
+        const char* what;
+        std::uint64_t game;
+        std::uint8_t ring;
+        int engagements;
+    };
+    const Phase phases[] = {
+        {"room", kBudget / 2, 5, 2},
+        {"five counted once", (kDoubleCounted + kGrowBelow) / 2, 5, 4},
+        {"between the lines, five held", (kGrowBelow + kKeepBelow) / 2, 5, 3},
+        {"video memory grown past keeping", kKeepBelow + kSlot, 3, 2},
+        {"between the lines, three held", (kGrowBelow + kKeepBelow) / 2, 3, 3},
+        {"freed", kBudget / 2, 5, 2},
+    };
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    gpu.memory_budget = kBudget;
+    gpu.memory_game = phases[0].game;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2, app, runtime, owned,
+             log.logger.get());
+    presenter.SetSummaryInterval(150ms);
+    for (int i = 0; i < 3; ++i) app->Frame();
+    // Presenting from its thread, with a few frames analyzed since `from`.
+    const auto analyzed = [&](int from) {
+        const auto ready = [&] { return presenter.Status().threaded && gpu.analyzes - from >= 6; };
+        RunWork(*app, 3000ms, kLightWork, [&](const XrFrameState&) { return ready(); });
+        return ready();
+    };
+    Check(analyzed(0), "canvas ring: engaged");
+    int ring = gpu.canvas_ring;
+    Check(ring == 5, "canvas ring: five with room (" + std::to_string(ring) + ")");
+    int changes = 0;
+    for (const Phase& phase : phases) {
+        gpu.memory_game = phase.game;
+        for (int i = 0; i < phase.engagements; ++i) {
+            const std::string name = std::string("canvas ring, ") + phase.what + " (engagement " + std::to_string(i + 1) + ")";
+            const int replacements = gpu.history_replacements;
+            Check(!presenter.Toggle(), name + ": turned off");
+            RunWork(*app, 100ms, kLightWork);
+            Check(presenter.Toggle(), name + ": turned on");
+            Check(analyzed(gpu.analyzes), name + ": presents from its thread again");
+            const int chosen = gpu.canvas_ring;
+            Check(chosen == phase.ring, name + ": keeps " + std::to_string(phase.ring) + " real frames (" +
+                                            std::to_string(chosen) + ")");
+            // The views' images are replaced only when the ring changes: once per view.
+            const int replaced = gpu.history_replacements - replacements;
+            Check(replaced == (chosen != ring ? 2 : 0),
+                  name + ": history images replaced only for a new ring (" + std::to_string(replaced) + ")");
+            changes += chosen != ring ? 1 : 0;
+            ring = chosen;
+        }
+    }
+    Check(changes == 2, "canvas ring: changed twice over the session (" + std::to_string(changes) + ")");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "canvas ring: calls stayed ordered");
+
+    const auto first = log.Lines("Frame Generation keeps the last 5 real frames");
+    const auto short_of_memory = log.Lines("Frame Generation now keeps the last 3 real frames");
+    const auto freed = log.Lines("Frame Generation now keeps the last 5 real frames");
+    Check(first.size() == 1 && short_of_memory.size() == 1 && freed.size() == 1,
+          "canvas ring: the first choice and each change are logged once (" + std::to_string(first.size()) + ", " +
+              std::to_string(short_of_memory.size()) + ", " + std::to_string(freed.size()) + ")");
+    Check(!short_of_memory.empty() && short_of_memory[0].find("video memory is short: usage ") != std::string::npos,
+          "canvas ring: a drop to three says video memory is short (" +
+              (short_of_memory.empty() ? std::string("none") : short_of_memory[0]) + ")");
+    bool five = false, three = false;
+    for (const std::string& line : log.Lines("threaded=1")) {
+        five = five || line.find(", ring=5,") != std::string::npos;
+        three = three || line.find(", ring=3,") != std::string::npos;
+    }
+    Check(five && three, "canvas ring: the summaries name the ring in use");
+}
+
+// A recording that fails frees every view's history (the Direct3D 12
+// backend rebuilds its views), so the run after the pause holds none: its
+// ring is chosen as for images made anew, with a tenth of the budget to
+// spare, not kept as if five were still held (two slots and a twentieth of
+// the budget short).
+void TestCanvasRingAfterAFailedRecording() {
+    SessionLog log("canvas-ring-failure");
+    constexpr std::uint64_t kBudget = 4ull << 30;
+    // The game's share once five are held: they still fit with a twentieth
+    // to spare, but five made anew do not with a tenth.
+    constexpr std::uint64_t kGame = kBudget - kBudget / 10;
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    gpu.memory_budget = kBudget;
+    gpu.memory_game = kBudget / 2;
+    gpu.fail_frees = true;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2, app, runtime, owned,
+             log.logger.get());
+    // A retry after a delay, as a session's: the presenter thread leaves
+    // while paused, and the retry starts it again (choosing its ring).
+    presenter.SetRetryPolicy(300ms, 3);
+    for (int i = 0; i < 3; ++i) app->Frame();
+    const auto analyzed = [&](int from) {
+        const auto ready = [&] { return presenter.Status().threaded && gpu.analyzes - from >= 6; };
+        RunWork(*app, 3000ms, kLightWork, [&](const XrFrameState&) { return ready(); });
+        return ready();
+    };
+    Check(analyzed(0) && gpu.canvas_ring == 5, "failed recording: five with room (" +
+                                                   std::to_string(gpu.canvas_ring.load()) + ")");
+    gpu.memory_game = kGame;
+    gpu.fail = true;
+    RunWork(*app, 3000ms, kLightWork,
+            [&](const XrFrameState&) { return presenter.Status().state == FrameGenState::kPaused; });
+    gpu.fail = false;
+    Check(presenter.Status().state == FrameGenState::kPaused && gpu.history_bytes == 0,
+          "failed recording: paused, the history freed");
+    RunWork(*app, 3000ms, kLightWork, [&](const XrFrameState&) { return !presenter.Status().threaded; });
+    Check(!presenter.Status().threaded && presenter.Status().state == FrameGenState::kPaused,
+          "failed recording: paused, the presenter thread left");
+    Check(analyzed(gpu.analyzes), "failed recording: the automatic retry presents from its thread again");
+    Check(gpu.canvas_ring == 3, "failed recording: the next run keeps three, its history made anew (" +
+                                    std::to_string(gpu.canvas_ring.load()) + ")");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "failed recording: calls stayed ordered");
+}
+
+// A long session's pauses, far apart (a runtime rejecting a frame after a
+// recenter, GPU failures under a loading screen): each retries by itself.
+// The automatic retries were the session's, so the pause after the last
+// one stayed paused until a toggle, however late it came. They come back
+// once the last pause is long enough ago (SetRetryPolicy); pauses close
+// together still stop at the limit.
+void TestRetriesRestoredAfterQuietStretch() {
+    SessionLog log("retries-restored");
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate, kFormat, kAppUsage, FrameGenMultiplier::k2,
+                   log.logger.get());
+    presenter.SetRetryPolicy(0ms, 1, 300ms);
+    App app(presenter, runtime);
+    for (int i = 0; i < 5; ++i) app.Frame();
+    Check(presenter.Status().state == FrameGenState::kActive, "retries: engaged");
+    // GPU failures pause; the retry re-engages once they stop.
+    const auto pause_and_recover = [&](const std::string& name) {
+        gpu.fail = true;
+        for (int i = 0; i < 3; ++i) app.Frame();
+        const FrameGenStatus paused = presenter.Status();
+        gpu.fail = false;
+        Check(paused.state == FrameGenState::kPaused && paused.retry_pending,
+              name + ": paused with a retry pending (" + std::string(ToString(paused.state)) + ")");
+        for (int i = 0; i < 5; ++i) app.Frame();
+        Check(presenter.Status().state == FrameGenState::kActive, name + ": the automatic retry re-engages");
+    };
+    const auto quiet = [&](std::chrono::milliseconds duration) {
+        const auto start = std::chrono::steady_clock::now();
+        while (std::chrono::steady_clock::now() - start < duration) {
+            app.Frame();
+            std::this_thread::sleep_for(4ms);
+        }
+    };
+    constexpr int kPauses = 6;
+    for (int pause = 1; pause <= kPauses; ++pause) {
+        pause_and_recover("retries, pause " + std::to_string(pause) + " of a long session");
+        quiet(400ms);
+    }
+    // Two pauses close together: the second finds the attempt spent.
+    pause_and_recover("retries, the first of two close pauses");
+    gpu.fail = true;
+    for (int i = 0; i < 3; ++i) app.Frame();
+    gpu.fail = false;
+    Check(presenter.Status().state == FrameGenState::kPaused && !presenter.Status().retry_pending,
+          "retries: a second pause soon after stays paused; retries are still bounded");
+    for (int i = 0; i < 4; ++i) {
+        Check(app.Frame().predictedDisplayPeriod == kPeriod, "retries: a paused session passes through");
+    }
+    Check(presenter.Status().state == FrameGenState::kPaused, "retries: no attempt comes back while it stays paused");
+    Check(presenter.Toggle() && presenter.Status().state == FrameGenState::kWaiting, "retries: the toggle still retries");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "retries: calls stayed ordered");
+
+    const auto restored = log.Lines("a later pause retries by itself again");
+    const auto retried = log.Lines("Frame Generation retrying after a pause (1 of 1)");
+    Check(restored.size() == kPauses && retried.size() == kPauses + 1,
+          "retries: restored after each quiet stretch (" + std::to_string(restored.size()) + " restored, " +
+              std::to_string(retried.size()) + " retried)");
+}
+
+// The quiet stretch that gives the retries back counts from when Frame
+// Generation runs again, not from when it paused: a pause that stays paused
+// (its retries spent) for longer than the stretch, then a toggle, must not
+// hand back every retry at once, nor log that it ran all that while.
+void TestRetriesNotRestoredByALongPause() {
+    SessionLog log("retries-long-pause");
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate, kFormat, kAppUsage, FrameGenMultiplier::k2,
+                   log.logger.get());
+    presenter.SetRetryPolicy(0ms, 1, 1000ms);
+    App app(presenter, runtime);
+    for (int i = 0; i < 5; ++i) app.Frame();
+    Check(presenter.Status().state == FrameGenState::kActive, "long pause: engaged");
+    const auto fail = [&] {
+        gpu.fail = true;
+        for (int i = 0; i < 3; ++i) app.Frame();
+        gpu.fail = false;
+    };
+    // The retry is spent on a first pause; a second soon after stays paused.
+    fail();
+    for (int i = 0; i < 5; ++i) app.Frame();
+    Check(presenter.Status().state == FrameGenState::kActive, "long pause: the automatic retry re-engages");
+    fail();
+    Check(presenter.Status().state == FrameGenState::kPaused && !presenter.Status().retry_pending,
+          "long pause: a second pause soon after stays paused");
+    // Paused for longer than the quiet stretch, then the player toggles it on.
+    const auto paused = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - paused < 1200ms) {
+        app.Frame();
+        std::this_thread::sleep_for(4ms);
+    }
+    Check(presenter.Toggle() && presenter.Status().state == FrameGenState::kWaiting, "long pause: the toggle retries");
+    for (int i = 0; i < 5; ++i) app.Frame();
+    Check(presenter.Status().state == FrameGenState::kActive, "long pause: re-engaged after the toggle");
+    // Failing again within the stretch: the retry is still spent.
+    fail();
+    const FrameGenStatus again = presenter.Status();
+    Check(again.state == FrameGenState::kPaused && !again.retry_pending,
+          "long pause: soon after the toggle a pause stays paused (" + std::string(ToString(again.state)) +
+              (again.retry_pending ? ", retry pending" : "") + ")");
+    presenter.Stop();
+    Check(log.Lines("a later pause retries by itself again").empty(),
+          "long pause: no retries are given back for time spent paused");
+    Check(!runtime.ordering_violation && !g_release_violation, "long pause: calls stayed ordered");
+}
+
+// Dynamic's summaries say how long the next stand-down passes frames
+// straight through (doubling after short engagements), how many there
+// were, and how many automatic retries are spent.
+void TestDynamicSummaryShowsHold() {
+    SessionLog log("dynamic-hold");
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic, app, runtime, owned,
+             log.logger.get());
+    presenter.SetDynamicPolicy(GuardDynamic());
+    presenter.SetSummaryInterval(150ms);
+    EngageDynamic(presenter, *app, "dynamic hold");
+    RunWork(*app, 400ms, kLightWork);
+    // Motion never measured: the guard stands down, soon after engaging.
+    gpu.measure_lag = 1s;
+    RunTicks(*app, 3000ms, {3}, [&](const XrFrameState&) { return presenter.Status().standby; });
+    gpu.measure_lag = 0us;
+    Check(presenter.Status().dynamic_stand_downs == 1, "dynamic hold: the guard stood down");
+    RunTicks(*app, 500ms, {3});
+    presenter.Stop();
+
+    // GuardDynamic holds 0.6 s, doubled to 1.2 s by a stand-down soon after engaging.
+    bool before = false, doubled = false, counted = false, retries = false;
+    for (const std::string& line : log.Lines("standDownHoldS=")) {
+        const auto value = [&](const std::string& text) { return line.find(text) != std::string::npos; };
+        before = before || (value(", standDowns=0") && value(", standDownHoldS=0.6"));
+        doubled = doubled || (value(", standDowns=1") && value(", standDownHoldS=1.2"));
+        counted = counted || value(", standDowns=1");
+        retries = retries || value(", autoRetries=0/3");
+    }
+    Check(before, "dynamic hold: the summaries name the next stand-down's hold");
+    Check(doubled && counted, "dynamic hold: a stand-down soon after engaging doubles it, and is counted");
+    Check(retries, "dynamic hold: the summaries say how many automatic retries are spent");
+}
+
+// The game's view sizes are logged as they change: each change replaces
+// Frame Generation's images for its views (a wait for the GPU and a
+// reallocation), so a game varying them every frame (dynamic resolution)
+// shows. The first lines say each change; then a line at most every 5 s
+// counts the changes between.
+void TestViewExtentChangesLogged() {
+    SessionLog log("view-extents");
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate, kFormat, kAppUsage, FrameGenMultiplier::k2,
+                   log.logger.get());
+    App app(presenter, runtime);
+    for (int i = 0; i < 6; ++i) app.Frame();
+    app.views[0].subImage.imageRect.extent.width = 1500;
+    for (int i = 0; i < 6; ++i) app.Frame();
+    app.views[0].subImage.imageRect.extent.width = 1600;
+    for (int i = 0; i < 6; ++i) app.Frame();
+    // Dynamic resolution: another size every frame.
+    for (int i = 0; i < 60; ++i) {
+        app.views[0].subImage.imageRect.extent.width = 1200 + 4 * i;
+        app.views[1].subImage.imageRect.extent.width = 1200 + 4 * i;
+        app.Frame();
+    }
+    presenter.Stop();
+
+    const auto first = log.Lines("Frame Generation: the game's views are ");
+    Check(first.size() == 1 && first[0].find("are 1600x1600, 1600x1600.") != std::string::npos,
+          "view sizes: the first are logged (" + (first.empty() ? std::string("none") : first[0]) + ")");
+    const auto changed = log.Lines("Frame Generation: the game's view sizes changed to ");
+    Check(changed.size() == 19, "view sizes: every change logged for the first lines, then held back (" +
+                                    std::to_string(changed.size()) + " lines)");
+    Check(changed.size() >= 2 && changed[0].find("changed to 1500x1600, 1600x1600 (1 change in 6 frames") !=
+                                     std::string::npos &&
+              changed[1].find("changed to 1600x1600, 1600x1600 (1 change in 6 frames") != std::string::npos,
+          "view sizes: each change says what it changed to (" +
+              (changed.empty() ? std::string("none") : changed[0]) + ")");
+}
+
+// OpenComposite (an OpenVR game on OpenXR): IVRCompositor::WaitGetPoses
+// waits and begins a frame every time it is called, and ends one only once
+// both eyes are submitted. A game that asks for poses again first begins a
+// frame over the open one, all on one thread: the runtime discards that one
+// (XR_FRAME_DISCARDED) and its end never comes. Such frames are abandoned,
+// not demoted: nothing pauses, the frames that end are generated from as
+// usual, and no runtime call is made for the abandoned ones.
+void TestOpenCompositeAbandonsFrames() {
+    SessionLog log("opencomposite-abandons");
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate, kFormat, kAppUsage, FrameGenMultiplier::k2,
+                   log.logger.get());
+    App app(presenter, runtime);
+    for (int i = 0; i < 4; ++i) app.Frame();
+    Check(presenter.Status().state == FrameGenState::kActive, "abandoned frames: engaged first");
+    const std::uint64_t generated = presenter.Status().generated;
+    XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};
+    constexpr int kCycles = 24;
+    for (int i = 0; i < kCycles; ++i) {
+        app.Wait(); // WaitGetPoses: wait and begin
+        Check(presenter.BeginFrame(kSession, &begin, app.calls) == XR_SUCCESS, "abandoned frames: first begin");
+        const auto asked = std::chrono::steady_clock::now();
+        const XrFrameState state = app.Wait(); // WaitGetPoses again, the frame still open
+        Check(std::chrono::steady_clock::now() - asked < 150ms, "abandoned frames: the second wait is not held");
+        Check(presenter.BeginFrame(kSession, &begin, app.calls) == XR_FRAME_DISCARDED,
+              "abandoned frames: the begin over the open frame reports it discarded");
+        app.Release(); // Submit for both eyes, then the end
+        Check(XR_SUCCEEDED(app.End(state.predictedDisplayTime)), "abandoned frames: end");
+    }
+    const FrameGenStatus status = presenter.Status();
+    Check(status.state == FrameGenState::kActive && status.demoted == 0,
+          "abandoned frames: neither demoted nor paused (state " + std::string(ToString(status.state)) + ", demoted " +
+              std::to_string(status.demoted) + ")");
+    Check(status.abandoned == kCycles && runtime.discarded == kCycles,
+          "abandoned frames: each counted once, and discarded by the runtime itself (" +
+              std::to_string(status.abandoned) + ", " + std::to_string(runtime.discarded.load()) + ")");
+    // The first frame waited over an open one passes through (the open one
+    // could still have ended); after that, each frame that ends is generated
+    // from, continuous with the real frame before the abandoned one.
+    Check(status.generated >= generated + kCycles - 2,
+          "abandoned frames: the frames that end are generated from (" + std::to_string(status.generated - generated) +
+              " of " + std::to_string(kCycles) + ")");
+    Check(!runtime.ordering_violation && !g_release_violation, "abandoned frames: calls stayed ordered");
+    presenter.Stop();
+    Check(log.Lines("begins frames over frames it has not ended").size() == 1, "abandoned frames: logged once");
+    Check(log.Lines("abandoned=" + std::to_string(kCycles) + ",").size() == 1,
+          "abandoned frames: the session summary counts them");
+}
+
+// A single abandoned frame (WaitGetPoses called twice once, as around a
+// hitch) leaves nothing behind: the frames after it, waited, begun and ended
+// in order, engage and are generated from. Its record once stayed a wait
+// behind, so every later wait found a frame "open", demoted it, and Frame
+// Generation paused within a few frames, again after each retry.
+void TestSingleAbandonedFrameLeavesNothingBehind() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate);
+    App app(presenter, runtime);
+    for (int i = 0; i < 4; ++i) app.Frame();
+    XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};
+    app.Wait();
+    Check(presenter.BeginFrame(kSession, &begin, app.calls) == XR_SUCCESS, "one abandoned frame: begin");
+    const XrFrameState state = app.Wait();
+    Check(presenter.BeginFrame(kSession, &begin, app.calls) == XR_FRAME_DISCARDED,
+          "one abandoned frame: the begin over it reports it discarded");
+    app.Release();
+    Check(XR_SUCCEEDED(app.End(state.predictedDisplayTime)), "one abandoned frame: end");
+    const std::uint64_t generated = presenter.Status().generated;
+    constexpr int kFrames = 12;
+    for (int i = 0; i < kFrames; ++i) app.Frame();
+    const FrameGenStatus status = presenter.Status();
+    Check(status.state == FrameGenState::kActive && status.demoted == 0,
+          "one abandoned frame: later frames neither demote nor pause (state " + std::string(ToString(status.state)) +
+              ", demoted " + std::to_string(status.demoted) + ")");
+    Check(status.abandoned == 1 && status.generated >= generated + kFrames - 2,
+          "one abandoned frame: counted once, and the frames after it are generated from (" +
+              std::to_string(status.generated - generated) + " of " + std::to_string(kFrames) + ")");
+    Check(!runtime.ordering_violation && !g_release_violation, "one abandoned frame: calls stayed ordered");
+}
+
+// A game that only asks for poses while it loads, from the start of a
+// session (OpenComposite's session for the game's input, made while it
+// loads): frames are waited and begun, none ended, before any frame shows
+// which thread ends them. Each begin abandons the frame before it, so once
+// the game renders again its ends match their own frames, and Frame
+// Generation engages as usual.
+void TestAbandonedBeforeFirstEnd() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate);
+    App app(presenter, runtime);
+    XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};
+    constexpr int kLoading = 8;
+    for (int i = 0; i < kLoading; ++i) {
+        app.Wait();
+        const XrResult begun = presenter.BeginFrame(kSession, &begin, app.calls);
+        Check(begun == (i == 0 ? XR_SUCCESS : XR_FRAME_DISCARDED), "loading: each begin over an open frame discards it");
+    }
+    app.Release();
+    const XrFrameState last = app.Wait();
+    Check(presenter.BeginFrame(kSession, &begin, app.calls) == XR_FRAME_DISCARDED, "loading: the last begin discards");
+    Check(XR_SUCCEEDED(app.End(last.predictedDisplayTime)), "loading: the first end");
+    const std::uint64_t generated = presenter.Status().generated;
+    constexpr int kFrames = 12;
+    for (int i = 0; i < kFrames; ++i) app.Frame();
+    const FrameGenStatus status = presenter.Status();
+    Check(status.state == FrameGenState::kActive && status.demoted == 0 && status.abandoned == kLoading,
+          "loading: engaged afterwards, nothing demoted, every loading frame abandoned (state " +
+              std::string(ToString(status.state)) + ", demoted " + std::to_string(status.demoted) + ", abandoned " +
+              std::to_string(status.abandoned) + ")");
+    Check(status.generated >= generated + kFrames - 4,
+          "loading: the frames after it are generated from (" + std::to_string(status.generated - generated) + " of " +
+              std::to_string(kFrames) + ")");
+    Check(!runtime.ordering_violation && !g_release_violation, "loading: calls stayed ordered");
+}
+
+// Frame Generation turned off just as an OpenComposite game abandons a frame
+// the presenter thread was to present: the wait that leaves the presenter
+// thread drops that frame, and the game's next call says what it was. Begun
+// over, it was abandoned: the next frame's end is that frame's own and
+// reaches the runtime (not swallowed as a dropped frame's end).
+void TestThreadedExitAtAbandonedFrame() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    StartThreaded(presenter, gpu, FrameGenMultiplier::k2);
+    App app(presenter, runtime);
+    for (int i = 0; i < 60 && !presenter.Status().threaded; ++i) app.Frame();
+    Check(presenter.Status().threaded, "exit at abandoned: presents from its own thread first");
+    XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};
+    app.Wait();
+    Check(presenter.BeginFrame(kSession, &begin, app.calls) == XR_SUCCESS, "exit at abandoned: begin");
+    Check(!presenter.Toggle(), "exit at abandoned: turned off");
+    const XrFrameState state = app.Wait(); // leaves the presenter thread
+    Check(!presenter.Status().threaded, "exit at abandoned: back inline");
+    presenter.BeginFrame(kSession, &begin, app.calls);
+    app.Release();
+    const std::size_t before = runtime.Submissions();
+    Check(XR_SUCCEEDED(app.End(state.predictedDisplayTime)), "exit at abandoned: end");
+    Check(runtime.Submissions() == before + 1, "exit at abandoned: the next frame's end reaches the runtime");
+    for (int i = 0; i < 4; ++i) {
+        const std::size_t submitted = runtime.Submissions();
+        app.Frame();
+        Check(runtime.Submissions() == submitted + 1, "exit at abandoned: later frames pass straight through");
+    }
+    const FrameGenStatus status = presenter.Status();
+    Check(status.abandoned == 1 && status.demoted == 0,
+          "exit at abandoned: the frame counted abandoned once (abandoned " + std::to_string(status.abandoned) + ")");
+    Check(!runtime.ordering_violation && !g_release_violation, "exit at abandoned: calls stayed ordered");
+}
+
+// A game that waits on its main thread and begins and ends on job threads,
+// whose main thread once ended a frame itself (Star Citizen does, now and
+// then), with the presenter thread presenting: the main thread's next waits
+// come while a job thread's frame is begun. That frame is not the main
+// thread's to supersede: when the next job thread begins its frame before
+// the first one's end reaches Frame Generation, nothing is abandoned, and
+// each end is its own frame's.
+void TestThreadedWaitThreadEndsOneFrame() {
+    SessionLog log("wait-thread-ends");
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    gpu.threaded = true;
+    gpu.jit = g_jit;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, kFormat, kAppUsage, FrameGenMultiplier::k2,
+                   log.logger.get());
+    App app(presenter, runtime);
+    // The main thread's own frames, the last of them ending on it.
+    for (int i = 0; i < 60 && !presenter.Status().threaded; ++i) app.Frame();
+    Check(presenter.Status().threaded, "wait thread ends: presents from its own thread first");
+    XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};
+    auto on_thread = [](const std::function<void()>& call) {
+        std::thread worker(call);
+        worker.join();
+    };
+    int discarded = 0;
+    for (int i = 0; i < 12; ++i) {
+        const XrFrameState first = app.Wait();
+        on_thread([&] { discarded += presenter.BeginFrame(kSession, &begin, app.calls) == XR_FRAME_DISCARDED; });
+        const XrFrameState second = app.Wait(); // the main thread waits on while the job frame is begun
+        on_thread([&] { discarded += presenter.BeginFrame(kSession, &begin, app.calls) == XR_FRAME_DISCARDED; });
+        on_thread([&] {
+            app.Release();
+            Check(XR_SUCCEEDED(app.End(first.predictedDisplayTime)), "wait thread ends: first job end");
+        });
+        on_thread([&] {
+            app.Release();
+            Check(XR_SUCCEEDED(app.End(second.predictedDisplayTime)), "wait thread ends: second job end");
+        });
+        app.Frame(); // and the main thread ends one itself again
+    }
+    const FrameGenStatus status = presenter.Status();
+    Check(status.abandoned == 0 && discarded == 0,
+          "wait thread ends: nothing abandoned or discarded (abandoned " + std::to_string(status.abandoned) +
+              ", discarded " + std::to_string(discarded) + ")");
+    Check(status.threaded && status.state == FrameGenState::kActive, "wait thread ends: still presenting");
+    presenter.Stop();
+    Check(log.Lines("matched no waited frame").empty() && log.Lines("begins frames over").empty(),
+          "wait thread ends: every end found its own frame");
+    Check(!runtime.ordering_violation && !g_release_violation, "wait thread ends: calls stayed ordered");
+}
+
+// MSFS 2024's order with the presenter thread presenting: its wait thread
+// begins frame N + 1 while its render thread's xrEndFrame for frame N is on
+// its way in, before that end reaches Frame Generation. Frame N is not
+// abandoned: no frame is dropped or reported discarded, and each end is its
+// own frame's.
+void TestThreadedBeginBeforeOtherThreadsEnd() {
+    SessionLog log("begin-before-end");
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    gpu.threaded = true;
+    gpu.jit = g_jit;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, kFormat, kAppUsage, FrameGenMultiplier::k2,
+                   log.logger.get());
+    App app(presenter, runtime);
+    // Until the presenter thread runs, a begin reaches the runtime, which
+    // discards a frame begun over (as a real runtime would).
+    for (int i = 0; i < 60 && !presenter.Status().threaded; ++i) app.Frame();
+    Check(presenter.Status().threaded, "begin before end: presents from its own thread first");
+    XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::deque<XrFrameState> begun;
+    int begins = 0; // frames the wait thread has begun
+    bool done = false;
+    std::atomic<int> discarded{0};
+    const auto start = std::chrono::steady_clock::now();
+    std::thread wait_thread([&] {
+        while (std::chrono::steady_clock::now() - start < 1500ms) {
+            const XrFrameState state = app.Wait();
+            discarded += presenter.BeginFrame(kSession, &begin, app.calls) == XR_FRAME_DISCARDED ? 1 : 0;
+            std::scoped_lock lock(mutex);
+            begun.push_back(state);
+            ++begins;
+            cv.notify_all();
+        }
+        std::scoped_lock lock(mutex);
+        done = true;
+        cv.notify_all();
+    });
+    int ended = 0;
+    for (;;) {
+        XrFrameState state{};
+        {
+            std::unique_lock lock(mutex);
+            cv.wait(lock, [&] { return !begun.empty() || done; });
+            if (begun.empty()) break;
+            state = begun.front();
+            begun.pop_front();
+            // The end of frame N comes in only after frame N + 1 has begun
+            // (or the run is over).
+            cv.wait_for(lock, 200ms, [&] { return begins > ended + 1 || done; });
+        }
+        SleepPrecise(std::chrono::steady_clock::now() + 4ms);
+        app.Release();
+        Check(XR_SUCCEEDED(app.End(state.predictedDisplayTime)), "begin before end: end on the render thread");
+        ++ended;
+    }
+    wait_thread.join();
+    const FrameGenStatus status = presenter.Status();
+    Check(status.threaded && status.state == FrameGenState::kActive,
+          "begin before end: presents from its own thread (state " + std::string(ToString(status.state)) + ")");
+    Check(status.abandoned == 0 && discarded == 0 && status.demoted == 0,
+          "begin before end: nothing abandoned, discarded or demoted (abandoned " + std::to_string(status.abandoned) +
+              ", discarded " + std::to_string(discarded.load()) + ", demoted " + std::to_string(status.demoted) + ")");
+    Check(status.generated > static_cast<std::uint64_t>(ended) / 2,
+          "begin before end: the real frames are generated from (" + std::to_string(status.generated) + " for " +
+              std::to_string(ended) + " frames)");
+    presenter.Stop();
+    Check(log.Lines("matched no waited frame").empty() && log.Lines("begins frames over").empty(),
+          "begin before end: every end found its own frame");
+    Check(!runtime.ordering_violation && !g_release_violation, "begin before end: calls stayed ordered");
+}
+
+// As above with the presenter thread presenting (the app's begins never
+// reach the runtime): the begin over an abandoned frame drops it and reports
+// it discarded as a runtime would, the next end is matched to its own frame,
+// and no wait is held for a frame that never ends.
+void TestThreadedOpenCompositeAbandonsFrames() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    StartThreaded(presenter, gpu, FrameGenMultiplier::k2);
+    App app(presenter, runtime);
+    for (int i = 0; i < 3; ++i) app.Frame();
+    XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};
+    int cycles = 0;
+    int discarded = 0;
+    std::chrono::steady_clock::duration longest{};
+    const auto start = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - start < 1500ms) {
+        auto asked = std::chrono::steady_clock::now();
+        app.Wait();
+        longest = std::max(longest, std::chrono::steady_clock::now() - asked);
+        Check(presenter.BeginFrame(kSession, &begin, app.calls) == XR_SUCCESS, "threaded abandoned: first begin");
+        asked = std::chrono::steady_clock::now();
+        const XrFrameState state = app.Wait();
+        longest = std::max(longest, std::chrono::steady_clock::now() - asked);
+        discarded += presenter.BeginFrame(kSession, &begin, app.calls) == XR_FRAME_DISCARDED ? 1 : 0;
+        std::this_thread::sleep_for(4ms);
+        app.Release();
+        Check(XR_SUCCEEDED(app.End(state.predictedDisplayTime)), "threaded abandoned: end");
+        ++cycles;
+    }
+    const FrameGenStatus status = presenter.Status();
+    Check(status.threaded && status.state == FrameGenState::kActive && status.demoted == 0,
+          "threaded abandoned: presents from its own thread, nothing demoted or paused");
+    Check(status.abandoned == static_cast<std::uint64_t>(cycles) && discarded == cycles,
+          "threaded abandoned: every abandoned frame dropped and reported discarded (" +
+              std::to_string(status.abandoned) + ", " + std::to_string(discarded) + " of " + std::to_string(cycles) +
+              ")");
+    Check(longest < 500ms, "threaded abandoned: no wait held for a frame that never ends (longest " +
+                               std::to_string(Seconds(longest)) + " s)");
+    Check(status.generated > static_cast<std::uint64_t>(cycles) / 2,
+          "threaded abandoned: the frames that end are generated from (" + std::to_string(status.generated) + " for " +
+              std::to_string(cycles) + " frames)");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "threaded abandoned: calls stayed ordered");
+}
+
+// Another thread waiting while the ending thread's engaged frame is open
+// keeps today's behaviour: the wait is held, the frame demoted after the hold
+// and counted, and three in a row pause. Nothing is abandoned: such games end
+// the frame after the hold.
+void TestCrossThreadOverlapStillDemotes() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate);
+    App app(presenter, runtime);
+    for (int i = 0; i < 4; ++i) app.Frame();
+    for (int i = 0; i < 3; ++i) {
+        const XrFrameState stalled = app.Wait();
+        app.Begin();
+        XrFrameState next{};
+        std::chrono::steady_clock::duration held{};
+        std::thread waiter([&] {
+            const auto asked = std::chrono::steady_clock::now();
+            next = app.Wait();
+            held = std::chrono::steady_clock::now() - asked;
+        });
+        waiter.join();
+        Check(held >= 200ms, "cross-thread overlap: the wait is held before the frame is demoted");
+        const std::size_t before = runtime.Submissions();
+        app.Release();
+        Check(XR_SUCCEEDED(app.End(stalled.predictedDisplayTime)), "cross-thread overlap: the demoted frame ends");
+        Check(runtime.Submissions() == before + 1, "cross-thread overlap: a demoted frame submits once");
+        app.Begin();
+        app.Release();
+        Check(XR_SUCCEEDED(app.End(next.predictedDisplayTime)), "cross-thread overlap: the next frame ends");
+    }
+    const FrameGenStatus status = presenter.Status();
+    Check(status.state == FrameGenState::kPaused && status.reason == "the application starts frames before the previous one ends",
+          "cross-thread overlap: three demotions in a row pause");
+    Check(status.demoted == 3 && status.abandoned == 0 && runtime.discarded == 0,
+          "cross-thread overlap: demotions counted, nothing abandoned or discarded");
+    Check(!runtime.ordering_violation && !g_release_violation, "cross-thread overlap: calls stayed ordered");
+}
 
 // Turned off while the game's wait is held for its cadence (fixed 2x holds
 // it about half of each frame): the wait returned into the presenter thread,
@@ -9491,6 +10304,250 @@ void TestOsdRuntimeHalving() {
     }
 }
 
+// Composition metadata is application-owned only until xrEndFrame returns.
+// Poison its storage between frames: copied/repeated/generated submissions
+// must use owned values, while inline submissions may use the live chain.
+void TestCompositionExtensions() {
+    for (const auto mode : {FrameGenSynthesisMode::kInterpolate, FrameGenSynthesisMode::kExtrapolate}) {
+        for (int path = 0; path < 3; ++path) {
+            const std::string name = "composition metadata path " + std::to_string(path) + " " + ToString(mode);
+            FrameGenPresenter presenter;
+            GpuLog gpu;
+            gpu.threaded = path > 0;
+            gpu.jit = path == 2;
+            Runtime runtime;
+            runtime.paced = true;
+            StartPresenter(presenter, gpu, mode);
+            App app(presenter, runtime);
+            XrCompositionLayerColorScaleBiasKHR color{}, reverse_color{};
+            XrCompositionLayerAlphaBlendFB blend{}, reverse_blend{};
+            const auto restore = [&] {
+                color = {XR_TYPE_COMPOSITION_LAYER_COLOR_SCALE_BIAS_KHR};
+                color.colorScale = {0.25f, 0.5f, 0.75f, 1.0f};
+                color.colorBias = {0.1f, 0.2f, 0.3f, 0.0f};
+                blend = {XR_TYPE_COMPOSITION_LAYER_ALPHA_BLEND_FB};
+                blend.srcFactorColor = XR_BLEND_FACTOR_SRC_ALPHA_FB;
+                blend.dstFactorColor = XR_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA_FB;
+                blend.srcFactorAlpha = XR_BLEND_FACTOR_ONE_FB;
+                blend.dstFactorAlpha = XR_BLEND_FACTOR_ZERO_FB;
+                reverse_color = color;
+                reverse_blend = blend;
+                color.next = &blend;
+                reverse_blend.next = &reverse_color;
+            };
+            restore();
+            app.projection.next = &color;
+            app.quad.next = &reverse_blend;
+            XrCompositionLayerCylinderKHR cylinder{XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR};
+            XrCompositionLayerEquirectKHR equirect{XR_TYPE_COMPOSITION_LAYER_EQUIRECT_KHR};
+            XrCompositionLayerEquirect2KHR equirect2{XR_TYPE_COMPOSITION_LAYER_EQUIRECT2_KHR};
+            XrCompositionLayerCubeKHR cube{XR_TYPE_COMPOSITION_LAYER_CUBE_KHR};
+            cylinder.next = equirect.next = equirect2.next = cube.next = &reverse_blend;
+            for (const void* layer : {static_cast<const void*>(&app.quad), static_cast<const void*>(&cylinder),
+                                      static_cast<const void*>(&equirect), static_cast<const void*>(&equirect2),
+                                      static_cast<const void*>(&cube)}) {
+                app.layers.push_back(reinterpret_cast<const XrCompositionLayerBaseHeader*>(layer));
+            }
+            std::atomic<int> checked{0}, generated{0};
+            const auto submit = app.calls.submit;
+            app.calls.submit = [&](XrSession session, const XrFrameEndInfo* info) {
+                if (info->layerCount) {
+                    Check(info->layerCount == app.layers.size(), name + ": all layers kept");
+                    for (std::uint32_t i = 0; i < info->layerCount; ++i) {
+                        const auto* first = static_cast<const XrBaseInStructure*>(info->layers[i]->next);
+                        Check(first && first->type == (i == 0 ? XR_TYPE_COMPOSITION_LAYER_COLOR_SCALE_BIAS_KHR
+                                                             : XR_TYPE_COMPOSITION_LAYER_ALPHA_BLEND_FB),
+                              name + ": chain starts in application order");
+                        const auto* second = first->next;
+                        Check(second && second->next == nullptr, name + ": both nodes kept, chain terminated");
+                        const auto* colors = reinterpret_cast<const XrCompositionLayerColorScaleBiasKHR*>(i == 0 ? first : second);
+                        const auto* blends = reinterpret_cast<const XrCompositionLayerAlphaBlendFB*>(i == 0 ? second : first);
+                        Check(colors->type == XR_TYPE_COMPOSITION_LAYER_COLOR_SCALE_BIAS_KHR &&
+                                  colors->colorScale.r == 0.25f && colors->colorScale.g == 0.5f &&
+                                  colors->colorScale.b == 0.75f && colors->colorScale.a == 1.0f &&
+                                  colors->colorBias.r == 0.1f && colors->colorBias.g == 0.2f &&
+                                  colors->colorBias.b == 0.3f && colors->colorBias.a == 0.0f,
+                              name + ": color values survive application storage reuse");
+                        Check(blends->type == XR_TYPE_COMPOSITION_LAYER_ALPHA_BLEND_FB &&
+                                  blends->srcFactorColor == XR_BLEND_FACTOR_SRC_ALPHA_FB &&
+                                  blends->dstFactorColor == XR_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA_FB &&
+                                  blends->srcFactorAlpha == XR_BLEND_FACTOR_ONE_FB &&
+                                  blends->dstFactorAlpha == XR_BLEND_FACTOR_ZERO_FB,
+                              name + ": alpha factors survive application storage reuse");
+                    }
+                    const auto* projection = reinterpret_cast<const XrCompositionLayerProjection*>(info->layers[0]);
+                    if (projection->views[0].subImage.swapchain != kLeft) ++generated;
+                    ++checked;
+                }
+                return submit(session, info);
+            };
+            for (int i = 0; i < 12; ++i) {
+                const auto frame = app.Wait();
+                restore();
+                app.Begin();
+                app.Release();
+                Check(XR_SUCCEEDED(app.End(frame.predictedDisplayTime)), name + ": end");
+                color.type = blend.type = reverse_color.type = reverse_blend.type = XR_TYPE_UNKNOWN;
+            }
+            if (path > 0) std::this_thread::sleep_for(60ms);
+            const auto status = presenter.Status();
+            presenter.Stop();
+            Check(checked > 12 && generated > 0 && status.state == FrameGenState::kActive &&
+                      status.threaded == (path > 0), name + ": every presentation path exercised");
+            Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+        }
+    }
+}
+
+// Unsupported frame/layer/view extension semantics use the original frame
+// once, then pass through for this session. A live JIT rejection must get a
+// runtime slot before returning; it may never keep the application's chain.
+void TestCompositionUnsupportedChains() {
+    for (int path = 0; path < 3; ++path) {
+        for (int kind = 0; kind < 3; ++kind) {
+            for (const bool live : {false, true}) {
+                const std::string name = "unsupported composition " + std::to_string(path) + "/" +
+                                         std::to_string(kind) + (live ? " live" : " startup");
+                FrameGenPresenter presenter;
+                GpuLog gpu;
+                gpu.threaded = path > 0;
+                gpu.jit = path == 2;
+                Runtime runtime;
+                runtime.paced = true;
+                StartPresenter(presenter, gpu, FrameGenSynthesisMode::kExtrapolate);
+                App app(presenter, runtime);
+                if (live) {
+                    for (int i = 0; i < 10; ++i) app.Frame();
+                    Check(presenter.Status().state == FrameGenState::kActive, name + ": engaged first");
+                }
+                const auto before = presenter.Status();
+                XrSecondaryViewConfigurationFrameEndInfoMSFT secondary{XR_TYPE_SECONDARY_VIEW_CONFIGURATION_FRAME_END_INFO_MSFT};
+                XrCompositionLayerDepthTestFB depth_test{XR_TYPE_COMPOSITION_LAYER_DEPTH_TEST_FB};
+                XrCompositionLayerSpaceWarpInfoFB space_warp{XR_TYPE_COMPOSITION_LAYER_SPACE_WARP_INFO_FB};
+                const void* expected = kind == 0 ? static_cast<const void*>(&secondary)
+                                               : kind == 1 ? static_cast<const void*>(&depth_test)
+                                                           : static_cast<const void*>(&space_warp);
+                std::atomic<int> originals{0};
+                const auto submit = app.calls.submit;
+                app.calls.submit = [&](XrSession session, const XrFrameEndInfo* info) {
+                    if (info->layerCount) {
+                        const auto* projection = reinterpret_cast<const XrCompositionLayerProjection*>(info->layers[0]);
+                        const void* chain = kind == 0 ? info->next : kind == 1 ? projection->next : projection->views[0].next;
+                        if (chain == expected) ++originals;
+                    }
+                    return submit(session, info);
+                };
+                if (kind == 0) app.end_next = expected;
+                if (kind == 1) app.projection.next = expected;
+                if (kind == 2) app.views[0].next = expected;
+                app.Frame();
+                Check(originals == 1, name + ": first unsupported frame reaches its runtime slot intact");
+                for (int i = 0; i < 6; ++i) app.Frame();
+                const auto after = presenter.Status();
+                Check(after.state == FrameGenState::kUnavailable && !after.threaded && presenter.OwnsPacing() &&
+                          after.reason.find("extension type") != std::string::npos &&
+                          after.demoted == before.demoted && after.failures == before.failures && originals == 7,
+                      name + ": original frames keep flowing with a stable, named compatibility refusal");
+                presenter.Stop();
+                Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+            }
+        }
+    }
+}
+
+void TestCompositionRefusalSurvivesRuntimeFailure() {
+    for (int path = 0; path < 3; ++path) {
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        gpu.threaded = path > 0;
+        gpu.jit = path == 2;
+        Runtime runtime;
+        runtime.paced = true;
+        StartPresenter(presenter, gpu, FrameGenSynthesisMode::kExtrapolate);
+        App app(presenter, runtime);
+        for (int i = 0; i < 10; ++i) app.Frame();
+        XrCompositionLayerDepthTestFB depth_test{XR_TYPE_COMPOSITION_LAYER_DEPTH_TEST_FB};
+        app.projection.next = &depth_test;
+        std::atomic<bool> reject{true};
+        const auto submit = app.calls.submit;
+        app.calls.submit = [&](XrSession session, const XrFrameEndInfo* info) {
+            if (info->layerCount && info->layers[0]->next == &depth_test && reject.exchange(false)) {
+                runtime.fail_next_submit = true;
+            }
+            return submit(session, info);
+        };
+        // Replace the callbacks a running presenter copied at its start:
+        // it hands this unsupported frame to the application's own end.
+        const auto frame = app.Wait();
+        app.Begin();
+        app.Release();
+        Check(app.End(frame.predictedDisplayTime) == XR_ERROR_TIME_INVALID && !reject,
+              "composition refusal: its original submission failure reaches the app");
+        app.projection.next = nullptr;
+        presenter.Toggle();
+        presenter.Toggle();
+        presenter.SetConfigured(false);
+        presenter.SetConfigured(true);
+        FrameGenResolvedSettings settings;
+        settings.enabled = true;
+        settings.synthesis_mode = FrameGenSynthesisMode::kExtrapolate;
+        settings.multiplier = FrameGenMultiplier::k2;
+        presenter.Configure(settings);
+        for (int i = 0; i < 8; ++i) app.Frame();
+        const auto refused = presenter.Status();
+        Check(refused.state == FrameGenState::kUnavailable && !refused.threaded && !refused.retry_pending &&
+                  refused.reason.find("extension type") != std::string::npos && presenter.OwnsPacing(),
+              "composition refusal: submission failures, toggles and settings never re-arm generation");
+        presenter.Stop();
+        StartPresenter(presenter, gpu, FrameGenSynthesisMode::kExtrapolate);
+        for (int i = 0; i < 8; ++i) app.Frame();
+        const auto restarted = presenter.Status();
+        presenter.Stop();
+        Check(restarted.state == FrameGenState::kActive && restarted.threaded == (path > 0),
+              "composition refusal: a new session can generate again without the unsupported metadata");
+        Check(!runtime.ordering_violation && !g_release_violation, "composition refusal: calls stayed ordered");
+    }
+}
+
+void TestCompositionQuadUnsupportedChains() {
+    for (const bool after_claim : {false, true}) {
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        runtime.paced = true;
+        StartQuad(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2);
+        QuadApp app(presenter, runtime);
+        for (int i = 0; i < 3; ++i) app.Frame();
+        app.Run(300ms);
+        Check(presenter.Status().quad && presenter.Status().threaded, "unsupported quad: composing first");
+        XrCompositionLayerDepthTestFB depth_test{XR_TYPE_COMPOSITION_LAYER_DEPTH_TEST_FB};
+        XrSecondaryViewConfigurationFrameEndInfoMSFT secondary{XR_TYPE_SECONDARY_VIEW_CONFIGURATION_FRAME_END_INFO_MSFT};
+        bool claimed = false;
+        if (after_claim) {
+            app.after_claim = [&](FrameGenQuadRoute route) {
+                if (route == FrameGenQuadRoute::kClaimed) {
+                    claimed = true;
+                    app.end_next = &secondary;
+                }
+                return true;
+            };
+        } else {
+            app.projection_next = &depth_test;
+        }
+        app.Frame();
+        Check(after_claim ? claimed : app.ended.back().route != FrameGenQuadRoute::kClaimed,
+              "unsupported quad: source chains are refused before claim, late chains identified after it");
+        app.after_claim = {};
+        app.end_next = nullptr;
+        for (int i = 0; i < 6; ++i) app.Frame();
+        const auto status = presenter.Status();
+        presenter.Stop();
+        Check(status.state == FrameGenState::kUnavailable && !status.threaded && runtime.not_stereo == 0 &&
+                  !runtime.ordering_violation && !g_release_violation,
+              "unsupported quad: following frames pass through composed, four raw views never reach stereo");
+    }
+}
+
 } // namespace
 
 // FG_TEST_ONLY=<name> runs only the tests whose name contains it. Each test
@@ -9729,6 +10786,10 @@ int main(int argc, char** argv) {
         return 0;
     }
     const HANDLE policy = std::getenv("FG_TEST_SERIAL") ? nullptr : StartPolicyTests();
+    RUN(TestCompositionExtensions);
+    RUN(TestCompositionUnsupportedChains);
+    RUN(TestCompositionRefusalSurvivesRuntimeFailure);
+    RUN(TestCompositionQuadUnsupportedChains);
     RUN(TestInterpolationPacing);
     RUN(TestWorkingMemoryAskedOncePerSecond);
     RUN(TestExtrapolationPacing);
@@ -9779,11 +10840,33 @@ int main(int argc, char** argv) {
     RUN(TestOverlappingWaitIsHeld);
     RUN(TestUnclaimedFrameIsDemoted);
     RUN(TestSameThreadDoubleWait);
+    RUN(TestDepthDescriptionLogged);
+    // A long session: video memory moving between engagements, pauses far
+    // apart, and what the summaries and the log say about both.
+    RUN(TestCanvasRingAcrossEngagements);
+    RUN(TestCanvasRingAfterAFailedRecording);
+    RUN(TestRetriesRestoredAfterQuietStretch);
+    RUN(TestRetriesNotRestoredByALongPause);
+    RUN(TestDynamicSummaryShowsHold);
+    RUN(TestViewExtentChangesLogged);
+    RUN(TestOpenCompositeAbandonsFrames);
+    RUN(TestSingleAbandonedFrameLeavesNothingBehind);
+    RUN(TestAbandonedBeforeFirstEnd);
+    for (const bool jit : {false, true}) {
+        g_jit = jit;
+        RUN(TestThreadedOpenCompositeAbandonsFrames);
+        RUN(TestThreadedBeginBeforeOtherThreadsEnd);
+        RUN(TestThreadedExitAtAbandonedFrame);
+        RUN(TestThreadedWaitThreadEndsOneFrame);
+    }
+    g_jit = false;
+    RUN(TestCrossThreadOverlapStillDemotes);
     RUN(TestWaitThreadSeparateFromEndThread);
     RUN(TestRefusedCaptureUsage);
     RUN(TestOutputWaitTimeout);
     RUN(TestOutputFormatFallback);
     RUN(TestFailuresRetryAndToggle);
+    RUN(TestFlippedImageRectPauses);
     RUN(TestUncapturedFramesAreSkipped);
     RUN(TestSettingsAndSessionChanges);
     RUN(TestDiagnosticViewLogged);

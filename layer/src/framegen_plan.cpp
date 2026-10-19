@@ -713,6 +713,7 @@ void FrameGenDepthValidator::Add(const FrameGenDepthEvidence& check) {
     evidence_ = sums_;
     sums_ = {};
     checks_ = 0;
+    ++batches_;
     const FrameGenDepthReading reading_before = reading_;
     const bool swapped_before = swapped_;
 

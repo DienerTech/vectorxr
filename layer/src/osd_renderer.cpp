@@ -9,6 +9,7 @@
 #include <array>
 #include <cmath>
 #include <numeric>
+#include <tuple>
 #include <sstream>
 #include <iomanip>
 
@@ -158,9 +159,12 @@ constexpr int kCompactFpsWidth=210, kCompactFpsBadgeWidth=260;
 // The diagnostics tag: its text size, the padding either side of the text,
 // and its height.
 constexpr int kTagText=17, kTagPad=10, kTagHeight=30;
-// What asks for attention: a pending restart, the diagnostics tag.
+// What asks for attention: a pending restart, the diagnostics tag, the
+// performance row's verdict and video memory over its budget.
 constexpr COLORREF kAttention=RGB(245,185,108);
 }
+
+int OsdTextWidth(int size, const std::string& text, bool bold) { Canvas measure(1,1); return measure.Width(size,text,bold); }
 
 OsdCompactLayout CompactOsdLayout(const OsdSettings& settings, const OsdCompactLayoutOptions& options) {
     OsdCompactLayout layout;
@@ -191,19 +195,22 @@ OsdCompactLayout CompactOsdLayout(const OsdSettings& settings, const OsdCompactL
     layout.framegen_badge=layout.fps && options.framegen_session && settings.show_framegen_fps;
     const int fps_width=layout.framegen_badge?kCompactFpsBadgeWidth:kCompactFpsWidth;
     layout.frame_time_x=layout.fps?28+fps_width+24:28;
-    const bool status=settings.compact_show_turbo || settings.compact_show_framegen || settings.compact_show_pivot;
+    const bool status=settings.compact_show_performance || settings.compact_show_turbo || settings.compact_show_framegen ||
+        settings.compact_show_pivot;
     layout.empty=!count && !layout.fps && !layout.frame_time && !status;
     layout.width=std::max({240,count?x+12:0,
         (layout.fps || layout.frame_time)?56+(layout.fps?fps_width:0)+(layout.frame_time?300:0)+(layout.fps&&layout.frame_time?24:0):0,
-        status?520:0});
+        status?520:0,settings.compact_show_performance?kOsdCompactPerformanceWidth:0});
     if(count) { layout.header_y=y; y+=44; }
     if(layout.fps || layout.frame_time) { layout.metrics_y=y; y+=68; }
-    // Status rows stack Turbo, Frame Gen, then Pivot. "FRAME GEN" is the
-    // widest label, so values move right while that row is shown.
+    // Status rows stack Performance (it reads with the metrics above), Turbo,
+    // Frame Gen, then Pivot. "FRAME GEN" is the widest label, so values move
+    // right while that row is shown.
+    if(settings.compact_show_performance) { layout.performance_y=y; y+=48; }
     if(settings.compact_show_turbo) { layout.turbo_y=y; y+=48; }
     if(settings.compact_show_framegen) { layout.framegen_y=y; y+=48; }
     if(settings.compact_show_pivot) { layout.pivot_y=y; y+=options.pivot_snap_line?80:48; }
-    layout.status_y=layout.turbo_y>=0?layout.turbo_y:layout.framegen_y>=0?layout.framegen_y:layout.pivot_y;
+    for(const int row:{layout.pivot_y,layout.framegen_y,layout.turbo_y,layout.performance_y}) if(row>=0) layout.status_y=row;
     layout.status_value_x=settings.compact_show_framegen?150:128;
     layout.height=layout.empty?80:y+6;
     return layout;
@@ -294,7 +301,7 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
     const int header_shift=(settings.show_brand || settings.show_app || settings.show_runtime || settings.show_clock || tag_width)?0:40;
     const int pivot_row_height=pivot_snap_line?84:52;
     const int height=compact?layout.height:210-header_shift+(settings.show_graph?156:0)+
-        (settings.show_turbo?52:0)+(settings.show_framegen&&snapshot.framegen_session?(snapshot.framegen_detail.empty()?52:80):0)+
+        (settings.show_performance?kOsdPerformanceRowHeight:0)+(settings.show_turbo?52:0)+(settings.show_framegen&&snapshot.framegen_session?(snapshot.framegen_detail.empty()?52:80):0)+
         (settings.show_pivot?pivot_row_height:0)+(settings.show_modules?52:0)+
         (!snapshot.restart.empty()?48:0);
     OsdBitmap output; output.height=height; output.content_width=panel_width; output.empty=compact&&layout.empty;
@@ -343,6 +350,20 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
             const int y=layout.status_y;
             if(y>18) canvas.Rect(28,y-8,panel_width-56,1,inset);
             const int value_x=layout.status_value_x;
+            if(settings.compact_show_performance) {
+                // One line of three values, the bound side named, video memory
+                // over its budget in the attention colour.
+                const auto& p=snapshot.performance;
+                canvas.Text(30,layout.performance_y+2,value_x-38,20,"PERF",muted);
+                int x=value_x; const int right=panel_width-28;
+                const auto part=[&](const std::string& text,COLORREF color) {
+                    if(right-x<=0 || text.empty()) return;
+                    canvas.Text(x,layout.performance_y,right-x,24,text,color,true); x+=canvas.Width(24,text,true);
+                };
+                part(p.compact_cpu,p.cpu_bound?kAttention:white); part("  /  ",muted);
+                part(p.compact_gpu,p.gpu_bound?kAttention:white); part("  /  ",muted);
+                part(p.compact_vram,p.vram_over?kAttention:white);
+            }
             if(settings.compact_show_turbo) {
                 canvas.Text(30,layout.turbo_y+2,90,20,"TURBO",muted);
                 canvas.Text(value_x,layout.turbo_y,panel_width-value_x-28,24,snapshot.turbo+(snapshot.experimental?" / EXP":""),accent,true);
@@ -395,6 +416,23 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
                     if (first) { MoveToEx(canvas.dc,x,py,nullptr); first=false; } else LineTo(canvas.dc,x,py);
                 }
                 SelectObject(canvas.dc,old); DeleteObject(pen); y+=156;
+            } else if (row=="performance" && settings.show_performance) {
+                // Under the label, the verdict when there is a clear one, else
+                // the frame budget as a rate; beside it three cells of a
+                // headline (headroom, or video memory) over its detail.
+                const auto& p=snapshot.performance;
+                canvas.Text(30,y,210,20,"PERFORMANCE",muted);
+                if(!p.verdict.empty()) canvas.Text(30,y+30,210,20,p.verdict,kAttention,true);
+                else canvas.Text(30,y+30,210,20,p.target,muted);
+                const std::array<std::tuple<const std::string*,const std::string*,bool>,3> cells{{
+                    {&p.cpu,&p.cpu_detail,p.cpu_bound},{&p.gpu,&p.gpu_detail,p.gpu_bound},{&p.vram,&p.vram_detail,p.vram_over}}};
+                for(std::size_t i=0;i<cells.size();++i) {
+                    const auto& [headline,detail,attention]=cells[i];
+                    const int x=242+static_cast<int>(i)*230;
+                    canvas.Text(x,y,220,24,*headline,attention?kAttention:white,true);
+                    canvas.Text(x,y+30,220,20,*detail,muted);
+                }
+                y+=kOsdPerformanceRowHeight;
             } else if ((row=="turbo" && settings.show_turbo) || (row=="framegen" && settings.show_framegen && snapshot.framegen_session) ||
                        (row=="pivot" && settings.show_pivot) || (row=="modules" && settings.show_modules)) {
                 const auto label=row=="turbo"?"TURBO":row=="framegen"?"FRAME GEN":row=="pivot"?"PIVOT":"ENHANCEMENTS";
@@ -561,6 +599,7 @@ std::pair<OsdPresentation, OsdPresentation> OsdRenderer::Prepare(const OsdSettin
         settings.show_graph!=settings_.show_graph || settings.show_turbo!=settings_.show_turbo || settings.show_pivot!=settings_.show_pivot || settings.show_modules!=settings_.show_modules ||
         settings.show_framegen!=settings_.show_framegen || settings.compact_show_framegen!=settings_.compact_show_framegen ||
         settings.show_framegen_fps!=settings_.show_framegen_fps ||
+        settings.show_performance!=settings_.show_performance || settings.compact_show_performance!=settings_.compact_show_performance ||
         settings.show_runtime!=settings_.show_runtime || settings.show_brand!=settings_.show_brand || settings.show_app!=settings_.show_app || settings.show_clock!=settings_.show_clock || settings.clock_format!=settings_.clock_format ||
         settings.compact_metrics!=settings_.compact_metrics || settings.compact_show_brand!=settings_.compact_show_brand || settings.compact_show_app!=settings_.compact_show_app ||
         settings.compact_show_runtime!=settings_.compact_show_runtime || settings.compact_show_clock!=settings_.compact_show_clock ||
@@ -575,7 +614,7 @@ std::pair<OsdPresentation, OsdPresentation> OsdRenderer::Prepare(const OsdSettin
     if(changed || placed){
         Event(false,"configuration enabled="+std::to_string(settings.enabled)+" shown="+std::to_string(settings.enabled&&visible_)+" compact="+std::to_string(compact_)+
             " refreshHz="+std::to_string(settings.update_hz)+" scale="+std::to_string(settings.scale)+" opacity="+std::to_string(settings.opacity)+
-            " graph="+std::to_string(settings.show_graph)+" turbo="+std::to_string(settings.show_turbo)+" framegen="+std::to_string(settings.show_framegen)+" framegenFps="+std::to_string(settings.show_framegen_fps)+" pivot="+std::to_string(settings.show_pivot)+" modules="+std::to_string(settings.show_modules));
+            " graph="+std::to_string(settings.show_graph)+" turbo="+std::to_string(settings.show_turbo)+" framegen="+std::to_string(settings.show_framegen)+" framegenFps="+std::to_string(settings.show_framegen_fps)+" performance="+std::to_string(settings.show_performance)+"/"+std::to_string(settings.compact_show_performance)+" pivot="+std::to_string(settings.show_pivot)+" modules="+std::to_string(settings.show_modules));
     }
     if(changed){
         // Refresh now, and drop a raster requested before the change: it

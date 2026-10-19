@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import {
   defaultConfig,
   normalizeConfig,
+  savedOsdRowOrder,
   type ConfigEnvelope,
   type RuntimePacingObservation,
   type TurboMetricsSession,
@@ -187,7 +188,10 @@ export async function resetStoredData(): Promise<ResetStoredDataEnvelope> {
 }
 
 export async function exportConfigFile(config: VectorXRConfig): Promise<boolean> {
-  const content = JSON.stringify(normalizeConfig(config), null, 2)
+  const normalized = normalizeConfig(config)
+  const osd = savedOsdRowOrder(normalized.core.osd)
+  osd.customPresets = osd.customPresets.map(preset => ({ ...preset, settings: savedOsdRowOrder(preset.settings) }))
+  const content = JSON.stringify({ ...normalized, core: { ...normalized.core, osd } }, null, 2)
   const pickerWindow = window as SaveFilePickerWindow
 
   if (pickerWindow.showSaveFilePicker) {
@@ -467,6 +471,15 @@ export async function setRuntimeQuadViewsDiagnosticVisualization(
     sessionId,
     enabled,
   })
+}
+
+// Rescan inputs: running games look again for bound devices that were not
+// connected. Resolves to how many games are running with VectorXR.
+export async function requestInputRescan(): Promise<number> {
+  if (!tauriAvailable()) {
+    return 0
+  }
+  return invoke<number>('request_input_rescan')
 }
 
 export async function loadOpenXrLayers(includeSignatures = false): Promise<OpenXrLayerSnapshot> {

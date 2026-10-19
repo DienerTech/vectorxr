@@ -133,6 +133,9 @@ class FrameGenGpu {
     // Tests: the next optical flow hardware work is never handed to the
     // hardware, as if it had stopped responding.
     virtual void StallHardwareForTest() {}
+    // Tests: fail the ordinal-th following working-texture allocation once
+    // (one-based; zero cancels). Direct3D 12 only.
+    virtual void FailAllocationForTest(std::uint32_t /*ordinal*/) {}
     // Several views match on one optical flow atlas (the default) or on a
     // session each (tests, research; VECTORXR_FRAMEGEN_HARDWARE_ATLAS=0).
     virtual void SetHardwareAtlas(bool /*on*/) {}

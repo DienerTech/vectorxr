@@ -5,6 +5,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <filesystem>
 #include <functional>
 #include <future>
@@ -27,6 +28,7 @@
 #include "depthxr/pivot_step.h"
 #include "depthxr/pivot_view.h"
 #include "depthxr/effects.h"
+#include "depthxr/head_prediction.h"
 #include "depthxr/logger.h"
 #include "depthxr/quadviews_frame_cache.h"
 #include "depthxr/quadviews_recovery.h"
@@ -34,6 +36,7 @@
 #include "depthxr/runtime_pacing.h"
 #include "depthxr/runtime_relay.h"
 #include "depthxr/osd_renderer.h"
+#include "depthxr/performance_monitor.h"
 #include "depthxr/process_exit.h"
 #include "depthxr/framegen_d3d11_bridge.h"
 #include "depthxr/framegen_vulkan_bridge.h"
@@ -136,6 +139,11 @@ class OpenXrLayer {
         bool vulkan_enable1_requested{false};
         // The names of the layers below VectorXR, nearest first.
         std::string layers_below;
+        // Where OpenXR Toolkit is: "absent", "below", "above", or
+        // "above-bypassed" (its per-application bypass passes everything
+        // through). Above VectorXR it gets a game's quad views, which it does
+        // not support.
+        std::string openxr_toolkit{"absent"};
     };
 
     // True when VectorXR quadviews should run in Varjo compatible mode, i.e. core
@@ -246,6 +254,7 @@ class OpenXrLayer {
     friend class EyeGazeTestPeer;
     friend class D3D11BridgeLayerTestPeer;
     friend class VulkanBridgeLayerTestPeer;
+    friend class HeadPredictionTestPeer;
 #endif
 
     OpenXrLayer() = default;
@@ -276,6 +285,12 @@ class OpenXrLayer {
         bool has_last_acquired_image_index{false};
         bool has_last_released_image_index{false};
         uint32_t deferred_release_count{0};
+        // A bridged swapchain's images the application released, oldest
+        // first, whose hand-over waits for the frame's end: a game may render
+        // into an image after releasing it and before xrEndFrame (Star
+        // Citizen does), which a runtime reading the image at xrEndFrame
+        // still shows; a copy at the release would not have it.
+        std::deque<uint32_t> bridge_handovers;
         bool quadviews_session{false};
         SwapchainImageQueue image_states;
         std::unordered_set<uint32_t> d3d11_shader_resource_slices_attempted;
@@ -601,6 +616,14 @@ class OpenXrLayer {
                                                  SwapchainInfo& info,
                                                  std::string_view reason);
     XrResult FlushDeferredSwapchainReleasesLocked(std::string_view reason);
+    // A bridged swapchain's images the application released, handed over
+    // oldest first (SwapchainInfo::bridge_handovers): the bridge's copy into
+    // the runtime's image, Frame Generation's capture of it, then the release
+    // on to the runtime (or deferred, as ReleaseSwapchainImage would). With
+    // `copy` false (the session's end) only the releases go on.
+    XrResult HandOverBridgedReleasesLocked(XrSwapchain swapchain, SwapchainInfo& info, std::string_view reason,
+                                           bool copy = true);
+    XrResult HandOverBridgedReleasesLocked(std::string_view reason, bool copy = true);
     void PollQuadViewsDiagnosticVisualizationToggle();
     void ResetQuadViewsDiagnosticVisualizationState();
     bool PollInputBindingDown(const InputBinding& binding);
@@ -736,7 +759,8 @@ class OpenXrLayer {
                                 uint32_t* view_count_output,
                                 XrView* views,
                                 bool* synthesized_quad_views,
-                                QuadViewsGazeDiagnostic* gaze_diagnostic);
+                                QuadViewsGazeDiagnostic* gaze_diagnostic,
+                                HeadExtension* head_extension);
     void RecordVarjoNativeLocateDiagnostics(const XrViewLocateInfo* view_locate_info,
                                             bool vector_request_injected,
                                             bool rendering_gaze_queried,
@@ -870,6 +894,7 @@ class OpenXrLayer {
     std::atomic<bool> osd_should_render_{true};
     std::optional<std::chrono::steady_clock::time_point> osd_last_input_poll_;
     bool osd_toggle_down_{false}, osd_cycle_down_{false}, osd_was_enabled_{false};
+    std::atomic<bool> performance_wanted_{false}; // last SetWanted: a shown layout has the PERFORMANCE row
     // The binding of each list that last went down: its sound plays for the
     // change it made (none yet: the list's first binding's).
     std::optional<SoundFeedback> osd_toggle_sound_;
@@ -883,6 +908,9 @@ class OpenXrLayer {
     std::optional<std::chrono::steady_clock::time_point> turbo_limit_last_wait_;
     bool turbo_trace_last_engaged_{false};
     XrResult TraceRuntimeWaitFrame(XrSession, const XrFrameWaitInfo*, XrFrameState*);
+    // The game's xrWaitFrame: Frame Generation's, Turbo's or the runtime's pacing. `fabricated`: Turbo returned a
+    // frame the runtime did not.
+    XrResult PaceWaitFrame(XrSession, const XrFrameWaitInfo*, XrFrameState*, bool& fabricated);
     XrResult TraceRuntimeBeginFrame(XrSession, const XrFrameBeginInfo*);
     XrResult TraceRuntimeEndFrame(XrSession, const XrFrameEndInfo*);
     // The layer's final submission: OSD overlay, then the runtime xrEndFrame.
@@ -1011,6 +1039,9 @@ class OpenXrLayer {
     FrameGenPresenter::GpuFactory framegen_gpu_factory_{CreateFrameGenGpu};
     FrameGenRuntimeCalls framegen_calls_;
     std::atomic<bool> framegen_owns_pacing_{false};
+    // The OSD's PERFORMANCE row: fed by the game's frame calls while the row is shown; its sampler thread reads
+    // Frame Generation's status (declared after framegen_, so it stops first).
+    PerformanceMonitor performance_;
     bool framegen_session_enabled_{false};  // mutex_
     // A session of this instance started with Frame Generation on: its
     // teardown calls are watched (TeardownWatch). Sessions without it log
@@ -1074,6 +1105,8 @@ class OpenXrLayer {
     ProcessExitFile runtime_relay_exit_status_;
     ProcessExitFile runtime_relay_exit_control_;
     bool runtime_relay_pruned_{false}; // Watcher thread only.
+    // The app's last Rescan inputs request taken (Unix ms). Watcher thread only.
+    std::uint64_t input_rescan_taken_at_{0};
     // The Frame Generation events PollFrameGenRecorder last saw (watcher
     // thread only): Dynamic stand-downs and probes, and runtime halving.
     FrameGenSnapshotTrigger framegen_recorder_;
@@ -1442,6 +1475,46 @@ class OpenXrLayer {
     // locates to the known horizon; the sources are smoothed/near-static so
     // <=1 period of staleness is invisible. Cache keys keep the app's time.
     XrTime ClampInternalLocateTime(XrTime app_time);
+
+    // Head prediction past the runtime's limit (Frame Generation's
+    // extendHeadPrediction; see head_prediction.h). Frame Generation tells
+    // games display times far past what some runtimes predict; the head's
+    // rotation is carried over the rest. Planned under mutex_; its runtime
+    // locates run outside it, as the game's own do. Every locate is answered
+    // from that call's own runtime answers for its display time: nothing is
+    // kept from one display time for another, and nothing by wall-clock age.
+    struct HeadPredictionPlan {
+        bool enabled{false};  // setting on, Frame Generation paces, runtime clock, internal VIEW space
+        bool probe{false};    // the runtime's limit is not settled and a probe is due
+        bool limited{false};  // settled: the runtime predicts no further than `limit`
+        XrDuration limit{0};
+        XrSpace view_space{XR_NULL_HANDLE};
+    };
+    struct HeadPredictionStats {
+        std::uint64_t locates{0};   // world-space view locates past the runtime's limit
+        std::uint64_t extended{0};  // ... that were turned
+        double beyond_sum_ms{0.0};  // display time past the runtime's limit
+        double beyond_max_ms{0.0};
+        double degrees_sum{0.0};
+        double degrees_max{0.0};
+    };
+    // The world space a head locate is in: the base of a view locate, or the
+    // non-VIEW side of a VIEW-to-world xrLocateSpace. Null otherwise.
+    XrSpace HeadPredictionWorldSpace(XrSpace space, XrSpace base_space) const;
+    HeadPredictionPlan PlanHeadPredictionLocked(bool allow_probe);
+    std::optional<PredictionLimitEstimate> ProbeRuntimePredictionLimit(const HeadPredictionPlan& plan,
+                                                                       XrSpace world_space);
+    void NotePredictionProbeLocked(const std::optional<PredictionLimitEstimate>& estimate);
+    HeadExtension ExtendHead(const HeadPredictionPlan& plan, XrSpace world_space, XrTime target, XrTime now);
+    void NoteHeadExtensionLocked(const HeadExtension& extension, XrTime target, XrTime now);
+    std::string HeadPredictionOsdDetail() const;
+    PredictionLimitTracker head_prediction_limit_;
+    std::chrono::steady_clock::time_point head_prediction_last_probe_{};
+    HeadPredictionStats head_prediction_stats_;
+    std::chrono::steady_clock::time_point head_prediction_stats_since_{};
+    // Display time past the runtime's limit, smoothed, for the OSD (ms).
+    double head_prediction_beyond_ms_{0.0};
+    bool head_prediction_logged_unavailable_{false};
     XrResult ApplyPivotToLocatedSpace(XrSpace space,
                                       XrSpace base_space,
                                       XrTime time,
@@ -1580,6 +1653,11 @@ class OpenXrLayer {
     // that suppresses quad->stereo synthesis, stereo composite, and combined-eye
     // emulation on this instance.
     bool varjo_compatible_quadviews_active_{false};
+    // OpenXR Toolkit is above VectorXR for this instance (not bypassed): it
+    // supports two views only and breaks a game's quad views, so synthesized
+    // Quadviews stays off and the game runs stereo.
+    bool openxr_toolkit_above_{false};
+    bool openxr_toolkit_quadviews_logged_{false};
     bool defer_quadviews_swapchain_releases_{false};
     // Quadviews changes the application's view/swapchain topology. Once a session
     // is created, keep its initial activation state until teardown so a config
