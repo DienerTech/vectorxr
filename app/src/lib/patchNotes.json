@@ -3,13 +3,12 @@
     "version": "0.19.3",
     "date": "2026-10-18",
     "title": "Star Citizen Stability, Performance Headroom, and a System Tray",
-    "summary": "A stability release with a few new tools. Star Citizen's head wobble with Frame Generation is fixed, on every headset, and an unplugged controller no longer stalls games every two seconds. Frame Generation holds steadier over long sessions, works with OpenComposite games that leave frames open, and survives low video memory and live quality changes that could stall the GPU before. The On-Screen Display gains a PERFORMANCE row showing CPU and GPU headroom and video memory, and the app gains a system tray icon. Settings carry over from 0.19.2 unchanged.",
+    "summary": "A stability release with a few new tools. Star Citizen's head wobble with Frame Generation is fixed on Virtual Desktop and Pimax, and an unplugged controller no longer stalls games every two seconds. Frame Generation holds steadier over long sessions, works with OpenComposite games that leave frames open, and no longer uses images that failed to allocate when video memory runs low. The On-Screen Display gains a PERFORMANCE row showing CPU and GPU headroom and video memory, and the app gains a system tray icon. Settings carry over from 0.19.2 unchanged.",
     "items": [
       {
         "html": "<strong>Star Citizen</strong>",
         "items": [
-          "<strong>The head wobble is fixed.</strong> With Frame Generation enabled for Star Citizen, the world swam against head movement, even with generation toggled off in-game. The game draws each frame after handing its image over, and VectorXR copied the image at the handover, so the headset was shown an older frame with the current head position. It was clearest on Virtual Desktop, where the frame was three frames old, and fainter on Pimax, where it was one. VectorXR now takes the image when the frame is submitted, as a runtime does. Frame Generation's frames come from the same images, so they are fixed too.",
-          "With Star Citizen's hidden stereo depth option on, VectorXR no longer copies the depth image while the game is still writing it."
+          "<strong>The head wobble is fixed.</strong> With Frame Generation enabled for Star Citizen, the world swam against head movement, even with generation toggled off in-game. The game draws each frame after handing its image over, and VectorXR copied the image at the handover, so the headset was shown an older frame with the current head position. It was clearest on Virtual Desktop, where the frame was three frames old, and fainter on Pimax, where it was one. VectorXR now takes the image when the frame is submitted, as a runtime does. Frame Generation's frames come from the same images, so they are fixed too."
         ]
       },
       {
@@ -25,17 +24,17 @@
           "<strong>Steadier over long sessions.</strong> When video memory was close to its limit, Frame Generation could switch between keeping three and five real frames each time it re-engaged, rebuilding all its images each time. It now keeps its choice until memory really runs short, and the log says when it changes.",
           "<strong>Recovers from late pauses.</strong> Frame Generation retries by itself after a pause, but only three times per session, so a fourth pause late in a long flight stayed paused until you toggled it. The retries now come back after five minutes without a pause.",
           "<strong>OpenComposite games no longer pause Frame Generation.</strong> OpenVR games running through OpenComposite (Automobilista 2, for example) can leave a frame open and begin another. One such frame left Frame Generation a frame behind for the rest of the session, and it soon paused. It now drops those frames, as the runtime does.",
-          "<strong>Fewer GPU stalls and failures under pressure.</strong> A failed image allocation (low video memory) could leave Frame Generation using images that didn't exist. Changing the motion quality while NVIDIA's optical flow hardware was busy could leave a stall that nothing would release. Both are fixed.",
+          "<strong>Fewer failures under GPU pressure.</strong> A failed image allocation (low video memory) could leave Frame Generation using images that didn't exist; that is fixed. Changing the motion quality while NVIDIA's optical flow hardware is busy now waits for it, and a watchdog releases a match that never finishes.",
           "<strong>Layer metadata is kept.</strong> Colour scale and bias, and alpha-blend settings a game attaches to its layers, now carry through to generated frames. A game that attaches metadata Frame Generation can't carry over gets Frame Generation off for that session, with the reason on the OSD and in the log, instead of frames that lose it.",
-          "<strong>Extend head prediction (experimental, off by default).</strong> On runtimes that predict the head only a short way ahead (PiOpenXR, about 20 ms), Frame Generation's longer timing leaves the compositor to turn the image the rest of the way. The Crystal Super's OLED shows that as black at the edge you turn toward. With this setting on, VectorXR predicts the head the rest of the way itself. The OSD shows how far ahead it predicts.",
+          "<strong>Extend head prediction (experimental, off by default).</strong> On runtimes that predict the head only a short way ahead (PiOpenXR, about 20 ms), Frame Generation's longer timing leaves the compositor to turn the image the rest of the way, which we expect shows as black at the edge you turn toward on the Crystal Super's OLED. With this setting on, VectorXR carries your head's turn over the rest of the way, for less black at the edge. The OSD shows how far past the runtime's prediction it extends.",
           "Logs and summaries show more for support: the real frames kept, how long Dynamic waits after standing down, retries used, the game's view sizes when they change, and its full depth description."
         ]
       },
       {
         "html": "<strong>On-Screen Display</strong>",
         "items": [
-          "<strong>New PERFORMANCE row</strong> (on by default in the expanded layout, optional in compact): how much of the frame budget the game's CPU and the GPU leave, so you can see which one limits you, plus the game's video memory use against its budget. It samples only while the row is shown.",
-          "<strong>The OSD shows in games that restart VR at launch.</strong> OpenVR games through OpenComposite start their VR session twice, and on Virtual Desktop the OSD then stayed off, even when its binding showed it, until a setting was saved."
+          "<strong>New PERFORMANCE row</strong> (on by default in the expanded layout, optional in compact): how much of the frame budget the game's CPU time and the GPU leave free (headroom), and which one limits you when that is clear, plus the game's video memory use against its budget. It samples only while the row is shown.",
+          "<strong>The OSD shows in games that restart VR at launch.</strong> OpenComposite games (seen with Automobilista 2) start their VR session twice at launch, and on Virtual Desktop the OSD then stayed off, even when its binding showed it, until a setting was saved."
         ]
       },
       {
@@ -43,7 +42,7 @@
         "items": [
           "<strong>System tray icon.</strong> The tray menu has the health status, the VectorXR switch, the log level and Export Debug. Changes made there are saved at once. With the tray On (the default), closing the window keeps the app in the tray, and starting VectorXR again brings the window back. With it Off, closing the window quits. The app and tray only manage your settings: VectorXR works in your games with both closed, as long as VectorXR Enabled is on.",
           "<strong>Export Debug</strong> is also under Settings > Logging.",
-          "Settings saved by 0.19.3 stay readable by 0.19.0-0.19.2 layers, such as a signed copy kept for anti-cheat games."
+          "Settings saved by 0.19.3 stay readable by 0.19.0-0.19.2 layers, so you can keep an older copy installed."
         ]
       },
       {
