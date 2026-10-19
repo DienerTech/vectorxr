@@ -3,6 +3,8 @@
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
+#include <iomanip>
+#include <locale>
 #include <sstream>
 #include <string_view>
 #include <thread>
@@ -237,6 +239,8 @@ bool ReadRuntimeControl(const std::filesystem::path& path, RuntimeControlDocumen
 
 bool WriteRuntimeStatus(const std::filesystem::path& path, const RuntimeStatusDocument& document, std::string* error) {
     std::ostringstream stream;
+    // A game may set a global locale with a decimal comma or digit grouping.
+    stream.imbue(std::locale::classic());
     stream << "{\n"
            << "  \"protocolVersion\": " << kRuntimeRelayProtocolVersion << ",\n"
            << "  \"sessionId\": \"" << EscapeJson(document.session_id) << "\",\n"
@@ -253,8 +257,17 @@ bool WriteRuntimeStatus(const std::filesystem::path& path, const RuntimeStatusDo
            << "\", \"turboReason\": \"" << EscapeJson(document.turbo_reason)
            << "\", \"framegenState\": \"" << EscapeJson(document.framegen_state)
            << "\", \"framegenReason\": \"" << EscapeJson(document.framegen_reason)
-           << "\", \"framegenDepth\": \"" << EscapeJson(document.framegen_depth) << "\" },\n"
-           << "  \"quadviewsDimensionsAt\": " << document.quadviews_dimensions_at << ",\n"
+           << "\", \"framegenDepth\": \"" << EscapeJson(document.framegen_depth) << "\" },\n";
+    if (const auto& rates = document.framegen_rates) {
+        stream << std::fixed << std::setprecision(1) << "  \"framegen\": { \"mode\": \"" << EscapeJson(rates->mode)
+               << "\", \"frameRate\": \"" << EscapeJson(rates->frame_rate)
+               << "\", \"generating\": " << (rates->generating ? "true" : "false")
+               << ", \"multiplier\": " << rates->multiplier << ", \"refreshHz\": " << rates->refresh_hz
+               << ", \"holdFps\": " << rates->hold_fps << ", \"appFps\": " << rates->app_fps
+               << ", \"outputFps\": " << rates->output_fps << ", \"distinctFps\": " << rates->distinct_fps
+               << " },\n";
+    }
+    stream << "  \"quadviewsDimensionsAt\": " << document.quadviews_dimensions_at << ",\n"
            << "  \"quadviewsDimensions\": [";
     for (std::size_t i = 0; i < document.quadviews_dimensions.size(); ++i) {
         const auto& view = document.quadviews_dimensions[i];

@@ -2619,6 +2619,33 @@ void TestRuntimeRelayControlAndStatusRoundTrip() {
     status_content << status_stream.rdbuf();
     Expect(status_content.str().find("\"acknowledgedRevision\": 17") != std::string::npos,
            "Runtime status acknowledgement was not serialized");
+    Expect(status_content.str().find("\"framegen\":") == std::string::npos,
+           "Runtime status wrote Frame Generation rates for a session without it");
+    status_stream.close(); // an open reader keeps the atomic replace from taking the file
+
+    // Frame Generation's rates as numbers: a game slower than a fixed 2x hold.
+    depthxr::RuntimeFrameGenRates rates;
+    rates.mode = "extrapolate";
+    rates.frame_rate = "2x";
+    rates.generating = true;
+    rates.multiplier = 2;
+    rates.refresh_hz = 80.0;
+    rates.hold_fps = 40.0;
+    rates.app_fps = 34.14;
+    rates.output_fps = 80.0;
+    rates.distinct_fps = 79.56;
+    status.framegen_rates = rates;
+    Expect(depthxr::WriteRuntimeStatus(status_path, status, &relay_error),
+           "Failed to write runtime status with Frame Generation rates: " + relay_error);
+    std::ifstream rates_stream(status_path);
+    std::ostringstream rates_content;
+    rates_content << rates_stream.rdbuf();
+    Expect(rates_content.str().find("\"framegen\": { \"mode\": \"extrapolate\", \"frameRate\": \"2x\", "
+                                    "\"generating\": true, \"multiplier\": 2, \"refreshHz\": 80.0, \"holdFps\": 40.0, "
+                                    "\"appFps\": 34.1, \"outputFps\": 80.0, \"distinctFps\": 79.6 },") != std::string::npos,
+           "Runtime status did not serialize Frame Generation's rates");
+    Expect(rates_content.str().find("\"quadviewsDimensionsAt\": 0,") != std::string::npos,
+           "Runtime status lost the fields after Frame Generation's rates");
     std::filesystem::remove_all(test_directory, filesystem_error);
 }
 

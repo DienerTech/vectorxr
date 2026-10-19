@@ -57,9 +57,9 @@ const frameRates: { value: FrameRate; label: string; badge?: string; description
 
 const fixedRates: { value: FrameGenFixedMultiplier; label: string; description: string }[] = [
   { value: 'auto', label: 'Auto', description: 'Picks 2x, 3x or 4x as the game needs, and generates nothing while the game keeps up on its own.' },
-  { value: '2x', label: '2x', description: 'The game runs at 1/2 the refresh rate, such as 45 fps at 90 Hz.' },
-  { value: '3x', label: '3x', description: 'The game runs at 1/3 the refresh rate, such as 30 fps at 90 Hz.' },
-  { value: '4x', label: '4x', description: 'The game runs at 1/4 the refresh rate, such as 22.5 fps at 90 Hz. The most artifacts; for the heaviest games.' },
+  { value: '2x', label: '2x', description: 'The game runs at up to 1/2 the refresh rate, such as 45 fps at 90 Hz. Below that, pacing is less even.' },
+  { value: '3x', label: '3x', description: 'The game runs at up to 1/3 the refresh rate, such as 30 fps at 90 Hz. Below that, pacing is less even.' },
+  { value: '4x', label: '4x', description: 'The game runs at up to 1/4 the refresh rate, such as 22.5 fps at 90 Hz. The most artifacts; for the heaviest games.' },
 ]
 
 function isFixed(value: string): value is FrameGenFixedMultiplier {

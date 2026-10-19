@@ -6096,10 +6096,16 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
     NoteGpuEvidenceLocked(delta(&Totals::app_frames), delta(&Totals::late_gpu), capture_done_ms_);
     if (logger_) {
         LogMemoryBudgetLocked();
+        // A fixed or Auto rate is the most the game is let run: a slower
+        // game takes more refreshes per real frame (just in time measures
+        // them for every mode).
         const std::string multiplier =
             DynamicLocked() ? "dynamic (" + Number(dynamic_interval_slots_, 2) + " refreshes per real frame)"
                             : MultiplierText(EffectiveMultiplierLocked()) +
-                                  (settings_.multiplier == FrameGenMultiplier::kAuto ? " (auto)" : "");
+                                  (settings_.multiplier == FrameGenMultiplier::kAuto ? " (auto)" : "") +
+                                  (jit_ && dynamic_interval_slots_ > 0.0
+                                       ? " (" + Number(dynamic_interval_slots_, 2) + " refreshes per real frame)"
+                                       : "");
         // lateReal: real frames ended after their refresh was due / not on
         // the GPU when first chosen. gpuWaits: game waits held for its GPU
         // (count/median ms/timeouts). captureDoneMs: an analysis's newest

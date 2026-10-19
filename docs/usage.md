@@ -785,11 +785,17 @@ thread, Dynamic runs as Auto.
 
 **Fixed** holds the game at a set fraction of the headset refresh rate, for even pacing:
 
-| Fixed rate | Game rate | Example at 90 Hz | Generated frames between real frames |
+| Fixed rate | Game rate (at most) | Example at 90 Hz | Generated frames between real frames |
 | --- | --- | --- | --- |
 | **2x** | 1/2 of the headset refresh rate | 45 fps | One |
 | **3x** | 1/3 | 30 fps | Two |
 | **4x** | 1/4 | 22.5 fps | Three |
+
+The fraction is the most the game is let run. A game that cannot reach it runs at its own rate,
+and every refresh is still filled: some real frames then get two or more generated frames, each
+made from the newest real frame and placed further ahead, so pacing is less even and artifacts
+grow. Lower the game's settings until it holds the rate, or use the next rate up (or Auto) for
+even pacing. The On-Screen Display's "game → headset" frame rates show the real ratio.
 
 **Auto** starts at full rate: while the game holds the headset refresh, frames pass straight
 through and the status reads **Standby**. When it cannot, Auto steps up to 2x, 3x or 4x, and
@@ -984,7 +990,8 @@ engages, or sooner once the game's own frames show the runtime giving them every
 
 With a **Fixed** frame rate that is expected: Frame Generation holds the game at a fraction of
 the headset refresh rate and fills in the frames between: 45, 30, or 22.5 fps on a 90 Hz headset
-at 2x, 3x, or 4x. With **Dynamic**, the game runs as fast as it can. Judge the image in the
+at 2x, 3x, or 4x. A game below that rate runs at its own rate, with more generated frames per
+real one. With **Dynamic**, the game runs as fast as it can. Judge the image in the
 headset, not the game's own FPS counter; the On-Screen Display shows the frames per second the
 headset gets beside **FG ON**.
 
@@ -1017,7 +1024,9 @@ frames. Raising Artifact suppression under Advanced can help.
 **Can I use Turbo with Frame Generation?**
 
 Not in the same session. Frame Generation takes over frame pacing, so Turbo stays off wherever
-Frame Generation runs. Turbo still works for games without Frame Generation.
+Frame Generation runs. Turbo still works for games without Frame Generation. If Turbo alone
+gets a game close to the refresh rate, compare it with Frame Generation before choosing: 2x
+holds the game at half the refresh rate, so it trades real frames for generated ones.
 
 **Do I need to turn off Motion Smoothing or ASW?**
 

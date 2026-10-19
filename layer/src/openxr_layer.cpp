@@ -16605,6 +16605,22 @@ void OpenXrLayer::PollRuntimeRelay() {
             resolved_settings_.framegen.enabled && !framegen_session_enabled_)
             status.framegen_reason = "turned on after the game started; restart the game to use it";
         status.framegen_depth = framegen.depth == FrameGenDepthState::kUnknown ? "" : ToString(framegen.depth);
+        if (framegen_session_enabled_) {
+            // The same rates as framegen_reason, as numbers (MSFS_AutoFPS, issue 103).
+            RuntimeFrameGenRates rates;
+            rates.mode = framegen.mode == FrameGenSynthesisMode::kExtrapolate ? "extrapolate" : "interpolate";
+            rates.frame_rate = framegen.dynamic ? "dynamic" : framegen.automatic ? "auto" :
+                std::to_string(framegen.multiplier) + "x";
+            rates.generating = framegen.state == FrameGenState::kActive && !framegen.standby && !framegen.full_rate;
+            rates.multiplier = framegen.multiplier;
+            if (framegen.refresh_period_ns > 0) rates.refresh_hz = 1e9 / static_cast<double>(framegen.refresh_period_ns);
+            if (rates.generating && !framegen.dynamic && framegen.multiplier >= 2)
+                rates.hold_fps = rates.refresh_hz / framegen.multiplier;
+            rates.app_fps = framegen.app_fps;
+            rates.output_fps = framegen.output_fps;
+            rates.distinct_fps = framegen.distinct_fps;
+            status.framegen_rates = rates;
+        }
         if (status.turbo_reason.empty() && turbo_auto_suspended_.load())
             status.turbo_reason = "Runtime pacing repeatedly stalled. Use the Turbo toggle to retry.";
 

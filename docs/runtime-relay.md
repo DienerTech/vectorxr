@@ -44,8 +44,28 @@ Status documents identify one process-local OpenXR session and advertise only th
 `framegenState` is `off`, `waiting`, `active` (generating frames), `standby` (on, but the game
 holds the refresh rate itself, so its frames pass straight through), `paused`, or `unavailable`.
 `framegenReason` is a short line in the On-Screen Display's words: the mode, frame rate, and
-frame rates while active; the game's rate on standby; or why it is paused or unavailable.
+frame rates while active; the game's rate on standby; or why it is paused or unavailable. It is
+display text and may change between versions: read the numbers below instead.
 `turboState` reads `framegen` while Turbo yields to Frame Generation.
+
+While the session runs with Frame Generation on, the document also carries its rates as numbers,
+averaged over about a second:
+
+```json
+"framegen": { "mode": "extrapolate", "frameRate": "2x", "generating": true, "multiplier": 2,
+              "refreshHz": 80.0, "holdFps": 40.0, "appFps": 34.1, "outputFps": 80.0,
+              "distinctFps": 79.6 }
+```
+
+- `frameRate` is `2x`, `3x`, `4x`, `auto` or `dynamic`. `multiplier` is the refreshes per real
+  frame aimed for: Auto's current choice, or the typical value under Dynamic.
+- `generating` is true while generated frames are shown (not while waiting, paused, standing by,
+  or at Auto's full rate).
+- `holdFps` is the most the game is let run (`refreshHz / multiplier`) while a fixed or Auto rate
+  generates, and 0 otherwise. A game slower than that runs at its own rate, and every refresh is
+  still filled: the frames the headset gets per real frame are `distinctFps / appFps`, not
+  `multiplier`. A tool that tunes the game's settings should aim for `appFps` at `holdFps`.
+- `refreshHz` is 0 until the runtime's refresh period is known.
 
 Control documents target that exact session and express desired state rather than a toggle event:
 

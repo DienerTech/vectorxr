@@ -24,6 +24,23 @@ struct QuadViewDimensions {
     bool operator==(const QuadViewDimensions&) const = default;
 };
 
+// Frame Generation's live rates as numbers, for tools that read the status
+// file (framegen_reason is display text): averaged over about a second.
+struct RuntimeFrameGenRates {
+    std::string mode;            // "interpolate" or "extrapolate"
+    std::string frame_rate;      // "2x", "3x", "4x", "auto" or "dynamic"
+    bool generating{false};      // generated frames are being shown
+    std::uint32_t multiplier{0}; // refreshes per real frame aimed for (Auto: its choice; Dynamic: typical)
+    double refresh_hz{0.0};      // 0 until the runtime's period is known
+    // The most the game is let run (refresh / multiplier) while a fixed or
+    // Auto rate generates; 0 when nothing holds it. A slower game runs at its
+    // own rate and every refresh is still filled.
+    double hold_fps{0.0};
+    double app_fps{0.0};      // real frames per second
+    double output_fps{0.0};   // frames submitted to the runtime per second
+    double distinct_fps{0.0}; // of those, frames showing something new
+};
+
 struct RuntimeStatusDocument {
     bool osd_available{false}, osd_visible{false}, osd_compact{false};
     std::string osd_message;
@@ -34,6 +51,8 @@ struct RuntimeStatusDocument {
     // FrameGenDepthState relay name ("in-use", "not-sent", ...), empty
     // before generated frames.
     std::string framegen_depth;
+    // Present while the session runs with Frame Generation on.
+    std::optional<RuntimeFrameGenRates> framegen_rates;
     std::vector<QuadViewDimensions> quadviews_dimensions;
     std::uint64_t quadviews_dimensions_at{0};
     std::string session_id;
