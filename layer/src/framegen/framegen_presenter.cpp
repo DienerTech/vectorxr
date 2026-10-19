@@ -3946,6 +3946,18 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
                 error = "a projection swapchain image was never released through the layer";
                 break;
             }
+            // A negative height is how some OpenVR translations flip an image
+            // (OpenComposite without invertUsingShaders): OpenXR does not
+            // allow it, and Frame Generation would capture nothing.
+            const auto& rect = view.subImage.imageRect;
+            if (rect.extent.width <= 0 || rect.extent.height <= 0 || rect.offset.x < 0 || rect.offset.y < 0) {
+                error = "view " + std::to_string(i) + "'s image rectangle is " + std::to_string(rect.extent.width) +
+                        "x" + std::to_string(rect.extent.height) + " at " + std::to_string(rect.offset.x) + "," +
+                        std::to_string(rect.offset.y) +
+                        ", and Frame Generation needs a positive size (a negative height flips the image, which "
+                        "OpenXR does not allow; OpenComposite flips it with invertUsingShaders=true instead)";
+                break;
+            }
             if (record->second.sample_count > 1) {
                 UnavailableLocked("multisampled projection swapchains are not supported");
                 return false;

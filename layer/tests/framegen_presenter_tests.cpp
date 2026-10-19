@@ -3637,6 +3637,29 @@ void TestFailuresRetryAndToggle() {
     Check(!runtime.ordering_violation && !g_release_violation, "calls stayed ordered through failures");
 }
 
+// OpenComposite without invertUsingShaders flips an image with a negative
+// height (EmuVR, issue 107), which OpenXR does not allow: generation pauses
+// naming the rectangle instead of making zero-height images, and the game's
+// frames still pass through.
+void TestFlippedImageRectPauses() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate);
+    presenter.SetRetryPolicy(0ms, 0);
+    App app(presenter, runtime);
+    for (auto& view : app.views) view.subImage.imageRect = {{0, 1600}, {1600, -1600}};
+    for (int i = 0; i < 10; ++i) app.Frame();
+    const FrameGenStatus status = presenter.Status();
+    Check(gpu.executes == 0, "flipped: nothing is generated");
+    Check(status.state == FrameGenState::kPaused && !status.retry_pending, "flipped: generation pauses");
+    Check(status.reason.find("1600x-1600 at 0,1600") != std::string::npos &&
+              status.reason.find("invertUsingShaders") != std::string::npos,
+          "flipped: the pause names the rectangle and the OpenComposite setting");
+    Check(IsAppImage(runtime.Snapshot().back().swapchains), "flipped: the game's frame is still shown");
+    Check(!runtime.ordering_violation && !g_release_violation, "flipped: calls stayed ordered");
+}
+
 // A frame whose images were not captured when the game released them (a
 // view's first frame, or its region changed) is skipped, never read after
 // release: it is not a GPU failure, so it never pauses generation.
@@ -10734,6 +10757,7 @@ int main(int argc, char** argv) {
     RUN(TestOutputWaitTimeout);
     RUN(TestOutputFormatFallback);
     RUN(TestFailuresRetryAndToggle);
+    RUN(TestFlippedImageRectPauses);
     RUN(TestUncapturedFramesAreSkipped);
     RUN(TestSettingsAndSessionChanges);
     RUN(TestDiagnosticViewLogged);
