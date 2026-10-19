@@ -3579,6 +3579,40 @@ void TestInputDeviceAbsentWaitsForRescan() {
                           "and on the one device arrival");
 }
 
+// The connector looks for a device off the frame thread (CreateDevice, 13-70
+// ms) while the frame thread keeps counting arrivals. A controller whose HID
+// collections arrive one after another starts an attempt on the first and
+// may still be unknown to DirectInput at it: the second arrival, during the
+// attempt, must get it tried again, or its bindings stay dead for the session
+// (on the 2 s timer of 0.19.2 the next attempt found it).
+void TestInputDeviceArrivalDuringAttemptIsKept() {
+    using Backoff = depthxr::InputDeviceRetryBackoff;
+    using namespace std::chrono_literals;
+    const std::wstring stecs = L"{stecs-guid}";
+    const Backoff::TimePoint start{};
+
+    Backoff backoff(100ms, 400ms);
+    backoff.SetSessionActive(true);
+    backoff.RecordAbsent(stecs, start);
+    backoff.Rescan(); // the controller's first collection arrives
+    Expect(backoff.ShouldAttempt(stecs, start + 1s), "An arrival must let the absent device be tried");
+    const std::uint64_t attempted_after = backoff.Rescans(); // the connector takes the attempt
+    backoff.Rescan();                                        // the joystick's collection arrives meanwhile
+    backoff.RecordAbsent(stecs, start + 1s, attempted_after); // DirectInput did not know it yet
+    Expect(!backoff.WaitsForRescan(stecs) && backoff.ShouldAttempt(stecs, start + 1s),
+           "An arrival while an attempt ran must let the device be tried once more");
+    const std::uint64_t retried_after = backoff.Rescans();
+    backoff.RecordAbsent(stecs, start + 2s, retried_after);
+    Expect(backoff.WaitsForRescan(stecs) && !backoff.ShouldAttempt(stecs, start + 10min),
+           "With no arrival during its attempt, an absent device must wait for the next rescan");
+
+    // An attempt the frame thread makes itself (a read under the poller's
+    // lock, so no rescan between its start and its end) waits as before.
+    backoff.Rescan();
+    backoff.RecordAbsent(stecs, start + 11min);
+    Expect(backoff.WaitsForRescan(stecs), "An absent result with no rescan since must wait for the next rescan");
+}
+
 void TestInputDeviceRetryBackoff() {
     using Backoff = depthxr::InputDeviceRetryBackoff;
     using namespace std::chrono_literals;
@@ -4286,6 +4320,7 @@ int main() {
     TestDeviceInputPathsAndHatDirections();
     TestInputDeviceRetryBackoff();
     TestInputDeviceAbsentWaitsForRescan();
+    TestInputDeviceArrivalDuringAttemptIsKept();
     TestInputConnectPriming();
 #ifdef _WIN32
     TestD3D11SharpenShaderRegression();

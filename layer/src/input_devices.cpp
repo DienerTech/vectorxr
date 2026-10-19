@@ -214,9 +214,14 @@ std::chrono::milliseconds InputDeviceRetryBackoff::RecordFailure(
 }
 
 std::chrono::milliseconds InputDeviceRetryBackoff::RecordAbsent(const std::wstring& device_key, TimePoint now) {
+    return RecordAbsent(device_key, now, rescans_);
+}
+
+std::chrono::milliseconds InputDeviceRetryBackoff::RecordAbsent(const std::wstring& device_key, TimePoint now,
+                                                                std::uint64_t attempted_after) {
     Entry& entry = entries_[device_key];
     entry.absent = true;
-    entry.rescan_seen = rescans_;
+    entry.rescan_seen = std::min(attempted_after, rescans_);
     return Delay(entry, now);
 }
 
@@ -474,13 +479,7 @@ class DirectInputPoller {
         // hitting the hardware once per binding.
         const std::wstring cache_key = NormalizeGuidText(binding.device_guid);
         const auto now = std::chrono::steady_clock::now();
-        // A device arrived since the last poll (any game controller): absent
-        // devices are tried once more.
-        if (const std::uint64_t arrivals = g_device_arrivals.load(std::memory_order_relaxed);
-            arrivals != seen_arrivals_) {
-            seen_arrivals_ = arrivals;
-            retry_backoff_.Rescan();
-        }
+        NoteArrivalsLocked();
         result.device_arrival_notified = arrival_notification_ != nullptr;
         if (const auto it = state_cache_.find(cache_key); it != state_cache_.end() &&
                                                           now - it->second.read_time < kStateCacheLifetime) {
@@ -746,9 +745,20 @@ class DirectInputPoller {
         return true;
     }
 
-    // Windows reports device arrivals once a bound device was found absent:
-    // the only way, besides Rescan inputs and a session's start, that an
-    // absent device is tried again during a session. The layer stays loaded
+    // A device arrived since the last look (any game controller): absent
+    // devices are tried once more.
+    void NoteArrivalsLocked() {
+        if (const std::uint64_t arrivals = g_device_arrivals.load(std::memory_order_relaxed);
+            arrivals != seen_arrivals_) {
+            seen_arrivals_ = arrivals;
+            retry_backoff_.Rescan();
+        }
+    }
+
+    // Windows reports device arrivals once a bound device was found absent,
+    // or a reconnect begins in a session: the only way, besides Rescan
+    // inputs and a session's start, that an absent device is tried again
+    // during a session. The layer stays loaded
     // while the notification is registered (Drain unregisters it), so a
     // callback never runs unmapped code.
     void EnsureArrivalNotificationLocked() {
@@ -856,12 +866,23 @@ class DirectInputPoller {
         for (;;) {
             std::vector<IDirectInputDevice8W*> retired;
             std::optional<std::pair<std::wstring, std::string>> job;
+            std::uint64_t attempted_after = 0;
             IDirectInput8W* direct_input = nullptr;
             {
                 std::scoped_lock lock(mutex_);
                 retired.swap(retired_);
                 if (!pending_connects_.empty()) {
                     job = *pending_connects_.begin();
+                    // The attempt runs unlocked while the frame thread counts
+                    // arrivals: one during it (a controller's next HID
+                    // collection, or a device back from a drop) gets the
+                    // device tried again if this attempt finds it absent. A
+                    // reconnect in a session needs the notification for that.
+                    if (retry_backoff_.SessionActive() && retry_backoff_.ConsecutiveFailures(job->first) > 0) {
+                        EnsureArrivalNotificationLocked();
+                    }
+                    NoteArrivalsLocked();
+                    attempted_after = retry_backoff_.Rescans();
                 } else if (retired.empty()) {
                     connector_running_.store(false);
                     connector_idle_.notify_all();
@@ -902,9 +923,10 @@ class DirectInputPoller {
             const bool absent = diagnostic.diagnostic_stage == InputBindingPollStage::CreateDevice &&
                                 IsAbsentResult(diagnostic.result_code);
             const auto failed_at = InputDeviceRetryBackoff::Clock::now();
-            diagnostic.device_retry_delay_ms = (absent ? retry_backoff_.RecordAbsent(job->first, failed_at)
-                                                       : retry_backoff_.RecordFailure(job->first, failed_at))
-                                                   .count();
+            diagnostic.device_retry_delay_ms =
+                (absent ? retry_backoff_.RecordAbsent(job->first, failed_at, attempted_after)
+                        : retry_backoff_.RecordFailure(job->first, failed_at))
+                    .count();
             if (absent) {
                 EnsureArrivalNotificationLocked();
             }

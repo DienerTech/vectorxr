@@ -85,7 +85,16 @@ class InputDeviceRetryBackoff {
     // a session it is not retried on the timer: an attempt every 2 s stalled
     // the game with it (Star Citizen, 2026-10-18: a 48-70 ms hitch at each
     // attempt). It waits for Rescan; outside a session the timer still runs.
+    // `attempted_after` is Rescans() when the attempt began (the connector's
+    // runs off the frame thread): a rescan while it ran, such as a controller
+    // arriving while DirectInput looked for it, gets the device tried again.
+    // Without it, the attempt is taken to have begun at the latest rescan.
     std::chrono::milliseconds RecordAbsent(const std::wstring& device_key, TimePoint now);
+    std::chrono::milliseconds RecordAbsent(const std::wstring& device_key, TimePoint now,
+                                           std::uint64_t attempted_after);
+    // How many rescans there have been (a device's arrival, Rescan inputs, a
+    // session's start).
+    std::uint64_t Rescans() const { return rescans_; }
     void RecordSuccess(const std::wstring& device_key);
     std::chrono::milliseconds RetryDelayRemaining(const std::wstring& device_key,
                                                    TimePoint now) const;
