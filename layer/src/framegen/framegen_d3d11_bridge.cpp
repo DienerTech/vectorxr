@@ -1053,6 +1053,14 @@ bool D3D11Bridge::Released(XrSwapchain swapchain) {
     return true;
 }
 
+void D3D11Bridge::ReleaseCalled() {
+    if (!impl_) {
+        return;
+    }
+    std::scoped_lock lock(impl_->mutex);
+    impl_->NoteThread();
+}
+
 void D3D11Bridge::Abandoned(XrSwapchain swapchain) {
     if (!impl_) {
         return;

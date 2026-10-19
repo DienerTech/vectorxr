@@ -4501,6 +4501,9 @@ XrResult OpenXrLayer::ReleaseSwapchainImage(XrSwapchain swapchain,
                 bridged->second.last_released_image_index = *released_index;
                 bridged->second.has_last_released_image_index = true;
                 bridged->second.bridge_handovers.push_back(*released_index);
+                // The game may release on another thread than it ends frames
+                // on: Direct3D 11's immediate context is then shared.
+                d3d11_bridge_.ReleaseCalled();
                 if (framegen_.TracesSwapchainCalls()) {
                     framegen_.Trace().Record("rel", reinterpret_cast<uint64_t>(swapchain), *released_index, 2);
                 }

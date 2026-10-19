@@ -2166,6 +2166,75 @@ void CheckAcquireAhead(App& app, Game& game, Target& left, Target& right) {
           "acquire ahead: the runtime shows the image released last");
 }
 
+// 2d. A game releasing its images on another thread than it ends frames on:
+// the bridge's copy runs at the frame's end, on the game's immediate context,
+// which the releasing thread uses too. The release's thread still counts, so
+// the bridge turns the game device's multithread protection on (as when the
+// copy ran at the release). The protection stays on for the session, and is
+// put back for the cases after it.
+void CheckReleaseOnAnotherThread(App& app, Game& game, Target& left, Target& right) {
+    ComPtr<ID3D11Multithread> multithread;
+    Check(SUCCEEDED(game.context.As(&multithread)), "release thread: the game's context has multithread protection");
+    const BOOL was_protected = multithread->GetMultithreadProtected();
+    Check(Contains(Peer::Bridge().Summary(), "secondThread=no"),
+          "release thread: one thread so far: " + Peer::Bridge().Summary());
+    XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
+    XrFrameState state{XR_TYPE_FRAME_STATE};
+    Check(app.api.wait_frame(app.session, &wait_info, &state) == XR_SUCCESS, "release thread: xrWaitFrame");
+    XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
+    Check(app.api.begin_frame(app.session, &begin_info) == XR_SUCCESS, "release thread: xrBeginFrame");
+    XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO};
+    locate.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    locate.displayTime = state.predictedDisplayTime;
+    locate.space = app.space;
+    XrViewState view_state{XR_TYPE_VIEW_STATE};
+    std::array<XrView, 2> located{};
+    for (XrView& view : located) view.type = XR_TYPE_VIEW;
+    std::uint32_t located_count = 0;
+    Check(app.api.locate_views(app.session, &locate, &view_state, 2, &located_count, located.data()) == XR_SUCCESS &&
+              located_count == 2,
+          "release thread: xrLocateViews");
+    const std::array<const Target*, 2> targets{&left, &right};
+    const std::array<Color, 2> colors{FrameColor(7, 0), FrameColor(7, 1)};
+    for (std::size_t eye = 0; eye < 2; ++eye) {
+        Draw(game, targets[eye]->images[Acquire(app, *targets[eye])], colors[eye]);
+    }
+    std::thread releaser([&] {
+        Release(app, left);
+        Release(app, right);
+    });
+    releaser.join();
+    std::array<XrCompositionLayerProjectionView, 2> views{};
+    for (std::uint32_t eye = 0; eye < 2; ++eye) {
+        views[eye] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+        views[eye].pose = located[eye].pose;
+        views[eye].fov = located[eye].fov;
+        views[eye].subImage.swapchain = targets[eye]->swapchain;
+        views[eye].subImage.imageRect = {{0, 0},
+                                         {static_cast<std::int32_t>(kWidth), static_cast<std::int32_t>(kHeight)}};
+    }
+    XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    projection.space = app.space;
+    projection.viewCount = 2;
+    projection.views = views.data();
+    const XrCompositionLayerBaseHeader* layers[] = {reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection)};
+    XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};
+    end.displayTime = state.predictedDisplayTime;
+    end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    end.layerCount = 1;
+    end.layers = layers;
+    Check(app.api.end_frame(app.session, &end) == XR_SUCCESS, "release thread: xrEndFrame");
+    const ShownFrame& shown = g_runtime.frames.back();
+    Check(shown.views.size() == 2 && Near(shown.views[0].texel, colors[0]) && Near(shown.views[1].texel, colors[1]),
+          "release thread: the runtime shows the frame");
+    const std::string summary = Peer::Bridge().Summary();
+    Check(Contains(summary, "secondThread=yes") && Contains(summary, "multithreadProtected=yes") &&
+              multithread->GetMultithreadProtected(),
+          "release thread: the release's thread counts, and protection is on: " + summary);
+    Check(Contains(Peer::Log(), "come from more than one thread"), "release thread: the log says so");
+    multithread->SetMultithreadProtected(was_protected);
+}
+
 // Quad views (XR_VARJO_quad_views): views 0/1 peripheral, 2/3 focus, each with
 // a swapchain of its own.
 using QuadTargets = std::array<Target, 4>;
@@ -2740,6 +2809,22 @@ bool TestBridgedSession(Game& game) {
     CheckTeardown(app, game, left, right);
     EndCase(game);
     return true;
+}
+
+// 2d in a session of its own: the second thread is logged as an error, and
+// the protection stays on for the session.
+void TestReleaseOnAnotherThread(Game& game) {
+    BeginCase("release-thread", game);
+    App app = StartApp();
+    SessionCreate create(game.device.Get(), app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS && Peer::Bridge().Active(),
+          "release thread: a bridged session");
+    BeginSession(app);
+    Target left = MakeTarget(app, ColorInfo(), "the left eye");
+    Target right = MakeTarget(app, ColorInfo(), "the right eye");
+    CheckReleaseOnAnotherThread(app, game, left, right);
+    StopApp(app);
+    EndCase(game);
 }
 
 // 1a. VECTORXR_FRAMEGEN_QUEUE=game: the runtime would get the bridge's queue,
@@ -5119,6 +5204,7 @@ int main(int argc, char** argv) {
         TestRefusedD3D12Session(game);
         TestInstanceExtensions(game);
         TestDestroyInstanceWithSession(game);
+        TestReleaseOnAnotherThread(game);
         TestBridgedQuadViewsComposed(game, false);
         TestBridgedQuadViewsComposed(game, true);
         TestBridgedQuadFrameGen(game, "extrapolate");
