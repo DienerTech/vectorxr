@@ -914,9 +914,12 @@ bool FrameGenPresenter::Toggle() {
     std::scoped_lock lock(mutex_);
     if (state_ == FrameGenState::kPaused) {
         // A press after a pause retries rather than turning the feature off.
+        // The time it stayed paused is no quiet stretch: the retries come
+        // back only once it has run that long again (MaybeRetryLocked).
         user_enabled_ = true;
         consecutive_failures_ = consecutive_demotions_ = 0;
         paused_at_.reset();
+        last_pause_at_ = Clock::now();
         DynamicReenableLocked(Clock::now());
         SetStateLocked(configured_enabled_ ? FrameGenState::kWaiting : FrameGenState::kOff, "");
     } else {
@@ -2421,7 +2424,7 @@ void FrameGenPresenter::MaybeRetryLocked() {
         if (logger_) {
             logger_->Info("Frame Generation has run " +
                           Number(std::chrono::duration<double>(now - *last_pause_at_).count(), 0) +
-                          " s since its last pause: a later pause retries by itself again (up to " +
+                          " s since it resumed after its last pause: a later pause retries by itself again (up to " +
                           std::to_string(retry_attempts_) + " times).");
         }
         automatic_retries_ = 0;
@@ -2432,6 +2435,7 @@ void FrameGenPresenter::MaybeRetryLocked() {
     }
     ++automatic_retries_;
     paused_at_.reset();
+    last_pause_at_ = now; // the quiet stretch starts when it runs again
     consecutive_failures_ = consecutive_demotions_ = 0;
     healthy_streak_ = 0;
     DynamicReenableLocked(Clock::now());

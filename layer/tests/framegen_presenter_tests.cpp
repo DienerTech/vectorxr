@@ -7618,6 +7618,54 @@ void TestRetriesRestoredAfterQuietStretch() {
               std::to_string(retried.size()) + " retried)");
 }
 
+// The quiet stretch that gives the retries back counts from when Frame
+// Generation runs again, not from when it paused: a pause that stays paused
+// (its retries spent) for longer than the stretch, then a toggle, must not
+// hand back every retry at once, nor log that it ran all that while.
+void TestRetriesNotRestoredByALongPause() {
+    SessionLog log("retries-long-pause");
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate, kFormat, kAppUsage, FrameGenMultiplier::k2,
+                   log.logger.get());
+    presenter.SetRetryPolicy(0ms, 1, 1000ms);
+    App app(presenter, runtime);
+    for (int i = 0; i < 5; ++i) app.Frame();
+    Check(presenter.Status().state == FrameGenState::kActive, "long pause: engaged");
+    const auto fail = [&] {
+        gpu.fail = true;
+        for (int i = 0; i < 3; ++i) app.Frame();
+        gpu.fail = false;
+    };
+    // The retry is spent on a first pause; a second soon after stays paused.
+    fail();
+    for (int i = 0; i < 5; ++i) app.Frame();
+    Check(presenter.Status().state == FrameGenState::kActive, "long pause: the automatic retry re-engages");
+    fail();
+    Check(presenter.Status().state == FrameGenState::kPaused && !presenter.Status().retry_pending,
+          "long pause: a second pause soon after stays paused");
+    // Paused for longer than the quiet stretch, then the player toggles it on.
+    const auto paused = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - paused < 1200ms) {
+        app.Frame();
+        std::this_thread::sleep_for(4ms);
+    }
+    Check(presenter.Toggle() && presenter.Status().state == FrameGenState::kWaiting, "long pause: the toggle retries");
+    for (int i = 0; i < 5; ++i) app.Frame();
+    Check(presenter.Status().state == FrameGenState::kActive, "long pause: re-engaged after the toggle");
+    // Failing again within the stretch: the retry is still spent.
+    fail();
+    const FrameGenStatus again = presenter.Status();
+    Check(again.state == FrameGenState::kPaused && !again.retry_pending,
+          "long pause: soon after the toggle a pause stays paused (" + std::string(ToString(again.state)) +
+              (again.retry_pending ? ", retry pending" : "") + ")");
+    presenter.Stop();
+    Check(log.Lines("a later pause retries by itself again").empty(),
+          "long pause: no retries are given back for time spent paused");
+    Check(!runtime.ordering_violation && !g_release_violation, "long pause: calls stayed ordered");
+}
+
 // Dynamic's summaries say how long the next stand-down passes frames
 // straight through (doubling after short engagements), how many there
 // were, and how many automatic retries are spent.
@@ -10738,6 +10786,7 @@ int main(int argc, char** argv) {
     // apart, and what the summaries and the log say about both.
     RUN(TestCanvasRingAcrossEngagements);
     RUN(TestRetriesRestoredAfterQuietStretch);
+    RUN(TestRetriesNotRestoredByALongPause);
     RUN(TestDynamicSummaryShowsHold);
     RUN(TestViewExtentChangesLogged);
     RUN(TestOpenCompositeAbandonsFrames);

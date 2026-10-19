@@ -1084,7 +1084,9 @@ class FrameGenPresenter {
     // (MaybeRetryLocked): a long session's fourth pause, hours after the
     // third, still retries by itself.
     std::chrono::milliseconds retry_restore_after_{std::chrono::minutes(5)};
-    std::optional<std::chrono::steady_clock::time_point> last_pause_at_; // the latest pause's start
+    // The latest pause's start, moved on to when Frame Generation ran again
+    // after it (an automatic retry, a toggle): the quiet stretch's start.
+    std::optional<std::chrono::steady_clock::time_point> last_pause_at_;
     std::uint32_t consecutive_failures_{0};
     std::uint32_t consecutive_demotions_{0};
 
