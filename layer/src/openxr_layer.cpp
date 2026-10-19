@@ -2076,6 +2076,9 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
                            [this](const std::string& message) { logger_.Info(message); });
     eye_gaze_extension_enabled_ = eye_gaze_extension_enabled;
     varjo_compatible_quadviews_active_ = diagnostics.varjo_compatible_quad_forwarded;
+    openxr_toolkit_above_ = diagnostics.openxr_toolkit == "above";
+    openxr_toolkit_quadviews_logged_ = false;
+    resolved_settings_generation_ = ~0ull; // resolve again with the Toolkit's position
     ResetSessionState();
     config_path_ = ResolveConfigPath();
     log_path_ = ResolveLogPath();
@@ -2139,6 +2142,13 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
         }
         logger_.Info(ext_stream.str());
         logger_.Info("OpenXR API layers below VectorXR: [" + diagnostics.layers_below + "]");
+        if (diagnostics.openxr_toolkit != "absent") {
+            logger_.Info("OpenXR Toolkit is loaded " +
+                         std::string(diagnostics.openxr_toolkit == "below" ? "below VectorXR."
+                                     : diagnostics.openxr_toolkit == "above"
+                                         ? "above VectorXR."
+                                         : "above VectorXR, bypassed for this application."));
+        }
         // The bridge the instance's XR_KHR_D3D12_enable is for, and what Frame
         // Generation does without it.
         const bool vulkan_bridge = !diagnostics.app_requested_d3d11 && diagnostics.vulkan_enable_version != 0;
@@ -11367,6 +11377,19 @@ void OpenXrLayer::RefreshResolvedSettings() {
     if (framegen_owns_pacing_.load(std::memory_order_acquire)) {
         turbo_yielded_to_framegen_ = resolved_settings_.turbo.enabled;
         resolved_settings_.turbo.enabled = false;
+    }
+    // OpenXR Toolkit above VectorXR would get the game's four quad views,
+    // which it does not support: it passes them on with room for two, and
+    // the game crashes (issue 108). The game runs stereo instead, as with
+    // Quadviews off.
+    if (openxr_toolkit_above_ && !varjo_compatible_quadviews_active_ && resolved_settings_.quadviews.enabled) {
+        resolved_settings_.quadviews.enabled = false;
+        if (!openxr_toolkit_quadviews_logged_) {
+            openxr_toolkit_quadviews_logged_ = true;
+            logger_.Error("Quadviews is off for this game: OpenXR Toolkit is loaded above VectorXR, and it does not "
+                          "support quad views. Turn OpenXR Toolkit off for this game (or set its per-game bypass) "
+                          "to use Quadviews.");
+        }
     }
 
     osd_monitoring_.store(resolved_settings_.core.osd.enabled, std::memory_order_relaxed);

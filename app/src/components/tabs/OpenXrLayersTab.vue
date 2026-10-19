@@ -22,6 +22,7 @@ const props = defineProps<{
   loading: boolean
   machineWritesUnlocked: boolean
   turboInUse: boolean
+  quadviewsInUse: boolean
 }>()
 
 const emit = defineEmits<{
@@ -69,6 +70,19 @@ const toolkitTurboWarning = computed(() => {
   return (props.snapshot?.slices ?? []).some((slice) =>
     slice.layers.some((layer) => layer.enabled && layer.layerName.toLowerCase().includes('mbucchia_toolkit')),
   )
+})
+
+// OpenXR Toolkit supports two views only: above VectorXR it would get the
+// game's quad views, so the layer keeps Quadviews off in that order.
+const toolkitQuadSlices = computed(() => {
+  if (!props.quadviewsInUse) {
+    return []
+  }
+  return (props.snapshot?.slices ?? []).filter((slice) => {
+    const vector = slice.layers.find((layer) => layer.isVectorXr && layer.enabled)
+    const toolkit = slice.layers.find((layer) => layer.enabled && layer.layerName.toLowerCase().includes('mbucchia_toolkit'))
+    return vector && toolkit && toolkit.order < vector.order
+  }).map((slice) => slice.label)
 })
 
 watch(() => props.snapshot, (value) => {
@@ -449,6 +463,15 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
       >
         <span class="font-medium">Turbo conflict:</span>
         OpenXR Toolkit is enabled while VectorXR Turbo is in use. Two frame-pacing layers fight each other — if OXRTK's Turbo Mode is on, disable it there or in VectorXR, never both.
+      </div>
+
+      <div
+        v-if="toolkitQuadSlices.length > 0"
+        class="mt-3 rounded-[0.9rem] border px-3 py-2 text-sm leading-6 chip-warning"
+        style="border-color: var(--app-border)"
+      >
+        <span class="font-medium">Quadviews off:</span>
+        OpenXR Toolkit is above VectorXR ({{ toolkitQuadSlices.join(', ') }}). It does not support quad views, so VectorXR keeps Quadviews off for every game OpenXR Toolkit runs in. Disable OpenXR Toolkit, or turn it off for those games, to use Quadviews.
       </div>
 
     </article>

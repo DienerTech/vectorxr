@@ -139,6 +139,11 @@ class OpenXrLayer {
         bool vulkan_enable1_requested{false};
         // The names of the layers below VectorXR, nearest first.
         std::string layers_below;
+        // Where OpenXR Toolkit is: "absent", "below", "above", or
+        // "above-bypassed" (its per-application bypass passes everything
+        // through). Above VectorXR it gets a game's quad views, which it does
+        // not support.
+        std::string openxr_toolkit{"absent"};
     };
 
     // True when VectorXR quadviews should run in Varjo compatible mode, i.e. core
@@ -1648,6 +1653,11 @@ class OpenXrLayer {
     // that suppresses quad->stereo synthesis, stereo composite, and combined-eye
     // emulation on this instance.
     bool varjo_compatible_quadviews_active_{false};
+    // OpenXR Toolkit is above VectorXR for this instance (not bypassed): it
+    // supports two views only and breaks a game's quad views, so synthesized
+    // Quadviews stays off and the game runs stereo.
+    bool openxr_toolkit_above_{false};
+    bool openxr_toolkit_quadviews_logged_{false};
     bool defer_quadviews_swapchain_releases_{false};
     // Quadviews changes the application's view/swapchain topology. Once a session
     // is created, keep its initial activation state until teardown so a config

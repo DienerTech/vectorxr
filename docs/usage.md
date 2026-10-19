@@ -328,6 +328,10 @@ For the recommended **DCS + synthesized VectorXR Quadviews** path, set:
   Quadviews is different and remains runtime-driven.
 - **`XR_APILAYER_MBUCCHIA_quad_views_foveated`:** disabled while VectorXR is the quadviews
   provider. Run one quadviews provider at a time.
+- **OpenXR Toolkit:** disabled for DCS, or set to bypass DCS. Toolkit supports two views only,
+  and VectorXR is usually registered below it, where Toolkit would get DCS's four quad views. In
+  that order VectorXR keeps Quadviews off, so DCS runs stereo; the log says so, and the OpenXR
+  Layers page shows a warning.
 
 Restart DCS after changing its VR settings, the active OpenXR runtime, or API-layer state.
 The page's collapsible **Setup guide** repeats this checklist and the compatible titles; it

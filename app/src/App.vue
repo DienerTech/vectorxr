@@ -39,6 +39,11 @@ const turboInUse = computed(
     store.state.config.modules.turbo.enabled ||
     store.state.config.modules.turbo.profiles.some((profile) => profile.enabled),
 )
+const quadviewsInUse = computed(
+  () =>
+    store.state.config.modules.quadviews.enabled ||
+    store.state.config.modules.quadviews.profiles.some((profile) => profile.enabled),
+)
 const dirty = computed(() => store.isDirty.value)
 const logViewerOpen = ref(false)
 const healthCheckOpen = ref(false)
@@ -556,6 +561,7 @@ async function confirmResetConfig() {
           :loading="openXrLayersLoading"
           :machine-writes-unlocked="openXrMachineWritesUnlocked"
           :turbo-in-use="turboInUse"
+          :quadviews-in-use="quadviewsInUse"
           @refresh="refreshOpenXrLayers(true)"
           @machine-writes-unlocked="openXrMachineWritesUnlocked = $event"
           @snapshot-updated="openXrLayerSnapshot = $event; refreshOpenXrLayers(true)"

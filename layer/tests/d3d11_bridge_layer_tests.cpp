@@ -657,6 +657,7 @@ struct StandIn {
     int early_releases{0};
 
     std::vector<std::vector<std::string>> instance_attempts; // each attempt's extensions
+    int pre_instance_queries{0}; // functions asked for before the instance
     std::vector<std::string> calls;
     XrInstance instance{XR_NULL_HANDLE};
     XrSession session{XR_NULL_HANDLE};
@@ -973,6 +974,10 @@ XrResult XRAPI_CALL RtEnumerateInstanceExtensions(const char*, std::uint32_t cap
     return XR_SUCCESS;
 }
 
+// Another API layer's entry between the layer and the stand-in (the stand-in
+// answers for it), or none.
+depthxr::XrApiLayerNextInfo* g_layer_below = nullptr;
+
 XrResult XRAPI_CALL RtCreateApiLayerInstance(const XrInstanceCreateInfo* info,
                                              const depthxr::XrApiLayerCreateInfo* layer_info, XrInstance* instance) {
     std::scoped_lock lock(g_runtime_mutex);
@@ -984,7 +989,7 @@ XrResult XRAPI_CALL RtCreateApiLayerInstance(const XrInstanceCreateInfo* info,
     rt.instance_attempts.push_back(extensions);
     rt.calls.push_back("xrCreateApiLayerInstance");
     // The stand-in is the last of the chain: nothing follows it.
-    Check(layer_info && layer_info->nextInfo == nullptr, "the layer hands the rest of the chain on");
+    Check(layer_info && layer_info->nextInfo == g_layer_below, "the layer hands the rest of the chain on");
     if (rt.instance_failure != XR_SUCCESS) return rt.instance_failure;
     if (rt.refuse_d3d12_instance &&
         std::find(extensions.begin(), extensions.end(), kD3D12Extension) != extensions.end()) {
@@ -1565,6 +1570,7 @@ XrResult XRAPI_CALL RtGetInstanceProcAddr(XrInstance instance, const char* name,
     if (instance == XR_NULL_HANDLE) {
         // Before the instance: the loader's extension scan.
         std::scoped_lock lock(g_runtime_mutex);
+        ++g_runtime.pre_instance_queries;
         if (std::strcmp(name, "xrEnumerateInstanceExtensionProperties") == 0 && g_runtime.enumeration_offered) {
             *function = Function(RtEnumerateInstanceExtensions);
             return XR_SUCCESS;
@@ -1709,6 +1715,7 @@ XrResult CreateInstance(const std::vector<const char*>& extensions, XrInstance& 
     std::strncpy(next.layerName, "XR_APILAYER_TEST_stand_in_runtime", XR_MAX_API_LAYER_NAME_SIZE - 1);
     next.nextGetInstanceProcAddr = RtGetInstanceProcAddr;
     next.nextCreateApiLayerInstance = RtCreateApiLayerInstance;
+    next.next = g_layer_below;
     depthxr::XrApiLayerCreateInfo create{};
     create.structType = depthxr::XR_LOADER_INTERFACE_STRUCT_API_LAYER_CREATE_INFO;
     create.structVersion = depthxr::XR_API_LAYER_CREATE_INFO_STRUCT_VERSION;
@@ -2837,6 +2844,29 @@ void TestInstanceExtensions(Game& game) {
     result = InstanceAttempts({kD3D11Extension}, attempts, log);
     Check(result == XR_SUCCESS && attempts.size() == 1 && attempts[0] == Names{kD3D11Extension, kD3D12Extension},
           "added when there is no list: " + Text(attempts));
+    EndCase(game);
+
+    // A layer made from mbucchia's template (OpenXR Toolkit) calls through a
+    // null pointer when asked for a function before its own instance exists
+    // (issue 108): the layer never asks it, and adds the extension as when
+    // there is no list.
+    BeginCase("instance-template-layer-below", game);
+    depthxr::XrApiLayerNextInfo toolkit{};
+    toolkit.structType = depthxr::XR_LOADER_INTERFACE_STRUCT_API_LAYER_NEXT_INFO;
+    toolkit.structVersion = depthxr::XR_API_LAYER_NEXT_INFO_STRUCT_VERSION;
+    toolkit.structSize = sizeof(toolkit);
+    std::strncpy(toolkit.layerName, "XR_APILAYER_MBUCCHIA_toolkit", XR_MAX_API_LAYER_NAME_SIZE - 1);
+    toolkit.nextGetInstanceProcAddr = RtGetInstanceProcAddr;
+    toolkit.nextCreateApiLayerInstance = RtCreateApiLayerInstance;
+    g_layer_below = &toolkit;
+    result = InstanceAttempts({kD3D11Extension}, attempts, log);
+    g_layer_below = nullptr;
+    Check(result == XR_SUCCESS && g_runtime.pre_instance_queries == 0 && attempts.size() == 1 &&
+              attempts[0] == Names{kD3D11Extension, kD3D12Extension},
+          "nothing asked of a template layer before the instance, the extension added: " + Text(attempts));
+    Check(Contains(log, "OpenXR API layers below VectorXR: [XR_APILAYER_MBUCCHIA_toolkit]") &&
+              Contains(log, "OpenXR Toolkit is loaded below VectorXR."),
+          "the log names the layer below and where OpenXR Toolkit is");
     EndCase(game);
 
     BeginCase("instance-bridge-off", game);
