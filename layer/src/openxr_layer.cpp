@@ -4439,6 +4439,19 @@ XrResult OpenXrLayer::AcquireSwapchainImage(XrSwapchain swapchain,
 XrResult OpenXrLayer::WaitSwapchainImage(XrSwapchain swapchain, const XrSwapchainImageWaitInfo* wait_info) {
     const auto trace_call = turbo_trace_.Watch("app.waitImage");
     NoteThread(ThreadCensus::Call::WaitSwapchainImage);
+    {
+        // An image acquired ahead is waited for once the one before it is
+        // released (OpenXR's order): a bridged release kept for the frame's
+        // end goes on first, as at the next acquire.
+        std::scoped_lock lock(mutex_);
+        if (const auto it = tracked_swapchains_.find(swapchain);
+            it != tracked_swapchains_.end() && !it->second.bridge_handovers.empty()) {
+            if (const XrResult handed = HandOverBridgedReleasesLocked(swapchain, it->second, "swapchain wait");
+                XR_FAILED(handed)) {
+                return handed;
+            }
+        }
+    }
     const bool diag = TurboSequencedDebugTick();
     if (diag) {
         logger_.Debug("Turbo-diag: xrWaitSwapchainImage(" +

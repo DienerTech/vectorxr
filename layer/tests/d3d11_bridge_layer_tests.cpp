@@ -2095,6 +2095,77 @@ void CheckRenderAfterRelease(App& app, Game& game, Target& left, Target& right) 
     g_runtime.same_image = false;
 }
 
+// 2c. A game acquiring an image ahead (OpenXR lets it hold several and wait
+// for each once the one before it is released): acquire A and B, wait for A,
+// render and release it, then wait for B. The runtime gets A's release
+// before B's wait, as it orders them, and shows B.
+void CheckAcquireAhead(App& app, Game& game, Target& left, Target& right) {
+    XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
+    XrFrameState state{XR_TYPE_FRAME_STATE};
+    Check(app.api.wait_frame(app.session, &wait_info, &state) == XR_SUCCESS, "acquire ahead: xrWaitFrame");
+    XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
+    Check(app.api.begin_frame(app.session, &begin_info) == XR_SUCCESS, "acquire ahead: xrBeginFrame");
+    XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO};
+    locate.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    locate.displayTime = state.predictedDisplayTime;
+    locate.space = app.space;
+    XrViewState view_state{XR_TYPE_VIEW_STATE};
+    std::array<XrView, 2> located{};
+    for (XrView& view : located) view.type = XR_TYPE_VIEW;
+    std::uint32_t located_count = 0;
+    Check(app.api.locate_views(app.session, &locate, &view_state, 2, &located_count, located.data()) == XR_SUCCESS &&
+              located_count == 2,
+          "acquire ahead: xrLocateViews");
+    const Color ahead = FrameColor(5, 0);
+    const Color shown_left = FrameColor(6, 0);
+    const Color shown_right = FrameColor(6, 1);
+    XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+    XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+    wait.timeout = XR_INFINITE_DURATION;
+    std::uint32_t first = 0;
+    std::uint32_t second = 0;
+    Check(app.api.acquire(left.swapchain, &acquire, &first) == XR_SUCCESS &&
+              app.api.acquire(left.swapchain, &acquire, &second) == XR_SUCCESS && first != second &&
+              second < left.images.size(),
+          "acquire ahead: two images acquired");
+    Check(app.api.wait(left.swapchain, &wait) == XR_SUCCESS, "acquire ahead: the first image's wait");
+    Draw(game, left.images[first], ahead);
+    Release(app, left);
+    const XrResult second_wait = app.api.wait(left.swapchain, &wait);
+    Check(second_wait == XR_SUCCESS,
+          "acquire ahead: the second image's wait, after the first's release, succeeds (" +
+              std::to_string(second_wait) + ")");
+    Draw(game, left.images[second], shown_left);
+    Release(app, left);
+    const std::uint32_t right_index = Acquire(app, right);
+    Draw(game, right.images[right_index], shown_right);
+    Release(app, right);
+    std::array<XrCompositionLayerProjectionView, 2> views{};
+    const std::array<const Target*, 2> targets{&left, &right};
+    for (std::uint32_t eye = 0; eye < 2; ++eye) {
+        views[eye] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+        views[eye].pose = located[eye].pose;
+        views[eye].fov = located[eye].fov;
+        views[eye].subImage.swapchain = targets[eye]->swapchain;
+        views[eye].subImage.imageRect = {{0, 0},
+                                         {static_cast<std::int32_t>(kWidth), static_cast<std::int32_t>(kHeight)}};
+    }
+    XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    projection.space = app.space;
+    projection.viewCount = 2;
+    projection.views = views.data();
+    const XrCompositionLayerBaseHeader* layers[] = {reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection)};
+    XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};
+    end.displayTime = state.predictedDisplayTime;
+    end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    end.layerCount = 1;
+    end.layers = layers;
+    Check(app.api.end_frame(app.session, &end) == XR_SUCCESS, "acquire ahead: xrEndFrame");
+    const ShownFrame& shown = g_runtime.frames.back();
+    Check(shown.views.size() == 2 && Near(shown.views[0].texel, shown_left) && Near(shown.views[1].texel, shown_right),
+          "acquire ahead: the runtime shows the image released last");
+}
+
 // Quad views (XR_VARJO_quad_views): views 0/1 peripheral, 2/3 focus, each with
 // a swapchain of its own.
 using QuadTargets = std::array<Target, 4>;
@@ -2562,8 +2633,9 @@ void CheckDepth(App& app, Game& game, Target& left, Target& right, Target& depth
     Check(runtime && runtime->acquires == kFrames && runtime->waits == kFrames && runtime->releases == kFrames,
           "the depth swapchain's acquires, waits and releases reach the runtime");
     Check(Contains(Peer::Log(), "keeps the game's depth to itself"), "the log tells depth is left out");
-    // CheckFrames' 10 frames and CheckRenderAfterRelease's 16 before these.
-    Check(Contains(Peer::Bridge().Describe(left.swapchain), "copies=" + std::to_string(10 + 16 + kFrames)),
+    // CheckFrames' 10 frames, CheckRenderAfterRelease's 16 and
+    // CheckAcquireAhead's two releases before these.
+    Check(Contains(Peer::Bridge().Describe(left.swapchain), "copies=" + std::to_string(10 + 16 + 2 + kFrames)),
           "colour is still copied: " + Peer::Bridge().Describe(left.swapchain));
 }
 
@@ -2661,6 +2733,7 @@ bool TestBridgedSession(Game& game) {
     Target right = MakeTarget(app, ColorInfo(), "the right eye");
     CheckFrames(app, game, left, right);
     CheckRenderAfterRelease(app, game, left, right);
+    CheckAcquireAhead(app, game, left, right);
     Target depth = MakeTarget(app, DepthInfo(2), "depth");
     CheckDepth(app, game, left, right, depth);
     CheckValidation(game, "cases 1 to 4");
