@@ -4753,7 +4753,7 @@ void TestExtrapolateDuplicateTargetGuard() {
 // gap is not measured against the one before it (no motion across the gap),
 // and refreshes show their own time again from the next.
 void TestNoExtrapolationAcrossPauses() {
-    for (const auto pause : {1000ms, 400ms}) {
+    for (const auto pause : {1000ms, 400ms, 2100ms}) {
         const std::string name = "pause " + std::to_string(pause.count()) + " ms";
         FrameGenPresenter presenter;
         GpuLog gpu;
@@ -4766,6 +4766,8 @@ void TestNoExtrapolationAcrossPauses() {
         for (int i = 0; i < 3; ++i) app->Frame();
         RunWork(*app, 500ms, kLightWork);
         const auto last_end = std::chrono::steady_clock::now();
+        const float source_x = app->views[0].pose.position.x;
+        const std::size_t first_stalled = runtime.Submissions();
         const FrameGenStatus before = presenter.Status();
         std::size_t syntheses_before = 0;
         {
@@ -4774,6 +4776,21 @@ void TestNoExtrapolationAcrossPauses() {
         }
         SleepPrecise(last_end + pause);
         const FrameGenStatus paused = presenter.Status();
+        {
+            std::scoped_lock lock(g_xr_mutex);
+            // Time keeps advancing in the runtime while the game submits
+            // nothing. Depth-based eye correction is bounded by the same
+            // single real-frame interval as the image's optical-flow warp;
+            // it must not accumulate a translation throughout a load.
+            const double one_interval = app->eye_speed * static_cast<double>(4 * kPeriod) / 1e9;
+            for (std::size_t i = first_stalled; i < runtime.submitted_left_x.size(); ++i) {
+                const float x = runtime.submitted_left_x[i];
+                Check(std::isfinite(x) && x <= source_x + one_interval + 1e-5,
+                      name + ": a frozen source never accumulates eye translation");
+            }
+            Check(!runtime.submitted_left_x.empty() && std::abs(runtime.submitted_left_x.back() - source_x) < 1e-5,
+                  name + ": a long stall ends on the unchanged source pose");
+        }
         // Up to the last frame's refresh (its lead) the one before is still
         // moved on; past it, at most four intervals of four refreshes at 4x.
         Check(paused.generated - before.generated <= 16 + before.lead_slots + 1,
@@ -10047,6 +10064,104 @@ void TestAutoProbesNeedRoom() {
     Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
 }
 
+// A CPU-fast/GPU-slow game only exposes its throughput limit once Auto
+// probes full rate and the driver's short render queue fills. The ordinary
+// engagement warmup is two seconds; keeping it throughout a probe spends
+// those seconds on persistently late frames. Judge the actual probe cadence
+// after a short transition instead, preserving normal engagement warmup.
+void TestAutoGpuBoundProbeReturnsPromptly() {
+    for (const FrameGenSynthesisMode mode : {FrameGenSynthesisMode::kExtrapolate, FrameGenSynthesisMode::kInterpolate}) {
+        const std::string name = std::string("auto GPU-bound probe, ") +
+                                 (mode == FrameGenSynthesisMode::kExtrapolate ? "extrapolate" : "interpolate");
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        gpu.game_gpu = 17ms;
+        gpu.frames_ahead = 4;
+        Runtime runtime;
+        runtime.paced = true;
+        std::unique_ptr<App> owned;
+        App* app = nullptr;
+        StartJit(presenter, gpu, mode, FrameGenMultiplier::kAuto, app, runtime, owned);
+        presenter.SetAutoPolicy(200ms, 500ms, 15s, 300ms);
+        app->before_release = [&] { gpu.GameFrame(); };
+        RunWork(*app, 2000ms, PeriodsOfWork(kPeriod, 1.6));
+        Check(presenter.Status().multiplier == 2 && presenter.Status().threaded,
+              name + ": starts with stable 2x output");
+        // Preserve the production two-second settle and fifteen-second
+        // confirmation. Only probe scheduling is shortened for the test.
+        presenter.SetAutoPolicy(2s, 500ms, 15s, 300ms);
+        std::optional<TimePoint> probing;
+        double failed_ms = 0.0;
+        RunWork(*app, 6000ms, {2ms}, [&](const XrFrameState&) {
+            const auto now = std::chrono::steady_clock::now();
+            const auto multiplier = presenter.Status().multiplier;
+            if (!probing && multiplier == 1) probing = now;
+            if (probing && multiplier >= 2) {
+                failed_ms = Seconds(now - *probing) * 1000.0;
+                return true;
+            }
+            return false;
+        });
+        std::cerr << "  " << name << ": failed probe lasted " << failed_ms << " ms" << std::endl;
+        Check(probing && failed_ms > 0.0 && failed_ms < 1000.0,
+              name + ": actual late cadence ends the failed probe within one second (" +
+                  std::to_string(failed_ms) + " ms)");
+        // The failed probe's backoff still permits a lighter scene to
+        // recover; no capture-latency observation permanently pins a rate.
+        {
+            std::scoped_lock lock(gpu.timeline_mutex);
+            gpu.game_gpu = 3ms;
+        }
+        RunWork(*app, 4500ms, {2ms});
+        Check(presenter.Status().multiplier == 1,
+              name + ": a lighter GPU workload returns to full rate");
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    }
+}
+
+// Constant capture latency can exceed a refresh while captures still finish
+// every refresh. It is not proof of a throughput limit. Such a game must
+// reach full rate, and a single transition hitch must not fail its probe.
+void TestAutoProbeAllowsLatencyAndShortHitch() {
+    for (const FrameGenSynthesisMode mode : {FrameGenSynthesisMode::kExtrapolate, FrameGenSynthesisMode::kInterpolate}) {
+        const std::string name = std::string("auto latency and transient, ") +
+                                 (mode == FrameGenSynthesisMode::kExtrapolate ? "extrapolate" : "interpolate");
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        gpu.capture_lag = 17ms;
+        Runtime runtime;
+        runtime.paced = true;
+        std::unique_ptr<App> owned;
+        App* app = nullptr;
+        StartJit(presenter, gpu, mode, FrameGenMultiplier::kAuto, app, runtime, owned);
+        presenter.SetAutoPolicy(200ms, 500ms, 15s, 300ms);
+        RunWork(*app, 2000ms, PeriodsOfWork(kPeriod, 1.6));
+        Check(presenter.Status().multiplier == 2, name + ": starts at 2x");
+        presenter.SetAutoPolicy(2s, 500ms, 15s, 300ms);
+        RunWork(*app, 5000ms, {2ms}, [&](const XrFrameState&) {
+            return presenter.Status().multiplier == 1;
+        });
+        Check(presenter.Status().multiplier == 1,
+              name + ": fixed latency does not prohibit full-rate throughput");
+        const auto started = std::chrono::steady_clock::now();
+        bool hitched = false;
+        bool failed = false;
+        RunWork(*app, 2400ms, {2ms}, [&](const XrFrameState&) {
+            if (!hitched && std::chrono::steady_clock::now() - started >= 300ms) {
+                runtime.stall_next_submit_us = 120'000;
+                hitched = true;
+            }
+            failed = failed || presenter.Status().multiplier != 1;
+            return false;
+        });
+        Check(hitched && !failed && presenter.Status().multiplier == 1,
+              name + ": one late frame does not fail an otherwise steady probe");
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    }
+}
+
 // The same jump while Frame Generation presents (no game pause causes it
 // then, but a runtime may): the presenter thread's refreshes stop advancing,
 // so it stops and frames pass straight through within moments, the game never
@@ -10926,6 +11041,8 @@ int main(int argc, char** argv) {
         g_jit = jit;
         RUN(TestAutoProbesNeedRoom);
     }
+    RUN(TestAutoGpuBoundProbeReturnsPromptly);
+    RUN(TestAutoProbeAllowsLatencyAndShortHitch);
     g_jit = false;
     RUN(TestClockLogPairs);
     RUN(TestSteamVrMissedRefresh);

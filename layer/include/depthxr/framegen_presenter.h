@@ -849,7 +849,8 @@ class FrameGenPresenter {
     void NoteEyeMovementLocked(const XrCompositionLayerProjection& projection, const PendingFrame& frame);
     void NoteGpuTimingLocked(std::uint64_t submission, const PendingFrame& frame,
                              const std::optional<FrameGenGpuWindow>& window,
-                             const std::vector<FrameGenAnalysisTiming>& timings);
+                             const std::vector<FrameGenAnalysisTiming>& timings,
+                             std::chrono::steady_clock::time_point capture_pending_from = {});
     // One output image per spec in each of the first `sets` output sets.
     // `keep_replaced`: an output made anew keeps its old swapchain alive
     // (retired_outputs_) until a frame is written into the new ones.
@@ -1238,6 +1239,11 @@ class FrameGenPresenter {
     // (ThreadedEnd): the last such hold, left out of the time it falls in.
     std::array<double, 32> auto_busy_{};
     std::size_t auto_busy_count_{0};
+    // Diagnostic only: calibrated capture completion after CPU generation
+    // entry. Outstanding latency is not GPU service time or throughput and
+    // must not be used to prohibit a lower-multiplier probe.
+    std::array<double, 32> auto_capture_pending_ms_{};
+    std::size_t auto_capture_pending_count_{0};
     std::chrono::steady_clock::time_point auto_busy_since_{};
     std::chrono::steady_clock::time_point auto_end_held_from_{};
     std::chrono::steady_clock::time_point auto_end_held_to_{};
@@ -1639,6 +1645,7 @@ class FrameGenPresenter {
         std::uint64_t submission{0};
         std::chrono::steady_clock::time_point real_due{};
         std::chrono::steady_clock::time_point generated_due{};
+        std::chrono::steady_clock::time_point capture_pending_from{};
     };
     std::deque<GpuDue> gpu_due_;
     std::vector<double> gpu_start_ms_;

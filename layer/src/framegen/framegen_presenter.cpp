@@ -26,6 +26,10 @@ constexpr std::uint32_t kMaxMultiplier = 4;
 constexpr std::uint32_t kMemoryRecoveries = 2;
 constexpr std::chrono::seconds kPhaseLifetime{2};
 constexpr int kAutoMaxBackoffDoublings = 3; // 10 s, 20 s, 40 s, 80 s
+// A lower-multiplier probe starts from a steady game. Let its one-off
+// transition settle briefly, then judge its actual cadence rather than
+// spending the full engagement warmup on an unsustainable rate.
+constexpr std::chrono::milliseconds kAutoProbeSettle{250};
 // Auto stays at full rate this long after inline cycles kept starting late.
 constexpr std::chrono::seconds kInlineHold{60};
 // The presenter thread waits this long for frames in flight when it stops.
@@ -2020,8 +2024,13 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
         return;
     }
     // Frames right after a change (a new multiplier, engaging, new output
-    // images) carry its one-off cost and say nothing about the app.
-    if (last_app_end_ && now - multiplier_changed_at_ >= auto_settle_) {
+    // images) carry its one-off cost and say nothing about the app. Probes
+    // start from an already steady game: after a shorter transition, eight
+    // actual frames still have to establish persistent lateness before the
+    // old multiplier is restored. Capture latency alone cannot tell whether
+    // the game has the throughput for the lower multiplier.
+    const auto settle = probing_ ? std::min(auto_settle_, kAutoProbeSettle) : auto_settle_;
+    if (last_app_end_ && now - multiplier_changed_at_ >= settle) {
         // An engaged frame should take N refreshes; a passed-through one, one.
         const double multiplier = frame && frame->engaged ? static_cast<double>(frame->multiplier) : 1.0;
         const auto expected = std::chrono::nanoseconds(static_cast<std::int64_t>(period * multiplier * 1.25));
@@ -2032,7 +2041,7 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
     while (!cadence_.empty() && (now - cadence_.front().time > std::chrono::seconds(6) || cadence_.size() > 4096)) {
         cadence_.pop_front();
     }
-    if (now - multiplier_changed_at_ < auto_settle_) {
+    if (now - multiplier_changed_at_ < settle) {
         return;
     }
     std::size_t recent = 0, recent_late = 0, recent_started_late = 0, steady = 0, steady_late = 0;
@@ -3802,9 +3811,10 @@ void FrameGenPresenter::NoteEyeMovementLocked(const XrCompositionLayerProjection
 
 void FrameGenPresenter::NoteGpuTimingLocked(std::uint64_t submission, const PendingFrame& frame,
                                             const std::optional<FrameGenGpuWindow>& window,
-                                            const std::vector<FrameGenAnalysisTiming>& timings) {
+                                            const std::vector<FrameGenAnalysisTiming>& timings,
+                                            Clock::time_point capture_pending_from) {
     if (submission && frame.real_due != Clock::time_point{} && frame.generated_due != Clock::time_point{}) {
-        gpu_due_.push_back({submission, frame.real_due, frame.generated_due});
+        gpu_due_.push_back({submission, frame.real_due, frame.generated_due, capture_pending_from});
         while (gpu_due_.size() > 16) {
             gpu_due_.pop_front();
         }
@@ -3823,6 +3833,10 @@ void FrameGenPresenter::NoteGpuTimingLocked(std::uint64_t submission, const Pend
             const double done = Milliseconds(timing.capture_end - due->real_due);
             AddSample(capture_done_ms_, done);
             AddSample(guard_capture_done_ms_, done);
+            if (due->capture_pending_from != Clock::time_point{}) {
+                auto_capture_pending_ms_[auto_capture_pending_count_++ % auto_capture_pending_ms_.size()] =
+                    std::max(0.0, Milliseconds(timing.capture_end - due->capture_pending_from));
+            }
         }
         if (timing.start != Clock::time_point{} && timing.end != Clock::time_point{}) {
             AddSample(analysis_ms_, Milliseconds(timing.end - timing.start));
@@ -3858,6 +3872,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
                                  std::vector<std::vector<XrCompositionLayerProjectionView>>& sets,
                                  std::vector<std::uint8_t>& exact, bool release, Analysis* analyze,
                                  const FrameGenComposition* composition) {
+    const auto capture_pending_from = Clock::now();
     const std::size_t count = analyze ? 0 : std::min(fractions.size(), kFrameGenMaxGenerated);
     if (count == 0 && !analyze) {
         return false;
@@ -4132,7 +4147,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
     if (working_bytes) working_bytes_ = working_bytes;
     depth_status_ = depth;
     consecutive_failures_ = 0;
-    NoteGpuTimingLocked(executed.submission, frame, window, timings);
+    NoteGpuTimingLocked(executed.submission, frame, window, timings, capture_pending_from);
     if (logger_ && !hardware_status.empty() && hardware_status != logged_hardware_status_) {
         logged_hardware_status_ = hardware_status;
         // Its setup (the driver's optical flow API and sessions) runs in
@@ -5149,6 +5164,7 @@ void FrameGenPresenter::StartCompositorLocked(const FrameGenRuntimeCalls& calls)
     last_release_slot_.reset();
     last_offer_slot_.reset();
     auto_busy_count_ = 0;
+    auto_capture_pending_count_ = 0;
     auto_busy_since_ = auto_end_held_from_ = auto_end_held_to_ = {};
     auto_end_held_frame_ = 0;
     newest_copy_ = passthrough_copy_;
@@ -6175,6 +6191,11 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
             ", aheadJitterMs=" + Percentiles(ahead_jitter_ms_, 0.5, 0.95) +
             ", endSlackMs=" + Percentiles(end_slack_ms_, 0.1, 0.5) +
             ", appWorkMs=" + Number(app_work_frames_ ? app_work_ms_ / app_work_frames_ : 0.0, 1) +
+            (settings_.multiplier == FrameGenMultiplier::kAuto && auto_capture_pending_count_
+                 ? ", autoCapturePendingMs=" + MedianAndMax(std::vector<double>(
+                       auto_capture_pending_ms_.begin(), auto_capture_pending_ms_.begin() +
+                                                            std::min(auto_capture_pending_count_, auto_capture_pending_ms_.size())))
+                 : std::string()) +
             ", lateReal=" + std::to_string(delta(&Totals::late_cpu)) + "/" + std::to_string(delta(&Totals::late_gpu)) +
             ", skippedGenerated=" + std::to_string(skipped_generated_) + ", generated=+" +
             std::to_string(delta(&Totals::generated_distinct)) + " (" + std::to_string(totals_.generated_distinct) +
