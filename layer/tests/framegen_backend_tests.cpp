@@ -2107,6 +2107,48 @@ int RunQuadViews(Harness& harness) {
     };
     if (composes) {
         const auto views = quad_views(0.0f, 0.0f);
+        if (g_hardware && harness.name == "D3D12" && g_flow_status == "active") {
+            const auto check_atlas_memory = [&] {
+                // Changing hardware quality keeps the old atlas cached. No
+                // view dimensions, history ring or hardware flow level change:
+                // the second atlas's three committed images must increase the
+                // live-memory total. Returning to either warmed quality must
+                // reuse it without double-counting the images.
+                FrameGenTuning memory_tuning;
+                memory_tuning.hardware_flow = true;
+                gpu->SetHardwareAtlas(true);
+                const QuadFrame a = analyze(*gpu, 0, views, nullptr, moving(0.0f), memory_tuning, 25.0, 0.0, true);
+                const QuadFrame b = analyze(*gpu, 1, views, &a, moving(1.0f), memory_tuning, 25.0, 0.0, true);
+                Check(gpu->WaitIdle() && gpu->HardwareFlowStatus() == "active", "atlas memory warmup failed");
+                if (!gpu->UsesHardwareAtlasForTest()) {
+                    std::cout << harness.name << " optical-flow atlas memory check skipped: per-view fallback\n";
+                    return;
+                }
+                const std::uint64_t balanced_bytes = gpu->WorkingMemoryBytes();
+                memory_tuning.quality = FrameGenFlowQuality::kPerformance;
+                const QuadFrame c = analyze(*gpu, 2, views, &b, moving(2.0f), memory_tuning, 25.0, 0.0, true);
+                Check(gpu->WaitIdle() && gpu->HardwareFlowStatus() == "active", "atlas memory quality switch failed");
+                if (!gpu->UsesHardwareAtlasForTest()) {
+                    std::cout << harness.name << " optical-flow atlas memory check skipped: quality atlas refused\n";
+                    return;
+                }
+                const std::uint64_t cached_bytes = gpu->WorkingMemoryBytes();
+                Check(cached_bytes >= balanced_bytes + 3 * D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
+                      "cached optical-flow atlas images are missing from working memory");
+                memory_tuning.quality = FrameGenFlowQuality::kBalanced;
+                const QuadFrame d = analyze(*gpu, 3, views, &c, moving(3.0f), memory_tuning, 25.0, 0.0, true);
+                Check(gpu->WaitIdle() && gpu->WorkingMemoryBytes() == cached_bytes,
+                      "reusing the balanced atlas changed or double-counted working memory");
+                memory_tuning.quality = FrameGenFlowQuality::kPerformance;
+                analyze(*gpu, 0, views, &d, moving(4.0f), memory_tuning, 25.0, 0.0, true);
+                Check(gpu->WaitIdle() && gpu->WorkingMemoryBytes() == cached_bytes,
+                      "reusing the performance atlas changed or double-counted working memory");
+                std::cout << harness.name << " optical-flow atlas working memory: " << balanced_bytes << " -> "
+                          << cached_bytes << " bytes, stable on cache reuse\n";
+            };
+            check_atlas_memory();
+            gpu->ResetHistory();
+        }
         // Interpolating (with cover flow for a late real frame), then
         // extrapolating; on the GPU also with the optical flow hardware:
         // the four views matched on one atlas (flow 1), then with a session

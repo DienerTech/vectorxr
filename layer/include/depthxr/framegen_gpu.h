@@ -139,6 +139,9 @@ class FrameGenGpu {
     // Several views match on one optical flow atlas (the default) or on a
     // session each (tests, research; VECTORXR_FRAMEGEN_HARDWARE_ATLAS=0).
     virtual void SetHardwareAtlas(bool /*on*/) {}
+    // Tests: the last analysis used the optional multi-view hardware atlas,
+    // rather than the supported per-view fallback.
+    virtual bool UsesHardwareAtlasForTest() const { return false; }
     // Tests and research: the flow the last Execute measured for `view`
     // (the filtered field synthesis used) in full-resolution pixels, x and
     // y per cell row by row; `cells` receives the field's size. Waits for the
@@ -189,8 +192,10 @@ class FrameGenGpu {
     // the OS budget for it; absent when the backend cannot query it.
     virtual std::optional<FrameGenMemoryBudget> MemoryBudget() const { return std::nullopt; }
     // Video memory of the backend's own images for all views (history, flow,
-    // depth, trust, eye-shift maps), as allocated; 0 when unknown. Output
-    // images belong to the runtime and are not included.
+    // depth, trust, eye-shift maps, active and cached optical-flow atlases),
+    // as allocated; 0 when unknown. Output images belong to the runtime and
+    // are not included. Driver-retained resources detached during teardown
+    // are reflected in MemoryBudget's process usage, not this live-image sum.
     virtual std::uint64_t WorkingMemoryBytes() const { return 0; }
     // The runtime may then be called from a presenter thread while the
     // application renders: the API's queue is free-threaded (Direct3D 12), so

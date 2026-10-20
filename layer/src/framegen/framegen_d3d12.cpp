@@ -3009,6 +3009,18 @@ class D3D12FrameGen final : public FrameGenGpu {
         for (const ViewResources& view : views_) {
             ForEachTexture(view, add);
         }
+#ifdef DEPTHXR_NVOF
+        // Atlas matching owns images in addition to each view's packed
+        // input/output. Cached atlases still consume video memory while a
+        // different quality or view layout is active.
+        const auto add_atlas = [&](const HardwareAtlas& atlas) {
+            add(atlas.newest);
+            add(atlas.previous);
+            add(atlas.flow);
+        };
+        add_atlas(atlas_);
+        for (const HardwareAtlas& atlas : atlas_cache_) add_atlas(atlas);
+#endif
         add(check_scores_);
         return bytes;
     }
@@ -3571,6 +3583,7 @@ class D3D12FrameGen final : public FrameGenGpu {
     void StallHardwareForTest() override { stall_hardware_for_test_ = true; }
     void FailAllocationForTest(std::uint32_t ordinal) override { allocation_failure_ = ordinal; }
     void SetHardwareAtlas(bool on) override { atlas_enabled_ = on; }
+    bool UsesHardwareAtlasForTest() const override { return hardware_active_ && atlas_in_use_; }
 
     // The game's queue waits on the optical flow hardware's fence: should
     // the hardware stop answering, the game would hang behind it, and stop
