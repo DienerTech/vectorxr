@@ -493,6 +493,16 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         # hardware, its checks are skipped with a message).
         add_test(NAME depthxr_framegen_d3d12_hw_tests COMMAND depthxr_framegen_tests hw-d3d12)
         set_tests_properties(depthxr_framegen_d3d12_hw_tests PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 77)
+        # Queue substitution against a strict runtime and real queue fences:
+        # a stopped producer, repeated shown layers, and pass-through handover.
+        add_executable(depthxr_framegen_runtime_queue_tests tests/framegen_runtime_queue_tests.cpp)
+        target_link_libraries(depthxr_framegen_runtime_queue_tests PRIVATE depthxr_framegen d3d12 dxgi)
+        target_compile_definitions(depthxr_framegen_runtime_queue_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX
+            XR_USE_GRAPHICS_API_D3D12)
+        add_test(NAME depthxr_framegen_runtime_queue_tests COMMAND depthxr_framegen_runtime_queue_tests)
+        add_test(NAME depthxr_framegen_runtime_queue_hw_tests COMMAND depthxr_framegen_runtime_queue_tests hw)
+        set_tests_properties(depthxr_framegen_runtime_queue_tests depthxr_framegen_runtime_queue_hw_tests PROPERTIES
+            TIMEOUT 30 SKIP_RETURN_CODE 77)
         # Direct3D 11 <-> 12 sharing probe for the D3D11 bridge. It needs a real GPU, so it is
         # built here but is not a CTest (`depthxr_bridge_probe --help`).
         add_executable(depthxr_bridge_probe tests/bridge_probe.cpp)

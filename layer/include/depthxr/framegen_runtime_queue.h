@@ -132,6 +132,11 @@ class FrameGenQueueSubstitution {
     ShownLayerCounts ShownLayers() const;
     // For the session's end in the log (empty unless ShownLayersLazy()).
     std::string ShownLayersSummary() const;
+    // Best-effort diagnostic snapshot: queue fences and held-back calls per
+    // swapchain. Never waits for a queue, a runtime call, or a held mutex;
+    // a busy part is labelled rather than delaying a stall diagnostic.
+    // Session lifetime follows the swapchain calls (not concurrent with Reset).
+    std::string Describe() const;
 
   private:
     struct Impl;
