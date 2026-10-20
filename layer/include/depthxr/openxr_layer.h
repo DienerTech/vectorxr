@@ -43,6 +43,7 @@
 #include "depthxr/framegen_presenter.h"
 #include "depthxr/framegen_runtime_queue.h"
 #include "depthxr/turbo_recovery.h"
+#include "depthxr/turbo_prediction_history.h"
 #include "depthxr/turbo_trace.h"
 #include "depthxr/settings_resolver.h"
 #include "depthxr/swapchain_state.h"
@@ -963,6 +964,8 @@ class OpenXrLayer {
     // Direct3D 12: the runtime is given Frame Generation's queue (see
     // FrameGenQueueSubstitution); decided at xrCreateSession.
     FrameGenQueueSubstitution framegen_queue_;
+    bool framegen_queue_diagnostics_{false}; // session constant, opt-in slow-call snapshots
+    std::atomic<std::int64_t> framegen_queue_diagnostics_next_ms_{0};
     // Direct3D 11 games with Frame Generation: the session is Direct3D 12 and
     // the game renders into images shared with it (see D3D11Bridge); decided
     // at xrCreateSession.
@@ -1330,6 +1333,8 @@ class OpenXrLayer {
     bool turbo_last_should_render_{true};
     XrEnvironmentBlendMode turbo_last_environment_blend_mode_{XR_ENVIRONMENT_BLEND_MODE_OPAQUE};
     XrTime turbo_max_returned_display_time_{0};
+    TurboPredictionHistory turbo_prediction_history_; // turbo_mutex_, no pacing decisions
+    int turbo_prediction_fault_log_budget_{3}; // turbo_mutex_
     std::optional<std::chrono::steady_clock::time_point> turbo_last_wait_frame_wall_time_;
     // Toggle binding state (mutex_-guarded, polled from EndFrame like Depth's).
     bool turbo_toggle_enabled_{true};

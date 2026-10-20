@@ -2632,6 +2632,14 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
             // for the game's GPU work: on a GPU-bound game, a refresh missed
             // wherever the runtime's xrEndFrame waits for its queue (Varjo).
             downstream_info = framegen_queue_.Prepare(game_info, note, true);
+            const char* queue_diagnostics = std::getenv("VECTORXR_FRAMEGEN_QUEUE_DIAGNOSTICS");
+            framegen_queue_diagnostics_ = queue_diagnostics && std::string_view(queue_diagnostics) == "1";
+            framegen_queue_diagnostics_next_ms_.store(0, std::memory_order_relaxed);
+            if (framegen_queue_diagnostics_ && framegen_queue_.Active()) {
+                logger_.Info("Frame Generation queue diagnostics enabled "
+                             "(VECTORXR_FRAMEGEN_QUEUE_DIAGNOSTICS=1): runtime xrEndFrame calls taking "
+                             "at least 250ms record submitted swapchains and queue progress, at most once every 5s.");
+            }
             if (!note.empty()) logger_.Info(note);
             if (framegen_queue_.ShownLayersLazy()) {
                 logger_.Info("Frame Generation keeps releases of layers it does not capture lazy "
@@ -6082,6 +6090,8 @@ XrResult OpenXrLayer::TraceRuntimeEndFrame(XrSession session, const XrFrameEndIn
 }
 
 XrResult OpenXrLayer::SubmitRuntimeFrame(XrSession session, const XrFrameEndInfo* info) {
+    const bool queue_diagnostics = framegen_queue_diagnostics_ && framegen_queue_.Active();
+    std::vector<XrSwapchain> submitted_swapchains;
     if (framegen_queue_.Active() && info) {
         // Releases Frame Generation deferred go before a frame showing their
         // images (passing through, or with Frame Generation stopped).
@@ -6090,6 +6100,9 @@ XrResult OpenXrLayer::SubmitRuntimeFrame(XrSession session, const XrFrameEndInfo
             if (!header) continue;
             const bool layer = header->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION;
             auto flush = [&](XrSwapchain swapchain) {
+                if (queue_diagnostics && std::find(submitted_swapchains.begin(), submitted_swapchains.end(),
+                                                   swapchain) == submitted_swapchains.end())
+                    submitted_swapchains.push_back(swapchain);
                 framegen_queue_.Flush(swapchain, FrameGenQueueCalls(), layer && FrameGenShownLazily(swapchain));
             };
             switch (header->type) {
@@ -6145,7 +6158,26 @@ XrResult OpenXrLayer::SubmitRuntimeFrame(XrSession session, const XrFrameEndInfo
             const auto runtime_call = turbo_trace_.Watch("runtime.end");
             result = next_end_frame_(session, info);
         }
-        osd_.RecordSubmit(std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-submit_start).count());
+        const auto submit_end = std::chrono::steady_clock::now();
+        const double submit_ms = std::chrono::duration<double, std::milli>(submit_end - submit_start).count();
+        osd_.RecordSubmit(submit_ms);
+        if (queue_diagnostics && submit_ms >= 250.0) {
+            const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                submit_end.time_since_epoch()).count();
+            auto next_ms = framegen_queue_diagnostics_next_ms_.load(std::memory_order_relaxed);
+            if (now_ms >= next_ms && framegen_queue_diagnostics_next_ms_.compare_exchange_strong(
+                    next_ms, now_ms + 5000, std::memory_order_relaxed)) {
+                std::ostringstream message;
+                message << "Frame Generation slow runtime xrEndFrame: ms=" << submit_ms
+                        << ", result=" << static_cast<int>(result) << ", submittedSwapchains=[";
+                for (std::size_t i = 0; i < submitted_swapchains.size(); ++i) {
+                    if (i) message << ',';
+                    message << reinterpret_cast<std::uintptr_t>(submitted_swapchains[i]);
+                }
+                message << "]; " << framegen_queue_.Describe();
+                logger_.Info(message.str());
+            }
+        }
         if (!layers.empty() && XR_FAILED(result)) {
             // Never retry xrEndFrame: a failing runtime may already consume it.
             // Let the renderer distinguish a frame-order/timestamp rejection
@@ -6337,6 +6369,8 @@ XrResult OpenXrLayer::PaceWaitFrame(XrSession session,
             // the same session begins from the last real app-visible frame.
             turbo_last_predicted_display_time_ = frame_state->predictedDisplayTime;
             turbo_last_predicted_display_period_ = frame_state->predictedDisplayPeriod;
+            turbo_prediction_history_.NativeWait(frame_state->predictedDisplayTime,
+                                                   frame_state->predictedDisplayPeriod);
             turbo_last_should_render_ = frame_state->shouldRender == XR_TRUE;
             turbo_max_returned_display_time_ =
                 std::max(turbo_max_returned_display_time_, frame_state->predictedDisplayTime);
@@ -6534,15 +6568,17 @@ XrResult OpenXrLayer::PaceWaitFrame(XrSession session,
                 const auto now = experimental_active && turbo_experiment_.sample_at_entry
                     ? entry_time : std::chrono::steady_clock::now();
                 XrTime predicted = turbo_last_predicted_display_time_;
+                bool extrapolated = false;
                 if ((wait_pipelined || async_handoff) && !turbo_async_wait_completed_ &&
                     turbo_last_wait_frame_wall_time_.has_value()) {
                     // Async wait still in flight: extrapolate by the wall-clock
-                    // delta between the app's waits. (Sequenced pacing never needs
-                    // this — its wait completed before EndFrame returned, so the
-                    // recorded timing is already this frame's real timing.)
+                    // delta between the app's waits. Sequenced pacing keeps the
+                    // native cache, including when this app wait overlaps the
+                    // post-submit runtime wait on the frame thread.
                     predicted += std::chrono::duration_cast<std::chrono::nanoseconds>(
                                      now - *turbo_last_wait_frame_wall_time_)
                                      .count();
+                    extrapolated = true;
                 }
                 turbo_last_wait_frame_wall_time_ = now;
 
@@ -6566,6 +6602,12 @@ XrResult OpenXrLayer::PaceWaitFrame(XrSession session,
                 // EndFrame drops it unless the wait completes first.
                 frame_state->shouldRender = turbo_last_should_render_ && !poll_without_wait ? XR_TRUE : XR_FALSE;
                 turbo_max_returned_display_time_ = frame_state->predictedDisplayTime;
+                turbo_prediction_history_.AppWait(frame_state->predictedDisplayTime,
+                    extrapolated ? TurboPredictionHistory::Origin::kAsyncExtrapolated :
+                    turbo_pacing_mode_ == TurboPacingMode::kSequenced
+                        ? TurboPredictionHistory::Origin::kSequencedCache
+                        : TurboPredictionHistory::Origin::kAsyncCache,
+                    trace_id);
                 turbo_trace_.Record("predict.adjust", trace_id, extrapolated_prediction, predicted,
                                     frame_state->predictedDisplayTime - predicted);
                 turbo_trace_.Record("predict.state", trace_id, turbo_async_wait_completed_, async_handoff,
@@ -6628,6 +6670,8 @@ XrResult OpenXrLayer::PaceWaitFrame(XrSession session,
         // sane values to extrapolate from.
         turbo_last_predicted_display_time_ = frame_state->predictedDisplayTime;
         turbo_last_predicted_display_period_ = frame_state->predictedDisplayPeriod;
+        turbo_prediction_history_.NativeWait(frame_state->predictedDisplayTime,
+                                               frame_state->predictedDisplayPeriod);
         turbo_last_should_render_ = frame_state->shouldRender == XR_TRUE;
         NoteTurboShouldRenderLocked(turbo_last_should_render_);
         turbo_last_wait_frame_wall_time_ = experimental_active && turbo_experiment_.sample_at_entry
@@ -6635,6 +6679,8 @@ XrResult OpenXrLayer::PaceWaitFrame(XrSession session,
         frame_state->predictedDisplayTime =
             std::max(frame_state->predictedDisplayTime, turbo_max_returned_display_time_ + 1);
         turbo_max_returned_display_time_ = frame_state->predictedDisplayTime;
+        turbo_prediction_history_.AppWait(frame_state->predictedDisplayTime,
+                                            TurboPredictionHistory::Origin::kRuntime, trace_id);
 
         if (handshake && turbo_seq_state_ == TurboSequencedState::kEngaging) {
             turbo_seq_state_ = TurboSequencedState::kActive;
@@ -7430,6 +7476,8 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                         std::scoped_lock lock(turbo_mutex_);
                         turbo_last_predicted_display_time_ = frame_state.predictedDisplayTime;
                         turbo_last_predicted_display_period_ = frame_state.predictedDisplayPeriod;
+                        turbo_prediction_history_.NativeWait(frame_state.predictedDisplayTime,
+                                                               frame_state.predictedDisplayPeriod);
                         turbo_last_should_render_ = frame_state.shouldRender == XR_TRUE;
                         NoteTurboShouldRenderLocked(turbo_last_should_render_);
                         turbo_async_wait_completed_ = true;
@@ -8022,6 +8070,41 @@ void OpenXrLayer::NoteTurboRuntimeFailure(XrResult result, XrTime submitted_disp
     // Every failure reaches the flight recorder (which freezes its history on
     // fault events), even below the suspension threshold.
     turbo_trace_.Burst();
+    if (operation == TurboFrameOperation::kEnd && result == XR_ERROR_TIME_INVALID) {
+        std::optional<TurboPredictionHistory::Prediction> prediction;
+        XrTime native_snapshot = 0;
+        std::uint64_t native_generation_snapshot = 0;
+        bool log_prediction = false;
+        {
+            std::scoped_lock timing_lock(turbo_mutex_);
+            if (turbo_prediction_fault_log_budget_ > 0) {
+                --turbo_prediction_fault_log_budget_;
+                log_prediction = true;
+                prediction = turbo_prediction_history_.Find(submitted_display_time);
+                native_snapshot = turbo_last_predicted_display_time_;
+                native_generation_snapshot = turbo_prediction_history_.NativeGeneration();
+            }
+        }
+        if (log_prediction) {
+            std::string detail = "Turbo rejected display time: submitted=" + std::to_string(submitted_display_time) +
+                ", nativeAtFailureSnapshot=" + std::to_string(native_snapshot) +
+                ", nativeGenerationAtFailureSnapshot=" + std::to_string(native_generation_snapshot);
+            if (prediction) {
+                detail += ", appWait=" + std::to_string(prediction->app_wait) +
+                    ", origin=" + TurboPredictionHistory::Name(prediction->origin) +
+                    ", nativeAtWait=" + std::to_string(prediction->native_display_time) +
+                    ", nativeGenerationAtWait=" + std::to_string(prediction->native_generation) +
+                    ", nativePeriodAtWait=" + std::to_string(prediction->native_period);
+                turbo_trace_.Record("fault.prediction", prediction->trace_id, prediction->display_time,
+                                    prediction->native_display_time, prediction->native_generation);
+            } else {
+                detail += ", origin=not-in-recent-app-waits";
+            }
+            // This correlation is diagnostic, not a runtime validity rule:
+            // accepted app predictions can differ from the latest native wait.
+            logger_.Info(detail + ".");
+        }
+    }
     turbo_trace_.Record(fault_event, 0, result, submitted_display_time);
     // Ownership is re-established structurally by ForwardEndFrame; frame
     // forwarding never stops. Repeated failures still end Turbo's pacing.
@@ -8120,6 +8203,8 @@ XrResult OpenXrLayer::OpenTurboRuntimeFrame(XrSession session, XrTime display_ti
         std::scoped_lock lock(turbo_mutex_);
         turbo_last_predicted_display_time_ = frame_state.predictedDisplayTime;
         turbo_last_predicted_display_period_ = frame_state.predictedDisplayPeriod;
+        turbo_prediction_history_.NativeWait(frame_state.predictedDisplayTime,
+                                               frame_state.predictedDisplayPeriod);
         turbo_last_should_render_ = frame_state.shouldRender == XR_TRUE;
         NoteTurboShouldRenderLocked(turbo_last_should_render_);
     }
@@ -8728,6 +8813,8 @@ void OpenXrLayer::TurboAsyncWorkerLoop(std::uint64_t epoch) {
                 if (XR_SUCCEEDED(wait_result)) {
                     turbo_last_predicted_display_time_ = frame_state.predictedDisplayTime;
                     turbo_last_predicted_display_period_ = frame_state.predictedDisplayPeriod;
+                    turbo_prediction_history_.NativeWait(frame_state.predictedDisplayTime,
+                                                           frame_state.predictedDisplayPeriod);
                     turbo_last_should_render_ = frame_state.shouldRender == XR_TRUE;
                     NoteTurboShouldRenderLocked(turbo_last_should_render_);
                 } else {
@@ -8907,6 +8994,8 @@ void OpenXrLayer::ResetTurboFrameState(bool stop_recorder) {
     turbo_last_should_render_ = true;
     turbo_last_environment_blend_mode_ = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
     turbo_max_returned_display_time_ = 0;
+    turbo_prediction_history_.Reset();
+    turbo_prediction_fault_log_budget_ = 3;
     turbo_last_wait_frame_wall_time_.reset();
     turbo_pipelining_logged_ = false;
     turbo_fabricated_wait_log_budget_ = 0;
