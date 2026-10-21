@@ -291,6 +291,15 @@ std::string Percentiles(std::vector<double> values, double low, double high) {
     return Number(at(low), 1) + "/" + Number(at(high), 1);
 }
 
+// "lead:frames" for each lead told in a summary window, "-" when none.
+std::string LeadCountsText(const std::map<std::uint32_t, std::uint64_t>& counts) {
+    std::string text;
+    for (const auto& [lead, frames] : counts) {
+        text += (text.empty() ? "" : " ") + std::to_string(lead) + ":" + std::to_string(frames);
+    }
+    return text.empty() ? "-" : text;
+}
+
 std::optional<double> Median(std::vector<double> values) {
     if (values.empty()) {
         return std::nullopt;
@@ -705,6 +714,8 @@ void FrameGenPresenter::Stop() {
     told_lead_frames_ = 0;
     told_lead_max_ = 0;
     game_ahead_ms_.clear();
+    told_ahead_ms_.clear();
+    told_lead_counts_.clear();
     ahead_jitter_ms_.clear();
     end_slack_ms_.clear();
     last_ahead_ms_ = 0.0;
@@ -5777,6 +5788,14 @@ std::optional<XrResult> FrameGenPresenter::ThreadedWaitLocked(std::unique_lock<s
     told_lead_sum_ += frame.lead;
     ++told_lead_frames_;
     told_lead_max_ = std::max(told_lead_max_, frame.lead);
+    ++told_lead_counts_[frame.lead];
+    if (phase_wall_ != Clock::time_point{}) {
+        // As below, from the presenter thread's last paced wait however long
+        // ago (the clocks run on together), so every window has it.
+        const XrTime now_xr =
+            phase_xr_ + std::chrono::duration_cast<std::chrono::nanoseconds>(frame.wait_return - phase_wall_).count();
+        AddSample(told_ahead_ms_, static_cast<double>(frame.target_time - now_xr) / 1e6, kMaxFrameSamples);
+    }
     if (phase_wall_ != Clock::time_point{} && frame.wait_return - phase_wall_ <= std::chrono::nanoseconds(4 * period)) {
         const XrTime runtime_time =
             phase_xr_ + std::chrono::duration_cast<std::chrono::nanoseconds>(frame.wait_return - phase_wall_).count();
@@ -6213,6 +6232,8 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
                  ? Number(static_cast<double>(told_lead_sum_) / static_cast<double>(told_lead_frames_), 2)
                  : std::string("-")) +
             ", leadMax=" + (told_lead_frames_ ? std::to_string(told_lead_max_) : std::string("-")) +
+            ", leadHist=" + LeadCountsText(told_lead_counts_) +
+            ", toldAheadMs=" + Percentiles(told_ahead_ms_, 0.5, 0.9) +
             ", gameAheadMs=" + Percentiles(game_ahead_ms_, 0.5, 0.95) +
             ", aheadJitterMs=" + Percentiles(ahead_jitter_ms_, 0.5, 0.95) +
             ", endSlackMs=" + Percentiles(end_slack_ms_, 0.1, 0.5) +
@@ -6289,6 +6310,8 @@ void FrameGenPresenter::NewSummaryWindowLocked(Clock::time_point now, double sta
     told_lead_frames_ = 0;
     told_lead_max_ = 0;
     game_ahead_ms_.clear();
+    told_ahead_ms_.clear();
+    told_lead_counts_.clear();
     ahead_jitter_ms_.clear();
     end_slack_ms_.clear();
     pause_longest_ms_ = 0.0;

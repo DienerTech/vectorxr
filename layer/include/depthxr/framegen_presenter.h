@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -1689,6 +1690,11 @@ class FrameGenPresenter {
     std::uint64_t told_lead_frames_{0};   // the frames told one
     std::uint32_t told_lead_max_{0};      // the largest told
     std::vector<double> game_ahead_ms_;   // the time told past the runtime's own display time at the wait
+    // game_ahead_ms_ from the presenter thread's last paced wait at any
+    // age (measured in every window), and how many frames were told each
+    // lead.
+    std::vector<double> told_ahead_ms_;
+    std::map<std::uint32_t, std::uint64_t> told_lead_counts_;
     std::vector<double> ahead_jitter_ms_; // that against the frame told before's, unless a pause came between
     std::vector<double> end_slack_ms_;    // the time to spare when the frame ended (negative: late)
     double last_ahead_ms_{0.0};           // the frame told last's game_ahead_ms_ sample...

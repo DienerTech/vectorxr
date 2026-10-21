@@ -2129,6 +2129,15 @@ void TestHorizonTelemetryFixed() {
         Check(jitter->second <= 0.15 * period_ms,
               name + ": released on its refresh, the horizon holds from frame to frame (" + last + ")");
         Check(slack->first <= slack->second, name + ": endSlackMs is 10th percentile/median (" + last + ")");
+        // The horizon told past the refresh the presenter thread was at, in
+        // every window, and how many frames were told each lead.
+        const auto told = SummaryValues(last, "toldAheadMs");
+        Check(told && told->first > 0.0 && told->first <= told->second &&
+                  std::abs(told->first - lead_avg->first * period_ms) <= 1.5 * period_ms,
+              name + ": toldAheadMs is about the lead told (" + last + ")");
+        const std::size_t hist = last.find(", leadHist=");
+        Check(hist != std::string::npos && last.find(std::to_string(high) + ":", hist) != std::string::npos,
+              name + ": leadHist counts the leads told (" + last + ")");
     }
 }
 
