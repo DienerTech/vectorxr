@@ -2416,6 +2416,9 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
     // A bridged Vulkan session's last releases get through the bridge's
     // queue first (or are let through): Frame Generation's waits on it end.
     if (vulkan_bridge_.Active()) {
+        if (!framegen_.PresenterAbandoned()) {
+            SubmitKeptVulkanBridgeReleasesLocked();
+        }
         vulkan_bridge_.Escape();
     }
     framegen_.Stop();
@@ -2936,6 +2939,9 @@ XrResult OpenXrLayer::DestroySession(XrSession session) {
             // bridge's queue first (or are let through): Frame Generation's
             // waits on it end.
             if (vulkan_bridge_.Active()) {
+                if (!framegen_.PresenterAbandoned()) {
+                    SubmitKeptVulkanBridgeReleasesLocked();
+                }
                 vulkan_bridge_.Escape();
             }
             // Output swapchains and GPU work must go before the session does.
@@ -15042,6 +15048,19 @@ XrResult OpenXrLayer::HandOverBridgedReleasesLocked(XrSwapchain swapchain, Swapc
         }
     }
     return XR_SUCCESS;
+}
+
+void OpenXrLayer::SubmitKeptVulkanBridgeReleasesLocked() {
+    // A game that renders, releases and ends its session with no frame's
+    // end after the release still has that rendering on its queue; the
+    // bridge's barrier at the release is what End's wait covers it by
+    // (vkFreeMemory of the images it renders into). The copy into the
+    // runtime's image goes ahead too, unseen: nothing shows it now.
+    for (auto& [swapchain, info] : tracked_swapchains_) {
+        for (std::size_t kept = 0; kept < info.bridge_handovers.size(); ++kept) {
+            vulkan_bridge_.Released(swapchain);
+        }
+    }
 }
 
 XrResult OpenXrLayer::HandOverBridgedReleasesLocked(std::string_view reason, bool copy) {

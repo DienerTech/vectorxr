@@ -630,6 +630,12 @@ class OpenXrLayer {
     XrResult HandOverBridgedReleasesLocked(XrSwapchain swapchain, SwapchainInfo& info, std::string_view reason,
                                            bool copy = true);
     XrResult HandOverBridgedReleasesLocked(std::string_view reason, bool copy = true);
+    // At a session's (or an instance's) end, before the Vulkan bridge's
+    // Escape: releases no frame's end handed over still give the game's
+    // rendering into their images to the bridge (its Released, not Frame
+    // Generation's capture), so End waits for the game's queue past that
+    // rendering before it frees the images. They stay kept for the runtime.
+    void SubmitKeptVulkanBridgeReleasesLocked();
     void PollQuadViewsDiagnosticVisualizationToggle();
     void ResetQuadViewsDiagnosticVisualizationState();
     bool PollInputBindingDown(const InputBinding& binding);
