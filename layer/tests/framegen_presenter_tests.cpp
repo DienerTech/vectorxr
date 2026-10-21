@@ -10181,6 +10181,68 @@ void TestAutoProbeAllowsLatencyAndShortHitch() {
     }
 }
 
+// A probe's settle is 250 ms since b2ef6a8, tested with one late frame. A
+// switch to a lower multiplier that costs a few late frames in a row (a
+// game's frame time catching up with its new period, the runtime's
+// compositor adjusting), followed by steady on-time frames, must not fail
+// a probe the game can hold, nor double the next probe's wait: whether
+// the burst comes at the switch or as its settle ends.
+void TestAutoProbeSurvivesTransitionBurst() {
+    struct Burst {
+        std::chrono::milliseconds after; // from the switch to the first late frame
+        int frames;                      // consecutive late frames
+    };
+    for (const FrameGenSynthesisMode mode : {FrameGenSynthesisMode::kExtrapolate, FrameGenSynthesisMode::kInterpolate}) {
+        for (const Burst burst :
+             {Burst{0ms, 4}, Burst{150ms, 4}, Burst{240ms, 3}, Burst{240ms, 4}, Burst{300ms, 4}, Burst{700ms, 4}}) {
+            const std::string name = std::string("auto probe transition burst, ") +
+                                     (mode == FrameGenSynthesisMode::kExtrapolate ? "extrapolate" : "interpolate") +
+                                     ", " + std::to_string(burst.frames) + " late frames " +
+                                     std::to_string(burst.after.count()) + " ms after the switch";
+            SessionLog log("auto-burst");
+            FrameGenPresenter presenter;
+            GpuLog gpu;
+            Runtime runtime;
+            runtime.paced = true;
+            std::unique_ptr<App> owned;
+            App* app = nullptr;
+            StartJit(presenter, gpu, mode, FrameGenMultiplier::kAuto, app, runtime, owned, log.logger.get());
+            presenter.SetAutoPolicy(200ms, 500ms, 15s, 300ms);
+            RunWork(*app, 2000ms, PeriodsOfWork(kPeriod, 1.6));
+            Check(presenter.Status().multiplier == 2, name + ": starts at 2x");
+            // The production settle and confirmation; only the probe comes sooner.
+            presenter.SetAutoPolicy(2s, 500ms, 15s, 300ms);
+            RunWork(*app, 5000ms, {2ms}, [&](const XrFrameState&) { return presenter.Status().multiplier == 1; });
+            Check(presenter.Status().multiplier == 1, name + ": the probe at full rate began");
+            const auto switched = std::chrono::steady_clock::now();
+            // Late frames take 2.5 refreshes at full rate (a frame is late
+            // past 1.25); then 2 ms frames, which hold full rate easily.
+            const auto late_work = std::chrono::microseconds(kPeriod * 5 / 2 / 1000);
+            int late = 0;
+            bool failed = false;
+            while (std::chrono::steady_clock::now() - switched < 2000ms) {
+                const bool in_burst = late < burst.frames && std::chrono::steady_clock::now() - switched >= burst.after;
+                const XrFrameState state = app->Wait();
+                app->Begin();
+                SleepPrecise(std::chrono::steady_clock::now() + (in_burst ? late_work : std::chrono::microseconds(2000)));
+                app->Release();
+                Check(XR_SUCCEEDED(app->End(state.predictedDisplayTime)), name + ": end");
+                late += in_burst ? 1 : 0;
+                failed = failed || presenter.Status().multiplier != 1;
+            }
+            presenter.Stop();
+            const std::vector<std::string> steps = log.Lines("automatic multiplier");
+            std::cerr << "  " << name << ": " << (failed ? "FAILED" : "held") << " ("
+                      << (steps.empty() ? std::string("no step") : steps.back()) << ")" << std::endl;
+            Check(late == burst.frames, name + ": the burst ran");
+            Check(!failed && log.Lines("next probe in").empty(),
+                  name + ": a probe the game holds survives the burst, its backoff not doubled (" +
+                      (steps.empty() ? std::string("no step") : steps.back()) + ")");
+            Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+        }
+    }
+}
+
 // The same jump while Frame Generation presents (no game pause causes it
 // then, but a runtime may): the presenter thread's refreshes stop advancing,
 // so it stops and frames pass straight through within moments, the game never
@@ -11062,6 +11124,7 @@ int main(int argc, char** argv) {
     }
     RUN(TestAutoGpuBoundProbeReturnsPromptly);
     RUN(TestAutoProbeAllowsLatencyAndShortHitch);
+    RUN(TestAutoProbeSurvivesTransitionBurst);
     g_jit = false;
     RUN(TestClockLogPairs);
     RUN(TestSteamVrMissedRefresh);

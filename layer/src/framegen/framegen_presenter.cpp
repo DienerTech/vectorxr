@@ -2032,6 +2032,11 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
     // old multiplier is restored. Capture latency alone cannot tell whether
     // the game has the throughput for the lower multiplier.
     const auto settle = probing_ ? std::min(auto_settle_, kAutoProbeSettle) : auto_settle_;
+    // ...and is judged once it has a quarter of the configured settle's
+    // frames past that (500 ms by default), never on the first eight: a few
+    // late frames in a row as the short settle ends (a transition not quite
+    // over) made half of those late and failed a probe the game then held.
+    const bool judged = !probing_ || now - multiplier_changed_at_ >= settle + auto_settle_ / 4;
     if (last_app_end_ && now - multiplier_changed_at_ >= settle) {
         // An engaged frame should take N refreshes; a passed-through one, one.
         const double multiplier = frame && frame->engaged ? static_cast<double>(frame->multiplier) : 1.0;
@@ -2071,7 +2076,7 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
     bool late_at_ceiling = false;
     std::chrono::duration<double> left_ceiling_after{}; // for the log: a probe down from there
     // More than 30% of the last second's frames missed the cadence: step up.
-    if (recent >= 8 && recent_late * 10 > recent * 3) {
+    if (judged && recent >= 8 && recent_late * 10 > recent * 3) {
         auto_late_percent_ = recent_late * 100 / recent;
         if (!compositor_running_ && auto_multiplier_ > 1 && recent_started_late * 2 >= recent_late) {
             // Inline cycles that start late hold the game's frame thread for
