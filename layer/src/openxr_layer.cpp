@@ -3120,7 +3120,6 @@ XrResult OpenXrLayer::BeginSession(XrSession session, const XrSessionBeginInfo* 
 
 XrResult OpenXrLayer::EndSession(XrSession session) {
     logger_.Info("xrEndSession requested by application.");
-    SetInputDeviceSessionActive(false); // devices not connected retry on the reconnect timer again
     TeardownWatch watch(logger_, "xrEndSession", framegen_.TeardownWait(),
                         [this] { return framegen_.PresenterActivity(); },
                         framegen_teardowns_watched_.load(std::memory_order_acquire));
@@ -3200,6 +3199,9 @@ XrResult OpenXrLayer::EndSession(XrSession session) {
                       std::to_string(static_cast<int>(result)));
         return result;
     }
+    // Only once it ended: a refused xrEndSession (not stopping yet) leaves
+    // the game playing, its absent devices still waiting for a rescan.
+    SetInputDeviceSessionActive(false); // devices not connected retry on the reconnect timer again
 
     watch.Step("resetting Turbo's frame state");
     // A presenter thread still in the runtime is stopped or left behind at
