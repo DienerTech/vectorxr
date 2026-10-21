@@ -43,6 +43,8 @@ export function flattenMessages(messages: unknown, prefix = '', out = new Map<st
 }
 
 const catalogs = new Map<string, Map<string, string>>([[sourceLocale, flattenMessages(en)]])
+// Each catalog's _meta.json: who made it.
+const machineTranslated = new Map<string, boolean>([[sourceLocale, false]])
 
 // The language messages are shown in. Reactive: anything rendering t() follows
 // a change of language.
@@ -50,6 +52,14 @@ export const activeLocale = shallowRef<AppLocale>(sourceLocale)
 
 export function addMessages(locale: AppLocale, messages: unknown) {
   catalogs.set(locale, flattenMessages(messages))
+  const meta = (messages as { _meta?: { machineTranslated?: unknown } } | null)?._meta
+  machineTranslated.set(locale, meta?.machineTranslated !== false)
+}
+
+// Whether the language's catalog says it was made by machine (and not yet
+// reviewed), so the app can say so.
+export function isMachineTranslated(locale: AppLocale): boolean {
+  return machineTranslated.get(locale) ?? false
 }
 
 export function hasMessages(locale: AppLocale): boolean {
@@ -109,6 +119,24 @@ export function t(key: MessageKey, params?: MessageParams): string {
 export function hasMessage(key: string): key is MessageKey {
   const catalog = catalogs.get(sourceLocale)!
   return catalog.has(key) || pluralCategories.some((category) => catalog.has(`${key}_${category}`))
+}
+
+// Runs `build` with messages in `locale`, for text that must stay in one
+// language whatever the app shows (the debug package is English).
+export function withLocale<T>(locale: AppLocale, build: () => T): T {
+  const previous = activeLocale.value
+  activeLocale.value = locale
+  try {
+    return build()
+  } finally {
+    activeLocale.value = previous
+  }
+}
+
+// The app's language as the layer reads it (core.osd.appLanguage): the
+// pseudo-locale is the app's test, and the OSD draws English for it.
+export function layerLanguage(): LocaleCode {
+  return activeLocale.value === pseudoLocale ? sourceLocale : activeLocale.value
 }
 
 // A list joined the way the language joins one ("A, B and C").

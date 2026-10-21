@@ -12,6 +12,14 @@
         "title": "Theme",
         "description": "Stored on this PC only."
       },
+      "language": {
+        "title": "Language",
+        "description": "System (auto) follows the Windows display language. Stored on this PC only.",
+        "system": "System (auto)",
+        "systemResolved": "System (auto) · {language}",
+        "pseudo": "Pseudo-locale (test)",
+        "machineTranslated": "This translation was made by machine and may read awkwardly. Corrections are welcome on GitHub."
+      },
       "tray": {
         "title": "System Tray",
         "description": "Closing this window keeps the app in the notification area, with health, the VectorXR switch, log level and Export Debug. Off: closing the window quits the app. Stored on this PC only.",

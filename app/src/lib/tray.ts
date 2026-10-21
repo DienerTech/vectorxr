@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 
+import { t } from '../i18n/index.ts'
 import type { HealthSummary } from './health'
 import type { VectorXRConfig } from './model'
 
@@ -36,6 +37,41 @@ export interface TrayStatus {
   healthLabel: string
   enabled: boolean
   logLevel: 'info' | 'debug'
+  // The menu's text in the app's language (TrayLabels in src-tauri/src/tray.rs).
+  labels: TrayLabels
+}
+
+export interface TrayLabels {
+  health: string
+  healthUnavailable: string
+  logLevel: string
+  logLevelUnavailable: string
+  info: string
+  debug: string
+  tooltip: string
+  tooltipDisabled: string
+  enabled: string
+  exportDebug: string
+  open: string
+  quit: string
+}
+
+// {label} and {level} stay for the tray to fill in.
+export function trayLabels(): TrayLabels {
+  return {
+    health: t('tray.health'),
+    healthUnavailable: t('tray.healthUnavailable'),
+    logLevel: t('tray.logLevel'),
+    logLevelUnavailable: t('tray.logLevelUnavailable'),
+    info: t('tray.info'),
+    debug: t('tray.debug'),
+    tooltip: t('tray.tooltip'),
+    tooltipDisabled: t('tray.tooltipDisabled'),
+    enabled: t('tray.enabled'),
+    exportDebug: t('tray.exportDebug'),
+    open: t('tray.open'),
+    quit: t('tray.quit'),
+  }
 }
 
 export function trayStatus(saved: VectorXRConfig, health: HealthSummary, available: boolean): TrayStatus {
@@ -44,6 +80,7 @@ export function trayStatus(saved: VectorXRConfig, health: HealthSummary, availab
     healthLabel: health.label,
     enabled: saved.core.enabled,
     logLevel: saved.core.logLevel === 'debug' ? 'debug' : 'info',
+    labels: trayLabels(),
   }
 }
 

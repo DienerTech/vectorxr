@@ -1,1 +1,14 @@
-{}
+{
+  "health": "Health: {label}",
+  "healthUnavailable": "Health: settings not loaded",
+  "logLevel": "Log level: {level}",
+  "logLevelUnavailable": "Log level",
+  "info": "Info",
+  "debug": "Debug",
+  "tooltip": "VectorXR: {label}",
+  "tooltipDisabled": "VectorXR: disabled",
+  "enabled": "VectorXR enabled",
+  "exportDebug": "Export Debug...",
+  "open": "Open VectorXR",
+  "quit": "Quit VectorXR"
+}

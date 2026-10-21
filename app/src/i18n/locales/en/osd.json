@@ -137,6 +137,13 @@
     },
     "visibleOnStart": "Show automatically when enabled or a session starts"
   },
+  "language": {
+    "title": "OSD Language",
+    "description": "The language the headset display draws in. Same as app follows the language chosen in Settings.",
+    "sameAsApp": "Same as app",
+    "sameAsAppResolved": "Same as app · {language}",
+    "restartNote": "VectorXR 0.19 and older layers ignore this and draw in English."
+  },
   "colorPicker": {
     "wheelAria": "Custom accent hue and saturation wheel",
     "brightness": "Brightness",

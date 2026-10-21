@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import { t } from '../i18n/index.ts'
+import { layerLanguage, t } from '../i18n/index.ts'
 import {
   defaultConfig,
   normalizeConfig,
@@ -162,6 +162,9 @@ export async function loadConfigEnvelope(): Promise<ConfigEnvelope> {
 }
 
 export async function saveConfigEnvelope(config: VectorXRConfig): Promise<string> {
+  // The layer draws the OSD in the app's language unless core.osd.language
+  // names one; it reads the app's from appLanguage.
+  config = { ...config, core: { ...config.core, osd: { ...config.core.osd, appLanguage: layerLanguage() } as VectorXRConfig['core']['osd'] } }
   if (!tauriAvailable()) {
     window.localStorage.setItem(localKey, JSON.stringify(config))
     return './config/vectorxr.settings.json'

@@ -10,10 +10,13 @@ import ModuleBindingPage from '../ModuleBindingPage.vue'
 import BindingConflictWarnings from '../BindingConflictWarnings.vue'
 import { bindingLabel, savedBindingConflictWarnings, osdAccentColors, osdBodyRows, osdLayout, pivotSnapViewsConfigured, type OsdBodyRow, type VectorXRConfig, type OsdSettings } from '../../lib/model'
 import { loadRuntimeStatus, type RuntimeStatusSession } from '../../lib/commands'
-import { t, type MessageKey } from '../../i18n/index.ts'
+import { layerLanguage, t, type MessageKey } from '../../i18n/index.ts'
+import { supportedLocales } from '../../i18n/locales.ts'
 
 const props = defineProps<{ config: VectorXRConfig; savedConfig: VectorXRConfig }>()
 const osd = computed(() => props.config.core.osd)
+// "Same as app" names the language that means now.
+const appLanguageName = computed(() => supportedLocales.find((locale) => locale.code === layerLanguage())?.nativeName ?? layerLanguage())
 const colorExpanded = ref(false)
 const previewCompact = ref(osd.value.compact)
 const previewSettings = computed(() => ({ ...osd.value, compact: previewCompact.value }))
@@ -304,6 +307,7 @@ function preset(name: 'balanced' | 'minimal' | 'performance') {
             <div class="grid items-start gap-x-6 gap-y-3 sm:grid-cols-2">
               <label class="osd-control"><span>{{ t('osd.appearance.opacity') }} <output>{{ osd.opacity }}%</output></span><input v-model.number="osd.opacity" class="accent-depthxr-copper" :aria-label="t('osd.appearance.opacityAria')" type="range" min="30" max="100" step="1" /></label>
               <label class="osd-control" :title="t('osd.appearance.refreshRateHint')"><span>{{ t('osd.appearance.refreshRate') }}</span><select v-model.number="osd.updateHz" class="app-input manual-input-select mt-1.5 w-full rounded-[0.75rem] px-3 py-1.5 text-sm"><option v-for="hz in [1, 2, 5, 10, 20]" :key="hz" :value="hz">{{ hz === 5 ? t('osd.appearance.rateRecommended', { hz }) : `${hz} Hz` }}</option><option v-if="![1, 2, 5, 10, 20].includes(osd.updateHz)" :value="osd.updateHz">{{ osd.updateHz }} Hz</option></select></label>
+              <label class="osd-control" :title="`${t('osd.language.description')} ${t('osd.language.restartNote')}`"><span>{{ t('osd.language.title') }}</span><select v-model="osd.language" class="app-input manual-input-select mt-1.5 w-full rounded-[0.75rem] px-3 py-1.5 text-sm"><option value="app">{{ t('osd.language.sameAsAppResolved', { language: appLanguageName }) }}</option><option v-for="locale in supportedLocales" :key="locale.code" :value="locale.code" :lang="locale.code">{{ locale.nativeName }}</option></select></label>
             </div>
             <div class="flex flex-wrap gap-1.5" role="group" :aria-label="t('osd.appearance.accentAria')">
               <button v-for="(hex, color) in osdAccentColors" :key="color" type="button" class="color-choice rounded-full border px-2.5 py-1 text-xs capitalize" :aria-pressed="osd.accent === color" :style="{ '--swatch': hex }" @click="osd.accent = color; colorExpanded = false"><i />{{ t(accentNames[color]) }}</button>

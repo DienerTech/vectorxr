@@ -6,6 +6,7 @@ export type PivotStepGlideMode = 'instant' | 'glide'
 export type PivotProfileBehavior = 'enhancedMotion' | 'snapViews'
 export type QuadViewsTrackingMode = 'head' | 'eye'
 import { formatList, t } from '../i18n/index.ts'
+import { isLocaleCode, type LocaleCode } from '../i18n/locales.ts'
 import { en } from '../i18n/locales/en/index.ts'
 
 export type AppTab = 'osd' | 'home' | 'core' | 'registry' | 'layers' | 'about' | 'depthxr' | 'pivotxr' | 'quadviews' | 'turbo' | 'framegen'
@@ -135,12 +136,12 @@ export interface SoundSettings {
 // the end (the layer does the same), so new rows never reorder existing ones.
 export const osdBodyRows = ['graph', 'performance', 'turbo', 'framegen', 'pivot', 'modules'] as const
 export type OsdBodyRow = typeof osdBodyRows[number]
-export type OsdLayout = Omit<OsdSettings, 'enabled' | 'visibleOnStart' | 'toggleBindings' | 'cycleBindings' | 'customPresets'>
+export type OsdLayout = Omit<OsdSettings, 'enabled' | 'visibleOnStart' | 'toggleBindings' | 'cycleBindings' | 'customPresets' | 'language'>
 export interface OsdPreset { name: string; settings: OsdLayout }
 export const osdAccentColors = { teal: '#51ddbd', copper: '#f5ae78', blue: '#6facff', violet: '#bd9aff', rose: '#ff91b2' } as const
 
 export function osdLayout(settings: OsdSettings): OsdLayout {
-  const { enabled, visibleOnStart, toggleBindings, cycleBindings, customPresets, ...layout } = settings
+  const { enabled, visibleOnStart, toggleBindings, cycleBindings, customPresets, language, ...layout } = settings
   return { ...layout, bodyOrder: [...layout.bodyOrder] }
 }
 
@@ -184,6 +185,10 @@ export interface OsdSettings {
   accent: keyof typeof osdAccentColors | 'custom'
   customColor: string
   customPresets: OsdPreset[]
+  // The language the headset display draws in: 'app' follows the app's
+  // (saved beside it as appLanguage, saveConfigEnvelope). Not part of a
+  // layout preset.
+  language: 'app' | LocaleCode
   // Any one of a list's bindings acts (one per device, say a HOTAS's and a HOSAS's).
   toggleBindings: InputBinding[]
   cycleBindings: InputBinding[]
@@ -197,7 +202,7 @@ export function defaultOsdSettings(): OsdSettings {
     compactShowRuntime: true, compactShowClock: true, compactShowTurbo: false, compactShowPivot: false, compactShowFramegen: false,
     compactShowPerformance: false,
     compactShowBrand: true, compactShowApp: true, compactMetrics: 'all',
-    clockFormat: '24', bodyOrder: [...osdBodyRows], accent: 'teal', customColor: '#51ddbd', customPresets: [],
+    clockFormat: '24', bodyOrder: [...osdBodyRows], accent: 'teal', customColor: '#51ddbd', customPresets: [], language: 'app',
     toggleBindings: [{ type: 'keyboard', chord: ['Ctrl', 'Alt', 'F10'] }], // i18n-ignore
     cycleBindings: [{ type: 'keyboard', chord: ['Ctrl', 'Alt', 'F11'] }] } // i18n-ignore
 }
@@ -239,6 +244,7 @@ export function normalizeOsdSettings(value: unknown): OsdSettings {
     accent: typeof input.accent === 'string' && (Object.prototype.hasOwnProperty.call(osdAccentColors, input.accent) || input.accent === 'custom') ? input.accent as OsdSettings['accent'] : 'teal',
     customColor: typeof input.customColor === 'string' && /^#[0-9a-f]{6}$/i.test(input.customColor) ? input.customColor : fallback.customColor,
     clockFormat: input.clockFormat === '12' ? '12' : '24',
+    language: isLocaleCode(input.language) ? input.language : 'app',
     bodyOrder: [...new Set([...savedRowOrder(input).filter((row): row is OsdBodyRow => osdBodyRows.includes(row as OsdBodyRow)), ...osdBodyRows])],
     customPresets: Array.isArray(input.customPresets) ? input.customPresets.filter(item => isRecord(item) && typeof item.name === 'string' && item.name.trim() && isRecord(item.settings)).slice(0, 50)
       .map(item => ({ name: item.name.trim().slice(0, 60), settings: osdLayout(normalizeOsdSettings({ ...item.settings, customPresets: [] })) })) : [],

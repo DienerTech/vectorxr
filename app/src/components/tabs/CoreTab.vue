@@ -3,7 +3,9 @@ import { computed, ref } from "vue";
 
 import I18nText from "../I18nText.vue";
 import ThemeToggle from "../ThemeToggle.vue";
-import { t } from "../../i18n/index.ts";
+import { activeLocale, isMachineTranslated, t } from "../../i18n/index.ts";
+import { resolveLanguagePreference, type LanguagePreference } from "../../i18n/preference.ts";
+import { pseudoLocale, sourceLocale, supportedLocales } from "../../i18n/locales.ts";
 import { playTestSound, requestInputRescan } from "../../lib/commands";
 import { errorText } from "../../lib/errors";
 import type { VectorXRConfig } from "../../lib/model";
@@ -14,6 +16,7 @@ const props = defineProps<{
   path: string;
   logPath?: string;
   themePreference: ThemePreference;
+  languagePreference: LanguagePreference;
   trayEnabled: boolean;
   settingsActionsDisabled: boolean;
 }>();
@@ -25,6 +28,7 @@ defineEmits<{
   exportConfig: [];
   resetConfig: [];
   "update:themePreference": [value: ThemePreference];
+  "update:languagePreference": [value: LanguagePreference];
   "update:trayEnabled": [value: boolean];
 }>();
 
@@ -47,6 +51,17 @@ async function rescanInputs() {
     rescanning.value = false;
   }
 }
+
+// One select: System (auto), then every language by its own name. The
+// pseudo-locale is for development builds.
+const showPseudoLocale = import.meta.env.DEV;
+const systemLanguageName = computed(() => {
+  const code = resolveLanguagePreference("system");
+  return supportedLocales.find((locale) => locale.code === code)?.nativeName ?? code;
+});
+const machineTranslated = computed(
+  () => activeLocale.value !== sourceLocale && activeLocale.value !== pseudoLocale && isMachineTranslated(activeLocale.value),
+);
 
 const logPathShort = computed(() => {
   if (!props.logPath) return null;
@@ -102,6 +117,27 @@ async function previewSoundVolume() {
               :model-value="themePreference"
               @update:model-value="$emit('update:themePreference', $event)"
             />
+          </div>
+          <div class="flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border p-4 surface-panel-soft">
+            <div class="min-w-0 max-w-2xl">
+              <p class="text-sm font-semibold tracking-tight" style="color: var(--app-text)">{{ t("settings.core.general.language.title") }}</p>
+              <p class="mt-0.5 text-xs leading-5 text-muted">{{ t("settings.core.general.language.description") }}</p>
+              <p v-if="machineTranslated" class="mt-1 text-xs leading-5 text-muted">
+                {{ t("settings.core.general.language.machineTranslated") }}
+              </p>
+            </div>
+            <select
+              :value="languagePreference"
+              :aria-label="t('settings.core.general.language.title')"
+              class="app-input manual-input-select h-10 min-w-[14rem] rounded-[0.75rem] px-3 py-2 text-sm"
+              @change="$emit('update:languagePreference', ($event.target as HTMLSelectElement).value as LanguagePreference)"
+            >
+              <option value="system">{{ t("settings.core.general.language.systemResolved", { language: systemLanguageName }) }}</option>
+              <option v-for="locale in supportedLocales" :key="locale.code" :value="locale.code" :lang="locale.code">
+                {{ locale.nativeName }}
+              </option>
+              <option v-if="showPseudoLocale" :value="pseudoLocale">{{ t("settings.core.general.language.pseudo") }}</option>
+            </select>
           </div>
           <div class="flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border p-4 surface-panel-soft">
             <div class="min-w-0 max-w-2xl">

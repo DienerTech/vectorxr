@@ -23,7 +23,9 @@ import { exportConfigFile, loadDebugSources, loadLogSnapshot, loadOpenXrLayers, 
 import { createDebugPackage, saveDebugPackage } from './lib/debugPackage'
 import { errorText } from './lib/errors'
 import { buildHealthSummary, type HealthSummary } from './lib/health'
-import { activeLocale, t } from './i18n/index.ts'
+import { t, withLocale } from './i18n/index.ts'
+import { applyLanguagePreference } from './i18n/load.ts'
+import { loadLanguagePreference, storeLanguagePreference, type LanguagePreference } from './i18n/preference.ts'
 import { sourceLocale } from './i18n/locales.ts'
 import { moduleStateForApplication, normalizeConfig, type ModuleId, type VectorXRConfig } from './lib/model'
 import { patchNotes } from './lib/patchNotes'
@@ -55,6 +57,8 @@ const patchNotesOpen = ref(false)
 const logViewerLoading = ref(false)
 const logSnapshot = ref<LogSnapshot | null>(null)
 const themePreference = ref<ThemePreference>(loadThemePreference())
+// main.ts applied it (or the installer's language) before the first render.
+const languagePreference = ref<LanguagePreference>(loadLanguagePreference() ?? 'system')
 const trayEnabled = ref<boolean>(loadTrayEnabled())
 const importFileInput = ref<HTMLInputElement | null>(null)
 const importPreviewOpen = ref(false)
@@ -88,13 +92,7 @@ const healthSummary = computed(buildEditorHealthSummary)
 // person reading a tester's report can follow it. t() is synchronous, so
 // switching the locale around the build is never visible on screen.
 function englishHealthSummary(): HealthSummary {
-  const shown = activeLocale.value
-  activeLocale.value = sourceLocale
-  try {
-    return buildEditorHealthSummary()
-  } finally {
-    activeLocale.value = shown
-  }
+  return withLocale(sourceLocale, buildEditorHealthSummary)
 }
 
 // The tray shows what is saved, which is what the layer uses.
@@ -198,6 +196,17 @@ const tabs = computed(() => [
     enhancementActive: enhancementActive('depthxr'),
   },
 ])
+
+// A new language shows at once. The OSD follows the app's unless it names
+// its own: the saved settings carry the app's language (saveConfigEnvelope),
+// so save them again for the layer to pick it up.
+watch(languagePreference, async (preference) => {
+  storeLanguagePreference(preference)
+  await applyLanguagePreference(preference)
+  if (store.state.originalConfig.core.osd.language === 'app' && !store.state.loading && !store.state.loadError && store.state.path) {
+    await store.saveSetting(() => {}, t('validation.store.configSaved'))
+  }
+})
 
 watch(
   themePreference,
@@ -553,6 +562,7 @@ async function confirmResetConfig() {
           :path="store.state.path"
           :log-path="logSnapshot?.activePath"
           :theme-preference="themePreference"
+          :language-preference="languagePreference"
           :tray-enabled="trayEnabled"
           :settings-actions-disabled="store.state.loading || store.state.saving"
           @view-logs="openLogs"
@@ -561,6 +571,7 @@ async function confirmResetConfig() {
           @export-config="exportConfig"
           @reset-config="confirmResetConfig"
           @update:theme-preference="themePreference = $event"
+          @update:language-preference="languagePreference = $event"
           @update:tray-enabled="trayEnabled = $event"
         />
         <OsdTab v-else-if="store.state.activeTab === 'osd'" :config="store.state.config" :saved-config="store.state.originalConfig" />
