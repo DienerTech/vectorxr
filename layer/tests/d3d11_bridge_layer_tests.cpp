@@ -3085,6 +3085,37 @@ void TestInstanceExtensions(Game& game) {
           "the log names the layer below and where OpenXR Toolkit is");
     EndCase(game);
 
+    // Two layers down, behind a layer that forwards the probe to it
+    // (OpenKneeboard above OpenXR Toolkit): never asked either.
+    BeginCase("instance-template-layer-two-below", game);
+    depthxr::XrApiLayerNextInfo kneeboard = toolkit;
+    std::strncpy(kneeboard.layerName, "XR_APILAYER_FREDEMMOTT_OpenKneeboard", XR_MAX_API_LAYER_NAME_SIZE - 1);
+    kneeboard.next = &toolkit;
+    toolkit.next = nullptr;
+    g_layer_below = &kneeboard;
+    result = InstanceAttempts({kD3D11Extension}, attempts, log);
+    g_layer_below = nullptr;
+    Check(result == XR_SUCCESS && g_runtime.pre_instance_queries == 0 && attempts.size() == 1 &&
+              attempts[0] == Names{kD3D11Extension, kD3D12Extension},
+          "nothing asked through a forwarding layer above a template layer, the extension added: " +
+              Text(attempts));
+    Check(Contains(log, "OpenXR API layers below VectorXR: [XR_APILAYER_FREDEMMOTT_OpenKneeboard "
+                        "XR_APILAYER_MBUCCHIA_toolkit]") &&
+              Contains(log, "OpenXR Toolkit is loaded below VectorXR."),
+          "the log names both layers below and where OpenXR Toolkit is: " + log);
+    EndCase(game);
+
+    // A forwarding layer alone is asked as before.
+    BeginCase("instance-forwarding-layer-below", game);
+    kneeboard.next = nullptr;
+    g_layer_below = &kneeboard;
+    result = InstanceAttempts({kD3D11Extension}, attempts, log);
+    g_layer_below = nullptr;
+    Check(result == XR_SUCCESS && g_runtime.pre_instance_queries > 0 && attempts.size() == 1 &&
+              attempts[0] == Names{kD3D11Extension, kD3D12Extension},
+          "the runtime's extensions are asked through a layer not made from the template: " + Text(attempts));
+    EndCase(game);
+
     BeginCase("instance-bridge-off", game);
     SetEnv("VECTORXR_D3D11_BRIDGE", "off");
     result = InstanceAttempts({kD3D11Extension}, attempts, log);
