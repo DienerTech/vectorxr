@@ -1,0 +1,40 @@
+{
+  "eyebrow": "关于",
+  "tagline": "OpenXR 增强功能，按游戏单独调校。",
+  "intro": "VectorXR 是一个 OpenXR 增强平台，逐个游戏重塑头显的渲染与追踪方式。借助动态注视点渲染找回帧率，放大头部转动，让您无需大幅扭头也能查看身后，并加深立体分离，获得更强的尺度感与临场感。",
+  "profiles": "OpenXR 层管理和按应用程序的配置文件让每个游戏都完全按您喜欢的方式配置，一切都在一处完成。",
+  "firstAndOnly": "{highlight}让增强头部转动与四视图注视点渲染协同工作的 OpenXR 解决方案——注视点区域会跟随您转动后的视角，而不是被留在原处。",
+  "firstAndOnlyHighlight": "首个也是唯一一个",
+  "developedBy": "由 DienerTech LLC 独立开发。",
+  "copyright": "(c) 2026 DienerTech LLC。根据 Mozilla Public License 2.0 发布。",
+  "support": {
+    "eyebrow": "支持开发",
+    "title": "支持 VectorXR",
+    "body": "通过 Ko-fi 打赏有助于资助测试硬件、发布工作以及 OpenXR 工具的持续完善。",
+    "button": "在 Ko-fi 上支持"
+  },
+  "patchNotes": {
+    "eyebrow": "最新补丁说明",
+    "readFull": "阅读完整补丁说明"
+  },
+  "updates": {
+    "eyebrow": "更新",
+    "title": "发布状态",
+    "published": "发布于 {date}",
+    "check": "检查",
+    "release": "版本",
+    "summary": {
+      "checking": "正在检查 GitHub 版本...",
+      "available": "VectorXR {tag} 已可用。",
+      "upToDate": "您使用的是最新发布版本 {tag}。",
+      "unavailable": "目前还没有已发布的 GitHub 版本。",
+      "idle": "在 GitHub 上检查最新发布的 VectorXR 版本。"
+    },
+    "chip": {
+      "checking": "正在检查",
+      "available": "更新",
+      "upToDate": "最新",
+      "error": "重试"
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "configRead": "Não foi possível ler {path}: {detail}",
+  "configParse": "Não foi possível analisar {path}: {detail}",
+  "configReplace": "Não foi possível substituir {path}: {detail}",
+  "directoryMissing": "A pasta não existe: {path}",
+  "soundMissing": "Arquivo de som não encontrado: {path}",
+  "sessionInactive": "A sessão OpenXR não está mais ativa",
+  "diagnosticUnavailable": "A visualização de diagnóstico não está disponível para esta sessão OpenXR",
+  "layerNotRegistered": "O manifesto da camada não está mais registrado nessa fatia OpenXR",
+  "layerConflict": "Outro registro do VectorXR já está ativado ({slice}: {path}). Aplicativos OpenXR travam quando duas cópias do VectorXR são carregadas, então desative essa primeiro.",
+  "elevationRequired": "Esta alteração de camada OpenXR exige elevação. Reinicie o VectorXR como administrador e tente de novo.",
+  "elevationCanceled": "A alteração de camada OpenXR foi cancelada no prompt de elevação ou o auxiliar elevado não foi iniciado."
+}

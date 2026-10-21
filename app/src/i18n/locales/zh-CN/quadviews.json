@@ -1,0 +1,320 @@
+{
+  "tab": {
+    "intro": "为已经请求 OpenXR 四视图的游戏配置注视点渲染和外围渲染。启用此模块不会为普通立体游戏添加四视图支持。",
+    "varjoCompatibility": "Varjo 兼容性",
+    "setupGuide": {
+      "title": "设置指南",
+      "summary": "推荐的 DCS 设置和兼容游戏",
+      "heading": "推荐的 DCS 设置",
+      "gameLabel": "游戏：",
+      "game": "{label}开启 {useQuadView}；如需注视追踪，还要开启 {useEyeTracking}。",
+      "useQuadView": "Use Quad View",
+      "useEyeTracking": "Use Eye Tracking",
+      "providerLabel": "提供方：",
+      "provider": "{label}启用 VectorXR 层和 Quadviews 配置文件，然后禁用 {layerName}。在 Pimax 上，还要关闭 Native Pimax Quad Views。Varjo 原生 Quadviews 仍由运行时驱动。",
+      "applyLabel": "应用：",
+      "apply": "{label}更改运行时、层或游戏内 VR 设置后，请保存配置文件并重新启动 DCS。",
+      "titles": "DCS 是主要测试过的游戏。可能可用但尚未确认的 D3D11 候选游戏包括 Pavlov VR、VAIL VR、The 7th Guest VR 和 Kayak VR: Mirage。每个游戏都必须自行请求四视图。",
+      "pixelEstimates": "像素估算仅比较应用程序的视图渲染；运行时和 VectorXR 合成还会产生额外的 GPU 开销。"
+    },
+    "restartNoteLabel": "重新启动以应用：",
+    "restartNote": "{label}标记的字段以及 Quadviews 的开启/关闭会在当前 OpenXR 应用程序退出后完全生效。未标记的控件会在游玩期间更新。",
+    "diagnostics": {
+      "eyebrow": "头显内诊断",
+      "intro": "在调校 Quadviews 时查看渲染区域、注视点对齐、注视过滤和追踪可用性。",
+      "howToRead": "如何解读叠加层",
+      "sessionControl": "会话控制",
+      "shownIn": "在 {application} 中显示",
+      "hiddenIn": "在 {application} 中隐藏",
+      "unavailable": "在活动的 OpenXR 会话中不可用",
+      "noSession": "没有活动的合成 Quadviews 会话",
+      "applying": "正在应用...",
+      "hide": "隐藏可视化",
+      "show": "显示可视化",
+      "shortcutHeading": "头显内快捷方式",
+      "shortcutHint": "可选。每个 OpenXR 会话开始时可视化均为隐藏状态。",
+      "guideHint": "第一次使用可视化？交互式指南会解释每种形状，并将常见症状对应到控制它们的设置。",
+      "readStatusFailed": "无法读取运行时状态",
+      "controlFailed": "无法控制可视化",
+      "notAcknowledged": "OpenXR 会话未确认控制请求"
+    },
+    "binding": {
+      "label": "诊断可视化切换",
+      "description": "在游戏中显示或隐藏 Quadviews 校准视图。每个会话开始时它都是隐藏的，并且仅在 VectorXR 通过其 D3D11 合成器合成 Quadviews 时可用。",
+      "noneText": "未分配头显内快捷方式。您仍然可以在 Quadviews 页面上控制可视化。"
+    },
+    "defaultProfile": {
+      "heading": "默认配置文件",
+      "appliesTo": "适用于没有已启用的自定义配置文件的应用程序",
+      "toggleOn": "默认配置文件已开启",
+      "toggleOff": "默认配置文件已关闭",
+      "restartTitle": "Quadviews 的启用/禁用更改会在正在运行的 OpenXR 应用程序退出后生效。",
+      "offNote": "关闭，除非某个已启用的自定义配置文件将其开启。下方的自定义配置文件仍会应用于其应用程序。"
+    },
+    "launchStateNote": "已立即保存，但正在运行的 OpenXR 应用程序会保持其启动时的 Quadviews 状态，直到退出。",
+    "customProfiles": {
+      "heading": "自定义配置文件",
+      "intro": "按应用程序覆盖 Quadviews 设置。以第一个匹配的已启用配置文件为准。",
+      "add": "添加配置文件",
+      "empty": "还没有自定义配置文件。添加一个配置文件即可为特定应用程序覆盖四视图数值。",
+      "alreadyTargeted": "{application} 已被配置文件 {number} 作为目标。以第一个活动的配置文件为准。"
+    },
+    "budget": {
+      "estimate": "估计应用渲染像素为 {percent}%",
+      "light": "轻",
+      "moderate": "中等",
+      "heavy": "重",
+      "detrimental": "⚠ 有害"
+    },
+    "varjo": {
+      "title": "Varjo 兼容 Quadviews",
+      "biPanel": "Varjo 头显采用双面板设计：每只眼睛有一块宽广、密度较低的环境显示屏和一块小巧、高密度的焦点显示屏。VectorXR 的 Varjo 兼容四视图会保留头显所需的四个视图层（两个外围、两个焦点），从而直接驱动物理焦点面板。因此，Varjo 运行时会接管视图几何，部分 Quadviews 设置将被忽略。",
+      "notesIntro": "VectorXR Quadviews 与 Varjo 运行时兼容性说明：",
+      "stillApplies": "VectorXR 仍然生效",
+      "handledByRuntime": "由 Varjo 运行时处理",
+      "focusScale": "焦点缩放",
+      "peripheralScale": "外围缩放",
+      "focusSharpness": "焦点锐度",
+      "focusSizeTransition": "焦点大小和过渡厚度",
+      "offsets": "水平和垂直偏移",
+      "smoothingDeadzone": "注视平滑和死区",
+      "diagnosticVisualization": "诊断可视化",
+      "emulation": "在不通过双面板显示屏提供物理四视图支持的头显上（例如 Quest Pro、Pimax Crystal），VectorXR Quadviews 使用标准模拟模式，所有设置均会生效。这些兼容性说明仅适用于 Varjo 运行时。",
+      "diagnosticUnsupportedLead": "目前 Varjo 头显不支持诊断可视化。",
+      "diagnosticUnsupported": "{lead} Varjo 的运行时负责原生四视图合成，因此 VectorXR 的合成 D3D11 合成器不会在那里运行。"
+    }
+  },
+  "fields": {
+    "preset": {
+      "heading": "Vector 预设",
+      "restartTitle": "预设中包含需要重新启动游戏才能完全生效的设置。",
+      "intro": "一个可靠的起点；追踪和对齐仍由您决定。",
+      "buttonTitle": "预设会更改焦点尺寸和分辨率，因此需要重新启动游戏才能完全生效。",
+      "performance": "性能",
+      "balanced": "平衡",
+      "quality": "质量"
+    },
+    "focusWindow": "焦点窗口",
+    "focusWidth": {
+      "label": "焦点宽度",
+      "restart": "焦点窗口会实时移动，但在重新启动之前，DCS 会保持现有的纹理宽度和像素工作量。"
+    },
+    "focusHeight": {
+      "label": "焦点高度",
+      "restart": "焦点窗口会实时移动，但在重新启动之前，DCS 会保持现有的纹理高度和像素工作量。"
+    },
+    "percentOfFov": "% 视场角",
+    "horizontalOffset": {
+      "label": "水平偏移",
+      "help": "以度为单位向左或向右移动焦点区域。仅当清晰区域感觉偏离中心时使用。"
+    },
+    "verticalOffset": {
+      "label": "垂直偏移",
+      "help": "以度为单位向上或向下移动焦点区域。当头显的注视中心感觉在垂直方向上有偏差时很有用。"
+    },
+    "resolution": "分辨率",
+    "focusResolution": {
+      "label": "焦点分辨率",
+      "restart": "需要重新启动：DCS 会保留其启动时的焦点纹理。超过 100% 可能会调整 VectorXR 输出画布的大小，并可能导致暂时的帧率卡顿。",
+      "warning": "VectorXR 的全视图输出图像会随焦点分辨率增大：{percent}% 在 GPU 显存和合成中大约需要头显像素的 {factor}×，这还不包括上方显示的应用渲染开销。"
+    },
+    "percentOfHmd": "% HMD 分辨率",
+    "peripheralResolution": {
+      "label": "外围分辨率",
+      "restart": "需要重新启动：DCS 会保留其启动时的外围纹理和像素工作量。"
+    },
+    "foveateSharpness": {
+      "label": "注视点锐度",
+      "help": "对高细节焦点图像额外锐化。0 为关闭；值越高越清晰，但可能产生光晕。"
+    },
+    "transitionThickness": {
+      "label": "过渡厚度",
+      "help": "控制焦点图像与外围图像之间混合边缘的宽度。值越高越能隐藏边界，但焦点窗口中会有更多区域变得柔和。"
+    },
+    "percentOfFocusWindow": "% 焦点窗口",
+    "tracking": "追踪",
+    "mode": {
+      "label": "模式",
+      "restart": "如果游戏以头部追踪模式启动，切换到眼动追踪需要重新启动游戏。",
+      "help": "选择焦点区域在眼动追踪可用时是跟随头部方向还是眼睛注视。",
+      "head": "头部追踪",
+      "eye": "眼动追踪"
+    },
+    "eyeTrackingCorrection": {
+      "label": "眼动追踪校正",
+      "help": "除非眼动追踪感觉方向相反，否则请使用“默认”；如果相反，请尝试“仅翻转 Z”。",
+      "default": "默认",
+      "flipZ": "仅翻转 Z"
+    },
+    "smoothing": {
+      "label": "平滑",
+      "help": "使焦点区域的移动更柔和。0 为即时；值越高抖动越少，但延迟越大。"
+    },
+    "deadzone": {
+      "label": "死区",
+      "help": "焦点区域移动之前被忽略的微小注视移动。有助于减少中心附近的闪烁。"
+    }
+  },
+  "dimensions": {
+    "peripheralLeft": "外围 左",
+    "peripheralRight": "外围 右",
+    "focusLeft": "焦点 左",
+    "focusRight": "焦点 右",
+    "waiting": "Quadviews 游戏运行时，视图尺寸会显示在这里。",
+    "view": "{name}：{width} × {height}（纹理 {allocatedWidth} × {allocatedHeight}）",
+    "footer": "提交的视图尺寸，每秒刷新一次。已保存的分辨率更改可能需要重新启动游戏。",
+    "labelNone": "尺寸 —",
+    "labelLive": "尺寸 · 实时",
+    "labelLast": "尺寸 · 上次"
+  },
+  "guide": {
+    "eyebrow": "交互式现场指南",
+    "title": "解读 Quadviews 叠加层",
+    "intro": "先了解画面，然后更改与您实际所见相符的设置。",
+    "closeLabel": "关闭叠加层指南",
+    "stepsLabel": "叠加层指南步骤",
+    "steps": {
+      "zones": {
+        "title": "解读区域",
+        "summary": "查看每个图像所覆盖的区域。"
+      },
+      "alignment": {
+        "title": "检查对齐",
+        "summary": "比较中心、偏移和注视。"
+      },
+      "motion": {
+        "title": "判断追踪",
+        "summary": "发现抖动、延迟和追踪丢失。"
+      },
+      "troubleshoot": {
+        "title": "选择修复方法",
+        "summary": "将症状对应到正确的控制。"
+      }
+    },
+    "illustrationLabel": "Quadviews 诊断叠加层的交互式示意图",
+    "svg": {
+      "peripheral": "蓝色 - 外围环境",
+      "blend": "琥珀色 - 混合",
+      "focus": "焦点图像",
+      "headCenter": "头部中心",
+      "configuredOffset": "配置的偏移",
+      "raw": "原始",
+      "smoothed": "平滑后",
+      "dragHint": "单击或拖动以移动原始注视点",
+      "trackingUnavailable": "追踪不可用 - 回退模式已启用"
+    },
+    "illustrative": "示意图 - 并非逐像素的头显画面截图",
+    "demo": {
+      "focusSize": "焦点大小",
+      "transitionThickness": "过渡厚度",
+      "horizontalOffset": "水平偏移",
+      "verticalOffset": "垂直偏移",
+      "smoothing": "平滑",
+      "degrees": "{value} 度",
+      "eyeTrackingAvailable": "眼动追踪：可用",
+      "eyeTrackingLost": "眼动追踪：丢失",
+      "reset": "重置示意图"
+    },
+    "settingNames": {
+      "peripheralResolution": "外围分辨率",
+      "transitionThickness": "过渡厚度",
+      "focusResolution": "焦点分辨率",
+      "focusWidthHeight": "焦点宽度 / 高度",
+      "referenceOnly": "仅供参考",
+      "horizontalVerticalOffset": "水平 / 垂直偏移",
+      "horizontalOffset": "水平偏移",
+      "verticalOffset": "垂直偏移",
+      "trackingSource": "追踪来源",
+      "smoothingDeadzone": "平滑 / 死区",
+      "smoothing": "平滑",
+      "deadzone": "死区",
+      "trackingMode": "追踪模式",
+      "gameEyeTracking": "游戏眼动追踪",
+      "headsetRuntime": "头显运行时"
+    },
+    "cards": {
+      "peripheral": {
+        "title": "外围区域",
+        "body": "蓝色覆盖环境图像。降低其分辨率通常能节省最多的像素，而不会缩小您的清晰区域。"
+      },
+      "transition": {
+        "title": "过渡带",
+        "body": "琥珀色是图像之间的混合区域。加宽可以隐藏接缝；过宽则会让边缘感觉模糊。"
+      },
+      "focusBoundary": {
+        "title": "焦点边界",
+        "body": "绿色轮廓表示焦点窗口的大小。焦点分辨率改变的是细节密度，而不是这个轮廓。"
+      },
+      "headCenter": {
+        "title": "头部中心",
+        "body": "白色十字是头显的正前方。它为其他所有标记提供稳定的参考。"
+      },
+      "configuredOffset": {
+        "title": "配置的偏移",
+        "body": "洋红色的 L 和圆环显示您相对于头部中心有意设置的校正。"
+      },
+      "rawGaze": {
+        "title": "原始注视",
+        "body": "青色是即时的眼动追踪样本。单击示意图即可移动它。"
+      },
+      "smoothedGaze": {
+        "title": "平滑后的注视",
+        "body": "黄色是经过过滤的位置，在加上配置的偏移之前驱动焦点窗口。"
+      },
+      "greenOutline": {
+        "title": "绿色轮廓",
+        "body": "眼动追踪可用。比较青色和黄色即可判断过滤效果。"
+      },
+      "redOutline": {
+        "title": "红色轮廓",
+        "body": "眼动来源不可用。VectorXR 正在使用其回退焦点行为。"
+      }
+    },
+    "goodTracking": {
+      "heading": "良好的追踪是什么样子",
+      "cyan": "青色会立即响应您的眼睛。",
+      "yellow": "黄色紧密跟随，且不会持续抖动。",
+      "window": "焦点窗口停留在您想看的细节上。"
+    },
+    "symptoms": {
+      "boundary": {
+        "label": "可见接缝",
+        "title": "焦点边缘很容易看到",
+        "body": "稍微增加过渡厚度。如果琥珀色带大面积变得模糊，请再将其调小，并缩小焦点与外围之间的分辨率差异。"
+      },
+      "offset": {
+        "label": "中心错误",
+        "title": "清晰区域始终存在偏差",
+        "body": "首先确认青色和黄色注视标记落在您注视的位置。如果是这样，请使用水平或垂直偏移来校正这种一致的偏差。不要用偏移来掩盖注视延迟。"
+      },
+      "jitter": {
+        "label": "抖动",
+        "title": "焦点窗口在您的注视点附近抖动",
+        "body": "逐步提高平滑。较小的死区可以抑制中心附近的微小眼动，但过大会在焦点最终移动时产生粘滞的跳动。"
+      },
+      "lag": {
+        "label": "延迟过大",
+        "title": "黄色标记落后青色太多",
+        "body": "降低平滑。如果移动开始得晚然后跳动，也请降低死区。使用仍能让焦点窗口在视觉上保持平稳的最小值。"
+      },
+      "lost": {
+        "label": "红色轮廓",
+        "title": "眼动追踪不可用",
+        "body": "红色焦点轮廓是状态警告，而不是颜色偏好。请确认已在游戏和头显运行时中启用眼动追踪。VectorXR 会回退，而不是跟随眼睛注视。"
+      },
+      "performance": {
+        "label": "需要更多 FPS",
+        "title": "在最不重要的地方减少像素",
+        "body": "先降低外围分辨率。如有需要，再降低焦点宽度或高度。焦点分辨率改变的是窗口内的密度 - 它不会改变绿色轮廓的大小。"
+      }
+    },
+    "ifYouSee": "如果您看到这种情况",
+    "tuningOrder": {
+      "heading": "推荐的调校顺序：",
+      "tracking": "确认追踪可用。",
+      "alignment": "校正一致的对齐偏差。",
+      "smoothing": "在平滑与延迟之间取得平衡。",
+      "quality": "然后调校画质和像素开销。"
+    }
+  }
+}

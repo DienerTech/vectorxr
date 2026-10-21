@@ -1,0 +1,239 @@
+{
+  "title": "屏幕显示",
+  "liveAfterSave": "保存后实时生效",
+  "intro": "VR 中跟随头部的性能面板。支持 Direct3D 11、Direct3D 12 和 Vulkan，可用于立体或 Quadviews 渲染。",
+  "toggleOn": "OSD 已开启",
+  "toggleOff": "OSD 已关闭",
+  "runtimeStatusUnavailable": "运行时状态暂时不可用。",
+  "controls": {
+    "heading": "头显内控制",
+    "noSession": "没有正在运行的 VR 应用程序",
+    "needsUpdatedLayer": "需要更新后的 VectorXR 层",
+    "toggleHeading": "显示/隐藏",
+    "cycleHeading": "紧凑/展开",
+    "toggleBindingLabel": "显示/隐藏屏幕显示",
+    "cycleBindingLabel": "切换紧凑/展开",
+    "bindingDescription": "在 VR 应用程序中生效。可分配键盘组合键、摇杆按钮或 HAT 方向。保存后实时生效。"
+  },
+  "explainer": {
+    "summary": "哪些设置实时生效？我测量的是什么？",
+    "live": "此页面上的每项设置都会在保存后生效，包括在正在运行的游戏中启用 OSD。绑定会立即更改当前会话的可见性和布局。下一个会话将使用您保存的起始布局和可见性。",
+    "measuring": "叠加层测量的是应用程序在最近 120 帧中相邻两次 xrEndFrame 调用之间的间隔。P95 是第 95 百分位的间隔；帧时间越低、越稳定越好。这些数值并不测量 GPU 工作量、重投影或合成器帧率。Turbo 可能使应用程序的节奏与头显的刷新率不同。开启 Frame Generation 时，FPS 旁边的“FG 开启”显示头显实际获得的每秒帧数（包括生成的帧）。",
+    "headroom": "性能余量将游戏每帧的 CPU 时间（从其 xrWaitFrame 返回到其 xrEndFrame）与帧预算进行比较：帧预算为头显的刷新周期；当 Frame Generation 正在生成帧时，则为游戏自身的目标（90 Hz 和 2x 时为 45 fps）。GPU 余量为 100% 减去 Windows GPU 计数器报告的整个 GPU 3D 利用率，其中包括运行时的合成器和其他应用；“游戏”是游戏自身所占的份额，“线程”表示游戏中负责结束帧的线程有多忙碌。当游戏在结束上一帧之前就等待下一帧（OpenComposite 就是这样）或由 Turbo 控制其节奏时，CPU 时间会被隐藏。VRAM 是游戏的显存使用量以及 Windows 分配给它的预算，包括 Frame Generation 自身的图像。“CPU 瓶颈”或“GPU 瓶颈”仅在情况明确时显示；使用 Frame Generation 时，则表示其迟到的帧是由哪一方造成的。",
+    "turbo": "可以在保存后于正在运行的游戏中启用 Turbo，游戏内绑定可将其关闭/开启；已在 DCS 中验证过实时启用和 Async 切换。实验性时序控制以及 Quadviews 的启用/禁用更改仍需重新启动应用程序；展开的 OSD 会显示这些待处理的更改。开启 Frame Generation 也需要重新启动；关闭则立即生效。其他 VectorXR 控制保持其各自设置页面上所述的行为。",
+    "panel": "这是一个信息面板，提供游戏内的可见性和布局控制。请在桌面应用中编辑设置。不支持 OpenGL。没有空闲合成层的运行时无法显示该面板。"
+  },
+  "layout": {
+    "compact": "紧凑",
+    "expanded": "展开",
+    "editAria": "要预览和编辑的布局",
+    "previewAria": "要预览的布局",
+    "starting": "起始布局",
+    "startingHint": "每个会话中 OSD 都会以此布局打开。头显内绑定可在游玩期间切换布局。",
+    "startInCompact": "以紧凑布局启动",
+    "startInExpanded": "以展开布局启动"
+  },
+  "previewScale": {
+    "aria": "预览缩放",
+    "legible": "清晰",
+    "placement": "位置"
+  },
+  "popOut": "弹出",
+  "focusWindow": "聚焦窗口",
+  "previewOpenElsewhere": "预览已在单独的窗口中打开。",
+  "contents": {
+    "compactHeading": "紧凑内容",
+    "expandedHeading": "展开内容",
+    "justFps": "仅 FPS",
+    "justFpsHint": "清除标题行和状态行，形成极小的显示。“大小”仍控制文字大小。",
+    "alwaysShown": "始终显示 FPS、平均值和 P95",
+    "performance": "性能",
+    "metrics": {
+      "all": "FPS + 平均帧时间",
+      "fps": "仅 FPS",
+      "frameTime": "仅平均帧时间",
+      "none": "隐藏"
+    },
+    "headerLegend": "标题 · 全部关闭即可移除",
+    "statusLegend": "状态",
+    "nothingSelected": "未选择任何内容。在您选择一个值之前，紧凑布局保持隐藏。",
+    "rowsLegend": "行 · 拖动或使用箭头重新排序",
+    "dragRow": "拖动 {row} 以重新排序",
+    "dragHint": "拖动以重新排序；使用箭头键移动",
+    "moveUp": "上移 {row}",
+    "moveDown": "下移 {row}",
+    "framegenFps": "在 FPS 旁显示 Frame Generation",
+    "bothLayouts": "（两种布局）",
+    "framegenFpsHint": "在开启了 Frame Generation 的游戏中：显示“FG 开启”及头显显示的每秒帧数，或显示待机、等待、已暂停、关闭或不可用。",
+    "clockFormat": "时钟格式（两种布局）",
+    "clockFormatAria": "时钟格式",
+    "clock12": "12 小时制 · 下午 8:42",
+    "clock24": "24 小时制 · 20:42"
+  },
+  "header": {
+    "brand": "VectorXR 名称",
+    "app": "应用程序名称",
+    "runtime": "OpenXR 运行时",
+    "clock": "本地时钟"
+  },
+  "rows": {
+    "graph": {
+      "label": "帧时间图",
+      "hint": "最近 120 个应用程序帧的滚动历史记录。"
+    },
+    "performance": {
+      "label": "性能余量",
+      "hint": "相对于帧预算的 CPU 和 GPU 余量、显存（含 Frame Generation 的份额），以及在情况明确时显示“CPU 瓶颈”或“GPU 瓶颈”。每秒采样两次，仅在某个布局显示此行时采样。"
+    },
+    "turbo": {
+      "label": "Turbo 状态",
+      "hint": "区分已禁用、已启用但关闭、活动策略、安全状态，以及因 Frame Generation 而暂停。"
+    },
+    "framegen": {
+      "label": "Frame Generation 状态",
+      "hint": "开启、待机、已暂停或关闭，以及模式和帧率；第二行显示帧率或原因。仅在开启了 Frame Generation 的游戏中显示。"
+    },
+    "pivot": {
+      "label": "Pivot 状态",
+      "hint": "运动状态、Position Assist 和微调。使用快照视图的应用会增加第二行，显示快照、叠加和过渡。"
+    },
+    "modules": {
+      "label": "活动的增强功能",
+      "hint": "为此应用启用的深度、Pivot、Turbo、Quadviews 和 Frame Generation。"
+    }
+  },
+  "compactRows": {
+    "performanceHint": "在一行中显示 CPU 和 GPU 余量以及显存；受限的一方会标明。",
+    "turboHint": "当前策略、关闭、等待、安全状态，或因 Frame Generation 而暂停。",
+    "framegenHint": "帧率以及游戏到头显的帧率，或待机、已暂停、关闭。",
+    "pivotHint": "以简短标签显示运动状态；配置了快照视图时另加一行快照视图信息。"
+  },
+  "position": {
+    "heading": "位置和大小",
+    "center": "在视野中居中",
+    "horizontal": "水平",
+    "horizontalAria": "水平位置",
+    "vertical": "垂直",
+    "verticalAria": "垂直位置",
+    "size": "大小",
+    "sizeAria": "显示大小",
+    "distance": "观看距离",
+    "distanceAria": "观看距离"
+  },
+  "appearance": {
+    "heading": "外观",
+    "opacity": "不透明度",
+    "opacityAria": "显示不透明度",
+    "refreshRate": "刷新率",
+    "refreshRateHint": "帧历史记录每帧都会采样。更高的刷新率会更频繁地重绘面板。",
+    "rateRecommended": "{hz} Hz · 推荐",
+    "accentAria": "强调色",
+    "colors": {
+      "teal": "青绿",
+      "copper": "铜色",
+      "blue": "蓝色",
+      "violet": "紫罗兰",
+      "rose": "玫瑰"
+    },
+    "visibleOnStart": "启用时或会话开始时自动显示"
+  },
+  "language": {
+    "title": "OSD 语言",
+    "description": "头显显示所使用的语言。“与应用相同”跟随在“设置”中选择的语言。",
+    "sameAsApp": "与应用相同",
+    "sameAsAppResolved": "与应用相同 · {language}",
+    "restartNote": "VectorXR 0.19 及更早版本的层会忽略此设置，并以英语显示。"
+  },
+  "colorPicker": {
+    "wheelAria": "自定义强调色的色相和饱和度色轮",
+    "brightness": "亮度",
+    "brightnessAria": "自定义强调色亮度",
+    "customAccent": "自定义强调色",
+    "colorAria": "自定义强调色",
+    "hex": "十六进制颜色"
+  },
+  "presets": {
+    "aria": "显示预设",
+    "heading": "预设",
+    "hint": "预设会同时应用位置、外观和内容。",
+    "expanded": "展开",
+    "performance": "性能",
+    "minimal": "极简",
+    "savedAria": "已保存的自定义预设",
+    "savedPlaceholder": "已保存的预设…",
+    "noneSaved": "没有已保存的预设",
+    "reload": "重新加载",
+    "reloadHint": "将所选预设重新加载到控件中",
+    "delete": "删除所选预设",
+    "nameAria": "预设名称",
+    "namePlaceholder": "将当前设置另存为…",
+    "update": "更新已保存的预设",
+    "saveNew": "保存新预设",
+    "limit": "最多可保存 50 个预设。",
+    "added": "已添加 {name}。单击“保存更改”以保留它。",
+    "updated": "已更新 {name}。单击“保存更改”以保留它。",
+    "loaded": "已加载 {name}。单击“保存更改”以在 VR 中应用。",
+    "removed": "已移除 {name}。单击“保存更改”以保留此更改。",
+    "appliedExpanded": "已应用“展开”。单击“保存更改”以在 VR 中应用。",
+    "appliedPerformance": "已应用“性能”。单击“保存更改”以在 VR 中应用。",
+    "appliedMinimal": "已应用“极简”。单击“保存更改”以在 VR 中应用。"
+  },
+  "previewStage": {
+    "legibleNote": "内容预览 · 示例值 · 请使用“位置”判断位置和大小",
+    "placementNote": "位置预览 · 100° × 80° 参考视野",
+    "legibleAria": "清晰的 OSD 内容预览，已放大并居中",
+    "placementAria": "在 100 × 80 度参考视野中估算的 OSD 大小",
+    "emptyCompact": "选择一个紧凑值以显示屏幕显示。",
+    "footer": "面板宽度 {width}° · 拖动以调整位置 · 头显视场角各不相同"
+  },
+  "previewWindow": {
+    "title": "OSD 预览",
+    "windowTitle": "VectorXR — OSD 预览",
+    "connecting": "正在连接到 OSD 控件…",
+    "openFailed": "无法打开预览窗口。请重试。",
+    "popupBlocked": "请允许弹出窗口以打开预览窗口。"
+  },
+  "preview": {
+    "appName": "your-game.exe",
+    "runtimeName": "您的 OpenXR 运行时",
+    "clock12": "下午 8:42",
+    "clock24": "20:42",
+    "fgOn": "FG 开启",
+    "averageCompact": "平均 {value} ms",
+    "appFps": "应用 FPS",
+    "appFrameAverage": "应用帧 / 平均",
+    "appFrameP95": "应用帧 / P95",
+    "frameTimeGraph": "帧时间 / 最近 120 帧",
+    "labels": {
+      "performance": "性能",
+      "performanceCompact": "性能",
+      "turbo": "TURBO",
+      "framegen": "FRAME GEN",
+      "pivot": "PIVOT",
+      "modules": "增强功能"
+    },
+    "turboPausedForFramegen": "因 Frame Generation 暂停",
+    "turboAsyncExperimental": "Async / 实验性",
+    "turboAsyncCompact": "Async / 实验",
+    "framegenState": "开启  /  Interpolate  /  动态",
+    "framegenDetail": "45 → 90 fps  /  GPU 3.1 ms",
+    "framegenCompact": "动态 / 45 → 90 fps",
+    "pivotState": "运动：活动 / 连续 + 位置 / 飞行",
+    "pivotCompact": "运动：连续 活动 + 位置",
+    "snapState": "快照：活动 / 叠加 / 查看六点钟",
+    "snapCompact": "快照：活动 / 叠加",
+    "modulesWithFramegen": "深度 / Pivot / Turbo / Frame Gen / Quadviews",
+    "modules": "深度 / Pivot / Turbo / Quadviews",
+    "performanceTarget": "目标 {fps} fps",
+    "cpuDetail": "{ms} ms，线程 {thread}%",
+    "gpuDetail": "占用 {busy}%，游戏 {game}%",
+    "vramDetail": "共 {budget} GB",
+    "vramDetailWithFramegen": "共 {budget} GB，FG {framegen} MB",
+    "diagnostics": {
+      "debugLog": "调试日志",
+      "flowView": "光流视图",
+      "confidenceView": "置信度视图",
+      "tintView": "着色视图"
+    }
+  }
+}

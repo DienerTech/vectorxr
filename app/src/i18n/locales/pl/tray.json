@@ -1,0 +1,14 @@
+{
+  "health": "Kondycja: {label}",
+  "healthUnavailable": "Kondycja: nie załadowano ustawień",
+  "logLevel": "Poziom dziennika: {level}",
+  "logLevelUnavailable": "Poziom dziennika",
+  "info": "Info",
+  "debug": "Debug",
+  "tooltip": "VectorXR: {label}",
+  "tooltipDisabled": "VectorXR: wyłączony",
+  "enabled": "VectorXR włączony",
+  "exportDebug": "Eksportuj diagnostykę...",
+  "open": "Otwórz VectorXR",
+  "quit": "Zakończ VectorXR"
+}

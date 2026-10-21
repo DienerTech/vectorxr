@@ -1,0 +1,206 @@
+{
+  "tabs": {
+    "home": {
+      "label": "홈",
+      "subtitle": "상태, 업데이트 및 지원"
+    },
+    "core": {
+      "label": "설정",
+      "subtitle": "런타임, 로깅, 테마 및 구성",
+      "suiteOn": "제품군 켜짐",
+      "suiteOff": "제품군 꺼짐"
+    },
+    "osd": {
+      "label": "화면 표시(OSD)",
+      "subtitle": "헤드셋 디스플레이, 배치 및 바인딩"
+    },
+    "registry": {
+      "label": "애플리케이션 레지스트리",
+      "subtitle": "프로필 할당을 위한 애플리케이션 등록",
+      "status_other": "앱 {count}개"
+    },
+    "layers": {
+      "label": "OpenXR 레이어",
+      "subtitle": "암시적 레이어 순서 검사 및 관리",
+      "status": "시스템"
+    },
+    "about": {
+      "label": "정보",
+      "subtitle": "프로젝트 정보, 패치 노트 및 지원"
+    },
+    "quadviews": {
+      "label": "Quadviews",
+      "subtitle": "동적 포비티드 렌더링 제어"
+    },
+    "turbo": {
+      "label": "Turbo",
+      "subtitle": "고집스러운 fps 제한을 위한 프레임 페이싱 재정의"
+    },
+    "framegen": {
+      "label": "Frame Generation",
+      "subtitle": "생성된 프레임으로 더 부드러운 움직임"
+    },
+    "pivotxr": {
+      "label": "Pivot",
+      "subtitle": "회전 조정 - 후방을 확인하십시오!"
+    },
+    "depthxr": {
+      "label": "깊이",
+      "subtitle": "스테레오 깊이 조정 - 세상을 새롭게 보십시오!"
+    }
+  },
+  "status": {
+    "trayFailed": "트레이 아이콘을 설정하지 못했습니다",
+    "enabledFromTray": "트레이에서 VectorXR을 사용 설정했습니다",
+    "disabledFromTray": "트레이에서 VectorXR을 사용 안 함으로 설정했습니다",
+    "logLevelDebugFromTray": "트레이에서 로그 수준을 디버그로 설정했습니다",
+    "logLevelInfoFromTray": "트레이에서 로그 수준을 정보로 설정했습니다",
+    "fixBeforeSaving": "저장하기 전에 유효성 검사 오류를 수정하십시오",
+    "loadLogsFailed": "로그를 로드하지 못했습니다",
+    "loadLayersFailed": "OpenXR 레이어 상태를 로드하지 못했습니다",
+    "fixBeforeExporting": "내보내기 전에 유효성 검사 오류를 수정하십시오",
+    "configExported": "구성을 내보냈습니다",
+    "exportCanceled": "내보내기가 취소되었습니다",
+    "exportFailed": "구성을 내보내지 못했습니다",
+    "debugExported": "디버그 정보를 내보냈습니다",
+    "debugExportCanceled": "디버그 내보내기가 취소되었습니다",
+    "debugExportFailed": "디버그 정보를 내보내지 못했습니다",
+    "importInvalidJson": "가져오기 실패: 파일이 올바른 JSON이 아닙니다"
+  },
+  "resetConfirm": "VectorXR을 기본값으로 초기화하시겠습니까?\n\n저장된 모든 설정, 애플리케이션 레지스트리 항목, 프로필 및 OpenXR 애플리케이션 검색 데이터가 지워집니다. 이 작업은 되돌릴 수 없습니다.",
+  "updates": {
+    "available": "버전 {version}을(를) 사용할 수 있습니다. 자세한 내용을 보려면 클릭하십시오.",
+    "checkFailed": "지금은 업데이트를 확인할 수 없습니다.",
+    "httpFailed": "GitHub 업데이트 확인에 실패했습니다(HTTP {status})",
+    "invalidRelease": "GitHub에서 올바른 릴리스를 반환하지 않았습니다"
+  },
+  "sidebar": {
+    "appSettings": "앱 설정",
+    "enhancements": "OpenXR 향상 기능",
+    "suiteOff": "VectorXR 런타임 효과가 꺼져 있습니다",
+    "moduleTitle": "{subtitle}. {status}",
+    "saveHint": "설정을 적용하려면 변경 내용 저장을 누르십시오. 각 향상 기능에는 VR 애플리케이션을 다시 시작해야 하는 변경 사항이 표시되어 있습니다.",
+    "logoAlt": "VectorXR 로고",
+    "version": "v{version}",
+    "updateTooltip": "새 버전을 사용할 수 있습니다. 자세한 내용을 보려면 클릭하십시오.",
+    "updateAria": "새 버전을 사용할 수 있습니다"
+  },
+  "saveBar": {
+    "unsaved": "저장되지 않은 변경 사항",
+    "allSaved": "모든 변경 사항이 저장됨",
+    "pending": "대기 중",
+    "dirtyHint": "적용하려면 저장하고, 되돌리려면 취소하십시오.",
+    "cleanHint": "구성이 디스크와 일치합니다.",
+    "saving": "저장하는 중...",
+    "save": "변경 내용 저장",
+    "discard": "취소",
+    "fixBeforeSaving": "저장하기 전에 수정할 항목:",
+    "moreErrors_other": "…외 {count}개"
+  },
+  "importPreview": {
+    "eyebrow": "가져오기",
+    "title": "적용하기 전에 검토",
+    "description": "유효한 가져오기는 즉시 저장됩니다. 유효성 검사 문제가 있는 가져오기도 편집기로 로드하여 수정할 수 있습니다.",
+    "whatWillLoad": "로드될 항목",
+    "applications": "애플리케이션: {number}",
+    "moduleDefault_other": "{module} 기본값: {state} — 프로필 {count}개",
+    "issuesFound_other": "유효성 검사 문제 {count}개 발견",
+    "issuesHint": "그래도 적용할 수 있습니다. 오류는 유효성 검사 패널에 표시되며, 해결될 때까지 저장이 차단됩니다.",
+    "valid": "구성 구조와 값 범위가 유효한 것으로 보입니다.",
+    "applyToEditor": "편집기에 적용",
+    "importAndSave": "가져와서 저장"
+  },
+  "debugExport": {
+    "eyebrow": "진단",
+    "title": "디버그 정보 내보내기",
+    "description": "VectorXR은 테스트 중에 공유할 수 있도록 문제 해결 정보를 ZIP 파일로 묶습니다.",
+    "included": "포함 항목",
+    "items": {
+      "settings": "현재 및 저장된 설정 JSON",
+      "seenApps": "감지된 OpenXR 앱",
+      "logs": "보관된 VectorXR 로그와 최신 Frame Generation 추적(디버그 로깅)",
+      "layers": "OpenXR 레이어 스냅숏",
+      "health": "상태 검사 요약",
+      "version": "앱 버전 및 관련 경로",
+      "turboMetrics": "Turbo 메트릭 및 페이싱 결정",
+      "turboSafety": "Turbo 안전 차단 및 오류 기록",
+      "runtime": "실시간 및 저장된 런타임 진단",
+      "inventory": "파일 목록 및 수집 오류"
+    },
+    "limits": "원본 파일은 각각 8 MiB, 합계 64 MiB로 제한되며 ZIP은 압축됩니다. 더 큰 로그는 시작 부분과 최신 출력이 포함되며, 생략되거나 제한된 파일은 ZIP에 목록으로 기록됩니다. 지운 기록과 기록되지 않은 메트릭은 포함할 수 없습니다.",
+    "privacy": "패키지에는 로컬 파일 경로와 게임 실행 파일 이름이 포함될 수 있습니다. 시스템 환경 변수나 관련 없는 파일은 포함되지 않습니다.",
+    "exporting": "내보내는 중...",
+    "save": "ZIP 저장",
+    "fileType": "VectorXR 디버그 패키지"
+  },
+  "profile": {
+    "number": "프로필 {number}",
+    "editName": "프로필 이름 편집",
+    "noApplications": "애플리케이션 없음",
+    "priority": "우선순위: 여러 프로필이 같은 애플리케이션에 겹치면 위에 있는 프로필이 공유하는 바인딩을 소유합니다.",
+    "moveUp": "프로필을 위로 이동(높은 우선순위)",
+    "moveDown": "프로필을 아래로 이동(낮은 우선순위)",
+    "enabledTitle": "이 프로필은 할당된 애플리케이션에 사용자 지정 {module} 설정을 적용합니다.",
+    "disabledTitle": "이 프로필은 런타임에 무시됩니다.",
+    "on": "프로필 켜짐",
+    "off": "프로필 꺼짐",
+    "conflict": "프로필 충돌",
+    "applications": "애플리케이션",
+    "applicationsHelp": "이 프로필이 적용되는 등록된 애플리케이션입니다. 처음으로 일치하는 활성 프로필이 우선합니다.",
+    "inactiveTitle": "이 프로필은 활성화되지 않습니다",
+    "inactiveBody": "사용 설정된 이 프로필이 어떤 애플리케이션에도 할당되지 않았습니다. 애플리케이션을 하나 이상 선택하거나 프로필을 끄십시오.",
+    "offNote": "이 프로필은 꺼져 있어 아무 효과가 없습니다. 해당 애플리케이션에는 기본 {module} 프로필이 적용됩니다."
+  },
+  "logViewer": {
+    "eyebrow": "로그",
+    "title": "VectorXR 로그 뷰어",
+    "description": "런타임 상태를 쉽게 검사할 수 있도록 최근 레이어 로그가 읽기 전용으로 표시됩니다.",
+    "loading": "로그를 로드하는 중...",
+    "directory": "로그 디렉터리",
+    "unavailable": "사용할 수 없음",
+    "logs": "VectorXR 로그",
+    "empty": "아직 로그 파일이 없습니다. 타이틀에서 레이어를 시작한 다음 이 뷰어를 다시 여십시오.",
+    "selected": "선택한 로그",
+    "noneSelected": "선택한 로그 없음",
+    "copied": "복사했습니다!",
+    "copyFailed": "복사 실패",
+    "copy": "텍스트 복사",
+    "opened": "열었습니다!",
+    "openFailed": "열기 실패",
+    "open": "디렉터리 열기",
+    "noContent": "표시할 로그 내용이 없습니다."
+  },
+  "discord": {
+    "loading": "Discord 로드하는 중…",
+    "opening": "Discord 여는 중…",
+    "join": "Discord 참가 ↗",
+    "unavailable": "Discord를 사용할 수 없음",
+    "loadFailed": "Discord 초대를 로드할 수 없습니다. 다시 시도하십시오.",
+    "invitesUnavailable": "현재 Discord 초대를 사용할 수 없습니다.",
+    "openFailed": "브라우저를 열 수 없습니다. 다시 시도하십시오.",
+    "retryAria": "Discord 초대 로드 다시 시도",
+    "loadingStatus": "Discord 초대를 로드하는 중입니다."
+  },
+  "healthCheck": {
+    "eyebrow": "시스템 상태",
+    "title": "상태 검사",
+    "layer": "VectorXR 레이어",
+    "layerNotFound": "찾을 수 없음",
+    "lastSeenApp": "마지막으로 감지된 앱",
+    "noApp": "아직 감지된 OpenXR 앱 없음",
+    "exportHint": "문제 해결 정보를 공유할 때 디버그 패키지를 내보내십시오.",
+    "export": "디버그 정보 내보내기"
+  },
+  "healthLoading": {
+    "label": "상태 정보 로드 중",
+    "checking": "확인 중"
+  },
+  "patchNotes": {
+    "eyebrow": "패치 노트",
+    "title": "최근 업데이트",
+    "description": "앱의 모든 새로운 내용이며, 최신 항목이 맨 위에 고정되어 있습니다."
+  },
+  "setupGuide": {
+    "title": "설정 가이드"
+  }
+}

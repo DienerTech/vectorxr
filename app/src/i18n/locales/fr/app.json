@@ -1,0 +1,210 @@
+{
+  "tabs": {
+    "home": {
+      "label": "Accueil",
+      "subtitle": "État, mises à jour et soutien"
+    },
+    "core": {
+      "label": "Paramètres",
+      "subtitle": "Exécution, journalisation, thème et configuration",
+      "suiteOn": "Suite activée",
+      "suiteOff": "Suite désactivée"
+    },
+    "osd": {
+      "label": "Affichage à l'écran",
+      "subtitle": "Affichage dans le casque, placement et affectations"
+    },
+    "registry": {
+      "label": "Registre des applications",
+      "subtitle": "Inscrire des applications pour l'attribution des profils",
+      "status_one": "{count} application",
+      "status_other": "{count} applications"
+    },
+    "layers": {
+      "label": "Couches OpenXR",
+      "subtitle": "Inspecter et gérer l'ordre des couches implicites",
+      "status": "Système"
+    },
+    "about": {
+      "label": "À propos",
+      "subtitle": "Infos sur le projet, notes de version et soutien"
+    },
+    "quadviews": {
+      "label": "Quadviews",
+      "subtitle": "Contrôle du rendu fovéal dynamique"
+    },
+    "turbo": {
+      "label": "Turbo",
+      "subtitle": "Remplacement du cadencement pour les plafonds de fps tenaces"
+    },
+    "framegen": {
+      "label": "Frame Generation",
+      "subtitle": "Mouvement plus fluide grâce aux images générées"
+    },
+    "pivotxr": {
+      "label": "Pivot",
+      "subtitle": "Réglage de la rotation - surveillez vos six heures !"
+    },
+    "depthxr": {
+      "label": "Profondeur",
+      "subtitle": "Réglage de la profondeur stéréo - voyez le monde autrement !"
+    }
+  },
+  "status": {
+    "trayFailed": "Impossible de configurer l'icône de la zone de notification",
+    "enabledFromTray": "VectorXR activé depuis la zone de notification",
+    "disabledFromTray": "VectorXR désactivé depuis la zone de notification",
+    "logLevelDebugFromTray": "Niveau de journal réglé sur Débogage depuis la zone de notification",
+    "logLevelInfoFromTray": "Niveau de journal réglé sur Info depuis la zone de notification",
+    "fixBeforeSaving": "Corrigez les erreurs de validation avant d'enregistrer",
+    "loadLogsFailed": "Échec du chargement des journaux",
+    "loadLayersFailed": "Échec du chargement de l'état des couches OpenXR",
+    "fixBeforeExporting": "Corrigez les erreurs de validation avant d'exporter",
+    "configExported": "Configuration exportée",
+    "exportCanceled": "Exportation annulée",
+    "exportFailed": "Échec de l'exportation de la configuration",
+    "debugExported": "Informations de débogage exportées",
+    "debugExportCanceled": "Exportation du débogage annulée",
+    "debugExportFailed": "Échec de l'exportation des informations de débogage",
+    "importInvalidJson": "Échec de l'importation : le fichier n'est pas un JSON valide"
+  },
+  "resetConfirm": "Rétablir les valeurs par défaut de VectorXR ?\n\nCela effacera tous les paramètres enregistrés, les entrées du registre des applications, les profils et les données de découverte des applications OpenXR. Cette action est irréversible.",
+  "updates": {
+    "available": "La version {version} est disponible. Cliquez pour plus de détails.",
+    "checkFailed": "Impossible de rechercher des mises à jour pour le moment.",
+    "httpFailed": "La vérification des mises à jour sur GitHub a échoué avec le code HTTP {status}",
+    "invalidRelease": "GitHub n'a pas renvoyé de version valide"
+  },
+  "sidebar": {
+    "appSettings": "Paramètres de l'application",
+    "enhancements": "Améliorations OpenXR",
+    "suiteOff": "Les effets d'exécution de VectorXR sont désactivés",
+    "moduleTitle": "{subtitle}. {status}",
+    "saveHint": "Enregistrez les modifications pour appliquer les paramètres. Chaque amélioration indique quelles modifications nécessitent un redémarrage de l'application VR.",
+    "logoAlt": "Logo VectorXR",
+    "version": "v{version}",
+    "updateTooltip": "Une nouvelle version est disponible. Cliquez pour plus de détails.",
+    "updateAria": "Une nouvelle version est disponible"
+  },
+  "saveBar": {
+    "unsaved": "Modifications non enregistrées",
+    "allSaved": "Toutes les modifications sont enregistrées",
+    "pending": "En attente",
+    "dirtyHint": "Enregistrez pour appliquer ou abandonnez pour revenir en arrière.",
+    "cleanHint": "La configuration correspond au disque.",
+    "saving": "Enregistrement...",
+    "save": "Enregistrer les modifications",
+    "discard": "Abandonner",
+    "fixBeforeSaving": "À corriger avant l'enregistrement :",
+    "moreErrors_one": "…et {count} autre",
+    "moreErrors_other": "…et {count} autres"
+  },
+  "importPreview": {
+    "eyebrow": "Importation",
+    "title": "Vérifier avant d'appliquer",
+    "description": "Une importation valide sera enregistrée immédiatement. Les importations comportant des problèmes de validation peuvent tout de même être chargées dans l'éditeur pour être corrigées.",
+    "whatWillLoad": "Ce qui sera chargé",
+    "applications": "Applications : {number}",
+    "moduleDefault_one": "{module} par défaut : {state} — {count} profil",
+    "moduleDefault_other": "{module} par défaut : {state} — {count} profils",
+    "issuesFound_one": "{count} problème de validation trouvé",
+    "issuesFound_other": "{count} problèmes de validation trouvés",
+    "issuesHint": "Vous pouvez quand même appliquer — les erreurs apparaîtront dans le panneau Validation et l'enregistrement sera bloqué jusqu'à leur résolution.",
+    "valid": "La structure de la configuration et les plages de valeurs semblent valides.",
+    "applyToEditor": "Appliquer à l'éditeur",
+    "importAndSave": "Importer et enregistrer"
+  },
+  "debugExport": {
+    "eyebrow": "Diagnostics",
+    "title": "Exporter les informations de débogage",
+    "description": "VectorXR va regrouper les détails de dépannage dans un fichier ZIP que vous pourrez partager pendant les tests.",
+    "included": "Inclus",
+    "items": {
+      "settings": "Paramètres JSON actuels et enregistrés",
+      "seenApps": "Applications OpenXR vues",
+      "logs": "Journaux VectorXR conservés et dernière trace de Frame Generation (journalisation Débogage)",
+      "layers": "Instantané des couches OpenXR",
+      "health": "Résumé de la vérification de l'état",
+      "version": "Version de l'application et chemins pertinents",
+      "turboMetrics": "Métriques Turbo et décisions de cadencement",
+      "turboSafety": "Blocages de sécurité Turbo et historique des défaillances",
+      "runtime": "Diagnostics d'exécution en direct et enregistrés",
+      "inventory": "Inventaire des fichiers et erreurs de collecte"
+    },
+    "limits": "Les fichiers bruts sont limités à 8 Mio chacun et 64 Mio au total, et le ZIP est compressé. Les journaux plus volumineux incluent leur début et leur sortie la plus récente ; les fichiers omis ou tronqués sont listés dans le ZIP. L'historique effacé et les métriques non enregistrées ne sont pas disponibles.",
+    "privacy": "Le paquet peut inclure des chemins de fichiers locaux et des noms d'exécutables de jeux. Il n'inclut pas les variables d'environnement du système ni de fichiers sans rapport.",
+    "exporting": "Exportation...",
+    "save": "Enregistrer le ZIP",
+    "fileType": "Paquet de débogage VectorXR"
+  },
+  "profile": {
+    "number": "Profil {number}",
+    "editName": "Modifier le nom du profil",
+    "noApplications": "Aucune application",
+    "priority": "Ordre de priorité — lorsque des profils se chevauchent sur une application, le profil le plus haut détient toute affectation qu'ils partagent.",
+    "moveUp": "Monter le profil (priorité plus élevée)",
+    "moveDown": "Descendre le profil (priorité plus basse)",
+    "enabledTitle": "Ce profil applique des paramètres {module} personnalisés aux applications qui lui sont attribuées.",
+    "disabledTitle": "Ce profil est ignoré à l'exécution.",
+    "on": "Profil activé",
+    "off": "Profil désactivé",
+    "conflict": "Conflit de profils",
+    "applications": "Applications",
+    "applicationsHelp": "Applications inscrites auxquelles ce profil s'applique. Le premier profil actif correspondant l'emporte.",
+    "inactiveTitle": "Ce profil ne s'activera pas",
+    "inactiveBody": "Ce profil activé n'est attribué à aucune application. Sélectionnez au moins une application ou désactivez le profil.",
+    "offNote": "Ce profil est désactivé et n'a aucun effet. Ses applications reviennent au profil {module} par défaut."
+  },
+  "logViewer": {
+    "eyebrow": "Journaux",
+    "title": "Visionneuse de journaux VectorXR",
+    "description": "Les journaux récents de la couche sont affichés en lecture seule pour que l'état d'exécution reste facile à examiner.",
+    "loading": "Chargement des journaux...",
+    "directory": "Dossier des journaux",
+    "unavailable": "Indisponible",
+    "logs": "Journaux VectorXR",
+    "empty": "Aucun fichier journal trouvé pour l'instant. Lancez la couche dans un jeu, puis rouvrez cette visionneuse.",
+    "selected": "Journal sélectionné",
+    "noneSelected": "Aucun journal sélectionné",
+    "copied": "Copié !",
+    "copyFailed": "Échec de la copie",
+    "copy": "Copier le texte",
+    "opened": "Ouvert !",
+    "openFailed": "Échec de l'ouverture",
+    "open": "Ouvrir le dossier",
+    "noContent": "Aucun contenu de journal disponible."
+  },
+  "discord": {
+    "loading": "Chargement de Discord…",
+    "opening": "Ouverture de Discord…",
+    "join": "Rejoindre le Discord ↗",
+    "unavailable": "Discord indisponible",
+    "loadFailed": "Impossible de charger l'invitation Discord. Réessayez.",
+    "invitesUnavailable": "Les invitations Discord sont actuellement indisponibles.",
+    "openFailed": "Impossible d'ouvrir le navigateur. Veuillez réessayer.",
+    "retryAria": "Réessayer de charger l'invitation Discord",
+    "loadingStatus": "Chargement de l'invitation Discord."
+  },
+  "healthCheck": {
+    "eyebrow": "État du système",
+    "title": "Vérification de l'état",
+    "layer": "Couche VectorXR",
+    "layerNotFound": "Introuvable",
+    "lastSeenApp": "Dernière application vue",
+    "noApp": "Aucune application OpenXR observée pour l'instant",
+    "exportHint": "Exportez un paquet de débogage pour partager des détails de dépannage.",
+    "export": "Exporter les informations de débogage"
+  },
+  "healthLoading": {
+    "label": "Chargement des informations d'état",
+    "checking": "Vérification"
+  },
+  "patchNotes": {
+    "eyebrow": "Notes de version",
+    "title": "Mises à jour récentes",
+    "description": "Toutes les nouveautés de l'application, la plus récente épinglée en haut."
+  },
+  "setupGuide": {
+    "title": "Guide de configuration"
+  }
+}

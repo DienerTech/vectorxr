@@ -1,0 +1,314 @@
+{
+  "title": "Turbo",
+  "breadcrumb": "階層連結",
+  "unknownApp": "未知的應用程式",
+  "strategy": {
+    "vectorxr": "VectorXR",
+    "vectorxrWithModes": "VectorXR · {modes}",
+    "toolkit": "Toolkit 風格",
+    "custom": "自訂",
+    "unknown": "未知的策略",
+    "async": "Async",
+    "sequenced": "Sequenced",
+    "auto": "自動"
+  },
+  "pacingMode": {
+    "auto": "自動 · 穩定優先",
+    "forcedAsync": "強制 Async",
+    "forcedSequenced": "強制 Sequenced"
+  },
+  "tab": {
+    "badge": "進階節奏覆寫",
+    "intro": "當節奏控制拖慢遊戲時，將執行階段的等待移出遊戲的關鍵路徑。請只在遊戲內 A/B 比較證實有幫助的情況下啟用。",
+    "howItWorksButton": "Turbo 的運作方式",
+    "recoveryUnavailable": "復原狀態無法使用。您已儲存的安全設定仍然有效。",
+    "toolkitConflict": "OpenXR Toolkit 與 VectorXR Turbo 同時啟用。如果 OXRTK 的 Turbo Mode 也已開啟，請停用其中一個，以免兩個節奏層互相競爭。",
+    "frameGenNote": "部分應用程式已開啟 Frame Generation。在執行 Frame Generation 的工作階段中，Turbo 會保持關閉，其狀態會顯示「因 Frame Generation 暫停」。",
+    "pacingSummary": {
+      "manual": "所有執行階段都使用手動選擇的策略。",
+      "empty": "「自動」會為每個執行階段挑選並記住一個穩定的策略。請嘗試 Async 與 Sequenced，以找出最快的策略。",
+      "observed_other": "已觀察到 {count} 個執行階段環境。「自動」會為每個環境挑選最穩定的策略，但不一定是最快的。"
+    },
+    "metricsMode": {
+      "binding": "受控擷取",
+      "off": "收集關閉",
+      "always": "自動擷取"
+    },
+    "metricsSummary": {
+      "empty": "在同一次飛行中擷取 Turbo 開啟與關閉的資料，以量測每個策略的效益。",
+      "recorded_other": "已記錄 {count} 次飛行。最新：{app}。",
+      "recordedLive_other": "已記錄 {count} 次飛行。最新：{app}（進行中）。"
+    },
+    "toggleBinding": {
+      "label": "Turbo 切換繫結",
+      "description": "在遊戲中開啟與關閉 Turbo，直接比較 fps 與影格手感；若畫面呈現出問題，也能立即停用。此繫結需要在應用程式的設定檔中啟用 Turbo。當復原機制封鎖了 Turbo，或節奏問題使其暫停時，也可用它重試 Turbo。在工作階段中途切換可能會造成短暫的重新同步頓挫。",
+      "noneText": "未指派繫結。在已啟用的地方，Turbo 會自動啟動，除非復原或節奏保護機制將其封鎖。"
+    },
+    "essentials": {
+      "eyebrow": "基本設定",
+      "intro": "保持預設關閉，並使用自訂設定檔針對個別應用程式啟用 Turbo，或全面開啟。啟用狀態會在儲存時套用；切換繫結可在執行中的遊戲裡關閉與開啟 Turbo。",
+      "defaultProfile": "預設設定檔",
+      "defaultOnHint": "Turbo 會套用至沒有自訂設定檔的應用程式。",
+      "defaultOffHint": "除非已啟用的自訂設定檔將其開啟，否則保持關閉。",
+      "defaultOn": "預設開啟",
+      "defaultOff": "預設關閉",
+      "toggleHeading": "遊戲內 Turbo 切換",
+      "toggleHint": "在遊戲中開啟與關閉 Turbo 以直接比較。"
+    },
+    "safety": {
+      "heldOff_other": "Turbo 在 {count} 個設定組合中被保持關閉。請檢閱後清除，或使用切換繫結重試。",
+      "idle": "在工作階段中斷或執行階段重複發生錯誤後，讓 Turbo 保持關閉。",
+      "blockCount_other": "{count} 個封鎖",
+      "faultCount_other": "{count} 個錯誤",
+      "review": "檢閱…",
+      "details": "詳細資料…"
+    },
+    "tune": {
+      "eyebrow": "調校與驗證",
+      "intro": "Turbo 的效果取決於遊戲、頭戴式裝置、執行階段與驅動程式。若要找出最佳設定，請在同一次飛行中將每個策略與 Turbo 關閉的情況比較。",
+      "guideSummary": "為遊戲找出最佳策略",
+      "guideStep1": "為遊戲建立自訂設定檔，並指派遊戲內 Turbo 切換。將「效能診斷」設為使用擷取繫結。",
+      "guideStep2": "以某個策略啟動遊戲。在 Turbo 開啟的狀態下飛行一個可重複的情境約一分鐘，然後將其關閉至少 30 秒。",
+      "guideStep3": "在「效能診斷」中記下相對於 Turbo 關閉的效益。每次飛行都會標示所使用的策略。",
+      "guideStep4": "變更策略、儲存、重新啟動，然後重複。請在「執行階段行為」中嘗試 Async 與 Sequenced，然後再嘗試 Toolkit 風格的設定檔策略。",
+      "guideStep5": "保留效益最佳、1% 低值最好且沒有停頓的策略。「自動」仍是安全的預設值，但它挑選的是最穩定的策略，不一定是最快的。"
+    },
+    "profiles": {
+      "title": "自訂設定檔",
+      "intro": "為每個設定檔選擇應用程式與 Turbo 策略。如果已啟用的設定檔互相重疊，以第一個相符的設定檔為優先。",
+      "add": "新增設定檔",
+      "broadStrong": "已全面啟用。",
+      "broad": "{strong} Turbo 會套用至沒有自訂設定檔的應用程式，包括您尚未驗證過的應用程式。較安全的做法是使用「預設關閉」，並將此清單當作應用程式允許清單。",
+      "legacyExperimental": "先前的實驗性設定在儲存時沒有指派應用程式。",
+      "useSavedTiming": "在此設定檔中使用已儲存的計時",
+      "bypassSafety": "為這些應用程式略過 Turbo 安全機制",
+      "bypassSafetyHint": "忽略持續性的安全封鎖。即時節奏後援仍會暫停發生問題的工作階段；請使用切換繫結重試。",
+      "empty": "尚無自訂設定檔。當某個應用程式需要與預設不同的行為時，請新增一個。"
+    }
+  },
+  "howItWorks": {
+    "eyebrow": "Turbo 模式",
+    "title": "Turbo 的運作方式",
+    "whatItDoes": "功能說明",
+    "whatItDoesBody": "遊戲通常會閒置等待，直到頭戴式裝置的執行階段發出下一個影格的訊號。Turbo 會在不妨礙遊戲的情況下執行這段等待，讓遊戲在上一個影格提交後就能立即開始下一個影格。VectorXR 會保留下游的影格呼叫順序，但會改變節奏控制發生的時機，並可能估計下一次的顯示時間。",
+    "strategies": "{async}（通常最快）會在背景中等待。{sequenced}（適用於需要它的執行階段）會讓等待與提交保持同步。{auto} 會先使用 Async，若 Async 不穩定則退回 Sequenced，然後為每個執行階段記住結果。「自動」以穩定為優先：它挑選的是可行的策略，不一定是最快的。",
+    "toolkit": "{toolkit} 是一種實驗性的個別設定檔策略，重現了由 mbucchia 最初開發的 OpenXR Toolkit Turbo Mode 的計時方式。它一律使用 Async，並在遊戲重新啟動後生效。",
+    "whatToExpect": "預期效果",
+    "whatToExpectBody": "Turbo 是針對性的修正，而不是全面的效能提升。它只在執行階段的節奏控制使 fps 低於硬體能力時有幫助，且無法移除執行階段強制的影格速率鎖定。請搭配遊戲內切換使用「效能診斷」來量測每款遊戲。",
+    "reprojectionLabel": "重新投影相容性：",
+    "reprojection": "{label}Turbo 可能會干擾 SteamVR Motion Smoothing 以及 ASW 等其他重新投影系統。測試 Turbo 時請停用 Motion Smoothing。影格時間預測可能較不準確，而在工作階段中途切換 Turbo 時，管線重新同步可能會造成短暫頓挫。",
+    "bestStrategy": "找出最佳策略",
+    "bestStrategyBody": "Turbo 依賴 OpenXR 規格未正式定義的計時行為，因此效果會因硬體、驅動程式、執行階段與遊戲而異。策略並不一定能在工作階段中途安全切換，因此請每次啟動只測試一個策略：使用遊戲內切換在同一次飛行中擷取 Turbo 開啟與關閉的資料，然後在「效能診斷」中比較每個策略的效益。",
+    "safetyNet": "安全網",
+    "safetyNetBody": "如果在「自動」調整後節奏仍然停頓，Turbo 會在該工作階段中自行暫停。啟用 Turbo 安全機制時，該應用程式與執行階段的設定組合會保持封鎖，直到您清除它或使用繫結重試為止。錯誤詳細資料會保留在「Turbo 安全機制」頁面上。這能捕捉節奏停頓，但無法捕捉所有視覺或驅動程式故障；請只在工作階段穩定後再重試。"
+  },
+  "profileTiming": {
+    "strategy": "策略",
+    "strategyAria": "此設定檔的 Turbo 策略",
+    "restartTitle": "切換至此策略或從此策略切換，會在儲存並重新啟動遊戲後生效。",
+    "restartNote": "切換至標示的策略或從其切換，會在儲存並重新啟動遊戲後生效。",
+    "descriptionVectorxr": "VectorXR 自己的 Turbo。遵循您的「執行階段行為」設定（{pacing}），並可在遊戲中開啟與關閉。",
+    "descriptionToolkit": "重現 OpenXR Toolkit Turbo Mode 的計時方式。實驗性；變更後請重新啟動遊戲。",
+    "descriptionCustom": "加入您自己調整的 Toolkit 風格。實驗性；變更後請重新啟動遊戲。",
+    "summary": {
+      "waitForSubmission": "等待提交",
+      "overlapSubmission": "重疊提交",
+      "sampleAtEntry": "進入時取樣",
+      "sampleAtReturn": "返回時取樣",
+      "prediction": "{percent}% 預測",
+      "fpsCap": "{fps} fps 上限",
+      "noCap": "無上限"
+    },
+    "advancedTitle": "進階計時",
+    "advancedIntro": "供實驗使用。大多數玩家應保持這些設定不變。",
+    "waitForOverlap": "等待重疊的提交",
+    "sampleAtWaitEntry": "在進入等待時取樣預測計時",
+    "predictionLabel": "預測 (%)",
+    "frameCapLabel": "影格上限（fps；0 = 關閉）",
+    "changeNote": "變更任何數值都會將設定檔切換為「自訂」。預測調整需要執行階段時脈支援。"
+  },
+  "safety": {
+    "title": "Turbo 安全機制",
+    "intro": "檢閱遭封鎖的應用程式與執行階段設定組合、重試 Turbo，並檢查已記錄的錯誤。",
+    "back": "返回 Turbo",
+    "uncleanExitReason": "工作階段在未正常關閉的情況下結束。確切原因與當機時間不明。",
+    "state": {
+      "recoveryDisabled": "Turbo 已啟用 · 因安全封鎖而關閉",
+      "suspended": "Turbo 已啟用 · 因錯誤而暫停",
+      "async": "Turbo 作用中 · Async",
+      "sequenced": "Turbo 作用中 · Sequenced",
+      "waiting": "Turbo 正在等待啟動",
+      "off": "Turbo 關閉",
+      "framegen": "因 Frame Generation 暫停",
+      "unavailable": "狀態無法使用"
+    },
+    "protection": {
+      "title": "自動保護",
+      "body": "工作階段中斷或執行階段重複發生錯誤時，可能會讓該應用程式與執行階段設定組合的 Turbo 保持關閉。Turbo 在其設定檔中仍保持啟用，因此即使關閉此介面，其遊戲內繫結仍可重試。",
+      "saveNote": "請儲存設定變更以套用。自訂設定檔可為選取的應用程式略過安全機制。即時節奏後援仍會暫停發生問題的工作階段；繫結可重新啟動它。"
+    },
+    "columns": {
+      "application": "應用程式／執行階段",
+      "recorded": "記錄時間",
+      "protection": "保護",
+      "actions": "動作",
+      "fault": "錯誤",
+      "details": "詳細資料"
+    },
+    "blocked": {
+      "title": "遭封鎖的設定組合",
+      "intro": "「清除並重新測試」會保留錯誤記錄，並清除執行階段學到的節奏決策。請在「自動」模式且沒有手動覆寫的情況下重新啟動，以重新進行 Async 測試，必要時再測試 Sequenced。執行中的工作階段可重試其目前的模式；完整的重新測試則需要重新啟動。",
+      "ariaLabel": "遭封鎖的 Turbo 設定組合",
+      "blocked": "已封鎖",
+      "bypassed": "已略過",
+      "details": "詳細資料",
+      "clearing": "正在清除…",
+      "clearRetest": "清除並重新測試",
+      "empty": "沒有已記錄的安全封鎖。"
+    },
+    "faults": {
+      "title": "錯誤記錄",
+      "clearLogs": "清除記錄",
+      "clearing": "正在清除…",
+      "intro": "重試後，已記錄的錯誤仍會保留在這裡。對於未正常結束的情況，記錄的時間是最後一個安全標記，而不是已確認的當機時間。",
+      "clearHint": "「清除記錄」會移除錯誤歷程記錄。安全封鎖與學到的節奏決策會保留。",
+      "ariaLabel": "Turbo 錯誤記錄",
+      "details": "詳細資料",
+      "empty": "沒有已記錄的 Turbo 錯誤。"
+    },
+    "dialog": {
+      "title": "{application} · Turbo 錯誤",
+      "recorded": "記錄時間",
+      "pacingMode": "節奏模式",
+      "runtime": "執行階段",
+      "headset": "頭戴式裝置",
+      "graphicsApi": "圖形 API",
+      "processId": "處理程序識別碼",
+      "notRecorded": "未記錄",
+      "armedNote": "未正常結束是根據已停止的處理程序推斷而來。這並不能證明是 Turbo 造成當機。",
+      "recoveredNote": "VectorXR 在同一個工作階段中已從此錯誤復原，並讓遊戲繼續執行。這不會封鎖 Turbo。"
+    }
+  },
+  "diagnostics": {
+    "title": "效能診斷",
+    "moduleLabel": "Turbo 診斷",
+    "intro": "在對您重要的情境中量測 Turbo。只有在開啟與關閉兩方都有足夠的遊戲內擷取時間後，VectorXR 才會比較 Turbo 開啟與關閉的差異。",
+    "closeAria": "關閉診斷並返回 Turbo",
+    "binding": {
+      "label": "效能指標擷取繫結",
+      "description": "在遊戲中開始與停止收集效能指標。請在實際開始飛行後啟動擷取，並在載入畫面或選單之前暫停，讓記錄的數字反映真實的遊玩情況。",
+      "noneText": "未指派繫結。在擷取繫結模式下，設定繫結之前不會記錄任何效能指標。",
+      "hint": "請在實際開始飛行後啟動擷取；在載入畫面或選單之前暫停。"
+    },
+    "capture": {
+      "title": "擷取行為",
+      "intro": "只擷取具代表性的遊戲過程，才能得到最公平的結果。載入畫面與選單可能會掩蓋您想量測的效果。",
+      "collection": "收集",
+      "always": "在遊戲中時一律收集",
+      "binding": "使用擷取繫結",
+      "off": "關閉",
+      "bindingNote": "記錄會隨您的擷取繫結開始與暫停。這是進行受控比較時的建議模式。",
+      "alwaysNote": "只要 Turbo 套用中就會記錄。超過一秒的頓挫會被排除，但選單與載入畫面仍會計入。",
+      "offNote": "效能指標收集已停用。下方仍可查看現有的結果。"
+    },
+    "results": {
+      "eyebrow": "結果",
+      "intro": "選擇一次飛行、查看判定結果，必要時再開啟詳細量測資料。",
+      "clearAllTitle": "刪除所有已記錄的效能指標工作階段",
+      "clearAll": "清除所有結果",
+      "emptyTitle": "尚無效能檢查",
+      "emptyBody": "在遊戲中執行 Turbo，結果大約每 15 秒會在這裡更新一次。",
+      "flight": "飛行",
+      "strategy": "策略",
+      "accumulateNote": "結果會在工作階段內累積。若要比較策略，請每個策略各使用一次全新的啟動，並比較它們相對於 Turbo 關閉的效益；這些數據不會量測 ASW 活動或頭戴式裝置的畫面呈現。",
+      "versusOff": "平均 fps 相對於 Turbo 關閉",
+      "fpsChange": "此次飛行中 {off} → {turbo} fps",
+      "needMoreTitle": "需要更多可比較的飛行時間",
+      "needMoreBody": "請在相似的條件下，分別擷取至少 30 秒的 Turbo 關閉與 30 秒的 Turbo 開啟資料。在兩段之間使用 Turbo 切換。",
+      "evidenceNote": "請將百分比視為佐證，而非保證：場景複雜度、天氣、交通與背景工作仍會影響比較結果。"
+    },
+    "verdict": {
+      "faster": "較快",
+      "slower": "較慢",
+      "within": "差距在 1% 以內"
+    },
+    "bucket": {
+      "off": "Turbo 關閉",
+      "async": "Turbo — async",
+      "sequenced": "Turbo — sequenced"
+    },
+    "session": {
+      "unknownTime": "時間不明",
+      "label": "{when} — {app} · {details}",
+      "labelLive": "{when} — {app} · {details}（即時）"
+    },
+    "duration": {
+      "minutes": "{minutes} 分 {seconds} 秒",
+      "seconds": "{seconds} 秒"
+    },
+    "detail": {
+      "title": "詳細量測資料",
+      "subtitle": "影格時間、執行階段等待與停頓",
+      "empty": "此次飛行尚未擷取到任何影格。",
+      "pacing": "節奏",
+      "time": "時間",
+      "avgFps": "平均 fps",
+      "onePercentLow": "1% 低值",
+      "avgFrame": "平均影格",
+      "p99Frame": "p99 影格",
+      "waitBlocked": "等待阻塞",
+      "waitBlockedTitle": "遊戲每個影格因執行階段節奏控制而阻塞的平均時間",
+      "stalls": "停頓",
+      "stallsTitle": "安全電路計算出的影格節奏停頓次數",
+      "live": "飛行進行中：大約每 15 秒更新一次。",
+      "complete": "飛行已完成。",
+      "collectionBinding": "收集方式：擷取繫結。",
+      "collectionAlways": "收集方式：一律收集。",
+      "hitchesExcluded": "已排除超過一秒的頓挫。"
+    }
+  },
+  "runtime": {
+    "title": "執行階段行為",
+    "intro": "選擇 VectorXR Turbo 如何與每個 OpenXR 執行階段協調。「自動」是安全的起點；若要為遊戲找出最快的策略，請嘗試 Async 與 Sequenced，並在「效能診斷」中比較。使用 Toolkit 風格或自訂策略的設定檔會忽略這些設定。",
+    "closeAria": "關閉執行階段行為並返回 Turbo",
+    "pacing": {
+      "title": "節奏策略",
+      "intro": "「自動」以穩定為優先：它會先使用 Async，若 Async 停頓或重複拒絕影格，就改試 Sequenced，然後在穩定遊玩 60 秒後記住該策略。它不會比較效能，因此記住的策略不一定是最快的。",
+      "mode": "模式",
+      "asyncOnly": "僅 Async · 通常最快",
+      "sequencedOnly": "僅 Sequenced · 適用於需要它的執行階段",
+      "autoActiveStrong": "「自動」作用中。",
+      "autoActive": "{strong} Async 會讓執行階段的等待與遊戲工作重疊進行；Sequenced 則支援要求等待與提交保持互鎖的執行階段。在下方固定某個執行階段即可測試特定策略。",
+      "manualStrong": "手動覆寫作用中。",
+      "manual": "{strong} 只會執行選取的策略。自動探索已暫停；Turbo 安全機制與即時錯誤暫停仍然有效。"
+    },
+    "decisions": {
+      "eyebrow": "執行階段決策",
+      "intro": "檢閱「自動」學到的內容，或覆寫某個執行階段而不影響其他執行階段。",
+      "active": "作用中：{runtime}",
+      "empty": "目前沒有可管理的項目。Turbo 在某個執行階段上的第一個工作階段結束後，「自動」就會記錄一項決策。",
+      "environment": "環境",
+      "decision": "決策",
+      "learned": "學到的時間",
+      "override": "覆寫",
+      "activeBadge": "作用中",
+      "unknownHeadset": "未知的頭戴式裝置",
+      "useAuto": "使用自動",
+      "pinAsync": "固定 Async",
+      "pinSequenced": "固定 Sequenced",
+      "clearRetestTitle": "清除此執行階段學到的決策與安全封鎖。請在「自動」模式且沒有手動覆寫的情況下重新啟動遊戲，以測試 Async，必要時再測試 Sequenced。",
+      "clearRetest": "清除並重新測試",
+      "inactiveNote": "選取全域手動覆寫時，執行階段決策不會作用。",
+      "willTest": "「自動」會在下一個 Turbo 工作階段中測試 {runtime}，從 Async 開始。"
+    },
+    "mode": {
+      "notSupported": "不支援",
+      "undiscovered": "尚未探索"
+    },
+    "badge": {
+      "pinned": "已固定",
+      "suspended": "已暫停",
+      "discovered": "已探索"
+    }
+  }
+}

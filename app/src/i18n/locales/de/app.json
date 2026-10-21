@@ -1,0 +1,210 @@
+{
+  "tabs": {
+    "home": {
+      "label": "Start",
+      "subtitle": "Status, Updates und Unterstützung"
+    },
+    "core": {
+      "label": "Einstellungen",
+      "subtitle": "Laufzeit, Protokollierung, Design und Konfiguration",
+      "suiteOn": "Suite ein",
+      "suiteOff": "Suite aus"
+    },
+    "osd": {
+      "label": "Bildschirmanzeige",
+      "subtitle": "Headset-Anzeige, Platzierung und Belegungen"
+    },
+    "registry": {
+      "label": "Anwendungsregister",
+      "subtitle": "Anwendungen für die Profilzuweisung registrieren",
+      "status_one": "{count} App",
+      "status_other": "{count} Apps"
+    },
+    "layers": {
+      "label": "OpenXR-Layer",
+      "subtitle": "Reihenfolge impliziter Layer prüfen und verwalten",
+      "status": "System"
+    },
+    "about": {
+      "label": "Info",
+      "subtitle": "Projektinfos, Patchnotes und Unterstützung"
+    },
+    "quadviews": {
+      "label": "Quadviews",
+      "subtitle": "Steuerung des dynamischen Foveated Rendering"
+    },
+    "turbo": {
+      "label": "Turbo",
+      "subtitle": "Überschreibt die Bildtaktung bei hartnäckigen FPS-Grenzen"
+    },
+    "framegen": {
+      "label": "Frame Generation",
+      "subtitle": "Flüssigere Bewegung mit generierten Bildern"
+    },
+    "pivotxr": {
+      "label": "Pivot",
+      "subtitle": "Drehungsabstimmung – check your six!"
+    },
+    "depthxr": {
+      "label": "Tiefe",
+      "subtitle": "Abstimmung der Stereotiefe – sehen Sie die Welt neu!"
+    }
+  },
+  "status": {
+    "trayFailed": "Das Infobereichssymbol konnte nicht eingerichtet werden",
+    "enabledFromTray": "VectorXR über den Infobereich aktiviert",
+    "disabledFromTray": "VectorXR über den Infobereich deaktiviert",
+    "logLevelDebugFromTray": "Protokollebene über den Infobereich auf „Debug“ gesetzt",
+    "logLevelInfoFromTray": "Protokollebene über den Infobereich auf „Info“ gesetzt",
+    "fixBeforeSaving": "Beheben Sie die Validierungsfehler vor dem Speichern",
+    "loadLogsFailed": "Protokolle konnten nicht geladen werden",
+    "loadLayersFailed": "Status der OpenXR-Layer konnte nicht geladen werden",
+    "fixBeforeExporting": "Beheben Sie die Validierungsfehler vor dem Exportieren",
+    "configExported": "Konfiguration exportiert",
+    "exportCanceled": "Export abgebrochen",
+    "exportFailed": "Konfiguration konnte nicht exportiert werden",
+    "debugExported": "Debuginformationen exportiert",
+    "debugExportCanceled": "Debugexport abgebrochen",
+    "debugExportFailed": "Debuginformationen konnten nicht exportiert werden",
+    "importInvalidJson": "Import fehlgeschlagen: Die Datei ist kein gültiges JSON"
+  },
+  "resetConfirm": "VectorXR auf Standardwerte zurücksetzen?\n\nDadurch werden alle gespeicherten Einstellungen, Einträge im Anwendungsregister, Profile und Erkennungsdaten der OpenXR-Anwendungen gelöscht. Dies kann nicht rückgängig gemacht werden.",
+  "updates": {
+    "available": "Version {version} ist verfügbar. Klicken Sie für Details.",
+    "checkFailed": "Derzeit kann nicht nach Updates gesucht werden.",
+    "httpFailed": "Die Updateprüfung über GitHub ist mit HTTP {status} fehlgeschlagen",
+    "invalidRelease": "GitHub hat kein gültiges Release zurückgegeben"
+  },
+  "sidebar": {
+    "appSettings": "App-Einstellungen",
+    "enhancements": "OpenXR-Verbesserungen",
+    "suiteOff": "VectorXR-Laufzeiteffekte sind ausgeschaltet",
+    "moduleTitle": "{subtitle}. {status}",
+    "saveHint": "Klicken Sie auf „Änderungen speichern“, um die Einstellungen anzuwenden. Jede Verbesserung gibt an, welche Änderungen einen Neustart der VR-Anwendung erfordern.",
+    "logoAlt": "VectorXR-Logo",
+    "version": "v{version}",
+    "updateTooltip": "Eine neue Version ist verfügbar. Klicken Sie für Details.",
+    "updateAria": "Eine neue Version ist verfügbar"
+  },
+  "saveBar": {
+    "unsaved": "Nicht gespeicherte Änderungen",
+    "allSaved": "Alle Änderungen gespeichert",
+    "pending": "Ausstehend",
+    "dirtyHint": "Speichern zum Anwenden oder Verwerfen zum Zurücksetzen.",
+    "cleanHint": "Die Konfiguration entspricht dem Datenträger.",
+    "saving": "Wird gespeichert...",
+    "save": "Änderungen speichern",
+    "discard": "Verwerfen",
+    "fixBeforeSaving": "Vor dem Speichern beheben:",
+    "moreErrors_one": "…und {count} weiterer",
+    "moreErrors_other": "…und {count} weitere"
+  },
+  "importPreview": {
+    "eyebrow": "Import",
+    "title": "Vor dem Anwenden prüfen",
+    "description": "Ein gültiger Import wird sofort gespeichert. Importe mit Validierungsproblemen können trotzdem zur Reparatur in den Editor geladen werden.",
+    "whatWillLoad": "Was geladen wird",
+    "applications": "Anwendungen: {number}",
+    "moduleDefault_one": "{module} Standard: {state} – {count} Profil",
+    "moduleDefault_other": "{module} Standard: {state} – {count} Profile",
+    "issuesFound_one": "{count} Validierungsproblem gefunden",
+    "issuesFound_other": "{count} Validierungsprobleme gefunden",
+    "issuesHint": "Sie können trotzdem anwenden – Fehler werden im Validierungsbereich angezeigt, und das Speichern ist blockiert, bis sie behoben sind.",
+    "valid": "Konfigurationsstruktur und Wertebereiche scheinen gültig zu sein.",
+    "applyToEditor": "In Editor übernehmen",
+    "importAndSave": "Importieren und speichern"
+  },
+  "debugExport": {
+    "eyebrow": "Diagnose",
+    "title": "Debuginformationen exportieren",
+    "description": "VectorXR packt Informationen zur Problembehandlung in eine ZIP-Datei, die Sie beim Testen teilen können.",
+    "included": "Enthalten",
+    "items": {
+      "settings": "Aktuelle und gespeicherte Einstellungen als JSON",
+      "seenApps": "Erkannte OpenXR-Apps",
+      "logs": "Aufbewahrte VectorXR-Protokolle und der neueste Frame Generation-Trace (Debug-Protokollierung)",
+      "layers": "Momentaufnahme der OpenXR-Layer",
+      "health": "Zusammenfassung der Zustandsprüfung",
+      "version": "App-Version und relevante Pfade",
+      "turboMetrics": "Turbo-Metriken und Taktungsentscheidungen",
+      "turboSafety": "Turbo-Sicherheitssperren und Fehlerverlauf",
+      "runtime": "Aktuelle und gespeicherte Laufzeitdiagnosen",
+      "inventory": "Dateiverzeichnis und Erfassungsfehler"
+    },
+    "limits": "Rohdateien sind auf je 8 MiB und insgesamt 64 MiB begrenzt, und die ZIP-Datei ist komprimiert. Größere Protokolle enthalten ihren Anfang und ihre neueste Ausgabe; ausgelassene oder gekürzte Dateien sind in der ZIP-Datei aufgeführt. Gelöschter Verlauf und nicht aufgezeichnete Metriken sind nicht verfügbar.",
+    "privacy": "Das Paket kann lokale Dateipfade und Namen ausführbarer Spieldateien enthalten. Es enthält keine Systemumgebungsvariablen und keine unabhängigen Dateien.",
+    "exporting": "Wird exportiert...",
+    "save": "ZIP speichern",
+    "fileType": "VectorXR-Debugpaket"
+  },
+  "profile": {
+    "number": "Profil {number}",
+    "editName": "Profilnamen bearbeiten",
+    "noApplications": "Keine Anwendungen",
+    "priority": "Prioritätsreihenfolge – wenn sich Profile bei einer Anwendung überschneiden, gehört jede gemeinsame Belegung dem höheren Profil.",
+    "moveUp": "Profil nach oben verschieben (höhere Priorität)",
+    "moveDown": "Profil nach unten verschieben (niedrigere Priorität)",
+    "enabledTitle": "Dieses Profil wendet eigene {module}-Einstellungen auf die zugewiesenen Anwendungen an.",
+    "disabledTitle": "Dieses Profil wird zur Laufzeit ignoriert.",
+    "on": "Profil ein",
+    "off": "Profil aus",
+    "conflict": "Profilkonflikt",
+    "applications": "Anwendungen",
+    "applicationsHelp": "Registrierte Anwendungen, für die dieses Profil gilt. Das erste aktive passende Profil hat Vorrang.",
+    "inactiveTitle": "Dieses Profil wird nicht aktiviert",
+    "inactiveBody": "Dieses aktivierte Profil ist keiner Anwendung zugewiesen. Wählen Sie mindestens eine Anwendung aus, oder schalten Sie das Profil aus.",
+    "offNote": "Dieses Profil ist ausgeschaltet und hat keine Wirkung. Für seine Anwendungen gilt wieder das Standardprofil für {module}."
+  },
+  "logViewer": {
+    "eyebrow": "Protokolle",
+    "title": "VectorXR-Protokollanzeige",
+    "description": "Aktuelle Layer-Protokolle werden schreibgeschützt angezeigt, damit der Laufzeitstatus leicht zu prüfen bleibt.",
+    "loading": "Protokolle werden geladen...",
+    "directory": "Protokollverzeichnis",
+    "unavailable": "Nicht verfügbar",
+    "logs": "VectorXR-Protokolle",
+    "empty": "Es wurden noch keine Protokolldateien gefunden. Starten Sie den Layer in einem Titel, und öffnen Sie diese Anzeige erneut.",
+    "selected": "Ausgewähltes Protokoll",
+    "noneSelected": "Kein Protokoll ausgewählt",
+    "copied": "Kopiert!",
+    "copyFailed": "Kopieren fehlgeschlagen",
+    "copy": "Text kopieren",
+    "opened": "Geöffnet!",
+    "openFailed": "Öffnen fehlgeschlagen",
+    "open": "Verzeichnis öffnen",
+    "noContent": "Kein Protokollinhalt verfügbar."
+  },
+  "discord": {
+    "loading": "Discord wird geladen…",
+    "opening": "Discord wird geöffnet…",
+    "join": "Discord beitreten ↗",
+    "unavailable": "Discord nicht verfügbar",
+    "loadFailed": "Die Discord-Einladung konnte nicht geladen werden. Versuchen Sie es erneut.",
+    "invitesUnavailable": "Discord-Einladungen sind derzeit nicht verfügbar.",
+    "openFailed": "Der Browser konnte nicht geöffnet werden. Versuchen Sie es erneut.",
+    "retryAria": "Laden der Discord-Einladung wiederholen",
+    "loadingStatus": "Discord-Einladung wird geladen."
+  },
+  "healthCheck": {
+    "eyebrow": "Systemzustand",
+    "title": "Zustandsprüfung",
+    "layer": "VectorXR-Layer",
+    "layerNotFound": "Nicht gefunden",
+    "lastSeenApp": "Zuletzt erkannte App",
+    "noApp": "Noch keine OpenXR-App erkannt",
+    "exportHint": "Exportieren Sie ein Debugpaket, wenn Sie Informationen zur Problembehandlung teilen.",
+    "export": "Debuginformationen exportieren"
+  },
+  "healthLoading": {
+    "label": "Zustandsinformationen werden geladen",
+    "checking": "Wird geprüft"
+  },
+  "patchNotes": {
+    "eyebrow": "Patchnotes",
+    "title": "Neueste Updates",
+    "description": "Alle Neuerungen der App, mit dem neuesten Eintrag oben angeheftet."
+  },
+  "setupGuide": {
+    "title": "Einrichtungsanleitung"
+  }
+}

@@ -1,0 +1,237 @@
+{
+  "title": "Frame Generation",
+  "experimental": "実験的",
+  "intro": "ゲームのフレームの間に生成フレームを追加するため、ゲームが追いつかないときでもヘッドセットの最大リフレッシュ レートで滑らかな動きを保てます。ゲームごとに試して、A/B 切り替えで比較してください。",
+  "howItWorksTitle": "Frame Generation のしくみ",
+  "restartNote": "Frame Generation をオンにすると、次回ゲームを起動したときに反映されます。オフにした場合はすぐに反映されます。",
+  "restartToApply": {
+    "label": "適用には再起動が必要:",
+    "body": "{label} ゲームに対して Frame Generation をオンにすると、次回ゲームを起動したときに反映されます。オフにする場合と、このページのその他のすべての設定は、プレイ中に反映されます。"
+  },
+  "setupGuide": {
+    "title": "セットアップ ガイド",
+    "summary": "1 つのゲームでオンにして、ヘッドセットで比較する",
+    "smoothing": {
+      "label": "ランタイムのスムージングをオフにします",
+      "body": "{label}。ゲームに対して、ランタイムとヘッドセット独自のソフトウェアの両方で、SteamVR Motion Smoothing、Pimax Smart Smoothing、Virtual Desktop SSW、Meta ASW をオフにしてください。これらは Frame Generation のペーシングと干渉します。"
+    },
+    "refreshRate": {
+      "label": "ヘッドセットを最大リフレッシュ レートのままにします。",
+      "body": "{label} Pimax Play の Lock Frame Rate to Half Refresh Rate や SteamVR の Throttling Behavior のフレーム制限でフレーム レートを半分にしないでください。Frame Generation がゲームのレートを自ら設定します。"
+    },
+    "halfRate": {
+      "label": "まずゲームをリフレッシュ レートの半分で動かします。",
+      "body": "{label} Frame Generation をオフにした状態で、ヘッドセットのレートの少なくとも半分 (90 Hz で 45 fps) を維持できるまで、ゲームの設定またはレンダリング解像度を下げてください。Frame Generation は半分から最大まで引き上げられますが、最初の半分を補うことはできません。"
+    },
+    "oneGame": {
+      "label": "1 つのゲームでオンにします:",
+      "body": "{label} 既定のプロファイルはオフのままにし、下でカスタム プロファイルを追加してゲームを割り当ててください。既定の設定はほとんどのゲームに適しています。"
+    },
+    "restart": {
+      "label": "保存してゲームを再起動します。",
+      "body": "{label} Frame Generation をオンにした変更は次回の起動時に反映されます。"
+    },
+    "check": {
+      "label": "ヘッドセットで確認します:",
+      "osd": "オンスクリーン表示",
+      "body": "{label} {osd} の FPS の横に FG オンが表示されます。または、診断ビューで [生成フレームの色付け] を選択してください (確認後は [オフ] に戻してください)。"
+    },
+    "compare": {
+      "label": "比較します:",
+      "body": "{label} A/B 切り替えを割り当て、同じシーンで生成フレームをオフ/オンにしてください。"
+    },
+    "turboNote": "Frame Generation が動作するゲームでは、Turbo はオフのままです。"
+  },
+  "controls": {
+    "heading": "ヘッドセット内の操作",
+    "statusUnavailable": "ランタイムの状態は一時的に利用できません。",
+    "noSession": "実行中の VR アプリケーションはありません"
+  },
+  "session": {
+    "withReason": "{status} · {reason}",
+    "withReasonColon": "{status}: {reason}",
+    "active": "オン",
+    "standby": "待機",
+    "waiting": "開始中 · 安定したフレームを待っています",
+    "paused": "一時停止",
+    "unavailable": "利用不可",
+    "off": "オフ",
+    "needsLayer": "更新された VectorXR レイヤーが必要です",
+    "unknown": "状態を取得できません"
+  },
+  "gameDepth": {
+    "inUse": {
+      "label": "ゲームの深度を使用中",
+      "title": "ゲームが深度を共有しているため、頭を動かしても近くの物体が安定して表示されます。"
+    },
+    "empty": {
+      "label": "ゲームの深度が空です",
+      "title": "ゲームは深度を送信していますが、中身が書き込まれていません。ゲームに深度ベースのリプロジェクションのオプションがある場合、それをオンにすると Frame Generation が深度を使用できます。"
+    },
+    "unusable": {
+      "label": "ゲームの深度は未使用",
+      "title": "ゲームが送信する深度は左右の目で一致しないため、Frame Generation は深度なしで動作します。"
+    }
+  },
+  "toggle": {
+    "heading": "A/B 切り替え",
+    "hint": "省略可能。Frame Generation をオンにして開始したゲームで、生成フレームをオフ/オンに切り替えます。",
+    "label": "Frame Generation A/B 切り替え",
+    "description": "ヘッドセット内で生成フレームをオフ/オンに切り替え、同じシーンで動きを比較します。Frame Generation をオンにして開始したゲームで機能します。",
+    "noneText": "バインドが割り当てられていません。Frame Generation は、ゲーム開始時にオンになっている場所で常に動作します。"
+  },
+  "diagnostic": {
+    "heading": "診断ビュー",
+    "hint": "{description} すべてのゲームに適用され、プレイ中に更新されます。",
+    "onWarning": "オン: ヘッドセット内の生成フレームがこのビューの色で描画され、通常のプレイでは不具合のように見えます。終わったら [オフ] に戻してください。",
+    "views": {
+      "off": {
+        "label": "オフ",
+        "description": "生成フレームをそのまま表示します。"
+      },
+      "flow": {
+        "label": "モーション フロー",
+        "description": "Frame Generation が生成フレーム上で測定した動きを色分けして表示します。"
+      },
+      "confidence": {
+        "label": "信頼度",
+        "description": "生成フレームのうち実際の画像にフォールバックした部分を赤く塗ります。詳細設定を調整する際に便利です。"
+      },
+      "tint": {
+        "label": "生成フレームの色付け",
+        "description": "生成フレームにかすかに色を付け、表示されていることを確認できるようにします。"
+      }
+    }
+  },
+  "defaultProfile": {
+    "heading": "既定のプロファイル",
+    "appliesTo": "有効なカスタム プロファイルのないゲームに適用されます",
+    "toggleOn": "既定のプロファイル オン",
+    "toggleOff": "既定のプロファイル オフ",
+    "offNote": "カスタム プロファイルのないゲームではオフです。下のカスタム プロファイルは、それぞれのゲームで引き続きオンにします。",
+    "onWarning": {
+      "label": "カスタム プロファイルのないすべてのゲームでオンです。",
+      "body": "{label} まだ試していないゲームも含まれます。より安全な設定は、これをオフのままにし、確認済みのゲームごとにプロファイルを追加することです。"
+    }
+  },
+  "customProfiles": {
+    "heading": "カスタム プロファイル",
+    "description": "ゲームごとに Frame Generation をオンにします。最初に一致した有効なプロファイルが優先されます。",
+    "add": "プロファイルの追加",
+    "empty": "カスタム プロファイルはまだありません。ゲームで Frame Generation をオンにするには、プロファイルを追加してください。",
+    "duplicateApplication": "{application} はすでにプロファイル {profile} の対象です。最初のアクティブなプロファイルが優先されます。"
+  },
+  "summary": {
+    "format": "{mode} · {rate} · {motion}",
+    "dynamic": "Dynamic",
+    "fixedAuto": "Fixed 自動",
+    "fixed": "Fixed {multiplier}"
+  },
+  "howItWorks": {
+    "whatItDoes": {
+      "heading": "機能",
+      "body": "Frame Generation は、ゲームのフレーム間で画像がどのように動くかを測定し、その動きから新しいフレームを作成します。そのため、ゲームのレンダリング数が少なくても、ヘッドセットはリフレッシュごとに新しい画像を受け取ります。頭の回転はヘッドセット自身のリプロジェクションがすでに処理しているため、最初に取り除かれます。"
+    },
+    "mode": {
+      "heading": "モード",
+      "interpolate": "{name} (既定) は、直近 2 つのゲーム フレームの間を補間します。最も滑らかでアーティファクトも最も少ないですが、各ゲーム フレームの表示が少し遅れます。",
+      "extrapolate": "{name} は、最新のゲーム フレームをその動きに沿って先へ投影するため、遅延が増えません。速い動きや新たに見えてくる領域ではアーティファクトが多くなります。動きのソースとして NVIDIA ハードウェアを使うと最もきれいに見えます。"
+    },
+    "frameRate": {
+      "heading": "フレーム レート",
+      "dynamic": "{name} (既定) は、ゲームをできるだけ速く動かし、ゲームのフレーム間のリフレッシュを生成フレームで埋めます。ゲームが単独で追いつけているときは、Frame Generation は待機し、何も生成しません。",
+      "fixed": "{name} は、均一なペーシングのためにゲームをリフレッシュ レートの一定の割合に固定します。90 Hz のヘッドセットでは、{x2} でゲームは 45 fps、{x3} で 30 fps、{x4} で 22.5 fps で動作します。{auto} はゲームの必要に応じてこれらから選択します。生成フレームごとに画像の移動量が大きくなるため、倍率が高いほどアーティファクトが多くなります。"
+    },
+    "beforeYouStart": {
+      "heading": "始める前に",
+      "smoothing": "{label}。ゲームに対して、ランタイムとヘッドセット独自のソフトウェアの両方で (SteamVR Motion Smoothing、Pimax Smart Smoothing、Virtual Desktop SSW、Meta ASW) オフにし、ヘッドセットを最大リフレッシュ レートのままにしてください。Pimax Play の Lock Frame Rate to Half Refresh Rate や SteamVR の Throttling Behavior のフレーム制限でフレーム レートを半分にしないでください。Frame Generation がゲームのレートを自ら設定します。",
+      "turbo": {
+        "label": "Frame Generation の動作中は Turbo はオフのままです。",
+        "body": "{label} この 2 つは逆の方法でフレームのペースを制御するため、それらのゲームでは Turbo が譲り、「Frame Generation のため一時停止」と表示されます。Turbo のプロファイルは変更されません。"
+      },
+      "apis": "Direct3D 11、Direct3D 12、Vulkan のゲームで、Quadviews 使用時も含めて動作します。"
+    },
+    "knownLimits": {
+      "heading": "既知の制限",
+      "body": "動きはゲームが表示する画像から測定されるため、文字、HUD、透明部分、繰り返しパターンは生成フレーム上でちらついたり歪んだりすることがあります。気になる場合は、[詳細設定] で [アーティファクトの抑制] を上げるか、[動きの上限] を下げてください。"
+    }
+  },
+  "settings": {
+    "mode": {
+      "legend": "モード",
+      "interpolate": {
+        "label": "Interpolate",
+        "description": "直近 2 つのゲーム フレームの間を補間します。最も滑らかでアーティファクトが最も少ない画像ですが、わずかに遅延が増えます。"
+      },
+      "extrapolate": {
+        "label": "Extrapolate",
+        "description": "最新のゲーム フレームを先へ投影します。遅延は最も小さいですが、動いている輪郭でアーティファクトが多くなります。NVIDIA ハードウェアで最もよく機能します。"
+      }
+    },
+    "frameRate": {
+      "legend": "フレーム レート",
+      "dynamic": {
+        "label": "Dynamic",
+        "description": "ゲームはできるだけ速く動作し、ヘッドセットのリフレッシュ レートまでの不足分を生成フレームが埋めます。"
+      },
+      "fixed": {
+        "label": "Fixed",
+        "description": "均一なペーシングのためにゲームをリフレッシュ レートの一定の割合に固定し、残りを生成フレームで埋めます。"
+      },
+      "fixedRate": "固定レート",
+      "rates": {
+        "auto": "ゲームの必要に応じて 2x、3x、4x から選択し、ゲームが単独で追いつけている間は何も生成しません。",
+        "x2": "ゲームはリフレッシュ レートの最大 1/2 (90 Hz で 45 fps など) で動作します。それを下回ると、ペーシングの均一さが低下します。",
+        "x3": "ゲームはリフレッシュ レートの最大 1/3 (90 Hz で 30 fps など) で動作します。それを下回ると、ペーシングの均一さが低下します。",
+        "x4": "ゲームはリフレッシュ レートの最大 1/4 (90 Hz で 22.5 fps など) で動作します。アーティファクトが最も多く、最も重いゲーム向けです。"
+      }
+    },
+    "motionSource": {
+      "legend": "動きのソース",
+      "shader": {
+        "label": "シェーダー",
+        "description": "GPU のシェーダー コアで動きを測定します。どの GPU でも動作し、Interpolate と最も相性が良いです。"
+      },
+      "hardware": {
+        "label": "NVIDIA ハードウェア",
+        "description": "NVIDIA RTX GPU のオプティカル フロー ユニットを使用します。特に繰り返しパターンでより正確です。Extrapolate と、固定または自動フレーム レートの Interpolate で使用されます (実験的)。"
+      }
+    },
+    "advanced": {
+      "summary": "{flow} · 抑制 {suppression} · 動きの上限 {motionLimit}%",
+      "summaryHeadPrediction": "{flow} · 抑制 {suppression} · 動きの上限 {motionLimit}% · 頭の予測",
+      "reset": "詳細設定のリセット"
+    },
+    "flowQuality": {
+      "heading": "フローの品質",
+      "resolution": "目の画像の {resolution}",
+      "description": "動きをどれだけ細かく測定するかです。高いほど小さく細い物体をよく追跡しますが、GPU 時間が多くかかります。",
+      "levels": {
+        "performance": "パフォーマンス",
+        "balanced": "バランス",
+        "quality": "品質"
+      },
+      "summary": {
+        "performance": "パフォーマンス フロー",
+        "balanced": "バランス フロー",
+        "quality": "品質フロー"
+      }
+    },
+    "artifactSuppression": {
+      "heading": "アーティファクトの抑制",
+      "valueLabel": "アーティファクトの抑制の値",
+      "smoother": "滑らかな動き",
+      "fewer": "アーティファクトが少ない",
+      "description": "動きが不確かな場所では、値が高いほど早く実際の画像を表示します。歪みは減りますが、ジャダーが少し増えます。"
+    },
+    "motionLimit": {
+      "heading": "動きの上限",
+      "valueLabel": "ビュー幅に対する割合 (%) で表した動きの上限の値",
+      "description": "生成フレームが画像を移動できる最大量で、ビュー幅に対する割合で表します。これより速い動きでは実際の画像が表示されます。"
+    },
+    "headPrediction": {
+      "heading": "頭の予測を延長",
+      "description": "Frame Generation はゲームに最大約 150 ms 先までレンダリングさせますが、Pimax などの一部のランタイムはそのうち約 20 ms 分しか頭の動きを予測しません。この設定は残りの時間にも頭の回転を引き継ぎ、向いた側の端に出る黒い部分を減らします。ゲームを開始する前にオンにしてください。"
+    }
+  }
+}

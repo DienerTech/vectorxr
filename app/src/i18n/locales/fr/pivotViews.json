@@ -1,0 +1,137 @@
+{
+  "shared": {
+    "pivot": "Pivot",
+    "breadcrumb": "Fil d'Ariane",
+    "returnToPivot": "Revenir à Pivot",
+    "editTitle": "Modifier {name}",
+    "yaw": "Lacet",
+    "pitch": "Tangage",
+    "transition": "Transition",
+    "unitSeconds": "s",
+    "unitCm": "cm",
+    "behavior": "Comportement",
+    "hold": "Maintenir",
+    "toggle": "Basculer",
+    "addBinding": "Ajouter une affectation",
+    "bindingLabel": "Affectation {index}",
+    "holdDescription": "La vue n'est active que pendant le maintien.",
+    "toggleDescription": "Appuyez une fois pour entrer ; appuyez à nouveau pour sortir.",
+    "bindingCount_one": "{count} affectation",
+    "bindingCount_other": "{count} affectations"
+  },
+  "viewControlsPage": {
+    "snapViews": "Vues instantanées",
+    "title": "{context} — Vues instantanées",
+    "returnHint": "Appuyez sur Échap ou Terminé pour revenir.",
+    "returnToSnapViews": "Revenir aux Vues instantanées",
+    "name": "Nom",
+    "yawHint": "Négatif tourne à gauche ; positif tourne à droite.",
+    "positionOffset": "Décalage de position facultatif",
+    "positionHint": "La position est relative à l'origine Pivot capturée. La translation naturelle de la tête reste disponible.",
+    "rightLeft": "Droite / gauche",
+    "upDown": "Haut / bas",
+    "forwardBack": "Avant / arrière",
+    "bindings": "Affectations",
+    "bindingsHint": "Maintenir revient en arrière au relâchement. Basculer reste actif jusqu'au prochain appui ou jusqu'à ce qu'une autre Vue rapide prenne le relais.",
+    "noBindings": "Aucune affectation. Cette Vue rapide est inactive tant qu'aucune affectation n'est ajoutée.",
+    "quickViews": "Vues rapides",
+    "quickViewsHint": "Poses nommées relatives à l'origine Pivot, avec un suivi naturel de la tête 1:1 autour de la cible.",
+    "createPreset": "Créer un préréglage à 4 vues",
+    "addQuickView": "Ajouter une Vue rapide",
+    "empty": "Aucune Vue rapide pour l'instant. Ajoutez-en une manuellement ou commencez avec le préréglage HAT à quatre vues.",
+    "summary_one": "Lacet {yaw}° · Tangage {pitch}° · {count} affectation",
+    "summary_other": "Lacet {yaw}° · Tangage {pitch}° · {count} affectations",
+    "position": "Position D {right} · H {up} · Av {forward} cm",
+    "moveUp": "Monter",
+    "moveDown": "Descendre",
+    "copyName": "Copie de {name}",
+    "presets": {
+      "lookLeft": "Regard à gauche",
+      "lookRight": "Regard à droite",
+      "high12": "12 h haut",
+      "checkSix": "Contrôle des six"
+    }
+  },
+  "viewControlsPanel": {
+    "snapViews": "Vues instantanées",
+    "viewCount_one": "{count} vue",
+    "viewCount_other": "{count} vues",
+    "editSnapViews": "Modifier les Vues instantanées…"
+  },
+  "nudgeSetPage": {
+    "nudgeSets": "Jeux d'ajustements",
+    "linked_one": "Lié à {count} profil. Les modifications s'appliquent partout où ce jeu est sélectionné.",
+    "linked_other": "Lié à {count} profils. Les modifications s'appliquent partout où ce jeu est sélectionné.",
+    "setName": "Nom du jeu",
+    "allowWhileInactive": "Autoriser lorsque Pivot est inactif",
+    "allowWhileInactiveHint": "Ces affectations peuvent ajuster et conserver le décalage de vue global même lorsqu'aucun profil lié n'est engagé.",
+    "yawStep": "Pas de lacet",
+    "pitchStep": "Pas de tangage",
+    "yawLeft": "Lacet à gauche",
+    "yawRight": "Lacet à droite",
+    "pitchUp": "Tangage vers le haut",
+    "pitchDown": "Tangage vers le bas",
+    "yawStepDescription": "Ajoute un pas de lacet à la vue actuelle.",
+    "pitchStepDescription": "Ajoute un pas de tangage à la vue actuelle.",
+    "center": "Recentrer le décalage d'ajustement",
+    "centerDescription": "Efface le décalage d'ajustement accumulé.",
+    "resetToDefaults": "Rétablir par défaut",
+    "confirmReset": "Réinitialiser les valeurs de mouvement et supprimer toutes les affectations de ce jeu d'ajustements ?",
+    "deleteSet": "Supprimer le jeu d'ajustements",
+    "deleteTitle": "Supprimer ce jeu d'ajustements",
+    "deleteRequired": "Au moins un jeu d'ajustements est requis",
+    "confirmDelete": "Supprimer « {name} » ? Les profils qui l'utilisent passeront à un autre jeu d'ajustements."
+  },
+  "snapBindingsPage": {
+    "snapViewBindings": "Affectations des Vues instantanées",
+    "title": "{context} — Affectations des Vues instantanées",
+    "hint": "Affectez des commandes Maintenir ou Basculer sans modifier les transformations de vue enregistrées.",
+    "noBinding": "Aucune affectation. Cette Vue instantanée est inactive.",
+    "empty": "Aucune Vue instantanée n'existe encore. Créez des vues depuis Modifier les Vues instantanées avant d'affecter des commandes."
+  },
+  "snapBindingsPanel": {
+    "snapViewBindings": "Affectations des Vues instantanées",
+    "inactiveHint": "Les Vues instantanées restent inactives tant qu'aucune affectation n'est définie.",
+    "editBindings": "Modifier les affectations…"
+  },
+  "snapStacking": {
+    "title": "Appliquer le Mouvement amélioré aux Vues instantanées",
+    "description": "Conserve l'assistance en entrant dans une Vue instantanée, ou l'active autour d'une vue déjà sélectionnée. Utilise les réglages de rotation et de position de ce profil."
+  },
+  "originPage": {
+    "originControls": "Commandes d'origine",
+    "title": "{context} — Commandes d'origine",
+    "hint": "Gardez la pose neutre de Pivot alignée sur la position de recentrage du simulateur.",
+    "closeLabel": "Fermer les commandes d'origine et revenir à Pivot",
+    "setOrigin": "Définir l'origine (facultatif)",
+    "setOriginDescription": "Capture la pose actuelle de la tête comme origine assise neutre de Pivot. Affectez-la à la même commande que celle utilisée pour recentrer la vue en jeu afin que les deux origines soient mises à jour ensemble.",
+    "setOriginNone": "Aucune affectation. Pivot tourne autour de l'origine du casque.",
+    "releaseOrigin": "Libérer l'origine (facultatif)",
+    "releaseOriginDescription": "Efface une origine capturée et ramène Pivot à l'origine du casque. Utile si une origine a été capturée en regardant de travers.",
+    "releaseOriginNone": "Aucune affectation. Une origine capturée reste active jusqu'à la fin de la session ou jusqu'à ce qu'elle soit recapturée."
+  },
+  "originPanel": {
+    "originControls": "Commandes d'origine",
+    "setOrigin": "Définir l'origine",
+    "setOriginTitle": "Capture la pose actuelle de la tête comme origine assise neutre de Pivot.",
+    "releaseOrigin": "Libérer l'origine",
+    "releaseOriginTitle": "Libère une origine capturée et ramène Pivot à l'origine par défaut du casque.",
+    "editOrigin": "Modifier l'origine…"
+  },
+  "bindingsPanel": {
+    "motionActivation": "Activation du mouvement",
+    "alwaysActive": "Toujours actif",
+    "manual": "Manuel",
+    "noSuspendControls": "Aucune commande de suspension",
+    "noActivationControls": "Aucune commande d'activation",
+    "editActivation": "Modifier l'activation..."
+  },
+  "bindingsPage": {
+    "motionActivation": "Activation du mouvement",
+    "title": "{context} — Activation",
+    "returnHint": "Appuyez sur Échap ou Terminé pour revenir à Pivot.",
+    "closeLabel": "Fermer l'activation et revenir à Pivot",
+    "alwaysActiveDescription": "Choisissez les commandes qui suspendent temporairement ou désactivent Pivot.",
+    "manualDescription": "Choisissez les commandes qui engagent Pivot."
+  }
+}

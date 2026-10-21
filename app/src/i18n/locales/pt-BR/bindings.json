@@ -1,0 +1,110 @@
+{
+  "editor": {
+    "type": "Tipo de atribuição",
+    "types": {
+      "none": "Nenhuma",
+      "keyboard": "Teclado",
+      "device": "Dispositivo"
+    },
+    "noneText": "Nenhuma atribuição definida. Esta ação não será executada até que uma atribuição seja selecionada.",
+    "modifiers": "Modificadores",
+    "primaryKey": "Tecla principal"
+  },
+  "sound": {
+    "playOnFire": "Reproduzir um som quando esta ação for disparada",
+    "playOnTransition": "Reproduzir um som ao ativar / desativar",
+    "explanation": "Um sinal sonoro extra para esta atribuição. Deixe um espaço com o tom padrão ou escolha seu próprio .wav curto.",
+    "defaultTone": "Tom padrão",
+    "single": "Som",
+    "activate": "Ativar",
+    "deactivate": "Desativar",
+    "browse": "Procurar…",
+    "test": "Testar",
+    "pickerFailed": "Falha ao abrir o seletor de arquivos.",
+    "playFailed": "Falha ao reproduzir o som."
+  },
+  "list": {
+    "add": "Adicionar atribuição",
+    "noneText": "Nenhuma atribuição definida. Esta ação não será executada até que uma atribuição seja adicionada.",
+    "bindingNumber": "Atribuição {number}",
+    "bindingDescription": "Escolha um atalho de teclado ou uma entrada de dispositivo detectada."
+  },
+  "panel": {
+    "soundEnabledHint": "O retorno sonoro está ativado para uma atribuição",
+    "soundEnabledAria": "Retorno sonoro ativado",
+    "editOne": "Editar atribuição…",
+    "editMany": "Editar atribuições…"
+  },
+  "page": {
+    "breadcrumbAria": "Trilha de navegação",
+    "breadcrumbBinding": "Atribuição",
+    "returnHint": "Pressione Esc ou Concluído para voltar a {module}.",
+    "closeAria": "Fechar a atribuição e voltar a {module}",
+    "listDescription": "{description} Adicione uma atribuição para cada dispositivo com que você voa; qualquer uma delas funciona."
+  },
+  "device": {
+    "joystickDevice": "Dispositivo de joystick",
+    "scanning": "Procurando...",
+    "selectDevice": "Selecione um dispositivo",
+    "disconnectedOption": "{name} (desconectado)",
+    "disconnectedName": "<dispositivo desconectado>",
+    "noDeviceSelected": "Nenhum dispositivo selecionado",
+    "assignedInput": "Entrada atribuída",
+    "manualAria": "Escolher a entrada do joystick manualmente",
+    "selectInput": "Selecione uma entrada...",
+    "manualHint": "Escolha um botão ou uma direção de HAT sem escutar a entrada.",
+    "manualHintNoDevice": "Selecione primeiro um joystick conectado.",
+    "manual": "Manual",
+    "button": "Botão {number}",
+    "hatInput": "HAT {number} {direction}",
+    "hatDirections": {
+      "up": "Cima",
+      "upRight": "Cima direita",
+      "right": "Direita",
+      "downRight": "Baixo direita",
+      "down": "Baixo",
+      "downLeft": "Baixo esquerda",
+      "left": "Esquerda",
+      "upLeft": "Cima esquerda"
+    },
+    "noInput": "Nenhuma entrada capturada",
+    "buttonCount_one": "{count} botão",
+    "buttonCount_other": "{count} botões",
+    "hatCount_one": "{count} HAT",
+    "hatCount_other": "{count} HATs",
+    "capabilities": "{buttons}, {hats}",
+    "disconnectedTitle": "O dispositivo atribuído não está conectado no momento",
+    "disconnectedBody": "Esta atribuição continua salva como {device} / {input}, mas o Windows não está relatando esse joystick no momento.",
+    "capture": "Capturar entrada",
+    "canceling": "Cancelando...",
+    "listening": "Escutando... {seconds}s",
+    "cancelListening": "Cancelar escuta ({seconds}s)",
+    "refresh": "Atualizar dispositivos",
+    "metadata": "Metadados",
+    "metadataTitle": "Metadados do joystick",
+    "deviceGuid": "GUID do dispositivo",
+    "connectionStatus": "Status da conexão",
+    "productGuid": "GUID do produto",
+    "inputPath": "Caminho da entrada",
+    "inputLabel": "Rótulo da entrada",
+    "unassigned": "Não atribuído",
+    "unavailable": "Indisponível",
+    "connected": "Conectado",
+    "disconnected": "Desconectado",
+    "status": {
+      "canceling": "Cancelando a captura de entrada...",
+      "cancelFailedWith": "Não foi possível cancelar a captura: {message}",
+      "cancelFailed": "Não foi possível cancelar a captura. Ela será encerrada automaticamente no limite de tempo.",
+      "noDevices": "Nenhum dispositivo de joystick encontrado.",
+      "selectFirst": "Selecione um joystick conectado antes de capturar uma entrada.",
+      "listening": "Escutando somente {device}. Pressione Esc para cancelar; a captura é encerrada automaticamente após 15 segundos.",
+      "canceled": "Captura de entrada cancelada.",
+      "timedOut": "A captura de entrada expirou após 15 segundos.",
+      "captured": "Capturado {device} / {input}.",
+      "captureFailed": "Falha ao capturar a entrada do joystick.",
+      "selected": "{device} selecionado. Capture ou escolha uma entrada manualmente.",
+      "assigned": "{device} / {input} atribuído manualmente."
+    },
+    "listFailed": "Falha ao listar os dispositivos de joystick."
+  }
+}

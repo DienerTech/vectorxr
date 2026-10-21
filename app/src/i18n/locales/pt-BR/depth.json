@@ -1,0 +1,218 @@
+{
+  "title": "Profundidade",
+  "experimental": "Experimental",
+  "intro": "Molde a escala binocular e o posicionamento da profundidade como um único sistema e use perfis por aplicativo quando um título precisar de ajuste próprio. Comece no neutro, altere um controle de cada vez e use a atribuição de execução para comparações A/B imediatas.",
+  "tuningGuide": {
+    "title": "Guia de ajuste",
+    "summary": "Defina a escala, posicione a profundidade e compare",
+    "ariaLabel": "Guia de ajuste de profundidade",
+    "scale": {
+      "step": "Etapa 1: defina a escala",
+      "name": "Profundidade estéreo",
+      "body": "Para a esquerda aumenta a escala aparente do mundo e pode restaurar proporções em tamanho real quando um cockpit parece miniaturizado. Para a direita reforça a forma estéreo e a presença quando um título parece plano demais ou grande demais. A geometria próxima é a que mais muda."
+    },
+    "place": {
+      "step": "Etapa 2: posicione a profundidade",
+      "name": "Plano de convergência",
+      "body": "Deixe isto em zero enquanto avalia a escala e depois posicione o plano de trabalho em pequenos passos. Para a esquerda dá mais espaço a um cockpit apertado; para a direita aproxima um painel, uma mira ou uma área de interação distante."
+    },
+    "compare": {
+      "step": "Etapa 3: compare",
+      "name": "Ajuste em par",
+      "body": "Trate cada perfil de jogo como uma calibração visual própria — geometrias de câmera diferentes podem pedir combinações totalmente diferentes, não pequenas variações. Faça A/B contra a geometria nativa e pare ao primeiro sinal de cansaço visual ou dificuldade de fusão."
+    }
+  },
+  "ipdNote": {
+    "lead": "As configurações de IPD do jogo podem substituir a Profundidade estéreo.",
+    "body": "{lead} Desative primeiro qualquer substituição de Force IPD, IPD virtual, separação estéreo ou escala do mundo. No DCS, desmarque {setting} em Options > VR.",
+    "forceIpdDistance": "Force IPD Distance"
+  },
+  "bindingsCard": {
+    "eyebrow": "Ajuste e compare",
+    "heading": "Atribuições no jogo",
+    "description": "Configure em um só lugar as alternâncias A/B completas de Profundidade e de Depth Lock.",
+    "assigned_one": "{count} de {total} atribuída",
+    "assigned_other": "{count} de {total} atribuídas",
+    "duplicateInputs_one": "{count} entrada duplicada",
+    "duplicateInputs_other": "{count} entradas duplicadas"
+  },
+  "defaultProfile": {
+    "heading": "Perfil padrão",
+    "appliesTo": "Aplica-se a aplicativos sem um perfil personalizado ativado",
+    "toggleOn": "Perfil padrão ligado",
+    "toggleOff": "Perfil padrão desligado",
+    "offNote": "Desligado, a menos que um perfil personalizado ativado o ligue. Os perfis personalizados abaixo continuam se aplicando aos seus aplicativos."
+  },
+  "customProfiles": {
+    "heading": "Perfis personalizados",
+    "description": "Substitua a Profundidade por aplicativo. O primeiro perfil ativado correspondente prevalece.",
+    "add": "Adicionar perfil",
+    "empty": "Nenhum perfil personalizado ainda. Adicione um perfil para substituir os valores de profundidade de um aplicativo específico.",
+    "duplicateApplication": "{application} já é atingido pelo Perfil {profile}. O primeiro perfil ativo prevalece."
+  },
+  "troubleshooting": {
+    "title": "Solução de problemas de profundidade",
+    "heading": "Quando a profundidade se comporta de forma inesperada",
+    "override": "Jogos com uma configuração de Force IPD, IPD virtual, separação estéreo ou escala do mundo podem substituir a separação dos olhos informada pelo OpenXR. Essa substituição tem precedência sobre a Profundidade estéreo do VectorXR.",
+    "dcs": {
+      "label": "DCS:",
+      "body": "{label} desmarque {setting} em Options > VR e reinicie o DCS completamente. Um valor forçado fixa a separação da câmera virtual do próprio DCS e pode fazer a Profundidade estéreo parecer não ter efeito algum."
+    },
+    "expected": {
+      "label": "Resultado esperado:",
+      "body": "{label} a Profundidade estéreo altera a escala binocular de forma mais perceptível na geometria próxima, então um cockpit pode parecer maior ou menor enquanto o terreno distante e o horizonte parecem quase inalterados. Essa resposta dependente da distância é normal."
+    },
+    "convergence": {
+      "label": "A convergência é mais sutil:",
+      "body": "{label} ela desloca o plano de paralaxe zero em vez de escalar a cena. Compare uma borda próxima do cockpit com o cenário distante enquanto a move em pequenos passos. Se a Profundidade estéreo continuar sem efeito depois de desativar as substituições do jogo, ative o log de depuração e exporte os logs da sessão."
+    },
+    "depthLock": {
+      "label": "O Depth Lock preserva a imagem ajustada no envio:",
+      "body": "{label} o jogo renderiza com a geometria estéreo alterada e depois o runtime recebe as poses dos olhos e o FOV nativos do headset, para que não possa normalizar a combinação. Compare com ele ligado e desligado com valores idênticos e reduza a intensidade ou desative-o se o conforto piorar."
+    }
+  },
+  "bindingsPage": {
+    "breadcrumb": "Trilha de navegação",
+    "current": "Atribuições no jogo",
+    "title": "Profundidade — Atribuições no jogo",
+    "escHint": "Pressione Esc ou Concluído para voltar à Profundidade.",
+    "closeLabel": "Fechar as atribuições e voltar à Profundidade",
+    "compareGently": {
+      "heading": "Compare com calma",
+      "body": "Mudanças A/B rápidas podem desafiar por um instante a fusão visual mesmo quando as duas configurações são confortáveis isoladamente. Faça pausas entre as comparações e reduza a configuração mais forte se a imagem parecer difícil de assentar."
+    },
+    "depthToggle": {
+      "label": "Alternância A/B de Profundidade",
+      "description": "Liga ou desliga o aprimoramento completo de Profundidade durante o jogo, preservando os valores ajustados para uma comparação direta. Adicione uma atribuição para cada dispositivo com que você voa; qualquer uma delas funciona.",
+      "noneText": "Nenhuma atribuição definida. A Profundidade segue o perfil ativo sem uma alternância A/B no jogo."
+    },
+    "lockToggle": {
+      "label": "Alternância A/B de Depth Lock",
+      "description": "Alterna somente o Depth Lock enquanto a Profundidade estéreo e a Convergência continuam ativas. Isso facilita perceber e sentir o que o travamento no envio contribui para a combinação ajustada. Adicione uma atribuição para cada dispositivo com que você voa; qualquer uma delas funciona.",
+      "noneText": "Nenhuma atribuição definida. O Depth Lock segue o perfil ativo."
+    }
+  },
+  "depthLock": {
+    "name": "Depth Lock",
+    "description": "Trava a geometria estéreo ajustada na imagem renderizada e depois restaura as poses dos olhos e o FOV nativos do headset para o envio, para que o runtime não possa normalizar o efeito. Teste em cada jogo e reduza a intensidade se aparecer desconforto ou náusea."
+  },
+  "stereoDepth": {
+    "title": "Profundidade estéreo / Escala do mundo",
+    "subtitle": "Altera a separação virtual dos olhos sem mexer no IPD físico do seu headset. Mova para a direita para um estéreo de campo próximo mais forte e um mundo que parece menor; mova para a esquerda para um mundo que parece maior e mais plano. Comece em torno de ±5–15%.",
+    "left": "- Mundo maior",
+    "center": "0 Escala nativa",
+    "right": "+ Efeito estéreo 3D",
+    "extendedRange": "Faixa estendida (±100%)",
+    "extendedRangeHint": "Use somente quando o ajuste normal de ±25% não for suficiente.",
+    "badgeNative": "IPD nativo",
+    "badge": "Estéreo {value}%"
+  },
+  "convergence": {
+    "title": "Convergência / Plano de profundidade",
+    "subtitle": "Posiciona o plano de paralaxe zero sem alterar a profundidade relativa. Mantenha 0 enquanto ajusta a Profundidade estéreo e depois use pequenos passos: negativo afasta o plano; positivo o aproxima.",
+    "left": "- Plano mais longe",
+    "center": "0 Padrão do aplicativo",
+    "right": "+ Plano mais perto",
+    "extendedRange": "Faixa estendida (±25)",
+    "extendedRangeHint": "Use somente quando o ajuste normal de ±5 não for suficiente.",
+    "badgeDefault": "Plano: padrão do aplicativo",
+    "badgeNearer": "Plano: mais perto +{value}",
+    "badgeFarther": "Plano: mais longe {value}"
+  },
+  "pairingMap": {
+    "heading": "Mapa de combinação de profundidade",
+    "hint": "Arraste o marcador para explorar os dois controles juntos. Use os controles deslizantes para o ajuste fino.",
+    "regionLabel": "Efeito combinado de profundidade",
+    "values": "Profundidade {depth} · Conv {convergence}",
+    "lockOn": "Depth Lock ligado",
+    "lockOff": "Depth Lock desligado",
+    "convergenceNearer": "Convergência: mais perto (+{limit})",
+    "convergenceFarther": "Convergência: mais longe (−{limit})",
+    "depthLarger": "Profundidade: escala maior (−{limit}%)",
+    "depthStronger": "Profundidade: estéreo mais forte (+{limit}%)",
+    "mapLabel": "Mapa de combinação de profundidade. Arraste para definir a Profundidade estéreo na horizontal e a Convergência na vertical. As teclas de seta fazem ajustes finos; segure Shift para passos maiores.",
+    "quadrants": {
+      "largerNear": {
+        "label": "Escala maior · Perto",
+        "axes": "Profundidade − · Convergência +"
+      },
+      "strongerNear": {
+        "label": "Estéreo mais forte · Perto",
+        "axes": "Profundidade + · Convergência +"
+      },
+      "largerFar": {
+        "label": "Escala maior · Longe",
+        "axes": "Profundidade − · Convergência −"
+      },
+      "strongerFar": {
+        "label": "Estéreo mais forte · Longe",
+        "axes": "Profundidade + · Convergência −"
+      }
+    }
+  },
+  "netEffect": {
+    "heading": "Efeito resultante",
+    "goodFitLabel": "Bom para:",
+    "goodFit": "{label} {text}",
+    "watchForLabel": "Fique atento a:",
+    "watchFor": "{label} {text}",
+    "lockOff": "O Depth Lock está desligado, então o runtime pode reinterpretar e normalizar parcialmente esta combinação no envio.",
+    "lockOn": "O Depth Lock preserva a combinação renderizada quando a geometria nativa é restaurada para o envio.",
+    "cases": {
+      "native": {
+        "title": "Geometria estéreo nativa",
+        "description": "Nenhum dos controles está alterando a escala estéreo ou o plano de profundidade do aplicativo.",
+        "useCase": "Use isto para conhecer a escala original de um título e como referência A/B para todos os perfis.",
+        "caution": "Se as proporções nativas já parecem convincentes, nenhuma correção é necessária."
+      },
+      "compactNear": {
+        "title": "Escala compacta com presença imediata",
+        "description": "Uma separação estéreo mais forte faz o mundo parecer menor e mais tridimensional, enquanto um plano mais perto traz a área de trabalho na sua direção.",
+        "useCase": "Útil quando um cockpit parece grande ou distante demais e você quer que painéis, controles e geometria próxima pareçam imediatos.",
+        "caution": "Os dois controles aumentam a exigência de campo próximo, então avance neste quadrante em pequenos passos."
+      },
+      "detailedFar": {
+        "title": "Estéreo detalhado com posicionamento confortável",
+        "description": "Uma separação estéreo mais forte adiciona forma e presença, enquanto um plano mais longe dá espaço a essa imagem mais compacta.",
+        "useCase": "Útil quando as proporções nativas parecem grandes demais, mas a Profundidade estéreo positiva sozinha deixa o cockpit apertado.",
+        "caution": "Ajuste primeiro a Profundidade estéreo e depois afaste o plano só o suficiente para que a imagem mais forte assente naturalmente."
+      },
+      "largerNear": {
+        "title": "Escala maior com plano de trabalho perto",
+        "description": "Uma separação estéreo reduzida expande a escala aparente do mundo, enquanto um plano mais perto mantém o painel e os controles visualmente acessíveis.",
+        "useCase": "Útil quando um cockpit parece de brinquedo, mas os instrumentos ou a área de interação ainda devem parecer próximos e legíveis.",
+        "caution": "Um valor de Convergência muito positivo pode cansar mesmo quando a Profundidade estéreo está reduzida."
+      },
+      "lifeSizedFar": {
+        "title": "Escala em tamanho real com posicionamento relaxado",
+        "description": "Uma separação estéreo reduzida aumenta o tamanho aparente, enquanto um plano mais longe deixa o cockpit ao seu redor em vez de colado no seu rosto.",
+        "useCase": "Útil em simuladores de aeronaves e veículos cuja câmera nativa parece miniaturizada ou próxima demais; pode corresponder melhor às proporções reais de que você se lembra.",
+        "caution": "O estéreo mais suave é intencional — pare quando a escala parecer natural em vez de buscar o efeito 3D mais forte possível."
+      },
+      "strongerStereo": {
+        "title": "Profundidade estéreo relativa mais forte",
+        "description": "A geometria próxima ganha separação e forma, aumentando a presença e fazendo o mundo parecer um pouco menor.",
+        "useCase": "Útil quando um título parece plano ou grande demais, mas o posicionamento atual do plano de profundidade já é confortável.",
+        "caution": "Se a cena começar a ficar apertada, combine com um pequeno ajuste negativo de Convergência."
+      },
+      "largerScale": {
+        "title": "Escala do mundo maior e mais suave",
+        "description": "Uma separação estéreo reduzida suaviza a intensidade de campo próximo e aumenta o tamanho aparente do mundo.",
+        "useCase": "Útil quando a geometria nativa parece miniaturizada, apertada ou estereoscopicamente mais intensa do que o veículo real.",
+        "caution": "Reduza só o suficiente para restaurar proporções críveis e manter pistas de forma úteis."
+      },
+      "planeNearer": {
+        "title": "Plano de trabalho mais perto",
+        "description": "O campo de disparidade da cena se aproxima de você sem alterar o gradiente de profundidade relativa nem a escala geral.",
+        "useCase": "Útil quando a escala parece correta, mas o painel, a mira ou a área de interação parece visualmente longe demais.",
+        "caution": "Valores positivos podem dar a sensação de olhos vesgos, principalmente quando combinados com Profundidade estéreo positiva."
+      },
+      "planeFarther": {
+        "title": "Plano de trabalho mais longe",
+        "description": "O campo de disparidade da cena se afasta sem alterar o gradiente de profundidade relativa nem a escala geral.",
+        "useCase": "Útil quando a escala parece correta, mas o cockpit ou a geometria próxima parece colada demais no seu rosto.",
+        "caution": "Afaste só o suficiente para relaxar o posicionamento, mantendo a cena fácil de fundir."
+      }
+    }
+  }
+}

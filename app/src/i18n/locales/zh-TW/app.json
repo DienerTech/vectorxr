@@ -1,0 +1,206 @@
+{
+  "tabs": {
+    "home": {
+      "label": "首頁",
+      "subtitle": "狀態、更新與支持"
+    },
+    "core": {
+      "label": "設定",
+      "subtitle": "執行階段、記錄、佈景主題與設定",
+      "suiteOn": "套件開啟",
+      "suiteOff": "套件關閉"
+    },
+    "osd": {
+      "label": "螢幕顯示",
+      "subtitle": "頭戴式裝置顯示、位置與繫結"
+    },
+    "registry": {
+      "label": "應用程式登錄",
+      "subtitle": "註冊應用程式以指派設定檔",
+      "status_other": "{count} 個應用程式"
+    },
+    "layers": {
+      "label": "OpenXR 層",
+      "subtitle": "檢查並管理隱含層順序",
+      "status": "系統"
+    },
+    "about": {
+      "label": "關於",
+      "subtitle": "專案資訊、修補說明與支持"
+    },
+    "quadviews": {
+      "label": "Quadviews",
+      "subtitle": "動態注視點渲染控制"
+    },
+    "turbo": {
+      "label": "Turbo",
+      "subtitle": "針對頑固 fps 上限的影格節奏覆寫"
+    },
+    "framegen": {
+      "label": "Frame Generation",
+      "subtitle": "以生成影格帶來更流暢的動態"
+    },
+    "pivotxr": {
+      "label": "Pivot",
+      "subtitle": "旋轉調校：留意您的六點鐘方向！"
+    },
+    "depthxr": {
+      "label": "深度",
+      "subtitle": "立體深度調校：以全新方式看世界！"
+    }
+  },
+  "status": {
+    "trayFailed": "無法設定系統匣圖示",
+    "enabledFromTray": "已從系統匣啟用 VectorXR",
+    "disabledFromTray": "已從系統匣停用 VectorXR",
+    "logLevelDebugFromTray": "已從系統匣將記錄層級設為「偵錯」",
+    "logLevelInfoFromTray": "已從系統匣將記錄層級設為「資訊」",
+    "fixBeforeSaving": "儲存前請先修正驗證錯誤",
+    "loadLogsFailed": "無法載入記錄",
+    "loadLayersFailed": "無法載入 OpenXR 層狀態",
+    "fixBeforeExporting": "匯出前請先修正驗證錯誤",
+    "configExported": "已匯出設定",
+    "exportCanceled": "已取消匯出",
+    "exportFailed": "無法匯出設定",
+    "debugExported": "已匯出偵錯資訊",
+    "debugExportCanceled": "已取消偵錯資料匯出",
+    "debugExportFailed": "無法匯出偵錯資訊",
+    "importInvalidJson": "匯入失敗：檔案不是有效的 JSON"
+  },
+  "resetConfirm": "要將 VectorXR 重設為預設值嗎？\n\n這會清除所有已儲存的設定、應用程式登錄項目、設定檔，以及 OpenXR 應用程式探索資料。此動作無法復原。",
+  "updates": {
+    "available": "已推出版本 {version}。按一下以查看詳細資料。",
+    "checkFailed": "目前無法檢查更新。",
+    "httpFailed": "GitHub 更新檢查失敗，HTTP {status}",
+    "invalidRelease": "GitHub 未傳回有效的發行版本"
+  },
+  "sidebar": {
+    "appSettings": "應用程式設定",
+    "enhancements": "OpenXR 增強功能",
+    "suiteOff": "VectorXR 執行階段效果已關閉",
+    "moduleTitle": "{subtitle}。{status}",
+    "saveHint": "按「儲存變更」以套用設定。每項增強功能都會註明哪些變更需要重新啟動 VR 應用程式。",
+    "logoAlt": "VectorXR 標誌",
+    "version": "v{version}",
+    "updateTooltip": "有新版本可用。按一下以查看詳細資料。",
+    "updateAria": "有新版本可用"
+  },
+  "saveBar": {
+    "unsaved": "未儲存的變更",
+    "allSaved": "所有變更皆已儲存",
+    "pending": "待處理",
+    "dirtyHint": "儲存以套用，或捨棄以還原。",
+    "cleanHint": "設定與磁碟上的內容一致。",
+    "saving": "正在儲存…",
+    "save": "儲存變更",
+    "discard": "捨棄",
+    "fixBeforeSaving": "儲存前請修正：",
+    "moreErrors_other": "…以及另外 {count} 項"
+  },
+  "importPreview": {
+    "eyebrow": "匯入",
+    "title": "套用前請先檢閱",
+    "description": "有效的匯入會立即儲存。有驗證問題的匯入仍可載入編輯器中進行修復。",
+    "whatWillLoad": "將載入的內容",
+    "applications": "應用程式：{number}",
+    "moduleDefault_other": "{module} 預設：{state} — {count} 個設定檔",
+    "issuesFound_other": "發現 {count} 個驗證問題",
+    "issuesHint": "您仍可套用：錯誤會顯示在「驗證」面板中，且在解決之前將無法儲存。",
+    "valid": "設定結構與數值範圍看起來皆有效。",
+    "applyToEditor": "套用至編輯器",
+    "importAndSave": "匯入並儲存"
+  },
+  "debugExport": {
+    "eyebrow": "診斷",
+    "title": "匯出偵錯資訊",
+    "description": "VectorXR 會將疑難排解詳細資料打包成一個 ZIP 檔案，供您在測試期間分享。",
+    "included": "包含項目",
+    "items": {
+      "settings": "目前與已儲存的設定 JSON",
+      "seenApps": "已偵測的 OpenXR 應用程式",
+      "logs": "保留的 VectorXR 記錄與最新的 Frame Generation 追蹤（偵錯記錄）",
+      "layers": "OpenXR 層快照",
+      "health": "健康狀態檢查摘要",
+      "version": "應用程式版本與相關路徑",
+      "turboMetrics": "Turbo 效能指標與節奏決策",
+      "turboSafety": "Turbo 安全封鎖與錯誤歷程記錄",
+      "runtime": "即時與已儲存的執行階段診斷",
+      "inventory": "檔案清單與收集錯誤"
+    },
+    "limits": "原始檔案每個上限為 8 MiB，總計上限為 64 MiB，且 ZIP 會經過壓縮。較大的記錄會包含開頭與最新的輸出；遭省略或受限的檔案會列在 ZIP 中。已清除的歷程記錄以及未記錄的效能指標無法取得。",
+    "privacy": "此套件可能包含本機檔案路徑與遊戲執行檔名稱。不包含系統環境變數或無關的檔案。",
+    "exporting": "正在匯出…",
+    "save": "儲存 ZIP",
+    "fileType": "VectorXR 偵錯套件"
+  },
+  "profile": {
+    "number": "設定檔 {number}",
+    "editName": "編輯設定檔名稱",
+    "noApplications": "沒有應用程式",
+    "priority": "優先順序：當多個設定檔重疊套用於同一應用程式時，較上方的設定檔擁有它們共用的任何繫結。",
+    "moveUp": "將設定檔上移（較高優先順序）",
+    "moveDown": "將設定檔下移（較低優先順序）",
+    "enabledTitle": "此設定檔會將自訂 {module} 設定套用至其指派的應用程式。",
+    "disabledTitle": "執行階段會忽略此設定檔。",
+    "on": "設定檔開啟",
+    "off": "設定檔關閉",
+    "conflict": "設定檔衝突",
+    "applications": "應用程式",
+    "applicationsHelp": "此設定檔所套用的已註冊應用程式。以第一個相符且作用中的設定檔為準。",
+    "inactiveTitle": "此設定檔不會啟用",
+    "inactiveBody": "此已啟用的設定檔未指派給任何應用程式。請至少選取一個應用程式，或關閉此設定檔。",
+    "offNote": "此設定檔已關閉，不會產生任何作用。其應用程式會改用預設的 {module} 設定檔。"
+  },
+  "logViewer": {
+    "eyebrow": "記錄",
+    "title": "VectorXR 記錄檢視器",
+    "description": "最近的層記錄以唯讀方式顯示，方便您檢查執行階段狀態。",
+    "loading": "正在載入記錄…",
+    "directory": "記錄目錄",
+    "unavailable": "無法使用",
+    "logs": "VectorXR 記錄",
+    "empty": "尚未找到任何記錄檔。請在遊戲中啟動該層，然後重新開啟此檢視器。",
+    "selected": "選取的記錄",
+    "noneSelected": "未選取記錄",
+    "copied": "已複製！",
+    "copyFailed": "複製失敗",
+    "copy": "複製文字",
+    "opened": "已開啟！",
+    "openFailed": "開啟失敗",
+    "open": "開啟目錄",
+    "noContent": "沒有可用的記錄內容。"
+  },
+  "discord": {
+    "loading": "正在載入 Discord…",
+    "opening": "正在開啟 Discord…",
+    "join": "加入 Discord ↗",
+    "unavailable": "Discord 無法使用",
+    "loadFailed": "無法載入 Discord 邀請。請再試一次。",
+    "invitesUnavailable": "Discord 邀請目前無法使用。",
+    "openFailed": "無法開啟瀏覽器。請再試一次。",
+    "retryAria": "重試載入 Discord 邀請",
+    "loadingStatus": "正在載入 Discord 邀請。"
+  },
+  "healthCheck": {
+    "eyebrow": "系統健康狀態",
+    "title": "健康狀態檢查",
+    "layer": "VectorXR 層",
+    "layerNotFound": "找不到",
+    "lastSeenApp": "最後偵測的應用程式",
+    "noApp": "尚未偵測到任何 OpenXR 應用程式",
+    "exportHint": "分享疑難排解詳細資料時，請匯出偵錯套件。",
+    "export": "匯出偵錯資訊"
+  },
+  "healthLoading": {
+    "label": "正在載入健康狀態資訊",
+    "checking": "檢查中"
+  },
+  "patchNotes": {
+    "eyebrow": "修補說明",
+    "title": "最近的更新",
+    "description": "應用程式中的所有新內容，最新項目固定在最上方。"
+  },
+  "setupGuide": {
+    "title": "設定指南"
+  }
+}

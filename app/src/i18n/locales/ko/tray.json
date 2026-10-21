@@ -1,0 +1,14 @@
+{
+  "health": "상태: {label}",
+  "healthUnavailable": "상태: 설정이 로드되지 않음",
+  "logLevel": "로그 수준: {level}",
+  "logLevelUnavailable": "로그 수준",
+  "info": "정보",
+  "debug": "디버그",
+  "tooltip": "VectorXR: {label}",
+  "tooltipDisabled": "VectorXR: 사용 안 함",
+  "enabled": "VectorXR 사용",
+  "exportDebug": "디버그 내보내기...",
+  "open": "VectorXR 열기",
+  "quit": "VectorXR 종료"
+}

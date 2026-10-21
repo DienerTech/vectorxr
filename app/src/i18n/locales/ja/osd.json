@@ -1,0 +1,239 @@
+{
+  "title": "オンスクリーン表示",
+  "liveAfterSave": "保存後すぐに反映",
+  "intro": "VR 内で頭の動きに追従するパフォーマンス パネルです。Direct3D 11、Direct3D 12、Vulkan に対応し、ステレオまたは Quadviews で表示できます。",
+  "toggleOn": "OSD オン",
+  "toggleOff": "OSD オフ",
+  "runtimeStatusUnavailable": "ランタイムの状態は一時的に利用できません。",
+  "controls": {
+    "heading": "ヘッドセット内の操作",
+    "noSession": "実行中の VR アプリケーションはありません",
+    "needsUpdatedLayer": "更新された VectorXR レイヤーが必要です",
+    "toggleHeading": "表示 / 非表示",
+    "cycleHeading": "コンパクト / 拡張",
+    "toggleBindingLabel": "表示の表示 / 非表示",
+    "cycleBindingLabel": "コンパクト / 拡張の切り替え",
+    "bindingDescription": "VR アプリケーション内で機能します。キーボードの組み合わせ、ジョイスティックのボタン、または HAT の方向を割り当ててください。保存するとすぐに反映されます。"
+  },
+  "explainer": {
+    "summary": "何がすぐに反映され、何を測定しているのですか?",
+    "live": "このページのすべての設定は、実行中のゲームで OSD を有効にすることも含めて、保存後に反映されます。バインドは現在のセッションの表示とレイアウトをすぐに変更します。次のセッションでは、保存された開始時のレイアウトと表示状態が使用されます。",
+    "measuring": "オーバーレイは、直近 120 フレームにわたるアプリケーションの xrEndFrame 呼び出しの間隔を測定します。P95 は 95 パーセンタイルの間隔で、フレーム時間は短く安定しているほど良好です。これらの値は GPU の処理、リプロジェクション、コンポジターのフレーム レートを測定するものではありません。Turbo により、アプリケーションのリズムがヘッドセットのリフレッシュ レートと異なる場合があります。Frame Generation がオンの場合、FPS の横の FG オンは、生成されたフレームを含めてヘッドセットが受け取る 1 秒あたりのフレーム数を示します。",
+    "headroom": "パフォーマンスの余裕は、ゲームの 1 フレームあたりの CPU 時間 (xrWaitFrame から戻ってから xrEndFrame まで) をフレーム予算と比較したものです。フレーム予算はヘッドセットのリフレッシュ周期、または Frame Generation が生成中の場合はゲーム自身の目標 (90 Hz・2x では 45 fps) です。GPU の余裕は、100% から Windows の GPU カウンターによる GPU 全体の 3D 使用率 (ランタイムのコンポジターや他のアプリを含む) を引いた値です。「ゲーム」はゲーム自身の割合、「スレッド」はフレームを終了するゲームのスレッドの稼働率です。ゲームが前のフレームを終了する前に次のフレームを待つ場合 (OpenComposite がそうします) や、Turbo がペースを制御している場合、CPU 時間は表示されません。VRAM は、Frame Generation 自身の画像を含む、ゲームのビデオ メモリ使用量と Windows がゲームに与える予算です。CPU ボトルネックまたは GPU ボトルネックは明確な場合にのみ表示されます。Frame Generation 使用時は、遅れたフレームがどちら側で遅れたかを示します。",
+    "turbo": "Turbo は実行中のゲームで保存後に有効にでき、ゲーム内のバインドでオフ/オンを切り替えられます。DCS では、ライブでの有効化と Async の切り替えが確認されています。実験的なタイミング制御と Quadviews の有効/無効の変更には、引き続きアプリケーションの再起動が必要です。拡張 OSD にはこうした保留中の変更が表示されます。Frame Generation をオンにする場合も再起動が必要ですが、オフにする場合はすぐに反映されます。その他の VectorXR の操作は、それぞれの設定ページで説明されている動作のままです。",
+    "panel": "これは、ゲーム内で表示とレイアウトを操作できる情報パネルです。設定はデスクトップ アプリで編集してください。OpenGL はサポートされていません。空きのコンポジション レイヤーがないランタイムでは、パネルを表示できません。"
+  },
+  "layout": {
+    "compact": "コンパクト",
+    "expanded": "拡張",
+    "editAria": "プレビューして編集するレイアウト",
+    "previewAria": "プレビューするレイアウト",
+    "starting": "開始時のレイアウト",
+    "startingHint": "OSD は各セッションでこのレイアウトで開きます。プレイ中はヘッドセット内のバインドでレイアウトを切り替えられます。",
+    "startInCompact": "コンパクトで開始",
+    "startInExpanded": "拡張で開始"
+  },
+  "previewScale": {
+    "aria": "プレビューの倍率",
+    "legible": "読みやすさ",
+    "placement": "配置"
+  },
+  "popOut": "別ウィンドウで開く",
+  "focusWindow": "ウィンドウに移動",
+  "previewOpenElsewhere": "プレビューは別のウィンドウで開いています。",
+  "contents": {
+    "compactHeading": "コンパクトの内容",
+    "expandedHeading": "拡張の内容",
+    "justFps": "FPS のみ",
+    "justFpsHint": "ヘッダーと状態の行を消して、小さな表示にします。文字の大きさは引き続き [サイズ] で調整できます。",
+    "alwaysShown": "FPS、平均、P95 は常に表示",
+    "performance": "パフォーマンス",
+    "metrics": {
+      "all": "FPS + 平均フレーム時間",
+      "fps": "FPS のみ",
+      "frameTime": "平均フレーム時間のみ",
+      "none": "非表示"
+    },
+    "headerLegend": "ヘッダー · すべてオフにすると削除されます",
+    "statusLegend": "状態",
+    "nothingSelected": "何も選択されていません。値を選択するまで、コンパクトは非表示のままです。",
+    "rowsLegend": "行 · ドラッグまたは矢印で並べ替え",
+    "dragRow": "{row} をドラッグして並べ替え",
+    "dragHint": "ドラッグで並べ替え、方向キーで移動",
+    "moveUp": "{row} を上へ移動",
+    "moveDown": "{row} を下へ移動",
+    "framegenFps": "FPS の横に Frame Generation",
+    "bothLayouts": "(両方のレイアウト)",
+    "framegenFpsHint": "Frame Generation がオンのゲームで、ヘッドセットが表示する 1 秒あたりのフレーム数とともに FG オンを表示するか、待機、待ち、一時停止、オフ、利用不可を表示します。",
+    "clockFormat": "時計の形式 (両方のレイアウト)",
+    "clockFormatAria": "時計の形式",
+    "clock12": "12 時間 · 午後 8:42",
+    "clock24": "24 時間 · 20:42"
+  },
+  "header": {
+    "brand": "VectorXR の名前",
+    "app": "アプリケーション名",
+    "runtime": "OpenXR ランタイム",
+    "clock": "ローカル時計"
+  },
+  "rows": {
+    "graph": {
+      "label": "フレーム時間グラフ",
+      "hint": "直近 120 アプリケーション フレームの履歴を順次表示します。"
+    },
+    "performance": {
+      "label": "パフォーマンスの余裕",
+      "hint": "フレーム予算に対する CPU と GPU の余裕、Frame Generation の分を含むビデオ メモリ、明確な場合は CPU ボトルネックまたは GPU ボトルネックを表示します。1 秒に 2 回、レイアウトに表示されている間のみ取得します。"
+    },
+    "turbo": {
+      "label": "Turbo の状態",
+      "hint": "無効、有効だがオフ、アクティブな戦略、安全状態、Frame Generation のための一時停止を区別して表示します。"
+    },
+    "framegen": {
+      "label": "Frame Generation の状態",
+      "hint": "オン、待機、一時停止、オフをモードとフレーム レートとともに表示し、2 行目にフレーム レートまたは理由を表示します。Frame Generation がオンのゲームでのみ表示されます。"
+    },
+    "pivot": {
+      "label": "Pivot の状態",
+      "hint": "モーションの状態、Position Assist、微調整を表示します。スナップ ビューを使用するアプリでは、スナップ、重ね合わせ、トランジションの 2 行目が追加されます。"
+    },
+    "modules": {
+      "label": "アクティブな拡張機能",
+      "hint": "このアプリで有効な深度、Pivot、Turbo、Quadviews、Frame Generation を表示します。"
+    }
+  },
+  "compactRows": {
+    "performanceHint": "CPU と GPU の余裕とビデオ メモリを 1 行で表示します。ボトルネックの側はそのことを示します。",
+    "turboHint": "現在の戦略、オフ、待機中、安全状態、または Frame Generation のための一時停止を表示します。",
+    "framegenHint": "フレーム レートとゲームからヘッドセットへのフレーム レート、または待機、一時停止、オフを表示します。",
+    "pivotHint": "モーションの状態を短いラベルで表示し、スナップ ビューが構成されている場合はスナップ ビューの行を追加します。"
+  },
+  "position": {
+    "heading": "位置とサイズ",
+    "center": "視界の中央に配置",
+    "horizontal": "水平",
+    "horizontalAria": "水平位置",
+    "vertical": "垂直",
+    "verticalAria": "垂直位置",
+    "size": "サイズ",
+    "sizeAria": "表示サイズ",
+    "distance": "表示距離",
+    "distanceAria": "表示距離"
+  },
+  "appearance": {
+    "heading": "外観",
+    "opacity": "不透明度",
+    "opacityAria": "表示の不透明度",
+    "refreshRate": "更新頻度",
+    "refreshRateHint": "フレーム履歴は毎フレーム取得されます。頻度を上げるとパネルの再描画が多くなります。",
+    "rateRecommended": "{hz} Hz · 推奨",
+    "accentAria": "アクセント カラー",
+    "colors": {
+      "teal": "ティール",
+      "copper": "カッパー",
+      "blue": "ブルー",
+      "violet": "バイオレット",
+      "rose": "ローズ"
+    },
+    "visibleOnStart": "有効にしたときやセッション開始時に自動的に表示する"
+  },
+  "language": {
+    "title": "OSD の言語",
+    "description": "ヘッドセットの表示に使用する言語です。[アプリと同じ] は [設定] で選択した言語に従います。",
+    "sameAsApp": "アプリと同じ",
+    "sameAsAppResolved": "アプリと同じ · {language}",
+    "restartNote": "VectorXR 0.19 以前のレイヤーはこの設定を無視し、英語で表示します。"
+  },
+  "colorPicker": {
+    "wheelAria": "カスタム アクセントの色相と彩度のホイール",
+    "brightness": "明るさ",
+    "brightnessAria": "カスタム アクセントの明るさ",
+    "customAccent": "カスタム アクセント",
+    "colorAria": "カスタム アクセント カラー",
+    "hex": "16 進カラー"
+  },
+  "presets": {
+    "aria": "表示のプリセット",
+    "heading": "プリセット",
+    "hint": "プリセットは位置、外観、内容をまとめて適用します。",
+    "expanded": "拡張",
+    "performance": "パフォーマンス",
+    "minimal": "最小",
+    "savedAria": "保存したカスタム プリセット",
+    "savedPlaceholder": "保存したプリセット…",
+    "noneSaved": "保存したプリセットはありません",
+    "reload": "再読み込み",
+    "reloadHint": "選択したプリセットを操作部に再読み込みします",
+    "delete": "選択したプリセットを削除",
+    "nameAria": "プリセット名",
+    "namePlaceholder": "現在の設定を名前を付けて保存…",
+    "update": "保存したプリセットを更新",
+    "saveNew": "新しいプリセットを保存",
+    "limit": "プリセットは 50 個まで保存できます。",
+    "added": "{name} を追加しました。保持するには [変更を保存] をクリックしてください。",
+    "updated": "{name} を更新しました。保持するには [変更を保存] をクリックしてください。",
+    "loaded": "{name} を読み込みました。VR に適用するには [変更を保存] をクリックしてください。",
+    "removed": "{name} を削除しました。この変更を保持するには [変更を保存] をクリックしてください。",
+    "appliedExpanded": "[拡張] を適用しました。VR に適用するには [変更を保存] をクリックしてください。",
+    "appliedPerformance": "[パフォーマンス] を適用しました。VR に適用するには [変更を保存] をクリックしてください。",
+    "appliedMinimal": "[最小] を適用しました。VR に適用するには [変更を保存] をクリックしてください。"
+  },
+  "previewStage": {
+    "legibleNote": "内容のプレビュー · サンプル値 · 位置とサイズは [配置] で確認してください",
+    "placementNote": "配置のプレビュー · 100° × 80° の基準ビュー",
+    "legibleAria": "拡大して中央に表示した、読みやすい OSD の内容のプレビュー",
+    "placementAria": "100 × 80 度の基準ビュー内での OSD の推定サイズ",
+    "emptyCompact": "表示するにはコンパクトの値を選択してください。",
+    "footer": "パネル幅 {width}° · ドラッグで配置 · ヘッドセットの視野は機種によって異なります"
+  },
+  "previewWindow": {
+    "title": "OSD プレビュー",
+    "windowTitle": "VectorXR — OSD プレビュー",
+    "connecting": "OSD の操作部に接続しています…",
+    "openFailed": "プレビュー ウィンドウを開けませんでした。もう一度お試しください。",
+    "popupBlocked": "プレビュー ウィンドウを開くには、ポップアップを許可してください。"
+  },
+  "preview": {
+    "appName": "your-game.exe",
+    "runtimeName": "お使いの OpenXR ランタイム",
+    "clock12": "午後 8:42",
+    "clock24": "20:42",
+    "fgOn": "FG オン",
+    "averageCompact": "平均 {value} ms",
+    "appFps": "アプリ FPS",
+    "appFrameAverage": "アプリフレーム / 平均",
+    "appFrameP95": "アプリフレーム / P95",
+    "frameTimeGraph": "フレーム時間 / 直近 120 フレーム",
+    "labels": {
+      "performance": "パフォーマンス",
+      "performanceCompact": "性能",
+      "turbo": "TURBO",
+      "framegen": "FRAME GEN",
+      "pivot": "PIVOT",
+      "modules": "拡張機能"
+    },
+    "turboPausedForFramegen": "Frame Generation のため一時停止",
+    "turboAsyncExperimental": "Async / 実験的",
+    "turboAsyncCompact": "Async / 実験",
+    "framegenState": "オン  /  Interpolate  /  Dynamic",
+    "framegenDetail": "45 → 90 fps  /  GPU 3.1 ms",
+    "framegenCompact": "Dynamic / 45 → 90 fps",
+    "pivotState": "モーション: アクティブ / 連続 + 位置 / Flight",
+    "pivotCompact": "モーション: 連続 アクティブ + 位置",
+    "snapState": "スナップ: アクティブ / 重ね / 後方確認",
+    "snapCompact": "スナップ: アクティブ / 重ね",
+    "modulesWithFramegen": "深度 / Pivot / Turbo / Frame Gen / Quadviews",
+    "modules": "深度 / Pivot / Turbo / Quadviews",
+    "performanceTarget": "目標 {fps} fps",
+    "cpuDetail": "{ms} ms、スレッド {thread}%",
+    "gpuDetail": "使用率 {busy}%、ゲーム {game}%",
+    "vramDetail": "/ {budget} GB",
+    "vramDetailWithFramegen": "/ {budget} GB、FG {framegen} MB",
+    "diagnostics": {
+      "debugLog": "デバッグログ",
+      "flowView": "フロー表示",
+      "confidenceView": "信頼度表示",
+      "tintView": "色付け表示"
+    }
+  }
+}

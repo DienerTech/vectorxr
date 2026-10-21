@@ -1,0 +1,239 @@
+{
+  "title": "螢幕顯示",
+  "liveAfterSave": "儲存後即時生效",
+  "intro": "在 VR 中跟隨頭部的效能面板。支援 Direct3D 11、Direct3D 12 與 Vulkan，可用於立體或 Quadviews 模式。",
+  "toggleOn": "OSD 開啟",
+  "toggleOff": "OSD 關閉",
+  "runtimeStatusUnavailable": "執行階段狀態暫時無法使用。",
+  "controls": {
+    "heading": "頭戴式裝置內控制",
+    "noSession": "沒有正在執行的 VR 應用程式",
+    "needsUpdatedLayer": "需要更新版的 VectorXR 層",
+    "toggleHeading": "顯示／隱藏",
+    "cycleHeading": "精簡／展開",
+    "toggleBindingLabel": "顯示／隱藏顯示面板",
+    "cycleBindingLabel": "切換精簡／展開",
+    "bindingDescription": "在 VR 應用程式中運作。請指派鍵盤組合鍵、搖桿按鈕或 HAT 方向。儲存後即可即時套用。"
+  },
+  "explainer": {
+    "summary": "哪些設定會即時套用？我量測的是什麼？",
+    "live": "此頁面上的每項設定都會在儲存後套用，包括在執行中的遊戲裡啟用 OSD。繫結會立即變更目前工作階段的顯示狀態與版面配置。下一個工作階段會使用您儲存的起始版面配置與顯示狀態。",
+    "measuring": "疊加層會量測最近 120 個影格中，應用程式各次 xrEndFrame 呼叫之間的間隔。P95 是第 95 百分位數的間隔；影格時間越低、越穩定越好。這些數值不會量測 GPU 工作、重新投影或合成器的影格速率。Turbo 可能使應用程式的節奏與頭戴式裝置的更新頻率不同。開啟 Frame Generation 時，FPS 旁的「FG 開啟」會顯示頭戴式裝置實際取得的每秒影格數，包含生成的影格。",
+    "headroom": "效能餘裕會將遊戲每個影格的 CPU 時間（從其 xrWaitFrame 返回到其 xrEndFrame）與影格預算比較：影格預算是頭戴式裝置的更新週期，或在 Frame Generation 生成影格時，是遊戲本身的目標（90 Hz 且 2x 時為 45 fps）。GPU 餘裕是 100% 減去 Windows GPU 計數器回報的整個 GPU 3D 使用率，其中包含執行階段的合成器與其他應用程式；「遊戲」是遊戲本身所占的比例，「執行緒」則是遊戲中結束影格的那個執行緒有多忙碌。當遊戲在結束上一個影格前就先等待下一個影格（OpenComposite 會這樣做），或由 Turbo 控制其節奏時，CPU 時間會被隱藏。VRAM 是遊戲的視訊記憶體使用量以及 Windows 給予它的預算，並包含 Frame Generation 自己的影像。「CPU 瓶頸」或「GPU 瓶頸」只會在情況明確時顯示；使用 Frame Generation 時，則表示其延遲影格是因哪一方而延遲。",
+    "turbo": "Turbo 可在執行中的遊戲裡於儲存後啟用，遊戲內繫結可將其關閉／開啟；已在 DCS 中觀察到即時啟用與 Async 切換正常運作。實驗性計時控制以及 Quadviews 的啟用／停用變更仍需要重新啟動應用程式；展開的 OSD 會顯示這些待生效的變更。開啟 Frame Generation 也需要重新啟動；關閉則會立即套用。其他 VectorXR 控制項則維持其各自設定頁面上所述的行為。",
+    "panel": "這是一個資訊面板，具有遊戲內的顯示與版面配置控制。請在桌面應用程式中編輯設定。不支援 OpenGL。沒有多餘合成層的執行階段無法顯示此面板。"
+  },
+  "layout": {
+    "compact": "精簡",
+    "expanded": "展開",
+    "editAria": "要預覽並編輯的版面配置",
+    "previewAria": "要預覽的版面配置",
+    "starting": "起始版面配置",
+    "startingHint": "每個工作階段開始時，OSD 會以此版面配置開啟。遊玩時可使用頭戴式裝置內的繫結切換版面配置。",
+    "startInCompact": "以精簡模式開始",
+    "startInExpanded": "以展開模式開始"
+  },
+  "previewScale": {
+    "aria": "預覽比例",
+    "legible": "易讀",
+    "placement": "位置"
+  },
+  "popOut": "彈出視窗",
+  "focusWindow": "切換至視窗",
+  "previewOpenElsewhere": "預覽已在另一個視窗中開啟。",
+  "contents": {
+    "compactHeading": "精簡內容",
+    "expandedHeading": "展開內容",
+    "justFps": "僅 FPS",
+    "justFpsHint": "清除標題列與狀態列，以取得極小的顯示面板。「大小」仍會控制文字大小。",
+    "alwaysShown": "一律顯示 FPS、平均值與 P95",
+    "performance": "效能",
+    "metrics": {
+      "all": "FPS + 平均影格時間",
+      "fps": "僅 FPS",
+      "frameTime": "僅平均影格時間",
+      "none": "隱藏"
+    },
+    "headerLegend": "標題列 · 全部關閉即可移除",
+    "statusLegend": "狀態",
+    "nothingSelected": "未選取任何項目。在您選擇一個值之前，精簡模式會保持隱藏。",
+    "rowsLegend": "列 · 拖曳或使用箭號重新排序",
+    "dragRow": "拖曳 {row} 以重新排序",
+    "dragHint": "拖曳以重新排序；使用方向鍵移動",
+    "moveUp": "將 {row} 上移",
+    "moveDown": "將 {row} 下移",
+    "framegenFps": "在 FPS 旁顯示 Frame Generation",
+    "bothLayouts": "（兩種版面配置）",
+    "framegenFpsHint": "在開啟 Frame Generation 的遊戲中：顯示「FG 開啟」以及頭戴式裝置顯示的每秒影格數，或顯示「待機」、「等待」、「已暫停」、「關閉」或「不可用」。",
+    "clockFormat": "時鐘格式（兩種版面配置）",
+    "clockFormatAria": "時鐘格式",
+    "clock12": "12 小時制 · 下午 8:42",
+    "clock24": "24 小時制 · 20:42"
+  },
+  "header": {
+    "brand": "VectorXR 名稱",
+    "app": "應用程式名稱",
+    "runtime": "OpenXR 執行階段",
+    "clock": "本機時鐘"
+  },
+  "rows": {
+    "graph": {
+      "label": "影格時間圖表",
+      "hint": "最近 120 個應用程式影格的滾動歷程。"
+    },
+    "performance": {
+      "label": "效能餘裕",
+      "hint": "相對於影格預算的 CPU 與 GPU 餘裕、含 Frame Generation 占用量的視訊記憶體，以及在情況明確時顯示「CPU 瓶頸」或「GPU 瓶頸」。每秒取樣兩次，且僅在版面配置顯示此列時取樣。"
+    },
+    "turbo": {
+      "label": "Turbo 狀態",
+      "hint": "區分已停用、已啟用但關閉、作用中的策略、安全狀態，以及為 Frame Generation 暫停。"
+    },
+    "framegen": {
+      "label": "Frame Generation 狀態",
+      "hint": "開啟、待機、已暫停或關閉，並附上模式與影格速率，第二行則顯示影格速率或原因。僅在開啟 Frame Generation 的遊戲中顯示。"
+    },
+    "pivot": {
+      "label": "Pivot 狀態",
+      "hint": "動態狀態、Position Assist 與微調。有吸附視角的應用程式會多一行，顯示吸附、疊加與轉場。"
+    },
+    "modules": {
+      "label": "作用中的增強功能",
+      "hint": "為此應用程式啟用的深度、Pivot、Turbo、Quadviews 與 Frame Generation。"
+    }
+  },
+  "compactRows": {
+    "performanceHint": "以一行顯示 CPU 與 GPU 餘裕及視訊記憶體；造成瓶頸的一方會標示出來。",
+    "turboHint": "目前的策略、關閉、等待中、安全狀態，或為 Frame Generation 暫停。",
+    "framegenHint": "影格速率及遊戲到頭戴式裝置的影格速率，或待機、已暫停、關閉。",
+    "pivotHint": "以簡短標籤顯示動態狀態，並在設定了吸附視角時加上一行吸附視角資訊。"
+  },
+  "position": {
+    "heading": "位置與大小",
+    "center": "在視野中置中",
+    "horizontal": "水平",
+    "horizontalAria": "水平位置",
+    "vertical": "垂直",
+    "verticalAria": "垂直位置",
+    "size": "大小",
+    "sizeAria": "顯示面板大小",
+    "distance": "觀看距離",
+    "distanceAria": "觀看距離"
+  },
+  "appearance": {
+    "heading": "外觀",
+    "opacity": "不透明度",
+    "opacityAria": "顯示面板不透明度",
+    "refreshRate": "更新頻率",
+    "refreshRateHint": "影格歷程會在每個影格取樣。較高的頻率會更常重繪面板。",
+    "rateRecommended": "{hz} Hz · 建議",
+    "accentAria": "強調色",
+    "colors": {
+      "teal": "藍綠",
+      "copper": "銅色",
+      "blue": "藍色",
+      "violet": "紫羅蘭",
+      "rose": "玫瑰"
+    },
+    "visibleOnStart": "啟用或工作階段開始時自動顯示"
+  },
+  "language": {
+    "title": "OSD 語言",
+    "description": "頭戴式裝置顯示面板所使用的語言。「與應用程式相同」會跟隨您在「設定」中選擇的語言。",
+    "sameAsApp": "與應用程式相同",
+    "sameAsAppResolved": "與應用程式相同 · {language}",
+    "restartNote": "VectorXR 0.19 及更舊版本的層會忽略此設定，並以英文顯示。"
+  },
+  "colorPicker": {
+    "wheelAria": "自訂強調色的色相與飽和度色輪",
+    "brightness": "亮度",
+    "brightnessAria": "自訂強調色亮度",
+    "customAccent": "自訂強調色",
+    "colorAria": "自訂強調色",
+    "hex": "十六進位色碼"
+  },
+  "presets": {
+    "aria": "顯示面板預設組",
+    "heading": "預設組",
+    "hint": "預設組會同時套用位置、外觀與內容。",
+    "expanded": "展開",
+    "performance": "效能",
+    "minimal": "極簡",
+    "savedAria": "已儲存的自訂預設組",
+    "savedPlaceholder": "已儲存的預設組…",
+    "noneSaved": "沒有已儲存的預設組",
+    "reload": "重新載入",
+    "reloadHint": "將選取的預設組重新載入到控制項中",
+    "delete": "刪除選取的預設組",
+    "nameAria": "預設組名稱",
+    "namePlaceholder": "將目前設定另存為…",
+    "update": "更新已儲存的預設組",
+    "saveNew": "儲存新預設組",
+    "limit": "您最多可以儲存 50 個預設組。",
+    "added": "已新增 {name}。請按「儲存變更」以保留。",
+    "updated": "已更新 {name}。請按「儲存變更」以保留。",
+    "loaded": "已載入 {name}。請按「儲存變更」以在 VR 中套用。",
+    "removed": "已移除 {name}。請按「儲存變更」以保留此變更。",
+    "appliedExpanded": "已套用「展開」。請按「儲存變更」以在 VR 中套用。",
+    "appliedPerformance": "已套用「效能」。請按「儲存變更」以在 VR 中套用。",
+    "appliedMinimal": "已套用「極簡」。請按「儲存變更」以在 VR 中套用。"
+  },
+  "previewStage": {
+    "legibleNote": "內容預覽 · 範例數值 · 請使用「位置」判斷位置與大小",
+    "placementNote": "位置預覽 · 100° × 80° 參考視野",
+    "legibleAria": "易讀的 OSD 內容預覽，已放大並置中",
+    "placementAria": "在 100 × 80 度參考視野中估計的 OSD 大小",
+    "emptyCompact": "選擇一個精簡值以顯示顯示面板。",
+    "footer": "面板寬度 {width}° · 拖曳以調整位置 · 頭戴式裝置的視野因機型而異"
+  },
+  "previewWindow": {
+    "title": "OSD 預覽",
+    "windowTitle": "VectorXR — OSD 預覽",
+    "connecting": "正在連線到 OSD 控制項…",
+    "openFailed": "無法開啟預覽視窗。請再試一次。",
+    "popupBlocked": "請允許快顯視窗以開啟預覽視窗。"
+  },
+  "preview": {
+    "appName": "your-game.exe",
+    "runtimeName": "您的 OpenXR 執行階段",
+    "clock12": "下午 8:42",
+    "clock24": "20:42",
+    "fgOn": "FG 開啟",
+    "averageCompact": "平均 {value} ms",
+    "appFps": "應用程式 FPS",
+    "appFrameAverage": "應用程式影格 / 平均",
+    "appFrameP95": "應用程式影格 / P95",
+    "frameTimeGraph": "影格時間 / 最近 120 影格",
+    "labels": {
+      "performance": "效能",
+      "performanceCompact": "效能",
+      "turbo": "TURBO",
+      "framegen": "FRAME GEN",
+      "pivot": "PIVOT",
+      "modules": "增強功能"
+    },
+    "turboPausedForFramegen": "因 Frame Generation 暫停",
+    "turboAsyncExperimental": "Async / 實驗性",
+    "turboAsyncCompact": "Async / 實驗",
+    "framegenState": "開啟  /  Interpolate  /  Dynamic",
+    "framegenDetail": "45 → 90 fps  /  GPU 3.1 ms",
+    "framegenCompact": "Dynamic / 45 → 90 fps",
+    "pivotState": "運動：作用中 / 連續 + 位置 / 飛行",
+    "pivotCompact": "運動：連續 作用中 + 位置",
+    "snapState": "快照：作用中 / 疊加 / 檢查六點鐘",
+    "snapCompact": "快照：作用中 / 疊加",
+    "modulesWithFramegen": "深度 / Pivot / Turbo / Frame Gen / Quadviews",
+    "modules": "深度 / Pivot / Turbo / Quadviews",
+    "performanceTarget": "目標 {fps} fps",
+    "cpuDetail": "{ms} ms，執行緒 {thread}%",
+    "gpuDetail": "使用率 {busy}%，遊戲 {game}%",
+    "vramDetail": "共 {budget} GB",
+    "vramDetailWithFramegen": "共 {budget} GB，FG {framegen} MB",
+    "diagnostics": {
+      "debugLog": "偵錯記錄",
+      "flowView": "光流檢視",
+      "confidenceView": "信賴度檢視",
+      "tintView": "著色檢視"
+    }
+  }
+}

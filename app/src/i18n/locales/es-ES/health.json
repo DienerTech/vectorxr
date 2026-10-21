@@ -1,0 +1,66 @@
+{
+  "checks": {
+    "suiteEnabled": {
+      "label": "Interruptor de ejecución de la suite",
+      "enabled": "Los efectos de VectorXR en tiempo de ejecución pueden funcionar.",
+      "disabled": "VectorXR está desactivado desde el interruptor de ejecución de Inicio."
+    },
+    "layerRegistered": {
+      "label": "Registro de la capa OpenXR",
+      "loading": "VectorXR todavía está leyendo los registros de capas OpenXR.",
+      "registered": "Registrada en {slice}.",
+      "missing": "No se encontró VectorXR en el registro de capas de API implícitas de OpenXR."
+    },
+    "layerEnabled": {
+      "label": "Capa OpenXR activada",
+      "loading": "Esperando el estado de la capa OpenXR.",
+      "enabled": "La capa de API de VectorXR está activada para los próximos inicios de OpenXR.",
+      "disabled": "La capa de API de VectorXR está desactivada o no está disponible."
+    },
+    "layerDuplicates": {
+      "label": "Una sola capa VectorXR activada",
+      "detail_one": "Hay {count} registro de VectorXR activado ({paths}). Las aplicaciones OpenXR se bloquean cuando se cargan dos copias; desactívalas todas menos una en la página Capas OpenXR.",
+      "detail_other": "Hay {count} registros de VectorXR activados ({paths}). Las aplicaciones OpenXR se bloquean cuando se cargan dos copias; desactívalas todas menos una en la página Capas OpenXR."
+    },
+    "layerFiles": {
+      "label": "Archivos de la capa",
+      "pending": "Los archivos de la capa se pueden comprobar cuando se encuentre el registro de la capa.",
+      "resolved": "Las rutas del manifiesto y de la DLL se resuelven correctamente.",
+      "missing": "Falta la ruta del manifiesto o de la DLL registrada."
+    },
+    "configLoaded": {
+      "label": "Ruta de configuración",
+      "pending": "La ruta de configuración aparecerá cuando se cargue la configuración."
+    },
+    "recentLog": {
+      "label": "Registros de ejecución",
+      "available_one": "Hay {count} archivo de registro reciente disponible.",
+      "available_other": "Hay {count} archivos de registro recientes disponibles.",
+      "none": "Todavía no hay registros de ejecución de VectorXR."
+    },
+    "seenApps": {
+      "label": "Detección de aplicaciones",
+      "observed_one": "Se ha detectado {count} aplicación OpenXR.",
+      "observed_other": "Se han detectado {count} aplicaciones OpenXR.",
+      "none": "Todavía no se ha detectado ninguna aplicación OpenXR."
+    }
+  },
+  "overall": {
+    "ready": "Listo",
+    "attention": "Requiere atención",
+    "inactive": "No activo",
+    "unknown": "Comprobando"
+  },
+  "description": {
+    "ready": "VectorXR parece listo para los próximos inicios de aplicaciones OpenXR.",
+    "attention": "VectorXR puede funcionar, pero uno o varios diagnósticos podrían requerir revisión.",
+    "inactive": "VectorXR no está listo en este momento para aplicar las mejoras de OpenXR.",
+    "unknown": "VectorXR todavía está recopilando el estado del sistema."
+  },
+  "state": {
+    "pass": "correcto",
+    "warn": "aviso",
+    "fail": "error",
+    "info": "info"
+  }
+}

@@ -1,0 +1,320 @@
+{
+  "tab": {
+    "intro": "すでに OpenXR のクアッド ビューを要求するゲーム向けに、中心窩と周辺のレンダリングを構成します。このモジュールを有効にしても、通常のステレオ ゲームにクアッド ビューのサポートが追加されることはありません。",
+    "varjoCompatibility": "Varjo の互換性",
+    "setupGuide": {
+      "title": "セットアップ ガイド",
+      "summary": "推奨される DCS のセットアップと互換性のあるタイトル",
+      "heading": "推奨される DCS のセットアップ",
+      "gameLabel": "ゲーム:",
+      "game": "{label} {useQuadView} をオンにし、視線トラッキングを使う場合は {useEyeTracking} もオンにします。",
+      "useQuadView": "Use Quad View",
+      "useEyeTracking": "Use Eye Tracking",
+      "providerLabel": "プロバイダー:",
+      "provider": "{label} VectorXR レイヤーと Quadviews プロファイルを有効にしてから、{layerName} を無効にします。Pimax の場合は、Native Pimax Quad Views もオフにしてください。Varjo のネイティブ Quadviews は引き続きランタイムによって制御されます。",
+      "applyLabel": "適用:",
+      "apply": "{label} プロファイルを保存し、ランタイム、レイヤー、またはゲーム内の VR 設定を変更した後は DCS を再起動します。",
+      "titles": "DCS が主にテストされたタイトルです。可能性は高いものの未確認の D3D11 タイトル候補には、Pavlov VR、VAIL VR、The 7th Guest VR、Kayak VR: Mirage があります。各タイトルが自らクアッド ビューを要求する必要があります。",
+      "pixelEstimates": "ピクセルの推定値はアプリケーションのビュー レンダリングのみを比較したものです。ランタイムと VectorXR の合成には追加の GPU コストがかかります。"
+    },
+    "restartNoteLabel": "適用には再起動が必要:",
+    "restartNote": "{label} マークの付いた項目と Quadviews のオン/オフは、現在の OpenXR アプリケーションが終了した後に完全に反映されます。マークのない操作はプレイ中に更新されます。",
+    "diagnostics": {
+      "eyebrow": "ヘッドセット内の診断",
+      "intro": "Quadviews を調整しながら、レンダリング ゾーン、フォーカスの位置合わせ、視線のフィルタリング、トラッキングの可用性を確認できます。",
+      "howToRead": "オーバーレイの見方",
+      "sessionControl": "セッションの制御",
+      "shownIn": "{application} で表示中",
+      "hiddenIn": "{application} で非表示",
+      "unavailable": "アクティブな OpenXR セッションでは利用できません",
+      "noSession": "合成された Quadviews のアクティブなセッションはありません",
+      "applying": "適用しています...",
+      "hide": "可視化を非表示",
+      "show": "可視化を表示",
+      "shortcutHeading": "ヘッドセット内のショートカット",
+      "shortcutHint": "省略可能。可視化は OpenXR セッションごとに非表示の状態で始まります。",
+      "guideHint": "可視化を初めて使いますか? インタラクティブ ガイドでは、各図形の意味と、よくある症状に対応する設定を説明しています。",
+      "readStatusFailed": "ランタイムの状態を読み取れません",
+      "controlFailed": "可視化を制御できません",
+      "notAcknowledged": "OpenXR セッションが制御要求に応答しませんでした"
+    },
+    "binding": {
+      "label": "診断用可視化の切り替え",
+      "description": "ゲーム中に Quadviews のキャリブレーション ビューを表示または非表示にします。セッションごとに非表示の状態で始まり、VectorXR が D3D11 コンポジターで Quadviews を合成している場合にのみ利用できます。",
+      "noneText": "ヘッドセット内のショートカットが割り当てられていません。可視化は引き続き Quadviews ページから制御できます。"
+    },
+    "defaultProfile": {
+      "heading": "既定のプロファイル",
+      "appliesTo": "有効なカスタム プロファイルのないアプリケーションに適用されます",
+      "toggleOn": "既定のプロファイル オン",
+      "toggleOff": "既定のプロファイル オフ",
+      "restartTitle": "Quadviews の有効/無効の変更は、実行中の OpenXR アプリケーションが終了した後に適用されます。",
+      "offNote": "有効なカスタム プロファイルがオンにしない限りオフです。下のカスタム プロファイルは、それぞれのアプリケーションに引き続き適用されます。"
+    },
+    "launchStateNote": "すぐに保存されますが、実行中の OpenXR アプリケーションは終了するまで起動時の Quadviews の状態を維持します。",
+    "customProfiles": {
+      "heading": "カスタム プロファイル",
+      "intro": "アプリケーションごとに Quadviews を上書きします。最初に一致した有効なプロファイルが優先されます。",
+      "add": "プロファイルの追加",
+      "empty": "カスタム プロファイルはまだありません。特定のアプリケーションのクアッド ビューの値を上書きするには、プロファイルを追加してください。",
+      "alreadyTargeted": "{application} はすでにプロファイル {number} の対象です。最初のアクティブなプロファイルが優先されます。"
+    },
+    "budget": {
+      "estimate": "アプリのレンダリング ピクセル数の推定 {percent}%",
+      "light": "軽い",
+      "moderate": "中程度",
+      "heavy": "重い",
+      "detrimental": "⚠ 逆効果"
+    },
+    "varjo": {
+      "title": "Varjo 互換の Quadviews",
+      "biPanel": "Varjo のヘッドセットはデュアル パネル構成で、片目ごとに広い低密度のコンテキスト ディスプレイと、小さな高密度のフォーカス ディスプレイを備えています。VectorXR の Varjo 互換クアッド ビューは、ヘッドセットが想定する 4 つのビュー レイヤー (周辺 2 つ、フォーカス 2 つ) を維持するため、物理的なフォーカス パネルが直接駆動されます。その結果、Varjo ランタイムがビューのジオメトリを引き継ぎ、一部の Quadviews 設定は無視されます。",
+      "notesIntro": "VectorXR Quadviews と Varjo ランタイムの互換性に関する注意事項:",
+      "stillApplies": "VectorXR で引き続き適用",
+      "handledByRuntime": "Varjo ランタイムが処理",
+      "focusScale": "フォーカス スケール",
+      "peripheralScale": "周辺スケール",
+      "focusSharpness": "フォーカスのシャープネス",
+      "focusSizeTransition": "フォーカスのサイズと遷移の幅",
+      "offsets": "水平および垂直オフセット",
+      "smoothingDeadzone": "視線のスムージングとデッドゾーン",
+      "diagnosticVisualization": "診断用の可視化",
+      "emulation": "デュアル パネル ディスプレイによる物理的なクアッド ビューのサポートがないヘッドセット (Quest Pro、Pimax Crystal など) では、VectorXR Quadviews は標準のエミュレーション モードを使用し、すべての設定が適用されます。これらの互換性に関する注意事項は Varjo ランタイムにのみ適用されます。",
+      "diagnosticUnsupportedLead": "診断用の可視化は、現在 Varjo のヘッドセットではサポートされていません。",
+      "diagnosticUnsupported": "{lead} Varjo のランタイムがネイティブのクアッド ビュー合成を担っているため、VectorXR の合成用 D3D11 コンポジターはそこでは動作しません。"
+    }
+  },
+  "fields": {
+    "preset": {
+      "heading": "Vector プリセット",
+      "restartTitle": "プリセットには、完全に反映させるためにゲームの再起動が必要な設定が含まれます。",
+      "intro": "優れた出発点です。トラッキングと位置合わせはご自身で調整してください。",
+      "buttonTitle": "プリセットはフォーカスの寸法と解像度を変更するため、完全に反映させるにはゲームの再起動が必要です。",
+      "performance": "パフォーマンス",
+      "balanced": "バランス",
+      "quality": "品質"
+    },
+    "focusWindow": "フォーカス ウィンドウ",
+    "focusWidth": {
+      "label": "フォーカスの幅",
+      "restart": "フォーカス ウィンドウはすぐに移動しますが、DCS は再起動するまで既存のテクスチャの幅とピクセル負荷を維持します。"
+    },
+    "focusHeight": {
+      "label": "フォーカスの高さ",
+      "restart": "フォーカス ウィンドウはすぐに移動しますが、DCS は再起動するまで既存のテクスチャの高さとピクセル負荷を維持します。"
+    },
+    "percentOfFov": "FOV の %",
+    "horizontalOffset": {
+      "label": "水平オフセット",
+      "help": "フォーカス領域を度単位で左右に移動します。鮮明な領域が中心からずれていると感じる場合にのみ使用してください。"
+    },
+    "verticalOffset": {
+      "label": "垂直オフセット",
+      "help": "フォーカス領域を度単位で上下に移動します。ヘッドセットの視線の中心が上下に偏っていると感じる場合に役立ちます。"
+    },
+    "resolution": "解像度",
+    "focusResolution": {
+      "label": "フォーカスの解像度",
+      "restart": "再起動が必要: DCS は起動時のフォーカス テクスチャを維持します。100% を超えると VectorXR の出力キャンバスのサイズが変わり、一時的にフレーム レートが引っかかることがあります。",
+      "warning": "VectorXR の全ビュー出力画像はフォーカスの解像度に応じて大きくなります。{percent}% では、上に示したアプリのレンダリング コストに加えて、GPU メモリと合成にヘッドセットのピクセル数の約 {factor}× が必要です。"
+    },
+    "percentOfHmd": "HMD 解像度の %",
+    "peripheralResolution": {
+      "label": "周辺の解像度",
+      "restart": "再起動が必要: DCS は起動時の周辺テクスチャとピクセル負荷を維持します。"
+    },
+    "foveateSharpness": {
+      "label": "中心窩のシャープネス",
+      "help": "高精細なフォーカス画像に追加のシャープ処理を適用します。0 でオフ。値を大きくすると鮮明さが増しますが、ハローが生じることがあります。"
+    },
+    "transitionThickness": {
+      "label": "遷移の幅",
+      "help": "フォーカス画像と周辺画像の間でブレンドされる境界の幅を制御します。値を大きくすると境界が目立ちにくくなりますが、フォーカス ウィンドウのより広い部分が柔らかくなります。"
+    },
+    "percentOfFocusWindow": "フォーカス ウィンドウの %",
+    "tracking": "トラッキング",
+    "mode": {
+      "label": "モード",
+      "restart": "ゲームがヘッド トラッキング モードで開始された場合、アイ トラッキングに切り替えるにはゲームの再起動が必要です。",
+      "help": "アイ トラッキングが利用可能な場合に、フォーカス領域が頭の向きと視線のどちらに追従するかを選択します。",
+      "head": "ヘッド トラッキング",
+      "eye": "アイ トラッキング"
+    },
+    "eyeTrackingCorrection": {
+      "label": "アイ トラッキングの補正",
+      "help": "アイ トラッキングが逆に感じられない限り [既定] を使用してください。逆に感じられる場合は [Z のみ反転] を試してください。",
+      "default": "既定",
+      "flipZ": "Z のみ反転"
+    },
+    "smoothing": {
+      "label": "スムージング",
+      "help": "フォーカス領域の動きを滑らかにします。0 は即時。値を大きくするとぶれが減りますが、遅れが増えます。"
+    },
+    "deadzone": {
+      "label": "デッドゾーン",
+      "help": "フォーカス領域が動く前に無視される小さな視線の動きです。中心付近のちらつきを減らすのに役立ちます。"
+    }
+  },
+  "dimensions": {
+    "peripheralLeft": "周辺 L",
+    "peripheralRight": "周辺 R",
+    "focusLeft": "フォーカス L",
+    "focusRight": "フォーカス R",
+    "waiting": "Quadviews のゲームの実行中に、ビューの寸法がここに表示されます。",
+    "view": "{name}: {width} × {height} (テクスチャ {allocatedWidth} × {allocatedHeight})",
+    "footer": "送信されたビューのサイズで、毎秒更新されます。保存した解像度の変更にはゲームの再起動が必要な場合があります。",
+    "labelNone": "寸法 —",
+    "labelLive": "寸法 · ライブ",
+    "labelLast": "寸法 · 前回"
+  },
+  "guide": {
+    "eyebrow": "インタラクティブ フィールド ガイド",
+    "title": "Quadviews オーバーレイの見方",
+    "intro": "まず図の見方を覚えてから、実際に見えている状態に合った設定を変更してください。",
+    "closeLabel": "オーバーレイ ガイドを閉じる",
+    "stepsLabel": "オーバーレイ ガイドの手順",
+    "steps": {
+      "zones": {
+        "title": "ゾーンを読む",
+        "summary": "各画像がどこに寄与しているかを確認します。"
+      },
+      "alignment": {
+        "title": "位置合わせを確認",
+        "summary": "中心、オフセット、視線を比較します。"
+      },
+      "motion": {
+        "title": "トラッキングを判断",
+        "summary": "ぶれ、遅れ、トラッキングの喪失を見つけます。"
+      },
+      "troubleshoot": {
+        "title": "対処法を選ぶ",
+        "summary": "症状を適切な操作に対応付けます。"
+      }
+    },
+    "illustrationLabel": "Quadviews 診断オーバーレイのインタラクティブな図",
+    "svg": {
+      "peripheral": "青 - 周辺コンテキスト",
+      "blend": "琥珀 - ブレンド",
+      "focus": "フォーカス画像",
+      "headCenter": "頭の中心",
+      "configuredOffset": "設定したオフセット",
+      "raw": "生データ",
+      "smoothed": "スムージング後",
+      "dragHint": "クリックまたはドラッグで生の視線を移動",
+      "trackingUnavailable": "トラッキング利用不可 - フォールバック動作中"
+    },
+    "illustrative": "説明用の図です。ヘッドセットのピクセル単位の正確なキャプチャではありません",
+    "demo": {
+      "focusSize": "フォーカスのサイズ",
+      "transitionThickness": "遷移の幅",
+      "horizontalOffset": "水平オフセット",
+      "verticalOffset": "垂直オフセット",
+      "smoothing": "スムージング",
+      "degrees": "{value} 度",
+      "eyeTrackingAvailable": "アイ トラッキング: 利用可能",
+      "eyeTrackingLost": "アイ トラッキング: 喪失",
+      "reset": "図をリセット"
+    },
+    "settingNames": {
+      "peripheralResolution": "周辺の解像度",
+      "transitionThickness": "遷移の幅",
+      "focusResolution": "フォーカスの解像度",
+      "focusWidthHeight": "フォーカスの幅 / 高さ",
+      "referenceOnly": "参照のみ",
+      "horizontalVerticalOffset": "水平 / 垂直オフセット",
+      "horizontalOffset": "水平オフセット",
+      "verticalOffset": "垂直オフセット",
+      "trackingSource": "トラッキングのソース",
+      "smoothingDeadzone": "スムージング / デッドゾーン",
+      "smoothing": "スムージング",
+      "deadzone": "デッドゾーン",
+      "trackingMode": "トラッキング モード",
+      "gameEyeTracking": "ゲームのアイ トラッキング",
+      "headsetRuntime": "ヘッドセットのランタイム"
+    },
+    "cards": {
+      "peripheral": {
+        "title": "周辺領域",
+        "body": "青はコンテキスト画像の範囲です。この解像度を下げると、鮮明な領域を縮めずに最も多くのピクセルを節約できることが多いです。"
+      },
+      "transition": {
+        "title": "遷移帯",
+        "body": "琥珀色は画像間のブレンドです。幅を広げると継ぎ目を隠せますが、広すぎると境界が柔らかく感じられます。"
+      },
+      "focusBoundary": {
+        "title": "フォーカスの境界",
+        "body": "緑の枠はフォーカス ウィンドウのサイズです。フォーカスの解像度は細部の密度を変えるもので、この枠は変わりません。"
+      },
+      "headCenter": {
+        "title": "頭の中心",
+        "body": "白い十字はヘッドセットの真正面です。他のすべてのマーカーの安定した基準になります。"
+      },
+      "configuredOffset": {
+        "title": "設定したオフセット",
+        "body": "マゼンタの L と円は、頭の中心からの意図的な補正を示します。"
+      },
+      "rawGaze": {
+        "title": "生の視線",
+        "body": "シアンはアイ トラッキングの即時のサンプルです。図をクリックすると移動できます。"
+      },
+      "smoothedGaze": {
+        "title": "スムージング後の視線",
+        "body": "黄色は、設定したオフセットが加わる前にフォーカス ウィンドウを駆動するフィルター済みの位置です。"
+      },
+      "greenOutline": {
+        "title": "緑の枠",
+        "body": "アイ トラッキングが利用可能です。シアンと黄色を比べてフィルタリングを判断してください。"
+      },
+      "redOutline": {
+        "title": "赤の枠",
+        "body": "視線のソースが利用できません。VectorXR はフォールバックのフォーカス動作を使用しています。"
+      }
+    },
+    "goodTracking": {
+      "heading": "良好なトラッキングの見え方",
+      "cyan": "シアンが目の動きにすぐ反応する。",
+      "yellow": "黄色が絶えず震えることなく、ぴったり追従する。",
+      "window": "フォーカス ウィンドウが意図した細部にとどまる。"
+    },
+    "symptoms": {
+      "boundary": {
+        "label": "継ぎ目が見える",
+        "title": "フォーカスの境界がはっきり見える",
+        "body": "遷移の幅を少し大きくしてください。琥珀色の帯が全体的に柔らかくなりすぎた場合は、幅を戻して、フォーカスと周辺の解像度の差を小さくしてください。"
+      },
+      "offset": {
+        "label": "中心がずれている",
+        "title": "鮮明な領域が常に偏っている",
+        "body": "まず、シアンと黄色の視線マーカーが見ている場所に来ているか確認してください。来ている場合は、水平または垂直オフセットで一定の偏りを補正してください。視線の遅れを隠すためにオフセットを使用しないでください。"
+      },
+      "jitter": {
+        "label": "ぶれ",
+        "title": "フォーカス ウィンドウが視線の近くで震える",
+        "body": "スムージングを徐々に上げてください。小さなデッドゾーンは中心付近の細かな目の動きを抑えられますが、大きすぎるとフォーカスが最終的に動くときに引っかかったように跳びます。"
+      },
+      "lag": {
+        "label": "遅れが大きすぎる",
+        "title": "黄色のマーカーがシアンから遅れすぎている",
+        "body": "スムージングを下げてください。動き出しが遅れてから跳ぶ場合は、デッドゾーンも下げてください。フォーカス ウィンドウが視覚的に落ち着いている範囲で、できるだけ小さな値を使用してください。"
+      },
+      "lost": {
+        "label": "赤の枠",
+        "title": "アイ トラッキングが利用できない",
+        "body": "赤いフォーカスの枠は状態の警告であり、色の好みではありません。ゲームとヘッドセットのランタイムでアイ トラッキングが有効になっていることを確認してください。VectorXR は視線に追従せず、フォールバック動作になります。"
+      },
+      "performance": {
+        "label": "FPS を上げたい",
+        "title": "影響の最も少ない部分のピクセルを減らす",
+        "body": "まず周辺の解像度を下げてください。必要に応じて、次にフォーカスの幅または高さを下げてください。フォーカスの解像度はウィンドウ内の密度を変えるもので、緑の枠のサイズは変わりません。"
+      }
+    },
+    "ifYouSee": "このように見える場合",
+    "tuningOrder": {
+      "heading": "おすすめの調整順序:",
+      "tracking": "トラッキングが利用可能か確認する。",
+      "alignment": "一定の位置ずれを補正する。",
+      "smoothing": "スムージングと遅れのバランスを取る。",
+      "quality": "その後、画質とピクセル コストを調整する。"
+    }
+  }
+}

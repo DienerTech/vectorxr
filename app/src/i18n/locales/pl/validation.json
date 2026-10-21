@@ -1,0 +1,90 @@
+{
+  "field": {
+    "between": "{field} musi mieścić się w zakresie od {min} do {max}",
+    "betweenCm": "{field} musi mieścić się w zakresie od {min} do {max} cm",
+    "integerBetween": "{field} musi być liczbą całkowitą od {min} do {max}",
+    "wholeNumberFromTo": "{field} musi być liczbą całkowitą od {min} do {max}",
+    "boolean": "{field} musi być wartością logiczną",
+    "trueOrFalse": "{field} musi mieć wartość true lub false",
+    "required": "{field} jest wymagane",
+    "smallerThan": "{field} musi być mniejsze niż {other}",
+    "duplicates": "{field} powiela {value}",
+    "wavFile": "{field} musi wskazywać plik .wav"
+  },
+  "osd": {
+    "between": "OSD: {field} musi mieścić się w zakresie od {min} do {max}",
+    "customColor": "Kolor niestandardowy OSD musi być sześciocyfrowym kolorem szesnastkowym",
+    "accent": "Akcent OSD jest nieprawidłowy",
+    "clockFormat": "Format zegara OSD musi być 12- lub 24-godzinny",
+    "compactMetrics": "Wybór kompaktowych wskaźników wydajności OSD jest nieprawidłowy",
+    "bodyOrder": "Kolejność wierszy OSD musi zawierać każdy wiersz dokładnie raz"
+  },
+  "binding": {
+    "chordEmpty": "{field} musi zawierać co najmniej jeden klawisz",
+    "chordUnsupportedKey": "{field} zawiera nieobsługiwany klawisz: {key}",
+    "chordPrimaryKey": "{field} musi zawierać dokładnie jeden klawisz niebędący modyfikatorem",
+    "inputPath": "{field} musi używać wartości od button-1 do button-128 lub od hat-1 do hat-4 z obsługiwanym kierunkiem"
+  },
+  "pivot": {
+    "positionAssistAngles": "{field} wymaga 0 <= kąt początkowy < kąt pełnego przesunięcia <= 180",
+    "responseMode": "{field} musi mieć wartość \"continuous\" lub \"stepped\"",
+    "stepGlideMode": "{field} musi mieć wartość \"instant\" lub \"glide\"",
+    "quickViewDuplicateId": "{field} powiela inny Szybki widok",
+    "nudgeSetReservedId": "{field} używa zarezerwowanego wyboru Brak",
+    "nudgeSetDuplicateId": "{field} powiela inny Zestaw przesunięć",
+    "unknownNudgeSet": "{field} odwołuje się do nieznanego Zestawu przesunięć"
+  },
+  "quadviews": {
+    "trackingMode": "{field} musi mieć wartość head lub eye"
+  },
+  "framegen": {
+    "synthesisMode": "{field} musi mieć wartość interpolate lub extrapolate",
+    "flowQuality": "{field} musi mieć wartość performance, balanced lub quality",
+    "motionEstimation": "{field} musi mieć wartość shader lub hardware",
+    "frameMultiplier": "{field} musi mieć wartość auto, dynamic, 2x, 3x lub 4x",
+    "diagnosticView": "{field} musi mieć wartość off, flow, confidence lub tint"
+  },
+  "turbo": {
+    "predictionPercent": "Eksperymentalne tłumienie predykcji Turbo musi być liczbą całkowitą od 50 do 100",
+    "frameLimit": "Eksperymentalny limit klatek Turbo musi wynosić 0 (wył.) lub być liczbą całkowitą od 20 do 240"
+  },
+  "applications": {
+    "idFormat": "{field} może zawierać tylko małe litery, cyfry i łączniki",
+    "duplicateId": "{field} powiela inną aplikację",
+    "duplicateExe": "{field} powiela inną aplikację",
+    "unknownApplication": "{field} odwołuje się do nieznanej aplikacji: {application}"
+  },
+  "profiles": {
+    "conflict": "{profile} koliduje z profiles[{first}] dla aplikacji {application}; wygrywa pierwszy włączony profil"
+  },
+  "version": "version musi być równe {version}",
+  "warnings": {
+    "turboFrameGenOverlap": "Turbo i Frame Generation są włączone jednocześnie dla: {targets}. Frame Generation przejmuje taktowanie klatek; Turbo pozostaje wyłączone w sesjach, w których działa Frame Generation.",
+    "moreApplications_one": "jeszcze {count}",
+    "moreApplications_few": "jeszcze {count}",
+    "moreApplications_many": "jeszcze {count}",
+    "moreApplications_other": "jeszcze {count}",
+    "applicationsWithoutProfile": "aplikacje bez profilu niestandardowego"
+  },
+  "store": {
+    "loadBlocked": "Nie można załadować ustawień, więc zapisywanie jest wyłączone, aby zachować plik na dysku: {error}. Napraw plik i ponownie otwórz VectorXR, zaimportuj konfigurację lub przywróć wartości domyślne.",
+    "loadConfigFailed": "Nie udało się załadować konfiguracji",
+    "loadSeenAppsFailed": "Nie udało się załadować wykrytych aplikacji",
+    "loadRuntimePacingFailed": "Nie udało się załadować stanu taktowania środowiska uruchomieniowego",
+    "loadTurboMetricsFailed": "Nie udało się załadować metryk Turbo",
+    "turboMetricsCleared": "Wyczyszczono metryki Turbo",
+    "clearTurboMetricsFailed": "Nie udało się wyczyścić metryk Turbo",
+    "pacingVerdictCleared": "Wyczyszczono werdykt taktowania dla {runtime}; tryb Auto ponownie go wykryje w następnej sesji",
+    "clearPacingVerdictFailed": "Nie udało się wyczyścić werdyktu taktowania",
+    "configSaved": "Zapisano konfigurację",
+    "saveConfigFailed": "Nie udało się zapisać konfiguracji",
+    "reloadedFromDisk": "Załadowano ustawienia zmienione na dysku",
+    "configReset": "Przywrócono domyślną konfigurację",
+    "resetConfigFailed": "Nie udało się przywrócić konfiguracji",
+    "changesDiscarded": "Odrzucono niezapisane zmiany",
+    "configImported": "Zaimportowano konfigurację — zapisz, aby zapisać ją na dysku",
+    "applicationAdded": "Dodano {exe} do rejestru aplikacji",
+    "seenAppsCleared": "Wyczyszczono wykryte aplikacje",
+    "clearSeenAppsFailed": "Nie udało się wyczyścić wykrytych aplikacji"
+  }
+}

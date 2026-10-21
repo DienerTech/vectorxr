@@ -1,0 +1,40 @@
+{
+  "eyebrow": "Informacje",
+  "tagline": "Ulepszenia OpenXR dostrojone do każdej gry.",
+  "intro": "VectorXR to platforma Ulepszeń OpenXR, która zmienia sposób renderowania i śledzenia w goglach — osobno dla każdego tytułu. Odzyskaj liczbę klatek dzięki dynamicznemu renderowaniu foveated, wzmocnij obrót głowy, aby sprawdzić tył samolotu bez wykręcania się, i pogłęb separację stereo, by uzyskać silniejsze poczucie skali i obecności.",
+  "profiles": "Zarządzanie warstwami OpenXR i profile dla poszczególnych aplikacji sprawiają, że każdy tytuł jest skonfigurowany dokładnie tak, jak lubisz — wszystko z jednego miejsca.",
+  "firstAndOnly": "{highlight} rozwiązanie OpenXR, w którym wzmocniony obrót głowy i renderowanie foveated quad-views działają razem — obszar foveated podąża za obróconym widokiem zamiast zostawać w tyle.",
+  "firstAndOnlyHighlight": "Pierwsze i jedyne",
+  "developedBy": "Rozwijane niezależnie przez DienerTech LLC.",
+  "copyright": "(c) 2026 DienerTech LLC. Wydano na licencji Mozilla Public License 2.0.",
+  "support": {
+    "eyebrow": "Wesprzyj rozwój",
+    "title": "Wesprzyj VectorXR",
+    "body": "Napiwki przez Ko-fi pomagają finansować sprzęt testowy, pracę nad wydaniami i dalsze dopracowywanie narzędzi OpenXR.",
+    "button": "Wesprzyj na Ko-fi"
+  },
+  "patchNotes": {
+    "eyebrow": "Najnowsze informacje o poprawkach",
+    "readFull": "Przeczytaj pełne informacje o poprawkach"
+  },
+  "updates": {
+    "eyebrow": "Aktualizacje",
+    "title": "Stan wydania",
+    "published": "Opublikowano {date}",
+    "check": "Sprawdź",
+    "release": "Wydanie",
+    "summary": {
+      "checking": "Sprawdzanie wydań w serwisie GitHub...",
+      "available": "Dostępna jest wersja VectorXR {tag}.",
+      "upToDate": "Używasz najnowszego opublikowanego wydania, {tag}.",
+      "unavailable": "W serwisie GitHub nie ma jeszcze opublikowanych wydań.",
+      "idle": "Sprawdź w serwisie GitHub najnowszą opublikowaną kompilację VectorXR."
+    },
+    "chip": {
+      "checking": "Sprawdzanie",
+      "available": "Aktualizacja",
+      "upToDate": "Aktualna",
+      "error": "Ponów"
+    }
+  }
+}

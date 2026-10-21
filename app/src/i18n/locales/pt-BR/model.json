@@ -1,0 +1,95 @@
+{
+  "keyGroups": {
+    "function": "Teclas de função",
+    "letter": "Teclas de letras",
+    "number": "Teclas numéricas",
+    "numpad": "Teclas do teclado numérico",
+    "special": "Teclas especiais"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "space": "Espaço",
+    "numpad": "Numpad{digit}"
+  },
+  "modules": {
+    "depthxr": "Profundidade",
+    "pivotxr": "Pivot",
+    "quadviews": "Quadviews",
+    "turbo": "Turbo",
+    "framegen": "Frame Generation"
+  },
+  "defaults": {
+    "newProfile": "Novo perfil",
+    "profile": "Perfil",
+    "standardNudges": "Deslocamentos padrão",
+    "nudgeSetNumbered": "Conjunto de deslocamentos {number}",
+    "profileNudges": "Deslocamentos de {profile}",
+    "newQuickView": "Nova vista rápida",
+    "quickViewNumbered": "Vista rápida {number}",
+    "deviceButton": "Botão {number}",
+    "turboTimingProfile": "Tempo de {name}"
+  },
+  "snapViews": {
+    "defaultProfileUnavailable": "Não disponível no perfil Padrão, que é Movimento aprimorado ou Vistas fixas. Use um perfil personalizado de Movimento aprimorado junto com um perfil personalizado de Vistas fixas para o mesmo aplicativo.",
+    "noSnapPartner": "Nenhum perfil de Vistas fixas ativado atinge ainda os aplicativos deste perfil.",
+    "motionNoteNone": "Um perfil de Movimento aprimorado para o mesmo aplicativo pode continuar funcionando nestas Vistas fixas quando ativa Aplicar Movimento aprimorado às Vistas fixas.",
+    "motionNoteSources": "O Movimento aprimorado de {profiles} continua funcionando nestas Vistas fixas."
+  },
+  "binding": {
+    "device": "{device} / {input}",
+    "unassignedDevice": "Dispositivo não atribuído",
+    "unassignedInput": "entrada não atribuída",
+    "none": "Nenhuma",
+    "listMore_one": "{first} ou {count} outra",
+    "listMore_other": "{first} ou {count} outras",
+    "numbered": "{label} (atribuição {number})"
+  },
+  "actions": {
+    "quadviewsDiagnostics": "Quadviews: visualização de diagnóstico",
+    "depthToggle": "Profundidade: alternância A/B",
+    "depthLock": "Profundidade: Depth Lock A/B",
+    "osdToggle": "OSD: mostrar/ocultar",
+    "osdCycle": "OSD: trocar layout",
+    "turboToggle": "Turbo: alternância A/B",
+    "turboMetrics": "Turbo: captura de métricas",
+    "framegenToggle": "Frame Generation: alternância A/B",
+    "nudgeLeft": "Pivot {set}: deslocar à esquerda",
+    "nudgeRight": "Pivot {set}: deslocar à direita",
+    "nudgeUp": "Pivot {set}: deslocar para cima",
+    "nudgeDown": "Pivot {set}: deslocar para baixo",
+    "nudgeCenter": "Pivot {set}: centralizar deslocamento",
+    "defaultActivate": "Pivot padrão: ativar",
+    "defaultSetOrigin": "Pivot padrão: definir origem",
+    "defaultReleaseOrigin": "Pivot padrão: liberar origem",
+    "defaultQuickView": "Pivot padrão: {view}",
+    "profileNumbered": "Perfil {number}",
+    "profileActivate": "Pivot {profile}: ativar",
+    "profileSetOrigin": "Pivot {profile}: definir origem",
+    "profileReleaseOrigin": "Pivot {profile}: liberar origem",
+    "profileQuickView": "Pivot {profile}: {view}"
+  },
+  "conflicts": {
+    "sharedTitle": "{binding} está atribuído mais de uma vez",
+    "sharedMessage": "Esta entrada está atribuída a {actions}. Um pressionamento pode disparar várias ações, ou uma ação de prioridade mais alta pode encobrir outra. Este aviso não impede o salvamento.",
+    "duplicateTitle": "{binding} está duplicado",
+    "duplicateMessage": "{action} contém a mesma entrada física mais de uma vez. A duplicata é redundante e somente a primeira cópia é usada durante a execução.",
+    "duplicateActions": {
+      "suspendControls": "Controles de suspensão",
+      "activation": "Ativação",
+      "setOrigin": "Definir origem",
+      "releaseOrigin": "Liberar origem"
+    },
+    "everySuspendPress": "Cada pressionamento do controle de suspensão",
+    "everyActivationPress": "Cada pressionamento do controle de ativação",
+    "allThreeTitle": "Uma atribuição controla três ações conflitantes",
+    "allThreeMessage": "Ativação, Definir origem e Liberar origem usam todos {binding}. {press} solicita uma nova frente neutra e logo em seguida a apaga, então a origem não é capturada. Dê a Definir origem ou a Liberar origem uma atribuição própria.",
+    "setsOriginTitle": "A ativação também define a origem",
+    "setsOriginMessage": "Ativação e Definir origem usam ambos {binding}. {press} recaptura a direção atual da cabeça como a frente neutra do Pivot. Mantenha isso somente se for intencional; caso contrário, dê a Definir origem uma atribuição própria, normalmente o seu controle de recentralização no jogo.",
+    "releasesOriginTitle": "A ativação também libera a origem",
+    "releasesOriginMessage": "Ativação e Liberar origem usam ambos {binding}. {press} apaga qualquer origem do Pivot capturada. Mantenha isso somente se for intencional; caso contrário, dê a Liberar origem uma atribuição própria.",
+    "setCanceledTitle": "Definir origem é cancelado imediatamente",
+    "setCanceledMessage": "Definir origem e Liberar origem usam ambos {binding}. Um pressionamento solicita uma nova frente neutra e logo em seguida a apaga, então a origem não é capturada. Dê a uma das ações uma atribuição diferente."
+  }
+}

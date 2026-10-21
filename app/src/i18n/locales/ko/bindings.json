@@ -1,0 +1,108 @@
+{
+  "editor": {
+    "type": "바인딩 유형",
+    "types": {
+      "none": "없음",
+      "keyboard": "키보드",
+      "device": "장치"
+    },
+    "noneText": "할당된 바인딩이 없습니다. 바인딩을 선택할 때까지 이 동작은 실행되지 않습니다.",
+    "modifiers": "보조키",
+    "primaryKey": "기본 키"
+  },
+  "sound": {
+    "playOnFire": "이 동작이 실행될 때 사운드 재생",
+    "playOnTransition": "활성화/비활성화 시 사운드 재생",
+    "explanation": "이 바인딩에 대한 추가 청각 신호입니다. 슬롯을 기본 신호음으로 두거나 원하는 짧은 .wav 파일을 선택하십시오.",
+    "defaultTone": "기본 신호음",
+    "single": "사운드",
+    "activate": "활성화",
+    "deactivate": "비활성화",
+    "browse": "찾아보기…",
+    "test": "테스트",
+    "pickerFailed": "파일 선택기를 열지 못했습니다.",
+    "playFailed": "사운드를 재생하지 못했습니다."
+  },
+  "list": {
+    "add": "바인딩 추가",
+    "noneText": "할당된 바인딩이 없습니다. 바인딩을 추가할 때까지 이 동작은 실행되지 않습니다.",
+    "bindingNumber": "바인딩 {number}",
+    "bindingDescription": "키보드 바로 가기 키 또는 감지된 장치 입력을 선택하십시오."
+  },
+  "panel": {
+    "soundEnabledHint": "바인딩에 사운드 피드백이 사용 설정되어 있습니다",
+    "soundEnabledAria": "사운드 피드백 사용",
+    "editOne": "바인딩 편집…",
+    "editMany": "바인딩 편집…"
+  },
+  "page": {
+    "breadcrumbAria": "이동 경로",
+    "breadcrumbBinding": "바인딩",
+    "returnHint": "{module}(으)로 돌아가려면 Esc 또는 완료를 누르십시오.",
+    "closeAria": "바인딩을 닫고 {module}(으)로 돌아가기",
+    "listDescription": "{description} 비행에 사용하는 장치마다 바인딩을 추가하십시오. 그중 어느 것을 사용해도 작동합니다."
+  },
+  "device": {
+    "joystickDevice": "조이스틱 장치",
+    "scanning": "검색하는 중...",
+    "selectDevice": "장치 선택",
+    "disconnectedOption": "{name}(연결 끊김)",
+    "disconnectedName": "<장치 연결 끊김>",
+    "noDeviceSelected": "선택된 장치 없음",
+    "assignedInput": "할당된 입력",
+    "manualAria": "조이스틱 입력을 수동으로 선택",
+    "selectInput": "입력 선택...",
+    "manualHint": "입력을 감지하지 않고 버튼 또는 HAT 방향을 선택합니다.",
+    "manualHintNoDevice": "먼저 연결된 조이스틱을 선택하십시오.",
+    "manual": "수동",
+    "button": "버튼 {number}",
+    "hatInput": "HAT {number} {direction}",
+    "hatDirections": {
+      "up": "위",
+      "upRight": "오른쪽 위",
+      "right": "오른쪽",
+      "downRight": "오른쪽 아래",
+      "down": "아래",
+      "downLeft": "왼쪽 아래",
+      "left": "왼쪽",
+      "upLeft": "왼쪽 위"
+    },
+    "noInput": "캡처된 입력 없음",
+    "buttonCount_other": "버튼 {count}개",
+    "hatCount_other": "HAT {count}개",
+    "capabilities": "{buttons}, {hats}",
+    "disconnectedTitle": "바인딩된 장치가 현재 연결되어 있지 않음",
+    "disconnectedBody": "이 바인딩은 여전히 {device} / {input}(으)로 저장되어 있지만 Windows에서 현재 해당 조이스틱을 보고하지 않습니다.",
+    "capture": "입력 캡처",
+    "canceling": "취소하는 중...",
+    "listening": "입력 대기 중... {seconds}초",
+    "cancelListening": "입력 대기 취소({seconds}초)",
+    "refresh": "장치 새로 고침",
+    "metadata": "메타데이터",
+    "metadataTitle": "조이스틱 메타데이터",
+    "deviceGuid": "장치 GUID",
+    "connectionStatus": "연결 상태",
+    "productGuid": "제품 GUID",
+    "inputPath": "입력 경로",
+    "inputLabel": "입력 레이블",
+    "unassigned": "할당되지 않음",
+    "unavailable": "사용할 수 없음",
+    "connected": "연결됨",
+    "disconnected": "연결 끊김",
+    "status": {
+      "canceling": "입력 캡처를 취소하는 중...",
+      "cancelFailedWith": "캡처를 취소할 수 없습니다: {message}",
+      "cancelFailed": "캡처를 취소할 수 없습니다. 제한 시간이 되면 자동으로 중지됩니다.",
+      "noDevices": "조이스틱 장치를 찾을 수 없습니다.",
+      "selectFirst": "입력을 캡처하기 전에 연결된 조이스틱을 선택하십시오.",
+      "listening": "{device}의 입력만 대기하는 중입니다. 취소하려면 Esc 키를 누르십시오. 15초가 지나면 캡처가 자동으로 중지됩니다.",
+      "canceled": "입력 캡처가 취소되었습니다.",
+      "timedOut": "15초가 지나 입력 캡처 시간이 초과되었습니다.",
+      "captured": "{device} / {input}을(를) 캡처했습니다.",
+      "captureFailed": "조이스틱 입력을 캡처하지 못했습니다.",
+      "selected": "{device}을(를) 선택했습니다. 입력을 캡처하거나 수동으로 선택하십시오.",
+      "assigned": "{device} / {input}을(를) 수동으로 할당했습니다."
+    },
+    "listFailed": "조이스틱 장치 목록을 가져오지 못했습니다."
+  }
+}

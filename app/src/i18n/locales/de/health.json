@@ -1,0 +1,66 @@
+{
+  "checks": {
+    "suiteEnabled": {
+      "label": "Laufzeitschalter der Suite",
+      "enabled": "VectorXR-Laufzeiteffekte dürfen ausgeführt werden.",
+      "disabled": "VectorXR ist über den Laufzeitschalter auf der Startseite deaktiviert."
+    },
+    "layerRegistered": {
+      "label": "Registrierung des OpenXR-Layers",
+      "loading": "VectorXR liest noch die Registrierungen der OpenXR-Layer.",
+      "registered": "Registriert in {slice}.",
+      "missing": "VectorXR wurde in der Registrierung der impliziten OpenXR-API-Layer nicht gefunden."
+    },
+    "layerEnabled": {
+      "label": "OpenXR-Layer aktiviert",
+      "loading": "Warten auf den Status des OpenXR-Layers.",
+      "enabled": "Der VectorXR-API-Layer ist für künftige OpenXR-Starts aktiviert.",
+      "disabled": "Der VectorXR-API-Layer ist deaktiviert oder nicht verfügbar."
+    },
+    "layerDuplicates": {
+      "label": "Ein VectorXR-Layer aktiviert",
+      "detail_one": "{count} VectorXR-Registrierung ist aktiviert ({paths}). OpenXR-Apps stürzen ab, wenn zwei Kopien geladen werden. Deaktivieren Sie auf der Seite „OpenXR-Layer“ alle bis auf eine.",
+      "detail_other": "{count} VectorXR-Registrierungen sind aktiviert ({paths}). OpenXR-Apps stürzen ab, wenn zwei Kopien geladen werden. Deaktivieren Sie auf der Seite „OpenXR-Layer“ alle bis auf eine."
+    },
+    "layerFiles": {
+      "label": "Layer-Dateien",
+      "pending": "Die Layer-Dateien können geprüft werden, sobald die Layer-Registrierung gefunden wurde.",
+      "resolved": "Manifest- und DLL-Pfad sind beide auflösbar.",
+      "missing": "Der registrierte Manifest- oder DLL-Pfad fehlt."
+    },
+    "configLoaded": {
+      "label": "Konfigurationspfad",
+      "pending": "Der Konfigurationspfad wird angezeigt, sobald die Einstellungen geladen sind."
+    },
+    "recentLog": {
+      "label": "Laufzeitprotokolle",
+      "available_one": "{count} aktuelle Protokolldatei verfügbar.",
+      "available_other": "{count} aktuelle Protokolldateien verfügbar.",
+      "none": "Es sind noch keine VectorXR-Laufzeitprotokolle verfügbar."
+    },
+    "seenApps": {
+      "label": "Anwendungserkennung",
+      "observed_one": "{count} OpenXR-App erkannt.",
+      "observed_other": "{count} OpenXR-Apps erkannt.",
+      "none": "Es wurden noch keine OpenXR-Anwendungen erkannt."
+    }
+  },
+  "overall": {
+    "ready": "Bereit",
+    "attention": "Aufmerksamkeit erforderlich",
+    "inactive": "Nicht aktiv",
+    "unknown": "Wird geprüft"
+  },
+  "description": {
+    "ready": "VectorXR scheint für künftige Starts von OpenXR-Apps bereit zu sein.",
+    "attention": "VectorXR kann ausgeführt werden, aber eine oder mehrere Diagnosen sollten überprüft werden.",
+    "inactive": "VectorXR ist derzeit nicht bereit, OpenXR-Verbesserungen anzuwenden.",
+    "unknown": "VectorXR erfasst noch den Systemstatus."
+  },
+  "state": {
+    "pass": "ok",
+    "warn": "Warnung",
+    "fail": "Fehler",
+    "info": "Info"
+  }
+}

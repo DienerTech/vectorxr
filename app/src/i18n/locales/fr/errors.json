@@ -1,0 +1,13 @@
+{
+  "configRead": "Impossible de lire {path} : {detail}",
+  "configParse": "Impossible d'analyser {path} : {detail}",
+  "configReplace": "Impossible de remplacer {path} : {detail}",
+  "directoryMissing": "Le dossier n'existe pas : {path}",
+  "soundMissing": "Fichier son introuvable : {path}",
+  "sessionInactive": "La session OpenXR n'est plus active",
+  "diagnosticUnavailable": "La visualisation de diagnostic n'est pas disponible pour cette session OpenXR",
+  "layerNotRegistered": "Le manifeste de la couche n'est plus inscrit dans cette tranche OpenXR",
+  "layerConflict": "Une autre inscription de VectorXR est déjà activée ({slice} : {path}). Les applications OpenXR plantent quand deux copies de VectorXR se chargent ; désactivez donc d'abord celle-ci.",
+  "elevationRequired": "Cette modification de couche OpenXR nécessite une élévation de privilèges. Redémarrez VectorXR en tant qu'administrateur, puis réessayez.",
+  "elevationCanceled": "La modification de couche OpenXR a été annulée à l'invite d'élévation, ou l'assistant élevé n'a pas démarré."
+}

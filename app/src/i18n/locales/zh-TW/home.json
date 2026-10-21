@@ -1,0 +1,53 @@
+{
+  "supportLinkError": "無法開啟瀏覽器。請前往 ko-fi.com/dienertech 支持 VectorXR。",
+  "layerStatus": {
+    "checking": "檢查中",
+    "notFound": "找不到",
+    "enabled": "層已啟用",
+    "disabled": "層已停用"
+  },
+  "layerDescription": {
+    "checking": "正在檢查已註冊的 VectorXR API 層。",
+    "notFound": "找不到 VectorXR 的 API 層註冊。在註冊並啟用該層之前，增強功能都不會套用。",
+    "enabled": "VectorXR API 層已啟用，因此增強功能可在執行階段套用。",
+    "disabled": "VectorXR API 層已停用。無論套件或增強功能的啟用狀態為何，所有增強功能都不會套用。"
+  },
+  "runtime": {
+    "enabled": "執行階段已啟用",
+    "disabled": "執行階段已停用",
+    "title": "套件層級的執行階段開關狀態。"
+  },
+  "systemHealth": {
+    "eyebrow": "系統健康狀態",
+    "suiteOff": "執行階段效果已由套件開關停用。仍可查看層狀態以進行疑難排解。",
+    "checking": "正在檢查 VectorXR 執行階段與 OpenXR 層是否就緒。",
+    "layerNotFound": "VectorXR 已啟用，但找不到 OpenXR API 層註冊。",
+    "layerDisabled": "VectorXR 已啟用，但 OpenXR API 層已停用。",
+    "ready": "VectorXR 執行階段與 OpenXR 層狀態看起來已就緒，可供之後啟動的 OpenXR 應用程式使用。",
+    "viewHealth": "檢視健康狀態",
+    "exportDebug": "匯出偵錯資料"
+  },
+  "enhancements": {
+    "eyebrow": "增強功能",
+    "title": "作用中總覽",
+    "activeCount": "{active} / {total} 個作用中",
+    "columns": {
+      "enhancement": "增強功能",
+      "defaultProfile": "預設設定檔",
+      "customProfiles": "自訂設定檔",
+      "status": "狀態"
+    },
+    "open": "開啟 {module} 設定",
+    "customEnabled": "{enabled} / {total} 個已啟用",
+    "hint": "選取一項增強功能以開啟其設定。"
+  },
+  "community": {
+    "eyebrow": "社群與公告",
+    "title": "一起打造 VectorXR",
+    "discordTitle": "DienerTech Discord",
+    "discordBody": "分享您的設定、比較成果，並掌握最新的 VectorXR 公告。",
+    "supportTitle": "支持開發",
+    "supportBody": "在 Ko-fi 上贊助 VectorXR，協助支持這個專案。所有支持都有助於推動 VectorXR 的未來！",
+    "supportButton": "在 Ko-fi 上支持 VectorXR ↗"
+  }
+}

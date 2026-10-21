@@ -1,0 +1,95 @@
+{
+  "keyGroups": {
+    "function": "Touches de fonction",
+    "letter": "Touches de lettres",
+    "number": "Touches de chiffres",
+    "numpad": "Touches du pavé numérique",
+    "special": "Touches spéciales"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Maj",
+    "space": "Espace",
+    "numpad": "Numpad{digit}"
+  },
+  "modules": {
+    "depthxr": "Profondeur",
+    "pivotxr": "Pivot",
+    "quadviews": "Quadviews",
+    "turbo": "Turbo",
+    "framegen": "Frame Generation"
+  },
+  "defaults": {
+    "newProfile": "Nouveau profil",
+    "profile": "Profil",
+    "standardNudges": "Ajustements standard",
+    "nudgeSetNumbered": "Jeu d'ajustements {number}",
+    "profileNudges": "Ajustements {profile}",
+    "newQuickView": "Nouvelle Vue rapide",
+    "quickViewNumbered": "Vue rapide {number}",
+    "deviceButton": "Bouton {number}",
+    "turboTimingProfile": "Synchronisation {name}"
+  },
+  "snapViews": {
+    "defaultProfileUnavailable": "Non disponible sur le profil par défaut, qui est soit Mouvement amélioré, soit Vues instantanées. Utilisez un profil Mouvement amélioré personnalisé avec un profil Vues instantanées personnalisé pour la même application.",
+    "noSnapPartner": "Aucun profil Vues instantanées activé ne cible encore les applications de ce profil.",
+    "motionNoteNone": "Un profil Mouvement amélioré pour la même application peut continuer à fonctionner dans ces Vues instantanées s'il active Appliquer le Mouvement amélioré aux Vues instantanées.",
+    "motionNoteSources": "Le Mouvement amélioré de {profiles} continue de fonctionner dans ces Vues instantanées."
+  },
+  "binding": {
+    "device": "{device} / {input}",
+    "unassignedDevice": "Périphérique non affecté",
+    "unassignedInput": "entrée non affectée",
+    "none": "Aucune",
+    "listMore_one": "{first} ou {count} autre",
+    "listMore_other": "{first} ou {count} autres",
+    "numbered": "{label} (affectation {number})"
+  },
+  "actions": {
+    "quadviewsDiagnostics": "Quadviews : visualisation de diagnostic",
+    "depthToggle": "Profondeur : bascule A/B",
+    "depthLock": "Profondeur : Depth Lock A/B",
+    "osdToggle": "OSD : afficher/masquer",
+    "osdCycle": "OSD : changer de disposition",
+    "turboToggle": "Turbo : bascule A/B",
+    "turboMetrics": "Turbo : capture des métriques",
+    "framegenToggle": "Frame Generation : bascule A/B",
+    "nudgeLeft": "Pivot {set} : ajustement à gauche",
+    "nudgeRight": "Pivot {set} : ajustement à droite",
+    "nudgeUp": "Pivot {set} : ajustement vers le haut",
+    "nudgeDown": "Pivot {set} : ajustement vers le bas",
+    "nudgeCenter": "Pivot {set} : recentrer le décalage d'ajustement",
+    "defaultActivate": "Pivot par défaut : activer",
+    "defaultSetOrigin": "Pivot par défaut : définir l'origine",
+    "defaultReleaseOrigin": "Pivot par défaut : libérer l'origine",
+    "defaultQuickView": "Pivot par défaut : {view}",
+    "profileNumbered": "Profil {number}",
+    "profileActivate": "Pivot {profile} : activer",
+    "profileSetOrigin": "Pivot {profile} : définir l'origine",
+    "profileReleaseOrigin": "Pivot {profile} : libérer l'origine",
+    "profileQuickView": "Pivot {profile} : {view}"
+  },
+  "conflicts": {
+    "sharedTitle": "{binding} est affecté plusieurs fois",
+    "sharedMessage": "Cette entrée est affectée à {actions}. Un appui peut déclencher plusieurs actions, ou une action plus prioritaire peut en masquer une autre. Cet avertissement n'empêche pas l'enregistrement.",
+    "duplicateTitle": "{binding} est en double",
+    "duplicateMessage": "{action} contient la même entrée physique plusieurs fois. Le doublon est redondant et seule la première copie est utilisée à l'exécution.",
+    "duplicateActions": {
+      "suspendControls": "Commandes de suspension",
+      "activation": "Activation",
+      "setOrigin": "Définir l'origine",
+      "releaseOrigin": "Libérer l'origine"
+    },
+    "everySuspendPress": "Chaque appui sur une commande de suspension",
+    "everyActivationPress": "Chaque appui sur une commande d'activation",
+    "allThreeTitle": "Une affectation contrôle trois actions en conflit",
+    "allThreeMessage": "Activation, Définir l'origine et Libérer l'origine utilisent toutes {binding}. {press} demande une nouvelle direction avant neutre puis l'efface immédiatement ; l'origine n'est donc pas capturée. Donnez à Définir l'origine ou à Libérer l'origine sa propre affectation.",
+    "setsOriginTitle": "L'activation définit aussi l'origine",
+    "setsOriginMessage": "Activation et Définir l'origine utilisent toutes deux {binding}. {press} recapture la direction actuelle de la tête comme direction avant neutre de Pivot. Ne conservez cela que si c'est voulu ; sinon, donnez à Définir l'origine sa propre affectation, normalement votre commande de recentrage en jeu.",
+    "releasesOriginTitle": "L'activation libère aussi l'origine",
+    "releasesOriginMessage": "Activation et Libérer l'origine utilisent toutes deux {binding}. {press} efface toute origine Pivot capturée. Ne conservez cela que si c'est voulu ; sinon, donnez à Libérer l'origine sa propre affectation.",
+    "setCanceledTitle": "Définir l'origine est immédiatement annulé",
+    "setCanceledMessage": "Définir l'origine et Libérer l'origine utilisent toutes deux {binding}. Un appui demande une nouvelle direction avant neutre puis l'efface immédiatement ; l'origine n'est donc pas capturée. Donnez une affectation différente à l'une des actions."
+  }
+}

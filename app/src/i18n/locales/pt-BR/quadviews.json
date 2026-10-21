@@ -1,0 +1,320 @@
+{
+  "tab": {
+    "intro": "Configure a renderização foveal e periférica para jogos que já solicitam quad views do OpenXR. Ativar este módulo não adiciona suporte a quad views em jogos estéreo comuns.",
+    "varjoCompatibility": "Compatibilidade com Varjo",
+    "setupGuide": {
+      "title": "Guia de configuração",
+      "summary": "Configuração recomendada para o DCS e títulos compatíveis",
+      "heading": "Configuração recomendada para o DCS",
+      "gameLabel": "Jogo:",
+      "game": "{label} ative {useQuadView} e, para rastreamento do olhar, {useEyeTracking}.",
+      "useQuadView": "Use Quad View",
+      "useEyeTracking": "Use Eye Tracking",
+      "providerLabel": "Provedor:",
+      "provider": "{label} ative a camada do VectorXR e o perfil do Quadviews e depois desative {layerName}. No Pimax, desligue também Native Pimax Quad Views. O Quadviews nativo do Varjo continua controlado pelo runtime.",
+      "applyLabel": "Aplicar:",
+      "apply": "{label} salve o perfil e reinicie o DCS após alterar o runtime, a camada ou as configurações de VR do jogo.",
+      "titles": "O DCS é o principal título testado. Candidatos D3D11 prováveis, mas não confirmados, incluem Pavlov VR, VAIL VR, The 7th Guest VR e Kayak VR: Mirage. Cada título precisa solicitar quad views por conta própria.",
+      "pixelEstimates": "As estimativas de pixels comparam somente a renderização das vistas do aplicativo; o runtime e a composição do VectorXR têm custo de GPU adicional."
+    },
+    "restartNoteLabel": "Reinicie para aplicar:",
+    "restartNote": "{label} os campos marcados e o Quadviews ligado/desligado só entram em vigor completamente após o aplicativo OpenXR atual ser encerrado. Os controles não marcados são atualizados durante o jogo.",
+    "diagnostics": {
+      "eyebrow": "Diagnóstico no headset",
+      "intro": "Veja as zonas de renderização, o alinhamento do foco, a filtragem do olhar e a disponibilidade do rastreamento enquanto ajusta o Quadviews.",
+      "howToRead": "Como ler a sobreposição",
+      "sessionControl": "Controle da sessão",
+      "shownIn": "Mostrado em {application}",
+      "hiddenIn": "Oculto em {application}",
+      "unavailable": "Indisponível na sessão OpenXR ativa",
+      "noSession": "Nenhuma sessão ativa de Quadviews sintetizado",
+      "applying": "Aplicando...",
+      "hide": "Ocultar visualização",
+      "show": "Mostrar visualização",
+      "shortcutHeading": "Atalho no headset",
+      "shortcutHint": "Opcional. A visualização começa oculta em cada sessão OpenXR.",
+      "guideHint": "Novo na visualização? O guia interativo explica cada forma e relaciona os sintomas comuns à configuração que os controla.",
+      "readStatusFailed": "Não foi possível ler o status do runtime",
+      "controlFailed": "Não foi possível controlar a visualização",
+      "notAcknowledged": "A sessão OpenXR não confirmou a solicitação de controle"
+    },
+    "binding": {
+      "label": "Alternância da visualização de diagnóstico",
+      "description": "Mostra ou oculta a visualização de calibração do Quadviews durante o jogo. Ela começa oculta em cada sessão e só está disponível quando o VectorXR sintetiza o Quadviews pelo seu compositor D3D11.",
+      "noneText": "Nenhum atalho no headset definido. Você ainda pode controlar a visualização pela página do Quadviews."
+    },
+    "defaultProfile": {
+      "heading": "Perfil padrão",
+      "appliesTo": "Aplica-se a aplicativos sem um perfil personalizado ativado",
+      "toggleOn": "Perfil padrão ligado",
+      "toggleOff": "Perfil padrão desligado",
+      "restartTitle": "As alterações de ativação/desativação do Quadviews se aplicam após o aplicativo OpenXR em execução ser encerrado.",
+      "offNote": "Desligado, a menos que um perfil personalizado ativado o ligue. Os perfis personalizados abaixo continuam se aplicando aos seus aplicativos."
+    },
+    "launchStateNote": "Salvo imediatamente, mas um aplicativo OpenXR em execução mantém o estado do Quadviews da inicialização até ser encerrado.",
+    "customProfiles": {
+      "heading": "Perfis personalizados",
+      "intro": "Substitua o Quadviews por aplicativo. O primeiro perfil ativado correspondente prevalece.",
+      "add": "Adicionar perfil",
+      "empty": "Nenhum perfil personalizado ainda. Adicione um perfil para substituir os valores de quad views de um aplicativo específico.",
+      "alreadyTargeted": "{application} já é atingido pelo Perfil {number}. O primeiro perfil ativo prevalece."
+    },
+    "budget": {
+      "estimate": "{percent}% dos pixels de renderização estimados do aplicativo",
+      "light": "Leve",
+      "moderate": "Moderado",
+      "heavy": "Pesado",
+      "detrimental": "⚠ Prejudicial"
+    },
+    "varjo": {
+      "title": "Quadviews compatível com Varjo",
+      "biPanel": "Os headsets Varjo são de dois painéis: uma tela de contexto ampla e de menor densidade mais uma pequena tela de foco de alta densidade por olho. O quadviews compatível com Varjo do VectorXR mantém as quatro camadas de vista que o seu headset espera (duas periféricas, duas de foco) para que os painéis físicos de foco sejam acionados diretamente. Como consequência, o runtime Varjo assume a geometria das vistas, e algumas configurações do Quadviews são ignoradas.",
+      "notesIntro": "Notas de compatibilidade entre o Quadviews do VectorXR e o runtime Varjo:",
+      "stillApplies": "Continua aplicado pelo VectorXR",
+      "handledByRuntime": "Tratado pelo runtime Varjo",
+      "focusScale": "Escala do foco",
+      "peripheralScale": "Escala periférica",
+      "focusSharpness": "Nitidez do foco",
+      "focusSizeTransition": "Tamanho do foco e espessura da transição",
+      "offsets": "Deslocamento horizontal e vertical",
+      "smoothingDeadzone": "Suavização do olhar e zona morta",
+      "diagnosticVisualization": "Visualização de diagnóstico",
+      "emulation": "Em headsets sem suporte físico a quad views por telas de dois painéis (por exemplo, Quest Pro, Pimax Crystal), o Quadviews do VectorXR usa o modo de emulação padrão e todas as configurações se aplicam. Estas notas de compatibilidade se aplicam somente a runtimes Varjo.",
+      "diagnosticUnsupportedLead": "No momento, a visualização de diagnóstico não é compatível com headsets Varjo.",
+      "diagnosticUnsupported": "{lead} O runtime da Varjo controla a composição nativa de quad views, então o compositor D3D11 sintetizado do VectorXR não é executado lá."
+    }
+  },
+  "fields": {
+    "preset": {
+      "heading": "Predefinição Vector",
+      "restartTitle": "As predefinições incluem configurações que exigem reiniciar o jogo para o efeito completo.",
+      "intro": "Um ponto de partida forte; o rastreamento e o alinhamento continuam por sua conta.",
+      "buttonTitle": "As predefinições alteram as dimensões e a resolução do foco, então o efeito completo exige reiniciar o jogo.",
+      "performance": "Desempenho",
+      "balanced": "Equilibrado",
+      "quality": "Qualidade"
+    },
+    "focusWindow": "Janela de foco",
+    "focusWidth": {
+      "label": "Largura do foco",
+      "restart": "A janela de foco se move ao vivo, mas o DCS mantém a largura de textura e a carga de pixels existentes até reiniciar."
+    },
+    "focusHeight": {
+      "label": "Altura do foco",
+      "restart": "A janela de foco se move ao vivo, mas o DCS mantém a altura de textura e a carga de pixels existentes até reiniciar."
+    },
+    "percentOfFov": "% do FOV",
+    "horizontalOffset": {
+      "label": "Deslocamento horizontal",
+      "help": "Move a área de foco para a esquerda ou para a direita, em graus. Use somente se a região nítida parecer descentralizada."
+    },
+    "verticalOffset": {
+      "label": "Deslocamento vertical",
+      "help": "Move a área de foco para cima ou para baixo, em graus. Útil se o centro do olhar de um headset parecer deslocado na vertical."
+    },
+    "resolution": "Resolução",
+    "focusResolution": {
+      "label": "Resolução do foco",
+      "restart": "É necessário reiniciar: o DCS mantém as texturas de foco da inicialização. Acima de 100% pode redimensionar a tela de saída do VectorXR e causar uma breve queda na taxa de quadros.",
+      "warning": "A imagem de saída de vista completa do VectorXR cresce com a Resolução do foco: {percent}% exige cerca de {factor}× os pixels do seu headset em memória de GPU e composição, além do custo de renderização do aplicativo mostrado acima."
+    },
+    "percentOfHmd": "% da resolução do HMD",
+    "peripheralResolution": {
+      "label": "Resolução periférica",
+      "restart": "É necessário reiniciar: o DCS mantém as texturas periféricas e a carga de pixels da inicialização."
+    },
+    "foveateSharpness": {
+      "label": "Nitidez foveal",
+      "help": "Aplica nitidez extra à imagem de foco de alto detalhe. 0 desliga; valores mais altos dão mais definição, mas podem criar halos."
+    },
+    "transitionThickness": {
+      "label": "Espessura da transição",
+      "help": "Controla a largura da borda mesclada entre as imagens de foco e periférica. Valores mais altos escondem melhor o limite, mas suavizam uma parte maior da janela de foco."
+    },
+    "percentOfFocusWindow": "% da janela de foco",
+    "tracking": "Rastreamento",
+    "mode": {
+      "label": "Modo",
+      "restart": "Mudar para Rastreado pelos olhos exige reiniciar o jogo quando ele foi iniciado no modo Rastreado pela cabeça.",
+      "help": "Escolhe se a área de foco segue a direção da cabeça ou o olhar quando o rastreamento ocular está disponível.",
+      "head": "Rastreado pela cabeça",
+      "eye": "Rastreado pelos olhos"
+    },
+    "eyeTrackingCorrection": {
+      "label": "Correção do rastreamento ocular",
+      "help": "Use Padrão, a menos que o rastreamento ocular pareça invertido; nesse caso, experimente Inverter só Z.",
+      "default": "Padrão",
+      "flipZ": "Inverter só Z"
+    },
+    "smoothing": {
+      "label": "Suavização",
+      "help": "Suaviza o movimento da área de foco. 0 é instantâneo; valores mais altos reduzem a tremulação, mas adicionam atraso."
+    },
+    "deadzone": {
+      "label": "Zona morta",
+      "help": "Pequenos movimentos do olhar ignorados antes de a área de foco se mover. Útil para reduzir o tremeluzir perto do centro."
+    }
+  },
+  "dimensions": {
+    "peripheralLeft": "Periférica E",
+    "peripheralRight": "Periférica D",
+    "focusLeft": "Foco E",
+    "focusRight": "Foco D",
+    "waiting": "As dimensões das vistas aparecem aqui enquanto um jogo com Quadviews está em execução.",
+    "view": "{name}: {width} × {height} (textura {allocatedWidth} × {allocatedHeight})",
+    "footer": "Tamanhos das vistas enviadas, atualizados a cada segundo. Alterações de resolução salvas podem exigir reiniciar o jogo.",
+    "labelNone": "Dimensões —",
+    "labelLive": "Dimensões · Ao vivo",
+    "labelLast": "Dimensões · Últimas"
+  },
+  "guide": {
+    "eyebrow": "Guia de campo interativo",
+    "title": "Como ler a sobreposição do Quadviews",
+    "intro": "Primeiro entenda a imagem e depois altere a configuração que corresponde ao que você realmente vê.",
+    "closeLabel": "Fechar o guia da sobreposição",
+    "stepsLabel": "Etapas do guia da sobreposição",
+    "steps": {
+      "zones": {
+        "title": "Leia as zonas",
+        "summary": "Veja onde cada imagem contribui."
+      },
+      "alignment": {
+        "title": "Verifique o alinhamento",
+        "summary": "Compare os centros, o deslocamento e o olhar."
+      },
+      "motion": {
+        "title": "Avalie o rastreamento",
+        "summary": "Identifique tremulação, atraso e perda de rastreamento."
+      },
+      "troubleshoot": {
+        "title": "Escolha uma correção",
+        "summary": "Relacione um sintoma ao controle certo."
+      }
+    },
+    "illustrationLabel": "Ilustração interativa da sobreposição de diagnóstico do Quadviews",
+    "svg": {
+      "peripheral": "AZUL - CONTEXTO PERIFÉRICO",
+      "blend": "ÂMBAR - MESCLAGEM",
+      "focus": "IMAGEM DE FOCO",
+      "headCenter": "CENTRO DA CABEÇA",
+      "configuredOffset": "DESLOCAMENTO CONFIGURADO",
+      "raw": "BRUTO",
+      "smoothed": "SUAVIZADO",
+      "dragHint": "CLIQUE OU ARRASTE PARA MOVER O OLHAR BRUTO",
+      "trackingUnavailable": "RASTREAMENTO INDISPONÍVEL - ALTERNATIVA ATIVA"
+    },
+    "illustrative": "Ilustrativo - não é uma captura do headset perfeita pixel a pixel",
+    "demo": {
+      "focusSize": "Tamanho do foco",
+      "transitionThickness": "Espessura da transição",
+      "horizontalOffset": "Deslocamento horizontal",
+      "verticalOffset": "Deslocamento vertical",
+      "smoothing": "Suavização",
+      "degrees": "{value} graus",
+      "eyeTrackingAvailable": "Rastreamento ocular: disponível",
+      "eyeTrackingLost": "Rastreamento ocular: perdido",
+      "reset": "Redefinir a ilustração"
+    },
+    "settingNames": {
+      "peripheralResolution": "Resolução periférica",
+      "transitionThickness": "Espessura da transição",
+      "focusResolution": "Resolução do foco",
+      "focusWidthHeight": "Largura / altura do foco",
+      "referenceOnly": "Somente referência",
+      "horizontalVerticalOffset": "Deslocamento horizontal / vertical",
+      "horizontalOffset": "Deslocamento horizontal",
+      "verticalOffset": "Deslocamento vertical",
+      "trackingSource": "Fonte do rastreamento",
+      "smoothingDeadzone": "Suavização / zona morta",
+      "smoothing": "Suavização",
+      "deadzone": "Zona morta",
+      "trackingMode": "Modo de rastreamento",
+      "gameEyeTracking": "Rastreamento ocular do jogo",
+      "headsetRuntime": "Runtime do headset"
+    },
+    "cards": {
+      "peripheral": {
+        "title": "Área periférica",
+        "body": "O azul cobre a imagem de contexto. Reduzir a resolução dela geralmente economiza mais pixels sem encolher a sua região nítida."
+      },
+      "transition": {
+        "title": "Faixa de transição",
+        "body": "O âmbar é a mesclagem entre as imagens. Mais larga pode esconder uma emenda; larga demais pode deixar a borda suave."
+      },
+      "focusBoundary": {
+        "title": "Limite do foco",
+        "body": "O contorno verde é o tamanho da janela de foco. A Resolução do foco altera a densidade de detalhes, não este contorno."
+      },
+      "headCenter": {
+        "title": "Centro da cabeça",
+        "body": "A cruz branca é a direção à frente do headset. Ela dá a todos os outros marcadores uma referência estável."
+      },
+      "configuredOffset": {
+        "title": "Deslocamento configurado",
+        "body": "O L e o anel magenta mostram a sua correção intencional a partir do centro da cabeça."
+      },
+      "rawGaze": {
+        "title": "Olhar bruto",
+        "body": "O ciano é a amostra imediata do rastreamento ocular. Clique na ilustração para movê-lo."
+      },
+      "smoothedGaze": {
+        "title": "Olhar suavizado",
+        "body": "O amarelo é a posição filtrada que conduz a janela de foco antes de o deslocamento configurado ser somado."
+      },
+      "greenOutline": {
+        "title": "Contorno verde",
+        "body": "O rastreamento ocular está disponível. Compare o ciano e o amarelo para avaliar a filtragem."
+      },
+      "redOutline": {
+        "title": "Contorno vermelho",
+        "body": "A fonte ocular está indisponível. O VectorXR está usando seu comportamento de foco alternativo."
+      }
+    },
+    "goodTracking": {
+      "heading": "Como é um bom rastreamento",
+      "cyan": "O ciano responde imediatamente aos seus olhos.",
+      "yellow": "O amarelo acompanha de perto sem tremer constantemente.",
+      "window": "A janela de foco permanece no detalhe pretendido."
+    },
+    "symptoms": {
+      "boundary": {
+        "label": "Emenda visível",
+        "title": "A borda do foco é fácil de ver",
+        "body": "Aumente um pouco a Espessura da transição. Se a faixa âmbar ficar suave demais, reduza-a de novo e diminua a diferença de resolução entre Foco e Periférica."
+      },
+      "offset": {
+        "label": "Centro errado",
+        "title": "A região nítida está sempre deslocada",
+        "body": "Primeiro confirme que os marcadores de olhar ciano e amarelo caem onde você olha. Se caírem, use o Deslocamento horizontal ou vertical para corrigir o desvio constante. Não use o deslocamento para esconder o atraso do olhar."
+      },
+      "jitter": {
+        "label": "Tremulação",
+        "title": "A janela de foco treme perto do seu olhar",
+        "body": "Aumente a Suavização aos poucos. Uma pequena Zona morta pode suprimir movimentos oculares minúsculos perto do centro, mas demais cria um salto pegajoso quando o foco finalmente se move."
+      },
+      "lag": {
+        "label": "Atraso demais",
+        "title": "O marcador amarelo fica muito atrás do ciano",
+        "body": "Reduza a Suavização. Se o movimento começar tarde e depois saltar, reduza também a Zona morta. Use os menores valores que ainda mantêm a janela de foco visualmente calma."
+      },
+      "lost": {
+        "label": "Contorno vermelho",
+        "title": "O rastreamento ocular está indisponível",
+        "body": "Um contorno de foco vermelho é um aviso de status, não uma preferência de cor. Confirme que o rastreamento ocular está ativado no jogo e no runtime do headset. O VectorXR recorre à alternativa em vez de seguir o olhar."
+      },
+      "performance": {
+        "label": "Preciso de mais FPS",
+        "title": "Reduza pixels onde eles importam menos",
+        "body": "Reduza primeiro a Resolução periférica. Depois reduza a Largura ou a Altura do foco, se necessário. A Resolução do foco altera a densidade dentro da janela - ela não altera o tamanho do contorno verde."
+      }
+    },
+    "ifYouSee": "Se você vir isto",
+    "tuningOrder": {
+      "heading": "Boa ordem de ajuste:",
+      "tracking": "Confirme que o rastreamento está disponível.",
+      "alignment": "Corrija um desvio de alinhamento constante.",
+      "smoothing": "Equilibre a suavização e o atraso.",
+      "quality": "Depois ajuste a qualidade da imagem e o custo em pixels."
+    }
+  }
+}

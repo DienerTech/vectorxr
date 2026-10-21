@@ -1,0 +1,237 @@
+{
+  "title": "Frame Generation",
+  "experimental": "實驗性",
+  "intro": "在遊戲的影格之間加入生成的影格，即使遊戲跟不上，動態畫面仍能在頭戴式裝置的完整更新頻率下保持流暢。請針對每款遊戲個別嘗試，並使用 A/B 切換進行比較。",
+  "howItWorksTitle": "Frame Generation 的運作方式",
+  "restartNote": "開啟 Frame Generation 會在下次啟動遊戲時生效；關閉則會立即套用。",
+  "restartToApply": {
+    "label": "重新啟動以套用：",
+    "body": "{label}為某款遊戲開啟 Frame Generation 會在下次啟動該遊戲時生效。關閉它以及此頁面上的其他所有設定，都會在遊玩期間套用。"
+  },
+  "setupGuide": {
+    "title": "設定指南",
+    "summary": "先為一款遊戲開啟，然後在頭戴式裝置中比較",
+    "smoothing": {
+      "label": "關閉執行階段的平滑處理",
+      "body": "{label}：針對該遊戲，在執行階段以及頭戴式裝置本身的軟體中關閉：SteamVR Motion Smoothing、Pimax Smart Smoothing、Virtual Desktop SSW 或 Meta ASW。它們會與 Frame Generation 的節奏互相干擾。"
+    },
+    "refreshRate": {
+      "label": "讓頭戴式裝置維持完整的更新頻率。",
+      "body": "{label}不要使用 Pimax Play 的 Lock Frame Rate to Half Refresh Rate，或 SteamVR Throttling Behavior 中的影格限制將影格速率減半；Frame Generation 會自行設定遊戲的速率。"
+    },
+    "halfRate": {
+      "label": "先讓遊戲達到更新頻率的一半。",
+      "body": "{label}在 Frame Generation 關閉的情況下，降低遊戲設定或渲染解析度，直到遊戲能維持至少頭戴式裝置一半的速率（90 Hz 時為 45 fps）。Frame Generation 可以把速率從一半提升到完整，但無法替您完成前一半。"
+    },
+    "oneGame": {
+      "label": "為一款遊戲開啟：",
+      "body": "{label}保持預設設定檔關閉，在下方新增自訂設定檔並指派該遊戲。預設設定適用於大多數遊戲。"
+    },
+    "restart": {
+      "label": "儲存並重新啟動遊戲。",
+      "body": "{label}開啟 Frame Generation 會在下次啟動時生效。"
+    },
+    "check": {
+      "label": "在頭戴式裝置中確認：",
+      "osd": "螢幕顯示",
+      "body": "{label}{osd}會在其 FPS 旁顯示「FG 開啟」，或者您也可以選擇「生成影格著色」診斷檢視（之後請將其改回「關閉」）。"
+    },
+    "compare": {
+      "label": "比較：",
+      "body": "{label}指派 A/B 切換，並在同一場景中將生成的影格關閉再開啟。"
+    },
+    "turboNote": "在執行 Frame Generation 的遊戲中，Turbo 會保持關閉。"
+  },
+  "controls": {
+    "heading": "頭戴式裝置內控制",
+    "statusUnavailable": "執行階段狀態暫時無法使用。",
+    "noSession": "沒有正在執行的 VR 應用程式"
+  },
+  "session": {
+    "withReason": "{status} · {reason}",
+    "withReasonColon": "{status}：{reason}",
+    "active": "開啟",
+    "standby": "待機",
+    "waiting": "啟動中 · 正在等待穩定的影格",
+    "paused": "已暫停",
+    "unavailable": "無法使用",
+    "off": "關閉",
+    "needsLayer": "需要更新版的 VectorXR 層",
+    "unknown": "狀態無法使用"
+  },
+  "gameDepth": {
+    "inUse": {
+      "label": "使用遊戲深度",
+      "title": "遊戲會分享其深度資訊，因此您轉動頭部時，近處物體能保持穩定。"
+    },
+    "empty": {
+      "label": "遊戲深度為空",
+      "title": "遊戲傳送了深度但沒有填入內容。如果遊戲有基於深度的重新投影選項，開啟它即可讓 Frame Generation 使用深度。"
+    },
+    "unusable": {
+      "label": "未使用遊戲深度",
+      "title": "遊戲傳送的深度在兩眼之間無法對齊，因此 Frame Generation 會在沒有深度的情況下運作。"
+    }
+  },
+  "toggle": {
+    "heading": "A/B 切換",
+    "hint": "選用。在啟動時已開啟 Frame Generation 的遊戲中，關閉再開啟生成的影格。",
+    "label": "Frame Generation A/B 切換",
+    "description": "在頭戴式裝置中關閉再開啟生成的影格，以便在同一場景中比較動態畫面。適用於啟動時已開啟 Frame Generation 的遊戲。",
+    "noneText": "未指派繫結。只要遊戲啟動時已開啟，Frame Generation 就會執行。"
+  },
+  "diagnostic": {
+    "heading": "診斷檢視",
+    "hint": "{description} 套用至每款遊戲，並會在遊玩期間更新。",
+    "onWarning": "開啟：頭戴式裝置中的生成影格會以此檢視的色彩繪製，在一般遊玩中看起來就像畫面故障。完成後請將其設為「關閉」。",
+    "views": {
+      "off": {
+        "label": "關閉",
+        "description": "生成的影格會照原樣顯示。"
+      },
+      "flow": {
+        "label": "動態光流",
+        "description": "以色彩標示 Frame Generation 在生成影格上量測到的動態。"
+      },
+      "confidence": {
+        "label": "信賴度",
+        "description": "將生成影格中退回使用真實影像的部分塗成紅色；在調校進階設定時很有用。"
+      },
+      "tint": {
+        "label": "生成影格著色",
+        "description": "為生成的影格加上淡淡的色調，讓您能看出它們確實有顯示。"
+      }
+    }
+  },
+  "defaultProfile": {
+    "heading": "預設設定檔",
+    "appliesTo": "套用至沒有已啟用自訂設定檔的遊戲",
+    "toggleOn": "預設設定檔開啟",
+    "toggleOff": "預設設定檔關閉",
+    "offNote": "對沒有自訂設定檔的遊戲保持關閉。下方的自訂設定檔仍會為其遊戲開啟此功能。",
+    "onWarning": {
+      "label": "對所有沒有自訂設定檔的遊戲開啟，",
+      "body": "{label}包括您尚未試用過的遊戲。較安全的做法是保持此項關閉，並為每款您確認過的遊戲新增設定檔。"
+    }
+  },
+  "customProfiles": {
+    "heading": "自訂設定檔",
+    "description": "依遊戲開啟 Frame Generation。以第一個相符且已啟用的設定檔為準。",
+    "add": "新增設定檔",
+    "empty": "尚無自訂設定檔。新增設定檔即可為某款遊戲開啟 Frame Generation。",
+    "duplicateApplication": "{application} 已由設定檔 {profile} 指定。以第一個作用中的設定檔為準。"
+  },
+  "summary": {
+    "format": "{mode} · {rate} · {motion}",
+    "dynamic": "動態",
+    "fixedAuto": "固定 自動",
+    "fixed": "固定 {multiplier}"
+  },
+  "howItWorks": {
+    "whatItDoes": {
+      "heading": "功能說明",
+      "body": "Frame Generation 會量測影像在遊戲影格之間如何移動，並根據該動態建立新的影格，因此即使遊戲渲染的影格較少，頭戴式裝置在每次更新時都能取得新的影像。您的頭部旋轉會先被排除，因為頭戴式裝置本身的重新投影已經會處理它。"
+    },
+    "mode": {
+      "heading": "模式",
+      "interpolate": "{name}（預設）會在最近兩個遊戲影格之間混合。看起來最流暢、瑕疵最少，但每個遊戲影格的顯示會稍微延後。",
+      "extrapolate": "{name}會沿著最新遊戲影格的動態向前推算，因此不會增加延遲。快速動作與新顯露的區域會出現較多瑕疵；以 NVIDIA 硬體作為動態來源時效果最佳。"
+    },
+    "frameRate": {
+      "heading": "影格速率",
+      "dynamic": "{name}（預設）讓遊戲盡可能快速執行，並以生成的影格填補其影格之間的更新。當遊戲本身就能跟上時，Frame Generation 會待機，不生成任何影格。",
+      "fixed": "{name}會將遊戲維持在更新頻率的固定比例，以取得均勻的節奏。在 90 Hz 的頭戴式裝置上，{x2} 會讓遊戲以 45 fps 執行，{x3} 為 30 fps，{x4} 為 22.5 fps；{auto} 則會依遊戲需要在其中選擇。每個生成的影格都會讓影像移動得更遠，因此倍率越高，瑕疵越多。"
+    },
+    "beforeYouStart": {
+      "heading": "開始之前",
+      "smoothing": "{label}：針對該遊戲，在執行階段以及頭戴式裝置本身的軟體中關閉（SteamVR Motion Smoothing、Pimax Smart Smoothing、Virtual Desktop SSW、Meta ASW），並讓頭戴式裝置維持完整的更新頻率：不要使用 Pimax Play 的 Lock Frame Rate to Half Refresh Rate，或 SteamVR Throttling Behavior 中的影格限制將影格速率減半。Frame Generation 會自行設定遊戲的速率。",
+      "turbo": {
+        "label": "Frame Generation 執行時，Turbo 會保持關閉。",
+        "body": "{label}兩者以相反的方式控制影格節奏，因此 Turbo 會在那些遊戲中讓位，並顯示「因 Frame Generation 暫停」。您的 Turbo 設定檔不會被變更。"
+      },
+      "apis": "適用於 Direct3D 11、Direct3D 12 與 Vulkan 遊戲，也支援 Quadviews。"
+    },
+    "knownLimits": {
+      "heading": "已知限制",
+      "body": "動態是根據遊戲顯示的影像量測的，因此文字、HUD、透明效果與重複圖樣在生成影格上可能會閃爍或扭曲。如果這令人分心，請在「進階」中提高「瑕疵抑制」或降低「動態限制」。"
+    }
+  },
+  "settings": {
+    "mode": {
+      "legend": "模式",
+      "interpolate": {
+        "label": "Interpolate",
+        "description": "在最近兩個遊戲影格之間混合。影像最流暢、瑕疵最少；會增加些許延遲。"
+      },
+      "extrapolate": {
+        "label": "Extrapolate",
+        "description": "將最新的遊戲影格向前推算。延遲最低，但移動中的邊緣會有較多瑕疵；搭配 NVIDIA 硬體效果最佳。"
+      }
+    },
+    "frameRate": {
+      "legend": "影格速率",
+      "dynamic": {
+        "label": "動態",
+        "description": "遊戲盡可能快速執行，生成的影格會補足到頭戴式裝置的更新頻率。"
+      },
+      "fixed": {
+        "label": "固定",
+        "description": "將遊戲維持在更新頻率的固定比例以取得均勻的節奏，其餘部分以生成的影格填補。"
+      },
+      "fixedRate": "固定倍率",
+      "rates": {
+        "auto": "依遊戲需要選擇 2x、3x 或 4x，當遊戲本身就能跟上時則不生成任何影格。",
+        "x2": "遊戲最高以更新頻率的 1/2 執行，例如 90 Hz 時為 45 fps。低於此值時，節奏會較不均勻。",
+        "x3": "遊戲最高以更新頻率的 1/3 執行，例如 90 Hz 時為 30 fps。低於此值時，節奏會較不均勻。",
+        "x4": "遊戲最高以更新頻率的 1/4 執行，例如 90 Hz 時為 22.5 fps。瑕疵最多；適用於負擔最重的遊戲。"
+      }
+    },
+    "motionSource": {
+      "legend": "動態來源",
+      "shader": {
+        "label": "著色器",
+        "description": "在 GPU 的著色器核心上量測動態。適用於任何 GPU，與 Interpolate 搭配效果最佳。"
+      },
+      "hardware": {
+        "label": "NVIDIA 硬體",
+        "description": "使用 NVIDIA RTX GPU 的光流單元：更準確，尤其是在重複圖樣上。供 Extrapolate 使用，以及 Interpolate 在固定或自動影格速率下使用（實驗性）。"
+      }
+    },
+    "advanced": {
+      "summary": "{flow} · 抑制 {suppression} · 動態限制 {motionLimit}%",
+      "summaryHeadPrediction": "{flow} · 抑制 {suppression} · 動態限制 {motionLimit}% · 頭部預測",
+      "reset": "重設進階設定"
+    },
+    "flowQuality": {
+      "heading": "光流品質",
+      "resolution": "眼睛影像的 {resolution}",
+      "description": "動態量測的精細程度。越高越能追蹤細小、纖細的物體，但會耗用更多 GPU 時間。",
+      "levels": {
+        "performance": "效能",
+        "balanced": "平衡",
+        "quality": "品質"
+      },
+      "summary": {
+        "performance": "效能光流",
+        "balanced": "平衡光流",
+        "quality": "品質光流"
+      }
+    },
+    "artifactSuppression": {
+      "heading": "瑕疵抑制",
+      "valueLabel": "瑕疵抑制值",
+      "smoother": "動態較流暢",
+      "fewer": "瑕疵較少",
+      "description": "在動態不確定之處，數值越高就越早顯示真實影像：扭曲較少，但抖動會稍微增加。"
+    },
+    "motionLimit": {
+      "heading": "動態限制",
+      "valueLabel": "動態限制值，以視野寬度的百分比表示",
+      "description": "生成影格可移動影像的最大距離，以視野寬度的比例表示。更快的動態會顯示真實影像。"
+    },
+    "headPrediction": {
+      "heading": "延伸頭部預測",
+      "description": "Frame Generation 會讓遊戲最多提前約 150 ms 渲染，而某些執行階段（例如 Pimax 的）只會預測其中約 20 ms 的頭部動作。此選項會將您頭部的轉動延續到剩餘的時間，讓您轉向的那一側邊緣出現較少黑邊。請在啟動遊戲前開啟。"
+    }
+  }
+}

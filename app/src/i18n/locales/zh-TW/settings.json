@@ -1,0 +1,86 @@
+{
+  "core": {
+    "title": "設定",
+    "intro": "全應用程式的開關、外觀、記錄、音效回饋與設定檔案。",
+    "general": {
+      "heading": "一般",
+      "enabled": {
+        "title": "啟用 VectorXR",
+        "description": "在執行階段啟用或停用所有 VectorXR OpenXR 增強功能。"
+      },
+      "theme": {
+        "title": "佈景主題",
+        "description": "僅儲存在這台電腦上。"
+      },
+      "language": {
+        "title": "語言",
+        "description": "「系統（自動）」會跟隨 Windows 顯示語言。僅儲存在這台電腦上。",
+        "system": "系統（自動）",
+        "systemResolved": "系統（自動）· {language}",
+        "pseudo": "虛擬地區設定（測試）",
+        "machineTranslated": "此翻譯由機器產生，讀起來可能不太通順。歡迎到 GitHub 上提供修正。"
+      },
+      "tray": {
+        "title": "系統匣",
+        "description": "關閉此視窗時，應用程式會保留在通知區域，提供健康狀態、VectorXR 開關、記錄層級與「匯出偵錯資料」。關閉時：關閉視窗即結束應用程式。僅儲存在這台電腦上。",
+        "helperNote": "本應用程式與系統匣只是設定輔助工具，而不是 OpenXR 層。只要「啟用 VectorXR」為開啟，即使關閉它們，VectorXR 仍會在您的遊戲中運作。"
+      },
+      "inputDevices": {
+        "title": "輸入裝置",
+        "description": "供遊戲中使用：重新尋找在工作階段中途連接、但 VectorXR 未偵測到的控制器。",
+        "rescan": "重新掃描輸入",
+        "rescanning": "正在重新掃描…",
+        "noGame": "沒有任何搭配 VectorXR 執行中的遊戲。",
+        "asked_other": "已要求 {count} 個執行中的遊戲重新尋找。",
+        "rescanFailed": "重新掃描輸入失敗"
+      },
+      "trackSeenApps": {
+        "title": "追蹤探索到的 XR 應用程式",
+        "description": "記下您啟動的 OpenXR 應用程式的執行檔名稱及首次／最後偵測時間，方便您從「應用程式登錄」輕鬆註冊。所有資料都只保存在這台電腦上。"
+      }
+    },
+    "logging": {
+      "heading": "記錄",
+      "logLevel": "記錄層級",
+      "logLevelHelp": "「資訊」會寫入一般作業訊息與錯誤。「偵錯」會加入詳細診斷，包括有限長度的 Turbo 影格計時追蹤。記錄變更會即時套用；若要進行執行階段時脈量測，請在啟用「偵錯」的情況下啟動 VR 應用程式。",
+      "levelInfo": "資訊",
+      "levelDebug": "偵錯",
+      "retention": "記錄保留",
+      "retentionHelp": "要保留的輪替記錄檔數量。超過保留數量後，會移除較舊的檔案。",
+      "viewLogs": "檢視記錄",
+      "exportDebug": "匯出偵錯資料",
+      "exportDebugHelp": "將記錄、設定與診斷資料儲存為一個 ZIP 檔案以便分享，與「首頁」索引標籤上的功能相同。",
+      "latestLog": "最新記錄：{path}",
+      "latestLogPending": "第一次工作階段後可用"
+    },
+    "sound": {
+      "heading": "音效回饋",
+      "description": "可附加到繫結的啟用／停用提示音的主音量。",
+      "test": "測試",
+      "volume": "音效回饋音量",
+      "previewFailed": "無法播放音效。"
+    },
+    "configFiles": {
+      "heading": "設定檔案",
+      "description": "匯入其他設定檔案、匯出目前的設定，或確認 VectorXR 存放本機設定的位置。",
+      "import": "匯入設定",
+      "export": "匯出設定",
+      "directory": "設定目錄",
+      "directoryPending": "設定載入後可用",
+      "reset": {
+        "title": "重設為預設值",
+        "description": "以預設值重建 settings.json，並清除本機的 OpenXR 應用程式探索資料。",
+        "button": "重設為預設值"
+      }
+    }
+  },
+  "theme": {
+    "system": "系統",
+    "light": "淺色",
+    "dark": "深色"
+  },
+  "fileTypes": {
+    "jsonConfig": "JSON 設定",
+    "wavAudio": "WAV 音訊"
+  }
+}

@@ -1,0 +1,56 @@
+{
+  "applications": {
+    "eyebrow": "注册表",
+    "title": "应用程序注册表",
+    "intro": "按可执行文件名注册模块配置文件可以作用的应用程序。每张卡片上的标签显示各模块当前如何对待该应用程序——单击某个标签即可跳转到其配置文件，或创建一个配置文件。",
+    "add": "添加应用程序",
+    "unnamed": "未命名的应用程序",
+    "editName": "编辑应用程序名称",
+    "executable": "可执行文件",
+    "executableHelp": "可执行文件匹配不区分大小写，但名称必须包含应用程序扩展名。例如：DCS.exe",
+    "empty": "尚未注册任何应用程序。请先添加一个，再创建模块配置文件。",
+    "chip": {
+      "defaultOff": "{module} · 默认关闭",
+      "defaultOffTitle": "默认 {module} 配置文件已关闭。单击可为此应用程序创建自定义配置文件。",
+      "custom": "{module} · {profile}",
+      "customTitle": "正在应用自定义 {module} 配置文件“{profile}”。单击可将其打开。",
+      "default": "{module} · 默认",
+      "defaultTitle": "正在应用默认 {module} 配置文件。单击可为此应用程序创建自定义配置文件。"
+    }
+  },
+  "discovery": {
+    "eyebrow": "发现",
+    "trackingOnTitle": "“发现”正在跟踪您启动的 OpenXR 应用。",
+    "trackingOffTitle": "“发现”已关闭。在“设置”中启用跟踪之前，不会记录新的 OpenXR 应用启动。",
+    "trackingOn": "跟踪已开启",
+    "trackingOff": "跟踪已关闭",
+    "title": "新应用从何而来",
+    "intro": "VectorXR 会记录您启动的 OpenXR 应用，以便您一键轻松注册它们。在您注册之前，这里的任何内容都不会更改您的设置。跟踪功能在“设置”中控制。",
+    "clear": "清除已发现的应用",
+    "loading": "正在加载已发现的应用...",
+    "launches_other": "启动 {count} 次",
+    "details": "详细信息",
+    "register": "注册",
+    "allRegistered": "所有发现的应用均已注册。您启动的新应用将显示在这里。",
+    "allRegisteredTrackingOff": "所有发现的应用均已注册。跟踪已关闭，因此不会有新应用显示在这里。",
+    "alreadyRegistered": "已注册",
+    "registeredAs": "已注册为 {name}",
+    "empty": "尚未发现任何 XR 应用。请在 VectorXR 处于活动状态时启动一个 OpenXR 应用，然后刷新此列表。",
+    "emptyTrackingOff": "应用程序跟踪已禁用，因此不会有新应用显示在这里。请在“设置”中启用跟踪以记录 OpenXR 应用启动。"
+  },
+  "seenDetails": {
+    "eyebrow": "已发现的应用",
+    "registeredAs": "注册为",
+    "unregistered": "未注册",
+    "launches": "启动次数",
+    "firstSeen": "首次发现",
+    "lastSeen": "最近发现"
+  },
+  "exclusions": {
+    "title": "已启用的自定义配置文件对以下应用优先：{apps}",
+    "label": "不适用于："
+  },
+  "picker": {
+    "empty": "尚未注册任何应用程序。请先在“应用程序注册表”中添加一个，此配置文件才能激活。"
+  }
+}

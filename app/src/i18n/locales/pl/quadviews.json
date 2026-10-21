@@ -1,0 +1,320 @@
+{
+  "tab": {
+    "intro": "Skonfiguruj renderowanie foveal i peryferyjne dla gier, które już żądają widoków quad OpenXR. Włączenie tego modułu nie dodaje obsługi widoków quad do zwykłych gier stereo.",
+    "varjoCompatibility": "Zgodność z Varjo",
+    "setupGuide": {
+      "title": "Przewodnik konfiguracji",
+      "summary": "Zalecana konfiguracja DCS i zgodne tytuły",
+      "heading": "Zalecana konfiguracja DCS",
+      "gameLabel": "Gra:",
+      "game": "{label} włącz {useQuadView} oraz, dla śledzenia wzroku, {useEyeTracking}.",
+      "useQuadView": "Use Quad View",
+      "useEyeTracking": "Use Eye Tracking",
+      "providerLabel": "Dostawca:",
+      "provider": "{label} włącz warstwę VectorXR i profil Quadviews, a następnie wyłącz {layerName}. W Pimax wyłącz również Native Pimax Quad Views. Natywne Quadviews w Varjo nadal są sterowane przez środowisko uruchomieniowe.",
+      "applyLabel": "Zastosuj:",
+      "apply": "{label} zapisz profil i uruchom ponownie DCS po zmianie środowiska uruchomieniowego, warstwy lub ustawień VR w grze.",
+      "titles": "DCS to główny przetestowany tytuł. Prawdopodobni, ale niepotwierdzeni kandydaci D3D11 to m.in. Pavlov VR, VAIL VR, The 7th Guest VR i Kayak VR: Mirage. Każdy tytuł musi sam żądać widoków quad.",
+      "pixelEstimates": "Szacunki pikseli porównują tylko renderowanie widoków aplikacji; środowisko uruchomieniowe i kompozycja VectorXR mają dodatkowy koszt GPU."
+    },
+    "restartNoteLabel": "Wymagane ponowne uruchomienie:",
+    "restartNote": "{label} oznaczone pola oraz włączenie/wyłączenie Quadviews zaczynają w pełni działać po zakończeniu bieżącej aplikacji OpenXR. Nieoznaczone ustawienia aktualizują się w trakcie gry.",
+    "diagnostics": {
+      "eyebrow": "Diagnostyka w goglach",
+      "intro": "Zobacz strefy renderowania, wyrównanie ostrości, filtrowanie wzroku i dostępność śledzenia podczas dostrajania Quadviews.",
+      "howToRead": "Jak odczytywać nakładkę",
+      "sessionControl": "Sterowanie sesją",
+      "shownIn": "Wyświetlane w {application}",
+      "hiddenIn": "Ukryte w {application}",
+      "unavailable": "Niedostępne w aktywnej sesji OpenXR",
+      "noSession": "Brak aktywnej syntetyzowanej sesji Quadviews",
+      "applying": "Stosowanie...",
+      "hide": "Ukryj wizualizację",
+      "show": "Pokaż wizualizację",
+      "shortcutHeading": "Skrót w goglach",
+      "shortcutHint": "Opcjonalnie. Wizualizacja jest na początku ukryta w każdej sesji OpenXR.",
+      "guideHint": "Pierwszy raz z wizualizacją? Interaktywny przewodnik objaśnia każdy kształt i przypisuje typowe objawy do ustawienia, które nimi steruje.",
+      "readStatusFailed": "Nie można odczytać stanu działania",
+      "controlFailed": "Nie można sterować wizualizacją",
+      "notAcknowledged": "Sesja OpenXR nie potwierdziła żądania sterowania"
+    },
+    "binding": {
+      "label": "Przełącznik wizualizacji diagnostycznej",
+      "description": "Pokazuj lub ukrywaj widok kalibracji Quadviews w trakcie gry. Na początku każdej sesji jest ukryty i jest dostępny tylko wtedy, gdy VectorXR syntetyzuje Quadviews za pomocą swojego kompozytora D3D11.",
+      "noneText": "Nie przypisano skrótu w goglach. Wizualizacją można nadal sterować ze strony Quadviews."
+    },
+    "defaultProfile": {
+      "heading": "Profil domyślny",
+      "appliesTo": "Dotyczy aplikacji bez włączonego profilu niestandardowego",
+      "toggleOn": "Profil domyślny wł.",
+      "toggleOff": "Profil domyślny wył.",
+      "restartTitle": "Zmiany włączenia/wyłączenia Quadviews są stosowane po zakończeniu działającej aplikacji OpenXR.",
+      "offNote": "Wyłączony, chyba że włączy go włączony profil niestandardowy. Poniższe profile niestandardowe nadal obowiązują dla swoich aplikacji."
+    },
+    "launchStateNote": "Zapisano natychmiast, ale działająca aplikacja OpenXR zachowuje stan Quadviews z chwili uruchomienia aż do zakończenia.",
+    "customProfiles": {
+      "heading": "Profile niestandardowe",
+      "intro": "Zastąp ustawienia Quadviews dla poszczególnych aplikacji. Wygrywa pierwszy włączony pasujący profil.",
+      "add": "Dodaj profil",
+      "empty": "Brak profili niestandardowych. Dodaj profil, aby zastąpić wartości quadviews dla określonej aplikacji.",
+      "alreadyTargeted": "{application} jest już objęta Profilem {number}. Wygrywa pierwszy aktywny profil."
+    },
+    "budget": {
+      "estimate": "{percent}% szacowanych pikseli renderowania aplikacji",
+      "light": "Lekkie",
+      "moderate": "Umiarkowane",
+      "heavy": "Ciężkie",
+      "detrimental": "⚠ Szkodliwe"
+    },
+    "varjo": {
+      "title": "Quadviews zgodne z Varjo",
+      "biPanel": "Gogle Varjo są dwupanelowe: szeroki wyświetlacz kontekstowy o niższej gęstości oraz mały wyświetlacz ostrości o wysokiej gęstości dla każdego oka. Quadviews zgodne z Varjo w VectorXR zachowuje cztery warstwy widoków, których oczekują gogle (dwie peryferyjne, dwie ostrości), dzięki czemu fizyczne panele ostrości są sterowane bezpośrednio. W konsekwencji środowisko uruchomieniowe Varjo przejmuje geometrię widoków, a niektóre ustawienia Quadviews są ignorowane.",
+      "notesIntro": "Uwagi o zgodności Quadviews VectorXR ze środowiskiem uruchomieniowym Varjo:",
+      "stillApplies": "VectorXR nadal stosuje",
+      "handledByRuntime": "Obsługiwane przez środowisko uruchomieniowe Varjo",
+      "focusScale": "Skala ostrości",
+      "peripheralScale": "Skala peryferyjna",
+      "focusSharpness": "Wyostrzenie ostrości",
+      "focusSizeTransition": "Rozmiar ostrości i grubość przejścia",
+      "offsets": "Przesunięcie w poziomie i w pionie",
+      "smoothingDeadzone": "Wygładzanie wzroku i martwa strefa",
+      "diagnosticVisualization": "Wizualizacja diagnostyczna",
+      "emulation": "W goglach bez fizycznej obsługi widoków quad przez wyświetlacze dwupanelowe (np. Quest Pro, Pimax Crystal) Quadviews VectorXR używa standardowego trybu emulacji i stosowane są wszystkie ustawienia. Te uwagi o zgodności dotyczą tylko środowisk uruchomieniowych Varjo.",
+      "diagnosticUnsupportedLead": "Wizualizacja diagnostyczna nie jest obecnie obsługiwana w goglach Varjo.",
+      "diagnosticUnsupported": "{lead} Środowisko uruchomieniowe Varjo zarządza natywną kompozycją widoków quad, więc syntetyzujący kompozytor D3D11 VectorXR tam nie działa."
+    }
+  },
+  "fields": {
+    "preset": {
+      "heading": "Ustawienie wstępne Vector",
+      "restartTitle": "Ustawienia wstępne obejmują ustawienia, które do pełnego efektu wymagają ponownego uruchomienia gry.",
+      "intro": "Mocny punkt wyjścia; śledzenie i wyrównanie pozostają w Twoich rękach.",
+      "buttonTitle": "Ustawienia wstępne zmieniają wymiary i rozdzielczość obszaru ostrości, więc ich pełny efekt wymaga ponownego uruchomienia gry.",
+      "performance": "Wydajność",
+      "balanced": "Zrównoważone",
+      "quality": "Jakość"
+    },
+    "focusWindow": "Okno ostrości",
+    "focusWidth": {
+      "label": "Szerokość ostrości",
+      "restart": "Okno ostrości przesuwa się na żywo, ale DCS zachowuje dotychczasową szerokość tekstury i obciążenie pikselami do ponownego uruchomienia."
+    },
+    "focusHeight": {
+      "label": "Wysokość ostrości",
+      "restart": "Okno ostrości przesuwa się na żywo, ale DCS zachowuje dotychczasową wysokość tekstury i obciążenie pikselami do ponownego uruchomienia."
+    },
+    "percentOfFov": "% FOV",
+    "horizontalOffset": {
+      "label": "Przesunięcie w poziomie",
+      "help": "Przesuwa obszar ostrości w lewo lub w prawo w stopniach. Używaj tylko wtedy, gdy ostry obszar wydaje się przesunięty od środka."
+    },
+    "verticalOffset": {
+      "label": "Przesunięcie w pionie",
+      "help": "Przesuwa obszar ostrości w górę lub w dół w stopniach. Pomocne, jeśli środek wzroku w goglach wydaje się przesunięty w pionie."
+    },
+    "resolution": "Rozdzielczość",
+    "focusResolution": {
+      "label": "Rozdzielczość ostrości",
+      "restart": "Wymagane ponowne uruchomienie: DCS zachowuje tekstury ostrości z chwili uruchomienia. Powyżej 100% może zmienić rozmiar płótna wyjściowego VectorXR i spowodować chwilowy spadek liczby klatek.",
+      "warning": "Pełnowidokowy obraz wyjściowy VectorXR rośnie wraz z Rozdzielczością ostrości: {percent}% wymaga około {factor}× pikseli gogli w pamięci GPU i kompozycji, oprócz pokazanego powyżej kosztu renderowania aplikacji."
+    },
+    "percentOfHmd": "% rozdzielczości gogli",
+    "peripheralResolution": {
+      "label": "Rozdzielczość peryferyjna",
+      "restart": "Wymagane ponowne uruchomienie: DCS zachowuje tekstury peryferyjne i obciążenie pikselami z chwili uruchomienia."
+    },
+    "foveateSharpness": {
+      "label": "Wyostrzenie foveated",
+      "help": "Stosuje dodatkowe wyostrzenie do szczegółowego obrazu ostrości. 0 oznacza wyłączone; wyższe wartości dodają ostrości, ale mogą tworzyć halo."
+    },
+    "transitionThickness": {
+      "label": "Grubość przejścia",
+      "help": "Określa szerokość zmieszanej krawędzi między obrazem ostrości a obrazem peryferyjnym. Wyższe wartości lepiej ukrywają granicę, ale zmiękczają większą część okna ostrości."
+    },
+    "percentOfFocusWindow": "% okna ostrości",
+    "tracking": "Śledzenie",
+    "mode": {
+      "label": "Tryb",
+      "restart": "Przełączenie na śledzenie wzroku wymaga ponownego uruchomienia gry, jeśli gra została uruchomiona w trybie śledzenia głowy.",
+      "help": "Określa, czy obszar ostrości podąża za kierunkiem głowy, czy za wzrokiem, gdy śledzenie wzroku jest dostępne.",
+      "head": "Śledzenie głowy",
+      "eye": "Śledzenie wzroku"
+    },
+    "eyeTrackingCorrection": {
+      "label": "Korekta śledzenia wzroku",
+      "help": "Używaj opcji Domyślna, chyba że śledzenie wzroku wydaje się odwrócone; wtedy spróbuj Odwróć tylko Z.",
+      "default": "Domyślna",
+      "flipZ": "Odwróć tylko Z"
+    },
+    "smoothing": {
+      "label": "Wygładzanie",
+      "help": "Łagodzi ruch obszaru ostrości. 0 oznacza natychmiastowy ruch; wyższe wartości zmniejszają drgania, ale dodają opóźnienie."
+    },
+    "deadzone": {
+      "label": "Martwa strefa",
+      "help": "Drobne ruchy wzroku ignorowane, zanim obszar ostrości się przesunie. Przydatne do ograniczenia migotania w pobliżu środka."
+    }
+  },
+  "dimensions": {
+    "peripheralLeft": "Peryferyjny L",
+    "peripheralRight": "Peryferyjny P",
+    "focusLeft": "Ostrość L",
+    "focusRight": "Ostrość P",
+    "waiting": "Wymiary widoków pojawią się tutaj, gdy działa gra z Quadviews.",
+    "view": "{name}: {width} × {height} (tekstura {allocatedWidth} × {allocatedHeight})",
+    "footer": "Przesłane rozmiary widoków, odświeżane co sekundę. Zapisane zmiany rozdzielczości mogą wymagać ponownego uruchomienia gry.",
+    "labelNone": "Wymiary —",
+    "labelLive": "Wymiary · Na żywo",
+    "labelLast": "Wymiary · Ostatnie"
+  },
+  "guide": {
+    "eyebrow": "Interaktywny przewodnik",
+    "title": "Odczytywanie nakładki Quadviews",
+    "intro": "Najpierw poznaj obraz, a następnie zmień ustawienie odpowiadające temu, co faktycznie widzisz.",
+    "closeLabel": "Zamknij przewodnik po nakładce",
+    "stepsLabel": "Kroki przewodnika po nakładce",
+    "steps": {
+      "zones": {
+        "title": "Odczytaj strefy",
+        "summary": "Zobacz, gdzie każdy obraz ma swój udział."
+      },
+      "alignment": {
+        "title": "Sprawdź wyrównanie",
+        "summary": "Porównaj środki, przesunięcie i wzrok."
+      },
+      "motion": {
+        "title": "Oceń śledzenie",
+        "summary": "Wykryj drgania, opóźnienie i utratę śledzenia."
+      },
+      "troubleshoot": {
+        "title": "Wybierz poprawkę",
+        "summary": "Dopasuj objaw do właściwego ustawienia."
+      }
+    },
+    "illustrationLabel": "Interaktywna ilustracja nakładki diagnostycznej Quadviews",
+    "svg": {
+      "peripheral": "NIEBIESKI - KONTEKST PERYFERYJNY",
+      "blend": "BURSZTYNOWY - PRZEJŚCIE",
+      "focus": "OBRAZ OSTROŚCI",
+      "headCenter": "ŚRODEK GŁOWY",
+      "configuredOffset": "SKONFIGUROWANE PRZESUNIĘCIE",
+      "raw": "SUROWY",
+      "smoothed": "WYGŁADZONY",
+      "dragHint": "KLIKNIJ LUB PRZECIĄGNIJ, ABY PRZESUNĄĆ SUROWY WZROK",
+      "trackingUnavailable": "ŚLEDZENIE NIEDOSTĘPNE - AKTYWNY TRYB ZASTĘPCZY"
+    },
+    "illustrative": "Ilustracja poglądowa - nie jest dokładnym zrzutem z gogli",
+    "demo": {
+      "focusSize": "Rozmiar ostrości",
+      "transitionThickness": "Grubość przejścia",
+      "horizontalOffset": "Przesunięcie w poziomie",
+      "verticalOffset": "Przesunięcie w pionie",
+      "smoothing": "Wygładzanie",
+      "degrees": "{value}°",
+      "eyeTrackingAvailable": "Śledzenie wzroku: dostępne",
+      "eyeTrackingLost": "Śledzenie wzroku: utracone",
+      "reset": "Resetuj ilustrację"
+    },
+    "settingNames": {
+      "peripheralResolution": "Rozdzielczość peryferyjna",
+      "transitionThickness": "Grubość przejścia",
+      "focusResolution": "Rozdzielczość ostrości",
+      "focusWidthHeight": "Szerokość / wysokość ostrości",
+      "referenceOnly": "Tylko odniesienie",
+      "horizontalVerticalOffset": "Przesunięcie w poziomie / w pionie",
+      "horizontalOffset": "Przesunięcie w poziomie",
+      "verticalOffset": "Przesunięcie w pionie",
+      "trackingSource": "Źródło śledzenia",
+      "smoothingDeadzone": "Wygładzanie / martwa strefa",
+      "smoothing": "Wygładzanie",
+      "deadzone": "Martwa strefa",
+      "trackingMode": "Tryb śledzenia",
+      "gameEyeTracking": "Śledzenie wzroku w grze",
+      "headsetRuntime": "Środowisko uruchomieniowe gogli"
+    },
+    "cards": {
+      "peripheral": {
+        "title": "Obszar peryferyjny",
+        "body": "Niebieski obejmuje obraz kontekstowy. Obniżenie jego rozdzielczości zwykle oszczędza najwięcej pikseli bez zmniejszania ostrego obszaru."
+      },
+      "transition": {
+        "title": "Pas przejścia",
+        "body": "Bursztynowy to przejście między obrazami. Szerszy może ukryć szew; zbyt szeroki może sprawić, że krawędź będzie wydawać się miękka."
+      },
+      "focusBoundary": {
+        "title": "Granica ostrości",
+        "body": "Zielony kontur to rozmiar okna ostrości. Rozdzielczość ostrości zmienia gęstość szczegółów, a nie ten kontur."
+      },
+      "headCenter": {
+        "title": "Środek głowy",
+        "body": "Biały krzyż wskazuje kierunek na wprost od gogli. Daje każdemu innemu znacznikowi stabilny punkt odniesienia."
+      },
+      "configuredOffset": {
+        "title": "Skonfigurowane przesunięcie",
+        "body": "Purpurowe L i pierścień pokazują zamierzoną korektę względem środka głowy."
+      },
+      "rawGaze": {
+        "title": "Surowy wzrok",
+        "body": "Cyjan to bieżąca próbka śledzenia wzroku. Kliknij ilustrację, aby ją przesunąć."
+      },
+      "smoothedGaze": {
+        "title": "Wygładzony wzrok",
+        "body": "Żółty to przefiltrowana pozycja, która steruje oknem ostrości przed dodaniem skonfigurowanego przesunięcia."
+      },
+      "greenOutline": {
+        "title": "Zielony kontur",
+        "body": "Śledzenie wzroku jest dostępne. Porównaj cyjan i żółty, aby ocenić filtrowanie."
+      },
+      "redOutline": {
+        "title": "Czerwony kontur",
+        "body": "Źródło danych o wzroku jest niedostępne. VectorXR używa zastępczego zachowania ostrości."
+      }
+    },
+    "goodTracking": {
+      "heading": "Jak wygląda dobre śledzenie",
+      "cyan": "Cyjan reaguje natychmiast na ruch oczu.",
+      "yellow": "Żółty podąża blisko bez ciągłego drżenia.",
+      "window": "Okno ostrości pozostaje na zamierzonym szczególe."
+    },
+    "symptoms": {
+      "boundary": {
+        "label": "Widoczny szew",
+        "title": "Krawędź ostrości jest łatwo zauważalna",
+        "body": "Nieznacznie zwiększ Grubość przejścia. Jeśli bursztynowy pas stanie się szeroko rozmyty, zmniejsz ją ponownie i zmniejsz różnicę rozdzielczości między ostrością a obszarem peryferyjnym."
+      },
+      "offset": {
+        "label": "Zły środek",
+        "title": "Ostry obszar jest stale przesunięty",
+        "body": "Najpierw sprawdź, czy cyjanowy i żółty znacznik wzroku trafiają tam, gdzie patrzysz. Jeśli tak, użyj Przesunięcia w poziomie lub w pionie, aby skorygować stałe przesunięcie. Nie używaj przesunięcia do ukrywania opóźnienia wzroku."
+      },
+      "jitter": {
+        "label": "Drgania",
+        "title": "Okno ostrości drży w pobliżu punktu patrzenia",
+        "body": "Stopniowo zwiększaj Wygładzanie. Niewielka Martwa strefa może tłumić drobne ruchy oczu w pobliżu środka, ale zbyt duża powoduje lepki przeskok, gdy ostrość w końcu się przesunie."
+      },
+      "lag": {
+        "label": "Zbyt duże opóźnienie",
+        "title": "Żółty znacznik zbyt daleko pozostaje za cyjanowym",
+        "body": "Zmniejsz Wygładzanie. Jeśli ruch zaczyna się późno, a potem przeskakuje, zmniejsz również Martwą strefę. Używaj najmniejszych wartości, przy których okno ostrości nadal pozostaje wizualnie spokojne."
+      },
+      "lost": {
+        "label": "Czerwony kontur",
+        "title": "Śledzenie wzroku jest niedostępne",
+        "body": "Czerwony kontur ostrości to ostrzeżenie o stanie, a nie preferencja koloru. Sprawdź, czy śledzenie wzroku jest włączone w grze i w środowisku uruchomieniowym gogli. VectorXR przechodzi w tryb zastępczy zamiast podążać za wzrokiem."
+      },
+      "performance": {
+        "label": "Potrzeba więcej FPS",
+        "title": "Zmniejsz liczbę pikseli tam, gdzie mają najmniejsze znaczenie",
+        "body": "Najpierw obniż Rozdzielczość peryferyjną. Następnie w razie potrzeby zmniejsz Szerokość lub Wysokość ostrości. Rozdzielczość ostrości zmienia gęstość wewnątrz okna - nie zmienia rozmiaru zielonego konturu."
+      }
+    },
+    "ifYouSee": "Jeśli widzisz to",
+    "tuningOrder": {
+      "heading": "Dobra kolejność dostrajania:",
+      "tracking": "Sprawdź, czy śledzenie jest dostępne.",
+      "alignment": "Skoryguj stałe przesunięcie wyrównania.",
+      "smoothing": "Wyważ wygładzanie i opóźnienie.",
+      "quality": "Następnie dostrój jakość obrazu i koszt pikseli."
+    }
+  }
+}

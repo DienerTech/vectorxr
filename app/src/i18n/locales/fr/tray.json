@@ -1,0 +1,14 @@
+{
+  "health": "État : {label}",
+  "healthUnavailable": "État : paramètres non chargés",
+  "logLevel": "Niveau de journal : {level}",
+  "logLevelUnavailable": "Niveau de journal",
+  "info": "Info",
+  "debug": "Débogage",
+  "tooltip": "VectorXR : {label}",
+  "tooltipDisabled": "VectorXR : désactivé",
+  "enabled": "VectorXR activé",
+  "exportDebug": "Exporter le débogage...",
+  "open": "Ouvrir VectorXR",
+  "quit": "Quitter VectorXR"
+}

@@ -1,0 +1,53 @@
+{
+  "supportLinkError": "Der Browser konnte nicht geöffnet werden. Besuchen Sie ko-fi.com/dienertech, um VectorXR zu unterstützen.",
+  "layerStatus": {
+    "checking": "Wird geprüft",
+    "notFound": "Nicht gefunden",
+    "enabled": "Layer aktiviert",
+    "disabled": "Layer deaktiviert"
+  },
+  "layerDescription": {
+    "checking": "Der registrierte VectorXR-API-Layer wird geprüft.",
+    "notFound": "Die Registrierung des VectorXR-API-Layers wurde nicht gefunden. Verbesserungen werden erst angewendet, wenn der Layer registriert und aktiviert ist.",
+    "enabled": "Der VectorXR-API-Layer ist aktiviert, sodass Verbesserungen zur Laufzeit angewendet werden können.",
+    "disabled": "Der VectorXR-API-Layer ist deaktiviert. Keine der Verbesserungen wird angewendet, unabhängig davon, ob die Suite oder die Verbesserung aktiviert ist."
+  },
+  "runtime": {
+    "enabled": "Laufzeit aktiviert",
+    "disabled": "Laufzeit deaktiviert",
+    "title": "Status des Laufzeitschalters auf Suite-Ebene."
+  },
+  "systemHealth": {
+    "eyebrow": "Systemzustand",
+    "suiteOff": "Laufzeiteffekte sind über den Suite-Schalter deaktiviert. Der Layer-Status ist für die Problembehandlung weiterhin verfügbar.",
+    "checking": "Die Bereitschaft der VectorXR-Laufzeit und des OpenXR-Layers wird geprüft.",
+    "layerNotFound": "VectorXR ist aktiviert, aber die Registrierung des OpenXR-API-Layers wurde nicht gefunden.",
+    "layerDisabled": "VectorXR ist aktiviert, aber der OpenXR-API-Layer ist deaktiviert.",
+    "ready": "Der Status der VectorXR-Laufzeit und des OpenXR-Layers ist für künftige Starts von OpenXR-Apps bereit.",
+    "viewHealth": "Zustand anzeigen",
+    "exportDebug": "Debugdaten exportieren"
+  },
+  "enhancements": {
+    "eyebrow": "Verbesserungen",
+    "title": "Aktive Übersicht",
+    "activeCount": "{active} von {total} aktiv",
+    "columns": {
+      "enhancement": "Verbesserung",
+      "defaultProfile": "Standardprofil",
+      "customProfiles": "Eigene Profile",
+      "status": "Status"
+    },
+    "open": "Einstellungen für {module} öffnen",
+    "customEnabled": "{enabled} / {total} aktiviert",
+    "hint": "Wählen Sie eine Verbesserung aus, um ihre Einstellungen zu öffnen."
+  },
+  "community": {
+    "eyebrow": "Community & Ankündigungen",
+    "title": "Gestalten Sie VectorXR mit",
+    "discordTitle": "DienerTech Discord",
+    "discordBody": "Teilen Sie Ihr Setup, vergleichen Sie Ergebnisse und erhalten Sie die neuesten VectorXR-Ankündigungen.",
+    "supportTitle": "Entwicklung unterstützen",
+    "supportBody": "Unterstützen Sie das Projekt mit einem Beitrag für VectorXR auf Ko-fi. Jede Unterstützung hilft, die Zukunft von VectorXR zu finanzieren!",
+    "supportButton": "VectorXR auf Ko-fi unterstützen ↗"
+  }
+}

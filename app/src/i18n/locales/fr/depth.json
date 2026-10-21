@@ -1,0 +1,218 @@
+{
+  "title": "Profondeur",
+  "experimental": "Expérimental",
+  "intro": "Façonnez l'échelle binoculaire et le placement de la profondeur comme un seul système, puis utilisez des profils par application lorsqu'un jeu a besoin de son propre réglage. Partez du neutre, modifiez une commande à la fois et utilisez l'affectation en jeu pour des comparaisons A/B immédiates.",
+  "tuningGuide": {
+    "title": "Guide de réglage",
+    "summary": "Réglez l'échelle, placez la profondeur, puis comparez",
+    "ariaLabel": "Guide de réglage de la profondeur",
+    "scale": {
+      "step": "Étape 1 : régler l'échelle",
+      "name": "Profondeur stéréo",
+      "body": "Vers la gauche, l'échelle apparente du monde augmente, ce qui peut rendre des proportions grandeur nature quand un cockpit semble miniaturisé. Vers la droite, la forme stéréo et la présence se renforcent quand un jeu paraît trop plat ou surdimensionné. La géométrie proche change le plus."
+    },
+    "place": {
+      "step": "Étape 2 : placer la profondeur",
+      "name": "Plan de convergence",
+      "body": "Laissez-le à zéro pendant que vous évaluez l'échelle, puis placez le plan de travail par petits pas. Vers la gauche, un cockpit encombré gagne de l'espace ; vers la droite, un panneau, un viseur ou une zone d'interaction lointaine se rapproche."
+    },
+    "compare": {
+      "step": "Étape 3 : comparer",
+      "name": "Réglez-les en paire",
+      "body": "Traitez chaque profil de jeu comme son propre étalonnage visuel — une géométrie de caméra différente peut demander des combinaisons totalement différentes, et pas de légères variations. Comparez en A/B avec la géométrie native et arrêtez-vous au premier signe de fatigue oculaire ou de fusion difficile."
+    }
+  },
+  "ipdNote": {
+    "lead": "Les réglages d'IPD du jeu peuvent remplacer la Profondeur stéréo.",
+    "body": "{lead} Désactivez d'abord tout remplacement de type Force IPD, IPD virtuel, séparation stéréo ou échelle du monde. Dans DCS, décochez {setting} sous Options > VR.",
+    "forceIpdDistance": "Force IPD Distance"
+  },
+  "bindingsCard": {
+    "eyebrow": "Régler et comparer",
+    "heading": "Affectations en jeu",
+    "description": "Configurez les bascules A/B complètes de Profondeur et de Depth Lock en un seul endroit.",
+    "assigned_one": "{count} sur {total} affectée",
+    "assigned_other": "{count} sur {total} affectées",
+    "duplicateInputs_one": "{count} entrée en double",
+    "duplicateInputs_other": "{count} entrées en double"
+  },
+  "defaultProfile": {
+    "heading": "Profil par défaut",
+    "appliesTo": "S'applique aux applications sans profil personnalisé activé",
+    "toggleOn": "Profil par défaut activé",
+    "toggleOff": "Profil par défaut désactivé",
+    "offNote": "Désactivé, sauf si un profil personnalisé activé l'active. Les profils personnalisés ci-dessous s'appliquent toujours à leurs applications."
+  },
+  "customProfiles": {
+    "heading": "Profils personnalisés",
+    "description": "Remplacez la Profondeur par application. Le premier profil activé correspondant l'emporte.",
+    "add": "Ajouter un profil",
+    "empty": "Aucun profil personnalisé pour l'instant. Ajoutez un profil pour remplacer les valeurs de profondeur d'une application précise.",
+    "duplicateApplication": "{application} est déjà ciblée par le profil {profile}. Le premier profil actif l'emporte."
+  },
+  "troubleshooting": {
+    "title": "Dépannage de la profondeur",
+    "heading": "Quand la profondeur se comporte de façon inattendue",
+    "override": "Les jeux disposant d'un réglage Force IPD, IPD virtuel, séparation stéréo ou échelle du monde peuvent remplacer la séparation des yeux signalée par OpenXR. Ce remplacement a priorité sur la Profondeur stéréo de VectorXR.",
+    "dcs": {
+      "label": "DCS :",
+      "body": "{label} décochez {setting} sous Options > VR, puis redémarrez complètement DCS. Une valeur forcée fixe la séparation de la caméra virtuelle de DCS elle-même et peut donner l'impression que la Profondeur stéréo ne fait rien."
+    },
+    "expected": {
+      "label": "Résultat attendu :",
+      "body": "{label} la Profondeur stéréo modifie l'échelle binoculaire surtout sur la géométrie proche ; un cockpit peut donc paraître plus grand ou plus petit tandis que le terrain lointain et l'horizon semblent presque inchangés. Cette réponse dépendante de la distance est normale."
+    },
+    "convergence": {
+      "label": "La convergence est plus subtile :",
+      "body": "{label} elle déplace le plan de parallaxe nulle au lieu de mettre la scène à l'échelle. Comparez un bord de cockpit proche avec un paysage lointain en la déplaçant par petits pas. Si la Profondeur stéréo n'a toujours aucun effet après la désactivation des remplacements du jeu, activez la journalisation de débogage et exportez les journaux de la session."
+    },
+    "depthLock": {
+      "label": "Depth Lock préserve l'image réglée à la soumission :",
+      "body": "{label} le jeu effectue le rendu avec une géométrie stéréo modifiée, puis le runtime reçoit les poses des yeux et le champ de vision natifs du casque, de sorte qu'il ne peut pas normaliser la combinaison. Comparez-le activé et désactivé à valeurs identiques, et réduisez l'intensité ou désactivez-le si le confort se dégrade."
+    }
+  },
+  "bindingsPage": {
+    "breadcrumb": "Fil d'Ariane",
+    "current": "Affectations en jeu",
+    "title": "Profondeur — Affectations en jeu",
+    "escHint": "Appuyez sur Échap ou Terminé pour revenir à Profondeur.",
+    "closeLabel": "Fermer les affectations et revenir à Profondeur",
+    "compareGently": {
+      "heading": "Comparez en douceur",
+      "body": "Des changements A/B rapides peuvent brièvement perturber la fusion visuelle, même lorsque les deux réglages sont confortables individuellement. Faites une pause entre les comparaisons et réduisez le réglage le plus fort si l'image semble difficile à stabiliser."
+    },
+    "depthToggle": {
+      "label": "Bascule A/B de Profondeur",
+      "description": "Activez ou désactivez l'amélioration Profondeur complète en jeu, en conservant vos valeurs réglées pour une comparaison directe. Ajoutez une affectation pour chaque périphérique avec lequel vous volez ; n'importe laquelle d'entre elles agit.",
+      "noneText": "Aucune affectation. La Profondeur suit le profil actif, sans bascule A/B en jeu."
+    },
+    "lockToggle": {
+      "label": "Bascule A/B de Depth Lock",
+      "description": "Bascule uniquement Depth Lock pendant que Profondeur stéréo et Convergence restent actives. Il est ainsi plus facile de percevoir ce que le verrouillage à la soumission apporte à la combinaison réglée. Ajoutez une affectation pour chaque périphérique avec lequel vous volez ; n'importe laquelle d'entre elles agit.",
+      "noneText": "Aucune affectation. Depth Lock suit le profil actif."
+    }
+  },
+  "depthLock": {
+    "name": "Depth Lock",
+    "description": "Verrouille la géométrie stéréo réglée dans l'image rendue, puis rétablit les poses des yeux et le champ de vision natifs du casque à la soumission pour que le runtime ne puisse pas normaliser l'effet. Testez-le jeu par jeu et réduisez l'intensité en cas d'inconfort ou de nausée."
+  },
+  "stereoDepth": {
+    "title": "Profondeur stéréo / Échelle du monde",
+    "subtitle": "Modifie la séparation virtuelle des yeux sans toucher à l'IPD physique de votre casque. Déplacez vers la droite pour une stéréo de proximité plus forte et un monde qui paraît plus petit ; vers la gauche pour un monde qui paraît plus grand et plus plat. Commencez autour de ±5–15 %.",
+    "left": "- Monde plus grand",
+    "center": "0 Échelle native",
+    "right": "+ Effet stéréo 3D",
+    "extendedRange": "Plage étendue (±100 %)",
+    "extendedRangeHint": "À utiliser uniquement lorsque le réglage normal de ±25 % ne suffit pas.",
+    "badgeNative": "IPD native",
+    "badge": "Stéréo {value} %"
+  },
+  "convergence": {
+    "title": "Convergence / Plan de profondeur",
+    "subtitle": "Place le plan de parallaxe nulle sans modifier la profondeur relative. Gardez 0 pendant le réglage de la Profondeur stéréo, puis utilisez de petits pas : négatif éloigne le plan ; positif le rapproche.",
+    "left": "- Plan plus éloigné",
+    "center": "0 Valeur de l'application",
+    "right": "+ Plan plus proche",
+    "extendedRange": "Plage étendue (±25)",
+    "extendedRangeHint": "À utiliser uniquement lorsque le réglage normal de ±5 ne suffit pas.",
+    "badgeDefault": "Plan : valeur de l'application",
+    "badgeNearer": "Plan : plus proche +{value}",
+    "badgeFarther": "Plan : plus éloigné {value}"
+  },
+  "pairingMap": {
+    "heading": "Carte des combinaisons de profondeur",
+    "hint": "Faites glisser le curseur pour explorer les deux commandes ensemble. Utilisez les curseurs linéaires pour le réglage fin.",
+    "regionLabel": "Effet de profondeur combiné",
+    "values": "Profondeur {depth} · Conv. {convergence}",
+    "lockOn": "Depth Lock activé",
+    "lockOff": "Depth Lock désactivé",
+    "convergenceNearer": "Convergence : plus proche (+{limit})",
+    "convergenceFarther": "Convergence : plus éloignée (−{limit})",
+    "depthLarger": "Profondeur : échelle plus grande (−{limit} %)",
+    "depthStronger": "Profondeur : stéréo plus forte (+{limit} %)",
+    "mapLabel": "Carte des combinaisons de profondeur. Faites glisser pour régler la Profondeur stéréo horizontalement et la Convergence verticalement. Les touches fléchées permettent des ajustements fins ; maintenez Maj pour des pas plus grands.",
+    "quadrants": {
+      "largerNear": {
+        "label": "Échelle plus grande · Proche",
+        "axes": "Profondeur − · Convergence +"
+      },
+      "strongerNear": {
+        "label": "Stéréo plus forte · Proche",
+        "axes": "Profondeur + · Convergence +"
+      },
+      "largerFar": {
+        "label": "Échelle plus grande · Lointain",
+        "axes": "Profondeur − · Convergence −"
+      },
+      "strongerFar": {
+        "label": "Stéréo plus forte · Lointain",
+        "axes": "Profondeur + · Convergence −"
+      }
+    }
+  },
+  "netEffect": {
+    "heading": "Effet net",
+    "goodFitLabel": "Adapté à :",
+    "goodFit": "{label} {text}",
+    "watchForLabel": "Attention à :",
+    "watchFor": "{label} {text}",
+    "lockOff": "Depth Lock est désactivé ; le runtime peut donc réinterpréter et partiellement normaliser cette combinaison à la soumission.",
+    "lockOn": "Depth Lock préserve la combinaison rendue lorsque la géométrie native est rétablie pour la soumission.",
+    "cases": {
+      "native": {
+        "title": "Géométrie stéréo native",
+        "description": "Aucune des deux commandes ne modifie l'échelle stéréo ou le plan de profondeur de l'application.",
+        "useCase": "Utilisez-la pour connaître l'échelle d'origine d'un jeu et comme référence A/B pour chaque profil.",
+        "caution": "Si les proportions natives semblent déjà convaincantes, aucune correction n'est nécessaire."
+      },
+      "compactNear": {
+        "title": "Échelle compacte avec présence immédiate",
+        "description": "Une séparation stéréo plus forte fait paraître le monde plus petit et plus en relief, tandis qu'un plan plus proche rapproche la zone de travail de vous.",
+        "useCase": "Utile quand un cockpit semble surdimensionné ou lointain et que vous voulez que les panneaux, les commandes et la géométrie proche semblent immédiats.",
+        "caution": "Les deux commandes augmentent la sollicitation en vision de près ; abordez donc ce quadrant par petits pas."
+      },
+      "detailedFar": {
+        "title": "Stéréo détaillée avec placement confortable",
+        "description": "Une séparation stéréo plus forte ajoute de la forme et de la présence, tandis qu'un plan plus éloigné donne de l'espace à cette image plus compacte.",
+        "useCase": "Utile quand les proportions natives semblent trop grandes, mais qu'une Profondeur stéréo positive seule rend le cockpit encombré.",
+        "caution": "Réglez d'abord la Profondeur stéréo, puis éloignez le plan juste assez pour que l'image plus forte se stabilise naturellement."
+      },
+      "largerNear": {
+        "title": "Échelle plus grande avec un plan de travail proche",
+        "description": "Une séparation stéréo réduite agrandit l'échelle apparente du monde, tandis qu'un plan plus proche garde le panneau et les commandes visuellement accessibles.",
+        "useCase": "Utile quand un cockpit ressemble à un jouet mais que ses instruments ou sa zone d'interaction doivent rester proches et lisibles.",
+        "caution": "Une valeur de Convergence fortement positive peut devenir fatigante même lorsque la Profondeur stéréo est réduite."
+      },
+      "lifeSizedFar": {
+        "title": "Échelle grandeur nature avec placement détendu",
+        "description": "Une séparation stéréo réduite augmente la taille apparente, tandis qu'un plan plus éloigné laisse le cockpit vous entourer au lieu de vous coller au visage.",
+        "useCase": "Utile dans les simulateurs d'avions et de véhicules dont la caméra native semble miniaturisée ou trop proche ; cela peut mieux correspondre aux proportions réelles dont vous vous souvenez.",
+        "caution": "La stéréo plus douce est voulue — arrêtez-vous quand l'échelle semble naturelle plutôt que de rechercher l'effet 3D le plus fort possible."
+      },
+      "strongerStereo": {
+        "title": "Profondeur stéréo relative plus forte",
+        "description": "La géométrie proche gagne en séparation et en forme, ce qui augmente la présence tout en faisant paraître le monde un peu plus petit.",
+        "useCase": "Utile quand un jeu paraît plat ou surdimensionné mais que le placement existant de son plan de profondeur est déjà confortable.",
+        "caution": "Si la scène commence à vous oppresser, associez-la à un petit ajustement négatif de la Convergence."
+      },
+      "largerScale": {
+        "title": "Échelle du monde plus grande et plus douce",
+        "description": "Une séparation stéréo réduite adoucit l'intensité en vision de près et augmente la taille apparente du monde.",
+        "useCase": "Utile quand la géométrie native semble miniaturisée, exiguë ou plus intense en stéréoscopie que le véhicule réel.",
+        "caution": "Réduisez juste assez pour retrouver des proportions crédibles tout en conservant des indices de forme utiles."
+      },
+      "planeNearer": {
+        "title": "Plan de travail rapproché",
+        "description": "Le champ de disparité de la scène se rapproche de vous sans modifier son gradient de profondeur relatif ni son échelle globale.",
+        "useCase": "Utile quand l'échelle semble correcte mais que le panneau, le viseur ou la zone d'interaction semble visuellement trop éloigné.",
+        "caution": "Les valeurs positives peuvent donner une impression de loucher, surtout associées à une Profondeur stéréo positive."
+      },
+      "planeFarther": {
+        "title": "Plan de travail éloigné",
+        "description": "Le champ de disparité de la scène s'éloigne sans modifier son gradient de profondeur relatif ni son échelle globale.",
+        "useCase": "Utile quand l'échelle semble correcte mais que le cockpit ou la géométrie proche semble collé à votre visage.",
+        "caution": "Éloignez juste assez pour détendre le placement tout en gardant la scène facile à fusionner."
+      }
+    }
+  }
+}

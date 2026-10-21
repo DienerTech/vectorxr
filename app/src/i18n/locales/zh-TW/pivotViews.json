@@ -1,0 +1,133 @@
+{
+  "shared": {
+    "pivot": "Pivot",
+    "breadcrumb": "階層連結",
+    "returnToPivot": "返回 Pivot",
+    "editTitle": "編輯 {name}",
+    "yaw": "偏擺",
+    "pitch": "俯仰",
+    "transition": "轉場",
+    "unitSeconds": "s",
+    "unitCm": "cm",
+    "behavior": "行為",
+    "hold": "按住",
+    "toggle": "切換",
+    "addBinding": "新增繫結",
+    "bindingLabel": "繫結 {index}",
+    "holdDescription": "僅在按住時啟用此視角。",
+    "toggleDescription": "按一次進入；再按一次離開。",
+    "bindingCount_other": "{count} 個繫結"
+  },
+  "viewControlsPage": {
+    "snapViews": "吸附視角",
+    "title": "{context} — 吸附視角",
+    "returnHint": "按 Esc 或「完成」即可返回。",
+    "returnToSnapViews": "返回吸附視角",
+    "name": "名稱",
+    "yawHint": "負值向左轉；正值向右轉。",
+    "positionOffset": "選用的位置偏移",
+    "positionHint": "位置是相對於已擷取的 Pivot 原點。自然的頭部平移仍然可用。",
+    "rightLeft": "右／左",
+    "upDown": "上／下",
+    "forwardBack": "前／後",
+    "bindings": "繫結",
+    "bindingsHint": "「按住」在放開時返回。「切換」會維持，直到再次按下或另一個快速視角接手為止。",
+    "noBindings": "未指派任何繫結。在新增繫結之前，此快速視角不會作用。",
+    "quickViews": "快速視角",
+    "quickViewsHint": "相對於 Pivot 原點的具名姿勢，並在目標周圍保有 1:1 的自然頭部追蹤。",
+    "createPreset": "建立 4 視角預設組",
+    "addQuickView": "新增快速視角",
+    "empty": "尚無快速視角。請手動新增，或從四視角 HAT 預設組開始。",
+    "summary_other": "偏擺 {yaw}° · 俯仰 {pitch}° · {count} 個繫結",
+    "position": "位置 右 {right} · 上 {up} · 前 {forward} cm",
+    "moveUp": "上移",
+    "moveDown": "下移",
+    "copyName": "{name} 複本",
+    "presets": {
+      "lookLeft": "向左看",
+      "lookRight": "向右看",
+      "high12": "正上方 12 點",
+      "checkSix": "檢查六點鐘"
+    }
+  },
+  "viewControlsPanel": {
+    "snapViews": "吸附視角",
+    "viewCount_other": "{count} 個視角",
+    "editSnapViews": "編輯吸附視角…"
+  },
+  "nudgeSetPage": {
+    "nudgeSets": "微調組",
+    "linked_other": "已連結至 {count} 個設定檔。變更會套用到所有選取此微調組的地方。",
+    "setName": "微調組名稱",
+    "allowWhileInactive": "允許在 Pivot 未作用時使用",
+    "allowWhileInactiveHint": "即使沒有任何連結的設定檔正在作用，這些繫結仍可調整並保留全域視角偏移。",
+    "yawStep": "偏擺步進",
+    "pitchStep": "俯仰步進",
+    "yawLeft": "向左偏擺",
+    "yawRight": "向右偏擺",
+    "pitchUp": "向上俯仰",
+    "pitchDown": "向下俯仰",
+    "yawStepDescription": "為目前的視角增加一個偏擺步進。",
+    "pitchStepDescription": "為目前的視角增加一個俯仰步進。",
+    "center": "微調偏移歸零",
+    "centerDescription": "清除累積的微調偏移。",
+    "resetToDefaults": "重設為預設值",
+    "confirmReset": "要重設移動值，並移除此微調組中的所有繫結嗎？",
+    "deleteSet": "刪除微調組",
+    "deleteTitle": "刪除此微調組",
+    "deleteRequired": "至少需要一個微調組",
+    "confirmDelete": "要刪除「{name}」嗎？使用它的設定檔會切換到另一個微調組。"
+  },
+  "snapBindingsPage": {
+    "snapViewBindings": "吸附視角繫結",
+    "title": "{context} — 吸附視角繫結",
+    "hint": "指派「按住」或「切換」控制，而不變更已儲存的視角轉換。",
+    "noBinding": "未指派繫結。此吸附視角未作用。",
+    "empty": "尚無任何吸附視角。請先從「編輯吸附視角」建立視角，再指派繫結。"
+  },
+  "snapBindingsPanel": {
+    "snapViewBindings": "吸附視角繫結",
+    "inactiveHint": "在指派繫結之前，吸附視角會保持未作用。",
+    "editBindings": "編輯繫結…"
+  },
+  "snapStacking": {
+    "title": "將增強動態套用至吸附視角",
+    "description": "進入吸附視角時保留輔助效果，或在已選取的視角周圍啟用它。使用此設定檔的旋轉與位置調校。"
+  },
+  "originPage": {
+    "originControls": "原點控制",
+    "title": "{context} — 原點控制",
+    "hint": "讓 Pivot 的中立姿勢與模擬器的重新置中位置保持一致。",
+    "closeLabel": "關閉原點控制並返回 Pivot",
+    "setOrigin": "設定原點（選用）",
+    "setOriginDescription": "將目前的頭部姿勢擷取為 Pivot 的中立坐姿原點。請將此繫結到您在遊戲中重新置中視角所用的同一個控制鍵，讓兩個原點同時更新。",
+    "setOriginNone": "未指派繫結。Pivot 會以 HMD 原點為中心旋轉。",
+    "releaseOrigin": "釋放原點（選用）",
+    "releaseOriginDescription": "清除已擷取的原點，讓 Pivot 回到 HMD 原點。若擷取原點時視線偏離中心，這會很有用。",
+    "releaseOriginNone": "未指派繫結。已擷取的原點會持續作用，直到工作階段結束或重新擷取為止。"
+  },
+  "originPanel": {
+    "originControls": "原點控制",
+    "setOrigin": "設定原點",
+    "setOriginTitle": "將目前的頭部姿勢擷取為 Pivot 的中立坐姿原點。",
+    "releaseOrigin": "釋放原點",
+    "releaseOriginTitle": "釋放已擷取的原點，讓 Pivot 回到預設的 HMD 原點。",
+    "editOrigin": "編輯原點…"
+  },
+  "bindingsPanel": {
+    "motionActivation": "動態啟用",
+    "alwaysActive": "永遠作用",
+    "manual": "手動",
+    "noSuspendControls": "沒有暫停控制",
+    "noActivationControls": "沒有啟用控制",
+    "editActivation": "編輯啟用方式…"
+  },
+  "bindingsPage": {
+    "motionActivation": "動態啟用",
+    "title": "{context} — 啟用",
+    "returnHint": "按 Esc 或「完成」即可返回 Pivot。",
+    "closeLabel": "關閉啟用設定並返回 Pivot",
+    "alwaysActiveDescription": "選擇可暫時暫停或關閉 Pivot 的控制。",
+    "manualDescription": "選擇可啟動 Pivot 的控制。"
+  }
+}

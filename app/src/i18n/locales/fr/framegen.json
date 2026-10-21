@@ -1,0 +1,237 @@
+{
+  "title": "Frame Generation",
+  "experimental": "Expérimental",
+  "intro": "Ajoute des images générées entre les images du jeu, pour que le mouvement reste fluide à la fréquence de rafraîchissement complète de votre casque même quand le jeu ne suit pas. Essayez-la jeu par jeu et comparez avec la bascule A/B.",
+  "howItWorksTitle": "Fonctionnement de Frame Generation",
+  "restartNote": "L'activation de Frame Generation prend effet au prochain démarrage du jeu ; sa désactivation s'applique immédiatement.",
+  "restartToApply": {
+    "label": "Redémarrage nécessaire :",
+    "body": "{label} l'activation de Frame Generation pour un jeu prend effet au prochain démarrage du jeu. Sa désactivation, ainsi que tous les autres paramètres de cette page, s'appliquent pendant le jeu."
+  },
+  "setupGuide": {
+    "title": "Guide de configuration",
+    "summary": "Activez-la pour un seul jeu, puis comparez dans le casque",
+    "smoothing": {
+      "label": "Désactivez le lissage du runtime",
+      "body": "{label} pour le jeu, dans le runtime et dans le logiciel du casque : SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW ou Meta ASW. Ils entrent en conflit avec le cadencement de Frame Generation."
+    },
+    "refreshRate": {
+      "label": "Gardez le casque à sa fréquence de rafraîchissement complète.",
+      "body": "{label} Ne divisez pas la fréquence d'images par deux avec l'option Lock Frame Rate to Half Refresh Rate de Pimax Play ni avec une limite d'images dans le Throttling Behavior de SteamVR ; Frame Generation règle elle-même la fréquence du jeu."
+    },
+    "halfRate": {
+      "label": "Amenez d'abord le jeu à la moitié de la fréquence de rafraîchissement.",
+      "body": "{label} Avec Frame Generation désactivée, baissez les réglages du jeu ou la résolution de rendu jusqu'à ce qu'il tienne au moins la moitié de la fréquence du casque (45 fps à 90 Hz). Frame Generation peut passer de la moitié au plein, mais elle ne peut pas fournir la première moitié."
+    },
+    "oneGame": {
+      "label": "Activez-la pour un seul jeu :",
+      "body": "{label} laissez le profil par défaut désactivé, ajoutez un profil personnalisé ci-dessous et attribuez-lui le jeu. Les paramètres par défaut conviennent à la plupart des jeux."
+    },
+    "restart": {
+      "label": "Enregistrez et redémarrez le jeu.",
+      "body": "{label} L'activation de Frame Generation prend effet au prochain lancement."
+    },
+    "check": {
+      "label": "Vérifiez dans le casque :",
+      "osd": "Affichage à l'écran",
+      "body": "{label} l'{osd} affiche FG ACTIF à côté de ses FPS, ou choisissez la vue de diagnostic Teinte des images générées (et remettez-la sur Désactivé ensuite)."
+    },
+    "compare": {
+      "label": "Comparez :",
+      "body": "{label} affectez la bascule A/B et désactivez puis réactivez les images générées dans la même scène."
+    },
+    "turboNote": "Turbo reste désactivé dans les jeux où Frame Generation s'exécute."
+  },
+  "controls": {
+    "heading": "Commandes dans le casque",
+    "statusUnavailable": "L'état d'exécution est temporairement indisponible.",
+    "noSession": "Aucune application VR en cours d'exécution"
+  },
+  "session": {
+    "withReason": "{status} · {reason}",
+    "withReasonColon": "{status} : {reason}",
+    "active": "Actif",
+    "standby": "Veille",
+    "waiting": "Démarrage · en attente d'images stables",
+    "paused": "En pause",
+    "unavailable": "Indisponible",
+    "off": "Désactivé",
+    "needsLayer": "Nécessite la couche VectorXR mise à jour",
+    "unknown": "État indisponible"
+  },
+  "gameDepth": {
+    "inUse": {
+      "label": "Profondeur du jeu utilisée",
+      "title": "Le jeu partage sa profondeur ; les objets proches restent donc stables lorsque vous bougez la tête."
+    },
+    "empty": {
+      "label": "Profondeur du jeu vide",
+      "title": "Le jeu envoie une profondeur sans la remplir. Si le jeu propose une option de reprojection basée sur la profondeur, l'activer permet à Frame Generation de l'utiliser."
+    },
+    "unusable": {
+      "label": "Profondeur du jeu non utilisée",
+      "title": "La profondeur envoyée par le jeu ne concorde pas entre les deux yeux ; Frame Generation fonctionne donc sans elle."
+    }
+  },
+  "toggle": {
+    "heading": "Bascule A/B",
+    "hint": "Facultatif. Désactive et réactive les images générées dans les jeux démarrés avec Frame Generation activée.",
+    "label": "Bascule A/B de Frame Generation",
+    "description": "Désactive et réactive les images générées dans le casque, pour comparer le mouvement dans la même scène. Fonctionne dans les jeux démarrés avec Frame Generation activée.",
+    "noneText": "Aucune affectation. Frame Generation s'exécute partout où elle est activée au démarrage du jeu."
+  },
+  "diagnostic": {
+    "heading": "Vue de diagnostic",
+    "hint": "{description} S'applique à tous les jeux et se met à jour pendant le jeu.",
+    "onWarning": "Activée : les images générées dans le casque sont dessinées avec les couleurs de cette vue, qui ressemblent à des défauts en jeu normal. Remettez-la sur Désactivé une fois terminé.",
+    "views": {
+      "off": {
+        "label": "Désactivé",
+        "description": "Les images générées sont affichées telles quelles."
+      },
+      "flow": {
+        "label": "Flux de mouvement",
+        "description": "Code par couleur le mouvement mesuré par Frame Generation sur les images générées."
+      },
+      "confidence": {
+        "label": "Confiance",
+        "description": "Peint en rouge les zones des images générées qui sont revenues à l'image réelle ; utile pour régler les paramètres avancés."
+      },
+      "tint": {
+        "label": "Teinte des images générées",
+        "description": "Teinte légèrement les images générées, pour que vous puissiez voir qu'elles sont affichées."
+      }
+    }
+  },
+  "defaultProfile": {
+    "heading": "Profil par défaut",
+    "appliesTo": "S'applique aux jeux sans profil personnalisé activé",
+    "toggleOn": "Profil par défaut activé",
+    "toggleOff": "Profil par défaut désactivé",
+    "offNote": "Désactivé pour les jeux sans profil personnalisé. Les profils personnalisés ci-dessous l'activent tout de même pour leurs jeux.",
+    "onWarning": {
+      "label": "Activé pour chaque jeu sans profil personnalisé,",
+      "body": "{label} y compris ceux avec lesquels vous ne l'avez pas encore essayé. La configuration la plus sûre consiste à laisser cette option désactivée et à ajouter un profil pour chaque jeu que vous avez vérifié."
+    }
+  },
+  "customProfiles": {
+    "heading": "Profils personnalisés",
+    "description": "Activez Frame Generation jeu par jeu. Le premier profil activé correspondant l'emporte.",
+    "add": "Ajouter un profil",
+    "empty": "Aucun profil personnalisé pour l'instant. Ajoutez un profil pour activer Frame Generation pour un jeu.",
+    "duplicateApplication": "{application} est déjà ciblée par le profil {profile}. Le premier profil actif l'emporte."
+  },
+  "summary": {
+    "format": "{mode} · {rate} · {motion}",
+    "dynamic": "Dynamique",
+    "fixedAuto": "Fixe Auto",
+    "fixed": "Fixe {multiplier}"
+  },
+  "howItWorks": {
+    "whatItDoes": {
+      "heading": "Ce qu'elle fait",
+      "body": "Frame Generation mesure comment l'image se déplace entre les images du jeu et crée de nouvelles images à partir de ce mouvement, pour que le casque reçoive une image fraîche à chaque rafraîchissement même quand le jeu en rend moins. La rotation de votre tête est d'abord retirée, car la reprojection du casque s'en charge déjà."
+    },
+    "mode": {
+      "heading": "Mode",
+      "interpolate": "{name} (par défaut) mélange les deux dernières images du jeu. C'est le plus fluide, avec le moins d'artefacts, mais chaque image du jeu est affichée un peu plus tard.",
+      "extrapolate": "{name} projette la plus récente image du jeu vers l'avant selon son mouvement ; il n'ajoute donc aucune latence. Les mouvements rapides et les zones nouvellement dévoilées présentent plus d'artefacts ; le rendu est meilleur avec le matériel NVIDIA comme source de mouvement."
+    },
+    "frameRate": {
+      "heading": "Fréquence d'images",
+      "dynamic": "{name} (par défaut) laisse le jeu tourner aussi vite que possible et remplit les rafraîchissements entre ses images par des images générées. Quand le jeu suit seul, Frame Generation se met en veille et ne génère rien.",
+      "fixed": "{name} maintient le jeu à une fraction fixe de la fréquence de rafraîchissement pour un cadencement régulier. Sur un casque à 90 Hz, {x2} fait tourner le jeu à 45 fps, {x3} à 30 fps et {x4} à 22,5 fps ; {auto} choisit parmi eux selon les besoins du jeu. Chaque image générée déplace davantage l'image ; des taux plus élevés présentent donc plus d'artefacts."
+    },
+    "beforeYouStart": {
+      "heading": "Avant de commencer",
+      "smoothing": "{label} pour le jeu, dans le runtime et dans le logiciel du casque (SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW, Meta ASW), et gardez le casque à sa fréquence de rafraîchissement complète : ne divisez pas la fréquence d'images par deux avec l'option Lock Frame Rate to Half Refresh Rate de Pimax Play ni avec une limite d'images dans le Throttling Behavior de SteamVR. Frame Generation règle elle-même la fréquence du jeu.",
+      "turbo": {
+        "label": "Turbo reste désactivé pendant que Frame Generation s'exécute.",
+        "body": "{label} Les deux cadencent les images de manières opposées ; Turbo cède donc la place dans ces jeux et affiche En pause pour Frame Generation. Vos profils Turbo ne sont pas modifiés."
+      },
+      "apis": "Fonctionne avec les jeux Direct3D 11, Direct3D 12 et Vulkan, y compris avec Quadviews."
+    },
+    "knownLimits": {
+      "heading": "Limites connues",
+      "body": "Le mouvement est mesuré à partir des images affichées par le jeu ; le texte, les HUD, la transparence et les motifs répétitifs peuvent donc scintiller ou se déformer sur les images générées. Si cela vous gêne, augmentez Suppression des artefacts ou réduisez Limite de mouvement dans Avancé."
+    }
+  },
+  "settings": {
+    "mode": {
+      "legend": "Mode",
+      "interpolate": {
+        "label": "Interpolate",
+        "description": "Mélange les deux dernières images du jeu. L'image la plus fluide avec le moins d'artefacts ; ajoute un peu de latence."
+      },
+      "extrapolate": {
+        "label": "Extrapolate",
+        "description": "Projette la plus récente image du jeu vers l'avant. La latence la plus faible, avec plus d'artefacts sur les bords en mouvement ; fonctionne mieux avec le matériel NVIDIA."
+      }
+    },
+    "frameRate": {
+      "legend": "Fréquence d'images",
+      "dynamic": {
+        "label": "Dynamique",
+        "description": "Le jeu tourne aussi vite que possible, et les images générées complètent jusqu'à la fréquence de rafraîchissement de votre casque."
+      },
+      "fixed": {
+        "label": "Fixe",
+        "description": "Maintient le jeu à une fraction fixe de la fréquence de rafraîchissement pour un cadencement régulier, et complète le reste avec des images générées."
+      },
+      "fixedRate": "Taux fixe",
+      "rates": {
+        "auto": "Choisit 2x, 3x ou 4x selon les besoins du jeu, et ne génère rien tant que le jeu suit seul.",
+        "x2": "Le jeu tourne jusqu'à 1/2 de la fréquence de rafraîchissement, par exemple 45 fps à 90 Hz. En dessous, le cadencement est moins régulier.",
+        "x3": "Le jeu tourne jusqu'à 1/3 de la fréquence de rafraîchissement, par exemple 30 fps à 90 Hz. En dessous, le cadencement est moins régulier.",
+        "x4": "Le jeu tourne jusqu'à 1/4 de la fréquence de rafraîchissement, par exemple 22,5 fps à 90 Hz. Le plus d'artefacts ; pour les jeux les plus lourds."
+      }
+    },
+    "motionSource": {
+      "legend": "Source de mouvement",
+      "shader": {
+        "label": "Shader",
+        "description": "Mesure le mouvement sur les cœurs de shader du GPU. Fonctionne sur n'importe quel GPU et s'associe au mieux avec Interpolate."
+      },
+      "hardware": {
+        "label": "Matériel NVIDIA",
+        "description": "Utilise l'unité de flux optique des GPU NVIDIA RTX : plus précis, en particulier sur les motifs répétitifs. Utilisé par Extrapolate, et par Interpolate à une fréquence d'images fixe ou Auto (expérimental)."
+      }
+    },
+    "advanced": {
+      "summary": "{flow} · Suppression {suppression} · Limite de mouvement {motionLimit} %",
+      "summaryHeadPrediction": "{flow} · Suppression {suppression} · Limite de mouvement {motionLimit} % · Prédiction de la tête",
+      "reset": "Réinitialiser les paramètres avancés"
+    },
+    "flowQuality": {
+      "heading": "Qualité du flux",
+      "resolution": "{resolution} de l'image de l'œil",
+      "description": "La finesse avec laquelle le mouvement est mesuré. Plus élevé suit mieux les objets petits et fins et coûte plus de temps GPU.",
+      "levels": {
+        "performance": "Performances",
+        "balanced": "Équilibré",
+        "quality": "Qualité"
+      },
+      "summary": {
+        "performance": "Flux performances",
+        "balanced": "Flux équilibré",
+        "quality": "Flux qualité"
+      }
+    },
+    "artifactSuppression": {
+      "heading": "Suppression des artefacts",
+      "valueLabel": "Valeur de suppression des artefacts",
+      "smoother": "Mouvement plus fluide",
+      "fewer": "Moins d'artefacts",
+      "description": "Là où le mouvement est incertain, des valeurs plus élevées affichent plus tôt l'image réelle : moins de déformation, un peu plus de saccades."
+    },
+    "motionLimit": {
+      "heading": "Limite de mouvement",
+      "valueLabel": "Valeur de la limite de mouvement en pourcentage de la largeur de vue",
+      "description": "Le déplacement maximal qu'une image générée peut appliquer à l'image, en proportion de la largeur de vue. Un mouvement plus rapide affiche l'image réelle."
+    },
+    "headPrediction": {
+      "heading": "Étendre la prédiction de la tête",
+      "description": "Frame Generation fait rendre le jeu jusqu'à ~150 ms à l'avance, et certains runtimes, comme celui de Pimax, ne prédisent votre tête que sur ~20 ms de cette durée. Cette option prolonge la rotation de votre tête sur le reste, pour moins de noir sur le bord vers lequel vous tournez. Activez-la avant de démarrer le jeu."
+    }
+  }
+}

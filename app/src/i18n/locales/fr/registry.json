@@ -1,0 +1,57 @@
+{
+  "applications": {
+    "eyebrow": "Registre",
+    "title": "Registre des applications",
+    "intro": "Inscrivez les applications que les profils des modules peuvent cibler par nom d'exécutable. Les pastilles de chaque carte montrent comment chaque module traite actuellement cette application — cliquez sur l'une d'elles pour accéder à son profil ou pour en créer un.",
+    "add": "Ajouter une application",
+    "unnamed": "Application sans nom",
+    "editName": "Modifier le nom de l'application",
+    "executable": "Exécutable",
+    "executableHelp": "La correspondance de l'exécutable ne tient pas compte de la casse, mais le nom doit inclure l'extension de l'application. Par exemple : DCS.exe",
+    "empty": "Aucune application inscrite pour l'instant. Ajoutez-en une avant de créer des profils de module.",
+    "chip": {
+      "defaultOff": "{module} · Par défaut désactivé",
+      "defaultOffTitle": "Le profil {module} par défaut est désactivé. Cliquez pour créer un profil personnalisé pour cette application.",
+      "custom": "{module} · {profile}",
+      "customTitle": "Le profil {module} personnalisé « {profile} » s'applique. Cliquez pour l'ouvrir.",
+      "default": "{module} · Par défaut",
+      "defaultTitle": "Le profil {module} par défaut s'applique. Cliquez pour créer un profil personnalisé pour cette application."
+    }
+  },
+  "discovery": {
+    "eyebrow": "Découverte",
+    "trackingOnTitle": "La découverte suit les applications OpenXR que vous lancez.",
+    "trackingOffTitle": "La découverte est désactivée. Les nouveaux lancements d'applications OpenXR ne seront pas enregistrés tant que vous n'aurez pas activé le suivi dans Paramètres.",
+    "trackingOn": "Suivi activé",
+    "trackingOff": "Suivi désactivé",
+    "title": "D'où viennent les nouvelles applications",
+    "intro": "VectorXR note les applications OpenXR que vous lancez pour que vous puissiez les inscrire facilement en un clic. Rien ici ne modifie vos paramètres tant que vous ne l'inscrivez pas. Le suivi se règle dans Paramètres.",
+    "clear": "Effacer les applications vues",
+    "loading": "Chargement des applications vues...",
+    "launches_one": "{count} lancement",
+    "launches_other": "{count} lancements",
+    "details": "Détails",
+    "register": "Inscrire",
+    "allRegistered": "Toutes les applications découvertes sont inscrites. Les nouvelles applications que vous lancerez apparaîtront ici.",
+    "allRegisteredTrackingOff": "Toutes les applications découvertes sont inscrites. Le suivi est désactivé : aucune nouvelle application n'apparaîtra ici.",
+    "alreadyRegistered": "Déjà inscrite",
+    "registeredAs": "Inscrite sous {name}",
+    "empty": "Aucune application XR vue pour l'instant. Lancez une application OpenXR pendant que VectorXR est actif, puis actualisez cette liste.",
+    "emptyTrackingOff": "Le suivi des applications est désactivé : aucune nouvelle application n'apparaîtra ici. Activez le suivi dans Paramètres pour enregistrer les lancements d'applications OpenXR."
+  },
+  "seenDetails": {
+    "eyebrow": "Application découverte",
+    "registeredAs": "Inscrite sous",
+    "unregistered": "Non inscrite",
+    "launches": "Lancements",
+    "firstSeen": "Vue pour la première fois",
+    "lastSeen": "Vue pour la dernière fois"
+  },
+  "exclusions": {
+    "title": "Les profils personnalisés activés sont prioritaires pour : {apps}",
+    "label": "Ne s'applique pas à :"
+  },
+  "picker": {
+    "empty": "Aucune application n'est inscrite. Ajoutez-en une depuis le Registre des applications pour que ce profil puisse s'activer."
+  }
+}

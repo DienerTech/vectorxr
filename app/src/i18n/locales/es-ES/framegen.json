@@ -1,0 +1,237 @@
+{
+  "title": "Frame Generation",
+  "experimental": "Experimental",
+  "intro": "Añade fotogramas generados entre los fotogramas del juego, de modo que el movimiento se mantiene fluido a la frecuencia de actualización completa del visor aunque el juego no dé abasto. Pruébalo en cada juego y compara con el conmutador A/B.",
+  "howItWorksTitle": "Cómo funciona Frame Generation",
+  "restartNote": "Activar Frame Generation surte efecto la próxima vez que se inicie el juego; desactivarlo se aplica al instante.",
+  "restartToApply": {
+    "label": "Reinicia para aplicar:",
+    "body": "{label} activar Frame Generation para un juego surte efecto la próxima vez que se inicie el juego. Desactivarlo, y todos los demás ajustes de esta página, se aplican durante el juego."
+  },
+  "setupGuide": {
+    "title": "Guía de configuración",
+    "summary": "Actívalo para un juego y luego compara en el visor",
+    "smoothing": {
+      "label": "Desactiva el suavizado del entorno de ejecución",
+      "body": "{label} para el juego, en el entorno de ejecución y en el software propio del visor: SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW o Meta ASW. Interfieren con el ritmo de Frame Generation."
+    },
+    "refreshRate": {
+      "label": "Mantén el visor a su frecuencia de actualización completa.",
+      "body": "{label} No reduzcas a la mitad la velocidad de fotogramas con Lock Frame Rate to Half Refresh Rate de Pimax Play ni con un límite de fotogramas en Throttling Behavior de SteamVR; Frame Generation fija por sí mismo la velocidad del juego."
+    },
+    "halfRate": {
+      "label": "Consigue primero que el juego llegue a la mitad de la frecuencia de actualización.",
+      "body": "{label} Con Frame Generation desactivado, baja los ajustes del juego o la resolución de renderizado hasta que mantenga al menos la mitad de la frecuencia del visor (45 fps a 90 Hz). Frame Generation puede llevarlo de la mitad al total, pero no puede hacer la primera mitad."
+    },
+    "oneGame": {
+      "label": "Actívalo para un juego:",
+      "body": "{label} deja el perfil predeterminado desactivado, agrega un perfil personalizado abajo y asígnale el juego. La configuración predeterminada sirve para la mayoría de los juegos."
+    },
+    "restart": {
+      "label": "Guarda y reinicia el juego.",
+      "body": "{label} Activar Frame Generation surte efecto en el siguiente inicio."
+    },
+    "check": {
+      "label": "Compruébalo en el visor:",
+      "osd": "Información en pantalla",
+      "body": "{label} la {osd} muestra FG ACTIVO junto a sus FPS, o elige la vista de diagnóstico Tinte de fotogramas generados (y vuelve a ponerla en Desactivado después)."
+    },
+    "compare": {
+      "label": "Compara:",
+      "body": "{label} asigna el conmutador A/B y desactiva y activa los fotogramas generados en la misma escena."
+    },
+    "turboNote": "Turbo permanece desactivado en los juegos en los que se ejecuta Frame Generation."
+  },
+  "controls": {
+    "heading": "Controles en el visor",
+    "statusUnavailable": "El estado de ejecución no está disponible temporalmente.",
+    "noSession": "No hay ninguna aplicación de RV en ejecución"
+  },
+  "session": {
+    "withReason": "{status} · {reason}",
+    "withReasonColon": "{status}: {reason}",
+    "active": "Activo",
+    "standby": "En espera",
+    "waiting": "Iniciando · esperando fotogramas estables",
+    "paused": "En pausa",
+    "unavailable": "No disponible",
+    "off": "Apagado",
+    "needsLayer": "Requiere la capa de VectorXR actualizada",
+    "unknown": "Estado no disponible"
+  },
+  "gameDepth": {
+    "inUse": {
+      "label": "Usando la profundidad del juego",
+      "title": "El juego comparte su profundidad, así que los objetos cercanos permanecen estables al mover la cabeza."
+    },
+    "empty": {
+      "label": "La profundidad del juego está vacía",
+      "title": "El juego envía la profundidad sin rellenarla. Si el juego tiene una opción de reproyección basada en la profundidad, activarla permite que Frame Generation la use."
+    },
+    "unusable": {
+      "label": "Profundidad del juego no usada",
+      "title": "La profundidad que envía el juego no coincide entre los ojos, así que Frame Generation funciona sin ella."
+    }
+  },
+  "toggle": {
+    "heading": "Conmutador A/B",
+    "hint": "Opcional. Desactiva y activa los fotogramas generados en los juegos que se iniciaron con Frame Generation activado.",
+    "label": "Conmutador A/B de Frame Generation",
+    "description": "Desactiva y activa los fotogramas generados en el visor para comparar el movimiento en la misma escena. Funciona en los juegos que se iniciaron con Frame Generation activado.",
+    "noneText": "No hay ninguna asignación. Frame Generation se ejecuta allí donde esté activado al iniciar el juego."
+  },
+  "diagnostic": {
+    "heading": "Vista de diagnóstico",
+    "hint": "{description} Se aplica a todos los juegos y se actualiza durante el juego.",
+    "onWarning": "Activada: los fotogramas generados en el visor se dibujan con los colores de esta vista, que parecen fallos gráficos en el juego normal. Ponla en Desactivado cuando termines.",
+    "views": {
+      "off": {
+        "label": "Desactivado",
+        "description": "Los fotogramas generados se muestran tal cual."
+      },
+      "flow": {
+        "label": "Flujo de movimiento",
+        "description": "Codifica por colores el movimiento que Frame Generation midió en los fotogramas generados."
+      },
+      "confidence": {
+        "label": "Confianza",
+        "description": "Pinta de rojo los fotogramas generados donde se recurrió a la imagen real; útil al ajustar la configuración avanzada."
+      },
+      "tint": {
+        "label": "Tinte de fotogramas generados",
+        "description": "Tiñe ligeramente los fotogramas generados para que puedas ver que se muestran."
+      }
+    }
+  },
+  "defaultProfile": {
+    "heading": "Perfil predeterminado",
+    "appliesTo": "Se aplica a los juegos sin un perfil personalizado activado",
+    "toggleOn": "Perfil predeterminado activado",
+    "toggleOff": "Perfil predeterminado desactivado",
+    "offNote": "Desactivado para los juegos sin perfil personalizado. Los perfiles personalizados de abajo lo siguen activando para sus juegos.",
+    "onWarning": {
+      "label": "Activado para todos los juegos sin perfil personalizado,",
+      "body": "{label} incluidos aquellos con los que no lo has probado. Lo más seguro es dejarlo desactivado y agregar un perfil para cada juego que hayas comprobado."
+    }
+  },
+  "customProfiles": {
+    "heading": "Perfiles personalizados",
+    "description": "Activa Frame Generation por juego. Prevalece el primer perfil activado que coincida.",
+    "add": "Agregar perfil",
+    "empty": "Todavía no hay perfiles personalizados. Agrega un perfil para activar Frame Generation en un juego.",
+    "duplicateApplication": "{application} ya está asignada al perfil {profile}. Prevalece el primer perfil activo."
+  },
+  "summary": {
+    "format": "{mode} · {rate} · {motion}",
+    "dynamic": "Dinámico",
+    "fixedAuto": "Fijo automático",
+    "fixed": "Fijo {multiplier}"
+  },
+  "howItWorks": {
+    "whatItDoes": {
+      "heading": "Qué hace",
+      "body": "Frame Generation mide cómo se mueve la imagen entre los fotogramas del juego y crea nuevos fotogramas a partir de ese movimiento, de modo que el visor recibe una imagen nueva en cada actualización aunque el juego renderice menos. Primero se descuenta la rotación de tu cabeza, porque la reproyección propia del visor ya se encarga de ella."
+    },
+    "mode": {
+      "heading": "Modo",
+      "interpolate": "{name} (predeterminado) mezcla los dos últimos fotogramas del juego. Es el más fluido y el que menos artefactos produce, pero muestra cada fotograma del juego un poco más tarde.",
+      "extrapolate": "{name} proyecta hacia delante el fotograma más reciente del juego siguiendo su movimiento, así que no añade latencia. El movimiento rápido y las zonas recién descubiertas muestran más artefactos; se ve mejor con el hardware de NVIDIA como fuente de movimiento."
+    },
+    "frameRate": {
+      "heading": "Velocidad de fotogramas",
+      "dynamic": "{name} (predeterminado) deja que el juego vaya tan rápido como pueda y rellena las actualizaciones entre sus fotogramas con fotogramas generados. Cuando el juego da abasto por sí solo, Frame Generation queda en espera y no genera nada.",
+      "fixed": "{name} mantiene el juego en una fracción fija de la frecuencia de actualización para un ritmo uniforme. En un visor de 90 Hz, {x2} hace funcionar el juego a 45 fps, {x3} a 30 fps y {x4} a 22.5 fps; {auto} elige entre ellos según lo necesite el juego. Cada fotograma generado desplaza más la imagen, así que los multiplicadores más altos muestran más artefactos."
+    },
+    "beforeYouStart": {
+      "heading": "Antes de empezar",
+      "smoothing": "{label} para el juego, en el entorno de ejecución y en el software propio del visor (SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW, Meta ASW), y mantén el visor a su frecuencia de actualización completa: no reduzcas a la mitad la velocidad de fotogramas con Lock Frame Rate to Half Refresh Rate de Pimax Play ni con un límite de fotogramas en Throttling Behavior de SteamVR. Frame Generation fija por sí mismo la velocidad del juego.",
+      "turbo": {
+        "label": "Turbo permanece desactivado mientras se ejecuta Frame Generation.",
+        "body": "{label} Ambos marcan el ritmo de los fotogramas de formas opuestas, así que Turbo cede en esos juegos y muestra En pausa por Frame Generation. Tus perfiles de Turbo no cambian."
+      },
+      "apis": "Funciona con juegos Direct3D 11, Direct3D 12 y Vulkan, también con Quadviews."
+    },
+    "knownLimits": {
+      "heading": "Limitaciones conocidas",
+      "body": "El movimiento se mide a partir de las imágenes que muestra el juego, así que el texto, los HUD, las transparencias y los patrones repetitivos pueden parpadear o deformarse en los fotogramas generados. Si molesta, sube Supresión de artefactos o baja Límite de movimiento en Avanzado."
+    }
+  },
+  "settings": {
+    "mode": {
+      "legend": "Modo",
+      "interpolate": {
+        "label": "Interpolate",
+        "description": "Mezcla los dos últimos fotogramas del juego. La imagen más fluida y con menos artefactos; añade un poco de latencia."
+      },
+      "extrapolate": {
+        "label": "Extrapolate",
+        "description": "Proyecta hacia delante el fotograma más reciente del juego. La latencia más baja, con más artefactos en los bordes en movimiento; funciona mejor con hardware de NVIDIA."
+      }
+    },
+    "frameRate": {
+      "legend": "Velocidad de fotogramas",
+      "dynamic": {
+        "label": "Dinámico",
+        "description": "El juego va tan rápido como puede y los fotogramas generados rellenan hasta la frecuencia de actualización del visor."
+      },
+      "fixed": {
+        "label": "Fijo",
+        "description": "Mantiene el juego en una fracción fija de la frecuencia de actualización para un ritmo uniforme y rellena el resto con fotogramas generados."
+      },
+      "fixedRate": "Multiplicador fijo",
+      "rates": {
+        "auto": "Elige 2x, 3x o 4x según lo necesite el juego y no genera nada mientras el juego da abasto por sí solo.",
+        "x2": "El juego funciona hasta a 1/2 de la frecuencia de actualización, por ejemplo 45 fps a 90 Hz. Por debajo de eso, el ritmo es menos uniforme.",
+        "x3": "El juego funciona hasta a 1/3 de la frecuencia de actualización, por ejemplo 30 fps a 90 Hz. Por debajo de eso, el ritmo es menos uniforme.",
+        "x4": "El juego funciona hasta a 1/4 de la frecuencia de actualización, por ejemplo 22.5 fps a 90 Hz. El que más artefactos produce; para los juegos más exigentes."
+      }
+    },
+    "motionSource": {
+      "legend": "Fuente de movimiento",
+      "shader": {
+        "label": "Shader",
+        "description": "Mide el movimiento en los núcleos de shader de la GPU. Funciona en cualquier GPU y combina mejor con Interpolate."
+      },
+      "hardware": {
+        "label": "Hardware de NVIDIA",
+        "description": "Usa la unidad de flujo óptico de las GPU NVIDIA RTX: más precisa, sobre todo en patrones repetitivos. La usa Extrapolate, e Interpolate con una velocidad de fotogramas fija o automática (experimental)."
+      }
+    },
+    "advanced": {
+      "summary": "{flow} · Supresión {suppression} · Límite de movimiento {motionLimit}%",
+      "summaryHeadPrediction": "{flow} · Supresión {suppression} · Límite de movimiento {motionLimit}% · Predicción de cabeza",
+      "reset": "Restablecer configuración avanzada"
+    },
+    "flowQuality": {
+      "heading": "Calidad del flujo",
+      "resolution": "{resolution} de la imagen de cada ojo",
+      "description": "Con qué detalle se mide el movimiento. Un valor más alto sigue mejor los objetos pequeños y finos, y consume más tiempo de GPU.",
+      "levels": {
+        "performance": "Rendimiento",
+        "balanced": "Equilibrado",
+        "quality": "Calidad"
+      },
+      "summary": {
+        "performance": "Flujo de rendimiento",
+        "balanced": "Flujo equilibrado",
+        "quality": "Flujo de calidad"
+      }
+    },
+    "artifactSuppression": {
+      "heading": "Supresión de artefactos",
+      "valueLabel": "Valor de supresión de artefactos",
+      "smoother": "Movimiento más fluido",
+      "fewer": "Menos artefactos",
+      "description": "Donde el movimiento es incierto, los valores más altos muestran antes la imagen real: menos deformación y algo más de tirones."
+    },
+    "motionLimit": {
+      "heading": "Límite de movimiento",
+      "valueLabel": "Valor del límite de movimiento en porcentaje del ancho de la vista",
+      "description": "Lo máximo que un fotograma generado puede desplazar la imagen, como proporción del ancho de la vista. Un movimiento más rápido muestra la imagen real."
+    },
+    "headPrediction": {
+      "heading": "Ampliar la predicción de cabeza",
+      "description": "Frame Generation hace que el juego renderice hasta ~150 ms por adelantado, y algunos entornos de ejecución, como el de Pimax, solo predicen tu cabeza unos ~20 ms de ese tiempo. Esto prolonga el giro de tu cabeza durante el resto, para que haya menos negro en el borde hacia el que giras. Actívalo antes de iniciar el juego."
+    }
+  }
+}

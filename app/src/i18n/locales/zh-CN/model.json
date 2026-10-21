@@ -1,0 +1,94 @@
+{
+  "keyGroups": {
+    "function": "功能键",
+    "letter": "字母键",
+    "number": "数字键",
+    "numpad": "数字键盘键",
+    "special": "特殊键"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "space": "Space",
+    "numpad": "Numpad{digit}"
+  },
+  "modules": {
+    "depthxr": "深度",
+    "pivotxr": "Pivot",
+    "quadviews": "Quadviews",
+    "turbo": "Turbo",
+    "framegen": "Frame Generation"
+  },
+  "defaults": {
+    "newProfile": "新配置文件",
+    "profile": "配置文件",
+    "standardNudges": "标准微调",
+    "nudgeSetNumbered": "微调组 {number}",
+    "profileNudges": "{profile} 微调",
+    "newQuickView": "新快速视图",
+    "quickViewNumbered": "快速视图 {number}",
+    "deviceButton": "按钮 {number}",
+    "turboTimingProfile": "{name} 时序"
+  },
+  "snapViews": {
+    "defaultProfileUnavailable": "在默认配置文件上不可用，默认配置文件只能是增强运动或快照视图之一。请为同一应用程序同时使用一个自定义增强运动配置文件和一个自定义快照视图配置文件。",
+    "noSnapPartner": "目前还没有已启用的快照视图配置文件作用于此配置文件的应用程序。",
+    "motionNoteNone": "同一应用程序的增强运动配置文件如果开启了“将增强运动应用于快照视图”，就可以在这些快照视图中继续工作。",
+    "motionNoteSources": "来自 {profiles} 的增强运动会在这些快照视图中继续工作。"
+  },
+  "binding": {
+    "device": "{device} / {input}",
+    "unassignedDevice": "未分配的设备",
+    "unassignedInput": "未分配的输入",
+    "none": "无",
+    "listMore_other": "{first} 或其他 {count} 个",
+    "numbered": "{label}（绑定 {number}）"
+  },
+  "actions": {
+    "quadviewsDiagnostics": "Quadviews：诊断可视化",
+    "depthToggle": "深度：A/B 切换",
+    "depthLock": "深度：Depth Lock A/B",
+    "osdToggle": "OSD：显示/隐藏",
+    "osdCycle": "OSD：切换布局",
+    "turboToggle": "Turbo：A/B 切换",
+    "turboMetrics": "Turbo：指标捕获",
+    "framegenToggle": "Frame Generation：A/B 切换",
+    "nudgeLeft": "Pivot {set}：向左微调",
+    "nudgeRight": "Pivot {set}：向右微调",
+    "nudgeUp": "Pivot {set}：向上微调",
+    "nudgeDown": "Pivot {set}：向下微调",
+    "nudgeCenter": "Pivot {set}：微调偏移归中",
+    "defaultActivate": "Pivot 默认：激活",
+    "defaultSetOrigin": "Pivot 默认：设置原点",
+    "defaultReleaseOrigin": "Pivot 默认：释放原点",
+    "defaultQuickView": "Pivot 默认：{view}",
+    "profileNumbered": "配置文件 {number}",
+    "profileActivate": "Pivot {profile}：激活",
+    "profileSetOrigin": "Pivot {profile}：设置原点",
+    "profileReleaseOrigin": "Pivot {profile}：释放原点",
+    "profileQuickView": "Pivot {profile}：{view}"
+  },
+  "conflicts": {
+    "sharedTitle": "{binding} 被分配了多次",
+    "sharedMessage": "此输入已分配给 {actions}。一次按下可能会触发多个操作，或者优先级更高的操作可能会遮蔽另一个操作。此警告不会阻止保存。",
+    "duplicateTitle": "{binding} 重复",
+    "duplicateMessage": "{action} 多次包含同一个物理输入。重复项是多余的，运行时只会使用第一个。",
+    "duplicateActions": {
+      "suspendControls": "暂停控制",
+      "activation": "激活",
+      "setOrigin": "设置原点",
+      "releaseOrigin": "释放原点"
+    },
+    "everySuspendPress": "每次按下暂停控制",
+    "everyActivationPress": "每次按下激活控制",
+    "allThreeTitle": "一个绑定控制了三个相互冲突的操作",
+    "allThreeMessage": "激活、设置原点和释放原点都使用 {binding}。{press}会请求新的中立前方，然后立即将其清除，因此不会捕获原点。请为设置原点或释放原点单独分配绑定。",
+    "setsOriginTitle": "激活同时也会设置原点",
+    "setsOriginMessage": "激活和设置原点都使用 {binding}。{press}会将当前头部方向重新捕获为 Pivot 的中立前方。仅当这是有意为之时才保留；否则请为设置原点单独分配绑定，通常是您在游戏中的重新居中控制。",
+    "releasesOriginTitle": "激活同时也会释放原点",
+    "releasesOriginMessage": "激活和释放原点都使用 {binding}。{press}会清除任何已捕获的 Pivot 原点。仅当这是有意为之时才保留；否则请为释放原点单独分配绑定。",
+    "setCanceledTitle": "设置原点会被立即取消",
+    "setCanceledMessage": "设置原点和释放原点都使用 {binding}。按下时会请求新的中立前方，然后立即将其清除，因此不会捕获原点。请为其中一个操作分配不同的绑定。"
+  }
+}
