@@ -3541,6 +3541,21 @@ void TestDeviceInputPathsAndHatDirections() {
                repeated_missing_device.diagnostic_stage == first_missing_device.diagnostic_stage &&
                repeated_missing_device.result_code == first_missing_device.result_code,
            "A repeated missing-device binding must reuse the failure without touching DirectInput");
+
+    // xrDestroyInstance with its session still begun drains the device work:
+    // that ends the session's waiting for a rescan too, so a later instance
+    // in a process that kept the layer loaded retries on the timer again.
+    depthxr::SetInputDeviceSessionActive(true); // tries the absent device once more
+    bool waits_in_session = false;
+    for (int attempt = 0; attempt < 500 && !waits_in_session; ++attempt) {
+        waits_in_session = depthxr::PollInputBinding(missing_device_binding).device_waits_for_rescan;
+        if (!waits_in_session) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    Expect(waits_in_session, "In a session a missing device must wait for a rescan after its attempt");
+    depthxr::DrainInputDeviceWork(std::chrono::seconds(5));
+    Expect(!depthxr::PollInputBinding(missing_device_binding).device_waits_for_rescan,
+           "Draining the device work at instance teardown must end the session's wait for a rescan");
+    depthxr::DrainInputDeviceWork(std::chrono::seconds(5));
 #endif
 }
 
