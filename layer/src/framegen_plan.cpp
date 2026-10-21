@@ -639,6 +639,35 @@ FrameGenDispatch BuildFrameGenDepthCheckDispatch(const FrameGenViewGeometry& vie
     return dispatch;
 }
 
+FrameGenDispatch BuildFrameGenDepthCrossDispatch(FrameGenPass pass, std::uint32_t mode, FrameGenExtent source_extent,
+                                                 FrameGenExtent target_extent, const FrameGenViewGeometry& source,
+                                                 const FrameGenViewGeometry& target) {
+    const FrameGenExtent from = FrameGenPyramid(source_extent)[1];
+    const FrameGenExtent to = FrameGenPyramid(target_extent)[1];
+    FrameGenDispatch dispatch;
+    dispatch.pass = pass;
+    // Clearing and resolving cover the target eye's grid, splatting the
+    // source eye's.
+    const bool splat = pass == FrameGenPass::kDepthCrossSplat && mode == 1;
+    dispatch.width = splat ? from.width : to.width;
+    dispatch.height = splat ? from.height : to.height;
+    // The shared mapping (MapToPrevious): the source view plays the newest,
+    // the target the previous one; direction rotation and position, source
+    // into target.
+    dispatch.constants.fov_current = Tangents(source);
+    dispatch.constants.fov_previous = Tangents(target);
+    const Matrix3 rotation = FrameGenRelativeRotation(source.orientation, target.orientation);
+    const std::array<float, 3> translation = RelativeTranslation(source, target);
+    dispatch.constants.rot0 = {rotation[0][0], rotation[0][1], rotation[0][2], translation[0]};
+    dispatch.constants.rot1 = {rotation[1][0], rotation[1][1], rotation[1][2], translation[1]};
+    dispatch.constants.rot2 = {rotation[2][0], rotation[2][1], rotation[2][2], translation[2]};
+    dispatch.constants.size = pass == FrameGenPass::kDepthCrossResolve ? std::array<std::uint32_t, 4>{to.width, to.height, 0, 0}
+                                                                        : std::array<std::uint32_t, 4>{from.width, from.height,
+                                                                                                       to.width, to.height};
+    dispatch.constants.options = {mode, kFrameGenFlagDepth, 0, 0};
+    return dispatch;
+}
+
 FrameGenDispatch BuildFrameGenDepthTrustDispatch(FrameGenExtent view_extent, const FrameGenViewGeometry& own,
                                                  const FrameGenViewGeometry& other) {
     const auto levels = FrameGenPyramid(view_extent);
@@ -702,7 +731,36 @@ FrameGenDepthEvidence& FrameGenDepthEvidence::operator+=(const FrameGenDepthEvid
     }
     probed += other.probed;
     cockpit += other.cockpit;
+    source_varied += other.source_varied;
+    other_varied += other.other_varied;
     return *this;
+}
+
+bool FrameGenDepthEyes::Add(std::size_t source, const FrameGenDepthEvidence& check) {
+    // Decided for the session: the empty eye's depth is the other eye's
+    // from now on, so its own can no longer be judged.
+    if (empty_ || source != source_) {
+        return false;
+    }
+    // Cells of the check's grid where depth differs from the view's centre:
+    // a scene shows a few dozen at least (a panel's outline); clear depth
+    // none at all.
+    constexpr double kVaried = 16.0;
+    constexpr std::uint32_t kChecks = 6;
+    // Either eye may be the empty one: the checked eye's (its depth was
+    // judged until now, so the other eye takes over the check and the
+    // validator starts over), or the other eye's (the check already reads
+    // the right one).
+    const bool source_clear = check.source_varied == 0.0 && check.other_varied >= kVaried;
+    const bool other_clear = check.other_varied == 0.0 && check.source_varied >= kVaried;
+    if (source_clear != other_clear && (source_clear ? source_streak_ : other_streak_) + 1 >= kChecks) {
+        empty_ = source_clear ? source_ : 1 - source_;
+        source_ = 1 - *empty_;
+        return source_clear;
+    }
+    source_streak_ = source_clear ? source_streak_ + 1 : 0;
+    other_streak_ = other_clear ? other_streak_ + 1 : 0;
+    return false;
 }
 
 void FrameGenDepthValidator::Add(const FrameGenDepthEvidence& check) {
@@ -787,6 +845,18 @@ void FrameGenDepthValidator::Add(const FrameGenDepthEvidence& check) {
         ++decisions_;
     }
     settled_ = !changed && reading_ != FrameGenDepthReading::kUnknown;
+}
+
+void FrameGenDepthValidator::Restart() {
+    const std::uint32_t generation = generation_ + 1;
+    const std::uint32_t check_generation = check_generation_ + 1;
+    const std::uint32_t decisions = decisions_;
+    const std::uint32_t batches = batches_;
+    *this = {};
+    generation_ = generation;
+    check_generation_ = check_generation;
+    decisions_ = decisions;
+    batches_ = batches;
 }
 
 bool FrameGenDepthValidator::WantsCheck(std::uint64_t submission) const {

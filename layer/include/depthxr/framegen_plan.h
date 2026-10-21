@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 #include "depthxr/settings.h"
@@ -69,8 +70,14 @@ enum class FrameGenPass : std::uint8_t {
     // motion (FrameGenSynthesisPlan's stale flow), the previous frame's
     // resolved depth on this frame's grid, for its eye-shift map.
     kDepthStale,
+    // Depth (Direct3D 12) for a game that fills only one eye's
+    // (FrameGenDepthEyes): the other eye's linear depth moved to the empty
+    // eye's view, nearest content winning (options.x 0 clears the keys, 1
+    // splats), then resolved into the empty eye's linear depth.
+    kDepthCrossSplat,
+    kDepthCrossResolve,
 };
-inline constexpr std::size_t kFrameGenPassCount = 26;
+inline constexpr std::size_t kFrameGenPassCount = 28;
 
 // Logical textures owned per view. History and filtered flow are ping-pong
 // pairs: "newest" is written this submission, "previous" is last
@@ -570,6 +577,12 @@ struct FrameGenDepthEvidence {
     std::array<double, kFrameGenDepthScaleProbes> probes{};
     double probed{0.0};
     double cockpit{0.0};        // ... whose depth is nearer than 10 m (none: empty depth)
+    // Check cells (of kFrameGenDepthCheckCells squared) where the checked
+    // eye's depth, and the other eye's, differs from its depth at the view's
+    // centre: none where an eye's depth is uniform (a game that leaves it
+    // clear), whatever the decoding.
+    double source_varied{0.0};
+    double other_varied{0.0};
     FrameGenDepthEvidence& operator+=(const FrameGenDepthEvidence& other);
 };
 
@@ -603,6 +616,9 @@ class FrameGenDepthValidator {
     std::uint32_t Batches() const { return batches_; }
     // The evidence behind the last decision.
     const FrameGenDepthEvidence& Evidence() const { return evidence_; }
+    // Forgets every reading, as for a new game; the generations keep
+    // counting, so depth decoded or checked before is never taken as new.
+    void Restart();
 
   private:
     std::uint32_t batches_{0};
@@ -619,6 +635,31 @@ class FrameGenDepthValidator {
     FrameGenDepthEvidence evidence_;
 };
 
+// Which eye's depth the check reads, and whether an eye takes the other's.
+// Star Citizen describes depth for both eyes but fills only the right eye's
+// (the left stays clear): its left depth is uniform while the right eye's
+// varies. Six checks in a row that find one eye's depth uniform and the
+// other eye's not decide it for the session, whichever eye is empty: the
+// check then reads the eye with depth, and the empty eye takes that eye's
+// depth moved to its view (kDepthCrossSplat/kDepthCrossResolve).
+class FrameGenDepthEyes {
+  public:
+    // A check's evidence (one check, not a batch), made from view `source`'s
+    // depth. True when it decided the source eye is empty: the depth
+    // validator judged that eye's depth until now and must start over (an
+    // empty other eye changes nothing the validator judged).
+    bool Add(std::size_t source, const FrameGenDepthEvidence& check);
+    std::size_t Source() const { return source_; }
+    // The eye that takes the other's depth, once decided.
+    std::optional<std::size_t> Empty() const { return empty_; }
+
+  private:
+    std::size_t source_{0};
+    std::optional<std::size_t> empty_;
+    std::uint32_t source_streak_{0}; // checks in a row finding the checked eye's depth clear
+    std::uint32_t other_streak_{0};  // ... the other eye's
+};
+
 struct FrameGenDepthStatus {
     FrameGenDepthReading reading{FrameGenDepthReading::kUnknown};
     std::uint32_t decisions{0};
@@ -628,7 +669,16 @@ struct FrameGenDepthStatus {
     std::uint32_t batches{0};
     bool swapped{false};
     float probe_step{0.0f};
+    // FrameGenDepthEyes: the eye given the other eye's depth, -1 for none.
+    int empty_view{-1};
 };
+
+// The kDepthCrossSplat (mode 0: clear the keys on the target eye's grid; 1:
+// splat the source eye's depth) or kDepthCrossResolve dispatch moving one
+// eye's half-resolution linear depth to the other eye's view.
+FrameGenDispatch BuildFrameGenDepthCrossDispatch(FrameGenPass pass, std::uint32_t mode, FrameGenExtent source_extent,
+                                                 FrameGenExtent target_extent, const FrameGenViewGeometry& source,
+                                                 const FrameGenViewGeometry& target);
 // The kFlowPackRaw dispatch for a view of this extent (half resolution).
 FrameGenDispatch BuildFrameGenRawPackDispatch(FrameGenExtent view_extent);
 

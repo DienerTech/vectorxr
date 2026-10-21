@@ -730,6 +730,7 @@ void FrameGenPresenter::Stop() {
     view_extent_changes_ = view_extent_frames_ = 0;
     view_extent_lines_ = 0;
     logged_depth_batches_ = 0;
+    logged_empty_view_ = -1;
     session_ = XR_NULL_HANDLE;
     idle_cv_.notify_all();
 }
@@ -4184,6 +4185,15 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
                    "(MSFS 2024: Motion reprojection set to Depth); it is checked again now and then."
                  : ""));
     }
+    if (logger_ && depth.empty_view >= 0 && depth.empty_view != logged_empty_view_) {
+        logged_empty_view_ = depth.empty_view;
+        const int other = 1 - depth.empty_view;
+        logger_->Info("Frame Generation: the game leaves view " + std::to_string(depth.empty_view) +
+                      "'s depth clear while view " + std::to_string(other) + "'s varies (Star Citizen fills only one " +
+                      "eye's): view " + std::to_string(depth.empty_view) + " takes view " + std::to_string(other) +
+                      "'s depth, moved to its eye, and the depth check reads view " + std::to_string(other) +
+                      ".");
+    }
     if (logger_ && depth.batches != logged_depth_batches_ && logger_->IsDebugEnabled()) {
         // Every batch's evidence, decision or not (at most one line a
         // second), to follow the check through a session.
@@ -4208,6 +4218,11 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
                            ", binocular=" + Number(e.binocular, 0) + "; as decoded " + score(e.decoded) +
                            "; swapped " + score(e.swapped) + "; scale probes (error vs centre) " + probes +
                            " over " + Number(e.probed, 0) + " samples; nearer than 10 m " + Number(e.cockpit, 0) +
+                           "; cells where depth varies: checked eye " + Number(e.source_varied, 0) + ", other eye " +
+                           Number(e.other_varied, 0) + (depth.empty_view >= 0
+                                                            ? " (view " + std::to_string(depth.empty_view) +
+                                                                  " takes the other eye's depth)"
+                                                            : std::string()) +
                            ".");
         }
     }

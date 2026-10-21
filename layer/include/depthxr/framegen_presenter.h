@@ -1431,6 +1431,7 @@ class FrameGenPresenter {
     void LogViewExtentsLocked(const XrCompositionLayerProjection& projection);
     // The depth check's batches, one Debug line each (at most one a second).
     std::uint32_t logged_depth_batches_{0};
+    int logged_empty_view_{-1}; // FrameGenDepthStatus::empty_view last logged
     std::chrono::steady_clock::time_point depth_batch_logged_at_{};
     bool logged_capture_failure_{false};
     bool logged_uncaptured_{false};

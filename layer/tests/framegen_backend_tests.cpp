@@ -954,6 +954,8 @@ int RunScenarios(Harness& harness) {
             bool used{false};
             FrameGenDepthReading reading{FrameGenDepthReading::kUnknown};
             float scale{1.0f};
+            int empty_view{-1};
+            bool used_right{false};
         };
         // Runs one depth case on a fresh backend: depth images for the newest
         // frame (panel and background values, the near value over the panel
@@ -961,14 +963,18 @@ int RunScenarios(Harness& harness) {
         // `eye` meters sideways per unit of generated-frame time. `stale`:
         // just in time, a third frame (the newest image again, the head
         // still since) moved by the newest frame's motion and depth
-        // (SynthesizeStale) instead.
+        // (SynthesizeStale) instead. `left_clear`/`right_clear`: that eye's
+        // depth all background (Star Citizen fills only the right eye's).
         auto run_case = [&](float panel_value, float background_value, const FrameGenDepthEncoding& encoding,
-                            bool use_depth, int glass, float eye = 0.0f, bool stale = false) {
+                            bool use_depth, int glass, float eye = 0.0f, bool stale = false, bool left_clear = false,
+                            bool right_clear = false) {
             auto backend = CreateFrameGenGpu(harness.binding, error);
             if (backend) backend->SetCopyAfterRelease(true); // the tests' images are their own
             Check(backend != nullptr, harness.name + " backend: " + error);
-            g_swapchains[kDepthImage] = {harness.create_depth(panel_value, grow(left_panel, glass), background_value)};
-            g_swapchains[right_depth] = {harness.create_depth(panel_value, grow(right_panel, glass), background_value)};
+            g_swapchains[kDepthImage] = {harness.create_depth(left_clear ? background_value : panel_value,
+                                                              grow(left_panel, glass), background_value)};
+            g_swapchains[right_depth] = {harness.create_depth(right_clear ? background_value : panel_value,
+                                                              grow(right_panel, glass), background_value)};
             for (const XrSwapchain chain :
                  {kSource, kOutput, kOutputSecond, right_source, right_output, right_second, kDepthImage, right_depth}) {
                 Check(backend->Track(chain, EnumerateImages, error), error);
@@ -1016,9 +1022,10 @@ int RunScenarios(Harness& harness) {
                 }
             };
             // Prime, then frames until the eyes have been checked a few times
-            // and the scores read back.
+            // and the scores read back (an empty eye is found first, then the
+            // other eye's depth is judged afresh).
             Check(backend->Execute(views(0), tuning, result, error), harness.name + " execute: " + error);
-            for (int i = 0; i < 20; ++i) {
+            for (int i = 0; i < (left_clear || right_clear ? 40 : 20); ++i) {
                 capture(1);
                 Check(backend->Execute(views(1), tuning, result, error), harness.name + " execute: " + error);
             }
@@ -1048,6 +1055,8 @@ int RunScenarios(Harness& harness) {
             const FrameGenDepthStatus status = backend->DepthStatus();
             outcome.reading = status.reading;
             outcome.scale = status.scale;
+            outcome.empty_view = status.empty_view;
+            outcome.used_right = result.depth.size() == 2 && result.depth[1];
             const FrameGenDepthEvidence& evidence = status.evidence;
             std::cout << harness.name << " depth check: " << ToString(status.reading) << " after " << status.decisions
                       << " decisions; moved " << evidence.decoded.samples << " of " << evidence.binocular
@@ -1095,6 +1104,40 @@ int RunScenarios(Harness& harness) {
               harness.name + " nonsense depth was used");
         Check(glass.used && glass.reading == FrameGenDepthReading::kAsSubmitted && glass_error < 0.4 * rotation_error,
               harness.name + " depth wrong around the panel (glass) was not dropped there");
+        // Star Citizen: the left eye's depth left clear. The right eye's is
+        // checked instead and moved to the left eye, which then compensates
+        // head translation about as well as with its own.
+        // Off by default (VECTORXR_FRAMEGEN_DEPTH_EYES): the left eye keeps
+        // its own clear depth.
+        const Outcome left_clear_off = run_case(panel, 1.0f, standard, true, 0, 0.0f, false, true);
+        Check(left_clear_off.empty_view == -1, harness.name + " an empty eye was given depth with the switch off");
+        _putenv_s("VECTORXR_FRAMEGEN_DEPTH_EYES", "1");
+        const Outcome left_clear = run_case(panel, 1.0f, standard, true, 0, 0.0f, false, true);
+        Dump(harness.name + "-cockpit-left-clear", left_clear.output);
+        const double left_clear_error = error_of(left_clear);
+        std::cout << harness.name << " left eye's depth clear: error " << left_clear_error << " ("
+                  << ToString(left_clear.reading) << ", empty view " << left_clear.empty_view << ") vs "
+                  << correct_error << " with both eyes' depth" << std::endl;
+        Check(left_clear.empty_view == 0 && left_clear.used &&
+                  left_clear.reading == FrameGenDepthReading::kAsSubmitted && left_clear_error < 0.4 * rotation_error,
+              harness.name + " an eye whose depth the game leaves clear did not take the other eye's");
+        // The mirror case: the right eye's depth clear, the left eye's
+        // real; the right eye takes the left's.
+        const Outcome right_clear = run_case(panel, 1.0f, standard, true, 0, 0.0f, false, false, true);
+        std::cout << harness.name << " right eye's depth clear: " << ToString(right_clear.reading) << ", empty view "
+                  << right_clear.empty_view << ", right eye uses depth " << right_clear.used_right << std::endl;
+        Check(right_clear.empty_view == 1 && right_clear.used && right_clear.used_right &&
+                  right_clear.reading == FrameGenDepthReading::kAsSubmitted && error_of(right_clear) < 0.4 * rotation_error,
+              harness.name + " a right eye whose depth the game leaves clear did not take the left eye's");
+        // With the switch on, a game filling both eyes changes nothing.
+        const Outcome correct_eyes = run_case(panel, 1.0f, standard, true, 0);
+        _putenv_s("VECTORXR_FRAMEGEN_DEPTH_EYES", "");
+        Check(correct_eyes.empty_view == -1 && correct_eyes.used &&
+                  error_of(correct_eyes) == correct_error,
+              harness.name + " an eye was taken for empty although the game fills both (" +
+                  std::to_string(error_of(correct_eyes)) + " vs " + std::to_string(correct_error) + ")");
+        Check(correct.empty_view == -1 && glass.empty_view == -1 && nonsense.empty_view == -1,
+              harness.name + " an eye was taken for empty although the game fills both");
         const double misplaced_error = error_of(misplaced);
         std::cout << harness.name << " near plane described wrongly: scale " << misplaced.scale << ", error "
                   << misplaced_error << " (correct depth: scale " << correct.scale << ")" << std::endl;
@@ -1376,7 +1419,7 @@ Pixels CockpitAt(std::uint32_t width, std::uint32_t height, float head_x, float 
 const char* const kProfileNames[] = {"luma",        "downsample",  "search",      "refine",      "filter",
                                      "synthesize",  "synthesize16", "depth",      "depth check", "depth trust",
                                      "flow pack",   "flow unpack", "trust update", "shift clear", "shift splat",
-                                     "shift resolve", "shift fill", "raw pack",   "trust resolve", "shading rate", "world reduce", "world solve", "trust vote", "depth scale", "scale vote", "depth stale",
+                                     "shift resolve", "shift fill", "raw pack",   "trust resolve", "shading rate", "world reduce", "world solve", "trust vote", "depth scale", "scale vote", "depth stale", "cross splat", "cross resolve",
                                      "source copy", "output copy",
                                      "hardware wait", "compose", "flow merge"};
 static_assert(std::size(kProfileNames) == kFrameGenPassCount + 5, "a name per profiled category");
@@ -5216,10 +5259,21 @@ int RunReplay(Harness& harness) {
             }
         }
     };
-    // Three times through to settle the depth check, then once to measure.
-    for (int pass = 0; pass < 4; ++pass) {
+    // Three times through to settle the depth check (FG_REPLAY_SETTLE times:
+    // a short capture of a game that fills one eye's depth needs more), then
+    // once to measure.
+    const int settle = std::max(1, std::atoi(env("FG_REPLAY_SETTLE").empty() ? "3" : env("FG_REPLAY_SETTLE").c_str()));
+    for (int pass = 0; pass <= settle; ++pass) {
+        if (pass > 0 && !no_depth) {
+            const FrameGenDepthStatus depth = gpu->DepthStatus();
+            std::printf("Settle pass %d: depth %s, %u batches, empty view %d, varied cells %.0f/%.0f, moved %.0f of %.0f, "
+                        "ratio %.3f (swapped %.3f)\n",
+                        pass, ToString(depth.reading), depth.batches, depth.empty_view, depth.evidence.source_varied,
+                        depth.evidence.other_varied, depth.evidence.decoded.samples, depth.evidence.binocular,
+                        depth.evidence.decoded.Ratio(), depth.evidence.swapped.Ratio());
+        }
         gpu->ResetHistory();
-        const bool measure = pass == 3;
+        const bool measure = pass == settle;
         for (std::size_t k = 0; k < frames.size(); ++k) {
             FrameGenExecuteResult result;
             const bool has_next = k + 1 < frames.size();

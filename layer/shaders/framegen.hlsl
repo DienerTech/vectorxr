@@ -1611,6 +1611,7 @@ float DepthEvidence(Texture2D<float4> own, Texture2D<float4> other, SamplerState
 FG_BIND(0) Texture2D<float4> g_view0 : register(t0);
 FG_BIND(1) Texture2D<float4> g_view1 : register(t1);
 FG_BIND(2) Texture2D<float4> g_depth : register(t2);
+FG_BIND(3) Texture2D<float4> g_depth_other : register(t3);
 FG_BIND(6) SamplerState g_linear : register(s0);
 FG_BIND(4) FG_FORMAT("rgba32f") RWTexture2D<float4> g_scores : register(u0);
 
@@ -1652,8 +1653,12 @@ float4 Score(float2 uv, float depth, float2 far_uv, float none, float2 spacing, 
 // (FG_PASS_DEPTH_TRUST): depth wrong in places (cockpit glass written to
 // depth) does not hide that it is right elsewhere.
 // Writes five texels per cell: a Score sum per reading, then (samples both
-// eyes see, how many of them are nearer than FG_CHECK_NEAR meters, 0, 0),
-// then the probes' error sums (j = 0..3) and (j = 4, probed samples, 0, 0).
+// eyes see, how many of them are nearer than FG_CHECK_NEAR meters, 1 if view
+// 0's depth differs anywhere in the cell from its depth at the view's centre,
+// the same for view 1's depth: t3, unbound reads 0), then the probes' error
+// sums (j = 0..3) and (j = 4, probed samples, 0, 0). A game that leaves an
+// eye's depth clear (Star Citizen's left) varies in no cell, however the
+// depth is decoded (FrameGenDepthEyes).
 #define FG_CHECK_NEAR 10.0
 #define FG_CHECK_PROBES 5
 [numthreads(8, 8, 1)]
@@ -1672,11 +1677,22 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     float cockpit = 0.0;
     float probes[FG_CHECK_PROBES] = {0.0, 0.0, 0.0, 0.0, 0.0};
     float probed = 0.0;
+    uint other_width, other_height;
+    g_depth_other.GetDimensions(other_width, other_height);
+    const float2 other_size = float2(max(other_width, 1u), max(other_height, 1u));
+    const float centre = abs(g_depth.Load(int3(int2(size * 0.5), 0)).r);
+    const float other_centre = abs(g_depth_other.Load(int3(int2(other_size * 0.5), 0)).r);
+    bool varied = false;
+    bool other_varied = false;
     [loop]
     for (int sy = 0; sy < samples; ++sy) {
         [loop]
         for (int sx = 0; sx < samples; ++sx) {
             const float2 uv = (float2(id.xy) + (float2(sx, sy) + 0.5) / float(samples)) / float2(g.size.xy);
+            const int2 own_texel = clamp(int2(uv * size), int2(0, 0), int2(size) - 1);
+            const int2 other_texel = clamp(int2(uv * other_size), int2(0, 0), int2(other_size) - 1);
+            varied = varied || abs(g_depth.Load(int3(own_texel, 0)).r) != centre;
+            other_varied = other_varied || abs(g_depth_other.Load(int3(other_texel, 0)).r) != other_centre;
             float2 far_uv;
             if (!MapToPrevious(uv, FG_FAR_DEPTH, far_uv)) {
                 continue;
@@ -1710,9 +1726,100 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     const int2 base = int2(id.x * 5, id.y);
     g_scores[base] = decoded;
     g_scores[base + int2(1, 0)] = swapped;
-    g_scores[base + int2(2, 0)] = float4(binocular, cockpit, 0.0, 0.0);
+    g_scores[base + int2(2, 0)] = float4(binocular, cockpit, varied ? 1.0 : 0.0, other_varied ? 1.0 : 0.0);
     g_scores[base + int2(3, 0)] = float4(probes[0], probes[1], probes[2], probes[3]);
     g_scores[base + int2(4, 0)] = float4(probes[4], probed, 0.0, 0.0);
+}
+#endif
+
+#if defined(FG_PASS_DEPTH_CROSS_SPLAT)
+FG_BIND(0) Texture2D<float4> g_depth : register(t0);
+FG_BIND(4) FG_FORMAT("r32ui") RWTexture2D<uint> g_keys : register(u0);
+
+// One eye's depth for the other, for a game that fills only one eye's
+// (FrameGenDepthEyes). options.x 0 clears the keys (the target eye's grid,
+// size.zw); 1 moves each texel of the source eye's linear depth (its grid,
+// size.xy) to where the target eye sees it (fov_current/previous and the
+// rotation rows: source -> target, position in .w) and keeps the nearest
+// (largest 1/z, as unsigned bits) on the 2x2 texels around it. Distant
+// content moves by rotation alone and claims its texel as far (key 1), so
+// sky beside the cockpit stays sky.
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID) {
+    if (g.options.x == 0u) {
+        if (all(id.xy < g.size.zw)) {
+            g_keys[id.xy] = 0u;
+        }
+        return;
+    }
+    if (any(id.xy >= g.size.xy)) {
+        return;
+    }
+    const float depth = g_depth.Load(int3(id.xy, 0)).r;
+    const bool near = depth > 0.0 && depth < FG_FAR_DEPTH;
+    const float2 uv = (float2(id.xy) + 0.5) / float2(g.size.xy);
+    const float3 direction = float3(lerp(g.fov_current.x, g.fov_current.y, uv.x),
+                                    lerp(g.fov_current.z, g.fov_current.w, uv.y), -1.0);
+    float3 moved = float3(dot(g.rot0.xyz, direction), dot(g.rot1.xyz, direction), dot(g.rot2.xyz, direction));
+    if (near) {
+        // The point is direction * depth; in the target view R p + t, so
+        // R d + t / depth scaled by depth (its depth there: -z * depth).
+        moved += float3(g.rot0.w, g.rot1.w, g.rot2.w) / depth;
+    }
+    if (moved.z > -1e-4) {
+        return;
+    }
+    const float2 tangent = moved.xy / -moved.z;
+    const float2 target_uv = float2((tangent.x - g.fov_previous.x) / (g.fov_previous.y - g.fov_previous.x),
+                                    (tangent.y - g.fov_previous.z) / (g.fov_previous.w - g.fov_previous.z));
+    const float2 landing = target_uv * float2(g.size.zw);
+    if (!near) {
+        const int2 texel = int2(floor(landing));
+        if (all(texel >= 0) && all(texel < int2(g.size.zw))) {
+            InterlockedMax(g_keys[texel], 1u);
+        }
+        return;
+    }
+    const uint key = max(asuint(1.0 / (-moved.z * depth)), 2u);
+    const int2 first = int2(floor(landing - 0.5));
+    [unroll]
+    for (int i = 0; i < 4; ++i) {
+        const int2 texel = first + int2(i & 1, i >> 1);
+        if (all(texel >= 0) && all(texel < int2(g.size.zw))) {
+            InterlockedMax(g_keys[texel], key);
+        }
+    }
+}
+#endif
+
+#if defined(FG_PASS_DEPTH_CROSS_RESOLVE)
+FG_BIND(0) Texture2D<uint> g_keys : register(t0);
+FG_BIND(4) FG_FORMAT("r32f") RWTexture2D<float> g_linear_depth : register(u0);
+
+// The target eye's linear depth from FG_PASS_DEPTH_CROSS_SPLAT's keys: the
+// nearest content that landed on each texel (key 1: distant). A texel
+// nothing landed on (uncovered beside near content, or outside the source
+// eye's view) takes the farthest of its neighbours that something landed on,
+// the background an edge uncovers; else it is as far.
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID) {
+    if (any(id.xy >= g.size.xy)) {
+        return;
+    }
+    uint key = g_keys.Load(int3(id.xy, 0));
+    if (key == 0u) {
+        uint farthest = 0xffffffffu;
+        [unroll]
+        for (int i = 0; i < 9; ++i) {
+            const int2 texel = clamp(int2(id.xy) + int2(i % 3 - 1, i / 3 - 1), int2(0, 0), int2(g.size.xy) - 1);
+            const uint value = g_keys.Load(int3(texel, 0));
+            if (value != 0u) {
+                farthest = min(farthest, value);
+            }
+        }
+        key = farthest == 0xffffffffu ? 0u : farthest;
+    }
+    g_linear_depth[id.xy] = key > 1u ? 1.0 / asfloat(key) : FG_FAR_DEPTH;
 }
 #endif
 

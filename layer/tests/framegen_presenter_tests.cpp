@@ -7820,6 +7820,54 @@ void TestViewExtentChangesLogged() {
               (changed.empty() ? std::string("none") : changed[0]) + ")");
 }
 
+// Star Citizen fills only one eye's depth: six checks in a row that find
+// the checked eye's depth uniform while the other eye's varies hand the
+// check to the other eye, and the empty eye takes its depth for the session.
+void TestDepthEyes() {
+    FrameGenDepthEvidence both;
+    both.source_varied = 300.0;
+    both.other_varied = 310.0;
+    FrameGenDepthEvidence left_clear;
+    left_clear.other_varied = 280.0;
+    FrameGenDepthEvidence all_far; // scenery only: neither eye varies
+    {
+        FrameGenDepthEyes eyes;
+        for (int i = 0; i < 40; ++i) Check(!eyes.Add(0, both), "depth eyes: a game filling both eyes keeps view 0");
+        for (int i = 0; i < 40; ++i) Check(!eyes.Add(0, all_far), "depth eyes: uniform scenery in both eyes decides nothing");
+        Check(eyes.Source() == 0 && !eyes.Empty(), "depth eyes: nothing changed for a normal game");
+    }
+    {
+        FrameGenDepthEyes eyes;
+        for (int i = 0; i < 5; ++i) Check(!eyes.Add(0, left_clear), "depth eyes: five checks are not enough");
+        Check(!eyes.Add(0, both), "depth eyes: a varied check starts over");
+        for (int i = 0; i < 5; ++i) Check(!eyes.Add(0, left_clear), "depth eyes: still counting again");
+        Check(eyes.Add(0, left_clear), "depth eyes: the sixth check in a row decides");
+        Check(eyes.Source() == 1 && eyes.Empty() == std::optional<std::size_t>(0),
+              "depth eyes: the right eye is checked and the left takes its depth");
+        Check(!eyes.Add(0, both) && !eyes.Add(1, left_clear) && eyes.Empty() == std::optional<std::size_t>(0),
+              "depth eyes: decided for the session");
+    }
+    {
+        // The mirror case: the checked eye (view 0) has depth, the other's is
+        // clear. The check keeps reading view 0 and the validator keeps what
+        // it judged; view 1 takes view 0's depth.
+        FrameGenDepthEyes eyes;
+        FrameGenDepthEvidence right_clear;
+        right_clear.source_varied = 280.0;
+        for (int i = 0; i < 5; ++i) Check(!eyes.Add(0, right_clear) && !eyes.Empty(), "depth eyes: mirror, counting");
+        Check(!eyes.Add(0, right_clear), "depth eyes: an empty other eye needs no fresh judgement");
+        Check(eyes.Source() == 0 && eyes.Empty() == std::optional<std::size_t>(1),
+              "depth eyes: the left eye is checked and the right takes its depth");
+    }
+    {
+        FrameGenDepthEyes eyes;
+        FrameGenDepthEvidence few = left_clear;
+        few.other_varied = 4.0; // a speck of near content: not enough to call the other eye real
+        for (int i = 0; i < 20; ++i) Check(!eyes.Add(0, few), "depth eyes: too little variation decides nothing");
+        Check(!eyes.Empty(), "depth eyes: still undecided");
+    }
+}
+
 // OpenComposite (an OpenVR game on OpenXR): IVRCompositor::WaitGetPoses
 // waits and begins a frame every time it is called, and ends one only once
 // both eyes are submitted. A game that asks for poses again first begins a
@@ -10964,6 +11012,7 @@ int main(int argc, char** argv) {
     RUN(TestRetriesNotRestoredByALongPause);
     RUN(TestDynamicSummaryShowsHold);
     RUN(TestViewExtentChangesLogged);
+    RUN(TestDepthEyes);
     RUN(TestOpenCompositeAbandonsFrames);
     RUN(TestSingleAbandonedFrameLeavesNothingBehind);
     RUN(TestAbandonedBeforeFirstEnd);

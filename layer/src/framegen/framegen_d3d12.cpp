@@ -137,6 +137,7 @@ struct ViewResources {
     int bound_previous{-1};
     Texture shift_keys;
     Texture shift_map; // rebuilt for each generated frame
+    Texture cross_keys; // kDepthCrossSplat's, for an eye given the other eye's depth (FrameGenDepthEyes)
     Texture depth_stale; // kDepthStale's, for a frame moved by the previous frame's motion
     Texture trust_tiles; // the trust vote's counts per tile, then summed around each
     Texture trust_votes;
@@ -162,6 +163,7 @@ struct ViewResources {
     // depth came from, and what it read.
     UINT64 depth_capture{0};
     FrameGenImage depth_source;
+    bool depth_crossed{false}; // the newest depth is the other eye's, moved here (RecordDepthCross)
     // Optical flow hardware (FrameGenTuning::hardware_flow): its inputs,
     // its vectors and its session for this view.
     Texture hardware_newest;
@@ -233,6 +235,7 @@ struct FrameSlot {
     ComPtr<ID3D12Resource> check_readback; // depth check scores, read once the slot's fence passes
     bool check_pending{false};
     std::uint32_t check_generation{0}; // FrameGenDepthValidator::CheckGeneration() when recorded
+    std::size_t check_source{0};       // the view whose depth the check read (FrameGenDepthEyes)
 };
 
 struct CaptureSlot {
@@ -475,6 +478,11 @@ class D3D12FrameGen final : public FrameGenGpu {
         // flow as before).
         if (const char* world = std::getenv("VECTORXR_FRAMEGEN_WORLD")) {
             world_motion_ = std::string(world) != "0";
+        }
+        // An eye whose depth the game leaves clear takes the other eye's
+        // (FrameGenDepthEyes; VECTORXR_FRAMEGEN_DEPTH_EYES=1 on, 0 off).
+        if (const char* eyes = std::getenv("VECTORXR_FRAMEGEN_DEPTH_EYES")) {
+            depth_eyes_ = std::string(eyes) == "1";
         }
         // Interpolation's occlusion handling (VECTORXR_FRAMEGEN_OCCLUSION=0:
         // off) and, for research, its cross-fade fallback
@@ -925,6 +933,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         view.depth_generation = validator_.Generation();
         view.depth_capture = capture_count_;
         view.depth_source = depth;
+        view.depth_crossed = false;
         FrameGenDepthEncoding depth_encoding = encoding;
         if (validator_.Swapped()) {
             std::swap(depth_encoding.near_z, depth_encoding.far_z);
@@ -978,7 +987,64 @@ class D3D12FrameGen final : public FrameGenGpu {
         status.batches = validator_.Batches();
         status.swapped = validator_.Swapped();
         status.probe_step = validator_.ProbeStep();
+        status.empty_view = eyes_.Empty() ? static_cast<int>(*eyes_.Empty()) : -1;
         return status;
+    }
+
+    // A game that fills only one eye's depth (FrameGenDepthEyes): the other
+    // eye's linear depth moved to the empty eye's view (kDepthCrossSplat
+    // clears the keys, then splats; kDepthCrossResolve writes the empty eye's
+    // newest depth), before the trust pass and the plans read it. Both views'
+    // newest images must be this frame's.
+    bool RecordDepthCross(const FrameGenViewSubmission& source_submission,
+                          const FrameGenViewSubmission& target_submission, ViewResources& source,
+                          ViewResources& target, std::string& error) {
+        const FrameGenExtent half = FrameGenPyramid(target_submission.request.extent)[1];
+        if (!target.cross_keys.resource &&
+            !Create(target.cross_keys, half, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_UINT, true, error)) {
+            return false;
+        }
+        Texture& from = source.depth[source.history_state.Newest()];
+        Texture& to = target.depth[target.history_state.Newest()];
+        std::vector<D3D12_RESOURCE_BARRIER> barriers;
+        const auto run = [&](FrameGenPass pass, std::uint32_t mode, Texture* input, Texture& output) {
+            if (descriptor_cursor_ + kDescriptorsPerDispatch > descriptor_end_) {
+                error = "D3D12 Frame Generation descriptor budget exhausted";
+                return false;
+            }
+            const UINT base = descriptor_cursor_;
+            descriptor_cursor_ += kDescriptorsPerDispatch;
+            ShaderResource(input, base, 0);
+            for (UINT i = 1; i < kShaderResources; ++i) {
+                ShaderResource(nullptr, base, i);
+            }
+            if (input) Require(barriers, *input, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            UnorderedAccess(&output, base + kFirstUav);
+            UnorderedAccess(nullptr, base + kFirstUav + 1);
+            Require(barriers, output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            Flush(barriers);
+            const FrameGenDispatch dispatch =
+                BuildFrameGenDepthCrossDispatch(pass, mode, source_submission.request.extent,
+                                                target_submission.request.extent, source_submission.request.newest,
+                                                target_submission.request.newest);
+            commands_->SetPipelineState(pipelines_[static_cast<std::size_t>(pass)].Get());
+            commands_->SetComputeRoot32BitConstants(0, sizeof(FrameGenConstants) / 4, &dispatch.constants, 0);
+            commands_->SetComputeRootDescriptorTable(1, Gpu(base));
+            commands_->SetComputeRootDescriptorTable(2, Gpu(base + kFirstUav));
+            commands_->Dispatch((dispatch.width + kFrameGenThreadGroupSize - 1) / kFrameGenThreadGroupSize,
+                                (dispatch.height + kFrameGenThreadGroupSize - 1) / kFrameGenThreadGroupSize, 1);
+            return true;
+        };
+        if (!run(FrameGenPass::kDepthCrossSplat, 0, &from, target.cross_keys) ||
+            !run(FrameGenPass::kDepthCrossSplat, 1, &from, target.cross_keys) ||
+            !run(FrameGenPass::kDepthCrossResolve, 0, &target.cross_keys, to)) {
+            return false;
+        }
+        target.depth_ready = true;
+        target.depth_generation = source.depth_generation;
+        target.depth_encoding = source.depth_encoding;
+        target.depth_crossed = true;
+        return true;
     }
 
     // Research capture: a readback buffer for one array slice of the game's
@@ -1204,9 +1270,13 @@ class D3D12FrameGen final : public FrameGenGpu {
         }
         const UINT base = descriptor_cursor_;
         descriptor_cursor_ += kDescriptorsPerDispatch;
+        // The other eye's depth (t3) only says whether it varies at all
+        // (FrameGenDepthEyes, with depth_eyes_).
+        Texture* other_depth = depth_eyes_ ? &view1.depth[view1.history_state.Newest()] : nullptr;
         Texture* inputs[kShaderResources] = {&view0.history[view0.history_state.Newest()],
                                              &view1.history[view1.history_state.Newest()],
-                                             &view0.depth[view0.history_state.Newest()], nullptr, nullptr};
+                                             &view0.depth[view0.history_state.Newest()],
+                                             other_depth && other_depth->resource ? other_depth : nullptr, nullptr};
         std::vector<D3D12_RESOURCE_BARRIER> barriers;
         for (UINT i = 0; i < kShaderResources; ++i) {
             ShaderResource(inputs[i], base, i);
@@ -1264,6 +1334,8 @@ class D3D12FrameGen final : public FrameGenGpu {
                 } else if (reading == 2) {
                     evidence.binocular += texel[0];
                     evidence.cockpit += texel[1];
+                    evidence.source_varied += texel[2];
+                    evidence.other_varied += texel[3];
                 } else if (reading == 3) {
                     for (int probe = 0; probe < 4; ++probe) evidence.probes[probe] += texel[probe];
                 } else {
@@ -1274,6 +1346,13 @@ class D3D12FrameGen final : public FrameGenGpu {
         }
         const D3D12_RANGE written{0, 0};
         slot.check_readback->Unmap(0, &written);
+        // An eye whose depth is clear while the other eye's is not
+        // (FrameGenDepthEyes): the other eye is checked from now on, and
+        // judged afresh.
+        if (depth_eyes_ && eyes_.Add(slot.check_source, evidence)) {
+            validator_.Restart();
+            return;
+        }
         // A check of depth decoded before the validator last changed the
         // decoding, or probed with another step, scored other readings.
         if (slot.check_generation == validator_.CheckGeneration()) {
@@ -1850,9 +1929,26 @@ class D3D12FrameGen final : public FrameGenGpu {
 #endif
         }
         bool ok = true;
+        // A game that fills only one eye's depth (FrameGenDepthEyes): that
+        // eye takes the other's, moved to its view, before the trust pass
+        // and the plans read it.
+        if (const std::optional<std::size_t> empty = eyes_.Empty(); empty && views.size() >= 2) {
+            const std::size_t target = *empty;
+            const std::size_t source = 1 - target;
+            bool both = true;
+            for (std::size_t i = 0; i < 2; ++i) {
+                both = both && Prepared(views[i], views_[i], FrameGenHistoryRing(tuning)) &&
+                       views_[i].capture.Matches(views[i].source);
+            }
+            if (both && views[source].request.depth && views[target].request.depth && views_[source].depth_ready &&
+                views_[source].depth_generation == validator_.Generation()) {
+                ok = RecordDepthCross(views[source], views[target], views_[source], views_[target], error);
+                Stamp(static_cast<int>(FrameGenPass::kDepthCrossResolve));
+            }
+        }
         // Depth the other eye disproves is dropped per texel before any view
         // uses it. Needs both eyes' images of this frame, captured at release.
-        if (views.size() >= 2 && validator_.Usable()) {
+        if (ok && views.size() >= 2 && validator_.Usable()) {
             bool both = true;
             for (std::size_t i = 0; i < 2; ++i) {
                 both = both && Prepared(views[i], views_[i], FrameGenHistoryRing(tuning)) &&
@@ -1898,10 +1994,15 @@ class D3D12FrameGen final : public FrameGenGpu {
             ok = RecordFlowMerge(*effective_tuning.composition, recordings, error);
         }
         // Check the game's depth against the other eye while undecided, and
-        // now and then afterwards.
-        if (ok && views.size() >= 2 && views_[0].depth_fresh && views[0].request.depth &&
-            views_[0].depth_generation == validator_.Generation() && validator_.WantsCheck(submission_)) {
-            ok = RecordDepthCheck(views[0], views[1], views_[0], views_[1], slot, error);
+        // now and then afterwards: from view 0, or from the eye whose depth
+        // the game fills (FrameGenDepthEyes).
+        const std::size_t check_source = eyes_.Source() == 1 ? 1 : 0;
+        const std::size_t check_other = 1 - check_source;
+        if (ok && views.size() >= 2 && views_[check_source].depth_fresh && views[check_source].request.depth &&
+            views_[check_source].depth_generation == validator_.Generation() && validator_.WantsCheck(submission_)) {
+            ok = RecordDepthCheck(views[check_source], views[check_other], views_[check_source], views_[check_other],
+                                  slot, error);
+            slot.check_source = check_source;
             Stamp(static_cast<int>(FrameGenPass::kDepthCheck));
         }
         for (std::size_t i = 0; i < views.size(); ++i) {
@@ -3046,7 +3147,8 @@ class D3D12FrameGen final : public FrameGenGpu {
         for (auto* group : {&view.luma_newest, &view.luma_previous, &view.flow}) {
             for (auto& texture : *group) visit(texture);
         }
-        for (auto* texture : {&view.output, &view.compose_target, &view.shift_keys, &view.shift_map, &view.depth_stale,
+        for (auto* texture : {&view.output, &view.compose_target, &view.shift_keys, &view.shift_map, &view.cross_keys,
+                              &view.depth_stale,
                               &view.world_partials, &view.world_params, &view.shading_rate, &view.trust_tiles,
                               &view.trust_votes, &view.depth_scales, &view.depth_scale_raw, &view.depth_scale_votes}) {
             visit(*texture);
@@ -3173,7 +3275,9 @@ class D3D12FrameGen final : public FrameGenGpu {
         depth_meta.precision(9);
         depth_meta << "reading " << ToString(validator_.Reading()) << "\nswapped " << validator_.Swapped() << "\nscale "
                    << validator_.Scale() << "\nprobe_step " << validator_.ProbeStep() << "\ngeneration "
-                   << validator_.Generation() << '\n';
+                   << validator_.Generation() << "\nempty_view "
+                   << (eyes_.Empty() ? static_cast<int>(*eyes_.Empty()) : -1) << "\ncheck_source " << eyes_.Source()
+                   << '\n';
         for (std::size_t i = 0; i < views.size() && i < views_.size(); ++i) {
             const ViewResources& view = views_[i];
             const FrameGenDepthEncoding& e = view.depth_encoding;
@@ -3184,7 +3288,8 @@ class D3D12FrameGen final : public FrameGenGpu {
                        << source.swapchain << " image " << source.image_index << " slice " << source.array_index
                        << " rect " << source.rect.offset.x << ' ' << source.rect.offset.y << ' '
                        << source.rect.extent.width << ' ' << source.rect.extent.height << " min_depth " << e.min_depth
-                       << " max_depth " << e.max_depth << " near_z " << e.near_z << " far_z " << e.far_z << '\n';
+                       << " max_depth " << e.max_depth << " near_z " << e.near_z << " far_z " << e.far_z
+                       << " crossed " << view.depth_crossed << '\n';
         }
         // Quad views: how each eye is composed from the views.
         if (tuning.composition) {
@@ -3506,6 +3611,7 @@ class D3D12FrameGen final : public FrameGenGpu {
             view.trust = {};  // likewise (see EnsureTrust)
             view.shift_keys = {};
             view.shift_map = {};
+            view.cross_keys = {};
             view.depth_stale = {};
             view.trust_tiles = {};
             view.trust_votes = {};
@@ -4676,6 +4782,8 @@ class D3D12FrameGen final : public FrameGenGpu {
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT check_footprint_{};
     UINT64 check_bytes_{0};
     FrameGenDepthValidator validator_;
+    FrameGenDepthEyes eyes_; // which eye's depth is checked, and whether an eye takes the other's
+    bool depth_eyes_{false};  // eyes_ judges the checks (VECTORXR_FRAMEGEN_DEPTH_EYES)
     // Optical flow hardware: loaded on first use; failure turns it off for
     // the backend's life.
 #ifdef DEPTHXR_NVOF
