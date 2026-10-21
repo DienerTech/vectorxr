@@ -260,6 +260,22 @@ struct FrameGenLeadPolicy {
     // the lead is retried only after explore_after, doubling after each
     // failure (tests compare without).
     bool slack_hysteresis{true};
+    // Hitches, not frames: late frames within hitch_span of the first of
+    // them are one event (a hitch makes the next frames late too), and the
+    // lead steps up for two events within event_window, never for one alone
+    // (its refreshes show a cover frame meanwhile); a probe is still undone
+    // by two late frames in the last ten. A rare hitch ratcheted the lead up
+    // for every frame where two late frames in the last ten stepped it up
+    // (DCS on Virtual Desktop, 2026-10-20: lead 4-7, the game told a median
+    // 67 ms past the refresh it was picked for, with 0.5% of its frames
+    // late, in bursts). Spare time steps it down as before (seven of the
+    // last ten frames). Off by default until flown: a game that is late now
+    // and then is held at a shorter lead, and GPU-aware pacing arms for its
+    // late captures (TestGpuAwarePacing's pipelined MSFS-like game). On with
+    // VECTORXR_FRAMEGEN_LEAD=events.
+    bool hitch_events{false};
+    std::chrono::milliseconds hitch_span{250};
+    std::chrono::milliseconds event_window{2000};
 };
 
 // Frame Generation pacing for one OpenXR session.
@@ -909,6 +925,8 @@ class FrameGenPresenter {
     // engagement it does not need a fresh run of steady frames.
     bool StayThreadedLocked() const;
     void DropUnclaimedLocked();
+    // Forgets the frames judged at the lead (it changed, or starts over).
+    void ClearLeadHistoryLocked();
     void UpdateLeadLocked(bool late, std::optional<double> slack_ms, std::uint32_t lead, std::uint32_t multiplier);
     // Just in time: a kept real frame's lead sample, once.
     void ScoreLeadLocked(JitFrame& frame, bool late);
@@ -1490,6 +1508,10 @@ class FrameGenPresenter {
     // anyway (a probe, FrameGenLeadPolicy).
     std::uint32_t lead_slots_{0};
     std::deque<std::uint8_t> lead_history_; // last frames at the current lead: 0 on time, 1 late, 2 slack
+    // FrameGenLeadPolicy::hitch_events, at the current lead: when the last
+    // late event began, and the events within event_window.
+    std::optional<std::chrono::steady_clock::time_point> lead_event_start_;
+    std::deque<std::chrono::steady_clock::time_point> lead_events_;
     FrameGenLeadPolicy lead_policy_;
     std::chrono::steady_clock::time_point lead_calm_since_{}; // the lead's last step (none yet: unset)
     struct LeadProbe {

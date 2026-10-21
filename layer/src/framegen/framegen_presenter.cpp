@@ -469,6 +469,14 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
     }
     gpu_frames_ahead_ = 1;
     gpu_timeouts_in_row_ = 0;
+    // VECTORXR_FRAMEGEN_LEAD=events: the lead steps by hitch events
+    // (FrameGenLeadPolicy::hitch_events), for comparisons in flight; off by
+    // default until flown.
+    const char* lead_setting = std::getenv("VECTORXR_FRAMEGEN_LEAD");
+    const bool event_lead = lead_setting && std::string(lead_setting) == "events";
+    if (event_lead) {
+        lead_policy_.hitch_events = true;
+    }
     std::string gpu_gate_setting;
     if (const char* ahead = std::getenv("VECTORXR_FRAMEGEN_GPU_AHEAD"); ahead && *ahead) {
         gpu_gate_setting = ahead;
@@ -507,6 +515,10 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
                       ", motionEstimation=" + ToString(settings_.motion_estimation) +
                       ", diagnosticView=" + DiagnosticViewText(settings_.diagnostic_view) +
                       "; frame pacing is owned by Frame Generation (Turbo stays off).");
+        if (event_lead) {
+            logger_->Info("Frame Generation: the lead steps by hitch events, not frame by frame "
+                          "(VECTORXR_FRAMEGEN_LEAD=events).");
+        }
         if (!gpu_gate_setting.empty()) {
             logger_->Info("Frame Generation: GPU-aware pacing set by VECTORXR_FRAMEGEN_GPU_AHEAD=" + gpu_gate_setting +
                           (gpu_gate_enabled_ ? ": the game's waits are held until its GPU has run the capture of " +
@@ -867,9 +879,15 @@ void FrameGenPresenter::SetLeadPolicy(const FrameGenLeadPolicy& policy) {
     lead_return_after_ = policy.explore_after;
 }
 
+void FrameGenPresenter::ClearLeadHistoryLocked() {
+    lead_history_.clear();
+    lead_event_start_.reset();
+    lead_events_.clear();
+}
+
 void FrameGenPresenter::ResetLeadLocked() {
     lead_slots_ = 0;
-    lead_history_.clear();
+    ClearLeadHistoryLocked();
     lead_calm_since_ = {};
     lead_probe_.reset();
     lead_floor_ = 0;
@@ -5403,7 +5421,8 @@ void FrameGenPresenter::UpdateLeadLocked(bool late, std::optional<double> slack_
     } else if (lead == lead_slots_) {
         const double period_ms = static_cast<double>(std::max<XrDuration>(last_period_, 1)) / 1e6;
         // Slack: it could have arrived a refresh later and still made its slot.
-        lead_history_.push_back(late ? 1 : (slack_ms && *slack_ms > period_ms * 1.1) ? 2 : 0);
+        const bool spare = !late && slack_ms && *slack_ms > period_ms * 1.1;
+        lead_history_.push_back(late ? 1 : spare ? 2 : 0);
         while (lead_history_.size() > 10) {
             lead_history_.pop_front();
         }
@@ -5411,7 +5430,28 @@ void FrameGenPresenter::UpdateLeadLocked(bool late, std::optional<double> slack_
             return static_cast<std::size_t>(std::count(lead_history_.begin(), lead_history_.end(), kind));
         };
         const bool hysteresis = lead_policy_.slack_hysteresis;
-        if (count(1) >= 2) {
+        // Late: two in the last ten frames. Spare: seven of the last ten.
+        bool step_up = count(1) >= 2;
+        bool step_down = lead_history_.size() >= 8 && count(2) >= 7;
+        if (lead_policy_.hitch_events) {
+            // Late: two hitches within event_window, each the late frames
+            // within hitch_span of its first. A probe is still undone by two
+            // late frames in the last ten: a lead too short is late frame
+            // after frame, and judged by hitch events it showed a quarter
+            // second of them before going back. (Judging spare time over a
+            // longer window as well held a GPU-bound game, whose frames show
+            // a refresh to spare only now and then, three slots higher after
+            // a slow stretch: TestLeadStepsDownAfterHitches.)
+            if (late && (!lead_event_start_ || now - *lead_event_start_ > lead_policy_.hitch_span)) {
+                lead_event_start_ = now;
+                lead_events_.push_back(now);
+            }
+            while (!lead_events_.empty() && now - lead_events_.front() > lead_policy_.event_window) {
+                lead_events_.pop_front();
+            }
+            step_up = lead_probe_ ? count(1) >= 2 : lead_events_.size() >= 2;
+        }
+        if (step_up) {
             if (lead_probe_) {
                 // The probe (or step down) failed: the lead before it is the
                 // lowest known to hold, and below it is tried only rarely
@@ -5456,7 +5496,7 @@ void FrameGenPresenter::UpdateLeadLocked(bool late, std::optional<double> slack_
             // At the cap nothing moves: not counted (the summary marks the cap).
             totals_.lead_ups += lead_slots_ < 4 * multiplier ? 1 : 0;
             lead_slots_ = std::min(lead_slots_ + 1, 4 * multiplier);
-            lead_history_.clear();
+            ClearLeadHistoryLocked();
             lead_calm_since_ = now;
             return;
         }
@@ -5467,7 +5507,7 @@ void FrameGenPresenter::UpdateLeadLocked(bool late, std::optional<double> slack_
         // down and back up about once a second, each time with two late
         // frames (DCS and MSFS 2024, 2026-10-09).
         const bool exploring = lead_floor_ != 0 && lead_slots_ <= lead_floor_ && lead_floor_failed_;
-        if (lead_history_.size() >= 8 && count(2) >= 7 && lead_slots_ > 1 &&
+        if (step_down && lead_slots_ > 1 &&
             (!hysteresis || !exploring || now - lead_calm_since_ >= explore_wait)) {
             if (hysteresis) {
                 lead_probe_ = LeadProbe{now, lead_slots_};
@@ -5475,7 +5515,7 @@ void FrameGenPresenter::UpdateLeadLocked(bool late, std::optional<double> slack_
             }
             --lead_slots_;
             ++totals_.lead_downs;
-            lead_history_.clear();
+            ClearLeadHistoryLocked();
             lead_calm_since_ = now;
             return;
         }
@@ -5493,7 +5533,7 @@ void FrameGenPresenter::UpdateLeadLocked(bool late, std::optional<double> slack_
     lead_probe_ = LeadProbe{now, lead_slots_};
     --lead_slots_;
     ++totals_.lead_probes;
-    lead_history_.clear();
+    ClearLeadHistoryLocked();
     lead_calm_since_ = now;
 }
 
@@ -5741,7 +5781,7 @@ std::optional<XrResult> FrameGenPresenter::ThreadedWaitLocked(std::unique_lock<s
         lead_floor_ = std::min(lead_floor_, lead_slots_);
         lead_floor_proven_ = std::min(lead_floor_proven_, lead_slots_);
         lead_probe_.reset();
-        lead_history_.clear();
+        ClearLeadHistoryLocked();
     }
     // Predict the first slot the frame will really reach. Interpolated
     // frames before it are shown first, so the frame itself is shown (and
@@ -6205,7 +6245,11 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
         // images newer captures had replaced (written unmoved, or the frame
         // before). staleSkipped: refreshes not submitted, nothing current to
         // show (a frame shown as it is had newer images in its swapchains).
-        // leadAvg/leadMax: the lead told to the game's frames. gameAheadMs
+        // leadAvg/leadMax: the lead told to the game's frames; leadHist: how
+        // many frames were told each lead ("lead:frames"). toldAheadMs
+        // (median/90th percentile): gameAheadMs measured from the presenter
+        // thread's last paced wait however long ago, so every window has
+        // it (gameAheadMs only from one within four refreshes). gameAheadMs
         // (median/95th percentile): how far past the runtime's own
         // prediction the game is told to render, Frame Generation's share
         // of its pose horizon (without Frame Generation 0, or a refresh for
