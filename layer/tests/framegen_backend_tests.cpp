@@ -216,10 +216,11 @@ constexpr float kTan = 0.8f;
 // A cockpit: a textured panel 0.4 m square, 0.5 m in front of the head, over
 // scenery at infinity, seen from a head at (head_x, 0, 0) looking down -Z
 // through a view spanning tangents tan_left..tan_right across and +-kTan
-// down.
+// down; the scenery `scroll` px (about) further right, the way a turning
+// vehicle moves it.
 constexpr float kPanelDistance = 0.5f;
 constexpr float kPanelHalf = 0.2f;
-Pixels Cockpit(float head_x, float tan_left = -kTan, float tan_right = kTan) {
+Pixels Cockpit(float head_x, float tan_left = -kTan, float tan_right = kTan, float scroll = 0.0f) {
     Pixels pixels(kSize * kSize);
     for (std::uint32_t y = 0; y < kSize; ++y) {
         for (std::uint32_t x = 0; x < kSize; ++x) {
@@ -229,7 +230,7 @@ Pixels Cockpit(float head_x, float tan_left = -kTan, float tan_right = kTan) {
             const float py = kPanelDistance * ty;
             pixels[y * kSize + x] = std::abs(px) < kPanelHalf && std::abs(py) < kPanelHalf
                                         ? Patch(px * 480.0f + 100.0f, py * 480.0f + 100.0f)
-                                        : Background(tx * 240.0f, ty * 240.0f);
+                                        : Background(tx * 240.0f - scroll, ty * 240.0f);
         }
     }
     return pixels;
@@ -1199,6 +1200,53 @@ int RunScenarios(Harness& harness) {
                   << std::endl;
         Check(two.used && two_error < 1.2 * moving_error + 0.0005,
               harness.name + " a generated frame before the last one did not see the panel from its own eye position");
+
+        // 3h. Depth engine mk2 (research switches): the vehicle turns, so the
+        // scenery scrolls 8 px a frame behind the still panel. Half an
+        // interval on, it has moved 4 px more and comes into view right of
+        // the panel, where the newest frame shows the panel's edge: what the
+        // motion map (VECTORXR_FRAMEGEN_DEPTH_SPLAT) fills from the scenery
+        // beside, rather than moving the panel's edge over it. Depth matching
+        // (VECTORXR_FRAMEGEN_DEPTH_MATCH) must not make it worse either.
+        const float scroll = 8.0f;
+        harness.upload(g_swapchains[kSource][0], Cockpit(-half_ipd, -outer, inner, 0.0f));
+        harness.upload(g_swapchains[kSource][1], Cockpit(shift - half_ipd, -outer, inner, scroll));
+        harness.upload(g_swapchains[right_source][0], Cockpit(half_ipd, -inner, outer, 0.0f));
+        harness.upload(g_swapchains[right_source][1], Cockpit(shift + half_ipd, -inner, outer, scroll));
+        const Pixels turning_truth = Cockpit(shift - half_ipd, -outer, inner, 1.5f * scroll);
+        // The strip right of the panel the scenery uncovers, and the whole view.
+        const int strip_x = left_panel.offset.x + left_panel.extent.width;
+        auto strip_error_of = [&](const Pixels& output) {
+            return MeanError(output, turning_truth, strip_x, left_panel.offset.y, strip_x + 8,
+                             left_panel.offset.y + left_panel.extent.height);
+        };
+        auto turning_error_of = [&](const Pixels& output) {
+            return MeanError(output, turning_truth, 64, 64, kSize - 64, kSize - 64);
+        };
+        const Outcome turning = run_case(panel, 1.0f, standard, true, 0);
+        _putenv_s("VECTORXR_FRAMEGEN_DEPTH_SPLAT", "1");
+        const Outcome turning_splat = run_case(panel, 1.0f, standard, true, 0);
+        _putenv_s("VECTORXR_FRAMEGEN_DEPTH_SPLAT", "");
+        _putenv_s("VECTORXR_FRAMEGEN_DEPTH_MATCH", "1");
+        const Outcome turning_match = run_case(panel, 1.0f, standard, true, 0);
+        _putenv_s("VECTORXR_FRAMEGEN_DEPTH_MATCH", "");
+        Dump(harness.name + "-cockpit-turning", turning.output);
+        Dump(harness.name + "-cockpit-turning-splat", turning_splat.output);
+        Dump(harness.name + "-cockpit-turning-truth", turning_truth);
+        std::cout << harness.name << " turning: uncovered strip error " << strip_error_of(turning.output) << ", "
+                  << strip_error_of(turning_splat.output) << " with the motion map, "
+                  << strip_error_of(turning_match.output) << " with depth matching; view "
+                  << turning_error_of(turning.output) << ", " << turning_error_of(turning_splat.output) << ", "
+                  << turning_error_of(turning_match.output) << std::endl;
+        Check(turning_splat.used && strip_error_of(turning_splat.output) < strip_error_of(turning.output) &&
+                  turning_error_of(turning_splat.output) < 1.05 * turning_error_of(turning.output) + 0.0005,
+              harness.name + " the motion map did not fill what the turning scenery uncovers");
+        Check(turning_match.used && turning_error_of(turning_match.output) < 1.05 * turning_error_of(turning.output) + 0.0005,
+              harness.name + " depth matching made the turning scenery worse");
+        harness.upload(g_swapchains[kSource][0], Cockpit(-half_ipd, -outer, inner));
+        harness.upload(g_swapchains[kSource][1], Cockpit(shift - half_ipd, -outer, inner));
+        harness.upload(g_swapchains[right_source][0], Cockpit(half_ipd, -inner, outer));
+        harness.upload(g_swapchains[right_source][1], Cockpit(shift + half_ipd, -inner, outer));
     }
 
     // 4. Head rotation only: compensation must leave a static panorama where

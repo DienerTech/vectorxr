@@ -137,6 +137,7 @@ struct ViewResources {
     int bound_previous{-1};
     Texture shift_keys;
     Texture shift_map; // rebuilt for each generated frame
+    Texture motion_map; // FrameGenTuning::depth_splat's, rebuilt for each generated frame
     Texture cross_keys; // kDepthCrossSplat's, for an eye given the other eye's depth (FrameGenDepthEyes)
     Texture depth_stale; // kDepthStale's, for a frame moved by the previous frame's motion
     Texture trust_tiles; // the trust vote's counts per tile, then summed around each
@@ -488,6 +489,11 @@ class D3D12FrameGen final : public FrameGenGpu {
         // (FrameGenTuning::depth_match; VECTORXR_FRAMEGEN_DEPTH_MATCH=1).
         if (const char* match = std::getenv("VECTORXR_FRAMEGEN_DEPTH_MATCH")) {
             depth_match_ = std::string(match) == "1";
+        }
+        // Research (depth engine mk2): the motion map
+        // (FrameGenTuning::depth_splat; VECTORXR_FRAMEGEN_DEPTH_SPLAT=1).
+        if (const char* splat = std::getenv("VECTORXR_FRAMEGEN_DEPTH_SPLAT")) {
+            depth_splat_ = std::string(splat) == "1";
         }
         // Interpolation's occlusion handling (VECTORXR_FRAMEGEN_OCCLUSION=0:
         // off) and, for research, its cross-fade fallback
@@ -1898,6 +1904,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         effective_tuning.occlusion = tuning.occlusion && occlusion_;
         effective_tuning.cross_fade = tuning.cross_fade || cross_fade_;
         effective_tuning.depth_match = tuning.depth_match || depth_match_;
+        effective_tuning.depth_splat = tuning.depth_splat || depth_splat_;
         effective_tuning.hardware_flow = tuning.hardware_flow && HardwareFlowReady();
         // Several views on Frame Generation's own queue match on one atlas;
         // otherwise (one view, matching at release on the game's queue, or
@@ -3153,7 +3160,8 @@ class D3D12FrameGen final : public FrameGenGpu {
         for (auto* group : {&view.luma_newest, &view.luma_previous, &view.flow}) {
             for (auto& texture : *group) visit(texture);
         }
-        for (auto* texture : {&view.output, &view.compose_target, &view.shift_keys, &view.shift_map, &view.cross_keys,
+        for (auto* texture : {&view.output, &view.compose_target, &view.shift_keys, &view.shift_map, &view.motion_map,
+                              &view.cross_keys,
                               &view.depth_stale,
                               &view.world_partials, &view.world_params, &view.shading_rate, &view.trust_tiles,
                               &view.trust_votes, &view.depth_scales, &view.depth_scale_raw, &view.depth_scale_votes}) {
@@ -3617,6 +3625,7 @@ class D3D12FrameGen final : public FrameGenGpu {
             view.trust = {};  // likewise (see EnsureTrust)
             view.shift_keys = {};
             view.shift_map = {};
+            view.motion_map = {};
             view.cross_keys = {};
             view.depth_stale = {};
             view.trust_tiles = {};
@@ -4423,6 +4432,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         case FrameGenTextureKind::kShiftKeys: return &view.shift_keys;
         case FrameGenTextureKind::kShiftMap: return &view.shift_map;
         case FrameGenTextureKind::kDepthStale: return &view.depth_stale;
+        case FrameGenTextureKind::kMotionMap: return &view.motion_map;
         case FrameGenTextureKind::kWorldPartials: return &view.world_partials;
         case FrameGenTextureKind::kWorldParams: return &view.world_params;
         case FrameGenTextureKind::kTrustTiles: return &view.trust_tiles;
@@ -4522,6 +4532,11 @@ class D3D12FrameGen final : public FrameGenGpu {
         view.raw_executed = captured ? view.raw_captured : 0;
         view.raw_value = effective.hardware_raw ? view.raw_value : 0;
         if (effective.depth && !EnsureTrust(view, submission.request.extent, error)) {
+            return false;
+        }
+        if (effective.depth && (tuning.depth_splat || depth_splat_) && !view.motion_map.resource &&
+            !Create(view.motion_map, FrameGenPyramid(submission.request.extent)[1], DXGI_FORMAT_R32_UINT,
+                    DXGI_FORMAT_R32_UINT, true, error)) {
             return false;
         }
         // The previous frame's depth was used (its trust scores were kept),
@@ -4781,6 +4796,7 @@ class D3D12FrameGen final : public FrameGenGpu {
     bool occlusion_{true};                          // FrameGenTuning::occlusion allowed
     bool cross_fade_{false};                        // FrameGenTuning::cross_fade forced (research)
     bool depth_match_{false};                       // FrameGenTuning::depth_match forced (research)
+    bool depth_splat_{false};                       // FrameGenTuning::depth_splat forced (research)
     std::array<FrameSlot, kFramesInFlight> slots_;
     ComPtr<ID3D12GraphicsCommandList> capture_commands_;
     std::array<CaptureSlot, kCaptureSlots> capture_slots_; // views x frames in flight, color and depth

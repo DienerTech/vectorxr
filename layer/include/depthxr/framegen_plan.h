@@ -133,6 +133,10 @@ enum class FrameGenTextureKind : std::uint8_t {
     // kDepthStale's output: the previous frame's resolved depth read where
     // each half-resolution texel's content was in that frame.
     kDepthStale,
+    // FrameGenTuning::depth_splat: the motion map at half resolution, built
+    // like the eye-shift map (into kShiftKeys, once that map is built) for
+    // each generated frame: offsets back to the newest frame.
+    kMotionMap,
 };
 
 // The flow level the optical flow hardware fills: a 4x4 grid on the
@@ -184,6 +188,9 @@ inline constexpr std::uint32_t kFrameGenFlagStaleFlow = 1024u;
 // Synthesis with depth: candidate vectors are also chosen by where they were
 // measured against the depth of what they carry (FrameGenTuning::depth_match).
 inline constexpr std::uint32_t kFrameGenFlagDepthMatch = 2048u;
+// The kShift* passes build the motion map (kMotionMap; tuning[1]: the
+// synthesis step), and synthesis reads it (input 5): FrameGenTuning::depth_splat.
+inline constexpr std::uint32_t kFrameGenFlagDepthSplat = 4096u;
 // World motion: samples per side of the fit's grid, and its iterations.
 inline constexpr std::uint32_t kFrameGenWorldGrid = 128u;
 // The trust vote's tile side in half-resolution texels (FG_TRUST_TILE):
@@ -399,6 +406,11 @@ struct FrameGenTuning {
     // another surface than the content it would carry costs more (depth
     // engine mk2, M4.2; research, off by default).
     bool depth_match{false};
+    // With depth: content with a motion model (head-fixed nearer than 4 m,
+    // world from 30 m) is moved to each generated frame's time with a depth
+    // test, and shown where its surface and the chosen vector's disagree
+    // (depth engine mk2, M3; research, off by default).
+    bool depth_splat{false};
     // Quad views: how each eye is composed from its views, for the flow
     // merge and the focus views' motion limit; null on the canvas path. Not
     // owned: the caller keeps it alive for the Execute call.

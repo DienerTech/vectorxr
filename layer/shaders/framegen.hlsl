@@ -76,6 +76,17 @@ cbuffer FrameGenConstantBuffer : register(b0) {
 // another surface than the content it would carry here costs more (see
 // DepthMismatch).
 #define FG_FLAG_DEPTH_MATCH 2048u
+// FG_PASS_SHIFT_*: the map is the motion map (depth engine mk2, M3), not the
+// eye shift: content with a motion model (cockpit, head-fixed; world, moving
+// with its flow) is splatted to the generated frame's time, nearest in
+// front. Synthesis with it (input 5): where the map's surface and the chosen
+// vector's disagree, the map's motion wins (see Synthesize).
+#define FG_FLAG_DEPTH_SPLAT 4096u
+// The motion map's distance classes (stand-ins for fitted motion labels):
+// nearer than this is head-fixed (FG_RIGID_DEPTH), at or beyond the second
+// (to the sky) moves with the world (FG_WORLD_DEPTH); between, no model.
+#define FG_SPLAT_HEAD 4.0
+#define FG_SPLAT_WORLD 30.0
 
 // Linear depth at or beyond this many meters is treated as infinitely far.
 #define FG_FAR_DEPTH 100000.0
@@ -998,6 +1009,8 @@ FG_BIND(6) SamplerState g_linear : register(s0);
 // The eye-shift map (FG_PASS_SHIFT_*) built for this generated frame (or,
 // for a spare, the frame before), Direct3D 12 only, as depth is.
 Texture2D<uint> g_shift : register(t4);
+// FG_FLAG_DEPTH_SPLAT: the motion map built for this generated frame.
+Texture2D<uint> g_motion : register(t5);
 #endif
 #if defined(FG_PASS_SYNTHESIZE_UNORM8)
 FG_BIND(4) FG_FORMAT("rgba8") RWTexture2D<float4> g_output : register(u0);
@@ -1254,6 +1267,34 @@ float4 Synthesize(float2 position, float fraction) {
             }
         }
     }
+
+#if !defined(__spirv__)
+    // FG_FLAG_DEPTH_SPLAT: the motion map says which surface with a motion
+    // model is nearest here at this frame's time. Where it is in front of
+    // what the chosen vector carries (something nearer covers the pixel),
+    // or, extrapolating, where the chosen vector carries a surface with a
+    // model that the map put elsewhere (uncovered: the map holds what lies
+    // behind), the map's motion is shown, matched or not. Surfaces without
+    // a model (4-30 m, sky) keep the chosen vector.
+    if (!still && (g.options.y & (FG_FLAG_DEPTH_SPLAT | FG_FLAG_DEPTH)) == (FG_FLAG_DEPTH_SPLAT | FG_FLAG_DEPTH)) {
+        uint motion_width, motion_height;
+        g_motion.GetDimensions(motion_width, motion_height);
+        const float2 motion_size = float2(motion_width, motion_height);
+        const uint packed = g_motion.Load(int3(min(int2(uv * motion_size), int2(motion_size) - 1), 0));
+        if (packed != FG_SHIFT_NONE) {
+            const float2 back = float2(f16tof32(packed & 0xffffu), f16tof32(packed >> 16)) / motion_size;
+            const float surface = OrderDepth(DepthAt(uv + back));
+            const float carried = OrderDepth(DepthAt(uv + step * chosen.xy));
+            const bool modelled = carried < FG_SPLAT_HEAD || (carried >= FG_SPLAT_WORLD && carried < 0.5 * FG_FAR_DEPTH);
+            if (surface < 0.97 * carried || (extrapolate && modelled && carried < 0.97 * surface)) {
+                chosen = float4(back / step, 0.02, 1.0);
+                chosen_error = 0.0;
+                occlusion = 0;
+                boundary = false;
+            }
+        }
+    }
+#endif
 
     const float shift = length(step * chosen.xy * aspect);
     const float motion_confidence = saturate((limit - shift) / (0.25 * limit));
@@ -2546,8 +2587,45 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
 }
 #endif
 
+#if defined(FG_PASS_SHIFT_SPLAT) || defined(FG_PASS_SHIFT_RESOLVE) || defined(FG_PASS_SHIFT_FILL)
+// FG_FLAG_DEPTH_SPLAT: the newest frame's filtered flow (FG_PASS_FILTER).
+FG_BIND(1) Texture2D<float4> g_motion_flow : register(t1);
+FG_BIND(6) SamplerState g_linear : register(s0);
+
+bool MotionMap() {
+    return (g.options.y & FG_FLAG_DEPTH_SPLAT) != 0u;
+}
+#endif
+
 #if defined(FG_PASS_SHIFT_SPLAT) || defined(FG_PASS_SHIFT_RESOLVE)
 FG_BIND(0) Texture2D<float4> g_depth : register(t0);
+
+// The motion map's world motion at uv: the filtered flow of the cells
+// around whose content is world too (bilinear among those), so the
+// cockpit's stillness beside it does not slow it; the nearest cell's where
+// none is.
+float2 WorldMotion(float2 uv) {
+    uint width, height;
+    g_motion_flow.GetDimensions(width, height);
+    const float2 cells = float2(width, height);
+    const float2 position = uv * cells - 0.5;
+    const int2 base = int2(floor(position));
+    const float2 f = position - float2(base);
+    float2 sum = float2(0.0, 0.0);
+    float weight = 0.0;
+    [unroll]
+    for (int i = 0; i < 4; ++i) {
+        const int2 cell = clamp(base + int2(i & 1, i >> 1), int2(0, 0), int2(cells) - 1);
+        const float depth = DepthNearest(g_depth, (float2(cell) + 0.5) / cells);
+        const float w = ((i & 1) != 0 ? f.x : 1.0 - f.x) * ((i >> 1) != 0 ? f.y : 1.0 - f.y);
+        if (depth >= FG_SPLAT_WORLD && depth < 0.5 * FG_FAR_DEPTH) {
+            sum += w * g_motion_flow.Load(int3(cell, 0)).xy;
+            weight += w;
+        }
+    }
+    return weight > 0.0 ? sum / weight
+                        : g_motion_flow.Load(int3(clamp(int2(uv * cells), int2(0, 0), int2(cells) - 1), 0)).xy;
+}
 
 // The eye-shift map: where each texel of the newest frame lands when seen
 // from the eye's position at a generated frame's time (head movement the
@@ -2566,6 +2644,11 @@ FG_BIND(0) Texture2D<float4> g_depth : register(t0);
 // FG_PASS_TRUST_RESOLVE), which does not move with the eye and only claims
 // its own texel (FG_PASS_SHIFT_SPLAT), and for content the eye's movement
 // takes out of the view.
+//
+// The motion map (FG_FLAG_DEPTH_SPLAT) moves content by its model instead:
+// head-fixed content not at all, world content by its flow (WorldMotion)
+// times tuning.y (synthesis's step, negated: content at x reaches
+// x - step * v); content without a model (and the sky) is distant here.
 bool Landing(uint2 id, out float2 landing, out uint key) {
     const float2 size = float2(g.size.xy);
     const float2 uv = (float2(id) + 0.5) / size;
@@ -2575,8 +2658,18 @@ bool Landing(uint2 id, out float2 landing, out uint key) {
     if (!(depth > 0.0) || depth >= FG_FAR_DEPTH) {
         return false;
     }
-    float2 shifted;
-    const bool inside = MapToPrevious(uv, depth, shifted);
+    float2 shifted = uv;
+    bool inside = false;
+    if (MotionMap()) {
+        const bool head = depth < FG_SPLAT_HEAD;
+        if (!head && (depth < FG_SPLAT_WORLD || depth >= 0.5 * FG_FAR_DEPTH)) {
+            return false;
+        }
+        shifted = head ? uv : uv - g.tuning.y * WorldMotion(uv);
+        inside = all(shifted >= 0.0) && all(shifted <= 1.0);
+    } else {
+        inside = MapToPrevious(uv, depth, shifted);
+    }
     landing = shifted * size;
     // Positive floats order like their bits; 0 marks texels nothing reached.
     // Moved content's bit (32) puts it ahead of distant content at the same
@@ -2735,6 +2828,10 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     const float3 t = float3(g.rot0.w, g.rot1.w, g.rot2.w);
     float2 direction = (t.xy + tangent * t.z) /
                        float2(g.fov_current.y - g.fov_current.x, g.fov_current.w - g.fov_current.z) * size;
+    if (MotionMap()) {
+        // The motion map: content moved along its flow.
+        direction = g_motion_flow.SampleLevel(g_linear, uv, 0.0).xy * size;
+    }
     direction = dot(direction, direction) > 1e-12 ? normalize(direction) : float2(1.0, 0.0);
     uint ahead_key, behind_key;
     const int2 ahead = Reached(int2(id.xy), direction, ahead_key);

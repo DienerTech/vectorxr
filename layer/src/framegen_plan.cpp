@@ -148,6 +148,30 @@ void AppendShiftMap(FrameGenViewPlan& plan, const FrameGenConstants& base, const
     pass(FrameGenPass::kShiftFill, {keys, {}, {}, {}, {}, {}}, target);
 }
 
+// The motion map for a generated frame `step` (synthesis's: content at x in
+// the newest frame shows at x - step * v) from the newest frame's resolved
+// depth and filtered flow, built into kMotionMap with the eye-shift map's
+// passes (their keys reused: built after that map).
+void AppendMotionMap(FrameGenViewPlan& plan, const FrameGenConstants& base, float step, FrameGenTexture depth,
+                     FrameGenTexture flow) {
+    FrameGenConstants mapping = base;
+    mapping.options = {0, kFrameGenFlagDepth | kFrameGenFlagDepthSplat, 0, 0};
+    mapping.tuning[1] = step;
+    auto pass = [&](FrameGenPass kind, std::array<FrameGenTexture, 6> inputs, FrameGenTexture output,
+                    FrameGenTexture second = {}) {
+        FrameGenDispatch dispatch = Dispatch(kind, plan.levels[1], plan.levels[1], mapping);
+        dispatch.inputs = inputs;
+        dispatch.outputs = {output, second};
+        plan.dispatches.push_back(dispatch);
+    };
+    const FrameGenTexture keys = Texture(FrameGenTextureKind::kShiftKeys);
+    const FrameGenTexture target = Texture(FrameGenTextureKind::kMotionMap);
+    pass(FrameGenPass::kShiftClear, {}, keys, target);
+    pass(FrameGenPass::kShiftSplat, {depth, flow, {}, {}, {}, {}}, keys);
+    pass(FrameGenPass::kShiftResolve, {depth, flow, keys, {}, {}, {}}, target);
+    pass(FrameGenPass::kShiftFill, {keys, flow, {}, {}, {}, {}}, target);
+}
+
 // The world's own motion (FrameGenViewRequest::world_motion), fitted to the
 // measured flow at a grid of samples: each iteration weighs the samples by
 // the last fit.
@@ -496,16 +520,26 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
             AppendShiftMap(plan, base, {request.shift[0] * time, request.shift[1] * time, request.shift[2] * time}, depth);
             plan.frames_in_order = true;
         }
+        // The motion map for this frame's own time (FrameGenTuning::depth_splat).
+        const bool motion = request.depth && tuning.depth_splat && time > 0.0f;
+        if (motion) {
+            AppendMotionMap(plan, base, tuning.mode == FrameGenSynthesisMode::kExtrapolate ? -fraction : 1.0f - fraction,
+                            depth, Texture(FrameGenTextureKind::kFilteredNewest, plan.final_flow_level));
+            plan.frames_in_order = true;
+        }
         FrameGenDispatch output = Dispatch(synthesize, plan.levels[0], plan.levels[plan.final_flow_level], base);
         output.inputs = {Texture(FrameGenTextureKind::kHistoryNewest),
                          Texture(FrameGenTextureKind::kHistoryPrevious),
                          Texture(FrameGenTextureKind::kFilteredNewest, plan.final_flow_level),
                          depth,
                          shifted ? Texture(FrameGenTextureKind::kShiftMap) : FrameGenTexture{},
-                         {}};
+                         motion ? Texture(FrameGenTextureKind::kMotionMap) : FrameGenTexture{}};
         if (shifted) {
             output.constants.options[1] |= kFrameGenFlagShift;
             output.constants.options[3] = FrameGenHalf(map_time);
+        }
+        if (motion) {
+            output.constants.options[1] |= kFrameGenFlagDepthSplat;
         }
         output.outputs = {Texture(FrameGenTextureKind::kOutput), {}};
         output.constants.tuning[0] = fraction;
@@ -586,15 +620,24 @@ FrameGenViewPlan BuildFrameGenSynthesisPlan(const FrameGenViewRequest& request, 
     if (shifted) {
         AppendShiftMap(plan, base, eye, depth);
     }
+    const FrameGenTexture flow = Texture(extrapolate && cover_flow ? FrameGenTextureKind::kFilteredCover
+                                                                   : FrameGenTextureKind::kFilteredNewest,
+                                         plan.final_flow_level);
+    // The motion map for this frame's time (FrameGenTuning::depth_splat).
+    const bool motion = request.depth && tuning.depth_splat;
+    if (motion) {
+        AppendMotionMap(plan, base, extrapolate ? -fraction : 1.0f - fraction, depth, flow);
+    }
     FrameGenDispatch output = Dispatch(synthesize, plan.levels[0], plan.levels[plan.final_flow_level], base);
     output.inputs = {Texture(FrameGenTextureKind::kHistoryNewest),
                      Texture(FrameGenTextureKind::kHistoryPrevious),
-                     Texture(extrapolate && cover_flow ? FrameGenTextureKind::kFilteredCover
-                                                       : FrameGenTextureKind::kFilteredNewest,
-                             plan.final_flow_level),
+                     flow,
                      depth,
                      shifted ? Texture(FrameGenTextureKind::kShiftMap) : FrameGenTexture{},
-                     {}};
+                     motion ? Texture(FrameGenTextureKind::kMotionMap) : FrameGenTexture{}};
+    if (motion) {
+        output.constants.options[1] |= kFrameGenFlagDepthSplat;
+    }
     if (shifted) {
         // The map is built for this frame's own eye position: synthesis
         // scales it by one.

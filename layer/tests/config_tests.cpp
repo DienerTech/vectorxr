@@ -1701,11 +1701,41 @@ void TestFrameGenPlan() {
         Expect((plan.dispatches.back().constants.options[1] & depthxr::kFrameGenFlagDepthMatch) == 0,
                "Depth matching should not reach a stale-flow frame");
     }
-    request.depth = false;
-    Expect((depthxr::BuildFrameGenViewPlan(request, tuning).dispatches.back().constants.options[1] &
-            depthxr::kFrameGenFlagDepthMatch) == 0,
-           "Depth matching should need depth");
     tuning.depth_match = false;
+    // The motion map (research): built with the eye-shift map's passes into
+    // kMotionMap right before each generated frame, which reads it.
+    tuning.depth_splat = true;
+    tuning.generated = 2;
+    tuning.fractions = {0.5f, 1.0f, 0.5f, 0.5f};
+    {
+        const auto plan = depthxr::BuildFrameGenViewPlan(request, tuning);
+        int maps = 0;
+        bool read = true;
+        for (std::size_t i = 0; i < plan.dispatches.size(); ++i) {
+            const auto& dispatch = plan.dispatches[i];
+            if (dispatch.pass == FrameGenPass::kShiftClear && dispatch.outputs[1].kind == FrameGenTextureKind::kMotionMap) {
+                ++maps;
+                Expect((dispatch.constants.options[1] & depthxr::kFrameGenFlagDepthSplat) != 0 &&
+                           i + 4 < plan.dispatches.size() &&
+                           plan.dispatches[i + 3].pass == FrameGenPass::kShiftFill &&
+                           plan.dispatches[i + 2].inputs[1].kind == FrameGenTextureKind::kFilteredNewest,
+                       "The motion map should be splatted, resolved and filled from the filtered flow");
+                const auto& synth = plan.dispatches[i + 4];
+                read = read && synth.inputs[5].kind == FrameGenTextureKind::kMotionMap &&
+                       (synth.constants.options[1] & depthxr::kFrameGenFlagDepthSplat) != 0;
+            }
+        }
+        Expect(maps == 2 && read && plan.frames_in_order, "Each generated frame should read its own motion map");
+    }
+    tuning.generated = 1;
+    tuning.fractions = {0.5f, 0.5f, 0.5f, 0.5f};
+    request.depth = false;
+    tuning.depth_match = true;
+    Expect((depthxr::BuildFrameGenViewPlan(request, tuning).dispatches.back().constants.options[1] &
+            (depthxr::kFrameGenFlagDepthMatch | depthxr::kFrameGenFlagDepthSplat)) == 0,
+           "Depth matching and the motion map should need depth");
+    tuning.depth_match = false;
+    tuning.depth_splat = false;
     request.trust_stereo = false;
 
     // Fractions follow display times and clamp.
