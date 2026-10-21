@@ -87,6 +87,11 @@ cbuffer FrameGenConstantBuffer : register(b0) {
 // (to the sky) moves with the world (FG_WORLD_DEPTH); between, no model.
 #define FG_SPLAT_HEAD 4.0
 #define FG_SPLAT_WORLD 30.0
+// Research: 1 moves the sky (FG_WORLD_SKY and beyond) in the motion map too,
+// by the measured flow of the sky around it, behind everything else.
+#ifndef FG_SPLAT_SKY
+#define FG_SPLAT_SKY 0
+#endif
 
 // Linear depth at or beyond this many meters is treated as infinitely far.
 #define FG_FAR_DEPTH 100000.0
@@ -1284,8 +1289,11 @@ float4 Synthesize(float2 position, float fraction) {
         if (packed != FG_SHIFT_NONE) {
             const float2 back = float2(f16tof32(packed & 0xffffu), f16tof32(packed >> 16)) / motion_size;
             const float surface = OrderDepth(DepthAt(uv + back));
-            const float carried = OrderDepth(DepthAt(uv + step * chosen.xy));
-            const bool modelled = carried < FG_SPLAT_HEAD || (carried >= FG_SPLAT_WORLD && carried < 0.5 * FG_FAR_DEPTH);
+            const float carried_depth = DepthAt(uv + step * chosen.xy);
+            const float carried = OrderDepth(carried_depth);
+            const bool modelled = carried_depth > 0.0 &&
+                                  (carried < FG_SPLAT_HEAD ||
+                                   (carried >= FG_SPLAT_WORLD && (FG_SPLAT_SKY != 0 || carried < 0.5 * FG_FAR_DEPTH)));
             if (surface < 0.97 * carried || (extrapolate && modelled && carried < 0.97 * surface)) {
                 chosen = float4(back / step, 0.02, 1.0);
                 chosen_error = 0.0;
@@ -2603,8 +2611,8 @@ FG_BIND(0) Texture2D<float4> g_depth : register(t0);
 // The motion map's world motion at uv: the filtered flow of the cells
 // around whose content is world too (bilinear among those), so the
 // cockpit's stillness beside it does not slow it; the nearest cell's where
-// none is.
-float2 WorldMotion(float2 uv) {
+// none is. `sky`: of the sky's cells instead (FG_SPLAT_SKY).
+float2 WorldMotion(float2 uv, bool sky) {
     uint width, height;
     g_motion_flow.GetDimensions(width, height);
     const float2 cells = float2(width, height);
@@ -2618,7 +2626,7 @@ float2 WorldMotion(float2 uv) {
         const int2 cell = clamp(base + int2(i & 1, i >> 1), int2(0, 0), int2(cells) - 1);
         const float depth = DepthNearest(g_depth, (float2(cell) + 0.5) / cells);
         const float w = ((i & 1) != 0 ? f.x : 1.0 - f.x) * ((i >> 1) != 0 ? f.y : 1.0 - f.y);
-        if (depth >= FG_SPLAT_WORLD && depth < 0.5 * FG_FAR_DEPTH) {
+        if (sky ? depth >= 0.5 * FG_FAR_DEPTH : depth >= FG_SPLAT_WORLD && depth < 0.5 * FG_FAR_DEPTH) {
             sum += w * g_motion_flow.Load(int3(cell, 0)).xy;
             weight += w;
         }
@@ -2648,24 +2656,28 @@ float2 WorldMotion(float2 uv) {
 // The motion map (FG_FLAG_DEPTH_SPLAT) moves content by its model instead:
 // head-fixed content not at all, world content by its flow (WorldMotion)
 // times tuning.y (synthesis's step, negated: content at x reaches
-// x - step * v); content without a model (and the sky) is distant here.
+// x - step * v); the sky is distant (moved by its flow with FG_SPLAT_SKY).
+// Content without a model stays on its own texel with its depth's key,
+// without the moved bit, so what lands behind it there does not cover it.
 bool Landing(uint2 id, out float2 landing, out uint key) {
     const float2 size = float2(g.size.xy);
     const float2 uv = (float2(id) + 0.5) / size;
     const float depth = g_depth.Load(int3(id, 0)).r;
     landing = uv * size;
     key = 0u;
-    if (!(depth > 0.0) || depth >= FG_FAR_DEPTH) {
+    const bool sky = FG_SPLAT_SKY != 0 && MotionMap() && depth >= 0.5 * FG_FAR_DEPTH;
+    if (!(depth > 0.0) || (depth >= FG_FAR_DEPTH && !sky)) {
         return false;
     }
     float2 shifted = uv;
     bool inside = false;
     if (MotionMap()) {
         const bool head = depth < FG_SPLAT_HEAD;
-        if (!head && (depth < FG_SPLAT_WORLD || depth >= 0.5 * FG_FAR_DEPTH)) {
+        if (!head && !sky && (depth < FG_SPLAT_WORLD || depth >= 0.5 * FG_FAR_DEPTH)) {
+            key = depth < FG_SPLAT_WORLD ? (asuint(1.0 / depth) + 64u) & ~63u : 0u;
             return false;
         }
-        shifted = head ? uv : uv - g.tuning.y * WorldMotion(uv);
+        shifted = head ? uv : uv - g.tuning.y * WorldMotion(uv, sky);
         inside = all(shifted >= 0.0) && all(shifted <= 1.0);
     } else {
         inside = MapToPrevious(uv, depth, shifted);
@@ -2710,6 +2722,10 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         // Distant content stays on its own texel (no offset is written:
         // FG_SHIFT_NONE), unless nearer content lands there.
         InterlockedMax(g_keys[id.xy], FG_SHIFT_FAR_KEY);
+    } else if ((key & 32u) == 0u) {
+        // The motion map: content without a model stays too, in front of
+        // what lands behind it.
+        InterlockedMax(g_keys[id.xy], key | 31u);
     }
 }
 #endif
