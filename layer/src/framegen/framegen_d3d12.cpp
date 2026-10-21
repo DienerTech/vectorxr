@@ -481,9 +481,9 @@ class D3D12FrameGen final : public FrameGenGpu {
             world_motion_ = std::string(world) != "0";
         }
         // An eye whose depth the game leaves clear takes the other eye's
-        // (FrameGenDepthEyes; VECTORXR_FRAMEGEN_DEPTH_EYES=1 on, 0 off).
+        // (FrameGenDepthEyes; VECTORXR_FRAMEGEN_DEPTH_EYES=0 turns it off).
         if (const char* eyes = std::getenv("VECTORXR_FRAMEGEN_DEPTH_EYES")) {
-            depth_eyes_ = std::string(eyes) == "1";
+            depth_eyes_ = std::string(eyes) != "0";
         }
         // Research (depth engine mk2): candidate vectors chosen by depth too
         // (FrameGenTuning::depth_match; VECTORXR_FRAMEGEN_DEPTH_MATCH=1).
@@ -4806,7 +4806,7 @@ class D3D12FrameGen final : public FrameGenGpu {
     UINT64 check_bytes_{0};
     FrameGenDepthValidator validator_;
     FrameGenDepthEyes eyes_; // which eye's depth is checked, and whether an eye takes the other's
-    bool depth_eyes_{false};  // eyes_ judges the checks (VECTORXR_FRAMEGEN_DEPTH_EYES)
+    bool depth_eyes_{true};   // eyes_ judges the checks (VECTORXR_FRAMEGEN_DEPTH_EYES)
     // Optical flow hardware: loaded on first use; failure turns it off for
     // the backend's life.
 #ifdef DEPTHXR_NVOF

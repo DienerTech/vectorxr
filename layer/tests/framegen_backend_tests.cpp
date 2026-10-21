@@ -1108,11 +1108,12 @@ int RunScenarios(Harness& harness) {
         // Star Citizen: the left eye's depth left clear. The right eye's is
         // checked instead and moved to the left eye, which then compensates
         // head translation about as well as with its own.
-        // Off by default (VECTORXR_FRAMEGEN_DEPTH_EYES): the left eye keeps
-        // its own clear depth.
+        // Turned off (VECTORXR_FRAMEGEN_DEPTH_EYES=0), the left eye keeps its
+        // own clear depth.
+        _putenv_s("VECTORXR_FRAMEGEN_DEPTH_EYES", "0");
         const Outcome left_clear_off = run_case(panel, 1.0f, standard, true, 0, 0.0f, false, true);
+        _putenv_s("VECTORXR_FRAMEGEN_DEPTH_EYES", "");
         Check(left_clear_off.empty_view == -1, harness.name + " an empty eye was given depth with the switch off");
-        _putenv_s("VECTORXR_FRAMEGEN_DEPTH_EYES", "1");
         const Outcome left_clear = run_case(panel, 1.0f, standard, true, 0, 0.0f, false, true);
         Dump(harness.name + "-cockpit-left-clear", left_clear.output);
         const double left_clear_error = error_of(left_clear);
@@ -1130,7 +1131,8 @@ int RunScenarios(Harness& harness) {
         Check(right_clear.empty_view == 1 && right_clear.used && right_clear.used_right &&
                   right_clear.reading == FrameGenDepthReading::kAsSubmitted && error_of(right_clear) < 0.4 * rotation_error,
               harness.name + " a right eye whose depth the game leaves clear did not take the left eye's");
-        // With the switch on, a game filling both eyes changes nothing.
+        // Turned off, a game filling both eyes sees no difference.
+        _putenv_s("VECTORXR_FRAMEGEN_DEPTH_EYES", "0");
         const Outcome correct_eyes = run_case(panel, 1.0f, standard, true, 0);
         _putenv_s("VECTORXR_FRAMEGEN_DEPTH_EYES", "");
         Check(correct_eyes.empty_view == -1 && correct_eyes.used &&
@@ -5408,7 +5410,7 @@ int RunReplay(Harness& harness) {
                 evaluate(k, k, k + 1, frames[k].views[0].color, result, fraction, shifts, fraction, {k});
             }
         }
-        if (pass == 2) {
+        if (pass == settle - 1) {
             std::printf("Depth reading: %s, scale %.3f\n", ToString(gpu->DepthStatus().reading),
                         static_cast<double>(gpu->DepthStatus().scale));
         }
