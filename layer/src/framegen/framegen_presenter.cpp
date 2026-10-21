@@ -4183,8 +4183,8 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
             "% of it (swapped " +
             Number(evidence.swapped.samples > 0.0 ? 100.0 * evidence.swapped.fallback / evidence.swapped.samples : 0.0,
                    0) +
-            "%; over half is never used), which is treated as far (cockpit glass written to depth, or depth wrong "
-            "there)." +
+            "%; a reading disproved on over 40% is not taken up, over half not kept), which is treated as far "
+            "(cockpit glass written to depth, or depth wrong there)." +
             (depth.reading == FrameGenDepthReading::kUnusable
                  ? " Some games only fill the depth they send while their own depth reprojection setting is on "
                    "(MSFS 2024: Motion reprojection set to Depth); it is checked again now and then."
