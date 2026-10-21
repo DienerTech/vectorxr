@@ -30,6 +30,8 @@ constexpr int kAutoMaxBackoffDoublings = 3; // 10 s, 20 s, 40 s, 80 s
 // transition settle briefly, then judge its actual cadence rather than
 // spending the full engagement warmup on an unsustainable rate.
 constexpr std::chrono::milliseconds kAutoProbeSettle{250};
+// Auto counts a frame late once it takes this much longer than its refreshes.
+constexpr double kAutoLateFactor = 1.25;
 // Auto stays at full rate this long after inline cycles kept starting late.
 constexpr std::chrono::seconds kInlineHold{60};
 // The presenter thread waits this long for frames in flight when it stops.
@@ -2033,7 +2035,7 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
     if (last_app_end_ && now - multiplier_changed_at_ >= settle) {
         // An engaged frame should take N refreshes; a passed-through one, one.
         const double multiplier = frame && frame->engaged ? static_cast<double>(frame->multiplier) : 1.0;
-        const auto expected = std::chrono::nanoseconds(static_cast<std::int64_t>(period * multiplier * 1.25));
+        const auto expected = std::chrono::nanoseconds(static_cast<std::int64_t>(period * multiplier * kAutoLateFactor));
         const bool late = now - *last_app_end_ > expected;
         cadence_.push_back({now, late, late && started_late});
     }
@@ -7593,6 +7595,29 @@ FrameGenStatus FrameGenPresenter::Status() const {
     status.automatic = settings_.multiplier == FrameGenMultiplier::kAuto ||
                        (settings_.multiplier == FrameGenMultiplier::kDynamic && !status.dynamic);
     status.full_rate = full_rate_ && state_ == FrameGenState::kActive;
+    const XrDuration grid = refresh_period_ > 0 ? GameGridLocked() : 0;
+    if (status.automatic && grid > 0) {
+        // UpdateAutoLocked's thresholds as frame rates: a step up once more
+        // than 30% of frames take kAutoLateFactor times their refreshes; a
+        // probe one step down after five steady seconds, from its own thread
+        // only for a game whose own time per frame is within reach of it
+        // (AutoProbeInReachLocked), inline for any game holding its step.
+        const double grid_hz = 1e9 / static_cast<double>(grid);
+        if (auto_multiplier_ < std::min(auto_memory_ceiling_, kMaxMultiplier)) {
+            status.auto_step_up_below_fps = grid_hz / (kAutoLateFactor * auto_multiplier_);
+        }
+        if (auto_multiplier_ > 1) {
+            status.auto_step_down_above_fps =
+                compositor_running_ ? (dynamic_policy_.stay_above - kProbeReach) * grid_hz / (auto_multiplier_ - 1)
+                                    : grid_hz / auto_multiplier_;
+        }
+    }
+    // As the 30 s summary says it: just in time and Dynamic measure the
+    // refreshes between real frames' slots; otherwise their ends' interval.
+    status.refreshes_per_real_frame =
+        (DynamicLocked() || jit_) && dynamic_interval_slots_ > 0.0 ? dynamic_interval_slots_
+        : grid > 0 && real_interval_ns_ > 0.0                       ? real_interval_ns_ / static_cast<double>(grid)
+                                                                    : 0.0;
     status.standby = status.dynamic && dynamic_standby_;
     status.dynamic_reason = dynamic_reason_;
     status.dynamic_engagements = dynamic_engagements_;

@@ -91,6 +91,16 @@ struct FrameGenStatus {
     std::uint32_t multiplier{2}; // headset frames per real frame in use
     bool automatic{false};       // the multiplier is chosen automatically
     bool full_rate{false};       // automatic and the app holds full refresh
+    // Automatic: the game's rate below which it steps up (0 with no higher
+    // step), and the game's own rate (its time per frame, the hold left
+    // out) from which it tries one step down (0 at full rate). Frames per
+    // second, on the grid the game's frames are timed by (grid_period_ns).
+    double auto_step_up_below_fps{0.0};
+    double auto_step_down_above_fps{0.0};
+    // Grid periods per real frame, measured frame by frame (smoothed; 0
+    // until measured): what a fixed or Auto multiplier becomes for a slower
+    // game.
+    double refreshes_per_real_frame{0.0};
     // Dynamic: the app runs at its own rate and generated frames fill the
     // refreshes between; `multiplier` is then the typical refreshes per real
     // frame.

@@ -28,6 +28,7 @@
 #include "depthxr/pivot_step.h"
 #include "depthxr/pivot_view.h"
 #include "depthxr/effects.h"
+#include "depthxr/external_status.h"
 #include "depthxr/head_prediction.h"
 #include "depthxr/logger.h"
 #include "depthxr/quadviews_frame_cache.h"
@@ -496,6 +497,10 @@ class OpenXrLayer {
     void PollFrameGenRecorder();
     // The app's status line for Frame Generation (RuntimeStatusDocument::framegen_reason).
     static std::string FrameGenStatusReason(const FrameGenStatus& framegen);
+    // Its rates as numbers (RuntimeStatusDocument::framegen_rates), and the
+    // public status file's Frame Generation block (external_status.h).
+    static RuntimeFrameGenRates FrameGenRates(const FrameGenStatus& framegen);
+    static ExternalFrameGenStatus ExternalFrameGen(const FrameGenStatus& framegen);
     void CaptureInstanceFunctions();
     void LogResolvedSettings(const ResolvedRuntimeConfig& settings);
     void ResetPivotActivationState();
@@ -1108,6 +1113,9 @@ class OpenXrLayer {
     ProcessExitFile runtime_relay_exit_status_;
     ProcessExitFile runtime_relay_exit_control_;
     bool runtime_relay_pruned_{false}; // Watcher thread only.
+    // The public status file (external_status.h), written beside the relay's
+    // heartbeat while a session runs. Resolved with the relay root.
+    std::filesystem::path external_status_path_;
     // The app's last Rescan inputs request taken (Unix ms). Watcher thread only.
     std::uint64_t input_rescan_taken_at_{0};
     // The Frame Generation events PollFrameGenRecorder last saw (watcher

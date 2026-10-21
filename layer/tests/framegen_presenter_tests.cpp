@@ -1650,8 +1650,27 @@ void TestAutomaticMultiplier() {
             Check(XR_SUCCEEDED(app.End(state.predictedDisplayTime)), "auto: end");
         }
     };
+    // Its thresholds as frame rates (the public status file's): at full rate
+    // a step up below 80% of the refresh rate, no step down.
+    FrameGenStatus status = presenter.Status();
+    Check(status.grid_period_ns > 0, "auto: the grid is known");
+    double grid_hz = 1e9 / static_cast<double>(status.grid_period_ns);
+    Check(std::abs(status.auto_step_up_below_fps - grid_hz / 1.25) < 0.01 && status.auto_step_down_above_fps == 0.0,
+          "auto at full rate: steps up below " + std::to_string(status.auto_step_up_below_fps) + " fps");
     run(1500ms, 30ms);
     Check(presenter.Status().multiplier >= 3, "auto: a slow app steps up to 3x or more");
+    // Inline, a probe down needs only five steady seconds at the step; the
+    // last step has none above it.
+    status = presenter.Status();
+    grid_hz = 1e9 / static_cast<double>(status.grid_period_ns);
+    const double step = static_cast<double>(status.multiplier);
+    Check(std::abs(status.auto_step_up_below_fps - (status.multiplier < 4 ? grid_hz / (1.25 * step) : 0.0)) < 0.01 &&
+              std::abs(status.auto_step_down_above_fps - grid_hz / step) < 0.01,
+          "auto at " + std::to_string(status.multiplier) + "x: up below " +
+              std::to_string(status.auto_step_up_below_fps) + ", down from " +
+              std::to_string(status.auto_step_down_above_fps) + " fps");
+    Check(status.refreshes_per_real_frame >= 2.0, "auto: a 30 ms frame takes two refreshes or more (" +
+                                                      std::to_string(status.refreshes_per_real_frame) + ")");
     Check(app.Frame().predictedDisplayPeriod == presenter.Status().multiplier * kPeriod,
           "auto: the app's period follows the multiplier");
 

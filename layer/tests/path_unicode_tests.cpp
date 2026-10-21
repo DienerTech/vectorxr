@@ -3,6 +3,7 @@
 // never throws converting a path to text.
 #include "depthxr/config_parser.h"
 #include "depthxr/config_path.h"
+#include "depthxr/external_status.h"
 #include "depthxr/logger.h"
 #include "depthxr/process_info.h"
 #include "depthxr/runtime_pacing.h"
@@ -59,7 +60,7 @@ int main() {
     std::filesystem::create_directories(local_app_data);
     _wputenv_s(L"LOCALAPPDATA", local_app_data.c_str());
     for (const wchar_t* name : {L"VECTORXR_CONFIG_PATH", L"VECTORXR_SEEN_APPS_PATH", L"VECTORXR_LOG_PATH",
-                                L"VECTORXR_RUNTIME_PACING_PATH", L"VECTORXR_RUNTIME_RELAY_PATH",
+                                L"VECTORXR_RUNTIME_PACING_PATH", L"VECTORXR_RUNTIME_RELAY_PATH", L"VECTORXR_EXTERNAL_STATUS_PATH",
                                 L"VECTORXR_TURBO_METRICS_PATH"}) {
         _wputenv_s(name, L"");
     }
@@ -72,6 +73,7 @@ int main() {
     Expect(depthxr::ResolveRuntimePacingPath() == root / "config" / "runtime-pacing.json", "runtime-pacing path");
     Expect(depthxr::ResolveTurboMetricsPath() == root / "config" / "turbo-metrics.json", "turbo-metrics path");
     Expect(depthxr::ResolveRuntimeRelayRoot() == root / "runtime", "runtime relay folder");
+    Expect(depthxr::ResolveExternalStatusPath() == root / "api" / "status.json", "public status file");
 
     // Log text is UTF-8, as the app reads it; an unpaired surrogate (a valid
     // NTFS name) is replaced rather than thrown on.
@@ -140,6 +142,10 @@ int main() {
     Expect(depthxr::WriteRuntimeStatus(status_path, depthxr::RuntimeStatusDocument{}, &error),
            "runtime status: " + error);
     Expect(std::filesystem::exists(root / "runtime" / "status" / "1-2-3.json"), "runtime status file");
+    depthxr::ExternalStatusDocument external;
+    external.process_id = 1;
+    Expect(depthxr::WriteExternalStatus(depthxr::ResolveExternalStatusPath(), external, &error), "public status: " + error);
+    Expect(std::filesystem::exists(root / "api" / "status.json"), "public status file written");
 
     depthxr::TurboRecoveryRecord identity;
     identity.fingerprint = "test";

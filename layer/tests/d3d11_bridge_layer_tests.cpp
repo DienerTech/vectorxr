@@ -198,6 +198,13 @@ class D3D11BridgeLayerTestPeer {
     static std::string FrameGenStatusReason(const FrameGenStatus& status) {
         return OpenXrLayer::FrameGenStatusReason(status);
     }
+    // The relay status's rates and the public status file's block for `status`.
+    static RuntimeFrameGenRates FrameGenRates(const FrameGenStatus& status) {
+        return OpenXrLayer::FrameGenRates(status);
+    }
+    static ExternalFrameGenStatus ExternalFrameGen(const FrameGenStatus& status) {
+        return OpenXrLayer::ExternalFrameGen(status);
+    }
     // Frame Generation left a presenter thread behind (for the process).
     static bool FrameGenPresenterAbandoned() {
         return OpenXrLayer::Instance().framegen_.PresenterAbandoned();
@@ -2811,6 +2818,57 @@ bool TestBridgedSession(Game& game) {
     return true;
 }
 
+// The public status file (%LOCALAPPDATA%\VectorXR\api\status.json, here
+// the test's own): written on the relay's heartbeat while a session runs, as
+// this process's, with Frame Generation's block; removed at the session's
+// end, and with an instance destroyed with its session alive. (That a copy
+// leaves another process's file alone is the external status tests'.)
+void TestStatusFile(Game& game) {
+    BeginCase("status-file", game);
+    const std::filesystem::path path = g_root / "api" / "status.json";
+    std::error_code error;
+    std::filesystem::remove(path, error);
+    const auto text = [&] {
+        std::ifstream stream(path, std::ios::binary);
+        std::ostringstream buffer;
+        buffer << stream.rdbuf();
+        return buffer.str();
+    };
+    const auto eventually = [](const std::function<bool()>& done) {
+        const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!done()) {
+            if (std::chrono::steady_clock::now() > until) return false;
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        return true;
+    };
+    const std::string owner = "\"processId\": " + std::to_string(GetCurrentProcessId()) + ",";
+    App app = StartApp();
+    for (int session = 0; session < 2; ++session) {
+        SessionCreate create(game.device.Get(), app.system);
+        Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS, "xrCreateSession");
+        BeginSession(app);
+        Check(eventually([&] { return Contains(text(), owner); }), "the status file is written while a session runs");
+        const std::string written = text();
+        Check(Contains(written, "\"schema\": \"vectorxr.status\",\n  \"version\": 1,\n") &&
+                  Contains(written, "\"sessionId\": \"" + std::to_string(GetCurrentProcessId()) + "-") &&
+                  Contains(written, "\"framegen\": {\n") && Contains(written, "\"targetAppFps\": "),
+              "the status file names this session and carries Frame Generation's block: " + written);
+        if (session == 1) break;
+        Check(app.api.destroy_space(app.space) == XR_SUCCESS, "xrDestroySpace");
+        app.space = XR_NULL_HANDLE;
+        Check(app.api.destroy_session(app.session) == XR_SUCCESS, "xrDestroySession");
+        app.session = XR_NULL_HANDLE;
+        Check(eventually([&] { return !std::filesystem::exists(path); }), "the session's end removes its status file");
+    }
+    // The instance destroyed with its session alive: gone by the time
+    // xrDestroyInstance returns (the watcher is stopped first).
+    Check(app.api.destroy_instance(app.api.instance) == XR_SUCCESS, "xrDestroyInstance with the session alive");
+    Check(!std::filesystem::exists(path), "the instance's end removes the status file of its live session");
+    Check(Peer::Idle(), "nothing is left of the instance");
+    EndCase(game);
+}
+
 // 2d in a session of its own: the second thread is logged as an error, and
 // the protection stays on for the session.
 void TestReleaseOnAnotherThread(Game& game) {
@@ -5111,6 +5169,45 @@ void CheckFrameGenStatusLine() {
     status.reason = "paused";
     status.quad_declining = true;
     Check(Peer::FrameGenStatusReason(status) == "paused", "paused: the reason alone");
+
+    // The numbers say what the state says: composing at 2x, generating and
+    // held to 45 fps; declining meanwhile, standing by and not generating
+    // (the relay said generating with a 45 fps hold until the next game wait).
+    status = {};
+    status.state = depthxr::FrameGenState::kActive;
+    status.multiplier = 2;
+    status.refresh_period_ns = 11'111'111;
+    status.grid_period_ns = 11'111'111;
+    status.refreshes_per_real_frame = 2.02;
+    status.quad = true;
+    depthxr::RuntimeFrameGenRates rates = Peer::FrameGenRates(status);
+    Check(rates.generating && std::abs(rates.hold_fps - 45.0) < 0.01, "composing: generating, held to 45 fps");
+    depthxr::ExternalFrameGenStatus external = Peer::ExternalFrameGen(status);
+    Check(external.state == "active" && external.generating && external.frame_rate == "2x" &&
+              std::abs(external.target_app_fps - 45.0) < 0.01 && external.holding && !external.automatic,
+          "composing: the public block aims for 45 fps, held");
+    status.quad_declining = true;
+    rates = Peer::FrameGenRates(status);
+    Check(!rates.generating && rates.hold_fps == 0.0, "declining: not generating, nothing held");
+    external = Peer::ExternalFrameGen(status);
+    Check(external.state == "standby" && !external.generating && std::abs(external.target_app_fps - 90.0) < 0.01 &&
+              !external.holding,
+          "declining: the public block stands by, the game may run at the refresh rate");
+
+    // Auto at 2x: its step and thresholds. The runtime holding frames to
+    // every second refresh: the measured grid periods are said in refreshes.
+    status.quad_declining = false;
+    status.automatic = true;
+    status.auto_step_up_below_fps = 36.0;
+    status.auto_step_down_above_fps = 76.5;
+    external = Peer::ExternalFrameGen(status);
+    Check(external.frame_rate == "auto" && external.automatic && external.automatic->step == 2 &&
+              external.automatic->step_up_below_fps == 36.0 && external.automatic->step_down_above_fps == 76.5,
+          "Auto: its step and thresholds");
+    status.grid_period_ns = 22'222'222;
+    status.refreshes_per_real_frame = 1.0;
+    external = Peer::ExternalFrameGen(status);
+    Check(std::abs(external.refreshes_per_real_frame - 2.0) < 0.01, "grid periods said in refreshes");
 }
 
 // Everything the layer reads and writes on the host goes to the test's own directory.
@@ -5126,6 +5223,7 @@ void IsolateHost() {
     SetEnv("VECTORXR_LOG_PATH", (g_root / "logs" / "vectorxr.log").string());
     SetEnv("VECTORXR_SEEN_APPS_PATH", (g_root / "seen-apps.json").string());
     SetEnv("VECTORXR_RUNTIME_RELAY_PATH", (g_root / "runtime").string());
+    SetEnv("VECTORXR_EXTERNAL_STATUS_PATH", (g_root / "api" / "status.json").string());
     SetEnv("VECTORXR_RUNTIME_PACING_PATH", (g_root / "runtime-pacing.json").string());
     SetEnv("VECTORXR_TURBO_METRICS_PATH", (g_root / "turbo-metrics.json").string());
     SetEnv("XR_RUNTIME_JSON", (g_root / "no-runtime.json").string());
@@ -5204,6 +5302,7 @@ int main(int argc, char** argv) {
         TestRefusedD3D12Session(game);
         TestInstanceExtensions(game);
         TestDestroyInstanceWithSession(game);
+        TestStatusFile(game);
         TestReleaseOnAnotherThread(game);
         TestBridgedQuadViewsComposed(game, false);
         TestBridgedQuadViewsComposed(game, true);

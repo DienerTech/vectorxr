@@ -2875,6 +2875,7 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
     d3d11_bridge_.SessionCreated();
     vulkan_bridge_.SessionCreated();
     if (runtime_relay_root_.empty()) runtime_relay_root_ = ResolveRuntimeRelayRoot();
+    if (external_status_path_.empty()) external_status_path_ = ResolveExternalStatusPath();
     runtime_relay_session_id_ = std::to_string(GetCurrentProcessId()) + "-" +
         std::to_string(RuntimeRelayUnixMilliseconds()) + "-" +
         std::to_string(++runtime_relay_session_sequence_);
@@ -11147,10 +11148,12 @@ void OpenXrLayer::StopConfigWatcher() {
     // so remove this process's relay files here as well. Crashes can still
     // leave files behind; the app rejects them once their heartbeat is stale.
     std::filesystem::path relay_root;
+    std::filesystem::path external_status_path;
     std::vector<std::string> relay_session_ids;
     {
         std::scoped_lock lock(mutex_);
         relay_root = runtime_relay_root_;
+        external_status_path = external_status_path_;
         relay_session_ids.swap(runtime_relay_sessions_to_remove_);
         if (!runtime_relay_session_id_.empty()) {
             relay_session_ids.push_back(std::move(runtime_relay_session_id_));
@@ -11166,6 +11169,11 @@ void OpenXrLayer::StopConfigWatcher() {
         std::filesystem::remove(RuntimeStatusPath(relay_root, relay_session_id), ec);
         ec.clear();
         std::filesystem::remove(RuntimeControlPath(relay_root, relay_session_id), ec);
+    }
+    // The public status file only while it is still this process's: by now
+    // another game may have written its own.
+    if (!relay_session_ids.empty() && !external_status_path.empty()) {
+        RemoveExternalStatusIfOwned(external_status_path, GetCurrentProcessId());
     }
 }
 
@@ -16607,10 +16615,12 @@ std::string OpenXrLayer::FrameGenStatusReason(const FrameGenStatus& framegen) {
 void OpenXrLayer::PollRuntimeRelay() {
     std::vector<std::string> sessions_to_remove;
     std::filesystem::path root;
+    std::filesystem::path external_status_path;
     std::string session_id;
     {
         std::scoped_lock lock(mutex_);
         root = runtime_relay_root_;
+        external_status_path = external_status_path_;
         session_id = runtime_relay_session_id_;
         sessions_to_remove.swap(runtime_relay_sessions_to_remove_);
     }
@@ -16621,6 +16631,12 @@ void OpenXrLayer::PollRuntimeRelay() {
         ec.clear();
         std::filesystem::remove(RuntimeControlPath(root, stale_session_id), ec);
         ec.clear();
+    }
+    // A session ended: the public status file goes with it, unless another
+    // game has written its own since. A session that started meanwhile
+    // writes it again below.
+    if (!sessions_to_remove.empty() && !external_status_path.empty()) {
+        RemoveExternalStatusIfOwned(external_status_path, GetCurrentProcessId());
     }
     if (!root.empty() && !runtime_relay_pruned_) {
         // Once per process: files of earlier sessions that ended by a crash,
@@ -16684,6 +16700,7 @@ void OpenXrLayer::PollRuntimeRelay() {
 
     osd_.ReportDiagnostics();
     RuntimeStatusDocument status;
+    ExternalStatusDocument external;
     {
         std::scoped_lock lock(mutex_);
         if (runtime_relay_session_id_ != session_id || active_session_ == XR_NULL_HANDLE) return;
@@ -16716,25 +16733,18 @@ void OpenXrLayer::PollRuntimeRelay() {
         status.framegen_depth = framegen.depth == FrameGenDepthState::kUnknown ? "" : ToString(framegen.depth);
         if (framegen_session_enabled_) {
             // The same rates as framegen_reason, as numbers (MSFS_AutoFPS, issue 103).
-            RuntimeFrameGenRates rates;
-            rates.mode = framegen.mode == FrameGenSynthesisMode::kExtrapolate ? "extrapolate" : "interpolate";
-            rates.frame_rate = framegen.dynamic ? "dynamic" : framegen.automatic ? "auto" :
-                std::to_string(framegen.multiplier) + "x";
-            rates.generating = framegen.state == FrameGenState::kActive && !framegen.standby && !framegen.full_rate;
-            rates.multiplier = framegen.multiplier;
-            if (framegen.refresh_period_ns > 0) rates.refresh_hz = 1e9 / static_cast<double>(framegen.refresh_period_ns);
-            if (rates.generating && !framegen.dynamic && framegen.multiplier >= 2)
-                rates.hold_fps = rates.refresh_hz / framegen.multiplier;
-            rates.app_fps = framegen.app_fps;
-            rates.output_fps = framegen.output_fps;
-            rates.distinct_fps = framegen.distinct_fps;
-            status.framegen_rates = rates;
+            status.framegen_rates = FrameGenRates(framegen);
+            external.framegen = ExternalFrameGen(framegen);
         }
         if (status.turbo_reason.empty() && turbo_auto_suspended_.load())
             status.turbo_reason = "Runtime pacing repeatedly stalled. Use the Turbo toggle to retry.";
 
         status.updated_at_unix_milliseconds = RuntimeRelayUnixMilliseconds();
         status.acknowledged_revision = runtime_relay_acknowledged_revision_;
+        external.process_id = status.process_id;
+        external.application = status.application;
+        external.session_id = status.session_id;
+        external.updated_at_unix_milliseconds = status.updated_at_unix_milliseconds;
         status.quadviews_diagnostic_visualization_available = QuadViewsDiagnosticVisualizationAvailable();
         status.quadviews_diagnostic_visualization_enabled = quadviews_diagnostic_visualization_enabled_;
     }
@@ -16746,5 +16756,56 @@ void OpenXrLayer::PollRuntimeRelay() {
     } else {
         runtime_relay_status_dirty_.store(true, std::memory_order_release);
     }
+    // The public file on the same heartbeat; a failed write is retried at the next.
+    if (!external_status_path.empty()) {
+        WriteExternalStatus(external_status_path, external);
+    }
+}
+
+RuntimeFrameGenRates OpenXrLayer::FrameGenRates(const FrameGenStatus& framegen) {
+    RuntimeFrameGenRates rates;
+    rates.mode = framegen.mode == FrameGenSynthesisMode::kExtrapolate ? "extrapolate" : "interpolate";
+    rates.frame_rate = framegen.dynamic ? "dynamic" : framegen.automatic ? "auto" :
+        std::to_string(framegen.multiplier) + "x";
+    // As the app's state says it: not while composed quad views frames could
+    // not be written for a while either (standing by meanwhile).
+    rates.generating = DescribeFrameGen(framegen, true).state == "active";
+    rates.multiplier = framegen.multiplier;
+    if (framegen.refresh_period_ns > 0) rates.refresh_hz = 1e9 / static_cast<double>(framegen.refresh_period_ns);
+    if (rates.generating && !framegen.dynamic && framegen.multiplier >= 2)
+        rates.hold_fps = rates.refresh_hz / framegen.multiplier;
+    rates.app_fps = framegen.app_fps;
+    rates.output_fps = framegen.output_fps;
+    rates.distinct_fps = framegen.distinct_fps;
+    return rates;
+}
+
+ExternalFrameGenStatus OpenXrLayer::ExternalFrameGen(const FrameGenStatus& framegen) {
+    const RuntimeFrameGenRates rates = FrameGenRates(framegen);
+    ExternalFrameGenStatus external;
+    external.state = DescribeFrameGen(framegen, true).state;
+    external.mode = rates.mode;
+    external.frame_rate = rates.frame_rate;
+    external.generating = rates.generating;
+    external.multiplier = rates.multiplier;
+    external.refresh_hz = rates.refresh_hz;
+    external.app_fps = rates.app_fps;
+    external.output_fps = rates.output_fps;
+    external.distinct_fps = rates.distinct_fps;
+    // Measured on the grid the game's frames are timed by (twice the refresh
+    // period while the runtime halves the rate); said in headset refreshes.
+    if (framegen.refresh_period_ns > 0 && framegen.grid_period_ns > 0) {
+        external.refreshes_per_real_frame = framegen.refreshes_per_real_frame *
+            static_cast<double>(framegen.grid_period_ns) / static_cast<double>(framegen.refresh_period_ns);
+    }
+    ExternalFrameGenTarget(&external);
+    if (framegen.automatic) {
+        ExternalAutoStep step;
+        step.step = framegen.multiplier;
+        step.step_up_below_fps = framegen.auto_step_up_below_fps;
+        step.step_down_above_fps = framegen.auto_step_down_above_fps;
+        external.automatic = step;
+    }
+    return external;
 }
 } // namespace depthxr

@@ -4294,6 +4294,7 @@ void IsolateHost() {
     SetEnv("VECTORXR_LOG_PATH", (g_root / "logs" / "vectorxr.log").string());
     SetEnv("VECTORXR_SEEN_APPS_PATH", (g_root / "seen-apps.json").string());
     SetEnv("VECTORXR_RUNTIME_RELAY_PATH", (g_root / "runtime").string());
+    SetEnv("VECTORXR_EXTERNAL_STATUS_PATH", (g_root / "api" / "status.json").string());
     SetEnv("VECTORXR_RUNTIME_PACING_PATH", (g_root / "runtime-pacing.json").string());
     SetEnv("VECTORXR_TURBO_METRICS_PATH", (g_root / "turbo-metrics.json").string());
     SetEnv("XR_RUNTIME_JSON", (g_root / "no-runtime.json").string());
