@@ -1,1 +1,237 @@
-{}
+{
+  "title": "Frame Generation",
+  "experimental": "Experimental",
+  "intro": "Adds generated frames between the game's frames, so motion stays smooth at your headset's full refresh rate even when the game can't keep up. Try it per game and compare with the A/B toggle.",
+  "howItWorksTitle": "How Frame Generation Works",
+  "restartNote": "Turning Frame Generation on takes effect the next time the game starts; turning it off applies at once.",
+  "restartToApply": {
+    "label": "Restart to apply:",
+    "body": "{label} turning Frame Generation on for a game takes effect the next time the game starts. Turning it off, and every other setting on this page, applies during play."
+  },
+  "setupGuide": {
+    "title": "Setup guide",
+    "summary": "Turn it on for one game, then compare in the headset",
+    "smoothing": {
+      "label": "Turn off runtime smoothing",
+      "body": "{label} for the game, in the runtime and in the headset's own software: SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW or Meta ASW. They fight Frame Generation's pacing."
+    },
+    "refreshRate": {
+      "label": "Keep the headset at its full refresh rate.",
+      "body": "{label} Don't halve the frame rate with Pimax Play's Lock Frame Rate to Half Refresh Rate or a frame limit in SteamVR's Throttling Behavior; Frame Generation sets the game's rate itself."
+    },
+    "halfRate": {
+      "label": "Get the game to half the refresh rate first.",
+      "body": "{label} With Frame Generation off, lower the game's settings or the render resolution until it holds at least half the headset's rate (45 fps at 90 Hz). Frame Generation can take it from half to full, but it can't do the first half."
+    },
+    "oneGame": {
+      "label": "Turn it on for one game:",
+      "body": "{label} leave the Default Profile off, add a custom profile below and assign the game. The default settings suit most games."
+    },
+    "restart": {
+      "label": "Save and restart the game.",
+      "body": "{label} Turning Frame Generation on takes effect at the next launch."
+    },
+    "check": {
+      "label": "Check it in the headset:",
+      "osd": "On-Screen Display",
+      "body": "{label} the {osd} shows FG ON next to its FPS, or pick the Generated-frame tint diagnostic view (and set it back to Off afterwards)."
+    },
+    "compare": {
+      "label": "Compare:",
+      "body": "{label} assign the A/B toggle and switch generated frames off and on in the same scene."
+    },
+    "turboNote": "Turbo stays off in games where Frame Generation runs."
+  },
+  "controls": {
+    "heading": "In-headset controls",
+    "statusUnavailable": "Runtime status is temporarily unavailable.",
+    "noSession": "No VR application running"
+  },
+  "session": {
+    "withReason": "{status} · {reason}",
+    "withReasonColon": "{status}: {reason}",
+    "active": "On",
+    "standby": "Standby",
+    "waiting": "Starting · waiting for steady frames",
+    "paused": "Paused",
+    "unavailable": "Unavailable",
+    "off": "Off",
+    "needsLayer": "Needs the updated VectorXR layer",
+    "unknown": "Status unavailable"
+  },
+  "gameDepth": {
+    "inUse": {
+      "label": "Using game depth",
+      "title": "The game shares its depth, so near objects stay steady as you move your head."
+    },
+    "empty": {
+      "label": "Game depth is empty",
+      "title": "The game sends depth without filling it. If the game has a depth-based reprojection option, turning it on lets Frame Generation use it."
+    },
+    "unusable": {
+      "label": "Game depth not used",
+      "title": "The depth the game sends does not line up between the eyes, so Frame Generation works without it."
+    }
+  },
+  "toggle": {
+    "heading": "A/B toggle",
+    "hint": "Optional. Switches generated frames off and on in games that started with Frame Generation on.",
+    "label": "Frame Generation A/B Toggle",
+    "description": "Switches generated frames off and on in the headset, to compare motion in the same scene. Works in games that started with Frame Generation on.",
+    "noneText": "No binding assigned. Frame Generation runs wherever it is on when the game starts."
+  },
+  "diagnostic": {
+    "heading": "Diagnostic view",
+    "hint": "{description} Applies to every game and updates during play.",
+    "onWarning": "On: generated frames in the headset are drawn with this view's colors, which look like glitches in normal play. Set it to Off when you are done.",
+    "views": {
+      "off": {
+        "label": "Off",
+        "description": "Generated frames are shown as they are."
+      },
+      "flow": {
+        "label": "Motion flow",
+        "description": "Color-codes the motion Frame Generation measured on generated frames."
+      },
+      "confidence": {
+        "label": "Confidence",
+        "description": "Paints generated frames red where they fell back to the real image; useful while tuning the Advanced settings."
+      },
+      "tint": {
+        "label": "Generated-frame tint",
+        "description": "Tints generated frames faintly, so you can see they are shown."
+      }
+    }
+  },
+  "defaultProfile": {
+    "heading": "Default Profile",
+    "appliesTo": "Applies to games without an enabled custom profile",
+    "toggleOn": "Default Profile On",
+    "toggleOff": "Default Profile Off",
+    "offNote": "Off for games without a custom profile. Custom profiles below still turn it on for their games.",
+    "onWarning": {
+      "label": "On for every game without a custom profile,",
+      "body": "{label} including ones you haven't tried it with. The safer setup is to leave this off and add a profile for each game you've checked."
+    }
+  },
+  "customProfiles": {
+    "heading": "Custom Profiles",
+    "description": "Turn Frame Generation on per game. The first enabled matching profile wins.",
+    "add": "Add Profile",
+    "empty": "No custom profiles yet. Add a profile to turn Frame Generation on for a game.",
+    "duplicateApplication": "{application} is already targeted by Profile {profile}. The first active profile wins."
+  },
+  "summary": {
+    "format": "{mode} · {rate} · {motion}",
+    "dynamic": "Dynamic",
+    "fixedAuto": "Fixed Auto",
+    "fixed": "Fixed {multiplier}"
+  },
+  "howItWorks": {
+    "whatItDoes": {
+      "heading": "What it does",
+      "body": "Frame Generation measures how the image moves between the game's frames and creates new frames from that motion, so the headset gets a fresh image every refresh even when the game renders fewer. Your head rotation is taken out first, because the headset's own reprojection already handles it."
+    },
+    "mode": {
+      "heading": "Mode",
+      "interpolate": "{name} (default) blends between the last two game frames. It looks smoothest and has the fewest artifacts, but shows each game frame a little later.",
+      "extrapolate": "{name} projects the newest game frame forward along its motion, so it adds no latency. Fast motion and newly revealed areas show more artifacts; it looks best with NVIDIA hardware as the motion source."
+    },
+    "frameRate": {
+      "heading": "Frame rate",
+      "dynamic": "{name} (default) lets the game run as fast as it can and fills the refreshes between its frames with generated ones. When the game keeps up on its own, Frame Generation stands by and generates nothing.",
+      "fixed": "{name} holds the game at a set fraction of the refresh rate for even pacing. On a 90 Hz headset, {x2} runs the game at 45 fps, {x3} at 30 fps and {x4} at 22.5 fps; {auto} picks among them as the game needs. Each generated frame moves the image further, so higher rates show more artifacts."
+    },
+    "beforeYouStart": {
+      "heading": "Before you start",
+      "smoothing": "{label} for the game, in the runtime and in the headset's own software (SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW, Meta ASW), and keep the headset at its full refresh rate: don't halve the frame rate with Pimax Play's Lock Frame Rate to Half Refresh Rate or a frame limit in SteamVR's Throttling Behavior. Frame Generation sets the game's rate itself.",
+      "turbo": {
+        "label": "Turbo stays off while Frame Generation runs.",
+        "body": "{label} The two pace frames in opposite ways, so Turbo yields in those games and reads Paused for Frame Generation. Your Turbo profiles are not changed."
+      },
+      "apis": "Works with Direct3D 11, Direct3D 12 and Vulkan games, including with Quadviews."
+    },
+    "knownLimits": {
+      "heading": "Known limits",
+      "body": "Motion is measured from the images the game shows, so text, HUDs, transparency and repeating patterns can shimmer or warp on generated frames. If it is distracting, raise Artifact suppression or lower Motion limit under Advanced."
+    }
+  },
+  "settings": {
+    "mode": {
+      "legend": "Mode",
+      "interpolate": {
+        "label": "Interpolate",
+        "description": "Blends between the last two game frames. The smoothest image with the fewest artifacts; adds a little latency."
+      },
+      "extrapolate": {
+        "label": "Extrapolate",
+        "description": "Projects the newest game frame forward. The lowest latency, with more artifacts at moving edges; works best with NVIDIA hardware."
+      }
+    },
+    "frameRate": {
+      "legend": "Frame rate",
+      "dynamic": {
+        "label": "Dynamic",
+        "description": "The game runs as fast as it can, and generated frames fill in up to your headset's refresh rate."
+      },
+      "fixed": {
+        "label": "Fixed",
+        "description": "Holds the game at a set fraction of the refresh rate for even pacing, and fills the rest with generated frames."
+      },
+      "fixedRate": "Fixed rate",
+      "rates": {
+        "auto": "Picks 2x, 3x or 4x as the game needs, and generates nothing while the game keeps up on its own.",
+        "x2": "The game runs at up to 1/2 the refresh rate, such as 45 fps at 90 Hz. Below that, pacing is less even.",
+        "x3": "The game runs at up to 1/3 the refresh rate, such as 30 fps at 90 Hz. Below that, pacing is less even.",
+        "x4": "The game runs at up to 1/4 the refresh rate, such as 22.5 fps at 90 Hz. The most artifacts; for the heaviest games."
+      }
+    },
+    "motionSource": {
+      "legend": "Motion source",
+      "shader": {
+        "label": "Shader",
+        "description": "Measures motion on the GPU's shader cores. Works on any GPU, and pairs best with Interpolate."
+      },
+      "hardware": {
+        "label": "NVIDIA hardware",
+        "description": "Uses the optical flow unit of NVIDIA RTX GPUs: more accurate, especially on repeating patterns. Used by Extrapolate, and by Interpolate at a fixed or Auto frame rate (experimental)."
+      }
+    },
+    "advanced": {
+      "summary": "{flow} · Suppression {suppression} · Motion limit {motionLimit}%",
+      "summaryHeadPrediction": "{flow} · Suppression {suppression} · Motion limit {motionLimit}% · Head prediction",
+      "reset": "Reset advanced settings"
+    },
+    "flowQuality": {
+      "heading": "Flow quality",
+      "resolution": "{resolution} of the eye image",
+      "description": "How finely motion is measured. Higher tracks small, thin objects better and costs more GPU time.",
+      "levels": {
+        "performance": "Performance",
+        "balanced": "Balanced",
+        "quality": "Quality"
+      },
+      "summary": {
+        "performance": "Performance flow",
+        "balanced": "Balanced flow",
+        "quality": "Quality flow"
+      }
+    },
+    "artifactSuppression": {
+      "heading": "Artifact suppression",
+      "valueLabel": "Artifact suppression value",
+      "smoother": "Smoother motion",
+      "fewer": "Fewer artifacts",
+      "description": "Where motion is uncertain, higher values show the real image sooner: less warping, a little more judder."
+    },
+    "motionLimit": {
+      "heading": "Motion limit",
+      "valueLabel": "Motion limit value in percent of view width",
+      "description": "The farthest a generated frame may move the image, as a share of view width. Faster motion shows the real image."
+    },
+    "headPrediction": {
+      "heading": "Extend head prediction",
+      "description": "Frame Generation has the game render up to ~150 ms ahead, and some runtimes, such as Pimax's, predict your head only ~20 ms of that. This carries your head's turn over the rest, for less black at the edge you turn toward. Turn it on before starting the game."
+    }
+  }
+}

@@ -1,1 +1,57 @@
-{}
+{
+  "applications": {
+    "eyebrow": "Registry",
+    "title": "Application Registry",
+    "intro": "Register the applications that module profiles can target by executable name. The chips on each card show how every module currently treats that application — click one to jump to its profile, or to create one.",
+    "add": "Add Application",
+    "unnamed": "Unnamed application",
+    "editName": "Edit application name",
+    "executable": "Executable",
+    "executableHelp": "Executable matching is case-insensitive, but the name must include the application extension. For example: DCS.exe",
+    "empty": "No applications registered yet. Add one before creating module profiles.",
+    "chip": {
+      "defaultOff": "{module} · Default off",
+      "defaultOffTitle": "The default {module} profile is off. Click to create a custom profile for this application.",
+      "custom": "{module} · {profile}",
+      "customTitle": "Custom {module} profile \"{profile}\" applies. Click to open it.",
+      "default": "{module} · Default",
+      "defaultTitle": "The default {module} profile applies. Click to create a custom profile for this application."
+    }
+  },
+  "discovery": {
+    "eyebrow": "Discovery",
+    "trackingOnTitle": "Discovery is tracking the OpenXR apps you launch.",
+    "trackingOffTitle": "Discovery is off. New OpenXR app launches will not be recorded until you enable tracking in Settings.",
+    "trackingOn": "Tracking on",
+    "trackingOff": "Tracking off",
+    "title": "Where new apps come from",
+    "intro": "VectorXR notes the OpenXR apps you launch so you can easily register them in one click. Nothing here changes your settings until you register it. Tracking is controlled in Settings.",
+    "clear": "Clear Seen Apps",
+    "loading": "Loading seen apps...",
+    "launches_one": "{count} launch",
+    "launches_other": "{count} launches",
+    "details": "Details",
+    "register": "Register",
+    "allRegistered": "Every discovered app is registered. New apps you launch will appear here.",
+    "allRegisteredTrackingOff": "Every discovered app is registered. Tracking is off, so no new apps will appear here.",
+    "alreadyRegistered": "Already registered",
+    "registeredAs": "Registered as {name}",
+    "empty": "No XR apps seen yet. Launch an OpenXR app while VectorXR is active, then refresh this list.",
+    "emptyTrackingOff": "Application tracking is disabled, so no new apps will appear here. Enable tracking in Settings to record OpenXR app launches."
+  },
+  "seenDetails": {
+    "eyebrow": "Discovered App",
+    "registeredAs": "Registered as",
+    "unregistered": "Unregistered",
+    "launches": "Launches",
+    "firstSeen": "First seen",
+    "lastSeen": "Last seen"
+  },
+  "exclusions": {
+    "title": "Enabled custom profiles take priority for: {apps}",
+    "label": "Does not apply to:"
+  },
+  "picker": {
+    "empty": "No applications are registered. Add one from Application Registry before this profile can activate."
+  }
+}

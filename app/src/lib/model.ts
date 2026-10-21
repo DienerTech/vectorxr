@@ -5,31 +5,47 @@ export type PivotResponseMode = 'continuous' | 'stepped'
 export type PivotStepGlideMode = 'instant' | 'glide'
 export type PivotProfileBehavior = 'enhancedMotion' | 'snapViews'
 export type QuadViewsTrackingMode = 'head' | 'eye'
+import { formatList, t } from '../i18n/index.ts'
+import { en } from '../i18n/locales/en/index.ts'
+
 export type AppTab = 'osd' | 'home' | 'core' | 'registry' | 'layers' | 'about' | 'depthxr' | 'pivotxr' | 'quadviews' | 'turbo' | 'framegen'
+// Option values are key names saved in chords; labels are read when shown, so
+// a change of language applies.
 export const keyboardBindingKeyGroups = [
   {
-    label: 'Function Keys',
+    get label() { return t('model.keyGroups.function') },
     options: Array.from({ length: 12 }, (_, index) => `F${index + 1}`),
   },
   {
-    label: 'Letter Keys',
+    get label() { return t('model.keyGroups.letter') },
     options: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split(''),
   },
   {
-    label: 'Number Keys',
+    get label() { return t('model.keyGroups.number') },
     options: '0123456789'.split(''),
   },
   {
-    label: 'Numpad Keys',
+    get label() { return t('model.keyGroups.numpad') },
     options: Array.from({ length: 10 }, (_, index) => `Numpad${index}`),
   },
   {
-    label: 'Special Keys',
-    options: ['Space'],
+    get label() { return t('model.keyGroups.special') },
+    options: ['Space'], // i18n-ignore
   },
 ] as const
 
-export const keyboardModifierKeys = ['Ctrl', 'Alt', 'Shift'] as const
+export const keyboardModifierKeys = ['Ctrl', 'Alt', 'Shift'] as const // i18n-ignore
+
+// How a key name saved in a chord (Ctrl, Numpad5, F8, A) is shown.
+export function keyboardKeyLabel(key: string): string {
+  if (key === 'Ctrl') return t('model.keys.ctrl')
+  if (key === 'Alt') return t('model.keys.alt')
+  if (key === 'Shift') return t('model.keys.shift')
+  if (key === 'Space') return t('model.keys.space')
+  const numpad = /^Numpad([0-9])$/.exec(key)
+  if (numpad) return t('model.keys.numpad', { digit: numpad[1] })
+  return key
+}
 
 // Optional audible feedback played when a binding's action activates or
 // deactivates. An empty sound path means "use the bundled default WAV".
@@ -182,8 +198,8 @@ export function defaultOsdSettings(): OsdSettings {
     compactShowPerformance: false,
     compactShowBrand: true, compactShowApp: true, compactMetrics: 'all',
     clockFormat: '24', bodyOrder: [...osdBodyRows], accent: 'teal', customColor: '#51ddbd', customPresets: [],
-    toggleBindings: [{ type: 'keyboard', chord: ['Ctrl', 'Alt', 'F10'] }],
-    cycleBindings: [{ type: 'keyboard', chord: ['Ctrl', 'Alt', 'F11'] }] }
+    toggleBindings: [{ type: 'keyboard', chord: ['Ctrl', 'Alt', 'F10'] }], // i18n-ignore
+    cycleBindings: [{ type: 'keyboard', chord: ['Ctrl', 'Alt', 'F11'] }] } // i18n-ignore
 }
 
 // The rows 0.19.0-0.19.2 layers know. They reject a config whose bodyOrder
@@ -422,7 +438,7 @@ export function pivotSnapStackingStatus(config: VectorXRConfig, target: 'default
   if (target === 'default') {
     return {
       available: false,
-      message: 'Not available on the Default profile, which is either Enhanced Motion or Snap Views. Use a custom Enhanced Motion profile together with a custom Snap Views profile for the same application.',
+      message: t('model.snapViews.defaultProfileUnavailable'),
     }
   }
   const profiles = config.modules.pivotxr.profiles
@@ -433,7 +449,7 @@ export function pivotSnapStackingStatus(config: VectorXRConfig, target: 'default
     candidate.applicationIds.some((applicationId) => profile.applicationIds.includes(applicationId)))
   return {
     available: true,
-    message: hasSnapPartner ? '' : 'No enabled Snap Views profile targets this profile’s applications yet.',
+    message: hasSnapPartner ? '' : t('model.snapViews.noSnapPartner'),
   }
 }
 
@@ -453,9 +469,9 @@ export function pivotSnapViewMotionNote(config: VectorXRConfig, target: 'default
       candidate.applicationIds.some((applicationId) => profile.applicationIds.includes(applicationId)))
     : []
   if (sources.length === 0) {
-    return 'An Enhanced Motion profile for the same application can keep working in these Snap Views when it turns on Apply Enhanced Motion to Snap Views.'
+    return t('model.snapViews.motionNoteNone')
   }
-  return `Enhanced Motion from ${sources.map((source) => source.name).join(', ')} keeps working in these Snap Views.`
+  return t('model.snapViews.motionNoteSources', { profiles: formatList(sources.map((source) => source.name)) })
 }
 
 export interface PivotXRSettings {
@@ -1009,7 +1025,7 @@ export function newPivotNudgeSetId(): string {
   return `pivot-nudges-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
 }
 
-export function createPivotNudgeSet(name = 'Standard Nudges', settings = defaultPivotNudgeSettings(), allowWhileInactive = false): PivotNudgeSet {
+export function createPivotNudgeSet(name = t('model.defaults.standardNudges'), settings = defaultPivotNudgeSettings(), allowWhileInactive = false): PivotNudgeSet {
   return {
     id: newPivotNudgeSetId(),
     name,
@@ -1022,7 +1038,7 @@ export function newPivotQuickViewId(): string {
   return `pivot-view-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
 }
 
-export function createPivotQuickView(name = 'New Quick View'): PivotQuickView {
+export function createPivotQuickView(name = t('model.defaults.newQuickView')): PivotQuickView {
   return {
     id: newPivotQuickViewId(),
     name,
@@ -1088,7 +1104,7 @@ export function defaultDeviceBinding(): DeviceBinding {
     inputPath: 'button-1',
     productGuid: '',
     deviceName: '',
-    inputLabel: 'Button 1',
+    inputLabel: t('model.defaults.deviceButton', { number: 1 }),
   }
 }
 
@@ -1109,7 +1125,7 @@ export function defaultConfig(): VectorXRConfig {
         defaults: defaultPivotXRSettings(),
         behavior: 'enhancedMotion',
         nudgeSetId: 'pivot-nudges-standard',
-        nudgeSets: [{ id: 'pivot-nudges-standard', name: 'Standard Nudges', allowWhileInactive: false, settings: defaultPivotNudgeSettings() }],
+        nudgeSets: [{ id: 'pivot-nudges-standard', name: t('model.defaults.standardNudges'), allowWhileInactive: false, settings: defaultPivotNudgeSettings() }],
         alwaysActive: false,
         activationBindings: [],
         setOriginBindings: [],
@@ -1139,10 +1155,20 @@ export function defaultConfig(): VectorXRConfig {
   }
 }
 
+export function defaultProfileName(): string {
+  return t('model.defaults.newProfile')
+}
+
+// Whether a profile still has the name it was created with, in English or in
+// the language shown now, so picking an application can rename it.
+export function isDefaultProfileName(name: string): boolean {
+  return name === en.model.defaults.newProfile || name === defaultProfileName()
+}
+
 export function sanitizeProfileName(exe: string): string {
   const trimmed = exe.trim()
   if (!trimmed) {
-    return 'New Profile'
+    return defaultProfileName()
   }
 
   const basename = trimmed.split(/[/\\]/).pop() ?? trimmed
@@ -1156,7 +1182,7 @@ export function sanitizeProfileName(exe: string): string {
 
 export function createProfile(defaultSettings: DepthXRSettings, applicationIds: string[] = []): DepthXRProfileConfig {
   return {
-    name: 'New Profile',
+    name: defaultProfileName(),
     enabled: true,
     applicationIds,
     settings: { ...defaultSettings },
@@ -1178,7 +1204,7 @@ export function createPivotProfile(
 ): PivotXRProfileConfig {
   return {
     id: newPivotProfileId(),
-    name: 'New Profile',
+    name: defaultProfileName(),
     enabled: true,
     applicationIds,
     behavior,
@@ -1194,7 +1220,7 @@ export function createPivotProfile(
 
 export function createQuadViewsProfile(defaultSettings: QuadViewsSettings, applicationIds: string[] = []): QuadViewsProfileConfig {
   return {
-    name: 'New Profile',
+    name: defaultProfileName(),
     enabled: true,
     applicationIds,
     settings: { ...defaultSettings },
@@ -1203,7 +1229,7 @@ export function createQuadViewsProfile(defaultSettings: QuadViewsSettings, appli
 
 export function createFrameGenProfile(defaultSettings: FrameGenSettings, applicationIds: string[] = []): FrameGenProfileConfig {
   return {
-    name: 'New Profile',
+    name: defaultProfileName(),
     enabled: true,
     applicationIds,
     settings: { ...defaultSettings },
@@ -1219,7 +1245,7 @@ export function createTurboProfile(applicationIds: string[] = []): TurboProfileC
     disableSafety: false,
     experimental: defaultTurboExperimental(),
     id: newTurboProfileId(),
-    name: 'New Profile',
+    name: defaultProfileName(),
     enabled: true,
     applicationIds,
   }
@@ -1372,7 +1398,7 @@ function normalizePivotViewControls(value: unknown, fallback: PivotViewControls)
   const quickViews = Array.isArray(source.quickViews) ? source.quickViews : fallback.quickViews
   return {
     nudges: normalizePivotNudgeSettings(source.nudges, fallback.nudges),
-    quickViews: quickViews.map((quickView, index) => normalizePivotQuickView(quickView, `Quick View ${index + 1}`)),
+    quickViews: quickViews.map((quickView, index) => normalizePivotQuickView(quickView, t('model.defaults.quickViewNumbered', { number: index + 1 }))),
   }
 }
 
@@ -1425,11 +1451,11 @@ export function normalizeKeyboardKey(value: unknown, fallback: string): string {
   }
 
   if (/^numpad[0-9]$/i.test(trimmed)) {
-    return `Numpad${trimmed.slice(-1)}`
+    return `Numpad${trimmed.slice(-1)}` // i18n-ignore
   }
 
   if (/^(ctrl|control)$/i.test(trimmed)) {
-    return 'Ctrl'
+    return 'Ctrl' // i18n-ignore
   }
 
   if (/^alt$/i.test(trimmed)) {
@@ -1437,11 +1463,11 @@ export function normalizeKeyboardKey(value: unknown, fallback: string): string {
   }
 
   if (/^shift$/i.test(trimmed)) {
-    return 'Shift'
+    return 'Shift' // i18n-ignore
   }
 
   if (/^space$/i.test(trimmed)) {
-    return 'Space'
+    return 'Space' // i18n-ignore
   }
 
   return fallback
@@ -1617,24 +1643,23 @@ export function bindingsMatchRuntimeActivation(left: InputBinding, right: InputB
 
 export function bindingLabel(binding: InputBinding): string {
   if (binding.type === 'device') {
-    const device = binding.deviceName?.trim() || binding.deviceGuid.trim() || 'Unassigned device'
-    const input = binding.inputLabel?.trim() || binding.inputPath.trim() || 'unassigned input'
-    return `${device} / ${input}`
+    const device = binding.deviceName?.trim() || binding.deviceGuid.trim() || t('model.binding.unassignedDevice')
+    const input = binding.inputLabel?.trim() || binding.inputPath.trim() || t('model.binding.unassignedInput')
+    return t('model.binding.device', { device, input })
   }
 
   if (binding.type === 'none') {
-    return 'None'
+    return t('model.binding.none')
   }
 
-  return binding.chord.join('+')
+  return binding.chord.map(keyboardKeyLabel).join('+')
 }
 
 export function bindingListLabel(bindings: InputBinding[]): string {
-  if (bindings.length === 0) return 'None'
-  if (bindings.length <= 2) return bindings.map(bindingLabel).join(' or ')
+  if (bindings.length === 0) return t('model.binding.none')
+  if (bindings.length <= 2) return formatList(bindings.map(bindingLabel), 'disjunction')
 
-  const remaining = bindings.length - 1
-  return `${bindingLabel(bindings[0])} or ${remaining} other${remaining === 1 ? '' : 's'}`
+  return t('model.binding.listMore', { first: bindingLabel(bindings[0]), count: bindings.length - 1 })
 }
 
 export interface PivotBindingWarning {
@@ -1657,7 +1682,7 @@ function pushBindingAssignments(
   bindings.forEach((binding, index) => {
     assignments.push({
       id: `${id}.${index}`,
-      label: bindings.length > 1 ? `${label} (binding ${index + 1})` : label,
+      label: bindings.length > 1 ? t('model.binding.numbered', { label, number: index + 1 }) : label,
       binding,
     })
   })
@@ -1666,42 +1691,43 @@ function pushBindingAssignments(
 
 function savedBindingAssignments(config: VectorXRConfig): SavedBindingAssignment[] {
   const assignments: SavedBindingAssignment[] = [
-    { id: 'quadviews.diagnostics', label: 'Quadviews: diagnostic visualization', binding: config.modules.quadviews.diagnosticVisualizationBinding },
+    { id: 'quadviews.diagnostics', label: t('model.actions.quadviewsDiagnostics'), binding: config.modules.quadviews.diagnosticVisualizationBinding },
   ]
-  pushBindingAssignments(assignments, 'depth.toggle', 'Depth: A/B toggle', config.modules.depthxr.bindings.toggleEnabledBindings)
-  pushBindingAssignments(assignments, 'depth.lock', 'Depth: Depth Lock A/B', config.modules.depthxr.bindings.toggleAnchorBindings)
-  pushBindingAssignments(assignments, 'osd.toggle', 'OSD: show/hide', config.core.osd.toggleBindings)
-  pushBindingAssignments(assignments, 'osd.cycle', 'OSD: switch layout', config.core.osd.cycleBindings)
-  pushBindingAssignments(assignments, 'turbo.toggle', 'Turbo: A/B toggle', config.modules.turbo.toggleBindings)
-  pushBindingAssignments(assignments, 'turbo.metrics', 'Turbo: metrics capture', config.modules.turbo.metricsBindings)
-  pushBindingAssignments(assignments, 'framegen.toggle', 'Frame Generation: A/B toggle', config.modules.framegen.toggleBindings)
+  pushBindingAssignments(assignments, 'depth.toggle', t('model.actions.depthToggle'), config.modules.depthxr.bindings.toggleEnabledBindings)
+  pushBindingAssignments(assignments, 'depth.lock', t('model.actions.depthLock'), config.modules.depthxr.bindings.toggleAnchorBindings)
+  pushBindingAssignments(assignments, 'osd.toggle', t('model.actions.osdToggle'), config.core.osd.toggleBindings)
+  pushBindingAssignments(assignments, 'osd.cycle', t('model.actions.osdCycle'), config.core.osd.cycleBindings)
+  pushBindingAssignments(assignments, 'turbo.toggle', t('model.actions.turboToggle'), config.modules.turbo.toggleBindings)
+  pushBindingAssignments(assignments, 'turbo.metrics', t('model.actions.turboMetrics'), config.modules.turbo.metricsBindings)
+  pushBindingAssignments(assignments, 'framegen.toggle', t('model.actions.framegenToggle'), config.modules.framegen.toggleBindings)
 
   const pivot = config.modules.pivotxr
   pivot.nudgeSets.forEach((set) => {
     const prefix = `pivot.nudge-set.${set.id}`
-    const label = `Pivot ${set.name}`
-    pushBindingAssignments(assignments, `${prefix}.left`, `${label}: Nudge Left`, set.settings.yawLeftBindings)
-    pushBindingAssignments(assignments, `${prefix}.right`, `${label}: Nudge Right`, set.settings.yawRightBindings)
-    pushBindingAssignments(assignments, `${prefix}.up`, `${label}: Nudge Up`, set.settings.pitchUpBindings)
-    pushBindingAssignments(assignments, `${prefix}.down`, `${label}: Nudge Down`, set.settings.pitchDownBindings)
-    pushBindingAssignments(assignments, `${prefix}.center`, `${label}: Center Nudge Offset`, set.settings.centerBindings)
+    const params = { set: set.name }
+    pushBindingAssignments(assignments, `${prefix}.left`, t('model.actions.nudgeLeft', params), set.settings.yawLeftBindings)
+    pushBindingAssignments(assignments, `${prefix}.right`, t('model.actions.nudgeRight', params), set.settings.yawRightBindings)
+    pushBindingAssignments(assignments, `${prefix}.up`, t('model.actions.nudgeUp', params), set.settings.pitchUpBindings)
+    pushBindingAssignments(assignments, `${prefix}.down`, t('model.actions.nudgeDown', params), set.settings.pitchDownBindings)
+    pushBindingAssignments(assignments, `${prefix}.center`, t('model.actions.nudgeCenter', params), set.settings.centerBindings)
   })
-  pushBindingAssignments(assignments, 'pivot.default.activate', 'Pivot Default: Activate', pivot.activationBindings.map((item) => item.binding))
-  pushBindingAssignments(assignments, 'pivot.default.set-origin', 'Pivot Default: Set Origin', pivot.setOriginBindings)
-  pushBindingAssignments(assignments, 'pivot.default.release-origin', 'Pivot Default: Release Origin', pivot.releaseOriginBindings)
+  pushBindingAssignments(assignments, 'pivot.default.activate', t('model.actions.defaultActivate'), pivot.activationBindings.map((item) => item.binding))
+  pushBindingAssignments(assignments, 'pivot.default.set-origin', t('model.actions.defaultSetOrigin'), pivot.setOriginBindings)
+  pushBindingAssignments(assignments, 'pivot.default.release-origin', t('model.actions.defaultReleaseOrigin'), pivot.releaseOriginBindings)
 
   pivot.viewControls.quickViews.forEach((quickView) => {
-    pushBindingAssignments(assignments, `pivot.default.quick-view.${quickView.id}`, `Pivot Default: ${quickView.name}`, quickView.activationBindings.map((item) => item.binding))
+    pushBindingAssignments(assignments, `pivot.default.quick-view.${quickView.id}`, t('model.actions.defaultQuickView', { view: quickView.name }), quickView.activationBindings.map((item) => item.binding))
   })
 
   pivot.profiles.forEach((profile, index) => {
-    const context = profile.name.trim() || `Profile ${index + 1}`
-    pushBindingAssignments(assignments, `pivot.${profile.id}.activate`, `Pivot ${context}: Activate`, profile.activationBindings.map((item) => item.binding))
-    pushBindingAssignments(assignments, `pivot.${profile.id}.set-origin`, `Pivot ${context}: Set Origin`, profile.setOriginBindings)
-    pushBindingAssignments(assignments, `pivot.${profile.id}.release-origin`, `Pivot ${context}: Release Origin`, profile.releaseOriginBindings)
+    const context = profile.name.trim() || t('model.actions.profileNumbered', { number: index + 1 })
+    const params = { profile: context }
+    pushBindingAssignments(assignments, `pivot.${profile.id}.activate`, t('model.actions.profileActivate', params), profile.activationBindings.map((item) => item.binding))
+    pushBindingAssignments(assignments, `pivot.${profile.id}.set-origin`, t('model.actions.profileSetOrigin', params), profile.setOriginBindings)
+    pushBindingAssignments(assignments, `pivot.${profile.id}.release-origin`, t('model.actions.profileReleaseOrigin', params), profile.releaseOriginBindings)
 
     profile.viewControls.quickViews.forEach((quickView) => {
-      pushBindingAssignments(assignments, `pivot.${profile.id}.quick-view.${quickView.id}`, `Pivot ${context}: ${quickView.name}`, quickView.activationBindings.map((item) => item.binding))
+      pushBindingAssignments(assignments, `pivot.${profile.id}.quick-view.${quickView.id}`, t('model.actions.profileQuickView', { profile: context, view: quickView.name }), quickView.activationBindings.map((item) => item.binding))
     })
   })
 
@@ -1743,8 +1769,8 @@ export function savedBindingConflictWarnings(
         !assignments.every((assignment) => focusBindingSet.has(assignment.binding)))
     ))
     .map(([, assignments]) => ({
-      title: `${bindingLabel(assignments[0].binding)} is assigned more than once`,
-      message: `This input is assigned to ${assignments.map((assignment) => assignment.label).join('; ')}. A press may trigger multiple actions, or a higher-priority action may shadow another. This warning does not block saving.`,
+      title: t('model.conflicts.sharedTitle', { binding: bindingLabel(assignments[0].binding) }),
+      message: t('model.conflicts.sharedMessage', { actions: formatList(assignments.map((assignment) => assignment.label)) }),
     }))
 }
 
@@ -1764,8 +1790,8 @@ function duplicateBindingWarnings(actionLabel: string, bindings: InputBinding[])
     if (!key) continue
     if (seen.has(key)) {
       warnings.push({
-        title: `${bindingLabel(binding)} is duplicated`,
-        message: `${actionLabel} contains the same physical input more than once. The duplicate is redundant and only the first copy is used at runtime.`,
+        title: t('model.conflicts.duplicateTitle', { binding: bindingLabel(binding) }),
+        message: t('model.conflicts.duplicateMessage', { action: actionLabel }),
       })
     } else {
       seen.add(key)
@@ -1784,39 +1810,39 @@ export function pivotBindingConflictWarnings(
   const activationSetsOrigin = firstSharedBinding(physicalActivationBindings, setOriginBindings)
   const activationReleasesOrigin = firstSharedBinding(physicalActivationBindings, releaseOriginBindings)
   const setAlsoReleasesOrigin = firstSharedBinding(setOriginBindings, releaseOriginBindings)
-  const action = alwaysActive ? 'Every suspend-control press' : 'Every activation-control press'
+  const press = alwaysActive ? t('model.conflicts.everySuspendPress') : t('model.conflicts.everyActivationPress')
 
   if (activationSetsOrigin && activationReleasesOrigin
       && bindingsShareInput(activationSetsOrigin, activationReleasesOrigin)) {
     return [{
-      title: 'One binding controls three conflicting actions',
-      message: `Activation, Set Origin, and Release Origin all use ${bindingLabel(activationSetsOrigin)}. ${action} requests a new neutral forward and then immediately clears it, so the origin is not captured. Give Set Origin or Release Origin its own binding.`,
+      title: t('model.conflicts.allThreeTitle'),
+      message: t('model.conflicts.allThreeMessage', { binding: bindingLabel(activationSetsOrigin), press }),
     }]
   }
 
   const warnings: PivotBindingWarning[] = [
-    ...duplicateBindingWarnings(alwaysActive ? 'Suspend controls' : 'Activation', physicalActivationBindings),
-    ...duplicateBindingWarnings('Set Origin', setOriginBindings),
-    ...duplicateBindingWarnings('Release Origin', releaseOriginBindings),
+    ...duplicateBindingWarnings(t(alwaysActive ? 'model.conflicts.duplicateActions.suspendControls' : 'model.conflicts.duplicateActions.activation'), physicalActivationBindings),
+    ...duplicateBindingWarnings(t('model.conflicts.duplicateActions.setOrigin'), setOriginBindings),
+    ...duplicateBindingWarnings(t('model.conflicts.duplicateActions.releaseOrigin'), releaseOriginBindings),
   ]
   if (activationSetsOrigin) {
     warnings.push({
-      title: 'Activation also sets the origin',
-      message: `Activation and Set Origin both use ${bindingLabel(activationSetsOrigin)}. ${action} recaptures the current head direction as Pivot's neutral forward. Keep this only if it is intentional; otherwise give Set Origin its own binding, normally your in-game recenter control.`,
+      title: t('model.conflicts.setsOriginTitle'),
+      message: t('model.conflicts.setsOriginMessage', { binding: bindingLabel(activationSetsOrigin), press }),
     })
   }
 
   if (activationReleasesOrigin) {
     warnings.push({
-      title: 'Activation also releases the origin',
-      message: `Activation and Release Origin both use ${bindingLabel(activationReleasesOrigin)}. ${action} clears any captured Pivot origin. Keep this only if it is intentional; otherwise give Release Origin its own binding.`,
+      title: t('model.conflicts.releasesOriginTitle'),
+      message: t('model.conflicts.releasesOriginMessage', { binding: bindingLabel(activationReleasesOrigin), press }),
     })
   }
 
   if (setAlsoReleasesOrigin) {
     warnings.push({
-      title: 'Set Origin is immediately canceled',
-      message: `Set Origin and Release Origin both use ${bindingLabel(setAlsoReleasesOrigin)}. A press requests a new neutral forward and then immediately clears it, so the origin is not captured. Give one action a different binding.`,
+      title: t('model.conflicts.setCanceledTitle'),
+      message: t('model.conflicts.setCanceledMessage', { binding: bindingLabel(setAlsoReleasesOrigin) }),
     })
   }
 
@@ -1860,7 +1886,7 @@ function findApplicationIdByExe(applications: RegisteredApplication[], exe: stri
 function createImportedApplication(exe: string, profileName: unknown, applications: RegisteredApplication[]): RegisteredApplication {
   const application = createApplication(exe, applications)
   const normalizedName = normalizeString(profileName, '').trim()
-  if (normalizedName && normalizedName !== 'New Profile') {
+  if (normalizedName && !isDefaultProfileName(normalizedName)) {
     application.name = normalizedName
     application.id = uniqueApplicationId(normalizedName, applications)
   }
@@ -1923,13 +1949,13 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
     const set = isRecord(value) ? value : {}
     return {
       id: normalizeString(set.id, `pivot-nudges-${index + 1}`),
-      name: normalizeString(set.name, `Nudge Set ${index + 1}`),
+      name: normalizeString(set.name, t('model.defaults.nudgeSetNumbered', { number: index + 1 })),
       allowWhileInactive: normalizeBoolean(set.allowWhileInactive, false),
       settings: normalizePivotNudgeSettings(set.settings, defaultPivotNudgeSettings()),
     }
   })
   if (pivotNudgeSets.length === 0) {
-    pivotNudgeSets.push({ id: 'pivot-nudges-standard', name: 'Standard Nudges', allowWhileInactive: false, settings: pivotViewControls.nudges })
+    pivotNudgeSets.push({ id: 'pivot-nudges-standard', name: t('model.defaults.standardNudges'), allowWhileInactive: false, settings: pivotViewControls.nudges })
   }
   const requestedDefaultNudgeSetId = normalizeString(pivotxr.nudgeSetId, '')
   const defaultNudgeSetId = requestedDefaultNudgeSetId === 'none'
@@ -1977,7 +2003,7 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
           const applicationIds = applicationIdsFromProfile(profile, applications)
 
           return {
-            name: normalizeString(profile.name, 'New Profile'),
+            name: normalizeString(profile.name, defaultProfileName()),
             enabled: normalizeBoolean(profile.enabled, true),
             applicationIds,
             settings,
@@ -2007,7 +2033,7 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
             const sharesDefault = JSON.stringify(viewControls.nudges) === JSON.stringify(pivotViewControls.nudges)
             nudgeSetId = sharesDefault ? defaultNudgeSetId : `${id}-nudges`
             if (!sharesDefault) {
-              pivotNudgeSets.push({ id: nudgeSetId, name: `${normalizeString(profile.name, 'Profile')} Nudges`, allowWhileInactive: false, settings: viewControls.nudges })
+              pivotNudgeSets.push({ id: nudgeSetId, name: t('model.defaults.profileNudges', { profile: normalizeString(profile.name, t('model.defaults.profile')) }), allowWhileInactive: false, settings: viewControls.nudges })
             }
           }
 
@@ -2018,7 +2044,7 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
 
           const normalized: PivotXRProfileConfig = {
             id,
-            name: normalizeString(profile.name, 'New Profile'),
+            name: normalizeString(profile.name, defaultProfileName()),
             enabled: normalizeBoolean(profile.enabled, true),
             applicationIds,
             behavior: profile.behavior === 'snapViews' ? 'snapViews' : 'enhancedMotion',
@@ -2046,7 +2072,7 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
           const applicationIds = applicationIdsFromProfile(profile, applications)
 
           return {
-            name: normalizeString(profile.name, 'New Profile'),
+            name: normalizeString(profile.name, defaultProfileName()),
             enabled: normalizeBoolean(profile.enabled, true),
             applicationIds,
             settings,
@@ -2074,7 +2100,7 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
             experimental: { ...normalizeTurboExperimental(profile.experimental), applicationIds: [] },
             disableSafety: normalizeBoolean(profile.disableSafety, false),
             id,
-            name: normalizeString(profile.name, 'New Profile'),
+            name: normalizeString(profile.name, defaultProfileName()),
             enabled: normalizeBoolean(profile.enabled, true),
             applicationIds,
           }
@@ -2084,11 +2110,11 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
           if (!scoped.length) return [base]
           const migrated = { ...base, experimental: { ...legacy, applicationIds: [] }, applicationIds: scoped }
           const remaining = applicationIds.filter(id => !scoped.includes(id))
-          return remaining.length ? [{ ...base, applicationIds: remaining }, { ...migrated, id: newTurboProfileId(), name: `${base.name} timing` }] : [migrated]
+          return remaining.length ? [{ ...base, applicationIds: remaining }, { ...migrated, id: newTurboProfileId(), name: t('model.defaults.turboTimingProfile', { name: base.name }) }] : [migrated]
 
         }).concat(legacyTurboExperimental.applicationIds
           .filter(id => applications.some(app => app.id === id) && !turboProfileValues.some(value => isRecord(value) && applicationIdsFromProfile(value, applications).includes(id)))
-          .map(id => ({ ...createTurboProfile([id]), name: `${applications.find(app => app.id === id)?.name ?? id} timing`,
+          .map(id => ({ ...createTurboProfile([id]), name: t('model.defaults.turboTimingProfile', { name: applications.find(app => app.id === id)?.name ?? id }),
             enabled: normalizeBoolean(turbo.enabled, false), experimental: { ...legacyTurboExperimental, applicationIds: [] } }))),
       },
       framegen: {
@@ -2102,7 +2128,7 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
           const applicationIds = applicationIdsFromProfile(profile, applications)
 
           return {
-            name: normalizeString(profile.name, 'New Profile'),
+            name: normalizeString(profile.name, defaultProfileName()),
             enabled: normalizeBoolean(profile.enabled, true),
             applicationIds,
             settings,
@@ -2127,12 +2153,13 @@ export function cloneConfig(config: VectorXRConfig): VectorXRConfig {
 
 export type ModuleId = 'depthxr' | 'pivotxr' | 'quadviews' | 'turbo' | 'framegen'
 
-export const moduleLabels: Record<ModuleId, string> = {
-  depthxr: 'Depth',
-  pivotxr: 'Pivot',
-  quadviews: 'Quadviews',
-  turbo: 'Turbo',
-  framegen: 'Frame Generation',
+// Read when shown, so a change of language applies.
+export const moduleLabels: Readonly<Record<ModuleId, string>> = {
+  get depthxr() { return t('model.modules.depthxr') },
+  get pivotxr() { return t('model.modules.pivotxr') },
+  get quadviews() { return t('model.modules.quadviews') },
+  get turbo() { return t('model.modules.turbo') },
+  get framegen() { return t('model.modules.framegen') },
 }
 
 export interface ModuleApplicationState {

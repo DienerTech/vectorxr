@@ -1,5 +1,6 @@
 import type { LogSnapshot, OpenXrLayerEntry, OpenXrLayerSnapshot, SeenApplication } from './commands'
 import type { VectorXRConfig } from './model'
+import { t } from '../i18n/index.ts'
 
 export type HealthCheckState = 'pass' | 'warn' | 'fail' | 'info'
 export type HealthOverallState = 'ready' | 'attention' | 'inactive' | 'unknown'
@@ -58,71 +59,74 @@ export function buildHealthSummary(input: BuildHealthSummaryInput): HealthSummar
   const checks: HealthCheckItem[] = [
     {
       id: 'suite-enabled',
-      label: 'Suite runtime switch',
+      label: t('health.checks.suiteEnabled.label'),
       state: input.config.core.enabled ? 'pass' : 'warn',
       detail: input.config.core.enabled
-        ? 'VectorXR runtime effects are allowed to run.'
-        : 'VectorXR is disabled from the Home runtime switch.',
+        ? t('health.checks.suiteEnabled.enabled')
+        : t('health.checks.suiteEnabled.disabled'),
     },
     {
       id: 'layer-registered',
-      label: 'OpenXR layer registration',
+      label: t('health.checks.layerRegistered.label'),
       state: input.openXrLayersLoading ? 'info' : vectorXrLayer ? 'pass' : 'fail',
       detail: input.openXrLayersLoading
-        ? 'VectorXR is still reading OpenXR layer registrations.'
+        ? t('health.checks.layerRegistered.loading')
         : vectorXrLayer
-          ? `Registered in ${vectorXrLayer.slice}.`
-          : 'VectorXR was not found in the OpenXR implicit API layer registry.',
+          ? t('health.checks.layerRegistered.registered', { slice: vectorXrLayer.slice })
+          : t('health.checks.layerRegistered.missing'),
     },
     {
       id: 'layer-enabled',
-      label: 'OpenXR layer enabled',
+      label: t('health.checks.layerEnabled.label'),
       state: input.openXrLayersLoading ? 'info' : vectorXrLayer?.enabled ? 'pass' : 'fail',
       detail: input.openXrLayersLoading
-        ? 'Waiting for OpenXR layer status.'
+        ? t('health.checks.layerEnabled.loading')
         : vectorXrLayer?.enabled
-          ? 'The VectorXR API layer is enabled for future OpenXR launches.'
-          : 'The VectorXR API layer is disabled or unavailable.',
+          ? t('health.checks.layerEnabled.enabled')
+          : t('health.checks.layerEnabled.disabled'),
     },
     ...(enabledVectorXrLayers.length > 1 && !input.openXrLayersLoading
       ? [{
           id: 'layer-duplicates',
-          label: 'One VectorXR layer enabled',
+          label: t('health.checks.layerDuplicates.label'),
           state: 'fail' as const,
-          detail: `${enabledVectorXrLayers.length} VectorXR registrations are enabled (${enabledVectorXrLayers.map((layer) => layer.manifestPath).join('; ')}). OpenXR apps crash when two copies load; disable all but one on the OpenXR Layers page.`,
+          detail: t('health.checks.layerDuplicates.detail', {
+            count: enabledVectorXrLayers.length,
+            paths: enabledVectorXrLayers.map((layer) => layer.manifestPath).join('; '),
+          }),
         }]
       : []),
     {
       id: 'layer-files',
-      label: 'Layer files',
+      label: t('health.checks.layerFiles.label'),
       state: !vectorXrLayer ? 'info' : vectorXrLayer.manifestExists && vectorXrLayer.libraryExists ? 'pass' : 'fail',
       detail: !vectorXrLayer
-        ? 'Layer files can be checked after the layer registration is found.'
+        ? t('health.checks.layerFiles.pending')
         : vectorXrLayer.manifestExists && vectorXrLayer.libraryExists
-          ? 'Manifest and DLL paths both resolve.'
-          : 'The registered manifest or DLL path is missing.',
+          ? t('health.checks.layerFiles.resolved')
+          : t('health.checks.layerFiles.missing'),
     },
     {
       id: 'config-loaded',
-      label: 'Config path',
+      label: t('health.checks.configLoaded.label'),
       state: input.configPath ? 'pass' : 'info',
-      detail: input.configPath || 'Config path will appear after settings load.',
+      detail: input.configPath || t('health.checks.configLoaded.pending'),
     },
     {
       id: 'recent-log',
-      label: 'Runtime logs',
+      label: t('health.checks.recentLog.label'),
       state: input.logSnapshot?.files.length ? 'pass' : 'warn',
       detail: input.logSnapshot?.files.length
-        ? `${input.logSnapshot.files.length} recent log file${input.logSnapshot.files.length === 1 ? '' : 's'} available.`
-        : 'No VectorXR runtime logs are available yet.',
+        ? t('health.checks.recentLog.available', { count: input.logSnapshot.files.length })
+        : t('health.checks.recentLog.none'),
     },
     {
       id: 'seen-apps',
-      label: 'Application discovery',
+      label: t('health.checks.seenApps.label'),
       state: input.seenApps.length ? 'pass' : 'info',
       detail: input.seenApps.length
-        ? `${input.seenApps.length} OpenXR app${input.seenApps.length === 1 ? '' : 's'} observed.`
-        : 'No OpenXR applications have been observed yet.',
+        ? t('health.checks.seenApps.observed', { count: input.seenApps.length })
+        : t('health.checks.seenApps.none'),
     },
   ]
 
@@ -136,21 +140,8 @@ export function buildHealthSummary(input: BuildHealthSummaryInput): HealthSummar
         ? 'unknown'
         : 'ready'
 
-  const label = overall === 'ready'
-    ? 'Ready'
-    : overall === 'attention'
-      ? 'Needs attention'
-      : overall === 'inactive'
-        ? 'Not active'
-        : 'Checking'
-
-  const description = overall === 'ready'
-    ? 'VectorXR looks ready for future OpenXR app launches.'
-    : overall === 'attention'
-      ? 'VectorXR can run, but one or more diagnostics may need review.'
-      : overall === 'inactive'
-        ? 'VectorXR is not currently ready to apply OpenXR Enhancements.'
-        : 'VectorXR is still collecting system status.'
+  const label = t(`health.overall.${overall}`)
+  const description = t(`health.description.${overall}`)
 
   return {
     loading: input.openXrLayersLoading,

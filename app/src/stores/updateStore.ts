@@ -1,5 +1,6 @@
 import { computed, reactive } from 'vue'
 
+import { t } from '../i18n/index.ts'
 import { checkForUpdates, type GitHubReleaseInfo, type UpdateCheckStatus } from '../lib/updates'
 
 interface UpdateState {
@@ -50,7 +51,7 @@ export function useUpdateStore() {
         }
       } catch (error) {
         state.status = 'error'
-        state.error = error instanceof Error ? error.message : 'Unable to check for updates right now.'
+        state.error = error instanceof Error ? error.message : t('app.updates.checkFailed')
       } finally {
         inFlight = null
       }

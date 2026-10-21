@@ -1,1 +1,53 @@
-{}
+{
+  "supportLinkError": "Could not open the browser. Visit ko-fi.com/dienertech to support VectorXR.",
+  "layerStatus": {
+    "checking": "Checking",
+    "notFound": "Not found",
+    "enabled": "Layer enabled",
+    "disabled": "Layer disabled"
+  },
+  "layerDescription": {
+    "checking": "Checking the registered VectorXR API layer.",
+    "notFound": "VectorXR's API layer registration was not found. Enhancements will not apply until the layer is registered and enabled.",
+    "enabled": "The VectorXR API layer is enabled, so Enhancements can apply at runtime.",
+    "disabled": "The VectorXR API layer is disabled. None of the Enhancements will apply, regardless of suite or Enhancement enabled state."
+  },
+  "runtime": {
+    "enabled": "Runtime enabled",
+    "disabled": "Runtime disabled",
+    "title": "Suite-level runtime switch state."
+  },
+  "systemHealth": {
+    "eyebrow": "System Health",
+    "suiteOff": "Runtime effects are disabled from the suite switch. Layer status is still available for troubleshooting.",
+    "checking": "Checking VectorXR runtime and OpenXR layer readiness.",
+    "layerNotFound": "VectorXR is enabled, but the OpenXR API layer registration was not found.",
+    "layerDisabled": "VectorXR is enabled, but the OpenXR API layer is disabled.",
+    "ready": "VectorXR runtime and OpenXR layer status look ready for future OpenXR app launches.",
+    "viewHealth": "View Health",
+    "exportDebug": "Export Debug"
+  },
+  "enhancements": {
+    "eyebrow": "Enhancements",
+    "title": "Active Overview",
+    "activeCount": "{active} of {total} active",
+    "columns": {
+      "enhancement": "Enhancement",
+      "defaultProfile": "Default profile",
+      "customProfiles": "Custom profiles",
+      "status": "Status"
+    },
+    "open": "Open {module} settings",
+    "customEnabled": "{enabled} / {total} enabled",
+    "hint": "Select an Enhancement to open its settings."
+  },
+  "community": {
+    "eyebrow": "Community & announcements",
+    "title": "Help shape VectorXR",
+    "discordTitle": "DienerTech Discord",
+    "discordBody": "Share your setup, compare results, and catch the latest VectorXR announcements.",
+    "supportTitle": "Support development",
+    "supportBody": "Help support the project by contributing to VectorXR on Ko-fi. All support helps fund the future of VectorXR!",
+    "supportButton": "Support VectorXR on Ko-fi ↗"
+  }
+}

@@ -1,1 +1,95 @@
-{}
+{
+  "keyGroups": {
+    "function": "Function Keys",
+    "letter": "Letter Keys",
+    "number": "Number Keys",
+    "numpad": "Numpad Keys",
+    "special": "Special Keys"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "space": "Space",
+    "numpad": "Numpad{digit}"
+  },
+  "modules": {
+    "depthxr": "Depth",
+    "pivotxr": "Pivot",
+    "quadviews": "Quadviews",
+    "turbo": "Turbo",
+    "framegen": "Frame Generation"
+  },
+  "defaults": {
+    "newProfile": "New Profile",
+    "profile": "Profile",
+    "standardNudges": "Standard Nudges",
+    "nudgeSetNumbered": "Nudge Set {number}",
+    "profileNudges": "{profile} Nudges",
+    "newQuickView": "New Quick View",
+    "quickViewNumbered": "Quick View {number}",
+    "deviceButton": "Button {number}",
+    "turboTimingProfile": "{name} timing"
+  },
+  "snapViews": {
+    "defaultProfileUnavailable": "Not available on the Default profile, which is either Enhanced Motion or Snap Views. Use a custom Enhanced Motion profile together with a custom Snap Views profile for the same application.",
+    "noSnapPartner": "No enabled Snap Views profile targets this profile’s applications yet.",
+    "motionNoteNone": "An Enhanced Motion profile for the same application can keep working in these Snap Views when it turns on Apply Enhanced Motion to Snap Views.",
+    "motionNoteSources": "Enhanced Motion from {profiles} keeps working in these Snap Views."
+  },
+  "binding": {
+    "device": "{device} / {input}",
+    "unassignedDevice": "Unassigned device",
+    "unassignedInput": "unassigned input",
+    "none": "None",
+    "listMore_one": "{first} or {count} other",
+    "listMore_other": "{first} or {count} others",
+    "numbered": "{label} (binding {number})"
+  },
+  "actions": {
+    "quadviewsDiagnostics": "Quadviews: diagnostic visualization",
+    "depthToggle": "Depth: A/B toggle",
+    "depthLock": "Depth: Depth Lock A/B",
+    "osdToggle": "OSD: show/hide",
+    "osdCycle": "OSD: switch layout",
+    "turboToggle": "Turbo: A/B toggle",
+    "turboMetrics": "Turbo: metrics capture",
+    "framegenToggle": "Frame Generation: A/B toggle",
+    "nudgeLeft": "Pivot {set}: Nudge Left",
+    "nudgeRight": "Pivot {set}: Nudge Right",
+    "nudgeUp": "Pivot {set}: Nudge Up",
+    "nudgeDown": "Pivot {set}: Nudge Down",
+    "nudgeCenter": "Pivot {set}: Center Nudge Offset",
+    "defaultActivate": "Pivot Default: Activate",
+    "defaultSetOrigin": "Pivot Default: Set Origin",
+    "defaultReleaseOrigin": "Pivot Default: Release Origin",
+    "defaultQuickView": "Pivot Default: {view}",
+    "profileNumbered": "Profile {number}",
+    "profileActivate": "Pivot {profile}: Activate",
+    "profileSetOrigin": "Pivot {profile}: Set Origin",
+    "profileReleaseOrigin": "Pivot {profile}: Release Origin",
+    "profileQuickView": "Pivot {profile}: {view}"
+  },
+  "conflicts": {
+    "sharedTitle": "{binding} is assigned more than once",
+    "sharedMessage": "This input is assigned to {actions}. A press may trigger multiple actions, or a higher-priority action may shadow another. This warning does not block saving.",
+    "duplicateTitle": "{binding} is duplicated",
+    "duplicateMessage": "{action} contains the same physical input more than once. The duplicate is redundant and only the first copy is used at runtime.",
+    "duplicateActions": {
+      "suspendControls": "Suspend controls",
+      "activation": "Activation",
+      "setOrigin": "Set Origin",
+      "releaseOrigin": "Release Origin"
+    },
+    "everySuspendPress": "Every suspend-control press",
+    "everyActivationPress": "Every activation-control press",
+    "allThreeTitle": "One binding controls three conflicting actions",
+    "allThreeMessage": "Activation, Set Origin, and Release Origin all use {binding}. {press} requests a new neutral forward and then immediately clears it, so the origin is not captured. Give Set Origin or Release Origin its own binding.",
+    "setsOriginTitle": "Activation also sets the origin",
+    "setsOriginMessage": "Activation and Set Origin both use {binding}. {press} recaptures the current head direction as Pivot's neutral forward. Keep this only if it is intentional; otherwise give Set Origin its own binding, normally your in-game recenter control.",
+    "releasesOriginTitle": "Activation also releases the origin",
+    "releasesOriginMessage": "Activation and Release Origin both use {binding}. {press} clears any captured Pivot origin. Keep this only if it is intentional; otherwise give Release Origin its own binding.",
+    "setCanceledTitle": "Set Origin is immediately canceled",
+    "setCanceledMessage": "Set Origin and Release Origin both use {binding}. A press requests a new neutral forward and then immediately clears it, so the origin is not captured. Give one action a different binding."
+  }
+}

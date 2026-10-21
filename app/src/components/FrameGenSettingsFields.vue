@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 
+import { t } from '../i18n/index.ts'
 import OptionCards from './OptionCards.vue'
 import { useGpuCapabilities } from '../lib/gpuCapabilities'
 import { motionSourceState } from '../lib/motionSource'
@@ -23,44 +24,44 @@ const props = defineProps<{
   settings: FrameGenSettings
 }>()
 
-const modes: { value: FrameGenSynthesisMode; label: string; badge?: string; description: string }[] = [
+const modes = computed<{ value: FrameGenSynthesisMode; label: string; badge?: string; description: string }[]>(() => [
   {
     value: 'interpolate',
-    label: 'Interpolate',
-    badge: 'Default',
-    description: 'Blends between the last two game frames. The smoothest image with the fewest artifacts; adds a little latency.',
+    label: t('framegen.settings.mode.interpolate.label'),
+    badge: t('common.default'),
+    description: t('framegen.settings.mode.interpolate.description'),
   },
   {
     value: 'extrapolate',
-    label: 'Extrapolate',
-    description: 'Projects the newest game frame forward. The lowest latency, with more artifacts at moving edges; works best with NVIDIA hardware.',
+    label: t('framegen.settings.mode.extrapolate.label'),
+    description: t('framegen.settings.mode.extrapolate.description'),
   },
-]
+])
 
 // Dynamic and the fixed rates share one setting: the fixed rates are every
 // value but 'dynamic'. The last fixed rate is remembered while the page is open,
 // so switching to Dynamic and back keeps it.
 type FrameRate = 'dynamic' | 'fixed'
-const frameRates: { value: FrameRate; label: string; badge?: string; description: string }[] = [
+const frameRates = computed<{ value: FrameRate; label: string; badge?: string; description: string }[]>(() => [
   {
     value: 'dynamic',
-    label: 'Dynamic',
-    badge: 'Default',
-    description: 'The game runs as fast as it can, and generated frames fill in up to your headset\'s refresh rate.',
+    label: t('framegen.settings.frameRate.dynamic.label'),
+    badge: t('common.default'),
+    description: t('framegen.settings.frameRate.dynamic.description'),
   },
   {
     value: 'fixed',
-    label: 'Fixed',
-    description: 'Holds the game at a set fraction of the refresh rate for even pacing, and fills the rest with generated frames.',
+    label: t('framegen.settings.frameRate.fixed.label'),
+    description: t('framegen.settings.frameRate.fixed.description'),
   },
-]
+])
 
-const fixedRates: { value: FrameGenFixedMultiplier; label: string; description: string }[] = [
-  { value: 'auto', label: 'Auto', description: 'Picks 2x, 3x or 4x as the game needs, and generates nothing while the game keeps up on its own.' },
-  { value: '2x', label: '2x', description: 'The game runs at up to 1/2 the refresh rate, such as 45 fps at 90 Hz. Below that, pacing is less even.' },
-  { value: '3x', label: '3x', description: 'The game runs at up to 1/3 the refresh rate, such as 30 fps at 90 Hz. Below that, pacing is less even.' },
-  { value: '4x', label: '4x', description: 'The game runs at up to 1/4 the refresh rate, such as 22.5 fps at 90 Hz. The most artifacts; for the heaviest games.' },
-]
+const fixedRates = computed<{ value: FrameGenFixedMultiplier; label: string; description: string }[]>(() => [
+  { value: 'auto', label: t('common.auto'), description: t('framegen.settings.frameRate.rates.auto') },
+  { value: '2x', label: '2x', description: t('framegen.settings.frameRate.rates.x2') },
+  { value: '3x', label: '3x', description: t('framegen.settings.frameRate.rates.x3') },
+  { value: '4x', label: '4x', description: t('framegen.settings.frameRate.rates.x4') },
+])
 
 function isFixed(value: string): value is FrameGenFixedMultiplier {
   return (frameGenFixedMultipliers as readonly string[]).includes(value)
@@ -77,7 +78,7 @@ const frameRate = computed<FrameRate>({
     props.settings.frameMultiplier = value === 'dynamic' ? 'dynamic' : lastFixedRate.value
   },
 })
-const fixedRateDescription = computed(() => fixedRates.find((rate) => rate.value === props.settings.frameMultiplier)?.description ?? '')
+const fixedRateDescription = computed(() => fixedRates.value.find((rate) => rate.value === props.settings.frameMultiplier)?.description ?? '')
 
 // Interpolate in Dynamic always measures with Shader, and NVIDIA hardware needs a card
 // that has it (any card in the PC, as the driver reports): the cards show
@@ -92,25 +93,25 @@ const motionSourceModel = computed<FrameGenMotionEstimation>({
 const motionSources = computed(() => [
   {
     value: 'shader' as const,
-    label: 'Shader',
-    badge: 'Default',
-    description: 'Measures motion on the GPU\'s shader cores. Works on any GPU, and pairs best with Interpolate.',
+    label: t('framegen.settings.motionSource.shader.label'),
+    badge: t('common.default'),
+    description: t('framegen.settings.motionSource.shader.description'),
   },
   {
     value: 'hardware' as const,
-    label: 'NVIDIA hardware',
-    description: 'Uses the optical flow unit of NVIDIA RTX GPUs: more accurate, especially on repeating patterns. Used by Extrapolate, and by Interpolate at a fixed or Auto frame rate (experimental).',
+    label: t('framegen.settings.motionSource.hardware.label'),
+    description: t('framegen.settings.motionSource.hardware.description'),
     disabled: motionSource.value.hardwareUnavailable !== null,
     disabledReason: motionSource.value.hardwareUnavailable,
   },
 ])
 
-const flowQualities: { value: FrameGenFlowQuality; label: string; resolution: string }[] = [
-  { value: 'performance', label: 'Performance', resolution: '1/16' },
-  { value: 'balanced', label: 'Balanced', resolution: '1/8' },
-  { value: 'quality', label: 'Quality', resolution: '1/4' },
-]
-const flowQuality = computed(() => flowQualities.find((item) => item.value === props.settings.flowQuality) ?? flowQualities[1])
+const flowQualities = computed<{ value: FrameGenFlowQuality; label: string; summary: string; resolution: string }[]>(() => [
+  { value: 'performance', label: t('framegen.settings.flowQuality.levels.performance'), summary: t('framegen.settings.flowQuality.summary.performance'), resolution: '1/16' },
+  { value: 'balanced', label: t('framegen.settings.flowQuality.levels.balanced'), summary: t('framegen.settings.flowQuality.summary.balanced'), resolution: '1/8' },
+  { value: 'quality', label: t('framegen.settings.flowQuality.levels.quality'), summary: t('framegen.settings.flowQuality.summary.quality'), resolution: '1/4' },
+])
+const flowQuality = computed(() => flowQualities.value.find((item) => item.value === props.settings.flowQuality) ?? flowQualities.value[1])
 
 // Extend head prediction stays out of the app until it has flown: on a Pimax
 // PC with Virtual Desktop installed it finds no runtime clock. The layer still
@@ -125,8 +126,11 @@ const advancedAtDefaults = computed(() =>
   props.settings.motionLimitPercent === advancedDefaults.motionLimitPercent &&
   !props.settings.extendHeadPrediction)
 const advancedSummary = computed(() =>
-  `${flowQuality.value.label} flow · Suppression ${props.settings.artifactSuppression} · Motion limit ${props.settings.motionLimitPercent}%` +
-  (props.settings.extendHeadPrediction ? ' · Head prediction' : ''))
+  t(props.settings.extendHeadPrediction ? 'framegen.settings.advanced.summaryHeadPrediction' : 'framegen.settings.advanced.summary', {
+    flow: flowQuality.value.summary,
+    suppression: props.settings.artifactSuppression,
+    motionLimit: props.settings.motionLimitPercent,
+  }))
 
 function resetAdvanced() {
   props.settings.flowQuality = advancedDefaults.flowQuality
@@ -139,14 +143,14 @@ function resetAdvanced() {
 <template>
   <div class="space-y-3">
     <div class="rounded-[1rem] border p-4 surface-panel-soft">
-      <OptionCards v-model="settings.synthesisMode" legend="Mode" :options="modes" />
+      <OptionCards v-model="settings.synthesisMode" :legend="t('framegen.settings.mode.legend')" :options="modes" />
     </div>
 
     <div class="rounded-[1rem] border p-4 surface-panel-soft">
-      <OptionCards v-model="frameRate" legend="Frame rate" :options="frameRates">
+      <OptionCards v-model="frameRate" :legend="t('framegen.settings.frameRate.legend')" :options="frameRates">
         <div v-if="frameRate === 'fixed'" class="mt-3 flex flex-wrap items-center justify-between gap-3">
-          <span class="text-sm font-medium">Fixed rate</span>
-          <div class="segmented flex w-full sm:w-auto" role="radiogroup" aria-label="Fixed rate">
+          <span class="text-sm font-medium">{{ t('framegen.settings.frameRate.fixedRate') }}</span>
+          <div class="segmented flex w-full sm:w-auto" role="radiogroup" :aria-label="t('framegen.settings.frameRate.fixedRate')">
             <button
               v-for="rate in fixedRates"
               :key="rate.value"
@@ -167,7 +171,7 @@ function resetAdvanced() {
     </div>
 
     <div class="rounded-[1rem] border p-4 surface-panel-soft">
-      <OptionCards v-model="motionSourceModel" legend="Motion source" :options="motionSources" :disabled="motionSource.locked">
+      <OptionCards v-model="motionSourceModel" :legend="t('framegen.settings.motionSource.legend')" :options="motionSources" :disabled="motionSource.locked">
         <p v-if="motionSource.note" class="mt-2 text-xs leading-5 text-muted">{{ motionSource.note }}</p>
       </OptionCards>
     </div>
@@ -177,17 +181,17 @@ function resetAdvanced() {
         <svg aria-hidden="true" class="section-chevron h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
           <path fill-rule="evenodd" d="M7.2 14.8a1 1 0 0 1 0-1.4L10.6 10 7.2 6.6a1 1 0 1 1 1.4-1.4l4.1 4.1a1 1 0 0 1 0 1.4l-4.1 4.1a1 1 0 0 1-1.4 0Z" clip-rule="evenodd" />
         </svg>
-        <span class="text-sm font-semibold tracking-tight">Advanced</span>
+        <span class="text-sm font-semibold tracking-tight">{{ t('common.advanced') }}</span>
         <span class="text-xs text-muted">{{ advancedSummary }}</span>
       </summary>
 
       <div class="mt-3 grid gap-3 lg:grid-cols-3">
         <div class="rounded-[1rem] border p-4 surface-panel">
           <div class="flex flex-wrap items-center justify-between gap-2">
-            <p class="eyebrow text-xs uppercase tracking-[0.18em]">Flow quality</p>
-            <span class="text-xs text-muted">{{ flowQuality.resolution }} of the eye image</span>
+            <p class="eyebrow text-xs uppercase tracking-[0.18em]">{{ t('framegen.settings.flowQuality.heading') }}</p>
+            <span class="text-xs text-muted">{{ t('framegen.settings.flowQuality.resolution', { resolution: flowQuality.resolution }) }}</span>
           </div>
-          <div class="segmented mt-3 flex w-full" role="radiogroup" aria-label="Flow quality">
+          <div class="segmented mt-3 flex w-full" role="radiogroup" :aria-label="t('framegen.settings.flowQuality.heading')">
             <button
               v-for="quality in flowQualities"
               :key="quality.value"
@@ -202,20 +206,20 @@ function resetAdvanced() {
             </button>
           </div>
           <p class="mt-2 text-xs leading-5 text-muted">
-            How finely motion is measured. Higher tracks small, thin objects better and costs more GPU time.
+            {{ t('framegen.settings.flowQuality.description') }}
           </p>
         </div>
 
         <label class="block rounded-[1rem] border p-4 surface-panel">
           <span class="flex flex-wrap items-center justify-between gap-2">
-            <span class="eyebrow text-xs uppercase tracking-[0.18em]">Artifact suppression</span>
+            <span class="eyebrow text-xs uppercase tracking-[0.18em]">{{ t('framegen.settings.artifactSuppression.heading') }}</span>
             <output class="text-sm font-semibold tabular-nums">{{ settings.artifactSuppression }}</output>
           </span>
           <span class="mt-3 flex items-center gap-3">
             <input
               v-model.number="settings.artifactSuppression"
               class="h-2 min-w-0 flex-1 cursor-pointer accent-depthxr-copper"
-              aria-label="Artifact suppression"
+              :aria-label="t('framegen.settings.artifactSuppression.heading')"
               type="range"
               :min="frameGenLimits.artifactSuppression.min"
               :max="frameGenLimits.artifactSuppression.max"
@@ -224,7 +228,7 @@ function resetAdvanced() {
             <input
               v-model.number="settings.artifactSuppression"
               class="app-input w-[4.5rem] shrink-0 rounded-[0.75rem] px-2 py-1.5 text-right text-sm"
-              aria-label="Artifact suppression value"
+              :aria-label="t('framegen.settings.artifactSuppression.valueLabel')"
               type="number"
               :min="frameGenLimits.artifactSuppression.min"
               :max="frameGenLimits.artifactSuppression.max"
@@ -232,24 +236,24 @@ function resetAdvanced() {
             />
           </span>
           <span class="mt-2 grid grid-cols-2 text-[10px] font-medium uppercase tracking-[0.08em] text-muted">
-            <span>Smoother motion</span>
-            <span class="text-right">Fewer artifacts</span>
+            <span>{{ t('framegen.settings.artifactSuppression.smoother') }}</span>
+            <span class="text-right">{{ t('framegen.settings.artifactSuppression.fewer') }}</span>
           </span>
           <span class="mt-2 block text-xs leading-5 text-muted">
-            Where motion is uncertain, higher values show the real image sooner: less warping, a little more judder.
+            {{ t('framegen.settings.artifactSuppression.description') }}
           </span>
         </label>
 
         <label class="block rounded-[1rem] border p-4 surface-panel">
           <span class="flex flex-wrap items-center justify-between gap-2">
-            <span class="eyebrow text-xs uppercase tracking-[0.18em]">Motion limit</span>
+            <span class="eyebrow text-xs uppercase tracking-[0.18em]">{{ t('framegen.settings.motionLimit.heading') }}</span>
             <output class="text-sm font-semibold tabular-nums">{{ settings.motionLimitPercent }}%</output>
           </span>
           <span class="mt-3 flex items-center gap-3">
             <input
               v-model.number="settings.motionLimitPercent"
               class="h-2 min-w-0 flex-1 cursor-pointer accent-depthxr-copper"
-              aria-label="Motion limit"
+              :aria-label="t('framegen.settings.motionLimit.heading')"
               type="range"
               :min="frameGenLimits.motionLimitPercent.min"
               :max="frameGenLimits.motionLimitPercent.max"
@@ -258,7 +262,7 @@ function resetAdvanced() {
             <input
               v-model.number="settings.motionLimitPercent"
               class="app-input w-[4.5rem] shrink-0 rounded-[0.75rem] px-2 py-1.5 text-right text-sm"
-              aria-label="Motion limit value in percent of view width"
+              :aria-label="t('framegen.settings.motionLimit.valueLabel')"
               type="number"
               :min="frameGenLimits.motionLimitPercent.min"
               :max="frameGenLimits.motionLimitPercent.max"
@@ -266,7 +270,7 @@ function resetAdvanced() {
             />
           </span>
           <span class="mt-2 block text-xs leading-5 text-muted">
-            The farthest a generated frame may move the image, as a share of view width. Faster motion shows the real image.
+            {{ t('framegen.settings.motionLimit.description') }}
           </span>
         </label>
 
@@ -278,13 +282,13 @@ function resetAdvanced() {
           />
           <span class="min-w-0">
             <span class="flex flex-wrap items-center gap-2">
-              <span class="eyebrow text-xs uppercase tracking-[0.18em]">Extend head prediction</span>
+              <span class="eyebrow text-xs uppercase tracking-[0.18em]">{{ t('framegen.settings.headPrediction.heading') }}</span>
               <span class="chip-warning rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em]">
-                Experimental
+                {{ t('framegen.experimental') }}
               </span>
             </span>
             <span class="mt-2 block text-xs leading-5 text-muted">
-              Frame Generation has the game render up to ~150 ms ahead, and some runtimes, such as Pimax's, predict your head only ~20 ms of that. This carries your head's turn over the rest, for less black at the edge you turn toward. Turn it on before starting the game.
+              {{ t('framegen.settings.headPrediction.description') }}
             </span>
           </span>
         </label>
@@ -292,7 +296,7 @@ function resetAdvanced() {
 
       <div v-if="!advancedAtDefaults" class="mt-3 flex justify-end">
         <button type="button" class="button-secondary rounded-[0.75rem] px-3 py-1.5 text-xs font-medium" @click="resetAdvanced">
-          Reset advanced settings
+          {{ t('framegen.settings.advanced.reset') }}
         </button>
       </div>
     </details>

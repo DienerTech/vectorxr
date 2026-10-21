@@ -1,1 +1,66 @@
-{}
+{
+  "checks": {
+    "suiteEnabled": {
+      "label": "Suite runtime switch",
+      "enabled": "VectorXR runtime effects are allowed to run.",
+      "disabled": "VectorXR is disabled from the Home runtime switch."
+    },
+    "layerRegistered": {
+      "label": "OpenXR layer registration",
+      "loading": "VectorXR is still reading OpenXR layer registrations.",
+      "registered": "Registered in {slice}.",
+      "missing": "VectorXR was not found in the OpenXR implicit API layer registry."
+    },
+    "layerEnabled": {
+      "label": "OpenXR layer enabled",
+      "loading": "Waiting for OpenXR layer status.",
+      "enabled": "The VectorXR API layer is enabled for future OpenXR launches.",
+      "disabled": "The VectorXR API layer is disabled or unavailable."
+    },
+    "layerDuplicates": {
+      "label": "One VectorXR layer enabled",
+      "detail_one": "{count} VectorXR registration is enabled ({paths}). OpenXR apps crash when two copies load; disable all but one on the OpenXR Layers page.",
+      "detail_other": "{count} VectorXR registrations are enabled ({paths}). OpenXR apps crash when two copies load; disable all but one on the OpenXR Layers page."
+    },
+    "layerFiles": {
+      "label": "Layer files",
+      "pending": "Layer files can be checked after the layer registration is found.",
+      "resolved": "Manifest and DLL paths both resolve.",
+      "missing": "The registered manifest or DLL path is missing."
+    },
+    "configLoaded": {
+      "label": "Config path",
+      "pending": "Config path will appear after settings load."
+    },
+    "recentLog": {
+      "label": "Runtime logs",
+      "available_one": "{count} recent log file available.",
+      "available_other": "{count} recent log files available.",
+      "none": "No VectorXR runtime logs are available yet."
+    },
+    "seenApps": {
+      "label": "Application discovery",
+      "observed_one": "{count} OpenXR app observed.",
+      "observed_other": "{count} OpenXR apps observed.",
+      "none": "No OpenXR applications have been observed yet."
+    }
+  },
+  "overall": {
+    "ready": "Ready",
+    "attention": "Needs attention",
+    "inactive": "Not active",
+    "unknown": "Checking"
+  },
+  "description": {
+    "ready": "VectorXR looks ready for future OpenXR app launches.",
+    "attention": "VectorXR can run, but one or more diagnostics may need review.",
+    "inactive": "VectorXR is not currently ready to apply OpenXR Enhancements.",
+    "unknown": "VectorXR is still collecting system status."
+  },
+  "state": {
+    "pass": "pass",
+    "warn": "warn",
+    "fail": "fail",
+    "info": "info"
+  }
+}

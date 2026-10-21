@@ -10,6 +10,7 @@ import ModuleBindingPage from '../ModuleBindingPage.vue'
 import BindingConflictWarnings from '../BindingConflictWarnings.vue'
 import { bindingLabel, savedBindingConflictWarnings, osdAccentColors, osdBodyRows, osdLayout, pivotSnapViewsConfigured, type OsdBodyRow, type VectorXRConfig, type OsdSettings } from '../../lib/model'
 import { loadRuntimeStatus, type RuntimeStatusSession } from '../../lib/commands'
+import { t, type MessageKey } from '../../i18n/index.ts'
 
 const props = defineProps<{ config: VectorXRConfig; savedConfig: VectorXRConfig }>()
 const osd = computed(() => props.config.core.osd)
@@ -34,7 +35,7 @@ async function refresh() {
   try {
     const status = await loadRuntimeStatus()
     if (!disposed) { sessions.value = status.sessions; statusError.value = '' }
-  } catch { if (!disposed) statusError.value = 'Runtime status is temporarily unavailable.' }
+  } catch { if (!disposed) statusError.value = t('osd.runtimeStatusUnavailable') }
   if (!disposed) poll = setTimeout(refresh, 2000)
 }
 onMounted(refresh)
@@ -51,29 +52,32 @@ function closeBinding() {
   editing.value = null
   void nextTick(() => scroller()?.scrollTo({ top: savedScrollTop }))
 }
-const performanceHint = 'CPU and GPU headroom against the frame budget, video memory with Frame Generation\'s share, and CPU-BOUND or GPU-BOUND when it is clear. Sampled twice a second, only while a layout shows it.'
-const contents: Record<OsdBodyRow, { key: 'showGraph' | 'showPerformance' | 'showTurbo' | 'showFramegen' | 'showPivot' | 'showModules'; label: string; hint: string }> = {
-  graph: { key: 'showGraph', label: 'Frame-time graph', hint: 'Rolling history of the last 120 application frames.' },
-  performance: { key: 'showPerformance', label: 'Performance headroom', hint: performanceHint },
-  turbo: { key: 'showTurbo', label: 'Turbo state', hint: 'Distinguishes disabled, enabled but off, active strategy, safety states, and paused for Frame Generation.' },
-  framegen: { key: 'showFramegen', label: 'Frame Generation state', hint: 'On, Standby, Paused or Off, with the mode and frame rate, and a second line with frame rates or the reason. Shown only in games where Frame Generation is on.' },
-  pivot: { key: 'showPivot', label: 'Pivot state', hint: 'Motion state, Position Assist, and nudges. Apps with Snap Views add a second line for the snap, stacking, and transitions.' },
-  modules: { key: 'showModules', label: 'Active enhancements', hint: 'Depth, Pivot, Turbo, Quadviews, and Frame Generation enabled for this app.' },
+// Message keys, translated at render so a language change applies.
+const contents: Record<OsdBodyRow, { key: 'showGraph' | 'showPerformance' | 'showTurbo' | 'showFramegen' | 'showPivot' | 'showModules'; labelKey: MessageKey; hintKey: MessageKey }> = {
+  graph: { key: 'showGraph', labelKey: 'osd.rows.graph.label', hintKey: 'osd.rows.graph.hint' },
+  performance: { key: 'showPerformance', labelKey: 'osd.rows.performance.label', hintKey: 'osd.rows.performance.hint' },
+  turbo: { key: 'showTurbo', labelKey: 'osd.rows.turbo.label', hintKey: 'osd.rows.turbo.hint' },
+  framegen: { key: 'showFramegen', labelKey: 'osd.rows.framegen.label', hintKey: 'osd.rows.framegen.hint' },
+  pivot: { key: 'showPivot', labelKey: 'osd.rows.pivot.label', hintKey: 'osd.rows.pivot.hint' },
+  modules: { key: 'showModules', labelKey: 'osd.rows.modules.label', hintKey: 'osd.rows.modules.hint' },
 }
 const compactContents = [
-  { key: 'compactShowPerformance', label: 'Performance headroom', hint: 'CPU and GPU headroom and video memory in one line; the bound side says so.' },
-  { key: 'compactShowTurbo', label: 'Turbo state', hint: 'Current strategy, off, waiting, safety state, or paused for Frame Generation.' },
-  { key: 'compactShowFramegen', label: 'Frame Generation state', hint: 'Frame rate and game-to-headset frame rates, or Standby, Paused or Off.' },
-  { key: 'compactShowPivot', label: 'Pivot state', hint: 'Motion state in a short label, plus a Snap View line when Snap Views are configured.' },
-] as const
+  { key: 'compactShowPerformance', labelKey: 'osd.rows.performance.label', hintKey: 'osd.compactRows.performanceHint' },
+  { key: 'compactShowTurbo', labelKey: 'osd.rows.turbo.label', hintKey: 'osd.compactRows.turboHint' },
+  { key: 'compactShowFramegen', labelKey: 'osd.rows.framegen.label', hintKey: 'osd.compactRows.framegenHint' },
+  { key: 'compactShowPivot', labelKey: 'osd.rows.pivot.label', hintKey: 'osd.compactRows.pivotHint' },
+] as const satisfies readonly { key: string; labelKey: MessageKey; hintKey: MessageKey }[]
 const compactHeaders = [
-  { key: 'compactShowBrand', label: 'VectorXR name' },
-  { key: 'compactShowApp', label: 'Application name' },
-  { key: 'compactShowRuntime', label: 'OpenXR runtime' },
-  { key: 'compactShowClock', label: 'Local clock' },
-] as const
-const metricChoices = { all: 'FPS + average frame time', fps: 'FPS only', frameTime: 'Average frame time only', none: 'Hidden' } as const
-const framegenFpsHint = 'In games with Frame Generation on: FG ON with the frames per second the headset shows, or STBY, WAIT, PAUSED, OFF or N/A.'
+  { key: 'compactShowBrand', labelKey: 'osd.header.brand' },
+  { key: 'compactShowApp', labelKey: 'osd.header.app' },
+  { key: 'compactShowRuntime', labelKey: 'osd.header.runtime' },
+  { key: 'compactShowClock', labelKey: 'osd.header.clock' },
+] as const satisfies readonly { key: string; labelKey: MessageKey }[]
+const metricChoices = { all: 'osd.contents.metrics.all', fps: 'osd.contents.metrics.fps', frameTime: 'osd.contents.metrics.frameTime', none: 'osd.contents.metrics.none' } as const satisfies Record<string, MessageKey>
+const accentNames: Record<keyof typeof osdAccentColors, MessageKey> = {
+  teal: 'osd.appearance.colors.teal', copper: 'osd.appearance.colors.copper', blue: 'osd.appearance.colors.blue',
+  violet: 'osd.appearance.colors.violet', rose: 'osd.appearance.colors.rose',
+}
 const compactEmpty = computed(() => osdCompactLayout(osd.value).empty)
 function fpsOnly() {
   Object.assign(osd.value, { compactMetrics: 'fps', compactShowBrand: false, compactShowApp: false,
@@ -120,24 +124,24 @@ function savePreset() {
   const name = presetName.value.trim().slice(0, 60)
   if (!name) return
   const index = osd.value.customPresets.findIndex(p => p.name.toLowerCase() === name.toLowerCase())
-  if (index < 0 && osd.value.customPresets.length >= 50) { presetMessage.value = 'You can save up to 50 presets.'; return }
+  if (index < 0 && osd.value.customPresets.length >= 50) { presetMessage.value = t('osd.presets.limit'); return }
   const preset = { name, settings: osdLayout(osd.value) }
   if (index >= 0) osd.value.customPresets.splice(index, 1, preset)
   else osd.value.customPresets.push(preset)
   selectedPreset.value = name; presetName.value = name
-  presetMessage.value = `${name} ${index >= 0 ? 'updated' : 'added'}. Save Changes to keep it.`
+  presetMessage.value = t(index >= 0 ? 'osd.presets.updated' : 'osd.presets.added', { name })
 }
 function loadPreset() {
   const preset = osd.value.customPresets.find(p => p.name === selectedPreset.value)
   if (!preset) return
   Object.assign(osd.value, { ...preset.settings, bodyOrder: [...preset.settings.bodyOrder] })
   previewCompact.value = osd.value.compact
-  presetName.value = preset.name; presetMessage.value = `${preset.name} loaded. Save Changes to apply in VR.`
+  presetName.value = preset.name; presetMessage.value = t('osd.presets.loaded', { name: preset.name })
 }
 function deletePreset() {
   const name = selectedPreset.value
   osd.value.customPresets = osd.value.customPresets.filter(p => p.name !== name)
-  selectedPreset.value = ''; presetName.value = ''; presetMessage.value = `${name} removed. Save Changes to keep this change.`
+  selectedPreset.value = ''; presetName.value = ''; presetMessage.value = t('osd.presets.removed', { name })
 }
 function preset(name: 'balanced' | 'minimal' | 'performance') {
   const shared: Partial<OsdSettings> = { opacity: 90, accent: 'teal', distanceMeters: 1.2, updateHz: 5,
@@ -152,45 +156,45 @@ function preset(name: 'balanced' | 'minimal' | 'performance') {
   Object.assign(osd.value, shared, layout)
   previewCompact.value = osd.value.compact
   selectedPreset.value = ''
-  presetMessage.value = `${name === 'balanced' ? 'Expanded' : name === 'performance' ? 'Performance' : 'Minimal'} applied. Save Changes to apply in VR.`
+  presetMessage.value = t(name === 'balanced' ? 'osd.presets.appliedExpanded' : name === 'performance' ? 'osd.presets.appliedPerformance' : 'osd.presets.appliedMinimal')
 }
 </script>
 
 <template>
-  <ModuleBindingPage v-if="editing" module-label="On-Screen Display" :bindings="osd[editing]"
-    :label="editing === 'toggleBindings' ? 'Show / hide display' : 'Switch compact / expanded'"
-    description="Works in the VR application. Assign a keyboard chord, joystick button, or hat direction. Save to apply it live."
+  <ModuleBindingPage v-if="editing" :module-label="t('osd.title')" :bindings="osd[editing]"
+    :label="editing === 'toggleBindings' ? t('osd.controls.toggleBindingLabel') : t('osd.controls.cycleBindingLabel')"
+    :description="t('osd.controls.bindingDescription')"
     :warnings="warnings" @update:bindings="osd[editing!] = $event" @close="closeBinding" />
   <div v-else class="space-y-4">
     <article class="surface-panel rounded-[1.25rem] border p-5 shadow-panel backdrop-blur">
       <div class="flex flex-wrap items-start justify-between gap-4">
         <div class="min-w-0">
           <div class="flex flex-wrap items-center gap-2">
-            <h2 class="text-2xl font-semibold tracking-tight">On-Screen Display</h2>
-            <span class="chip-success rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em]">Live after Save</span>
+            <h2 class="text-2xl font-semibold tracking-tight">{{ t('osd.title') }}</h2>
+            <span class="chip-success rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em]">{{ t('osd.liveAfterSave') }}</span>
           </div>
-          <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">A head-following performance panel in VR. Direct3D 11, Direct3D 12, and Vulkan, in stereo or Quadviews.</p>
+          <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">{{ t('osd.intro') }}</p>
         </div>
         <label class="pill-toggle inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
           <input v-model="osd.enabled" type="checkbox" class="h-4 w-4 accent-depthxr-copper" />
-          {{ osd.enabled ? 'OSD On' : 'OSD Off' }}
+          {{ osd.enabled ? t('osd.toggleOn') : t('osd.toggleOff') }}
         </label>
       </div>
 
       <section class="mt-4 border-t pt-4" style="border-color: var(--app-border)">
         <div class="mb-3 flex flex-wrap items-center gap-2">
-          <p class="eyebrow mr-1 text-xs font-semibold uppercase tracking-[0.24em]">In-headset controls</p>
+          <p class="eyebrow mr-1 text-xs font-semibold uppercase tracking-[0.24em]">{{ t('osd.controls.heading') }}</p>
           <span v-if="statusError" class="text-xs text-muted">{{ statusError }}</span>
-          <span v-else-if="!sessions.length" class="chip-idle rounded-full px-2.5 py-1 text-xs">No VR application running</span>
+          <span v-else-if="!sessions.length" class="chip-idle rounded-full px-2.5 py-1 text-xs">{{ t('osd.controls.noSession') }}</span>
           <template v-else>
             <span v-for="session in sessions" :key="session.sessionId" class="chip-idle rounded-full px-2.5 py-1 text-xs">
-              <strong class="font-semibold">{{ session.application }}</strong> · {{ session.state.osdMessage || 'Needs the updated VectorXR layer' }}<template v-if="session.state.osdVisible"> · {{ session.state.osdCompact ? 'Compact' : 'Expanded' }}</template>
+              <strong class="font-semibold">{{ session.application }}</strong> · {{ session.state.osdMessage || t('osd.controls.needsUpdatedLayer') }}<template v-if="session.state.osdVisible"> · {{ session.state.osdCompact ? t('osd.layout.compact') : t('osd.layout.expanded') }}</template>
             </span>
           </template>
         </div>
         <div class="grid gap-3 lg:grid-cols-2">
-          <ModuleBindingPanel heading="Show / hide" :bindings="osd.toggleBindings" @edit="openBinding('toggleBindings')" />
-          <ModuleBindingPanel heading="Compact / expanded" :bindings="osd.cycleBindings" @edit="openBinding('cycleBindings')" />
+          <ModuleBindingPanel :heading="t('osd.controls.toggleHeading')" :bindings="osd.toggleBindings" @edit="openBinding('toggleBindings')" />
+          <ModuleBindingPanel :heading="t('osd.controls.cycleHeading')" :bindings="osd.cycleBindings" @edit="openBinding('cycleBindings')" />
         </div>
         <BindingConflictWarnings class="mt-3" :warnings="warnings" />
       </section>
@@ -198,133 +202,133 @@ function preset(name: 'balanced' | 'minimal' | 'performance') {
       <details class="section-disclosure mt-4 border-t pt-4" style="border-color: var(--app-border)">
         <summary class="flex items-center gap-2 text-sm font-medium text-muted">
           <svg aria-hidden="true" class="section-chevron h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.2 14.8a1 1 0 0 1 0-1.4L10.6 10 7.2 6.6a1 1 0 1 1 1.4-1.4l4.1 4.1a1 1 0 0 1 0 1.4l-4.1 4.1a1 1 0 0 1-1.4 0Z" clip-rule="evenodd" /></svg>
-          What applies live, and what am I measuring?
+          {{ t('osd.explainer.summary') }}
         </summary>
         <div class="mt-3 max-w-4xl space-y-2 text-xs leading-5 text-muted">
-          <p>Every setting on this page applies after Save, including enabling the OSD in a running game. Bindings change visibility and layout immediately for the current session. The next session uses your saved starting layout and visibility.</p>
-          <p>The overlay measures intervals between the application's xrEndFrame calls over the last 120 frames. P95 is the interval at the 95th percentile; lower, steadier frame times are better. These values do not measure GPU work, reprojection, or compositor frame rate. Turbo can make application cadence differ from the headset's refresh rate. With Frame Generation on, FG ON beside FPS shows the frames per second the headset gets, generated ones included.</p>
-          <p>Performance headroom compares the game's CPU time per frame (from its xrWaitFrame's return to its xrEndFrame) with the frame budget: the headset's refresh period, or with Frame Generation generating, the game's own target (45 fps at 90 Hz and 2x). GPU headroom is 100% less the whole GPU's 3D utilization from Windows' GPU counters, the runtime's compositor and other apps included; "game" is the game's own share, and "thread" how busy the game's thread that ends frames is. The CPU time is hidden while the game waits for its next frame before ending the last (OpenComposite does) or Turbo paces it. VRAM is the game's video memory use and the budget Windows gives it, with Frame Generation's own images. CPU-BOUND or GPU-BOUND shows only when it is clear; with Frame Generation, from which side its late frames were late.</p>
-          <p>Turbo can be enabled after Save in a running game, and the in-game binding switches it off/on; live enable and Async toggles have been observed in DCS. Experimental timing controls and Quadviews enable/disable changes still require an application restart; the expanded OSD shows these pending changes. Turning Frame Generation on also needs a restart; turning it off applies at once. Other VectorXR controls retain the behavior described on their own settings pages.</p>
-          <p>This is an information panel with in-game visibility and layout controls. Edit settings in the desktop app. OpenGL is not supported. A runtime with no spare composition layers cannot show the panel.</p>
+          <p>{{ t('osd.explainer.live') }}</p>
+          <p>{{ t('osd.explainer.measuring') }}</p>
+          <p>{{ t('osd.explainer.headroom') }}</p>
+          <p>{{ t('osd.explainer.turbo') }}</p>
+          <p>{{ t('osd.explainer.panel') }}</p>
         </div>
       </details>
     </article>
 
     <article class="surface-panel overflow-hidden rounded-[1.25rem] border shadow-panel backdrop-blur">
       <div class="flex flex-wrap items-center gap-2 px-5 py-3">
-        <div class="segmented" role="group" aria-label="Layout to preview and edit">
-          <button v-for="compact in [true, false]" :key="String(compact)" type="button" class="segmented-option" :class="{ 'segmented-option-active': previewCompact === compact }" :aria-pressed="previewCompact === compact" @click="previewCompact = compact">{{ compact ? 'Compact' : 'Expanded' }}</button>
+        <div class="segmented" role="group" :aria-label="t('osd.layout.editAria')">
+          <button v-for="compact in [true, false]" :key="String(compact)" type="button" class="segmented-option" :class="{ 'segmented-option-active': previewCompact === compact }" :aria-pressed="previewCompact === compact" @click="previewCompact = compact">{{ compact ? t('osd.layout.compact') : t('osd.layout.expanded') }}</button>
         </div>
-        <span v-if="osd.compact === previewCompact" class="chip-accent rounded-full px-2.5 py-1 text-[11px] font-medium uppercase tracking-[0.15em]" title="The OSD opens in this layout each session. The in-headset binding switches layouts during play.">Starting layout</span>
-        <button v-else type="button" class="button-secondary rounded-[0.75rem] px-3 py-1.5 text-xs font-medium" title="The OSD opens in this layout each session. The in-headset binding switches layouts during play." @click="osd.compact = previewCompact">Start in {{ previewCompact ? 'Compact' : 'Expanded' }}</button>
+        <span v-if="osd.compact === previewCompact" class="chip-accent rounded-full px-2.5 py-1 text-[11px] font-medium uppercase tracking-[0.15em]" :title="t('osd.layout.startingHint')">{{ t('osd.layout.starting') }}</span>
+        <button v-else type="button" class="button-secondary rounded-[0.75rem] px-3 py-1.5 text-xs font-medium" :title="t('osd.layout.startingHint')" @click="osd.compact = previewCompact">{{ previewCompact ? t('osd.layout.startInCompact') : t('osd.layout.startInExpanded') }}</button>
         <div class="ml-auto flex flex-wrap items-center gap-2">
-          <div class="segmented" role="group" aria-label="Preview scale">
-            <button v-for="mode in [false, true]" :key="String(mode)" type="button" class="segmented-option" :class="{ 'segmented-option-active': previewLegible === mode }" :aria-pressed="previewLegible === mode" @click="previewLegible = mode">{{ mode ? 'Legible' : 'Placement' }}</button>
+          <div class="segmented" role="group" :aria-label="t('osd.previewScale.aria')">
+            <button v-for="mode in [false, true]" :key="String(mode)" type="button" class="segmented-option" :class="{ 'segmented-option-active': previewLegible === mode }" :aria-pressed="previewLegible === mode" @click="previewLegible = mode">{{ mode ? t('osd.previewScale.legible') : t('osd.previewScale.placement') }}</button>
           </div>
-          <button type="button" class="button-secondary rounded-[0.75rem] px-3 py-1.5 text-xs font-medium" @click="previewWindow.open">{{ previewWindow.opened.value ? 'Focus window' : 'Pop out' }}</button>
+          <button type="button" class="button-secondary rounded-[0.75rem] px-3 py-1.5 text-xs font-medium" @click="previewWindow.open">{{ previewWindow.opened.value ? t('osd.focusWindow') : t('osd.popOut') }}</button>
         </div>
       </div>
       <p v-if="previewWindow.error.value" role="alert" class="chip-danger px-5 py-2 text-xs">{{ previewWindow.error.value }}</p>
       <OsdPreview v-if="!previewWindow.opened.value" v-model:legible="previewLegible" :settings="previewSettings" :pivot-snap-line="previewPivotSnapLine" :diagnostics="previewDiagnostics" @position="(horizontal, vertical) => { osd.horizontalDegrees = horizontal; osd.verticalDegrees = vertical }" />
-      <p v-else class="surface-panel-soft border-y px-5 py-4 text-xs text-muted" style="border-color: var(--app-border)">Preview is open in a separate window.</p>
+      <p v-else class="surface-panel-soft border-y px-5 py-4 text-xs text-muted" style="border-color: var(--app-border)">{{ t('osd.previewOpenElsewhere') }}</p>
 
       <div class="grid gap-x-8 gap-y-6 border-t p-5 lg:grid-cols-2" style="border-color: var(--app-border)">
         <section class="min-w-0 space-y-3">
           <div class="flex flex-wrap items-center justify-between gap-2">
-            <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">{{ previewCompact ? 'Compact' : 'Expanded' }} contents</p>
-            <button v-if="previewCompact" type="button" class="button-secondary rounded-[0.75rem] px-3 py-1.5 text-xs font-medium" title="Clears the header and status rows for a tiny display. Size still controls text size." @click="fpsOnly">Just FPS</button>
-            <span v-else class="text-xs text-muted">FPS, average, and P95 always shown</span>
+            <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">{{ previewCompact ? t('osd.contents.compactHeading') : t('osd.contents.expandedHeading') }}</p>
+            <button v-if="previewCompact" type="button" class="button-secondary rounded-[0.75rem] px-3 py-1.5 text-xs font-medium" :title="t('osd.contents.justFpsHint')" @click="fpsOnly">{{ t('osd.contents.justFps') }}</button>
+            <span v-else class="text-xs text-muted">{{ t('osd.contents.alwaysShown') }}</span>
           </div>
 
           <template v-if="previewCompact">
-            <label class="block"><span class="mb-1.5 block text-xs text-muted">Performance</span><select v-model="osd.compactMetrics" class="app-input manual-input-select w-full rounded-[0.75rem] px-3 py-2 text-sm"><option v-for="(label, value) in metricChoices" :key="value" :value="value">{{ label }}</option></select></label>
+            <label class="block"><span class="mb-1.5 block text-xs text-muted">{{ t('osd.contents.performance') }}</span><select v-model="osd.compactMetrics" class="app-input manual-input-select w-full rounded-[0.75rem] px-3 py-2 text-sm"><option v-for="(labelKey, value) in metricChoices" :key="value" :value="value">{{ t(labelKey) }}</option></select></label>
             <fieldset>
-              <legend class="mb-2 text-xs text-muted">Header · turn all off to remove it</legend>
-              <div class="grid grid-cols-2 gap-2"><label v-for="item in compactHeaders" :key="item.key" class="flex items-center gap-2.5 text-sm"><input v-model="osd[item.key]" type="checkbox" class="accent-depthxr-copper" />{{ item.label }}</label></div>
+              <legend class="mb-2 text-xs text-muted">{{ t('osd.contents.headerLegend') }}</legend>
+              <div class="grid grid-cols-2 gap-2"><label v-for="item in compactHeaders" :key="item.key" class="flex items-center gap-2.5 text-sm"><input v-model="osd[item.key]" type="checkbox" class="accent-depthxr-copper" />{{ t(item.labelKey) }}</label></div>
             </fieldset>
             <fieldset>
-              <legend class="mb-2 text-xs text-muted">Status</legend>
-              <div class="grid grid-cols-2 gap-2"><label v-for="item in compactContents" :key="item.key" class="flex items-center gap-2.5 text-sm" :title="item.hint"><input v-model="osd[item.key]" type="checkbox" class="accent-depthxr-copper" />{{ item.label }}</label></div>
+              <legend class="mb-2 text-xs text-muted">{{ t('osd.contents.statusLegend') }}</legend>
+              <div class="grid grid-cols-2 gap-2"><label v-for="item in compactContents" :key="item.key" class="flex items-center gap-2.5 text-sm" :title="t(item.hintKey)"><input v-model="osd[item.key]" type="checkbox" class="accent-depthxr-copper" />{{ t(item.labelKey) }}</label></div>
             </fieldset>
-            <p v-if="compactEmpty" role="status" class="chip-warning rounded-[0.75rem] px-3 py-2 text-xs">Nothing selected. Compact stays hidden until you choose a value.</p>
+            <p v-if="compactEmpty" role="status" class="chip-warning rounded-[0.75rem] px-3 py-2 text-xs">{{ t('osd.contents.nothingSelected') }}</p>
           </template>
 
           <template v-else>
             <fieldset>
-              <legend class="mb-2 text-xs text-muted">Header · turn all off to remove it</legend>
+              <legend class="mb-2 text-xs text-muted">{{ t('osd.contents.headerLegend') }}</legend>
               <div class="grid grid-cols-2 gap-2">
-                <label class="flex items-center gap-2.5 text-sm"><input v-model="osd.showBrand" type="checkbox" class="accent-depthxr-copper" />VectorXR name</label>
-                <label class="flex items-center gap-2.5 text-sm"><input v-model="osd.showApp" type="checkbox" class="accent-depthxr-copper" />Application name</label>
-                <label class="flex items-center gap-2.5 text-sm"><input v-model="osd.showRuntime" type="checkbox" class="accent-depthxr-copper" />OpenXR runtime</label>
-                <label class="flex items-center gap-2.5 text-sm"><input v-model="osd.showClock" type="checkbox" class="accent-depthxr-copper" />Local clock</label>
+                <label class="flex items-center gap-2.5 text-sm"><input v-model="osd.showBrand" type="checkbox" class="accent-depthxr-copper" />{{ t('osd.header.brand') }}</label>
+                <label class="flex items-center gap-2.5 text-sm"><input v-model="osd.showApp" type="checkbox" class="accent-depthxr-copper" />{{ t('osd.header.app') }}</label>
+                <label class="flex items-center gap-2.5 text-sm"><input v-model="osd.showRuntime" type="checkbox" class="accent-depthxr-copper" />{{ t('osd.header.runtime') }}</label>
+                <label class="flex items-center gap-2.5 text-sm"><input v-model="osd.showClock" type="checkbox" class="accent-depthxr-copper" />{{ t('osd.header.clock') }}</label>
               </div>
             </fieldset>
             <fieldset>
-              <legend class="mb-2 text-xs text-muted">Rows · drag or use the arrows to reorder</legend>
+              <legend class="mb-2 text-xs text-muted">{{ t('osd.contents.rowsLegend') }}</legend>
               <div ref="bodyList" class="space-y-1" @pointermove="dragRow" @pointerup="endRowDrag" @pointercancel="endRowDrag" @lostpointercapture="endRowDrag">
                 <div v-for="(row, index) in osd.bodyOrder" :key="row" :data-osd-row="row" :class="{ 'osd-row-dragging': draggedRow === row }" class="osd-row flex items-center gap-2 rounded-[0.75rem] border py-0.5 pl-1 pr-1.5">
-                  <button type="button" class="osd-drag-handle rounded px-1.5 py-1 text-muted" :aria-label="`Drag ${contents[row].label} to reorder`" title="Drag to reorder; use arrow keys to move" @pointerdown.prevent="startRowDrag($event, row)" @keydown.up.prevent="moveRow(row, -1)" @keydown.down.prevent="moveRow(row, 1)">⠿</button>
-                  <label class="flex min-w-0 flex-1 items-center gap-2.5 text-sm" :title="contents[row].hint"><input v-model="osd[contents[row].key]" type="checkbox" class="accent-depthxr-copper" /><span class="truncate">{{ contents[row].label }}</span></label>
-                  <button type="button" :disabled="index === 0" :aria-label="`Move ${contents[row].label} up`" class="button-secondary rounded px-1.5 py-0.5 text-xs disabled:opacity-30" @click="moveRow(row, -1)">↑</button>
-                  <button type="button" :disabled="index === osd.bodyOrder.length - 1" :aria-label="`Move ${contents[row].label} down`" class="button-secondary rounded px-1.5 py-0.5 text-xs disabled:opacity-30" @click="moveRow(row, 1)">↓</button>
+                  <button type="button" class="osd-drag-handle rounded px-1.5 py-1 text-muted" :aria-label="t('osd.contents.dragRow', { row: t(contents[row].labelKey) })" :title="t('osd.contents.dragHint')" @pointerdown.prevent="startRowDrag($event, row)" @keydown.up.prevent="moveRow(row, -1)" @keydown.down.prevent="moveRow(row, 1)">⠿</button>
+                  <label class="flex min-w-0 flex-1 items-center gap-2.5 text-sm" :title="t(contents[row].hintKey)"><input v-model="osd[contents[row].key]" type="checkbox" class="accent-depthxr-copper" /><span class="truncate">{{ t(contents[row].labelKey) }}</span></label>
+                  <button type="button" :disabled="index === 0" :aria-label="t('osd.contents.moveUp', { row: t(contents[row].labelKey) })" class="button-secondary rounded px-1.5 py-0.5 text-xs disabled:opacity-30" @click="moveRow(row, -1)">↑</button>
+                  <button type="button" :disabled="index === osd.bodyOrder.length - 1" :aria-label="t('osd.contents.moveDown', { row: t(contents[row].labelKey) })" class="button-secondary rounded px-1.5 py-0.5 text-xs disabled:opacity-30" @click="moveRow(row, 1)">↓</button>
                 </div>
               </div>
             </fieldset>
           </template>
 
-          <label class="flex items-start gap-2.5 text-sm" :title="framegenFpsHint">
+          <label class="flex items-start gap-2.5 text-sm" :title="t('osd.contents.framegenFpsHint')">
             <input v-model="osd.showFramegenFps" type="checkbox" class="mt-0.5 accent-depthxr-copper" />
-            <span>Frame Generation beside FPS <span class="text-xs text-muted">(both layouts)</span>
-              <span class="mt-0.5 block text-xs leading-5 text-muted">{{ framegenFpsHint }}</span>
+            <span>{{ t('osd.contents.framegenFps') }} <span class="text-xs text-muted">{{ t('osd.contents.bothLayouts') }}</span>
+              <span class="mt-0.5 block text-xs leading-5 text-muted">{{ t('osd.contents.framegenFpsHint') }}</span>
             </span>
           </label>
-          <label v-if="osd.showClock || osd.compactShowClock" class="flex items-center justify-between gap-3 text-xs text-muted">Clock format (both layouts)<select v-model="osd.clockFormat" aria-label="Clock format" class="app-input manual-input-select rounded-[0.75rem] px-2 py-1 text-xs"><option value="12">12 hour · 8:42 PM</option><option value="24">24 hour · 20:42</option></select></label>
+          <label v-if="osd.showClock || osd.compactShowClock" class="flex items-center justify-between gap-3 text-xs text-muted">{{ t('osd.contents.clockFormat') }}<select v-model="osd.clockFormat" :aria-label="t('osd.contents.clockFormatAria')" class="app-input manual-input-select rounded-[0.75rem] px-2 py-1 text-xs"><option value="12">{{ t('osd.contents.clock12') }}</option><option value="24">{{ t('osd.contents.clock24') }}</option></select></label>
         </section>
 
         <section class="min-w-0 space-y-6">
           <div class="space-y-3">
             <div class="flex items-center justify-between gap-2">
-              <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Position &amp; size</p>
-              <button type="button" class="button-secondary rounded-[0.75rem] px-3 py-1.5 text-xs font-medium" :disabled="osd.horizontalDegrees === 0 && osd.verticalDegrees === 0" @click="osd.horizontalDegrees = 0; osd.verticalDegrees = 0">Center in view</button>
+              <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">{{ t('osd.position.heading') }}</p>
+              <button type="button" class="button-secondary rounded-[0.75rem] px-3 py-1.5 text-xs font-medium" :disabled="osd.horizontalDegrees === 0 && osd.verticalDegrees === 0" @click="osd.horizontalDegrees = 0; osd.verticalDegrees = 0">{{ t('osd.position.center') }}</button>
             </div>
             <div class="grid gap-x-6 gap-y-3 sm:grid-cols-2">
-              <label class="osd-control"><span>Horizontal <output>{{ osd.horizontalDegrees }}°</output></span><input v-model.number="osd.horizontalDegrees" class="accent-depthxr-copper" aria-label="Horizontal position" type="range" min="-40" max="40" step="1" /></label>
-              <label class="osd-control"><span>Vertical <output>{{ osd.verticalDegrees }}°</output></span><input v-model.number="osd.verticalDegrees" class="accent-depthxr-copper" aria-label="Vertical position" type="range" min="-35" max="35" step="1" /></label>
-              <label class="osd-control"><span>Size <output>{{ osd.scale }}%</output></span><input v-model.number="osd.scale" class="accent-depthxr-copper" aria-label="Display size" type="range" min="25" max="150" step="5" /></label>
-              <label class="osd-control"><span>Viewing distance <output>{{ osd.distanceMeters.toFixed(1) }} m</output></span><input v-model.number="osd.distanceMeters" class="accent-depthxr-copper" aria-label="Viewing distance" type="range" min="0.5" max="3" step="0.1" /></label>
+              <label class="osd-control"><span>{{ t('osd.position.horizontal') }} <output>{{ osd.horizontalDegrees }}°</output></span><input v-model.number="osd.horizontalDegrees" class="accent-depthxr-copper" :aria-label="t('osd.position.horizontalAria')" type="range" min="-40" max="40" step="1" /></label>
+              <label class="osd-control"><span>{{ t('osd.position.vertical') }} <output>{{ osd.verticalDegrees }}°</output></span><input v-model.number="osd.verticalDegrees" class="accent-depthxr-copper" :aria-label="t('osd.position.verticalAria')" type="range" min="-35" max="35" step="1" /></label>
+              <label class="osd-control"><span>{{ t('osd.position.size') }} <output>{{ osd.scale }}%</output></span><input v-model.number="osd.scale" class="accent-depthxr-copper" :aria-label="t('osd.position.sizeAria')" type="range" min="25" max="150" step="5" /></label>
+              <label class="osd-control"><span>{{ t('osd.position.distance') }} <output>{{ osd.distanceMeters.toFixed(1) }} m</output></span><input v-model.number="osd.distanceMeters" class="accent-depthxr-copper" :aria-label="t('osd.position.distanceAria')" type="range" min="0.5" max="3" step="0.1" /></label>
             </div>
           </div>
 
           <div class="space-y-3">
-            <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Appearance</p>
+            <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">{{ t('osd.appearance.heading') }}</p>
             <div class="grid items-start gap-x-6 gap-y-3 sm:grid-cols-2">
-              <label class="osd-control"><span>Opacity <output>{{ osd.opacity }}%</output></span><input v-model.number="osd.opacity" class="accent-depthxr-copper" aria-label="Display opacity" type="range" min="30" max="100" step="1" /></label>
-              <label class="osd-control" title="Frame history samples every frame. Higher rates redraw the panel more often."><span>Refresh rate</span><select v-model.number="osd.updateHz" class="app-input manual-input-select mt-1.5 w-full rounded-[0.75rem] px-3 py-1.5 text-sm"><option v-for="hz in [1, 2, 5, 10, 20]" :key="hz" :value="hz">{{ hz }} Hz{{ hz === 5 ? ' · Recommended' : '' }}</option><option v-if="![1, 2, 5, 10, 20].includes(osd.updateHz)" :value="osd.updateHz">{{ osd.updateHz }} Hz</option></select></label>
+              <label class="osd-control"><span>{{ t('osd.appearance.opacity') }} <output>{{ osd.opacity }}%</output></span><input v-model.number="osd.opacity" class="accent-depthxr-copper" :aria-label="t('osd.appearance.opacityAria')" type="range" min="30" max="100" step="1" /></label>
+              <label class="osd-control" :title="t('osd.appearance.refreshRateHint')"><span>{{ t('osd.appearance.refreshRate') }}</span><select v-model.number="osd.updateHz" class="app-input manual-input-select mt-1.5 w-full rounded-[0.75rem] px-3 py-1.5 text-sm"><option v-for="hz in [1, 2, 5, 10, 20]" :key="hz" :value="hz">{{ hz === 5 ? t('osd.appearance.rateRecommended', { hz }) : `${hz} Hz` }}</option><option v-if="![1, 2, 5, 10, 20].includes(osd.updateHz)" :value="osd.updateHz">{{ osd.updateHz }} Hz</option></select></label>
             </div>
-            <div class="flex flex-wrap gap-1.5" role="group" aria-label="Accent color">
-              <button v-for="(hex, color) in osdAccentColors" :key="color" type="button" class="color-choice rounded-full border px-2.5 py-1 text-xs capitalize" :aria-pressed="osd.accent === color" :style="{ '--swatch': hex }" @click="osd.accent = color; colorExpanded = false"><i />{{ color }}</button>
-              <button type="button" class="color-choice rounded-full border px-2.5 py-1 text-xs" :aria-pressed="osd.accent === 'custom'" :aria-expanded="colorExpanded" aria-controls="osd-custom-color" :style="{ '--swatch': osd.customColor }" @click="customColor"><i />Custom</button>
+            <div class="flex flex-wrap gap-1.5" role="group" :aria-label="t('osd.appearance.accentAria')">
+              <button v-for="(hex, color) in osdAccentColors" :key="color" type="button" class="color-choice rounded-full border px-2.5 py-1 text-xs capitalize" :aria-pressed="osd.accent === color" :style="{ '--swatch': hex }" @click="osd.accent = color; colorExpanded = false"><i />{{ t(accentNames[color]) }}</button>
+              <button type="button" class="color-choice rounded-full border px-2.5 py-1 text-xs" :aria-pressed="osd.accent === 'custom'" :aria-expanded="colorExpanded" aria-controls="osd-custom-color" :style="{ '--swatch': osd.customColor }" @click="customColor"><i />{{ t('common.custom') }}</button>
             </div>
             <OsdColorPicker v-if="colorExpanded" id="osd-custom-color" v-model="osd.customColor" class="surface-panel-soft rounded-[1rem] border p-4" style="border-color: var(--app-border)" />
-            <label class="flex items-center gap-2.5 text-sm"><input v-model="osd.visibleOnStart" type="checkbox" class="accent-depthxr-copper" />Show automatically when enabled or a session starts</label>
+            <label class="flex items-center gap-2.5 text-sm"><input v-model="osd.visibleOnStart" type="checkbox" class="accent-depthxr-copper" />{{ t('osd.appearance.visibleOnStart') }}</label>
           </div>
         </section>
       </div>
-      <div class="flex flex-wrap items-center gap-2 border-t px-5 py-3" style="border-color: var(--app-border)" aria-label="Display presets">
-        <p class="eyebrow mr-1 text-xs font-semibold uppercase tracking-[0.24em]" title="Presets apply position, appearance, and contents together.">Presets</p>
-        <button type="button" class="button-secondary rounded-[0.75rem] px-3 py-1.5 text-xs font-medium" @click="preset('balanced')">Expanded</button>
-        <button type="button" class="button-secondary rounded-[0.75rem] px-3 py-1.5 text-xs font-medium" @click="preset('performance')">Performance</button>
-        <button type="button" class="button-secondary rounded-[0.75rem] px-3 py-1.5 text-xs font-medium" @click="preset('minimal')">Minimal</button>
+      <div class="flex flex-wrap items-center gap-2 border-t px-5 py-3" style="border-color: var(--app-border)" :aria-label="t('osd.presets.aria')">
+        <p class="eyebrow mr-1 text-xs font-semibold uppercase tracking-[0.24em]" :title="t('osd.presets.hint')">{{ t('osd.presets.heading') }}</p>
+        <button type="button" class="button-secondary rounded-[0.75rem] px-3 py-1.5 text-xs font-medium" @click="preset('balanced')">{{ t('osd.presets.expanded') }}</button>
+        <button type="button" class="button-secondary rounded-[0.75rem] px-3 py-1.5 text-xs font-medium" @click="preset('performance')">{{ t('osd.presets.performance') }}</button>
+        <button type="button" class="button-secondary rounded-[0.75rem] px-3 py-1.5 text-xs font-medium" @click="preset('minimal')">{{ t('osd.presets.minimal') }}</button>
         <span class="mx-1 hidden h-5 border-l sm:block" style="border-color: var(--app-border)" aria-hidden="true" />
-        <select v-model="selectedPreset" aria-label="Saved custom presets" class="app-input manual-input-select w-44 rounded-[0.75rem] px-3 py-1.5 text-xs" @change="loadPreset">
-          <option value="">{{ osd.customPresets.length ? 'Saved presets…' : 'No saved presets' }}</option>
+        <select v-model="selectedPreset" :aria-label="t('osd.presets.savedAria')" class="app-input manual-input-select w-44 rounded-[0.75rem] px-3 py-1.5 text-xs" @change="loadPreset">
+          <option value="">{{ osd.customPresets.length ? t('osd.presets.savedPlaceholder') : t('osd.presets.noneSaved') }}</option>
           <option v-for="item in osd.customPresets" :key="item.name" :value="item.name">{{ item.name }}</option>
         </select>
-        <button v-if="selectedPreset" type="button" class="button-secondary rounded-[0.75rem] px-3 py-1.5 text-xs font-medium" title="Reload the selected preset into the controls" @click="loadPreset">Reload</button>
-        <button v-if="selectedPreset" type="button" class="button-secondary rounded-[0.75rem] p-1.5" title="Delete selected preset" aria-label="Delete selected preset" @click="deletePreset"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 6h18 M9 6V3h6v3 M5 6l1 15h12l1-15 M10 10v7 M14 10v7" /></svg></button>
+        <button v-if="selectedPreset" type="button" class="button-secondary rounded-[0.75rem] px-3 py-1.5 text-xs font-medium" :title="t('osd.presets.reloadHint')" @click="loadPreset">{{ t('osd.presets.reload') }}</button>
+        <button v-if="selectedPreset" type="button" class="button-secondary rounded-[0.75rem] p-1.5" :title="t('osd.presets.delete')" :aria-label="t('osd.presets.delete')" @click="deletePreset"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 6h18 M9 6V3h6v3 M5 6l1 15h12l1-15 M10 10v7 M14 10v7" /></svg></button>
         <div class="flex items-center gap-1">
-          <input v-model="presetName" maxlength="60" aria-label="Preset name" class="app-input w-44 rounded-[0.75rem] px-3 py-1.5 text-xs" placeholder="Save current as…" @keydown.enter.prevent="savePreset" />
-          <button type="button" class="button-secondary rounded-[0.75rem] p-1.5 disabled:opacity-40" :disabled="!presetName.trim()" :title="existingPreset ? 'Update saved preset' : 'Save new preset'" :aria-label="existingPreset ? 'Update saved preset' : 'Save new preset'" @click="savePreset"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 3h13l4 4v14H3V3z M7 3v6h10V3 M7 21v-8h10v8" /></svg></button>
+          <input v-model="presetName" maxlength="60" :aria-label="t('osd.presets.nameAria')" class="app-input w-44 rounded-[0.75rem] px-3 py-1.5 text-xs" :placeholder="t('osd.presets.namePlaceholder')" @keydown.enter.prevent="savePreset" />
+          <button type="button" class="button-secondary rounded-[0.75rem] p-1.5 disabled:opacity-40" :disabled="!presetName.trim()" :title="existingPreset ? t('osd.presets.update') : t('osd.presets.saveNew')" :aria-label="existingPreset ? t('osd.presets.update') : t('osd.presets.saveNew')" @click="savePreset"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 3h13l4 4v14H3V3z M7 3v6h10V3 M7 21v-8h10v8" /></svg></button>
         </div>
         <p v-if="presetMessage" class="w-full text-xs text-muted" role="status">{{ presetMessage }}</p>
       </div>

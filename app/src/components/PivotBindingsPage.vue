@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted } from 'vue'
 
 import BindingConflictWarnings from './BindingConflictWarnings.vue'
 import PivotActivationEditor from './PivotActivationEditor.vue'
+import { t } from '../i18n/index.ts'
 import { pivotBindingConflictWarnings, savedBindingConflictWarnings, type InputBinding, type PivotActivationBinding, type VectorXRConfig } from '../lib/model'
 
 // The default module config and each pivot profile share this binding shape;
@@ -56,20 +57,20 @@ onUnmounted(() => {
     <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
       <div class="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <nav class="flex items-center gap-1.5 text-xs text-muted" aria-label="Breadcrumb">
-            <button class="underline-offset-2 hover:underline" type="button" @click="$emit('close')">Pivot</button>
+          <nav class="flex items-center gap-1.5 text-xs text-muted" :aria-label="t('pivotViews.shared.breadcrumb')">
+            <button class="underline-offset-2 hover:underline" type="button" @click="$emit('close')">{{ t('pivotViews.shared.pivot') }}</button>
             <span aria-hidden="true">›</span>
             <span>{{ contextLabel }}</span>
             <span aria-hidden="true">›</span>
-            <span class="font-medium" style="color: var(--app-text)">Motion Activation</span>
+            <span class="font-medium" style="color: var(--app-text)">{{ t('pivotViews.bindingsPage.motionActivation') }}</span>
           </nav>
-          <h2 class="mt-2 text-2xl font-semibold tracking-tight">{{ contextLabel }} — Activation</h2>
-          <p class="mt-1 text-sm text-muted">Press Esc or Done to return to Pivot.</p>
+          <h2 class="mt-2 text-2xl font-semibold tracking-tight">{{ t('pivotViews.bindingsPage.title', { context: contextLabel }) }}</h2>
+          <p class="mt-1 text-sm text-muted">{{ t('pivotViews.bindingsPage.returnHint') }}</p>
         </div>
         <button
           class="button-secondary inline-flex h-9 w-9 items-center justify-center rounded-[0.75rem]"
           type="button"
-          aria-label="Close activation and return to Pivot"
+          :aria-label="t('pivotViews.bindingsPage.closeLabel')"
           @click="$emit('close')"
         >
           <svg aria-hidden="true" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
@@ -82,7 +83,7 @@ onUnmounted(() => {
         <PivotActivationEditor
           v-model:always-active="subject.alwaysActive"
           v-model:activation-bindings="subject.activationBindings"
-          :description="subject.alwaysActive ? 'Choose controls that temporarily suspend or toggle off Pivot.' : 'Choose controls that engage Pivot.'"
+          :description="subject.alwaysActive ? t('pivotViews.bindingsPage.alwaysActiveDescription') : t('pivotViews.bindingsPage.manualDescription')"
         />
 
         <div
@@ -99,7 +100,7 @@ onUnmounted(() => {
 
       <div class="mt-5 flex justify-end border-t pt-4" style="border-color: var(--app-border)">
         <button class="button-accent rounded-[0.75rem] px-6 py-2.5 text-sm font-medium" type="button" @click="$emit('close')">
-          Done
+          {{ t('common.done') }}
         </button>
       </div>
     </article>

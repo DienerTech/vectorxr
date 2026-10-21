@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue'
 import HealthLoading from '../HealthLoading.vue'
 import DiscordJoinButton from '../DiscordJoinButton.vue'
+import { t } from '../../i18n/index.ts'
 
 import type { OpenXrLayerEntry, OpenXrLayerSnapshot } from '../../lib/commands'
 import { openExternalUrl } from '../../lib/commands'
@@ -15,7 +16,7 @@ async function openSupport() {
     await openExternalUrl('https://ko-fi.com/dienertech')
     supportLinkError.value = ''
   } catch {
-    supportLinkError.value = 'Could not open the browser. Visit ko-fi.com/dienertech to support VectorXR.'
+    supportLinkError.value = t('home.supportLinkError')
   }
 }
 
@@ -34,9 +35,9 @@ defineEmits<{
 const vectorXrLayer = computed<OpenXrLayerEntry | null>(() => findVectorXrLayer(props.openXrLayerSnapshot))
 
 const vectorXrLayerStatusLabel = computed(() => {
-  if (props.openXrLayersLoading) return 'Checking'
-  if (!vectorXrLayer.value) return 'Not found'
-  return vectorXrLayer.value.enabled ? 'Layer enabled' : 'Layer disabled'
+  if (props.openXrLayersLoading) return t('home.layerStatus.checking')
+  if (!vectorXrLayer.value) return t('home.layerStatus.notFound')
+  return vectorXrLayer.value.enabled ? t('home.layerStatus.enabled') : t('home.layerStatus.disabled')
 })
 
 const vectorXrLayerStatusClass = computed(() => {
@@ -46,58 +47,52 @@ const vectorXrLayerStatusClass = computed(() => {
 
 const vectorXrLayerStatusDescription = computed(() => {
   if (props.openXrLayersLoading) {
-    return 'Checking the registered VectorXR API layer.'
+    return t('home.layerDescription.checking')
   }
 
   if (!vectorXrLayer.value) {
-    return "VectorXR's API layer registration was not found. Enhancements will not apply until the layer is registered and enabled."
+    return t('home.layerDescription.notFound')
   }
 
   if (vectorXrLayer.value.enabled) {
-    return 'The VectorXR API layer is enabled, so Enhancements can apply at runtime.'
+    return t('home.layerDescription.enabled')
   }
 
-  return 'The VectorXR API layer is disabled. None of the Enhancements will apply, regardless of suite or Enhancement enabled state.'
+  return t('home.layerDescription.disabled')
 })
 
 const runtimeStatusClass = computed(() => props.config.core.enabled ? 'chip-success' : 'chip-warning')
-const runtimeStatusLabel = computed(() => props.config.core.enabled ? 'Runtime enabled' : 'Runtime disabled')
+const runtimeStatusLabel = computed(() => props.config.core.enabled ? t('home.runtime.enabled') : t('home.runtime.disabled'))
 const systemHealthDescription = computed(() => {
   if (!props.config.core.enabled) {
-    return 'Runtime effects are disabled from the suite switch. Layer status is still available for troubleshooting.'
+    return t('home.systemHealth.suiteOff')
   }
 
   if (props.openXrLayersLoading) {
-    return 'Checking VectorXR runtime and OpenXR layer readiness.'
+    return t('home.systemHealth.checking')
   }
 
   if (!vectorXrLayer.value) {
-    return 'VectorXR is enabled, but the OpenXR API layer registration was not found.'
+    return t('home.systemHealth.layerNotFound')
   }
 
   if (!vectorXrLayer.value.enabled) {
-    return 'VectorXR is enabled, but the OpenXR API layer is disabled.'
+    return t('home.systemHealth.layerDisabled')
   }
 
-  return 'VectorXR runtime and OpenXR layer status look ready for future OpenXR app launches.'
+  return t('home.systemHealth.ready')
 })
 
-const moduleMeta: { id: ModuleId; label: string }[] = [
-  { id: 'quadviews', label: 'Quadviews' },
-  { id: 'turbo', label: 'Turbo' },
-  { id: 'framegen', label: 'Frame Generation' },
-  { id: 'pivotxr', label: 'Pivot' },
-  { id: 'depthxr', label: 'Depth' },
-]
+const moduleOrder: ModuleId[] = ['quadviews', 'turbo', 'framegen', 'pivotxr', 'depthxr']
 
 const enhancementRows = computed(() =>
-  moduleMeta.map(({ id, label }) => {
+  moduleOrder.map((id) => {
     const module = props.config.modules[id]
     const totalCustom = module.profiles.length
     const enabledCustom = module.profiles.filter((profile) => profile.enabled).length
     return {
       id,
-      label,
+      label: t(`app.tabs.${id}.label`),
       defaultEnabled: module.enabled,
       enabledCustom,
       totalCustom,
@@ -114,12 +109,12 @@ const activeEnhancementCount = computed(() => enhancementRows.value.filter((row)
 
     <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
       <div class="flex flex-wrap items-center justify-between gap-3">
-        <p class="eyebrow text-xs uppercase tracking-[0.24em]">System Health</p>
+        <p class="eyebrow text-xs uppercase tracking-[0.24em]">{{ t('home.systemHealth.eyebrow') }}</p>
         <div class="flex flex-wrap gap-2">
           <span
             class="inline-flex cursor-default items-center justify-center whitespace-nowrap rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em]"
             :class="runtimeStatusClass"
-            title="Suite-level runtime switch state."
+            :title="t('home.runtime.title')"
           >
             {{ runtimeStatusLabel }}
           </span>
@@ -138,10 +133,10 @@ const activeEnhancementCount = computed(() => enhancementRows.value.filter((row)
       </p>
       <div class="mt-4 flex flex-wrap gap-2 border-t pt-4" style="border-color: var(--app-border)">
         <button class="button-secondary rounded-[0.65rem] px-3 py-1.5 text-xs font-medium" type="button" @click="$emit('viewHealth')">
-          View Health
+          {{ t('home.systemHealth.viewHealth') }}
         </button>
         <button class="button-secondary rounded-[0.65rem] px-3 py-1.5 text-xs font-medium" type="button" @click="$emit('exportDebug')">
-          Export Debug
+          {{ t('home.systemHealth.exportDebug') }}
         </button>
       </div>
     </article>
@@ -149,19 +144,19 @@ const activeEnhancementCount = computed(() => enhancementRows.value.filter((row)
     <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
       <div class="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <p class="eyebrow text-xs uppercase tracking-[0.24em]">Enhancements</p>
-          <h2 class="mt-2 text-2xl font-semibold tracking-tight">Active Overview</h2>
+          <p class="eyebrow text-xs uppercase tracking-[0.24em]">{{ t('home.enhancements.eyebrow') }}</p>
+          <h2 class="mt-2 text-2xl font-semibold tracking-tight">{{ t('home.enhancements.title') }}</h2>
         </div>
-        <span class="text-sm text-muted">{{ activeEnhancementCount }} of {{ enhancementRows.length }} active</span>
+        <span class="text-sm text-muted">{{ t('home.enhancements.activeCount', { active: activeEnhancementCount, total: enhancementRows.length }) }}</span>
       </div>
 
       <div
         class="mt-4 grid grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)] gap-3 border border-transparent px-3 text-[0.68rem] font-semibold uppercase tracking-[0.16em] text-soft"
       >
-        <span>Enhancement</span>
-        <span class="text-center">Default profile</span>
-        <span class="text-center">Custom profiles</span>
-        <span class="text-center">Status</span>
+        <span>{{ t('home.enhancements.columns.enhancement') }}</span>
+        <span class="text-center">{{ t('home.enhancements.columns.defaultProfile') }}</span>
+        <span class="text-center">{{ t('home.enhancements.columns.customProfiles') }}</span>
+        <span class="text-center">{{ t('home.enhancements.columns.status') }}</span>
       </div>
 
       <div class="mt-2 grid gap-2">
@@ -170,7 +165,7 @@ const activeEnhancementCount = computed(() => enhancementRows.value.filter((row)
           :key="row.id"
           type="button"
           class="enhancement-row grid grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)] items-center gap-3 rounded-[0.9rem] border px-3 py-3 text-left transition"
-          :title="`Open ${row.label} settings`"
+          :title="t('home.enhancements.open', { module: row.label })"
           @click="$emit('navigate', row.id)"
         >
           <span class="text-sm font-semibold">{{ row.label }}</span>
@@ -179,36 +174,36 @@ const activeEnhancementCount = computed(() => enhancementRows.value.filter((row)
               class="inline-flex rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em]"
               :class="row.defaultEnabled ? 'chip-success' : 'chip-idle'"
             >
-              {{ row.defaultEnabled ? 'Enabled' : 'Disabled' }}
+              {{ row.defaultEnabled ? t('common.enabled') : t('common.disabled') }}
             </span>
           </span>
-          <span class="text-center text-sm text-muted">{{ row.enabledCustom }} / {{ row.totalCustom }} enabled</span>
+          <span class="text-center text-sm text-muted">{{ t('home.enhancements.customEnabled', { enabled: row.enabledCustom, total: row.totalCustom }) }}</span>
           <span class="text-center">
             <span
               class="inline-flex rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em]"
               :class="row.active ? 'chip-success' : 'chip-idle'"
             >
-              {{ row.active ? 'Active' : 'Inactive' }}
+              {{ row.active ? t('common.active') : t('common.inactive') }}
             </span>
           </span>
         </button>
       </div>
 
-      <p class="mt-3 text-xs text-soft">Select an Enhancement to open its settings.</p>
+      <p class="mt-3 text-xs text-soft">{{ t('home.enhancements.hint') }}</p>
     </article>
     <article class="rounded-[1.25rem] border px-5 py-4 shadow-panel surface-panel">
-      <p class="eyebrow text-xs uppercase tracking-[0.24em]">Community &amp; announcements</p>
-      <h2 class="mt-1 text-lg font-semibold">Help shape VectorXR</h2>
+      <p class="eyebrow text-xs uppercase tracking-[0.24em]">{{ t('home.community.eyebrow') }}</p>
+      <h2 class="mt-1 text-lg font-semibold">{{ t('home.community.title') }}</h2>
       <div class="mt-2 grid gap-4 sm:grid-cols-2">
         <div>
-          <h3 class="font-semibold">DienerTech Discord</h3>
-          <p class="mt-1 text-sm leading-5 text-muted">Share your setup, compare results, and catch the latest VectorXR announcements.</p>
+          <h3 class="font-semibold">{{ t('home.community.discordTitle') }}</h3>
+          <p class="mt-1 text-sm leading-5 text-muted">{{ t('home.community.discordBody') }}</p>
           <DiscordJoinButton class="mt-2" button-class="rounded-[0.65rem] px-3 py-1.5 text-sm font-medium" />
         </div>
         <div>
-          <h3 class="font-semibold">Support development</h3>
-          <p class="mt-1 text-sm leading-5 text-muted">Help support the project by contributing to VectorXR on Ko-fi. All support helps fund the future of VectorXR!</p>
-          <button class="button-accent mt-2 rounded-[0.65rem] px-3 py-1.5 text-sm font-medium" type="button" @click="openSupport">Support VectorXR on Ko-fi ↗</button>
+          <h3 class="font-semibold">{{ t('home.community.supportTitle') }}</h3>
+          <p class="mt-1 text-sm leading-5 text-muted">{{ t('home.community.supportBody') }}</p>
+          <button class="button-accent mt-2 rounded-[0.65rem] px-3 py-1.5 text-sm font-medium" type="button" @click="openSupport">{{ t('home.community.supportButton') }}</button>
           <p v-if="supportLinkError" role="status" class="mt-2 text-xs text-muted">{{ supportLinkError }}</p>
         </div>
       </div>

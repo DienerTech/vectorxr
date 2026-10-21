@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 
+import { t } from '../i18n/index.ts'
 import ModuleBindingPage from './ModuleBindingPage.vue'
 import { preferredTurboSession, turboSessionStrategy } from '../lib/turboDiagnostics'
 import ModuleBindingPanel from './ModuleBindingPanel.vue'
@@ -52,20 +53,22 @@ function formatSessionLabel(session: TurboMetricsSession): string {
         hour: '2-digit',
         minute: '2-digit',
       })
-    : 'Unknown time'
-  const runtime = session.runtimeName ? ` · ${session.runtimeName}` : ''
-  return `${when} — ${session.appName || 'unknown app'} · ${turboSessionStrategy(session)}${runtime}${session.live ? ' (live)' : ''}`
+    : t('turbo.diagnostics.session.unknownTime')
+  // Strategy and runtime name (layer data), separated like the rest of the label.
+  const details = [turboSessionStrategy(session), session.runtimeName].filter(Boolean).join(' · ')
+  const params = { when, app: session.appName || t('turbo.unknownApp'), details }
+  return session.live ? t('turbo.diagnostics.session.labelLive', params) : t('turbo.diagnostics.session.label', params)
 }
 
 function bucketLabel(state: string): string {
   if (state === 'off') {
-    return 'Turbo off'
+    return t('turbo.diagnostics.bucket.off')
   }
   if (state === 'async') {
-    return 'Turbo — async'
+    return t('turbo.diagnostics.bucket.async')
   }
   if (state === 'sequenced') {
-    return 'Turbo — sequenced'
+    return t('turbo.diagnostics.bucket.sequenced')
   }
   return state
 }
@@ -74,9 +77,9 @@ function formatSeconds(seconds: number): string {
   if (seconds >= 90) {
     const minutes = Math.floor(seconds / 60)
     const rest = Math.round(seconds % 60)
-    return `${minutes}m ${rest}s`
+    return t('turbo.diagnostics.duration.minutes', { minutes, seconds: rest })
   }
-  return `${seconds.toFixed(0)}s`
+  return t('turbo.diagnostics.duration.seconds', { seconds: seconds.toFixed(0) })
 }
 
 function onePercentLowFps(bucket: TurboMetricsBucket): string {
@@ -136,12 +139,12 @@ function comparisonTone(value: number): string {
 
 function comparisonVerdict(value: number): string {
   if (value >= 1) {
-    return 'Faster'
+    return t('turbo.diagnostics.verdict.faster')
   }
   if (value <= -1) {
-    return 'Slower'
+    return t('turbo.diagnostics.verdict.slower')
   }
-  return 'Within 1%'
+  return t('turbo.diagnostics.verdict.within')
 }
 
 function onKeydown(event: KeyboardEvent) {
@@ -157,11 +160,11 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 <template>
   <ModuleBindingPage
     v-if="metricsBindingOpen"
-    module-label="Turbo Diagnostics"
+    :module-label="t('turbo.diagnostics.moduleLabel')"
     :bindings="config.modules.turbo.metricsBindings"
-    label="Metrics Capture Binding"
-    description="Start and stop metric collection while in-game. Arm it once you are actually flying and pause it before loading screens or menus, so the recorded numbers reflect real play."
-    none-text="No binding assigned. In capture-binding mode, no metrics are recorded until a binding is set."
+    :label="t('turbo.diagnostics.binding.label')"
+    :description="t('turbo.diagnostics.binding.description')"
+    :none-text="t('turbo.diagnostics.binding.noneText')"
     default-activate-sound="metrics-on.wav"
     default-deactivate-sound="metrics-off.wav"
     :warnings="metricsBindingWarnings"
@@ -172,20 +175,20 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
     <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
       <div class="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <nav class="flex items-center gap-1.5 text-xs text-muted" aria-label="Breadcrumb">
-            <button class="underline-offset-2 hover:underline" type="button" @click="$emit('close')">Turbo</button>
+          <nav class="flex items-center gap-1.5 text-xs text-muted" :aria-label="t('turbo.breadcrumb')">
+            <button class="underline-offset-2 hover:underline" type="button" @click="$emit('close')">{{ t('turbo.title') }}</button>
             <span aria-hidden="true">›</span>
-            <span class="font-medium" style="color: var(--app-text)">Performance Diagnostics</span>
+            <span class="font-medium" style="color: var(--app-text)">{{ t('turbo.diagnostics.title') }}</span>
           </nav>
-          <h2 class="mt-2 text-2xl font-semibold tracking-tight">Performance Diagnostics</h2>
+          <h2 class="mt-2 text-2xl font-semibold tracking-tight">{{ t('turbo.diagnostics.title') }}</h2>
           <p class="mt-1 max-w-3xl text-sm leading-6 text-muted">
-            Measure Turbo in the scenario that matters to you. VectorXR compares Turbo on and off only after both sides have enough in-game capture time.
+            {{ t('turbo.diagnostics.intro') }}
           </p>
         </div>
         <button
           class="button-secondary inline-flex h-9 w-9 items-center justify-center rounded-[0.75rem]"
           type="button"
-          aria-label="Close diagnostics and return to Turbo"
+          :aria-label="t('turbo.diagnostics.closeAria')"
           @click="$emit('close')"
         >
           <svg aria-hidden="true" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
@@ -197,43 +200,43 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
       <section class="mt-5 rounded-[1rem] border p-4 surface-panel-soft">
         <div class="flex flex-wrap items-start justify-between gap-4">
           <div class="max-w-2xl">
-            <p class="text-sm font-semibold tracking-tight">Capture behavior</p>
+            <p class="text-sm font-semibold tracking-tight">{{ t('turbo.diagnostics.capture.title') }}</p>
             <p class="mt-1 text-sm leading-6 text-muted">
-              Capture only representative gameplay for the fairest result. Loading screens and menus can overwhelm the effect you are trying to measure.
+              {{ t('turbo.diagnostics.capture.intro') }}
             </p>
           </div>
           <label class="flex items-center gap-3 text-sm font-medium">
-            Collection
+            {{ t('turbo.diagnostics.capture.collection') }}
             <select
               v-model="config.modules.turbo.metricsMode"
               class="rounded-[0.6rem] border px-3 py-1.5 text-sm surface-panel-strong"
               style="border-color: var(--app-border)"
             >
-              <option value="always">Always while in-game</option>
-              <option value="binding">Use a capture binding</option>
-              <option value="off">Off</option>
+              <option value="always">{{ t('turbo.diagnostics.capture.always') }}</option>
+              <option value="binding">{{ t('turbo.diagnostics.capture.binding') }}</option>
+              <option value="off">{{ t('turbo.diagnostics.capture.off') }}</option>
             </select>
           </label>
         </div>
 
         <p class="mt-3 text-xs leading-5 text-muted">
           <template v-if="config.modules.turbo.metricsMode === 'binding'">
-            Recording starts and pauses with your capture binding. This is the recommended mode for controlled comparisons.
+            {{ t('turbo.diagnostics.capture.bindingNote') }}
           </template>
           <template v-else-if="config.modules.turbo.metricsMode === 'always'">
-            Recording runs whenever Turbo applies. Hitches over one second are excluded, but menus and loading screens still count.
+            {{ t('turbo.diagnostics.capture.alwaysNote') }}
           </template>
           <template v-else>
-            Metrics collection is disabled. Existing results remain available below.
+            {{ t('turbo.diagnostics.capture.offNote') }}
           </template>
         </p>
 
         <ModuleBindingPanel
           v-if="config.modules.turbo.metricsMode === 'binding'"
           class="mt-3"
-          heading="Metrics Capture Binding"
+          :heading="t('turbo.diagnostics.binding.label')"
           :bindings="config.modules.turbo.metricsBindings"
-          hint="Arm capture once you are actually flying; pause it before loading screens or menus."
+          :hint="t('turbo.diagnostics.binding.hint')"
           @edit="openMetricsBinding"
         />
       </section>
@@ -241,28 +244,28 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
       <section class="mt-5 border-t pt-5" style="border-color: var(--app-border)">
         <div class="mb-4 flex flex-wrap items-start justify-between gap-3">
           <div>
-            <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Results</p>
-            <p class="mt-1 text-sm text-muted">Choose a flight, read the verdict, then open the detailed measurements only if you need them.</p>
+            <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">{{ t('turbo.diagnostics.results.eyebrow') }}</p>
+            <p class="mt-1 text-sm text-muted">{{ t('turbo.diagnostics.results.intro') }}</p>
           </div>
           <button
             v-if="turboMetrics.length > 0"
             class="button-secondary rounded-[0.6rem] px-3 py-1.5 text-xs"
             type="button"
-            title="Delete all recorded metric sessions"
+            :title="t('turbo.diagnostics.results.clearAllTitle')"
             @click="emit('clearTurboMetrics')"
           >
-            Clear all results
+            {{ t('turbo.diagnostics.results.clearAll') }}
           </button>
         </div>
 
         <div v-if="turboMetrics.length === 0" class="rounded-[0.9rem] border border-dashed px-5 py-6 text-center surface-panel-soft">
-          <p class="text-sm font-medium">No performance checks yet</p>
-          <p class="mt-1 text-sm text-muted">Run Turbo in a game and results will update here about every 15 seconds.</p>
+          <p class="text-sm font-medium">{{ t('turbo.diagnostics.results.emptyTitle') }}</p>
+          <p class="mt-1 text-sm text-muted">{{ t('turbo.diagnostics.results.emptyBody') }}</p>
         </div>
 
         <template v-else>
           <label class="mb-4 flex flex-wrap items-center gap-2 text-sm font-medium">
-            Flight
+            {{ t('turbo.diagnostics.results.flight') }}
             <select
               :value="selectedSession?.sessionId ?? ''"
               class="min-w-0 max-w-full rounded-[0.6rem] border px-3 py-1.5 text-sm surface-panel-strong"
@@ -276,11 +279,11 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
           </label>
 
           <p v-if="selectedSession" class="mb-4 flex flex-wrap items-center gap-2 text-sm">
-            <span class="text-muted">Strategy</span>
+            <span class="text-muted">{{ t('turbo.diagnostics.results.strategy') }}</span>
             <span class="chip-accent rounded-full px-2.5 py-1 text-xs font-semibold" :title="selectedSession.timingConfiguration">{{ turboSessionStrategy(selectedSession) }}</span>
             <span v-if="selectedSession.timingConfiguration?.startsWith('Experimental')" class="text-xs text-muted">{{ selectedSession.timingConfiguration }}</span>
           </p>
-          <p class="mb-4 text-xs text-muted">Results accumulate within a session. To compare strategies, use a fresh launch for each and compare their gain versus Turbo off; these figures do not measure ASW activity or headset presentation.</p>
+          <p class="mb-4 text-xs text-muted">{{ t('turbo.diagnostics.results.accumulateNote') }}</p>
           <div v-if="comparisons.length > 0" class="grid gap-3 md:grid-cols-2">
             <article
               v-for="comparison in comparisons"
@@ -294,15 +297,15 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
                 <span class="rounded-full border px-2.5 py-1 text-xs" style="border-color: var(--app-border)">{{ comparison.label }}</span>
               </div>
               <p class="mt-3 text-3xl font-semibold tracking-tight">{{ formatDeltaPercent(comparison.deltaPercent) }}</p>
-              <p class="mt-1 text-sm">Average fps versus Turbo off</p>
-              <p class="mt-3 text-xs text-muted">{{ comparison.offFps.toFixed(1) }} → {{ comparison.turboFps.toFixed(1) }} fps in this flight</p>
+              <p class="mt-1 text-sm">{{ t('turbo.diagnostics.results.versusOff') }}</p>
+              <p class="mt-3 text-xs text-muted">{{ t('turbo.diagnostics.results.fpsChange', { off: comparison.offFps.toFixed(1), turbo: comparison.turboFps.toFixed(1) }) }}</p>
             </article>
           </div>
 
           <div v-else class="rounded-[1rem] border px-4 py-4 surface-panel-strong">
-            <p class="text-sm font-semibold">More comparable flight time needed</p>
+            <p class="text-sm font-semibold">{{ t('turbo.diagnostics.results.needMoreTitle') }}</p>
             <p class="mt-1 text-sm leading-6 text-muted">
-              Capture at least 30 seconds with Turbo off and 30 seconds with Turbo on in similar conditions. Use the Turbo toggle between passes.
+              {{ t('turbo.diagnostics.results.needMoreBody') }}
             </p>
             <div v-if="selectedBuckets.length > 0" class="mt-3 flex flex-wrap gap-2">
               <span v-for="bucket in selectedBuckets" :key="bucket.state" class="rounded-full border px-3 py-1 text-xs" style="border-color: var(--app-border)">
@@ -312,7 +315,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
           </div>
 
           <p v-if="comparisons.length > 0" class="mt-3 text-xs leading-5 text-muted">
-            Use the percentage as evidence, not a promise: scene complexity, weather, traffic, and background work still affect the comparison.
+            {{ t('turbo.diagnostics.results.evidenceNote') }}
           </p>
 
           <details class="section-disclosure mt-5 border-t pt-4" style="border-color: var(--app-border)">
@@ -320,25 +323,25 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
               <svg aria-hidden="true" class="section-chevron h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
                 <path fill-rule="evenodd" d="M7.2 14.8a1 1 0 0 1 0-1.4L10.6 10 7.2 6.6a1 1 0 1 1 1.4-1.4l4.1 4.1a1 1 0 0 1 0 1.4l-4.1 4.1a1 1 0 0 1-1.4 0Z" clip-rule="evenodd" />
               </svg>
-              <span class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Detailed Measurements</span>
-              <span class="text-xs text-muted">Frame times, runtime wait, and stalls</span>
+              <span class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">{{ t('turbo.diagnostics.detail.title') }}</span>
+              <span class="text-xs text-muted">{{ t('turbo.diagnostics.detail.subtitle') }}</span>
             </summary>
 
             <div v-if="selectedBuckets.length === 0" class="mt-3 rounded-[0.9rem] border border-dashed px-4 py-4 text-sm text-muted surface-panel-soft">
-              This flight has no captured frames yet.
+              {{ t('turbo.diagnostics.detail.empty') }}
             </div>
             <div v-else class="mt-3 overflow-x-auto">
               <table class="w-full text-sm">
                 <thead>
                   <tr class="text-left text-xs uppercase tracking-wide text-muted">
-                    <th class="py-2 pr-3 font-medium">Pacing</th>
-                    <th class="py-2 pr-3 font-medium">Time</th>
-                    <th class="py-2 pr-3 font-medium">Avg fps</th>
-                    <th class="py-2 pr-3 font-medium">1% low</th>
-                    <th class="py-2 pr-3 font-medium">Avg frame</th>
-                    <th class="py-2 pr-3 font-medium">p99 frame</th>
-                    <th class="py-2 pr-3 font-medium" title="Average per-frame time the game spent blocked on runtime pacing">Wait blocked</th>
-                    <th class="py-2 font-medium" title="Frame-pacing stalls counted by the safety circuit">Stalls</th>
+                    <th class="py-2 pr-3 font-medium">{{ t('turbo.diagnostics.detail.pacing') }}</th>
+                    <th class="py-2 pr-3 font-medium">{{ t('turbo.diagnostics.detail.time') }}</th>
+                    <th class="py-2 pr-3 font-medium">{{ t('turbo.diagnostics.detail.avgFps') }}</th>
+                    <th class="py-2 pr-3 font-medium">{{ t('turbo.diagnostics.detail.onePercentLow') }}</th>
+                    <th class="py-2 pr-3 font-medium">{{ t('turbo.diagnostics.detail.avgFrame') }}</th>
+                    <th class="py-2 pr-3 font-medium">{{ t('turbo.diagnostics.detail.p99Frame') }}</th>
+                    <th class="py-2 pr-3 font-medium" :title="t('turbo.diagnostics.detail.waitBlockedTitle')">{{ t('turbo.diagnostics.detail.waitBlocked') }}</th>
+                    <th class="py-2 font-medium" :title="t('turbo.diagnostics.detail.stallsTitle')">{{ t('turbo.diagnostics.detail.stalls') }}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -356,16 +359,16 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
               </table>
             </div>
             <p v-if="selectedSession" class="mt-2 text-xs text-muted">
-              {{ selectedSession.live ? 'Flight in progress — updates every ~15 seconds.' : 'Flight complete.' }}
-              Collection: {{ selectedSession.collectionMode === 'binding' ? 'capture binding' : 'always' }}.
-              <template v-if="selectedBuckets.some((bucket) => bucket.discardedFrames > 0)">Hitches over one second were excluded.</template>
+              {{ selectedSession.live ? t('turbo.diagnostics.detail.live') : t('turbo.diagnostics.detail.complete') }}
+              {{ selectedSession.collectionMode === 'binding' ? t('turbo.diagnostics.detail.collectionBinding') : t('turbo.diagnostics.detail.collectionAlways') }}
+              <template v-if="selectedBuckets.some((bucket) => bucket.discardedFrames > 0)">{{ t('turbo.diagnostics.detail.hitchesExcluded') }}</template>
             </p>
           </details>
         </template>
       </section>
 
       <div class="mt-5 flex justify-end border-t pt-4" style="border-color: var(--app-border)">
-        <button class="button-accent rounded-[0.75rem] px-6 py-2.5 text-sm font-medium" type="button" @click="$emit('close')">Done</button>
+        <button class="button-accent rounded-[0.75rem] px-6 py-2.5 text-sm font-medium" type="button" @click="$emit('close')">{{ t('common.done') }}</button>
       </div>
     </article>
   </div>

@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
+import { t } from '../i18n/index.ts'
+
 const props = defineProps<{
   dirty: boolean
   saving: boolean
@@ -23,7 +25,11 @@ const saveTooltip = computed(() => {
   }
   const shown = props.errors.slice(0, 6)
   const remainder = props.errors.length - shown.length
-  return `Fix before saving:\n• ${shown.join('\n• ')}${remainder > 0 ? `\n…and ${remainder} more` : ''}`
+  return [
+    t('app.saveBar.fixBeforeSaving'),
+    ...shown.map((error) => `• ${error}`),
+    ...(remainder > 0 ? [t('app.saveBar.moreErrors', { count: remainder })] : []),
+  ].join('\n')
 })
 </script>
 
@@ -34,11 +40,11 @@ const saveTooltip = computed(() => {
         <div>
           <div class="flex items-center gap-2.5">
             <p class="text-sm font-semibold tracking-tight">
-              {{ dirty ? 'Unsaved changes' : 'All changes saved' }}
+              {{ dirty ? t('app.saveBar.unsaved') : t('app.saveBar.allSaved') }}
             </p>
-            <span v-if="dirty" class="chip-warning rounded-full px-2.5 py-1 text-xs font-medium">Pending</span>
+            <span v-if="dirty" class="chip-warning rounded-full px-2.5 py-1 text-xs font-medium">{{ t('app.saveBar.pending') }}</span>
           </div>
-          <p class="mt-1 text-sm text-muted">{{ status || (dirty ? 'Save to apply or discard to revert.' : 'Config matches disk.') }}</p>
+          <p class="mt-1 text-sm text-muted">{{ status || (dirty ? t('app.saveBar.dirtyHint') : t('app.saveBar.cleanHint')) }}</p>
         </div>
 
         <div class="flex flex-wrap gap-3">
@@ -49,7 +55,7 @@ const saveTooltip = computed(() => {
               type="button"
               @click="$emit('save')"
             >
-              {{ saving ? 'Saving...' : 'Save Changes' }}
+              {{ saving ? t('app.saveBar.saving') : t('app.saveBar.save') }}
             </button>
           </span>
           <button
@@ -58,7 +64,7 @@ const saveTooltip = computed(() => {
             type="button"
             @click="$emit('discard')"
           >
-            Discard
+            {{ t('app.saveBar.discard') }}
           </button>
         </div>
       </div>

@@ -28,7 +28,8 @@ const untranslatable = new RegExp(
 
 function needsTranslation(text) {
   const plain = text.replace(/&[a-z]+;|&#\d+;/gi, ' ').trim()
-  return /[A-Za-z]/.test(plain) && !untranslatable.test(plain)
+  // One letter alone (an icon glyph such as "i") is not text.
+  return /[A-Za-z].*[A-Za-z]/s.test(plain) && !untranslatable.test(plain)
 }
 
 // A string literal inside a template or script expression that reads as UI
@@ -37,6 +38,7 @@ function needsTranslation(text) {
 function looksLikeUiText(literal) {
   if (!needsTranslation(literal)) return false
   if (/^(?:https?:|mailto:|file:)/.test(literal.trim())) return false
+  if (/^[MmLlHhVvCcSsQqTtAaZz][\d\s.,MmLlHhVvCcSsQqTtAaZz-]*$/.test(literal.trim())) return false // SVG path data
   if (/^[a-z0-9\-_:/[\].\s%#()!@&=>+,]*$/.test(literal)) {
     // Lowercase only: UI text only if it reads as a sentence fragment.
     return /\b[a-z]{2,} [a-z]{2,} [a-z]{2,}\b/.test(literal) && !/[-:[\]/]/.test(literal)
@@ -45,7 +47,23 @@ function looksLikeUiText(literal) {
   return /[A-Z][a-z]/.test(literal) || /\s/.test(literal.trim())
 }
 
+// Literals that are code, not text: message keys, emitted event names,
+// comparisons with a value ('Escape', a layer state) and switch cases.
+const literal = /(['"`])(?:\\.|(?!\1)[^\\])*\1/.source
+const codeLiterals = [
+  new RegExp(/\b(?:t|hasMessage|\$?emit)\(\s*/.source + literal, 'g'),
+  new RegExp(/[!=]==?\s*/.source + literal, 'g'),
+  new RegExp(literal + /\s*[!=]==?/.source, 'g'),
+  new RegExp(/\.(?:startsWith|endsWith|includes|indexOf|split)\(\s*/.source + literal, 'g'),
+  new RegExp(/\bcase\s+/.source + literal, 'g'),
+]
+
+function withoutCodeLiterals(code) {
+  return codeLiterals.reduce((text, pattern) => text.replace(pattern, ' '), code)
+}
+
 function stringLiterals(expression) {
+  expression = withoutCodeLiterals(expression)
   const found = []
   const pattern = /(['"`])((?:\\.|(?!\1)[^\\])*)\1/g
   let match
@@ -92,7 +110,7 @@ function checkTemplate(path, template, findings) {
         if (prop.type === 7 && prop.exp?.content && prop.name !== 'model') {
           // :class / :style literals are class names, not text.
           const target = prop.arg?.content
-          if (target === 'class' || target === 'style' || target === 'key' || target === 'id' || target === 'to') continue
+          if (['class', 'style', 'key', 'id', 'to', 'd', 'points', 'transform', 'viewBox', 'keypath'].includes(target)) continue
           for (const literal of stringLiterals(prop.exp.content)) if (looksLikeUiText(literal)) report(prop, literal, `binding ${target ?? prop.name}`)
         }
       }
@@ -111,11 +129,13 @@ const scriptPatterns = [
 
 function checkScript(path, source, startLine, findings) {
   const lines = source.split('\n')
-  lines.forEach((line, index) => {
+  lines.forEach((source, index) => {
+    let line = source
     const trimmed = line.trim()
     if (/i18n-ignore/.test(line) || trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*')) return
     if (/\bconsole\.|\bimport\b|\bthrow new Error\b|\bnew Error\(/.test(line)) return
     const seen = new Set()
+    line = withoutCodeLiterals(line)
     for (const pattern of scriptPatterns) {
       pattern.lastIndex = 0
       let match

@@ -1,1 +1,320 @@
-{}
+{
+  "title": "Turbo",
+  "breadcrumb": "Breadcrumb",
+  "unknownApp": "unknown app",
+  "strategy": {
+    "vectorxr": "VectorXR",
+    "vectorxrWithModes": "VectorXR · {modes}",
+    "toolkit": "Toolkit-style",
+    "custom": "Custom",
+    "unknown": "Unknown strategy",
+    "async": "Async",
+    "sequenced": "Sequenced",
+    "auto": "Auto"
+  },
+  "pacingMode": {
+    "auto": "Auto · stability-first",
+    "forcedAsync": "Forced Async",
+    "forcedSequenced": "Forced Sequenced"
+  },
+  "tab": {
+    "badge": "Advanced pacing override",
+    "intro": "Moves runtime waiting out of a game's critical path when pacing is holding it back. Enable it only where an in-game A/B comparison proves that it helps.",
+    "howItWorksButton": "How Turbo Works",
+    "recoveryUnavailable": "Recovery status is unavailable. Your saved safety setting still applies.",
+    "toolkitConflict": "OpenXR Toolkit is enabled alongside VectorXR Turbo. If OXRTK's Turbo Mode is also on, disable one of them so the two pacing layers do not compete.",
+    "frameGenNote": "Frame Generation is on for some applications. Turbo stays off in sessions where Frame Generation runs, and its status reads Paused for Frame Generation.",
+    "pacingSummary": {
+      "manual": "A manual strategy is being used for every runtime.",
+      "empty": "Auto picks and remembers a stable strategy per runtime. Try Async and Sequenced to find the fastest.",
+      "observed_one": "{count} runtime environment observed. Auto picks the most stable strategy for each, not necessarily the fastest.",
+      "observed_other": "{count} runtime environments observed. Auto picks the most stable strategy for each, not necessarily the fastest."
+    },
+    "metricsMode": {
+      "binding": "Controlled capture",
+      "off": "Collection off",
+      "always": "Automatic capture"
+    },
+    "metricsSummary": {
+      "empty": "Capture Turbo on and off in the same flight to measure the gain for each strategy.",
+      "recorded_one": "{count} flight recorded. Latest: {app}.",
+      "recorded_other": "{count} flights recorded. Latest: {app}.",
+      "recordedLive_one": "{count} flight recorded. Latest: {app} (in progress).",
+      "recordedLive_other": "{count} flights recorded. Latest: {app} (in progress)."
+    },
+    "toggleBinding": {
+      "label": "Turbo Toggle Binding",
+      "description": "Flip Turbo on and off while in-game to compare fps and frame feel directly—and to disable it immediately if presentation breaks. The binding requires Turbo to be enabled for the application in its profile. It can also retry Turbo when recovery has blocked it or pacing trouble has suspended it. Switching it mid-session can cause a brief re-synchronization hitch.",
+      "noneText": "No binding assigned. Turbo starts automatically where enabled, unless recovery or pacing protection blocks it."
+    },
+    "essentials": {
+      "eyebrow": "Essentials",
+      "intro": "Leave the default off and enable Turbo per application with a custom profile, or turn it on broadly. Enablement applies on Save; the toggle binding switches Turbo off and on in the running game.",
+      "defaultProfile": "Default Profile",
+      "defaultOnHint": "Turbo applies to applications without a custom profile.",
+      "defaultOffHint": "Off unless an enabled custom profile turns it on.",
+      "defaultOn": "Default On",
+      "defaultOff": "Default Off",
+      "toggleHeading": "In-game Turbo Toggle",
+      "toggleHint": "Flip Turbo on and off while in-game for a direct comparison."
+    },
+    "safety": {
+      "heldOff_one": "Turbo is being held off for {count} setup. Review, then clear or retry with the toggle binding.",
+      "heldOff_other": "Turbo is being held off for {count} setups. Review, then clear or retry with the toggle binding.",
+      "idle": "Holds Turbo off after an interrupted session or repeated runtime fault.",
+      "blockCount_one": "{count} block",
+      "blockCount_other": "{count} blocks",
+      "faultCount_one": "{count} fault",
+      "faultCount_other": "{count} faults",
+      "review": "Review…",
+      "details": "Details…"
+    },
+    "tune": {
+      "eyebrow": "Tune & Verify",
+      "intro": "Turbo results depend on the game, headset, runtime, and driver. To find what works best, compare each strategy against Turbo off in the same flight.",
+      "guideSummary": "Finding the best strategy for a game",
+      "guideStep1": "Create a custom profile for the game and assign the in-game Turbo toggle. Set Performance Diagnostics to use a capture binding.",
+      "guideStep2": "Launch the game with one strategy. Fly a repeatable scenario for about a minute with Turbo on, then toggle it off for at least 30 seconds.",
+      "guideStep3": "Note the gain versus Turbo off in Performance Diagnostics. Each flight is labeled with the strategy it used.",
+      "guideStep4": "Change the strategy, Save, relaunch, and repeat. Try Async and Sequenced in Runtime Behavior, then the Toolkit-style profile strategy.",
+      "guideStep5": "Keep the strategy with the best gain and 1% lows and no stalls. Auto remains a safe default, but it picks the most stable strategy, not necessarily the fastest."
+    },
+    "profiles": {
+      "title": "Custom Profiles",
+      "intro": "Choose applications and a Turbo strategy per profile. If enabled profiles overlap, the first matching profile takes priority.",
+      "add": "Add Profile",
+      "broadStrong": "Broad enablement is active.",
+      "broad": "{strong} Turbo applies to applications without a custom profile, including ones you have not validated. The safer setup is Default Off with this list used as an application allowlist.",
+      "legacyExperimental": "Previous experimental settings were saved without an application assignment.",
+      "useSavedTiming": "Use saved timing in this profile",
+      "bypassSafety": "Bypass Turbo Safety for these applications",
+      "bypassSafetyHint": "Ignores persistent safety blocks. Live pacing fallback still suspends a failing session; use the toggle binding to retry.",
+      "empty": "No custom profiles yet. Add one when an application needs different behavior from the default."
+    }
+  },
+  "howItWorks": {
+    "eyebrow": "Turbo Mode",
+    "title": "How Turbo Works",
+    "whatItDoes": "What it does",
+    "whatItDoesBody": "A game normally idles until the headset runtime signals the next frame. Turbo performs that wait out of the game's way, so the game can begin its next frame as soon as the previous one is submitted. VectorXR preserves downstream frame-call order, but changes when pacing occurs and may estimate the next display time.",
+    "strategies": "{async} (usually fastest) waits in the background. {sequenced} (for runtimes that need it) keeps waiting and submission in step. {auto} starts with Async and falls back to Sequenced if Async is unstable, then remembers the result per runtime. Auto is stability-first: it picks the strategy that works, not necessarily the fastest one.",
+    "toolkit": "{toolkit} is an experimental, per-profile strategy that recreates the timing of OpenXR Toolkit's Turbo Mode, originally developed by mbucchia. It always uses Async and takes effect after the game restarts.",
+    "whatToExpect": "What to expect",
+    "whatToExpectBody": "Turbo is a targeted fix, not a general boost. It helps only when runtime pacing holds fps below what the hardware can deliver, and it cannot remove a runtime-enforced framerate lock. Use Performance Diagnostics with the in-game toggle to measure each title.",
+    "reprojectionLabel": "Reprojection compatibility:",
+    "reprojection": "{label} Turbo can interfere with SteamVR Motion Smoothing and other reprojection systems such as ASW. Disable Motion Smoothing when testing Turbo. Frame-time prediction may be less accurate, and switching Turbo mid-session can briefly hitch while the pipeline re-synchronizes.",
+    "bestStrategy": "Finding the best strategy",
+    "bestStrategyBody": "Turbo relies on OpenXR timing behavior that the specification does not formally define, so results vary by hardware, driver, runtime, and game. Strategies cannot always be switched safely mid-session, so test one per launch: use the in-game toggle to capture Turbo on and Turbo off in the same flight, then compare the gain for each strategy in Performance Diagnostics.",
+    "safetyNet": "Safety net",
+    "safetyNetBody": "If pacing stalls even after Auto adapts, Turbo suspends itself for that session. With Turbo Safety enabled, the application and runtime setup stays blocked until you clear it or retry with the binding. Fault details remain on the Turbo Safety page. This catches pacing stalls, not every visual or driver failure; retry only after the session is stable."
+  },
+  "profileTiming": {
+    "strategy": "Strategy",
+    "strategyAria": "Turbo strategy for this profile",
+    "restartTitle": "Switching to or from this strategy takes effect after Save and a game restart.",
+    "restartNote": "Switching to or from a marked strategy takes effect after Save and a game restart.",
+    "descriptionVectorxr": "VectorXR's own Turbo. Follows your Runtime Behavior setting ({pacing}) and can be switched on and off in-game.",
+    "descriptionToolkit": "Recreates the timing of OpenXR Toolkit’s Turbo Mode. Experimental; restart the game after changing.",
+    "descriptionCustom": "Toolkit-style with your own adjustments. Experimental; restart the game after changing.",
+    "summary": {
+      "waitForSubmission": "Wait for submission",
+      "overlapSubmission": "Overlap submission",
+      "sampleAtEntry": "Sample at entry",
+      "sampleAtReturn": "Sample at return",
+      "prediction": "{percent}% prediction",
+      "fpsCap": "{fps} fps cap",
+      "noCap": "No cap"
+    },
+    "advancedTitle": "Advanced timing",
+    "advancedIntro": "For experimentation. Most players should leave these alone.",
+    "waitForOverlap": "Wait for an overlapping submission",
+    "sampleAtWaitEntry": "Sample prediction timing at wait entry",
+    "predictionLabel": "Prediction (%)",
+    "frameCapLabel": "Frame cap (fps; 0 = off)",
+    "changeNote": "Changing any value switches the profile to Custom. Prediction adjustment requires runtime clock support."
+  },
+  "safety": {
+    "title": "Turbo Safety",
+    "intro": "Review blocked application and runtime setups, retry Turbo, and inspect recorded faults.",
+    "back": "Back to Turbo",
+    "uncleanExitReason": "The session ended without a clean shutdown. The exact cause and crash time are unknown.",
+    "state": {
+      "recoveryDisabled": "Turbo enabled · off after safety block",
+      "suspended": "Turbo enabled · suspended after a fault",
+      "async": "Turbo active · Async",
+      "sequenced": "Turbo active · Sequenced",
+      "waiting": "Turbo waiting to engage",
+      "off": "Turbo off",
+      "framegen": "Paused for Frame Generation",
+      "unavailable": "Status unavailable"
+    },
+    "protection": {
+      "title": "Automatic protection",
+      "body": "An interrupted session or repeated runtime fault can hold Turbo off for that application and runtime setup. Turbo stays enabled in its profile, so its in-game binding can retry even with this UI closed.",
+      "saveNote": "Save setting changes to apply them. Custom profiles can bypass safety for selected applications. Live pacing fallback still suspends a failing session; the binding can re-arm it."
+    },
+    "columns": {
+      "application": "Application / runtime",
+      "recorded": "Recorded",
+      "protection": "Protection",
+      "actions": "Actions",
+      "fault": "Fault",
+      "details": "Details"
+    },
+    "blocked": {
+      "title": "Blocked setups",
+      "intro": "Clear & retest preserves faults and clears the runtime's learned pacing decision. Relaunch in Auto without a manual override for a fresh Async test, followed by Sequenced if needed. A running session can retry its current mode; a full retest requires a relaunch.",
+      "ariaLabel": "Blocked Turbo setups",
+      "blocked": "Blocked",
+      "bypassed": "Bypassed",
+      "details": "Details",
+      "clearing": "Clearing…",
+      "clearRetest": "Clear & retest",
+      "empty": "No recorded safety blocks."
+    },
+    "faults": {
+      "title": "Fault log",
+      "clearLogs": "Clear Logs",
+      "clearing": "Clearing…",
+      "intro": "Recorded faults remain here after a retry. For an unclean exit, the recorded time is the last safety marker, not a confirmed crash time.",
+      "clearHint": "Clear Logs removes fault history. Safety blocks and learned pacing decisions stay in place.",
+      "ariaLabel": "Turbo fault log",
+      "details": "Details",
+      "empty": "No Turbo faults recorded."
+    },
+    "dialog": {
+      "title": "{application} · Turbo fault",
+      "recorded": "Recorded",
+      "pacingMode": "Pacing mode",
+      "runtime": "Runtime",
+      "headset": "Headset",
+      "graphicsApi": "Graphics API",
+      "processId": "Process ID",
+      "notRecorded": "Not recorded",
+      "armedNote": "An unclean exit was inferred from a stopped process. This does not establish that Turbo caused a crash.",
+      "recoveredNote": "VectorXR recovered from this fault during the same session and kept the game running. It does not block Turbo."
+    }
+  },
+  "diagnostics": {
+    "title": "Performance Diagnostics",
+    "moduleLabel": "Turbo Diagnostics",
+    "intro": "Measure Turbo in the scenario that matters to you. VectorXR compares Turbo on and off only after both sides have enough in-game capture time.",
+    "closeAria": "Close diagnostics and return to Turbo",
+    "binding": {
+      "label": "Metrics Capture Binding",
+      "description": "Start and stop metric collection while in-game. Arm it once you are actually flying and pause it before loading screens or menus, so the recorded numbers reflect real play.",
+      "noneText": "No binding assigned. In capture-binding mode, no metrics are recorded until a binding is set.",
+      "hint": "Arm capture once you are actually flying; pause it before loading screens or menus."
+    },
+    "capture": {
+      "title": "Capture behavior",
+      "intro": "Capture only representative gameplay for the fairest result. Loading screens and menus can overwhelm the effect you are trying to measure.",
+      "collection": "Collection",
+      "always": "Always while in-game",
+      "binding": "Use a capture binding",
+      "off": "Off",
+      "bindingNote": "Recording starts and pauses with your capture binding. This is the recommended mode for controlled comparisons.",
+      "alwaysNote": "Recording runs whenever Turbo applies. Hitches over one second are excluded, but menus and loading screens still count.",
+      "offNote": "Metrics collection is disabled. Existing results remain available below."
+    },
+    "results": {
+      "eyebrow": "Results",
+      "intro": "Choose a flight, read the verdict, then open the detailed measurements only if you need them.",
+      "clearAllTitle": "Delete all recorded metric sessions",
+      "clearAll": "Clear all results",
+      "emptyTitle": "No performance checks yet",
+      "emptyBody": "Run Turbo in a game and results will update here about every 15 seconds.",
+      "flight": "Flight",
+      "strategy": "Strategy",
+      "accumulateNote": "Results accumulate within a session. To compare strategies, use a fresh launch for each and compare their gain versus Turbo off; these figures do not measure ASW activity or headset presentation.",
+      "versusOff": "Average fps versus Turbo off",
+      "fpsChange": "{off} → {turbo} fps in this flight",
+      "needMoreTitle": "More comparable flight time needed",
+      "needMoreBody": "Capture at least 30 seconds with Turbo off and 30 seconds with Turbo on in similar conditions. Use the Turbo toggle between passes.",
+      "evidenceNote": "Use the percentage as evidence, not a promise: scene complexity, weather, traffic, and background work still affect the comparison."
+    },
+    "verdict": {
+      "faster": "Faster",
+      "slower": "Slower",
+      "within": "Within 1%"
+    },
+    "bucket": {
+      "off": "Turbo off",
+      "async": "Turbo — async",
+      "sequenced": "Turbo — sequenced"
+    },
+    "session": {
+      "unknownTime": "Unknown time",
+      "label": "{when} — {app} · {details}",
+      "labelLive": "{when} — {app} · {details} (live)"
+    },
+    "duration": {
+      "minutes": "{minutes}m {seconds}s",
+      "seconds": "{seconds}s"
+    },
+    "detail": {
+      "title": "Detailed Measurements",
+      "subtitle": "Frame times, runtime wait, and stalls",
+      "empty": "This flight has no captured frames yet.",
+      "pacing": "Pacing",
+      "time": "Time",
+      "avgFps": "Avg fps",
+      "onePercentLow": "1% low",
+      "avgFrame": "Avg frame",
+      "p99Frame": "p99 frame",
+      "waitBlocked": "Wait blocked",
+      "waitBlockedTitle": "Average per-frame time the game spent blocked on runtime pacing",
+      "stalls": "Stalls",
+      "stallsTitle": "Frame-pacing stalls counted by the safety circuit",
+      "live": "Flight in progress — updates every ~15 seconds.",
+      "complete": "Flight complete.",
+      "collectionBinding": "Collection: capture binding.",
+      "collectionAlways": "Collection: always.",
+      "hitchesExcluded": "Hitches over one second were excluded."
+    }
+  },
+  "runtime": {
+    "title": "Runtime Behavior",
+    "intro": "Choose how VectorXR Turbo coordinates with each OpenXR runtime. Auto is a safe starting point; to find the fastest strategy for a game, try Async and Sequenced and compare them in Performance Diagnostics. Profiles using the Toolkit-style or Custom strategy ignore these settings.",
+    "closeAria": "Close runtime behavior and return to Turbo",
+    "pacing": {
+      "title": "Pacing strategy",
+      "intro": "Auto is stability-first: it starts with Async and tries Sequenced if Async stalls or repeatedly rejects frames, then remembers the strategy after 60 seconds of stable play. It does not compare performance, so the remembered strategy is not necessarily the fastest.",
+      "mode": "Mode",
+      "asyncOnly": "Async only · usually fastest",
+      "sequencedOnly": "Sequenced only · for runtimes that need it",
+      "autoActiveStrong": "Auto is active.",
+      "autoActive": "{strong} Async overlaps the runtime wait with game work; Sequenced supports runtimes that require wait and submission to remain interlocked. Pin a runtime below to test a specific strategy.",
+      "manualStrong": "Manual override is active.",
+      "manual": "{strong} Only the selected strategy runs. Automatic discovery is paused; Turbo Safety and live fault suspension still apply."
+    },
+    "decisions": {
+      "eyebrow": "Runtime Decisions",
+      "intro": "Review what Auto learned or override one runtime without affecting the rest.",
+      "active": "Active: {runtime}",
+      "empty": "Nothing to manage yet. Auto records a decision after Turbo's first session on a runtime.",
+      "environment": "Environment",
+      "decision": "Decision",
+      "learned": "Learned",
+      "override": "Override",
+      "activeBadge": "Active",
+      "unknownHeadset": "Unknown headset",
+      "useAuto": "Use Auto",
+      "pinAsync": "Pin Async",
+      "pinSequenced": "Pin Sequenced",
+      "clearRetestTitle": "Clear this runtime's learned decisions and safety blocks. Relaunch the game in Auto without a manual override to test Async, then Sequenced if needed.",
+      "clearRetest": "Clear & retest",
+      "inactiveNote": "Runtime decisions are inactive while a global manual override is selected.",
+      "willTest": "Auto will test {runtime} during the next Turbo session, starting with Async."
+    },
+    "mode": {
+      "notSupported": "Not supported",
+      "undiscovered": "Undiscovered"
+    },
+    "badge": {
+      "pinned": "Pinned",
+      "suspended": "Suspended",
+      "discovered": "Discovered"
+    }
+  }
+}

@@ -1,3 +1,4 @@
+import { t } from '../i18n/index.ts'
 import type { TurboMetricsSession } from './model'
 
 // Prefer a running capture, then the newest usable A/B run. A quick relaunch
@@ -18,9 +19,11 @@ export function turboSessionStrategy(session: Pick<TurboMetricsSession, 'timingC
   if (timing.startsWith('Experimental')) {
     const value = (key: string) => new RegExp(`${key}=([^;]+)`).exec(timing)?.[1]?.trim()
     const toolkit = value('submit') === 'wait' && value('sample') === 'entry' && value('prediction') === '100%' && value('cap') === '0'
-    return toolkit ? 'Toolkit-style' : 'Custom'
+    return toolkit ? t('turbo.strategy.toolkit') : t('turbo.strategy.custom')
   }
   const modes = session.buckets.map(bucket => bucket.state).filter(state => state !== 'off')
-  const label = [...new Set(modes)].map(mode => mode === 'async' ? 'Async' : mode === 'sequenced' ? 'Sequenced' : mode).join(' + ')
-  return timing || label ? `VectorXR${label ? ` · ${label}` : ''}` : 'Unknown strategy'
+  // Unrecognized states are layer data and stay as written.
+  const label = [...new Set(modes)].map(mode => mode === 'async' ? t('turbo.strategy.async') : mode === 'sequenced' ? t('turbo.strategy.sequenced') : mode).join(' + ')
+  if (!timing && !label) return t('turbo.strategy.unknown')
+  return label ? t('turbo.strategy.vectorxrWithModes', { modes: label }) : t('turbo.strategy.vectorxr')
 }

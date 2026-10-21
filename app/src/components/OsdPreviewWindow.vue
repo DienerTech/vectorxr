@@ -4,6 +4,7 @@ import { isTauri } from '@tauri-apps/api/core'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { defaultOsdSettings, normalizeOsdSettings } from '../lib/model'
 import OsdPreview from './OsdPreview.vue'
+import { t } from '../i18n/index.ts'
 
 const settings = ref(defaultOsdSettings())
 const ready = ref(false)
@@ -39,19 +40,19 @@ onUnmounted(() => { closed(); channel.close(); window.removeEventListener('befor
 <template>
   <main class="preview-window surface-panel">
     <header class="flex flex-wrap items-center gap-2 px-5 py-3">
-      <h1 class="mr-auto text-sm font-semibold">OSD Preview</h1>
+      <h1 class="mr-auto text-sm font-semibold">{{ t('osd.previewWindow.title') }}</h1>
       <template v-if="ready">
-        <div class="segmented" role="group" aria-label="Layout to preview">
-          <button v-for="compact in [true, false]" :key="String(compact)" type="button" class="segmented-option" :class="{ 'segmented-option-active': settings.compact === compact }" :aria-pressed="settings.compact === compact" @click="layout(compact)">{{ compact ? 'Compact' : 'Expanded' }}</button>
+        <div class="segmented" role="group" :aria-label="t('osd.layout.previewAria')">
+          <button v-for="compact in [true, false]" :key="String(compact)" type="button" class="segmented-option" :class="{ 'segmented-option-active': settings.compact === compact }" :aria-pressed="settings.compact === compact" @click="layout(compact)">{{ compact ? t('osd.layout.compact') : t('osd.layout.expanded') }}</button>
         </div>
-        <div class="segmented" role="group" aria-label="Preview scale">
-          <button v-for="mode in [false, true]" :key="String(mode)" type="button" class="segmented-option" :class="{ 'segmented-option-active': legible === mode }" :aria-pressed="legible === mode" @click="setLegible(mode)">{{ mode ? 'Legible' : 'Placement' }}</button>
+        <div class="segmented" role="group" :aria-label="t('osd.previewScale.aria')">
+          <button v-for="mode in [false, true]" :key="String(mode)" type="button" class="segmented-option" :class="{ 'segmented-option-active': legible === mode }" :aria-pressed="legible === mode" @click="setLegible(mode)">{{ mode ? t('osd.previewScale.legible') : t('osd.previewScale.placement') }}</button>
         </div>
       </template>
-      <button type="button" class="button-secondary rounded-[0.75rem] px-3 py-1.5 text-xs font-medium" @click="close">Close</button>
+      <button type="button" class="button-secondary rounded-[0.75rem] px-3 py-1.5 text-xs font-medium" @click="close">{{ t('common.close') }}</button>
     </header>
     <OsdPreview v-if="ready" v-model:legible="legible" :settings="settings" :pivot-snap-line="pivotSnapLine" :diagnostics="diagnostics" @position="position" />
-    <p v-else class="p-5 text-sm text-muted">Connecting to OSD controls…</p>
+    <p v-else class="p-5 text-sm text-muted">{{ t('osd.previewWindow.connecting') }}</p>
   </main>
 </template>
 

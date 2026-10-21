@@ -1,1 +1,40 @@
-{}
+{
+  "eyebrow": "About",
+  "tagline": "OpenXR Enhancements, tuned per game.",
+  "intro": "VectorXR is an OpenXR Enhancement platform that reshapes how your headset renders and tracks — title by title. Reclaim frame rate with dynamic foveated rendering, amplify head rotation so you can check your six without overturning, and deepen stereo separation for a stronger sense of scale and presence.",
+  "profiles": "OpenXR layer management and per-application profiles keep every title configured exactly how you like it, all from one place.",
+  "firstAndOnly": "{highlight} OpenXR solution where enhanced head rotation and quad-views foveated rendering work together — the foveated region follows your pivoted view instead of being left behind.",
+  "firstAndOnlyHighlight": "The first and only",
+  "developedBy": "Developed independently by DienerTech LLC.",
+  "copyright": "(c) 2026 DienerTech LLC. Released under the Mozilla Public License 2.0.",
+  "support": {
+    "eyebrow": "Support Development",
+    "title": "Support VectorXR",
+    "body": "Tips through Ko-fi help fund testing hardware, release work, and continued polish for OpenXR tools.",
+    "button": "Support on Ko-fi"
+  },
+  "patchNotes": {
+    "eyebrow": "Latest Patch Notes",
+    "readFull": "Read full patch notes"
+  },
+  "updates": {
+    "eyebrow": "Updates",
+    "title": "Release status",
+    "published": "Published {date}",
+    "check": "Check",
+    "release": "Release",
+    "summary": {
+      "checking": "Checking GitHub releases...",
+      "available": "VectorXR {tag} is available.",
+      "upToDate": "You are on the latest published release, {tag}.",
+      "unavailable": "No published GitHub releases are available yet.",
+      "idle": "Check GitHub for the latest published VectorXR build."
+    },
+    "chip": {
+      "checking": "Checking",
+      "available": "Update",
+      "upToDate": "Current",
+      "error": "Retry"
+    }
+  }
+}

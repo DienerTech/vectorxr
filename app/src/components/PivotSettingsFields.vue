@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { t } from '../i18n/index.ts'
 import type { PivotAxisTuning, PivotSnapStackingStatus, PivotXRSettings } from '../lib/model'
 import PivotSteppedSettings from './PivotSteppedSettings.vue'
 import PivotPositionAssistEditor from './PivotPositionAssistEditor.vue'
@@ -16,17 +17,11 @@ const props = defineProps<{
   snapStacking: PivotSnapStackingStatus
 }>()
 
-const deadzoneTransitionHint = [
-  'Eases from 1:1 to full sensitivity over this many degrees beyond the deadzone, instead of switching at its edge. 0 keeps the original hard deadzone.',
-  'For example, with an 8° deadzone and an 8° transition, amplification starts gently at 8° and reaches full strength at 16°.',
-  'The gentler start gives up half the transition width × (multiplier − 1) of extra rotation: at ×1.5 with an 8° transition, the view stays 2° behind a hard deadzone until Max Extra is reached.',
-].join('\n\n')
-
 const advancedDirections = [
-  { key: 'yawLeft', label: 'Yaw Left', hint: 'Applied when turning your head to the left.', deadzoneMax: 180 },
-  { key: 'yawRight', label: 'Yaw Right', hint: 'Applied when turning your head to the right.', deadzoneMax: 180 },
-  { key: 'pitchUp', label: 'Pitch Up', hint: 'Applied when tilting your head up.', deadzoneMax: 90 },
-  { key: 'pitchDown', label: 'Pitch Down', hint: 'Applied when tilting your head down.', deadzoneMax: 90 },
+  { key: 'yawLeft', labelKey: 'pivot.directions.yawLeft', hintKey: 'pivot.fields.yawLeftHint', deadzoneMax: 180 },
+  { key: 'yawRight', labelKey: 'pivot.directions.yawRight', hintKey: 'pivot.fields.yawRightHint', deadzoneMax: 180 },
+  { key: 'pitchUp', labelKey: 'pivot.directions.pitchUp', hintKey: 'pivot.fields.pitchUpHint', deadzoneMax: 90 },
+  { key: 'pitchDown', labelKey: 'pivot.directions.pitchDown', hintKey: 'pivot.fields.pitchDownHint', deadzoneMax: 90 },
 ] as const
 
 function axisTuning(key: (typeof advancedDirections)[number]['key']): PivotAxisTuning {
@@ -70,27 +65,27 @@ function onAdvancedAxesChange(enabled: boolean) {
     </section>
     <!-- General: applies to both axes -->
     <div class="rounded-[1rem] border p-4 surface-panel-soft">
-      <p class="eyebrow text-xs uppercase tracking-[0.18em]">General</p>
+      <p class="eyebrow text-xs uppercase tracking-[0.18em]">{{ t('pivot.fields.general') }}</p>
       <div class="mt-3 grid gap-3" :class="settings.responseMode === 'continuous' ? 'sm:grid-cols-3' : 'sm:grid-cols-2'">
         <label class="block">
           <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-            Response Mode
+            {{ t('pivot.fields.responseMode') }}
             <span
-              title="Continuous scales your head rotation smoothly with a multiplier. Stepped adds fixed chunks of rotation as your head crosses angle thresholds, like XRNeckSafer's stepped mode."
+              :title="t('pivot.fields.responseModeHint')"
               class="cursor-help select-none text-xs text-muted"
               >ⓘ</span
             >
           </span>
           <select v-model="settings.responseMode" class="app-input h-11 w-full rounded-[0.75rem] px-4 py-2.5">
-            <option value="continuous">continuous</option>
-            <option value="stepped">stepped</option>
+            <option value="continuous">{{ t('pivot.fields.responseModeContinuous') }}</option>
+            <option value="stepped">{{ t('pivot.fields.responseModeStepped') }}</option>
           </select>
         </label>
         <label v-if="settings.responseMode === 'continuous'" class="block">
           <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-            Smoothing
+            {{ t('pivot.fields.smoothing') }}
             <span
-              title="Low-pass filter on continuous pivot response for both yaw and pitch. 0 = instant, higher = smoother but laggier. Good range: 0.05–0.2."
+              :title="t('pivot.fields.smoothingHint')"
               class="cursor-help select-none text-xs text-muted"
               >ⓘ</span
             >
@@ -106,9 +101,9 @@ function onAdvancedAxesChange(enabled: boolean) {
         </label>
         <label class="block">
           <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-            Activation Ramp
+            {{ t('pivot.fields.activationRamp') }}
             <span
-              title="Seconds to ease the pivot effect in and out when you toggle it on or off, so activating it never snaps the view. 0 = instant. Default 0.35."
+              :title="t('pivot.fields.activationRampHint')"
               class="cursor-help select-none text-xs text-muted"
               >ⓘ</span
             >
@@ -121,7 +116,7 @@ function onAdvancedAxesChange(enabled: boolean) {
             step="0.05"
             type="number"
           />
-          <span class="mt-1 block text-xs text-muted">seconds</span>
+          <span class="mt-1 block text-xs text-muted">{{ t('pivot.units.seconds') }}</span>
         </label>
       </div>
     </div>
@@ -138,9 +133,9 @@ function onAdvancedAxesChange(enabled: boolean) {
           @change="onAdvancedAxesChange(($event.target as HTMLInputElement).checked)"
         />
         <span>
-          <span class="block text-sm font-medium">Advanced axes &mdash; tune each direction independently</span>
+          <span class="block text-sm font-medium">{{ t('pivot.advancedAxes.label') }}</span>
           <span class="mt-0.5 block text-sm leading-6 text-muted">
-            Separate multiplier, deadzone, and cap for looking left, right, up, and down. Enabling this starts each direction from your current yaw/pitch values.
+            {{ t('pivot.advancedAxes.continuousDescription') }}
           </span>
         </span>
       </label>
@@ -149,13 +144,13 @@ function onAdvancedAxesChange(enabled: boolean) {
     <!-- Yaw + Pitch (symmetric continuous, or stepped limits) -->
     <div v-if="settings.responseMode === 'continuous' && !settings.advancedAxes" class="grid gap-3 md:grid-cols-2">
       <div class="rounded-[1rem] border p-4 surface-panel-soft">
-        <p class="eyebrow text-xs uppercase tracking-[0.18em]">Yaw</p>
+        <p class="eyebrow text-xs uppercase tracking-[0.18em]">{{ t('pivot.fields.yaw') }}</p>
         <div class="mt-3 grid gap-3 sm:grid-cols-2">
           <label class="block">
             <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-              Multiplier
+              {{ t('pivot.fields.multiplier') }}
               <span
-                title="Amplifies head yaw (left/right) beyond the deadzone. 1.0 = no change. 1.3–2.0 is typical; up to 3 helps look further or behind you depending on your headset and head-tracking range."
+                :title="t('pivot.fields.yawMultiplierHint')"
                 class="cursor-help select-none text-xs text-muted"
                 >ⓘ</span
               >
@@ -171,9 +166,9 @@ function onAdvancedAxesChange(enabled: boolean) {
           </label>
           <label class="block">
             <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-              Max Extra
+              {{ t('pivot.fields.maxExtra') }}
               <span
-                title="Cap on the extra yaw degrees pivot can add on top of natural head movement. 180° lets you look directly behind you."
+                :title="t('pivot.fields.yawMaxExtraHint')"
                 class="cursor-help select-none text-xs text-muted"
                 >ⓘ</span
               >
@@ -186,13 +181,13 @@ function onAdvancedAxesChange(enabled: boolean) {
               step="0.5"
               type="number"
             />
-            <span class="mt-1 block text-xs text-muted">degrees</span>
+            <span class="mt-1 block text-xs text-muted">{{ t('pivot.units.degrees') }}</span>
           </label>
           <label class="block">
             <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-              Deadzone
+              {{ t('pivot.fields.deadzone') }}
               <span
-                title="Degrees of head yaw ignored before amplification kicks in. Prevents jitter when looking straight ahead. 2–8° is typical."
+                :title="t('pivot.fields.yawDeadzoneHint')"
                 class="cursor-help select-none text-xs text-muted"
                 >ⓘ</span
               >
@@ -205,13 +200,13 @@ function onAdvancedAxesChange(enabled: boolean) {
               step="0.5"
               type="number"
             />
-            <span class="mt-1 block text-xs text-muted">degrees</span>
+            <span class="mt-1 block text-xs text-muted">{{ t('pivot.units.degrees') }}</span>
           </label>
           <label class="block">
             <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-              Deadzone Transition
+              {{ t('pivot.fields.deadzoneTransition') }}
               <span
-                :title="deadzoneTransitionHint"
+                :title="t('pivot.fields.deadzoneTransitionHint')"
                 class="cursor-help select-none text-xs text-muted"
                 >ⓘ</span
               >
@@ -224,19 +219,19 @@ function onAdvancedAxesChange(enabled: boolean) {
               step="0.5"
               type="number"
             />
-            <span class="mt-1 block text-xs text-muted">degrees · 0 keeps the original hard deadzone</span>
+            <span class="mt-1 block text-xs text-muted">{{ t('pivot.units.degreesHardDeadzone') }}</span>
           </label>
         </div>
       </div>
 
       <div class="rounded-[1rem] border p-4 surface-panel-soft">
-        <p class="eyebrow text-xs uppercase tracking-[0.18em]">Pitch</p>
+        <p class="eyebrow text-xs uppercase tracking-[0.18em]">{{ t('pivot.fields.pitch') }}</p>
         <div class="mt-3 grid gap-3 sm:grid-cols-2">
           <label class="block">
             <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-              Multiplier
+              {{ t('pivot.fields.multiplier') }}
               <span
-                title="Amplifies head pitch (up/down) beyond the deadzone. 1.0 = no change. 1.2–2.0 is typical; up to 3 helps look over the nose or up at the canopy."
+                :title="t('pivot.fields.pitchMultiplierHint')"
                 class="cursor-help select-none text-xs text-muted"
                 >ⓘ</span
               >
@@ -252,9 +247,9 @@ function onAdvancedAxesChange(enabled: boolean) {
           </label>
           <label class="block">
             <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-              Max Extra
+              {{ t('pivot.fields.maxExtra') }}
               <span
-                title="Cap on the extra pitch degrees pivot can add. Useful for looking over the nose or up at the canopy without craning your neck."
+                :title="t('pivot.fields.pitchMaxExtraHint')"
                 class="cursor-help select-none text-xs text-muted"
                 >ⓘ</span
               >
@@ -267,13 +262,13 @@ function onAdvancedAxesChange(enabled: boolean) {
               step="0.5"
               type="number"
             />
-            <span class="mt-1 block text-xs text-muted">degrees</span>
+            <span class="mt-1 block text-xs text-muted">{{ t('pivot.units.degrees') }}</span>
           </label>
           <label class="block">
             <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-              Deadzone
+              {{ t('pivot.fields.deadzone') }}
               <span
-                title="Degrees of head pitch ignored before amplification kicks in. 2–12° is typical."
+                :title="t('pivot.fields.pitchDeadzoneHint')"
                 class="cursor-help select-none text-xs text-muted"
                 >ⓘ</span
               >
@@ -286,13 +281,13 @@ function onAdvancedAxesChange(enabled: boolean) {
               step="0.5"
               type="number"
             />
-            <span class="mt-1 block text-xs text-muted">degrees</span>
+            <span class="mt-1 block text-xs text-muted">{{ t('pivot.units.degrees') }}</span>
           </label>
           <label class="block">
             <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-              Deadzone Transition
+              {{ t('pivot.fields.deadzoneTransition') }}
               <span
-                :title="deadzoneTransitionHint"
+                :title="t('pivot.fields.deadzoneTransitionHint')"
                 class="cursor-help select-none text-xs text-muted"
                 >ⓘ</span
               >
@@ -305,7 +300,7 @@ function onAdvancedAxesChange(enabled: boolean) {
               step="0.5"
               type="number"
             />
-            <span class="mt-1 block text-xs text-muted">degrees · 0 keeps the original hard deadzone</span>
+            <span class="mt-1 block text-xs text-muted">{{ t('pivot.units.degreesHardDeadzone') }}</span>
           </label>
         </div>
       </div>
@@ -321,22 +316,22 @@ function onAdvancedAxesChange(enabled: boolean) {
           @change="onAdvancedAxesChange(($event.target as HTMLInputElement).checked)"
         />
         <span>
-          <span class="block text-sm font-medium">Advanced axes — tune each direction independently</span>
+          <span class="block text-sm font-medium">{{ t('pivot.advancedAxes.label') }}</span>
           <span class="mt-0.5 block text-sm leading-6 text-muted">
-            Separate multiplier, deadzone, and cap for looking left, right, up, and down. Enabling this starts each direction from your current yaw/pitch values.
+            {{ t('pivot.advancedAxes.continuousDescription') }}
           </span>
         </span>
       </label>
 
       <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <div v-for="direction in advancedDirections" :key="direction.key" class="rounded-[0.9rem] border p-3 surface-panel">
-          <p class="eyebrow text-xs uppercase tracking-[0.18em]" :title="direction.hint">{{ direction.label }}</p>
+          <p class="eyebrow text-xs uppercase tracking-[0.18em]" :title="t(direction.hintKey)">{{ t(direction.labelKey) }}</p>
           <div class="mt-3 grid gap-3">
             <label class="block">
               <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-                Multiplier
+                {{ t('pivot.fields.multiplier') }}
                 <span
-                  title="How much head rotation is amplified in this direction after the deadzone. 1.0 adds no extra rotation."
+                  :title="t('pivot.fields.directionMultiplierHint')"
                   class="cursor-help select-none text-xs text-muted"
                   >ⓘ</span
                 >
@@ -352,9 +347,9 @@ function onAdvancedAxesChange(enabled: boolean) {
             </label>
             <label class="block">
               <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-                Deadzone
+                {{ t('pivot.fields.deadzone') }}
                 <span
-                  title="Head rotation in this direction that is ignored before Motion starts adding rotation."
+                  :title="t('pivot.fields.directionDeadzoneHint')"
                   class="cursor-help select-none text-xs text-muted"
                   >ⓘ</span
                 >
@@ -367,13 +362,13 @@ function onAdvancedAxesChange(enabled: boolean) {
                 step="0.5"
                 type="number"
               />
-              <span class="mt-1 block text-xs text-muted">degrees</span>
+              <span class="mt-1 block text-xs text-muted">{{ t('pivot.units.degrees') }}</span>
             </label>
             <label class="block">
               <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-                Deadzone Transition
+                {{ t('pivot.fields.deadzoneTransition') }}
                 <span
-                  :title="deadzoneTransitionHint"
+                  :title="t('pivot.fields.deadzoneTransitionHint')"
                   class="cursor-help select-none text-xs text-muted"
                   >ⓘ</span
                 >
@@ -386,13 +381,13 @@ function onAdvancedAxesChange(enabled: boolean) {
                 step="0.5"
                 type="number"
               />
-              <span class="mt-1 block text-xs text-muted">degrees</span>
+              <span class="mt-1 block text-xs text-muted">{{ t('pivot.units.degrees') }}</span>
             </label>
             <label class="block">
               <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-                Max Extra
+                {{ t('pivot.fields.maxExtra') }}
                 <span
-                  title="The most extra rotation Motion can add in this direction."
+                  :title="t('pivot.fields.directionMaxExtraHint')"
                   class="cursor-help select-none text-xs text-muted"
                   >ⓘ</span
                 >
@@ -405,7 +400,7 @@ function onAdvancedAxesChange(enabled: boolean) {
                 step="0.5"
                 type="number"
               />
-              <span class="mt-1 block text-xs text-muted">degrees</span>
+              <span class="mt-1 block text-xs text-muted">{{ t('pivot.units.degrees') }}</span>
             </label>
           </div>
         </div>

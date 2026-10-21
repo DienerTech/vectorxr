@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { t } from '../i18n/index.ts'
 const props = defineProps<{ modelValue: string }>()
 const emit = defineEmits<{ 'update:modelValue': [string] }>()
 const hsv = computed(() => {
@@ -29,13 +30,13 @@ function hexInput(event: Event) {
 
 <template>
   <div class="flex flex-wrap items-center gap-5">
-    <div class="color-wheel" aria-label="Custom accent hue and saturation wheel" @pointerdown="wheel" @pointermove="wheel">
+    <div class="color-wheel" :aria-label="t('osd.colorPicker.wheelAria')" @pointerdown="wheel" @pointermove="wheel">
       <i :style="marker" />
     </div>
     <div class="min-w-0 flex-1 space-y-3">
-      <label class="block text-xs">Brightness<input :value="hsv.v * 100" aria-label="Custom accent brightness" type="range" min="0" max="100" class="mt-2 h-2 w-full cursor-pointer accent-depthxr-copper" @input="setColor(hsv.h, hsv.s, Number(($event.target as HTMLInputElement).value) / 100)" /></label>
-      <label class="block text-xs">Custom accent<input :value="modelValue" type="color" aria-label="Custom accent color" class="app-input manual-input-select mt-2 h-9 w-full rounded-lg" @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)" /></label>
-      <label class="block text-xs">Hex color<input :value="modelValue" maxlength="7" class="app-input mt-1 w-full rounded-lg px-2 py-1 font-mono" @input="hexInput" @blur="($event.target as HTMLInputElement).value = modelValue" /></label>
+      <label class="block text-xs">{{ t('osd.colorPicker.brightness') }}<input :value="hsv.v * 100" :aria-label="t('osd.colorPicker.brightnessAria')" type="range" min="0" max="100" class="mt-2 h-2 w-full cursor-pointer accent-depthxr-copper" @input="setColor(hsv.h, hsv.s, Number(($event.target as HTMLInputElement).value) / 100)" /></label>
+      <label class="block text-xs">{{ t('osd.colorPicker.customAccent') }}<input :value="modelValue" type="color" :aria-label="t('osd.colorPicker.colorAria')" class="app-input manual-input-select mt-2 h-9 w-full rounded-lg" @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)" /></label>
+      <label class="block text-xs">{{ t('osd.colorPicker.hex') }}<input :value="modelValue" maxlength="7" class="app-input mt-1 w-full rounded-lg px-2 py-1 font-mono" @input="hexInput" @blur="($event.target as HTMLInputElement).value = modelValue" /></label>
     </div>
   </div>
 </template>

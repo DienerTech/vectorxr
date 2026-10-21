@@ -233,7 +233,7 @@ test('Turbo overlap produces a non-blocking warning naming the affected applicat
 
   config.modules.turbo.enabled = true
   config.modules.framegen.enabled = true
-  assert.match(configWarnings(config)[0], /both on for DCS, MSFS and applications without a custom profile\./)
+  assert.match(configWarnings(config)[0], /both on for DCS, MSFS,? and applications without a custom profile\./)
 })
 
 test('the OSD Frame Gen rows default sensibly and old saved orders gain the row at the end', () => {

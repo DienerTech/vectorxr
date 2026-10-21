@@ -1,1 +1,79 @@
-{}
+{
+  "core": {
+    "title": "Settings",
+    "intro": "App-wide switches, appearance, logging, sound feedback, and config files.",
+    "general": {
+      "heading": "General",
+      "enabled": {
+        "title": "VectorXR Enabled",
+        "description": "Enables or disables all VectorXR OpenXR Enhancements at runtime."
+      },
+      "theme": {
+        "title": "Theme",
+        "description": "Stored on this PC only."
+      },
+      "tray": {
+        "title": "System Tray",
+        "description": "Closing this window keeps the app in the notification area, with health, the VectorXR switch, log level and Export Debug. Off: closing the window quits the app. Stored on this PC only.",
+        "helperNote": "The app and tray are a settings helper, not the OpenXR layer. VectorXR works in your games with them closed, while VectorXR Enabled is on."
+      },
+      "inputDevices": {
+        "title": "Input Devices",
+        "description": "For use in-game: looks again for a controller connected mid-session that VectorXR didn't detect.",
+        "rescan": "Rescan inputs",
+        "rescanning": "Rescanning…",
+        "noGame": "No game is running with VectorXR.",
+        "asked_one": "Asked {count} running game to look again.",
+        "asked_other": "Asked {count} running games to look again.",
+        "rescanFailed": "Rescan inputs failed"
+      },
+      "trackSeenApps": {
+        "title": "Track discovered XR apps",
+        "description": "Notes the executable name and first/last seen time of OpenXR apps you launch, so you can easily register them from the Application Registry. All data is kept locally on this PC."
+      }
+    },
+    "logging": {
+      "heading": "Logging",
+      "logLevel": "Log Level",
+      "logLevelHelp": "Info writes normal operational messages and errors. Debug adds verbose diagnostics, including bounded Turbo frame-timing traces. Logging changes apply live; launch the VR app with Debug enabled for runtime clock measurements.",
+      "levelInfo": "Info",
+      "levelDebug": "Debug",
+      "retention": "Log Retention",
+      "retentionHelp": "Number of rotated log files to keep. Older files are removed after the retention count is exceeded.",
+      "viewLogs": "View Logs",
+      "exportDebug": "Export Debug",
+      "exportDebugHelp": "Saves the logs, settings and diagnostics as one ZIP file to share, as on the Home tab.",
+      "latestLog": "Latest log: {path}",
+      "latestLogPending": "Available after first session"
+    },
+    "sound": {
+      "heading": "Sound Feedback",
+      "description": "Master volume for the activate / deactivate cues you can attach to bindings.",
+      "test": "Test",
+      "volume": "Sound feedback volume",
+      "previewFailed": "Failed to play sound."
+    },
+    "configFiles": {
+      "heading": "Config Files",
+      "description": "Import another settings file, export the current settings, or confirm where VectorXR keeps its local config.",
+      "import": "Import Config",
+      "export": "Export Config",
+      "directory": "Config directory",
+      "directoryPending": "Available after config loads",
+      "reset": {
+        "title": "Reset to defaults",
+        "description": "Rebuild settings.json with default values and clear local OpenXR application discovery data.",
+        "button": "Reset to Default"
+      }
+    }
+  },
+  "theme": {
+    "system": "System",
+    "light": "Light",
+    "dark": "Dark"
+  },
+  "fileTypes": {
+    "jsonConfig": "JSON config",
+    "wavAudio": "WAV audio"
+  }
+}

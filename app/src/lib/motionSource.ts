@@ -1,3 +1,4 @@
+import { t } from '../i18n/index.ts'
 import type { FrameGenMotionEstimation, FrameGenSettings } from './model'
 
 // What the app's graphics card check found (load_gpu_capabilities): every
@@ -38,19 +39,20 @@ export function motionSourceState(
   const locked = interpolate && settings.frameMultiplier === 'dynamic'
   let hardwareUnavailable: string | null = null
   if (gpus?.probed && !gpus.opticalFlow) {
-    const cards = gpus.adapters.map((adapter) => `${adapter.name}: ${adapter.detail}`).join('; ')
+    // adapter.detail comes from the app backend and stays as it reads there.
+    const cards = gpus.adapters.map((adapter) => t('pivot.motionSource.cardDetail', { name: adapter.name, detail: adapter.detail })).join('; ')
     hardwareUnavailable = cards
-      ? `No graphics card in this PC has NVIDIA's optical flow hardware (${cards}).`
-      : "No graphics card in this PC has NVIDIA's optical flow hardware."
+      ? t('pivot.motionSource.hardwareUnavailableCards', { cards })
+      : t('pivot.motionSource.hardwareUnavailable')
   }
   const effective: FrameGenMotionEstimation = locked || hardwareUnavailable ? 'shader' : settings.motionEstimation
   let note: string | null = null
   if (locked) {
-    note = 'In Dynamic, Interpolate measures motion with Shader: its frames between real frames need motion sooner than the NVIDIA hardware delivers it beside a busy game. The choice applies to Extrapolate, and to Interpolate at a fixed or Auto frame rate.'
+    note = t('pivot.motionSource.lockedNote')
   } else if (hardwareUnavailable && settings.motionEstimation === 'hardware') {
-    note = 'NVIDIA hardware is chosen, but no graphics card here has it, so Shader measures motion.'
+    note = t('pivot.motionSource.hardwareMissingNote')
   } else if (interpolate && effective === 'hardware') {
-    note = 'Experimental: Interpolate measures motion with the NVIDIA hardware at a fixed or Auto frame rate. If its motion arrives late, Frame Generation runs a refresh further ahead (more latency); Shader is the safe choice.'
+    note = t('pivot.motionSource.experimentalNote')
   }
   return { effective, locked, hardwareUnavailable, note }
 }

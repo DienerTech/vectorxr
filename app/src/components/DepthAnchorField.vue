@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { t } from '../i18n/index.ts'
+
 defineProps<{
   value: boolean
   muted?: boolean
@@ -22,19 +24,19 @@ defineEmits<{
     />
     <span class="min-w-0">
       <span class="flex flex-wrap items-center gap-2">
-        <span class="text-base font-semibold tracking-tight">Depth Lock</span>
+        <span class="text-base font-semibold tracking-tight">{{ t('depth.depthLock.name') }}</span>
         <span class="chip-warning rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em]">
-          Experimental
+          {{ t('depth.experimental') }}
         </span>
         <span
           class="rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em]"
           :class="value ? 'chip-accent' : 'surface-panel-strong text-muted'"
         >
-          {{ value ? 'On' : 'Off' }}
+          {{ value ? t('common.on') : t('common.off') }}
         </span>
       </span>
       <span class="mt-1 block text-[13px] leading-5 text-muted">
-        Lock the tuned stereo geometry into the rendered image, then restore headset-native eye poses and FOV for submission so the runtime cannot normalize the effect away. Test it per game and reduce intensity if discomfort or nausea appears.
+        {{ t('depth.depthLock.description') }}
       </span>
     </span>
   </label>

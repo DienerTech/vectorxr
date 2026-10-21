@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
+import { t } from '../i18n/index.ts'
 import EffectField from './EffectField.vue'
 import {
   fromStereoBoostDisplay,
@@ -34,8 +35,8 @@ function setExtendedRange(enabled: boolean) {
   <EffectField
     :value="value"
     :muted="muted"
-    title="Stereo Depth / World Scale"
-    subtitle="Changes virtual eye separation while keeping your physical headset IPD untouched. Move right for stronger near-field stereo and a smaller-feeling world; move left for a larger-feeling, flatter world. Start around ±5–15%."
+    :title="t('depth.stereoDepth.title')"
+    :subtitle="t('depth.stereoDepth.subtitle')"
     :min="1 - props.displayLimit / 100"
     :max="1 + props.displayLimit / 100"
     :step="0.001"
@@ -45,9 +46,9 @@ function setExtendedRange(enabled: boolean) {
     :display-value="toStereoBoostDisplay"
     :parse-display-value="fromStereoBoostDisplay"
     :display-badge="stereoBoostBadge"
-    left-label="- Larger world"
-    center-label="0 Native scale"
-    right-label="+ 3D stereo effect"
+    :left-label="t('depth.stereoDepth.left')"
+    :center-label="t('depth.stereoDepth.center')"
+    :right-label="t('depth.stereoDepth.right')"
     @update:value="$emit('update:value', $event)"
   >
     <template #footer>
@@ -58,8 +59,8 @@ function setExtendedRange(enabled: boolean) {
           type="checkbox"
           @change="setExtendedRange(($event.target as HTMLInputElement).checked)"
         />
-        Extended range (&plusmn;100%)
-        <span class="text-muted">Use only when normal &plusmn;25% tuning is not enough.</span>
+        {{ t('depth.stereoDepth.extendedRange') }}
+        <span class="text-muted">{{ t('depth.stereoDepth.extendedRangeHint') }}</span>
       </label>
     </template>
   </EffectField>

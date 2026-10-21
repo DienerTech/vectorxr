@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
+import { t } from '../i18n/index.ts'
 import type { PivotXRSettings } from '../lib/model'
 
 // Compact read-only summary of a profile's rotation settings. Editing happens
@@ -20,59 +21,79 @@ const chips = computed(() => {
   if (settings.responseMode === 'stepped') {
     if (settings.advancedAxes) {
       result.push({
-        label: 'Stepped · Advanced',
-        value: '4 directions',
-        title: `Independent yaw-left, yaw-right, pitch-up, and pitch-down step tuning.`,
+        label: t('pivot.summary.steppedAdvanced'),
+        value: t('pivot.summary.fourDirections'),
+        title: t('pivot.summary.steppedAdvancedTitle'),
       })
     } else {
       result.push({
-        label: 'Stepped',
-        value: `Y ${settings.yawStep.triggerDegrees}° → +${settings.yawStep.amountDegrees}° · P ${settings.pitchStep.triggerDegrees}° → +${settings.pitchStep.amountDegrees}°`,
-        title: `Yaw and pitch use independent trigger, amount, hysteresis, deadzone, and maximum values.`,
+        label: t('pivot.summary.stepped'),
+        value: t('pivot.summary.steppedValue', {
+          yawTrigger: settings.yawStep.triggerDegrees,
+          yawAmount: settings.yawStep.amountDegrees,
+          pitchTrigger: settings.pitchStep.triggerDegrees,
+          pitchAmount: settings.pitchStep.amountDegrees,
+        }),
+        title: t('pivot.summary.steppedTitle'),
       })
     }
     result.push({
-      label: 'Step Glide',
-      value: settings.stepGlideMode === 'instant' ? 'Instant' : `${settings.stepGlideSeconds}s`,
+      label: t('pivot.summary.stepGlide'),
+      value: settings.stepGlideMode === 'instant' ? t('pivot.summary.instant') : `${settings.stepGlideSeconds}s`,
       title: settings.stepGlideMode === 'instant'
-        ? 'Each step is applied immediately.'
-        : `Each step reaches its target in ${settings.stepGlideSeconds}s without overshoot.`,
+        ? t('pivot.summary.stepInstantTitle')
+        : t('pivot.summary.stepGlideTitle', { seconds: settings.stepGlideSeconds }),
     })
   } else if (settings.advancedAxes) {
     result.push({
-      label: 'Advanced axes',
+      label: t('pivot.summary.advancedAxes'),
       value: `×${settings.yawLeft.rotationMultiplier}/${settings.yawRight.rotationMultiplier} · ×${settings.pitchUp.rotationMultiplier}/${settings.pitchDown.rotationMultiplier}`,
-      title: `Per-direction multipliers — yaw left ×${settings.yawLeft.rotationMultiplier}, yaw right ×${settings.yawRight.rotationMultiplier}, pitch up ×${settings.pitchUp.rotationMultiplier}, pitch down ×${settings.pitchDown.rotationMultiplier}.`,
+      title: t('pivot.summary.advancedAxesTitle', {
+        yawLeft: settings.yawLeft.rotationMultiplier,
+        yawRight: settings.yawRight.rotationMultiplier,
+        pitchUp: settings.pitchUp.rotationMultiplier,
+        pitchDown: settings.pitchDown.rotationMultiplier,
+      }),
     })
   } else {
     result.push({
-      label: 'Yaw',
+      label: t('pivot.summary.yaw'),
       value: `×${settings.rotationMultiplier}`,
-      title: `Yaw multiplier ×${settings.rotationMultiplier}, deadzone ${settings.deadzoneDegrees}°, max extra ${settings.maxExtraYawDegrees}°.`,
+      title: t('pivot.summary.yawTitle', {
+        multiplier: settings.rotationMultiplier,
+        deadzone: settings.deadzoneDegrees,
+        maxExtra: settings.maxExtraYawDegrees,
+      }),
     })
     result.push({
-      label: 'Pitch',
+      label: t('pivot.summary.pitch'),
       value: `×${settings.pitchRotationMultiplier}`,
-      title: `Pitch multiplier ×${settings.pitchRotationMultiplier}, deadzone ${settings.pitchDeadzoneDegrees}°, max extra ${settings.maxExtraPitchDegrees}°.`,
+      title: t('pivot.summary.pitchTitle', {
+        multiplier: settings.pitchRotationMultiplier,
+        deadzone: settings.pitchDeadzoneDegrees,
+        maxExtra: settings.maxExtraPitchDegrees,
+      }),
     })
   }
 
   result.push({
-    label: settings.responseMode === 'stepped' ? 'Activation Ramp' : 'Smoothing',
+    label: settings.responseMode === 'stepped' ? t('pivot.summary.activationRamp') : t('pivot.summary.smoothing'),
     value: settings.responseMode === 'stepped' ? `${settings.activationRampSeconds}s` : `${settings.smoothing}`,
-    title: settings.responseMode === 'stepped' ? 'Pivot activation and release ramp.' : `Tracking smoothing ${settings.smoothing}; activation ramp ${settings.activationRampSeconds}s.`,
+    title: settings.responseMode === 'stepped'
+      ? t('pivot.summary.activationRampTitle')
+      : t('pivot.summary.smoothingTitle', { smoothing: settings.smoothing, ramp: settings.activationRampSeconds }),
   })
 
   if (settings.positionAssist.enabled) {
-    result.push({ label: 'Position Assist', value: 'On', title: 'Rotation-driven extra lean and height.' })
+    result.push({ label: t('pivot.summary.positionAssist'), value: t('common.on'), title: t('pivot.summary.positionAssistTitle') })
   }
   if (settings.responseMode === 'continuous') {
     result.push({
-      label: 'Deadzone Transition',
+      label: t('pivot.summary.deadzoneTransition'),
       value: settings.advancedAxes
-        ? 'Per direction'
-        : `Y ${settings.deadzoneTransitionDegrees}° · P ${settings.pitchDeadzoneTransitionDegrees}°`,
-      title: 'Angular sensitivity ramp beyond the deadzone.',
+        ? t('pivot.summary.perDirection')
+        : t('pivot.summary.deadzoneTransitionValue', { yaw: settings.deadzoneTransitionDegrees, pitch: settings.pitchDeadzoneTransitionDegrees }),
+      title: t('pivot.summary.deadzoneTransitionTitle'),
     })
   }
   return result
@@ -85,7 +106,7 @@ const chips = computed(() => {
          with the bindings row's button regardless of chip wrapping. -->
     <div class="flex items-start justify-between gap-3">
       <div class="flex min-w-0 flex-1 flex-wrap items-center gap-2">
-        <p class="shrink-0 text-sm font-semibold tracking-tight">Motion</p>
+        <p class="shrink-0 text-sm font-semibold tracking-tight">{{ t('pivot.summary.motion') }}</p>
         <span
           v-for="chip in chips"
           :key="chip.label"
@@ -99,7 +120,7 @@ const chips = computed(() => {
       </div>
 
       <button class="button-secondary w-40 shrink-0 rounded-[0.75rem] px-4 py-2 text-center text-sm font-medium" type="button" @click="$emit('edit')">
-        Edit Motion…
+        {{ t('pivot.summary.editMotion') }}
       </button>
     </div>
   </div>
