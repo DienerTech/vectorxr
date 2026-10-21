@@ -5242,6 +5242,14 @@ void CheckFrameGenStatusLine() {
               std::abs(external.target_app_fps - 22.5) < 0.01 && external.holding,
           "the runtime holding frames to every second refresh: grid periods said in refreshes, the target on the "
           "grid (2x of 45 Hz), held");
+    // Halving without reporting the longer period (Pimax Play's smoothing):
+    // the frames are shown at half the refresh rate all the same.
+    status.grid_period_ns = 11'111'111;
+    status.runtime_halving = true;
+    status.refreshes_per_real_frame = 4.0;
+    external = Peer::ExternalFrameGen(status);
+    Check(std::abs(external.target_app_fps - 22.5) < 0.01 && external.holding,
+          "the runtime halving without reporting it: the target at 2x of 45 Hz, held");
 }
 
 // Everything the layer reads and writes on the host goes to the test's own directory.

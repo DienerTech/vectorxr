@@ -13,11 +13,14 @@ tune a game's settings while Frame Generation runs. This page is the whole contr
   replacing it in one step: a reader sees the previous document or the new one, never part of one.
 - When that session ends, or the game exits normally without ending it (Microsoft Flight Simulator
   and Star Citizen often do), the game removes the file, but only while the file still names its
-  own process. A game shutting down never removes the file of a game started after it.
+  own process. A game shutting down never removes the file of a game started after it. A reader
+  holding the file open without delete sharing at that moment can keep it from being removed (see
+  [Reading it](#reading-it)).
 - A game that crashes, or is ended by force, leaves its last file behind. Detect that by its update
   time (below).
 - No file means no game with a VectorXR session is running, or the running game has not written
-  one yet (the first write follows the session's start within about a second).
+  one yet (the first write follows the session's start within about a second), or, with two games
+  running, the other one's session just ended (the remaining one writes it again within a second).
 - Every OpenXR game loads its own copy of VectorXR. If two run sessions at once (an overlay app, or
   a game relaunched before the old one has quit), each replaces the file in turn. Check
   `processId` (and `application`) to know which one you are reading.
@@ -33,7 +36,8 @@ it, as its format changes between versions without notice.
   `new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete)`),
   so that your read never holds up VectorXR's next write. A reader without delete sharing (such as
   .NET's `File.ReadAllText`) works too, but VectorXR's write waits for it, and gives up for that
-  second if the file stays open.
+  second if the file stays open: a reader that keeps it open that way makes a running game's file
+  look stale.
 - Opening can fail for a moment while the file is being replaced or removed: try again at your next
   poll.
 - Poll once a second or less often. The values are averages over about a second.
@@ -108,9 +112,9 @@ for the game, and when it was turned on after the game started (the game must re
 | `mode` | `interpolate` or `extrapolate`. |
 | `frameRate` | The frame rate in effect: `2x`, `3x`, `4x`, `auto` or `dynamic`. A Dynamic setting reads `auto` where the system cannot run Dynamic (it falls back to Auto). |
 | `generating` | True while generated frames are shown (`state` is `active`). |
-| `multiplier` | Frame periods per real frame aimed for: the fixed rate, Auto's current step (1 at full rate), or under Dynamic the typical value (1 while standing by). A frame period is a headset refresh, or two while the runtime holds frames to every second refresh (headset or runtime smoothing, a frame rate limit). |
+| `multiplier` | Frame periods per real frame aimed for: the fixed rate, Auto's current step (1 at full rate), or under Dynamic the typical value, 2 to 4 while engaged (1 while standing by). A frame period is a headset refresh, or two while the runtime holds frames to every second refresh (headset or runtime smoothing, a frame rate limit). |
 | `refreshHz` | The headset's refresh rate. 0 until the runtime has reported it. |
-| `targetAppFps` | The game's frame rate to aim for now: the rate the game's frames are timed by (`refreshHz`, or half of it while the runtime holds frames to every second refresh) divided by `multiplier` while generating: a fixed rate's hold, Auto's current step, or the rate at which Dynamic's typical multiplier holds. While not generating, that rate itself: the game's frames pass straight through. 0 only until `refreshHz` is known. |
+| `targetAppFps` | The game's frame rate to aim for now: the rate the game's frames are timed by (`refreshHz`, or half of it while the runtime holds frames to every second refresh or less) divided by `multiplier` while generating: a fixed rate's hold, Auto's current step, or the rate at which Dynamic's typical multiplier holds. While not generating, that rate itself: the game's frames pass straight through. 0 only until `refreshHz` is known. Under Dynamic the game runs at its own rate, not held to this: a game slightly slower than the refresh rate reads Dynamic's lowest engaged multiplier (2) until Dynamic stands by again. |
 | `appFps` | Real frames per second from the game. |
 | `outputFps` | Frames per second VectorXR submits to the runtime. |
 | `distinctFps` | Of those, frames showing something new (repeats left out). |
@@ -122,8 +126,8 @@ Only while `frameRate` is `auto`:
 | Field | Meaning |
 | --- | --- |
 | `autoStep` | Auto's current step, the same as `multiplier`: 1 is full rate (nothing generated), 2 to 4 generate. |
-| `autoStepUpBelowFps` | Auto steps up once the game's frame rate stays below this (more than 30% of its frames in a second take more than 1.25 times their frame periods). 0 while it would not step up: at 4x, with video memory too short for more, and while it holds full rate for a while (after generated frames kept slowing the game, or while the runtime holds frames to every second refresh). Where Frame Generation presents on the game's thread, a game whose frames keep starting late goes back to full rate instead of one step up. |
-| `autoStepDownAboveFps` | Auto tries one step down after five steady seconds (at most 2% of frames late) once the game's own frame rate, its frame time without Frame Generation's hold, reaches this (see `autoGameOwnFps`). Where Frame Generation presents on the game's thread, holding the current step steady is enough, and this is `targetAppFps`. 0 at full rate. |
+| `autoStepUpBelowFps` | Auto steps up once the game's frame rate stays below this (more than 30% of its frames in a second take more than 1.25 times the frame period the game is told, which a runtime echoing the game's own frame interval can make longer than a refresh). 0 while it would not step up: at 4x, with video memory too short for more, while the runtime's display clock does not advance with the time, and while it holds full rate for a while (after generated frames kept slowing the game, or while the runtime holds frames to every second refresh). Where Frame Generation presents on the game's thread, a game whose frames keep starting late goes back to full rate instead of one step up; at 4x, a game late for long though its own frame rate is within reach of 3x tries 3x. |
+| `autoStepDownAboveFps` | Auto tries one step down after five steady seconds (at most 2% of frames late) once the game's own frame rate, its frame time without Frame Generation's hold, reaches this (see `autoGameOwnFps`; until Auto has measured it, it tries anyway). Where Frame Generation presents on the game's thread, holding the current step steady is enough, and this is the step's rate. 0 at full rate. |
 | `autoGameOwnFps` | The game's own frame rate as Auto measures it (the median of its recent frame times, Frame Generation's hold left out), to compare with `autoStepDownAboveFps`. 0 until measured, and where Frame Generation presents on the game's thread (the game's waits say nothing of it there). |
 
 A tool that tunes the game's settings and runs alongside Auto should keep the game's rate clear of

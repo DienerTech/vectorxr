@@ -22,8 +22,6 @@ namespace {
 // Real frames taking at most this share more refreshes than aimed for still
 // hold the target (a slot missed now and then is not a slower game).
 constexpr double kHoldingTolerance = 1.1;
-// Status documents are well under this; anything longer is not one.
-constexpr std::size_t kMaxDocumentBytes = 64 * 1024;
 
 std::string EscapeJson(std::string_view value) {
     std::string escaped;
@@ -185,7 +183,7 @@ ExternalStatusRemoval RemoveExternalStatusIfOwned(const std::filesystem::path& p
         if (attempt + 1 == kOpenAttempts) return ExternalStatusRemoval::kBusy;
         std::this_thread::sleep_for(std::chrono::milliseconds(2u << attempt));
     }
-    char buffer[kMaxDocumentBytes];
+    char buffer[4096]; // the process id comes first
     DWORD size = 0;
     DWORD read = 0;
     while (size < sizeof(buffer) && ReadFile(file, buffer + size, sizeof(buffer) - size, &read, nullptr) && read > 0) {

@@ -75,9 +75,16 @@ void RemoveOwnedFile(const wchar_t* path, std::uint32_t owner) {
         size += read;
     }
     if (ProcessIdIn(text, size) == owner) {
-        FILE_DISPOSITION_INFO disposition{};
-        disposition.DeleteFile = TRUE;
-        SetFileInformationByHandle(file, FileDispositionInfo, &disposition, sizeof(disposition));
+        // POSIX semantics take the name away even from a reader sharing it
+        // (the next game's write is not refused meanwhile); older Windows has
+        // only the classic deletion.
+        FILE_DISPOSITION_INFO_EX posix{};
+        posix.Flags = FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS;
+        if (!SetFileInformationByHandle(file, FileDispositionInfoEx, &posix, sizeof(posix))) {
+            FILE_DISPOSITION_INFO disposition{};
+            disposition.DeleteFile = TRUE;
+            SetFileInformationByHandle(file, FileDispositionInfo, &disposition, sizeof(disposition));
+        }
     }
     CloseHandle(file);
 }

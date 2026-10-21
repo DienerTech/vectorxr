@@ -7637,8 +7637,13 @@ FrameGenStatus FrameGenPresenter::Status() const {
                                      memory_budget_->budget_bytes &&
                                      memory_budget_->usage_bytes >
                                          memory_budget_->budget_bytes - memory_budget_->budget_bytes / 20;
-        if (auto_multiplier_ < std::min(auto_memory_ceiling_, kMaxMultiplier) && !held && !memory_pressure) {
-            status.auto_step_up_below_fps = grid_hz / (kAutoLateFactor * auto_multiplier_);
+        // Frames are judged late on the period the game is told (the runtime's
+        // as it reports it: under SteamVR's period echo, longer than the grid),
+        // and not at all while the runtime's clock is displaced.
+        const double judged_hz = last_period_ > 0 ? 1e9 / static_cast<double>(last_period_) : grid_hz;
+        if (auto_multiplier_ < std::min(auto_memory_ceiling_, kMaxMultiplier) && !held && !memory_pressure &&
+            !clock_displaced_) {
+            status.auto_step_up_below_fps = judged_hz / (kAutoLateFactor * auto_multiplier_);
         }
         if (auto_multiplier_ > 1) {
             status.auto_step_down_above_fps =

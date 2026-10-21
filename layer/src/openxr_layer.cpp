@@ -11167,7 +11167,8 @@ void OpenXrLayer::StopConfigWatcher() {
         }
         runtime_relay_exit_status_.Disarm();
         runtime_relay_exit_control_.Disarm();
-        external_status_exit_.Disarm();
+        // The public status file stays armed: its exit removal is
+        // owner-checked, and covers a removal held up here.
         runtime_relay_last_applied_revision_ = 0;
         runtime_relay_acknowledged_revision_ = 0;
         runtime_relay_status_dirty_.store(false, std::memory_order_release);
@@ -11891,7 +11892,9 @@ void OpenXrLayer::ResetSessionState() {
         runtime_relay_session_id_.clear();
         runtime_relay_exit_status_.Disarm();
         runtime_relay_exit_control_.Disarm();
-        external_status_exit_.Disarm();
+        // The public status file stays armed (owner-checked at exit): a game
+        // that ends its session and exits before the watcher's next poll
+        // still has it removed.
         runtime_relay_last_applied_revision_ = 0;
         runtime_relay_acknowledged_revision_ = 0;
         runtime_relay_status_dirty_.store(false, std::memory_order_release);
@@ -16782,9 +16785,16 @@ void OpenXrLayer::PollRuntimeRelay() {
     } else {
         runtime_relay_status_dirty_.store(true, std::memory_order_release);
     }
-    // The public file on the same heartbeat; a failed write is retried at the next.
+    // The public file on the same heartbeat; a failed write is retried at the
+    // next. A session kept only for an abandoned presenter thread (left in
+    // the runtime at xrDestroySession) has ended for the game: its file goes.
     if (!external_status_path.empty()) {
-        WriteExternalStatus(external_status_path, external);
+        if (framegen_.PresenterAbandoned()) {
+            external_status_remove_pending_ = RemoveExternalStatusIfOwned(external_status_path, GetCurrentProcessId()) ==
+                                              ExternalStatusRemoval::kBusy;
+        } else {
+            WriteExternalStatus(external_status_path, external);
+        }
     }
 }
 
@@ -16824,9 +16834,16 @@ ExternalFrameGenStatus OpenXrLayer::ExternalFrameGen(const FrameGenStatus& frame
         external.refreshes_per_real_frame = framegen.refreshes_per_real_frame *
             static_cast<double>(framegen.grid_period_ns) / static_cast<double>(framegen.refresh_period_ns);
     }
-    // The target and holding are on that grid: an N-x frame takes N of its periods.
-    ExternalFrameGenTarget(&external,
-                           framegen.grid_period_ns > 0 ? 1e9 / static_cast<double>(framegen.grid_period_ns) : 0.0);
+    // The target and holding are on that grid: an N-x frame takes N of its
+    // periods. A runtime holding frames to every second refresh (or less)
+    // without reporting the longer period shows them at half the refresh
+    // rate at most all the same.
+    double grid_hz = framegen.grid_period_ns > 0 ? 1e9 / static_cast<double>(framegen.grid_period_ns) : 0.0;
+    if (framegen.runtime_halving && framegen.refresh_period_ns > 0 &&
+        framegen.grid_period_ns < framegen.refresh_period_ns + framegen.refresh_period_ns / 2) {
+        grid_hz = 0.5e9 / static_cast<double>(framegen.refresh_period_ns);
+    }
+    ExternalFrameGenTarget(&external, grid_hz);
     if (framegen.automatic) {
         ExternalAutoStep step;
         step.step = framegen.multiplier;
