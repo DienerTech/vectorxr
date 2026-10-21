@@ -10,8 +10,67 @@
 done:
 !macroend
 
+; The install notice (the license page) in each installer language; English
+; is bundle.licenseFile. windows/installer.nsi inserts these after the
+; languages, which LicenseLangString needs.
+!define VECTORXR_WINDOWS_DIR "${__FILEDIR__}"
+!macro VECTORXR_NOTICE_LANG_STRINGS
+  LicenseLangString VectorXRNotice ${LANG_ENGLISH} "${LICENSE}"
+  LicenseLangString VectorXRNotice ${LANG_SIMPCHINESE} "${VECTORXR_WINDOWS_DIR}\install-notice.zh-CN.txt"
+  LicenseLangString VectorXRNotice ${LANG_RUSSIAN} "${VECTORXR_WINDOWS_DIR}\install-notice.ru.txt"
+  LicenseLangString VectorXRNotice ${LANG_SPANISH} "${VECTORXR_WINDOWS_DIR}\install-notice.es-ES.txt"
+  LicenseLangString VectorXRNotice ${LANG_PORTUGUESEBR} "${VECTORXR_WINDOWS_DIR}\install-notice.pt-BR.txt"
+  LicenseLangString VectorXRNotice ${LANG_GERMAN} "${VECTORXR_WINDOWS_DIR}\install-notice.de.txt"
+  LicenseLangString VectorXRNotice ${LANG_JAPANESE} "${VECTORXR_WINDOWS_DIR}\install-notice.ja.txt"
+  LicenseLangString VectorXRNotice ${LANG_FRENCH} "${VECTORXR_WINDOWS_DIR}\install-notice.fr.txt"
+  LicenseLangString VectorXRNotice ${LANG_POLISH} "${VECTORXR_WINDOWS_DIR}\install-notice.pl.txt"
+  LicenseLangString VectorXRNotice ${LANG_KOREAN} "${VECTORXR_WINDOWS_DIR}\install-notice.ko.txt"
+  LicenseLangString VectorXRNotice ${LANG_TRADCHINESE} "${VECTORXR_WINDOWS_DIR}\install-notice.zh-TW.txt"
+!macroend
+
+; The installer's language as the app's language code (app/src/i18n/locales.ts),
+; in $1.
+!macro VECTORXR_INSTALLER_LANGUAGE_CODE
+  StrCpy $1 "en"
+  ${If} $LANGUAGE == ${LANG_SIMPCHINESE}
+    StrCpy $1 "zh-CN"
+  ${ElseIf} $LANGUAGE == ${LANG_RUSSIAN}
+    StrCpy $1 "ru"
+  ${ElseIf} $LANGUAGE == ${LANG_SPANISH}
+    StrCpy $1 "es-ES"
+  ${ElseIf} $LANGUAGE == ${LANG_PORTUGUESEBR}
+    StrCpy $1 "pt-BR"
+  ${ElseIf} $LANGUAGE == ${LANG_GERMAN}
+    StrCpy $1 "de"
+  ${ElseIf} $LANGUAGE == ${LANG_JAPANESE}
+    StrCpy $1 "ja"
+  ${ElseIf} $LANGUAGE == ${LANG_FRENCH}
+    StrCpy $1 "fr"
+  ${ElseIf} $LANGUAGE == ${LANG_POLISH}
+    StrCpy $1 "pl"
+  ${ElseIf} $LANGUAGE == ${LANG_KOREAN}
+    StrCpy $1 "ko"
+  ${ElseIf} $LANGUAGE == ${LANG_TRADCHINESE}
+    StrCpy $1 "zh-TW"
+  ${EndIf}
+!macroend
+
 !macro NSIS_HOOK_POSTINSTALL
   !insertmacro VECTORXR_RESOLVE_LAYER_MANIFEST
+
+  ; The app starts in the language picked here until one is picked in its
+  ; Settings (installer_language in src-tauri/src/main.rs).
+  Push $1
+  Push $2
+  !insertmacro VECTORXR_INSTALLER_LANGUAGE_CODE
+  ClearErrors
+  FileOpen $2 "$INSTDIR\installer-language.txt" w
+  ${IfNot} ${Errors}
+    FileWrite $2 "$1"
+    FileClose $2
+  ${EndIf}
+  Pop $2
+  Pop $1
 
   SetRegView 64
   !insertmacro VECTORXR_DISABLE_OTHER_LAYER_REGISTRATIONS HKLM "Software\Khronos\OpenXR\1\ApiLayers\Implicit" "$0"
@@ -31,6 +90,8 @@ done:
     DeleteRegValue HKLM "Software\Khronos\OpenXR\1\ApiLayers\Implicit" "$INSTDIR\resources\vectorxr-layer\XR_APILAYER_DIENERTECH_VECTORXR.json"
     DeleteRegValue HKLM "Software\Khronos\OpenXR\1\ApiLayers\Implicit" "$INSTDIR\vectorxr-layer\XR_APILAYER_DIENERTECH_VECTORXR.json"
     DeleteRegValue HKLM "Software\Khronos\OpenXR\1\ApiLayers\Implicit" "$INSTDIR\resources\resources\vectorxr-layer\XR_APILAYER_DIENERTECH_VECTORXR.json"
+    Delete "$INSTDIR\installer-language.txt"
+    RMDir "$INSTDIR"
     DetailPrint "Unregistered the VectorXR OpenXR layer manifest from $INSTDIR"
   ${EndIf}
 !macroend
