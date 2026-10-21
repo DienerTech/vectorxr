@@ -87,10 +87,11 @@ cbuffer FrameGenConstantBuffer : register(b0) {
 // (to the sky) moves with the world (FG_WORLD_DEPTH); between, no model.
 #define FG_SPLAT_HEAD 4.0
 #define FG_SPLAT_WORLD 30.0
-// Research: 1 moves the sky (FG_WORLD_SKY and beyond) in the motion map too,
-// by the measured flow of the sky around it, behind everything else.
+// The sky (FG_WORLD_SKY and beyond) moves in the motion map too (0: it
+// stays as distant), by the measured flow of the sky around it, behind
+// everything else (MSFS replays: better beside the cockpit edges).
 #ifndef FG_SPLAT_SKY
-#define FG_SPLAT_SKY 0
+#define FG_SPLAT_SKY 1
 #endif
 
 // Linear depth at or beyond this many meters is treated as infinitely far.
@@ -1118,7 +1119,7 @@ int Occlusion(float2 uv, float step, float4 candidates[7], float candidate_depth
 // beyond FG_MATCH_TOLERANCE (natural log of the depth ratio) the cost grows
 // to FG_MATCH_WEIGHT, in CandidateError's units, over FG_MATCH_RANGE.
 #ifndef FG_MATCH_WEIGHT
-#define FG_MATCH_WEIGHT 0.06
+#define FG_MATCH_WEIGHT 0.12
 #endif
 #define FG_MATCH_TOLERANCE 0.05
 #define FG_MATCH_RANGE 0.25
