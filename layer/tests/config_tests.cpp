@@ -1741,13 +1741,27 @@ void TestFrameGenDepthGuard() {
     Expect(!sc.Usable() && !sc.Swapped(), "a mostly disproved reading stays unused however well it scores");
 
     // MSFS: as submitted, disproved on 8-14%, is taken up and kept.
-    for (const double share : {0.08, 0.14, 0.5}) {
+    for (const double share : {0.08, 0.14, 0.4}) {
         depthxr::FrameGenDepthValidator msfs;
         batch(msfs, check(0.3, share, 1.2, 0.6));
         Expect(msfs.Reading() == FrameGenDepthReading::kAsSubmitted && !msfs.Swapped(),
                "depth disproved on " + std::to_string(share) + " of its samples should still be used");
         batch(msfs, check(0.46, share, 1.2, 0.6));
         Expect(msfs.Reading() == FrameGenDepthReading::kAsSubmitted, "used depth that still holds should be kept");
+        // Up to half, depth in use stays in use.
+        batch(msfs, check(0.46, 0.5, 1.2, 0.6));
+        Expect(msfs.Reading() == FrameGenDepthReading::kAsSubmitted, "used depth disproved on half is kept");
+    }
+    // Between the bars nothing flaps: not taken up from 45%, nor dropped there.
+    {
+        depthxr::FrameGenDepthValidator hovering;
+        batch(hovering, check(0.4, 0.45, 1.2, 0.6));
+        Expect(!hovering.Usable(), "depth disproved on 45% is not taken up");
+        batch(hovering, check(0.4, 0.38, 1.2, 0.6));
+        Expect(hovering.Usable(), "...and is once it is disproved on under 40%");
+        batch(hovering, check(0.4, 0.45, 1.2, 0.6));
+        batch(hovering, check(0.4, 0.48, 1.2, 0.6));
+        Expect(hovering.Usable(), "...then kept while disproved on under half");
     }
 
     // In use, then mostly disproved (a scene the depth no longer matches):
@@ -1764,6 +1778,27 @@ void TestFrameGenDepthGuard() {
     batch(reversed, check(1.0, 0.2, 0.3, 0.1));
     Expect(reversed.Reading() == FrameGenDepthReading::kReversed && reversed.Swapped(),
            "a swapped reading that holds is taken up");
+
+    // In use, then mostly disproved where the swap holds: straight to the
+    // swap (its ratio not 0.7 times the disproved one's), never a batch
+    // without depth.
+    depthxr::FrameGenDepthValidator switched;
+    batch(switched, check(0.3, 0.1, 1.2, 0.6));
+    batch(switched, check(0.6, 0.9, 0.5, 0.1));
+    Expect(switched.Reading() == FrameGenDepthReading::kReversed && switched.Swapped(),
+           "a disproved reading in use gives way to a swap that holds at once");
+
+    // Mostly disproved while the swap moves too little to judge: decided
+    // unusable, not left checking.
+    depthxr::FrameGenDepthValidator undecided;
+    depthxr::FrameGenDepthEvidence little = check(0.6, 0.9, 0.5, 0.1);
+    little.swapped.samples = 10.0;
+    little.swapped.none = 10.0;
+    little.swapped.error = 5.0;
+    little.swapped.fallback = 1.0;
+    batch(undecided, little);
+    Expect(undecided.Reading() == FrameGenDepthReading::kUnusable,
+           "a mostly disproved reading is decided unusable though the swap is not judged");
 }
 
 void TestFrameGenHistoryState() {

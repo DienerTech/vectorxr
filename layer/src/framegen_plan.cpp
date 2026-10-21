@@ -727,28 +727,38 @@ void FrameGenDepthValidator::Add(const FrameGenDepthEvidence& check) {
     constexpr double kAdopt = 0.7;
     constexpr double kDrop = 0.9;
     // A reading the other eye disproves on most of its samples scores well
-    // only through the samples sent "infinitely far" instead: it is neither
-    // taken up nor kept. Star Citizen's depth read near/far swapped scored
-    // 0.70 with the other eye disproving 88-95% of it, and smeared the HUD,
-    // cockpit and distant geometry (2026-10-15); MSFS's as submitted, 8-14%.
+    // only through the samples sent "infinitely far" instead: it is not
+    // kept, and taken up only well clear of that (a share hovering at the
+    // bar must not switch depth on and off). Star Citizen's depth read
+    // near/far swapped scored 0.70 with the other eye disproving 88-95% of
+    // it, and smeared the HUD, cockpit and distant geometry (2026-10-15);
+    // MSFS's as submitted, 8-14%.
     constexpr double kMostlyDisproved = 0.5;
-    auto disproved = [](const FrameGenDepthScore& score) {
-        return score.samples > 0.0 && score.fallback > kMostlyDisproved * score.samples;
+    constexpr double kAdoptDisproved = 0.4;
+    auto disproved_over = [](const FrameGenDepthScore& score, double share) {
+        return score.samples > 0.0 && score.fallback > share * score.samples;
     };
+    auto disproved = [&](const FrameGenDepthScore& score) { return disproved_over(score, kMostlyDisproved); };
     const FrameGenDepthScore& decoded = evidence_.decoded;
     const FrameGenDepthScore& swapped = evidence_.swapped;
-    const bool decoded_adopts = judged(decoded) && decoded.Ratio() < kAdopt && !disproved(decoded);
-    const bool swapped_adopts = judged(swapped) && swapped.Ratio() < kAdopt && !disproved(swapped);
+    const bool decoded_adopts =
+        judged(decoded) && decoded.Ratio() < kAdopt && !disproved_over(decoded, kAdoptDisproved);
+    const bool swapped_adopts =
+        judged(swapped) && swapped.Ratio() < kAdopt && !disproved_over(swapped, kAdoptDisproved);
     if (!Usable()) {
         if (swapped_adopts && (!decoded_adopts || swapped.Ratio() < decoded.Ratio())) {
             swapped_ = !swapped_;
         }
         if (decoded_adopts || swapped_adopts) {
             reading_ = swapped_ ? FrameGenDepthReading::kReversed : FrameGenDepthReading::kAsSubmitted;
-        } else if (judged(decoded) && judged(swapped)) {
+        } else if (judged(decoded) && (judged(swapped) || disproved(decoded))) {
+            // A reading mostly disproved is decided on, though the other
+            // moves too little to judge: not left checking for good.
             reading_ = FrameGenDepthReading::kUnusable;
         }
-    } else if (swapped_adopts && swapped.Ratio() < kAdopt * decoded.Ratio()) {
+    } else if (swapped_adopts && (disproved(decoded) || swapped.Ratio() < kAdopt * decoded.Ratio())) {
+        // The swap wins clearly, or the reading in use is mostly disproved
+        // and the swap holds: straight to it, not through a batch without.
         swapped_ = !swapped_;
         reading_ = swapped_ ? FrameGenDepthReading::kReversed : FrameGenDepthReading::kAsSubmitted;
     } else if (judged(decoded) && (decoded.Ratio() > kDrop || disproved(decoded))) {

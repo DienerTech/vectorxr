@@ -543,7 +543,7 @@ enum class FrameGenDepthReading : std::uint8_t {
     kUnknown,     // not checked yet: depth is not used
     kAsSubmitted, // the game's description is right
     kReversed,    // near and far swapped (reversed depth described as standard, or the reverse)
-    kUnusable,    // no reading lines the eyes up better than no depth
+    kUnusable,    // no reading lines the eyes up better than no depth, or the other eye mostly disproves it
 };
 
 const char* ToString(FrameGenDepthReading reading);
