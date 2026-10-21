@@ -484,6 +484,11 @@ class D3D12FrameGen final : public FrameGenGpu {
         if (const char* eyes = std::getenv("VECTORXR_FRAMEGEN_DEPTH_EYES")) {
             depth_eyes_ = std::string(eyes) == "1";
         }
+        // Research (depth engine mk2): candidate vectors chosen by depth too
+        // (FrameGenTuning::depth_match; VECTORXR_FRAMEGEN_DEPTH_MATCH=1).
+        if (const char* match = std::getenv("VECTORXR_FRAMEGEN_DEPTH_MATCH")) {
+            depth_match_ = std::string(match) == "1";
+        }
         // Interpolation's occlusion handling (VECTORXR_FRAMEGEN_OCCLUSION=0:
         // off) and, for research, its cross-fade fallback
         // (VECTORXR_FRAMEGEN_CROSSFADE=1).
@@ -1892,6 +1897,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         FrameGenTuning effective_tuning = tuning;
         effective_tuning.occlusion = tuning.occlusion && occlusion_;
         effective_tuning.cross_fade = tuning.cross_fade || cross_fade_;
+        effective_tuning.depth_match = tuning.depth_match || depth_match_;
         effective_tuning.hardware_flow = tuning.hardware_flow && HardwareFlowReady();
         // Several views on Frame Generation's own queue match on one atlas;
         // otherwise (one view, matching at release on the game's queue, or
@@ -4774,6 +4780,7 @@ class D3D12FrameGen final : public FrameGenGpu {
     bool world_motion_{true};                       // FrameGenViewRequest::world_motion where depth is in use
     bool occlusion_{true};                          // FrameGenTuning::occlusion allowed
     bool cross_fade_{false};                        // FrameGenTuning::cross_fade forced (research)
+    bool depth_match_{false};                       // FrameGenTuning::depth_match forced (research)
     std::array<FrameSlot, kFramesInFlight> slots_;
     ComPtr<ID3D12GraphicsCommandList> capture_commands_;
     std::array<CaptureSlot, kCaptureSlots> capture_slots_; // views x frames in flight, color and depth

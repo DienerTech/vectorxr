@@ -1686,7 +1686,26 @@ void TestFrameGenPlan() {
     Expect(scale.pass == FrameGenPass::kDepthScale && scale.outputs[0].kind == FrameGenTextureKind::kDepthScales &&
                scale.constants.size[2] == depthxr::FrameGenPyramid(request.extent)[1].width,
            "The stereo scale probe should run per trust tile over the half-resolution depth");
+    // Depth matching (research): the flag reaches synthesis only with depth,
+    // and never the stale-flow frame, which has no depth bound.
+    tuning.depth_match = true;
+    Expect((depthxr::BuildFrameGenViewPlan(request, tuning).dispatches.back().constants.options[1] &
+            depthxr::kFrameGenFlagDepthMatch) != 0,
+           "Depth matching should reach synthesis with depth");
+    {
+        auto stale = request;
+        stale.depth_previous = true;
+        stale.shift = {0.1f, 0.0f, 0.0f};
+        const auto plan = depthxr::BuildFrameGenSynthesisPlan(stale, tuning, depthxr::FrameGenSynthesisMode::kExtrapolate,
+                                                              0.5f, false, true);
+        Expect((plan.dispatches.back().constants.options[1] & depthxr::kFrameGenFlagDepthMatch) == 0,
+               "Depth matching should not reach a stale-flow frame");
+    }
     request.depth = false;
+    Expect((depthxr::BuildFrameGenViewPlan(request, tuning).dispatches.back().constants.options[1] &
+            depthxr::kFrameGenFlagDepthMatch) == 0,
+           "Depth matching should need depth");
+    tuning.depth_match = false;
     request.trust_stereo = false;
 
     // Fractions follow display times and clamp.

@@ -72,6 +72,10 @@ cbuffer FrameGenConstantBuffer : register(b0) {
 // frame's own motion is not measured yet), read where each pixel's content
 // was in that frame by head rotation alone.
 #define FG_FLAG_STALE_FLOW 1024u
+// Synthesis with depth, at a motion boundary: a candidate vector measured on
+// another surface than the content it would carry here costs more (see
+// DepthMismatch).
+#define FG_FLAG_DEPTH_MATCH 2048u
 
 // Linear depth at or beyond this many meters is treated as infinitely far.
 #define FG_FAR_DEPTH 100000.0
@@ -1089,6 +1093,25 @@ int Occlusion(float2 uv, float step, float4 candidates[7], float candidate_depth
     return 2;
 }
 
+// FG_FLAG_DEPTH_MATCH: how much a candidate vector measured at depth
+// `measured` costs for carrying content at depth `carried` (meters; unknown
+// or disproved depth, 0 or less, costs nothing). A block vector measured on
+// a near feature does not carry the background beside it, nor the reverse:
+// beyond FG_MATCH_TOLERANCE (natural log of the depth ratio) the cost grows
+// to FG_MATCH_WEIGHT, in CandidateError's units, over FG_MATCH_RANGE.
+#ifndef FG_MATCH_WEIGHT
+#define FG_MATCH_WEIGHT 0.06
+#endif
+#define FG_MATCH_TOLERANCE 0.05
+#define FG_MATCH_RANGE 0.25
+float DepthMismatch(float measured, float carried) {
+    if (!(measured > 0.0) || !(carried > 0.0)) {
+        return 0.0;
+    }
+    const float ratio = abs(log(min(measured, 0.5 * FG_FAR_DEPTH) / min(carried, 0.5 * FG_FAR_DEPTH)));
+    return FG_MATCH_WEIGHT * saturate((ratio - FG_MATCH_TOLERANCE) / FG_MATCH_RANGE);
+}
+
 // How differently the two real frames see the content a candidate vector
 // claims to carry to this pixel. Block flow straddles object edges; picking
 // the neighbouring block vector the frames agree on restores pixel-sharp
@@ -1169,7 +1192,10 @@ float4 Synthesize(float2 position, float fraction) {
         float candidate_depth[7];
         const float4 here = g_flow.SampleLevel(g_linear, uv + flow_offset, 0.0);
         float4 solved = g_flow.SampleLevel(g_linear, uv + step * here.xy + flow_offset, 0.0);
-        solved = g_flow.SampleLevel(g_linear, uv + step * solved.xy + flow_offset, 0.0);
+        // Where the solved field is read: the depth it was measured at
+        // (FG_FLAG_DEPTH_MATCH).
+        const float2 solved_uv = uv + step * solved.xy + flow_offset;
+        solved = g_flow.SampleLevel(g_linear, solved_uv, 0.0);
         candidates[0] = solved;
         candidates[1] = here;
         uint flow_width, flow_height;
@@ -1200,10 +1226,24 @@ float4 Synthesize(float2 position, float fraction) {
         [branch]
         if (boundary) {
             chosen_error = CandidateError(uv, chosen.xy, step);
+            // With FG_FLAG_DEPTH_MATCH the choice also weighs where each
+            // vector was measured against the depth of what it carries here
+            // (zero motion carries this pixel's own content: no cost). The
+            // cost only chooses: chosen_error stays the frames' agreement.
+            const bool match = (g.options.y & (FG_FLAG_DEPTH_MATCH | FG_FLAG_DEPTH)) == (FG_FLAG_DEPTH_MATCH | FG_FLAG_DEPTH);
+            float chosen_score = chosen_error;
+            if (match) {
+                chosen_score += DepthMismatch(DepthAt(solved_uv - flow_offset), DepthAt(uv + step * chosen.xy));
+            }
             [unroll]
             for (int k = 1; k < 7; ++k) {
                 const float error = CandidateError(uv, candidates[k].xy, step) + (k == 6 ? 0.03 : 0.01);
-                if (error < chosen_error) {
+                float score = error;
+                if (match && k < 6) {
+                    score += DepthMismatch(candidate_depth[k], DepthAt(uv + step * candidates[k].xy));
+                }
+                if (score < chosen_score) {
+                    chosen_score = score;
                     chosen_error = error;
                     chosen = candidates[k];
                 }

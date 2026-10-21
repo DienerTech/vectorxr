@@ -114,6 +114,9 @@ FrameGenConstants BaseConstants(const FrameGenViewRequest& request, const FrameG
     if (tuning.cross_fade && mode == FrameGenSynthesisMode::kInterpolate) {
         flags |= kFrameGenFlagCrossFade;
     }
+    if (tuning.depth_match && request.depth) {
+        flags |= kFrameGenFlagDepthMatch;
+    }
     base.options = {kFrameGenSearchRadius, flags, static_cast<std::uint32_t>(tuning.diagnostic), 0};
     base.tuning = {std::clamp(tuning.fractions[0], 0.0f, 1.0f), limit, 4.0f + 26.0f * suppression,
                    3.0f + 21.0f * suppression};
@@ -564,7 +567,7 @@ FrameGenViewPlan BuildFrameGenSynthesisPlan(const FrameGenViewRequest& request, 
         output.inputs = {Texture(FrameGenTextureKind::kHistoryNewest), Texture(FrameGenTextureKind::kHistoryPrevious),
                          Texture(FrameGenTextureKind::kFilteredPrevious, plan.final_flow_level), {},
                          shifted ? Texture(FrameGenTextureKind::kShiftMap) : FrameGenTexture{}, {}};
-        output.constants.options[1] &= ~kFrameGenFlagDepth;
+        output.constants.options[1] &= ~(kFrameGenFlagDepth | kFrameGenFlagDepthMatch);
         output.constants.options[1] |= kFrameGenFlagStaleFlow;
         if (shifted) {
             output.constants.options[1] |= kFrameGenFlagShift;
