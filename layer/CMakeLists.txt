@@ -8,6 +8,7 @@ add_library(
     src/framegen_plan.cpp
     src/runtime_pacing.cpp
     src/runtime_relay.cpp
+    src/external_status.cpp
     src/runtime_compatibility.cpp
     src/seen_apps.cpp
     src/turbo_trace.cpp
@@ -745,6 +746,10 @@ if(DEPTHXR_BUILD_TESTS)
     target_link_libraries(depthxr_runtime_relay_tests PRIVATE depthxr_core)
     add_test(NAME depthxr_runtime_relay_tests COMMAND depthxr_runtime_relay_tests)
     set_tests_properties(depthxr_runtime_relay_tests PROPERTIES TIMEOUT 20)
+    add_executable(depthxr_external_status_tests tests/external_status_tests.cpp)
+    target_link_libraries(depthxr_external_status_tests PRIVATE depthxr_core)
+    add_test(NAME depthxr_external_status_tests COMMAND depthxr_external_status_tests)
+    set_tests_properties(depthxr_external_status_tests PROPERTIES TIMEOUT 20)
     if(WIN32)
         add_library(depthxr_process_exit_probe SHARED tests/process_exit_probe.cpp src/dll_main.cpp)
         target_link_libraries(depthxr_process_exit_probe PRIVATE depthxr_core)

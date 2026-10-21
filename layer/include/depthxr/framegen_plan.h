@@ -569,7 +569,7 @@ enum class FrameGenDepthReading : std::uint8_t {
     kUnknown,     // not checked yet: depth is not used
     kAsSubmitted, // the game's description is right
     kReversed,    // near and far swapped (reversed depth described as standard, or the reverse)
-    kUnusable,    // no reading lines the eyes up better than no depth
+    kUnusable,    // no reading lines the eyes up better than no depth, or the other eye mostly disproves it
 };
 
 const char* ToString(FrameGenDepthReading reading);
@@ -652,6 +652,10 @@ class FrameGenDepthValidator {
     std::uint32_t check_generation_{0};
     std::uint32_t decisions_{0};
     FrameGenDepthEvidence evidence_;
+    // Dropped for being mostly disproved: passing batches in a row still
+    // needed before a reading is taken up again (FrameGenDepthValidator::Add).
+    static constexpr std::uint32_t kDisprovedWait = 2;
+    std::uint32_t disproved_wait_{0};
 };
 
 // Which eye's depth the check reads, and whether an eye takes the other's.

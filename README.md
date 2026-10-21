@@ -276,9 +276,12 @@ Patch-note summaries and item text support the attribute-free inline tags `<stro
 - `app/`: Tauri 2 and Vue 3 desktop app
 - `layer/`: C++20 OpenXR API layer and runtime logic
 - `config/`: shared schema and config notes
-- `docs/`: architecture notes, the usage guide, and screenshots
+- `docs/`: architecture notes, the usage guide, and screenshots ([index](docs/README.md))
 - `examples/`: sample settings
 - `scripts/`: Windows build, install, staging, and release helpers
+
+Programs that read VectorXR's live state while a game runs (for example, to tune
+the game's settings around Frame Generation) use the [status API](docs/status-api.md).
 
 An opt-in real-runtime OpenXR diagnostic client is also available for
 deterministic Pivot reference-space and Turbo frame-threading tests. See the

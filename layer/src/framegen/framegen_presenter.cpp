@@ -30,6 +30,11 @@ constexpr int kAutoMaxBackoffDoublings = 3; // 10 s, 20 s, 40 s, 80 s
 // transition settle briefly, then judge its actual cadence rather than
 // spending the full engagement warmup on an unsustainable rate.
 constexpr std::chrono::milliseconds kAutoProbeSettle{250};
+// ...and judges it on this many frames at least (a slow game's half second
+// holds few: a 4x -> 3x probe at 90 Hz about fifteen).
+constexpr std::size_t kAutoProbeJudgedFrames = 16;
+// Auto counts a frame late once it takes this much longer than its refreshes.
+constexpr double kAutoLateFactor = 1.25;
 // Auto stays at full rate this long after inline cycles kept starting late.
 constexpr std::chrono::seconds kInlineHold{60};
 // The presenter thread waits this long for frames in flight when it stops.
@@ -286,6 +291,15 @@ std::string Percentiles(std::vector<double> values, double low, double high) {
     return Number(at(low), 1) + "/" + Number(at(high), 1);
 }
 
+// "lead:frames" for each lead told in a summary window, "-" when none.
+std::string LeadCountsText(const std::map<std::uint32_t, std::uint64_t>& counts) {
+    std::string text;
+    for (const auto& [lead, frames] : counts) {
+        text += (text.empty() ? "" : " ") + std::to_string(lead) + ":" + std::to_string(frames);
+    }
+    return text.empty() ? "-" : text;
+}
+
 std::optional<double> Median(std::vector<double> values) {
     if (values.empty()) {
         return std::nullopt;
@@ -455,6 +469,14 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
     }
     gpu_frames_ahead_ = 1;
     gpu_timeouts_in_row_ = 0;
+    // VECTORXR_FRAMEGEN_LEAD=events: the lead steps by hitch events
+    // (FrameGenLeadPolicy::hitch_events), for comparisons in flight; off by
+    // default until flown.
+    const char* lead_setting = std::getenv("VECTORXR_FRAMEGEN_LEAD");
+    const bool event_lead = lead_setting && std::string(lead_setting) == "events";
+    if (event_lead) {
+        lead_policy_.hitch_events = true;
+    }
     std::string gpu_gate_setting;
     if (const char* ahead = std::getenv("VECTORXR_FRAMEGEN_GPU_AHEAD"); ahead && *ahead) {
         gpu_gate_setting = ahead;
@@ -493,6 +515,10 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
                       ", motionEstimation=" + ToString(settings_.motion_estimation) +
                       ", diagnosticView=" + DiagnosticViewText(settings_.diagnostic_view) +
                       "; frame pacing is owned by Frame Generation (Turbo stays off).");
+        if (event_lead) {
+            logger_->Info("Frame Generation: the lead steps by hitch events, not frame by frame "
+                          "(VECTORXR_FRAMEGEN_LEAD=events).");
+        }
         if (!gpu_gate_setting.empty()) {
             logger_->Info("Frame Generation: GPU-aware pacing set by VECTORXR_FRAMEGEN_GPU_AHEAD=" + gpu_gate_setting +
                           (gpu_gate_enabled_ ? ": the game's waits are held until its GPU has run the capture of " +
@@ -700,6 +726,8 @@ void FrameGenPresenter::Stop() {
     told_lead_frames_ = 0;
     told_lead_max_ = 0;
     game_ahead_ms_.clear();
+    told_ahead_ms_.clear();
+    told_lead_counts_.clear();
     ahead_jitter_ms_.clear();
     end_slack_ms_.clear();
     last_ahead_ms_ = 0.0;
@@ -852,9 +880,15 @@ void FrameGenPresenter::SetLeadPolicy(const FrameGenLeadPolicy& policy) {
     lead_return_after_ = policy.explore_after;
 }
 
+void FrameGenPresenter::ClearLeadHistoryLocked() {
+    lead_history_.clear();
+    lead_event_start_.reset();
+    lead_events_.clear();
+}
+
 void FrameGenPresenter::ResetLeadLocked() {
     lead_slots_ = 0;
-    lead_history_.clear();
+    ClearLeadHistoryLocked();
     lead_calm_since_ = {};
     lead_probe_.reset();
     lead_floor_ = 0;
@@ -2030,11 +2064,14 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
     // actual frames still have to establish persistent lateness before the
     // old multiplier is restored. Capture latency alone cannot tell whether
     // the game has the throughput for the lower multiplier.
-    const auto settle = probing_ ? std::min(auto_settle_, kAutoProbeSettle) : auto_settle_;
+    // Only the probe's own switch: a change since (new settings, the
+    // runtime's clock recovering, new output images) settles in full.
+    const bool probe_switch = probing_ && multiplier_changed_at_ == probe_started_at_;
+    const auto settle = probe_switch ? std::min(auto_settle_, kAutoProbeSettle) : auto_settle_;
     if (last_app_end_ && now - multiplier_changed_at_ >= settle) {
         // An engaged frame should take N refreshes; a passed-through one, one.
         const double multiplier = frame && frame->engaged ? static_cast<double>(frame->multiplier) : 1.0;
-        const auto expected = std::chrono::nanoseconds(static_cast<std::int64_t>(period * multiplier * 1.25));
+        const auto expected = std::chrono::nanoseconds(static_cast<std::int64_t>(period * multiplier * kAutoLateFactor));
         const bool late = now - *last_app_end_ > expected;
         cadence_.push_back({now, late, late && started_late});
     }
@@ -2057,6 +2094,15 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
             steady_late += entry.late ? 1 : 0;
         }
     }
+    // ...and the probe is judged once it has a quarter of the configured
+    // settle's frames past that (500 ms by default) and kAutoProbeJudgedFrames
+    // of them, or the configured settle has passed (a slow game), never on
+    // the first eight: a few late frames in a row as the short settle ends
+    // (a transition not quite over) made half of those late and failed a
+    // probe the game then held.
+    const auto since_switch = now - multiplier_changed_at_;
+    const bool judged = !probe_switch || (since_switch >= settle + auto_settle_ / 4 &&
+                                          (cadence_.size() >= kAutoProbeJudgedFrames || since_switch >= auto_settle_));
     const std::uint32_t before = auto_multiplier_;
     // A halving hold ends early where the game's own waits clear the report.
     // Only waits asked for well within a refresh, or released at the next
@@ -2070,7 +2116,7 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
     bool late_at_ceiling = false;
     std::chrono::duration<double> left_ceiling_after{}; // for the log: a probe down from there
     // More than 30% of the last second's frames missed the cadence: step up.
-    if (recent >= 8 && recent_late * 10 > recent * 3) {
+    if (judged && recent >= 8 && recent_late * 10 > recent * 3) {
         auto_late_percent_ = recent_late * 100 / recent;
         if (!compositor_running_ && auto_multiplier_ > 1 && recent_started_late * 2 >= recent_late) {
             // Inline cycles that start late hold the game's frame thread for
@@ -2112,7 +2158,9 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
             }
         }
         probe_not_before_ = now + probe_backoff_;
-    } else if (probing_ && now - multiplier_changed_at_ >= auto_probe_confirm_) {
+    } else if (probing_ && judged && now - multiplier_changed_at_ >= auto_probe_confirm_) {
+        // Not before it was judged: a probe still too short of frames to
+        // fail is not confirmed.
         probing_ = false;
         probe_backoff_ = auto_initial_backoff_;
         probe_not_before_ = now + probe_backoff_;
@@ -2134,6 +2182,9 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
     }
     if (auto_multiplier_ != before) {
         multiplier_changed_at_ = now;
+        if (probing_) {
+            probe_started_at_ = now;
+        }
         cadence_.clear();
         if (logger_ && gave_up_inline) {
             logger_->Info("Frame Generation automatic multiplier " + MultiplierText(before) +
@@ -4179,7 +4230,11 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
             "% of what both eyes see) it leaves " + Number(evidence.decoded.Ratio(), 2) +
             " of the error without depth (swapped " + Number(evidence.swapped.Ratio(), 2) +
             "); the other eye disproves " + Number(moved > 0.0 ? 100.0 * evidence.decoded.fallback / moved : 0.0, 0) +
-            "% of it, which is treated as far (cockpit glass written to depth, or depth wrong there)." +
+            "% of it (swapped " +
+            Number(evidence.swapped.samples > 0.0 ? 100.0 * evidence.swapped.fallback / evidence.swapped.samples : 0.0,
+                   0) +
+            "%; a reading disproved on over half is not used), which is treated as far "
+            "(cockpit glass written to depth, or depth wrong there)." +
             (depth.reading == FrameGenDepthReading::kUnusable
                  ? " Some games only fill the depth they send while their own depth reprojection setting is on "
                    "(MSFS 2024: Motion reprojection set to Depth); it is checked again now and then."
@@ -5381,7 +5436,8 @@ void FrameGenPresenter::UpdateLeadLocked(bool late, std::optional<double> slack_
     } else if (lead == lead_slots_) {
         const double period_ms = static_cast<double>(std::max<XrDuration>(last_period_, 1)) / 1e6;
         // Slack: it could have arrived a refresh later and still made its slot.
-        lead_history_.push_back(late ? 1 : (slack_ms && *slack_ms > period_ms * 1.1) ? 2 : 0);
+        const bool spare = !late && slack_ms && *slack_ms > period_ms * 1.1;
+        lead_history_.push_back(late ? 1 : spare ? 2 : 0);
         while (lead_history_.size() > 10) {
             lead_history_.pop_front();
         }
@@ -5389,7 +5445,28 @@ void FrameGenPresenter::UpdateLeadLocked(bool late, std::optional<double> slack_
             return static_cast<std::size_t>(std::count(lead_history_.begin(), lead_history_.end(), kind));
         };
         const bool hysteresis = lead_policy_.slack_hysteresis;
-        if (count(1) >= 2) {
+        // Late: two in the last ten frames. Spare: seven of the last ten.
+        bool step_up = count(1) >= 2;
+        bool step_down = lead_history_.size() >= 8 && count(2) >= 7;
+        if (lead_policy_.hitch_events) {
+            // Late: two hitches within event_window, each the late frames
+            // within hitch_span of its first. A probe is still undone by two
+            // late frames in the last ten: a lead too short is late frame
+            // after frame, and judged by hitch events it showed a quarter
+            // second of them before going back. (Judging spare time over a
+            // longer window as well held a GPU-bound game, whose frames show
+            // a refresh to spare only now and then, three slots higher after
+            // a slow stretch: TestLeadStepsDownAfterHitches.)
+            if (late && (!lead_event_start_ || now - *lead_event_start_ > lead_policy_.hitch_span)) {
+                lead_event_start_ = now;
+                lead_events_.push_back(now);
+            }
+            while (!lead_events_.empty() && now - lead_events_.front() > lead_policy_.event_window) {
+                lead_events_.pop_front();
+            }
+            step_up = lead_probe_ ? count(1) >= 2 : lead_events_.size() >= 2;
+        }
+        if (step_up) {
             if (lead_probe_) {
                 // The probe (or step down) failed: the lead before it is the
                 // lowest known to hold, and below it is tried only rarely
@@ -5434,7 +5511,7 @@ void FrameGenPresenter::UpdateLeadLocked(bool late, std::optional<double> slack_
             // At the cap nothing moves: not counted (the summary marks the cap).
             totals_.lead_ups += lead_slots_ < 4 * multiplier ? 1 : 0;
             lead_slots_ = std::min(lead_slots_ + 1, 4 * multiplier);
-            lead_history_.clear();
+            ClearLeadHistoryLocked();
             lead_calm_since_ = now;
             return;
         }
@@ -5445,7 +5522,7 @@ void FrameGenPresenter::UpdateLeadLocked(bool late, std::optional<double> slack_
         // down and back up about once a second, each time with two late
         // frames (DCS and MSFS 2024, 2026-10-09).
         const bool exploring = lead_floor_ != 0 && lead_slots_ <= lead_floor_ && lead_floor_failed_;
-        if (lead_history_.size() >= 8 && count(2) >= 7 && lead_slots_ > 1 &&
+        if (step_down && lead_slots_ > 1 &&
             (!hysteresis || !exploring || now - lead_calm_since_ >= explore_wait)) {
             if (hysteresis) {
                 lead_probe_ = LeadProbe{now, lead_slots_};
@@ -5453,7 +5530,7 @@ void FrameGenPresenter::UpdateLeadLocked(bool late, std::optional<double> slack_
             }
             --lead_slots_;
             ++totals_.lead_downs;
-            lead_history_.clear();
+            ClearLeadHistoryLocked();
             lead_calm_since_ = now;
             return;
         }
@@ -5471,7 +5548,7 @@ void FrameGenPresenter::UpdateLeadLocked(bool late, std::optional<double> slack_
     lead_probe_ = LeadProbe{now, lead_slots_};
     --lead_slots_;
     ++totals_.lead_probes;
-    lead_history_.clear();
+    ClearLeadHistoryLocked();
     lead_calm_since_ = now;
 }
 
@@ -5719,7 +5796,7 @@ std::optional<XrResult> FrameGenPresenter::ThreadedWaitLocked(std::unique_lock<s
         lead_floor_ = std::min(lead_floor_, lead_slots_);
         lead_floor_proven_ = std::min(lead_floor_proven_, lead_slots_);
         lead_probe_.reset();
-        lead_history_.clear();
+        ClearLeadHistoryLocked();
     }
     // Predict the first slot the frame will really reach. Interpolated
     // frames before it are shown first, so the frame itself is shown (and
@@ -5766,6 +5843,14 @@ std::optional<XrResult> FrameGenPresenter::ThreadedWaitLocked(std::unique_lock<s
     told_lead_sum_ += frame.lead;
     ++told_lead_frames_;
     told_lead_max_ = std::max(told_lead_max_, frame.lead);
+    ++told_lead_counts_[frame.lead];
+    if (phase_wall_ != Clock::time_point{}) {
+        // As below, from the presenter thread's last paced wait however long
+        // ago (the clocks run on together), so every window has it.
+        const XrTime now_xr =
+            phase_xr_ + std::chrono::duration_cast<std::chrono::nanoseconds>(frame.wait_return - phase_wall_).count();
+        AddSample(told_ahead_ms_, static_cast<double>(frame.target_time - now_xr) / 1e6, kMaxFrameSamples);
+    }
     if (phase_wall_ != Clock::time_point{} && frame.wait_return - phase_wall_ <= std::chrono::nanoseconds(4 * period)) {
         const XrTime runtime_time =
             phase_xr_ + std::chrono::duration_cast<std::chrono::nanoseconds>(frame.wait_return - phase_wall_).count();
@@ -6175,7 +6260,11 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
         // images newer captures had replaced (written unmoved, or the frame
         // before). staleSkipped: refreshes not submitted, nothing current to
         // show (a frame shown as it is had newer images in its swapchains).
-        // leadAvg/leadMax: the lead told to the game's frames. gameAheadMs
+        // leadAvg/leadMax: the lead told to the game's frames; leadHist: how
+        // many frames were told each lead ("lead:frames"). toldAheadMs
+        // (median/90th percentile): gameAheadMs measured from the presenter
+        // thread's last paced wait however long ago, so every window has
+        // it (gameAheadMs only from one within four refreshes). gameAheadMs
         // (median/95th percentile): how far past the runtime's own
         // prediction the game is told to render, Frame Generation's share
         // of its pose horizon (without Frame Generation 0, or a refresh for
@@ -6202,6 +6291,8 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
                  ? Number(static_cast<double>(told_lead_sum_) / static_cast<double>(told_lead_frames_), 2)
                  : std::string("-")) +
             ", leadMax=" + (told_lead_frames_ ? std::to_string(told_lead_max_) : std::string("-")) +
+            ", leadHist=" + LeadCountsText(told_lead_counts_) +
+            ", toldAheadMs=" + Percentiles(told_ahead_ms_, 0.5, 0.9) +
             ", gameAheadMs=" + Percentiles(game_ahead_ms_, 0.5, 0.95) +
             ", aheadJitterMs=" + Percentiles(ahead_jitter_ms_, 0.5, 0.95) +
             ", endSlackMs=" + Percentiles(end_slack_ms_, 0.1, 0.5) +
@@ -6278,6 +6369,8 @@ void FrameGenPresenter::NewSummaryWindowLocked(Clock::time_point now, double sta
     told_lead_frames_ = 0;
     told_lead_max_ = 0;
     game_ahead_ms_.clear();
+    told_ahead_ms_.clear();
+    told_lead_counts_.clear();
     ahead_jitter_ms_.clear();
     end_slack_ms_.clear();
     pause_longest_ms_ = 0.0;
@@ -7608,6 +7701,54 @@ FrameGenStatus FrameGenPresenter::Status() const {
     status.automatic = settings_.multiplier == FrameGenMultiplier::kAuto ||
                        (settings_.multiplier == FrameGenMultiplier::kDynamic && !status.dynamic);
     status.full_rate = full_rate_ && state_ == FrameGenState::kActive;
+    const XrDuration grid = refresh_period_ > 0 ? GameGridLocked() : 0;
+    if (status.automatic && grid > 0) {
+        // UpdateAutoLocked's thresholds as frame rates: a step up once more
+        // than 30% of frames take kAutoLateFactor times their refreshes; a
+        // probe one step down after five steady seconds, from its own thread
+        // only for a game whose own time per frame is within reach of it
+        // (AutoProbeInReachLocked), inline for any game holding its step.
+        // None while it would not step up: held at full rate (inline cycles
+        // that kept starting late, or the runtime halving), or video memory
+        // near its budget.
+        const double grid_hz = 1e9 / static_cast<double>(grid);
+        const bool held = auto_multiplier_ == 1 && ((inline_hold_until_ && now < *inline_hold_until_) ||
+                                                     (runtime_halving_ && auto_halving_hold_until_ &&
+                                                      now < *auto_halving_hold_until_));
+        const bool memory_pressure = !(compositor_running_ && jit_) && memory_budget_ &&
+                                     memory_budget_->budget_bytes &&
+                                     memory_budget_->usage_bytes >
+                                         memory_budget_->budget_bytes - memory_budget_->budget_bytes / 20;
+        // Frames are judged late on the period the game is told (the runtime's
+        // as it reports it: under SteamVR's period echo, longer than the grid),
+        // and not at all while the runtime's clock is displaced.
+        const double judged_hz = last_period_ > 0 ? 1e9 / static_cast<double>(last_period_) : grid_hz;
+        if (auto_multiplier_ < std::min(auto_memory_ceiling_, kMaxMultiplier) && !held && !memory_pressure &&
+            !clock_displaced_) {
+            status.auto_step_up_below_fps = judged_hz / (kAutoLateFactor * auto_multiplier_);
+        }
+        if (auto_multiplier_ > 1) {
+            status.auto_step_down_above_fps =
+                compositor_running_ ? (dynamic_policy_.stay_above - kProbeReach) * grid_hz / (auto_multiplier_ - 1)
+                                    : grid_hz / auto_multiplier_;
+        }
+    }
+    if (status.automatic && compositor_running_) {
+        const std::size_t count = std::min(auto_busy_count_, auto_busy_.size());
+        if (count >= 8) {
+            std::array<double, 32> sorted = auto_busy_;
+            std::nth_element(sorted.begin(), sorted.begin() + count / 2, sorted.begin() + count);
+            status.auto_game_own_fps = sorted[count / 2] > 0.0 ? 1000.0 / sorted[count / 2] : 0.0;
+        }
+    }
+    // As the 30 s summary says it: just in time and Dynamic measure the
+    // refreshes between real frames' slots, while the presenter thread
+    // presents (frames passing through inline leave that value behind);
+    // otherwise their ends' interval.
+    status.refreshes_per_real_frame =
+        compositor_running_ && (DynamicLocked() || jit_) && dynamic_interval_slots_ > 0.0 ? dynamic_interval_slots_
+        : grid > 0 && real_interval_ns_ > 0.0 ? real_interval_ns_ / static_cast<double>(grid)
+                                              : 0.0;
     status.standby = status.dynamic && dynamic_standby_;
     status.dynamic_reason = dynamic_reason_;
     status.dynamic_engagements = dynamic_engagements_;

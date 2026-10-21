@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -91,6 +92,20 @@ struct FrameGenStatus {
     std::uint32_t multiplier{2}; // headset frames per real frame in use
     bool automatic{false};       // the multiplier is chosen automatically
     bool full_rate{false};       // automatic and the app holds full refresh
+    // Automatic: the game's rate below which it steps up (0 while it would
+    // not: no higher step, held at full rate, video memory near its
+    // budget), and the game's own rate (its time per frame, the hold left
+    // out) from which it tries one step down (0 at full rate). Frames per
+    // second, on the grid the game's frames are timed by (grid_period_ns).
+    double auto_step_up_below_fps{0.0};
+    double auto_step_down_above_fps{0.0};
+    // ...and that own rate as measured, presenting from its own thread (0
+    // until measured, or inline, where the game's waits say nothing of it).
+    double auto_game_own_fps{0.0};
+    // Grid periods per real frame, measured frame by frame (smoothed; 0
+    // until measured): what a fixed or Auto multiplier becomes for a slower
+    // game.
+    double refreshes_per_real_frame{0.0};
     // Dynamic: the app runs at its own rate and generated frames fill the
     // refreshes between; `multiplier` is then the typical refreshes per real
     // frame.
@@ -245,6 +260,22 @@ struct FrameGenLeadPolicy {
     // the lead is retried only after explore_after, doubling after each
     // failure (tests compare without).
     bool slack_hysteresis{true};
+    // Hitches, not frames: late frames within hitch_span of the first of
+    // them are one event (a hitch makes the next frames late too), and the
+    // lead steps up for two events within event_window, never for one alone
+    // (its refreshes show a cover frame meanwhile); a probe is still undone
+    // by two late frames in the last ten. A rare hitch ratcheted the lead up
+    // for every frame where two late frames in the last ten stepped it up
+    // (DCS on Virtual Desktop, 2026-10-20: lead 4-7, the game told a median
+    // 67 ms past the refresh it was picked for, with 0.5% of its frames
+    // late, in bursts). Spare time steps it down as before (seven of the
+    // last ten frames). Off by default until flown: a game that is late now
+    // and then is held at a shorter lead, and GPU-aware pacing arms for its
+    // late captures (TestGpuAwarePacing's pipelined MSFS-like game). On with
+    // VECTORXR_FRAMEGEN_LEAD=events.
+    bool hitch_events{false};
+    std::chrono::milliseconds hitch_span{250};
+    std::chrono::milliseconds event_window{2000};
 };
 
 // Frame Generation pacing for one OpenXR session.
@@ -894,6 +925,8 @@ class FrameGenPresenter {
     // engagement it does not need a fresh run of steady frames.
     bool StayThreadedLocked() const;
     void DropUnclaimedLocked();
+    // Forgets the frames judged at the lead (it changed, or starts over).
+    void ClearLeadHistoryLocked();
     void UpdateLeadLocked(bool late, std::optional<double> slack_ms, std::uint32_t lead, std::uint32_t multiplier);
     // Just in time: a kept real frame's lead sample, once.
     void ScoreLeadLocked(JitFrame& frame, bool late);
@@ -1228,6 +1261,7 @@ class FrameGenPresenter {
     std::chrono::steady_clock::time_point probe_not_before_{};
     std::chrono::milliseconds probe_backoff_{10000};
     bool probing_{false};
+    std::chrono::steady_clock::time_point probe_started_at_{}; // the probe's own switch
     std::uint32_t probe_from_{0};
     // Since when every judgement found the game late with no higher
     // multiplier to step to (UpdateAutoLocked); before the last change, none.
@@ -1475,6 +1509,10 @@ class FrameGenPresenter {
     // anyway (a probe, FrameGenLeadPolicy).
     std::uint32_t lead_slots_{0};
     std::deque<std::uint8_t> lead_history_; // last frames at the current lead: 0 on time, 1 late, 2 slack
+    // FrameGenLeadPolicy::hitch_events, at the current lead: when the last
+    // late event began, and the events within event_window.
+    std::optional<std::chrono::steady_clock::time_point> lead_event_start_;
+    std::deque<std::chrono::steady_clock::time_point> lead_events_;
     FrameGenLeadPolicy lead_policy_;
     std::chrono::steady_clock::time_point lead_calm_since_{}; // the lead's last step (none yet: unset)
     struct LeadProbe {
@@ -1675,6 +1713,11 @@ class FrameGenPresenter {
     std::uint64_t told_lead_frames_{0};   // the frames told one
     std::uint32_t told_lead_max_{0};      // the largest told
     std::vector<double> game_ahead_ms_;   // the time told past the runtime's own display time at the wait
+    // game_ahead_ms_ from the presenter thread's last paced wait at any
+    // age (measured in every window), and how many frames were told each
+    // lead.
+    std::vector<double> told_ahead_ms_;
+    std::map<std::uint32_t, std::uint64_t> told_lead_counts_;
     std::vector<double> ahead_jitter_ms_; // that against the frame told before's, unless a pause came between
     std::vector<double> end_slack_ms_;    // the time to spare when the frame ended (negative: late)
     double last_ahead_ms_{0.0};           // the frame told last's game_ahead_ms_ sample...

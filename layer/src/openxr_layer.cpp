@@ -2416,6 +2416,9 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
     // A bridged Vulkan session's last releases get through the bridge's
     // queue first (or are let through): Frame Generation's waits on it end.
     if (vulkan_bridge_.Active()) {
+        if (!framegen_.PresenterAbandoned()) {
+            SubmitKeptVulkanBridgeReleasesLocked();
+        }
         vulkan_bridge_.Escape();
     }
     framegen_.Stop();
@@ -2875,11 +2878,13 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
     d3d11_bridge_.SessionCreated();
     vulkan_bridge_.SessionCreated();
     if (runtime_relay_root_.empty()) runtime_relay_root_ = ResolveRuntimeRelayRoot();
+    if (external_status_path_.empty()) external_status_path_ = ResolveExternalStatusPath();
     runtime_relay_session_id_ = std::to_string(GetCurrentProcessId()) + "-" +
         std::to_string(RuntimeRelayUnixMilliseconds()) + "-" +
         std::to_string(++runtime_relay_session_sequence_);
     runtime_relay_exit_status_.Arm(RuntimeStatusPath(runtime_relay_root_, runtime_relay_session_id_));
     runtime_relay_exit_control_.Arm(RuntimeControlPath(runtime_relay_root_, runtime_relay_session_id_));
+    external_status_exit_.Arm(external_status_path_, GetCurrentProcessId());
     quadviews_dimensions_.clear();
     quadviews_dimensions_at_ = 0;
     runtime_relay_last_applied_revision_ = 0;
@@ -2935,6 +2940,9 @@ XrResult OpenXrLayer::DestroySession(XrSession session) {
             // bridge's queue first (or are let through): Frame Generation's
             // waits on it end.
             if (vulkan_bridge_.Active()) {
+                if (!framegen_.PresenterAbandoned()) {
+                    SubmitKeptVulkanBridgeReleasesLocked();
+                }
                 vulkan_bridge_.Escape();
             }
             // Output swapchains and GPU work must go before the session does.
@@ -3112,7 +3120,6 @@ XrResult OpenXrLayer::BeginSession(XrSession session, const XrSessionBeginInfo* 
 
 XrResult OpenXrLayer::EndSession(XrSession session) {
     logger_.Info("xrEndSession requested by application.");
-    SetInputDeviceSessionActive(false); // devices not connected retry on the reconnect timer again
     TeardownWatch watch(logger_, "xrEndSession", framegen_.TeardownWait(),
                         [this] { return framegen_.PresenterActivity(); },
                         framegen_teardowns_watched_.load(std::memory_order_acquire));
@@ -3192,6 +3199,9 @@ XrResult OpenXrLayer::EndSession(XrSession session) {
                       std::to_string(static_cast<int>(result)));
         return result;
     }
+    // Only once it ended: a refused xrEndSession (not stopping yet) leaves
+    // the game playing, its absent devices still waiting for a rescan.
+    SetInputDeviceSessionActive(false); // devices not connected retry on the reconnect timer again
 
     watch.Step("resetting Turbo's frame state");
     // A presenter thread still in the runtime is stopped or left behind at
@@ -11147,16 +11157,20 @@ void OpenXrLayer::StopConfigWatcher() {
     // so remove this process's relay files here as well. Crashes can still
     // leave files behind; the app rejects them once their heartbeat is stale.
     std::filesystem::path relay_root;
+    std::filesystem::path external_status_path;
     std::vector<std::string> relay_session_ids;
     {
         std::scoped_lock lock(mutex_);
         relay_root = runtime_relay_root_;
+        external_status_path = external_status_path_;
         relay_session_ids.swap(runtime_relay_sessions_to_remove_);
         if (!runtime_relay_session_id_.empty()) {
             relay_session_ids.push_back(std::move(runtime_relay_session_id_));
         }
         runtime_relay_exit_status_.Disarm();
         runtime_relay_exit_control_.Disarm();
+        // The public status file stays armed: its exit removal is
+        // owner-checked, and covers a removal held up here.
         runtime_relay_last_applied_revision_ = 0;
         runtime_relay_acknowledged_revision_ = 0;
         runtime_relay_status_dirty_.store(false, std::memory_order_release);
@@ -11166,6 +11180,12 @@ void OpenXrLayer::StopConfigWatcher() {
         std::filesystem::remove(RuntimeStatusPath(relay_root, relay_session_id), ec);
         ec.clear();
         std::filesystem::remove(RuntimeControlPath(relay_root, relay_session_id), ec);
+    }
+    // The public status file only while it is still this process's: by now
+    // another game may have written its own.
+    if ((!relay_session_ids.empty() || external_status_remove_pending_) && !external_status_path.empty()) {
+        RemoveExternalStatusIfOwned(external_status_path, GetCurrentProcessId());
+        external_status_remove_pending_ = false;
     }
 }
 
@@ -11874,6 +11894,9 @@ void OpenXrLayer::ResetSessionState() {
         runtime_relay_session_id_.clear();
         runtime_relay_exit_status_.Disarm();
         runtime_relay_exit_control_.Disarm();
+        // The public status file stays armed (owner-checked at exit): a game
+        // that ends its session and exits before the watcher's next poll
+        // still has it removed.
         runtime_relay_last_applied_revision_ = 0;
         runtime_relay_acknowledged_revision_ = 0;
         runtime_relay_status_dirty_.store(false, std::memory_order_release);
@@ -15036,6 +15059,19 @@ XrResult OpenXrLayer::HandOverBridgedReleasesLocked(XrSwapchain swapchain, Swapc
     return XR_SUCCESS;
 }
 
+void OpenXrLayer::SubmitKeptVulkanBridgeReleasesLocked() {
+    // A game that renders, releases and ends its session with no frame's
+    // end after the release still has that rendering on its queue; the
+    // bridge's barrier at the release is what End's wait covers it by
+    // (vkFreeMemory of the images it renders into). The copy into the
+    // runtime's image goes ahead too, unseen: nothing shows it now.
+    for (auto& [swapchain, info] : tracked_swapchains_) {
+        for (std::size_t kept = 0; kept < info.bridge_handovers.size(); ++kept) {
+            vulkan_bridge_.Released(swapchain, true);
+        }
+    }
+}
+
 XrResult OpenXrLayer::HandOverBridgedReleasesLocked(std::string_view reason, bool copy) {
     XrResult first_failure = XR_SUCCESS;
     for (auto& [swapchain, info] : tracked_swapchains_) {
@@ -16607,10 +16643,12 @@ std::string OpenXrLayer::FrameGenStatusReason(const FrameGenStatus& framegen) {
 void OpenXrLayer::PollRuntimeRelay() {
     std::vector<std::string> sessions_to_remove;
     std::filesystem::path root;
+    std::filesystem::path external_status_path;
     std::string session_id;
     {
         std::scoped_lock lock(mutex_);
         root = runtime_relay_root_;
+        external_status_path = external_status_path_;
         session_id = runtime_relay_session_id_;
         sessions_to_remove.swap(runtime_relay_sessions_to_remove_);
     }
@@ -16621,6 +16659,15 @@ void OpenXrLayer::PollRuntimeRelay() {
         ec.clear();
         std::filesystem::remove(RuntimeControlPath(root, stale_session_id), ec);
         ec.clear();
+    }
+    // A session ended: the public status file goes with it, unless another
+    // game has written its own since. A session that started meanwhile
+    // writes it again below. A reader holding it past the retries: again at
+    // the next polls, while no session runs.
+    if ((!sessions_to_remove.empty() || (external_status_remove_pending_ && session_id.empty())) &&
+        !external_status_path.empty()) {
+        external_status_remove_pending_ = RemoveExternalStatusIfOwned(external_status_path, GetCurrentProcessId()) ==
+                                          ExternalStatusRemoval::kBusy;
     }
     if (!root.empty() && !runtime_relay_pruned_) {
         // Once per process: files of earlier sessions that ended by a crash,
@@ -16684,6 +16731,7 @@ void OpenXrLayer::PollRuntimeRelay() {
 
     osd_.ReportDiagnostics();
     RuntimeStatusDocument status;
+    ExternalStatusDocument external;
     {
         std::scoped_lock lock(mutex_);
         if (runtime_relay_session_id_ != session_id || active_session_ == XR_NULL_HANDLE) return;
@@ -16716,25 +16764,18 @@ void OpenXrLayer::PollRuntimeRelay() {
         status.framegen_depth = framegen.depth == FrameGenDepthState::kUnknown ? "" : ToString(framegen.depth);
         if (framegen_session_enabled_) {
             // The same rates as framegen_reason, as numbers (MSFS_AutoFPS, issue 103).
-            RuntimeFrameGenRates rates;
-            rates.mode = framegen.mode == FrameGenSynthesisMode::kExtrapolate ? "extrapolate" : "interpolate";
-            rates.frame_rate = framegen.dynamic ? "dynamic" : framegen.automatic ? "auto" :
-                std::to_string(framegen.multiplier) + "x";
-            rates.generating = framegen.state == FrameGenState::kActive && !framegen.standby && !framegen.full_rate;
-            rates.multiplier = framegen.multiplier;
-            if (framegen.refresh_period_ns > 0) rates.refresh_hz = 1e9 / static_cast<double>(framegen.refresh_period_ns);
-            if (rates.generating && !framegen.dynamic && framegen.multiplier >= 2)
-                rates.hold_fps = rates.refresh_hz / framegen.multiplier;
-            rates.app_fps = framegen.app_fps;
-            rates.output_fps = framegen.output_fps;
-            rates.distinct_fps = framegen.distinct_fps;
-            status.framegen_rates = rates;
+            status.framegen_rates = FrameGenRates(framegen);
+            external.framegen = ExternalFrameGen(framegen);
         }
         if (status.turbo_reason.empty() && turbo_auto_suspended_.load())
             status.turbo_reason = "Runtime pacing repeatedly stalled. Use the Turbo toggle to retry.";
 
         status.updated_at_unix_milliseconds = RuntimeRelayUnixMilliseconds();
         status.acknowledged_revision = runtime_relay_acknowledged_revision_;
+        external.process_id = status.process_id;
+        external.application = status.application;
+        external.session_id = status.session_id;
+        external.updated_at_unix_milliseconds = status.updated_at_unix_milliseconds;
         status.quadviews_diagnostic_visualization_available = QuadViewsDiagnosticVisualizationAvailable();
         status.quadviews_diagnostic_visualization_enabled = quadviews_diagnostic_visualization_enabled_;
     }
@@ -16746,5 +16787,73 @@ void OpenXrLayer::PollRuntimeRelay() {
     } else {
         runtime_relay_status_dirty_.store(true, std::memory_order_release);
     }
+    // The public file on the same heartbeat; a failed write is retried at the
+    // next. A session kept only for an abandoned presenter thread (left in
+    // the runtime at xrDestroySession) has ended for the game: its file goes.
+    if (!external_status_path.empty()) {
+        if (framegen_.PresenterAbandoned()) {
+            external_status_remove_pending_ = RemoveExternalStatusIfOwned(external_status_path, GetCurrentProcessId()) ==
+                                              ExternalStatusRemoval::kBusy;
+        } else {
+            WriteExternalStatus(external_status_path, external);
+        }
+    }
+}
+
+RuntimeFrameGenRates OpenXrLayer::FrameGenRates(const FrameGenStatus& framegen) {
+    RuntimeFrameGenRates rates;
+    rates.mode = framegen.mode == FrameGenSynthesisMode::kExtrapolate ? "extrapolate" : "interpolate";
+    rates.frame_rate = framegen.dynamic ? "dynamic" : framegen.automatic ? "auto" :
+        std::to_string(framegen.multiplier) + "x";
+    // As the app's state says it: not while composed quad views frames could
+    // not be written for a while either (standing by meanwhile).
+    rates.generating = DescribeFrameGen(framegen, true).state == "active";
+    rates.multiplier = framegen.multiplier;
+    if (framegen.refresh_period_ns > 0) rates.refresh_hz = 1e9 / static_cast<double>(framegen.refresh_period_ns);
+    if (rates.generating && !framegen.dynamic && framegen.multiplier >= 2)
+        rates.hold_fps = rates.refresh_hz / framegen.multiplier;
+    rates.app_fps = framegen.app_fps;
+    rates.output_fps = framegen.output_fps;
+    rates.distinct_fps = framegen.distinct_fps;
+    return rates;
+}
+
+ExternalFrameGenStatus OpenXrLayer::ExternalFrameGen(const FrameGenStatus& framegen) {
+    const RuntimeFrameGenRates rates = FrameGenRates(framegen);
+    ExternalFrameGenStatus external;
+    external.state = DescribeFrameGen(framegen, true).state;
+    external.mode = rates.mode;
+    external.frame_rate = rates.frame_rate;
+    external.generating = rates.generating;
+    external.multiplier = rates.multiplier;
+    external.refresh_hz = rates.refresh_hz;
+    external.app_fps = rates.app_fps;
+    external.output_fps = rates.output_fps;
+    external.distinct_fps = rates.distinct_fps;
+    // Measured on the grid the game's frames are timed by (twice the refresh
+    // period while the runtime halves the rate); said in headset refreshes.
+    if (framegen.refresh_period_ns > 0 && framegen.grid_period_ns > 0) {
+        external.refreshes_per_real_frame = framegen.refreshes_per_real_frame *
+            static_cast<double>(framegen.grid_period_ns) / static_cast<double>(framegen.refresh_period_ns);
+    }
+    // The target and holding are on that grid: an N-x frame takes N of its
+    // periods. A runtime holding frames to every second refresh (or less)
+    // without reporting the longer period shows them at half the refresh
+    // rate at most all the same.
+    double grid_hz = framegen.grid_period_ns > 0 ? 1e9 / static_cast<double>(framegen.grid_period_ns) : 0.0;
+    if (framegen.runtime_halving && framegen.refresh_period_ns > 0 &&
+        framegen.grid_period_ns < framegen.refresh_period_ns + framegen.refresh_period_ns / 2) {
+        grid_hz = 0.5e9 / static_cast<double>(framegen.refresh_period_ns);
+    }
+    ExternalFrameGenTarget(&external, grid_hz);
+    if (framegen.automatic) {
+        ExternalAutoStep step;
+        step.step = framegen.multiplier;
+        step.step_up_below_fps = framegen.auto_step_up_below_fps;
+        step.step_down_above_fps = framegen.auto_step_down_above_fps;
+        step.game_own_fps = framegen.auto_game_own_fps;
+        external.automatic = step;
+    }
+    return external;
 }
 } // namespace depthxr

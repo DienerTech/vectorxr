@@ -1650,8 +1650,27 @@ void TestAutomaticMultiplier() {
             Check(XR_SUCCEEDED(app.End(state.predictedDisplayTime)), "auto: end");
         }
     };
+    // Its thresholds as frame rates (the public status file's): at full rate
+    // a step up below 80% of the refresh rate, no step down.
+    FrameGenStatus status = presenter.Status();
+    Check(status.grid_period_ns > 0, "auto: the grid is known");
+    double grid_hz = 1e9 / static_cast<double>(status.grid_period_ns);
+    Check(std::abs(status.auto_step_up_below_fps - grid_hz / 1.25) < 0.01 && status.auto_step_down_above_fps == 0.0,
+          "auto at full rate: steps up below " + std::to_string(status.auto_step_up_below_fps) + " fps");
     run(1500ms, 30ms);
     Check(presenter.Status().multiplier >= 3, "auto: a slow app steps up to 3x or more");
+    // Inline, a probe down needs only five steady seconds at the step; the
+    // last step has none above it.
+    status = presenter.Status();
+    grid_hz = 1e9 / static_cast<double>(status.grid_period_ns);
+    const double step = static_cast<double>(status.multiplier);
+    Check(std::abs(status.auto_step_up_below_fps - (status.multiplier < 4 ? grid_hz / (1.25 * step) : 0.0)) < 0.01 &&
+              std::abs(status.auto_step_down_above_fps - grid_hz / step) < 0.01,
+          "auto at " + std::to_string(status.multiplier) + "x: up below " +
+              std::to_string(status.auto_step_up_below_fps) + ", down from " +
+              std::to_string(status.auto_step_down_above_fps) + " fps");
+    Check(status.refreshes_per_real_frame >= 2.0, "auto: a 30 ms frame takes two refreshes or more (" +
+                                                      std::to_string(status.refreshes_per_real_frame) + ")");
     Check(app.Frame().predictedDisplayPeriod == presenter.Status().multiplier * kPeriod,
           "auto: the app's period follows the multiplier");
 
@@ -2110,6 +2129,15 @@ void TestHorizonTelemetryFixed() {
         Check(jitter->second <= 0.15 * period_ms,
               name + ": released on its refresh, the horizon holds from frame to frame (" + last + ")");
         Check(slack->first <= slack->second, name + ": endSlackMs is 10th percentile/median (" + last + ")");
+        // The horizon told past the refresh the presenter thread was at, in
+        // every window, and how many frames were told each lead.
+        const auto told = SummaryValues(last, "toldAheadMs");
+        Check(told && told->first > 0.0 && told->first <= told->second &&
+                  std::abs(told->first - lead_avg->first * period_ms) <= 1.5 * period_ms,
+              name + ": toldAheadMs is about the lead told (" + last + ")");
+        const std::size_t hist = last.find(", leadHist=");
+        Check(hist != std::string::npos && last.find(std::to_string(high) + ":", hist) != std::string::npos,
+              name + ": leadHist counts the leads told (" + last + ")");
     }
 }
 
@@ -4925,7 +4953,7 @@ struct LeadRun {
     FrameGenStatus after;     // at the end
 };
 
-LeadRun RunLeadAfterHitches(bool probes) {
+LeadRun RunLeadAfterHitches(bool probes, bool hitch_events = false) {
     FrameGenPresenter presenter;
     GpuLog gpu;
     gpu.game_gpu = 19ms;
@@ -4944,6 +4972,9 @@ LeadRun RunLeadAfterHitches(bool probes) {
     // judged as a probe skips the frames in flight across it, so it too
     // brings the lead back down here).
     policy.slack_hysteresis = probes;
+    // These runs pin the rules as before 0.19.4 (frame by frame); the
+    // hitch-event rules are run alongside (TestLeadStepsDownAfterHitches).
+    policy.hitch_events = hitch_events;
     presenter.SetLeadPolicy(policy);
     app->before_release = [&] { gpu.GameFrame(); };
     for (int i = 0; i < 3; ++i) app->Frame();
@@ -4968,6 +4999,7 @@ LeadRun RunLeadAfterHitches(bool probes) {
 void TestLeadStepsDownAfterHitches() {
     const LeadRun held = RunLeadAfterHitches(false);
     const LeadRun probed = RunLeadAfterHitches(true);
+    const LeadRun events = RunLeadAfterHitches(true, true);
     const auto late = [](const LeadRun& run) {
         return (run.after.late_cpu - run.before.late_cpu) + (run.after.late_gpu - run.before.late_gpu);
     };
@@ -4975,7 +5007,19 @@ void TestLeadStepsDownAfterHitches() {
               << " (late " << late(held) << "); with probes: " << probed.settled << " -> " << probed.peak << " -> "
               << probed.final << " (floor " << probed.after.lead_floor << ", probes " << probed.after.lead_probes
               << ", failed " << probed.after.lead_probes_failed << ", late " << late(probed) << ")" << std::endl;
+    std::cerr << "  with hitch events: " << events.settled << " -> " << events.peak << " -> " << events.final
+              << " (floor " << events.after.lead_floor << ", probes " << events.after.lead_probes << ", failed "
+              << events.after.lead_probes_failed << ", late " << late(events) << ")" << std::endl;
     Check(held.peak > held.settled && probed.peak > probed.settled, "lead probes: the hitches grow the lead");
+    // Hitch events raise the lead of a game late frame after frame too,
+    // but more slowly (a step per two hitch events, each 250 ms at least,
+    // against the probes these runs make every 250 ms): this game had not
+    // reached the lead it holds frame by frame (8) when the slow GPU came.
+    // The lead rises to that, and no further.
+    Check(events.final > events.settled && events.final <= probed.settled,
+          "lead probes, hitch events: the lead rises to what the game holds, no higher (" +
+              std::to_string(events.settled) + " -> " + std::to_string(events.peak) + " -> " +
+              std::to_string(events.final) + "; frame by frame " + std::to_string(probed.settled) + ")");
     // Without probes the lead comes down only by slack: once the game's rate
     // is back, Dynamic's cap (4 refreshes per real frame) is 8 again, below
     // the peak, and the lead comes down with it; frames scored there show
@@ -5008,7 +5052,7 @@ struct LeadFlapRun {
     std::uint64_t undone{0}; // steps down undone by late frames
 };
 
-LeadFlapRun RunLeadFlap(bool hysteresis) {
+LeadFlapRun RunLeadFlap(bool hysteresis, bool hitch_events = false) {
     FrameGenPresenter presenter;
     GpuLog gpu;
     gpu.frames_ahead = 3;
@@ -5023,6 +5067,9 @@ LeadFlapRun RunLeadFlap(bool hysteresis) {
     policy.explore_after = 1500ms;
     policy.explore_max = 3000ms;
     policy.slack_hysteresis = hysteresis;
+    // The rules as before 0.19.4, with and without hysteresis; then the
+    // hitch-event rules (TestLeadDoesNotFlap).
+    policy.hitch_events = hitch_events;
     presenter.SetLeadPolicy(policy);
     // GPU-bound near 50 fps, one frame in five a refresh longer.
     const std::vector<std::chrono::microseconds> pattern = {18ms, 18ms, 18ms, 18ms, 30ms};
@@ -5070,6 +5117,7 @@ LeadFlapRun RunLeadFlap(bool hysteresis) {
 void TestLeadDoesNotFlap() {
     const LeadFlapRun flapping = RunLeadFlap(false);
     const LeadFlapRun held = RunLeadFlap(true);
+    const LeadFlapRun events = RunLeadFlap(true, true);
     std::cerr << "  lead flapping without hysteresis: " << flapping.changes << " changes, " << flapping.late
               << " late in 6 s, mean lead " << flapping.mean_lead << "; with: " << held.changes << " changes ("
               << held.undone << " undone), " << held.late << " late, mean lead " << held.mean_lead << ", floor "
@@ -5085,6 +5133,156 @@ void TestLeadDoesNotFlap() {
     Check(held.mean_lead <= flapping.mean_lead + 1.0,
           "lead flapping: the lead holds about where it flapped (" + std::to_string(held.mean_lead) + " vs " +
               std::to_string(flapping.mean_lead) + ")");
+    // Hitch events: the slow frame of every five is one late frame at a
+    // time, a refresh longer, frame after frame: the lead rises for it (the
+    // game is truly short of time) and stays, without flapping.
+    std::cerr << "  with hitch events: " << events.changes << " changes, " << events.late << " late, mean lead "
+              << events.mean_lead << ", floor " << events.floor << std::endl;
+    Check(events.changes <= 6 && events.late <= held.late + 10 && events.mean_lead <= held.mean_lead + 1.0,
+          "lead flapping, hitch events: the lead holds without flapping (" + std::to_string(events.changes) +
+              " changes, " + std::to_string(events.late) + " late, mean " + std::to_string(events.mean_lead) + ")");
+}
+
+// The lead over a run of a game whose GPU work per frame is `gpu(frame)`,
+// with the rules as before 0.19.4 (frame by frame) or hitch events. Probes
+// and explore waits are shortened about threefold from the defaults
+// (FrameGenLeadPolicy); the hitch-event windows keep theirs.
+struct LeadPatternRun {
+    FrameGenStatus settled;  // at the end of the settling run
+    FrameGenStatus after;    // at the end
+    double mean_lead{0.0};   // over the measured run, sampled each frame
+    std::uint32_t highest{0};
+    std::uint32_t lowest{0};
+    int changes{0};
+    std::uint64_t late{0};   // real frames late in the measured run
+};
+
+struct LeadPattern {
+    FrameGenSynthesisMode mode{FrameGenSynthesisMode::kInterpolate};
+    FrameGenMultiplier multiplier{FrameGenMultiplier::k2};
+    int end_offset_periods{0};
+    std::chrono::milliseconds settle{4000};
+    std::chrono::milliseconds measure{9000};
+    std::function<std::chrono::microseconds(int)> gpu;
+};
+
+LeadPatternRun RunLeadPattern(const LeadPattern& pattern, bool hitch_events) {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    gpu.frames_ahead = 3;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, pattern.mode, pattern.multiplier, app, runtime, owned);
+    app->end_offset_periods = pattern.end_offset_periods;
+    FrameGenLeadPolicy policy;
+    policy.probe_after = 1500ms;
+    policy.judge = 1000ms;
+    policy.explore_after = 3000ms;
+    policy.explore_max = 18000ms;
+    policy.hitch_events = hitch_events;
+    presenter.SetLeadPolicy(policy);
+    int frame = 0;
+    app->before_release = [&] {
+        gpu.game_gpu = pattern.gpu(frame++);
+        gpu.GameFrame();
+    };
+    for (int i = 0; i < 3; ++i) app->Frame();
+    LeadPatternRun run;
+    RunWork(*app, pattern.settle, {6ms});
+    run.settled = presenter.Status();
+    std::uint32_t lead = run.settled.lead_slots;
+    run.highest = run.lowest = lead;
+    double sum = 0.0;
+    int samples = 0;
+    RunWork(*app, pattern.measure, {6ms}, [&](const XrFrameState&) {
+        const std::uint32_t now = presenter.Status().lead_slots;
+        sum += now;
+        ++samples;
+        run.highest = std::max(run.highest, now);
+        run.lowest = std::min(run.lowest, now);
+        run.changes += now != lead ? 1 : 0;
+        lead = now;
+        return false;
+    });
+    run.after = presenter.Status();
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "lead pattern: calls stayed ordered");
+    run.mean_lead = samples ? sum / samples : 0.0;
+    run.late = (run.after.late_cpu - run.settled.late_cpu) + (run.after.late_gpu - run.settled.late_gpu);
+    return run;
+}
+
+std::string LeadPatternText(const LeadPatternRun& run) {
+    return "lead " + std::to_string(run.settled.lead_slots) + " -> mean " + std::to_string(run.mean_lead) + " (" +
+           std::to_string(run.lowest) + "-" + std::to_string(run.highest) + ", " + std::to_string(run.changes) +
+           " changes, floor " + std::to_string(run.after.lead_floor) + "), " + std::to_string(run.late) + " late";
+}
+
+// DCS on Virtual Desktop (2026-10-20, 90 Hz, Interpolate): 0.5% of its real
+// frames late, in bursts of two or three, its others with 30-60 ms to
+// spare; the lead sat at 4-7 and the game was told a median 67 ms past the
+// refresh picked for it. Every burst stepped the lead up (two late in the
+// last ten frames), and back down took explore waits. With hitch events a
+// burst is one event and raises nothing. (Bursts every 3 s here, at
+// threefold shortened probes and waits.)
+void TestLeadIgnoresRareHitchBursts() {
+    LeadPattern pattern;
+    pattern.gpu = [](int frame) { return frame % 135 < 3 ? std::chrono::microseconds(20000) : 8000us; };
+    const LeadPatternRun legacy = RunLeadPattern(pattern, false);
+    const LeadPatternRun events = RunLeadPattern(pattern, true);
+    std::cerr << "  rare hitch bursts, frame by frame: " << LeadPatternText(legacy) << "; hitch events: "
+              << LeadPatternText(events) << std::endl;
+    // This stand-in game does not ratchet frame by frame as DCS did (its
+    // spare time is all on the CPU, DCS's late frames were mostly its GPU
+    // work not captured in time): what it shows is that the bursts raise
+    // nothing, the lead sits no higher, and the cost is the burst frames
+    // covered, not a lead held up for every frame.
+    Check(events.mean_lead <= legacy.mean_lead + 0.25 && events.highest <= events.settled.lead_slots + 1,
+          "rare hitch bursts: the bursts do not raise the lead (" + LeadPatternText(events) + " vs " +
+              LeadPatternText(legacy) + ")");
+    Check(events.changes <= 4, "rare hitch bursts: ...and it stays put (" + LeadPatternText(events) + ")");
+    Check(events.late <= 30, "rare hitch bursts: ...with the burst frames covered, a few more (" +
+                                 LeadPatternText(events) + ")");
+}
+
+// Star Citizen (2026-10-18, Virtual Desktop, fixed 2x Extrapolate): it ends
+// its frames a period after its told time, and hitches about every 30 s; the
+// lead stood at its cap of 8. A hitch no lead cures must not ratchet it.
+// (A 150 ms frame every 3 s here.)
+void TestLeadHitchesDoNotRatchet() {
+    LeadPattern pattern;
+    pattern.mode = FrameGenSynthesisMode::kExtrapolate;
+    pattern.end_offset_periods = 1;
+    pattern.gpu = [](int frame) { return frame > 0 && frame % 135 == 0 ? std::chrono::microseconds(150000) : 10000us; };
+    const LeadPatternRun legacy = RunLeadPattern(pattern, false);
+    const LeadPatternRun events = RunLeadPattern(pattern, true);
+    std::cerr << "  hitch every 3 s, frame by frame: " << LeadPatternText(legacy) << "; hitch events: "
+              << LeadPatternText(events) << std::endl;
+    Check(events.highest <= events.settled.lead_slots + 1 && events.after.lead_slots <= events.settled.lead_slots,
+          "hitches every 3 s: the lead does not ratchet (" + LeadPatternText(events) + ")");
+    Check(events.mean_lead <= legacy.mean_lead + 0.25,
+          "hitches every 3 s: no higher than frame by frame (" + LeadPatternText(events) + " vs " +
+              LeadPatternText(legacy) + ")");
+}
+
+// A game truly short of GPU time: every fourth frame a refresh and more
+// longer, late frame after frame. Hitch events still raise the lead for it,
+// about as high as frame by frame, and its frames are no more often late.
+void TestLeadRisesForFrequentLates() {
+    LeadPattern pattern;
+    pattern.gpu = [](int frame) { return frame % 4 == 3 ? std::chrono::microseconds(30000) : 14000us; };
+    const LeadPatternRun legacy = RunLeadPattern(pattern, false);
+    const LeadPatternRun events = RunLeadPattern(pattern, true);
+    std::cerr << "  frequent lates, frame by frame: " << LeadPatternText(legacy) << "; hitch events: "
+              << LeadPatternText(events) << std::endl;
+    Check(events.mean_lead + 1.0 >= legacy.mean_lead,
+          "frequent lates: hitch events raise the lead about as far (" + LeadPatternText(events) + " vs " +
+              LeadPatternText(legacy) + ")");
+    Check(events.late <= legacy.late * 3 / 2 + 20,
+          "frequent lates: ...and frames are no more often late (" + LeadPatternText(events) + " vs " +
+              LeadPatternText(legacy) + ")");
 }
 
 // A slow game (GPU-bound near 33 fps) that hitches every 0.6 s: each hitch
@@ -5166,6 +5364,10 @@ FrameGenLeadPolicy ProvenLeadPolicy(std::chrono::milliseconds explore_max) {
     policy.judge = 200ms;
     policy.explore_after = 700ms;
     policy.explore_max = explore_max;
+    // The floor a hitch raises is a rule of the frame-by-frame steps (as
+    // before 0.19.4): with hitch events a lone hitch raises nothing
+    // (TestLeadHitchesDoNotRatchet).
+    policy.hitch_events = false;
     return policy;
 }
 
@@ -10210,6 +10412,91 @@ void TestAutoProbeAllowsLatencyAndShortHitch() {
     }
 }
 
+// A probe's settle is 250 ms since b2ef6a8, tested with one late frame. A
+// switch to a lower multiplier that costs a few late frames in a row (a
+// game's frame time catching up with its new period, the runtime's
+// compositor adjusting), followed by steady on-time frames, must not fail
+// a probe the game can hold, nor double the next probe's wait: whether
+// the burst comes at the switch or as its settle ends, and for a slow probe
+// (4x -> 3x: a third as many frames in the same time) too.
+void TestAutoProbeSurvivesTransitionBurst() {
+    struct Burst {
+        std::chrono::milliseconds after; // from the switch to the first late frame
+        int frames;                      // consecutive late frames
+    };
+    struct Probe {
+        const char* name;
+        double engage_periods; // the game's work while Auto steps up to `from`
+        std::uint32_t from;
+        double steady_periods; // then: within reach of `to`, held there
+        std::uint32_t to;
+        std::vector<Burst> bursts;
+    };
+    const std::vector<Probe> probes = {
+        {"2x -> full rate", 1.6, 2, 0.18, 1,
+         {Burst{0ms, 4}, Burst{150ms, 4}, Burst{240ms, 3}, Burst{240ms, 4}, Burst{300ms, 4}, Burst{700ms, 4}}},
+        {"4x -> 3x", 4.2, 4, 2.7, 3, {Burst{0ms, 4}, Burst{240ms, 4}, Burst{300ms, 4}}},
+    };
+    for (const FrameGenSynthesisMode mode : {FrameGenSynthesisMode::kExtrapolate, FrameGenSynthesisMode::kInterpolate}) {
+        for (const Probe& probe : probes) {
+            for (const Burst burst : probe.bursts) {
+                const std::string name = std::string("auto probe transition burst, ") +
+                                         (mode == FrameGenSynthesisMode::kExtrapolate ? "extrapolate" : "interpolate") +
+                                         ", " + probe.name + ", " + std::to_string(burst.frames) + " late frames " +
+                                         std::to_string(burst.after.count()) + " ms after the switch";
+                SessionLog log("auto-burst");
+                FrameGenPresenter presenter;
+                GpuLog gpu;
+                Runtime runtime;
+                runtime.paced = true;
+                std::unique_ptr<App> owned;
+                App* app = nullptr;
+                StartJit(presenter, gpu, mode, FrameGenMultiplier::kAuto, app, runtime, owned, log.logger.get());
+                presenter.SetAutoPolicy(200ms, 500ms, 15s, 300ms);
+                RunWork(*app, 4000ms, PeriodsOfWork(kPeriod, probe.engage_periods),
+                        [&](const XrFrameState&) { return presenter.Status().multiplier == probe.from; });
+                RunWork(*app, 300ms, PeriodsOfWork(kPeriod, probe.engage_periods));
+                Check(presenter.Status().multiplier == probe.from,
+                      name + ": starts at " + std::to_string(probe.from) + "x (" +
+                          std::to_string(presenter.Status().multiplier) + "x)");
+                // The production settle and confirmation; only the probe comes sooner.
+                presenter.SetAutoPolicy(2s, 500ms, 15s, 300ms);
+                const auto steady = PeriodsOfWork(kPeriod, probe.steady_periods);
+                RunWork(*app, 6000ms, steady, [&](const XrFrameState&) { return presenter.Status().multiplier == probe.to; });
+                Check(presenter.Status().multiplier == probe.to, name + ": the probe began");
+                const auto switched = std::chrono::steady_clock::now();
+                // No further probe in the window (5 s steady first).
+                presenter.SetAutoPolicy(2s, 5000ms, 15s, 300ms);
+                // Late frames take 1.25 times their refreshes and more; then
+                // the steady frames, which hold the probe's rate.
+                const auto late_work = PeriodsOfWork(kPeriod, 1.6 * probe.to).front();
+                int late = 0;
+                bool failed = false;
+                while (std::chrono::steady_clock::now() - switched < 2000ms) {
+                    const bool in_burst =
+                        late < burst.frames && std::chrono::steady_clock::now() - switched >= burst.after;
+                    const XrFrameState state = app->Wait();
+                    app->Begin();
+                    SleepPrecise(std::chrono::steady_clock::now() + (in_burst ? late_work : steady.front()));
+                    app->Release();
+                    Check(XR_SUCCEEDED(app->End(state.predictedDisplayTime)), name + ": end");
+                    late += in_burst ? 1 : 0;
+                    failed = failed || presenter.Status().multiplier != probe.to;
+                }
+                presenter.Stop();
+                const std::vector<std::string> steps = log.Lines("automatic multiplier");
+                std::cerr << "  " << name << ": " << (failed ? "FAILED" : "held") << " ("
+                          << (steps.empty() ? std::string("no step") : steps.back()) << ")" << std::endl;
+                Check(late == burst.frames, name + ": the burst ran");
+                Check(!failed && log.Lines("next probe in").empty(),
+                      name + ": a probe the game holds survives the burst, its backoff not doubled (" +
+                          (steps.empty() ? std::string("no step") : steps.back()) + ")");
+                Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+            }
+        }
+    }
+}
+
 // The same jump while Frame Generation presents (no game pause causes it
 // then, but a runtime may): the presenter thread's refreshes stop advancing,
 // so it stops and frames pass straight through within moments, the game never
@@ -11092,10 +11379,14 @@ int main(int argc, char** argv) {
     }
     RUN(TestAutoGpuBoundProbeReturnsPromptly);
     RUN(TestAutoProbeAllowsLatencyAndShortHitch);
+    RUN(TestAutoProbeSurvivesTransitionBurst);
     g_jit = false;
     RUN(TestClockLogPairs);
     RUN(TestSteamVrMissedRefresh);
     RUN(TestLeadAfterRepeatedHitches);
+    RUN(TestLeadIgnoresRareHitchBursts);
+    RUN(TestLeadHitchesDoNotRatchet);
+    RUN(TestLeadRisesForFrequentLates);
     RUN(TestHitchReturnsToProvenLead);
     RUN(TestRaisedFloorProbesBackOff);
     RUN(TestHitchDuringProbeBack);

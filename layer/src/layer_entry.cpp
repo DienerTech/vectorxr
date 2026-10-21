@@ -291,10 +291,16 @@ std::string LayerName(const XrApiLayerNextInfo& info) {
 
 // Layers built from mbucchia's layer template (OpenXR Toolkit,
 // Quad-Views-Foveated) call through a null pointer when asked for a function
-// before their own instance exists: VectorXR directly above one never probes
-// the runtime's extensions that way.
-bool NextLayerNeedsAnInstance(const XrApiLayerNextInfo* next_info) {
-    return next_info && next_info->next && LayerName(*next_info->next).starts_with("XR_APILAYER_MBUCCHIA_");
+// before their own instance exists: VectorXR anywhere above one never probes
+// the runtime's extensions that way, since a forwarding layer between them
+// (OpenKneeboard) passes the probe down to it.
+bool LayerBelowNeedsAnInstance(const XrApiLayerNextInfo* next_info) {
+    for (const XrApiLayerNextInfo* below = next_info ? next_info->next : nullptr; below; below = below->next) {
+        if (LayerName(*below).starts_with("XR_APILAYER_MBUCCHIA_")) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // OpenXR Toolkit's own bypass for an application: a nonzero DWORD "bypass"
@@ -341,8 +347,8 @@ RuntimeExtensionScan ScanRuntimeInstanceExtensions(const XrApiLayerNextInfo* nex
         scan.detail = "next-get-instance-proc-addr-unavailable";
         return scan;
     }
-    if (NextLayerNeedsAnInstance(next_info)) {
-        scan.detail = "next-layer-needs-an-instance"; // the layers-below line names it
+    if (LayerBelowNeedsAnInstance(next_info)) {
+        scan.detail = "layer-below-needs-an-instance"; // the layers-below line names it
         return scan;
     }
 
