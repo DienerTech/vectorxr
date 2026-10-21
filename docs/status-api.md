@@ -11,10 +11,11 @@ tune a game's settings while Frame Generation runs. This page is the whole contr
 
 - The VectorXR layer in the game that has a live OpenXR session writes it about once a second,
   replacing it in one step: a reader sees the previous document or the new one, never part of one.
-- When that session ends, the game removes the file, but only while the file still names its own
-  process. A game shutting down never removes the file of a game started after it.
-- A game that crashes, or exits without ending its OpenXR session (Microsoft Flight Simulator and
-  Star Citizen often do), leaves its last file behind. Detect that by its update time (below).
+- When that session ends, or the game exits normally without ending it (Microsoft Flight Simulator
+  and Star Citizen often do), the game removes the file, but only while the file still names its
+  own process. A game shutting down never removes the file of a game started after it.
+- A game that crashes, or is ended by force, leaves its last file behind. Detect that by its update
+  time (below).
 - No file means no game with a VectorXR session is running, or the running game has not written
   one yet (the first write follows the session's start within about a second).
 - Every OpenXR game loads its own copy of VectorXR. If two run sessions at once (an overlay app, or
@@ -42,9 +43,9 @@ it, as its format changes between versions without notice.
 
 The file is current while `updatedAtUnixMilliseconds` is recent. Compare it with the current time
 (milliseconds since 1970-01-01 UTC): a file not updated for 3 seconds or more is stale. Its game has
-crashed, exited without ending its session, or hung. (The write runs on a thread of its own, so a
-loading screen that holds up the game's frames does not stop it.) Also treat the file as stale when
-no process with its `processId` is running.
+crashed, was ended by force, or hung. (The write runs on a thread of its own, not on the game's
+frame calls, so a loading screen that holds up the game's frames does not stop it.) Also treat the
+file as stale when no process with its `processId` is running.
 
 ## Compatibility
 
@@ -79,7 +80,8 @@ no process with its `processId` is running.
     "holding": true,
     "autoStep": 2,
     "autoStepUpBelowFps": 36.00,
-    "autoStepDownAboveFps": 76.50
+    "autoStepDownAboveFps": 76.50,
+    "autoGameOwnFps": 81.20
   }
 }
 ```
@@ -104,29 +106,30 @@ for the game, and when it was turned on after the game started (the game must re
 | --- | --- |
 | `state` | `active` (generated frames are shown), `standby` (frames pass straight through: the game holds the refresh rate on its own, Auto is at full rate, or generated frames could not be shown for a moment), `waiting` (starting), `paused` (after errors; it may retry), `unavailable`, or `off`. More values may be added: treat an unknown one as not generating. |
 | `mode` | `interpolate` or `extrapolate`. |
-| `frameRate` | The frame rate setting: `2x`, `3x`, `4x`, `auto` or `dynamic`. |
+| `frameRate` | The frame rate in effect: `2x`, `3x`, `4x`, `auto` or `dynamic`. A Dynamic setting reads `auto` where the system cannot run Dynamic (it falls back to Auto). |
 | `generating` | True while generated frames are shown (`state` is `active`). |
-| `multiplier` | Headset refreshes per real frame aimed for: the fixed rate, Auto's current step (1 at full rate), or under Dynamic the typical value (1 while standing by). |
+| `multiplier` | Frame periods per real frame aimed for: the fixed rate, Auto's current step (1 at full rate), or under Dynamic the typical value (1 while standing by). A frame period is a headset refresh, or two while the runtime holds frames to every second refresh (headset or runtime smoothing, a frame rate limit). |
 | `refreshHz` | The headset's refresh rate. 0 until the runtime has reported it. |
-| `targetAppFps` | The game's frame rate to aim for now. While generating, `refreshHz / multiplier`: a fixed rate's hold, Auto's current step, or the rate at which Dynamic's typical multiplier holds. While not generating, `refreshHz`: the game's frames pass straight through. 0 only until `refreshHz` is known. |
+| `targetAppFps` | The game's frame rate to aim for now: the rate the game's frames are timed by (`refreshHz`, or half of it while the runtime holds frames to every second refresh) divided by `multiplier` while generating: a fixed rate's hold, Auto's current step, or the rate at which Dynamic's typical multiplier holds. While not generating, that rate itself: the game's frames pass straight through. 0 only until `refreshHz` is known. |
 | `appFps` | Real frames per second from the game. |
 | `outputFps` | Frames per second VectorXR submits to the runtime. |
 | `distinctFps` | Of those, frames showing something new (repeats left out). |
-| `refreshesPerRealFrame` | Headset refreshes each real frame is shown for, measured frame by frame and smoothed over about ten frames. 0 until measured. At a fixed or Auto rate, a game slower than `targetAppFps` gets more refreshes per frame than `multiplier`, and every refresh is still filled. |
-| `holding` | True while the game keeps up with `targetAppFps`: `refreshesPerRealFrame` is at most 10% over the refreshes aimed for (`multiplier` while generating, 1 otherwise). False until measured. |
+| `refreshesPerRealFrame` | Headset refreshes each real frame is shown for, measured frame by frame and smoothed over about ten frames. 0 until measured. At a fixed or Auto rate, a game slower than `targetAppFps` gets more refreshes per frame than its multiplier, and every refresh is still filled. |
+| `holding` | True while the game keeps up with `targetAppFps`: its real frames take at most 10% more frame periods than aimed for (`multiplier` while generating, 1 otherwise). False until measured. |
 
-Only while `frameRate` is `auto` (or `dynamic` falling back to Auto, where the system cannot run
-Dynamic):
+Only while `frameRate` is `auto`:
 
 | Field | Meaning |
 | --- | --- |
 | `autoStep` | Auto's current step, the same as `multiplier`: 1 is full rate (nothing generated), 2 to 4 generate. |
-| `autoStepUpBelowFps` | Auto steps up once the game's frame rate stays below this (more than 30% of its frames in a second take more than 1.25 times their refreshes). 0 when there is no higher step (4x, or video memory too short for more). |
-| `autoStepDownAboveFps` | Auto tries one step down after five steady seconds (at most 2% of frames late) once the game's own frame rate, its frame time without Frame Generation's hold, reaches this. Where Frame Generation presents on the game's thread, holding the current step steady is enough, and this is `refreshHz / autoStep`. 0 at full rate. |
+| `autoStepUpBelowFps` | Auto steps up once the game's frame rate stays below this (more than 30% of its frames in a second take more than 1.25 times their frame periods). 0 while it would not step up: at 4x, with video memory too short for more, and while it holds full rate for a while (after generated frames kept slowing the game, or while the runtime holds frames to every second refresh). Where Frame Generation presents on the game's thread, a game whose frames keep starting late goes back to full rate instead of one step up. |
+| `autoStepDownAboveFps` | Auto tries one step down after five steady seconds (at most 2% of frames late) once the game's own frame rate, its frame time without Frame Generation's hold, reaches this (see `autoGameOwnFps`). Where Frame Generation presents on the game's thread, holding the current step steady is enough, and this is `targetAppFps`. 0 at full rate. |
+| `autoGameOwnFps` | The game's own frame rate as Auto measures it (the median of its recent frame times, Frame Generation's hold left out), to compare with `autoStepDownAboveFps`. 0 until measured, and where Frame Generation presents on the game's thread (the game's waits say nothing of it there). |
 
 A tool that tunes the game's settings and runs alongside Auto should keep the game's rate clear of
-both thresholds, so that its own adjustments and Auto's steps do not chase each other across the
-boundary. Under a fixed rate, aim for `appFps` at `targetAppFps` and watch `holding`.
+both thresholds (`appFps` against `autoStepUpBelowFps`, `autoGameOwnFps` against
+`autoStepDownAboveFps`), so that its own adjustments and Auto's steps do not chase each other across
+the boundary. Under a fixed rate, aim for `appFps` at `targetAppFps` and watch `holding`.
 
 ## Testing without a headset
 

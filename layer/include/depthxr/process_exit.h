@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 
 namespace depthxr {
@@ -34,8 +35,10 @@ public:
     ProcessExitFile& operator=(const ProcessExitFile&) = delete;
 
     // False when the path is too long or the table is full: the file then
-    // outlives the process, as it did before.
-    bool Arm(const std::filesystem::path& path);
+    // outlives the process, as it did before. `owner`: removed only while
+    // the file's "processId" is that (the public status file, which another
+    // game may have taken over by then); 0 for any.
+    bool Arm(const std::filesystem::path& path, std::uint32_t owner = 0);
     void Disarm();
 
 private:

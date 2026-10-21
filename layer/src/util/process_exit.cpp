@@ -19,6 +19,7 @@ constexpr std::size_t kExitPathCapacity = 1024;
 struct ExitFileSlot {
     std::atomic<bool> taken{false};
     std::atomic<bool> armed{false};
+    std::atomic<std::uint32_t> owner{0}; // ProcessExitFile::Arm's
     wchar_t path[kExitPathCapacity]{};
 };
 
@@ -26,6 +27,61 @@ struct ExitFileSlot {
 std::array<ExitFileSlot, kExitFileSlots> g_exit_files;
 std::atomic<bool> g_process_exiting{false};
 std::atomic<bool> g_keep_exit_files{false};
+
+#if defined(_WIN32)
+// The number after "processId": in `text`, or 0. No allocation: it runs at
+// DLL_PROCESS_DETACH.
+std::uint64_t ProcessIdIn(const char* text, DWORD size) {
+    static constexpr char kToken[] = "\"processId\"";
+    constexpr DWORD kTokenSize = sizeof(kToken) - 1;
+    for (DWORD at = 0; at + kTokenSize <= size; ++at) {
+        DWORD matched = 0;
+        while (matched < kTokenSize && text[at + matched] == kToken[matched]) ++matched;
+        if (matched != kTokenSize) continue;
+        DWORD position = at + kTokenSize;
+        while (position < size && (text[position] == ' ' || text[position] == '\t' || text[position] == '\r' ||
+                                   text[position] == '\n')) {
+            ++position;
+        }
+        if (position >= size || text[position] != ':') return 0;
+        ++position;
+        while (position < size && (text[position] == ' ' || text[position] == '\t' || text[position] == '\r' ||
+                                   text[position] == '\n')) {
+            ++position;
+        }
+        std::uint64_t value = 0;
+        DWORD digits = 0;
+        while (position < size && text[position] >= '0' && text[position] <= '9' && digits < 12) {
+            value = value * 10 + static_cast<std::uint64_t>(text[position] - '0');
+            ++position;
+            ++digits;
+        }
+        return digits ? value : 0;
+    }
+    return 0;
+}
+
+// Removes the file only while its "processId" is `owner`, holding it open
+// without delete sharing meanwhile so another process's replace cannot
+// land between the check and the removal.
+void RemoveOwnedFile(const wchar_t* path, std::uint32_t owner) {
+    HANDLE file = CreateFileW(path, GENERIC_READ | DELETE, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                              FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return;
+    char text[4096];
+    DWORD size = 0;
+    DWORD read = 0;
+    while (size < sizeof(text) && ReadFile(file, text + size, sizeof(text) - size, &read, nullptr) && read > 0) {
+        size += read;
+    }
+    if (ProcessIdIn(text, size) == owner) {
+        FILE_DISPOSITION_INFO disposition{};
+        disposition.DeleteFile = TRUE;
+        SetFileInformationByHandle(file, FileDispositionInfo, &disposition, sizeof(disposition));
+    }
+    CloseHandle(file);
+}
+#endif
 
 } // namespace
 
@@ -41,7 +97,7 @@ ProcessExitFile::~ProcessExitFile() {
     Disarm();
 }
 
-bool ProcessExitFile::Arm(const std::filesystem::path& path) {
+bool ProcessExitFile::Arm(const std::filesystem::path& path, std::uint32_t owner) {
     const auto& text = path.native();
     if (text.empty() || text.size() >= kExitPathCapacity) {
         Disarm();
@@ -63,6 +119,7 @@ bool ProcessExitFile::Arm(const std::filesystem::path& path) {
     slot.armed.exchange(false, std::memory_order_acq_rel);
     for (std::size_t index = 0; index < text.size(); ++index) slot.path[index] = static_cast<wchar_t>(text[index]);
     slot.path[text.size()] = L'\0';
+    slot.owner.store(owner, std::memory_order_relaxed);
     slot.armed.store(true, std::memory_order_release);
     return true;
 }
@@ -80,7 +137,11 @@ void RemoveProcessExitFiles() {
     for (ExitFileSlot& slot : g_exit_files) {
         if (!slot.armed.exchange(false, std::memory_order_acq_rel)) continue;
 #if defined(_WIN32)
-        DeleteFileW(slot.path);
+        if (const std::uint32_t owner = slot.owner.load(std::memory_order_relaxed)) {
+            RemoveOwnedFile(slot.path, owner);
+        } else {
+            DeleteFileW(slot.path);
+        }
 #endif
     }
 }

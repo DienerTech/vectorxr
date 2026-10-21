@@ -36,6 +36,9 @@ std::string ReadAll(const std::filesystem::path& path) {
 
 bool Near(double a, double b) { return std::abs(a - b) < 1e-9; }
 
+bool Removed(depthxr::ExternalStatusRemoval result) { return result == depthxr::ExternalStatusRemoval::kRemoved; }
+bool NotOwned(depthxr::ExternalStatusRemoval result) { return result == depthxr::ExternalStatusRemoval::kNotOwned; }
+
 depthxr::ExternalStatusDocument Identity(std::uint32_t process_id) {
     depthxr::ExternalStatusDocument document;
     document.process_id = process_id;
@@ -91,11 +94,11 @@ void TestDocument() {
     Expect(!Contains(text, "autoStep"), "no Auto fields under a fixed rate: " + text);
 
     framegen.frame_rate = "auto";
-    framegen.automatic = depthxr::ExternalAutoStep{2, 36.0, 76.5};
+    framegen.automatic = depthxr::ExternalAutoStep{2, 36.0, 76.5, 81.2};
     document.framegen = framegen;
     text = depthxr::FormatExternalStatus(document);
     Expect(Contains(text, "\"holding\": true,\n    \"autoStep\": 2,\n    \"autoStepUpBelowFps\": 36.00,\n"
-                          "    \"autoStepDownAboveFps\": 76.50\n  }\n}\n"),
+                          "    \"autoStepDownAboveFps\": 76.50,\n    \"autoGameOwnFps\": 81.20\n  }\n}\n"),
            "Auto's step: " + text);
 
     // Text is escaped; a name cannot pass for the process id.
@@ -139,6 +142,22 @@ void TestTarget() {
     framegen.refreshes_per_real_frame = 0.0;
     depthxr::ExternalFrameGenTarget(&framegen);
     Expect(Near(framegen.target_app_fps, 90.0) && !framegen.holding, "not measured: not holding");
+
+    // The runtime holding frames to every second refresh, reporting that
+    // period (Auto stays engaged there): a 2x frame takes two such periods,
+    // four refreshes. The game held there aims for 22.5 fps and holds it.
+    framegen.generating = true;
+    framegen.multiplier = 2;
+    framegen.refreshes_per_real_frame = 4.1;
+    depthxr::ExternalFrameGenTarget(&framegen, 45.0);
+    Expect(Near(framegen.target_app_fps, 22.5) && framegen.holding, "a halved grid: 22.5 fps, held");
+    framegen.refreshes_per_real_frame = 5.0;
+    depthxr::ExternalFrameGenTarget(&framegen, 45.0);
+    Expect(!framegen.holding, "a halved grid: a game at 18 fps does not hold 22.5");
+    framegen.generating = false;
+    framegen.refreshes_per_real_frame = 2.0;
+    depthxr::ExternalFrameGenTarget(&framegen, 45.0);
+    Expect(Near(framegen.target_app_fps, 45.0) && framegen.holding, "a halved grid, passing through: 45 fps");
 }
 
 // The write replaces the file in one step: a reader polling it meanwhile
@@ -209,20 +228,21 @@ void TestAtomicWrite(const std::filesystem::path& root) {
 // At session end a copy removes the file only while it names its process.
 void TestOwnedRemoval(const std::filesystem::path& root) {
     const auto path = root / "owned" / "status.json";
-    Expect(!depthxr::RemoveExternalStatusIfOwned(path, 10), "no file: nothing removed");
+    Expect(NotOwned(depthxr::RemoveExternalStatusIfOwned(path, 10)), "no file: nothing removed");
     std::string error;
     Expect(depthxr::WriteExternalStatus(path, Identity(20), &error), "write: " + error);
-    Expect(!depthxr::RemoveExternalStatusIfOwned(path, 10), "another process's file is not removed");
+    Expect(NotOwned(depthxr::RemoveExternalStatusIfOwned(path, 10)), "another process's file is not removed");
     Expect(std::filesystem::exists(path) && ReadAll(path) == depthxr::FormatExternalStatus(Identity(20)),
            "another process's file stays as it was");
-    Expect(!depthxr::RemoveExternalStatusIfOwned(path, 2), "a process id that is a prefix of the owner's is not it");
-    Expect(depthxr::RemoveExternalStatusIfOwned(path, 20), "the owner removes its file");
+    Expect(NotOwned(depthxr::RemoveExternalStatusIfOwned(path, 2)),
+           "a process id that is a prefix of the owner's is not it");
+    Expect(Removed(depthxr::RemoveExternalStatusIfOwned(path, 20)), "the owner removes its file");
     Expect(!std::filesystem::exists(path), "the owner's file is gone");
 
     // Not a status document (part of one, another program's file): kept.
     std::filesystem::create_directories(path.parent_path());
     std::ofstream(path, std::ios::binary) << "{ \"schema\": \"vectorxr.status\", \"version\": 1, ";
-    Expect(!depthxr::RemoveExternalStatusIfOwned(path, 20), "a file with no process id is not removed");
+    Expect(NotOwned(depthxr::RemoveExternalStatusIfOwned(path, 20)), "a file with no process id is not removed");
     Expect(std::filesystem::exists(path), "a file with no process id stays");
 
     // A name that holds the process id's text does not count: the identity is
@@ -230,8 +250,9 @@ void TestOwnedRemoval(const std::filesystem::path& root) {
     depthxr::ExternalStatusDocument named = Identity(30);
     named.application = "\"processId\": 20";
     Expect(depthxr::WriteExternalStatus(path, named, &error), "write: " + error);
-    Expect(!depthxr::RemoveExternalStatusIfOwned(path, 20), "a process id in the application name is not the owner");
-    Expect(depthxr::RemoveExternalStatusIfOwned(path, 30), "the owner removes it");
+    Expect(NotOwned(depthxr::RemoveExternalStatusIfOwned(path, 20)),
+           "a process id in the application name is not the owner");
+    Expect(Removed(depthxr::RemoveExternalStatusIfOwned(path, 30)), "the owner removes it");
 
 #if defined(_WIN32)
     // A reader holding the file without delete sharing (as .NET's ReadAllText
@@ -244,12 +265,37 @@ void TestOwnedRemoval(const std::filesystem::path& root) {
         std::this_thread::sleep_for(std::chrono::milliseconds(15));
         CloseHandle(held);
     });
-    const bool removed = depthxr::RemoveExternalStatusIfOwned(path, 40);
+    const bool removed = Removed(depthxr::RemoveExternalStatusIfOwned(path, 40));
     release.join();
     Expect(removed && !std::filesystem::exists(path), "a briefly held file is removed after a retry");
 
-    // While the removal holds the file, another game's write waits for it
-    // and then lands: the check and the removal are one step for writers.
+    // Held for longer than the retries: busy, to be tried again later.
+    Expect(depthxr::WriteExternalStatus(path, Identity(45), &error), "write: " + error);
+    HANDLE kept = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                              FILE_ATTRIBUTE_NORMAL, nullptr);
+    Expect(kept != INVALID_HANDLE_VALUE, "could not hold the file open");
+    Expect(depthxr::RemoveExternalStatusIfOwned(path, 45) == depthxr::ExternalStatusRemoval::kBusy,
+           "a file held past the retries is reported busy");
+    CloseHandle(kept);
+    Expect(Removed(depthxr::RemoveExternalStatusIfOwned(path, 45)) && !std::filesystem::exists(path),
+           "...and removed once it is let go");
+
+    // A reader that shares delete does not keep the name: the next game's
+    // write lands while the reader still has the old file open.
+    Expect(depthxr::WriteExternalStatus(path, Identity(47), &error), "write: " + error);
+    HANDLE sharing = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                 nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    Expect(sharing != INVALID_HANDLE_VALUE, "could not open the file as a sharing reader");
+    Expect(Removed(depthxr::RemoveExternalStatusIfOwned(path, 47)), "removed beside a sharing reader");
+    Expect(depthxr::WriteExternalStatus(path, Identity(48), &error), "a write beside the old file's reader: " + error);
+    CloseHandle(sharing);
+    Expect(ReadAll(path) == depthxr::FormatExternalStatus(Identity(48)), "the next game's file is there");
+    std::filesystem::remove(path);
+
+    // The sharing the removal relies on, by hand: while a handle opened as
+    // it opens the file is held, another game's write waits for it (its
+    // retries) and then lands, so no write slips between the check and the
+    // removal. (Timing only makes the write likely to start meanwhile.)
     Expect(depthxr::WriteExternalStatus(path, Identity(50), &error), "write: " + error);
     HANDLE removing = CreateFileW(path.c_str(), GENERIC_READ | DELETE, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
                                   FILE_ATTRIBUTE_NORMAL, nullptr);

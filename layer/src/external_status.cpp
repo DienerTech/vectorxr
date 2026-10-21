@@ -74,11 +74,15 @@ std::optional<std::uint64_t> ReadProcessId(std::string_view content) {
 
 } // namespace
 
-void ExternalFrameGenTarget(ExternalFrameGenStatus* framegen) {
+void ExternalFrameGenTarget(ExternalFrameGenStatus* framegen, double grid_hz) {
     const std::uint32_t slots = framegen->generating ? std::max<std::uint32_t>(framegen->multiplier, 1) : 1;
-    framegen->target_app_fps = framegen->refresh_hz > 0.0 ? framegen->refresh_hz / slots : 0.0;
-    framegen->holding = framegen->target_app_fps > 0.0 && framegen->refreshes_per_real_frame > 0.0 &&
-                        framegen->refreshes_per_real_frame <= kHoldingTolerance * slots;
+    const double grid = grid_hz > 0.0 ? grid_hz : framegen->refresh_hz;
+    framegen->target_app_fps = grid > 0.0 ? grid / slots : 0.0;
+    // refreshes_per_real_frame is in refreshes; the multiplier counts grid periods.
+    const double periods = framegen->refresh_hz > 0.0 && grid > 0.0
+                               ? framegen->refreshes_per_real_frame * grid / framegen->refresh_hz
+                               : framegen->refreshes_per_real_frame;
+    framegen->holding = framegen->target_app_fps > 0.0 && periods > 0.0 && periods <= kHoldingTolerance * slots;
 }
 
 std::filesystem::path ResolveExternalStatusPath() {
@@ -122,7 +126,8 @@ std::string FormatExternalStatus(const ExternalStatusDocument& document) {
         if (const auto& automatic = framegen->automatic) {
             stream << ",\n    \"autoStep\": " << automatic->step << ",\n"
                    << "    \"autoStepUpBelowFps\": " << automatic->step_up_below_fps << ",\n"
-                   << "    \"autoStepDownAboveFps\": " << automatic->step_down_above_fps;
+                   << "    \"autoStepDownAboveFps\": " << automatic->step_down_above_fps << ",\n"
+                   << "    \"autoGameOwnFps\": " << automatic->game_own_fps;
         }
         stream << "\n  }";
     }
@@ -161,7 +166,7 @@ bool WriteExternalStatus(const std::filesystem::path& path, const ExternalStatus
     return true;
 }
 
-bool RemoveExternalStatusIfOwned(const std::filesystem::path& path, std::uint32_t process_id) {
+ExternalStatusRemoval RemoveExternalStatusIfOwned(const std::filesystem::path& path, std::uint32_t process_id) {
 #if defined(_WIN32)
     // Opened without delete sharing, another game's replace cannot take the
     // file between the check and the removal (ReplaceFileAtomically retries
@@ -176,33 +181,43 @@ bool RemoveExternalStatusIfOwned(const std::filesystem::path& path, std::uint32_
         const DWORD open_error = GetLastError();
         const bool transient = open_error == ERROR_ACCESS_DENIED || open_error == ERROR_SHARING_VIOLATION ||
                                open_error == ERROR_LOCK_VIOLATION;
-        if (!transient || attempt + 1 == kOpenAttempts) return false;
+        if (!transient) return ExternalStatusRemoval::kNotOwned;
+        if (attempt + 1 == kOpenAttempts) return ExternalStatusRemoval::kBusy;
         std::this_thread::sleep_for(std::chrono::milliseconds(2u << attempt));
     }
-    std::string content;
-    char buffer[4096];
+    char buffer[kMaxDocumentBytes];
+    DWORD size = 0;
     DWORD read = 0;
-    while (content.size() < kMaxDocumentBytes && ReadFile(file, buffer, sizeof(buffer), &read, nullptr) && read > 0) {
-        content.append(buffer, read);
+    while (size < sizeof(buffer) && ReadFile(file, buffer + size, sizeof(buffer) - size, &read, nullptr) && read > 0) {
+        size += read;
     }
-    bool removed = false;
-    if (const auto owner = ReadProcessId(content); owner && *owner == process_id) {
-        FILE_DISPOSITION_INFO disposition{};
-        disposition.DeleteFile = TRUE;
-        removed = SetFileInformationByHandle(file, FileDispositionInfo, &disposition, sizeof(disposition)) != FALSE;
+    ExternalStatusRemoval result = ExternalStatusRemoval::kNotOwned;
+    if (const auto owner = ReadProcessId(std::string_view(buffer, size)); owner && *owner == process_id) {
+        // POSIX semantics take the name away at once, even from a reader
+        // that has it open with delete sharing (the next game's replace
+        // would fail while a classic deletion is pending); older Windows
+        // has only the classic one.
+        FILE_DISPOSITION_INFO_EX posix{};
+        posix.Flags = FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS;
+        FILE_DISPOSITION_INFO classic{};
+        classic.DeleteFile = TRUE;
+        const bool removed =
+            SetFileInformationByHandle(file, FileDispositionInfoEx, &posix, sizeof(posix)) != FALSE ||
+            SetFileInformationByHandle(file, FileDispositionInfo, &classic, sizeof(classic)) != FALSE;
+        result = removed ? ExternalStatusRemoval::kRemoved : ExternalStatusRemoval::kBusy;
     }
     CloseHandle(file);
-    return removed;
+    return result;
 #else
     std::ifstream stream(path, std::ios::binary);
-    if (!stream) return false;
+    if (!stream) return ExternalStatusRemoval::kNotOwned;
     std::ostringstream buffer;
     buffer << stream.rdbuf();
     stream.close();
     const auto owner = ReadProcessId(buffer.str());
-    if (!owner || *owner != process_id) return false;
+    if (!owner || *owner != process_id) return ExternalStatusRemoval::kNotOwned;
     std::error_code ec;
-    return std::filesystem::remove(path, ec);
+    return std::filesystem::remove(path, ec) ? ExternalStatusRemoval::kRemoved : ExternalStatusRemoval::kBusy;
 #endif
 }
 

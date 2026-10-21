@@ -7611,8 +7611,18 @@ FrameGenStatus FrameGenPresenter::Status() const {
         // probe one step down after five steady seconds, from its own thread
         // only for a game whose own time per frame is within reach of it
         // (AutoProbeInReachLocked), inline for any game holding its step.
+        // None while it would not step up: held at full rate (inline cycles
+        // that kept starting late, or the runtime halving), or video memory
+        // near its budget.
         const double grid_hz = 1e9 / static_cast<double>(grid);
-        if (auto_multiplier_ < std::min(auto_memory_ceiling_, kMaxMultiplier)) {
+        const bool held = auto_multiplier_ == 1 && ((inline_hold_until_ && now < *inline_hold_until_) ||
+                                                     (runtime_halving_ && auto_halving_hold_until_ &&
+                                                      now < *auto_halving_hold_until_));
+        const bool memory_pressure = !(compositor_running_ && jit_) && memory_budget_ &&
+                                     memory_budget_->budget_bytes &&
+                                     memory_budget_->usage_bytes >
+                                         memory_budget_->budget_bytes - memory_budget_->budget_bytes / 20;
+        if (auto_multiplier_ < std::min(auto_memory_ceiling_, kMaxMultiplier) && !held && !memory_pressure) {
             status.auto_step_up_below_fps = grid_hz / (kAutoLateFactor * auto_multiplier_);
         }
         if (auto_multiplier_ > 1) {
@@ -7621,12 +7631,22 @@ FrameGenStatus FrameGenPresenter::Status() const {
                                     : grid_hz / auto_multiplier_;
         }
     }
+    if (status.automatic && compositor_running_) {
+        const std::size_t count = std::min(auto_busy_count_, auto_busy_.size());
+        if (count >= 8) {
+            std::array<double, 32> sorted = auto_busy_;
+            std::nth_element(sorted.begin(), sorted.begin() + count / 2, sorted.begin() + count);
+            status.auto_game_own_fps = sorted[count / 2] > 0.0 ? 1000.0 / sorted[count / 2] : 0.0;
+        }
+    }
     // As the 30 s summary says it: just in time and Dynamic measure the
-    // refreshes between real frames' slots; otherwise their ends' interval.
+    // refreshes between real frames' slots, while the presenter thread
+    // presents (frames passing through inline leave that value behind);
+    // otherwise their ends' interval.
     status.refreshes_per_real_frame =
-        (DynamicLocked() || jit_) && dynamic_interval_slots_ > 0.0 ? dynamic_interval_slots_
-        : grid > 0 && real_interval_ns_ > 0.0                       ? real_interval_ns_ / static_cast<double>(grid)
-                                                                    : 0.0;
+        compositor_running_ && (DynamicLocked() || jit_) && dynamic_interval_slots_ > 0.0 ? dynamic_interval_slots_
+        : grid > 0 && real_interval_ns_ > 0.0 ? real_interval_ns_ / static_cast<double>(grid)
+                                              : 0.0;
     status.standby = status.dynamic && dynamic_standby_;
     status.dynamic_reason = dynamic_reason_;
     status.dynamic_engagements = dynamic_engagements_;

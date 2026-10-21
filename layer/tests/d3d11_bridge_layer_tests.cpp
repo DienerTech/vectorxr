@@ -5236,9 +5236,12 @@ void CheckFrameGenStatusLine() {
               external.automatic->step_up_below_fps == 36.0 && external.automatic->step_down_above_fps == 76.5,
           "Auto: its step and thresholds");
     status.grid_period_ns = 22'222'222;
-    status.refreshes_per_real_frame = 1.0;
+    status.refreshes_per_real_frame = 2.0;
     external = Peer::ExternalFrameGen(status);
-    Check(std::abs(external.refreshes_per_real_frame - 2.0) < 0.01, "grid periods said in refreshes");
+    Check(std::abs(external.refreshes_per_real_frame - 4.0) < 0.01 &&
+              std::abs(external.target_app_fps - 22.5) < 0.01 && external.holding,
+          "the runtime holding frames to every second refresh: grid periods said in refreshes, the target on the "
+          "grid (2x of 45 Hz), held");
 }
 
 // Everything the layer reads and writes on the host goes to the test's own directory.

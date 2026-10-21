@@ -1120,8 +1120,14 @@ class OpenXrLayer {
     ProcessExitFile runtime_relay_exit_control_;
     bool runtime_relay_pruned_{false}; // Watcher thread only.
     // The public status file (external_status.h), written beside the relay's
-    // heartbeat while a session runs. Resolved with the relay root.
+    // heartbeat while a session runs. Resolved with the relay root. A normal
+    // process exit removes it while it is still this process's (games that
+    // skip OpenXR teardown); guarded by mutex_.
     std::filesystem::path external_status_path_;
+    ProcessExitFile external_status_exit_;
+    // A session's end could not remove it yet (a reader held it): tried again
+    // at the next polls while no session runs. Watcher thread only.
+    bool external_status_remove_pending_{false};
     // The app's last Rescan inputs request taken (Unix ms). Watcher thread only.
     std::uint64_t input_rescan_taken_at_{0};
     // The Frame Generation events PollFrameGenRecorder last saw (watcher

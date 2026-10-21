@@ -45,6 +45,13 @@ extern "C" __declspec(dllexport) int ArmProcessExitFile(const wchar_t* path, con
     return g_exit_file.Arm(path) ? 1 : 0;
 }
 
+// Armed for this process only: the exit removes it only while it names this
+// process (the public status file's rule).
+extern "C" __declspec(dllexport) int ArmOwnedProcessExitFile(const wchar_t* path, const wchar_t* sentinel) {
+    g_sentinel = sentinel;
+    return g_exit_file.Arm(path, GetCurrentProcessId()) ? 1 : 0;
+}
+
 // A fatal error in the layer: abort() with the layer's crash reporting
 // installed in this DLL's own runtime, as the loader negotiation does.
 extern "C" __declspec(dllexport) void FailFatally() {

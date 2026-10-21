@@ -53,6 +53,16 @@ int Child(const std::wstring& how, const std::filesystem::path& file, const std:
         ExitProcess(0);
     }
     using Arm = int (*)(const wchar_t*, const wchar_t*);
+    if (how == L"owned" || how == L"foreign") {
+        // The public status file: this process's, or another game's that
+        // took it over before this one exited.
+        const DWORD named = how == L"owned" ? GetCurrentProcessId() : GetCurrentProcessId() + 4;
+        std::ofstream(file, std::ios::binary | std::ios::trunc)
+            << "{\n  \"schema\": \"vectorxr.status\",\n  \"version\": 1,\n  \"processId\": " << named << ",\n}\n";
+        const auto arm_owned = reinterpret_cast<Arm>(GetProcAddress(probe, "ArmOwnedProcessExitFile"));
+        if (!arm_owned || !arm_owned(file.c_str(), sentinel.c_str())) return 16;
+        ExitProcess(0);
+    }
     const auto arm = reinterpret_cast<Arm>(GetProcAddress(probe, "ArmProcessExitFile"));
     if (!arm || !arm(file.c_str(), sentinel.c_str())) return 11;
     if (how == L"exit") ExitProcess(0);
@@ -117,6 +127,13 @@ int wmain(int argc, wchar_t** argv) {
     const auto [unload_kept, unload_sentinel] = run(L"unload");
     Expect(unload_kept, "An unload is not a process exit");
     Expect(unload_sentinel == "unloading", "Static destructors at an unload must not see ProcessExiting()");
+
+    // An exit file armed for its process only: a normal exit removes it while
+    // it names the process, and leaves another game's.
+    const auto [owned_kept, owned_sentinel] = run(L"owned");
+    Expect(!owned_kept, "A normal exit must remove its own status file");
+    const auto [foreign_kept, foreign_sentinel] = run(L"foreign");
+    Expect(foreign_kept, "A normal exit must leave a status file another process wrote");
 
     // The layer's fatal error went to the game's crash reporter, which then
     // exited: a crash, so the Turbo recovery marker must stay for next launch.

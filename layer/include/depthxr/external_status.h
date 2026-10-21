@@ -17,8 +17,9 @@ constexpr std::uint32_t kExternalStatusVersion = 1;
 // Auto's current step and where it steps next (FrameGenStatus).
 struct ExternalAutoStep {
     std::uint32_t step{1};          // refreshes per real frame aimed for; 1 = full rate, nothing generated
-    double step_up_below_fps{0.0};  // the game's rate below which it steps up; 0 with no higher step
-    double step_down_above_fps{0.0}; // the game's own rate above which it tries a step down; 0 at full rate
+    double step_up_below_fps{0.0};  // the game's rate below which it steps up; 0 while it would not
+    double step_down_above_fps{0.0}; // the game's own rate from which it tries a step down; 0 at full rate
+    double game_own_fps{0.0};        // that own rate as measured; 0 until measured, or inline
 };
 
 struct ExternalFrameGenStatus {
@@ -50,12 +51,15 @@ struct ExternalStatusDocument {
 };
 
 // Fills target_app_fps and holding from generating, multiplier, refresh_hz
-// and refreshes_per_real_frame. Generating, the game is let run at
-// refresh / multiplier (a fixed rate's hold, Auto's current step, or the rate
+// and refreshes_per_real_frame. `grid_hz`: the rate the game's frames are
+// timed by, the refresh rate unless the runtime holds frames to every second
+// refresh or less (0: the refresh rate). Generating, the game is let run at
+// grid / multiplier (a fixed rate's hold, Auto's current step, or the rate
 // at which Dynamic's typical multiplier holds); otherwise its frames pass
-// straight through and it may run at the refresh rate. It holds that rate
-// while its real frames take at most a tenth more refreshes than aimed for.
-void ExternalFrameGenTarget(ExternalFrameGenStatus* framegen);
+// straight through and it may run at the grid's rate. It holds that rate
+// while its real frames take at most a tenth more grid periods than aimed
+// for.
+void ExternalFrameGenTarget(ExternalFrameGenStatus* framegen, double grid_hz = 0.0);
 
 // VECTORXR_EXTERNAL_STATUS_PATH overrides the path (development and tests).
 std::filesystem::path ResolveExternalStatusPath();
@@ -66,8 +70,12 @@ bool WriteExternalStatus(const std::filesystem::path& path, const ExternalStatus
                          std::string* error = nullptr);
 // At session end: removes the file only while it still names `process_id`,
 // so a game shutting down never removes the next game's file. The check and
-// the removal hold the file open against a writer's replace meanwhile. True
-// when it was removed.
-bool RemoveExternalStatusIfOwned(const std::filesystem::path& path, std::uint32_t process_id);
+// the removal hold the file open against a writer's replace meanwhile.
+enum class ExternalStatusRemoval : std::uint8_t {
+    kRemoved,
+    kNotOwned, // no file, or another process's (or not a status document)
+    kBusy,     // held open by a reader without delete sharing beyond the retries: try again later
+};
+ExternalStatusRemoval RemoveExternalStatusIfOwned(const std::filesystem::path& path, std::uint32_t process_id);
 
 } // namespace depthxr

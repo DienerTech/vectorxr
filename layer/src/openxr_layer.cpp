@@ -2884,6 +2884,7 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
         std::to_string(++runtime_relay_session_sequence_);
     runtime_relay_exit_status_.Arm(RuntimeStatusPath(runtime_relay_root_, runtime_relay_session_id_));
     runtime_relay_exit_control_.Arm(RuntimeControlPath(runtime_relay_root_, runtime_relay_session_id_));
+    external_status_exit_.Arm(external_status_path_, GetCurrentProcessId());
     quadviews_dimensions_.clear();
     quadviews_dimensions_at_ = 0;
     runtime_relay_last_applied_revision_ = 0;
@@ -11166,6 +11167,7 @@ void OpenXrLayer::StopConfigWatcher() {
         }
         runtime_relay_exit_status_.Disarm();
         runtime_relay_exit_control_.Disarm();
+        external_status_exit_.Disarm();
         runtime_relay_last_applied_revision_ = 0;
         runtime_relay_acknowledged_revision_ = 0;
         runtime_relay_status_dirty_.store(false, std::memory_order_release);
@@ -11178,8 +11180,9 @@ void OpenXrLayer::StopConfigWatcher() {
     }
     // The public status file only while it is still this process's: by now
     // another game may have written its own.
-    if (!relay_session_ids.empty() && !external_status_path.empty()) {
+    if ((!relay_session_ids.empty() || external_status_remove_pending_) && !external_status_path.empty()) {
         RemoveExternalStatusIfOwned(external_status_path, GetCurrentProcessId());
+        external_status_remove_pending_ = false;
     }
 }
 
@@ -11888,6 +11891,7 @@ void OpenXrLayer::ResetSessionState() {
         runtime_relay_session_id_.clear();
         runtime_relay_exit_status_.Disarm();
         runtime_relay_exit_control_.Disarm();
+        external_status_exit_.Disarm();
         runtime_relay_last_applied_revision_ = 0;
         runtime_relay_acknowledged_revision_ = 0;
         runtime_relay_status_dirty_.store(false, std::memory_order_release);
@@ -16653,9 +16657,12 @@ void OpenXrLayer::PollRuntimeRelay() {
     }
     // A session ended: the public status file goes with it, unless another
     // game has written its own since. A session that started meanwhile
-    // writes it again below.
-    if (!sessions_to_remove.empty() && !external_status_path.empty()) {
-        RemoveExternalStatusIfOwned(external_status_path, GetCurrentProcessId());
+    // writes it again below. A reader holding it past the retries: again at
+    // the next polls, while no session runs.
+    if ((!sessions_to_remove.empty() || (external_status_remove_pending_ && session_id.empty())) &&
+        !external_status_path.empty()) {
+        external_status_remove_pending_ = RemoveExternalStatusIfOwned(external_status_path, GetCurrentProcessId()) ==
+                                          ExternalStatusRemoval::kBusy;
     }
     if (!root.empty() && !runtime_relay_pruned_) {
         // Once per process: files of earlier sessions that ended by a crash,
@@ -16817,12 +16824,15 @@ ExternalFrameGenStatus OpenXrLayer::ExternalFrameGen(const FrameGenStatus& frame
         external.refreshes_per_real_frame = framegen.refreshes_per_real_frame *
             static_cast<double>(framegen.grid_period_ns) / static_cast<double>(framegen.refresh_period_ns);
     }
-    ExternalFrameGenTarget(&external);
+    // The target and holding are on that grid: an N-x frame takes N of its periods.
+    ExternalFrameGenTarget(&external,
+                           framegen.grid_period_ns > 0 ? 1e9 / static_cast<double>(framegen.grid_period_ns) : 0.0);
     if (framegen.automatic) {
         ExternalAutoStep step;
         step.step = framegen.multiplier;
         step.step_up_below_fps = framegen.auto_step_up_below_fps;
         step.step_down_above_fps = framegen.auto_step_down_above_fps;
+        step.game_own_fps = framegen.auto_game_own_fps;
         external.automatic = step;
     }
     return external;
