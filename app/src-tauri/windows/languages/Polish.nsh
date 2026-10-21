@@ -1,5 +1,6 @@
-﻿; The Tauri installer strings in Polish (bundle.windows.nsis.customLanguageFiles),
-; machine-translated from the Tauri CLI 2.10.1 English file.
+; The Tauri installer strings in Polish (bundle.windows.nsis.customLanguageFiles),
+; machine-translated from the Tauri CLI 2.10.1 English file. No byte order mark:
+; the bundler writes one when it copies the file.
 LangString addOrReinstall ${LANG_POLISH} "Dodaj/zainstaluj ponownie składniki"
 LangString alreadyInstalled ${LANG_POLISH} "Już zainstalowano"
 LangString alreadyInstalledLong ${LANG_POLISH} "${PRODUCTNAME} ${VERSION} jest już zainstalowany. Wybierz operację, którą chcesz wykonać, i kliknij Dalej, aby kontynuować."
