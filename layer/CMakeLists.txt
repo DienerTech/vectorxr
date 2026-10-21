@@ -212,6 +212,9 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         # Not Frame Generation's: the session's adapters for its log line,
         # which needs the Direct3D 12 and Vulkan types the layer lacks.
         src/session_graphics_query.cpp
+        # Nor is the space-warp probe's frame handling, which needs the
+        # OpenXR types the core library lacks.
+        src/spacewarp_probe.cpp
         "${_framegen_out}/framegen_shaders.cpp"
         "${_framegen_out}/framegen_flow_merge.h")
     target_include_directories(depthxr_framegen PUBLIC include)
@@ -282,6 +285,19 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 ${CMAKE_CURRENT_SOURCE_DIR}/manifest/XR_APILAYER_DIENERTECH_VECTORXR.json
                 $<TARGET_FILE_DIR:XR_APILAYER_DIENERTECH_VECTORXR>/XR_APILAYER_DIENERTECH_VECTORXR.json
+        # The space-warp probe's manifests (spacewarp_probe.h), never staged
+        # or installed: each in a folder of its own under the layer's file
+        # name, so Install-Layer.ps1 -ManifestPath swaps one in for the
+        # layer's own and back.
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+                $<TARGET_FILE_DIR:XR_APILAYER_DIENERTECH_VECTORXR>/spacewarp-probe-fb
+                $<TARGET_FILE_DIR:XR_APILAYER_DIENERTECH_VECTORXR>/spacewarp-probe-ext
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${CMAKE_CURRENT_SOURCE_DIR}/manifest/spacewarp-probe-fb.json
+                $<TARGET_FILE_DIR:XR_APILAYER_DIENERTECH_VECTORXR>/spacewarp-probe-fb/XR_APILAYER_DIENERTECH_VECTORXR.json
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${CMAKE_CURRENT_SOURCE_DIR}/manifest/spacewarp-probe-ext.json
+                $<TARGET_FILE_DIR:XR_APILAYER_DIENERTECH_VECTORXR>/spacewarp-probe-ext/XR_APILAYER_DIENERTECH_VECTORXR.json
         COMMAND ${CMAKE_COMMAND} -E make_directory
                 $<TARGET_FILE_DIR:XR_APILAYER_DIENERTECH_VECTORXR>/sounds
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -613,6 +629,17 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
             WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 VECTORXR_VERSION="${_vectorxr_version}")
         add_test(NAME depthxr_head_prediction_layer_tests COMMAND depthxr_head_prediction_layer_tests)
         set_tests_properties(depthxr_head_prediction_layer_tests PROPERTIES TIMEOUT 15)
+        # The space-warp probe through the layer's own hooks (xrCreateApiLayerInstance
+        # on) against a stand-in runtime (CPU only).
+        add_executable(depthxr_spacewarp_probe_tests tests/spacewarp_probe_tests.cpp src/openxr_layer.cpp
+            src/layer_entry.cpp)
+        target_include_directories(depthxr_spacewarp_probe_tests PRIVATE include)
+        target_link_libraries(depthxr_spacewarp_probe_tests PRIVATE depthxr_core depthxr_osd depthxr_framegen
+            OpenXR::openxr_loader d3d11 d3dcompiler dxgi shlwapi)
+        target_compile_definitions(depthxr_spacewarp_probe_tests PRIVATE DEPTHXR_TESTING
+            WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 VECTORXR_VERSION="${_vectorxr_version}")
+        add_test(NAME depthxr_spacewarp_probe_tests COMMAND depthxr_spacewarp_probe_tests)
+        set_tests_properties(depthxr_spacewarp_probe_tests PROPERTIES TIMEOUT 30)
         # Frame Generation's Direct3D 11 bridge through the layer's own hooks
         # (xrCreateApiLayerInstance on) against a stand-in runtime whose
         # swapchain images are Direct3D 12 textures, on WARP

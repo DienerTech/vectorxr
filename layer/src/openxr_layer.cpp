@@ -2076,6 +2076,8 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
                            [this](const std::string& message) { logger_.Info(message); });
     eye_gaze_extension_enabled_ = eye_gaze_extension_enabled;
     varjo_compatible_quadviews_active_ = diagnostics.varjo_compatible_quad_forwarded;
+    spacewarp_fb_owned_ = diagnostics.fb_space_warp_owned;
+    spacewarp_ext_owned_ = diagnostics.frame_synthesis_owned;
     openxr_toolkit_above_ = diagnostics.openxr_toolkit == "above";
     openxr_toolkit_quadviews_logged_ = false;
     resolved_settings_generation_ = ~0ull; // resolve again with the Toolkit's position
@@ -2232,6 +2234,34 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
                 "DIAGNOSTIC: the application enabled XR_VARJO_quad_views but the layer's pre-instance probe "
                 "did not report it — confirming the pre-instance extension probe is unreliable here. Varjo "
                 "detection now uses the active OpenXR runtime instead (see activeRuntimeIsVarjo).");
+        }
+    }
+
+    if (diagnostics.spacewarp_probe != "off" || diagnostics.app_requested_fb_space_warp ||
+        diagnostics.app_requested_frame_synthesis) {
+        std::string taken_over;
+        if (spacewarp_fb_owned_) taken_over += " " XR_FB_SPACE_WARP_EXTENSION_NAME;
+        if (spacewarp_ext_owned_) taken_over += " " XR_EXT_FRAME_SYNTHESIS_EXTENSION_NAME;
+        std::ostringstream stream;
+        stream << "Space-warp probe: VECTORXR_SPACEWARP_PROBE=" << diagnostics.spacewarp_probe
+               << ", appEnabledFbSpaceWarp=" << (diagnostics.app_requested_fb_space_warp ? 1 : 0)
+               << ", appEnabledFrameSynthesis=" << (diagnostics.app_requested_frame_synthesis ? 1 : 0)
+               << ", extScanComplete=" << (diagnostics.spacewarp_scan_complete ? 1 : 0)
+               << ", runtimeListsFbSpaceWarp=" << (diagnostics.runtime_lists_fb_space_warp ? 1 : 0)
+               << ", runtimeListsFrameSynthesis=" << (diagnostics.runtime_lists_frame_synthesis ? 1 : 0)
+               << ", takenOver=" << (taken_over.empty() ? std::string("none") : taken_over.substr(1));
+        logger_.Info(stream.str());
+        const SpaceWarpProbeSelection selection = ParseSpaceWarpProbe(diagnostics.spacewarp_probe.c_str());
+        if ((spacewarp_fb_owned_ && !selection.fb) || (spacewarp_ext_owned_ && !selection.ext)) {
+            logger_.Info("Space-warp probe: WARNING: the application enabled an extension "
+                         "VECTORXR_SPACEWARP_PROBE=" +
+                         diagnostics.spacewarp_probe +
+                         " does not name (the other probe manifest is registered?); the layer takes it over too, "
+                         "as the runtime would refuse it.");
+        }
+        if (diagnostics.spacewarp_probe == "off") {
+            logger_.Info("Space-warp probe: off; the application's space-warp extensions go to the runtime as "
+                         "they are.");
         }
     }
 
@@ -3402,6 +3432,27 @@ XrResult OpenXrLayer::GetSystemProperties(XrInstance instance,
     }
 
     std::scoped_lock lock(mutex_);
+    if (spacewarp_fb_owned_) {
+        // The runtime left the structure as the application wrote it.
+        auto* space_warp = static_cast<XrSystemSpaceWarpPropertiesFB*>(
+            FindMutableStructInChain(properties->next, XR_TYPE_SYSTEM_SPACE_WARP_PROPERTIES_FB));
+        if (space_warp) {
+            spacewarp_motion_vector_size_ = SpaceWarpMotionVectorSize(instance, system_id);
+            space_warp->recommendedMotionVectorImageRectWidth =
+                static_cast<uint32_t>(spacewarp_motion_vector_size_.width);
+            space_warp->recommendedMotionVectorImageRectHeight =
+                static_cast<uint32_t>(spacewarp_motion_vector_size_.height);
+        }
+        if (!spacewarp_properties_logged_) {
+            spacewarp_properties_logged_ = true;
+            logger_.Info(space_warp ? "Space-warp probe: XrSystemSpaceWarpPropertiesFB answered: "
+                                      "recommendedMotionVectorImageRect=" +
+                                          std::to_string(spacewarp_motion_vector_size_.width) + "x" +
+                                          std::to_string(spacewarp_motion_vector_size_.height) + "."
+                                    : std::string("Space-warp probe: xrGetSystemProperties without "
+                                                  "XrSystemSpaceWarpPropertiesFB (its first call)."));
+        }
+    }
     ReloadConfigIfNeeded();
     RefreshResolvedSettings();
     system_name_ = properties->systemName;
@@ -3600,6 +3651,47 @@ XrResult OpenXrLayer::EnumerateViewConfigurationViews(XrInstance instance,
                                                       uint32_t view_capacity_input,
                                                       uint32_t* view_count_output,
                                                       XrViewConfigurationView* views) {
+    const XrResult result = ForwardEnumerateViewConfigurationViews(
+        instance, system_id, view_configuration_type, view_capacity_input, view_count_output, views);
+    if (XR_FAILED(result) || !views || view_capacity_input == 0) {
+        return result;
+    }
+    std::scoped_lock lock(mutex_);
+    if (!spacewarp_ext_owned_) {
+        return result;
+    }
+    // XR_EXT_frame_synthesis recommends a motion vector size for each view.
+    std::string answered;
+    const uint32_t count = std::min(view_capacity_input, *view_count_output);
+    for (uint32_t i = 0; i < count; ++i) {
+        auto* config = static_cast<XrFrameSynthesisConfigViewEXT*>(
+            FindMutableStructInChain(views[i].next, XR_TYPE_FRAME_SYNTHESIS_CONFIG_VIEW_EXT));
+        if (!config) {
+            continue;
+        }
+        const XrExtent2Di size =
+            RecommendedMotionVectorSize(views[i].recommendedImageRectWidth, views[i].recommendedImageRectHeight);
+        config->recommendedMotionVectorImageRectWidth = static_cast<uint32_t>(size.width);
+        config->recommendedMotionVectorImageRectHeight = static_cast<uint32_t>(size.height);
+        spacewarp_motion_vector_size_ = size;
+        answered += " view" + std::to_string(i) + "=" + std::to_string(size.width) + "x" + std::to_string(size.height);
+    }
+    if (!spacewarp_config_views_logged_) {
+        spacewarp_config_views_logged_ = true;
+        logger_.Info("Space-warp probe: xrEnumerateViewConfigurationViews(" +
+                     std::string(ToString(view_configuration_type)) + ") " +
+                     (answered.empty() ? std::string("without XrFrameSynthesisConfigViewEXT (its first call).")
+                                       : "XrFrameSynthesisConfigViewEXT answered:" + answered + "."));
+    }
+    return result;
+}
+
+XrResult OpenXrLayer::ForwardEnumerateViewConfigurationViews(XrInstance instance,
+                                                             XrSystemId system_id,
+                                                             XrViewConfigurationType view_configuration_type,
+                                                             uint32_t view_capacity_input,
+                                                             uint32_t* view_count_output,
+                                                             XrViewConfigurationView* views) {
     if (!view_count_output) {
         return XR_ERROR_VALIDATION_FAILURE;
     }
@@ -4232,6 +4324,9 @@ XrResult OpenXrLayer::CreateSwapchain(XrSession session,
     tracked_swapchains_[*swapchain] = info;
     framegen_.TrackSwapchain(*swapchain, create_info->format, create_info->sampleCount, create_info->usageFlags);
     LogSwapchainSummary(*swapchain, info, "created");
+    if (SpaceWarpProbeActive()) {
+        NoteSpaceWarpSwapchainLocked(*swapchain, info);
+    }
     return result;
 }
 
@@ -9049,6 +9144,12 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     }
     // Each frame's own quad route only (set at the compose site below).
     DropPendingFrameGenQuad(true);
+    // The space-warp probe's structures never reach the runtime (nor Frame
+    // Generation, nor the bridges' copies of the frame).
+    std::optional<SpaceWarpFrame> spacewarp_frame;
+    if (SpaceWarpProbeActive()) {
+        frame_end_info = ProbeSpaceWarpFrameLocked(frame_end_info, spacewarp_frame.emplace());
+    }
     // The frame's bridged images reach the runtime's images here, where a
     // runtime reads them: everything the game submitted before this call is
     // in them, its rendering after a release included. Frame Generation
@@ -11858,7 +11959,16 @@ void OpenXrLayer::ResetSessionState() {
     // Both xrDestroySession and an xrDestroyInstance that skipped it end a session here.
     if (active_session_ != XR_NULL_HANDLE) {
         logger_.Info("Thread census at session end: " + thread_census_.Summary());
+        // The probe's frames (xrDestroyInstance forgets what it owned first).
+        if (spacewarp_counts_.frames > 0) {
+            LogSpaceWarpProbeSummaryLocked("session end");
+        }
     }
+    spacewarp_counts_ = {};
+    spacewarp_counts_summarized_ = {};
+    spacewarp_first_frame_logged_ = false;
+    spacewarp_last_summary_ = {};
+    spacewarp_last_view_.clear();
     application_action_spaces_.clear();
     osd_.Shutdown();
     osd_monitoring_.store(false);
@@ -12021,6 +12131,11 @@ void OpenXrLayer::ResetInstanceState() {
     has_logged_varjo_native_view_configuration_signature_limit_ = false;
     logged_varjo_native_view_configuration_signatures_.clear();
     has_logged_system_properties_ = false;
+    spacewarp_fb_owned_ = false;
+    spacewarp_ext_owned_ = false;
+    spacewarp_motion_vector_size_ = {};
+    spacewarp_properties_logged_ = false;
+    spacewarp_config_views_logged_ = false;
 }
 
 bool OpenXrLayer::IsQuadViewsActive() const {
@@ -15797,6 +15912,107 @@ void OpenXrLayer::NoteThread(ThreadCensus::Call call) {
     if (call == ThreadCensus::Call::EndFrame && count == kThreadCensusSummaryFrame) {
         logger_.Info("Thread census after " + std::to_string(count) + " frames: " + thread_census_.Summary());
     }
+}
+
+XrExtent2Di OpenXrLayer::SpaceWarpMotionVectorSize(XrInstance instance, XrSystemId system_id) {
+    // The runtime's own stereo views, whatever quad views make of them.
+    uint32_t count = 0;
+    std::array<XrViewConfigurationView, 2> views{};
+    views.fill({XR_TYPE_VIEW_CONFIGURATION_VIEW});
+    if (!next_enumerate_view_configuration_views_ ||
+        XR_FAILED(next_enumerate_view_configuration_views_(instance, system_id,
+                                                           XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
+                                                           static_cast<uint32_t>(views.size()), &count,
+                                                           views.data())) ||
+        count == 0) {
+        return RecommendedMotionVectorSize(0, 0);
+    }
+    return RecommendedMotionVectorSize(views[0].recommendedImageRectWidth, views[0].recommendedImageRectHeight);
+}
+
+std::string OpenXrLayer::DescribeSpaceWarpSwapchainLocked(XrSwapchain swapchain) const {
+    const auto found = tracked_swapchains_.find(swapchain);
+    if (found == tracked_swapchains_.end()) {
+        return FormatHandle(swapchain) + "(untracked)";
+    }
+    const SwapchainInfo& info = found->second;
+    return FormatHandle(swapchain) + "(" + std::to_string(info.width) + "x" + std::to_string(info.height) +
+           " format=" + std::to_string(info.format) + " samples=" + std::to_string(info.sample_count) +
+           " array=" + std::to_string(info.array_size) + " usage=" + FormatUsageFlags(info.usage_flags) + ")";
+}
+
+void OpenXrLayer::NoteSpaceWarpSwapchainLocked(XrSwapchain swapchain, const SwapchainInfo& info) {
+    const bool half_float = IsHalfFloatRgbaFormat(info.format);
+    const bool motion_vector_size = spacewarp_motion_vector_size_.width > 0 &&
+                                    info.width == static_cast<uint32_t>(spacewarp_motion_vector_size_.width) &&
+                                    info.height == static_cast<uint32_t>(spacewarp_motion_vector_size_.height);
+    if (!half_float && !motion_vector_size) {
+        return;
+    }
+    logger_.Info("Space-warp probe: swapchain that looks like motion vectors or their depth: " +
+                 DescribeSpaceWarpSwapchainLocked(swapchain) + ", rgba16f=" + (half_float ? "1" : "0") +
+                 ", motionVectorSize=" + (motion_vector_size ? "1" : "0") + " (recommended " +
+                 std::to_string(spacewarp_motion_vector_size_.width) + "x" +
+                 std::to_string(spacewarp_motion_vector_size_.height) + ").");
+}
+
+const XrFrameEndInfo* OpenXrLayer::ProbeSpaceWarpFrameLocked(const XrFrameEndInfo* frame, SpaceWarpFrame& storage) {
+    const XrFrameEndInfo* stripped = WithoutSpaceWarp(frame, spacewarp_fb_owned_, spacewarp_ext_owned_, storage);
+    const auto now = std::chrono::steady_clock::now();
+    if (spacewarp_counts_.frames++ == 0) {
+        spacewarp_last_summary_ = now;
+    }
+    bool fb = false;
+    bool ext = false;
+    for (const SpaceWarpViewInfo& view : storage.found) {
+        (view.type == XR_TYPE_COMPOSITION_LAYER_SPACE_WARP_INFO_FB ? fb : ext) = true;
+        ++(view.stripped ? spacewarp_counts_.views_stripped : spacewarp_counts_.views_left);
+        if (view.type == XR_TYPE_COMPOSITION_LAYER_SPACE_WARP_INFO_FB &&
+            (view.layer_flags & XR_COMPOSITION_LAYER_SPACE_WARP_INFO_FRAME_SKIP_BIT_FB) != 0) {
+            ++spacewarp_counts_.frame_skips;
+        }
+    }
+    spacewarp_counts_.frames_fb += fb ? 1 : 0;
+    spacewarp_counts_.frames_ext += ext ? 1 : 0;
+    if (!storage.found.empty()) {
+        const SpaceWarpViewInfo& first = storage.found.front();
+        spacewarp_last_view_ = DescribeSpaceWarpView(first) +
+                               " mvSwapchain=" + DescribeSpaceWarpSwapchainLocked(first.motion_vector.swapchain) +
+                               " depthSwapchain=" + DescribeSpaceWarpSwapchainLocked(first.depth.swapchain);
+        if (!spacewarp_first_frame_logged_) {
+            spacewarp_first_frame_logged_ = true;
+            logger_.Info("Space-warp probe: the session's first frame with motion vectors (frame " +
+                         std::to_string(spacewarp_counts_.frames) +
+                         ", displayTime=" + std::to_string(frame->displayTime) + ", " +
+                         std::to_string(storage.found.size()) + " structures):");
+            for (const SpaceWarpViewInfo& view : storage.found) {
+                logger_.Info("Space-warp probe:   " + DescribeSpaceWarpView(view) +
+                             " mvSwapchain=" + DescribeSpaceWarpSwapchainLocked(view.motion_vector.swapchain) +
+                             " depthSwapchain=" + DescribeSpaceWarpSwapchainLocked(view.depth.swapchain));
+            }
+        }
+    }
+    if (now - spacewarp_last_summary_ >= std::chrono::seconds(30)) {
+        spacewarp_last_summary_ = now;
+        LogSpaceWarpProbeSummaryLocked("30 s");
+    }
+    return stripped;
+}
+
+void OpenXrLayer::LogSpaceWarpProbeSummaryLocked(std::string_view reason) {
+    const SpaceWarpProbeCounts& total = spacewarp_counts_;
+    const SpaceWarpProbeCounts& last = spacewarp_counts_summarized_;
+    std::ostringstream stream;
+    stream << "Space-warp probe summary (" << reason << "): frames=" << total.frames - last.frames
+           << ", framesWithFbSpaceWarp=" << total.frames_fb - last.frames_fb
+           << ", framesWithFrameSynthesis=" << total.frames_ext - last.frames_ext
+           << ", viewsStripped=" << total.views_stripped - last.views_stripped
+           << ", viewsLeftBehindUnknownStruct=" << total.views_left - last.views_left
+           << ", frameSkipFlags=" << total.frame_skips - last.frame_skips << "; session: frames=" << total.frames
+           << ", framesWithFbSpaceWarp=" << total.frames_fb << ", framesWithFrameSynthesis=" << total.frames_ext
+           << "; last=" << (spacewarp_last_view_.empty() ? std::string("none") : spacewarp_last_view_);
+    logger_.Info(stream.str());
+    spacewarp_counts_summarized_ = total;
 }
 
 void OpenXrLayer::LogSwapchainSummary(XrSwapchain swapchain,

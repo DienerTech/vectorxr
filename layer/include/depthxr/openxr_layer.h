@@ -46,6 +46,7 @@
 #include "depthxr/turbo_prediction_history.h"
 #include "depthxr/turbo_trace.h"
 #include "depthxr/settings_resolver.h"
+#include "depthxr/spacewarp_probe.h"
 #include "depthxr/swapchain_state.h"
 #include "depthxr/thread_census.h"
 
@@ -145,6 +146,17 @@ class OpenXrLayer {
         // through). Above VectorXR it gets a game's quad views, which it does
         // not support.
         std::string openxr_toolkit{"absent"};
+        // The space-warp probe (spacewarp_probe.h): VECTORXR_SPACEWARP_PROBE,
+        // what the application enabled, what the runtime's list before the
+        // instance names, and what the layer took over (kept from the runtime).
+        std::string spacewarp_probe{"off"};
+        bool app_requested_fb_space_warp{false};
+        bool app_requested_frame_synthesis{false};
+        bool spacewarp_scan_complete{false};
+        bool runtime_lists_fb_space_warp{false};
+        bool runtime_lists_frame_synthesis{false};
+        bool fb_space_warp_owned{false};
+        bool frame_synthesis_owned{false};
     };
 
     // True when VectorXR quadviews should run in Varjo compatible mode, i.e. core
@@ -256,6 +268,7 @@ class OpenXrLayer {
     friend class D3D11BridgeLayerTestPeer;
     friend class VulkanBridgeLayerTestPeer;
     friend class HeadPredictionTestPeer;
+    friend class SpaceWarpProbeTestPeer;
 #endif
 
     OpenXrLayer() = default;
@@ -605,6 +618,24 @@ class OpenXrLayer {
     bool QuadViewsDiagnosticVisualizationAvailable() const;
     void ResetSwapchainState();
     void LogSwapchainSummary(XrSwapchain swapchain, const SwapchainInfo& info, std::string_view event_name);
+    // The space-warp probe (spacewarp_probe.h), mutex_ held: whether it owns
+    // an extension, its recommended motion vector size for the runtime's
+    // primary stereo views, a frame without its structures (logging what they
+    // carried), a swapchain that looks like a motion vector or its depth, and
+    // the summary of the session's frames.
+    bool SpaceWarpProbeActive() const { return spacewarp_fb_owned_ || spacewarp_ext_owned_; }
+    XrExtent2Di SpaceWarpMotionVectorSize(XrInstance instance, XrSystemId system_id);
+    const XrFrameEndInfo* ProbeSpaceWarpFrameLocked(const XrFrameEndInfo* frame, SpaceWarpFrame& storage);
+    void NoteSpaceWarpSwapchainLocked(XrSwapchain swapchain, const SwapchainInfo& info);
+    std::string DescribeSpaceWarpSwapchainLocked(XrSwapchain swapchain) const;
+    void LogSpaceWarpProbeSummaryLocked(std::string_view reason);
+    // xrEnumerateViewConfigurationViews before the probe's answer.
+    XrResult ForwardEnumerateViewConfigurationViews(XrInstance instance,
+                                                    XrSystemId system_id,
+                                                    XrViewConfigurationType view_configuration_type,
+                                                    uint32_t view_capacity_input,
+                                                    uint32_t* view_count_output,
+                                                    XrViewConfigurationView* views);
     // Logs xrEnumerateSwapchainFormats' list when it differs from the last one this session.
     void LogSwapchainFormatsOnChange(const std::string& line);
     // Counts an application call on the calling thread; logs the first call of each kind on each thread.
@@ -1730,6 +1761,29 @@ class OpenXrLayer {
     bool has_logged_visibility_mask_mapping_{false};
     uint32_t logged_visibility_mask_shapes_{0}; // one bit per synthesized view and mask type
     bool has_logged_system_properties_{false};
+    // The space-warp probe (spacewarp_probe.h, mutex_): the extensions it took
+    // over for the instance, the motion vector size it last recommended, and
+    // the session's frames: all of them, those carrying either structure, the
+    // structures (stripped, or left behind a structure it cannot copy) and
+    // their frame-skip flags; as of the last summary too.
+    bool spacewarp_fb_owned_{false};
+    bool spacewarp_ext_owned_{false};
+    XrExtent2Di spacewarp_motion_vector_size_{};
+    bool spacewarp_properties_logged_{false};
+    bool spacewarp_config_views_logged_{false};
+    struct SpaceWarpProbeCounts {
+        std::uint64_t frames{0};
+        std::uint64_t frames_fb{0};
+        std::uint64_t frames_ext{0};
+        std::uint64_t views_stripped{0};
+        std::uint64_t views_left{0};
+        std::uint64_t frame_skips{0};
+    };
+    SpaceWarpProbeCounts spacewarp_counts_;
+    SpaceWarpProbeCounts spacewarp_counts_summarized_;
+    bool spacewarp_first_frame_logged_{false};
+    std::chrono::steady_clock::time_point spacewarp_last_summary_{};
+    std::string spacewarp_last_view_;
     uint32_t cached_quadviews_stereo_recommended_width_{0};
     uint32_t cached_quadviews_stereo_recommended_height_{0};
     uint32_t cached_quadviews_stereo_max_width_{0};

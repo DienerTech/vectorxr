@@ -1,0 +1,637 @@
+// The space-warp probe (spacewarp_probe.h): its frame handling on its own,
+// then through the layer's own hooks, from xrCreateApiLayerInstance on,
+// against a stand-in runtime (CPU only): the layer keeps XR_FB_space_warp and
+// XR_EXT_frame_synthesis from a runtime that lacks them while
+// VECTORXR_SPACEWARP_PROBE is set, answers their recommended motion vector
+// sizes and takes their structures off the frames the runtime gets; a runtime
+// that lists one, or the probe off, gets the application's own. Settings and
+// logs go to a temporary directory.
+#include <windows.h>
+
+#include "depthxr/openxr_layer.h"
+#include "depthxr/openxr_loader_api_layer.h"
+#include "depthxr/spacewarp_probe.h"
+
+#include <algorithm>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+// The layer's loader entry point (layer_entry.cpp).
+extern "C" XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* info,
+                                                        const depthxr::XrApiLayerCreateInfo* layer_info,
+                                                        XrInstance* instance);
+
+namespace depthxr {
+
+// Test-only access to the singleton (DEPTHXR_TESTING).
+class SpaceWarpProbeTestPeer {
+  public:
+    static void SetActiveSession(XrSession session) {
+        std::scoped_lock lock(OpenXrLayer::Instance().mutex_);
+        OpenXrLayer::Instance().active_session_ = session;
+    }
+    // The last instance's log (an error reaches the file at once, with
+    // everything logged before it).
+    static std::string Log() {
+        OpenXrLayer& layer = OpenXrLayer::Instance();
+        layer.logger_.Error("Test harness: log read.");
+        std::ifstream stream(layer.logger_.ActiveLogPath(), std::ios::binary);
+        std::ostringstream text;
+        text << stream.rdbuf();
+        const std::string log = text.str();
+        const std::size_t start = log.rfind("VectorXR layer version: ");
+        return start == std::string::npos ? log : log.substr(start);
+    }
+};
+
+} // namespace depthxr
+
+namespace {
+
+using depthxr::SpaceWarpFrame;
+using depthxr::SpaceWarpProbeTestPeer;
+
+void Check(bool condition, const std::string& message) {
+    if (!condition) {
+        throw std::runtime_error(message);
+    }
+}
+
+template <typename T>
+T Handle(std::uintptr_t value) {
+    return reinterpret_cast<T>(value);
+}
+
+constexpr XrSystemId kSystem = 1;
+constexpr std::uint32_t kEyeWidth = 2000;
+constexpr std::uint32_t kEyeHeight = 2400;
+const XrSession kSession = Handle<XrSession>(0x5e55);
+const XrSwapchain kColor = Handle<XrSwapchain>(0xc0);
+const XrSwapchain kDepth = Handle<XrSwapchain>(0xd0);
+const XrSwapchain kMotion = Handle<XrSwapchain>(0x30);
+const XrSwapchain kMotionDepth = Handle<XrSwapchain>(0x3d);
+constexpr XrStructureType kUnknownType = static_cast<XrStructureType>(1999999999);
+
+// --- The probe's frame handling on its own -----------------------------------
+
+XrCompositionLayerSpaceWarpInfoFB SpaceWarpInfo(const void* next = nullptr) {
+    XrCompositionLayerSpaceWarpInfoFB info{XR_TYPE_COMPOSITION_LAYER_SPACE_WARP_INFO_FB};
+    info.next = next;
+    info.layerFlags = XR_COMPOSITION_LAYER_SPACE_WARP_INFO_FRAME_SKIP_BIT_FB;
+    info.motionVectorSubImage.swapchain = kMotion;
+    info.motionVectorSubImage.imageRect = {{0, 0}, {500, 600}};
+    info.depthSubImage.swapchain = kMotionDepth;
+    info.depthSubImage.imageRect = {{0, 0}, {500, 600}};
+    info.appSpaceDeltaPose = {{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, -0.25f}};
+    info.minDepth = 0.0f;
+    info.maxDepth = 1.0f;
+    info.nearZ = 0.05f;
+    info.farZ = 10000.0f;
+    return info;
+}
+
+XrFrameSynthesisInfoEXT FrameSynthesisInfo(const void* next = nullptr) {
+    XrFrameSynthesisInfoEXT info{XR_TYPE_FRAME_SYNTHESIS_INFO_EXT};
+    info.next = next;
+    info.motionVectorSubImage.swapchain = kMotion;
+    info.motionVectorSubImage.imageRect = {{0, 0}, {500, 600}};
+    info.motionVectorScale = {1.0f, 1.0f, 0.0f, 0.0f};
+    info.depthSubImage.swapchain = kMotionDepth;
+    info.depthSubImage.imageRect = {{0, 0}, {500, 600}};
+    info.nearZ = 0.05f;
+    info.farZ = 10000.0f;
+    return info;
+}
+
+XrCompositionLayerDepthInfoKHR DepthInfo(const void* next = nullptr) {
+    XrCompositionLayerDepthInfoKHR depth{XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR};
+    depth.next = next;
+    depth.subImage.swapchain = kDepth;
+    depth.subImage.imageRect = {{0, 0}, {static_cast<int32_t>(kEyeWidth), static_cast<int32_t>(kEyeHeight)}};
+    depth.maxDepth = 1.0f;
+    depth.nearZ = 0.05f;
+    depth.farZ = 10000.0f;
+    return depth;
+}
+
+std::vector<XrStructureType> ChainTypes(const void* next) {
+    std::vector<XrStructureType> types;
+    for (auto* node = static_cast<const XrBaseInStructure*>(next); node; node = node->next) {
+        types.push_back(node->type);
+    }
+    return types;
+}
+
+// A stereo projection layer (behind a quad layer) whose views' chains are given.
+struct Frame {
+    XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+    XrCompositionLayerProjectionView views[2]{{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},
+                                              {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
+    XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    const XrCompositionLayerBaseHeader* layers[2]{};
+    XrFrameEndInfo info{XR_TYPE_FRAME_END_INFO};
+
+    Frame(const void* left, const void* right) {
+        for (std::uint32_t eye = 0; eye < 2; ++eye) {
+            views[eye].pose = {{0.0f, 0.0f, 0.0f, 1.0f}, {eye == 0 ? -0.032f : 0.032f, 0.0f, 0.0f}};
+            views[eye].fov = {-0.8f, 0.8f, 0.8f, -0.8f};
+            views[eye].subImage.swapchain = kColor;
+            views[eye].subImage.imageRect = {{0, 0},
+                                             {static_cast<int32_t>(kEyeWidth), static_cast<int32_t>(kEyeHeight)}};
+            views[eye].subImage.imageArrayIndex = eye;
+        }
+        views[0].next = left;
+        views[1].next = right;
+        projection.viewCount = 2;
+        projection.views = views;
+        layers[0] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
+        layers[1] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
+        info.displayTime = 123456789;
+        info.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+        info.layerCount = 2;
+        info.layers = layers;
+    }
+    Frame(const Frame&) = delete;
+    Frame& operator=(const Frame&) = delete;
+};
+
+const XrCompositionLayerProjection* Projection(const XrFrameEndInfo* frame) {
+    return reinterpret_cast<const XrCompositionLayerProjection*>(frame->layers[1]);
+}
+
+void TestSelectionAndSizes() {
+    using depthxr::ParseSpaceWarpProbe;
+    Check(!ParseSpaceWarpProbe(nullptr).Any() && !ParseSpaceWarpProbe("").Any() && !ParseSpaceWarpProbe("1").Any() &&
+              !ParseSpaceWarpProbe("on").Any(),
+          "only fb, ext and both turn the probe on");
+    Check(ParseSpaceWarpProbe("fb").fb && !ParseSpaceWarpProbe("fb").ext, "fb is XR_FB_space_warp alone");
+    Check(ParseSpaceWarpProbe("EXT").ext && !ParseSpaceWarpProbe("EXT").fb, "ext is XR_EXT_frame_synthesis alone");
+    Check(ParseSpaceWarpProbe("Both").fb && ParseSpaceWarpProbe("Both").ext, "both is both");
+    Check(std::string(depthxr::SpaceWarpProbeName(ParseSpaceWarpProbe("both"))) == "both" &&
+              std::string(depthxr::SpaceWarpProbeName({})) == "off",
+          "the probe's names");
+
+    using depthxr::SpaceWarpProbeOwns;
+    Check(SpaceWarpProbeOwns(true, true, false), "the probe takes over what the runtime lacks");
+    Check(!SpaceWarpProbeOwns(true, true, true), "what the runtime lists goes to it");
+    Check(!SpaceWarpProbeOwns(true, false, false), "nothing the application did not enable");
+    Check(!SpaceWarpProbeOwns(false, true, false), "nothing while the probe is off");
+
+    const XrExtent2Di quarter = depthxr::RecommendedMotionVectorSize(2000, 2399);
+    Check(quarter.width == 500 && quarter.height == 600, "a quarter of the eye each way, rounded up");
+    const XrExtent2Di none = depthxr::RecommendedMotionVectorSize(0, 0);
+    Check(none.width == 1 && none.height == 1, "at least 1x1");
+
+    Check(depthxr::IsHalfFloatRgbaFormat(10) && depthxr::IsHalfFloatRgbaFormat(97) &&
+              depthxr::IsHalfFloatRgbaFormat(0x881A) && !depthxr::IsHalfFloatRgbaFormat(29),
+          "RGBA16F in DXGI, Vulkan and GL only");
+}
+
+void TestWithoutSpaceWarp() {
+    // No structure, or one of an extension not stripped: the frame itself.
+    {
+        XrCompositionLayerDepthInfoKHR depth = DepthInfo();
+        Frame frame(&depth, nullptr);
+        SpaceWarpFrame storage;
+        Check(depthxr::WithoutSpaceWarp(&frame.info, true, true, storage) == &frame.info && storage.found.empty(),
+              "a frame without the structures is forwarded as it is");
+        XrFrameSynthesisInfoEXT ext = FrameSynthesisInfo();
+        Frame other(&ext, nullptr);
+        Check(depthxr::WithoutSpaceWarp(&other.info, true, false, storage) == &other.info && storage.found.empty(),
+              "XR_EXT_frame_synthesis' structure stays while only XR_FB_space_warp is stripped");
+    }
+    // The structure ahead of depth, and behind it.
+    {
+        XrCompositionLayerDepthInfoKHR left_depth = DepthInfo();
+        XrCompositionLayerSpaceWarpInfoFB left = SpaceWarpInfo(&left_depth);
+        XrCompositionLayerSpaceWarpInfoFB right = SpaceWarpInfo();
+        XrCompositionLayerDepthInfoKHR right_depth = DepthInfo(&right);
+        Frame frame(&left, &right_depth);
+        SpaceWarpFrame storage;
+        const XrFrameEndInfo* stripped = depthxr::WithoutSpaceWarp(&frame.info, true, false, storage);
+        Check(stripped != &frame.info && stripped->layerCount == 2 && stripped->displayTime == frame.info.displayTime,
+              "a copy of the frame");
+        Check(stripped->layers[0] == frame.layers[0], "other layers are the application's");
+        const XrCompositionLayerProjection* projection = Projection(stripped);
+        Check(projection != &frame.projection && projection->viewCount == 2, "a copy of the projection layer");
+        Check(ChainTypes(projection->views[0].next) ==
+                      std::vector<XrStructureType>{XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR} &&
+                  projection->views[0].next == &left_depth,
+              "the structure ahead of depth goes; depth is the application's");
+        Check(ChainTypes(projection->views[1].next) ==
+                      std::vector<XrStructureType>{XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR} &&
+                  projection->views[1].next != &right_depth &&
+                  static_cast<const XrCompositionLayerDepthInfoKHR*>(projection->views[1].next)->subImage.swapchain ==
+                      kDepth,
+              "the structure behind depth goes with a copy of depth");
+        Check(frame.views[0].next == &left && right_depth.next == &right, "the application's chains are untouched");
+        Check(projection->views[1].subImage.imageArrayIndex == 1 && projection->views[1].pose.position.x > 0.0f,
+              "the views are the application's otherwise");
+        Check(storage.found.size() == 2 && storage.found[0].stripped && storage.found[1].stripped &&
+                  storage.found[0].layer_index == 1 && storage.found[1].view_index == 1,
+              "both structures are recorded");
+        const depthxr::SpaceWarpViewInfo& info = storage.found[0];
+        Check(info.motion_vector.swapchain == kMotion && info.motion_vector.imageRect.extent.width == 500 &&
+                  info.depth.swapchain == kMotionDepth && info.far_z == 10000.0f &&
+                  info.app_space_delta_pose.position.z == -0.25f &&
+                  info.layer_flags == XR_COMPOSITION_LAYER_SPACE_WARP_INFO_FRAME_SKIP_BIT_FB,
+              "the structure's fields are recorded");
+        const std::string described = depthxr::DescribeSpaceWarpView(info);
+        Check(described.find("XrCompositionLayerSpaceWarpInfoFB") != std::string::npos &&
+                  described.find("mv=0,0+500x600[0]") != std::string::npos &&
+                  described.find("farZ=10000") != std::string::npos &&
+                  described.find("flags=0x1") != std::string::npos,
+              "the description: " + described);
+    }
+    // Behind a structure the probe cannot copy, the structure stays.
+    {
+        XrCompositionLayerSpaceWarpInfoFB behind = SpaceWarpInfo();
+        XrBaseInStructure unknown{kUnknownType, reinterpret_cast<const XrBaseInStructure*>(&behind)};
+        XrFrameSynthesisInfoEXT ext = FrameSynthesisInfo();
+        Frame frame(&unknown, &ext);
+        SpaceWarpFrame storage;
+        const XrFrameEndInfo* stripped = depthxr::WithoutSpaceWarp(&frame.info, true, true, storage);
+        const XrCompositionLayerProjection* projection = Projection(stripped);
+        Check(projection->views[0].next == &unknown, "a chain behind an unknown structure is the application's");
+        Check(projection->views[1].next == nullptr, "XR_EXT_frame_synthesis' structure goes");
+        Check(storage.found.size() == 2 && !storage.found[0].stripped && storage.found[1].stripped &&
+                  storage.found[1].type == XR_TYPE_FRAME_SYNTHESIS_INFO_EXT &&
+                  storage.found[1].motion_vector_scale.x == 1.0f,
+              "the structure left behind is recorded as left");
+    }
+}
+
+// --- The stand-in runtime ----------------------------------------------------
+
+struct StandIn {
+    std::vector<std::string> extensions;              // what it lists before the instance
+    std::vector<std::string> instance_extensions;     // what its instance was created with
+    std::vector<std::vector<XrStructureType>> ended;  // each submitted projection view's chain, last frame
+    std::uint32_t end_frames{0};
+    XrInstance instance{XR_NULL_HANDLE};
+    std::uintptr_t handles{0x1000};
+};
+StandIn g_runtime;
+
+template <typename F>
+PFN_xrVoidFunction Function(F function) {
+    return reinterpret_cast<PFN_xrVoidFunction>(function);
+}
+
+// Everything the layer resolves that the probe does not need. The x64
+// calling convention lets a function that takes nothing stand in for one
+// that takes arguments: the caller owns them.
+XrResult XRAPI_CALL RtSucceed() {
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtEnumerateInstanceExtensions(const char*, std::uint32_t capacity, std::uint32_t* count,
+                                                   XrExtensionProperties* properties) {
+    *count = static_cast<std::uint32_t>(g_runtime.extensions.size());
+    if (capacity == 0) return XR_SUCCESS;
+    if (capacity < g_runtime.extensions.size()) return XR_ERROR_SIZE_INSUFFICIENT;
+    for (std::size_t i = 0; i < g_runtime.extensions.size(); ++i) {
+        std::strncpy(properties[i].extensionName, g_runtime.extensions[i].c_str(), XR_MAX_EXTENSION_NAME_SIZE - 1);
+        properties[i].extensionVersion = 1;
+    }
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtCreateApiLayerInstance(const XrInstanceCreateInfo* info, const depthxr::XrApiLayerCreateInfo*,
+                                             XrInstance* instance) {
+    g_runtime.instance_extensions.clear();
+    for (std::uint32_t i = 0; i < info->enabledExtensionCount; ++i) {
+        const std::string name = info->enabledExtensionNames[i];
+        // A runtime refuses an extension it does not have.
+        if (std::find(g_runtime.extensions.begin(), g_runtime.extensions.end(), name) == g_runtime.extensions.end()) {
+            return XR_ERROR_EXTENSION_NOT_PRESENT;
+        }
+        g_runtime.instance_extensions.push_back(name);
+    }
+    *instance = g_runtime.instance = Handle<XrInstance>(++g_runtime.handles);
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtGetInstanceProperties(XrInstance, XrInstanceProperties* properties) {
+    std::strncpy(properties->runtimeName, "Space-warp stand-in", XR_MAX_RUNTIME_NAME_SIZE - 1);
+    properties->runtimeVersion = XR_MAKE_VERSION(1, 0, 0);
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtGetSystemProperties(XrInstance, XrSystemId, XrSystemProperties* properties) {
+    std::strncpy(properties->systemName, "Stand-in headset", XR_MAX_SYSTEM_NAME_SIZE - 1);
+    properties->graphicsProperties.maxSwapchainImageWidth = 8192;
+    properties->graphicsProperties.maxSwapchainImageHeight = 8192;
+    properties->graphicsProperties.maxLayerCount = 16;
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtEnumerateViewConfigurationViews(XrInstance, XrSystemId, XrViewConfigurationType,
+                                                       std::uint32_t capacity, std::uint32_t* count,
+                                                       XrViewConfigurationView* views) {
+    *count = 2;
+    if (capacity == 0) return XR_SUCCESS;
+    if (capacity < 2) return XR_ERROR_SIZE_INSUFFICIENT;
+    for (std::uint32_t i = 0; i < 2; ++i) {
+        views[i].recommendedImageRectWidth = kEyeWidth;
+        views[i].recommendedImageRectHeight = kEyeHeight;
+        views[i].maxImageRectWidth = 8192;
+        views[i].maxImageRectHeight = 8192;
+        views[i].recommendedSwapchainSampleCount = 1;
+        views[i].maxSwapchainSampleCount = 4;
+    }
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtCreateSwapchain(XrSession, const XrSwapchainCreateInfo*, XrSwapchain* swapchain) {
+    *swapchain = Handle<XrSwapchain>(++g_runtime.handles);
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtEndFrame(XrSession, const XrFrameEndInfo* info) {
+    ++g_runtime.end_frames;
+    g_runtime.ended.clear();
+    for (std::uint32_t i = 0; i < info->layerCount; ++i) {
+        if (info->layers[i]->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) continue;
+        const auto* projection = reinterpret_cast<const XrCompositionLayerProjection*>(info->layers[i]);
+        for (std::uint32_t v = 0; v < projection->viewCount; ++v) {
+            g_runtime.ended.push_back(ChainTypes(projection->views[v].next));
+        }
+    }
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtGetInstanceProcAddr(XrInstance instance, const char* name, PFN_xrVoidFunction* function) {
+    *function = nullptr;
+    const std::string_view requested(name);
+    if (instance == XR_NULL_HANDLE) {
+        // Before the instance: the layer's extension scan.
+        if (requested == "xrEnumerateInstanceExtensionProperties") {
+            *function = Function(RtEnumerateInstanceExtensions);
+            return XR_SUCCESS;
+        }
+        return XR_ERROR_FUNCTION_UNSUPPORTED;
+    }
+    if (requested == "xrGetInstanceProperties") {
+        *function = Function(RtGetInstanceProperties);
+    } else if (requested == "xrGetSystemProperties") {
+        *function = Function(RtGetSystemProperties);
+    } else if (requested == "xrEnumerateViewConfigurationViews") {
+        *function = Function(RtEnumerateViewConfigurationViews);
+    } else if (requested == "xrCreateSwapchain") {
+        *function = Function(RtCreateSwapchain);
+    } else if (requested == "xrEndFrame") {
+        *function = Function(RtEndFrame);
+    } else if (requested.starts_with("xr") && !requested.ends_with("KHR") && !requested.ends_with("EXT") &&
+               !requested.ends_with("VARJO") && !requested.ends_with("FB")) {
+        *function = Function(RtSucceed);
+    } else {
+        return XR_ERROR_FUNCTION_UNSUPPORTED;
+    }
+    return XR_SUCCESS;
+}
+
+// --- The application ---------------------------------------------------------
+
+void SetProbe(const char* value) {
+    _putenv_s("VECTORXR_SPACEWARP_PROBE", value ? value : "");
+}
+
+XrResult CreateInstance(const std::vector<const char*>& extensions, XrInstance& instance) {
+    XrInstanceCreateInfo info{XR_TYPE_INSTANCE_CREATE_INFO};
+    std::strncpy(info.applicationInfo.applicationName, "VectorXR space-warp probe test",
+                 XR_MAX_APPLICATION_NAME_SIZE - 1);
+    info.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 0);
+    info.enabledExtensionCount = static_cast<std::uint32_t>(extensions.size());
+    info.enabledExtensionNames = extensions.empty() ? nullptr : extensions.data();
+    depthxr::XrApiLayerNextInfo next{};
+    next.structType = depthxr::XR_LOADER_INTERFACE_STRUCT_API_LAYER_NEXT_INFO;
+    next.structVersion = depthxr::XR_API_LAYER_NEXT_INFO_STRUCT_VERSION;
+    next.structSize = sizeof(next);
+    std::strncpy(next.layerName, "XR_APILAYER_TEST_stand_in_runtime", XR_MAX_API_LAYER_NAME_SIZE - 1);
+    next.nextGetInstanceProcAddr = RtGetInstanceProcAddr;
+    next.nextCreateApiLayerInstance = RtCreateApiLayerInstance;
+    depthxr::XrApiLayerCreateInfo create{};
+    create.structType = depthxr::XR_LOADER_INTERFACE_STRUCT_API_LAYER_CREATE_INFO;
+    create.structVersion = depthxr::XR_API_LAYER_CREATE_INFO_STRUCT_VERSION;
+    create.structSize = sizeof(create);
+    create.nextInfo = &next;
+    instance = XR_NULL_HANDLE;
+    return xrCreateApiLayerInstance(&info, &create, &instance);
+}
+
+template <typename T>
+T LayerFunction(XrInstance instance, const char* name) {
+    PFN_xrVoidFunction function = nullptr;
+    Check(XR_SUCCEEDED(xrGetInstanceProcAddr(instance, name, &function)) && function,
+          std::string("the layer hands out ") + name);
+    return reinterpret_cast<T>(function);
+}
+
+bool Has(const std::vector<std::string>& names, const char* name) {
+    return std::find(names.begin(), names.end(), name) != names.end();
+}
+
+// What an application sees and the runtime gets in one instance and a frame.
+struct Outcome {
+    XrResult create{XR_ERROR_RUNTIME_FAILURE};
+    std::vector<std::string> runtime_instance;
+    XrSystemSpaceWarpPropertiesFB fb{XR_TYPE_SYSTEM_SPACE_WARP_PROPERTIES_FB};
+    XrFrameSynthesisConfigViewEXT ext[2]{{XR_TYPE_FRAME_SYNTHESIS_CONFIG_VIEW_EXT},
+                                         {XR_TYPE_FRAME_SYNTHESIS_CONFIG_VIEW_EXT}};
+    std::vector<std::vector<XrStructureType>> ended;
+    std::string log;
+};
+
+Outcome Run(const char* probe, std::vector<std::string> runtime, std::vector<const char*> application) {
+    SetProbe(probe);
+    g_runtime = {};
+    g_runtime.extensions = std::move(runtime);
+    Outcome outcome;
+    XrInstance instance = XR_NULL_HANDLE;
+    outcome.create = CreateInstance(application, instance);
+    if (XR_FAILED(outcome.create)) {
+        return outcome;
+    }
+    outcome.runtime_instance = g_runtime.instance_extensions;
+
+    XrSystemProperties properties{XR_TYPE_SYSTEM_PROPERTIES};
+    properties.next = &outcome.fb;
+    Check(XR_SUCCEEDED(LayerFunction<PFN_xrGetSystemProperties>(instance, "xrGetSystemProperties")(
+              instance, kSystem, &properties)),
+          "xrGetSystemProperties");
+
+    XrViewConfigurationView views[2]{{XR_TYPE_VIEW_CONFIGURATION_VIEW}, {XR_TYPE_VIEW_CONFIGURATION_VIEW}};
+    views[0].next = &outcome.ext[0];
+    views[1].next = &outcome.ext[1];
+    std::uint32_t count = 0;
+    Check(XR_SUCCEEDED(LayerFunction<PFN_xrEnumerateViewConfigurationViews>(
+              instance, "xrEnumerateViewConfigurationViews")(
+              instance, kSystem, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 2, &count, views)) &&
+              count == 2 && views[0].recommendedImageRectWidth == kEyeWidth,
+          "xrEnumerateViewConfigurationViews");
+
+    SpaceWarpProbeTestPeer::SetActiveSession(kSession);
+    // The motion vector swapchain, as an application makes it.
+    XrSwapchainCreateInfo motion{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+    motion.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+    motion.format = 10; // DXGI_FORMAT_R16G16B16A16_FLOAT
+    motion.sampleCount = 1;
+    motion.width = 500;
+    motion.height = 600;
+    motion.faceCount = 1;
+    motion.arraySize = 2;
+    motion.mipCount = 1;
+    XrSwapchain motion_swapchain = XR_NULL_HANDLE;
+    Check(XR_SUCCEEDED(LayerFunction<PFN_xrCreateSwapchain>(instance, "xrCreateSwapchain")(kSession, &motion,
+                                                                                            &motion_swapchain)),
+          "xrCreateSwapchain");
+
+    XrCompositionLayerDepthInfoKHR left_depth = DepthInfo();
+    XrCompositionLayerSpaceWarpInfoFB left = SpaceWarpInfo(&left_depth);
+    left.motionVectorSubImage.swapchain = motion_swapchain;
+    XrCompositionLayerDepthInfoKHR right_depth = DepthInfo();
+    XrFrameSynthesisInfoEXT right = FrameSynthesisInfo(&right_depth);
+    right.motionVectorSubImage.swapchain = motion_swapchain;
+    Frame frame(&left, &right);
+    Check(XR_SUCCEEDED(LayerFunction<PFN_xrEndFrame>(instance, "xrEndFrame")(kSession, &frame.info)) &&
+              g_runtime.end_frames == 1,
+          "xrEndFrame reaches the runtime");
+    Check(frame.views[0].next == &left && frame.views[1].next == &right, "the application's frame is untouched");
+    outcome.ended = g_runtime.ended;
+
+    // The session ends with the instance.
+    Check(XR_SUCCEEDED(LayerFunction<PFN_xrDestroyInstance>(instance, "xrDestroyInstance")(instance)),
+          "xrDestroyInstance");
+    outcome.log = SpaceWarpProbeTestPeer::Log();
+    return outcome;
+}
+
+const std::vector<XrStructureType> kDepthOnly{XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR};
+
+void TestThroughTheLayer() {
+    const char* fb = XR_FB_SPACE_WARP_EXTENSION_NAME;
+    const char* ext = XR_EXT_FRAME_SYNTHESIS_EXTENSION_NAME;
+    const char* depth = XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME;
+
+    // The probe on (fb): XR_FB_space_warp is the layer's, on a runtime without it.
+    {
+        const Outcome outcome = Run("fb", {depth}, {depth, fb});
+        Check(outcome.create == XR_SUCCESS, "the instance exists: " + std::to_string(outcome.create));
+        Check(!Has(outcome.runtime_instance, fb) && Has(outcome.runtime_instance, depth),
+              "the runtime's instance lacks XR_FB_space_warp, with the application's other extensions");
+        Check(outcome.fb.recommendedMotionVectorImageRectWidth == 500 &&
+                  outcome.fb.recommendedMotionVectorImageRectHeight == 600,
+              "XrSystemSpaceWarpPropertiesFB recommends a quarter of the eye: " +
+                  std::to_string(outcome.fb.recommendedMotionVectorImageRectWidth) + "x" +
+                  std::to_string(outcome.fb.recommendedMotionVectorImageRectHeight));
+        Check(outcome.ext[0].recommendedMotionVectorImageRectWidth == 0,
+              "XR_EXT_frame_synthesis' configuration is not answered for an instance without it");
+        Check(outcome.ended.size() == 2 && outcome.ended[0] == kDepthOnly,
+              "the runtime gets the left view's depth without the space-warp structure");
+        Check(outcome.ended[1] ==
+                  std::vector<XrStructureType>{XR_TYPE_FRAME_SYNTHESIS_INFO_EXT,
+                                               XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR},
+              "a structure of an extension the layer does not own goes on");
+        Check(outcome.log.find("takenOver=XR_FB_space_warp") != std::string::npos,
+              "the instance's probe line says what the layer took over");
+        Check(outcome.log.find("XrSystemSpaceWarpPropertiesFB answered: recommendedMotionVectorImageRect=500x600") !=
+                  std::string::npos,
+              "the answer is logged");
+        Check(outcome.log.find("swapchain that looks like motion vectors") != std::string::npos &&
+                  outcome.log.find("rgba16f=1, motionVectorSize=1") != std::string::npos,
+              "the motion vector swapchain is logged");
+        Check(outcome.log.find("the session's first frame with motion vectors") != std::string::npos &&
+                  outcome.log.find("XrCompositionLayerSpaceWarpInfoFB layer=1 view=0 stripped=1") !=
+                      std::string::npos &&
+                  outcome.log.find("(500x600 format=10") != std::string::npos,
+              "the first frame's structure is logged with its swapchain");
+        Check(outcome.log.find("Space-warp probe summary (session end): frames=1, framesWithFbSpaceWarp=1") !=
+                  std::string::npos,
+              "the session's summary at its end");
+    }
+
+    // The probe on (ext): XR_EXT_frame_synthesis, answered for each view.
+    {
+        const Outcome outcome = Run("ext", {depth}, {ext, depth});
+        Check(outcome.create == XR_SUCCESS && !Has(outcome.runtime_instance, ext),
+              "the runtime's instance lacks XR_EXT_frame_synthesis");
+        Check(outcome.ext[0].recommendedMotionVectorImageRectWidth == 500 &&
+                  outcome.ext[1].recommendedMotionVectorImageRectHeight == 600,
+              "XrFrameSynthesisConfigViewEXT recommends a quarter of each view");
+        Check(outcome.fb.recommendedMotionVectorImageRectWidth == 0, "XR_FB_space_warp's properties are not answered");
+        Check(outcome.ended.size() == 2 && outcome.ended[1] == kDepthOnly &&
+                  outcome.ended[0] ==
+                      std::vector<XrStructureType>{XR_TYPE_COMPOSITION_LAYER_SPACE_WARP_INFO_FB,
+                                                   XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR},
+              "the runtime gets the right view without XR_EXT_frame_synthesis' structure");
+        Check(outcome.log.find("XrFrameSynthesisConfigViewEXT answered: view0=500x600 view1=500x600") !=
+                  std::string::npos,
+              "the answer is logged");
+    }
+
+    // A runtime that lists the extension gets it, and its structures.
+    {
+        const Outcome outcome = Run("both", {depth, fb}, {depth, fb});
+        Check(outcome.create == XR_SUCCESS && Has(outcome.runtime_instance, fb),
+              "the runtime's own XR_FB_space_warp is forwarded");
+        Check(outcome.fb.recommendedMotionVectorImageRectWidth == 0, "the runtime answers for its own extension");
+        Check(outcome.ended.size() == 2 &&
+                  outcome.ended[0] ==
+                      std::vector<XrStructureType>{XR_TYPE_COMPOSITION_LAYER_SPACE_WARP_INFO_FB,
+                                                   XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR},
+              "the runtime gets the structures");
+        Check(outcome.log.find("runtimeListsFbSpaceWarp=1") != std::string::npos &&
+                  outcome.log.find("takenOver=none") != std::string::npos,
+              "the probe line says the runtime has it");
+    }
+
+    // The probe off: nothing changes (a runtime without the extension refuses it).
+    {
+        const Outcome refused = Run(nullptr, {depth}, {depth, fb});
+        Check(refused.create == XR_ERROR_EXTENSION_NOT_PRESENT,
+              "with the probe off the application's XR_FB_space_warp goes to the runtime as it is");
+        const Outcome forwarded = Run(nullptr, {depth, fb}, {depth, fb});
+        Check(forwarded.create == XR_SUCCESS && Has(forwarded.runtime_instance, fb) &&
+                  forwarded.ended[0].front() == XR_TYPE_COMPOSITION_LAYER_SPACE_WARP_INFO_FB &&
+                  forwarded.fb.recommendedMotionVectorImageRectWidth == 0,
+              "with the probe off a runtime with XR_FB_space_warp gets everything");
+        Check(forwarded.log.find("Space-warp probe: off") != std::string::npos, "the log says the probe is off");
+        const Outcome plain = Run(nullptr, {depth}, {depth});
+        Check(plain.create == XR_SUCCESS && plain.log.find("Space-warp probe") == std::string::npos,
+              "an application without the extensions sees no probe at all");
+    }
+}
+
+} // namespace
+
+int main() {
+    // Settings and logs go beside the test, never into the user's VectorXR folder.
+    wchar_t exe_path[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
+    const std::filesystem::path app_data =
+        std::filesystem::path(exe_path).parent_path() / "spacewarp_probe_tests_appdata";
+    std::error_code ignored;
+    std::filesystem::remove_all(app_data, ignored);
+    std::filesystem::create_directories(app_data);
+    _wputenv_s(L"LOCALAPPDATA", app_data.c_str());
+    SetEnvironmentVariableW(L"LOCALAPPDATA", app_data.c_str());
+    try {
+        TestSelectionAndSizes();
+        TestWithoutSpaceWarp();
+        TestThroughTheLayer();
+    } catch (const std::exception& error) {
+        std::cerr << "FAILED: " << error.what() << '\n';
+        return 1;
+    }
+    std::cout << "Space-warp probe: selection, stripping, advertise/strip/forward through the layer passed\n";
+    return 0;
+}

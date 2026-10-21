@@ -3,6 +3,7 @@
 
 #include "depthxr/crt_failure_report.h"
 #include "depthxr/runtime_compatibility.h"
+#include "depthxr/spacewarp_probe.h"
 #include "depthxr/vulkan_enable_hooks.h"
 
 #include <algorithm>
@@ -732,6 +733,28 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
     }
     diagnostics.varjo_compatible_quad_forwarded = forward_varjo_quad_extensions;
 
+    // The space-warp probe (spacewarp_probe.h): its manifests advertise the
+    // extensions on a runtime without them, so the layer keeps them from such
+    // a runtime. One the runtime lists goes on as it is.
+    const SpaceWarpProbeSelection spacewarp_probe = ReadSpaceWarpProbeEnvironment();
+    diagnostics.spacewarp_probe = SpaceWarpProbeName(spacewarp_probe);
+    diagnostics.app_requested_fb_space_warp =
+        ApplicationRequestedExtension(instance_create_info, XR_FB_SPACE_WARP_EXTENSION_NAME);
+    diagnostics.app_requested_frame_synthesis =
+        ApplicationRequestedExtension(instance_create_info, XR_EXT_FRAME_SYNTHESIS_EXTENSION_NAME);
+    if (spacewarp_probe.Any() &&
+        (diagnostics.app_requested_fb_space_warp || diagnostics.app_requested_frame_synthesis)) {
+        const RuntimeExtensionScan spacewarp_scan =
+            extension_scan.ran ? extension_scan : ScanRuntimeInstanceExtensions(next_info);
+        diagnostics.spacewarp_scan_complete = spacewarp_scan.complete;
+        diagnostics.runtime_lists_fb_space_warp = spacewarp_scan.Contains(XR_FB_SPACE_WARP_EXTENSION_NAME);
+        diagnostics.runtime_lists_frame_synthesis = spacewarp_scan.Contains(XR_EXT_FRAME_SYNTHESIS_EXTENSION_NAME);
+        diagnostics.fb_space_warp_owned = SpaceWarpProbeOwns(
+            true, diagnostics.app_requested_fb_space_warp, diagnostics.runtime_lists_fb_space_warp);
+        diagnostics.frame_synthesis_owned = SpaceWarpProbeOwns(
+            true, diagnostics.app_requested_frame_synthesis, diagnostics.runtime_lists_frame_synthesis);
+    }
+
     std::vector<const char*> base_downstream_extensions;
     base_downstream_extensions.reserve(instance_create_info->enabledExtensionCount + 1);
     for (uint32_t i = 0; i < instance_create_info->enabledExtensionCount; ++i) {
@@ -742,6 +765,11 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
         // Keep the layer-owned Varjo extensions in the downstream list only when we
         // are forwarding them for Varjo compatible quadviews; otherwise strip as usual.
         if (IsLayerOwnedExtension(extension_name) && !forward_varjo_quad_extensions) {
+            continue;
+        }
+        if ((diagnostics.fb_space_warp_owned && std::string_view(extension_name) == XR_FB_SPACE_WARP_EXTENSION_NAME) ||
+            (diagnostics.frame_synthesis_owned &&
+             std::string_view(extension_name) == XR_EXT_FRAME_SYNTHESIS_EXTENSION_NAME)) {
             continue;
         }
         base_downstream_extensions.push_back(extension_name);
