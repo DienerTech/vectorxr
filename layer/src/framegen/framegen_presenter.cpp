@@ -31,7 +31,7 @@ constexpr int kAutoMaxBackoffDoublings = 3; // 10 s, 20 s, 40 s, 80 s
 // spending the full engagement warmup on an unsustainable rate.
 constexpr std::chrono::milliseconds kAutoProbeSettle{250};
 // ...and judges it on this many frames at least (a slow game's half second
-// holds few: a 4x -> 3x probe at 90 Hz about ten).
+// holds few: a 4x -> 3x probe at 90 Hz about fifteen).
 constexpr std::size_t kAutoProbeJudgedFrames = 16;
 // Auto counts a frame late once it takes this much longer than its refreshes.
 constexpr double kAutoLateFactor = 1.25;
