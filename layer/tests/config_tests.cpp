@@ -1726,6 +1726,15 @@ void TestFrameGenPlan() {
             }
         }
         Expect(maps == 2 && read && plan.frames_in_order, "Each generated frame should read its own motion map");
+        // Interpolating, none (MSFS replays: worse there).
+        tuning.mode = depthxr::FrameGenSynthesisMode::kInterpolate;
+        bool none = true;
+        for (const auto& dispatch : depthxr::BuildFrameGenViewPlan(request, tuning).dispatches) {
+            none = none && dispatch.outputs[1].kind != FrameGenTextureKind::kMotionMap &&
+                   (dispatch.constants.options[1] & depthxr::kFrameGenFlagDepthSplat) == 0;
+        }
+        tuning.mode = depthxr::FrameGenSynthesisMode::kExtrapolate;
+        Expect(none, "Interpolation should build no motion map");
     }
     tuning.generated = 1;
     tuning.fractions = {0.5f, 0.5f, 0.5f, 0.5f};

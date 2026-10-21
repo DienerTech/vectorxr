@@ -520,11 +520,13 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
             AppendShiftMap(plan, base, {request.shift[0] * time, request.shift[1] * time, request.shift[2] * time}, depth);
             plan.frames_in_order = true;
         }
-        // The motion map for this frame's own time (FrameGenTuning::depth_splat).
-        const bool motion = request.depth && tuning.depth_splat && time > 0.0f;
+        // The motion map for this frame's own time (FrameGenTuning::depth_splat),
+        // extrapolating only.
+        const bool motion = request.depth && tuning.depth_splat && time > 0.0f &&
+                            tuning.mode == FrameGenSynthesisMode::kExtrapolate;
         if (motion) {
-            AppendMotionMap(plan, base, tuning.mode == FrameGenSynthesisMode::kExtrapolate ? -fraction : 1.0f - fraction,
-                            depth, Texture(FrameGenTextureKind::kFilteredNewest, plan.final_flow_level));
+            AppendMotionMap(plan, base, -fraction, depth,
+                            Texture(FrameGenTextureKind::kFilteredNewest, plan.final_flow_level));
             plan.frames_in_order = true;
         }
         FrameGenDispatch output = Dispatch(synthesize, plan.levels[0], plan.levels[plan.final_flow_level], base);
@@ -623,10 +625,11 @@ FrameGenViewPlan BuildFrameGenSynthesisPlan(const FrameGenViewRequest& request, 
     const FrameGenTexture flow = Texture(extrapolate && cover_flow ? FrameGenTextureKind::kFilteredCover
                                                                    : FrameGenTextureKind::kFilteredNewest,
                                          plan.final_flow_level);
-    // The motion map for this frame's time (FrameGenTuning::depth_splat).
-    const bool motion = request.depth && tuning.depth_splat;
+    // The motion map for this frame's time (FrameGenTuning::depth_splat),
+    // extrapolating only (cover frames included).
+    const bool motion = request.depth && tuning.depth_splat && extrapolate;
     if (motion) {
-        AppendMotionMap(plan, base, extrapolate ? -fraction : 1.0f - fraction, depth, flow);
+        AppendMotionMap(plan, base, -fraction, depth, flow);
     }
     FrameGenDispatch output = Dispatch(synthesize, plan.levels[0], plan.levels[plan.final_flow_level], base);
     output.inputs = {Texture(FrameGenTextureKind::kHistoryNewest),
