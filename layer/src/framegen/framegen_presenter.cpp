@@ -30,6 +30,9 @@ constexpr int kAutoMaxBackoffDoublings = 3; // 10 s, 20 s, 40 s, 80 s
 // transition settle briefly, then judge its actual cadence rather than
 // spending the full engagement warmup on an unsustainable rate.
 constexpr std::chrono::milliseconds kAutoProbeSettle{250};
+// ...and judges it on this many frames at least (a slow game's half second
+// holds few: a 4x -> 3x probe at 90 Hz about ten).
+constexpr std::size_t kAutoProbeJudgedFrames = 16;
 // Auto counts a frame late once it takes this much longer than its refreshes.
 constexpr double kAutoLateFactor = 1.25;
 // Auto stays at full rate this long after inline cycles kept starting late.
@@ -2031,12 +2034,10 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
     // actual frames still have to establish persistent lateness before the
     // old multiplier is restored. Capture latency alone cannot tell whether
     // the game has the throughput for the lower multiplier.
-    const auto settle = probing_ ? std::min(auto_settle_, kAutoProbeSettle) : auto_settle_;
-    // ...and is judged once it has a quarter of the configured settle's
-    // frames past that (500 ms by default), never on the first eight: a few
-    // late frames in a row as the short settle ends (a transition not quite
-    // over) made half of those late and failed a probe the game then held.
-    const bool judged = !probing_ || now - multiplier_changed_at_ >= settle + auto_settle_ / 4;
+    // Only the probe's own switch: a change since (new settings, the
+    // runtime's clock recovering, new output images) settles in full.
+    const bool probe_switch = probing_ && multiplier_changed_at_ == probe_started_at_;
+    const auto settle = probe_switch ? std::min(auto_settle_, kAutoProbeSettle) : auto_settle_;
     if (last_app_end_ && now - multiplier_changed_at_ >= settle) {
         // An engaged frame should take N refreshes; a passed-through one, one.
         const double multiplier = frame && frame->engaged ? static_cast<double>(frame->multiplier) : 1.0;
@@ -2063,6 +2064,15 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
             steady_late += entry.late ? 1 : 0;
         }
     }
+    // ...and the probe is judged once it has a quarter of the configured
+    // settle's frames past that (500 ms by default) and kAutoProbeJudgedFrames
+    // of them, or the configured settle has passed (a slow game), never on
+    // the first eight: a few late frames in a row as the short settle ends
+    // (a transition not quite over) made half of those late and failed a
+    // probe the game then held.
+    const auto since_switch = now - multiplier_changed_at_;
+    const bool judged = !probe_switch || (since_switch >= settle + auto_settle_ / 4 &&
+                                          (cadence_.size() >= kAutoProbeJudgedFrames || since_switch >= auto_settle_));
     const std::uint32_t before = auto_multiplier_;
     // A halving hold ends early where the game's own waits clear the report.
     // Only waits asked for well within a refresh, or released at the next
@@ -2118,7 +2128,9 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
             }
         }
         probe_not_before_ = now + probe_backoff_;
-    } else if (probing_ && now - multiplier_changed_at_ >= auto_probe_confirm_) {
+    } else if (probing_ && judged && now - multiplier_changed_at_ >= auto_probe_confirm_) {
+        // Not before it was judged: a probe still too short of frames to
+        // fail is not confirmed.
         probing_ = false;
         probe_backoff_ = auto_initial_backoff_;
         probe_not_before_ = now + probe_backoff_;
@@ -2140,6 +2152,9 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
     }
     if (auto_multiplier_ != before) {
         multiplier_changed_at_ = now;
+        if (probing_) {
+            probe_started_at_ = now;
+        }
         cadence_.clear();
         if (logger_ && gave_up_inline) {
             logger_->Info("Frame Generation automatic multiplier " + MultiplierText(before) +

@@ -1242,6 +1242,7 @@ class FrameGenPresenter {
     std::chrono::steady_clock::time_point probe_not_before_{};
     std::chrono::milliseconds probe_backoff_{10000};
     bool probing_{false};
+    std::chrono::steady_clock::time_point probe_started_at_{}; // the probe's own switch
     std::uint32_t probe_from_{0};
     // Since when every judgement found the game late with no higher
     // multiplier to step to (UpdateAutoLocked); before the last change, none.

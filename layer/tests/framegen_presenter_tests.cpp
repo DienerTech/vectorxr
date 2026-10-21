@@ -10186,59 +10186,82 @@ void TestAutoProbeAllowsLatencyAndShortHitch() {
 // game's frame time catching up with its new period, the runtime's
 // compositor adjusting), followed by steady on-time frames, must not fail
 // a probe the game can hold, nor double the next probe's wait: whether
-// the burst comes at the switch or as its settle ends.
+// the burst comes at the switch or as its settle ends, and for a slow probe
+// (4x -> 3x: a third as many frames in the same time) too.
 void TestAutoProbeSurvivesTransitionBurst() {
     struct Burst {
         std::chrono::milliseconds after; // from the switch to the first late frame
         int frames;                      // consecutive late frames
     };
+    struct Probe {
+        const char* name;
+        double engage_periods; // the game's work while Auto steps up to `from`
+        std::uint32_t from;
+        double steady_periods; // then: within reach of `to`, held there
+        std::uint32_t to;
+        std::vector<Burst> bursts;
+    };
+    const std::vector<Probe> probes = {
+        {"2x -> full rate", 1.6, 2, 0.18, 1,
+         {Burst{0ms, 4}, Burst{150ms, 4}, Burst{240ms, 3}, Burst{240ms, 4}, Burst{300ms, 4}, Burst{700ms, 4}}},
+        {"4x -> 3x", 4.2, 4, 2.7, 3, {Burst{0ms, 4}, Burst{240ms, 4}, Burst{300ms, 4}}},
+    };
     for (const FrameGenSynthesisMode mode : {FrameGenSynthesisMode::kExtrapolate, FrameGenSynthesisMode::kInterpolate}) {
-        for (const Burst burst :
-             {Burst{0ms, 4}, Burst{150ms, 4}, Burst{240ms, 3}, Burst{240ms, 4}, Burst{300ms, 4}, Burst{700ms, 4}}) {
-            const std::string name = std::string("auto probe transition burst, ") +
-                                     (mode == FrameGenSynthesisMode::kExtrapolate ? "extrapolate" : "interpolate") +
-                                     ", " + std::to_string(burst.frames) + " late frames " +
-                                     std::to_string(burst.after.count()) + " ms after the switch";
-            SessionLog log("auto-burst");
-            FrameGenPresenter presenter;
-            GpuLog gpu;
-            Runtime runtime;
-            runtime.paced = true;
-            std::unique_ptr<App> owned;
-            App* app = nullptr;
-            StartJit(presenter, gpu, mode, FrameGenMultiplier::kAuto, app, runtime, owned, log.logger.get());
-            presenter.SetAutoPolicy(200ms, 500ms, 15s, 300ms);
-            RunWork(*app, 2000ms, PeriodsOfWork(kPeriod, 1.6));
-            Check(presenter.Status().multiplier == 2, name + ": starts at 2x");
-            // The production settle and confirmation; only the probe comes sooner.
-            presenter.SetAutoPolicy(2s, 500ms, 15s, 300ms);
-            RunWork(*app, 5000ms, {2ms}, [&](const XrFrameState&) { return presenter.Status().multiplier == 1; });
-            Check(presenter.Status().multiplier == 1, name + ": the probe at full rate began");
-            const auto switched = std::chrono::steady_clock::now();
-            // Late frames take 2.5 refreshes at full rate (a frame is late
-            // past 1.25); then 2 ms frames, which hold full rate easily.
-            const auto late_work = std::chrono::microseconds(kPeriod * 5 / 2 / 1000);
-            int late = 0;
-            bool failed = false;
-            while (std::chrono::steady_clock::now() - switched < 2000ms) {
-                const bool in_burst = late < burst.frames && std::chrono::steady_clock::now() - switched >= burst.after;
-                const XrFrameState state = app->Wait();
-                app->Begin();
-                SleepPrecise(std::chrono::steady_clock::now() + (in_burst ? late_work : std::chrono::microseconds(2000)));
-                app->Release();
-                Check(XR_SUCCEEDED(app->End(state.predictedDisplayTime)), name + ": end");
-                late += in_burst ? 1 : 0;
-                failed = failed || presenter.Status().multiplier != 1;
+        for (const Probe& probe : probes) {
+            for (const Burst burst : probe.bursts) {
+                const std::string name = std::string("auto probe transition burst, ") +
+                                         (mode == FrameGenSynthesisMode::kExtrapolate ? "extrapolate" : "interpolate") +
+                                         ", " + probe.name + ", " + std::to_string(burst.frames) + " late frames " +
+                                         std::to_string(burst.after.count()) + " ms after the switch";
+                SessionLog log("auto-burst");
+                FrameGenPresenter presenter;
+                GpuLog gpu;
+                Runtime runtime;
+                runtime.paced = true;
+                std::unique_ptr<App> owned;
+                App* app = nullptr;
+                StartJit(presenter, gpu, mode, FrameGenMultiplier::kAuto, app, runtime, owned, log.logger.get());
+                presenter.SetAutoPolicy(200ms, 500ms, 15s, 300ms);
+                RunWork(*app, 4000ms, PeriodsOfWork(kPeriod, probe.engage_periods),
+                        [&](const XrFrameState&) { return presenter.Status().multiplier == probe.from; });
+                RunWork(*app, 300ms, PeriodsOfWork(kPeriod, probe.engage_periods));
+                Check(presenter.Status().multiplier == probe.from,
+                      name + ": starts at " + std::to_string(probe.from) + "x (" +
+                          std::to_string(presenter.Status().multiplier) + "x)");
+                // The production settle and confirmation; only the probe comes sooner.
+                presenter.SetAutoPolicy(2s, 500ms, 15s, 300ms);
+                const auto steady = PeriodsOfWork(kPeriod, probe.steady_periods);
+                RunWork(*app, 6000ms, steady, [&](const XrFrameState&) { return presenter.Status().multiplier == probe.to; });
+                Check(presenter.Status().multiplier == probe.to, name + ": the probe began");
+                const auto switched = std::chrono::steady_clock::now();
+                // No further probe in the window (5 s steady first).
+                presenter.SetAutoPolicy(2s, 5000ms, 15s, 300ms);
+                // Late frames take 1.25 times their refreshes and more; then
+                // the steady frames, which hold the probe's rate.
+                const auto late_work = PeriodsOfWork(kPeriod, 1.6 * probe.to).front();
+                int late = 0;
+                bool failed = false;
+                while (std::chrono::steady_clock::now() - switched < 2000ms) {
+                    const bool in_burst =
+                        late < burst.frames && std::chrono::steady_clock::now() - switched >= burst.after;
+                    const XrFrameState state = app->Wait();
+                    app->Begin();
+                    SleepPrecise(std::chrono::steady_clock::now() + (in_burst ? late_work : steady.front()));
+                    app->Release();
+                    Check(XR_SUCCEEDED(app->End(state.predictedDisplayTime)), name + ": end");
+                    late += in_burst ? 1 : 0;
+                    failed = failed || presenter.Status().multiplier != probe.to;
+                }
+                presenter.Stop();
+                const std::vector<std::string> steps = log.Lines("automatic multiplier");
+                std::cerr << "  " << name << ": " << (failed ? "FAILED" : "held") << " ("
+                          << (steps.empty() ? std::string("no step") : steps.back()) << ")" << std::endl;
+                Check(late == burst.frames, name + ": the burst ran");
+                Check(!failed && log.Lines("next probe in").empty(),
+                      name + ": a probe the game holds survives the burst, its backoff not doubled (" +
+                          (steps.empty() ? std::string("no step") : steps.back()) + ")");
+                Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
             }
-            presenter.Stop();
-            const std::vector<std::string> steps = log.Lines("automatic multiplier");
-            std::cerr << "  " << name << ": " << (failed ? "FAILED" : "held") << " ("
-                      << (steps.empty() ? std::string("no step") : steps.back()) << ")" << std::endl;
-            Check(late == burst.frames, name + ": the burst ran");
-            Check(!failed && log.Lines("next probe in").empty(),
-                  name + ": a probe the game holds survives the burst, its backoff not doubled (" +
-                      (steps.empty() ? std::string("no step") : steps.back()) + ")");
-            Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
         }
     }
 }
