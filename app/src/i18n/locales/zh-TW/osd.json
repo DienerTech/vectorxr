@@ -226,9 +226,9 @@
     "modules": "深度 / Pivot / Turbo / Quadviews",
     "performanceTarget": "目標 {fps} fps",
     "cpuDetail": "{ms} ms，執行緒 {thread}%",
-    "gpuDetail": "使用率 {busy}%，遊戲 {game}%",
-    "vramDetail": "共 {budget} GB",
-    "vramDetailWithFramegen": "共 {budget} GB，FG {framegen} MB",
+    "gpuDetail": "占用 {busy}%，遊戲 {game}%",
+    "vramDetail": "/ {budget} GB",
+    "vramDetailWithFramegen": "/ {budget} GB，FG {framegen} MB",
     "diagnostics": {
       "debugLog": "偵錯記錄",
       "flowView": "光流檢視",

@@ -226,7 +226,7 @@
     "modules": "깊이 / Pivot / Turbo / Quadviews",
     "performanceTarget": "목표 {fps} fps",
     "cpuDetail": "{ms} ms, 스레드 {thread}%",
-    "gpuDetail": "사용률 {busy}%, 게임 {game}%",
+    "gpuDetail": "부하 {busy}%, 게임 {game}%",
     "vramDetail": "/ {budget} GB",
     "vramDetailWithFramegen": "/ {budget} GB, FG {framegen} MB",
     "diagnostics": {

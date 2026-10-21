@@ -168,7 +168,9 @@ constexpr int kTagText=17, kTagPad=10, kTagHeight=30;
 constexpr COLORREF kAttention=RGB(245,185,108);
 }
 
-int OsdTextWidth(int size, const std::string& text, bool bold) { Canvas measure(1,1); return measure.Width(size,text,bold); }
+int OsdTextWidth(int size, const std::string& text, bool bold, OsdLanguage language) {
+    Canvas measure(1,1,language); return measure.Width(size,text,bold);
+}
 
 OsdCompactLayout CompactOsdLayout(const OsdSettings& settings, const OsdCompactLayoutOptions& options) {
     OsdCompactLayout layout;

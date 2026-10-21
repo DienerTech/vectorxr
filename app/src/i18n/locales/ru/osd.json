@@ -205,7 +205,7 @@
     "appFrameP95": "КАДР ПРИЛ. / P95",
     "frameTimeGraph": "ВРЕМЯ КАДРА / ПОСЛЕДНИЕ 120 КАДРОВ",
     "labels": {
-      "performance": "ПРОИЗВОДИТЕЛЬНОСТЬ",
+      "performance": "БЫСТРОДЕЙСТВИЕ",
       "performanceCompact": "ПРОИЗВ.",
       "turbo": "TURBO",
       "framegen": "FRAME GEN",
@@ -226,7 +226,7 @@
     "modules": "Глубина / Pivot / Turbo / Quadviews",
     "performanceTarget": "цель {fps} fps",
     "cpuDetail": "{ms} ms, поток {thread}%",
-    "gpuDetail": "загрузка {busy}%, игра {game}%",
+    "gpuDetail": "загр. {busy}%, игра {game}%",
     "vramDetail": "из {budget} GB",
     "vramDetailWithFramegen": "из {budget} GB, FG {framegen} MB",
     "diagnostics": {

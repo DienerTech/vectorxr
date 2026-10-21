@@ -227,8 +227,8 @@
     "performanceTarget": "cible {fps} fps",
     "cpuDetail": "{ms} ms, thread {thread} %",
     "gpuDetail": "{busy} % occupé, jeu {game} %",
-    "vramDetail": "sur {budget} Go",
-    "vramDetailWithFramegen": "sur {budget} Go, FG {framegen} Mo",
+    "vramDetail": "/ {budget} GB",
+    "vramDetailWithFramegen": "/ {budget} GB, FG {framegen} MB",
     "diagnostics": {
       "debugLog": "JOURNAL DE DÉBOGAGE",
       "flowView": "VUE DU FLUX",

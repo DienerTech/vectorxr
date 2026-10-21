@@ -226,9 +226,9 @@
     "modules": "Tiefe / Pivot / Turbo / Quadviews",
     "performanceTarget": "Ziel {fps} fps",
     "cpuDetail": "{ms} ms, Thread {thread} %",
-    "gpuDetail": "{busy} % ausgelastet, Spiel {game} %",
-    "vramDetail": "von {budget} GB",
-    "vramDetailWithFramegen": "von {budget} GB, FG {framegen} MB",
+    "gpuDetail": "Last {busy} %, Spiel {game} %",
+    "vramDetail": "/ {budget} GB",
+    "vramDetailWithFramegen": "/ {budget} GB, FG {framegen} MB",
     "diagnostics": {
       "debugLog": "DEBUG-LOG",
       "flowView": "FLUSSANSICHT",

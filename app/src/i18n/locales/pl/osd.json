@@ -226,7 +226,7 @@
     "modules": "Głębia / Pivot / Turbo / Quadviews",
     "performanceTarget": "cel {fps} fps",
     "cpuDetail": "{ms} ms, wątek {thread}%",
-    "gpuDetail": "zajętość {busy}%, gra {game}%",
+    "gpuDetail": "użycie {busy}%, gra {game}%",
     "vramDetail": "z {budget} GB",
     "vramDetailWithFramegen": "z {budget} GB, FG {framegen} MB",
     "diagnostics": {
