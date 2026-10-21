@@ -727,24 +727,31 @@ void FrameGenDepthValidator::Add(const FrameGenDepthEvidence& check) {
     constexpr double kAdopt = 0.7;
     constexpr double kDrop = 0.9;
     // A reading the other eye disproves on most of its samples scores well
-    // only through the samples sent "infinitely far" instead: it is not
-    // kept, and taken up only well clear of that (a share hovering at the
-    // bar must not switch depth on and off). Star Citizen's depth read
-    // near/far swapped scored 0.70 with the other eye disproving 88-95% of
-    // it, and smeared the HUD, cockpit and distant geometry (2026-10-15);
-    // MSFS's as submitted, 8-14%.
+    // only through the samples sent "infinitely far" instead: it is neither
+    // taken up nor kept. Star Citizen's depth read near/far swapped scored
+    // 0.70 with the other eye disproving 88-95% of it, and smeared the HUD,
+    // cockpit and distant geometry (2026-10-15); MSFS's as submitted, 8-29%
+    // (the more of the view the cockpit fills, the more), and cockpit glass
+    // written to depth about 44%. Once dropped for that, two batches in a
+    // row must pass before it is taken up again: a share hovering at the bar
+    // must not switch depth on and off every batch.
     constexpr double kMostlyDisproved = 0.5;
-    constexpr double kAdoptDisproved = 0.4;
-    auto disproved_over = [](const FrameGenDepthScore& score, double share) {
-        return score.samples > 0.0 && score.fallback > share * score.samples;
+    auto disproved = [](const FrameGenDepthScore& score) {
+        return score.samples > 0.0 && score.fallback > kMostlyDisproved * score.samples;
     };
-    auto disproved = [&](const FrameGenDepthScore& score) { return disproved_over(score, kMostlyDisproved); };
     const FrameGenDepthScore& decoded = evidence_.decoded;
     const FrameGenDepthScore& swapped = evidence_.swapped;
-    const bool decoded_adopts =
-        judged(decoded) && decoded.Ratio() < kAdopt && !disproved_over(decoded, kAdoptDisproved);
-    const bool swapped_adopts =
-        judged(swapped) && swapped.Ratio() < kAdopt && !disproved_over(swapped, kAdoptDisproved);
+    bool decoded_adopts = judged(decoded) && decoded.Ratio() < kAdopt && !disproved(decoded);
+    bool swapped_adopts = judged(swapped) && swapped.Ratio() < kAdopt && !disproved(swapped);
+    if (!Usable() && disproved_wait_ > 0) {
+        if (decoded_adopts || swapped_adopts) {
+            if (--disproved_wait_ > 0) {
+                decoded_adopts = swapped_adopts = false;
+            }
+        } else if (disproved(decoded) || disproved(swapped)) {
+            disproved_wait_ = kDisprovedWait;
+        }
+    }
     if (!Usable()) {
         if (swapped_adopts && (!decoded_adopts || swapped.Ratio() < decoded.Ratio())) {
             swapped_ = !swapped_;
@@ -763,6 +770,9 @@ void FrameGenDepthValidator::Add(const FrameGenDepthEvidence& check) {
         reading_ = swapped_ ? FrameGenDepthReading::kReversed : FrameGenDepthReading::kAsSubmitted;
     } else if (judged(decoded) && (decoded.Ratio() > kDrop || disproved(decoded))) {
         reading_ = FrameGenDepthReading::kUnusable;
+        if (disproved(decoded)) {
+            disproved_wait_ = kDisprovedWait;
+        }
     }
 
     // The scale that lines the eyes up best: the probes' minimum, refined by

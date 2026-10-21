@@ -617,6 +617,10 @@ class FrameGenDepthValidator {
     std::uint32_t check_generation_{0};
     std::uint32_t decisions_{0};
     FrameGenDepthEvidence evidence_;
+    // Dropped for being mostly disproved: passing batches in a row still
+    // needed before a reading is taken up again (FrameGenDepthValidator::Add).
+    static constexpr std::uint32_t kDisprovedWait = 2;
+    std::uint32_t disproved_wait_{0};
 };
 
 struct FrameGenDepthStatus {

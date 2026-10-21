@@ -1740,8 +1740,9 @@ void TestFrameGenDepthGuard() {
     batch(sc, check(1.0, 0.2, 0.60, 0.95));
     Expect(!sc.Usable() && !sc.Swapped(), "a mostly disproved reading stays unused however well it scores");
 
-    // MSFS: as submitted, disproved on 8-14%, is taken up and kept.
-    for (const double share : {0.08, 0.14, 0.4}) {
+    // MSFS: as submitted, disproved on 8-29%, is taken up and kept; so is
+    // cockpit glass written to depth (44%), and up to half.
+    for (const double share : {0.08, 0.14, 0.29, 0.44, 0.5}) {
         depthxr::FrameGenDepthValidator msfs;
         batch(msfs, check(0.3, share, 1.2, 0.6));
         Expect(msfs.Reading() == FrameGenDepthReading::kAsSubmitted && !msfs.Swapped(),
@@ -1752,16 +1753,21 @@ void TestFrameGenDepthGuard() {
         batch(msfs, check(0.46, 0.5, 1.2, 0.6));
         Expect(msfs.Reading() == FrameGenDepthReading::kAsSubmitted, "used depth disproved on half is kept");
     }
-    // Between the bars nothing flaps: not taken up from 45%, nor dropped there.
+    // A share hovering at half does not switch depth on and off every
+    // batch: once dropped for it, two passing batches in a row take it up.
     {
         depthxr::FrameGenDepthValidator hovering;
         batch(hovering, check(0.4, 0.45, 1.2, 0.6));
-        Expect(!hovering.Usable(), "depth disproved on 45% is not taken up");
-        batch(hovering, check(0.4, 0.38, 1.2, 0.6));
-        Expect(hovering.Usable(), "...and is once it is disproved on under 40%");
+        Expect(hovering.Usable(), "depth disproved on 45% is taken up");
+        batch(hovering, check(0.4, 0.55, 1.2, 0.6));
+        Expect(!hovering.Usable(), "...and dropped at 55%");
         batch(hovering, check(0.4, 0.45, 1.2, 0.6));
-        batch(hovering, check(0.4, 0.48, 1.2, 0.6));
-        Expect(hovering.Usable(), "...then kept while disproved on under half");
+        Expect(!hovering.Usable(), "...not taken up again by one batch at 45%");
+        batch(hovering, check(0.4, 0.55, 1.2, 0.6));
+        batch(hovering, check(0.4, 0.45, 1.2, 0.6));
+        Expect(!hovering.Usable(), "...a disproved batch between starts the wait over");
+        batch(hovering, check(0.4, 0.45, 1.2, 0.6));
+        Expect(hovering.Usable(), "...two in a row take it up again");
     }
 
     // In use, then mostly disproved (a scene the depth no longer matches):

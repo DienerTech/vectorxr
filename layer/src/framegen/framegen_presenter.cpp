@@ -4188,7 +4188,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
             "% of it (swapped " +
             Number(evidence.swapped.samples > 0.0 ? 100.0 * evidence.swapped.fallback / evidence.swapped.samples : 0.0,
                    0) +
-            "%; a reading disproved on over 40% is not taken up, over half not kept), which is treated as far "
+            "%; a reading disproved on over half is not used), which is treated as far "
             "(cockpit glass written to depth, or depth wrong there)." +
             (depth.reading == FrameGenDepthReading::kUnusable
                  ? " Some games only fill the depth they send while their own depth reprojection setting is on "
