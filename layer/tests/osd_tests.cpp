@@ -2,6 +2,7 @@
 #include <d3d11.h>
 #include "depthxr/osd_renderer.h"
 #include "depthxr/logger.h"
+#include "depthxr/osd_strings.h"
 #include <openxr/openxr_platform.h>
 #include <cmath>
 #include <algorithm>
@@ -324,6 +325,45 @@ int main(int argc, char** argv) {
                   attention_in(bound_row,702,922,top,top+28) && !attention_in(bound_row,242,462,top,top+28),
                   "The verdict, the bound side or video memory over its budget was not in the attention colour");
             if(const char* path=std::getenv("OSD_PERFORMANCE_BOUND_BMP")) WriteBitmap(path,bound_row);
+            // Every language draws its own labels and the values the layer
+            // builds (osd_strings.h), Chinese, Japanese and Korean in their
+            // script's UI font. OSD_LANGUAGE_BMP_DIR saves both layouts per
+            // language for review.
+            {
+                const char* dir=std::getenv("OSD_LANGUAGE_BMP_DIR");
+                const auto localized_snapshot=[&](OsdLanguage language) {
+                    auto snapshot=gpu_bound;
+                    const auto text=[language](OsdText id) { return std::string(OsdString(language,id)); };
+                    snapshot.turbo=text(OsdText::TurboEnabledWaiting)+text(OsdText::TurboAnalyzingSuffix);
+                    snapshot.modules=text(OsdText::ModuleDepth)+"  /  "+text(OsdText::ModulePivot)+"  /  "+text(OsdText::ModuleQuadviews);
+                    snapshot.pivot=OsdFormat(language,OsdText::Motion,text(OsdText::Active))+" / "+text(OsdText::MotionContinuous)+
+                        text(OsdText::PlusPosition)+" / Flight";
+                    snapshot.compact_pivot=OsdFormat(language,OsdText::Motion,text(OsdText::MotionContinuousShort)+" "+text(OsdText::Active))+
+                        text(OsdText::PlusPosition);
+                    snapshot.restart=text(OsdText::RestartTurboExperiments);
+                    snapshot.diagnostics=text(OsdText::DiagnosticsDebugLog);
+                    snapshot.performance=DescribePerformance(bound,language);
+                    return snapshot;
+                };
+                auto expanded=settings; expanded.clock_format="12";
+                auto compact_layout=expanded; compact_layout.compact_show_turbo=compact_layout.compact_show_pivot=compact_layout.compact_show_performance=true;
+                expanded.language=compact_layout.language="en";
+                const auto english=RasterizeOsd(expanded,false,localized_snapshot(OsdLanguage::En),stats,false);
+                for(int i=0;i<static_cast<int>(OsdLanguage::Count);++i) {
+                    const auto language=static_cast<OsdLanguage>(i);
+                    const std::string code(OsdLanguageCode(language));
+                    expanded.language=compact_layout.language=code;
+                    Check(ResolveOsdLanguage(expanded)==language,"The OSD language setting was not used");
+                    const auto full=RasterizeOsd(expanded,false,localized_snapshot(language),stats,false);
+                    const auto compact_raster=RasterizeOsd(compact_layout,true,localized_snapshot(language),stats,false);
+                    Check(full.Valid() && compact_raster.Valid(),("An OSD in "+code+" did not rasterize").c_str());
+                    if(language!=OsdLanguage::En) Check(full.pixels!=english.pixels,("The OSD in "+code+" drew the English text").c_str());
+                    if(dir) {
+                        WriteBitmap((std::string(dir)+"\\osd-"+code+".bmp").c_str(),full);
+                        WriteBitmap((std::string(dir)+"\\osd-"+code+"-compact.bmp").c_str(),compact_raster);
+                    }
+                }
+            }
             // Every expanded cell's widest text fits its 220 pixels.
             for(const char* headline:{"CPU \xE2\x88\x92" "999%","GPU +100%","VRAM 99.9 GB","VRAM 1023 MB"})
                 Check(OsdTextWidth(24,headline,true)<=220,"A performance headline does not fit its cell");

@@ -18,6 +18,7 @@ add_library(
     src/settings_resolver.cpp
     src/session_graphics.cpp
     src/performance_monitor.cpp
+    src/osd_strings.cpp
     src/swapchain_state.cpp
     src/thread_census.cpp
     src/util/config_path.cpp
@@ -35,6 +36,10 @@ add_library(
 )
 
 target_include_directories(depthxr_core PUBLIC include)
+# The OSD's translations are UTF-8 literals.
+if(MSVC)
+    set_source_files_properties(src/osd_strings.cpp PROPERTIES COMPILE_OPTIONS /utf-8)
+endif()
 target_compile_features(depthxr_core PUBLIC cxx_std_20)
 if(WIN32)
     target_sources(depthxr_core PRIVATE src/util/crt_failure_report.cpp src/performance_sampler.cpp)

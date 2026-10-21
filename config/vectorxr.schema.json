@@ -394,6 +394,17 @@
           ],
           "default": "24"
         },
+        "language": {
+          "type": "string",
+          "description": "The language the OSD draws in: app (the app's language, saved as appLanguage) or a language code (en, zh-CN, ru, es-ES, pt-BR, de, ja, fr, pl, ko, zh-TW). A code the layer does not ship falls back to app. 0.19 layers ignore it.",
+          "pattern": "^(app|[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*)$",
+          "default": "app"
+        },
+        "appLanguage": {
+          "type": "string",
+          "description": "Written by the app: its own language, which the OSD uses while language is app. Without it, the Windows display language.",
+          "pattern": "^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$"
+        },
         "customColor": {
           "type": "string",
           "pattern": "^#[0-9a-fA-F]{6}$",
