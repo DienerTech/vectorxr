@@ -1713,6 +1713,59 @@ void TestFrameGenPlan() {
            "Relative rotation should carry the newest view's yaw into previous-view space");
 }
 
+// Depth the other eye mostly disproves is never used (backlog item 2): Star
+// Citizen's depth read near/far swapped scored 0.70 against no depth with the
+// other eye disproving 88-95% of it; MSFS's as submitted leaves 0.18-0.46 of
+// the error, disproved on 8-14%.
+void TestFrameGenDepthGuard() {
+    using depthxr::FrameGenDepthReading;
+    // Three checks make a batch; each check here is a third of the batch.
+    const auto check = [](double decoded_ratio, double decoded_disproved, double swapped_ratio,
+                          double swapped_disproved) {
+        depthxr::FrameGenDepthEvidence evidence;
+        evidence.binocular = 10000.0;
+        evidence.decoded = {decoded_ratio * 1000.0, 1000.0, 1000.0, decoded_disproved * 1000.0};
+        evidence.swapped = {swapped_ratio * 1000.0, 1000.0, 1000.0, swapped_disproved * 1000.0};
+        return evidence;
+    };
+    const auto batch = [](depthxr::FrameGenDepthValidator& validator, const depthxr::FrameGenDepthEvidence& evidence) {
+        for (int i = 0; i < 3; ++i) validator.Add(evidence);
+    };
+
+    // Star Citizen: the swapped reading just under the bar, mostly disproved.
+    depthxr::FrameGenDepthValidator sc;
+    batch(sc, check(1.0, 0.2, 0.69, 0.9));
+    Expect(sc.Reading() == FrameGenDepthReading::kUnusable && !sc.Swapped() && !sc.Usable(),
+           "depth the other eye mostly disproves should not be taken up");
+    batch(sc, check(1.0, 0.2, 0.60, 0.95));
+    Expect(!sc.Usable() && !sc.Swapped(), "a mostly disproved reading stays unused however well it scores");
+
+    // MSFS: as submitted, disproved on 8-14%, is taken up and kept.
+    for (const double share : {0.08, 0.14, 0.5}) {
+        depthxr::FrameGenDepthValidator msfs;
+        batch(msfs, check(0.3, share, 1.2, 0.6));
+        Expect(msfs.Reading() == FrameGenDepthReading::kAsSubmitted && !msfs.Swapped(),
+               "depth disproved on " + std::to_string(share) + " of its samples should still be used");
+        batch(msfs, check(0.46, share, 1.2, 0.6));
+        Expect(msfs.Reading() == FrameGenDepthReading::kAsSubmitted, "used depth that still holds should be kept");
+    }
+
+    // In use, then mostly disproved (a scene the depth no longer matches):
+    // dropped, though it still scores under the drop bar.
+    depthxr::FrameGenDepthValidator dropped;
+    batch(dropped, check(0.3, 0.1, 1.2, 0.6));
+    Expect(dropped.Usable(), "the depth is taken up first");
+    batch(dropped, check(0.5, 0.6, 1.2, 0.6));
+    Expect(dropped.Reading() == FrameGenDepthReading::kUnusable,
+           "used depth the other eye comes to disprove on most samples should stop being used");
+
+    // The swapped reading wins only where the other eye does not disprove it.
+    depthxr::FrameGenDepthValidator reversed;
+    batch(reversed, check(1.0, 0.2, 0.3, 0.1));
+    Expect(reversed.Reading() == FrameGenDepthReading::kReversed && reversed.Swapped(),
+           "a swapped reading that holds is taken up");
+}
+
 void TestFrameGenHistoryState() {
     depthxr::FrameGenHistoryState state;
     depthxr::FrameGenViewRequest request;
@@ -4276,6 +4329,7 @@ int main() {
     TestFrameGenOsdRows();
     TestOsdPerformanceRow();
     TestFrameGenPlan();
+    TestFrameGenDepthGuard();
     TestFrameGenHistoryState();
     TestTurboMetricsSettingsParsing();
     TestTurboMetricsSessionRoundTrip();

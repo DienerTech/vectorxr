@@ -726,10 +726,19 @@ void FrameGenDepthValidator::Add(const FrameGenDepthEvidence& check) {
     // out at scenery, or a moment of noise, must not switch it on and off.
     constexpr double kAdopt = 0.7;
     constexpr double kDrop = 0.9;
+    // A reading the other eye disproves on most of its samples scores well
+    // only through the samples sent "infinitely far" instead: it is neither
+    // taken up nor kept. Star Citizen's depth read near/far swapped scored
+    // 0.70 with the other eye disproving 88-95% of it, and smeared the HUD,
+    // cockpit and distant geometry (2026-10-15); MSFS's as submitted, 8-14%.
+    constexpr double kMostlyDisproved = 0.5;
+    auto disproved = [](const FrameGenDepthScore& score) {
+        return score.samples > 0.0 && score.fallback > kMostlyDisproved * score.samples;
+    };
     const FrameGenDepthScore& decoded = evidence_.decoded;
     const FrameGenDepthScore& swapped = evidence_.swapped;
-    const bool decoded_adopts = judged(decoded) && decoded.Ratio() < kAdopt;
-    const bool swapped_adopts = judged(swapped) && swapped.Ratio() < kAdopt;
+    const bool decoded_adopts = judged(decoded) && decoded.Ratio() < kAdopt && !disproved(decoded);
+    const bool swapped_adopts = judged(swapped) && swapped.Ratio() < kAdopt && !disproved(swapped);
     if (!Usable()) {
         if (swapped_adopts && (!decoded_adopts || swapped.Ratio() < decoded.Ratio())) {
             swapped_ = !swapped_;
@@ -742,7 +751,7 @@ void FrameGenDepthValidator::Add(const FrameGenDepthEvidence& check) {
     } else if (swapped_adopts && swapped.Ratio() < kAdopt * decoded.Ratio()) {
         swapped_ = !swapped_;
         reading_ = swapped_ ? FrameGenDepthReading::kReversed : FrameGenDepthReading::kAsSubmitted;
-    } else if (judged(decoded) && decoded.Ratio() > kDrop) {
+    } else if (judged(decoded) && (decoded.Ratio() > kDrop || disproved(decoded))) {
         reading_ = FrameGenDepthReading::kUnusable;
     }
 
