@@ -592,9 +592,10 @@ class DirectInputPoller {
             module = std::exchange(arrival_module_, nullptr);
             arrival_failed_ = false; // a later instance may register again
             // An instance destroyed with its session begun ends the session
-            // too: where the layer stays loaded (a pinned presenter), a later
-            // instance's devices retry on the reconnect timer until its own
-            // session starts, rather than waiting for a rescan.
+            // too: where the layer stays loaded (a connector thread that
+            // outlived the wait above holds it), a later instance's devices
+            // retry on the reconnect timer until its own session starts,
+            // rather than waiting for a rescan.
             retry_backoff_.SetSessionActive(false);
         }
         // Returns once no callback runs (none takes mutex_); then the layer
