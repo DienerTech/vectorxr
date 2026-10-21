@@ -15067,7 +15067,7 @@ void OpenXrLayer::SubmitKeptVulkanBridgeReleasesLocked() {
     // runtime's image goes ahead too, unseen: nothing shows it now.
     for (auto& [swapchain, info] : tracked_swapchains_) {
         for (std::size_t kept = 0; kept < info.bridge_handovers.size(); ++kept) {
-            vulkan_bridge_.Released(swapchain);
+            vulkan_bridge_.Released(swapchain, true);
         }
     }
 }
