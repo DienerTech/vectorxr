@@ -4633,7 +4633,47 @@ struct ReplayError {
     // ... and over the newest real frame's own gradients there, unresampled:
     // what alternates with generated frames in the headset (1: no shimmer).
     double sharpness_newest{0};
+    double bad_all{0}; // percent of all valid pixels
+    // Bad pixels by the depth band of the view's depth (kReplayBands), and
+    // each band's share of the valid pixels (percent).
+    std::array<double, 4> bad_band{}, band_share{};
+    // Pixels beside a depth edge (ReplayDepthEdges): all of them, and those
+    // on its near side (thin near content over the background).
+    double bad_edges{0}, bad_edges_near{0}, edge_share{0};
 };
+// Depth bands of the split: nearer than 4 m (the cockpit), 4-30 m, 30 m to
+// the shaders' sky (FG_WORLD_SKY), and none (no depth, or sky).
+inline constexpr const char* kReplayBands[4] = {"<4 m", "4-30 m", ">=30 m", "none"};
+int ReplayBand(float depth) {
+    if (!(depth > 0.0f) || depth >= 5e4f) return 3;
+    return depth < 4.0f ? 0 : depth < 30.0f ? 1 : 2;
+}
+// Half-resolution texels within a texel of a depth edge (the 3x3 around
+// differs by more than a quarter): 1 on the edge's far side, 2 on its near
+// side. Unknown depth and sky count as the far depth.
+std::vector<std::uint8_t> ReplayDepthEdges(const ReplayView& view) {
+    std::vector<std::uint8_t> edges(view.depth.size(), 0);
+    const auto at = [&](int x, int y) {
+        x = std::clamp(x, 0, static_cast<int>(view.half_width) - 1);
+        y = std::clamp(y, 0, static_cast<int>(view.half_height) - 1);
+        const float depth = std::abs(view.depth[std::size_t(y) * view.half_width + x]);
+        return depth > 0.0f && depth < 1e5f ? std::max(depth, 0.01f) : 1e5f;
+    };
+    for (int y = 0; y < static_cast<int>(view.half_height); ++y) {
+        for (int x = 0; x < static_cast<int>(view.half_width); ++x) {
+            float nearest = 1e30f, farthest = 0.0f;
+            for (int i = 0; i < 9; ++i) {
+                const float depth = at(x + i % 3 - 1, y + i / 3 - 1);
+                nearest = std::min(nearest, depth);
+                farthest = std::max(farthest, depth);
+            }
+            if (farthest > 1.25f * nearest) {
+                edges[std::size_t(y) * view.half_width + x] = at(x, y) < 1.1f * nearest ? 2 : 1;
+            }
+        }
+    }
+    return edges;
+}
 double PixelLuma(std::uint32_t p) {
     return (0.2126 * (p & 255u) + 0.7152 * ((p >> 8) & 255u) + 0.0722 * ((p >> 16) & 255u)) / 255.0;
 }
@@ -4641,9 +4681,11 @@ double Gradient(const Pixels& image, std::size_t index, std::uint32_t width) {
     return std::abs(PixelLuma(image[index + 1]) - PixelLuma(image[index - 1])) +
            std::abs(PixelLuma(image[index + width]) - PixelLuma(image[index - width]));
 }
-ReplayError CompareTo(const Pixels& image, const Pixels& truth, const std::vector<bool>& valid, const ReplayView& view) {
+ReplayError CompareTo(const Pixels& image, const Pixels& truth, const std::vector<bool>& valid, const ReplayView& view,
+                      const std::vector<std::uint8_t>& depth_edges) {
     double sums[3] = {}, counts[3] = {}, bad[3] = {};
     double edge_sum = 0, edge_count = 0, image_energy = 0, truth_energy = 0, newest_energy = 0;
+    double band_counts[4] = {}, band_bad[4] = {}, edge_counts[2] = {}, edge_bad[2] = {};
     for (std::uint32_t y = 0; y < view.height; ++y) {
         const std::uint32_t hy = std::min(y / 2, view.half_height - 1);
         for (std::uint32_t x = 0; x < view.width; ++x) {
@@ -4654,13 +4696,23 @@ ReplayError CompareTo(const Pixels& image, const Pixels& truth, const std::vecto
                 error += std::abs(static_cast<int>((image[index] >> (8 * c)) & 255u) - static_cast<int>((truth[index] >> (8 * c)) & 255u));
             }
             error /= 3 * 255.0;
-            const float depth = std::abs(view.depth[std::size_t{hy} * view.half_width + std::min(x / 2, view.half_width - 1)]);
+            const std::size_t texel = std::size_t{hy} * view.half_width + std::min(x / 2, view.half_width - 1);
+            const float depth = std::abs(view.depth[texel]);
             const int part = depth > 0.0f && depth < 4.0f ? 1 : 2;
+            const double is_bad = error > 0.1 ? 1.0 : 0.0;
             sums[0] += error;
             counts[0] += 1;
+            bad[0] += is_bad;
             sums[part] += error;
             counts[part] += 1;
-            bad[part] += error > 0.1 ? 1.0 : 0.0;
+            bad[part] += is_bad;
+            const int band = ReplayBand(depth);
+            band_counts[band] += 1;
+            band_bad[band] += is_bad;
+            if (const std::uint8_t edge = depth_edges.empty() ? 0 : depth_edges[texel]) {
+                edge_counts[edge - 1] += 1;
+                edge_bad[edge - 1] += is_bad;
+            }
             if (part == 1 && x > 0 && y > 0 && x + 1 < view.width && y + 1 < view.height && valid[index - 1] &&
                 valid[index + 1] && valid[index - view.width] && valid[index + view.width]) {
                 const double truth_gradient = Gradient(truth, index, view.width);
@@ -4674,10 +4726,180 @@ ReplayError CompareTo(const Pixels& image, const Pixels& truth, const std::vecto
             }
         }
     }
-    return {counts[0] ? sums[0] / counts[0] : 0, counts[1] ? sums[1] / counts[1] : 0, counts[2] ? sums[2] / counts[2] : 0,
-            counts[1] ? 100.0 * bad[1] / counts[1] : 0, counts[2] ? 100.0 * bad[2] / counts[2] : 0,
-            edge_count ? edge_sum / edge_count : 0, truth_energy > 0 ? image_energy / truth_energy : 0,
-            newest_energy > 0 ? image_energy / newest_energy : 0};
+    ReplayError result{counts[0] ? sums[0] / counts[0] : 0, counts[1] ? sums[1] / counts[1] : 0,
+                       counts[2] ? sums[2] / counts[2] : 0, counts[1] ? 100.0 * bad[1] / counts[1] : 0,
+                       counts[2] ? 100.0 * bad[2] / counts[2] : 0, edge_count ? edge_sum / edge_count : 0,
+                       truth_energy > 0 ? image_energy / truth_energy : 0,
+                       newest_energy > 0 ? image_energy / newest_energy : 0};
+    result.bad_all = counts[0] ? 100.0 * bad[0] / counts[0] : 0;
+    for (int band = 0; band < 4; ++band) {
+        result.bad_band[band] = band_counts[band] ? 100.0 * band_bad[band] / band_counts[band] : 0;
+        result.band_share[band] = counts[0] ? 100.0 * band_counts[band] / counts[0] : 0;
+    }
+    const double edges = edge_counts[0] + edge_counts[1];
+    result.bad_edges = edges ? 100.0 * (edge_bad[0] + edge_bad[1]) / edges : 0;
+    result.bad_edges_near = edge_counts[1] ? 100.0 * edge_bad[1] / edge_counts[1] : 0;
+    result.edge_share = counts[0] ? 100.0 * edges / counts[0] : 0;
+    return result;
+}
+
+// What the depth-aligned score drops (ReplayAlign), as percent of the pixels
+// rotation-only alignment keeps.
+struct ReplayMasked {
+    double disoccluded{0}, untrusted{0}, unaligned{0};
+};
+
+// Truth aligned by depth and pose, not rotation alone (TurnTo): each pixel
+// of the generated view (`view`'s orientation, the eye at `eye`, world
+// meters) reads `next` where the surface its ray meets lies, found by moving
+// along the ray with `next`'s depth until both agree (exactly TurnTo when the
+// eye is where `next` was rendered). Kept only where the result says what a
+// method could have shown from `sources`, the real frames it was given:
+// - unaligned: no consistent surface along the ray (an edge or depth hole);
+// - disoccluded: no source saw the surface (something nearer stood in front
+//   of it there, or it lay outside the source's view);
+// - untrusted: a source's depth there disagrees with the surface, or the
+//   backend's trust pass disproved it (`newest_trusted`: the newest source's
+//   resolved depth, negative where disproved; empty when not read).
+Pixels ReplayAlign(const ReplayView& view, const std::array<double, 3>& eye, const ReplayView& next,
+                   const std::vector<const ReplayView*>& sources, const std::vector<float>& newest_trusted,
+                   std::vector<bool>& valid, ReplayMasked& masked) {
+    struct Frame {
+        std::array<std::array<double, 3>, 3> rotation;
+        double l, r, u, d;
+        std::array<double, 3> position;
+    };
+    const auto frame_of = [](const ReplayView& v) {
+        const FrameGenViewGeometry& g = v.newest;
+        return Frame{ReplayRotation(g.orientation), std::tan(g.angle_left), std::tan(g.angle_right),
+                     std::tan(g.angle_up), std::tan(g.angle_down), {g.position[0], g.position[1], g.position[2]}};
+    };
+    const Frame own = frame_of(view), truth = frame_of(next);
+    std::vector<Frame> source_frames;
+    for (const ReplayView* source : sources) source_frames.push_back(frame_of(*source));
+    // A world point in a view: its uv and depth along the view's axis.
+    const auto project = [](const Frame& f, const std::array<double, 3>& origin, const std::array<double, 3>& point,
+                            double& u, double& v) {
+        double delta[3] = {point[0] - origin[0], point[1] - origin[1], point[2] - origin[2]}, local[3];
+        for (int i = 0; i < 3; ++i) local[i] = f.rotation[0][i] * delta[0] + f.rotation[1][i] * delta[1] + f.rotation[2][i] * delta[2];
+        if (local[2] > -1e-6) return -1.0;
+        u = ((local[0] / -local[2]) - f.l) / (f.r - f.l);
+        v = ((local[1] / -local[2]) - f.u) / (f.d - f.u);
+        return -local[2];
+    };
+    const auto depth_at = [](const ReplayView& v, double u, double w) {
+        const int x = std::clamp(static_cast<int>(u * v.half_width), 0, static_cast<int>(v.half_width) - 1);
+        const int y = std::clamp(static_cast<int>(w * v.half_height), 0, static_cast<int>(v.half_height) - 1);
+        const float depth = std::abs(v.depth[std::size_t(y) * v.half_width + x]);
+        return depth > 0.0f && depth < 5e4f ? static_cast<double>(depth) : 1e5;
+    };
+    Pixels out(view.color.size(), 0xff000000u);
+    valid.assign(view.color.size(), false);
+    std::atomic<std::uint64_t> counts[4] = {}; // kept by rotation alone, unaligned, disoccluded, untrusted
+    auto rows = [&](std::uint32_t first, std::uint32_t step) {
+        std::uint64_t local_counts[4] = {};
+        for (std::uint32_t y = first; y < view.height; y += step) {
+            for (std::uint32_t x = 0; x < view.width; ++x) {
+                const double dir[3] = {own.l + (own.r - own.l) * (x + 0.5) / view.width,
+                                       own.u + (own.d - own.u) * (y + 0.5) / view.height, -1.0};
+                std::array<double, 3> ray{};
+                for (int i = 0; i < 3; ++i) ray[i] = own.rotation[i][0] * dir[0] + own.rotation[i][1] * dir[1] + own.rotation[i][2] * dir[2];
+                // Rotation alone first (an infinitely far surface), then the
+                // depth `next` reads there, a few times.
+                double u = 0, w = 0, along = 1e5;
+                bool inside = false, aligned = false;
+                for (int iteration = 0; iteration < 4; ++iteration) {
+                    const std::array<double, 3> point{eye[0] + ray[0] * along, eye[1] + ray[1] * along, eye[2] + ray[2] * along};
+                    if (project(truth, truth.position, point, u, w) < 0.0 || u < 0 || w < 0 || u >= 1 || w >= 1) break;
+                    if (iteration == 0) {
+                        inside = true;
+                        local_counts[0] += 1;
+                    }
+                    // The surface `next` sees there, back in this view.
+                    const double depth = depth_at(next, u, w);
+                    const double tx = truth.l + (truth.r - truth.l) * u, ty = truth.u + (truth.d - truth.u) * w;
+                    std::array<double, 3> surface{};
+                    for (int i = 0; i < 3; ++i) {
+                        surface[i] = truth.position[i] +
+                                     (truth.rotation[i][0] * tx + truth.rotation[i][1] * ty - truth.rotation[i][2]) * depth;
+                    }
+                    double su = 0, sw = 0;
+                    const double here = project(own, eye, surface, su, sw);
+                    if (here > 0.0 && std::abs(su * view.width - (x + 0.5)) < 0.75 &&
+                        std::abs(sw * view.height - (y + 0.5)) < 0.75) {
+                        aligned = true;
+                        along = here;
+                        break;
+                    }
+                    if (here <= 0.0) break;
+                    along = here;
+                }
+                if (!inside) continue;
+                if (!aligned) {
+                    local_counts[1] += 1;
+                    continue;
+                }
+                const std::array<double, 3> point{eye[0] + ray[0] * along, eye[1] + ray[1] * along, eye[2] + ray[2] * along};
+                bool seen = false, disagrees = false;
+                for (std::size_t s = 0; s < sources.size() && !seen; ++s) {
+                    double su = 0, sw = 0;
+                    const double expected = project(source_frames[s], source_frames[s].position, point, su, sw);
+                    if (expected <= 0.0 || su < 0 || sw < 0 || su >= 1 || sw >= 1) continue;
+                    // Any of the 3x3 depth texels around within 5% (or both far).
+                    bool match = false, nearer = false;
+                    const ReplayView& source = *sources[s];
+                    for (int i = 0; i < 9 && !match; ++i) {
+                        const double depth = depth_at(*sources[s], su + (i % 3 - 1) / double(source.half_width),
+                                                      sw + (i / 3 - 1) / double(source.half_height));
+                        const bool distant = depth >= 5e4 && expected >= 5e4 * 0.5;
+                        match = distant || std::abs(depth - expected) <= 0.05 * expected + 0.02;
+                        nearer = nearer || depth < 0.95 * expected - 0.02;
+                    }
+                    if (match && s + 1 == sources.size() && !newest_trusted.empty() && expected < 5e4) {
+                        const int hx = std::clamp(static_cast<int>(su * source.half_width), 0, static_cast<int>(source.half_width) - 1);
+                        const int hy = std::clamp(static_cast<int>(sw * source.half_height), 0, static_cast<int>(source.half_height) - 1);
+                        if (newest_trusted[std::size_t(hy) * source.half_width + hx] <= 0.0f) {
+                            disagrees = true;
+                            continue;
+                        }
+                    }
+                    seen = match;
+                    disagrees = disagrees || (!match && !nearer);
+                }
+                if (!seen) {
+                    local_counts[disagrees ? 3 : 2] += 1;
+                    continue;
+                }
+                const double sx = u * next.width - 0.5, sy = w * next.height - 0.5;
+                if (sx < 0 || sy < 0 || sx > next.width - 1.001 || sy > next.height - 1.001) {
+                    local_counts[1] += 1;
+                    continue;
+                }
+                const int ix = static_cast<int>(sx), iy = static_cast<int>(sy);
+                const double fx = sx - ix, fy = sy - iy;
+                std::uint32_t pixel = 0xff000000u;
+                for (int c = 0; c < 3; ++c) {
+                    auto at = [&](int px, int py) {
+                        return static_cast<double>((next.color[std::size_t{static_cast<std::uint32_t>(py)} * next.width + px] >> (8 * c)) & 255u);
+                    };
+                    const double value = (at(ix, iy) * (1 - fx) + at(ix + 1, iy) * fx) * (1 - fy) +
+                                         (at(ix, iy + 1) * (1 - fx) + at(ix + 1, iy + 1) * fx) * fy;
+                    pixel |= static_cast<std::uint32_t>(std::lround(value)) << (8 * c);
+                }
+                const std::size_t index = std::size_t{y} * view.width + x;
+                out[index] = pixel;
+                valid[index] = true;
+            }
+        }
+        for (int i = 0; i < 4; ++i) counts[i] += local_counts[i];
+    };
+    const std::uint32_t threads = std::max(1u, std::thread::hardware_concurrency());
+    std::vector<std::thread> workers;
+    for (std::uint32_t t = 0; t < threads; ++t) workers.emplace_back(rows, t, threads);
+    for (auto& worker : workers) worker.join();
+    const double kept = std::max<double>(1.0, static_cast<double>(counts[0].load()));
+    masked = {100.0 * counts[2].load() / kept, 100.0 * counts[3].load() / kept, 100.0 * counts[1].load() / kept};
+    return out;
 }
 
 // Research: a full-resolution crop (FG_REPLAY_CROP=x0,y0,x1,y1), scaled up
@@ -4839,11 +5061,40 @@ int RunReplay(Harness& harness) {
     };
     // Compares each view's generated frame (in frame `view_frame`'s view)
     // with frame `truth_frame` turned to that view; `hold` (view 0) is what
-    // showing a real frame instead would give.
+    // showing a real frame instead would give. Also with the truth aligned
+    // by depth and pose (ReplayAlign): the eye moved by `shifts` times
+    // `time` (FrameGenViewRequest::shift), `source_frames` the real frames
+    // the generated one was made from, newest last.
     double sums[7] = {};
+    // Bad pixels by band and beside depth edges (ReplayError), with the
+    // truth turned and aligned.
+    struct BandSums {
+        double bad_all{0}, bad_cockpit{0}, bad_outside{0};
+        std::array<double, 4> bad_band{}, band_share{};
+        double bad_edges{0}, bad_edges_near{0}, edge_share{0};
+        void Add(const ReplayError& e) {
+            bad_all += e.bad_all;
+            bad_cockpit += e.bad_cockpit;
+            bad_outside += e.bad_outside;
+            for (int b = 0; b < 4; ++b) {
+                bad_band[b] += e.bad_band[b];
+                band_share[b] += e.band_share[b];
+            }
+            bad_edges += e.bad_edges;
+            bad_edges_near += e.bad_edges_near;
+            edge_share += e.edge_share;
+        }
+    };
+    BandSums rotation_sums, aligned_sums;
+    ReplayMasked masked_sums;
+    // Per view: with one eye's depth the eyes differ.
+    std::vector<double> view_bad(view_count, 0.0);
+    std::vector<std::size_t> view_evaluated(view_count, 0);
     std::size_t evaluated = 0;
     auto evaluate = [&](std::size_t k, std::size_t view_frame, std::size_t truth_frame, const Pixels& hold,
-                        const FrameGenExecuteResult& result, float fraction) {
+                        const FrameGenExecuteResult& result, float fraction,
+                        const std::vector<std::array<float, 3>>& shifts, float time,
+                        const std::vector<std::size_t>& source_frames) {
         for (std::size_t v = 0; v < view_count; ++v) {
             const ReplayView& view = frames[view_frame].views[v];
             std::vector<float> xy;
@@ -4895,8 +5146,49 @@ int RunReplay(Harness& harness) {
             const Pixels generated = harness.readback_sized(g_swapchains[outputs[v]][0]);
             std::vector<bool> valid;
             const Pixels truth = TurnTo(view, frames[truth_frame].views[v], valid);
-            const ReplayError generated_error = CompareTo(generated, truth, valid, view);
-            const ReplayError hold_error = CompareTo(v == 0 ? hold : frames[view_frame].views[v].color, truth, valid, view);
+            const std::vector<std::uint8_t> depth_edges = ReplayDepthEdges(view);
+            const ReplayError generated_error = CompareTo(generated, truth, valid, view, depth_edges);
+            const ReplayError hold_error =
+                CompareTo(v == 0 ? hold : frames[view_frame].views[v].color, truth, valid, view, depth_edges);
+            // The eye the generated frame is seen from, in world meters.
+            std::array<double, 3> eye{view.newest.position[0], view.newest.position[1], view.newest.position[2]};
+            if (v < shifts.size()) {
+                const auto rotation = ReplayRotation(view.newest.orientation);
+                for (int i = 0; i < 3; ++i) {
+                    for (int j = 0; j < 3; ++j) eye[i] += rotation[i][j] * shifts[v][j] * time;
+                }
+            }
+            std::vector<const ReplayView*> sources;
+            for (const std::size_t f : source_frames) sources.push_back(&frames[f].views[v]);
+            std::vector<float> trusted;
+            FrameGenExtent trusted_extent{};
+            std::uint32_t trusted_channels = 0;
+            if (no_depth ||
+                !gpu->ReadTexture(v, {FrameGenTextureKind::kDepth, 0}, trusted, trusted_extent, trusted_channels) ||
+                trusted_channels != 1 || trusted_extent.width != sources.back()->half_width ||
+                trusted_extent.height != sources.back()->half_height) {
+                trusted.clear();
+            }
+            std::vector<bool> aligned_valid;
+            ReplayMasked masked;
+            const Pixels aligned =
+                ReplayAlign(view, eye, frames[truth_frame].views[v], sources, trusted, aligned_valid, masked);
+            const ReplayError aligned_error = CompareTo(generated, aligned, aligned_valid, view, depth_edges);
+            rotation_sums.Add(generated_error);
+            aligned_sums.Add(aligned_error);
+            masked_sums.disoccluded += masked.disoccluded;
+            masked_sums.untrusted += masked.untrusted;
+            masked_sums.unaligned += masked.unaligned;
+            view_bad[v] += generated_error.bad_all;
+            view_evaluated[v] += 1;
+            std::printf("frame %zu view %zu bands: all %.2f%% bad; <4 m %.2f%%, 4-30 m %.2f%%, >=30 m %.2f%%, none %.2f%%;"
+                        " depth edges %.2f%% (near side %.2f%%) | aligned: all %.2f%%, cockpit %.2f%%, outside %.2f%%;"
+                        " masked disoccluded %.2f%%, untrusted %.2f%%, unaligned %.2f%%%s\n",
+                        k, v, generated_error.bad_all, generated_error.bad_band[0], generated_error.bad_band[1],
+                        generated_error.bad_band[2], generated_error.bad_band[3], generated_error.bad_edges,
+                        generated_error.bad_edges_near, aligned_error.bad_all, aligned_error.bad_cockpit,
+                        aligned_error.bad_outside, masked.disoccluded, masked.untrusted, masked.unaligned,
+                        trusted.empty() ? " (no trust read)" : "");
             std::printf("frame %zu view %zu (depth %s, %.2f): generated %.4f (cockpit %.4f %.2f%% bad, outside %.4f %.2f%% bad,"
                         " cockpit edges %.4f, sharpness %.3f, vs newest %.3f)  hold %.4f (cockpit %.4f %.2f%%, outside %.4f %.2f%%)\n",
                         k, v, result.depth.size() > v && result.depth[v] ? "used" : "not used", fraction,
@@ -4916,7 +5208,8 @@ int RunReplay(Harness& harness) {
                 WriteCropPpm(prefix + "-crop-truth.ppm", truth, view.width, view.height, *crop, 3);
                 WriteCropPpm(prefix + "-crop-newest.ppm", frames[view_frame].views[v].color, view.width, view.height, *crop, 3);
             }
-            if (!g_replay_output.empty() && v == 0) {
+            // Crops alone when cropping: whole frames are tens of MB each.
+            if (!g_replay_output.empty() && v == 0 && !crop) {
                 WriteHalfPpm(prefix + "-generated.ppm", generated, view.width, view.height);
                 WriteHalfPpm(prefix + "-truth.ppm", truth, view.width, view.height);
                 WriteHalfPpm(prefix + "-newest.ppm", frames[view_frame].views[v].color, view.width, view.height);
@@ -4963,7 +5256,10 @@ int RunReplay(Harness& harness) {
                 Check(written, "replay just in time (" + jit_variant + "): " + error);
                 Check(gpu->WaitIdle(), "replay: the frame was not written");
                 result.synthesized.assign(view_count, true);
-                evaluate(k, k, k + 1, frames[k].views[0].color, result, fraction);
+                evaluate(k, k, k + 1, frames[k].views[0].color, result, fraction,
+                         jit_variant != "stale-noshift" ? eye_shifts(k, k + 1, fraction)
+                                                        : std::vector<std::array<float, 3>>{},
+                         fraction, {k});
                 continue;
             }
             if (interpolate && measure) {
@@ -4974,9 +5270,10 @@ int RunReplay(Harness& harness) {
                 const float fraction = 1.0f / (1.0f + ratio);
                 gpu->ResetHistory();
                 execute(k - 1, std::nullopt, FrameGenSynthesisMode::kInterpolate, fraction, {}, result);
-                execute(k + 1, k - 1, FrameGenSynthesisMode::kInterpolate, fraction,
-                        eye_shifts(k + 1, k, 1.0f - fraction), result);
-                evaluate(k, k + 1, k, frames[k + 1].views[0].color, result, fraction);
+                const auto shifts = eye_shifts(k + 1, k, 1.0f - fraction);
+                execute(k + 1, k - 1, FrameGenSynthesisMode::kInterpolate, fraction, shifts, result);
+                evaluate(k, k + 1, k, frames[k + 1].views[0].color, result, fraction, shifts, 1.0f - fraction,
+                         {k - 1, k + 1});
                 continue;
             }
             // Frame k extrapolated to frame k + 1: one frame at the time ratio
@@ -5006,7 +5303,7 @@ int RunReplay(Harness& harness) {
             execute(k, k > 0 ? std::optional<std::size_t>(k - 1) : std::nullopt, FrameGenSynthesisMode::kExtrapolate,
                     fraction, shifts, result);
             if (measure && k > 0 && has_next && !interpolate) {
-                evaluate(k, k, k + 1, frames[k].views[0].color, result, fraction);
+                evaluate(k, k, k + 1, frames[k].views[0].color, result, fraction, shifts, fraction, {k});
             }
         }
         if (pass == 2) {
@@ -5019,6 +5316,25 @@ int RunReplay(Harness& harness) {
                     " sharpness %.3f, vs newest %.3f\n",
                     evaluated, sums[0] / evaluated, sums[1] / evaluated, sums[2] / evaluated, sums[3] / evaluated,
                     sums[4] / evaluated, sums[5] / evaluated, sums[6] / evaluated);
+        // Bad pixels by depth band (kReplayBands) and beside depth edges,
+        // with the truth turned (as above) and aligned by depth and pose.
+        const double n = static_cast<double>(evaluated);
+        for (const auto& [name, s] : {std::pair<const char*, const BandSums*>{"Bands", &rotation_sums},
+                                      std::pair<const char*, const BandSums*>{"Aligned bands", &aligned_sums}}) {
+            std::printf("%s over %zu views: all %.3f%% bad, cockpit %.3f%%, outside %.3f%%; <4 m %.3f%% (%.1f%% of"
+                        " pixels), 4-30 m %.3f%% (%.1f%%), >=30 m %.3f%% (%.1f%%), none %.3f%% (%.1f%%); depth edges"
+                        " %.3f%% (near side %.3f%%, %.1f%% of pixels)\n",
+                        name, evaluated, s->bad_all / n, s->bad_cockpit / n, s->bad_outside / n, s->bad_band[0] / n,
+                        s->band_share[0] / n, s->bad_band[1] / n, s->band_share[1] / n, s->bad_band[2] / n,
+                        s->band_share[2] / n, s->bad_band[3] / n, s->band_share[3] / n, s->bad_edges / n,
+                        s->bad_edges_near / n, s->edge_share / n);
+        }
+        std::printf("Aligned masks over %zu views: disoccluded %.2f%%, untrusted %.2f%%, unaligned %.2f%%\n", evaluated,
+                    masked_sums.disoccluded / n, masked_sums.untrusted / n, masked_sums.unaligned / n);
+        for (std::size_t v = 0; v < view_count; ++v) {
+            std::printf("View %zu over %zu frames: all %.3f%% bad\n", v, view_evaluated[v],
+                        view_evaluated[v] ? view_bad[v] / view_evaluated[v] : 0.0);
+        }
     }
     gpu->Reset();
     return 0;
