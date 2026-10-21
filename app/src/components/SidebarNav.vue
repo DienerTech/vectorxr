@@ -49,6 +49,7 @@ function moduleDotClass(tab: { enhancementActive?: boolean }): string {
         class="side-nav-item flex items-center justify-between gap-2 rounded-[0.65rem] px-3 py-2 text-left text-sm font-medium transition"
         :class="activeTab === tab.id ? 'side-nav-item-active' : ''"
         type="button"
+        :data-tab="tab.id"
         :title="tab.subtitle"
         @click="$emit('select', tab.id)"
       >
@@ -65,6 +66,7 @@ function moduleDotClass(tab: { enhancementActive?: boolean }): string {
         class="side-nav-item flex items-center justify-between gap-2 rounded-[0.65rem] px-3 py-2 text-left text-sm font-medium transition"
         :class="activeTab === tab.id ? 'side-nav-item-active' : ''"
         type="button"
+        :data-tab="tab.id"
         :title="t('app.sidebar.moduleTitle', { subtitle: tab.subtitle, status: tab.status })"
         @click="$emit('select', tab.id)"
       >
