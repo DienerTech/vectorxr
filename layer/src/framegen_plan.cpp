@@ -1,10 +1,17 @@
 #include "depthxr/framegen_plan.h"
 
+#include "depthxr/config_path.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <mutex>
+#include <set>
 #include <string>
+#include <string_view>
 
 namespace depthxr {
 namespace {
@@ -1717,6 +1724,215 @@ FrameGenEngineCalibration CalibrateFrameGenEngine(const std::vector<FrameGenEngi
                          return a.residual_px < b.residual_px;
                      });
     return calibration;
+}
+
+// --- Engine motion vectors: the frame gates --------------------------------
+
+namespace {
+
+constexpr double kDegreesPerRadian = 57.29577951308232;
+
+// a * b, in double.
+std::array<double, 4> Multiply(const std::array<double, 4>& a, const std::array<double, 4>& b) {
+    return {a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1], a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+            a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3], a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2]};
+}
+
+std::array<double, 4> Unit(const std::array<float, 4>& q) {
+    const double length = std::sqrt(static_cast<double>(q[0]) * q[0] + static_cast<double>(q[1]) * q[1] +
+                                    static_cast<double>(q[2]) * q[2] + static_cast<double>(q[3]) * q[3]);
+    // A quaternion left unset (all zero) turns nothing.
+    if (!(length > 0.0)) return {0.0, 0.0, 0.0, 1.0};
+    return {q[0] / length, q[1] / length, q[2] / length, q[3] / length};
+}
+
+// The angle a unit quaternion turns by, in degrees.
+double Degrees(const std::array<double, 4>& q) {
+    return 2.0 * std::atan2(std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2]), std::abs(q[3])) * kDegreesPerRadian;
+}
+
+} // namespace
+
+const char* FrameGenEngineGateName(std::size_t index) {
+    static constexpr std::array<const char*, kFrameGenEngineGateCount> kNames{
+        "noStruct", "skip", "pairing", "cut", "decode", "recreate", "settle", "uncaptured"};
+    return index < kNames.size() ? kNames[index] : "";
+}
+
+std::uint32_t FrameGenEngineGates(const FrameGenEngineGateRecord* record, const FrameGenEngineGateRecord* previous,
+                                  const FrameGenEngineGateFacts& facts) {
+    std::uint32_t gates = 0;
+    // G8: swapchains made lately (a game resizing its views makes them anew,
+    // Star Citizen churns them at its world entry) settle first.
+    if (facts.frames_since_swapchain < 2) gates |= kFrameGenEngineRecreate;
+    if (facts.seconds_since_swapchain < 3.0) gates |= kFrameGenEngineSettle;
+    // G9: the engine path serves frames analyzed just in time, of two views
+    // each captured at its release.
+    if (!facts.captured || !facts.just_in_time || facts.views != 2 || facts.composed) {
+        gates |= kFrameGenEngineUncaptured;
+    }
+    // G1, G2: a readable structure on every view, of one extension. Another
+    // frame's record is none of this one's (a frame the layer handed none
+    // over for).
+    if (!record || record->display_time != facts.end_time || !record->complete || record->views.size() != facts.views ||
+        std::any_of(record->views.begin(), record->views.end(),
+                    [](const FrameGenEngineGateView& view) { return !view.readable; })) {
+        return gates | kFrameGenEngineNoStruct;
+    }
+    // G4: the game says the frame repeats the one before (XR_FB_space_warp).
+    if (std::any_of(record->views.begin(), record->views.end(),
+                    [](const FrameGenEngineGateView& view) { return view.frame_skip; })) {
+        gates |= kFrameGenEngineSkip;
+    }
+    // G6.
+    if (record->cut) gates |= kFrameGenEngineCut;
+    // G7: the frame's depth decoded as its structure describes it. The depth
+    // captured at its release is decoded as the frame before described its
+    // own, so the first frame after a change (MSFS: nearZ 1000 in its menus,
+    // 356700 in flight) is not.
+    for (const FrameGenEngineGateView& view : record->views) {
+        const auto& decoded = view.view < facts.decoded.size() ? facts.decoded[view.view] : std::nullopt;
+        if (decoded && !SameFrameGenDepthDescription(*decoded, view.depth)) gates |= kFrameGenEngineDecode;
+    }
+    // G3, G5: the record before is the one of the frame generated from right
+    // before this one, which is the projection frame right before it (none
+    // without a projection came between: those have records of their own),
+    // with the same vectors in the same regions; and no pause came between.
+    bool paired = previous && previous->sequence != 0 && previous->sequence == facts.previous_sequence &&
+                  facts.continuous && !facts.paused && previous->complete && previous->projection_frame != 0 &&
+                  previous->projection_frame + 1 == record->projection_frame &&
+                  previous->views.size() == record->views.size();
+    for (std::size_t i = 0; paired && i < record->views.size(); ++i) {
+        const FrameGenEngineGateView& before = previous->views[i];
+        const FrameGenEngineGateView& now = record->views[i];
+        paired = before.view == now.view && before.vectors == now.vectors && before.rect == now.rect;
+    }
+    if (!paired) gates |= kFrameGenEnginePairing;
+    return gates;
+}
+
+bool FrameGenEngineCuts::Add(const std::array<float, 4>& orientation, const std::array<float, 3>& position) {
+    const double distance =
+        std::sqrt(static_cast<double>(position[0]) * position[0] + static_cast<double>(position[1]) * position[1] +
+                  static_cast<double>(position[2]) * position[2]);
+    // Anything not finite is a cut too (Unit would take a rotation of NaN for
+    // an unset one).
+    const bool finite = std::isfinite(distance) &&
+                        std::all_of(orientation.begin(), orientation.end(), [](float c) { return std::isfinite(c); });
+    const bool cut = !finite || !(distance <= std::max(50.0, 8.0 * Median() + 1.0)) || !(Degrees(Unit(orientation)) <= 10.0);
+    // A cut joins the median as well: one moves a median of 30 frames
+    // nowhere, while a game that keeps moving faster (MSFS's sim rate, slew)
+    // makes its new speed the median within 15 frames instead of cutting
+    // every frame from then on.
+    if (finite) {
+        distances_.push_back(distance);
+        while (distances_.size() > 30) distances_.pop_front();
+    }
+    return cut;
+}
+
+double FrameGenEngineCuts::Median() const {
+    if (distances_.empty()) return 0.0;
+    std::vector<double> sorted(distances_.begin(), distances_.end());
+    const auto middle = sorted.begin() + static_cast<std::ptrdiff_t>(sorted.size() / 2);
+    std::nth_element(sorted.begin(), middle, sorted.end());
+    return *middle;
+}
+
+FrameGenPoseChange FrameGenDeclaredChange(const FrameGenViewGeometry& game, const FrameGenViewGeometry& declared) {
+    // declared = change * game: q_d = q_c q_g and p_d = R_c p_g + p_c.
+    std::array<double, 4> game_inverse = Unit(game.orientation);
+    game_inverse = {-game_inverse[0], -game_inverse[1], -game_inverse[2], game_inverse[3]};
+    const std::array<double, 4> q = Multiply(Unit(declared.orientation), game_inverse);
+    FrameGenPoseChange change;
+    change.orientation = {static_cast<float>(q[0]), static_cast<float>(q[1]), static_cast<float>(q[2]),
+                          static_cast<float>(q[3])};
+    const Vector3 rotated = Rotate(change.orientation, Position(game));
+    for (int i = 0; i < 3; ++i) {
+        change.position[i] = static_cast<float>(declared.position[i] - rotated[i]);
+    }
+    return change;
+}
+
+bool FrameGenDeclaredChangeMoved(const FrameGenPoseChange& before, const FrameGenPoseChange& now) {
+    std::array<double, 4> inverse = Unit(before.orientation);
+    inverse = {-inverse[0], -inverse[1], -inverse[2], inverse[3]};
+    const Vector3 moved{static_cast<double>(now.position[0]) - before.position[0],
+                        static_cast<double>(now.position[1]) - before.position[1],
+                        static_cast<double>(now.position[2]) - before.position[2]};
+    return Degrees(Multiply(inverse, Unit(now.orientation))) > 0.05 ||
+           std::sqrt(moved[0] * moved[0] + moved[1] * moved[1] + moved[2] * moved[2]) > 0.0005;
+}
+
+// --- Research switches ------------------------------------------------------
+
+namespace {
+
+// What ReadResearchSwitch took from the research file.
+struct ResearchFile {
+    std::mutex mutex;
+    std::set<std::string> taken; // "NAME=VALUE"
+    std::vector<std::string> untaken;
+    std::uint64_t reads{0};
+};
+
+ResearchFile& Research() {
+    static ResearchFile research;
+    return research;
+}
+
+std::string Trimmed(const std::string& text) {
+    const std::size_t first = text.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return {};
+    return text.substr(first, text.find_last_not_of(" \t\r\n") - first + 1);
+}
+
+} // namespace
+
+std::optional<std::string> ReadResearchSwitch(const char* name) {
+    if (!name) return std::nullopt;
+    if (const char* value = std::getenv(name); value && *value) {
+        return std::string(value);
+    }
+    const std::string_view wanted(name);
+    if (wanted.rfind("VECTORXR_FRAMEGEN_ENGINE_", 0) != 0 && wanted != "VECTORXR_FRAMEGEN_DEPTH_ENCODING_CHECK") {
+        return std::nullopt;
+    }
+    const std::filesystem::path local = LocalAppDataPath();
+    if (local.empty()) return std::nullopt;
+    std::ifstream file(local / "VectorXR" / "framegen-research.txt");
+    // The last line naming the switch holds; others (a commented one too)
+    // are not its.
+    std::optional<std::string> value;
+    bool first = true;
+    for (std::string line; std::getline(file, line); first = false) {
+        if (first && line.rfind("\xEF\xBB\xBF", 0) == 0) line.erase(0, 3); // Notepad's byte order mark
+        const std::size_t equals = line.find('=');
+        if (equals != std::string::npos && Trimmed(line.substr(0, equals)) == wanted) {
+            value = Trimmed(line.substr(equals + 1));
+        }
+    }
+    if (!value || value->empty()) return std::nullopt;
+    ResearchFile& research = Research();
+    std::scoped_lock lock(research.mutex);
+    ++research.reads;
+    std::string taken = std::string(wanted) + "=" + *value;
+    if (research.taken.insert(taken).second) research.untaken.push_back(std::move(taken));
+    return value;
+}
+
+std::vector<std::string> TakeResearchFileSwitches() {
+    ResearchFile& research = Research();
+    std::scoped_lock lock(research.mutex);
+    std::vector<std::string> taken;
+    taken.swap(research.untaken);
+    return taken;
+}
+
+std::uint64_t ResearchFileReads() {
+    ResearchFile& research = Research();
+    std::scoped_lock lock(research.mutex);
+    return research.reads;
 }
 
 } // namespace depthxr

@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <fstream>
 #include <tuple>
+#include <utility>
 
 namespace depthxr {
 namespace {
@@ -462,14 +463,32 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
         stale_motion_enabled_ = !(stale && std::string(stale) == "0");
     }
     // Engine motion vectors (research, stage 0): their census while the
-    // space-warp probe takes the game's structures over.
-    engine_requested_ = ParseFrameGenEngineMode(std::getenv("VECTORXR_FRAMEGEN_ENGINE_MV"));
+    // space-warp probe takes the game's structures over. The research
+    // switches may come from framegen-research.txt too (ReadResearchSwitch),
+    // the backend's among them.
+    const std::uint64_t research_reads = ResearchFileReads();
+    engine_requested_ =
+        ParseFrameGenEngineMode(ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_MV").value_or("").c_str());
+    // A row per view and frame (VECTORXR_FRAMEGEN_ENGINE_MV_CSV=1), beside
+    // the logs.
+    const bool engine_rows = engine_requested_ != FrameGenEngineMode::kOff &&
+                             ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_MV_CSV") == "1";
     engine_frame_ = {};
     engine_previous_ = {};
     engine_noted_ = engine_invalid_ = 0;
     engine_census_after_ = 0;
     engine_notes_logged_ = 0;
     logged_engine_failure_ = logged_engine_bridged_ = false;
+    // Stage 1: the frame gates are counted for every session; these two act
+    // on what they find.
+    depth_encoding_check_ = ReadResearchSwitch("VECTORXR_FRAMEGEN_DEPTH_ENCODING_CHECK") == "1";
+    engine_cuts_ = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_CUTS") == "1";
+    engine_cut_window_.Reset();
+    logged_engine_cut_ = false;
+    depth_decoded_.clear();
+    swapchain_created_at_.reset();
+    swapchain_created_frame_ = 0;
+    engine_window_ = {};
     gpu_frames_ahead_ = 1;
     gpu_timeouts_in_row_ = 0;
     std::string gpu_gate_setting;
@@ -491,10 +510,25 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
     }
     std::string error;
     gpu_ = factory ? factory(binding_chain, error) : nullptr;
+    // The session's research switches from the file, the backend's among
+    // them (read as it was made): each logged once in the process, as the
+    // file first gave it, a session without a backend's too.
+    const std::vector<std::string> research = TakeResearchFileSwitches();
+    if (logger_ && !research.empty()) {
+        std::string switches;
+        for (const std::string& line : research) {
+            switches += (switches.empty() ? "" : ", ") + line;
+        }
+        logger_->Info("Frame Generation research switches from %LOCALAPPDATA%\\VectorXR\\framegen-research.txt "
+                      "(the environment has none of them): " +
+                      switches + ".");
+    }
     if (!gpu_) {
         UnavailableLocked(error.empty() ? "no graphics backend" : error);
         return;
     }
+    // The OSD says so while the session runs with them.
+    research_file_ = ResearchFileReads() != research_reads;
     if (xr_.formats) {
         std::uint32_t count = 0;
         if (XR_SUCCEEDED(xr_.formats(session, 0, &count, nullptr)) && count) {
@@ -510,12 +544,9 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
             engine_text = std::string("Frame Generation: VECTORXR_FRAMEGEN_ENGINE_MV=") + ToString(engine_requested_) +
                           " is ignored: the " + gpu_->Name() + " backend cannot read a game's motion vectors.";
         } else {
-            // A row per view and frame (VECTORXR_FRAMEGEN_ENGINE_MV_CSV=1),
-            // beside the logs.
             std::string csv;
-            const char* rows = std::getenv("VECTORXR_FRAMEGEN_ENGINE_MV_CSV");
             const char* local = std::getenv("LOCALAPPDATA");
-            if (rows && std::string(rows) == "1" && local && *local) {
+            if (engine_rows && local && *local) {
                 const std::time_t time = std::time(nullptr);
                 std::tm local_time{};
                 localtime_s(&local_time, &time);
@@ -541,6 +572,17 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
                       "; frame pacing is owned by Frame Generation (Turbo stays off).");
         if (!engine_text.empty()) {
             logger_->Info(engine_text);
+        }
+        if (depth_encoding_check_) {
+            logger_->Info("Frame Generation: VECTORXR_FRAMEGEN_DEPTH_ENCODING_CHECK=1 (research): a view whose depth "
+                          "was decoded as the frame before described it (the first frame after a game changes its "
+                          "nearZ or farZ) is generated without depth.");
+        }
+        if (engine_cuts_) {
+            logger_->Info("Frame Generation: VECTORXR_FRAMEGEN_ENGINE_CUTS=1 (research): nothing is generated across "
+                          "a camera cut (the game's space moving further in a frame than 50 m and 8 times its usual "
+                          "movement, or turning more than 10 degrees, by the appSpaceDeltaPose it sends with its "
+                          "motion vectors).");
         }
         if (!gpu_gate_setting.empty()) {
             logger_->Info("Frame Generation: GPU-aware pacing set by VECTORXR_FRAMEGEN_GPU_AHEAD=" + gpu_gate_setting +
@@ -571,6 +613,9 @@ void FrameGenPresenter::Stop() {
     // even when that thread is left behind.
     engine_worker = std::move(engine_worker_);
     engine_requested_ = FrameGenEngineMode::kOff;
+    // Nor do the session's research switches outlast it (a later Start of
+    // an abandoned presenter reads none).
+    depth_encoding_check_ = engine_cuts_ = research_file_ = false;
     ForgetEngineFramesLocked();
     if (abandoned_) {
         // The thread left behind may still use the backend, the output
@@ -1177,6 +1222,9 @@ void FrameGenPresenter::TrackSwapchain(XrSwapchain swapchain, std::int64_t forma
     record.depth_capturable = record.depth && gpu_ && gpu_->SupportsDepth() && record.sample_count == 1 &&
                               (usage & depth_required) == depth_required;
     swapchains_[swapchain] = record;
+    // A game's vectors settle after it made a swapchain (G8).
+    swapchain_created_at_ = Clock::now();
+    swapchain_created_frame_ = totals_.app_frames;
 }
 
 bool FrameGenPresenter::ForgetSwapchain(XrSwapchain swapchain) {
@@ -1473,6 +1521,13 @@ void FrameGenPresenter::CaptureOnRelease(XrSwapchain swapchain, std::uint32_t im
             quad_captures_[job.view] = {job.ok, swapchain, job.source.image_index, job.source.array_index,
                                         job.source.rect, releases};
         }
+        // ...and the encoding each view's depth was decoded with: the frame
+        // before's description (its capture target), which Generate checks
+        // against the frame's own.
+        if (job.depth && job.ok) {
+            depth_decoded_.resize(std::max(depth_decoded_.size(), job.view + 1));
+            depth_decoded_[job.view] = job.encoding;
+        }
     }
     if (logger_ && !failure.empty() && !logged_capture_failure_) {
         logged_capture_failure_ = true;
@@ -1524,6 +1579,34 @@ void FrameGenPresenter::NoteEngineMotion(FrameGenEngineMotionFrame frame, bool b
                     engine_frame_.frame.views[i].vectors.swapchain == view.vectors.swapchain &&
                     vectors->second.releases > engine_frame_.vector_releases[i]) {
                     record.released[i] = vectors->second.released;
+                }
+            }
+        }
+        // G6: a camera cut moves the application's space further, or turns
+        // it more, than its own movement does (appSpaceDeltaPose, the same
+        // for every view: the first's). Nothing measured across it is the
+        // game's motion; with VECTORXR_FRAMEGEN_ENGINE_CUTS=1 nothing is
+        // generated across it (a runtime's own space warp synthesizes nothing
+        // across one either).
+        if (!frame.views.empty()) {
+            const XrPosef& delta = frame.views.front().app_delta;
+            record.cut = engine_cut_window_.Add(
+                {delta.orientation.x, delta.orientation.y, delta.orientation.z, delta.orientation.w},
+                {delta.position.x, delta.position.y, delta.position.z});
+            if (record.cut) {
+                ++engine_window_.cuts;
+            }
+            if (record.cut && engine_cuts_) {
+                InvalidateContinuityLocked();
+                if (logger_ && !logged_engine_cut_) {
+                    logged_engine_cut_ = true;
+                    const double meters = std::sqrt(static_cast<double>(delta.position.x) * delta.position.x +
+                                                    static_cast<double>(delta.position.y) * delta.position.y +
+                                                    static_cast<double>(delta.position.z) * delta.position.z);
+                    logger_->Info("Frame Generation: the game's space jumped " + Number(meters, 1) +
+                                  " m in a frame, or turned past 10 degrees (a camera cut): nothing is generated "
+                                  "across it (VECTORXR_FRAMEGEN_ENGINE_CUTS=1). Cuts are counted in the engine "
+                                  "motion summary.");
                 }
             }
         }
@@ -2814,6 +2897,111 @@ void FrameGenPresenter::ForgetEngineFramesLocked() {
     engine_previous_ = {};
 }
 
+std::optional<FrameGenEngineGateRecord> FrameGenPresenter::EngineGateRecordLocked(const EngineFrame& frame) const {
+    if (!frame.valid) {
+        return std::nullopt;
+    }
+    FrameGenEngineGateRecord record;
+    record.display_time = frame.frame.display_time;
+    record.projection_frame = frame.frame.projection_frame;
+    record.complete = frame.frame.complete;
+    record.cut = frame.cut;
+    record.sequence = frame.sequence;
+    for (const FrameGenEngineMotionView& view : frame.frame.views) {
+        FrameGenEngineGateView gate;
+        gate.view = view.view;
+        gate.vectors = reinterpret_cast<std::uint64_t>(view.vectors.swapchain);
+        gate.rect = {view.vectors.imageRect.offset.x, view.vectors.imageRect.offset.y, view.vectors.imageRect.extent.width,
+                     view.vectors.imageRect.extent.height};
+        const auto vectors = swapchains_.find(view.vectors.swapchain);
+        gate.readable = view.problems == 0 && vectors != swapchains_.end() && vectors->second.sample_count == 1 &&
+                        IsEngineMotionFormat(vectors->second.format);
+        gate.frame_skip = view.frame_skip;
+        gate.depth = view.depth_encoding;
+        record.views.push_back(gate);
+    }
+    return record;
+}
+
+bool FrameGenPresenter::EngineGatesLocked(const XrCompositionLayerProjection& projection, const PendingFrame& frame,
+                                          const FrameGenEngineGateRecord* record, const FrameGenEngineGateRecord* previous,
+                                          const FrameGenEngineGateFacts& facts, bool flipped) {
+    const std::uint32_t gates = FrameGenEngineGates(record, previous, facts);
+    const bool own = record && record->display_time == facts.end_time;
+    ++engine_window_.frames;
+    engine_window_.structs += own && record->complete ? 1 : 0;
+    for (std::size_t i = 0; i < kFrameGenEngineGateCount; ++i) {
+        engine_window_.gated[i] += (gates >> i) & 1u;
+    }
+    engine_window_.flips += flipped ? 1 : 0;
+    // Kept with the frame's record (unless a pause forgot it meanwhile): the
+    // next frame pairs with it by this frame's sequence.
+    if (!own || !engine_frame_.valid || engine_frame_.frame.display_time != facts.end_time) {
+        return false;
+    }
+    EngineFrame& kept = engine_frame_;
+    kept.sequence = frame.sequence;
+    kept.gates = gates;
+    kept.unsettled = (gates & (kFrameGenEngineCut | kFrameGenEngineDecode | kFrameGenEngineRecreate)) != 0 ||
+                     facts.paused || flipped;
+    // Pivot's change to each view, from the pose the game rendered with and
+    // the pose Frame Generation is told. Calibration measures the vectors
+    // against the told poses, so only while that change holds still: the
+    // game's own poses move the scene as its vectors do.
+    kept.pivot.clear();
+    for (const FrameGenEngineMotionView& view : kept.frame.views) {
+        if (view.view >= projection.viewCount) {
+            kept.pivot.clear();
+            break;
+        }
+        kept.pivot.push_back(FrameGenDeclaredChange(view.game, Geometry(projection.views[view.view])));
+    }
+    const EngineFrame& before = engine_previous_;
+    const bool paired = (gates & (kFrameGenEngineNoStruct | kFrameGenEnginePairing)) == 0 && before.valid &&
+                        !kept.pivot.empty() && before.pivot.size() == kept.pivot.size();
+    kept.pivot_moved = false;
+    for (std::size_t i = 0; paired && i < kept.pivot.size(); ++i) {
+        kept.pivot_moved = kept.pivot_moved || FrameGenDeclaredChangeMoved(before.pivot[i], kept.pivot[i]);
+    }
+    engine_window_.pivot_moving += kept.pivot_moved ? 1 : 0;
+    // No cut, depth encoding change, pause or new swapchain in this frame or
+    // the one before. (Settling and the engine path's frames are its use's
+    // gates, not its calibration's.)
+    kept.calibrate = paired && !kept.pivot_moved && !kept.unsettled && !before.unsettled &&
+                     (gates & ~(kFrameGenEngineSettle | kFrameGenEngineUncaptured)) == 0;
+    engine_window_.calibrate += kept.calibrate ? 1 : 0;
+    return kept.calibrate;
+}
+
+void FrameGenPresenter::LogEngineSummaryLocked(double seconds) {
+    const EngineWindow& window = engine_window_;
+    if (!logger_ || window.frames == 0 || (engine_noted_ == 0 && window.flips == 0)) {
+        return;
+    }
+    // frames: real frames generated from; structs: their records had a
+    // structure on every view; gated: frames each gate held the vectors back
+    // in (a frame in several); flips: frames with a view's depth decoded as
+    // the frame before described it; cuts: camera cuts among the records
+    // (passing frames through too); pivotMoving: frames Pivot's change to
+    // the views moved in; calibrate: frames that may calibrate.
+    std::string gated;
+    std::string names;
+    for (std::size_t i = 0; i < kFrameGenEngineGateCount; ++i) {
+        gated += (i ? "/" : "") + std::to_string(window.gated[i]);
+        names += (i ? "/" : "") + std::string(FrameGenEngineGateName(i));
+    }
+    logger_->Info("Frame Generation engine motion (" + Number(seconds, 0) + " s): frames=" + std::to_string(window.frames) +
+                  ", structs=" + std::to_string(window.structs) + ", gated=" + gated + " (" + names +
+                  "), flips=" + std::to_string(window.flips) + ", cuts=" + std::to_string(window.cuts) +
+                  ", pivotMoving=" + std::to_string(window.pivot_moving) +
+                  ", calibrate=" + std::to_string(window.calibrate) + ".");
+}
+
+bool FrameGenPresenter::ResearchFileInUse() const {
+    std::scoped_lock lock(mutex_);
+    return research_file_;
+}
+
 bool FrameGenPresenter::SupersedeOwnFramesLocked() {
     if (std::this_thread::get_id() != end_thread_) {
         return false;
@@ -3311,6 +3499,7 @@ XrResult FrameGenPresenter::EndFrame(XrSession session, const XrFrameEndInfo* in
                 }
             }
             frame = *it;
+            frame->end_time = info->displayTime;
             NoteDisplayOffsetLocked(info->displayTime, it->app_time, it->reported_period);
             app_work_ms_ += std::chrono::duration<double, std::milli>(Clock::now() - it->wait_return).count();
             ++app_work_frames_;
@@ -3437,6 +3626,7 @@ XrResult FrameGenPresenter::EndFrame(XrSession session, const XrFrameEndInfo* in
                     ", autoRetries=" + std::to_string(automatic_retries_) + "/" + std::to_string(retry_attempts_) +
                     ", gpuMs=" + Number(gpu_ms_, 2) + ClockSummaryLocked(start) + DynamicSummaryLocked() +
                     QuadSummaryLocked(start) + ".");
+                LogEngineSummaryLocked(seconds);
             }
             NewSummaryWindowLocked(now, standby);
         }
@@ -4045,7 +4235,7 @@ void FrameGenPresenter::RecordReal(const XrCompositionLayerProjection& projectio
                               ? display_time - last_real_.display_time
                               : 0;
     last_real_.valid = true;
-    last_real_.sequence = sequence;
+    last_real_.sequence = last_real_.generated_sequence = sequence;
     last_real_.display_time = display_time;
     last_real_.space = projection.space;
     last_real_.views.clear();
@@ -4241,14 +4431,38 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         // eye blends them, and a focus view limits its periphery's motion.
         tuning.composition = analyze ? composition : nullptr;
         tuning.history_ring = analyze && !composition ? jit_canvas_ring_ : 0;
+        // The frame's engine motion record and the frame before's, as the
+        // frame gates read them: taken before a pause forgets them (just in
+        // time, AnalyzeJit's pause check came first: such a frame counts as
+        // one without a record).
+        const std::optional<FrameGenEngineGateRecord> engine_record = EngineGateRecordLocked(engine_frame_);
+        const std::optional<FrameGenEngineGateRecord> engine_before = EngineGateRecordLocked(engine_previous_);
         // Nothing is measured across a pause: the motion of a game that
         // stopped for a while says nothing about its next frames.
-        if (last_real_.valid && frame.app_time - last_real_.display_time > PauseLimitLocked()) {
+        const bool paused = last_real_.valid && frame.app_time - last_real_.display_time > PauseLimitLocked();
+        if (paused) {
             NotePauseLocked(frame.app_time - last_real_.display_time);
             InvalidateContinuityLocked();
         }
         const bool continuous = last_real_.valid && last_real_.sequence + 1 == frame.sequence &&
                                 last_real_.space == projection.space && last_real_.views.size() == projection.viewCount;
+        FrameGenEngineGateFacts engine_facts;
+        engine_facts.views = projection.viewCount;
+        engine_facts.end_time = frame.end_time;
+        // The record before was stamped with its frame's own sequence
+        // (continuity steps over frames begun over and never ended).
+        engine_facts.previous_sequence = last_real_.valid ? last_real_.generated_sequence : 0;
+        engine_facts.continuous = continuous;
+        engine_facts.paused = paused;
+        engine_facts.decoded.resize(projection.viewCount);
+        if (swapchain_created_at_) {
+            engine_facts.frames_since_swapchain = totals_.app_frames - swapchain_created_frame_;
+            engine_facts.seconds_since_swapchain = std::chrono::duration<double>(Clock::now() - *swapchain_created_at_).count();
+        }
+        engine_facts.captured = true;
+        engine_facts.just_in_time = analyze != nullptr;
+        engine_facts.composed = analyze && composition;
+        bool flipped = false; // a view's depth decoded as the frame before described it
         if (continuous && last_real_.interval > 0 && frame.app_time > last_real_.display_time) {
             tuning.interval_ratio = std::clamp(static_cast<float>(frame.app_time - last_real_.display_time) /
                                                    static_cast<float>(last_real_.interval),
@@ -4323,17 +4537,45 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
                 depth_seen_ = true;
                 depth_sent_ = depth_readable_ = false;
             }
+            // Each depth capture is checked once, by the frame it was taken
+            // for (as the backend uses it once): a frame whose depth was not
+            // captured (a failed capture, quad views) has no encoding to check.
+            std::optional<FrameGenDepthEncoding> decoded;
+            if (i < depth_decoded_.size()) {
+                decoded = std::exchange(depth_decoded_[i], std::nullopt);
+            }
             if (const auto* depth = DepthInfo(view)) {
                 const auto depth_record = swapchains_.find(depth->subImage.swapchain);
                 submission.request.depth =
                     depth_record != swapchains_.end() && depth_record->second.depth_capturable;
                 depth_sent_ = true;
                 depth_readable_ = depth_readable_ || (submission.request.depth && gpu_->SupportsDepth());
+                // The depth captured at its release was decoded as the frame
+                // before described its own (the capture target recorded at
+                // its end): the first frame after a game changes its encoding
+                // (MSFS: nearZ 1000 in its menus, 356700 in flight) holds
+                // depth decoded wrongly. With
+                // VECTORXR_FRAMEGEN_DEPTH_ENCODING_CHECK=1 the view goes
+                // without depth for that frame.
+                if (decoded) {
+                    engine_facts.decoded[i] = decoded;
+                    if (!SameFrameGenDepthDescription(*decoded,
+                                                      {depth->minDepth, depth->maxDepth, depth->nearZ, depth->farZ})) {
+                        flipped = true;
+                        submission.request.depth = submission.request.depth && !depth_encoding_check_;
+                    }
+                }
             }
+            engine_facts.captured = engine_facts.captured && record->second.captured_releases == record->second.releases;
         }
         if (!error.empty()) {
             NoteFailureLocked(error);
             return false;
+        }
+        const bool calibrate = EngineGatesLocked(projection, frame, engine_record ? &*engine_record : nullptr,
+                                                 engine_before ? &*engine_before : nullptr, engine_facts, flipped);
+        for (FrameGenViewSubmission& submission : submissions) {
+            submission.request.engine_calibrate = calibrate;
         }
     }
     std::vector<OutputSpec> specs(projection.viewCount);
@@ -4799,6 +5041,14 @@ void FrameGenPresenter::WriteCaptureNotes(const std::string& directory, const Ca
             }
         }
     }
+    // The frame gates as Generate found them (stage 1; sequence 0: nothing
+    // was generated from the frame with its record).
+    std::string gates;
+    for (std::size_t i = 0; i < kFrameGenEngineGateCount; ++i) {
+        if ((frame.gates >> i) & 1u) gates += (gates.empty() ? "" : ",") + std::string(FrameGenEngineGateName(i));
+    }
+    motion << "sequence " << frame.sequence << "\ngates " << frame.gates << ' ' << (gates.empty() ? "none" : gates)
+           << "\ncut " << frame.cut << "\npivot_moved " << frame.pivot_moved << "\ncalibrate " << frame.calibrate << '\n';
     // Later stages' choices; none in stage 0.
     motion << "convention none\ndelta_model none\n";
 }
@@ -6345,6 +6595,7 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
         }
         PendingFrame pending;
         pending.app_time = content_time;
+        pending.end_time = info.displayTime;
         pending.sequence = frame.id;
         pending.real_due = pending.generated_due = first_due;
         between_ok =
@@ -6538,6 +6789,7 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
         }
         PendingFrame pending;
         pending.app_time = content_time;
+        pending.end_time = info.displayTime;
         pending.sequence = frame.id;
         pending.real_due = real_due;
         pending.generated_due = generated_due;
@@ -6696,6 +6948,7 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
             ", pauses=" + std::to_string(delta(&Totals::pauses)) + "/" + Number(pause_longest_ms_, 0) +
             ", autoRetries=" + std::to_string(automatic_retries_) + "/" + std::to_string(retry_attempts_) +
             ClockSummaryLocked(start) + DynamicSummaryLocked() + QuadSummaryLocked(start) + ".");
+        LogEngineSummaryLocked(seconds);
     }
     NewSummaryWindowLocked(now, standby);
 }
@@ -6736,6 +6989,7 @@ void FrameGenPresenter::NewSummaryWindowLocked(Clock::time_point now, double sta
     shift_window_sum_mm_ = shift_window_max_mm_ = 0.0;
     shift_window_frames_ = 0;
     jit_covers_ = 0;
+    engine_window_ = {};
 }
 
 bool FrameGenPresenter::AnalyzeJit(const XrCompositionLayerProjection& projection, const PendingFrame& frame,
@@ -6995,6 +7249,7 @@ XrResult FrameGenPresenter::ThreadedEndJit(const XrFrameEndInfo& info, const Thr
     if (measure) {
         PendingFrame pending;
         pending.app_time = frame.target_time;
+        pending.end_time = info.displayTime;
         pending.sequence = frame.id;
         pending.period = period;
         // Its exact copy needs its capture by its refresh; its motion is
@@ -7038,6 +7293,7 @@ XrResult FrameGenPresenter::ThreadedEndJit(const XrFrameEndInfo& info, const Thr
         source.views = quad->source_views.data();
         PendingFrame pending;
         pending.app_time = frame.target_time;
+        pending.end_time = info.displayTime;
         pending.sequence = frame.id;
         pending.period = period;
         Analysis analysis;

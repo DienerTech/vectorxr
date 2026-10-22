@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <deque>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "depthxr/settings.h"
@@ -369,6 +370,12 @@ struct FrameGenViewRequest {
     // one rotation and translation fitted to its measured flow, instead of
     // the flow itself (kWorldReduce, kWorldSolve).
     bool world_motion{false};
+    // Engine motion vectors (the presenter's frame gates): this frame's
+    // vectors and the frame before's pair, Pivot's change to the views held
+    // still between them, and neither frame came with a camera cut, a
+    // depth encoding change, a pause or a new swapchain. Only such frames
+    // may calibrate the vectors' convention.
+    bool engine_calibrate{false};
 };
 
 struct FrameGenTuning {
@@ -529,6 +536,12 @@ struct FrameGenDepthEncoding {
     // games describe their near plane wrongly too.
     float scale{1.0f};
 };
+
+// Whether two depth descriptions are the same (minDepth, maxDepth, nearZ and
+// farZ; the scale is not the game's).
+inline bool SameFrameGenDepthDescription(const FrameGenDepthEncoding& a, const FrameGenDepthEncoding& b) {
+    return a.min_depth == b.min_depth && a.max_depth == b.max_depth && a.near_z == b.near_z && a.far_z == b.far_z;
+}
 
 // Linear depth at or beyond this many meters is infinitely far (FG_FAR_DEPTH).
 inline constexpr float kFrameGenFarDepth = 100000.0f;
@@ -1041,5 +1054,121 @@ struct FrameGenEngineCalibration {
     std::uint32_t frames{0};
 };
 FrameGenEngineCalibration CalibrateFrameGenEngine(const std::vector<FrameGenEngineCalibrationFrame>& frames);
+
+// --- Engine motion vectors: the frame gates (stage 1) ----------------------
+//
+// Whatever a frame's vectors show, they cannot be used for it where a gate
+// says so (G1-G9, bits; 0: none does). The presenter checks them in Generate
+// from the frame's record, the record of the frame generated from before it,
+// and what it knows of the frame.
+inline constexpr std::uint32_t kFrameGenEngineNoStruct = 1u;   // G1, G2: a view without a structure the vectors can be read by
+inline constexpr std::uint32_t kFrameGenEngineSkip = 2u;       // G4: the game marked the frame FRAME_SKIP
+inline constexpr std::uint32_t kFrameGenEnginePairing = 4u;    // G3, G5: the record before is not this frame's pair
+inline constexpr std::uint32_t kFrameGenEngineCut = 8u;        // G6: the application's space jumped (a camera cut)
+inline constexpr std::uint32_t kFrameGenEngineDecode = 16u;    // G7: the depth was decoded as another frame described it
+inline constexpr std::uint32_t kFrameGenEngineRecreate = 32u;  // G8: the game made a swapchain in the last 2 frames...
+inline constexpr std::uint32_t kFrameGenEngineSettle = 64u;    // ...or in the last 3 s
+// G9: the frame's color was not captured at its release, or the frame is
+// not one the engine path serves (just in time, two views, no quad views).
+inline constexpr std::uint32_t kFrameGenEngineUncaptured = 128u;
+inline constexpr std::size_t kFrameGenEngineGateCount = 8;
+// Bit `index`'s name in the summaries: "noStruct", "skip", "pairing", "cut",
+// "decode", "recreate", "settle", "uncaptured".
+const char* FrameGenEngineGateName(std::size_t index);
+
+// One view's structure as the gates read it.
+struct FrameGenEngineGateView {
+    std::uint32_t view{0};
+    std::uint64_t vectors{0};           // the motion vector swapchain
+    std::array<std::int32_t, 4> rect{}; // its region: x, y, width, height
+    // No problems with the structure (ValidateEngineMotionView), and a
+    // swapchain the presenter tracks, of float texels and one sample (G2).
+    bool readable{false};
+    bool frame_skip{false};
+    FrameGenDepthEncoding depth; // the structure's minDepth, maxDepth, nearZ and farZ
+};
+
+// A frame's record (FrameGenEngineMotionFrame) as the gates read it.
+struct FrameGenEngineGateRecord {
+    std::int64_t display_time{0};      // the time the game ended the frame with
+    std::uint64_t projection_frame{0}; // the layer's count of frames with a projection (0: none here)
+    bool complete{false};              // every view carried a structure, of one extension
+    std::vector<FrameGenEngineGateView> views;
+    bool cut{false}; // its appSpaceDeltaPose is a camera cut (FrameGenEngineCuts)
+    // The real frame Frame Generation generated from with it (the presenter's
+    // frame sequence; 0: none).
+    std::uint64_t sequence{0};
+};
+
+// What the presenter knows of the frame it generates from.
+struct FrameGenEngineGateFacts {
+    std::size_t views{0};     // the projection's
+    std::int64_t end_time{0}; // the display time the game ended the frame with: its record's
+    // The real frame generated from before it, frames begun over and never
+    // ended after it aside (Frame Generation bridges those; 0: none, or
+    // forgotten since: a pause, a frame the layer abandoned, a failure).
+    std::uint64_t previous_sequence{0};
+    bool continuous{false}; // it is the frame right after that one, in the same space, with as many views
+    bool paused{false};     // past the pause limit after that one
+    // Per projection view: the encoding the depth captured for the frame was
+    // decoded with (none: no depth captured).
+    std::vector<std::optional<FrameGenDepthEncoding>> decoded;
+    std::uint64_t frames_since_swapchain{~0ull}; // real frames since the game made a swapchain
+    double seconds_since_swapchain{1e9};
+    bool captured{false}; // every view's color was captured at its release
+    bool just_in_time{false};
+    bool composed{false}; // quad views composed by Frame Generation
+};
+
+// The gates holding a frame's vectors back: `record` is the frame's (none
+// where the layer handed none over), `previous` the record of the frame
+// generated from before it.
+std::uint32_t FrameGenEngineGates(const FrameGenEngineGateRecord* record, const FrameGenEngineGateRecord* previous,
+                                  const FrameGenEngineGateFacts& facts);
+
+// G6: whether a frame's appSpaceDeltaPose is a camera cut rather than the
+// application's own movement: further than max(50 m, 8 x the median distance
+// of the last 30 frames + 1 m), or turned more than 10 degrees. Until frames
+// are known the median is 0 (50 m); every frame with a finite delta joins it,
+// a cut too.
+class FrameGenEngineCuts {
+  public:
+    // The frame's delta (a unit quaternion, meters): whether it is a cut.
+    bool Add(const std::array<float, 4>& orientation, const std::array<float, 3>& position);
+    double Median() const;
+    void Reset() { distances_.clear(); }
+
+  private:
+    std::deque<double> distances_; // the last 30 frames'
+};
+
+// Pivot's change to a view (its reverse delta, applied in the application's
+// space): the pose Frame Generation is told is `change` times the pose the
+// game rendered with.
+struct FrameGenPoseChange {
+    std::array<float, 4> orientation{0.0f, 0.0f, 0.0f, 1.0f};
+    std::array<float, 3> position{0.0f, 0.0f, 0.0f};
+};
+FrameGenPoseChange FrameGenDeclaredChange(const FrameGenViewGeometry& game, const FrameGenViewGeometry& declared);
+// Whether that change moved between two frames: more than 0.05 degrees or
+// 0.5 mm. The vectors are calibrated against the declared poses only while
+// it holds still.
+bool FrameGenDeclaredChangeMoved(const FrameGenPoseChange& before, const FrameGenPoseChange& now);
+
+// --- Research switches ------------------------------------------------------
+
+// A research switch's value: the environment's, else, for the engine motion
+// research's switches (VECTORXR_FRAMEGEN_ENGINE_*,
+// VECTORXR_FRAMEGEN_DEPTH_ENCODING_CHECK), a NAME=VALUE line of
+// %LOCALAPPDATA%\VectorXR\framegen-research.txt, read at each call: a flight
+// changes them between a game's sessions without signing out to change the
+// environment. None where neither has it (an empty value is none).
+std::optional<std::string> ReadResearchSwitch(const char* name);
+// The switches ReadResearchSwitch took from the file ("NAME=VALUE"), each
+// once in the process: those no earlier call returned.
+std::vector<std::string> TakeResearchFileSwitches();
+// How many reads the file answered in the process (a session's: the count
+// after its reads against the count before).
+std::uint64_t ResearchFileReads();
 
 } // namespace depthxr

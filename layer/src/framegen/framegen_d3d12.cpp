@@ -561,14 +561,15 @@ class D3D12FrameGen final : public FrameGenGpu {
         // (VECTORXR_FRAMEGEN_ENGINE_MV_STATE=auto|rt|common|none; it may never
         // acquire or release them), and the debug layer's messages about
         // them where the game runs with it (VECTORXR_FRAMEGEN_ENGINE_MV_DEBUG=1).
-        if (const char* state = std::getenv("VECTORXR_FRAMEGEN_ENGINE_MV_STATE")) {
-            const std::string text = state;
+        // Both may come from the research file too (ReadResearchSwitch).
+        if (const std::optional<std::string> state = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_MV_STATE")) {
+            const std::string& text = *state;
             motion_state_ = text == "rt"       ? MotionState::kRenderTarget
                             : text == "common" ? MotionState::kCommon
                             : text == "none"   ? MotionState::kNone
                                                : MotionState::kAuto;
         }
-        if (const char* debug = std::getenv("VECTORXR_FRAMEGEN_ENGINE_MV_DEBUG"); debug && std::string(debug) == "1") {
+        if (ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_MV_DEBUG") == "1") {
             // Only the plain debug layer gives the device this interface.
             if (FAILED(device_.As(&info_queue_))) {
                 info_queue_.Reset();

@@ -435,6 +435,10 @@ class FrameGenPresenter {
     // The runtime shows only images of Frame Generation's own (just in time,
     // once its first frame is written): the game's are captured, never shown.
     bool ShowsOwnImagesOnly() const;
+    // A research switch of this session came from
+    // %LOCALAPPDATA%\VectorXR\framegen-research.txt (ReadResearchSwitch): the
+    // OSD says so, as such switches are easily left on.
+    bool ResearchFileInUse() const;
     // Frame Generation captures the images of `swapchain` (a primary
     // projection's color or depth).
     bool CapturesFrom(XrSwapchain swapchain) const;
@@ -473,6 +477,9 @@ class FrameGenPresenter {
 
     struct PendingFrame {
         XrTime app_time{0};
+        // The display time the game ended the frame with (Generate: its
+        // engine motion record's; 0 where Generate is not called).
+        XrTime end_time{0};
         XrTime slot_time{0};
         XrDuration period{0};
         bool should_render{false};
@@ -505,6 +512,9 @@ class FrameGenPresenter {
     struct RealFrame {
         bool valid{false};
         std::uint64_t sequence{0};
+        // The frame's own sequence: `sequence` steps over the abandoned
+        // frames after it (BridgeAbandonedLocked), this one does not.
+        std::uint64_t generated_sequence{0};
         XrTime display_time{0};
         XrDuration interval{0}; // since the real frame before it, 0 when not continuous
         XrSpace space{XR_NULL_HANDLE};
@@ -1752,6 +1762,19 @@ class FrameGenPresenter {
         std::vector<std::uint64_t> vector_releases;
         std::vector<std::optional<std::uint32_t>> released; // the vectors' swapchain released one since the frame before
         std::vector<std::uint8_t> captured;
+        bool cut{false}; // its appSpaceDeltaPose is a camera cut (FrameGenEngineCuts)
+        // Generate's, once it generated from the frame (EngineGatesLocked):
+        // the frame (PendingFrame::sequence), the gates holding its vectors
+        // back, whether it came with a cut, a depth encoding change, a pause
+        // or a new swapchain, Pivot's change to each view (record order) and
+        // whether it moved since the frame before, and whether the frame may
+        // calibrate (FrameGenViewRequest::engine_calibrate).
+        std::uint64_t sequence{0};
+        std::uint32_t gates{0};
+        bool unsettled{false};
+        std::vector<FrameGenPoseChange> pivot;
+        bool pivot_moved{false};
+        bool calibrate{false};
     };
     // The census jobs for `frame`'s views (stage 0: every image, sampled at
     // its end), with each view's color request.
@@ -1771,6 +1794,50 @@ class FrameGenPresenter {
     std::size_t engine_notes_logged_{0};
     bool logged_engine_failure_{false};
     bool logged_engine_bridged_{false};
+    // The frame gates (stage 1), under mutex_: a record as the gates read it
+    // (none: no record), and the gates for the frame Generate generates
+    // from (`flipped`: a view's depth was decoded as the frame before
+    // described it): counted for the summary, kept with the frame's record
+    // (the next frame pairs with it, motion.txt), and whether the frame may
+    // calibrate.
+    std::optional<FrameGenEngineGateRecord> EngineGateRecordLocked(const EngineFrame& frame) const;
+    bool EngineGatesLocked(const XrCompositionLayerProjection& projection, const PendingFrame& frame,
+                           const FrameGenEngineGateRecord* record, const FrameGenEngineGateRecord* previous,
+                           const FrameGenEngineGateFacts& facts, bool flipped);
+    // The summary's engine motion line (engine_window_ over `seconds`), when
+    // the layer hands records over or depth was decoded as another frame
+    // described it.
+    void LogEngineSummaryLocked(double seconds);
+    // Research switches read at Start (ReadResearchSwitch).
+    // VECTORXR_FRAMEGEN_DEPTH_ENCODING_CHECK=1: a view whose depth was decoded
+    // as the frame before described it (the first frame after a game changes
+    // its nearZ) is generated without depth. VECTORXR_FRAMEGEN_ENGINE_CUTS=1:
+    // nothing is generated across a camera cut (G6).
+    bool depth_encoding_check_{false};
+    bool engine_cuts_{false};
+    bool research_file_{false}; // a switch of this session came from the research file
+    FrameGenEngineCuts engine_cut_window_;
+    bool logged_engine_cut_{false};
+    // Per view: the encoding its latest depth capture was decoded with, until
+    // Generate checks it.
+    std::vector<std::optional<FrameGenDepthEncoding>> depth_decoded_;
+    // When the game last made a swapchain, and totals_.app_frames then (G8).
+    std::optional<std::chrono::steady_clock::time_point> swapchain_created_at_;
+    std::uint64_t swapchain_created_frame_{0};
+    // Since the last summary: real frames generated from, those whose record
+    // had a structure on every view, frames each gate held back, frames whose
+    // depth was decoded as another frame described it, camera cuts among the
+    // records, frames Pivot's change moved in, and frames that may calibrate.
+    struct EngineWindow {
+        std::uint64_t frames{0};
+        std::uint64_t structs{0};
+        std::array<std::uint64_t, kFrameGenEngineGateCount> gated{};
+        std::uint64_t flips{0};
+        std::uint64_t cuts{0};
+        std::uint64_t pivot_moving{0};
+        std::uint64_t calibrate{0};
+    };
+    EngineWindow engine_window_;
     // Timed: teardown never waits on them for long (LockForTeardown).
     std::timed_mutex submit_mutex_;      // presenter-thread submissions vs output swapchain calls
     std::timed_mutex gpu_mutex_;         // the GPU backend (Track, Capture, Execute, WaitIdle, Forget, Reset)

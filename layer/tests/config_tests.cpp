@@ -9,6 +9,7 @@
 #include <functional>
 #include <iostream>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <optional>
 #include <sstream>
@@ -2149,6 +2150,359 @@ void TestFrameGenEngineCalibration() {
                        ")");
         }
     }
+}
+
+// The frame gates (stage 1): a frame and the one generated from before it,
+// paired, then each gate on its own.
+void TestFrameGenEngineGates() {
+    using namespace depthxr;
+    Expect(std::string(FrameGenEngineGateName(0)) == "noStruct" && std::string(FrameGenEngineGateName(2)) == "pairing" &&
+               std::string(FrameGenEngineGateName(kFrameGenEngineGateCount - 1)) == "uncaptured",
+           "Engine gates: the summary names each gate");
+    const FrameGenDepthEncoding flight{0.0f, 1.0f, 356700.0f, 0.05f};
+    auto record = [&](std::int64_t time, std::uint64_t projection_frame, std::uint64_t sequence) {
+        FrameGenEngineGateRecord frame;
+        frame.display_time = time;
+        frame.projection_frame = projection_frame;
+        frame.complete = true;
+        frame.sequence = sequence;
+        for (std::uint32_t v = 0; v < 2; ++v) {
+            FrameGenEngineGateView view;
+            view.view = v;
+            view.vectors = 0x31;
+            view.rect = {0, 0, 4339, 4285};
+            view.readable = true;
+            view.depth = flight;
+            frame.views.push_back(view);
+        }
+        return frame;
+    };
+    const FrameGenEngineGateRecord before = record(1000, 41, 7);
+    const FrameGenEngineGateRecord now = record(1011, 42, 0);
+    FrameGenEngineGateFacts good;
+    good.views = 2;
+    good.end_time = 1011;
+    good.previous_sequence = 7;
+    good.continuous = true;
+    good.decoded = {flight, flight};
+    good.frames_since_swapchain = 500;
+    good.seconds_since_swapchain = 60.0;
+    good.captured = true;
+    good.just_in_time = true;
+    Expect(FrameGenEngineGates(&now, &before, good) == 0, "Engine gates: a frame paired with the one before passes");
+
+    // G1, G2: no structure the vectors can be read by.
+    Expect(FrameGenEngineGates(nullptr, &before, good) == kFrameGenEngineNoStruct,
+           "Engine gates: a frame without a record has no structure");
+    FrameGenEngineGateRecord other = now;
+    other.display_time = 1022;
+    Expect(FrameGenEngineGates(&other, &before, good) == kFrameGenEngineNoStruct,
+           "Engine gates: another frame's record is not this frame's");
+    FrameGenEngineGateRecord partial = now;
+    partial.complete = false;
+    Expect(FrameGenEngineGates(&partial, &before, good) == kFrameGenEngineNoStruct,
+           "Engine gates: a structure on one view only");
+    FrameGenEngineGateRecord unreadable = now;
+    unreadable.views[1].readable = false;
+    Expect(FrameGenEngineGates(&unreadable, &before, good) == kFrameGenEngineNoStruct,
+           "Engine gates: an unreadable structure");
+
+    // G4: FRAME_SKIP.
+    FrameGenEngineGateRecord skipped = now;
+    skipped.views[0].frame_skip = true;
+    Expect(FrameGenEngineGates(&skipped, &before, good) == kFrameGenEngineSkip, "Engine gates: FRAME_SKIP holds it back");
+
+    // G3, G5: the pair.
+    Expect(FrameGenEngineGates(&now, nullptr, good) == kFrameGenEnginePairing, "Engine gates: no record before");
+    // An abandoned frame between: its record (never generated from) is the
+    // one before, or the record before it is no longer the frame generated
+    // from last (the presenter forgot it with the abandoned frame).
+    const FrameGenEngineGateRecord abandoned = record(1005, 41, 0);
+    Expect(FrameGenEngineGates(&now, &abandoned, good) == kFrameGenEnginePairing,
+           "Engine gates: an abandoned frame's record pairs with nothing");
+    FrameGenEngineGateFacts forgotten = good;
+    forgotten.previous_sequence = 0;
+    forgotten.continuous = false;
+    Expect(FrameGenEngineGates(&now, &before, forgotten) == kFrameGenEnginePairing,
+           "Engine gates: an abandoned frame between breaks the pair");
+    // A frame without a projection between: its record (no number, no
+    // views) is the one before.
+    FrameGenEngineGateRecord empty;
+    empty.display_time = 1005;
+    Expect(FrameGenEngineGates(&now, &empty, good) == kFrameGenEnginePairing,
+           "Engine gates: a frame without a projection between breaks the pair");
+    FrameGenEngineGateRecord gap = before;
+    gap.projection_frame = 40;
+    Expect(FrameGenEngineGates(&now, &gap, good) == kFrameGenEnginePairing,
+           "Engine gates: projection frames must follow each other");
+    FrameGenEngineGateRecord swapped = before;
+    swapped.views[1].vectors = 0x32;
+    Expect(FrameGenEngineGates(&now, &swapped, good) == kFrameGenEnginePairing,
+           "Engine gates: other motion vector swapchains break the pair");
+    FrameGenEngineGateRecord moved = before;
+    moved.views[0].rect = {0, 0, 4000, 4285};
+    Expect(FrameGenEngineGates(&now, &moved, good) == kFrameGenEnginePairing,
+           "Engine gates: another region breaks the pair (G3)");
+    FrameGenEngineGateFacts paused = good;
+    paused.paused = true;
+    Expect(FrameGenEngineGates(&now, &before, paused) == kFrameGenEnginePairing, "Engine gates: a pause breaks the pair");
+    FrameGenEngineGateFacts discontinuous = good;
+    discontinuous.continuous = false;
+    Expect(FrameGenEngineGates(&now, &before, discontinuous) == kFrameGenEnginePairing,
+           "Engine gates: a frame not continuing the one before breaks the pair");
+
+    // G6.
+    FrameGenEngineGateRecord cut = now;
+    cut.cut = true;
+    Expect(FrameGenEngineGates(&cut, &before, good) == kFrameGenEngineCut, "Engine gates: a camera cut");
+
+    // G7: nearZ changes (MSFS's menus to flight). The depth captured at a
+    // frame's release is decoded as the frame before described its own: the
+    // first frame after the change, and only it, is held back.
+    {
+        const FrameGenDepthEncoding menus{0.0f, 1.0f, 1000.0f, 0.05f};
+        const std::array<FrameGenDepthEncoding, 6> described{menus, menus, flight, flight, flight, menus};
+        for (std::size_t f = 1; f < described.size(); ++f) {
+            FrameGenEngineGateRecord previous = record(1000 + 11 * static_cast<std::int64_t>(f - 1), 40 + f, f);
+            FrameGenEngineGateRecord frame = record(1000 + 11 * static_cast<std::int64_t>(f), 41 + f, 0);
+            for (FrameGenEngineGateView& view : frame.views) view.depth = described[f];
+            FrameGenEngineGateFacts facts = good;
+            facts.end_time = frame.display_time;
+            facts.previous_sequence = f;
+            facts.decoded = {described[f - 1], described[f - 1]};
+            const bool flipped = !SameFrameGenDepthDescription(described[f], described[f - 1]);
+            Expect(FrameGenEngineGates(&frame, &previous, facts) == (flipped ? kFrameGenEngineDecode : 0u),
+                   "Engine gates: depth decoded as the frame before described it only on the first frame after a change "
+                   "(frame " + std::to_string(f) + ")");
+        }
+        FrameGenEngineGateFacts undecoded = good;
+        undecoded.decoded = {std::nullopt, std::nullopt};
+        Expect(FrameGenEngineGates(&now, &before, undecoded) == 0, "Engine gates: no depth captured, nothing decoded wrongly");
+    }
+
+    // G8: a new swapchain, then settling.
+    for (std::uint64_t frames = 0; frames < 3; ++frames) {
+        FrameGenEngineGateFacts facts = good;
+        facts.frames_since_swapchain = frames;
+        Expect(FrameGenEngineGates(&now, &before, facts) == (frames < 2 ? kFrameGenEngineRecreate : 0u),
+               "Engine gates: a swapchain made in the last 2 frames (" + std::to_string(frames) + ")");
+    }
+    FrameGenEngineGateFacts settling = good;
+    settling.seconds_since_swapchain = 2.9;
+    Expect(FrameGenEngineGates(&now, &before, settling) == kFrameGenEngineSettle, "Engine gates: settling for 3 s");
+    settling.seconds_since_swapchain = 3.0;
+    Expect(FrameGenEngineGates(&now, &before, settling) == 0, "Engine gates: settled after 3 s");
+
+    // G9: frames the engine path serves.
+    for (int i = 0; i < 3; ++i) {
+        FrameGenEngineGateFacts facts = good;
+        if (i == 0) facts.captured = false;
+        if (i == 1) facts.just_in_time = false;
+        if (i == 2) facts.composed = true;
+        Expect(FrameGenEngineGates(&now, &before, facts) == kFrameGenEngineUncaptured,
+               "Engine gates: uncaptured, not just in time or quad views (" + std::to_string(i) + ")");
+    }
+    // Gates that need no record still count without one.
+    FrameGenEngineGateFacts fresh = good;
+    fresh.frames_since_swapchain = 0;
+    fresh.seconds_since_swapchain = 0.0;
+    fresh.captured = false;
+    Expect(FrameGenEngineGates(nullptr, nullptr, fresh) ==
+               (kFrameGenEngineNoStruct | kFrameGenEngineRecreate | kFrameGenEngineSettle | kFrameGenEngineUncaptured),
+           "Engine gates: without a record, the gates that need none still count");
+}
+
+// G6's cut detection: a floor of 50 m while the median of the frames
+// before is small or unknown, 8 times it beyond, and 10 degrees.
+void TestFrameGenEngineCuts() {
+    using depthxr::FrameGenEngineCuts;
+    const std::array<float, 4> still{0.0f, 0.0f, 0.0f, 1.0f};
+    auto ahead = [](float meters) { return std::array<float, 3>{0.0f, 0.0f, meters}; };
+    auto yaw = [](float degrees) {
+        const float half = degrees * 3.14159265f / 360.0f;
+        return std::array<float, 4>{0.0f, std::sin(half), 0.0f, std::cos(half)};
+    };
+    {
+        FrameGenEngineCuts cuts;
+        Expect(cuts.Median() == 0.0, "Engine cuts: no median before any frame");
+        Expect(cuts.Add(still, ahead(51.0f)), "Engine cuts: warming up, past 50 m is a cut");
+        cuts.Reset();
+        Expect(!cuts.Add(still, ahead(49.0f)) && cuts.Median() == 49.0, "Engine cuts: warming up, 49 m is not");
+    }
+    {
+        // Flight: 3 m a frame keeps the 50 m floor.
+        FrameGenEngineCuts cuts;
+        for (int i = 0; i < 30; ++i) Expect(!cuts.Add(still, ahead(3.0f)), "Engine cuts: steady movement is not a cut");
+        Expect(!cuts.Add(still, ahead(49.0f)) && cuts.Add(still, ahead(51.0f)),
+               "Engine cuts: 50 m holds while the movement is small");
+    }
+    {
+        // Faster: 10 m a frame, 81 m.
+        FrameGenEngineCuts cuts;
+        for (int i = 0; i < 30; ++i) cuts.Add(still, ahead(-10.0f));
+        Expect(std::abs(cuts.Median() - 10.0) < 1e-6, "Engine cuts: the median movement");
+        Expect(!cuts.Add(still, ahead(80.0f)) && cuts.Add(still, ahead(82.0f)) && cuts.Add(still, ahead(1000.0f)),
+               "Engine cuts: 8 times the median movement and a meter");
+        Expect(std::abs(cuts.Median() - 10.0) < 1e-6, "Engine cuts: a few cuts move the median nowhere");
+        // The median is the last 30 frames'.
+        for (int i = 0; i < 30; ++i) cuts.Add(still, ahead(1.0f));
+        Expect(std::abs(cuts.Median() - 1.0) < 1e-6 && cuts.Add(still, ahead(60.0f)),
+               "Engine cuts: the median of the last 30 frames");
+    }
+    {
+        // A game that speeds up for good (MSFS's sim rate at 16x, slew): its
+        // first frames at the new speed are cuts, then the speed is its own.
+        FrameGenEngineCuts cuts;
+        for (int i = 0; i < 30; ++i) cuts.Add(still, ahead(3.0f));
+        int cut = 0;
+        int last = -1;
+        for (int i = 0; i < 40; ++i) {
+            if (cuts.Add(still, ahead(60.0f))) {
+                ++cut;
+                last = i;
+            }
+        }
+        Expect(cut == 15 && last == 14 && std::abs(cuts.Median() - 60.0) < 1e-6,
+               "Engine cuts: a lasting new speed is cut for 15 frames, not for good (" + std::to_string(cut) + " cuts)");
+    }
+    {
+        FrameGenEngineCuts cuts;
+        Expect(!cuts.Add(yaw(9.0f), ahead(1.0f)) && cuts.Add(yaw(11.0f), ahead(1.0f)) && cuts.Add(yaw(-11.0f), ahead(0.0f)),
+               "Engine cuts: turning past 10 degrees in a frame is a cut");
+        Expect(cuts.Add(still, {std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f}),
+               "Engine cuts: a delta not finite is a cut");
+        Expect(cuts.Add({std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f, 1.0f}, ahead(1.0f)) &&
+                   cuts.Add({0.0f, std::numeric_limits<float>::infinity(), 0.0f, 1.0f}, ahead(1.0f)),
+               "Engine cuts: a rotation not finite is a cut");
+        Expect(!cuts.Add({0.0f, 0.0f, 0.0f, 0.0f}, ahead(0.0f)), "Engine cuts: an unset rotation turns nothing");
+        cuts.Reset();
+        Expect(cuts.Median() == 0.0, "Engine cuts: reset");
+    }
+}
+
+// Pivot's change to the views, from the pose the game rendered with and the
+// pose declared, and whether it moved between frames.
+void TestFrameGenDeclaredChange() {
+    using namespace depthxr;
+    using Quaternion = std::array<double, 4>;
+    auto multiply = [](const Quaternion& a, const Quaternion& b) {
+        return Quaternion{a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
+                          a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+                          a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
+                          a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2]};
+    };
+    auto turn = [](double degrees, std::array<double, 3> axis) {
+        const double half = degrees * 3.14159265358979 / 360.0;
+        const double length = std::sqrt(axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]);
+        return Quaternion{axis[0] / length * std::sin(half), axis[1] / length * std::sin(half),
+                          axis[2] / length * std::sin(half), std::cos(half)};
+    };
+    // declared = change * game, as Pivot applies its reverse delta.
+    auto declare = [&](const FrameGenViewGeometry& game, const Quaternion& q, std::array<double, 3> p) {
+        const Quaternion g{game.orientation[0], game.orientation[1], game.orientation[2], game.orientation[3]};
+        const Quaternion d = multiply(q, g);
+        const Quaternion rotated = multiply(multiply(q, {game.position[0], game.position[1], game.position[2], 0.0}),
+                                            {-q[0], -q[1], -q[2], q[3]});
+        FrameGenViewGeometry declared = game;
+        declared.orientation = {static_cast<float>(d[0]), static_cast<float>(d[1]), static_cast<float>(d[2]),
+                                static_cast<float>(d[3])};
+        for (int i = 0; i < 3; ++i) declared.position[i] = static_cast<float>(rotated[i] + p[i]);
+        return declared;
+    };
+    auto game = [&](double degrees, std::array<float, 3> position) {
+        FrameGenViewGeometry view;
+        const Quaternion q = turn(degrees, {0.2, 1.0, 0.1});
+        view.orientation = {static_cast<float>(q[0]), static_cast<float>(q[1]), static_cast<float>(q[2]),
+                            static_cast<float>(q[3])};
+        view.position = position;
+        return view;
+    };
+    const Quaternion pivot = turn(25.0, {0.0, 1.0, 0.0});
+    const std::array<double, 3> offset{0.3, -0.1, 0.7};
+    const FrameGenViewGeometry first = game(10.0, {0.1f, 1.2f, -0.3f});
+    const FrameGenViewGeometry second = game(14.0, {0.12f, 1.21f, -0.31f});
+    const FrameGenPoseChange a = FrameGenDeclaredChange(first, declare(first, pivot, offset));
+    double error = 0.0;
+    for (int i = 0; i < 4; ++i) error = (std::max)(error, std::abs(a.orientation[i] - pivot[i]));
+    for (int i = 0; i < 3; ++i) error = (std::max)(error, std::abs(a.position[i] - offset[i]));
+    Expect(error < 1e-5, "Declared change: Pivot's reverse delta is found (" + std::to_string(error) + ")");
+    Expect(!FrameGenDeclaredChangeMoved(a, FrameGenDeclaredChange(second, declare(second, pivot, offset))),
+           "Declared change: the same change with the head moved has not moved");
+    Expect(!FrameGenDeclaredChangeMoved(FrameGenDeclaredChange(first, first), FrameGenDeclaredChange(second, second)),
+           "Declared change: without Pivot nothing moves");
+    Expect(FrameGenDeclaredChangeMoved(a, FrameGenDeclaredChange(second, declare(second, multiply(turn(0.1, {1.0, 0.0, 0.0}), pivot), offset))) &&
+               !FrameGenDeclaredChangeMoved(
+                   a, FrameGenDeclaredChange(second, declare(second, multiply(turn(0.02, {1.0, 0.0, 0.0}), pivot), offset))),
+           "Declared change: turning by 0.1 degrees moves it, 0.02 degrees does not");
+    Expect(FrameGenDeclaredChangeMoved(a, FrameGenDeclaredChange(second, declare(second, pivot, {0.3, -0.1, 0.701}))) &&
+               !FrameGenDeclaredChangeMoved(
+                   a, FrameGenDeclaredChange(second, declare(second, pivot, {0.3, -0.1, 0.7002}))),
+           "Declared change: 1 mm moves it, 0.2 mm does not");
+}
+
+// Research switches: the environment first, then framegen-research.txt for
+// the engine motion research's switches only.
+void TestResearchSwitches() {
+#if defined(_WIN32)
+    namespace fs = std::filesystem;
+    const wchar_t* saved_local = _wgetenv(L"LOCALAPPDATA");
+    const std::wstring local_before = saved_local ? saved_local : L"";
+    const fs::path root =
+        fs::temp_directory_path() /
+        ("vectorxr-research-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::error_code ignored;
+    fs::remove_all(root, ignored);
+    fs::create_directories(root / "VectorXR", ignored);
+    _wputenv_s(L"LOCALAPPDATA", root.wstring().c_str());
+    for (const char* name : {"VECTORXR_FRAMEGEN_ENGINE_CUTS", "VECTORXR_FRAMEGEN_ENGINE_MV",
+                             "VECTORXR_FRAMEGEN_DEPTH_ENCODING_CHECK", "VECTORXR_FRAMEGEN_JIT",
+                             "VECTORXR_FRAMEGEN_ENGINE_MV_STATE"}) {
+        _putenv_s(name, "");
+    }
+    Expect(!depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_CUTS"), "Research switches: none without a file");
+    {
+        // Notepad's byte order mark, spaces, a comment, a switch outside the
+        // research's and one named twice.
+        std::ofstream file(root / "VectorXR" / "framegen-research.txt", std::ios::binary);
+        file << "\xEF\xBB\xBFVECTORXR_FRAMEGEN_ENGINE_MV=census\r\n"
+             << "# VECTORXR_FRAMEGEN_ENGINE_MV_STATE=common\r\n"
+             << "  VECTORXR_FRAMEGEN_ENGINE_CUTS = 0 \r\n"
+             << "VECTORXR_FRAMEGEN_DEPTH_ENCODING_CHECK=1\r\n"
+             << "VECTORXR_FRAMEGEN_JIT=0\r\n"
+             << "VECTORXR_FRAMEGEN_ENGINE_CUTS=1\r\n";
+    }
+    depthxr::TakeResearchFileSwitches(); // what earlier reads in the process left
+    const std::uint64_t reads = depthxr::ResearchFileReads();
+    Expect(depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_MV") == "census",
+           "Research switches: the first line, after a byte order mark");
+    Expect(depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_CUTS") == "1",
+           "Research switches: the last line naming a switch holds, trimmed");
+    Expect(depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_DEPTH_ENCODING_CHECK") == "1",
+           "Research switches: the depth encoding check is one of them");
+    Expect(!depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_MV_STATE"), "Research switches: a commented line is not read");
+    Expect(!depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_JIT"),
+           "Research switches: switches outside the engine motion research come from the environment only");
+    Expect(depthxr::ResearchFileReads() == reads + 3, "Research switches: three reads answered by the file");
+    // The environment wins.
+    _putenv_s("VECTORXR_FRAMEGEN_ENGINE_CUTS", "0");
+    _putenv_s("VECTORXR_FRAMEGEN_JIT", "1");
+    Expect(depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_CUTS") == "0" &&
+               depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_JIT") == "1" && depthxr::ResearchFileReads() == reads + 3,
+           "Research switches: the environment wins");
+    // Each switch taken from the file is told once.
+    const std::vector<std::string> taken = depthxr::TakeResearchFileSwitches();
+    Expect(taken == std::vector<std::string>{"VECTORXR_FRAMEGEN_ENGINE_MV=census", "VECTORXR_FRAMEGEN_ENGINE_CUTS=1",
+                                             "VECTORXR_FRAMEGEN_DEPTH_ENCODING_CHECK=1"},
+           "Research switches: the switches taken from the file, in order");
+    Expect(depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_MV") == "census" &&
+               depthxr::TakeResearchFileSwitches().empty(),
+           "Research switches: a switch taken again is not told again");
+    for (const char* name : {"VECTORXR_FRAMEGEN_ENGINE_CUTS", "VECTORXR_FRAMEGEN_JIT"}) {
+        _putenv_s(name, "");
+    }
+    _wputenv_s(L"LOCALAPPDATA", local_before.c_str());
+    fs::remove_all(root, ignored);
+#endif
 }
 
 void TestTurboMetricsSettingsParsing() {
@@ -4692,6 +5046,10 @@ int main() {
     TestFrameGenEngineImageTracker();
     TestFrameGenViewMapping();
     TestFrameGenEngineCalibration();
+    TestFrameGenEngineGates();
+    TestFrameGenEngineCuts();
+    TestFrameGenDeclaredChange();
+    TestResearchSwitches();
     TestTurboMetricsSettingsParsing();
     TestTurboMetricsSessionRoundTrip();
     TestQuadViewsProfileResolution();

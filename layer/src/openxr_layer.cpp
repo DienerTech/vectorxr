@@ -11520,6 +11520,10 @@ OsdSnapshot OpenXrLayer::BuildOsdSnapshot() const {
         snapshot.diagnostics+=std::string(snapshot.diagnostics.empty()?"":" \xC2\xB7 ")+
             (view==FrameGenDiagnosticView::kFlow?"FLOW VIEW":view==FrameGenDiagnosticView::kConfidence?"CONFIDENCE VIEW":"TINT VIEW");
     }
+    // ...and Frame Generation research switches taken from its research
+    // file (framegen-research.txt), which outlives the flight it was for.
+    if (framegen_session_enabled_ && framegen_.ResearchFileInUse())
+        snapshot.diagnostics+=std::string(snapshot.diagnostics.empty()?"":" \xC2\xB7 ")+"RESEARCH";
     return snapshot;
 }
 

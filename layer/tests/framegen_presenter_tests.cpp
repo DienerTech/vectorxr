@@ -3589,6 +3589,270 @@ void TestEngineMotionCensus() {
     }
 }
 
+// Engine motion vectors, stage 1: the frame gates. A frame's record pairs
+// with the record of the frame generated from before it (by the display
+// time the game ended each with), never across an abandoned frame or a frame
+// the layer handed no record over for (across one begun over and never ended,
+// as Frame Generation's own continuity), and the frame may then calibrate
+// unless Pivot's change to the views moved. With
+// VECTORXR_FRAMEGEN_DEPTH_ENCODING_CHECK=1 a nearZ change takes the depth of
+// the first frame after it only; with VECTORXR_FRAMEGEN_ENGINE_CUTS=1 a
+// camera cut leaves its frame unmoved. Both are counted in the summary.
+void TestEngineMotionGates() {
+    const XrSwapchain depth_chain = reinterpret_cast<XrSwapchain>(0x21);
+    const XrSwapchain vectors = reinterpret_cast<XrSwapchain>(0x31);
+    struct Session {
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        std::unique_ptr<App> app;
+        std::uint64_t frames{0};  // the layer's projection frames
+        bool alternate{false};    // a record at every other end only
+        float delta_z{0.0f};      // the next record's appSpaceDeltaPose (meters ahead)
+        float pivot_x{0.0f};      // Pivot's change: the game rendered this far left of the pose declared
+        // The frame generated from last: whether it may calibrate, and with depth and moved.
+        bool Calibrate() const { return gpu.last.size() == 2 && gpu.last[0].request.engine_calibrate && gpu.last[1].request.engine_calibrate; }
+    };
+    auto start = [&](Session& session, const char* check, const char* cuts, Logger* logger = nullptr) {
+        session.gpu.depth = true;
+        _putenv_s("VECTORXR_FRAMEGEN_DEPTH_ENCODING_CHECK", check);
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_CUTS", cuts);
+        StartPresenter(session.presenter, session.gpu, FrameGenSynthesisMode::kExtrapolate, kFormat, kAppUsage,
+                       FrameGenMultiplier::k2, logger);
+        _putenv_s("VECTORXR_FRAMEGEN_DEPTH_ENCODING_CHECK", "");
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_CUTS", "");
+        session.presenter.TrackSwapchain(depth_chain, 20, 1,
+                                         XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+        session.presenter.TrackSwapchain(vectors, kFloatFormat, 1,
+                                         XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+        session.app = std::make_unique<App>(session.presenter, session.runtime);
+        App& app = *session.app;
+        app.depth.subImage.swapchain = depth_chain;
+        app.depth.subImage.imageRect = {{0, 0}, {1200, 1200}};
+        app.depth.maxDepth = 1.0f;
+        app.depth.nearZ = 0.1f;
+        app.depth.farZ = 1000.0f;
+        // As the layer: the frame's record, with the poses the game rendered
+        // with (before Pivot's change).
+        app.before_end = [&session, vectors](XrTime time) {
+            ++session.frames;
+            if (session.alternate && session.frames % 2) return;
+            App& app = *session.app;
+            FrameGenEngineMotionFrame record;
+            record.display_time = time;
+            record.projection_frame = session.frames;
+            for (std::uint32_t v = 0; v < 2; ++v) {
+                FrameGenEngineMotionView view;
+                view.view = v;
+                view.source = FrameGenMotionSource::kSpaceWarpFb;
+                view.vectors = {vectors, {{0, 0}, {800, 800}}, v};
+                view.depth = app.depth.subImage;
+                view.depth_is_khr = true;
+                view.color = app.views[v].subImage;
+                view.depth_encoding = {app.depth.minDepth, app.depth.maxDepth, app.depth.nearZ, app.depth.farZ};
+                view.app_delta.position.z = session.delta_z;
+                const XrPosef& pose = app.views[v].pose;
+                view.game.orientation = {pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w};
+                view.game.position = {pose.position.x - session.pivot_x, pose.position.y, pose.position.z};
+                record.views.push_back(view);
+            }
+            record.complete = true;
+            session.delta_z = 0.0f;
+            session.presenter.NoteEngineMotion(record);
+        };
+    };
+    // A frame Frame Generation generates from (what the backend was last
+    // asked is that frame's).
+    const auto step = [](Session& session, const std::string& what) {
+        const int executes = session.gpu.executes;
+        session.app->Frame();
+        Check(session.gpu.executes > executes, "engine gates: " + what + ": the frame is generated from");
+    };
+
+    // Records every frame: once paired, frames may calibrate.
+    {
+        Session session;
+        start(session, "", "");
+        App& app = *session.app;
+        for (int i = 0; i < 8; ++i) app.Frame();
+        step(session, "steady");
+        Check(session.Calibrate(), "engine gates: paired frames may calibrate");
+
+        // An abandoned frame (its record handed over, its end never came):
+        // the next frame generated from pairs with nothing, the one after
+        // with it.
+        const XrFrameState state = app.Wait();
+        app.Begin();
+        app.Release();
+        FrameGenEngineMotionFrame record;
+        record.display_time = state.predictedDisplayTime;
+        record.projection_frame = ++session.frames;
+        record.views.resize(2);
+        record.views[1].view = 1;
+        for (auto& view : record.views) view.vectors = {vectors, {{0, 0}, {800, 800}}, view.view};
+        record.complete = true;
+        session.presenter.NoteEngineMotion(record);
+        session.presenter.AbandonFrame(state.predictedDisplayTime);
+        const int executes = session.gpu.executes;
+        for (int i = 0; i < 10 && session.gpu.executes == executes; ++i) app.Frame();
+        Check(session.gpu.executes > executes && !session.Calibrate(), "engine gates: no pair across an abandoned frame");
+        step(session, "after an abandoned frame");
+        Check(session.Calibrate(), "engine gates: paired again after an abandoned frame");
+
+        // Frames begun over and never ended (OpenComposite asking for poses
+        // twice): Frame Generation bridges each, and the frames on either side
+        // still pair. (The first frame ended over an open one passes through,
+        // and the one after it follows no frame generated from.)
+        XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};
+        bool bridged = true;
+        for (int i = 0; i < 5; ++i) {
+            app.Wait();
+            Check(session.presenter.BeginFrame(kSession, &begin, app.calls) == XR_SUCCESS, "engine gates: begin");
+            const XrFrameState over = app.Wait();
+            Check(session.presenter.BeginFrame(kSession, &begin, app.calls) == XR_FRAME_DISCARDED,
+                  "engine gates: the begin over an open frame discards it");
+            app.Release();
+            const int before = session.gpu.executes;
+            Check(XR_SUCCEEDED(app.End(over.predictedDisplayTime)), "engine gates: the frame begun over ends");
+            if (i >= 2) bridged = bridged && session.gpu.executes > before && session.Calibrate();
+        }
+        Check(bridged, "engine gates: frames pair across a frame begun over and never ended");
+
+        // A record at every other end: a frame without one of its own never
+        // takes the one before as its own, nor pairs with it later.
+        session.alternate = true;
+        step(session, "alternate records"); // may still pair with the frame before
+        bool calibrated = false;
+        for (int i = 0; i < 6; ++i) {
+            step(session, "alternate records");
+            calibrated = calibrated || session.Calibrate();
+        }
+        Check(!calibrated, "engine gates: records pair only as their frames do (by display time)");
+        session.alternate = false;
+        step(session, "records again");
+        step(session, "records again");
+        Check(session.Calibrate(), "engine gates: paired again with a record each frame");
+
+        // Pivot's change: once moved, then held (calibrating again), then
+        // moving every frame.
+        session.pivot_x = 0.1f;
+        step(session, "Pivot");
+        Check(!session.Calibrate(), "engine gates: Pivot's change moved: no calibration");
+        step(session, "Pivot");
+        Check(session.Calibrate(), "engine gates: Pivot's change held: calibrating again");
+        calibrated = false;
+        for (int i = 0; i < 4; ++i) {
+            session.pivot_x += 0.001f;
+            step(session, "Pivot moving");
+            calibrated = calibrated || session.Calibrate();
+        }
+        Check(!calibrated, "engine gates: no calibration while Pivot's change moves 1 mm a frame");
+
+        // Without the check, a nearZ change keeps the depth (decoded as the
+        // frame before described it), and no frame calibrates around it.
+        session.pivot_x = 0.0f;
+        step(session, "Pivot off");
+        step(session, "Pivot off");
+        Check(session.Calibrate(), "engine gates: calibrating before the nearZ change");
+        app.depth.nearZ = 0.2f;
+        step(session, "nearZ");
+        Check(session.gpu.last[0].request.depth && session.gpu.last[1].request.depth && !session.Calibrate(),
+              "engine gates: without the check, a nearZ change keeps the depth, uncalibrated");
+        step(session, "nearZ");
+        Check(!session.Calibrate(), "engine gates: nor the frame after the nearZ change");
+        step(session, "nearZ");
+        Check(session.Calibrate(), "engine gates: calibrating again two frames after the nearZ change");
+
+        // A camera cut without the switch: counted, the frames still moved.
+        session.delta_z = 60.0f;
+        step(session, "cut");
+        Check(session.gpu.last[0].request.synthesize && !session.Calibrate(),
+              "engine gates: without the switch, a cut's frame is still moved, uncalibrated");
+        session.presenter.Stop();
+        Check(!session.runtime.ordering_violation && !g_release_violation, "engine gates: calls stayed ordered");
+    }
+
+    // VECTORXR_FRAMEGEN_DEPTH_ENCODING_CHECK=1 and VECTORXR_FRAMEGEN_ENGINE_CUTS=1,
+    // and the summary's line.
+    {
+        const std::filesystem::path directory = std::filesystem::temp_directory_path() /
+                                                ("vectorxr-presenter-gates-" + std::to_string(GetCurrentProcessId()));
+        std::error_code ignored;
+        std::filesystem::remove_all(directory, ignored);
+        auto logger = std::make_unique<Logger>();
+        logger->Initialize(directory / "gates.log");
+        Session session;
+        start(session, "1", "1", logger.get());
+        session.presenter.SetSummaryInterval(100ms);
+        App& app = *session.app;
+        for (int i = 0; i < 8; ++i) app.Frame();
+        step(session, "switches on");
+        Check(session.gpu.last[0].request.depth && session.gpu.last[0].request.synthesize,
+              "engine gates: depth and motion before the changes");
+        app.depth.nearZ = 0.2f;
+        step(session, "checked nearZ");
+        Check(!session.gpu.last[0].request.depth && !session.gpu.last[1].request.depth,
+              "engine gates: the depth decoded as the frame before described it is not used");
+        {
+            // The frame after it without its depth captured (as where the
+            // capture fails): no capture, nothing to check against the
+            // change, which was the frame before's.
+            const int executes = session.gpu.executes;
+            const XrFrameState state = app.Wait();
+            app.Begin();
+            app.image = (app.image + 1) % 3;
+            for (const XrSwapchain swapchain : {kLeft, kRight}) {
+                session.presenter.NoteRelease(swapchain, app.image);
+                session.presenter.CaptureOnRelease(swapchain, app.image);
+            }
+            Check(XR_SUCCEEDED(app.End(state.predictedDisplayTime)) && session.gpu.executes > executes,
+                  "engine gates: a frame without its depth captured is generated from");
+            Check(session.gpu.last[0].request.depth && session.gpu.last[1].request.depth,
+                  "engine gates: a frame without its depth captured counts no change");
+        }
+        step(session, "checked nearZ");
+        Check(session.gpu.last[0].request.depth && session.gpu.last[1].request.depth,
+              "engine gates: the next frame's depth is used again");
+        session.delta_z = 60.0f;
+        step(session, "cut");
+        Check(!session.gpu.last[0].request.synthesize && !session.gpu.last[1].request.synthesize,
+              "engine gates: nothing is moved across a camera cut");
+        step(session, "cut");
+        Check(session.gpu.last[0].request.synthesize, "engine gates: frames after the cut are moved again");
+        std::this_thread::sleep_for(150ms);
+        app.Frame();
+        session.presenter.Stop();
+        const std::filesystem::path path = logger->ActiveLogPath();
+        logger.reset(); // flushed
+        std::ifstream file(path);
+        // Summed over the summaries (a slow run may split the frames).
+        int summaries = 0;
+        int flips = 0;
+        int cuts = 0;
+        bool named = true;
+        bool research = false;
+        const auto count = [](const std::string& line, const std::string& key) {
+            const std::size_t at = line.find(key);
+            return at == std::string::npos ? 0 : std::stoi(line.substr(at + key.size()));
+        };
+        for (std::string line; std::getline(file, line);) {
+            if (line.find("Frame Generation engine motion (") != std::string::npos) {
+                ++summaries;
+                flips += count(line, "flips=");
+                cuts += count(line, "cuts=");
+                named = named && line.find("(noStruct/skip/pairing/cut/decode/recreate/settle/uncaptured)") != std::string::npos;
+            }
+            research = research || line.find("VECTORXR_FRAMEGEN_ENGINE_CUTS=1 (research)") != std::string::npos;
+        }
+        file.close();
+        std::filesystem::remove_all(directory, ignored);
+        Check(research, "engine gates: the switches are logged at the start");
+        Check(summaries > 0 && named && flips == 1 && cuts == 1,
+              "engine gates: the summaries count the nearZ change and the cut (" + std::to_string(summaries) +
+                  " summaries, flips " + std::to_string(flips) + ", cuts " + std::to_string(cuts) + ")");
+    }
+}
+
 void TestOverlappingWaitIsHeld() {
     FrameGenPresenter presenter;
     GpuLog gpu;
@@ -7617,6 +7881,50 @@ struct SessionLog {
     }
 };
 
+// Research switches from %LOCALAPPDATA%\VectorXR\framegen-research.txt (a
+// folder of this test's own, which the policy tests' process never sees):
+// the OSD names them for the session that runs with them only, not once it
+// stopped, nor for one without a backend; the log names each once in the
+// process, a session without a backend's too.
+void TestResearchFileSessions() {
+    const std::wstring local_before = _wgetenv(L"LOCALAPPDATA") ? _wgetenv(L"LOCALAPPDATA") : L"";
+    const std::filesystem::path local = std::filesystem::temp_directory_path() /
+                                        ("vectorxr-presenter-research-" + std::to_string(GetCurrentProcessId()));
+    std::error_code ignored;
+    std::filesystem::remove_all(local, ignored);
+    _wputenv_s(L"LOCALAPPDATA", local.c_str());
+    const std::filesystem::path file = local / "VectorXR" / "framegen-research.txt";
+    std::filesystem::create_directories(file.parent_path(), ignored);
+    {
+        std::ofstream out(file, std::ios::binary);
+        out << "VECTORXR_FRAMEGEN_ENGINE_CUTS=1\n";
+    }
+    SessionLog log("research-file");
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    presenter.Start(kSession, nullptr, Dispatch(), log.logger.get(), nullptr,
+                    [](const void*, std::string& error) -> std::unique_ptr<FrameGenGpu> {
+                        error = "no device";
+                        return nullptr;
+                    });
+    Check(!presenter.ResearchFileInUse(), "research file: not named for a session without a backend");
+    presenter.Stop();
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, kFormat, kAppUsage, FrameGenMultiplier::k2,
+                   log.logger.get());
+    Check(presenter.ResearchFileInUse(), "research file: named for the session running with it");
+    presenter.Stop();
+    Check(!presenter.ResearchFileInUse(), "research file: not once that session stopped");
+    std::filesystem::remove(file, ignored);
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kExtrapolate);
+    Check(!presenter.ResearchFileInUse(), "research file: not for a session without it");
+    presenter.Stop();
+    _wputenv_s(L"LOCALAPPDATA", local_before.c_str());
+    std::filesystem::remove_all(local, ignored);
+    Check(log.Lines("research switches from").size() == 1 &&
+              log.Lines("VECTORXR_FRAMEGEN_ENGINE_CUTS=1 (research)").size() == 1,
+          "research file: the switch logged once, its effect for the session with a backend");
+}
+
 // A game's depth description is logged with every digit (Star Citizen's
 // near plane hid behind one decimal), and again whenever it changes.
 void TestDepthDescriptionLogged() {
@@ -11116,6 +11424,18 @@ int main(int argc, char** argv) {
         std::cerr << "FAILED: terminate: " << what << std::endl;
         std::_Exit(3);
     });
+    // Research switches (framegen-research.txt) and capture requests are
+    // read beside the tests, never from the user's VectorXR folder.
+    {
+        wchar_t exe_path[MAX_PATH]{};
+        GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
+        const std::filesystem::path app_data =
+            std::filesystem::path(exe_path).parent_path() / "framegen_presenter_tests_appdata";
+        std::error_code ignored;
+        std::filesystem::create_directories(app_data, ignored);
+        _wputenv_s(L"LOCALAPPDATA", app_data.c_str());
+        SetEnvironmentVariableW(L"LOCALAPPDATA", app_data.c_str());
+    }
     if (argc > 1 && std::string(argv[1]) == "--policy-tests") {
         RunPolicyTests();
         return 0;
@@ -11134,6 +11454,8 @@ int main(int argc, char** argv) {
     RUN(TestOutputsKeptAcrossMultipliers);
     RUN(TestDepthCapture);
     RUN(TestEngineMotionCensus);
+    RUN(TestEngineMotionGates);
+    RUN(TestResearchFileSessions);
     RUN(TestAutomaticMultiplier);
     RUN(TestThreadedExtrapolation);
     RUN(TestThreadedDynamic);

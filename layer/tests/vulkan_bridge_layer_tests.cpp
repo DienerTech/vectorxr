@@ -4297,6 +4297,9 @@ void IsolateHost() {
     SetEnv("VECTORXR_RUNTIME_PACING_PATH", (g_root / "runtime-pacing.json").string());
     SetEnv("VECTORXR_TURBO_METRICS_PATH", (g_root / "turbo-metrics.json").string());
     SetEnv("XR_RUNTIME_JSON", (g_root / "no-runtime.json").string());
+    // Frame Generation's research switches (framegen-research.txt) and
+    // capture requests.
+    SetEnv("LOCALAPPDATA", (g_root / "appdata").string());
     // Whatever the host sets for the bridges does not apply.
     SetEnv("VECTORXR_FRAMEGEN_QUEUE", "");
     SetEnv("VECTORXR_D3D11_BRIDGE", "");

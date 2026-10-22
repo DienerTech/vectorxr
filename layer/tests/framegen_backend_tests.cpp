@@ -8065,6 +8065,20 @@ int VulkanTest() {
 } // namespace
 
 int main(int argc, char** argv) {
+    // Research switches (framegen-research.txt) are read beside the tests,
+    // never from the user's VectorXR folder: one left there for a flight
+    // (VECTORXR_FRAMEGEN_ENGINE_MV_STATE) would change the barriers the
+    // census tests record, and make replays depend on the machine.
+    {
+        wchar_t exe_path[MAX_PATH]{};
+        GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
+        const std::filesystem::path app_data =
+            std::filesystem::path(exe_path).parent_path() / "framegen_backend_tests_appdata";
+        std::error_code ignored;
+        std::filesystem::create_directories(app_data, ignored);
+        _wputenv_s(L"LOCALAPPDATA", app_data.c_str());
+        SetEnvironmentVariableW(L"LOCALAPPDATA", app_data.c_str());
+    }
     std::string api = argc > 1 ? argv[1] : "d3d11";
     if (api == "engine-calibrate") {
         // depthxr_framegen_tests engine-calibrate <capture directory>: CPU only.
