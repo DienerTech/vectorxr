@@ -71,6 +71,82 @@ struct FrameGenMemoryBudget {
     std::uint64_t budget_bytes{0};
 };
 
+// Engine motion vectors (FrameGenGpu::CaptureMotion): one view's motion
+// vector images to read for a frame.
+struct FrameGenMotionJob {
+    std::size_t view{0};
+    // The swapchain and region the game named (XR_FB_space_warp,
+    // XR_EXT_frame_synthesis); image_index is the image the frame's vectors
+    // are thought to be in (FrameGenEngineImageTracker), which a dump copies
+    // without `census_all`'s.
+    FrameGenImage vectors;
+    std::uint32_t image_count{0}; // 0: the swapchain's own, up to kFrameGenEngineImages
+    std::optional<std::uint32_t> released; // a game following the specification released this one
+    std::uint32_t color_index{0};          // the images the frame's color and depth swapchains released
+    std::uint32_t depth_index{0};
+    std::uint64_t frame{0};                // the layer's count of frames with a projection layer
+    FrameGenMotionEncoding encoding;
+    bool informative{false};
+    // Stage 0: every image is fingerprinted, and the sparse samples taken.
+    bool census_all{false};
+    bool samples{false};
+    // Taken when the frame's depth was released, before its xrEndFrame:
+    // whether the images are written by then (census only).
+    bool early{false};
+};
+
+// One image's census (kEngineCensus, see FG_PASS_ENGINE_CENSUS).
+struct FrameGenEngineImageCensus {
+    std::uint32_t xor_hash{0};
+    std::uint32_t sum_hash{0};
+    std::uint32_t zeros{0};     // exact zero vectors on the hash grid (of 4096)
+    std::uint32_t non_finite{0}; // ... not finite
+    std::uint32_t large{0};      // longer than 4 on the statistics grid (of 1024)
+    float sum_abs{0.0f};
+    float max_abs{0.0f};
+    std::uint32_t finite{0};     // finite on the statistics grid
+    std::array<float, 4> sums{}; // r, g, b, a summed over those
+    std::uint32_t tag{0};
+    std::uint32_t image{0};
+    std::uint32_t rect_width{0};
+    std::uint32_t rect_height{0};
+    std::uint64_t Hash() const { return (static_cast<std::uint64_t>(xor_hash) << 32) | sum_hash; }
+};
+
+// What a job's census found, once read back (a few frames later).
+struct FrameGenEngineCensus {
+    std::uint64_t sequence{0}; // in the order read, from 1
+    std::uint64_t frame{0};
+    std::size_t view{0};
+    bool early{false};
+    std::uint32_t images{0};
+    std::uint32_t color_index{0};
+    std::uint32_t depth_index{0};
+    std::uint64_t handle{0}; // the motion vector swapchain
+    std::array<std::int32_t, 4> rect{};
+    std::array<FrameGenEngineImageCensus, kFrameGenEngineImages> image{};
+    // 16x16 samples of 4 texels: the three images' raw texels, then the
+    // linear depth, the color image index and the half-resolution texel.
+    std::vector<std::array<float, 4>> samples;
+    double gpu_ms{-1.0}; // the census submission's time on the GPU
+};
+
+// The backend's engine motion state: counts, and the censuses read back
+// lately (the newest kept few; callers take those past the last sequence
+// they saw).
+struct FrameGenEngineStatus {
+    std::uint64_t submitted{0};
+    std::uint64_t busy{0};        // calls skipped: every motion slot still on the GPU (never waited for)
+    std::uint64_t refused{0};     // images that cannot be read (multisampled, integer, not shader-readable)
+    std::uint64_t failed{0};
+    std::uint64_t dumped{0};      // frames whose images were copied for a research capture
+    bool stopped{false};          // the device was removed: nothing more is read
+    // Each motion vector image's description (resource, heap), once each,
+    // and debug-layer messages about their states (VECTORXR_FRAMEGEN_ENGINE_MV_DEBUG).
+    std::vector<std::string> notes;
+    std::vector<FrameGenEngineCensus> census;
+};
+
 class FrameGenGpu {
   public:
     virtual ~FrameGenGpu() = default;
@@ -110,6 +186,25 @@ class FrameGenGpu {
     // when the backend has no depth path).
     virtual XrSwapchainUsageFlags RequiredDepthUsage() const { return 0; }
     virtual bool SupportsDepth() const { return false; }
+    // Engine motion vectors (Direct3D 12): reads each job's motion vector
+    // images on the game's queue, as they are at the call (a game may never
+    // release them), and keeps what the census finds for EngineStatus a few
+    // frames later. `color` describes each view's color image, by view.
+    // Never waits: with every motion slot still on the GPU the call is
+    // skipped (false, an empty error).
+    virtual bool SupportsEngineMotion() const { return false; }
+    virtual bool CaptureMotion(const std::vector<FrameGenMotionJob>& /*jobs*/,
+                               const std::vector<FrameGenViewRequest>& /*color*/, std::string& error) {
+        error.clear();
+        return false;
+    }
+    // With the censuses read back since sequence `after` (FrameGenEngineCensus::sequence).
+    virtual FrameGenEngineStatus EngineStatus(std::uint64_t /*after*/ = 0) const { return {}; }
+    // Research: the next CaptureMotion (not an early one) also copies the
+    // images into `directory` (which must exist), every image or only each
+    // job's vectors.image_index; files are written after the GPU, by a
+    // thread of their own.
+    virtual bool DumpMotion(const std::string& /*directory*/, bool /*all_images*/) { return false; }
     // How the game's depth is being read after checking it against the
     // other eye, with the evidence; counts decisions so callers log each once.
     virtual FrameGenDepthStatus DepthStatus() const { return {}; }

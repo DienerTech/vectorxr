@@ -184,6 +184,18 @@ struct GpuLog {
     std::atomic<int> canvas_ring{0};
     std::atomic<int> working_memory_queries{0}; // WorkingMemoryBytes calls
     std::atomic<int> depth_captures{0};
+    // Engine motion vectors (SupportsEngineMotion): each CaptureMotion
+    // call's jobs, in order.
+    bool engine{false};
+    std::mutex motion_mutex;
+    std::vector<std::vector<FrameGenMotionJob>> motion_calls;
+    // Calls at a frame's end, or at a depth release (early).
+    int MotionCalls(bool early) {
+        std::scoped_lock lock(motion_mutex);
+        return static_cast<int>(std::count_if(motion_calls.begin(), motion_calls.end(), [&](const auto& jobs) {
+            return !jobs.empty() && jobs.front().early == early;
+        }));
+    }
     std::vector<FrameGenViewSubmission> last;
     FrameGenImage last_capture;
     FrameGenTuning tuning;
@@ -757,6 +769,14 @@ class FakeGpu final : public FrameGenGpu {
         ++log_->depth_captures;
         return log_->depth;
     }
+    bool SupportsEngineMotion() const override { return log_->engine; }
+    bool CaptureMotion(const std::vector<FrameGenMotionJob>& jobs, const std::vector<FrameGenViewRequest>&,
+                       std::string& error) override {
+        error.clear();
+        std::scoped_lock lock(log_->motion_mutex);
+        log_->motion_calls.push_back(jobs);
+        return log_->engine;
+    }
 
   private:
     struct Analyzed {
@@ -1284,6 +1304,9 @@ struct App {
     // (GpuLog::GameFrame) and what a test records around it.
     std::function<void()> before_begin;
     std::function<void()> before_release;
+    // Run in each end before the presenter's: what the layer does there
+    // first (its engine motion record and census), with the frame's time.
+    std::function<void(XrTime)> before_end;
 
     App(FrameGenPresenter& p, Runtime& r) : presenter(p), runtime(r), calls(r.Calls()) {
         for (int eye = 0; eye < 2; ++eye) {
@@ -1346,6 +1369,7 @@ struct App {
         info.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
         info.layerCount = layers ? static_cast<std::uint32_t>(this->layers.size()) : 0;
         info.layers = layers ? this->layers.data() : nullptr;
+        if (before_end) before_end(info.displayTime);
         return presenter.EndFrame(kSession, &info, calls);
     }
 
@@ -3415,6 +3439,154 @@ void TestDepthCapture() {
     Check(none.Status().depth == FrameGenDepthState::kUnknown, "depth: nothing reported before generated frames");
     for (int i = 0; i < 8; ++i) none_app.Frame();
     Check(none.Status().depth == FrameGenDepthState::kNotSent, "depth: a game without depth is reported");
+}
+
+// Engine motion vectors, stage 0 (VECTORXR_FRAMEGEN_ENGINE_MV=census): the
+// layer hands each frame's record over in xrEndFrame and asks for its census
+// right after. The census is taken once per frame while frames are
+// generated (and never with the switch off), the early census at each depth
+// release, and the records are forgotten with an abandoned frame or a
+// destroyed swapchain.
+void TestEngineMotionCensus() {
+    const XrSwapchain depth_chain = reinterpret_cast<XrSwapchain>(0x21);
+    const XrSwapchain vectors = reinterpret_cast<XrSwapchain>(0x31);
+    struct Session {
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        std::unique_ptr<App> app;
+        std::uint64_t frames{0};
+        bool bridged{false};
+    };
+    auto start = [&](Session& session, bool census) {
+        session.gpu.depth = true;
+        session.gpu.engine = true;
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", census ? "census" : "");
+        StartPresenter(session.presenter, session.gpu, FrameGenSynthesisMode::kExtrapolate);
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "");
+        session.presenter.TrackSwapchain(depth_chain, 20, 1,
+                                         XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+        session.presenter.TrackSwapchain(vectors, kFloatFormat, 1,
+                                         XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+        session.app = std::make_unique<App>(session.presenter, session.runtime);
+        App& app = *session.app;
+        app.depth.subImage.swapchain = depth_chain;
+        app.depth.subImage.imageRect = {{0, 0}, {1200, 1200}};
+        app.depth.maxDepth = 1.0f;
+        app.depth.nearZ = 0.1f;
+        app.depth.farZ = 1000.0f;
+        // As the layer: the frame's record, then its census.
+        app.before_end = [&session, vectors](XrTime time) {
+            FrameGenEngineMotionFrame record;
+            record.display_time = time;
+            record.projection_frame = ++session.frames;
+            for (std::uint32_t v = 0; v < 2; ++v) {
+                FrameGenEngineMotionView view;
+                view.view = v;
+                view.source = FrameGenMotionSource::kSpaceWarpFb;
+                view.vectors = {vectors, {{0, 0}, {800, 800}}, v};
+                view.depth = session.app->depth.subImage;
+                view.depth_is_khr = true;
+                view.color = session.app->views[v].subImage;
+                record.views.push_back(view);
+            }
+            record.complete = true;
+            session.presenter.NoteEngineMotion(record, session.bridged);
+            session.presenter.CaptureEngineMotion();
+        };
+    };
+
+    {
+        Session session;
+        start(session, true);
+        App& app = *session.app;
+        app.Frame();
+        Check(session.gpu.MotionCalls(false) == 0 && session.gpu.MotionCalls(true) == 0,
+              "engine motion: nothing is read while frames pass straight through");
+        for (int i = 0; i < 6; ++i) app.Frame();
+        const int engaged = session.gpu.MotionCalls(false);
+        Check(engaged > 0 && session.gpu.executes > 0, "engine motion: frames generated, the census is taken");
+        for (int i = 0; i < 5; ++i) app.Frame();
+        Check(session.gpu.MotionCalls(false) == engaged + 5, "engine motion: one census per frame end (" +
+                                                                 std::to_string(session.gpu.MotionCalls(false)) + ")");
+        {
+            std::scoped_lock lock(session.gpu.motion_mutex);
+            const auto& end = session.gpu.motion_calls.back();
+            Check(end.size() == 2 && end[0].census_all && end[0].samples && !end[0].early && end[0].view == 0 &&
+                      end[1].view == 1 && end[0].frame == session.frames && end[1].vectors.swapchain == vectors &&
+                      end[1].vectors.array_index == 1 && end[1].vectors.rect.extent.width == 800,
+                  "engine motion: both views' images, every one of them, sampled, for the frame ending");
+        }
+        Check(session.gpu.MotionCalls(true) > 0, "engine motion: the depth release takes the early census");
+        {
+            std::scoped_lock lock(session.gpu.motion_mutex);
+            const auto early = std::find_if(session.gpu.motion_calls.rbegin(), session.gpu.motion_calls.rend(),
+                                            [](const auto& jobs) { return jobs.front().early; });
+            Check(early->size() == 2 && !early->front().samples && early->front().frame == session.frames,
+                  "engine motion: the early census is of the frame ending next, its census only");
+        }
+
+        // An abandoned frame (the layer's hand-over failed after the record
+        // was handed over): no census of it, and no early census before the
+        // next record.
+        const int ends = session.gpu.MotionCalls(false);
+        const int earlies = session.gpu.MotionCalls(true);
+        const XrFrameState state = app.Wait();
+        app.Begin();
+        app.Release();
+        FrameGenEngineMotionFrame record;
+        record.display_time = state.predictedDisplayTime;
+        record.projection_frame = ++session.frames;
+        record.views.resize(2);
+        record.views[0].vectors = record.views[1].vectors = {vectors, {{0, 0}, {800, 800}}, 0};
+        record.views[1].view = 1;
+        session.presenter.NoteEngineMotion(record);
+        session.presenter.AbandonFrame(state.predictedDisplayTime);
+        session.presenter.CaptureEngineMotion();
+        Check(session.gpu.MotionCalls(false) == ends && session.gpu.MotionCalls(true) == earlies + 1,
+              "engine motion: an abandoned frame's record is forgotten");
+        const XrFrameState next = app.Wait();
+        app.Begin();
+        app.Release();
+        Check(session.gpu.MotionCalls(true) == earlies + 1, "engine motion: no early census without a record");
+        Check(XR_SUCCEEDED(app.End(next.predictedDisplayTime)), "engine motion: the next frame ends");
+        for (int i = 0; i < 3; ++i) app.Frame();
+        Check(session.gpu.MotionCalls(false) > ends, "engine motion: the census resumes after an abandoned frame");
+
+        // A motion vector swapchain destroyed: its records go with it.
+        const int before_destroy = session.gpu.MotionCalls(true);
+        Check(session.presenter.ForgetSwapchain(vectors), "engine motion: the swapchain is forgotten");
+        const XrFrameState last = app.Wait();
+        app.Begin();
+        app.Release();
+        Check(session.gpu.MotionCalls(true) == before_destroy,
+              "engine motion: no early census of a destroyed swapchain's images");
+        Check(XR_SUCCEEDED(app.End(last.predictedDisplayTime)), "engine motion: the frame ends");
+        session.presenter.Stop();
+        Check(!session.runtime.ordering_violation && !g_release_violation, "engine motion: calls stayed ordered");
+    }
+
+    // The switch off: the records are handed over, nothing is read.
+    {
+        Session session;
+        start(session, false);
+        for (int i = 0; i < 12; ++i) session.app->Frame();
+        Check(session.gpu.executes > 0 && session.gpu.MotionCalls(false) == 0 && session.gpu.MotionCalls(true) == 0,
+              "engine motion: nothing is read with the switch off");
+        session.presenter.Stop();
+    }
+
+    // A bridged session: the runtime's images hold the game's vectors only
+    // after a release, so nothing is read there.
+    {
+        Session session;
+        session.bridged = true;
+        start(session, true);
+        for (int i = 0; i < 12; ++i) session.app->Frame();
+        Check(session.gpu.executes > 0 && session.gpu.MotionCalls(false) == 0 && session.gpu.MotionCalls(true) == 0,
+              "engine motion: nothing is read in a bridged session");
+        session.presenter.Stop();
+    }
 }
 
 void TestOverlappingWaitIsHeld() {
@@ -10961,6 +11133,7 @@ int main(int argc, char** argv) {
     RUN(TestSubmissionSpacing);
     RUN(TestOutputsKeptAcrossMultipliers);
     RUN(TestDepthCapture);
+    RUN(TestEngineMotionCensus);
     RUN(TestAutomaticMultiplier);
     RUN(TestThreadedExtrapolation);
     RUN(TestThreadedDynamic);

@@ -6,9 +6,11 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <functional>
 #include <iostream>
 #include <fstream>
 #include <map>
+#include <optional>
 #include <sstream>
 #include <string>
 
@@ -1795,6 +1797,358 @@ void TestFrameGenHistoryState() {
     state.Commit(false);
     state.Invalidate();
     Expect(!state.Effective(request).synthesize, "Invalidate should drop history");
+}
+
+// The image tracker fed `frames` frames, each written by `written` (the
+// image whose vectors change, kNone for none, kAll for every image alike)
+// with the color and depth indices `indices` gives for the frame.
+constexpr int kNoImage = -1;
+constexpr int kAllImages = -2;
+struct TrackerFeed {
+    std::uint64_t frame{0};
+    std::uint64_t handle{0x30};
+    std::array<std::int32_t, 4> rect{0, 0, 500, 600};
+    std::array<std::uint64_t, depthxr::kFrameGenEngineImages> hashes{1, 2, 3};
+    void Run(depthxr::FrameGenEngineImageTracker& tracker, int frames, bool informative,
+             const std::function<int(std::uint64_t, std::uint32_t, std::uint32_t)>& written,
+             const std::function<std::pair<std::uint32_t, std::uint32_t>(std::uint64_t)>& indices) {
+        for (int i = 0; i < frames; ++i) {
+            ++frame;
+            const auto [color, depth] = indices(frame);
+            const int image = written(frame, color, depth);
+            if (image == kAllImages) {
+                hashes.fill(1000 + frame);
+            } else if (image >= 0) {
+                hashes[static_cast<std::size_t>(image)] = 1000 * (static_cast<std::uint64_t>(image) + 1) + frame;
+            }
+            depthxr::FrameGenEngineTrackerFrame census;
+            census.frame = frame;
+            census.informative = informative;
+            census.handle = handle;
+            census.rect = rect;
+            census.images = depthxr::kFrameGenEngineImages;
+            census.hashes = hashes;
+            census.color_index = color;
+            census.depth_index = depth;
+            tracker.Add(census);
+        }
+    }
+};
+
+// A color (or depth) swapchain index no image policy follows by itself.
+std::uint32_t Scrambled(std::uint64_t frame, std::uint64_t salt) {
+    std::uint64_t h = (frame + salt) * 0x9E3779B97F4A7C15ull;
+    h ^= h >> 29;
+    return static_cast<std::uint32_t>(h % 3);
+}
+
+void TestFrameGenEngineImageTracker() {
+    using depthxr::FrameGenEngineImageTracker;
+    using Policy = FrameGenEngineImageTracker::Policy;
+    const auto cycling = [](std::uint64_t frame) {
+        const auto index = static_cast<std::uint32_t>(frame % 3);
+        return std::pair<std::uint32_t, std::uint32_t>(index, index);
+    };
+    const auto scrambled = [](std::uint64_t frame) {
+        return std::pair<std::uint32_t, std::uint32_t>(Scrambled(frame, 1), Scrambled(frame, 7));
+    };
+    // A constant image, whatever the color swapchain does.
+    {
+        FrameGenEngineImageTracker tracker;
+        TrackerFeed feed;
+        feed.Run(tracker, 80, true, [](auto, auto, auto) { return 1; }, cycling);
+        Expect(tracker.Locked() && tracker.Best().policy == Policy::kConstant && tracker.Best().parameter == 1 &&
+                   tracker.Image(500, 2, 2, std::nullopt) == 1u,
+               "Engine image tracker: a constant image should lock");
+        Expect(tracker.RunnerUp().share <= 0.6, "Engine image tracker: the runner-up of a constant image is far behind");
+    }
+    // The frame's number modulo the images, against a color swapchain of two.
+    {
+        FrameGenEngineImageTracker tracker;
+        TrackerFeed feed;
+        feed.Run(tracker, 80, true, [](std::uint64_t frame, auto, auto) { return static_cast<int>((frame + 2) % 3); },
+                 [](std::uint64_t frame) {
+                     const auto index = static_cast<std::uint32_t>(frame % 2);
+                     return std::pair<std::uint32_t, std::uint32_t>(index, index);
+                 });
+        Expect(tracker.Locked() && tracker.Best().policy == Policy::kCycle && tracker.Best().parameter == 2 &&
+                   tracker.Image(601, 0, 0, std::nullopt) == static_cast<std::uint32_t>((601 + 2) % 3),
+               "Engine image tracker: a cycle with the frames should lock with its phase");
+    }
+    // Following the color swapchain, and following the depth swapchain.
+    {
+        FrameGenEngineImageTracker tracker;
+        TrackerFeed feed;
+        feed.Run(tracker, 80, true, [](auto, std::uint32_t color, auto) { return static_cast<int>(color); }, scrambled);
+        Expect(tracker.Locked() && tracker.Best().policy == Policy::kColor && tracker.Image(9, 2, 0, std::nullopt) == 2u,
+               "Engine image tracker: an image following the color swapchain should lock to it");
+    }
+    {
+        FrameGenEngineImageTracker tracker;
+        TrackerFeed feed;
+        feed.Run(tracker, 80, true, [](auto, auto, std::uint32_t depth) { return static_cast<int>(depth); }, scrambled);
+        Expect(tracker.Locked() && tracker.Best().policy == Policy::kDepth && tracker.Image(9, 2, 1, std::nullopt) == 1u,
+               "Engine image tracker: an image following the depth swapchain should lock to it");
+    }
+    // A color swapchain cycling with the frames: the color and the cycle
+    // predict alike, which is one policy (the color, preferred).
+    {
+        FrameGenEngineImageTracker tracker;
+        TrackerFeed feed;
+        feed.Run(tracker, 80, true, [](auto, std::uint32_t color, auto) { return static_cast<int>(color); }, cycling);
+        Expect(tracker.Locked() && tracker.Best().policy == Policy::kColor,
+               "Engine image tracker: policies predicting alike should not keep each other from locking");
+    }
+    // Every image written alike: any of them.
+    {
+        FrameGenEngineImageTracker tracker;
+        TrackerFeed feed;
+        feed.Run(tracker, 80, true, [](auto, auto, auto) { return kAllImages; }, cycling);
+        Expect(!tracker.Locked() && tracker.Best().policy == Policy::kAll && tracker.AllChanged() >= 79,
+               "Engine image tracker: images written alike should read as all written");
+    }
+    // Nothing written: no image after 300 informative frames.
+    {
+        FrameGenEngineImageTracker tracker;
+        TrackerFeed feed;
+        feed.Run(tracker, 299, true, [](auto, auto, auto) { return kNoImage; }, cycling);
+        Expect(!tracker.NotWritten() && tracker.Image(1, 1, 1, std::nullopt).has_value(),
+               "Engine image tracker: unwritten needs 300 informative frames");
+        feed.Run(tracker, 2, true, [](auto, auto, auto) { return kNoImage; }, cycling);
+        Expect(tracker.NotWritten() && tracker.Best().policy == Policy::kUnwritten &&
+                   !tracker.Image(1, 1, 1, std::nullopt).has_value(),
+               "Engine image tracker: images never written should read as not written");
+    }
+    // A still scene: frames that are not informative show nothing.
+    {
+        FrameGenEngineImageTracker tracker;
+        TrackerFeed feed;
+        feed.Run(tracker, 200, false, [](auto, auto, auto) { return 0; }, cycling);
+        Expect(!tracker.Locked() && tracker.WindowFrames() == 0 && tracker.Best().policy == Policy::kNone,
+               "Engine image tracker: frames that are not informative should be ignored");
+        feed.Run(tracker, 80, true, [](auto, auto, auto) { return 2; }, cycling);
+        Expect(tracker.Locked() && tracker.Best().policy == Policy::kConstant && tracker.Best().parameter == 2,
+               "Engine image tracker: informative frames after a still scene should lock");
+    }
+    // Another region, another swapchain, and mispredictions unlock.
+    {
+        FrameGenEngineImageTracker tracker;
+        TrackerFeed feed;
+        feed.Run(tracker, 80, true, [](auto, auto, auto) { return 1; }, cycling);
+        Expect(tracker.Locked(), "Engine image tracker: locked before the region changes");
+        feed.rect = {0, 0, 400, 600};
+        feed.Run(tracker, 1, true, [](auto, auto, auto) { return 1; }, cycling);
+        Expect(!tracker.Locked() && tracker.WindowFrames() == 0 && tracker.Unlocks() == 1,
+               "Engine image tracker: another region should unlock and start over");
+        feed.Run(tracker, 80, true, [](auto, auto, auto) { return 1; }, cycling);
+        Expect(tracker.Locked(), "Engine image tracker: locked again on the new region");
+        feed.handle = 0x31;
+        feed.Run(tracker, 1, true, [](auto, auto, auto) { return 1; }, cycling);
+        Expect(!tracker.Locked() && tracker.WindowFrames() == 0, "Engine image tracker: another swapchain should unlock");
+        feed.Run(tracker, 80, true, [](auto, auto, auto) { return 1; }, cycling);
+        feed.Run(tracker, 4, true, [](auto, auto, auto) { return 2; }, cycling);
+        Expect(tracker.Locked() && tracker.Mispredictions() == 4, "Engine image tracker: four mispredictions keep the lock");
+        feed.Run(tracker, 1, true, [](auto, auto, auto) { return 2; }, cycling);
+        Expect(!tracker.Locked() && tracker.Mispredictions() == 5, "Engine image tracker: the fifth misprediction unlocks");
+        feed.Run(tracker, 200, true, [](auto, auto, auto) { return 2; }, cycling);
+        Expect(tracker.Locked() && tracker.Best().parameter == 2, "Engine image tracker: the new image locks in time");
+    }
+    // A game following the specification: the released image.
+    {
+        FrameGenEngineImageTracker tracker;
+        Expect(tracker.Image(1, 0, 0, 2u) == 2u, "Engine image tracker: a released image is the frame's");
+    }
+}
+
+// The shaders' view mapping on the CPU: the previous view and back.
+void TestFrameGenViewMapping() {
+    depthxr::FrameGenViewGeometry newest;
+    depthxr::FrameGenViewGeometry previous;
+    for (auto* view : {&newest, &previous}) {
+        view->angle_left = -0.9f;
+        view->angle_right = 0.8f;
+        view->angle_up = 0.85f;
+        view->angle_down = -0.95f;
+    }
+    const float yaw = 0.03f, pitch = -0.02f;
+    newest.orientation = {std::sin(pitch / 2) * std::cos(yaw / 2), std::cos(pitch / 2) * std::sin(yaw / 2),
+                          -std::sin(pitch / 2) * std::sin(yaw / 2), std::cos(pitch / 2) * std::cos(yaw / 2)};
+    newest.position = {0.03f, -0.01f, -0.02f};
+    for (const bool depth : {true, false}) {
+        const auto mapping = depthxr::BuildFrameGenViewMapping(newest, previous, depth);
+        double worst = 0.0;
+        for (int y = 1; y < 10; ++y) {
+            for (int x = 1; x < 10; ++x) {
+                const std::array<float, 2> uv{x / 10.0f, y / 10.0f};
+                const float z = 0.4f + 0.3f * static_cast<float>(x * y);
+                std::array<float, 2> back{};
+                std::array<float, 2> again{};
+                Expect(depthxr::FrameGenMapToPrevious(mapping, uv, z, back),
+                       "View mapping: a central point should be seen in the previous view");
+                Expect(depthxr::FrameGenMapToNewest(mapping, back, z, again), "View mapping: and map back");
+                worst = (std::max)({worst, std::abs(static_cast<double>(again[0]) - uv[0]),
+                                    std::abs(static_cast<double>(again[1]) - uv[1])});
+            }
+        }
+        Expect(worst < 1e-4, "View mapping: MapToPrevious and MapToNewest should be inverses (" + std::to_string(worst) + ")");
+    }
+    // With depth, near content moves with the head's translation; far
+    // content (and rotation only) does not.
+    const auto with_depth = depthxr::BuildFrameGenViewMapping(newest, previous, true);
+    const auto rotation_only = depthxr::BuildFrameGenViewMapping(newest, previous, false);
+    std::array<float, 2> close_by{}, distant{}, rotated{};
+    depthxr::FrameGenMapToPrevious(with_depth, {0.5f, 0.5f}, 0.5f, close_by);
+    depthxr::FrameGenMapToPrevious(with_depth, {0.5f, 0.5f}, 200000.0f, distant);
+    depthxr::FrameGenMapToPrevious(rotation_only, {0.5f, 0.5f}, 0.5f, rotated);
+    Expect(std::abs(close_by[0] - rotated[0]) > 1e-3f && distant == rotated,
+           "View mapping: translation should move near content only");
+}
+
+// Engine motion calibration on synthetic vectors: each convention's gains
+// and camera model are found from the samples alone.
+void TestFrameGenEngineCalibration() {
+    using depthxr::FrameGenEngineCamera;
+    const depthxr::FrameGenExtent vectors{4339, 4285};
+    const depthxr::FrameGenExtent color{5424, 5356};
+    auto pose = [](float yaw, float pitch, std::array<float, 3> position) {
+        depthxr::FrameGenViewGeometry view;
+        view.angle_left = -0.95f;
+        view.angle_right = 0.8f;
+        view.angle_up = 0.85f;
+        view.angle_down = -0.9f;
+        view.orientation = {std::sin(pitch / 2) * std::cos(yaw / 2), std::cos(pitch / 2) * std::sin(yaw / 2),
+                            -std::sin(pitch / 2) * std::sin(yaw / 2), std::cos(pitch / 2) * std::cos(yaw / 2)};
+        view.position = position;
+        return view;
+    };
+    // Three frames of a head turning and leaning, the aircraft flying on
+    // and turning gently (appSpaceDeltaPose).
+    const std::array<depthxr::FrameGenViewGeometry, 4> heads{
+        pose(0.30f, 0.02f, {0.00f, 1.20f, 0.00f}), pose(0.32f, 0.01f, {0.02f, 1.21f, -0.01f}),
+        pose(0.35f, 0.03f, {0.03f, 1.19f, -0.03f}), pose(0.37f, 0.00f, {0.05f, 1.20f, -0.02f})};
+    const float turn = 0.01f; // radians per frame about +Y
+    const std::array<float, 4> delta{0.0f, std::sin(turn / 2), 0.0f, std::cos(turn / 2)};
+    const std::array<float, 3> delta_position{0.1f, -0.2f, 2.5f};
+    struct Truth {
+        FrameGenEngineCamera camera;
+        std::array<double, 2> gain;
+    };
+    std::vector<Truth> truths;
+    for (const FrameGenEngineCamera camera : {FrameGenEngineCamera::kIncluded, FrameGenEngineCamera::kExcluded}) {
+        for (const std::array<double, 2> gain : {std::array<double, 2>{1.0, 1.0}, std::array<double, 2>{1.0, -1.0},
+                                                 std::array<double, 2>{2.0, -2.0},
+                                                 std::array<double, 2>{2.0 / 4339.0, -2.0 / 4285.0}}) {
+            truths.push_back({camera, gain});
+            truths.push_back({camera, {-gain[0], -gain[1]}});
+        }
+    }
+    for (const Truth& truth : truths) {
+        std::vector<depthxr::FrameGenEngineCalibrationFrame> frames;
+        for (std::size_t k = 2; k < heads.size(); ++k) {
+            depthxr::FrameGenEngineCalibrationFrame frame;
+            frame.newest = heads[k];
+            frame.previous = heads[k - 1];
+            frame.before_previous = heads[k - 2];
+            frame.delta_orientation = delta;
+            frame.delta_position = delta_position;
+            frame.vectors = vectors;
+            frame.color = color;
+            for (int y = 0; y < 24; ++y) {
+                for (int x = 0; x < 24; ++x) {
+                    depthxr::FrameGenEngineCalibrationSample sample;
+                    sample.uv = {(x + 0.5f) / 24.0f, (y + 0.5f) / 24.0f};
+                    // The lower half a cockpit (0.5-3 m), the upper half
+                    // world (40 m to 4 km) and sky.
+                    const int cell = (x * 7 + y * 13) % 17;
+                    sample.depth = y >= 12 ? 0.5f + 0.15f * static_cast<float>(cell)
+                                           : (cell == 0 ? 0.0f : 40.0f * std::pow(1.33f, static_cast<float>(cell)));
+                    std::array<double, 2> q{};
+                    if (!depthxr::FrameGenEnginePrediction(frame.newest, frame.previous, delta, delta_position, 1,
+                                                           truth.camera, sample.uv, sample.depth, q)) {
+                        continue;
+                    }
+                    sample.vector = {static_cast<float>(q[0] / truth.gain[0]), static_cast<float>(q[1] / truth.gain[1])};
+                    frame.samples.push_back(sample);
+                }
+            }
+            frames.push_back(frame);
+        }
+        const auto calibration = depthxr::CalibrateFrameGenEngine(frames);
+        const auto& best = calibration.leaderboard.front();
+        const std::string what = std::string(depthxr::ToString(truth.camera)) + " gain " + std::to_string(truth.gain[0]) +
+                                 "," + std::to_string(truth.gain[1]);
+        Expect(best.camera == truth.camera && best.delta_sign == 1,
+               "Engine calibration: the camera model should be found (" + what + ": found " +
+                   depthxr::ToString(best.camera) + ", sign " + std::to_string(best.delta_sign) + ")");
+        Expect(std::abs(best.gain[0] / truth.gain[0] - 1.0) < 0.01 && std::abs(best.gain[1] / truth.gain[1] - 1.0) < 0.01,
+               "Engine calibration: the gains should be found within 1% (" + what + ": found " +
+                   std::to_string(best.gain[0]) + "," + std::to_string(best.gain[1]) + ")");
+        Expect(best.gain_error < 0.01 && std::abs(best.nearest.gain[0] - truth.gain[0]) < 1e-9,
+               "Engine calibration: the nearest canonical gain should be the truth's (" + what + ")");
+        if (truth.camera == FrameGenEngineCamera::kIncluded) {
+            // Cockpit content: a = b = 1 / g, nothing left at the intercept.
+            for (int axis = 0; axis < 2; ++axis) {
+                const auto& fit = calibration.cockpit[axis];
+                Expect(fit.valid && std::abs(fit.a * truth.gain[axis] - 1.0) < 0.01 && std::abs(fit.b / fit.a - 1.0) < 0.01 &&
+                           fit.corr2 > 0.99,
+                       "Engine calibration: the cockpit fit should find a = b = 1/g (" + what + ")");
+            }
+            Expect(calibration.intercept_spread_px && (*calibration.intercept_spread_px)[0] < 0.01 &&
+                       (*calibration.intercept_spread_px)[1] < 0.01,
+                   "Engine calibration: no jitter in exact vectors (" + what + ")");
+        }
+    }
+
+    // Jitter: vectors in the vectors' pixels, four frames of one head
+    // movement offset by +-0.5 pixels on x and +-0.25 on y in turn, found in
+    // vector pixels; with the head still, no gain, and the offsets in the
+    // vectors' own units.
+    for (const bool still : {false, true}) {
+        const std::array<double, 2> gain{2.0 / 4339.0, -2.0 / 4285.0};
+        std::vector<depthxr::FrameGenEngineCalibrationFrame> frames;
+        for (std::size_t k = 0; k < 4; ++k) {
+            depthxr::FrameGenEngineCalibrationFrame frame;
+            frame.newest = heads[still ? 0 : 2];
+            frame.previous = heads[still ? 0 : 1];
+            frame.vectors = vectors;
+            frame.color = color;
+            const double sign = k % 2 ? -1.0 : 1.0;
+            for (int y = 0; y < 24; ++y) {
+                for (int x = 0; x < 24; ++x) {
+                    depthxr::FrameGenEngineCalibrationSample sample;
+                    sample.uv = {(x + 0.5f) / 24.0f, (y + 0.5f) / 24.0f};
+                    sample.depth = 0.5f + 0.15f * static_cast<float>((x * 7 + y * 13) % 17);
+                    std::array<double, 2> q{};
+                    if (!depthxr::FrameGenEnginePrediction(frame.newest, frame.previous, delta, delta_position, 1,
+                                                           FrameGenEngineCamera::kIncluded, sample.uv, sample.depth, q)) {
+                        continue;
+                    }
+                    sample.vector = {static_cast<float>(q[0] / gain[0] + sign * 0.5),
+                                     static_cast<float>(q[1] / gain[1] + sign * 0.25)};
+                    frame.samples.push_back(sample);
+                }
+            }
+            frames.push_back(frame);
+        }
+        // +0.5, -0.5, +0.5, -0.5: a spread of sqrt(1/3).
+        const double x_spread = std::sqrt(1.0 / 3.0);
+        const double y_spread = 0.5 * std::sqrt(1.0 / 3.0);
+        const auto calibration = depthxr::CalibrateFrameGenEngine(frames);
+        if (still) {
+            Expect(!calibration.intercept_spread_px && std::abs(calibration.intercept_spread[0] - x_spread) < 0.01 &&
+                       std::abs(calibration.intercept_spread[1] - y_spread) < 0.01,
+                   "Engine calibration: with the head still, the jitter is in the vectors' units");
+        } else {
+            Expect(calibration.intercept_spread_px &&
+                       std::abs((*calibration.intercept_spread_px)[0] - x_spread) < 0.01 &&
+                       std::abs((*calibration.intercept_spread_px)[1] - y_spread) < 0.01,
+                   "Engine calibration: the jitter is found in vector pixels (" +
+                       (calibration.intercept_spread_px ? std::to_string((*calibration.intercept_spread_px)[0]) + ", " +
+                                                              std::to_string((*calibration.intercept_spread_px)[1])
+                                                        : std::string("none")) +
+                       ")");
+        }
+    }
 }
 
 void TestTurboMetricsSettingsParsing() {
@@ -4335,6 +4689,9 @@ int main() {
     TestOsdPerformanceRow();
     TestFrameGenPlan();
     TestFrameGenHistoryState();
+    TestFrameGenEngineImageTracker();
+    TestFrameGenViewMapping();
+    TestFrameGenEngineCalibration();
     TestTurboMetricsSettingsParsing();
     TestTurboMetricsSessionRoundTrip();
     TestQuadViewsProfileResolution();

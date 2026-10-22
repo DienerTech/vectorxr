@@ -3,22 +3,29 @@
 // against a stand-in runtime (CPU only): the layer keeps XR_FB_space_warp and
 // XR_EXT_frame_synthesis from a runtime that lacks them while
 // VECTORXR_SPACEWARP_PROBE is set, answers their recommended motion vector
-// sizes and takes their structures off the frames the runtime gets; a runtime
-// that lists one, or the probe off, gets the application's own. Settings and
-// logs go to a temporary directory.
+// sizes and takes their structures off the frames the runtime gets, handing
+// Frame Generation a record of each frame's (engine_motion.h); a runtime that
+// lists one, or the probe off, gets the application's own. Settings and logs
+// go to a temporary directory.
 #include <windows.h>
 
+#include "depthxr/engine_motion.h"
 #include "depthxr/openxr_layer.h"
 #include "depthxr/openxr_loader_api_layer.h"
 #include "depthxr/spacewarp_probe.h"
 
 #include <algorithm>
+#include <array>
+#include <chrono>
+#include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -37,6 +44,20 @@ class SpaceWarpProbeTestPeer {
     static void SetActiveSession(XrSession session) {
         std::scoped_lock lock(OpenXrLayer::Instance().mutex_);
         OpenXrLayer::Instance().active_session_ = session;
+    }
+    // Frame Generation's engine motion records as the layer handed them
+    // over: the last frame's, the one before's, and the session's counts.
+    struct EngineRecords {
+        FrameGenEngineMotionFrame frame;
+        FrameGenEngineMotionFrame previous;
+        std::uint64_t noted{0};
+        std::uint64_t invalid{0};
+    };
+    static EngineRecords Engine() {
+        FrameGenPresenter& presenter = OpenXrLayer::Instance().framegen_;
+        std::scoped_lock lock(presenter.mutex_);
+        return {presenter.engine_frame_.frame, presenter.engine_previous_.frame, presenter.engine_noted_,
+                presenter.engine_invalid_};
     }
     // The last instance's log (an error reaches the file at once, with
     // everything logged before it).
@@ -266,6 +287,89 @@ void TestWithoutSpaceWarp() {
                   storage.found[1].type == XR_TYPE_FRAME_SYNTHESIS_INFO_EXT &&
                   storage.found[1].motion_vector_scale.x == 1.0f,
               "the structure left behind is recorded as left");
+    }
+}
+
+// Frame Generation's record of a frame's structures (engine_motion.h).
+void TestEngineMotionRecord() {
+    using depthxr::ToEngineMotionFrame;
+    const auto swapchains = [](XrSwapchain swapchain) -> std::optional<depthxr::EngineMotionSwapchain> {
+        if (swapchain == kMotion) return depthxr::EngineMotionSwapchain{500, 600, 2, 10};
+        return std::nullopt;
+    };
+    // Both views carry XR_FB_space_warp's structure; the projection is the
+    // frame's second layer (behind a quad), and only its views were copied.
+    {
+        XrCompositionLayerDepthInfoKHR left_depth = DepthInfo();
+        XrCompositionLayerSpaceWarpInfoFB left = SpaceWarpInfo(&left_depth);
+        // The left structure's depth is the view's own depth (MSFS 2024).
+        left.depthSubImage = left_depth.subImage;
+        XrCompositionLayerSpaceWarpInfoFB right = SpaceWarpInfo();
+        right.motionVectorSubImage.imageArrayIndex = 1;
+        Frame frame(&left, &right);
+        frame.views[0].pose.orientation = {0.0f, 0.0998f, 0.0f, 0.995f};
+        frame.views[1].pose.position = {0.031f, 1.25f, -0.5f};
+        frame.views[1].fov = {-0.9f, 0.7f, 0.75f, -0.85f};
+        SpaceWarpFrame storage;
+        const XrFrameEndInfo* stripped = depthxr::WithoutSpaceWarp(&frame.info, true, false, storage);
+        const auto record = ToEngineMotionFrame(storage, *stripped, 7, swapchains);
+        Check(record && record->primary_layer == 1 && record->projection_frame == 7 &&
+                  record->display_time == frame.info.displayTime && record->views.size() == 2 && record->complete &&
+                  record->invalid == 0,
+              "the record names the primary projection's two structures");
+        const depthxr::FrameGenEngineMotionView& view0 = record->views[0];
+        const depthxr::FrameGenEngineMotionView& view1 = record->views[1];
+        Check(view0.view == 0 && view1.view == 1 && view0.source == depthxr::FrameGenMotionSource::kSpaceWarpFb &&
+                  view0.vectors.swapchain == kMotion && view1.vectors.imageArrayIndex == 1 && view0.vectors_format == 10 &&
+                  !view0.encoding.ext && view0.frame_skip && view0.color.swapchain == kColor &&
+                  view1.color.imageArrayIndex == 1,
+              "each view's structure is recorded");
+        Check(view0.depth_is_khr && !view1.depth_is_khr && view0.depth_encoding.far_z == 10000.0f &&
+                  view0.app_delta.position.z == -0.25f,
+              "the structure's depth is the view's own only where it names the same image");
+        Check(view0.game.orientation[1] == 0.0998f && view1.game.position[1] == 1.25f && view1.game.angle_left == -0.9f &&
+                  view1.game.angle_up == 0.75f && view0.game.position[0] == -0.032f,
+              "the game's own poses and fields of view are read by layer index from the forwarded frame");
+    }
+    // XR_EXT_frame_synthesis' decoding, and structures with problems.
+    {
+        XrFrameSynthesisInfoEXT left = FrameSynthesisInfo();
+        left.layerFlags = XR_FRAME_SYNTHESIS_INFO_USE_2D_MOTION_VECTOR_BIT_EXT;
+        left.motionVectorScale = {2.0f, -2.0f, 1.0f, 0.0f};
+        left.motionVectorOffset = {-1.0f, 1.0f, 0.0f, 0.0f};
+        left.nearZ = left.farZ = 1000.0f; // nearZ == farZ (MSFS 2024's menus?)
+        XrFrameSynthesisInfoEXT right = FrameSynthesisInfo();
+        right.motionVectorSubImage.imageRect = {{100, 0}, {500, 600}}; // past the swapchain's 500 texels
+        Frame frame(&left, &right);
+        SpaceWarpFrame storage;
+        const auto record = ToEngineMotionFrame(storage, *depthxr::WithoutSpaceWarp(&frame.info, false, true, storage), 8,
+                                                swapchains);
+        Check(record && record->views.size() == 2 && record->invalid == 2 && record->complete,
+              "structures with problems are counted, and still recorded");
+        const depthxr::FrameGenEngineMotionView& view0 = record->views[0];
+        Check(view0.source == depthxr::FrameGenMotionSource::kFrameSynthesisExt && view0.encoding.ext &&
+                  view0.encoding.two_d && view0.encoding.scale[1] == -2.0f && view0.encoding.offset[0] == -1.0f &&
+                  view0.problems == depthxr::kEngineMotionNearFar && record->views[1].problems == depthxr::kEngineMotionRect,
+              "XR_EXT_frame_synthesis' decoding and the problems found");
+        const auto decoded = depthxr::DecodeFrameGenMotion(view0.encoding, {0.5f, 0.25f, 9.0f, 9.0f});
+        Check(decoded[0] == 0.0f && decoded[1] == 0.5f, "an EXT vector is rg * scale + offset");
+        std::string why;
+        Check(!depthxr::ValidateEngineMotionView(storage.found[0], why) && why.find("nearZ equals farZ") != std::string::npos,
+              "the problem is told: " + why);
+    }
+    // No structure the layer took on the primary projection: no record.
+    {
+        XrFrameSynthesisInfoEXT ext = FrameSynthesisInfo();
+        Frame frame(&ext, nullptr);
+        SpaceWarpFrame storage;
+        Check(!ToEngineMotionFrame(storage, *depthxr::WithoutSpaceWarp(&frame.info, true, false, storage), 9),
+              "a structure the layer did not take makes no record");
+        XrBaseInStructure unknown{kUnknownType, nullptr};
+        XrCompositionLayerSpaceWarpInfoFB behind = SpaceWarpInfo();
+        unknown.next = reinterpret_cast<const XrBaseInStructure*>(&behind);
+        Frame left_behind(&unknown, nullptr);
+        Check(!ToEngineMotionFrame(storage, *depthxr::WithoutSpaceWarp(&left_behind.info, true, false, storage), 9),
+              "a structure left behind an unknown one makes no record");
     }
 }
 
@@ -517,6 +621,94 @@ Outcome Run(const char* probe, std::vector<std::string> runtime, std::vector<con
 
 const std::vector<XrStructureType> kDepthOnly{XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR};
 
+// Frame Generation gets each frame's record from the layer's xrEndFrame:
+// the game's poses as submitted, structures with problems counted, and a
+// record without views for a frame without structures; the runtime never
+// sees one.
+void TestEngineRecordsThroughTheLayer() {
+    const char* fb = XR_FB_SPACE_WARP_EXTENSION_NAME;
+    const char* depth = XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME;
+    SetProbe("fb");
+    g_runtime = {};
+    g_runtime.extensions = {depth};
+    XrInstance instance = XR_NULL_HANDLE;
+    Check(CreateInstance({depth, fb}, instance) == XR_SUCCESS, "the instance exists");
+    SpaceWarpProbeTestPeer::SetActiveSession(kSession);
+    XrSwapchainCreateInfo motion{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+    motion.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+    motion.format = 10;
+    motion.sampleCount = 1;
+    motion.width = 500;
+    motion.height = 600;
+    motion.faceCount = 1;
+    motion.arraySize = 2;
+    motion.mipCount = 1;
+    XrSwapchain motion_swapchain = XR_NULL_HANDLE;
+    Check(XR_SUCCEEDED(LayerFunction<PFN_xrCreateSwapchain>(instance, "xrCreateSwapchain")(kSession, &motion,
+                                                                                            &motion_swapchain)),
+          "xrCreateSwapchain");
+    const auto end_frame = LayerFunction<PFN_xrEndFrame>(instance, "xrEndFrame");
+    const SpaceWarpProbeTestPeer::EngineRecords before = SpaceWarpProbeTestPeer::Engine();
+
+    XrCompositionLayerDepthInfoKHR left_depth = DepthInfo();
+    XrCompositionLayerSpaceWarpInfoFB left = SpaceWarpInfo(&left_depth);
+    left.motionVectorSubImage.swapchain = motion_swapchain;
+    left.nearZ = left.farZ = 1000.0f; // a structure with a problem
+    XrCompositionLayerDepthInfoKHR right_depth = DepthInfo();
+    XrCompositionLayerSpaceWarpInfoFB right = SpaceWarpInfo(&right_depth);
+    right.motionVectorSubImage.swapchain = motion_swapchain;
+    right.motionVectorSubImage.imageArrayIndex = 1;
+    {
+        Frame frame(&left, &right);
+        frame.views[1].pose.orientation = {0.0f, 0.0499792f, 0.0f, 0.99875f};
+        frame.views[1].pose.position = {0.032f, 1.6f, 0.1f};
+        Check(XR_SUCCEEDED(end_frame(kSession, &frame.info)), "xrEndFrame with the structures");
+        Check(g_runtime.ended.size() == 2 && g_runtime.ended[0] == kDepthOnly && g_runtime.ended[1] == kDepthOnly,
+              "the runtime never sees the structures");
+        const SpaceWarpProbeTestPeer::EngineRecords records = SpaceWarpProbeTestPeer::Engine();
+        Check(records.noted == before.noted + 1 && records.frame.views.size() == 2 && records.frame.complete &&
+                  records.frame.display_time == frame.info.displayTime && records.frame.primary_layer == 1,
+              "Frame Generation gets the frame's record");
+        Check(records.frame.views[1].game.orientation[1] == 0.0499792f && records.frame.views[1].game.position[1] == 1.6f &&
+                  records.frame.views[0].game.position[0] == -0.032f &&
+                  records.frame.views[1].vectors.swapchain == motion_swapchain,
+              "the record has the game's own poses");
+        Check(records.frame.invalid == 1 && records.invalid == before.invalid + 1 &&
+                  records.frame.views[0].problems == depthxr::kEngineMotionNearFar,
+              "structures with problems are counted");
+    }
+    const std::uint64_t carried = SpaceWarpProbeTestPeer::Engine().frame.projection_frame;
+    {
+        XrCompositionLayerDepthInfoKHR plain_left = DepthInfo();
+        XrCompositionLayerDepthInfoKHR plain_right = DepthInfo();
+        Frame frame(&plain_left, &plain_right);
+        frame.info.displayTime += 11'111'111;
+        Check(XR_SUCCEEDED(end_frame(kSession, &frame.info)), "xrEndFrame without the structures");
+        const SpaceWarpProbeTestPeer::EngineRecords records = SpaceWarpProbeTestPeer::Engine();
+        Check(records.noted == before.noted + 2 && records.frame.views.empty() &&
+                  records.frame.display_time == frame.info.displayTime && records.frame.projection_frame == carried + 1 &&
+                  records.previous.views.size() == 2,
+              "a frame without structures hands over an empty record, the frame before's kept as its pair");
+    }
+    {
+        // The quad alone: a frame without a projection has no number (never
+        // the last projection frame's).
+        XrCompositionLayerDepthInfoKHR plain_left = DepthInfo();
+        XrCompositionLayerDepthInfoKHR plain_right = DepthInfo();
+        Frame frame(&plain_left, &plain_right);
+        frame.info.layerCount = 1;
+        frame.info.displayTime += 22'222'222;
+        Check(XR_SUCCEEDED(end_frame(kSession, &frame.info)), "xrEndFrame without a projection");
+        const SpaceWarpProbeTestPeer::EngineRecords records = SpaceWarpProbeTestPeer::Engine();
+        Check(records.noted == before.noted + 3 && records.frame.views.empty() && records.frame.projection_frame == 0,
+              "a frame without a projection hands over a record without a number");
+    }
+    Check(XR_SUCCEEDED(LayerFunction<PFN_xrDestroyInstance>(instance, "xrDestroyInstance")(instance)),
+          "xrDestroyInstance");
+    const std::string log = SpaceWarpProbeTestPeer::Log();
+    Check(log.find("structuresWithProblems=1") != std::string::npos, "the probe's summary counts the structure's problem");
+}
+
 void TestThroughTheLayer() {
     const char* fb = XR_FB_SPACE_WARP_EXTENSION_NAME;
     const char* ext = XR_EXT_FRAME_SYNTHESIS_EXTENSION_NAME;
@@ -613,6 +805,87 @@ void TestThroughTheLayer() {
 
 } // namespace
 
+// The census worker on records and censuses made up here: a head turning
+// and leaning at a steady rate, its vectors in the vectors' pixels (y down)
+// and offset by +-0.5 pixels (x) and +-0.25 (y) frame by frame. The record
+// lists view 1 first (its color view empty); a record without a projection
+// sent under a real frame's number is not taken for it.
+void TestEngineCensusWorker() {
+    using depthxr::FrameGenEngineCensus;
+    using depthxr::FrameGenEngineCensusWorker;
+    depthxr::FrameGenEngineCensusWorker worker(nullptr, "", std::chrono::hours(1));
+    const std::array<double, 2> gain{2.0 / 4339.0, -2.0 / 4285.0};
+    const depthxr::FrameGenExtent color{5424, 5356};
+    const depthxr::FrameGenExtent half = depthxr::FrameGenPyramid(color)[1];
+    auto head = [](int frame) {
+        depthxr::FrameGenViewGeometry view;
+        view.angle_left = -0.95f;
+        view.angle_right = 0.8f;
+        view.angle_up = 0.85f;
+        view.angle_down = -0.9f;
+        const float yaw = 0.3f + 0.02f * static_cast<float>(frame);
+        view.orientation = {0.0f, std::sin(yaw / 2), 0.0f, std::cos(yaw / 2)};
+        view.position = {0.01f * static_cast<float>(frame), 1.2f, 0.0f};
+        return view;
+    };
+    std::uint64_t sequence = 0;
+    for (int f = 1; f <= 9; ++f) {
+        FrameGenEngineCensusWorker::Frame frame;
+        frame.record.projection_frame = static_cast<std::uint64_t>(f);
+        frame.record.views.resize(2);
+        frame.record.views[0].view = 1;
+        frame.record.views[1].view = 0;
+        frame.record.views[1].game = head(f);
+        frame.color_index = {0, 0};
+        frame.depth_index = {0, 0};
+        frame.released = {std::nullopt, std::nullopt};
+        frame.color_extent = {{0, 0}, color};
+        frame.continuous = f > 1;
+        worker.NoteFrame(frame);
+        if (f == 5) {
+            FrameGenEngineCensusWorker::Frame stray;
+            stray.record.projection_frame = 5;
+            worker.NoteFrame(stray);
+        }
+        FrameGenEngineCensus census;
+        census.sequence = ++sequence;
+        census.frame = static_cast<std::uint64_t>(f);
+        census.view = 0;
+        census.images = 1;
+        census.image[0].xor_hash = static_cast<std::uint32_t>(f);
+        census.rect = {0, 0, 4339, 4285};
+        census.samples.resize(16 * 16 * 4);
+        const double sign = f % 2 ? -1.0 : 1.0;
+        for (std::uint32_t s = 0; s < 256; ++s) {
+            const std::uint32_t qx = static_cast<std::uint32_t>(((s % 16) + 0.5f) * half.width / 16.0f);
+            const std::uint32_t qy = static_cast<std::uint32_t>(((s / 16) + 0.5f) * half.height / 16.0f);
+            const float depth = 0.5f + 0.15f * static_cast<float>((s * 7) % 17);
+            const std::array<float, 2> uv{(qx + 0.5f) / static_cast<float>(half.width),
+                                          (qy + 0.5f) / static_cast<float>(half.height)};
+            std::array<double, 2> q{};
+            if (f > 1) {
+                depthxr::FrameGenEnginePrediction(head(f), head(f - 1), {0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}, 1,
+                                                  depthxr::FrameGenEngineCamera::kIncluded, uv, depth, q);
+            }
+            census.samples[s * 4] = {static_cast<float>(q[0] / gain[0] + sign * 0.5),
+                                     static_cast<float>(q[1] / gain[1] + sign * 0.25), 0.0f, 0.0f};
+            census.samples[s * 4 + 3] = {depth, 0.0f, static_cast<float>(qx), static_cast<float>(qy)};
+        }
+        depthxr::FrameGenEngineStatus status;
+        status.census.push_back(census);
+        worker.NoteStatus(status);
+    }
+    const std::string summary = worker.Flush();
+    Check(summary.find("view0: ") != std::string::npos && summary.find("fit a=(") != std::string::npos &&
+              summary.find(" n=2048") != std::string::npos,
+          "the census worker fits the view at its place in the record, every frame's pair kept: " + summary);
+    const std::size_t jitter = summary.find("jitter=(");
+    double x = 0.0, y = 0.0;
+    Check(jitter != std::string::npos && std::sscanf(summary.c_str() + jitter, "jitter=(%lf, %lf) px", &x, &y) == 2 &&
+              std::abs(x - std::sqrt(2.0 / 7.0)) < 0.02 && std::abs(y - 0.5 * std::sqrt(2.0 / 7.0)) < 0.02,
+          "the census worker's jitter is in vector pixels: " + summary);
+}
+
 int main() {
     // Settings and logs go beside the test, never into the user's VectorXR folder.
     wchar_t exe_path[MAX_PATH]{};
@@ -627,11 +900,15 @@ int main() {
     try {
         TestSelectionAndSizes();
         TestWithoutSpaceWarp();
+        TestEngineMotionRecord();
+        TestEngineCensusWorker();
         TestThroughTheLayer();
+        TestEngineRecordsThroughTheLayer();
     } catch (const std::exception& error) {
         std::cerr << "FAILED: " << error.what() << '\n';
         return 1;
     }
-    std::cout << "Space-warp probe: selection, stripping, advertise/strip/forward through the layer passed\n";
+    std::cout << "Space-warp probe: selection, stripping, engine motion records and census, advertise/strip/forward "
+                 "through the layer passed\n";
     return 0;
 }

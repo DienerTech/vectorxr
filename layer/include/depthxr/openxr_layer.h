@@ -626,6 +626,10 @@ class OpenXrLayer {
     bool SpaceWarpProbeActive() const { return spacewarp_fb_owned_ || spacewarp_ext_owned_; }
     XrExtent2Di SpaceWarpMotionVectorSize(XrInstance instance, XrSystemId system_id);
     const XrFrameEndInfo* ProbeSpaceWarpFrameLocked(const XrFrameEndInfo* frame, SpaceWarpFrame& storage);
+    // Frame Generation's record of the frame's structures (FrameGenEngineMotionFrame;
+    // no views when it carried none), from the frame the probe forwards and
+    // what it took off; counts the frames that carry a projection.
+    FrameGenEngineMotionFrame EngineMotionFrameLocked(const XrFrameEndInfo& stripped, const SpaceWarpFrame& storage);
     void NoteSpaceWarpSwapchainLocked(XrSwapchain swapchain, const SwapchainInfo& info);
     std::string DescribeSpaceWarpSwapchainLocked(XrSwapchain swapchain) const;
     void LogSpaceWarpProbeSummaryLocked(std::string_view reason);
@@ -1778,8 +1782,14 @@ class OpenXrLayer {
         std::uint64_t views_stripped{0};
         std::uint64_t views_left{0};
         std::uint64_t frame_skips{0};
+        // Structures on the primary projection Frame Generation would not
+        // take as they are (ValidateEngineMotionView).
+        std::uint64_t invalid{0};
     };
     SpaceWarpProbeCounts spacewarp_counts_;
+    // Frames that carried a projection with views this session: Frame
+    // Generation's engine motion records count frames by it.
+    std::uint64_t spacewarp_projection_frames_{0};
     SpaceWarpProbeCounts spacewarp_counts_summarized_;
     bool spacewarp_first_frame_logged_{false};
     std::chrono::steady_clock::time_point spacewarp_last_summary_{};

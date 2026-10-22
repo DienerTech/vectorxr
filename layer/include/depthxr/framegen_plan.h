@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <deque>
 #include <optional>
 #include <vector>
 
@@ -76,8 +77,13 @@ enum class FrameGenPass : std::uint8_t {
     // splats), then resolved into the empty eye's linear depth.
     kDepthCrossSplat,
     kDepthCrossResolve,
+    // Engine motion vectors, stage 0 (Direct3D 12, FrameGenGpu::CaptureMotion):
+    // a game's motion vector images fingerprinted and sampled on its own
+    // queue (FrameGenEngineCensus), whether or not it ever acquires them.
+    // Nothing generated frames are made from reads what it writes.
+    kEngineCensus,
 };
-inline constexpr std::size_t kFrameGenPassCount = 28;
+inline constexpr std::size_t kFrameGenPassCount = 29;
 
 // Logical textures owned per view. History and filtered flow are ping-pong
 // pairs: "newest" is written this submission, "previous" is last
@@ -524,6 +530,40 @@ struct FrameGenDepthEncoding {
     float scale{1.0f};
 };
 
+// Linear depth at or beyond this many meters is infinitely far (FG_FAR_DEPTH).
+inline constexpr float kFrameGenFarDepth = 100000.0f;
+
+// How a game's motion vector image holds its vectors (XR_FB_space_warp,
+// XR_EXT_frame_synthesis), whatever the API: a texel's rgb as it is (FB), or
+// rgb * scale + offset (EXT; `two_d`: rg alone, USE_2D_MOTION_VECTOR).
+struct FrameGenMotionEncoding {
+    bool ext{false};
+    std::array<float, 3> scale{1.0f, 1.0f, 1.0f};
+    std::array<float, 3> offset{0.0f, 0.0f, 0.0f};
+    bool two_d{false};
+};
+
+// A texel's vector (xy) as `encoding` decodes it, from the image's raw rgba.
+std::array<float, 2> DecodeFrameGenMotion(const FrameGenMotionEncoding& encoding, const std::array<float, 4>& raw);
+
+// How far Frame Generation goes with a game's motion vectors
+// (VECTORXR_FRAMEGEN_ENGINE_MV), each step after the census doing what the
+// one before does. Stage 0 has the census alone: the images are fingerprinted
+// and sampled, and generated frames are made as without them.
+enum class FrameGenEngineMode : std::uint8_t {
+    kOff,
+    kCensus,
+    kCapture,
+    kObserve,
+    kAssist,
+    kLead,
+};
+
+const char* ToString(FrameGenEngineMode mode); // "off", "census", ...
+// "off" or "census" (any case); anything else is off: the later modes do not
+// exist yet.
+FrameGenEngineMode ParseFrameGenEngineMode(const char* value);
+
 // The kDepth dispatch for one view: resamples the region `depth_rect` (in
 // depth texels, array slice `array_index`) of the application's depth image
 // to the view's half-resolution grid as linear view depth.
@@ -731,5 +771,275 @@ float FrameGenFraction(FrameGenSynthesisMode mode, std::int64_t previous_time, s
 // Row-major rotation taking newest-view directions into previous-view space.
 std::array<std::array<float, 3>, 3> FrameGenRelativeRotation(const std::array<float, 4>& newest,
                                                              const std::array<float, 4>& previous);
+
+// The shaders' mapping between two views (MapToPrevious and MapToNewest in
+// framegen.hlsl) on the CPU: both views' tangents and the relative pose the
+// plan's constants carry (with depth, the newest view's position in the
+// previous view's space too).
+struct FrameGenViewMapping {
+    std::array<float, 4> fov_current{};
+    std::array<float, 4> fov_previous{};
+    std::array<std::array<float, 3>, 3> rotation{}; // newest-view direction -> previous-view direction
+    std::array<float, 3> translation{};
+    bool depth{false};
+};
+FrameGenViewMapping BuildFrameGenViewMapping(const FrameGenViewGeometry& newest, const FrameGenViewGeometry& previous,
+                                             bool depth);
+// Where newest-view `uv` (content at linear depth `depth`, rotation only
+// without it) lies in the previous view; false behind it or outside its
+// image (`previous_uv` is still set outside it).
+bool FrameGenMapToPrevious(const FrameGenViewMapping& mapping, const std::array<float, 2>& uv, float depth,
+                           std::array<float, 2>& previous_uv);
+// Its inverse, for content at newest-view depth `depth`; false behind the
+// newest view.
+bool FrameGenMapToNewest(const FrameGenViewMapping& mapping, const std::array<float, 2>& previous_uv, float depth,
+                         std::array<float, 2>& newest_uv);
+
+// --- Engine motion vectors: which image a frame's vectors are in -----------
+
+// Images of a motion vector swapchain the census reads (runtimes make three).
+inline constexpr std::uint32_t kFrameGenEngineImages = 3;
+
+// One frame's census of a view's motion vector images (kEngineCensus), as
+// the image tracker reads it.
+struct FrameGenEngineTrackerFrame {
+    std::uint64_t frame{0}; // frames that carried a projection layer, counted by the layer
+    // The head moved more than 0.3 degrees or 2 mm since the frame before, or
+    // the application's space more than 5 cm (appSpaceDeltaPose): its vectors
+    // must differ from the frame before's. Other frames show nothing.
+    bool informative{false};
+    std::uint64_t handle{0};             // the motion vector swapchain
+    std::array<std::int32_t, 4> rect{}; // its region: x, y, width, height
+    std::uint32_t images{0};             // up to kFrameGenEngineImages
+    std::array<std::uint64_t, kFrameGenEngineImages> hashes{};
+    // The images the frame's color and depth swapchains released for it.
+    std::uint32_t color_index{0};
+    std::uint32_t depth_index{0};
+    // A game following the specification released a motion vector image for
+    // the frame: that one.
+    std::optional<std::uint32_t> released;
+};
+
+// Which of a game's motion vector images a frame's vectors are in. MSFS 2024
+// never acquires, waits on or releases them, so the census says: per
+// informative frame, the images whose hash changed since their own last
+// census. Frames where exactly one changed score every policy a game could
+// follow over a window of 120 informative frames; one explaining 95% of 60
+// such frames or more, with no policy that predicts otherwise above 60%, is
+// locked. Five mispredictions while locked (in the window), another
+// swapchain or another region unlock it. More than 90% of 300 informative
+// frames changing nothing: the images are not written.
+class FrameGenEngineImageTracker {
+  public:
+    enum class Policy : std::uint8_t {
+        kNone,          // nothing known yet
+        kReleased,      // the image the swapchain released (the specification's way)
+        kConstant,      // always image `parameter`
+        kCycle,         // (frame + parameter) % images
+        kColor,         // the image index the color swapchain released
+        kDepth,         // ... the depth swapchain released
+        kColorNext,     // the color index + 1
+        kColorPrevious, // the color index - 1
+        kAll,           // every image is written alike: any of them
+        kUnwritten,     // none is
+    };
+    struct Hypothesis {
+        Policy policy{Policy::kNone};
+        std::uint32_t parameter{0};
+        double share{0.0}; // of the single-change frames in the window it explains
+    };
+
+    void Add(const FrameGenEngineTrackerFrame& frame);
+    // The image a frame's vectors are in: the locked policy's, else the best
+    // guess (the color index while nothing explains more); none while the
+    // images are not written.
+    std::optional<std::uint32_t> Image(std::uint64_t frame, std::uint32_t color_index, std::uint32_t depth_index,
+                                       std::optional<std::uint32_t> released) const;
+    bool Locked() const { return locked_; }
+    bool NotWritten() const;
+    // The policy explaining the most single-change frames in the window, and
+    // the best of those predicting otherwise on at least one of them (equal
+    // predictions are one policy: a color swapchain cycling with the frames
+    // follows both).
+    Hypothesis Best() const;
+    Hypothesis RunnerUp() const;
+    // In the window: informative frames, and those where one image changed,
+    // every image alike, more than one (not alike) or none.
+    std::uint32_t WindowFrames() const { return static_cast<std::uint32_t>(window_.size()); }
+    std::uint32_t SingleChanges() const;
+    std::uint32_t AllChanged() const;
+    std::uint32_t SeveralChanged() const;
+    std::uint32_t NoneChanged() const;
+    // Session totals.
+    std::uint64_t Mispredictions() const { return mispredictions_; }
+    std::uint64_t Locks() const { return locks_; }
+    std::uint64_t Unlocks() const { return unlocks_; }
+
+  private:
+    enum class Change : std::uint8_t { kNone, kSingle, kAll, kSeveral };
+    struct Entry {
+        Change change{Change::kNone};
+        std::uint32_t image{0}; // kSingle: the image that changed
+        std::uint64_t frame{0};
+        std::uint32_t color_index{0};
+        std::uint32_t depth_index{0};
+        bool mispredicted{false}; // locked, and the locked policy said otherwise
+    };
+    std::uint32_t Predict(const Hypothesis& hypothesis, const Entry& entry) const;
+    // Every policy the images could follow, scored over the window.
+    std::vector<Hypothesis> Score() const;
+    void Restart();
+
+    std::uint64_t handle_{0};
+    std::array<std::int32_t, 4> rect_{};
+    std::uint32_t images_{0};
+    std::array<std::optional<std::uint64_t>, kFrameGenEngineImages> hashes_{};
+    std::deque<Entry> window_;            // the last 120 informative frames
+    std::deque<std::uint8_t> written_;    // the last 300 informative frames: 1 where an image changed
+    std::uint32_t released_streak_{0};    // frames in a row the swapchain released an image
+    bool locked_{false};
+    Hypothesis lock_{};
+    std::uint64_t mispredictions_{0};
+    std::uint64_t locks_{0};
+    std::uint64_t unlocks_{0};
+};
+
+const char* ToString(FrameGenEngineImageTracker::Policy policy);
+
+// --- Engine motion vectors: calibration (stage 0 research) -----------------
+//
+// How a game's decoded vectors e relate to what the poses predict, in D3D
+// NDC (x right, y up), the current frame minus the previous one: n = g * e
+// per axis. Used by the census's online fit and by
+// `depthxr_framegen_tests engine-calibrate`.
+
+// What the vectors leave of the movement (FrameGenEngineConvention's camera).
+enum class FrameGenEngineCamera : std::uint8_t {
+    kIncluded,     // the head's movement and the application's (the specification's intent)
+    kRotationOnly, // the head's rotation alone
+    kExcluded,     // the application's movement only: head movement removed
+    kObjectOnly,   // objects' own movement only
+};
+const char* ToString(FrameGenEngineCamera camera);
+
+// e on one axis fitted as a * p_r + b * p_t + c: p_r the prediction from the
+// head's rotation alone (depth 0), p_t what its translation adds at the
+// content's depth; or as a line, e = a * (p_r + p_t) + c.
+class FrameGenEngineAxisFit {
+  public:
+    struct Solution {
+        bool valid{false};
+        double a{0.0};
+        double b{0.0};
+        double c{0.0};
+        double corr2{0.0}; // the share of e's variance the fit explains
+        double samples{0.0};
+    };
+    void Add(double e, double rotation, double translation);
+    FrameGenEngineAxisFit& operator+=(const FrameGenEngineAxisFit& other);
+    Solution Solve() const;
+    Solution SolveLine() const;
+    // The mean of e - a * p_r - b * p_t: these samples' intercept under
+    // another fit's a and b (their mean e with both 0).
+    double Intercept(double a, double b) const { return n_ > 0.0 ? (e_ - a * r_ - b * t_) / n_ : 0.0; }
+    double Samples() const { return n_; }
+    // Sum of the squared rotation part: the regression's leverage.
+    double RotationSpread() const { return rr_ - (n_ > 0.0 ? r_ * r_ / n_ : 0.0); }
+
+  private:
+    double n_{0.0}, r_{0.0}, t_{0.0}, e_{0.0};
+    double rr_{0.0}, tt_{0.0}, rt_{0.0}, er_{0.0}, et_{0.0}, ee_{0.0};
+};
+
+// A fit whose a gives the vectors' gain (1 / a): one explaining at least
+// this share of the vectors' variance. With the head still a fit only
+// follows tracking noise.
+inline constexpr double kFrameGenEngineGainCorr2 = 0.5;
+inline bool GivesFrameGenEngineGain(const FrameGenEngineAxisFit::Solution& fit) {
+    return fit.valid && fit.a != 0.0 && fit.corr2 >= kFrameGenEngineGainCorr2;
+}
+
+// A convention's gain (n = g * e) with its name.
+struct FrameGenEngineGain {
+    const char* name{""};
+    std::array<double, 2> gain{1.0, 1.0};
+};
+// The canonical gains for vectors of a region `vectors` in size and a color
+// view of `color`: NDC with y up (XR_FB_space_warp's text), Vulkan NDC (y
+// down, XR_EXT_frame_synthesis), uv (y down), the vectors' pixels and the
+// color view's pixels (y down), and each as previous minus current.
+std::vector<FrameGenEngineGain> FrameGenEngineCanonicalGains(FrameGenExtent vectors, FrameGenExtent color);
+// The canonical gain nearest `gain`, and the larger of its axes' relative
+// errors.
+FrameGenEngineGain NearestFrameGenEngineGain(const std::array<double, 2>& gain, FrameGenExtent vectors,
+                                             FrameGenExtent color, double& error);
+
+// Where content at newest-view `uv` (linear depth `depth`: 0 or less, or
+// kFrameGenFarDepth and beyond, infinitely far) was in the previous frame,
+// as NDC current minus previous, for vectors leaving `camera` of the
+// movement. `newest` and `previous` are the poses the game rendered with;
+// content nearer than kFrameGenEngineCockpit stays in the application's
+// space, content from kFrameGenEngineWorld on (and infinitely far) moved
+// with it by appSpaceDeltaPose (`delta_*`; `delta_sign` -1 takes its
+// rotation conjugated). False where the content was behind the view, or is
+// between the two (no model).
+inline constexpr float kFrameGenEngineCockpit = 4.0f;
+inline constexpr float kFrameGenEngineWorld = 30.0f;
+bool FrameGenEnginePrediction(const FrameGenViewGeometry& newest, const FrameGenViewGeometry& previous,
+                              const std::array<float, 4>& delta_orientation, const std::array<float, 3>& delta_position,
+                              int delta_sign, FrameGenEngineCamera camera, const std::array<float, 2>& uv, float depth,
+                              std::array<double, 2>& prediction);
+
+// One sample of a view's vectors: where, its content's linear depth, and
+// its vector as decoded.
+struct FrameGenEngineCalibrationSample {
+    std::array<float, 2> uv{};
+    float depth{0.0f};
+    std::array<float, 2> vector{};
+};
+
+// A frame's samples, with the poses the game rendered it and the frame
+// before with (and the one before that, for the lag test).
+struct FrameGenEngineCalibrationFrame {
+    FrameGenViewGeometry newest;
+    FrameGenViewGeometry previous;
+    std::optional<FrameGenViewGeometry> before_previous;
+    std::array<float, 4> delta_orientation{0.0f, 0.0f, 0.0f, 1.0f};
+    std::array<float, 3> delta_position{};
+    FrameGenExtent vectors; // the vectors' region (pixels as units)
+    FrameGenExtent color;   // the color view
+    std::vector<FrameGenEngineCalibrationSample> samples;
+};
+
+// A camera model's fit over every sample with a model (cockpit and world).
+struct FrameGenEngineCandidate {
+    FrameGenEngineCamera camera{FrameGenEngineCamera::kIncluded};
+    int delta_sign{1};
+    std::array<FrameGenEngineAxisFit::Solution, 2> fit{}; // e = a * prediction + c per axis
+    std::array<double, 2> gain{0.0, 0.0};                  // 1 / a
+    FrameGenEngineGain nearest;
+    double gain_error{0.0};  // relative, the larger axis's
+    double residual_px{0.0}; // median |g * (e - c) - prediction| in vector pixels
+    double Corr2() const { return 0.5 * (fit[0].corr2 + fit[1].corr2); }
+};
+
+struct FrameGenEngineCalibration {
+    // Every candidate, the best fit first.
+    std::vector<FrameGenEngineCandidate> leaderboard;
+    // Cockpit samples (nearer than kFrameGenEngineCockpit) with the head
+    // included: e = a * p_r + b * p_t + c per axis (b / a about 1 when Frame
+    // Generation's depth agrees with the game's), with the newest pair's
+    // poses and with the pair before's (the lag test).
+    std::array<FrameGenEngineAxisFit::Solution, 2> cockpit{};
+    std::array<FrameGenEngineAxisFit::Solution, 2> cockpit_lag{};
+    // Jitter: the spread across frames of each frame's intercept under the
+    // cockpit fit, in vector pixels (the intercept over a, in NDC; none
+    // without the fit), and of the frames' mean cockpit vectors, in the
+    // vectors' own units (the jitter where the head was too still to fit).
+    std::optional<std::array<double, 2>> intercept_spread_px;
+    std::array<double, 2> intercept_spread{0.0, 0.0};
+    std::uint32_t frames{0};
+};
+FrameGenEngineCalibration CalibrateFrameGenEngine(const std::vector<FrameGenEngineCalibrationFrame>& frames);
 
 } // namespace depthxr

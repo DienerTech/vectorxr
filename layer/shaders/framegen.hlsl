@@ -2934,3 +2934,190 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     g_rates[id.xy] = rate;
 }
 #endif
+
+#if defined(FG_PASS_ENGINE_CENSUS)
+#if defined(__spirv__)
+// Direct3D 12 only (FrameGenGpu::CaptureMotion): the SPIR-V build compiles
+// every pass, and this one never runs there.
+[numthreads(64, 1, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID) {
+}
+#else
+FG_BIND(0) Texture2DArray<float4> g_vectors0 : register(t0);
+FG_BIND(1) Texture2DArray<float4> g_vectors1 : register(t1);
+FG_BIND(2) Texture2DArray<float4> g_vectors2 : register(t2);
+FG_BIND(3) Texture2D<float4> g_depth : register(t3);
+FG_BIND(4) RWTexture2D<uint4> g_census : register(u0);
+FG_BIND(5) RWTexture2D<float4> g_samples : register(u1);
+
+// Engine motion vectors, stage 0 (FrameGenGpu::CaptureMotion): a game's
+// motion vector images fingerprinted, so the census can tell whether, which
+// and when it writes them (it may never acquire or release them), and
+// sampled where Frame Generation knows the depth, for its fits. A group of
+// 64 threads per image (size.z of them: t0-t2 at array slice size.w) reads
+//   a hash grid of 64x64 texels spread over the whole image, so another
+//     region can never look like a write;
+//   a statistics grid of 32x32 texels inside the region (fov_current:
+//     offset, extent);
+// and writes four texels per image into u0: the hashes and the exact-zero
+// and non-finite counts; the large, |e| summed, the longest |e| and the
+// finite count; r, g, b and a summed; the frame's tag (options.y), the
+// image, the region's extent. With FG_CENSUS_SAMPLES one group more writes
+// the sparse samples into u1: on a 16x16 grid of the color view's
+// half-resolution texels (size.xy), the three images' raw texels by
+// FG_PASS_DEPTH's nearest rule, then the linear depth there (t3, with
+// FG_CENSUS_DEPTH), the color image index (options.z) and the texel.
+#define FG_CENSUS_THREADS 64u
+#define FG_CENSUS_HASH_GRID 64u
+#define FG_CENSUS_STATS_GRID 32u
+#define FG_CENSUS_SAMPLE_GRID 16u
+// options.x
+#define FG_CENSUS_SAMPLES 1u
+#define FG_CENSUS_DEPTH 2u
+// A vector longer than this, in the image's own units, is counted as large.
+#define FG_CENSUS_LARGE 4.0
+
+groupshared uint g_census_xor[FG_CENSUS_THREADS];
+groupshared uint g_census_sum[FG_CENSUS_THREADS];
+groupshared uint g_census_zeros[FG_CENSUS_THREADS];
+groupshared uint g_census_nonfinite[FG_CENSUS_THREADS];
+groupshared uint g_census_large[FG_CENSUS_THREADS];
+groupshared uint g_census_count[FG_CENSUS_THREADS];
+groupshared float g_census_abs[FG_CENSUS_THREADS];
+groupshared float g_census_max[FG_CENSUS_THREADS];
+groupshared float4 g_census_rgba[FG_CENSUS_THREADS];
+
+float4 CensusLoad(uint image, int2 texel) {
+    const int4 at = int4(texel, int(g.size.w), 0);
+    float4 value;
+    if (image == 0u) {
+        value = g_vectors0.Load(at);
+    } else if (image == 1u) {
+        value = g_vectors1.Load(at);
+    } else {
+        value = g_vectors2.Load(at);
+    }
+    return value;
+}
+
+float2 CensusDimensions(uint image) {
+    uint width = 0u, height = 0u, elements = 0u;
+    if (image == 0u) {
+        g_vectors0.GetDimensions(width, height, elements);
+    } else if (image == 1u) {
+        g_vectors1.GetDimensions(width, height, elements);
+    } else {
+        g_vectors2.GetDimensions(width, height, elements);
+    }
+    return float2(width, height);
+}
+
+// By its bits: the compiler may take every float to be finite.
+bool CensusFinite(float value) {
+    return (asuint(value) & 0x7f800000u) != 0x7f800000u;
+}
+
+// An integer hash (lowbias32): a texel's channels mixed this way change its
+// value whenever either changes, a sign flip of both included (multiplied
+// and xored alone, those cancel).
+uint CensusMix(uint x) {
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+[numthreads(64, 1, 1)]
+void CSMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID) {
+    const uint t = thread.x;
+    const uint image = group.x;
+    const bool census = image < g.size.z;
+    uint hash_xor = 0u, hash_sum = 0u, zeros = 0u, nonfinite = 0u;
+    uint large = 0u, count = 0u;
+    float total = 0.0, longest = 0.0;
+    float4 sums = float4(0.0, 0.0, 0.0, 0.0);
+    if (census) {
+        // Hash grid: this thread's row of it, at fixed texels of the image.
+        const float2 dimensions = CensusDimensions(image);
+        [loop]
+        for (uint x = 0u; x < FG_CENSUS_HASH_GRID; ++x) {
+            const float2 cell = (float2(float(x), float(t)) + 0.5) * dimensions / float(FG_CENSUS_HASH_GRID);
+            const float4 v = CensusLoad(image, int2(min(floor(cell), dimensions - 1.0)));
+            const uint index = t * FG_CENSUS_HASH_GRID + x;
+            const uint value =
+                CensusMix((asuint(v.r) * 0x9E3779B1u) ^ CensusMix((asuint(v.g) * 0x85EBCA77u) ^ (index * 0xC2B2AE3Du)));
+            hash_xor ^= value;
+            hash_sum += value;
+            zeros += v.r == 0.0 && v.g == 0.0 ? 1u : 0u;
+            nonfinite += CensusFinite(v.r) && CensusFinite(v.g) ? 0u : 1u;
+        }
+        // Statistics grid: this thread's share of it, inside the region.
+        [loop]
+        for (uint s = t; s < FG_CENSUS_STATS_GRID * FG_CENSUS_STATS_GRID; s += FG_CENSUS_THREADS) {
+            const float2 cell = float2(float(s % FG_CENSUS_STATS_GRID), float(s / FG_CENSUS_STATS_GRID));
+            const float2 offset = min(floor((cell + 0.5) * g.fov_current.zw / float(FG_CENSUS_STATS_GRID)),
+                                      g.fov_current.zw - 1.0);
+            const float4 v = CensusLoad(image, int2(g.fov_current.xy + offset));
+            if (CensusFinite(v.r) && CensusFinite(v.g)) {
+                const float magnitude = length(v.rg);
+                ++count;
+                large += magnitude > FG_CENSUS_LARGE ? 1u : 0u;
+                total += magnitude;
+                longest = max(longest, magnitude);
+                sums += float4(v.r, v.g, CensusFinite(v.b) ? v.b : 0.0, CensusFinite(v.a) ? v.a : 0.0);
+            }
+        }
+    }
+    g_census_xor[t] = hash_xor;
+    g_census_sum[t] = hash_sum;
+    g_census_zeros[t] = zeros;
+    g_census_nonfinite[t] = nonfinite;
+    g_census_large[t] = large;
+    g_census_count[t] = count;
+    g_census_abs[t] = total;
+    g_census_max[t] = longest;
+    g_census_rgba[t] = sums;
+    [unroll]
+    for (uint stride = FG_CENSUS_THREADS / 2u; stride > 0u; stride >>= 1u) {
+        GroupMemoryBarrierWithGroupSync();
+        if (t < stride) {
+            g_census_xor[t] ^= g_census_xor[t + stride];
+            g_census_sum[t] += g_census_sum[t + stride];
+            g_census_zeros[t] += g_census_zeros[t + stride];
+            g_census_nonfinite[t] += g_census_nonfinite[t + stride];
+            g_census_large[t] += g_census_large[t + stride];
+            g_census_count[t] += g_census_count[t + stride];
+            g_census_abs[t] += g_census_abs[t + stride];
+            g_census_max[t] = max(g_census_max[t], g_census_max[t + stride]);
+            g_census_rgba[t] += g_census_rgba[t + stride];
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (census && t == 0u) {
+        const uint base = image * 4u;
+        g_census[uint2(base, 0u)] = uint4(g_census_xor[0], g_census_sum[0], g_census_zeros[0], g_census_nonfinite[0]);
+        g_census[uint2(base + 1u, 0u)] =
+            uint4(g_census_large[0], asuint(g_census_abs[0]), asuint(g_census_max[0]), g_census_count[0]);
+        g_census[uint2(base + 2u, 0u)] = asuint(g_census_rgba[0]);
+        g_census[uint2(base + 3u, 0u)] = uint4(g.options.y, image, uint(g.fov_current.z), uint(g.fov_current.w));
+    }
+    if (!census && (g.options.x & FG_CENSUS_SAMPLES) != 0u) {
+        [loop]
+        for (uint s = t; s < FG_CENSUS_SAMPLE_GRID * FG_CENSUS_SAMPLE_GRID; s += FG_CENSUS_THREADS) {
+            const float2 cell = float2(float(s % FG_CENSUS_SAMPLE_GRID), float(s / FG_CENSUS_SAMPLE_GRID));
+            const uint2 q = uint2((cell + 0.5) * float2(g.size.xy) / float(FG_CENSUS_SAMPLE_GRID));
+            const float2 uv = (float2(q) + 0.5) / float2(g.size.xy);
+            const int2 texel = int2(g.fov_current.xy + min(uv * g.fov_current.zw, g.fov_current.zw - 1.0));
+            [unroll]
+            for (uint k = 0u; k < 3u; ++k) {
+                g_samples[uint2(s * 4u + k, 0u)] = k < g.size.z ? CensusLoad(k, texel) : float4(0.0, 0.0, 0.0, 0.0);
+            }
+            const float depth = (g.options.x & FG_CENSUS_DEPTH) != 0u ? g_depth.Load(int3(q, 0)).r : 0.0;
+            g_samples[uint2(s * 4u + 3u, 0u)] = float4(depth, float(g.options.z), float(q.x), float(q.y));
+        }
+    }
+}
+#endif
+#endif

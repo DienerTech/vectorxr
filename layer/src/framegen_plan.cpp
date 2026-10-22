@@ -1,8 +1,10 @@
 #include "depthxr/framegen_plan.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstring>
+#include <string>
 
 namespace depthxr {
 namespace {
@@ -989,6 +991,732 @@ void FrameGenHistoryState::Invalidate() {
     filtered_valid_ = {};
     trust_valid_ = {};
     newest_ = 0;
+}
+
+std::array<float, 2> DecodeFrameGenMotion(const FrameGenMotionEncoding& encoding, const std::array<float, 4>& raw) {
+    if (!encoding.ext) {
+        return {raw[0], raw[1]};
+    }
+    return {raw[0] * encoding.scale[0] + encoding.offset[0], raw[1] * encoding.scale[1] + encoding.offset[1]};
+}
+
+const char* ToString(FrameGenEngineMode mode) {
+    switch (mode) {
+    case FrameGenEngineMode::kCensus:
+        return "census";
+    case FrameGenEngineMode::kCapture:
+        return "capture";
+    case FrameGenEngineMode::kObserve:
+        return "observe";
+    case FrameGenEngineMode::kAssist:
+        return "assist";
+    case FrameGenEngineMode::kLead:
+        return "lead";
+    default:
+        return "off";
+    }
+}
+
+FrameGenEngineMode ParseFrameGenEngineMode(const char* value) {
+    if (!value) {
+        return FrameGenEngineMode::kOff;
+    }
+    std::string text(value);
+    std::transform(text.begin(), text.end(), text.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return text == "census" ? FrameGenEngineMode::kCensus : FrameGenEngineMode::kOff;
+}
+
+FrameGenViewMapping BuildFrameGenViewMapping(const FrameGenViewGeometry& newest, const FrameGenViewGeometry& previous,
+                                             bool depth) {
+    FrameGenViewMapping mapping;
+    mapping.fov_current = Tangents(newest);
+    mapping.fov_previous = Tangents(previous);
+    mapping.rotation = FrameGenRelativeRotation(newest.orientation, previous.orientation);
+    mapping.translation = depth ? RelativeTranslation(newest, previous) : std::array<float, 3>{0.0f, 0.0f, 0.0f};
+    mapping.depth = depth;
+    return mapping;
+}
+
+bool FrameGenMapToPrevious(const FrameGenViewMapping& mapping, const std::array<float, 2>& uv, float depth,
+                           std::array<float, 2>& previous_uv) {
+    const auto& current = mapping.fov_current;
+    const auto& before = mapping.fov_previous;
+    const std::array<float, 3> direction{current[0] + (current[1] - current[0]) * uv[0],
+                                         current[2] + (current[3] - current[2]) * uv[1], -1.0f};
+    std::array<float, 3> rotated{};
+    for (int i = 0; i < 3; ++i) {
+        rotated[i] = mapping.rotation[i][0] * direction[0] + mapping.rotation[i][1] * direction[1] +
+                     mapping.rotation[i][2] * direction[2];
+    }
+    if (mapping.depth && depth > 0.0f && depth < kFrameGenFarDepth) {
+        for (int i = 0; i < 3; ++i) {
+            rotated[i] += mapping.translation[i] / depth;
+        }
+    }
+    previous_uv = {0.0f, 0.0f};
+    if (rotated[2] > -1e-4f) {
+        return false;
+    }
+    previous_uv = {(rotated[0] / -rotated[2] - before[0]) / (before[1] - before[0]),
+                   (rotated[1] / -rotated[2] - before[2]) / (before[3] - before[2])};
+    return previous_uv[0] >= 0.0f && previous_uv[1] >= 0.0f && previous_uv[0] <= 1.0f && previous_uv[1] <= 1.0f;
+}
+
+bool FrameGenMapToNewest(const FrameGenViewMapping& mapping, const std::array<float, 2>& previous_uv, float depth,
+                         std::array<float, 2>& newest_uv) {
+    const auto& current = mapping.fov_current;
+    const auto& before = mapping.fov_previous;
+    const std::array<float, 3> seen{before[0] + (before[1] - before[0]) * previous_uv[0],
+                                    before[2] + (before[3] - before[2]) * previous_uv[1], -1.0f};
+    // R transposed: newest-view directions from previous-view ones.
+    std::array<float, 3> located{};
+    std::array<float, 3> back{};
+    for (int i = 0; i < 3; ++i) {
+        located[i] = mapping.rotation[0][i] * seen[0] + mapping.rotation[1][i] * seen[1] + mapping.rotation[2][i] * seen[2];
+        back[i] = mapping.rotation[0][i] * mapping.translation[0] + mapping.rotation[1][i] * mapping.translation[1] +
+                  mapping.rotation[2][i] * mapping.translation[2];
+    }
+    if (mapping.depth && depth > 0.0f && depth < kFrameGenFarDepth && std::abs(located[2]) > 1e-6f) {
+        // The point is s * seen in the previous view and R^T (s seen - t) in
+        // the newest, at depth `depth` there.
+        const float s = (back[2] - depth) / located[2];
+        for (int i = 0; i < 3; ++i) {
+            located[i] = s * located[i] - back[i];
+        }
+    }
+    newest_uv = {0.0f, 0.0f};
+    if (located[2] > -1e-4f) {
+        return false;
+    }
+    newest_uv = {(located[0] / -located[2] - current[0]) / (current[1] - current[0]),
+                 (located[1] / -located[2] - current[2]) / (current[3] - current[2])};
+    return true;
+}
+
+// --- Engine motion vectors: the image tracker ------------------------------
+
+namespace {
+
+// Informative frames the tracker scores over, and those that decide whether
+// the images are written at all.
+constexpr std::size_t kTrackerWindow = 120;
+constexpr std::size_t kTrackerWrittenWindow = 300;
+constexpr std::uint32_t kTrackerLockFrames = 60;
+constexpr double kTrackerLockShare = 0.95;
+constexpr double kTrackerRunnerUpShare = 0.60;
+constexpr std::uint32_t kTrackerMispredictions = 5;
+constexpr double kTrackerUnwrittenShare = 0.90;
+// Frames in a row a swapchain released an image before its releases decide.
+constexpr std::uint32_t kTrackerReleasedFrames = 3;
+
+} // namespace
+
+const char* ToString(FrameGenEngineImageTracker::Policy policy) {
+    using Policy = FrameGenEngineImageTracker::Policy;
+    switch (policy) {
+    case Policy::kReleased:
+        return "released";
+    case Policy::kConstant:
+        return "constant";
+    case Policy::kCycle:
+        return "cycle";
+    case Policy::kColor:
+        return "follows color";
+    case Policy::kDepth:
+        return "follows depth";
+    case Policy::kColorNext:
+        return "color + 1";
+    case Policy::kColorPrevious:
+        return "color - 1";
+    case Policy::kAll:
+        return "all written";
+    case Policy::kUnwritten:
+        return "not written";
+    default:
+        return "none";
+    }
+}
+
+void FrameGenEngineImageTracker::Restart() {
+    hashes_ = {};
+    window_.clear();
+    written_.clear();
+    released_streak_ = 0;
+    if (locked_) {
+        locked_ = false;
+        ++unlocks_;
+    }
+    lock_ = {};
+}
+
+std::uint32_t FrameGenEngineImageTracker::Predict(const Hypothesis& hypothesis, const Entry& entry) const {
+    const std::uint32_t images = std::max(images_, 1u);
+    switch (hypothesis.policy) {
+    case Policy::kConstant:
+        return hypothesis.parameter % images;
+    case Policy::kCycle:
+        return static_cast<std::uint32_t>((entry.frame + hypothesis.parameter) % images);
+    case Policy::kDepth:
+        return entry.depth_index % images;
+    case Policy::kColorNext:
+        return (entry.color_index + 1) % images;
+    case Policy::kColorPrevious:
+        return (entry.color_index + images - 1) % images;
+    default:
+        return entry.color_index % images;
+    }
+}
+
+std::vector<FrameGenEngineImageTracker::Hypothesis> FrameGenEngineImageTracker::Score() const {
+    // In the order ties go: following color first (the best guess before
+    // anything is known), then depth, then the rest.
+    std::vector<Hypothesis> hypotheses{{Policy::kColor}, {Policy::kDepth}, {Policy::kColorNext}, {Policy::kColorPrevious}};
+    for (std::uint32_t k = 0; k < images_; ++k) {
+        hypotheses.push_back({Policy::kConstant, k});
+    }
+    for (std::uint32_t phase = 0; phase < images_; ++phase) {
+        hypotheses.push_back({Policy::kCycle, phase});
+    }
+    const double singles = SingleChanges();
+    for (Hypothesis& hypothesis : hypotheses) {
+        std::uint32_t explained = 0;
+        for (const Entry& entry : window_) {
+            explained += entry.change == Change::kSingle && Predict(hypothesis, entry) == entry.image ? 1u : 0u;
+        }
+        hypothesis.share = singles > 0.0 ? explained / singles : 0.0;
+    }
+    return hypotheses;
+}
+
+void FrameGenEngineImageTracker::Add(const FrameGenEngineTrackerFrame& frame) {
+    const std::uint32_t images = std::min(frame.images, kFrameGenEngineImages);
+    if (frame.handle != handle_ || frame.rect != rect_ || images != images_) {
+        // Other images, or another part of them: nothing learned holds.
+        Restart();
+        handle_ = frame.handle;
+        rect_ = frame.rect;
+        images_ = images;
+    }
+    released_streak_ = frame.released ? released_streak_ + 1 : 0;
+    // The images whose hash changed since their own last census.
+    bool known = images > 0;
+    std::uint32_t changed = 0;
+    std::uint32_t last = 0;
+    for (std::uint32_t i = 0; i < images; ++i) {
+        if (!hashes_[i]) {
+            known = false;
+        } else if (*hashes_[i] != frame.hashes[i]) {
+            ++changed;
+            last = i;
+        }
+        hashes_[i] = frame.hashes[i];
+    }
+    if (!known || !frame.informative) {
+        return;
+    }
+    Entry entry;
+    entry.frame = frame.frame;
+    entry.color_index = frame.color_index;
+    entry.depth_index = frame.depth_index;
+    if (changed == 1) {
+        entry.change = Change::kSingle;
+        entry.image = last;
+    } else if (changed > 1) {
+        bool alike = changed == images;
+        for (std::uint32_t i = 1; i < images && alike; ++i) {
+            alike = frame.hashes[i] == frame.hashes[0];
+        }
+        entry.change = alike ? Change::kAll : Change::kSeveral;
+    }
+    if (locked_ && entry.change == Change::kSingle && Predict(lock_, entry) != entry.image) {
+        entry.mispredicted = true;
+        ++mispredictions_;
+    }
+    window_.push_back(entry);
+    while (window_.size() > kTrackerWindow) {
+        window_.pop_front();
+    }
+    written_.push_back(changed > 0 ? 1 : 0);
+    while (written_.size() > kTrackerWrittenWindow) {
+        written_.pop_front();
+    }
+    if (locked_) {
+        const auto wrong = std::count_if(window_.begin(), window_.end(), [](const Entry& e) { return e.mispredicted; });
+        if (wrong >= kTrackerMispredictions) {
+            locked_ = false;
+            ++unlocks_;
+            for (Entry& e : window_) {
+                e.mispredicted = false;
+            }
+        }
+    }
+    if (!locked_ && SingleChanges() >= kTrackerLockFrames) {
+        const Hypothesis best = Best();
+        if (best.share >= kTrackerLockShare && RunnerUp().share <= kTrackerRunnerUpShare &&
+            best.policy != Policy::kNone && best.policy != Policy::kReleased && best.policy != Policy::kAll &&
+            best.policy != Policy::kUnwritten) {
+            locked_ = true;
+            lock_ = best;
+            ++locks_;
+        }
+    }
+}
+
+bool FrameGenEngineImageTracker::NotWritten() const {
+    if (written_.size() < kTrackerWrittenWindow) {
+        return false;
+    }
+    const auto unwritten = std::count(written_.begin(), written_.end(), std::uint8_t{0});
+    return static_cast<double>(unwritten) > kTrackerUnwrittenShare * static_cast<double>(written_.size());
+}
+
+std::uint32_t FrameGenEngineImageTracker::SingleChanges() const {
+    return static_cast<std::uint32_t>(
+        std::count_if(window_.begin(), window_.end(), [](const Entry& e) { return e.change == Change::kSingle; }));
+}
+
+std::uint32_t FrameGenEngineImageTracker::AllChanged() const {
+    return static_cast<std::uint32_t>(
+        std::count_if(window_.begin(), window_.end(), [](const Entry& e) { return e.change == Change::kAll; }));
+}
+
+std::uint32_t FrameGenEngineImageTracker::SeveralChanged() const {
+    return static_cast<std::uint32_t>(
+        std::count_if(window_.begin(), window_.end(), [](const Entry& e) { return e.change == Change::kSeveral; }));
+}
+
+std::uint32_t FrameGenEngineImageTracker::NoneChanged() const {
+    return static_cast<std::uint32_t>(
+        std::count_if(window_.begin(), window_.end(), [](const Entry& e) { return e.change == Change::kNone; }));
+}
+
+FrameGenEngineImageTracker::Hypothesis FrameGenEngineImageTracker::Best() const {
+    if (released_streak_ >= kTrackerReleasedFrames) {
+        return {Policy::kReleased, 0, 1.0};
+    }
+    if (NotWritten()) {
+        const auto unwritten = std::count(written_.begin(), written_.end(), std::uint8_t{0});
+        return {Policy::kUnwritten, 0, static_cast<double>(unwritten) / static_cast<double>(written_.size())};
+    }
+    const std::uint32_t singles = SingleChanges();
+    const std::uint32_t all = AllChanged();
+    if (all > singles && !window_.empty()) {
+        return {Policy::kAll, 0, static_cast<double>(all) / static_cast<double>(window_.size())};
+    }
+    const std::vector<Hypothesis> scored = Score();
+    if (locked_) {
+        for (const Hypothesis& hypothesis : scored) {
+            if (hypothesis.policy == lock_.policy && hypothesis.parameter == lock_.parameter) {
+                return hypothesis;
+            }
+        }
+    }
+    if (singles == 0) {
+        return {};
+    }
+    Hypothesis best = scored.front();
+    for (const Hypothesis& hypothesis : scored) {
+        if (hypothesis.share > best.share) {
+            best = hypothesis;
+        }
+    }
+    return best;
+}
+
+FrameGenEngineImageTracker::Hypothesis FrameGenEngineImageTracker::RunnerUp() const {
+    const Hypothesis best = Best();
+    if (best.policy == Policy::kNone || best.policy == Policy::kReleased || best.policy == Policy::kAll ||
+        best.policy == Policy::kUnwritten) {
+        return {};
+    }
+    Hypothesis runner_up;
+    for (const Hypothesis& hypothesis : Score()) {
+        // A policy predicting what the best does on every frame is the same.
+        const bool differs = std::any_of(window_.begin(), window_.end(), [&](const Entry& entry) {
+            return entry.change == Change::kSingle && Predict(hypothesis, entry) != Predict(best, entry);
+        });
+        if (differs && hypothesis.share > runner_up.share) {
+            runner_up = hypothesis;
+        }
+    }
+    return runner_up;
+}
+
+std::optional<std::uint32_t> FrameGenEngineImageTracker::Image(std::uint64_t frame, std::uint32_t color_index,
+                                                               std::uint32_t depth_index,
+                                                               std::optional<std::uint32_t> released) const {
+    if (released) {
+        return released;
+    }
+    if (NotWritten()) {
+        return std::nullopt;
+    }
+    Entry entry;
+    entry.frame = frame;
+    entry.color_index = color_index;
+    entry.depth_index = depth_index;
+    const Hypothesis hypothesis = locked_ ? lock_ : Best();
+    switch (hypothesis.policy) {
+    case Policy::kConstant:
+    case Policy::kCycle:
+    case Policy::kDepth:
+    case Policy::kColorNext:
+    case Policy::kColorPrevious:
+        return Predict(hypothesis, entry);
+    default:
+        return Predict({Policy::kColor}, entry);
+    }
+}
+
+// --- Engine motion vectors: calibration ------------------------------------
+
+namespace {
+
+using Vector3 = std::array<double, 3>;
+
+Vector3 Rotate(const std::array<float, 4>& q, const Vector3& v) {
+    // v + 2 w (u x v) + 2 u x (u x v), u = q.xyz.
+    const Vector3 u{q[0], q[1], q[2]};
+    const double w = q[3];
+    const Vector3 uv{u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]};
+    const Vector3 uuv{u[1] * uv[2] - u[2] * uv[1], u[2] * uv[0] - u[0] * uv[2], u[0] * uv[1] - u[1] * uv[0]};
+    return {v[0] + 2.0 * (w * uv[0] + uuv[0]), v[1] + 2.0 * (w * uv[1] + uuv[1]), v[2] + 2.0 * (w * uv[2] + uuv[2])};
+}
+
+std::array<float, 4> Conjugate(const std::array<float, 4>& q) {
+    return {-q[0], -q[1], -q[2], q[3]};
+}
+
+Vector3 Minus(const Vector3& a, const Vector3& b) {
+    return {a[0] - b[0], a[1] - b[1], a[2] - b[2]};
+}
+
+Vector3 Position(const FrameGenViewGeometry& view) {
+    return {view.position[0], view.position[1], view.position[2]};
+}
+
+} // namespace
+
+const char* ToString(FrameGenEngineCamera camera) {
+    switch (camera) {
+    case FrameGenEngineCamera::kRotationOnly:
+        return "rotation only";
+    case FrameGenEngineCamera::kExcluded:
+        return "head excluded";
+    case FrameGenEngineCamera::kObjectOnly:
+        return "objects only";
+    default:
+        return "head included";
+    }
+}
+
+void FrameGenEngineAxisFit::Add(double e, double rotation, double translation) {
+    n_ += 1.0;
+    r_ += rotation;
+    t_ += translation;
+    e_ += e;
+    rr_ += rotation * rotation;
+    tt_ += translation * translation;
+    rt_ += rotation * translation;
+    er_ += e * rotation;
+    et_ += e * translation;
+    ee_ += e * e;
+}
+
+FrameGenEngineAxisFit& FrameGenEngineAxisFit::operator+=(const FrameGenEngineAxisFit& other) {
+    n_ += other.n_;
+    r_ += other.r_;
+    t_ += other.t_;
+    e_ += other.e_;
+    rr_ += other.rr_;
+    tt_ += other.tt_;
+    rt_ += other.rt_;
+    er_ += other.er_;
+    et_ += other.et_;
+    ee_ += other.ee_;
+    return *this;
+}
+
+FrameGenEngineAxisFit::Solution FrameGenEngineAxisFit::Solve() const {
+    Solution solution;
+    solution.samples = n_;
+    if (n_ < 4.0) {
+        return solution;
+    }
+    // Centered sums: the intercept drops out of the 2x2 system.
+    const double srr = rr_ - r_ * r_ / n_;
+    const double stt = tt_ - t_ * t_ / n_;
+    const double srt = rt_ - r_ * t_ / n_;
+    const double ser = er_ - e_ * r_ / n_;
+    const double set = et_ - e_ * t_ / n_;
+    const double see = ee_ - e_ * e_ / n_;
+    const double det = srr * stt - srt * srt;
+    if (!(srr > 1e-12 * n_) || !(stt > 1e-12 * n_) || !(det > 1e-9 * srr * stt)) {
+        return solution;
+    }
+    solution.a = (ser * stt - set * srt) / det;
+    solution.b = (set * srr - ser * srt) / det;
+    solution.c = (e_ - solution.a * r_ - solution.b * t_) / n_;
+    const double explained = solution.a * ser + solution.b * set;
+    solution.corr2 = see > 0.0 ? std::clamp(explained / see, 0.0, 1.0) : 0.0;
+    solution.valid = true;
+    return solution;
+}
+
+FrameGenEngineAxisFit::Solution FrameGenEngineAxisFit::SolveLine() const {
+    Solution solution;
+    solution.samples = n_;
+    if (n_ < 3.0) {
+        return solution;
+    }
+    const double q = r_ + t_;
+    const double sqq = rr_ + 2.0 * rt_ + tt_ - q * q / n_;
+    const double seq = er_ + et_ - e_ * q / n_;
+    const double see = ee_ - e_ * e_ / n_;
+    if (!(sqq > 1e-12 * n_)) {
+        return solution;
+    }
+    solution.a = seq / sqq;
+    solution.b = solution.a;
+    solution.c = (e_ - solution.a * q) / n_;
+    solution.corr2 = see > 0.0 ? std::clamp(seq * seq / (sqq * see), 0.0, 1.0) : 0.0;
+    solution.valid = true;
+    return solution;
+}
+
+std::vector<FrameGenEngineGain> FrameGenEngineCanonicalGains(FrameGenExtent vectors, FrameGenExtent color) {
+    const double vw = std::max<std::uint32_t>(vectors.width, 1);
+    const double vh = std::max<std::uint32_t>(vectors.height, 1);
+    const double cw = std::max<std::uint32_t>(color.width, 1);
+    const double ch = std::max<std::uint32_t>(color.height, 1);
+    return {
+        {"ndc", {1.0, 1.0}},
+        {"vulkan ndc", {1.0, -1.0}},
+        {"uv", {2.0, -2.0}},
+        {"vector pixels", {2.0 / vw, -2.0 / vh}},
+        {"color pixels", {2.0 / cw, -2.0 / ch}},
+        {"ndc, previous - current", {-1.0, -1.0}},
+        {"vulkan ndc, previous - current", {-1.0, 1.0}},
+        {"uv, previous - current", {-2.0, 2.0}},
+        {"vector pixels, previous - current", {-2.0 / vw, 2.0 / vh}},
+        {"color pixels, previous - current", {-2.0 / cw, 2.0 / ch}},
+    };
+}
+
+FrameGenEngineGain NearestFrameGenEngineGain(const std::array<double, 2>& gain, FrameGenExtent vectors,
+                                             FrameGenExtent color, double& error) {
+    FrameGenEngineGain nearest;
+    error = 1e30;
+    for (const FrameGenEngineGain& candidate : FrameGenEngineCanonicalGains(vectors, color)) {
+        const double candidate_error = std::max(std::abs(gain[0] - candidate.gain[0]) / std::abs(candidate.gain[0]),
+                                                std::abs(gain[1] - candidate.gain[1]) / std::abs(candidate.gain[1]));
+        if (candidate_error < error) {
+            error = candidate_error;
+            nearest = candidate;
+        }
+    }
+    return nearest;
+}
+
+bool FrameGenEnginePrediction(const FrameGenViewGeometry& newest, const FrameGenViewGeometry& previous,
+                              const std::array<float, 4>& delta_orientation, const std::array<float, 3>& delta_position,
+                              int delta_sign, FrameGenEngineCamera camera, const std::array<float, 2>& uv, float depth,
+                              std::array<double, 2>& prediction) {
+    prediction = {0.0, 0.0};
+    if (camera == FrameGenEngineCamera::kObjectOnly) {
+        return false; // nothing that stays still moves
+    }
+    const bool infinite = !(depth > 0.0f) || depth >= kFrameGenFarDepth || camera == FrameGenEngineCamera::kRotationOnly;
+    const bool cockpit = !infinite && depth < kFrameGenEngineCockpit;
+    const bool world = infinite || depth >= kFrameGenEngineWorld;
+    if (!cockpit && !world) {
+        return false;
+    }
+    const std::array<float, 4> current = Tangents(newest);
+    const Vector3 direction{current[0] + (current[1] - current[0]) * uv[0], current[2] + (current[3] - current[2]) * uv[1],
+                            -1.0};
+    // The content in the application's space now, and where it was: a
+    // direction alone at infinity, else a point.
+    const std::array<float, 4> delta =
+        delta_sign < 0 ? Conjugate(delta_orientation) : delta_orientation; // X(N) = R_D X(N-1) + p_D
+    Vector3 now = Rotate(newest.orientation, direction);
+    Vector3 before = now;
+    if (!infinite) {
+        const Vector3 point{direction[0] * depth, direction[1] * depth, direction[2] * depth};
+        const Vector3 rotated = Rotate(newest.orientation, point);
+        now = {rotated[0] + newest.position[0], rotated[1] + newest.position[1], rotated[2] + newest.position[2]};
+        before = now;
+    }
+    if (world && camera != FrameGenEngineCamera::kRotationOnly) {
+        const Vector3 moved =
+            infinite ? now
+                     : Minus(now, {delta_position[0], delta_position[1], delta_position[2]});
+        before = Rotate(Conjugate(delta), moved);
+    }
+    // Seen from the previous frame's camera (head included), or from this
+    // frame's (head excluded).
+    const FrameGenViewGeometry& eye = camera == FrameGenEngineCamera::kExcluded ? newest : previous;
+    const Vector3 relative = infinite ? before : Minus(before, Position(eye));
+    const Vector3 seen = Rotate(Conjugate(eye.orientation), relative);
+    if (seen[2] > -1e-6) {
+        return false;
+    }
+    const std::array<float, 4> tangents = Tangents(eye);
+    const double u = (seen[0] / -seen[2] - tangents[0]) / (tangents[1] - tangents[0]);
+    const double v = (seen[1] / -seen[2] - tangents[2]) / (tangents[3] - tangents[2]);
+    // NDC(u, v) = (2u - 1, 1 - 2v), current minus previous.
+    prediction = {2.0 * (uv[0] - u), -2.0 * (uv[1] - v)};
+    return true;
+}
+
+FrameGenEngineCalibration CalibrateFrameGenEngine(const std::vector<FrameGenEngineCalibrationFrame>& frames) {
+    FrameGenEngineCalibration calibration;
+    calibration.frames = static_cast<std::uint32_t>(frames.size());
+    struct Model {
+        FrameGenEngineCamera camera;
+        int sign;
+    };
+    const std::array<Model, 5> models{{{FrameGenEngineCamera::kIncluded, 1},
+                                       {FrameGenEngineCamera::kIncluded, -1},
+                                       {FrameGenEngineCamera::kRotationOnly, 1},
+                                       {FrameGenEngineCamera::kExcluded, 1},
+                                       {FrameGenEngineCamera::kExcluded, -1}}};
+    std::array<std::array<FrameGenEngineAxisFit, 2>, models.size()> fits{};
+    std::array<FrameGenEngineAxisFit, 2> cockpit{};
+    std::array<FrameGenEngineAxisFit, 2> cockpit_lag{};
+    // Each frame's cockpit samples, summed, for its intercept under the fit.
+    std::vector<std::array<FrameGenEngineAxisFit, 2>> frame_sums;
+    std::size_t total = 0;
+    for (const auto& frame : frames) {
+        total += frame.samples.size();
+    }
+    // Residuals are taken over at most about 100 000 samples.
+    const std::size_t stride = std::max<std::size_t>(1, total / 100000);
+    for (const auto& frame : frames) {
+        std::array<FrameGenEngineAxisFit, 2> frame_cockpit{};
+        for (const FrameGenEngineCalibrationSample& sample : frame.samples) {
+            const std::array<double, 2> e{sample.vector[0], sample.vector[1]};
+            if (!std::isfinite(e[0]) || !std::isfinite(e[1])) {
+                continue;
+            }
+            for (std::size_t m = 0; m < models.size(); ++m) {
+                std::array<double, 2> q{};
+                if (FrameGenEnginePrediction(frame.newest, frame.previous, frame.delta_orientation, frame.delta_position,
+                                             models[m].sign, models[m].camera, sample.uv, sample.depth, q)) {
+                    fits[m][0].Add(e[0], q[0], 0.0);
+                    fits[m][1].Add(e[1], q[1], 0.0);
+                }
+            }
+            if (!(sample.depth > 0.0f) || sample.depth >= kFrameGenEngineCockpit) {
+                continue;
+            }
+            // Cockpit content stays in the application's space: its
+            // prediction from the head alone, split into the rotation's part
+            // and what the translation adds at its depth.
+            auto split = [&](const FrameGenViewGeometry& newest, const FrameGenViewGeometry& previous,
+                             std::array<FrameGenEngineAxisFit, 2>& fit, std::array<FrameGenEngineAxisFit, 2>* each) {
+                std::array<double, 2> rotation{};
+                std::array<double, 2> full{};
+                if (!FrameGenEnginePrediction(newest, previous, frame.delta_orientation, frame.delta_position, 1,
+                                              FrameGenEngineCamera::kRotationOnly, sample.uv, sample.depth, rotation) ||
+                    !FrameGenEnginePrediction(newest, previous, frame.delta_orientation, frame.delta_position, 1,
+                                              FrameGenEngineCamera::kIncluded, sample.uv, sample.depth, full)) {
+                    return;
+                }
+                for (int axis = 0; axis < 2; ++axis) {
+                    fit[axis].Add(e[axis], rotation[axis], full[axis] - rotation[axis]);
+                    if (each) (*each)[axis].Add(e[axis], rotation[axis], full[axis] - rotation[axis]);
+                }
+            };
+            split(frame.newest, frame.previous, cockpit, &frame_cockpit);
+            if (frame.before_previous) {
+                split(frame.previous, *frame.before_previous, cockpit_lag, nullptr);
+            }
+        }
+        frame_sums.push_back(frame_cockpit);
+    }
+    auto spread = [](const std::vector<double>& values) {
+        if (values.size() < 2) return 0.0;
+        double mean = 0.0;
+        for (const double c : values) mean += c;
+        mean /= static_cast<double>(values.size());
+        double variance = 0.0;
+        for (const double c : values) variance += (c - mean) * (c - mean);
+        return std::sqrt(variance / static_cast<double>(values.size() - 1));
+    };
+    // Each frame's intercept under the cockpit fit (with the head still, the
+    // vectors' mean): a fit of the frame alone would follow tracking noise.
+    bool gain = true;
+    std::array<double, 2> spread_px{};
+    for (int axis = 0; axis < 2; ++axis) {
+        calibration.cockpit[axis] = cockpit[axis].Solve();
+        calibration.cockpit_lag[axis] = cockpit_lag[axis].Solve();
+        const FrameGenEngineAxisFit::Solution& fit = calibration.cockpit[axis];
+        gain = gain && GivesFrameGenEngineGain(fit);
+        std::vector<double> raw;
+        std::vector<double> pixels;
+        for (std::size_t f = 0; f < frames.size(); ++f) {
+            if (frame_sums[f][axis].Samples() <= 0.0) continue;
+            raw.push_back(frame_sums[f][axis].Intercept(0.0, 0.0));
+            if (GivesFrameGenEngineGain(fit)) {
+                const std::uint32_t extent = axis == 0 ? frames[f].vectors.width : frames[f].vectors.height;
+                pixels.push_back(frame_sums[f][axis].Intercept(fit.a, fit.b) / fit.a * 0.5 *
+                                 std::max<std::uint32_t>(extent, 1));
+            }
+        }
+        calibration.intercept_spread[axis] = spread(raw);
+        spread_px[axis] = spread(pixels);
+    }
+    if (gain) {
+        calibration.intercept_spread_px = spread_px;
+    }
+    const FrameGenExtent vectors = frames.empty() ? FrameGenExtent{} : frames.front().vectors;
+    const FrameGenExtent color = frames.empty() ? FrameGenExtent{} : frames.front().color;
+    for (std::size_t m = 0; m < models.size(); ++m) {
+        FrameGenEngineCandidate candidate;
+        candidate.camera = models[m].camera;
+        candidate.delta_sign = models[m].sign;
+        candidate.fit = {fits[m][0].SolveLine(), fits[m][1].SolveLine()};
+        if (!candidate.fit[0].valid || !candidate.fit[1].valid || candidate.fit[0].a == 0.0 || candidate.fit[1].a == 0.0) {
+            candidate.fit[0].corr2 = candidate.fit[1].corr2 = 0.0;
+            calibration.leaderboard.push_back(candidate);
+            continue;
+        }
+        candidate.gain = {1.0 / candidate.fit[0].a, 1.0 / candidate.fit[1].a};
+        candidate.nearest = NearestFrameGenEngineGain(candidate.gain, vectors, color, candidate.gain_error);
+        // The median residual of the samples taken, in vector pixels.
+        std::vector<double> residuals;
+        std::size_t index = 0;
+        for (const auto& frame : frames) {
+            const std::array<double, 2> pixels{0.5 * frame.vectors.width, 0.5 * frame.vectors.height};
+            for (const FrameGenEngineCalibrationSample& sample : frame.samples) {
+                if (index++ % stride != 0 || !std::isfinite(sample.vector[0]) || !std::isfinite(sample.vector[1])) {
+                    continue;
+                }
+                std::array<double, 2> q{};
+                if (!FrameGenEnginePrediction(frame.newest, frame.previous, frame.delta_orientation, frame.delta_position,
+                                              candidate.delta_sign, candidate.camera, sample.uv, sample.depth, q)) {
+                    continue;
+                }
+                const double dx = (candidate.gain[0] * (sample.vector[0] - candidate.fit[0].c) - q[0]) * pixels[0];
+                const double dy = (candidate.gain[1] * (sample.vector[1] - candidate.fit[1].c) - q[1]) * pixels[1];
+                residuals.push_back(std::sqrt(dx * dx + dy * dy));
+            }
+        }
+        if (!residuals.empty()) {
+            const auto middle = residuals.begin() + static_cast<std::ptrdiff_t>(residuals.size() / 2);
+            std::nth_element(residuals.begin(), middle, residuals.end());
+            candidate.residual_px = *middle;
+        }
+        calibration.leaderboard.push_back(candidate);
+    }
+    std::stable_sort(calibration.leaderboard.begin(), calibration.leaderboard.end(),
+                     [](const FrameGenEngineCandidate& a, const FrameGenEngineCandidate& b) {
+                         if (std::abs(a.Corr2() - b.Corr2()) > 1e-6) return a.Corr2() > b.Corr2();
+                         return a.residual_px < b.residual_px;
+                     });
+    return calibration;
 }
 
 } // namespace depthxr

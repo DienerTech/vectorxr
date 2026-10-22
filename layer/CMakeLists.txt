@@ -126,7 +126,7 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
     endif()
     set(_framegen_passes LUMA DOWNSAMPLE SEARCH REFINE FILTER SYNTHESIZE_UNORM8 SYNTHESIZE_FLOAT16 DEPTH DEPTH_CHECK DEPTH_TRUST FLOW_PACK FLOW_UNPACK
         TRUST_UPDATE SHIFT_CLEAR SHIFT_SPLAT SHIFT_RESOLVE SHIFT_FILL FLOW_PACK_RAW TRUST_RESOLVE SHADING_RATE WORLD_REDUCE WORLD_SOLVE
-        TRUST_VOTE DEPTH_SCALE DEPTH_SCALE_VOTE DEPTH_STALE DEPTH_CROSS_SPLAT DEPTH_CROSS_RESOLVE)
+        TRUST_VOTE DEPTH_SCALE DEPTH_SCALE_VOTE DEPTH_STALE DEPTH_CROSS_SPLAT DEPTH_CROSS_RESOLVE ENGINE_CENSUS)
     set(_framegen_hlsl "${CMAKE_CURRENT_SOURCE_DIR}/shaders/framegen.hlsl")
     set(_framegen_out "${CMAKE_CURRENT_BINARY_DIR}/framegen_shaders")
     file(MAKE_DIRECTORY "${_framegen_out}")
@@ -215,6 +215,8 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         # Nor is the space-warp probe's frame handling, which needs the
         # OpenXR types the core library lacks.
         src/spacewarp_probe.cpp
+        # ...and the engine motion record and census made from it.
+        src/engine_motion.cpp
         "${_framegen_out}/framegen_shaders.cpp"
         "${_framegen_out}/framegen_flow_merge.h")
     target_include_directories(depthxr_framegen PUBLIC include)

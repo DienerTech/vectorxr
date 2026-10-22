@@ -9149,6 +9149,11 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     std::optional<SpaceWarpFrame> spacewarp_frame;
     if (SpaceWarpProbeActive()) {
         frame_end_info = ProbeSpaceWarpFrameLocked(frame_end_info, spacewarp_frame.emplace());
+        // Frame Generation's record of what the structures carried, with the
+        // game's own poses (Pivot changes a copy later): on every frame, one
+        // without structures too, so its frame before is always the last.
+        framegen_.NoteEngineMotion(EngineMotionFrameLocked(*frame_end_info, *spacewarp_frame),
+                                   d3d11_bridge_.Active() || vulkan_bridge_.Active());
     }
     // The frame's bridged images reach the runtime's images here, where a
     // runtime reads them: everything the game submitted before this call is
@@ -9158,6 +9163,11 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         DropPendingFrameGenQuad(false);
         framegen_.AbandonFrame(frame_end_info->displayTime);
         return handed;
+    }
+    // ...and the game's motion vector images, which it may never release:
+    // as they are now.
+    if (SpaceWarpProbeActive()) {
+        framegen_.CaptureEngineMotion();
     }
     // A bridged session lives on the bridge's device; depth that stays the
     // game's is left out of its frames.
@@ -11966,6 +11976,7 @@ void OpenXrLayer::ResetSessionState() {
     }
     spacewarp_counts_ = {};
     spacewarp_counts_summarized_ = {};
+    spacewarp_projection_frames_ = 0;
     spacewarp_first_frame_logged_ = false;
     spacewarp_last_summary_ = {};
     spacewarp_last_view_.clear();
@@ -15999,6 +16010,40 @@ const XrFrameEndInfo* OpenXrLayer::ProbeSpaceWarpFrameLocked(const XrFrameEndInf
     return stripped;
 }
 
+FrameGenEngineMotionFrame OpenXrLayer::EngineMotionFrameLocked(const XrFrameEndInfo& stripped,
+                                                               const SpaceWarpFrame& storage) {
+    bool has_projection = false;
+    for (std::uint32_t i = 0; i < stripped.layerCount && !has_projection; ++i) {
+        const XrCompositionLayerBaseHeader* base = stripped.layers ? stripped.layers[i] : nullptr;
+        const auto* projection = base && base->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION
+                                     ? reinterpret_cast<const XrCompositionLayerProjection*>(base)
+                                     : nullptr;
+        has_projection = projection && projection->viewCount > 0 && projection->views;
+    }
+    if (has_projection) {
+        ++spacewarp_projection_frames_;
+    }
+    const auto swapchains = [this](XrSwapchain swapchain) -> std::optional<EngineMotionSwapchain> {
+        const auto found = tracked_swapchains_.find(swapchain);
+        if (found == tracked_swapchains_.end()) {
+            return std::nullopt;
+        }
+        return EngineMotionSwapchain{found->second.width, found->second.height, found->second.array_size,
+                                     found->second.format};
+    };
+    if (std::optional<FrameGenEngineMotionFrame> record =
+            ToEngineMotionFrame(storage, stripped, spacewarp_projection_frames_, swapchains)) {
+        spacewarp_counts_.invalid += record->invalid;
+        return std::move(*record);
+    }
+    // A frame without a projection has no number of its own (never the
+    // last projection frame's, whose record it would stand in for).
+    FrameGenEngineMotionFrame empty;
+    empty.display_time = stripped.displayTime;
+    empty.projection_frame = has_projection ? spacewarp_projection_frames_ : 0;
+    return empty;
+}
+
 void OpenXrLayer::LogSpaceWarpProbeSummaryLocked(std::string_view reason) {
     const SpaceWarpProbeCounts& total = spacewarp_counts_;
     const SpaceWarpProbeCounts& last = spacewarp_counts_summarized_;
@@ -16008,7 +16053,8 @@ void OpenXrLayer::LogSpaceWarpProbeSummaryLocked(std::string_view reason) {
            << ", framesWithFrameSynthesis=" << total.frames_ext - last.frames_ext
            << ", viewsStripped=" << total.views_stripped - last.views_stripped
            << ", viewsLeftBehindUnknownStruct=" << total.views_left - last.views_left
-           << ", frameSkipFlags=" << total.frame_skips - last.frame_skips << "; session: frames=" << total.frames
+           << ", frameSkipFlags=" << total.frame_skips - last.frame_skips
+           << ", structuresWithProblems=" << total.invalid - last.invalid << "; session: frames=" << total.frames
            << ", framesWithFbSpaceWarp=" << total.frames_fb << ", framesWithFrameSynthesis=" << total.frames_ext
            << "; last=" << (spacewarp_last_view_.empty() ? std::string("none") : spacewarp_last_view_);
     logger_.Info(stream.str());

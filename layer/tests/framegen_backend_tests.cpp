@@ -1,6 +1,7 @@
 // Runs the Frame Generation GPU backends on synthetic frames with known motion
 // and compares the generated image against analytic ground truth.
 //   depthxr_framegen_tests d3d11 | d3d12 | vulkan | hw-d3d12
+// (and, CPU only, `engine-calibrate <capture>`: see RunEngineCalibrate).
 // Direct3D runs on WARP so the test needs no GPU; Vulkan needs a device and
 // exits 77 (skipped) when none is present. hw-d3d12 runs the Direct3D 12
 // scenarios on the first hardware adapter (variable-rate shading, the
@@ -38,11 +39,14 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iostream>
 #include <limits>
 #include <map>
 #include <optional>
+#include <sstream>
 #include <tuple>
 #include <string>
 #include <thread>
@@ -1470,6 +1474,7 @@ const char* const kProfileNames[] = {"luma",        "downsample",  "search",    
                                      "synthesize",  "synthesize16", "depth",      "depth check", "depth trust",
                                      "flow pack",   "flow unpack", "trust update", "shift clear", "shift splat",
                                      "shift resolve", "shift fill", "raw pack",   "trust resolve", "shading rate", "world reduce", "world solve", "trust vote", "depth scale", "scale vote", "depth stale", "cross splat", "cross resolve",
+                                     "engine census",
                                      "source copy", "output copy",
                                      "hardware wait", "compose", "flow merge"};
 static_assert(std::size(kProfileNames) == kFrameGenPassCount + 5, "a name per profiled category");
@@ -6790,6 +6795,650 @@ void AllocationFailureRecoveryTest(Harness& harness) {
     g_swapchains.erase(source);
 }
 
+// --- Engine motion vectors, stage 0 (Direct3D 12) ----------------------------
+
+// IEEE half floats, for motion vector images and their dumps.
+std::uint16_t HalfBits(float value) {
+    if (std::isnan(value)) return 0x7e00;
+    if (std::isinf(value)) return value > 0 ? 0x7c00 : 0xfc00;
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    const std::uint32_t sign = (bits >> 16) & 0x8000u;
+    const int exponent = static_cast<int>((bits >> 23) & 0xffu) - 127 + 15;
+    const std::uint32_t mantissa = bits & 0x7fffffu;
+    if (exponent <= 0) return static_cast<std::uint16_t>(sign); // the tests' values are never that small
+    if (exponent >= 31) return static_cast<std::uint16_t>(sign | 0x7c00u);
+    return static_cast<std::uint16_t>(sign | (static_cast<std::uint32_t>(exponent) << 10) | (mantissa >> 13));
+}
+
+float HalfValue(std::uint16_t half) {
+    const std::uint32_t sign = (half & 0x8000u) << 16;
+    const std::uint32_t exponent = (half >> 10) & 0x1fu;
+    std::uint32_t mantissa = half & 0x3ffu;
+    std::uint32_t bits = 0;
+    if (exponent == 0x1f) {
+        bits = sign | 0x7f800000u | (mantissa << 13);
+    } else if (exponent == 0) {
+        if (mantissa == 0) {
+            bits = sign;
+        } else {
+            int shift = 0;
+            while ((mantissa & 0x400u) == 0) {
+                mantissa <<= 1;
+                ++shift;
+            }
+            bits = sign | (static_cast<std::uint32_t>(127 - 15 + 1 - shift) << 23) | ((mantissa & 0x3ffu) << 13);
+        }
+    } else {
+        bits = sign | ((exponent + 127 - 15) << 23) | (mantissa << 13);
+    }
+    float value = 0.0f;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+// The census of one image on the CPU (FG_PASS_ENGINE_CENSUS): its counts
+// and sums, for comparing with the GPU's.
+struct CensusReference {
+    std::uint32_t zeros{0};
+    std::uint32_t non_finite{0};
+    std::uint32_t finite{0};
+    std::uint32_t large{0};
+    std::array<double, 4> sums{};
+    double max_abs{0.0};
+};
+CensusReference ReferenceCensus(const std::vector<std::array<float, 4>>& texels, std::uint32_t width,
+                                std::uint32_t height, const XrRect2Di& rect) {
+    CensusReference reference;
+    auto at = [&](int x, int y) { return texels[static_cast<std::size_t>(y) * width + x]; };
+    for (std::uint32_t row = 0; row < 64; ++row) {
+        for (std::uint32_t column = 0; column < 64; ++column) {
+            const int x = std::min(static_cast<int>(std::floor((column + 0.5f) * width / 64.0f)), static_cast<int>(width) - 1);
+            const int y = std::min(static_cast<int>(std::floor((row + 0.5f) * height / 64.0f)), static_cast<int>(height) - 1);
+            const std::array<float, 4> v = at(x, y);
+            reference.zeros += v[0] == 0.0f && v[1] == 0.0f ? 1u : 0u;
+            reference.non_finite += std::isfinite(v[0]) && std::isfinite(v[1]) ? 0u : 1u;
+        }
+    }
+    for (std::uint32_t s = 0; s < 32 * 32; ++s) {
+        const float cx = static_cast<float>(s % 32), cy = static_cast<float>(s / 32);
+        const float ox = std::min(std::floor((cx + 0.5f) * rect.extent.width / 32.0f), rect.extent.width - 1.0f);
+        const float oy = std::min(std::floor((cy + 0.5f) * rect.extent.height / 32.0f), rect.extent.height - 1.0f);
+        const std::array<float, 4> v = at(rect.offset.x + static_cast<int>(ox), rect.offset.y + static_cast<int>(oy));
+        if (!std::isfinite(v[0]) || !std::isfinite(v[1])) continue;
+        const double magnitude = std::sqrt(static_cast<double>(v[0]) * v[0] + static_cast<double>(v[1]) * v[1]);
+        ++reference.finite;
+        reference.large += magnitude > 4.0 ? 1u : 0u;
+        reference.max_abs = std::max(reference.max_abs, magnitude);
+        for (int c = 0; c < 4; ++c) reference.sums[c] += std::isfinite(v[c]) ? v[c] : 0.0f;
+    }
+    return reference;
+}
+
+// The census of a game's motion vector images on WARP: three RGBA16F
+// images, one of them changed per frame, read where the game leaves them in
+// RENDER_TARGET; the changed image found by its hash, the counts and means
+// exact, the hashes independent of the region, the sparse samples taken by
+// the depth capture's nearest rule (and its depth beside them), and a call
+// skipped, not waited for, while every motion slot is still on the GPU.
+void EngineCensusTest(Harness& harness, ID3D12Device* device, ID3D12CommandQueue* queue) {
+    std::string error;
+    auto gpu = CreateFrameGenGpu(harness.binding, error);
+    Check(gpu != nullptr && gpu->SupportsEngineMotion(), "engine census backend: " + error);
+    gpu->SetCopyAfterRelease(true); // the tests' images are their own
+    const XrSwapchain source = reinterpret_cast<XrSwapchain>(std::uintptr_t{0xe0});
+    const XrSwapchain output = reinterpret_cast<XrSwapchain>(std::uintptr_t{0xe1});
+    const XrSwapchain depth_image = reinterpret_cast<XrSwapchain>(std::uintptr_t{0xe2});
+    const XrSwapchain vectors = reinterpret_cast<XrSwapchain>(std::uintptr_t{0xe3});
+    const std::int64_t output_format = gpu->OutputFormats(FrameGenOutputKind::kSrgb8).front();
+    g_swapchains[source] = {harness.create(kSize, kSize)};
+    g_swapchains[output] = {harness.create(kSize, kSize)};
+    harness.upload(g_swapchains[source][0], MovingSquare(100.0f, 120.0f));
+    // The depth: 0.5 m over the left half, 100 m elsewhere.
+    FrameGenDepthEncoding encoding;
+    encoding.near_z = 0.1f;
+    encoding.far_z = 100.0f;
+    const float near_value = (1.0f / 0.5f - 1.0f / encoding.near_z) / (1.0f / encoding.far_z - 1.0f / encoding.near_z);
+    const XrRect2Di near_rect{{0, 0}, {static_cast<int>(kSize / 2), static_cast<int>(kSize)}};
+    g_swapchains[depth_image] = {harness.create_depth(near_value, near_rect, 1.0f)};
+
+    // Three motion vector images (the runtime's), RGBA16F, rendered into.
+    constexpr std::uint32_t kWidth = 128, kHeight = 96;
+    ComPtr<ID3D12CommandAllocator> allocator;
+    ComPtr<ID3D12GraphicsCommandList> list;
+    ComPtr<ID3D12Fence> fence;
+    Check(SUCCEEDED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator))) &&
+              SUCCEEDED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr,
+                                                  IID_PPV_ARGS(&list))) &&
+              SUCCEEDED(list->Close()) && SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence))),
+          "engine census: command list");
+    UINT64 fence_value = 0;
+    const HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    auto finish = [&] {
+        Check(SUCCEEDED(list->Close()), "engine census: close");
+        ID3D12CommandList* lists[] = {list.Get()};
+        queue->ExecuteCommandLists(1, lists);
+        Check(SUCCEEDED(queue->Signal(fence.Get(), ++fence_value)) &&
+                  SUCCEEDED(fence->SetEventOnCompletion(fence_value, event)) &&
+                  WaitForSingleObject(event, 30000) == WAIT_OBJECT_0,
+              "engine census: GPU timeout");
+    };
+    std::vector<ComPtr<ID3D12Resource>> images;
+    std::array<std::vector<std::array<float, 4>>, 3> contents;
+    for (int k = 0; k < 3; ++k) {
+        D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_DEFAULT};
+        D3D12_RESOURCE_DESC desc{};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        desc.Width = kWidth;
+        desc.Height = kHeight;
+        desc.DepthOrArraySize = 1;
+        desc.MipLevels = 1;
+        desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        desc.SampleDesc.Count = 1;
+        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+        ComPtr<ID3D12Resource> image;
+        Check(SUCCEEDED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                                        D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr, IID_PPV_ARGS(&image))),
+              "engine census: motion vector image");
+        images.push_back(image);
+    }
+    g_swapchains[vectors] = {images[0].Get(), images[1].Get(), images[2].Get()};
+    // Image `k`'s texels, version `variant`: image 0 a vector per texel (its
+    // own coordinates), image 1 exact zeros (one texel not, in later
+    // versions), image 2 not finite left of x = 32 and (3, -4) elsewhere.
+    auto write = [&](int k, int variant) {
+        std::vector<std::array<float, 4>>& texels = contents[k];
+        texels.assign(std::size_t{kWidth} * kHeight, {});
+        for (std::uint32_t y = 0; y < kHeight; ++y) {
+            for (std::uint32_t x = 0; x < kWidth; ++x) {
+                std::array<float, 4>& v = texels[std::size_t{y} * kWidth + x];
+                if (k == 0) {
+                    v = {x / 128.0f + 0.25f * variant, y / 64.0f, 0.5f, 1.0f};
+                } else if (k == 1) {
+                    v = {x == 1 && y == 0 ? static_cast<float>(variant) : 0.0f, 0.0f, 0.0f, 0.0f};
+                } else {
+                    const float nan = std::numeric_limits<float>::quiet_NaN();
+                    const float inf = std::numeric_limits<float>::infinity();
+                    v = x < 32 ? std::array<float, 4>{y % 2 ? nan : inf, 0.0f, 0.0f, 0.0f}
+                               : std::array<float, 4>{variant % 2 ? -3.0f : 3.0f, variant % 2 ? 4.0f : -4.0f, 0.0f, 0.0f};
+                }
+            }
+        }
+        D3D12_RESOURCE_DESC desc = images[k]->GetDesc();
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+        UINT64 bytes = 0;
+        device->GetCopyableFootprints(&desc, 0, 1, 0, &footprint, nullptr, nullptr, &bytes);
+        D3D12_HEAP_PROPERTIES upload_heap{D3D12_HEAP_TYPE_UPLOAD};
+        D3D12_RESOURCE_DESC buffer{};
+        buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        buffer.Width = bytes;
+        buffer.Height = buffer.DepthOrArraySize = buffer.MipLevels = 1;
+        buffer.SampleDesc.Count = 1;
+        buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        ComPtr<ID3D12Resource> upload;
+        Check(SUCCEEDED(device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &buffer,
+                                                        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&upload))),
+              "engine census: upload buffer");
+        void* mapped = nullptr;
+        Check(SUCCEEDED(upload->Map(0, nullptr, &mapped)), "engine census: upload map");
+        for (std::uint32_t y = 0; y < kHeight; ++y) {
+            auto* row = reinterpret_cast<std::uint16_t*>(static_cast<std::byte*>(mapped) + y * footprint.Footprint.RowPitch);
+            for (std::uint32_t x = 0; x < kWidth; ++x) {
+                for (int c = 0; c < 4; ++c) row[x * 4 + c] = HalfBits(texels[std::size_t{y} * kWidth + x][c]);
+            }
+        }
+        upload->Unmap(0, nullptr);
+        Check(SUCCEEDED(allocator->Reset()) && SUCCEEDED(list->Reset(allocator.Get(), nullptr)), "engine census: reset");
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition = {images[k].Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_RENDER_TARGET,
+                              D3D12_RESOURCE_STATE_COPY_DEST};
+        list->ResourceBarrier(1, &barrier);
+        D3D12_TEXTURE_COPY_LOCATION destination{images[k].Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+        D3D12_TEXTURE_COPY_LOCATION from{upload.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
+        from.PlacedFootprint = footprint;
+        list->CopyTextureRegion(&destination, 0, 0, 0, &from, nullptr);
+        std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+        list->ResourceBarrier(1, &barrier);
+        finish();
+        // The values as the GPU reads them back from halves.
+        for (auto& v : texels) {
+            for (float& c : v) c = HalfValue(HalfBits(c));
+        }
+    };
+    for (int k = 0; k < 3; ++k) write(k, 0);
+    for (const XrSwapchain chain : {source, output, depth_image, vectors}) {
+        Check(gpu->Track(chain, EnumerateImages, error), "engine census: track: " + error);
+    }
+
+    // The view is set up by a first frame, then its depth is captured.
+    FrameGenViewSubmission view;
+    view.source = {source, 0, 0, {{0, 0}, {static_cast<int>(kSize), static_cast<int>(kSize)}}, harness.format};
+    view.outputs = {{output, 0, 0, view.source.rect, output_format}};
+    view.request.extent = {kSize, kSize};
+    view.request.output = FrameGenOutputKind::kSrgb8;
+    view.request.depth = true;
+    for (auto* geometry : {&view.request.newest, &view.request.previous}) {
+        geometry->angle_left = geometry->angle_down = -std::atan(kTan);
+        geometry->angle_right = geometry->angle_up = std::atan(kTan);
+    }
+    FrameGenTuning tuning;
+    FrameGenExecuteResult result;
+    Check(gpu->Execute({view}, tuning, result, error), "engine census: execute: " + error);
+    Check(gpu->CaptureDepth(0, {depth_image, 0, 0, view.source.rect, 0}, encoding, view.request, error),
+          "engine census: depth capture: " + error);
+
+    const XrRect2Di rect{{16, 8}, {96, 80}};
+    FrameGenMotionJob job;
+    job.vectors = {vectors, 0, 0, rect, DXGI_FORMAT_R16G16B16A16_FLOAT};
+    job.census_all = true;
+    job.samples = true;
+    job.color_index = 2;
+    const std::vector<FrameGenViewRequest> color{view.request};
+    std::uint64_t taken = 0;
+    // One frame's census, read back.
+    auto census = [&](std::uint64_t frame, const XrRect2Di& region) {
+        job.frame = frame;
+        job.vectors.rect = region;
+        Check(gpu->CaptureMotion({job}, color, error), "engine census: capture: " + error);
+        Check(gpu->WaitIdle(), "engine census: wait");
+        const FrameGenEngineStatus status = gpu->EngineStatus();
+        Check(!status.census.empty() && status.census.back().sequence > taken && status.census.back().frame == frame,
+              "engine census: frame " + std::to_string(frame) + " read back");
+        taken = status.census.back().sequence;
+        return status.census.back();
+    };
+    std::array<FrameGenEngineCensus, 4> frames;
+    frames[0] = census(1, rect);
+    for (int k = 0; k < 3; ++k) {
+        const FrameGenEngineImageCensus& image = frames[0].image[k];
+        const CensusReference reference = ReferenceCensus(contents[k], kWidth, kHeight, rect);
+        Check(image.zeros == reference.zeros && image.non_finite == reference.non_finite &&
+                  image.finite == reference.finite && image.large == reference.large,
+              "engine census: image " + std::to_string(k) + "'s counts (zeros " + std::to_string(image.zeros) + " of " +
+                  std::to_string(reference.zeros) + ", not finite " + std::to_string(image.non_finite) + " of " +
+                  std::to_string(reference.non_finite) + ", finite " + std::to_string(image.finite) + " of " +
+                  std::to_string(reference.finite) + ")");
+        for (int c = 0; c < 4; ++c) {
+            Check(image.sums[c] == static_cast<float>(reference.sums[c]),
+                  "engine census: image " + std::to_string(k) + "'s means are exact (channel " + std::to_string(c) +
+                      ": " + std::to_string(image.sums[c]) + " vs " + std::to_string(reference.sums[c]) + ")");
+        }
+        Check(std::abs(image.max_abs - reference.max_abs) < 1e-5 && image.tag == 1 && image.image == static_cast<std::uint32_t>(k) &&
+                  image.rect_width == 96 && image.rect_height == 80,
+              "engine census: image " + std::to_string(k) + "'s longest vector and tag");
+    }
+    Check(frames[0].image[1].zeros == 64 * 64 && frames[0].image[2].non_finite == 64 * 16,
+          "engine census: the zero and non-finite counts are the hash grid's");
+    // A frame each rewriting one image: only its hash changes.
+    for (std::uint64_t f = 1; f < 4; ++f) {
+        const int k = static_cast<int>(f - 1);
+        write(k, 1);
+        frames[f] = census(f + 1, rect);
+        for (int i = 0; i < 3; ++i) {
+            Check((frames[f].image[i].Hash() != frames[f - 1].image[i].Hash()) == (i == k),
+                  "engine census: frame " + std::to_string(f + 1) + " changed image " + std::to_string(k) + " alone");
+        }
+    }
+    // Another region, nothing rewritten: the same hashes, other sums.
+    const FrameGenEngineCensus whole = census(5, {{0, 0}, {static_cast<int>(kWidth), static_cast<int>(kHeight)}});
+    for (int i = 0; i < 3; ++i) {
+        Check(whole.image[i].Hash() == frames[3].image[i].Hash(), "engine census: hashes do not depend on the region");
+    }
+    Check(whole.image[0].sums[0] != frames[3].image[0].sums[0], "engine census: statistics do");
+
+    // The sparse samples: each image's texel by kDepth's nearest rule, and
+    // the linear depth captured there.
+    const FrameGenEngineCensus& sampled = frames[3];
+    Check(sampled.samples.size() == 16 * 16 * 4, "engine census: 16x16 samples");
+    const FrameGenExtent half = FrameGenPyramid({kSize, kSize})[1];
+    for (std::uint32_t s = 0; s < 256; ++s) {
+        const std::array<float, 4>& where = sampled.samples[s * 4 + 3];
+        const std::uint32_t qx = static_cast<std::uint32_t>(((s % 16) + 0.5f) * half.width / 16.0f);
+        const std::uint32_t qy = static_cast<std::uint32_t>(((s / 16) + 0.5f) * half.height / 16.0f);
+        Check(where[2] == static_cast<float>(qx) && where[3] == static_cast<float>(qy) && where[1] == 2.0f,
+              "engine census: sample " + std::to_string(s) + " on the half-resolution grid, with the color index");
+        const float u = (qx + 0.5f) / half.width, v = (qy + 0.5f) / half.height;
+        const int x = rect.offset.x + static_cast<int>(std::min(u * rect.extent.width, rect.extent.width - 1.0f));
+        const int y = rect.offset.y + static_cast<int>(std::min(v * rect.extent.height, rect.extent.height - 1.0f));
+        for (int k = 0; k < 3; ++k) {
+            const std::array<float, 4>& expected = contents[k][static_cast<std::size_t>(y) * kWidth + x];
+            const std::array<float, 4>& raw = sampled.samples[s * 4 + k];
+            for (int c = 0; c < 4; ++c) {
+                Check((std::isnan(expected[c]) && std::isnan(raw[c])) || raw[c] == expected[c],
+                      "engine census: sample " + std::to_string(s) + " image " + std::to_string(k) +
+                          " is the texel by the depth's nearest rule");
+            }
+        }
+        // The depth texel kDepth read for this half-resolution texel.
+        const int depth_x = std::min(static_cast<int>(u * kSize), static_cast<int>(kSize) - 1);
+        const float expected_depth = depth_x < near_rect.extent.width ? 0.5f : 100.0f;
+        Check(std::abs(where[0] - expected_depth) < 1e-3f * expected_depth,
+              "engine census: sample " + std::to_string(s) + "'s depth (" + std::to_string(where[0]) + ")");
+    }
+
+    // A research dump: the region of each image, as stored, written by a
+    // thread of its own. The request goes with the next census at a frame's
+    // end only, taken or not; a region outside the images is not copied.
+    const std::filesystem::path dumps = std::filesystem::temp_directory_path() /
+                                        ("vectorxr-engine-dump-" + std::to_string(GetCurrentProcessId()));
+    std::error_code ignored;
+    std::filesystem::remove_all(dumps, ignored);
+    std::filesystem::create_directories(dumps / "first", ignored);
+    std::filesystem::create_directories(dumps / "second", ignored);
+    Check(gpu->DumpMotion((dumps / "first").string(), true), "engine census: dump requested");
+    census(6, rect);
+    const std::size_t dump_bytes = std::size_t{96} * 80 * 8;
+    std::vector<std::uint16_t> dumped(dump_bytes / 2);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    bool written = false;
+    while (!written && std::chrono::steady_clock::now() < deadline) {
+        std::error_code size_error;
+        written = std::filesystem::file_size(dumps / "first" / "view0-mv-img2.rgba16f", size_error) == dump_bytes &&
+                  ReadBinary((dumps / "first" / "view0-mv-img2.rgba16f").string(), dumped.data(), dump_bytes);
+        if (!written) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    Check(written, "engine census: the dump is written");
+    bool same = true;
+    for (int y = 0; y < 80; ++y) {
+        for (int x = 0; x < 96; ++x) {
+            for (int c = 0; c < 4; ++c) {
+                const float expected = contents[2][std::size_t(y + 8) * kWidth + (x + 16)][c];
+                const std::uint16_t bits = dumped[(std::size_t(y) * 96 + x) * 4 + c];
+                same = same && (bits == HalfBits(expected) || (std::isnan(expected) && std::isnan(HalfValue(bits))));
+            }
+        }
+    }
+    std::ostringstream meta;
+    meta << std::ifstream(dumps / "first" / "view0-mv-img2.txt").rdbuf();
+    Check(same && meta.str().rfind("frame 6\n", 0) == 0, "engine census: the dump is the region, of its frame");
+    Check(gpu->DumpMotion((dumps / "second").string(), true), "engine census: dump requested");
+    census(7, {{100, 8}, {96, 80}});
+    census(8, rect);
+    Check(gpu->WaitIdle(), "engine census: wait");
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    Check(std::filesystem::is_empty(dumps / "second", ignored),
+          "engine census: no dump of a region outside the images, nor of a later frame");
+    std::filesystem::remove_all(dumps, ignored);
+
+    // Every motion slot still on the GPU: the next call is skipped, never
+    // waited for, and nothing is latched off.
+    ComPtr<ID3D12Fence> gate;
+    Check(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate))), "engine census: gate fence");
+    queue->Wait(gate.Get(), 1);
+    const std::uint64_t busy_before = gpu->EngineStatus().busy;
+    for (std::uint64_t f = 10; f < 14; ++f) {
+        job.frame = f;
+        Check(gpu->CaptureMotion({job}, color, error), "engine census: a free slot: " + error);
+    }
+    job.frame = 14;
+    const auto asked = std::chrono::steady_clock::now();
+    const bool skipped = !gpu->CaptureMotion({job}, color, error);
+    const double waited = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - asked).count();
+    Check(skipped && error.empty() && gpu->EngineStatus().busy == busy_before + 1 && waited < 50.0,
+          "engine census: a busy slot is skipped at once (" + std::to_string(waited) + " ms)");
+    Check(SUCCEEDED(gate->Signal(1)) && gpu->WaitIdle(), "engine census: the queue goes on");
+    job.frame = 15;
+    Check(gpu->CaptureMotion({job}, color, error) && gpu->WaitIdle(), "engine census: slots free again: " + error);
+    Check(gpu->EngineStatus().census.back().frame == 15, "engine census: read back after the busy stretch");
+    CloseHandle(event);
+    gpu->Reset();
+    for (const XrSwapchain chain : {source, output, depth_image, vectors}) g_swapchains.erase(chain);
+    std::cout << "D3D12 engine census: hashes, counts, means, samples and busy slots checked\n";
+}
+
+// --- engine-calibrate: a research capture's motion vectors against its poses --
+//   depthxr_framegen_tests engine-calibrate <capture directory>
+// CPU only (no GPU, no lock): for each view, the frames whose motion vector
+// images were dumped (Capture-FrameGen.ps1 -Motion) are sampled on the half-
+// resolution grid by the depth's nearest rule, decoded as motion.txt says, and
+// fitted against what the game's own poses (and appSpaceDeltaPose) predict:
+// the cockpit fit (head included), the lag test, the intercept's spread and a
+// leaderboard of camera models with their gains and nearest canonical gain.
+
+// A line of a key-value text file: the words after `key` on the first line
+// starting with it (empty when none).
+std::vector<std::string> TextLine(const std::string& path, const std::string& key) {
+    std::ifstream file(path);
+    std::string line;
+    while (std::getline(file, line)) {
+        if (line.rfind(key + " ", 0) == 0 || line == key) {
+            std::istringstream words(line.substr(key.size()));
+            std::vector<std::string> result;
+            for (std::string word; words >> word;) result.push_back(word);
+            return result;
+        }
+    }
+    return {};
+}
+
+bool GeometryFrom(const std::vector<std::string>& words, FrameGenViewGeometry& geometry) {
+    if (words.size() < 11) return false;
+    float values[11];
+    for (int i = 0; i < 11; ++i) values[i] = std::stof(words[static_cast<std::size_t>(i)]);
+    geometry.orientation = {values[0], values[1], values[2], values[3]};
+    geometry.position = {values[4], values[5], values[6]};
+    geometry.angle_left = values[7];
+    geometry.angle_right = values[8];
+    geometry.angle_up = values[9];
+    geometry.angle_down = values[10];
+    return true;
+}
+
+struct MotionDumpImage {
+    std::uint32_t width{0}, height{0};
+    int format{0};
+    std::vector<std::uint8_t> bytes;
+    std::array<float, 4> Texel(std::uint32_t x, std::uint32_t y) const {
+        std::array<float, 4> v{};
+        const bool half = format == DXGI_FORMAT_R16G16B16A16_FLOAT || format == DXGI_FORMAT_R16G16_FLOAT;
+        const int channels = format == DXGI_FORMAT_R16G16_FLOAT || format == DXGI_FORMAT_R32G32_FLOAT ? 2 : 4;
+        const std::size_t size = half ? 2 : 4;
+        const std::size_t offset = (std::size_t{y} * width + x) * channels * size;
+        for (int c = 0; c < channels; ++c) {
+            if (half) {
+                std::uint16_t bits = 0;
+                std::memcpy(&bits, &bytes[offset + c * size], 2);
+                v[c] = HalfValue(bits);
+            } else {
+                std::memcpy(&v[c], &bytes[offset + c * size], 4);
+            }
+        }
+        return v;
+    }
+};
+
+// A view's image `image` of the frame motion.txt describes (`frame`): never
+// another frame's vectors left in its directory.
+bool LoadMotionDump(const std::string& directory, std::size_t view, std::uint32_t image, std::uint64_t frame,
+                    MotionDumpImage& dump) {
+    const std::string stem = directory + "/view" + std::to_string(view) + "-mv-img" + std::to_string(image);
+    const std::vector<std::string> dumped = TextLine(stem + ".txt", "frame");
+    if (dumped.empty() || std::stoull(dumped[0]) != frame) return false;
+    const std::vector<std::string> rect = TextLine(stem + ".txt", "rect");
+    const std::vector<std::string> format = TextLine(stem + ".txt", "format");
+    const std::vector<std::string> file = TextLine(stem + ".txt", "file");
+    if (rect.size() < 4 || format.empty() || file.empty()) return false;
+    dump.width = static_cast<std::uint32_t>(std::stoul(rect[2]));
+    dump.height = static_cast<std::uint32_t>(std::stoul(rect[3]));
+    dump.format = std::stoi(format[0]);
+    std::size_t texel = 16; // RGBA32F
+    if (dump.format == DXGI_FORMAT_R16G16B16A16_FLOAT || dump.format == DXGI_FORMAT_R32G32_FLOAT) {
+        texel = 8;
+    } else if (dump.format == DXGI_FORMAT_R16G16_FLOAT) {
+        texel = 4;
+    }
+    dump.bytes.resize(std::size_t{dump.width} * dump.height * texel);
+    return ReadBinary(directory + "/" + file[0], dump.bytes.data(), dump.bytes.size());
+}
+
+int RunEngineCalibrate(const std::string& capture) {
+    std::vector<std::string> directories;
+    for (int index = 0;; ++index) {
+        const std::string directory = capture + "/frame-" + std::to_string(index);
+        if (!std::filesystem::exists(directory + "/frame.txt")) break;
+        directories.push_back(directory);
+    }
+    if (directories.empty()) {
+        std::cerr << "engine-calibrate: no frame-N directories with frame.txt in " << capture << '\n';
+        return 1;
+    }
+    const std::vector<std::string> views_line = TextLine(directories.front() + "/motion.txt", "views");
+    const std::size_t views = views_line.empty() ? 0 : std::stoul(views_line[0]);
+    if (views == 0) {
+        std::cerr << "engine-calibrate: " << directories.front() << "/motion.txt names no views (a capture without -Motion?)\n";
+        return 1;
+    }
+    for (std::size_t v = 0; v < views; ++v) {
+        const std::string prefix = "view " + std::to_string(v);
+        std::vector<FrameGenEngineCalibrationFrame> frames;
+        std::array<MotionDumpImage, kFrameGenEngineImages> before{};
+        std::array<bool, kFrameGenEngineImages> had{};
+        std::optional<FrameGenViewGeometry> last_previous;
+        std::uint64_t last_frame = 0;
+        std::size_t samples = 0;
+        for (const std::string& directory : directories) {
+            const std::string motion = directory + "/motion.txt";
+            const std::vector<std::string> frame_line = TextLine(motion, "frame");
+            const std::uint64_t frame_number = frame_line.empty() ? 0 : std::stoull(frame_line[0]);
+            // This frame's images, and the one that changed since the last frame's dump.
+            std::array<MotionDumpImage, kFrameGenEngineImages> dumps{};
+            std::array<bool, kFrameGenEngineImages> has{};
+            std::optional<std::uint32_t> written;
+            int changed = 0;
+            for (std::uint32_t k = 0; k < kFrameGenEngineImages; ++k) {
+                has[k] = LoadMotionDump(directory, v, k, frame_number, dumps[k]);
+                if (has[k] && had[k] && dumps[k].bytes != before[k].bytes) {
+                    written = k;
+                    ++changed;
+                }
+            }
+            if (changed != 1) {
+                // None or several changed (or the frame before had no dump):
+                // the image the census thought it was in.
+                const std::vector<std::string> chosen = TextLine(motion, prefix + " chosen");
+                written = !chosen.empty() && has[std::stoul(chosen[0]) % kFrameGenEngineImages]
+                              ? std::optional<std::uint32_t>(std::stoul(chosen[0]) % kFrameGenEngineImages)
+                              : std::nullopt;
+            }
+            FrameGenEngineCalibrationFrame calibration;
+            const bool posed = GeometryFrom(TextLine(motion, prefix + " game"), calibration.newest) &&
+                               GeometryFrom(TextLine(motion, prefix + " game_previous"), calibration.previous);
+            if (last_previous && frame_number == last_frame + 1) calibration.before_previous = last_previous;
+            last_previous = posed ? std::optional<FrameGenViewGeometry>(calibration.previous) : std::nullopt;
+            last_frame = frame_number;
+            before = dumps;
+            had = has;
+            // The frame's view and depth (frame.txt's extents, the half-resolution linear depth).
+            std::uint32_t width = 0, height = 0, half_width = 0, half_height = 0;
+            {
+                std::ifstream file(directory + "/frame.txt");
+                std::string line;
+                const std::string key = "view " + std::to_string(v) + " extent ";
+                while (std::getline(file, line)) {
+                    if (line.rfind(key, 0) == 0) {
+                        std::sscanf(line.c_str() + key.size(), "%u %u half %u %u", &width, &height, &half_width, &half_height);
+                    }
+                }
+            }
+            std::vector<float> depth(std::size_t{half_width} * half_height);
+            const bool depth_read = !depth.empty() && ReadBinary(directory + "/view" + std::to_string(v) + "-depth.f32",
+                                                                   depth.data(), depth.size() * 4);
+            if (!posed || !written || !depth_read) {
+                std::cout << directory << " view " << v << ": skipped (" << (!posed ? "no pose pair" : !written ? "no written image" : "no depth")
+                          << ")\n";
+                continue;
+            }
+            const std::vector<std::string> delta = TextLine(motion, prefix + " delta");
+            if (delta.size() >= 7) {
+                calibration.delta_orientation = {std::stof(delta[0]), std::stof(delta[1]), std::stof(delta[2]), std::stof(delta[3])};
+                calibration.delta_position = {std::stof(delta[4]), std::stof(delta[5]), std::stof(delta[6])};
+            }
+            FrameGenMotionEncoding encoding;
+            const std::vector<std::string> decode = TextLine(motion, prefix + " decode");
+            if (decode.size() >= 8) {
+                encoding.ext = decode[0] == "1";
+                encoding.scale = {std::stof(decode[1]), std::stof(decode[2]), std::stof(decode[3])};
+                encoding.offset = {std::stof(decode[4]), std::stof(decode[5]), std::stof(decode[6])};
+                encoding.two_d = decode[7] == "1";
+            }
+            const MotionDumpImage& image = dumps[*written];
+            calibration.vectors = {image.width, image.height};
+            calibration.color = {width, height};
+            for (std::uint32_t y = 0; y < half_height; y += 4) {
+                for (std::uint32_t x = 0; x < half_width; x += 4) {
+                    const float u = (x + 0.5f) / half_width, w = (y + 0.5f) / half_height;
+                    const std::uint32_t px = static_cast<std::uint32_t>(std::min(u * image.width, image.width - 1.0f));
+                    const std::uint32_t py = static_cast<std::uint32_t>(std::min(w * image.height, image.height - 1.0f));
+                    FrameGenEngineCalibrationSample sample;
+                    sample.uv = {u, w};
+                    sample.depth = depth[std::size_t{y} * half_width + x];
+                    sample.vector = DecodeFrameGenMotion(encoding, image.Texel(px, py));
+                    calibration.samples.push_back(sample);
+                }
+            }
+            samples += calibration.samples.size();
+            frames.push_back(std::move(calibration));
+        }
+        if (frames.empty()) {
+            std::cout << "engine-calibrate: view " << v << ": no frame to fit\n";
+            continue;
+        }
+        const FrameGenEngineCalibration result = CalibrateFrameGenEngine(frames);
+        auto fixed = [](double value, int digits) {
+            char text[64];
+            std::snprintf(text, sizeof(text), "%.*f", digits, value);
+            return std::string(text);
+        };
+        std::cout << "engine-calibrate " << capture << ": view " << v << ", " << frames.size() << " frames, " << samples
+                  << " samples (vectors " << frames.front().vectors.width << "x" << frames.front().vectors.height << ")\n";
+        const auto& x = result.cockpit[0];
+        const auto& y = result.cockpit[1];
+        if (x.valid && y.valid) {
+            double error = 0.0;
+            const FrameGenEngineGain nearest =
+                NearestFrameGenEngineGain({1.0 / x.a, 1.0 / y.a}, frames.front().vectors, frames.front().color, error);
+            std::cout << "  cockpit (nearer than 4 m, head included): gain (" << fixed(1.0 / x.a, 6) << ", " << fixed(1.0 / y.a, 6)
+                      << ") ~ " << nearest.name << " (" << fixed(100.0 * error, 2) << "%), b/a (" << fixed(x.b / x.a, 3) << ", "
+                      << fixed(y.b / y.a, 3) << "), corr2 (" << fixed(x.corr2, 3) << ", " << fixed(y.corr2, 3) << "), "
+                      << fixed(x.samples, 0) << " samples\n";
+            const auto& lag_x = result.cockpit_lag[0];
+            const auto& lag_y = result.cockpit_lag[1];
+            if (lag_x.valid && lag_y.valid) {
+                const double now = 0.5 * (x.corr2 + y.corr2), before_pair = 0.5 * (lag_x.corr2 + lag_y.corr2);
+                std::cout << "  lag: corr2 " << fixed(now, 3) << " with the newest pair, " << fixed(before_pair, 3)
+                          << " with the pair before: lag " << (now >= before_pair ? 0 : 1) << "\n";
+            }
+        } else {
+            std::cout << "  cockpit: no fit (" << fixed(x.samples, 0) << " samples; too little head movement?)\n";
+        }
+        if (result.intercept_spread_px) {
+            std::cout << "  intercept spread across frames (jitter): (" << fixed((*result.intercept_spread_px)[0], 3)
+                      << ", " << fixed((*result.intercept_spread_px)[1], 3) << ") vector px\n";
+        }
+        std::cout << "  mean cockpit vector's spread across frames (the jitter with the head still): ("
+                  << fixed(result.intercept_spread[0], 6) << ", " << fixed(result.intercept_spread[1], 6)
+                  << ") in the vectors' units\n  leaderboard:\n";
+        int rank = 0;
+        for (const FrameGenEngineCandidate& candidate : result.leaderboard) {
+            std::cout << "    " << ++rank << ". " << ToString(candidate.camera)
+                      << (candidate.camera == FrameGenEngineCamera::kRotationOnly
+                              ? std::string()
+                              : candidate.delta_sign > 0 ? ", delta as given" : ", delta conjugated");
+            if (!candidate.fit[0].valid || !candidate.fit[1].valid || candidate.gain[0] == 0.0) {
+                std::cout << ": no fit (the model predicts no movement here), " << fixed(candidate.fit[0].samples, 0)
+                          << " samples\n";
+                continue;
+            }
+            std::cout << ": gain (" << fixed(candidate.gain[0], 6) << ", " << fixed(candidate.gain[1], 6) << ") ~ "
+                      << candidate.nearest.name << " (" << fixed(100.0 * candidate.gain_error, 2) << "%), corr2 ("
+                      << fixed(candidate.fit[0].corr2, 3) << ", " << fixed(candidate.fit[1].corr2, 3) << "), residual "
+                      << fixed(candidate.residual_px, 2) << " px, " << fixed(candidate.fit[0].samples, 0) << " samples\n";
+        }
+    }
+    return 0;
+}
+
 int D3D12Test() {
     HardwareWatchOwnershipTest();
     ComPtr<IDXGIFactory4> factory;
@@ -7150,6 +7799,7 @@ int D3D12Test() {
         SubstitutionTest(device.Get(), queue.Get());
         SubstitutionShownTest(device.Get(), queue.Get());
         AllocationFailureRecoveryTest(harness);
+        EngineCensusTest(harness, device.Get(), queue.Get());
     }
     int result = g_replay      ? RunReplay(harness)
                  : g_contention ? RunContention(harness)
@@ -7416,6 +8066,11 @@ int VulkanTest() {
 
 int main(int argc, char** argv) {
     std::string api = argc > 1 ? argv[1] : "d3d11";
+    if (api == "engine-calibrate") {
+        // depthxr_framegen_tests engine-calibrate <capture directory>: CPU only.
+        Check(argc > 2, "engine-calibrate needs a capture directory");
+        return RunEngineCalibrate(argv[2]);
+    }
     if (api.rfind("bench-", 0) == 0) {
         g_bench = true;
         api = api.substr(6);

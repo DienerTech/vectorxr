@@ -18,6 +18,7 @@
 
 #include <openxr/openxr.h>
 
+#include "depthxr/engine_motion.h"
 #include "depthxr/framegen_gpu.h"
 #include "depthxr/framegen_trace.h"
 #include "depthxr/settings.h"
@@ -387,8 +388,23 @@ class FrameGenPresenter {
     bool ForgetSpace(XrSpace space);
     void NoteRelease(XrSwapchain swapchain, std::uint32_t image_index);
     // Call before forwarding a release: captures the image into history while
-    // the application still owns it.
+    // the application still owns it. With VECTORXR_FRAMEGEN_ENGINE_MV=census,
+    // a view's depth release also takes the early census of its motion
+    // vector images (named by the last frame's record).
     void CaptureOnRelease(XrSwapchain swapchain, std::uint32_t image_index);
+    // Engine motion vectors (XR_FB_space_warp, XR_EXT_frame_synthesis): in
+    // xrEndFrame, under the layer's lock, every frame while the layer takes
+    // the structures over: the frame's record (no views when the frame
+    // carried none), kept with the frame before's. A `bridged` session's
+    // records are dropped: the runtime's images it would read get the
+    // game's motion vectors only by the bridge's copy at a release, and its
+    // releases are captured inside xrEndFrame, after the frame's record.
+    void NoteEngineMotion(FrameGenEngineMotionFrame frame, bool bridged = false);
+    // ...then, once the frame's bridged releases were handed over: with
+    // VECTORXR_FRAMEGEN_ENGINE_MV=census and while frames are generated, its
+    // motion vector images are read where the game left them (it may never
+    // release them): their census (FrameGenGpu::CaptureMotion).
+    void CaptureEngineMotion();
 
     XrResult WaitFrame(XrSession session, const XrFrameWaitInfo* info, XrFrameState* state, const FrameGenRuntimeCalls& calls);
     XrResult BeginFrame(XrSession session, const XrFrameBeginInfo* info, const FrameGenRuntimeCalls& calls);
@@ -432,6 +448,8 @@ class FrameGenPresenter {
   private:
     // Holds a presenter thread "in the runtime" for the layer's teardown tests.
     friend class TurboFrameTestPeer;
+    // Reads the engine motion records the layer hands over (its probe tests).
+    friend class SpaceWarpProbeTestPeer;
     struct SwapchainRecord {
         std::int64_t format{0};
         std::uint32_t sample_count{1};
@@ -441,6 +459,9 @@ class FrameGenPresenter {
         std::optional<std::uint32_t> released;
         std::uint64_t releases{0}; // images released so far
         std::uint64_t captured_releases{0}; // `releases` when its latest color capture was submitted
+        // Named as a frame's motion vectors (NoteEngineMotion): never a
+        // color image, whatever its format.
+        bool motion{false};
     };
 
     // What each output swapchain holds, readable from release threads.
@@ -1682,15 +1703,74 @@ class FrameGenPresenter {
     double pause_longest_ms_{0.0};
     std::uint32_t logged_pauses_{0};
     // Research capture: a file %LOCALAPPDATA%\VectorXR\framegen-capture.request
-    // (checked once a second) writes the next kCaptureFrames real frames'
-    // inputs under %LOCALAPPDATA%\VectorXR\captures (FrameGenGpu::DumpNextExecute).
-    // Under gpu_mutex_.
+    // (checked once a second) writes the next real frames' inputs under
+    // %LOCALAPPDATA%\VectorXR\captures (FrameGenGpu::DumpNextExecute):
+    // kCaptureFrames of them, or as many as it says ("capture frames=7"),
+    // with the game's motion vector images too for "motion=all" (every image
+    // of the first frame dumped, then the one each frame's vectors are
+    // thought to be in; at most once per frame directory). Under gpu_mutex_.
     static constexpr std::uint32_t kCaptureFrames = 5;
+    // Starts a capture when the request is there; whether one is under way.
+    bool CaptureUnderWay();
+    // The next frame's directory (made here), and the frame counted.
     std::string NextCaptureDirectory();
     std::chrono::steady_clock::time_point last_capture_check_{};
+    std::uint32_t capture_frames_{kCaptureFrames};
     std::uint32_t capture_frames_left_{0};
     std::uint32_t capture_index_{0};
     std::string capture_root_;
+    bool capture_motion_{false};
+    bool capture_motion_all_{false};                    // no copy of every image taken yet
+    std::optional<std::uint32_t> capture_motion_armed_; // the directory (capture_index_) last armed
+    // What a captured frame's presenter.txt and motion.txt say (Generate):
+    // the presenter's view of the frame, and its engine motion record.
+    struct CaptureNotes {
+        std::uint64_t sequence{0};
+        XrTime display_time{0};
+        XrTime previous_time{0};
+        XrDuration previous_interval{0};
+        XrDuration period{0};
+        XrSpace space{XR_NULL_HANDLE};
+        std::uint32_t lead{0};
+        FrameGenSynthesisMode mode{FrameGenSynthesisMode::kInterpolate};
+        bool analyze{false};
+        bool continuous{false};
+        std::vector<FrameGenViewGeometry> declared; // the views as Frame Generation takes them
+    };
+    void WriteCaptureNotes(const std::string& directory, const CaptureNotes& notes);
+
+    // Engine motion vectors (VECTORXR_FRAMEGEN_ENGINE_MV, read at Start;
+    // NoteEngineMotion, CaptureEngineMotion). Under mutex_: the frame's
+    // record and the frame before's, each with what its views' swapchains
+    // had released then and whether its census was taken at its end.
+    struct EngineFrame {
+        bool valid{false};
+        FrameGenEngineMotionFrame frame;
+        std::vector<std::uint32_t> color_index; // per view
+        std::vector<std::uint32_t> depth_index;
+        std::vector<std::uint64_t> color_releases;
+        std::vector<std::uint64_t> vector_releases;
+        std::vector<std::optional<std::uint32_t>> released; // the vectors' swapchain released one since the frame before
+        std::vector<std::uint8_t> captured;
+    };
+    // The census jobs for `frame`'s views (stage 0: every image, sampled at
+    // its end), with each view's color request.
+    void EngineJobsLocked(const EngineFrame& frame, std::vector<FrameGenMotionJob>& jobs,
+                          std::vector<FrameGenViewRequest>& color) const;
+    // A pause, an abandoned frame or a swapchain gone: the records are not a
+    // frame's and the one before's any more.
+    void ForgetEngineFramesLocked();
+    FrameGenEngineMode engine_requested_{FrameGenEngineMode::kOff};
+    EngineFrame engine_frame_;
+    EngineFrame engine_previous_;
+    // The census worker, while a session's backend reads motion vectors.
+    std::shared_ptr<FrameGenEngineCensusWorker> engine_worker_;
+    std::uint64_t engine_noted_{0};   // records handed over this session
+    std::uint64_t engine_invalid_{0}; // structures with problems among them
+    std::uint64_t engine_census_after_{0}; // the newest census taken from the backend (under gpu_mutex_)
+    std::size_t engine_notes_logged_{0};
+    bool logged_engine_failure_{false};
+    bool logged_engine_bridged_{false};
     // Timed: teardown never waits on them for long (LockForTeardown).
     std::timed_mutex submit_mutex_;      // presenter-thread submissions vs output swapchain calls
     std::timed_mutex gpu_mutex_;         // the GPU backend (Track, Capture, Execute, WaitIdle, Forget, Reset)
