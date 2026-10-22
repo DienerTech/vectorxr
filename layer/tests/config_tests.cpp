@@ -1810,6 +1810,9 @@ struct TrackerFeed {
     std::uint64_t handle{0x30};
     std::array<std::int32_t, 4> rect{0, 0, 500, 600};
     std::array<std::uint64_t, depthxr::kFrameGenEngineImages> hashes{1, 2, 3};
+    // Production (stage 2): the census reads every image while the tracker
+    // is not locked and every 30th frame, else the image it chooses.
+    bool production{false};
     void Run(depthxr::FrameGenEngineImageTracker& tracker, int frames, bool informative,
              const std::function<int(std::uint64_t, std::uint32_t, std::uint32_t)>& written,
              const std::function<std::pair<std::uint32_t, std::uint32_t>(std::uint64_t)>& indices) {
@@ -1831,6 +1834,9 @@ struct TrackerFeed {
             census.hashes = hashes;
             census.color_index = color;
             census.depth_index = depth;
+            if (production && tracker.Locked() && frame % 30 != 0) {
+                census.censused = 1u << tracker.Image(frame, color, depth, std::nullopt).value_or(0);
+            }
             tracker.Add(census);
         }
     }
@@ -1959,6 +1965,70 @@ void TestFrameGenEngineImageTracker() {
         FrameGenEngineImageTracker tracker;
         Expect(tracker.Image(1, 0, 0, 2u) == 2u, "Engine image tracker: a released image is the frame's");
     }
+    // Production (stage 2): once locked, the census reads the chosen image
+    // alone except every 30th frame. Those frames keep the hashes; frames
+    // reading every image are scored, each image against its own last census.
+    {
+        FrameGenEngineImageTracker tracker;
+        TrackerFeed feed;
+        feed.production = true;
+        feed.Run(tracker, 80, true, [](auto, auto, auto) { return 1; }, cycling);
+        Expect(tracker.Locked(), "Engine image tracker (production): a constant image locks while every image is read");
+        const std::uint32_t window = tracker.WindowFrames();
+        feed.Run(tracker, 600, true, [](auto, auto, auto) { return 1; }, cycling);
+        Expect(tracker.Locked() && tracker.Mispredictions() == 0 && tracker.Best().parameter == 1,
+               "Engine image tracker (production): the chosen image alone keeps the lock");
+        Expect(tracker.WindowFrames() == std::min<std::uint32_t>(window + 20, 120),
+               "Engine image tracker (production): only censuses of every image are scored (" +
+                   std::to_string(tracker.WindowFrames()) + " from " + std::to_string(window) + ")");
+        // The game moves to another image: the 30th frames find it changed
+        // (since its census 30 frames before) and the chosen one not, and
+        // their fifth misprediction unlocks; every image is read again, and
+        // the new one locks.
+        feed.Run(tracker, 129, true, [](auto, auto, auto) { return 2; }, cycling);
+        Expect(tracker.Locked() && tracker.Mispredictions() == 4,
+               "Engine image tracker (production): four 30th frames mispredicted keep the lock");
+        feed.Run(tracker, 1, true, [](auto, auto, auto) { return 2; }, cycling);
+        Expect(!tracker.Locked() && tracker.Mispredictions() == 5,
+               "Engine image tracker (production): the fifth unlocks");
+        feed.Run(tracker, 200, true, [](auto, auto, auto) { return 2; }, cycling);
+        Expect(tracker.Locked() && tracker.Best().parameter == 2,
+               "Engine image tracker (production): the new image locks once every image is read");
+    }
+    {
+        // An image following a color swapchain that changes images at random:
+        // the chosen image is a different one most frames, each read right
+        // after it was written, and the 30th frames find the one written then.
+        FrameGenEngineImageTracker tracker;
+        TrackerFeed feed;
+        feed.production = true;
+        feed.Run(tracker, 80, true, [](auto, std::uint32_t color, auto) { return static_cast<int>(color); }, scrambled);
+        Expect(tracker.Locked() && tracker.Best().policy == Policy::kColor,
+               "Engine image tracker (production): following the color locks");
+        feed.Run(tracker, 900, true, [](auto, std::uint32_t color, auto) { return static_cast<int>(color); }, scrambled);
+        Expect(tracker.Locked() && tracker.Mispredictions() == 0 && tracker.Best().policy == Policy::kColor,
+               "Engine image tracker (production): following the color stays locked on the chosen images' censuses");
+    }
+}
+
+// Stage 2: the switch's modes, and the capture dispatch's constants for two
+// eyes of one grid (the shader reads them as FG_PASS_ENGINE_CAPTURE says).
+void TestFrameGenMotionCapturePlan() {
+    Expect(depthxr::ParseFrameGenEngineMode("Capture") == depthxr::FrameGenEngineMode::kCapture &&
+               depthxr::ParseFrameGenEngineMode("census") == depthxr::FrameGenEngineMode::kCensus &&
+               depthxr::ParseFrameGenEngineMode("observe") == depthxr::FrameGenEngineMode::kOff,
+           "Engine motion: the switch takes off, census and capture");
+    const depthxr::FrameGenExtent l1 = depthxr::FrameGenPyramid({5424, 5356})[1];
+    const depthxr::FrameGenDispatch dispatch =
+        depthxr::BuildFrameGenMotionCaptureDispatch(l1, {0, 0, 4339, 4285}, {16, 8, 4300, 4200}, 0, 1, 2);
+    const depthxr::FrameGenConstants& c = dispatch.constants;
+    Expect(dispatch.pass == depthxr::FrameGenPass::kEngineCapture && dispatch.width == 2712 && dispatch.height == 2678 &&
+               dispatch.outputs[0].kind == depthxr::FrameGenTextureKind::kEngineRaw,
+           "Engine motion: the capture writes the raw field on the half-resolution grid");
+    Expect(c.size == std::array<std::uint32_t, 4>{2712, 2678, 4339, 4285} &&
+               c.fov_current == std::array<float, 4>{0.0f, 0.0f, 16.0f, 8.0f} &&
+               c.fov_previous == std::array<float, 4>{4300.0f, 4200.0f, 0.0f, 1.0f} && c.options[0] == 2,
+           "Engine motion: the capture's constants carry both eyes' regions and slices");
 }
 
 // The shaders' view mapping on the CPU: the previous view and back.
@@ -5044,6 +5114,7 @@ int main() {
     TestFrameGenPlan();
     TestFrameGenHistoryState();
     TestFrameGenEngineImageTracker();
+    TestFrameGenMotionCapturePlan();
     TestFrameGenViewMapping();
     TestFrameGenEngineCalibration();
     TestFrameGenEngineGates();

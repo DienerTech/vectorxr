@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <deque>
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <vector>
@@ -83,8 +84,13 @@ enum class FrameGenPass : std::uint8_t {
     // queue (FrameGenEngineCensus), whether or not it ever acquires them.
     // Nothing generated frames are made from reads what it writes.
     kEngineCensus,
+    // Engine motion vectors, stage 2 (Direct3D 12, FrameGenGpu::CaptureMotion):
+    // the vectors of the image a frame's are in, as rendered, resampled to
+    // each eye's half-resolution grid (kEngineRaw) on the game's queue, both
+    // eyes in one dispatch (BuildFrameGenMotionCaptureDispatch).
+    kEngineCapture,
 };
-inline constexpr std::size_t kFrameGenPassCount = 29;
+inline constexpr std::size_t kFrameGenPassCount = 30;
 
 // Logical textures owned per view. History and filtered flow are ping-pong
 // pairs: "newest" is written this submission, "previous" is last
@@ -144,6 +150,10 @@ enum class FrameGenTextureKind : std::uint8_t {
     // like the eye-shift map (into kShiftKeys, once that map is built) for
     // each generated frame: offsets back to the newest frame.
     kMotionMap,
+    // Engine motion vectors (kEngineCapture): the game's raw vectors at half
+    // resolution, the newest capture and the one before it.
+    kEngineRaw,
+    kEngineRawPrevious,
 };
 
 // The flow level the optical flow hardware fills: a 4x4 grid on the
@@ -378,6 +388,27 @@ struct FrameGenViewRequest {
     bool engine_calibrate{false};
 };
 
+// How far Frame Generation goes with a game's motion vectors
+// (VECTORXR_FRAMEGEN_ENGINE_MV). The census fingerprints the images and
+// samples them every frame (stage 0); the capture resamples the image a
+// frame's vectors are in to each eye's half-resolution grid as well, with
+// a census of that image (of every image while it is not known which one,
+// and every 30th frame) (stage 2). Generated frames are made as without
+// them in both.
+enum class FrameGenEngineMode : std::uint8_t {
+    kOff,
+    kCensus,
+    kCapture,
+    kObserve,
+    kAssist,
+    kLead,
+};
+
+const char* ToString(FrameGenEngineMode mode); // "off", "census", ...
+// "off", "census" or "capture" (any case); anything else is off: the later
+// modes do not exist yet.
+FrameGenEngineMode ParseFrameGenEngineMode(const char* value);
+
 struct FrameGenTuning {
     FrameGenSynthesisMode mode{FrameGenSynthesisMode::kInterpolate};
     FrameGenFlowQuality quality{FrameGenFlowQuality::kBalanced};
@@ -431,6 +462,9 @@ struct FrameGenTuning {
     // With analyze_only: the real frames each view's ring keeps
     // (FrameGenHistoryRing); 0 for the default of the path.
     std::uint8_t history_ring{0};
+    // Engine motion vectors: from kCapture the backend keeps each view's
+    // raw vector fields (kEngineRaw), made when the view is set up.
+    FrameGenEngineMode engine_mode{FrameGenEngineMode::kOff};
 };
 
 struct FrameGenViewPlan {
@@ -559,23 +593,26 @@ struct FrameGenMotionEncoding {
 // A texel's vector (xy) as `encoding` decodes it, from the image's raw rgba.
 std::array<float, 2> DecodeFrameGenMotion(const FrameGenMotionEncoding& encoding, const std::array<float, 4>& raw);
 
-// How far Frame Generation goes with a game's motion vectors
-// (VECTORXR_FRAMEGEN_ENGINE_MV), each step after the census doing what the
-// one before does. Stage 0 has the census alone: the images are fingerprinted
-// and sampled, and generated frames are made as without them.
-enum class FrameGenEngineMode : std::uint8_t {
-    kOff,
-    kCensus,
-    kCapture,
-    kObserve,
-    kAssist,
-    kLead,
-};
+// kEngineCapture: a raw vector not finite, or longer than kFrameGenEngineRawLimit
+// on either axis in its own units (eight image widths in NDC, sixteen in uv;
+// vectors in pixels would need a larger limit), is stored as this on both
+// axes (half float's largest); an exact zero stays zero.
+inline constexpr float kFrameGenEngineInvalid = 65504.0f;
+inline constexpr float kFrameGenEngineRawLimit = 16.0f;
+// The raw fields each view keeps (VECTORXR_FRAMEGEN_ENGINE_RAW_SLOTS=3: one
+// more, so a capture waits for an older Execute).
+inline constexpr std::size_t kFrameGenEngineRawSlots = 3;
 
-const char* ToString(FrameGenEngineMode mode); // "off", "census", ...
-// "off" or "census" (any case); anything else is off: the later modes do not
-// exist yet.
-FrameGenEngineMode ParseFrameGenEngineMode(const char* value);
+// The kEngineCapture dispatch for the eyes of one half-resolution extent
+// `l1` (`views` of them, 1 or 2): each eye's motion vector region
+// (`rect0`, `rect1`: x, y, width, height in the image's texels, at array
+// slice `slice0`, `slice1`) resampled to the grid by kDepth's nearest rule.
+// size = (l1, rect0's extent), fov_current = (rect0's offset, rect1's
+// offset), fov_previous = (rect1's extent, slice0, slice1), options.x =
+// views. The backend dispatches `views` deep: id.z picks the eye.
+FrameGenDispatch BuildFrameGenMotionCaptureDispatch(FrameGenExtent l1, const std::array<std::int32_t, 4>& rect0,
+                                                    const std::array<std::int32_t, 4>& rect1, std::uint32_t slice0,
+                                                    std::uint32_t slice1, std::uint32_t views);
 
 // The kDepth dispatch for one view: resamples the region `depth_rect` (in
 // depth texels, array slice `array_index`) of the application's depth image
@@ -825,6 +862,10 @@ struct FrameGenEngineTrackerFrame {
     std::array<std::int32_t, 4> rect{}; // its region: x, y, width, height
     std::uint32_t images{0};             // up to kFrameGenEngineImages
     std::array<std::uint64_t, kFrameGenEngineImages> hashes{};
+    // The images the census read (bits; the others' hashes mean nothing):
+    // in production the image the frame's vectors are thought to be in,
+    // and every image now and then.
+    std::uint32_t censused{~0u};
     // The images the frame's color and depth swapchains released for it.
     std::uint32_t color_index{0};
     std::uint32_t depth_index{0};
@@ -841,7 +882,10 @@ struct FrameGenEngineTrackerFrame {
 // such frames or more, with no policy that predicts otherwise above 60%, is
 // locked. Five mispredictions while locked (in the window), another
 // swapchain or another region unlock it. More than 90% of 300 informative
-// frames changing nothing: the images are not written.
+// frames changing nothing: the images are not written. A census of some of
+// the images (FrameGenEngineTrackerFrame::censused, production's chosen
+// image) only keeps their hashes: frames are scored from censuses of every
+// image, each compared with that image's own last census.
 class FrameGenEngineImageTracker {
   public:
     enum class Policy : std::uint8_t {
@@ -1170,5 +1214,11 @@ std::vector<std::string> TakeResearchFileSwitches();
 // How many reads the file answered in the process (a session's: the count
 // after its reads against the count before).
 std::uint64_t ResearchFileReads();
+
+// Engine motion vectors: %LOCALAPPDATA%\VectorXR\engine-motion-<exe>.removed,
+// which the Direct3D 12 backend writes when the device is removed within 2 s
+// of reading this game's motion vectors. While it is there, sessions of this
+// game read none (deleting it reads them again). Empty without %LOCALAPPDATA%.
+std::filesystem::path FrameGenEngineRemovedPath();
 
 } // namespace depthxr

@@ -8,6 +8,7 @@
 
 #include "depthxr/framegen_gpu.h"
 #include "depthxr/framegen_hardware_watch.h"
+#include "depthxr/config_path.h"
 
 #ifdef DEPTHXR_NVOF
 #include <nvOpticalFlowD3D12.h>
@@ -58,9 +59,10 @@ constexpr UINT kFirstUav = kShaderResources;
 constexpr UINT kDescriptorsPerDispatch = kShaderResources + 2;
 // Engine motion vectors (CaptureMotion): submissions in flight, never waited
 // for, each with a block of descriptors per dispatch (the two eyes'
-// censuses, and one spare) and a readback of each eye's census and samples.
+// censuses, then the resample's, one or one per eye) and a readback of each
+// eye's census and samples.
 constexpr UINT kMotionSlots = 4;
-constexpr UINT kMotionBlocks = 3;
+constexpr UINT kMotionBlocks = 4;
 constexpr std::size_t kMotionViews = 2;
 constexpr UINT64 kMotionViewReadback = 32 * 1024; // per eye: the census, then the samples at kMotionSamplesOffset
 constexpr UINT64 kMotionSamplesOffset = 512;      // D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT
@@ -183,6 +185,20 @@ struct ViewResources {
     UINT64 depth_capture{0};
     FrameGenImage depth_source;
     bool depth_crossed{false}; // the newest depth is the other eye's, moved here (RecordDepthCross)
+    // Engine motion vectors (CaptureMotion's `capture`, set up from
+    // FrameGenTuning::engine_mode kCapture): the game's raw vectors on the
+    // half-resolution grid (kEngineCapture), written in turn (engine_slots_
+    // of them); the one the next capture writes; the color capture each one
+    // pairs with (none while it waits for the color released after it:
+    // engine_pair_next, until the frame's Execute); whether one was captured
+    // since the last Execute; and the work queue's fence value of the last
+    // analysis that read each (a capture into it waits for that on the GPU).
+    std::array<Texture, kFrameGenEngineRawSlots> engine_raw;
+    std::uint8_t engine_next{0};
+    std::array<CaptureKey, kFrameGenEngineRawSlots> engine_pair{};
+    bool engine_pair_next{false};
+    bool engine_ready{false};
+    std::array<UINT64, kFrameGenEngineRawSlots> engine_read{};
     // Optical flow hardware (FrameGenTuning::hardware_flow): its inputs,
     // its vectors and its session for this view.
     Texture hardware_newest;
@@ -235,6 +251,9 @@ struct ViewRecording {
     bool temporal{false};
     std::size_t next{0};
     bool waits_for_hardware{false}; // stopped before kFlowUnpack
+    // The view's engine motion vectors were captured for this frame (paired
+    // with its color capture): what an analysis of the frame reads.
+    bool engine{false};
 };
 
 struct FrameSlot {
@@ -277,6 +296,7 @@ struct MotionSlot {
         bool early{false};
         bool samples{false};
         std::uint32_t images{0};
+        std::uint32_t censused{0}; // the images read (bits)
         std::uint32_t color_index{0};
         std::uint32_t depth_index{0};
         XrSwapchain swapchain{XR_NULL_HANDLE};
@@ -575,6 +595,18 @@ class D3D12FrameGen final : public FrameGenGpu {
                 info_queue_.Reset();
             }
         }
+        // Stage 2 (research): a third raw field per view, so a capture waits
+        // only for an analysis three frames old
+        // (VECTORXR_FRAMEGEN_ENGINE_RAW_SLOTS=3), and the fields as RGBA16F,
+        // keeping the vectors' b and a (VECTORXR_FRAMEGEN_ENGINE_MV_RESEARCH=z).
+        if (ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_RAW_SLOTS") == "3") {
+            engine_slots_ = 3;
+            motion_notes_.push_back("three raw fields per view (VECTORXR_FRAMEGEN_ENGINE_RAW_SLOTS=3)");
+        }
+        if (ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_MV_RESEARCH") == "z") {
+            engine_format_ = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            motion_notes_.push_back("raw fields keep the vectors' b and a (VECTORXR_FRAMEGEN_ENGINE_MV_RESEARCH=z)");
+        }
         if (!software && coarse_tangent_ > 0.0 &&
             SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS6, &options6, sizeof(options6))) &&
             options6.VariableShadingRateTier >= D3D12_VARIABLE_SHADING_RATE_TIER_2 &&
@@ -699,7 +731,7 @@ class D3D12FrameGen final : public FrameGenGpu {
             error = "Frame Generation capture image is not tracked";
             return false;
         }
-        HRESULT hr = device_->GetDeviceRemovedReason();
+        HRESULT hr = DeviceRemovedReason();
         if (FAILED(hr)) {
             error = Failure("D3D12 device", hr);
             return false;
@@ -765,6 +797,13 @@ class D3D12FrameGen final : public FrameGenGpu {
         slot.timed = capture_query_heap_ != nullptr;
         ++capture_count_;
         view.capture = {true, source.swapchain, source.image_index, source.array_index, source.rect};
+        // Engine motion vectors the game released before this color image
+        // (CaptureMotion's `pair_next`) are this frame's: they pair with it.
+        if (view.engine_pair_next) {
+            view.engine_pair[EngineNewest(view)] = view.capture;
+            view.engine_pair_next = false;
+            view.engine_ready = true;
+        }
         view.raw_captured = 0;
         if (raw) {
             MatchRaw(view, watch);
@@ -960,7 +999,7 @@ class D3D12FrameGen final : public FrameGenGpu {
             error = "Frame Generation cannot read depth format " + std::to_string(static_cast<int>(desc.Format));
             return false;
         }
-        HRESULT hr = device_->GetDeviceRemovedReason();
+        HRESULT hr = DeviceRemovedReason();
         if (FAILED(hr)) {
             error = Failure("D3D12 device", hr);
             return false;
@@ -1078,15 +1117,19 @@ class D3D12FrameGen final : public FrameGenGpu {
 
     bool SupportsEngineMotion() const override { return true; }
 
-    // Engine motion vectors, stage 0: each eye's motion vector images
-    // fingerprinted and sampled (kEngineCensus) on the game's queue, where
-    // the game's own rendering ordered before this call has written them. A
-    // game that never acquires or releases them (MSFS 2024) leaves their
-    // state unknown: motion_state_ decides the barriers. Results are read
-    // without waiting, at a later call, for EngineStatus.
+    // Engine motion vectors: each eye's motion vector images fingerprinted
+    // (kEngineCensus) on the game's queue, where the game's own rendering
+    // ordered before this call has written them, and sampled (stage 0); for
+    // jobs with `capture` (stage 2) the image the frame's vectors are in is
+    // resampled into the view's raw field as well (kEngineCapture), both eyes
+    // in one dispatch when their grids are one size. A game that never
+    // acquires or releases them (MSFS 2024) leaves their state unknown:
+    // motion_state_ decides the barriers. Census results are read without
+    // waiting, at a later call, for EngineStatus.
     bool CaptureMotion(const std::vector<FrameGenMotionJob>& jobs, const std::vector<FrameGenViewRequest>& color,
-                       std::string& error) override {
+                       std::string& error, std::vector<bool>* resampled_jobs) override {
         error.clear();
+        if (resampled_jobs) resampled_jobs->assign(jobs.size(), false);
         ReadMotion();
         // A research capture's copies of the images (DumpMotion) go with the
         // next census at a frame's end, taken or not: never a later frame's.
@@ -1099,7 +1142,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         if (jobs.empty() || motion_stopped_ || stalled_ || signal_failed_) {
             return false;
         }
-        HRESULT hr = device_->GetDeviceRemovedReason();
+        HRESULT hr = DeviceRemovedReason();
         if (FAILED(hr)) {
             // Nothing is read for the rest of the session.
             motion_stopped_ = true;
@@ -1162,6 +1205,24 @@ class D3D12FrameGen final : public FrameGenGpu {
             ++motion_busy_;
             return false;
         }
+        // The views whose vectors are resampled: set up by Execute for engine
+        // motion (FrameGenTuning::engine_mode), on their color view's grid,
+        // with a color capture to pair with (or one to come). Others are left
+        // out this call, counted, their census taken all the same.
+        std::array<bool, kMotionViews> resample{};
+        for (std::size_t j = 0; j < count; ++j) {
+            const FrameGenMotionJob& job = jobs[j];
+            if (!job.capture) {
+                continue;
+            }
+            const ViewResources* view = job.view < views_.size() ? &views_[job.view] : nullptr;
+            const FrameGenExtent color_extent = job.view < color.size() ? color[job.view].extent : FrameGenExtent{};
+            const FrameGenExtent extent = view ? view->history_state.Extent() : FrameGenExtent{};
+            resample[j] = view && view->engine_raw[0].resource && extent.width && extent.width == color_extent.width &&
+                          extent.height == color_extent.height && job.vectors.image_index < found[j].count &&
+                          (job.pair_next || view->capture.valid);
+            motion_unready_ += resample[j] ? 0 : 1;
+        }
         if (!slot.pending.empty() || slot.timed) {
             ReadMotion(); // finished since the read above: read before it is reused
         }
@@ -1213,7 +1274,6 @@ class D3D12FrameGen final : public FrameGenGpu {
         ID3D12DescriptorHeap* heaps[] = {heap_.Get()};
         capture_commands_->SetDescriptorHeaps(1, heaps);
         capture_commands_->SetComputeRootSignature(root_signature_.Get());
-        capture_commands_->SetPipelineState(pipelines_[static_cast<std::size_t>(FrameGenPass::kEngineCensus)].Get());
         const bool dumping = !dump_directory.empty();
         std::vector<MotionDump> dumps;
         std::vector<D3D12_RESOURCE_BARRIER> barriers;
@@ -1223,29 +1283,58 @@ class D3D12FrameGen final : public FrameGenGpu {
                 barriers.clear();
             }
         };
+        // Each eye's census reads every image, or the one the frame's vectors
+        // are thought to be in (the image its resample and dump read too).
+        std::array<std::uint32_t, kMotionViews> censused{};
+        for (std::size_t j = 0; j < count; ++j) {
+            const std::uint32_t every = (1u << found[j].count) - 1u;
+            const std::uint32_t image = jobs[j].vectors.image_index;
+            censused[j] = jobs[j].census_all || image >= found[j].count ? every : 1u << image;
+        }
+        // Each image read, once (both eyes may read one swapchain's images):
+        // from the state it is held in to readable (copyable too when dumped)
+        // for the whole list, and back at its end. The images not read keep
+        // their state untouched: a game following the specification may hold
+        // one it acquired for its next frame in a state of its own.
+        const D3D12_RESOURCE_STATES read = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
+                                           (dumping ? D3D12_RESOURCE_STATE_COPY_SOURCE : D3D12_RESOURCE_STATE_COMMON);
+        std::vector<std::pair<ID3D12Resource*, D3D12_RESOURCE_STATES>> held_images;
+        for (std::size_t j = 0; j < count; ++j) {
+            const std::optional<D3D12_RESOURCE_STATES> held = MotionHeldState(found[j].simultaneous);
+            // The samples (stage 0) and a dump of every image read them all.
+            const std::uint32_t every = (1u << found[j].count) - 1u;
+            const std::uint32_t touched = censused[j] | (jobs[j].samples || (dumping && dump_all) ? every : 0u);
+            for (std::uint32_t k = 0; k < found[j].count && held; ++k) {
+                if (((touched >> k) & 1u) == 0) {
+                    continue;
+                }
+                ID3D12Resource* resource = found[j].resources[k];
+                if (std::none_of(held_images.begin(), held_images.end(),
+                                 [&](const auto& image) { return image.first == resource; })) {
+                    held_images.emplace_back(resource, *held);
+                    Transition(barriers, resource, *held, read);
+                }
+            }
+        }
+        // The censuses: a dispatch per eye, in the slot's first blocks.
+        capture_commands_->SetPipelineState(pipelines_[static_cast<std::size_t>(FrameGenPass::kEngineCensus)].Get());
         std::vector<MotionSlot::Pending> pending;
         std::vector<std::size_t> depth_views;
         for (std::size_t j = 0; j < count; ++j) {
             const FrameGenMotionJob& job = jobs[j];
             const Images& images = found[j];
             MotionView& outputs = motion_views_[j];
-            const UINT base = kMotionDescriptors +
-                              (static_cast<UINT>(slot_index) * kMotionBlocks + static_cast<UINT>(j)) * kDescriptorsPerDispatch;
+            const UINT base = MotionBlock(slot_index, j);
             for (std::uint32_t k = 0; k < kFrameGenEngineImages; ++k) {
-                D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
-                srv.Format = k < images.count ? images.format : DXGI_FORMAT_R16G16B16A16_FLOAT;
-                srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
-                srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-                srv.Texture2DArray.MipLevels = 1;
-                srv.Texture2DArray.ArraySize = k < images.count ? images.array_size : 1;
-                device_->CreateShaderResourceView(k < images.count ? images.resources[k] : nullptr, &srv, Cpu(base + k));
+                MotionImageView(k < images.count ? images.resources[k] : nullptr, images.format, images.array_size,
+                                base + k);
             }
             // This frame's linear depth (captured at its release, since the
             // last Execute), where the samples are taken.
             const FrameGenExtent color_extent = job.view < color.size() ? color[job.view].extent : FrameGenExtent{};
             const FrameGenExtent half = FrameGenPyramid(color_extent)[1];
             Texture* depth = nullptr;
-            if (job.view < views_.size()) {
+            if (job.samples && job.view < views_.size()) {
                 ViewResources& view = views_[job.view];
                 Texture& newest = view.depth[view.history_state.Newest()];
                 const FrameGenExtent extent = view.history_state.Extent();
@@ -1265,42 +1354,25 @@ class D3D12FrameGen final : public FrameGenGpu {
             UnorderedAccess(samples ? &outputs.samples : nullptr, base + kFirstUav + 1);
             Require(barriers, outputs.census, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             if (samples) Require(barriers, outputs.samples, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            // The images' own state, read and back (copied too when dumped).
-            const bool dump_job = dumping;
-            const D3D12_RESOURCE_STATES read = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
-                                               (dump_job ? D3D12_RESOURCE_STATE_COPY_SOURCE : D3D12_RESOURCE_STATE_COMMON);
-            const std::optional<D3D12_RESOURCE_STATES> held = MotionHeldState(images.simultaneous);
-            for (std::uint32_t k = 0; k < images.count && held; ++k) {
-                Transition(barriers, images.resources[k], *held, read);
-            }
             flush();
             FrameGenConstants constants{};
             constants.fov_current = {static_cast<float>(job.vectors.rect.offset.x), static_cast<float>(job.vectors.rect.offset.y),
                                      static_cast<float>(job.vectors.rect.extent.width),
                                      static_cast<float>(job.vectors.rect.extent.height)};
             constants.size = {half.width, half.height, images.count, job.vectors.array_index};
-            constants.options = {(samples ? 1u : 0u) | (depth ? 2u : 0u), static_cast<std::uint32_t>(job.frame),
+            constants.options = {(samples ? 1u : 0u) | (depth ? 2u : 0u) | (censused[j] << 8), static_cast<std::uint32_t>(job.frame),
                                  job.color_index, job.depth_index};
             capture_commands_->SetComputeRoot32BitConstants(0, sizeof(FrameGenConstants) / 4, &constants, 0);
             capture_commands_->SetComputeRootDescriptorTable(1, Gpu(base));
             capture_commands_->SetComputeRootDescriptorTable(2, Gpu(base + kFirstUav));
             capture_commands_->Dispatch(images.count + (samples ? 1u : 0u), 1, 1);
-            if (dump_job) {
+            if (dumping) {
                 for (std::uint32_t k = 0; k < images.count; ++k) {
                     if (dump_all || k == job.vectors.image_index) {
                         DumpMotionImage(images.resources[k], job, k, dump_all, dumps);
                     }
                 }
             }
-            for (std::uint32_t k = 0; k < images.count && held; ++k) {
-                Transition(barriers, images.resources[k], read, *held);
-            }
-            // Both outputs into the slot's readback, this eye's part of it.
-            Require(barriers, outputs.census, D3D12_RESOURCE_STATE_COPY_SOURCE);
-            if (samples) Require(barriers, outputs.samples, D3D12_RESOURCE_STATE_COPY_SOURCE);
-            flush();
-            CopyToReadback(outputs.census, slot.readback.Get(), j * kMotionViewReadback);
-            if (samples) CopyToReadback(outputs.samples, slot.readback.Get(), j * kMotionViewReadback + kMotionSamplesOffset);
             MotionSlot::Pending entry;
             entry.sequence = ++motion_sequence_;
             entry.view = job.view;
@@ -1308,19 +1380,91 @@ class D3D12FrameGen final : public FrameGenGpu {
             entry.early = job.early;
             entry.samples = samples;
             entry.images = images.count;
+            entry.censused = censused[j];
             entry.color_index = job.color_index;
             entry.depth_index = job.depth_index;
             entry.swapchain = job.vectors.swapchain;
             entry.rect = job.vectors.rect;
             pending.push_back(entry);
         }
+        // The resample (kEngineCapture) into each view's next raw field, in
+        // the slot's last blocks: one dispatch for eyes of one grid, else one
+        // each.
+        std::vector<std::size_t> resampled;
+        for (std::size_t j = 0; j < count; ++j) {
+            if (resample[j]) resampled.push_back(j);
+        }
+        std::vector<std::vector<std::size_t>> dispatches;
+        for (const std::size_t j : resampled) {
+            const FrameGenExtent l1 = FrameGenPyramid(color[jobs[j].view].extent)[1];
+            const auto same = std::find_if(dispatches.begin(), dispatches.end(), [&](const std::vector<std::size_t>& eyes) {
+                const FrameGenExtent other = FrameGenPyramid(color[jobs[eyes.front()].view].extent)[1];
+                return other.width == l1.width && other.height == l1.height;
+            });
+            if (same != dispatches.end()) {
+                same->push_back(j);
+            } else {
+                dispatches.push_back({j});
+            }
+        }
+        if (!dispatches.empty()) {
+            capture_commands_->SetPipelineState(pipelines_[static_cast<std::size_t>(FrameGenPass::kEngineCapture)].Get());
+        }
+        for (std::size_t d = 0; d < dispatches.size(); ++d) {
+            const std::vector<std::size_t>& eyes = dispatches[d];
+            const UINT base = MotionBlock(slot_index, kMotionViews + d);
+            std::array<std::array<std::int32_t, 4>, 2> rects{};
+            std::array<std::uint32_t, 2> slices{};
+            for (std::size_t e = 0; e < 2; ++e) {
+                // A single eye reads its own image in both places.
+                const std::size_t j = eyes[std::min(e, eyes.size() - 1)];
+                const FrameGenMotionJob& job = jobs[j];
+                MotionImageView(found[j].resources[job.vectors.image_index], found[j].format, found[j].array_size,
+                                base + static_cast<UINT>(e));
+                const XrRect2Di& rect = job.vectors.rect;
+                rects[e] = {rect.offset.x, rect.offset.y, rect.extent.width, rect.extent.height};
+                slices[e] = job.vectors.array_index;
+                ViewResources& view = views_[job.view];
+                Texture* raw = e < eyes.size() ? &view.engine_raw[view.engine_next] : nullptr;
+                UnorderedAccess(raw, base + kFirstUav + static_cast<UINT>(e));
+                if (raw) Require(barriers, *raw, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            }
+            for (UINT i = 2; i < kShaderResources; ++i) {
+                ShaderResource(nullptr, base, i);
+            }
+            flush();
+            const FrameGenDispatch dispatch = BuildFrameGenMotionCaptureDispatch(
+                FrameGenPyramid(color[jobs[eyes.front()].view].extent)[1], rects[0], rects[1], slices[0], slices[1],
+                static_cast<std::uint32_t>(eyes.size()));
+            capture_commands_->SetComputeRoot32BitConstants(0, sizeof(FrameGenConstants) / 4, &dispatch.constants, 0);
+            capture_commands_->SetComputeRootDescriptorTable(1, Gpu(base));
+            capture_commands_->SetComputeRootDescriptorTable(2, Gpu(base + kFirstUav));
+            capture_commands_->Dispatch((dispatch.width + kFrameGenThreadGroupSize - 1) / kFrameGenThreadGroupSize,
+                                        (dispatch.height + kFrameGenThreadGroupSize - 1) / kFrameGenThreadGroupSize,
+                                        static_cast<UINT>(eyes.size()));
+        }
+        for (const auto& [resource, held] : held_images) {
+            Transition(barriers, resource, read, held);
+        }
+        // The censuses into the slot's readback, each eye's part of it.
+        for (std::size_t j = 0; j < count; ++j) {
+            Require(barriers, motion_views_[j].census, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            if (pending[j].samples) Require(barriers, motion_views_[j].samples, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        }
+        flush();
+        for (std::size_t j = 0; j < count; ++j) {
+            CopyToReadback(motion_views_[j].census, slot.readback.Get(), j * kMotionViewReadback);
+            if (pending[j].samples) {
+                CopyToReadback(motion_views_[j].samples, slot.readback.Get(), j * kMotionViewReadback + kMotionSamplesOffset);
+            }
+        }
         StampMotion(slot_index, true);
         hr = capture_commands_->Close();
         if (FAILED(hr)) {
             // Nothing was submitted: the outputs' tracked states go back to
             // what the GPU has. Earlier submissions may still use them, so
-            // they are never freed here; the depth views are rebuilt as
-            // Capture does (waiting for the GPU before freeing).
+            // they are never freed here; the depth views and those resampled
+            // are rebuilt as Capture does (waiting for the GPU before freeing).
             ++motion_failed_;
             error = Failure("D3D12 Frame Generation motion close", hr);
             for (std::size_t j = 0; j < count; ++j) {
@@ -1328,12 +1472,20 @@ class D3D12FrameGen final : public FrameGenGpu {
                 motion_views_[j].samples.state = output_states[j].second;
             }
             for (const std::size_t v : depth_views) views_[v].history_state = {};
+            for (const std::size_t j : resampled) views_[jobs[j].view].history_state = {};
             return false;
         }
+        std::vector<ViewResources*> written;
+        for (const std::size_t j : resampled) {
+            written.push_back(&views_[jobs[j].view]);
+        }
         UINT64 value = 0;
-        hr = SubmitMotion(capture_commands_.Get(), value);
+        hr = SubmitMotion(capture_commands_.Get(), written, value);
         for (const std::size_t v : depth_views) {
             MarkUsed(views_[v], CaptureFence(), value);
+        }
+        for (ViewResources* view : written) {
+            MarkUsed(*view, CaptureFence(), value);
         }
         if (FAILED(hr)) {
             // The slot stays busy for good: its list may still run (as a
@@ -1350,6 +1502,20 @@ class D3D12FrameGen final : public FrameGenGpu {
         slot.pending = std::move(pending);
         ++motion_count_;
         ++motion_submitted_;
+        motion_submitted_at_ = std::chrono::steady_clock::now();
+        // Each raw field written pairs with the view's color capture: the
+        // frame's own when it was captured first, else its next (Capture).
+        for (const std::size_t j : resampled) {
+            ViewResources& view = views_[jobs[j].view];
+            const std::uint8_t field = view.engine_next;
+            view.engine_pair[field] = jobs[j].pair_next ? CaptureKey{} : view.capture;
+            view.engine_pair_next = jobs[j].pair_next;
+            view.engine_ready = !jobs[j].pair_next;
+            view.engine_next = static_cast<std::uint8_t>((field + 1u) % engine_slots_);
+            ++motion_captured_;
+            if (resampled_jobs) (*resampled_jobs)[j] = true;
+        }
+        motion_dispatches_ += dispatches.size();
         if (!dumps.empty()) {
             WriteMotionDump(std::move(dumps), value, dump_directory);
             ++motion_dumped_;
@@ -1365,6 +1531,11 @@ class D3D12FrameGen final : public FrameGenGpu {
         status.refused = motion_refused_;
         status.failed = motion_failed_;
         status.dumped = motion_dumped_;
+        status.captured = motion_captured_;
+        status.dispatches = motion_dispatches_;
+        status.waits = motion_waits_;
+        status.unready = motion_unready_;
+        status.paired = motion_paired_;
         status.stopped = motion_stopped_;
         status.notes = motion_notes_;
         for (const FrameGenEngineCensus& census : motion_census_) {
@@ -1959,6 +2130,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         case DXGI_FORMAT_R32G32B32A32_FLOAT: channels = 4; break;
         case DXGI_FORMAT_R32_FLOAT: channels = 1; break;
         case DXGI_FORMAT_R16_FLOAT: channels = 1; break;
+        case DXGI_FORMAT_R16G16_FLOAT: channels = 2; break;
         case DXGI_FORMAT_R32_UINT: channels = 2; break; // two packed halves
         case DXGI_FORMAT_R8_UNORM: channels = 1; break;
         default: channels = 0; break;
@@ -1988,6 +2160,13 @@ class D3D12FrameGen final : public FrameGenGpu {
                     std::uint16_t texel = 0;
                     std::memcpy(&texel, row + x * 2, sizeof(texel));
                     out[x] = half(texel);
+                    break;
+                }
+                case DXGI_FORMAT_R16G16_FLOAT: {
+                    std::uint16_t texel[2]{};
+                    std::memcpy(texel, row + x * 4, sizeof(texel));
+                    out[x * 2] = half(texel[0]);
+                    out[x * 2 + 1] = half(texel[1]);
                     break;
                 }
                 case DXGI_FORMAT_R32_UINT: {
@@ -2233,13 +2412,20 @@ class D3D12FrameGen final : public FrameGenGpu {
                  FrameGenExecuteResult& result, std::string& error) override {
         result.synthesized.assign(views.size(), false);
         result.depth.assign(views.size(), false);
-        HRESULT hr = device_->GetDeviceRemovedReason();
+        HRESULT hr = DeviceRemovedReason();
         if (FAILED(hr)) {
             error = Failure("D3D12 device", hr);
             return false;
         }
         if (hardware_stuck_.exchange(false)) {
             HardwareFailed("the optical flow hardware stopped responding");
+        }
+        // Engine motion vectors still waiting for their color (released
+        // before it, CaptureMotion's `pair_next`) are a frame whose color was
+        // never captured: the game releases a frame's images before its
+        // xrEndFrame, which runs this. They pair with no later frame's color.
+        for (ViewResources& view : views_) {
+            view.engine_pair_next = false;
         }
         if (Uncaptured(views, tuning, result, error)) {
             return false;
@@ -2368,7 +2554,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         // Research dumps read the inputs before the plans change the depth.
         std::vector<DumpCopy> dump;
         if (ok && !dump_directory_.empty()) {
-            ok = RecordDump(views, dump, error);
+            ok = RecordDump(views, recordings, dump, error);
         }
         for (std::size_t i = 0; i < views.size() && ok; ++i) {
             ok = RecordPlan(recordings[i], effective_tuning.hardware_flow, error);
@@ -2492,10 +2678,16 @@ class D3D12FrameGen final : public FrameGenGpu {
             HandOverOutputs();
         }
         source_copied_ = false;
-        // The next capture into these slots waits for this work on the GPU.
+        // The next capture into these slots waits for this work on the GPU,
+        // and so does the engine motion capture into the frame's own raw
+        // field, two captures later (dumped in this stage; a later stage's
+        // analysis reads it).
         for (std::size_t i = 0; i < views.size(); ++i) {
             ViewResources& view = views_[i];
             view.slot_read[view.history_state.Newest()] = view.slot_read[view.history_state.Previous()] = fence_value_;
+            if (recordings[i].engine) {
+                view.engine_read[EngineNewest(view)] = fence_value_;
+            }
         }
         if (effective_tuning.analyze_only) {
             // What Synthesize writes this real frame's generated frames from.
@@ -2557,7 +2749,7 @@ class D3D12FrameGen final : public FrameGenGpu {
 
     bool Synthesize(std::uint64_t frame_id, FrameGenSynthesisMode mode, float fraction,
                     const std::vector<FrameGenImage>& outputs, std::string& error) override {
-        HRESULT hr = device_->GetDeviceRemovedReason();
+        HRESULT hr = DeviceRemovedReason();
         if (FAILED(hr)) {
             error = Failure("D3D12 device", hr);
             return false;
@@ -2612,7 +2804,7 @@ class D3D12FrameGen final : public FrameGenGpu {
 
     bool SynthesizeStale(std::uint64_t frame_id, std::uint64_t motion_id, float fraction,
                          const std::vector<FrameGenImage>& outputs, std::string& error) override {
-        HRESULT hr = device_->GetDeviceRemovedReason();
+        HRESULT hr = DeviceRemovedReason();
         if (FAILED(hr)) {
             error = Failure("D3D12 Frame Generation device", hr);
             return false;
@@ -2707,7 +2899,7 @@ class D3D12FrameGen final : public FrameGenGpu {
             error = "this Direct3D 12 device cannot compose quad views";
             return false;
         }
-        HRESULT hr = device_->GetDeviceRemovedReason();
+        HRESULT hr = DeviceRemovedReason();
         if (FAILED(hr)) {
             error = Failure("D3D12 device", hr);
             return false;
@@ -3400,7 +3592,11 @@ class D3D12FrameGen final : public FrameGenGpu {
             if (!EnsureView(views_[i], views[i], it->second[views[i].source.image_index], tuning, error)) {
                 return true;
             }
+            // Engine motion vectors captured since were paired with an
+            // earlier color capture (a frame never analysed): no later
+            // frame's either.
             views_[i].capture.valid = false;
+            views_[i].engine_ready = false;
         }
         result.uncaptured = true;
         error = "a view's image was not captured when the game released it";
@@ -3561,6 +3757,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         for (auto* group : {&view.luma_newest, &view.luma_previous, &view.flow}) {
             for (auto& texture : *group) visit(texture);
         }
+        for (auto& texture : view.engine_raw) visit(texture);
         for (auto* texture : {&view.output, &view.compose_target, &view.shift_keys, &view.shift_map, &view.motion_map,
                               &view.cross_keys,
                               &view.depth_stale,
@@ -3663,10 +3860,83 @@ class D3D12FrameGen final : public FrameGenGpu {
         }
     }
 
+    // The first descriptor of a motion slot's block (CaptureMotion: the eyes'
+    // censuses, then the resample's dispatches).
+    static UINT MotionBlock(std::size_t slot_index, std::size_t block) {
+        return kMotionDescriptors + static_cast<UINT>(slot_index * kMotionBlocks + block) * kDescriptorsPerDispatch;
+    }
+
+    // A motion vector image (all its slices) as the shaders read it; none
+    // still describes a texture array.
+    void MotionImageView(ID3D12Resource* resource, DXGI_FORMAT format, UINT array_size, UINT descriptor) {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = resource ? format : DXGI_FORMAT_R16G16B16A16_FLOAT;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2DArray.MipLevels = 1;
+        srv.Texture2DArray.ArraySize = resource ? array_size : 1;
+        device_->CreateShaderResourceView(resource, &srv, Cpu(descriptor));
+    }
+
+    // A view's raw engine motion field the latest capture wrote, and the one
+    // before (kEngineRaw, kEngineRawPrevious).
+    std::uint8_t EngineNewest(const ViewResources& view) const {
+        return static_cast<std::uint8_t>((view.engine_next + engine_slots_ - 1u) % engine_slots_);
+    }
+    std::uint8_t EnginePrevious(const ViewResources& view) const {
+        return static_cast<std::uint8_t>((view.engine_next + engine_slots_ - 2u) % engine_slots_);
+    }
+
+    // The device's removed reason (S_OK while it works). Removed within 2 s
+    // of an engine motion submission, the game's next sessions read none
+    // (FrameGenEngineRemovedPath; the owner deletes the file to read them
+    // again): the research reads images a game may not expect to be read.
+    HRESULT DeviceRemovedReason() {
+        const HRESULT hr = device_->GetDeviceRemovedReason();
+        if (FAILED(hr) && !motion_removed_noted_ && motion_submitted_at_ &&
+            std::chrono::steady_clock::now() - *motion_submitted_at_ <= std::chrono::seconds(2)) {
+            motion_removed_noted_ = true;
+            const std::filesystem::path path = FrameGenEngineRemovedPath();
+            if (!path.empty()) {
+                std::error_code ignored;
+                std::filesystem::create_directories(path.parent_path(), ignored);
+                std::ofstream(path) << "The GPU device was removed (hr=" << static_cast<long>(hr)
+                                    << ") within 2 s of VectorXR Frame Generation reading this game's motion vectors.\n"
+                                       "While this file is here, its sessions read none. Delete it to read them again.\n";
+            }
+            if (motion_notes_.size() < kMotionNotes) {
+                motion_notes_.push_back("the device was removed within 2 s of reading the game's motion vectors: "
+                                        "later sessions of this game read none until " +
+                                        PathToUtf8(path) + " is deleted");
+            }
+        }
+        return hr;
+    }
+
     // Submits an engine motion list on the game's queue: as SubmitCapture
     // (analyses wait for it), without waiting for a ring slot, as it writes
-    // none.
-    HRESULT SubmitMotion(ID3D12GraphicsCommandList* list, UINT64& value) {
+    // none. The raw fields it writes (`written` views' next ones) the
+    // analysis of the frame that wrote them last (two captures ago, Execute's
+    // engine_read) may still read on the work queue: as SubmitCapture's ring
+    // slots, the game's queue waits for that only when the CPU sees it
+    // unfinished (rarely, that frame being two frames old), and each such
+    // view is counted. The count is what the CPU saw, not a stall: the
+    // game's queue reaches the wait after rendering the frame, by when such
+    // an analysis is usually done.
+    HRESULT SubmitMotion(ID3D12GraphicsCommandList* list, const std::vector<ViewResources*>& written, UINT64& value) {
+        if (separate_) {
+            UINT64 read = 0;
+            for (const ViewResources* view : written) {
+                const UINT64 field = view->engine_read[view->engine_next];
+                if (field && fence_->GetCompletedValue() < field) {
+                    read = std::max(read, field);
+                    ++motion_waits_;
+                }
+            }
+            if (read) {
+                queue_->Wait(fence_.Get(), read);
+            }
+        }
         ID3D12CommandList* lists[] = {list};
         queue_->ExecuteCommandLists(1, lists);
         const HRESULT hr = separate_ ? queue_->Signal(capture_fence_.Get(), ++capture_value_)
@@ -3692,7 +3962,9 @@ class D3D12FrameGen final : public FrameGenGpu {
     // EngineStatus, and when it ran (CaptureEnd).
     void ReadMotion() {
         ID3D12Fence* fence = CaptureFence();
-        if (!fence) {
+        // A removed device reports every fence value reached, and its
+        // readbacks hold nothing: nothing is read.
+        if (!fence || FAILED(device_->GetDeviceRemovedReason())) {
             return;
         }
         const UINT64 completed = fence->GetCompletedValue();
@@ -3724,6 +3996,7 @@ class D3D12FrameGen final : public FrameGenGpu {
                 census.view = pending.view;
                 census.early = pending.early;
                 census.images = pending.images;
+                census.censused = pending.censused;
                 census.color_index = pending.color_index;
                 census.depth_index = pending.depth_index;
                 census.handle = reinterpret_cast<std::uint64_t>(pending.swapchain);
@@ -3733,6 +4006,9 @@ class D3D12FrameGen final : public FrameGenGpu {
                 std::array<std::uint32_t, 16 * kFrameGenEngineImages> texels{};
                 std::memcpy(texels.data(), region, sizeof(texels));
                 for (std::uint32_t k = 0; k < pending.images && k < kFrameGenEngineImages; ++k) {
+                    if (((pending.censused >> k) & 1u) == 0) {
+                        continue; // not read: its texels are an older census's
+                    }
                     const std::uint32_t* t = texels.data() + 16 * k;
                     FrameGenEngineImageCensus& image = census.image[k];
                     image.xor_hash = t[0];
@@ -3956,8 +4232,13 @@ class D3D12FrameGen final : public FrameGenGpu {
         DXGI_FORMAT format{DXGI_FORMAT_UNKNOWN};
     };
 
-    // Copies every view's newest image and depth into readback buffers.
-    bool RecordDump(const std::vector<FrameGenViewSubmission>& views, std::vector<DumpCopy>& dump, std::string& error) {
+    // Copies every view's newest image and depth into readback buffers, and
+    // the game's motion vectors resampled for the frame (kEngineCapture) as
+    // view<i>-engine-raw.rg16f (.rgba16f with the research's b and a): only
+    // the frame's own (ViewRecording::engine), which the capture into that
+    // field waits for this work to read (Execute's engine_read).
+    bool RecordDump(const std::vector<FrameGenViewSubmission>& views, const std::vector<ViewRecording>& recordings,
+                    std::vector<DumpCopy>& dump, std::string& error) {
         std::vector<D3D12_RESOURCE_BARRIER> barriers;
         auto copy = [&](Texture& texture, const std::string& name) {
             if (!texture.resource) {
@@ -3996,6 +4277,11 @@ class D3D12FrameGen final : public FrameGenGpu {
             ViewResources& view = views_[i];
             if (!copy(view.history[view.history_state.Newest()], "view" + std::to_string(i) + "-color.raw") ||
                 !copy(view.depth[view.history_state.Newest()], "view" + std::to_string(i) + "-depth.f32")) {
+                return false;
+            }
+            if (i < recordings.size() && recordings[i].engine &&
+                !copy(view.engine_raw[EngineNewest(view)], "view" + std::to_string(i) + "-engine-raw." +
+                                                               (engine_format_ == DXGI_FORMAT_R16G16_FLOAT ? "rg16f" : "rgba16f"))) {
                 return false;
             }
         }
@@ -4180,6 +4466,10 @@ class D3D12FrameGen final : public FrameGenGpu {
             view.capture = {};
             for (auto& generation : view.slot_generation) ++generation;
             view.trust_stereo = view.depth_ready = view.depth_fresh = false;
+            view.engine_pair = {};
+            view.engine_read = {};
+            view.engine_next = 0;
+            view.engine_pair_next = view.engine_ready = false;
             // Its optical flow session matches afresh (no hints, no raw
             // capture to use).
             view.hardware_fresh = true;
@@ -4425,6 +4715,37 @@ class D3D12FrameGen final : public FrameGenGpu {
                 if (!Create(view.filtered_cover[slot], levels[final_level], DXGI_FORMAT_R16G16B16A16_FLOAT,
                             DXGI_FORMAT_R16G16B16A16_FLOAT, true, error)) {
                     return false;
+                }
+            }
+        }
+        // Engine motion vectors (stage 2): the raw fields the game's vectors
+        // are resampled into at half resolution, made here only (CaptureMotion
+        // never allocates: the frame after setup goes uncaptured, as color),
+        // for the view's grid (a view set up again drops its old ones, the GPU
+        // done with them above). They are research data nothing generated
+        // reads: when they cannot be made, Frame Generation goes on without
+        // them, and engine capture stays off for the session.
+        auto reset_engine = [&view] {
+            view.engine_raw = {};
+            view.engine_pair = {};
+            view.engine_read = {};
+            view.engine_next = 0;
+            view.engine_pair_next = view.engine_ready = false;
+        };
+        if (change & FrameGenHistoryState::kAll) {
+            reset_engine();
+        }
+        if (tuning.engine_mode >= FrameGenEngineMode::kCapture && !engine_failed_ && !view.engine_raw[0].resource) {
+            reset_engine();
+            for (std::uint8_t slot = 0; slot < engine_slots_ && !engine_failed_; ++slot) {
+                std::string why;
+                if (!Create(view.engine_raw[slot], levels[1], engine_format_, engine_format_, true, why)) {
+                    engine_failed_ = true;
+                    reset_engine();
+                    if (motion_notes_.size() < kMotionNotes) {
+                        motion_notes_.push_back("the raw fields could not be made (" + why +
+                                                "): no capture this session, Frame Generation goes on without it");
+                    }
                 }
             }
         }
@@ -5208,6 +5529,8 @@ class D3D12FrameGen final : public FrameGenGpu {
         case FrameGenTextureKind::kDepthScales: return &view.depth_scales;
         case FrameGenTextureKind::kDepthScaleVotes: return &view.depth_scale_votes;
         case FrameGenTextureKind::kDepthScaleRaw: return &view.depth_scale_raw;
+        case FrameGenTextureKind::kEngineRaw: return &view.engine_raw[EngineNewest(view)];
+        case FrameGenTextureKind::kEngineRawPrevious: return &view.engine_raw[EnginePrevious(view)];
         default: return nullptr;
         }
     }
@@ -5287,6 +5610,13 @@ class D3D12FrameGen final : public FrameGenGpu {
         effective.depth = effective.depth && view.depth_ready && view.depth[1].resource && validator_.Usable() &&
                           view.depth_generation == validator_.Generation();
         view.depth_ready = false;
+        // Engine motion vectors likewise: captured for this frame (paired
+        // with its color capture), used once.
+        const std::uint8_t engine_newest = EngineNewest(view);
+        recording.engine = view.engine_ready && view.engine_raw[engine_newest].resource &&
+                           view.engine_pair[engine_newest].Matches(submission.source);
+        view.engine_ready = false;
+        motion_paired_ += recording.engine ? 1 : 0;
         effective.trust_stereo = view.trust_stereo;
         view.trust_stereo = false;
         // The hardware matched this frame against the previous one as soon
@@ -5689,6 +6019,22 @@ class D3D12FrameGen final : public FrameGenGpu {
     bool motion_stopped_{false};
     std::string motion_dump_directory_; // DumpMotion
     bool motion_dump_all_{false};
+    // Stage 2: each view's raw fields (VECTORXR_FRAMEGEN_ENGINE_RAW_SLOTS=3:
+    // three) and their format (VECTORXR_FRAMEGEN_ENGINE_MV_RESEARCH=z: RGBA16F,
+    // the vectors' b and a kept); counts for EngineStatus; and the last
+    // submission's time, for the device-removed sentinel (DeviceRemovedReason).
+    std::uint8_t engine_slots_{2};
+    DXGI_FORMAT engine_format_{DXGI_FORMAT_R16G16_FLOAT};
+    std::uint64_t motion_captured_{0};
+    std::uint64_t motion_dispatches_{0};
+    std::uint64_t motion_waits_{0};
+    std::uint64_t motion_unready_{0};
+    std::uint64_t motion_paired_{0};
+    std::optional<std::chrono::steady_clock::time_point> motion_submitted_at_;
+    bool motion_removed_noted_{false};
+    // The raw fields could not be made (EnsureView): engine capture stays
+    // off for the session, Frame Generation runs on without it.
+    bool engine_failed_{false};
     std::unordered_map<XrSwapchain, std::vector<ID3D12Resource*>> images_;
     std::vector<ViewResources> views_;
 };

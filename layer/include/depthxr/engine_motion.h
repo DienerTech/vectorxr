@@ -166,7 +166,11 @@ class FrameGenEngineCensusWorker {
     std::string Flush();
 
   private:
+    // An image's censuses at frames' ends in the window: of informative
+    // frames, and how many of those it changed in; its hash grid's exact
+    // zeros and non-finite texels, of all its texels read.
     struct ImageWindow {
+        std::uint64_t informative{0};
         std::uint64_t changed{0};
         std::uint64_t zeros{0};
         std::uint64_t non_finite{0};
@@ -198,6 +202,10 @@ class FrameGenEngineCensusWorker {
         std::optional<std::array<std::uint64_t, kFrameGenEngineImages>> last_end;
         std::uint64_t last_end_frame{0};
         std::uint32_t last_images{0};
+        // Each image's hash at its own last census at a frame's end, for the
+        // images read so far (bits): stage 2 reads one most frames.
+        std::array<std::uint64_t, kFrameGenEngineImages> last_hash{};
+        std::uint32_t known{0};
         // The worker thread's alone.
         std::map<std::uint64_t, Hashes> hashes;
         std::optional<AxisSolutions> gain; // the last window's fit that solved

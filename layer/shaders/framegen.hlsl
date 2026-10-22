@@ -2962,7 +2962,9 @@ FG_BIND(5) RWTexture2D<float4> g_samples : register(u1);
 // and writes four texels per image into u0: the hashes and the exact-zero
 // and non-finite counts; the large, |e| summed, the longest |e| and the
 // finite count; r, g, b and a summed; the frame's tag (options.y), the
-// image, the region's extent. With FG_CENSUS_SAMPLES one group more writes
+// image, the region's extent. Only the images options.x's mask names are
+// read (stage 2 reads the chosen one alone most frames); the others' groups
+// write nothing. With FG_CENSUS_SAMPLES one group more writes
 // the sparse samples into u1: on a 16x16 grid of the color view's
 // half-resolution texels (size.xy), the three images' raw texels by
 // FG_PASS_DEPTH's nearest rule, then the linear depth there (t3, with
@@ -2971,9 +2973,10 @@ FG_BIND(5) RWTexture2D<float4> g_samples : register(u1);
 #define FG_CENSUS_HASH_GRID 64u
 #define FG_CENSUS_STATS_GRID 32u
 #define FG_CENSUS_SAMPLE_GRID 16u
-// options.x
+// options.x: flags, and from bit 8 the images to read (a bit each).
 #define FG_CENSUS_SAMPLES 1u
 #define FG_CENSUS_DEPTH 2u
+#define FG_CENSUS_IMAGES_SHIFT 8u
 // A vector longer than this, in the image's own units, is counted as large.
 #define FG_CENSUS_LARGE 4.0
 
@@ -3033,7 +3036,7 @@ uint CensusMix(uint x) {
 void CSMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID) {
     const uint t = thread.x;
     const uint image = group.x;
-    const bool census = image < g.size.z;
+    const bool census = image < g.size.z && ((g.options.x >> FG_CENSUS_IMAGES_SHIFT) & (1u << image)) != 0u;
     uint hash_xor = 0u, hash_sum = 0u, zeros = 0u, nonfinite = 0u;
     uint large = 0u, count = 0u;
     float total = 0.0, longest = 0.0;
@@ -3103,7 +3106,7 @@ void CSMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID) {
         g_census[uint2(base + 2u, 0u)] = asuint(g_census_rgba[0]);
         g_census[uint2(base + 3u, 0u)] = uint4(g.options.y, image, uint(g.fov_current.z), uint(g.fov_current.w));
     }
-    if (!census && (g.options.x & FG_CENSUS_SAMPLES) != 0u) {
+    if (image >= g.size.z && (g.options.x & FG_CENSUS_SAMPLES) != 0u) {
         [loop]
         for (uint s = t; s < FG_CENSUS_SAMPLE_GRID * FG_CENSUS_SAMPLE_GRID; s += FG_CENSUS_THREADS) {
             const float2 cell = float2(float(s % FG_CENSUS_SAMPLE_GRID), float(s / FG_CENSUS_SAMPLE_GRID));
@@ -3117,6 +3120,63 @@ void CSMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID) {
             const float depth = (g.options.x & FG_CENSUS_DEPTH) != 0u ? g_depth.Load(int3(q, 0)).r : 0.0;
             g_samples[uint2(s * 4u + 3u, 0u)] = float4(depth, float(g.options.z), float(q.x), float(q.y));
         }
+    }
+}
+#endif
+#endif
+
+#if defined(FG_PASS_ENGINE_CAPTURE)
+#if defined(__spirv__)
+// Direct3D 12 only (FrameGenGpu::CaptureMotion), like FG_PASS_ENGINE_CENSUS.
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID) {
+}
+#else
+FG_BIND(0) Texture2DArray<float4> g_vectors0 : register(t0);
+FG_BIND(1) Texture2DArray<float4> g_vectors1 : register(t1);
+FG_BIND(4) RWTexture2D<float4> g_raw0 : register(u0);
+FG_BIND(5) RWTexture2D<float4> g_raw1 : register(u1);
+
+// Engine motion vectors, stage 2 (FrameGenGpu::CaptureMotion): each eye's
+// motion vector image, as the game rendered it, on the view's half-resolution
+// grid (size.xy) by FG_PASS_DEPTH's nearest rule, so a texel's vector and
+// its depth come from the same rendered texel. No convention is applied: the
+// raw rg goes into the field (rg16f; rgba16f keeps b and a too, research).
+// id.z picks the eye: t0 into u0 from the region at fov_current.xy, extent
+// size.zw, slice fov_previous.z; t1 into u1 from fov_current.zw, extent
+// fov_previous.xy, slice fov_previous.w. options.x eyes.
+// A vector not finite, or longer than FG_ENGINE_RAW_LIMIT on either axis,
+// is stored as FG_ENGINE_INVALID on both; an exact zero stays zero (a cleared
+// sky says something too).
+#define FG_ENGINE_INVALID 65504.0
+#define FG_ENGINE_RAW_LIMIT 16.0
+
+// By its bits: the compiler may take every float to be finite.
+bool EngineFinite(float value) {
+    return (asuint(value) & 0x7f800000u) != 0x7f800000u;
+}
+
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID) {
+    if (any(id.xy >= g.size.xy) || id.z >= g.options.x) {
+        return;
+    }
+    const bool second = id.z == 1u;
+    const float2 offset = second ? g.fov_current.zw : g.fov_current.xy;
+    const float2 extent = second ? g.fov_previous.xy : float2(g.size.zw);
+    const int slice = int(second ? g.fov_previous.w : g.fov_previous.z);
+    const float2 uv = (float2(id.xy) + 0.5) / float2(g.size.xy);
+    const int2 texel = int2(offset + min(uv * extent, extent - 1.0));
+    const float4 raw = second ? g_vectors1.Load(int4(texel, slice, 0)) : g_vectors0.Load(int4(texel, slice, 0));
+    const bool valid = EngineFinite(raw.r) && EngineFinite(raw.g) && abs(raw.r) <= FG_ENGINE_RAW_LIMIT &&
+                       abs(raw.g) <= FG_ENGINE_RAW_LIMIT;
+    const float4 value = float4(valid ? raw.rg : float2(FG_ENGINE_INVALID, FG_ENGINE_INVALID),
+                                EngineFinite(raw.b) ? raw.b : FG_ENGINE_INVALID,
+                                EngineFinite(raw.a) ? raw.a : FG_ENGINE_INVALID);
+    if (second) {
+        g_raw1[id.xy] = value;
+    } else {
+        g_raw0[id.xy] = value;
     }
 }
 #endif

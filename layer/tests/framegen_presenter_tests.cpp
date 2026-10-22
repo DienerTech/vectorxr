@@ -185,10 +185,14 @@ struct GpuLog {
     std::atomic<int> working_memory_queries{0}; // WorkingMemoryBytes calls
     std::atomic<int> depth_captures{0};
     // Engine motion vectors (SupportsEngineMotion): each CaptureMotion
-    // call's jobs, in order.
+    // call's jobs, in order. With engine_unready no capture job is
+    // resampled (as by a backend not set up for them), their census taken.
     bool engine{false};
+    bool engine_unready{false};
     std::mutex motion_mutex;
     std::vector<std::vector<FrameGenMotionJob>> motion_calls;
+    // The color captures made before each call (`captures` then).
+    std::vector<int> motion_captures;
     // Calls at a frame's end, or at a depth release (early).
     int MotionCalls(bool early) {
         std::scoped_lock lock(motion_mutex);
@@ -771,10 +775,17 @@ class FakeGpu final : public FrameGenGpu {
     }
     bool SupportsEngineMotion() const override { return log_->engine; }
     bool CaptureMotion(const std::vector<FrameGenMotionJob>& jobs, const std::vector<FrameGenViewRequest>&,
-                       std::string& error) override {
+                       std::string& error, std::vector<bool>* resampled) override {
         error.clear();
         std::scoped_lock lock(log_->motion_mutex);
         log_->motion_calls.push_back(jobs);
+        log_->motion_captures.push_back(log_->captures);
+        if (resampled) {
+            resampled->clear();
+            for (const FrameGenMotionJob& job : jobs) {
+                resampled->push_back(log_->engine && job.capture && !log_->engine_unready);
+            }
+        }
         return log_->engine;
     }
 
@@ -3850,6 +3861,252 @@ void TestEngineMotionGates() {
         Check(summaries > 0 && named && flips == 1 && cuts == 1,
               "engine gates: the summaries count the nearZ change and the cut (" + std::to_string(summaries) +
                   " summaries, flips " + std::to_string(flips) + ", cuts " + std::to_string(cuts) + ")");
+    }
+}
+
+// Engine motion vectors, stage 2 (VECTORXR_FRAMEGEN_ENGINE_MV=capture). A game
+// that never releases its motion vector images (MSFS) has them captured at
+// each frame's end, after both views' colors (their pair), with a census of
+// every image while the tracker is unsure, and no early census is taken; the
+// backend keeps raw fields (FrameGenTuning::engine_mode) only once a frame
+// came with vectors, analysed just in time. A game releasing them (the
+// specification's way) has them captured at the release, with the released
+// index, paired with the color released before them or else the next one,
+// and the frame's end leaves those views be, unless the backend left them
+// out. Their swapchain is never one the layer holds calls back for
+// (CapturesFrom), the release captures stop with an abandoned frame or the
+// swapchain gone, and a device-removed sentinel keeps the switch off.
+void TestEngineMotionCapture() {
+    const XrSwapchain depth_chain = reinterpret_cast<XrSwapchain>(0x21);
+    const XrSwapchain vectors = reinterpret_cast<XrSwapchain>(0x31);
+    enum class Released { kNever, kAfterColor, kBeforeColor };
+    struct Session {
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        std::unique_ptr<App> app;
+        std::uint64_t frames{0};
+        Released released{Released::kNever};
+        std::uint32_t vector_image{0}; // the image the game released last
+        bool records{true};            // the frames carry the structures
+    };
+    auto start = [&](Session& session, const char* image = "") {
+        session.gpu.depth = true;
+        session.gpu.engine = true;
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "capture");
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV_IMAGE", image);
+        StartPresenter(session.presenter, session.gpu, FrameGenSynthesisMode::kExtrapolate);
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "");
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV_IMAGE", "");
+        session.presenter.TrackSwapchain(depth_chain, 20, 1,
+                                         XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+        session.presenter.TrackSwapchain(vectors, kFloatFormat, 1,
+                                         XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+        session.app = std::make_unique<App>(session.presenter, session.runtime);
+        App& app = *session.app;
+        app.depth.subImage.swapchain = depth_chain;
+        app.depth.subImage.imageRect = {{0, 0}, {1200, 1200}};
+        app.depth.maxDepth = 1.0f;
+        app.depth.nearZ = 0.1f;
+        app.depth.farZ = 1000.0f;
+        // The game's release of its motion vector images, as the layer
+        // hands it over: before its colors or after them.
+        auto release_vectors = [&session, vectors] {
+            session.vector_image = (session.vector_image + 1) % 3;
+            session.presenter.NoteRelease(vectors, session.vector_image);
+            session.presenter.CaptureOnRelease(vectors, session.vector_image);
+        };
+        app.before_release = [&session, release_vectors] {
+            if (session.released == Released::kBeforeColor) release_vectors();
+        };
+        // As the layer: the frame's record, then its capture.
+        app.before_end = [&session, vectors, release_vectors](XrTime time) {
+            if (session.released == Released::kAfterColor) release_vectors();
+            if (!session.records) return;
+            FrameGenEngineMotionFrame record;
+            record.display_time = time;
+            record.projection_frame = ++session.frames;
+            for (std::uint32_t v = 0; v < 2; ++v) {
+                FrameGenEngineMotionView view;
+                view.view = v;
+                view.source = FrameGenMotionSource::kSpaceWarpFb;
+                view.vectors = {vectors, {{0, 0}, {1280, 1280}}, v};
+                view.depth = session.app->depth.subImage;
+                view.depth_is_khr = true;
+                view.color = session.app->views[v].subImage;
+                record.views.push_back(view);
+            }
+            record.complete = true;
+            session.presenter.NoteEngineMotion(record);
+            session.presenter.CaptureEngineMotion();
+        };
+    };
+    auto calls = [](Session& session) {
+        std::scoped_lock lock(session.gpu.motion_mutex);
+        return session.gpu.motion_calls;
+    };
+
+    // Never released: captured at each frame's end, after its colors.
+    {
+        Session session;
+        start(session);
+        for (int i = 0; i < 12; ++i) session.app->Frame();
+        Check(session.gpu.executes > 0 && session.gpu.tuning.engine_mode == FrameGenEngineMode::kCensus,
+              "engine capture: no raw fields for frames generated other than just in time");
+        const auto made = calls(session);
+        Check(made.size() > 4 && session.gpu.MotionCalls(true) == 0,
+              "engine capture: a capture per frame end, no early census");
+        bool jobs_right = true;
+        for (const auto& jobs : made) {
+            jobs_right = jobs_right && jobs.size() == 2 && jobs[0].capture && jobs[1].capture && !jobs[0].samples &&
+                         jobs[0].census_all && !jobs[0].pair_next && !jobs[0].released && jobs[1].vectors.array_index == 1;
+        }
+        Check(jobs_right, "engine capture: both views captured at the end, every image's census while unsure");
+        bool paired = true;
+        {
+            std::scoped_lock lock(session.gpu.motion_mutex);
+            for (std::size_t i = 1; i < session.gpu.motion_captures.size(); ++i) {
+                paired = paired && session.gpu.motion_captures[i] - session.gpu.motion_captures[i - 1] == 2;
+            }
+        }
+        Check(paired, "engine capture: each frame's vectors are captured after both its colors (their pair)");
+        Check(!session.presenter.CapturesFrom(vectors) && session.presenter.CapturesFrom(kLeft),
+              "engine capture: the motion vector swapchain is never one the layer holds calls back for");
+        session.presenter.Stop();
+    }
+
+    // Just in time: the raw fields are asked for once a frame came with
+    // vectors (a bridged session, or a game sending none, never does).
+    {
+        Session session;
+        session.gpu.threaded = session.gpu.jit = true;
+        session.runtime.paced = true;
+        session.records = false;
+        start(session);
+        for (int i = 0; i < 12 || (session.gpu.executes == 0 && i < 200); ++i) session.app->Frame();
+        Check(session.gpu.executes > 0 && session.gpu.tuning.engine_mode == FrameGenEngineMode::kCensus,
+              "engine capture: no raw fields while no frame came with vectors");
+        session.records = true;
+        const int executes = session.gpu.executes;
+        for (int i = 0; i < 12 || (session.gpu.executes <= executes + 1 && i < 200); ++i) session.app->Frame();
+        Check(session.gpu.executes > executes + 1 && session.gpu.tuning.engine_mode == FrameGenEngineMode::kCapture,
+              "engine capture: raw fields once a frame came with vectors, just in time");
+        session.presenter.Stop();
+        Check(!session.runtime.ordering_violation && !g_release_violation, "engine capture: just in time, calls stayed ordered");
+    }
+
+    // VECTORXR_FRAMEGEN_ENGINE_MV_IMAGE=2: that image, every image's census
+    // every 30th frame only.
+    {
+        Session session;
+        start(session, "2");
+        for (int i = 0; i < 40; ++i) session.app->Frame();
+        bool image = true;
+        int all = 0;
+        for (const auto& jobs : calls(session)) {
+            image = image && jobs.front().vectors.image_index == 2;
+            all += jobs.front().census_all ? 1 : 0;
+            image = image && jobs.front().census_all == (jobs.front().frame % 30 == 0);
+        }
+        Check(image && all == 1, "engine capture: the image the switch names, all images every 30th frame");
+        session.presenter.Stop();
+    }
+
+    // Released after the colors: captured at the release with its index,
+    // paired with the colors captured before; the frame's end leaves them.
+    for (const Released when : {Released::kAfterColor, Released::kBeforeColor}) {
+        const std::string order = when == Released::kAfterColor ? "after" : "before";
+        Session session;
+        start(session);
+        session.released = when;
+        for (int i = 0; i < 12; ++i) session.app->Frame();
+        const std::size_t before = calls(session).size();
+        for (int i = 0; i < 6; ++i) session.app->Frame();
+        const auto made = calls(session);
+        bool released = made.size() == before + 6;
+        for (std::size_t i = before; i < made.size() && released; ++i) {
+            const auto& jobs = made[i];
+            released = jobs.size() == 2 && jobs[0].capture && jobs[0].released && jobs[0].vectors.image_index == *jobs[0].released &&
+                       jobs[1].vectors.array_index == 1 && !jobs[0].census_all &&
+                       jobs[0].pair_next == (when == Released::kBeforeColor);
+        }
+        Check(released, "engine capture: vectors released " + order +
+                            " their colors are captured at the release, with its index, and not again at the end");
+        Check(made.back()[0].vectors.image_index == session.vector_image,
+              "engine capture: the index captured is the one released");
+        Check(!session.presenter.CapturesFrom(vectors),
+              "engine capture: released vectors never make their swapchain one the layer holds calls back for");
+
+        // Vectors the backend left out at their release (not set up for
+        // them) are captured again at the frame's end, with every image's
+        // census (the tracker unsure), the release's census without.
+        session.gpu.engine_unready = true;
+        const std::size_t left_out = calls(session).size();
+        for (int i = 0; i < 3; ++i) session.app->Frame();
+        session.gpu.engine_unready = false;
+        const auto retried = calls(session);
+        bool again = retried.size() == left_out + 6;
+        for (std::size_t i = left_out; i + 1 < retried.size() && again; i += 2) {
+            again = !retried[i][0].census_all && retried[i][0].vectors.image_index == *retried[i][0].released &&
+                    retried[i + 1].size() == 2 && retried[i + 1][0].census_all;
+        }
+        Check(again, "engine capture: vectors released " + order +
+                         " their colors but left out by the backend are captured again at the frame's end");
+
+        // An abandoned frame: its release is not captured at the release
+        // (the record it was named by is gone).
+        const XrFrameState state = session.app->Wait();
+        session.app->Begin();
+        session.app->Release();
+        session.presenter.AbandonFrame(state.predictedDisplayTime);
+        const std::size_t abandoned = calls(session).size();
+        const XrFrameState next = session.app->Wait();
+        session.app->Begin();
+        session.app->Release();
+        if (when == Released::kAfterColor) {
+            session.vector_image = (session.vector_image + 1) % 3;
+            session.presenter.NoteRelease(vectors, session.vector_image);
+            session.presenter.CaptureOnRelease(vectors, session.vector_image);
+        }
+        Check(calls(session).size() == abandoned, "engine capture: no capture at a release after an abandoned frame");
+        session.released = Released::kNever;
+        Check(XR_SUCCEEDED(session.app->End(next.predictedDisplayTime)), "engine capture: the frame ends");
+        session.released = when;
+
+        // The swapchain destroyed: nothing names it any more.
+        for (int i = 0; i < 3; ++i) session.app->Frame();
+        Check(session.presenter.ForgetSwapchain(vectors), "engine capture: the swapchain is forgotten");
+        const std::size_t forgotten = calls(session).size();
+        session.vector_image = (session.vector_image + 1) % 3;
+        session.presenter.NoteRelease(vectors, session.vector_image);
+        session.presenter.CaptureOnRelease(vectors, session.vector_image);
+        Check(calls(session).size() == forgotten, "engine capture: no capture of a destroyed swapchain's release");
+        session.presenter.Stop();
+        Check(!session.runtime.ordering_violation && !g_release_violation, "engine capture: calls stayed ordered");
+    }
+
+    // A device removed right after a session read this game's vectors: the
+    // next session reads none until the file is deleted.
+    {
+        const std::filesystem::path removed = FrameGenEngineRemovedPath();
+        std::error_code ignored;
+        std::filesystem::create_directories(removed.parent_path(), ignored);
+        std::ofstream(removed) << "test\n";
+        {
+            Session session;
+            start(session);
+            for (int i = 0; i < 12; ++i) session.app->Frame();
+            Check(session.gpu.executes > 0 && calls(session).empty() &&
+                      session.gpu.tuning.engine_mode == FrameGenEngineMode::kOff,
+                  "engine capture: the device-removed sentinel keeps the switch off");
+            session.presenter.Stop();
+        }
+        std::filesystem::remove(removed, ignored);
+        Session session;
+        start(session);
+        for (int i = 0; i < 12; ++i) session.app->Frame();
+        Check(!calls(session).empty(), "engine capture: deleting the sentinel lets the switch work again");
+        session.presenter.Stop();
     }
 }
 
@@ -11455,6 +11712,7 @@ int main(int argc, char** argv) {
     RUN(TestDepthCapture);
     RUN(TestEngineMotionCensus);
     RUN(TestEngineMotionGates);
+    RUN(TestEngineMotionCapture);
     RUN(TestResearchFileSessions);
     RUN(TestAutomaticMultiplier);
     RUN(TestThreadedExtrapolation);

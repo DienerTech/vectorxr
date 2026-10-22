@@ -2,6 +2,7 @@
 
 #include "depthxr/framegen_presenter.h"
 
+#include "depthxr/config_path.h"
 #include "depthxr/logger.h"
 
 #include <algorithm>
@@ -469,10 +470,46 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
     const std::uint64_t research_reads = ResearchFileReads();
     engine_requested_ =
         ParseFrameGenEngineMode(ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_MV").value_or("").c_str());
+    // A game whose GPU device was removed within 2 s of its motion vectors
+    // being read has them read no more, until the file the backend wrote
+    // then is deleted (FrameGenEngineRemovedPath).
+    std::string engine_removed;
+    if (engine_requested_ != FrameGenEngineMode::kOff) {
+        const std::filesystem::path removed = FrameGenEngineRemovedPath();
+        std::error_code ignored;
+        if (!removed.empty() && std::filesystem::exists(removed, ignored)) {
+            engine_removed = std::string("Frame Generation: VECTORXR_FRAMEGEN_ENGINE_MV=") + ToString(engine_requested_) +
+                             " is ignored: the GPU device was removed right after this game's motion vectors were read "
+                             "in an earlier session. Delete " +
+                             PathToUtf8(removed) + " to read them again.";
+            engine_requested_ = FrameGenEngineMode::kOff;
+        }
+    }
     // A row per view and frame (VECTORXR_FRAMEGEN_ENGINE_MV_CSV=1), beside
     // the logs.
     const bool engine_rows = engine_requested_ != FrameGenEngineMode::kOff &&
                              ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_MV_CSV") == "1";
+    // Stage 2: the image a frame's vectors are taken from
+    // (VECTORXR_FRAMEGEN_ENGINE_MV_IMAGE=released|color|depth|0|1|2; auto,
+    // the default: the census worker's tracker).
+    engine_image_.reset();
+    if (engine_requested_ >= FrameGenEngineMode::kCapture) {
+        using Policy = FrameGenEngineImageTracker::Policy;
+        const std::string image = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_MV_IMAGE").value_or("auto");
+        if (image == "released") {
+            engine_image_ = FrameGenEngineImageTracker::Hypothesis{Policy::kReleased};
+        } else if (image == "color" || image == "colour") {
+            engine_image_ = FrameGenEngineImageTracker::Hypothesis{Policy::kColor};
+        } else if (image == "depth") {
+            engine_image_ = FrameGenEngineImageTracker::Hypothesis{Policy::kDepth};
+        } else if (image == "0" || image == "1" || image == "2") {
+            engine_image_ = FrameGenEngineImageTracker::Hypothesis{Policy::kConstant,
+                                                                   static_cast<std::uint32_t>(image[0] - '0')};
+        }
+    }
+    engine_released_.clear();
+    engine_capturable_ = false;
+    motion_targets_.clear();
     engine_frame_ = {};
     engine_previous_ = {};
     engine_noted_ = engine_invalid_ = 0;
@@ -558,10 +595,23 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
                 csv = (logs / (std::string("mv-research-") + stamp + ".csv")).string();
             }
             engine_worker_ = std::make_shared<FrameGenEngineCensusWorker>(logger_, csv);
-            engine_text = std::string("Frame Generation engine motion vectors: ") + ToString(engine_requested_) +
-                          " (research, stage 0): the game's motion vector images are fingerprinted and sampled while "
-                          "frames are generated, generated frames are made as without them" +
-                          (csv.empty() ? std::string(".") : ", rows in " + csv + ".");
+            engine_text =
+                std::string("Frame Generation engine motion vectors: ") + ToString(engine_requested_) +
+                (engine_requested_ == FrameGenEngineMode::kCensus
+                     ? " (research, stage 0): the game's motion vector images are fingerprinted and sampled while "
+                       "frames are generated"
+                     : std::string(" (research, stage 2): while frames are generated, the image each frame's vectors "
+                                   "are in is resampled to each eye's half-resolution grid, at the game's release of "
+                                   "it or at its xrEndFrame (image: ") +
+                           (engine_image_ ? ToString(engine_image_->policy) +
+                                                (engine_image_->policy == FrameGenEngineImageTracker::Policy::kConstant
+                                                     ? " " + std::to_string(engine_image_->parameter)
+                                                     : std::string()) +
+                                                ", VECTORXR_FRAMEGEN_ENGINE_MV_IMAGE"
+                                          : std::string("tracked")) +
+                           "), with a census of it") +
+                ", generated frames are made as without them" +
+                (csv.empty() ? std::string(".") : ", rows in " + csv + ".");
         }
     }
     if (logger_) {
@@ -570,6 +620,9 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
                       ", motionEstimation=" + ToString(settings_.motion_estimation) +
                       ", diagnosticView=" + DiagnosticViewText(settings_.diagnostic_view) +
                       "; frame pacing is owned by Frame Generation (Turbo stays off).");
+        if (!engine_removed.empty()) {
+            logger_->Info(engine_removed);
+        }
         if (!engine_text.empty()) {
             logger_->Info(engine_text);
         }
@@ -1371,11 +1424,20 @@ void FrameGenPresenter::CaptureOnRelease(XrSwapchain swapchain, std::uint32_t im
             return false;
         }
         const auto record = swapchains_.find(swapchain);
-        return record != swapchains_.end() && record->second.sample_count == 1 &&
-               (record->second.depth ? record->second.depth_capturable
-                                     : record->second.capturable && !record->second.motion) &&
-               std::any_of(capture_targets_.begin(), capture_targets_.end(),
-                           [&](const CaptureTarget& target) { return target.swapchain == swapchain; });
+        if (record == swapchains_.end() || record->second.sample_count != 1) {
+            return false;
+        }
+        auto named = [&](const std::vector<CaptureTarget>& targets) {
+            return std::any_of(targets.begin(), targets.end(),
+                               [&](const CaptureTarget& target) { return target.swapchain == swapchain; });
+        };
+        // A frame's motion vectors (never a color image, whatever its
+        // format): captured as a motion target only.
+        if (record->second.motion) {
+            return named(motion_targets_);
+        }
+        return (record->second.depth ? record->second.depth_capturable : record->second.capturable) &&
+               named(capture_targets_);
     };
     {
         // Most releases have nothing to capture; check before the queue lock.
@@ -1403,6 +1465,10 @@ void FrameGenPresenter::CaptureOnRelease(XrSwapchain swapchain, std::uint32_t im
         std::optional<FrameGenMotionJob> motion;
     };
     std::vector<Job> jobs;
+    // A frame's motion vectors at their release (stage 2), with each view's
+    // color request.
+    std::vector<FrameGenMotionJob> motion;
+    std::vector<FrameGenViewRequest> motion_color;
     FrameGenFlowQuality quality;
     std::uint64_t releases = 0; // the swapchain's releases the jobs capture
     {
@@ -1424,7 +1490,7 @@ void FrameGenPresenter::CaptureOnRelease(XrSwapchain swapchain, std::uint32_t im
                 job.encoding = target.encoding;
                 job.source = {swapchain, image_index, target.array_index, target.rect, record->second.format};
                 job.request.extent = target.color_extent;
-                if (engine_requested_ != FrameGenEngineMode::kOff && engine_worker_ && engine_frame_.valid) {
+                if (engine_requested_ == FrameGenEngineMode::kCensus && engine_worker_ && engine_frame_.valid) {
                     std::vector<FrameGenMotionJob> motion;
                     std::vector<FrameGenViewRequest> color;
                     EngineJobsLocked(engine_frame_, motion, color);
@@ -1460,6 +1526,44 @@ void FrameGenPresenter::CaptureOnRelease(XrSwapchain swapchain, std::uint32_t im
                                   static_cast<std::uint32_t>(target.rect.extent.height)};
             job.request.output = *kind;
             jobs.push_back(job);
+        }
+        // Stage 2: a view's motion vectors released (the specification's
+        // way), captured as released and paired with the view's color of
+        // this frame: captured already when released before them, else the
+        // next one (`pair_next`). xrEndFrame captures the views not captured
+        // here (CaptureEngineMotion).
+        if (!motion_targets_.empty() && engine_frame_.valid) {
+            std::vector<FrameGenMotionJob> all;
+            std::vector<FrameGenViewRequest> color;
+            EngineJobsLocked(engine_frame_, all, color);
+            for (const CaptureTarget& target : motion_targets_) {
+                for (std::size_t i = 0; i < all.size() && target.swapchain == swapchain; ++i) {
+                    FrameGenMotionJob job = all[i];
+                    if (job.view != target.view) {
+                        continue;
+                    }
+                    job.vectors.image_index = image_index;
+                    job.released = image_index;
+                    job.frame = engine_frame_.frame.projection_frame + 1;
+                    job.census_all = job.samples = false;
+                    job.capture = true;
+                    const FrameGenEngineMotionView& view = engine_frame_.frame.views[i];
+                    const auto color_record = swapchains_.find(view.color.swapchain);
+                    const bool color_released = color_record != swapchains_.end() && i < engine_frame_.color_releases.size() &&
+                                                color_record->second.releases > engine_frame_.color_releases[i];
+                    job.pair_next = !color_released;
+                    if (color_released && color_record->second.released) {
+                        job.color_index = *color_record->second.released;
+                    }
+                    if (const auto depth = swapchains_.find(view.depth.swapchain);
+                        depth != swapchains_.end() && depth->second.released) {
+                        job.depth_index = *depth->second.released;
+                    }
+                    motion.push_back(job);
+                    motion_color.resize(std::max(motion_color.size(), job.view + 1));
+                    motion_color[job.view] = color[job.view];
+                }
+            }
         }
     }
     std::uint64_t captured = 0;
@@ -1501,8 +1605,15 @@ void FrameGenPresenter::CaptureOnRelease(XrSwapchain swapchain, std::uint32_t im
         }
         census = tracked && gpu_->CaptureMotion(early, early_color, error);
     }
+    bool motion_captured = false;
+    std::vector<bool> resampled; // per motion job
+    if (!motion.empty()) {
+        std::string error;
+        motion_captured =
+            gpu_->Track(swapchain, xr_.images, error) && gpu_->CaptureMotion(motion, motion_color, error, &resampled);
+    }
     // Still under the GPU lock: what the game's waits are held for.
-    const std::uint64_t mark = captured || census ? gpu_->CaptureMark() : 0;
+    const std::uint64_t mark = captured || census || motion_captured ? gpu_->CaptureMark() : 0;
     trace_.Record("cap", reinterpret_cast<std::uint64_t>(swapchain), image_index, static_cast<std::int64_t>(captured),
                   static_cast<std::int64_t>(jobs.size()), static_cast<std::int64_t>(releases),
                   static_cast<std::int64_t>(mark));
@@ -1527,6 +1638,15 @@ void FrameGenPresenter::CaptureOnRelease(XrSwapchain swapchain, std::uint32_t im
         if (job.depth && job.ok) {
             depth_decoded_.resize(std::max(depth_decoded_.size(), job.view + 1));
             depth_decoded_[job.view] = job.encoding;
+        }
+    }
+    // ...and the views whose motion vectors were captured at their release
+    // (resampled: a view the backend left out is tried again at the frame's
+    // end): the frame's end leaves them be.
+    for (std::size_t k = 0; k < motion.size() && motion_captured; ++k) {
+        if (k < resampled.size() && resampled[k]) {
+            engine_released_.resize(std::max(engine_released_.size(), motion[k].view + 1));
+            engine_released_[motion[k].view] = 1;
         }
     }
     if (logger_ && !failure.empty() && !logged_capture_failure_) {
@@ -1610,6 +1730,28 @@ void FrameGenPresenter::NoteEngineMotion(FrameGenEngineMotionFrame frame, bool b
                 }
             }
         }
+        // Vectors to capture: the backend's raw fields are made from now on
+        // (Generate's FrameGenTuning::engine_mode).
+        engine_capturable_ = engine_capturable_ || (engine_requested_ >= FrameGenEngineMode::kCapture && views > 0);
+        // Stage 2: motion vector images the game released for this frame are
+        // captured at their next release, for the next frame (its end
+        // captures the others).
+        motion_targets_.clear();
+        for (std::size_t i = 0; i < views && engine_requested_ >= FrameGenEngineMode::kCapture; ++i) {
+            if (!record.released[i]) {
+                continue;
+            }
+            const FrameGenEngineMotionView& view = frame.views[i];
+            CaptureTarget target;
+            target.swapchain = view.vectors.swapchain;
+            target.array_index = view.vectors.imageArrayIndex;
+            target.rect = view.vectors.imageRect;
+            target.view = view.view;
+            target.motion = true;
+            target.color_extent = {static_cast<std::uint32_t>(std::max(view.color.imageRect.extent.width, 0)),
+                                   static_cast<std::uint32_t>(std::max(view.color.imageRect.extent.height, 0))};
+            motion_targets_.push_back(target);
+        }
         // The frame before's record is this frame's pair: the frame right
         // before it, with no pause between.
         const bool continuous = engine_frame_.valid && engine_frame_.frame.projection_frame + 1 == frame.projection_frame &&
@@ -1666,23 +1808,63 @@ void FrameGenPresenter::EngineJobsLocked(const EngineFrame& frame, std::vector<F
 
 void FrameGenPresenter::CaptureEngineMotion() {
     std::vector<FrameGenMotionJob> jobs;
+    std::vector<std::size_t> places; // each job's view in the record
     std::vector<FrameGenViewRequest> color;
     std::shared_ptr<FrameGenEngineCensusWorker> worker;
+    std::optional<FrameGenEngineImageTracker::Hypothesis> image;
+    bool capture = false;
+    std::uint64_t frame = 0;
     {
         std::scoped_lock lock(mutex_);
+        // The views captured at their release since the last frame's end
+        // (CaptureOnRelease): this frame's.
+        const std::vector<std::uint8_t> released = std::exchange(engine_released_, {});
         if (engine_requested_ == FrameGenEngineMode::kOff || !engine_worker_ || !engine_frame_.valid ||
             engine_frame_.frame.views.empty() || !CapturingLocked()) {
             return;
         }
         worker = engine_worker_;
-        EngineJobsLocked(engine_frame_, jobs, color);
+        capture = engine_requested_ >= FrameGenEngineMode::kCapture;
+        image = engine_image_;
+        frame = engine_frame_.frame.projection_frame;
+        std::vector<FrameGenMotionJob> all;
+        EngineJobsLocked(engine_frame_, all, color);
+        for (std::size_t i = 0; i < all.size(); ++i) {
+            if (all[i].view < released.size() && released[all[i].view]) {
+                engine_frame_.captured[i] = 1;
+            } else {
+                jobs.push_back(all[i]);
+                places.push_back(i);
+            }
+        }
     }
     for (FrameGenMotionJob& job : jobs) {
-        job.vectors.image_index = worker->Image(job.view, job.frame, job.color_index, job.depth_index, job.released)
-                                      .value_or(job.vectors.image_index);
+        const std::optional<std::uint32_t> tracked =
+            worker->Image(job.view, job.frame, job.color_index, job.depth_index, job.released);
+        job.vectors.image_index = tracked.value_or(job.vectors.image_index);
+        if (!capture) {
+            continue;
+        }
+        // Stage 2: the image VECTORXR_FRAMEGEN_ENGINE_MV_IMAGE names, else the
+        // tracker's; its census alone, but every image's while the tracker is
+        // not sure which one is written, and every 30th frame (a change of
+        // the game's way shows only there).
+        using Policy = FrameGenEngineImageTracker::Policy;
+        if (image) {
+            job.vectors.image_index = image->policy == Policy::kReleased ? job.released.value_or(job.color_index)
+                                      : image->policy == Policy::kColor  ? job.color_index
+                                      : image->policy == Policy::kDepth  ? job.depth_index
+                                                                         : image->parameter;
+            job.vectors.image_index %= kFrameGenEngineImages;
+        }
+        const std::optional<FrameGenEngineCensusWorker::ViewSummary> summary = worker->Summarize(job.view);
+        job.census_all = job.frame % 30 == 0 || (!image && !(summary && summary->locked));
+        job.samples = false;
+        job.capture = true;
     }
     std::string error;
     bool ok = true;
+    std::vector<bool> resampled; // per job (stage 2)
     FrameGenEngineStatus status;
     std::uint64_t mark = 0;
     {
@@ -1705,7 +1887,7 @@ void FrameGenPresenter::CaptureEngineMotion() {
         // copy of them all is taken, then the image the vectors are thought to
         // be in.
         bool dumping = false;
-        if (ok && CaptureUnderWay() && capture_motion_ && capture_motion_armed_ != capture_index_) {
+        if (ok && !jobs.empty() && CaptureUnderWay() && capture_motion_ && capture_motion_armed_ != capture_index_) {
             const std::filesystem::path directory =
                 std::filesystem::path(capture_root_) / ("frame-" + std::to_string(capture_index_));
             std::error_code ignored;
@@ -1713,7 +1895,9 @@ void FrameGenPresenter::CaptureEngineMotion() {
             capture_motion_armed_ = capture_index_;
             dumping = gpu_->DumpMotion(directory.string(), capture_motion_all_);
         }
-        ok = ok && gpu_->CaptureMotion(jobs, color, error);
+        // Views all captured at their release need no call; their censuses
+        // are taken from the backend all the same.
+        ok = ok && !jobs.empty() && gpu_->CaptureMotion(jobs, color, error, &resampled);
         if (ok && dumping) {
             capture_motion_all_ = false;
         }
@@ -1728,8 +1912,13 @@ void FrameGenPresenter::CaptureEngineMotion() {
     {
         std::scoped_lock lock(mutex_);
         last_capture_mark_ = std::max(last_capture_mark_, mark);
-        if (ok && engine_frame_.valid && engine_frame_.frame.projection_frame == jobs.front().frame) {
-            std::fill(engine_frame_.captured.begin(), engine_frame_.captured.end(), std::uint8_t{1});
+        // A view's vectors were read: their census (stage 0), from stage 2
+        // their resample (a view the backend left out was not).
+        if (ok && engine_frame_.valid && engine_frame_.frame.projection_frame == frame) {
+            for (std::size_t k = 0; k < places.size(); ++k) {
+                const bool read = !capture || (k < resampled.size() && resampled[k]);
+                if (read && places[k] < engine_frame_.captured.size()) engine_frame_.captured[places[k]] = 1;
+            }
         }
         if (logger_) {
             for (; engine_notes_logged_ < status.notes.size(); ++engine_notes_logged_) {
@@ -2895,6 +3084,8 @@ void FrameGenPresenter::InvalidateContinuityLocked() {
 void FrameGenPresenter::ForgetEngineFramesLocked() {
     engine_frame_ = {};
     engine_previous_ = {};
+    motion_targets_.clear();
+    engine_released_.clear();
 }
 
 std::optional<FrameGenEngineGateRecord> FrameGenPresenter::EngineGateRecordLocked(const EngineFrame& frame) const {
@@ -2940,6 +3131,15 @@ bool FrameGenPresenter::EngineGatesLocked(const XrCompositionLayerProjection& pr
         return false;
     }
     EngineFrame& kept = engine_frame_;
+    // Frames no gate holds back, and those whose vectors were read on every
+    // view (stage 2: captured, at their release or the frame's end).
+    if (gates == 0) {
+        ++engine_window_.open;
+        engine_window_.captured += !kept.captured.empty() && std::all_of(kept.captured.begin(), kept.captured.end(),
+                                                                         [](std::uint8_t c) { return c != 0; })
+                                       ? 1
+                                       : 0;
+    }
     kept.sequence = frame.sequence;
     kept.gates = gates;
     kept.unsettled = (gates & (kFrameGenEngineCut | kFrameGenEngineDecode | kFrameGenEngineRecreate)) != 0 ||
@@ -2983,7 +3183,9 @@ void FrameGenPresenter::LogEngineSummaryLocked(double seconds) {
     // in (a frame in several); flips: frames with a view's depth decoded as
     // the frame before described it; cuts: camera cuts among the records
     // (passing frames through too); pivotMoving: frames Pivot's change to
-    // the views moved in; calibrate: frames that may calibrate.
+    // the views moved in; calibrate: frames that may calibrate; captured:
+    // frames no gate held back whose vectors were read on every view (the
+    // census, from stage 2 their capture), of all frames no gate held back.
     std::string gated;
     std::string names;
     for (std::size_t i = 0; i < kFrameGenEngineGateCount; ++i) {
@@ -2994,7 +3196,8 @@ void FrameGenPresenter::LogEngineSummaryLocked(double seconds) {
                   ", structs=" + std::to_string(window.structs) + ", gated=" + gated + " (" + names +
                   "), flips=" + std::to_string(window.flips) + ", cuts=" + std::to_string(window.cuts) +
                   ", pivotMoving=" + std::to_string(window.pivot_moving) +
-                  ", calibrate=" + std::to_string(window.calibrate) + ".");
+                  ", calibrate=" + std::to_string(window.calibrate) + ", captured=" + std::to_string(window.captured) +
+                  "/" + std::to_string(window.open) + ".");
 }
 
 bool FrameGenPresenter::ResearchFileInUse() const {
@@ -4431,6 +4634,15 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         // eye blends them, and a focus view limits its periphery's motion.
         tuning.composition = analyze ? composition : nullptr;
         tuning.history_ring = analyze && !composition ? jit_canvas_ring_ : 0;
+        // Engine motion vectors: from stage 2 the backend keeps raw fields
+        // for them (made as the views are set up), in a session whose frames
+        // came with vectors the layer reads, for frames the engine path may
+        // serve (two views analysed just in time, not composed: gate G9).
+        // Elsewhere (a bridged session, a game sending none) it makes none:
+        // kCensus. A frame asking for none in between keeps those made.
+        tuning.engine_mode = engine_capturable_ && analyze && !composition && projection.viewCount == 2
+                                 ? engine_requested_
+                                 : std::min(engine_requested_, FrameGenEngineMode::kCensus);
         // The frame's engine motion record and the frame before's, as the
         // frame gates read them: taken before a pause forgets them (just in
         // time, AnalyzeJit's pause check came first: such a frame counts as
@@ -4957,11 +5169,15 @@ void FrameGenPresenter::WriteCaptureNotes(const std::string& directory, const Ca
     EngineFrame frame;
     EngineFrame previous;
     std::shared_ptr<FrameGenEngineCensusWorker> worker;
+    FrameGenEngineMode mode = FrameGenEngineMode::kOff;
+    std::optional<FrameGenEngineImageTracker::Hypothesis> image;
     {
         std::scoped_lock lock(mutex_);
         frame = engine_frame_;
         previous = engine_previous_;
         worker = engine_worker_;
+        mode = engine_requested_;
+        image = engine_image_;
     }
     if (!frame.valid) {
         return;
@@ -5049,6 +5265,11 @@ void FrameGenPresenter::WriteCaptureNotes(const std::string& directory, const Ca
     }
     motion << "sequence " << frame.sequence << "\ngates " << frame.gates << ' ' << (gates.empty() ? "none" : gates)
            << "\ncut " << frame.cut << "\npivot_moved " << frame.pivot_moved << "\ncalibrate " << frame.calibrate << '\n';
+    // The switch, and the image VECTORXR_FRAMEGEN_ENGINE_MV_IMAGE names (stage
+    // 2; none: the tracker's, as `chosen` above).
+    motion << "engine_mode " << ToString(mode) << "\nimage_override "
+           << (image ? std::string(ToString(image->policy)) + " " + std::to_string(image->parameter) : std::string("none"))
+           << '\n';
     // Later stages' choices; none in stage 0.
     motion << "convention none\ndelta_model none\n";
 }

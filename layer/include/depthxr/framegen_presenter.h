@@ -390,7 +390,9 @@ class FrameGenPresenter {
     // Call before forwarding a release: captures the image into history while
     // the application still owns it. With VECTORXR_FRAMEGEN_ENGINE_MV=census,
     // a view's depth release also takes the early census of its motion
-    // vector images (named by the last frame's record).
+    // vector images (named by the last frame's record); with =capture, a game
+    // releasing its motion vector images (the specification's way) has them
+    // captured here, with the released index (motion_targets_).
     void CaptureOnRelease(XrSwapchain swapchain, std::uint32_t image_index);
     // Engine motion vectors (XR_FB_space_warp, XR_EXT_frame_synthesis): in
     // xrEndFrame, under the layer's lock, every frame while the layer takes
@@ -403,7 +405,9 @@ class FrameGenPresenter {
     // ...then, once the frame's bridged releases were handed over: with
     // VECTORXR_FRAMEGEN_ENGINE_MV=census and while frames are generated, its
     // motion vector images are read where the game left them (it may never
-    // release them): their census (FrameGenGpu::CaptureMotion).
+    // release them): their census (FrameGenGpu::CaptureMotion). With
+    // =capture the image the frame's vectors are in is captured as well, for
+    // the views not captured at their release.
     void CaptureEngineMotion();
 
     XrResult WaitFrame(XrSession session, const XrFrameWaitInfo* info, XrFrameState* state, const FrameGenRuntimeCalls& calls);
@@ -674,7 +678,9 @@ class FrameGenPresenter {
         // its color image.
         bool depth{false};
         FrameGenDepthEncoding encoding;
-        FrameGenExtent color_extent; // the color view the depth belongs to
+        FrameGenExtent color_extent; // the color view the depth (or the motion vectors) belong to
+        // A view's motion vector image (stage 2: motion_targets_ only).
+        bool motion{false};
     };
 
     // Quad views: a view's latest color capture (CaptureOnRelease), as the
@@ -1128,6 +1134,13 @@ class FrameGenPresenter {
     std::uint64_t wait_sequence_{0};
     XrTime last_returned_time_{0};
     std::vector<CaptureTarget> capture_targets_;
+    // Engine motion vectors (stage 2): the motion vector images a game
+    // following the specification released for the last frame, captured at
+    // their next release (CaptureOnRelease). Never in capture_targets_: the
+    // layer holds back calls on those swapchains for a frame's submission
+    // (FrameGenLazy, CapturesFrom), which flushes only the swapchains its
+    // layers name, and none names these.
+    std::vector<CaptureTarget> motion_targets_;
     std::vector<OutputKinds> output_kinds_;
     std::thread::id end_thread_; // the thread that last ended a frame
     bool logged_claimed_wait_{false};
@@ -1752,7 +1765,8 @@ class FrameGenPresenter {
     // Engine motion vectors (VECTORXR_FRAMEGEN_ENGINE_MV, read at Start;
     // NoteEngineMotion, CaptureEngineMotion). Under mutex_: the frame's
     // record and the frame before's, each with what its views' swapchains
-    // had released then and whether its census was taken at its end.
+    // had released then and whether its vectors were read (the census at its
+    // end; from stage 2 their capture, at its end or at their release).
     struct EngineFrame {
         bool valid{false};
         FrameGenEngineMotionFrame frame;
@@ -1777,13 +1791,24 @@ class FrameGenPresenter {
         bool calibrate{false};
     };
     // The census jobs for `frame`'s views (stage 0: every image, sampled at
-    // its end), with each view's color request.
+    // its end; stage 2 captures too, CaptureEngineMotion chooses), with each
+    // view's color request.
     void EngineJobsLocked(const EngineFrame& frame, std::vector<FrameGenMotionJob>& jobs,
                           std::vector<FrameGenViewRequest>& color) const;
     // A pause, an abandoned frame or a swapchain gone: the records are not a
-    // frame's and the one before's any more.
+    // frame's and the one before's any more, nor are the motion targets.
     void ForgetEngineFramesLocked();
     FrameGenEngineMode engine_requested_{FrameGenEngineMode::kOff};
+    // Stage 2: the image a frame's vectors are taken from
+    // (VECTORXR_FRAMEGEN_ENGINE_MV_IMAGE=released|color|depth|0|1|2; none:
+    // auto, the census worker's tracker), and per view whether they were
+    // captured at their release since the last frame's end (CaptureOnRelease):
+    // its end captures the others.
+    std::optional<FrameGenEngineImageTracker::Hypothesis> engine_image_;
+    std::vector<std::uint8_t> engine_released_;
+    // Stage 2: a frame of this session came with motion vectors the layer
+    // reads (not bridged): only then are the backend's raw fields made.
+    bool engine_capturable_{false};
     EngineFrame engine_frame_;
     EngineFrame engine_previous_;
     // The census worker, while a session's backend reads motion vectors.
@@ -1827,7 +1852,9 @@ class FrameGenPresenter {
     // Since the last summary: real frames generated from, those whose record
     // had a structure on every view, frames each gate held back, frames whose
     // depth was decoded as another frame described it, camera cuts among the
-    // records, frames Pivot's change moved in, and frames that may calibrate.
+    // records, frames Pivot's change moved in, and frames that may calibrate;
+    // frames no gate held back, and those of them whose vectors were read on
+    // every view (stage 2: captured).
     struct EngineWindow {
         std::uint64_t frames{0};
         std::uint64_t structs{0};
@@ -1836,6 +1863,8 @@ class FrameGenPresenter {
         std::uint64_t cuts{0};
         std::uint64_t pivot_moving{0};
         std::uint64_t calibrate{0};
+        std::uint64_t open{0};
+        std::uint64_t captured{0};
     };
     EngineWindow engine_window_;
     // Timed: teardown never waits on them for long (LockForTeardown).

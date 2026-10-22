@@ -395,6 +395,9 @@ void FrameGenEngineCensusWorker::ProcessCensus(const FrameGenEngineCensus& censu
         ++window_gpu_samples_;
     }
     const std::uint32_t images = std::min(census.images, kFrameGenEngineImages);
+    // The images the census read: every one (stage 0; stage 2 while the
+    // image is not known, and every 30th frame), else the chosen one.
+    const std::uint32_t censused = census.censused & ((1u << images) - 1u);
     std::array<std::uint64_t, kFrameGenEngineImages> hashes{};
     for (std::uint32_t i = 0; i < images; ++i) {
         hashes[i] = census.image[i].Hash();
@@ -407,23 +410,27 @@ void FrameGenEngineCensusWorker::ProcessCensus(const FrameGenEngineCensus& censu
         while (state.hashes.size() > kKeptHashes) state.hashes.erase(state.hashes.begin());
         return;
     }
-    // The images that changed since this view's last census.
+    // The images read that changed since their own last census (the images
+    // not read keep theirs).
+    const std::uint32_t known = state.last_images == images ? state.known : 0u;
     std::uint32_t changed = 0;
     std::uint32_t changed_count = 0;
     std::optional<std::uint32_t> written;
-    if (state.last_end) {
-        for (std::uint32_t i = 0; i < images; ++i) {
-            if ((*state.last_end)[i] != hashes[i]) {
-                changed |= 1u << i;
-                ++changed_count;
-                written = i;
-            }
+    for (std::uint32_t i = 0; i < images; ++i) {
+        if ((((censused & known) >> i) & 1u) != 0 && state.last_hash[i] != hashes[i]) {
+            changed |= 1u << i;
+            ++changed_count;
+            written = i;
         }
-        if (changed_count != 1) written.reset();
     }
+    if (changed_count != 1) written.reset();
     {
         std::scoped_lock lock(view_mutex_);
-        state.last_end = hashes;
+        for (std::uint32_t i = 0; i < images; ++i) {
+            if ((censused >> i) & 1u) state.last_hash[i] = hashes[i];
+        }
+        state.known = known | censused;
+        state.last_end = state.last_hash;
         state.last_end_frame = census.frame;
         state.last_images = images;
     }
@@ -474,6 +481,7 @@ void FrameGenEngineCensusWorker::ProcessCensus(const FrameGenEngineCensus& censu
     tracked.rect = census.rect;
     tracked.images = images;
     tracked.hashes = hashes;
+    tracked.censused = censused;
     tracked.color_index = census.color_index;
     tracked.depth_index = census.depth_index;
     if (place && *place < record->released.size()) {
@@ -485,11 +493,13 @@ void FrameGenEngineCensusWorker::ProcessCensus(const FrameGenEngineCensus& censu
     }
     if (informative) {
         ++state.informative;
-        for (std::uint32_t i = 0; i < images; ++i) {
-            state.images[i].changed += (changed >> i) & 1u;
-        }
     }
     for (std::uint32_t i = 0; i < images; ++i) {
+        if (((censused >> i) & 1u) == 0) {
+            continue;
+        }
+        state.images[i].informative += informative ? 1u : 0u;
+        state.images[i].changed += informative ? (changed >> i) & 1u : 0u;
         state.images[i].zeros += census.image[i].zeros;
         state.images[i].non_finite += census.image[i].non_finite;
         state.images[i].texels += kHashTexels;
@@ -646,7 +656,8 @@ void FrameGenEngineCensusWorker::WriteRow(const FrameGenEngineCensus& census, co
     for (std::uint32_t i = 0; i < kFrameGenEngineImages; ++i) {
         const FrameGenEngineImageCensus& image = census.image[i];
         const double finite = std::max<std::uint32_t>(image.finite, 1);
-        csv_ << ',' << (i < census.images ? Hex(image.Hash()) : std::string()) << ',' << image.zeros << ','
+        csv_ << ',' << (i < census.images && ((census.censused >> i) & 1u) ? Hex(image.Hash()) : std::string()) << ','
+             << image.zeros << ','
              << image.non_finite << ',' << Number(image.sums[0] / finite, 6) << ',' << Number(image.sums[1] / finite, 6)
              << ',' << Number(image.sum_abs / finite, 6) << ',' << Number(image.max_abs, 6) << ',' << image.large;
     }
@@ -677,7 +688,7 @@ std::string FrameGenEngineCensusWorker::Summary() {
         const FrameGenEngineImageTracker& tracker = state.tracker;
         line += "; view" + std::to_string(v) + ": informative=" + std::to_string(state.informative) + ", changed";
         for (std::uint32_t i = 0; i < kFrameGenEngineImages; ++i) {
-            line += (i ? "/" : " ") + Percent(state.images[i].changed, state.informative);
+            line += (i ? "/" : " ") + Percent(state.images[i].changed, state.images[i].informative);
         }
         line += ", zero";
         for (std::uint32_t i = 0; i < kFrameGenEngineImages; ++i) {
@@ -751,6 +762,16 @@ std::string FrameGenEngineCensusWorker::Summary() {
             "; backend: submitted=" + std::to_string(counts_taken_.submitted) +
             ", busy=" + std::to_string(counts_taken_.busy) + ", refused=" + std::to_string(counts_taken_.refused) +
             ", failed=" + std::to_string(counts_taken_.failed) + ", dumped=" + std::to_string(counts_taken_.dumped) +
+            // Stage 2 (session totals): views captured, those whose capture
+            // waited for the analysis that last read its field, views left
+            // out (not set up, or no color to pair with), and views analysed
+            // with their own frame's field.
+            (counts_taken_.captured || counts_taken_.unready
+                 ? ", captured=" + std::to_string(counts_taken_.captured) +
+                       ", captureWaits=" + std::to_string(counts_taken_.waits) +
+                       ", unready=" + std::to_string(counts_taken_.unready) +
+                       ", paired=" + std::to_string(counts_taken_.paired)
+                 : std::string()) +
             (counts_taken_.stopped ? ", stopped (device removed)" : "") +
             ", censusGpuMs=" +
             (window_gpu_samples_ ? Number(window_gpu_ms_ / static_cast<double>(window_gpu_samples_), 4)

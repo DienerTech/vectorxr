@@ -331,6 +331,11 @@ struct Harness {
     // reading back an image of any size.
     std::function<void*(std::uint32_t, std::uint32_t, const std::vector<float>&)> create_depth_data;
     std::function<Pixels(void*)> readback_sized;
+    // Engine motion vectors (Direct3D 12): an image of `format` (a game's
+    // motion vectors: RGBA16F) holding `bytes` (rows packed), left in
+    // RENDER_TARGET as a game leaves its motion vector images.
+    std::function<void*(std::int64_t, std::uint32_t, std::uint32_t, const std::vector<std::uint8_t>&)>
+        create_texture_data;
 };
 
 std::map<XrSwapchain, std::vector<void*>> g_swapchains;
@@ -1429,6 +1434,129 @@ int RunBench(Harness& harness) {
     return 0;
 }
 
+// --- Engine motion vectors: images, dumps and the capture on the CPU -------
+// (the profile, the replay, engine-calibrate and the tests share them)
+
+std::uint16_t HalfBits(float value);
+float HalfValue(std::uint16_t half);
+
+bool ReadBinary(const std::string& path, void* data, std::size_t bytes) {
+    std::FILE* file = std::fopen(path.c_str(), "rb");
+    if (!file) return false;
+    const std::size_t read = std::fread(data, 1, bytes, file);
+    std::fclose(file);
+    return read == bytes;
+}
+
+// A line of a key-value text file: the words after `key` on the first line
+// starting with it (empty when none).
+std::vector<std::string> TextLine(const std::string& path, const std::string& key) {
+    std::ifstream file(path);
+    std::string line;
+    while (std::getline(file, line)) {
+        if (line.rfind(key + " ", 0) == 0 || line == key) {
+            std::istringstream words(line.substr(key.size()));
+            std::vector<std::string> result;
+            for (std::string word; words >> word;) result.push_back(word);
+            return result;
+        }
+    }
+    return {};
+}
+
+bool GeometryFrom(const std::vector<std::string>& words, FrameGenViewGeometry& geometry) {
+    if (words.size() < 11) return false;
+    float values[11];
+    for (int i = 0; i < 11; ++i) values[i] = std::stof(words[static_cast<std::size_t>(i)]);
+    geometry.orientation = {values[0], values[1], values[2], values[3]};
+    geometry.position = {values[4], values[5], values[6]};
+    geometry.angle_left = values[7];
+    geometry.angle_right = values[8];
+    geometry.angle_up = values[9];
+    geometry.angle_down = values[10];
+    return true;
+}
+
+// A game's motion vector image, as a research capture dumps its region
+// (view<i>-mv-img<k>), or as a test or the profile makes one (rows packed).
+struct MotionDumpImage {
+    std::uint32_t width{0}, height{0};
+    int format{0};
+    std::vector<std::uint8_t> bytes;
+    std::array<float, 4> Texel(std::uint32_t x, std::uint32_t y) const {
+        std::array<float, 4> v{};
+        const bool half = format == DXGI_FORMAT_R16G16B16A16_FLOAT || format == DXGI_FORMAT_R16G16_FLOAT;
+        const int channels = format == DXGI_FORMAT_R16G16_FLOAT || format == DXGI_FORMAT_R32G32_FLOAT ? 2 : 4;
+        const std::size_t size = half ? 2 : 4;
+        const std::size_t offset = (std::size_t{y} * width + x) * channels * size;
+        for (int c = 0; c < channels; ++c) {
+            if (half) {
+                std::uint16_t bits = 0;
+                std::memcpy(&bits, &bytes[offset + c * size], 2);
+                v[c] = HalfValue(bits);
+            } else {
+                std::memcpy(&v[c], &bytes[offset + c * size], 4);
+            }
+        }
+        return v;
+    }
+};
+
+// A view's image `image` of the frame motion.txt describes (`frame`): never
+// another frame's vectors left in its directory.
+bool LoadMotionDump(const std::string& directory, std::size_t view, std::uint32_t image, std::uint64_t frame,
+                    MotionDumpImage& dump) {
+    const std::string stem = directory + "/view" + std::to_string(view) + "-mv-img" + std::to_string(image);
+    const std::vector<std::string> dumped = TextLine(stem + ".txt", "frame");
+    if (dumped.empty() || std::stoull(dumped[0]) != frame) return false;
+    const std::vector<std::string> rect = TextLine(stem + ".txt", "rect");
+    const std::vector<std::string> format = TextLine(stem + ".txt", "format");
+    const std::vector<std::string> file = TextLine(stem + ".txt", "file");
+    if (rect.size() < 4 || format.empty() || file.empty()) return false;
+    dump.width = static_cast<std::uint32_t>(std::stoul(rect[2]));
+    dump.height = static_cast<std::uint32_t>(std::stoul(rect[3]));
+    dump.format = std::stoi(format[0]);
+    std::size_t texel = 16; // RGBA32F
+    if (dump.format == DXGI_FORMAT_R16G16B16A16_FLOAT || dump.format == DXGI_FORMAT_R32G32_FLOAT) {
+        texel = 8;
+    } else if (dump.format == DXGI_FORMAT_R16G16_FLOAT) {
+        texel = 4;
+    }
+    dump.bytes.resize(std::size_t{dump.width} * dump.height * texel);
+    return ReadBinary(directory + "/" + file[0], dump.bytes.data(), dump.bytes.size());
+}
+
+// FG_PASS_ENGINE_CAPTURE on the CPU: `rect` of the image resampled to the
+// half-resolution grid `l1` by kDepth's nearest rule, its raw rg per texel;
+// a vector not finite or longer than kFrameGenEngineRawLimit on either axis
+// is the sentinel on both, an exact zero stays zero.
+std::vector<float> EngineRawReference(const MotionDumpImage& vectors, const XrRect2Di& rect, FrameGenExtent l1) {
+    std::vector<float> raw(std::size_t{l1.width} * l1.height * 2);
+    const float width = static_cast<float>(rect.extent.width), height = static_cast<float>(rect.extent.height);
+    for (std::uint32_t y = 0; y < l1.height; ++y) {
+        for (std::uint32_t x = 0; x < l1.width; ++x) {
+            const float u = (x + 0.5f) / static_cast<float>(l1.width), v = (y + 0.5f) / static_cast<float>(l1.height);
+            const auto tx = static_cast<std::uint32_t>(static_cast<float>(rect.offset.x) + std::min(u * width, width - 1.0f));
+            const auto ty = static_cast<std::uint32_t>(static_cast<float>(rect.offset.y) + std::min(v * height, height - 1.0f));
+            const std::array<float, 4> texel = vectors.Texel(tx, ty);
+            const bool valid = std::isfinite(texel[0]) && std::isfinite(texel[1]) &&
+                               std::abs(texel[0]) <= kFrameGenEngineRawLimit && std::abs(texel[1]) <= kFrameGenEngineRawLimit;
+            const std::size_t i = (std::size_t{y} * l1.width + x) * 2;
+            raw[i] = valid ? texel[0] : kFrameGenEngineInvalid;
+            raw[i + 1] = valid ? texel[1] : kFrameGenEngineInvalid;
+        }
+    }
+    return raw;
+}
+
+// A raw field's value (a half float) against EngineRawReference's: equal,
+// or a 32-bit vector stored to half precision, rounded either way (a half
+// step is a 1024th of the value, or 2^-14 below the normal halves).
+bool EngineRawMatches(float value, float reference) {
+    return value == reference ||
+           std::abs(value - reference) <= std::max(std::abs(reference) / 1024.0f, 1.0f / 16384.0f);
+}
+
 // Profile: the MSFS-like case at headset size on the GPU. Two eyes of a
 // cockpit over scrolling scenery, with depth, extrapolated 4x; prints the
 // GPU time of every pass. Not a CTest: `depthxr_framegen_tests profile`.
@@ -1468,13 +1596,53 @@ Pixels CockpitAt(std::uint32_t width, std::uint32_t height, float head_x, float 
     return pixels;
 }
 
+// FG_PROFILE_MV=1: the motion vectors a game would render for CockpitAt's
+// frames, at the size of the depth (`width` x `height`): the panel head-fixed
+// (zero; the profile's head never moves), the scenery moved by its scroll of
+// `scroll_step` tangent units a frame. In `convention`
+// (FG_PROFILE_MV_CONVENTION): fb, the default (XR_FB_space_warp's D3D NDC,
+// y up, current minus previous, the head's movement included), ext (y
+// down), uv (uv units, y down) or pixels (the image's pixels, y down);
+// "-reversed" makes any of them previous minus current. RGBA16F.
+MotionDumpImage ProfileMotionVectors(std::uint32_t width, std::uint32_t height, float head_x, float tan_left,
+                                     float tan_right, float tan_vertical, float scroll_step, const std::string& convention) {
+    // n = g * e: the gain each convention's vectors have (FrameGenEngineCanonicalGains).
+    const bool reversed = convention.size() > 9 && convention.substr(convention.size() - 9) == "-reversed";
+    const std::string name = reversed ? convention.substr(0, convention.size() - 9) : convention;
+    std::array<float, 2> gain{1.0f, 1.0f};
+    if (name == "ext") gain = {1.0f, -1.0f};
+    if (name == "uv") gain = {2.0f, -2.0f};
+    if (name == "pixels") gain = {2.0f / static_cast<float>(width), -2.0f / static_cast<float>(height)};
+    if (reversed) gain = {-gain[0], -gain[1]};
+    // Scenery at tangent t this frame was at t + scroll_step the frame before.
+    const float scenery = -2.0f * scroll_step / (tan_right - tan_left) / gain[0];
+    MotionDumpImage vectors;
+    vectors.width = width;
+    vectors.height = height;
+    vectors.format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    vectors.bytes.resize(std::size_t{width} * height * 8);
+    for (std::uint32_t y = 0; y < height; ++y) {
+        const float ty = tan_vertical - 2 * tan_vertical * (y + 0.5f) / height;
+        for (std::uint32_t x = 0; x < width; ++x) {
+            const float tx = tan_left + (tan_right - tan_left) * (x + 0.5f) / width;
+            const bool panel = std::abs(head_x + kPanelDistance * tx) < kPanelHalf && std::abs(kPanelDistance * ty) < kPanelHalf;
+            const std::array<float, 4> v{panel ? 0.0f : scenery, 0.0f, 0.0f, 1.0f};
+            for (int c = 0; c < 4; ++c) {
+                const std::uint16_t bits = HalfBits(v[c]);
+                std::memcpy(&vectors.bytes[(std::size_t{y} * width + x) * 8 + c * 2], &bits, 2);
+            }
+        }
+    }
+    return vectors;
+}
+
 // Profiled categories (PassMilliseconds): the passes, then copies, the
 // optical flow hardware's wait and the quad views' compose and flow merge.
 const char* const kProfileNames[] = {"luma",        "downsample",  "search",      "refine",      "filter",
                                      "synthesize",  "synthesize16", "depth",      "depth check", "depth trust",
                                      "flow pack",   "flow unpack", "trust update", "shift clear", "shift splat",
                                      "shift resolve", "shift fill", "raw pack",   "trust resolve", "shading rate", "world reduce", "world solve", "trust vote", "depth scale", "scale vote", "depth stale", "cross splat", "cross resolve",
-                                     "engine census",
+                                     "engine census", "engine capture",
                                      "source copy", "output copy",
                                      "hardware wait", "compose", "flow merge"};
 static_assert(std::size(kProfileNames) == kFrameGenPassCount + 5, "a name per profiled category");
@@ -4353,10 +4521,17 @@ int RunProfile(Harness& harness) {
     // two frames between and the real frame's copy.
     const bool jit = std::getenv("FG_PROFILE_JIT") && std::string(std::getenv("FG_PROFILE_JIT")) == "1";
     const bool interpolate = std::getenv("FG_PROFILE_MODE") && std::string(std::getenv("FG_PROFILE_MODE")) == "interpolate";
-    std::printf("Profiling %ux%u per eye, depth %ux%u, %s %s; rendering test frames...\n", width, height, depth_width,
-                depth_height, interpolate ? "interpolate" : "extrapolate", jit ? "just in time" : "4x");
+    // FG_PROFILE_MV=1: the game's motion vectors too, at the depth's size
+    // (ProfileMotionVectors, in FG_PROFILE_MV_CONVENTION), captured with each
+    // real frame (stage 2's capture and its census, on the game's queue).
+    const bool engine = std::getenv("FG_PROFILE_MV") && std::string(std::getenv("FG_PROFILE_MV")) == "1";
+    const std::string convention = std::getenv("FG_PROFILE_MV_CONVENTION") ? std::getenv("FG_PROFILE_MV_CONVENTION") : "fb";
+    std::printf("Profiling %ux%u per eye, depth %ux%u, %s %s%s; rendering test frames...\n", width, height, depth_width,
+                depth_height, interpolate ? "interpolate" : "extrapolate", jit ? "just in time" : "4x",
+                engine ? (", with motion vectors (" + convention + ")").c_str() : "");
     std::array<XrSwapchain, 2> sources{reinterpret_cast<XrSwapchain>(0x61), reinterpret_cast<XrSwapchain>(0x62)};
     std::array<XrSwapchain, 2> depths{reinterpret_cast<XrSwapchain>(0x63), reinterpret_cast<XrSwapchain>(0x64)};
+    std::array<XrSwapchain, 2> vectors{reinterpret_cast<XrSwapchain>(0x65), reinterpret_cast<XrSwapchain>(0x66)};
     std::array<std::array<XrSwapchain, 4>, 2> outputs{};
     for (std::size_t eye = 0; eye < 2; ++eye) {
         const float head = eye == 0 ? -half_ipd : half_ipd;
@@ -4384,14 +4559,33 @@ int RunProfile(Harness& harness) {
         for (const XrSwapchain output : outputs[eye]) {
             Check(gpu->Track(output, EnumerateImages, error), error);
         }
+        if (engine) {
+            // Three images, as a runtime makes them; the scroll is steady, so
+            // each holds the same vectors.
+            const MotionDumpImage motion =
+                ProfileMotionVectors(depth_width, depth_height, head, left, right, vertical, kScroll, convention);
+            g_swapchains[vectors[eye]].clear();
+            for (int k = 0; k < 3; ++k) {
+                g_swapchains[vectors[eye]].push_back(
+                    harness.create_texture_data(motion.format, motion.width, motion.height, motion.bytes));
+            }
+            Check(gpu->Track(vectors[eye], EnumerateImages, error), error);
+        }
     }
     FrameGenDepthEncoding encoding;
     encoding.near_z = 1000.0f;
     encoding.far_z = 0.1f;
     const char* const* names = kProfileNames;
+    // The motion vector captures' GPU time (both eyes' census and resample
+    // in one submission on the game's queue, from its two timestamps).
+    double engine_ms = 0.0;
+    std::size_t engine_samples = 0;
+    std::uint64_t engine_seen = 0;
     // A real frame's two views, captured at release as the presenter does:
-    // color, then depth.
-    auto capture_frame = [&](FrameGenGpu& backend, std::uint32_t frame, FrameGenFlowQuality quality) {
+    // color, then depth; with FG_PROFILE_MV, then the frame's motion vectors
+    // (as the layer at its xrEndFrame), copied into `dump` too when given.
+    auto capture_frame = [&](FrameGenGpu& backend, std::uint32_t frame, FrameGenFlowQuality quality,
+                             const std::string& dump = {}) {
         std::vector<FrameGenViewSubmission> views;
         for (std::size_t eye = 0; eye < 2; ++eye) {
             const float head = eye == 0 ? -half_ipd : half_ipd;
@@ -4427,6 +4621,29 @@ int RunProfile(Harness& harness) {
                 backend.CaptureDepth(eye, {depths[eye], 0, 0, depth_rect, 0}, encoding, views[eye].request, error);
             Check(depth_captured || error.empty(), "depth capture: " + error);
         }
+        if (engine) {
+            std::vector<FrameGenMotionJob> jobs(2);
+            std::vector<FrameGenViewRequest> color;
+            for (std::size_t eye = 0; eye < 2; ++eye) {
+                jobs[eye].view = eye;
+                jobs[eye].vectors = {vectors[eye], frame % 3, 0,
+                                     {{0, 0}, {static_cast<int>(depth_width), static_cast<int>(depth_height)}},
+                                     DXGI_FORMAT_R16G16B16A16_FLOAT};
+                jobs[eye].frame = frame;
+                jobs[eye].capture = true;
+                color.push_back(views[eye].request);
+            }
+            if (!dump.empty()) {
+                backend.DumpMotion(dump, true);
+                std::ofstream notes(dump + "/motion.txt");
+                for (std::size_t eye = 0; eye < 2; ++eye) {
+                    notes << "view " << eye << " decode 0 1 1 1 0 0 0 0\n";
+                }
+                notes << "convention " << convention << '\n';
+            }
+            const bool captured = backend.CaptureMotion(jobs, color, error);
+            Check(captured || error.empty(), "motion vector capture: " + error);
+        }
         return views;
     };
     for (const int config : {0, 1, 2}) {
@@ -4453,22 +4670,37 @@ int RunProfile(Harness& harness) {
         bool depth_used = false;
         for (int i = 0; i < 48; ++i) {
             const std::uint32_t frame = static_cast<std::uint32_t>(i % kFrames);
-            const std::vector<FrameGenViewSubmission> views = capture_frame(*gpu, frame, quality);
+            // FG_PROFILE_DUMP=<directory>: frames 30-34 of the first run as a
+            // capture for `replay` (with FG_PROFILE_MV, their motion vectors).
+            std::string directory;
+            if (const char* dump = std::getenv("FG_PROFILE_DUMP"); dump && config == 0 && i >= 30 && i < 35) {
+                directory = std::string(dump) + "/frame-" + std::to_string(i - 30);
+                CreateDirectoryA(directory.c_str(), nullptr);
+            }
+            const std::vector<FrameGenViewSubmission> views = capture_frame(*gpu, frame, quality, directory);
             // Games release their images a few milliseconds before the frame
             // ends and generation starts (FG_PROFILE_GAP_MS, default 6).
             const char* gap = std::getenv("FG_PROFILE_GAP_MS");
             Sleep(static_cast<DWORD>(gap ? std::atoi(gap) : 6));
-            // FG_PROFILE_DUMP=<directory>: frames 30-34 of the first run as a
-            // capture for `replay`.
-            if (const char* dump = std::getenv("FG_PROFILE_DUMP"); dump && config == 0 && i >= 30 && i < 35) {
-                const std::string directory = std::string(dump) + "/frame-" + std::to_string(i - 30);
-                CreateDirectoryA(directory.c_str(), nullptr);
+            if (!directory.empty()) {
                 gpu->DumpNextExecute(directory);
+            }
+            if (engine && i >= 24) {
+                // Each submission's census of eye 0 carries its GPU time.
+                const FrameGenEngineStatus status = gpu->EngineStatus(engine_seen);
+                for (const FrameGenEngineCensus& census : status.census) {
+                    engine_seen = std::max(engine_seen, census.sequence);
+                    if (census.view == 0 && census.gpu_ms >= 0.0) {
+                        engine_ms += census.gpu_ms;
+                        ++engine_samples;
+                    }
+                }
             }
             FrameGenExecuteResult result;
             FrameGenTuning executed = tuning;
             executed.analyze_only = jit;
             executed.cover = jit && interpolate;
+            executed.engine_mode = engine ? FrameGenEngineMode::kCapture : FrameGenEngineMode::kOff;
             Check(gpu->Execute(views, executed, result, error), "profile execute: " + error);
             const std::vector<double> times = gpu->PassMilliseconds();
             if (jit) {
@@ -4511,6 +4743,16 @@ int RunProfile(Harness& harness) {
                 std::printf("  %-14s %6.3f ms\n", names[p], sums[p] / samples);
             }
         }
+        if (engine) {
+            const FrameGenEngineStatus status = gpu->EngineStatus(engine_seen);
+            std::printf("  engine capture %6.3f ms per real frame on the game's queue (census and resample, both eyes;"
+                        " %zu submissions); motion slot skips %llu, engine waits %llu, unready %llu\n",
+                        engine_samples ? engine_ms / static_cast<double>(engine_samples) : -1.0, engine_samples,
+                        static_cast<unsigned long long>(status.busy), static_cast<unsigned long long>(status.waits),
+                        static_cast<unsigned long long>(status.unready));
+            engine_ms = 0.0;
+            engine_samples = 0;
+        }
         if (synthesis_samples) {
             std::printf("  just in time, per frame written: %.3f ms (%.2f ms for the three per real frame)\n",
                         synthesis_total / synthesis_samples, 3.0 * synthesis_total / synthesis_samples);
@@ -4530,6 +4772,7 @@ int RunProfile(Harness& harness) {
         tuning.hardware_flow = std::getenv("FG_PROFILE_HARDWARE") && std::string(std::getenv("FG_PROFILE_HARDWARE")) == "1";
         tuning.analyze_only = true;
         tuning.cover = interpolate;
+        tuning.engine_mode = engine ? FrameGenEngineMode::kCapture : FrameGenEngineMode::kOff;
         ProfileUnderLoad(harness, std::atof(load), [&](FrameGenGpu& backend, int i) {
             if (i == 0) {
                 for (std::size_t eye = 0; eye < 2; ++eye) {
@@ -4538,6 +4781,7 @@ int RunProfile(Harness& harness) {
                     for (const XrSwapchain output : outputs[eye]) {
                         Check(backend.Track(output, EnumerateImages, error), error);
                     }
+                    Check(!engine || backend.Track(vectors[eye], EnumerateImages, error), error);
                 }
             }
             const std::vector<FrameGenViewSubmission> views =
@@ -4570,6 +4814,32 @@ int RunProfile(Harness& harness) {
 bool g_replay = false;
 std::string g_replay_directory, g_replay_output;
 
+// A captured frame's motion vectors (Capture-FrameGen.ps1 -Motion; older
+// captures have none): of a view's images dumped with it, the one its
+// vectors were thought to be in (the .txt's `chosen`), else the first there.
+bool LoadReplayMotion(const std::string& directory, std::size_t view, MotionDumpImage& dump, std::uint32_t& image) {
+    std::optional<std::uint32_t> first;
+    std::optional<std::uint32_t> chosen;
+    std::uint64_t frame = 0;
+    std::array<bool, kFrameGenEngineImages> there{};
+    for (std::uint32_t k = 0; k < kFrameGenEngineImages; ++k) {
+        const std::string meta = directory + "/view" + std::to_string(view) + "-mv-img" + std::to_string(k) + ".txt";
+        const std::vector<std::string> dumped = TextLine(meta, "frame");
+        if (dumped.empty()) continue;
+        there[k] = true;
+        if (!first) {
+            first = k;
+            frame = std::stoull(dumped[0]);
+            if (const std::vector<std::string> named = TextLine(meta, "chosen"); !named.empty()) {
+                chosen = static_cast<std::uint32_t>(std::stoul(named[0]));
+            }
+        }
+    }
+    if (!first) return false;
+    image = chosen && *chosen < kFrameGenEngineImages && there[*chosen] ? *chosen : *first;
+    return LoadMotionDump(directory, view, image, frame, dump);
+}
+
 struct ReplayView {
     std::uint32_t width{0}, height{0}, half_width{0}, half_height{0};
     int format{0};
@@ -4577,20 +4847,24 @@ struct ReplayView {
     std::array<float, 3> shift{};
     Pixels color;
     std::vector<float> depth; // linear meters at half resolution, before trust
+    // Engine motion vectors (optional, LoadReplayMotion): the image the
+    // frame's vectors were thought to be in (its region), which one it was,
+    // how they decode (motion.txt), and the raw field the backend resampled
+    // them into for the frame (view<i>-engine-raw.rg16f: rg per half-
+    // resolution texel).
+    std::optional<MotionDumpImage> vectors;
+    std::uint32_t vectors_image{0};
+    FrameGenMotionEncoding encoding;
+    std::vector<float> engine_raw;
 };
 
 struct ReplayFrame {
     FrameGenTuning tuning;
     std::vector<ReplayView> views;
+    // presenter.txt (optional): the interval to the frame's display time
+    // over the interval before, unclamped (FG_REPLAY_TIME=display).
+    std::optional<float> display_ratio;
 };
-
-bool ReadBinary(const std::string& path, void* data, std::size_t bytes) {
-    std::FILE* file = std::fopen(path.c_str(), "rb");
-    if (!file) return false;
-    const std::size_t read = std::fread(data, 1, bytes, file);
-    std::fclose(file);
-    return read == bytes;
-}
 
 bool LoadReplayFrame(const std::string& directory, ReplayFrame& frame) {
     std::FILE* file = std::fopen((directory + "/frame.txt").c_str(), "r");
@@ -4636,6 +4910,33 @@ bool LoadReplayFrame(const std::string& directory, ReplayFrame& frame) {
              ReadBinary(directory + "/view" + std::to_string(i) + "-depth.f32", view.depth.data(), view.depth.size() * 4);
         if (view.format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB || view.format == DXGI_FORMAT_B8G8R8A8_UNORM) {
             for (std::uint32_t& p : view.color) p = (p & 0xff00ff00u) | ((p & 0xffu) << 16) | ((p >> 16) & 0xffu);
+        }
+    }
+    // The files a capture with -Motion has beside frame.txt (never read from
+    // it: its strict scan above stays as it is). Older captures have none.
+    if (const std::vector<std::string> ratio = TextLine(directory + "/presenter.txt", "ratio"); ok && !ratio.empty()) {
+        frame.display_ratio = std::stof(ratio[0]);
+    }
+    for (std::size_t i = 0; i < count && ok; ++i) {
+        ReplayView& view = frame.views[i];
+        MotionDumpImage vectors;
+        if (LoadReplayMotion(directory, i, vectors, view.vectors_image)) {
+            view.vectors = std::move(vectors);
+        }
+        const std::vector<std::string> decode =
+            TextLine(directory + "/motion.txt", "view " + std::to_string(i) + " decode");
+        if (decode.size() >= 8) {
+            view.encoding.ext = decode[0] == "1";
+            for (int c = 0; c < 3; ++c) {
+                view.encoding.scale[c] = std::stof(decode[1 + c]);
+                view.encoding.offset[c] = std::stof(decode[4 + c]);
+            }
+            view.encoding.two_d = decode[7] == "1";
+        }
+        std::vector<std::uint16_t> raw(std::size_t{view.half_width} * view.half_height * 2);
+        if (ReadBinary(directory + "/view" + std::to_string(i) + "-engine-raw.rg16f", raw.data(), raw.size() * 2)) {
+            view.engine_raw.resize(raw.size());
+            for (std::size_t t = 0; t < raw.size(); ++t) view.engine_raw[t] = HalfValue(raw[t]);
         }
     }
     return ok;
@@ -5034,6 +5335,47 @@ void WriteFloats(const std::string& prefix, const std::vector<float>& values, Fr
     }
 }
 
+// FG_REPLAY_MV=composed: frame k + 1's vectors after frame k's, at their
+// resolution, for the pair Interpolate's frames k - 1 and k + 1 span. Each
+// texel's vector (current minus previous, decoded and taken as D3D NDC with
+// y up, as XR_FB_space_warp writes them) is followed back to where its
+// content was in frame k, and frame k's vector there added; content that
+// was outside frame k's image has none (not finite: the capture's
+// sentinel). RGBA16F, encoded as the vectors were.
+MotionDumpImage ComposeReplayVectors(const MotionDumpImage& newest, const MotionDumpImage& previous,
+                                     const FrameGenMotionEncoding& encoding) {
+    MotionDumpImage composed;
+    composed.width = newest.width;
+    composed.height = newest.height;
+    composed.format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    composed.bytes.resize(std::size_t{composed.width} * composed.height * 8);
+    auto encode = [&](float value, int axis) {
+        return encoding.ext && encoding.scale[axis] != 0.0f ? (value - encoding.offset[axis]) / encoding.scale[axis] : value;
+    };
+    for (std::uint32_t y = 0; y < composed.height; ++y) {
+        for (std::uint32_t x = 0; x < composed.width; ++x) {
+            const std::array<float, 4> texel = newest.Texel(x, y);
+            std::array<float, 2> n = DecodeFrameGenMotion(encoding, texel);
+            const float px = static_cast<float>(x) + 0.5f - n[0] * 0.5f * static_cast<float>(previous.width);
+            const float py = static_cast<float>(y) + 0.5f + n[1] * 0.5f * static_cast<float>(previous.height);
+            if (std::isfinite(px) && std::isfinite(py) && px >= 0.0f && py >= 0.0f &&
+                px < static_cast<float>(previous.width) && py < static_cast<float>(previous.height)) {
+                const std::array<float, 2> before = DecodeFrameGenMotion(
+                    encoding, previous.Texel(static_cast<std::uint32_t>(px), static_cast<std::uint32_t>(py)));
+                n = {n[0] + before[0], n[1] + before[1]};
+            } else {
+                n = {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::quiet_NaN()};
+            }
+            const std::array<float, 4> out{encode(n[0], 0), encode(n[1], 1), texel[2], texel[3]};
+            for (int c = 0; c < 4; ++c) {
+                const std::uint16_t bits = HalfBits(out[c]);
+                std::memcpy(&composed.bytes[(std::size_t{y} * composed.width + x) * 8 + c * 2], &bits, 2);
+            }
+        }
+    }
+    return composed;
+}
+
 int RunReplay(Harness& harness) {
     std::vector<ReplayFrame> frames;
     for (int k = 0;; ++k) {
@@ -5095,6 +5437,53 @@ int RunReplay(Harness& harness) {
     if (std::array<int, 4> box{}; std::sscanf(env("FG_REPLAY_CROP").c_str(), "%d,%d,%d,%d", &box[0], &box[1], &box[2], &box[3]) == 4) {
         crop = box;
     }
+    // FG_REPLAY_TIME=display: each frame at the ratio of the display times
+    // the game gave it and the frame before (presenter.txt, unclamped),
+    // instead of the presenter's interval ratio.
+    if (env("FG_REPLAY_TIME") == "display") {
+        for (ReplayFrame& frame : frames) {
+            if (frame.display_ratio && *frame.display_ratio > 0.0f) frame.tuning.interval_ratio = *frame.display_ratio;
+        }
+    }
+    // Engine motion vectors (FG_REPLAY_MV=own|oracle|composed; off by
+    // default): each frame's capture also resamples, beside its color and
+    // depth, the frame's own dumped vectors (own), the next frame's (oracle,
+    // a ceiling), or its own after the frame before's, composed on the CPU at
+    // their resolution (composed: the pair Interpolate's frames k - 1 and
+    // k + 1 span), into raw fields nothing reads yet: generated frames stay
+    // as they are. A swapchain per frame and view (0x400 + 0x10 k + v): the
+    // backend reads a swapchain's first three images only.
+    const std::string engine = env("FG_REPLAY_MV").empty() ? "off" : env("FG_REPLAY_MV");
+    Check(engine == "off" || engine == "own" || engine == "oracle" || engine == "composed",
+          "replay: FG_REPLAY_MV is off, own, oracle or composed");
+    std::vector<std::vector<std::optional<MotionDumpImage>>> engine_images(frames.size(),
+                                                                           std::vector<std::optional<MotionDumpImage>>(view_count));
+    std::vector<std::vector<XrSwapchain>> engine_chains(frames.size(), std::vector<XrSwapchain>(view_count, XR_NULL_HANDLE));
+    for (std::size_t k = 0; k < frames.size() && engine != "off"; ++k) {
+        for (std::size_t v = 0; v < view_count; ++v) {
+            const std::optional<MotionDumpImage>& own = frames[k].views[v].vectors;
+            std::optional<MotionDumpImage>& image = engine_images[k][v];
+            if (engine == "own") {
+                image = own;
+            } else if (engine == "oracle" && k + 1 < frames.size()) {
+                image = frames[k + 1].views[v].vectors;
+            } else if (engine == "composed" && k > 0 && own && frames[k - 1].views[v].vectors) {
+                image = ComposeReplayVectors(*own, *frames[k - 1].views[v].vectors, frames[k].views[v].encoding);
+            }
+            if (!image || (image->format != DXGI_FORMAT_R16G16B16A16_FLOAT && image->format != DXGI_FORMAT_R32G32B32A32_FLOAT)) {
+                image.reset();
+                continue;
+            }
+            engine_chains[k][v] = reinterpret_cast<XrSwapchain>(std::uintptr_t{0x400 + 0x10 * k + v});
+            g_swapchains[engine_chains[k][v]] = {
+                harness.create_texture_data(image->format, image->width, image->height, image->bytes)};
+            Check(gpu->Track(engine_chains[k][v], EnumerateImages, error), error);
+        }
+    }
+    // What the measuring pass's captures resampled, against the CPU's
+    // resample of the same vectors (EngineRawReference).
+    bool check_engine = false;
+    std::size_t engine_views = 0, engine_texels = 0, engine_same = 0, engine_sentinels = 0, engine_zeros = 0;
 
     // Executes frame k as the newest real frame after frame `before` (none:
     // a fresh sequence, nothing generated), generating one frame at
@@ -5114,6 +5503,7 @@ int RunReplay(Harness& harness) {
         tuning.generated = 1;
         tuning.spare = false;
         tuning.fractions[0] = fraction;
+        tuning.engine_mode = engine != "off" ? FrameGenEngineMode::kCapture : FrameGenEngineMode::kOff;
         if (before && *before + 1 != k) tuning.interval_ratio = 1.0f;
         std::vector<FrameGenViewSubmission> views(view_count);
         for (std::size_t v = 0; v < view_count; ++v) {
@@ -5137,6 +5527,48 @@ int RunReplay(Harness& harness) {
                                     submission.request, error) ||
                       error.empty(),
                   "replay depth capture: " + error);
+        }
+        // The frame's engine motion vectors, after its depth, as the layer
+        // captures them at its xrEndFrame.
+        std::vector<FrameGenMotionJob> jobs;
+        std::vector<FrameGenViewRequest> color;
+        for (std::size_t v = 0; v < view_count && engine != "off"; ++v) {
+            color.push_back(views[v].request);
+            if (!engine_images[k][v]) continue;
+            FrameGenMotionJob job;
+            job.view = v;
+            const MotionDumpImage& image = *engine_images[k][v];
+            job.vectors = {engine_chains[k][v], 0, 0,
+                           {{0, 0}, {static_cast<int>(image.width), static_cast<int>(image.height)}}, image.format};
+            job.frame = k;
+            job.encoding = frames[k].views[v].encoding;
+            job.census_all = true;
+            job.capture = true;
+            jobs.push_back(job);
+        }
+        if (!jobs.empty()) {
+            Check(gpu->CaptureMotion(jobs, color, error) || error.empty(), "replay engine capture: " + error);
+            for (const FrameGenMotionJob& job : jobs) {
+                std::vector<float> values;
+                FrameGenExtent extent{};
+                std::uint32_t channels = 0;
+                if (!check_engine ||
+                    !gpu->ReadTexture(job.view, {FrameGenTextureKind::kEngineRaw, 0}, values, extent, channels)) {
+                    continue;
+                }
+                const std::vector<float> expected =
+                    EngineRawReference(*engine_images[k][job.view], job.vectors.rect, FrameGenPyramid(views[job.view].request.extent)[1]);
+                if (values.size() != expected.size()) continue; // not captured: the view was not set up yet
+                ++engine_views;
+                for (std::size_t i = 0; i < values.size(); i += 2) {
+                    ++engine_texels;
+                    engine_same += EngineRawMatches(values[i], expected[i]) && EngineRawMatches(values[i + 1], expected[i + 1])
+                                        ? 1
+                                        : 0;
+                    engine_sentinels += values[i] == kFrameGenEngineInvalid ? 1 : 0;
+                    engine_zeros += values[i] == 0.0f && values[i + 1] == 0.0f ? 1 : 0;
+                }
+            }
         }
         Check(gpu->Execute(views, tuning, result, error), "replay execute: " + error);
     };
@@ -5329,6 +5761,7 @@ int RunReplay(Harness& harness) {
         }
         gpu->ResetHistory();
         const bool measure = pass == settle;
+        check_engine = measure;
         for (std::size_t k = 0; k < frames.size(); ++k) {
             FrameGenExecuteResult result;
             const bool has_next = k + 1 < frames.size();
@@ -5444,6 +5877,36 @@ int RunReplay(Harness& harness) {
             std::printf("View %zu over %zu frames: all %.3f%% bad\n", v, view_evaluated[v],
                         view_evaluated[v] ? view_bad[v] / view_evaluated[v] : 0.0);
         }
+    }
+    // Engine motion vectors: the measuring pass's resamples against the
+    // CPU's, and each dumped raw field against its frame's dumped vectors
+    // (captures of stage 2 and later), texel by texel: a GPU's division
+    // (within 2.5 ulp) may pick the neighbour of a texel whose position
+    // falls that close to its edge, so a field can be right short of 100%.
+    std::size_t dumped = 0, dumped_texels = 0, dumped_same = 0;
+    for (const ReplayFrame& frame : frames) {
+        for (const ReplayView& view : frame.views) {
+            if (!view.vectors || view.engine_raw.empty()) continue;
+            const XrRect2Di rect{{0, 0}, {static_cast<int>(view.vectors->width), static_cast<int>(view.vectors->height)}};
+            const std::vector<float> expected = EngineRawReference(*view.vectors, rect, {view.half_width, view.half_height});
+            ++dumped;
+            dumped_texels += expected.size() / 2;
+            for (std::size_t i = 0; i + 1 < expected.size() && expected.size() == view.engine_raw.size(); i += 2) {
+                dumped_same += EngineRawMatches(view.engine_raw[i], expected[i]) &&
+                                       EngineRawMatches(view.engine_raw[i + 1], expected[i + 1])
+                                   ? 1
+                                   : 0;
+            }
+        }
+    }
+    if (engine != "off" || dumped) {
+        std::printf("Engine capture (FG_REPLAY_MV=%s): %zu views resampled, %.4f%% of %zu texels as the CPU's nearest "
+                    "resample; sentinel %.3f%%, zero %.3f%%; dumped raw fields: %zu, %.4f%% of %zu texels as their "
+                    "vectors' resample\n",
+                    engine.c_str(), engine_views, engine_texels ? 100.0 * engine_same / engine_texels : 0.0, engine_texels,
+                    engine_texels ? 100.0 * engine_sentinels / engine_texels : 0.0,
+                    engine_texels ? 100.0 * engine_zeros / engine_texels : 0.0, dumped,
+                    dumped_texels ? 100.0 * dumped_same / dumped_texels : 0.0, dumped_texels);
     }
     gpu->Reset();
     return 0;
@@ -7165,6 +7628,7 @@ void EngineCensusTest(Harness& harness, ID3D12Device* device, ID3D12CommandQueue
     // waited for, and nothing is latched off.
     ComPtr<ID3D12Fence> gate;
     Check(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate))), "engine census: gate fence");
+    const test_gates::Guard gate_guard(gate.Get());
     queue->Wait(gate.Get(), 1);
     const std::uint64_t busy_before = gpu->EngineStatus().busy;
     for (std::uint64_t f = 10; f < 14; ++f) {
@@ -7187,6 +7651,487 @@ void EngineCensusTest(Harness& harness, ID3D12Device* device, ID3D12CommandQueue
     std::cout << "D3D12 engine census: hashes, counts, means, samples and busy slots checked\n";
 }
 
+// A motion vector image as a game renders it at 80% of a 384 view (307
+// texels inside a slightly larger image): smooth vectors in its own units,
+// and columns 20-39 in blocks of four that are not finite (r, then g),
+// longer than the limit, exactly zero and exactly at the limit. `bias`
+// tells images apart.
+MotionDumpImage TestEngineVectors(float bias) {
+    MotionDumpImage vectors;
+    vectors.width = 320;
+    vectors.height = 316;
+    vectors.format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    vectors.bytes.resize(std::size_t{vectors.width} * vectors.height * 8);
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    for (std::uint32_t y = 0; y < vectors.height; ++y) {
+        for (std::uint32_t x = 0; x < vectors.width; ++x) {
+            std::array<float, 4> v{(static_cast<float>(x) - 150.0f) / 64.0f + bias, (static_cast<float>(y) - 140.0f) / -32.0f,
+                                   0.25f, 1.0f};
+            if (x >= 20 && x < 24) v[0] = nan;
+            if (x >= 24 && x < 28) v[1] = inf;
+            if (x >= 28 && x < 32) v[0] = 20.0f;
+            if (x >= 32 && x < 36) v[0] = v[1] = 0.0f;
+            if (x >= 36 && x < 40) v[0] = -kFrameGenEngineRawLimit;
+            for (int c = 0; c < 4; ++c) {
+                const std::uint16_t bits = HalfBits(v[c]);
+                std::memcpy(&vectors.bytes[(std::size_t{y} * vectors.width + x) * 8 + c * 2], &bits, 2);
+            }
+        }
+    }
+    return vectors;
+}
+
+// Engine motion vectors, stage 2 (FrameGenGpu::CaptureMotion with
+// `capture`), on WARP: the game's vectors resampled to each eye's half-
+// resolution grid exactly as kDepth picks its texels, invalid ones as the
+// sentinel and zeros kept; both eyes in one dispatch, eyes of other sizes in
+// one each; nothing before Execute sets the views up; vectors released
+// before their color paired with the color captured after them (the dump of
+// the frame has them); a capture into a field an unfinished analysis reads
+// waits for it on the game's queue, and only then; and a busy motion slot
+// skipped without waiting.
+void EngineCaptureTest(Harness& harness, ID3D12CommandQueue* queue, ID3D12Device* device) {
+    std::string error;
+    auto gpu = CreateFrameGenGpu(harness.binding, error);
+    Check(gpu != nullptr && gpu->SupportsEngineMotion(), "engine capture backend: " + error);
+    gpu->SetCopyAfterRelease(true); // the tests' images are their own
+    const std::int64_t output_format = gpu->OutputFormats(FrameGenOutputKind::kSrgb8).front();
+    constexpr std::uint32_t kSmall = 256; // view 1 at another size
+    std::array<XrSwapchain, 2> sources{}, small_sources{}, outputs{}, small_outputs{}, vectors{};
+    std::array<std::array<MotionDumpImage, 3>, 2> images;
+    for (std::size_t v = 0; v < 2; ++v) {
+        sources[v] = reinterpret_cast<XrSwapchain>(std::uintptr_t{0xf0 + v});
+        small_sources[v] = reinterpret_cast<XrSwapchain>(std::uintptr_t{0xf2 + v});
+        outputs[v] = reinterpret_cast<XrSwapchain>(std::uintptr_t{0xf4 + v});
+        small_outputs[v] = reinterpret_cast<XrSwapchain>(std::uintptr_t{0xf6 + v});
+        vectors[v] = reinterpret_cast<XrSwapchain>(std::uintptr_t{0xf8 + v});
+        g_swapchains[sources[v]].clear();
+        for (int k = 0; k < 3; ++k) {
+            void* image = harness.create(kSize, kSize);
+            harness.upload(image, MovingSquare(100.0f + 8.0f * k, 120.0f));
+            g_swapchains[sources[v]].push_back(image);
+        }
+        g_swapchains[small_sources[v]] = {harness.create(kSmall, kSmall)};
+        g_swapchains[outputs[v]] = {harness.create(kSize, kSize)};
+        g_swapchains[small_outputs[v]] = {harness.create(kSmall, kSmall)};
+        g_swapchains[vectors[v]].clear();
+        for (int k = 0; k < 3; ++k) {
+            images[v][k] = TestEngineVectors(0.125f * static_cast<float>(v * 3 + k));
+            g_swapchains[vectors[v]].push_back(harness.create_texture_data(images[v][k].format, images[v][k].width,
+                                                                           images[v][k].height, images[v][k].bytes));
+        }
+        for (const XrSwapchain chain : {sources[v], small_sources[v], outputs[v], small_outputs[v], vectors[v]}) {
+            Check(gpu->Track(chain, EnumerateImages, error), "engine capture: track: " + error);
+        }
+    }
+    const std::array<XrRect2Di, 2> rects{XrRect2Di{{6, 5}, {307, 307}}, XrRect2Di{{9, 2}, {307, 300}}};
+    // Frame `frame` of the views (source image frame % 3), view 1 at 256
+    // with `smaller`.
+    auto submissions = [&](std::uint32_t frame, bool smaller) {
+        std::vector<FrameGenViewSubmission> views(2);
+        for (std::size_t v = 0; v < 2; ++v) {
+            const std::uint32_t size = v == 1 && smaller ? kSmall : kSize;
+            const XrRect2Di rect{{0, 0}, {static_cast<int>(size), static_cast<int>(size)}};
+            FrameGenViewSubmission& view = views[v];
+            view.source = {v == 1 && smaller ? small_sources[v] : sources[v], v == 1 && smaller ? 0 : frame % 3, 0, rect,
+                           harness.format};
+            view.outputs = {{v == 1 && smaller ? small_outputs[v] : outputs[v], 0, 0, rect, output_format}};
+            view.request.extent = {size, size};
+            view.request.output = FrameGenOutputKind::kSrgb8;
+            for (auto* geometry : {&view.request.newest, &view.request.previous}) {
+                geometry->angle_left = geometry->angle_down = -std::atan(kTan);
+                geometry->angle_right = geometry->angle_up = std::atan(kTan);
+            }
+        }
+        return views;
+    };
+    FrameGenTuning tuning;
+    tuning.engine_mode = FrameGenEngineMode::kCapture;
+    auto execute = [&](const std::vector<FrameGenViewSubmission>& views) {
+        FrameGenExecuteResult result;
+        Check(gpu->Execute(views, tuning, result, error), "engine capture: execute: " + error);
+    };
+    auto capture_color = [&](const std::vector<FrameGenViewSubmission>& views) {
+        for (std::size_t v = 0; v < views.size(); ++v) {
+            Check(gpu->Capture(v, views[v].source, views[v].request, tuning.quality, error), "engine capture: color: " + error);
+        }
+    };
+    // Each eye's image `image` of its vectors, captured.
+    auto jobs = [&](std::uint32_t image, bool pair_next = false) {
+        std::vector<FrameGenMotionJob> list(2);
+        for (std::size_t v = 0; v < 2; ++v) {
+            list[v].view = v;
+            list[v].vectors = {vectors[v], image, 0, rects[v], DXGI_FORMAT_R16G16B16A16_FLOAT};
+            list[v].capture = true;
+            list[v].pair_next = pair_next;
+        }
+        return list;
+    };
+    auto requests = [&](const std::vector<FrameGenViewSubmission>& views) {
+        std::vector<FrameGenViewRequest> color;
+        for (const FrameGenViewSubmission& view : views) color.push_back(view.request);
+        return color;
+    };
+    // Each view's newest raw field against the CPU's resample of `image`.
+    auto check_raw = [&](std::uint32_t image, const std::vector<FrameGenViewSubmission>& views, const std::string& what) {
+        for (std::size_t v = 0; v < 2; ++v) {
+            std::vector<float> values;
+            FrameGenExtent extent{};
+            std::uint32_t channels = 0;
+            Check(gpu->ReadTexture(v, {FrameGenTextureKind::kEngineRaw, 0}, values, extent, channels) && channels == 2,
+                  "engine capture: " + what + ": view " + std::to_string(v) + "'s raw field read back");
+            const FrameGenExtent l1 = FrameGenPyramid(views[v].request.extent)[1];
+            const std::vector<float> expected = EngineRawReference(images[v][image], rects[v], l1);
+            Check(extent.width == l1.width && extent.height == l1.height && values.size() == expected.size(),
+                  "engine capture: " + what + ": view " + std::to_string(v) + "'s field is on its half-resolution grid");
+            std::size_t mismatches = 0, sentinels = 0, zeros = 0, limits = 0;
+            for (std::size_t i = 0; i < values.size(); ++i) {
+                mismatches += values[i] == expected[i] ? 0 : 1;
+                sentinels += values[i] == kFrameGenEngineInvalid ? 1 : 0;
+                zeros += values[i] == 0.0f && i % 2 == 0 && values[i + 1] == 0.0f ? 1 : 0;
+                limits += values[i] == -kFrameGenEngineRawLimit ? 1 : 0;
+            }
+            Check(mismatches == 0, "engine capture: " + what + ": view " + std::to_string(v) + " is the nearest texels, raw (" +
+                                       std::to_string(mismatches) + " values differ)");
+            Check(sentinels > 0 && zeros > 0 && limits > 0,
+                  "engine capture: " + what + ": the sentinel, exact zeros and vectors at the limit are there");
+        }
+    };
+
+    // Before Execute sets the views up: their census, no capture.
+    const std::vector<FrameGenViewSubmission> first = submissions(0, false);
+    Check(gpu->CaptureMotion(jobs(1), requests(first), error) && gpu->WaitIdle(), "engine capture: before setup: " + error);
+    FrameGenEngineStatus status = gpu->EngineStatus();
+    Check(status.captured == 0 && status.unready == 2 && status.dispatches == 0,
+          "engine capture: nothing is captured before the views are set up");
+    execute(first);
+
+    // Both eyes, one grid: one dispatch.
+    std::vector<FrameGenViewSubmission> views = submissions(1, false);
+    capture_color(views);
+    Check(gpu->CaptureMotion(jobs(1), requests(views), error), "engine capture: capture: " + error);
+    status = gpu->EngineStatus();
+    Check(status.captured == 2 && status.dispatches == 1, "engine capture: both eyes in one dispatch");
+    check_raw(1, views, "one grid");
+    execute(views);
+
+    // View 1 at another size: a dispatch each.
+    views = submissions(2, true);
+    execute(views); // set up at that size
+    capture_color(views);
+    Check(gpu->CaptureMotion(jobs(2), requests(views), error), "engine capture: capture at two sizes: " + error);
+    status = gpu->EngineStatus();
+    Check(status.captured == 4 && status.dispatches == 3, "engine capture: eyes of two sizes in two dispatches");
+    check_raw(2, views, "two sizes");
+    execute(views);
+    views = submissions(3, false);
+    execute(views); // back at one size
+
+    // Vectors released before their color pair with the color captured
+    // after them: the frame's dump has them, as the field holds them.
+    const std::filesystem::path dumps = std::filesystem::temp_directory_path() /
+                                        ("vectorxr-engine-capture-" + std::to_string(GetCurrentProcessId()));
+    std::error_code ignored;
+    std::filesystem::remove_all(dumps, ignored);
+    std::filesystem::create_directories(dumps / "frame-0", ignored);
+    views = submissions(4, false);
+    Check(gpu->CaptureMotion(jobs(0, true), requests(views), error), "engine capture: released first: " + error);
+    capture_color(views);
+    Check(gpu->DumpNextExecute((dumps / "frame-0").string()), "engine capture: dump armed");
+    execute(views);
+    Check(gpu->WaitIdle(), "engine capture: dump written");
+    const FrameGenExtent l1 = FrameGenPyramid({kSize, kSize})[1];
+    std::vector<std::uint16_t> dumped(std::size_t{l1.width} * l1.height * 2);
+    bool written = false;
+    for (int attempt = 0; attempt < 500 && !written; ++attempt) {
+        std::error_code size_error;
+        written = std::filesystem::file_size(dumps / "frame-0" / "view1-engine-raw.rg16f", size_error) ==
+                      dumped.size() * 2 &&
+                  ReadBinary((dumps / "frame-0" / "view1-engine-raw.rg16f").string(), dumped.data(), dumped.size() * 2);
+        if (!written) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    Check(written, "engine capture: vectors released before their color pair with it (the dump has them)");
+    const std::vector<float> expected = EngineRawReference(images[1][0], rects[1], l1);
+    bool same = true;
+    for (std::size_t i = 0; i < expected.size(); ++i) same = same && HalfValue(dumped[i]) == expected[i];
+    Check(same, "engine capture: the dumped field is the frame's vectors");
+
+    // A later frame of the same color image (the same capture key) whose
+    // vectors were not captured: its dump has no raw field (the field holds
+    // frame 4's vectors, which its analysis did not take).
+    std::filesystem::create_directories(dumps / "frame-1", ignored);
+    views = submissions(7, false);
+    capture_color(views);
+    Check(gpu->DumpNextExecute((dumps / "frame-1").string()), "engine capture: second dump armed");
+    const std::uint64_t paired = gpu->EngineStatus().paired;
+    execute(views);
+    Check(gpu->WaitIdle() && gpu->EngineStatus().paired == paired, "engine capture: a frame without vectors pairs none");
+    // Its files are written in view order: view 1's depth after view 0's
+    // raw field would have been.
+    const std::uintmax_t depth_bytes = std::uintmax_t{l1.width} * l1.height * 4;
+    written = false;
+    for (int attempt = 0; attempt < 500 && !written; ++attempt) {
+        std::error_code size_error;
+        written = std::filesystem::file_size(dumps / "frame-1" / "view1-depth.f32", size_error) == depth_bytes;
+        if (!written) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    Check(written && !std::filesystem::exists(dumps / "frame-1" / "view0-engine-raw.rg16f") &&
+              !std::filesystem::exists(dumps / "frame-1" / "view1-engine-raw.rg16f"),
+          "engine capture: a frame's dump has no raw field its analysis did not take");
+    std::filesystem::remove_all(dumps, ignored);
+
+    // Vectors released before a color that was never captured (frame 8 is
+    // copied by Execute) pair with no later frame's color.
+    views = submissions(8, false);
+    Check(gpu->CaptureMotion(jobs(2, true), requests(views), error), "engine capture: released, color never captured: " + error);
+    execute(views);
+    views = submissions(9, false);
+    capture_color(views);
+    execute(views);
+    Check(gpu->EngineStatus().paired == paired, "engine capture: vectors whose color never came pair with no later frame's");
+
+    // The field a frame's analysis reads is written two captures later:
+    // with that analysis done, the capture never waits.
+    Check(gpu->WaitIdle(), "engine capture: idle");
+    std::uint64_t waits = gpu->EngineStatus().waits;
+    for (std::uint32_t frame = 10; frame < 13; ++frame) {
+        views = submissions(frame, false);
+        capture_color(views);
+        Check(gpu->CaptureMotion(jobs(frame % 3), requests(views), error), "engine capture: steady: " + error);
+        execute(views);
+        Check(gpu->WaitIdle(), "engine capture: idle");
+    }
+    status = gpu->EngineStatus();
+    Check(status.waits == waits && status.paired == paired + 6,
+          "engine capture: each frame's analysis takes its vectors; no wait once the analyses reading a field are done");
+    // ...but with the game's queue held, the analysis of frame 13 cannot run
+    // (it waits for frame 13's captures): frame 15's capture into the field
+    // it reads waits for it on the game's queue, never on the CPU (frame
+    // 14's, into the field frame 12's finished analysis read, does not).
+    ComPtr<ID3D12Fence> gate;
+    Check(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate))), "engine capture: gate fence");
+    const test_gates::Guard gate_guard(gate.Get());
+    queue->Wait(gate.Get(), 1);
+    for (std::uint32_t frame = 13; frame < 15; ++frame) {
+        views = submissions(frame, false);
+        capture_color(views);
+        Check(gpu->CaptureMotion(jobs(frame % 3), requests(views), error), "engine capture: held: " + error);
+        execute(views);
+    }
+    Check(gpu->EngineStatus().waits == waits, "engine capture: no wait for a field a finished analysis read");
+    views = submissions(15, false);
+    capture_color(views);
+    const auto asked = std::chrono::steady_clock::now();
+    Check(gpu->CaptureMotion(jobs(0), requests(views), error), "engine capture: over an unfinished analysis: " + error);
+    const double waited = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - asked).count();
+    status = gpu->EngineStatus();
+    Check(status.waits == waits + 2 && waited < 50.0,
+          "engine capture: a field an unfinished analysis reads is waited for on the GPU (" +
+              std::to_string(status.waits - waits) + " waits, " + std::to_string(waited) + " ms)");
+    // Every motion slot still on the GPU (three held, one free): the next
+    // call but one is skipped at once.
+    const std::uint64_t busy = status.busy;
+    Check(gpu->CaptureMotion(jobs(1), requests(views), error), "engine capture: a free slot: " + error);
+    const auto skipped_at = std::chrono::steady_clock::now();
+    const bool skipped = !gpu->CaptureMotion(jobs(1), requests(views), error);
+    const double skip_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - skipped_at).count();
+    Check(skipped && error.empty() && gpu->EngineStatus().busy == busy + 1 && skip_ms < 50.0,
+          "engine capture: a busy motion slot is skipped at once (" + std::to_string(skip_ms) + " ms)");
+    Check(SUCCEEDED(gate->Signal(1)) && gpu->WaitIdle(), "engine capture: the queue goes on");
+    execute(views);
+    check_raw(1, views, "after the held queue");
+    gpu->Reset();
+
+    // Raw fields that cannot be made leave the views out for the session;
+    // Frame Generation goes on without them.
+    {
+        auto plain = CreateFrameGenGpu(harness.binding, error);
+        Check(plain != nullptr, "engine capture: second backend: " + error);
+        plain->SetCopyAfterRelease(true);
+        for (std::size_t v = 0; v < 2; ++v) {
+            for (const XrSwapchain chain : {sources[v], outputs[v], vectors[v]}) {
+                Check(plain->Track(chain, EnumerateImages, error), "engine capture: track: " + error);
+            }
+        }
+        FrameGenExecuteResult result;
+        views = submissions(0, false);
+        Check(plain->Execute(views, FrameGenTuning{}, result, error), "engine capture: set up without raw fields: " + error);
+        plain->FailAllocationForTest(1); // the first raw field
+        Check(plain->Execute(views, tuning, result, error),
+              "engine capture: raw fields that cannot be made fail no Execute: " + error);
+        views = submissions(1, false);
+        for (std::size_t v = 0; v < 2; ++v) {
+            Check(plain->Capture(v, views[v].source, views[v].request, tuning.quality, error),
+                  "engine capture: color without raw fields: " + error);
+        }
+        Check(plain->CaptureMotion(jobs(1), requests(views), error) && plain->Execute(views, tuning, result, error),
+              "engine capture: a frame without raw fields: " + error);
+        const FrameGenEngineStatus failed = plain->EngineStatus();
+        const auto notes = std::count_if(failed.notes.begin(), failed.notes.end(), [](const std::string& note) {
+            return note.find("raw fields could not be made") != std::string::npos;
+        });
+        Check(notes == 1 && failed.captured == 0 && failed.unready == 2 && failed.paired == 0,
+              "engine capture: raw fields that cannot be made leave the views out, noted once");
+        plain->Reset();
+    }
+    for (std::size_t v = 0; v < 2; ++v) {
+        for (const XrSwapchain chain : {sources[v], small_sources[v], outputs[v], small_outputs[v], vectors[v]}) {
+            g_swapchains.erase(chain);
+        }
+    }
+    std::cout << "D3D12 engine capture: raw fields, sentinel, dispatches, pairing, dumps, waits, busy slots and "
+                 "allocation failure checked\n";
+}
+
+// The replay's loader on a synthetic capture with motion vectors, made as
+// `profile` makes one with FG_PROFILE_MV=1 and FG_PROFILE_DUMP (on WARP, at
+// test size): each frame's vectors come back as made, with how they decode,
+// and the raw field dumped beside them is their resample; the capture's
+// files without the motion ones (an older capture) load as before.
+void ReplayMotionLoaderTest(Harness& harness) {
+    std::string error;
+    auto gpu = CreateFrameGenGpu(harness.binding, error);
+    Check(gpu != nullptr, "replay loader backend: " + error);
+    gpu->SetCopyAfterRelease(true); // the tests' images are their own
+    const std::int64_t output_format = gpu->OutputFormats(FrameGenOutputKind::kSrgb8).front();
+    const std::uint32_t depth_size = kSize * 4 / 5;
+    const float outer = 2.0f, inner = 1.26f, vertical = 1.64f, half_ipd = 0.0336f;
+    constexpr float kScroll = 0.004f;
+    std::array<XrSwapchain, 2> sources{}, depths{}, outputs{}, vectors{};
+    std::array<MotionDumpImage, 2> made;
+    for (std::size_t eye = 0; eye < 2; ++eye) {
+        const float head = eye == 0 ? -half_ipd : half_ipd;
+        const float left = eye == 0 ? -outer : -inner, right = eye == 0 ? inner : outer;
+        sources[eye] = reinterpret_cast<XrSwapchain>(std::uintptr_t{0x1f0 + eye});
+        depths[eye] = reinterpret_cast<XrSwapchain>(std::uintptr_t{0x1f2 + eye});
+        outputs[eye] = reinterpret_cast<XrSwapchain>(std::uintptr_t{0x1f4 + eye});
+        vectors[eye] = reinterpret_cast<XrSwapchain>(std::uintptr_t{0x1f6 + eye});
+        g_swapchains[sources[eye]].clear();
+        for (int frame = 0; frame < 3; ++frame) {
+            void* image = harness.create(kSize, kSize);
+            harness.upload(image, CockpitAt(kSize, kSize, head, left, right, vertical, kScroll * frame));
+            g_swapchains[sources[eye]].push_back(image);
+        }
+        const XrRect2Di panel{{depth_size / 3, depth_size / 3}, {static_cast<int>(depth_size / 3), static_cast<int>(depth_size / 3)}};
+        g_swapchains[depths[eye]] = {harness.create_depth_sized(depth_size, depth_size, 0.6f, panel, 0.0f)};
+        g_swapchains[outputs[eye]] = {harness.create(kSize, kSize)};
+        made[eye] = ProfileMotionVectors(depth_size, depth_size, head, left, right, vertical, kScroll, "uv");
+        g_swapchains[vectors[eye]].clear();
+        for (int k = 0; k < 3; ++k) {
+            g_swapchains[vectors[eye]].push_back(
+                harness.create_texture_data(made[eye].format, made[eye].width, made[eye].height, made[eye].bytes));
+        }
+        for (const XrSwapchain chain : {sources[eye], depths[eye], outputs[eye], vectors[eye]}) {
+            Check(gpu->Track(chain, EnumerateImages, error), "replay loader: track: " + error);
+        }
+    }
+    const std::filesystem::path root = std::filesystem::temp_directory_path() /
+                                       ("vectorxr-replay-loader-" + std::to_string(GetCurrentProcessId()));
+    std::error_code ignored;
+    std::filesystem::remove_all(root, ignored);
+    FrameGenDepthEncoding encoding;
+    encoding.near_z = 1000.0f;
+    encoding.far_z = 0.1f;
+    FrameGenTuning tuning;
+    tuning.mode = FrameGenSynthesisMode::kExtrapolate;
+    tuning.engine_mode = FrameGenEngineMode::kCapture;
+    constexpr int kDumped = 3;
+    for (int i = 0; i < 2 + kDumped; ++i) {
+        std::vector<FrameGenViewSubmission> views(2);
+        const XrRect2Di rect{{0, 0}, {static_cast<int>(kSize), static_cast<int>(kSize)}};
+        std::vector<FrameGenMotionJob> jobs(2);
+        std::vector<FrameGenViewRequest> color;
+        for (std::size_t eye = 0; eye < 2; ++eye) {
+            FrameGenViewSubmission& view = views[eye];
+            view.source = {sources[eye], static_cast<std::uint32_t>(i % 3), 0, rect, harness.format};
+            view.outputs = {{outputs[eye], 0, 0, rect, output_format}};
+            view.request.extent = {kSize, kSize};
+            view.request.output = FrameGenOutputKind::kSrgb8;
+            view.request.synthesize = i > 0;
+            view.request.depth = true;
+            for (auto* geometry : {&view.request.newest, &view.request.previous}) {
+                geometry->angle_left = std::atan(eye == 0 ? -outer : -inner);
+                geometry->angle_right = std::atan(eye == 0 ? inner : outer);
+                geometry->angle_up = std::atan(vertical);
+                geometry->angle_down = -std::atan(vertical);
+                geometry->position = {eye == 0 ? -half_ipd : half_ipd, 0, 0};
+            }
+            const bool captured = gpu->Capture(eye, view.source, view.request, tuning.quality, error);
+            Check(captured || error.empty(), "replay loader: capture: " + error);
+            const XrRect2Di depth_rect{{0, 0}, {static_cast<int>(depth_size), static_cast<int>(depth_size)}};
+            const bool depth = gpu->CaptureDepth(eye, {depths[eye], 0, 0, depth_rect, 0}, encoding, view.request, error);
+            Check(depth || error.empty(), "replay loader: depth capture: " + error);
+            jobs[eye].view = eye;
+            jobs[eye].vectors = {vectors[eye], static_cast<std::uint32_t>(i % 3), 0, depth_rect,
+                                 DXGI_FORMAT_R16G16B16A16_FLOAT};
+            jobs[eye].frame = static_cast<std::uint64_t>(i);
+            jobs[eye].capture = true;
+            color.push_back(view.request);
+        }
+        const std::string directory = (root / ("frame-" + std::to_string(i - 2))).string();
+        if (i >= 2) {
+            std::filesystem::create_directories(directory, ignored);
+            gpu->DumpMotion(directory, true);
+            std::ofstream notes(directory + "/motion.txt");
+            for (std::size_t eye = 0; eye < 2; ++eye) notes << "view " << eye << " decode 0 1 1 1 0 0 0 0\n";
+            std::ofstream(directory + "/presenter.txt") << "sequence " << i << "\nratio 1.25\n";
+        }
+        Check(gpu->CaptureMotion(jobs, color, error), "replay loader: motion capture: " + error);
+        if (i >= 2) gpu->DumpNextExecute(directory);
+        FrameGenExecuteResult result;
+        Check(gpu->Execute(views, tuning, result, error), "replay loader: execute: " + error);
+        Check(gpu->WaitIdle(), "replay loader: idle");
+    }
+    // The files are written by threads of their own once the GPU is done.
+    const std::filesystem::path last = root / ("frame-" + std::to_string(kDumped - 1));
+    bool written = false;
+    for (int attempt = 0; attempt < 500 && !written; ++attempt) {
+        std::error_code size_error;
+        written = std::filesystem::file_size(last / "view1-engine-raw.rg16f", size_error) ==
+                      std::size_t{kSize / 2} * (kSize / 2) * 4 &&
+                  std::filesystem::file_size(last / "view1-mv-img2.rgba16f", size_error) == made[1].bytes.size();
+        if (!written) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    Check(written, "replay loader: the synthetic capture is written");
+    std::this_thread::sleep_for(std::chrono::milliseconds(100)); // the other files' writers
+    for (int k = 0; k < kDumped; ++k) {
+        ReplayFrame frame;
+        Check(LoadReplayFrame((root / ("frame-" + std::to_string(k))).string(), frame) && frame.views.size() == 2,
+              "replay loader: frame " + std::to_string(k) + " loads");
+        Check(frame.display_ratio && *frame.display_ratio == 1.25f, "replay loader: presenter.txt's ratio");
+        for (std::size_t eye = 0; eye < 2; ++eye) {
+            const ReplayView& view = frame.views[eye];
+            Check(view.vectors && view.vectors->width == depth_size && view.vectors->height == depth_size &&
+                      view.vectors->bytes == made[eye].bytes && view.vectors_image == static_cast<std::uint32_t>((k + 2) % 3) &&
+                      !view.encoding.ext,
+                  "replay loader: frame " + std::to_string(k) + " view " + std::to_string(eye) +
+                      "'s vectors come back as made, the image the frame chose");
+            const XrRect2Di region{{0, 0}, {static_cast<int>(depth_size), static_cast<int>(depth_size)}};
+            Check(view.engine_raw == EngineRawReference(*view.vectors, region, {view.half_width, view.half_height}),
+                  "replay loader: frame " + std::to_string(k) + " view " + std::to_string(eye) +
+                      "'s dumped raw field is its vectors' resample");
+        }
+    }
+    // An older capture: frame.txt, the colors and the depths alone.
+    const std::filesystem::path old = root / "old" / "frame-0";
+    std::filesystem::create_directories(old, ignored);
+    for (const char* name : {"frame.txt", "view0-color.raw", "view1-color.raw", "view0-depth.f32", "view1-depth.f32"}) {
+        std::filesystem::copy_file(root / "frame-0" / name, old / name, ignored);
+    }
+    ReplayFrame frame;
+    Check(LoadReplayFrame(old.string(), frame) && frame.views.size() == 2 && !frame.display_ratio &&
+              !frame.views[0].vectors && frame.views[0].engine_raw.empty(),
+          "replay loader: a capture without motion vectors loads as before");
+    std::filesystem::remove_all(root, ignored);
+    gpu->Reset();
+    for (std::size_t eye = 0; eye < 2; ++eye) {
+        for (const XrSwapchain chain : {sources[eye], depths[eye], outputs[eye], vectors[eye]}) g_swapchains.erase(chain);
+    }
+    std::cout << "D3D12 replay loader: a synthetic capture's motion vectors and raw fields round-trip; older captures load\n";
+}
+
 // --- engine-calibrate: a research capture's motion vectors against its poses --
 //   depthxr_framegen_tests engine-calibrate <capture directory>
 // CPU only (no GPU, no lock): for each view, the frames whose motion vector
@@ -7196,81 +8141,6 @@ void EngineCensusTest(Harness& harness, ID3D12Device* device, ID3D12CommandQueue
 // the cockpit fit (head included), the lag test, the intercept's spread and a
 // leaderboard of camera models with their gains and nearest canonical gain.
 
-// A line of a key-value text file: the words after `key` on the first line
-// starting with it (empty when none).
-std::vector<std::string> TextLine(const std::string& path, const std::string& key) {
-    std::ifstream file(path);
-    std::string line;
-    while (std::getline(file, line)) {
-        if (line.rfind(key + " ", 0) == 0 || line == key) {
-            std::istringstream words(line.substr(key.size()));
-            std::vector<std::string> result;
-            for (std::string word; words >> word;) result.push_back(word);
-            return result;
-        }
-    }
-    return {};
-}
-
-bool GeometryFrom(const std::vector<std::string>& words, FrameGenViewGeometry& geometry) {
-    if (words.size() < 11) return false;
-    float values[11];
-    for (int i = 0; i < 11; ++i) values[i] = std::stof(words[static_cast<std::size_t>(i)]);
-    geometry.orientation = {values[0], values[1], values[2], values[3]};
-    geometry.position = {values[4], values[5], values[6]};
-    geometry.angle_left = values[7];
-    geometry.angle_right = values[8];
-    geometry.angle_up = values[9];
-    geometry.angle_down = values[10];
-    return true;
-}
-
-struct MotionDumpImage {
-    std::uint32_t width{0}, height{0};
-    int format{0};
-    std::vector<std::uint8_t> bytes;
-    std::array<float, 4> Texel(std::uint32_t x, std::uint32_t y) const {
-        std::array<float, 4> v{};
-        const bool half = format == DXGI_FORMAT_R16G16B16A16_FLOAT || format == DXGI_FORMAT_R16G16_FLOAT;
-        const int channels = format == DXGI_FORMAT_R16G16_FLOAT || format == DXGI_FORMAT_R32G32_FLOAT ? 2 : 4;
-        const std::size_t size = half ? 2 : 4;
-        const std::size_t offset = (std::size_t{y} * width + x) * channels * size;
-        for (int c = 0; c < channels; ++c) {
-            if (half) {
-                std::uint16_t bits = 0;
-                std::memcpy(&bits, &bytes[offset + c * size], 2);
-                v[c] = HalfValue(bits);
-            } else {
-                std::memcpy(&v[c], &bytes[offset + c * size], 4);
-            }
-        }
-        return v;
-    }
-};
-
-// A view's image `image` of the frame motion.txt describes (`frame`): never
-// another frame's vectors left in its directory.
-bool LoadMotionDump(const std::string& directory, std::size_t view, std::uint32_t image, std::uint64_t frame,
-                    MotionDumpImage& dump) {
-    const std::string stem = directory + "/view" + std::to_string(view) + "-mv-img" + std::to_string(image);
-    const std::vector<std::string> dumped = TextLine(stem + ".txt", "frame");
-    if (dumped.empty() || std::stoull(dumped[0]) != frame) return false;
-    const std::vector<std::string> rect = TextLine(stem + ".txt", "rect");
-    const std::vector<std::string> format = TextLine(stem + ".txt", "format");
-    const std::vector<std::string> file = TextLine(stem + ".txt", "file");
-    if (rect.size() < 4 || format.empty() || file.empty()) return false;
-    dump.width = static_cast<std::uint32_t>(std::stoul(rect[2]));
-    dump.height = static_cast<std::uint32_t>(std::stoul(rect[3]));
-    dump.format = std::stoi(format[0]);
-    std::size_t texel = 16; // RGBA32F
-    if (dump.format == DXGI_FORMAT_R16G16B16A16_FLOAT || dump.format == DXGI_FORMAT_R32G32_FLOAT) {
-        texel = 8;
-    } else if (dump.format == DXGI_FORMAT_R16G16_FLOAT) {
-        texel = 4;
-    }
-    dump.bytes.resize(std::size_t{dump.width} * dump.height * texel);
-    return ReadBinary(directory + "/" + file[0], dump.bytes.data(), dump.bytes.size());
-}
 
 int RunEngineCalibrate(const std::string& capture) {
     std::vector<std::string> directories;
@@ -7751,6 +8621,53 @@ int D3D12Test() {
         keep.push_back(resource);
         return resource.Get();
     };
+    harness.create_texture_data = [&](std::int64_t format, std::uint32_t width, std::uint32_t height,
+                                      const std::vector<std::uint8_t>& bytes) -> void* {
+        D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_DEFAULT};
+        D3D12_RESOURCE_DESC desc{};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        desc.Width = width;
+        desc.Height = height;
+        desc.DepthOrArraySize = 1;
+        desc.MipLevels = 1;
+        desc.Format = static_cast<DXGI_FORMAT>(format);
+        desc.SampleDesc.Count = 1;
+        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+        ComPtr<ID3D12Resource> resource;
+        Check(SUCCEEDED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST,
+                                                        nullptr, IID_PPV_ARGS(&resource))),
+              "D3D12 data image");
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT sized{};
+        UINT64 size_bytes = 0;
+        device->GetCopyableFootprints(&desc, 0, 1, 0, &sized, nullptr, nullptr, &size_bytes);
+        D3D12_HEAP_PROPERTIES upload_heap{D3D12_HEAP_TYPE_UPLOAD};
+        D3D12_RESOURCE_DESC buffer_desc{};
+        buffer_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        buffer_desc.Width = size_bytes;
+        buffer_desc.Height = buffer_desc.DepthOrArraySize = buffer_desc.MipLevels = 1;
+        buffer_desc.SampleDesc.Count = 1;
+        buffer_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        ComPtr<ID3D12Resource> upload;
+        Check(SUCCEEDED(device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &buffer_desc,
+                                                        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&upload))),
+              "D3D12 data upload buffer");
+        void* mapped = nullptr;
+        Check(SUCCEEDED(upload->Map(0, nullptr, &mapped)), "D3D12 data upload map");
+        const std::size_t row = bytes.size() / height;
+        for (std::uint32_t y = 0; y < height; ++y) {
+            std::memcpy(static_cast<std::byte*>(mapped) + y * sized.Footprint.RowPitch, bytes.data() + y * row, row);
+        }
+        upload->Unmap(0, nullptr);
+        begin();
+        D3D12_TEXTURE_COPY_LOCATION dst{resource.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+        D3D12_TEXTURE_COPY_LOCATION src{upload.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
+        src.PlacedFootprint = sized;
+        commands->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        transition(resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        submit_and_wait();
+        keep.push_back(resource);
+        return resource.Get();
+    };
     harness.readback_sized = [&](void* image) {
         auto* resource = static_cast<ID3D12Resource*>(image);
         const D3D12_RESOURCE_DESC desc = resource->GetDesc();
@@ -7800,6 +8717,8 @@ int D3D12Test() {
         SubstitutionShownTest(device.Get(), queue.Get());
         AllocationFailureRecoveryTest(harness);
         EngineCensusTest(harness, device.Get(), queue.Get());
+        EngineCaptureTest(harness, queue.Get(), device.Get());
+        ReplayMotionLoaderTest(harness);
     }
     int result = g_replay      ? RunReplay(harness)
                  : g_contention ? RunContention(harness)

@@ -88,11 +88,18 @@ struct FrameGenMotionJob {
     FrameGenMotionEncoding encoding;
     bool informative{false};
     // Stage 0: every image is fingerprinted, and the sparse samples taken.
+    // Without census_all only vectors.image_index is.
     bool census_all{false};
     bool samples{false};
     // Taken when the frame's depth was released, before its xrEndFrame:
     // whether the images are written by then (census only).
     bool early{false};
+    // Stage 2: vectors.image_index is also resampled to the view's
+    // half-resolution grid (kEngineCapture), paired with the view's color
+    // capture: its latest, or with `pair_next` (the game released its vectors
+    // before its color this frame) the next one.
+    bool capture{false};
+    bool pair_next{false};
 };
 
 // One image's census (kEngineCensus, see FG_PASS_ENGINE_CENSUS).
@@ -120,6 +127,7 @@ struct FrameGenEngineCensus {
     std::size_t view{0};
     bool early{false};
     std::uint32_t images{0};
+    std::uint32_t censused{~0u}; // the images read (bits): `image` holds only theirs
     std::uint32_t color_index{0};
     std::uint32_t depth_index{0};
     std::uint64_t handle{0}; // the motion vector swapchain
@@ -128,7 +136,7 @@ struct FrameGenEngineCensus {
     // 16x16 samples of 4 texels: the three images' raw texels, then the
     // linear depth, the color image index and the half-resolution texel.
     std::vector<std::array<float, 4>> samples;
-    double gpu_ms{-1.0}; // the census submission's time on the GPU
+    double gpu_ms{-1.0}; // the census submission's time on the GPU (stage 2: its capture's too)
 };
 
 // The backend's engine motion state: counts, and the censuses read back
@@ -140,6 +148,17 @@ struct FrameGenEngineStatus {
     std::uint64_t refused{0};     // images that cannot be read (multisampled, integer, not shader-readable)
     std::uint64_t failed{0};
     std::uint64_t dumped{0};      // frames whose images were copied for a research capture
+    // Stage 2: views' vectors resampled (kEngineCapture), in how many
+    // dispatches (one for eyes of one size); views whose capture had the
+    // game's queue wait for the analysis that last read the field it writes
+    // (the CPU saw that analysis unfinished); views left out (not set up yet,
+    // or no color capture to pair with); and views analysed with their own
+    // frame's field (what a later stage reads).
+    std::uint64_t captured{0};
+    std::uint64_t dispatches{0};
+    std::uint64_t waits{0};
+    std::uint64_t unready{0};
+    std::uint64_t paired{0};
     bool stopped{false};          // the device was removed: nothing more is read
     // Each motion vector image's description (resource, heap), once each,
     // and debug-layer messages about their states (VECTORXR_FRAMEGEN_ENGINE_MV_DEBUG).
@@ -190,12 +209,19 @@ class FrameGenGpu {
     // images on the game's queue, as they are at the call (a game may never
     // release them), and keeps what the census finds for EngineStatus a few
     // frames later. `color` describes each view's color image, by view.
+    // Jobs with `capture` (stage 2) also resample their image into the
+    // view's raw field (kEngineRaw), once Execute set the view up with
+    // FrameGenTuning::engine_mode from kCapture; `resampled`, when given,
+    // says per job whether it was (a view not set up, or with no color
+    // capture to pair with, is left out while its census is still taken).
     // Never waits: with every motion slot still on the GPU the call is
     // skipped (false, an empty error).
     virtual bool SupportsEngineMotion() const { return false; }
     virtual bool CaptureMotion(const std::vector<FrameGenMotionJob>& /*jobs*/,
-                               const std::vector<FrameGenViewRequest>& /*color*/, std::string& error) {
+                               const std::vector<FrameGenViewRequest>& /*color*/, std::string& error,
+                               std::vector<bool>* resampled = nullptr) {
         error.clear();
+        if (resampled) resampled->clear();
         return false;
     }
     // With the censuses read back since sequence `after` (FrameGenEngineCensus::sequence).

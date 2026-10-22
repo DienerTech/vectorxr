@@ -1,6 +1,7 @@
 #include "depthxr/framegen_plan.h"
 
 #include "depthxr/config_path.h"
+#include "depthxr/process_info.h"
 
 #include <algorithm>
 #include <cctype>
@@ -1031,7 +1032,27 @@ FrameGenEngineMode ParseFrameGenEngineMode(const char* value) {
     std::string text(value);
     std::transform(text.begin(), text.end(), text.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return text == "census" ? FrameGenEngineMode::kCensus : FrameGenEngineMode::kOff;
+    return text == "census"    ? FrameGenEngineMode::kCensus
+           : text == "capture" ? FrameGenEngineMode::kCapture
+                               : FrameGenEngineMode::kOff;
+}
+
+FrameGenDispatch BuildFrameGenMotionCaptureDispatch(FrameGenExtent l1, const std::array<std::int32_t, 4>& rect0,
+                                                    const std::array<std::int32_t, 4>& rect1, std::uint32_t slice0,
+                                                    std::uint32_t slice1, std::uint32_t views) {
+    FrameGenDispatch dispatch;
+    dispatch.pass = FrameGenPass::kEngineCapture;
+    dispatch.width = l1.width;
+    dispatch.height = l1.height;
+    dispatch.outputs = {Texture(FrameGenTextureKind::kEngineRaw), {}};
+    dispatch.constants.size = {l1.width, l1.height, static_cast<std::uint32_t>(std::max(rect0[2], 0)),
+                               static_cast<std::uint32_t>(std::max(rect0[3], 0))};
+    dispatch.constants.fov_current = {static_cast<float>(rect0[0]), static_cast<float>(rect0[1]),
+                                      static_cast<float>(rect1[0]), static_cast<float>(rect1[1])};
+    dispatch.constants.fov_previous = {static_cast<float>(rect1[2]), static_cast<float>(rect1[3]),
+                                       static_cast<float>(slice0), static_cast<float>(slice1)};
+    dispatch.constants.options = {views, 0, 0, 0};
+    return dispatch;
 }
 
 FrameGenViewMapping BuildFrameGenViewMapping(const FrameGenViewGeometry& newest, const FrameGenViewGeometry& previous,
@@ -1206,11 +1227,18 @@ void FrameGenEngineImageTracker::Add(const FrameGenEngineTrackerFrame& frame) {
         images_ = images;
     }
     released_streak_ = frame.released ? released_streak_ + 1 : 0;
-    // The images whose hash changed since their own last census.
+    // The images whose hash changed since their own last census. A census
+    // of some of them keeps theirs for the next census of every image
+    // (production reads the chosen image alone between those): only such a
+    // census tells which images a frame wrote.
     bool known = images > 0;
     std::uint32_t changed = 0;
     std::uint32_t last = 0;
     for (std::uint32_t i = 0; i < images; ++i) {
+        if (((frame.censused >> i) & 1u) == 0) {
+            known = false;
+            continue;
+        }
         if (!hashes_[i]) {
             known = false;
         } else if (*hashes_[i] != frame.hashes[i]) {
@@ -1933,6 +1961,12 @@ std::uint64_t ResearchFileReads() {
     ResearchFile& research = Research();
     std::scoped_lock lock(research.mutex);
     return research.reads;
+}
+
+std::filesystem::path FrameGenEngineRemovedPath() {
+    const std::filesystem::path local = LocalAppDataPath();
+    if (local.empty()) return {};
+    return local / "VectorXR" / (L"engine-motion-" + GetCurrentExecutablePath().filename().wstring() + L".removed");
 }
 
 } // namespace depthxr
