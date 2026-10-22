@@ -9180,7 +9180,9 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
             break;
         }
     }
-    if (IsQuadViewsEmulationActive()) {
+    // The suite switch hides the diagnostic visualization of a Quadviews
+    // session that keeps running (RefreshResolvedSettings).
+    if (IsQuadViewsEmulationActive() && config_.core.enabled) {
         PollQuadViewsDiagnosticVisualizationToggle();
     } else {
         ResetQuadViewsDiagnosticVisualizationState();
@@ -9233,9 +9235,11 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     // rewrite loop below, so a requested sharpen must keep this frame out of the
     // identity-delta fast path — otherwise sharpening only ever ran on frames
     // where PivotXR happened to produce a correction. Threshold matches
-    // SharpenNativeFocusViews (amount <= 0.001 is treated as off).
+    // SharpenNativeFocusViews (amount <= 0.001 is treated as off). The
+    // runtime composes native focus views, so the suite switch stops the
+    // sharpen at once, though the session keeps Quadviews.
     const bool needs_native_focus_sharpen =
-        varjo_compatible_quadviews_active_ && IsQuadViewsActive() && !d3d11_bridge_.Active() &&
+        varjo_compatible_quadviews_active_ && IsQuadViewsActive() && config_.core.enabled && !d3d11_bridge_.Active() &&
         Clamp(resolved_settings_.quadviews.foveate_sharpness, 0.0, 100.0) / 100.0 > 0.001;
     if (d3d11_bridge_.Active() && !d3d11_bridge_sharpen_logged_ && varjo_compatible_quadviews_active_ &&
         IsQuadViewsActive() && Clamp(resolved_settings_.quadviews.foveate_sharpness, 0.0, 100.0) / 100.0 > 0.001) {
@@ -11438,7 +11442,7 @@ void OpenXrLayer::PrepareOsd() {
     const auto& settings=resolved_settings_.core.osd;
     if (!settings.enabled && !osd_was_enabled_) {record();return;}
     osd_was_enabled_=settings.enabled;
-    // OSD remains available when enhancements are off, so it can explain state.
+    // Off with the suite switch too (RefreshResolvedSettings).
     if (settings.enabled) {
         const auto now=std::chrono::steady_clock::now();
         if (!osd_last_input_poll_ || now-*osd_last_input_poll_>=kInputBindingPollInterval) {
@@ -11494,6 +11498,11 @@ void OpenXrLayer::RefreshResolvedSettings() {
 
     const ResolvedRuntimeConfig previous = resolved_settings_;
     resolved_settings_ = ResolveRuntimeConfig(config_, current_exe_name_);
+    // The suite switch leaves the layer inert: the OSD (and its bindings)
+    // turns off with the Enhancements.
+    if (!resolved_settings_.core.enabled) {
+        resolved_settings_.core.osd.enabled = false;
+    }
     framegen_.Configure(resolved_settings_.framegen);
     framegen_.SetConfigured(resolved_settings_.core.enabled && resolved_settings_.framegen.enabled);
     // Turbo decouples the app from runtime pacing; Frame Generation locks it
@@ -11553,6 +11562,8 @@ void OpenXrLayer::RefreshResolvedSettings() {
                 resolved_settings_.depthxr.enabled = false;
                 resolved_settings_.pivotxr.enabled = false;
                 resolved_settings_.turbo.enabled = false;
+                resolved_settings_.framegen.enabled = false;
+                resolved_settings_.framegen.extend_head_prediction = false;
             }
         }
     } else {
@@ -12066,7 +12077,9 @@ bool OpenXrLayer::QuadViewsOverlayWithheld() const {
 }
 
 bool OpenXrLayer::QuadViewsDiagnosticVisualizationAvailable() const {
-    return IsQuadViewsEmulationActive() && d3d11_quadviews_compositor_.context != nullptr &&
+    // Not with the suite switch off, though a Quadviews session keeps its
+    // views until the game restarts.
+    return config_.core.enabled && IsQuadViewsEmulationActive() && d3d11_quadviews_compositor_.context != nullptr &&
            !QuadViewsOverlayWithheld();
 }
 
@@ -12078,6 +12091,12 @@ bool OpenXrLayer::IsVarjoCompatibleQuadviewsEligible() {
     // supports Varjo quad views. There is no separate opt-in — a user who does not
     // want VectorXR quadviews simply disables the module (per profile or globally).
     return config_.core.enabled && config_.quadviews.enabled;
+}
+
+bool OpenXrLayer::IsSuiteEnabled() {
+    std::scoped_lock lock(mutex_);
+    ReloadConfigIfNeeded();
+    return config_.core.enabled;
 }
 
 bool OpenXrLayer::ShouldLogQuadViewsDebugHeartbeat(
@@ -14831,6 +14850,12 @@ void OpenXrLayer::PollFrameGenToggle() {
     if (!framegen_owns_pacing_.load(std::memory_order_acquire)) {
         return;
     }
+    // Turned off in settings (or by the suite switch), the toggle would only
+    // flip a state nothing uses, with its sound: it waits, primed afresh.
+    if (!resolved_settings_.core.enabled || !resolved_settings_.framegen.enabled) {
+        framegen_binding_last_poll_time_.reset();
+        return;
+    }
 #if defined(_WIN32)
     const std::vector<InputBinding>& bindings = resolved_settings_.framegen.toggle_bindings;
     const auto now = std::chrono::steady_clock::now();
@@ -15328,7 +15353,7 @@ bool OpenXrLayer::AcquireFocusSharpenImage(QuadViewsCompositionTarget& target,
 void OpenXrLayer::SharpenNativeFocusViews(std::vector<XrCompositionLayerProjectionView>& views,
                                           XrTime display_time) {
     const double sharpen_amount = Clamp(resolved_settings_.quadviews.foveate_sharpness, 0.0, 100.0) / 100.0;
-    if (sharpen_amount <= 0.001 || views.size() < 4) {
+    if (!config_.core.enabled || sharpen_amount <= 0.001 || views.size() < 4) {
         return;
     }
     if (!EnsureD3D11FocusSharpen()) {

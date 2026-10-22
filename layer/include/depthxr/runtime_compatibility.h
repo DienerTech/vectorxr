@@ -23,6 +23,7 @@ enum class EyeGazeRequestReason {
     kNativeQuadviews,
     kReliableNegative,
     kQuadviewsNotRequested,
+    kSuiteDisabled,
 };
 
 struct EyeGazeRequestDecision {
@@ -40,6 +41,8 @@ struct EyeGazeRequestPolicyInput {
     EyeGazeProbeState pre_instance_probe{EyeGazeProbeState::kIndeterminate};
     bool pre_instance_probe_structurally_unreliable{false};
     bool pre_instance_probe_known_unreliable{false};
+    // VectorXR Enabled (the suite switch): off, the layer adds nothing.
+    bool suite_enabled{true};
 };
 
 bool IsEyeGazeExtensionProbeKnownUnreliable(std::string_view active_runtime_manifest_path);

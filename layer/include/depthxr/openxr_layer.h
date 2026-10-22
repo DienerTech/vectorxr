@@ -153,6 +153,9 @@ class OpenXrLayer {
     // (loads config lazily). Does not consider runtime capability — the caller
     // pairs this with a runtime extension probe.
     bool IsVarjoCompatibleQuadviewsEligible();
+    // VectorXR Enabled (the suite switch). Safe at instance-creation time
+    // (loads config lazily).
+    bool IsSuiteEnabled();
     bool WantsTurboClockConversion();
     // Whether Frame Generation is enabled for this executable, so a Direct3D 11
     // application's instance needs XR_KHR_D3D12_enable for the bridge. Safe

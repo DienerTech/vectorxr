@@ -3183,6 +3183,12 @@ void TestEyeGazeExtensionCompatibilityPolicy() {
                     "The layer must not duplicate an application-requested gaze extension");
 
     input.downstream_already_has_eye_gaze = false;
+    input.pre_instance_probe = EyeGazeProbeState::kPresent;
+    input.suite_enabled = false;
+    expect_decision(input, false, EyeGazeRequestReason::kSuiteDisabled,
+                    "With VectorXR turned off the layer must not add the gaze extension");
+
+    input.suite_enabled = true;
     input.app_requested_layer_owned_quadviews = false;
     expect_decision(input, false, EyeGazeRequestReason::kQuadviewsNotRequested,
                     "Applications without layer-owned quadviews should not receive an injected extension");
@@ -3198,7 +3204,8 @@ void TestEyeGazeExtensionCompatibilityPolicy() {
                depthxr::EyeGazeRequestReasonName(EyeGazeRequestReason::kRuntimeWorkaround) ==
                    "runtime-workaround" &&
                depthxr::EyeGazeRequestReasonName(EyeGazeRequestReason::kReliableNegative) ==
-                   "reliable-negative",
+                   "reliable-negative" &&
+               depthxr::EyeGazeRequestReasonName(EyeGazeRequestReason::kSuiteDisabled) == "suite-disabled",
            "Request reason names must remain stable for startup diagnostics");
 
     Expect(depthxr::ShouldRetryWithoutInjectedEyeGaze(true, true),

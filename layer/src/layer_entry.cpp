@@ -698,8 +698,10 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
         diagnostics.app_requested_quad_views || diagnostics.app_requested_varjo_foveated_rendering;
     RuntimeExtensionScan extension_scan;
     bool forward_varjo_quad_extensions = false;
+    bool suite_enabled = true;
     if (app_requested_layer_owned_quadviews) {
         diagnostics.varjo_compatible_eligible = OpenXrLayer::Instance().IsVarjoCompatibleQuadviewsEligible();
+        suite_enabled = OpenXrLayer::Instance().IsSuiteEnabled();
 
         // Always scan (even when ineligible) so the logs show exactly what the
         // pre-instance probe returned — this is the signal the forward hinges on.
@@ -833,6 +835,7 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
         diagnostics.eye_gaze_probe_state,
         diagnostics.eye_gaze_probe_structurally_unreliable,
         diagnostics.eye_gaze_probe_known_unreliable,
+        suite_enabled,
     });
     diagnostics.eye_gaze_request_reason = eye_gaze_request.reason;
     diagnostics.layer_injected_eye_gaze_request = eye_gaze_request.inject_extension;
