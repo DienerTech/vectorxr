@@ -138,6 +138,20 @@ struct FrameGenStatus {
     std::uint64_t lead_probes{0};     // steps down after a calm while (FrameGenLeadPolicy)
     std::uint64_t lead_probes_failed{0}; // probes undone by late frames
     std::uint64_t lead_downs_undone{0};  // steps down undone by late frames within FrameGenLeadPolicy::judge
+    // The lead's ceiling from the history ring (FrameGenLeadPolicy::ring_ceiling)
+    // at the current multiplier, while below 4 refreshes per real frame (0:
+    // none), and whether that ceiling is on.
+    std::uint32_t lead_ceiling{0};
+    bool lead_ceiling_on{false};
+    std::uint64_t ring_short{0};         // moved refreshes whose real frame's previous images alone were replaced
+    std::uint64_t ring_short_ignored{0}; // ...of those, not taken as the lead's (late, another lead or path)
+    std::uint64_t ring_short_late{0};    // ...of those, found so with the presenter thread itself late
+    std::uint64_t ring_short_would{0};   // the ceiling off: times it would have been lowered
+    std::uint64_t lead_ring_downs{0};    // ceilings lowered a refresh
+    std::uint64_t lead_ring_raises{0};   // ...raised a refresh again (frames late at it)
+    std::uint64_t lead_ring_refused{0};  // second late events at the ceiling before its retry wait ran out
+    std::uint64_t lead_ring_held{0};     // lowerings refused: the ring holds the lead, or late frames proved it
+    std::uint64_t lead_ring_undone{0};   // lowerings undone at once: frames late at them within judge
     std::uint64_t app_frames{0};      // real frames this session
     std::uint64_t late_cpu{0};        // real frames ended after their refresh was due
     std::uint64_t late_gpu{0};        // real frames not captured on the GPU when first chosen for a refresh
@@ -276,6 +290,35 @@ struct FrameGenLeadPolicy {
     bool hitch_events{false};
     std::chrono::milliseconds hitch_span{250};
     std::chrono::milliseconds event_window{2000};
+    // The lead's ceiling follows the history ring: once two real frames told
+    // the same lead found their previous images replaced before their last
+    // moved refresh (the ring a capture short there), the ceiling at that
+    // multiplier is a refresh lower, and the lead with it. Never below the
+    // lead the ring holds at any capture timing (FrameGenRingLeadFloor) or
+    // one that frames late a refresh below it showed the game needs (a
+    // lowering from it undone; not a probe or step down of the policy's that
+    // a hitch failed, which says nothing of the ring). Each lowering is
+    // judged as a probe is, by hitch events (hitch_span, event_window)
+    // whether hitch_events is on or not: two late events at it, the first
+    // within judge, put it back at once and keep that lead for explore_max.
+    // A lone hitch no lead cures leaves it (frame after frame late at a lead
+    // too short is a second event a hitch_span on). One that comes as the
+    // policy's own calm probe is already due (within 100 ms) is that probe,
+    // so the policy keeps what it showed; any other is a trial of its own,
+    // the policy's floors and calm time put back when it is undone. None
+    // comes while a probe or step down is judged (the policy is bringing the
+    // lead down itself). After that, raised a refresh again by two late
+    // events at it, once its retry wait has run out. A lead the ring
+    // cannot hold moves nothing: DCS on
+    // Virtual Desktop (Pierpaolo, 2026-10-20) ran at lead 8 with 198
+    // refreshes in 30 s finding their frame's images replaced, where MSFS
+    // 2024 (2026-10-19) needs leads of 7-8 and its ring holds them (none).
+    // On in the 20-lead exploration branch until flown;
+    // VECTORXR_FRAMEGEN_LEAD_CEILING=off for the control arm.
+    bool ring_ceiling{true};
+    // Tests only, never read from the environment: the lead starts here and
+    // UpdateLeadLocked makes no moves (the caps still clamp it).
+    std::uint32_t pinned_lead{0};
 };
 
 // Frame Generation pacing for one OpenXR session.
@@ -463,6 +506,9 @@ class FrameGenPresenter {
   private:
     // Holds a presenter thread "in the runtime" for the layer's teardown tests.
     friend class TurboFrameTestPeer;
+    // Drives the lead policy and the history ring's ceiling frame by frame,
+    // without a presenter thread, for the presenter tests.
+    friend class FrameGenLeadTestPeer;
     struct SwapchainRecord {
         std::int64_t format{0};
         std::uint32_t sample_count{1};
@@ -928,6 +974,9 @@ class FrameGenPresenter {
     // Forgets the frames judged at the lead (it changed, or starts over).
     void ClearLeadHistoryLocked();
     void UpdateLeadLocked(bool late, std::optional<double> slack_ms, std::uint32_t lead, std::uint32_t multiplier);
+    // How long after lead_calm_since_ the next calm probe comes: probe_after,
+    // or the wait below the lowest lead known to hold.
+    std::chrono::milliseconds CalmProbeWaitLocked() const;
     // Just in time: a kept real frame's lead sample, once.
     void ScoreLeadLocked(JitFrame& frame, bool late);
     // A kept real frame dropped before any refresh chose it: late when its
@@ -1034,6 +1083,16 @@ class FrameGenPresenter {
         // itself instead (the fallback, a cover frame). Late for the lead.
         bool motion_late{false};
         bool ring_exhausted{false}; // images it was to be written from were replaced by newer captures (Writable)
+        // The refresh's own choice was to be moved (not a cover frame, not
+        // the fallback) and newer captures had replaced its real frame's
+        // previous images, its newest still kept: the ring was a capture
+        // short for the lead that frame was told (NoteRingShortLocked).
+        bool ring_short{false};
+        std::uint64_t ring_short_id{0};         // that real frame (JitFrame::id)...
+        std::uint32_t ring_short_lead{0};       // ...the lead it was told...
+        std::uint32_t ring_short_multiplier{0}; // ...at this multiplier...
+        bool ring_short_composed{false};        // ...a claimed quad frame's...
+        std::chrono::steady_clock::time_point ring_short_at{}; // ...and when the check found it so
         bool as_is{false};      // nothing written: the frame (JitFrame::as_is) is shown as the layer composed it
         bool failed{false};     // writing was attempted and failed: outputs, an acquire or wait, or the GPU
         bool timed_out{false};  // ...an output image the runtime did not hand back in time
@@ -1352,6 +1411,17 @@ class FrameGenPresenter {
         std::uint64_t lead_probes{0};
         std::uint64_t lead_probes_failed{0};
         std::uint64_t lead_downs_undone{0};
+        // The lead's ceiling from the history ring (FrameGenStatus's of the
+        // same names).
+        std::uint64_t ring_short{0};
+        std::uint64_t ring_short_ignored{0};
+        std::uint64_t ring_short_late{0};
+        std::uint64_t ring_short_would{0};
+        std::uint64_t lead_ring_downs{0};
+        std::uint64_t lead_ring_raises{0};
+        std::uint64_t lead_ring_refused{0};
+        std::uint64_t lead_ring_held{0};
+        std::uint64_t lead_ring_undone{0};
         // Frames of the layer's quad compose site, by route (FrameGenQuadRoute).
         std::uint64_t quad_claimed{0};
         std::uint64_t quad_uncaptured{0};
@@ -1522,6 +1592,11 @@ class FrameGenPresenter {
         // the lead before it.
         std::uint32_t grace{2};
         bool slack{false}; // a step down for frames with a refresh to spare, not a calm probe
+        // A lowering of the history ring's ceiling, taken for the calm probe
+        // already due (NoteRingShortLocked): judged by the ring's hitch
+        // events (LeadRing::late_event), and its failure counts as
+        // lead_ring_undone, not as a failed probe.
+        bool ring{false};
     };
     std::optional<LeadProbe> lead_probe_; // a probe being judged
     std::uint32_t lead_floor_{0};         // the lowest lead known to hold (0: none yet)
@@ -1539,6 +1614,95 @@ class FrameGenPresenter {
     // Frames were late at lead_floor_ or below it (a probe or step down
     // undone): steps down for slack below it also wait, as calm probes do.
     bool lead_floor_failed_{false};
+    // The lead's ceiling from the history ring (FrameGenLeadPolicy::ring_ceiling)
+    // at one multiplier, for this presenter run (or until the multiplier or
+    // Dynamic is switched): each multiplier keeps its own, and its own waits.
+    struct LeadRing {
+        std::uint32_t ceiling{0}; // 0: none, the cap is 4 refreshes per real frame
+        // When it last moved, and the wait before frames late at it raise it
+        // again: explore_after, doubled each time a raise is undone within
+        // explore_after (up to explore_max).
+        std::chrono::steady_clock::time_point changed_at{};
+        std::chrono::milliseconds retry{10000};
+        bool raised{false}; // the last move raised it
+        // A lowering judged as a probe is, for FrameGenLeadPolicy::judge from
+        // its time (longer while a late event that began within it awaits a
+        // second, RingJudgedLocked): two late events at it put `previous`
+        // (the ceiling before) back at once, and `from` (the lead it
+        // lowered) is needed.
+        std::optional<std::chrono::steady_clock::time_point> trial;
+        std::uint32_t trial_from{0};
+        std::uint32_t trial_previous{0};
+        // The lead policy's own state before a lowering not taken for its
+        // calm probe: undone, it is put back, as though never tried
+        // (UpdateLeadLocked), so the policy's own probes keep their times.
+        std::chrono::steady_clock::time_point trial_calm{};
+        std::uint32_t trial_floor{0};
+        std::uint32_t trial_proven{0};
+        bool trial_floor_failed{false};
+        // The first late frame of the last late event at the ceiling (frames
+        // late within hitch_span of it are that event), while lowered: a
+        // second within event_window of it undoes a lowering being judged,
+        // or raises the ceiling once its retry wait has run out. A lone
+        // hitch does neither.
+        std::optional<std::chrono::steady_clock::time_point> late_event;
+        // The lowest lead frames late a refresh below it showed the game
+        // needs (a lowering from it undone, the ceiling's own verdict; a
+        // probe or step down of the policy's says nothing of the ring): no
+        // lowering goes below it until explore_max after `needed_at`.
+        std::uint32_t needed{0};
+        std::chrono::steady_clock::time_point needed_at{};
+        // Dynamic: its refreshes per real frame when it was lowered. A game
+        // that slows a refresh in (ring - 2) since (ring - 1 interpolating)
+        // has the ring hold a lead more: the ceiling goes.
+        double interval{0.0};
+        // Turned off: the ceiling it would have set (ringWould counts
+        // lowerings, not every ring-short pair at a lead it would have left).
+        std::uint32_t would{0};
+    };
+    // Index 2-4 (the multiplier).
+    std::array<LeadRing, 5> lead_ring_{};
+    // The first real frame that found the ring a capture short at a lead and
+    // multiplier, while a second one is awaited within event_window.
+    struct LeadRingEvent {
+        std::chrono::steady_clock::time_point at;
+        std::uint64_t frame{0};
+        std::uint32_t lead{0};
+        std::uint32_t multiplier{0};
+    };
+    std::optional<LeadRingEvent> lead_ring_event_;
+    // How long after the presenter thread's wait returned each ring-short
+    // refresh was found so (ringShortWriteMs), this summary window.
+    std::vector<double> ring_short_write_ms_;
+    // VECTORXR_FRAMEGEN_LEAD_CEILING (none: the policy's): outranks
+    // FrameGenLeadPolicy::ring_ceiling, so a policy set later keeps it.
+    std::optional<bool> ring_ceiling_env_;
+    std::uint32_t logged_ring_moves_{0}; // ceiling moves logged this session (at most 16)
+    bool logged_ring_held_{false};       // a refused lowering logged this run
+    bool RingCeilingLocked() const { return ring_ceiling_env_ ? *ring_ceiling_env_ : lead_policy_.ring_ceiling; }
+    // The lead the ring holds at any capture timing at `multiplier`
+    // (FrameGenRingLeadFloor, at a refresh per real frame for Dynamic).
+    std::uint32_t RingLeadFloorLocked(std::uint32_t multiplier) const;
+    // The lead's cap at `multiplier` refreshes per real frame: 4 per real
+    // frame, or the ring's ceiling below that (never below the ring's floor).
+    std::uint32_t LeadCapLocked(std::uint32_t multiplier) const;
+    // A lowering of `ring` still judged at `now`: within judge of it, or
+    // while a late event that began within judge awaits a second.
+    bool RingJudgedLocked(const LeadRing& ring, std::chrono::steady_clock::time_point now) const;
+    // Drops every multiplier's ceiling, its waits and what was proved: a new
+    // run, or a switch of the multiplier or of Dynamic.
+    void ResetRingCeilingLocked();
+    // Dynamic: drops the ceiling at `multiplier` once the game has slowed
+    // enough since its lowering for the ring to hold a lead more.
+    void ExpireRingCeilingLocked(std::uint32_t multiplier, std::chrono::steady_clock::time_point now);
+    // Brings the lead (and its floors) down to `cap`, its history and any
+    // probe dropped: a lead above its cap is told the cap, and no frame would
+    // match it to be scored.
+    void ClampLeadLocked(std::uint32_t cap);
+    // A refresh found the ring a capture short (JitWrite::ring_short): taken
+    // for the lead when the presenter thread was not late itself, lowering
+    // the ceiling once two real frames did (presenter thread, under mutex_).
+    void NoteRingShortLocked(const JitWrite& write, std::chrono::steady_clock::time_point returned, XrDuration period);
     // A new run measures its lead afresh (StartCompositorLocked, Start).
     void ResetLeadLocked();
     // Dynamic: refreshes between real frames' slots, smoothed, and the slot

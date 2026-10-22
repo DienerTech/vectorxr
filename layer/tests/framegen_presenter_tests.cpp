@@ -69,6 +69,9 @@ int g_creates = 0;
 std::vector<XrSwapchain> g_destroyed; // swapchains the layer destroyed
 int g_wait_timeouts = 0; // number of upcoming output waits that time out
 int g_wait_timeouts_on_create = 0; // g_wait_timeouts once the next output swapchain is made
+// Each output image wait takes this long (the runtime slow to hand images
+// back): the presenter thread writes its refresh that much later.
+std::atomic<std::chrono::microseconds> g_wait_image_delay{std::chrono::microseconds(0)};
 bool g_release_violation = false;
 std::map<XrSwapchain, int> g_releases; // images released per swapchain
 // What the fake GPU drew into output images, as the eye position (x) the
@@ -77,6 +80,8 @@ std::map<XrSwapchain, int> g_releases; // images released per swapchain
 std::map<XrSwapchain, std::deque<float>> g_written;
 std::map<XrSwapchain, float> g_shown;
 std::vector<std::pair<std::uint32_t, std::uint32_t>> g_create_sizes; // each output swapchain's width and height
+
+void SleepPrecise(std::chrono::steady_clock::time_point deadline); // below
 
 XrResult XRAPI_PTR Formats(XrSession, std::uint32_t capacity, std::uint32_t* count, std::int64_t* formats) {
     *count = 1;
@@ -112,6 +117,9 @@ XrResult XRAPI_PTR Acquire(XrSwapchain swapchain, const XrSwapchainImageAcquireI
     return XR_SUCCESS;
 }
 XrResult XRAPI_PTR WaitImage(XrSwapchain swapchain, const XrSwapchainImageWaitInfo*) {
+    if (const std::chrono::microseconds delay = g_wait_image_delay.load(); delay.count() > 0) {
+        SleepPrecise(std::chrono::steady_clock::now() + delay);
+    }
     std::scoped_lock lock(g_xr_mutex);
     if (g_wait_timeouts > 0) {
         --g_wait_timeouts;
@@ -1417,6 +1425,7 @@ void StartPresenter(FrameGenPresenter& presenter, GpuLog& gpu, FrameGenSynthesis
     g_destroyed.clear();
     g_wait_timeouts = 0;
     g_wait_timeouts_on_create = 0;
+    g_wait_image_delay = std::chrono::microseconds(0);
     g_release_violation = false;
 }
 
@@ -2077,6 +2086,7 @@ void TestHorizonTelemetryFixed() {
         StartJit(presenter, gpu, mode, FrameGenMultiplier::k2, app, runtime, owned, log.logger.get());
         FrameGenLeadPolicy policy;
         policy.probe_after = 600s; // no probes: the lead holds while measured
+        policy.ring_ceiling = false; // pins the lead policy's own moves; the ring ceiling has its own tests
         presenter.SetLeadPolicy(policy);
         // Windows of about 45 game frames, whose 95th percentile is not their
         // largest: a 300 ms window holds 13, and one late wake-up beside the
@@ -4975,6 +4985,7 @@ LeadRun RunLeadAfterHitches(bool probes, bool hitch_events = false) {
     // These runs pin the rules as before 0.19.4 (frame by frame); the
     // hitch-event rules are run alongside (TestLeadStepsDownAfterHitches).
     policy.hitch_events = hitch_events;
+    policy.ring_ceiling = false; // pins the lead policy's own moves; the ring ceiling has its own tests
     presenter.SetLeadPolicy(policy);
     app->before_release = [&] { gpu.GameFrame(); };
     for (int i = 0; i < 3; ++i) app->Frame();
@@ -5070,6 +5081,7 @@ LeadFlapRun RunLeadFlap(bool hysteresis, bool hitch_events = false) {
     // The rules as before 0.19.4, with and without hysteresis; then the
     // hitch-event rules (TestLeadDoesNotFlap).
     policy.hitch_events = hitch_events;
+    policy.ring_ceiling = false; // pins the lead policy's own moves; the ring ceiling has its own tests
     presenter.SetLeadPolicy(policy);
     // GPU-bound near 50 fps, one frame in five a refresh longer.
     const std::vector<std::chrono::microseconds> pattern = {18ms, 18ms, 18ms, 18ms, 30ms};
@@ -5182,6 +5194,7 @@ LeadPatternRun RunLeadPattern(const LeadPattern& pattern, bool hitch_events) {
     policy.explore_after = 3000ms;
     policy.explore_max = 18000ms;
     policy.hitch_events = hitch_events;
+    policy.ring_ceiling = false; // pins the lead policy's own moves; the ring ceiling has its own tests
     presenter.SetLeadPolicy(policy);
     int frame = 0;
     app->before_release = [&] {
@@ -5309,6 +5322,7 @@ void TestLeadAfterRepeatedHitches() {
     policy.judge = 200ms;
     policy.explore_after = 700ms;
     policy.explore_max = 1400ms;
+    policy.ring_ceiling = false; // pins the lead policy's own moves; the ring ceiling has its own tests
     presenter.SetLeadPolicy(policy);
     bool hitches = false;
     int frames = 0;
@@ -5368,6 +5382,7 @@ FrameGenLeadPolicy ProvenLeadPolicy(std::chrono::milliseconds explore_max) {
     // before 0.19.4): with hitch events a lone hitch raises nothing
     // (TestLeadHitchesDoNotRatchet).
     policy.hitch_events = false;
+    policy.ring_ceiling = false; // pins the lead policy's own moves; the ring ceiling has its own tests
     return policy;
 }
 
@@ -5623,6 +5638,7 @@ void TestLeadFollowsLoweredCap() {
     StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic, app, runtime, owned);
     FrameGenLeadPolicy policy;
     policy.probe_after = 600s; // no probes: only scored frames move the lead
+    policy.ring_ceiling = false; // pins the lead policy's own moves; the ring ceiling has its own tests
     presenter.SetLeadPolicy(policy);
     for (int i = 0; i < 3; ++i) app->Frame();
     // A game at a third of the refresh rate (cap 12), its frames reaching the
@@ -5667,6 +5683,7 @@ void TestPassedOverFramesKeepLead() {
     gpu.frames_ahead = 3;
     FrameGenLeadPolicy policy;
     policy.probe_after = 600s;
+    policy.ring_ceiling = false; // pins the lead policy's own moves; the ring ceiling has its own tests
     presenter.SetLeadPolicy(policy);
     app->before_release = [&] { gpu.GameFrame(); };
     const std::vector<std::chrono::microseconds> work{6ms};
@@ -7528,6 +7545,14 @@ void TestQuadDynamicDeepRing() {
         runtime.paced = true;
         StartQuad(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic);
         presenter.SetDynamicPolicy(GuardDynamic());
+        if (shallow) {
+            // A ring of three behind quad views is a mismatch the backend
+            // cannot have (the presenter counts on five): the ring ceiling
+            // would chase it down to Dynamic's floor of 3.
+            FrameGenLeadPolicy policy;
+            policy.ring_ceiling = false; // pins the lead policy's own moves; the ring ceiling has its own tests
+            presenter.SetLeadPolicy(policy);
+        }
         QuadApp app(presenter, runtime);
         const auto works = QuadTicks(runtime, {1, 2, 2});
         auto composing = [&] {
@@ -11124,6 +11149,1261 @@ void TestOsdDescription() {
     }
 }
 
+// --- The lead's ceiling from the history ring ----------------------------------------
+
+// The fake's history ring (FakeGpu::Capture) takes a slot at the capture on
+// the CPU, as the game releases its views; capture_lag only delays the
+// capture's GPU completion. In a ring of five a moved real frame keeps its
+// previous images until the fourth newer frame is captured: at 2x, 8
+// refreshes and the game's work after that frame's release. Its last moved
+// refresh at a lead of L is written right after refresh L + 1, so a game
+// working 5.5 ms after each wait holds a lead of 7 (half a refresh inside)
+// and not 8 (half a refresh past); at 3x (12 refreshes, two moved ones) 10
+// and not 11.
+
+// The lead the ring holds whatever the game's capture timing
+// (FrameGenRingLeadFloor): the ring's slots less two cadences extrapolating,
+// less one interpolating; a ring of three or less holds 1 (a refresh at a
+// time).
+void TestRingLeadFloor() {
+    Check(FrameGenRingLeadFloor(5, false, 2) == 6 && FrameGenRingLeadFloor(5, false, 3) == 9 &&
+              FrameGenRingLeadFloor(5, false, 4) == 12,
+          "ring lead floor: a ring of five extrapolating holds three cadences");
+    Check(FrameGenRingLeadFloor(5, true, 2) == 8, "ring lead floor: interpolating, four cadences");
+    Check(FrameGenRingLeadFloor(5, false, 1) == 3 && FrameGenRingLeadFloor(5, true, 1) == 4,
+          "ring lead floor: Dynamic's cadence of a refresh");
+    Check(FrameGenRingLeadFloor(3, false, 2) == 2, "ring lead floor: a ring of three");
+}
+
+// Moved frames written so far (composed ones too): extrapolated past their
+// real frame, or interpolated short of it.
+int MovedWrites(GpuLog& gpu) {
+    return SynthesesWhere(gpu, [](FrameGenSynthesisMode mode, float fraction) {
+        return mode == FrameGenSynthesisMode::kExtrapolate ? fraction > 0.0f : fraction < 1.0f;
+    });
+}
+
+// A game against a paced runtime at 90 Hz, presented just in time: its
+// canvas (App, with depth), or quad views Frame Generation composes
+// (QuadApp).
+struct CeilingGame {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    std::unique_ptr<App> owned;
+    App* app{nullptr};
+    std::unique_ptr<QuadApp> quad;
+
+    CeilingGame(bool quad_views, FrameGenSynthesisMode mode, FrameGenMultiplier multiplier, Logger* logger = nullptr) {
+        runtime.paced = true;
+        if (quad_views) {
+            StartQuad(presenter, gpu, mode, multiplier);
+            quad = std::make_unique<QuadApp>(presenter, runtime);
+        } else {
+            StartJit(presenter, gpu, mode, multiplier, app, runtime, owned, logger);
+        }
+    }
+    ~CeilingGame() { presenter.Stop(); }
+    CeilingGame(const CeilingGame&) = delete;
+    CeilingGame& operator=(const CeilingGame&) = delete;
+
+    void Frames(int count) {
+        for (int i = 0; i < count; ++i) {
+            if (quad) {
+                quad->Frame();
+            } else {
+                app->Frame();
+            }
+        }
+    }
+    // Frames working works[i % size] each, until `until` (when given).
+    void Run(std::chrono::milliseconds duration, const std::vector<std::chrono::microseconds>& works,
+             const std::function<bool()>& until = {}) {
+        if (quad) {
+            quad->RunWorks(duration, works, until);
+        } else {
+            RunWork(*app, duration, works, [&](const XrFrameState&) { return until && until(); });
+        }
+    }
+    bool Ordered() const { return !runtime.ordering_violation && !g_release_violation; }
+};
+
+// What a stretch of a CeilingGame's run did.
+struct CeilingWindow {
+    FrameGenStatus before;
+    FrameGenStatus after;
+    int refreshes{0}; // submissions
+    int moved{0};     // moved frames written
+
+    std::uint64_t Exhausted() const { return after.ring_exhausted - before.ring_exhausted; }
+    std::uint64_t Short() const { return after.ring_short - before.ring_short; }
+    std::string Text() const {
+        return "lead " + std::to_string(after.lead_slots) + ", ceiling " + std::to_string(after.lead_ceiling) +
+               ", ring moves -" + std::to_string(after.lead_ring_downs) + "/+" + std::to_string(after.lead_ring_raises) +
+               ", " + std::to_string(Exhausted()) + " found their images replaced (" + std::to_string(Short()) +
+               " a capture short, " + std::to_string(after.ring_short_ignored - before.ring_short_ignored) +
+               " of those ignored), " + std::to_string(moved) + " moved, of " + std::to_string(refreshes) +
+               " refreshes" +
+               (std::getenv("FG_TEST_STATS")
+                    ? "; generated +" + std::to_string(after.generated - before.generated) + ", unmeasured +" +
+                          std::to_string(after.unmeasured_copies - before.unmeasured_copies) + ", skipped +" +
+                          std::to_string(after.copies_skipped - before.copies_skipped) + ", unready +" +
+                          std::to_string(after.unready_capture - before.unready_capture) + ", unwritten +" +
+                          std::to_string(after.unwritten - before.unwritten) + ", app frames +" +
+                          std::to_string(after.app_frames - before.app_frames) + ", multiplier " +
+                          std::to_string(after.multiplier) + ", refreshes per real frame " +
+                          std::to_string(after.refreshes_per_real_frame)
+                    : std::string());
+    }
+};
+
+CeilingWindow MeasureCeiling(CeilingGame& game, std::chrono::milliseconds duration,
+                             const std::vector<std::chrono::microseconds>& works) {
+    CeilingWindow window;
+    window.before = game.presenter.Status();
+    const std::size_t first = game.runtime.Submissions();
+    const int moved = MovedWrites(game.gpu);
+    game.Run(duration, works);
+    window.after = game.presenter.Status();
+    window.refreshes = static_cast<int>(game.runtime.Submissions() - first);
+    window.moved = MovedWrites(game.gpu) - moved;
+    return window;
+}
+
+FrameGenLeadPolicy PinnedLead(std::uint32_t lead, bool ring_ceiling) {
+    FrameGenLeadPolicy policy;
+    policy.pinned_lead = lead;
+    policy.ring_ceiling = ring_ceiling;
+    return policy;
+}
+
+// DCS on Virtual Desktop (Pierpaolo, 2026-10-20): at a lead of 8, 198
+// refreshes in 30 s found their real frame's images replaced in the history
+// ring, its moved refreshes shown as exact copies. A lead the ring is a
+// capture short for: two real frames finding their previous images replaced
+// lower the lead's ceiling a refresh, and the lead with it, until the ring
+// holds it. Off, the lead stays and half the refreshes stand still. Canvas
+// and quad views at 2x, and the canvas at 3x (12, two refreshes above what
+// the ring holds: lowered twice).
+void TestLeadCeilingFollowsRing() {
+    struct Variant {
+        const char* name;
+        bool quad;
+        FrameGenMultiplier multiplier;
+        std::uint32_t pinned;
+        std::uint32_t holds; // the lead the ring holds
+        std::uint64_t downs;
+    };
+    for (const Variant& variant : {Variant{"ring ceiling 2x", false, FrameGenMultiplier::k2, 8, 7, 1},
+                                   Variant{"ring ceiling 3x", false, FrameGenMultiplier::k3, 12, 10, 2},
+                                   Variant{"ring ceiling quad 2x", true, FrameGenMultiplier::k2, 8, 7, 1}}) {
+        for (const bool on : {false, true}) {
+            const std::string name = std::string(variant.name) + (on ? "" : " (off)");
+            CeilingGame game(variant.quad, FrameGenSynthesisMode::kExtrapolate, variant.multiplier);
+            game.presenter.SetLeadPolicy(PinnedLead(variant.pinned, on));
+            game.Frames(3);
+            game.Run(1000ms, {5500us});
+            const CeilingWindow window = MeasureCeiling(game, 1000ms, {5500us});
+            const FrameGenStatus& status = window.after;
+            std::cerr << "  " << name << ": " << window.Text() << std::endl;
+            Check(game.Ordered(), name + ": calls stayed ordered");
+            if (!on) {
+                Check(status.lead_slots == variant.pinned && status.lead_ceiling == 0,
+                      name + ": the lead stays where it was pinned (" + window.Text() + ")");
+                Check(window.Exhausted() > static_cast<std::uint64_t>(window.refreshes / 4),
+                      name + ": its moved refreshes find their frame's images replaced (" + window.Text() + ")");
+                Check(window.Short() * 10 >= window.Exhausted() * 9,
+                      name + ": ...a capture short, their newest images kept (" + window.Text() + ")");
+                Check(!status.lead_ceiling_on, name + ": Status says the ceiling is off");
+                continue;
+            }
+            Check(status.lead_ceiling == variant.holds && status.lead_slots == variant.holds,
+                  name + ": the lead comes down to what the ring holds (" + window.Text() + ")");
+            Check(status.lead_ring_downs == variant.downs && status.lead_ring_raises == 0,
+                  name + ": a refresh at a time, " + std::to_string(variant.downs) + " (" + window.Text() + ")");
+            Check(window.Exhausted() <= static_cast<std::uint64_t>(window.refreshes / 50) &&
+                      window.moved > window.refreshes / 4,
+                  name + ": its refreshes move their frame again (" + window.Text() + ")");
+            Check(game.gpu.ring_refusals == 0 && status.quad_write_declines == 0,
+                  name + ": nothing is asked of the backend it no longer has");
+            Check(status.lead_ceiling_on, name + ": Status says the ceiling is on");
+        }
+    }
+}
+
+// Dynamic at the game's own rate (quad views, the backend's ring of five),
+// the game's work one, then two, then two refreshes less 3 ms: released at
+// once when it asks late, its real frames come 1.45 refreshes apart, and
+// only the refreshes in the longer gaps are moved. The ring holds a lead of
+// 6 for them. Pinned at 8, the ceiling comes down twice, keyed by Dynamic's
+// typical refreshes per real frame (2; its floor is 3); off, those
+// refreshes stand still. (A game a real frame every 1.13 refreshes, work of
+// one, one, then two refreshes, keeps its five newest frames for under six
+// refreshes: at a lead of 7 a frame is no longer kept by its last refresh,
+// nothing is moved, and nothing finds the ring short.)
+void TestLeadCeilingDynamicFollowsSpacing() {
+    for (const bool on : {true, false}) {
+        const std::string name = std::string("ring ceiling, Dynamic") + (on ? "" : " (off)");
+        CeilingGame game(true, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic);
+        game.presenter.SetDynamicPolicy(GuardDynamic());
+        game.presenter.SetLeadPolicy(PinnedLead(8, on));
+        const auto works = QuadTicks(game.runtime, {1, 2, 2});
+        auto composing = [&] {
+            const FrameGenStatus status = game.presenter.Status();
+            return status.threaded && status.quad && !status.standby;
+        };
+        game.Run(3000ms, works, composing);
+        Check(composing(), name + ": composing under Dynamic");
+        game.Run(1500ms, works);
+        const CeilingWindow window = MeasureCeiling(game, 1000ms, works);
+        const FrameGenStatus& status = window.after;
+        std::cerr << "  " << name << ": " << window.Text() << std::endl;
+        Check(game.Ordered() && composing(), name + ": calls stayed ordered, still composing");
+        if (on) {
+            Check(status.lead_ceiling == 6 && status.lead_slots == 6 && status.lead_ring_downs == 2,
+                  name + ": the ceiling comes down to what the ring holds (" + window.Text() + ")");
+            Check(window.Exhausted() <= static_cast<std::uint64_t>(window.refreshes / 50) &&
+                      window.moved > window.refreshes / 6,
+                  name + ": its refreshes move their frame again (" + window.Text() + ")");
+        } else {
+            Check(window.Exhausted() > static_cast<std::uint64_t>(window.refreshes / 10),
+                  name + ": its moved refreshes find their frame's images replaced (" + window.Text() + ")");
+        }
+    }
+}
+
+// Dynamic's floor is the ring's at a refresh per real frame (3), not at its
+// typical 2 refreshes per real frame (6): a game a real frame every 1.13
+// refreshes (work of one, one, then two refreshes) pinned at 6 finds the
+// ring short there, and the ceiling comes down to 5. With the fixed 2x floor
+// it would be held at 6.
+void TestLeadCeilingDynamicFloor() {
+    const std::string name = "ring ceiling, Dynamic's floor";
+    CeilingGame game(true, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic);
+    game.presenter.SetDynamicPolicy(GuardDynamic());
+    game.presenter.SetLeadPolicy(PinnedLead(6, true));
+    const auto works = QuadTicks(game.runtime, {1, 1, 2});
+    auto composing = [&] {
+        const FrameGenStatus status = game.presenter.Status();
+        return status.threaded && status.quad && !status.standby;
+    };
+    game.Run(3000ms, works, composing);
+    Check(composing(), name + ": composing under Dynamic");
+    game.Run(1500ms, works);
+    const CeilingWindow window = MeasureCeiling(game, 1000ms, works);
+    const FrameGenStatus& status = window.after;
+    std::cerr << "  " << name << ": " << window.Text() << ", held " << status.lead_ring_held << std::endl;
+    Check(game.Ordered() && composing(), name + ": calls stayed ordered, still composing");
+    Check(status.multiplier == 2, name + ": keyed by 2 refreshes per real frame (" + std::to_string(status.multiplier) +
+                                      ")");
+    Check(status.lead_ring_downs >= 1 && status.lead_ceiling == 5 && status.lead_slots == 5,
+          name + ": the ceiling comes below the fixed 2x floor of 6 (" + window.Text() + ")");
+}
+
+// One Dynamic ceiling covers 1.5 to 2.5 refreshes per real frame: lowered
+// to 6 for the game of TestLeadCeilingDynamicFollowsSpacing, it goes
+// once the same run slows to two or three refreshes a real frame, where the
+// ring holds a lead more for each third of a refresh.
+void TestLeadCeilingDynamicSlowsDown() {
+    const std::string name = "ring ceiling, Dynamic slows down";
+    CeilingGame game(true, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic);
+    game.presenter.SetDynamicPolicy(GuardDynamic());
+    game.presenter.SetLeadPolicy(PinnedLead(8, true));
+    const auto fast = QuadTicks(game.runtime, {1, 2, 2});
+    auto composing = [&] {
+        const FrameGenStatus status = game.presenter.Status();
+        return status.threaded && status.quad && !status.standby;
+    };
+    game.Run(3000ms, fast, composing);
+    Check(composing(), name + ": composing under Dynamic");
+    game.Run(2500ms, fast, [&] { return game.presenter.Status().lead_ceiling == 6; });
+    const FrameGenStatus lowered = game.presenter.Status();
+    Check(lowered.lead_ceiling == 6, name + ": the ceiling came down to 6 (" + std::to_string(lowered.lead_ceiling) +
+                                         ")");
+    const CeilingWindow window = MeasureCeiling(game, 1500ms, QuadTicks(game.runtime, {2, 2, 3}));
+    const FrameGenStatus& status = window.after;
+    std::cerr << "  " << name << ": " << lowered.refreshes_per_real_frame << " then "
+              << status.refreshes_per_real_frame << " refreshes per real frame: " << window.Text() << std::endl;
+    Check(game.Ordered() && composing(), name + ": calls stayed ordered, still composing");
+    Check(status.refreshes_per_real_frame >= 2.0 && status.lead_ceiling == 0,
+          name + ": slowed, the ceiling goes (" + window.Text() + ")");
+}
+
+// A real frame captured 150 ms late now and then: refreshes that needed it
+// show the frame before moved on past itself (the fallback), whose previous
+// images are long replaced. That is the capture's lateness, not the lead's:
+// the ceiling stays.
+void TestLeadCeilingIgnoresFallbackExhaustion() {
+    const std::string name = "ring ceiling, late captures";
+    _putenv_s("VECTORXR_FRAMEGEN_GPU_AHEAD", "off"); // the game's waits are not held for its GPU
+    CeilingGame game(false, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2);
+    _putenv_s("VECTORXR_FRAMEGEN_GPU_AHEAD", "");
+    game.presenter.SetLeadPolicy(PinnedLead(7, true));
+    int frames = 0;
+    game.app->before_release = [&] { game.gpu.capture_lag = ++frames % 15 == 0 ? 150ms : 0us; };
+    game.Frames(3);
+    const CeilingWindow window = MeasureCeiling(game, 2000ms, {5500us});
+    const FrameGenStatus& status = window.after;
+    std::cerr << "  " << name << ": " << window.Text() << std::endl;
+    Check(game.Ordered(), name + ": calls stayed ordered");
+    Check(window.Exhausted() > 0, name + ": refreshes found their frame's images replaced (" + window.Text() + ")");
+    Check(status.lead_ring_downs == 0 && status.lead_ceiling == 0 && status.lead_slots == 7,
+          name + ": the ceiling and the lead stay (" + window.Text() + ")");
+}
+
+// The presenter thread itself late (the runtime slow to hand its output
+// images back, 9 ms a refresh): a moved refresh at a lead the ring holds by
+// half a refresh is written past the capture that replaces its frame's
+// previous images. That is not the lead's doing: ignored, and the lead
+// stays. At 4 ms the same lead moves its refreshes.
+void TestLeadCeilingIgnoresLateWrites() {
+    for (const int total_us : {9000, 4000}) {
+        const std::string name = "ring ceiling, output waits of " + std::to_string(total_us / 1000) + " ms";
+        CeilingGame game(false, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2);
+        game.presenter.SetLeadPolicy(PinnedLead(7, true));
+        game.Frames(3);
+        // Two output images a refresh (one per view), waited one after the other.
+        g_wait_image_delay = std::chrono::microseconds(total_us / 2);
+        game.Run(1000ms, {5500us});
+        const CeilingWindow window = MeasureCeiling(game, 1000ms, {5500us});
+        g_wait_image_delay = std::chrono::microseconds(0);
+        const FrameGenStatus& status = window.after;
+        std::cerr << "  " << name << ": " << window.Text() << std::endl;
+        Check(game.Ordered(), name + ": calls stayed ordered");
+        if (total_us > 5000) {
+            Check(window.Exhausted() > static_cast<std::uint64_t>(window.refreshes / 5),
+                  name + ": moved refreshes are written too late for their frame's images (" + window.Text() + ")");
+            Check(status.ring_short > 0 && status.ring_short_ignored == status.ring_short,
+                  name + ": ...each found so after the presenter thread's own lateness, ignored (" + window.Text() +
+                      ")");
+            Check(status.lead_ring_downs == 0 && status.lead_slots == 7,
+                  name + ": the ceiling and the lead stay (" + window.Text() + ")");
+        } else {
+            Check(window.Exhausted() <= static_cast<std::uint64_t>(window.refreshes / 50),
+                  name + ": the lead's refreshes move their frame (" + window.Text() + ")");
+        }
+    }
+}
+
+// A canvas short of video memory keeps a ring of three (as in
+// TestJitRingExhaustion): its frames reach the GPU late, the lead grows past
+// what the ring holds, and refreshes show exact copies. A ring of three
+// moves the ceiling for no lead (it would lower the lead the game needs).
+void TestLeadCeilingInactiveOnShortRing() {
+    const std::string name = "ring ceiling, a ring of three";
+    CeilingGame game(false, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2);
+    game.gpu.capture_lag = 40ms;
+    game.gpu.memory_pressure = true;
+    game.presenter.SetLeadPolicy(PinnedLead(0, true));
+    game.Frames(3);
+    const CeilingWindow window = MeasureCeiling(game, 1200ms, kLightWork);
+    const FrameGenStatus& status = window.after;
+    std::cerr << "  " << name << ": " << window.Text() << std::endl;
+    Check(game.Ordered(), name + ": calls stayed ordered");
+    Check(status.lead_slots >= 4 && status.ring_exhausted > 10,
+          name + ": the lead grew and refreshes found their frame's images replaced (" + window.Text() + ")");
+    Check(status.lead_ceiling == 0 && status.lead_ring_downs == 0, name + ": the ceiling stays (" + window.Text() + ")");
+}
+
+// The switch and what the log says: on by default and with
+// VECTORXR_FRAMEGEN_LEAD_CEILING=ring (or on), off with =off, the variable
+// outranking a lead policy set after Start that says otherwise (off for
+// =ring and =on, on for =off). Every session log names its arm,
+// and the summaries carry the ceiling, its moves and the ring-short
+// refreshes (counted, and what the ceiling would have done, when off).
+void TestLeadCeilingSummaryAndSwitch() {
+    std::string outer;
+    if (const char* value = std::getenv("VECTORXR_FRAMEGEN_LEAD_CEILING")) outer = value;
+    for (const char* setting : {"", "ring", "on", "off"}) {
+        const bool off = std::string(setting) == "off";
+        const std::string name = std::string("ring ceiling switch ") + (*setting ? setting : "(unset)");
+        SessionLog log(std::string("ring-ceiling-") + (*setting ? setting : "unset"));
+        _putenv_s("VECTORXR_FRAMEGEN_LEAD_CEILING", setting);
+        CeilingGame game(false, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2, log.logger.get());
+        _putenv_s("VECTORXR_FRAMEGEN_LEAD_CEILING", outer.c_str());
+        game.presenter.SetSummaryInterval(300ms);
+        // The variable outranks it: unset, the policy's own (on) applies.
+        game.presenter.SetLeadPolicy(PinnedLead(8, !*setting || off));
+        game.Frames(3);
+        game.Run(2000ms, {5500us});
+        const FrameGenStatus status = game.presenter.Status();
+        game.presenter.Stop();
+        Check(game.Ordered(), name + ": calls stayed ordered");
+        const std::vector<std::string> started = log.Lines("Frame Generation: the lead's ceiling");
+        const std::vector<std::string> summaries = log.Lines("threaded=1");
+        Check(started.size() == 1, name + ": the start names the arm (" + std::to_string(started.size()) + " lines)");
+        Check(summaries.size() >= 3, name + ": summaries while engaged (" + std::to_string(summaries.size()) + ")");
+        const std::string& line = started.front();
+        const std::string& last = summaries.back();
+        const std::size_t lead_at = last.find(", leadSlots=");
+        const std::size_t ring_at = last.find(", ringExhausted=");
+        const std::size_t ring_end = last.find(", staleSkipped=");
+        if (lead_at != std::string::npos && ring_at != std::string::npos && ring_end != std::string::npos) {
+            std::cerr << "  " << name << ": " << last.substr(lead_at + 2, last.find(", leadFloor=") - lead_at - 2)
+                      << last.substr(ring_at, ring_end - ring_at) << std::endl;
+        }
+        const auto any = [&](const std::string& text) {
+            return std::any_of(summaries.begin(), summaries.end(),
+                               [&](const std::string& summary) { return summary.find(text) != std::string::npos; });
+        };
+        if (!off) {
+            Check(line.find(*setting ? "(VECTORXR_FRAMEGEN_LEAD_CEILING=ring)." : "(default;") != std::string::npos,
+                  name + ": the start says the ceiling follows the ring (" + line + ")");
+            Check(last.find(", ringCeiling=7") != std::string::npos &&
+                      last.find(", leadSlots=7 (ring cap)") != std::string::npos &&
+                      last.find(", ringShort=") != std::string::npos,
+                  name + ": the summary shows the ceiling (" + last + ")");
+            Check(any(", ringMoves=-1/+0"), name + ": ...and the window that lowered it (" + last + ")");
+            Check(status.lead_ceiling == 7 && status.lead_ceiling_on, name + ": Status has the ceiling");
+        } else {
+            Check(line.find("ring-short refreshes are counted only (VECTORXR_FRAMEGEN_LEAD_CEILING=off).") !=
+                      std::string::npos,
+                  name + ": the start says the ceiling is off (" + line + ")");
+            Check(last.find(", ringCeiling=off") != std::string::npos &&
+                      last.find(", leadSlots=8 (cap)") != std::string::npos,
+                  name + ": the summary shows the ceiling off, the lead at its cap (" + last + ")");
+            std::uint64_t would = 0;
+            for (const std::string& summary : summaries) {
+                if (const auto value = SummaryValues(summary, "ringWould")) would += static_cast<std::uint64_t>(value->first);
+            }
+            Check(would > 0 && would <= status.ring_short_would,
+                  name + ": ...and what it would have done (" + std::to_string(would) + ", " + last + ")");
+            Check(status.ring_short_would == 1,
+                  name + ": ...one lowering, not one for every ring-short pair at 8 (" +
+                      std::to_string(status.ring_short_would) + ")");
+            Check(status.lead_ceiling == 0 && !status.lead_ceiling_on && status.lead_slots == 8,
+                  name + ": Status has no ceiling");
+        }
+    }
+}
+
+// Captured 83 ms after its release, a real frame is late at a lead of 7 and
+// on time at 8; the ring holds 7. At 7 a late frame's refresh shows the frame
+// before moved past itself, which stands where it stood at 8, its previous
+// images as gone: a refresh lower costs as many refreshes their images and
+// adds the lateness. So each lowering is judged as a probe: frames late at 7
+// within judge in two hitch events (late frame after frame, the second a
+// hitch_span, 250 ms, after the first) put 8 back at once, and 8 is kept for
+// explore_max (1600 ms here) before the ring tries 7 again. Nothing is raised
+// by the retry wait, a hitch_span of frames are late for each lowering
+// (about 16, against 5 when two late frames in ten undid it, which a lone
+// hitch did too: TestLeadCeilingActsThroughHitches), and no more refreshes find
+// their images replaced than at 8 with the ceiling off.
+void TestLeadCeilingRetriesWhenLate() {
+    struct Arm {
+        std::uint64_t exhausted{0};
+        std::uint64_t late{0};
+        FrameGenStatus status;
+        std::vector<double> lowered_at; // seconds into the run
+        std::uint32_t lowest{std::numeric_limits<std::uint32_t>::max()};
+        std::uint32_t highest{0};
+    };
+    Arm arms[2];
+    for (const bool on : {true, false}) {
+        Arm& arm = arms[on ? 0 : 1];
+        const std::string name = std::string("ring ceiling retries") + (on ? "" : " (off)");
+        _putenv_s("VECTORXR_FRAMEGEN_GPU_AHEAD", "off");
+        CeilingGame game(false, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2);
+        _putenv_s("VECTORXR_FRAMEGEN_GPU_AHEAD", "");
+        FrameGenLeadPolicy policy;
+        policy.probe_after = 600s;
+        policy.judge = 300ms;
+        policy.explore_after = 400ms;
+        policy.explore_max = 1600ms;
+        policy.ring_ceiling = on;
+        game.presenter.SetLeadPolicy(policy);
+        game.gpu.capture_lag = 77500us;
+        game.Frames(3);
+        const FrameGenStatus before = game.presenter.Status();
+        const auto start = std::chrono::steady_clock::now();
+        std::uint64_t downs = before.lead_ring_downs;
+        game.Run(7000ms, {5500us}, [&] {
+            const FrameGenStatus now = game.presenter.Status();
+            const double at = Seconds(std::chrono::steady_clock::now() - start);
+            if (now.lead_ring_downs > downs) {
+                downs = now.lead_ring_downs;
+                arm.lowered_at.push_back(at);
+            }
+            if (at >= 1.0) {
+                arm.lowest = std::min(arm.lowest, now.lead_slots);
+                arm.highest = std::max(arm.highest, now.lead_slots);
+            }
+            return false;
+        });
+        arm.status = game.presenter.Status();
+        arm.exhausted = arm.status.ring_exhausted - before.ring_exhausted;
+        arm.late = (arm.status.late_cpu - before.late_cpu) + (arm.status.late_gpu - before.late_gpu);
+        std::string times;
+        for (const double at : arm.lowered_at) times += (times.empty() ? "" : ", ") + std::to_string(at);
+        std::cerr << "  " << name << ": lead " << arm.lowest << "-" << arm.highest << " after 1 s, ring moves -"
+                  << arm.status.lead_ring_downs << "/+" << arm.status.lead_ring_raises << " (lowered at " << times
+                  << " s), undone " << arm.status.lead_ring_undone << ", held " << arm.status.lead_ring_held
+                  << ", refused " << arm.status.lead_ring_refused << ", " << arm.exhausted
+                  << " found their images replaced (" << arm.status.ring_short - before.ring_short
+                  << " the refresh's own frame a capture short), " << arm.late << " late" << std::endl;
+        Check(game.Ordered(), name + ": calls stayed ordered");
+    }
+    const Arm& on = arms[0];
+    const Arm& off = arms[1];
+    const std::uint64_t downs = on.status.lead_ring_downs;
+    const std::uint64_t undone = on.status.lead_ring_undone;
+    Check(downs >= 2 && downs <= 6 && undone + 1 >= downs && undone <= downs && on.status.lead_ring_raises == 0,
+          "ring ceiling retries: each lowering is undone at once, none waits to be raised (-" + std::to_string(downs) +
+              "/+" + std::to_string(on.status.lead_ring_raises) + ", undone " + std::to_string(undone) + ")");
+    Check(on.status.lead_ring_held > 0, "ring ceiling retries: ...and 8 is kept for a while after each");
+    for (std::size_t i = 1; i < on.lowered_at.size(); ++i) {
+        const double gap = on.lowered_at[i] - on.lowered_at[i - 1];
+        Check(gap >= 1.5, "ring ceiling retries: the ring tries 7 again only after explore_max (" +
+                              std::to_string(gap) + " s)");
+    }
+    Check(on.lowest >= 7 && on.highest <= 8,
+          "ring ceiling retries: the lead stays at 7-8 (" + std::to_string(on.lowest) + "-" +
+              std::to_string(on.highest) + ")");
+    Check(on.late <= off.late + 20 * downs, "ring ceiling retries: a hitch_span's frames are late for each lowering (" +
+                                                std::to_string(on.late) + " vs " + std::to_string(off.late) +
+                                                " off, " + std::to_string(downs) + " lowerings)");
+    Check(on.exhausted <= off.exhausted + off.exhausted / 10 + 5,
+          "ring ceiling retries: no more refreshes find their images replaced (" + std::to_string(on.exhausted) +
+              " vs " + std::to_string(off.exhausted) + " off)");
+}
+
+// Leads the ring holds move nothing: a game working 20 ms after each wait
+// (its frames captured 8 refreshes and 20 ms later) at a lead of 8, and
+// Interpolate at 2x, whose ring of five holds 8 whatever the capture timing
+// (FrameGenRingLeadFloor).
+void TestLeadCeilingKeepsLeadTheRingHolds() {
+    struct Case {
+        const char* name;
+        FrameGenSynthesisMode mode;
+        std::chrono::microseconds work;
+        std::chrono::microseconds lag;
+    };
+    for (const Case& test : {Case{"ring ceiling, lead the ring holds", FrameGenSynthesisMode::kExtrapolate, 20000us, 60000us},
+                             Case{"ring ceiling, Interpolate", FrameGenSynthesisMode::kInterpolate, 5500us, 0us}}) {
+        const std::string name = test.name;
+        CeilingGame game(false, test.mode, FrameGenMultiplier::k2);
+        game.gpu.capture_lag = test.lag;
+        game.presenter.SetLeadPolicy(PinnedLead(8, true));
+        game.Frames(3);
+        game.Run(1000ms, {test.work});
+        const CeilingWindow window = MeasureCeiling(game, 1000ms, {test.work});
+        const FrameGenStatus& status = window.after;
+        std::cerr << "  " << name << ": " << window.Text() << std::endl;
+        Check(game.Ordered(), name + ": calls stayed ordered");
+        Check(status.ring_short == 0 && status.lead_ring_downs == 0 && status.lead_ceiling == 0 &&
+                  status.lead_slots == 8 && window.Exhausted() <= 2,
+              name + ": nothing found the ring short, the lead stays (" + window.Text() + ")");
+    }
+}
+
+// A lead the policy's probe found the game needs is not the ring's: first
+// frames captured 83 ms after release, 15 ms of it the game's own work (the
+// ring holds 8, a probe to 7 fails), then the same capture with 3 ms of work
+// (the ring holds 7). A failed probe says only that frames were late a
+// refresh below, which a hitch says too: the ceiling tries 7 itself, frames
+// late at it frame after frame put 8 back at once (two late events), and the
+// ring then holds the ceiling at 8.
+void TestLeadCeilingRespectsProvenLead() {
+    const std::string name = "ring ceiling, proven lead";
+    CeilingGame game(false, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2);
+    FrameGenLeadPolicy policy;
+    policy.probe_after = 250ms;
+    policy.judge = 300ms;
+    policy.explore_after = 10s;
+    policy.ring_ceiling = true;
+    game.presenter.SetLeadPolicy(policy);
+    game.gpu.capture_lag = 68ms;
+    game.Frames(3);
+    game.Run(2500ms, {15000us});
+    const FrameGenStatus proven = game.presenter.Status();
+    game.gpu.capture_lag = 80ms;
+    std::uint32_t lowest = proven.lead_slots;
+    std::uint32_t highest = proven.lead_slots;
+    game.Run(1500ms, {3000us}, [&] {
+        const std::uint32_t lead = game.presenter.Status().lead_slots;
+        lowest = std::min(lowest, lead);
+        highest = std::max(highest, lead);
+        return false;
+    });
+    const FrameGenStatus after = game.presenter.Status();
+    std::cerr << "  " << name << ": lead " << proven.lead_slots << " (floor " << proven.lead_floor << ", "
+              << proven.lead_probes_failed << " probes failed), then " << lowest << "-" << highest
+              << ": ring short +" << after.ring_short - proven.ring_short << " (ignored +"
+              << after.ring_short_ignored - proven.ring_short_ignored << "), held " << after.lead_ring_held
+              << ", ring moves -" << after.lead_ring_downs << "/+" << after.lead_ring_raises << ", undone "
+              << after.lead_ring_undone << std::endl;
+    Check(game.Ordered(), name + ": calls stayed ordered");
+    Check(proven.lead_slots == 8 && proven.lead_probes_failed >= 1,
+          name + ": a probe below 8 failed (lead " + std::to_string(proven.lead_slots) + ", " +
+              std::to_string(proven.lead_probes_failed) + " failed)");
+    Check(after.ring_short > proven.ring_short && after.lead_ring_downs == 1 && after.lead_ring_undone == 1 &&
+              after.lead_ring_held >= 1,
+          name + ": the ring is short at 8, its one lowering undone, then held (held " +
+              std::to_string(after.lead_ring_held) + ", lowered " + std::to_string(after.lead_ring_downs) +
+              ", undone " + std::to_string(after.lead_ring_undone) + ")");
+    Check(lowest >= 7 && highest == 8 && after.lead_slots == 8 && after.lead_floor == 8,
+          name + ": the lead is 8 again, as is the lowest known to hold (" + std::to_string(lowest) + "-" +
+              std::to_string(highest) + ", floor " + std::to_string(after.lead_floor) + ")");
+}
+
+// A presenter run's ceiling is not the next one's (another mode, rate or
+// engagement): restarted, the lead is measured afresh with no ceiling.
+void TestLeadCeilingResetsOnRestart() {
+    const std::string name = "ring ceiling reset";
+    CeilingGame game(false, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2);
+    game.presenter.SetLeadPolicy(PinnedLead(8, true));
+    game.Frames(3);
+    game.Run(3000ms, {5500us}, [&] { return game.presenter.Status().lead_ceiling != 0; });
+    const FrameGenStatus formed = game.presenter.Status();
+    Check(formed.lead_ceiling == 7, name + ": a ceiling formed (" + std::to_string(formed.lead_ceiling) + ")");
+    game.presenter.SetLeadPolicy({});
+    game.presenter.Toggle();
+    game.Frames(4);
+    Check(!game.presenter.Status().threaded, name + ": toggled off, the presenter thread stopped");
+    game.presenter.Toggle();
+    game.Run(3000ms, {1000us}, [&] { return game.presenter.Status().threaded; });
+    game.Run(30ms, {1000us});
+    const FrameGenStatus restarted = game.presenter.Status();
+    Check(game.Ordered(), name + ": calls stayed ordered");
+    Check(restarted.threaded && restarted.lead_ceiling == 0 && restarted.lead_slots <= 2,
+          name + ": the restarted presenter thread has no ceiling and measures its lead afresh (ceiling " +
+              std::to_string(restarted.lead_ceiling) + ", lead " + std::to_string(restarted.lead_slots) + ")");
+}
+
+// The GPU-bound game of RunLeadAfterHitches (19 ms of GPU a frame, three
+// frames queued, Dynamic at its own ~52 fps) climbs to a lead of 8 while it
+// settles, and the fake's ring is a capture short at 7 and 8. Its frames
+// are late a refresh below those leads then (a probe from 8 fails, as does
+// a lowering of the ceiling to 7), so the ceiling cannot spare it those
+// refreshes: the policy brings the lead down to 5 itself once the game has
+// settled (about 3 s in, when every frame at 8 finds its images replaced),
+// and the ring follows. The ceiling must cost little on the way: a lowering
+// from 8 that comes as the policy's calm probe from 8 is already due is that
+// probe (failed, the policy's next waits explore_after, doubling); any other
+// is a trial whose undoing puts the policy's floors and calm time back, so
+// the policy's own probes keep their times; and none comes while the
+// policy's probe or step down is judged. Judged apart, the policy failed
+// its own probe from 8 after the lowering's, came down from 8 0.35 s later
+// and was held at 6 for 1.4 s, its step down dropped unjudged: 40 refreshes
+// found their images replaced against 29 off. A failed probe of the
+// policy's no longer keeps 8 for the ring (a hitch fails one too), so the
+// ceiling tries 7 itself about twice while the game settles, each time late
+// for a hitch_span (two late events undo it; here shortened with the
+// policy's other windows, to 50 ms in 400 ms): a few frames more are late
+// for each, and no more refreshes find their images replaced. In this fake
+// that is a trade with no gain: both lowerings undone (2 in every run), 5-8
+// frames more late than off and as many refreshes finding their images
+// replaced. The lowerings undone are bounded, so the allowance for each
+// cannot grow with them; the cost of a lowering at the field's windows (a
+// hitch_span of 250 ms in 2 s) is TestLeadCeilingRetriesWhenLate's.
+void TestLeadCeilingGpuBoundTrade() {
+    struct Arm {
+        std::uint64_t exhausted{0};
+        std::uint64_t late{0};
+        FrameGenStatus status;
+    };
+    Arm arms[2];
+    for (const bool on : {true, false}) {
+        Arm& arm = arms[on ? 0 : 1];
+        const std::string name = std::string("ring ceiling, GPU-bound") + (on ? "" : " (off)");
+        CeilingGame game(false, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic);
+        game.gpu.game_gpu = 19ms;
+        game.gpu.frames_ahead = 3;
+        FrameGenLeadPolicy policy;
+        policy.probe_after = 250ms;
+        policy.judge = 200ms;
+        policy.explore_after = 700ms;
+        policy.explore_max = 1400ms;
+        // The hitch events that judge the ring's lowerings, shortened with
+        // the rest (a hitch_span of 250 ms is 13 of this game's frames).
+        policy.hitch_span = 50ms;
+        policy.event_window = 400ms;
+        policy.ring_ceiling = on;
+        game.presenter.SetLeadPolicy(policy);
+        game.app->before_release = [&] { game.gpu.GameFrame(); };
+        game.Frames(3);
+        game.Run(3000ms, {6ms}, [&] { return Engaged(game.presenter); });
+        Check(Engaged(game.presenter), name + ": Dynamic engages for the GPU-bound game");
+        const FrameGenStatus before = game.presenter.Status();
+        const bool trace = std::getenv("FG_TEST_LEAD_TRACE") != nullptr;
+        const auto trace_start = std::chrono::steady_clock::now();
+        FrameGenStatus traced = before;
+        auto polled = trace_start;
+        game.Run(6000ms, {6ms}, [&] {
+            // Polled every 40 ms: Status at every frame moved the game's timing.
+            if (!trace || std::chrono::steady_clock::now() - polled < 40ms) return false;
+            polled = std::chrono::steady_clock::now();
+            const FrameGenStatus now = game.presenter.Status();
+            if (now.lead_slots != traced.lead_slots || now.lead_ceiling != traced.lead_ceiling ||
+                now.lead_floor != traced.lead_floor) {
+                std::cerr << "    " << Seconds(std::chrono::steady_clock::now() - trace_start) << " s: lead "
+                          << now.lead_slots << " floor " << now.lead_floor << " ceiling " << now.lead_ceiling
+                          << " exhausted +" << now.ring_exhausted - before.ring_exhausted << " short +"
+                          << now.ring_short - before.ring_short << " late +"
+                          << (now.late_cpu - before.late_cpu) + (now.late_gpu - before.late_gpu) << " probes "
+                          << now.lead_probes << "/" << now.lead_probes_failed << " held " << now.lead_ring_held
+                          << std::endl;
+                traced = now;
+            }
+            return false;
+        });
+        arm.status = game.presenter.Status();
+        arm.exhausted = arm.status.ring_exhausted - before.ring_exhausted;
+        arm.late = (arm.status.late_cpu - before.late_cpu) + (arm.status.late_gpu - before.late_gpu);
+        std::cerr << "  " << name << ": lead " << arm.status.lead_slots << " (floor " << arm.status.lead_floor
+                  << ", ceiling " << arm.status.lead_ceiling << ", ring moves -" << arm.status.lead_ring_downs << "/+"
+                  << arm.status.lead_ring_raises << ", undone " << arm.status.lead_ring_undone << ", refused "
+                  << arm.status.lead_ring_refused << ", held " << arm.status.lead_ring_held << "), " << arm.exhausted
+                  << " found their images replaced (" << arm.status.ring_short - before.ring_short
+                  << " the refresh's own frame a capture short), " << arm.late << " late" << std::endl;
+        Check(game.Ordered(), name + ": calls stayed ordered");
+    }
+    const Arm& on = arms[0];
+    const Arm& off = arms[1];
+    Check(off.exhausted > 20, "ring ceiling, GPU-bound: off, the fake's ring is short for the lead (" +
+                                  std::to_string(off.exhausted) + ")");
+    Check(on.status.lead_ring_refused <= 2,
+          "ring ceiling, GPU-bound: frames late at a lowered ceiling put it back, not left to wait (refused " +
+              std::to_string(on.status.lead_ring_refused) + ", undone " + std::to_string(on.status.lead_ring_undone) +
+              ")");
+    Check(on.status.lead_ring_undone <= 2,
+          "ring ceiling, GPU-bound: the ceiling tries 7 about twice while the game settles (undone " +
+              std::to_string(on.status.lead_ring_undone) + " of " + std::to_string(on.status.lead_ring_downs) + ")");
+    Check(on.exhausted <= off.exhausted + std::max<std::uint64_t>(5, off.exhausted / 10),
+          "ring ceiling, GPU-bound: no more refreshes find their images replaced (" + std::to_string(on.exhausted) +
+              " vs " + std::to_string(off.exhausted) + " off)");
+    Check(on.late <= off.late + std::max<std::uint64_t>(5, off.late / 10) + 5 * on.status.lead_ring_undone,
+          "ring ceiling, GPU-bound: ...nor are frames more often late, but for each lowering undone (" +
+              std::to_string(on.late) + " vs " + std::to_string(off.late) + " off, " +
+              std::to_string(on.status.lead_ring_undone) + " undone)");
+}
+
+// What a run of RunCeilingHitches measured.
+struct CeilingHitchRun {
+    FrameGenStatus switched; // as the 66 ms capture began
+    FrameGenStatus before;   // at the measurement's start
+    FrameGenStatus after;    // at its end
+    std::uint64_t exhausted{0};
+    std::uint64_t late{0};
+    int refreshes{0};
+    std::uint32_t lowest{std::numeric_limits<std::uint32_t>::max()};
+    std::uint32_t highest{0};
+
+    std::string Text() const {
+        return "lead " + std::to_string(before.lead_slots) + " (ceiling " + std::to_string(before.lead_ceiling) +
+               ") then " + std::to_string(lowest) + "-" + std::to_string(highest) + ", floor " +
+               std::to_string(switched.lead_floor) + " -> " + std::to_string(after.lead_floor) + ", ring moves -" + std::to_string(after.lead_ring_downs) + "/+" +
+               std::to_string(after.lead_ring_raises) + ", undone " + std::to_string(after.lead_ring_undone) +
+               ", held " + std::to_string(after.lead_ring_held) + ", refused " +
+               std::to_string(after.lead_ring_refused) + "; the policy's steps down " +
+               std::to_string(after.lead_downs) + " (undone " + std::to_string(after.lead_downs_undone) +
+               "), probes " + std::to_string(after.lead_probes) + "/" + std::to_string(after.lead_probes_failed) +
+               "; " + std::to_string(exhausted) + " of " + std::to_string(refreshes) +
+               " refreshes found their images replaced, " + std::to_string(late) + " late";
+    }
+};
+
+// DCS on Virtual Desktop (Pierpaolo, 2026-10-20, Fixed 2x Extrapolate, lead
+// 8 from hitches, three of the policy's steps down undone and no calm probe
+// in 30 s, 198 refreshes finding their images replaced): a game captured
+// 66 ms after release (on time at a lead of 7, a refresh to spare at 8) that
+// works 5.5 ms after each wait (the canvas's ring of five holds 7, not 8),
+// and stalls 150 ms (three frames of 50 ms) every 112 frames, about 2.5 s,
+// under the lead policy's defaults. Frame by frame each stall is two late
+// frames and more: it steps the lead up, to 8, and fails each step down from
+// it within judge (3 s), which makes 8 the lowest lead known to hold, so the
+// next waits explore_after from a calm the next stall resets. With hitch
+// events a stall is one event and raises nothing: a slow stretch first
+// (2 s of 20 ms of work captured 60 ms later: the lead 8, which the ring
+// holds there) leaves the lead at 8, and the stalls fail its steps down.
+// Measured 6 s after 6 s of the stalls. `proven_first`: in Pierpaolo's order,
+// the stalls first come with 20 ms of work captured 51.5 ms after release (as
+// late after each wait as the 66 ms capture, a refresh to spare at 8; the
+// ring holds 8 there) until a step down of the policy's from 8 has failed, 8
+// the lowest lead known to hold, and only then is the ring short at 8.
+// (Captured 60 ms later, 8 has no refresh to spare: no step down.)
+// `stall_every`: frames from one stall to the next (112, about 2.5 s; 64,
+// about 1.5 s, closer than event_window).
+CeilingHitchRun RunCeilingHitches(bool on, bool hitch_events, bool proven_first = false,
+                                  std::size_t stall_every = 112) {
+    const std::string name = std::string("ring ceiling, hitches") + (hitch_events ? " (hitch events)" : "") +
+                             (proven_first ? " (8 proven first)" : "") +
+                             (stall_every != 112 ? " (every " + std::to_string(stall_every) + " frames)" : "") +
+                             (on ? "" : " (off)");
+    CeilingGame game(false, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2);
+    FrameGenLeadPolicy policy;
+    policy.hitch_events = hitch_events;
+    policy.ring_ceiling = on;
+    game.presenter.SetLeadPolicy(policy);
+    const auto stalls = [&](std::chrono::microseconds work) {
+        std::vector<std::chrono::microseconds> works(stall_every, work);
+        std::fill(works.end() - 3, works.end(), 50ms);
+        return works;
+    };
+    const std::vector<std::chrono::microseconds> works = stalls(5500us);
+    game.Frames(3);
+    if (hitch_events) {
+        game.gpu.capture_lag = 60ms;
+        game.Run(2000ms, {20000us});
+    }
+    CeilingHitchRun run;
+    if (proven_first) {
+        game.gpu.capture_lag = 51500us;
+        game.Run(15000ms, stalls(20000us), [&] {
+            const FrameGenStatus now = game.presenter.Status();
+            return now.lead_slots == 8 && now.lead_floor == 8 && now.lead_downs_undone + now.lead_probes_failed >= 1;
+        });
+    }
+    run.switched = game.presenter.Status();
+    if (proven_first) {
+        const FrameGenStatus& at = run.switched;
+        std::cerr << "  " << name << ": first lead " << at.lead_slots << " (floor " << at.lead_floor
+                  << ", ceiling " << at.lead_ceiling << ", ring moves -" << at.lead_ring_downs << "), the policy's steps down "
+                  << at.lead_downs << " (undone " << at.lead_downs_undone << "), probes " << at.lead_probes << "/"
+                  << at.lead_probes_failed << ", " << at.ring_short << " a capture short" << std::endl;
+    }
+    game.gpu.capture_lag = 66ms;
+    game.Run(6000ms, works);
+    run.before = game.presenter.Status();
+    const std::size_t first = game.runtime.Submissions();
+    game.Run(6000ms, works, [&] {
+        const std::uint32_t lead = game.presenter.Status().lead_slots;
+        run.lowest = std::min(run.lowest, lead);
+        run.highest = std::max(run.highest, lead);
+        return false;
+    });
+    run.after = game.presenter.Status();
+    run.refreshes = static_cast<int>(game.runtime.Submissions() - first);
+    run.exhausted = run.after.ring_exhausted - run.before.ring_exhausted;
+    run.late = (run.after.late_cpu - run.before.late_cpu) + (run.after.late_gpu - run.before.late_gpu);
+    std::cerr << "  " << name << ": " << run.Text() << std::endl;
+    Check(game.Ordered(), name + ": calls stayed ordered");
+    return run;
+}
+
+// A lone hitch says nothing of whether the ring holds a lead: the ceiling
+// still comes down to what the ring holds, and stays through the stalls.
+// Before, each stall's two late frames undid a lowering being judged, and
+// any step down of the policy's a stall failed kept the lead for
+// explore_max: the ceiling could not act in the window it exists for. Also
+// in Pierpaolo's order (a step down from 8 failed before the ring was short
+// there), and the boundary: stalls closer than event_window undo the
+// lowering, as frames late at a lead too short do.
+void TestLeadCeilingActsThroughHitches() {
+    for (const bool hitch_events : {false, true}) {
+        const std::string name = std::string("ring ceiling, hitches") + (hitch_events ? " (hitch events)" : "");
+        const CeilingHitchRun on = RunCeilingHitches(true, hitch_events);
+        const CeilingHitchRun off = RunCeilingHitches(false, hitch_events);
+        // Off: the window the ceiling is for.
+        Check(off.before.lead_slots == 8 && off.highest == 8 && off.after.lead_downs_undone >= 1,
+              name + " (off): the stalls hold the lead at 8, failing the policy's steps down (" + off.Text() + ")");
+        Check(off.exhausted > static_cast<std::uint64_t>(off.refreshes / 4),
+              name + " (off): its moved refreshes find their frame's images replaced (" + off.Text() + ")");
+        Check(on.before.lead_ceiling == 7 && on.after.lead_ceiling == 7 && on.after.lead_ring_downs >= 1,
+              name + ": the ceiling comes down to what the ring holds (" + on.Text() + ")");
+        Check(on.highest <= 7 && on.after.lead_ring_undone == 0 && on.after.lead_floor <= 7,
+              name + ": ...and the lead stays there through the stalls, the policy's floor below 8 (" + on.Text() +
+                  ")");
+        Check(on.exhausted <= off.exhausted / 4 + 5,
+              name + ": its refreshes move their frame again (" + std::to_string(on.exhausted) + " vs " +
+                  std::to_string(off.exhausted) + " off found their images replaced)");
+        Check(on.late <= off.late + std::max<std::uint64_t>(5, off.late / 10),
+              name + ": ...and frames are no more often late (" + std::to_string(on.late) + " vs " +
+                  std::to_string(off.late) + " off)");
+    }
+    {
+        // Pierpaolo's order: a step down from 8 failed (by a stall) before
+        // the ring was short there, 8 the lowest lead known to hold. That
+        // says nothing of the ring: the ceiling still comes down to 7, and
+        // the policy's floor with it, from 8.
+        const std::string name = "ring ceiling, hitches (8 proven first)";
+        const CeilingHitchRun on = RunCeilingHitches(true, false, true);
+        const CeilingHitchRun off = RunCeilingHitches(false, false, true);
+        Check(on.switched.lead_slots == 8 && on.switched.lead_floor == 8 &&
+                  on.switched.lead_downs_undone + on.switched.lead_probes_failed >= 1 &&
+                  on.switched.lead_ring_downs == 0,
+              name + ": a step down from 8 failed first, 8 the lowest lead known to hold (" + on.Text() + ")");
+        Check(on.after.lead_ceiling == 7 && on.after.lead_ring_downs >= 1 && on.after.lead_ring_undone == 0 &&
+                  on.highest <= 7 && on.after.lead_floor <= 7,
+              name + ": the ceiling comes down to 7 and stays, the floor from 8 with it (" + on.Text() + ")");
+        Check(on.exhausted <= off.exhausted / 4 + 5,
+              name + ": its refreshes move their frame again (" + std::to_string(on.exhausted) + " vs " +
+                  std::to_string(off.exhausted) + " off found their images replaced)");
+        Check(on.late <= off.late + std::max<std::uint64_t>(5, off.late / 10),
+              name + ": ...and frames are no more often late (" + std::to_string(on.late) + " vs " +
+                  std::to_string(off.late) + " off)");
+    }
+    {
+        // The boundary: stalls closer than event_window (about 1.5 s apart)
+        // are two late events while a lowering is judged, as a lead too
+        // short is. The lowering is undone once, 8 is needed (the next
+        // ring-short pairs at it held), and the lead stays at 8 as it does
+        // off: the ceiling cannot tell these stalls from a lead too short.
+        const std::string name = "ring ceiling, hitches (closer than event_window)";
+        const CeilingHitchRun on = RunCeilingHitches(true, false, false, 64);
+        const CeilingHitchRun off = RunCeilingHitches(false, false, false, 64);
+        Check(on.after.lead_ring_downs == 1 && on.after.lead_ring_undone == 1 && on.after.lead_ring_held >= 1 &&
+                  on.after.lead_ceiling == 0,
+              name + ": the lowering is undone once and 8 kept (" + on.Text() + ")");
+        Check(on.lowest == 8 && on.highest == 8 && off.highest == 8,
+              name + ": the lead stays at 8, as off (" + on.Text() + "; off " + off.Text() + ")");
+        Check(on.late <= off.late + std::max<std::uint64_t>(5, off.late / 10),
+              name + ": frames are no more often late (" + std::to_string(on.late) + " vs " +
+                  std::to_string(off.late) + " off)");
+    }
+}
+
+namespace depthxr {
+// Drives a presenter's lead policy and history-ring ceiling directly, frame
+// by frame, without a presenter thread or a runtime: a canvas just in time
+// at fixed 2x Extrapolate with the deep ring (it holds a lead of 6 at any
+// capture timing), at 90 Hz. Each call stands for the presenter thread's,
+// under the presenter's mutex.
+class FrameGenLeadTestPeer {
+  public:
+    using Clock = std::chrono::steady_clock;
+    struct State {
+        std::uint32_t lead{0};
+        std::uint32_t floor{0};
+        std::uint32_t proven{0};
+        bool floor_failed{false};
+        Clock::time_point calm{};
+        bool probe{false};      // a probe or step down judged...
+        bool ring_probe{false}; // ...a lowering of the ceiling taken for the policy's calm probe
+        std::uint32_t ceiling{0};
+        std::uint32_t needed{0};
+        std::uint64_t ring_downs{0};
+        std::uint64_t ring_undone{0};
+        std::uint64_t ring_held{0};
+        std::uint64_t ring_raises{0};
+        std::uint64_t ring_refused{0};
+        std::uint64_t probes_failed{0};
+        std::uint64_t downs_undone{0};
+    };
+
+    static void Prepare(FrameGenPresenter& presenter, const FrameGenLeadPolicy& policy) {
+        FrameGenResolvedSettings settings;
+        settings.enabled = true;
+        settings.synthesis_mode = FrameGenSynthesisMode::kExtrapolate;
+        settings.multiplier = FrameGenMultiplier::k2;
+        presenter.Configure(settings);
+        presenter.SetLeadPolicy(policy);
+        std::scoped_lock lock(presenter.mutex_);
+        presenter.jit_ = true;
+        presenter.jit_interpolate_ = false;
+        presenter.jit_canvas_ring_ = kFrameGenHistoryRingMax;
+        presenter.last_period_ = kPeriod;
+    }
+    // The lead, the policy's floors and its calm time, as a run left them.
+    static void Set(FrameGenPresenter& presenter, std::uint32_t lead, std::uint32_t floor, std::uint32_t proven,
+                    bool floor_failed, Clock::time_point calm) {
+        std::scoped_lock lock(presenter.mutex_);
+        presenter.lead_slots_ = lead;
+        presenter.lead_floor_ = floor;
+        presenter.lead_floor_proven_ = proven;
+        presenter.lead_floor_failed_ = floor_failed;
+        presenter.lead_calm_since_ = calm;
+        presenter.lead_probe_.reset();
+        presenter.ClearLeadHistoryLocked();
+    }
+    // A real frame told the current lead, scored: late, or on time with
+    // `slack_ms` to spare (more than 1.1 refreshes: a refresh to spare).
+    static void Frame(FrameGenPresenter& presenter, bool late, double slack_ms = 0.0) {
+        std::scoped_lock lock(presenter.mutex_);
+        presenter.UpdateLeadLocked(late, late ? std::nullopt : std::optional<double>(slack_ms), presenter.lead_slots_,
+                                   2);
+    }
+    // Real frame `id`, told the current lead: a moved refresh of it found its
+    // previous images replaced, the presenter thread on time.
+    static void RingShort(FrameGenPresenter& presenter, std::uint64_t id) {
+        std::scoped_lock lock(presenter.mutex_);
+        FrameGenPresenter::JitWrite write;
+        write.ring_short = true;
+        write.ring_short_id = id;
+        write.ring_short_lead = presenter.lead_slots_;
+        write.ring_short_multiplier = 2;
+        write.ring_short_at = Clock::now();
+        presenter.NoteRingShortLocked(write, write.ring_short_at, kPeriod);
+    }
+    // The ceiling's times moved `ago` earlier (its lowering, judge, retry
+    // wait and last late event), as though that much had passed since.
+    static void Age(FrameGenPresenter& presenter, Clock::duration ago) {
+        std::scoped_lock lock(presenter.mutex_);
+        FrameGenPresenter::LeadRing& ring = presenter.lead_ring_[2];
+        if (ring.trial) *ring.trial -= ago;
+        if (ring.late_event) *ring.late_event -= ago;
+        ring.changed_at -= ago;
+        ring.needed_at -= ago;
+    }
+    static State Get(FrameGenPresenter& presenter) {
+        std::scoped_lock lock(presenter.mutex_);
+        State state;
+        state.lead = presenter.lead_slots_;
+        state.floor = presenter.lead_floor_;
+        state.proven = presenter.lead_floor_proven_;
+        state.floor_failed = presenter.lead_floor_failed_;
+        state.calm = presenter.lead_calm_since_;
+        state.probe = presenter.lead_probe_.has_value();
+        state.ring_probe = presenter.lead_probe_ && presenter.lead_probe_->ring;
+        state.ceiling = presenter.lead_ring_[2].ceiling;
+        state.needed = presenter.lead_ring_[2].needed;
+        state.ring_downs = presenter.totals_.lead_ring_downs;
+        state.ring_undone = presenter.totals_.lead_ring_undone;
+        state.ring_held = presenter.totals_.lead_ring_held;
+        state.ring_raises = presenter.totals_.lead_ring_raises;
+        state.ring_refused = presenter.totals_.lead_ring_refused;
+        state.probes_failed = presenter.totals_.lead_probes_failed;
+        state.downs_undone = presenter.totals_.lead_downs_undone;
+        return state;
+    }
+};
+} // namespace depthxr
+
+std::string LeadStateText(const FrameGenLeadTestPeer::State& state) {
+    return "lead " + std::to_string(state.lead) + ", floor " + std::to_string(state.floor) + "/" +
+           std::to_string(state.proven) + (state.floor_failed ? " failed" : "") + ", ceiling " +
+           std::to_string(state.ceiling) + " (needed " + std::to_string(state.needed) + ")" +
+           (state.ring_probe ? ", ring probe" : state.probe ? ", probe" : "") + ", ring -" +
+           std::to_string(state.ring_downs) + " undone " + std::to_string(state.ring_undone) + " held " +
+           std::to_string(state.ring_held) + " raised " + std::to_string(state.ring_raises) + " refused " +
+           std::to_string(state.ring_refused) + ", probes failed " + std::to_string(state.probes_failed) +
+           ", steps down undone " + std::to_string(state.downs_undone);
+}
+
+// The ceiling's lowerings against the lead policy's own state, frame by frame
+// (FrameGenLeadTestPeer): probes 1 s apart, judged 500 ms, explore waits of
+// 700 ms, hitch events 40 ms long and paired within 400 ms.
+// - A lowering whose policy calm probe is 300 ms off (within judge, not
+//   already due) is a trial of its own: a lone hitch leaves it, a second
+//   late event undoes it, and the policy's floors, proven lead and calm time
+//   come back as they were (its next probe keeps its time); the lead it
+//   lowered is then kept.
+// - None comes while a step down of the policy's is judged; the next
+//   ring-short pair after its verdict lowers it.
+// - One as the policy's calm probe is due is that probe: undone, it fails as
+//   the policy's (the lead lowered the lowest known to hold), not counted as
+//   a failed probe; held, the lead below is the lowest known to hold.
+// - A step down of the policy's that a hitch failed does not keep the lead:
+//   the next ring-short pair lowers it.
+void TestLeadCeilingProbeAndTrial() {
+    using Peer = FrameGenLeadTestPeer;
+    using Clock = std::chrono::steady_clock;
+    FrameGenLeadPolicy policy;
+    policy.probe_after = 1000ms;
+    policy.judge = 500ms;
+    policy.explore_after = 700ms;
+    policy.explore_max = 1400ms;
+    policy.hitch_span = 40ms;
+    policy.event_window = 400ms;
+    policy.ring_ceiling = true;
+    const auto pair = [](FrameGenPresenter& presenter, std::uint64_t id) {
+        Peer::RingShort(presenter, id);
+        Peer::RingShort(presenter, id + 1);
+    };
+    const auto spare = [](FrameGenPresenter& presenter, int frames) {
+        for (int i = 0; i < frames; ++i) Peer::Frame(presenter, false, 20.0);
+    };
+    {
+        const std::string name = "ring ceiling trial";
+        FrameGenPresenter presenter;
+        Peer::Prepare(presenter, policy);
+        const Clock::time_point calm = Clock::now() - 400ms;
+        Peer::Set(presenter, 8, 8, 8, false, calm);
+        pair(presenter, 1);
+        const Peer::State lowered = Peer::Get(presenter);
+        Check(lowered.lead == 7 && lowered.ceiling == 7 && lowered.ring_downs == 1 && !lowered.probe,
+              name + ": lowered as a trial of its own, the policy's probe 300 ms off (" + LeadStateText(lowered) +
+                  ")");
+        Peer::Frame(presenter, true);
+        Peer::Frame(presenter, true);
+        const Peer::State hitch = Peer::Get(presenter);
+        Check(hitch.lead == 7 && hitch.ceiling == 7 && hitch.ring_undone == 0,
+              name + ": a lone hitch leaves it (" + LeadStateText(hitch) + ")");
+        std::this_thread::sleep_for(60ms);
+        Peer::Frame(presenter, true);
+        const Peer::State undone = Peer::Get(presenter);
+        Check(undone.lead == 8 && undone.ceiling == 0 && undone.ring_undone == 1 && undone.needed == 8,
+              name + ": a second late event undoes it, 8 kept (" + LeadStateText(undone) + ")");
+        Check(undone.floor == 8 && undone.proven == 8 && !undone.floor_failed && undone.calm == calm && !undone.probe,
+              name + ": ...and the policy's floors and calm time are as before it (" + LeadStateText(undone) + ")");
+        pair(presenter, 3);
+        const Peer::State held = Peer::Get(presenter);
+        Check(held.lead == 8 && held.ring_downs == 1 && held.ring_held == 1,
+              name + ": the next ring-short pair at 8 is held (" + LeadStateText(held) + ")");
+    }
+    {
+        const std::string name = "ring ceiling during a step down";
+        FrameGenPresenter presenter;
+        Peer::Prepare(presenter, policy);
+        Peer::Set(presenter, 8, 0, 0, false, Clock::now());
+        spare(presenter, 8);
+        const Peer::State stepped = Peer::Get(presenter);
+        Check(stepped.lead == 7 && stepped.probe, name + ": frames to spare step the lead down, judged (" +
+                                                      LeadStateText(stepped) + ")");
+        pair(presenter, 1);
+        const Peer::State waited = Peer::Get(presenter);
+        Check(waited.lead == 7 && waited.ring_downs == 0 && waited.ceiling == 0 && waited.probe,
+              name + ": no lowering while it is judged (" + LeadStateText(waited) + ")");
+        std::this_thread::sleep_for(510ms);
+        Peer::Frame(presenter, false);
+        const Peer::State held = Peer::Get(presenter);
+        Check(held.floor == 7 && !held.probe && held.ring_downs == 0,
+              name + ": the step down held (" + LeadStateText(held) + ")");
+        pair(presenter, 3);
+        const Peer::State after = Peer::Get(presenter);
+        Check(after.lead == 6 && after.ceiling == 6 && after.ring_downs == 1,
+              name + ": ...and the next ring-short pair lowers it (" + LeadStateText(after) + ")");
+    }
+    for (const bool fails : {true, false}) {
+        const std::string name = std::string("ring ceiling as the policy's probe") + (fails ? ", undone" : ", held");
+        FrameGenPresenter presenter;
+        Peer::Prepare(presenter, policy);
+        Peer::Set(presenter, 8, 0, 0, false, Clock::now() - 1000ms);
+        pair(presenter, 1);
+        const Peer::State lowered = Peer::Get(presenter);
+        Check(lowered.lead == 7 && lowered.ceiling == 7 && lowered.ring_probe,
+              name + ": lowered as the calm probe that was due (" + LeadStateText(lowered) + ")");
+        Peer::Frame(presenter, false); // the probe's first frames are not judged
+        Peer::Frame(presenter, false);
+        if (fails) {
+            Peer::Frame(presenter, true);
+            Peer::Frame(presenter, true);
+            const Peer::State hitch = Peer::Get(presenter);
+            Check(hitch.lead == 7 && hitch.ring_probe && hitch.floor == 0,
+                  name + ": a lone hitch leaves it (" + LeadStateText(hitch) + ")");
+            std::this_thread::sleep_for(60ms);
+            Peer::Frame(presenter, true);
+            const Peer::State undone = Peer::Get(presenter);
+            Check(undone.lead == 8 && undone.ceiling == 0 && undone.ring_undone == 1 && !undone.probe,
+                  name + ": a second late event undoes it (" + LeadStateText(undone) + ")");
+            Check(undone.floor == 8 && undone.proven == 8 && undone.floor_failed && undone.probes_failed == 0,
+                  name + ": ...as the policy's probe failed, not counted as one (" + LeadStateText(undone) + ")");
+        } else {
+            std::this_thread::sleep_for(510ms);
+            Peer::Frame(presenter, false);
+            const Peer::State held = Peer::Get(presenter);
+            Check(held.lead == 7 && held.ceiling == 7 && !held.probe && held.floor == 7 && held.proven == 7,
+                  name + ": held, 7 is the lowest lead known to hold (" + LeadStateText(held) + ")");
+        }
+    }
+    {
+        const std::string name = "ring ceiling after a failed step down";
+        FrameGenPresenter presenter;
+        Peer::Prepare(presenter, policy);
+        Peer::Set(presenter, 8, 0, 0, false, Clock::now());
+        spare(presenter, 8);
+        Peer::Frame(presenter, false); // not judged
+        Peer::Frame(presenter, false);
+        Peer::Frame(presenter, true);
+        Peer::Frame(presenter, true);
+        const Peer::State failed = Peer::Get(presenter);
+        Check(failed.lead == 8 && failed.floor == 8 && failed.downs_undone == 1 && failed.needed == 0,
+              name + ": a hitch undid the step down, 8 the lowest lead known to hold (" + LeadStateText(failed) +
+                  ")");
+        pair(presenter, 1);
+        const Peer::State lowered = Peer::Get(presenter);
+        Check(lowered.lead == 7 && lowered.ceiling == 7 && lowered.ring_downs == 1 && lowered.ring_held == 0,
+              name + ": the ceiling is still lowered (" + LeadStateText(lowered) + ")");
+    }
+}
+
+// A lowering judged and held that the game's lateness shows too low (its
+// capture moved later since), frame by frame (FrameGenLeadTestPeer, the
+// windows of TestLeadCeilingProbeAndTrial; the ceiling's clock moved on with
+// Peer::Age): late in bursts of two or three frames, each burst one event.
+// - A second burst within event_window raises it once its retry wait
+//   (explore_after, 700 ms) has run out, on that burst's first late frame.
+//   Each burst's second late frame steps the policy up at the ceiling and
+//   clears its history, so the next burst's first counts one late frame:
+//   left to the policy's step up, the second event was never seen and the
+//   ceiling stayed, nothing refused.
+// - Before the wait has run out it is refused (counted), the lead staying;
+//   a third burst within event_window of the second, after it, raises.
+// - A lone burst, or bursts further apart than event_window (a hitch no lead
+//   cures: Pierpaolo's stalls, TestLeadCeilingActsThroughHitches), raises
+//   nothing.
+void TestLeadCeilingRaisesOnBursts() {
+    using Peer = FrameGenLeadTestPeer;
+    using Clock = std::chrono::steady_clock;
+    FrameGenLeadPolicy policy;
+    policy.probe_after = 1000ms;
+    policy.judge = 500ms;
+    policy.explore_after = 700ms;
+    policy.explore_max = 1400ms;
+    policy.hitch_span = 40ms;
+    policy.event_window = 400ms;
+    policy.ring_ceiling = true;
+    Check(!policy.hitch_events, "ring ceiling bursts: frame by frame is the policy's default");
+    const auto burst = [](FrameGenPresenter& presenter, int frames) {
+        for (int i = 0; i < frames; ++i) Peer::Frame(presenter, true);
+    };
+    // Lowered from 8 to 7 as a trial of its own (the policy's probe 300 ms
+    // off), 8 the lowest lead known to hold.
+    const auto lower = [&](FrameGenPresenter& presenter, const std::string& name) {
+        Peer::Prepare(presenter, policy);
+        Peer::Set(presenter, 8, 8, 8, false, Clock::now() - 400ms);
+        Peer::RingShort(presenter, 1);
+        Peer::RingShort(presenter, 2);
+        const Peer::State lowered = Peer::Get(presenter);
+        Check(lowered.lead == 7 && lowered.ceiling == 7 && lowered.ring_downs == 1 && !lowered.probe,
+              name + ": lowered to 7 (" + LeadStateText(lowered) + ")");
+    };
+    {
+        const std::string name = "ring ceiling bursts, raised";
+        FrameGenPresenter presenter;
+        lower(presenter, name);
+        Peer::Age(presenter, 800ms); // judged and held, the retry wait run out
+        burst(presenter, 2);
+        const Peer::State first = Peer::Get(presenter);
+        Check(first.lead == 7 && first.ceiling == 7 && first.ring_raises == 0 && first.ring_refused == 0,
+              name + ": a lone burst leaves it (" + LeadStateText(first) + ")");
+        Peer::Age(presenter, 100ms);
+        Peer::Frame(presenter, true);
+        const Peer::State raised = Peer::Get(presenter);
+        Check(raised.lead == 8 && raised.ceiling == 0 && raised.ring_raises == 1 && raised.ring_undone == 0,
+              name + ": a second burst within event_window raises it on its first late frame (" +
+                  LeadStateText(raised) + ")");
+        burst(presenter, 2);
+        const Peer::State after = Peer::Get(presenter);
+        Check(after.lead == 8 && after.ring_raises == 1 && after.ring_refused == 0,
+              name + ": ...once (" + LeadStateText(after) + ")");
+    }
+    {
+        const std::string name = "ring ceiling bursts, apart";
+        FrameGenPresenter presenter;
+        lower(presenter, name);
+        Peer::Age(presenter, 800ms);
+        for (int i = 0; i < 4; ++i) {
+            burst(presenter, 3);
+            Peer::Age(presenter, 500ms); // past event_window
+        }
+        const Peer::State apart = Peer::Get(presenter);
+        Check(apart.lead == 7 && apart.ceiling == 7 && apart.ring_raises == 0 && apart.ring_refused == 0 &&
+                  apart.ring_undone == 0,
+              name + ": bursts further apart than event_window raise nothing (" + LeadStateText(apart) + ")");
+    }
+    {
+        const std::string name = "ring ceiling bursts, refused";
+        FrameGenPresenter presenter;
+        lower(presenter, name);
+        Peer::Age(presenter, 550ms); // judged and held, 150 ms of the retry wait left
+        burst(presenter, 2);
+        Peer::Age(presenter, 60ms);
+        burst(presenter, 3);
+        const Peer::State refused = Peer::Get(presenter);
+        Check(refused.lead == 7 && refused.ceiling == 7 && refused.ring_raises == 0 && refused.ring_refused == 1 &&
+                  refused.ring_undone == 0,
+              name + ": a second burst before the retry wait has run out is refused, counted once (" +
+                  LeadStateText(refused) + ")");
+        Peer::Age(presenter, 200ms);
+        Peer::Frame(presenter, true);
+        const Peer::State raised = Peer::Get(presenter);
+        Check(raised.lead == 8 && raised.ceiling == 0 && raised.ring_raises == 1 && raised.ring_refused == 1,
+              name + ": ...a third within event_window of it, after the wait, raises it (" + LeadStateText(raised) +
+                  ")");
+    }
+}
+
 #define RUN(test)                                                                                \
     do {                                                                                         \
         const char* only = std::getenv("FG_TEST_ONLY");                                          \
@@ -11155,6 +12435,9 @@ void RunPolicyTests() {
     RUN(TestLeadResetOnRestart);
     RUN(TestLeadStepsDownAfterHitches);
     RUN(TestLeadDoesNotFlap);
+    RUN(TestLeadCeilingKeepsLeadTheRingHolds);
+    RUN(TestLeadCeilingRespectsProvenLead);
+    RUN(TestLeadCeilingResetsOnRestart);
     RUN(TestSkipIdenticalExactCopies);
     RUN(TestTelemetryWindows);
     RUN(TestDynamicSwitchStandby);
@@ -11176,6 +12459,9 @@ void RunPolicyTests() {
     RUN(TestLateSubmissionRecovers);
     RUN(TestEchoRuntimeLatePresenter);
     RUN(TestRefreshPeriodChanges);
+    // The lead's ceiling against lateness at the lead below it.
+    RUN(TestLeadCeilingGpuBoundTrade);
+    RUN(TestLeadCeilingRetriesWhenLate);
 }
 
 // The policy tests in a second process of this executable, alongside the
@@ -11397,6 +12683,19 @@ int main(int argc, char** argv) {
         RUN(TestLoadingFramesDoNotRaiseLead);
     }
     g_jit = false;
+    // The lead's ceiling from the history ring.
+    RUN(TestRingLeadFloor);
+    RUN(TestLeadCeilingFollowsRing);
+    RUN(TestLeadCeilingDynamicFollowsSpacing);
+    RUN(TestLeadCeilingDynamicFloor);
+    RUN(TestLeadCeilingDynamicSlowsDown);
+    RUN(TestLeadCeilingIgnoresFallbackExhaustion);
+    RUN(TestLeadCeilingIgnoresLateWrites);
+    RUN(TestLeadCeilingInactiveOnShortRing);
+    RUN(TestLeadCeilingSummaryAndSwitch);
+    RUN(TestLeadCeilingProbeAndTrial);
+    RUN(TestLeadCeilingRaisesOnBursts);
+    RUN(TestLeadCeilingActsThroughHitches);
     if (!policy) {
         RunPolicyTests();
     } else {
