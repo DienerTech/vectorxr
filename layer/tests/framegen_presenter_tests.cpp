@@ -4110,6 +4110,134 @@ void TestEngineMotionCapture() {
     }
 }
 
+// Engine motion vectors, stage 3 (VECTORXR_FRAMEGEN_ENGINE_MV=observe): once
+// the game's swapchains settled, each frame analysed just in time whose
+// vectors no gate holds back asks for their evidence
+// (FrameGenViewRequest::engine_motion) with the poses the game rendered it
+// and the frame before with; where the head's turn changed by 2 degrees a
+// frame and both frames may calibrate, with the frame before that's too
+// (engine_lag). Pivot's change moving keeps a frame from calibrating, not
+// from its evidence; a gate (FRAME_SKIP) keeps it from both. The backend runs
+// at kObserve, the flow at its quality's level (the hardware's level is
+// Assist's).
+void TestEngineMotionObserve() {
+    const XrSwapchain depth_chain = reinterpret_cast<XrSwapchain>(0x21);
+    const XrSwapchain vectors = reinterpret_cast<XrSwapchain>(0x31);
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    gpu.depth = gpu.engine = gpu.threaded = gpu.jit = true;
+    runtime.paced = true;
+    _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "observe");
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kExtrapolate);
+    _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "");
+    presenter.TrackSwapchain(depth_chain, 20, 1, XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+    presenter.TrackSwapchain(vectors, kFloatFormat, 1, XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+    App app(presenter, runtime);
+    app.depth.subImage.swapchain = depth_chain;
+    app.depth.subImage.imageRect = {{0, 0}, {1200, 1200}};
+    app.depth.maxDepth = 1.0f;
+    app.depth.nearZ = 0.1f;
+    app.depth.farZ = 1000.0f;
+    std::uint64_t frames = 0;
+    float pivot_x = 0.0f; // Pivot's change: the game rendered this far left of the pose declared
+    bool skip = false;    // the game marks its frames FRAME_SKIP
+    // As the layer: the frame's record, with the poses the game rendered
+    // with, then its capture.
+    app.before_end = [&](XrTime time) {
+        FrameGenEngineMotionFrame record;
+        record.display_time = time;
+        record.projection_frame = ++frames;
+        for (std::uint32_t v = 0; v < 2; ++v) {
+            FrameGenEngineMotionView view;
+            view.view = v;
+            view.source = FrameGenMotionSource::kSpaceWarpFb;
+            view.vectors = {vectors, {{0, 0}, {960, 960}}, v};
+            view.depth = app.depth.subImage;
+            view.depth_is_khr = true;
+            view.color = app.views[v].subImage;
+            view.depth_encoding = {app.depth.minDepth, app.depth.maxDepth, app.depth.nearZ, app.depth.farZ};
+            view.frame_skip = skip;
+            const XrPosef& pose = app.views[v].pose;
+            view.game.orientation = {pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w};
+            view.game.position = {pose.position.x - pivot_x, pose.position.y, pose.position.z};
+            record.views.push_back(view);
+        }
+        record.complete = true;
+        presenter.NoteEngineMotion(record);
+        presenter.CaptureEngineMotion();
+    };
+    // Frames until `count` more were analysed.
+    const auto run = [&](int count) {
+        const int executes = gpu.executes;
+        for (int i = 0; gpu.executes < executes + count && i < 400; ++i) app.Frame();
+        Check(gpu.executes >= executes + count, "engine observe: frames are analysed");
+    };
+    const auto asked = [&] {
+        return gpu.last.size() == 2 && gpu.last[0].request.engine_motion && gpu.last[1].request.engine_motion;
+    };
+    const auto calibrating = [&] {
+        return gpu.last.size() == 2 && gpu.last[0].request.engine_calibrate && gpu.last[1].request.engine_calibrate;
+    };
+
+    // The swapchains made at the start settle for 3 s (G8): no evidence yet.
+    run(6);
+    Check(gpu.tuning.engine_mode == FrameGenEngineMode::kObserve && gpu.tuning.analyze_only && !gpu.tuning.hardware_level &&
+              !asked(),
+          "engine observe: just in time at kObserve, no evidence while the swapchains settle");
+    std::this_thread::sleep_for(std::chrono::milliseconds(3100));
+    run(4);
+    Check(asked() && calibrating() && !gpu.last[0].request.engine_lag,
+          "engine observe: settled and paired, the frame's vectors' evidence is asked for");
+    const FrameGenViewRequest& steady = gpu.last[1].request;
+    Check(steady.game_newest.position == steady.newest.position &&
+              steady.game_newest.orientation == steady.newest.orientation &&
+              steady.game_previous.position == steady.previous.position,
+          "engine observe: with the game's poses (Pivot's change none)");
+
+    // The head turning 2.5 degrees one way, then back, frame by frame: the
+    // turn changes by 5 degrees a frame, so the pair before is asked for.
+    const float half = 2.5f * 3.14159265f / 360.0f;
+    for (XrCompositionLayerProjectionView& view : app.views) view.pose.orientation = {0.0f, std::sin(half), 0.0f, std::cos(half)};
+    run(1);
+    bool lagged = false;
+    for (int i = 0; i < 6; ++i) {
+        for (XrCompositionLayerProjectionView& view : app.views) {
+            view.pose.orientation = view.pose.orientation.y != 0.0f ? XrQuaternionf{0.0f, 0.0f, 0.0f, 1.0f}
+                                                                    : XrQuaternionf{0.0f, std::sin(half), 0.0f, std::cos(half)};
+        }
+        run(1);
+        const FrameGenViewRequest& request = gpu.last[0].request;
+        lagged = lagged || (request.engine_lag && request.game_before.orientation == request.game_newest.orientation &&
+                            request.game_previous.orientation != request.game_newest.orientation);
+    }
+    Check(lagged, "engine observe: a turn changing by 5 degrees a frame asks for the pair before");
+    for (XrCompositionLayerProjectionView& view : app.views) view.pose.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
+    run(3);
+    Check(asked() && !gpu.last[0].request.engine_lag, "engine observe: a steady head asks for no pair before");
+
+    // Pivot's change moving: evidence, no calibration, the game's poses as
+    // rendered (the declared ones less the change).
+    bool moving = true;
+    for (int i = 0; i < 4; ++i) {
+        pivot_x += 0.002f;
+        run(1);
+        moving = moving && asked() && !calibrating() &&
+                 std::abs(gpu.last[0].request.game_newest.position[0] - (gpu.last[0].request.newest.position[0] - pivot_x)) < 1e-6f;
+    }
+    Check(moving, "engine observe: Pivot's change moving still asks for evidence, never calibrates");
+
+    // FRAME_SKIP: a gate, so no evidence.
+    skip = true;
+    run(3);
+    Check(!asked(), "engine observe: a frame a gate holds back asks for no evidence");
+    skip = false;
+    run(3);
+    Check(asked(), "engine observe: asked again once no gate holds the frames back");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "engine observe: calls stayed ordered");
+}
+
 void TestOverlappingWaitIsHeld() {
     FrameGenPresenter presenter;
     GpuLog gpu;
@@ -11713,6 +11841,7 @@ int main(int argc, char** argv) {
     RUN(TestEngineMotionCensus);
     RUN(TestEngineMotionGates);
     RUN(TestEngineMotionCapture);
+    RUN(TestEngineMotionObserve);
     RUN(TestResearchFileSessions);
     RUN(TestAutomaticMultiplier);
     RUN(TestThreadedExtrapolation);

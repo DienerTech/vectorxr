@@ -1789,7 +1789,17 @@ class FrameGenPresenter {
         std::vector<FrameGenPoseChange> pivot;
         bool pivot_moved{false};
         bool calibrate{false};
+        // The poses the game rendered the frame before (its pair) with, per
+        // view in record order, once paired: the next frame's lag test reads
+        // them as the frame before the frame before.
+        std::vector<FrameGenViewGeometry> paired_game;
     };
+    // Stage 3 (VECTORXR_FRAMEGEN_ENGINE_MV=observe): the frame's requests ask
+    // for its vectors' evidence where no gate holds them back
+    // (FrameGenViewRequest::engine_motion), with the game's poses, and the
+    // lag test's where both frames may calibrate and the head's turn changed
+    // by 2 degrees a frame.
+    void EngineRequestsLocked(const PendingFrame& frame, bool calibrate, std::vector<FrameGenViewSubmission>& submissions);
     // The census jobs for `frame`'s views (stage 0: every image, sampled at
     // its end; stage 2 captures too, CaptureEngineMotion chooses), with each
     // view's color request.
@@ -1819,6 +1829,14 @@ class FrameGenPresenter {
     std::size_t engine_notes_logged_{0};
     bool logged_engine_failure_{false};
     bool logged_engine_bridged_{false};
+    // Stage 3, under mutex_: the backend's validator as last read
+    // (CaptureEngineMotion), its decisions logged, its totals at the last
+    // summary, and whether the game's prior (FrameGenEnginePriorFor) was
+    // looked for.
+    FrameGenEngineValidation engine_validation_;
+    std::uint32_t engine_decisions_logged_{0};
+    FrameGenEngineValidation engine_validation_logged_;
+    bool engine_prior_checked_{false};
     // The frame gates (stage 1), under mutex_: a record as the gates read it
     // (none: no record), and the gates for the frame Generate generates
     // from (`flipped`: a view's depth was decoded as the frame before

@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -203,6 +204,80 @@ void AppendWorldFit(FrameGenViewPlan& plan, const FrameGenConstants& base, Frame
     }
 }
 
+// Engine motion vectors (FrameGenViewRequest::engine_motion): the evidence
+// on the frame's vectors (its raw field) against the declared poses, its
+// luma, its resolved depth and the measured flow at the final level, summed
+// per group into kEnginePartials by kind (cockpit, the solve's first stage
+// taking the frame's bias out, photometric, the field before when it is the
+// frame before's, the cockpit against the pair before), then solved into
+// kEngineParams and kEngineEvidence. Writes those alone: nothing measured
+// or generated changes.
+void AppendEngineEvidence(FrameGenViewPlan& plan, const FrameGenConstants& base, const FrameGenViewRequest& request,
+                          const FrameGenTuning& tuning) {
+    const FrameGenExtent l1 = plan.levels[1];
+    const FrameGenTexture raw = Texture(FrameGenTextureKind::kEngineRaw);
+    const FrameGenTexture luma = Texture(FrameGenTextureKind::kLumaNewest, 1);
+    const FrameGenTexture before = Texture(FrameGenTextureKind::kLumaPrevious, 1);
+    const FrameGenTexture depth = Texture(FrameGenTextureKind::kDepth);
+    const FrameGenTexture flow = Texture(FrameGenTextureKind::kFlow, plan.final_flow_level);
+    const FrameGenTexture partials = Texture(FrameGenTextureKind::kEnginePartials);
+    const FrameGenTexture params = Texture(FrameGenTextureKind::kEngineParams);
+    // The cockpit fits take the vectors decoded alone (unit gains): what the
+    // validator fits the gains to. The rest take the convention under test.
+    const std::array<float, 4> decoded = FrameGenEngineDecode(FrameGenEngineConvention{}, request.engine_encoding);
+    const std::array<float, 4> converted = FrameGenEngineDecode(tuning.engine, request.engine_encoding);
+    const std::uint32_t camera = static_cast<std::uint32_t>(tuning.engine.camera) << 4;
+    // Observe and Assist measure the flow as well.
+    const std::uint32_t measured = tuning.engine_mode <= FrameGenEngineMode::kAssist ? 1u << 8 : 0u;
+    auto reduce = [&](std::uint32_t kind, const FrameGenConstants& constants, const std::array<FrameGenTexture, 6>& inputs,
+                      const std::array<float, 4>& decode) {
+        FrameGenDispatch dispatch =
+            Dispatch(FrameGenPass::kEngineReduce, {kFrameGenEngineGrid, kFrameGenEngineGrid}, l1, constants);
+        dispatch.inputs = inputs;
+        dispatch.outputs = {partials, {}};
+        dispatch.constants.options = {kind | camera | measured, constants.options[1], 0, plan.final_flow_level};
+        dispatch.constants.tuning = decode;
+        plan.dispatches.push_back(dispatch);
+    };
+    // The solve's options: its stage (0: the bias alone), whether the
+    // convention is locked and jittered, which kinds ran, the camera; the
+    // images the newest and previous fields came from (the stale test).
+    auto solve = [&](std::uint32_t stage) {
+        FrameGenDispatch dispatch =
+            Dispatch(FrameGenPass::kEngineSolve, {kFrameGenThreadGroupSize, kFrameGenThreadGroupSize}, l1, base);
+        dispatch.constants.size = {l1.width, l1.height, request.engine_vectors.width, request.engine_vectors.height};
+        dispatch.inputs = {partials, Texture(FrameGenTextureKind::kEngineCensus),
+                           Texture(FrameGenTextureKind::kEngineCensusPrevious), {}, {}, {}};
+        dispatch.outputs = {params, stage ? Texture(FrameGenTextureKind::kEngineEvidence) : FrameGenTexture{}};
+        const std::uint32_t flags = (tuning.engine_locked ? 1u << 4 : 0u) | (tuning.engine.jitter ? 1u << 5 : 0u) |
+                                    (measured ? 0u : 1u << 6) | (request.engine_previous ? 1u << 7 : 0u) |
+                                    (request.engine_lag ? 1u << 8 : 0u) |
+                                    (static_cast<std::uint32_t>(tuning.engine.camera) << 12);
+        dispatch.constants.options = {stage | flags, base.options[1],
+                                      (request.engine_images[0] & 0xffu) | ((request.engine_images[1] & 0xffu) << 8), 0};
+        dispatch.constants.tuning = {tuning.engine.gain[0], tuning.engine.gain[1], 0.0f, 0.0f};
+        plan.dispatches.push_back(dispatch);
+    };
+    reduce(kFrameGenEngineKindCockpit, base, {raw, luma, before, depth, flow, {}}, decoded);
+    solve(0);
+    reduce(kFrameGenEngineKindPhotometric, base, {raw, luma, before, depth, flow, params}, converted);
+    if (request.engine_previous) {
+        // The field before against this frame pair, this frame's beside it (t4).
+        reduce(kFrameGenEngineKindLag, base,
+               {Texture(FrameGenTextureKind::kEngineRawPrevious), luma, before, depth, raw, params}, converted);
+    }
+    if (request.engine_lag) {
+        // The cockpit fit against the pair before, by the game's poses (the
+        // same relative pose as the declared ones while Pivot's change holds).
+        FrameGenViewRequest pair = request;
+        pair.newest = request.game_previous;
+        pair.previous = request.game_before;
+        reduce(kFrameGenEngineKindCockpitLag, BaseConstants(pair, tuning, tuning.mode), {raw, luma, before, depth, {}, {}},
+               decoded);
+    }
+    solve(1);
+}
+
 // The quad views compositor's clamp (NaN clamps to `high`, unlike std::clamp).
 double ComposeClamp(double value, double low, double high) {
     return std::max(low, std::min(high, value));
@@ -222,7 +297,8 @@ std::uint8_t FrameGenFinalFlowLevel(FrameGenFlowQuality quality) {
 }
 
 std::uint8_t FrameGenFinalFlowLevel(const FrameGenTuning& tuning) {
-    return tuning.hardware_flow ? kFrameGenHardwareFlowLevel : FrameGenFinalFlowLevel(tuning.quality);
+    return tuning.hardware_flow || tuning.hardware_level ? kFrameGenHardwareFlowLevel
+                                                         : FrameGenFinalFlowLevel(tuning.quality);
 }
 
 std::uint8_t FrameGenMatchLevel(std::uint8_t flow_level) {
@@ -490,6 +566,12 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
         filter.constants.options[1] |= kFrameGenFlagWorld;
     }
     plan.dispatches.push_back(filter);
+    // The game's motion vectors judged against what the frame shows (its
+    // luma and measured flow exist by now); nothing generated reads it.
+    if (request.engine_motion && (tuning.engine_mode == FrameGenEngineMode::kObserve ||
+                                  tuning.engine_mode == FrameGenEngineMode::kAssist)) {
+        AppendEngineEvidence(plan, base, request, tuning);
+    }
     if (tuning.analyze_only) {
         if (tuning.cover && tuning.mode == FrameGenSynthesisMode::kInterpolate) {
             // The same flow filtered as extrapolation filters it, for cover
@@ -1034,7 +1116,62 @@ FrameGenEngineMode ParseFrameGenEngineMode(const char* value) {
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return text == "census"    ? FrameGenEngineMode::kCensus
            : text == "capture" ? FrameGenEngineMode::kCapture
+           : text == "observe" ? FrameGenEngineMode::kObserve
                                : FrameGenEngineMode::kOff;
+}
+
+bool SameFrameGenEngineConvention(const FrameGenEngineConvention& a, const FrameGenEngineConvention& b) {
+    auto same = [](float x, float y) { return std::abs(x - y) <= 1e-3f * std::max(std::abs(x), std::abs(y)); };
+    return same(a.gain[0], b.gain[0]) && same(a.gain[1], b.gain[1]) && a.camera == b.camera;
+}
+
+std::optional<FrameGenEngineConvention> ParseFrameGenEngineConvention(const std::string& text) {
+    std::vector<std::string> parts;
+    std::size_t start = 0;
+    for (std::size_t comma = text.find(','); ; comma = text.find(',', start)) {
+        std::string part = text.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+        part.erase(0, part.find_first_not_of(" \t"));
+        part.erase(part.find_last_not_of(" \t") + 1);
+        parts.push_back(part);
+        if (comma == std::string::npos) break;
+        start = comma + 1;
+    }
+    if (parts.size() < 3 || parts.size() > 4) return std::nullopt;
+    FrameGenEngineConvention convention;
+    for (int axis = 0; axis < 2; ++axis) {
+        char* end = nullptr;
+        const float gain = std::strtof(parts[axis].c_str(), &end);
+        if (end == parts[axis].c_str() || *end != '\0' || !std::isfinite(gain) || gain == 0.0f) return std::nullopt;
+        convention.gain[axis] = gain;
+    }
+    if (parts[2] == "included") {
+        convention.camera = FrameGenEngineCamera::kIncluded;
+    } else if (parts[2] == "rotation") {
+        convention.camera = FrameGenEngineCamera::kRotationOnly;
+    } else if (parts[2] == "excluded") {
+        convention.camera = FrameGenEngineCamera::kExcluded;
+    } else if (parts[2] == "objects") {
+        convention.camera = FrameGenEngineCamera::kObjectOnly;
+    } else {
+        return std::nullopt;
+    }
+    if (parts.size() == 4) {
+        if (parts[3] != "jitter" && parts[3] != "1") return std::nullopt;
+        convention.jitter = true;
+    }
+    return convention;
+}
+
+std::array<float, 4> FrameGenEngineDecode(const FrameGenEngineConvention& convention,
+                                          const FrameGenMotionEncoding& encoding) {
+    // n = g * (e - the convention's offset) in NDC (y up), e = raw * scale +
+    // the extension's offset; in uv (y down) half of n, y negated.
+    const float scale_x = encoding.ext ? encoding.scale[0] : 1.0f;
+    const float scale_y = encoding.ext ? encoding.scale[1] : 1.0f;
+    const float offset_x = (encoding.ext ? encoding.offset[0] : 0.0f) - convention.offset[0];
+    const float offset_y = (encoding.ext ? encoding.offset[1] : 0.0f) - convention.offset[1];
+    return {0.5f * convention.gain[0] * scale_x, -0.5f * convention.gain[1] * scale_y, 0.5f * convention.gain[0] * offset_x,
+            -0.5f * convention.gain[1] * offset_y};
 }
 
 FrameGenDispatch BuildFrameGenMotionCaptureDispatch(FrameGenExtent l1, const std::array<std::int32_t, 4>& rect0,
@@ -1520,6 +1657,53 @@ FrameGenEngineAxisFit::Solution FrameGenEngineAxisFit::SolveLine() const {
     return solution;
 }
 
+FrameGenEngineAxisFit FrameGenEngineAxisFit::FromSums(const float* sums) {
+    FrameGenEngineAxisFit fit;
+    fit.n_ = sums[0];
+    fit.r_ = sums[1];
+    fit.t_ = sums[2];
+    fit.e_ = sums[3];
+    fit.rr_ = sums[4];
+    fit.tt_ = sums[5];
+    fit.rt_ = sums[6];
+    fit.er_ = sums[7];
+    fit.et_ = sums[8];
+    fit.ee_ = sums[9];
+    return fit;
+}
+
+FrameGenEngineAxisFit::Solution FrameGenEngineAxisFit::SolveRotation() const {
+    Solution solution;
+    solution.samples = n_;
+    const double srr = RotationSpread();
+    const double ser = er_ - (n_ > 0.0 ? e_ * r_ / n_ : 0.0);
+    const double see = Spread();
+    if (n_ < 3.0 || !(srr > 1e-12 * n_)) {
+        return solution;
+    }
+    solution.a = ser / srr;
+    solution.c = (e_ - solution.a * r_) / n_;
+    solution.corr2 = see > 0.0 ? std::clamp(ser * ser / (srr * see), 0.0, 1.0) : 0.0;
+    solution.valid = true;
+    return solution;
+}
+
+FrameGenEngineAxisFit::Solution FrameGenEngineAxisFit::SolveTranslation() const {
+    Solution solution;
+    solution.samples = n_;
+    const double stt = TranslationSpread();
+    const double set = et_ - (n_ > 0.0 ? e_ * t_ / n_ : 0.0);
+    const double see = Spread();
+    if (n_ < 3.0 || !(stt > 1e-12 * n_)) {
+        return solution;
+    }
+    solution.b = set / stt;
+    solution.c = (e_ - solution.b * t_) / n_;
+    solution.corr2 = see > 0.0 ? std::clamp(set * set / (stt * see), 0.0, 1.0) : 0.0;
+    solution.valid = true;
+    return solution;
+}
+
 std::vector<FrameGenEngineGain> FrameGenEngineCanonicalGains(FrameGenExtent vectors, FrameGenExtent color) {
     const double vw = std::max<std::uint32_t>(vectors.width, 1);
     const double vh = std::max<std::uint32_t>(vectors.height, 1);
@@ -1754,6 +1938,571 @@ FrameGenEngineCalibration CalibrateFrameGenEngine(const std::vector<FrameGenEngi
     return calibration;
 }
 
+// --- Engine motion vectors: evidence and validation ------------------------
+
+namespace {
+
+// A batch: each axis's head rotation spread by this many samples of three
+// half-resolution texels (in NDC), over this many frames or more. One that
+// has not in kBatchMaxFrames starts over: the head held still, or nothing
+// was still to fit, and minutes-old sums would decide it.
+constexpr double kBatchSpreadSamples = 300.0;
+constexpr std::size_t kBatchFrames = 3;
+constexpr std::size_t kBatchMaxFrames = 300;
+// Classification: a gain within this share of a canonical one, the fit
+// explaining this share of the vectors, b / a with the head included or
+// rotation only, and still content's vectors this small against the
+// head's movement (head excluded).
+constexpr double kSnapError = 0.10;
+constexpr double kFitCorr2 = 0.7;
+constexpr double kIncludedLow = 0.75;
+constexpr double kIncludedHigh = 1.35;
+constexpr double kRotationOnly = 0.25;
+constexpr double kExcludedShare = 0.04;
+// A photometric batch's textured samples, and the margins it needs.
+constexpr double kPhotometricSamples = 2000.0;
+constexpr double kVariantMargin = 1.15;
+constexpr double kMovingShare = 0.85;
+constexpr double kLagMargin = 1.1;
+constexpr double kMeasuredMargin = 1.1;
+constexpr double kMeasuredSlack = 0.005;
+constexpr double kWinShare = 0.7;
+constexpr double kWorseThanMeasured = 1.3;
+constexpr double kPhotometricMinimum = 200.0; // samples a term needs to count
+// Adoption and its checks.
+constexpr std::uint32_t kAdoptBatches = 3;
+constexpr std::uint32_t kAdoptPhotometric = 2;
+constexpr std::uint32_t kLagBatches = 3;
+constexpr double kJitterPx = 0.15;
+constexpr double kJitterMeanPx = 1.0;
+constexpr std::size_t kJitterFrames = 30;
+constexpr std::size_t kJitterMinimumFrames = 6;
+constexpr double kOffsetPx = 0.1;
+constexpr std::size_t kVerdictWindow = 90;
+constexpr double kInvalidShare = 0.2;
+constexpr double kSuspendSeconds = 10.0;
+constexpr double kSuspensionWindow = 300.0;
+constexpr std::size_t kSuspensionsToDisable = 3;
+// Unlocked this long over batches disables, each gap between two batches
+// counting up to kBatchGapSeconds.
+constexpr double kUnknownSeconds = 300.0;
+constexpr double kBatchGapSeconds = 2.0;
+
+void AddPhotometric(FrameGenEngineEvidence& sums, const FrameGenEngineEvidence& view) {
+    for (std::size_t c = 0; c < sums.variants.size(); ++c) sums.variants[c] += view.variants[c];
+    sums.zero += view.zero;
+    sums.measured_cost += view.measured_cost;
+    sums.textured += view.textured;
+    sums.with_measured += view.with_measured;
+    sums.moving += view.moving;
+    sums.variant_moving += view.variant_moving;
+    sums.zero_moving += view.zero_moving;
+    sums.wins += view.wins;
+    sums.lag_cost += view.lag_cost;
+    sums.lag_variant += view.lag_variant;
+    sums.lag_samples += view.lag_samples;
+}
+
+std::string Fixed(double value, int decimals) {
+    char text[32];
+    std::snprintf(text, sizeof(text), "%.*f", decimals, value);
+    return text;
+}
+
+} // namespace
+
+const char* FrameGenEngineVerdictName(std::size_t index) {
+    static constexpr std::array<const char*, kFrameGenEngineVerdictReasons> kNames{
+        "unlocked", "stale", "cockpit", "photometric", "lag", "jitter"};
+    return index < kNames.size() ? kNames[index] : "";
+}
+
+FrameGenEngineEvidence ReadFrameGenEngineEvidence(const float* evidence, const float* params) {
+    FrameGenEngineEvidence view;
+    const float* cockpit = evidence + 4 * kFrameGenEngineCockpitTexel;
+    view.cockpit = {FrameGenEngineAxisFit::FromSums(cockpit), FrameGenEngineAxisFit::FromSums(cockpit + 10)};
+    view.swapped = {cockpit[20], cockpit[21]};
+    view.measured = {FrameGenEngineAxisFit::FromSums(cockpit + 22), FrameGenEngineAxisFit::FromSums(cockpit + 32)};
+    view.head_gap = cockpit[42];
+    const float* photometric = evidence + 4 * kFrameGenEnginePhotometricTexel;
+    for (std::size_t c = 0; c < view.variants.size(); ++c) view.variants[c] = photometric[c];
+    view.zero = photometric[8];
+    view.measured_cost = photometric[9];
+    view.textured = photometric[10];
+    view.with_measured = photometric[11];
+    view.moving = photometric[12];
+    view.wins = photometric[13];
+    view.variant_moving = photometric[14];
+    view.zero_moving = photometric[15];
+    view.inliers = photometric[16];
+    view.cockpit_samples = photometric[17];
+    for (std::size_t band = 0; band < 3; ++band) {
+        view.epe[band] = photometric[18 + 2 * band];
+        view.epe_samples[band] = photometric[19 + 2 * band];
+    }
+    view.head_px = photometric[24];
+    view.vectors_px = photometric[25];
+    view.valid = photometric[26];
+    view.flow_px = photometric[27];
+    const float* lag = evidence + 4 * kFrameGenEngineLagTexel;
+    view.lag_cost = lag[0];
+    view.lag_variant = lag[1];
+    view.lag_samples = lag[2];
+    view.lag_cost_moving = lag[3];
+    view.lag_variant_moving = lag[4];
+    view.lag_moving = lag[5];
+    // The solve leaves the sums of kinds that did not run at zero.
+    view.lag_photometric = view.lag_samples > 0.0;
+    const float* cockpit_lag = evidence + 4 * kFrameGenEngineCockpitLagTexel;
+    view.cockpit_lag = {FrameGenEngineAxisFit::FromSums(cockpit_lag), FrameGenEngineAxisFit::FromSums(cockpit_lag + 10)};
+    view.lag = view.cockpit_lag[0].Samples() > 0.0;
+    view.bias = {params[0], params[1]};
+    view.verdict = static_cast<std::uint32_t>(std::max(params[2], 0.0f) + 0.5f);
+    view.stale = params[4 * 2 + 3] > 0.5f;
+    return view;
+}
+
+const char* ToString(FrameGenEngineValidation::State state) {
+    switch (state) {
+    case FrameGenEngineValidation::State::kCalibrating:
+        return "calibrating";
+    case FrameGenEngineValidation::State::kLocked:
+        return "locked";
+    case FrameGenEngineValidation::State::kSuspended:
+        return "suspended";
+    case FrameGenEngineValidation::State::kDisabled:
+        return "disabled";
+    default:
+        return "probing";
+    }
+}
+
+void FrameGenEngineValidator::SetPrior(const FrameGenEngineConvention& convention) {
+    prior_ = convention;
+    if (state_ == State::kProbing && !fixed_) {
+        StartCandidate(convention, "", true);
+        state_ = State::kCalibrating;
+    }
+}
+
+void FrameGenEngineValidator::Fix(const FrameGenEngineConvention& convention) {
+    fixed_ = convention;
+    StartCandidate(convention, "", true);
+    state_ = State::kCalibrating;
+}
+
+void FrameGenEngineValidator::StartCandidate(const FrameGenEngineConvention& convention, const std::string& name,
+                                             bool prior) {
+    // Photometric batches are of the convention the GPU took them with:
+    // another one starts them over.
+    if (!SameFrameGenEngineConvention(convention, candidate_)) {
+        photometric_ = {};
+        passed_ = 0;
+        jitter_ = false;
+    }
+    candidate_ = convention;
+    candidate_.jitter = jitter_ || convention.jitter;
+    if (candidate_.jitter) candidate_.offset = {0.0f, 0.0f}; // the frame's bias holds it
+    candidate_prior_ = prior;
+    agreeing_ = 0;
+    if (!name.empty()) report_.name = name;
+}
+
+void FrameGenEngineValidator::Decide(State state, const std::string& reason) {
+    state_ = state;
+    ++report_.decisions;
+    report_.reason = reason;
+}
+
+void FrameGenEngineValidator::Suspend(const std::string& reason, double seconds) {
+    suspended_at_ = seconds;
+    suspensions_.push_back(seconds);
+    while (!suspensions_.empty() && seconds - suspensions_.front() > kSuspensionWindow) suspensions_.pop_front();
+    batch_ = {};
+    photometric_ = {};
+    agreeing_ = passed_ = worse_ = 0;
+    verdicts_.clear();
+    if (suspensions_.size() >= kSuspensionsToDisable) {
+        Decide(State::kDisabled, std::to_string(suspensions_.size()) + " suspensions within 5 minutes, the last: " + reason);
+        return;
+    }
+    Decide(State::kSuspended, reason);
+}
+
+FrameGenEngineValidator::Classified FrameGenEngineValidator::Classify(const Batch& batch) {
+    Classified result;
+    auto snap = [&](const std::array<double, 2>& gain, FrameGenEngineCamera camera) {
+        double error = 0.0;
+        const FrameGenEngineGain nearest = NearestFrameGenEngineGain(gain, batch.vectors, batch.color, error);
+        if (!(error <= kSnapError)) {
+            result.why = "gains " + Fixed(gain[0], 4) + "/" + Fixed(gain[1], 4) + " are no canonical ones (nearest " +
+                         nearest.name + ", " + Fixed(100.0 * error, 0) + "% off)";
+            return;
+        }
+        FrameGenEngineConvention convention;
+        convention.gain = {static_cast<float>(nearest.gain[0]), static_cast<float>(nearest.gain[1])};
+        convention.camera = camera;
+        result.convention = convention;
+        result.name = nearest.name;
+    };
+    // Head excluded: the measured flow with the head taken out explains the
+    // vectors (e = b * h + c), and by the gain that gives them (1 / b) still
+    // content's vectors are near zero in NDC against the head's movement
+    // there. e is in the vectors' own units: compared unscaled, vectors in
+    // pixels would pass only when exactly zero.
+    std::array<double, 2> excluded_gain{};
+    double excluded_corr2 = 1.0;
+    bool explained = true;
+    bool unmoved = true; // still content's vectors do not change at all (no gain needed to tell)
+    for (int axis = 0; axis < 2; ++axis) {
+        const FrameGenEngineAxisFit::Solution h = batch.measured[axis].SolveTranslation();
+        explained = explained && h.valid && h.b != 0.0;
+        if (explained) {
+            excluded_gain[axis] = 1.0 / h.b;
+            excluded_corr2 = std::min(excluded_corr2, h.corr2);
+        }
+        unmoved = unmoved && batch.cockpit[axis].Spread() <= 0.0;
+    }
+    if (explained && excluded_corr2 >= kFitCorr2) {
+        bool still = true;
+        for (int axis = 0; axis < 2; ++axis) {
+            still = still && batch.cockpit[axis].Spread() * excluded_gain[axis] * excluded_gain[axis] <
+                                 kExcludedShare * batch.cockpit[axis].PredictionSpread();
+        }
+        if (still) {
+            result.corr2 = excluded_corr2;
+            report_.corr2 = {excluded_corr2, excluded_corr2};
+            snap(excluded_gain, FrameGenEngineCamera::kExcluded);
+            return result;
+        }
+    } else if (unmoved) {
+        result.corr2 = explained ? excluded_corr2 : 0.0;
+        report_.corr2 = {result.corr2, result.corr2};
+        result.why = explained ? "still content's vectors are near zero, and the measured flow explains them to corr2 " +
+                                     Fixed(excluded_corr2, 2)
+                               : "still content's vectors are near zero, and the measured flow does not explain them";
+        return result;
+    }
+    // The cockpit fit per axis; without the head's translation to tell b
+    // from a, the line through both.
+    std::array<FrameGenEngineAxisFit::Solution, 2> fit{};
+    bool translation = true;
+    for (int axis = 0; axis < 2; ++axis) {
+        fit[axis] = batch.cockpit[axis].Solve();
+        if (!fit[axis].valid) {
+            translation = false;
+            fit[axis] = batch.cockpit[axis].SolveLine();
+        }
+        if (!fit[axis].valid || fit[axis].a == 0.0) {
+            result.why = "the fit did not solve";
+            return result;
+        }
+    }
+    if (!translation) {
+        for (int axis = 0; axis < 2; ++axis) fit[axis] = batch.cockpit[axis].SolveLine();
+    }
+    result.corr2 = std::min(fit[0].corr2, fit[1].corr2);
+    report_.corr2 = {fit[0].corr2, fit[1].corr2};
+    report_.gain = {1.0 / fit[0].a, 1.0 / fit[1].a};
+    report_.ratio = translation ? std::array<double, 2>{fit[0].b / fit[0].a, fit[1].b / fit[1].a} : std::array<double, 2>{};
+    if (result.corr2 < kFitCorr2) {
+        result.why = "the fit explains the vectors to corr2 " + Fixed(fit[0].corr2, 2) + "/" + Fixed(fit[1].corr2, 2);
+        return result;
+    }
+    // An axis the other axis's rotation explains better: swapped axes.
+    for (int axis = 0; axis < 2; ++axis) {
+        const FrameGenEngineAxisFit& own = batch.cockpit[axis];
+        const FrameGenEngineAxisFit& other = batch.cockpit[1 - axis];
+        const double diagonal = std::abs(own.ErrorRotation()) / std::sqrt(std::max(own.ErrorSquares() * own.RotationSquares(), 1e-30));
+        const double crossed =
+            std::abs(batch.swapped[axis]) / std::sqrt(std::max(own.ErrorSquares() * other.RotationSquares(), 1e-30));
+        if (crossed > diagonal) {
+            result.why = std::string("the other axis's rotation explains ") + (axis ? "y" : "x") + " better (swapped axes)";
+            return result;
+        }
+    }
+    FrameGenEngineCamera camera = FrameGenEngineCamera::kIncluded;
+    if (translation) {
+        const std::array<double, 2> ratio{fit[0].b / fit[0].a, fit[1].b / fit[1].a};
+        const bool included = ratio[0] >= kIncludedLow && ratio[0] <= kIncludedHigh && ratio[1] >= kIncludedLow &&
+                              ratio[1] <= kIncludedHigh;
+        const bool rotation = std::abs(ratio[0]) < kRotationOnly && std::abs(ratio[1]) < kRotationOnly;
+        if (!included && !rotation) {
+            result.why = "b/a " + Fixed(ratio[0], 2) + "/" + Fixed(ratio[1], 2) +
+                         " is neither the head's translation (0.75-1.35) nor none of it";
+            return result;
+        }
+        camera = included ? FrameGenEngineCamera::kIncluded : FrameGenEngineCamera::kRotationOnly;
+    }
+    snap({1.0 / fit[0].a, 1.0 / fit[1].a}, camera);
+    if (!result.convention) {
+        return result;
+    }
+    // Jitter: the frames' intercepts under their batch's fit, in the vectors'
+    // pixels (e = a p + c: c / a in NDC), over the last kJitterFrames frames
+    // of the batches of this convention.
+    if (!report_.name.empty() && report_.name != result.name) intercepts_.clear();
+    for (const auto& frame : batch.frames) {
+        if (frame[0].Samples() <= 0.0 || frame[1].Samples() <= 0.0) continue;
+        std::array<double, 2> intercept{};
+        for (int axis = 0; axis < 2; ++axis) {
+            const double pixels = 0.5 * (axis == 0 ? batch.vectors.width : batch.vectors.height);
+            intercept[axis] = frame[axis].Intercept(fit[axis].a, fit[axis].b) / fit[axis].a * pixels;
+        }
+        intercepts_.push_back(intercept);
+        while (intercepts_.size() > kJitterFrames) intercepts_.pop_front();
+    }
+    std::array<double, 2> spread{}, mean{};
+    if (intercepts_.size() >= kJitterMinimumFrames) {
+        for (int axis = 0; axis < 2; ++axis) {
+            for (const auto& c : intercepts_) mean[axis] += c[axis];
+            mean[axis] /= static_cast<double>(intercepts_.size());
+            for (const auto& c : intercepts_) spread[axis] += (c[axis] - mean[axis]) * (c[axis] - mean[axis]);
+            spread[axis] = std::sqrt(spread[axis] / static_cast<double>(intercepts_.size() - 1));
+        }
+    }
+    report_.jitter_px = spread;
+    result.convention->jitter = std::max(spread[0], spread[1]) > kJitterPx &&
+                                std::max(std::abs(mean[0]), std::abs(mean[1])) <= kJitterMeanPx;
+    // An intercept every frame shares is the convention's offset (in e's
+    // units: vector pixels to NDC, over the gain); smaller is the fit's
+    // noise. Jittered, the frame's bias holds it.
+    if (!result.convention->jitter && intercepts_.size() >= kJitterMinimumFrames &&
+        std::max(std::abs(mean[0]), std::abs(mean[1])) >= kOffsetPx) {
+        for (int axis = 0; axis < 2; ++axis) {
+            const double pixels = 0.5 * std::max<std::uint32_t>(axis == 0 ? batch.vectors.width : batch.vectors.height, 1);
+            result.convention->offset[axis] = static_cast<float>(mean[axis] / pixels / result.convention->gain[axis]);
+        }
+    }
+    return result;
+}
+
+void FrameGenEngineValidator::JudgeBatch(double seconds) {
+    const Classified result = Classify(batch_);
+    ++report_.batches;
+    // The pair before against this pair on the same frames: the vectors come
+    // a frame late where it explains them better, batch after batch.
+    if (batch_.lagged[0].Samples() >= kPhotometricMinimum && batch_.lagged_now[0].Samples() >= kPhotometricMinimum) {
+        double lagged = 0.0, now = 0.0;
+        for (int axis = 0; axis < 2; ++axis) {
+            lagged += 0.5 * batch_.lagged[axis].SolveLine().corr2;
+            now += 0.5 * batch_.lagged_now[axis].SolveLine().corr2;
+        }
+        lagging_ = lagged > now ? lagging_ + 1 : 0;
+    }
+    report_.lag_batches = lagging_;
+    report_.lag = lagging_ >= kLagBatches;
+    extents_ = {batch_.vectors, batch_.color};
+    batch_ = {};
+    const double gap = last_batch_ ? std::clamp(seconds - *last_batch_, 0.0, kBatchGapSeconds) : 0.0;
+    last_batch_ = seconds;
+    if (state_ == State::kSuspended) {
+        return;
+    }
+    if (state_ == State::kLocked) {
+        if (report_.lag) {
+            Suspend("the vectors come a frame late (the head's movement a frame before fits them better)", seconds);
+        } else if (result.convention && !SameFrameGenEngineConvention(*result.convention, candidate_) &&
+                   result.corr2 >= kFitCorr2) {
+            Suspend("a batch fitted " + result.name + ", " + ToString(result.convention->camera) + " instead", seconds);
+        }
+        return;
+    }
+    // Unlocked over 5 minutes of batches (each counting the time since the
+    // one before, up to kBatchGapSeconds): disabled.
+    unknown_seconds_ += gap;
+    if (unknown_seconds_ >= kUnknownSeconds) {
+        Decide(State::kDisabled, "no convention locked over 5 minutes of head movement (the last batch: " +
+                                     (result.convention ? "fitted " + result.name : result.why) + ")");
+        return;
+    }
+    if (!result.convention || (fixed_ && !SameFrameGenEngineConvention(*result.convention, *fixed_))) {
+        agreeing_ = 0;
+        report_.reason = result.convention ? "a batch fitted " + result.name + ", not the fixed convention" : result.why;
+        return;
+    }
+    if (state_ == State::kProbing || !SameFrameGenEngineConvention(*result.convention, candidate_)) {
+        StartCandidate(*result.convention, result.name,
+                       (prior_ && SameFrameGenEngineConvention(*result.convention, *prior_)) || fixed_.has_value());
+        Decide(State::kCalibrating, std::string("calibrating ") + result.name + ", " + ToString(candidate_.camera));
+    }
+    report_.name = result.name;
+    if (result.convention->jitter && !jitter_) {
+        // The bias comes out from now on: photometric batches start over.
+        jitter_ = true;
+        candidate_.jitter = true;
+        candidate_.offset = {0.0f, 0.0f};
+        photometric_ = {};
+        passed_ = 0;
+    }
+    if (!candidate_.jitter) {
+        candidate_.offset = result.convention->offset;
+    }
+    ++agreeing_;
+    TryAdopt();
+}
+
+void FrameGenEngineValidator::JudgePhotometric(double seconds) {
+    const FrameGenEngineEvidence sums = photometric_.sums;
+    photometric_ = {};
+    const double variant = sums.variants[0];
+    std::string failed;
+    for (std::size_t c = 1; c < sums.variants.size() && failed.empty(); ++c) {
+        if (variant * kVariantMargin > sums.variants[c]) {
+            failed = "variant " + std::to_string(c) + " explains the image within 15% (" +
+                     Fixed(sums.variants[c] / std::max(variant, 1e-12), 3) + ")";
+        }
+    }
+    if (failed.empty() && sums.moving >= kPhotometricMinimum / 2.0 && sums.variant_moving > kMovingShare * sums.zero_moving) {
+        failed = "where the vectors move content, no motion explains it as well (" +
+                 Fixed(sums.variant_moving / std::max(sums.zero_moving, 1e-12), 3) + " of " + Fixed(sums.moving, 0) + ")";
+    }
+    if (failed.empty() && sums.lag_samples >= kPhotometricMinimum && sums.lag_cost < kLagMargin * sums.lag_variant) {
+        failed = "the field before explains the image as well (" + Fixed(sums.lag_cost / std::max(sums.lag_variant, 1e-12), 3) + ")";
+    }
+    bool worse = false;
+    if (sums.with_measured >= kPhotometricMinimum && sums.textured > 0.0) {
+        const double mean = variant / sums.textured;
+        const double measured = sums.measured_cost / sums.with_measured;
+        if (failed.empty() && mean > kMeasuredMargin * measured + kMeasuredSlack) {
+            failed = "the measured flow explains the image better (" + Fixed(mean / std::max(measured, 1e-12), 3) + ")";
+        }
+        if (failed.empty() && sums.wins < kWinShare * sums.textured) {
+            failed = "the vectors win on " + Fixed(100.0 * sums.wins / sums.textured, 0) + "% of the samples only";
+        }
+        worse = mean > kWorseThanMeasured * measured;
+    }
+    const bool pass = failed.empty();
+    passed_ = pass ? passed_ + 1 : 0;
+    report_.photometric = pass ? "passed" : failed;
+    report_.photometric_passed = passed_;
+    if (state_ == State::kLocked) {
+        worse_ = worse ? worse_ + 1 : 0;
+        if (worse_ >= 2) {
+            Suspend("the vectors follow the image 30% worse than the measured flow", seconds);
+        }
+        return;
+    }
+    TryAdopt();
+}
+
+void FrameGenEngineValidator::TryAdopt() {
+    if (state_ != State::kCalibrating) return;
+    const std::uint32_t needed = candidate_prior_ ? 1u : kAdoptBatches;
+    if (agreeing_ >= needed && passed_ >= kAdoptPhotometric && !report_.lag) {
+        unknown_seconds_ = 0.0;
+        verdicts_.clear();
+        worse_ = 0;
+        Decide(State::kLocked,
+               "locked " + report_.name + ", " + ToString(candidate_.camera) + (candidate_.jitter ? ", jittered" : "") +
+                   " after " + std::to_string(agreeing_) + " batch(es)");
+    }
+}
+
+void FrameGenEngineValidator::Add(const FrameGenEngineFrameEvidence& frame, double seconds) {
+    if (state_ == State::kDisabled || frame.views.empty()) {
+        return;
+    }
+    ++report_.frames;
+    bool held = false;
+    bool calibrate = true;
+    for (const FrameGenEngineEvidence& view : frame.views) {
+        ++report_.verdicts;
+        if (view.verdict) {
+            held = true;
+            ++report_.invalid;
+            for (std::size_t i = 0; i < kFrameGenEngineVerdictReasons; ++i) {
+                report_.reasons[i] += (view.verdict >> i) & 1u;
+            }
+        }
+        for (std::size_t band = 0; band < 3; ++band) {
+            report_.epe[band] += view.epe[band];
+            report_.epe_samples[band] += view.epe_samples[band];
+        }
+        report_.variant += view.variants[0];
+        report_.zero += view.zero;
+        report_.measured_cost += view.measured_cost;
+        report_.textured += view.textured;
+        report_.with_measured += view.with_measured;
+        report_.lag_cost += view.lag_cost;
+        report_.lag_variant += view.lag_variant;
+        calibrate = calibrate && view.calibrate;
+        extents_ = {view.vectors, view.color};
+    }
+    if (state_ == State::kSuspended) {
+        if (seconds - suspended_at_ < kSuspendSeconds) {
+            return;
+        }
+        // Calibrating again, with the convention suspended as the prior.
+        StartCandidate(candidate_, report_.name, true);
+        Decide(State::kCalibrating, "calibrating " + report_.name + " again after 10 s suspended");
+    }
+    if (state_ == State::kLocked) {
+        verdicts_.push_back(held ? 1 : 0);
+        while (verdicts_.size() > kVerdictWindow) verdicts_.pop_front();
+        const auto invalid = std::count(verdicts_.begin(), verdicts_.end(), std::uint8_t{1});
+        if (verdicts_.size() >= kVerdictWindow && static_cast<double>(invalid) > kInvalidShare * kVerdictWindow) {
+            Suspend(std::to_string(invalid) + " of the last " + std::to_string(kVerdictWindow) +
+                        " frames' verdicts held the vectors back",
+                    seconds);
+            return;
+        }
+    }
+    // A photometric batch: frames taken with the convention under test.
+    if (SameFrameGenEngineConvention(frame.convention, candidate_) && frame.convention.jitter == candidate_.jitter) {
+        for (const FrameGenEngineEvidence& view : frame.views) AddPhotometric(photometric_.sums, view);
+        ++photometric_.frames;
+        if (photometric_.sums.textured >= kPhotometricSamples && photometric_.frames >= kBatchFrames) {
+            JudgePhotometric(seconds);
+            if (state_ == State::kSuspended || state_ == State::kDisabled) return;
+        }
+    }
+    // A batch: frames that may calibrate (every view).
+    if (calibrate) {
+        std::array<FrameGenEngineAxisFit, 2> own{};
+        for (const FrameGenEngineEvidence& view : frame.views) {
+            for (int axis = 0; axis < 2; ++axis) {
+                batch_.cockpit[axis] += view.cockpit[axis];
+                batch_.measured[axis] += view.measured[axis];
+                batch_.swapped[axis] += view.swapped[axis];
+                own[axis] += view.cockpit[axis];
+                if (view.lag) {
+                    batch_.lagged_now[axis] += view.cockpit[axis];
+                    batch_.lagged[axis] += view.cockpit_lag[axis];
+                }
+            }
+            batch_.l1 = view.l1;
+            batch_.vectors = view.vectors;
+            batch_.color = view.color;
+        }
+        batch_.frames.push_back(own);
+        const double width = std::max<std::uint32_t>(batch_.l1.width, 1);
+        const double height = std::max<std::uint32_t>(batch_.l1.height, 1);
+        if (batch_.frames.size() >= kBatchFrames &&
+            batch_.cockpit[0].RotationSpread() >= kBatchSpreadSamples * (3.0 / width) * (3.0 / width) &&
+            batch_.cockpit[1].RotationSpread() >= kBatchSpreadSamples * (3.0 / height) * (3.0 / height)) {
+            JudgeBatch(seconds);
+        } else if (batch_.frames.size() >= kBatchMaxFrames) {
+            batch_ = {};
+        }
+    }
+}
+
+FrameGenEngineValidation FrameGenEngineValidator::Report() const {
+    FrameGenEngineValidation report = report_;
+    report.state = state_;
+    report.convention = candidate_;
+    report.fixed = fixed_.has_value();
+    report.prior = prior_.has_value();
+    if (report.name.empty() && extents_.second.width) {
+        double error = 0.0;
+        const FrameGenEngineGain nearest = NearestFrameGenEngineGain({candidate_.gain[0], candidate_.gain[1]},
+                                                                     extents_.first, extents_.second, error);
+        if (error <= kSnapError) report.name = nearest.name;
+    }
+    return report;
+}
+
 // --- Engine motion vectors: the frame gates --------------------------------
 
 namespace {
@@ -1890,6 +2639,50 @@ bool FrameGenDeclaredChangeMoved(const FrameGenPoseChange& before, const FrameGe
                         static_cast<double>(now.position[2]) - before.position[2]};
     return Degrees(Multiply(inverse, Unit(now.orientation))) > 0.05 ||
            std::sqrt(moved[0] * moved[0] + moved[1] * moved[1] + moved[2] * moved[2]) > 0.0005;
+}
+
+std::optional<FrameGenEngineConvention> FrameGenEnginePriorFor(const std::string& executable, bool ext,
+                                                               const std::string& api) {
+    // MSFS 2024 writes XR_FB_space_warp's vectors on Direct3D 12. The entry is
+    // the specification's convention (D3D NDC, y up, current minus previous,
+    // the head's movement included) until a flight's census confirms it: a
+    // prior only lets one batch adopt it, the evidence decides all the same.
+    struct Entry {
+        const char* executable;
+        bool ext;
+        const char* api;
+        FrameGenEngineConvention convention;
+    };
+    static const Entry kPriors[] = {
+        {"flightsimulator2024.exe", false, "D3D12", FrameGenEngineConvention{}},
+    };
+    std::string name = executable;
+    std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    for (const Entry& entry : kPriors) {
+        if (name == entry.executable && ext == entry.ext && api == entry.api) {
+            return entry.convention;
+        }
+    }
+    return std::nullopt;
+}
+
+double FrameGenAngularAcceleration(const FrameGenViewGeometry& newest, const FrameGenViewGeometry& previous,
+                                   const FrameGenViewGeometry& before) {
+    // Each frame's turn as a rotation vector in the world (q_n q_p^-1).
+    auto turn = [](const FrameGenViewGeometry& to, const FrameGenViewGeometry& from) {
+        std::array<double, 4> inverse = Unit(from.orientation);
+        inverse = {-inverse[0], -inverse[1], -inverse[2], inverse[3]};
+        std::array<double, 4> q = Multiply(Unit(to.orientation), inverse);
+        if (q[3] < 0.0) q = {-q[0], -q[1], -q[2], -q[3]};
+        const double sine = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2]);
+        const double angle = 2.0 * std::atan2(sine, q[3]) * kDegreesPerRadian;
+        const double scale = sine > 1e-12 ? angle / sine : 2.0 * kDegreesPerRadian;
+        return std::array<double, 3>{q[0] * scale, q[1] * scale, q[2] * scale};
+    };
+    const std::array<double, 3> now = turn(newest, previous);
+    const std::array<double, 3> then = turn(previous, before);
+    return std::sqrt((now[0] - then[0]) * (now[0] - then[0]) + (now[1] - then[1]) * (now[1] - then[1]) +
+                     (now[2] - then[2]) * (now[2] - then[2]));
 }
 
 // --- Research switches ------------------------------------------------------

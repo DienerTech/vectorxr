@@ -4,6 +4,7 @@
 
 #include "depthxr/config_path.h"
 #include "depthxr/logger.h"
+#include "depthxr/process_info.h"
 
 #include <algorithm>
 #include <cmath>
@@ -516,6 +517,9 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
     engine_census_after_ = 0;
     engine_notes_logged_ = 0;
     logged_engine_failure_ = logged_engine_bridged_ = false;
+    engine_validation_ = engine_validation_logged_ = {};
+    engine_decisions_logged_ = 0;
+    engine_prior_checked_ = false;
     // Stage 1: the frame gates are counted for every session; these two act
     // on what they find.
     depth_encoding_check_ = ReadResearchSwitch("VECTORXR_FRAMEGEN_DEPTH_ENCODING_CHECK") == "1";
@@ -600,16 +604,21 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
                 (engine_requested_ == FrameGenEngineMode::kCensus
                      ? " (research, stage 0): the game's motion vector images are fingerprinted and sampled while "
                        "frames are generated"
-                     : std::string(" (research, stage 2): while frames are generated, the image each frame's vectors "
-                                   "are in is resampled to each eye's half-resolution grid, at the game's release of "
-                                   "it or at its xrEndFrame (image: ") +
+                     : std::string(engine_requested_ == FrameGenEngineMode::kObserve ? " (research, stage 3)"
+                                                                                     : " (research, stage 2)") +
+                           ": while frames are generated, the image each frame's vectors are in is resampled to each "
+                           "eye's half-resolution grid, at the game's release of it or at its xrEndFrame (image: " +
                            (engine_image_ ? ToString(engine_image_->policy) +
                                                 (engine_image_->policy == FrameGenEngineImageTracker::Policy::kConstant
                                                      ? " " + std::to_string(engine_image_->parameter)
                                                      : std::string()) +
                                                 ", VECTORXR_FRAMEGEN_ENGINE_MV_IMAGE"
                                           : std::string("tracked")) +
-                           "), with a census of it") +
+                           "), with a census of it" +
+                           (engine_requested_ == FrameGenEngineMode::kObserve
+                                ? ", and each frame's vectors are judged against what the frame shows to work out "
+                                  "their convention"
+                                : "")) +
                 ", generated frames are made as without them" +
                 (csv.empty() ? std::string(".") : ", rows in " + csv + ".");
         }
@@ -1814,6 +1823,9 @@ void FrameGenPresenter::CaptureEngineMotion() {
     std::optional<FrameGenEngineImageTracker::Hypothesis> image;
     bool capture = false;
     std::uint64_t frame = 0;
+    // Stage 3: the game's expected convention is looked for with its first
+    // vectors (by the extension it sends them with).
+    std::optional<bool> prior_ext;
     {
         std::scoped_lock lock(mutex_);
         // The views captured at their release since the last frame's end
@@ -1827,6 +1839,10 @@ void FrameGenPresenter::CaptureEngineMotion() {
         capture = engine_requested_ >= FrameGenEngineMode::kCapture;
         image = engine_image_;
         frame = engine_frame_.frame.projection_frame;
+        if (engine_requested_ >= FrameGenEngineMode::kObserve && !engine_prior_checked_) {
+            engine_prior_checked_ = true;
+            prior_ext = engine_frame_.frame.views.front().source == FrameGenMotionSource::kFrameSynthesisExt;
+        }
         std::vector<FrameGenMotionJob> all;
         EngineJobsLocked(engine_frame_, all, color);
         for (std::size_t i = 0; i < all.size(); ++i) {
@@ -1877,6 +1893,12 @@ void FrameGenPresenter::CaptureEngineMotion() {
         if (!gpu_) {
             return;
         }
+        if (prior_ext) {
+            if (const std::optional<FrameGenEngineConvention> prior =
+                    FrameGenEnginePriorFor(PathToUtf8(GetCurrentExecutablePath().filename()), *prior_ext, gpu_->Name())) {
+                gpu_->SetEnginePrior(*prior);
+            }
+        }
         for (const FrameGenMotionJob& job : jobs) {
             ok = ok && gpu_->Track(job.vectors.swapchain, xr_.images, error);
         }
@@ -1920,6 +1942,9 @@ void FrameGenPresenter::CaptureEngineMotion() {
                 if (read && places[k] < engine_frame_.captured.size()) engine_frame_.captured[places[k]] = 1;
             }
         }
+        // Stage 3: the validator's state for the summary, and each of its
+        // decisions logged once.
+        engine_validation_ = status.validation;
         if (logger_) {
             for (; engine_notes_logged_ < status.notes.size(); ++engine_notes_logged_) {
                 logger_->Info("Frame Generation engine motion: " + status.notes[engine_notes_logged_]);
@@ -1927,6 +1952,12 @@ void FrameGenPresenter::CaptureEngineMotion() {
             if (!ok && !error.empty() && !logged_engine_failure_) {
                 logged_engine_failure_ = true;
                 logger_->Error("Frame Generation could not read the game's motion vectors: " + error);
+            }
+            if (status.validation.decisions > engine_decisions_logged_) {
+                engine_decisions_logged_ = status.validation.decisions;
+                logger_->Info(std::string("Frame Generation engine convention: ") + ToString(status.validation.state) +
+                              " (" + status.validation.reason + "), after " + std::to_string(status.validation.frames) +
+                              " frames and " + std::to_string(status.validation.batches) + " batches.");
             }
         }
     }
@@ -3160,8 +3191,10 @@ bool FrameGenPresenter::EngineGatesLocked(const XrCompositionLayerProjection& pr
     const bool paired = (gates & (kFrameGenEngineNoStruct | kFrameGenEnginePairing)) == 0 && before.valid &&
                         !kept.pivot.empty() && before.pivot.size() == kept.pivot.size();
     kept.pivot_moved = false;
+    kept.paired_game.clear();
     for (std::size_t i = 0; paired && i < kept.pivot.size(); ++i) {
         kept.pivot_moved = kept.pivot_moved || FrameGenDeclaredChangeMoved(before.pivot[i], kept.pivot[i]);
+        kept.paired_game.push_back(before.frame.views[i].game);
     }
     engine_window_.pivot_moving += kept.pivot_moved ? 1 : 0;
     // No cut, depth encoding change, pause or new swapchain in this frame or
@@ -3171,6 +3204,34 @@ bool FrameGenPresenter::EngineGatesLocked(const XrCompositionLayerProjection& pr
                      (gates & ~(kFrameGenEngineSettle | kFrameGenEngineUncaptured)) == 0;
     engine_window_.calibrate += kept.calibrate ? 1 : 0;
     return kept.calibrate;
+}
+
+void FrameGenPresenter::EngineRequestsLocked(const PendingFrame& frame, bool calibrate,
+                                             std::vector<FrameGenViewSubmission>& submissions) {
+    const EngineFrame& now = engine_frame_;
+    const EngineFrame& before = engine_previous_;
+    // The frame's own record, no gate holding it back (its pair, the record
+    // before, among them).
+    if (!now.valid || now.frame.display_time != frame.end_time || now.gates != 0 || !before.valid ||
+        now.paired_game.size() != now.frame.views.size()) {
+        return;
+    }
+    // The lag test: both frames may calibrate (Pivot's change held still
+    // over the three), and the head's turn changed by 2 degrees a frame.
+    const bool lag = calibrate && before.calibrate && before.paired_game.size() == now.frame.views.size() &&
+                     !now.frame.views.empty() &&
+                     FrameGenAngularAcceleration(now.frame.views.front().game, now.paired_game.front(),
+                                                 before.paired_game.front()) > 2.0;
+    for (std::size_t i = 0; i < now.frame.views.size(); ++i) {
+        const FrameGenEngineMotionView& view = now.frame.views[i];
+        if (view.view >= submissions.size()) continue;
+        FrameGenViewRequest& request = submissions[view.view].request;
+        request.engine_motion = true;
+        request.game_newest = view.game;
+        request.game_previous = now.paired_game[i];
+        request.engine_lag = lag;
+        if (lag) request.game_before = before.paired_game[i];
+    }
 }
 
 void FrameGenPresenter::LogEngineSummaryLocked(double seconds) {
@@ -3198,6 +3259,58 @@ void FrameGenPresenter::LogEngineSummaryLocked(double seconds) {
                   ", pivotMoving=" + std::to_string(window.pivot_moving) +
                   ", calibrate=" + std::to_string(window.calibrate) + ", captured=" + std::to_string(window.captured) +
                   "/" + std::to_string(window.open) + ".");
+    // Stage 3: the validator now (its state, the convention under test or
+    // locked, the last batch's fit), and since the last summary: its frames
+    // and batches, the views judged and those their verdict held back by
+    // reason, the vectors' distance from the measured flow by band (pixels),
+    // and the luma error of the vectors against the measured flow's, no
+    // motion's, and of the field before against this frame's.
+    const FrameGenEngineValidation& now = engine_validation_;
+    const FrameGenEngineValidation& last = engine_validation_logged_;
+    if (engine_requested_ < FrameGenEngineMode::kObserve || now.frames == 0) {
+        return;
+    }
+    auto ratio = [](double numerator, double numerator_samples, double denominator, double denominator_samples) {
+        return numerator_samples > 0.0 && denominator_samples > 0.0 && denominator > 0.0
+                   ? Number((numerator / numerator_samples) / (denominator / denominator_samples), 3)
+                   : std::string("-");
+    };
+    std::string reasons;
+    for (std::size_t i = 0; i < kFrameGenEngineVerdictReasons; ++i) {
+        reasons += (i ? ", " : "") + std::string(FrameGenEngineVerdictName(i)) + " " +
+                   std::to_string(now.reasons[i] - last.reasons[i]);
+    }
+    std::string bands;
+    static constexpr const char* kBands[] = {"<4 m", ">=30 m", "sky"};
+    for (std::size_t band = 0; band < 3; ++band) {
+        const double samples = now.epe_samples[band] - last.epe_samples[band];
+        bands += (band ? ", " : "") + std::string(kBands[band]) + " " +
+                 (samples > 0.0 ? Number((now.epe[band] - last.epe[band]) / samples, 2) + " px" : std::string("-")) +
+                 " (" + Number(samples, 0) + ")";
+    }
+    const double textured = now.textured - last.textured;
+    logger_->Info(
+        "Frame Generation engine convention (" + Number(seconds, 0) + " s): " + ToString(now.state) + ", " +
+        (now.name.empty() ? std::string("gains ") + Number(now.convention.gain[0], 4) + "/" +
+                                Number(now.convention.gain[1], 4)
+                          : now.name) +
+        ", " + ToString(now.convention.camera) + (now.convention.jitter ? ", jittered" : "") +
+        (now.convention.offset[0] != 0.0f || now.convention.offset[1] != 0.0f
+             ? ", offset " + Number(now.convention.offset[0], 5) + "/" + Number(now.convention.offset[1], 5)
+             : std::string()) +
+        (now.fixed ? " (fixed)" : now.prior ? " (prior)" : "") + "; frames=" + std::to_string(now.frames - last.frames) +
+        ", batches=" + std::to_string(now.batches - last.batches) + " (last: gain " + Number(now.gain[0], 4) + "/" +
+        Number(now.gain[1], 4) + ", b/a " + Number(now.ratio[0], 2) + "/" + Number(now.ratio[1], 2) + ", corr2 " +
+        Number(now.corr2[0], 3) + "/" + Number(now.corr2[1], 3) + ", jitter " + Number(now.jitter_px[0], 2) + "/" +
+        Number(now.jitter_px[1], 2) + " px, lag " + std::to_string(now.lag_batches) + (now.lag ? " (late)" : "") +
+        "); verdicts=" + std::to_string(now.verdicts - last.verdicts) + ", heldBack=" +
+        std::to_string(now.invalid - last.invalid) + " (" + reasons + "); EPE vs measured " + bands +
+        "; luma error engine/measured " +
+        ratio(now.variant - last.variant, textured, now.measured_cost - last.measured_cost,
+              now.with_measured - last.with_measured) +
+        ", engine/head " + ratio(now.variant - last.variant, textured, now.zero - last.zero, textured) +
+        ", lag/engine " + ratio(now.lag_cost - last.lag_cost, 1.0, now.lag_variant - last.lag_variant, 1.0) + ".");
+    engine_validation_logged_ = now;
 }
 
 bool FrameGenPresenter::ResearchFileInUse() const {
@@ -4619,6 +4732,12 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
                               " (experimental).");
             }
         }
+        // Once the game's vectors can stand in for measured flow (from
+        // Assist), the flow ends at the hardware's level whenever the hardware
+        // is chosen, whether it or the vectors measure a frame (Observe
+        // changes nothing generated).
+        tuning.hardware_level = settings_.motion_estimation == FrameGenMotionEstimation::kHardware &&
+                                engine_requested_ >= FrameGenEngineMode::kAssist;
         tuning.diagnostic = settings_.diagnostic_view;
         tuning.artifact_suppression = settings_.artifact_suppression;
         tuning.motion_limit_percent = settings_.motion_limit_percent;
@@ -4788,6 +4907,9 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
                                                  engine_before ? &*engine_before : nullptr, engine_facts, flipped);
         for (FrameGenViewSubmission& submission : submissions) {
             submission.request.engine_calibrate = calibrate;
+        }
+        if (engine_requested_ >= FrameGenEngineMode::kObserve) {
+            EngineRequestsLocked(frame, calibrate, submissions);
         }
     }
     std::vector<OutputSpec> specs(projection.viewCount);
@@ -5171,6 +5293,7 @@ void FrameGenPresenter::WriteCaptureNotes(const std::string& directory, const Ca
     std::shared_ptr<FrameGenEngineCensusWorker> worker;
     FrameGenEngineMode mode = FrameGenEngineMode::kOff;
     std::optional<FrameGenEngineImageTracker::Hypothesis> image;
+    FrameGenEngineValidation validation;
     {
         std::scoped_lock lock(mutex_);
         frame = engine_frame_;
@@ -5178,6 +5301,7 @@ void FrameGenPresenter::WriteCaptureNotes(const std::string& directory, const Ca
         worker = engine_worker_;
         mode = engine_requested_;
         image = engine_image_;
+        validation = engine_validation_;
     }
     if (!frame.valid) {
         return;
@@ -5270,8 +5394,18 @@ void FrameGenPresenter::WriteCaptureNotes(const std::string& directory, const Ca
     motion << "engine_mode " << ToString(mode) << "\nimage_override "
            << (image ? std::string(ToString(image->policy)) + " " + std::to_string(image->parameter) : std::string("none"))
            << '\n';
-    // Later stages' choices; none in stage 0.
-    motion << "convention none\ndelta_model none\n";
+    // The validator's convention (stage 3: its state, gains, camera, jitter
+    // and offset); later stages' choices.
+    if (mode >= FrameGenEngineMode::kObserve) {
+        motion << "convention " << ToString(validation.state) << ' ' << validation.convention.gain[0] << ' '
+               << validation.convention.gain[1] << ' ' << static_cast<int>(validation.convention.camera) << ' '
+               << validation.convention.jitter << ' ' << validation.convention.offset[0] << ' '
+               << validation.convention.offset[1] << " (" << (validation.name.empty() ? "?" : validation.name) << ", "
+               << ToString(validation.convention.camera) << ")\n";
+    } else {
+        motion << "convention none\n";
+    }
+    motion << "delta_model none\n";
 }
 
 bool FrameGenPresenter::EnsureOutputs(const std::vector<OutputSpec>& specs, std::size_t sets, std::string& error,

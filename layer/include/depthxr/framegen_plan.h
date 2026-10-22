@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "depthxr/settings.h"
@@ -89,8 +90,15 @@ enum class FrameGenPass : std::uint8_t {
     // each eye's half-resolution grid (kEngineRaw) on the game's queue, both
     // eyes in one dispatch (BuildFrameGenMotionCaptureDispatch).
     kEngineCapture,
+    // Engine motion vectors, stage 3 (FrameGenViewRequest::engine_motion):
+    // the evidence on a frame's vectors (against the poses, the frame's luma
+    // and its measured flow) summed per group of a grid of samples, then
+    // solved into the frame's verdict (see AppendEngineEvidence). Nothing
+    // generated frames are made from reads what they write.
+    kEngineReduce,
+    kEngineSolve,
 };
-inline constexpr std::size_t kFrameGenPassCount = 30;
+inline constexpr std::size_t kFrameGenPassCount = 32;
 
 // Logical textures owned per view. History and filtered flow are ping-pong
 // pairs: "newest" is written this submission, "previous" is last
@@ -154,6 +162,16 @@ enum class FrameGenTextureKind : std::uint8_t {
     // resolution, the newest capture and the one before it.
     kEngineRaw,
     kEngineRawPrevious,
+    // Stage 3: the census of the image each of those was resampled from
+    // (kEngineCensus's output, four texels per image), the evidence passes'
+    // per-group sums (kFrameGenEnginePartialTexels RGBA32F texels per group in
+    // one row), the solve (kFrameGenEngineParamsTexels: the bias, the
+    // verdict) and the frame's evidence summed (kFrameGenEngineEvidenceTexels).
+    kEngineCensus,
+    kEngineCensusPrevious,
+    kEnginePartials,
+    kEngineParams,
+    kEngineEvidence,
 };
 
 // The flow level the optical flow hardware fills: a 4x4 grid on the
@@ -343,6 +361,16 @@ struct FrameGenViewGeometry {
     float angle_down{0.0f};
 };
 
+// How a game's motion vector image holds its vectors (XR_FB_space_warp,
+// XR_EXT_frame_synthesis), whatever the API: a texel's rgb as it is (FB), or
+// rgb * scale + offset (EXT; `two_d`: rg alone, USE_2D_MOTION_VECTOR).
+struct FrameGenMotionEncoding {
+    bool ext{false};
+    std::array<float, 3> scale{1.0f, 1.0f, 1.0f};
+    std::array<float, 3> offset{0.0f, 0.0f, 0.0f};
+    bool two_d{false};
+};
+
 struct FrameGenViewRequest {
     FrameGenExtent extent;
     FrameGenOutputKind output{FrameGenOutputKind::kSrgb8};
@@ -386,6 +414,29 @@ struct FrameGenViewRequest {
     // depth encoding change, a pause or a new swapchain. Only such frames
     // may calibrate the vectors' convention.
     bool engine_calibrate{false};
+    // Stage 3 (FrameGenTuning::engine_mode from kObserve): no frame gate
+    // holds this frame's vectors back, so their evidence is taken. The
+    // presenter asks; the backend confirms for every view or none (each
+    // view's vectors captured for this frame, its depth in use).
+    bool engine_motion{false};
+    // The poses the game rendered this frame and the frame before with
+    // (before Pivot's change). With engine_lag, the head turned 2 degrees a
+    // frame faster or slower than the frame before (both frames may
+    // calibrate): the vectors are fitted against the pair before as well
+    // (game_previous after game_before), which fits better when they come a
+    // frame late.
+    FrameGenViewGeometry game_newest;
+    FrameGenViewGeometry game_previous;
+    bool engine_lag{false};
+    FrameGenViewGeometry game_before;
+    // Set by backends with engine_motion: how the captured vectors decode,
+    // the images the newest and the previous raw fields were resampled from
+    // (their censuses' stale test), the vectors' region (its extent), and
+    // whether the previous field holds the frame before's vectors.
+    FrameGenMotionEncoding engine_encoding;
+    std::array<std::uint32_t, 2> engine_images{};
+    FrameGenExtent engine_vectors;
+    bool engine_previous{false};
 };
 
 // How far Frame Generation goes with a game's motion vectors
@@ -393,8 +444,10 @@ struct FrameGenViewRequest {
 // samples them every frame (stage 0); the capture resamples the image a
 // frame's vectors are in to each eye's half-resolution grid as well, with
 // a census of that image (of every image while it is not known which one,
-// and every 30th frame) (stage 2). Generated frames are made as without
-// them in both.
+// and every 30th frame) (stage 2); observe takes the evidence on each
+// frame's vectors as well, works out their convention from it
+// (FrameGenEngineValidator) and judges each frame by it (stage 3).
+// Generated frames are made as without them in all three.
 enum class FrameGenEngineMode : std::uint8_t {
     kOff,
     kCensus,
@@ -405,9 +458,42 @@ enum class FrameGenEngineMode : std::uint8_t {
 };
 
 const char* ToString(FrameGenEngineMode mode); // "off", "census", ...
-// "off", "census" or "capture" (any case); anything else is off: the later
-// modes do not exist yet.
+// "off", "census", "capture" or "observe" (any case); anything else is off:
+// the later modes do not exist yet.
 FrameGenEngineMode ParseFrameGenEngineMode(const char* value);
+
+// What a game's motion vectors leave of the movement.
+enum class FrameGenEngineCamera : std::uint8_t {
+    kIncluded,     // the head's movement and the application's (the specification's intent)
+    kRotationOnly, // the head's rotation alone
+    kExcluded,     // the application's movement only: head movement removed
+    kObjectOnly,   // objects' own movement only
+};
+const char* ToString(FrameGenEngineCamera camera);
+
+// How a game's decoded vectors e relate to the movement: in D3D NDC (x
+// right, y up), the current frame minus the previous one, n = gain *
+// (e - offset) per axis, leaving `camera` of the movement in; with `jitter`,
+// each frame's vectors carry a bias of their own (a jittered projection),
+// which the GPU measures on still content and takes out. `offset` is a bias
+// they all carry alike (in e's units; none when jittered: the frame's bias
+// holds it).
+struct FrameGenEngineConvention {
+    std::array<float, 2> gain{1.0f, 1.0f};
+    FrameGenEngineCamera camera{FrameGenEngineCamera::kIncluded};
+    bool jitter{false};
+    std::array<float, 2> offset{0.0f, 0.0f};
+};
+// The same gains (to a thousandth) and camera; the jitter and offset aside.
+bool SameFrameGenEngineConvention(const FrameGenEngineConvention& a, const FrameGenEngineConvention& b);
+// "gx,gy,camera[,jitter]" (camera: included, rotation, excluded or objects),
+// as VECTORXR_FRAMEGEN_ENGINE_MV_CONVENTION fixes one; none when it is not.
+std::optional<FrameGenEngineConvention> ParseFrameGenEngineConvention(const std::string& text);
+// The shaders' decode of raw vectors for a convention: tuning (A.x, A.y,
+// B.x, B.y), the vector as rendered in uv (y down, current minus previous)
+// being A * raw + B (raw: a texel's rg as the image holds it).
+std::array<float, 4> FrameGenEngineDecode(const FrameGenEngineConvention& convention,
+                                          const FrameGenMotionEncoding& encoding);
 
 struct FrameGenTuning {
     FrameGenSynthesisMode mode{FrameGenSynthesisMode::kInterpolate};
@@ -465,6 +551,15 @@ struct FrameGenTuning {
     // Engine motion vectors: from kCapture the backend keeps each view's
     // raw vector fields (kEngineRaw), made when the view is set up.
     FrameGenEngineMode engine_mode{FrameGenEngineMode::kOff};
+    // Set by backends from kObserve: the convention the vectors' evidence is
+    // taken with (FrameGenEngineValidator's, under test or locked), and
+    // whether it is locked.
+    FrameGenEngineConvention engine;
+    bool engine_locked{false};
+    // The flow ends at the optical flow hardware's level even where block
+    // matching measures it (FrameGenFinalFlowLevel): from kAssist, a choice
+    // between the game's vectors and measured flow never changes the level.
+    bool hardware_level{false};
 };
 
 struct FrameGenViewPlan {
@@ -554,7 +649,8 @@ class FrameGenHistoryState {
 };
 
 std::uint8_t FrameGenFinalFlowLevel(FrameGenFlowQuality quality);
-// The level the plan's flow ends at: the quality's, or the hardware's.
+// The level the plan's flow ends at: the quality's, or the hardware's (with
+// hardware_flow or hardware_level).
 std::uint8_t FrameGenFinalFlowLevel(const FrameGenTuning& tuning);
 
 // How an application's depth swapchain encodes view depth
@@ -579,16 +675,6 @@ inline bool SameFrameGenDepthDescription(const FrameGenDepthEncoding& a, const F
 
 // Linear depth at or beyond this many meters is infinitely far (FG_FAR_DEPTH).
 inline constexpr float kFrameGenFarDepth = 100000.0f;
-
-// How a game's motion vector image holds its vectors (XR_FB_space_warp,
-// XR_EXT_frame_synthesis), whatever the API: a texel's rgb as it is (FB), or
-// rgb * scale + offset (EXT; `two_d`: rg alone, USE_2D_MOTION_VECTOR).
-struct FrameGenMotionEncoding {
-    bool ext{false};
-    std::array<float, 3> scale{1.0f, 1.0f, 1.0f};
-    std::array<float, 3> offset{0.0f, 0.0f, 0.0f};
-    bool two_d{false};
-};
 
 // A texel's vector (xy) as `encoding` decodes it, from the image's raw rgba.
 std::array<float, 2> DecodeFrameGenMotion(const FrameGenMotionEncoding& encoding, const std::array<float, 4>& raw);
@@ -970,15 +1056,6 @@ const char* ToString(FrameGenEngineImageTracker::Policy policy);
 // per axis. Used by the census's online fit and by
 // `depthxr_framegen_tests engine-calibrate`.
 
-// What the vectors leave of the movement (FrameGenEngineConvention's camera).
-enum class FrameGenEngineCamera : std::uint8_t {
-    kIncluded,     // the head's movement and the application's (the specification's intent)
-    kRotationOnly, // the head's rotation alone
-    kExcluded,     // the application's movement only: head movement removed
-    kObjectOnly,   // objects' own movement only
-};
-const char* ToString(FrameGenEngineCamera camera);
-
 // e on one axis fitted as a * p_r + b * p_t + c: p_r the prediction from the
 // head's rotation alone (depth 0), p_t what its translation adds at the
 // content's depth; or as a line, e = a * (p_r + p_t) + c.
@@ -994,14 +1071,32 @@ class FrameGenEngineAxisFit {
     };
     void Add(double e, double rotation, double translation);
     FrameGenEngineAxisFit& operator+=(const FrameGenEngineAxisFit& other);
+    // The sums as the evidence passes write them (kFrameGenEngineAxisTerms
+    // floats): n, the sums of p_r, p_t and e, then of p_r^2, p_t^2,
+    // p_r p_t, e p_r, e p_t and e^2.
+    static FrameGenEngineAxisFit FromSums(const float* sums);
     Solution Solve() const;
     Solution SolveLine() const;
+    // e fitted to one part alone (e = a * p_r + c, or e = b * p_t + c).
+    Solution SolveRotation() const;
+    Solution SolveTranslation() const;
     // The mean of e - a * p_r - b * p_t: these samples' intercept under
     // another fit's a and b (their mean e with both 0).
     double Intercept(double a, double b) const { return n_ > 0.0 ? (e_ - a * r_ - b * t_) / n_ : 0.0; }
     double Samples() const { return n_; }
     // Sum of the squared rotation part: the regression's leverage.
     double RotationSpread() const { return rr_ - (n_ > 0.0 ? r_ * r_ / n_ : 0.0); }
+    double TranslationSpread() const { return tt_ - (n_ > 0.0 ? t_ * t_ / n_ : 0.0); }
+    // Sums of the squares about the means: of e, and of p_r + p_t.
+    double Spread() const { return ee_ - (n_ > 0.0 ? e_ * e_ / n_ : 0.0); }
+    double PredictionSpread() const {
+        const double p = r_ + t_;
+        return rr_ + 2.0 * rt_ + tt_ - (n_ > 0.0 ? p * p / n_ : 0.0);
+    }
+    // Sums of e p_r and e^2 about the origin (the off-diagonal test).
+    double ErrorRotation() const { return er_; }
+    double ErrorSquares() const { return ee_; }
+    double RotationSquares() const { return rr_; }
 
   private:
     double n_{0.0}, r_{0.0}, t_{0.0}, e_{0.0};
@@ -1098,6 +1193,290 @@ struct FrameGenEngineCalibration {
     std::uint32_t frames{0};
 };
 FrameGenEngineCalibration CalibrateFrameGenEngine(const std::vector<FrameGenEngineCalibrationFrame>& frames);
+
+// --- Engine motion vectors: evidence and validation (stage 3) --------------
+//
+// Each frame whose vectors no gate holds back (FrameGenViewRequest::
+// engine_motion) has its evidence taken on the GPU on a grid of
+// kFrameGenEngineGrid squared samples (AppendEngineEvidence): kEngineReduce
+// sums each group's samples by kind, kEngineSolve sums the groups, takes the
+// frame's bias out and judges the frame (the verdict), and the backend reads
+// the sums back for FrameGenEngineValidator, which works out the vectors'
+// convention.
+//
+// kEngineReduce's kinds (options.x bits 0-1, 4 for the cockpit fit against
+// the pair before):
+//   cockpit: per axis, still content's decoded vectors e against what the
+//     declared poses predict (C1: e = a * p_r + b * p_t + c), with the
+//     cross-axis sums; and against what the measured flow says (C2: q, as
+//     rendered with the head; h, with the head taken out);
+//   photometric: per sample, how well the frame's luma follows each of 8
+//     variants of the convention under test (y flipped, direction flipped,
+//     head toggled; variant 0 the convention itself), no motion and the
+//     measured flow (C3), with the cockpit's inliers, the samples moving,
+//     the vectors' distance from the measured flow by depth band and the
+//     measured flow's length (the stale test of head-excluded vectors);
+//   lag: the field before scored against this frame pair, with this
+//   frame's beside it on the same samples.
+inline constexpr std::uint32_t kFrameGenEngineGrid = 128u;
+inline constexpr std::uint32_t kFrameGenEngineKindCockpit = 0u;
+inline constexpr std::uint32_t kFrameGenEngineKindPhotometric = 1u;
+inline constexpr std::uint32_t kFrameGenEngineKindLag = 2u;
+inline constexpr std::uint32_t kFrameGenEngineKindCockpitLag = 3u;
+// Each group's texels in kEnginePartials, and the kinds' places among them
+// (kEngineEvidence holds their sums in the same places).
+inline constexpr std::uint32_t kFrameGenEnginePartialTexels = 32u;
+inline constexpr std::uint32_t kFrameGenEngineCockpitTexel = 0u;      // 11 texels
+inline constexpr std::uint32_t kFrameGenEnginePhotometricTexel = 11u; // 7
+inline constexpr std::uint32_t kFrameGenEngineLagTexel = 18u;         // 2
+inline constexpr std::uint32_t kFrameGenEngineCockpitLagTexel = 20u;  // 5
+inline constexpr std::uint32_t kFrameGenEngineEvidenceTexels = 32u;
+inline constexpr std::uint32_t kFrameGenEngineParamsTexels = 8u;
+inline constexpr std::uint32_t kFrameGenEngineAxisTerms = 10u;
+// The frame's verdict (kEngineParams texel 0's z, and texel 4's x with zeros
+// after it, so that the texel's first 8 bytes are zero exactly when the
+// vectors may be used: a predicate's source): 0 when the vectors may be
+// used, else why not (bits).
+inline constexpr std::uint32_t kFrameGenEngineVerdictUnlocked = 1u;    // no convention locked
+inline constexpr std::uint32_t kFrameGenEngineVerdictStale = 2u;       // the image read did not change while the head moved
+inline constexpr std::uint32_t kFrameGenEngineVerdictCockpit = 4u;     // still content's vectors do not follow the head
+inline constexpr std::uint32_t kFrameGenEngineVerdictPhotometric = 8u; // the luma follows them worse than the measured flow
+inline constexpr std::uint32_t kFrameGenEngineVerdictLag = 16u;        // the vectors before follow this frame as well
+inline constexpr std::uint32_t kFrameGenEngineVerdictJitter = 32u;     // jittered, with no still content to take the bias from
+inline constexpr std::size_t kFrameGenEngineVerdictReasons = 6;
+const char* FrameGenEngineVerdictName(std::size_t index); // "unlocked", "stale", ...
+
+// One view's evidence for a frame, as read back (kEngineEvidence, the
+// solve's kEngineParams), with what it was taken for.
+struct FrameGenEngineEvidence {
+    // Cockpit kind. C1 per axis (e in the vectors' decoded units, p in NDC),
+    // the sums of e_x p_r,y and e_y p_r,x (an axis swap shows there), and C2
+    // per axis with q as p_r and h as p_t, with the sum of |q - h|^2.
+    std::array<FrameGenEngineAxisFit, 2> cockpit{};
+    std::array<double, 2> swapped{};
+    std::array<FrameGenEngineAxisFit, 2> measured{};
+    double head_gap{0.0};
+    // C1 against the pair before (FrameGenViewRequest::engine_lag), when taken.
+    bool lag{false};
+    std::array<FrameGenEngineAxisFit, 2> cockpit_lag{};
+    // Photometric kind: the 3x3 luma error summed per variant, of no motion
+    // and of the measured flow; the textured samples the luma was seen at,
+    // those with measured flow, those the vectors move more than a pixel
+    // (with variant 0's and no motion's error there), those where the
+    // vectors explain the luma about as well as the measured flow; still
+    // near content and its inliers; the vectors' distance from the measured
+    // flow (full-resolution pixels) summed by band (nearer than 4 m, from
+    // 30 m, the sky) with the samples; the head movement and vector length
+    // (pixels) summed over the samples with valid vectors; and the measured
+    // flow's length (pixels) summed over those with measured flow.
+    std::array<double, 8> variants{};
+    double zero{0.0};
+    double measured_cost{0.0};
+    double textured{0.0};
+    double with_measured{0.0};
+    double moving{0.0};
+    double variant_moving{0.0};
+    double zero_moving{0.0};
+    double wins{0.0};
+    double inliers{0.0};
+    double cockpit_samples{0.0};
+    std::array<double, 3> epe{};
+    std::array<double, 3> epe_samples{};
+    double head_px{0.0};
+    double vectors_px{0.0};
+    double valid{0.0};
+    double flow_px{0.0};
+    // Lag kind (when the field before was the frame before's): the error of
+    // the field before and of this frame's, on the samples both have, and
+    // on those moving.
+    bool lag_photometric{false};
+    double lag_cost{0.0};
+    double lag_variant{0.0};
+    double lag_samples{0.0};
+    double lag_cost_moving{0.0};
+    double lag_variant_moving{0.0};
+    double lag_moving{0.0};
+    // The solve: the bias taken out (uv), the verdict and whether the image
+    // read was stale.
+    std::array<float, 2> bias{};
+    std::uint32_t verdict{0};
+    bool stale{false};
+    // What it was taken for: whether the frame may calibrate, the view's
+    // half-resolution extent, the vectors' region and the color view.
+    bool calibrate{false};
+    FrameGenExtent l1;
+    FrameGenExtent vectors;
+    FrameGenExtent color;
+};
+// A view's evidence from kEngineEvidence's and kEngineParams' texels
+// (RGBA32F, kFrameGenEngineEvidenceTexels and kFrameGenEngineParamsTexels).
+FrameGenEngineEvidence ReadFrameGenEngineEvidence(const float* evidence, const float* params);
+
+// A frame's evidence, every view's, with the convention it was taken with.
+struct FrameGenEngineFrameEvidence {
+    FrameGenEngineConvention convention;
+    bool locked{false};
+    std::vector<FrameGenEngineEvidence> views;
+};
+
+// The validator as the log tells it (FrameGenEngineValidator::Report).
+struct FrameGenEngineValidation {
+    enum class State : std::uint8_t { kProbing, kCalibrating, kLocked, kSuspended, kDisabled };
+    State state{State::kProbing};
+    FrameGenEngineConvention convention; // under test, or locked
+    std::string name;                    // its canonical gain's name ("ndc", ...), or "" before one
+    bool fixed{false};                   // VECTORXR_FRAMEGEN_ENGINE_MV_CONVENTION
+    bool prior{false};                   // the game's table entry
+    std::uint32_t decisions{0};          // locks, suspensions, disables and candidates
+    std::string reason;                  // of the last decision
+    // Session totals: frames read, batches judged, the last batch's fit
+    // (gain, b/a: 0 without translation), the jitter's spread across its
+    // frames (vector pixels), and how many batches in a row the pair before
+    // fitted better (lag: 3).
+    std::uint64_t frames{0};
+    std::uint64_t batches{0};
+    std::array<double, 2> gain{};
+    std::array<double, 2> ratio{};
+    std::array<double, 2> corr2{};
+    std::array<double, 2> jitter_px{};
+    std::uint32_t lag_batches{0};
+    bool lag{false};
+    // The last photometric batch: "passed", or what failed; and how many
+    // passed in a row.
+    std::string photometric;
+    std::uint32_t photometric_passed{0};
+    // Views judged, and those whose verdict held them back per reason
+    // (kFrameGenEngineVerdict* bit order).
+    std::uint64_t verdicts{0};
+    std::uint64_t invalid{0};
+    std::array<std::uint64_t, kFrameGenEngineVerdictReasons> reasons{};
+    // The photometric evidence summed (FrameGenEngineEvidence's).
+    std::array<double, 3> epe{};
+    std::array<double, 3> epe_samples{};
+    double variant{0.0};
+    double zero{0.0};
+    double measured_cost{0.0};
+    double textured{0.0};
+    double with_measured{0.0};
+    double lag_cost{0.0};
+    double lag_variant{0.0};
+};
+const char* ToString(FrameGenEngineValidation::State state); // "probing", "calibrating", ...
+
+// Works out a game's motion vector convention from the evidence on its
+// frames (FrameGenEngineEvidence), and keeps checking it.
+//   Batches: the C1 sums of frames that may calibrate, until each axis's
+//     head rotation spreads by 300 * (3 / W1)^2 (NDC^2) over 3 frames or
+//     more (300 frames without: the batch starts over); solved per axis and
+//     classified: its gain (1 / a) within 10% of a canonical one with
+//     corr^2 >= 0.7 and b / a in [0.75, 1.35] (head included; |b / a| <
+//     0.25: rotation only; no translation to tell: head included), or C2's
+//     head-excluded target explaining the vectors (corr^2 >= 0.7) while by
+//     the gain it gives them still content's vectors are near zero in NDC
+//     (head excluded); else unknown, as where the other axis's rotation
+//     explains an axis better.
+//   Photometric batches (C3): the photometric sums of frames taken with the
+//     convention under test, 2000 textured samples or more over 3 frames:
+//     variant 0 beats every other variant by 15%, the moving content's no
+//     motion by 15%, the field before by 10%, and with measured flow comes
+//     within 10% of it, as well as it on 70% of the samples.
+//   Adopted (locked) after 3 batches in a row of one convention (1 when it is
+//     the prior or fixed one, never 0) with the last 2 photometric batches
+//     passing, unless the pair before fitted better in 3 batches in a row
+//     (the vectors come a frame late). Jitter: the last 30 frames'
+//     intercepts under their batch's fit spread by more than 0.15 vector
+//     pixels about a mean within 1. Without jitter, a mean of 0.1 vector
+//     pixels or more is the convention's offset.
+//   Locked: suspended by a batch of another convention (corr^2 >= 0.7), 2
+//     photometric batches 30% worse than the measured flow, more than 20% of
+//     the last 90 frames held back by their verdict, or the lag; after 10 s
+//     suspended it calibrates again with that convention as its prior.
+//   Disabled: 3 suspensions within 5 minutes, or no lock over 5 minutes of
+//     batches (unlocked, the time from each batch judged to the next, up to
+//     2 s of it each: a longer gap had no movement to judge, or no frames).
+//     A lack of still content never disables anything: it only leaves
+//     batches unfinished.
+class FrameGenEngineValidator {
+  public:
+    using State = FrameGenEngineValidation::State;
+    // The game's table entry (FrameGenEnginePriorFor): one batch adopts it.
+    void SetPrior(const FrameGenEngineConvention& convention);
+    // VECTORXR_FRAMEGEN_ENGINE_MV_CONVENTION: only this one is ever under
+    // test or locked.
+    void Fix(const FrameGenEngineConvention& convention);
+    // A frame's evidence, at `seconds` (any steady clock).
+    void Add(const FrameGenEngineFrameEvidence& frame, double seconds);
+    State GetState() const { return state_; }
+    bool Locked() const { return state_ == State::kLocked; }
+    // The convention evidence is taken with: under test, or locked.
+    const FrameGenEngineConvention& Convention() const { return candidate_; }
+    std::uint32_t Decisions() const { return report_.decisions; }
+    FrameGenEngineValidation Report() const;
+
+  private:
+    struct Batch {
+        std::array<FrameGenEngineAxisFit, 2> cockpit{};
+        std::array<double, 2> swapped{};
+        std::array<FrameGenEngineAxisFit, 2> measured{};
+        // The frames' own cockpit sums (each frame's intercept), and the
+        // cockpit on frames fitted against the pair before, with that fit.
+        std::vector<std::array<FrameGenEngineAxisFit, 2>> frames;
+        std::array<FrameGenEngineAxisFit, 2> lagged_now{};
+        std::array<FrameGenEngineAxisFit, 2> lagged{};
+        FrameGenExtent l1, vectors, color;
+    };
+    struct Photometric {
+        FrameGenEngineEvidence sums;
+        std::uint32_t frames{0};
+    };
+    struct Classified {
+        std::optional<FrameGenEngineConvention> convention;
+        std::string name;
+        std::string why; // unknown: why
+        double corr2{0.0};
+    };
+    Classified Classify(const Batch& batch);
+    void JudgeBatch(double seconds);
+    void JudgePhotometric(double seconds);
+    void TryAdopt();
+    void Decide(State state, const std::string& reason);
+    void Suspend(const std::string& reason, double seconds);
+    void StartCandidate(const FrameGenEngineConvention& convention, const std::string& name, bool prior);
+
+    State state_{State::kProbing};
+    FrameGenEngineConvention candidate_;
+    std::optional<FrameGenEngineConvention> prior_;
+    std::optional<FrameGenEngineConvention> fixed_;
+    bool candidate_prior_{false}; // the candidate is the prior (or fixed) one: one batch adopts it
+    std::uint32_t agreeing_{0};   // batches in a row of the candidate
+    std::uint32_t passed_{0};     // photometric batches in a row passing
+    std::uint32_t worse_{0};      // ... locked, worse than the measured flow
+    std::uint32_t lagging_{0};    // batches in a row the pair before fitted better
+    bool jitter_{false};
+    Batch batch_;
+    Photometric photometric_;
+    std::deque<std::array<double, 2>> intercepts_; // the last batches' frames' intercepts (vector pixels)
+    std::deque<std::uint8_t> verdicts_; // locked: the last 90 frames, 1 held back
+    std::deque<double> suspensions_;    // when, the last 5 minutes'
+    double suspended_at_{0.0};
+    std::optional<double> last_batch_; // when the last batch was judged
+    double unknown_seconds_{0.0};      // unlocked: the batches' time (see Disabled above)
+    // The newest evidence's vectors and color extents (canonical names).
+    std::pair<FrameGenExtent, FrameGenExtent> extents_{};
+    FrameGenEngineValidation report_;
+};
+
+// The convention a game is expected to use (a table by executable,
+// extension and graphics API: MSFS 2024's XR_FB_space_warp on Direct3D 12),
+// none for the rest. `executable` is the file name, any case; `api` the
+// backend's Name().
+std::optional<FrameGenEngineConvention> FrameGenEnginePriorFor(const std::string& executable, bool ext,
+                                                               const std::string& api);
+
+// How much faster or slower the head turned between `previous` and `newest`
+// than between `before` and `previous` (degrees per frame, per frame).
+double FrameGenAngularAcceleration(const FrameGenViewGeometry& newest, const FrameGenViewGeometry& previous,
+                                   const FrameGenViewGeometry& before);
 
 // --- Engine motion vectors: the frame gates (stage 1) ----------------------
 //

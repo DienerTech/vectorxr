@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <functional>
 #include <iostream>
@@ -2016,8 +2017,9 @@ void TestFrameGenEngineImageTracker() {
 void TestFrameGenMotionCapturePlan() {
     Expect(depthxr::ParseFrameGenEngineMode("Capture") == depthxr::FrameGenEngineMode::kCapture &&
                depthxr::ParseFrameGenEngineMode("census") == depthxr::FrameGenEngineMode::kCensus &&
-               depthxr::ParseFrameGenEngineMode("observe") == depthxr::FrameGenEngineMode::kOff,
-           "Engine motion: the switch takes off, census and capture");
+               depthxr::ParseFrameGenEngineMode("Observe") == depthxr::FrameGenEngineMode::kObserve &&
+               depthxr::ParseFrameGenEngineMode("assist") == depthxr::FrameGenEngineMode::kOff,
+           "Engine motion: the switch takes off, census, capture and observe");
     const depthxr::FrameGenExtent l1 = depthxr::FrameGenPyramid({5424, 5356})[1];
     const depthxr::FrameGenDispatch dispatch =
         depthxr::BuildFrameGenMotionCaptureDispatch(l1, {0, 0, 4339, 4285}, {16, 8, 4300, 4200}, 0, 1, 2);
@@ -2508,6 +2510,550 @@ void TestFrameGenDeclaredChange() {
                !FrameGenDeclaredChangeMoved(
                    a, FrameGenDeclaredChange(second, declare(second, pivot, {0.3, -0.1, 0.7002}))),
            "Declared change: 1 mm moves it, 0.2 mm does not");
+}
+
+// Engine motion vectors, stage 3: the convention switch and decode, and the
+// evidence passes in a plan (after the filter, writing nothing else; none
+// without engine_motion, in capture, or in Lead); the hardware level.
+void TestFrameGenEngineEvidencePlan() {
+    using depthxr::FrameGenEngineCamera;
+    using depthxr::FrameGenPass;
+    using depthxr::FrameGenTextureKind;
+    const auto fixed = depthxr::ParseFrameGenEngineConvention("1, -1, excluded,jitter");
+    Expect(fixed && fixed->gain == std::array<float, 2>{1.0f, -1.0f} && fixed->camera == FrameGenEngineCamera::kExcluded &&
+               fixed->jitter,
+           "Engine evidence: a fixed convention parses");
+    Expect(!depthxr::ParseFrameGenEngineConvention("1,1") && !depthxr::ParseFrameGenEngineConvention("0,1,included") &&
+               !depthxr::ParseFrameGenEngineConvention("1,1,sideways") &&
+               depthxr::ParseFrameGenEngineConvention("2,-2,rotation") &&
+               depthxr::ParseFrameGenEngineConvention("2,-2,rotation")->camera == FrameGenEngineCamera::kRotationOnly,
+           "Engine evidence: conventions that are none are refused");
+    // FB: A = g / 2 (y negated), no offset; EXT: its scale and offset as well.
+    depthxr::FrameGenEngineConvention convention;
+    convention.gain = {2.0f, -2.0f};
+    depthxr::FrameGenMotionEncoding fb;
+    Expect(depthxr::FrameGenEngineDecode(convention, fb) == std::array<float, 4>{1.0f, 1.0f, 0.0f, 0.0f},
+           "Engine evidence: uv vectors decode as they are (y flipped twice)");
+    depthxr::FrameGenMotionEncoding ext;
+    ext.ext = true;
+    ext.scale = {0.5f, 0.25f, 1.0f};
+    ext.offset = {0.1f, -0.2f, 0.0f};
+    Expect(depthxr::FrameGenEngineDecode(convention, ext) == std::array<float, 4>{0.5f, 0.25f, 0.1f, -0.2f},
+           "Engine evidence: EXT's scale and offset go into the decode");
+    // The convention's own offset comes out of e.
+    convention.offset = {0.25f, -0.5f};
+    Expect(depthxr::FrameGenEngineDecode(convention, fb) == std::array<float, 4>{1.0f, 1.0f, -0.25f, 0.5f},
+           "Engine evidence: the convention's offset goes into the decode");
+    convention.offset = {0.0f, 0.0f};
+
+    depthxr::FrameGenViewRequest request;
+    request.extent = {1024, 1024};
+    request.synthesize = true;
+    request.depth = true;
+    request.newest.angle_left = request.previous.angle_left = -0.9f;
+    request.newest.angle_right = request.previous.angle_right = 0.9f;
+    request.newest.angle_up = request.previous.angle_up = 0.9f;
+    request.newest.angle_down = request.previous.angle_down = -0.9f;
+    request.newest.orientation = {0.0f, 0.01f, 0.0f, 0.99995f};
+    depthxr::FrameGenTuning tuning;
+    tuning.mode = depthxr::FrameGenSynthesisMode::kExtrapolate;
+    tuning.analyze_only = true;
+    tuning.engine_mode = depthxr::FrameGenEngineMode::kObserve;
+    tuning.engine = convention;
+    const depthxr::FrameGenViewPlan plain = depthxr::BuildFrameGenViewPlan(request, tuning);
+    request.engine_motion = true;
+    request.engine_images = {2, 1};
+    request.engine_vectors = {800, 790};
+    const depthxr::FrameGenViewPlan observed = depthxr::BuildFrameGenViewPlan(request, tuning);
+    // The plan without the evidence passes is the plan without engine motion.
+    std::vector<depthxr::FrameGenDispatch> rest;
+    std::vector<depthxr::FrameGenDispatch> engine;
+    for (const auto& dispatch : observed.dispatches) {
+        (dispatch.pass == FrameGenPass::kEngineReduce || dispatch.pass == FrameGenPass::kEngineSolve ? engine : rest)
+            .push_back(dispatch);
+    }
+    bool same = rest.size() == plain.dispatches.size();
+    for (std::size_t i = 0; same && i < rest.size(); ++i) {
+        // FrameGenTexture is two bytes, the constants 32 words: compared as bytes.
+        same = rest[i].pass == plain.dispatches[i].pass &&
+               std::memcmp(rest[i].inputs.data(), plain.dispatches[i].inputs.data(), sizeof(rest[i].inputs)) == 0 &&
+               std::memcmp(rest[i].outputs.data(), plain.dispatches[i].outputs.data(), sizeof(rest[i].outputs)) == 0 &&
+               std::memcmp(&rest[i].constants, &plain.dispatches[i].constants, sizeof(depthxr::FrameGenConstants)) == 0;
+    }
+    Expect(same, "Engine evidence: everything else in the plan is as without engine motion");
+    auto kinds = [](const std::vector<depthxr::FrameGenDispatch>& dispatches) {
+        std::string order;
+        for (const auto& dispatch : dispatches) {
+            order += dispatch.pass == FrameGenPass::kEngineSolve ? "S" + std::to_string(dispatch.constants.options[0] & 15u)
+                                                                 : "R" + std::to_string(dispatch.constants.options[0] & 3u);
+            order += " ";
+        }
+        return order;
+    };
+    Expect(kinds(engine) == "R0 S0 R1 S1 ", "Engine evidence: cockpit, bias, photometric, solve (" + kinds(engine) + ")");
+    bool writes_engine_only = true;
+    for (const auto& dispatch : engine) {
+        for (const auto& output : dispatch.outputs) {
+            writes_engine_only = writes_engine_only && (output.kind == FrameGenTextureKind::kNone ||
+                                                        output.kind == FrameGenTextureKind::kEnginePartials ||
+                                                        output.kind == FrameGenTextureKind::kEngineParams ||
+                                                        output.kind == FrameGenTextureKind::kEngineEvidence);
+        }
+    }
+    Expect(writes_engine_only, "Engine evidence: the passes write their own textures alone");
+    // After the filter, which the measured flow they read is final for.
+    const auto filter = std::find_if(observed.dispatches.begin(), observed.dispatches.end(),
+                                     [](const auto& dispatch) { return dispatch.pass == FrameGenPass::kFilter; });
+    const auto first = std::find_if(observed.dispatches.begin(), observed.dispatches.end(),
+                                    [](const auto& dispatch) { return dispatch.pass == FrameGenPass::kEngineReduce; });
+    Expect(filter < first && engine[0].inputs[4].kind == FrameGenTextureKind::kFlow &&
+               engine[0].inputs[4].level == observed.final_flow_level,
+           "Engine evidence: taken after the filter, from the final level's measured flow");
+    // The cockpit kind decodes with unit gains, the photometric with the
+    // convention's; the solve carries the gains and the images.
+    const depthxr::FrameGenConstants& cockpit = engine[0].constants;
+    const depthxr::FrameGenConstants& photometric = engine[2].constants;
+    const depthxr::FrameGenConstants& solve = engine[3].constants;
+    Expect(cockpit.tuning == std::array<float, 4>{0.5f, -0.5f, 0.0f, 0.0f} &&
+               photometric.tuning == std::array<float, 4>{1.0f, 1.0f, 0.0f, 0.0f} &&
+               cockpit.size == std::array<std::uint32_t, 4>{128, 128, 512, 512} &&
+               solve.tuning == std::array<float, 4>{2.0f, -2.0f, 0.0f, 0.0f} && solve.options[2] == (2u | (1u << 8)) &&
+               solve.size == std::array<std::uint32_t, 4>{512, 512, 800, 790} &&
+               engine[3].outputs[1].kind == FrameGenTextureKind::kEngineEvidence,
+           "Engine evidence: decodes, grid, gains and images");
+    // The field before (the lag kind) and the pair before (the cockpit lag
+    // kind, by the game's poses) when the request has them.
+    request.engine_previous = true;
+    request.engine_lag = true;
+    request.game_previous.orientation = {0.0f, 0.02f, 0.0f, 0.9998f};
+    request.game_before.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
+    const depthxr::FrameGenViewPlan lagged = depthxr::BuildFrameGenViewPlan(request, tuning);
+    std::vector<depthxr::FrameGenDispatch> lag;
+    for (const auto& dispatch : lagged.dispatches) {
+        if (dispatch.pass == FrameGenPass::kEngineReduce || dispatch.pass == FrameGenPass::kEngineSolve) lag.push_back(dispatch);
+    }
+    Expect(kinds(lag) == "R0 S0 R1 R2 R3 S1 " &&
+               lag[3].inputs[0].kind == FrameGenTextureKind::kEngineRawPrevious &&
+               lag[3].inputs[4].kind == FrameGenTextureKind::kEngineRaw && lag[4].constants.rot0 != lag[0].constants.rot0 &&
+               (lag[5].constants.options[0] & (1u << 7)) != 0 && (lag[5].constants.options[0] & (1u << 8)) != 0,
+           "Engine evidence: the field before and the pair before (" + kinds(lag) + ")");
+    // None in capture, without engine_motion, or interpolating's cover alike.
+    tuning.engine_mode = depthxr::FrameGenEngineMode::kCapture;
+    Expect(depthxr::BuildFrameGenViewPlan(request, tuning).dispatches.size() == plain.dispatches.size(),
+           "Engine evidence: none in capture");
+    // The hardware level: the flow ends at the hardware's level.
+    tuning.engine_mode = depthxr::FrameGenEngineMode::kOff;
+    tuning.quality = depthxr::FrameGenFlowQuality::kQuality;
+    Expect(depthxr::FrameGenFinalFlowLevel(tuning) == 2, "Engine evidence: Quality ends at level 2");
+    tuning.hardware_level = true;
+    Expect(depthxr::FrameGenFinalFlowLevel(tuning) == depthxr::kFrameGenHardwareFlowLevel,
+           "Engine evidence: with hardware_level, at the hardware's level");
+}
+
+// Engine motion validation on synthetic evidence: a game's vectors in a
+// convention (the truth), the head turning both ways at changing speeds and
+// leaning; each frame's evidence as the GPU sums it for the convention under
+// test (the validator's own): C1 from still samples near and far, the pair
+// before's fit, C2 against the measured flow, and photometric sums that
+// favour the convention under test only where it is the truth.
+struct EngineTruth {
+    std::array<double, 2> gain{1.0, 1.0};
+    depthxr::FrameGenEngineCamera camera{depthxr::FrameGenEngineCamera::kIncluded};
+    double jitter_px{0.0}; // each frame's vectors offset by up to this (vector pixels)
+    double offset_px{0.0}; // every frame's vectors offset by this (vector pixels)
+    double noise{0.0};     // noise on the vectors, as a share of the head's movement
+    bool late{false};      // a frame late: the vectors of the pair before
+    bool swapped{false};   // x holds y's vector and y x's
+    bool zero{false};      // the vectors are all zero
+    bool pitch{true};      // the head pitches as well as turns
+    bool still{true};      // still content to fit (none: on foot, nothing still)
+    bool correlated{false}; // the head pitches as it turns
+};
+
+class EngineScenario {
+  public:
+    explicit EngineScenario(EngineTruth truth) : truth_(truth) {}
+    // Frame `f`'s evidence, both views, for `tested` (what the GPU decoded
+    // with), the frame calibrating.
+    depthxr::FrameGenEngineFrameEvidence Frame(int f, const depthxr::FrameGenEngineConvention& tested, bool locked,
+                                              std::uint32_t verdict = 0) const {
+        depthxr::FrameGenEngineFrameEvidence frame;
+        frame.convention = tested;
+        frame.locked = locked;
+        for (int v = 0; v < 2; ++v) {
+            depthxr::FrameGenEngineEvidence view;
+            view.calibrate = true;
+            view.l1 = {2712, 2678};
+            view.vectors = {4339, 4285};
+            view.color = {5424, 5356};
+            view.lag = true;
+            view.verdict = verdict;
+            const auto now = Head(f), before = Head(f - 1);
+            const double jitter = truth_.jitter_px * (Hash(f, 3) * 2.0 - 1.0);
+            for (int s = 0; s < 200 && truth_.still; ++s) {
+                const double u = Hash(s, 5 + v), w = Hash(s, 7 + v);
+                const double z = s % 3 == 0 ? 0.0 : 0.5 + 2.5 * Hash(s, 11); // 0: far
+                auto predict = [&](const std::array<double, 3>& head, int axis, bool translation) {
+                    const double rotation = head[axis] * (1.0 + 0.2 * (axis ? w : u));
+                    return translation ? (z > 0.0 ? head[2] * (axis ? 0.3 : 1.0) / z : 0.0) : rotation;
+                };
+                std::array<double, 2> e{};
+                for (int axis = 0; axis < 2; ++axis) {
+                    const auto& head = truth_.late ? before : now;
+                    const int source = truth_.swapped ? 1 - axis : axis;
+                    const double r = predict(head, source, false), t = predict(head, source, true);
+                    const double movement = truth_.camera == depthxr::FrameGenEngineCamera::kIncluded ? r + t
+                                            : truth_.camera == depthxr::FrameGenEngineCamera::kRotationOnly ? r
+                                                                                                        : 0.0;
+                    const double noise = truth_.noise * (std::abs(r) + 0.01) * (Hash(s * 31 + f, 13 + axis) * 2.0 - 1.0) * 1.7;
+                    const double offset =
+                        (jitter * (axis ? 0.5 : 1.0) + truth_.offset_px) / (0.5 * (axis ? 4285.0 : 4339.0));
+                    e[axis] = truth_.zero ? 0.0 : (movement + noise + offset) / truth_.gain[axis];
+                }
+                for (int axis = 0; axis < 2; ++axis) {
+                    view.cockpit[axis].Add(e[axis], predict(now, axis, false), predict(now, axis, true));
+                    view.cockpit_lag[axis].Add(e[axis], predict(before, axis, false), predict(before, axis, true));
+                }
+                view.swapped[0] += e[0] * predict(now, 1, false);
+                view.swapped[1] += e[1] * predict(now, 0, false);
+            }
+            // C2: content moving on its own (h, NDC) besides the head (q =
+            // h + p); vectors without the head (excluded) follow h.
+            for (int s = 0; s < 200; ++s) {
+                for (int axis = 0; axis < 2; ++axis) {
+                    const double h = 0.01 * (Hash(s + 1000 * f, 17 + axis) * 2.0 - 1.0);
+                    const double p = now[axis];
+                    const double e = truth_.zero ? 0.0
+                                     : truth_.camera == depthxr::FrameGenEngineCamera::kExcluded ? h / truth_.gain[axis]
+                                                                                                  : (h + p) / truth_.gain[axis];
+                    view.measured[axis].Add(e, h + p, h);
+                }
+            }
+            // C3: the convention under test explains the image only where it
+            // is the truth (and the vectors are the frame's own).
+            const bool right = depthxr::SameFrameGenEngineConvention(tested, Truth()) && !truth_.late && !truth_.swapped &&
+                               !truth_.zero && truth_.noise < 0.5;
+            const double n = 1000.0;
+            view.textured = view.with_measured = n;
+            for (std::size_t c = 0; c < view.variants.size(); ++c) view.variants[c] = 0.05 * n;
+            if (right) view.variants[0] = 0.01 * n;
+            view.zero = 0.04 * n;
+            view.measured_cost = 0.0105 * n;
+            view.wins = (right ? 0.95 : 0.3) * n;
+            view.moving = 0.3 * n;
+            view.variant_moving = view.variants[0] * 0.3;
+            view.zero_moving = 0.05 * 0.3 * n;
+            view.lag_samples = n;
+            view.lag_variant = view.variants[0];
+            view.lag_cost = right ? 0.03 * n : view.variants[0];
+            view.epe = {0.4 * n, 0.8 * n, 0.3 * n};
+            view.epe_samples = {n, n, n};
+            frame.views.push_back(view);
+        }
+        return frame;
+    }
+    depthxr::FrameGenEngineConvention Truth() const {
+        depthxr::FrameGenEngineConvention convention;
+        convention.gain = {static_cast<float>(truth_.gain[0]), static_cast<float>(truth_.gain[1])};
+        convention.camera = truth_.camera;
+        return convention;
+    }
+    EngineTruth& truth() { return truth_; }
+
+  private:
+    static double Hash(int a, int b) {
+        std::uint32_t h = static_cast<std::uint32_t>(a) * 374761393u + static_cast<std::uint32_t>(b) * 668265263u;
+        h = (h ^ (h >> 13)) * 1274126177u;
+        return static_cast<double>((h ^ (h >> 16)) & 0xffffu) / 65535.0;
+    }
+    // The head's turn per frame (NDC, x and y) and lean (meters) at frame f:
+    // changing speed and direction from frame to frame.
+    std::array<double, 3> Head(int f) const {
+        const double yaw = 0.012 * std::sin(0.9 * f) + 0.008 * (Hash(f, 1) * 2.0 - 1.0);
+        const double pitch = !truth_.pitch    ? 0.0
+                             : truth_.correlated ? 0.9 * yaw + 0.002 * (Hash(f, 2) * 2.0 - 1.0)
+                                                 : 0.009 * std::cos(1.3 * f) + 0.006 * (Hash(f, 2) * 2.0 - 1.0);
+        return {yaw, pitch, 0.004 * std::sin(0.7 * f)};
+    }
+    EngineTruth truth_;
+};
+
+// Runs a scenario through a validator from frame `first` for `frames`
+// frames, `seconds_per_frame` apart; the frame it locked at (none: never).
+std::optional<int> RunEngineScenario(depthxr::FrameGenEngineValidator& validator, EngineScenario& scenario, int first,
+                                     int frames, double seconds_per_frame = 1.0 / 90.0) {
+    std::optional<int> locked;
+    for (int f = first; f < first + frames; ++f) {
+        validator.Add(scenario.Frame(f, validator.Convention(), validator.Locked()), f * seconds_per_frame);
+        if (!locked && validator.Locked()) locked = f;
+    }
+    return locked;
+}
+
+void TestFrameGenEngineValidator() {
+    using depthxr::FrameGenEngineCamera;
+    using State = depthxr::FrameGenEngineValidator::State;
+    // Each canonical convention, the head included (and its rotation only,
+    // and excluded, for one each), adopted within 30 frames.
+    const auto canonical = depthxr::FrameGenEngineCanonicalGains({4339, 4285}, {5424, 5356});
+    std::vector<EngineTruth> truths;
+    for (const auto& gain : canonical) {
+        EngineTruth truth;
+        truth.gain = gain.gain;
+        truths.push_back(truth);
+    }
+    EngineTruth rotation;
+    rotation.camera = FrameGenEngineCamera::kRotationOnly;
+    rotation.gain = {1.0, -1.0};
+    truths.push_back(rotation);
+    EngineTruth excluded;
+    excluded.camera = FrameGenEngineCamera::kExcluded;
+    excluded.gain = {2.0, -2.0};
+    truths.push_back(excluded);
+    // Excluded in vector pixels, with a little noise: still content's
+    // vectors are near zero in NDC, not in their own units.
+    excluded.gain = canonical[3].gain;
+    excluded.noise = 0.02;
+    truths.push_back(excluded);
+    for (const EngineTruth& truth : truths) {
+        EngineScenario scenario(truth);
+        depthxr::FrameGenEngineValidator validator;
+        const std::optional<int> locked = RunEngineScenario(validator, scenario, 0, 30);
+        const auto report = validator.Report();
+        const std::string what = std::to_string(truth.gain[0]) + "," + std::to_string(truth.gain[1]) + " " +
+                                 depthxr::ToString(truth.camera) + ": " + depthxr::ToString(report.state) + ", " +
+                                 report.reason;
+        Expect(locked && *locked <= 15 && depthxr::SameFrameGenEngineConvention(validator.Convention(), scenario.Truth()) &&
+                   !validator.Convention().jitter && validator.Convention().offset == std::array<float, 2>{0.0f, 0.0f},
+               "Engine validator: the convention is adopted (" + what + ")");
+    }
+
+    // Never adopted: the head never pitching (no batch), the vectors noisy,
+    // a frame late, axes swapped, axes swapped with the head pitching as it
+    // turns (the other axis explains each better), all zero.
+    auto never = [](EngineTruth truth, const std::string& what, const std::string& reason = "") {
+        EngineScenario scenario(truth);
+        depthxr::FrameGenEngineValidator validator;
+        const std::optional<int> locked = RunEngineScenario(validator, scenario, 0, 300);
+        Expect(!locked && validator.GetState() != State::kDisabled,
+               "Engine validator: never adopted " + what + " (" + depthxr::ToString(validator.Report().state) + ", " +
+                   validator.Report().reason + ")");
+        Expect(reason.empty() || validator.Report().reason.find(reason) != std::string::npos,
+               "Engine validator: " + what + ": " + validator.Report().reason);
+        return validator.Report();
+    };
+    EngineTruth yaw_only;
+    yaw_only.pitch = false;
+    const auto unbatched = never(yaw_only, "without the head pitching");
+    Expect(unbatched.batches == 0, "Engine validator: no batch completes without pitch");
+    EngineTruth noisy;
+    noisy.noise = 2.0;
+    never(noisy, "noisy vectors", "corr2");
+    EngineTruth late;
+    late.late = true;
+    const auto lagged = never(late, "late vectors");
+    Expect(lagged.lag, "Engine validator: late vectors fit the pair before better");
+    EngineTruth swapped;
+    swapped.swapped = true;
+    never(swapped, "swapped axes");
+    swapped.correlated = true;
+    never(swapped, "swapped axes of a head pitching as it turns", "swapped");
+    EngineTruth zero;
+    zero.zero = true;
+    never(zero, "zero vectors");
+
+    // A prior: one batch adopts it, sooner than three; never without a batch.
+    {
+        EngineScenario scenario(EngineTruth{});
+        depthxr::FrameGenEngineValidator plain;
+        const std::optional<int> without = RunEngineScenario(plain, scenario, 0, 40);
+        depthxr::FrameGenEngineValidator primed;
+        primed.SetPrior(scenario.Truth());
+        const std::optional<int> with = RunEngineScenario(primed, scenario, 0, 40);
+        Expect(with && without && *with < *without && primed.Report().prior,
+               "Engine validator: a prior is adopted after one batch (" + std::to_string(with.value_or(-1)) + " vs " +
+                   std::to_string(without.value_or(-1)) + ")");
+        EngineScenario flat(yaw_only);
+        depthxr::FrameGenEngineValidator unbatched_prior;
+        unbatched_prior.SetPrior(flat.Truth());
+        Expect(!RunEngineScenario(unbatched_prior, flat, 0, 300), "Engine validator: a prior alone never adopts");
+    }
+
+    // Fixed: only that convention locks.
+    {
+        EngineTruth uv;
+        uv.gain = {2.0, -2.0};
+        EngineScenario scenario(uv);
+        depthxr::FrameGenEngineValidator fixed;
+        fixed.Fix(depthxr::FrameGenEngineConvention{});
+        Expect(!RunEngineScenario(fixed, scenario, 0, 200) && fixed.Report().fixed,
+               "Engine validator: a fixed convention that is not the truth never locks");
+        depthxr::FrameGenEngineValidator right;
+        depthxr::FrameGenEngineConvention truth = scenario.Truth();
+        right.Fix(truth);
+        Expect(RunEngineScenario(right, scenario, 0, 40).has_value(), "Engine validator: the fixed truth locks");
+    }
+
+    // Jitter: each frame's vectors offset by up to 0.6 vector pixels.
+    {
+        EngineTruth jittered;
+        jittered.jitter_px = 0.6;
+        EngineScenario scenario(jittered);
+        depthxr::FrameGenEngineValidator validator;
+        const std::optional<int> locked = RunEngineScenario(validator, scenario, 0, 60);
+        Expect(locked && validator.Convention().jitter && validator.Report().jitter_px[0] > 0.15 &&
+                   validator.Convention().offset == std::array<float, 2>{0.0f, 0.0f},
+               "Engine validator: jitter is found (" + std::to_string(validator.Report().jitter_px[0]) + " px)");
+    }
+
+    // An offset every frame's vectors share (0.5 vector pixels): no jitter,
+    // the offset taken out (in e's units: NDC over the gain).
+    {
+        EngineTruth offset;
+        offset.gain = {1.0, -1.0};
+        offset.offset_px = 0.5;
+        EngineScenario scenario(offset);
+        depthxr::FrameGenEngineValidator validator;
+        const std::optional<int> locked = RunEngineScenario(validator, scenario, 0, 60);
+        const std::array<float, 2> found = validator.Convention().offset;
+        const std::array<double, 2> expected{0.5 / (0.5 * 4339.0) / 1.0, 0.5 / (0.5 * 4285.0) / -1.0};
+        Expect(locked && !validator.Convention().jitter && std::abs(found[0] - expected[0]) < 0.02 * std::abs(expected[0]) &&
+                   std::abs(found[1] - expected[1]) < 0.02 * std::abs(expected[1]),
+               "Engine validator: a constant offset is taken out (" + std::to_string(found[0]) + "/" +
+                   std::to_string(found[1]) + ")");
+    }
+
+    // Contradiction: locked, then the vectors fit another convention.
+    {
+        EngineScenario scenario(EngineTruth{});
+        depthxr::FrameGenEngineValidator validator;
+        Expect(RunEngineScenario(validator, scenario, 0, 30).has_value(), "Engine validator: locked before the change");
+        scenario.truth().gain = {1.0, -1.0};
+        RunEngineScenario(validator, scenario, 30, 10);
+        Expect(validator.GetState() == State::kSuspended, "Engine validator: a contradicting batch suspends (" +
+                                                              std::string(depthxr::ToString(validator.GetState())) + ")");
+        // 10 s on it calibrates again, and adopts the new convention.
+        const std::optional<int> relocked = RunEngineScenario(validator, scenario, 40, 1200);
+        Expect(relocked && depthxr::SameFrameGenEngineConvention(validator.Convention(), scenario.Truth()),
+               "Engine validator: after 10 s suspended, calibrated again");
+    }
+
+    // Disabled: 3 suspensions within 5 minutes; spread wider, never.
+    for (const double gap : {20.0, 200.0}) {
+        EngineScenario scenario(EngineTruth{});
+        depthxr::FrameGenEngineValidator validator;
+        int frame = 0;
+        for (int round = 0; round < 3; ++round) {
+            scenario.truth().gain = round % 2 ? std::array<double, 2>{1.0, -1.0} : std::array<double, 2>{1.0, 1.0};
+            RunEngineScenario(validator, scenario, frame, static_cast<int>(gap * 10), 0.1);
+            frame += static_cast<int>(gap * 10);
+        }
+        scenario.truth().gain = {2.0, -2.0};
+        RunEngineScenario(validator, scenario, frame, 100, 0.1);
+        Expect((validator.GetState() == State::kDisabled) == (gap < 100.0),
+               "Engine validator: 3 suspensions " + std::to_string(gap) + " s apart: " +
+                   depthxr::ToString(validator.GetState()) + " (" + validator.Report().reason + ")");
+    }
+
+    // Disabled: no convention over 5 minutes of batches; but never without
+    // still content (no batch, however long), and never by time without
+    // batches: frames that stop (Frame Generation off, a pause) or that
+    // have nothing still to fit.
+    {
+        EngineScenario scenario(noisy);
+        depthxr::FrameGenEngineValidator validator;
+        RunEngineScenario(validator, scenario, 0, 3100, 0.1);
+        Expect(validator.GetState() == State::kDisabled, "Engine validator: no convention after 5 minutes disables");
+        EngineTruth on_foot;
+        on_foot.still = false;
+        EngineScenario walking(on_foot);
+        depthxr::FrameGenEngineValidator patient;
+        RunEngineScenario(patient, walking, 0, 6000, 0.1);
+        Expect(patient.GetState() != State::kDisabled && patient.Report().batches == 0,
+               "Engine validator: no still content never disables");
+        depthxr::FrameGenEngineValidator paused;
+        RunEngineScenario(paused, scenario, 0, 6, 0.1);
+        RunEngineScenario(paused, scenario, 3600, 6, 0.1);
+        Expect(paused.GetState() != State::kDisabled && paused.Report().batches >= 3,
+               "Engine validator: 6 minutes without frames do not disable (" +
+                   std::string(depthxr::ToString(paused.GetState())) + ", " + paused.Report().reason + ")");
+        depthxr::FrameGenEngineValidator stepped_off;
+        RunEngineScenario(stepped_off, scenario, 0, 6, 0.1);
+        EngineScenario off(noisy);
+        off.truth().still = false;
+        RunEngineScenario(stepped_off, off, 6, 3100, 0.1);
+        RunEngineScenario(stepped_off, scenario, 3106, 6, 0.1);
+        Expect(stepped_off.GetState() != State::kDisabled && stepped_off.Report().batches >= 3,
+               "Engine validator: 5 minutes without still content after two batches do not disable (" +
+                   std::string(depthxr::ToString(stepped_off.GetState())) + ", " + stepped_off.Report().reason + ")");
+    }
+
+    // A batch that cannot close (no pitch) starts over rather than holding
+    // minutes of frames: once the head pitches, batches close as before.
+    {
+        EngineScenario flat(yaw_only);
+        depthxr::FrameGenEngineValidator validator;
+        RunEngineScenario(validator, flat, 0, 1000);
+        EngineScenario scenario(EngineTruth{});
+        const std::optional<int> locked = RunEngineScenario(validator, scenario, 1000, 40);
+        Expect(locked && *locked <= 1015,
+               "Engine validator: batches close after a long batch without pitch (" +
+                   std::to_string(locked.value_or(-1)) + ")");
+    }
+
+    // Verdicts: locked, then most frames held back by their verdict suspends.
+    {
+        EngineScenario scenario(EngineTruth{});
+        depthxr::FrameGenEngineValidator validator;
+        Expect(RunEngineScenario(validator, scenario, 0, 30).has_value(), "Engine validator: locked");
+        for (int f = 30; f < 130 && validator.Locked(); ++f) {
+            validator.Add(scenario.Frame(f, validator.Convention(), true, f % 3 ? 0u : depthxr::kFrameGenEngineVerdictStale),
+                          f / 90.0);
+        }
+        const auto report = validator.Report();
+        Expect(validator.GetState() == State::kSuspended && report.reasons[1] > 20,
+               "Engine validator: a third of the frames held back suspends (" + report.reason + ")");
+    }
+
+    // The evidence as the GPU writes it reads back into the same sums.
+    {
+        std::array<float, 4 * depthxr::kFrameGenEngineEvidenceTexels> evidence{};
+        std::array<float, 4 * depthxr::kFrameGenEngineParamsTexels> params{};
+        for (std::size_t i = 0; i < evidence.size(); ++i) evidence[i] = static_cast<float>(i + 1);
+        params = {0.25f, -0.5f, 6.0f, 0.9f};
+        params[11] = 1.0f;
+        const auto read = depthxr::ReadFrameGenEngineEvidence(evidence.data(), params.data());
+        Expect(read.cockpit[0].Samples() == 1.0f && read.cockpit[1].Samples() == 11.0f && read.swapped[1] == 22.0f &&
+                   read.measured[1].Samples() == 33.0f && read.head_gap == 43.0f && read.variants[0] == 45.0f &&
+                   read.textured == 55.0f && read.epe_samples[2] == 68.0f && read.valid == 71.0f && read.flow_px == 72.0f &&
+                   read.lag_cost == 73.0f &&
+                   read.lag_moving == 78.0f && read.cockpit_lag[1].Samples() == 91.0f && read.lag &&
+                   read.lag_photometric && read.bias == std::array<float, 2>{0.25f, -0.5f} && read.verdict == 6u && read.stale,
+               "Engine validator: the evidence's texels read back in their places");
+    }
+}
+
+// The prior table: MSFS 2024's FB vectors on Direct3D 12, nothing else.
+void TestFrameGenEnginePrior() {
+    const auto msfs = depthxr::FrameGenEnginePriorFor("FlightSimulator2024.exe", false, "D3D12");
+    Expect(msfs && depthxr::SameFrameGenEngineConvention(*msfs, depthxr::FrameGenEngineConvention{}),
+           "Engine prior: MSFS 2024 expects XR_FB_space_warp's convention");
+    Expect(!depthxr::FrameGenEnginePriorFor("FlightSimulator2024.exe", true, "D3D12") &&
+               !depthxr::FrameGenEnginePriorFor("FlightSimulator2024.exe", false, "Vulkan") &&
+               !depthxr::FrameGenEnginePriorFor("StarCitizen.exe", false, "D3D12"),
+           "Engine prior: none for another extension, API or game");
+    // The lag test's acceleration: a steady turn is none, a change is.
+    depthxr::FrameGenViewGeometry a, b, c;
+    auto yaw = [](double degrees) {
+        const double half = degrees * 3.14159265358979 / 360.0;
+        return std::array<float, 4>{0.0f, static_cast<float>(std::sin(half)), 0.0f, static_cast<float>(std::cos(half))};
+    };
+    a.orientation = yaw(0.0);
+    b.orientation = yaw(3.0);
+    c.orientation = yaw(6.0);
+    Expect(depthxr::FrameGenAngularAcceleration(c, b, a) < 1e-3, "Engine prior: a steady turn does not accelerate");
+    c.orientation = yaw(4.0);
+    Expect(std::abs(depthxr::FrameGenAngularAcceleration(c, b, a) - 2.0) < 1e-3, "Engine prior: 3 then 1 degree is 2");
 }
 
 // Research switches: the environment first, then framegen-research.txt for
@@ -5120,6 +5666,9 @@ int main() {
     TestFrameGenEngineGates();
     TestFrameGenEngineCuts();
     TestFrameGenDeclaredChange();
+    TestFrameGenEngineEvidencePlan();
+    TestFrameGenEngineValidator();
+    TestFrameGenEnginePrior();
     TestResearchSwitches();
     TestTurboMetricsSettingsParsing();
     TestTurboMetricsSessionRoundTrip();

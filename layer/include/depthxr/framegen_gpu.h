@@ -159,6 +159,10 @@ struct FrameGenEngineStatus {
     std::uint64_t waits{0};
     std::uint64_t unready{0};
     std::uint64_t paired{0};
+    // Stage 3: frames whose evidence was taken (every view's), and what the
+    // validator makes of it.
+    std::uint64_t evidence{0};
+    FrameGenEngineValidation validation;
     bool stopped{false};          // the device was removed: nothing more is read
     // Each motion vector image's description (resource, heap), once each,
     // and debug-layer messages about their states (VECTORXR_FRAMEGEN_ENGINE_MV_DEBUG).
@@ -214,6 +218,10 @@ class FrameGenGpu {
     // FrameGenTuning::engine_mode from kCapture; `resampled`, when given,
     // says per job whether it was (a view not set up, or with no color
     // capture to pair with, is left out while its census is still taken).
+    // From kObserve, Execute takes the evidence on the fields
+    // (FrameGenViewRequest::engine_motion) and judges their convention
+    // (FrameGenEngineValidator, in EngineStatus); a validator that disabled
+    // them leaves every view out.
     // Never waits: with every motion slot still on the GPU the call is
     // skipped (false, an empty error).
     virtual bool SupportsEngineMotion() const { return false; }
@@ -226,6 +234,9 @@ class FrameGenGpu {
     }
     // With the censuses read back since sequence `after` (FrameGenEngineCensus::sequence).
     virtual FrameGenEngineStatus EngineStatus(std::uint64_t /*after*/ = 0) const { return {}; }
+    // Stage 3: the convention the game is expected to use
+    // (FrameGenEnginePriorFor), for the validator (one batch adopts it).
+    virtual void SetEnginePrior(const FrameGenEngineConvention& /*convention*/) {}
     // Research: the next CaptureMotion (not an early one) also copies the
     // images into `directory` (which must exist), every image or only each
     // job's vectors.image_index; files are written after the GPU, by a
