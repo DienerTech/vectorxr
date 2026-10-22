@@ -102,8 +102,17 @@ enum class FrameGenPass : std::uint8_t {
     // (FrameGenEngineWorldParams), written into kWorldParams in place of the
     // fit (kWorldReduce, kWorldSolve) by one thread.
     kWorldSet,
+    // Engine motion vectors, stage 5 (FrameGenTuning::engine_mode kAssist,
+    // AppendEngineAssist): each flow cell's candidates from the frame's raw
+    // vectors (its nearest and farthest surface's, as Frame Generation's flow),
+    // then the measured flow or the vectors per cell, whichever the luma
+    // follows better (kEngineFlow, the flow the filters read, and the cells'
+    // labels), then each tile's trust in the vectors from the labels.
+    kEngineConvert,
+    kEngineMerge,
+    kEngineTiles,
 };
-inline constexpr std::size_t kFrameGenPassCount = 33;
+inline constexpr std::size_t kFrameGenPassCount = 36;
 
 // Logical textures owned per view. History and filtered flow are ping-pong
 // pairs: "newest" is written this submission, "previous" is last
@@ -181,6 +190,24 @@ enum class FrameGenTextureKind : std::uint8_t {
     kEnginePartials,
     kEngineParams,
     kEngineEvidence,
+    // Stage 5 (kEngineConvert, kEngineMerge, kEngineTiles), at the final flow
+    // level: each cell's two candidates (the nearest surface's vector in xy,
+    // the farthest's in zw) and what kEngineMerge needs to know of them (the
+    // spread, flags, the tile's trust and their classes); the flow the
+    // filters read (kFlow's contract: kFlow itself where the frame's verdict
+    // holds the vectors back); each cell's label (kFrameGenEngineLabel*), in
+    // the ring like the filtered flow (synthesis's tint reads a real frame's);
+    // and per tile of kFrameGenEngineTile cells the trust in the vectors, a
+    // ping-pong pair like the history.
+    kEngineCandidate,
+    kEngineInfo,
+    kEngineFlow,
+    kEngineLabels,
+    kEngineTiles,
+    kEngineTilesPrevious,
+    // The other view's kEngineParams, for kEngineConvert: its verdict holds
+    // this view's vectors back too (the eyes take them, or not, together).
+    kEngineParamsOther,
 };
 
 // The flow level the optical flow hardware fills: a 4x4 grid on the
@@ -235,6 +262,13 @@ inline constexpr std::uint32_t kFrameGenFlagDepthMatch = 2048u;
 // The kShift* passes build the motion map (kMotionMap; tuning[1]: the
 // synthesis step), and synthesis reads it (input 5): FrameGenTuning::depth_splat.
 inline constexpr std::uint32_t kFrameGenFlagDepthSplat = 4096u;
+// Engine motion vectors (stage 5). kFilter: cells the game's vectors moved
+// follow their label's class (input 4, kEngineLabels; options.x 1: near
+// content of its own motion keeps it when it matches clearly,
+// FrameGenTuning::engine_cockpit), not their distance (FrameGenTuning::
+// engine_filter). Synthesis with the confidence view: tinted by the labels
+// (input 5; FrameGenTuning::engine_tint).
+inline constexpr std::uint32_t kFrameGenFlagEngine = 8192u;
 // kFilter: the sky (FG_WORLD_SKY and beyond) turns with the world's rotation
 // where the world's motion is the application's own (kWorldSet: input 3's
 // texel 2 y is 1), never with a fitted one (FrameGenTuning::world_sky).
@@ -460,6 +494,10 @@ struct FrameGenViewRequest {
     std::array<std::uint32_t, 2> engine_images{};
     FrameGenExtent engine_vectors;
     bool engine_previous{false};
+    // Set by backends with engine_motion from kAssist: the tiles' trust in
+    // the vectors from the frame before is in kEngineTilesPrevious (none
+    // after a discontinuity: each tile starts at half).
+    bool engine_tiles{false};
 };
 
 // How far Frame Generation goes with a game's motion vectors
@@ -470,7 +508,11 @@ struct FrameGenViewRequest {
 // and every 30th frame) (stage 2); observe takes the evidence on each
 // frame's vectors as well, works out their convention from it
 // (FrameGenEngineValidator) and judges each frame by it (stage 3).
-// Generated frames are made as without them in all three.
+// Generated frames are made as without them in all three. Assist (stage 5)
+// measures the flow as before and takes the vectors per flow cell where the
+// luma follows them better, on frames whose verdict lets them be used: the
+// measured flow, bit for bit, on the others. Interpolating, the mode goes no
+// further than assist.
 enum class FrameGenEngineMode : std::uint8_t {
     kOff,
     kCensus,
@@ -481,8 +523,8 @@ enum class FrameGenEngineMode : std::uint8_t {
 };
 
 const char* ToString(FrameGenEngineMode mode); // "off", "census", ...
-// "off", "census", "capture" or "observe" (any case); anything else is off:
-// the later modes do not exist yet.
+// "off", "census", "capture", "observe" or "assist" (any case); anything else
+// is off: lead does not exist yet.
 FrameGenEngineMode ParseFrameGenEngineMode(const char* value);
 
 // What a game's motion vectors leave of the movement.
@@ -598,6 +640,18 @@ struct FrameGenTuning {
     float delta_scale{1.0f};
     bool world_sky{false};
     bool delta_watchdog{false};
+    // Stage 5, from kAssist (research, the presenter's switches): the filters
+    // treat cells the game's vectors moved by their label's class instead of
+    // their distance (VECTORXR_FRAMEGEN_ENGINE_FILTER=1, kFrameGenFlagEngine:
+    // the head's, rigid; their own movement, kept beyond 4 m and never the
+    // world's; the world's, as world content); near content of its own
+    // movement (levers, a yoke) keeps it when extrapolating where it matches
+    // clearly (VECTORXR_FRAMEGEN_ENGINE_COCKPIT=1); and the confidence view
+    // tints the generated frames by the labels (VECTORXR_FRAMEGEN_ENGINE_TINT=1,
+    // without depth_splat, whose motion map synthesis reads there).
+    bool engine_filter{false};
+    bool engine_cockpit{false};
+    bool engine_tint{false};
 };
 
 struct FrameGenViewPlan {
@@ -1284,6 +1338,60 @@ inline constexpr std::uint32_t kFrameGenEngineVerdictJitter = 32u;     // jitter
 inline constexpr std::size_t kFrameGenEngineVerdictReasons = 6;
 const char* FrameGenEngineVerdictName(std::size_t index); // "unlocked", "stale", ...
 
+// --- Engine motion vectors: assist (stage 5) --------------------------------
+//
+// On frames whose evidence is taken (FrameGenViewRequest::engine_motion),
+// after it (AppendEngineAssist): kEngineConvert gives each final-level flow
+// cell two candidates from the raw vectors under its half-resolution
+// texels, the nearest surface's and the farthest's (the background, the far
+// sentinel included), each converted to Frame Generation's flow by the
+// convention (the head's movement taken out through the declared poses at
+// its depth); kEngineMerge keeps the measured flow, bit for bit, wherever the
+// frame's verdict holds the vectors back, and elsewhere takes the candidate
+// whose block cost (REFINE's own) beats the measured flow's (Assist; by a
+// margin the tile's trust widens), polished by a texel where that matches
+// clearly better, labelling each cell; kEngineTiles moves each tile's trust
+// toward the share of its textured cells the vectors won.
+//
+// A cell's label (kEngineLabels, R32_UINT): bits 0-2 what moved it, bits 3-4
+// the class of its vector (the engine's candidates': the head's movement, the
+// world's, their own), bit 6 the frame's verdict held the vectors back, bit 7
+// the cell is textured (its block's luma varies: the tiles' share counts
+// those).
+inline constexpr std::uint32_t kFrameGenEngineLabelSource = 7u;      // mask
+inline constexpr std::uint32_t kFrameGenEngineLabelMeasured = 0u;    // the measured flow
+inline constexpr std::uint32_t kFrameGenEngineLabelNear = 1u;        // the vectors: the nearest surface's
+inline constexpr std::uint32_t kFrameGenEngineLabelFar = 2u;         // ... the farthest's
+inline constexpr std::uint32_t kFrameGenEngineLabelZero = 3u;        // no motion (Lead)
+inline constexpr std::uint32_t kFrameGenEngineLabelSearched = 4u;    // searched from the better of them and none (Lead)
+inline constexpr std::uint32_t kFrameGenEngineLabelAbsent = 5u;      // measured: the vectors were cleared (an exact zero on far content the head moved)
+inline constexpr std::uint32_t kFrameGenEngineLabelDisproved = 6u;   // measured: no depth under the cell the other eye did not disprove
+inline constexpr std::uint32_t kFrameGenEngineClassShift = 3u;
+inline constexpr std::uint32_t kFrameGenEngineClassHead = 1u;        // within a texel (or 8%) of no motion
+inline constexpr std::uint32_t kFrameGenEngineClassWorld = 2u;       // ... of the world's motion (kWorldParams)
+inline constexpr std::uint32_t kFrameGenEngineClassOwn = 3u;         // neither
+inline constexpr std::uint32_t kFrameGenEngineLabelInvalid = 64u;    // the frame's verdict held the vectors back
+inline constexpr std::uint32_t kFrameGenEngineLabelTextured = 128u;
+// The tiles' side in final-level cells.
+inline constexpr std::uint32_t kFrameGenEngineTile = 8u;
+// kEngineMerge's options.x: Assist's rule, or Lead's (stage 6).
+inline constexpr std::uint32_t kFrameGenEngineMergeAssist = 1u;
+inline constexpr std::uint32_t kFrameGenEngineMergeLead = 2u;
+// kEngineConvert's options.x: the camera from bit 4 (as kEngineReduce's),
+// the frame before's tiles bound (input 3), the world's motion bound (input
+// 4: the classes' world).
+inline constexpr std::uint32_t kFrameGenEngineConvertTiles = 1u << 8;
+inline constexpr std::uint32_t kFrameGenEngineConvertWorld = 1u << 9;
+// The tiles over a final-level extent.
+inline FrameGenExtent FrameGenEngineTiles(FrameGenExtent cells) {
+    return {(cells.width + kFrameGenEngineTile - 1) / kFrameGenEngineTile,
+            (cells.height + kFrameGenEngineTile - 1) / kFrameGenEngineTile};
+}
+// The mode a submission's engine passes run in: tuning.engine_mode, no
+// further than Assist when interpolating (Lead's model-driven flow needs
+// Interpolate's own gate).
+FrameGenEngineMode FrameGenEngineModeFor(const FrameGenTuning& tuning);
+
 // One view's evidence for a frame, as read back (kEngineEvidence, the
 // solve's kEngineParams), with what it was taken for.
 struct FrameGenEngineEvidence {
@@ -1398,6 +1506,12 @@ struct FrameGenEngineValidation {
     double with_measured{0.0};
     double lag_cost{0.0};
     double lag_variant{0.0};
+    // Stage 5, the backend's (FrameGenGpu::EngineStatus; the validator
+    // leaves them): frames the vectors were merged into, and of their flow
+    // cells the textured ones and those the vectors moved.
+    std::uint64_t merged{0};
+    double textured_cells{0.0};
+    double moved_cells{0.0};
 };
 const char* ToString(FrameGenEngineValidation::State state); // "probing", "calibrating", ...
 
@@ -1442,6 +1556,10 @@ class FrameGenEngineValidator {
     // VECTORXR_FRAMEGEN_ENGINE_MV_CONVENTION: only this one is ever under
     // test or locked.
     void Fix(const FrameGenEngineConvention& convention);
+    // Tests: this one locked from now on, whatever the evidence says (each
+    // frame's verdict still holds the vectors back where it fails): what the
+    // vectors do once locked, tested apart from working out the convention.
+    void LockForTest(const FrameGenEngineConvention& convention);
     // A frame's evidence, at `seconds` (any steady clock).
     void Add(const FrameGenEngineFrameEvidence& frame, double seconds);
     State GetState() const { return state_; }
@@ -1486,6 +1604,7 @@ class FrameGenEngineValidator {
     std::optional<FrameGenEngineConvention> prior_;
     std::optional<FrameGenEngineConvention> fixed_;
     bool candidate_prior_{false}; // the candidate is the prior (or fixed) one: one batch adopts it
+    bool held_for_test_{false};   // LockForTest: the verdicts are counted, nothing else changes
     std::uint32_t agreeing_{0};   // batches in a row of the candidate
     std::uint32_t passed_{0};     // photometric batches in a row passing
     std::uint32_t worse_{0};      // ... locked, worse than the measured flow

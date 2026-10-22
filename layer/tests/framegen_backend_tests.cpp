@@ -392,6 +392,7 @@ FrameGenViewSubmission Submission(std::uint32_t source_index, std::int64_t forma
 }
 
 void EngineObserveScenarios(Harness& harness);
+void EngineAssistScenarios(Harness& harness);
 void WorldDeltaScenarios(Harness& harness);
 
 int RunScenarios(Harness& harness) {
@@ -1270,6 +1271,14 @@ int RunScenarios(Harness& harness) {
         EngineObserveScenarios(harness);
     }
 
+    // 3v. Engine motion vectors, stage 5 (Direct3D 12): Assist takes the
+    // game's vectors per flow cell where the luma follows them better, the
+    // measured flow bit for bit on frames whose verdict holds them back
+    // (EngineAssistScenarios).
+    if (harness.create_texture_data && harness.create_depth_data && harness.upload_sized && harness.readback_sized) {
+        EngineAssistScenarios(harness);
+    }
+
     // 3w. Engine motion vectors, stage 4 (Direct3D 12): the world's motion
     // from the application's movement instead of the fit, and the sky
     // turned exactly by it (WorldDeltaScenarios).
@@ -1621,9 +1630,9 @@ Pixels CockpitAt(std::uint32_t width, std::uint32_t height, float head_x, float 
 // y up, current minus previous, the head's movement included), ext (y
 // down), uv (uv units, y down) or pixels (the image's pixels, y down);
 // "-reversed" makes any of them previous minus current. RGBA16F.
-MotionDumpImage ProfileMotionVectors(std::uint32_t width, std::uint32_t height, float head_x, float tan_left,
-                                     float tan_right, float tan_vertical, float scroll_step, const std::string& convention) {
-    // n = g * e: the gain each convention's vectors have (FrameGenEngineCanonicalGains).
+// n = g * e: the gain each convention's vectors have (FrameGenEngineCanonicalGains),
+// for vectors `width` x `height`.
+std::array<float, 2> ProfileMotionGain(const std::string& convention, std::uint32_t width, std::uint32_t height) {
     const bool reversed = convention.size() > 9 && convention.substr(convention.size() - 9) == "-reversed";
     const std::string name = reversed ? convention.substr(0, convention.size() - 9) : convention;
     std::array<float, 2> gain{1.0f, 1.0f};
@@ -1631,6 +1640,12 @@ MotionDumpImage ProfileMotionVectors(std::uint32_t width, std::uint32_t height, 
     if (name == "uv") gain = {2.0f, -2.0f};
     if (name == "pixels") gain = {2.0f / static_cast<float>(width), -2.0f / static_cast<float>(height)};
     if (reversed) gain = {-gain[0], -gain[1]};
+    return gain;
+}
+
+MotionDumpImage ProfileMotionVectors(std::uint32_t width, std::uint32_t height, float head_x, float tan_left,
+                                     float tan_right, float tan_vertical, float scroll_step, const std::string& convention) {
+    const std::array<float, 2> gain = ProfileMotionGain(convention, width, height);
     // Scenery at tangent t this frame was at t + scroll_step the frame before.
     const float scenery = -2.0f * scroll_step / (tan_right - tan_left) / gain[0];
     MotionDumpImage vectors;
@@ -1660,6 +1675,7 @@ const char* const kProfileNames[] = {"luma",        "downsample",  "search",    
                                      "flow pack",   "flow unpack", "trust update", "shift clear", "shift splat",
                                      "shift resolve", "shift fill", "raw pack",   "trust resolve", "shading rate", "world reduce", "world solve", "trust vote", "depth scale", "scale vote", "depth stale", "cross splat", "cross resolve",
                                      "engine census", "engine capture", "engine reduce", "engine solve", "world set",
+                                     "engine convert", "engine merge", "engine tiles",
                                      "source copy", "output copy",
                                      "hardware wait", "compose", "flow merge"};
 static_assert(std::size(kProfileNames) == kFrameGenPassCount + 5, "a name per profiled category");
@@ -4551,9 +4567,20 @@ int RunProfile(Harness& harness) {
     // FG_PROFILE_MV=1: the game's motion vectors too, at the depth's size
     // (ProfileMotionVectors, in FG_PROFILE_MV_CONVENTION), captured with each
     // real frame (stage 2's capture and its census, on the game's queue) and
-    // judged in Observe (stage 3's evidence passes, on the work queue).
-    const bool engine = std::getenv("FG_PROFILE_MV") && std::string(std::getenv("FG_PROFILE_MV")) == "1";
+    // judged in Observe (stage 3's evidence passes, on the work queue);
+    // FG_PROFILE_MV=assist merges them into the flow as well (stage 5's
+    // convert, merge and tiles), the convention locked from the start.
+    const std::string profile_mv = std::getenv("FG_PROFILE_MV") ? std::getenv("FG_PROFILE_MV") : "";
+    const bool engine = profile_mv == "1" || profile_mv == "assist";
+    const FrameGenEngineMode engine_mode = profile_mv == "assist" ? FrameGenEngineMode::kAssist
+                                           : engine                ? FrameGenEngineMode::kObserve
+                                                                   : FrameGenEngineMode::kOff;
     const std::string convention = std::getenv("FG_PROFILE_MV_CONVENTION") ? std::getenv("FG_PROFILE_MV_CONVENTION") : "fb";
+    if (engine_mode == FrameGenEngineMode::kAssist) {
+        FrameGenEngineConvention locked;
+        locked.gain = ProfileMotionGain(convention, depth_width, depth_height);
+        gpu->LockEngineForTest(locked);
+    }
     std::printf("Profiling %ux%u per eye, depth %ux%u, %s %s%s%s; rendering test frames...\n", width, height, depth_width,
                 depth_height, interpolate ? "interpolate" : "extrapolate", jit ? "just in time" : "4x",
                 engine ? (", with motion vectors (" + convention + ")").c_str() : "",
@@ -4738,7 +4765,7 @@ int RunProfile(Harness& harness) {
             FrameGenTuning executed = tuning;
             executed.analyze_only = jit;
             executed.cover = jit && interpolate;
-            executed.engine_mode = engine ? FrameGenEngineMode::kObserve : FrameGenEngineMode::kOff;
+            executed.engine_mode = engine_mode;
             Check(gpu->Execute(views, executed, result, error), "profile execute: " + error);
             const std::vector<double> times = gpu->PassMilliseconds();
             if (jit) {
@@ -4795,6 +4822,20 @@ int RunProfile(Harness& harness) {
             std::printf("  engine evidence %6.3f ms per real frame on the work queue (reduce and solve, both eyes; "
                         "gate <= 0.06): %llu frames' evidence read, the validator %s\n",
                         evidence, static_cast<unsigned long long>(status.evidence), ToString(status.validation.state));
+            if (engine_mode == FrameGenEngineMode::kAssist) {
+                // Stage 5's gate: convert, merge and tiles within 0.2 ms per
+                // real frame at level 3.
+                const auto convert = static_cast<std::size_t>(FrameGenPass::kEngineConvert);
+                const auto tiles = static_cast<std::size_t>(FrameGenPass::kEngineTiles);
+                double assist_ms = -1.0;
+                if (samples && sums.size() > tiles) {
+                    assist_ms = 0.0;
+                    for (std::size_t pass = convert; pass <= tiles; ++pass) assist_ms += sums[pass] / samples;
+                }
+                std::printf("  engine assist %6.3f ms per real frame on the work queue (convert, merge and tiles, both "
+                            "eyes, level %u; gate <= 0.2 at level 3)\n",
+                            assist_ms, static_cast<unsigned>(FrameGenFinalFlowLevel(tuning)));
+            }
             engine_ms = 0.0;
             engine_samples = 0;
         }
@@ -4826,7 +4867,7 @@ int RunProfile(Harness& harness) {
         tuning.hardware_flow = std::getenv("FG_PROFILE_HARDWARE") && std::string(std::getenv("FG_PROFILE_HARDWARE")) == "1";
         tuning.analyze_only = true;
         tuning.cover = interpolate;
-        tuning.engine_mode = engine ? FrameGenEngineMode::kObserve : FrameGenEngineMode::kOff;
+        tuning.engine_mode = engine_mode;
         ProfileUnderLoad(harness, std::atof(load), [&](FrameGenGpu& backend, int i) {
             if (i == 0) {
                 for (std::size_t eye = 0; eye < 2; ++eye) {
@@ -4873,6 +4914,8 @@ int RunProfile(Harness& harness) {
 // each frame pair it was recorded for, and print "World vs delta"; with
 // VECTORXR_FRAMEGEN_ENGINE_DELTA=1, _DELTA_FIXED=sign,scale (and _SKY=1) in
 // the environment, the backend sets the world's motion from it, as a session.
+// The game's motion vectors (FG_REPLAY_MV, RunReplay): Observe, or with
+// FG_REPLAY_MV_MODE=assist merged into the flow (stage 5, "Engine labels").
 bool g_replay = false;
 std::string g_replay_directory, g_replay_output;
 
@@ -5618,6 +5661,27 @@ int RunReplay(Harness& harness) {
     Check(perturb == "none" || perturb == "sign" || perturb == "yflip" || perturb == "scale2" || perturb == "stale" ||
               perturb == "zero" || perturb == "noise2" || perturb == "swapxy" || perturb == "bias1" || perturb == "index",
           "replay: FG_REPLAY_MV_PERTURB is none, sign, yflip, scale2, stale, zero, noise2, swapxy, bias1 or index");
+    // Stage 5: FG_REPLAY_MV_MODE=assist merges the vectors into the flow
+    // (observe by default), with the convention locked from the first frame
+    // (FG_REPLAY_MV_CONVENTION's: a capture's few frames do not work it out;
+    // FG_REPLAY_MV_LOCK=0 leaves it to the validator): each frame's verdict
+    // alone holds them back, the gate of the perturbations. The filters' and
+    // the tint's research switches as a session reads them
+    // (VECTORXR_FRAMEGEN_ENGINE_FILTER, _COCKPIT, _TINT).
+    const std::string engine_mode = env("FG_REPLAY_MV_MODE").empty() ? "observe" : env("FG_REPLAY_MV_MODE");
+    Check(engine_mode == "observe" || engine_mode == "assist", "replay: FG_REPLAY_MV_MODE is observe or assist");
+    const bool assist = engine != "off" && engine_mode == "assist";
+    if (assist && env("FG_REPLAY_MV_LOCK") != "0") {
+        gpu->LockEngineForTest(replay_convention);
+    }
+    const bool engine_filter = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_FILTER") == "1";
+    const bool engine_cockpit = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_COCKPIT") == "1";
+    const bool engine_tint = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_TINT") == "1";
+    // The measuring pass's labels (Assist): cells by what moved them, the
+    // classes of those the vectors moved, and those held back.
+    std::array<std::size_t, 8> label_sources{};
+    std::array<std::size_t, 4> label_classes{};
+    std::size_t label_cells = 0, label_held = 0;
     std::vector<std::vector<std::optional<MotionDumpImage>>> engine_images(frames.size(),
                                                                            std::vector<std::optional<MotionDumpImage>>(view_count));
     std::vector<std::vector<XrSwapchain>> engine_chains(frames.size(), std::vector<XrSwapchain>(view_count, XR_NULL_HANDLE));
@@ -5688,7 +5752,12 @@ int RunReplay(Harness& harness) {
         tuning.generated = 1;
         tuning.spare = false;
         tuning.fractions[0] = fraction;
-        tuning.engine_mode = engine != "off" ? FrameGenEngineMode::kObserve : FrameGenEngineMode::kOff;
+        tuning.engine_mode = assist ? FrameGenEngineMode::kAssist
+                             : engine != "off" ? FrameGenEngineMode::kObserve
+                                               : FrameGenEngineMode::kOff;
+        tuning.engine_filter = engine_filter;
+        tuning.engine_cockpit = engine_cockpit;
+        tuning.engine_tint = engine_tint;
         if (before && *before + 1 != k) tuning.interval_ratio = 1.0f;
         // Observe's evidence (stage 3) on frames whose every view has vectors,
         // calibrating where the pair is consecutive frames (by the game's
@@ -5795,6 +5864,31 @@ int RunReplay(Harness& harness) {
             }
         }
         Check(gpu->Execute(views, tuning, result, error), "replay execute: " + error);
+        // Stage 5: the labels of the measuring pass's frames whose views
+        // merged the vectors in (FrameGenExecuteResult::merged; a frame
+        // without the merge leaves an older frame's labels in their place).
+        for (std::size_t v = 0; v < view_count && assist && check_engine && vectors_everywhere; ++v) {
+            std::vector<float> labels;
+            FrameGenExtent extent{};
+            std::uint32_t channels = 0;
+            if (result.merged.size() <= v || !result.merged[v] ||
+                !gpu->ReadTexture(v, {FrameGenTextureKind::kEngineLabels, 0}, labels, extent, channels) || channels != 2) {
+                continue;
+            }
+            for (std::size_t i = 0; i < labels.size(); i += 2) {
+                const auto label = static_cast<std::uint32_t>(labels[i]);
+                ++label_cells;
+                if (label & kFrameGenEngineLabelInvalid) {
+                    ++label_held;
+                    continue;
+                }
+                const std::uint32_t source = label & kFrameGenEngineLabelSource;
+                ++label_sources[source];
+                if (source == kFrameGenEngineLabelNear || source == kFrameGenEngineLabelFar) {
+                    ++label_classes[(label >> kFrameGenEngineClassShift) & 3u];
+                }
+            }
+        }
         // Stage 4: the measuring pass's world fits (views that used depth:
         // the fit ran, unless kWorldSet stood in for it or followed it,
         // texel 2's y 1)
@@ -6184,6 +6278,28 @@ int RunReplay(Harness& harness) {
                     mean(v.epe[2], v.epe_samples[2]), v.epe_samples[2],
                     mean(mean(v.variant, v.textured), mean(v.measured_cost, v.with_measured)),
                     mean(v.variant, v.zero), mean(v.lag_cost, v.lag_variant));
+    }
+    // Stage 5 (FG_REPLAY_MV_MODE=assist): what moved the measuring pass's
+    // flow cells: the measured flow, the vectors (the nearest surface's, the
+    // farthest's), no motion and searched (Lead), the measured flow where the
+    // vectors were cleared or the depth disproved; the frames' verdicts
+    // holding them back; the classes of the cells the vectors moved.
+    if (assist) {
+        auto share = [&](std::size_t count, std::size_t of) { return of ? 100.0 * count / of : 0.0; };
+        const std::size_t moved = label_sources[kFrameGenEngineLabelNear] + label_sources[kFrameGenEngineLabelFar];
+        std::printf("Engine labels (FG_REPLAY_MV=%s, FG_REPLAY_MV_PERTURB=%s): %zu cells; held back %.2f%%; measured %.2f%%, "
+                    "nearest %.2f%%, farthest %.2f%%, zero %.2f%%, searched %.2f%%, absent %.2f%%, disproved %.2f%%; "
+                    "of the vectors' cells head %.2f%%, world %.2f%%, own %.2f%%\n",
+                    engine.c_str(), perturb.c_str(), label_cells, share(label_held, label_cells),
+                    share(label_sources[kFrameGenEngineLabelMeasured], label_cells),
+                    share(label_sources[kFrameGenEngineLabelNear], label_cells),
+                    share(label_sources[kFrameGenEngineLabelFar], label_cells),
+                    share(label_sources[kFrameGenEngineLabelZero], label_cells),
+                    share(label_sources[kFrameGenEngineLabelSearched], label_cells),
+                    share(label_sources[kFrameGenEngineLabelAbsent], label_cells),
+                    share(label_sources[kFrameGenEngineLabelDisproved], label_cells),
+                    share(label_classes[kFrameGenEngineClassHead], moved), share(label_classes[kFrameGenEngineClassWorld], moved),
+                    share(label_classes[kFrameGenEngineClassOwn], moved));
     }
     // Stage 4: the world fits against the application's movement: how the
     // fitted rotation correlates with the movement's under either sign of
@@ -8296,12 +8412,32 @@ using EngineQuat = std::array<double, 4>; // x, y, z, w
 struct EngineScene {
     bool walking{false};    // toward a wall, 2 cm a frame, with no cockpit
     double world_turn{0.0}; // radians a frame
+    // Stage 5: what the game's depth and vectors hold that its colour does
+    // not, or the reverse, fixed in the application's space below the
+    // cockpit: an invisible box 0.6 m off in the depth and the vectors (MSFS
+    // 2024's over its glareshield), the same box in the vectors alone (canopy
+    // glass), a panel 1 m off in the colour alone (a VR panel drawn without
+    // depth or vectors), a 2-pixel wire 0.4 m off in everything; the sky's
+    // vectors cleared to zero; how far the square moves across the world a
+    // frame; scenery 50 m off below the horizon moving across the world this
+    // far a frame (none: the sky there); and how far off the square is (its
+    // size and path as seen at 2 m).
+    bool box{false};
+    bool glass{false};
+    bool panel{false};
+    bool wire{false};
+    bool cleared_sky{false};
+    double square_speed{0.03};
+    double backdrop{0.0};
+    double square_distance{2.0};
 };
 
 // What the game's vectors carry wrongly, if anything: none, all zero, noise,
 // the pair before's (a frame late), objects' own movement alone, or the
-// first frame's for good (the game stopped writing them).
-enum class EngineFault { kNone, kZero, kNoise, kLate, kObjectOnly, kFrozen };
+// first frame's for good (the game stopped writing them); each frame's own
+// bias of up to half a vector pixel (a jittered projection); none for the
+// left eye (a game that sends one eye's).
+enum class EngineFault { kNone, kZero, kNoise, kLate, kObjectOnly, kFrozen, kJitter, kOneEye };
 
 double EngineHash(int a, int b) {
     std::uint32_t h = static_cast<std::uint32_t>(a) * 374761393u + static_cast<std::uint32_t>(b) * 668265263u;
@@ -8345,22 +8481,26 @@ EnginePose EngineEye(int frame, int eye) {
 }
 
 // What an eye sees through its view's uv at a frame: the kind (0 the sky:
-// `point` its direction in the world; 1 the cockpit: its point in the
-// application's space; 2 the square, 3 the wall: their points in the world),
-// its depth along the view axis (1000 m for the sky) and colour.
+// `point` its direction in the world; 1 the cockpit and the scene's
+// overlays: its point in the application's space; 2 the square, 3 the wall,
+// 4 the scenery below the horizon: their points in the world), its depth
+// along the view axis (1000 m for the sky) and colour. In the game's colour, its depth, or its vectors (the
+// scene's overlays are in some of them alone).
 struct EngineHit {
     int kind{0};
     EngineVec point{};
     double depth{1000.0};
     std::uint32_t color{0};
 };
+enum class EngineLayer { kColor, kDepth, kVectors };
 // The world as the application's space holds it at a frame: turned, and
 // left behind by a walking player.
 EngineVec EngineWorldToApp(const EngineScene& scene, int frame, const EngineVec& world, bool direction) {
     const EngineVec player{0.0, 0.0, scene.walking && !direction ? -0.02 * frame : 0.0};
     return EngineRotate(EngineYaw(scene.world_turn * frame), {world[0] - player[0], world[1] - player[1], world[2] - player[2]});
 }
-EngineHit EngineCast(const EngineScene& scene, int frame, const EnginePose& eye, double u, double v) {
+EngineHit EngineCast(const EngineScene& scene, int frame, const EnginePose& eye, double u, double v,
+                     EngineLayer layer = EngineLayer::kColor) {
     const EngineVec ray = EngineRotate(eye.orientation, {-kTan + 2.0 * kTan * u, kTan - 2.0 * kTan * v, -1.0});
     const EngineVec& origin = eye.position;
     EngineHit hit;
@@ -8373,24 +8513,59 @@ EngineHit EngineCast(const EngineScene& scene, int frame, const EnginePose& eye,
             hit = {1, p, t, Patch(static_cast<float>(p[0] * 480.0 + 100.0), static_cast<float>(p[1] * 480.0 + 100.0))};
         }
     }
+    // The overlays, each in the plane z of the application's space within
+    // [x0, x1] x [y0, y1], over the sky beside the cockpit.
+    auto overlay = [&](double z, double x0, double x1, double y0, double y1, std::uint32_t color) {
+        if (ray[2] >= 0.0) return;
+        const double t = (z - origin[2]) / ray[2];
+        const EngineVec p{origin[0] + t * ray[0], origin[1] + t * ray[1], origin[2] + t * ray[2]};
+        if (t > 0.0 && t < nearest && p[0] >= x0 && p[0] <= x1 && p[1] >= y0 && p[1] <= y1) {
+            nearest = t;
+            hit = {1, p, t, color ? color : Patch(static_cast<float>(p[0] * 100.0 + 700.0), static_cast<float>(p[1] * 100.0 + 700.0))};
+        }
+    };
+    if ((scene.box && layer != EngineLayer::kColor) || (scene.glass && layer == EngineLayer::kVectors)) {
+        overlay(-0.6, -0.45, -0.15, -0.45, -0.25, 0u);
+    }
+    if (scene.panel && layer == EngineLayer::kColor) {
+        overlay(-1.0, 0.3, 0.7, -0.7, -0.45, 0u);
+    }
+    if (scene.wire) {
+        // 2 pixels tall: 0.4 m off, a pixel is 0.4 * 2 * kTan / kEngineSize.
+        const double half = 0.4 * kTan / kEngineSize;
+        overlay(-0.4, -0.25, 0.25, -0.2 - half, -0.2 + half, Pack(0.95f, 0.95f, 0.9f));
+    }
     // The world: the ray in its frame.
     const EngineQuat back = EngineYaw(-scene.world_turn * frame);
     const EngineVec player{0.0, 0.0, scene.walking ? -0.02 * frame : 0.0};
     const EngineVec o = EngineRotate(back, origin);
     const EngineVec world_origin{o[0] + player[0], o[1] + player[1], o[2] + player[2]};
     const EngineVec world_ray = EngineRotate(back, ray);
-    const double plane = scene.walking ? -2.5 : -2.0;
+    // The square: as seen at 2 m, at its distance.
+    const double scale = scene.square_distance / 2.0;
+    const double plane = scene.walking ? -2.5 : -scene.square_distance;
     if (world_ray[2] < 0.0) {
         const double t = (plane - world_origin[2]) / world_ray[2];
         const EngineVec p{world_origin[0] + t * world_ray[0], world_origin[1] + t * world_ray[1],
                           world_origin[2] + t * world_ray[2]};
-        const double centre = -0.5 + 0.03 * frame;
+        const double centre = -0.5 * scale + scene.square_speed * frame;
         if (t < nearest && scene.walking) {
             nearest = t;
             hit = {3, p, t, Background(static_cast<float>(p[0] * 150.0 + 500.0), static_cast<float>(p[1] * 150.0 + 500.0))};
-        } else if (t < nearest && std::abs(p[0] - centre) < 0.25 && std::abs(p[1] - 0.1) < 0.25) {
+        } else if (t < nearest && std::abs(p[0] - centre) < 0.25 * scale && std::abs(p[1] - 0.1 * scale) < 0.25 * scale) {
             nearest = t;
-            hit = {2, p, t, Patch(static_cast<float>((p[0] - centre) * 60.0 + 300.0), static_cast<float>((p[1] - 0.1) * 60.0 + 300.0))};
+            hit = {2, p, t, Patch(static_cast<float>((p[0] - centre) * 60.0 / scale + 300.0),
+                                  static_cast<float>((p[1] - 0.1 * scale) * 60.0 / scale + 300.0))};
+        }
+    }
+    if (scene.backdrop > 0.0 && world_ray[2] < 0.0 && world_ray[1] < 0.0) {
+        const double t = (-50.0 - world_origin[2]) / world_ray[2];
+        const EngineVec p{world_origin[0] + t * world_ray[0], world_origin[1] + t * world_ray[1],
+                          world_origin[2] + t * world_ray[2]};
+        if (t < nearest) {
+            nearest = t;
+            hit = {4, p, t, Background(static_cast<float>((p[0] - scene.backdrop * frame) * 2.0 + 500.0),
+                                       static_cast<float>(p[1] * 2.0 + 500.0))};
         }
     }
     if (hit.kind == 0) {
@@ -8406,7 +8581,7 @@ EngineHit EngineCast(const EngineScene& scene, int frame, const EnginePose& eye,
 
 // Where a hit's content was in an eye's view at frame `before` (its uv;
 // false behind it): the cockpit stays in the application's space, the
-// square moved 3 cm across the world a frame, the wall and sky stay in the
+// square moved across the world (EngineScene::square_speed), the wall and sky stay in the
 // world (`objects_only`: the head and the world as at the hit's frame, the
 // objects' own movement alone).
 bool EngineWasAt(const EngineScene& scene, const EngineHit& hit, int frame, int before, const EnginePose& eye,
@@ -8418,7 +8593,8 @@ bool EngineWasAt(const EngineScene& scene, const EngineHit& hit, int frame, int 
         app = EngineWorldToApp(scene, world_frame, hit.point, true);
         direction = true;
     } else if (hit.kind >= 2) {
-        const EngineVec moved{hit.point[0] - (hit.kind == 2 ? 0.03 * (frame - before) : 0.0), hit.point[1], hit.point[2]};
+        const double speed = hit.kind == 2 ? scene.square_speed : hit.kind == 4 ? scene.backdrop : 0.0;
+        const EngineVec moved{hit.point[0] - speed * (frame - before), hit.point[1], hit.point[2]};
         app = EngineWorldToApp(scene, world_frame, moved, false);
     }
     const EngineQuat inverse{-eye.orientation[0], -eye.orientation[1], -eye.orientation[2], eye.orientation[3]};
@@ -8432,19 +8608,41 @@ bool EngineWasAt(const EngineScene& scene, const EngineHit& hit, int frame, int 
 // A scene's frames: per frame and eye, its colour, its depth (0.1 m to 1 km,
 // 1/z linear) and its vectors in D3D NDC (current minus previous, y up;
 // NaN where the content was behind the eye), all the movement in them and
-// objects' own alone.
+// objects' own alone (zero in the sky where the scene clears it). With
+// `truth`: Frame Generation's flow for each half-resolution texel's centre
+// (uv, the colour's content: the head's movement taken out by the poses at
+// its depth; NaN where it was behind the eye) with that depth, and the colour
+// of the frame after's world seen from the frame's eye, what extrapolating a
+// whole interval should show.
 struct EngineFrames {
     std::vector<std::array<Pixels, 2>> color;
     std::vector<std::array<std::vector<float>, 2>> depth;
     std::vector<std::array<std::vector<std::array<float, 2>>, 2>> motion;
     std::vector<std::array<std::vector<std::array<float, 2>>, 2>> objects;
+    std::vector<std::array<std::vector<std::array<float, 2>>, 2>> flow;
+    std::vector<std::array<std::vector<float>, 2>> surface;
+    std::vector<std::array<Pixels, 2>> next;
 };
-EngineFrames RenderEngineFrames(const EngineScene& scene) {
+FrameGenViewGeometry EngineGeometry(const EnginePose& pose) {
+    FrameGenViewGeometry geometry;
+    geometry.orientation = {static_cast<float>(pose.orientation[0]), static_cast<float>(pose.orientation[1]),
+                            static_cast<float>(pose.orientation[2]), static_cast<float>(pose.orientation[3])};
+    geometry.position = {static_cast<float>(pose.position[0]), static_cast<float>(pose.position[1]),
+                         static_cast<float>(pose.position[2])};
+    geometry.angle_left = geometry.angle_down = -std::atan(kTan);
+    geometry.angle_right = geometry.angle_up = std::atan(kTan);
+    return geometry;
+}
+
+EngineFrames RenderEngineFrames(const EngineScene& scene, bool truth = false) {
     EngineFrames frames;
     frames.color.resize(kEngineFrames);
     frames.depth.resize(kEngineFrames);
     frames.motion.resize(kEngineFrames);
     frames.objects.resize(kEngineFrames);
+    frames.flow.resize(truth ? kEngineFrames : 0);
+    frames.surface.resize(truth ? kEngineFrames : 0);
+    frames.next.resize(truth ? kEngineFrames : 0);
     std::vector<std::thread> workers;
     for (std::size_t k = 0; k < kEngineFrames; ++k) {
         workers.emplace_back([&, k] {
@@ -8464,8 +8662,8 @@ EngineFrames RenderEngineFrames(const EngineScene& scene) {
                 depth.resize(std::size_t{kEngineVectorSize} * kEngineVectorSize);
                 for (std::uint32_t y = 0; y < kEngineVectorSize; ++y) {
                     for (std::uint32_t x = 0; x < kEngineVectorSize; ++x) {
-                        const EngineHit hit =
-                            EngineCast(scene, frame, eye, (x + 0.5) / kEngineVectorSize, (y + 0.5) / kEngineVectorSize);
+                        const EngineHit hit = EngineCast(scene, frame, eye, (x + 0.5) / kEngineVectorSize,
+                                                         (y + 0.5) / kEngineVectorSize, EngineLayer::kDepth);
                         depth[std::size_t{y} * kEngineVectorSize + x] =
                             static_cast<float>((1.0 / hit.depth - 1.0 / 0.1) / (1.0 / 1000.0 - 1.0 / 0.1));
                     }
@@ -8477,16 +8675,50 @@ EngineFrames RenderEngineFrames(const EngineScene& scene) {
                     for (std::uint32_t y = 0; y < kEngineVectorSize; ++y) {
                         for (std::uint32_t x = 0; x < kEngineVectorSize; ++x) {
                             const double u = (x + 0.5) / kEngineVectorSize, v = (y + 0.5) / kEngineVectorSize;
-                            const EngineHit hit = EngineCast(scene, frame, eye, u, v);
+                            const EngineHit hit = EngineCast(scene, frame, eye, u, v, EngineLayer::kVectors);
                             std::array<double, 2> was{};
                             std::array<float, 2>& n = vectors[std::size_t{y} * kEngineVectorSize + x];
-                            if (EngineWasAt(scene, hit, frame, std::max(frame - 1, 0), objects_only ? eye : before,
-                                            objects_only, was)) {
+                            if (scene.cleared_sky && hit.kind == 0) {
+                                n = {0.0f, 0.0f};
+                            } else if (EngineWasAt(scene, hit, frame, std::max(frame - 1, 0), objects_only ? eye : before,
+                                                   objects_only, was)) {
                                 n = {static_cast<float>(2.0 * (u - was[0])), static_cast<float>(-2.0 * (v - was[1]))};
                             } else {
                                 n = {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::quiet_NaN()};
                             }
                         }
+                    }
+                }
+                if (!truth) continue;
+                constexpr std::uint32_t half = kEngineSize / 2;
+                const FrameGenViewMapping mapping =
+                    BuildFrameGenViewMapping(EngineGeometry(eye), EngineGeometry(before), true);
+                auto& flow = frames.flow[k][e];
+                flow.resize(std::size_t{half} * half);
+                auto& surface = frames.surface[k][e];
+                surface.resize(std::size_t{half} * half);
+                for (std::uint32_t y = 0; y < half; ++y) {
+                    for (std::uint32_t x = 0; x < half; ++x) {
+                        const double u = (x + 0.5) / half, v = (y + 0.5) / half;
+                        const EngineHit hit = EngineCast(scene, frame, eye, u, v);
+                        surface[std::size_t{y} * half + x] = static_cast<float>(hit.depth);
+                        std::array<double, 2> was{};
+                        std::array<float, 2> newest{};
+                        std::array<float, 2>& f = flow[std::size_t{y} * half + x];
+                        f = {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::quiet_NaN()};
+                        if (EngineWasAt(scene, hit, frame, std::max(frame - 1, 0), before, false, was) &&
+                            FrameGenMapToNewest(mapping, {static_cast<float>(was[0]), static_cast<float>(was[1])},
+                                                static_cast<float>(hit.depth), newest)) {
+                            f = {static_cast<float>(u - newest[0]), static_cast<float>(v - newest[1])};
+                        }
+                    }
+                }
+                Pixels& next = frames.next[k][e];
+                next.resize(std::size_t{kEngineSize} * kEngineSize);
+                for (std::uint32_t y = 0; y < kEngineSize; ++y) {
+                    for (std::uint32_t x = 0; x < kEngineSize; ++x) {
+                        next[std::size_t{y} * kEngineSize + x] =
+                            EngineCast(scene, frame + 1, eye, (x + 0.5) / kEngineSize, (y + 0.5) / kEngineSize).color;
                     }
                 }
             }
@@ -8496,34 +8728,55 @@ EngineFrames RenderEngineFrames(const EngineScene& scene) {
     return frames;
 }
 
-FrameGenViewGeometry EngineGeometry(const EnginePose& pose) {
-    FrameGenViewGeometry geometry;
-    geometry.orientation = {static_cast<float>(pose.orientation[0]), static_cast<float>(pose.orientation[1]),
-                            static_cast<float>(pose.orientation[2]), static_cast<float>(pose.orientation[3])};
-    geometry.position = {static_cast<float>(pose.position[0]), static_cast<float>(pose.position[1]),
-                         static_cast<float>(pose.position[2])};
-    geometry.angle_left = geometry.angle_down = -std::atan(kTan);
-    geometry.angle_right = geometry.angle_up = std::atan(kTan);
-    return geometry;
-}
-
 // A run of a scene's frames on a backend of its own: each frame's color,
 // depth and (from `mode` kCapture) its vectors captured as a game releases
 // them (vectors in `gain`, with `fault`; y flipped from the frame the
-// convention locks with `flip_after_lock`), then extrapolated half an
-// interval on; the generated frames when `outputs` is given.
+// convention locks with `flip_after_lock`, the right eye's alone with
+// `flip_one_eye`), then extrapolated `fraction` of
+// an interval on (1: to the next frame's time, EngineFrames::next), the
+// filters' label rules with `filter` (FrameGenTuning::engine_filter), a
+// diagnostic view (tinted by the labels with `tint`); with `lock`, the
+// convention of `gain` locked from the start (FrameGenGpu::LockEngineForTest:
+// what the vectors do, apart from working the convention out); the
+// generated frames when `outputs` is given, and per eye whether the vectors
+// were merged in (FrameGenExecuteResult::merged) when `merged` is; `before`
+// called before each frame's Execute, for what a scenario changes of its
+// tuning (a config reload); `after` called after it, for what a scenario
+// reads of it.
+struct EngineRunOptions {
+    FrameGenEngineMode mode{FrameGenEngineMode::kOff};
+    std::array<double, 2> gain{1.0, 1.0};
+    EngineFault fault{EngineFault::kNone};
+    bool flip_after_lock{false};
+    bool flip_one_eye{false};
+    float fraction{0.5f};
+    bool filter{false};
+    FrameGenDiagnosticView diagnostic{FrameGenDiagnosticView::kOff};
+    bool tint{false};
+    bool lock{false};
+    std::vector<std::array<Pixels, 2>>* outputs{nullptr};
+    std::vector<std::array<bool, 2>>* merged{nullptr};
+    std::function<void(FrameGenTuning&, std::size_t)> before;
+    std::function<void(FrameGenGpu&, std::size_t)> after;
+};
 struct EngineRunResult {
     FrameGenEngineStatus status;
     std::optional<std::size_t> locked; // the frame whose evidence was read when it locked
     std::size_t evidence_frames{0};    // frames whose views all took evidence (FrameGenEngineStatus::evidence)
 };
-EngineRunResult RunEngineFrames(Harness& harness, const EngineFrames& frames, FrameGenEngineMode mode,
-                                std::array<double, 2> gain, EngineFault fault, bool flip_after_lock = false,
-                                std::vector<std::array<Pixels, 2>>* outputs = nullptr) {
+EngineRunResult RunEngineFrames(Harness& harness, const EngineFrames& frames, const EngineRunOptions& options) {
+    const FrameGenEngineMode mode = options.mode;
+    const std::array<double, 2>& gain = options.gain;
+    const EngineFault fault = options.fault;
     std::string error;
     auto gpu = CreateFrameGenGpu(harness.binding, error);
     Check(gpu != nullptr && gpu->SupportsEngineMotion(), "engine observe backend: " + error);
     gpu->SetCopyAfterRelease(true); // the tests' images are their own
+    if (options.lock) {
+        FrameGenEngineConvention locked;
+        locked.gain = {static_cast<float>(gain[0]), static_cast<float>(gain[1])};
+        gpu->LockEngineForTest(locked);
+    }
     const std::int64_t output_format = gpu->OutputFormats(FrameGenOutputKind::kSrgb8).front();
     std::array<XrSwapchain, 2> sources{}, depths{}, results{};
     std::vector<std::array<XrSwapchain, 2>> vectors(kEngineFrames);
@@ -8550,14 +8803,20 @@ EngineRunResult RunEngineFrames(Harness& harness, const EngineFrames& frames, Fr
     encoding.far_z = 1000.0f;
     FrameGenTuning tuning;
     tuning.mode = FrameGenSynthesisMode::kExtrapolate;
-    tuning.fractions[0] = 0.5f;
+    tuning.fractions[0] = options.fraction;
     tuning.generated = 1;
     tuning.engine_mode = mode;
+    tuning.engine_filter = options.filter;
+    tuning.engine_tint = options.tint;
+    tuning.diagnostic = options.diagnostic;
     const XrRect2Di rect{{0, 0}, {static_cast<int>(kEngineSize), static_cast<int>(kEngineSize)}};
     const XrRect2Di vector_rect{{0, 0}, {static_cast<int>(kEngineVectorSize), static_cast<int>(kEngineVectorSize)}};
     EngineRunResult run;
     bool flipped = false;
     for (std::size_t k = 0; k < kEngineFrames; ++k) {
+        if (options.before) {
+            options.before(tuning, k);
+        }
         const int frame = static_cast<int>(k);
         std::vector<FrameGenViewSubmission> views(2);
         std::vector<FrameGenViewRequest> color;
@@ -8596,8 +8855,12 @@ EngineRunResult RunEngineFrames(Harness& harness, const EngineFrames& frames, Fr
         if (k > 0 && mode >= FrameGenEngineMode::kCapture) {
             // The frame's vectors in the convention, as RGBA16F (the sentinel
             // where the content was behind the eye).
-            std::vector<FrameGenMotionJob> jobs(2);
-            for (int e = 0; e < 2; ++e) {
+            std::vector<FrameGenMotionJob> jobs;
+            // The frame's own bias (kJitter), in the vectors' pixels.
+            const std::array<double, 2> bias{0.5 * (2.0 * EngineHash(frame, 41) - 1.0),
+                                             0.5 * (2.0 * EngineHash(frame, 43) - 1.0)};
+            for (int e = fault == EngineFault::kOneEye ? 1 : 0; e < 2; ++e) {
+                FrameGenMotionJob& job = jobs.emplace_back();
                 const std::size_t source = fault == EngineFault::kLate ? k - 1 : fault == EngineFault::kFrozen ? 1 : k;
                 const auto& field = fault == EngineFault::kObjectOnly ? frames.objects[source][e] : frames.motion[source][e];
                 std::vector<std::uint8_t> bytes(field.size() * 8);
@@ -8609,7 +8872,11 @@ EngineRunResult RunEngineFrames(Harness& harness, const EngineFrames& frames, Fr
                         raw[0] = static_cast<float>(0.05 * (EngineHash(static_cast<int>(i), frame * 2) - 0.5) / gain[0]);
                         raw[1] = static_cast<float>(0.05 * (EngineHash(static_cast<int>(i), frame * 2 + 1) - 0.5) / gain[1]);
                     }
-                    if (flipped) raw[1] = -raw[1];
+                    if (fault == EngineFault::kJitter) {
+                        raw[0] += static_cast<float>(bias[0] * 2.0 / kEngineVectorSize / gain[0]);
+                        raw[1] += static_cast<float>(bias[1] * 2.0 / kEngineVectorSize / gain[1]);
+                    }
+                    if (flipped && (e == 1 || !options.flip_one_eye)) raw[1] = -raw[1];
                     for (int c = 0; c < 4; ++c) {
                         const std::uint16_t bits = HalfBits(raw[c]);
                         std::memcpy(&bytes[i * 8 + c * 2], &bits, 2);
@@ -8619,24 +8886,31 @@ EngineRunResult RunEngineFrames(Harness& harness, const EngineFrames& frames, Fr
                 g_swapchains[vectors[k][e]] = {harness.create_texture_data(DXGI_FORMAT_R16G16B16A16_FLOAT, kEngineVectorSize,
                                                                            kEngineVectorSize, bytes)};
                 Check(gpu->Track(vectors[k][e], EnumerateImages, error), "engine observe: track vectors: " + error);
-                jobs[e].view = e;
-                jobs[e].vectors = {vectors[k][e], 0, 0, vector_rect, DXGI_FORMAT_R16G16B16A16_FLOAT};
-                jobs[e].frame = k;
-                jobs[e].capture = true;
+                job.view = e;
+                job.vectors = {vectors[k][e], 0, 0, vector_rect, DXGI_FORMAT_R16G16B16A16_FLOAT};
+                job.frame = k;
+                job.capture = true;
             }
             const bool captured = gpu->CaptureMotion(jobs, color, error);
             Check(captured || error.empty(), "engine observe: vectors: " + error);
         }
         FrameGenExecuteResult result;
         Check(gpu->Execute(views, tuning, result, error), "engine observe: execute: " + error);
-        if (outputs) {
-            outputs->push_back({harness.readback_sized(g_swapchains[results[0]][0]),
-                                harness.readback_sized(g_swapchains[results[1]][0])});
+        if (options.outputs) {
+            options.outputs->push_back({harness.readback_sized(g_swapchains[results[0]][0]),
+                                        harness.readback_sized(g_swapchains[results[1]][0])});
+        }
+        if (options.merged) {
+            options.merged->push_back({result.merged.size() == 2 && result.merged[0], result.merged.size() == 2 && result.merged[1]});
+        }
+        if (options.after) {
+            Check(gpu->WaitIdle(), "engine observe: idle");
+            options.after(*gpu, k);
         }
         const FrameGenEngineStatus status = gpu->EngineStatus(~0ull);
         if (!run.locked && status.validation.state == FrameGenEngineValidation::State::kLocked) {
             run.locked = k;
-            flipped = flip_after_lock;
+            flipped = options.flip_after_lock;
         }
     }
     Check(gpu->WaitIdle(), "engine observe: idle");
@@ -8663,6 +8937,10 @@ std::string DescribeEngineRun(const EngineRunResult& run) {
                        std::to_string(v.corr2[0]) + "/" + std::to_string(v.corr2[1]) + ", gain " + std::to_string(v.gain[0]) +
                        "/" + std::to_string(v.gain[1]) + ", b/a " + std::to_string(v.ratio[0]) + "/" + std::to_string(v.ratio[1]);
     if (run.locked) text += ", locked at frame " + std::to_string(*run.locked);
+    if (v.merged) {
+        text += ", merged " + std::to_string(v.merged) + " frames (the vectors moved " +
+                std::to_string(100.0 * v.moved_cells / std::max(v.textured_cells, 1.0)) + "% of the textured cells)";
+    }
     text += ", photometric: " + v.photometric + " (" + std::to_string(v.photometric_passed) + " in a row)";
     if (v.textured > 0.0) {
         text += ", luma error engine/measured " + std::to_string((v.variant / v.textured) / std::max(v.measured_cost / std::max(v.with_measured, 1.0), 1e-9)) +
@@ -8677,9 +8955,9 @@ void EngineObserveScenarios(Harness& harness) {
     // and judged, generated as without them (the invariant), byte for byte.
     {
         std::vector<std::array<Pixels, 2>> off, observed;
-        RunEngineFrames(harness, still_world, FrameGenEngineMode::kOff, {1.0, 1.0}, EngineFault::kNone, false, &off);
-        const EngineRunResult run = RunEngineFrames(harness, still_world, FrameGenEngineMode::kObserve, {1.0, 1.0},
-                                                    EngineFault::kNone, false, &observed);
+        RunEngineFrames(harness, still_world, {.mode = FrameGenEngineMode::kOff, .outputs = &off});
+        const EngineRunResult run =
+            RunEngineFrames(harness, still_world, {.mode = FrameGenEngineMode::kObserve, .outputs = &observed});
         std::size_t differing = 0;
         for (std::size_t k = 0; k < off.size(); ++k) {
             for (int e = 0; e < 2; ++e) differing += off[k][e] == observed[k][e] ? 0 : 1;
@@ -8693,7 +8971,7 @@ void EngineObserveScenarios(Harness& harness) {
     const auto canonical = FrameGenEngineCanonicalGains({kEngineVectorSize, kEngineVectorSize}, {kEngineSize, kEngineSize});
     for (const FrameGenEngineGain& gain : canonical) {
         const EngineRunResult run =
-            RunEngineFrames(harness, still_world, FrameGenEngineMode::kObserve, gain.gain, EngineFault::kNone);
+            RunEngineFrames(harness, still_world, {.mode = FrameGenEngineMode::kObserve, .gain = gain.gain});
         std::cout << "D3D12 engine observe: " << gain.name << ": " << DescribeEngineRun(run) << std::endl;
         FrameGenEngineConvention truth;
         truth.gain = {static_cast<float>(gain.gain[0]), static_cast<float>(gain.gain[1])};
@@ -8704,14 +8982,14 @@ void EngineObserveScenarios(Harness& harness) {
     // Vectors that are wrong never lock: all zero, noise, a frame late
     // (E_lag and the pair before), objects' own movement alone (the world
     // turning, so it is not the head excluded).
-    const EngineFrames turning = RenderEngineFrames(EngineScene{false, 0.004});
+    const EngineFrames turning = RenderEngineFrames(EngineScene{.world_turn = 0.004});
     for (const auto& [fault, name, frames] :
          {std::tuple<EngineFault, const char*, const EngineFrames*>{EngineFault::kZero, "zero", &still_world},
           {EngineFault::kNoise, "noise", &still_world},
           {EngineFault::kLate, "a frame late", &still_world},
           {EngineFault::kFrozen, "no longer written", &still_world},
           {EngineFault::kObjectOnly, "objects' own movement", &turning}}) {
-        const EngineRunResult run = RunEngineFrames(harness, *frames, FrameGenEngineMode::kObserve, {1.0, 1.0}, fault);
+        const EngineRunResult run = RunEngineFrames(harness, *frames, {.mode = FrameGenEngineMode::kObserve, .fault = fault});
         std::cout << "D3D12 engine observe: " << name << ": " << DescribeEngineRun(run) << std::endl;
         Check(!run.locked && run.evidence_frames > kEngineFrames / 2,
               std::string("engine observe: vectors of ") + name + " locked: " + DescribeEngineRun(run));
@@ -8727,7 +9005,7 @@ void EngineObserveScenarios(Harness& harness) {
     // y flipped once locked: the lock drops.
     {
         const EngineRunResult run =
-            RunEngineFrames(harness, still_world, FrameGenEngineMode::kObserve, {1.0, 1.0}, EngineFault::kNone, true);
+            RunEngineFrames(harness, still_world, {.mode = FrameGenEngineMode::kObserve, .flip_after_lock = true});
         std::cout << "D3D12 engine observe: y flipped after the lock: " << DescribeEngineRun(run) << std::endl;
         Check(run.locked && run.status.validation.state != FrameGenEngineValidation::State::kLocked &&
                   run.status.validation.invalid > 0,
@@ -8735,11 +9013,606 @@ void EngineObserveScenarios(Harness& harness) {
     }
     // Walking toward a wall, nothing still: never disabled.
     {
-        const EngineRunResult run = RunEngineFrames(harness, RenderEngineFrames(EngineScene{true, 0.0}),
-                                                    FrameGenEngineMode::kObserve, {1.0, 1.0}, EngineFault::kNone);
+        const EngineRunResult run = RunEngineFrames(harness, RenderEngineFrames(EngineScene{.walking = true}),
+                                                    {.mode = FrameGenEngineMode::kObserve});
         std::cout << "D3D12 engine observe: walking: " << DescribeEngineRun(run) << std::endl;
         Check(run.status.validation.state != FrameGenEngineValidation::State::kDisabled,
               "engine observe: walking disabled the vectors: " + DescribeEngineRun(run));
+    }
+}
+
+// --- Engine motion vectors, stage 5 (Assist), on WARP ------------------------
+//
+// The observe scenarios' scenes in Assist: each frame's merged flow
+// (kEngineFlow) and labels read after its Execute and compared with the
+// scene's own flow, the measured flow and what the game's colour shows.
+// The flow ends at level 3 (Balanced): 32 x 32 cells of 8 pixels, each over
+// 4 x 4 half-resolution texels.
+constexpr std::uint8_t kEngineLevel = 3;
+constexpr std::uint32_t kEngineCells = kEngineSize >> kEngineLevel;
+constexpr std::uint32_t kEngineCellTexels = 1u << (kEngineLevel - 1);
+
+// One view's flow cells after a frame's Execute: the merged flow and the
+// measured flow (4 floats each: the kFlow contract) and the labels.
+struct EngineCells {
+    std::vector<float> flow;
+    std::vector<float> measured;
+    std::vector<std::uint32_t> labels;
+};
+bool ReadEngineCells(FrameGenGpu& gpu, std::size_t view, EngineCells& cells) {
+    FrameGenExtent extent{}, measured_extent{}, label_extent{};
+    std::uint32_t channels = 0, measured_channels = 0, label_channels = 0;
+    std::vector<float> labels;
+    if (!gpu.ReadTexture(view, {FrameGenTextureKind::kEngineFlow, 0}, cells.flow, extent, channels) ||
+        !gpu.ReadTexture(view, {FrameGenTextureKind::kFlow, kEngineLevel}, cells.measured, measured_extent,
+                         measured_channels) ||
+        !gpu.ReadTexture(view, {FrameGenTextureKind::kEngineLabels, 0}, labels, label_extent, label_channels)) {
+        return false;
+    }
+    Check(extent.width == kEngineCells && extent.height == kEngineCells && channels == 4 && measured_channels == 4 &&
+              measured_extent.width == kEngineCells && label_extent.width == kEngineCells && label_channels == 2,
+          "engine assist: the merged flow, the measured flow and the labels at level 3");
+    cells.labels.resize(labels.size() / 2);
+    for (std::size_t i = 0; i < cells.labels.size(); ++i) cells.labels[i] = static_cast<std::uint32_t>(labels[i * 2]);
+    return true;
+}
+
+std::uint32_t EngineSource(std::uint32_t label) {
+    return label & kFrameGenEngineLabelInvalid ? kFrameGenEngineLabelMeasured : label & kFrameGenEngineLabelSource;
+}
+bool EngineMoved(std::uint32_t label) {
+    const std::uint32_t source = EngineSource(label);
+    return source == kFrameGenEngineLabelNear || source == kFrameGenEngineLabelFar;
+}
+
+// The scene's own flow of a cell (uv): its texels' (EngineFrames::flow), where
+// they lie on one surface (depth within 5%) two texels around as well (what
+// the head's movement revealed beside an edge matches nothing: neither
+// measured flow nor vectors are right there) and agree within a tenth of a
+// pixel.
+bool EngineTruthCell(const EngineFrames& frames, std::size_t k, int e, std::uint32_t cx, std::uint32_t cy,
+                     std::array<double, 2>& truth) {
+    constexpr std::uint32_t half = kEngineSize / 2;
+    const auto& flow = frames.flow[k][e];
+    const auto& surface = frames.surface[k][e];
+    std::array<double, 2> low{1e9, 1e9}, high{-1e9, -1e9}, sum{};
+    double nearest = 1e9, farthest = 0.0;
+    constexpr int kRing = 2;
+    for (int y = static_cast<int>(cy * kEngineCellTexels) - kRing; y < static_cast<int>((cy + 1) * kEngineCellTexels) + kRing; ++y) {
+        for (int x = static_cast<int>(cx * kEngineCellTexels) - kRing; x < static_cast<int>((cx + 1) * kEngineCellTexels) + kRing; ++x) {
+            const std::size_t at = std::size_t(std::clamp(y, 0, static_cast<int>(half) - 1)) * half +
+                                   std::size_t(std::clamp(x, 0, static_cast<int>(half) - 1));
+            nearest = std::min(nearest, static_cast<double>(surface[at]));
+            farthest = std::max(farthest, static_cast<double>(surface[at]));
+        }
+    }
+    for (std::uint32_t y = cy * kEngineCellTexels; y < (cy + 1) * kEngineCellTexels; ++y) {
+        for (std::uint32_t x = cx * kEngineCellTexels; x < (cx + 1) * kEngineCellTexels; ++x) {
+            const std::array<float, 2>& f = flow[std::size_t{y} * half + x];
+            if (!std::isfinite(f[0]) || !std::isfinite(f[1])) return false;
+            for (int a = 0; a < 2; ++a) {
+                low[a] = std::min(low[a], static_cast<double>(f[a]));
+                high[a] = std::max(high[a], static_cast<double>(f[a]));
+                sum[a] += f[a];
+            }
+        }
+    }
+    if ((high[0] - low[0]) * kEngineSize > 0.1 || (high[1] - low[1]) * kEngineSize > 0.1 || farthest > 1.05 * nearest) {
+        return false;
+    }
+    truth = {sum[0] / (kEngineCellTexels * kEngineCellTexels), sum[1] / (kEngineCellTexels * kEngineCellTexels)};
+    return true;
+}
+
+// How far the merged flow of the cells the vectors moved is from the scene's
+// own (full-resolution pixels), after the lock: worst and mean, over cells.
+struct EngineAccuracy {
+    double worst{0.0};
+    double sum{0.0};
+    std::size_t compared{0};
+    std::size_t moved{0}; // cells the vectors moved
+    std::size_t cells{0}; // cells read after the lock
+    std::string where;    // the worst cell: frame, view, cell, label, flow and the scene's (pixels)
+    double Mean() const { return compared ? sum / static_cast<double>(compared) : 0.0; }
+};
+std::function<void(FrameGenGpu&, std::size_t)> MeasureEngineAccuracy(const EngineFrames& frames, EngineAccuracy& accuracy) {
+    return [&frames, &accuracy](FrameGenGpu& gpu, std::size_t k) {
+        if (k == 0 || gpu.EngineStatus(~0ull).validation.state != FrameGenEngineValidation::State::kLocked) return;
+        for (int e = 0; e < 2; ++e) {
+            EngineCells cells;
+            if (!ReadEngineCells(gpu, e, cells)) continue;
+            for (std::uint32_t cy = 0; cy < kEngineCells; ++cy) {
+                for (std::uint32_t cx = 0; cx < kEngineCells; ++cx) {
+                    const std::size_t i = std::size_t{cy} * kEngineCells + cx;
+                    ++accuracy.cells;
+                    std::array<double, 2> truth{};
+                    if (!EngineMoved(cells.labels[i])) continue;
+                    ++accuracy.moved;
+                    if (!EngineTruthCell(frames, k, e, cx, cy, truth)) continue;
+                    const double error = std::hypot(cells.flow[i * 4] - truth[0], cells.flow[i * 4 + 1] - truth[1]) * kEngineSize;
+                    if (error > accuracy.worst) {
+                        accuracy.where = "frame " + std::to_string(k) + " view " + std::to_string(e) + " cell " +
+                                         std::to_string(cx) + "," + std::to_string(cy) + " label " +
+                                         std::to_string(cells.labels[i]) + ": " + std::to_string(cells.flow[i * 4] * kEngineSize) +
+                                         "," + std::to_string(cells.flow[i * 4 + 1] * kEngineSize) + " (cost " +
+                                         std::to_string(cells.flow[i * 4 + 2]) + "; measured " +
+                                         std::to_string(cells.measured[i * 4] * kEngineSize) + "," +
+                                         std::to_string(cells.measured[i * 4 + 1] * kEngineSize) + " cost " +
+                                         std::to_string(cells.measured[i * 4 + 2]) + "), the scene's " +
+                                         std::to_string(truth[0] * kEngineSize) + "," + std::to_string(truth[1] * kEngineSize);
+                    }
+                    accuracy.worst = std::max(accuracy.worst, error);
+                    accuracy.sum += error;
+                    ++accuracy.compared;
+                }
+            }
+        }
+    };
+}
+
+// A region of the scene by what a cell shows in `layer` at frame k, at its
+// centre and its corners: the overlay in the plane `depth` (within 10%), or
+// the sky (depth 0).
+bool EngineInRegion(const EngineScene& scene, std::size_t k, int e, std::uint32_t cx, std::uint32_t cy, EngineLayer layer,
+                    double depth) {
+    for (const auto& [x, y] : {std::pair{0.5, 0.5}, std::pair{0.05, 0.05}, std::pair{0.95, 0.05}, std::pair{0.05, 0.95},
+                               std::pair{0.95, 0.95}}) {
+        const EngineHit hit = EngineCast(scene, static_cast<int>(k), EngineEye(static_cast<int>(k), e),
+                                         (cx + x) / kEngineCells, (cy + y) / kEngineCells, layer);
+        if (depth > 0.0 ? !(hit.kind == 1 && std::abs(hit.depth - depth) < 0.1 * depth) : hit.kind != 0) return false;
+    }
+    return true;
+}
+
+// How the cells of a region were moved after the lock: by the vectors, the
+// measured flow, or as absent, and whether those the measured flow moved
+// carry it bit for bit.
+struct EngineRegion {
+    std::size_t cells{0};
+    std::size_t moved{0};
+    std::size_t absent{0};
+    std::size_t kept{0}; // not moved by the vectors, the measured flow as it is
+    double Share(std::size_t count) const { return cells ? static_cast<double>(count) / static_cast<double>(cells) : 0.0; }
+};
+std::function<void(FrameGenGpu&, std::size_t)> MeasureEngineRegion(
+    EngineRegion& region, const std::function<bool(std::size_t, int, std::uint32_t, std::uint32_t)>& inside) {
+    return [&region, inside](FrameGenGpu& gpu, std::size_t k) {
+        if (k == 0 || gpu.EngineStatus(~0ull).validation.state != FrameGenEngineValidation::State::kLocked) return;
+        for (int e = 0; e < 2; ++e) {
+            EngineCells cells;
+            if (!ReadEngineCells(gpu, e, cells)) continue;
+            for (std::uint32_t cy = 0; cy < kEngineCells; ++cy) {
+                for (std::uint32_t cx = 0; cx < kEngineCells; ++cx) {
+                    if (!inside(k, e, cx, cy)) continue;
+                    const std::size_t i = std::size_t{cy} * kEngineCells + cx;
+                    ++region.cells;
+                    const bool moved = EngineMoved(cells.labels[i]);
+                    region.moved += moved ? 1 : 0;
+                    region.absent += EngineSource(cells.labels[i]) == kFrameGenEngineLabelAbsent ? 1 : 0;
+                    region.kept += !moved && std::memcmp(&cells.flow[i * 4], &cells.measured[i * 4], 4 * sizeof(float)) == 0 ? 1 : 0;
+                }
+            }
+        }
+    };
+}
+
+// Per frame and eye, the pixels `take` takes (one thread per frame).
+using EngineMask = std::vector<std::array<std::vector<std::uint8_t>, 2>>;
+EngineMask EngineMasks(const std::function<bool(std::size_t, int, std::uint32_t, std::uint32_t)>& take) {
+    EngineMask masks(kEngineFrames);
+    std::vector<std::thread> workers;
+    for (std::size_t k = 0; k < kEngineFrames; ++k) {
+        workers.emplace_back([&, k] {
+            for (int e = 0; e < 2; ++e) {
+                auto& mask = masks[k][e];
+                mask.resize(std::size_t{kEngineSize} * kEngineSize);
+                for (std::uint32_t y = 0; y < kEngineSize; ++y) {
+                    for (std::uint32_t x = 0; x < kEngineSize; ++x) {
+                        mask[std::size_t{y} * kEngineSize + x] = take(k, e, x, y) ? 1 : 0;
+                    }
+                }
+            }
+        });
+    }
+    for (auto& worker : workers) worker.join();
+    return masks;
+}
+
+// The generated frames' error against the scene's next frame (EngineFrames::
+// next: extrapolating a whole interval) over the pixels of `mask`, from frame
+// `first` on, both eyes: the mean channel difference (0-1).
+double EngineFrameError(const EngineFrames& frames, const std::vector<std::array<Pixels, 2>>& generated, std::size_t first,
+                        const EngineMask& mask) {
+    double sum = 0.0;
+    std::size_t count = 0;
+    for (std::size_t k = first; k + 1 < generated.size() && k < frames.next.size(); ++k) {
+        for (int e = 0; e < 2; ++e) {
+            for (std::uint32_t y = 0; y < kEngineSize; ++y) {
+                for (std::uint32_t x = 0; x < kEngineSize; ++x) {
+                    if (!mask[k][e][std::size_t{y} * kEngineSize + x]) continue;
+                    const std::uint32_t p = generated[k][e][std::size_t{y} * kEngineSize + x];
+                    const std::uint32_t q = frames.next[k][e][std::size_t{y} * kEngineSize + x];
+                    for (int c = 0; c < 3; ++c) {
+                        sum += std::abs(static_cast<int>((p >> (8 * c)) & 255) - static_cast<int>((q >> (8 * c)) & 255));
+                    }
+                    count += 3;
+                }
+            }
+        }
+    }
+    return count ? sum / (255.0 * static_cast<double>(count)) : 0.0;
+}
+
+void EngineAssistScenarios(Harness& harness) {
+    const EngineFrames still = RenderEngineFrames(EngineScene{}, true);
+    // Every canonical convention, once locked: the cells the vectors move
+    // carry the scene's own flow within a quarter of a pixel.
+    const auto canonical = FrameGenEngineCanonicalGains({kEngineVectorSize, kEngineVectorSize}, {kEngineSize, kEngineSize});
+    for (const FrameGenEngineGain& gain : canonical) {
+        EngineAccuracy accuracy;
+        const EngineRunResult run = RunEngineFrames(
+            harness, still,
+            {.mode = FrameGenEngineMode::kAssist, .gain = gain.gain, .after = MeasureEngineAccuracy(still, accuracy)});
+        std::cout << "D3D12 engine assist: " << gain.name << ": " << DescribeEngineRun(run) << "; " << accuracy.moved << " of "
+                  << accuracy.cells << " cells moved by the vectors, " << accuracy.compared << " compared: worst "
+                  << accuracy.worst << " px (" << accuracy.where << "), mean " << accuracy.Mean() << " px" << std::endl;
+        // The log's share (EngineStatus, from the tiles read back) agrees.
+        const FrameGenEngineValidation& v = run.status.validation;
+        Check(v.merged > 10 && v.moved_cells > 0.5 * v.textured_cells,
+              std::string("engine assist: ") + gain.name + ": the tiles read back say the vectors moved " +
+                  std::to_string(v.moved_cells) + " of " + std::to_string(v.textured_cells) + " textured cells over " +
+                  std::to_string(v.merged) + " frames");
+        Check(run.locked && accuracy.compared > 500 && accuracy.worst <= 0.25,
+              std::string("engine assist: ") + gain.name + "'s merged flow is not the scene's within 0.25 px (worst " +
+                  std::to_string(accuracy.worst) + " px over " + std::to_string(accuracy.compared) + " cells)");
+    }
+    // y flipped once locked, in both eyes or in the right eye alone: the
+    // frame's verdict holds the vectors back that very frame, in both eyes
+    // (either eye's holds the other's back too), and the merged flow is the
+    // measured flow, bit for bit.
+    for (const bool one_eye : {false, true}) {
+        const std::string name = std::string("y flipped after the lock") + (one_eye ? " in one eye" : "");
+        std::optional<std::size_t> locked;
+        std::size_t held = 0, identical = 0;
+        bool first_held = false;
+        const EngineRunResult run = RunEngineFrames(
+            harness, still,
+            {.mode = FrameGenEngineMode::kAssist,
+             .flip_after_lock = true,
+             .flip_one_eye = one_eye,
+             .after = [&](FrameGenGpu& gpu, std::size_t k) {
+                 if (!locked) {
+                     if (gpu.EngineStatus(~0ull).validation.state == FrameGenEngineValidation::State::kLocked) locked = k;
+                     return;
+                 }
+                 bool all_held = true;
+                 bool same = true;
+                 for (int e = 0; e < 2; ++e) {
+                     EngineCells cells;
+                     Check(ReadEngineCells(gpu, e, cells), "engine assist: flipped: cells read");
+                     for (const std::uint32_t label : cells.labels) all_held = all_held && (label & kFrameGenEngineLabelInvalid);
+                     same = same && cells.flow == cells.measured;
+                 }
+                 held += all_held ? 1 : 0;
+                 identical += all_held && same ? 1 : 0;
+                 first_held = first_held || (k == *locked + 1 && all_held);
+             }});
+        std::cout << "D3D12 engine assist: " << name << ": " << DescribeEngineRun(run) << "; " << held
+                  << " frames held back in both eyes, " << identical << " of them the measured flow bit for bit" << std::endl;
+        Check(locked && first_held && held > 0 && identical == held,
+              "engine assist: " + name + " was not held back that frame in both eyes, as the measured flow (" +
+                  std::to_string(held) + " held, " + std::to_string(identical) + " identical)");
+    }
+    // Switched to Observe once locked (a config reload), the flow's quality
+    // changed meanwhile (level 3 to 2), then back to Assist: the vectors are
+    // merged in at the new level, the cells they do not move the measured
+    // flow's, bit for bit.
+    {
+        constexpr std::uint8_t level = 2;
+        std::optional<std::size_t> locked;
+        std::vector<std::array<bool, 2>> merged;
+        std::size_t frames_checked = 0, cells = 0, moved = 0, kept = 0;
+        bool sized = true;
+        const EngineRunResult run = RunEngineFrames(
+            harness, still,
+            {.mode = FrameGenEngineMode::kAssist,
+             .merged = &merged,
+             .before =
+                 [&](FrameGenTuning& tuning, std::size_t k) {
+                     const bool observing = locked && k > *locked + 1 && k <= *locked + 5;
+                     tuning.engine_mode = observing ? FrameGenEngineMode::kObserve : FrameGenEngineMode::kAssist;
+                     if (locked && k > *locked + 3) tuning.quality = FrameGenFlowQuality::kQuality;
+                 },
+             .after = [&](FrameGenGpu& gpu, std::size_t k) {
+                 if (!locked) {
+                     if (gpu.EngineStatus(~0ull).validation.state == FrameGenEngineValidation::State::kLocked) locked = k;
+                     return;
+                 }
+                 if (k <= *locked + 5) return;
+                 for (int e = 0; e < 2; ++e) {
+                     if (!merged[k][e]) continue;
+                     std::vector<float> flow, measured, labels;
+                     FrameGenExtent flow_extent{}, measured_extent{}, label_extent{};
+                     std::uint32_t channels = 0;
+                     Check(gpu.ReadTexture(e, {FrameGenTextureKind::kEngineFlow, 0}, flow, flow_extent, channels) &&
+                               gpu.ReadTexture(e, {FrameGenTextureKind::kFlow, level}, measured, measured_extent, channels) &&
+                               gpu.ReadTexture(e, {FrameGenTextureKind::kEngineLabels, 0}, labels, label_extent, channels),
+                           "engine assist: level changed: cells read");
+                     sized = sized && measured_extent.width == kEngineSize >> level && flow_extent.width == measured_extent.width &&
+                             flow_extent.height == measured_extent.height && label_extent.width == measured_extent.width &&
+                             label_extent.height == measured_extent.height;
+                     if (!sized) continue;
+                     ++frames_checked;
+                     for (std::size_t i = 0; i < labels.size() / 2; ++i) {
+                         ++cells;
+                         const bool by_vectors = EngineMoved(static_cast<std::uint32_t>(labels[i * 2]));
+                         moved += by_vectors ? 1 : 0;
+                         kept += !by_vectors && std::memcmp(&flow[i * 4], &measured[i * 4], 4 * sizeof(float)) == 0 ? 1 : 0;
+                     }
+                 }
+             }});
+        std::cout << "D3D12 engine assist: level changed while observing: " << DescribeEngineRun(run) << "; " << frames_checked
+                  << " eyes' frames merged at level 2, " << moved << " of " << cells << " cells moved by the vectors, " << kept
+                  << " of the rest the measured flow bit for bit" << std::endl;
+        Check(locked && sized && frames_checked >= 4 && moved > 0 && kept == cells - moved,
+              "engine assist: back to Assist after the level changed while observing, the vectors were not merged in at the "
+              "new level (" +
+                  std::to_string(frames_checked) + " eyes' frames, " + std::string(sized ? "sized" : "the old size") + ")");
+    }
+    // A game sending one eye's vectors: neither eye takes them, and the
+    // frames are as without them, byte for byte.
+    std::vector<std::array<Pixels, 2>> off;
+    RunEngineFrames(harness, still, {.mode = FrameGenEngineMode::kOff, .outputs = &off});
+    {
+        std::vector<std::array<Pixels, 2>> one;
+        const EngineRunResult run = RunEngineFrames(
+            harness, still, {.mode = FrameGenEngineMode::kAssist, .fault = EngineFault::kOneEye, .outputs = &one});
+        std::size_t differing = 0;
+        for (std::size_t k = 0; k < off.size(); ++k) {
+            for (int e = 0; e < 2; ++e) differing += off[k][e] == one[k][e] ? 0 : 1;
+        }
+        std::cout << "D3D12 engine assist: one eye's vectors: " << run.evidence_frames << " frames' evidence, " << differing
+                  << " frames differ" << std::endl;
+        Check(run.evidence_frames == 0 && differing == 0,
+              "engine assist: one eye's vectors were used (" + std::to_string(differing) + " frames differ)");
+    }
+    // Switched from Observe to Assist once locked (a config reload), the
+    // textures the vectors are merged in with failing to be made: the frames
+    // go on as without the vectors, byte for byte, noted once, and the raw
+    // fields the GPU may still read are kept (not released under it).
+    {
+        std::optional<std::size_t> locked;
+        std::vector<std::array<Pixels, 2>> failed;
+        bool raw_kept = true;
+        const EngineRunResult run = RunEngineFrames(
+            harness, still,
+            {.mode = FrameGenEngineMode::kAssist,
+             .outputs = &failed,
+             .before =
+                 [&](FrameGenTuning& tuning, std::size_t k) {
+                     tuning.engine_mode = locked && k > *locked ? FrameGenEngineMode::kAssist : FrameGenEngineMode::kObserve;
+                 },
+             .after = [&](FrameGenGpu& gpu, std::size_t k) {
+                 if (!locked) {
+                     if (gpu.EngineStatus(~0ull).validation.state == FrameGenEngineValidation::State::kLocked) {
+                         locked = k;
+                         gpu.FailAllocationForTest(1); // the first of them, at the switch
+                     }
+                     return;
+                 }
+                 for (int e = 0; e < 2; ++e) {
+                     std::vector<float> raw;
+                     FrameGenExtent extent{};
+                     std::uint32_t channels = 0;
+                     raw_kept = raw_kept && gpu.ReadTexture(e, {FrameGenTextureKind::kEngineRaw, 0}, raw, extent, channels) &&
+                                !raw.empty();
+                 }
+             }});
+        std::size_t differing = 0;
+        for (std::size_t k = 0; k < off.size() && k < failed.size(); ++k) {
+            for (int e = 0; e < 2; ++e) differing += off[k][e] == failed[k][e] ? 0 : 1;
+        }
+        const auto notes = std::count_if(run.status.notes.begin(), run.status.notes.end(), [](const std::string& note) {
+            return note.find("merged in with could not be made") != std::string::npos;
+        });
+        std::cout << "D3D12 engine assist: textures failed at the switch from observe: " << DescribeEngineRun(run) << "; "
+                  << differing << " frames differ, " << notes << " notes" << std::endl;
+        Check(locked && failed.size() == off.size() && differing == 0 && notes == 1 && raw_kept &&
+                  run.status.validation.merged == 0,
+              "engine assist: textures that cannot be made at the switch from observe did not leave the frames as "
+              "without the vectors (" +
+                  std::to_string(differing) + " frames differ, " + std::to_string(notes) + " notes, raw fields " +
+                  (raw_kept ? "kept" : "released") + ")");
+    }
+    // A jittered projection's vectors, the convention fixed with its jitter:
+    // the bias taken out, the merged flow within a tenth of a pixel.
+    {
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV_CONVENTION", "1,1,included,jitter");
+        EngineAccuracy accuracy;
+        const EngineRunResult run = RunEngineFrames(
+            harness, still,
+            {.mode = FrameGenEngineMode::kAssist, .fault = EngineFault::kJitter, .after = MeasureEngineAccuracy(still, accuracy)});
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV_CONVENTION", "");
+        std::cout << "D3D12 engine assist: jittered: " << DescribeEngineRun(run) << "; " << accuracy.compared
+                  << " cells compared: worst " << accuracy.worst << " px, mean " << accuracy.Mean() << " px" << std::endl;
+        Check(run.locked && accuracy.compared > 500 && accuracy.Mean() < 0.1,
+              "engine assist: the jittered vectors' bias was not taken out (mean " + std::to_string(accuracy.Mean()) + " px)");
+    }
+    // The sky's vectors cleared while the head turns: absent, the measured
+    // flow kept there bit for bit.
+    {
+        const EngineScene scene{.cleared_sky = true};
+        EngineRegion sky;
+        const EngineRunResult run = RunEngineFrames(
+            harness, RenderEngineFrames(scene),
+            {.mode = FrameGenEngineMode::kAssist,
+             .after = MeasureEngineRegion(sky, [&](std::size_t k, int e, std::uint32_t cx, std::uint32_t cy) {
+                 return EngineInRegion(scene, k, e, cx, cy, EngineLayer::kVectors, 0.0);
+             })});
+        std::cout << "D3D12 engine assist: cleared sky: " << DescribeEngineRun(run) << "; " << sky.cells << " sky cells, "
+                  << sky.Share(sky.absent) * 100.0 << "% absent, " << sky.Share(sky.kept) * 100.0 << "% measured as it is"
+                  << std::endl;
+        Check(run.locked && sky.cells > 500 && sky.Share(sky.absent) >= 0.9 && sky.Share(sky.kept) >= 0.99,
+              "engine assist: the cleared sky's vectors were not absent, the measured flow kept");
+    }
+    // Over scenery moving across the world (10 pixels a frame), what the
+    // game's depth and vectors hold and its colour does not, or the reverse:
+    // the vectors lose there. The invisible box in depth and vectors (frames
+    // extrapolated a whole interval, against the scenery's next frame there:
+    // no worse than without the vectors), the box in the vectors alone
+    // (glass), a panel in the colour alone. The convention is locked for these
+    // (FrameGenGpu::LockEngineForTest): what the vectors do once it is, apart
+    // from working it out over scenery moving on its own (the validator's
+    // batches find the head's movement in such scenery's still-looking smooth
+    // patches, and the photometric evidence favours the measured flow on
+    // textured motion: notes/fg-engine-mv).
+    struct Overlay {
+        const char* name;
+        EngineScene scene;
+        EngineLayer layer;
+        double depth;
+    };
+    for (const Overlay& overlay : {Overlay{"invisible box", EngineScene{.box = true, .backdrop = 3.0}, EngineLayer::kDepth, 0.6},
+                                   Overlay{"glass", EngineScene{.glass = true, .backdrop = 3.0}, EngineLayer::kVectors, 0.6},
+                                   Overlay{"UI panel", EngineScene{.panel = true, .backdrop = 3.0}, EngineLayer::kColor, 1.0}}) {
+        const EngineFrames frames = RenderEngineFrames(overlay.scene, true);
+        EngineRegion region;
+        std::vector<std::array<Pixels, 2>> assisted, measured;
+        const EngineRunResult run = RunEngineFrames(
+            harness, frames,
+            {.mode = FrameGenEngineMode::kAssist,
+             .fraction = 1.0f,
+             .lock = true,
+             .outputs = &assisted,
+             .after = MeasureEngineRegion(region, [&](std::size_t k, int e, std::uint32_t cx, std::uint32_t cy) {
+                 return EngineInRegion(overlay.scene, k, e, cx, cy, overlay.layer, overlay.depth);
+             })});
+        RunEngineFrames(harness, frames, {.mode = FrameGenEngineMode::kOff, .fraction = 1.0f, .outputs = &measured});
+        const EngineMask pixels = EngineMasks([&](std::size_t k, int e, std::uint32_t x, std::uint32_t y) {
+            const EngineHit hit = EngineCast(overlay.scene, static_cast<int>(k), EngineEye(static_cast<int>(k), e),
+                                             (x + 0.5) / kEngineSize, (y + 0.5) / kEngineSize, overlay.layer);
+            return hit.kind == 1 && std::abs(hit.depth - overlay.depth) < 0.1 * overlay.depth;
+        });
+        // From the frame the evidence first ran for (the depth checked).
+        const double error = EngineFrameError(frames, assisted, 4, pixels);
+        const double without = EngineFrameError(frames, measured, 4, pixels);
+        std::cout << "D3D12 engine assist: " << overlay.name << ": " << DescribeEngineRun(run) << "; " << region.cells
+                  << " cells, " << region.Share(region.moved) * 100.0 << "% moved by the vectors; error against the next frame "
+                  << error << ", without the vectors " << without << std::endl;
+        Check(region.cells > 1000 && region.Share(region.moved) <= 0.1,
+              std::string("engine assist: the vectors were taken over the ") + overlay.name + " (" +
+                  std::to_string(region.Share(region.moved) * 100.0) + "% of its cells)");
+        Check(error <= without * 1.02 + 0.001,
+              std::string("engine assist: the ") + overlay.name + "'s frames are worse with the vectors (" +
+                  std::to_string(error) + " against " + std::to_string(without) + ")");
+    }
+    // A 2-pixel wire 0.4 m off over the moving scenery: the cells whose
+    // resolved depth has it (at 2 pixels it is in about every other row of
+    // the half-resolution grid the vectors are resampled to) have its vector
+    // (the nearest surface's: still) and the scenery's to choose from; the
+    // block cost over the cell mostly prefers the scenery's (three of its four
+    // rows), and the wire stays where synthesis's own no-motion candidate
+    // keeps it: its pixels, extrapolated a whole interval, are no worse than
+    // without the vectors.
+    {
+        const EngineScene scene{.wire = true, .backdrop = 3.0};
+        const EngineFrames frames = RenderEngineFrames(scene, true);
+        std::size_t cells = 0, nearest = 0;
+        std::vector<std::array<Pixels, 2>> assisted, measured;
+        RunEngineFrames(
+            harness, frames,
+            {.mode = FrameGenEngineMode::kAssist, .fraction = 1.0f, .lock = true, .outputs = &assisted,
+             .after = [&](FrameGenGpu& gpu, std::size_t k) {
+                 for (int e = 0; e < 2 && k > 0; ++e) {
+                     EngineCells read;
+                     std::vector<float> depth;
+                     FrameGenExtent extent{};
+                     std::uint32_t channels = 0;
+                     if (!ReadEngineCells(gpu, e, read) ||
+                         !gpu.ReadTexture(e, {FrameGenTextureKind::kDepth, 0}, depth, extent, channels) || channels != 1) {
+                         continue;
+                     }
+                     for (std::uint32_t cy = 0; cy < kEngineCells; ++cy) {
+                         for (std::uint32_t cx = 0; cx < kEngineCells; ++cx) {
+                             const std::uint32_t label = read.labels[std::size_t{cy} * kEngineCells + cx];
+                             bool wire = false;
+                             for (std::uint32_t t = 0; t < kEngineCellTexels * kEngineCellTexels; ++t) {
+                                 const float z = depth[std::size_t{cy * kEngineCellTexels + t / kEngineCellTexels} * extent.width +
+                                                       cx * kEngineCellTexels + t % kEngineCellTexels];
+                                 wire = wire || std::abs(z - 0.4f) < 0.04f;
+                             }
+                             if (!wire || (label & kFrameGenEngineLabelInvalid)) continue;
+                             ++cells;
+                             nearest += EngineSource(label) == kFrameGenEngineLabelNear ? 1 : 0;
+                         }
+                     }
+                 }
+             }});
+        RunEngineFrames(harness, frames, {.mode = FrameGenEngineMode::kOff, .fraction = 1.0f, .outputs = &measured});
+        const EngineMask pixels = EngineMasks([&](std::size_t k, int e, std::uint32_t x, std::uint32_t y) {
+            const EngineHit hit = EngineCast(scene, static_cast<int>(k), EngineEye(static_cast<int>(k), e),
+                                             (x + 0.5) / kEngineSize, (y + 0.5) / kEngineSize);
+            return hit.kind == 1 && std::abs(hit.depth - 0.4) < 0.04;
+        });
+        const double error = EngineFrameError(frames, assisted, 4, pixels);
+        const double without = EngineFrameError(frames, measured, 4, pixels);
+        const double share = cells ? static_cast<double>(nearest) / static_cast<double>(cells) : 0.0;
+        std::cout << "D3D12 engine assist: wire: " << cells << " cells with the wire's depth, " << share * 100.0
+                  << "% moved by the nearest surface's vectors; its pixels' error against the next frame " << error
+                  << ", without the vectors " << without << std::endl;
+        Check(cells > 300 && error <= without * 1.02 + 0.001,
+              "engine assist: the wire is worse with the vectors (" + std::to_string(error) + " against " +
+                  std::to_string(without) + ")");
+    }
+    // A square 10 m off (between the cockpit, which extrapolating holds
+    // still, and the world, which moves with the world's motion: content
+    // whose own motion the flow carries) moving 9 pixels a frame,
+    // extrapolated a whole interval: its pixels within 3 of its edge in the
+    // next frame better with the vectors. (The design's 30% is for game
+    // captures: here the measured flow of the square's clean texture is good
+    // already, and the vectors win 5% or so.)
+    {
+        const EngineScene scene{.square_speed = 0.56, .square_distance = 10.0};
+        const EngineFrames frames = RenderEngineFrames(scene, true);
+        std::vector<std::array<Pixels, 2>> assisted, measured;
+        const EngineRunResult run = RunEngineFrames(
+            harness, frames, {.mode = FrameGenEngineMode::kAssist, .fraction = 1.0f, .lock = true, .outputs = &assisted});
+        RunEngineFrames(harness, frames, {.mode = FrameGenEngineMode::kOff, .fraction = 1.0f, .outputs = &measured});
+        // The square's pixels within 3 of its edge in the next frame (what it
+        // revealed is unknown to both).
+        const EngineMask edges = EngineMasks([&](std::size_t k, int e, std::uint32_t x, std::uint32_t y) {
+            const EnginePose eye = EngineEye(static_cast<int>(k), e);
+            auto square = [&](int px, int py) {
+                return EngineCast(scene, static_cast<int>(k) + 1, eye, (px + 0.5) / kEngineSize, (py + 0.5) / kEngineSize)
+                           .kind == 2;
+            };
+            const int px = static_cast<int>(x), py = static_cast<int>(y);
+            const bool here = square(px, py);
+            return here && (!square(px - 3, py) || !square(px + 3, py) || !square(px, py - 3) || !square(px, py + 3));
+        });
+        const double error = EngineFrameError(frames, assisted, 4, edges);
+        const double without = EngineFrameError(frames, measured, 4, edges);
+        std::cout << "D3D12 engine assist: mover: " << DescribeEngineRun(run) << "; edge error against the next frame "
+                  << error << ", without the vectors " << without << std::endl;
+        Check(error < without, "engine assist: the mover's edges are not better with the vectors (" + std::to_string(error) +
+                                   " against " + std::to_string(without) + ")");
+    }
+    // The confidence view tinted by the labels shows the cells the vectors
+    // moved; the filters' label rules run.
+    {
+        std::vector<std::array<Pixels, 2>> plain, tinted;
+        RunEngineFrames(harness, still,
+                        {.mode = FrameGenEngineMode::kAssist, .diagnostic = FrameGenDiagnosticView::kConfidence,
+                         .outputs = &plain});
+        const EngineRunResult run =
+            RunEngineFrames(harness, still,
+                            {.mode = FrameGenEngineMode::kAssist, .filter = true,
+                             .diagnostic = FrameGenDiagnosticView::kConfidence, .tint = true, .outputs = &tinted});
+        std::size_t differing = 0;
+        for (std::size_t k = 0; k < plain.size(); ++k) differing += plain[k][0] == tinted[k][0] ? 0 : 1;
+        std::cout << "D3D12 engine assist: tinted with the filters' label rules: " << DescribeEngineRun(run) << "; "
+                  << differing << " frames differ from the untinted" << std::endl;
+        Check(run.locked && differing > 0, "engine assist: the tint showed nothing");
     }
 }
 

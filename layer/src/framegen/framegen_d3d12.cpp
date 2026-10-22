@@ -84,6 +84,24 @@ constexpr UINT64 kWorldFitReadback = 512;
 constexpr UINT kMotionDescriptors = kDescriptorsPerFrame * kFramesInFlight + kCaptureSlots * kDescriptorsPerDispatch;
 constexpr UINT kSynthesisDescriptors = kMotionDescriptors + kMotionSlots * kMotionBlocks * kDescriptorsPerDispatch;
 
+// An IEEE half float's value.
+float HalfFloat(std::uint16_t h) {
+    const std::uint32_t sign = (h & 0x8000u) << 16, exponent = (h >> 10) & 0x1fu, mantissa = h & 0x3ffu;
+    std::uint32_t bits;
+    if (exponent == 0) {
+        // Zero or subnormal.
+        const float value = std::ldexp(static_cast<float>(mantissa), -24);
+        return sign ? -value : value;
+    } else if (exponent == 31) {
+        bits = sign | 0x7f800000u | (mantissa << 13);
+    } else {
+        bits = sign | ((exponent + 112) << 23) | (mantissa << 13);
+    }
+    float value;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
 std::string Failure(const char* operation, HRESULT hr) {
     return std::string(operation) + " failed: hr=" + std::to_string(static_cast<long>(hr));
 }
@@ -224,6 +242,18 @@ struct ViewResources {
     Texture engine_partials;
     Texture engine_params;
     Texture engine_evidence;
+    // Stage 5 (set up from FrameGenTuning::engine_mode kAssist, at the final
+    // flow level): the candidates and what was found of them, the flow the
+    // filters read, the labels (in the ring, as the filtered flow), and the
+    // tiles' trust, written in turn (engine_tiles_next) and valid while each
+    // Execute of the view wrote them.
+    Texture engine_candidate;
+    Texture engine_info;
+    Texture engine_flow;
+    std::array<Texture, kFrameGenHistoryRingMax> engine_labels;
+    std::array<Texture, 2> engine_tiles;
+    std::uint8_t engine_tiles_next{0};
+    bool engine_tiles_valid{false};
     // Optical flow hardware (FrameGenTuning::hardware_flow): its inputs,
     // its vectors and its session for this view.
     Texture hardware_newest;
@@ -264,7 +294,7 @@ struct ViewResources {
 };
 
 // One view's recording: a plan recorded up to `next`, resumable after the
-// optical flow hardware.
+// optical flow hardware and after every view's verdict on the game's vectors.
 struct ViewRecording {
     const FrameGenViewSubmission* submission{nullptr};
     ViewResources* view{nullptr};
@@ -278,9 +308,11 @@ struct ViewRecording {
     bool waits_for_hardware{false}; // stopped before kFlowUnpack
     // The view's engine motion vectors were captured for this frame (paired
     // with its color capture): what an analysis of the frame reads. With
-    // `evidence`, the plan takes their evidence (stage 3).
+    // `evidence`, the plan takes their evidence (stage 3); with `assist`, it
+    // merges them into the flow too and writes the tiles (stage 5).
     bool engine{false};
     bool evidence{false};
+    bool assist{false};
 };
 
 struct FrameSlot {
@@ -308,6 +340,12 @@ struct FrameSlot {
     bool engine_pending{false};
     FrameGenEngineFrameEvidence engine_frame;
     double engine_seconds{0.0}; // when it was recorded, on the validator's clock
+    // Stage 5: the tiles the views' merge wrote (kEngineTiles: each tile's
+    // share of textured cells the vectors moved, and those cells), for the
+    // log's share of them, read with the evidence; where each view's are.
+    ComPtr<ID3D12Resource> tiles_readback;
+    UINT64 tiles_capacity{0};
+    std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> tiles;
     // Stage 4: views' world fits (kWorldParams, kWorldFitReadback each, in
     // `world_fits` order) beside what the delta model needs, read once the
     // slot's fence passes (the fits filled in then).
@@ -1292,8 +1330,9 @@ class D3D12FrameGen final : public FrameGenGpu {
         // The views whose vectors are resampled: set up by Execute for engine
         // motion (FrameGenTuning::engine_mode), on their color view's grid,
         // with a color capture to pair with (or one to come). Others are left
-        // out this call, counted, their census taken all the same. Vectors
-        // the validator disabled are resampled no more (stage 3).
+        // out this call, counted, their census taken all the same (as are all
+        // of a session that could not make what reads them: engine_failed_).
+        // Vectors the validator disabled are resampled no more (stage 3).
         const bool disabled = engine_validator_.GetState() == FrameGenEngineValidator::State::kDisabled;
         std::array<bool, kMotionViews> resample{};
         for (std::size_t j = 0; j < count; ++j) {
@@ -1304,7 +1343,8 @@ class D3D12FrameGen final : public FrameGenGpu {
             const ViewResources* view = job.view < views_.size() ? &views_[job.view] : nullptr;
             const FrameGenExtent color_extent = job.view < color.size() ? color[job.view].extent : FrameGenExtent{};
             const FrameGenExtent extent = view ? view->history_state.Extent() : FrameGenExtent{};
-            resample[j] = view && view->engine_raw[0].resource && extent.width && extent.width == color_extent.width &&
+            resample[j] = !engine_failed_ && view && view->engine_raw[0].resource && extent.width &&
+                          extent.width == color_extent.width &&
                           extent.height == color_extent.height && job.vectors.image_index < found[j].count &&
                           (job.pair_next || view->capture.valid);
             motion_unready_ += resample[j] ? 0 : 1;
@@ -1641,6 +1681,9 @@ class D3D12FrameGen final : public FrameGenGpu {
         status.paired = motion_paired_;
         status.evidence = engine_evidence_frames_;
         status.validation = engine_validator_.Report();
+        status.validation.merged = engine_merged_frames_;
+        status.validation.textured_cells = engine_textured_cells_;
+        status.validation.moved_cells = engine_moved_cells_;
         status.stopped = motion_stopped_;
         status.notes = motion_notes_;
         for (const FrameGenEngineCensus& census : motion_census_) {
@@ -1650,6 +1693,7 @@ class D3D12FrameGen final : public FrameGenGpu {
     }
 
     void SetEnginePrior(const FrameGenEngineConvention& convention) override { engine_validator_.SetPrior(convention); }
+    void LockEngineForTest(const FrameGenEngineConvention& convention) override { engine_validator_.LockForTest(convention); }
 
     bool DumpMotion(const std::string& directory, bool all_images) override {
         motion_dump_directory_ = directory;
@@ -2079,6 +2123,46 @@ class D3D12FrameGen final : public FrameGenGpu {
             evidence.color = recordings[i].request.extent;
             frame.views.push_back(evidence);
         }
+        // Stage 5: each view's tiles, after one another (each placed at
+        // 512 bytes), in a buffer made (larger) as they need; without one
+        // the log goes without their share.
+        slot.tiles.clear();
+        UINT64 bytes = 0;
+        for (std::size_t i = 0; i < recordings.size() && i < kMotionViews && recordings[i].assist; ++i) {
+            Texture& tiles = recordings[i].view->engine_tiles[recordings[i].view->engine_tiles_next];
+            const D3D12_RESOURCE_DESC desc = tiles.resource->GetDesc();
+            D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+            UINT64 size = 0;
+            const UINT64 offset = (bytes + 511) & ~UINT64{511};
+            device_->GetCopyableFootprints(&desc, 0, 1, offset, &footprint, nullptr, nullptr, &size);
+            slot.tiles.push_back(footprint);
+            bytes = offset + size;
+        }
+        if (!slot.tiles.empty() && slot.tiles_capacity < bytes) {
+            D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_READBACK};
+            D3D12_RESOURCE_DESC buffer{};
+            buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            buffer.Width = bytes;
+            buffer.Height = buffer.DepthOrArraySize = buffer.MipLevels = 1;
+            buffer.SampleDesc.Count = 1;
+            buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            slot.tiles_readback.Reset();
+            slot.tiles_capacity = 0;
+            if (SUCCEEDED(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_COPY_DEST,
+                                                           nullptr, IID_PPV_ARGS(&slot.tiles_readback)))) {
+                slot.tiles_capacity = bytes;
+            }
+        }
+        if (slot.tiles_capacity < bytes) {
+            slot.tiles.clear();
+        }
+        for (std::size_t i = 0; i < slot.tiles.size(); ++i) {
+            ViewResources& view = *recordings[i].view;
+            Texture& tiles = view.engine_tiles[view.engine_tiles_next];
+            Require(barriers, tiles, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            Flush(barriers);
+            CopyToReadback(commands_.Get(), tiles, slot.tiles_readback.Get(), slot.tiles[i].Offset);
+        }
         slot.engine_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - engine_clock_).count();
         return true;
     }
@@ -2110,6 +2194,25 @@ class D3D12FrameGen final : public FrameGenGpu {
         slot.engine_readback->Unmap(0, &written);
         engine_validator_.Add(frame, slot.engine_seconds);
         ++engine_evidence_frames_;
+        // Stage 5: the textured cells of the frame's tiles, and those the
+        // vectors moved (each tile's share of its textured cells).
+        void* tiles = nullptr;
+        if (!slot.tiles.empty() && SUCCEEDED(slot.tiles_readback->Map(0, nullptr, &tiles)) && tiles) {
+            ++engine_merged_frames_;
+            for (const D3D12_PLACED_SUBRESOURCE_FOOTPRINT& footprint : slot.tiles) {
+                for (UINT y = 0; y < footprint.Footprint.Height; ++y) {
+                    const auto* row = reinterpret_cast<const std::uint16_t*>(static_cast<const std::byte*>(tiles) + footprint.Offset +
+                                                                             std::size_t{y} * footprint.Footprint.RowPitch);
+                    for (UINT x = 0; x < footprint.Footprint.Width; ++x) {
+                        const double textured = HalfFloat(row[x * 4 + 2]);
+                        engine_textured_cells_ += textured;
+                        engine_moved_cells_ += textured * HalfFloat(row[x * 4 + 1]);
+                    }
+                }
+            }
+            slot.tiles_readback->Unmap(0, &written);
+        }
+        slot.tiles.clear();
         if (engine_validator_.GetState() == FrameGenEngineValidator::State::kDisabled && !engine_disable_noted_ &&
             motion_notes_.size() < kMotionNotes) {
             engine_disable_noted_ = true;
@@ -2344,6 +2447,8 @@ class D3D12FrameGen final : public FrameGenGpu {
         case FrameGenTextureKind::kTrustNewest: kind.kind = FrameGenTextureKind::kTrustPrevious; break;
         case FrameGenTextureKind::kDepth: kind.kind = FrameGenTextureKind::kDepthPrevious; break;
         case FrameGenTextureKind::kFilteredCover: view.bound_newest = view.history_state.Previous(); break;
+        case FrameGenTextureKind::kEngineLabels: view.bound_newest = view.history_state.Previous(); break;
+        case FrameGenTextureKind::kEngineTiles: kind.kind = FrameGenTextureKind::kEngineTilesPrevious; break;
         default: break;
         }
         Texture* texture = Resolve(view, kind);
@@ -2392,22 +2497,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         if (FAILED(readback->Map(0, nullptr, &mapped))) {
             return false;
         }
-        auto half = [](std::uint16_t h) {
-            const std::uint32_t sign = (h & 0x8000u) << 16, exponent = (h >> 10) & 0x1fu, mantissa = h & 0x3ffu;
-            std::uint32_t bits;
-            if (exponent == 0) {
-                // Zero or subnormal.
-                float value = std::ldexp(static_cast<float>(mantissa), -24);
-                return sign ? -value : value;
-            } else if (exponent == 31) {
-                bits = sign | 0x7f800000u | (mantissa << 13);
-            } else {
-                bits = sign | ((exponent + 112) << 23) | (mantissa << 13);
-            }
-            float value;
-            std::memcpy(&value, &bits, sizeof(value));
-            return value;
-        };
+        const auto half = HalfFloat;
         extent = {static_cast<std::uint32_t>(desc.Width), desc.Height};
         switch (desc.Format) {
         case DXGI_FORMAT_R16G16B16A16_FLOAT: channels = 4; break;
@@ -2463,6 +2553,10 @@ class D3D12FrameGen final : public FrameGenGpu {
                         std::memcpy(&value, &bits, sizeof(value));
                         out[x * 2] = value;
                         out[x * 2 + 1] = static_cast<float>(packed & 63u);
+                    } else if (kind.kind == FrameGenTextureKind::kEngineLabels) {
+                        // Engine labels: the label as it is (bits 0-7).
+                        out[x * 2] = static_cast<float>(packed);
+                        out[x * 2 + 1] = 0.0f;
                     } else {
                         out[x * 2] = half(static_cast<std::uint16_t>(packed & 0xffffu));
                         out[x * 2 + 1] = half(static_cast<std::uint16_t>(packed >> 16));
@@ -2696,6 +2790,7 @@ class D3D12FrameGen final : public FrameGenGpu {
                  FrameGenExecuteResult& result, std::string& error) override {
         result.synthesized.assign(views.size(), false);
         result.depth.assign(views.size(), false);
+        result.merged.assign(views.size(), false);
         HRESULT hr = DeviceRemovedReason();
         if (FAILED(hr)) {
             error = Failure("D3D12 device", hr);
@@ -2858,11 +2953,15 @@ class D3D12FrameGen final : public FrameGenGpu {
             evidence = views[i].request.engine_motion && Prepared(views[i], view, FrameGenHistoryRing(tuning)) &&
                        view.history_state.Effective(views[i].request).synthesize && view.engine_ready &&
                        view.engine_raw[newest].resource && view.engine_params.resource &&
+                       (tuning.engine_mode < FrameGenEngineMode::kAssist || view.engine_flow.resource) &&
                        view.engine_pair[newest].Matches(views[i].source) && views[i].request.depth && view.depth_ready &&
                        validator_.Usable() && view.depth_generation == validator_.Generation();
         }
         // Every view up to the optical flow hardware, the hardware for all of
         // them, then the rest (without hardware flow, everything at once).
+        // The game's vectors (stage 5) are merged in after every view's
+        // verdict on them: each eye's holds the other's back too
+        // (kEngineConvert reads it), so the eyes take them or not together.
         std::vector<ViewRecording> recordings(views.size());
         bool hardware = false;
         for (std::size_t i = 0; i < views.size() && ok; ++i) {
@@ -2878,14 +2977,18 @@ class D3D12FrameGen final : public FrameGenGpu {
             ok = RecordDump(views, recordings, dump, error);
         }
         for (std::size_t i = 0; i < views.size() && ok; ++i) {
-            ok = RecordPlan(recordings[i], effective_tuning.hardware_flow, error);
+            ok = RecordPlan(recordings[i], effective_tuning.hardware_flow ? FrameGenPass::kFlowUnpack : FrameGenPass::kEngineConvert,
+                            error);
             hardware = hardware || recordings[i].waits_for_hardware;
         }
         if (ok && hardware) {
             ok = RunHardwareFlow(recordings, slot, slot_index, error);
             for (std::size_t i = 0; i < views.size() && ok; ++i) {
-                ok = RecordPlan(recordings[i], false, error);
+                ok = RecordPlan(recordings[i], FrameGenPass::kEngineConvert, error);
             }
+        }
+        for (std::size_t i = 0; i < views.size() && ok; ++i) {
+            ok = RecordPlan(recordings[i], std::nullopt, error);
         }
         // Quad views: each eye's periphery moves content as its focus view
         // does where the eye's image blends the two.
@@ -2934,6 +3037,10 @@ class D3D12FrameGen final : public FrameGenGpu {
                 for (Texture* texture : {&view.history[newest], &view.filtered[newest], &view.filtered_cover[newest],
                                          &view.depth[newest], &view.history[view.history_state.Previous()]}) {
                     if (texture->resource) Require(barriers, *texture, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+                }
+                // The labels the confidence view's tint reads (stage 5).
+                if (effective_tuning.engine_tint && recordings[i].assist) {
+                    Require(barriers, view.engine_labels[newest], D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
                 }
             }
             Flush(barriers);
@@ -3030,6 +3137,13 @@ class D3D12FrameGen final : public FrameGenGpu {
             if (recordings[i].evidence) {
                 view.engine_read[EnginePrevious(view)] = fence_value_;
             }
+            // Stage 5: the tiles this frame wrote are the next one's before;
+            // a frame that wrote none starts the next one's over.
+            if (recordings[i].assist) {
+                view.engine_tiles_next = static_cast<std::uint8_t>(1u - view.engine_tiles_next);
+            }
+            view.engine_tiles_valid = recordings[i].assist;
+            result.merged[i] = recordings[i].assist;
         }
         if (effective_tuning.analyze_only) {
             // What Synthesize writes this real frame's generated frames from.
@@ -3619,7 +3733,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         ViewResources& view = *recording.view;
         view.bound_newest = analyzed.newest;
         view.bound_previous = analyzed.previous;
-        const bool ok = RecordPlan(recording, false, error);
+        const bool ok = RecordPlan(recording, std::nullopt, error);
         view.bound_newest = view.bound_previous = -1;
         return ok;
     }
@@ -4028,6 +4142,7 @@ class D3D12FrameGen final : public FrameGenGpu {
             slot.check_readback.Detach();
             slot.engine_readback.Detach();
             slot.world_readback.Detach();
+            slot.tiles_readback.Detach();
         }
         for (auto& slot : capture_slots_) slot.allocator.Detach();
         for (auto& slot : motion_slots_) {
@@ -4103,12 +4218,15 @@ class D3D12FrameGen final : public FrameGenGpu {
         }
         for (auto& texture : view.engine_raw) visit(texture);
         for (auto& texture : view.engine_census) visit(texture);
+        for (auto& texture : view.engine_labels) visit(texture);
+        for (auto& texture : view.engine_tiles) visit(texture);
         for (auto* texture : {&view.output, &view.compose_target, &view.shift_keys, &view.shift_map, &view.motion_map,
                               &view.cross_keys,
                               &view.depth_stale,
                               &view.world_partials, &view.world_params, &view.shading_rate, &view.trust_tiles,
                               &view.trust_votes, &view.depth_scales, &view.depth_scale_raw, &view.depth_scale_votes,
-                              &view.engine_partials, &view.engine_params, &view.engine_evidence}) {
+                              &view.engine_partials, &view.engine_params, &view.engine_evidence, &view.engine_candidate,
+                              &view.engine_info, &view.engine_flow}) {
             visit(*texture);
         }
     }
@@ -4818,6 +4936,7 @@ class D3D12FrameGen final : public FrameGenGpu {
             view.engine_pair_next = view.engine_ready = false;
             view.engine_count = {};
             view.engine_captures = view.engine_used = 0;
+            view.engine_tiles_valid = false;
             // Its optical flow session matches afresh (no hints, no raw
             // capture to use).
             view.hardware_fresh = true;
@@ -5075,7 +5194,14 @@ class D3D12FrameGen final : public FrameGenGpu {
         // them, and engine capture stays off for the session.
         // From Observe (stage 3), with them: each field's census and the
         // evidence passes' textures.
-        auto reset_engine = [&view] {
+        auto reset_assist = [&view] {
+            view.engine_candidate = view.engine_info = view.engine_flow = {};
+            view.engine_labels = {};
+            view.engine_tiles = {};
+            view.engine_tiles_next = 0;
+            view.engine_tiles_valid = false;
+        };
+        auto reset_engine = [&view, &reset_assist] {
             view.engine_raw = {};
             view.engine_pair = {};
             view.engine_read = {};
@@ -5085,6 +5211,7 @@ class D3D12FrameGen final : public FrameGenGpu {
             view.engine_count = {};
             view.engine_captures = view.engine_used = 0;
             view.engine_partials = view.engine_params = view.engine_evidence = {};
+            reset_assist();
         };
         if (change & FrameGenHistoryState::kAll) {
             reset_engine();
@@ -5118,6 +5245,44 @@ class D3D12FrameGen final : public FrameGenGpu {
                 if (motion_notes_.size() < kMotionNotes) {
                     motion_notes_.push_back("the raw fields could not be made (" + why +
                                             "): no capture this session, Frame Generation goes on without it");
+                }
+            }
+        }
+        // From Assist (stage 5), beside them: the textures at the final flow
+        // level the vectors are merged in with, the tiles' trust starting
+        // over. A level or ring changed drops them in any mode (the GPU done
+        // with them above): a session switched to Observe at a config reload
+        // makes them again at the level of its switch back. When they cannot
+        // be made, nothing of the vectors is read this session either, as for
+        // the raw fields; those are left as they are (a switch makes these
+        // without waiting for the GPU, which may still read them), dropped
+        // when the view is set up again.
+        if (change != FrameGenHistoryState::kNone) {
+            reset_assist();
+        }
+        if (tuning.engine_mode >= FrameGenEngineMode::kAssist && !engine_failed_ && view.engine_raw[0].resource &&
+            !view.engine_flow.resource) {
+            const FrameGenExtent cells = levels[final_level];
+            const FrameGenExtent tiles = FrameGenEngineTiles(cells);
+            std::string why;
+            bool made = Create(view.engine_candidate, cells, DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R16G16B16A16_FLOAT,
+                               true, why) &&
+                        Create(view.engine_info, cells, DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R16G16B16A16_FLOAT, true,
+                               why) &&
+                        Create(view.engine_flow, cells, DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R16G16B16A16_FLOAT, true,
+                               why);
+            for (std::uint8_t slot = 0; slot < ring && made; ++slot) {
+                made = Create(view.engine_labels[slot], cells, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_UINT, true, why);
+            }
+            for (Texture& texture : view.engine_tiles) {
+                made = made && Create(texture, tiles, DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R16G16B16A16_FLOAT, true, why);
+            }
+            if (!made) {
+                engine_failed_ = true;
+                reset_assist();
+                if (motion_notes_.size() < kMotionNotes) {
+                    motion_notes_.push_back("the textures the vectors are merged in with could not be made (" + why +
+                                            "): no vectors this session, Frame Generation goes on without them");
                 }
             }
         }
@@ -5908,6 +6073,18 @@ class D3D12FrameGen final : public FrameGenGpu {
         case FrameGenTextureKind::kEnginePartials: return &view.engine_partials;
         case FrameGenTextureKind::kEngineParams: return &view.engine_params;
         case FrameGenTextureKind::kEngineEvidence: return &view.engine_evidence;
+        case FrameGenTextureKind::kEngineCandidate: return &view.engine_candidate;
+        case FrameGenTextureKind::kEngineInfo: return &view.engine_info;
+        case FrameGenTextureKind::kEngineFlow: return &view.engine_flow;
+        case FrameGenTextureKind::kEngineLabels: return &view.engine_labels[newest];
+        case FrameGenTextureKind::kEngineTiles: return &view.engine_tiles[view.engine_tiles_next];
+        case FrameGenTextureKind::kEngineTilesPrevious: return &view.engine_tiles[1u - view.engine_tiles_next];
+        case FrameGenTextureKind::kEngineParamsOther:
+            // The game's vectors are used with two views alone.
+            if (views_.size() >= 2 && (&view == &views_[0] || &view == &views_[1])) {
+                return &views_[&view == &views_[0] ? 1 : 0].engine_params;
+            }
+            return nullptr;
         default: return nullptr;
         }
     }
@@ -5999,8 +6176,9 @@ class D3D12FrameGen final : public FrameGenGpu {
         // Stage 3: their evidence (every view's or none), with how they
         // decode, the images the newest and previous fields came from, and
         // whether the field before is the frame before's (the frame the last
-        // Execute took, captured right before this one).
-        effective.engine_motion = evidence && recording.engine;
+        // Execute took, captured right before this one). Not where EnsureView
+        // just now could not make the textures they need (engine_failed_).
+        effective.engine_motion = evidence && recording.engine && !engine_failed_;
         if (effective.engine_motion) {
             const std::uint8_t engine_previous = EnginePrevious(view);
             effective.engine_encoding = view.engine_encoding[engine_newest];
@@ -6009,6 +6187,9 @@ class D3D12FrameGen final : public FrameGenGpu {
             effective.engine_previous = view.engine_count[engine_previous] != 0 &&
                                         view.engine_count[engine_previous] + 1 == view.engine_count[engine_newest] &&
                                         view.engine_used == view.engine_count[engine_previous];
+            // Stage 5: the tiles' trust from the frame before, while each
+            // frame since the last discontinuity merged the vectors in.
+            effective.engine_tiles = view.engine_tiles_valid && effective.temporal;
         }
         view.engine_used = recording.engine ? view.engine_count[engine_newest] : 0;
         effective.trust_stereo = view.trust_stereo;
@@ -6047,6 +6228,8 @@ class D3D12FrameGen final : public FrameGenGpu {
         recording.plan = BuildFrameGenViewPlan(effective, tuning);
         const FrameGenViewPlan& plan = recording.plan;
         recording.evidence = effective.engine_motion && plan.synthesize;
+        recording.assist = std::any_of(plan.dispatches.begin(), plan.dispatches.end(),
+                                       [](const FrameGenDispatch& dispatch) { return dispatch.pass == FrameGenPass::kEngineTiles; });
         synthesized = plan.synthesize;
         if (tuning.analyze_only) {
             return true; // Synthesize writes the frames
@@ -6072,10 +6255,11 @@ class D3D12FrameGen final : public FrameGenGpu {
         return true;
     }
 
-    // Records a view's plan from where it stopped; with `until_hardware`,
-    // stops right before kFlowUnpack, which needs the optical flow hardware's
-    // vectors.
-    bool RecordPlan(ViewRecording& recording, bool until_hardware, std::string& error) {
+    // Records a view's plan from where it stopped; with `until`, stops right
+    // before that pass: kFlowUnpack, which needs the optical flow hardware's
+    // vectors, or kEngineConvert, which needs the other view's verdict on the
+    // game's vectors.
+    bool RecordPlan(ViewRecording& recording, std::optional<FrameGenPass> until, std::string& error) {
         ViewResources& view = *recording.view;
         const FrameGenViewSubmission& submission = *recording.submission;
         const std::vector<ID3D12Resource*>& outputs = recording.outputs;
@@ -6092,9 +6276,10 @@ class D3D12FrameGen final : public FrameGenGpu {
             return ok;
         };
         while (recording.next < recording.plan.dispatches.size()) {
-            if (until_hardware && recording.plan.dispatches[recording.next].pass == FrameGenPass::kFlowUnpack) {
-                // The optical flow hardware's vectors are next.
-                recording.waits_for_hardware = true;
+            if (recording.plan.dispatches[recording.next].pass == until) {
+                // The optical flow hardware's vectors, or the other view's
+                // verdict, are next.
+                recording.waits_for_hardware = until == FrameGenPass::kFlowUnpack;
                 return flush_batch();
             }
             const FrameGenDispatch& dispatch = recording.plan.dispatches[recording.next++];
@@ -6430,6 +6615,11 @@ class D3D12FrameGen final : public FrameGenGpu {
     FrameGenEngineValidator engine_validator_;
     std::chrono::steady_clock::time_point engine_clock_{std::chrono::steady_clock::now()};
     std::uint64_t engine_evidence_frames_{0};
+    // Stage 5 (EngineStatus): frames the vectors were merged into whose tiles
+    // were read, their textured cells and those the vectors moved.
+    std::uint64_t engine_merged_frames_{0};
+    double engine_textured_cells_{0.0};
+    double engine_moved_cells_{0.0};
     bool engine_disable_noted_{false};
     std::uint64_t motion_captured_{0};
     std::uint64_t motion_dispatches_{0};

@@ -36,6 +36,9 @@ struct FrameGenViewSubmission {
 struct FrameGenExecuteResult {
     std::vector<bool> synthesized; // per view; false = the newest frame was written unchanged
     std::vector<bool> depth;       // per view; the newest frame's depth was used
+    // Per view (Direct3D 12, from FrameGenEngineMode::kAssist): the game's
+    // motion vectors were merged into the flow (its kEngineLabels written).
+    std::vector<bool> merged;
     // Execute failed only because a view's image was not captured when the
     // application released it (SetCopyAfterRelease): nothing was generated,
     // and the views are now set up so the next releases are captured.
@@ -279,6 +282,9 @@ class FrameGenGpu {
     // Tests: the last analysis used the optional multi-view hardware atlas,
     // rather than the supported per-view fallback.
     virtual bool UsesHardwareAtlasForTest() const { return false; }
+    // Tests: the engine motion vectors' convention locked from now on
+    // (FrameGenEngineValidator::LockForTest). Direct3D 12 only.
+    virtual void LockEngineForTest(const FrameGenEngineConvention& /*convention*/) {}
     // Tests and research: the flow the last Execute measured for `view`
     // (the filtered field synthesis used) in full-resolution pixels, x and
     // y per cell row by row; `cells` receives the field's size. Waits for the

@@ -526,6 +526,12 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
     // on what they find.
     depth_encoding_check_ = ReadResearchSwitch("VECTORXR_FRAMEGEN_DEPTH_ENCODING_CHECK") == "1";
     engine_cuts_ = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_CUTS") == "1";
+    // Stage 5: how the filters and the confidence view treat the cells the
+    // vectors moved (again at each config reload).
+    engine_started_ = engine_requested_;
+    engine_filter_ = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_FILTER") == "1";
+    engine_cockpit_ = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_COCKPIT") == "1";
+    engine_tint_ = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_TINT") == "1";
     engine_cut_window_.Reset();
     logged_engine_cut_ = false;
     depth_decoded_.clear();
@@ -606,8 +612,9 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
                 (engine_requested_ == FrameGenEngineMode::kCensus
                      ? " (research, stage 0): the game's motion vector images are fingerprinted and sampled while "
                        "frames are generated"
-                     : std::string(engine_requested_ == FrameGenEngineMode::kObserve ? " (research, stage 3)"
-                                                                                     : " (research, stage 2)") +
+                     : std::string(engine_requested_ == FrameGenEngineMode::kAssist    ? " (research, stage 5)"
+                                   : engine_requested_ == FrameGenEngineMode::kObserve ? " (research, stage 3)"
+                                                                                       : " (research, stage 2)") +
                            ": while frames are generated, the image each frame's vectors are in is resampled to each "
                            "eye's half-resolution grid, at the game's release of it or at its xrEndFrame (image: " +
                            (engine_image_ ? ToString(engine_image_->policy) +
@@ -617,11 +624,20 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
                                                 ", VECTORXR_FRAMEGEN_ENGINE_MV_IMAGE"
                                           : std::string("tracked")) +
                            "), with a census of it" +
-                           (engine_requested_ == FrameGenEngineMode::kObserve
+                           (engine_requested_ >= FrameGenEngineMode::kObserve
                                 ? ", and each frame's vectors are judged against what the frame shows to work out "
                                   "their convention"
                                 : "")) +
-                ", generated frames are made as without them" +
+                (engine_requested_ >= FrameGenEngineMode::kAssist
+                     ? std::string(", and where a frame's verdict lets them be used they take the measured flow's "
+                                   "place per flow cell wherever the frame's luma follows them better") +
+                           (engine_filter_ ? ", the filters treating those cells by their class "
+                                             "(VECTORXR_FRAMEGEN_ENGINE_FILTER=1" +
+                                                 std::string(engine_cockpit_ ? ", _COCKPIT=1)" : ")")
+                                           : std::string()) +
+                           (engine_tint_ ? ", tinted in the confidence view (VECTORXR_FRAMEGEN_ENGINE_TINT=1)"
+                                         : std::string())
+                     : std::string(", generated frames are made as without them")) +
                 (csv.empty() ? std::string(".") : ", rows in " + csv + ".");
         }
     }
@@ -694,10 +710,11 @@ void FrameGenPresenter::Stop() {
     // The census worker shares nothing with the presenter thread: stopped
     // even when that thread is left behind.
     engine_worker = std::move(engine_worker_);
-    engine_requested_ = FrameGenEngineMode::kOff;
+    engine_requested_ = engine_started_ = FrameGenEngineMode::kOff;
     // Nor do the session's research switches outlast it (a later Start of
     // an abandoned presenter reads none).
     depth_encoding_check_ = engine_cuts_ = research_file_ = false;
+    engine_filter_ = engine_cockpit_ = engine_tint_ = false;
     ForgetEngineFramesLocked();
     if (abandoned_) {
         // The thread left behind may still use the backend, the output
@@ -949,7 +966,15 @@ void FrameGenPresenter::SetTraceEnabled(bool enabled) {
 }
 
 void FrameGenPresenter::Configure(const FrameGenResolvedSettings& settings) {
+    // Stage 5's live comparison: the research switches again, read before
+    // the lock (the research file is read at each call).
+    const std::optional<std::string> engine_mode = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_MV");
+    const bool engine_filter = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_FILTER") == "1";
+    const bool engine_cockpit = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_COCKPIT") == "1";
+    const bool engine_tint = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_TINT") == "1";
     std::scoped_lock lock(mutex_);
+    ReconfigureEngineLocked(ParseFrameGenEngineMode(engine_mode.value_or("").c_str()), engine_filter, engine_cockpit,
+                            engine_tint);
     // Just in time, the presenter thread keeps the mode it started with
     // (StayThreadedLocked): another one starts it again, after a fresh run of
     // steady frames, as turning Frame Generation off and on does. Frames
@@ -1001,6 +1026,28 @@ void FrameGenPresenter::Configure(const FrameGenResolvedSettings& settings) {
                           " once frames are steady again.");
         }
     }
+}
+
+void FrameGenPresenter::ReconfigureEngineLocked(FrameGenEngineMode mode, bool filter, bool cockpit, bool tint) {
+    if (!started_ || engine_started_ < FrameGenEngineMode::kObserve) {
+        return;
+    }
+    // Observe and Assist only: the other modes capture otherwise.
+    const FrameGenEngineMode next =
+        mode == FrameGenEngineMode::kObserve || mode == FrameGenEngineMode::kAssist ? mode : engine_requested_;
+    if (next == engine_requested_ && filter == engine_filter_ && cockpit == engine_cockpit_ && tint == engine_tint_) {
+        return;
+    }
+    if (logger_) {
+        logger_->Info(std::string("Frame Generation engine motion vectors from the next real frame (config reload): ") +
+                      ToString(engine_requested_) + " -> " + ToString(next) + ", VECTORXR_FRAMEGEN_ENGINE_FILTER=" +
+                      (filter ? "1" : "0") + ", _COCKPIT=" + (cockpit ? "1" : "0") + ", _TINT=" + (tint ? "1" : "0") +
+                      (mode == next ? "." : std::string(" (") + ToString(mode) + " waits for the next session)."));
+    }
+    engine_requested_ = next;
+    engine_filter_ = filter;
+    engine_cockpit_ = cockpit;
+    engine_tint_ = tint;
 }
 
 void FrameGenPresenter::SetConfigured(bool enabled) {
@@ -3385,7 +3432,17 @@ void FrameGenPresenter::LogEngineSummaryLocked(double seconds) {
         ratio(now.variant - last.variant, textured, now.measured_cost - last.measured_cost,
               now.with_measured - last.with_measured) +
         ", engine/head " + ratio(now.variant - last.variant, textured, now.zero - last.zero, textured) +
-        ", lag/engine " + ratio(now.lag_cost - last.lag_cost, 1.0, now.lag_variant - last.lag_variant, 1.0) + ".");
+        ", lag/engine " + ratio(now.lag_cost - last.lag_cost, 1.0, now.lag_variant - last.lag_variant, 1.0) +
+        // Stage 5: frames the vectors were merged into, and the share of
+        // their textured flow cells the vectors moved.
+        (now.merged > last.merged || engine_requested_ >= FrameGenEngineMode::kAssist
+             ? "; assist: merged=" + std::to_string(now.merged - last.merged) + ", vectors moved " +
+                   (now.textured_cells > last.textured_cells
+                        ? Number(100.0 * (now.moved_cells - last.moved_cells) / (now.textured_cells - last.textured_cells), 1) +
+                              "% of the textured cells"
+                        : std::string("no textured cells"))
+             : std::string()) +
+        ".");
     engine_validation_logged_ = now;
 }
 
@@ -4808,12 +4865,27 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
                               " (experimental).");
             }
         }
+        // Engine motion vectors: from stage 2 the backend keeps raw fields
+        // for them (made as the views are set up), in a session whose frames
+        // came with vectors the layer reads, for frames the engine path may
+        // serve (two views analysed just in time, not composed: gate G9).
+        const bool engine_path = engine_capturable_ && analyze && !composition && projection.viewCount == 2;
         // Once the game's vectors can stand in for measured flow (from
         // Assist), the flow ends at the hardware's level whenever the hardware
         // is chosen, whether it or the vectors measure a frame (Observe
-        // changes nothing generated).
+        // changes nothing generated). By the mode the session started in: a
+        // switch between Observe and Assist at a config reload leaves the
+        // level as it is. Only for frames the vectors may serve, on a backend
+        // that reads them: elsewhere (bridged, quad views, Direct3D 11 or
+        // Vulkan) the flow stays at its quality's level, as without them.
         tuning.hardware_level = settings_.motion_estimation == FrameGenMotionEstimation::kHardware &&
-                                engine_requested_ >= FrameGenEngineMode::kAssist;
+                                engine_started_ >= FrameGenEngineMode::kAssist && engine_path &&
+                                gpu_->SupportsEngineMotion();
+        // Stage 5: how the filters and the confidence view treat the cells
+        // the vectors moved (research).
+        tuning.engine_filter = engine_filter_;
+        tuning.engine_cockpit = engine_cockpit_;
+        tuning.engine_tint = engine_tint_;
         tuning.diagnostic = settings_.diagnostic_view;
         tuning.artifact_suppression = settings_.artifact_suppression;
         tuning.motion_limit_percent = settings_.motion_limit_percent;
@@ -4829,15 +4901,10 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         // eye blends them, and a focus view limits its periphery's motion.
         tuning.composition = analyze ? composition : nullptr;
         tuning.history_ring = analyze && !composition ? jit_canvas_ring_ : 0;
-        // Engine motion vectors: from stage 2 the backend keeps raw fields
-        // for them (made as the views are set up), in a session whose frames
-        // came with vectors the layer reads, for frames the engine path may
-        // serve (two views analysed just in time, not composed: gate G9).
-        // Elsewhere (a bridged session, a game sending none) it makes none:
-        // kCensus. A frame asking for none in between keeps those made.
-        tuning.engine_mode = engine_capturable_ && analyze && !composition && projection.viewCount == 2
-                                 ? engine_requested_
-                                 : std::min(engine_requested_, FrameGenEngineMode::kCensus);
+        // The engine path's frames (above); elsewhere (a bridged session, a
+        // game sending none) the backend makes no raw fields: kCensus. A
+        // frame asking for none in between keeps those made.
+        tuning.engine_mode = engine_path ? engine_requested_ : std::min(engine_requested_, FrameGenEngineMode::kCensus);
         // The frame's engine motion record and the frame before's, as the
         // frame gates read them: taken before a pause forgets them (just in
         // time, AnalyzeJit's pause check came first: such a frame counts as

@@ -2018,8 +2018,9 @@ void TestFrameGenMotionCapturePlan() {
     Expect(depthxr::ParseFrameGenEngineMode("Capture") == depthxr::FrameGenEngineMode::kCapture &&
                depthxr::ParseFrameGenEngineMode("census") == depthxr::FrameGenEngineMode::kCensus &&
                depthxr::ParseFrameGenEngineMode("Observe") == depthxr::FrameGenEngineMode::kObserve &&
-               depthxr::ParseFrameGenEngineMode("assist") == depthxr::FrameGenEngineMode::kOff,
-           "Engine motion: the switch takes off, census, capture and observe");
+               depthxr::ParseFrameGenEngineMode("Assist") == depthxr::FrameGenEngineMode::kAssist &&
+               depthxr::ParseFrameGenEngineMode("lead") == depthxr::FrameGenEngineMode::kOff,
+           "Engine motion: the switch takes off, census, capture, observe and assist");
     const depthxr::FrameGenExtent l1 = depthxr::FrameGenPyramid({5424, 5356})[1];
     const depthxr::FrameGenDispatch dispatch =
         depthxr::BuildFrameGenMotionCaptureDispatch(l1, {0, 0, 4339, 4285}, {16, 8, 4300, 4200}, 0, 1, 2);
@@ -2648,6 +2649,230 @@ void TestFrameGenEngineEvidencePlan() {
     tuning.hardware_level = true;
     Expect(depthxr::FrameGenFinalFlowLevel(tuning) == depthxr::kFrameGenHardwareFlowLevel,
            "Engine evidence: with hardware_level, at the hardware's level");
+}
+
+// Stage 5's plan: Observe's as before; Assist takes the evidence before the
+// filter, then kEngineConvert, kEngineMerge and kEngineTiles, the filters
+// reading the merged flow (kEngineFlow) and the world fit the measured one;
+// the constants the shaders read; Interpolate capped at Assist; the
+// filters' label rules and the confidence view's tint behind their switches.
+void TestFrameGenEngineAssistPlan() {
+    using depthxr::FrameGenEngineMode;
+    using depthxr::FrameGenPass;
+    using depthxr::FrameGenTextureKind;
+    depthxr::FrameGenEngineConvention convention;
+    convention.gain = {2.0f, -2.0f};
+    convention.camera = depthxr::FrameGenEngineCamera::kRotationOnly;
+    depthxr::FrameGenViewRequest request;
+    request.extent = {1024, 1024};
+    request.synthesize = request.temporal = request.depth = true;
+    request.newest.angle_left = request.previous.angle_left = -0.9f;
+    request.newest.angle_right = request.previous.angle_right = 0.9f;
+    request.newest.angle_up = request.previous.angle_up = 0.9f;
+    request.newest.angle_down = request.previous.angle_down = -0.9f;
+    request.newest.orientation = {0.0f, 0.01f, 0.0f, 0.99995f};
+    request.engine_motion = true;
+    request.engine_encoding.ext = true;
+    request.engine_encoding.scale = {0.5f, 0.25f, 1.0f};
+    request.engine_encoding.offset = {0.1f, -0.2f, 0.0f};
+    request.engine_vectors = {800, 790};
+    depthxr::FrameGenTuning tuning;
+    tuning.mode = depthxr::FrameGenSynthesisMode::kExtrapolate;
+    tuning.analyze_only = true;
+    tuning.engine_mode = FrameGenEngineMode::kObserve;
+    tuning.engine = convention;
+    const depthxr::FrameGenViewPlan observed = depthxr::BuildFrameGenViewPlan(request, tuning);
+    tuning.engine_mode = FrameGenEngineMode::kAssist;
+    const depthxr::FrameGenViewPlan assisted = depthxr::BuildFrameGenViewPlan(request, tuning);
+    auto order = [](const depthxr::FrameGenViewPlan& plan) {
+        std::string text;
+        for (const auto& dispatch : plan.dispatches) {
+            switch (dispatch.pass) {
+            case FrameGenPass::kRefine: text += "refine "; break;
+            case FrameGenPass::kFilter: text += "filter "; break;
+            case FrameGenPass::kEngineReduce: text += "R "; break;
+            case FrameGenPass::kEngineSolve: text += "S "; break;
+            case FrameGenPass::kEngineConvert: text += "convert "; break;
+            case FrameGenPass::kEngineMerge: text += "merge "; break;
+            case FrameGenPass::kEngineTiles: text += "tiles "; break;
+            case FrameGenPass::kWorldReduce: text += "W "; break;
+            case FrameGenPass::kWorldSolve: text += "w "; break;
+            default: break;
+            }
+        }
+        return text;
+    };
+    Expect(order(observed) == "refine refine filter R S R S ",
+           "Engine assist plan: Observe takes the evidence after the filter, as before (" + order(observed) + ")");
+    Expect(order(assisted) == "refine refine R S R S convert merge tiles filter ",
+           "Engine assist plan: Assist takes it first, then converts, merges and tiles before the filter (" +
+               order(assisted) + ")");
+    // Everything else as Observe's, the filter reading the merged flow.
+    std::vector<depthxr::FrameGenDispatch> rest, observed_rest;
+    auto engine_pass = [](FrameGenPass pass) {
+        return pass == FrameGenPass::kEngineReduce || pass == FrameGenPass::kEngineSolve ||
+               pass == FrameGenPass::kEngineConvert || pass == FrameGenPass::kEngineMerge || pass == FrameGenPass::kEngineTiles;
+    };
+    for (const auto& dispatch : assisted.dispatches) {
+        if (!engine_pass(dispatch.pass)) rest.push_back(dispatch);
+    }
+    for (const auto& dispatch : observed.dispatches) {
+        if (!engine_pass(dispatch.pass)) observed_rest.push_back(dispatch);
+    }
+    bool same = rest.size() == observed_rest.size();
+    for (std::size_t i = 0; same && i < rest.size(); ++i) {
+        depthxr::FrameGenDispatch expected = observed_rest[i];
+        if (expected.pass == FrameGenPass::kFilter) expected.inputs[0] = {FrameGenTextureKind::kEngineFlow, 0};
+        same = rest[i].pass == expected.pass &&
+               std::memcmp(rest[i].inputs.data(), expected.inputs.data(), sizeof(rest[i].inputs)) == 0 &&
+               std::memcmp(rest[i].outputs.data(), expected.outputs.data(), sizeof(rest[i].outputs)) == 0 &&
+               std::memcmp(&rest[i].constants, &expected.constants, sizeof(depthxr::FrameGenConstants)) == 0;
+    }
+    Expect(same, "Engine assist plan: the rest is Observe's, the filter reading kEngineFlow in place of kFlow");
+    auto find = [](const depthxr::FrameGenViewPlan& plan, FrameGenPass pass) {
+        return *std::find_if(plan.dispatches.begin(), plan.dispatches.end(),
+                             [&](const depthxr::FrameGenDispatch& dispatch) { return dispatch.pass == pass; });
+    };
+    const std::uint8_t level = assisted.final_flow_level;
+    const depthxr::FrameGenExtent cells = assisted.levels[level];
+    const depthxr::FrameGenDispatch convert = find(assisted, FrameGenPass::kEngineConvert);
+    const depthxr::FrameGenDispatch merge = find(assisted, FrameGenPass::kEngineMerge);
+    const depthxr::FrameGenDispatch tiles = find(assisted, FrameGenPass::kEngineTiles);
+    // A and B of the convention and the extension's encoding; the camera in
+    // bits 4-5; the level; the frame's verdict and bias from kEngineParams,
+    // the other eye's verdict from its own.
+    Expect(convert.inputs[0].kind == FrameGenTextureKind::kEngineRaw && convert.inputs[1].kind == FrameGenTextureKind::kDepth &&
+               convert.inputs[2].kind == FrameGenTextureKind::kEngineParams &&
+               convert.inputs[3].kind == FrameGenTextureKind::kNone && convert.inputs[4].kind == FrameGenTextureKind::kNone &&
+               convert.inputs[5].kind == FrameGenTextureKind::kEngineParamsOther &&
+               convert.outputs[0].kind == FrameGenTextureKind::kEngineCandidate &&
+               convert.outputs[1].kind == FrameGenTextureKind::kEngineInfo &&
+               convert.constants.tuning == depthxr::FrameGenEngineDecode(convention, request.engine_encoding) &&
+               convert.constants.tuning == std::array<float, 4>{0.5f, 0.25f, 0.1f, -0.2f} &&
+               convert.constants.options[0] == 1u << 4 && convert.constants.options[3] == level &&
+               convert.constants.size == std::array<std::uint32_t, 4>{cells.width, cells.height, 512, 512} &&
+               convert.width == cells.width && convert.height == cells.height &&
+               (convert.constants.options[1] & depthxr::kFrameGenFlagDepth) != 0,
+           "Engine assist plan: kEngineConvert's inputs, decode (A, B), camera bits and level");
+    // REFINE's block at its match level: the scale in options.w.
+    const std::uint8_t match = depthxr::FrameGenMatchLevel(level);
+    Expect(level == 3 && match == 1 && merge.inputs[0].kind == FrameGenTextureKind::kLumaNewest && merge.inputs[0].level == match &&
+               merge.inputs[1].kind == FrameGenTextureKind::kLumaPrevious && merge.inputs[1].level == match &&
+               merge.inputs[2].kind == FrameGenTextureKind::kEngineCandidate &&
+               merge.inputs[3].kind == FrameGenTextureKind::kEngineInfo &&
+               merge.inputs[4].kind == FrameGenTextureKind::kFlow && merge.inputs[4].level == level &&
+               merge.inputs[5].kind == FrameGenTextureKind::kEngineParams &&
+               merge.outputs[0].kind == FrameGenTextureKind::kEngineFlow &&
+               merge.outputs[1].kind == FrameGenTextureKind::kEngineLabels &&
+               merge.constants.options[0] == depthxr::kFrameGenEngineMergeAssist && merge.constants.options[2] == level &&
+               merge.constants.options[3] == 4u,
+           "Engine assist plan: kEngineMerge reads REFINE's luma and the measured flow, its block scale 4 at level 3");
+    tuning.quality = depthxr::FrameGenFlowQuality::kQuality;
+    Expect(find(depthxr::BuildFrameGenViewPlan(request, tuning), FrameGenPass::kEngineMerge).constants.options[3] == 2u,
+           "Engine assist plan: scale 2 at level 2");
+    tuning.quality = depthxr::FrameGenFlowQuality::kPerformance;
+    const depthxr::FrameGenDispatch coarse = find(depthxr::BuildFrameGenViewPlan(request, tuning), FrameGenPass::kEngineMerge);
+    Expect(coarse.constants.options[3] == 4u && coarse.inputs[0].level == 2, "Engine assist plan: level 4 matches at level 2");
+    tuning.quality = depthxr::FrameGenFlowQuality::kBalanced;
+    // The tiles: a thread each, the head's turn (degrees) in tuning.y.
+    Expect(tiles.inputs[0].kind == FrameGenTextureKind::kEngineLabels && tiles.inputs[1].kind == FrameGenTextureKind::kNone &&
+               tiles.outputs[0].kind == FrameGenTextureKind::kEngineTiles &&
+               tiles.width == (cells.width + 7) / 8 && tiles.height == (cells.height + 7) / 8 &&
+               tiles.constants.options[0] == 0u && std::abs(tiles.constants.tuning[1] - 1.146f) < 0.002f,
+           "Engine assist plan: kEngineTiles per 8x8 cells, with the head's turn per frame (" +
+               std::to_string(tiles.constants.tuning[1]) + " degrees)");
+    request.engine_tiles = true;
+    const depthxr::FrameGenViewPlan tiled = depthxr::BuildFrameGenViewPlan(request, tuning);
+    Expect(find(tiled, FrameGenPass::kEngineConvert).inputs[3].kind == FrameGenTextureKind::kEngineTilesPrevious &&
+               find(tiled, FrameGenPass::kEngineConvert).constants.options[0] ==
+                   ((1u << 4) | depthxr::kFrameGenEngineConvertTiles) &&
+               find(tiled, FrameGenPass::kEngineTiles).inputs[1].kind == FrameGenTextureKind::kEngineTilesPrevious &&
+               find(tiled, FrameGenPass::kEngineTiles).constants.options[0] == 1u,
+           "Engine assist plan: the frame before's tiles where the backend has them");
+    request.engine_tiles = false;
+    // The filters' label rules behind their switch.
+    Expect(find(assisted, FrameGenPass::kFilter).inputs[4].kind == FrameGenTextureKind::kNone &&
+               (find(assisted, FrameGenPass::kFilter).constants.options[1] & depthxr::kFrameGenFlagEngine) == 0,
+           "Engine assist plan: no label rules without VECTORXR_FRAMEGEN_ENGINE_FILTER");
+    tuning.engine_filter = true;
+    const depthxr::FrameGenDispatch labelled = find(depthxr::BuildFrameGenViewPlan(request, tuning), FrameGenPass::kFilter);
+    tuning.engine_cockpit = true;
+    const depthxr::FrameGenDispatch cockpit = find(depthxr::BuildFrameGenViewPlan(request, tuning), FrameGenPass::kFilter);
+    Expect(labelled.inputs[4].kind == FrameGenTextureKind::kEngineLabels &&
+               (labelled.constants.options[1] & depthxr::kFrameGenFlagEngine) != 0 && labelled.constants.options[0] == 0u &&
+               cockpit.constants.options[0] == 1u,
+           "Engine assist plan: the labels at the filter's input 4, options.x 1 for the cockpit's movers");
+    tuning.engine_filter = tuning.engine_cockpit = false;
+    // With world motion: fitted (or set) before the conversion, for the
+    // classes, from the measured flow; the filter then reads it as before.
+    request.world_motion = true;
+    const depthxr::FrameGenViewPlan world = depthxr::BuildFrameGenViewPlan(request, tuning);
+    bool fit_measured = true;
+    for (const auto& dispatch : world.dispatches) {
+        if (dispatch.pass == FrameGenPass::kWorldReduce) {
+            fit_measured = fit_measured && dispatch.inputs[0].kind == FrameGenTextureKind::kFlow;
+        }
+    }
+    Expect(order(world) == "refine refine R S R S W w W w W w convert merge tiles filter " && fit_measured &&
+               find(world, FrameGenPass::kEngineConvert).inputs[4].kind == FrameGenTextureKind::kWorldParams &&
+               (find(world, FrameGenPass::kEngineConvert).constants.options[0] & depthxr::kFrameGenEngineConvertWorld) != 0 &&
+               find(world, FrameGenPass::kFilter).inputs[3].kind == FrameGenTextureKind::kWorldParams,
+           "Engine assist plan: the world fit before the conversion, from the measured flow (" + order(world) + ")");
+    // Interpolating just in time: the cover filter reads the merged flow
+    // too, and the world fit (the cover's) comes first; Lead is capped at
+    // Assist.
+    tuning.mode = depthxr::FrameGenSynthesisMode::kInterpolate;
+    tuning.cover = true;
+    tuning.engine_mode = FrameGenEngineMode::kLead;
+    const depthxr::FrameGenViewPlan interpolated = depthxr::BuildFrameGenViewPlan(request, tuning);
+    std::vector<depthxr::FrameGenDispatch> interpolated_filters;
+    for (const auto& dispatch : interpolated.dispatches) {
+        if (dispatch.pass == FrameGenPass::kFilter) interpolated_filters.push_back(dispatch);
+    }
+    Expect(depthxr::FrameGenEngineModeFor(tuning) == FrameGenEngineMode::kAssist &&
+               order(interpolated) == "refine refine R S R S W w W w W w convert merge tiles filter filter " &&
+               find(interpolated, FrameGenPass::kEngineMerge).constants.options[0] == depthxr::kFrameGenEngineMergeAssist &&
+               interpolated_filters.size() == 2 && interpolated_filters[0].inputs[0].kind == FrameGenTextureKind::kEngineFlow &&
+               interpolated_filters[1].inputs[0].kind == FrameGenTextureKind::kEngineFlow &&
+               interpolated_filters[1].inputs[3].kind == FrameGenTextureKind::kWorldParams &&
+               interpolated_filters[0].inputs[3].kind == FrameGenTextureKind::kNone,
+           "Engine assist plan: interpolating, capped at Assist, both filters read the merged flow (" +
+               order(interpolated) + ")");
+    tuning.mode = depthxr::FrameGenSynthesisMode::kExtrapolate;
+    tuning.cover = false;
+    Expect(depthxr::FrameGenEngineModeFor(tuning) == FrameGenEngineMode::kLead &&
+               find(depthxr::BuildFrameGenViewPlan(request, tuning), FrameGenPass::kEngineMerge).constants.options[0] ==
+                   depthxr::kFrameGenEngineMergeLead,
+           "Engine assist plan: extrapolating, Lead's rule (stage 6)");
+    tuning.engine_mode = FrameGenEngineMode::kAssist;
+    request.world_motion = false;
+    // None without the evidence (a gate, a view without vectors).
+    request.engine_motion = false;
+    const depthxr::FrameGenViewPlan without = depthxr::BuildFrameGenViewPlan(request, tuning);
+    Expect(order(without) == "refine refine filter " && find(without, FrameGenPass::kFilter).inputs[0].kind == FrameGenTextureKind::kFlow,
+           "Engine assist plan: none without the frame's evidence, the filter on the measured flow");
+    request.engine_motion = true;
+    // The confidence view's tint: the labels at synthesis's input 5, never
+    // in place of the motion map.
+    tuning.diagnostic = depthxr::FrameGenDiagnosticView::kConfidence;
+    auto synthesis = [&](const depthxr::FrameGenTuning& with) {
+        const depthxr::FrameGenViewPlan plan = depthxr::BuildFrameGenSynthesisPlan(
+            request, with, depthxr::FrameGenSynthesisMode::kExtrapolate, 0.5f, false);
+        return plan.dispatches.back();
+    };
+    Expect(synthesis(tuning).inputs[5].kind == FrameGenTextureKind::kNone, "Engine assist plan: no tint without its switch");
+    tuning.engine_tint = true;
+    const depthxr::FrameGenDispatch tinted = synthesis(tuning);
+    Expect(tinted.inputs[5].kind == FrameGenTextureKind::kEngineLabels &&
+               (tinted.constants.options[1] & depthxr::kFrameGenFlagEngine) != 0,
+           "Engine assist plan: the tint reads the labels at input 5");
+    tuning.depth_splat = true;
+    Expect(synthesis(tuning).inputs[5].kind == FrameGenTextureKind::kMotionMap &&
+               (synthesis(tuning).constants.options[1] & depthxr::kFrameGenFlagEngine) == 0,
+           "Engine assist plan: the motion map keeps input 5");
+    tuning.depth_splat = false;
+    tuning.diagnostic = depthxr::FrameGenDiagnosticView::kOff;
+    Expect(synthesis(tuning).inputs[5].kind == FrameGenTextureKind::kNone, "Engine assist plan: the tint is the confidence view's");
 }
 
 // Engine motion validation on synthetic evidence: a game's vectors in a
@@ -6181,6 +6406,7 @@ int main() {
     TestFrameGenEngineCuts();
     TestFrameGenDeclaredChange();
     TestFrameGenEngineEvidencePlan();
+    TestFrameGenEngineAssistPlan();
     TestFrameGenEngineValidator();
     TestFrameGenEnginePrior();
     TestFrameGenEngineWorldParams();

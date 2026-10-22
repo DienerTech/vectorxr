@@ -4110,6 +4110,137 @@ void TestEngineMotionCapture() {
     }
 }
 
+// Engine motion vectors, stage 5 (VECTORXR_FRAMEGEN_ENGINE_MV=assist): the
+// backend runs at kAssist, the flow at the hardware's level where the
+// hardware is chosen, with the filters' and the tint's switches
+// (VECTORXR_FRAMEGEN_ENGINE_FILTER, _COCKPIT, _TINT). A config reload reads
+// them again: Assist and Observe swap from the next real frame, the level as
+// the session started; another mode waits for the next session.
+void TestEngineMotionAssist() {
+    const XrSwapchain depth_chain = reinterpret_cast<XrSwapchain>(0x21);
+    const XrSwapchain vectors = reinterpret_cast<XrSwapchain>(0x31);
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    gpu.depth = gpu.engine = gpu.threaded = gpu.jit = true;
+    runtime.paced = true;
+    _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "assist");
+    _putenv_s("VECTORXR_FRAMEGEN_ENGINE_FILTER", "1");
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kExtrapolate);
+    FrameGenResolvedSettings settings;
+    settings.enabled = true;
+    settings.synthesis_mode = FrameGenSynthesisMode::kExtrapolate;
+    settings.multiplier = FrameGenMultiplier::k2;
+    settings.motion_estimation = FrameGenMotionEstimation::kHardware;
+    presenter.Configure(settings);
+    _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "");
+    _putenv_s("VECTORXR_FRAMEGEN_ENGINE_FILTER", "");
+    // A config reload with the research switches as they are then.
+    const auto reload = [&](const char* mode, const char* filter, const char* tint) {
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", mode);
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_FILTER", filter);
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_TINT", tint);
+        presenter.Configure(settings);
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "");
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_FILTER", "");
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_TINT", "");
+    };
+    presenter.TrackSwapchain(depth_chain, 20, 1, XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+    presenter.TrackSwapchain(vectors, kFloatFormat, 1, XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+    App app(presenter, runtime);
+    app.depth.subImage.swapchain = depth_chain;
+    app.depth.subImage.imageRect = {{0, 0}, {1200, 1200}};
+    app.depth.maxDepth = 1.0f;
+    app.depth.nearZ = 0.1f;
+    app.depth.farZ = 1000.0f;
+    // Each frame's vectors, as the layer notes them at its xrEndFrame.
+    const auto note = [&](FrameGenPresenter& target, const App& source, XrTime time, std::uint64_t frame) {
+        FrameGenEngineMotionFrame record;
+        record.display_time = time;
+        record.projection_frame = frame;
+        for (std::uint32_t v = 0; v < 2; ++v) {
+            FrameGenEngineMotionView view;
+            view.view = v;
+            view.source = FrameGenMotionSource::kSpaceWarpFb;
+            view.vectors = {vectors, {{0, 0}, {960, 960}}, v};
+            view.depth = source.depth.subImage;
+            view.depth_is_khr = true;
+            view.color = source.views[v].subImage;
+            view.depth_encoding = {source.depth.minDepth, source.depth.maxDepth, source.depth.nearZ, source.depth.farZ};
+            const XrPosef& pose = source.views[v].pose;
+            view.game.orientation = {pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w};
+            view.game.position = {pose.position.x, pose.position.y, pose.position.z};
+            record.views.push_back(view);
+        }
+        record.complete = true;
+        target.NoteEngineMotion(record);
+        target.CaptureEngineMotion();
+    };
+    std::uint64_t frames = 0;
+    app.before_end = [&](XrTime time) { note(presenter, app, time, ++frames); };
+    const auto run = [&](int count) {
+        const int executes = gpu.executes;
+        for (int i = 0; gpu.executes < executes + count && i < 400; ++i) app.Frame();
+        Check(gpu.executes >= executes + count, "engine assist: frames are analysed");
+    };
+    run(6);
+    Check(gpu.tuning.engine_mode == FrameGenEngineMode::kAssist && gpu.tuning.hardware_level && gpu.tuning.engine_filter &&
+              !gpu.tuning.engine_cockpit && !gpu.tuning.engine_tint,
+          "engine assist: at kAssist, the flow at the hardware's level, the filters' label rules on");
+    reload("observe", "", "1");
+    run(2);
+    Check(gpu.tuning.engine_mode == FrameGenEngineMode::kObserve && gpu.tuning.hardware_level && !gpu.tuning.engine_filter &&
+              gpu.tuning.engine_tint,
+          "engine assist: a reload to observe takes it from the next frame, the level kept, the switches read again");
+    reload("capture", "", "");
+    run(2);
+    Check(gpu.tuning.engine_mode == FrameGenEngineMode::kObserve && !gpu.tuning.engine_tint,
+          "engine assist: a reload to capture waits for the next session");
+    reload("assist", "1", "");
+    run(2);
+    Check(gpu.tuning.engine_mode == FrameGenEngineMode::kAssist && gpu.tuning.engine_filter,
+          "engine assist: and back to assist");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "engine assist: calls stayed ordered");
+
+    // A session started below Observe never switches to it at a reload.
+    FrameGenPresenter census;
+    GpuLog census_gpu;
+    census_gpu.engine = census_gpu.threaded = census_gpu.jit = true;
+    _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "capture");
+    StartPresenter(census, census_gpu, FrameGenSynthesisMode::kExtrapolate);
+    _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "assist");
+    census.Configure(settings);
+    _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "");
+    Runtime census_runtime;
+    census_runtime.paced = true;
+    App census_app(census, census_runtime);
+    for (int i = 0; census_gpu.executes < 3 && i < 400; ++i) census_app.Frame();
+    Check(census_gpu.executes >= 3 && census_gpu.tuning.engine_mode <= FrameGenEngineMode::kCapture,
+          "engine assist: a session started at capture stays below observe");
+    census.Stop();
+
+    // A backend that cannot read the vectors (Direct3D 11, Vulkan) keeps the
+    // flow at its quality's level, the game sending them or not: only frames
+    // the vectors may serve end at the hardware's.
+    FrameGenPresenter plain;
+    GpuLog plain_gpu;
+    plain_gpu.depth = plain_gpu.threaded = plain_gpu.jit = true;
+    _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "assist");
+    StartPresenter(plain, plain_gpu, FrameGenSynthesisMode::kExtrapolate);
+    plain.Configure(settings);
+    _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "");
+    Runtime plain_runtime;
+    plain_runtime.paced = true;
+    App plain_app(plain, plain_runtime);
+    std::uint64_t plain_frames = 0;
+    plain_app.before_end = [&](XrTime time) { note(plain, plain_app, time, ++plain_frames); };
+    for (int i = 0; plain_gpu.executes < 4 && i < 400; ++i) plain_app.Frame();
+    Check(plain_gpu.executes >= 4 && plain_frames > 0 && !plain_gpu.tuning.hardware_level,
+          "engine assist: a backend that cannot read the vectors keeps the flow at its quality's level");
+    plain.Stop();
+}
+
 // Engine motion vectors, stage 3 (VECTORXR_FRAMEGEN_ENGINE_MV=observe): once
 // the game's swapchains settled, each frame analysed just in time whose
 // vectors no gate holds back asks for their evidence
@@ -11933,6 +12064,7 @@ int main(int argc, char** argv) {
     RUN(TestEngineMotionGates);
     RUN(TestEngineMotionCapture);
     RUN(TestEngineMotionObserve);
+    RUN(TestEngineMotionAssist);
     RUN(TestEngineDelta);
     RUN(TestResearchFileSessions);
     RUN(TestAutomaticMultiplier);

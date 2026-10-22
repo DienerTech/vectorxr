@@ -1815,6 +1815,10 @@ class FrameGenPresenter {
     // A pause, an abandoned frame or a swapchain gone: the records are not a
     // frame's and the one before's any more, nor are the motion targets.
     void ForgetEngineFramesLocked();
+    // Stage 5, at a config reload (Configure): VECTORXR_FRAMEGEN_ENGINE_MV
+    // (observe or assist; another mode waits for the next session) and the
+    // filters' and tint's switches as the research switches name them now.
+    void ReconfigureEngineLocked(FrameGenEngineMode mode, bool filter, bool cockpit, bool tint);
     FrameGenEngineMode engine_requested_{FrameGenEngineMode::kOff};
     // Stage 2: the image a frame's vectors are taken from
     // (VECTORXR_FRAMEGEN_ENGINE_MV_IMAGE=released|color|depth|0|1|2; none:
@@ -1872,6 +1876,18 @@ class FrameGenPresenter {
     bool depth_encoding_check_{false};
     bool engine_cuts_{false};
     bool research_file_{false}; // a switch of this session came from the research file
+    // Stage 5 (FrameGenTuning::engine_filter, engine_cockpit, engine_tint):
+    // VECTORXR_FRAMEGEN_ENGINE_FILTER=1, _COCKPIT=1 and _TINT=1, read at Start
+    // and again at each config reload (Configure) with
+    // VECTORXR_FRAMEGEN_ENGINE_MV: a session started observing or assisting
+    // takes either of the two from its next real frame on, so a flight
+    // compares them without a restart. The mode the session started in sets
+    // the flow's level (FrameGenTuning::hardware_level): switching never
+    // changes it.
+    bool engine_filter_{false};
+    bool engine_cockpit_{false};
+    bool engine_tint_{false};
+    FrameGenEngineMode engine_started_{FrameGenEngineMode::kOff};
     FrameGenEngineCuts engine_cut_window_;
     bool logged_engine_cut_{false};
     // Per view: the encoding its latest depth capture was decoded with, until

@@ -246,7 +246,7 @@ void AppendEngineEvidence(FrameGenViewPlan& plan, const FrameGenConstants& base,
     const std::array<float, 4> converted = FrameGenEngineDecode(tuning.engine, request.engine_encoding);
     const std::uint32_t camera = static_cast<std::uint32_t>(tuning.engine.camera) << 4;
     // Observe and Assist measure the flow as well.
-    const std::uint32_t measured = tuning.engine_mode <= FrameGenEngineMode::kAssist ? 1u << 8 : 0u;
+    const std::uint32_t measured = FrameGenEngineModeFor(tuning) <= FrameGenEngineMode::kAssist ? 1u << 8 : 0u;
     auto reduce = [&](std::uint32_t kind, const FrameGenConstants& constants, const std::array<FrameGenTexture, 6>& inputs,
                       const std::array<float, 4>& decode) {
         FrameGenDispatch dispatch =
@@ -296,6 +296,74 @@ void AppendEngineEvidence(FrameGenViewPlan& plan, const FrameGenConstants& base,
     solve(1);
 }
 
+// How far the head turned between the request's two views, in degrees.
+float HeadTurnDegrees(const FrameGenViewRequest& request) {
+    const auto& a = request.newest.orientation;
+    const auto& b = request.previous.orientation;
+    const float dot = std::abs(a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]);
+    return 2.0f * std::acos(std::min(dot, 1.0f)) * 57.2957795f;
+}
+
+// Engine motion vectors from Assist (FrameGenViewRequest::engine_motion),
+// after their evidence (the frame's verdict is in kEngineParams): each flow
+// cell's two candidates from the raw vectors under it, converted by the
+// convention (kEngineConvert; `world`: the world's motion was set or fitted
+// before them, for the candidates' classes; with the other view's verdict,
+// which holds them back here too), then the flow the filters read
+// with each cell's label (kEngineMerge: the measured flow wherever the
+// verdict holds the vectors back), then each tile's trust in the vectors
+// (kEngineTiles: from the frame before's where it has them, faster while the
+// head turns more than 2 degrees a frame).
+void AppendEngineAssist(FrameGenViewPlan& plan, const FrameGenConstants& base, const FrameGenViewRequest& request,
+                        const FrameGenTuning& tuning, bool world) {
+    const std::uint8_t level = plan.final_flow_level;
+    const FrameGenExtent cells = plan.levels[level];
+    const FrameGenTexture tiles_before =
+        request.engine_tiles ? Texture(FrameGenTextureKind::kEngineTilesPrevious) : FrameGenTexture{};
+    FrameGenDispatch convert = Dispatch(FrameGenPass::kEngineConvert, cells, plan.levels[1], base);
+    convert.inputs = {Texture(FrameGenTextureKind::kEngineRaw),
+                      Texture(FrameGenTextureKind::kDepth),
+                      Texture(FrameGenTextureKind::kEngineParams),
+                      tiles_before,
+                      world ? Texture(FrameGenTextureKind::kWorldParams) : FrameGenTexture{},
+                      Texture(FrameGenTextureKind::kEngineParamsOther)};
+    convert.outputs = {Texture(FrameGenTextureKind::kEngineCandidate), Texture(FrameGenTextureKind::kEngineInfo)};
+    convert.constants.options = {(static_cast<std::uint32_t>(tuning.engine.camera) << 4) |
+                                     (request.engine_tiles ? kFrameGenEngineConvertTiles : 0u) |
+                                     (world ? kFrameGenEngineConvertWorld : 0u),
+                                 base.options[1], 0, level};
+    convert.constants.tuning = FrameGenEngineDecode(tuning.engine, request.engine_encoding);
+    plan.dispatches.push_back(convert);
+    // The candidates cost what REFINE's would: its block at its match level.
+    const std::uint8_t match = FrameGenMatchLevel(level);
+    FrameGenDispatch merge = Dispatch(FrameGenPass::kEngineMerge, cells, plan.levels[match], base);
+    merge.inputs = {Texture(FrameGenTextureKind::kLumaNewest, match),
+                    Texture(FrameGenTextureKind::kLumaPrevious, match),
+                    Texture(FrameGenTextureKind::kEngineCandidate),
+                    Texture(FrameGenTextureKind::kEngineInfo),
+                    Texture(FrameGenTextureKind::kFlow, level),
+                    Texture(FrameGenTextureKind::kEngineParams)};
+    merge.outputs = {Texture(FrameGenTextureKind::kEngineFlow), Texture(FrameGenTextureKind::kEngineLabels)};
+    merge.constants.options = {FrameGenEngineModeFor(tuning) == FrameGenEngineMode::kLead ? kFrameGenEngineMergeLead
+                                                                                           : kFrameGenEngineMergeAssist,
+                               base.options[1], level, 1u << (level - match)};
+    plan.dispatches.push_back(merge);
+    FrameGenDispatch tiles = Dispatch(FrameGenPass::kEngineTiles, FrameGenEngineTiles(cells), cells, base);
+    tiles.inputs = {Texture(FrameGenTextureKind::kEngineLabels), tiles_before, {}, {}, {}, {}};
+    tiles.outputs = {Texture(FrameGenTextureKind::kEngineTiles), {}};
+    tiles.constants.options = {request.engine_tiles ? 1u : 0u, base.options[1], 0, level};
+    tiles.constants.tuning[1] = HeadTurnDegrees(request);
+    plan.dispatches.push_back(tiles);
+}
+
+// Synthesis with the confidence view, tinted by the cells' labels
+// (FrameGenTuning::engine_tint): where a real frame's analysis wrote them,
+// and synthesis reads no motion map in their place.
+bool EngineTint(const FrameGenViewRequest& request, const FrameGenTuning& tuning, bool motion) {
+    return tuning.engine_tint && tuning.diagnostic == FrameGenDiagnosticView::kConfidence && request.engine_motion &&
+           FrameGenEngineModeFor(tuning) >= FrameGenEngineMode::kAssist && !motion;
+}
+
 // The quad views compositor's clamp (NaN clamps to `high`, unlike std::clamp).
 double ComposeClamp(double value, double low, double high) {
     return std::max(low, std::min(high, value));
@@ -317,6 +385,11 @@ std::uint8_t FrameGenFinalFlowLevel(FrameGenFlowQuality quality) {
 std::uint8_t FrameGenFinalFlowLevel(const FrameGenTuning& tuning) {
     return tuning.hardware_flow || tuning.hardware_level ? kFrameGenHardwareFlowLevel
                                                          : FrameGenFinalFlowLevel(tuning.quality);
+}
+
+FrameGenEngineMode FrameGenEngineModeFor(const FrameGenTuning& tuning) {
+    return tuning.mode == FrameGenSynthesisMode::kInterpolate ? std::min(tuning.engine_mode, FrameGenEngineMode::kAssist)
+                                                              : tuning.engine_mode;
 }
 
 std::uint8_t FrameGenMatchLevel(std::uint8_t flow_level) {
@@ -600,27 +673,51 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
         }
     };
     const std::uint32_t world_flags = kFrameGenFlagWorld | (tuning.world_sky ? kFrameGenFlagWorldSky : 0u);
+    const bool covered = tuning.analyze_only && tuning.cover && tuning.mode == FrameGenSynthesisMode::kInterpolate;
+    // Engine motion vectors from Assist: their evidence (the frame's
+    // verdict), then the flow the filters read in place of the measured flow,
+    // the world's motion first for the cells' classes (the fit reads the
+    // measured flow still: a frame whose verdict holds the vectors back is
+    // filtered as without them).
+    const bool assist = request.engine_motion && FrameGenEngineModeFor(tuning) >= FrameGenEngineMode::kAssist;
+    if (assist) {
+        AppendEngineEvidence(plan, base, request, tuning);
+        const bool world_first = world && (tuning.mode == FrameGenSynthesisMode::kExtrapolate || covered);
+        if (world_first) {
+            append_world();
+        }
+        AppendEngineAssist(plan, base, request, tuning, world_first);
+        filter.inputs[0] = Texture(FrameGenTextureKind::kEngineFlow);
+        if (tuning.engine_filter) {
+            filter.inputs[4] = Texture(FrameGenTextureKind::kEngineLabels);
+            filter.constants.options[0] = tuning.engine_cockpit ? 1u : 0u;
+            filter.constants.options[1] |= kFrameGenFlagEngine;
+        }
+    }
     if (world && tuning.mode == FrameGenSynthesisMode::kExtrapolate) {
-        append_world();
+        if (!assist) {
+            append_world();
+        }
         filter.inputs[3] = Texture(FrameGenTextureKind::kWorldParams);
         filter.constants.options[1] |= world_flags;
     }
     plan.dispatches.push_back(filter);
-    // The game's motion vectors judged against what the frame shows (its
-    // luma and measured flow exist by now); nothing generated reads it.
-    if (request.engine_motion && (tuning.engine_mode == FrameGenEngineMode::kObserve ||
-                                  tuning.engine_mode == FrameGenEngineMode::kAssist)) {
+    // Observe: the game's motion vectors judged against what the frame shows
+    // (its luma and measured flow exist by now); nothing generated reads it.
+    if (request.engine_motion && FrameGenEngineModeFor(tuning) == FrameGenEngineMode::kObserve) {
         AppendEngineEvidence(plan, base, request, tuning);
     }
     if (tuning.analyze_only) {
-        if (tuning.cover && tuning.mode == FrameGenSynthesisMode::kInterpolate) {
+        if (covered) {
             // The same flow filtered as extrapolation filters it, for cover
             // frames past the newest frame.
             FrameGenDispatch cover = filter;
             cover.outputs = {Texture(FrameGenTextureKind::kFilteredCover, plan.final_flow_level), {}};
             cover.constants.options[1] |= kFrameGenFlagExtrapolate;
             if (world) {
-                append_world();
+                if (!assist) {
+                    append_world();
+                }
                 cover.inputs[3] = Texture(FrameGenTextureKind::kWorldParams);
                 cover.constants.options[1] |= world_flags;
             }
@@ -674,6 +771,10 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
         }
         if (motion) {
             output.constants.options[1] |= kFrameGenFlagDepthSplat;
+        }
+        if (EngineTint(request, tuning, motion)) {
+            output.inputs[5] = Texture(FrameGenTextureKind::kEngineLabels);
+            output.constants.options[1] |= kFrameGenFlagEngine;
         }
         output.outputs = {Texture(FrameGenTextureKind::kOutput), {}};
         output.constants.tuning[0] = fraction;
@@ -772,6 +873,10 @@ FrameGenViewPlan BuildFrameGenSynthesisPlan(const FrameGenViewRequest& request, 
                      motion ? Texture(FrameGenTextureKind::kMotionMap) : FrameGenTexture{}};
     if (motion) {
         output.constants.options[1] |= kFrameGenFlagDepthSplat;
+    }
+    if (EngineTint(request, tuning, motion)) {
+        output.inputs[5] = Texture(FrameGenTextureKind::kEngineLabels);
+        output.constants.options[1] |= kFrameGenFlagEngine;
     }
     if (shifted) {
         // The map is built for this frame's own eye position: synthesis
@@ -1157,6 +1262,7 @@ FrameGenEngineMode ParseFrameGenEngineMode(const char* value) {
     return text == "census"    ? FrameGenEngineMode::kCensus
            : text == "capture" ? FrameGenEngineMode::kCapture
            : text == "observe" ? FrameGenEngineMode::kObserve
+           : text == "assist"  ? FrameGenEngineMode::kAssist
                                : FrameGenEngineMode::kOff;
 }
 
@@ -2131,6 +2237,13 @@ void FrameGenEngineValidator::Fix(const FrameGenEngineConvention& convention) {
     state_ = State::kCalibrating;
 }
 
+void FrameGenEngineValidator::LockForTest(const FrameGenEngineConvention& convention) {
+    fixed_ = convention;
+    StartCandidate(convention, "", true);
+    held_for_test_ = true;
+    Decide(State::kLocked, "locked for a test");
+}
+
 void FrameGenEngineValidator::StartCandidate(const FrameGenEngineConvention& convention, const std::string& name,
                                              bool prior) {
     // Photometric batches are of the convention the GPU took them with:
@@ -2468,6 +2581,9 @@ void FrameGenEngineValidator::Add(const FrameGenEngineFrameEvidence& frame, doub
         report_.lag_variant += view.lag_variant;
         calibrate = calibrate && view.calibrate;
         extents_ = {view.vectors, view.color};
+    }
+    if (held_for_test_) {
+        return;
     }
     if (state_ == State::kSuspended) {
         if (seconds - suspended_at_ < kSuspendSeconds) {
