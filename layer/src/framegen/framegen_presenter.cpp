@@ -532,6 +532,13 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
     engine_filter_ = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_FILTER") == "1";
     engine_cockpit_ = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_COCKPIT") == "1";
     engine_tint_ = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_TINT") == "1";
+    // Stage 6, Lead: no measured passes at all (VECTORXR_FRAMEGEN_ENGINE_PREDICATE=0)
+    // and interpolating led too (VECTORXR_FRAMEGEN_ENGINE_INTERPOLATE=lead),
+    // for the session; the vectors lead once their verdicts let them.
+    engine_predicate_ = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_PREDICATE") != "0";
+    engine_interpolate_ = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_INTERPOLATE") == "lead";
+    engine_lead_ = {};
+    logged_engine_lead_ = false;
     engine_cut_window_.Reset();
     logged_engine_cut_ = false;
     depth_decoded_.clear();
@@ -612,7 +619,8 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
                 (engine_requested_ == FrameGenEngineMode::kCensus
                      ? " (research, stage 0): the game's motion vector images are fingerprinted and sampled while "
                        "frames are generated"
-                     : std::string(engine_requested_ == FrameGenEngineMode::kAssist    ? " (research, stage 5)"
+                     : std::string(engine_requested_ == FrameGenEngineMode::kLead      ? " (research, stage 6)"
+                                   : engine_requested_ == FrameGenEngineMode::kAssist  ? " (research, stage 5)"
                                    : engine_requested_ == FrameGenEngineMode::kObserve ? " (research, stage 3)"
                                                                                        : " (research, stage 2)") +
                            ": while frames are generated, the image each frame's vectors are in is resampled to each "
@@ -636,7 +644,16 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
                                                  std::string(engine_cockpit_ ? ", _COCKPIT=1)" : ")")
                                            : std::string()) +
                            (engine_tint_ ? ", tinted in the confidence view (VECTORXR_FRAMEGEN_ENGINE_TINT=1)"
-                                         : std::string())
+                                         : std::string()) +
+                           (engine_requested_ == FrameGenEngineMode::kLead
+                                ? std::string("; leading once 30 verdicts in a row let them (held at assist for 300 "
+                                              "frames when more than 10% of the last 30 do not), the measured passes ") +
+                                      (engine_predicate_ ? "run only where a frame's verdict holds them back"
+                                                         : "never run (VECTORXR_FRAMEGEN_ENGINE_PREDICATE=0)") +
+                                      ", NVIDIA's optical flow hardware idle on those frames" +
+                                      (engine_interpolate_ ? ", interpolating too (VECTORXR_FRAMEGEN_ENGINE_INTERPOLATE=lead)"
+                                                           : ", extrapolating only")
+                                : std::string())
                      : std::string(", generated frames are made as without them")) +
                 (csv.empty() ? std::string(".") : ", rows in " + csv + ".");
         }
@@ -715,6 +732,8 @@ void FrameGenPresenter::Stop() {
     // an abandoned presenter reads none).
     depth_encoding_check_ = engine_cuts_ = research_file_ = false;
     engine_filter_ = engine_cockpit_ = engine_tint_ = false;
+    engine_predicate_ = true;
+    engine_interpolate_ = false;
     ForgetEngineFramesLocked();
     if (abandoned_) {
         // The thread left behind may still use the backend, the output
@@ -1032,9 +1051,12 @@ void FrameGenPresenter::ReconfigureEngineLocked(FrameGenEngineMode mode, bool fi
     if (!started_ || engine_started_ < FrameGenEngineMode::kObserve) {
         return;
     }
-    // Observe and Assist only: the other modes capture otherwise.
-    const FrameGenEngineMode next =
-        mode == FrameGenEngineMode::kObserve || mode == FrameGenEngineMode::kAssist ? mode : engine_requested_;
+    // Observe and Assist only, and Lead in a session started at Assist or Lead
+    // (its flow ends at the hardware's level already, where the hardware is
+    // chosen): the other modes capture otherwise.
+    const bool allowed = mode == FrameGenEngineMode::kObserve || mode == FrameGenEngineMode::kAssist ||
+                         (mode == FrameGenEngineMode::kLead && engine_started_ >= FrameGenEngineMode::kAssist);
+    const FrameGenEngineMode next = allowed ? mode : engine_requested_;
     if (next == engine_requested_ && filter == engine_filter_ && cockpit == engine_cockpit_ && tint == engine_tint_) {
         return;
     }
@@ -1043,6 +1065,10 @@ void FrameGenPresenter::ReconfigureEngineLocked(FrameGenEngineMode mode, bool fi
                       ToString(engine_requested_) + " -> " + ToString(next) + ", VECTORXR_FRAMEGEN_ENGINE_FILTER=" +
                       (filter ? "1" : "0") + ", _COCKPIT=" + (cockpit ? "1" : "0") + ", _TINT=" + (tint ? "1" : "0") +
                       (mode == next ? "." : std::string(" (") + ToString(mode) + " waits for the next session)."));
+    }
+    // Into Lead, the vectors lead again once their verdicts let them.
+    if (next == FrameGenEngineMode::kLead && engine_requested_ != FrameGenEngineMode::kLead) {
+        engine_lead_ = {};
     }
     engine_requested_ = next;
     engine_filter_ = filter;
@@ -2008,6 +2034,17 @@ void FrameGenPresenter::CaptureEngineMotion() {
                 const bool read = !capture || (k < resampled.size() && resampled[k]);
                 if (read && places[k] < engine_frame_.captured.size()) engine_frame_.captured[places[k]] = 1;
             }
+        }
+        // Stage 6: the frames' verdicts read back since the last call, as Lead
+        // judges them (those of frames held at Assist too), steer a session
+        // in Lead (FrameGenEngineLeadControl).
+        const FrameGenEngineValidation& before = engine_validation_;
+        if (engine_requested_ == FrameGenEngineMode::kLead && status.validation.frames >= before.frames &&
+            status.validation.lead_held >= before.lead_held) {
+            const std::uint64_t demotions = engine_lead_.Demotions();
+            engine_lead_.AddVerdicts(status.validation.frames - before.frames,
+                                     status.validation.lead_held - before.lead_held);
+            engine_window_.demotions += engine_lead_.Demotions() - demotions;
         }
         // Stage 3: the validator's state for the summary, and each of its
         // decisions logged once.
@@ -3412,6 +3449,9 @@ void FrameGenPresenter::LogEngineSummaryLocked(double seconds) {
                  " (" + Number(samples, 0) + ")";
     }
     const double textured = now.textured - last.textured;
+    auto percent = [](std::uint64_t part, std::uint64_t whole) {
+        return whole ? Number(100.0 * static_cast<double>(part) / static_cast<double>(whole), 1) : std::string("-");
+    };
     logger_->Info(
         "Frame Generation engine convention (" + Number(seconds, 0) + " s): " + ToString(now.state) + ", " +
         (now.name.empty() ? std::string("gains ") + Number(now.convention.gain[0], 4) + "/" +
@@ -3441,6 +3481,18 @@ void FrameGenPresenter::LogEngineSummaryLocked(double seconds) {
                         ? Number(100.0 * (now.moved_cells - last.moved_cells) / (now.textured_cells - last.textured_cells), 1) +
                               "% of the textured cells"
                         : std::string("no textured cells"))
+             : std::string()) +
+        // Stage 6: of a session in Lead's frames, the shares the vectors led
+        // and the controller held at Assist (the rest: frames whose evidence
+        // was not taken, no convention locked, or interpolating, which Lead
+        // leaves to Assist without VECTORXR_FRAMEGEN_ENGINE_INTERPOLATE=lead),
+        // those led with the optical flow hardware chosen and idle, and the
+        // times the vectors were held at Assist.
+        (window.lead_frames > 0 || engine_requested_ == FrameGenEngineMode::kLead
+             ? "; lead: led " + percent(window.led, window.lead_frames) + "% of " + std::to_string(window.lead_frames) +
+                   " frames, held at assist " + percent(window.held_at_assist, window.lead_frames) +
+                   "%, hardwareIdle=" + std::to_string(window.hardware_idle) +
+                   ", demotions=" + std::to_string(window.demotions)
              : std::string()) +
         ".");
     engine_validation_logged_ = now;
@@ -4827,6 +4879,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
     std::vector<FrameGenViewSubmission> submissions(projection.viewCount);
     std::vector<FrameGenOutputKind> kinds(projection.viewCount);
     FrameGenTuning tuning;
+    bool lead_frame = false; // a frame on the engine path of a session in Lead (stage 6)
     std::string error;
     CaptureNotes notes; // for a research capture of the frame
     {
@@ -4873,11 +4926,14 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         // Once the game's vectors can stand in for measured flow (from
         // Assist), the flow ends at the hardware's level whenever the hardware
         // is chosen, whether it or the vectors measure a frame (Observe
-        // changes nothing generated). By the mode the session started in: a
-        // switch between Observe and Assist at a config reload leaves the
-        // level as it is. Only for frames the vectors may serve, on a backend
-        // that reads them: elsewhere (bridged, quad views, Direct3D 11 or
-        // Vulkan) the flow stays at its quality's level, as without them.
+        // changes nothing generated): in Lead the hardware is idle on the
+        // frames the vectors lead, and Dynamic's interpolating on the shader
+        // cores (above) leaves the level as it is too. By the mode the session
+        // started in: a switch between Observe and Assist (or Lead) at a config
+        // reload leaves the level as it is. Only for frames the vectors may
+        // serve, on a backend that reads them: elsewhere (bridged, quad views,
+        // Direct3D 11 or Vulkan) the flow stays at its quality's level, as
+        // without them.
         tuning.hardware_level = settings_.motion_estimation == FrameGenMotionEstimation::kHardware &&
                                 engine_started_ >= FrameGenEngineMode::kAssist && engine_path &&
                                 gpu_->SupportsEngineMotion();
@@ -4903,8 +4959,15 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         tuning.history_ring = analyze && !composition ? jit_canvas_ring_ : 0;
         // The engine path's frames (above); elsewhere (a bridged session, a
         // game sending none) the backend makes no raw fields: kCensus. A
-        // frame asking for none in between keeps those made.
-        tuning.engine_mode = engine_path ? engine_requested_ : std::min(engine_requested_, FrameGenEngineMode::kCensus);
+        // frame asking for none in between keeps those made. A session in
+        // Lead holds the vectors at Assist until their verdicts let them
+        // lead (stage 6, FrameGenEngineLeadControl).
+        lead_frame = engine_path && engine_requested_ == FrameGenEngineMode::kLead;
+        tuning.engine_mode = !engine_path                          ? std::min(engine_requested_, FrameGenEngineMode::kCensus)
+                             : lead_frame && !engine_lead_.Leads() ? FrameGenEngineMode::kAssist
+                                                                   : engine_requested_;
+        tuning.engine_predicate = engine_predicate_;
+        tuning.engine_interpolate = engine_interpolate_;
         // The frame's engine motion record and the frame before's, as the
         // frame gates read them: taken before a pause forgets them (just in
         // time, AnalyzeJit's pause check came first: such a frame counts as
@@ -5186,6 +5249,29 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
     depth_status_ = depth;
     world_delta_ = world_delta;
     consecutive_failures_ = 0;
+    // Stage 6: a session in Lead counts its frames (the controller holds the
+    // vectors at Assist for so many), those the vectors led (the backend's
+    // say), those held at Assist, and those led with the optical flow
+    // hardware chosen and idle; the first frame they lead is logged once.
+    if (lead_frame) {
+        engine_lead_.AddFrame();
+        const bool hardware_chosen = settings_.motion_estimation == FrameGenMotionEstimation::kHardware;
+        ++engine_window_.lead_frames;
+        engine_window_.led += executed.lead ? 1 : 0;
+        engine_window_.held_at_assist += tuning.engine_mode == FrameGenEngineMode::kAssist ? 1 : 0;
+        engine_window_.hardware_idle += executed.lead && hardware_chosen ? 1 : 0;
+        if (executed.lead && logger_ && !logged_engine_lead_) {
+            logged_engine_lead_ = true;
+            logger_->Info(std::string("Frame Generation: the game's motion vectors lead from this frame "
+                                      "(VECTORXR_FRAMEGEN_ENGINE_MV=lead; 30 verdicts in a row let them): ") +
+                          (hardware_chosen ? "NVIDIA's optical flow hardware is idle on the frames they lead, and " : "") +
+                          (tuning.engine_predicate
+                               ? "a frame whose verdict holds them back is measured on the shader cores in the same "
+                                 "submission"
+                               : "no frame is measured (VECTORXR_FRAMEGEN_ENGINE_PREDICATE=0)") +
+                          ", the flow at level " + std::to_string(FrameGenFinalFlowLevel(tuning)) + ".");
+        }
+    }
     // Stage 4: each of the world delta calibration's decisions (a lock, a
     // drop back to the fit) once.
     if (logger_ && world_delta.decisions > world_delta_decisions_logged_) {

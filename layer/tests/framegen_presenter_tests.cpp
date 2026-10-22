@@ -189,6 +189,17 @@ struct GpuLog {
     // resampled (as by a backend not set up for them), their census taken.
     bool engine{false};
     bool engine_unready{false};
+    // Stage 6: each Execute whose views all ask for their vectors' evidence
+    // is a frame judged (FrameGenEngineValidation::frames, as EngineStatus
+    // reports it), held back while `verdicts_held` (held and lead_held),
+    // held back as Lead judges it alone while `lead_verdicts_held` (lead_held:
+    // the vectors good enough for Assist's test, not for Lead's), and led
+    // where it runs at kLead (FrameGenExecuteResult::lead).
+    std::atomic<bool> verdicts_held{false};
+    std::atomic<bool> lead_verdicts_held{false};
+    std::atomic<std::uint64_t> verdict_frames{0};
+    std::atomic<std::uint64_t> verdicts_held_back{0};
+    std::atomic<std::uint64_t> lead_verdicts_held_back{0};
     std::mutex motion_mutex;
     std::vector<std::vector<FrameGenMotionJob>> motion_calls;
     // The color captures made before each call (`captures` then).
@@ -459,6 +470,14 @@ class FakeGpu final : public FrameGenGpu {
         history_.resize(views.size());
         result.synthesized.clear();
         result.depth.clear();
+        if (tuning.engine_mode >= FrameGenEngineMode::kObserve && !views.empty() &&
+            std::all_of(views.begin(), views.end(),
+                        [](const FrameGenViewSubmission& view) { return view.request.engine_motion; })) {
+            ++log_->verdict_frames;
+            log_->verdicts_held_back += log_->verdicts_held ? 1 : 0;
+            log_->lead_verdicts_held_back += log_->verdicts_held || log_->lead_verdicts_held ? 1 : 0;
+            result.lead = tuning.engine_mode == FrameGenEngineMode::kLead;
+        }
         Analyzed analyzed;
         std::uint64_t held_bytes = 0;
         for (std::size_t i = 0; i < views.size(); ++i) {
@@ -774,6 +793,13 @@ class FakeGpu final : public FrameGenGpu {
         return log_->depth;
     }
     bool SupportsEngineMotion() const override { return log_->engine; }
+    FrameGenEngineStatus EngineStatus(std::uint64_t) const override {
+        FrameGenEngineStatus status;
+        status.validation.frames = log_->verdict_frames;
+        status.validation.held = log_->verdicts_held_back;
+        status.validation.lead_held = log_->lead_verdicts_held_back;
+        return status;
+    }
     bool CaptureMotion(const std::vector<FrameGenMotionJob>& jobs, const std::vector<FrameGenViewRequest>&,
                        std::string& error, std::vector<bool>* resampled) override {
         error.clear();
@@ -4239,6 +4265,180 @@ void TestEngineMotionAssist() {
     Check(plain_gpu.executes >= 4 && plain_frames > 0 && !plain_gpu.tuning.hardware_level,
           "engine assist: a backend that cannot read the vectors keeps the flow at its quality's level");
     plain.Stop();
+}
+
+// Engine motion vectors, stage 6 (VECTORXR_FRAMEGEN_ENGINE_MV=lead): a
+// session in Lead runs at kAssist until 30 verdicts in a row let the vectors
+// be used as Lead judges them (verdicts only Assist's test lets through do
+// not), then at kLead; more than 10% of the last 30 held back hold it at
+// kAssist for 300 real frames, then it leads again. The flow ends at the
+// hardware's level where the hardware is chosen, the research switches
+// (VECTORXR_FRAMEGEN_ENGINE_PREDICATE, _INTERPOLATE) go into the tuning, and
+// a config reload goes into Lead only in a session started at Assist or Lead.
+void TestEngineMotionLead() {
+    const XrSwapchain depth_chain = reinterpret_cast<XrSwapchain>(0x21);
+    const XrSwapchain vectors = reinterpret_cast<XrSwapchain>(0x31);
+    FrameGenResolvedSettings settings;
+    settings.enabled = true;
+    settings.synthesis_mode = FrameGenSynthesisMode::kExtrapolate;
+    settings.multiplier = FrameGenMultiplier::k2;
+    settings.motion_estimation = FrameGenMotionEstimation::kHardware;
+    struct Session {
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        std::unique_ptr<App> app;
+        std::uint64_t frames{0};
+    };
+    // A session started at `mode`, its frames carrying their vectors' records
+    // (with the poses the game rendered with), as the layer hands them over.
+    auto start = [&](Session& session, const char* mode, const char* predicate, const char* interpolate) {
+        session.gpu.depth = session.gpu.engine = session.gpu.threaded = session.gpu.jit = true;
+        session.runtime.paced = true;
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", mode);
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_PREDICATE", predicate);
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_INTERPOLATE", interpolate);
+        StartPresenter(session.presenter, session.gpu, FrameGenSynthesisMode::kExtrapolate);
+        session.presenter.Configure(settings);
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "");
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_PREDICATE", "");
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_INTERPOLATE", "");
+        session.presenter.TrackSwapchain(depth_chain, 20, 1,
+                                         XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+        session.presenter.TrackSwapchain(vectors, kFloatFormat, 1,
+                                         XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+        session.app = std::make_unique<App>(session.presenter, session.runtime);
+        App& app = *session.app;
+        app.depth.subImage.swapchain = depth_chain;
+        app.depth.subImage.imageRect = {{0, 0}, {1200, 1200}};
+        app.depth.maxDepth = 1.0f;
+        app.depth.nearZ = 0.1f;
+        app.depth.farZ = 1000.0f;
+        app.before_end = [&session, vectors](XrTime time) {
+            const App& source = *session.app;
+            FrameGenEngineMotionFrame record;
+            record.display_time = time;
+            record.projection_frame = ++session.frames;
+            for (std::uint32_t v = 0; v < 2; ++v) {
+                FrameGenEngineMotionView view;
+                view.view = v;
+                view.source = FrameGenMotionSource::kSpaceWarpFb;
+                view.vectors = {vectors, {{0, 0}, {960, 960}}, v};
+                view.depth = source.depth.subImage;
+                view.depth_is_khr = true;
+                view.color = source.views[v].subImage;
+                view.depth_encoding = {source.depth.minDepth, source.depth.maxDepth, source.depth.nearZ, source.depth.farZ};
+                const XrPosef& pose = source.views[v].pose;
+                view.game.orientation = {pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w};
+                view.game.position = {pose.position.x, pose.position.y, pose.position.z};
+                record.views.push_back(view);
+            }
+            record.complete = true;
+            session.presenter.NoteEngineMotion(record);
+            session.presenter.CaptureEngineMotion();
+        };
+    };
+    // Frames until `count` more were analysed, or `until` holds.
+    auto run = [](Session& session, int count, const std::function<bool()>& until = {}) {
+        const int executes = session.gpu.executes;
+        for (int i = 0; session.gpu.executes < executes + count && !(until && until()) && i < 4 * count + 40; ++i) {
+            session.app->Frame();
+        }
+        return session.gpu.executes - executes;
+    };
+    auto mode = [](Session& session) { return session.gpu.tuning.engine_mode; };
+
+    {
+        Session session;
+        start(session, "lead", "0", "lead");
+        // The swapchains made at the start settle for 3 s (G8): no evidence,
+        // so no verdicts, yet: at Assist.
+        run(session, 4);
+        Check(mode(session) == FrameGenEngineMode::kAssist && session.gpu.tuning.hardware_level &&
+                  !session.gpu.tuning.engine_predicate && session.gpu.tuning.engine_interpolate,
+              "engine lead: at kAssist before any verdict, the hardware's level, the research switches in the tuning");
+        std::this_thread::sleep_for(std::chrono::milliseconds(3100));
+        // Verdicts letting Assist use the vectors but not Lead (its own
+        // photometric test, against no motion): no Lead.
+        session.gpu.lead_verdicts_held = true;
+        run(session, 200, [&] { return session.gpu.verdict_frames >= 60; });
+        Check(session.gpu.verdict_frames >= 60 && session.gpu.verdicts_held_back == 0 &&
+                  mode(session) == FrameGenEngineMode::kAssist,
+              "engine lead: led on verdicts only Assist's test let through");
+        session.gpu.lead_verdicts_held = false;
+        const std::uint64_t judged = session.gpu.verdict_frames;
+        // 30 verdicts in a row letting the vectors be used: Lead.
+        run(session, 200, [&] { return session.gpu.verdict_frames >= judged + 25; });
+        Check(session.gpu.verdict_frames >= judged + 25 && mode(session) == FrameGenEngineMode::kAssist,
+              "engine lead: at kAssist before 30 verdicts in a row");
+        run(session, 40, [&] { return mode(session) == FrameGenEngineMode::kLead; });
+        const std::uint64_t entered = session.gpu.verdict_frames - judged;
+        Check(mode(session) == FrameGenEngineMode::kLead && entered >= 30 && entered <= 34,
+              "engine lead: kLead after 30 verdicts in a row (" + std::to_string(entered) + " judged)");
+        // Verdicts holding the vectors back: a fourth in the last 30 holds
+        // them at Assist.
+        session.gpu.verdicts_held = true;
+        run(session, 40, [&] { return mode(session) == FrameGenEngineMode::kAssist; });
+        const std::uint64_t held = session.gpu.verdicts_held_back;
+        Check(mode(session) == FrameGenEngineMode::kAssist && held >= 4 && held <= 7,
+              "engine lead: held at kAssist after 4 verdicts held back (" + std::to_string(held) + ")");
+        // Held there for 300 real frames, though the verdicts let the vectors
+        // be used again at once.
+        session.gpu.verdicts_held = false;
+        const int assisted = run(session, 400, [&] { return mode(session) == FrameGenEngineMode::kLead; });
+        Check(mode(session) == FrameGenEngineMode::kLead && assisted >= 300 && assisted <= 306,
+              "engine lead: kLead again after 300 frames at kAssist (" + std::to_string(assisted) + ")");
+        // Held at Assist again, its verdicts there letting Assist use the
+        // vectors but not Lead: still at kAssist past the 300 frames, then
+        // Lead after 30 that let Lead use them.
+        session.gpu.verdicts_held = true;
+        run(session, 40, [&] { return mode(session) == FrameGenEngineMode::kAssist; });
+        session.gpu.verdicts_held = false;
+        session.gpu.lead_verdicts_held = true;
+        const std::uint64_t held_twice = session.gpu.verdicts_held_back;
+        run(session, 340);
+        Check(mode(session) == FrameGenEngineMode::kAssist && session.gpu.verdicts_held_back <= held_twice + 1,
+              "engine lead: led again after the 300 frames on verdicts only Assist's test let through");
+        session.gpu.lead_verdicts_held = false;
+        const std::uint64_t judged_again = session.gpu.verdict_frames;
+        run(session, 60, [&] { return mode(session) == FrameGenEngineMode::kLead; });
+        const std::uint64_t reentered = session.gpu.verdict_frames - judged_again;
+        Check(mode(session) == FrameGenEngineMode::kLead && reentered >= 30 && reentered <= 34,
+              "engine lead: kLead after 30 verdicts in a row that let Lead use the vectors (" + std::to_string(reentered) +
+                  " judged)");
+        // A reload to Assist and back: Lead once 30 verdicts in a row came.
+        auto reload = [&](const char* to) {
+            _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", to);
+            session.presenter.Configure(settings);
+            _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "");
+        };
+        reload("assist");
+        run(session, 3);
+        Check(mode(session) == FrameGenEngineMode::kAssist, "engine lead: a reload to assist");
+        reload("lead");
+        run(session, 3);
+        Check(mode(session) == FrameGenEngineMode::kAssist, "engine lead: a reload into lead starts at kAssist");
+        run(session, 60, [&] { return mode(session) == FrameGenEngineMode::kLead; });
+        Check(mode(session) == FrameGenEngineMode::kLead, "engine lead: and leads after 30 verdicts in a row");
+        session.presenter.Stop();
+        Check(!session.runtime.ordering_violation && !g_release_violation, "engine lead: calls stayed ordered");
+    }
+
+    // A session started at Observe never leads at a reload (its flow's level
+    // was set by the mode it started in); the switches' defaults.
+    {
+        Session session;
+        start(session, "observe", "", "");
+        run(session, 2);
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "lead");
+        session.presenter.Configure(settings);
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "");
+        run(session, 3);
+        Check(mode(session) == FrameGenEngineMode::kObserve && !session.gpu.tuning.hardware_level &&
+                  session.gpu.tuning.engine_predicate && !session.gpu.tuning.engine_interpolate,
+              "engine lead: a session started at observe does not lead at a reload");
+        session.presenter.Stop();
+    }
 }
 
 // Engine motion vectors, stage 3 (VECTORXR_FRAMEGEN_ENGINE_MV=observe): once
@@ -12065,6 +12265,7 @@ int main(int argc, char** argv) {
     RUN(TestEngineMotionCapture);
     RUN(TestEngineMotionObserve);
     RUN(TestEngineMotionAssist);
+    RUN(TestEngineMotionLead);
     RUN(TestEngineDelta);
     RUN(TestResearchFileSessions);
     RUN(TestAutomaticMultiplier);

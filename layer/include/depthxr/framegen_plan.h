@@ -208,6 +208,10 @@ enum class FrameGenTextureKind : std::uint8_t {
     // The other view's kEngineParams, for kEngineConvert: its verdict holds
     // this view's vectors back too (the eyes take them, or not, together).
     kEngineParamsOther,
+    // Stage 6 (Lead): the frame's verdict for both eyes (one RGBA32F texel,
+    // kEngineSolve's stage 2), whose first 8 bytes are zero exactly when
+    // both eyes' vectors may be used: copied into the view's predicate.
+    kEngineVerdict,
 };
 
 // The flow level the optical flow hardware fills: a 4x4 grid on the
@@ -317,6 +321,10 @@ struct FrameGenDispatch {
     // After this dispatch, copy the output texture to every generated-frame
     // output whose bit is set.
     std::uint8_t copy_mask{0};
+    // Stage 6 (Lead, Direct3D 12): kFrameGenPredicateSkip where the frame's
+    // verdict lets the game's vectors be used, kFrameGenPredicateSet for the
+    // dispatch whose output is that predicate (see kFrameGenPredicateNone).
+    std::uint8_t predicate{0};
 };
 
 enum class FrameGenOutputKind : std::uint8_t {
@@ -512,7 +520,10 @@ struct FrameGenViewRequest {
 // measures the flow as before and takes the vectors per flow cell where the
 // luma follows them better, on frames whose verdict lets them be used: the
 // measured flow, bit for bit, on the others. Interpolating, the mode goes no
-// further than assist.
+// further than assist. Lead (stage 6) takes the vectors first on frames
+// whose verdict lets them be used, with the measured passes recorded for
+// those whose verdict does not and skipped on the GPU otherwise; the
+// optical flow hardware is not used for those frames.
 enum class FrameGenEngineMode : std::uint8_t {
     kOff,
     kCensus,
@@ -523,8 +534,8 @@ enum class FrameGenEngineMode : std::uint8_t {
 };
 
 const char* ToString(FrameGenEngineMode mode); // "off", "census", ...
-// "off", "census", "capture", "observe" or "assist" (any case); anything else
-// is off: lead does not exist yet.
+// "off", "census", "capture", "observe", "assist" or "lead" (any case);
+// anything else is off.
 FrameGenEngineMode ParseFrameGenEngineMode(const char* value);
 
 // What a game's motion vectors leave of the movement.
@@ -652,6 +663,15 @@ struct FrameGenTuning {
     bool engine_filter{false};
     bool engine_cockpit{false};
     bool engine_tint{false};
+    // Stage 6, Lead (research, the presenter's switches): the measured passes
+    // are recorded predicated on the frame's verdict, for frames whose verdict
+    // holds the vectors back; with engine_predicate false
+    // (VECTORXR_FRAMEGEN_ENGINE_PREDICATE=0) none are, and kEngineMerge
+    // searches every cell the vectors do not move (all of a frame whose
+    // verdict holds them back). Interpolating goes as far as Lead only with
+    // engine_interpolate (VECTORXR_FRAMEGEN_ENGINE_INTERPOLATE=lead).
+    bool engine_predicate{true};
+    bool engine_interpolate{false};
 };
 
 struct FrameGenViewPlan {
@@ -1329,8 +1349,8 @@ inline constexpr std::uint32_t kFrameGenEngineParamsTexels = 8u;
 inline constexpr std::uint32_t kFrameGenEngineAxisTerms = 10u;
 // The frame's verdict (kEngineParams texel 0's z, and texel 4's x with zeros
 // after it, so that the texel's first 8 bytes are zero exactly when the
-// vectors may be used: a predicate's source): 0 when the vectors may be
-// used, else why not (bits).
+// vectors may be used; Lead's predicate is both eyes' together,
+// kEngineVerdict): 0 when the vectors may be used, else why not (bits).
 inline constexpr std::uint32_t kFrameGenEngineVerdictUnlocked = 1u;    // no convention locked
 inline constexpr std::uint32_t kFrameGenEngineVerdictStale = 2u;       // the image read did not change while the head moved
 inline constexpr std::uint32_t kFrameGenEngineVerdictCockpit = 4u;     // still content's vectors do not follow the head
@@ -1376,9 +1396,11 @@ inline constexpr std::uint32_t kFrameGenEngineLabelInvalid = 64u;    // the fram
 inline constexpr std::uint32_t kFrameGenEngineLabelTextured = 128u;
 // The tiles' side in final-level cells.
 inline constexpr std::uint32_t kFrameGenEngineTile = 8u;
-// kEngineMerge's options.x: Assist's rule, or Lead's (stage 6).
+// kEngineMerge's options.x: Assist's rule, or Lead's (stage 6), with no
+// measured flow at all (FrameGenTuning::engine_predicate false).
 inline constexpr std::uint32_t kFrameGenEngineMergeAssist = 1u;
 inline constexpr std::uint32_t kFrameGenEngineMergeLead = 2u;
+inline constexpr std::uint32_t kFrameGenEngineMergeUnmeasured = 4u;
 // kEngineConvert's options.x: the camera from bit 4 (as kEngineReduce's),
 // the frame before's tiles bound (input 3), the world's motion bound (input
 // 4: the classes' world).
@@ -1391,8 +1413,60 @@ inline FrameGenExtent FrameGenEngineTiles(FrameGenExtent cells) {
 }
 // The mode a submission's engine passes run in: tuning.engine_mode, no
 // further than Assist when interpolating (Lead's model-driven flow needs
-// Interpolate's own gate).
+// Interpolate's own gate) unless FrameGenTuning::engine_interpolate.
 FrameGenEngineMode FrameGenEngineModeFor(const FrameGenTuning& tuning);
+
+// --- Engine motion vectors: lead (stage 6) ----------------------------------
+//
+// A view's vectors lead (FrameGenEngineLeads) where its evidence is taken in
+// Lead with the convention locked: the plan takes the evidence right after
+// the luma (without measured flow: Lead's photometric test, against no
+// motion), then the frame's verdict for both eyes (kEngineSolve's stage 2:
+// kEngineVerdict) becomes the predicate of the measured passes after it
+// (downsample, search, refine), which Direct3D 12 skips where the vectors
+// may be used and runs in the same submission where they may not, so
+// kEngineMerge copies their flow then as Assist does. The downsample to the
+// merge's match level is never skipped (it reads that luma). No optical flow
+// hardware: the backend leaves it idle for such frames, and the flow ends at
+// its level all the same (FrameGenTuning::hardware_level). kEngineMerge
+// takes a vector unless it matches worse than no motion; elsewhere it
+// searches from the better of the two. The world's motion is the
+// application's (kWorldSet) before the conversion, or fitted to the merged
+// flow after it.
+inline constexpr std::uint8_t kFrameGenPredicateNone = 0;
+inline constexpr std::uint8_t kFrameGenPredicateSkip = 1; // skipped where the frame's verdict lets the vectors be used
+inline constexpr std::uint8_t kFrameGenPredicateSet = 2;  // its output (kEngineVerdict) is the predicate from here
+bool FrameGenEngineLeads(const FrameGenViewRequest& request, const FrameGenTuning& tuning);
+
+// Whether a session in Lead lets the vectors lead its frames or holds them
+// at Assist, from the frames' verdicts as Lead judges them (the validator's
+// lead_held, read back a few frames late; frames held at Assist are judged
+// by Lead's photometric test too): Lead after 30 verdicts in a row that let
+// the vectors be used; held at Assist for 300 real frames when more than
+// 10% of the last 30 frames' verdicts held them back, then Lead again after
+// 30 in a row. A session starts at Assist.
+class FrameGenEngineLeadControl {
+  public:
+    // Frames whose verdict was read since the last call, and those of them
+    // whose verdict held the vectors back (on either eye) as Lead judges it:
+    // taken as read in that order, the held ones last.
+    void AddVerdicts(std::uint64_t frames, std::uint64_t held);
+    // A real frame analysed while the session is in Lead.
+    void AddFrame();
+    bool Leads() const { return leads_; }
+    // Session totals: times held at Assist, and back to Lead after.
+    std::uint64_t Demotions() const { return demotions_; }
+    std::uint64_t Promotions() const { return promotions_; }
+
+  private:
+    void Update();
+    bool leads_{false};
+    std::uint32_t held_frames_{0}; // real frames still to hold at Assist
+    std::uint32_t streak_{0};      // verdicts in a row that let the vectors be used
+    std::deque<std::uint8_t> window_; // the last 30 frames' verdicts, 1 held back
+    std::uint64_t demotions_{0};
+    std::uint64_t promotions_{0};
+};
 
 // One view's evidence for a frame, as read back (kEngineEvidence, the
 // solve's kEngineParams), with what it was taken for.
@@ -1499,9 +1573,17 @@ struct FrameGenEngineValidation {
     std::string photometric;
     std::uint32_t photometric_passed{0};
     // Views judged, and those whose verdict held them back per reason
-    // (kFrameGenEngineVerdict* bit order).
+    // (kFrameGenEngineVerdict* bit order); frames whose verdict held them
+    // back on either view (the eyes take them, or not, together), and those
+    // Lead's would have (stage 6: the luma following the vectors worse than
+    // no motion in place of Assist's test against the measured flow, the
+    // other reasons as they are), which Lead's FrameGenEngineLeadControl
+    // counts against `frames`: a session held at Assist leads again only
+    // where Lead's own test lets it.
     std::uint64_t verdicts{0};
     std::uint64_t invalid{0};
+    std::uint64_t held{0};
+    std::uint64_t lead_held{0};
     std::array<std::uint64_t, kFrameGenEngineVerdictReasons> reasons{};
     // The photometric evidence summed (FrameGenEngineEvidence's).
     std::array<double, 3> epe{};

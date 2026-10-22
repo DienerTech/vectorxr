@@ -1816,8 +1816,9 @@ class FrameGenPresenter {
     // frame's and the one before's any more, nor are the motion targets.
     void ForgetEngineFramesLocked();
     // Stage 5, at a config reload (Configure): VECTORXR_FRAMEGEN_ENGINE_MV
-    // (observe or assist; another mode waits for the next session) and the
-    // filters' and tint's switches as the research switches name them now.
+    // (observe or assist, and lead in a session started at assist or lead;
+    // another mode waits for the next session) and the filters' and tint's
+    // switches as the research switches name them now.
     void ReconfigureEngineLocked(FrameGenEngineMode mode, bool filter, bool cockpit, bool tint);
     FrameGenEngineMode engine_requested_{FrameGenEngineMode::kOff};
     // Stage 2: the image a frame's vectors are taken from
@@ -1887,6 +1888,16 @@ class FrameGenPresenter {
     bool engine_filter_{false};
     bool engine_cockpit_{false};
     bool engine_tint_{false};
+    // Stage 6 (FrameGenTuning::engine_predicate, engine_interpolate), read at
+    // Start: VECTORXR_FRAMEGEN_ENGINE_PREDICATE=0 and
+    // VECTORXR_FRAMEGEN_ENGINE_INTERPOLATE=lead. A session in Lead holds the
+    // vectors at Assist until their verdicts let them lead
+    // (engine_lead_, fed in CaptureEngineMotion and Generate); the first
+    // frame they lead is logged once. A config reload into Lead starts it over.
+    bool engine_predicate_{true};
+    bool engine_interpolate_{false};
+    FrameGenEngineLeadControl engine_lead_;
+    bool logged_engine_lead_{false};
     FrameGenEngineMode engine_started_{FrameGenEngineMode::kOff};
     FrameGenEngineCuts engine_cut_window_;
     bool logged_engine_cut_{false};
@@ -1901,7 +1912,10 @@ class FrameGenPresenter {
     // depth was decoded as another frame described it, camera cuts among the
     // records, frames Pivot's change moved in, and frames that may calibrate;
     // frames no gate held back, and those of them whose vectors were read on
-    // every view (stage 2: captured).
+    // every view (stage 2: captured); frames of a session in Lead on the
+    // engine path, those the vectors led, those held at Assist, those led
+    // with the optical flow hardware chosen (idle), and the times the
+    // vectors were held at Assist (stage 6).
     struct EngineWindow {
         std::uint64_t frames{0};
         std::uint64_t structs{0};
@@ -1912,6 +1926,11 @@ class FrameGenPresenter {
         std::uint64_t calibrate{0};
         std::uint64_t open{0};
         std::uint64_t captured{0};
+        std::uint64_t lead_frames{0};
+        std::uint64_t led{0};
+        std::uint64_t held_at_assist{0};
+        std::uint64_t hardware_idle{0};
+        std::uint64_t demotions{0};
     };
     EngineWindow engine_window_;
     // Timed: teardown never waits on them for long (LockForTeardown).

@@ -184,14 +184,13 @@ void AppendMotionMap(FrameGenViewPlan& plan, const FrameGenConstants& base, floa
 }
 
 // The world's own motion (FrameGenViewRequest::world_motion), fitted to the
-// measured flow at a grid of samples: each iteration weighs the samples by
-// the last fit.
-void AppendWorldFit(FrameGenViewPlan& plan, const FrameGenConstants& base, FrameGenTexture depth) {
+// flow at a grid of samples (the measured flow; in Lead the merged flow,
+// kEngineFlow): each iteration weighs the samples by the last fit.
+void AppendWorldFit(FrameGenViewPlan& plan, const FrameGenConstants& base, FrameGenTexture depth, FrameGenTexture flow) {
     for (std::uint32_t iteration = 0; iteration < kFrameGenWorldIterations; ++iteration) {
         FrameGenDispatch reduce = Dispatch(FrameGenPass::kWorldReduce, {kFrameGenWorldGrid, kFrameGenWorldGrid},
                                            plan.levels[plan.final_flow_level], base);
-        reduce.inputs = {Texture(FrameGenTextureKind::kFlow, plan.final_flow_level), {}, depth,
-                         iteration ? Texture(FrameGenTextureKind::kWorldParams) : FrameGenTexture{}, {}};
+        reduce.inputs = {flow, {}, depth, iteration ? Texture(FrameGenTextureKind::kWorldParams) : FrameGenTexture{}, {}};
         reduce.outputs = {Texture(FrameGenTextureKind::kWorldPartials), {}};
         reduce.constants.options[2] = iteration;
         reduce.constants.options[3] = plan.final_flow_level;
@@ -224,23 +223,27 @@ void AppendWorldSet(FrameGenViewPlan& plan, const FrameGenEngineWorld& world, co
 
 // Engine motion vectors (FrameGenViewRequest::engine_motion): the evidence
 // on the frame's vectors (its raw field) against the declared poses, its
-// luma, its resolved depth and the measured flow at the final level, summed
-// per group into kEnginePartials by kind (cockpit, photometric, the field
-// before when it is the frame before's, the cockpit against the pair
-// before), then solved into kEngineParams and kEngineEvidence. Writes those
-// alone: nothing measured or generated changes. The kinds share one pass,
-// which reads each sample's luma and sums the group once, but for a
-// jittered convention's photometric kind, which takes the frame's bias out
-// (the solve's first stage finds it in the cockpit kind's sums), and the
-// cockpit against the pair before, which needs that pair's constants.
+// luma, its resolved depth and the measured flow at the final level (none
+// where the vectors lead: the evidence comes before it), summed per group
+// into kEnginePartials by kind (cockpit, photometric, the field before when
+// it is the frame before's, the cockpit against the pair before), then
+// solved into kEngineParams and kEngineEvidence. Writes those alone: nothing
+// measured or generated changes. The kinds share one pass, which reads each
+// sample's luma and sums the group once, but for a jittered convention's
+// photometric kind, which takes the frame's bias out (the solve's first
+// stage finds it in the cockpit kind's sums), and the cockpit against the
+// pair before, which needs that pair's constants.
 void AppendEngineEvidence(FrameGenViewPlan& plan, const FrameGenConstants& base, const FrameGenViewRequest& request,
                           const FrameGenTuning& tuning) {
+    // Observe and Assist measure the flow before it; where the vectors lead
+    // (stage 6) it is measured after it, if at all.
+    const std::uint32_t measured = FrameGenEngineLeads(request, tuning) ? 0u : 1u << 8;
     const FrameGenExtent l1 = plan.levels[1];
     const FrameGenTexture raw = Texture(FrameGenTextureKind::kEngineRaw);
     const FrameGenTexture luma = Texture(FrameGenTextureKind::kLumaNewest, 1);
     const FrameGenTexture before = Texture(FrameGenTextureKind::kLumaPrevious, 1);
     const FrameGenTexture depth = Texture(FrameGenTextureKind::kDepth);
-    const FrameGenTexture flow = Texture(FrameGenTextureKind::kFlow, plan.final_flow_level);
+    const FrameGenTexture flow = measured ? Texture(FrameGenTextureKind::kFlow, plan.final_flow_level) : FrameGenTexture{};
     const FrameGenTexture partials = Texture(FrameGenTextureKind::kEnginePartials);
     const FrameGenTexture params = Texture(FrameGenTextureKind::kEngineParams);
     // The lag kind's field before, when it is the frame before's.
@@ -252,8 +255,6 @@ void AppendEngineEvidence(FrameGenViewPlan& plan, const FrameGenConstants& base,
     // the gains to those) in ReadFrameGenEngineEvidence.
     const std::array<float, 4> converted = FrameGenEngineDecode(tuning.engine, request.engine_encoding);
     const std::uint32_t camera = static_cast<std::uint32_t>(tuning.engine.camera) << 4;
-    // Observe and Assist measure the flow as well.
-    const std::uint32_t measured = FrameGenEngineModeFor(tuning) <= FrameGenEngineMode::kAssist ? 1u << 8 : 0u;
     // The fifth input: the field before, or with bit 9 the solve's first
     // stage (the frame's bias in texel 0).
     auto reduce = [&](std::uint32_t kinds, const FrameGenConstants& constants, const FrameGenTexture& measured_flow,
@@ -302,6 +303,21 @@ void AppendEngineEvidence(FrameGenViewPlan& plan, const FrameGenConstants& base,
     solve(1);
 }
 
+// Stage 6: the frame's verdict for both eyes (kEngineSolve's stage 2, from
+// this view's kEngineParams and the other view's), the predicate of the
+// measured passes after it: kEngineVerdict, copied into the view's predicate
+// by the backend (kFrameGenPredicateSet).
+void AppendEnginePredicate(FrameGenViewPlan& plan, const FrameGenConstants& base) {
+    FrameGenDispatch predicate = Dispatch(FrameGenPass::kEngineSolve, {kFrameGenThreadGroupSize, kFrameGenThreadGroupSize},
+                                          plan.levels[1], base);
+    predicate.inputs = {FrameGenTexture{}, {}, {}, Texture(FrameGenTextureKind::kEngineParams), {},
+                        Texture(FrameGenTextureKind::kEngineParamsOther)};
+    predicate.outputs = {Texture(FrameGenTextureKind::kEngineVerdict), {}};
+    predicate.constants.options = {2u, base.options[1], 0, 0};
+    predicate.predicate = kFrameGenPredicateSet;
+    plan.dispatches.push_back(predicate);
+}
+
 // How far the head turned between the request's two views, in degrees.
 float HeadTurnDegrees(const FrameGenViewRequest& request) {
     const auto& a = request.newest.orientation;
@@ -319,9 +335,13 @@ float HeadTurnDegrees(const FrameGenViewRequest& request) {
 // with each cell's label (kEngineMerge: the measured flow wherever the
 // verdict holds the vectors back), then each tile's trust in the vectors
 // (kEngineTiles: from the frame before's where it has them, faster while the
-// head turns more than 2 degrees a frame).
+// head turns more than 2 degrees a frame). Where the vectors lead (stage 6),
+// the merge takes Lead's rule, and with no measured flow at all
+// (FrameGenTuning::engine_predicate false) reads none.
 void AppendEngineAssist(FrameGenViewPlan& plan, const FrameGenConstants& base, const FrameGenViewRequest& request,
                         const FrameGenTuning& tuning, bool world) {
+    const bool lead = FrameGenEngineLeads(request, tuning);
+    const bool measured = !lead || tuning.engine_predicate;
     const std::uint8_t level = plan.final_flow_level;
     const FrameGenExtent cells = plan.levels[level];
     const FrameGenTexture tiles_before =
@@ -347,11 +367,12 @@ void AppendEngineAssist(FrameGenViewPlan& plan, const FrameGenConstants& base, c
                     Texture(FrameGenTextureKind::kLumaPrevious, match),
                     Texture(FrameGenTextureKind::kEngineCandidate),
                     Texture(FrameGenTextureKind::kEngineInfo),
-                    Texture(FrameGenTextureKind::kFlow, level),
+                    measured ? Texture(FrameGenTextureKind::kFlow, level) : FrameGenTexture{},
                     Texture(FrameGenTextureKind::kEngineParams)};
     merge.outputs = {Texture(FrameGenTextureKind::kEngineFlow), Texture(FrameGenTextureKind::kEngineLabels)};
-    merge.constants.options = {FrameGenEngineModeFor(tuning) == FrameGenEngineMode::kLead ? kFrameGenEngineMergeLead
-                                                                                           : kFrameGenEngineMergeAssist,
+    merge.constants.options = {!lead      ? kFrameGenEngineMergeAssist
+                               : measured ? kFrameGenEngineMergeLead
+                                          : kFrameGenEngineMergeLead | kFrameGenEngineMergeUnmeasured,
                                base.options[1], level, 1u << (level - match)};
     plan.dispatches.push_back(merge);
     FrameGenDispatch tiles = Dispatch(FrameGenPass::kEngineTiles, FrameGenEngineTiles(cells), cells, base);
@@ -394,8 +415,52 @@ std::uint8_t FrameGenFinalFlowLevel(const FrameGenTuning& tuning) {
 }
 
 FrameGenEngineMode FrameGenEngineModeFor(const FrameGenTuning& tuning) {
-    return tuning.mode == FrameGenSynthesisMode::kInterpolate ? std::min(tuning.engine_mode, FrameGenEngineMode::kAssist)
-                                                              : tuning.engine_mode;
+    return tuning.mode == FrameGenSynthesisMode::kInterpolate && !tuning.engine_interpolate
+               ? std::min(tuning.engine_mode, FrameGenEngineMode::kAssist)
+               : tuning.engine_mode;
+}
+
+bool FrameGenEngineLeads(const FrameGenViewRequest& request, const FrameGenTuning& tuning) {
+    return request.engine_motion && FrameGenEngineModeFor(tuning) == FrameGenEngineMode::kLead && tuning.engine_locked;
+}
+
+namespace {
+// FrameGenEngineLeadControl: the verdicts it judges by, the share of them
+// held back that holds the vectors at Assist, for how many real frames, and
+// the verdicts in a row that let them lead again.
+constexpr std::size_t kLeadWindow = 30;
+constexpr std::size_t kLeadHeldMost = 3; // 10% of the window
+constexpr std::uint32_t kLeadHoldFrames = 300;
+constexpr std::uint32_t kLeadStreak = 30;
+} // namespace
+
+void FrameGenEngineLeadControl::AddVerdicts(std::uint64_t frames, std::uint64_t held) {
+    held = std::min(held, frames);
+    for (std::uint64_t i = 0; i < frames; ++i) {
+        const bool back = i >= frames - held;
+        window_.push_back(back ? 1 : 0);
+        while (window_.size() > kLeadWindow) window_.pop_front();
+        streak_ = back ? 0 : streak_ + 1;
+        const auto held_back = static_cast<std::size_t>(std::count(window_.begin(), window_.end(), std::uint8_t{1}));
+        if (leads_ && window_.size() >= kLeadWindow && held_back > kLeadHeldMost) {
+            leads_ = false;
+            held_frames_ = kLeadHoldFrames;
+            ++demotions_;
+        }
+    }
+    Update();
+}
+
+void FrameGenEngineLeadControl::AddFrame() {
+    held_frames_ -= held_frames_ ? 1 : 0;
+    Update();
+}
+
+void FrameGenEngineLeadControl::Update() {
+    if (!leads_ && held_frames_ == 0 && streak_ >= kLeadStreak) {
+        leads_ = true;
+        promotions_ += demotions_ ? 1 : 0;
+    }
 }
 
 std::uint8_t FrameGenMatchLevel(std::uint8_t flow_level) {
@@ -582,7 +647,24 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
     luma.constants.options[3] = 1;
     plan.dispatches.push_back(luma);
 
-    if (tuning.hardware_flow) {
+    // Stage 6: where the game's vectors lead, their evidence (the frame's
+    // verdict) comes right after the luma, and the measured passes after it
+    // are skipped where the verdict for both eyes lets the vectors be used
+    // (FrameGenEngineLeads); the optical flow hardware is not used. With
+    // tuning.engine_predicate false (research) no measured pass is planned:
+    // only the downsample to the luma the merge matches on.
+    const bool lead = FrameGenEngineLeads(request, tuning);
+    const bool hardware = tuning.hardware_flow && !lead;
+    const bool measure = !lead || tuning.engine_predicate;
+    const std::uint8_t measured_predicate = lead ? kFrameGenPredicateSkip : kFrameGenPredicateNone;
+    if (lead) {
+        AppendEngineEvidence(plan, base, request, tuning);
+        if (tuning.engine_predicate) {
+            AppendEnginePredicate(plan, base);
+        }
+    }
+
+    if (hardware) {
         // The optical flow hardware matches the half-resolution luma pair
         // (run by the backend right before the unpack), and the unpack scores
         // each of its vectors the way block matching would. Frames it matched
@@ -606,28 +688,37 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
         plan.dispatches.push_back(unpack);
     }
 
-    for (std::uint8_t level = 2; level <= kFrameGenPyramidLevels && !tuning.hardware_flow; ++level) {
+    // Where the vectors lead, kEngineMerge matches on the final level's
+    // match level: the downsample to it is never skipped.
+    const std::uint8_t merge_match = FrameGenMatchLevel(plan.final_flow_level);
+    for (std::uint8_t level = 2; level <= kFrameGenPyramidLevels && !hardware; ++level) {
+        const bool skippable = lead && level > merge_match;
+        if (skippable && !measure) {
+            break;
+        }
         FrameGenDispatch down = Dispatch(FrameGenPass::kDownsample, plan.levels[level], plan.levels[level - 1], base);
         down.inputs = {Texture(FrameGenTextureKind::kLumaNewest, level - 1),
                        Texture(FrameGenTextureKind::kLumaPrevious, level - 1), {}, {}, {}};
         down.outputs = {Texture(FrameGenTextureKind::kLumaNewest, level), Texture(FrameGenTextureKind::kLumaPrevious, level)};
         down.constants.options[3] = level;
+        down.predicate = skippable ? kFrameGenPredicateSkip : kFrameGenPredicateNone;
         plan.dispatches.push_back(down);
     }
 
     // Flow passes match on luma at `match` and write one vector per cell of
     // the flow level; options.w carries the cell size in match texels.
-    if (!tuning.hardware_flow) {
+    if (!hardware && measure) {
         FrameGenDispatch search = Dispatch(FrameGenPass::kSearch, plan.levels[kFrameGenPyramidLevels],
                                            plan.levels[kFrameGenPyramidLevels], base);
         search.inputs = {Texture(FrameGenTextureKind::kLumaNewest, kFrameGenPyramidLevels),
                          Texture(FrameGenTextureKind::kLumaPrevious, kFrameGenPyramidLevels), {}, {}, {}};
         search.outputs = {Texture(FrameGenTextureKind::kFlow, kFrameGenPyramidLevels), {}};
         search.constants.options[3] = 1;
+        search.predicate = measured_predicate;
         plan.dispatches.push_back(search);
     }
 
-    for (std::uint8_t level = kFrameGenPyramidLevels - 1; level >= plan.final_flow_level && !tuning.hardware_flow;
+    for (std::uint8_t level = kFrameGenPyramidLevels - 1; level >= plan.final_flow_level && !hardware && measure;
          --level) {
         const std::uint8_t match = FrameGenMatchLevel(level);
         FrameGenDispatch refine = Dispatch(FrameGenPass::kRefine, plan.levels[level], plan.levels[level + 1], base);
@@ -639,6 +730,7 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
         refine.outputs = {Texture(FrameGenTextureKind::kFlow, level), {}};
         refine.constants.options[3] = 1u << (level - match);
         refine.constants.tuning[0] = std::clamp(tuning.interval_ratio, 0.25f, 4.0f);
+        refine.predicate = measured_predicate;
         plan.dispatches.push_back(refine);
         if (level == plan.final_flow_level) {
             break;
@@ -672,7 +764,7 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
     // the same motion on every frame.
     auto append_world = [&] {
         if (!delta.valid || tuning.delta_watchdog) {
-            AppendWorldFit(plan, base, depth);
+            AppendWorldFit(plan, base, depth, Texture(FrameGenTextureKind::kFlow, plan.final_flow_level));
         }
         if (delta.valid) {
             AppendWorldSet(plan, delta, tuning);
@@ -684,15 +776,33 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
     // verdict), then the flow the filters read in place of the measured flow,
     // the world's motion first for the cells' classes (the fit reads the
     // measured flow still: a frame whose verdict holds the vectors back is
-    // filtered as without them).
+    // filtered as without them). Where they lead (stage 6) the evidence came
+    // first; the world's motion is the application's before the conversion,
+    // or fitted to the merged flow after it (the measured flow, bit for bit,
+    // where the verdict holds the vectors back): on the watchdog's frames the
+    // fit after it and the application's motion set again.
     const bool assist = request.engine_motion && FrameGenEngineModeFor(tuning) >= FrameGenEngineMode::kAssist;
     if (assist) {
-        AppendEngineEvidence(plan, base, request, tuning);
         const bool world_first = world && (tuning.mode == FrameGenSynthesisMode::kExtrapolate || covered);
-        if (world_first) {
-            append_world();
+        if (!lead) {
+            AppendEngineEvidence(plan, base, request, tuning);
+            if (world_first) {
+                append_world();
+            }
+            AppendEngineAssist(plan, base, request, tuning, world_first);
+        } else {
+            const bool set_first = world_first && delta.valid;
+            if (set_first) {
+                AppendWorldSet(plan, delta, tuning);
+            }
+            AppendEngineAssist(plan, base, request, tuning, set_first);
+            if (world_first && (!delta.valid || tuning.delta_watchdog)) {
+                AppendWorldFit(plan, base, depth, Texture(FrameGenTextureKind::kEngineFlow));
+                if (delta.valid) {
+                    AppendWorldSet(plan, delta, tuning);
+                }
+            }
         }
-        AppendEngineAssist(plan, base, request, tuning, world_first);
         filter.inputs[0] = Texture(FrameGenTextureKind::kEngineFlow);
         if (tuning.engine_filter) {
             filter.inputs[4] = Texture(FrameGenTextureKind::kEngineLabels);
@@ -1269,6 +1379,7 @@ FrameGenEngineMode ParseFrameGenEngineMode(const char* value) {
            : text == "capture" ? FrameGenEngineMode::kCapture
            : text == "observe" ? FrameGenEngineMode::kObserve
            : text == "assist"  ? FrameGenEngineMode::kAssist
+           : text == "lead"    ? FrameGenEngineMode::kLead
                                : FrameGenEngineMode::kOff;
 }
 
@@ -2165,6 +2276,24 @@ void AddPhotometric(FrameGenEngineEvidence& sums, const FrameGenEngineEvidence& 
     sums.lag_samples += view.lag_samples;
 }
 
+// A view's verdict as Lead judges it (stage 6): its photometric reason from
+// the vectors' luma error against no motion's (15% better where more than
+// 100 samples move, else no worse, both with 0.005 of slack), as kEngineSolve
+// judges a Lead plan's evidence, in its float arithmetic; the other reasons
+// as the GPU gave them. Evidence taken for Assist was judged against the
+// measured flow instead, which Lead does not measure.
+std::uint32_t LeadVerdict(const FrameGenEngineEvidence& view) {
+    std::uint32_t verdict = view.verdict & ~kFrameGenEngineVerdictPhotometric;
+    const auto textured = static_cast<float>(view.textured);
+    if (textured >= 200.0f) {
+        const float variant = static_cast<float>(view.variants[0]) / textured;
+        const float zero = static_cast<float>(view.zero) / textured;
+        const float share = static_cast<float>(view.moving) > 100.0f ? 0.85f : 1.0f;
+        verdict |= variant > share * zero + 0.005f ? kFrameGenEngineVerdictPhotometric : 0u;
+    }
+    return verdict;
+}
+
 std::string Fixed(double value, int decimals) {
     char text[32];
     std::snprintf(text, sizeof(text), "%.*f", decimals, value);
@@ -2584,9 +2713,11 @@ void FrameGenEngineValidator::Add(const FrameGenEngineFrameEvidence& frame, doub
     }
     ++report_.frames;
     bool held = false;
+    bool lead_held = false;
     bool calibrate = true;
     for (const FrameGenEngineEvidence& view : frame.views) {
         ++report_.verdicts;
+        lead_held = lead_held || LeadVerdict(view) != 0;
         if (view.verdict) {
             held = true;
             ++report_.invalid;
@@ -2608,6 +2739,8 @@ void FrameGenEngineValidator::Add(const FrameGenEngineFrameEvidence& frame, doub
         calibrate = calibrate && view.calibrate;
         extents_ = {view.vectors, view.color};
     }
+    report_.held += held ? 1 : 0;
+    report_.lead_held += lead_held ? 1 : 0;
     if (held_for_test_) {
         return;
     }

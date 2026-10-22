@@ -39,6 +39,10 @@ struct FrameGenExecuteResult {
     // Per view (Direct3D 12, from FrameGenEngineMode::kAssist): the game's
     // motion vectors were merged into the flow (its kEngineLabels written).
     std::vector<bool> merged;
+    // Direct3D 12, FrameGenEngineMode::kLead (stage 6): the game's vectors led
+    // the frame on every view (FrameGenEngineLeads): its measured passes were
+    // predicated on its verdict, and the optical flow hardware left idle.
+    bool lead{false};
     // Execute failed only because a view's image was not captured when the
     // application released it (SetCopyAfterRelease): nothing was generated,
     // and the views are now set up so the next releases are captured.

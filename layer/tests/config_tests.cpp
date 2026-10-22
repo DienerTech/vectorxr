@@ -2019,8 +2019,9 @@ void TestFrameGenMotionCapturePlan() {
                depthxr::ParseFrameGenEngineMode("census") == depthxr::FrameGenEngineMode::kCensus &&
                depthxr::ParseFrameGenEngineMode("Observe") == depthxr::FrameGenEngineMode::kObserve &&
                depthxr::ParseFrameGenEngineMode("Assist") == depthxr::FrameGenEngineMode::kAssist &&
-               depthxr::ParseFrameGenEngineMode("lead") == depthxr::FrameGenEngineMode::kOff,
-           "Engine motion: the switch takes off, census, capture, observe and assist");
+               depthxr::ParseFrameGenEngineMode("lead") == depthxr::FrameGenEngineMode::kLead &&
+               depthxr::ParseFrameGenEngineMode("leading") == depthxr::FrameGenEngineMode::kOff,
+           "Engine motion: the switch takes off, census, capture, observe, assist and lead");
     const depthxr::FrameGenExtent l1 = depthxr::FrameGenPyramid({5424, 5356})[1];
     const depthxr::FrameGenDispatch dispatch =
         depthxr::BuildFrameGenMotionCaptureDispatch(l1, {0, 0, 4339, 4285}, {16, 8, 4300, 4200}, 0, 1, 2);
@@ -2857,10 +2858,18 @@ void TestFrameGenEngineAssistPlan() {
                order(interpolated) + ")");
     tuning.mode = depthxr::FrameGenSynthesisMode::kExtrapolate;
     tuning.cover = false;
-    Expect(depthxr::FrameGenEngineModeFor(tuning) == FrameGenEngineMode::kLead &&
+    // Extrapolating in Lead, Lead's rule once the convention is locked
+    // (stage 6); before, Assist's plan.
+    Expect(depthxr::FrameGenEngineModeFor(tuning) == FrameGenEngineMode::kLead && !depthxr::FrameGenEngineLeads(request, tuning) &&
+               find(depthxr::BuildFrameGenViewPlan(request, tuning), FrameGenPass::kEngineMerge).constants.options[0] ==
+                   depthxr::kFrameGenEngineMergeAssist,
+           "Engine assist plan: extrapolating in Lead, Assist's rule until the convention is locked");
+    tuning.engine_locked = true;
+    Expect(depthxr::FrameGenEngineLeads(request, tuning) &&
                find(depthxr::BuildFrameGenViewPlan(request, tuning), FrameGenPass::kEngineMerge).constants.options[0] ==
                    depthxr::kFrameGenEngineMergeLead,
            "Engine assist plan: extrapolating, Lead's rule (stage 6)");
+    tuning.engine_locked = false;
     tuning.engine_mode = FrameGenEngineMode::kAssist;
     request.world_motion = false;
     // None without the evidence (a gate, a view without vectors).
@@ -2890,6 +2899,319 @@ void TestFrameGenEngineAssistPlan() {
     tuning.depth_splat = false;
     tuning.diagnostic = depthxr::FrameGenDiagnosticView::kOff;
     Expect(synthesis(tuning).inputs[5].kind == FrameGenTextureKind::kNone, "Engine assist plan: the tint is the confidence view's");
+}
+
+// Stage 6's plan: where the vectors lead (Lead, the convention locked, their
+// evidence asked for), the evidence right after the luma without measured
+// flow, the frame's verdict for both eyes (the predicate), then exactly the
+// downsample, search and refine passes predicated on it (but the downsample
+// to the merge's match level), never the optical flow hardware's pack and
+// unpack, the merge by Lead's rule and the filter on the merged flow; the
+// world's motion set before the conversion, or fitted to the merged flow
+// after it. With engine_predicate false no measured pass at all. Unlocked,
+// or interpolating, Assist's plan. The flow's level holds between the frames
+// the vectors lead and those measured without them (hardware_level): no
+// view's filtered flow is made anew.
+void TestFrameGenEngineLeadPlan() {
+    using depthxr::FrameGenEngineMode;
+    using depthxr::FrameGenPass;
+    using depthxr::FrameGenTextureKind;
+    depthxr::FrameGenViewRequest request;
+    request.extent = {1024, 1024};
+    request.synthesize = request.temporal = request.depth = true;
+    request.newest.angle_left = request.previous.angle_left = -0.9f;
+    request.newest.angle_right = request.previous.angle_right = 0.9f;
+    request.newest.angle_up = request.previous.angle_up = 0.9f;
+    request.newest.angle_down = request.previous.angle_down = -0.9f;
+    request.newest.orientation = {0.0f, 0.01f, 0.0f, 0.99995f};
+    request.engine_motion = true;
+    request.engine_vectors = {800, 790};
+    depthxr::FrameGenTuning tuning;
+    tuning.mode = depthxr::FrameGenSynthesisMode::kExtrapolate;
+    tuning.analyze_only = true;
+    tuning.engine_mode = FrameGenEngineMode::kLead;
+    tuning.engine_locked = true;
+    // The hardware chosen, Quality: the flow at the hardware's level.
+    tuning.hardware_flow = tuning.hardware_level = true;
+    tuning.quality = depthxr::FrameGenFlowQuality::kQuality;
+    // The passes in order (the depth's trust passes aside), a skippable one
+    // marked "?", the predicate (kEngineSolve's stage 2) as "P".
+    auto order = [](const depthxr::FrameGenViewPlan& plan) {
+        std::string text;
+        for (const auto& dispatch : plan.dispatches) {
+            std::string name;
+            switch (dispatch.pass) {
+            case FrameGenPass::kLuma: name = "luma"; break;
+            case FrameGenPass::kFlowPack: name = "pack"; break;
+            case FrameGenPass::kFlowUnpack: name = "unpack"; break;
+            case FrameGenPass::kDownsample: name = "down"; break;
+            case FrameGenPass::kSearch: name = "search"; break;
+            case FrameGenPass::kRefine: name = "refine"; break;
+            case FrameGenPass::kFilter: name = "filter"; break;
+            case FrameGenPass::kEngineReduce: name = "R"; break;
+            case FrameGenPass::kEngineSolve: name = (dispatch.constants.options[0] & 15u) == 2u ? "P" : "S"; break;
+            case FrameGenPass::kEngineConvert: name = "convert"; break;
+            case FrameGenPass::kEngineMerge: name = "merge"; break;
+            case FrameGenPass::kEngineTiles: name = "tiles"; break;
+            case FrameGenPass::kWorldReduce: name = "W"; break;
+            case FrameGenPass::kWorldSolve: name = "w"; break;
+            case FrameGenPass::kWorldSet: name = "set"; break;
+            default: continue;
+            }
+            text += name + (dispatch.predicate == depthxr::kFrameGenPredicateSkip ? "? " : " ");
+        }
+        return text;
+    };
+    auto find = [](const depthxr::FrameGenViewPlan& plan, FrameGenPass pass) {
+        return *std::find_if(plan.dispatches.begin(), plan.dispatches.end(),
+                             [&](const depthxr::FrameGenDispatch& dispatch) { return dispatch.pass == pass; });
+    };
+    auto same = [](const depthxr::FrameGenViewPlan& a, const depthxr::FrameGenViewPlan& b) {
+        bool equal = a.dispatches.size() == b.dispatches.size();
+        for (std::size_t i = 0; equal && i < a.dispatches.size(); ++i) {
+            equal = a.dispatches[i].pass == b.dispatches[i].pass && a.dispatches[i].predicate == b.dispatches[i].predicate &&
+                    std::memcmp(a.dispatches[i].inputs.data(), b.dispatches[i].inputs.data(), sizeof(a.dispatches[i].inputs)) == 0 &&
+                    std::memcmp(a.dispatches[i].outputs.data(), b.dispatches[i].outputs.data(), sizeof(a.dispatches[i].outputs)) == 0 &&
+                    std::memcmp(&a.dispatches[i].constants, &b.dispatches[i].constants, sizeof(depthxr::FrameGenConstants)) == 0;
+        }
+        return equal;
+    };
+    const depthxr::FrameGenViewPlan lead = depthxr::BuildFrameGenViewPlan(request, tuning);
+    Expect(lead.final_flow_level == depthxr::kFrameGenHardwareFlowLevel &&
+               order(lead) == "luma R S P down? down? down? down? search? refine? refine? convert merge tiles filter ",
+           "Engine lead plan: the evidence and predicate after the luma, the measured passes predicated, no optical flow "
+           "hardware (" + order(lead) + ")");
+    std::size_t predicated = 0, set = 0;
+    bool measured_only = true;
+    for (const auto& dispatch : lead.dispatches) {
+        predicated += dispatch.predicate == depthxr::kFrameGenPredicateSkip ? 1 : 0;
+        set += dispatch.predicate == depthxr::kFrameGenPredicateSet ? 1 : 0;
+        measured_only = measured_only && (dispatch.predicate != depthxr::kFrameGenPredicateSkip ||
+                                          dispatch.pass == FrameGenPass::kDownsample || dispatch.pass == FrameGenPass::kSearch ||
+                                          dispatch.pass == FrameGenPass::kRefine);
+    }
+    Expect(predicated == 7 && set == 1 && measured_only,
+           "Engine lead plan: exactly the downsample, search and refine passes predicated, one predicate");
+    // The evidence without measured flow (Lead's photometric test, against
+    // no motion); the predicate from both eyes' verdicts into kEngineVerdict;
+    // the merge by Lead's rule, the measured flow there for a frame whose
+    // verdict holds the vectors back.
+    const depthxr::FrameGenDispatch reduce = find(lead, FrameGenPass::kEngineReduce);
+    std::vector<depthxr::FrameGenDispatch> solves;
+    for (const auto& dispatch : lead.dispatches) {
+        if (dispatch.pass == FrameGenPass::kEngineSolve) solves.push_back(dispatch);
+    }
+    const depthxr::FrameGenDispatch merge = find(lead, FrameGenPass::kEngineMerge);
+    Expect(reduce.inputs[4].kind == FrameGenTextureKind::kNone && (reduce.constants.options[0] & (1u << 8)) == 0 &&
+               solves.size() == 2 && (solves[0].constants.options[0] & (1u << 6)) != 0 &&
+               (solves[0].constants.options[0] & (1u << 4)) != 0 &&
+               solves[1].inputs[3].kind == FrameGenTextureKind::kEngineParams &&
+               solves[1].inputs[5].kind == FrameGenTextureKind::kEngineParamsOther &&
+               solves[1].outputs[0].kind == FrameGenTextureKind::kEngineVerdict &&
+               solves[1].predicate == depthxr::kFrameGenPredicateSet && solves[1].width == 8 && solves[1].height == 8 &&
+               merge.constants.options[0] == depthxr::kFrameGenEngineMergeLead &&
+               merge.inputs[4].kind == FrameGenTextureKind::kFlow && merge.inputs[4].level == 3 &&
+               find(lead, FrameGenPass::kFilter).inputs[0].kind == FrameGenTextureKind::kEngineFlow,
+           "Engine lead plan: no measured flow in the evidence, both eyes' verdicts the predicate, Lead's merge");
+    // Balanced on the shader cores alike; Performance merges on level 2's
+    // luma, whose downsample runs whatever the verdict.
+    tuning.hardware_flow = tuning.hardware_level = false;
+    tuning.quality = depthxr::FrameGenFlowQuality::kBalanced;
+    Expect(order(depthxr::BuildFrameGenViewPlan(request, tuning)) ==
+               "luma R S P down? down? down? down? search? refine? refine? convert merge tiles filter ",
+           "Engine lead plan: Balanced alike");
+    tuning.quality = depthxr::FrameGenFlowQuality::kPerformance;
+    const depthxr::FrameGenViewPlan coarse = depthxr::BuildFrameGenViewPlan(request, tuning);
+    Expect(order(coarse) == "luma R S P down down? down? down? search? refine? convert merge tiles filter " &&
+               find(coarse, FrameGenPass::kEngineMerge).inputs[0].level == 2,
+           "Engine lead plan: Performance's downsample to level 2 is never skipped (" + order(coarse) + ")");
+    // VECTORXR_FRAMEGEN_ENGINE_PREDICATE=0: no measured pass, no predicate;
+    // the merge reads no measured flow.
+    tuning.engine_predicate = false;
+    const depthxr::FrameGenViewPlan unmeasured = depthxr::BuildFrameGenViewPlan(request, tuning);
+    tuning.quality = depthxr::FrameGenFlowQuality::kBalanced;
+    const depthxr::FrameGenViewPlan unmeasured_balanced = depthxr::BuildFrameGenViewPlan(request, tuning);
+    Expect(order(unmeasured) == "luma R S down convert merge tiles filter " &&
+               order(unmeasured_balanced) == "luma R S convert merge tiles filter " &&
+               find(unmeasured_balanced, FrameGenPass::kEngineMerge).constants.options[0] ==
+                   (depthxr::kFrameGenEngineMergeLead | depthxr::kFrameGenEngineMergeUnmeasured) &&
+               find(unmeasured_balanced, FrameGenPass::kEngineMerge).inputs[4].kind == FrameGenTextureKind::kNone,
+           "Engine lead plan: with engine_predicate false, nothing measured (" + order(unmeasured) + ", " +
+               order(unmeasured_balanced) + ")");
+    tuning.engine_predicate = true;
+    // Unlocked, interpolating, or without the evidence: Assist's plan (the
+    // optical flow hardware's where it is chosen), byte for byte.
+    tuning.hardware_flow = tuning.hardware_level = true;
+    tuning.quality = depthxr::FrameGenFlowQuality::kQuality;
+    tuning.engine_locked = false;
+    depthxr::FrameGenTuning assist = tuning;
+    assist.engine_mode = FrameGenEngineMode::kAssist;
+    Expect(same(depthxr::BuildFrameGenViewPlan(request, tuning), depthxr::BuildFrameGenViewPlan(request, assist)) &&
+               order(depthxr::BuildFrameGenViewPlan(request, tuning)) == "luma pack unpack R S convert merge tiles filter ",
+           "Engine lead plan: unlocked, Assist's plan with the hardware's flow");
+    tuning.engine_locked = assist.engine_locked = true;
+    tuning.mode = assist.mode = depthxr::FrameGenSynthesisMode::kInterpolate;
+    tuning.cover = assist.cover = true;
+    Expect(same(depthxr::BuildFrameGenViewPlan(request, tuning), depthxr::BuildFrameGenViewPlan(request, assist)),
+           "Engine lead plan: interpolating, Assist's plan");
+    tuning.engine_interpolate = true;
+    const depthxr::FrameGenViewPlan interpolated = depthxr::BuildFrameGenViewPlan(request, tuning);
+    std::vector<depthxr::FrameGenDispatch> interpolated_filters;
+    for (const auto& dispatch : interpolated.dispatches) {
+        if (dispatch.pass == FrameGenPass::kFilter) interpolated_filters.push_back(dispatch);
+    }
+    Expect(order(interpolated) == "luma R S P down? down? down? down? search? refine? refine? convert merge tiles filter filter " &&
+               interpolated_filters.size() == 2 && interpolated_filters[1].inputs[0].kind == FrameGenTextureKind::kEngineFlow,
+           "Engine lead plan: interpolating led with engine_interpolate, the cover on the merged flow (" +
+               order(interpolated) + ")");
+    tuning.engine_interpolate = false;
+    tuning.mode = depthxr::FrameGenSynthesisMode::kExtrapolate;
+    tuning.cover = false;
+    request.engine_motion = false;
+    assist.engine_mode = FrameGenEngineMode::kOff;
+    assist.mode = depthxr::FrameGenSynthesisMode::kExtrapolate;
+    assist.cover = false;
+    Expect(same(depthxr::BuildFrameGenViewPlan(request, tuning), depthxr::BuildFrameGenViewPlan(request, assist)),
+           "Engine lead plan: without the evidence, the plan without the vectors");
+    request.engine_motion = true;
+    // The world's motion: fitted to the merged flow after the merge, or the
+    // application's set before the conversion (its classes), on the
+    // watchdog's frames the fit after the merge and the set again.
+    request.world_motion = true;
+    const depthxr::FrameGenViewPlan fitted = depthxr::BuildFrameGenViewPlan(request, tuning);
+    bool fit_merged = true;
+    for (const auto& dispatch : fitted.dispatches) {
+        if (dispatch.pass == FrameGenPass::kWorldReduce) {
+            fit_merged = fit_merged && dispatch.inputs[0].kind == FrameGenTextureKind::kEngineFlow;
+        }
+    }
+    Expect(order(fitted) == "luma R S P down? down? down? down? search? refine? refine? convert merge tiles W w W w W w filter " &&
+               fit_merged && find(fitted, FrameGenPass::kEngineConvert).inputs[4].kind == FrameGenTextureKind::kNone &&
+               find(fitted, FrameGenPass::kFilter).inputs[3].kind == FrameGenTextureKind::kWorldParams,
+           "Engine lead plan: the world fitted to the merged flow after the merge (" + order(fitted) + ")");
+    request.app_delta = true;
+    request.game_newest = request.newest;
+    request.game_previous = request.previous;
+    request.delta_position = {0.0f, 0.0f, 1.8f};
+    tuning.world_delta = true;
+    const depthxr::FrameGenViewPlan set_first = depthxr::BuildFrameGenViewPlan(request, tuning);
+    tuning.delta_watchdog = true;
+    const depthxr::FrameGenViewPlan watched = depthxr::BuildFrameGenViewPlan(request, tuning);
+    Expect(order(set_first) == "luma R S P down? down? down? down? search? refine? refine? set convert merge tiles filter " &&
+               (find(set_first, FrameGenPass::kEngineConvert).constants.options[0] & depthxr::kFrameGenEngineConvertWorld) != 0 &&
+               order(watched) ==
+                   "luma R S P down? down? down? down? search? refine? refine? set convert merge tiles W w W w W w set filter ",
+           "Engine lead plan: the application's motion set before the conversion, the watchdog's fit after the merge (" +
+               order(set_first) + ", " + order(watched) + ")");
+    tuning.world_delta = tuning.delta_watchdog = false;
+    request.world_motion = request.app_delta = false;
+    // The level the backend's views are set up for: the frames the vectors
+    // lead (the hardware idle) and those measured without them (on it) end
+    // at one level with hardware_level, so their filtered flow is never
+    // made anew; without it a led frame would end at Quality's level 2.
+    depthxr::FrameGenTuning led = tuning;
+    led.hardware_flow = false;
+    depthxr::FrameGenTuning measured = tuning;
+    measured.engine_mode = FrameGenEngineMode::kAssist;
+    depthxr::FrameGenHistoryState history;
+    const unsigned first = history.Configure({1024, 1024}, 28, depthxr::FrameGenOutputKind::kSrgb8,
+                                             depthxr::FrameGenFinalFlowLevel(led), 3);
+    const unsigned fallback = history.Configure({1024, 1024}, 28, depthxr::FrameGenOutputKind::kSrgb8,
+                                                depthxr::FrameGenFinalFlowLevel(measured), 3);
+    const unsigned again = history.Configure({1024, 1024}, 28, depthxr::FrameGenOutputKind::kSrgb8,
+                                             depthxr::FrameGenFinalFlowLevel(led), 3);
+    led.hardware_level = false;
+    const unsigned unpinned = history.Configure({1024, 1024}, 28, depthxr::FrameGenOutputKind::kSrgb8,
+                                                depthxr::FrameGenFinalFlowLevel(led), 3);
+    Expect(first == depthxr::FrameGenHistoryState::kAll && fallback == depthxr::FrameGenHistoryState::kNone &&
+               again == depthxr::FrameGenHistoryState::kNone && unpinned == depthxr::FrameGenHistoryState::kFiltered,
+           "Engine lead plan: Lead -> Assist -> Lead keeps the views' filtered flow at the hardware's level");
+}
+
+// Stage 6's controller: a session in Lead starts at Assist and leads after
+// 30 verdicts in a row that let the vectors be used; more than 10% of the
+// last 30 frames held back hold it at Assist for 300 real frames, then 30
+// in a row lead again. Verdicts read together count the held ones last. The
+// validator counts the frames either eye's verdict held back.
+void TestFrameGenEngineLeadControl() {
+    depthxr::FrameGenEngineLeadControl control;
+    control.AddVerdicts(29, 0);
+    Expect(!control.Leads(), "Engine lead control: at Assist before 30 verdicts in a row");
+    control.AddVerdicts(1, 0);
+    Expect(control.Leads() && control.Demotions() == 0, "Engine lead control: leads after 30 in a row");
+    control.AddVerdicts(3, 3);
+    for (int i = 0; i < 10; ++i) control.AddFrame();
+    Expect(control.Leads(), "Engine lead control: 3 of the last 30 held back (10%) keep it leading");
+    control.AddVerdicts(1, 1);
+    Expect(!control.Leads() && control.Demotions() == 1, "Engine lead control: a fourth holds it at Assist");
+    control.AddVerdicts(60, 0);
+    for (int i = 0; i < 299; ++i) control.AddFrame();
+    Expect(!control.Leads(), "Engine lead control: at Assist for 300 frames, its verdicts as they may be");
+    control.AddFrame();
+    Expect(control.Leads() && control.Promotions() == 1, "Engine lead control: leads again after 300 frames");
+    // Held back again, its verdicts held back through the 300 frames: then
+    // 30 in a row more.
+    control.AddVerdicts(4, 4);
+    Expect(!control.Leads() && control.Demotions() == 2, "Engine lead control: held at Assist again");
+    for (int i = 0; i < 300; ++i) {
+        control.AddVerdicts(1, 1);
+        control.AddFrame();
+    }
+    control.AddVerdicts(29, 0);
+    Expect(!control.Leads(), "Engine lead control: after the 300 frames, 29 in a row do not lead");
+    // Read together, the held one last: no streak.
+    control.AddVerdicts(2, 1);
+    Expect(!control.Leads(), "Engine lead control: verdicts read together count the held one last");
+    control.AddVerdicts(30, 0);
+    Expect(control.Leads() && control.Promotions() == 2, "Engine lead control: 30 in a row lead again");
+
+    // The validator: a frame held back on either eye is one held frame.
+    depthxr::FrameGenEngineValidator validator;
+    depthxr::FrameGenEngineFrameEvidence frame;
+    frame.views.resize(2);
+    validator.Add(frame, 0.0);
+    frame.views[1].verdict = depthxr::kFrameGenEngineVerdictStale;
+    validator.Add(frame, 0.1);
+    frame.views[0].verdict = depthxr::kFrameGenEngineVerdictPhotometric;
+    validator.Add(frame, 0.2);
+    depthxr::FrameGenEngineValidation report = validator.Report();
+    Expect(report.frames == 3 && report.held == 2 && report.invalid == 3 && report.verdicts == 6 && report.lead_held == 2,
+           "Engine lead control: the validator counts the frames either eye held back (" + std::to_string(report.held) + ", " +
+               std::to_string(report.lead_held) + " as Lead judges them)");
+    // As Lead judges them (lead_held): vectors Assist's test lets be used
+    // (about as good as the measured flow) that beat no motion by less than
+    // 15% while content moves hold a frame back; Assist's photometric reason
+    // alone, the vectors beating no motion clearly, does not.
+    frame.views[0].verdict = frame.views[1].verdict = 0;
+    for (depthxr::FrameGenEngineEvidence& view : frame.views) {
+        view.textured = 1000.0;
+        view.moving = 500.0;
+        view.zero = 100.0;       // 0.1 a sample
+        view.variants[0] = 92.0; // 0.092: above 0.85 of it and the slack
+    }
+    validator.Add(frame, 0.3);
+    report = validator.Report();
+    Expect(report.held == 2 && report.lead_held == 3,
+           "Engine lead control: vectors barely better than no motion are held back as Lead judges them (" +
+               std::to_string(report.lead_held) + ")");
+    frame.views[1].verdict = depthxr::kFrameGenEngineVerdictPhotometric;
+    for (depthxr::FrameGenEngineEvidence& view : frame.views) view.variants[0] = 50.0;
+    validator.Add(frame, 0.4);
+    report = validator.Report();
+    Expect(report.held == 3 && report.lead_held == 3,
+           "Engine lead control: Assist's photometric reason alone does not hold a frame back as Lead judges it (" +
+               std::to_string(report.lead_held) + ")");
+    // Few moving samples: no worse than no motion (and the slack) passes.
+    frame.views[1].verdict = 0;
+    for (depthxr::FrameGenEngineEvidence& view : frame.views) {
+        view.moving = 100.0;
+        view.variants[0] = 104.0;
+    }
+    validator.Add(frame, 0.5);
+    report = validator.Report();
+    Expect(report.held == 3 && report.lead_held == 3,
+           "Engine lead control: with 100 samples moving, vectors within the slack of no motion are not held back (" +
+               std::to_string(report.lead_held) + ")");
 }
 
 // Engine motion validation on synthetic evidence: a game's vectors in a
@@ -6437,6 +6759,8 @@ int main() {
     TestFrameGenDeclaredChange();
     TestFrameGenEngineEvidencePlan();
     TestFrameGenEngineAssistPlan();
+    TestFrameGenEngineLeadPlan();
+    TestFrameGenEngineLeadControl();
     TestFrameGenEngineValidator();
     TestFrameGenEnginePrior();
     TestFrameGenEngineWorldParams();

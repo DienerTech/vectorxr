@@ -393,6 +393,7 @@ FrameGenViewSubmission Submission(std::uint32_t source_index, std::int64_t forma
 
 void EngineObserveScenarios(Harness& harness);
 void EngineAssistScenarios(Harness& harness);
+void EngineLeadScenarios(Harness& harness);
 void WorldDeltaScenarios(Harness& harness);
 
 int RunScenarios(Harness& harness) {
@@ -1277,6 +1278,13 @@ int RunScenarios(Harness& harness) {
     // (EngineAssistScenarios).
     if (harness.create_texture_data && harness.create_depth_data && harness.upload_sized && harness.readback_sized) {
         EngineAssistScenarios(harness);
+    }
+
+    // 3x. Engine motion vectors, stage 6 (Direct3D 12): Lead skips the
+    // measured passes where a frame's verdict lets the game's vectors be
+    // used, runs them where it does not (EngineLeadScenarios).
+    if (harness.create_texture_data && harness.create_depth_data && harness.upload_sized && harness.readback_sized) {
+        EngineLeadScenarios(harness);
     }
 
     // 3w. Engine motion vectors, stage 4 (Direct3D 12): the world's motion
@@ -4569,14 +4577,19 @@ int RunProfile(Harness& harness) {
     // real frame (stage 2's capture and its census, on the game's queue) and
     // judged in Observe (stage 3's evidence passes, on the work queue);
     // FG_PROFILE_MV=assist merges them into the flow as well (stage 5's
-    // convert, merge and tiles), the convention locked from the start.
+    // convert, merge and tiles), the convention locked from the start;
+    // FG_PROFILE_MV=lead lets them lead (stage 6: the measured passes skipped
+    // where a frame's verdict lets the vectors be used, the optical flow
+    // hardware idle on such frames, the flow at its level as the presenter
+    // pins it).
     const std::string profile_mv = std::getenv("FG_PROFILE_MV") ? std::getenv("FG_PROFILE_MV") : "";
-    const bool engine = profile_mv == "1" || profile_mv == "assist";
-    const FrameGenEngineMode engine_mode = profile_mv == "assist" ? FrameGenEngineMode::kAssist
-                                           : engine                ? FrameGenEngineMode::kObserve
-                                                                   : FrameGenEngineMode::kOff;
+    const bool engine = profile_mv == "1" || profile_mv == "assist" || profile_mv == "lead";
+    const FrameGenEngineMode engine_mode = profile_mv == "lead"     ? FrameGenEngineMode::kLead
+                                           : profile_mv == "assist" ? FrameGenEngineMode::kAssist
+                                           : engine                 ? FrameGenEngineMode::kObserve
+                                                                    : FrameGenEngineMode::kOff;
     const std::string convention = std::getenv("FG_PROFILE_MV_CONVENTION") ? std::getenv("FG_PROFILE_MV_CONVENTION") : "fb";
-    if (engine_mode == FrameGenEngineMode::kAssist) {
+    if (engine_mode >= FrameGenEngineMode::kAssist) {
         FrameGenEngineConvention locked;
         locked.gain = ProfileMotionGain(convention, depth_width, depth_height);
         gpu->LockEngineForTest(locked);
@@ -4732,6 +4745,10 @@ int RunProfile(Harness& harness) {
         double synthesis_total = 0.0;
         int samples = 0;
         int synthesis_samples = 0;
+        int led = 0; // FG_PROFILE_MV=lead: profiled frames the vectors led
+        // ... and of this run's frames judged, those whose verdict held the
+        // vectors back (their measured passes ran).
+        const FrameGenEngineValidation judged = engine ? gpu->EngineStatus(~0ull).validation : FrameGenEngineValidation{};
         bool depth_used = false;
         for (int i = 0; i < 48; ++i) {
             const std::uint32_t frame = static_cast<std::uint32_t>(i % kFrames);
@@ -4766,7 +4783,11 @@ int RunProfile(Harness& harness) {
             executed.analyze_only = jit;
             executed.cover = jit && interpolate;
             executed.engine_mode = engine_mode;
+            // The level as the presenter pins it from Assist with the hardware
+            // chosen (FrameGenTuning::hardware_level).
+            executed.hardware_level = tuning.hardware_flow && engine_mode >= FrameGenEngineMode::kAssist;
             Check(gpu->Execute(views, executed, result, error), "profile execute: " + error);
+            led += i >= 24 && result.lead ? 1 : 0;
             const std::vector<double> times = gpu->PassMilliseconds();
             if (jit) {
                 // The frames until the next real one, each written on its own.
@@ -4822,7 +4843,7 @@ int RunProfile(Harness& harness) {
             std::printf("  engine evidence %6.3f ms per real frame on the work queue (reduce and solve, both eyes; "
                         "gate <= 0.06): %llu frames' evidence read, the validator %s\n",
                         evidence, static_cast<unsigned long long>(status.evidence), ToString(status.validation.state));
-            if (engine_mode == FrameGenEngineMode::kAssist) {
+            if (engine_mode >= FrameGenEngineMode::kAssist) {
                 // Stage 5's gate: convert, merge and tiles within 0.2 ms per
                 // real frame at level 3.
                 const auto convert = static_cast<std::size_t>(FrameGenPass::kEngineConvert);
@@ -4835,6 +4856,23 @@ int RunProfile(Harness& harness) {
                 std::printf("  engine assist %6.3f ms per real frame on the work queue (convert, merge and tiles, both "
                             "eyes, level %u; gate <= 0.2 at level 3)\n",
                             assist_ms, static_cast<unsigned>(FrameGenFinalFlowLevel(tuning)));
+            }
+            if (engine_mode == FrameGenEngineMode::kLead && samples) {
+                // Stage 6's gate: the analysis per real frame 0.25 ms or more
+                // below a Balanced run without FG_PROFILE_MV (mk1's), the
+                // measured passes skipped where the vectors lead, and no wait
+                // for the optical flow hardware.
+                double measured_ms = 0.0;
+                for (const FrameGenPass pass : {FrameGenPass::kDownsample, FrameGenPass::kSearch, FrameGenPass::kRefine}) {
+                    measured_ms += static_cast<std::size_t>(pass) < sums.size() ? sums[static_cast<std::size_t>(pass)] / samples : 0.0;
+                }
+                const std::size_t wait = kFrameGenPassCount + 2; // "hardware wait"
+                std::printf("  engine lead: %d of %d frames led, %llu of %llu judged held back by their verdict; the measured "
+                            "passes %6.3f ms, the hardware wait %6.3f ms per real frame (gate: %.2f ms per real frame at most "
+                            "mk1 Balanced's less 0.25)\n",
+                            led, samples, static_cast<unsigned long long>(status.validation.held - judged.held),
+                            static_cast<unsigned long long>(status.validation.frames - judged.frames), measured_ms,
+                            wait < sums.size() ? sums[wait] / samples : 0.0, total / samples);
             }
             engine_ms = 0.0;
             engine_samples = 0;
@@ -4915,7 +4953,8 @@ int RunProfile(Harness& harness) {
 // VECTORXR_FRAMEGEN_ENGINE_DELTA=1, _DELTA_FIXED=sign,scale (and _SKY=1) in
 // the environment, the backend sets the world's motion from it, as a session.
 // The game's motion vectors (FG_REPLAY_MV, RunReplay): Observe, or with
-// FG_REPLAY_MV_MODE=assist merged into the flow (stage 5, "Engine labels").
+// FG_REPLAY_MV_MODE=assist merged into the flow (stage 5, "Engine labels"),
+// or =lead leading it (stage 6).
 bool g_replay = false;
 std::string g_replay_directory, g_replay_output;
 
@@ -5668,15 +5707,23 @@ int RunReplay(Harness& harness) {
     // alone holds them back, the gate of the perturbations. The filters' and
     // the tint's research switches as a session reads them
     // (VECTORXR_FRAMEGEN_ENGINE_FILTER, _COCKPIT, _TINT).
+    // Stage 6: FG_REPLAY_MV_MODE=lead lets them lead (the measured passes
+    // predicated on each frame's verdict, none with
+    // VECTORXR_FRAMEGEN_ENGINE_PREDICATE=0), the flow at the level the
+    // presenter pins with FG_REPLAY_HARDWARE=1 (the hardware idle where they
+    // lead); the labels as Assist's.
     const std::string engine_mode = env("FG_REPLAY_MV_MODE").empty() ? "observe" : env("FG_REPLAY_MV_MODE");
-    Check(engine_mode == "observe" || engine_mode == "assist", "replay: FG_REPLAY_MV_MODE is observe or assist");
-    const bool assist = engine != "off" && engine_mode == "assist";
+    Check(engine_mode == "observe" || engine_mode == "assist" || engine_mode == "lead",
+          "replay: FG_REPLAY_MV_MODE is observe, assist or lead");
+    const bool lead = engine != "off" && engine_mode == "lead";
+    const bool assist = engine != "off" && (engine_mode == "assist" || lead);
     if (assist && env("FG_REPLAY_MV_LOCK") != "0") {
         gpu->LockEngineForTest(replay_convention);
     }
     const bool engine_filter = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_FILTER") == "1";
     const bool engine_cockpit = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_COCKPIT") == "1";
     const bool engine_tint = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_TINT") == "1";
+    const bool engine_predicate = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_PREDICATE") != "0";
     // The measuring pass's labels (Assist): cells by what moved them, the
     // classes of those the vectors moved, and those held back.
     std::array<std::size_t, 8> label_sources{};
@@ -5752,12 +5799,15 @@ int RunReplay(Harness& harness) {
         tuning.generated = 1;
         tuning.spare = false;
         tuning.fractions[0] = fraction;
-        tuning.engine_mode = assist ? FrameGenEngineMode::kAssist
+        tuning.engine_mode = lead              ? FrameGenEngineMode::kLead
+                             : assist          ? FrameGenEngineMode::kAssist
                              : engine != "off" ? FrameGenEngineMode::kObserve
                                                : FrameGenEngineMode::kOff;
+        tuning.hardware_level = hardware && assist;
         tuning.engine_filter = engine_filter;
         tuning.engine_cockpit = engine_cockpit;
         tuning.engine_tint = engine_tint;
+        tuning.engine_predicate = engine_predicate;
         if (before && *before + 1 != k) tuning.interval_ratio = 1.0f;
         // Observe's evidence (stage 3) on frames whose every view has vectors,
         // calibrating where the pair is consecutive frames (by the game's
@@ -8436,8 +8486,9 @@ struct EngineScene {
 // the pair before's (a frame late), objects' own movement alone, or the
 // first frame's for good (the game stopped writing them); each frame's own
 // bias of up to half a vector pixel (a jittered projection); none for the
-// left eye (a game that sends one eye's).
-enum class EngineFault { kNone, kZero, kNoise, kLate, kObjectOnly, kFrozen, kJitter, kOneEye };
+// left eye (a game that sends one eye's); pointing the other way (previous
+// minus current).
+enum class EngineFault { kNone, kZero, kNoise, kLate, kObjectOnly, kFrozen, kJitter, kOneEye, kReversed };
 
 double EngineHash(int a, int b) {
     std::uint32_t h = static_cast<std::uint32_t>(a) * 374761393u + static_cast<std::uint32_t>(b) * 668265263u;
@@ -8731,8 +8782,8 @@ EngineFrames RenderEngineFrames(const EngineScene& scene, bool truth = false) {
 // A run of a scene's frames on a backend of its own: each frame's color,
 // depth and (from `mode` kCapture) its vectors captured as a game releases
 // them (vectors in `gain`, with `fault`; y flipped from the frame the
-// convention locks with `flip_after_lock`, the right eye's alone with
-// `flip_one_eye`), then extrapolated `fraction` of
+// convention locks with `flip_after_lock`; the right eye's alone flipped, or
+// reversed with kReversed, with `flip_one_eye`), then extrapolated `fraction` of
 // an interval on (1: to the next frame's time, EngineFrames::next), the
 // filters' label rules with `filter` (FrameGenTuning::engine_filter), a
 // diagnostic view (tinted by the labels with `tint`); with `lock`, the
@@ -8758,6 +8809,8 @@ struct EngineRunOptions {
     std::vector<std::array<bool, 2>>* merged{nullptr};
     std::function<void(FrameGenTuning&, std::size_t)> before;
     std::function<void(FrameGenGpu&, std::size_t)> after;
+    // Per frame whether the vectors led it (FrameGenExecuteResult::lead).
+    std::vector<bool>* led{nullptr};
 };
 struct EngineRunResult {
     FrameGenEngineStatus status;
@@ -8868,6 +8921,9 @@ EngineRunResult RunEngineFrames(Harness& harness, const EngineFrames& frames, co
                     std::array<float, 4> raw{static_cast<float>(field[i][0] / gain[0]),
                                              static_cast<float>(field[i][1] / gain[1]), 0.0f, 1.0f};
                     if (fault == EngineFault::kZero) raw[0] = raw[1] = 0.0f;
+                    if (fault == EngineFault::kReversed && (e == 1 || !options.flip_one_eye)) {
+                        raw = {-raw[0], -raw[1], raw[2], raw[3]};
+                    }
                     if (fault == EngineFault::kNoise) {
                         raw[0] = static_cast<float>(0.05 * (EngineHash(static_cast<int>(i), frame * 2) - 0.5) / gain[0]);
                         raw[1] = static_cast<float>(0.05 * (EngineHash(static_cast<int>(i), frame * 2 + 1) - 0.5) / gain[1]);
@@ -8902,6 +8958,9 @@ EngineRunResult RunEngineFrames(Harness& harness, const EngineFrames& frames, co
         }
         if (options.merged) {
             options.merged->push_back({result.merged.size() == 2 && result.merged[0], result.merged.size() == 2 && result.merged[1]});
+        }
+        if (options.led) {
+            options.led->push_back(result.lead);
         }
         if (options.after) {
             Check(gpu->WaitIdle(), "engine observe: idle");
@@ -8943,7 +9002,10 @@ std::string DescribeEngineRun(const EngineRunResult& run) {
     }
     text += ", photometric: " + v.photometric + " (" + std::to_string(v.photometric_passed) + " in a row)";
     if (v.textured > 0.0) {
-        text += ", luma error engine/measured " + std::to_string((v.variant / v.textured) / std::max(v.measured_cost / std::max(v.with_measured, 1.0), 1e-9)) +
+        // Lead's evidence has no measured flow.
+        text += (v.with_measured > 0.0 ? ", luma error engine/measured " +
+                                             std::to_string((v.variant / v.textured) / std::max(v.measured_cost / v.with_measured, 1e-9))
+                                       : std::string(", luma error")) +
                 ", engine/head " + std::to_string(v.variant / std::max(v.zero, 1e-9));
     }
     return text;
@@ -9626,6 +9688,383 @@ void EngineAssistScenarios(Harness& harness) {
         std::cout << "D3D12 engine assist: tinted with the filters' label rules: " << DescribeEngineRun(run) << "; "
                   << differing << " frames differ from the untinted" << std::endl;
         Check(run.locked && differing > 0, "engine assist: the tint showed nothing");
+    }
+}
+
+// --- Engine motion vectors, stage 6 (Lead), on WARP --------------------------
+//
+// The still scene in Lead, the convention locked from the start
+// (FrameGenGpu::LockEngineForTest). Where every frame's verdict holds the
+// vectors back (they point the other way), the measured passes run in the
+// same submission and the generated frames are as without the vectors, byte
+// for byte. Where the verdicts let them be used, the measured passes are
+// skipped (their stamps about 0 ms against Assist's, the measured flow left
+// as an earlier frame had it) and the merged flow never reads that flow: it
+// is the merged flow of a run without the measured passes at all
+// (FrameGenTuning::engine_predicate false), bit for bit. The flow's level
+// holds at the hardware's through Lead, Assist and Lead again with the
+// hardware chosen in Quality (FrameGenTuning::hardware_level).
+
+// One frame of a run as Lead's scenarios read it: whether the vectors were
+// merged into both eyes, whether either eye's verdict held them back (every
+// cell's label says so), each eye's merged and measured flow, and the
+// measured passes' time (downsample, search and refine, both eyes).
+struct LeadFrame {
+    bool merged{false};
+    bool held{false};
+    std::array<std::vector<float>, 2> flow;
+    std::array<std::vector<float>, 2> measured;
+    std::array<std::vector<std::uint32_t>, 2> labels;
+    double measured_ms{0.0};
+};
+
+std::vector<LeadFrame> TraceLeadFrames(Harness& harness, const EngineFrames& frames, EngineRunOptions options,
+                                       EngineRunResult* result = nullptr) {
+    std::vector<LeadFrame> trace(kEngineFrames);
+    std::vector<std::array<bool, 2>> merged;
+    options.lock = true;
+    options.merged = &merged;
+    options.after = [&](FrameGenGpu& gpu, std::size_t k) {
+        if (k == 0) {
+            gpu.SetProfiling(true); // from the next frame on
+            return;
+        }
+        LeadFrame& frame = trace[k];
+        const std::vector<double> times = gpu.PassMilliseconds();
+        for (const FrameGenPass pass : {FrameGenPass::kDownsample, FrameGenPass::kSearch, FrameGenPass::kRefine}) {
+            frame.measured_ms += static_cast<std::size_t>(pass) < times.size() ? times[static_cast<std::size_t>(pass)] : 0.0;
+        }
+        frame.merged = merged[k][0] && merged[k][1];
+        for (int e = 0; e < 2 && frame.merged; ++e) {
+            EngineCells cells;
+            Check(ReadEngineCells(gpu, e, cells), "engine lead: cells read");
+            for (const std::uint32_t label : cells.labels) frame.held = frame.held || (label & kFrameGenEngineLabelInvalid);
+            frame.flow[e] = std::move(cells.flow);
+            frame.measured[e] = std::move(cells.measured);
+            frame.labels[e] = std::move(cells.labels);
+        }
+    };
+    const EngineRunResult run = RunEngineFrames(harness, frames, options);
+    if (result) *result = run;
+    return trace;
+}
+
+void EngineLeadScenarios(Harness& harness) {
+    const EngineFrames still = RenderEngineFrames(EngineScene{});
+    std::vector<std::array<Pixels, 2>> off;
+    RunEngineFrames(harness, still, {.mode = FrameGenEngineMode::kOff, .outputs = &off});
+
+    // Every frame's verdict holding the vectors back: the measured flow
+    // copied bit for bit, the generated frames mk1's.
+    {
+        std::vector<std::array<Pixels, 2>> reversed;
+        std::vector<bool> led;
+        EngineRunResult run;
+        const std::vector<LeadFrame> trace = TraceLeadFrames(
+            harness, still, {.mode = FrameGenEngineMode::kLead, .fault = EngineFault::kReversed, .outputs = &reversed, .led = &led},
+            &run);
+        std::size_t merged = 0, held = 0, copied = 0, frames_led = 0;
+        for (std::size_t k = 0; k < trace.size(); ++k) {
+            if (!trace[k].merged) continue;
+            ++merged;
+            held += trace[k].held ? 1 : 0;
+            copied += trace[k].held && trace[k].flow == trace[k].measured ? 1 : 0;
+            frames_led += led[k] ? 1 : 0;
+        }
+        std::size_t differing = 0;
+        for (std::size_t k = 0; k < off.size() && k < reversed.size(); ++k) {
+            for (int e = 0; e < 2; ++e) differing += off[k][e] == reversed[k][e] ? 0 : 1;
+        }
+        std::cout << "D3D12 engine lead: reversed vectors: " << DescribeEngineRun(run) << "; " << merged << " frames merged, "
+                  << frames_led << " led, " << held << " held back, " << copied << " the measured flow bit for bit; "
+                  << differing << " generated frames differ from mk1's" << std::endl;
+        Check(merged > kEngineFrames / 2 && frames_led == merged && held == merged && copied == merged && differing == 0,
+              "engine lead: frames whose verdict holds the vectors back are not mk1's (" + std::to_string(held) + " held of " +
+                  std::to_string(merged) + ", " + std::to_string(copied) + " copied, " + std::to_string(differing) +
+                  " frames differ)");
+    }
+
+    // The right eye's vectors reversed, the left eye's right: the left eye's
+    // own verdict lets them be used, the right eye's holds both back (the
+    // predicate is the frame's, both eyes'), so the left eye is measured as
+    // well: every cell of both eyes held back, each eye's merged flow its
+    // measured flow, the left eye's measured anew each frame (the head
+    // moves), the generated frames mk1's.
+    {
+        std::vector<std::array<Pixels, 2>> one;
+        std::vector<bool> led;
+        EngineRunResult run;
+        const std::vector<LeadFrame> trace = TraceLeadFrames(harness, still,
+                                                             {.mode = FrameGenEngineMode::kLead,
+                                                              .fault = EngineFault::kReversed,
+                                                              .flip_one_eye = true,
+                                                              .outputs = &one,
+                                                              .led = &led},
+                                                             &run);
+        std::size_t merged = 0, frames_led = 0, held = 0, copied = 0, pairs = 0, remeasured = 0;
+        for (std::size_t k = 0; k < trace.size(); ++k) {
+            const LeadFrame& frame = trace[k];
+            if (!frame.merged) continue;
+            ++merged;
+            frames_led += led[k] ? 1 : 0;
+            bool both = true;
+            for (const auto& labels : frame.labels) {
+                for (const std::uint32_t label : labels) both = both && (label & kFrameGenEngineLabelInvalid);
+            }
+            held += both ? 1 : 0;
+            copied += both && frame.flow == frame.measured ? 1 : 0;
+            if (k > 0 && trace[k - 1].merged) {
+                ++pairs;
+                remeasured += frame.measured[0] != trace[k - 1].measured[0] ? 1 : 0;
+            }
+        }
+        std::size_t differing = 0;
+        for (std::size_t k = 0; k < off.size() && k < one.size(); ++k) {
+            for (int e = 0; e < 2; ++e) differing += off[k][e] == one[k][e] ? 0 : 1;
+        }
+        // The left eye's own verdicts let the vectors be used.
+        const FrameGenEngineValidation& v = run.status.validation;
+        const std::uint64_t own_valid = v.verdicts - v.invalid;
+        std::cout << "D3D12 engine lead: the right eye's vectors reversed: " << DescribeEngineRun(run) << "; " << merged
+                  << " frames merged, " << frames_led << " led, " << held << " held back in both eyes, " << copied
+                  << " the measured flow bit for bit, the left eye measured anew on " << remeasured << " of " << pairs
+                  << " frames after one; " << differing << " generated frames differ from mk1's" << std::endl;
+        Check(merged > kEngineFrames / 2 && frames_led == merged && held == merged && copied == merged && pairs > 10 &&
+                  remeasured == pairs && own_valid > merged / 2 && differing == 0,
+              "engine lead: the right eye's verdict did not have the left eye measured (" + std::to_string(held) +
+                  " held of " + std::to_string(merged) + ", " + std::to_string(remeasured) + " of " + std::to_string(pairs) +
+                  " measured anew, " + std::to_string(own_valid) + " verdicts valid, " + std::to_string(differing) +
+                  " frames differ)");
+    }
+
+    // The verdicts letting the vectors be used: the measured passes skipped
+    // and their flow never read.
+    {
+        EngineRunResult run;
+        const std::vector<LeadFrame> lead = TraceLeadFrames(harness, still, {.mode = FrameGenEngineMode::kLead}, &run);
+        const std::vector<LeadFrame> assist = TraceLeadFrames(harness, still, {.mode = FrameGenEngineMode::kAssist});
+        const std::vector<LeadFrame> unmeasured = TraceLeadFrames(
+            harness, still,
+            {.mode = FrameGenEngineMode::kLead,
+             .before = [](FrameGenTuning& tuning, std::size_t) { tuning.engine_predicate = false; }});
+        double lead_ms = 0.0, assist_ms = 0.0, unmeasured_ms = 0.0;
+        std::size_t valid = 0, assisted = 0, pairs = 0, kept = 0, compared = 0, same = 0;
+        bool all_valid = true;
+        for (std::size_t k = 1; k < lead.size(); ++k) {
+            if (assist[k].merged) {
+                assist_ms += assist[k].measured_ms;
+                ++assisted;
+            }
+            unmeasured_ms += unmeasured[k].merged ? unmeasured[k].measured_ms : 0.0;
+            if (!lead[k].merged || lead[k].held) continue;
+            ++valid;
+            lead_ms += lead[k].measured_ms;
+            // Skipped: the measured flow as the frame before left it.
+            if (lead[k - 1].merged && !lead[k - 1].held) {
+                ++pairs;
+                kept += lead[k].measured == lead[k - 1].measured ? 1 : 0;
+            }
+            // Never read: the merged flow of the run without measured passes,
+            // up to a frame either run held the vectors back in.
+            all_valid = all_valid && unmeasured[k].merged && !unmeasured[k].held;
+            if (all_valid) {
+                ++compared;
+                same += lead[k].flow == unmeasured[k].flow ? 1 : 0;
+            }
+        }
+        lead_ms /= std::max<std::size_t>(valid, 1);
+        assist_ms /= std::max<std::size_t>(assisted, 1);
+        std::cout << "D3D12 engine lead: " << DescribeEngineRun(run) << "; " << valid << " frames led with a verdict letting "
+                  << "the vectors be used: the measured passes " << lead_ms << " ms (Assist " << assist_ms << " ms), "
+                  << kept << " of " << pairs << " frames after one such left the measured flow as it was, " << same << " of "
+                  << compared << " merged flows as without measured passes (those " << unmeasured_ms << " ms in all)"
+                  << std::endl;
+        Check(valid > kEngineFrames / 2 && pairs > 10 && kept == pairs,
+              "engine lead: the measured passes ran where the verdict let the vectors be used (" + std::to_string(kept) +
+                  " of " + std::to_string(pairs) + " frames kept the measured flow)");
+        Check(assist_ms > 0.0 && lead_ms <= 0.1 * assist_ms,
+              "engine lead: the skipped passes' stamps are not about 0 ms (" + std::to_string(lead_ms) + " ms against " +
+                  std::to_string(assist_ms) + ")");
+        Check(compared > 10 && same == compared && unmeasured_ms == 0.0,
+              "engine lead: the merged flow read the measured flow it skipped (" + std::to_string(same) + " of " +
+                  std::to_string(compared) + " as without it)");
+    }
+
+    // Without measured passes at all, every frame held back: each cell
+    // searched from no motion (or none), labelled held back, never the
+    // stale measured flow.
+    {
+        const std::vector<LeadFrame> trace = TraceLeadFrames(
+            harness, still,
+            {.mode = FrameGenEngineMode::kLead,
+             .fault = EngineFault::kReversed,
+             .before = [](FrameGenTuning& tuning, std::size_t) { tuning.engine_predicate = false; }});
+        std::size_t held = 0, searched = 0, cells = 0, copies = 0;
+        for (const LeadFrame& frame : trace) {
+            if (!frame.merged) continue;
+            held += frame.held ? 1 : 0;
+            copies += frame.flow == frame.measured ? 1 : 0;
+            for (const auto& labels : frame.labels) {
+                for (const std::uint32_t label : labels) {
+                    ++cells;
+                    const std::uint32_t source = label & kFrameGenEngineLabelSource;
+                    searched += (label & kFrameGenEngineLabelInvalid) &&
+                                        (source == kFrameGenEngineLabelZero || source == kFrameGenEngineLabelSearched)
+                                    ? 1
+                                    : 0;
+                }
+            }
+        }
+        std::cout << "D3D12 engine lead: no measured passes, reversed vectors: " << held << " frames held back, " << searched
+                  << " of " << cells << " cells searched, " << copies << " frames the measured flow" << std::endl;
+        Check(held > kEngineFrames / 2 && cells > 0 && searched == cells && copies == 0,
+              "engine lead: without measured passes, a frame held back was not searched (" + std::to_string(searched) +
+                  " of " + std::to_string(cells) + " cells)");
+    }
+
+    // The hardware chosen in Quality (WARP has none: the shader cores
+    // measure): Lead, Assist for ten frames, Lead again, the flow at the
+    // hardware's level throughout, its filtered flow never made anew.
+    {
+        std::vector<bool> led;
+        std::vector<std::array<bool, 2>> merged;
+        bool sized = true;
+        const EngineRunResult run = RunEngineFrames(
+            harness, still,
+            {.mode = FrameGenEngineMode::kLead,
+             .lock = true,
+             .merged = &merged,
+             .before =
+                 [](FrameGenTuning& tuning, std::size_t k) {
+                     tuning.hardware_flow = tuning.hardware_level = true;
+                     tuning.quality = FrameGenFlowQuality::kQuality;
+                     tuning.engine_mode = k >= 15 && k < 25 ? FrameGenEngineMode::kAssist : FrameGenEngineMode::kLead;
+                 },
+             .after =
+                 [&](FrameGenGpu& gpu, std::size_t k) {
+                     for (int e = 0; e < 2 && k > 0; ++e) {
+                         std::vector<float> values;
+                         FrameGenExtent extent{};
+                         std::uint32_t channels = 0;
+                         sized = sized && gpu.ReadTexture(e, {FrameGenTextureKind::kFilteredNewest, kEngineLevel}, values,
+                                                          extent, channels) &&
+                                 extent.width == kEngineCells && extent.height == kEngineCells;
+                         if (merged[k][e]) {
+                             sized = sized && gpu.ReadTexture(e, {FrameGenTextureKind::kEngineFlow, 0}, values, extent, channels) &&
+                                     extent.width == kEngineCells;
+                         }
+                     }
+                 },
+             .led = &led});
+        std::size_t led_before = 0, assisted = 0, led_after = 0;
+        for (std::size_t k = 0; k < led.size(); ++k) {
+            led_before += k < 15 && led[k] ? 1 : 0;
+            assisted += k >= 15 && k < 25 && merged[k][0] && !led[k] ? 1 : 0;
+            led_after += k >= 25 && led[k] ? 1 : 0;
+        }
+        std::cout << "D3D12 engine lead: Lead, Assist and Lead with the hardware chosen in Quality: " << DescribeEngineRun(run)
+                  << "; " << led_before << " frames led, " << assisted << " assisted, " << led_after << " led again, the flow "
+                  << (sized ? "at level 3 throughout" : "not at level 3") << std::endl;
+        Check(led_before > 5 && assisted == 10 && led_after > 10 && sized,
+              "engine lead: Lead, Assist and Lead with the hardware chosen in Quality did not keep the flow at level 3");
+    }
+
+    // The hardware chosen in Quality, every frame's verdict holding the
+    // vectors back: the predicated shader passes measure at the level the
+    // hardware pins (3, not Quality's 2), and the generated frames are mk1's
+    // at that level byte for byte: measured on the shader cores where the
+    // vectors led (the hardware idle), by the hardware (where there is one:
+    // WARP has none) before their evidence was first taken.
+    {
+        auto pinned = [](FrameGenTuning& tuning, std::size_t) {
+            tuning.hardware_flow = tuning.hardware_level = true;
+            tuning.quality = FrameGenFlowQuality::kQuality;
+        };
+        std::vector<std::array<Pixels, 2>> mk1, reversed;
+        std::vector<bool> led;
+        EngineRunResult run;
+        // TraceLeadFrames reads the cells at level 3 (ReadEngineCells).
+        const std::vector<LeadFrame> trace = TraceLeadFrames(harness, still,
+                                                             {.mode = FrameGenEngineMode::kLead,
+                                                              .fault = EngineFault::kReversed,
+                                                              .outputs = &reversed,
+                                                              .before = pinned,
+                                                              .led = &led},
+                                                             &run);
+        RunEngineFrames(harness, still,
+                        {.mode = FrameGenEngineMode::kOff,
+                         .outputs = &mk1,
+                         .before = [&](FrameGenTuning& tuning, std::size_t k) {
+                             pinned(tuning, k);
+                             tuning.hardware_flow = k >= led.size() || !led[k];
+                         }});
+        std::size_t merged = 0, frames_led = 0, held = 0, copied = 0;
+        for (std::size_t k = 0; k < trace.size(); ++k) {
+            if (!trace[k].merged) continue;
+            ++merged;
+            frames_led += led[k] ? 1 : 0;
+            held += trace[k].held ? 1 : 0;
+            copied += trace[k].held && trace[k].flow == trace[k].measured ? 1 : 0;
+        }
+        std::size_t differing = 0;
+        for (std::size_t k = 0; k < mk1.size() && k < reversed.size(); ++k) {
+            for (int e = 0; e < 2; ++e) differing += mk1[k][e] == reversed[k][e] ? 0 : 1;
+        }
+        std::cout << "D3D12 engine lead: reversed vectors, the hardware chosen in Quality: " << DescribeEngineRun(run) << "; "
+                  << merged << " frames merged, " << frames_led << " led, " << held << " held back, " << copied
+                  << " the measured flow bit for bit at level 3; " << differing
+                  << " generated frames differ from mk1's at the pinned level" << std::endl;
+        Check(merged > kEngineFrames / 2 && frames_led == merged && held == merged && copied == merged && differing == 0,
+              "engine lead: with the hardware chosen in Quality, frames held back are not mk1's at level 3 (" +
+                  std::to_string(held) + " held of " + std::to_string(merged) + ", " + std::to_string(differing) +
+                  " frames differ)");
+    }
+
+    // The right eye's verdict and predicate failing to be made the first
+    // frame the vectors would lead, after frames at Assist (as a session in
+    // Lead runs until its verdicts let them lead; reversed vectors, so every
+    // verdict holds them back and Assist's frames are mk1's): neither eye
+    // leads or merges them that frame or after, every generated frame mk1's
+    // byte for byte, noted once.
+    {
+        static constexpr std::size_t kLeadFrom = 10; // evidence is taken from frame 6
+        std::vector<std::array<Pixels, 2>> failed;
+        std::vector<std::array<bool, 2>> merged;
+        std::vector<bool> led;
+        const EngineRunResult run = RunEngineFrames(
+            harness, still,
+            {.mode = FrameGenEngineMode::kLead,
+             .fault = EngineFault::kReversed,
+             .lock = true,
+             .outputs = &failed,
+             .merged = &merged,
+             .before =
+                 [](FrameGenTuning& tuning, std::size_t k) {
+                     tuning.engine_mode = k < kLeadFrom ? FrameGenEngineMode::kAssist : FrameGenEngineMode::kLead;
+                 },
+             .after =
+                 [](FrameGenGpu& gpu, std::size_t k) {
+                     // The right eye's verdict (the left eye's is made first).
+                     if (k + 1 == kLeadFrom) gpu.FailAllocationForTest(2);
+                 },
+             .led = &led});
+        std::size_t differing = 0, used = 0;
+        for (std::size_t k = 0; k < off.size() && k < failed.size(); ++k) {
+            for (int e = 0; e < 2; ++e) differing += off[k][e] == failed[k][e] ? 0 : 1;
+            used += k >= kLeadFrom && (merged[k][0] || merged[k][1] || led[k]) ? 1 : 0;
+        }
+        const bool assisted = merged.size() == kEngineFrames && merged[kLeadFrom - 1][0] && merged[kLeadFrom - 1][1];
+        const auto notes = std::count_if(run.status.notes.begin(), run.status.notes.end(), [](const std::string& note) {
+            return note.find("the predicate the vectors lead with could not be made") != std::string::npos;
+        });
+        std::cout << "D3D12 engine lead: the right eye's predicate failed: " << DescribeEngineRun(run) << "; "
+                  << (assisted ? "merged" : "not merged") << " at Assist before, " << used
+                  << " frames used the vectors from the switch, " << differing << " frames differ, " << notes << " notes"
+                  << std::endl;
+        Check(failed.size() == off.size() && assisted && used == 0 && differing == 0 && notes == 1,
+              "engine lead: a predicate that cannot be made did not leave both eyes as without the vectors (" +
+                  std::to_string(used) + " frames used them, " + std::to_string(differing) + " frames differ, " +
+                  std::to_string(notes) + " notes)");
     }
 }
 

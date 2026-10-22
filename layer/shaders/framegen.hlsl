@@ -3821,6 +3821,8 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
 FG_BIND(0) Texture2D<float4> g_partials : register(t0);
 FG_BIND(1) Texture2D<uint4> g_census : register(t1);
 FG_BIND(2) Texture2D<uint4> g_census_previous : register(t2);
+FG_BIND(3) Texture2D<float4> g_params_view : register(t3);
+Texture2D<float4> g_params_other : register(t5);
 FG_BIND(4) FG_FORMAT("rgba32f") RWTexture2D<float4> g_params : register(u0);
 FG_BIND(5) FG_FORMAT("rgba32f") RWTexture2D<float4> g_evidence : register(u1);
 
@@ -3836,8 +3838,13 @@ FG_BIND(5) FG_FORMAT("rgba32f") RWTexture2D<float4> g_evidence : register(u1);
 //     texel 0's z with the cockpit's inlier share in its w, the photometric
 //     ratios with the head's mean movement and the stale test (texels 2 and
 //     3), the verdict alone in texel 4 (its first 8 bytes are zero exactly
-//     when the vectors may be used: what a predicate copies); into u1 the
-//     sums themselves, those of kinds that did not run zero.
+//     when the vectors may be used); into u1 the sums themselves, those of
+//     kinds that did not run zero;
+//   stage 2 (Lead, stage 6), after every view's stage 1: the frame's verdict
+//     for both eyes (t3's texel 0 z, this view's, and t5's, the other
+//     view's: either holds both back) into u0's texel 0 x (kEngineVerdict),
+//     zeros after it: its first 8 bytes are zero exactly when both views'
+//     vectors may be used, what the view's predicate copies.
 // The first stage sums the cockpit fit's texels alone. The plan dispatches
 // one group's worth of threads (8 x 8); the group is 256 threads, 8 a texel,
 // each summing every eighth group's texel with 16 loads in flight at a time
@@ -3909,6 +3916,12 @@ void CSMain(uint3 thread : SV_GroupThreadID, uint index : SV_GroupIndex) {
     }
     GroupMemoryBarrierWithGroupSync();
     if (index != 0u) {
+        return;
+    }
+    // Stage 2 sums nothing (no partials bound).
+    if (stage == 2u) {
+        const uint reasons = uint(g_params_view.Load(int3(0, 0, 0)).z) | uint(g_params_other.Load(int3(0, 0, 0)).z);
+        g_params[uint2(0u, 0u)] = float4(float(reasons), 0.0, 0.0, 0.0);
         return;
     }
     const uint camera = (g.options.x >> 12) & 3u;
@@ -4227,7 +4240,9 @@ FG_BIND(5) FG_FORMAT("r32ui") RWTexture2D<uint> g_labels : register(u1);
 //     to three quarters, 40% beyond);
 //   Lead (2, stage 6): beats no motion by that much; else the step-halving
 //     search from the better of it and no motion moves the cell (content
-//     without vectors: screens, propellers, clouds).
+//     without vectors: screens, propellers, clouds). With no measured flow
+//     at all (4, research: t4 unbound), every cell of a frame whose verdict
+//     holds the vectors back is searched from no motion, labelled held back.
 // A candidate taken is polished, a texel across and to the sub-texel, only
 // where that matches clearly better (FG_ENGINE_POLISH) within a texel of it
 // and the previous frame saw all of the block where the candidate puts it
@@ -4236,6 +4251,7 @@ FG_BIND(5) FG_FORMAT("r32ui") RWTexture2D<uint> g_labels : register(u1);
 // block's cost of no motion, -1 where the previous frame did not see it, as
 // FG_PASS_REFINE's.
 #define FG_ENGINE_MERGE_LEAD 2u
+#define FG_ENGINE_MERGE_UNMEASURED 4u
 #define FG_ENGINE_SPREAD_PIXELS 2.0
 #define FG_ENGINE_SPREAD_SHARE 0.3
 #define FG_ENGINE_SPREAD_COST 0.02
@@ -4262,7 +4278,9 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         return;
     }
     const float4 measured = g_measured.Load(int3(id.xy, 0));
-    if (g_params.Load(int3(0, 0, 0)).z != 0.0 || (uint(g_info.Load(int3(id.xy, 0)).y) & FG_ENGINE_FLAG_HELD) != 0u) {
+    const bool held =
+        g_params.Load(int3(0, 0, 0)).z != 0.0 || (uint(g_info.Load(int3(id.xy, 0)).y) & FG_ENGINE_FLAG_HELD) != 0u;
+    if (held && (g.options.x & FG_ENGINE_MERGE_UNMEASURED) == 0u) {
         g_flow[id.xy] = measured;
         g_labels[id.xy] = FG_ENGINE_LABEL_MEASURED | FG_ENGINE_LABEL_INVALID;
         return;
@@ -4317,13 +4335,13 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
             kind = (kinds >> 2) & 3u;
         }
     }
-    const bool candidate = source == FG_ENGINE_LABEL_NEAR || source == FG_ENGINE_LABEL_FAR;
+    const bool candidate = !held && (source == FG_ENGINE_LABEL_NEAR || source == FG_ENGINE_LABEL_FAR);
     const float trust = info.z;
     const float alpha = trust < 0.25 ? 0.0 : trust > 0.75 ? 0.4 : 0.25;
     const float beta = trust < 0.25 ? 0.0 : 0.01;
     bool taken = false;
     float4 result = measured;
-    if (g.options.x == FG_ENGINE_MERGE_LEAD) {
+    if ((g.options.x & FG_ENGINE_MERGE_LEAD) != 0u) {
         const float zero_cost = BlockCost(block, int2(0, 0));
         taken = candidate && engine_cost <= zero_cost + beta;
         if (!taken) {
@@ -4368,7 +4386,7 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         result = float4(v, chosen, ZeroCost(block));
     }
     g_flow[id.xy] = result;
-    g_labels[id.xy] = source | (kind << 3) | (textured ? FG_ENGINE_LABEL_TEXTURED : 0u);
+    g_labels[id.xy] = source | (kind << 3) | (textured ? FG_ENGINE_LABEL_TEXTURED : 0u) | (held ? FG_ENGINE_LABEL_INVALID : 0u);
 }
 #endif
 #endif

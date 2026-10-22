@@ -75,6 +75,9 @@ constexpr std::size_t kMotionNotes = 64;
 // 512 bytes on).
 constexpr UINT64 kEngineViewReadback = 2048;
 constexpr UINT64 kEngineEvidenceOffset = 512; // D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT
+// Stage 6: each view's predicate buffer, kEngineVerdict's one texel copied
+// to its start (a row of D3D12_TEXTURE_DATA_PITCH_ALIGNMENT).
+constexpr UINT64 kEnginePredicateBytes = 256;
 // Stage 4: views' world fits read back per frame slot (four: quad views'),
 // each at its own aligned offset.
 constexpr std::size_t kWorldFitViews = 4;
@@ -254,6 +257,13 @@ struct ViewResources {
     std::array<Texture, 2> engine_tiles;
     std::uint8_t engine_tiles_next{0};
     bool engine_tiles_valid{false};
+    // Stage 6 (made by Execute for the first frame the vectors lead, before
+    // any view of it is planned: EnsureEngineLead): the frame's verdict for
+    // both eyes (kEngineVerdict), and the predicate of the measured passes
+    // it is copied into (a buffer of kEnginePredicateBytes; buffers decay to
+    // COMMON after each submission). Neither depends on the flow's level.
+    Texture engine_verdict;
+    Texture engine_predicate;
     // Optical flow hardware (FrameGenTuning::hardware_flow): its inputs,
     // its vectors and its session for this view.
     Texture hardware_newest;
@@ -293,6 +303,12 @@ struct ViewResources {
     bool raw_matched{false};      // ... and its raw images
 };
 
+// Where RecordPlan stops: at the plan's end, right before kFlowUnpack (the
+// optical flow hardware's vectors come next), or right before the first
+// dispatch reading the other view's verdict on the game's vectors (Lead's
+// predicate, kEngineConvert): every view's evidence is recorded first.
+enum class RecordUntil { kEnd, kHardware, kVerdicts };
+
 // One view's recording: a plan recorded up to `next`, resumable after the
 // optical flow hardware and after every view's verdict on the game's vectors.
 struct ViewRecording {
@@ -309,10 +325,12 @@ struct ViewRecording {
     // The view's engine motion vectors were captured for this frame (paired
     // with its color capture): what an analysis of the frame reads. With
     // `evidence`, the plan takes their evidence (stage 3); with `assist`, it
-    // merges them into the flow too and writes the tiles (stage 5).
+    // merges them into the flow too and writes the tiles (stage 5); with
+    // `lead`, they lead (stage 6, FrameGenEngineLeads).
     bool engine{false};
     bool evidence{false};
     bool assist{false};
+    bool lead{false};
 };
 
 struct FrameSlot {
@@ -2792,6 +2810,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         result.synthesized.assign(views.size(), false);
         result.depth.assign(views.size(), false);
         result.merged.assign(views.size(), false);
+        result.lead = false;
         HRESULT hr = DeviceRemovedReason();
         if (FAILED(hr)) {
             error = Failure("D3D12 device", hr);
@@ -2873,41 +2892,6 @@ class D3D12FrameGen final : public FrameGenGpu {
             effective_tuning.delta_scale = delta_calibration_.Scale();
         }
         effective_tuning.world_sky = tuning.world_sky || delta_sky_;
-        // Several views on Frame Generation's own queue match on one atlas;
-        // otherwise (one view, matching at release on the game's queue, or
-        // the atlas refused) a session per view, its hints following that
-        // view's motion.
-        atlas_in_use_ = effective_tuning.hardware_flow && atlas_enabled_ && !atlas_failed_ && separate_ && views.size() >= 2;
-        for (std::size_t i = 0; i < views.size() && effective_tuning.hardware_flow; ++i) {
-            effective_tuning.hardware_flow = EnsureHardware(views_[i], i, views[i], tuning, !atlas_in_use_);
-        }
-        if (atlas_in_use_ && effective_tuning.hardware_flow && !EnsureAtlas(views, tuning)) {
-            atlas_in_use_ = false;
-            if (atlas_busy_) {
-                // The GPU did not finish before an atlas switch: no refusal.
-                // This frame measures on the shader cores; the next one
-                // tries the switch again.
-                atlas_busy_ = false;
-                effective_tuning.hardware_flow = false;
-            } else {
-                atlas_failed_ = !hardware_failed_;
-                effective_tuning.hardware_flow = !hardware_failed_;
-                for (std::size_t i = 0; i < views.size() && effective_tuning.hardware_flow; ++i) {
-                    effective_tuning.hardware_flow = EnsureHardware(views_[i], i, views[i], tuning, true);
-                }
-            }
-        }
-        // Captures start matching on the hardware while it is in use.
-        hardware_active_ = effective_tuning.hardware_flow;
-        // Measured on the shader cores meanwhile (Interpolate in Dynamic, or
-        // the hardware not ready): the hardware's last vectors are from an
-        // earlier stretch of frames, so its next match starts unhinted.
-        if (!effective_tuning.hardware_flow) {
-            for (auto& view : views_) view.hardware_fresh = true;
-#ifdef DEPTHXR_NVOF
-            atlas_.fresh = true;
-#endif
-        }
         bool ok = true;
         // A game that fills only one eye's depth (FrameGenDepthEyes): that
         // eye takes the other's, moved to its view, before the trust pass
@@ -2958,11 +2942,67 @@ class D3D12FrameGen final : public FrameGenGpu {
                        view.engine_pair[newest].Matches(views[i].source) && views[i].request.depth && view.depth_ready &&
                        validator_.Usable() && view.depth_generation == validator_.Generation();
         }
+        // Stage 6: the game's vectors lead the frame where every view's
+        // evidence is taken in Lead with the convention locked
+        // (FrameGenEngineLeads): the measured passes are predicated on the
+        // frame's verdict, and the optical flow hardware stays idle (its
+        // sessions kept for frames measured without the vectors). The flow
+        // ends at its level all the same (FrameGenTuning::hardware_level).
+        bool lead = evidence && FrameGenEngineModeFor(effective_tuning) == FrameGenEngineMode::kLead &&
+                    effective_tuning.engine_locked;
+        // Every view's verdict and predicate exist before any view is
+        // planned: one that cannot be made leaves the vectors out of both
+        // eyes' plans (engine_failed_, which BeginView reads), never one eye
+        // led on the other's verdict of a frame before.
+        for (std::size_t i = 0; i < views.size() && lead; ++i) {
+            lead = EnsureEngineLead(views_[i]);
+        }
+        evidence = evidence && !engine_failed_;
+        if (lead) {
+            effective_tuning.hardware_flow = false;
+        }
+        // Several views on Frame Generation's own queue match on one atlas;
+        // otherwise (one view, matching at release on the game's queue, or
+        // the atlas refused) a session per view, its hints following that
+        // view's motion.
+        atlas_in_use_ = effective_tuning.hardware_flow && atlas_enabled_ && !atlas_failed_ && separate_ && views.size() >= 2;
+        for (std::size_t i = 0; i < views.size() && effective_tuning.hardware_flow; ++i) {
+            effective_tuning.hardware_flow = EnsureHardware(views_[i], i, views[i], tuning, !atlas_in_use_);
+        }
+        if (atlas_in_use_ && effective_tuning.hardware_flow && !EnsureAtlas(views, tuning)) {
+            atlas_in_use_ = false;
+            if (atlas_busy_) {
+                // The GPU did not finish before an atlas switch: no refusal.
+                // This frame measures on the shader cores; the next one
+                // tries the switch again.
+                atlas_busy_ = false;
+                effective_tuning.hardware_flow = false;
+            } else {
+                atlas_failed_ = !hardware_failed_;
+                effective_tuning.hardware_flow = !hardware_failed_;
+                for (std::size_t i = 0; i < views.size() && effective_tuning.hardware_flow; ++i) {
+                    effective_tuning.hardware_flow = EnsureHardware(views_[i], i, views[i], tuning, true);
+                }
+            }
+        }
+        // Captures start matching on the hardware while it is in use.
+        hardware_active_ = effective_tuning.hardware_flow;
+        // Measured on the shader cores meanwhile (Interpolate in Dynamic, the
+        // hardware not ready, or the game's vectors leading): the hardware's
+        // last vectors are from an earlier stretch of frames, so its next
+        // match starts unhinted.
+        if (!effective_tuning.hardware_flow) {
+            for (auto& view : views_) view.hardware_fresh = true;
+#ifdef DEPTHXR_NVOF
+            atlas_.fresh = true;
+#endif
+        }
         // Every view up to the optical flow hardware, the hardware for all of
         // them, then the rest (without hardware flow, everything at once).
         // The game's vectors (stage 5) are merged in after every view's
         // verdict on them: each eye's holds the other's back too
-        // (kEngineConvert reads it), so the eyes take them or not together.
+        // (kEngineConvert, and in Lead the predicate, read it), so the eyes
+        // take them or not together.
         std::vector<ViewRecording> recordings(views.size());
         bool hardware = false;
         for (std::size_t i = 0; i < views.size() && ok; ++i) {
@@ -2978,18 +3018,18 @@ class D3D12FrameGen final : public FrameGenGpu {
             ok = RecordDump(views, recordings, dump, error);
         }
         for (std::size_t i = 0; i < views.size() && ok; ++i) {
-            ok = RecordPlan(recordings[i], effective_tuning.hardware_flow ? FrameGenPass::kFlowUnpack : FrameGenPass::kEngineConvert,
+            ok = RecordPlan(recordings[i], effective_tuning.hardware_flow ? RecordUntil::kHardware : RecordUntil::kVerdicts,
                             error);
             hardware = hardware || recordings[i].waits_for_hardware;
         }
         if (ok && hardware) {
             ok = RunHardwareFlow(recordings, slot, slot_index, error);
             for (std::size_t i = 0; i < views.size() && ok; ++i) {
-                ok = RecordPlan(recordings[i], FrameGenPass::kEngineConvert, error);
+                ok = RecordPlan(recordings[i], RecordUntil::kVerdicts, error);
             }
         }
         for (std::size_t i = 0; i < views.size() && ok; ++i) {
-            ok = RecordPlan(recordings[i], std::nullopt, error);
+            ok = RecordPlan(recordings[i], RecordUntil::kEnd, error);
         }
         // Quad views: each eye's periphery moves content as its focus view
         // does where the eye's image blends the two.
@@ -3146,6 +3186,8 @@ class D3D12FrameGen final : public FrameGenGpu {
             view.engine_tiles_valid = recordings[i].assist;
             result.merged[i] = recordings[i].assist;
         }
+        result.lead = lead && std::all_of(recordings.begin(), recordings.end(),
+                                           [](const ViewRecording& recording) { return recording.lead; });
         if (effective_tuning.analyze_only) {
             // What Synthesize writes this real frame's generated frames from.
             AnalyzedFrame frame;
@@ -3734,7 +3776,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         ViewResources& view = *recording.view;
         view.bound_newest = analyzed.newest;
         view.bound_previous = analyzed.previous;
-        const bool ok = RecordPlan(recording, std::nullopt, error);
+        const bool ok = RecordPlan(recording, RecordUntil::kEnd, error);
         view.bound_newest = view.bound_previous = -1;
         return ok;
     }
@@ -4227,7 +4269,7 @@ class D3D12FrameGen final : public FrameGenGpu {
                               &view.world_partials, &view.world_params, &view.shading_rate, &view.trust_tiles,
                               &view.trust_votes, &view.depth_scales, &view.depth_scale_raw, &view.depth_scale_votes,
                               &view.engine_partials, &view.engine_params, &view.engine_evidence, &view.engine_candidate,
-                              &view.engine_info, &view.engine_flow}) {
+                              &view.engine_info, &view.engine_flow, &view.engine_verdict, &view.engine_predicate}) {
             visit(*texture);
         }
     }
@@ -5203,6 +5245,7 @@ class D3D12FrameGen final : public FrameGenGpu {
             view.engine_tiles_valid = false;
         };
         auto reset_engine = [&view, &reset_assist] {
+            view.engine_verdict = view.engine_predicate = {};
             view.engine_raw = {};
             view.engine_pair = {};
             view.engine_read = {};
@@ -5289,6 +5332,45 @@ class D3D12FrameGen final : public FrameGenGpu {
         }
         setup.complete = true;
         return true;
+    }
+
+    // Stage 6: the view's verdict for both eyes and the predicate it is
+    // copied into, made the first frame the vectors lead it (a session
+    // switched to Lead at a config reload, or held at Assist until then),
+    // before any view of that frame is planned (Execute); kept while the
+    // view keeps its raw fields. When they cannot be made, nothing of the
+    // vectors is read this session, as for the textures above; those made
+    // before are left as they are (earlier frames' work may still read them).
+    bool EnsureEngineLead(ViewResources& view) {
+        if (view.engine_predicate.resource) {
+            return true;
+        }
+        std::string why;
+        bool made =
+            Create(view.engine_verdict, {1, 1}, DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_FORMAT_R32G32B32A32_FLOAT, true, why);
+        if (made) {
+            D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_DEFAULT};
+            D3D12_RESOURCE_DESC buffer{};
+            buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            buffer.Width = kEnginePredicateBytes;
+            buffer.Height = buffer.DepthOrArraySize = buffer.MipLevels = 1;
+            buffer.SampleDesc.Count = 1;
+            buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            const HRESULT hr = device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer,
+                                                                D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                                                IID_PPV_ARGS(&view.engine_predicate.resource));
+            made = SUCCEEDED(hr);
+            why = made ? why : Failure("D3D12 Frame Generation engine predicate", hr);
+        }
+        if (!made) {
+            engine_failed_ = true;
+            view.engine_verdict = view.engine_predicate = {};
+            if (motion_notes_.size() < kMotionNotes) {
+                motion_notes_.push_back("the predicate the vectors lead with could not be made (" + why +
+                                        "): no vectors this session, Frame Generation goes on without them");
+            }
+        }
+        return made;
     }
 
     // --- Optical flow hardware (NVIDIA's optical flow accelerator, RTX 20-50) ---
@@ -6086,6 +6168,7 @@ class D3D12FrameGen final : public FrameGenGpu {
                 return &views_[&view == &views_[0] ? 1 : 0].engine_params;
             }
             return nullptr;
+        case FrameGenTextureKind::kEngineVerdict: return &view.engine_verdict;
         default: return nullptr;
         }
     }
@@ -6231,6 +6314,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         recording.evidence = effective.engine_motion && plan.synthesize;
         recording.assist = std::any_of(plan.dispatches.begin(), plan.dispatches.end(),
                                        [](const FrameGenDispatch& dispatch) { return dispatch.pass == FrameGenPass::kEngineTiles; });
+        recording.lead = recording.assist && FrameGenEngineLeads(effective, tuning);
         synthesized = plan.synthesize;
         if (tuning.analyze_only) {
             return true; // Synthesize writes the frames
@@ -6256,11 +6340,21 @@ class D3D12FrameGen final : public FrameGenGpu {
         return true;
     }
 
-    // Records a view's plan from where it stopped; with `until`, stops right
-    // before that pass: kFlowUnpack, which needs the optical flow hardware's
-    // vectors, or kEngineConvert, which needs the other view's verdict on the
-    // game's vectors.
-    bool RecordPlan(ViewRecording& recording, std::optional<FrameGenPass> until, std::string& error) {
+    // Whether a dispatch reads the other view's verdict on the game's vectors
+    // (kEngineParamsOther).
+    static bool ReadsOtherVerdict(const FrameGenDispatch& dispatch) {
+        return std::any_of(dispatch.inputs.begin(), dispatch.inputs.end(), [](const FrameGenTexture& texture) {
+            return texture.kind == FrameGenTextureKind::kEngineParamsOther;
+        });
+    }
+
+    // Records a view's plan from where it stopped, up to `until`
+    // (RecordUntil). Where the game's vectors lead (stage 6), the measured
+    // passes are recorded predicated on the frame's verdict for both eyes,
+    // copied into the view's predicate right after its dispatch
+    // (kFrameGenPredicateSet): only their dispatches are skipped, and the
+    // barriers recorded meanwhile run, so the states tracked here hold.
+    bool RecordPlan(ViewRecording& recording, RecordUntil until, std::string& error) {
         ViewResources& view = *recording.view;
         const FrameGenViewSubmission& submission = *recording.submission;
         const std::vector<ID3D12Resource*>& outputs = recording.outputs;
@@ -6276,14 +6370,28 @@ class D3D12FrameGen final : public FrameGenGpu {
             batch_indices.clear();
             return ok;
         };
+        bool predicated = false;
+        auto predication = [&](bool on) {
+            if (on != predicated) {
+                commands_->SetPredication(on ? view.engine_predicate.resource.Get() : nullptr, 0,
+                                          D3D12_PREDICATION_OP_EQUAL_ZERO);
+                predicated = on;
+            }
+        };
         while (recording.next < recording.plan.dispatches.size()) {
-            if (recording.plan.dispatches[recording.next].pass == until) {
+            const FrameGenDispatch& next = recording.plan.dispatches[recording.next];
+            if ((until == RecordUntil::kHardware && next.pass == FrameGenPass::kFlowUnpack) ||
+                (until == RecordUntil::kVerdicts && ReadsOtherVerdict(next))) {
                 // The optical flow hardware's vectors, or the other view's
                 // verdict, are next.
-                recording.waits_for_hardware = until == FrameGenPass::kFlowUnpack;
+                recording.waits_for_hardware = until == RecordUntil::kHardware;
+                predication(false);
                 return flush_batch();
             }
             const FrameGenDispatch& dispatch = recording.plan.dispatches[recording.next++];
+            if (dispatch.predicate != kFrameGenPredicateSkip) {
+                predication(false);
+            }
             if (dispatch.pass == FrameGenPass::kShiftClear && clear_heap_) {
                 // The eye-shift keys to nothing reached and the map to no
                 // offset (FG_PASS_SHIFT_CLEAR's values), cleared in hardware.
@@ -6336,6 +6444,7 @@ class D3D12FrameGen final : public FrameGenGpu {
             if (!flush_batch()) {
                 return false;
             }
+            predication(dispatch.predicate == kFrameGenPredicateSkip && view.engine_predicate.resource);
             if (descriptor_cursor_ + kDescriptorsPerDispatch > descriptor_end_) {
                 error = "D3D12 Frame Generation descriptor budget exhausted";
                 return false;
@@ -6360,6 +6469,18 @@ class D3D12FrameGen final : public FrameGenGpu {
             commands_->Dispatch((dispatch.width + kFrameGenThreadGroupSize - 1) / kFrameGenThreadGroupSize,
                                 (dispatch.height + kFrameGenThreadGroupSize - 1) / kFrameGenThreadGroupSize, 1);
             Stamp(static_cast<int>(dispatch.pass));
+            if (dispatch.predicate == kFrameGenPredicateSet && view.engine_predicate.resource) {
+                // The frame's verdict for both eyes into the predicate, which
+                // every submission finds in COMMON (buffers decay to it).
+                ID3D12Resource* buffer = view.engine_predicate.resource.Get();
+                Require(barriers, view.engine_verdict, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                Transition(barriers, buffer, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
+                Flush(barriers);
+                CopyToReadback(commands_.Get(), view.engine_verdict, buffer, 0);
+                Transition(barriers, buffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PREDICATION);
+                Flush(barriers);
+                Stamp(static_cast<int>(dispatch.pass));
+            }
             for (std::size_t index = 0; index < outputs.size(); ++index) {
                 if (!(dispatch.copy_mask & (1u << index))) {
                     continue;
@@ -6381,6 +6502,7 @@ class D3D12FrameGen final : public FrameGenGpu {
                 Stamp(kProfileOutputCopy);
             }
         }
+        predication(false);
         if (!recording.draw || recording.plan.frames_in_order) {
             return flush_batch();
         }
