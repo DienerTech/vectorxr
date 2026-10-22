@@ -4551,6 +4551,43 @@ void TestEngineMap() {
     }
 }
 
+// Engine motion vectors, stage 8 (VECTORXR_FRAMEGEN_ENGINE_VISIBILITY=1 or
+// =merge, _BIDIR=1, read at Start): the switches go into the tuning; other
+// values, or none, leave them off.
+void TestEngineVisibility() {
+    struct Variant {
+        const char* visibility;
+        const char* bidir;
+        bool seen;
+        bool synthesis;
+        bool forward;
+    };
+    for (const Variant& variant : {Variant{"1", "", true, true, false}, Variant{"merge", "1", true, false, true},
+                                   Variant{"2", "0", false, false, false}, Variant{"", "", false, false, false}}) {
+        const std::string name = std::string("engine visibility (") + variant.visibility + ", " + variant.bidir + ")";
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        gpu.depth = gpu.engine = gpu.threaded = gpu.jit = true;
+        runtime.paced = true;
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "assist");
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_VISIBILITY", variant.visibility);
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_BIDIR", variant.bidir);
+        StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate);
+        for (const char* name_of :
+             {"VECTORXR_FRAMEGEN_ENGINE_MV", "VECTORXR_FRAMEGEN_ENGINE_VISIBILITY", "VECTORXR_FRAMEGEN_ENGINE_BIDIR"}) {
+            _putenv_s(name_of, "");
+        }
+        App app(presenter, runtime);
+        for (int i = 0; gpu.executes < 3 && i < 40; ++i) app.Frame();
+        Check(gpu.executes >= 3 && gpu.tuning.engine_visibility == variant.seen &&
+                  gpu.tuning.engine_visibility_synthesis == variant.synthesis && gpu.tuning.engine_bidir == variant.forward,
+              name + ": the switches in the tuning");
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    }
+}
+
 // Engine motion vectors, stage 3 (VECTORXR_FRAMEGEN_ENGINE_MV=observe): once
 // the game's swapchains settled, each frame analysed just in time whose
 // vectors no gate holds back asks for their evidence
@@ -12377,6 +12414,7 @@ int main(int argc, char** argv) {
     RUN(TestEngineMotionAssist);
     RUN(TestEngineMotionLead);
     RUN(TestEngineMap);
+    RUN(TestEngineVisibility);
     RUN(TestEngineDelta);
     RUN(TestResearchFileSessions);
     RUN(TestAutomaticMultiplier);

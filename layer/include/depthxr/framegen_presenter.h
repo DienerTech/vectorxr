@@ -1915,6 +1915,12 @@ class FrameGenPresenter {
     FrameGenEngineMap engine_map_{FrameGenEngineMap::kOff};
     bool engine_map_reuse_{false};
     float engine_reach_{1.0f};
+    // Stage 8 (FrameGenTuning::engine_visibility, engine_visibility_synthesis,
+    // engine_bidir), read at Start: VECTORXR_FRAMEGEN_ENGINE_VISIBILITY=1 (or
+    // =merge: the first alone) and VECTORXR_FRAMEGEN_ENGINE_BIDIR=1.
+    bool engine_visibility_{false};
+    bool engine_visibility_synthesis_{false};
+    bool engine_bidir_{false};
     FrameGenEngineLeadControl engine_lead_;
     bool logged_engine_lead_{false};
     FrameGenEngineMode engine_started_{FrameGenEngineMode::kOff};

@@ -3128,6 +3128,263 @@ void TestFrameGenEngineLeadPlan() {
            "Engine lead plan: Lead -> Assist -> Lead keeps the views' filtered flow at the hardware's level");
 }
 
+// Stage 8's plans. Interpolating from Assist with the seen test
+// (engine_visibility) and the previous frame's depth, the solve's second
+// stage writes both eyes' verdict (no predicate) right before the conversion,
+// which reads it in place of the view's own parameters and the previous
+// frame's depth in place of the other view's; the merge keeps the surfaces'
+// depths in the labels. In Lead its predicate's verdict serves. Extrapolating,
+// without the previous frame's depth or the switch, the plans as before.
+// Interpolated frames read the labels at input 5 (with
+// engine_visibility_synthesis), or with engine_bidir the forward map built for
+// them from the previous frame's depth and filtered flow.
+void TestFrameGenEngineVisibilityPlan() {
+    using depthxr::FrameGenEngineMode;
+    using depthxr::FrameGenPass;
+    using depthxr::FrameGenSynthesisMode;
+    using depthxr::FrameGenTextureKind;
+    depthxr::FrameGenViewRequest request;
+    request.extent = {1024, 1024};
+    request.synthesize = request.temporal = request.depth = request.depth_previous = true;
+    for (auto* geometry : {&request.newest, &request.previous}) {
+        geometry->angle_left = geometry->angle_down = -0.9f;
+        geometry->angle_right = geometry->angle_up = 0.9f;
+    }
+    request.previous.orientation = {0.0f, 0.01f, 0.0f, 0.99995f};
+    request.shift = {0.02f, 0.0f, 0.004f};
+    request.engine_motion = true;
+    request.engine_vectors = {800, 790};
+    depthxr::FrameGenTuning tuning;
+    tuning.mode = FrameGenSynthesisMode::kInterpolate;
+    tuning.analyze_only = true;
+    tuning.engine_mode = FrameGenEngineMode::kAssist;
+    tuning.engine_locked = true;
+    auto order = [](const depthxr::FrameGenViewPlan& plan) {
+        std::string text;
+        for (const auto& dispatch : plan.dispatches) {
+            switch (dispatch.pass) {
+            case FrameGenPass::kEngineReduce: text += "R "; break;
+            case FrameGenPass::kEngineSolve: text += (dispatch.constants.options[0] & 15u) == 2u ? "P " : "S "; break;
+            case FrameGenPass::kEngineConvert: text += "convert "; break;
+            case FrameGenPass::kEngineMerge: text += "merge "; break;
+            case FrameGenPass::kShiftClear: text += dispatch.outputs[1].kind == FrameGenTextureKind::kShiftMap ? "C " : "c "; break;
+            case FrameGenPass::kShiftSplat: text += "s "; break;
+            case FrameGenPass::kShiftResolve: text += "r "; break;
+            case FrameGenPass::kShiftFill: text += "f "; break;
+            case FrameGenPass::kShiftSplatEngine: text += "es "; break;
+            case FrameGenPass::kShiftResolveEngine: text += "er "; break;
+            case FrameGenPass::kShiftFillEngine: text += "ef "; break;
+            case FrameGenPass::kSynthesizeUnorm8: text += "synth "; break;
+            default: break;
+            }
+        }
+        return text;
+    };
+    auto find = [](const depthxr::FrameGenViewPlan& plan, FrameGenPass pass) {
+        return *std::find_if(plan.dispatches.begin(), plan.dispatches.end(),
+                             [&](const depthxr::FrameGenDispatch& dispatch) { return dispatch.pass == pass; });
+    };
+    // kEngineSolve's second stage: both eyes' verdict.
+    auto verdict_of = [](const depthxr::FrameGenViewPlan& plan) {
+        return *std::find_if(plan.dispatches.begin(), plan.dispatches.end(), [](const depthxr::FrameGenDispatch& dispatch) {
+            return dispatch.pass == FrameGenPass::kEngineSolve && (dispatch.constants.options[0] & 15u) == 2u;
+        });
+    };
+    auto same = [](const depthxr::FrameGenViewPlan& a, const depthxr::FrameGenViewPlan& b) {
+        bool equal = a.dispatches.size() == b.dispatches.size();
+        for (std::size_t i = 0; equal && i < a.dispatches.size(); ++i) {
+            equal = a.dispatches[i].pass == b.dispatches[i].pass && a.dispatches[i].predicate == b.dispatches[i].predicate &&
+                    std::memcmp(a.dispatches[i].inputs.data(), b.dispatches[i].inputs.data(), sizeof(a.dispatches[i].inputs)) == 0 &&
+                    std::memcmp(a.dispatches[i].outputs.data(), b.dispatches[i].outputs.data(), sizeof(a.dispatches[i].outputs)) == 0 &&
+                    std::memcmp(&a.dispatches[i].constants, &b.dispatches[i].constants, sizeof(depthxr::FrameGenConstants)) == 0;
+        }
+        return equal;
+    };
+
+    // The analysis.
+    const depthxr::FrameGenViewPlan plain = depthxr::BuildFrameGenViewPlan(request, tuning);
+    tuning.engine_visibility = true;
+    Expect(depthxr::FrameGenEngineVisibility(tuning), "Engine visibility plan: the seen test interpolating from Assist");
+    const depthxr::FrameGenViewPlan seen = depthxr::BuildFrameGenViewPlan(request, tuning);
+    const depthxr::FrameGenDispatch verdict = verdict_of(seen);
+    const depthxr::FrameGenDispatch convert = find(seen, FrameGenPass::kEngineConvert);
+    const depthxr::FrameGenDispatch merge = find(seen, FrameGenPass::kEngineMerge);
+    Expect(order(plain) == "R S convert merge " && order(seen) == "R S P convert merge ",
+           "Engine visibility plan: both eyes' verdict right before the conversion (" + order(seen) + ")");
+    Expect(verdict.predicate == depthxr::kFrameGenPredicateNone && verdict.inputs[3].kind == FrameGenTextureKind::kEngineParams &&
+               verdict.inputs[5].kind == FrameGenTextureKind::kEngineParamsOther &&
+               verdict.outputs[0].kind == FrameGenTextureKind::kEngineVerdict && convert.inputs[2].kind == FrameGenTextureKind::kEngineVerdict &&
+               convert.inputs[5].kind == FrameGenTextureKind::kDepthPrevious &&
+               (convert.constants.options[0] & depthxr::kFrameGenEngineConvertSeen) != 0 &&
+               merge.inputs[5].kind == FrameGenTextureKind::kDepth &&
+               (merge.constants.options[0] & depthxr::kFrameGenEngineMergeDepths) != 0,
+           "Engine visibility plan: the verdict without a predicate, the conversion's seen test on the previous frame's "
+           "depth, the merge keeping the surfaces' depths");
+    // Nothing else of the analysis changes.
+    std::size_t changed = 0;
+    for (std::size_t i = 0, j = 0; i < plain.dispatches.size() && j < seen.dispatches.size(); ++i, ++j) {
+        if (seen.dispatches[j].pass == FrameGenPass::kEngineSolve && (seen.dispatches[j].constants.options[0] & 15u) == 2u) ++j;
+        const bool equal = plain.dispatches[i].pass == seen.dispatches[j].pass &&
+                           std::memcmp(&plain.dispatches[i].constants, &seen.dispatches[j].constants,
+                                       sizeof(depthxr::FrameGenConstants)) == 0 &&
+                           std::memcmp(plain.dispatches[i].inputs.data(), seen.dispatches[j].inputs.data(),
+                                       sizeof(plain.dispatches[i].inputs)) == 0;
+        changed += equal ? 0 : 1;
+    }
+    Expect(seen.dispatches.size() == plain.dispatches.size() + 1 && changed == 2,
+           "Engine visibility plan: only the conversion and the merge change (" + std::to_string(changed) + ")");
+    // Without the previous frame's depth, extrapolating, observing, or with
+    // the switch off: as before.
+    request.depth_previous = false;
+    depthxr::FrameGenTuning switched_off = tuning;
+    switched_off.engine_visibility = false;
+    Expect(same(depthxr::BuildFrameGenViewPlan(request, tuning), depthxr::BuildFrameGenViewPlan(request, switched_off)),
+           "Engine visibility plan: without the previous frame's depth, as without the switch");
+    request.depth_previous = true;
+    depthxr::FrameGenTuning extrapolating = tuning, extrapolating_plain = tuning;
+    extrapolating.mode = extrapolating_plain.mode = FrameGenSynthesisMode::kExtrapolate;
+    extrapolating_plain.engine_visibility = false;
+    Expect(!depthxr::FrameGenEngineVisibility(extrapolating) &&
+               same(depthxr::BuildFrameGenViewPlan(request, extrapolating),
+                    depthxr::BuildFrameGenViewPlan(request, extrapolating_plain)),
+           "Engine visibility plan: extrapolating, as without the switch");
+    depthxr::FrameGenTuning observing = tuning, observing_plain = tuning;
+    observing.engine_mode = observing_plain.engine_mode = FrameGenEngineMode::kObserve;
+    observing_plain.engine_visibility = false;
+    Expect(!depthxr::FrameGenEngineVisibility(observing) &&
+               same(depthxr::BuildFrameGenViewPlan(request, observing), depthxr::BuildFrameGenViewPlan(request, observing_plain)),
+           "Engine visibility plan: observing, as without the switch");
+    // Interpolating led (engine_interpolate): the predicate's verdict serves;
+    // with no measured pass at all, the verdict is written for the test.
+    tuning.engine_mode = FrameGenEngineMode::kLead;
+    tuning.engine_interpolate = true;
+    const depthxr::FrameGenViewPlan led = depthxr::BuildFrameGenViewPlan(request, tuning);
+    std::size_t verdicts = 0;
+    for (const auto& dispatch : led.dispatches) {
+        verdicts += dispatch.pass == FrameGenPass::kEngineSolve && (dispatch.constants.options[0] & 15u) == 2u ? 1 : 0;
+    }
+    Expect(verdicts == 1 && order(led) == "R S P convert merge " &&
+               verdict_of(led).predicate == depthxr::kFrameGenPredicateSet &&
+               find(led, FrameGenPass::kEngineConvert).inputs[2].kind == FrameGenTextureKind::kEngineVerdict &&
+               find(led, FrameGenPass::kEngineConvert).inputs[5].kind == FrameGenTextureKind::kDepthPrevious,
+           "Engine visibility plan: led, the predicate's verdict read by the conversion (" + order(led) + ")");
+    tuning.engine_predicate = false;
+    const depthxr::FrameGenViewPlan unmeasured = depthxr::BuildFrameGenViewPlan(request, tuning);
+    Expect(order(unmeasured) == "R S P convert merge " &&
+               verdict_of(unmeasured).predicate == depthxr::kFrameGenPredicateNone,
+           "Engine visibility plan: led with no measured pass, the verdict written for the test (" + order(unmeasured) + ")");
+    tuning.engine_predicate = true;
+    tuning.engine_interpolate = false;
+    tuning.engine_mode = FrameGenEngineMode::kAssist;
+
+    // The frames written just in time: the labels at input 5 with the
+    // synthesis switch (the analysed request labelled with depth), never
+    // extrapolating (cover frames); the forward map with engine_bidir.
+    auto synthesis = [&](const depthxr::FrameGenTuning& with, FrameGenSynthesisMode mode, float fraction) {
+        return depthxr::BuildFrameGenSynthesisPlan(request, with, mode, fraction, mode == FrameGenSynthesisMode::kExtrapolate);
+    };
+    depthxr::FrameGenTuning off = tuning;
+    off.engine_visibility = false;
+    const depthxr::FrameGenViewPlan written_plain = synthesis(off, FrameGenSynthesisMode::kInterpolate, 0.5f);
+    const depthxr::FrameGenViewPlan written_merge = synthesis(tuning, FrameGenSynthesisMode::kInterpolate, 0.5f);
+    tuning.engine_visibility_synthesis = true;
+    const depthxr::FrameGenViewPlan written = synthesis(tuning, FrameGenSynthesisMode::kInterpolate, 0.5f);
+    const depthxr::FrameGenDispatch& output = written.dispatches.back();
+    Expect(same(written_merge, written_plain) && written.dispatches.size() == written_plain.dispatches.size() &&
+               output.inputs[5].kind == FrameGenTextureKind::kEngineLabels &&
+               output.constants.options[1] ==
+                   (written_plain.dispatches.back().constants.options[1] | depthxr::kFrameGenFlagEngineVisibility),
+           "Engine visibility plan: interpolated frames read the labels at input 5 with the synthesis switch alone");
+    Expect(same(synthesis(tuning, FrameGenSynthesisMode::kExtrapolate, 0.5f),
+                synthesis(off, FrameGenSynthesisMode::kExtrapolate, 0.5f)),
+           "Engine visibility plan: cover frames (extrapolated) as without the switch");
+    request.engine_motion = false;
+    Expect(same(synthesis(tuning, FrameGenSynthesisMode::kInterpolate, 0.5f), written_plain),
+           "Engine visibility plan: a real frame without the vectors' labels, as without the switch");
+    request.engine_motion = true;
+
+    tuning.engine_bidir = true;
+    const depthxr::FrameGenViewPlan forward = synthesis(tuning, FrameGenSynthesisMode::kInterpolate, 0.25f);
+    const depthxr::FrameGenDispatch& forward_splat = forward.dispatches[forward.dispatches.size() - 3];
+    const depthxr::FrameGenDispatch& forward_resolve = forward.dispatches[forward.dispatches.size() - 2];
+    const depthxr::FrameGenDispatch& forward_output = forward.dispatches.back();
+    Expect(order(forward) == "C s r f c es er synth " &&
+               forward_splat.constants.options[0] == depthxr::kFrameGenEngineMapForward &&
+               forward_splat.constants.options[1] ==
+                   (depthxr::kFrameGenFlagDepth | depthxr::kFrameGenFlagDepthSplat | depthxr::kFrameGenFlagEngine) &&
+               forward_splat.constants.tuning[1] == 0.25f &&
+               forward_splat.constants.rot0 == written_plain.dispatches.back().constants.rot0 &&
+               forward_splat.inputs[0].kind == FrameGenTextureKind::kDepthPrevious &&
+               forward_splat.inputs[1].kind == FrameGenTextureKind::kFilteredPrevious &&
+               forward_splat.inputs[1].level == forward.final_flow_level &&
+               forward_resolve.inputs[2].kind == FrameGenTextureKind::kShiftKeys &&
+               forward_resolve.outputs[0].kind == FrameGenTextureKind::kMotionMap &&
+               !depthxr::FrameGenEngineMapTime(forward),
+           "Engine visibility plan: the forward map after the eye-shift map, from the previous frame's depth and "
+           "filtered flow, its fraction, no engine motion map's time (" + order(forward) + ")");
+    Expect(forward_output.inputs[5].kind == FrameGenTextureKind::kMotionMap &&
+               (forward_output.constants.options[1] & depthxr::kFrameGenFlagEngineBidir) != 0 &&
+               (forward_output.constants.options[1] & depthxr::kFrameGenFlagEngineVisibility) == 0,
+           "Engine visibility plan: the forward map read at input 5 in place of the labels");
+    // The previous frame's flow is the pair before's: moved the intervals'
+    // ratio as far (clamped as the filters clamp it).
+    depthxr::FrameGenTuning uneven = tuning;
+    uneven.interval_ratio = 1.5f;
+    const depthxr::FrameGenViewPlan forward_uneven = synthesis(uneven, FrameGenSynthesisMode::kInterpolate, 0.25f);
+    uneven.interval_ratio = 9.0f;
+    const depthxr::FrameGenViewPlan forward_clamped = synthesis(uneven, FrameGenSynthesisMode::kInterpolate, 0.25f);
+    Expect(forward_uneven.dispatches[forward_uneven.dispatches.size() - 3].constants.tuning[1] == 0.375f &&
+               forward_uneven.dispatches[forward_uneven.dispatches.size() - 2].constants.tuning[1] == 0.375f &&
+               forward_uneven.dispatches.back().constants.tuning[0] == 0.25f &&
+               forward_clamped.dispatches[forward_clamped.dispatches.size() - 3].constants.tuning[1] == 1.0f,
+           "Engine visibility plan: the forward map moves the previous frame's flow by the fraction times the "
+           "intervals' ratio");
+    // A real frame whose vectors were held back or missing: no forward map,
+    // its frames mk1's.
+    request.engine_motion = false;
+    Expect(same(synthesis(tuning, FrameGenSynthesisMode::kInterpolate, 0.5f), written_plain),
+           "Engine visibility plan: no forward map for a real frame without the vectors");
+    request.engine_motion = true;
+    request.depth_previous = false;
+    Expect(same(synthesis(tuning, FrameGenSynthesisMode::kInterpolate, 0.5f), written),
+           "Engine visibility plan: no forward map without the previous frame's depth (the labels read)");
+    request.depth_previous = true;
+    depthxr::FrameGenTuning bidir_observing = tuning;
+    bidir_observing.engine_mode = FrameGenEngineMode::kObserve;
+    Expect(same(synthesis(bidir_observing, FrameGenSynthesisMode::kInterpolate, 0.5f),
+                synthesis(off, FrameGenSynthesisMode::kInterpolate, 0.5f)),
+           "Engine visibility plan: observing, neither");
+
+    // Written together (frames generated with their analysis): the same.
+    tuning.analyze_only = false;
+    tuning.generated = 2;
+    tuning.fractions = {0.25f, 0.75f};
+    tuning.engine_bidir = false;
+    const depthxr::FrameGenViewPlan together = depthxr::BuildFrameGenViewPlan(request, tuning);
+    std::size_t reading = 0;
+    for (const auto& dispatch : together.dispatches) {
+        reading += dispatch.pass == FrameGenPass::kSynthesizeUnorm8 && dispatch.inputs[5].kind == FrameGenTextureKind::kEngineLabels &&
+                           (dispatch.constants.options[1] & depthxr::kFrameGenFlagEngineVisibility) != 0
+                       ? 1
+                       : 0;
+    }
+    tuning.engine_bidir = true;
+    const depthxr::FrameGenViewPlan together_forward = depthxr::BuildFrameGenViewPlan(request, tuning);
+    std::size_t forward_maps = 0, forward_reads = 0;
+    for (const auto& dispatch : together_forward.dispatches) {
+        forward_maps += dispatch.pass == FrameGenPass::kShiftSplatEngine &&
+                                (dispatch.constants.options[0] & depthxr::kFrameGenEngineMapForward) != 0
+                            ? 1
+                            : 0;
+        forward_reads += dispatch.pass == FrameGenPass::kSynthesizeUnorm8 &&
+                                 (dispatch.constants.options[1] & depthxr::kFrameGenFlagEngineBidir) != 0
+                             ? 1
+                             : 0;
+    }
+    Expect(reading == 2 && forward_maps == 2 && forward_reads == 2 && together_forward.frames_in_order,
+           "Engine visibility plan: written together, each frame reads the labels, or its own forward map");
+}
+
 // Stage 6's controller: a session in Lead starts at Assist and leads after
 // 30 verdicts in a row that let the vectors be used; more than 10% of the
 // last 30 frames held back hold it at Assist for 300 real frames, then 30
@@ -7023,6 +7280,7 @@ int main() {
     TestFrameGenWorldDeltaPlan();
     TestFrameGenWorldDeltaCalibration();
     TestFrameGenEngineMapPlan();
+    TestFrameGenEngineVisibilityPlan();
     TestResearchSwitches();
     TestTurboMetricsSettingsParsing();
     TestTurboMetricsSessionRoundTrip();

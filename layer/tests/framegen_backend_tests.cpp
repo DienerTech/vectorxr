@@ -395,6 +395,7 @@ void EngineObserveScenarios(Harness& harness);
 void EngineAssistScenarios(Harness& harness);
 void EngineLeadScenarios(Harness& harness);
 void EngineMapScenarios(Harness& harness);
+void EngineVisibilityScenarios(Harness& harness);
 void WorldDeltaScenarios(Harness& harness);
 
 int RunScenarios(Harness& harness) {
@@ -1293,6 +1294,13 @@ int RunScenarios(Harness& harness) {
     // depth test (EngineMapScenarios).
     if (harness.create_texture_data && harness.create_depth_data && harness.upload_sized && harness.readback_sized) {
         EngineMapScenarios(harness);
+    }
+
+    // 3z. Engine motion vectors, stage 8 (Direct3D 12): interpolated frames
+    // show content the game's vectors say the previous frame did not see
+    // from the newest frame alone (EngineVisibilityScenarios).
+    if (harness.create_texture_data && harness.create_depth_data && harness.upload_sized && harness.readback_sized) {
+        EngineVisibilityScenarios(harness);
     }
 
     // 3w. Engine motion vectors, stage 4 (Direct3D 12): the world's motion
@@ -4607,15 +4615,31 @@ int RunProfile(Harness& harness) {
         ParseFrameGenEngineMap(std::getenv("FG_PROFILE_ENGINE_MAP") ? std::getenv("FG_PROFILE_ENGINE_MAP") : "");
     const bool engine_map_reuse =
         std::getenv("FG_PROFILE_ENGINE_MAP_REUSE") && std::string(std::getenv("FG_PROFILE_ENGINE_MAP_REUSE")) == "1";
+    // FG_PROFILE_ENGINE_VISIBILITY=1|merge and FG_PROFILE_ENGINE_BIDIR=1 (with
+    // FG_PROFILE_MV=assist or lead, FG_PROFILE_MODE=interpolate): stage 8's
+    // seen test (with =1 read by the frames written too) and the forward map.
+    // Their gates, per frame written, against a run without either: the seen
+    // test at most 0.05 ms above (its analysis, shared by the frames written
+    // from it, and their synthesis: the "seen test" line), the forward map at
+    // most 0.45 ms (the frames written's whole time: its clear shares a row
+    // with the eye-shift map's, and synthesis reads it).
+    const std::string profile_visibility =
+        std::getenv("FG_PROFILE_ENGINE_VISIBILITY") ? std::getenv("FG_PROFILE_ENGINE_VISIBILITY") : "";
+    const bool engine_bidir =
+        std::getenv("FG_PROFILE_ENGINE_BIDIR") && std::string(std::getenv("FG_PROFILE_ENGINE_BIDIR")) == "1";
     if (engine_mode >= FrameGenEngineMode::kAssist) {
         FrameGenEngineConvention locked;
         locked.gain = ProfileMotionGain(convention, depth_width, depth_height);
         gpu->LockEngineForTest(locked);
     }
-    const std::string map_text = engine_map != FrameGenEngineMap::kOff
-                                     ? std::string(", the engine motion map (") + ToString(engine_map) +
-                                           (engine_map_reuse ? ", read again)" : ")")
-                                     : std::string();
+    const std::string map_text = (engine_map != FrameGenEngineMap::kOff
+                                      ? std::string(", the engine motion map (") + ToString(engine_map) +
+                                            (engine_map_reuse ? ", read again)" : ")")
+                                      : std::string()) +
+                                 (profile_visibility == "1" || profile_visibility == "merge"
+                                      ? ", the seen test (" + profile_visibility + ")"
+                                      : std::string()) +
+                                 (engine_bidir ? ", the forward map" : "");
     std::printf("Profiling %ux%u per eye, depth %ux%u, %s %s%s%s%s; rendering test frames...\n", width, height, depth_width,
                 depth_height, interpolate ? "interpolate" : "extrapolate", jit ? "just in time" : "4x",
                 engine ? (", with motion vectors (" + convention + ")").c_str() : "",
@@ -4812,6 +4836,9 @@ int RunProfile(Harness& harness) {
             executed.hardware_level = tuning.hardware_flow && engine_mode >= FrameGenEngineMode::kAssist;
             executed.engine_map = engine_map;
             executed.engine_map_reuse = engine_map_reuse;
+            executed.engine_visibility = profile_visibility == "1" || profile_visibility == "merge";
+            executed.engine_visibility_synthesis = profile_visibility == "1";
+            executed.engine_bidir = engine_bidir;
             Check(gpu->Execute(views, executed, result, error), "profile execute: " + error);
             led += i >= 24 && result.lead ? 1 : 0;
             const std::vector<double> times = gpu->PassMilliseconds();
@@ -4940,6 +4967,50 @@ int RunProfile(Harness& harness) {
                             static_cast<unsigned long long>(mapped.maps - maps_before),
                             static_cast<unsigned long long>(mapped.maps_reused - reused_before));
             }
+            if (engine_bidir) {
+                // Stage 8: the forward map's splat and resolve per frame
+                // written. Its clear is in the shift clear row with the
+                // eye-shift map's, and synthesis reads it: the gate is on the
+                // frames written's whole time.
+                double forward_ms = 0.0;
+                for (const FrameGenPass pass : {FrameGenPass::kShiftSplatEngine, FrameGenPass::kShiftResolveEngine}) {
+                    const auto index = static_cast<std::size_t>(pass);
+                    forward_ms += index < synthesis_sums.size() ? synthesis_sums[index] / synthesis_samples : 0.0;
+                }
+                std::printf("  forward map: splat and resolve %.3f ms per frame written (its clear in the shift clear row; "
+                            "gate: the frames written's %.3f ms at most 0.45 ms above a run without "
+                            "FG_PROFILE_ENGINE_BIDIR)\n",
+                            forward_ms, synthesis_total / synthesis_samples);
+            }
+        }
+        if (engine_mode >= FrameGenEngineMode::kAssist && samples &&
+            (profile_visibility == "1" || profile_visibility == "merge")) {
+            // Stage 8: the seen test's analysis (the frame's verdict,
+            // kEngineSolve's stage 2, written for it in Assist: in the
+            // evidence line above too; the test in convert, the surfaces'
+            // depths in merge) is shared by the frames written from it (three
+            // just in time, else the generated ones); with =1 synthesis reads
+            // the labels. Its gate: the two per frame written at most 0.05 ms
+            // above a run without FG_PROFILE_ENGINE_VISIBILITY.
+            const auto solve = static_cast<std::size_t>(FrameGenPass::kEngineSolve);
+            const auto convert = static_cast<std::size_t>(FrameGenPass::kEngineConvert);
+            const auto tiles = static_cast<std::size_t>(FrameGenPass::kEngineTiles);
+            double analysis_ms = solve < sums.size() ? sums[solve] / samples : 0.0;
+            for (std::size_t pass = convert; pass <= tiles && pass < sums.size(); ++pass) {
+                analysis_ms += sums[pass] / samples;
+            }
+            const double written = jit ? 3.0 : static_cast<double>(tuning.generated);
+            double synthesis_ms = synthesis_samples ? synthesis_total / synthesis_samples : 0.0;
+            if (!jit) {
+                for (const FrameGenPass pass : {FrameGenPass::kSynthesizeUnorm8, FrameGenPass::kSynthesizeFloat16}) {
+                    const auto index = static_cast<std::size_t>(pass);
+                    synthesis_ms += index < sums.size() ? sums[index] / samples / written : 0.0;
+                }
+            }
+            std::printf("  seen test: solve, convert, merge and tiles %.3f ms per real frame, %.3f ms per frame written; "
+                        "with synthesis %.3f ms per frame written (gate: at most 0.05 ms above a run without "
+                        "FG_PROFILE_ENGINE_VISIBILITY)\n",
+                        analysis_ms, analysis_ms / written, analysis_ms / written + synthesis_ms);
         }
         PrintWorkingMemory(*gpu);
     }
@@ -5002,7 +5073,9 @@ int RunProfile(Harness& harness) {
 // FG_REPLAY_MV_MODE=assist merged into the flow (stage 5, "Engine labels"),
 // or =lead leading it (stage 6); with VECTORXR_FRAMEGEN_ENGINE_MAP (and
 // _REACH) extrapolated with the engine motion map (stage 7), and with
-// FG_REPLAY_AHEAD=2 to the frame after next.
+// FG_REPLAY_AHEAD=2 to the frame after next; interpolating, with
+// VECTORXR_FRAMEGEN_ENGINE_VISIBILITY=1|merge (and _BIDIR=1) the seen test
+// (and the forward map) of stage 8, led with _INTERPOLATE=lead.
 bool g_replay = false;
 std::string g_replay_directory, g_replay_output;
 
@@ -5788,6 +5861,18 @@ int RunReplay(Harness& harness) {
         std::printf("Engine map: %s (VECTORXR_FRAMEGEN_ENGINE_MAP), reach %.2f; each frame extrapolated to the frame %s\n",
                     ToString(engine_map), static_cast<double>(engine_reach), ahead > 1 ? "after next" : "after it");
     }
+    // Stage 8, interpolating: the seen test and the forward map as a session
+    // reads their switches (VECTORXR_FRAMEGEN_ENGINE_VISIBILITY=1|merge,
+    // _BIDIR=1), and Lead there (_INTERPOLATE=lead, FG_REPLAY_MV_MODE=lead).
+    const std::string engine_visibility = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_VISIBILITY").value_or("");
+    const bool engine_bidir = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_BIDIR") == "1";
+    const bool engine_interpolate = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_INTERPOLATE") == "lead";
+    if (engine_visibility == "1" || engine_visibility == "merge" || engine_bidir || engine_interpolate) {
+        std::printf("Engine visibility: the seen test %s (VECTORXR_FRAMEGEN_ENGINE_VISIBILITY), the forward map %s "
+                    "(_BIDIR), interpolating led %s (_INTERPOLATE)\n",
+                    engine_visibility.empty() ? "off" : engine_visibility.c_str(), engine_bidir ? "on" : "off",
+                    engine_interpolate ? "too" : "no");
+    }
     // The measuring pass's labels (Assist): cells by what moved them, the
     // classes of those the vectors moved, and those held back.
     std::array<std::size_t, 8> label_sources{};
@@ -5874,6 +5959,10 @@ int RunReplay(Harness& harness) {
         tuning.engine_predicate = engine_predicate;
         tuning.engine_map = engine_map;
         tuning.engine_reach = engine_reach;
+        tuning.engine_visibility = engine_visibility == "1" || engine_visibility == "merge";
+        tuning.engine_visibility_synthesis = engine_visibility == "1";
+        tuning.engine_bidir = engine_bidir;
+        tuning.engine_interpolate = engine_interpolate;
         if (before && *before + 1 != k) tuning.interval_ratio = 1.0f;
         // Observe's evidence (stage 3) on frames whose every view has vectors,
         // calibrating where the pair is consecutive frames (by the game's
@@ -8565,6 +8654,11 @@ struct EngineScene {
     // Stage 7: where the square's centre starts across the world (meters as
     // seen at 2 m): behind the cockpit panel, or beside it.
     double square_start{-0.5};
+    // Stage 8: how high its centre is (meters as seen at 2 m: 1.2 puts it
+    // above the panel, over the sky, at 4 m off); and coloured as the sky is
+    // (another part of it), so that little tells the two apart.
+    double square_height{0.1};
+    bool camouflaged{false};
 };
 
 // What the game's vectors carry wrongly, if anything: none, all zero, noise,
@@ -8689,10 +8783,16 @@ EngineHit EngineCast(const EngineScene& scene, double frame, const EnginePose& e
         if (t < nearest && scene.walking) {
             nearest = t;
             hit = {3, p, t, Background(static_cast<float>(p[0] * 150.0 + 500.0), static_cast<float>(p[1] * 150.0 + 500.0))};
-        } else if (t < nearest && std::abs(p[0] - centre) < 0.25 * scale && std::abs(p[1] - 0.1 * scale) < 0.25 * scale) {
+        } else if (t < nearest && std::abs(p[0] - centre) < 0.25 * scale &&
+                   std::abs(p[1] - scene.square_height * scale) < 0.25 * scale) {
             nearest = t;
-            hit = {2, p, t, Patch(static_cast<float>((p[0] - centre) * 60.0 / scale + 300.0),
-                                  static_cast<float>((p[1] - 0.1 * scale) * 60.0 / scale + 300.0))};
+            const float x = static_cast<float>((p[0] - centre) * 60.0 / scale + 300.0);
+            const float y = static_cast<float>((p[1] - scene.square_height * scale) * 60.0 / scale + 300.0);
+            hit = {2, p, t, Patch(x, y)};
+            if (scene.camouflaged) {
+                const float n = 0.6f * Noise(x / 24.0f + 50.0f, y / 24.0f) + 0.4f * Noise(x / 10.0f + 59.0f, y / 10.0f);
+                hit.color = Pack(0.2f + 0.6f * n, 0.25f + 0.5f * n, 0.4f * n + 0.1f);
+            }
         }
     }
     if (scene.backdrop > 0.0 && world_ray[2] < 0.0 && world_ray[1] < 0.0) {
@@ -8912,6 +9012,18 @@ struct EngineRunOptions {
     std::array<float, 3> shift{};
     std::vector<float> synthesize;
     std::vector<std::vector<std::array<Pixels, 2>>>* written{nullptr};
+    // Stage 8: frames interpolated `fraction` of the way from the frame
+    // before to each frame instead (FrameGenTuning::mode), with the seen test
+    // (FrameGenTuning::engine_visibility and engine_visibility_synthesis; the
+    // first alone with `visibility_merge`) and the forward map (engine_bidir).
+    FrameGenSynthesisMode synthesis{FrameGenSynthesisMode::kExtrapolate};
+    bool visibility{false};
+    bool visibility_merge{false};
+    bool bidir{false};
+    // The depth decoded with the far plane infinitely far (MSFS 2024's
+    // projection): the sky (rendered at the 1000 m plane) resolves to
+    // kFrameGenFarDepth, the rest within a tenth of a percent of its distance.
+    bool infinite_far{false};
 };
 struct EngineRunResult {
     FrameGenEngineStatus status;
@@ -8955,9 +9067,9 @@ EngineRunResult RunEngineFrames(Harness& harness, const EngineFrames& frames, co
     }
     FrameGenDepthEncoding encoding;
     encoding.near_z = 0.1f;
-    encoding.far_z = 1000.0f;
+    encoding.far_z = options.infinite_far ? std::numeric_limits<float>::infinity() : 1000.0f;
     FrameGenTuning tuning;
-    tuning.mode = FrameGenSynthesisMode::kExtrapolate;
+    tuning.mode = options.synthesis;
     tuning.fractions[0] = options.fraction;
     tuning.generated = 1;
     tuning.engine_mode = mode;
@@ -8968,6 +9080,9 @@ EngineRunResult RunEngineFrames(Harness& harness, const EngineFrames& frames, co
     tuning.engine_map = options.map;
     tuning.engine_map_reuse = options.reuse;
     tuning.engine_reach = options.reach;
+    tuning.engine_visibility = options.visibility || options.visibility_merge;
+    tuning.engine_visibility_synthesis = options.visibility;
+    tuning.engine_bidir = options.bidir;
     tuning.analyze_only = !options.synthesize.empty();
     const XrRect2Di rect{{0, 0}, {static_cast<int>(kEngineSize), static_cast<int>(kEngineSize)}};
     const XrRect2Di vector_rect{{0, 0}, {static_cast<int>(kEngineVectorSize), static_cast<int>(kEngineVectorSize)}};
@@ -9070,8 +9185,8 @@ EngineRunResult RunEngineFrames(Harness& harness, const EngineFrames& frames, co
             std::vector<std::array<Pixels, 2>>& written = options.written->emplace_back();
             for (const float fraction : options.synthesize) {
                 if (k == 0 || !result.frame) continue;
-                Check(gpu->Synthesize(result.frame, FrameGenSynthesisMode::kExtrapolate, fraction,
-                                      {views[0].outputs[0], views[1].outputs[0]}, error),
+                Check(gpu->Synthesize(result.frame, options.synthesis, fraction, {views[0].outputs[0], views[1].outputs[0]},
+                                      error),
                       "engine observe: synthesize: " + error);
                 Check(gpu->WaitIdle(), "engine observe: synthesis did not finish");
                 written.push_back({harness.readback_sized(g_swapchains[results[0]][0]),
@@ -10697,6 +10812,367 @@ void EngineMapScenarios(Harness& harness) {
         }
         std::cout << "D3D12 engine map: observing, " << differing << " frames differ with the map" << std::endl;
         Check(plain.size() == 10 && mapped.size() == 10 && differing == 0, "engine map: observing, the map changed a frame");
+    }
+}
+
+// --- Engine motion vectors, stage 8 (Interpolate's visibility), on WARP ----
+//
+// Frames interpolated half way between each pair of real frames, the
+// convention locked (FrameGenGpu::LockEngineForTest), against the scene at
+// that time seen from the newer frame's eye. A square 4 m off crosses the sky
+// above the cockpit panel 12 pixels a frame ('mv-occlude': an occluder whose
+// vectors both frames have): the sky it reveals behind it (the newer frame
+// alone sees it), the sky it covers ahead of it (the older frame alone), the
+// square, the view. Without the vectors (mk1), in Assist, and in Assist with
+// the seen test (FrameGenTuning::engine_visibility and
+// engine_visibility_synthesis) or the forward map (engine_bidir): the square
+// patterned, coloured as the sky (little tells the two apart, so the frames'
+// disagreement says little of what each sees), and patterned with the sky
+// infinitely far (EngineRunOptions::infinite_far: its depth resolves to
+// kFrameGenFarDepth, as MSFS 2024's does, and the forward map moves it by
+// the sky's flow, not by the square's in the cells along its edge). The
+// revealed sky with the seen test within 0.7 of mk1's error, what is covered
+// no worse than Assist's (whose own merge makes it a little worse than
+// mk1's), the view no worse than Assist's; with the forward map, the covered
+// sky within 0.75 of mk1's (0.6 to 0.7 here: the design's 0.5 is for
+// captures), the view no worse than Assist's. The world turning behind the
+// cockpit panel, the sky infinitely far (a canopy frame against the sky in a
+// bank): the forward map's sky beside the panel within 0.95 of Assist's.
+// A still square: the seen test changes the frames within noise. Just in
+// time (the labels and the previous frame's flow and depth from the ring),
+// the frames are those written together, byte for byte.
+// What the conversion reads of the frame's verdict with the seen test
+// (kEngineVerdict, kEngineSolve's stage 2): the right eye's vectors reversed
+// hold both eyes' back (every cell measured and held back, none unseen, the
+// frames mk1's, byte for byte); interpolating led (engine_interpolate,
+// research), Lead's predicate's verdict, or with no measured pass at all the
+// one written for the test (both label what the previous frame did not see
+// and merge the same flow); a jittered projection's vectors, the convention
+// fixed with its jitter (the bias taken out, the merged flow the scene's
+// within a tenth of a pixel).
+void EngineVisibilityScenarios(Harness& harness) {
+    constexpr std::size_t kFrames = 12;
+    constexpr float kHalf = 0.5f;
+    auto pixel = [](std::uint32_t x, std::uint32_t y) { return std::size_t{y} * kEngineSize + x; };
+    auto view = [](std::size_t, int, std::uint32_t, std::uint32_t) { return true; };
+    struct Run {
+        const char* name;
+        FrameGenEngineMode mode;
+        bool visibility;
+        bool merge;
+        bool bidir;
+        bool jit;
+        std::vector<std::array<Pixels, 2>> outputs;
+        std::vector<std::array<bool, 2>> merged;
+    };
+    auto run_all = [&](const EngineFrames& frames, std::vector<Run>& runs, bool infinite_far) {
+        for (Run& run : runs) {
+            std::vector<std::vector<std::array<Pixels, 2>>> written;
+            RunEngineFrames(harness, frames,
+                            {.mode = run.mode, .fraction = kHalf, .lock = true, .outputs = &run.outputs, .merged = &run.merged,
+                             .frames = kFrames, .synthesize = run.jit ? std::vector<float>{kHalf} : std::vector<float>{},
+                             .written = run.jit ? &written : nullptr, .synthesis = FrameGenSynthesisMode::kInterpolate,
+                             .visibility = run.visibility, .visibility_merge = run.merge, .bidir = run.bidir,
+                             .infinite_far = infinite_far});
+            if (run.jit) run.outputs = EngineWrittenAt(written, 0);
+        }
+    };
+    struct Occluder {
+        const char* name;
+        bool camouflaged;
+        bool infinite_far;
+    };
+    for (const Occluder& occluder :
+         {Occluder{"a square", false, false}, Occluder{"a square coloured as the sky", true, false},
+          Occluder{"a square, the sky infinitely far", false, true}}) {
+        const EngineScene scene{.square_speed = 0.3, .square_distance = 4.0, .square_start = -1.4, .square_height = 1.2,
+                                .camouflaged = occluder.camouflaged};
+        const EngineFrames frames = RenderEngineFrames(scene, false, kFrames);
+        // The scene half way, and at the older and the newer frame's times,
+        // all seen from the newer frame's eye (the older frame as Frame
+        // Generation sees it: the head's movement taken out).
+        const auto truths = EngineTruths(scene, kFrames, kHalf - 1.0);
+        const auto older = EngineTruths(scene, kFrames, -1.0);
+        const auto newer = EngineTruths(scene, kFrames, 0.0);
+        std::vector<Run> runs{
+            Run{"without the vectors", FrameGenEngineMode::kOff, false, false, false, false},
+            Run{"assist", FrameGenEngineMode::kAssist, false, false, false, false},
+            Run{"the seen test", FrameGenEngineMode::kAssist, true, false, false, false},
+            occluder.camouflaged ? Run{"the forward map", FrameGenEngineMode::kAssist, false, false, true, false}
+                                 : Run{"the merge's seen test and the forward map", FrameGenEngineMode::kAssist, false, true,
+                                       true, false}};
+        const bool plain = !occluder.camouflaged && !occluder.infinite_far;
+        if (plain) {
+            runs.push_back(Run{"the seen test just in time", FrameGenEngineMode::kAssist, true, false, false, true});
+            runs.push_back(Run{"the merge's seen test and the forward map just in time", FrameGenEngineMode::kAssist, false,
+                               true, true, true});
+        }
+        run_all(frames, runs, occluder.infinite_far);
+        const std::size_t first = EngineMergedFrom(runs[2].merged);
+        auto revealed = [&](std::size_t k, int e, std::uint32_t x, std::uint32_t y) {
+            return truths[k][e].kind[pixel(x, y)] == 0 && older[k][e].kind[pixel(x, y)] == 2;
+        };
+        auto covered = [&](std::size_t k, int e, std::uint32_t x, std::uint32_t y) {
+            return truths[k][e].kind[pixel(x, y)] == 0 && newer[k][e].kind[pixel(x, y)] == 2;
+        };
+        auto square = [&](std::size_t k, int e, std::uint32_t x, std::uint32_t y) { return truths[k][e].kind[pixel(x, y)] == 2; };
+        std::array<std::array<EngineMapError, 4>, 4> errors{};
+        for (std::size_t i = 0; i < errors.size(); ++i) {
+            errors[i] = {EngineMapErrorOf(runs[i].outputs, truths, first, revealed),
+                         EngineMapErrorOf(runs[i].outputs, truths, first, covered),
+                         EngineMapErrorOf(runs[i].outputs, truths, first, square),
+                         EngineMapErrorOf(runs[i].outputs, truths, first, view)};
+            std::cout << "D3D12 engine visibility: " << occluder.name << " crossing the sky from frame " << first << ", "
+                      << runs[i].name << ": revealed " << errors[i][0].mean << " (" << errors[i][0].bad * 100.0 << "% bad, "
+                      << errors[i][0].pixels << " pixels), covered " << errors[i][1].mean << " ("
+                      << errors[i][1].bad * 100.0 << "% bad, " << errors[i][1].pixels << "), the square "
+                      << errors[i][2].mean << ", view " << errors[i][3].mean << " (" << errors[i][3].bad * 100.0 << "% bad)"
+                      << std::endl;
+        }
+        const std::string name = std::string("engine visibility: ") + occluder.name + ": ";
+        Check(first + 4 <= kFrames && errors[0][0].pixels > 500 && errors[0][1].pixels > 500,
+              name + "the vectors were not merged in, or the square revealed too little");
+        Check(errors[2][0].mean <= 0.7 * errors[0][0].mean,
+              name + "the seen test's revealed sky is not within 0.7 of mk1's error (" + std::to_string(errors[2][0].mean) +
+                  " against " + std::to_string(errors[0][0].mean) + ")");
+        Check(errors[2][1].mean <= errors[1][1].mean * 1.02 + 0.001 && errors[2][3].mean <= errors[1][3].mean * 1.02 + 0.0005,
+              name + "the seen test made the covered sky or the view worse than Assist's");
+        Check(errors[3][1].mean <= 0.75 * errors[0][1].mean && errors[3][3].mean <= errors[1][3].mean * 1.02 + 0.0005,
+              name + runs[3].name + ": the covered sky is not within 0.75 of mk1's error (" +
+                  std::to_string(errors[3][1].mean) + " against " + std::to_string(errors[0][1].mean) +
+                  "), or the view is worse than Assist's");
+        // Just in time, from the ring: as written together.
+        for (std::size_t j = 4; j < runs.size(); ++j) {
+            const Run& together = runs[j == 4 ? 2 : 3];
+            std::size_t differing = 0, compared = 0;
+            for (std::size_t k = first; k < runs[j].outputs.size() && k < together.outputs.size(); ++k) {
+                for (int e = 0; e < 2; ++e) {
+                    ++compared;
+                    differing += runs[j].outputs[k][e] == together.outputs[k][e] ? 0 : 1;
+                }
+            }
+            std::cout << "D3D12 engine visibility: " << runs[j].name << ": " << differing << " of " << compared
+                      << " frames differ from those written together" << std::endl;
+            Check(compared >= 8 && differing == 0,
+                  name + runs[j].name + " differs from the frames written together (" + std::to_string(differing) + " of " +
+                      std::to_string(compared) + ")");
+        }
+        if (!plain) continue;
+
+        // The right eye's vectors reversed, the left eye's right: the left
+        // eye's own verdict lets them be used, the right eye's holds both
+        // back. With the seen test the conversion reads the frame's verdict
+        // for both eyes (kEngineVerdict's x): every cell of both eyes
+        // measured and held back, none labelled unseen, the frames mk1's.
+        {
+            std::vector<std::array<Pixels, 2>> reversed;
+            std::vector<std::array<bool, 2>> merged;
+            std::size_t read = 0, cells = 0, held = 0;
+            RunEngineFrames(harness, frames,
+                            {.mode = FrameGenEngineMode::kAssist,
+                             .fault = EngineFault::kReversed,
+                             .flip_one_eye = true,
+                             .fraction = kHalf,
+                             .lock = true,
+                             .outputs = &reversed,
+                             .merged = &merged,
+                             .after =
+                                 [&](FrameGenGpu& gpu, std::size_t k) {
+                                     if (!merged[k][0] || !merged[k][1]) return;
+                                     ++read;
+                                     for (int e = 0; e < 2; ++e) {
+                                         EngineCells eye;
+                                         Check(ReadEngineCells(gpu, e, eye), "engine visibility: held back: cells read");
+                                         for (const std::uint32_t label : eye.labels) {
+                                             ++cells;
+                                             held += label == (kFrameGenEngineLabelMeasured | kFrameGenEngineLabelInvalid) ? 1 : 0;
+                                         }
+                                     }
+                                 },
+                             .frames = kFrames,
+                             .synthesis = FrameGenSynthesisMode::kInterpolate,
+                             .visibility = true});
+            std::size_t differing = 0;
+            for (std::size_t k = 0; k < reversed.size() && k < runs[0].outputs.size(); ++k) {
+                for (int e = 0; e < 2; ++e) differing += reversed[k][e] == runs[0].outputs[k][e] ? 0 : 1;
+            }
+            std::cout << "D3D12 engine visibility: the right eye's vectors reversed, with the seen test: " << read
+                      << " frames merged, " << held << " of " << cells << " cells measured and held back; " << differing
+                      << " frames differ from mk1's" << std::endl;
+            Check(read + first >= kFrames && held == cells && reversed.size() == runs[0].outputs.size() && differing == 0,
+                  name + "with the seen test, the right eye's verdict did not hold both eyes' vectors back (" +
+                      std::to_string(held) + " of " + std::to_string(cells) + " cells held back, " +
+                      std::to_string(differing) + " frames differ from mk1's)");
+        }
+
+        // Interpolating led (FrameGenTuning::engine_interpolate, research)
+        // with the seen test: the conversion reads Lead's predicate's
+        // verdict, or with no measured pass at all (engine_predicate false)
+        // the verdict written for the test. Both lead the frames, label what
+        // the previous frame did not see, and merge the same flow (Lead's
+        // merge never reads the measured flow where the verdict lets the
+        // vectors be used), up to a frame either held the vectors back in.
+        {
+            struct Led {
+                std::vector<bool> led;
+                std::vector<std::array<EngineCells, 2>> cells; // per frame, empty where not merged
+                std::size_t unseen{0};
+            };
+            std::array<Led, 2> led{};
+            for (std::size_t r = 0; r < led.size(); ++r) {
+                Led& run = led[r];
+                run.cells.resize(kFrames);
+                std::vector<std::array<bool, 2>> merged;
+                RunEngineFrames(harness, frames,
+                                {.mode = FrameGenEngineMode::kLead,
+                                 .fraction = kHalf,
+                                 .lock = true,
+                                 .merged = &merged,
+                                 .before =
+                                     [r](FrameGenTuning& tuning, std::size_t) {
+                                         tuning.engine_interpolate = true;
+                                         tuning.engine_predicate = r == 0;
+                                     },
+                                 .after =
+                                     [&](FrameGenGpu& gpu, std::size_t k) {
+                                         if (!merged[k][0] || !merged[k][1]) return;
+                                         for (int e = 0; e < 2; ++e) {
+                                             Check(ReadEngineCells(gpu, e, run.cells[k][e]), "engine visibility: led: cells read");
+                                             for (const std::uint32_t label : run.cells[k][e].labels) {
+                                                 run.unseen += label & kFrameGenEngineLabelUnseen ? 1 : 0;
+                                             }
+                                         }
+                                     },
+                                 .led = &run.led,
+                                 .frames = kFrames,
+                                 .synthesis = FrameGenSynthesisMode::kInterpolate,
+                                 .visibility = true});
+            }
+            std::size_t frames_led = 0, compared = 0, same = 0;
+            bool all_valid = true;
+            for (std::size_t k = first; k < kFrames && k < led[0].led.size() && k < led[1].led.size(); ++k) {
+                frames_led += led[0].led[k] && led[1].led[k] ? 1 : 0;
+                bool valid = led[0].led[k] && led[1].led[k];
+                for (const Led& run : led) {
+                    for (const EngineCells& eye : run.cells[k]) {
+                        valid = valid && !eye.labels.empty();
+                        for (const std::uint32_t label : eye.labels) valid = valid && !(label & kFrameGenEngineLabelInvalid);
+                    }
+                }
+                all_valid = all_valid && valid;
+                if (!all_valid) continue;
+                ++compared;
+                bool equal = true;
+                for (int e = 0; e < 2; ++e) {
+                    equal = equal && led[0].cells[k][e].labels == led[1].cells[k][e].labels &&
+                            led[0].cells[k][e].flow == led[1].cells[k][e].flow;
+                }
+                same += equal ? 1 : 0;
+            }
+            std::cout << "D3D12 engine visibility: interpolating led, with the seen test: " << frames_led
+                      << " frames led in both runs, " << led[0].unseen << " and " << led[1].unseen
+                      << " cells labelled unseen (the predicate's verdict, the one written for the test); " << same << " of "
+                      << compared << " frames merged the same" << std::endl;
+            Check(frames_led + first >= kFrames && led[0].unseen > 0 && led[1].unseen > 0 && compared >= 4 &&
+                      same == compared,
+                  name + "interpolating led, the seen test did not read the predicate's verdict as the one written for it (" +
+                      std::to_string(frames_led) + " frames led, " + std::to_string(same) + " of " + std::to_string(compared) +
+                      " merged the same)");
+        }
+    }
+
+    // The world turning 0.04 radians a frame (6 pixels) behind the panel, the
+    // sky infinitely far (an aircraft banking: the canopy frame against the
+    // sky, MSFS 2024's depth): the forward map moves the previous frame's sky
+    // in the cells along the panel's edges by the sky's flow, not by the
+    // panel's (which holds it still: a little worse than Assist there), so
+    // the sky the panel covers and reveals beside it is no worse than mk1's
+    // and within 0.95 of Assist's error (0.92 here), the view no worse.
+    {
+        const EngineScene scene{.world_turn = 0.04, .square_speed = 0.0, .square_distance = 12.0};
+        const EngineFrames frames = RenderEngineFrames(scene, false, kFrames);
+        const auto truths = EngineTruths(scene, kFrames, kHalf - 1.0);
+        std::vector<Run> runs{Run{"without the vectors", FrameGenEngineMode::kOff, false, false, false, false},
+                              Run{"assist", FrameGenEngineMode::kAssist, false, false, false, false},
+                              Run{"the forward map", FrameGenEngineMode::kAssist, false, false, true, false}};
+        run_all(frames, runs, true);
+        const std::size_t first = EngineMergedFrom(runs[2].merged);
+        auto strip = [&](std::size_t k, int e, std::uint32_t x, std::uint32_t y) {
+            const EngineTruth& truth = truths[k][e];
+            return truth.kind[pixel(x, y)] == 0 && EngineNear(truth, x, y, 8, 1);
+        };
+        std::array<EngineMapError, 3> strips{}, views{};
+        for (std::size_t i = 0; i < runs.size(); ++i) {
+            strips[i] = EngineMapErrorOf(runs[i].outputs, truths, first, strip);
+            views[i] = EngineMapErrorOf(runs[i].outputs, truths, first, view);
+            std::cout << "D3D12 engine visibility: the world turning behind the panel, the sky infinitely far, from frame "
+                      << first << ", " << runs[i].name << ": the sky beside the panel " << strips[i].mean << " ("
+                      << strips[i].bad * 100.0 << "% bad, " << strips[i].pixels << " pixels), view " << views[i].mean
+                      << " (" << views[i].bad * 100.0 << "% bad)" << std::endl;
+        }
+        Check(first + 4 <= kFrames && strips[0].pixels > 1000, "engine visibility: turning: the vectors were not merged in");
+        Check(strips[2].mean <= 0.95 * strips[1].mean && strips[2].mean <= strips[0].mean &&
+                  views[2].mean <= views[1].mean * 1.02 + 0.0005,
+              "engine visibility: turning: the forward map's sky beside the panel is not within 0.95 of Assist's error and "
+              "no worse than mk1's (" +
+                  std::to_string(strips[2].mean) + " against " + std::to_string(strips[1].mean) + " and " +
+                  std::to_string(strips[0].mean) + "), or its view is worse than Assist's");
+    }
+
+    // A jittered projection's vectors, the convention fixed with its jitter
+    // (EngineAssistScenarios' run, interpolating with the seen test): the
+    // conversion takes the bias from kEngineVerdict's zw, the merged flow is
+    // the scene's within a tenth of a pixel, and the test labels what the
+    // previous frame did not see.
+    {
+        const EngineFrames still = RenderEngineFrames(EngineScene{}, true);
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV_CONVENTION", "1,1,included,jitter");
+        EngineAccuracy accuracy;
+        std::size_t unseen = 0;
+        const auto measure = MeasureEngineAccuracy(still, accuracy);
+        const EngineRunResult run = RunEngineFrames(
+            harness, still,
+            {.mode = FrameGenEngineMode::kAssist,
+             .fault = EngineFault::kJitter,
+             .after =
+                 [&](FrameGenGpu& gpu, std::size_t k) {
+                     measure(gpu, k);
+                     if (k == 0 || gpu.EngineStatus(~0ull).validation.state != FrameGenEngineValidation::State::kLocked) return;
+                     for (int e = 0; e < 2; ++e) {
+                         EngineCells cells;
+                         if (!ReadEngineCells(gpu, e, cells)) continue;
+                         for (const std::uint32_t label : cells.labels) unseen += label & kFrameGenEngineLabelUnseen ? 1 : 0;
+                     }
+                 },
+             .synthesis = FrameGenSynthesisMode::kInterpolate,
+             .visibility = true});
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV_CONVENTION", "");
+        std::cout << "D3D12 engine visibility: jittered, with the seen test: " << DescribeEngineRun(run) << "; "
+                  << accuracy.compared << " cells compared: worst " << accuracy.worst << " px, mean " << accuracy.Mean()
+                  << " px; " << unseen << " cells labelled unseen" << std::endl;
+        Check(run.locked && run.status.validation.convention.jitter && accuracy.compared > 500 && accuracy.Mean() < 0.1 &&
+                  unseen > 0,
+              "engine visibility: with the seen test, the jittered vectors' bias was not taken out (mean " +
+                  std::to_string(accuracy.Mean()) + " px, " + std::to_string(unseen) + " cells unseen)");
+    }
+    // A still square: the seen test labels what the head's movement reveals
+    // (the panel's edges, the view's) and changes the frames within noise.
+    {
+        const EngineScene scene{.square_speed = 0.0, .square_distance = 4.0, .square_start = -1.4, .square_height = 1.2};
+        const EngineFrames frames = RenderEngineFrames(scene, false, kFrames);
+        const auto truths = EngineTruths(scene, kFrames, kHalf - 1.0);
+        std::vector<Run> runs{Run{"assist", FrameGenEngineMode::kAssist, false, false, false, false},
+                              Run{"the seen test", FrameGenEngineMode::kAssist, true, false, false, false}};
+        run_all(frames, runs, false);
+        const std::size_t first = EngineMergedFrom(runs[1].merged);
+        const EngineMapError plain = EngineMapErrorOf(runs[0].outputs, truths, first, view);
+        const EngineMapError seen = EngineMapErrorOf(runs[1].outputs, truths, first, view);
+        std::cout << "D3D12 engine visibility: a still square from frame " << first << ": view " << plain.mean << " ("
+                  << plain.bad * 100.0 << "% bad) in Assist, " << seen.mean << " (" << seen.bad * 100.0
+                  << "% bad) with the seen test" << std::endl;
+        Check(first + 4 <= kFrames && std::abs(seen.mean - plain.mean) <= 0.02 * plain.mean + 0.0002,
+              "engine visibility: a still square's frames changed beyond noise with the seen test (" +
+                  std::to_string(seen.mean) + " against " + std::to_string(plain.mean) + ")");
     }
 }
 

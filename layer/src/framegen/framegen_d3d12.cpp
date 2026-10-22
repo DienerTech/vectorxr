@@ -109,7 +109,8 @@ std::string Failure(const char* operation, HRESULT hr) {
     return std::string(operation) + " failed: hr=" + std::to_string(static_cast<long>(hr));
 }
 
-// The engine motion map's own passes (stage 7, FrameGenTuning::engine_map).
+// The engine motion map's own passes (stage 7, FrameGenTuning::engine_map;
+// stage 8's forward map, FrameGenTuning::engine_bidir).
 bool EngineMapPass(FrameGenPass pass) {
     return pass == FrameGenPass::kShiftSplatEngine || pass == FrameGenPass::kShiftResolveEngine ||
            pass == FrameGenPass::kShiftFillEngine;
@@ -274,11 +275,12 @@ struct ViewResources {
     std::uint64_t engine_map_frame{0};
     float engine_map_time{0.0f};
     bool engine_map_cover{false};
-    // Stage 6 (made by Execute for the first frame the vectors lead, before
-    // any view of it is planned: EnsureEngineLead): the frame's verdict for
-    // both eyes (kEngineVerdict), and the predicate of the measured passes
-    // it is copied into (a buffer of kEnginePredicateBytes; buffers decay to
-    // COMMON after each submission). Neither depends on the flow's level.
+    // Stage 6 (made by Execute for the first frame the vectors lead, or
+    // whose cells take stage 8's seen test, before any view of it is
+    // planned: EnsureEngineLead): the frame's verdict for both eyes
+    // (kEngineVerdict), and the predicate of the measured passes it is
+    // copied into (a buffer of kEnginePredicateBytes; buffers decay to COMMON
+    // after each submission). Neither depends on the flow's level.
     Texture engine_verdict;
     Texture engine_predicate;
     // Optical flow hardware (FrameGenTuning::hardware_flow): its inputs,
@@ -323,7 +325,8 @@ struct ViewResources {
 // Where RecordPlan stops: at the plan's end, right before kFlowUnpack (the
 // optical flow hardware's vectors come next), or right before the first
 // dispatch reading the other view's verdict on the game's vectors (Lead's
-// predicate, kEngineConvert): every view's evidence is recorded first.
+// predicate, stage 8's verdict for the seen test, kEngineConvert): every
+// view's evidence is recorded first.
 enum class RecordUntil { kEnd, kHardware, kVerdicts };
 
 // One view's recording: a plan recorded up to `next`, resumable after the
@@ -2979,9 +2982,14 @@ class D3D12FrameGen final : public FrameGenGpu {
         // Every view's verdict and predicate exist before any view is
         // planned: one that cannot be made leaves the vectors out of both
         // eyes' plans (engine_failed_, which BeginView reads), never one eye
-        // led on the other's verdict of a frame before.
+        // led on the other's verdict of a frame before. Interpolating with
+        // the seen test (stage 8) reads the verdict too.
         for (std::size_t i = 0; i < views.size() && lead; ++i) {
             lead = EnsureEngineLead(views_[i]);
+        }
+        const bool seen = evidence && !lead && FrameGenEngineVisibility(effective_tuning);
+        for (std::size_t i = 0; i < views.size() && seen && !engine_failed_; ++i) {
+            EnsureEngineLead(views_[i]);
         }
         evidence = evidence && !engine_failed_;
         if (lead) {
@@ -3027,8 +3035,9 @@ class D3D12FrameGen final : public FrameGenGpu {
         // them, then the rest (without hardware flow, everything at once).
         // The game's vectors (stage 5) are merged in after every view's
         // verdict on them: each eye's holds the other's back too
-        // (kEngineConvert, and in Lead the predicate, read it), so the eyes
-        // take them or not together.
+        // (kEngineConvert, and in Lead or with stage 8's seen test the
+        // verdict for both eyes, read it), so the eyes take them or not
+        // together.
         std::vector<ViewRecording> recordings(views.size());
         bool hardware = false;
         for (std::size_t i = 0; i < views.size() && ok; ++i) {
@@ -3132,9 +3141,12 @@ class D3D12FrameGen final : public FrameGenGpu {
                                          &view.depth[newest], &view.history[view.history_state.Previous()]}) {
                     if (texture->resource) Require(barriers, *texture, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
                 }
-                // The labels the confidence view's tint reads (stage 5), and
-                // the engine motion map with the world's motion kept (stage 7).
-                if ((effective_tuning.engine_tint || effective_tuning.engine_map != FrameGenEngineMap::kOff) &&
+                // The labels the confidence view's tint reads (stage 5), the
+                // engine motion map with the world's motion kept (stage 7),
+                // and interpolated frames for what the previous frame did not
+                // see (stage 8).
+                if ((effective_tuning.engine_tint || effective_tuning.engine_map != FrameGenEngineMap::kOff ||
+                     FrameGenEngineVisibility(effective_tuning)) &&
                     recordings[i].assist) {
                     Require(barriers, view.engine_labels[newest], D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
                 }
@@ -3852,8 +3864,8 @@ class D3D12FrameGen final : public FrameGenGpu {
     }
 
     // Stage 7: the engine motion map's passes, made the first time a view of
-    // a session with the map on is set up (research: other sessions never
-    // pay for them).
+    // a session with the map on (or stage 8's forward map, which they build
+    // too) is set up (research: other sessions never pay for them).
     bool EnsureEngineMapPasses(std::string& error) {
         for (std::size_t pass = 0; pass < kFrameGenPassCount; ++pass) {
             if (!EngineMapPass(static_cast<FrameGenPass>(pass)) || pipelines_[pass]) {
@@ -3874,7 +3886,8 @@ class D3D12FrameGen final : public FrameGenGpu {
     // Stage 7: what a view's motion map holds once `plan` is recorded: the
     // engine motion map it built for real frame `frame_id` (`cover`: from its
     // cover flow), which a later frame of that real frame may read again
-    // (FrameGenTuning::engine_map_reuse), or nothing of the kind. Counts the
+    // (FrameGenTuning::engine_map_reuse), or nothing of the kind (another map,
+    // stage 8's forward map among them). Counts the
     // frames written with the engine motion map, built or (`reused`) read
     // again.
     void NoteMotionMap(ViewResources& view, const FrameGenViewPlan& plan, std::uint64_t frame_id, bool cover,
@@ -3883,7 +3896,9 @@ class D3D12FrameGen final : public FrameGenGpu {
         for (const FrameGenDispatch& dispatch : plan.dispatches) {
             if (dispatch.pass == FrameGenPass::kShiftClear && dispatch.outputs[1].kind == FrameGenTextureKind::kMotionMap) {
                 written = true;
-                engine_maps_ += (dispatch.constants.options[1] & kFrameGenFlagEngine) != 0 ? 1 : 0;
+                // The forward map (stage 8) is built by the same passes.
+                const bool forward = (dispatch.constants.options[0] & kFrameGenEngineMapForward) != 0;
+                engine_maps_ += (dispatch.constants.options[1] & kFrameGenFlagEngine) != 0 && !forward ? 1 : 0;
             }
         }
         engine_maps_ += reused ? 1 : 0;
@@ -5467,7 +5482,8 @@ class D3D12FrameGen final : public FrameGenGpu {
 
     // Stage 6: the view's verdict for both eyes and the predicate it is
     // copied into, made the first frame the vectors lead it (a session
-    // switched to Lead at a config reload, or held at Assist until then),
+    // switched to Lead at a config reload, or held at Assist until then), or
+    // whose cells take stage 8's seen test (which reads the verdict alone),
     // before any view of that frame is planned (Execute); kept while the
     // view keeps its raw fields. When they cannot be made, nothing of the
     // vectors is read this session, as for the textures above; those made
@@ -6423,13 +6439,20 @@ class D3D12FrameGen final : public FrameGenGpu {
         if (effective.depth && !EnsureTrust(view, submission.request.extent, error)) {
             return false;
         }
-        if (effective.depth && (tuning.depth_splat || depth_splat_ || tuning.engine_map != FrameGenEngineMap::kOff) &&
+        // The motion map's texture holds the engine motion map (stage 7) and
+        // the forward map (stage 8, research) too, built by the engine map's
+        // passes: the latter only for interpolated frames of a real frame the
+        // game's vectors were merged into (other sessions never pay for it).
+        const bool forward = tuning.engine_bidir && tuning.mode == FrameGenSynthesisMode::kInterpolate &&
+                             FrameGenEngineModeFor(tuning) >= FrameGenEngineMode::kAssist && effective.engine_motion;
+        const bool engine_maps = tuning.engine_map != FrameGenEngineMap::kOff || forward;
+        if (effective.depth && (tuning.depth_splat || depth_splat_ || engine_maps) &&
             !view.motion_map.resource &&
             !Create(view.motion_map, FrameGenPyramid(submission.request.extent)[1], DXGI_FORMAT_R32_UINT,
                     DXGI_FORMAT_R32_UINT, true, error)) {
             return false;
         }
-        if (effective.depth && tuning.engine_map != FrameGenEngineMap::kOff && !EnsureEngineMapPasses(error)) {
+        if (effective.depth && engine_maps && !EnsureEngineMapPasses(error)) {
             return false;
         }
         // The previous frame's depth was used (its trust scores were kept),

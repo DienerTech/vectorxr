@@ -217,7 +217,9 @@ enum class FrameGenTextureKind : std::uint8_t {
     kEngineParamsOther,
     // Stage 6 (Lead): the frame's verdict for both eyes (one RGBA32F texel,
     // kEngineSolve's stage 2), whose first 8 bytes are zero exactly when
-    // both eyes' vectors may be used: copied into the view's predicate.
+    // both eyes' vectors may be used: copied into the view's predicate. Its
+    // zw: the view's bias, for kEngineConvert's seen test (stage 8, which
+    // reads both from here).
     kEngineVerdict,
     // Stage 7 (FrameGenTuning::engine_map): the world's motion a real
     // frame's filters read (kWorldParams' first four texels), copied at the
@@ -296,6 +298,13 @@ inline constexpr std::uint32_t kFrameGenFlagEngine = 8192u;
 // map's, added to each texel's motion).
 inline constexpr std::uint32_t kFrameGenEngineMapWorld = 1u;
 inline constexpr std::uint32_t kFrameGenEngineMapMerged = 2u;
+// Stage 8 (research, FrameGenTuning::engine_bidir): the kShift*Engine passes
+// build the forward map instead, for an interpolated frame (tuning[1]: its
+// fraction times FrameGenTuning::interval_ratio, as the flow read is the pair
+// before's): the previous real frame's content (input 0 its resolved depth,
+// input 1 its filtered flow) moved that far along its own motion, seen in the
+// newest view, the offsets leading back into the previous frame.
+inline constexpr std::uint32_t kFrameGenEngineMapForward = 4u;
 // A generated frame within this time (in real frame intervals) of the one
 // its real frame's engine motion map was built for reads that map again,
 // scaled to its own time (FrameGenTuning::engine_map_reuse).
@@ -306,6 +315,20 @@ inline constexpr float kFrameGenEngineReachMost = 2.0f;
 // where the world's motion is the application's own (kWorldSet: input 3's
 // texel 2 y is 1), never with a fitted one (FrameGenTuning::world_sky).
 inline constexpr std::uint32_t kFrameGenFlagWorldSky = 16384u;
+// Engine motion vectors (stage 8). Synthesis, interpolating with depth: at a
+// motion boundary, content whose flow cell's label says the previous frame
+// did not see it (kFrameGenEngineLabelUnseen; input 5, the real frame's
+// labels; where the content lies on the surface its label was chosen for) is
+// shown from the newest frame alone, however well the two frames agree there
+// (FrameGenTuning::engine_visibility_synthesis).
+inline constexpr std::uint32_t kFrameGenFlagEngineVisibility = 32768u;
+// Research (stage 8). Synthesis, interpolating with depth: content being
+// covered (only the previous frame shows it) is read from the previous frame
+// where the forward map (input 5, kMotionMap) puts it, and at a motion
+// boundary the forward map's content is taken as being covered wherever the
+// chosen vector carries content the newest frame does not show moving that
+// way (FrameGenTuning::engine_bidir).
+inline constexpr std::uint32_t kFrameGenFlagEngineBidir = 65536u;
 // World motion: samples per side of the fit's grid, and its iterations.
 inline constexpr std::uint32_t kFrameGenWorldGrid = 128u;
 // The trust vote's tile side in half-resolution texels (FG_TRUST_TILE):
@@ -734,6 +757,22 @@ struct FrameGenTuning {
     FrameGenEngineMap engine_map{FrameGenEngineMap::kOff};
     bool engine_map_reuse{false};
     float engine_reach{1.0f};
+    // Stage 8, interpolating (research, the presenter's switch): each cell's
+    // label says whether the previous frame saw the content the game's vector
+    // taken there moves (kEngineConvert's seen test, against the previous
+    // frame's depth), and kEngineMerge takes such a vector without matching
+    // it (FrameGenEngineVisibility); with engine_visibility_synthesis, at a
+    // motion boundary synthesis shows content the previous frame did not see
+    // from the newest frame alone (VECTORXR_FRAMEGEN_ENGINE_VISIBILITY=1 sets
+    // both, =merge the first alone).
+    bool engine_visibility{false};
+    bool engine_visibility_synthesis{false};
+    // Stage 8, research (VECTORXR_FRAMEGEN_ENGINE_BIDIR=1): interpolated frames
+    // with depth, of a real frame whose analysis merged the game's vectors
+    // in, read content being covered from the previous frame where the
+    // forward map puts it (kFrameGenEngineMapForward, built per frame), in
+    // place of the labels' read (input 5).
+    bool engine_bidir{false};
 };
 
 struct FrameGenViewPlan {
@@ -1454,11 +1493,13 @@ const char* FrameGenEngineVerdictName(std::size_t index); // "unlocked", "stale"
 //
 // A cell's label (kEngineLabels, R32_UINT): bits 0-2 what moved it, bits 3-4
 // the class of its vector (the engine's candidates': the head's movement, the
-// world's, their own), bit 6 the frame's verdict held the vectors back, bit 7
-// the cell is textured (its block's luma varies: the tiles' share counts
-// those); with the engine motion map (stage 7, kFrameGenEngineMergeDepths),
-// bits 16-31 the depth of the surface the vector taken was chosen for (a half
-// float; 0 elsewhere).
+// world's, their own), bit 5 the previous frame did not see the content the
+// vector taken moves (stage 8, FrameGenTuning::engine_visibility:
+// kEngineConvert's seen test), bit 6 the frame's verdict held the vectors
+// back, bit 7 the cell is textured (its block's luma varies: the tiles' share
+// counts those, but those of bit 5); with the engine motion map (stage 7) or
+// the seen test (kFrameGenEngineMergeDepths), bits 16-31 the depth of the
+// surface the vector taken was chosen for (a half float; 0 elsewhere).
 inline constexpr std::uint32_t kFrameGenEngineLabelSource = 7u;      // mask
 inline constexpr std::uint32_t kFrameGenEngineLabelMeasured = 0u;    // the measured flow
 inline constexpr std::uint32_t kFrameGenEngineLabelNear = 1u;        // the vectors: the nearest surface's
@@ -1471,23 +1512,28 @@ inline constexpr std::uint32_t kFrameGenEngineClassShift = 3u;
 inline constexpr std::uint32_t kFrameGenEngineClassHead = 1u;        // within a texel (or 8%) of no motion
 inline constexpr std::uint32_t kFrameGenEngineClassWorld = 2u;       // ... of the world's motion (kWorldParams)
 inline constexpr std::uint32_t kFrameGenEngineClassOwn = 3u;         // neither
+inline constexpr std::uint32_t kFrameGenEngineLabelUnseen = 32u;     // the previous frame did not see its content (stage 8)
 inline constexpr std::uint32_t kFrameGenEngineLabelInvalid = 64u;    // the frame's verdict held the vectors back
 inline constexpr std::uint32_t kFrameGenEngineLabelTextured = 128u;
 // The tiles' side in final-level cells.
 inline constexpr std::uint32_t kFrameGenEngineTile = 8u;
 // kEngineMerge's options.x: Assist's rule, or Lead's (stage 6), with no
 // measured flow at all (FrameGenTuning::engine_predicate false); the labels
-// keep their surface's depth (stage 7, FrameGenTuning::engine_map: input 5
-// the resolved depth).
+// keep their surface's depth (stage 7, FrameGenTuning::engine_map, and stage
+// 8's seen test: input 5 the resolved depth).
 inline constexpr std::uint32_t kFrameGenEngineMergeAssist = 1u;
 inline constexpr std::uint32_t kFrameGenEngineMergeLead = 2u;
 inline constexpr std::uint32_t kFrameGenEngineMergeUnmeasured = 4u;
 inline constexpr std::uint32_t kFrameGenEngineMergeDepths = 8u;
 // kEngineConvert's options.x: the camera from bit 4 (as kEngineReduce's),
 // the frame before's tiles bound (input 3), the world's motion bound (input
-// 4: the classes' world).
+// 4: the classes' world), the seen test (stage 8: input 5 the previous
+// frame's resolved depth in place of the other view's kEngineParams, input
+// 2 kEngineVerdict in place of the view's own, both eyes' verdict and the
+// bias in it).
 inline constexpr std::uint32_t kFrameGenEngineConvertTiles = 1u << 8;
 inline constexpr std::uint32_t kFrameGenEngineConvertWorld = 1u << 9;
+inline constexpr std::uint32_t kFrameGenEngineConvertSeen = 1u << 10;
 // The tiles over a final-level extent.
 inline FrameGenExtent FrameGenEngineTiles(FrameGenExtent cells) {
     return {(cells.width + kFrameGenEngineTile - 1) / kFrameGenEngineTile,
@@ -1497,6 +1543,19 @@ inline FrameGenExtent FrameGenEngineTiles(FrameGenExtent cells) {
 // further than Assist when interpolating (Lead's model-driven flow needs
 // Interpolate's own gate) unless FrameGenTuning::engine_interpolate.
 FrameGenEngineMode FrameGenEngineModeFor(const FrameGenTuning& tuning);
+// Stage 8: whether a submission interpolating from Assist takes the seen test
+// on the cells' vectors (FrameGenTuning::engine_visibility). The test runs on
+// views with the previous frame's depth (FrameGenViewRequest::
+// depth_previous): kEngineSolve's stage 2 writes the verdict for both eyes
+// (kEngineVerdict, as Lead's predicate) for kEngineConvert to read with the
+// bias, which frees its input 5 for that depth; kEngineMerge takes a vector
+// whose content the previous frame did not see without matching it (there is
+// nothing there to match) where the tile trusts the vectors at all and the
+// vector is of the head's or the world's class, and its label says so
+// (kFrameGenEngineLabelUnseen, which kEngineTiles leaves out of the trust),
+// with the depth of its surface.
+// Backends make kEngineVerdict for such submissions as for Lead's.
+bool FrameGenEngineVisibility(const FrameGenTuning& tuning);
 
 // --- Engine motion vectors: lead (stage 6) ----------------------------------
 //

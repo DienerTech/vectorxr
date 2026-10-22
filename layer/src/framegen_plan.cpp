@@ -222,6 +222,35 @@ void AppendEngineMotionMap(FrameGenViewPlan& plan, const FrameGenConstants& base
     pass(FrameGenPass::kShiftFillEngine, {keys, flow, {}, {}, {}, {}}, target);
 }
 
+// Stage 8, research (FrameGenTuning::engine_bidir): the forward map for a
+// frame interpolated `fraction` of the way from the previous real frame,
+// built into kMotionMap with the engine motion map's passes (their keys
+// reused, as the motion map's): the previous frame's content (its resolved
+// depth and filtered flow, in the ring) moved that far along its own motion
+// and seen in the newest view, nearest in front. That flow is the pair
+// before's: steady motion moves it the intervals' ratio as far now
+// (`interval_ratio`, as the filters scale it). Nothing fills its gaps: no
+// content of the previous frame reaches them.
+void AppendForwardMap(FrameGenViewPlan& plan, const FrameGenConstants& base, float fraction, float interval_ratio) {
+    FrameGenConstants mapping = base;
+    mapping.options = {kFrameGenEngineMapForward, kFrameGenFlagDepth | kFrameGenFlagDepthSplat | kFrameGenFlagEngine, 0, 0};
+    mapping.tuning[1] = fraction * std::clamp(interval_ratio, 0.25f, 4.0f);
+    auto pass = [&](FrameGenPass kind, std::array<FrameGenTexture, 6> inputs, FrameGenTexture output,
+                    FrameGenTexture second = {}) {
+        FrameGenDispatch dispatch = Dispatch(kind, plan.levels[1], plan.levels[1], mapping);
+        dispatch.inputs = inputs;
+        dispatch.outputs = {output, second};
+        plan.dispatches.push_back(dispatch);
+    };
+    const FrameGenTexture depth = Texture(FrameGenTextureKind::kDepthPrevious);
+    const FrameGenTexture flow = Texture(FrameGenTextureKind::kFilteredPrevious, plan.final_flow_level);
+    const FrameGenTexture keys = Texture(FrameGenTextureKind::kShiftKeys);
+    const FrameGenTexture target = Texture(FrameGenTextureKind::kMotionMap);
+    pass(FrameGenPass::kShiftClear, {}, keys, target);
+    pass(FrameGenPass::kShiftSplatEngine, {depth, flow, {}, {}, {}, {}}, keys);
+    pass(FrameGenPass::kShiftResolveEngine, {depth, flow, keys, {}, {}, {}}, target);
+}
+
 // Stage 7 (FrameGenTuning::engine_map): whether a frame `extrapolate`d from
 // a real frame whose flow cells the game's vectors labelled (its analysis
 // merged them in, from Assist) takes the engine motion map.
@@ -359,16 +388,17 @@ void AppendEngineEvidence(FrameGenViewPlan& plan, const FrameGenConstants& base,
 // Stage 6: the frame's verdict for both eyes (kEngineSolve's stage 2, from
 // this view's kEngineParams and the other view's), the predicate of the
 // measured passes after it: kEngineVerdict, copied into the view's predicate
-// by the backend (kFrameGenPredicateSet).
-void AppendEnginePredicate(FrameGenViewPlan& plan, const FrameGenConstants& base) {
-    FrameGenDispatch predicate = Dispatch(FrameGenPass::kEngineSolve, {kFrameGenThreadGroupSize, kFrameGenThreadGroupSize},
-                                          plan.levels[1], base);
-    predicate.inputs = {FrameGenTexture{}, {}, {}, Texture(FrameGenTextureKind::kEngineParams), {},
-                        Texture(FrameGenTextureKind::kEngineParamsOther)};
-    predicate.outputs = {Texture(FrameGenTextureKind::kEngineVerdict), {}};
-    predicate.constants.options = {2u, base.options[1], 0, 0};
-    predicate.predicate = kFrameGenPredicateSet;
-    plan.dispatches.push_back(predicate);
+// by the backend (kFrameGenPredicateSet). Stage 8's seen test reads it
+// without a predicate (`predicate` false).
+void AppendEngineVerdict(FrameGenViewPlan& plan, const FrameGenConstants& base, bool predicate) {
+    FrameGenDispatch verdict = Dispatch(FrameGenPass::kEngineSolve, {kFrameGenThreadGroupSize, kFrameGenThreadGroupSize},
+                                        plan.levels[1], base);
+    verdict.inputs = {FrameGenTexture{}, {}, {}, Texture(FrameGenTextureKind::kEngineParams), {},
+                      Texture(FrameGenTextureKind::kEngineParamsOther)};
+    verdict.outputs = {Texture(FrameGenTextureKind::kEngineVerdict), {}};
+    verdict.constants.options = {2u, base.options[1], 0, 0};
+    verdict.predicate = predicate ? kFrameGenPredicateSet : kFrameGenPredicateNone;
+    plan.dispatches.push_back(verdict);
 }
 
 // How far the head turned between the request's two views, in degrees.
@@ -391,33 +421,43 @@ float HeadTurnDegrees(const FrameGenViewRequest& request) {
 // head turns more than 2 degrees a frame). Where the vectors lead (stage 6),
 // the merge takes Lead's rule, and with no measured flow at all
 // (FrameGenTuning::engine_predicate false) reads none. For the engine motion
-// map (stage 7, with depth) the labels keep the depth of the surface each
-// vector taken was chosen for, from the resolved depth.
+// map (stage 7, with depth) and stage 8's seen test the labels keep the depth
+// of the surface each vector taken was chosen for, from the resolved depth.
+// Interpolating with the seen test (FrameGenEngineVisibility, with the
+// previous frame's depth), the conversion also tells whether the previous
+// frame saw each candidate's content where its vector puts it then, and
+// reads both eyes' verdict from kEngineVerdict (written here unless Lead's
+// predicate wrote it), so the previous frame's depth takes the other view's
+// place; the merge takes such content's vector without matching it.
 void AppendEngineAssist(FrameGenViewPlan& plan, const FrameGenConstants& base, const FrameGenViewRequest& request,
                         const FrameGenTuning& tuning, bool world) {
     const bool lead = FrameGenEngineLeads(request, tuning);
     const bool measured = !lead || tuning.engine_predicate;
+    const bool seen = FrameGenEngineVisibility(tuning) && request.depth && request.depth_previous;
     const std::uint8_t level = plan.final_flow_level;
     const FrameGenExtent cells = plan.levels[level];
     const FrameGenTexture tiles_before =
         request.engine_tiles ? Texture(FrameGenTextureKind::kEngineTilesPrevious) : FrameGenTexture{};
+    if (seen && !(lead && tuning.engine_predicate)) {
+        AppendEngineVerdict(plan, base, false);
+    }
     FrameGenDispatch convert = Dispatch(FrameGenPass::kEngineConvert, cells, plan.levels[1], base);
     convert.inputs = {Texture(FrameGenTextureKind::kEngineRaw),
                       Texture(FrameGenTextureKind::kDepth),
-                      Texture(FrameGenTextureKind::kEngineParams),
+                      Texture(seen ? FrameGenTextureKind::kEngineVerdict : FrameGenTextureKind::kEngineParams),
                       tiles_before,
                       world ? Texture(FrameGenTextureKind::kWorldParams) : FrameGenTexture{},
-                      Texture(FrameGenTextureKind::kEngineParamsOther)};
+                      Texture(seen ? FrameGenTextureKind::kDepthPrevious : FrameGenTextureKind::kEngineParamsOther)};
     convert.outputs = {Texture(FrameGenTextureKind::kEngineCandidate), Texture(FrameGenTextureKind::kEngineInfo)};
     convert.constants.options = {(static_cast<std::uint32_t>(tuning.engine.camera) << 4) |
                                      (request.engine_tiles ? kFrameGenEngineConvertTiles : 0u) |
-                                     (world ? kFrameGenEngineConvertWorld : 0u),
+                                     (world ? kFrameGenEngineConvertWorld : 0u) | (seen ? kFrameGenEngineConvertSeen : 0u),
                                  base.options[1], 0, level};
     convert.constants.tuning = FrameGenEngineDecode(tuning.engine, request.engine_encoding);
     plan.dispatches.push_back(convert);
     // The candidates cost what REFINE's would: its block at its match level.
     const std::uint8_t match = FrameGenMatchLevel(level);
-    const bool depths = tuning.engine_map != FrameGenEngineMap::kOff && request.depth;
+    const bool depths = (tuning.engine_map != FrameGenEngineMap::kOff || seen) && request.depth;
     FrameGenDispatch merge = Dispatch(FrameGenPass::kEngineMerge, cells, plan.levels[match], base);
     merge.inputs = {Texture(FrameGenTextureKind::kLumaNewest, match),
                     Texture(FrameGenTextureKind::kLumaPrevious, match),
@@ -448,6 +488,27 @@ bool EngineTint(const FrameGenViewRequest& request, const FrameGenTuning& tuning
            FrameGenEngineModeFor(tuning) >= FrameGenEngineMode::kAssist && !motion;
 }
 
+// Stage 8: interpolated frames with depth read the real frame's labels for
+// what the previous frame did not see (FrameGenEngineVisibility,
+// FrameGenTuning::engine_visibility_synthesis), where its analysis labelled
+// the cells (input 5, free when interpolating).
+bool EngineVisible(const FrameGenViewRequest& request, const FrameGenTuning& tuning, bool extrapolate) {
+    return tuning.engine_visibility_synthesis && !extrapolate && request.depth && request.engine_motion &&
+           FrameGenEngineVisibility(tuning);
+}
+
+// Stage 8, research (FrameGenTuning::engine_bidir): interpolated frames with
+// depth read content being covered through the forward map, where the
+// previous real frame's depth and filtered flow are kept and its analysis
+// merged the game's vectors in (input 5, in place of the labels; not with
+// the confidence view's tint, which reads them). A frame whose vectors were
+// held back or missing is mk1's.
+bool EngineBidir(const FrameGenViewRequest& request, const FrameGenTuning& tuning, bool extrapolate) {
+    return tuning.engine_bidir && !extrapolate && request.depth && request.depth_previous && request.temporal &&
+           request.engine_motion && FrameGenEngineModeFor(tuning) >= FrameGenEngineMode::kAssist &&
+           !EngineTint(request, tuning, false);
+}
+
 // The quad views compositor's clamp (NaN clamps to `high`, unlike std::clamp).
 double ComposeClamp(double value, double low, double high) {
     return std::max(low, std::min(high, value));
@@ -475,6 +536,11 @@ FrameGenEngineMode FrameGenEngineModeFor(const FrameGenTuning& tuning) {
     return tuning.mode == FrameGenSynthesisMode::kInterpolate && !tuning.engine_interpolate
                ? std::min(tuning.engine_mode, FrameGenEngineMode::kAssist)
                : tuning.engine_mode;
+}
+
+bool FrameGenEngineVisibility(const FrameGenTuning& tuning) {
+    return tuning.engine_visibility && tuning.mode == FrameGenSynthesisMode::kInterpolate &&
+           FrameGenEngineModeFor(tuning) >= FrameGenEngineMode::kAssist;
 }
 
 bool FrameGenEngineLeads(const FrameGenViewRequest& request, const FrameGenTuning& tuning) {
@@ -718,7 +784,7 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
     if (lead) {
         AppendEngineEvidence(plan, base, request, tuning);
         if (tuning.engine_predicate) {
-            AppendEnginePredicate(plan, base);
+            AppendEngineVerdict(plan, base, true);
         }
     }
 
@@ -948,6 +1014,12 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
                                   merged ? &eye : nullptr);
             plan.frames_in_order = true;
         }
+        // Stage 8 (research): the forward map for this frame's time.
+        const bool forward = time > 0.0f && EngineBidir(request, tuning, tuning.mode == FrameGenSynthesisMode::kExtrapolate);
+        if (forward) {
+            AppendForwardMap(plan, base, fraction, tuning.interval_ratio);
+            plan.frames_in_order = true;
+        }
         FrameGenDispatch output = Dispatch(synthesize, plan.levels[0], plan.levels[plan.final_flow_level], base);
         output.inputs = {Texture(FrameGenTextureKind::kHistoryNewest),
                          Texture(FrameGenTextureKind::kHistoryPrevious),
@@ -968,6 +1040,14 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
         if (EngineTint(request, tuning, motion || engine_map)) {
             output.inputs[5] = Texture(FrameGenTextureKind::kEngineLabels);
             output.constants.options[1] |= kFrameGenFlagEngine;
+        }
+        if (EngineVisible(request, tuning, tuning.mode == FrameGenSynthesisMode::kExtrapolate) && !forward) {
+            output.inputs[5] = Texture(FrameGenTextureKind::kEngineLabels);
+            output.constants.options[1] |= kFrameGenFlagEngineVisibility;
+        }
+        if (forward) {
+            output.inputs[5] = Texture(FrameGenTextureKind::kMotionMap);
+            output.constants.options[1] |= kFrameGenFlagEngineBidir;
         }
         output.outputs = {Texture(FrameGenTextureKind::kOutput), {}};
         output.constants.tuning[0] = fraction;
@@ -1072,6 +1152,11 @@ FrameGenViewPlan BuildFrameGenSynthesisPlan(const FrameGenViewRequest& request, 
                               request.engine_world ? Texture(FrameGenTextureKind::kWorldParamsNewest) : FrameGenTexture{},
                               merged ? &eye : nullptr);
     }
+    // Stage 8 (research): the forward map for this frame's time.
+    const bool forward = EngineBidir(request, tuning, extrapolate);
+    if (forward) {
+        AppendForwardMap(plan, base, fraction, tuning.interval_ratio);
+    }
     FrameGenDispatch output = Dispatch(synthesize, plan.levels[0], plan.levels[plan.final_flow_level], base);
     output.inputs = {Texture(FrameGenTextureKind::kHistoryNewest),
                      Texture(FrameGenTextureKind::kHistoryPrevious),
@@ -1088,6 +1173,14 @@ FrameGenViewPlan BuildFrameGenSynthesisPlan(const FrameGenViewRequest& request, 
     if (EngineTint(request, tuning, motion || mapped)) {
         output.inputs[5] = Texture(FrameGenTextureKind::kEngineLabels);
         output.constants.options[1] |= kFrameGenFlagEngine;
+    }
+    if (EngineVisible(request, tuning, extrapolate) && !forward) {
+        output.inputs[5] = Texture(FrameGenTextureKind::kEngineLabels);
+        output.constants.options[1] |= kFrameGenFlagEngineVisibility;
+    }
+    if (forward) {
+        output.inputs[5] = Texture(FrameGenTextureKind::kMotionMap);
+        output.constants.options[1] |= kFrameGenFlagEngineBidir;
     }
     if (shifted) {
         // The map is built for this frame's own eye position: synthesis
@@ -1110,7 +1203,8 @@ FrameGenViewPlan BuildFrameGenSynthesisPlan(const FrameGenViewRequest& request, 
 std::optional<float> FrameGenEngineMapTime(const FrameGenViewPlan& plan) {
     for (const FrameGenDispatch& dispatch : plan.dispatches) {
         if (dispatch.pass == FrameGenPass::kShiftClear && dispatch.outputs[1].kind == FrameGenTextureKind::kMotionMap &&
-            (dispatch.constants.options[1] & kFrameGenFlagEngine) != 0) {
+            (dispatch.constants.options[1] & kFrameGenFlagEngine) != 0 &&
+            (dispatch.constants.options[0] & kFrameGenEngineMapForward) == 0) {
             return -dispatch.constants.tuning[1];
         }
     }

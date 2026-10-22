@@ -109,6 +109,19 @@ cbuffer FrameGenConstantBuffer : register(b0) {
 // EngineLanding), and synthesis reads it as the merged map (the eye's offset
 // in it too).
 #define FG_FLAG_ENGINE 8192u
+// Engine motion vectors, stage 8. Synthesis, interpolating with depth: at a
+// motion boundary, content whose flow cell's label says the previous frame
+// did not see it (FG_ENGINE_LABEL_UNSEEN; input 5, the real frame's labels)
+// is shown from the newest frame alone, however well the two frames agree.
+#define FG_FLAG_ENGINE_VISIBILITY 32768u
+// Research, stage 8: interpolating, content being covered (only the previous
+// frame shows it, see Occlusion) is read from the previous frame where the
+// forward map (input 5: FG_PASS_SHIFT_*_ENGINE with FG_ENGINE_MAP_FORWARD,
+// the previous frame's content moved along its own flow) puts it; at a
+// motion boundary, the forward map's content is taken as being covered
+// wherever the chosen vector carries content the newest frame does not show
+// moving that way.
+#define FG_FLAG_ENGINE_BIDIR 65536u
 // The candidates' flags (FG_PASS_ENGINE_CONVERT; the nearest surface's in
 // bits 0-3 of its info, the farthest's in 4-7): not a vector (the capture's
 // sentinel), mapped behind the view, absent (a game that clears its vectors:
@@ -121,6 +134,11 @@ cbuffer FrameGenConstantBuffer : register(b0) {
 // back, or the other eye's verdict held its own back, so this eye's are held
 // back too (the eyes take them, or not, together).
 #define FG_ENGINE_FLAG_HELD 256u
+// Bits 9 and 10 (stage 8, with FG_ENGINE_CONVERT_SEEN): the previous frame
+// did not see the nearest surface's content where its vector puts it then,
+// or the farthest's (out of its view, or something nearer stood there).
+#define FG_ENGINE_FLAG_NEAR_UNSEEN 512u
+#define FG_ENGINE_FLAG_FAR_UNSEEN 1024u
 // Absent: with the head's movement in the vectors, an exact zero on content
 // without depth or from this many meters (the world, the sky), where the
 // head's movement alone (its rotation) moves it by more than this many
@@ -130,9 +148,10 @@ cbuffer FrameGenConstantBuffer : register(b0) {
 #define FG_ENGINE_ABSENT_PIXELS 0.5
 // A flow cell's label (kFrameGenEngineLabel*): bits 0-2 what moved it, 3-4
 // the class of its vector (the head's movement alone, the world's, its own),
-// 6 the frame's verdict held the vectors back, 7 the cell is textured; with
-// the engine motion map (stage 7), the high half the depth of the surface the
-// vector taken was chosen for (a half float; 0 for other cells).
+// 5 the previous frame did not see the content the vector taken moves (stage
+// 8), 6 the frame's verdict held the vectors back, 7 the cell is textured;
+// with the engine motion map (stage 7), the high half the depth of the
+// surface the vector taken was chosen for (a half float; 0 for other cells).
 #define FG_ENGINE_LABEL_SOURCE 7u
 #define FG_ENGINE_LABEL_MEASURED 0u
 #define FG_ENGINE_LABEL_NEAR 1u
@@ -144,8 +163,15 @@ cbuffer FrameGenConstantBuffer : register(b0) {
 #define FG_ENGINE_CLASS_HEAD 1u
 #define FG_ENGINE_CLASS_WORLD 2u
 #define FG_ENGINE_CLASS_OWN 3u
+#define FG_ENGINE_LABEL_UNSEEN 32u
 #define FG_ENGINE_LABEL_INVALID 64u
 #define FG_ENGINE_LABEL_TEXTURED 128u
+// A texel takes its flow cell's label (the engine motion map's class, stage
+// 7; synthesis's unseen bit, stage 8) where it lies on the surface the label
+// was chosen for: its depth within this (natural log of the ratio) of the
+// depth FG_PASS_ENGINE_MERGE kept in the label's high half. The cells along
+// a canopy frame's edge hold the hangar or the sky behind it too.
+#define FG_ENGINE_MAP_SURFACE 0.3
 // The tiles' side in flow cells (kFrameGenEngineTile).
 #define FG_ENGINE_TILE 8u
 // The motion map's distance classes (stand-ins for fitted motion labels):
@@ -246,31 +272,24 @@ float DepthNearest(Texture2D<float4> depth, float2 uv) {
     return depth.Load(int3(texel, 0)).r;
 }
 
-#if defined(FG_PASS_LUMA)
-FG_BIND(0) Texture2D<float4> g_current : register(t0);
-FG_BIND(1) Texture2D<float4> g_previous : register(t1);
-FG_BIND(2) Texture2D<float4> g_depth : register(t2);
-FG_BIND(3) Texture2D<float4> g_depth_previous : register(t3);
-FG_BIND(6) SamplerState g_linear : register(s0);
-FG_BIND(4) FG_FORMAT("r32f") RWTexture2D<float> g_luma_current : register(u0);
-FG_BIND(5) FG_FORMAT("r32f") RWTexture2D<float> g_luma_previous : register(u1);
-
+#if defined(FG_PASS_LUMA) || (defined(FG_PASS_ENGINE_CONVERT) && !defined(__spirv__))
 // Previous-frame content nearer than this share of where the newest frame's
 // depth puts a point (and by FG_OCCLUDER_METERS) stood in front of it.
 #define FG_OCCLUDER_SHARE 0.92
 #define FG_OCCLUDER_METERS 0.01
 
 // Whether the previous frame saw the content at newest-view `uv` (linear
-// depth `depth`, which mapped it to `previous_uv`): false where its own
-// depth there is clearly nearer, so something stood in front of it (newly
-// revealed by head or object movement). Matching such texels finds aliases
-// (black panel against black rim), not motion. Depth the other eye
-// disproved (negative: scenery behind glass) never hides anything.
-bool SeenBefore(float2 uv, float depth, float2 previous_uv) {
+// depth `depth`, which mapped it to `previous_uv`), by its depth
+// (`depth_previous`): false where its own depth there is clearly nearer, so
+// something stood in front of it (newly revealed by head or object
+// movement). Matching such texels finds aliases (black panel against black
+// rim), not motion. Depth the other eye disproved (negative: scenery behind
+// glass) never hides anything.
+bool SeenBefore(Texture2D<float4> depth_previous, float2 uv, float depth, float2 previous_uv) {
     uint width, height;
-    g_depth_previous.GetDimensions(width, height);
+    depth_previous.GetDimensions(width, height);
     const int2 texel = clamp(int2(previous_uv * float2(width, height)), int2(0, 0), int2(width, height) - 1);
-    const float observed = g_depth_previous.Load(int3(texel, 0)).r;
+    const float observed = depth_previous.Load(int3(texel, 0)).r;
     if (!(observed > 0.0) || observed >= FG_FAR_DEPTH) {
         return true;
     }
@@ -286,6 +305,16 @@ bool SeenBefore(float2 uv, float depth, float2 previous_uv) {
     const float expected = -rotated.z * depth;
     return observed >= expected * FG_OCCLUDER_SHARE - FG_OCCLUDER_METERS;
 }
+#endif
+
+#if defined(FG_PASS_LUMA)
+FG_BIND(0) Texture2D<float4> g_current : register(t0);
+FG_BIND(1) Texture2D<float4> g_previous : register(t1);
+FG_BIND(2) Texture2D<float4> g_depth : register(t2);
+FG_BIND(3) Texture2D<float4> g_depth_previous : register(t3);
+FG_BIND(6) SamplerState g_linear : register(s0);
+FG_BIND(4) FG_FORMAT("r32f") RWTexture2D<float> g_luma_current : register(u0);
+FG_BIND(5) FG_FORMAT("r32f") RWTexture2D<float> g_luma_previous : register(u1);
 
 // Half-resolution luma of the newest frame and of the previous frame mapped
 // into the newest view. Invalid previous texels (outside the previous view,
@@ -301,7 +330,8 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     const float depth = (g.options.y & FG_FLAG_DEPTH) != 0u ? g_depth.Load(int3(id.xy, 0)).r : 0.0;
     float2 previous_uv;
     const bool inside = MapToPrevious(uv, depth, previous_uv);
-    const bool seen = inside && ((g.options.y & FG_FLAG_DEPTH_PREVIOUS) == 0u || SeenBefore(uv, depth, previous_uv));
+    const bool seen = inside && ((g.options.y & FG_FLAG_DEPTH_PREVIOUS) == 0u ||
+                                 SeenBefore(g_depth_previous, uv, depth, previous_uv));
     g_luma_previous[id.xy] = seen ? Luma(g_previous.SampleLevel(g_linear, previous_uv, 0.0).rgb) : -1.0;
 }
 #endif
@@ -1196,8 +1226,9 @@ FG_BIND(6) SamplerState g_linear : register(s0);
 // for a spare, the frame before), Direct3D 12 only, as depth is.
 Texture2D<uint> g_shift : register(t4);
 // FG_FLAG_DEPTH_SPLAT: the motion map built for this generated frame; or,
-// FG_FLAG_ENGINE with the confidence view (no motion map then), the real
-// frame's flow cell labels (FG_PASS_ENGINE_MERGE).
+// FG_FLAG_ENGINE with the confidence view or FG_FLAG_ENGINE_VISIBILITY (no
+// motion map then), the real frame's flow cell labels (FG_PASS_ENGINE_MERGE);
+// or, FG_FLAG_ENGINE_BIDIR, the forward map built for this generated frame.
 Texture2D<uint> g_motion : register(t5);
 #endif
 #if defined(FG_PASS_SYNTHESIZE_UNORM8)
@@ -1369,6 +1400,26 @@ bool MotionMapBack(float2 uv, float fraction, out float2 back) {
     back = scale * float2(f16tof32(packed & 0xffffu), f16tof32(packed >> 16)) / size;
     return packed != FG_SHIFT_NONE;
 }
+
+// FG_FLAG_ENGINE_VISIBILITY (stage 8): whether the previous frame did not see
+// the content the newest frame shows at newest_uv, by its flow cell's label:
+// the game's vector taken there put it out of the previous frame's view or
+// behind something nearer (FG_ENGINE_LABEL_UNSEEN), and the content lies on
+// the surface that vector was taken for (FG_ENGINE_MAP_SURFACE: a cell at an
+// edge holds the surface in front too). False for cells the vectors did not
+// move.
+bool EngineUnseen(float2 newest_uv) {
+    if (any(newest_uv < 0.0) || any(newest_uv > 1.0)) {
+        return false;
+    }
+    uint width, height;
+    g_motion.GetDimensions(width, height);
+    const uint label = g_motion.Load(int3(min(int2(newest_uv * float2(width, height)), int2(width, height) - 1), 0));
+    const float surface = f16tof32(label >> 16);
+    const float depth = DepthAt(newest_uv);
+    return (label & FG_ENGINE_LABEL_UNSEEN) != 0u && surface > 0.0 && depth > 0.0 &&
+           abs(log(min(depth, 0.5 * FG_FAR_DEPTH) / surface)) <= FG_ENGINE_MAP_SURFACE;
+}
 #endif
 
 // One generated pixel at `fraction` (see FrameGenTuning::fractions);
@@ -1485,9 +1536,28 @@ float4 Synthesize(float2 position, float fraction) {
                     chosen = candidates[k];
                 }
             }
-            if (!extrapolate && (g.options.y & (FG_FLAG_OCCLUSION | FG_FLAG_DEPTH)) == (FG_FLAG_OCCLUSION | FG_FLAG_DEPTH) &&
-                chosen_error > FG_OCCLUSION_ERROR) {
-                occlusion = Occlusion(uv, step, candidates, candidate_depth, occlusion_v, occlusion_depth);
+            if (!extrapolate && (g.options.y & (FG_FLAG_OCCLUSION | FG_FLAG_DEPTH)) == (FG_FLAG_OCCLUSION | FG_FLAG_DEPTH)) {
+                if (chosen_error > FG_OCCLUSION_ERROR) {
+                    occlusion = Occlusion(uv, step, candidates, candidate_depth, occlusion_v, occlusion_depth);
+                }
+#if !defined(__spirv__)
+                // FG_FLAG_ENGINE_VISIBILITY: content the game's vectors say
+                // the previous frame did not see is shown from the newest
+                // frame alone where the two frames agree too (what was
+                // revealed can look like what stood in front of it).
+                else if ((g.options.y & FG_FLAG_ENGINE_VISIBILITY) != 0u && EngineUnseen(uv + step * chosen.xy)) {
+                    occlusion = 1;
+                    occlusion_v = chosen.xy;
+                }
+                // FG_FLAG_ENGINE_BIDIR: where the newest frame does not show
+                // the chosen vector's content moving that way (the vector
+                // carries something else here) and the forward map has the
+                // previous frame's content here, that is being covered.
+                else if ((g.options.y & FG_FLAG_ENGINE_BIDIR) != 0u && !SeesMoving(uv + step * chosen.xy, chosen.xy)) {
+                    float2 back;
+                    occlusion = MotionMapBack(uv, fraction, back) ? 2 : 0;
+                }
+#endif
             }
         }
     }
@@ -1550,9 +1620,19 @@ float4 Synthesize(float2 position, float fraction) {
         // Revealed (or in front): the newest frame alone.
         result = g_current.SampleLevel(g_linear, uv + confidence * step * occlusion_v, 0.0);
     } else if (occlusion == 2) {
-        // Being covered: the previous frame alone, where the content was.
+        // Being covered: the previous frame alone, where the content was
+        // (FG_FLAG_ENGINE_BIDIR: where the forward map puts it, else by the
+        // farthest candidate's motion).
         float2 previous_uv;
-        if (MapToPrevious(uv - confidence * fraction * occlusion_v, occlusion_depth, previous_uv)) {
+        bool forward = false;
+#if !defined(__spirv__)
+        float2 back;
+        forward = (g.options.y & FG_FLAG_ENGINE_BIDIR) != 0u && MotionMapBack(uv, fraction, back);
+        if (forward) {
+            result = g_previous.SampleLevel(g_linear, uv + back, 0.0);
+        }
+#endif
+        if (!forward && MapToPrevious(uv - confidence * fraction * occlusion_v, occlusion_depth, previous_uv)) {
             result = g_previous.SampleLevel(g_linear, previous_uv, 0.0);
         }
     } else if (!extrapolate && !still) {
@@ -2192,7 +2272,8 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
 }
 #endif
 
-#if defined(FG_PASS_FLOW_UNPACK) || defined(FG_PASS_ENGINE_REDUCE) || defined(FG_PASS_ENGINE_CONVERT)
+#if defined(FG_PASS_FLOW_UNPACK) || defined(FG_PASS_ENGINE_REDUCE) || defined(FG_PASS_ENGINE_CONVERT) || \
+    defined(FG_SHIFT_ENGINE)
 // The inverse of MapToPrevious: where a previous-view coordinate lies in the
 // newest view, for content at newest-view depth `depth` (rotation only
 // without it). False behind the newest view.
@@ -2865,9 +2946,11 @@ bool MotionMap() {
 #if defined(FG_SHIFT_ENGINE)
 // Stage 7: the engine motion map (FG_PASS_SHIFT_*_ENGINE); options.x: input 3
 // holds the real frame's world motion, the map is merged (the eye's offset in
-// rot*.w, as the eye-shift map's, added to each texel's motion).
+// rot*.w, as the eye-shift map's, added to each texel's motion). Stage 8
+// (research): the forward map instead (ForwardLanding).
 #define FG_ENGINE_MAP_WORLD 1u
 #define FG_ENGINE_MAP_MERGED 2u
+#define FG_ENGINE_MAP_FORWARD 4u
 #endif
 #endif
 
@@ -2910,12 +2993,6 @@ float2 WorldMotion(float2 uv, bool sky) {
 }
 
 #if defined(FG_SHIFT_ENGINE)
-// A texel takes its flow cell's label where it lies on the surface the label
-// was chosen for: its depth within this (natural log of the ratio) of the
-// depth FG_PASS_ENGINE_MERGE kept in the label's high half. The cells along
-// a canopy frame's edge hold the hangar or the sky behind it too.
-#define FG_ENGINE_MAP_SURFACE 0.3
-
 // The class of a flow cell's vector where the game's vectors moved it (its
 // label's: FG_ENGINE_CLASS_*), else 0.
 uint EngineClass(uint label) {
@@ -3061,6 +3138,37 @@ bool EngineLanding(uint2 id, out float2 landing, out uint key) {
     }
     return inside;
 }
+
+// Stage 8's forward map (FG_ENGINE_MAP_FORWARD, research, interpolating): the
+// previous real frame's content (t0 its resolved depth, t1 its filtered flow)
+// where it is at the frame's time, tuning.y on along its own motion (the
+// flow of the cells around on its surface: EngineMotion; the sky's by the
+// sky's cells around, as EngineLanding moves it; tuning.y is the frame's
+// fraction of the newest interval times the intervals' ratio, as that flow is
+// the pair before's), seen in the newest frame's view (the constants' pose:
+// MapToNewest at its depth). The map's offsets lead from a texel of the
+// newest view back to the content of the previous frame there (which the
+// newest frame may show covered already). Depth dropped or missing stays out
+// of it.
+bool ForwardLanding(uint2 id, out float2 landing, out uint key) {
+    const float2 size = float2(g.size.xy);
+    const float2 uv = (float2(id) + 0.5) / size;
+    const float depth = g_depth.Load(int3(id, 0)).r;
+    landing = uv * size;
+    key = 0u;
+    bool inside = false;
+    if (depth > 0.0) {
+        const bool sky = depth >= 0.5 * FG_FAR_DEPTH;
+        const float2 moved = uv + g.tuning.y * (sky ? WorldMotion(uv, true) : EngineMotion(uv, 0u, depth));
+        float2 newest_uv;
+        if (MapToNewest(moved, depth, newest_uv)) {
+            landing = newest_uv * size;
+            inside = all(newest_uv >= 0.0) && all(newest_uv <= 1.0);
+        }
+        key = ((asuint(1.0 / depth) + 64u) & ~63u) | 32u;
+    }
+    return inside;
+}
 #endif
 
 // The eye-shift map: where each texel of the newest frame lands when seen
@@ -3127,10 +3235,17 @@ uint Key(uint key, float2 landing, int2 texel) {
 }
 
 // A texel's landing in the map being built: the engine motion map's
-// (EngineLanding, FG_PASS_SHIFT_*_ENGINE), else Landing's.
+// (EngineLanding, FG_PASS_SHIFT_*_ENGINE) or the forward map's
+// (ForwardLanding), else Landing's.
 bool MapLanding(uint2 id, out float2 landing, out uint key) {
 #if defined(FG_SHIFT_ENGINE)
-    return EngineLanding(id, landing, key);
+    bool inside;
+    if ((g.options.x & FG_ENGINE_MAP_FORWARD) != 0u) {
+        inside = ForwardLanding(id, landing, key);
+    } else {
+        inside = EngineLanding(id, landing, key);
+    }
+    return inside;
 #else
     return Landing(id, landing, key);
 #endif
@@ -4087,11 +4202,13 @@ FG_BIND(5) FG_FORMAT("rgba32f") RWTexture2D<float4> g_evidence : register(u1);
 //     3), the verdict alone in texel 4 (its first 8 bytes are zero exactly
 //     when the vectors may be used); into u1 the sums themselves, those of
 //     kinds that did not run zero;
-//   stage 2 (Lead, stage 6), after every view's stage 1: the frame's verdict
-//     for both eyes (t3's texel 0 z, this view's, and t5's, the other
-//     view's: either holds both back) into u0's texel 0 x (kEngineVerdict),
-//     zeros after it: its first 8 bytes are zero exactly when both views'
-//     vectors may be used, what the view's predicate copies.
+//   stage 2 (Lead, stage 6; Interpolate's seen test, stage 8), after every
+//     view's stage 1: the frame's verdict for both eyes (t3's texel 0 z,
+//     this view's, and t5's, the other view's: either holds both back) into
+//     u0's texel 0 x (kEngineVerdict), 0 in its y: its first 8 bytes are
+//     zero exactly when both views' vectors may be used, what the view's
+//     predicate copies; this view's bias (t3's texel 0 xy) in its zw, for
+//     FG_PASS_ENGINE_CONVERT with FG_ENGINE_CONVERT_SEEN.
 // The first stage sums the cockpit fit's texels alone. The plan dispatches
 // one group's worth of threads (8 x 8); the group is 256 threads, 8 a texel,
 // each summing every eighth group's texel with 16 loads in flight at a time
@@ -4167,8 +4284,9 @@ void CSMain(uint3 thread : SV_GroupThreadID, uint index : SV_GroupIndex) {
     }
     // Stage 2 sums nothing (no partials bound).
     if (stage == 2u) {
-        const uint reasons = uint(g_params_view.Load(int3(0, 0, 0)).z) | uint(g_params_other.Load(int3(0, 0, 0)).z);
-        g_params[uint2(0u, 0u)] = float4(float(reasons), 0.0, 0.0, 0.0);
+        const float4 own = g_params_view.Load(int3(0, 0, 0));
+        const uint reasons = uint(own.z) | uint(g_params_other.Load(int3(0, 0, 0)).z);
+        g_params[uint2(0u, 0u)] = float4(float(reasons), 0.0, own.xy);
         return;
     }
     const uint camera = (g.options.x >> 12) & 3u;
@@ -4304,7 +4422,9 @@ FG_BIND(1) Texture2D<float4> g_depth : register(t1);
 FG_BIND(2) Texture2D<float4> g_params : register(t2);
 FG_BIND(3) Texture2D<float4> g_tiles_before : register(t3);
 Texture2D<float4> g_world : register(t4);
-Texture2D<float4> g_params_other : register(t5);
+// The other view's verdict (its kEngineParams), or with FG_ENGINE_CONVERT_SEEN
+// the previous frame's resolved depth.
+Texture2D<float4> g_other : register(t5);
 FG_BIND(4) FG_FORMAT("rgba16f") RWTexture2D<float4> g_candidate : register(u0);
 FG_BIND(5) FG_FORMAT("rgba16f") RWTexture2D<float4> g_info : register(u1);
 
@@ -4333,8 +4453,15 @@ FG_BIND(5) FG_FORMAT("rgba16f") RWTexture2D<float4> g_info : register(u1);
 // closer to it than to no motion and as far as the world: FG_WORLD_DEPTH or
 // no depth), their own. Nearer still content is the head's: the cockpit
 // stays rigid where the world barely moves.
+// With FG_ENGINE_CONVERT_SEEN (stage 8, interpolating with the previous
+// frame's depth in t5), each candidate also says whether the previous frame
+// saw its content where the vector puts it then, at its own depth (as
+// FG_PASS_LUMA's test: FG_ENGINE_FLAG_NEAR_UNSEEN, FG_ENGINE_FLAG_FAR_UNSEEN);
+// t2 is then kEngineVerdict (FG_PASS_ENGINE_SOLVE's stage 2): both eyes'
+// verdict in texel 0's x, the bias in its zw.
 #define FG_ENGINE_CONVERT_TILES 256u
 #define FG_ENGINE_CONVERT_WORLD 512u
+#define FG_ENGINE_CONVERT_SEEN 1024u
 #define FG_ENGINE_VALID_RAW 16.0
 #define FG_ENGINE_CLASS_TEXELS 0.6
 #define FG_ENGINE_CLASS_SHARE 0.08
@@ -4345,13 +4472,20 @@ struct EngineCandidate {
     float2 v;
     uint flags;
     uint kind;
+    bool unseen;
 };
+
+// Stage 8's seen test (FG_ENGINE_CONVERT_SEEN): t2 and t5 hold what it reads.
+bool EngineSeenTest() {
+    return (g.options.x & FG_ENGINE_CONVERT_SEEN) != 0u;
+}
 
 EngineCandidate EngineConvert(int2 q, float z) {
     EngineCandidate candidate;
     candidate.v = float2(0.0, 0.0);
     candidate.flags = z > 0.0 ? 0u : FG_ENGINE_FLAG_NO_DEPTH;
     candidate.kind = 0u;
+    candidate.unseen = false;
     const float2 extent = float2(g.size.zw);
     const float2 uv = (float2(q) + 0.5) / extent;
     const float2 raw = g_raw.Load(int3(q, 0)).rg;
@@ -4361,7 +4495,8 @@ EngineCandidate EngineConvert(int2 q, float z) {
     }
     const uint camera = (g.options.x >> 4) & 3u;
     const float depth = z > 0.0 ? z : 0.0;
-    const float2 delta = g.tuning.xy * raw + g.tuning.zw - g_params.Load(int3(0, 0, 0)).xy;
+    const float4 own = g_params.Load(int3(0, 0, 0));
+    const float2 delta = g.tuning.xy * raw + g.tuning.zw - (EngineSeenTest() ? own.zw : own.xy);
     if (camera <= 1u) {
         float2 newest_uv;
         if (!MapToNewest(uv - delta, camera == 0u ? depth : 0.0, newest_uv)) {
@@ -4390,6 +4525,13 @@ EngineCandidate EngineConvert(int2 q, float z) {
     candidate.kind = moved <= tolerance && (moved <= off_world || nearer) ? FG_ENGINE_CLASS_HEAD
                      : off_world <= tolerance                              ? FG_ENGINE_CLASS_WORLD
                                                                            : FG_ENGINE_CLASS_OWN;
+    // Stage 8: where the vector puts the content in the previous frame, out
+    // of its view or behind something nearer there.
+    if (EngineSeenTest() && depth > 0.0) {
+        float2 previous_uv;
+        candidate.unseen = !MapToPrevious(uv - candidate.v, depth, previous_uv) ||
+                           !SeenBefore(g_other, uv - candidate.v, depth, previous_uv);
+    }
     return candidate;
 }
 
@@ -4448,10 +4590,13 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     const float trust = (g.options.x & FG_ENGINE_CONVERT_TILES) != 0u
                             ? g_tiles_before.Load(int3(id.xy / FG_ENGINE_TILE, 0)).x
                             : 0.5;
-    const uint held =
-        g_params.Load(int3(0, 0, 0)).z != 0.0 || g_params_other.Load(int3(0, 0, 0)).z != 0.0 ? FG_ENGINE_FLAG_HELD : 0u;
+    const float4 own = g_params.Load(int3(0, 0, 0));
+    const bool held_back = EngineSeenTest() ? own.x != 0.0 : own.z != 0.0 || g_other.Load(int3(0, 0, 0)).z != 0.0;
+    const uint held = held_back ? FG_ENGINE_FLAG_HELD : 0u;
+    const uint unseen =
+        (nearest.unseen ? FG_ENGINE_FLAG_NEAR_UNSEEN : 0u) | (farthest.unseen ? FG_ENGINE_FLAG_FAR_UNSEEN : 0u);
     g_candidate[id.xy] = float4(nearest.v, farthest.v);
-    g_info[id.xy] = float4(spread, float(nearest.flags | (farthest.flags << 4) | held), trust,
+    g_info[id.xy] = float4(spread, float(nearest.flags | (farthest.flags << 4) | held | unseen), trust,
                            float(nearest.kind + 4u * farthest.kind));
 }
 #endif
@@ -4491,7 +4636,11 @@ FG_BIND(5) FG_FORMAT("r32ui") RWTexture2D<uint> g_labels : register(u1);
 //     search from the better of it and no motion moves the cell (content
 //     without vectors: screens, propellers, clouds). With no measured flow
 //     at all (4, research: t4 unbound), every cell of a frame whose verdict
-//     holds the vectors back is searched from no motion, labelled held back.
+//     holds the vectors back is searched from no motion, labelled held back;
+//   either way (stage 8, with FG_PASS_ENGINE_CONVERT's seen test) a candidate
+//     whose content the previous frame did not see where its vector puts it
+//     then, where the tile trusts the vectors at all and the vector is of
+//     the head's or the world's class: nothing there to match.
 // A candidate taken is polished, a texel across and to the sub-texel, only
 // where that matches clearly better (FG_ENGINE_POLISH) within a texel of it
 // and the previous frame saw all of the block where the candidate puts it
@@ -4499,10 +4648,13 @@ FG_BIND(5) FG_FORMAT("r32ui") RWTexture2D<uint> g_labels : register(u1);
 // shifted toward what was seen): else its own vector, unrounded. w: the
 // block's cost of no motion, -1 where the previous frame did not see it, as
 // FG_PASS_REFINE's. With FG_ENGINE_MERGE_DEPTHS (the engine motion map, stage
-// 7; t5 the resolved depth at half resolution), the label of a candidate
-// taken keeps the depth of the surface it was chosen for (its cell's nearest
-// or farthest, as FG_PASS_ENGINE_CONVERT found them) in its high half, so the
-// map moves only that surface's texels by it.
+// 7, and stage 8's seen test; t5 the resolved depth at half resolution), the
+// label of a candidate taken keeps the depth of the surface it was chosen for
+// (its cell's nearest or farthest, as FG_PASS_ENGINE_CONVERT found them) in
+// its high half, so the map moves only that surface's texels by it (and
+// synthesis reads its unseen bit only there). Where that candidate's content
+// was not seen by the previous frame (stage 8: FG_ENGINE_FLAG_NEAR_UNSEEN or
+// FG_ENGINE_FLAG_FAR_UNSEEN), its label says so (FG_ENGINE_LABEL_UNSEEN).
 #define FG_ENGINE_MERGE_LEAD 2u
 #define FG_ENGINE_MERGE_UNMEASURED 4u
 #define FG_ENGINE_MERGE_DEPTHS 8u
@@ -4592,11 +4744,21 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     const float trust = info.z;
     const float alpha = trust < 0.25 ? 0.0 : trust > 0.75 ? 0.4 : 0.25;
     const float beta = trust < 0.25 ? 0.0 : 0.01;
+    // Stage 8: content the previous frame did not see where the candidate's
+    // vector puts it then (FG_PASS_ENGINE_CONVERT's seen test) has nothing to
+    // match there: its cost says nothing against the measured flow's or no
+    // motion's, which match something else. Such a candidate is taken where
+    // the tile trusts the vectors at all and the vector moves as the head or
+    // the world does: one of the content's own motion still has to match (a
+    // wrong vector long enough to leave the view is never seen).
+    const uint unseen_flag = source == FG_ENGINE_LABEL_NEAR ? FG_ENGINE_FLAG_NEAR_UNSEEN : FG_ENGINE_FLAG_FAR_UNSEEN;
+    const bool unseen = candidate && (flags & unseen_flag) != 0u;
+    const bool unmatched = unseen && trust >= 0.25 && kind != FG_ENGINE_CLASS_OWN;
     bool taken = false;
     float4 result = measured;
     if ((g.options.x & FG_ENGINE_MERGE_LEAD) != 0u) {
         const float zero_cost = BlockCost(block, int2(0, 0));
-        taken = candidate && engine_cost <= zero_cost + beta;
+        taken = candidate && (engine_cost <= zero_cost + beta || unmatched);
         if (!taken) {
             int2 best = int2(0, 0);
             float best_cost = zero_cost;
@@ -4610,7 +4772,7 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
             kind = 0u;
         }
     } else {
-        taken = candidate && engine_cost <= (1.0 + alpha) * measured.z + beta;
+        taken = candidate && (engine_cost <= (1.0 + alpha) * measured.z + beta || unmatched);
         if (!taken) {
             source = candidate ? FG_ENGINE_LABEL_MEASURED : source;
             kind = 0u;
@@ -4662,7 +4824,8 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         surface = min(source == FG_ENGINE_LABEL_NEAR ? near_z : far_z, 0.5 * FG_FAR_DEPTH);
     }
     g_flow[id.xy] = result;
-    g_labels[id.xy] = source | (kind << 3) | (textured ? FG_ENGINE_LABEL_TEXTURED : 0u) | (held ? FG_ENGINE_LABEL_INVALID : 0u) |
+    g_labels[id.xy] = source | (kind << 3) | (taken && unseen ? FG_ENGINE_LABEL_UNSEEN : 0u) |
+                      (textured ? FG_ENGINE_LABEL_TEXTURED : 0u) | (held ? FG_ENGINE_LABEL_INVALID : 0u) |
                       (f32tof16(surface) << 16);
 }
 #endif
@@ -4686,7 +4849,11 @@ FG_BIND(4) FG_FORMAT("rgba16f") RWTexture2D<float4> g_tiles : register(u0);
 // FG_ENGINE_TILE_TURNING while the head turns more than FG_ENGINE_TILE_TURN
 // degrees a frame (tuning.y): what a moving view shows changes faster. A
 // tile without textured cells (or a frame whose verdict held the vectors
-// back) keeps its trust. Into u0: the trust, the share, the textured cells.
+// back) keeps its trust. Cells labelled unseen (stage 8: the previous frame
+// did not see the content their vector moves) are not counted: matching
+// there says nothing of the vectors, and the trust decides where the merge
+// takes such vectors unmatched. Into u0: the trust, the share, the textured
+// cells.
 #define FG_ENGINE_TILE_RATE 0.2
 #define FG_ENGINE_TILE_TURNING 0.6
 #define FG_ENGINE_TILE_TURN 2.0
@@ -4708,7 +4875,8 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
                 continue;
             }
             const uint label = g_labels.Load(int3(cell, 0));
-            if ((label & (FG_ENGINE_LABEL_TEXTURED | FG_ENGINE_LABEL_INVALID)) == FG_ENGINE_LABEL_TEXTURED) {
+            if ((label & (FG_ENGINE_LABEL_TEXTURED | FG_ENGINE_LABEL_INVALID | FG_ENGINE_LABEL_UNSEEN)) ==
+                FG_ENGINE_LABEL_TEXTURED) {
                 const uint source = label & FG_ENGINE_LABEL_SOURCE;
                 textured += 1.0;
                 won += source == FG_ENGINE_LABEL_NEAR || source == FG_ENGINE_LABEL_FAR ? 1.0 : 0.0;

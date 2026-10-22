@@ -555,6 +555,16 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
         const float value = static_cast<float>(std::atof(reach->c_str()));
         engine_reach_ = value > 1.0f ? std::min(value, kFrameGenEngineReachMost) : 1.0f;
     }
+    // Stage 8, for the session, interpolating: the merge takes the game's
+    // vectors for content the previous frame did not see, and interpolated
+    // frames show such content from the newest frame alone at motion
+    // boundaries (VECTORXR_FRAMEGEN_ENGINE_VISIBILITY=1; =merge, the merge
+    // alone); content being covered is read where the previous frame's own
+    // motion puts it (VECTORXR_FRAMEGEN_ENGINE_BIDIR=1, the forward map).
+    const std::string visibility = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_VISIBILITY").value_or("");
+    engine_visibility_ = visibility == "1" || visibility == "merge";
+    engine_visibility_synthesis_ = visibility == "1";
+    engine_bidir_ = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_BIDIR") == "1";
     engine_lead_ = {};
     logged_engine_lead_ = false;
     engine_cut_window_.Reset();
@@ -684,7 +694,19 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
                                                                   Number(engine_reach_, 2) + " intervals on (_REACH)"
                                                             : std::string()) +
                                       ")"
-                                : std::string())
+                                : std::string()) +
+                           (engine_visibility_
+                                ? std::string("; interpolating, the vectors are taken for content the previous frame "
+                                              "did not see (by its depth)") +
+                                      (engine_visibility_synthesis_
+                                           ? ", and generated frames show it from the newest frame alone at motion "
+                                             "boundaries (VECTORXR_FRAMEGEN_ENGINE_VISIBILITY=1)"
+                                           : " (VECTORXR_FRAMEGEN_ENGINE_VISIBILITY=merge)")
+                                : std::string()) +
+                           (engine_bidir_ ? "; interpolated frames read content being covered where the previous "
+                                            "frame's own motion puts it (VECTORXR_FRAMEGEN_ENGINE_BIDIR=1, the forward "
+                                            "map in place of the labels' read)"
+                                          : "")
                      : std::string(", generated frames are made as without them")) +
                 (csv.empty() ? std::string(".") : ", rows in " + csv + ".");
         }
@@ -768,6 +790,7 @@ void FrameGenPresenter::Stop() {
     engine_map_ = FrameGenEngineMap::kOff;
     engine_map_reuse_ = false;
     engine_reach_ = 1.0f;
+    engine_visibility_ = engine_visibility_synthesis_ = engine_bidir_ = false;
     ForgetEngineFramesLocked();
     if (abandoned_) {
         // The thread left behind may still use the backend, the output
@@ -5019,6 +5042,11 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         tuning.engine_map = engine_map_;
         tuning.engine_map_reuse = engine_map_reuse_;
         tuning.engine_reach = engine_reach_;
+        // Stage 8: what the previous frame did not see, and the forward map
+        // (research).
+        tuning.engine_visibility = engine_visibility_;
+        tuning.engine_visibility_synthesis = engine_visibility_synthesis_;
+        tuning.engine_bidir = engine_bidir_;
         // The frame's engine motion record and the frame before's, as the
         // frame gates read them: taken before a pause forgets them (just in
         // time, AnalyzeJit's pause check came first: such a frame counts as
