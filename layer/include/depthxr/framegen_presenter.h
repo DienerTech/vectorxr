@@ -1800,6 +1800,13 @@ class FrameGenPresenter {
     // lag test's where both frames may calibrate and the head's turn changed
     // by 2 degrees a frame.
     void EngineRequestsLocked(const PendingFrame& frame, bool calibrate, std::vector<FrameGenViewSubmission>& submissions);
+    // Stage 4: the frame's requests carry the application's movement since
+    // the frame before (FrameGenViewRequest::app_delta) where its record is
+    // paired with the frame before's, without a camera cut or FRAME_SKIP, and
+    // every view carries the same: whatever the engine motion mode, as the
+    // world's motion follows from it alone (the backend's
+    // VECTORXR_FRAMEGEN_ENGINE_DELTA decides).
+    void EngineDeltaLocked(const PendingFrame& frame, std::vector<FrameGenViewSubmission>& submissions);
     // The census jobs for `frame`'s views (stage 0: every image, sampled at
     // its end; stage 2 captures too, CaptureEngineMotion chooses), with each
     // view's color request.
@@ -1837,6 +1844,12 @@ class FrameGenPresenter {
     std::uint32_t engine_decisions_logged_{0};
     FrameGenEngineValidation engine_validation_logged_;
     bool engine_prior_checked_{false};
+    // Stage 4, under mutex_: the backend's world delta calibration as last
+    // read (after each Execute), its decisions logged, and its totals at the
+    // last summary.
+    FrameGenWorldDeltaStatus world_delta_;
+    std::uint32_t world_delta_decisions_logged_{0};
+    FrameGenWorldDeltaStatus world_delta_logged_;
     // The frame gates (stage 1), under mutex_: a record as the gates read it
     // (none: no record), and the gates for the frame Generate generates
     // from (`flipped`: a view's depth was decoded as the frame before

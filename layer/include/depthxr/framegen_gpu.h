@@ -245,6 +245,11 @@ class FrameGenGpu {
     // How the game's depth is being read after checking it against the
     // other eye, with the evidence; counts decisions so callers log each once.
     virtual FrameGenDepthStatus DepthStatus() const { return {}; }
+    // Stage 4: the world's motion from the application's movement
+    // (VECTORXR_FRAMEGEN_ENGINE_DELTA; mode off where the backend has none):
+    // its calibration against the world fit, with decisions counted so
+    // callers log each once.
+    virtual FrameGenWorldDeltaStatus WorldDeltaStatus() const { return {}; }
     // Benchmarks only: while on, Execute stamps the GPU time after every
     // pass and waits for the GPU, and PassMilliseconds() reports the last
     // Execute's time per pass (kFrameGenPassCount entries, then source

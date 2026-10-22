@@ -75,6 +75,10 @@ constexpr std::size_t kMotionNotes = 64;
 // 512 bytes on).
 constexpr UINT64 kEngineViewReadback = 2048;
 constexpr UINT64 kEngineEvidenceOffset = 512; // D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT
+// Stage 4: views' world fits read back per frame slot (four: quad views'),
+// each at its own aligned offset.
+constexpr std::size_t kWorldFitViews = 4;
+constexpr UINT64 kWorldFitReadback = 512;
 // Their descriptors start after the captures', and synthesis submissions'
 // after theirs.
 constexpr UINT kMotionDescriptors = kDescriptorsPerFrame * kFramesInFlight + kCaptureSlots * kDescriptorsPerDispatch;
@@ -304,6 +308,12 @@ struct FrameSlot {
     bool engine_pending{false};
     FrameGenEngineFrameEvidence engine_frame;
     double engine_seconds{0.0}; // when it was recorded, on the validator's clock
+    // Stage 4: views' world fits (kWorldParams, kWorldFitReadback each, in
+    // `world_fits` order) beside what the delta model needs, read once the
+    // slot's fence passes (the fits filled in then).
+    ComPtr<ID3D12Resource> world_readback;
+    bool world_pending{false};
+    std::vector<FrameGenWorldFit> world_fits;
 };
 
 struct CaptureSlot {
@@ -654,6 +664,24 @@ class D3D12FrameGen final : public FrameGenGpu {
                                         " is no convention (gx,gy,included|rotation|excluded|objects[,jitter]): ignored");
             }
         }
+        // Stage 4 (research): the world's motion from the game's
+        // appSpaceDeltaPose (VECTORXR_FRAMEGEN_ENGINE_DELTA=calibrate: every
+        // world fit compared with it, generated frames as without it; =1: in
+        // place of the fit once the comparison locked), the comparison fixed
+        // (VECTORXR_FRAMEGEN_ENGINE_DELTA_FIXED=sign,scale: locked from the
+        // start), and the sky turned by its rotation
+        // (VECTORXR_FRAMEGEN_ENGINE_SKY=1).
+        delta_mode_ = ParseFrameGenWorldDeltaMode(ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_DELTA").value_or(""));
+        if (delta_mode_ != FrameGenWorldDeltaMode::kOff) {
+            if (const std::optional<std::string> fixed = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_DELTA_FIXED")) {
+                if (const std::optional<std::pair<int, float>> parsed = ParseFrameGenWorldDeltaFixed(*fixed)) {
+                    delta_calibration_.Fix(parsed->first, parsed->second);
+                } else {
+                    delta_refused_ = *fixed;
+                }
+            }
+            delta_sky_ = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_SKY") == "1";
+        }
         if (!software && coarse_tangent_ > 0.0 &&
             SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS6, &options6, sizeof(options6))) &&
             options6.VariableShadingRateTier >= D3D12_VARIABLE_SHADING_RATE_TIER_2 &&
@@ -991,13 +1019,16 @@ class D3D12FrameGen final : public FrameGenGpu {
         }
 #endif
         // Engine motion censuses that ran are read now (EngineStatus), and
-        // the evidence, oldest first.
+        // the evidence and world fits, oldest first.
         ReadMotion();
         std::array<FrameSlot*, kFramesInFlight> pending{};
         for (std::size_t i = 0; i < slots_.size(); ++i) pending[i] = &slots_[i];
         std::sort(pending.begin(), pending.end(),
                   [](const FrameSlot* a, const FrameSlot* b) { return a->fence_value < b->fence_value; });
-        for (FrameSlot* slot : pending) ReadEngineEvidence(*slot);
+        for (FrameSlot* slot : pending) {
+            ReadEngineEvidence(*slot);
+            ReadWorldFits(*slot);
+        }
         return true;
     }
 
@@ -1843,7 +1874,9 @@ class D3D12FrameGen final : public FrameGenGpu {
                Create(view.shift_map, half, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_UINT, true, error);
     }
 
-    // A view's world-motion fit textures, created the first time it is used.
+    // A view's world-motion fit textures, created the first time it is used
+    // (the parameters' six texels: the fit's two, kWorldSet's two more, then
+    // the fit's copy that the set leaves for the watchdog's readback).
     bool EnsureWorld(ViewResources& view, std::string& error) {
         if (view.world_params.resource) {
             return true;
@@ -1851,7 +1884,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         const std::uint32_t groups = (kFrameGenWorldGrid / kFrameGenThreadGroupSize) * (kFrameGenWorldGrid / kFrameGenThreadGroupSize);
         return Create(view.world_partials, {groups * 8u, 1u}, DXGI_FORMAT_R32G32B32A32_FLOAT,
                       DXGI_FORMAT_R32G32B32A32_FLOAT, true, error) &&
-               Create(view.world_params, {2u, 1u}, DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_FORMAT_R32G32B32A32_FLOAT, true,
+               Create(view.world_params, {6u, 1u}, DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_FORMAT_R32G32B32A32_FLOAT, true,
                       error);
     }
 
@@ -2083,6 +2116,93 @@ class D3D12FrameGen final : public FrameGenGpu {
             motion_notes_.push_back("the vectors are disabled (" + engine_validator_.Report().reason +
                                     "): no more are resampled this session");
         }
+    }
+
+    // Stage 4: copies each view's world fit (kWorldParams texels 4 and 5,
+    // where its plan fitted the world and its request has the application's
+    // movement; a set after the fit leaves them) into the slot's readback,
+    // with what the delta model needs, for ReadWorldFits once the slot's work
+    // is done. False when no view fitted, or the readback could not be made:
+    // no calibration from then on this session, and Frame Generation goes on
+    // with the fit (the movement is not used without its watchdog).
+    bool RecordWorldReadback(FrameSlot& slot, const std::vector<ViewRecording>& recordings) {
+        slot.world_fits.clear();
+        std::vector<D3D12_RESOURCE_BARRIER> barriers;
+        for (const ViewRecording& recording : recordings) {
+            const auto& dispatches = recording.plan.dispatches;
+            const bool fitted = std::any_of(dispatches.begin(), dispatches.end(), [](const FrameGenDispatch& dispatch) {
+                return dispatch.pass == FrameGenPass::kWorldSolve;
+            });
+            if (!fitted || !recording.request.app_delta || !recording.view->world_params.resource ||
+                slot.world_fits.size() >= kWorldFitViews || delta_failed_) {
+                continue;
+            }
+            if (!slot.world_readback) {
+                D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_READBACK};
+                D3D12_RESOURCE_DESC buffer{};
+                buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+                buffer.Width = kWorldFitViews * kWorldFitReadback;
+                buffer.Height = buffer.DepthOrArraySize = buffer.MipLevels = 1;
+                buffer.SampleDesc.Count = 1;
+                buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+                if (FAILED(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer,
+                                                            D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                            IID_PPV_ARGS(&slot.world_readback)))) {
+                    delta_failed_ = true;
+                    return false;
+                }
+            }
+            Texture& params = recording.view->world_params;
+            Require(barriers, params, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            Flush(barriers);
+            CopyToReadback(commands_.Get(), params, slot.world_readback.Get(), slot.world_fits.size() * kWorldFitReadback);
+            FrameGenWorldFit fit;
+            fit.game_newest = recording.request.game_newest;
+            fit.game_previous = recording.request.game_previous;
+            fit.newest = recording.request.newest;
+            fit.previous = recording.request.previous;
+            fit.delta_orientation = recording.request.delta_orientation;
+            fit.delta_position = recording.request.delta_position;
+            slot.world_fits.push_back(fit);
+        }
+        return !slot.world_fits.empty();
+    }
+
+    // Feeds a finished slot's world fits to the delta calibration.
+    void ReadWorldFits(FrameSlot& slot) {
+        if (!slot.world_pending || !slot.world_readback || fence_->GetCompletedValue() < slot.fence_value ||
+            FAILED(device_->GetDeviceRemovedReason())) {
+            return;
+        }
+        slot.world_pending = false;
+        void* mapped = nullptr;
+        const D3D12_RANGE range{0, static_cast<SIZE_T>(kWorldFitViews * kWorldFitReadback)};
+        if (FAILED(slot.world_readback->Map(0, &range, &mapped)) || !mapped) {
+            return;
+        }
+        for (std::size_t i = 0; i < slot.world_fits.size(); ++i) {
+            // Texels 4 and 5: the fit's copy (texels 0 and 1 are the set's on
+            // the watchdog's frames).
+            const auto* texels =
+                reinterpret_cast<const float*>(static_cast<const std::byte*>(mapped) + i * kWorldFitReadback) + 16;
+            FrameGenWorldFit& fit = slot.world_fits[i];
+            fit.rotation = {texels[0], texels[1], texels[2]};
+            fit.valid = texels[3] > 0.0f;
+            fit.translation = {texels[4], texels[5], texels[6]};
+        }
+        const D3D12_RANGE written{0, 0};
+        slot.world_readback->Unmap(0, &written);
+        delta_calibration_.Add(slot.world_fits);
+    }
+
+    FrameGenWorldDeltaStatus WorldDeltaStatus() const override {
+        FrameGenWorldDeltaStatus status = delta_calibration_.Status();
+        status.mode = delta_mode_;
+        status.sky = delta_sky_;
+        status.refused = delta_refused_;
+        status.unread = delta_failed_;
+        status.set = delta_set_;
+        return status;
     }
 
     bool SupportsThreadedPresentation() const override { return true; }
@@ -2608,6 +2728,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         slot.hardware_call_ms = 0.0;
         ReadDepthCheck(slot);
         ReadEngineEvidence(slot);
+        ReadWorldFits(slot);
         hr = slot.allocator->Reset();
         if (SUCCEEDED(hr)) hr = commands_->Reset(slot.allocator.Get(), nullptr);
         if (FAILED(hr)) {
@@ -2642,6 +2763,20 @@ class D3D12FrameGen final : public FrameGenGpu {
             effective_tuning.engine = engine_validator_.Convention();
             effective_tuning.engine_locked = engine_validator_.Locked();
         }
+        // Stage 4: the world's motion from the application's movement once
+        // the calibration locked, while its fits can be read back. On every
+        // kFrameGenWorldDeltaWatchdog-th frame that takes it the fit runs as
+        // well, its watchdog (the filters read the movement's motion all the
+        // same). The sky turns with it (VECTORXR_FRAMEGEN_ENGINE_SKY).
+        if (delta_mode_ == FrameGenWorldDeltaMode::kOn && delta_calibration_.Locked() && !delta_failed_ &&
+            std::any_of(views.begin(), views.end(),
+                        [](const FrameGenViewSubmission& view) { return view.request.app_delta; })) {
+            effective_tuning.world_delta = true;
+            effective_tuning.delta_watchdog = ++delta_frames_ % kFrameGenWorldDeltaWatchdog == 0;
+            effective_tuning.delta_sign = delta_calibration_.Sign();
+            effective_tuning.delta_scale = delta_calibration_.Scale();
+        }
+        effective_tuning.world_sky = tuning.world_sky || delta_sky_;
         // Several views on Frame Generation's own queue match on one atlas;
         // otherwise (one view, matching at release on the game's queue, or
         // the atlas refused) a session per view, its hints following that
@@ -2762,6 +2897,16 @@ class D3D12FrameGen final : public FrameGenGpu {
             ok && !recordings.empty() &&
             std::all_of(recordings.begin(), recordings.end(), [](const ViewRecording& r) { return r.evidence; }) &&
             RecordEngineReadback(slot, recordings, effective_tuning);
+        // Stage 4: the world fits back to the CPU beside the application's
+        // movement, for the calibration (and, locked, its watchdog); frames
+        // the movement stood in for the fit, counted.
+        const bool fits_recorded = ok && delta_mode_ != FrameGenWorldDeltaMode::kOff && RecordWorldReadback(slot, recordings);
+        const bool set = std::any_of(recordings.begin(), recordings.end(), [](const ViewRecording& recording) {
+            const auto& dispatches = recording.plan.dispatches;
+            return std::any_of(dispatches.begin(), dispatches.end(),
+                               [](const FrameGenDispatch& dispatch) { return dispatch.pass == FrameGenPass::kWorldSet; });
+        });
+        delta_set_ += ok && set ? 1 : 0;
         // Check the game's depth against the other eye while undecided, and
         // now and then afterwards: from view 0, or from the eye whose depth
         // the game fills (FrameGenDepthEyes).
@@ -2863,6 +3008,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         slot.timing_pending = timed;
         slot.analysis_pending = effective_tuning.analyze_only && slot.timed_submission != 0;
         slot.engine_pending = evidence_recorded;
+        slot.world_pending = fits_recorded;
         ++submission_;
         if (!effective_tuning.analyze_only || source_copied_) {
             // Outputs written, or an application image read (SetCopyAfterRelease):
@@ -3881,6 +4027,7 @@ class D3D12FrameGen final : public FrameGenGpu {
             slot.after_hardware.Detach();
             slot.check_readback.Detach();
             slot.engine_readback.Detach();
+            slot.world_readback.Detach();
         }
         for (auto& slot : capture_slots_) slot.allocator.Detach();
         for (auto& slot : motion_slots_) {
@@ -6294,6 +6441,19 @@ class D3D12FrameGen final : public FrameGenGpu {
     // The raw fields could not be made (EnsureView): engine capture stays
     // off for the session, Frame Generation runs on without it.
     bool engine_failed_{false};
+    // Stage 4: the world's motion from the application's movement
+    // (VECTORXR_FRAMEGEN_ENGINE_DELTA, _DELTA_FIXED, _SKY, read at creation),
+    // its calibration against the fits read back, frames that took it since
+    // it locked (the watchdog counts them) and frames it stood in for the
+    // fit; the fits' readback could not be made (no calibration, and the fit
+    // on every frame: no movement without its watchdog).
+    FrameGenWorldDeltaMode delta_mode_{FrameGenWorldDeltaMode::kOff};
+    bool delta_sky_{false};
+    std::string delta_refused_;
+    FrameGenWorldDeltaCalibration delta_calibration_;
+    std::uint64_t delta_frames_{0};
+    std::uint64_t delta_set_{0};
+    bool delta_failed_{false};
     std::unordered_map<XrSwapchain, std::vector<ID3D12Resource*>> images_;
     std::vector<ViewResources> views_;
 };

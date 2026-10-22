@@ -4238,6 +4238,97 @@ void TestEngineMotionObserve() {
     Check(!runtime.ordering_violation && !g_release_violation, "engine observe: calls stayed ordered");
 }
 
+// Engine motion vectors, stage 4: whatever VECTORXR_FRAMEGEN_ENGINE_MV says
+// (off here), each frame paired with the frame before's record carries the
+// application's movement (FrameGenViewRequest::app_delta) with the poses the
+// game rendered both frames with; not where the views' deltas differ, at
+// FRAME_SKIP or at a camera cut. Nothing waits for the swapchains to settle:
+// the movement is the frame's whatever its vectors are.
+void TestEngineDelta() {
+    const XrSwapchain depth_chain = reinterpret_cast<XrSwapchain>(0x21);
+    const XrSwapchain vectors = reinterpret_cast<XrSwapchain>(0x31);
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    gpu.depth = gpu.threaded = gpu.jit = true;
+    runtime.paced = true;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kExtrapolate);
+    presenter.TrackSwapchain(depth_chain, 20, 1, XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+    presenter.TrackSwapchain(vectors, kFloatFormat, 1, XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+    App app(presenter, runtime);
+    app.depth.subImage.swapchain = depth_chain;
+    app.depth.subImage.imageRect = {{0, 0}, {1200, 1200}};
+    app.depth.maxDepth = 1.0f;
+    app.depth.nearZ = 0.1f;
+    app.depth.farZ = 1000.0f;
+    std::uint64_t frames = 0;
+    float forward = 1.8f;      // the application's movement a frame
+    float other_forward = 1.8f; // ... as view 1's structure has it
+    bool skip = false;
+    app.before_end = [&](XrTime time) {
+        FrameGenEngineMotionFrame record;
+        record.display_time = time;
+        record.projection_frame = ++frames;
+        for (std::uint32_t v = 0; v < 2; ++v) {
+            FrameGenEngineMotionView view;
+            view.view = v;
+            view.source = FrameGenMotionSource::kSpaceWarpFb;
+            view.vectors = {vectors, {{0, 0}, {960, 960}}, v};
+            view.depth = app.depth.subImage;
+            view.depth_is_khr = true;
+            view.color = app.views[v].subImage;
+            view.depth_encoding = {app.depth.minDepth, app.depth.maxDepth, app.depth.nearZ, app.depth.farZ};
+            view.frame_skip = skip;
+            view.app_delta.position.z = v ? other_forward : forward;
+            const XrPosef& pose = app.views[v].pose;
+            view.game.orientation = {pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w};
+            // The game rendered 1 cm right of the declared pose (Pivot).
+            view.game.position = {pose.position.x + 0.01f, pose.position.y, pose.position.z};
+            record.views.push_back(view);
+        }
+        record.complete = true;
+        presenter.NoteEngineMotion(record);
+    };
+    const auto run = [&](int count) {
+        const int executes = gpu.executes;
+        for (int i = 0; gpu.executes < executes + count && i < 400; ++i) app.Frame();
+        Check(gpu.executes >= executes + count, "engine delta: frames are analysed");
+    };
+    const auto carried = [&] {
+        return gpu.last.size() == 2 && gpu.last[0].request.app_delta && gpu.last[1].request.app_delta;
+    };
+
+    run(4);
+    const FrameGenViewRequest& request = gpu.last[1].request;
+    Check(carried() && request.delta_position[2] == 1.8f && request.delta_orientation[3] == 1.0f &&
+              request.game_newest.position[0] == request.newest.position[0] + 0.01f &&
+              request.game_previous.position[0] == request.previous.position[0] + 0.01f && !request.engine_motion,
+          "engine delta: paired frames carry the movement and the game's poses, engine motion off");
+    // The views' structures disagree: the frame's movement is not known.
+    other_forward = 2.0f;
+    run(2);
+    Check(!gpu.last[0].request.app_delta && !gpu.last[1].request.app_delta, "engine delta: none where the views differ");
+    other_forward = forward;
+    run(2);
+    Check(carried(), "engine delta: carried again once they agree");
+    // FRAME_SKIP: the frame repeats the one before.
+    skip = true;
+    run(2);
+    Check(!carried(), "engine delta: none at FRAME_SKIP");
+    skip = false;
+    run(2);
+    Check(carried(), "engine delta: carried again after FRAME_SKIP");
+    // A camera cut (100 m in a frame), and the frame after (its pair).
+    forward = other_forward = 100.0f;
+    run(1);
+    Check(!carried(), "engine delta: none at a camera cut");
+    forward = other_forward = 1.8f;
+    run(3);
+    Check(carried(), "engine delta: carried again after the cut");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "engine delta: calls stayed ordered");
+}
+
 void TestOverlappingWaitIsHeld() {
     FrameGenPresenter presenter;
     GpuLog gpu;
@@ -11842,6 +11933,7 @@ int main(int argc, char** argv) {
     RUN(TestEngineMotionGates);
     RUN(TestEngineMotionCapture);
     RUN(TestEngineMotionObserve);
+    RUN(TestEngineDelta);
     RUN(TestResearchFileSessions);
     RUN(TestAutomaticMultiplier);
     RUN(TestThreadedExtrapolation);

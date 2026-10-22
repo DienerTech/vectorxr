@@ -82,6 +82,10 @@ cbuffer FrameGenConstantBuffer : register(b0) {
 // front. Synthesis with it (input 5): where the map's surface and the chosen
 // vector's disagree, the map's motion wins (see Synthesize).
 #define FG_FLAG_DEPTH_SPLAT 4096u
+// FG_PASS_FILTER: the sky (FG_WORLD_SKY and beyond) turns with the world's
+// rotation where the world's motion is the application's own movement
+// (FG_PASS_WORLD_SET, input 3), never with a fitted rotation.
+#define FG_FLAG_WORLD_SKY 16384u
 // The motion map's distance classes (stand-ins for fitted motion labels):
 // nearer than this is head-fixed (FG_RIGID_DEPTH), at or beyond the second
 // (to the sky) moves with the world (FG_WORLD_DEPTH); between, no model.
@@ -554,7 +558,8 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
 // world content with depth fills only a few percent of the view is the
 // least certain part of the fit, and the sky is a third of it (replay of 12
 // MSFS captures: outside bad pixels 2.75% -> 2.81% with the sky moved by
-// the fit, 2.61% without).
+// the fit, 2.61% without). The application's own movement turns it exactly
+// (FG_FLAG_WORLD_SKY with FG_PASS_WORLD_SET's motion).
 #define FG_WORLD_SKY (0.5 * FG_FAR_DEPTH)
 // The fit solves for the translation in units of this many meters, so its
 // columns are about as large as the rotation's for distant world content.
@@ -798,9 +803,39 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint index : SV_GroupIndex) {
         x[v] = abs(a[v][v]) > 1e-20 ? a[v][6] / a[v][v] : 0.0;
         solved = solved && !isnan(x[v]) && !isinf(x[v]);
     }
-    g_world[uint2(0u, 0u)] = float4(x[0], x[1], x[2], solved ? 1.0 : 0.0);
-    g_world[uint2(1u, 0u)] = float4(float3(x[3], x[4], x[5]) * FG_WORLD_TRANSLATION_UNIT,
-                                    count > 0.0 ? weight / count : 0.0);
+    const float4 rotation = float4(x[0], x[1], x[2], solved ? 1.0 : 0.0);
+    const float4 translation = float4(float3(x[3], x[4], x[5]) * FG_WORLD_TRANSLATION_UNIT, count > 0.0 ? weight / count : 0.0);
+    g_world[uint2(0u, 0u)] = rotation;
+    g_world[uint2(1u, 0u)] = translation;
+    // Fitted, not the application's own movement (texel 2's y 0: the sky
+    // keeps its measured flow, FG_PASS_FILTER), whatever FG_PASS_WORLD_SET
+    // wrote before.
+    g_world[uint2(2u, 0u)] = float4(0.0, 0.0, 0.0, 0.0);
+    g_world[uint2(3u, 0u)] = float4(0.0, 0.0, 0.0, 1.0);
+    // The fit again in texels 4 and 5, which FG_PASS_WORLD_SET leaves: where
+    // the set follows the fit (the calibration's watchdog) the backend reads
+    // the fit back from there.
+    g_world[uint2(4u, 0u)] = rotation;
+    g_world[uint2(5u, 0u)] = translation;
+}
+#endif
+
+#if defined(FG_PASS_WORLD_SET)
+FG_BIND(4) FG_FORMAT("rgba32f") RWTexture2D<float4> g_world : register(u0);
+
+// The world's motion worked out from the application's movement
+// (appSpaceDeltaPose: FrameGenEngineWorldParams on the CPU) in place of the
+// fit (FG_PASS_WORLD_REDUCE, FG_PASS_WORLD_SOLVE), from the constants:
+// texel 0 the rotation and 1 (valid), texel 1 the translation and 1, texel
+// 2 the translation's scale, 1 (the application's movement), the rotation's
+// sign and 0, texel 3 the rotation as a quaternion; texels 4 and 5 (a fit's
+// copy, the watchdog's) are left. One thread.
+[numthreads(1, 1, 1)]
+void CSMain() {
+    g_world[uint2(0u, 0u)] = g.fov_current;
+    g_world[uint2(1u, 0u)] = g.fov_previous;
+    g_world[uint2(2u, 0u)] = g.rot0;
+    g_world[uint2(3u, 0u)] = g.rot1;
 }
 #endif
 
@@ -845,6 +880,30 @@ FG_BIND(4) FG_FORMAT("rgba16f") RWTexture2D<float4> g_flow_out : register(u0);
 // and the median prefers its neighbours'.
 #define FG_UNSEEN_COST 0.5
 
+// The flow (in tangents, as WorldFlow) of content at uv and inverse depth
+// inv_z (0: infinitely far) under the world's motion from the application's
+// movement (FG_PASS_WORLD_SET: the rotation as a quaternion in texel 3, the
+// translation in texel 1), exactly: the point moved back to where it was
+// the frame before, P(N-1) = R^T (P(N) - t), and seen from the newest view.
+// WorldFlow's small-angle form is off by about t_z / z of the flow (a tenth
+// of a pixel at 130 m and 3 m a frame; more at 30 m); the fit keeps it, as it
+// was fitted with it.
+float2 WorldFlowExact(float2 uv, float inv_z) {
+    const float2 at = WorldTangents(uv);
+    const float4 q = g_world.Load(int3(3, 0, 0));
+    // R^T (P - t) up to scale (P = (at, -1) / inv_z): by the conjugate.
+    const float3 d = float3(at, -1.0) - g_world.Load(int3(1, 0, 0)).xyz * inv_z;
+    const float3 u = -q.xyz;
+    const float3 before = d + 2.0 * cross(u, cross(u, d) + q.w * d);
+    float2 flow;
+    if (before.z < -1e-6) {
+        flow = at - before.xy / -before.z;
+    } else {
+        flow = WorldFlow(g_world, uv, inv_z); // behind the view the frame before: no projection
+    }
+    return flow;
+}
+
 // A flow sample (w: its cost with no motion, negative where the previous
 // frame did not see the content: FG_PASS_REFINE) with the rigid test applied
 // at its cell; `rigid` when the cell is cockpit content.
@@ -862,11 +921,22 @@ float4 Rigid(float4 flow, int2 cell, float2 pixels, out bool rigid) {
         }
     } else {
         // World content takes the world's fitted motion, also where the
-        // previous frame did not see it (no measured vector to trust there).
+        // previous frame did not see it (no measured vector to trust there);
+        // the application's own movement (FG_PASS_WORLD_SET, texel 2's y 1)
+        // moves it exactly.
         const float inv_z = WorldInverseDepth(depth);
         if ((g.options.y & FG_FLAG_WORLD) != 0u && inv_z >= 0.0 && depth < FG_WORLD_SKY &&
             g_world.Load(int3(0, 0, 0)).w > 0.0) {
-            result = float4(WorldFlow(g_world, uv, inv_z) / WorldTangentScale(), FG_WORLD_COST, max(zero, 0.0));
+            const bool delta = g_world.Load(int3(2, 0, 0)).y == 1.0;
+            result = float4((delta ? WorldFlowExact(uv, inv_z) : WorldFlow(g_world, uv, inv_z)) / WorldTangentScale(),
+                            FG_WORLD_COST, max(zero, 0.0));
+        } else if ((g.options.y & FG_FLAG_WORLD_SKY) != 0u && depth >= FG_WORLD_SKY &&
+                   g_world.Load(int3(0, 0, 0)).w > 0.0 && g_world.Load(int3(2, 0, 0)).y == 1.0) {
+            // The sky turns with the world's rotation alone (infinitely far)
+            // where that is the application's own movement: exact, unlike a
+            // rotation fitted where world content with depth fills a few
+            // percent of the view.
+            result = float4(WorldFlowExact(uv, 0.0) / WorldTangentScale(), FG_WORLD_COST, max(zero, 0.0));
         } else if (zero < 0.0) {
             result.z = max(flow.z, FG_UNSEEN_COST);
         }

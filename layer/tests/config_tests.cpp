@@ -3056,6 +3056,520 @@ void TestFrameGenEnginePrior() {
     Expect(std::abs(depthxr::FrameGenAngularAcceleration(c, b, a) - 2.0) < 1e-3, "Engine prior: 3 then 1 degree is 2");
 }
 
+// --- Stage 4: the world's motion from the application's movement ---------
+
+using WorldVec = std::array<double, 3>;
+using WorldQuat = std::array<double, 4>; // x, y, z, w
+using WorldMatrix = std::array<std::array<double, 4>, 4>;
+
+WorldQuat WorldAxisAngle(const WorldVec& axis, double radians) {
+    const double length = std::sqrt(axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]);
+    const double s = std::sin(radians / 2.0) / length;
+    return {axis[0] * s, axis[1] * s, axis[2] * s, std::cos(radians / 2.0)};
+}
+
+WorldQuat WorldMultiply(const WorldQuat& a, const WorldQuat& b) {
+    return {a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1], a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+            a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3], a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2]};
+}
+
+// A pose (unit quaternion, position) as a 4x4 matrix: camera to its space.
+WorldMatrix WorldPose(const std::array<float, 4>& orientation, const std::array<float, 3>& position) {
+    const double n = std::sqrt(static_cast<double>(orientation[0]) * orientation[0] +
+                               static_cast<double>(orientation[1]) * orientation[1] +
+                               static_cast<double>(orientation[2]) * orientation[2] +
+                               static_cast<double>(orientation[3]) * orientation[3]);
+    const double x = orientation[0] / n, y = orientation[1] / n, z = orientation[2] / n, w = orientation[3] / n;
+    return {{{1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w), position[0]},
+             {2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w), position[1]},
+             {2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y), position[2]},
+             {0.0, 0.0, 0.0, 1.0}}};
+}
+
+WorldMatrix WorldTimes(const WorldMatrix& a, const WorldMatrix& b) {
+    WorldMatrix result{};
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            for (int k = 0; k < 4; ++k) result[r][c] += a[r][k] * b[k][c];
+        }
+    }
+    return result;
+}
+
+WorldMatrix WorldInverse(const WorldMatrix& m) {
+    WorldMatrix result{};
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) result[r][c] = m[c][r];
+        result[r][3] = -(m[0][r] * m[0][3] + m[1][r] * m[1][3] + m[2][r] * m[2][3]);
+    }
+    result[3][3] = 1.0;
+    return result;
+}
+
+WorldVec WorldApply(const WorldMatrix& m, const WorldVec& p) {
+    return {m[0][0] * p[0] + m[0][1] * p[1] + m[0][2] * p[2] + m[0][3],
+            m[1][0] * p[0] + m[1][1] * p[1] + m[1][2] * p[2] + m[1][3],
+            m[2][0] * p[0] + m[2][1] * p[1] + m[2][2] * p[2] + m[2][3]};
+}
+
+std::array<float, 4> WorldFloats(const WorldQuat& q) {
+    return {static_cast<float>(q[0]), static_cast<float>(q[1]), static_cast<float>(q[2]), static_cast<float>(q[3])};
+}
+
+// A view of the scenes below: a Pimax-like field of view (wider outward).
+depthxr::FrameGenViewGeometry WorldView(const WorldQuat& orientation, const WorldVec& position, int eye) {
+    depthxr::FrameGenViewGeometry view;
+    view.orientation = WorldFloats(orientation);
+    view.position = {static_cast<float>(position[0]), static_cast<float>(position[1]), static_cast<float>(position[2])};
+    view.angle_left = eye ? -0.9f : -1.1f;
+    view.angle_right = eye ? 1.1f : 0.9f;
+    view.angle_up = 0.95f;
+    view.angle_down = -1.0f;
+    return view;
+}
+
+// One frame pair of a scene: per eye, the poses the game rendered the frame
+// and the one before with (an eye 32 mm to each side of a head, canted
+// outward by `cant`), the poses declared to Frame Generation (Pivot's change
+// times the game's, `pivot_*` at each frame), and the application's movement.
+struct WorldScene {
+    std::array<depthxr::FrameGenViewGeometry, 2> game_newest, game_previous, newest, previous;
+    std::array<float, 4> delta_orientation{0.0f, 0.0f, 0.0f, 1.0f};
+    std::array<float, 3> delta_position{};
+};
+
+struct WorldPivot {
+    WorldQuat orientation{0.0, 0.0, 0.0, 1.0};
+    WorldVec position{};
+};
+
+WorldScene MakeWorldScene(const WorldQuat& head_newest, const WorldVec& at_newest, const WorldQuat& head_previous,
+                          const WorldVec& at_previous, double cant, const WorldPivot& pivot_newest,
+                          const WorldPivot& pivot_previous, const WorldQuat& delta, const WorldVec& moved) {
+    WorldScene scene;
+    auto eye = [&](const WorldQuat& head, const WorldVec& at, int e) {
+        const WorldQuat orientation = WorldMultiply(head, WorldAxisAngle({0.0, 1.0, 0.0}, e ? -cant : cant));
+        const WorldMatrix rotation = WorldPose(WorldFloats(head), {0.0f, 0.0f, 0.0f});
+        const WorldVec side = WorldApply(rotation, {e ? 0.032 : -0.032, 0.0, 0.0});
+        return std::make_pair(orientation, WorldVec{at[0] + side[0], at[1] + side[1], at[2] + side[2]});
+    };
+    auto declared = [](const WorldPivot& pivot, const std::pair<WorldQuat, WorldVec>& game, int e) {
+        const WorldMatrix change = WorldPose(WorldFloats(pivot.orientation), {0.0f, 0.0f, 0.0f});
+        const WorldVec moved_by = WorldApply(change, game.second);
+        return WorldView(WorldMultiply(pivot.orientation, game.first),
+                         {moved_by[0] + pivot.position[0], moved_by[1] + pivot.position[1], moved_by[2] + pivot.position[2]},
+                         e);
+    };
+    for (int e = 0; e < 2; ++e) {
+        const auto now = eye(head_newest, at_newest, e);
+        const auto before = eye(head_previous, at_previous, e);
+        scene.game_newest[e] = WorldView(now.first, now.second, e);
+        scene.game_previous[e] = WorldView(before.first, before.second, e);
+        scene.newest[e] = declared(pivot_newest, now, e);
+        scene.previous[e] = declared(pivot_previous, before, e);
+    }
+    scene.delta_orientation = WorldFloats(delta);
+    scene.delta_position = {static_cast<float>(moved[0]), static_cast<float>(moved[1]), static_cast<float>(moved[2])};
+    return scene;
+}
+
+// FrameGenEngineWorldParams against a reference from 4x4 pose matrices: a
+// point y of the newest declared view (the head held) is at
+// T_gN^-1 T_D T_gP T_dP^-1 T_dN y at the newest frame (T_g, T_d: the game's
+// and the declared poses, T_D the application's movement). Then frames
+// rendered from the poses: the flow Frame Generation measures (the image's
+// correspondence with the declared head movement taken out, as
+// MapToNewest takes it out) is the model's, exactly and as FG_PASS_FILTER's
+// WorldFlow has it (small-angle).
+void TestFrameGenEngineWorldParams() {
+    constexpr double kDegree = 3.14159265358979 / 180.0;
+    const WorldQuat head_newest = WorldMultiply(WorldAxisAngle({0.0, 1.0, 0.0}, 30.0 * kDegree),
+                                                WorldAxisAngle({1.0, 0.0, 0.0}, -5.0 * kDegree));
+    const WorldQuat head_previous = WorldMultiply(WorldAxisAngle({0.0, 1.0, 0.0}, 29.5 * kDegree),
+                                                  WorldAxisAngle({1.0, 0.0, 0.0}, -4.8 * kDegree));
+    const WorldVec at_newest{0.02, 1.2, 0.01}, at_previous{0.0, 1.21, 0.0};
+    // 1.8 m a frame forward (world points come toward +Z in the
+    // application's space), banking gently.
+    const WorldQuat bank = WorldAxisAngle({0.1, 1.0, 0.2}, 0.3 * kDegree);
+    const WorldVec forward{0.0, 0.0, 1.8};
+    const WorldPivot pivot{WorldAxisAngle({0.0, 1.0, 0.0}, 15.0 * kDegree), {0.1, -0.05, 0.3}};
+    const WorldPivot pivot_ramp{WorldAxisAngle({0.0, 1.0, 0.0}, 14.5 * kDegree), {0.09, -0.05, 0.29}};
+    struct Case {
+        const char* name;
+        WorldPivot before;
+        float scale;
+    };
+    const std::array<Case, 3> cases{{{"Pivot's change held", pivot, 1.0f},
+                                     {"Pivot's change ramping", pivot_ramp, 1.0f},
+                                     {"s_t 1.1", pivot, 1.1f}}};
+    for (const Case& c : cases) {
+        const WorldScene scene =
+            MakeWorldScene(head_newest, at_newest, head_previous, at_previous, 10.0 * kDegree, pivot, c.before, bank, forward);
+        for (int e = 0; e < 2; ++e) {
+            const depthxr::FrameGenEngineWorld world = depthxr::FrameGenEngineWorldParams(
+                scene.game_newest[e], scene.game_previous[e], scene.newest[e], scene.previous[e], scene.delta_orientation,
+                scene.delta_position, 1, c.scale);
+            const WorldMatrix reference = WorldTimes(
+                WorldInverse(WorldPose(scene.game_newest[e].orientation, scene.game_newest[e].position)),
+                WorldTimes(WorldPose(scene.delta_orientation, scene.delta_position),
+                           WorldTimes(WorldPose(scene.game_previous[e].orientation, scene.game_previous[e].position),
+                                      WorldTimes(WorldInverse(WorldPose(scene.previous[e].orientation, scene.previous[e].position)),
+                                                 WorldPose(scene.newest[e].orientation, scene.newest[e].position)))));
+            const WorldMatrix rotation = WorldPose(world.quaternion, {0.0f, 0.0f, 0.0f});
+            double worst = 0.0;
+            for (int r = 0; r < 3; ++r) {
+                for (int k = 0; k < 3; ++k) worst = (std::max)(worst, std::abs(rotation[r][k] - reference[r][k]));
+                worst = (std::max)(worst, std::abs(world.translation[r] - c.scale * reference[r][3]));
+                worst = (std::max)(worst, std::abs(world.rotation[r] - 2.0 * world.quaternion[r]));
+            }
+            Expect(world.valid && world.quaternion[3] >= 0.0f && worst < 1e-5,
+                   std::string("World delta: the model matches the 4x4 reference (") + c.name + ", eye " +
+                       std::to_string(e) + ": " + std::to_string(worst) + ")");
+        }
+    }
+
+    // No movement of the application's space: the world holds still in the
+    // newest view whatever the head and a steady Pivot do.
+    const WorldScene still = MakeWorldScene(head_newest, at_newest, head_previous, at_previous, 10.0 * kDegree, pivot, pivot,
+                                            {0.0, 0.0, 0.0, 1.0}, {0.0, 0.0, 0.0});
+    for (int e = 0; e < 2; ++e) {
+        const depthxr::FrameGenEngineWorld world =
+            depthxr::FrameGenEngineWorldParams(still.game_newest[e], still.game_previous[e], still.newest[e],
+                                               still.previous[e], still.delta_orientation, still.delta_position, 1, 1.0f);
+        double largest = 0.0;
+        for (int i = 0; i < 3; ++i) {
+            largest = (std::max)({largest, std::abs(static_cast<double>(world.rotation[i])),
+                                  std::abs(static_cast<double>(world.translation[i]))});
+        }
+        Expect(world.valid && largest < 1e-6,
+               "World delta: an identity delta gives no world motion (" + std::to_string(largest) + ")");
+    }
+
+    // Sign -1 is the delta's rotation conjugated.
+    const WorldScene turning = MakeWorldScene(head_newest, at_newest, head_previous, at_previous, 10.0 * kDegree, pivot,
+                                              pivot_ramp, bank, forward);
+    const std::array<float, 4> conjugated{-turning.delta_orientation[0], -turning.delta_orientation[1],
+                                          -turning.delta_orientation[2], turning.delta_orientation[3]};
+    const depthxr::FrameGenEngineWorld minus = depthxr::FrameGenEngineWorldParams(
+        turning.game_newest[0], turning.game_previous[0], turning.newest[0], turning.previous[0], turning.delta_orientation,
+        turning.delta_position, -1, 1.0f);
+    const depthxr::FrameGenEngineWorld conjugate = depthxr::FrameGenEngineWorldParams(
+        turning.game_newest[0], turning.game_previous[0], turning.newest[0], turning.previous[0], conjugated,
+        turning.delta_position, 1, 1.0f);
+    const depthxr::FrameGenEngineWorld plus = depthxr::FrameGenEngineWorldParams(
+        turning.game_newest[0], turning.game_previous[0], turning.newest[0], turning.previous[0], turning.delta_orientation,
+        turning.delta_position, 1, 1.0f);
+    Expect(minus.rotation == conjugate.rotation && minus.translation == conjugate.translation &&
+               minus.quaternion == conjugate.quaternion && minus.rotation != plus.rotation,
+           "World delta: sign -1 conjugates the delta's rotation");
+    // Not finite: no model.
+    const depthxr::FrameGenEngineWorld broken = depthxr::FrameGenEngineWorldParams(
+        turning.game_newest[0], turning.game_previous[0], turning.newest[0], turning.previous[0], turning.delta_orientation,
+        {std::numeric_limits<float>::quiet_NaN(), 0.0f, 1.8f}, 1, 1.0f);
+    Expect(!broken.valid, "World delta: a delta not finite gives no model");
+
+    // Rendered: world points at 300 m to 5 km seen at the newest frame,
+    // where the game rendered them the frame before; Frame Generation's
+    // flow there is uv - MapToNewest(where they were, their depth) by the
+    // declared poses. The model's flow is the point moved back by the world's
+    // motion, projected (exact), or WorldRows' (the filter's, small-angle).
+    for (const Case& c : {cases[0], cases[1]}) {
+        const WorldScene scene =
+            MakeWorldScene(head_newest, at_newest, head_previous, at_previous, 10.0 * kDegree, pivot, c.before, bank, forward);
+        double exact_worst = 0.0, linear_worst = 0.0;
+        for (int e = 0; e < 2; ++e) {
+            const depthxr::FrameGenViewGeometry& game_now = scene.game_newest[e];
+            const depthxr::FrameGenViewGeometry& game_then = scene.game_previous[e];
+            const depthxr::FrameGenEngineWorld world = depthxr::FrameGenEngineWorldParams(
+                game_now, game_then, scene.newest[e], scene.previous[e], scene.delta_orientation, scene.delta_position, 1, 1.0f);
+            const auto mapping = depthxr::BuildFrameGenViewMapping(scene.newest[e], scene.previous[e], true);
+            const WorldMatrix camera_now = WorldPose(game_now.orientation, game_now.position);
+            const WorldMatrix camera_then = WorldPose(game_then.orientation, game_then.position);
+            const WorldMatrix moved = WorldPose(scene.delta_orientation, scene.delta_position);
+            const WorldMatrix motion = WorldPose(world.quaternion, world.translation);
+            const double l = std::tan(game_now.angle_left), r = std::tan(game_now.angle_right);
+            const double u = std::tan(game_now.angle_up), d = std::tan(game_now.angle_down);
+            for (int y = 1; y < 10; y += 2) {
+                for (int x = 1; x < 10; x += 2) {
+                    for (const double depth : {300.0, 1000.0, 5000.0}) {
+                        const std::array<float, 2> uv{x / 10.0f, y / 10.0f};
+                        const WorldVec point{(l + (r - l) * uv[0]) * depth, (u + (d - u) * uv[1]) * depth, -depth};
+                        // Where the game rendered it the frame before.
+                        const WorldVec seen = WorldApply(
+                            WorldInverse(camera_then), WorldApply(WorldInverse(moved), WorldApply(camera_now, point)));
+                        const std::array<float, 2> before{static_cast<float>((seen[0] / -seen[2] - l) / (r - l)),
+                                                          static_cast<float>((seen[1] / -seen[2] - u) / (d - u))};
+                        std::array<float, 2> back{};
+                        Expect(depthxr::FrameGenMapToNewest(mapping, before, static_cast<float>(depth), back),
+                               "World delta: the point maps back to the newest view");
+                        const double flow[2] = {uv[0] - back[0], uv[1] - back[1]};
+                        // The model: the point moved back by the world's motion.
+                        const WorldVec held = WorldApply(WorldInverse(motion), point);
+                        const double exact[2] = {uv[0] - (held[0] / -held[2] - l) / (r - l),
+                                                 uv[1] - (held[1] / -held[2] - u) / (d - u)};
+                        exact_worst = (std::max)({exact_worst, std::abs(flow[0] - exact[0]), std::abs(flow[1] - exact[1])});
+                        // WorldRows at the newest tangent and inverse depth.
+                        const double ax = l + (r - l) * uv[0], ay = u + (d - u) * uv[1], inv_z = 1.0 / depth;
+                        const auto& w = world.rotation;
+                        const auto& t = world.translation;
+                        const double dx = ax * ay * w[0] + (-1.0 - ax * ax) * w[1] - ay * w[2] + inv_z * t[0] + ax * inv_z * t[2];
+                        const double dy = (1.0 + ay * ay) * w[0] - ax * ay * w[1] + ax * w[2] + inv_z * t[1] + ay * inv_z * t[2];
+                        const double linear[2] = {dx / (r - l), dy / (d - u)};
+                        // Within tangent 1 of the view's axis (further out
+                        // the small-angle form drifts: 1.2e-4 uv at 1.6).
+                        if (c.before.orientation == pivot.orientation && std::abs(ax) <= 1.0 && std::abs(ay) <= 1.0) {
+                            linear_worst =
+                                (std::max)({linear_worst, std::abs(flow[0] - linear[0]), std::abs(flow[1] - linear[1])});
+                        }
+                    }
+                }
+            }
+        }
+        Expect(exact_worst < 1e-5, std::string("World delta: rendered frames move by the model exactly (") + c.name + ": " +
+                                       std::to_string(exact_worst) + " uv)");
+        Expect(linear_worst < 1e-4, std::string("World delta: and by the filter's small-angle model within 1e-4 uv (") +
+                                        c.name + ": " + std::to_string(linear_worst) + " uv)");
+    }
+}
+
+// The plan: kWorldSet in place of the fit where the backend's calibration
+// locked (FrameGenTuning::world_delta) and the request has the application's
+// movement, after the fit on the watchdog's frames (delta_watchdog); the
+// cover of just-in-time interpolation reads the same, and the
+// sky flag goes on the extrapolating filters with world_sky. Without
+// world_delta the plan is as without the movement, byte for byte.
+void TestFrameGenWorldDeltaPlan() {
+    using depthxr::FrameGenPass;
+    using depthxr::FrameGenTextureKind;
+    constexpr double kDegree = 3.14159265358979 / 180.0;
+    const WorldScene scene = MakeWorldScene(WorldAxisAngle({0.0, 1.0, 0.0}, 30.0 * kDegree), {0.0, 1.2, 0.0},
+                                            WorldAxisAngle({0.0, 1.0, 0.0}, 29.0 * kDegree), {0.0, 1.2, 0.0}, 0.0, {}, {},
+                                            WorldAxisAngle({0.0, 1.0, 0.0}, 0.3 * kDegree), {0.0, 0.0, 1.8});
+    depthxr::FrameGenViewRequest request;
+    request.extent = {1024, 1024};
+    request.synthesize = request.temporal = request.depth = request.world_motion = true;
+    request.newest = scene.newest[0];
+    request.previous = scene.previous[0];
+    request.game_newest = scene.game_newest[0];
+    request.game_previous = scene.game_previous[0];
+    depthxr::FrameGenTuning tuning;
+    tuning.mode = depthxr::FrameGenSynthesisMode::kExtrapolate;
+    tuning.analyze_only = true;
+    const depthxr::FrameGenViewPlan plain = depthxr::BuildFrameGenViewPlan(request, tuning);
+    auto same = [](const depthxr::FrameGenViewPlan& a, const depthxr::FrameGenViewPlan& b) {
+        bool equal = a.dispatches.size() == b.dispatches.size();
+        for (std::size_t i = 0; equal && i < a.dispatches.size(); ++i) {
+            equal = a.dispatches[i].pass == b.dispatches[i].pass &&
+                    std::memcmp(a.dispatches[i].inputs.data(), b.dispatches[i].inputs.data(), sizeof(a.dispatches[i].inputs)) == 0 &&
+                    std::memcmp(a.dispatches[i].outputs.data(), b.dispatches[i].outputs.data(), sizeof(a.dispatches[i].outputs)) == 0 &&
+                    std::memcmp(&a.dispatches[i].constants, &b.dispatches[i].constants, sizeof(depthxr::FrameGenConstants)) == 0;
+        }
+        return equal;
+    };
+    auto count = [](const depthxr::FrameGenViewPlan& plan, FrameGenPass pass) {
+        return std::count_if(plan.dispatches.begin(), plan.dispatches.end(),
+                             [&](const depthxr::FrameGenDispatch& dispatch) { return dispatch.pass == pass; });
+    };
+    auto filters = [](const depthxr::FrameGenViewPlan& plan) {
+        std::vector<depthxr::FrameGenDispatch> found;
+        for (const auto& dispatch : plan.dispatches) {
+            if (dispatch.pass == FrameGenPass::kFilter) found.push_back(dispatch);
+        }
+        return found;
+    };
+    request.app_delta = true;
+    request.delta_orientation = scene.delta_orientation;
+    request.delta_position = scene.delta_position;
+    Expect(same(depthxr::BuildFrameGenViewPlan(request, tuning), plain),
+           "World delta plan: the movement alone changes nothing (the backend's calibration has not locked)");
+    tuning.world_sky = true;
+    tuning.world_delta = true;
+    tuning.delta_sign = -1;
+    tuning.delta_scale = 1.1f;
+    const depthxr::FrameGenViewPlan set = depthxr::BuildFrameGenViewPlan(request, tuning);
+    const auto set_filters = filters(set);
+    const auto world_set = std::find_if(set.dispatches.begin(), set.dispatches.end(),
+                                        [](const auto& dispatch) { return dispatch.pass == FrameGenPass::kWorldSet; });
+    const depthxr::FrameGenEngineWorld expected = depthxr::FrameGenEngineWorldParams(
+        request.game_newest, request.game_previous, request.newest, request.previous, request.delta_orientation,
+        request.delta_position, -1, 1.1f);
+    Expect(count(set, FrameGenPass::kWorldSet) == 1 && count(set, FrameGenPass::kWorldReduce) == 0 &&
+               count(set, FrameGenPass::kWorldSolve) == 0 && count(plain, FrameGenPass::kWorldSolve) == 3 &&
+               set.dispatches.size() + 5 == plain.dispatches.size(),
+           "World delta plan: kWorldSet stands in for the fit's three iterations");
+    Expect(world_set != set.dispatches.end() && world_set->outputs[0].kind == FrameGenTextureKind::kWorldParams &&
+               world_set->width == 1 && world_set->height == 1 &&
+               world_set->constants.fov_current ==
+                   std::array<float, 4>{expected.rotation[0], expected.rotation[1], expected.rotation[2], 1.0f} &&
+               world_set->constants.fov_previous ==
+                   std::array<float, 4>{expected.translation[0], expected.translation[1], expected.translation[2], 1.0f} &&
+               world_set->constants.rot0 == std::array<float, 4>{1.1f, 1.0f, -1.0f, 0.0f} &&
+               world_set->constants.rot1 == expected.quaternion,
+           "World delta plan: kWorldSet writes the model's rotation, translation, source, sign, scale and quaternion");
+    Expect(set_filters.size() == 1 && set_filters[0].inputs[3].kind == FrameGenTextureKind::kWorldParams &&
+               (set_filters[0].constants.options[1] & depthxr::kFrameGenFlagWorld) != 0 &&
+               (set_filters[0].constants.options[1] & depthxr::kFrameGenFlagWorldSky) != 0 &&
+               world_set < std::find_if(set.dispatches.begin(), set.dispatches.end(),
+                                        [](const auto& dispatch) { return dispatch.pass == FrameGenPass::kFilter; }),
+           "World delta plan: the filter reads it after it is set, the sky flag with world_sky");
+    // The watchdog's frames: the fit runs as well, and the set after it, so
+    // the filter reads the same motion as on every other frame.
+    tuning.delta_watchdog = true;
+    const depthxr::FrameGenViewPlan watched = depthxr::BuildFrameGenViewPlan(request, tuning);
+    std::size_t last_solve = 0, watched_set = 0, watched_filter = 0;
+    for (std::size_t i = 0; i < watched.dispatches.size(); ++i) {
+        const FrameGenPass pass = watched.dispatches[i].pass;
+        if (pass == FrameGenPass::kWorldSolve) last_solve = i;
+        if (pass == FrameGenPass::kWorldSet) watched_set = i;
+        if (pass == FrameGenPass::kFilter && watched_filter == 0) watched_filter = i;
+    }
+    Expect(count(watched, FrameGenPass::kWorldSolve) == 3 && count(watched, FrameGenPass::kWorldSet) == 1 &&
+               watched.dispatches.size() == plain.dispatches.size() + 1 && last_solve < watched_set &&
+               watched_set < watched_filter &&
+               std::memcmp(&watched.dispatches[watched_set].constants, &world_set->constants,
+                           sizeof(depthxr::FrameGenConstants)) == 0,
+           "World delta plan: on the watchdog's frames the fit runs, then the set, then the filter");
+    tuning.delta_watchdog = false;
+    tuning.world_sky = false;
+    Expect((filters(depthxr::BuildFrameGenViewPlan(request, tuning))[0].constants.options[1] &
+            depthxr::kFrameGenFlagWorldSky) == 0,
+           "World delta plan: no sky flag without world_sky");
+    // A request without the movement, or a model not finite: the fit.
+    request.app_delta = false;
+    Expect(same(depthxr::BuildFrameGenViewPlan(request, tuning), plain), "World delta plan: the fit without the movement");
+    tuning.delta_watchdog = true;
+    Expect(same(depthxr::BuildFrameGenViewPlan(request, tuning), plain),
+           "World delta plan: the fit alone without the movement, on the watchdog's frames too");
+    tuning.delta_watchdog = false;
+    request.app_delta = true;
+    request.delta_position[0] = std::numeric_limits<float>::quiet_NaN();
+    Expect(same(depthxr::BuildFrameGenViewPlan(request, tuning), plain), "World delta plan: the fit for a broken delta");
+    request.delta_position = scene.delta_position;
+    // Interpolating just in time: the main filter keeps the measured flow
+    // (no world model, no sky); the cover reads the set motion, sky and all.
+    tuning.mode = depthxr::FrameGenSynthesisMode::kInterpolate;
+    tuning.cover = true;
+    tuning.world_sky = true;
+    const depthxr::FrameGenViewPlan interpolated = depthxr::BuildFrameGenViewPlan(request, tuning);
+    const auto interpolated_filters = filters(interpolated);
+    Expect(count(interpolated, FrameGenPass::kWorldSet) == 1 && count(interpolated, FrameGenPass::kWorldSolve) == 0 &&
+               interpolated_filters.size() == 2 &&
+               (interpolated_filters[0].constants.options[1] & (depthxr::kFrameGenFlagWorld | depthxr::kFrameGenFlagWorldSky)) == 0 &&
+               interpolated_filters[1].outputs[0].kind == FrameGenTextureKind::kFilteredCover &&
+               (interpolated_filters[1].constants.options[1] & depthxr::kFrameGenFlagWorldSky) != 0 &&
+               interpolated_filters[1].inputs[3].kind == FrameGenTextureKind::kWorldParams,
+           "World delta plan: interpolating, only the cover reads the set motion");
+    tuning.world_delta = tuning.world_sky = false;
+    request.app_delta = false;
+    const depthxr::FrameGenViewPlan interpolated_plain = depthxr::BuildFrameGenViewPlan(request, tuning);
+    Expect(count(interpolated_plain, FrameGenPass::kWorldSolve) == 3 &&
+               (filters(interpolated_plain)[1].constants.options[1] & depthxr::kFrameGenFlagWorldSky) == 0,
+           "World delta plan: interpolating without it, the cover's fit as before");
+}
+
+// The calibration of the application's movement against the world fit, on
+// fits made from the model (a sign and a scale, a little noise): a sign
+// and s_t found once 300 informative frames with turns came; none without
+// turns, nor at a scale out of range; locked, the watchdog drops it back
+// after 10 checks in a row 25% off, a check within resetting the count.
+void TestFrameGenWorldDeltaCalibration() {
+    using depthxr::FrameGenWorldDeltaMode;
+    Expect(depthxr::ParseFrameGenWorldDeltaMode("calibrate") == FrameGenWorldDeltaMode::kCalibrate &&
+               depthxr::ParseFrameGenWorldDeltaMode("Calibrate") == FrameGenWorldDeltaMode::kCalibrate &&
+               depthxr::ParseFrameGenWorldDeltaMode("1") == FrameGenWorldDeltaMode::kOn &&
+               depthxr::ParseFrameGenWorldDeltaMode("0") == FrameGenWorldDeltaMode::kOff &&
+               depthxr::ParseFrameGenWorldDeltaMode("") == FrameGenWorldDeltaMode::kOff,
+           "World delta calibration: the switch's modes parse");
+    const auto fixed = depthxr::ParseFrameGenWorldDeltaFixed(" -1, 1.05");
+    Expect(fixed && fixed->first == -1 && std::abs(fixed->second - 1.05f) < 1e-6f &&
+               !depthxr::ParseFrameGenWorldDeltaFixed("1") && !depthxr::ParseFrameGenWorldDeltaFixed("2,1") &&
+               !depthxr::ParseFrameGenWorldDeltaFixed("1,3") && !depthxr::ParseFrameGenWorldDeltaFixed("1,1,x"),
+           "World delta calibration: a fixed sign and scale parse, others are refused");
+    depthxr::FrameGenWorldDeltaCalibration fixed_calibration;
+    fixed_calibration.Fix(-1, 1.05f);
+    Expect(fixed_calibration.Locked() && fixed_calibration.Status().fixed && fixed_calibration.Sign() == -1 &&
+               fixed_calibration.Scale() == 1.05f && fixed_calibration.Status().decisions == 1,
+           "World delta calibration: fixed, locked from the start");
+
+    constexpr double kDegree = 3.14159265358979 / 180.0;
+    // Frame k: flying on 1.8 m a frame, banking 0.4 degrees a frame on
+    // frames 100-159 when `turns`; the head still, no Pivot.
+    auto frame_fits = [&](int k, bool turns, int sign, double scale, double off = 1.0) {
+        const double turn = turns && k >= 100 && k < 160 ? 0.4 * kDegree : 0.0;
+        const WorldQuat head = WorldAxisAngle({0.0, 1.0, 0.0}, 30.0 * kDegree);
+        const WorldScene scene = MakeWorldScene(head, {0.0, 1.2, 0.0}, head, {0.0, 1.2, 0.0}, 10.0 * kDegree, {}, {},
+                                                WorldAxisAngle({0.05, 1.0, 0.1}, turn), {0.0, 0.0, 1.8});
+        std::vector<depthxr::FrameGenWorldFit> fits;
+        for (int e = 0; e < 2; ++e) {
+            depthxr::FrameGenWorldFit fit;
+            fit.game_newest = scene.game_newest[e];
+            fit.game_previous = scene.game_previous[e];
+            fit.newest = scene.newest[e];
+            fit.previous = scene.previous[e];
+            fit.delta_orientation = scene.delta_orientation;
+            fit.delta_position = scene.delta_position;
+            const depthxr::FrameGenEngineWorld truth = depthxr::FrameGenEngineWorldParams(
+                fit.game_newest, fit.game_previous, fit.newest, fit.previous, fit.delta_orientation, fit.delta_position,
+                sign, static_cast<float>(scale));
+            for (int i = 0; i < 3; ++i) {
+                const double noise = std::sin(17.0 * k + 5.0 * i + 3.0 * e);
+                fit.rotation[i] = truth.rotation[i] + static_cast<float>(1e-4 * noise);
+                fit.translation[i] = static_cast<float>(off * truth.translation[i] + 0.02 * noise);
+            }
+            fit.valid = true;
+            fits.push_back(fit);
+        }
+        return fits;
+    };
+    for (const int sign : {1, -1}) {
+        depthxr::FrameGenWorldDeltaCalibration calibration;
+        for (int k = 0; k < 299; ++k) calibration.Add(frame_fits(k, true, sign, 1.08));
+        const bool early = calibration.Locked();
+        calibration.Add(frame_fits(299, true, sign, 1.08));
+        const depthxr::FrameGenWorldDeltaStatus& status = calibration.Status();
+        Expect(!early && calibration.Locked() && calibration.Sign() == sign && std::abs(calibration.Scale() - 1.08f) < 0.01f &&
+                   status.informative == 300 && status.turning == 60 && status.decisions == 1 &&
+                   status.rotation_correlation[sign > 0 ? 0 : 1] > 0.99 && status.translation_correlation > 0.99,
+               "World delta calibration: the sign and s_t lock after 300 informative frames (sign " + std::to_string(sign) +
+                   ": " + status.reason + ")");
+    }
+    // No turns: the sign cannot be told.
+    {
+        depthxr::FrameGenWorldDeltaCalibration calibration;
+        for (int k = 0; k < 400; ++k) calibration.Add(frame_fits(k, false, 1, 1.0));
+        Expect(!calibration.Locked() && calibration.Status().informative == 400 && calibration.Status().turning == 0,
+               "World delta calibration: straight flight alone never locks");
+    }
+    // s_t out of range (the depth or the delta far off): no lock.
+    {
+        depthxr::FrameGenWorldDeltaCalibration calibration;
+        for (int k = 0; k < 400; ++k) calibration.Add(frame_fits(k, true, 1, 2.0));
+        Expect(!calibration.Locked() && std::abs(calibration.Status().fitted_scale - 2.0) < 0.02,
+               "World delta calibration: s_t 2 does not lock");
+    }
+    // Fits that did not solve count for nothing.
+    {
+        depthxr::FrameGenWorldDeltaCalibration calibration;
+        auto fits = frame_fits(0, true, 1, 1.0);
+        for (auto& fit : fits) fit.valid = false;
+        calibration.Add(fits);
+        Expect(calibration.Status().frames == 0, "World delta calibration: unsolved fits are left out");
+    }
+    // The watchdog.
+    depthxr::FrameGenWorldDeltaCalibration calibration;
+    calibration.Fix(1, 1.0f);
+    for (int k = 0; k < 9; ++k) calibration.Add(frame_fits(k, false, 1, 1.0, 1.4));
+    const bool held = calibration.Locked() && calibration.Status().failed == 9;
+    calibration.Add(frame_fits(9, false, 1, 1.0));
+    for (int k = 10; k < 19; ++k) calibration.Add(frame_fits(k, false, 1, 1.0, 1.4));
+    const bool reset = calibration.Locked() && calibration.Status().checks == 19;
+    calibration.Add(frame_fits(19, false, 1, 1.0, 1.4));
+    const depthxr::FrameGenWorldDeltaStatus& dropped = calibration.Status();
+    Expect(held && reset && !calibration.Locked() && !dropped.fixed && dropped.drops == 1 && dropped.decisions == 2 &&
+               dropped.failed == 19 && std::abs(dropped.last_error - 0.4) < 0.05 && dropped.frames == 0,
+           "World delta calibration: 10 checks in a row 25% off drop it back to the fit (" + dropped.reason + ")");
+}
+
 // Research switches: the environment first, then framegen-research.txt for
 // the engine motion research's switches only.
 void TestResearchSwitches() {
@@ -5669,6 +6183,9 @@ int main() {
     TestFrameGenEngineEvidencePlan();
     TestFrameGenEngineValidator();
     TestFrameGenEnginePrior();
+    TestFrameGenEngineWorldParams();
+    TestFrameGenWorldDeltaPlan();
+    TestFrameGenWorldDeltaCalibration();
     TestResearchSwitches();
     TestTurboMetricsSettingsParsing();
     TestTurboMetricsSessionRoundTrip();

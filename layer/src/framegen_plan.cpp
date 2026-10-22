@@ -204,6 +204,24 @@ void AppendWorldFit(FrameGenViewPlan& plan, const FrameGenConstants& base, Frame
     }
 }
 
+// The world's motion from the application's movement (stage 4,
+// FrameGenEngineWorldParams) in place of the fit: kWorldParams texel 0 the
+// rotation and 1 (valid), texel 1 the translation and 1, texel 2 the
+// translation's scale, 1 (the application's movement), the rotation's sign
+// and 0, texel 3 the rotation as a quaternion. Readers of the fit read texels
+// 0 and 1 as they read the fit's; the filter moves world content exactly by
+// texels 1 and 3 where texel 2 says the motion is the application's. Texels
+// 4 and 5 (a fit run before it: the watchdog's) are left as they are.
+void AppendWorldSet(FrameGenViewPlan& plan, const FrameGenEngineWorld& world, const FrameGenTuning& tuning) {
+    FrameGenDispatch set = Dispatch(FrameGenPass::kWorldSet, {1, 1}, {1, 1}, {});
+    set.outputs = {Texture(FrameGenTextureKind::kWorldParams), {}};
+    set.constants.fov_current = {world.rotation[0], world.rotation[1], world.rotation[2], 1.0f};
+    set.constants.fov_previous = {world.translation[0], world.translation[1], world.translation[2], 1.0f};
+    set.constants.rot0 = {tuning.delta_scale, 1.0f, static_cast<float>(tuning.delta_sign), 0.0f};
+    set.constants.rot1 = world.quaternion;
+    plan.dispatches.push_back(set);
+}
+
 // Engine motion vectors (FrameGenViewRequest::engine_motion): the evidence
 // on the frame's vectors (its raw field) against the declared poses, its
 // luma, its resolved depth and the measured flow at the final level, summed
@@ -560,10 +578,32 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
     filter.constants.options[3] = plan.final_flow_level;
     filter.constants.tuning[0] = std::clamp(tuning.interval_ratio, 0.25f, 4.0f);
     const bool world = request.depth && request.world_motion;
+    // Stage 4: the world's motion from the application's movement where the
+    // request has it and the backend's calibration locked, else fitted; the
+    // sky turns with it (the filter's flag: the fitted rotation never moves
+    // it, FG_PASS_FILTER tells them apart).
+    const FrameGenEngineWorld delta =
+        world && tuning.world_delta && request.app_delta
+            ? FrameGenEngineWorldParams(request.game_newest, request.game_previous, request.newest, request.previous,
+                                        request.delta_orientation, request.delta_position, tuning.delta_sign,
+                                        tuning.delta_scale)
+            : FrameGenEngineWorld{};
+    // On the watchdog's frames the fit runs first, kept in texels 4 and 5
+    // for the backend's readback, and the set follows it: the filters read
+    // the same motion on every frame.
+    auto append_world = [&] {
+        if (!delta.valid || tuning.delta_watchdog) {
+            AppendWorldFit(plan, base, depth);
+        }
+        if (delta.valid) {
+            AppendWorldSet(plan, delta, tuning);
+        }
+    };
+    const std::uint32_t world_flags = kFrameGenFlagWorld | (tuning.world_sky ? kFrameGenFlagWorldSky : 0u);
     if (world && tuning.mode == FrameGenSynthesisMode::kExtrapolate) {
-        AppendWorldFit(plan, base, depth);
+        append_world();
         filter.inputs[3] = Texture(FrameGenTextureKind::kWorldParams);
-        filter.constants.options[1] |= kFrameGenFlagWorld;
+        filter.constants.options[1] |= world_flags;
     }
     plan.dispatches.push_back(filter);
     // The game's motion vectors judged against what the frame shows (its
@@ -580,9 +620,9 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
             cover.outputs = {Texture(FrameGenTextureKind::kFilteredCover, plan.final_flow_level), {}};
             cover.constants.options[1] |= kFrameGenFlagExtrapolate;
             if (world) {
-                AppendWorldFit(plan, base, depth);
+                append_world();
                 cover.inputs[3] = Texture(FrameGenTextureKind::kWorldParams);
-                cover.constants.options[1] |= kFrameGenFlagWorld;
+                cover.constants.options[1] |= world_flags;
             }
             plan.dispatches.push_back(cover);
         }
@@ -2639,6 +2679,264 @@ bool FrameGenDeclaredChangeMoved(const FrameGenPoseChange& before, const FrameGe
                         static_cast<double>(now.position[2]) - before.position[2]};
     return Degrees(Multiply(inverse, Unit(now.orientation))) > 0.05 ||
            std::sqrt(moved[0] * moved[0] + moved[1] * moved[1] + moved[2] * moved[2]) > 0.0005;
+}
+
+// --- Engine motion vectors: the world's motion from the application's ------
+
+namespace {
+
+using Rows = std::array<Vector3, 3>;
+
+Rows Rotation(const std::array<double, 4>& q) {
+    const double x = q[0], y = q[1], z = q[2], w = q[3];
+    return {{{1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)},
+             {2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)},
+             {2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)}}};
+}
+
+Rows Transposed(const Rows& m) {
+    return {{{m[0][0], m[1][0], m[2][0]}, {m[0][1], m[1][1], m[2][1]}, {m[0][2], m[1][2], m[2][2]}}};
+}
+
+Rows Times(const Rows& a, const Rows& b) {
+    Rows result{};
+    for (int row = 0; row < 3; ++row) {
+        for (int column = 0; column < 3; ++column) {
+            result[row][column] = a[row][0] * b[0][column] + a[row][1] * b[1][column] + a[row][2] * b[2][column];
+        }
+    }
+    return result;
+}
+
+Vector3 Times(const Rows& m, const Vector3& v) {
+    return {m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2], m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2],
+            m[2][0] * v[0] + m[2][1] * v[1] + m[2][2] * v[2]};
+}
+
+// A rotation matrix's quaternion (x, y, z, w), w >= 0.
+std::array<double, 4> Quaternion(const Rows& m) {
+    std::array<double, 4> q{};
+    const double trace = m[0][0] + m[1][1] + m[2][2];
+    if (trace > 0.0) {
+        const double s = 0.5 / std::sqrt(trace + 1.0);
+        q = {(m[2][1] - m[1][2]) * s, (m[0][2] - m[2][0]) * s, (m[1][0] - m[0][1]) * s, 0.25 / s};
+    } else if (m[0][0] > m[1][1] && m[0][0] > m[2][2]) {
+        const double s = 2.0 * std::sqrt(1.0 + m[0][0] - m[1][1] - m[2][2]);
+        q = {0.25 * s, (m[0][1] + m[1][0]) / s, (m[0][2] + m[2][0]) / s, (m[2][1] - m[1][2]) / s};
+    } else if (m[1][1] > m[2][2]) {
+        const double s = 2.0 * std::sqrt(1.0 + m[1][1] - m[0][0] - m[2][2]);
+        q = {(m[0][1] + m[1][0]) / s, 0.25 * s, (m[1][2] + m[2][1]) / s, (m[0][2] - m[2][0]) / s};
+    } else {
+        const double s = 2.0 * std::sqrt(1.0 + m[2][2] - m[0][0] - m[1][1]);
+        q = {(m[0][2] + m[2][0]) / s, (m[1][2] + m[2][1]) / s, 0.25 * s, (m[1][0] - m[0][1]) / s};
+    }
+    if (q[3] < 0.0) q = {-q[0], -q[1], -q[2], -q[3]};
+    return q;
+}
+
+double Dot(const std::array<float, 3>& a, const std::array<float, 3>& b) {
+    return static_cast<double>(a[0]) * b[0] + static_cast<double>(a[1]) * b[1] + static_cast<double>(a[2]) * b[2];
+}
+
+// What makes a fit informative (per frame), and the lock's and the
+// watchdog's thresholds (FrameGenWorldDeltaCalibration).
+constexpr double kWorldDeltaMeters = 0.5;
+constexpr double kWorldDeltaRadians = 0.002;
+constexpr std::uint64_t kWorldDeltaLockFrames = 300;
+constexpr std::uint64_t kWorldDeltaTurningFrames = 30;
+constexpr double kWorldDeltaCorrelation = 0.9;
+constexpr double kWorldDeltaScaleLow = 0.7;
+constexpr double kWorldDeltaScaleHigh = 1.4;
+constexpr double kWorldDeltaCheckError = 0.25;
+constexpr std::uint32_t kWorldDeltaFailedChecks = 10;
+
+} // namespace
+
+FrameGenEngineWorld FrameGenEngineWorldParams(const FrameGenViewGeometry& game_newest,
+                                              const FrameGenViewGeometry& game_previous,
+                                              const FrameGenViewGeometry& declared_newest,
+                                              const FrameGenViewGeometry& declared_previous,
+                                              const std::array<float, 4>& delta_orientation,
+                                              const std::array<float, 3>& delta_position, int sign, float scale) {
+    std::array<double, 4> delta = Unit(delta_orientation);
+    if (sign < 0) delta = {-delta[0], -delta[1], -delta[2], delta[3]};
+    const Rows game_now = Rotation(Unit(game_newest.orientation));
+    const Rows game_before = Rotation(Unit(game_previous.orientation));
+    const Rows turn = Rotation(delta);
+    const Vector3 moved{delta_position[0], delta_position[1], delta_position[2]};
+    // G takes a point of the newest game camera to the previous one's (where
+    // the world held it, as rendered), g is where its origin lands.
+    const Rows g_rotation = Times(Transposed(game_before), Times(Transposed(turn), game_now));
+    const Vector3 g_offset = Times(Transposed(game_before),
+                                   Minus(Times(Transposed(turn), Minus(Position(game_newest), moved)), Position(game_previous)));
+    // The declared relative pose exactly as the plan's constants carry it
+    // (BaseConstants): the measured flow has it taken out.
+    const Matrix3 declared = FrameGenRelativeRotation(declared_newest.orientation, declared_previous.orientation);
+    const std::array<float, 3> declared_offset = RelativeTranslation(declared_newest, declared_previous);
+    Rows q_d{};
+    for (int row = 0; row < 3; ++row) {
+        for (int column = 0; column < 3; ++column) q_d[row][column] = declared[row][column];
+    }
+    const Rows g_inverse = Transposed(g_rotation);
+    const Rows r_w = Times(g_inverse, q_d);
+    const Vector3 t_w = Times(g_inverse, Minus({declared_offset[0], declared_offset[1], declared_offset[2]}, g_offset));
+    const std::array<double, 4> q = Quaternion(r_w);
+    FrameGenEngineWorld world;
+    bool finite = std::isfinite(scale);
+    for (int i = 0; i < 3; ++i) {
+        // WorldRows' small-angle form, as the fit solves for it.
+        world.rotation[i] = static_cast<float>(2.0 * q[i]);
+        world.translation[i] = static_cast<float>(scale * t_w[i]);
+        finite = finite && std::isfinite(world.rotation[i]) && std::isfinite(world.translation[i]);
+    }
+    world.quaternion = {static_cast<float>(q[0]), static_cast<float>(q[1]), static_cast<float>(q[2]),
+                        static_cast<float>(q[3])};
+    world.valid = finite && std::isfinite(world.quaternion[3]);
+    return world;
+}
+
+const char* ToString(FrameGenWorldDeltaMode mode) {
+    switch (mode) {
+    case FrameGenWorldDeltaMode::kCalibrate:
+        return "calibrate";
+    case FrameGenWorldDeltaMode::kOn:
+        return "on";
+    default:
+        return "off";
+    }
+}
+
+FrameGenWorldDeltaMode ParseFrameGenWorldDeltaMode(const std::string& value) {
+    std::string text = value;
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (text == "calibrate") return FrameGenWorldDeltaMode::kCalibrate;
+    if (text == "1") return FrameGenWorldDeltaMode::kOn;
+    return FrameGenWorldDeltaMode::kOff;
+}
+
+std::optional<std::pair<int, float>> ParseFrameGenWorldDeltaFixed(const std::string& text) {
+    int sign = 0;
+    float scale = 0.0f;
+    char rest = 0;
+    if (std::sscanf(text.c_str(), " %d , %f %c", &sign, &scale, &rest) != 2 || (sign != 1 && sign != -1) ||
+        !(scale >= kWorldDeltaScaleLow && scale <= kWorldDeltaScaleHigh)) {
+        return std::nullopt;
+    }
+    return std::make_pair(sign, scale);
+}
+
+void FrameGenWorldDeltaCalibration::Fix(int sign, float scale) {
+    status_.locked = status_.fixed = true;
+    status_.sign = sign < 0 ? -1 : 1;
+    status_.scale = scale;
+    ++status_.decisions;
+    status_.reason = "fixed (VECTORXR_FRAMEGEN_ENGINE_DELTA_FIXED)";
+}
+
+void FrameGenWorldDeltaCalibration::Restart() {
+    rotation_squares_ = translation_squares_ = 0.0;
+    rotation_products_ = rotation_model_ = translation_products_ = translation_model_ = {};
+    failing_ = 0;
+    status_.locked = status_.fixed = false;
+    status_.sign = 1;
+    status_.scale = 1.0f;
+    status_.frames = status_.informative = status_.turning = 0;
+    status_.rotation_correlation = {};
+    status_.translation_correlation = status_.fitted_scale = 0.0;
+}
+
+void FrameGenWorldDeltaCalibration::Add(const std::vector<FrameGenWorldFit>& fits) {
+    bool counted = false;
+    bool informative = false;
+    bool turning = false;
+    // Locked: the fits against the locked model's translation.
+    double error = 0.0, reference = 0.0;
+    std::size_t views = 0;
+    for (const FrameGenWorldFit& fit : fits) {
+        if (!fit.valid) continue;
+        // The model under either sign of the delta's rotation, at scale 1.
+        std::array<FrameGenEngineWorld, 2> models;
+        for (int i = 0; i < 2; ++i) {
+            models[i] = FrameGenEngineWorldParams(fit.game_newest, fit.game_previous, fit.newest, fit.previous,
+                                                  fit.delta_orientation, fit.delta_position, i ? -1 : 1, 1.0f);
+        }
+        if (!models[0].valid || !models[1].valid) continue;
+        counted = true;
+        if (status_.locked) {
+            const std::array<float, 3>& model = models[status_.sign > 0 ? 0 : 1].translation;
+            double off = 0.0, length = 0.0;
+            for (int i = 0; i < 3; ++i) {
+                const double expected = static_cast<double>(status_.scale) * model[i];
+                off += (fit.translation[i] - expected) * (fit.translation[i] - expected);
+                length += expected * expected;
+            }
+            error += std::sqrt(off);
+            reference += std::sqrt(length);
+            ++views;
+            continue;
+        }
+        const double rotation = std::sqrt(Dot(fit.rotation, fit.rotation));
+        const double translation = std::sqrt(Dot(fit.translation, fit.translation));
+        if (!(translation > kWorldDeltaMeters || rotation > kWorldDeltaRadians)) continue;
+        informative = true;
+        turning = turning || rotation > kWorldDeltaRadians;
+        rotation_squares_ += rotation * rotation;
+        translation_squares_ += translation * translation;
+        for (int i = 0; i < 2; ++i) {
+            rotation_products_[i] += Dot(fit.rotation, models[i].rotation);
+            rotation_model_[i] += Dot(models[i].rotation, models[i].rotation);
+            translation_products_[i] += Dot(fit.translation, models[i].translation);
+            translation_model_[i] += Dot(models[i].translation, models[i].translation);
+        }
+    }
+    if (!counted) return;
+    ++status_.frames;
+    if (status_.locked) {
+        // The watchdog: only a model moving far enough to judge by.
+        if (views == 0 || reference < kWorldDeltaMeters * static_cast<double>(views)) return;
+        ++status_.checks;
+        status_.last_error = error / reference;
+        if (status_.last_error <= kWorldDeltaCheckError) {
+            failing_ = 0;
+            return;
+        }
+        ++status_.failed;
+        if (++failing_ < kWorldDeltaFailedChecks) return;
+        const std::string last = std::to_string(static_cast<int>(std::lround(100.0 * status_.last_error)));
+        Restart();
+        ++status_.drops;
+        ++status_.decisions;
+        status_.reason = "the fit's translation was more than 25% off the delta's in " +
+                         std::to_string(kWorldDeltaFailedChecks) + " checks in a row (the last " + last +
+                         "%): the fit again, calibrating anew";
+        return;
+    }
+    if (!informative) return;
+    ++status_.informative;
+    status_.turning += turning ? 1 : 0;
+    for (int i = 0; i < 2; ++i) {
+        const double spread = rotation_squares_ * rotation_model_[i];
+        status_.rotation_correlation[i] = spread > 0.0 ? rotation_products_[i] / std::sqrt(spread) : 0.0;
+    }
+    const int best = status_.rotation_correlation[1] > status_.rotation_correlation[0] ? 1 : 0;
+    const double spread = translation_squares_ * translation_model_[best];
+    status_.translation_correlation = spread > 0.0 ? translation_products_[best] / std::sqrt(spread) : 0.0;
+    status_.fitted_scale = translation_model_[best] > 0.0 ? translation_products_[best] / translation_model_[best] : 0.0;
+    if (status_.informative >= kWorldDeltaLockFrames && status_.turning >= kWorldDeltaTurningFrames &&
+        status_.rotation_correlation[best] > kWorldDeltaCorrelation &&
+        status_.translation_correlation > kWorldDeltaCorrelation && status_.fitted_scale >= kWorldDeltaScaleLow &&
+        status_.fitted_scale <= kWorldDeltaScaleHigh) {
+        status_.locked = true;
+        status_.sign = best ? -1 : 1;
+        status_.scale = static_cast<float>(status_.fitted_scale);
+        ++status_.decisions;
+        status_.reason = std::string("rotation ") + (best ? "conjugated" : "as given") + " (correlation " +
+                         Fixed(status_.rotation_correlation[best], 3) + " against " +
+                         Fixed(status_.rotation_correlation[1 - best], 3) + "), s_t " + Fixed(status_.fitted_scale, 3) +
+                         " (correlation " + Fixed(status_.translation_correlation, 3) + ") after " +
+                         std::to_string(status_.informative) + " informative frames, " +
+                         std::to_string(status_.turning) + " turning";
+    }
 }
 
 std::optional<FrameGenEngineConvention> FrameGenEnginePriorFor(const std::string& executable, bool ext,

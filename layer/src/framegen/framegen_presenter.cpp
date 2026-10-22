@@ -520,6 +520,8 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
     engine_validation_ = engine_validation_logged_ = {};
     engine_decisions_logged_ = 0;
     engine_prior_checked_ = false;
+    world_delta_ = world_delta_logged_ = {};
+    world_delta_decisions_logged_ = 0;
     // Stage 1: the frame gates are counted for every session; these two act
     // on what they find.
     depth_encoding_check_ = ReadResearchSwitch("VECTORXR_FRAMEGEN_DEPTH_ENCODING_CHECK") == "1";
@@ -645,6 +647,24 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
                           "a camera cut (the game's space moving further in a frame than 50 m and 8 times its usual "
                           "movement, or turning more than 10 degrees, by the appSpaceDeltaPose it sends with its "
                           "motion vectors).");
+        }
+        // Stage 4: the backend's (VECTORXR_FRAMEGEN_ENGINE_DELTA, read as it
+        // was made).
+        if (const FrameGenWorldDeltaStatus delta = gpu_->WorldDeltaStatus(); delta.mode != FrameGenWorldDeltaMode::kOff) {
+            logger_->Info(
+                std::string("Frame Generation world motion from the game's appSpaceDeltaPose: ") + ToString(delta.mode) +
+                " (research, stage 4): " +
+                (delta.mode == FrameGenWorldDeltaMode::kCalibrate
+                     ? "each world fit is compared with it, generated frames are made as without it"
+                     : "it stands in for the world fit once the comparison locked (the fit runs as well every " +
+                           std::to_string(kFrameGenWorldDeltaWatchdog) + "th frame, its watchdog)") +
+                (delta.fixed ? ", fixed: rotation " + std::string(delta.sign < 0 ? "conjugated" : "as given") +
+                                   ", s_t " + Number(delta.scale, 3)
+                             : std::string()) +
+                (delta.refused.empty() ? std::string()
+                                       : ", VECTORXR_FRAMEGEN_ENGINE_DELTA_FIXED=" + delta.refused +
+                                             " ignored (sign,scale: 1 or -1, 0.7-1.4)") +
+                (delta.sky ? "; the sky turns with it (VECTORXR_FRAMEGEN_ENGINE_SKY=1)." : "."));
         }
         if (!gpu_gate_setting.empty()) {
             logger_->Info("Frame Generation: GPU-aware pacing set by VECTORXR_FRAMEGEN_GPU_AHEAD=" + gpu_gate_setting +
@@ -3234,6 +3254,39 @@ void FrameGenPresenter::EngineRequestsLocked(const PendingFrame& frame, bool cal
     }
 }
 
+void FrameGenPresenter::EngineDeltaLocked(const PendingFrame& frame, std::vector<FrameGenViewSubmission>& submissions) {
+    const EngineFrame& now = engine_frame_;
+    // The frame's own record, paired with the frame before's (its game
+    // poses), no cut between them and not repeating the frame before.
+    constexpr std::uint32_t kHeldBack = kFrameGenEngineNoStruct | kFrameGenEnginePairing | kFrameGenEngineCut |
+                                        kFrameGenEngineSkip;
+    if (!now.valid || now.frame.display_time != frame.end_time || (now.gates & kHeldBack) != 0 ||
+        now.frame.views.empty() || now.paired_game.size() != now.frame.views.size()) {
+        return;
+    }
+    // appSpaceDeltaPose is the frame's: every view carries the same, or the
+    // record is not to be read by it.
+    const XrPosef& delta = now.frame.views.front().app_delta;
+    for (const FrameGenEngineMotionView& view : now.frame.views) {
+        const XrPosef& own = view.app_delta;
+        if (own.orientation.x != delta.orientation.x || own.orientation.y != delta.orientation.y ||
+            own.orientation.z != delta.orientation.z || own.orientation.w != delta.orientation.w ||
+            own.position.x != delta.position.x || own.position.y != delta.position.y || own.position.z != delta.position.z) {
+            return;
+        }
+    }
+    for (std::size_t i = 0; i < now.frame.views.size(); ++i) {
+        const FrameGenEngineMotionView& view = now.frame.views[i];
+        if (view.view >= submissions.size()) continue;
+        FrameGenViewRequest& request = submissions[view.view].request;
+        request.app_delta = true;
+        request.delta_orientation = {delta.orientation.x, delta.orientation.y, delta.orientation.z, delta.orientation.w};
+        request.delta_position = {delta.position.x, delta.position.y, delta.position.z};
+        request.game_newest = view.game;
+        request.game_previous = now.paired_game[i];
+    }
+}
+
 void FrameGenPresenter::LogEngineSummaryLocked(double seconds) {
     const EngineWindow& window = engine_window_;
     if (!logger_ || window.frames == 0 || (engine_noted_ == 0 && window.flips == 0)) {
@@ -3259,6 +3312,29 @@ void FrameGenPresenter::LogEngineSummaryLocked(double seconds) {
                   ", pivotMoving=" + std::to_string(window.pivot_moving) +
                   ", calibrate=" + std::to_string(window.calibrate) + ", captured=" + std::to_string(window.captured) +
                   "/" + std::to_string(window.open) + ".");
+    // Stage 4: the world fit against the application's movement (the
+    // calibration now: its state, the sign and s_t it has, the correlations
+    // and frames it has them from), and since the last summary: frames the
+    // movement stood in for the fit, and the watchdog's checks, those 25%
+    // off and drops back to the fit.
+    const FrameGenWorldDeltaStatus& delta = world_delta_;
+    if (delta.mode != FrameGenWorldDeltaMode::kOff) {
+        const FrameGenWorldDeltaStatus& logged = world_delta_logged_;
+        logger_->Info(
+            "Frame Generation world vs delta (" + Number(seconds, 0) + " s): " + ToString(delta.mode) + ", " +
+            (delta.locked ? std::string(delta.fixed ? "fixed" : "locked") + ": rotation " +
+                                (delta.sign < 0 ? "conjugated" : "as given") + ", s_t " + Number(delta.scale, 3)
+                          : std::string("calibrating")) +
+            (delta.unread ? " (no fits read back: the fit only)" : "") + "; rotation correlation " +
+            Number(delta.rotation_correlation[0], 3) + " as given/" + Number(delta.rotation_correlation[1], 3) +
+            " conjugated, translation " + Number(delta.translation_correlation, 3) + ", fitted s_t " +
+            Number(delta.fitted_scale, 3) + " over " + std::to_string(delta.informative) + " informative frames (" +
+            std::to_string(delta.turning) + " turning) of " + std::to_string(delta.frames) +
+            "; set=" + std::to_string(delta.set - logged.set) + ", checks=" + std::to_string(delta.checks - logged.checks) +
+            " (failed " + std::to_string(delta.failed - logged.failed) + ", last " + Number(100.0 * delta.last_error, 0) +
+            "% off), drops=" + std::to_string(delta.drops) + ".");
+        world_delta_logged_ = delta;
+    }
     // Stage 3: the validator now (its state, the convention under test or
     // locked, the last batch's fit), and since the last summary: its frames
     // and batches, the views judged and those their verdict held back by
@@ -4911,6 +4987,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         if (engine_requested_ >= FrameGenEngineMode::kObserve) {
             EngineRequestsLocked(frame, calibrate, submissions);
         }
+        EngineDeltaLocked(frame, submissions);
     }
     std::vector<OutputSpec> specs(projection.viewCount);
     for (std::uint32_t i = 0; i < projection.viewCount; ++i) {
@@ -4943,6 +5020,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
     std::optional<FrameGenGpuWindow> window;
     std::vector<FrameGenAnalysisTiming> timings;
     FrameGenDepthStatus depth;
+    FrameGenWorldDeltaStatus world_delta;
     std::string hardware_status;
     {
         // Vulkan queues need external synchronization with the runtime's own
@@ -4984,6 +5062,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
             window = gpu_->LastGpuWindow();
             timings = gpu_->TakeTimings();
             depth = gpu_->DepthStatus();
+            world_delta = gpu_->WorldDeltaStatus();
             // Only the log reads it, and the backend asks the driver about
             // each of its images for it (50-200 of them): once a second.
             if (const auto now = Clock::now(); now >= working_bytes_due_) {
@@ -5038,7 +5117,15 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
     gpu_ms_ = gpu_ms;
     if (working_bytes) working_bytes_ = working_bytes;
     depth_status_ = depth;
+    world_delta_ = world_delta;
     consecutive_failures_ = 0;
+    // Stage 4: each of the world delta calibration's decisions (a lock, a
+    // drop back to the fit) once.
+    if (logger_ && world_delta.decisions > world_delta_decisions_logged_) {
+        world_delta_decisions_logged_ = world_delta.decisions;
+        logger_->Info(std::string("Frame Generation world vs delta: ") +
+                      (world_delta.locked ? "locked, " : "calibrating, ") + world_delta.reason + ".");
+    }
     NoteGpuTimingLocked(executed.submission, frame, window, timings, capture_pending_from);
     if (logger_ && !hardware_status.empty() && hardware_status != logged_hardware_status_) {
         logged_hardware_status_ = hardware_status;
@@ -5294,6 +5381,7 @@ void FrameGenPresenter::WriteCaptureNotes(const std::string& directory, const Ca
     FrameGenEngineMode mode = FrameGenEngineMode::kOff;
     std::optional<FrameGenEngineImageTracker::Hypothesis> image;
     FrameGenEngineValidation validation;
+    FrameGenWorldDeltaStatus delta;
     {
         std::scoped_lock lock(mutex_);
         frame = engine_frame_;
@@ -5302,6 +5390,7 @@ void FrameGenPresenter::WriteCaptureNotes(const std::string& directory, const Ca
         mode = engine_requested_;
         image = engine_image_;
         validation = engine_validation_;
+        delta = world_delta_;
     }
     if (!frame.valid) {
         return;
@@ -5405,7 +5494,15 @@ void FrameGenPresenter::WriteCaptureNotes(const std::string& directory, const Ca
     } else {
         motion << "convention none\n";
     }
-    motion << "delta_model none\n";
+    // Stage 4: the world's motion from the application's movement (the
+    // backend's mode, whether its calibration locked, the rotation's sign
+    // and s_t; none while off).
+    if (delta.mode != FrameGenWorldDeltaMode::kOff) {
+        motion << "delta_model " << ToString(delta.mode) << ' ' << delta.locked << ' ' << delta.sign << ' ' << delta.scale
+               << ' ' << delta.sky << '\n';
+    } else {
+        motion << "delta_model none\n";
+    }
 }
 
 bool FrameGenPresenter::EnsureOutputs(const std::vector<OutputSpec>& specs, std::size_t sets, std::string& error,

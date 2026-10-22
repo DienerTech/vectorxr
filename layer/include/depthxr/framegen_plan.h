@@ -97,8 +97,13 @@ enum class FrameGenPass : std::uint8_t {
     // generated frames are made from reads what they write.
     kEngineReduce,
     kEngineSolve,
+    // Engine motion vectors, stage 4 (FrameGenTuning::world_delta): the
+    // world's motion worked out on the CPU from the game's appSpaceDeltaPose
+    // (FrameGenEngineWorldParams), written into kWorldParams in place of the
+    // fit (kWorldReduce, kWorldSolve) by one thread.
+    kWorldSet,
 };
-inline constexpr std::size_t kFrameGenPassCount = 32;
+inline constexpr std::size_t kFrameGenPassCount = 33;
 
 // Logical textures owned per view. History and filtered flow are ping-pong
 // pairs: "newest" is written this submission, "previous" is last
@@ -132,8 +137,12 @@ enum class FrameGenTextureKind : std::uint8_t {
     // content it did not see (FrameGenViewRequest::depth_previous).
     kDepthPrevious,
     // World motion: the per-group sums of kWorldReduce (8 RGBA32F texels per
-    // group in one row) and the fit (2 RGBA32F texels: rotation and 1 when
-    // valid; translation and the inlier share).
+    // group in one row) and the fit (6 RGBA32F texels: rotation and 1 when
+    // valid; translation and the inlier share; then, from kWorldSet, the
+    // translation's scale, 1 (the application's movement: 0 for the fit), the
+    // rotation's sign and 0; the rotation as a quaternion; and the fit's
+    // first two texels again, which kWorldSet leaves: the watchdog's
+    // readback, FrameGenTuning::delta_watchdog).
     kWorldPartials,
     kWorldParams,
     // Just-in-time interpolation (FrameGenTuning::cover): the newest frame's
@@ -226,6 +235,10 @@ inline constexpr std::uint32_t kFrameGenFlagDepthMatch = 2048u;
 // The kShift* passes build the motion map (kMotionMap; tuning[1]: the
 // synthesis step), and synthesis reads it (input 5): FrameGenTuning::depth_splat.
 inline constexpr std::uint32_t kFrameGenFlagDepthSplat = 4096u;
+// kFilter: the sky (FG_WORLD_SKY and beyond) turns with the world's rotation
+// where the world's motion is the application's own (kWorldSet: input 3's
+// texel 2 y is 1), never with a fitted one (FrameGenTuning::world_sky).
+inline constexpr std::uint32_t kFrameGenFlagWorldSky = 16384u;
 // World motion: samples per side of the fit's grid, and its iterations.
 inline constexpr std::uint32_t kFrameGenWorldGrid = 128u;
 // The trust vote's tile side in half-resolution texels (FG_TRUST_TILE):
@@ -429,6 +442,16 @@ struct FrameGenViewRequest {
     FrameGenViewGeometry game_previous;
     bool engine_lag{false};
     FrameGenViewGeometry game_before;
+    // Stage 4: how the application's space moved from the frame before
+    // (appSpaceDeltaPose, the same on every view: a still world point is
+    // X(N) = R(delta_orientation) X(N-1) + delta_position in it), with
+    // game_newest and game_previous. The presenter sets it for frames paired
+    // with the frame before's record, without a camera cut or FRAME_SKIP,
+    // whatever their vectors show: the world's motion follows from it
+    // (FrameGenTuning::world_delta).
+    bool app_delta{false};
+    std::array<float, 4> delta_orientation{0.0f, 0.0f, 0.0f, 1.0f};
+    std::array<float, 3> delta_position{0.0f, 0.0f, 0.0f};
     // Set by backends with engine_motion: how the captured vectors decode,
     // the images the newest and the previous raw fields were resampled from
     // (their censuses' stale test), the vectors' region (its extent), and
@@ -560,6 +583,21 @@ struct FrameGenTuning {
     // matching measures it (FrameGenFinalFlowLevel): from kAssist, a choice
     // between the game's vectors and measured flow never changes the level.
     bool hardware_level{false};
+    // Stage 4, set by backends (VECTORXR_FRAMEGEN_ENGINE_DELTA=1, once their
+    // calibration locked): world motion is worked out from the application's
+    // movement where a request has it (FrameGenViewRequest::app_delta:
+    // kWorldSet, FrameGenEngineWorldParams with the rotation's `delta_sign`
+    // and the translation's `delta_scale`) instead of fitted to the measured
+    // flow. With world_sky (VECTORXR_FRAMEGEN_ENGINE_SKY=1) extrapolating
+    // filters turn the sky with that rotation (kFrameGenFlagWorldSky). On
+    // the watchdog's frames (`delta_watchdog`, kFrameGenWorldDeltaWatchdog)
+    // the fit runs as well, before kWorldSet, for the backend to read back:
+    // the filters still read the application's movement.
+    bool world_delta{false};
+    int delta_sign{1};
+    float delta_scale{1.0f};
+    bool world_sky{false};
+    bool delta_watchdog{false};
 };
 
 struct FrameGenViewPlan {
@@ -1577,6 +1615,138 @@ FrameGenPoseChange FrameGenDeclaredChange(const FrameGenViewGeometry& game, cons
 // 0.5 mm. The vectors are calibrated against the declared poses only while
 // it holds still.
 bool FrameGenDeclaredChangeMoved(const FrameGenPoseChange& before, const FrameGenPoseChange& now);
+
+// --- Engine motion vectors: the world's motion from the application's (stage 4)
+//
+// A game sending appSpaceDeltaPose says how its application space moved from
+// the frame before: a still world point is X(N) = R_D X(N-1) + p_D in it.
+// With the poses the game rendered both frames with (R_gN, c_gN; R_gP, c_gP)
+// and the relative pose Frame Generation is told (Q_d, t_d, as the plan's
+// constants carry it: Pivot's change to the views in it), that is the
+// world's motion the fit (kWorldReduce, kWorldSolve) estimates from the
+// measured flow, exactly: in the newest view's space, the head held as the
+// declared poses hold it, a world point P at N-1 is at R_w P + t_w at N, with
+//   G = R_gP^T R_D^T R_gN,  g = R_gP^T (R_D^T (c_gN - p_D) - c_gP),
+//   R_w = G^T Q_d,          t_w = s_t G^T (t_d - g).
+// `sign` -1 takes the delta's rotation conjugated (which way a game turns it
+// is calibrated, as s_t, the scale between its meters and the depth's, is:
+// FrameGenWorldDeltaCalibration).
+struct FrameGenEngineWorld {
+    std::array<float, 3> rotation{};    // w = 2 sign(q.w) q.xyz of R_w, radians (kWorldParams texel 0)
+    std::array<float, 3> translation{}; // t_w, meters (texel 1)
+    std::array<float, 4> quaternion{0.0f, 0.0f, 0.0f, 1.0f}; // R_w, w >= 0
+    bool valid{false}; // every input and output finite
+};
+FrameGenEngineWorld FrameGenEngineWorldParams(const FrameGenViewGeometry& game_newest,
+                                              const FrameGenViewGeometry& game_previous,
+                                              const FrameGenViewGeometry& declared_newest,
+                                              const FrameGenViewGeometry& declared_previous,
+                                              const std::array<float, 4>& delta_orientation,
+                                              const std::array<float, 3>& delta_position, int sign, float scale);
+
+// How far Frame Generation goes with the application's movement
+// (VECTORXR_FRAMEGEN_ENGINE_DELTA): calibrate compares every world fit with
+// it (generated frames are made as without it); on takes the world's motion
+// from it once the comparison locked (FrameGenTuning::world_delta).
+enum class FrameGenWorldDeltaMode : std::uint8_t { kOff, kCalibrate, kOn };
+const char* ToString(FrameGenWorldDeltaMode mode); // "off", "calibrate", "on"
+// "calibrate" or "1" (any case for calibrate); anything else is off.
+FrameGenWorldDeltaMode ParseFrameGenWorldDeltaMode(const std::string& value);
+// "sign,scale" (VECTORXR_FRAMEGEN_ENGINE_DELTA_FIXED: "1,1", "-1,1.05"): the
+// sign 1 or -1, the scale within the calibration's range; none otherwise.
+std::optional<std::pair<int, float>> ParseFrameGenWorldDeltaFixed(const std::string& text);
+
+// The fit runs before kWorldSet on every this-many-th frame that takes the
+// application's movement: the calibration's watchdog (the filters read the
+// set motion all the same).
+inline constexpr std::uint64_t kFrameGenWorldDeltaWatchdog = 30;
+
+// One view's world fit as kWorldSolve left it (kWorldParams texels 4 and 5,
+// its copy of texels 0 and 1) beside what the model needs for the frame: its
+// request's poses and delta.
+struct FrameGenWorldFit {
+    std::array<float, 3> rotation{};
+    std::array<float, 3> translation{};
+    bool valid{false}; // the fit solved
+    FrameGenViewGeometry game_newest;
+    FrameGenViewGeometry game_previous;
+    FrameGenViewGeometry newest; // declared
+    FrameGenViewGeometry previous;
+    std::array<float, 4> delta_orientation{0.0f, 0.0f, 0.0f, 1.0f};
+    std::array<float, 3> delta_position{0.0f, 0.0f, 0.0f};
+};
+
+// The calibration as the log tells it (FrameGenGpu::WorldDeltaStatus).
+struct FrameGenWorldDeltaStatus {
+    FrameGenWorldDeltaMode mode{FrameGenWorldDeltaMode::kOff};
+    bool sky{false}; // VECTORXR_FRAMEGEN_ENGINE_SKY=1
+    // Locked, with the rotation's sign and the translation's scale; fixed
+    // (VECTORXR_FRAMEGEN_ENGINE_DELTA_FIXED) until a drop.
+    bool locked{false};
+    bool fixed{false};
+    int sign{1};
+    float scale{1.0f};
+    std::uint32_t decisions{0}; // locks and drops
+    std::string reason;         // of the last
+    std::string refused;        // a VECTORXR_FRAMEGEN_ENGINE_DELTA_FIXED that is none
+    bool unread{false};         // the fits' readback could not be made: no calibration, the fit only this session
+    // Since the calibration (re)started: frames with a fit beside the delta,
+    // those informative (a fit moving 0.5 m or turning 0.002 radians a frame),
+    // those turning; the fitted rotation's correlation with the delta's under
+    // each sign (+1, -1), the fitted translation's under the better one, and
+    // its scale (sum t_fit . t_D / sum |t_D|^2).
+    std::uint64_t frames{0};
+    std::uint64_t informative{0};
+    std::uint64_t turning{0};
+    std::array<double, 2> rotation_correlation{};
+    double translation_correlation{0.0};
+    double fitted_scale{0.0};
+    // Session totals: the watchdog's checks while locked (frames whose model
+    // moves 0.5 m or more), those whose fit is 25% off the model's
+    // translation, the last one's |t_fit - t_D| / |t_D|, and the drops back
+    // to the fit (10 such checks in a row); and frames the application's
+    // movement stood in for the fit (the backend's count).
+    std::uint64_t checks{0};
+    std::uint64_t failed{0};
+    double last_error{0.0};
+    std::uint64_t drops{0};
+    std::uint64_t set{0};
+};
+
+// Calibrates the application's movement against the world fit. Frames whose
+// fit moves 0.5 m or turns 0.002 radians a frame (per view) are compared with
+// the model under either sign of the delta's rotation (scale 1). The sign
+// whose rotation correlates best with the fitted one is taken (that needs
+// turns: 30 such frames or more), and s_t = sum t_fit . t_D / sum |t_D|^2.
+// After 300 informative frames, with both correlations above 0.9 and s_t in
+// [0.7, 1.4], it locks. Locked, each fit read is a check of the model (where
+// it moves 0.5 m or more): 10 checks in a row 25% off its translation drop it
+// back to the fit, and it calibrates again from scratch.
+class FrameGenWorldDeltaCalibration {
+  public:
+    // VECTORXR_FRAMEGEN_ENGINE_DELTA_FIXED: locked from the start with these.
+    void Fix(int sign, float scale);
+    // A frame's fits (those that did not solve, or whose model is not
+    // finite, are left out).
+    void Add(const std::vector<FrameGenWorldFit>& fits);
+    bool Locked() const { return status_.locked; }
+    int Sign() const { return status_.sign; }
+    float Scale() const { return status_.scale; }
+    const FrameGenWorldDeltaStatus& Status() const { return status_; }
+
+  private:
+    void Restart();
+    // Sums over informative views: the fitted rotation's and translation's
+    // squares, and per sign their products with the model's and its squares.
+    double rotation_squares_{0.0};
+    double translation_squares_{0.0};
+    std::array<double, 2> rotation_products_{};
+    std::array<double, 2> rotation_model_{};
+    std::array<double, 2> translation_products_{};
+    std::array<double, 2> translation_model_{};
+    std::uint32_t failing_{0}; // checks in a row 25% off
+    FrameGenWorldDeltaStatus status_;
+};
 
 // --- Research switches ------------------------------------------------------
 

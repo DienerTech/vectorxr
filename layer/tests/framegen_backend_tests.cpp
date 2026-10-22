@@ -392,6 +392,7 @@ FrameGenViewSubmission Submission(std::uint32_t source_index, std::int64_t forma
 }
 
 void EngineObserveScenarios(Harness& harness);
+void WorldDeltaScenarios(Harness& harness);
 
 int RunScenarios(Harness& harness) {
     std::string error;
@@ -1269,6 +1270,13 @@ int RunScenarios(Harness& harness) {
         EngineObserveScenarios(harness);
     }
 
+    // 3w. Engine motion vectors, stage 4 (Direct3D 12): the world's motion
+    // from the application's movement instead of the fit, and the sky
+    // turned exactly by it (WorldDeltaScenarios).
+    if (harness.create_depth_data && harness.upload_sized && harness.readback_sized) {
+        WorldDeltaScenarios(harness);
+    }
+
     // 4. Head rotation only: compensation must leave a static panorama where
     // the newest frame has it. Uncompensated flow would smear it sideways.
     const float yaw = 3.0f * 3.14159265f / 180.0f;
@@ -1651,7 +1659,7 @@ const char* const kProfileNames[] = {"luma",        "downsample",  "search",    
                                      "synthesize",  "synthesize16", "depth",      "depth check", "depth trust",
                                      "flow pack",   "flow unpack", "trust update", "shift clear", "shift splat",
                                      "shift resolve", "shift fill", "raw pack",   "trust resolve", "shading rate", "world reduce", "world solve", "trust vote", "depth scale", "scale vote", "depth stale", "cross splat", "cross resolve",
-                                     "engine census", "engine capture", "engine reduce", "engine solve",
+                                     "engine census", "engine capture", "engine reduce", "engine solve", "world set",
                                      "source copy", "output copy",
                                      "hardware wait", "compose", "flow merge"};
 static_assert(std::size(kProfileNames) == kFrameGenPassCount + 5, "a name per profiled category");
@@ -4512,6 +4520,16 @@ int RunProfile(Harness& harness) {
     if (std::getenv("FG_PROFILE_QUAD") && std::string(std::getenv("FG_PROFILE_QUAD")) == "1") {
         return RunQuadProfile(harness, kProfileNames, std::size(kProfileNames));
     }
+    // FG_PROFILE_DELTA=1: each frame carries the application's movement (1.8
+    // m a frame, turning with the scenery's scroll) and the backends are made
+    // with VECTORXR_FRAMEGEN_ENGINE_DELTA=1 and its calibration fixed, so
+    // kWorldSet stands in for the world fit (stage 4: compare the analysis
+    // with a run without it).
+    const bool delta = std::getenv("FG_PROFILE_DELTA") && std::string(std::getenv("FG_PROFILE_DELTA")) == "1";
+    if (delta) {
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_DELTA", "1");
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_DELTA_FIXED", "1,1");
+    }
     std::string error;
     auto gpu = CreateFrameGenGpu(harness.binding, error);
     if (gpu) gpu->SetCopyAfterRelease(true); // the tests' images are their own
@@ -4536,9 +4554,10 @@ int RunProfile(Harness& harness) {
     // judged in Observe (stage 3's evidence passes, on the work queue).
     const bool engine = std::getenv("FG_PROFILE_MV") && std::string(std::getenv("FG_PROFILE_MV")) == "1";
     const std::string convention = std::getenv("FG_PROFILE_MV_CONVENTION") ? std::getenv("FG_PROFILE_MV_CONVENTION") : "fb";
-    std::printf("Profiling %ux%u per eye, depth %ux%u, %s %s%s; rendering test frames...\n", width, height, depth_width,
+    std::printf("Profiling %ux%u per eye, depth %ux%u, %s %s%s%s; rendering test frames...\n", width, height, depth_width,
                 depth_height, interpolate ? "interpolate" : "extrapolate", jit ? "just in time" : "4x",
-                engine ? (", with motion vectors (" + convention + ")").c_str() : "");
+                engine ? (", with motion vectors (" + convention + ")").c_str() : "",
+                delta ? ", the world's motion from the application's movement" : "");
     std::array<XrSwapchain, 2> sources{reinterpret_cast<XrSwapchain>(0x61), reinterpret_cast<XrSwapchain>(0x62)};
     std::array<XrSwapchain, 2> depths{reinterpret_cast<XrSwapchain>(0x63), reinterpret_cast<XrSwapchain>(0x64)};
     std::array<XrSwapchain, 2> vectors{reinterpret_cast<XrSwapchain>(0x65), reinterpret_cast<XrSwapchain>(0x66)};
@@ -4625,6 +4644,11 @@ int RunProfile(Harness& harness) {
             view.request.engine_motion = view.request.engine_calibrate = engine;
             view.request.game_newest = view.request.newest;
             view.request.game_previous = view.request.previous;
+            // With FG_PROFILE_DELTA, the application's movement (stage 4).
+            view.request.app_delta = delta;
+            view.request.delta_orientation = {0.0f, std::sin(-0.5f * std::atan(kScroll)), 0.0f,
+                                              std::cos(-0.5f * std::atan(kScroll))};
+            view.request.delta_position = {0.0f, 0.0f, 1.8f};
             views.push_back(view);
         }
         for (std::size_t eye = 0; eye < 2; ++eye) {
@@ -4774,6 +4798,15 @@ int RunProfile(Harness& harness) {
             engine_ms = 0.0;
             engine_samples = 0;
         }
+        if (delta) {
+            // Stage 4's gate: kWorldSet within 0.01 ms, the analysis 0.10 ms
+            // or more below a run without FG_PROFILE_DELTA (the world fit's).
+            const auto set = static_cast<std::size_t>(FrameGenPass::kWorldSet);
+            const FrameGenWorldDeltaStatus status = gpu->WorldDeltaStatus();
+            std::printf("  world set %6.3f ms per real frame (both eyes; gate <= 0.01), %llu frames set\n",
+                        samples && sums.size() > set ? sums[set] / samples : -1.0,
+                        static_cast<unsigned long long>(status.set));
+        }
         if (synthesis_samples) {
             std::printf("  just in time, per frame written: %.3f ms (%.2f ms for the three per real frame)\n",
                         synthesis_total / synthesis_samples, 3.0 * synthesis_total / synthesis_samples);
@@ -4813,6 +4846,10 @@ int RunProfile(Harness& harness) {
             return result.submission;
         });
     }
+    if (delta) {
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_DELTA", "");
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_DELTA_FIXED", "");
+    }
     return 0;
 }
 
@@ -4831,7 +4868,11 @@ int RunProfile(Harness& harness) {
 // instead of exactly to the next frame's position), FG_REPLAY_JIT=own|stale|
 // stale-noshift (extrapolating just in time from frames k - 2..k analyzed
 // alone: frame k moved by its own motion, or by frame k - 1's,
-// FrameGenGpu::SynthesizeStale, with or without the eye shift).
+// FrameGenGpu::SynthesizeStale, with or without the eye shift). Captures
+// whose motion.txt has the application's movement (stage 4) carry it into
+// each frame pair it was recorded for, and print "World vs delta"; with
+// VECTORXR_FRAMEGEN_ENGINE_DELTA=1, _DELTA_FIXED=sign,scale (and _SKY=1) in
+// the environment, the backend sets the world's motion from it, as a session.
 bool g_replay = false;
 std::string g_replay_directory, g_replay_output;
 
@@ -4877,6 +4918,13 @@ struct ReplayView {
     std::uint32_t vectors_image{0};
     FrameGenMotionEncoding encoding;
     std::vector<float> engine_raw;
+    // Stage 4 (motion.txt, optional): the application's movement from the
+    // record before (appSpaceDeltaPose), with the poses the game rendered
+    // the frame and the one before with; `app_delta` where all are there.
+    bool app_delta{false};
+    std::array<float, 4> delta_orientation{0.0f, 0.0f, 0.0f, 1.0f};
+    std::array<float, 3> delta_position{};
+    FrameGenViewGeometry game, game_previous;
 };
 
 struct ReplayFrame {
@@ -4885,6 +4933,10 @@ struct ReplayFrame {
     // presenter.txt (optional): the interval to the frame's display time
     // over the interval before, unclamped (FG_REPLAY_TIME=display).
     std::optional<float> display_ratio;
+    // motion.txt (optional): the frame's record and the record before it
+    // (the layer's count of frames with a projection; 0: none).
+    std::uint64_t record{0};
+    std::uint64_t previous_record{0};
 };
 
 bool LoadReplayFrame(const std::string& directory, ReplayFrame& frame) {
@@ -4959,6 +5011,20 @@ bool LoadReplayFrame(const std::string& directory, ReplayFrame& frame) {
             view.engine_raw.resize(raw.size());
             for (std::size_t t = 0; t < raw.size(); ++t) view.engine_raw[t] = HalfValue(raw[t]);
         }
+        const std::string motion = directory + "/motion.txt";
+        const std::string prefix = "view " + std::to_string(i);
+        const std::vector<std::string> delta = TextLine(motion, prefix + " delta");
+        if (delta.size() >= 7 && GeometryFrom(TextLine(motion, prefix + " game"), view.game) &&
+            GeometryFrom(TextLine(motion, prefix + " game_previous"), view.game_previous)) {
+            view.app_delta = true;
+            view.delta_orientation = {std::stof(delta[0]), std::stof(delta[1]), std::stof(delta[2]), std::stof(delta[3])};
+            view.delta_position = {std::stof(delta[4]), std::stof(delta[5]), std::stof(delta[6])};
+        }
+    }
+    if (const std::vector<std::string> record = TextLine(directory + "/motion.txt", "frame"); ok && !record.empty()) {
+        frame.record = std::stoull(record[0]);
+        const std::vector<std::string> before = TextLine(directory + "/motion.txt", "previous_frame");
+        frame.previous_record = before.empty() ? 0 : std::stoull(before[0]);
     }
     return ok;
 }
@@ -5599,6 +5665,10 @@ int RunReplay(Harness& harness) {
     // resample of the same vectors (EngineRawReference).
     bool check_engine = false;
     std::size_t engine_views = 0, engine_texels = 0, engine_same = 0, engine_sentinels = 0, engine_zeros = 0;
+    // Stage 4: the measuring pass's world fits against the application's
+    // movement (captures whose motion.txt has it), calibrated as a session
+    // would be (FrameGenWorldDeltaCalibration).
+    FrameGenWorldDeltaCalibration world_delta;
 
     // Executes frame k as the newest real frame after frame `before` (none:
     // a fresh sequence, nothing generated), generating one frame at
@@ -5621,9 +5691,10 @@ int RunReplay(Harness& harness) {
         tuning.engine_mode = engine != "off" ? FrameGenEngineMode::kObserve : FrameGenEngineMode::kOff;
         if (before && *before + 1 != k) tuning.interval_ratio = 1.0f;
         // Observe's evidence (stage 3) on frames whose every view has vectors,
-        // calibrating where the pair is consecutive frames (no Pivot in a
-        // capture's frames: the game's poses are the declared ones), with the
-        // pair before where the head's turn changed by 2 degrees a frame.
+        // calibrating where the pair is consecutive frames (by the game's
+        // poses from motion.txt where it has them, else the declared ones: no
+        // Pivot in a capture's frames), with the pair before where the head's
+        // turn changed by 2 degrees a frame.
         bool vectors_everywhere = engine != "off";
         for (std::size_t v = 0; v < view_count; ++v) vectors_everywhere = vectors_everywhere && engine_images[k][v].has_value();
         const bool consecutive = before && *before + 1 == k;
@@ -5646,11 +5717,32 @@ int RunReplay(Harness& harness) {
             submission.request.engine_calibrate = vectors_everywhere && consecutive;
             submission.request.game_newest = submission.request.newest;
             submission.request.game_previous = submission.request.previous;
+            // Stage 4: the application's movement where motion.txt has it for
+            // this pair (its record before is frame `before`'s), with the
+            // poses the game rendered the two with.
+            const bool recorded = consecutive && view.app_delta && frame.previous_record != 0 &&
+                                  frame.previous_record == frames[*before].record;
+            if (recorded) {
+                submission.request.app_delta = true;
+                submission.request.delta_orientation = view.delta_orientation;
+                submission.request.delta_position = view.delta_position;
+                submission.request.game_newest = view.game;
+                submission.request.game_previous = view.game_previous;
+            }
+            // The pair before by the same poses as this one: the declared
+            // ones, or motion.txt's where it has the game's for that pair too
+            // (frame k - 1's record of frame k - 2); without them no lag test,
+            // as a session has none without the frame before's pairing.
             if (submission.request.engine_calibrate && k >= 2) {
-                submission.request.game_before = frames[k - 2].views[v].newest;
-                submission.request.engine_lag =
-                    FrameGenAngularAcceleration(submission.request.game_newest, submission.request.game_previous,
-                                                submission.request.game_before) > 2.0;
+                const ReplayFrame& last = frames[k - 1];
+                const bool last_recorded = last.views[v].app_delta && last.previous_record != 0 &&
+                                           last.previous_record == frames[k - 2].record;
+                if (!recorded || last_recorded) {
+                    submission.request.game_before = recorded ? last.views[v].game_previous : frames[k - 2].views[v].newest;
+                    submission.request.engine_lag =
+                        FrameGenAngularAcceleration(submission.request.game_newest, submission.request.game_previous,
+                                                    submission.request.game_before) > 2.0;
+                }
             }
             Check(gpu->Capture(v, submission.source, submission.request, tuning.quality, error) || error.empty(),
                   "replay capture: " + error);
@@ -5703,6 +5795,34 @@ int RunReplay(Harness& harness) {
             }
         }
         Check(gpu->Execute(views, tuning, result, error), "replay execute: " + error);
+        // Stage 4: the measuring pass's world fits (views that used depth:
+        // the fit ran, unless kWorldSet stood in for it or followed it,
+        // texel 2's y 1)
+        // beside the application's movement, for the "World vs delta" line.
+        std::vector<FrameGenWorldFit> fits;
+        for (std::size_t v = 0; v < view_count && check_engine && consecutive; ++v) {
+            const FrameGenViewRequest& request = views[v].request;
+            std::vector<float> texels;
+            FrameGenExtent extent{};
+            std::uint32_t channels = 0;
+            if (!request.app_delta || result.depth.size() <= v || !result.depth[v] || result.synthesized.size() <= v ||
+                !result.synthesized[v] || !gpu->ReadTexture(v, {FrameGenTextureKind::kWorldParams, 0}, texels, extent, channels) ||
+                channels != 4 || texels.size() < 16 || texels[9] != 0.0f) {
+                continue;
+            }
+            FrameGenWorldFit fit;
+            fit.rotation = {texels[0], texels[1], texels[2]};
+            fit.valid = texels[3] > 0.0f;
+            fit.translation = {texels[4], texels[5], texels[6]};
+            fit.game_newest = request.game_newest;
+            fit.game_previous = request.game_previous;
+            fit.newest = request.newest;
+            fit.previous = request.previous;
+            fit.delta_orientation = request.delta_orientation;
+            fit.delta_position = request.delta_position;
+            fits.push_back(fit);
+        }
+        world_delta.Add(fits);
     };
     // Where the eye was at frame `to`, from frame `from`'s eye, in frame
     // `from`'s view space, divided by `time`.
@@ -6064,6 +6184,19 @@ int RunReplay(Harness& harness) {
                     mean(v.epe[2], v.epe_samples[2]), v.epe_samples[2],
                     mean(mean(v.variant, v.textured), mean(v.measured_cost, v.with_measured)),
                     mean(v.variant, v.zero), mean(v.lag_cost, v.lag_variant));
+    }
+    // Stage 4: the world fits against the application's movement: how the
+    // fitted rotation correlates with the movement's under either sign of
+    // its rotation, and the translation's correlation and scale (s_t) under
+    // the better one, over the fits moving 0.5 m or turning 0.002 radians a
+    // frame (VECTORXR_FRAMEGEN_ENGINE_DELTA=1 sets the motion instead of
+    // fitting it: none then, the watchdog's fits set over as well).
+    if (const FrameGenWorldDeltaStatus& d = world_delta.Status(); d.frames) {
+        std::printf("World vs delta: %llu frames' fits, %llu informative (%llu turning); rotation correlation %.3f as "
+                    "given, %.3f conjugated; translation correlation %.3f, s_t %.3f\n",
+                    static_cast<unsigned long long>(d.frames), static_cast<unsigned long long>(d.informative),
+                    static_cast<unsigned long long>(d.turning), d.rotation_correlation[0], d.rotation_correlation[1],
+                    d.translation_correlation, d.fitted_scale);
     }
     gpu->Reset();
     return 0;
@@ -8610,6 +8743,436 @@ void EngineObserveScenarios(Harness& harness) {
     }
 }
 
+// --- Engine motion vectors, stage 4 (the world's motion from the
+// application's movement), on WARP ------------------------------------------
+//
+// A still head yawed 30 degrees with a cockpit panel 0.5 m ahead (fixed in
+// the application's space, below the view's centre), over a facade 200 m off
+// (the plane z = -200 of the world, up to 40 m above the eyes: windows 12 m
+// apart over noise) and the sky above it. The application's space flies on
+// 3 m a frame and turns 0.5 degrees a frame about +Y (an aircraft in a
+// turn): its appSpaceDeltaPose is known exactly. Two eyes 64 mm apart,
+// reversed depth (1 / z = 100 * raw, the sky 0). Frames 16 to 23 are judged,
+// and the last, the 30th to take the movement: the watchdog's, which fits
+// the world as well (kFrameGenWorldDeltaWatchdog).
+constexpr std::uint32_t kWorldSize = 256;
+constexpr int kWorldFrames = 31;
+constexpr int kWorldMeasured = 16;
+constexpr int kWorldJudged = 24;
+static_assert(kWorldFrames == kFrameGenWorldDeltaWatchdog + 1, "the last frame is the watchdog's");
+constexpr double kWorldSpeed = 3.0;
+
+bool WorldDeltaJudged(int k) {
+    return (k >= kWorldMeasured && k < kWorldJudged) || k == kWorldFrames - 1;
+}
+constexpr double kWorldTurn = 0.5 * 3.14159265358979 / 180.0;
+
+// The world in the application's space at time `t` (frames), and back:
+// app = R(turn t) (world - player(t)), the player flying toward -Z.
+EngineVec WorldDeltaToApp(double t, const EngineVec& world, bool direction) {
+    const EngineVec player{0.0, 0.0, direction ? 0.0 : -kWorldSpeed * t};
+    return EngineRotate(EngineYaw(kWorldTurn * t), {world[0] - player[0], world[1] - player[1], world[2] - player[2]});
+}
+
+EnginePose WorldDeltaEye(int eye) {
+    EnginePose pose;
+    pose.orientation = EngineYaw(30.0 * 3.14159265358979 / 180.0);
+    pose.position = EngineRotate(pose.orientation, {eye ? 0.032 : -0.032, 0.0, 0.0});
+    return pose;
+}
+
+// What an eye sees through uv at time t: 0 the sky (`point` its direction
+// in the world), 1 the panel, 2 the facade (its point in the world); the
+// depth along the view axis.
+struct WorldDeltaHit {
+    int kind{0};
+    EngineVec point{};
+    double depth{0.0};
+    std::uint32_t color{0};
+};
+WorldDeltaHit WorldDeltaCast(double t, const EnginePose& eye, double u, double v) {
+    const EngineVec view{-kTan + 2.0 * kTan * u, kTan - 2.0 * kTan * v, -1.0};
+    // The panel, in the head's frame (the eyes look the head's way, from
+    // 32 mm to its sides): where the ray meets z = -0.5 there.
+    const EngineVec side = EngineRotate({-eye.orientation[0], -eye.orientation[1], -eye.orientation[2], eye.orientation[3]},
+                                        eye.position);
+    const EngineVec at{side[0] + 0.5 * view[0], side[1] + 0.5 * view[1], -0.5};
+    WorldDeltaHit hit;
+    if (std::abs(at[0]) < 0.18 && at[1] > -0.32 && at[1] < -0.12) {
+        hit.kind = 1;
+        hit.depth = 0.5;
+        hit.color = Patch(static_cast<float>(at[0] * 600.0 + 100.0), static_cast<float>(at[1] * 600.0 + 100.0));
+        return hit;
+    }
+    // The world: the ray in its frame at time t.
+    const EngineVec ray = EngineRotate(eye.orientation, view);
+    const EngineQuat back = EngineYaw(-kWorldTurn * t);
+    const EngineVec o = EngineRotate(back, eye.position);
+    const EngineVec world_origin{o[0], o[1], o[2] - kWorldSpeed * t};
+    const EngineVec world_ray = EngineRotate(back, ray);
+    if (world_ray[2] < 0.0) {
+        const double s = (-200.0 - world_origin[2]) / world_ray[2];
+        const EngineVec p{world_origin[0] + s * world_ray[0], world_origin[1] + s * world_ray[1], -200.0};
+        if (p[1] < 40.0) {
+            const double cell = p[0] - 12.0 * std::floor(p[0] / 12.0);
+            const double row = p[1] - 16.0 * std::floor(p[1] / 16.0);
+            const bool glass = cell >= 3.0 && cell < 9.0 && row >= 4.0 && row < 12.0;
+            const float n = Noise(static_cast<float>(p[0] * 0.7 + 300.0), static_cast<float>(p[1] * 0.7 + 300.0));
+            hit = {2, p, s,
+                   glass ? Pack(0.12f + 0.2f * n, 0.18f + 0.2f * n, 0.26f + 0.2f * n)
+                         : Pack(0.45f + 0.4f * n, 0.42f + 0.4f * n, 0.38f + 0.35f * n)};
+            return hit;
+        }
+    }
+    const double length = std::sqrt(world_ray[0] * world_ray[0] + world_ray[1] * world_ray[1] + world_ray[2] * world_ray[2]);
+    const EngineVec d{world_ray[0] / length, world_ray[1] / length, world_ray[2] / length};
+    const float azimuth = static_cast<float>(std::atan2(d[0], -d[2]) * 180.0);
+    const float elevation = static_cast<float>(std::asin(d[1]) * 180.0);
+    const float n = 0.6f * Noise(azimuth / 6.0f, elevation / 6.0f) + 0.4f * Noise(azimuth / 2.5f + 9.0f, elevation / 2.5f);
+    hit = {0, d, 0.0, Pack(0.3f + 0.5f * n, 0.45f + 0.4f * n, 0.7f + 0.25f * n)};
+    return hit;
+}
+
+// Where the content an eye sees at uv at frame k was in its view at frame
+// k - 1 (the head still: Frame Generation's flow there, newest minus
+// previous, is uv minus that).
+std::array<double, 2> WorldDeltaWasAt(const WorldDeltaHit& hit, int k, const EnginePose& eye) {
+    const EngineVec app = WorldDeltaToApp(k - 1, hit.point, hit.kind == 0);
+    const EngineVec relative = hit.kind == 0 ? app : EngineVec{app[0] - eye.position[0], app[1] - eye.position[1],
+                                                                 app[2] - eye.position[2]};
+    const EngineVec view = EngineRotate({-eye.orientation[0], -eye.orientation[1], -eye.orientation[2], eye.orientation[3]},
+                                        relative);
+    return {(view[0] / -view[2] + kTan) / (2.0 * kTan), (kTan - view[1] / -view[2]) / (2.0 * kTan)};
+}
+
+// The scene's colour at time t (2x2 samples a pixel) and depth (raw, one
+// sample a pixel).
+Pixels WorldDeltaColor(double t, int eye) {
+    const EnginePose pose = WorldDeltaEye(eye);
+    Pixels pixels(std::size_t{kWorldSize} * kWorldSize);
+    for (std::uint32_t y = 0; y < kWorldSize; ++y) {
+        for (std::uint32_t x = 0; x < kWorldSize; ++x) {
+            float sum[3] = {0.0f, 0.0f, 0.0f};
+            for (int s = 0; s < 4; ++s) {
+                const std::uint32_t c = WorldDeltaCast(t, pose, (x + 0.25 + 0.5 * (s % 2)) / kWorldSize,
+                                                       (y + 0.25 + 0.5 * (s / 2)) / kWorldSize)
+                                            .color;
+                for (int k = 0; k < 3; ++k) sum[k] += static_cast<float>((c >> (8 * k)) & 255u) / 255.0f / 4.0f;
+            }
+            pixels[std::size_t{y} * kWorldSize + x] = Pack(sum[0], sum[1], sum[2]);
+        }
+    }
+    return pixels;
+}
+
+struct WorldDeltaFrames {
+    std::vector<std::array<Pixels, 2>> color;  // per frame
+    std::vector<std::array<Pixels, 2>> truth;  // half a frame on (k + 0.5)
+    std::vector<std::array<std::vector<float>, 2>> depth;
+};
+
+WorldDeltaFrames RenderWorldDeltaFrames() {
+    WorldDeltaFrames frames;
+    frames.color.resize(kWorldFrames);
+    frames.truth.resize(kWorldFrames);
+    frames.depth.resize(kWorldFrames);
+    std::vector<std::thread> workers;
+    for (int k = 0; k < kWorldFrames; ++k) {
+        workers.emplace_back([&, k] {
+            for (int e = 0; e < 2; ++e) {
+                frames.color[k][e] = WorldDeltaColor(k, e);
+                if (WorldDeltaJudged(k)) frames.truth[k][e] = WorldDeltaColor(k + 0.5, e);
+                std::vector<float>& depth = frames.depth[k][e];
+                depth.resize(std::size_t{kWorldSize} * kWorldSize);
+                const EnginePose pose = WorldDeltaEye(e);
+                for (std::uint32_t y = 0; y < kWorldSize; ++y) {
+                    for (std::uint32_t x = 0; x < kWorldSize; ++x) {
+                        const WorldDeltaHit hit = WorldDeltaCast(k, pose, (x + 0.5) / kWorldSize, (y + 0.5) / kWorldSize);
+                        depth[std::size_t{y} * kWorldSize + x] = hit.kind == 0 ? 0.0f : static_cast<float>(0.01 / hit.depth);
+                    }
+                }
+            }
+        });
+    }
+    for (auto& worker : workers) worker.join();
+    return frames;
+}
+
+// A run of the scene's frames on a backend made with the research switches
+// `delta` (VECTORXR_FRAMEGEN_ENGINE_DELTA), `fixed` (_DELTA_FIXED) and `sky`
+// (_SKY), each frame carrying the application's movement as the presenter
+// asks, extrapolated half a frame on: the judged frames' generated images,
+// filtered flow (4 channels at the final level) and world parameters, per
+// eye, and the backend's world delta status.
+struct WorldDeltaRun {
+    std::vector<int> frames; // the judged frames, in order
+    std::vector<std::array<Pixels, 2>> outputs;
+    std::vector<std::array<std::vector<float>, 2>> flow;
+    std::vector<std::array<std::vector<float>, 2>> world;
+    FrameGenExtent cells{};
+    FrameGenWorldDeltaStatus status;
+    bool depth{true}; // every judged frame used depth on both eyes
+};
+WorldDeltaRun RunWorldDeltaFrames(Harness& harness, const WorldDeltaFrames& frames, const char* delta, const char* fixed,
+                                  const char* sky) {
+    _putenv_s("VECTORXR_FRAMEGEN_ENGINE_DELTA", delta);
+    _putenv_s("VECTORXR_FRAMEGEN_ENGINE_DELTA_FIXED", fixed);
+    _putenv_s("VECTORXR_FRAMEGEN_ENGINE_SKY", sky);
+    std::string error;
+    auto gpu = CreateFrameGenGpu(harness.binding, error);
+    _putenv_s("VECTORXR_FRAMEGEN_ENGINE_DELTA", "");
+    _putenv_s("VECTORXR_FRAMEGEN_ENGINE_DELTA_FIXED", "");
+    _putenv_s("VECTORXR_FRAMEGEN_ENGINE_SKY", "");
+    Check(gpu != nullptr, "world delta backend: " + error);
+    gpu->SetCopyAfterRelease(true); // the tests' images are their own
+    const std::int64_t output_format = gpu->OutputFormats(FrameGenOutputKind::kSrgb8).front();
+    std::array<XrSwapchain, 2> sources{}, depths{}, results{};
+    for (int e = 0; e < 2; ++e) {
+        sources[e] = reinterpret_cast<XrSwapchain>(std::uintptr_t{0x980u + e});
+        depths[e] = reinterpret_cast<XrSwapchain>(std::uintptr_t{0x990u + e});
+        results[e] = reinterpret_cast<XrSwapchain>(std::uintptr_t{0x9a0u + e});
+        g_swapchains[sources[e]].clear();
+        g_swapchains[depths[e]].clear();
+        for (int k = 0; k < kWorldFrames; ++k) {
+            void* image = harness.create(kWorldSize, kWorldSize);
+            harness.upload_sized(image, kWorldSize, kWorldSize, frames.color[k][e]);
+            g_swapchains[sources[e]].push_back(image);
+            g_swapchains[depths[e]].push_back(harness.create_depth_data(kWorldSize, kWorldSize, frames.depth[k][e]));
+        }
+        g_swapchains[results[e]] = {harness.create(kWorldSize, kWorldSize)};
+        for (const XrSwapchain chain : {sources[e], depths[e], results[e]}) {
+            Check(gpu->Track(chain, EnumerateImages, error), "world delta: track: " + error);
+        }
+    }
+    FrameGenDepthEncoding encoding;
+    encoding.near_z = std::numeric_limits<float>::infinity();
+    encoding.far_z = 0.01f;
+    FrameGenTuning tuning;
+    tuning.mode = FrameGenSynthesisMode::kExtrapolate;
+    tuning.fractions[0] = 0.5f;
+    tuning.generated = 1;
+    const XrRect2Di rect{{0, 0}, {static_cast<int>(kWorldSize), static_cast<int>(kWorldSize)}};
+    WorldDeltaRun run;
+    for (int k = 0; k < kWorldFrames; ++k) {
+        // The application's movement from frame k - 1: R_D = R(turn k)
+        // R(turn (k - 1))^T, p_D = R(turn k) (player(k - 1) - player(k)).
+        const EngineQuat turn = EngineYaw(kWorldTurn);
+        const EngineVec moved = EngineRotate(EngineYaw(kWorldTurn * k), {0.0, 0.0, kWorldSpeed});
+        std::vector<FrameGenViewSubmission> views(2);
+        for (int e = 0; e < 2; ++e) {
+            FrameGenViewSubmission& view = views[e];
+            view.source = {sources[e], static_cast<std::uint32_t>(k), 0, rect, harness.format};
+            view.outputs = {{results[e], 0, 0, rect, output_format}};
+            view.request.extent = {kWorldSize, kWorldSize};
+            view.request.output = FrameGenOutputKind::kSrgb8;
+            view.request.synthesize = k > 0;
+            view.request.temporal = true;
+            view.request.depth = true;
+            view.request.newest = view.request.previous = EngineGeometry(WorldDeltaEye(e));
+            view.request.app_delta = k > 0;
+            view.request.delta_orientation = {static_cast<float>(turn[0]), static_cast<float>(turn[1]),
+                                              static_cast<float>(turn[2]), static_cast<float>(turn[3])};
+            view.request.delta_position = {static_cast<float>(moved[0]), static_cast<float>(moved[1]),
+                                           static_cast<float>(moved[2])};
+            view.request.game_newest = view.request.game_previous = view.request.newest;
+            if (k > 0) {
+                Check(gpu->Capture(e, view.source, view.request, tuning.quality, error), "world delta: color: " + error);
+                Check(gpu->CaptureDepth(e, {depths[e], static_cast<std::uint32_t>(k), 0, rect, 0}, encoding, view.request,
+                                        error),
+                      "world delta: depth: " + error);
+            }
+        }
+        FrameGenExecuteResult result;
+        Check(gpu->Execute(views, tuning, result, error), "world delta: execute: " + error);
+        if (!WorldDeltaJudged(k)) continue;
+        run.frames.push_back(k);
+        run.depth = run.depth && result.depth.size() == 2 && result.depth[0] && result.depth[1];
+        std::array<Pixels, 2> outputs;
+        std::array<std::vector<float>, 2> flow, world;
+        for (int e = 0; e < 2; ++e) {
+            outputs[e] = harness.readback_sized(g_swapchains[results[e]][0]);
+            std::uint32_t channels = 0;
+            FrameGenExtent extent{};
+            Check(gpu->ReadTexture(e, {FrameGenTextureKind::kFilteredNewest, 0}, flow[e], run.cells, channels) &&
+                      channels == 4,
+                  "world delta: the filtered flow reads back");
+            Check(gpu->ReadTexture(e, {FrameGenTextureKind::kWorldParams, 0}, world[e], extent, channels) &&
+                      extent.width == 6 && channels == 4,
+                  "world delta: the world's parameters read back (six texels)");
+        }
+        run.outputs.push_back(outputs);
+        run.flow.push_back(flow);
+        run.world.push_back(world);
+    }
+    Check(gpu->WaitIdle(), "world delta: idle");
+    run.status = gpu->WorldDeltaStatus();
+    gpu->Reset();
+    for (int e = 0; e < 2; ++e) {
+        g_swapchains.erase(sources[e]);
+        g_swapchains.erase(depths[e]);
+        g_swapchains.erase(results[e]);
+    }
+    return run;
+}
+
+// 3w: the world's motion from the application's movement
+// (VECTORXR_FRAMEGEN_ENGINE_DELTA=1, its calibration fixed) is the filter's
+// motion for the facade, within 0.1 px of the scene's exact flow, and the
+// extrapolated facade is closer to the truth than with the fitted motion;
+// the sky turns by the exact rotation only with VECTORXR_FRAMEGEN_ENGINE_SKY=1
+// (the fitted rotation never moves it). On the watchdog's frame the fit runs
+// and is checked while the filter keeps the delta's motion. Calibrating
+// changes no generated frame, and its fits agree with the movement's model.
+void WorldDeltaScenarios(Harness& harness) {
+    const WorldDeltaFrames frames = RenderWorldDeltaFrames();
+    const WorldDeltaRun fitted = RunWorldDeltaFrames(harness, frames, "", "", "");
+    const WorldDeltaRun calibrating = RunWorldDeltaFrames(harness, frames, "calibrate", "", "1");
+    const WorldDeltaRun set = RunWorldDeltaFrames(harness, frames, "1", "1,1", "");
+    const WorldDeltaRun sky = RunWorldDeltaFrames(harness, frames, "1", "1,1", "1");
+    Check(fitted.depth && set.depth && sky.depth, "world delta: depth is in use on the judged frames");
+    // Per judged frame and eye: the facade's and the sky's error against
+    // the truth half a frame on (pixels both frames show it at, away from
+    // the image's border), and the filtered flow's distance from the exact
+    // flow at cells whose neighbours show the same (pixels), and the share
+    // of sky cells given the world's cost: frames 16 to 23, or the
+    // watchdog's alone.
+    struct Judged {
+        double facade_error{0.0}, sky_error{0.0};
+        double facade_flow{0.0}, sky_flow{0.0};
+        std::size_t sky_cells{0}, sky_world_cost{0};
+    };
+    auto judge = [&](const WorldDeltaRun& run, bool watchdog) {
+        Judged judged;
+        std::size_t facade_pixels = 0, sky_pixels = 0;
+        const FrameGenExtent cells = run.cells;
+        for (std::size_t j = 0; j < run.outputs.size(); ++j) {
+            const int k = run.frames[j];
+            if ((k == kWorldFrames - 1) != watchdog) continue;
+            for (int e = 0; e < 2; ++e) {
+                const EnginePose eye = WorldDeltaEye(e);
+                const Pixels& shown = run.outputs[j][e];
+                const Pixels& truth = frames.truth[k][e];
+                for (std::uint32_t y = 16; y < kWorldSize - 16; ++y) {
+                    for (std::uint32_t x = 16; x < kWorldSize - 16; ++x) {
+                        const double u = (x + 0.5) / kWorldSize, v = (y + 0.5) / kWorldSize;
+                        const int now = WorldDeltaCast(k, eye, u, v).kind;
+                        const int then = WorldDeltaCast(k + 0.5, eye, u, v).kind;
+                        if (now != then || now == 1) continue;
+                        double difference = 0.0;
+                        const std::uint32_t p = shown[std::size_t{y} * kWorldSize + x], q = truth[std::size_t{y} * kWorldSize + x];
+                        for (int c = 0; c < 3; ++c) {
+                            difference += std::abs(static_cast<int>((p >> (8 * c)) & 255) - static_cast<int>((q >> (8 * c)) & 255));
+                        }
+                        (now == 2 ? judged.facade_error : judged.sky_error) += difference / (3.0 * 255.0);
+                        (now == 2 ? facade_pixels : sky_pixels) += 1;
+                    }
+                }
+                const std::vector<float>& flow = run.flow[j][e];
+                auto kind_at = [&](int cx, int cy) {
+                    return WorldDeltaCast(k, eye, (cx + 0.5) / cells.width, (cy + 0.5) / cells.height).kind;
+                };
+                // Cells two from anything else (the filter's 3x3 median, and
+                // its depth from the half-resolution texel nearest each
+                // cell's centre, reach a cell further).
+                for (int cy = 2; cy + 2 < static_cast<int>(cells.height); ++cy) {
+                    for (int cx = 2; cx + 2 < static_cast<int>(cells.width); ++cx) {
+                        const int kind = kind_at(cx, cy);
+                        bool alike = kind != 1;
+                        for (int n = 0; n < 25 && alike; ++n) alike = kind_at(cx + n % 5 - 2, cy + n / 5 - 2) == kind;
+                        if (!alike) continue;
+                        const double u = (cx + 0.5) / cells.width, v = (cy + 0.5) / cells.height;
+                        const std::array<double, 2> was = WorldDeltaWasAt(WorldDeltaCast(k, eye, u, v), k, eye);
+                        const float* texel = &flow[(std::size_t{static_cast<std::uint32_t>(cy)} * cells.width + cx) * 4];
+                        const double off = std::hypot((texel[0] - (u - was[0])) * kWorldSize, (texel[1] - (v - was[1])) * kWorldSize);
+                        if (kind == 2) {
+                            judged.facade_flow = std::max(judged.facade_flow, off);
+                        } else {
+                            judged.sky_flow = std::max(judged.sky_flow, off);
+                            ++judged.sky_cells;
+                            judged.sky_world_cost += std::abs(texel[2] - 0.01f) < 1e-4f ? 1 : 0;
+                        }
+                    }
+                }
+            }
+        }
+        judged.facade_error /= std::max<std::size_t>(facade_pixels, 1);
+        judged.sky_error /= std::max<std::size_t>(sky_pixels, 1);
+        return judged;
+    };
+    const Judged fit = judge(fitted, false), delta = judge(set, false), turned = judge(sky, false);
+    auto describe = [](const Judged& j) {
+        return "facade error " + std::to_string(j.facade_error) + " (flow within " + std::to_string(j.facade_flow) +
+               " px), sky error " + std::to_string(j.sky_error) + " (flow within " + std::to_string(j.sky_flow) + " px, " +
+               std::to_string(j.sky_world_cost) + "/" + std::to_string(j.sky_cells) + " cells at the world's cost)";
+    };
+    std::cout << "D3D12 world delta: fitted: " << describe(fit) << "\nD3D12 world delta: delta: " << describe(delta)
+              << "\nD3D12 world delta: delta and sky: " << describe(turned) << std::endl;
+    Check(set.status.mode == FrameGenWorldDeltaMode::kOn && set.status.locked && set.status.fixed &&
+              set.status.set >= static_cast<std::uint64_t>(kWorldFrames - kWorldMeasured),
+          "world delta: the fixed calibration stands in for the fit on the judged frames");
+    Check(delta.facade_flow < 0.1, "world delta: the facade's filtered flow is the exact flow within 0.1 px (" +
+                                       std::to_string(delta.facade_flow) + ")");
+    Check(delta.facade_error < fit.facade_error,
+          "world delta: the extrapolated facade is not closer to the truth than with the fitted motion (" +
+              std::to_string(delta.facade_error) + " vs " + std::to_string(fit.facade_error) + ")");
+    // The sky: the exact rotation with the sky switch, measured without it.
+    Check(turned.sky_cells > 0 && turned.sky_flow < 0.1 && turned.sky_world_cost == turned.sky_cells &&
+              delta.sky_world_cost * 2 < delta.sky_cells && fit.sky_world_cost * 2 < fit.sky_cells,
+          "world delta: the sky turns by the exact rotation only with the sky switch and the delta's motion");
+    Check(turned.sky_error <= delta.sky_error + 0.002,
+          "world delta: the sky turned exactly is no worse (" + std::to_string(turned.sky_error) + " vs " +
+              std::to_string(delta.sky_error) + ")");
+    // The world's parameters: texel 2 says where they came from.
+    bool sources = true;
+    for (const auto& eyes : set.world) {
+        for (const auto& texels : eyes) sources = sources && texels[9] == 1.0f && texels[10] == 1.0f && texels[3] == 1.0f;
+    }
+    for (const auto& eyes : fitted.world) {
+        for (const auto& texels : eyes) sources = sources && texels[9] == 0.0f;
+    }
+    Check(sources, "world delta: kWorldParams texel 2 tells the delta's motion (1) from the fit's (0)");
+    // The watchdog's frame: the fit runs and is read back (texels 4 and 5,
+    // the fit's copy), and the filter still moves the facade and the sky by
+    // the delta's motion.
+    const Judged watched = judge(set, true), watched_sky = judge(sky, true);
+    std::cout << "D3D12 world delta: the watchdog's frame: delta: " << describe(watched)
+              << "\nD3D12 world delta: the watchdog's frame: delta and sky: " << describe(watched_sky)
+              << "\nD3D12 world delta: the watchdog: " << set.status.checks << " checks, " << set.status.failed
+              << " failed (the last " << 100.0 * set.status.last_error << "% off), " << set.status.drops << " drops"
+              << std::endl;
+    bool copied = !fitted.world.empty();
+    for (const auto& eyes : fitted.world) {
+        for (const auto& texels : eyes) copied = copied && std::equal(texels.begin(), texels.begin() + 8, texels.begin() + 16);
+    }
+    for (const auto& texels : set.world.back()) copied = copied && texels[19] == 1.0f;
+    Check(copied, "world delta: texels 4 and 5 keep the fit, also where the watchdog's set follows it");
+    Check(set.frames.back() == kWorldFrames - 1 && set.status.checks == 1 && set.status.failed == 0 &&
+              set.status.drops == 0 && sky.status.checks == 1 && sky.status.drops == 0,
+          "world delta: the watchdog checks the fit on its frame, and it agrees with the delta's model");
+    Check(watched.facade_flow < 0.1 && watched_sky.sky_cells > 0 && watched_sky.sky_flow < 0.1 &&
+              watched_sky.sky_world_cost == watched_sky.sky_cells,
+          "world delta: on the watchdog's frame the filter keeps the delta's motion (facade within " +
+              std::to_string(watched.facade_flow) + " px, sky within " + std::to_string(watched_sky.sky_flow) + " px)");
+    // Calibrating (the sky switch on as well): the generated frames are the
+    // fit's byte for byte, and the fits read back follow the movement's
+    // model: its rotation as given, s_t about 1.
+    std::size_t differing = 0;
+    for (std::size_t j = 0; j < fitted.outputs.size(); ++j) {
+        for (int e = 0; e < 2; ++e) differing += fitted.outputs[j][e] == calibrating.outputs[j][e] ? 0 : 1;
+    }
+    const FrameGenWorldDeltaStatus& calibration = calibrating.status;
+    std::cout << "D3D12 world delta: calibrating: " << calibration.frames << " frames (" << calibration.informative
+              << " informative), rotation correlation " << calibration.rotation_correlation[0] << " as given, "
+              << calibration.rotation_correlation[1] << " conjugated, translation " << calibration.translation_correlation
+              << ", s_t " << calibration.fitted_scale << std::endl;
+    Check(differing == 0 && calibration.mode == FrameGenWorldDeltaMode::kCalibrate && !calibration.locked,
+          "world delta: calibrating changes no generated frame (" + std::to_string(differing) + " differ)");
+    Check(calibration.informative >= 4 && calibration.rotation_correlation[0] > 0.9 &&
+              calibration.rotation_correlation[1] < 0.0 && calibration.translation_correlation > 0.9 &&
+              calibration.fitted_scale > 0.8 && calibration.fitted_scale < 1.25,
+          "world delta: the fits follow the movement's model, its rotation as given");
+}
+
 // The replay's loader on a synthetic capture with motion vectors, made as
 // `profile` makes one with FG_PROFILE_MV=1 and FG_PROFILE_DUMP (on WARP, at
 // test size): each frame's vectors come back as made, with how they decode,
@@ -8700,7 +9263,15 @@ void ReplayMotionLoaderTest(Harness& harness) {
             std::filesystem::create_directories(directory, ignored);
             gpu->DumpMotion(directory, true);
             std::ofstream notes(directory + "/motion.txt");
-            for (std::size_t eye = 0; eye < 2; ++eye) notes << "view " << eye << " decode 0 1 1 1 0 0 0 0\n";
+            // The record and the one before it, and (stage 4) the
+            // application's movement with the game's poses.
+            notes << "frame " << 100 + i << "\nprevious_frame " << 99 + i << '\n';
+            for (std::size_t eye = 0; eye < 2; ++eye) {
+                notes << "view " << eye << " decode 0 1 1 1 0 0 0 0\n";
+                notes << "view " << eye << " delta 0 0.01 0 0.99995 0 0 1.8\n";
+                notes << "view " << eye << " game 0 0 0 1 " << (eye ? half_ipd : -half_ipd) << " 0 0 -1 1 1 -1\n";
+                notes << "view " << eye << " game_previous 0 0 0 1 " << (eye ? half_ipd : -half_ipd) << " 0 0.5 -1 1 1 -1\n";
+            }
             std::ofstream(directory + "/presenter.txt") << "sequence " << i << "\nratio 1.25\n";
         }
         Check(gpu->CaptureMotion(jobs, color, error), "replay loader: motion capture: " + error);
@@ -8726,8 +9297,16 @@ void ReplayMotionLoaderTest(Harness& harness) {
         Check(LoadReplayFrame((root / ("frame-" + std::to_string(k))).string(), frame) && frame.views.size() == 2,
               "replay loader: frame " + std::to_string(k) + " loads");
         Check(frame.display_ratio && *frame.display_ratio == 1.25f, "replay loader: presenter.txt's ratio");
+        Check(frame.record == static_cast<std::uint64_t>(102 + k) && frame.previous_record == static_cast<std::uint64_t>(101 + k),
+              "replay loader: motion.txt's record and the one before it");
         for (std::size_t eye = 0; eye < 2; ++eye) {
             const ReplayView& view = frame.views[eye];
+            Check(view.app_delta && view.delta_orientation == std::array<float, 4>{0.0f, 0.01f, 0.0f, 0.99995f} &&
+                      view.delta_position == std::array<float, 3>{0.0f, 0.0f, 1.8f} &&
+                      view.game.position[0] == (eye ? half_ipd : -half_ipd) && view.game_previous.position[2] == 0.5f &&
+                      view.game_previous.angle_down == -1.0f,
+                  "replay loader: frame " + std::to_string(k) + " view " + std::to_string(eye) +
+                      "'s application movement and game poses (stage 4)");
             Check(view.vectors && view.vectors->width == depth_size && view.vectors->height == depth_size &&
                       view.vectors->bytes == made[eye].bytes && view.vectors_image == static_cast<std::uint32_t>((k + 2) % 3) &&
                       !view.encoding.ext,
@@ -8747,7 +9326,8 @@ void ReplayMotionLoaderTest(Harness& harness) {
     }
     ReplayFrame frame;
     Check(LoadReplayFrame(old.string(), frame) && frame.views.size() == 2 && !frame.display_ratio &&
-              !frame.views[0].vectors && frame.views[0].engine_raw.empty(),
+              !frame.views[0].vectors && frame.views[0].engine_raw.empty() && !frame.views[0].app_delta &&
+              frame.record == 0,
           "replay loader: a capture without motion vectors loads as before");
     std::filesystem::remove_all(root, ignored);
     gpu->Reset();
