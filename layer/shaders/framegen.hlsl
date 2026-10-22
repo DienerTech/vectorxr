@@ -19,6 +19,21 @@
 // depth, generated frames are seen from where the eye will have moved to
 // (FG_PASS_SHIFT_*), which runtimes that only rotate frames never correct.
 
+// The engine motion map's passes (stage 7) are the shift passes built with
+// EngineLanding in place of Landing (FG_SHIFT_ENGINE, Direct3D 12 only): the
+// eye-shift map's and the motion map's own passes stay as they were.
+#if defined(FG_PASS_SHIFT_SPLAT_ENGINE)
+#define FG_PASS_SHIFT_SPLAT 1
+#elif defined(FG_PASS_SHIFT_RESOLVE_ENGINE)
+#define FG_PASS_SHIFT_RESOLVE 1
+#elif defined(FG_PASS_SHIFT_FILL_ENGINE)
+#define FG_PASS_SHIFT_FILL 1
+#endif
+#if (defined(FG_PASS_SHIFT_SPLAT_ENGINE) || defined(FG_PASS_SHIFT_RESOLVE_ENGINE) || \
+     defined(FG_PASS_SHIFT_FILL_ENGINE)) && !defined(__spirv__)
+#define FG_SHIFT_ENGINE 1
+#endif
+
 #ifdef __spirv__
 #define FG_BIND(slot) [[vk::binding(slot, 0)]]
 #define FG_FORMAT(format) [[vk::image_format(format)]]
@@ -89,7 +104,10 @@ cbuffer FrameGenConstantBuffer : register(b0) {
 // Engine motion vectors, stage 5. FG_PASS_FILTER: cells the game's vectors
 // moved follow their label's class (input 4: FG_PASS_ENGINE_MERGE's labels),
 // not their distance. Synthesis with the confidence view: tinted by the
-// labels (input 5).
+// labels (input 5). Stage 7, with FG_FLAG_DEPTH_SPLAT: FG_PASS_SHIFT_*_ENGINE
+// build the engine motion map (each texel moved by its cell's label:
+// EngineLanding), and synthesis reads it as the merged map (the eye's offset
+// in it too).
 #define FG_FLAG_ENGINE 8192u
 // The candidates' flags (FG_PASS_ENGINE_CONVERT; the nearest surface's in
 // bits 0-3 of its info, the farthest's in 4-7): not a vector (the capture's
@@ -99,8 +117,9 @@ cbuffer FrameGenConstantBuffer : register(b0) {
 #define FG_ENGINE_FLAG_UNMAPPED 2u
 #define FG_ENGINE_FLAG_ABSENT 4u
 #define FG_ENGINE_FLAG_NO_DEPTH 8u
-// Bit 8 of every cell's info: the other eye's verdict held its vectors back,
-// so this eye's are held back too (the eyes take them, or not, together).
+// Bit 8 of every cell's info: the frame's verdict held this eye's vectors
+// back, or the other eye's verdict held its own back, so this eye's are held
+// back too (the eyes take them, or not, together).
 #define FG_ENGINE_FLAG_HELD 256u
 // Absent: with the head's movement in the vectors, an exact zero on content
 // without depth or from this many meters (the world, the sky), where the
@@ -111,7 +130,9 @@ cbuffer FrameGenConstantBuffer : register(b0) {
 #define FG_ENGINE_ABSENT_PIXELS 0.5
 // A flow cell's label (kFrameGenEngineLabel*): bits 0-2 what moved it, 3-4
 // the class of its vector (the head's movement alone, the world's, its own),
-// 6 the frame's verdict held the vectors back, 7 the cell is textured.
+// 6 the frame's verdict held the vectors back, 7 the cell is textured; with
+// the engine motion map (stage 7), the high half the depth of the surface the
+// vector taken was chosen for (a half float; 0 for other cells).
 #define FG_ENGINE_LABEL_SOURCE 7u
 #define FG_ENGINE_LABEL_MEASURED 0u
 #define FG_ENGINE_LABEL_NEAR 1u
@@ -1332,6 +1353,24 @@ float2 SourceUv(float2 position, float fraction) {
     return uv;
 }
 
+#if !defined(__spirv__)
+// FG_FLAG_DEPTH_SPLAT: the motion map's offset at uv back to where its
+// content is in the newest frame (uv units), false where it has none. A map
+// built for another frame of the same real frame (FrameGenTuning::
+// engine_map_reuse: its time in options.w's high half; 0, this frame's own)
+// is scaled to `fraction`.
+bool MotionMapBack(float2 uv, float fraction, out float2 back) {
+    uint width, height;
+    g_motion.GetDimensions(width, height);
+    const float2 size = float2(width, height);
+    const uint packed = g_motion.Load(int3(min(int2(uv * size), int2(size) - 1), 0));
+    const uint built = g.options.w >> 16;
+    const float scale = built != 0u ? fraction / max(f16tof32(built), 1e-6) : 1.0;
+    back = scale * float2(f16tof32(packed & 0xffffu), f16tof32(packed >> 16)) / size;
+    return packed != FG_SHIFT_NONE;
+}
+#endif
+
 // One generated pixel at `fraction` (see FrameGenTuning::fractions);
 // `position` as for SourceUv.
 float4 Synthesize(float2 position, float fraction) {
@@ -1344,14 +1383,32 @@ float4 Synthesize(float2 position, float fraction) {
 
     // Content at x in the newest frame sits at x - (1 - f) * v at the
     // interpolated time, or at x + a * v when extrapolating; this pixel reads
-    // the newest frame at uv + step * v.
-    const float step = extrapolate ? -fraction : 1.0 - fraction;
+    // the newest frame at uv + step * v. Flow moves content one interval at
+    // most: past it (the engine motion map's FrameGenTuning::engine_reach)
+    // only the map's models go on.
+    const float step = extrapolate ? -min(fraction, 1.0) : 1.0 - fraction;
     float4 chosen = float4(0.0, 0.0, 0.0, 1.0);
     float chosen_error = 0.0;
     int occlusion = 0; // 1: newest frame alone, 2: previous frame alone (Occlusion)
     float2 occlusion_v = float2(0.0, 0.0);
     float occlusion_depth = 0.0;
-    if (!still) {
+    // The engine's merged map (FG_FLAG_DEPTH_SPLAT with FG_FLAG_ENGINE, stage
+    // 7): where it has an entry, the content there by its model or its flow
+    // (the motion limit applied to the flow by the map) and the eye's offset,
+    // outright; elsewhere (no depth or depth dropped, which the eye-shift map
+    // leaves too) the field at the pixel, without an eye shift.
+    bool mapped = false;
+#if !defined(__spirv__)
+    const uint merged = FG_FLAG_DEPTH_SPLAT | FG_FLAG_ENGINE | FG_FLAG_DEPTH;
+    if (!still && (g.options.y & merged) == merged) {
+        float2 back;
+        mapped = MotionMapBack(uv, fraction, back);
+        if (mapped) {
+            chosen = float4(back / step, 0.02, 1.0);
+        }
+    }
+#endif
+    if (!still && !mapped) {
         // FG_FLAG_STALE_FLOW: the field is laid out in the previous real
         // frame's view; it is read where this pixel's content was there (head
         // rotation alone: depth is not measured yet either).
@@ -1442,21 +1499,20 @@ float4 Synthesize(float2 position, float fraction) {
     // or, extrapolating, where the chosen vector carries a surface with a
     // model that the map put elsewhere (uncovered: the map holds what lies
     // behind), the map's motion is shown, matched or not. Surfaces without
-    // a model (4-30 m, sky) keep the chosen vector.
-    if (!still && (g.options.y & (FG_FLAG_DEPTH_SPLAT | FG_FLAG_DEPTH)) == (FG_FLAG_DEPTH_SPLAT | FG_FLAG_DEPTH)) {
-        uint motion_width, motion_height;
-        g_motion.GetDimensions(motion_width, motion_height);
-        const float2 motion_size = float2(motion_width, motion_height);
-        const uint packed = g_motion.Load(int3(min(int2(uv * motion_size), int2(motion_size) - 1), 0));
-        if (packed != FG_SHIFT_NONE) {
-            const float2 back = float2(f16tof32(packed & 0xffffu), f16tof32(packed >> 16)) / motion_size;
+    // a model (4-30 m, sky) keep the chosen vector. The engine's separate map
+    // (stage 7) is read so too, and past one interval (FrameGenTuning::
+    // engine_reach) its entries are shown outright, as the merged map's: only
+    // its models go on. The merged map was read above.
+    if (!still && (g.options.y & (FG_FLAG_DEPTH_SPLAT | FG_FLAG_DEPTH | FG_FLAG_ENGINE)) == (FG_FLAG_DEPTH_SPLAT | FG_FLAG_DEPTH)) {
+        float2 back;
+        if (MotionMapBack(uv, fraction, back)) {
             const float surface = OrderDepth(DepthAt(uv + back));
             const float carried_depth = DepthAt(uv + step * chosen.xy);
             const float carried = OrderDepth(carried_depth);
             const bool modelled = carried_depth > 0.0 &&
                                   (carried < FG_SPLAT_HEAD ||
                                    (carried >= FG_SPLAT_WORLD && (FG_SPLAT_SKY != 0 || carried < 0.5 * FG_FAR_DEPTH)));
-            if (surface < 0.97 * carried || (extrapolate && modelled && carried < 0.97 * surface)) {
+            if (fraction > 1.0 || surface < 0.97 * carried || (extrapolate && modelled && carried < 0.97 * surface)) {
                 chosen = float4(back / step, 0.02, 1.0);
                 chosen_error = 0.0;
                 occlusion = 0;
@@ -1466,8 +1522,10 @@ float4 Synthesize(float2 position, float fraction) {
     }
 #endif
 
+    // The motion limit guards flow, not the eye's movement: the merged map's
+    // entries hold the eye's offset, and the map limited their flow itself.
     const float shift = length(step * chosen.xy * aspect);
-    const float motion_confidence = saturate((limit - shift) / (0.25 * limit));
+    const float motion_confidence = mapped ? 1.0 : saturate((limit - shift) / (0.25 * limit));
     const float cost_confidence = saturate(1.0 - max(chosen.z - 0.02, 0.0) * g.tuning.z);
     const float agreement = saturate(1.0 - max(chosen_error - 0.03, 0.0) * g.tuning.w);
     // Uncertain motion shrinks toward a still image instead of blending two
@@ -1535,7 +1593,7 @@ float4 Synthesize(float2 position, float fraction) {
         const float trust = confidence * photometric_confidence;
         result.rgb = lerp(result.rgb, float3(1.0, 0.1, 0.05), 0.75 * (1.0 - trust));
 #if !defined(__spirv__)
-        if ((g.options.y & FG_FLAG_ENGINE) != 0u) {
+        if ((g.options.y & (FG_FLAG_ENGINE | FG_FLAG_DEPTH_SPLAT)) == FG_FLAG_ENGINE) {
             // What moved the content's flow cell: the game's vectors green
             // (the nearest surface's) or cyan (the farthest's), searched or no
             // motion blue, vectors cleared yellow, depth disproved magenta; the
@@ -2803,10 +2861,26 @@ FG_BIND(6) SamplerState g_linear : register(s0);
 bool MotionMap() {
     return (g.options.y & FG_FLAG_DEPTH_SPLAT) != 0u;
 }
+
+#if defined(FG_SHIFT_ENGINE)
+// Stage 7: the engine motion map (FG_PASS_SHIFT_*_ENGINE); options.x: input 3
+// holds the real frame's world motion, the map is merged (the eye's offset in
+// rot*.w, as the eye-shift map's, added to each texel's motion).
+#define FG_ENGINE_MAP_WORLD 1u
+#define FG_ENGINE_MAP_MERGED 2u
+#endif
 #endif
 
 #if defined(FG_PASS_SHIFT_SPLAT) || defined(FG_PASS_SHIFT_RESOLVE)
 FG_BIND(0) Texture2D<float4> g_depth : register(t0);
+#if defined(FG_SHIFT_ENGINE)
+// The engine motion map's: the real frame's world motion (FG_PASS_WORLD_SOLVE's
+// or FG_PASS_WORLD_SET's texels: 0 the rotation w and 1 when valid, 1 the
+// translation t, 2 y 1 where it is the application's own movement), with
+// FG_ENGINE_MAP_WORLD; its flow cells' labels (FG_PASS_ENGINE_MERGE).
+Texture2D<float4> g_engine_world : register(t3);
+Texture2D<uint> g_engine_labels : register(t4);
+#endif
 
 // The motion map's world motion at uv: the filtered flow of the cells
 // around whose content is world too (bilinear among those), so the
@@ -2834,6 +2908,160 @@ float2 WorldMotion(float2 uv, bool sky) {
     return weight > 0.0 ? sum / weight
                         : g_motion_flow.Load(int3(clamp(int2(uv * cells), int2(0, 0), int2(cells) - 1), 0)).xy;
 }
+
+#if defined(FG_SHIFT_ENGINE)
+// A texel takes its flow cell's label where it lies on the surface the label
+// was chosen for: its depth within this (natural log of the ratio) of the
+// depth FG_PASS_ENGINE_MERGE kept in the label's high half. The cells along
+// a canopy frame's edge hold the hangar or the sky behind it too.
+#define FG_ENGINE_MAP_SURFACE 0.3
+
+// The class of a flow cell's vector where the game's vectors moved it (its
+// label's: FG_ENGINE_CLASS_*), else 0.
+uint EngineClass(uint label) {
+    const uint source = label & FG_ENGINE_LABEL_SOURCE;
+    return (label & FG_ENGINE_LABEL_INVALID) == 0u && (source == FG_ENGINE_LABEL_NEAR || source == FG_ENGINE_LABEL_FAR)
+               ? (label >> 3) & 3u
+               : 0u;
+}
+
+// The filtered flow at uv of the cells around that move as the texel's
+// content does (bilinear among those), so the cells beside it do not slow it:
+// those whose label is of class `kind`, or with none (0) those whose content
+// lies at `depth` (at their centre, within FG_ENGINE_MAP_SURFACE), so a
+// surface's edge moves with the surface, not with what stands in front of
+// it. The nearest cell's where none is (as WorldMotion).
+float2 EngineMotion(float2 uv, uint kind, float depth) {
+    uint width, height;
+    g_motion_flow.GetDimensions(width, height);
+    const float2 cells = float2(width, height);
+    const float2 position = uv * cells - 0.5;
+    const int2 base = int2(floor(position));
+    const float2 f = position - float2(base);
+    float2 sum = float2(0.0, 0.0);
+    float weight = 0.0;
+    [unroll]
+    for (int i = 0; i < 4; ++i) {
+        const int2 cell = clamp(base + int2(i & 1, i >> 1), int2(0, 0), int2(cells) - 1);
+        const float w = ((i & 1) != 0 ? f.x : 1.0 - f.x) * ((i >> 1) != 0 ? f.y : 1.0 - f.y);
+        bool alike;
+        if (kind != 0u) {
+            alike = EngineClass(g_engine_labels.Load(int3(cell, 0))) == kind;
+        } else {
+            const float at = DepthNearest(g_depth, (float2(cell) + 0.5) / cells);
+            alike = at > 0.0 && abs(log(at / depth)) <= FG_ENGINE_MAP_SURFACE;
+        }
+        if (alike) {
+            sum += w * g_motion_flow.Load(int3(cell, 0)).xy;
+            weight += w;
+        }
+    }
+    return weight > 0.0 ? sum / weight
+                        : g_motion_flow.Load(int3(clamp(int2(uv * cells), int2(0, 0), int2(cells) - 1), 0)).xy;
+}
+
+// The engine motion map's Landing (stage 7): each texel moved by its flow
+// cell's label (the cell it lies in) where it lies on the surface the label
+// was chosen for (FG_ENGINE_MAP_SURFACE), else by its distance:
+//   the sky turns with the world's rotation where that is the application's
+//     own movement (texel 2 y 1), else by the sky's flow around, as the motion
+//     map moves it;
+//   nearer than FG_SPLAT_HEAD content stays (the head's), but where its cell
+//     moves on its own (a lever: the flow of the cells of its class around);
+//   the head's stays nearer than FG_SPLAT_WORLD; the world's moves by the
+//     world's motion (input 3) at its own depth, P' = P + a (w x P + t) with a
+//     = -tuning.y, exactly in perspective (by the flow of the world's cells
+//     around without one); their own by the flow of the cells of their class;
+//   the rest as the motion map moves it: from FG_SPLAT_WORLD by the world's
+//     flow; nearer, without a model, it claims its own texel (separate: the
+//     eye-shift map and synthesis's own vector move it), or merged moves by
+//     the flow of the cells around on its surface, as synthesis would.
+// Past one interval (FrameGenTuning::engine_reach: a above 1) the models go
+// that far, the flow one interval at most. Merged (FG_ENGINE_MAP_MERGED),
+// flow is limited as synthesis limits a vector (the motion limit in tuning.z;
+// synthesis takes the merged map's entries as they are), and the eye's offset
+// is added to content with depth but the sky, as the eye-shift map's Landing
+// adds it. Depth dropped (negative) or missing stays, as far.
+bool EngineLanding(uint2 id, out float2 landing, out uint key) {
+    const float2 size = float2(g.size.xy);
+    const float2 uv = (float2(id) + 0.5) / size;
+    const float depth = g_depth.Load(int3(id, 0)).r;
+    landing = uv * size;
+    key = 0u;
+    bool inside = false;
+    const bool sky = FG_SPLAT_SKY != 0 && depth >= 0.5 * FG_FAR_DEPTH;
+    if (depth > 0.0 && (depth < 0.5 * FG_FAR_DEPTH || sky)) {
+        uint width, height;
+        g_engine_labels.GetDimensions(width, height);
+        const uint label = g_engine_labels.Load(int3(min(int2(uv * float2(width, height)), int2(width, height) - 1), 0));
+        const float surface = f16tof32(label >> 16);
+        const uint kind = surface > 0.0 && abs(log(depth / surface)) <= FG_ENGINE_MAP_SURFACE ? EngineClass(label) : 0u;
+        const bool merged = (g.options.x & FG_ENGINE_MAP_MERGED) != 0u;
+        const float a = -g.tuning.y;
+        const float bounded = min(a, 1.0);
+        const bool world = (g.options.x & FG_ENGINE_MAP_WORLD) != 0u && g_engine_world.Load(int3(0, 0, 0)).w > 0.0;
+        const float3 w = g_engine_world.Load(int3(0, 0, 0)).xyz;
+        const float2 fov_left_up = g.fov_current.xz;
+        const float2 fov_span = g.fov_current.yw - g.fov_current.xz;
+        const float3 direction = float3(fov_left_up + uv * fov_span, -1.0);
+        // The content at the frame's time over its depth (a point at depth z
+        // along direction d is d * z; projection ignores the scale), or where
+        // flow moves it in uv.
+        float3 moved = direction;
+        float2 flow = float2(0.0, 0.0);
+        bool model = false;
+        bool none = false;
+        if (sky) {
+            model = world && g_engine_world.Load(int3(2, 0, 0)).y == 1.0;
+            if (model) {
+                moved = direction + a * cross(w, direction);
+            } else {
+                flow = bounded * WorldMotion(uv, true);
+            }
+        } else if (depth < FG_SPLAT_HEAD) {
+            model = kind != FG_ENGINE_CLASS_OWN;
+            if (!model) {
+                flow = bounded * EngineMotion(uv, kind, depth);
+            }
+        } else if (kind == FG_ENGINE_CLASS_HEAD && depth < FG_SPLAT_WORLD) {
+            model = true;
+        } else if (kind == FG_ENGINE_CLASS_WORLD && world) {
+            model = true;
+            moved = direction + a * (cross(w, direction) + g_engine_world.Load(int3(1, 0, 0)).xyz / depth);
+        } else if (kind == FG_ENGINE_CLASS_WORLD || kind == FG_ENGINE_CLASS_OWN) {
+            flow = bounded * EngineMotion(uv, kind, depth);
+        } else if (depth >= FG_SPLAT_WORLD) {
+            flow = bounded * WorldMotion(uv, false);
+        } else if (merged) {
+            flow = bounded * EngineMotion(uv, 0u, depth);
+        } else {
+            none = true;
+        }
+        if (none) {
+            key = (asuint(1.0 / depth) + 64u) & ~63u;
+        } else {
+            if (!model) {
+                if (merged) {
+                    const float limit = max(g.tuning.z, 1e-4);
+                    const float shift = length(flow * float2(1.0, size.y / size.x));
+                    flow *= saturate((limit - shift) / (0.25 * limit));
+                }
+                moved = float3(fov_left_up + (uv + flow) * fov_span, -1.0);
+            }
+            if (merged && !sky) {
+                moved += float3(g.rot0.w, g.rot1.w, g.rot2.w) / depth;
+            }
+            key = ((asuint(1.0 / depth) + 64u) & ~63u) | 32u;
+            if (moved.z <= -1e-4) {
+                const float2 shifted = (moved.xy / -moved.z - fov_left_up) / fov_span;
+                landing = shifted * size;
+                inside = all(shifted >= 0.0) && all(shifted <= 1.0);
+            }
+        }
+    }
+    return inside;
+}
+#endif
 
 // The eye-shift map: where each texel of the newest frame lands when seen
 // from the eye's position at a generated frame's time (head movement the
@@ -2897,6 +3125,16 @@ uint Key(uint key, float2 landing, int2 texel) {
     const float2 offset = float2(texel) + 0.5 - landing;
     return key | (31u - min(31u, uint(dot(offset, offset) * 15.5 + 0.5)));
 }
+
+// A texel's landing in the map being built: the engine motion map's
+// (EngineLanding, FG_PASS_SHIFT_*_ENGINE), else Landing's.
+bool MapLanding(uint2 id, out float2 landing, out uint key) {
+#if defined(FG_SHIFT_ENGINE)
+    return EngineLanding(id, landing, key);
+#else
+    return Landing(id, landing, key);
+#endif
+}
 #endif
 
 #if defined(FG_PASS_SHIFT_SPLAT)
@@ -2909,7 +3147,7 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     }
     float2 landing;
     uint key;
-    if (Landing(id.xy, landing, key)) {
+    if (MapLanding(id.xy, landing, key)) {
         const int2 first = int2(floor(landing - 0.5));
         [unroll]
         for (int i = 0; i < 4; ++i) {
@@ -2954,7 +3192,7 @@ bool InFront(float a, float b) {
 void CSMain(uint3 id : SV_DispatchThreadID) {
     float2 landing;
     uint key;
-    if (all(id.xy < g.size.xy) && Landing(id.xy, landing, key)) {
+    if (all(id.xy < g.size.xy) && MapLanding(id.xy, landing, key)) {
         const float2 back = float2(id.xy) + 0.5 - landing;
         const float own = g_depth.Load(int3(id.xy, 0)).r;
         const int2 first = int2(floor(landing - 0.5));
@@ -3045,8 +3283,17 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     float2 direction = (t.xy + tangent * t.z) /
                        float2(g.fov_current.y - g.fov_current.x, g.fov_current.w - g.fov_current.z) * size;
     if (MotionMap()) {
+#if defined(FG_SHIFT_ENGINE)
+        // The engine motion map (stage 7): content moved along its flow; the
+        // merged map moves it with the eye too, so the gap opens along the
+        // flow's motion against the eye's parallax (above, as for content a
+        // metre off).
+        const float2 motion = g_motion_flow.SampleLevel(g_linear, uv, 0.0).xy * size;
+        direction = (g.options.x & FG_ENGINE_MAP_MERGED) != 0u ? min(-g.tuning.y, 1.0) * motion - direction : motion;
+#else
         // The motion map: content moved along its flow.
         direction = g_motion_flow.SampleLevel(g_linear, uv, 0.0).xy * size;
+#endif
     }
     direction = dot(direction, direction) > 1e-12 ? normalize(direction) : float2(1.0, 0.0);
     uint ahead_key, behind_key;
@@ -4075,8 +4322,9 @@ FG_BIND(5) FG_FORMAT("rgba16f") RWTexture2D<float4> g_info : register(u1);
 // it (2, 3), as it is. A cell without depth takes its centre texel's.
 // u0: the two vectors (xy the nearest's, zw the farthest's). u1: the spread
 // of the nearest surface's vectors about its own (full-resolution pixels),
-// the flags (FG_ENGINE_FLAG_HELD in every cell where the other eye's verdict,
-// t5's texel 0 z, held its vectors back), the tile's trust in the vectors
+// the flags (FG_ENGINE_FLAG_HELD in every cell where the frame's verdict, t2's
+// texel 0 z, or the other eye's, t5's, held the vectors back), the tile's
+// trust in the vectors
 // (t3, the frame before's tiles with FG_ENGINE_CONVERT_TILES; half without),
 // and the classes (the nearest's plus 4 times the farthest's): the head's
 // movement alone (within FG_ENGINE_CLASS_TEXELS half-resolution texels or
@@ -4200,7 +4448,8 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     const float trust = (g.options.x & FG_ENGINE_CONVERT_TILES) != 0u
                             ? g_tiles_before.Load(int3(id.xy / FG_ENGINE_TILE, 0)).x
                             : 0.5;
-    const uint held = g_params_other.Load(int3(0, 0, 0)).z != 0.0 ? FG_ENGINE_FLAG_HELD : 0u;
+    const uint held =
+        g_params.Load(int3(0, 0, 0)).z != 0.0 || g_params_other.Load(int3(0, 0, 0)).z != 0.0 ? FG_ENGINE_FLAG_HELD : 0u;
     g_candidate[id.xy] = float4(nearest.v, farthest.v);
     g_info[id.xy] = float4(spread, float(nearest.flags | (farthest.flags << 4) | held), trust,
                            float(nearest.kind + 4u * farthest.kind));
@@ -4218,13 +4467,13 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
 FG_BIND(2) Texture2D<float4> g_candidate : register(t2);
 FG_BIND(3) Texture2D<float4> g_info : register(t3);
 Texture2D<float4> g_measured : register(t4);
-Texture2D<float4> g_params : register(t5);
+Texture2D<float4> g_depth : register(t5);
 FG_BIND(5) FG_FORMAT("r32ui") RWTexture2D<uint> g_labels : register(u1);
 
 // Each flow cell of the final level (size.xy; options.z its level): the flow
 // the filters read (u0, kFlow's contract) and the cell's label (u1). Where the
-// frame's verdict (t5's texel 0 z, or the other eye's: FG_ENGINE_FLAG_HELD in
-// t3) holds the vectors back, the measured flow (t4) as it is. Elsewhere the
+// frame's verdict or the other eye's (FG_ENGINE_FLAG_HELD in t3) holds the
+// vectors back, the measured flow (t4) as it is. Elsewhere the
 // candidates (t2, FG_PASS_ENGINE_CONVERT's; t3 what it found of them) cost
 // what FG_PASS_REFINE's would: its block at its match level (t0, t1;
 // options.w the block's scale), the vector rounded to the match texels. A
@@ -4249,9 +4498,14 @@ FG_BIND(5) FG_FORMAT("r32ui") RWTexture2D<uint> g_labels : register(u1);
 // (content coming into view or out from behind an edge matches better
 // shifted toward what was seen): else its own vector, unrounded. w: the
 // block's cost of no motion, -1 where the previous frame did not see it, as
-// FG_PASS_REFINE's.
+// FG_PASS_REFINE's. With FG_ENGINE_MERGE_DEPTHS (the engine motion map, stage
+// 7; t5 the resolved depth at half resolution), the label of a candidate
+// taken keeps the depth of the surface it was chosen for (its cell's nearest
+// or farthest, as FG_PASS_ENGINE_CONVERT found them) in its high half, so the
+// map moves only that surface's texels by it.
 #define FG_ENGINE_MERGE_LEAD 2u
 #define FG_ENGINE_MERGE_UNMEASURED 4u
+#define FG_ENGINE_MERGE_DEPTHS 8u
 #define FG_ENGINE_SPREAD_PIXELS 2.0
 #define FG_ENGINE_SPREAD_SHARE 0.3
 #define FG_ENGINE_SPREAD_COST 0.02
@@ -4278,8 +4532,7 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         return;
     }
     const float4 measured = g_measured.Load(int3(id.xy, 0));
-    const bool held =
-        g_params.Load(int3(0, 0, 0)).z != 0.0 || (uint(g_info.Load(int3(id.xy, 0)).y) & FG_ENGINE_FLAG_HELD) != 0u;
+    const bool held = (uint(g_info.Load(int3(id.xy, 0)).y) & FG_ENGINE_FLAG_HELD) != 0u;
     if (held && (g.options.x & FG_ENGINE_MERGE_UNMEASURED) == 0u) {
         g_flow[id.xy] = measured;
         g_labels[id.xy] = FG_ENGINE_LABEL_MEASURED | FG_ENGINE_LABEL_INVALID;
@@ -4385,8 +4638,32 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         }
         result = float4(v, chosen, ZeroCost(block));
     }
+    // The surface the candidate taken was chosen for: its cell's nearest or
+    // farthest depth, as FG_PASS_ENGINE_CONVERT found them.
+    float surface = 0.0;
+    if (taken && (g.options.x & FG_ENGINE_MERGE_DEPTHS) != 0u) {
+        uint width, height;
+        g_depth.GetDimensions(width, height);
+        const int side = int(1u << (g.options.z - 1u));
+        const int2 limit = int2(width, height) - 1;
+        float near_z = 2.0 * FG_FAR_DEPTH;
+        float far_z = 0.0;
+        [loop]
+        for (int y = 0; y < side; ++y) {
+            [loop]
+            for (int x = 0; x < side; ++x) {
+                const float z = g_depth.Load(int3(min(cell * side + int2(x, y), limit), 0)).r;
+                if (z > 0.0) {
+                    near_z = min(near_z, z);
+                    far_z = max(far_z, z);
+                }
+            }
+        }
+        surface = min(source == FG_ENGINE_LABEL_NEAR ? near_z : far_z, 0.5 * FG_FAR_DEPTH);
+    }
     g_flow[id.xy] = result;
-    g_labels[id.xy] = source | (kind << 3) | (textured ? FG_ENGINE_LABEL_TEXTURED : 0u) | (held ? FG_ENGINE_LABEL_INVALID : 0u);
+    g_labels[id.xy] = source | (kind << 3) | (textured ? FG_ENGINE_LABEL_TEXTURED : 0u) | (held ? FG_ENGINE_LABEL_INVALID : 0u) |
+                      (f32tof16(surface) << 16);
 }
 #endif
 #endif

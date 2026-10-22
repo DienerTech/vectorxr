@@ -611,6 +611,10 @@ class FrameGenPresenter {
         std::vector<FrameGenOutputKind> kinds;       // per view
         std::vector<std::array<float, 3>> velocity; // per view (Analysis::velocity)
         bool depth{false};                          // Analysis::depth
+        // How many of its intervals it may be moved past itself: the engine
+        // motion map's reach where its analysis merged the game's vectors into
+        // every view (stage 7, FrameGenTuning::engine_reach), else one.
+        float reach{1.0f};
         // Its lead sample (UpdateLeadLocked), taken when a refresh first
         // chooses it: on time only if its game frame had reached the GPU.
         std::uint32_t lead{0};
@@ -834,6 +838,10 @@ class FrameGenPresenter {
         // depth is used (generated frames are seen from where it will be).
         std::vector<std::array<float, 3>> velocity;
         bool depth{false}; // depth was used for a view
+        // The game's vectors were merged into every view, each with its depth
+        // (FrameGenExecuteResult::merged and depth): every view's cells are
+        // labelled, and the engine motion map takes every view.
+        bool merged{false};
     };
 
     // Generates one frame per fraction into the output swapchain sets from
@@ -1621,6 +1629,11 @@ class FrameGenPresenter {
     std::uint8_t held_ring_{0};
     std::uint64_t held_slot_bytes_{0};
     std::uint8_t CanvasRingLocked();
+    // Stage 7: whether the views' ring slots hold the engine motion map's
+    // labels and world motion (counted per slot): the map on, the vectors
+    // merged in (from Assist) on a backend that reads them, in a session
+    // whose frames came with vectors the layer reads (not bridged).
+    bool EngineMapRingLocked() const;
     // The real frames the backend keeps for a frame of this path.
     std::uint8_t JitRingLocked(bool quad) const {
         return quad ? FrameGenHistoryRing(true) : jit_canvas_ring_;
@@ -1896,6 +1909,12 @@ class FrameGenPresenter {
     // frame they lead is logged once. A config reload into Lead starts it over.
     bool engine_predicate_{true};
     bool engine_interpolate_{false};
+    // Stage 7 (FrameGenTuning::engine_map, engine_map_reuse, engine_reach),
+    // read at Start: VECTORXR_FRAMEGEN_ENGINE_MAP=separate|merged, _MAP_REUSE=1
+    // and _REACH (1 to 2).
+    FrameGenEngineMap engine_map_{FrameGenEngineMap::kOff};
+    bool engine_map_reuse_{false};
+    float engine_reach_{1.0f};
     FrameGenEngineLeadControl engine_lead_;
     bool logged_engine_lead_{false};
     FrameGenEngineMode engine_started_{FrameGenEngineMode::kOff};
@@ -1915,7 +1934,8 @@ class FrameGenPresenter {
     // every view (stage 2: captured); frames of a session in Lead on the
     // engine path, those the vectors led, those held at Assist, those led
     // with the optical flow hardware chosen (idle), and the times the
-    // vectors were held at Assist (stage 6).
+    // vectors were held at Assist (stage 6); frames written past one interval
+    // of their real frame (stage 7, FrameGenTuning::engine_reach).
     struct EngineWindow {
         std::uint64_t frames{0};
         std::uint64_t structs{0};
@@ -1931,6 +1951,7 @@ class FrameGenPresenter {
         std::uint64_t held_at_assist{0};
         std::uint64_t hardware_idle{0};
         std::uint64_t demotions{0};
+        std::uint64_t reached{0};
     };
     EngineWindow engine_window_;
     // Timed: teardown never waits on them for long (LockForTeardown).

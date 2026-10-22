@@ -252,12 +252,16 @@ FrameGenExtent Extent(const XrCompositionLayerProjectionView& view) {
 
 // One history slot of these views, estimated: each view's image, and
 // depth, trust and flow at half resolution or less (about one and a half
-// images' worth).
-std::uint64_t HistorySlotBytes(const XrCompositionLayerProjectionView* views, std::size_t count) {
+// images' worth); with the engine motion map (`map`, stage 7:
+// FrameGenPresenter::EngineMapRingLocked) the cells' labels too, 4 bytes per
+// flow cell at level 2 at most, and the world's motion kept beside them (a
+// committed texture of its own: 64 KiB).
+std::uint64_t HistorySlotBytes(const XrCompositionLayerProjectionView* views, std::size_t count, bool map) {
     std::uint64_t bytes = 0;
     for (std::size_t i = 0; views && i < count; ++i) {
         const FrameGenExtent extent = Extent(views[i]);
         bytes += std::uint64_t{extent.width} * extent.height * 6;
+        bytes += map ? std::uint64_t{extent.width} * extent.height / 4 + 64 * 1024 : 0;
     }
     return bytes;
 }
@@ -537,6 +541,20 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
     // for the session; the vectors lead once their verdicts let them.
     engine_predicate_ = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_PREDICATE") != "0";
     engine_interpolate_ = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_INTERPOLATE") == "lead";
+    // Stage 7, for the session: frames extrapolated from real frames whose
+    // cells the vectors labelled move their content by each cell's label with
+    // a depth test (VECTORXR_FRAMEGEN_ENGINE_MAP=separate|merged), just in
+    // time reading a map built for another frame of the same real frame again
+    // (VECTORXR_FRAMEGEN_ENGINE_MAP_REUSE=1), and go past one interval with
+    // the head's and the world's motion (VECTORXR_FRAMEGEN_ENGINE_REACH, 1 to
+    // 2 intervals).
+    engine_map_ = ParseFrameGenEngineMap(ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_MAP").value_or(""));
+    engine_map_reuse_ = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_MAP_REUSE") == "1";
+    engine_reach_ = 1.0f;
+    if (const std::optional<std::string> reach = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_REACH")) {
+        const float value = static_cast<float>(std::atof(reach->c_str()));
+        engine_reach_ = value > 1.0f ? std::min(value, kFrameGenEngineReachMost) : 1.0f;
+    }
     engine_lead_ = {};
     logged_engine_lead_ = false;
     engine_cut_window_.Reset();
@@ -653,6 +671,19 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
                                       ", NVIDIA's optical flow hardware idle on those frames" +
                                       (engine_interpolate_ ? ", interpolating too (VECTORXR_FRAMEGEN_ENGINE_INTERPOLATE=lead)"
                                                            : ", extrapolating only")
+                                : std::string()) +
+                           (engine_map_ != FrameGenEngineMap::kOff
+                                ? std::string("; extrapolated frames move each texel by its cell's label with a depth test "
+                                              "(VECTORXR_FRAMEGEN_ENGINE_MAP=") +
+                                      ToString(engine_map_) +
+                                      (engine_map_ == FrameGenEngineMap::kMerged ? ": one map with the eye's offset" : "") +
+                                      (engine_map_reuse_ ? ", read again within " + Number(kFrameGenEngineMapReuse, 2) +
+                                                               " of an interval (_MAP_REUSE=1)"
+                                                         : std::string()) +
+                                      (engine_reach_ > 1.0f ? ", the head's and the world's motion up to " +
+                                                                  Number(engine_reach_, 2) + " intervals on (_REACH)"
+                                                            : std::string()) +
+                                      ")"
                                 : std::string())
                      : std::string(", generated frames are made as without them")) +
                 (csv.empty() ? std::string(".") : ", rows in " + csv + ".");
@@ -734,6 +765,9 @@ void FrameGenPresenter::Stop() {
     engine_filter_ = engine_cockpit_ = engine_tint_ = false;
     engine_predicate_ = true;
     engine_interpolate_ = false;
+    engine_map_ = FrameGenEngineMap::kOff;
+    engine_map_reuse_ = false;
+    engine_reach_ = 1.0f;
     ForgetEngineFramesLocked();
     if (abandoned_) {
         // The thread left behind may still use the backend, the output
@@ -2240,13 +2274,18 @@ void FrameGenPresenter::LogDepthDescriptionLocked(const XrCompositionLayerProjec
     depth_description_logged_at_ = now;
 }
 
+bool FrameGenPresenter::EngineMapRingLocked() const {
+    return engine_map_ != FrameGenEngineMap::kOff && engine_requested_ >= FrameGenEngineMode::kAssist &&
+           engine_capturable_ && gpu_ && gpu_->SupportsEngineMotion();
+}
+
 std::uint8_t FrameGenPresenter::CanvasRingLocked() {
     // Each further slot keeps a real frame per view (HistorySlotBytes).
     const FrameCopy& copy = newest_copy_.valid ? newest_copy_ : passthrough_copy_;
     const std::uint64_t slot_bytes =
         copy.valid && copy.has_projection && copy.projection_index < copy.layers.size()
             ? HistorySlotBytes(copy.layers[copy.projection_index].views.data(),
-                               copy.layers[copy.projection_index].views.size())
+                               copy.layers[copy.projection_index].views.size(), EngineMapRingLocked())
             : 0;
     const std::uint8_t roomy = kFrameGenCanvasRingRoomy;
     const std::uint8_t lean = FrameGenHistoryRing(false);
@@ -3493,6 +3532,14 @@ void FrameGenPresenter::LogEngineSummaryLocked(double seconds) {
                    " frames, held at assist " + percent(window.held_at_assist, window.lead_frames) +
                    "%, hardwareIdle=" + std::to_string(window.hardware_idle) +
                    ", demotions=" + std::to_string(window.demotions)
+             : std::string()) +
+        // Stage 7: views' frames written with the engine motion map (those
+        // that read one built for another frame of the same real frame again),
+        // and frames moved past one interval of their real frame.
+        (engine_map_ != FrameGenEngineMap::kOff
+             ? "; map (" + std::string(ToString(engine_map_)) + "): " + std::to_string(now.maps - last.maps) +
+                   " view frames, read again " + std::to_string(now.maps_reused - last.maps_reused) +
+                   ", past one interval " + std::to_string(window.reached)
              : std::string()) +
         ".");
     engine_validation_logged_ = now;
@@ -4968,6 +5015,10 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
                                                                    : engine_requested_;
         tuning.engine_predicate = engine_predicate_;
         tuning.engine_interpolate = engine_interpolate_;
+        // Stage 7: the engine motion map (research).
+        tuning.engine_map = engine_map_;
+        tuning.engine_map_reuse = engine_map_reuse_;
+        tuning.engine_reach = engine_reach_;
         // The frame's engine motion record and the frame before's, as the
         // frame gates read them: taken before a pause forgets them (just in
         // time, AnalyzeJit's pause check came first: such a frame counts as
@@ -5220,7 +5271,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         // frame's Execute sets them up too): CanvasRingLocked counts them as
         // in use.
         held_ring_ = FrameGenHistoryRing(tuning);
-        held_slot_bytes_ = HistorySlotBytes(projection.views, projection.viewCount);
+        held_slot_bytes_ = HistorySlotBytes(projection.views, projection.viewCount, EngineMapRingLocked());
     } else if (!ok) {
         // A failed recording may have freed the views' history (Direct3D 12
         // rebuilds them): none counts as held, so the next run's ring is
@@ -5407,6 +5458,12 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
             if (executed.depth[i]) analyze->velocity[i] = shifts[i];
         }
         analyze->depth = std::any_of(executed.depth.begin(), executed.depth.end(), [](bool value) { return value; });
+        // Every view with its depth (the engine motion map needs it): one eye
+        // moved past one interval and the other not is no pair.
+        analyze->merged = executed.merged.size() == projection.viewCount && executed.depth.size() == projection.viewCount;
+        for (std::size_t i = 0; analyze->merged && i < executed.merged.size(); ++i) {
+            analyze->merged = executed.merged[i] && executed.depth[i];
+        }
         sets.clear();
         exact.clear();
         return executed.frame != 0;
@@ -7679,6 +7736,9 @@ bool FrameGenPresenter::AnalyzeJit(const XrCompositionLayerProjection& projectio
     jit.kinds = std::move(analysis.kinds);
     jit.velocity = std::move(analysis.velocity);
     jit.depth = analysis.depth;
+    // Stage 7: its cells labelled, the engine motion map moves the head's and
+    // the world's content past one interval of it.
+    jit.reach = analysis.merged && engine_map_ != FrameGenEngineMap::kOff ? engine_reach_ : 1.0f;
     jit.quad = std::move(quad);
     if (trace_.Enabled()) {
         trace_.Record("keep", jit.id, jit.time, jit.previous_time, static_cast<std::int64_t>(jit.analyzed),
@@ -8005,13 +8065,15 @@ FrameGenPresenter::JitChoice FrameGenPresenter::ChooseJitLocked(XrTime time, XrD
     // Past it, moved on by its motion: extrapolating, until the next real
     // frame's refresh; interpolating, the next real frame is late (a cover
     // frame). For at most a few intervals, and never past a pause: a game
-    // that stopped sending frames shows its last one.
+    // that stopped sending frames shows its last one. Content moves one
+    // interval at most, or with the engine motion map its reach (stage 7).
     choice.index = index;
     choice.mode = FrameGenSynthesisMode::kExtrapolate;
     choice.fraction = 0.0f;
     if (frame.previous_time && time > frame.time &&
         time - frame.time <= std::min<XrDuration>(4 * (frame.time - frame.previous_time), PauseLimitLocked())) {
-        choice.fraction = FrameGenFraction(FrameGenSynthesisMode::kExtrapolate, frame.previous_time, frame.time, time);
+        choice.fraction =
+            FrameGenFraction(FrameGenSynthesisMode::kExtrapolate, frame.previous_time, frame.time, time, frame.reach);
     }
     if (newest) {
         due = needed_in_flight;
@@ -8129,6 +8191,11 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
         write.unmeasured = unmeasured;
         write.stale = stale_source;
         write.motion_late = motion_late;
+        // Moved by the previous real frame's motion, a frame has no engine
+        // motion map of its own: one interval at most (stage 7).
+        if (write.stale) {
+            choice.fraction = std::min(choice.fraction, 1.0f);
+        }
     }
     const JitFrame& frame = *source;
     write.exact = JitCopyOnly(frame, choice);
@@ -8346,6 +8413,8 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
     }
     totals_.unmeasured += unmeasured ? 1 : 0;
     totals_.stale_motion += write.stale || write.motion_late ? 1 : 0;
+    // Stage 7: frames the engine motion map moved past one interval.
+    engine_window_.reached += extrapolate && !write.exact && choice.fraction > 1.0f ? 1 : 0;
     if (logger_ && !logged_jit_ && !write.exact) {
         logged_jit_ = true;
         logger_->Info("Frame Generation writes each generated frame right before its refresh (" +

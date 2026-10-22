@@ -2779,7 +2779,7 @@ void TestFrameGenEngineAssistPlan() {
                merge.inputs[2].kind == FrameGenTextureKind::kEngineCandidate &&
                merge.inputs[3].kind == FrameGenTextureKind::kEngineInfo &&
                merge.inputs[4].kind == FrameGenTextureKind::kFlow && merge.inputs[4].level == level &&
-               merge.inputs[5].kind == FrameGenTextureKind::kEngineParams &&
+               merge.inputs[5].kind == FrameGenTextureKind::kNone &&
                merge.outputs[0].kind == FrameGenTextureKind::kEngineFlow &&
                merge.outputs[1].kind == FrameGenTextureKind::kEngineLabels &&
                merge.constants.options[0] == depthxr::kFrameGenEngineMergeAssist && merge.constants.options[2] == level &&
@@ -4145,6 +4145,262 @@ void TestFrameGenWorldDeltaCalibration() {
     Expect(held && reset && !calibration.Locked() && !dropped.fixed && dropped.drops == 1 && dropped.decisions == 2 &&
                dropped.failed == 19 && std::abs(dropped.last_error - 0.4) < 0.05 && dropped.frames == 0,
            "World delta calibration: 10 checks in a row 25% off drop it back to the fit (" + dropped.reason + ")");
+}
+
+// Stage 7's plans: frames extrapolated from a real frame whose cells were
+// labelled (its analysis merged the vectors in) build the engine motion map
+// (the shift passes into kMotionMap with the labels and the world's motion),
+// merged in place of the eye-shift map: one map per generated frame, four
+// dispatches, and no eye-shift map; separate beside it. Read again for a
+// later frame of the same real frame (no map built, its time in options.w's
+// high half), and past one interval with engine_reach. Without labels, the
+// switch off, interpolating or moved by an older frame's motion, the plans as
+// before.
+void TestFrameGenEngineMapPlan() {
+    using depthxr::FrameGenEngineMap;
+    using depthxr::FrameGenPass;
+    using depthxr::FrameGenTextureKind;
+    Expect(depthxr::ParseFrameGenEngineMap("merged") == FrameGenEngineMap::kMerged &&
+               depthxr::ParseFrameGenEngineMap("Separate") == FrameGenEngineMap::kSeparate &&
+               depthxr::ParseFrameGenEngineMap("1") == FrameGenEngineMap::kOff &&
+               depthxr::ParseFrameGenEngineMap("") == FrameGenEngineMap::kOff &&
+               std::string(depthxr::ToString(FrameGenEngineMap::kMerged)) == "merged",
+           "Engine map plan: VECTORXR_FRAMEGEN_ENGINE_MAP parses separate and merged, anything else off");
+    depthxr::FrameGenViewRequest request;
+    request.extent = {1024, 1024};
+    request.synthesize = request.temporal = request.depth = true;
+    for (auto* geometry : {&request.newest, &request.previous}) {
+        geometry->angle_left = geometry->angle_down = -0.9f;
+        geometry->angle_right = geometry->angle_up = 0.9f;
+    }
+    request.previous.orientation = {0.0f, 0.01f, 0.0f, 0.99995f};
+    request.shift = {0.02f, 0.0f, 0.004f};
+    request.engine_motion = true;
+    depthxr::FrameGenTuning tuning;
+    tuning.mode = depthxr::FrameGenSynthesisMode::kExtrapolate;
+    tuning.analyze_only = true;
+    tuning.engine_mode = depthxr::FrameGenEngineMode::kAssist;
+    auto synthesis = [&](const depthxr::FrameGenTuning& with, float fraction, float map_time = 0.0f, bool stale = false,
+                         depthxr::FrameGenSynthesisMode mode = depthxr::FrameGenSynthesisMode::kExtrapolate) {
+        return depthxr::BuildFrameGenSynthesisPlan(request, with, mode, fraction, false, stale, map_time);
+    };
+    auto order = [](const depthxr::FrameGenViewPlan& plan) {
+        std::string text;
+        for (const auto& dispatch : plan.dispatches) {
+            switch (dispatch.pass) {
+            case FrameGenPass::kShiftClear: text += dispatch.outputs[1].kind == FrameGenTextureKind::kShiftMap ? "C " : "c "; break;
+            case FrameGenPass::kShiftSplat: text += "s "; break;
+            case FrameGenPass::kShiftResolve: text += "r "; break;
+            case FrameGenPass::kShiftFill: text += "f "; break;
+            case FrameGenPass::kShiftSplatEngine: text += "es "; break;
+            case FrameGenPass::kShiftResolveEngine: text += "er "; break;
+            case FrameGenPass::kShiftFillEngine: text += "ef "; break;
+            case FrameGenPass::kSynthesizeUnorm8: text += "synth "; break;
+            default: text += "? "; break;
+            }
+        }
+        return text;
+    };
+    auto same = [](const depthxr::FrameGenViewPlan& a, const depthxr::FrameGenViewPlan& b) {
+        bool equal = a.dispatches.size() == b.dispatches.size();
+        for (std::size_t i = 0; equal && i < a.dispatches.size(); ++i) {
+            equal = a.dispatches[i].pass == b.dispatches[i].pass &&
+                    std::memcmp(a.dispatches[i].inputs.data(), b.dispatches[i].inputs.data(), sizeof(a.dispatches[i].inputs)) == 0 &&
+                    std::memcmp(a.dispatches[i].outputs.data(), b.dispatches[i].outputs.data(), sizeof(a.dispatches[i].outputs)) == 0 &&
+                    std::memcmp(&a.dispatches[i].constants, &b.dispatches[i].constants, sizeof(depthxr::FrameGenConstants)) == 0;
+        }
+        return equal;
+    };
+    const depthxr::FrameGenViewPlan mk1 = synthesis(tuning, 0.5f);
+    tuning.depth_splat = true;
+    const depthxr::FrameGenViewPlan m3 = synthesis(tuning, 0.5f);
+    tuning.depth_splat = false;
+    Expect(order(mk1) == "C s r f synth " && order(m3) == "C s r f c s r f synth " &&
+               !depthxr::FrameGenEngineMapTime(mk1) && !depthxr::FrameGenEngineMapTime(m3),
+           "Engine map plan: without the switch the eye-shift map (and with the depth splat the motion map), as before (" +
+               order(m3) + ")");
+
+    // Merged: one map, the eye's offset in it, no eye-shift map.
+    tuning.engine_map = FrameGenEngineMap::kMerged;
+    const depthxr::FrameGenViewPlan merged = synthesis(tuning, 0.5f);
+    bool shift_map = false;
+    for (const auto& dispatch : merged.dispatches) {
+        for (const auto& texture : dispatch.inputs) shift_map = shift_map || texture.kind == FrameGenTextureKind::kShiftMap;
+        for (const auto& texture : dispatch.outputs) shift_map = shift_map || texture.kind == FrameGenTextureKind::kShiftMap;
+    }
+    const depthxr::FrameGenDispatch& splat = merged.dispatches[1];
+    const depthxr::FrameGenDispatch& resolve = merged.dispatches[2];
+    const depthxr::FrameGenDispatch& fill = merged.dispatches[3];
+    const depthxr::FrameGenDispatch& output = merged.dispatches.back();
+    const std::uint32_t map_flags = depthxr::kFrameGenFlagDepth | depthxr::kFrameGenFlagDepthSplat | depthxr::kFrameGenFlagEngine;
+    Expect(order(merged) == "c es er ef synth " && !shift_map && merged.dispatches.size() == 5 &&
+               merged.dispatches[0].outputs[0].kind == FrameGenTextureKind::kShiftKeys &&
+               merged.dispatches[0].outputs[1].kind == FrameGenTextureKind::kMotionMap,
+           "Engine map plan: merged, one map per generated frame (4 dispatches) and no eye-shift map (" + order(merged) + ")");
+    Expect(splat.constants.rot0 == std::array<float, 4>{1.0f, 0.0f, 0.0f, -0.01f} &&
+               splat.constants.rot1 == std::array<float, 4>{0.0f, 1.0f, 0.0f, 0.0f} &&
+               splat.constants.rot2 == std::array<float, 4>{0.0f, 0.0f, 1.0f, -0.002f} &&
+               splat.constants.fov_previous == splat.constants.fov_current &&
+               splat.constants.options[0] == depthxr::kFrameGenEngineMapMerged && splat.constants.options[1] == map_flags &&
+               splat.constants.tuning[1] == -0.5f && splat.constants.tuning[2] == 0.1f && splat.width == 512 &&
+               splat.height == 512,
+           "Engine map plan: merged, the eye-shift map's mapping (the eye's offset at the frame's time), the step, the "
+           "motion limit and the engine flags");
+    Expect(splat.inputs[0].kind == FrameGenTextureKind::kDepth &&
+               splat.inputs[1].kind == FrameGenTextureKind::kFilteredNewest && splat.inputs[1].level == merged.final_flow_level &&
+               splat.inputs[3].kind == FrameGenTextureKind::kNone && splat.inputs[4].kind == FrameGenTextureKind::kEngineLabels &&
+               resolve.inputs[2].kind == FrameGenTextureKind::kShiftKeys &&
+               resolve.inputs[4].kind == FrameGenTextureKind::kEngineLabels &&
+               fill.inputs[0].kind == FrameGenTextureKind::kShiftKeys &&
+               fill.inputs[1].kind == FrameGenTextureKind::kFilteredNewest,
+           "Engine map plan: the labels at input 4, the filtered flow at 1, no world motion without the real frame's");
+    Expect(output.inputs[4].kind == FrameGenTextureKind::kNone && output.inputs[5].kind == FrameGenTextureKind::kMotionMap &&
+               (output.constants.options[1] & (depthxr::kFrameGenFlagDepthSplat | depthxr::kFrameGenFlagEngine)) ==
+                   (depthxr::kFrameGenFlagDepthSplat | depthxr::kFrameGenFlagEngine) &&
+               (output.constants.options[1] & depthxr::kFrameGenFlagShift) == 0 && output.constants.options[3] == 0u &&
+               depthxr::FrameGenEngineMapTime(merged) == 0.5f,
+           "Engine map plan: merged, synthesis reads the map at input 5, no eye shift of its own");
+    request.engine_world = true;
+    const depthxr::FrameGenViewPlan worlded = synthesis(tuning, 0.5f);
+    request.engine_world = false;
+    Expect(worlded.dispatches[1].inputs[3].kind == FrameGenTextureKind::kWorldParamsNewest &&
+               worlded.dispatches[2].inputs[3].kind == FrameGenTextureKind::kWorldParamsNewest &&
+               worlded.dispatches[1].constants.options[0] ==
+                   (depthxr::kFrameGenEngineMapWorld | depthxr::kFrameGenEngineMapMerged),
+           "Engine map plan: the real frame's world motion kept (kWorldParamsNewest) at input 3");
+
+    // Separate: the eye-shift map, then the engine motion map from the
+    // plan's own constants.
+    tuning.engine_map = FrameGenEngineMap::kSeparate;
+    const depthxr::FrameGenViewPlan separate = synthesis(tuning, 0.5f);
+    const depthxr::FrameGenDispatch& separate_splat = separate.dispatches[5];
+    const depthxr::FrameGenDispatch& separate_output = separate.dispatches.back();
+    Expect(order(separate) == "C s r f c es er ef synth " && separate_splat.constants.options[0] == 0u &&
+               separate_splat.constants.options[1] == map_flags && separate_splat.constants.tuning[1] == -0.5f &&
+               separate_splat.constants.rot0 == m3.dispatches[5].constants.rot0 &&
+               separate_splat.inputs[4].kind == FrameGenTextureKind::kEngineLabels &&
+               separate_output.inputs[4].kind == FrameGenTextureKind::kShiftMap &&
+               separate_output.inputs[5].kind == FrameGenTextureKind::kMotionMap &&
+               (separate_output.constants.options[1] & depthxr::kFrameGenFlagEngine) == 0 &&
+               (separate_output.constants.options[1] & depthxr::kFrameGenFlagShift) != 0,
+           "Engine map plan: separate, the eye-shift map and the engine motion map (" + order(separate) + ")");
+
+    // Read again: no map built, the time it was built for in options.w's high
+    // half (separate: the eye-shift map's own time in the low half).
+    tuning.engine_map = FrameGenEngineMap::kMerged;
+    const depthxr::FrameGenViewPlan reused = synthesis(tuning, 0.5f, 0.25f);
+    tuning.engine_map = FrameGenEngineMap::kSeparate;
+    const depthxr::FrameGenViewPlan reused_separate = synthesis(tuning, 0.5f, 0.25f);
+    Expect(order(reused) == "synth " && reused.dispatches.back().inputs[5].kind == FrameGenTextureKind::kMotionMap &&
+               reused.dispatches.back().constants.options[3] == 0x3400u << 16 && !depthxr::FrameGenEngineMapTime(reused) &&
+               order(reused_separate) == "C s r f synth " &&
+               reused_separate.dispatches.back().constants.options[3] == ((0x3400u << 16) | 0x3800u),
+           "Engine map plan: a map read again is not built; its time in options.w's high half (" + order(reused) + ")");
+
+    // Past one interval with the reach: the frame's fraction (the eye's
+    // offset and the map's step with it) up to engine_reach.
+    tuning.engine_map = FrameGenEngineMap::kMerged;
+    tuning.engine_reach = 1.5f;
+    const depthxr::FrameGenViewPlan reached = synthesis(tuning, 1.4f);
+    const depthxr::FrameGenViewPlan capped = synthesis(tuning, 2.5f);
+    Expect(reached.dispatches.back().constants.tuning[0] == 1.4f && reached.dispatches[1].constants.tuning[1] == -1.4f &&
+               std::abs(reached.dispatches[1].constants.rot0[3] + 0.028f) < 1e-6f &&
+               capped.dispatches.back().constants.tuning[0] == 1.5f,
+           "Engine map plan: past one interval up to the reach");
+    request.engine_motion = false;
+    const depthxr::FrameGenViewPlan unlabelled = synthesis(tuning, 1.4f);
+    request.engine_motion = true;
+    const depthxr::FrameGenViewPlan stale = synthesis(tuning, 1.4f, 0.0f, true);
+    Expect(unlabelled.dispatches.back().constants.tuning[0] == 1.0f && order(unlabelled) == "C s r f synth " &&
+               stale.dispatches.back().constants.tuning[0] == 1.0f && !depthxr::FrameGenEngineMapTime(stale),
+           "Engine map plan: one interval at most without labels, or moved by an older frame's motion");
+    tuning.engine_reach = 1.0f;
+
+    // Without labels (Observe), interpolating, or the switch off: as before.
+    tuning.engine_mode = depthxr::FrameGenEngineMode::kObserve;
+    const depthxr::FrameGenViewPlan observed = synthesis(tuning, 0.5f);
+    tuning.engine_mode = depthxr::FrameGenEngineMode::kAssist;
+    request.engine_motion = false;
+    const depthxr::FrameGenViewPlan without = synthesis(tuning, 0.5f);
+    request.engine_motion = true;
+    tuning.mode = depthxr::FrameGenSynthesisMode::kInterpolate;
+    tuning.cover = true;
+    tuning.engine_map = FrameGenEngineMap::kOff;
+    const depthxr::FrameGenViewPlan interpolated_mk1 =
+        synthesis(tuning, 0.5f, 0.0f, false, depthxr::FrameGenSynthesisMode::kInterpolate);
+    tuning.engine_map = FrameGenEngineMap::kMerged;
+    const depthxr::FrameGenViewPlan interpolated =
+        synthesis(tuning, 0.5f, 0.0f, false, depthxr::FrameGenSynthesisMode::kInterpolate);
+    // A cover frame (extrapolated from an interpolating analysis) takes it.
+    const depthxr::FrameGenViewPlan cover = synthesis(tuning, 0.5f);
+    tuning.mode = depthxr::FrameGenSynthesisMode::kExtrapolate;
+    tuning.cover = false;
+    Expect(same(observed, mk1) && same(without, mk1) && same(interpolated, interpolated_mk1) &&
+               order(cover) == "c es er ef synth ",
+           "Engine map plan: Observe, a frame without labels and interpolated frames as without the switch; cover frames "
+           "take the map");
+
+    // Written together (not just in time): a merged map per generated frame,
+    // with the world motion the analysis set or fitted itself.
+    tuning.analyze_only = false;
+    tuning.generated = 2;
+    tuning.fractions = {0.5f, 1.0f, 0.5f, 0.5f};
+    request.world_motion = true;
+    const depthxr::FrameGenViewPlan together = depthxr::BuildFrameGenViewPlan(request, tuning);
+    std::size_t maps = 0, outputs = 0;
+    bool shift_together = false, world_together = true;
+    for (const auto& dispatch : together.dispatches) {
+        if (dispatch.pass == FrameGenPass::kShiftClear) {
+            maps += dispatch.outputs[1].kind == FrameGenTextureKind::kMotionMap ? 1 : 0;
+            shift_together = shift_together || dispatch.outputs[1].kind == FrameGenTextureKind::kShiftMap;
+        }
+        if (dispatch.pass == FrameGenPass::kShiftSplatEngine) {
+            world_together = world_together && dispatch.inputs[3].kind == FrameGenTextureKind::kWorldParams &&
+                             (dispatch.constants.options[0] & depthxr::kFrameGenEngineMapWorld) != 0;
+        }
+        outputs += dispatch.pass == FrameGenPass::kSynthesizeUnorm8 ? 1 : 0;
+    }
+    Expect(maps == 2 && outputs == 2 && !shift_together && world_together && together.frames_in_order,
+           "Engine map plan: written together, a merged map per generated frame with kWorldParams");
+    // The merge keeps the depth of each label's surface for the map (the
+    // resolved depth at input 5); without the map it reads none, as before.
+    tuning.engine_map = FrameGenEngineMap::kOff;
+    const depthxr::FrameGenViewPlan unmapped = depthxr::BuildFrameGenViewPlan(request, tuning);
+    tuning.engine_map = FrameGenEngineMap::kMerged;
+    auto merge_of = [](const depthxr::FrameGenViewPlan& plan) {
+        const auto found = std::find_if(plan.dispatches.begin(), plan.dispatches.end(),
+                                        [](const depthxr::FrameGenDispatch& dispatch) { return dispatch.pass == FrameGenPass::kEngineMerge; });
+        return found != plan.dispatches.end() ? *found : depthxr::FrameGenDispatch{};
+    };
+    const depthxr::FrameGenDispatch mapped_merge = merge_of(together);
+    const depthxr::FrameGenDispatch plain_merge = merge_of(unmapped);
+    Expect(mapped_merge.pass == FrameGenPass::kEngineMerge && mapped_merge.inputs[5].kind == FrameGenTextureKind::kDepth &&
+               (mapped_merge.constants.options[0] & depthxr::kFrameGenEngineMergeDepths) != 0 &&
+               plain_merge.pass == FrameGenPass::kEngineMerge && plain_merge.inputs[5].kind == FrameGenTextureKind::kNone &&
+               (plain_merge.constants.options[0] & depthxr::kFrameGenEngineMergeDepths) == 0,
+           "Engine map plan: the merge keeps the labels' surface depths for the map, none without it");
+    request.world_motion = false;
+    tuning.analyze_only = true;
+    tuning.generated = 1;
+
+    // Read again only near the time it was built for, both within one
+    // interval: past it the map's flow stopped at one interval while its
+    // models went on, which no one scale keeps.
+    using depthxr::FrameGenEngineMapReusable;
+    Expect(FrameGenEngineMapReusable(0.5f, 0.25f) && FrameGenEngineMapReusable(0.75f, 1.0f) &&
+               !FrameGenEngineMapReusable(0.75f, 0.25f) && !FrameGenEngineMapReusable(1.5f, 1.25f) &&
+               !FrameGenEngineMapReusable(1.2f, 0.9f) && !FrameGenEngineMapReusable(0.5f, 0.0f),
+           "Engine map plan: a map read again within 0.35 of its time, both within one interval");
+
+    // The fraction up to the reach, extrapolating only.
+    using depthxr::FrameGenFraction;
+    using depthxr::FrameGenSynthesisMode;
+    Expect(FrameGenFraction(FrameGenSynthesisMode::kExtrapolate, 0, 100, 250) == 1.0f &&
+               FrameGenFraction(FrameGenSynthesisMode::kExtrapolate, 0, 100, 250, 1.5f) == 1.5f &&
+               FrameGenFraction(FrameGenSynthesisMode::kExtrapolate, 0, 100, 220, 1.5f) == 1.2f &&
+               FrameGenFraction(FrameGenSynthesisMode::kExtrapolate, 0, 100, 400, 3.0f) == 2.0f &&
+               FrameGenFraction(FrameGenSynthesisMode::kInterpolate, 0, 100, 250, 1.5f) == 1.0f,
+           "Engine map plan: FrameGenFraction past one interval up to the reach (2 at most), extrapolating only");
 }
 
 // Research switches: the environment first, then framegen-research.txt for
@@ -6766,6 +7022,7 @@ int main() {
     TestFrameGenEngineWorldParams();
     TestFrameGenWorldDeltaPlan();
     TestFrameGenWorldDeltaCalibration();
+    TestFrameGenEngineMapPlan();
     TestResearchSwitches();
     TestTurboMetricsSettingsParsing();
     TestTurboMetricsSessionRoundTrip();

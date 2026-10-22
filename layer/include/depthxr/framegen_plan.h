@@ -111,8 +111,15 @@ enum class FrameGenPass : std::uint8_t {
     kEngineConvert,
     kEngineMerge,
     kEngineTiles,
+    // Engine motion vectors, stage 7 (FrameGenTuning::engine_map): the
+    // engine motion map, built as kShiftSplat, kShiftResolve and kShiftFill
+    // build the motion map, each texel moved by its flow cell's label (passes
+    // of their own: the eye-shift map's stay as they were).
+    kShiftSplatEngine,
+    kShiftResolveEngine,
+    kShiftFillEngine,
 };
-inline constexpr std::size_t kFrameGenPassCount = 36;
+inline constexpr std::size_t kFrameGenPassCount = 39;
 
 // Logical textures owned per view. History and filtered flow are ping-pong
 // pairs: "newest" is written this submission, "previous" is last
@@ -212,6 +219,12 @@ enum class FrameGenTextureKind : std::uint8_t {
     // kEngineSolve's stage 2), whose first 8 bytes are zero exactly when
     // both eyes' vectors may be used: copied into the view's predicate.
     kEngineVerdict,
+    // Stage 7 (FrameGenTuning::engine_map): the world's motion a real
+    // frame's filters read (kWorldParams' first four texels), copied at the
+    // end of its Execute into the ring like the labels, for the engine
+    // motion map of the frames written from it later
+    // (FrameGenViewRequest::engine_world).
+    kWorldParamsNewest,
 };
 
 // The flow level the optical flow hardware fills: a 4x4 grid on the
@@ -271,8 +284,24 @@ inline constexpr std::uint32_t kFrameGenFlagDepthSplat = 4096u;
 // content of its own motion keeps it when it matches clearly,
 // FrameGenTuning::engine_cockpit), not their distance (FrameGenTuning::
 // engine_filter). Synthesis with the confidence view: tinted by the labels
-// (input 5; FrameGenTuning::engine_tint).
+// (input 5; FrameGenTuning::engine_tint). Stage 7, with
+// kFrameGenFlagDepthSplat: kShiftClear and the kShift*Engine passes build
+// the engine motion map (FrameGenTuning::engine_map: each texel moved by its
+// cell's label, input 4, and the world's motion, input 3), and synthesis
+// reads the merged one (FrameGenEngineMap::kMerged: the eye's offset in it,
+// no eye-shift map).
 inline constexpr std::uint32_t kFrameGenFlagEngine = 8192u;
+// The engine motion map's options.x (stage 7): input 3 holds the frame's
+// world motion; the map is merged (the eye's offset, rot*.w as the eye-shift
+// map's, added to each texel's motion).
+inline constexpr std::uint32_t kFrameGenEngineMapWorld = 1u;
+inline constexpr std::uint32_t kFrameGenEngineMapMerged = 2u;
+// A generated frame within this time (in real frame intervals) of the one
+// its real frame's engine motion map was built for reads that map again,
+// scaled to its own time (FrameGenTuning::engine_map_reuse).
+inline constexpr float kFrameGenEngineMapReuse = 0.35f;
+// FrameGenTuning::engine_reach at most.
+inline constexpr float kFrameGenEngineReachMost = 2.0f;
 // kFilter: the sky (FG_WORLD_SKY and beyond) turns with the world's rotation
 // where the world's motion is the application's own (kWorldSet: input 3's
 // texel 2 y is 1), never with a fitted one (FrameGenTuning::world_sky).
@@ -506,6 +535,11 @@ struct FrameGenViewRequest {
     // the vectors from the frame before is in kEngineTilesPrevious (none
     // after a discontinuity: each tile starts at half).
     bool engine_tiles{false};
+    // Set by backends after the analysis (stage 7, FrameGenTuning::
+    // engine_map): the frame's world motion was kept beside its labels
+    // (kWorldParamsNewest), for the engine motion map of the frames written
+    // from it.
+    bool engine_world{false};
 };
 
 // How far Frame Generation goes with a game's motion vectors
@@ -562,6 +596,22 @@ struct FrameGenEngineConvention {
 };
 // The same gains (to a thousandth) and camera; the jitter and offset aside.
 bool SameFrameGenEngineConvention(const FrameGenEngineConvention& a, const FrameGenEngineConvention& b);
+// Stage 7 (VECTORXR_FRAMEGEN_ENGINE_MAP): extrapolated frames of a real
+// frame whose flow cells the game's vectors labelled move its content with
+// a depth test by each texel's label (the head's movement holds it, the
+// world's moves it by the world's motion at its own depth, its own by its
+// flow; the distance's rules elsewhere), in a motion map of their own beside
+// the eye-shift map (separate), or in one map with the eye's offset added
+// in place of both (merged).
+enum class FrameGenEngineMap : std::uint8_t {
+    kOff,
+    kSeparate,
+    kMerged,
+};
+const char* ToString(FrameGenEngineMap map); // "off", "separate", "merged"
+// "separate" or "merged" (any case); anything else is off.
+FrameGenEngineMap ParseFrameGenEngineMap(const std::string& value);
+
 // "gx,gy,camera[,jitter]" (camera: included, rotation, excluded or objects),
 // as VECTORXR_FRAMEGEN_ENGINE_MV_CONVENTION fixes one; none when it is not.
 std::optional<FrameGenEngineConvention> ParseFrameGenEngineConvention(const std::string& text);
@@ -672,6 +722,18 @@ struct FrameGenTuning {
     // engine_interpolate (VECTORXR_FRAMEGEN_ENGINE_INTERPOLATE=lead).
     bool engine_predicate{true};
     bool engine_interpolate{false};
+    // Stage 7, extrapolated frames of real frames whose cells were labelled
+    // (research, the presenter's switches): the engine motion map
+    // (VECTORXR_FRAMEGEN_ENGINE_MAP); just in time, a frame within
+    // kFrameGenEngineMapReuse of the time the real frame's map was last built
+    // for reads it again, scaled (VECTORXR_FRAMEGEN_ENGINE_MAP_REUSE=1); and
+    // how far past the newest frame such frames may go, in real frame
+    // intervals (VECTORXR_FRAMEGEN_ENGINE_REACH, 1 to kFrameGenEngineReachMost):
+    // the head's and the world's motion go that far, the measured flow and
+    // content's own motion one interval at most.
+    FrameGenEngineMap engine_map{FrameGenEngineMap::kOff};
+    bool engine_map_reuse{false};
+    float engine_reach{1.0f};
 };
 
 struct FrameGenViewPlan {
@@ -1006,15 +1068,30 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
 // (kFilteredPrevious, read where the content was in that frame); nothing
 // of its own analysis is read (no depth, so no eye shift: one refresh's head
 // movement is a fraction of a millimetre).
+// Stage 7: extrapolating a real frame whose cells were labelled, with
+// FrameGenTuning::engine_map, the engine motion map is built for the frame
+// (merged: in place of the eye-shift map), and `fraction` may go up to
+// FrameGenTuning::engine_reach; with `map_time` (FrameGenTuning::
+// engine_map_reuse), the map built for this real frame at that time is read
+// again, scaled to this frame's, and none is built.
 FrameGenViewPlan BuildFrameGenSynthesisPlan(const FrameGenViewRequest& request, const FrameGenTuning& tuning,
                                             FrameGenSynthesisMode mode, float fraction, bool cover_flow,
-                                            bool stale_flow = false);
+                                            bool stale_flow = false, float map_time = 0.0f);
+// The time (FrameGenTuning::fractions' units) of the engine motion map a
+// synthesis plan builds (stage 7); none when it builds none.
+std::optional<float> FrameGenEngineMapTime(const FrameGenViewPlan& plan);
+// Whether a frame at `time` may read the engine motion map built for its real
+// frame at `map_time` again, scaled (FrameGenTuning::engine_map_reuse): within
+// kFrameGenEngineMapReuse of it, both within one interval. Past it a map's
+// flow stops at one interval while its models go on, which no one scale keeps.
+bool FrameGenEngineMapReusable(float time, float map_time);
 
 // Interpolation fraction or extrapolation distance for a generated frame
 // displayed at target_time, given the two real frames' display times. Clamped
-// so a hitch never pushes content past the real frames' motion.
+// so a hitch never pushes content past the real frames' motion: one interval,
+// or extrapolating `reach` of them (stage 7, FrameGenTuning::engine_reach).
 float FrameGenFraction(FrameGenSynthesisMode mode, std::int64_t previous_time, std::int64_t newest_time,
-                       std::int64_t target_time);
+                       std::int64_t target_time, float reach = 1.0f);
 
 // Row-major rotation taking newest-view directions into previous-view space.
 std::array<std::array<float, 3>, 3> FrameGenRelativeRotation(const std::array<float, 4>& newest,
@@ -1379,7 +1456,9 @@ const char* FrameGenEngineVerdictName(std::size_t index); // "unlocked", "stale"
 // the class of its vector (the engine's candidates': the head's movement, the
 // world's, their own), bit 6 the frame's verdict held the vectors back, bit 7
 // the cell is textured (its block's luma varies: the tiles' share counts
-// those).
+// those); with the engine motion map (stage 7, kFrameGenEngineMergeDepths),
+// bits 16-31 the depth of the surface the vector taken was chosen for (a half
+// float; 0 elsewhere).
 inline constexpr std::uint32_t kFrameGenEngineLabelSource = 7u;      // mask
 inline constexpr std::uint32_t kFrameGenEngineLabelMeasured = 0u;    // the measured flow
 inline constexpr std::uint32_t kFrameGenEngineLabelNear = 1u;        // the vectors: the nearest surface's
@@ -1397,10 +1476,13 @@ inline constexpr std::uint32_t kFrameGenEngineLabelTextured = 128u;
 // The tiles' side in final-level cells.
 inline constexpr std::uint32_t kFrameGenEngineTile = 8u;
 // kEngineMerge's options.x: Assist's rule, or Lead's (stage 6), with no
-// measured flow at all (FrameGenTuning::engine_predicate false).
+// measured flow at all (FrameGenTuning::engine_predicate false); the labels
+// keep their surface's depth (stage 7, FrameGenTuning::engine_map: input 5
+// the resolved depth).
 inline constexpr std::uint32_t kFrameGenEngineMergeAssist = 1u;
 inline constexpr std::uint32_t kFrameGenEngineMergeLead = 2u;
 inline constexpr std::uint32_t kFrameGenEngineMergeUnmeasured = 4u;
+inline constexpr std::uint32_t kFrameGenEngineMergeDepths = 8u;
 // kEngineConvert's options.x: the camera from bit 4 (as kEngineReduce's),
 // the frame before's tiles bound (input 3), the world's motion bound (input
 // 4: the classes' world).
@@ -1601,6 +1683,11 @@ struct FrameGenEngineValidation {
     std::uint64_t merged{0};
     double textured_cells{0.0};
     double moved_cells{0.0};
+    // Stage 7, the backend's: views' frames written with the engine motion
+    // map, and those of them that read the map built for an earlier frame
+    // again (FrameGenTuning::engine_map_reuse).
+    std::uint64_t maps{0};
+    std::uint64_t maps_reused{0};
 };
 const char* ToString(FrameGenEngineValidation::State state); // "probing", "calibrating", ...
 

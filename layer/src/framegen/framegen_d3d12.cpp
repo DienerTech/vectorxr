@@ -109,6 +109,12 @@ std::string Failure(const char* operation, HRESULT hr) {
     return std::string(operation) + " failed: hr=" + std::to_string(static_cast<long>(hr));
 }
 
+// The engine motion map's own passes (stage 7, FrameGenTuning::engine_map).
+bool EngineMapPass(FrameGenPass pass) {
+    return pass == FrameGenPass::kShiftSplatEngine || pass == FrameGenPass::kShiftResolveEngine ||
+           pass == FrameGenPass::kShiftFillEngine;
+}
+
 DXGI_FORMAT ViewFormat(DXGI_FORMAT native, std::int64_t requested) {
     switch (native) {
     case DXGI_FORMAT_R8G8B8A8_TYPELESS:
@@ -257,6 +263,17 @@ struct ViewResources {
     std::array<Texture, 2> engine_tiles;
     std::uint8_t engine_tiles_next{0};
     bool engine_tiles_valid{false};
+    // Stage 7 (FrameGenTuning::engine_map), made with the labels while the map
+    // is on (read at the session's start): per ring slot the world's motion
+    // its real frame's filters read (kWorldParams' first four texels, copied
+    // at the end of its Execute), for the engine motion map of the frames
+    // written from it; and the real frame (0: none) and time the engine motion
+    // map in motion_map was last built for, from its cover flow or not, which
+    // a later frame of it may read again (FrameGenTuning::engine_map_reuse).
+    std::array<Texture, kFrameGenHistoryRingMax> engine_world;
+    std::uint64_t engine_map_frame{0};
+    float engine_map_time{0.0f};
+    bool engine_map_cover{false};
     // Stage 6 (made by Execute for the first frame the vectors lead, before
     // any view of it is planned: EnsureEngineLead): the frame's verdict for
     // both eyes (kEngineVerdict), and the predicate of the measured passes
@@ -507,6 +524,11 @@ class D3D12FrameGen final : public FrameGenGpu {
             return false;
         }
         for (std::size_t pass = 0; pass < kFrameGenPassCount; ++pass) {
+            // The engine motion map's passes (stage 7, research) are made at
+            // their first use (EnsureEngineMapPasses), not for every session.
+            if (EngineMapPass(static_cast<FrameGenPass>(pass))) {
+                continue;
+            }
             D3D12_COMPUTE_PIPELINE_STATE_DESC desc{};
             desc.pRootSignature = root_signature_.Get();
             desc.CS = {framegen_shaders::kDxbc[pass].data, framegen_shaders::kDxbc[pass].size};
@@ -1702,6 +1724,8 @@ class D3D12FrameGen final : public FrameGenGpu {
         status.validation.merged = engine_merged_frames_;
         status.validation.textured_cells = engine_textured_cells_;
         status.validation.moved_cells = engine_moved_cells_;
+        status.validation.maps = engine_maps_;
+        status.validation.maps_reused = engine_maps_reused_;
         status.stopped = motion_stopped_;
         status.notes = motion_notes_;
         for (const FrameGenEngineCensus& census : motion_census_) {
@@ -2467,6 +2491,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         case FrameGenTextureKind::kDepth: kind.kind = FrameGenTextureKind::kDepthPrevious; break;
         case FrameGenTextureKind::kFilteredCover: view.bound_newest = view.history_state.Previous(); break;
         case FrameGenTextureKind::kEngineLabels: view.bound_newest = view.history_state.Previous(); break;
+        case FrameGenTextureKind::kWorldParamsNewest: view.bound_newest = view.history_state.Previous(); break;
         case FrameGenTextureKind::kEngineTiles: kind.kind = FrameGenTextureKind::kEngineTilesPrevious; break;
         default: break;
         }
@@ -2573,9 +2598,10 @@ class D3D12FrameGen final : public FrameGenGpu {
                         out[x * 2] = value;
                         out[x * 2 + 1] = static_cast<float>(packed & 63u);
                     } else if (kind.kind == FrameGenTextureKind::kEngineLabels) {
-                        // Engine labels: the label as it is (bits 0-7).
-                        out[x * 2] = static_cast<float>(packed);
-                        out[x * 2 + 1] = 0.0f;
+                        // Engine labels: the label as it is (bits 0-7), then
+                        // the depth of its surface (the high half, stage 7).
+                        out[x * 2] = static_cast<float>(packed & 0xffffu);
+                        out[x * 2 + 1] = half(static_cast<std::uint16_t>(packed >> 16));
                     } else {
                         out[x * 2] = half(static_cast<std::uint16_t>(packed & 0xffffu));
                         out[x * 2 + 1] = half(static_cast<std::uint16_t>(packed >> 16));
@@ -3036,6 +3062,33 @@ class D3D12FrameGen final : public FrameGenGpu {
         if (ok && effective_tuning.analyze_only && effective_tuning.composition && flow_merge_pipeline_) {
             ok = RecordFlowMerge(*effective_tuning.composition, recordings, error);
         }
+        // Stage 7: each view's world motion kept beside its labels, in the
+        // ring, for the engine motion map of the frames written from it just
+        // in time (written together, they read kWorldParams itself).
+        if (ok && effective_tuning.analyze_only && effective_tuning.engine_map != FrameGenEngineMap::kOff) {
+            std::vector<D3D12_RESOURCE_BARRIER> barriers;
+            for (std::size_t i = 0; i < views.size(); ++i) {
+                ViewResources& view = views_[i];
+                Texture& kept = view.engine_world[view.history_state.Newest()];
+                const auto& dispatches = recordings[i].plan.dispatches;
+                const bool world = std::any_of(dispatches.begin(), dispatches.end(), [](const FrameGenDispatch& dispatch) {
+                    return dispatch.outputs[0].kind == FrameGenTextureKind::kWorldParams;
+                });
+                if (!recordings[i].assist || !world || !kept.resource || !view.world_params.resource) {
+                    continue;
+                }
+                Require(barriers, view.world_params, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                Require(barriers, kept, D3D12_RESOURCE_STATE_COPY_DEST);
+                Flush(barriers);
+                D3D12_TEXTURE_COPY_LOCATION destination{kept.resource.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+                destination.SubresourceIndex = 0;
+                D3D12_TEXTURE_COPY_LOCATION source{view.world_params.resource.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+                source.SubresourceIndex = 0;
+                const D3D12_BOX texels{0, 0, 0, 4, 1, 1};
+                commands_->CopyTextureRegion(&destination, 0, 0, 0, &source, &texels);
+                recordings[i].request.engine_world = true;
+            }
+        }
         // The engine evidence back to the CPU, for the validator.
         const bool evidence_recorded =
             ok && !recordings.empty() &&
@@ -3079,9 +3132,14 @@ class D3D12FrameGen final : public FrameGenGpu {
                                          &view.depth[newest], &view.history[view.history_state.Previous()]}) {
                     if (texture->resource) Require(barriers, *texture, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
                 }
-                // The labels the confidence view's tint reads (stage 5).
-                if (effective_tuning.engine_tint && recordings[i].assist) {
+                // The labels the confidence view's tint reads (stage 5), and
+                // the engine motion map with the world's motion kept (stage 7).
+                if ((effective_tuning.engine_tint || effective_tuning.engine_map != FrameGenEngineMap::kOff) &&
+                    recordings[i].assist) {
                     Require(barriers, view.engine_labels[newest], D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+                }
+                if (recordings[i].request.engine_world) {
+                    Require(barriers, view.engine_world[newest], D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
                 }
             }
             Flush(barriers);
@@ -3185,6 +3243,7 @@ class D3D12FrameGen final : public FrameGenGpu {
             }
             view.engine_tiles_valid = recordings[i].assist;
             result.merged[i] = recordings[i].assist;
+            NoteMotionMap(view, recordings[i].plan, 0, false);
         }
         result.lead = lead && std::all_of(recordings.begin(), recordings.end(),
                                            [](const ViewRecording& recording) { return recording.lead; });
@@ -3268,6 +3327,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         // their analyzed frames as they are.
         std::vector<FrameGenViewSubmission> submissions(frame.views.size());
         std::vector<ViewRecording> recordings(frame.views.size());
+        std::vector<bool> reused(frame.views.size(), false);
         for (std::size_t i = 0; i < frame.views.size(); ++i) {
             const AnalyzedView& analyzed = frame.views[i];
             const auto output_it = images_.find(outputs[i].swapchain);
@@ -3284,11 +3344,23 @@ class D3D12FrameGen final : public FrameGenGpu {
             recording.request = analyzed.request;
             recording.outputs = {output_it->second[outputs[i].image_index]};
             recording.plan = BuildFrameGenSynthesisPlan(analyzed.request, frame.tuning, mode, fraction, analyzed.cover);
+            // Stage 7 (FrameGenTuning::engine_map_reuse): the engine motion
+            // map the view's map texture still holds for this real frame, built
+            // for a time near this frame's (FrameGenEngineMapReusable), is read
+            // again, scaled, instead of built anew.
+            const ViewResources& view = views_[i];
+            if (const std::optional<float> time = FrameGenEngineMapTime(recording.plan);
+                time && frame.tuning.engine_map_reuse && view.engine_map_frame == frame.id &&
+                view.engine_map_cover == analyzed.cover && FrameGenEngineMapReusable(*time, view.engine_map_time)) {
+                recording.plan = BuildFrameGenSynthesisPlan(analyzed.request, frame.tuning, mode, fraction, analyzed.cover,
+                                                            false, view.engine_map_time);
+                reused[i] = true;
+            }
             if (!PrepareFrame(recording, error)) {
                 return false;
             }
         }
-        return RecordSynthesis(
+        const bool written = RecordSynthesis(
             frame, exact,
             [&](std::string& record_error) {
                 for (std::size_t i = 0; i < frame.views.size(); ++i) {
@@ -3299,6 +3371,10 @@ class D3D12FrameGen final : public FrameGenGpu {
                 return true;
             },
             error);
+        for (std::size_t i = 0; i < frame.views.size() && written; ++i) {
+            NoteMotionMap(views_[i], recordings[i].plan, frame.id, frame.views[i].cover, reused[i]);
+        }
+        return written;
     }
 
     bool SynthesizeStale(std::uint64_t frame_id, std::uint64_t motion_id, float fraction,
@@ -3511,6 +3587,11 @@ class D3D12FrameGen final : public FrameGenGpu {
             }
         }
         // Stale: the frame's capture alone is waited for, as its exact copy.
+        // The motion maps built here are no engine motion map a later frame
+        // reads again (stage 7).
+        for (std::size_t i = 0; i < count; ++i) {
+            if (warped[i]) NoteMotionMap(views_[i], recordings[i].plan, 0, false);
+        }
         return RecordSynthesis(
             frame, exact || stale,
             [&](std::string& record_error) {
@@ -3768,6 +3849,51 @@ class D3D12FrameGen final : public FrameGenGpu {
         }
         recording.draw = recording.frames[0] && CanDraw(*recording.submission, recording.outputs, 1, false);
         return recording.draw || EnsureOutput(*recording.view, *recording.submission, error);
+    }
+
+    // Stage 7: the engine motion map's passes, made the first time a view of
+    // a session with the map on is set up (research: other sessions never
+    // pay for them).
+    bool EnsureEngineMapPasses(std::string& error) {
+        for (std::size_t pass = 0; pass < kFrameGenPassCount; ++pass) {
+            if (!EngineMapPass(static_cast<FrameGenPass>(pass)) || pipelines_[pass]) {
+                continue;
+            }
+            D3D12_COMPUTE_PIPELINE_STATE_DESC desc{};
+            desc.pRootSignature = root_signature_.Get();
+            desc.CS = {framegen_shaders::kDxbc[pass].data, framegen_shaders::kDxbc[pass].size};
+            const HRESULT hr = device_->CreateComputePipelineState(&desc, IID_PPV_ARGS(&pipelines_[pass]));
+            if (FAILED(hr)) {
+                error = Failure("D3D12 Frame Generation engine motion map pipeline", hr);
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Stage 7: what a view's motion map holds once `plan` is recorded: the
+    // engine motion map it built for real frame `frame_id` (`cover`: from its
+    // cover flow), which a later frame of that real frame may read again
+    // (FrameGenTuning::engine_map_reuse), or nothing of the kind. Counts the
+    // frames written with the engine motion map, built or (`reused`) read
+    // again.
+    void NoteMotionMap(ViewResources& view, const FrameGenViewPlan& plan, std::uint64_t frame_id, bool cover,
+                       bool reused = false) {
+        bool written = false;
+        for (const FrameGenDispatch& dispatch : plan.dispatches) {
+            if (dispatch.pass == FrameGenPass::kShiftClear && dispatch.outputs[1].kind == FrameGenTextureKind::kMotionMap) {
+                written = true;
+                engine_maps_ += (dispatch.constants.options[1] & kFrameGenFlagEngine) != 0 ? 1 : 0;
+            }
+        }
+        engine_maps_ += reused ? 1 : 0;
+        engine_maps_reused_ += reused ? 1 : 0;
+        if (written) {
+            const std::optional<float> built = FrameGenEngineMapTime(plan);
+            view.engine_map_frame = built ? frame_id : 0;
+            view.engine_map_time = built.value_or(0.0f);
+            view.engine_map_cover = cover;
+        }
     }
 
     // Records one view's frame of `recording`'s plan (PrepareFrame set it
@@ -4262,6 +4388,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         for (auto& texture : view.engine_raw) visit(texture);
         for (auto& texture : view.engine_census) visit(texture);
         for (auto& texture : view.engine_labels) visit(texture);
+        for (auto& texture : view.engine_world) visit(texture);
         for (auto& texture : view.engine_tiles) visit(texture);
         for (auto* texture : {&view.output, &view.compose_target, &view.shift_keys, &view.shift_map, &view.motion_map,
                               &view.cross_keys,
@@ -5240,6 +5367,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         auto reset_assist = [&view] {
             view.engine_candidate = view.engine_info = view.engine_flow = {};
             view.engine_labels = {};
+            view.engine_world = {};
             view.engine_tiles = {};
             view.engine_tiles_next = 0;
             view.engine_tiles_valid = false;
@@ -5316,7 +5444,10 @@ class D3D12FrameGen final : public FrameGenGpu {
                         Create(view.engine_flow, cells, DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R16G16B16A16_FLOAT, true,
                                why);
             for (std::uint8_t slot = 0; slot < ring && made; ++slot) {
-                made = Create(view.engine_labels[slot], cells, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_UINT, true, why);
+                made = Create(view.engine_labels[slot], cells, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_UINT, true, why) &&
+                       (tuning.engine_map == FrameGenEngineMap::kOff ||
+                        Create(view.engine_world[slot], {4, 1}, DXGI_FORMAT_R32G32B32A32_FLOAT,
+                               DXGI_FORMAT_R32G32B32A32_FLOAT, false, why));
             }
             for (Texture& texture : view.engine_tiles) {
                 made = made && Create(texture, tiles, DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R16G16B16A16_FLOAT, true, why);
@@ -6169,6 +6300,7 @@ class D3D12FrameGen final : public FrameGenGpu {
             }
             return nullptr;
         case FrameGenTextureKind::kEngineVerdict: return &view.engine_verdict;
+        case FrameGenTextureKind::kWorldParamsNewest: return &view.engine_world[newest];
         default: return nullptr;
         }
     }
@@ -6291,9 +6423,13 @@ class D3D12FrameGen final : public FrameGenGpu {
         if (effective.depth && !EnsureTrust(view, submission.request.extent, error)) {
             return false;
         }
-        if (effective.depth && (tuning.depth_splat || depth_splat_) && !view.motion_map.resource &&
+        if (effective.depth && (tuning.depth_splat || depth_splat_ || tuning.engine_map != FrameGenEngineMap::kOff) &&
+            !view.motion_map.resource &&
             !Create(view.motion_map, FrameGenPyramid(submission.request.extent)[1], DXGI_FORMAT_R32_UINT,
                     DXGI_FORMAT_R32_UINT, true, error)) {
+            return false;
+        }
+        if (effective.depth && tuning.engine_map != FrameGenEngineMap::kOff && !EnsureEngineMapPasses(error)) {
             return false;
         }
         // The previous frame's depth was used (its trust scores were kept),
@@ -6743,6 +6879,10 @@ class D3D12FrameGen final : public FrameGenGpu {
     std::uint64_t engine_merged_frames_{0};
     double engine_textured_cells_{0.0};
     double engine_moved_cells_{0.0};
+    // Stage 7 (EngineStatus): views' frames written with the engine motion
+    // map, and those that read one built for an earlier frame again.
+    std::uint64_t engine_maps_{0};
+    std::uint64_t engine_maps_reused_{0};
     bool engine_disable_noted_{false};
     std::uint64_t motion_captured_{0};
     std::uint64_t motion_dispatches_{0};

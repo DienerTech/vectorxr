@@ -200,6 +200,11 @@ struct GpuLog {
     std::atomic<std::uint64_t> verdict_frames{0};
     std::atomic<std::uint64_t> verdicts_held_back{0};
     std::atomic<std::uint64_t> lead_verdicts_held_back{0};
+    // Stage 7: such frames from Assist had the vectors merged into every
+    // view (FrameGenExecuteResult::merged) while `merged`; the view whose
+    // depth is never used (FrameGenExecuteResult::depth; -1: none).
+    std::atomic<bool> merged{false};
+    std::atomic<int> depthless_view{-1};
     std::mutex motion_mutex;
     std::vector<std::vector<FrameGenMotionJob>> motion_calls;
     // The color captures made before each call (`captures` then).
@@ -477,6 +482,7 @@ class FakeGpu final : public FrameGenGpu {
             log_->verdicts_held_back += log_->verdicts_held ? 1 : 0;
             log_->lead_verdicts_held_back += log_->verdicts_held || log_->lead_verdicts_held ? 1 : 0;
             result.lead = tuning.engine_mode == FrameGenEngineMode::kLead;
+            result.merged.assign(views.size(), log_->merged && tuning.engine_mode >= FrameGenEngineMode::kAssist);
         }
         Analyzed analyzed;
         std::uint64_t held_bytes = 0;
@@ -491,7 +497,8 @@ class FakeGpu final : public FrameGenGpu {
             const bool synthesized = history_[i].Effective(views[i].request).synthesize;
             history_[i].Commit(synthesized);
             result.synthesized.push_back(synthesized);
-            result.depth.push_back(synthesized && views[i].request.depth && log_->depth);
+            result.depth.push_back(synthesized && views[i].request.depth && log_->depth &&
+                                   static_cast<int>(i) != log_->depthless_view);
             Analyzed::View kept{views[i].request.newest.position[0],
                                 result.depth.back() ? views[i].request.shift[0] : 0.0f, synthesized};
             {
@@ -4438,6 +4445,109 @@ void TestEngineMotionLead() {
                   session.gpu.tuning.engine_predicate && !session.gpu.tuning.engine_interpolate,
               "engine lead: a session started at observe does not lead at a reload");
         session.presenter.Stop();
+    }
+}
+
+// Engine motion vectors, stage 7 (VECTORXR_FRAMEGEN_ENGINE_MAP=merged,
+// _MAP_REUSE=1, _REACH=1.5, read at Start): the switches go into the tuning;
+// while the next real frame is late, a real frame whose analysis merged the
+// vectors into every view with its depth is moved past one interval up to the
+// reach (seen from where the eye will be then), one whose analysis did not,
+// or left one eye without depth (no engine motion map there: the eyes would
+// part), one interval at most.
+void TestEngineMap() {
+    const XrSwapchain depth_chain = reinterpret_cast<XrSwapchain>(0x21);
+    const XrSwapchain vectors = reinterpret_cast<XrSwapchain>(0x31);
+    FrameGenResolvedSettings settings;
+    settings.enabled = true;
+    settings.synthesis_mode = FrameGenSynthesisMode::kExtrapolate;
+    settings.multiplier = FrameGenMultiplier::k2;
+    for (int variant = 0; variant < 3; ++variant) {
+        const bool merged = variant != 1;
+        const bool one_eye = variant == 2;
+        const std::string name = variant == 0 ? "engine map" : merged ? "engine map, one eye without depth" : "engine map, not merged";
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        gpu.depth = gpu.engine = gpu.threaded = gpu.jit = true;
+        gpu.merged = merged;
+        gpu.depthless_view = one_eye ? 1 : -1;
+        runtime.paced = true;
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "assist");
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MAP", "merged");
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MAP_REUSE", "1");
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_REACH", "1.5");
+        StartPresenter(presenter, gpu, FrameGenSynthesisMode::kExtrapolate);
+        presenter.Configure(settings);
+        for (const char* name_of : {"VECTORXR_FRAMEGEN_ENGINE_MV", "VECTORXR_FRAMEGEN_ENGINE_MAP",
+                                    "VECTORXR_FRAMEGEN_ENGINE_MAP_REUSE", "VECTORXR_FRAMEGEN_ENGINE_REACH"}) {
+            _putenv_s(name_of, "");
+        }
+        presenter.TrackSwapchain(depth_chain, 20, 1, XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+        presenter.TrackSwapchain(vectors, kFloatFormat, 1, XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+        App app(presenter, runtime);
+        app.eye_speed = 0.5;
+        app.depth.subImage.swapchain = depth_chain;
+        app.depth.subImage.imageRect = {{0, 0}, {1200, 1200}};
+        app.depth.maxDepth = 1.0f;
+        app.depth.nearZ = 0.1f;
+        app.depth.farZ = 1000.0f;
+        std::uint64_t frames = 0;
+        app.before_end = [&](XrTime time) {
+            FrameGenEngineMotionFrame record;
+            record.display_time = time;
+            record.projection_frame = ++frames;
+            for (std::uint32_t v = 0; v < 2; ++v) {
+                FrameGenEngineMotionView view;
+                view.view = v;
+                view.source = FrameGenMotionSource::kSpaceWarpFb;
+                view.vectors = {vectors, {{0, 0}, {960, 960}}, v};
+                view.depth = app.depth.subImage;
+                view.depth_is_khr = true;
+                view.color = app.views[v].subImage;
+                view.depth_encoding = {app.depth.minDepth, app.depth.maxDepth, app.depth.nearZ, app.depth.farZ};
+                const XrPosef& pose = app.views[v].pose;
+                view.game.orientation = {pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w};
+                view.game.position = {pose.position.x, pose.position.y, pose.position.z};
+                record.views.push_back(view);
+            }
+            record.complete = true;
+            presenter.NoteEngineMotion(record);
+            presenter.CaptureEngineMotion();
+        };
+        for (int i = 0; gpu.executes < 4 && i < 60; ++i) app.Frame();
+        Check(gpu.tuning.engine_map == FrameGenEngineMap::kMerged && gpu.tuning.engine_map_reuse &&
+                  gpu.tuning.engine_reach == 1.5f,
+              name + ": the switches in the tuning");
+        // The swapchains made at the start settle for 3 s (G8); then frames
+        // whose vectors are merged in.
+        std::this_thread::sleep_for(std::chrono::milliseconds(3100));
+        const std::uint64_t judged = gpu.verdict_frames;
+        for (int i = 0; gpu.verdict_frames < judged + 10 && i < 100; ++i) app.Frame();
+        Check(gpu.verdict_frames >= judged + 10, name + ": frames judged");
+        // The next real frame three intervals late (six refreshes at 2x).
+        std::size_t before = 0;
+        {
+            std::scoped_lock lock(gpu.syntheses_mutex);
+            before = gpu.syntheses.size();
+        }
+        SleepPrecise(std::chrono::steady_clock::now() + std::chrono::nanoseconds(6 * kPeriod));
+        for (int i = 0; i < 4; ++i) app.Frame();
+        float farthest = 0.0f;
+        int past = 0;
+        {
+            std::scoped_lock lock(gpu.syntheses_mutex);
+            for (std::size_t i = before; i < gpu.syntheses.size(); ++i) {
+                const GpuLog::Synthesis& entry = gpu.syntheses[i];
+                if (entry.mode != FrameGenSynthesisMode::kExtrapolate) continue;
+                farthest = std::max(farthest, entry.fraction);
+                past += entry.fraction > 1.0f ? 1 : 0;
+            }
+        }
+        Check(merged && !one_eye ? past > 0 && farthest <= 1.5f : farthest <= 1.0f,
+              name + ": moved past one interval " + std::to_string(past) + " times, up to " + std::to_string(farthest));
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
     }
 }
 
@@ -12266,6 +12376,7 @@ int main(int argc, char** argv) {
     RUN(TestEngineMotionObserve);
     RUN(TestEngineMotionAssist);
     RUN(TestEngineMotionLead);
+    RUN(TestEngineMap);
     RUN(TestEngineDelta);
     RUN(TestResearchFileSessions);
     RUN(TestAutomaticMultiplier);

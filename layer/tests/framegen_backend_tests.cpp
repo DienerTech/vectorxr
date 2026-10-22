@@ -394,6 +394,7 @@ FrameGenViewSubmission Submission(std::uint32_t source_index, std::int64_t forma
 void EngineObserveScenarios(Harness& harness);
 void EngineAssistScenarios(Harness& harness);
 void EngineLeadScenarios(Harness& harness);
+void EngineMapScenarios(Harness& harness);
 void WorldDeltaScenarios(Harness& harness);
 
 int RunScenarios(Harness& harness) {
@@ -1287,6 +1288,13 @@ int RunScenarios(Harness& harness) {
         EngineLeadScenarios(harness);
     }
 
+    // 3y. Engine motion vectors, stage 7 (Direct3D 12): frames extrapolated
+    // with the engine motion map, each texel moved by its cell's label with a
+    // depth test (EngineMapScenarios).
+    if (harness.create_texture_data && harness.create_depth_data && harness.upload_sized && harness.readback_sized) {
+        EngineMapScenarios(harness);
+    }
+
     // 3w. Engine motion vectors, stage 4 (Direct3D 12): the world's motion
     // from the application's movement instead of the fit, and the sky
     // turned exactly by it (WorldDeltaScenarios).
@@ -1683,8 +1691,8 @@ const char* const kProfileNames[] = {"luma",        "downsample",  "search",    
                                      "flow pack",   "flow unpack", "trust update", "shift clear", "shift splat",
                                      "shift resolve", "shift fill", "raw pack",   "trust resolve", "shading rate", "world reduce", "world solve", "trust vote", "depth scale", "scale vote", "depth stale", "cross splat", "cross resolve",
                                      "engine census", "engine capture", "engine reduce", "engine solve", "world set",
-                                     "engine convert", "engine merge", "engine tiles",
-                                     "source copy", "output copy",
+                                     "engine convert", "engine merge", "engine tiles", "engine splat", "engine resolve",
+                                     "engine fill", "source copy", "output copy",
                                      "hardware wait", "compose", "flow merge"};
 static_assert(std::size(kProfileNames) == kFrameGenPassCount + 5, "a name per profiled category");
 
@@ -4589,15 +4597,29 @@ int RunProfile(Harness& harness) {
                                            : engine                 ? FrameGenEngineMode::kObserve
                                                                     : FrameGenEngineMode::kOff;
     const std::string convention = std::getenv("FG_PROFILE_MV_CONVENTION") ? std::getenv("FG_PROFILE_MV_CONVENTION") : "fb";
+    // FG_PROFILE_ENGINE_MAP=separate|merged (with FG_PROFILE_MV=assist or
+    // lead): extrapolated frames with the engine motion map (stage 7); just
+    // in time, with FG_PROFILE_ENGINE_MAP_REUSE=1, a frame within
+    // kFrameGenEngineMapReuse of the last map's time reads it again (the
+    // half-interval frame the quarter's). Its gate: per frame written, a run
+    // with the merged map at most 0.30 ms above one without.
+    const FrameGenEngineMap engine_map =
+        ParseFrameGenEngineMap(std::getenv("FG_PROFILE_ENGINE_MAP") ? std::getenv("FG_PROFILE_ENGINE_MAP") : "");
+    const bool engine_map_reuse =
+        std::getenv("FG_PROFILE_ENGINE_MAP_REUSE") && std::string(std::getenv("FG_PROFILE_ENGINE_MAP_REUSE")) == "1";
     if (engine_mode >= FrameGenEngineMode::kAssist) {
         FrameGenEngineConvention locked;
         locked.gain = ProfileMotionGain(convention, depth_width, depth_height);
         gpu->LockEngineForTest(locked);
     }
-    std::printf("Profiling %ux%u per eye, depth %ux%u, %s %s%s%s; rendering test frames...\n", width, height, depth_width,
+    const std::string map_text = engine_map != FrameGenEngineMap::kOff
+                                     ? std::string(", the engine motion map (") + ToString(engine_map) +
+                                           (engine_map_reuse ? ", read again)" : ")")
+                                     : std::string();
+    std::printf("Profiling %ux%u per eye, depth %ux%u, %s %s%s%s%s; rendering test frames...\n", width, height, depth_width,
                 depth_height, interpolate ? "interpolate" : "extrapolate", jit ? "just in time" : "4x",
                 engine ? (", with motion vectors (" + convention + ")").c_str() : "",
-                delta ? ", the world's motion from the application's movement" : "");
+                delta ? ", the world's motion from the application's movement" : "", map_text.c_str());
     std::array<XrSwapchain, 2> sources{reinterpret_cast<XrSwapchain>(0x61), reinterpret_cast<XrSwapchain>(0x62)};
     std::array<XrSwapchain, 2> depths{reinterpret_cast<XrSwapchain>(0x63), reinterpret_cast<XrSwapchain>(0x64)};
     std::array<XrSwapchain, 2> vectors{reinterpret_cast<XrSwapchain>(0x65), reinterpret_cast<XrSwapchain>(0x66)};
@@ -4749,6 +4771,8 @@ int RunProfile(Harness& harness) {
         // ... and of this run's frames judged, those whose verdict held the
         // vectors back (their measured passes ran).
         const FrameGenEngineValidation judged = engine ? gpu->EngineStatus(~0ull).validation : FrameGenEngineValidation{};
+        // ... and of its frames written, those with the engine motion map.
+        const std::uint64_t maps_before = judged.maps, reused_before = judged.maps_reused;
         bool depth_used = false;
         for (int i = 0; i < 48; ++i) {
             const std::uint32_t frame = static_cast<std::uint32_t>(i % kFrames);
@@ -4786,6 +4810,8 @@ int RunProfile(Harness& harness) {
             // The level as the presenter pins it from Assist with the hardware
             // chosen (FrameGenTuning::hardware_level).
             executed.hardware_level = tuning.hardware_flow && engine_mode >= FrameGenEngineMode::kAssist;
+            executed.engine_map = engine_map;
+            executed.engine_map_reuse = engine_map_reuse;
             Check(gpu->Execute(views, executed, result, error), "profile execute: " + error);
             led += i >= 24 && result.lead ? 1 : 0;
             const std::vector<double> times = gpu->PassMilliseconds();
@@ -4894,6 +4920,26 @@ int RunProfile(Harness& harness) {
                     std::printf("    %-14s %6.3f ms\n", names[p], synthesis_sums[p] / synthesis_samples);
                 }
             }
+            if (engine_map != FrameGenEngineMap::kOff) {
+                // Stage 7: the map's passes per frame written (the shift
+                // passes and the engine's own: the eye-shift map's too where
+                // it is separate), and the views' frames written with it and
+                // reading one again.
+                double map_ms = 0.0;
+                for (const FrameGenPass pass : {FrameGenPass::kShiftClear, FrameGenPass::kShiftSplat, FrameGenPass::kShiftResolve,
+                                                FrameGenPass::kShiftFill, FrameGenPass::kShiftSplatEngine,
+                                                FrameGenPass::kShiftResolveEngine, FrameGenPass::kShiftFillEngine}) {
+                    const auto index = static_cast<std::size_t>(pass);
+                    map_ms += index < synthesis_sums.size() ? synthesis_sums[index] / synthesis_samples : 0.0;
+                }
+                const FrameGenEngineValidation mapped = gpu->EngineStatus(~0ull).validation;
+                std::printf("  engine map (%s%s): the shift passes %.3f ms per frame written; %llu views' frames with the "
+                            "map, %llu read again (gate: merged at most 0.30 ms per frame written above a run without "
+                            "FG_PROFILE_ENGINE_MAP)\n",
+                            ToString(engine_map), engine_map_reuse ? ", read again" : "", map_ms,
+                            static_cast<unsigned long long>(mapped.maps - maps_before),
+                            static_cast<unsigned long long>(mapped.maps_reused - reused_before));
+            }
         }
         PrintWorkingMemory(*gpu);
     }
@@ -4954,7 +5000,9 @@ int RunProfile(Harness& harness) {
 // the environment, the backend sets the world's motion from it, as a session.
 // The game's motion vectors (FG_REPLAY_MV, RunReplay): Observe, or with
 // FG_REPLAY_MV_MODE=assist merged into the flow (stage 5, "Engine labels"),
-// or =lead leading it (stage 6).
+// or =lead leading it (stage 6); with VECTORXR_FRAMEGEN_ENGINE_MAP (and
+// _REACH) extrapolated with the engine motion map (stage 7), and with
+// FG_REPLAY_AHEAD=2 to the frame after next.
 bool g_replay = false;
 std::string g_replay_directory, g_replay_output;
 
@@ -5724,6 +5772,22 @@ int RunReplay(Harness& harness) {
     const bool engine_cockpit = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_COCKPIT") == "1";
     const bool engine_tint = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_TINT") == "1";
     const bool engine_predicate = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_PREDICATE") != "0";
+    // Stage 7: the engine motion map as a session reads its switches
+    // (VECTORXR_FRAMEGEN_ENGINE_MAP=separate|merged, _REACH; reading a map
+    // again is just in time's alone), and with FG_REPLAY_AHEAD=2 each frame
+    // extrapolated to the frame after next, about two intervals on (past one
+    // only with the reach): its gate's truth k + 2.
+    const FrameGenEngineMap engine_map =
+        ParseFrameGenEngineMap(ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_MAP").value_or(""));
+    float engine_reach = 1.0f;
+    if (const std::optional<std::string> reach = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_REACH")) {
+        engine_reach = std::clamp(static_cast<float>(std::atof(reach->c_str())), 1.0f, kFrameGenEngineReachMost);
+    }
+    const std::size_t ahead = env("FG_REPLAY_AHEAD") == "2" ? 2 : 1;
+    if (engine_map != FrameGenEngineMap::kOff || ahead > 1) {
+        std::printf("Engine map: %s (VECTORXR_FRAMEGEN_ENGINE_MAP), reach %.2f; each frame extrapolated to the frame %s\n",
+                    ToString(engine_map), static_cast<double>(engine_reach), ahead > 1 ? "after next" : "after it");
+    }
     // The measuring pass's labels (Assist): cells by what moved them, the
     // classes of those the vectors moved, and those held back.
     std::array<std::size_t, 8> label_sources{};
@@ -5808,6 +5872,8 @@ int RunReplay(Harness& harness) {
         tuning.engine_cockpit = engine_cockpit;
         tuning.engine_tint = engine_tint;
         tuning.engine_predicate = engine_predicate;
+        tuning.engine_map = engine_map;
+        tuning.engine_reach = engine_reach;
         if (before && *before + 1 != k) tuning.interval_ratio = 1.0f;
         // Observe's evidence (stage 3) on frames whose every view has vectors,
         // calibrating where the pair is consecutive frames (by the game's
@@ -6216,11 +6282,19 @@ int RunReplay(Harness& harness) {
             }
             // Frame k extrapolated to frame k + 1: one frame at the time ratio
             // of the two intervals, from the eye position frame k + 1 was
-            // rendered at (predicting: on as it moved from frame k - 1).
-            const float fraction = has_next ? std::clamp(frames[k + 1].tuning.interval_ratio, 0.25f, 1.0f) : 1.0f;
+            // rendered at (predicting: on as it moved from frame k - 1). With
+            // FG_REPLAY_AHEAD=2 to frame k + 2, at the ratio of the two
+            // intervals after frame k to the one before it.
+            const std::size_t target = k + ahead;
+            const bool has_target = target < frames.size();
+            const float fraction =
+                !has_target  ? 1.0f
+                : ahead == 1 ? std::clamp(frames[k + 1].tuning.interval_ratio, 0.25f, 1.0f)
+                             : std::clamp(frames[k + 1].tuning.interval_ratio * (1.0f + frames[k + 2].tuning.interval_ratio),
+                                          0.25f, kFrameGenEngineReachMost);
             std::vector<std::array<float, 3>> shifts;
-            if (has_next && k > 0) {
-                if (predict) {
+            if (has_target && k > 0) {
+                if (predict && ahead == 1) {
                     shifts = eye_shifts(k - 1, k, 1.0f);
                     for (std::size_t v = 0; v < view_count; ++v) {
                         // From frame k - 1's view space into frame k's; the eye
@@ -6235,13 +6309,21 @@ int RunReplay(Harness& harness) {
                         }
                     }
                 } else {
-                    shifts = eye_shifts(k, k + 1, fraction);
+                    shifts = eye_shifts(k, target, fraction);
                 }
             }
             execute(k, k > 0 ? std::optional<std::size_t>(k - 1) : std::nullopt, FrameGenSynthesisMode::kExtrapolate,
                     fraction, shifts, result);
-            if (measure && k > 0 && has_next && !interpolate) {
-                evaluate(k, k, k + 1, frames[k].views[0].color, result, fraction, shifts, fraction, {k});
+            if (measure && k > 0 && has_target && !interpolate) {
+                // The frame went as far as its plan let it (one interval, or
+                // the reach where the engine motion map took every view), seen
+                // from the eye moved on for that long, as a session submits
+                // it: the truth is lined up with that eye.
+                bool mapped = engine_map != FrameGenEngineMap::kOff && result.merged.size() == view_count &&
+                              result.depth.size() == view_count;
+                for (std::size_t v = 0; mapped && v < view_count; ++v) mapped = result.merged[v] && result.depth[v];
+                const float reached = std::min(fraction, mapped ? engine_reach : 1.0f);
+                evaluate(k, k, target, frames[k].views[0].color, result, reached, shifts, reached, {k});
             }
         }
         if (pass == settle - 1) {
@@ -8480,6 +8562,9 @@ struct EngineScene {
     double square_speed{0.03};
     double backdrop{0.0};
     double square_distance{2.0};
+    // Stage 7: where the square's centre starts across the world (meters as
+    // seen at 2 m): behind the cockpit panel, or beside it.
+    double square_start{-0.5};
 };
 
 // What the game's vectors carry wrongly, if anything: none, all zero, noise,
@@ -8531,7 +8616,8 @@ EnginePose EngineEye(int frame, int eye) {
     return pose;
 }
 
-// What an eye sees through its view's uv at a frame: the kind (0 the sky:
+// What an eye sees through its view's uv at a frame (or between two: the
+// world's movement goes on steadily): the kind (0 the sky:
 // `point` its direction in the world; 1 the cockpit and the scene's
 // overlays: its point in the application's space; 2 the square, 3 the wall,
 // 4 the scenery below the horizon: their points in the world), its depth
@@ -8546,11 +8632,11 @@ struct EngineHit {
 enum class EngineLayer { kColor, kDepth, kVectors };
 // The world as the application's space holds it at a frame: turned, and
 // left behind by a walking player.
-EngineVec EngineWorldToApp(const EngineScene& scene, int frame, const EngineVec& world, bool direction) {
+EngineVec EngineWorldToApp(const EngineScene& scene, double frame, const EngineVec& world, bool direction) {
     const EngineVec player{0.0, 0.0, scene.walking && !direction ? -0.02 * frame : 0.0};
     return EngineRotate(EngineYaw(scene.world_turn * frame), {world[0] - player[0], world[1] - player[1], world[2] - player[2]});
 }
-EngineHit EngineCast(const EngineScene& scene, int frame, const EnginePose& eye, double u, double v,
+EngineHit EngineCast(const EngineScene& scene, double frame, const EnginePose& eye, double u, double v,
                      EngineLayer layer = EngineLayer::kColor) {
     const EngineVec ray = EngineRotate(eye.orientation, {-kTan + 2.0 * kTan * u, kTan - 2.0 * kTan * v, -1.0});
     const EngineVec& origin = eye.position;
@@ -8599,7 +8685,7 @@ EngineHit EngineCast(const EngineScene& scene, int frame, const EnginePose& eye,
         const double t = (plane - world_origin[2]) / world_ray[2];
         const EngineVec p{world_origin[0] + t * world_ray[0], world_origin[1] + t * world_ray[1],
                           world_origin[2] + t * world_ray[2]};
-        const double centre = -0.5 * scale + scene.square_speed * frame;
+        const double centre = scene.square_start * scale + scene.square_speed * frame;
         if (t < nearest && scene.walking) {
             nearest = t;
             hit = {3, p, t, Background(static_cast<float>(p[0] * 150.0 + 500.0), static_cast<float>(p[1] * 150.0 + 500.0))};
@@ -8685,17 +8771,17 @@ FrameGenViewGeometry EngineGeometry(const EnginePose& pose) {
     return geometry;
 }
 
-EngineFrames RenderEngineFrames(const EngineScene& scene, bool truth = false) {
+EngineFrames RenderEngineFrames(const EngineScene& scene, bool truth = false, std::size_t count = kEngineFrames) {
     EngineFrames frames;
-    frames.color.resize(kEngineFrames);
-    frames.depth.resize(kEngineFrames);
-    frames.motion.resize(kEngineFrames);
-    frames.objects.resize(kEngineFrames);
-    frames.flow.resize(truth ? kEngineFrames : 0);
-    frames.surface.resize(truth ? kEngineFrames : 0);
-    frames.next.resize(truth ? kEngineFrames : 0);
+    frames.color.resize(count);
+    frames.depth.resize(count);
+    frames.motion.resize(count);
+    frames.objects.resize(count);
+    frames.flow.resize(truth ? count : 0);
+    frames.surface.resize(truth ? count : 0);
+    frames.next.resize(truth ? count : 0);
     std::vector<std::thread> workers;
-    for (std::size_t k = 0; k < kEngineFrames; ++k) {
+    for (std::size_t k = 0; k < count; ++k) {
         workers.emplace_back([&, k] {
             const int frame = static_cast<int>(k);
             for (int e = 0; e < 2; ++e) {
@@ -8811,6 +8897,21 @@ struct EngineRunOptions {
     std::function<void(FrameGenGpu&, std::size_t)> after;
     // Per frame whether the vectors led it (FrameGenExecuteResult::lead).
     std::vector<bool>* led{nullptr};
+    // Stage 7: the frames run (the scene's first ones); the motion maps
+    // (FrameGenTuning::depth_splat, engine_map, engine_map_reuse,
+    // engine_reach); how far the eyes move per interval in their view space
+    // (FrameGenViewRequest::shift: generated frames are seen from there); and
+    // just in time, each frame analysed alone and then written at each of
+    // `synthesize`'s fractions (FrameGenGpu::Synthesize) into `written` (per
+    // frame and fraction, empty for the first frame) instead of `outputs`.
+    std::size_t frames{kEngineFrames};
+    bool depth_splat{false};
+    FrameGenEngineMap map{FrameGenEngineMap::kOff};
+    bool reuse{false};
+    float reach{1.0f};
+    std::array<float, 3> shift{};
+    std::vector<float> synthesize;
+    std::vector<std::vector<std::array<Pixels, 2>>>* written{nullptr};
 };
 struct EngineRunResult {
     FrameGenEngineStatus status;
@@ -8831,15 +8932,16 @@ EngineRunResult RunEngineFrames(Harness& harness, const EngineFrames& frames, co
         gpu->LockEngineForTest(locked);
     }
     const std::int64_t output_format = gpu->OutputFormats(FrameGenOutputKind::kSrgb8).front();
+    const std::size_t count = std::min(options.frames, frames.color.size());
     std::array<XrSwapchain, 2> sources{}, depths{}, results{};
-    std::vector<std::array<XrSwapchain, 2>> vectors(kEngineFrames);
+    std::vector<std::array<XrSwapchain, 2>> vectors(count);
     for (int e = 0; e < 2; ++e) {
         sources[e] = reinterpret_cast<XrSwapchain>(std::uintptr_t{0x900u + e});
         depths[e] = reinterpret_cast<XrSwapchain>(std::uintptr_t{0x910u + e});
         results[e] = reinterpret_cast<XrSwapchain>(std::uintptr_t{0x920u + e});
         g_swapchains[sources[e]].clear();
         g_swapchains[depths[e]].clear();
-        for (std::size_t k = 0; k < kEngineFrames; ++k) {
+        for (std::size_t k = 0; k < count; ++k) {
             void* image = harness.create(kEngineSize, kEngineSize);
             harness.upload_sized(image, kEngineSize, kEngineSize, frames.color[k][e]);
             g_swapchains[sources[e]].push_back(image);
@@ -8862,11 +8964,16 @@ EngineRunResult RunEngineFrames(Harness& harness, const EngineFrames& frames, co
     tuning.engine_filter = options.filter;
     tuning.engine_tint = options.tint;
     tuning.diagnostic = options.diagnostic;
+    tuning.depth_splat = options.depth_splat;
+    tuning.engine_map = options.map;
+    tuning.engine_map_reuse = options.reuse;
+    tuning.engine_reach = options.reach;
+    tuning.analyze_only = !options.synthesize.empty();
     const XrRect2Di rect{{0, 0}, {static_cast<int>(kEngineSize), static_cast<int>(kEngineSize)}};
     const XrRect2Di vector_rect{{0, 0}, {static_cast<int>(kEngineVectorSize), static_cast<int>(kEngineVectorSize)}};
     EngineRunResult run;
     bool flipped = false;
-    for (std::size_t k = 0; k < kEngineFrames; ++k) {
+    for (std::size_t k = 0; k < count; ++k) {
         if (options.before) {
             options.before(tuning, k);
         }
@@ -8884,6 +8991,7 @@ EngineRunResult RunEngineFrames(Harness& harness, const EngineFrames& frames, co
             view.request.depth = true;
             view.request.newest = EngineGeometry(EngineEye(frame, e));
             view.request.previous = EngineGeometry(EngineEye(std::max(frame - 1, 0), e));
+            view.request.shift = options.shift;
             // As the presenter asks (no Pivot: the game's poses are the
             // declared ones): the pair before where the turn changed by 2
             // degrees a frame.
@@ -8952,9 +9060,23 @@ EngineRunResult RunEngineFrames(Harness& harness, const EngineFrames& frames, co
         }
         FrameGenExecuteResult result;
         Check(gpu->Execute(views, tuning, result, error), "engine observe: execute: " + error);
-        if (options.outputs) {
+        if (options.outputs && !tuning.analyze_only) {
             options.outputs->push_back({harness.readback_sized(g_swapchains[results[0]][0]),
                                         harness.readback_sized(g_swapchains[results[1]][0])});
+        }
+        if (options.written && tuning.analyze_only) {
+            // Just in time: the frame written at each fraction in turn, as a
+            // presenter writes the refreshes before the next real frame.
+            std::vector<std::array<Pixels, 2>>& written = options.written->emplace_back();
+            for (const float fraction : options.synthesize) {
+                if (k == 0 || !result.frame) continue;
+                Check(gpu->Synthesize(result.frame, FrameGenSynthesisMode::kExtrapolate, fraction,
+                                      {views[0].outputs[0], views[1].outputs[0]}, error),
+                      "engine observe: synthesize: " + error);
+                Check(gpu->WaitIdle(), "engine observe: synthesis did not finish");
+                written.push_back({harness.readback_sized(g_swapchains[results[0]][0]),
+                                   harness.readback_sized(g_swapchains[results[1]][0])});
+            }
         }
         if (options.merged) {
             options.merged->push_back({result.merged.size() == 2 && result.merged[0], result.merged.size() == 2 && result.merged[1]});
@@ -10065,6 +10187,516 @@ void EngineLeadScenarios(Harness& harness) {
               "engine lead: a predicate that cannot be made did not leave both eyes as without the vectors (" +
                   std::to_string(used) + " frames used them, " + std::to_string(differing) + " frames differ, " +
                   std::to_string(notes) + " notes)");
+    }
+}
+
+// --- Engine motion vectors, stage 7 (the engine motion map), on WARP ---------
+//
+// Assist with the convention locked from the start, frames extrapolated with
+// the engine motion map (each texel moved by its cell's label: the cockpit
+// panel the head's, the world's by the world's motion, a mover its own) against
+// the scene drawn at the generated frame's own time from its own eye
+// (EngineTruth). The world turning behind the panel: what it uncovers beside
+// the panel no worse than the motion map of depth engine mk2 (M3, the depth
+// splat), the whole view no worse than M3 or no map; the eye moving sideways:
+// the merged map shows the panel's parallax as the separate eye-shift map does
+// (within half a pixel), and with every verdict holding the vectors back the
+// square's 4.5 m off too; a mover passing behind the panel: the panel stays in
+// front; just in time at 4x, a map read again for the next frame within a
+// fifth of a percent of bad pixels of maps built for each; past one interval
+// (engine_reach 1.5) the turning world closer to the scene than one interval's
+// motion; Observe (no labels) as without the map, byte for byte.
+
+// A scene at real frame k's time `fraction` of an interval on (the world's
+// movement goes on steadily), seen from frame k's eye moved by `shift` times
+// the fraction (meters a frame, in its view space): what a frame generated
+// there should show, and what each pixel shows (EngineHit::kind). Per frame
+// from 1 to `count` and eye, a thread per frame.
+struct EngineTruth {
+    Pixels color;
+    std::vector<std::uint8_t> kind;
+};
+std::vector<std::array<EngineTruth, 2>> EngineTruths(const EngineScene& scene, std::size_t count, double fraction,
+                                                     const std::array<float, 3>& shift = {}) {
+    std::vector<std::array<EngineTruth, 2>> truths(count);
+    std::vector<std::thread> workers;
+    for (std::size_t k = 1; k < count; ++k) {
+        workers.emplace_back([&, k] {
+            for (int e = 0; e < 2; ++e) {
+                EnginePose eye = EngineEye(static_cast<int>(k), e);
+                const EngineVec moved = EngineRotate(eye.orientation, {shift[0] * fraction, shift[1] * fraction, shift[2] * fraction});
+                for (int i = 0; i < 3; ++i) eye.position[i] += moved[i];
+                EngineTruth& truth = truths[k][e];
+                truth.color.resize(std::size_t{kEngineSize} * kEngineSize);
+                truth.kind.resize(truth.color.size());
+                for (std::uint32_t y = 0; y < kEngineSize; ++y) {
+                    for (std::uint32_t x = 0; x < kEngineSize; ++x) {
+                        const EngineHit hit = EngineCast(scene, static_cast<double>(k) + fraction, eye, (x + 0.5) / kEngineSize,
+                                                         (y + 0.5) / kEngineSize);
+                        truth.color[std::size_t{y} * kEngineSize + x] = hit.color;
+                        truth.kind[std::size_t{y} * kEngineSize + x] = static_cast<std::uint8_t>(hit.kind);
+                    }
+                }
+            }
+        });
+    }
+    for (auto& worker : workers) worker.join();
+    return truths;
+}
+
+// Generated frames against their truths over the pixels `take` takes (frame,
+// eye, x, y; 16 pixels from the view's edges), from frame `first` on: the
+// mean channel difference (0-1), and the share of pixels a channel of which
+// is off by more than a tenth (bad).
+struct EngineMapError {
+    double mean{0.0};
+    double bad{0.0};
+    std::size_t pixels{0};
+};
+EngineMapError EngineMapErrorOf(const std::vector<std::array<Pixels, 2>>& generated,
+                                const std::vector<std::array<EngineTruth, 2>>& truths, std::size_t first,
+                                const std::function<bool(std::size_t, int, std::uint32_t, std::uint32_t)>& take) {
+    double sum = 0.0, bad = 0.0;
+    std::size_t pixels = 0;
+    for (std::size_t k = first; k < generated.size() && k < truths.size(); ++k) {
+        for (int e = 0; e < 2; ++e) {
+            if (generated[k][e].empty()) continue;
+            for (std::uint32_t y = 16; y < kEngineSize - 16; ++y) {
+                for (std::uint32_t x = 16; x < kEngineSize - 16; ++x) {
+                    if (!take(k, e, x, y)) continue;
+                    const std::uint32_t p = generated[k][e][std::size_t{y} * kEngineSize + x];
+                    const std::uint32_t q = truths[k][e].color[std::size_t{y} * kEngineSize + x];
+                    int worst = 0;
+                    for (int c = 0; c < 3; ++c) {
+                        const int difference = std::abs(static_cast<int>((p >> (8 * c)) & 255) - static_cast<int>((q >> (8 * c)) & 255));
+                        sum += difference;
+                        worst = std::max(worst, difference);
+                    }
+                    bad += worst > 25 ? 1.0 : 0.0;
+                    ++pixels;
+                }
+            }
+        }
+    }
+    return {pixels ? sum / (255.0 * 3.0 * static_cast<double>(pixels)) : 0.0, pixels ? bad / static_cast<double>(pixels) : 0.0,
+            pixels};
+}
+
+// Whether a truth's pixel is within `reach` pixels (in its row and column) of
+// one of kind `kind` (EngineHit::kind).
+bool EngineNear(const EngineTruth& truth, std::uint32_t x, std::uint32_t y, int reach, int kind) {
+    for (int d = -reach; d <= reach; ++d) {
+        const int px = std::clamp(static_cast<int>(x) + d, 0, static_cast<int>(kEngineSize) - 1);
+        const int py = std::clamp(static_cast<int>(y) + d, 0, static_cast<int>(kEngineSize) - 1);
+        if (truth.kind[std::size_t{y} * kEngineSize + px] == kind || truth.kind[std::size_t(py) * kEngineSize + x] == kind) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The first frame from which every frame merged the vectors into both eyes
+// (the depth checked, the convention locked), or the run's end.
+std::size_t EngineMergedFrom(const std::vector<std::array<bool, 2>>& merged) {
+    std::size_t first = merged.size();
+    for (std::size_t k = merged.size(); k-- > 1 && merged[k][0] && merged[k][1];) first = k;
+    return first;
+}
+
+// A frame's generated images (the written frames' `index`th fraction).
+std::vector<std::array<Pixels, 2>> EngineWrittenAt(const std::vector<std::vector<std::array<Pixels, 2>>>& written,
+                                                   std::size_t index) {
+    std::vector<std::array<Pixels, 2>> frames(written.size());
+    for (std::size_t k = 0; k < written.size(); ++k) {
+        if (index < written[k].size()) frames[k] = written[k][index];
+    }
+    return frames;
+}
+
+// Per frame from `first` on and eye, the pixels of the truth's kind `kind`
+// (EngineHit::kind) `margin` pixels from any other kind.
+std::vector<std::array<std::vector<std::uint32_t>, 2>> EngineInside(const std::vector<std::array<EngineTruth, 2>>& truths,
+                                                                    std::size_t first, int kind, int margin) {
+    std::vector<std::array<std::vector<std::uint32_t>, 2>> inside(truths.size());
+    for (std::size_t k = first; k < truths.size(); ++k) {
+        for (int e = 0; e < 2; ++e) {
+            const EngineTruth& truth = truths[k][e];
+            if (truth.kind.empty()) continue;
+            for (std::uint32_t y = 16; y < kEngineSize - 16; ++y) {
+                for (std::uint32_t x = 16; x < kEngineSize - 16; ++x) {
+                    bool alone = truth.kind[std::size_t{y} * kEngineSize + x] == kind;
+                    for (int other = 0; other <= 4 && alone; ++other) {
+                        alone = other == kind || !EngineNear(truth, x, y, margin, other);
+                    }
+                    if (alone) inside[k][e].push_back(y * kEngineSize + x);
+                }
+            }
+        }
+    }
+    return inside;
+}
+
+// The horizontal offset (pixels, in steps of an eighth) lining the generated
+// frames' pixels `inside` up with their truths best.
+double EngineBestOffset(const std::vector<std::array<Pixels, 2>>& generated, const std::vector<std::array<EngineTruth, 2>>& truths,
+                        const std::vector<std::array<std::vector<std::uint32_t>, 2>>& inside) {
+    double best = 0.0, best_error = 1e30;
+    for (int step = -32; step <= 32; ++step) {
+        const double s = step / 8.0;
+        double sum = 0.0;
+        std::size_t count = 0;
+        for (std::size_t k = 0; k < generated.size() && k < truths.size() && k < inside.size(); ++k) {
+            for (int e = 0; e < 2; ++e) {
+                const EngineTruth& truth = truths[k][e];
+                for (const std::uint32_t pixel : inside[k][e]) {
+                    const std::uint32_t x = pixel % kEngineSize, y = pixel / kEngineSize;
+                    const double at = x + s;
+                    const int x0 = static_cast<int>(std::floor(at));
+                    const double f = at - x0;
+                    const std::uint32_t a = truth.color[std::size_t{y} * kEngineSize + x0];
+                    const std::uint32_t b = truth.color[std::size_t{y} * kEngineSize + x0 + 1];
+                    const std::uint32_t p = generated[k][e][pixel];
+                    for (int c = 0; c < 3; ++c) {
+                        const double q = (1.0 - f) * ((a >> (8 * c)) & 255) + f * ((b >> (8 * c)) & 255);
+                        sum += std::abs(static_cast<double>((p >> (8 * c)) & 255) - q);
+                    }
+                    ++count;
+                }
+            }
+        }
+        if (count && sum / count < best_error) {
+            best_error = sum / count;
+            best = s;
+        }
+    }
+    return best;
+}
+
+void EngineMapScenarios(Harness& harness) {
+    constexpr std::size_t kFrames = 14;
+    // The world turning 0.04 radians a frame (6 pixels) behind the panel,
+    // the square 12 m off still in it: the panel's edges against the
+    // uncovered world and the whole view, extrapolated a whole interval, with
+    // no map, M3's, and the engine's separate and merged maps. With a map,
+    // the label of each cell the vectors moved keeps the depth of the surface
+    // they were taken for (its nearest or farthest, as the resolved depth
+    // under it has them).
+    {
+        const EngineScene scene{.world_turn = 0.04, .square_speed = 0.0, .square_distance = 12.0};
+        const EngineFrames frames = RenderEngineFrames(scene, false, kFrames);
+        const auto truths = EngineTruths(scene, kFrames, 1.0);
+        struct Run {
+            const char* name;
+            bool depth_splat;
+            FrameGenEngineMap map;
+            std::vector<std::array<Pixels, 2>> outputs;
+            std::vector<std::array<bool, 2>> merged;
+        };
+        std::array<Run, 4> runs{Run{"no map", false, FrameGenEngineMap::kOff}, Run{"M3", true, FrameGenEngineMap::kOff},
+                                Run{"separate", false, FrameGenEngineMap::kSeparate},
+                                Run{"merged", false, FrameGenEngineMap::kMerged}};
+        std::size_t surfaces = 0, surfaces_kept = 0;
+        auto check_surfaces = [&](FrameGenGpu& gpu, std::size_t) {
+            for (std::size_t e = 0; e < 2; ++e) {
+                std::vector<float> labels, depth;
+                FrameGenExtent label_extent{}, depth_extent{};
+                std::uint32_t label_channels = 0, depth_channels = 0;
+                if (!gpu.ReadTexture(e, {FrameGenTextureKind::kEngineLabels, 0}, labels, label_extent, label_channels) ||
+                    !gpu.ReadTexture(e, {FrameGenTextureKind::kDepth, 0}, depth, depth_extent, depth_channels) ||
+                    depth_channels != 1) {
+                    continue;
+                }
+                for (std::uint32_t cy = 0; cy < label_extent.height; ++cy) {
+                    for (std::uint32_t cx = 0; cx < label_extent.width; ++cx) {
+                        const std::size_t cell = std::size_t{cy} * label_extent.width + cx;
+                        const auto label = static_cast<std::uint32_t>(labels[cell * 2]);
+                        const std::uint32_t source = EngineSource(label);
+                        if (source != kFrameGenEngineLabelNear && source != kFrameGenEngineLabelFar) continue;
+                        float nearest = 1e30f, farthest = 0.0f;
+                        for (std::uint32_t y = 0; y < kEngineCellTexels; ++y) {
+                            for (std::uint32_t x = 0; x < kEngineCellTexels; ++x) {
+                                const std::uint32_t tx = std::min(cx * kEngineCellTexels + x, depth_extent.width - 1);
+                                const std::uint32_t ty = std::min(cy * kEngineCellTexels + y, depth_extent.height - 1);
+                                const float z = depth[std::size_t{ty} * depth_extent.width + tx];
+                                if (z > 0.0f) {
+                                    nearest = std::min(nearest, z);
+                                    farthest = std::max(farthest, z);
+                                }
+                            }
+                        }
+                        const float expected = std::min(source == kFrameGenEngineLabelNear ? nearest : farthest, 50000.0f);
+                        ++surfaces;
+                        surfaces_kept += std::abs(labels[cell * 2 + 1] - expected) <= 0.001f * expected ? 1 : 0;
+                    }
+                }
+            }
+        };
+        for (Run& run : runs) {
+            RunEngineFrames(harness, frames,
+                            {.mode = FrameGenEngineMode::kAssist, .fraction = 1.0f, .lock = true, .outputs = &run.outputs,
+                             .merged = &run.merged,
+                             .after = run.map == FrameGenEngineMap::kMerged ? std::function<void(FrameGenGpu&, std::size_t)>(check_surfaces)
+                                                                             : nullptr,
+                             .frames = kFrames, .depth_splat = run.depth_splat, .map = run.map});
+        }
+        const std::size_t first = EngineMergedFrom(runs[2].merged);
+        auto strip = [&](std::size_t k, int e, std::uint32_t x, std::uint32_t y) {
+            const EngineTruth& truth = truths[k][e];
+            return truth.kind[std::size_t{y} * kEngineSize + x] != 1 && EngineNear(truth, x, y, 8, 1);
+        };
+        auto view = [](std::size_t, int, std::uint32_t, std::uint32_t) { return true; };
+        std::array<EngineMapError, 4> strips{}, views{};
+        std::string text;
+        for (std::size_t i = 0; i < runs.size(); ++i) {
+            strips[i] = EngineMapErrorOf(runs[i].outputs, truths, first, strip);
+            views[i] = EngineMapErrorOf(runs[i].outputs, truths, first, view);
+            text += std::string(i ? "; " : "") + runs[i].name + " " + std::to_string(strips[i].mean) + " (" +
+                    std::to_string(strips[i].bad * 100.0) + "% bad), view " + std::to_string(views[i].mean) + " (" +
+                    std::to_string(views[i].bad * 100.0) + "% bad)";
+        }
+        std::cout << "D3D12 engine map: turning world beside the panel from frame " << first << ": strip error " << text
+                  << "; the labels kept their surface's depth in " << surfaces_kept << " of " << surfaces << " cells"
+                  << std::endl;
+        Check(first + 6 <= kFrames && strips[0].pixels > 1000, "engine map: turning: the vectors were not merged in");
+        Check(surfaces > 1000 && surfaces_kept == surfaces,
+              "engine map: turning: the labels did not keep their surface's depth (" + std::to_string(surfaces_kept) + " of " +
+                  std::to_string(surfaces) + " cells)");
+        for (std::size_t i = 2; i < runs.size(); ++i) {
+            Check(strips[i].mean <= strips[1].mean * 1.02 + 0.001,
+                  std::string("engine map: turning: the ") + runs[i].name + " map's strip beside the panel is worse than M3's (" +
+                      std::to_string(strips[i].mean) + " against " + std::to_string(strips[1].mean) + ")");
+            Check(views[i].mean <= std::min(views[0].mean, views[1].mean) * 1.05 + 0.0005,
+                  std::string("engine map: turning: the ") + runs[i].name + " map's view is worse than M3's or no map's (" +
+                      std::to_string(views[i].mean) + ")");
+        }
+    }
+    // The eye moving 4 cm a frame sideways, the world still, half an interval
+    // on (the panel 0.5 m off 6 pixels across): the merged map shows the
+    // panel where the separate eye-shift map does, within half a pixel (the
+    // horizontal offset that lines each up with the truth best, over the
+    // panel's inside).
+    {
+        const EngineScene scene{.square_speed = 0.0};
+        constexpr std::size_t kEyeFrames = 12;
+        const std::array<float, 3> shift{0.04f, 0.0f, 0.0f};
+        const EngineFrames frames = RenderEngineFrames(scene, false, kEyeFrames);
+        const auto truths = EngineTruths(scene, kEyeFrames, 0.5, shift);
+        std::vector<std::array<Pixels, 2>> separate, merged;
+        std::vector<std::array<bool, 2>> separate_merged, merged_merged;
+        RunEngineFrames(harness, frames,
+                        {.mode = FrameGenEngineMode::kAssist, .lock = true, .outputs = &separate, .merged = &separate_merged,
+                         .frames = kEyeFrames, .map = FrameGenEngineMap::kSeparate, .shift = shift});
+        RunEngineFrames(harness, frames,
+                        {.mode = FrameGenEngineMode::kAssist, .lock = true, .outputs = &merged, .merged = &merged_merged,
+                         .frames = kEyeFrames, .map = FrameGenEngineMap::kMerged, .shift = shift});
+        const std::size_t first = std::max(EngineMergedFrom(separate_merged), EngineMergedFrom(merged_merged));
+        // The panel's inside: 6 pixels from anything else.
+        const auto inside = EngineInside(truths, first, 1, 6);
+        const double separate_offset = EngineBestOffset(separate, truths, inside);
+        const double merged_offset = EngineBestOffset(merged, truths, inside);
+        std::cout << "D3D12 engine map: eye moving sideways from frame " << first << ": the panel " << separate_offset
+                  << " px off the truth with the separate maps, " << merged_offset << " px with the merged map" << std::endl;
+        Check(first + 4 <= kEyeFrames && std::abs(merged_offset - separate_offset) <= 0.5 && std::abs(separate_offset) <= 1.0,
+              "engine map: the merged map's parallax is not the separate eye-shift map's within half a pixel (" +
+                  std::to_string(merged_offset) + " against " + std::to_string(separate_offset) + ")");
+    }
+    // Every frame's verdict holding the vectors back (they point the other
+    // way: no cell labelled), the eye moving 8 cm a frame sideways, the square
+    // 4.5 m off beside the panel, half an interval on: the merged map moves
+    // content without a label by its flow and the eye's offset, so the square
+    // shows the parallax the separate eye-shift map gives it (within half a
+    // pixel; 1.4 pixels without it).
+    {
+        const EngineScene scene{.square_speed = 0.0, .square_distance = 4.5, .square_start = -1.2};
+        constexpr std::size_t kHeldFrames = 10;
+        const std::array<float, 3> shift{0.08f, 0.0f, 0.0f};
+        const EngineFrames frames = RenderEngineFrames(scene, false, kHeldFrames);
+        const auto truths = EngineTruths(scene, kHeldFrames, 0.5, shift);
+        std::vector<std::array<Pixels, 2>> separate, merged;
+        std::vector<std::array<bool, 2>> separate_merged, merged_merged;
+        std::size_t held = 0, labelled = 0;
+        auto count_held = [&](FrameGenGpu& gpu, std::size_t k) {
+            for (std::size_t e = 0; e < 2 && k < merged_merged.size(); ++e) {
+                if (!merged_merged[k][e]) continue;
+                std::vector<float> labels;
+                FrameGenExtent extent{};
+                std::uint32_t channels = 0;
+                if (!gpu.ReadTexture(e, {FrameGenTextureKind::kEngineLabels, 0}, labels, extent, channels)) continue;
+                ++labelled;
+                bool all = !labels.empty();
+                for (std::size_t i = 0; i < labels.size() && all; i += 2) {
+                    all = (static_cast<std::uint32_t>(labels[i]) & kFrameGenEngineLabelInvalid) != 0;
+                }
+                held += all ? 1 : 0;
+            }
+        };
+        RunEngineFrames(harness, frames,
+                        {.mode = FrameGenEngineMode::kAssist, .fault = EngineFault::kReversed, .lock = true,
+                         .outputs = &separate, .merged = &separate_merged, .frames = kHeldFrames,
+                         .map = FrameGenEngineMap::kSeparate, .shift = shift});
+        RunEngineFrames(harness, frames,
+                        {.mode = FrameGenEngineMode::kAssist, .fault = EngineFault::kReversed, .lock = true,
+                         .outputs = &merged, .merged = &merged_merged, .after = count_held, .frames = kHeldFrames,
+                         .map = FrameGenEngineMap::kMerged, .shift = shift});
+        const std::size_t first = std::max(EngineMergedFrom(separate_merged), EngineMergedFrom(merged_merged));
+        // The square, its edges against the sky included.
+        const auto inside = EngineInside(truths, first, 2, 0);
+        std::size_t pixels = 0;
+        for (const auto& eyes : inside) pixels += eyes[0].size() + eyes[1].size();
+        const double separate_offset = EngineBestOffset(separate, truths, inside);
+        const double merged_offset = EngineBestOffset(merged, truths, inside);
+        std::cout << "D3D12 engine map: the verdict holding the vectors back from frame " << first << " (" << held << " of "
+                  << labelled << " eyes' labels all held back), the eye moving sideways: the square " << separate_offset
+                  << " px off the truth with the separate maps, " << merged_offset << " px with the merged map (" << pixels
+                  << " pixels)" << std::endl;
+        Check(first + 4 <= kHeldFrames && held == labelled && labelled > 0 && pixels > 200 &&
+                  std::abs(merged_offset - separate_offset) <= 0.5,
+              "engine map: held back, the merged map's parallax of content without a label is not the separate eye-shift "
+              "map's within half a pixel (" +
+                  std::to_string(merged_offset) + " against " + std::to_string(separate_offset) + ")");
+    }
+    // A square 10 m off moving 9 pixels a frame across the world comes out
+    // from behind the panel: the panel stays in front of it (its pixels
+    // beside the square no worse than without a map), the square itself no
+    // worse either.
+    {
+        const EngineScene scene{.square_speed = 0.56, .square_distance = 10.0};
+        constexpr std::size_t kMoverFrames = 17;
+        const EngineFrames frames = RenderEngineFrames(scene, false, kMoverFrames);
+        const auto truths = EngineTruths(scene, kMoverFrames, 1.0);
+        std::vector<std::array<Pixels, 2>> none, separate, merged;
+        std::vector<std::array<bool, 2>> merged_flags;
+        RunEngineFrames(harness, frames,
+                        {.mode = FrameGenEngineMode::kAssist, .fraction = 1.0f, .lock = true, .outputs = &none,
+                         .frames = kMoverFrames});
+        RunEngineFrames(harness, frames,
+                        {.mode = FrameGenEngineMode::kAssist, .fraction = 1.0f, .lock = true, .outputs = &separate,
+                         .frames = kMoverFrames, .map = FrameGenEngineMap::kSeparate});
+        RunEngineFrames(harness, frames,
+                        {.mode = FrameGenEngineMode::kAssist, .fraction = 1.0f, .lock = true, .outputs = &merged,
+                         .merged = &merged_flags, .frames = kMoverFrames, .map = FrameGenEngineMap::kMerged});
+        const std::size_t first = EngineMergedFrom(merged_flags);
+        auto panel = [&](std::size_t k, int e, std::uint32_t x, std::uint32_t y) {
+            const EngineTruth& truth = truths[k][e];
+            return truth.kind[std::size_t{y} * kEngineSize + x] == 1 && EngineNear(truth, x, y, 6, 2);
+        };
+        auto square = [&](std::size_t k, int e, std::uint32_t x, std::uint32_t y) {
+            return truths[k][e].kind[std::size_t{y} * kEngineSize + x] == 2;
+        };
+        const EngineMapError panel_none = EngineMapErrorOf(none, truths, first, panel);
+        const EngineMapError square_none = EngineMapErrorOf(none, truths, first, square);
+        std::cout << "D3D12 engine map: a mover behind the panel from frame " << first << ": without a map the panel beside it "
+                  << panel_none.mean << " (" << panel_none.pixels << " pixels), the square " << square_none.mean;
+        for (const auto& [name, outputs] : {std::pair<const char*, const std::vector<std::array<Pixels, 2>>*>{"separate", &separate},
+                                            std::pair<const char*, const std::vector<std::array<Pixels, 2>>*>{"merged", &merged}}) {
+            const EngineMapError panel_map = EngineMapErrorOf(*outputs, truths, first, panel);
+            const EngineMapError square_map = EngineMapErrorOf(*outputs, truths, first, square);
+            std::cout << "; " << name << " " << panel_map.mean << ", the square " << square_map.mean;
+            Check(panel_none.pixels > 200 && panel_map.mean <= panel_none.mean * 1.02 + 0.001,
+                  std::string("engine map: the ") + name + " map moved the square over the panel (" +
+                      std::to_string(panel_map.mean) + " against " + std::to_string(panel_none.mean) + ")");
+            Check(square_map.mean <= square_none.mean * 1.05 + 0.002,
+                  std::string("engine map: the ") + name + " map moved the square worse than without a map (" +
+                      std::to_string(square_map.mean) + " against " + std::to_string(square_none.mean) + ")");
+        }
+        std::cout << std::endl;
+    }
+    // Just in time at 4x (a quarter, a half and three quarters of an
+    // interval on), the world turning and the eye moving: maps read again
+    // for the frame after (within kFrameGenEngineMapReuse) against maps built
+    // for each; the half-way frames built for each as the frames written
+    // together, byte for byte.
+    {
+        const EngineScene scene{.world_turn = 0.04, .square_speed = 0.0, .square_distance = 12.0};
+        constexpr std::size_t kJitFrames = 12;
+        const std::array<float, 3> shift{0.02f, 0.0f, 0.0f};
+        const std::vector<float> fractions{0.25f, 0.5f, 0.75f};
+        const EngineFrames frames = RenderEngineFrames(scene, false, kJitFrames);
+        std::vector<std::vector<std::array<Pixels, 2>>> built, reused;
+        std::vector<std::array<Pixels, 2>> together;
+        std::vector<std::array<bool, 2>> merged;
+        RunEngineFrames(harness, frames,
+                        {.mode = FrameGenEngineMode::kAssist, .lock = true, .merged = &merged, .frames = kJitFrames,
+                         .map = FrameGenEngineMap::kMerged, .shift = shift, .synthesize = fractions, .written = &built});
+        const EngineRunResult run =
+            RunEngineFrames(harness, frames,
+                            {.mode = FrameGenEngineMode::kAssist, .lock = true, .frames = kJitFrames,
+                             .map = FrameGenEngineMap::kMerged, .reuse = true, .shift = shift, .synthesize = fractions,
+                             .written = &reused});
+        RunEngineFrames(harness, frames,
+                        {.mode = FrameGenEngineMode::kAssist, .lock = true, .outputs = &together, .frames = kJitFrames,
+                         .map = FrameGenEngineMap::kMerged, .shift = shift});
+        const std::size_t first = EngineMergedFrom(merged);
+        auto view = [](std::size_t, int, std::uint32_t, std::uint32_t) { return true; };
+        std::string text;
+        double worst = 0.0;
+        for (std::size_t j = 0; j < fractions.size(); ++j) {
+            const auto truths = EngineTruths(scene, kJitFrames, fractions[j], shift);
+            const EngineMapError each = EngineMapErrorOf(EngineWrittenAt(built, j), truths, first, view);
+            const EngineMapError again = EngineMapErrorOf(EngineWrittenAt(reused, j), truths, first, view);
+            worst = std::max(worst, again.bad - each.bad);
+            text += std::string(j ? "; " : "") + std::to_string(fractions[j]) + ": " + std::to_string(each.bad * 100.0) +
+                    "% bad built, " + std::to_string(again.bad * 100.0) + "% read again";
+        }
+        std::size_t differing = 0, compared = 0;
+        const std::vector<std::array<Pixels, 2>> halfway = EngineWrittenAt(built, 1);
+        for (std::size_t k = first; k < halfway.size() && k < together.size(); ++k) {
+            for (int e = 0; e < 2; ++e) {
+                ++compared;
+                differing += halfway[k][e] == together[k][e] ? 0 : 1;
+            }
+        }
+        const FrameGenEngineValidation& v = run.status.validation;
+        std::cout << "D3D12 engine map: just in time at 4x from frame " << first << ": " << text << "; " << v.maps
+                  << " view frames with the map, " << v.maps_reused << " read again; half-way frames as written together: "
+                  << differing << " of " << compared << " differ" << std::endl;
+        Check(first + 4 <= kJitFrames && v.maps_reused >= 2 * (kJitFrames - first) && worst <= 0.002,
+              "engine map: maps read again for the next frame are not within 0.2% bad pixels of maps built for each (" +
+                  std::to_string(worst * 100.0) + "% worse, " + std::to_string(v.maps_reused) + " read again)");
+        Check(compared >= 8 && differing == 0,
+              "engine map: just in time differs from the frames written together (" + std::to_string(differing) + " of " +
+                  std::to_string(compared) + ")");
+    }
+    // Past one interval: the world turning steadily, a frame an interval and
+    // a half on with engine_reach 1.5 against the same frame held at one
+    // interval's motion.
+    {
+        const EngineScene scene{.world_turn = 0.03, .square_speed = 0.0, .square_distance = 12.0};
+        constexpr std::size_t kReachFrames = 12;
+        const EngineFrames frames = RenderEngineFrames(scene, false, kReachFrames);
+        const auto truths = EngineTruths(scene, kReachFrames, 1.5);
+        std::vector<std::vector<std::array<Pixels, 2>>> reached, held;
+        std::vector<std::array<bool, 2>> merged;
+        RunEngineFrames(harness, frames,
+                        {.mode = FrameGenEngineMode::kAssist, .lock = true, .merged = &merged, .frames = kReachFrames,
+                         .map = FrameGenEngineMap::kMerged, .reach = 1.5f, .synthesize = {1.5f}, .written = &reached});
+        RunEngineFrames(harness, frames,
+                        {.mode = FrameGenEngineMode::kAssist, .lock = true, .frames = kReachFrames,
+                         .map = FrameGenEngineMap::kMerged, .synthesize = {1.5f}, .written = &held});
+        const std::size_t first = EngineMergedFrom(merged);
+        auto view = [](std::size_t, int, std::uint32_t, std::uint32_t) { return true; };
+        const EngineMapError reach = EngineMapErrorOf(EngineWrittenAt(reached, 0), truths, first, view);
+        const EngineMapError one = EngineMapErrorOf(EngineWrittenAt(held, 0), truths, first, view);
+        std::cout << "D3D12 engine map: an interval and a half on from frame " << first << ": error " << reach.mean << " ("
+                  << reach.bad * 100.0 << "% bad) with the reach, " << one.mean << " (" << one.bad * 100.0
+                  << "% bad) held at one interval" << std::endl;
+        Check(first + 4 <= kReachFrames && reach.mean < one.mean && reach.bad < one.bad,
+              "engine map: the reach did not take the turning world closer to the scene past one interval (" +
+                  std::to_string(reach.mean) + " against " + std::to_string(one.mean) + ")");
+    }
+    // Observe labels nothing: the map changes no frame.
+    {
+        const EngineFrames frames = RenderEngineFrames(EngineScene{.world_turn = 0.04}, false, 10);
+        std::vector<std::array<Pixels, 2>> plain, mapped;
+        RunEngineFrames(harness, frames, {.mode = FrameGenEngineMode::kObserve, .outputs = &plain, .frames = 10});
+        RunEngineFrames(harness, frames,
+                        {.mode = FrameGenEngineMode::kObserve, .outputs = &mapped, .frames = 10, .map = FrameGenEngineMap::kMerged});
+        std::size_t differing = 0;
+        for (std::size_t k = 0; k < plain.size() && k < mapped.size(); ++k) {
+            for (int e = 0; e < 2; ++e) differing += plain[k][e] == mapped[k][e] ? 0 : 1;
+        }
+        std::cout << "D3D12 engine map: observing, " << differing << " frames differ with the map" << std::endl;
+        Check(plain.size() == 10 && mapped.size() == 10 && differing == 0, "engine map: observing, the map changed a frame");
     }
 }
 
