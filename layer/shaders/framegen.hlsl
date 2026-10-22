@@ -3391,10 +3391,10 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
 #define FG_ENGINE_LAG_TEXEL 18u
 #define FG_ENGINE_COCKPIT_LAG_TEXEL 20u
 #define FG_ENGINE_USED_TEXELS 25u
-#define FG_ENGINE_KIND_COCKPIT 0u
-#define FG_ENGINE_KIND_PHOTOMETRIC 1u
-#define FG_ENGINE_KIND_LAG 2u
-#define FG_ENGINE_KIND_COCKPIT_LAG 3u
+#define FG_ENGINE_KIND_COCKPIT 1u
+#define FG_ENGINE_KIND_PHOTOMETRIC 2u
+#define FG_ENGINE_KIND_LAG 4u
+#define FG_ENGINE_KIND_COCKPIT_LAG 8u
 #endif
 
 #if defined(FG_PASS_ENGINE_REDUCE)
@@ -3408,48 +3408,54 @@ FG_BIND(0) Texture2D<float4> g_raw : register(t0);
 FG_BIND(1) Texture2D<float4> g_luma_current : register(t1);
 FG_BIND(2) Texture2D<float4> g_luma_previous : register(t2);
 FG_BIND(3) Texture2D<float4> g_depth : register(t3);
-Texture2D<float4> g_flow : register(t4);   // the measured flow at the final level; the lag kind: this frame's raw field
-Texture2D<float4> g_params : register(t5); // the solve's first stage: texel 0 holds the frame's bias (uv)
+Texture2D<float4> g_flow : register(t4); // the measured flow at the final level
+// The field before; with FG_ENGINE_BIAS the solve's first stage (texel 0:
+// the frame's bias).
+Texture2D<float4> g_before : register(t5);
 FG_BIND(4) FG_FORMAT("rgba32f") RWTexture2D<float4> g_partials : register(u0);
+FG_BIND(6) SamplerState g_linear : register(s0);
 
 // The evidence on a frame's raw vectors (t0, half resolution, as the game
 // wrote them: the capture's sentinel, and anything past its limit, is no
 // vector), one sample per thread of a grid of size.xy over the half-
 // resolution extent size.zw, each at the centre of its texel. A vector as
 // rendered (uv, y down, current minus previous) is tuning.xy * raw +
-// tuning.zw: unit gains for the cockpit kinds, so e = (2 x, -2 y) is the
-// vector as decoded; the convention under test for the others, the frame's
-// bias (t5) taken out. Samples are chosen by what the luma shows (t1, and
-// t2: the previous frame mapped into this view by the declared poses,
-// negative where unseen), never by assuming near content is still:
+// tuning.zw in the convention under test; the cockpit kinds take it as that
+// convention reads it in NDC (e = (2 x, -2 y): its gain times the vector as
+// decoded less its offset), which ReadFrameGenEngineEvidence takes back to
+// as decoded. Samples are chosen by what the luma shows (t1, and t2: the
+// previous frame mapped into this view by the declared poses, negative
+// where unseen), never by assuming near content is still:
 //   textured: the 3x3 luma around varies by FG_ENGINE_TEXTURE;
 //   still: the previous frame's 3x3 luma within FG_ENGINE_STILL of it, the
 //     head's movement taken out, every texel seen.
-// Kinds (options.x bits 0-1; from bit 4 the camera: 0 the head included, 1
-// its rotation only, 2 excluded, 3 objects only; bit 8: the measured flow is
-// bound):
-//   cockpit (and the cockpit against the pair before, whose constants carry
-//     that pair's poses): per axis, still content's e against the head's
-//     movement there (p, NDC current minus previous: p_r by rotation alone,
-//     p_t what translation adds at the resolved depth, t3; any depth, but
-//     none or disproved), with the cross-axis sums; and against the measured
-//     flow (t4) where it is clear (cost below FG_ENGINE_CLEAR, seen, shorter
-//     than 64 pixels): q, its displacement as rendered with the head's
-//     movement, and h, without it;
+// Kinds (options.x bits 0-3, those the dispatch sums; from bit 4 the camera:
+// 0 the head included, 1 its rotation only, 2 excluded, 3 objects only; bit
+// 8: the measured flow is bound; bit 9: t5 holds the frame's bias):
+//   cockpit (and, alone, the cockpit against the pair before, whose
+//     constants carry that pair's poses): per axis, still content's e
+//     against the head's movement there (p, NDC current minus previous: p_r
+//     by rotation alone, p_t what translation adds at the resolved depth,
+//     t3; any depth, but none or disproved), with the cross-axis sums; and
+//     against the measured flow (t4) where it is clear (cost below
+//     FG_ENGINE_CLEAR, seen, shorter than 64 pixels): q, its displacement as
+//     rendered with the head's movement, and h, without it;
 //   photometric: textured, seen samples' 3x3 luma error with the previous
 //     frame read where each of 8 variants of the convention moves the
 //     content (bit 0 flips y, bit 1 the direction, bit 2 toggles the head;
-//     variant 0 the convention itself), with no motion and with the
-//     measured flow; still near content's inliers; the distance from the
-//     measured flow by depth band; the head's movement and the vectors'
-//     length (pixels), and the measured flow's;
-//   lag: the field before (t0) and this frame's (t4) by the same error.
+//     variant 0 the convention itself, the frame's bias taken out with bit
+//     9), with no motion and with the measured flow; still near content's
+//     inliers; the distance from the measured flow by depth band; the head's
+//     movement and the vectors' length (pixels), and the measured flow's;
+//   lag: the field before (t5) and this frame's by the same error, the bias
+//     taken out of neither (a jittered field carries its own frame's).
 // The photometric and lag kinds leave out what the merge never takes from
 // the vectors (FG_PASS_ENGINE_MERGE): absent vectors, and with depth,
 // samples without it (disproved by the other eye: scenery behind glass, the
 // box MSFS 2024 draws into its depth).
-// Each group sums its samples into its kind's texels of the partials.
-#define FG_ENGINE_TERMS 44
+// Each thread writes its sample's terms into the group's shared memory, a
+// row per term; a thread per row then sums it into the kinds' texels of the
+// partials.
 #define FG_ENGINE_RAW_VALID 16.0
 #define FG_ENGINE_TEXTURE 0.02
 #define FG_ENGINE_STILL 0.03
@@ -3458,8 +3464,18 @@ FG_BIND(4) FG_FORMAT("rgba32f") RWTexture2D<float4> g_partials : register(u0);
 #define FG_ENGINE_WORLD 30.0
 #define FG_ENGINE_SKY (0.5 * FG_FAR_DEPTH)
 #define FG_ENGINE_MEASURED 256u
-// Term by thread: a wave's threads read neighbouring words.
-groupshared float g_engine_terms[FG_ENGINE_TERMS][64];
+#define FG_ENGINE_BIAS 512u
+// The terms of texels 0 to 19 (the cockpit kind's, the photometric's, the
+// lag's; the cockpit against the pair before takes the cockpit's first 20),
+// each row a word longer than the group so that the threads summing rows
+// read different banks.
+#define FG_ENGINE_TERMS 80u
+#define FG_ENGINE_ROW 65u
+groupshared float g_engine_terms[FG_ENGINE_TERMS * FG_ENGINE_ROW];
+
+void EngineTerm(uint index, uint term, float value) {
+    g_engine_terms[term * FG_ENGINE_ROW + index] = value;
+}
 
 // The luma images are the half-resolution extent (size.zw).
 float EngineLuma(int2 q) {
@@ -3471,29 +3487,48 @@ float EnginePrevious(int2 q) {
     return any(q < 0) || any(q >= int2(g.size.zw)) ? -1.0 : g_luma_previous.Load(int3(q, 0)).r;
 }
 
-// ...between texels (`at` in texels), bilinear: -1 where any of its four
-// texels is unseen.
-float EnginePreviousAt(float2 at) {
-    const float2 p = at - 0.5;
-    const int2 base = int2(floor(p));
-    const float2 f = p - float2(base);
-    const float a = EnginePrevious(base), b = EnginePrevious(base + int2(1, 0));
-    const float c = EnginePrevious(base + int2(0, 1)), d = EnginePrevious(base + int2(1, 1));
-    if (min(min(a, b), min(c, d)) < 0.0) {
-        return -1.0;
-    }
-    return lerp(lerp(a, b, f.x), lerp(c, d, f.x), f.y);
-}
-
 // The mean luma error of the 3x3 texels around q (`current`: their luma)
-// with the content moved by v (uv): the previous frame read v before each.
-float EngineCost(int2 q, float current[9], float2 v) {
-    const float2 shift = v * float2(g.size.zw);
+// with the content moved by v (uv): the previous frame read v before each,
+// bilinear (FG_INVALID_PENALTY where any of a read's four texels is unseen;
+// `seen` false then). The nine reads share their fraction, so the 4x4
+// texels around are fetched once: inside the image (nearly always), four
+// gathers of 2x2 texels each, which return (bottom left, bottom right, top
+// right, top left) of their quad.
+float EngineCost(int2 q, float current[9], float2 v, out bool seen) {
+    const float2 p = float2(q) - v * float2(g.size.zw);
+    const int2 base = int2(floor(p)) - 1;
+    const float2 f = p - floor(p);
+    float previous[16];
+    [branch]
+    if (all(base >= 0) && all(base + 3 < int2(g.size.zw))) {
+        const float2 texel = 1.0 / float2(g.size.zw);
+        [unroll]
+        for (uint y = 0u; y < 4u; y += 2u) {
+            [unroll]
+            for (uint x = 0u; x < 4u; x += 2u) {
+                const float4 quad = g_luma_previous.GatherRed(g_linear, (float2(base + int2(x, y)) + 1.0) * texel);
+                previous[(y + 1u) * 4u + x] = quad.x;
+                previous[(y + 1u) * 4u + x + 1u] = quad.y;
+                previous[y * 4u + x + 1u] = quad.z;
+                previous[y * 4u + x] = quad.w;
+            }
+        }
+    } else {
+        [unroll]
+        for (uint i = 0u; i < 16u; ++i) {
+            previous[i] = EnginePrevious(base + int2(i & 3u, i >> 2));
+        }
+    }
     float sum = 0.0;
+    seen = true;
     [unroll]
-    for (int i = 0; i < 9; ++i) {
-        const float previous = EnginePreviousAt(float2(q + int2(i % 3 - 1, i / 3 - 1)) + 0.5 - shift);
-        sum += previous < 0.0 ? FG_INVALID_PENALTY : abs(current[i] - previous);
+    for (uint k = 0u; k < 9u; ++k) {
+        const uint corner = (k / 3u) * 4u + k % 3u;
+        const float a = previous[corner], b = previous[corner + 1u];
+        const float c = previous[corner + 4u], d = previous[corner + 5u];
+        const bool inside = min(min(a, b), min(c, d)) >= 0.0;
+        seen = seen && inside;
+        sum += inside ? abs(current[k] - lerp(lerp(a, b, f.x), lerp(c, d, f.x), f.y)) : FG_INVALID_PENALTY;
     }
     return sum / 9.0;
 }
@@ -3524,18 +3559,18 @@ bool EnginePrediction(float2 uv, float z, out float2 p) {
     return inside;
 }
 
-// One axis's fit sums at `first`, in FrameGenEngineAxisFit::FromSums' order.
-void EngineAxis(inout float terms[FG_ENGINE_TERMS], int first, float e, float rotation, float translation) {
-    terms[first] += 1.0;
-    terms[first + 1] += rotation;
-    terms[first + 2] += translation;
-    terms[first + 3] += e;
-    terms[first + 4] += rotation * rotation;
-    terms[first + 5] += translation * translation;
-    terms[first + 6] += rotation * translation;
-    terms[first + 7] += e * rotation;
-    terms[first + 8] += e * translation;
-    terms[first + 9] += e * e;
+// One axis's fit terms from `first`, in FrameGenEngineAxisFit::FromSums' order.
+void EngineAxis(uint index, uint first, float e, float rotation, float translation) {
+    EngineTerm(index, first, 1.0);
+    EngineTerm(index, first + 1u, rotation);
+    EngineTerm(index, first + 2u, translation);
+    EngineTerm(index, first + 3u, e);
+    EngineTerm(index, first + 4u, rotation * rotation);
+    EngineTerm(index, first + 5u, translation * translation);
+    EngineTerm(index, first + 6u, rotation * translation);
+    EngineTerm(index, first + 7u, e * rotation);
+    EngineTerm(index, first + 8u, e * translation);
+    EngineTerm(index, first + 9u, e * e);
 }
 
 // The measured flow (t4) of the cell at uv.
@@ -3551,14 +3586,24 @@ bool EngineValid(float2 raw) {
 
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint index : SV_GroupIndex) {
-    float terms[FG_ENGINE_TERMS];
-    [unroll]
-    for (int i = 0; i < FG_ENGINE_TERMS; ++i) {
-        terms[i] = 0.0;
-    }
-    const uint kind = g.options.x & 3u;
+    const uint kinds = g.options.x & 15u;
     const uint camera = (g.options.x >> 4) & 3u;
     const bool measured = (g.options.x & FG_ENGINE_MEASURED) != 0u;
+    const bool cockpit_kind = (kinds & (FG_ENGINE_KIND_COCKPIT | FG_ENGINE_KIND_COCKPIT_LAG)) != 0u;
+    // The terms this dispatch's kinds sum, from the first kind's to the last
+    // kind's (the cockpit against the pair before: the cockpit's first 20).
+    const uint pair_texels = FG_ENGINE_USED_TEXELS - FG_ENGINE_COCKPIT_LAG_TEXEL;
+    const uint first = cockpit_kind                                 ? 0u
+                       : (kinds & FG_ENGINE_KIND_PHOTOMETRIC) != 0u ? 4u * FG_ENGINE_PHOTOMETRIC_TEXEL
+                                                                   : 4u * FG_ENGINE_LAG_TEXEL;
+    const uint last = (kinds & FG_ENGINE_KIND_LAG) != 0u           ? 4u * (FG_ENGINE_LAG_TEXEL + 2u)
+                      : (kinds & FG_ENGINE_KIND_PHOTOMETRIC) != 0u ? 4u * FG_ENGINE_LAG_TEXEL
+                      : (kinds & FG_ENGINE_KIND_COCKPIT) != 0u     ? 4u * FG_ENGINE_PHOTOMETRIC_TEXEL
+                                                                   : 4u * pair_texels;
+    [unroll]
+    for (uint cleared = 0u; cleared < FG_ENGINE_TERMS; ++cleared) {
+        EngineTerm(index, cleared, 0.0);
+    }
     if (all(id.xy < g.size.xy)) {
         const float2 extent = float2(g.size.zw);
         const int2 q = min(int2((float2(id.xy) + 0.5) / float2(g.size.xy) * extent), int2(g.size.zw) - 1);
@@ -3572,6 +3617,8 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint index
         const bool valid = EngineValid(raw) && !EngineAbsent(raw, uv, z, camera);
         const bool measurable = z > 0.0 || (g.options.y & FG_FLAG_DEPTH) == 0u;
         const float depth = z > 0.0 ? z : 0.0;
+        const bool head = camera <= 1u;
+        const float head_z = camera == 0u ? depth : 0.0;
         float current[9];
         float mean = 0.0, squares = 0.0, still = 0.0;
         bool seen = true;
@@ -3589,46 +3636,48 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint index
         const bool textured = sqrt(max(squares / 9.0 - mean * mean, 0.0)) > FG_ENGINE_TEXTURE;
         const bool still_content = seen && still / 9.0 < FG_ENGINE_STILL;
         const float2 delta = g.tuning.xy * raw + g.tuning.zw;
-        if (kind == FG_ENGINE_KIND_COCKPIT || kind == FG_ENGINE_KIND_COCKPIT_LAG) {
+        if (cockpit_kind) {
             const float2 e = float2(2.0 * delta.x, -2.0 * delta.y);
             float2 rotation, full;
             if (valid && textured && still_content && z > 0.0 && EnginePrediction(uv, 0.0, rotation) &&
                 EnginePrediction(uv, depth, full)) {
                 const float2 translation = full - rotation;
-                EngineAxis(terms, 0, e.x, rotation.x, translation.x);
-                EngineAxis(terms, 10, e.y, rotation.y, translation.y);
-                terms[20] += e.x * rotation.y;
-                terms[21] += e.y * rotation.x;
+                EngineAxis(index, 0u, e.x, rotation.x, translation.x);
+                EngineAxis(index, 10u, e.y, rotation.y, translation.y);
+                EngineTerm(index, 20u, e.x * rotation.y);
+                EngineTerm(index, 21u, e.y * rotation.x);
             }
-            if (kind == FG_ENGINE_KIND_COCKPIT && measured && valid && z > 0.0) {
+            if ((kinds & FG_ENGINE_KIND_COCKPIT) != 0u && measured && valid && z > 0.0) {
                 const float4 flow = EngineMeasured(uv);
                 float2 before_uv;
                 if (flow.z < FG_ENGINE_CLEAR && flow.w >= 0.0 && length(flow.xy * pixels) < 64.0 &&
                     MapToPrevious(uv - flow.xy, depth, before_uv)) {
                     const float2 with_head = float2(2.0 * (uv.x - before_uv.x), -2.0 * (uv.y - before_uv.y));
                     const float2 without = float2(2.0 * flow.x, -2.0 * flow.y);
-                    EngineAxis(terms, 22, e.x, with_head.x, without.x);
-                    EngineAxis(terms, 32, e.y, with_head.y, without.y);
-                    terms[42] += dot(with_head - without, with_head - without);
+                    EngineAxis(index, 22u, e.x, with_head.x, without.x);
+                    EngineAxis(index, 32u, e.y, with_head.y, without.y);
+                    EngineTerm(index, 42u, dot(with_head - without, with_head - without));
                 }
             }
-        } else if (kind == FG_ENGINE_KIND_PHOTOMETRIC) {
-            const float2 rendered = delta - g_params.Load(int3(0, 0, 0)).xy;
-            const bool head = camera <= 1u;
-            const float head_z = camera == 0u ? depth : 0.0;
+        }
+        // Variant 0 where the photometric kind scored it with no bias taken
+        // out: this frame's for the lag kind.
+        float2 variant0 = float2(0.0, 0.0);
+        float cost0 = 0.0;
+        bool scored = false;
+        if ((kinds & FG_ENGINE_KIND_PHOTOMETRIC) != 0u) {
+            const uint p = 4u * FG_ENGINE_PHOTOMETRIC_TEXEL;
+            const bool bias = (g.options.x & FG_ENGINE_BIAS) != 0u;
+            const float2 rendered = bias ? delta - g_before.Load(int3(0, 0, 0)).xy : delta;
             float2 full;
             const bool predicted = z > 0.0 && EnginePrediction(uv, depth, full);
             if (valid && predicted) {
-                terms[24] += length(full * extent);
-                terms[25] += length(rendered * pixels);
-                terms[26] += 1.0;
+                EngineTerm(index, p + 24u, length(full * extent));
+                EngineTerm(index, p + 25u, length(rendered * pixels));
+                EngineTerm(index, p + 26u, 1.0);
             }
             if (valid && textured && seen && measurable) {
-                float2 variant0 = float2(0.0, 0.0);
-                float cost0 = 0.0;
-                // Unrolled (and the bands below are branches) so that every
-                // term's index is known when compiling: an array indexed at
-                // run time is kept in memory instead of registers.
+                bool seen0 = false;
                 [unroll]
                 for (uint c = 0u; c < 8u; ++c) {
                     const float direction = (c & 2u) != 0u ? -1.0 : 1.0;
@@ -3637,40 +3686,50 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint index
                     float2 v;
                     const bool mapped = EngineFlow(uv, rendered * float2(direction, direction * flip), toggled,
                                                    (c & 4u) != 0u ? depth : head_z, v);
-                    const float cost = mapped ? EngineCost(q, current, v) : FG_INVALID_PENALTY;
-                    terms[c] += cost;
+                    bool complete = false;
+                    const float cost = mapped ? EngineCost(q, current, v, complete) : FG_INVALID_PENALTY;
+                    EngineTerm(index, p + c, cost);
                     if (c == 0u) {
                         variant0 = v;
                         cost0 = cost;
+                        seen0 = mapped && complete;
                     }
                 }
-                const float zero = EngineCost(q, current, float2(0.0, 0.0));
-                terms[8] += zero;
-                terms[10] += 1.0;
-                if (length(variant0 * pixels) > 1.0) {
-                    terms[12] += 1.0;
-                    terms[14] += cost0;
-                    terms[15] += zero;
+                scored = !bias;
+                bool unused;
+                const float zero = EngineCost(q, current, float2(0.0, 0.0), unused);
+                EngineTerm(index, p + 8u, zero);
+                EngineTerm(index, p + 10u, 1.0);
+                // Content the vectors move, where the previous frame was seen
+                // under both readings. The luma pass's static-world test marks
+                // a moving object's place before unseen where it stood in
+                // front of what shows there now: the vectors' reading pays
+                // FG_INVALID_PENALTY there, no motion's (the 3x3 around, seen)
+                // never does.
+                if (seen0 && length(variant0 * pixels) > 1.0) {
+                    EngineTerm(index, p + 12u, 1.0);
+                    EngineTerm(index, p + 14u, cost0);
+                    EngineTerm(index, p + 15u, zero);
                 }
                 if (measured) {
                     const float4 flow = EngineMeasured(uv);
-                    const float cost_measured = EngineCost(q, current, flow.xy);
-                    terms[9] += cost_measured;
-                    terms[11] += 1.0;
-                    terms[13] += cost0 <= 1.25 * cost_measured + 0.01 ? 1.0 : 0.0;
-                    terms[27] += length(flow.xy * pixels);
+                    const float cost_measured = EngineCost(q, current, flow.xy, unused);
+                    EngineTerm(index, p + 9u, cost_measured);
+                    EngineTerm(index, p + 11u, 1.0);
+                    EngineTerm(index, p + 13u, cost0 <= 1.25 * cost_measured + 0.01 ? 1.0 : 0.0);
+                    EngineTerm(index, p + 27u, length(flow.xy * pixels));
                     // Bands: nearer than 4 m, from 30 m to the sky, the sky.
                     if (flow.w >= 0.0 && z > 0.0) {
                         const float apart = length((variant0 - flow.xy) * pixels);
                         if (z < FG_ENGINE_NEAR) {
-                            terms[18] += apart;
-                            terms[19] += 1.0;
+                            EngineTerm(index, p + 18u, apart);
+                            EngineTerm(index, p + 19u, 1.0);
                         } else if (z >= FG_ENGINE_WORLD && z < FG_ENGINE_SKY) {
-                            terms[20] += apart;
-                            terms[21] += 1.0;
+                            EngineTerm(index, p + 20u, apart);
+                            EngineTerm(index, p + 21u, 1.0);
                         } else if (z >= FG_ENGINE_SKY) {
-                            terms[22] += apart;
-                            terms[23] += 1.0;
+                            EngineTerm(index, p + 22u, apart);
+                            EngineTerm(index, p + 23u, 1.0);
                         }
                     }
                 }
@@ -3682,68 +3741,71 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint index
                 const float2 expected = camera == 0u ? full : camera == 1u ? rotation : float2(0.0, 0.0);
                 const float2 moved = float2(2.0 * rendered.x, -2.0 * rendered.y);
                 const float miss = length((moved - expected) * extent);
-                terms[16] += miss < max(1.5, 0.2 * length(expected * extent)) ? 1.0 : 0.0;
-                terms[17] += 1.0;
+                EngineTerm(index, p + 16u, miss < max(1.5, 0.2 * length(expected * extent)) ? 1.0 : 0.0);
+                EngineTerm(index, p + 17u, 1.0);
             }
-        } else {
-            // The field before (t0) and this frame's (t4), on the samples both have.
-            const float2 now_raw = g_flow.Load(int3(q, 0)).rg;
-            if (valid && EngineValid(now_raw) && textured && seen && measurable) {
-                const float2 bias = g_params.Load(int3(0, 0, 0)).xy;
-                const bool head = camera <= 1u;
-                const float head_z = camera == 0u ? depth : 0.0;
-                float2 before, now;
-                const bool mapped_before = EngineFlow(uv, delta - bias, head, head_z, before);
-                const bool mapped_now = EngineFlow(uv, g.tuning.xy * now_raw + g.tuning.zw - bias, head, head_z, now);
-                const float cost_before = mapped_before ? EngineCost(q, current, before) : FG_INVALID_PENALTY;
-                const float cost_now = mapped_now ? EngineCost(q, current, now) : FG_INVALID_PENALTY;
-                terms[0] += cost_before;
-                terms[1] += cost_now;
-                terms[2] += 1.0;
+        }
+        if ((kinds & FG_ENGINE_KIND_LAG) != 0u) {
+            // The field before (t5) and this frame's, on the samples both have.
+            const uint l = 4u * FG_ENGINE_LAG_TEXEL;
+            const float2 before_raw = g_before.Load(int3(q, 0)).rg;
+            if (valid && EngineValid(before_raw) && !EngineAbsent(before_raw, uv, z, camera) && textured && seen &&
+                measurable) {
+                bool unused;
+                float2 before;
+                const bool mapped_before = EngineFlow(uv, g.tuning.xy * before_raw + g.tuning.zw, head, head_z, before);
+                const float cost_before = mapped_before ? EngineCost(q, current, before, unused) : FG_INVALID_PENALTY;
+                float2 now = variant0;
+                float cost_now = cost0;
+                if (!scored) {
+                    const bool mapped_now = EngineFlow(uv, delta, head, head_z, now);
+                    cost_now = mapped_now ? EngineCost(q, current, now, unused) : FG_INVALID_PENALTY;
+                }
+                EngineTerm(index, l, cost_before);
+                EngineTerm(index, l + 1u, cost_now);
+                EngineTerm(index, l + 2u, 1.0);
                 if (length(now * pixels) > 1.0) {
-                    terms[3] += cost_before;
-                    terms[4] += cost_now;
-                    terms[5] += 1.0;
+                    EngineTerm(index, l + 3u, cost_before);
+                    EngineTerm(index, l + 4u, cost_now);
+                    EngineTerm(index, l + 5u, 1.0);
                 }
             }
         }
-    }
-    // The group's sums of the kind's own terms (its texels' worth).
-    const uint texels = kind == FG_ENGINE_KIND_COCKPIT       ? 11u
-                        : kind == FG_ENGINE_KIND_PHOTOMETRIC ? 7u
-                        : kind == FG_ENGINE_KIND_LAG         ? 2u
-                                                             : 5u;
-    [unroll]
-    for (int term = 0; term < FG_ENGINE_TERMS; ++term) {
-        g_engine_terms[term][index] = terms[term];
     }
     GroupMemoryBarrierWithGroupSync();
+    // A thread per term sums its row (four sums at a time, so the reads
+    // overlap) into the row's first word.
     [unroll]
-    for (uint stride = 32u; stride > 0u; stride >>= 1) {
-        if (index < stride) {
+    for (uint turn = 0u; turn < 2u; ++turn) {
+        const uint term = index + 64u * turn;
+        if (term >= first && term < last) {
+            const uint row = term * FG_ENGINE_ROW;
+            float4 sums = float4(0.0, 0.0, 0.0, 0.0);
             [unroll]
-            for (uint sum = 0u; sum < uint(FG_ENGINE_TERMS); ++sum) {
-                if (sum < 4u * texels) {
-                    g_engine_terms[sum][index] += g_engine_terms[sum][index + stride];
-                }
+            for (uint i = 0u; i < 64u; i += 4u) {
+                sums += float4(g_engine_terms[row + i], g_engine_terms[row + i + 1u], g_engine_terms[row + i + 2u],
+                               g_engine_terms[row + i + 3u]);
             }
+            g_engine_terms[row] = (sums.x + sums.y) + (sums.z + sums.w);
         }
-        GroupMemoryBarrierWithGroupSync();
     }
-    if (index == 0u) {
-        const uint first = kind == FG_ENGINE_KIND_COCKPIT       ? FG_ENGINE_COCKPIT_TEXEL
-                           : kind == FG_ENGINE_KIND_PHOTOMETRIC ? FG_ENGINE_PHOTOMETRIC_TEXEL
-                           : kind == FG_ENGINE_KIND_LAG         ? FG_ENGINE_LAG_TEXEL
-                                                                : FG_ENGINE_COCKPIT_LAG_TEXEL;
+    GroupMemoryBarrierWithGroupSync();
+    // The kinds' texels of the group's partials (the cockpit against the
+    // pair before's at its own).
+    const uint texel = index;
+    const bool written = texel < FG_ENGINE_PHOTOMETRIC_TEXEL
+                             ? (kinds & FG_ENGINE_KIND_COCKPIT) != 0u ||
+                                   ((kinds & FG_ENGINE_KIND_COCKPIT_LAG) != 0u && texel < pair_texels)
+                         : texel < FG_ENGINE_LAG_TEXEL      ? (kinds & FG_ENGINE_KIND_PHOTOMETRIC) != 0u
+                         : texel < FG_ENGINE_LAG_TEXEL + 2u ? (kinds & FG_ENGINE_KIND_LAG) != 0u
+                                                            : false;
+    if (written) {
         const uint slot = group.y * ((g.size.x + 7u) / 8u) + group.x;
-        [unroll]
-        for (uint texel = 0u; texel < 11u; ++texel) {
-            if (texel < texels) {
-                g_partials[uint2(slot * FG_ENGINE_PARTIAL_TEXELS + first + texel, 0u)] =
-                    float4(g_engine_terms[4 * texel][0], g_engine_terms[4 * texel + 1][0],
-                           g_engine_terms[4 * texel + 2][0], g_engine_terms[4 * texel + 3][0]);
-            }
-        }
+        const uint place = (kinds & FG_ENGINE_KIND_COCKPIT_LAG) != 0u ? FG_ENGINE_COCKPIT_LAG_TEXEL + texel : texel;
+        const uint row = 4u * texel * FG_ENGINE_ROW;
+        g_partials[uint2(slot * FG_ENGINE_PARTIAL_TEXELS + place, 0u)] =
+            float4(g_engine_terms[row], g_engine_terms[row + FG_ENGINE_ROW], g_engine_terms[row + 2u * FG_ENGINE_ROW],
+                   g_engine_terms[row + 3u * FG_ENGINE_ROW]);
     }
 }
 #endif
@@ -3765,9 +3827,10 @@ FG_BIND(5) FG_FORMAT("rgba32f") RWTexture2D<float4> g_evidence : register(u1);
 // Sums the evidence passes' partials (one group) and solves the frame:
 //   stage 0 (options.x bits 0-3), after the cockpit kind: with a jittered
 //     convention, the bias in still content's vectors (their mean less what
-//     the convention's gain, tuning.xy, makes of the head's movement there)
-//     into params texel 0 in uv, for the other kinds to take out; texel 1:
-//     the cockpit fit's a and b per axis (0 where it does not solve);
+//     the convention makes of the head's movement there) into params texel
+//     0 in uv, for the photometric kind to take out; texel 1: the cockpit
+//     fit's a and b per axis as the convention reads the vectors (1 and b/a
+//     where its gain is right; 0 where it does not solve);
 //   stage 1, after every kind: the same, the frame's verdict (0: its
 //     vectors may be used, else the kFrameGenEngineVerdict* reasons) in
 //     texel 0's z with the cockpit's inlier share in its w, the photometric
@@ -3775,9 +3838,11 @@ FG_BIND(5) FG_FORMAT("rgba32f") RWTexture2D<float4> g_evidence : register(u1);
 //     3), the verdict alone in texel 4 (its first 8 bytes are zero exactly
 //     when the vectors may be used: what a predicate copies); into u1 the
 //     sums themselves, those of kinds that did not run zero.
-// The first stage sums the cockpit fit's texels alone. Each thread sums its
-// share of the groups for every texel with the loads in flight together,
-// then one tree sums the threads.
+// The first stage sums the cockpit fit's texels alone. The plan dispatches
+// one group's worth of threads (8 x 8); the group is 256 threads, 8 a texel,
+// each summing every eighth group's texel with 16 loads in flight at a time
+// (one group waits on its loads, not on its arithmetic), then a thread a
+// texel summing theirs.
 // From bit 4: locked, jittered, no measured flow (Lead's photometric test,
 // against no motion), the field before was the frame before's (the lag
 // kind ran, and its census is the frame before's: the stale test), the
@@ -3789,65 +3854,64 @@ FG_BIND(5) FG_FORMAT("rgba32f") RWTexture2D<float4> g_evidence : register(u1);
 #define FG_ENGINE_BEFORE 128u
 #define FG_ENGINE_PAIR_BEFORE 256u
 #define FG_ENGINE_FIT_TEXELS 5u
-groupshared float4 g_engine_sum[FG_ENGINE_USED_TEXELS][64];
+#define FG_ENGINE_SOLVE_PARTS 8u
+groupshared float4 g_engine_sum[FG_ENGINE_PARTIAL_TEXELS * FG_ENGINE_SOLVE_PARTS];
 
-[numthreads(8, 8, 1)]
-void CSMain(uint3 id : SV_DispatchThreadID, uint index : SV_GroupIndex) {
+[numthreads(32, 8, 1)]
+void CSMain(uint3 thread : SV_GroupThreadID, uint index : SV_GroupIndex) {
     uint width, height;
     g_partials.GetDimensions(width, height);
     const uint groups = width / FG_ENGINE_PARTIAL_TEXELS;
     const uint stage = g.options.x & 15u;
     const uint texels = stage == 0u ? FG_ENGINE_FIT_TEXELS : FG_ENGINE_USED_TEXELS;
-    float4 total[FG_ENGINE_USED_TEXELS];
-    [unroll]
-    for (uint cleared = 0u; cleared < FG_ENGINE_USED_TEXELS; ++cleared) {
-        total[cleared] = float4(0.0, 0.0, 0.0, 0.0);
-    }
-    [loop]
-    for (uint slot = index; slot < groups; slot += 64u) {
-        [unroll]
-        for (uint loaded = 0u; loaded < FG_ENGINE_USED_TEXELS; ++loaded) {
-            if (loaded < texels) {
-                total[loaded] += g_partials.Load(int3(int(slot * FG_ENGINE_PARTIAL_TEXELS + loaded), 0, 0));
-            }
-        }
-    }
-    [unroll]
-    for (uint stored = 0u; stored < FG_ENGINE_USED_TEXELS; ++stored) {
-        g_engine_sum[stored][index] = total[stored];
-    }
-    GroupMemoryBarrierWithGroupSync();
-    [unroll]
-    for (uint stride = 32u; stride > 0u; stride >>= 1) {
-        if (index < stride) {
+    const bool before = (g.options.x & FG_ENGINE_BEFORE) != 0u;
+    const uint texel = thread.x;
+    float4 sum = float4(0.0, 0.0, 0.0, 0.0);
+    if (texel < texels) {
+        // No branch between the loads, so that they are in flight together:
+        // past the last group they read outside the partials, which is zero.
+        [loop]
+        for (uint slot = thread.y; slot < groups; slot += 16u * FG_ENGINE_SOLVE_PARTS) {
+            float4 loaded[16];
             [unroll]
-            for (uint texel = 0u; texel < FG_ENGINE_USED_TEXELS; ++texel) {
-                if (texel < texels) {
-                    g_engine_sum[texel][index] += g_engine_sum[texel][index + stride];
+            for (uint k = 0u; k < 16u; ++k) {
+                loaded[k] = g_partials.Load(
+                    int3(int((slot + FG_ENGINE_SOLVE_PARTS * k) * FG_ENGINE_PARTIAL_TEXELS + texel), 0, 0));
+            }
+            [unroll]
+            for (uint span = 8u; span > 0u; span >>= 1) {
+                [unroll]
+                for (uint k = 0u; k < span; ++k) {
+                    loaded[k] += loaded[k + span];
                 }
             }
+            sum += loaded[0];
         }
-        GroupMemoryBarrierWithGroupSync();
     }
+    g_engine_sum[index] = sum;
+    GroupMemoryBarrierWithGroupSync();
+    if (index < FG_ENGINE_PARTIAL_TEXELS) {
+        float4 total = float4(0.0, 0.0, 0.0, 0.0);
+        [unroll]
+        for (uint part = 0u; part < FG_ENGINE_SOLVE_PARTS; ++part) {
+            total += g_engine_sum[part * FG_ENGINE_PARTIAL_TEXELS + index];
+        }
+        // Kinds that did not run left another frame's sums in their texels.
+        const bool lag = index == FG_ENGINE_LAG_TEXEL || index == FG_ENGINE_LAG_TEXEL + 1u;
+        const bool pair = index >= FG_ENGINE_COCKPIT_LAG_TEXEL && index < FG_ENGINE_USED_TEXELS;
+        if (index >= texels || (lag && !before) || (pair && (g.options.x & FG_ENGINE_PAIR_BEFORE) == 0u)) {
+            total = float4(0.0, 0.0, 0.0, 0.0);
+        }
+        g_engine_sum[index] = total;
+        if (stage != 0u) {
+            g_evidence[uint2(index, 0u)] = total;
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
     if (index != 0u) {
         return;
     }
-    [unroll]
-    for (uint summed = 0u; summed < FG_ENGINE_USED_TEXELS; ++summed) {
-        total[summed] = g_engine_sum[summed][0];
-    }
     const uint camera = (g.options.x >> 12) & 3u;
-    const bool before = (g.options.x & FG_ENGINE_BEFORE) != 0u;
-    if (!before) {
-        total[FG_ENGINE_LAG_TEXEL] = float4(0.0, 0.0, 0.0, 0.0);
-        total[FG_ENGINE_LAG_TEXEL + 1u] = float4(0.0, 0.0, 0.0, 0.0);
-    }
-    if ((g.options.x & FG_ENGINE_PAIR_BEFORE) == 0u) {
-        [unroll]
-        for (uint lag = 0u; lag < 5u; ++lag) {
-            total[FG_ENGINE_COCKPIT_LAG_TEXEL + lag] = float4(0.0, 0.0, 0.0, 0.0);
-        }
-    }
     // Per axis: the bias (still content's vectors less the convention's
     // reading of the head's movement there) and the cockpit fit.
     float2 bias = float2(0.0, 0.0);
@@ -3858,17 +3922,16 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint index : SV_GroupIndex) {
         [unroll]
         for (int k = 0; k < 10; ++k) {
             const int term = axis * 10 + k;
-            s[k] = total[term / 4][term % 4];
+            s[k] = g_engine_sum[term / 4][term % 4];
         }
         const float n = s[0];
         if (n >= 50.0 && (g.options.x & FG_ENGINE_JITTER) != 0u) {
-            const float gain = axis == 0 ? g.tuning.x : g.tuning.y;
-            const float model = camera == 0u ? (s[1] + s[2]) / gain : camera == 1u ? s[1] / gain : 0.0;
+            const float model = camera == 0u ? s[1] + s[2] : camera == 1u ? s[1] : 0.0;
             const float c = (s[3] - model) / n;
             if (axis == 0) {
-                bias.x = 0.5 * gain * c;
+                bias.x = 0.5 * c;
             } else {
-                bias.y = -0.5 * gain * c;
+                bias.y = -0.5 * c;
             }
         }
         if (n >= 4.0) {
@@ -3895,21 +3958,21 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint index : SV_GroupIndex) {
         return;
     }
     const uint p = FG_ENGINE_PHOTOMETRIC_TEXEL;
-    const float variant = total[p].x;
-    const float zero = total[p + 2u].x;
-    const float cost_measured = total[p + 2u].y;
-    const float textured = total[p + 2u].z;
-    const float with_measured = total[p + 2u].w;
-    const float moving = total[p + 3u].x;
-    const float inliers = total[p + 4u].x;
-    const float cockpit = total[p + 4u].y;
-    const float head_px = total[p + 6u].x;
-    const float vectors_px = total[p + 6u].y;
-    const float valid = total[p + 6u].z;
-    const float flow_px = total[p + 6u].w;
-    const float lag_cost = total[FG_ENGINE_LAG_TEXEL].x;
-    const float lag_variant = total[FG_ENGINE_LAG_TEXEL].y;
-    const float lag_samples = total[FG_ENGINE_LAG_TEXEL].z;
+    const float variant = g_engine_sum[p].x;
+    const float zero = g_engine_sum[p + 2u].x;
+    const float cost_measured = g_engine_sum[p + 2u].y;
+    const float textured = g_engine_sum[p + 2u].z;
+    const float with_measured = g_engine_sum[p + 2u].w;
+    const float moving = g_engine_sum[p + 3u].x;
+    const float inliers = g_engine_sum[p + 4u].x;
+    const float cockpit = g_engine_sum[p + 4u].y;
+    const float head_px = g_engine_sum[p + 6u].x;
+    const float vectors_px = g_engine_sum[p + 6u].y;
+    const float valid = g_engine_sum[p + 6u].z;
+    const float flow_px = g_engine_sum[p + 6u].w;
+    const float lag_cost = g_engine_sum[FG_ENGINE_LAG_TEXEL].x;
+    const float lag_variant = g_engine_sum[FG_ENGINE_LAG_TEXEL].y;
+    const float lag_samples = g_engine_sum[FG_ENGINE_LAG_TEXEL].z;
     const float mean_head = valid > 0.0 ? head_px / valid : 0.0;
     const float mean_vectors = valid > 0.0 ? vectors_px / valid : 0.0;
     const float mean_flow = with_measured > 0.0 ? flow_px / with_measured : 0.0;
@@ -3963,14 +4026,6 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint index : SV_GroupIndex) {
     [unroll]
     for (uint rest = 5u; rest < 8u; ++rest) {
         g_params[uint2(rest, 0u)] = float4(0.0, 0.0, 0.0, 0.0);
-    }
-    [unroll]
-    for (uint used = 0u; used < FG_ENGINE_USED_TEXELS; ++used) {
-        g_evidence[uint2(used, 0u)] = total[used];
-    }
-    [loop]
-    for (uint unused = FG_ENGINE_USED_TEXELS; unused < FG_ENGINE_PARTIAL_TEXELS; ++unused) {
-        g_evidence[uint2(unused, 0u)] = float4(0.0, 0.0, 0.0, 0.0);
     }
 }
 #endif

@@ -8979,6 +8979,19 @@ void EngineObserveScenarios(Harness& harness) {
                   run.status.validation.photometric == "passed",
               std::string("engine observe: ") + gain.name + " was not locked: " + DescribeEngineRun(run));
     }
+    // The square crossing the world faster, in view beside the cockpit for
+    // the second half of the frames: where the vectors move content they
+    // explain it better than no motion in every photometric batch (3 frames
+    // each), though the luma pass marks the square's own place before
+    // unseen where the sky shows now.
+    {
+        const EngineRunResult run =
+            RunEngineFrames(harness, RenderEngineFrames(EngineScene{.square_speed = 0.05}), {.mode = FrameGenEngineMode::kObserve});
+        std::cout << "D3D12 engine observe: a faster square: " << DescribeEngineRun(run) << std::endl;
+        const FrameGenEngineValidation& v = run.status.validation;
+        Check(run.locked && v.photometric == "passed" && 3 * v.photometric_passed + 3 > run.evidence_frames,
+              "engine observe: a faster square failed a photometric batch: " + DescribeEngineRun(run));
+    }
     // Vectors that are wrong never lock: all zero, noise, a frame late
     // (E_lag and the pair before), objects' own movement alone (the world
     // turning, so it is not the head excluded).

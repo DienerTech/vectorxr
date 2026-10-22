@@ -2582,16 +2582,18 @@ void TestFrameGenEngineEvidencePlan() {
                std::memcmp(&rest[i].constants, &plain.dispatches[i].constants, sizeof(depthxr::FrameGenConstants)) == 0;
     }
     Expect(same, "Engine evidence: everything else in the plan is as without engine motion");
+    // Each reduce by the kinds it sums (1 cockpit, 2 photometric, 4 lag, 8
+    // the cockpit against the pair before), each solve by its stage.
     auto kinds = [](const std::vector<depthxr::FrameGenDispatch>& dispatches) {
         std::string order;
         for (const auto& dispatch : dispatches) {
             order += dispatch.pass == FrameGenPass::kEngineSolve ? "S" + std::to_string(dispatch.constants.options[0] & 15u)
-                                                                 : "R" + std::to_string(dispatch.constants.options[0] & 3u);
+                                                                 : "R" + std::to_string(dispatch.constants.options[0] & 15u);
             order += " ";
         }
         return order;
     };
-    Expect(kinds(engine) == "R0 S0 R1 S1 ", "Engine evidence: cockpit, bias, photometric, solve (" + kinds(engine) + ")");
+    Expect(kinds(engine) == "R3 S1 ", "Engine evidence: cockpit and photometric together, solve (" + kinds(engine) + ")");
     bool writes_engine_only = true;
     for (const auto& dispatch : engine) {
         for (const auto& output : dispatch.outputs) {
@@ -2610,20 +2612,19 @@ void TestFrameGenEngineEvidencePlan() {
     Expect(filter < first && engine[0].inputs[4].kind == FrameGenTextureKind::kFlow &&
                engine[0].inputs[4].level == observed.final_flow_level,
            "Engine evidence: taken after the filter, from the final level's measured flow");
-    // The cockpit kind decodes with unit gains, the photometric with the
-    // convention's; the solve carries the gains and the images.
-    const depthxr::FrameGenConstants& cockpit = engine[0].constants;
-    const depthxr::FrameGenConstants& photometric = engine[2].constants;
-    const depthxr::FrameGenConstants& solve = engine[3].constants;
-    Expect(cockpit.tuning == std::array<float, 4>{0.5f, -0.5f, 0.0f, 0.0f} &&
-               photometric.tuning == std::array<float, 4>{1.0f, 1.0f, 0.0f, 0.0f} &&
-               cockpit.size == std::array<std::uint32_t, 4>{128, 128, 512, 512} &&
-               solve.tuning == std::array<float, 4>{2.0f, -2.0f, 0.0f, 0.0f} && solve.options[2] == (2u | (1u << 8)) &&
-               solve.size == std::array<std::uint32_t, 4>{512, 512, 800, 790} &&
-               engine[3].outputs[1].kind == FrameGenTextureKind::kEngineEvidence,
-           "Engine evidence: decodes, grid, gains and images");
-    // The field before (the lag kind) and the pair before (the cockpit lag
-    // kind, by the game's poses) when the request has them.
+    // Every kind reads the vectors in the convention under test (the
+    // cockpit's sums come back to them as decoded on the CPU); the solve
+    // carries the images.
+    const depthxr::FrameGenConstants& reduce = engine[0].constants;
+    const depthxr::FrameGenConstants& solve = engine[1].constants;
+    Expect(reduce.tuning == std::array<float, 4>{1.0f, 1.0f, 0.0f, 0.0f} &&
+               reduce.size == std::array<std::uint32_t, 4>{128, 128, 512, 512} && engine[0].inputs[5].kind == FrameGenTextureKind::kNone &&
+               solve.options[2] == (2u | (1u << 8)) && solve.size == std::array<std::uint32_t, 4>{512, 512, 800, 790} &&
+               engine[1].outputs[1].kind == FrameGenTextureKind::kEngineEvidence,
+           "Engine evidence: decode, grid and images");
+    // The field before (the lag kind, with the others) and the pair before
+    // (the cockpit lag kind, by the game's poses, alone) when the request
+    // has them.
     request.engine_previous = true;
     request.engine_lag = true;
     request.game_previous.orientation = {0.0f, 0.02f, 0.0f, 0.9998f};
@@ -2633,11 +2634,27 @@ void TestFrameGenEngineEvidencePlan() {
     for (const auto& dispatch : lagged.dispatches) {
         if (dispatch.pass == FrameGenPass::kEngineReduce || dispatch.pass == FrameGenPass::kEngineSolve) lag.push_back(dispatch);
     }
-    Expect(kinds(lag) == "R0 S0 R1 R2 R3 S1 " &&
-               lag[3].inputs[0].kind == FrameGenTextureKind::kEngineRawPrevious &&
-               lag[3].inputs[4].kind == FrameGenTextureKind::kEngineRaw && lag[4].constants.rot0 != lag[0].constants.rot0 &&
-               (lag[5].constants.options[0] & (1u << 7)) != 0 && (lag[5].constants.options[0] & (1u << 8)) != 0,
+    Expect(kinds(lag) == "R7 R8 S1 " && lag[0].inputs[5].kind == FrameGenTextureKind::kEngineRawPrevious &&
+               lag[0].inputs[0].kind == FrameGenTextureKind::kEngineRaw && lag[1].constants.rot0 != lag[0].constants.rot0 &&
+               lag[1].inputs[4].kind == FrameGenTextureKind::kNone && lag[1].constants.tuning == reduce.tuning &&
+               (lag[2].constants.options[0] & (1u << 7)) != 0 && (lag[2].constants.options[0] & (1u << 8)) != 0,
            "Engine evidence: the field before and the pair before (" + kinds(lag) + ")");
+    // A jittered convention: the cockpit (and lag) kinds first, the bias
+    // from their sums (the solve's first stage), then the photometric kind
+    // taking it out (bit 9, kEngineParams as its fifth input).
+    convention.jitter = true;
+    tuning.engine = convention;
+    const depthxr::FrameGenViewPlan jittered = depthxr::BuildFrameGenViewPlan(request, tuning);
+    std::vector<depthxr::FrameGenDispatch> bias;
+    for (const auto& dispatch : jittered.dispatches) {
+        if (dispatch.pass == FrameGenPass::kEngineReduce || dispatch.pass == FrameGenPass::kEngineSolve) bias.push_back(dispatch);
+    }
+    Expect(kinds(bias) == "R5 S0 R2 R8 S1 " && bias[0].inputs[5].kind == FrameGenTextureKind::kEngineRawPrevious &&
+               (bias[0].constants.options[0] & (1u << 9)) == 0 && bias[2].inputs[5].kind == FrameGenTextureKind::kEngineParams &&
+               (bias[2].constants.options[0] & (1u << 9)) != 0 && (bias[4].constants.options[0] & (1u << 5)) != 0,
+           "Engine evidence: a jittered convention's bias first (" + kinds(bias) + ")");
+    convention.jitter = false;
+    tuning.engine = convention;
     // None in capture, without engine_motion, or interpolating's cover alike.
     tuning.engine_mode = depthxr::FrameGenEngineMode::kCapture;
     Expect(depthxr::BuildFrameGenViewPlan(request, tuning).dispatches.size() == plain.dispatches.size(),
@@ -2702,9 +2719,9 @@ void TestFrameGenEngineAssistPlan() {
         }
         return text;
     };
-    Expect(order(observed) == "refine refine filter R S R S ",
+    Expect(order(observed) == "refine refine filter R S ",
            "Engine assist plan: Observe takes the evidence after the filter, as before (" + order(observed) + ")");
-    Expect(order(assisted) == "refine refine R S R S convert merge tiles filter ",
+    Expect(order(assisted) == "refine refine R S convert merge tiles filter ",
            "Engine assist plan: Assist takes it first, then converts, merges and tiles before the filter (" +
                order(assisted) + ")");
     // Everything else as Observe's, the filter reading the merged flow.
@@ -2813,7 +2830,7 @@ void TestFrameGenEngineAssistPlan() {
             fit_measured = fit_measured && dispatch.inputs[0].kind == FrameGenTextureKind::kFlow;
         }
     }
-    Expect(order(world) == "refine refine R S R S W w W w W w convert merge tiles filter " && fit_measured &&
+    Expect(order(world) == "refine refine R S W w W w W w convert merge tiles filter " && fit_measured &&
                find(world, FrameGenPass::kEngineConvert).inputs[4].kind == FrameGenTextureKind::kWorldParams &&
                (find(world, FrameGenPass::kEngineConvert).constants.options[0] & depthxr::kFrameGenEngineConvertWorld) != 0 &&
                find(world, FrameGenPass::kFilter).inputs[3].kind == FrameGenTextureKind::kWorldParams,
@@ -2830,7 +2847,7 @@ void TestFrameGenEngineAssistPlan() {
         if (dispatch.pass == FrameGenPass::kFilter) interpolated_filters.push_back(dispatch);
     }
     Expect(depthxr::FrameGenEngineModeFor(tuning) == FrameGenEngineMode::kAssist &&
-               order(interpolated) == "refine refine R S R S W w W w W w convert merge tiles filter filter " &&
+               order(interpolated) == "refine refine R S W w W w W w convert merge tiles filter filter " &&
                find(interpolated, FrameGenPass::kEngineMerge).constants.options[0] == depthxr::kFrameGenEngineMergeAssist &&
                interpolated_filters.size() == 2 && interpolated_filters[0].inputs[0].kind == FrameGenTextureKind::kEngineFlow &&
                interpolated_filters[1].inputs[0].kind == FrameGenTextureKind::kEngineFlow &&
@@ -3247,7 +3264,7 @@ void TestFrameGenEngineValidator() {
         for (std::size_t i = 0; i < evidence.size(); ++i) evidence[i] = static_cast<float>(i + 1);
         params = {0.25f, -0.5f, 6.0f, 0.9f};
         params[11] = 1.0f;
-        const auto read = depthxr::ReadFrameGenEngineEvidence(evidence.data(), params.data());
+        const auto read = depthxr::ReadFrameGenEngineEvidence(evidence.data(), params.data(), {});
         Expect(read.cockpit[0].Samples() == 1.0f && read.cockpit[1].Samples() == 11.0f && read.swapped[1] == 22.0f &&
                    read.measured[1].Samples() == 33.0f && read.head_gap == 43.0f && read.variants[0] == 45.0f &&
                    read.textured == 55.0f && read.epe_samples[2] == 68.0f && read.valid == 71.0f && read.flow_px == 72.0f &&
@@ -3255,6 +3272,19 @@ void TestFrameGenEngineValidator() {
                    read.lag_moving == 78.0f && read.cockpit_lag[1].Samples() == 91.0f && read.lag &&
                    read.lag_photometric && read.bias == std::array<float, 2>{0.25f, -0.5f} && read.verdict == 6u && read.stale,
                "Engine validator: the evidence's texels read back in their places");
+        // Summed as a convention reads the vectors, g (e - offset): read back
+        // as decoded. The x axis's sums: n 1, p_r 2, p_t 3, e 4, ..., e p_r 8,
+        // e^2 10; y's p_r 12; e_x p_r,y 21.
+        depthxr::FrameGenEngineConvention convention;
+        convention.gain = {2.0f, -0.5f};
+        convention.offset = {0.5f, 0.0f};
+        const auto unscaled = depthxr::ReadFrameGenEngineEvidence(evidence.data(), params.data(), convention);
+        Expect(unscaled.cockpit[0].Intercept(0.0, 0.0) == 2.5 && unscaled.cockpit[0].ErrorRotation() == 5.0 &&
+                   unscaled.cockpit[0].ErrorSquares() == 4.75 && unscaled.swapped[0] == 16.5 &&
+                   unscaled.cockpit[1].Intercept(0.0, 0.0) == 14.0 / -0.5 / 11.0 &&
+                   unscaled.measured[0].Intercept(0.0, 0.0) == (26.0 / 2.0 + 0.5 * 23.0) / 23.0 &&
+                   unscaled.cockpit_lag[0].Samples() == 81.0 && unscaled.variants[0] == 45.0,
+               "Engine validator: the cockpit's sums come back to the vectors as decoded");
     }
 }
 

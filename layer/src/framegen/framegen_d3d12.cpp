@@ -2183,7 +2183,8 @@ class D3D12FrameGen final : public FrameGenGpu {
         for (std::size_t i = 0; i < frame.views.size(); ++i) {
             const auto* base = static_cast<const std::byte*>(mapped) + i * kEngineViewReadback;
             FrameGenEngineEvidence read = ReadFrameGenEngineEvidence(
-                reinterpret_cast<const float*>(base + kEngineEvidenceOffset), reinterpret_cast<const float*>(base));
+                reinterpret_cast<const float*>(base + kEngineEvidenceOffset), reinterpret_cast<const float*>(base),
+                frame.convention);
             read.calibrate = frame.views[i].calibrate;
             read.l1 = frame.views[i].l1;
             read.vectors = frame.views[i].vectors;

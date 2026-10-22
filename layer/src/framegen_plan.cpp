@@ -225,11 +225,14 @@ void AppendWorldSet(FrameGenViewPlan& plan, const FrameGenEngineWorld& world, co
 // Engine motion vectors (FrameGenViewRequest::engine_motion): the evidence
 // on the frame's vectors (its raw field) against the declared poses, its
 // luma, its resolved depth and the measured flow at the final level, summed
-// per group into kEnginePartials by kind (cockpit, the solve's first stage
-// taking the frame's bias out, photometric, the field before when it is the
-// frame before's, the cockpit against the pair before), then solved into
-// kEngineParams and kEngineEvidence. Writes those alone: nothing measured
-// or generated changes.
+// per group into kEnginePartials by kind (cockpit, photometric, the field
+// before when it is the frame before's, the cockpit against the pair
+// before), then solved into kEngineParams and kEngineEvidence. Writes those
+// alone: nothing measured or generated changes. The kinds share one pass,
+// which reads each sample's luma and sums the group once, but for a
+// jittered convention's photometric kind, which takes the frame's bias out
+// (the solve's first stage finds it in the cockpit kind's sums), and the
+// cockpit against the pair before, which needs that pair's constants.
 void AppendEngineEvidence(FrameGenViewPlan& plan, const FrameGenConstants& base, const FrameGenViewRequest& request,
                           const FrameGenTuning& tuning) {
     const FrameGenExtent l1 = plan.levels[1];
@@ -240,21 +243,27 @@ void AppendEngineEvidence(FrameGenViewPlan& plan, const FrameGenConstants& base,
     const FrameGenTexture flow = Texture(FrameGenTextureKind::kFlow, plan.final_flow_level);
     const FrameGenTexture partials = Texture(FrameGenTextureKind::kEnginePartials);
     const FrameGenTexture params = Texture(FrameGenTextureKind::kEngineParams);
-    // The cockpit fits take the vectors decoded alone (unit gains): what the
-    // validator fits the gains to. The rest take the convention under test.
-    const std::array<float, 4> decoded = FrameGenEngineDecode(FrameGenEngineConvention{}, request.engine_encoding);
+    // The lag kind's field before, when it is the frame before's.
+    const std::uint32_t lag = request.engine_previous ? kFrameGenEngineKindLag : 0u;
+    const FrameGenTexture field_before =
+        request.engine_previous ? Texture(FrameGenTextureKind::kEngineRawPrevious) : FrameGenTexture{};
+    // Every kind reads the vectors in the convention under test; the cockpit
+    // kinds' sums come back to the vectors as decoded (the validator fits
+    // the gains to those) in ReadFrameGenEngineEvidence.
     const std::array<float, 4> converted = FrameGenEngineDecode(tuning.engine, request.engine_encoding);
     const std::uint32_t camera = static_cast<std::uint32_t>(tuning.engine.camera) << 4;
     // Observe and Assist measure the flow as well.
     const std::uint32_t measured = FrameGenEngineModeFor(tuning) <= FrameGenEngineMode::kAssist ? 1u << 8 : 0u;
-    auto reduce = [&](std::uint32_t kind, const FrameGenConstants& constants, const std::array<FrameGenTexture, 6>& inputs,
-                      const std::array<float, 4>& decode) {
+    // The fifth input: the field before, or with bit 9 the solve's first
+    // stage (the frame's bias in texel 0).
+    auto reduce = [&](std::uint32_t kinds, const FrameGenConstants& constants, const FrameGenTexture& measured_flow,
+                      const FrameGenTexture& fifth, std::uint32_t bias) {
         FrameGenDispatch dispatch =
             Dispatch(FrameGenPass::kEngineReduce, {kFrameGenEngineGrid, kFrameGenEngineGrid}, l1, constants);
-        dispatch.inputs = inputs;
+        dispatch.inputs = {raw, luma, before, depth, measured_flow, fifth};
         dispatch.outputs = {partials, {}};
-        dispatch.constants.options = {kind | camera | measured, constants.options[1], 0, plan.final_flow_level};
-        dispatch.constants.tuning = decode;
+        dispatch.constants.options = {kinds | camera | measured | bias, constants.options[1], 0, plan.final_flow_level};
+        dispatch.constants.tuning = converted;
         plan.dispatches.push_back(dispatch);
     };
     // The solve's options: its stage (0: the bias alone), whether the
@@ -273,16 +282,14 @@ void AppendEngineEvidence(FrameGenViewPlan& plan, const FrameGenConstants& base,
                                     (static_cast<std::uint32_t>(tuning.engine.camera) << 12);
         dispatch.constants.options = {stage | flags, base.options[1],
                                       (request.engine_images[0] & 0xffu) | ((request.engine_images[1] & 0xffu) << 8), 0};
-        dispatch.constants.tuning = {tuning.engine.gain[0], tuning.engine.gain[1], 0.0f, 0.0f};
         plan.dispatches.push_back(dispatch);
     };
-    reduce(kFrameGenEngineKindCockpit, base, {raw, luma, before, depth, flow, {}}, decoded);
-    solve(0);
-    reduce(kFrameGenEngineKindPhotometric, base, {raw, luma, before, depth, flow, params}, converted);
-    if (request.engine_previous) {
-        // The field before against this frame pair, this frame's beside it (t4).
-        reduce(kFrameGenEngineKindLag, base,
-               {Texture(FrameGenTextureKind::kEngineRawPrevious), luma, before, depth, raw, params}, converted);
+    if (tuning.engine.jitter) {
+        reduce(kFrameGenEngineKindCockpit | lag, base, flow, field_before, 0u);
+        solve(0);
+        reduce(kFrameGenEngineKindPhotometric, base, flow, params, 1u << 9);
+    } else {
+        reduce(kFrameGenEngineKindCockpit | kFrameGenEngineKindPhotometric | lag, base, flow, field_before, 0u);
     }
     if (request.engine_lag) {
         // The cockpit fit against the pair before, by the game's poses (the
@@ -290,8 +297,7 @@ void AppendEngineEvidence(FrameGenViewPlan& plan, const FrameGenConstants& base,
         FrameGenViewRequest pair = request;
         pair.newest = request.game_previous;
         pair.previous = request.game_before;
-        reduce(kFrameGenEngineKindCockpitLag, BaseConstants(pair, tuning, tuning.mode), {raw, luma, before, depth, {}, {}},
-               decoded);
+        reduce(kFrameGenEngineKindCockpitLag, BaseConstants(pair, tuning, tuning.mode), {}, {}, 0u);
     }
     solve(1);
 }
@@ -1818,6 +1824,16 @@ FrameGenEngineAxisFit FrameGenEngineAxisFit::FromSums(const float* sums) {
     return fit;
 }
 
+FrameGenEngineAxisFit FrameGenEngineAxisFit::Unscaled(double gain, double offset) const {
+    FrameGenEngineAxisFit fit = *this;
+    const double k = 1.0 / gain;
+    fit.e_ = k * e_ + offset * n_;
+    fit.er_ = k * er_ + offset * r_;
+    fit.et_ = k * et_ + offset * t_;
+    fit.ee_ = k * k * ee_ + 2.0 * k * offset * e_ + offset * offset * n_;
+    return fit;
+}
+
 FrameGenEngineAxisFit::Solution FrameGenEngineAxisFit::SolveRotation() const {
     Solution solution;
     solution.samples = n_;
@@ -2163,12 +2179,22 @@ const char* FrameGenEngineVerdictName(std::size_t index) {
     return index < kNames.size() ? kNames[index] : "";
 }
 
-FrameGenEngineEvidence ReadFrameGenEngineEvidence(const float* evidence, const float* params) {
+FrameGenEngineEvidence ReadFrameGenEngineEvidence(const float* evidence, const float* params,
+                                                  const FrameGenEngineConvention& convention) {
     FrameGenEngineEvidence view;
+    // The cockpit kinds' e as the convention reads the vectors, g (e - its
+    // offset), back to e (gains are never 0: ParseFrameGenEngineConvention,
+    // the canonical ones).
+    const std::array<double, 2> gain{convention.gain[0], convention.gain[1]};
+    const std::array<double, 2> offset{convention.offset[0], convention.offset[1]};
+    auto unscaled = [&](const float* sums, int axis) {
+        return FrameGenEngineAxisFit::FromSums(sums).Unscaled(gain[axis], offset[axis]);
+    };
     const float* cockpit = evidence + 4 * kFrameGenEngineCockpitTexel;
-    view.cockpit = {FrameGenEngineAxisFit::FromSums(cockpit), FrameGenEngineAxisFit::FromSums(cockpit + 10)};
-    view.swapped = {cockpit[20], cockpit[21]};
-    view.measured = {FrameGenEngineAxisFit::FromSums(cockpit + 22), FrameGenEngineAxisFit::FromSums(cockpit + 32)};
+    view.cockpit = {unscaled(cockpit, 0), unscaled(cockpit + 10, 1)};
+    // e_x p_r,y and e_y p_r,x, with the other axis's sum of p_r.
+    view.swapped = {cockpit[20] / gain[0] + offset[0] * cockpit[11], cockpit[21] / gain[1] + offset[1] * cockpit[1]};
+    view.measured = {unscaled(cockpit + 22, 0), unscaled(cockpit + 32, 1)};
     view.head_gap = cockpit[42];
     const float* photometric = evidence + 4 * kFrameGenEnginePhotometricTexel;
     for (std::size_t c = 0; c < view.variants.size(); ++c) view.variants[c] = photometric[c];
@@ -2200,7 +2226,7 @@ FrameGenEngineEvidence ReadFrameGenEngineEvidence(const float* evidence, const f
     // The solve leaves the sums of kinds that did not run at zero.
     view.lag_photometric = view.lag_samples > 0.0;
     const float* cockpit_lag = evidence + 4 * kFrameGenEngineCockpitLagTexel;
-    view.cockpit_lag = {FrameGenEngineAxisFit::FromSums(cockpit_lag), FrameGenEngineAxisFit::FromSums(cockpit_lag + 10)};
+    view.cockpit_lag = {unscaled(cockpit_lag, 0), unscaled(cockpit_lag + 10, 1)};
     view.lag = view.cockpit_lag[0].Samples() > 0.0;
     view.bias = {params[0], params[1]};
     view.verdict = static_cast<std::uint32_t>(std::max(params[2], 0.0f) + 0.5f);

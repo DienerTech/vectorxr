@@ -1167,6 +1167,8 @@ class FrameGenEngineAxisFit {
     // floats): n, the sums of p_r, p_t and e, then of p_r^2, p_t^2,
     // p_r p_t, e p_r, e p_t and e^2.
     static FrameGenEngineAxisFit FromSums(const float* sums);
+    // The sums with each e read as e / gain + offset.
+    FrameGenEngineAxisFit Unscaled(double gain, double offset) const;
     Solution Solve() const;
     Solution SolveLine() const;
     // e fitted to one part alone (e = a * p_r + c, or e = b * p_t + c).
@@ -1296,8 +1298,8 @@ FrameGenEngineCalibration CalibrateFrameGenEngine(const std::vector<FrameGenEngi
 // the sums back for FrameGenEngineValidator, which works out the vectors'
 // convention.
 //
-// kEngineReduce's kinds (options.x bits 0-1, 4 for the cockpit fit against
-// the pair before):
+// kEngineReduce's kinds (options.x bits 0-3, those a dispatch sums
+// together; the cockpit fit against the pair before alone):
 //   cockpit: per axis, still content's decoded vectors e against what the
 //     declared poses predict (C1: e = a * p_r + b * p_t + c), with the
 //     cross-axis sums; and against what the measured flow says (C2: q, as
@@ -1311,10 +1313,10 @@ FrameGenEngineCalibration CalibrateFrameGenEngine(const std::vector<FrameGenEngi
 //   lag: the field before scored against this frame pair, with this
 //   frame's beside it on the same samples.
 inline constexpr std::uint32_t kFrameGenEngineGrid = 128u;
-inline constexpr std::uint32_t kFrameGenEngineKindCockpit = 0u;
-inline constexpr std::uint32_t kFrameGenEngineKindPhotometric = 1u;
-inline constexpr std::uint32_t kFrameGenEngineKindLag = 2u;
-inline constexpr std::uint32_t kFrameGenEngineKindCockpitLag = 3u;
+inline constexpr std::uint32_t kFrameGenEngineKindCockpit = 1u;
+inline constexpr std::uint32_t kFrameGenEngineKindPhotometric = 2u;
+inline constexpr std::uint32_t kFrameGenEngineKindLag = 4u;
+inline constexpr std::uint32_t kFrameGenEngineKindCockpitLag = 8u;
 // Each group's texels in kEnginePartials, and the kinds' places among them
 // (kEngineEvidence holds their sums in the same places).
 inline constexpr std::uint32_t kFrameGenEnginePartialTexels = 32u;
@@ -1408,7 +1410,8 @@ struct FrameGenEngineEvidence {
     // Photometric kind: the 3x3 luma error summed per variant, of no motion
     // and of the measured flow; the textured samples the luma was seen at,
     // those with measured flow, those the vectors move more than a pixel
-    // (with variant 0's and no motion's error there), those where the
+    // where the previous frame was seen under their reading too (with
+    // variant 0's and no motion's error there), those where the
     // vectors explain the luma about as well as the measured flow; still
     // near content and its inliers; the vectors' distance from the measured
     // flow (full-resolution pixels) summed by band (nearer than 4 m, from
@@ -1455,8 +1458,12 @@ struct FrameGenEngineEvidence {
     FrameGenExtent color;
 };
 // A view's evidence from kEngineEvidence's and kEngineParams' texels
-// (RGBA32F, kFrameGenEngineEvidenceTexels and kFrameGenEngineParamsTexels).
-FrameGenEngineEvidence ReadFrameGenEngineEvidence(const float* evidence, const float* params);
+// (RGBA32F, kFrameGenEngineEvidenceTexels and kFrameGenEngineParamsTexels),
+// taken with `convention`: the evidence passes sum the cockpit kinds' e as
+// it reads the vectors (its gain times e less its offset), taken back here
+// to e as decoded.
+FrameGenEngineEvidence ReadFrameGenEngineEvidence(const float* evidence, const float* params,
+                                                  const FrameGenEngineConvention& convention);
 
 // A frame's evidence, every view's, with the convention it was taken with.
 struct FrameGenEngineFrameEvidence {
