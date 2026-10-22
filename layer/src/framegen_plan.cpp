@@ -3550,7 +3550,8 @@ std::optional<std::string> ReadResearchSwitch(const char* name) {
         return std::string(value);
     }
     const std::string_view wanted(name);
-    if (wanted.rfind("VECTORXR_FRAMEGEN_ENGINE_", 0) != 0 && wanted != "VECTORXR_FRAMEGEN_DEPTH_ENCODING_CHECK") {
+    if (wanted.rfind("VECTORXR_FRAMEGEN_ENGINE_", 0) != 0 && wanted.rfind("VECTORXR_FRAMEGEN_DEPTH_", 0) != 0 &&
+        wanted != "VECTORXR_FRAMEGEN_WORLD") {
         return std::nullopt;
     }
     const std::filesystem::path local = LocalAppDataPath();

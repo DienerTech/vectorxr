@@ -4705,7 +4705,8 @@ void TestResearchSwitches() {
     _wputenv_s(L"LOCALAPPDATA", root.wstring().c_str());
     for (const char* name : {"VECTORXR_FRAMEGEN_ENGINE_CUTS", "VECTORXR_FRAMEGEN_ENGINE_MV",
                              "VECTORXR_FRAMEGEN_DEPTH_ENCODING_CHECK", "VECTORXR_FRAMEGEN_JIT",
-                             "VECTORXR_FRAMEGEN_ENGINE_MV_STATE"}) {
+                             "VECTORXR_FRAMEGEN_ENGINE_MV_STATE", "VECTORXR_FRAMEGEN_DEPTH_SPLAT",
+                             "VECTORXR_FRAMEGEN_WORLD"}) {
         _putenv_s(name, "");
     }
     Expect(!depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_CUTS"), "Research switches: none without a file");
@@ -4718,7 +4719,9 @@ void TestResearchSwitches() {
              << "  VECTORXR_FRAMEGEN_ENGINE_CUTS = 0 \r\n"
              << "VECTORXR_FRAMEGEN_DEPTH_ENCODING_CHECK=1\r\n"
              << "VECTORXR_FRAMEGEN_JIT=0\r\n"
-             << "VECTORXR_FRAMEGEN_ENGINE_CUTS=1\r\n";
+             << "VECTORXR_FRAMEGEN_ENGINE_CUTS=1\r\n"
+             << "VECTORXR_FRAMEGEN_DEPTH_SPLAT=1\r\n"
+             << "VECTORXR_FRAMEGEN_WORLD=0\r\n";
     }
     depthxr::TakeResearchFileSwitches(); // what earlier reads in the process left
     const std::uint64_t reads = depthxr::ResearchFileReads();
@@ -4730,18 +4733,22 @@ void TestResearchSwitches() {
            "Research switches: the depth encoding check is one of them");
     Expect(!depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_MV_STATE"), "Research switches: a commented line is not read");
     Expect(!depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_JIT"),
-           "Research switches: switches outside the engine motion research come from the environment only");
+           "Research switches: switches outside the engine motion and depth research come from the environment only");
     Expect(depthxr::ResearchFileReads() == reads + 3, "Research switches: three reads answered by the file");
+    Expect(depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_DEPTH_SPLAT") == "1" &&
+               depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_WORLD") == "0" && depthxr::ResearchFileReads() == reads + 5,
+           "Research switches: the depth research's switches and world motion are among them");
     // The environment wins.
     _putenv_s("VECTORXR_FRAMEGEN_ENGINE_CUTS", "0");
     _putenv_s("VECTORXR_FRAMEGEN_JIT", "1");
     Expect(depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_CUTS") == "0" &&
-               depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_JIT") == "1" && depthxr::ResearchFileReads() == reads + 3,
+               depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_JIT") == "1" && depthxr::ResearchFileReads() == reads + 5,
            "Research switches: the environment wins");
     // Each switch taken from the file is told once.
     const std::vector<std::string> taken = depthxr::TakeResearchFileSwitches();
     Expect(taken == std::vector<std::string>{"VECTORXR_FRAMEGEN_ENGINE_MV=census", "VECTORXR_FRAMEGEN_ENGINE_CUTS=1",
-                                             "VECTORXR_FRAMEGEN_DEPTH_ENCODING_CHECK=1"},
+                                             "VECTORXR_FRAMEGEN_DEPTH_ENCODING_CHECK=1",
+                                             "VECTORXR_FRAMEGEN_DEPTH_SPLAT=1", "VECTORXR_FRAMEGEN_WORLD=0"},
            "Research switches: the switches taken from the file, in order");
     Expect(depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_MV") == "census" &&
                depthxr::TakeResearchFileSwitches().empty(),

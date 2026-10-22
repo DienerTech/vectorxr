@@ -296,6 +296,10 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         COMMAND ${CMAKE_COMMAND} -E make_directory
                 $<TARGET_FILE_DIR:XR_APILAYER_DIENERTECH_VECTORXR>/spacewarp-probe-fb
                 $<TARGET_FILE_DIR:XR_APILAYER_DIENERTECH_VECTORXR>/spacewarp-probe-ext
+                $<TARGET_FILE_DIR:XR_APILAYER_DIENERTECH_VECTORXR>/spacewarp-probe-both
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${CMAKE_CURRENT_SOURCE_DIR}/manifest/spacewarp-probe-both.json
+                $<TARGET_FILE_DIR:XR_APILAYER_DIENERTECH_VECTORXR>/spacewarp-probe-both/XR_APILAYER_DIENERTECH_VECTORXR.json
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 ${CMAKE_CURRENT_SOURCE_DIR}/manifest/spacewarp-probe-fb.json
                 $<TARGET_FILE_DIR:XR_APILAYER_DIENERTECH_VECTORXR>/spacewarp-probe-fb/XR_APILAYER_DIENERTECH_VECTORXR.json

@@ -1,0 +1,33 @@
+{
+  "file_format_version": "1.0.0",
+  "api_layer": {
+    "name": "XR_APILAYER_DIENERTECH_VECTORXR",
+    "library_path": "..\\XR_APILAYER_DIENERTECH_VECTORXR.dll",
+    "api_version": "1.1",
+    "implementation_version": "1",
+    "description": "VectorXR OpenXR API layer: space-warp research probe advertising XR_FB_space_warp and XR_EXT_frame_synthesis (loads only while VECTORXR_SPACEWARP_PROBE is set)",
+    "functions": {
+      "xrNegotiateLoaderApiLayerInterface": "xrNegotiateLoaderApiLayerInterface"
+    },
+    "instance_extensions": [
+      {
+        "name": "XR_VARJO_quad_views",
+        "extension_version": "2"
+      },
+      {
+        "name": "XR_VARJO_foveated_rendering",
+        "extension_version": "3"
+      },
+      {
+        "name": "XR_FB_space_warp",
+        "extension_version": "2"
+      },
+      {
+        "name": "XR_EXT_frame_synthesis",
+        "extension_version": "1"
+      }
+    ],
+    "enable_environment": "VECTORXR_SPACEWARP_PROBE",
+    "disable_environment": "DISABLE_XR_APILAYER_DIENERTECH_VECTORXR"
+  }
+}

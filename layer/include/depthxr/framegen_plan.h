@@ -2137,8 +2137,8 @@ class FrameGenWorldDeltaCalibration {
 // --- Research switches ------------------------------------------------------
 
 // A research switch's value: the environment's, else, for the engine motion
-// research's switches (VECTORXR_FRAMEGEN_ENGINE_*,
-// VECTORXR_FRAMEGEN_DEPTH_ENCODING_CHECK), a NAME=VALUE line of
+// and depth research's switches (VECTORXR_FRAMEGEN_ENGINE_*,
+// VECTORXR_FRAMEGEN_DEPTH_*, VECTORXR_FRAMEGEN_WORLD), a NAME=VALUE line of
 // %LOCALAPPDATA%\VectorXR\framegen-research.txt, read at each call: a flight
 // changes them between a game's sessions without signing out to change the
 // environment. None where neither has it (an empty value is none).

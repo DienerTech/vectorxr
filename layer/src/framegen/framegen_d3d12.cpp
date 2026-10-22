@@ -670,23 +670,24 @@ class D3D12FrameGen final : public FrameGenGpu {
         wait_scale_ = software ? 20 : 1;
         // World motion for world content (VECTORXR_FRAMEGEN_WORLD=0: measured
         // flow as before).
-        if (const char* world = std::getenv("VECTORXR_FRAMEGEN_WORLD")) {
-            world_motion_ = std::string(world) != "0";
+        // These four may come from framegen-research.txt too (ReadResearchSwitch).
+        if (const std::optional<std::string> world = ReadResearchSwitch("VECTORXR_FRAMEGEN_WORLD")) {
+            world_motion_ = *world != "0";
         }
         // An eye whose depth the game leaves clear takes the other eye's
         // (FrameGenDepthEyes; VECTORXR_FRAMEGEN_DEPTH_EYES=0 turns it off).
-        if (const char* eyes = std::getenv("VECTORXR_FRAMEGEN_DEPTH_EYES")) {
-            depth_eyes_ = std::string(eyes) != "0";
+        if (const std::optional<std::string> eyes = ReadResearchSwitch("VECTORXR_FRAMEGEN_DEPTH_EYES")) {
+            depth_eyes_ = *eyes != "0";
         }
         // Research (depth engine mk2): candidate vectors chosen by depth too
         // (FrameGenTuning::depth_match; VECTORXR_FRAMEGEN_DEPTH_MATCH=1).
-        if (const char* match = std::getenv("VECTORXR_FRAMEGEN_DEPTH_MATCH")) {
-            depth_match_ = std::string(match) == "1";
+        if (const std::optional<std::string> match = ReadResearchSwitch("VECTORXR_FRAMEGEN_DEPTH_MATCH")) {
+            depth_match_ = *match == "1";
         }
         // Research (depth engine mk2): the motion map
         // (FrameGenTuning::depth_splat; VECTORXR_FRAMEGEN_DEPTH_SPLAT=1).
-        if (const char* splat = std::getenv("VECTORXR_FRAMEGEN_DEPTH_SPLAT")) {
-            depth_splat_ = std::string(splat) == "1";
+        if (const std::optional<std::string> splat = ReadResearchSwitch("VECTORXR_FRAMEGEN_DEPTH_SPLAT")) {
+            depth_splat_ = *splat == "1";
         }
         // Interpolation's occlusion handling (VECTORXR_FRAMEGEN_OCCLUSION=0:
         // off) and, for research, its cross-fade fallback
