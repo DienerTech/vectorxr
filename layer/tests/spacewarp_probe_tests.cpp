@@ -206,10 +206,28 @@ void TestSelectionAndSizes() {
     Check(!SpaceWarpProbeOwns(true, false, false), "nothing the application did not enable");
     Check(!SpaceWarpProbeOwns(false, true, false), "nothing while the probe is off");
 
-    const XrExtent2Di quarter = depthxr::RecommendedMotionVectorSize(2000, 2399);
+    using depthxr::MotionVectorSize;
+    const XrExtent2Di half = depthxr::RecommendedMotionVectorSize(2001, 2399, MotionVectorSize::kHalf);
+    Check(half.width == 1001 && half.height == 1200, "half the eye each way, rounded up");
+    const XrExtent2Di quarter = depthxr::RecommendedMotionVectorSize(2000, 2399, MotionVectorSize::kQuarter);
     Check(quarter.width == 500 && quarter.height == 600, "a quarter of the eye each way, rounded up");
-    const XrExtent2Di none = depthxr::RecommendedMotionVectorSize(0, 0);
+    const XrExtent2Di eighth = depthxr::RecommendedMotionVectorSize(2000, 2399, MotionVectorSize::kEighth);
+    Check(eighth.width == 250 && eighth.height == 300, "an eighth of the eye each way, rounded up");
+    const XrExtent2Di none = depthxr::RecommendedMotionVectorSize(0, 0, MotionVectorSize::kHalf);
     Check(none.width == 1 && none.height == 1, "at least 1x1");
+    // Half where Frame Generation will read the vectors (its half-resolution
+    // grid), an eighth where not; VECTORXR_FRAMEGEN_ENGINE_MV_SIZE wins.
+    Check(depthxr::ChooseMotionVectorSize(true, std::nullopt) == MotionVectorSize::kHalf &&
+              depthxr::ChooseMotionVectorSize(false, std::nullopt) == MotionVectorSize::kEighth &&
+              depthxr::ChooseMotionVectorSize(true, MotionVectorSize::kQuarter) == MotionVectorSize::kQuarter &&
+              depthxr::ChooseMotionVectorSize(false, MotionVectorSize::kHalf) == MotionVectorSize::kHalf,
+          "the size answered per policy");
+    Check(depthxr::ParseMotionVectorSize("Half") == MotionVectorSize::kHalf &&
+              depthxr::ParseMotionVectorSize("quarter") == MotionVectorSize::kQuarter &&
+              depthxr::ParseMotionVectorSize("EIGHTH") == MotionVectorSize::kEighth &&
+              !depthxr::ParseMotionVectorSize("2") && !depthxr::ParseMotionVectorSize("") &&
+              std::string(depthxr::ToString(MotionVectorSize::kEighth)) == "eighth",
+          "VECTORXR_FRAMEGEN_ENGINE_MV_SIZE's values");
 
     Check(depthxr::IsHalfFloatRgbaFormat(10) && depthxr::IsHalfFloatRgbaFormat(97) &&
               depthxr::IsHalfFloatRgbaFormat(0x881A) && !depthxr::IsHalfFloatRgbaFormat(29),
@@ -334,7 +352,8 @@ void TestEngineMotionRecord() {
     // XR_EXT_frame_synthesis' decoding, and structures with problems.
     {
         XrFrameSynthesisInfoEXT left = FrameSynthesisInfo();
-        left.layerFlags = XR_FRAME_SYNTHESIS_INFO_USE_2D_MOTION_VECTOR_BIT_EXT;
+        left.layerFlags = XR_FRAME_SYNTHESIS_INFO_USE_2D_MOTION_VECTOR_BIT_EXT |
+                          XR_FRAME_SYNTHESIS_INFO_REQUEST_RELAXED_FRAME_INTERVAL_BIT_EXT;
         left.motionVectorScale = {2.0f, -2.0f, 1.0f, 0.0f};
         left.motionVectorOffset = {-1.0f, 1.0f, 0.0f, 0.0f};
         left.nearZ = left.farZ = 1000.0f; // nearZ == farZ (MSFS 2024's menus?)
@@ -349,10 +368,21 @@ void TestEngineMotionRecord() {
         const depthxr::FrameGenEngineMotionView& view0 = record->views[0];
         Check(view0.source == depthxr::FrameGenMotionSource::kFrameSynthesisExt && view0.encoding.ext &&
                   view0.encoding.two_d && view0.encoding.scale[1] == -2.0f && view0.encoding.offset[0] == -1.0f &&
-                  view0.problems == depthxr::kEngineMotionNearFar && record->views[1].problems == depthxr::kEngineMotionRect,
+                  view0.encoding.scale[2] == 1.0f && view0.problems == depthxr::kEngineMotionNearFar &&
+                  record->views[1].problems == depthxr::kEngineMotionRect,
               "XR_EXT_frame_synthesis' decoding and the problems found");
+        Check(view0.relaxed_interval && !view0.frame_skip && !record->views[1].relaxed_interval &&
+                  !record->views[1].encoding.two_d,
+              "XR_EXT_frame_synthesis' flags: REQUEST_RELAXED_FRAME_INTERVAL and USE_2D_MOTION_VECTOR");
         const auto decoded = depthxr::DecodeFrameGenMotion(view0.encoding, {0.5f, 0.25f, 9.0f, 9.0f});
         Check(decoded[0] == 0.0f && decoded[1] == 0.5f, "an EXT vector is rg * scale + offset");
+        // As the shaders take it: in uv, y down (n = (1, -1) * e, Vulkan-style
+        // NDC as XR_EXT_frame_synthesis' vectors are, halved), A * raw + B.
+        depthxr::FrameGenEngineConvention y_down;
+        y_down.gain = {1.0f, -1.0f};
+        const std::array<float, 4> packed = depthxr::FrameGenEngineDecode(y_down, view0.encoding);
+        Check(packed[0] * 0.5f + packed[2] == 0.5f * decoded[0] && packed[1] * 0.25f + packed[3] == 0.5f * decoded[1],
+              "an EXT vector in Vulkan-style NDC is half itself in uv, y down");
         std::string why;
         Check(!depthxr::ValidateEngineMotionView(storage.found[0], why) && why.find("nearZ equals farZ") != std::string::npos,
               "the problem is told: " + why);
@@ -584,13 +614,22 @@ Outcome Run(const char* probe, std::vector<std::string> runtime, std::vector<con
           "xrEnumerateViewConfigurationViews");
 
     SpaceWarpProbeTestPeer::SetActiveSession(kSession);
-    // The motion vector swapchain, as an application makes it.
+    // The motion vector swapchain, as an application makes it: as big as the
+    // layer recommended (500x600 where it recommended nothing).
+    XrExtent2Di answered{500, 600};
+    if (outcome.fb.recommendedMotionVectorImageRectWidth) {
+        answered = {static_cast<std::int32_t>(outcome.fb.recommendedMotionVectorImageRectWidth),
+                    static_cast<std::int32_t>(outcome.fb.recommendedMotionVectorImageRectHeight)};
+    } else if (outcome.ext[0].recommendedMotionVectorImageRectWidth) {
+        answered = {static_cast<std::int32_t>(outcome.ext[0].recommendedMotionVectorImageRectWidth),
+                    static_cast<std::int32_t>(outcome.ext[0].recommendedMotionVectorImageRectHeight)};
+    }
     XrSwapchainCreateInfo motion{XR_TYPE_SWAPCHAIN_CREATE_INFO};
     motion.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
     motion.format = 10; // DXGI_FORMAT_R16G16B16A16_FLOAT
     motion.sampleCount = 1;
-    motion.width = 500;
-    motion.height = 600;
+    motion.width = static_cast<std::uint32_t>(answered.width);
+    motion.height = static_cast<std::uint32_t>(answered.height);
     motion.faceCount = 1;
     motion.arraySize = 2;
     motion.mipCount = 1;
@@ -602,9 +641,12 @@ Outcome Run(const char* probe, std::vector<std::string> runtime, std::vector<con
     XrCompositionLayerDepthInfoKHR left_depth = DepthInfo();
     XrCompositionLayerSpaceWarpInfoFB left = SpaceWarpInfo(&left_depth);
     left.motionVectorSubImage.swapchain = motion_swapchain;
+    left.motionVectorSubImage.imageRect = {{0, 0}, answered};
     XrCompositionLayerDepthInfoKHR right_depth = DepthInfo();
     XrFrameSynthesisInfoEXT right = FrameSynthesisInfo(&right_depth);
     right.motionVectorSubImage.swapchain = motion_swapchain;
+    right.motionVectorSubImage.imageRect = {{0, 0}, answered};
+    right.layerFlags = XR_FRAME_SYNTHESIS_INFO_REQUEST_RELAXED_FRAME_INTERVAL_BIT_EXT;
     Frame frame(&left, &right);
     Check(XR_SUCCEEDED(LayerFunction<PFN_xrEndFrame>(instance, "xrEndFrame")(kSession, &frame.info)) &&
               g_runtime.end_frames == 1,
@@ -720,9 +762,9 @@ void TestThroughTheLayer() {
         Check(outcome.create == XR_SUCCESS, "the instance exists: " + std::to_string(outcome.create));
         Check(!Has(outcome.runtime_instance, fb) && Has(outcome.runtime_instance, depth),
               "the runtime's instance lacks XR_FB_space_warp, with the application's other extensions");
-        Check(outcome.fb.recommendedMotionVectorImageRectWidth == 500 &&
-                  outcome.fb.recommendedMotionVectorImageRectHeight == 600,
-              "XrSystemSpaceWarpPropertiesFB recommends a quarter of the eye: " +
+        Check(outcome.fb.recommendedMotionVectorImageRectWidth == 250 &&
+                  outcome.fb.recommendedMotionVectorImageRectHeight == 300,
+              "XrSystemSpaceWarpPropertiesFB recommends an eighth of the eye (Frame Generation reads none): " +
                   std::to_string(outcome.fb.recommendedMotionVectorImageRectWidth) + "x" +
                   std::to_string(outcome.fb.recommendedMotionVectorImageRectHeight));
         Check(outcome.ext[0].recommendedMotionVectorImageRectWidth == 0,
@@ -735,8 +777,8 @@ void TestThroughTheLayer() {
               "a structure of an extension the layer does not own goes on");
         Check(outcome.log.find("takenOver=XR_FB_space_warp") != std::string::npos,
               "the instance's probe line says what the layer took over");
-        Check(outcome.log.find("XrSystemSpaceWarpPropertiesFB answered: recommendedMotionVectorImageRect=500x600") !=
-                  std::string::npos,
+        Check(outcome.log.find("XrSystemSpaceWarpPropertiesFB answered: recommendedMotionVectorImageRect=250x300 (an "
+                               "eighth of the eye each way)") != std::string::npos,
               "the answer is logged");
         Check(outcome.log.find("swapchain that looks like motion vectors") != std::string::npos &&
                   outcome.log.find("rgba16f=1, motionVectorSize=1") != std::string::npos,
@@ -744,8 +786,10 @@ void TestThroughTheLayer() {
         Check(outcome.log.find("the session's first frame with motion vectors") != std::string::npos &&
                   outcome.log.find("XrCompositionLayerSpaceWarpInfoFB layer=1 view=0 stripped=1") !=
                       std::string::npos &&
-                  outcome.log.find("(500x600 format=10") != std::string::npos,
+                  outcome.log.find("(250x300 format=10") != std::string::npos,
               "the first frame's structure is logged with its swapchain");
+        Check(outcome.log.find("relaxedIntervalFlags=0") != std::string::npos,
+              "a structure of an extension the layer does not own is not counted");
         Check(outcome.log.find("Space-warp probe summary (session end): frames=1, framesWithFbSpaceWarp=1") !=
                   std::string::npos,
               "the session's summary at its end");
@@ -756,18 +800,87 @@ void TestThroughTheLayer() {
         const Outcome outcome = Run("ext", {depth}, {ext, depth});
         Check(outcome.create == XR_SUCCESS && !Has(outcome.runtime_instance, ext),
               "the runtime's instance lacks XR_EXT_frame_synthesis");
-        Check(outcome.ext[0].recommendedMotionVectorImageRectWidth == 500 &&
-                  outcome.ext[1].recommendedMotionVectorImageRectHeight == 600,
-              "XrFrameSynthesisConfigViewEXT recommends a quarter of each view");
+        Check(outcome.ext[0].recommendedMotionVectorImageRectWidth == 250 &&
+                  outcome.ext[1].recommendedMotionVectorImageRectHeight == 300,
+              "XrFrameSynthesisConfigViewEXT recommends an eighth of each view");
         Check(outcome.fb.recommendedMotionVectorImageRectWidth == 0, "XR_FB_space_warp's properties are not answered");
         Check(outcome.ended.size() == 2 && outcome.ended[1] == kDepthOnly &&
                   outcome.ended[0] ==
                       std::vector<XrStructureType>{XR_TYPE_COMPOSITION_LAYER_SPACE_WARP_INFO_FB,
                                                    XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR},
               "the runtime gets the right view without XR_EXT_frame_synthesis' structure");
-        Check(outcome.log.find("XrFrameSynthesisConfigViewEXT answered: view0=500x600 view1=500x600") !=
-                  std::string::npos,
+        Check(outcome.log.find("XrFrameSynthesisConfigViewEXT answered: view0=250x300 view1=250x300 (an eighth of the "
+                               "eye each way)") != std::string::npos,
               "the answer is logged");
+        Check(outcome.log.find("relaxedIntervalFlags=1") != std::string::npos,
+              "REQUEST_RELAXED_FRAME_INTERVAL is counted in the probe's summary");
+    }
+
+    // The size answered: half the eye where Frame Generation will read the
+    // vectors (enabled for the game, VECTORXR_FRAMEGEN_ENGINE_MV from
+    // capture, on Direct3D 12: a Direct3D 12 game's, or a Vulkan game's
+    // through the Vulkan bridge), else an eighth;
+    // VECTORXR_FRAMEGEN_ENGINE_MV_SIZE wins.
+    {
+        const char* d3d12 = "XR_KHR_D3D12_enable";
+        const char* vulkan = "XR_KHR_vulkan_enable2";
+        const char* opengl = "XR_KHR_opengl_enable";
+        const std::filesystem::path settings =
+            std::filesystem::temp_directory_path() /
+            ("vectorxr-spacewarp-framegen-" + std::to_string(GetCurrentProcessId()) + ".json");
+        std::ofstream(settings, std::ios::trunc)
+            << R"({"version": 3, "core": {"enabled": true, "logLevel": "info", "trackSeenApps": false}, )"
+            << R"("applications": [], "modules": {"depthxr": {"enabled": false}, "pivotxr": {"enabled": false}, )"
+            << R"("quadviews": {"enabled": false}, "turbo": {"enabled": false}, "framegen": {"enabled": true}}})"
+            << "\n";
+        _putenv_s("VECTORXR_CONFIG_PATH", settings.string().c_str());
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "census");
+        const Outcome census = Run("both", {depth, d3d12}, {depth, fb, ext, d3d12});
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "capture");
+        const Outcome read = Run("both", {depth, d3d12}, {depth, fb, ext, d3d12});
+        const Outcome bridged = Run("both", {depth, d3d12, vulkan}, {depth, fb, ext, vulkan});
+        const Outcome gl = Run("both", {depth, opengl}, {depth, fb, ext, opengl});
+        _putenv_s("VECTORXR_VULKAN_BRIDGE", "off");
+        const Outcome unbridged = Run("both", {depth, d3d12, vulkan}, {depth, fb, ext, vulkan});
+        _putenv_s("VECTORXR_VULKAN_BRIDGE", "");
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_BRIDGE", "0");
+        const Outcome bridge_off = Run("both", {depth, d3d12, vulkan}, {depth, fb, ext, vulkan});
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_BRIDGE", "");
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV_SIZE", "quarter");
+        const Outcome research = Run("both", {depth}, {depth, fb, ext});
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV_SIZE", "");
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "");
+        _putenv_s("VECTORXR_CONFIG_PATH", "");
+        std::error_code ignored;
+        std::filesystem::remove(settings, ignored);
+        Check(census.fb.recommendedMotionVectorImageRectWidth == 250 &&
+                  census.ext[1].recommendedMotionVectorImageRectHeight == 300,
+              "an eighth of the eye while Frame Generation only takes a census");
+        Check(read.fb.recommendedMotionVectorImageRectWidth == 1000 &&
+                  read.fb.recommendedMotionVectorImageRectHeight == 1200 &&
+                  read.ext[0].recommendedMotionVectorImageRectWidth == 1000 &&
+                  read.ext[1].recommendedMotionVectorImageRectHeight == 1200 &&
+                  read.log.find("recommendedMotionVectorImageRect=1000x1200 (half the eye each way)") != std::string::npos,
+              "half the eye where Frame Generation reads a Direct3D 12 game's vectors: " +
+                  std::to_string(read.fb.recommendedMotionVectorImageRectWidth));
+        Check(bridged.create == XR_SUCCESS && Has(bridged.runtime_instance, d3d12) &&
+                  bridged.fb.recommendedMotionVectorImageRectWidth == 1000 &&
+                  bridged.ext[1].recommendedMotionVectorImageRectHeight == 1200,
+              "half the eye for a Vulkan game through the Vulkan bridge: " +
+                  std::to_string(bridged.fb.recommendedMotionVectorImageRectWidth));
+        Check(unbridged.create == XR_SUCCESS && !Has(unbridged.runtime_instance, d3d12) &&
+                  unbridged.fb.recommendedMotionVectorImageRectWidth == 250 &&
+                  unbridged.ext[1].recommendedMotionVectorImageRectHeight == 300,
+              "an eighth for a Vulkan game without the Vulkan bridge (Frame Generation's Vulkan backend reads none): " +
+                  std::to_string(unbridged.fb.recommendedMotionVectorImageRectWidth));
+        Check(bridge_off.create == XR_SUCCESS && bridge_off.fb.recommendedMotionVectorImageRectWidth == 250,
+              "an eighth for a Vulkan game with VECTORXR_FRAMEGEN_ENGINE_BRIDGE=0");
+        Check(gl.create == XR_SUCCESS && gl.fb.recommendedMotionVectorImageRectWidth == 250 &&
+                  gl.ext[0].recommendedMotionVectorImageRectWidth == 250,
+              "an eighth for an OpenGL game: " + std::to_string(gl.fb.recommendedMotionVectorImageRectWidth));
+        Check(research.fb.recommendedMotionVectorImageRectWidth == 500 &&
+                  research.ext[0].recommendedMotionVectorImageRectHeight == 600,
+              "VECTORXR_FRAMEGEN_ENGINE_MV_SIZE=quarter: a quarter of the eye");
     }
 
     // A runtime that lists the extension gets it, and its structures.

@@ -634,6 +634,23 @@ enum class FrameGenEngineMap : std::uint8_t {
 const char* ToString(FrameGenEngineMap map); // "off", "separate", "merged"
 // "separate" or "merged" (any case); anything else is off.
 FrameGenEngineMap ParseFrameGenEngineMap(const std::string& value);
+// Stage 9 (VECTORXR_FRAMEGEN_ENGINE_BRIDGE): a Vulkan game's motion vectors
+// through the Vulkan bridge, whose runtime images hold them only after the
+// bridge's copy. Released, the default: read at each release of them, after
+// the copy. End (=end): images the game never acquires are also handed over
+// at the frame's end (copied, then given back to the game's queue,
+// VulkanBridge::EndFrameMotion), for a game that writes them without the
+// swapchain calls. Off (=0): never, the session's records dropped (the kill
+// switch).
+enum class FrameGenEngineBridgeMode : std::uint8_t {
+    kOff,
+    kReleased,
+    kEndFrame,
+};
+const char* ToString(FrameGenEngineBridgeMode mode); // "off", "released", "end"
+// "0" or "off" is off, "end" the frame's end too (any case); anything else,
+// none among it, released.
+FrameGenEngineBridgeMode ParseFrameGenEngineBridgeMode(const std::string& value);
 
 // "gx,gy,camera[,jitter]" (camera: included, rotation, excluded or objects),
 // as VECTORXR_FRAMEGEN_ENGINE_MV_CONVENTION fixes one; none when it is not.
@@ -1860,8 +1877,12 @@ class FrameGenEngineValidator {
 
 // The convention a game is expected to use (a table by executable,
 // extension and graphics API: MSFS 2024's XR_FB_space_warp on Direct3D 12),
-// none for the rest. `executable` is the file name, any case; `api` the
-// backend's Name().
+// else the specification's where the API fixes the y axis: Vulkan-style NDC
+// (y down) for XR_EXT_frame_synthesis on any API, and for XR_FB_space_warp
+// from a Vulkan game (its NDC); none for the rest. `executable` is the file
+// name, any case; `api` the game's graphics API as a backend names it
+// ("D3D12", "Vulkan": a Vulkan game on the bridge's Direct3D 12 backend is
+// "Vulkan").
 std::optional<FrameGenEngineConvention> FrameGenEnginePriorFor(const std::string& executable, bool ext,
                                                                const std::string& api);
 
@@ -1886,10 +1907,18 @@ inline constexpr std::uint32_t kFrameGenEngineSettle = 64u;    // ...or in the l
 // G9: the frame's color was not captured at its release, or the frame is
 // not one the engine path serves (just in time, two views, no quad views).
 inline constexpr std::uint32_t kFrameGenEngineUncaptured = 128u;
-inline constexpr std::size_t kFrameGenEngineGateCount = 8;
+// G10 (stage 9): the newest censuses find one view's vectors exactly zero
+// everywhere and another's not: the game writes one eye's alone (Star
+// Citizen fills one eye's depth only). Neither eye's is used: one eye moved
+// by the game's vectors and the other by measured flow would not match.
+inline constexpr std::uint32_t kFrameGenEngineOneEye = 256u;
+inline constexpr std::size_t kFrameGenEngineGateCount = 9;
 // Bit `index`'s name in the summaries: "noStruct", "skip", "pairing", "cut",
-// "decode", "recreate", "settle", "uncaptured".
+// "decode", "recreate", "settle", "uncaptured", "oneEye".
 const char* FrameGenEngineGateName(std::size_t index);
+// G8's settle: how long after the game last made a swapchain its vectors
+// wait (in a Vulkan-bridged session, before they are read at all).
+inline constexpr double kFrameGenEngineSettleSeconds = 3.0;
 
 // One view's structure as the gates read it.
 struct FrameGenEngineGateView {
@@ -1933,6 +1962,9 @@ struct FrameGenEngineGateFacts {
     bool captured{false}; // every view's color was captured at its release
     bool just_in_time{false};
     bool composed{false}; // quad views composed by Frame Generation
+    // The views' newest censuses: one view's vectors exactly zero everywhere
+    // read, another's not (G10).
+    bool one_eye{false};
 };
 
 // The gates holding a frame's vectors back: `record` is the frame's (none
@@ -2120,8 +2152,13 @@ std::uint64_t ResearchFileReads();
 
 // Engine motion vectors: %LOCALAPPDATA%\VectorXR\engine-motion-<exe>.removed,
 // which the Direct3D 12 backend writes when the device is removed within 2 s
-// of reading this game's motion vectors. While it is there, sessions of this
-// game read none (deleting it reads them again). Empty without %LOCALAPPDATA%.
+// of reading this game's motion vectors, and the Vulkan bridge when the
+// game's Vulkan device is lost within 2 s of its work for them. While it is
+// there, sessions of this game read none (deleting it reads them again).
+// Empty without %LOCALAPPDATA%.
 std::filesystem::path FrameGenEngineRemovedPath();
+// Writes that file: `cause` ("The GPU device was removed (hr=...)") and what
+// it means. Returns its path (empty: none written).
+std::filesystem::path WriteFrameGenEngineRemoved(const std::string& cause);
 
 } // namespace depthxr

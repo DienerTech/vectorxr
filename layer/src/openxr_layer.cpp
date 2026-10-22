@@ -1487,6 +1487,13 @@ std::string SessionStateName(XrSessionState state) {
     }
 }
 
+// The space-warp probe's answer, as its lines say it.
+const char* EyeShare(MotionVectorSize size) {
+    return size == MotionVectorSize::kHalf      ? "half the eye"
+           : size == MotionVectorSize::kQuarter ? "a quarter of the eye"
+                                                : "an eighth of the eye";
+}
+
 template <typename Handle>
 std::string FormatHandle(Handle handle) {
     std::uint64_t value = 0;
@@ -2831,6 +2838,7 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
     d3d11_bridge_sharpen_logged_ = false;
     vulkan_bridge_lost_logged_ = false;
     vulkan_bridge_depth_logged_ = false;
+    vulkan_bridge_motion_ = false;
     vulkan_bridge_last_summary_ = std::chrono::steady_clock::now();
     const auto* d3d11_binding = create_info
                                     ? static_cast<const XrGraphicsBindingD3D11KHR*>(
@@ -3436,8 +3444,9 @@ XrResult OpenXrLayer::GetSystemProperties(XrInstance instance,
         // The runtime left the structure as the application wrote it.
         auto* space_warp = static_cast<XrSystemSpaceWarpPropertiesFB*>(
             FindMutableStructInChain(properties->next, XR_TYPE_SYSTEM_SPACE_WARP_PROPERTIES_FB));
+        const MotionVectorSize size = SpaceWarpVectorSizeLocked();
         if (space_warp) {
-            spacewarp_motion_vector_size_ = SpaceWarpMotionVectorSize(instance, system_id);
+            spacewarp_motion_vector_size_ = SpaceWarpMotionVectorSize(instance, system_id, size);
             space_warp->recommendedMotionVectorImageRectWidth =
                 static_cast<uint32_t>(spacewarp_motion_vector_size_.width);
             space_warp->recommendedMotionVectorImageRectHeight =
@@ -3448,7 +3457,8 @@ XrResult OpenXrLayer::GetSystemProperties(XrInstance instance,
             logger_.Info(space_warp ? "Space-warp probe: XrSystemSpaceWarpPropertiesFB answered: "
                                       "recommendedMotionVectorImageRect=" +
                                           std::to_string(spacewarp_motion_vector_size_.width) + "x" +
-                                          std::to_string(spacewarp_motion_vector_size_.height) + "."
+                                          std::to_string(spacewarp_motion_vector_size_.height) + " (" +
+                                          EyeShare(size) + " each way)."
                                     : std::string("Space-warp probe: xrGetSystemProperties without "
                                                   "XrSystemSpaceWarpPropertiesFB (its first call)."));
         }
@@ -3662,6 +3672,7 @@ XrResult OpenXrLayer::EnumerateViewConfigurationViews(XrInstance instance,
     }
     // XR_EXT_frame_synthesis recommends a motion vector size for each view.
     std::string answered;
+    const MotionVectorSize share = SpaceWarpVectorSizeLocked();
     const uint32_t count = std::min(view_capacity_input, *view_count_output);
     for (uint32_t i = 0; i < count; ++i) {
         auto* config = static_cast<XrFrameSynthesisConfigViewEXT*>(
@@ -3670,7 +3681,7 @@ XrResult OpenXrLayer::EnumerateViewConfigurationViews(XrInstance instance,
             continue;
         }
         const XrExtent2Di size =
-            RecommendedMotionVectorSize(views[i].recommendedImageRectWidth, views[i].recommendedImageRectHeight);
+            RecommendedMotionVectorSize(views[i].recommendedImageRectWidth, views[i].recommendedImageRectHeight, share);
         config->recommendedMotionVectorImageRectWidth = static_cast<uint32_t>(size.width);
         config->recommendedMotionVectorImageRectHeight = static_cast<uint32_t>(size.height);
         spacewarp_motion_vector_size_ = size;
@@ -3681,7 +3692,8 @@ XrResult OpenXrLayer::EnumerateViewConfigurationViews(XrInstance instance,
         logger_.Info("Space-warp probe: xrEnumerateViewConfigurationViews(" +
                      std::string(ToString(view_configuration_type)) + ") " +
                      (answered.empty() ? std::string("without XrFrameSynthesisConfigViewEXT (its first call).")
-                                       : "XrFrameSynthesisConfigViewEXT answered:" + answered + "."));
+                                       : "XrFrameSynthesisConfigViewEXT answered:" + answered + " (" + EyeShare(share) +
+                                             " each way)."));
     }
     return result;
 }
@@ -9147,13 +9159,21 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     // The space-warp probe's structures never reach the runtime (nor Frame
     // Generation, nor the bridges' copies of the frame).
     std::optional<SpaceWarpFrame> spacewarp_frame;
+    std::optional<FrameGenEngineMotionFrame> bridged_record;
     if (SpaceWarpProbeActive()) {
         frame_end_info = ProbeSpaceWarpFrameLocked(frame_end_info, spacewarp_frame.emplace());
         // Frame Generation's record of what the structures carried, with the
         // game's own poses (Pivot changes a copy later): on every frame, one
-        // without structures too, so its frame before is always the last.
-        framegen_.NoteEngineMotion(EngineMotionFrameLocked(*frame_end_info, *spacewarp_frame),
-                                   d3d11_bridge_.Active() || vulkan_bridge_.Active());
+        // without structures too, so its frame before is always the last. A
+        // Vulkan-bridged frame's goes once its releases are handed over
+        // below, as a game's own images' releases come before its xrEndFrame.
+        FrameGenEngineMotionFrame record = EngineMotionFrameLocked(*frame_end_info, *spacewarp_frame);
+        if (vulkan_bridge_.Active()) {
+            bridged_record = std::move(record);
+        } else {
+            framegen_.NoteEngineMotion(std::move(record), d3d11_bridge_.Active() ? FrameGenEngineBridge::kD3D11
+                                                                                  : FrameGenEngineBridge::kNone);
+        }
     }
     // The frame's bridged images reach the runtime's images here, where a
     // runtime reads them: everything the game submitted before this call is
@@ -9165,9 +9185,30 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         return handed;
     }
     // ...and the game's motion vector images, which it may never release:
-    // as they are now.
+    // as they are now (through the Vulkan bridge, as a hand-over copies them
+    // into the runtime's images, with VECTORXR_FRAMEGEN_ENGINE_BRIDGE=end).
     if (SpaceWarpProbeActive()) {
-        framegen_.CaptureEngineMotion();
+        if (bridged_record) {
+            std::vector<XrSwapchain> vectors;
+            for (const FrameGenEngineMotionView& view : bridged_record->views) {
+                vectors.push_back(view.vectors.swapchain);
+            }
+            // Read from now on: their images go back to the game's queue
+            // behind each copy, so its next frame's vectors never overwrite
+            // the ones being copied.
+            if (framegen_.NoteEngineMotion(std::move(*bridged_record), FrameGenEngineBridge::kVulkan)) {
+                for (const XrSwapchain swapchain : vectors) {
+                    vulkan_bridge_motion_ = vulkan_bridge_.MarkMotion(swapchain) || vulkan_bridge_motion_;
+                }
+            }
+        }
+        FrameGenMotionHandOver hand_over;
+        if (vulkan_bridge_.Active()) {
+            hand_over = [this](const std::vector<std::pair<XrSwapchain, std::uint32_t>>& images) {
+                return vulkan_bridge_.EndFrameMotion(images);
+            };
+        }
+        framegen_.CaptureEngineMotion(hand_over);
     }
     // A bridged session lives on the bridge's device; depth that stays the
     // game's is left out of its frames.
@@ -15128,6 +15169,11 @@ XrResult OpenXrLayer::HandOverBridgedReleasesLocked(XrSwapchain swapchain, Swapc
     while (!info.bridge_handovers.empty()) {
         const uint32_t index = info.bridge_handovers.front();
         info.bridge_handovers.pop_front();
+        std::optional<bool> copied_ahead;
+        if (!info.bridge_copied.empty()) {
+            copied_ahead = info.bridge_copied.front();
+            info.bridge_copied.pop_front();
+        }
         if (copy) {
             // As ReleaseSwapchainImage did at the release: the bridge's copy
             // into the runtime's image goes ahead of Frame Generation's
@@ -15135,7 +15181,8 @@ XrResult OpenXrLayer::HandOverBridgedReleasesLocked(XrSwapchain swapchain, Swapc
             // the copy on the bridge's queue, or the runtime may read the
             // image before it). A copy skipped (a stalled queue) leaves an
             // older frame there: not captured.
-            const bool copied = d3d11_bridge_.Released(swapchain) && vulkan_bridge_.Released(swapchain);
+            const bool copied = copied_ahead ? *copied_ahead
+                                             : d3d11_bridge_.Released(swapchain) && vulkan_bridge_.Released(swapchain);
             NoteFrameGenRelease(swapchain, index);
             if (framegen_.TracesSwapchainCalls()) {
                 framegen_.Trace().Record("hand", reinterpret_cast<uint64_t>(swapchain), index, copied);
@@ -15167,6 +15214,18 @@ XrResult OpenXrLayer::HandOverBridgedReleasesLocked(XrSwapchain swapchain, Swapc
 }
 
 XrResult OpenXrLayer::HandOverBridgedReleasesLocked(std::string_view reason, bool copy) {
+    // While the Vulkan bridge gives the game's motion vector images back at
+    // their releases, every swapchain's copies go first: a giving back waits
+    // on the GPU for its copy, and a capture of Frame Generation's queued
+    // ahead of the copy on the bridge's queue would hold the game's next
+    // frame back as well.
+    if (copy && vulkan_bridge_motion_) {
+        for (auto& [swapchain, info] : tracked_swapchains_) {
+            for (std::size_t k = info.bridge_copied.size(); k < info.bridge_handovers.size(); ++k) {
+                info.bridge_copied.push_back(d3d11_bridge_.Released(swapchain) && vulkan_bridge_.Released(swapchain));
+            }
+        }
+    }
     XrResult first_failure = XR_SUCCESS;
     for (auto& [swapchain, info] : tracked_swapchains_) {
         const XrResult result = HandOverBridgedReleasesLocked(swapchain, info, reason, copy);
@@ -15929,7 +15988,33 @@ void OpenXrLayer::NoteThread(ThreadCensus::Call call) {
     }
 }
 
-XrExtent2Di OpenXrLayer::SpaceWarpMotionVectorSize(XrInstance instance, XrSystemId system_id) {
+MotionVectorSize OpenXrLayer::SpaceWarpVectorSizeLocked() {
+    // Frame Generation reads a game's vectors from stage 2 on (their capture
+    // at half resolution), in a game it is enabled for, on Direct3D 12 only:
+    // a Direct3D 12 game's, or a Vulkan game's through the Vulkan bridge
+    // (whose backend is Direct3D 12) unless VECTORXR_FRAMEGEN_ENGINE_BRIDGE=0;
+    // never through the Direct3D 11 bridge (the game's depth stays its own
+    // there), on another API's backend, nor after a device was removed right
+    // after reading them (the sentinel).
+    ReloadConfigIfNeeded();
+    RefreshResolvedSettings();
+    const FrameGenEngineMode mode =
+        ParseFrameGenEngineMode(ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_MV").value_or("").c_str());
+    const bool bridge_reads =
+        ParseFrameGenEngineBridgeMode(ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_BRIDGE").value_or("")) !=
+        FrameGenEngineBridgeMode::kOff;
+    const bool direct3d12 =
+        vulkan_enable_version_ == 0 ? d3d12_extension_enabled_ : vulkan_bridge_extensions_ && bridge_reads;
+    const std::filesystem::path removed = FrameGenEngineRemovedPath();
+    std::error_code ignored;
+    const bool read = resolved_settings_.core.enabled && resolved_settings_.framegen.enabled &&
+                      mode >= FrameGenEngineMode::kCapture && !d3d11_graphics_extension_requested_ && direct3d12 &&
+                      (removed.empty() || !std::filesystem::exists(removed, ignored));
+    return ChooseMotionVectorSize(read,
+                                  ParseMotionVectorSize(ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_MV_SIZE").value_or("")));
+}
+
+XrExtent2Di OpenXrLayer::SpaceWarpMotionVectorSize(XrInstance instance, XrSystemId system_id, MotionVectorSize size) {
     // The runtime's own stereo views, whatever quad views make of them.
     uint32_t count = 0;
     std::array<XrViewConfigurationView, 2> views{};
@@ -15940,9 +16025,9 @@ XrExtent2Di OpenXrLayer::SpaceWarpMotionVectorSize(XrInstance instance, XrSystem
                                                            static_cast<uint32_t>(views.size()), &count,
                                                            views.data())) ||
         count == 0) {
-        return RecommendedMotionVectorSize(0, 0);
+        return RecommendedMotionVectorSize(0, 0, size);
     }
-    return RecommendedMotionVectorSize(views[0].recommendedImageRectWidth, views[0].recommendedImageRectHeight);
+    return RecommendedMotionVectorSize(views[0].recommendedImageRectWidth, views[0].recommendedImageRectHeight, size);
 }
 
 std::string OpenXrLayer::DescribeSpaceWarpSwapchainLocked(XrSwapchain swapchain) const {
@@ -15985,6 +16070,10 @@ const XrFrameEndInfo* OpenXrLayer::ProbeSpaceWarpFrameLocked(const XrFrameEndInf
         if (view.type == XR_TYPE_COMPOSITION_LAYER_SPACE_WARP_INFO_FB &&
             (view.layer_flags & XR_COMPOSITION_LAYER_SPACE_WARP_INFO_FRAME_SKIP_BIT_FB) != 0) {
             ++spacewarp_counts_.frame_skips;
+        }
+        if (view.type == XR_TYPE_FRAME_SYNTHESIS_INFO_EXT &&
+            (view.layer_flags & XR_FRAME_SYNTHESIS_INFO_REQUEST_RELAXED_FRAME_INTERVAL_BIT_EXT) != 0) {
+            ++spacewarp_counts_.relaxed;
         }
     }
     spacewarp_counts_.frames_fb += fb ? 1 : 0;
@@ -16058,6 +16147,7 @@ void OpenXrLayer::LogSpaceWarpProbeSummaryLocked(std::string_view reason) {
            << ", viewsStripped=" << total.views_stripped - last.views_stripped
            << ", viewsLeftBehindUnknownStruct=" << total.views_left - last.views_left
            << ", frameSkipFlags=" << total.frame_skips - last.frame_skips
+           << ", relaxedIntervalFlags=" << total.relaxed - last.relaxed
            << ", structuresWithProblems=" << total.invalid - last.invalid << "; session: frames=" << total.frames
            << ", framesWithFbSpaceWarp=" << total.frames_fb << ", framesWithFrameSynthesis=" << total.frames_ext
            << "; last=" << (spacewarp_last_view_.empty() ? std::string("none") : spacewarp_last_view_);

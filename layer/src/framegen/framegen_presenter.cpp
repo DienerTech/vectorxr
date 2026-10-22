@@ -521,6 +521,14 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
     engine_census_after_ = 0;
     engine_notes_logged_ = 0;
     logged_engine_failure_ = logged_engine_bridged_ = false;
+    // Stage 9: a Vulkan game's vectors through the Vulkan bridge, at their
+    // releases (the default), at the frame's end too for images it never
+    // acquires (=end), or not at all (=0).
+    engine_bridge_ = FrameGenEngineBridge::kNone;
+    engine_bridge_mode_ = ParseFrameGenEngineBridgeMode(ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_BRIDGE").value_or(""));
+    logged_engine_bridge_read_ = false;
+    engine_empty_.clear();
+    logged_engine_one_eye_ = false;
     engine_validation_ = engine_validation_logged_ = {};
     engine_decisions_logged_ = 0;
     engine_prior_checked_ = false;
@@ -1591,9 +1599,11 @@ void FrameGenPresenter::CaptureOnRelease(XrSwapchain swapchain, std::uint32_t im
                                [&](const CaptureTarget& target) { return target.swapchain == swapchain; });
         };
         // A frame's motion vectors (never a color image, whatever its
-        // format): captured as a motion target only.
+        // format): captured as a motion target only (through the Vulkan
+        // bridge, not while the game's swapchains settle).
         if (record->second.motion) {
-            return named(motion_targets_);
+            return named(motion_targets_) &&
+                   (engine_bridge_ != FrameGenEngineBridge::kVulkan || EngineBridgeSettledLocked());
         }
         return (record->second.depth ? record->second.depth_capturable : record->second.capturable) &&
                named(capture_targets_);
@@ -1649,7 +1659,10 @@ void FrameGenPresenter::CaptureOnRelease(XrSwapchain swapchain, std::uint32_t im
                 job.encoding = target.encoding;
                 job.source = {swapchain, image_index, target.array_index, target.rect, record->second.format};
                 job.request.extent = target.color_extent;
-                if (engine_requested_ == FrameGenEngineMode::kCensus && engine_worker_ && engine_frame_.valid) {
+                // (Not through the Vulkan bridge: its runtime images hold the
+                // vectors only behind its copies.)
+                if (engine_requested_ == FrameGenEngineMode::kCensus && engine_worker_ && engine_frame_.valid &&
+                    engine_bridge_ == FrameGenEngineBridge::kNone) {
                     std::vector<FrameGenMotionJob> motion;
                     std::vector<FrameGenViewRequest> color;
                     EngineJobsLocked(engine_frame_, motion, color);
@@ -1814,22 +1827,39 @@ void FrameGenPresenter::CaptureOnRelease(XrSwapchain swapchain, std::uint32_t im
     }
 }
 
-void FrameGenPresenter::NoteEngineMotion(FrameGenEngineMotionFrame frame, bool bridged) {
+bool FrameGenPresenter::EngineBridgeSettledLocked() const {
+    return !swapchain_created_at_ ||
+           std::chrono::duration<double>(Clock::now() - *swapchain_created_at_).count() >= kFrameGenEngineSettleSeconds;
+}
+
+bool FrameGenPresenter::NoteEngineMotion(FrameGenEngineMotionFrame frame, FrameGenEngineBridge bridge) {
     std::shared_ptr<FrameGenEngineCensusWorker> worker;
     FrameGenEngineCensusWorker::Frame noted;
+    bool read = false;
     {
         std::scoped_lock lock(mutex_);
         ++engine_noted_;
         engine_invalid_ += frame.invalid;
-        if (bridged) {
+        engine_bridge_ = bridge;
+        // Through the Direct3D 11 bridge the game's depth stays its own, and
+        // vectors are never read without it; through the Vulkan bridge none
+        // are with VECTORXR_FRAMEGEN_ENGINE_BRIDGE=0.
+        const bool vulkan = bridge == FrameGenEngineBridge::kVulkan;
+        if (bridge == FrameGenEngineBridge::kD3D11 || (vulkan && engine_bridge_mode_ == FrameGenEngineBridgeMode::kOff)) {
             ForgetEngineFramesLocked();
             if (engine_worker_ && engine_requested_ != FrameGenEngineMode::kOff && logger_ && !logged_engine_bridged_) {
                 logged_engine_bridged_ = true;
-                logger_->Info("Frame Generation engine motion census: none in this bridged session (the runtime's "
-                              "images get the game's motion vectors only when it releases them).");
+                logger_->Info(vulkan ? "Frame Generation engine motion: none in this Vulkan-bridged session "
+                                       "(VECTORXR_FRAMEGEN_ENGINE_BRIDGE=0)."
+                                     : "Frame Generation engine motion: none in this Direct3D 11-bridged session (the "
+                                       "game's depth stays its own there).");
             }
-            return;
+            return false;
         }
+        // Through the Vulkan bridge, from 3 s after the game last made a
+        // swapchain: Star Citizen churns them at its world entry, and nothing
+        // new is asked of its queue meanwhile (no hand-backs, no captures).
+        const bool settled = !vulkan || EngineBridgeSettledLocked();
         EngineFrame record;
         record.valid = true;
         const std::size_t views = frame.views.size();
@@ -1891,12 +1921,15 @@ void FrameGenPresenter::NoteEngineMotion(FrameGenEngineMotionFrame frame, bool b
         }
         // Vectors to capture: the backend's raw fields are made from now on
         // (Generate's FrameGenTuning::engine_mode).
-        engine_capturable_ = engine_capturable_ || (engine_requested_ >= FrameGenEngineMode::kCapture && views > 0);
+        engine_capturable_ =
+            engine_capturable_ || (engine_requested_ >= FrameGenEngineMode::kCapture && views > 0 && settled);
         // Stage 2: motion vector images the game released for this frame are
         // captured at their next release, for the next frame (its end
-        // captures the others).
+        // captures the others). Through the Vulkan bridge the layer hands the
+        // next frame's releases over before that frame's record comes (in
+        // its xrEndFrame, after the bridge's copy): they are captured there.
         motion_targets_.clear();
-        for (std::size_t i = 0; i < views && engine_requested_ >= FrameGenEngineMode::kCapture; ++i) {
+        for (std::size_t i = 0; i < views && engine_requested_ >= FrameGenEngineMode::kCapture && settled; ++i) {
             if (!record.released[i]) {
                 continue;
             }
@@ -1930,10 +1963,30 @@ void FrameGenPresenter::NoteEngineMotion(FrameGenEngineMotionFrame frame, bool b
             }
             noted.continuous = continuous;
         }
+        // Through the Vulkan bridge the vectors are read at their releases
+        // from stage 2, and at the frame's end only by a hand-over
+        // (VECTORXR_FRAMEGEN_ENGINE_BRIDGE=end): their images go back to the
+        // game's queue behind each copy from now on (VulkanBridge::MarkMotion).
+        read = vulkan && settled && views > 0 && engine_worker_ &&
+               (engine_requested_ >= FrameGenEngineMode::kCapture ||
+                engine_bridge_mode_ == FrameGenEngineBridgeMode::kEndFrame);
+        if (read && logger_ && !logged_engine_bridge_read_) {
+            logged_engine_bridge_read_ = true;
+            logger_->Info(std::string("Frame Generation engine motion through the Vulkan bridge: the game's vectors are "
+                                      "read in the runtime's images behind the bridge's copy, at their releases") +
+                          (engine_bridge_mode_ == FrameGenEngineBridgeMode::kEndFrame
+                               ? " and, for images the game never acquires, by a hand-over at the frame's end "
+                                 "(VECTORXR_FRAMEGEN_ENGINE_BRIDGE=end)"
+                               : "") +
+                          "; each release gives their image back to the game's queue behind the copy. From " +
+                          Number(kFrameGenEngineSettleSeconds, 0) +
+                          " s after the game last made a swapchain; VECTORXR_FRAMEGEN_ENGINE_BRIDGE=0 reads none.");
+        }
     }
     if (worker) {
         worker->NoteFrame(std::move(noted));
     }
+    return read;
 }
 
 void FrameGenPresenter::EngineJobsLocked(const EngineFrame& frame, std::vector<FrameGenMotionJob>& jobs,
@@ -1965,24 +2018,29 @@ void FrameGenPresenter::EngineJobsLocked(const EngineFrame& frame, std::vector<F
     }
 }
 
-void FrameGenPresenter::CaptureEngineMotion() {
+void FrameGenPresenter::CaptureEngineMotion(const FrameGenMotionHandOver& hand_over) {
     std::vector<FrameGenMotionJob> jobs;
     std::vector<std::size_t> places; // each job's view in the record
     std::vector<FrameGenViewRequest> color;
     std::shared_ptr<FrameGenEngineCensusWorker> worker;
     std::optional<FrameGenEngineImageTracker::Hypothesis> image;
     bool capture = false;
+    bool bridged = false;
+    bool hand_overs = false; // VECTORXR_FRAMEGEN_ENGINE_BRIDGE=end
     std::uint64_t frame = 0;
     // Stage 3: the game's expected convention is looked for with its first
-    // vectors (by the extension it sends them with).
+    // vectors (by the extension it sends them with, and its graphics API:
+    // a Vulkan game's, on the bridge's Direct3D 12 backend).
     std::optional<bool> prior_ext;
     {
         std::scoped_lock lock(mutex_);
         // The views captured at their release since the last frame's end
         // (CaptureOnRelease): this frame's.
         const std::vector<std::uint8_t> released = std::exchange(engine_released_, {});
+        bridged = engine_bridge_ == FrameGenEngineBridge::kVulkan;
+        hand_overs = engine_bridge_mode_ == FrameGenEngineBridgeMode::kEndFrame;
         if (engine_requested_ == FrameGenEngineMode::kOff || !engine_worker_ || !engine_frame_.valid ||
-            engine_frame_.frame.views.empty() || !CapturingLocked()) {
+            engine_frame_.frame.views.empty() || !CapturingLocked() || (bridged && !EngineBridgeSettledLocked())) {
             return;
         }
         worker = engine_worker_;
@@ -2028,6 +2086,56 @@ void FrameGenPresenter::CaptureEngineMotion() {
         job.samples = false;
         job.capture = true;
     }
+    // Through the Vulkan bridge the runtime's images hold the game's vectors
+    // only behind the bridge's copy: at the frame's end a view is read only
+    // where `hand_over` copied the image its vectors are thought to be in
+    // (every image is handed over while the census reads every one, so the
+    // tracker sees which one changes), with VECTORXR_FRAMEGEN_ENGINE_BRIDGE=end.
+    // Every image is read (the census of them all, the samples, a research
+    // dump of them all) only when every one was copied this frame: an image
+    // the hand-over left out (its first, or a stalled queue) holds an older
+    // frame, or nothing the bridge ever copied.
+    bool every_copied = true;
+    if (bridged) {
+        std::vector<std::pair<XrSwapchain, std::uint32_t>> handed;
+        std::vector<std::size_t> owners; // each image's job
+        for (std::size_t k = 0; k < jobs.size() && hand_over && hand_overs; ++k) {
+            // The swapchain's images (up to three), for the census and the hand-over alike.
+            std::uint32_t count = 0;
+            if (XR_FAILED(xr_.images(jobs[k].vectors.swapchain, 0, &count, nullptr))) {
+                count = 0;
+            }
+            jobs[k].image_count = std::min(count, kFrameGenEngineImages);
+            for (std::uint32_t i = 0; i < jobs[k].image_count; ++i) {
+                if (jobs[k].census_all || jobs[k].samples || i == jobs[k].vectors.image_index) {
+                    handed.push_back({jobs[k].vectors.swapchain, i});
+                    owners.push_back(k);
+                }
+            }
+        }
+        const std::vector<bool> copied = handed.empty() ? std::vector<bool>{} : hand_over(handed);
+        std::vector<FrameGenMotionJob> kept;
+        std::vector<std::size_t> kept_places;
+        for (std::size_t k = 0; k < jobs.size(); ++k) {
+            bool chosen = false;
+            bool all = true;
+            for (std::size_t n = 0; n < handed.size(); ++n) {
+                if (owners[n] != k) continue;
+                const bool done = n < copied.size() && copied[n];
+                chosen = chosen || (handed[n].second == jobs[k].vectors.image_index && done);
+                all = all && done;
+            }
+            if (!chosen) continue;
+            if (!all) {
+                jobs[k].census_all = jobs[k].samples = false;
+                every_copied = false;
+            }
+            kept.push_back(jobs[k]);
+            kept_places.push_back(places[k]);
+        }
+        jobs = std::move(kept);
+        places = std::move(kept_places);
+    }
     std::string error;
     bool ok = true;
     std::vector<bool> resampled; // per job (stage 2)
@@ -2044,8 +2152,8 @@ void FrameGenPresenter::CaptureEngineMotion() {
             return;
         }
         if (prior_ext) {
-            if (const std::optional<FrameGenEngineConvention> prior =
-                    FrameGenEnginePriorFor(PathToUtf8(GetCurrentExecutablePath().filename()), *prior_ext, gpu_->Name())) {
+            if (const std::optional<FrameGenEngineConvention> prior = FrameGenEnginePriorFor(
+                    PathToUtf8(GetCurrentExecutablePath().filename()), *prior_ext, bridged ? "Vulkan" : gpu_->Name())) {
                 gpu_->SetEnginePrior(*prior);
             }
         }
@@ -2059,7 +2167,8 @@ void FrameGenPresenter::CaptureEngineMotion() {
         // copy of them all is taken, then the image the vectors are thought to
         // be in.
         bool dumping = false;
-        if (ok && !jobs.empty() && CaptureUnderWay() && capture_motion_ && capture_motion_armed_ != capture_index_) {
+        if (ok && !jobs.empty() && every_copied && CaptureUnderWay() && capture_motion_ &&
+            capture_motion_armed_ != capture_index_) {
             const std::filesystem::path directory =
                 std::filesystem::path(capture_root_) / ("frame-" + std::to_string(capture_index_));
             std::error_code ignored;
@@ -2091,6 +2200,24 @@ void FrameGenPresenter::CaptureEngineMotion() {
                 const bool read = !capture || (k < resampled.size() && resampled[k]);
                 if (read && places[k] < engine_frame_.captured.size()) engine_frame_.captured[places[k]] = 1;
             }
+        }
+        // Stage 9: whether each view's newest census found its vectors
+        // exactly zero everywhere it read in the view's region (G10: one
+        // eye's alone). The statistics grid, inside the region, says: the
+        // hash grid covers the whole image, which two views side by side in
+        // one slice share.
+        for (const FrameGenEngineCensus& census : status.census) {
+            if (census.early) continue;
+            bool read_any = false;
+            bool empty = true;
+            for (std::uint32_t i = 0; i < census.images && i < kFrameGenEngineImages; ++i) {
+                if (((census.censused >> i) & 1u) == 0) continue;
+                read_any = true;
+                empty = empty && census.image[i].finite == kFrameGenEngineStatsTexels && census.image[i].max_abs == 0.0f;
+            }
+            if (!read_any) continue;
+            engine_empty_.resize(std::max(engine_empty_.size(), census.view + 1));
+            engine_empty_[census.view] = empty;
         }
         // Stage 6: the frames' verdicts read back since the last call, as Lead
         // judges them (those of frames held at Assist too), steer a session
@@ -3316,6 +3443,12 @@ bool FrameGenPresenter::EngineGatesLocked(const XrCompositionLayerProjection& pr
                                           const FrameGenEngineGateFacts& facts, bool flipped) {
     const std::uint32_t gates = FrameGenEngineGates(record, previous, facts);
     const bool own = record && record->display_time == facts.end_time;
+    if ((gates & kFrameGenEngineOneEye) != 0 && logger_ && !logged_engine_one_eye_) {
+        logged_engine_one_eye_ = true;
+        logger_->Info("Frame Generation engine motion: the game writes one eye's motion vectors alone (the other's are "
+                      "exactly zero everywhere the census reads): neither eye's are used while that holds (gate "
+                      "oneEye).");
+    }
     ++engine_window_.frames;
     engine_window_.structs += own && record->complete ? 1 : 0;
     for (std::size_t i = 0; i < kFrameGenEngineGateCount; ++i) {
@@ -5078,6 +5211,11 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         engine_facts.captured = true;
         engine_facts.just_in_time = analyze != nullptr;
         engine_facts.composed = analyze && composition;
+        // G10: one view's vectors exactly zero everywhere at its newest
+        // census while another's are not.
+        engine_facts.one_eye =
+            std::any_of(engine_empty_.begin(), engine_empty_.end(), [](const auto& empty) { return empty && *empty; }) &&
+            std::any_of(engine_empty_.begin(), engine_empty_.end(), [](const auto& empty) { return empty && !*empty; });
         bool flipped = false; // a view's depth decoded as the frame before described it
         if (continuous && last_real_.interval > 0 && frame.app_time > last_real_.display_time) {
             tuning.interval_ratio = std::clamp(static_cast<float>(frame.app_time - last_real_.display_time) /

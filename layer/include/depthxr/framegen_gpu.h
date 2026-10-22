@@ -109,13 +109,18 @@ struct FrameGenMotionJob {
     bool pair_next{false};
 };
 
+// The census's grids: the hash grid, 64 x 64 texels at fixed places of the
+// whole image, and the statistics grid, 32 x 32 texels inside the region.
+inline constexpr std::uint32_t kFrameGenEngineHashTexels = 64 * 64;
+inline constexpr std::uint32_t kFrameGenEngineStatsTexels = 32 * 32;
+
 // One image's census (kEngineCensus, see FG_PASS_ENGINE_CENSUS).
 struct FrameGenEngineImageCensus {
     std::uint32_t xor_hash{0};
     std::uint32_t sum_hash{0};
-    std::uint32_t zeros{0};     // exact zero vectors on the hash grid (of 4096)
+    std::uint32_t zeros{0};     // exact zero vectors on the hash grid (of kFrameGenEngineHashTexels)
     std::uint32_t non_finite{0}; // ... not finite
-    std::uint32_t large{0};      // longer than 4 on the statistics grid (of 1024)
+    std::uint32_t large{0};      // longer than 4 on the statistics grid (of kFrameGenEngineStatsTexels)
     float sum_abs{0.0f};
     float max_abs{0.0f};
     std::uint32_t finite{0};     // finite on the statistics grid

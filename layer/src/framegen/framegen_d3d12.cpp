@@ -4545,14 +4545,8 @@ class D3D12FrameGen final : public FrameGenGpu {
         if (FAILED(hr) && !motion_removed_noted_ && motion_submitted_at_ &&
             std::chrono::steady_clock::now() - *motion_submitted_at_ <= std::chrono::seconds(2)) {
             motion_removed_noted_ = true;
-            const std::filesystem::path path = FrameGenEngineRemovedPath();
-            if (!path.empty()) {
-                std::error_code ignored;
-                std::filesystem::create_directories(path.parent_path(), ignored);
-                std::ofstream(path) << "The GPU device was removed (hr=" << static_cast<long>(hr)
-                                    << ") within 2 s of VectorXR Frame Generation reading this game's motion vectors.\n"
-                                       "While this file is here, its sessions read none. Delete it to read them again.\n";
-            }
+            const std::filesystem::path path =
+                WriteFrameGenEngineRemoved("The GPU device was removed (hr=" + std::to_string(static_cast<long>(hr)) + ")");
             if (motion_notes_.size() < kMotionNotes) {
                 motion_notes_.push_back("the device was removed within 2 s of reading the game's motion vectors: "
                                         "later sessions of this game read none until " +

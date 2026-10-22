@@ -8991,6 +8991,11 @@ struct EngineRunOptions {
     FrameGenDiagnosticView diagnostic{FrameGenDiagnosticView::kOff};
     bool tint{false};
     bool lock{false};
+    // Stage 9: the vectors written as XR_EXT_frame_synthesis' structure
+    // describes them (decoded, raw * scale + offset is e), and the convention
+    // the validator is told to expect first (FrameGenGpu::SetEnginePrior).
+    std::optional<FrameGenMotionEncoding> encoding;
+    std::optional<FrameGenEngineConvention> prior;
     std::vector<std::array<Pixels, 2>>* outputs{nullptr};
     std::vector<std::array<bool, 2>>* merged{nullptr};
     std::function<void(FrameGenTuning&, std::size_t)> before;
@@ -9042,6 +9047,9 @@ EngineRunResult RunEngineFrames(Harness& harness, const EngineFrames& frames, co
         FrameGenEngineConvention locked;
         locked.gain = {static_cast<float>(gain[0]), static_cast<float>(gain[1])};
         gpu->LockEngineForTest(locked);
+    }
+    if (options.prior) {
+        gpu->SetEnginePrior(*options.prior);
     }
     const std::int64_t output_format = gpu->OutputFormats(FrameGenOutputKind::kSrgb8).front();
     const std::size_t count = std::min(options.frames, frames.color.size());
@@ -9156,6 +9164,10 @@ EngineRunResult RunEngineFrames(Harness& harness, const EngineFrames& frames, co
                         raw[1] += static_cast<float>(bias[1] * 2.0 / kEngineVectorSize / gain[1]);
                     }
                     if (flipped && (e == 1 || !options.flip_one_eye)) raw[1] = -raw[1];
+                    if (options.encoding) {
+                        raw[0] = (raw[0] - options.encoding->offset[0]) / options.encoding->scale[0];
+                        raw[1] = (raw[1] - options.encoding->offset[1]) / options.encoding->scale[1];
+                    }
                     for (int c = 0; c < 4; ++c) {
                         const std::uint16_t bits = HalfBits(raw[c]);
                         std::memcpy(&bytes[i * 8 + c * 2], &bits, 2);
@@ -9169,6 +9181,7 @@ EngineRunResult RunEngineFrames(Harness& harness, const EngineFrames& frames, co
                 job.vectors = {vectors[k][e], 0, 0, vector_rect, DXGI_FORMAT_R16G16B16A16_FLOAT};
                 job.frame = k;
                 job.capture = true;
+                if (options.encoding) job.encoding = *options.encoding;
             }
             const bool captured = gpu->CaptureMotion(jobs, color, error);
             Check(captured || error.empty(), "engine observe: vectors: " + error);
@@ -9277,6 +9290,36 @@ void EngineObserveScenarios(Harness& harness) {
         Check(run.locked && SameFrameGenEngineConvention(run.status.validation.convention, truth) &&
                   run.status.validation.photometric == "passed",
               std::string("engine observe: ") + gain.name + " was not locked: " + DescribeEngineRun(run));
+    }
+    // XR_EXT_frame_synthesis (stage 9): vectors in Vulkan-style NDC (y down)
+    // once decoded, written with a scale and offset of the game's own: in the
+    // vectors' pixels about an offset, and as previous minus current (a
+    // negative scale). Decoded first, they lock as (1, -1) like the
+    // specification's own, and with its prior (FrameGenEnginePriorFor) too.
+    {
+        FrameGenMotionEncoding pixels;
+        pixels.ext = true;
+        pixels.scale = {2.0f / kEngineVectorSize, 2.0f / kEngineVectorSize, 1.0f};
+        pixels.offset = {0.01f, -0.02f, 0.0f};
+        FrameGenMotionEncoding reversed;
+        reversed.ext = true;
+        reversed.scale = {-1.0f, -1.0f, 1.0f};
+        FrameGenEngineConvention y_down;
+        y_down.gain = {1.0f, -1.0f};
+        const std::optional<FrameGenEngineConvention> prior = FrameGenEnginePriorFor("AnyGame.exe", true, "D3D12");
+        for (const auto& [encoding, name, expected] :
+             {std::tuple<FrameGenMotionEncoding, const char*, std::optional<FrameGenEngineConvention>>{
+                  pixels, "EXT, pixels about an offset", std::nullopt},
+              {reversed, "EXT, previous minus current", std::nullopt},
+              {pixels, "EXT, pixels, with the prior", prior}}) {
+            const EngineRunResult run = RunEngineFrames(
+                harness, still_world,
+                {.mode = FrameGenEngineMode::kObserve, .gain = {1.0, -1.0}, .encoding = encoding, .prior = expected});
+            std::cout << "D3D12 engine observe: " << name << ": " << DescribeEngineRun(run) << std::endl;
+            Check(run.locked && SameFrameGenEngineConvention(run.status.validation.convention, y_down) &&
+                      run.status.validation.photometric == "passed" && run.status.validation.prior == expected.has_value(),
+                  std::string("engine observe: ") + name + " was not locked as (1, -1): " + DescribeEngineRun(run));
+        }
     }
     // The square crossing the world faster, in view beside the cockpit for
     // the second half of the frames: where the vectors move content they

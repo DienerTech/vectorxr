@@ -103,9 +103,36 @@ bool SpaceWarpProbeOwns(bool probe_on, bool application_enabled, bool runtime_li
     return probe_on && application_enabled && !runtime_lists;
 }
 
-XrExtent2Di RecommendedMotionVectorSize(std::uint32_t eye_width, std::uint32_t eye_height) {
-    return {static_cast<std::int32_t>(std::max<std::uint32_t>(1, (eye_width + 3) / 4)),
-            static_cast<std::int32_t>(std::max<std::uint32_t>(1, (eye_height + 3) / 4))};
+const char* ToString(MotionVectorSize size) {
+    switch (size) {
+    case MotionVectorSize::kHalf:
+        return "half";
+    case MotionVectorSize::kQuarter:
+        return "quarter";
+    default:
+        return "eighth";
+    }
+}
+
+std::optional<MotionVectorSize> ParseMotionVectorSize(const std::string& value) {
+    std::string text(value);
+    std::transform(text.begin(), text.end(), text.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (text == "half") return MotionVectorSize::kHalf;
+    if (text == "quarter") return MotionVectorSize::kQuarter;
+    if (text == "eighth") return MotionVectorSize::kEighth;
+    return std::nullopt;
+}
+
+MotionVectorSize ChooseMotionVectorSize(bool read, std::optional<MotionVectorSize> research) {
+    if (research) return *research;
+    return read ? MotionVectorSize::kHalf : MotionVectorSize::kEighth;
+}
+
+XrExtent2Di RecommendedMotionVectorSize(std::uint32_t eye_width, std::uint32_t eye_height, MotionVectorSize size) {
+    const std::uint32_t divisor = size == MotionVectorSize::kHalf ? 2 : size == MotionVectorSize::kQuarter ? 4 : 8;
+    return {static_cast<std::int32_t>(std::max<std::uint32_t>(1, (eye_width + divisor - 1) / divisor)),
+            static_cast<std::int32_t>(std::max<std::uint32_t>(1, (eye_height + divisor - 1) / divisor))};
 }
 
 bool IsHalfFloatRgbaFormat(std::int64_t format) {

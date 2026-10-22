@@ -4,6 +4,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <openxr/openxr.h>
@@ -51,9 +52,10 @@ struct VulkanBridgeGame {
 // keeps it out of submitted frames).
 //
 // Every Vulkan call that uses the game's queue is made inside the
-// application's own xrAcquireSwapchainImage and xrReleaseSwapchainImage, the
-// calls in which XR_KHR_vulkan_enable lets a runtime use it; nothing here is
-// called from the presenter thread.
+// application's own xrAcquireSwapchainImage, xrReleaseSwapchainImage and
+// xrEndFrame (where the layer hands releases over), the calls in which
+// XR_KHR_vulkan_enable lets a runtime use it; nothing here is called from the
+// presenter thread.
 class VulkanBridge {
   public:
     VulkanBridge();
@@ -181,6 +183,27 @@ class VulkanBridge {
     // submission): the runtime's image holds an older frame, which Frame
     // Generation must not capture as new.
     bool Released(XrSwapchain swapchain);
+    // The game's motion vectors (XR_FB_space_warp, XR_EXT_frame_synthesis)
+    // are in `swapchain`'s images, which Frame Generation reads in the
+    // runtime's images after each copy: from now on each release gives the
+    // image back to the game's queue at once, behind its copy, as depth's
+    // releases do (a game that renders into an image before acquiring it,
+    // Star Citizen, would otherwise write the next frame's vectors while the
+    // copy reads this one's). Colour twins only: false for any other.
+    bool MarkMotion(XrSwapchain swapchain);
+    // For a game that writes its motion vector images without acquiring or
+    // releasing them (stage 9's contingency), inside its xrEndFrame: each of
+    // `images` (an image of a swapchain MarkMotion named that the game never
+    // acquired), as the game left it (in the attachment layout, on its queue
+    // family), is handed to Direct3D 12 (one submission for them all on the
+    // game's queue, signalling "written"), copied into its runtime image on
+    // the bridge's queue and given back to the game's queue behind the copies
+    // (one more submission). An image the bridge never gave the game is not
+    // copied the first time: it is put in the attachment layout (its content
+    // undefined), and one whose giving back was refused is given back. Never
+    // waits for the bridge's queue. Per image whether it was copied: Frame
+    // Generation reads the runtime's image then, on the bridge's queue.
+    std::vector<bool> EndFrameMotion(const std::vector<std::pair<XrSwapchain, std::uint32_t>>& images);
     // Before the runtime destroys `swapchain`: waits for the bridge's copies
     // into it and the bridge's submissions on the game's queue (bounded) and
     // lets its images go. False when they did not finish: the runtime's

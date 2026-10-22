@@ -1887,9 +1887,67 @@ struct FrameGenChain {
 };
 FrameGenChain g_framegen_chain;
 
+// A motion vector capture as the stand-in backend saw it (stage 9): the job,
+// how many releases of its swapchain had reached the runtime then, and how
+// many application frames the test had ended.
+struct MotionCapture {
+    depthxr::FrameGenMotionJob job;
+    std::uint64_t runtime_releases{0};
+    std::uint64_t frames_ended{0};
+};
+std::mutex g_motion_mutex;
+std::vector<MotionCapture> g_motion;
+std::atomic<std::uint64_t> g_frames_ended{0};
+// The bridge's copies so far at each capture the stand-in backend saw, with
+// the application frames ended then and whether it was a motion capture.
+struct CaptureCopies {
+    std::uint64_t frames_ended{0};
+    std::uint64_t copies{0};
+    bool motion{false};
+};
+std::vector<CaptureCopies> g_capture_copies; // g_motion_mutex
+std::atomic<bool> g_note_copies{false};
+
+std::uint64_t BridgeCopies() {
+    const std::string summary = Peer::Bridge().Summary();
+    const std::size_t at = summary.find(", copies=");
+    return at == std::string::npos ? 0 : std::strtoull(summary.c_str() + at + 9, nullptr, 10);
+}
+
+void NoteCaptureCopies(bool motion) {
+    if (!g_note_copies) return;
+    const CaptureCopies noted{g_frames_ended.load(), BridgeCopies(), motion};
+    std::scoped_lock lock(g_motion_mutex);
+    g_capture_copies.push_back(noted);
+}
+
 class StandInGpu final : public depthxr::FrameGenGpu {
   public:
+    // `motion`: it reads a game's motion vectors (SupportsEngineMotion),
+    // noting each capture.
+    explicit StandInGpu(bool motion = false) : motion_(motion) {}
     const char* Name() const override { return "Stand-in"; }
+    bool SupportsEngineMotion() const override { return motion_; }
+    bool CaptureMotion(const std::vector<depthxr::FrameGenMotionJob>& jobs, const std::vector<depthxr::FrameGenViewRequest>&,
+                       std::string& error, std::vector<bool>* resampled) override {
+        error.clear();
+        NoteCaptureCopies(true);
+        std::vector<MotionCapture> captures;
+        {
+            std::scoped_lock lock(g_runtime_mutex);
+            for (const depthxr::FrameGenMotionJob& job : jobs) {
+                const StandInSwapchain* chain = FindSwapchain(job.vectors.swapchain);
+                captures.push_back(
+                    {job, chain ? static_cast<std::uint64_t>(chain->releases) : 0u, g_frames_ended.load()});
+            }
+        }
+        {
+            std::scoped_lock lock(g_motion_mutex);
+            g_motion.insert(g_motion.end(), captures.begin(), captures.end());
+        }
+        if (resampled) resampled->assign(jobs.size(), motion_);
+        return motion_;
+    }
     std::optional<depthxr::FrameGenOutputKind> Classify(std::int64_t) const override {
         return depthxr::FrameGenOutputKind::kSrgb8;
     }
@@ -1902,6 +1960,7 @@ class StandInGpu final : public depthxr::FrameGenGpu {
     void Forget(XrSwapchain) override {}
     bool Capture(std::size_t, const depthxr::FrameGenImage&, const depthxr::FrameGenViewRequest&,
                  depthxr::FrameGenFlowQuality, std::string&) override {
+        NoteCaptureCopies(false);
         return true;
     }
     bool WaitIdle() override { return true; }
@@ -1912,6 +1971,9 @@ class StandInGpu final : public depthxr::FrameGenGpu {
     }
     void ResetHistory() override {}
     void Reset() override {}
+
+  private:
+    bool motion_{false};
 };
 
 void NoteChain(const void* chain) {
@@ -1933,6 +1995,12 @@ void NoteChain(const void* chain) {
 std::unique_ptr<depthxr::FrameGenGpu> MakeStandInGpu(const void* chain, std::string&) {
     NoteChain(chain);
     return std::make_unique<StandInGpu>();
+}
+
+// The stand-in that reads a game's motion vectors.
+std::unique_ptr<depthxr::FrameGenGpu> MakeMotionStandInGpu(const void* chain, std::string&) {
+    NoteChain(chain);
+    return std::make_unique<StandInGpu>(true);
 }
 
 // The real backend, noting its chain.
@@ -2386,6 +2454,12 @@ struct FrameOptions {
     // xrEndFrame is the frame; a copy at the release would be
     // kBeforeRendering. Not with `depth`, `hold` or `stall`.
     bool release_before_begin{false};
+    // The game's motion vectors (XR_FB_space_warp): a swapchain of two
+    // slices, one per eye, acquired after depth, cleared to `motion_color`
+    // and released after it; each view chains its structure (naming its
+    // depth slice too) ahead of its depth. Needs `depth`.
+    const Target* motion{nullptr};
+    Color motion_color{64, 128, 32, 255};
 };
 
 // What a Star Citizen-ordered frame's images hold when released (FrameOptions::release_before_begin).
@@ -2462,6 +2536,8 @@ XrResult Frame(App& app, const Renderer& renderer, const std::vector<const Targe
             indices.push_back(Acquire(app, *target));
         }
         const std::uint32_t depth_index = depth ? Acquire(app, *depth) : 0;
+        Check(!options.motion || depth, "a frame's motion vectors come with its depth");
+        const std::uint32_t motion_index = options.motion ? Acquire(app, *options.motion) : 0;
         for (std::size_t i = 0; i < targets.size(); ++i) {
             renderer.Clear(*targets[i], indices[i], colors[i]);
         }
@@ -2470,6 +2546,9 @@ XrResult Frame(App& app, const Renderer& renderer, const std::vector<const Targe
         }
         if (depth) {
             renderer.ClearDepth(*depth, depth_index, options.depth_value);
+        }
+        if (options.motion) {
+            renderer.Clear(*options.motion, motion_index, options.motion_color);
         }
         for (std::size_t i = 0; i < targets.size(); ++i) {
             if ((options.hold || options.stall) && i + 1 == targets.size()) {
@@ -2480,6 +2559,9 @@ XrResult Frame(App& app, const Renderer& renderer, const std::vector<const Targe
         if (depth) {
             Release(app, *depth);
         }
+        if (options.motion) {
+            Release(app, *options.motion);
+        }
         if (options.quad) {
             Release(app, *options.quad);
         }
@@ -2487,6 +2569,7 @@ XrResult Frame(App& app, const Renderer& renderer, const std::vector<const Targe
 
     XrBaseInStructure after_depth{kApplicationStructType};
     std::array<XrCompositionLayerDepthInfoKHR, 2> depth_infos{};
+    std::array<XrCompositionLayerSpaceWarpInfoFB, 2> space_warp{};
     std::array<XrCompositionLayerProjectionView, 2> views{};
     for (std::uint32_t eye = 0; eye < 2; ++eye) {
         views[eye] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
@@ -2508,6 +2591,23 @@ XrResult Frame(App& app, const Renderer& renderer, const std::vector<const Targe
             depth_infos[eye].nearZ = 0.05f;
             depth_infos[eye].farZ = 1000.0f;
             views[eye].next = &depth_infos[eye];
+        }
+        if (options.motion) {
+            XrCompositionLayerSpaceWarpInfoFB& info = space_warp[eye];
+            info = {XR_TYPE_COMPOSITION_LAYER_SPACE_WARP_INFO_FB};
+            info.next = views[eye].next;
+            info.motionVectorSubImage.swapchain = options.motion->swapchain;
+            info.motionVectorSubImage.imageRect = {{0, 0},
+                                                   {static_cast<std::int32_t>(options.motion->info.width),
+                                                    static_cast<std::int32_t>(options.motion->info.height)}};
+            info.motionVectorSubImage.imageArrayIndex = eye;
+            info.appSpaceDeltaPose.orientation.w = 1.0f;
+            info.depthSubImage = depth_infos[eye].subImage;
+            info.minDepth = depth_infos[eye].minDepth;
+            info.maxDepth = depth_infos[eye].maxDepth;
+            info.nearZ = depth_infos[eye].nearZ;
+            info.farZ = depth_infos[eye].farZ;
+            views[eye].next = &info;
         }
     }
     XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
@@ -4067,6 +4167,122 @@ void TestStarCitizenShapes() {
     EndCase();
 }
 
+// 13d. Star Citizen sending its engine's motion vectors (stage 9):
+// XR_FB_space_warp taken over by the space-warp probe on a runtime without
+// it, VECTORXR_FRAMEGEN_ENGINE_MV=capture, Frame Generation on a stand-in
+// backend that reads motion vectors. The motion vector swapchain is bridged
+// as colour is. Nothing is read while the game's swapchains settle (3 s);
+// then each frame's vectors are read in the runtime's image as the layer
+// hands their release over inside the frame's xrEndFrame: behind the
+// bridge's copy, before the release reaches the runtime, and as that frame's
+// own (the frame's record comes after its releases, as a game's own images'
+// releases come before its xrEndFrame). The bridge gives their images back
+// to the game's queue at each release.
+void TestStarCitizenMotion() {
+    CaseSettings settings;
+    settings.frame_multiplier = "2x";
+    BeginCase("star-citizen-motion", settings);
+    SetEnv("VECTORXR_SPACEWARP_PROBE", "fb");
+    SetEnv("VECTORXR_FRAMEGEN_ENGINE_MV", "capture");
+    g_runtime.paced = true;
+    {
+        std::scoped_lock lock(g_motion_mutex);
+        g_motion.clear();
+        g_capture_copies.clear();
+    }
+    g_frames_ended = 0;
+    g_note_copies = true;
+    Peer::SetFrameGenEngagement(2, std::chrono::milliseconds(0));
+    Peer::UseFrameGenGpu(MakeMotionStandInGpu);
+    App app = StartApp({kVulkan2Extension, XR_FB_SPACE_WARP_EXTENSION_NAME});
+    Check(Contains(Peer::Log(), "takenOver=XR_FB_space_warp"), "star citizen motion: the probe takes XR_FB_space_warp over");
+    VulkanGame game = MakeVulkanGame(app);
+    SessionCreate create(game, app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS && Peer::Bridge().Active(),
+          "star citizen motion: a bridged session (" + Unbridged(Peer::Log()) + ")");
+    BeginSession(app);
+    const Renderer vulkan{&game, nullptr};
+    Target left = MakeTarget(app, ColorInfo(), "the left eye");
+    Target right = MakeTarget(app, ColorInfo(), "the right eye");
+    Target depth = MakeTarget(app, DepthInfo(VK_FORMAT_D32_SFLOAT, 2), "depth");
+    Target motion = MakeTarget(app, ColorInfo(VK_FORMAT_R16G16B16A16_SFLOAT, 1, 2), "motion vectors");
+    const auto run = [&](int frames) {
+        for (int frame = 0; frame < frames; ++frame) {
+            FrameOptions options;
+            options.depth = &depth;
+            options.motion = &motion;
+            Check(Frame(app, vulkan, {&left, &right}, {FrameColor(frame, 0), FrameColor(frame, 1)},
+                        {{{&left, 0}, {&right, 0}}}, options) == XR_SUCCESS,
+                  "star citizen motion: frame " + std::to_string(frame));
+            ++g_frames_ended;
+        }
+    };
+    const auto captures = [] {
+        std::scoped_lock lock(g_motion_mutex);
+        return g_motion;
+    };
+    run(24);
+    Check(Peer::FrameGen().generated > 0 && captures().empty(),
+          "star citizen motion: frames are generated, no vectors read while the swapchains settle (generated=" +
+              std::to_string(Peer::FrameGen().generated) + ")");
+    std::this_thread::sleep_for(std::chrono::milliseconds(3100));
+    run(24);
+    const std::vector<MotionCapture> read = captures();
+    Check(read.size() >= 2 * 20, "star citizen motion: settled, both views' vectors are read every frame (" +
+                                     std::to_string(read.size()) + " views)");
+    bool ordered = true;
+    std::string first_wrong;
+    for (const MotionCapture& capture : read) {
+        const bool right_one = capture.job.capture && capture.job.released && capture.job.vectors.swapchain == motion.swapchain &&
+                               capture.job.vectors.image_index == *capture.job.released &&
+                               capture.job.frame == capture.frames_ended + 1 &&
+                               capture.runtime_releases <= capture.frames_ended;
+        if (!right_one && ordered) {
+            first_wrong = "frame " + std::to_string(capture.job.frame) + " read during the " +
+                          std::to_string(capture.frames_ended + 1) + "th frame's end, " +
+                          std::to_string(capture.runtime_releases) + " releases at the runtime";
+        }
+        ordered = ordered && right_one;
+    }
+    Check(ordered, "star citizen motion: each frame's vectors are read at its release's hand-over, before the release "
+                   "reaches the runtime, as that frame's own (" +
+                       first_wrong + ")");
+    const std::string described = Peer::Bridge().Describe(motion.swapchain);
+    Check(Contains(described, "motion vectors (endFrameCopies=0)") && !Contains(described, "handBacks=0,"),
+          "star citizen motion: the bridge gives the vectors' images back at each release: " + described);
+    // While it gives them back, a frame's end makes every copy first: each
+    // capture of a frame whose vectors were read sees all of its copies, so
+    // no giving back waits for a capture.
+    g_note_copies = false;
+    std::vector<CaptureCopies> noted;
+    {
+        std::scoped_lock lock(g_motion_mutex);
+        noted = g_capture_copies;
+    }
+    std::size_t motion_frames = 0;
+    bool copies_first = true;
+    for (const CaptureCopies& at : noted) {
+        if (!at.motion) continue;
+        ++motion_frames;
+        for (const CaptureCopies& other : noted) {
+            copies_first = copies_first && (other.frames_ended != at.frames_ended || other.copies == at.copies);
+        }
+    }
+    Check(motion_frames >= 20 && copies_first,
+          "star citizen motion: the frame's copies are all made before its captures (" + std::to_string(motion_frames) +
+              " frames)");
+    Check(Contains(Peer::Log(), "Frame Generation engine motion through the Vulkan bridge"),
+          "star citizen motion: the session says how it reads them");
+    CheckValidation("star citizen motion");
+    StopApp(app);
+    SetEnv("VECTORXR_SPACEWARP_PROBE", "");
+    SetEnv("VECTORXR_FRAMEGEN_ENGINE_MV", "");
+    Peer::UseFrameGenGpu(MakeStandInGpu);
+    Peer::SetFrameGenEngagement(45, std::chrono::milliseconds(3000)); // the presenter's own
+    DestroyGame(game);
+    EndCase();
+}
+
 // 13b. The game's queue stalls before its last release of a frame while
 // Frame Generation (the real Direct3D 12 backend) generates, and the game
 // destroys its session (or its instance, the session alive): the bridge lets
@@ -4531,6 +4747,7 @@ int main(int argc, char** argv) {
         TestBridgedFrameGen("interpolate");
         TestBridgedFrameGen("extrapolate");
         TestStarCitizenShapes();
+        TestStarCitizenMotion();
         TestStalledTeardown(false);
         TestStalledTeardown(true);
         TestNativeD3D12("native-d3d12-after-bridged");

@@ -46,6 +46,20 @@ struct FrameGenSwapchainDispatch {
     PFN_xrReleaseSwapchainImage release{};
 };
 
+// How a session's images reach the runtime, as engine motion vectors are
+// read (FrameGenPresenter::NoteEngineMotion).
+enum class FrameGenEngineBridge : std::uint8_t {
+    kNone,   // the game's own images
+    kD3D11,  // the Direct3D 11 bridge: the game's depth stays its own, so its vectors are never read
+    kVulkan, // the Vulkan bridge: the runtime's images get the game's vectors at the bridge's copies
+};
+
+// A Vulkan-bridged session's way to have images of the game's motion vectors
+// reach the runtime's images at the frame's end (VulkanBridge::EndFrameMotion):
+// per (swapchain, image) whether it was copied.
+using FrameGenMotionHandOver =
+    std::function<std::vector<bool>(const std::vector<std::pair<XrSwapchain, std::uint32_t>>&)>;
+
 enum class FrameGenState {
     kOff,         // not enabled for this session, toggled off, or turned off in settings
     kWaiting,     // enabled, waiting for a steady renderable cadence
@@ -397,18 +411,26 @@ class FrameGenPresenter {
     // Engine motion vectors (XR_FB_space_warp, XR_EXT_frame_synthesis): in
     // xrEndFrame, under the layer's lock, every frame while the layer takes
     // the structures over: the frame's record (no views when the frame
-    // carried none), kept with the frame before's. A `bridged` session's
-    // records are dropped: the runtime's images it would read get the
-    // game's motion vectors only by the bridge's copy at a release, and its
-    // releases are captured inside xrEndFrame, after the frame's record.
-    void NoteEngineMotion(FrameGenEngineMotionFrame frame, bool bridged = false);
+    // carried none), kept with the frame before's. A Direct3D 11-bridged
+    // session's records are dropped (no depth to read them with), as are a
+    // Vulkan-bridged session's with VECTORXR_FRAMEGEN_ENGINE_BRIDGE=0. A
+    // Vulkan-bridged session's runtime images get the game's vectors only by
+    // the bridge's copy, at a release the layer hands over inside xrEndFrame:
+    // its record comes once they were handed over (its frame's releases
+    // then), and its vectors are read from 3 s after the game last made a
+    // swapchain (Star Citizen churns them at its world entry). True when they
+    // are read then: the layer has the bridge give their images back at each
+    // release (VulkanBridge::MarkMotion).
+    bool NoteEngineMotion(FrameGenEngineMotionFrame frame, FrameGenEngineBridge bridge = FrameGenEngineBridge::kNone);
     // ...then, once the frame's bridged releases were handed over: with
     // VECTORXR_FRAMEGEN_ENGINE_MV=census and while frames are generated, its
     // motion vector images are read where the game left them (it may never
     // release them): their census (FrameGenGpu::CaptureMotion). With
     // =capture the image the frame's vectors are in is captured as well, for
-    // the views not captured at their release.
-    void CaptureEngineMotion();
+    // the views not captured at their release. A Vulkan-bridged session's
+    // are read here only where `hand_over` copied them into the runtime's
+    // images first (VECTORXR_FRAMEGEN_ENGINE_BRIDGE=end).
+    void CaptureEngineMotion(const FrameGenMotionHandOver& hand_over = {});
 
     XrResult WaitFrame(XrSession session, const XrFrameWaitInfo* info, XrFrameState* state, const FrameGenRuntimeCalls& calls);
     XrResult BeginFrame(XrSession session, const XrFrameBeginInfo* info, const FrameGenRuntimeCalls& calls);
@@ -1842,7 +1864,9 @@ class FrameGenPresenter {
     std::optional<FrameGenEngineImageTracker::Hypothesis> engine_image_;
     std::vector<std::uint8_t> engine_released_;
     // Stage 2: a frame of this session came with motion vectors the layer
-    // reads (not bridged): only then are the backend's raw fields made.
+    // reads (not through the Direct3D 11 bridge, nor through the Vulkan
+    // bridge before its swapchains settled): only then are the backend's raw
+    // fields made.
     bool engine_capturable_{false};
     EngineFrame engine_frame_;
     EngineFrame engine_previous_;
@@ -1854,6 +1878,20 @@ class FrameGenPresenter {
     std::size_t engine_notes_logged_{0};
     bool logged_engine_failure_{false};
     bool logged_engine_bridged_{false};
+    // Stage 9: the session's bridge as its newest record said, how the
+    // Vulkan bridge's vectors are read (VECTORXR_FRAMEGEN_ENGINE_BRIDGE, read
+    // at Start), and whether its first such record was logged.
+    FrameGenEngineBridge engine_bridge_{FrameGenEngineBridge::kNone};
+    FrameGenEngineBridgeMode engine_bridge_mode_{FrameGenEngineBridgeMode::kReleased};
+    bool logged_engine_bridge_read_{false};
+    // A Vulkan-bridged session reads its vectors only once the game made no
+    // swapchain for kFrameGenEngineSettleSeconds.
+    bool EngineBridgeSettledLocked() const;
+    // Stage 9, per view: its newest census at a frame's end found every image
+    // it read exactly zero everywhere in the view's region (none: no census
+    // yet), for G10; the first frame it held back is logged.
+    std::vector<std::optional<bool>> engine_empty_;
+    bool logged_engine_one_eye_{false};
     // Stage 3, under mutex_: the backend's validator as last read
     // (CaptureEngineMotion), its decisions logged, its totals at the last
     // summary, and whether the game's prior (FrameGenEnginePriorFor) was

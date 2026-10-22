@@ -209,6 +209,10 @@ struct GpuLog {
     std::vector<std::vector<FrameGenMotionJob>> motion_calls;
     // The color captures made before each call (`captures` then).
     std::vector<int> motion_captures;
+    // Censuses EngineStatus hands out (those past the caller's sequence), and
+    // the convention SetEnginePrior was given (stage 9).
+    std::vector<FrameGenEngineCensus> census;
+    std::optional<FrameGenEngineConvention> prior;
     // Calls at a frame's end, or at a depth release (early).
     int MotionCalls(bool early) {
         std::scoped_lock lock(motion_mutex);
@@ -800,12 +804,20 @@ class FakeGpu final : public FrameGenGpu {
         return log_->depth;
     }
     bool SupportsEngineMotion() const override { return log_->engine; }
-    FrameGenEngineStatus EngineStatus(std::uint64_t) const override {
+    FrameGenEngineStatus EngineStatus(std::uint64_t after) const override {
         FrameGenEngineStatus status;
         status.validation.frames = log_->verdict_frames;
         status.validation.held = log_->verdicts_held_back;
         status.validation.lead_held = log_->lead_verdicts_held_back;
+        std::scoped_lock lock(log_->motion_mutex);
+        for (const FrameGenEngineCensus& census : log_->census) {
+            if (census.sequence > after) status.census.push_back(census);
+        }
         return status;
+    }
+    void SetEnginePrior(const FrameGenEngineConvention& convention) override {
+        std::scoped_lock lock(log_->motion_mutex);
+        log_->prior = convention;
     }
     bool CaptureMotion(const std::vector<FrameGenMotionJob>& jobs, const std::vector<FrameGenViewRequest>&,
                        std::string& error, std::vector<bool>* resampled) override {
@@ -3500,7 +3512,7 @@ void TestEngineMotionCensus() {
         Runtime runtime;
         std::unique_ptr<App> app;
         std::uint64_t frames{0};
-        bool bridged{false};
+        FrameGenEngineBridge bridge{FrameGenEngineBridge::kNone};
     };
     auto start = [&](Session& session, bool census) {
         session.gpu.depth = true;
@@ -3535,7 +3547,7 @@ void TestEngineMotionCensus() {
                 record.views.push_back(view);
             }
             record.complete = true;
-            session.presenter.NoteEngineMotion(record, session.bridged);
+            session.presenter.NoteEngineMotion(record, session.bridge);
             session.presenter.CaptureEngineMotion();
         };
     };
@@ -3620,15 +3632,22 @@ void TestEngineMotionCensus() {
         session.presenter.Stop();
     }
 
-    // A bridged session: the runtime's images hold the game's vectors only
-    // after a release, so nothing is read there.
-    {
+    // A Direct3D 11-bridged session: the game's depth stays its own, so
+    // nothing is read there. A Vulkan-bridged one's runtime images hold the
+    // game's vectors only behind the bridge's copies: the census is taken
+    // only of images copied at a release (from stage 2) or handed over at the
+    // frame's end (VECTORXR_FRAMEGEN_ENGINE_BRIDGE=end), never early, so
+    // nothing is read here once the swapchains settled either.
+    for (const FrameGenEngineBridge bridge : {FrameGenEngineBridge::kD3D11, FrameGenEngineBridge::kVulkan}) {
+        const std::string name = bridge == FrameGenEngineBridge::kD3D11 ? "Direct3D 11" : "Vulkan";
         Session session;
-        session.bridged = true;
+        session.bridge = bridge;
         start(session, true);
         for (int i = 0; i < 12; ++i) session.app->Frame();
+        std::this_thread::sleep_for(std::chrono::milliseconds(3100));
+        for (int i = 0; i < 12; ++i) session.app->Frame();
         Check(session.gpu.executes > 0 && session.gpu.MotionCalls(false) == 0 && session.gpu.MotionCalls(true) == 0,
-              "engine motion: nothing is read in a bridged session");
+              "engine motion: nothing is read in a " + name + "-bridged census session");
         session.presenter.Stop();
     }
 }
@@ -3884,7 +3903,8 @@ void TestEngineMotionGates() {
                 ++summaries;
                 flips += count(line, "flips=");
                 cuts += count(line, "cuts=");
-                named = named && line.find("(noStruct/skip/pairing/cut/decode/recreate/settle/uncaptured)") != std::string::npos;
+                named = named &&
+                        line.find("(noStruct/skip/pairing/cut/decode/recreate/settle/uncaptured/oneEye)") != std::string::npos;
             }
             research = research || line.find("VECTORXR_FRAMEGEN_ENGINE_CUTS=1 (research)") != std::string::npos;
         }
@@ -4139,6 +4159,188 @@ void TestEngineMotionCapture() {
         start(session);
         for (int i = 0; i < 12; ++i) session.app->Frame();
         Check(!calls(session).empty(), "engine capture: deleting the sentinel lets the switch work again");
+        session.presenter.Stop();
+    }
+}
+
+// Engine motion vectors through the Vulkan bridge (stage 9). Its runtime
+// images hold the game's vectors only behind the bridge's copies, which the
+// layer makes in xrEndFrame before the frame's record. Nothing is read, and
+// the bridge is not asked to hand images back (NoteEngineMotion false), until
+// 3 s after the game last made a swapchain; then vectors released for a
+// frame are captured where the layer hands their release over, as that
+// frame's, and its end captures nothing more. With
+// VECTORXR_FRAMEGEN_ENGINE_BRIDGE=end, vectors the game never releases are
+// captured at the frame's end only where the hand-over copied the image they
+// are in (every image handed over while the census reads them all); with =0
+// the records are dropped. A Vulkan game's XR_FB_space_warp vectors are
+// expected in Vulkan's NDC (y down).
+void TestEngineMotionBridge() {
+    const XrSwapchain depth_chain = reinterpret_cast<XrSwapchain>(0x21);
+    const XrSwapchain vectors = reinterpret_cast<XrSwapchain>(0x31);
+    struct Session {
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        std::unique_ptr<App> app;
+        std::uint64_t frames{0};
+        bool release{true};            // the game releases its vectors (after its colors)
+        std::uint32_t vector_image{0}; // the image it released last
+        int read{0};                   // records NoteEngineMotion said are read
+        // The hand-over's calls, and the images it copies (bits).
+        std::vector<std::vector<std::pair<XrSwapchain, std::uint32_t>>> handed;
+        std::uint32_t copies{7};
+    };
+    auto start = [&](Session& session, const char* mode, const char* bridge) {
+        session.gpu.depth = true;
+        session.gpu.engine = true;
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", mode);
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_BRIDGE", bridge);
+        StartPresenter(session.presenter, session.gpu, FrameGenSynthesisMode::kExtrapolate);
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "");
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_BRIDGE", "");
+        session.presenter.TrackSwapchain(depth_chain, 20, 1,
+                                         XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+        session.presenter.TrackSwapchain(vectors, kFloatFormat, 1,
+                                         XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+        session.app = std::make_unique<App>(session.presenter, session.runtime);
+        App& app = *session.app;
+        app.depth.subImage.swapchain = depth_chain;
+        app.depth.subImage.imageRect = {{0, 0}, {1200, 1200}};
+        app.depth.maxDepth = 1.0f;
+        app.depth.nearZ = 0.1f;
+        app.depth.farZ = 1000.0f;
+        // As the layer in a Vulkan-bridged session: the frame's releases
+        // handed over (the bridge's copies, then their captures), then the
+        // frame's record, then the frame's end with the bridge's hand-over.
+        app.before_end = [&session, vectors](XrTime time) {
+            if (session.release) {
+                session.vector_image = (session.vector_image + 1) % 3;
+                session.presenter.NoteRelease(vectors, session.vector_image);
+                session.presenter.CaptureOnRelease(vectors, session.vector_image);
+            }
+            FrameGenEngineMotionFrame record;
+            record.display_time = time;
+            record.projection_frame = ++session.frames;
+            for (std::uint32_t v = 0; v < 2; ++v) {
+                FrameGenEngineMotionView view;
+                view.view = v;
+                view.source = FrameGenMotionSource::kSpaceWarpFb;
+                view.vectors = {vectors, {{0, 0}, {1280, 1280}}, v};
+                view.depth = session.app->depth.subImage;
+                view.depth_is_khr = true;
+                view.color = session.app->views[v].subImage;
+                record.views.push_back(view);
+            }
+            record.complete = true;
+            session.read += session.presenter.NoteEngineMotion(record, FrameGenEngineBridge::kVulkan) ? 1 : 0;
+            session.presenter.CaptureEngineMotion([&session](const auto& images) {
+                session.handed.push_back(images);
+                std::vector<bool> copied;
+                for (const auto& image : images) copied.push_back(((session.copies >> image.second) & 1u) != 0);
+                return copied;
+            });
+        };
+    };
+    auto calls = [](Session& session) {
+        std::scoped_lock lock(session.gpu.motion_mutex);
+        return session.gpu.motion_calls;
+    };
+    const auto settle = [] { std::this_thread::sleep_for(std::chrono::milliseconds(3100)); };
+
+    // Released: nothing while the swapchains settle, then each release
+    // captured as its own frame's, with its index, and nothing at the end.
+    {
+        Session session;
+        start(session, "observe", "");
+        for (int i = 0; i < 12; ++i) session.app->Frame();
+        Check(session.gpu.executes > 0 && calls(session).empty() && session.read == 0,
+              "engine bridge: nothing read, nothing handed back, while the swapchains settle");
+        settle();
+        for (int i = 0; i < 12; ++i) session.app->Frame();
+        const auto made = calls(session);
+        Check(!made.empty() && session.read > 0 && session.handed.empty(),
+              "engine bridge: settled, the vectors are read at their releases and handed back, no hand-over at the end");
+        bool released = true;
+        for (const auto& jobs : made) {
+            released = released && jobs.size() == 2 && jobs[0].capture && jobs[0].released &&
+                       jobs[0].vectors.image_index == *jobs[0].released && !jobs[0].census_all &&
+                       jobs[1].vectors.array_index == 1;
+        }
+        Check(released, "engine bridge: only the releases are captured, with their index");
+        Check(made.back()[0].frame == session.frames && made.back()[0].vectors.image_index == session.vector_image,
+              "engine bridge: a release handed over in xrEndFrame is captured as that frame's vectors");
+        {
+            std::scoped_lock lock(session.gpu.motion_mutex);
+            Check(session.gpu.prior && session.gpu.prior->gain[0] == 1.0f && session.gpu.prior->gain[1] == -1.0f,
+                  "engine bridge: a Vulkan game's XR_FB_space_warp vectors are expected in Vulkan's NDC, y down");
+        }
+
+        // A swapchain made again (Star Citizen's world entry): nothing read
+        // until it settled.
+        session.presenter.TrackSwapchain(reinterpret_cast<XrSwapchain>(0x41), kFormat, 1, kAppUsage);
+        const std::size_t before = calls(session).size();
+        const int read = session.read;
+        for (int i = 0; i < 6; ++i) session.app->Frame();
+        Check(calls(session).size() == before && session.read == read,
+              "engine bridge: nothing read while a new swapchain settles");
+        settle();
+        for (int i = 0; i < 6; ++i) session.app->Frame();
+        Check(calls(session).size() > before && session.read > read, "engine bridge: read again once it settled");
+        session.presenter.Stop();
+        Check(!session.runtime.ordering_violation && !g_release_violation, "engine bridge: calls stayed ordered");
+    }
+
+    // =end, never released: handed over at the frame's end, every image
+    // while the census reads every one, captured only where copied.
+    {
+        Session session;
+        session.release = false;
+        start(session, "capture", "end");
+        for (int i = 0; i < 12; ++i) session.app->Frame();
+        Check(session.handed.empty() && calls(session).empty(), "engine bridge: no hand-over while the swapchains settle");
+        settle();
+        for (int i = 0; i < 12; ++i) session.app->Frame();
+        const auto made = calls(session);
+        Check(!session.handed.empty() && !made.empty() && session.read > 0,
+              "engine bridge: never released, the vectors are handed over and captured at the frame's end");
+        const auto& handed = session.handed.back();
+        const auto& jobs = made.back();
+        bool all = handed.size() == 6;
+        for (std::uint32_t k = 0; k < 6 && all; ++k) all = handed[k] == std::make_pair(vectors, k % 3);
+        Check(jobs.size() == 2 && jobs[0].census_all && !jobs[0].released && jobs[0].image_count == 3 && all,
+              "engine bridge: while the census reads every image, every image of both views is handed over");
+        // One image not copied (the bridge's first hand-over of it, or a
+        // stalled queue): the census reads the chosen image alone, where it
+        // was copied, and a view whose chosen image it is is not read.
+        session.copies = 3;
+        std::size_t copied = calls(session).size();
+        for (int i = 0; i < 12; ++i) session.app->Frame();
+        bool chosen_alone = calls(session).size() > copied;
+        for (std::size_t c = copied; c < calls(session).size(); ++c) {
+            for (const FrameGenMotionJob& job : calls(session)[c]) {
+                chosen_alone = chosen_alone && !job.census_all && !job.samples && job.vectors.image_index != 2;
+            }
+        }
+        Check(chosen_alone, "engine bridge: an image left out of a hand-over is not read, nor every image's census");
+        session.copies = 0;
+        copied = calls(session).size();
+        const std::size_t asked = session.handed.size();
+        for (int i = 0; i < 4; ++i) session.app->Frame();
+        Check(calls(session).size() == copied && session.handed.size() > asked,
+              "engine bridge: an image the hand-over did not copy is not read");
+        session.presenter.Stop();
+    }
+
+    // =0: the records are dropped, nothing read.
+    {
+        Session session;
+        start(session, "capture", "0");
+        for (int i = 0; i < 6; ++i) session.app->Frame();
+        settle();
+        for (int i = 0; i < 12; ++i) session.app->Frame();
+        Check(session.gpu.executes > 0 && calls(session).empty() && session.read == 0 && session.handed.empty(),
+              "engine bridge: VECTORXR_FRAMEGEN_ENGINE_BRIDGE=0 reads nothing");
         session.presenter.Stop();
     }
 }
@@ -4620,13 +4822,14 @@ void TestEngineMotionObserve() {
     std::uint64_t frames = 0;
     float pivot_x = 0.0f; // Pivot's change: the game rendered this far left of the pose declared
     bool skip = false;    // the game marks its frames FRAME_SKIP
+    bool one_view = false; // the right view alone carries a structure
     // As the layer: the frame's record, with the poses the game rendered
     // with, then its capture.
     app.before_end = [&](XrTime time) {
         FrameGenEngineMotionFrame record;
         record.display_time = time;
         record.projection_frame = ++frames;
-        for (std::uint32_t v = 0; v < 2; ++v) {
+        for (std::uint32_t v = one_view ? 1 : 0; v < 2; ++v) {
             FrameGenEngineMotionView view;
             view.view = v;
             view.source = FrameGenMotionSource::kSpaceWarpFb;
@@ -4641,7 +4844,7 @@ void TestEngineMotionObserve() {
             view.game.position = {pose.position.x - pivot_x, pose.position.y, pose.position.z};
             record.views.push_back(view);
         }
-        record.complete = true;
+        record.complete = !one_view;
         presenter.NoteEngineMotion(record);
         presenter.CaptureEngineMotion();
     };
@@ -4712,6 +4915,57 @@ void TestEngineMotionObserve() {
     skip = false;
     run(3);
     Check(asked(), "engine observe: asked again once no gate holds the frames back");
+
+    // One eye's vectors alone (Star Citizen fills one eye's depth only), by
+    // the record (one view's structure) or by the views' newest censuses
+    // (one view's vectors exactly zero everywhere in its region, the
+    // other's not): neither eye's evidence is asked for.
+    one_view = true;
+    run(3);
+    Check(!asked() && gpu.last.size() == 2 && !gpu.last[1].request.engine_motion,
+          "engine observe: one eye's structure alone asks for neither eye's evidence");
+    one_view = false;
+    run(3);
+    Check(asked(), "engine observe: asked again with both eyes' structures");
+    std::uint64_t sequence = 0;
+    // A view's census: its region's statistics grid finite throughout, the
+    // longest vector there `longest`; the hash grid, over the whole image,
+    // `zeros` exact zeros.
+    const auto census = [&](std::size_t view, float longest, std::uint32_t zeros) {
+        FrameGenEngineCensus taken;
+        taken.sequence = ++sequence;
+        taken.frame = frames;
+        taken.view = view;
+        taken.images = 3;
+        taken.censused = 1u << 1; // the image the vectors are thought to be in alone
+        taken.image[1].finite = kFrameGenEngineStatsTexels;
+        taken.image[1].max_abs = longest;
+        taken.image[1].zeros = zeros;
+        taken.image[0].finite = kFrameGenEngineStatsTexels; // never read
+        std::scoped_lock lock(gpu.motion_mutex);
+        gpu.census.push_back(taken);
+    };
+    census(0, 0.0f, kFrameGenEngineHashTexels);
+    census(1, 0.25f, 120);
+    run(3);
+    Check(!asked(), "engine observe: one eye's vectors zero everywhere the census reads asks for neither eye's evidence");
+    census(0, 0.5f, 300);
+    run(3);
+    Check(asked(), "engine observe: asked again once both eyes' censuses find vectors");
+    // Both views side by side in one slice: the hash grid, over the whole
+    // image, finds the same zeros for both; the region says.
+    census(0, 0.5f, 2048);
+    census(1, 0.0f, 2048);
+    run(3);
+    Check(!asked(), "engine observe: one eye's half of a shared slice zero asks for neither eye's evidence");
+    census(1, 0.25f, 2048);
+    run(3);
+    Check(asked(), "engine observe: asked again once both halves hold vectors");
+    census(0, 0.0f, kFrameGenEngineHashTexels);
+    census(1, 0.0f, kFrameGenEngineHashTexels);
+    run(3);
+    Check(asked(), "engine observe: both eyes' vectors zero everywhere (nothing moved) is no one-eye frame");
+    Check(!gpu.prior, "engine observe: no prior for XR_FB_space_warp from an unknown Direct3D game");
     presenter.Stop();
     Check(!runtime.ordering_violation && !g_release_violation, "engine observe: calls stayed ordered");
 }
@@ -12410,6 +12664,7 @@ int main(int argc, char** argv) {
     RUN(TestEngineMotionCensus);
     RUN(TestEngineMotionGates);
     RUN(TestEngineMotionCapture);
+    RUN(TestEngineMotionBridge);
     RUN(TestEngineMotionObserve);
     RUN(TestEngineMotionAssist);
     RUN(TestEngineMotionLead);

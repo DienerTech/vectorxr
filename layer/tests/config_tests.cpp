@@ -15,6 +15,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <tuple>
 
 #include "depthxr/config_parser.h"
 #include "depthxr/effects.h"
@@ -2231,7 +2232,9 @@ void TestFrameGenEngineCalibration() {
 void TestFrameGenEngineGates() {
     using namespace depthxr;
     Expect(std::string(FrameGenEngineGateName(0)) == "noStruct" && std::string(FrameGenEngineGateName(2)) == "pairing" &&
-               std::string(FrameGenEngineGateName(kFrameGenEngineGateCount - 1)) == "uncaptured",
+               std::string(FrameGenEngineGateName(7)) == "uncaptured" &&
+               std::string(FrameGenEngineGateName(kFrameGenEngineGateCount - 1)) == "oneEye" &&
+               (1u << (kFrameGenEngineGateCount - 1)) == kFrameGenEngineOneEye,
            "Engine gates: the summary names each gate");
     const FrameGenDepthEncoding flight{0.0f, 1.0f, 356700.0f, 0.05f};
     auto record = [&](std::int64_t time, std::uint64_t projection_frame, std::uint64_t sequence) {
@@ -2376,6 +2379,10 @@ void TestFrameGenEngineGates() {
         Expect(FrameGenEngineGates(&now, &before, facts) == kFrameGenEngineUncaptured,
                "Engine gates: uncaptured, not just in time or quad views (" + std::to_string(i) + ")");
     }
+    // G10: one eye's vectors alone.
+    FrameGenEngineGateFacts one_eye = good;
+    one_eye.one_eye = true;
+    Expect(FrameGenEngineGates(&now, &before, one_eye) == kFrameGenEngineOneEye, "Engine gates: one eye's vectors alone");
     // Gates that need no record still count without one.
     FrameGenEngineGateFacts fresh = good;
     fresh.frames_since_swapchain = 0;
@@ -3867,15 +3874,37 @@ void TestFrameGenEngineValidator() {
     }
 }
 
-// The prior table: MSFS 2024's FB vectors on Direct3D 12, nothing else.
+// The prior table: MSFS 2024's FB vectors on Direct3D 12; else Vulkan-style
+// NDC (y down) for XR_EXT_frame_synthesis on any API and for
+// XR_FB_space_warp from a Vulkan game; nothing for the rest.
 void TestFrameGenEnginePrior() {
     const auto msfs = depthxr::FrameGenEnginePriorFor("FlightSimulator2024.exe", false, "D3D12");
     Expect(msfs && depthxr::SameFrameGenEngineConvention(*msfs, depthxr::FrameGenEngineConvention{}),
            "Engine prior: MSFS 2024 expects XR_FB_space_warp's convention");
-    Expect(!depthxr::FrameGenEnginePriorFor("FlightSimulator2024.exe", true, "D3D12") &&
-               !depthxr::FrameGenEnginePriorFor("FlightSimulator2024.exe", false, "Vulkan") &&
-               !depthxr::FrameGenEnginePriorFor("StarCitizen.exe", false, "D3D12"),
-           "Engine prior: none for another extension, API or game");
+    depthxr::FrameGenEngineConvention y_down;
+    y_down.gain = {1.0f, -1.0f};
+    for (const auto& [executable, ext, api] :
+         {std::tuple<const char*, bool, const char*>{"FlightSimulator2024.exe", true, "D3D12"},
+          {"StarCitizen.exe", true, "Vulkan"},
+          {"StarCitizen.exe", false, "Vulkan"},
+          {"SomeGame.exe", true, "D3D11"}}) {
+        const auto prior = depthxr::FrameGenEnginePriorFor(executable, ext, api);
+        Expect(prior && depthxr::SameFrameGenEngineConvention(*prior, y_down) && !prior->jitter,
+               std::string("Engine prior: Vulkan-style NDC, y down, for ") + (ext ? "XR_EXT_frame_synthesis" : "XR_FB_space_warp") +
+                   " from " + executable + " on " + api);
+    }
+    Expect(!depthxr::FrameGenEnginePriorFor("StarCitizen.exe", false, "D3D12") &&
+               !depthxr::FrameGenEnginePriorFor("SomeGame.exe", false, "D3D11"),
+           "Engine prior: none for XR_FB_space_warp from another Direct3D game");
+    // The Vulkan bridge's switch.
+    using depthxr::FrameGenEngineBridgeMode;
+    Expect(depthxr::ParseFrameGenEngineBridgeMode("") == FrameGenEngineBridgeMode::kReleased &&
+               depthxr::ParseFrameGenEngineBridgeMode("1") == FrameGenEngineBridgeMode::kReleased &&
+               depthxr::ParseFrameGenEngineBridgeMode("0") == FrameGenEngineBridgeMode::kOff &&
+               depthxr::ParseFrameGenEngineBridgeMode("Off") == FrameGenEngineBridgeMode::kOff &&
+               depthxr::ParseFrameGenEngineBridgeMode("END") == FrameGenEngineBridgeMode::kEndFrame &&
+               std::string(depthxr::ToString(FrameGenEngineBridgeMode::kEndFrame)) == "end",
+           "Engine bridge: VECTORXR_FRAMEGEN_ENGINE_BRIDGE's values");
     // The lag test's acceleration: a steady turn is none, a change is.
     depthxr::FrameGenViewGeometry a, b, c;
     auto yaw = [](double degrees) {

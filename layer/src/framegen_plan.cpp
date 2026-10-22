@@ -1612,6 +1612,26 @@ FrameGenEngineMap ParseFrameGenEngineMap(const std::string& value) {
                               : FrameGenEngineMap::kOff;
 }
 
+const char* ToString(FrameGenEngineBridgeMode mode) {
+    switch (mode) {
+    case FrameGenEngineBridgeMode::kOff:
+        return "off";
+    case FrameGenEngineBridgeMode::kEndFrame:
+        return "end";
+    default:
+        return "released";
+    }
+}
+
+FrameGenEngineBridgeMode ParseFrameGenEngineBridgeMode(const std::string& value) {
+    std::string text(value);
+    std::transform(text.begin(), text.end(), text.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return text == "0" || text == "off" ? FrameGenEngineBridgeMode::kOff
+           : text == "end"              ? FrameGenEngineBridgeMode::kEndFrame
+                                        : FrameGenEngineBridgeMode::kReleased;
+}
+
 bool SameFrameGenEngineConvention(const FrameGenEngineConvention& a, const FrameGenEngineConvention& b) {
     auto same = [](float x, float y) { return std::abs(x - y) <= 1e-3f * std::max(std::abs(x), std::abs(y)); };
     return same(a.gain[0], b.gain[0]) && same(a.gain[1], b.gain[1]) && a.camera == b.camera;
@@ -3076,7 +3096,7 @@ double Degrees(const std::array<double, 4>& q) {
 
 const char* FrameGenEngineGateName(std::size_t index) {
     static constexpr std::array<const char*, kFrameGenEngineGateCount> kNames{
-        "noStruct", "skip", "pairing", "cut", "decode", "recreate", "settle", "uncaptured"};
+        "noStruct", "skip", "pairing", "cut", "decode", "recreate", "settle", "uncaptured", "oneEye"};
     return index < kNames.size() ? kNames[index] : "";
 }
 
@@ -3086,7 +3106,9 @@ std::uint32_t FrameGenEngineGates(const FrameGenEngineGateRecord* record, const 
     // G8: swapchains made lately (a game resizing its views makes them anew,
     // Star Citizen churns them at its world entry) settle first.
     if (facts.frames_since_swapchain < 2) gates |= kFrameGenEngineRecreate;
-    if (facts.seconds_since_swapchain < 3.0) gates |= kFrameGenEngineSettle;
+    if (facts.seconds_since_swapchain < kFrameGenEngineSettleSeconds) gates |= kFrameGenEngineSettle;
+    // G10: one eye's vectors alone.
+    if (facts.one_eye) gates |= kFrameGenEngineOneEye;
     // G9: the engine path serves frames analyzed just in time, of two views
     // each captured at its release.
     if (!facts.captured || !facts.just_in_time || facts.views != 2 || facts.composed) {
@@ -3465,6 +3487,16 @@ std::optional<FrameGenEngineConvention> FrameGenEnginePriorFor(const std::string
             return entry.convention;
         }
     }
+    // XR_EXT_frame_synthesis' vectors are in Vulkan-style NDC (y down) on every
+    // API, and XR_FB_space_warp's in the API's own NDC, y down in Vulkan's:
+    // decoded, the current frame minus the previous, n = (1, -1) * e. A game
+    // that flips its projection (as some ports to Vulkan do) is told by the
+    // evidence all the same.
+    if (ext || api == "Vulkan") {
+        FrameGenEngineConvention convention;
+        convention.gain = {1.0f, -1.0f};
+        return convention;
+    }
     return std::nullopt;
 }
 
@@ -3562,6 +3594,17 @@ std::filesystem::path FrameGenEngineRemovedPath() {
     const std::filesystem::path local = LocalAppDataPath();
     if (local.empty()) return {};
     return local / "VectorXR" / (L"engine-motion-" + GetCurrentExecutablePath().filename().wstring() + L".removed");
+}
+
+std::filesystem::path WriteFrameGenEngineRemoved(const std::string& cause) {
+    const std::filesystem::path path = FrameGenEngineRemovedPath();
+    if (path.empty()) return {};
+    std::error_code ignored;
+    std::filesystem::create_directories(path.parent_path(), ignored);
+    std::ofstream(path) << cause
+                        << " within 2 s of VectorXR Frame Generation reading this game's motion vectors.\n"
+                           "While this file is here, its sessions read none. Delete it to read them again.\n";
+    return path;
 }
 
 } // namespace depthxr

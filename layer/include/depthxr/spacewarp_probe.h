@@ -15,6 +15,7 @@
 
 #include <cstdint>
 #include <deque>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -40,9 +41,20 @@ const char* SpaceWarpProbeName(SpaceWarpProbeSelection selection);
 // extension it lacks, so the instance would fail).
 bool SpaceWarpProbeOwns(bool probe_on, bool application_enabled, bool runtime_lists);
 
-// The motion vector image the layer recommends for an eye's recommended
-// image: a quarter of it each way, at least 1x1.
-XrExtent2Di RecommendedMotionVectorSize(std::uint32_t eye_width, std::uint32_t eye_height);
+// How big a motion vector image the layer recommends, against an eye's
+// recommended image, each way: half (Frame Generation's half-resolution
+// grid, which it reads the vectors at), a quarter or an eighth.
+enum class MotionVectorSize : std::uint8_t { kHalf, kQuarter, kEighth };
+const char* ToString(MotionVectorSize size); // "half", "quarter", "eighth"
+// "half", "quarter" or "eighth" (any case); none for anything else.
+std::optional<MotionVectorSize> ParseMotionVectorSize(const std::string& value);
+// The size answered: half the eye when Frame Generation will read the
+// vectors (`read`), else an eighth (a game renders vectors for nothing
+// there; one that lets the answer size them pays little); `research`
+// (VECTORXR_FRAMEGEN_ENGINE_MV_SIZE) when given.
+MotionVectorSize ChooseMotionVectorSize(bool read, std::optional<MotionVectorSize> research);
+// That size of an eye's recommended image, rounded up, at least 1x1.
+XrExtent2Di RecommendedMotionVectorSize(std::uint32_t eye_width, std::uint32_t eye_height, MotionVectorSize size);
 
 // RGBA 16-bit float, the format both extensions take motion vectors in:
 // DXGI_FORMAT_R16G16B16A16_FLOAT, VK_FORMAT_R16G16B16A16_SFLOAT or GL_RGBA16F.

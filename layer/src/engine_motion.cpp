@@ -22,7 +22,7 @@ constexpr double kInformativeDeltaMeters = 0.05;
 // The CSV is written for this long from its first row.
 constexpr std::chrono::minutes kCsvLength{20};
 // The census grid sizes (FG_PASS_ENGINE_CENSUS).
-constexpr std::uint64_t kHashTexels = 64 * 64;
+constexpr std::uint64_t kHashTexels = kFrameGenEngineHashTexels;
 constexpr std::size_t kSampleGrid = 16;
 
 std::string Number(double value, int digits) {

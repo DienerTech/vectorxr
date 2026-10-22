@@ -305,6 +305,9 @@ class OpenXrLayer {
         // Citizen does), which a runtime reading the image at xrEndFrame
         // still shows; a copy at the release would not have it.
         std::deque<uint32_t> bridge_handovers;
+        // Whether the bridge copied each of them, where the frame's end made
+        // the copies ahead of the hand-overs (HandOverBridgedReleasesLocked).
+        std::deque<bool> bridge_copied;
         bool quadviews_session{false};
         SwapchainImageQueue image_states;
         std::unordered_set<uint32_t> d3d11_shader_resource_slices_attempted;
@@ -624,7 +627,11 @@ class OpenXrLayer {
     // carried), a swapchain that looks like a motion vector or its depth, and
     // the summary of the session's frames.
     bool SpaceWarpProbeActive() const { return spacewarp_fb_owned_ || spacewarp_ext_owned_; }
-    XrExtent2Di SpaceWarpMotionVectorSize(XrInstance instance, XrSystemId system_id);
+    // The size answered (ChooseMotionVectorSize): half the eye where Frame
+    // Generation will read the vectors, else an eighth, unless
+    // VECTORXR_FRAMEGEN_ENGINE_MV_SIZE says.
+    MotionVectorSize SpaceWarpVectorSizeLocked();
+    XrExtent2Di SpaceWarpMotionVectorSize(XrInstance instance, XrSystemId system_id, MotionVectorSize size);
     const XrFrameEndInfo* ProbeSpaceWarpFrameLocked(const XrFrameEndInfo* frame, SpaceWarpFrame& storage);
     // Frame Generation's record of the frame's structures (FrameGenEngineMotionFrame;
     // no views when it carried none), from the frame the probe forwards and
@@ -656,7 +663,10 @@ class OpenXrLayer {
     // oldest first (SwapchainInfo::bridge_handovers): the bridge's copy into
     // the runtime's image, Frame Generation's capture of it, then the release
     // on to the runtime (or deferred, as ReleaseSwapchainImage would). With
-    // `copy` false (the session's end) only the releases go on.
+    // `copy` false (the session's end) only the releases go on. Every
+    // swapchain's: while the Vulkan bridge gives the game's motion vector
+    // images back at their releases (vulkan_bridge_motion_), each
+    // swapchain's copies are made first, then the captures and releases.
     XrResult HandOverBridgedReleasesLocked(XrSwapchain swapchain, SwapchainInfo& info, std::string_view reason,
                                            bool copy = true);
     XrResult HandOverBridgedReleasesLocked(std::string_view reason, bool copy = true);
@@ -1045,6 +1055,11 @@ class OpenXrLayer {
     VulkanBridge vulkan_bridge_;
     bool vulkan_bridge_lost_logged_{false};  // mutex_
     bool vulkan_bridge_depth_logged_{false}; // mutex_
+    // The bridge gives a swapchain of the game's motion vectors back to its
+    // queue at each release (VulkanBridge::MarkMotion): a giving back waits
+    // on the GPU for its copy, so the frame's end makes every copy before
+    // Frame Generation's captures (HandOverBridgedReleasesLocked). mutex_.
+    bool vulkan_bridge_motion_{false};
     std::chrono::steady_clock::time_point vulkan_bridge_last_summary_; // mutex_
     // Either bridge's swapchain, and one whose runtime images never get
     // anything (its calls need no ordering with the game's queue).
@@ -1782,6 +1797,9 @@ class OpenXrLayer {
         std::uint64_t views_stripped{0};
         std::uint64_t views_left{0};
         std::uint64_t frame_skips{0};
+        // XR_EXT_frame_synthesis' REQUEST_RELAXED_FRAME_INTERVAL: noted, not
+        // acted on (Auto may take it later).
+        std::uint64_t relaxed{0};
         // Structures on the primary projection Frame Generation would not
         // take as they are (ValidateEngineMotionView).
         std::uint64_t invalid{0};
