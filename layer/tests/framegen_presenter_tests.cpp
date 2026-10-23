@@ -152,6 +152,83 @@ void SleepPrecise(std::chrono::steady_clock::time_point deadline) {
     }
 }
 
+// --- fake view locate (the eye probe, VECTORXR_FRAMEGEN_SYNTH_EYE_PROBE) ---------
+
+// Each xrLocateViews the presenter made: the time and space asked, the view
+// configuration, the calling thread, and whether the presenter's own lock
+// was free during the call (checked on the first few calls).
+struct LocateCall {
+    XrTime time{0};
+    XrSpace space{XR_NULL_HANDLE};
+    XrViewConfigurationType configuration{};
+    DWORD thread{0};
+    bool presenter_free{true};
+};
+
+// The runtime's answer: the eyes where App::End renders them at the time
+// asked (x = speed * (t - 1 s)), `offset_y` meters off that path, with
+// `flags`; `frozen`, the same position whatever time is asked; `result`, a
+// failure instead; `sleep_us`, that long first.
+struct FakeLocate {
+    std::mutex mutex;
+    std::vector<LocateCall> calls;
+    double speed{0.0};
+    float offset_y{0.0f};
+    XrViewStateFlags flags{XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT |
+                           XR_VIEW_STATE_ORIENTATION_TRACKED_BIT | XR_VIEW_STATE_POSITION_TRACKED_BIT};
+    bool frozen{false};
+    XrResult result{XR_SUCCESS};
+    int sleep_us{0};
+    bool check_lock{true}; // the presenter's lock checked free on the first calls
+    const FrameGenPresenter* presenter{nullptr};
+};
+FakeLocate g_locate;
+
+XrResult XRAPI_PTR LocateViews(XrSession, const XrViewLocateInfo* info, XrViewState* state, std::uint32_t capacity,
+                               std::uint32_t* count, XrView* views) {
+    LocateCall call{info->displayTime, info->space, info->viewConfigurationType, GetCurrentThreadId(), true};
+    const FrameGenPresenter* presenter = nullptr;
+    {
+        std::scoped_lock lock(g_locate.mutex);
+        if (g_locate.check_lock && g_locate.calls.size() < 3) presenter = g_locate.presenter;
+    }
+    if (presenter) {
+        // Another thread takes the presenter's lock (Status): held over this
+        // call, it would not get it.
+        auto taken = std::make_shared<std::atomic<bool>>(false);
+        std::thread([presenter, taken] {
+            (void)presenter->Status();
+            *taken = true;
+        }).detach();
+        const auto until = std::chrono::steady_clock::now() + 300ms;
+        // Spun, not slept (a sleep rounds up to the timer's resolution). The
+        // game's thread may hold the lock meanwhile: these calls may come out
+        // slow (the tests allow it).
+        while (!*taken && std::chrono::steady_clock::now() < until) std::this_thread::yield();
+        call.presenter_free = *taken;
+    }
+    std::unique_lock lock(g_locate.mutex);
+    g_locate.calls.push_back(call);
+    const int sleep_us = g_locate.sleep_us;
+    const XrResult result = g_locate.result;
+    const double speed = g_locate.speed;
+    const float offset_y = g_locate.offset_y;
+    const XrViewStateFlags flags = g_locate.flags;
+    const bool frozen = g_locate.frozen;
+    lock.unlock();
+    if (sleep_us) SleepPrecise(std::chrono::steady_clock::now() + std::chrono::microseconds(sleep_us));
+    if (XR_FAILED(result)) return result;
+    *count = 2;
+    if (capacity < 2) return capacity ? XR_ERROR_SIZE_INSUFFICIENT : XR_SUCCESS;
+    const double x = frozen ? 0.25 : speed * static_cast<double>(info->displayTime - 1'000'000'000) * 1e-9;
+    for (std::uint32_t i = 0; i < 2; ++i) {
+        views[i].pose = {{0.0f, 0.0f, 0.0f, 1.0f}, {static_cast<float>(x), offset_y, 0.0f}};
+        views[i].fov = {-0.8f, 0.8f, 0.8f, -0.8f};
+    }
+    state->viewStateFlags = flags;
+    return XR_SUCCESS;
+}
+
 // --- fake GPU -------------------------------------------------------------------
 
 using TimePoint = std::chrono::steady_clock::time_point;
@@ -1441,7 +1518,7 @@ struct App {
 };
 
 FrameGenSwapchainDispatch Dispatch() {
-    return {Formats, Create, Destroy, Images, Acquire, WaitImage, Release};
+    return {Formats, Create, Destroy, Images, Acquire, WaitImage, Release, LocateViews};
 }
 
 constexpr XrSwapchainUsageFlags kAppUsage =
@@ -3104,6 +3181,260 @@ void TestJitEyeShiftReported() {
           "jit eye shift: the summaries measure each eye predictor against the next real frame (velocity " +
               std::to_string(velocity_miss) + " mm, damped " + std::to_string(damped_miss) + " mm in " +
               std::to_string(predicted) + " summaries)");
+}
+
+// The eye probe's "key=a/b" summary field, each half none when "-" (or the
+// field missing).
+std::pair<std::optional<double>, std::optional<double>> EyeProbeField(const std::string& line, const std::string& key) {
+    const std::size_t at = line.find(", " + key + "=");
+    if (at == std::string::npos) return {};
+    const std::string value = line.substr(at + key.size() + 3, line.find(',', at + 2) - (at + key.size() + 3));
+    const auto number = [](const std::string& text) -> std::optional<double> {
+        if (text.empty() || text[0] == '-') return std::nullopt;
+        return std::stod(text);
+    };
+    const std::size_t slash = value.find('/');
+    if (slash == std::string::npos) return {number(value), std::nullopt};
+    return {number(value.substr(0, slash)), number(value.substr(slash + 1))};
+}
+
+// A count of the summary's "eyeLocate=calls:N/resolved:A+B/..." field (for
+// resolved, `between` picks B), 0 when missing.
+std::uint64_t EyeProbeCount(const std::string& line, const std::string& name, bool between = false) {
+    const std::size_t field = line.find(", eyeLocate=");
+    if (field == std::string::npos) return 0;
+    const std::size_t end = line.find(',', field + 2);
+    const std::size_t at = line.find((name == "calls" ? "=" : "/") + name + ":", field);
+    if (at == std::string::npos || at > end) return 0;
+    std::size_t start = at + name.size() + 2;
+    if (between) start = line.find('+', start) + 1;
+    return std::stoull(line.substr(start));
+}
+
+// What a just-in-time session with the eye probe on or off did: the probe's
+// locates, the summaries, the real frames' display times and those submitted.
+struct EyeProbeRun {
+    std::vector<LocateCall> calls;
+    std::vector<std::string> summaries;
+    std::vector<std::string> log;
+    std::set<XrTime> real;
+    std::set<XrTime> submitted;
+    DWORD app_thread{0};
+    int frames{0};
+    // Each count summed over the summaries.
+    std::uint64_t Count(const std::string& name, bool between = false) const {
+        std::uint64_t total = 0;
+        for (const std::string& line : summaries) total += EyeProbeCount(line, name, between);
+        return total;
+    }
+};
+
+EyeProbeRun RunEyeProbe(const std::string& name, FrameGenSynthesisMode mode, bool on,
+                        const std::function<void(FakeLocate&)>& answer = {}, std::chrono::milliseconds duration = 900ms) {
+    {
+        std::scoped_lock lock(g_locate.mutex);
+        g_locate.calls.clear();
+        g_locate.speed = 0.5;
+        g_locate.offset_y = 0.0f;
+        g_locate.flags = XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT |
+                         XR_VIEW_STATE_ORIENTATION_TRACKED_BIT | XR_VIEW_STATE_POSITION_TRACKED_BIT;
+        g_locate.frozen = false;
+        g_locate.result = XR_SUCCESS;
+        g_locate.sleep_us = 0;
+        g_locate.check_lock = true;
+        g_locate.presenter = nullptr;
+        if (answer) answer(g_locate);
+    }
+    EyeProbeRun run;
+    run.app_thread = GetCurrentThreadId();
+    HorizonLog log("eyeprobe-" + name);
+    {
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        runtime.paced = true;
+        std::unique_ptr<App> owned;
+        App* app = nullptr;
+        if (on) _putenv_s("VECTORXR_FRAMEGEN_SYNTH_EYE_PROBE", "1");
+        StartJit(presenter, gpu, mode, FrameGenMultiplier::k2, app, runtime, owned, log.logger.get());
+        _putenv_s("VECTORXR_FRAMEGEN_SYNTH_EYE_PROBE", "");
+        {
+            std::scoped_lock lock(g_locate.mutex);
+            g_locate.presenter = &presenter;
+        }
+        presenter.SetSummaryInterval(300ms);
+        app->eye_speed = 0.5;
+        for (int i = 0; i < 3; ++i) run.real.insert(app->Frame().predictedDisplayTime);
+        const auto start = std::chrono::steady_clock::now();
+        while (std::chrono::steady_clock::now() - start < duration) {
+            const XrFrameState state = app->Wait();
+            app->Begin();
+            std::this_thread::sleep_for(4ms);
+            app->Release();
+            Check(XR_SUCCEEDED(app->End(state.predictedDisplayTime)), "eye probe " + name + ": end");
+            run.real.insert(state.predictedDisplayTime);
+            ++run.frames;
+        }
+        presenter.Stop();
+        {
+            std::scoped_lock lock(g_locate.mutex);
+            g_locate.presenter = nullptr;
+            run.calls = g_locate.calls;
+        }
+        std::scoped_lock lock(g_xr_mutex);
+        run.submitted.insert(runtime.submitted_times.begin(), runtime.submitted_times.end());
+    }
+    {
+        const std::filesystem::path path = log.logger->ActiveLogPath();
+        run.summaries = log.Summaries(); // closes the log
+        std::ifstream file(path);
+        for (std::string line; std::getline(file, line);) run.log.push_back(line);
+    }
+    return run;
+}
+
+// Research (VECTORXR_FRAMEGEN_SYNTH_EYE_PROBE=1, log only): each generated
+// frame written just in time, the presenter thread asks the runtime where
+// the views are at exactly that frame's display time, in the real frame's
+// space, holding none of the presenter's locks (its own the fake checks),
+// and the summaries score the answer and the eye the frame was shown from
+// against the real frames' path. Off, the runtime is never asked. Invalid,
+// untracked, repeated, failed and slow answers are counted, never scored;
+// enough slow ones stop the probe for the session.
+void TestEyeProbe() {
+    // Off: not one call, and the summaries as they were.
+    const EyeProbeRun off = RunEyeProbe("off", FrameGenSynthesisMode::kExtrapolate, false);
+    Check(off.calls.empty(), "eye probe: off, the runtime is never asked (" + std::to_string(off.calls.size()) + ")");
+    Check(!off.summaries.empty() && std::none_of(off.summaries.begin(), off.summaries.end(), [](const std::string& line) {
+              return line.find("eyeLocate") != std::string::npos;
+          }),
+          "eye probe: off, the summaries carry none of its fields");
+
+    // The runtime answers 1 mm above the eyes' path, which the real frames
+    // follow: the answer misses their path by 1 mm, the eye moved at
+    // constant velocity by nothing.
+    const auto offset = [](FakeLocate& locate) { locate.offset_y = 0.001f; };
+    for (const FrameGenSynthesisMode mode : {FrameGenSynthesisMode::kExtrapolate, FrameGenSynthesisMode::kInterpolate}) {
+        const bool extrapolate = mode == FrameGenSynthesisMode::kExtrapolate;
+        const std::string name = extrapolate ? "extrapolate" : "interpolate";
+        const EyeProbeRun run = RunEyeProbe(name, mode, true, offset);
+        Check(static_cast<int>(run.calls.size()) > run.frames / 2,
+              "eye probe " + name + ": the runtime is asked for generated frames (" + std::to_string(run.calls.size()) +
+                  " calls, " + std::to_string(run.frames) + " real frames)");
+        std::size_t at_submitted = 0, at_real = 0, presenter_checked = 0;
+        bool ordered = true, own_thread = true, stereo = true, in_space = true, free = true;
+        for (std::size_t i = 0; i < run.calls.size(); ++i) {
+            const LocateCall& call = run.calls[i];
+            at_submitted += run.submitted.count(call.time);
+            at_real += run.real.count(call.time);
+            ordered = ordered && (i == 0 || call.time > run.calls[i - 1].time);
+            own_thread = own_thread && call.thread != run.app_thread && call.thread == run.calls.front().thread;
+            stereo = stereo && call.configuration == XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+            in_space = in_space && call.space == kSpace;
+            presenter_checked += i < 3 ? 1 : 0;
+            free = free && call.presenter_free;
+        }
+        // (The last frame written may never be submitted: the presenter
+        // stopped. A real frame not captured in time has its refresh moved
+        // on from the one before.)
+        Check(at_submitted + 1 >= run.calls.size() && at_real * 20 <= run.calls.size(),
+              "eye probe " + name + ": each call asks for its generated frame's own display time (" +
+                  std::to_string(at_submitted) + " of " + std::to_string(run.calls.size()) +
+                  " at a submitted time, " + std::to_string(at_real) + " at a real frame's)");
+        Check(ordered, "eye probe " + name + ": one call per generated frame, in display-time order");
+        Check(own_thread, "eye probe " + name + ": asked from the presenter thread only, never the game's");
+        Check(stereo && in_space, "eye probe " + name + ": the stereo views, in the real frame's projection space");
+        Check(presenter_checked > 0 && free, "eye probe " + name + ": the presenter's lock is free during the call");
+        const std::size_t kind = extrapolate ? 0 : 1;
+        // The answer misses by its 1 mm in every summary. The eye shown from
+        // is on the path once the game's pace settles (before, a frame past
+        // more than one of the previous intervals stays at one: it lags).
+        int scored = 0;
+        double used_best = 1e9, apart_best = 1e9;
+        for (const std::string& line : run.summaries) {
+            const auto miss = EyeProbeField(line, extrapolate ? "eyeLocateMissMm" : "eyeLocateBetweenMissMm");
+            const auto apart = EyeProbeField(line, "eyeLocateFromUsedMm");
+            const auto ms = EyeProbeField(line, "eyeLocateMs");
+            if (!miss.first) continue;
+            ++scored;
+            Check(miss.second && std::abs(*miss.first - 1.0) < 0.01,
+                  "eye probe " + name + ": the answer 1 mm off the real path misses it by 1 mm (" + line + ")");
+            const std::optional<double> apart_mm = kind == 0 ? apart.first : apart.second;
+            Check(apart_mm.has_value(), "eye probe " + name + ": how far the answer is from the eye shown from");
+            used_best = std::min(used_best, *miss.second);
+            apart_best = std::min(apart_best, std::abs(*apart_mm - 1.0));
+            Check(ms.first && ms.second && *ms.first >= 0.0 && *ms.second >= *ms.first,
+                  "eye probe " + name + ": the calls' mean and longest time");
+        }
+        Check(scored > 0 && run.Count("resolved", kind == 1) > 0,
+              "eye probe " + name + ": generated frames scored once the real frames either side came (" +
+                  std::to_string(scored) + " summaries)");
+        Check(used_best < 0.02 && apart_best < 0.02,
+              "eye probe " + name + ": settled, the eye shown from is on the path and 1 mm from the answer (" +
+                  std::to_string(used_best) + " mm off the path, " + std::to_string(apart_best) + " mm off 1 mm)");
+        // (The fake's lock check makes its first calls slow when the game's
+        // thread holds the presenter's lock meanwhile: those may be dropped.)
+        Check(run.Count("failed") + run.Count("invalid") + run.Count("untracked") + run.Count("same") == 0 &&
+                  run.Count("slow") <= presenter_checked,
+              "eye probe " + name + ": good answers are all used (failed " + std::to_string(run.Count("failed")) +
+                  ", invalid " + std::to_string(run.Count("invalid")) + ", untracked " +
+                  std::to_string(run.Count("untracked")) + ", same " + std::to_string(run.Count("same")) + ", slow " +
+                  std::to_string(run.Count("slow")) + ")");
+    }
+
+    // Answers the probe drops, each counted: no valid position, a position
+    // not tracked, the same position whatever the time, a failed call.
+    struct Dropped {
+        const char* name;
+        const char* count;
+        std::function<void(FakeLocate&)> answer;
+    };
+    const std::vector<Dropped> dropped{
+        {"invalid", "invalid", [](FakeLocate& locate) { locate.flags = XR_VIEW_STATE_ORIENTATION_VALID_BIT; }},
+        {"untracked", "untracked",
+         [](FakeLocate& locate) {
+             locate.flags = XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT |
+                            XR_VIEW_STATE_ORIENTATION_TRACKED_BIT;
+         }},
+        {"same", "same", [](FakeLocate& locate) { locate.frozen = true; }},
+        {"failed", "failed", [](FakeLocate& locate) { locate.result = XR_ERROR_RUNTIME_FAILURE; }},
+    };
+    for (const Dropped& drop : dropped) {
+        const EyeProbeRun run = RunEyeProbe(
+            drop.name, FrameGenSynthesisMode::kExtrapolate, true,
+            [&](FakeLocate& locate) {
+                locate.check_lock = false; // no call slow from the check
+                drop.answer(locate);
+            },
+            700ms);
+        const std::uint64_t calls = run.Count("calls");
+        const std::uint64_t counted = run.Count(drop.count);
+        // A frozen runtime's first answer is the one the others repeat.
+        const std::uint64_t expected = std::string(drop.name) == "same" && calls ? calls - 1 : calls;
+        Check(calls > 3 && counted >= expected && counted <= calls,
+              std::string("eye probe: ") + drop.name + " answers are counted (" + std::to_string(counted) + " of " +
+                  std::to_string(calls) + ")");
+        // Only a frozen runtime's first answer, the one repeated, is scored.
+        const bool same = std::string(drop.name) == "same";
+        Check(run.Count("resolved") + run.Count("resolved", true) <= (same ? 1u : 0u) &&
+                  (same || std::all_of(run.summaries.begin(), run.summaries.end(), [](const std::string& line) {
+                       return !EyeProbeField(line, "eyeLocateMissMm").first;
+                   })),
+              std::string("eye probe: ") + drop.name + " answers are never scored");
+    }
+
+    // Slow calls (4 ms each, past 3 ms) are dropped, and eight stop the probe
+    // for the session.
+    const EyeProbeRun slow = RunEyeProbe("slow", FrameGenSynthesisMode::kExtrapolate, true,
+                                         [](FakeLocate& locate) { locate.sleep_us = 4000; }, 700ms);
+    Check(slow.calls.size() == 8, "eye probe: eight slow calls stop it (" + std::to_string(slow.calls.size()) + ")");
+    Check(slow.Count("slow") == slow.Count("calls") && slow.Count("resolved") == 0,
+          "eye probe: slow answers are counted, never scored");
+    Check(std::any_of(slow.log.begin(), slow.log.end(),
+                      [](const std::string& line) { return line.find("eye probe stops for the session") != std::string::npos; }) &&
+              std::any_of(slow.summaries.begin(), slow.summaries.end(),
+                          [](const std::string& line) { return line.find("/stopped") != std::string::npos; }),
+          "eye probe: stopping is logged, and the summaries say so");
 }
 
 // Extrapolate at 3x, each generated frame written right before its refresh:
@@ -12943,6 +13274,7 @@ int main(int argc, char** argv) {
     RUN(TestThreadedInterpolation);
     RUN(TestJitExtrapolation);
     RUN(TestJitEyeShiftReported);
+    RUN(TestEyeProbe);
     RUN(TestJitDynamicExtrapolation);
     RUN(TestJitStaleMotion);
     RUN(TestJitInterpolateCoversLateMotion);

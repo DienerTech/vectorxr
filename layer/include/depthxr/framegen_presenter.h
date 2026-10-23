@@ -44,6 +44,10 @@ struct FrameGenSwapchainDispatch {
     PFN_xrAcquireSwapchainImage acquire{};
     PFN_xrWaitSwapchainImage wait{};
     PFN_xrReleaseSwapchainImage release{};
+    // Research only (VECTORXR_FRAMEGEN_SYNTH_EYE_PROBE): where the runtime
+    // puts the views at each generated frame's display time. Never called
+    // with the switch off; null, the probe has nothing to ask.
+    PFN_xrLocateViews locate_views{};
 };
 
 // How a session's images reach the runtime, as engine motion vectors are
@@ -929,6 +933,25 @@ class FrameGenPresenter {
     // Summary statistics: the eye shift's prediction (and each candidate
     // predictor's, eyePredictMissMm), and when generation ran on the GPU.
     void NoteEyeMovementLocked(const XrCompositionLayerProjection& projection, const PendingFrame& frame);
+    // Research (VECTORXR_FRAMEGEN_SYNTH_EYE_PROBE=1, log only): presenter
+    // thread, holding no lock, right after a generated frame was written for
+    // the refresh at `time`: asks the runtime where the views are at exactly
+    // that time, in `frame`'s projection space, under submit_mutex_ (the
+    // space cannot go meanwhile), and keeps the first eye, located and as
+    // `views` carry it, until the real frames either side of `time` say
+    // where it was (ResolveEyeProbeLocked). `ahead`: the frame is past its
+    // real frame (extrapolated, or a cover). A failed, invalid, untracked,
+    // repeated or slow answer is counted and dropped.
+    void ProbeEyeLocate(XrSession session, const JitFrame& frame, bool ahead,
+                        const std::vector<XrCompositionLayerProjectionView>& views, XrTime time);
+    // Each real frame's first eye at its display time (Generate), and the
+    // probed frames it brackets with the one before scored against the line
+    // between the two.
+    void NoteEyeProbeRealLocked(const XrCompositionLayerProjection& projection, XrTime display_time,
+                                std::uint64_t sequence);
+    void ResolveEyeProbeLocked();
+    // The eye probe's fields of the summary line (eyeLocate*).
+    std::string EyeProbeTextLocked() const;
     void NoteGpuTimingLocked(std::uint64_t submission, const PendingFrame& frame,
                              const std::optional<FrameGenGpuWindow>& window,
                              const std::vector<FrameGenAnalysisTiming>& timings,
@@ -1741,6 +1764,59 @@ class FrameGenPresenter {
     std::uint64_t eye_history_sequence_{0};
     std::array<double, 5> eye_predict_sum_mm_{};
     std::uint64_t eye_predict_frames_{0};
+    // Research (VECTORXR_FRAMEGEN_SYNTH_EYE_PROBE=1, read at Start): the
+    // runtime asked where the views are at each generated frame's own display
+    // time (ProbeEyeLocate). Nothing it learns changes a frame. Stopped for
+    // the session after kEyeProbeSlowStop slow calls.
+    bool eye_probe_{false};
+    bool eye_probe_stopped_{false};
+    std::uint32_t eye_probe_slow_calls_{0}; // this session's
+    // Probed frames waiting for the real frame after their time: the first
+    // eye where the runtime put it and where the frame was shown from, in
+    // the space of the real frame it was written from. `ahead`: past that
+    // real frame (extrapolated, or a cover), else between two real frames.
+    struct EyeProbeFrame {
+        XrTime time{0};
+        XrSpace space{XR_NULL_HANDLE};
+        bool ahead{false};
+        std::array<double, 3> located{};
+        std::array<double, 3> used{};
+    };
+    std::deque<EyeProbeFrame> eye_probe_pending_;
+    // The newest real frames' first eye at their own display times; each
+    // continuous with the one before it (consecutive, same space) or not.
+    struct EyeProbeReal {
+        XrTime time{0};
+        XrSpace space{XR_NULL_HANDLE};
+        std::uint64_t sequence{0};
+        bool continuous{false};
+        std::array<double, 3> position{};
+    };
+    std::deque<EyeProbeReal> eye_probe_reals_;
+    // The previous answer's first eye and its display time: a later time
+    // answered with exactly the same position is a runtime not predicting.
+    std::optional<std::array<float, 3>> eye_probe_last_;
+    XrTime eye_probe_last_time_{0};
+    // Since the last summary. Index 0: frames ahead of their real frame,
+    // 1: frames between two real frames.
+    struct EyeProbeWindow {
+        std::uint64_t calls{0};
+        double call_ms_sum{0.0};
+        double call_ms_max{0.0};
+        std::uint64_t failed{0};    // the call failed, or located no view
+        std::uint64_t invalid{0};   // no valid position
+        std::uint64_t untracked{0}; // a valid position, not tracked
+        std::uint64_t same{0};      // the previous answer's position for a later time
+        std::uint64_t slow{0};      // the call took longer than kEyeProbeSlowMs
+        std::uint64_t gone{0};      // the frame's space went before it could be asked
+        std::uint64_t unresolved{0}; // no continuous real frames either side of its time
+        std::array<std::uint64_t, 2> apart{};        // located against used
+        std::array<double, 2> apart_sum_mm{};
+        std::array<std::uint64_t, 2> resolved{};     // scored against the real frames' line
+        std::array<double, 2> located_miss_sum_mm{};
+        std::array<double, 2> used_miss_sum_mm{};
+    };
+    EyeProbeWindow eye_probe_window_;
     // When generation ran on the GPU: its start after the real frame's slot
     // was released and its end after the first generated slot was,
     // milliseconds, since the last summary (FrameGenGpu::LastGpuWindow).

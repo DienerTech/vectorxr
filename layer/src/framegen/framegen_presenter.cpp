@@ -191,6 +191,15 @@ constexpr std::array<FrameGenEyePredictor, 5> kFrameGenEyeCandidates{
     FrameGenEyePredictor::kVelocity, FrameGenEyePredictor::kDamped, FrameGenEyePredictor::kTwoInterval,
     FrameGenEyePredictor::kQuadratic, FrameGenEyePredictor::kTwist};
 
+// The eye probe (VECTORXR_FRAMEGEN_SYNTH_EYE_PROBE): a locate longer than
+// this is counted and its answer dropped (it is made right before a
+// refresh); this many in a session stop the probe for it. Real frames kept
+// to bracket probed frames' times, and probed frames kept waiting for them.
+constexpr double kEyeProbeSlowMs = 3.0;
+constexpr std::uint32_t kEyeProbeSlowStop = 8;
+constexpr std::size_t kEyeProbeReals = 6;
+constexpr std::size_t kEyeProbePending = 64;
+
 // `v` rotated by the unit quaternion `q`, and by its inverse.
 std::array<double, 3> Rotate(const XrQuaternionf& q, const std::array<double, 3>& v) {
     const double x = q.x, y = q.y, z = q.z, w = q.w;
@@ -293,6 +302,15 @@ std::string EyePredictMissText(const std::array<double, 5>& sums, std::uint64_t 
                 Number(sums[i] / static_cast<double>(frames), 3);
     }
     return text;
+}
+
+// A summary mean, "-" when nothing was counted.
+std::string EyeProbeMean(double sum, std::uint64_t count, int decimals) {
+    return count ? Number(sum / static_cast<double>(count), decimals) : std::string("-");
+}
+
+double Distance(const std::array<double, 3>& a, const std::array<double, 3>& b) {
+    return std::sqrt((a[0] - b[0]) * (a[0] - b[0]) + (a[1] - b[1]) * (a[1] - b[1]) + (a[2] - b[2]) * (a[2] - b[2]));
 }
 
 // "median/largest" of a summary window, "-" when empty.
@@ -577,6 +595,17 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
     eye_history_.clear();
     eye_predict_sum_mm_ = {};
     eye_predict_frames_ = 0;
+    // Research (D, log only), for the session: the runtime asked where the
+    // views are at each generated frame's display time
+    // (VECTORXR_FRAMEGEN_SYNTH_EYE_PROBE=1).
+    eye_probe_ = ReadResearchSwitch("VECTORXR_FRAMEGEN_SYNTH_EYE_PROBE") == "1";
+    eye_probe_stopped_ = false;
+    eye_probe_slow_calls_ = 0;
+    eye_probe_pending_.clear();
+    eye_probe_reals_.clear();
+    eye_probe_last_.reset();
+    eye_probe_last_time_ = 0;
+    eye_probe_window_ = {};
     // Stage 6, Lead: no measured passes at all (VECTORXR_FRAMEGEN_ENGINE_PREDICATE=0)
     // and interpolating led too (VECTORXR_FRAMEGEN_ENGINE_INTERPOLATE=lead),
     // for the session; the vectors lead once their verdicts let them.
@@ -656,6 +685,13 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
                            : std::string()) +
                       " predictor says (VECTORXR_FRAMEGEN_SYNTH_EYE, research); interpolated frames keep theirs on "
                       "the line between the pair.");
+    }
+    if (logger_ && eye_probe_) {
+        logger_->Info(std::string("Frame Generation asks the runtime where the views are at each generated frame's "
+                                  "display time and logs how far that is from the eye the frame is shown from and "
+                                  "from the real frames' path (eyeLocate* in the summaries; "
+                                  "VECTORXR_FRAMEGEN_SYNTH_EYE_PROBE, research): nothing shown changes.") +
+                      (xr_.locate_views ? "" : " The layer gave it no xrLocateViews: nothing is asked."));
     }
     if (!gpu_) {
         UnavailableLocked(error.empty() ? "no graphics backend" : error);
@@ -5127,6 +5163,215 @@ void FrameGenPresenter::NoteEyeMovementLocked(const XrCompositionLayerProjection
     eye_history_sequence_ = frame.sequence;
 }
 
+void FrameGenPresenter::ProbeEyeLocate(XrSession session, const JitFrame& frame, bool ahead,
+                                       const std::vector<XrCompositionLayerProjectionView>& views, XrTime time) {
+    if (views.empty() || !frame.copy.has_projection || frame.copy.projection_index >= frame.copy.layers.size()) {
+        return;
+    }
+    const XrSpace space = frame.copy.layers[frame.copy.projection_index].projection.space;
+    std::array<XrView, 2> located{};
+    for (XrView& view : located) {
+        view = {XR_TYPE_VIEW};
+    }
+    XrViewState state{XR_TYPE_VIEW_STATE};
+    std::uint32_t count = 0;
+    XrResult result = XR_ERROR_RUNTIME_FAILURE;
+    double call_ms = 0.0;
+    {
+        // As the output images' calls: under submit_mutex_ the space the
+        // frame was written in cannot go (ForgetSpace holds it), and the
+        // frame still kept in it says it has not gone before. No other lock
+        // is held over the call, and its time is the one this thread waited
+        // for last (a runtime that blocks locates past its newest wait, as
+        // PiOpenXR does, answers it at once).
+        std::scoped_lock submit(submit_mutex_);
+        PFN_xrLocateViews locate = nullptr;
+        {
+            std::scoped_lock lock(mutex_);
+            if (!eye_probe_ || eye_probe_stopped_ || !xr_.locate_views) {
+                return;
+            }
+            locate = xr_.locate_views;
+            const bool kept =
+                space != XR_NULL_HANDLE && std::any_of(jit_frames_.begin(), jit_frames_.end(), [&](const JitFrame& candidate) {
+                    return candidate.id == frame.id && candidate.copy.has_projection &&
+                           candidate.copy.projection_index < candidate.copy.layers.size() &&
+                           candidate.copy.layers[candidate.copy.projection_index].projection.space == space;
+                });
+            if (!kept) {
+                ++eye_probe_window_.gone;
+                return;
+            }
+        }
+        XrViewLocateInfo info{XR_TYPE_VIEW_LOCATE_INFO};
+        info.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+        info.displayTime = time;
+        info.space = space;
+        const auto entered = Clock::now();
+        {
+            const PresenterCall call(*this, "xrLocateViews");
+            result = locate(session, &info, &state, static_cast<std::uint32_t>(located.size()), &count, located.data());
+        }
+        call_ms = Milliseconds(Clock::now() - entered);
+    }
+    std::scoped_lock lock(mutex_);
+    EyeProbeWindow& window = eye_probe_window_;
+    ++window.calls;
+    window.call_ms_sum += call_ms;
+    window.call_ms_max = std::max(window.call_ms_max, call_ms);
+    if (call_ms > kEyeProbeSlowMs) {
+        // Made right before a refresh: an answer this late is not one a
+        // frame could use.
+        ++window.slow;
+        if (++eye_probe_slow_calls_ >= kEyeProbeSlowStop && !eye_probe_stopped_) {
+            eye_probe_stopped_ = true;
+            if (logger_) {
+                logger_->Info("Frame Generation's eye probe stops for the session: " +
+                              std::to_string(eye_probe_slow_calls_) + " of the runtime's locates took longer than " +
+                              Number(kEyeProbeSlowMs, 0) + " ms (the last " + Number(call_ms, 1) + " ms).");
+            }
+        }
+        return;
+    }
+    if (XR_FAILED(result) || count == 0) {
+        ++window.failed;
+        return;
+    }
+    if ((state.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT) == 0) {
+        ++window.invalid;
+        return;
+    }
+    if ((state.viewStateFlags & XR_VIEW_STATE_POSITION_TRACKED_BIT) == 0) {
+        ++window.untracked;
+        return;
+    }
+    const XrVector3f& at = located[0].pose.position;
+    const XrVector3f& shown = views[0].pose.position;
+    if (!std::isfinite(at.x) || !std::isfinite(at.y) || !std::isfinite(at.z)) {
+        ++window.invalid;
+        return;
+    }
+    // The previous answer's position exactly, for a later time: a runtime
+    // answering with its current pose whatever time is asked.
+    const std::array<float, 3> position{at.x, at.y, at.z};
+    const bool same = eye_probe_last_ && eye_probe_last_time_ != time && *eye_probe_last_ == position;
+    eye_probe_last_ = position;
+    eye_probe_last_time_ = time;
+    if (same) {
+        ++window.same;
+        return;
+    }
+    EyeProbeFrame probed;
+    probed.time = time;
+    probed.space = space;
+    probed.ahead = ahead;
+    probed.located = {at.x, at.y, at.z};
+    probed.used = {shown.x, shown.y, shown.z};
+    const std::size_t kind = ahead ? 0 : 1;
+    ++window.apart[kind];
+    window.apart_sum_mm[kind] += 1000.0 * Distance(probed.located, probed.used);
+    eye_probe_pending_.push_back(probed);
+    while (eye_probe_pending_.size() > kEyeProbePending) {
+        eye_probe_pending_.pop_front();
+        ++window.unresolved;
+    }
+    ResolveEyeProbeLocked();
+}
+
+void FrameGenPresenter::NoteEyeProbeRealLocked(const XrCompositionLayerProjection& projection, XrTime display_time,
+                                               std::uint64_t sequence) {
+    if (projection.viewCount == 0 || !projection.views) {
+        return;
+    }
+    const XrVector3f& at = projection.views[0].pose.position;
+    EyeProbeReal real;
+    real.time = display_time;
+    real.space = projection.space;
+    real.sequence = sequence;
+    real.position = {at.x, at.y, at.z};
+    if (!eye_probe_reals_.empty()) {
+        const EyeProbeReal& before = eye_probe_reals_.back();
+        if (before.sequence == sequence && before.time == display_time) {
+            return; // this frame again
+        }
+        if (display_time <= before.time) {
+            eye_probe_reals_.clear(); // times out of order: no line through them
+        } else {
+            real.continuous = before.sequence + 1 == sequence && before.space == projection.space;
+        }
+    }
+    eye_probe_reals_.push_back(real);
+    while (eye_probe_reals_.size() > kEyeProbeReals) {
+        eye_probe_reals_.pop_front();
+    }
+    ResolveEyeProbeLocked();
+}
+
+void FrameGenPresenter::ResolveEyeProbeLocked() {
+    if (eye_probe_reals_.empty()) {
+        return;
+    }
+    const XrTime newest = eye_probe_reals_.back().time;
+    const XrDuration pause = PauseLimitLocked();
+    EyeProbeWindow& window = eye_probe_window_;
+    for (auto it = eye_probe_pending_.begin(); it != eye_probe_pending_.end();) {
+        if (it->time > newest) {
+            ++it; // the real frame after it is still to come
+            continue;
+        }
+        // Where the first eye was at the frame's time: on the line between
+        // the real frames either side, each at its own display time (the
+        // later one itself at its own time). Not across a pause, a gap in the
+        // frames, another space or a tracking glitch.
+        std::optional<std::array<double, 3>> truth;
+        for (std::size_t i = 1; i < eye_probe_reals_.size(); ++i) {
+            const EyeProbeReal& a = eye_probe_reals_[i - 1];
+            const EyeProbeReal& b = eye_probe_reals_[i];
+            if (it->time <= a.time || it->time > b.time) {
+                continue;
+            }
+            const double seconds = static_cast<double>(b.time - a.time) / 1e9;
+            if (b.continuous && a.space == it->space && b.space == it->space && b.time - a.time <= pause &&
+                Distance(a.position, b.position) < kMaxEyeSpeed * seconds) {
+                const double f = static_cast<double>(it->time - a.time) / static_cast<double>(b.time - a.time);
+                truth = std::array<double, 3>{a.position[0] + f * (b.position[0] - a.position[0]),
+                                              a.position[1] + f * (b.position[1] - a.position[1]),
+                                              a.position[2] + f * (b.position[2] - a.position[2])};
+            }
+            break;
+        }
+        if (truth) {
+            const std::size_t kind = it->ahead ? 0 : 1;
+            ++window.resolved[kind];
+            window.located_miss_sum_mm[kind] += 1000.0 * Distance(it->located, *truth);
+            window.used_miss_sum_mm[kind] += 1000.0 * Distance(it->used, *truth);
+        } else {
+            ++window.unresolved;
+        }
+        it = eye_probe_pending_.erase(it);
+    }
+}
+
+std::string FrameGenPresenter::EyeProbeTextLocked() const {
+    const EyeProbeWindow& window = eye_probe_window_;
+    const auto pair = [&](std::size_t kind) {
+        return window.resolved[kind] ? EyeProbeMean(window.located_miss_sum_mm[kind], window.resolved[kind], 3) + "/" +
+                                           EyeProbeMean(window.used_miss_sum_mm[kind], window.resolved[kind], 3)
+                                     : std::string("-");
+    };
+    return ", eyeLocateMs=" +
+           (window.calls ? EyeProbeMean(window.call_ms_sum, window.calls, 3) + "/" + Number(window.call_ms_max, 3)
+                         : std::string("-")) +
+           ", eyeLocateFromUsedMm=" + EyeProbeMean(window.apart_sum_mm[0], window.apart[0], 3) + "/" +
+           EyeProbeMean(window.apart_sum_mm[1], window.apart[1], 3) + ", eyeLocateMissMm=" + pair(0) +
+           ", eyeLocateBetweenMissMm=" + pair(1) + ", eyeLocate=calls:" + std::to_string(window.calls) +
+           "/resolved:" + std::to_string(window.resolved[0]) + "+" + std::to_string(window.resolved[1]) +
+           "/unresolved:" + std::to_string(window.unresolved) + "/failed:" + std::to_string(window.failed) +
+           "/invalid:" + std::to_string(window.invalid) + "/untracked:" + std::to_string(window.untracked) +
+           "/same:" + std::to_string(window.same) + "/slow:" + std::to_string(window.slow) +
+           "/gone:" + std::to_string(window.gone) + (eye_probe_stopped_ ? "/stopped" : "");
+}
+
 void FrameGenPresenter::NoteGpuTimingLocked(std::uint64_t submission, const PendingFrame& frame,
                                             const std::optional<FrameGenGpuWindow>& window,
                                             const std::vector<FrameGenAnalysisTiming>& timings,
@@ -5352,6 +5597,9 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
             shifts = EyeShiftsLocked(projection, frame.app_time, analyze ? FrameGenSynthesisMode::kExtrapolate : mode,
                                      mode == FrameGenSynthesisMode::kExtrapolate);
             NoteEyeMovementLocked(projection, frame);
+        }
+        if (eye_probe_) {
+            NoteEyeProbeRealLocked(projection, frame.app_time, frame.sequence);
         }
         notes.sequence = frame.sequence;
         notes.display_time = frame.app_time;
@@ -7881,6 +8129,7 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
             ", eyeMoveMm=" + Number(eye_frames_ ? eye_move_sum_mm_ / eye_frames_ : 0.0, 1) +
             ", eyeMissMm=" + Number(eye_frames_ ? eye_miss_sum_mm_ / eye_frames_ : 0.0, 1) +
             ", eyePredictMissMm=" + EyePredictMissText(eye_predict_sum_mm_, eye_predict_frames_, eye_prediction_.damping) +
+            (eye_probe_ ? EyeProbeTextLocked() : std::string()) +
             ", gpuStartMs=" + MedianAndMax(gpu_start_ms_) + ", gpuDoneMs=" + MedianAndMax(gpu_done_ms_) +
             ", captureDoneMs=" + MedianAndMax(capture_done_ms_) + ", analysisMs=" + MedianAndMax(analysis_ms_) +
             ", measureLagMs=" + MedianAndMax(measure_lag_ms_) +
@@ -7925,6 +8174,7 @@ void FrameGenPresenter::NewSummaryWindowLocked(Clock::time_point now, double sta
     eye_frames_ = 0;
     eye_predict_sum_mm_ = {};
     eye_predict_frames_ = 0;
+    eye_probe_window_ = {};
     gpu_start_ms_.clear();
     gpu_done_ms_.clear();
     capture_done_ms_.clear();
@@ -8935,10 +9185,20 @@ void FrameGenPresenter::CompositorLoop() {
             } else if (!choice.index) {
                 ++totals_.unwritten_source;
             }
+            // Research (VECTORXR_FRAMEGEN_SYNTH_EYE_PROBE): a generated frame
+            // written for this refresh, the runtime is asked where the views
+            // are at its display time (the one this thread just waited for:
+            // never past the runtime's own horizon).
+            const bool probe = eye_probe_ && !eye_probe_stopped_ && xr_.locate_views != nullptr;
+            const XrTime probe_time = slot_time_;
             lock.unlock();
             std::vector<XrCompositionLayerProjectionView> written_views;
             JitWrite write;
             const bool written = source && SynthesizeJit(source, choice, fallback, fallback_choice, written_views, write);
+            if (probe && written && !write.exact) {
+                ProbeEyeLocate(session, *source, choice.mode == FrameGenSynthesisMode::kExtrapolate, written_views,
+                               probe_time);
+            }
             SleepUntil(timer, submit_at);
             std::unique_lock submit_lock(submit_mutex_);
             lock.lock();
