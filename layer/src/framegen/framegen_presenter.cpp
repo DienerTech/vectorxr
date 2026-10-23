@@ -5915,7 +5915,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
             "); the other eye disproves " + Number(moved > 0.0 ? 100.0 * evidence.decoded.fallback / moved : 0.0, 0) +
             "% of it, which is treated as far (cockpit glass written to depth, or depth wrong there)." +
             (depth.reading == FrameGenDepthReading::kUnusable &&
-                     evidence.source_varied < kFrameGenDepthBatchChecks * kFrameGenDepthVariedCells
+                     evidence.source_varied == 0.0
                  ? " The depth is the same all over the eye checked (cleared to one value), which shows nothing of "
                    "the scene."
                  : "") +

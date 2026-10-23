@@ -1461,14 +1461,17 @@ void FrameGenDepthValidator::Add(const FrameGenDepthEvidence& check) {
     // infinitely far, swapped all of it 2 cm away, and the few samples that
     // line up whatever moves them (dark space, plain panels) once made the
     // swapped reading look better than no depth: it was taken up, and every
-    // pixel moved with the head. Only depth that varies (FrameGenDepthEyes'
-    // measure, on average over the batch's checks) is judged.
+    // pixel moved with the head. Exactly uniform depth is never taken up;
+    // sparse foreground over sky still gets judged by its decoded evidence.
+    const bool uniform = evidence_.source_varied == 0.0;
+    // Swapping or scaling needs broader variation (FrameGenDepthEyes'
+    // measure, on average over the batch's checks).
     const bool varied = evidence_.source_varied >= kFrameGenDepthBatchChecks * kFrameGenDepthVariedCells;
     // Swapping needs the reading as decoded now to move content too, and to
     // line the eyes up worse there: swapped, depth that decodes all far (a
     // buffer left clear) is all near, and would win against nothing.
-    const bool swap_beats = swapped_adopts && judged(decoded);
-    if (!varied) {
+    const bool swap_beats = varied && swapped_adopts && judged(decoded);
+    if (uniform) {
         // Never taken up until it varies. Where it reads as infinitely far
         // it decides nothing, in use or not: MSFS 2024 clears its depth in
         // its menus (a session that starts there is still being checked,

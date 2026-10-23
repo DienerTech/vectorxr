@@ -10192,6 +10192,88 @@ void TestDepthValidator() {
         Check(held.Scale() == scale, "depth validator: probes on depth the same all over move nothing (" +
                                          std::to_string(held.Scale()) + ")");
     }
+    {
+        // A 1 m panel over sky, covering 3x5 check cells away from the view
+        // centre. Parallel eyes 6.4 cm apart, horizontal tangents [-2, 1]
+        // and [-1, 2], at 1024x1024 half resolution: the sample grid gives
+        // 10880 binocular samples, 240 moved by 21.85 px, and 15 varied
+        // cells per check. The batch's 720 moved samples exceed 652.8, the
+        // normal evidence threshold, despite only 45 varied cells.
+        FrameGenDepthEvidence sparse = cockpit;
+        sparse.binocular = 10880.0;
+        sparse.decoded = score(240.0, 0.3);
+        // Even a better swapped score cannot swap on sparse evidence.
+        sparse.swapped = score(10880.0, 0.1);
+        sparse.source_varied = 15.0;
+        sparse.other_varied = 20.0;
+        sparse.cockpit = 240.0;
+        // Enough probe samples and a strong trend, but scale still needs
+        // broader variation, independently of decoded adoption.
+        probes(sparse, {1.5, 1.27, 1.0, 0.96, 0.8}, 240.0);
+        FrameGenDepthValidator fresh;
+        batches(fresh, sparse, 20);
+        Check(fresh.Reading() == FrameGenDepthReading::kAsSubmitted && !fresh.Swapped() &&
+                  fresh.Scale() == 1.0f && fresh.ProbeStep() == 0.08f && fresh.Decisions() == 1,
+              "depth validator: sparse valid foreground is adopted as decoded, without swapping or scaling");
+
+        FrameGenDepthValidator after_menu;
+        batches(after_menu, clear, 10);
+        batches(after_menu, sparse, 1);
+        Check(after_menu.Reading() == FrameGenDepthReading::kAsSubmitted && !after_menu.Swapped() &&
+                  after_menu.Decisions() == 1,
+              "depth validator: sparse foreground after a clear menu takes up its depth");
+
+        FrameGenDepthValidator in_use;
+        batches(in_use, cockpit, 1);
+        const auto generation = in_use.Generation();
+        batches(in_use, sparse, 20);
+        Check(in_use.Reading() == FrameGenDepthReading::kAsSubmitted && !in_use.Swapped() &&
+                  in_use.Scale() == 1.0f && in_use.Generation() == generation && in_use.Decisions() == 1,
+              "depth validator: looking out at sparse foreground keeps depth already in use");
+
+        // Sparse depth still has to pass the normal evidence rules: bad
+        // decoded depth is rejected or dropped, never rescued by a swap.
+        FrameGenDepthEvidence wrong = sparse;
+        wrong.decoded = score(240.0, 0.95);
+        wrong.swapped = score(10880.0, 0.3);
+        FrameGenDepthValidator rejected;
+        batches(rejected, wrong, 10);
+        batches(in_use, wrong, 2);
+        Check(rejected.Reading() == FrameGenDepthReading::kUnusable && !rejected.Swapped() &&
+                  in_use.Reading() == FrameGenDepthReading::kUnusable && !in_use.Swapped(),
+              "depth validator: bad sparse depth is rejected or dropped without swapping");
+
+        // The existing swap boundary remains: the same scores can justify
+        // a swap once the depth varies in 16 cells per check.
+        wrong.source_varied = kFrameGenDepthVariedCells;
+        FrameGenDepthValidator broader;
+        batches(broader, wrong, 1);
+        Check(broader.Reading() == FrameGenDepthReading::kReversed && broader.Swapped(),
+              "depth validator: broader variation still permits a well-evidenced swap");
+    }
+    {
+        // SC Evocati's all-zero reversed depth must stay undecided even
+        // when some batches' swapped ratio dips just under kAdopt (0.69).
+        FrameGenDepthEvidence zero = clear;
+        FrameGenDepthValidator validator;
+        for (int i = 0; i < 20; ++i) {
+            zero.swapped = score(kBinocular, i % 2 == 0 ? 0.69 : 0.845);
+            batches(validator, zero, 1);
+        }
+        Check(validator.Reading() == FrameGenDepthReading::kUnknown && !validator.Swapped() &&
+                  validator.Scale() == 1.0f && validator.ProbeStep() == 0.08f && validator.Decisions() == 0,
+              "depth validator: clear reversed depth never adopts a chance swapped reading");
+
+        // A genuinely uniform near buffer is not evidence for adoption
+        // either, even when its decoded and swapped scores look good.
+        zero.decoded = score(kBinocular, 0.3);
+        zero.swapped = score(kBinocular, 0.69);
+        probes(zero, {1.5, 1.27, 1.0, 0.96, 0.8}, 8000.0);
+        FrameGenDepthValidator uniform;
+        batches(uniform, zero, 20);
+        Check(!uniform.Usable() && !uniform.Swapped() && uniform.Scale() == 1.0f && uniform.ProbeStep() == 0.08f,
+              "depth validator: uniform near depth cannot be adopted, swapped or scaled on good scores");
+    }
 }
 
 // OpenComposite (an OpenVR game on OpenXR): IVRCompositor::WaitGetPoses
