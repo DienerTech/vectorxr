@@ -5185,15 +5185,15 @@ int RunProfile(Harness& harness) {
 // FG_REPLAY_JIT=own with FG_REPLAY_MODE=interpolate interpolates just in
 // time (frames k - 1 and k + 1 analyzed alone, then written between them, as
 // a session writes them at each refresh); FG_REPLAY_PREDICT=1 holds just in
-// time too, and interpolating puts the eye on the line between the pair, as
-// the presenter does (EyeShiftsLocked), instead of where the truth was
-// rendered. FG_REPLAY_FRACTIONS=f1,f2,... (or live: the refreshes of the
-// display period in presenter.txt over each frame's interval) writes each
-// real frame just in time at those fractions from consecutive pairs, as a
-// session does (no real frame shows those times: the frame compared with is
-// the newest one, its aligned lines the newest moved to each frame's eye by
-// its own depth, valid for content still in the application's space, the
-// cockpit). FG_REPLAY_HARDWARE=capture takes the flow each frame was
+// time too, and interpolating (just in time or not) puts the eye on the line
+// between the pair, as the presenter does (EyeShiftsLocked), instead of where
+// the truth was rendered. FG_REPLAY_FRACTIONS=f1,f2,... (or live: the
+// refreshes of the display period in presenter.txt within the capture's
+// shortest interval, its steady rate) writes each real frame just in time
+// at those fractions from consecutive pairs, as a session does (no real
+// frame shows those times: the frame compared with is the newest one, its
+// aligned lines the newest moved to each frame's eye by its own depth, valid
+// for content still in the application's space, the cockpit). FG_REPLAY_HARDWARE=capture takes the flow each frame was
 // captured with (frame.txt); unset it is the shader cores', whatever the
 // capture used. FG_REPLAY_TRUTH=cubic resamples the truth (turned and
 // aligned) by Catmull-Rom in linear light instead of bilinearly.
@@ -6988,16 +6988,20 @@ int RunReplay(Harness& harness) {
     }
     const double coarse_tangent = env("VECTORXR_FRAMEGEN_VRS").empty() ? 1.0 : std::atof(env("VECTORXR_FRAMEGEN_VRS").c_str());
     const ReplayFrame& captured = frames[0];
+    // FG_REPLAY_PREDICT moves the eye wherever it applies: interpolating
+    // (on the pair's line), just in time, and extrapolating to the next
+    // frame (not with FG_REPLAY_AHEAD=2).
+    const bool predicted = predict && (interpolate || live_fractions || !jit.empty() || env("FG_REPLAY_AHEAD") != "2");
     std::printf("Replay setup: %s%s, the %s flow%s; eye %s; truth resampled %s%s; captured as %s with the %s flow; "
                 "shaded per 2x2 in tiles of %u px from tangent %.2f\n",
                 interpolate ? "Interpolate" : "Extrapolate", jit.empty() ? "" : " just in time",
                 hardware_as_captured ? "capture's" : hardware ? "hardware's" : "shader cores'",
                 hardware_as_captured || hardware ? "" : " (FG_REPLAY_HARDWARE=capture: the capture's)",
-                no_shift                      ? "unmoved"
-                : live_fractions && interpolate ? "on the line between the pair, as the presenter moves it"
-                : predict                     ? "predicted as the presenter moves it"
-                : live_fractions              ? "moving toward where the next frame was rendered"
-                                              : "where the truth was rendered",
+                no_shift                                    ? "unmoved"
+                : interpolate && (live_fractions || predict) ? "on the line between the pair, as the presenter moves it"
+                : predicted                                  ? "predicted as the presenter moves it"
+                : live_fractions                             ? "moving toward where the next frame was rendered"
+                                                             : "where the truth was rendered",
                 cubic_truth ? "by Catmull-Rom" : "bilinearly",
                 live_fractions ? "; live fractions, compared with the newest frame (aligned: moved by its own depth)" : "",
                 captured.tuning.mode == FrameGenSynthesisMode::kInterpolate ? "Interpolate" : "Extrapolate",
@@ -7744,13 +7748,16 @@ int RunReplay(Harness& harness) {
             }
             if (interpolate && measure) {
                 // Frame k from the frames either side of it: k - 1, then k + 1
-                // as the next real frame, at k's share of the two intervals.
+                // as the next real frame, at k's share of the two intervals;
+                // seen from where frame k was rendered, or (FG_REPLAY_PREDICT=1)
+                // from the line between the pair, as the presenter moves the
+                // eye back toward the previous frame (EyeShiftsLocked).
                 if (k == 0 || !has_next) continue;
                 const float ratio = std::clamp(frames[k + 1].tuning.interval_ratio, 0.25f, 4.0f);
                 const float fraction = 1.0f / (1.0f + ratio);
                 gpu->ResetHistory();
                 execute(k - 1, std::nullopt, FrameGenSynthesisMode::kInterpolate, fraction, {}, result);
-                const auto shifts = eye_shifts(k + 1, k, 1.0f - fraction);
+                const auto shifts = predict ? eye_shifts(k + 1, k - 1, 1.0f) : eye_shifts(k + 1, k, 1.0f - fraction);
                 execute(k + 1, k - 1, FrameGenSynthesisMode::kInterpolate, fraction, shifts, result);
                 evaluate(k, k + 1, k, frames[k + 1].views[0].color, result, fraction, shifts, 1.0f - fraction,
                          {k - 1, k + 1});
