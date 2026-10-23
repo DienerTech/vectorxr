@@ -46,6 +46,7 @@
 #include "depthxr/turbo_prediction_history.h"
 #include "depthxr/turbo_trace.h"
 #include "depthxr/settings_resolver.h"
+#include "depthxr/handshake_census.h"
 #include "depthxr/spacewarp_probe.h"
 #include "depthxr/swapchain_state.h"
 #include "depthxr/thread_census.h"
@@ -159,6 +160,9 @@ class OpenXrLayer {
         bool runtime_lists_frame_synthesis{false};
         bool fb_space_warp_owned{false};
         bool frame_synthesis_owned{false};
+        // The handshake census (handshake_census.h), with the probe's variable
+        // set: its xrCreateInstance lines.
+        std::vector<std::string> handshake_census;
     };
 
     // True when VectorXR quadviews should run in Varjo compatible mode, i.e. core
@@ -259,6 +263,40 @@ class OpenXrLayer {
                          uint32_t view_capacity_input,
                          uint32_t* view_count_output,
                          XrView* views);
+
+    // The handshake census (handshake_census.h), active while the instance
+    // was created with VECTORXR_SPACEWARP_PROBE set; log-only. The layer's
+    // entry points (layer_entry.cpp) note what the application asks and
+    // gets: CensusCall at each call (the first one logs the names looked up
+    // before it), CensusNote a call's detail (logged the first time it is
+    // seen for `function`; with `always`, the first 16 calls), and
+    // CensusProcAddr each xrGetInstanceProcAddr. The functions only the
+    // census hooks (xrGetInstanceProperties, xrGetSystem and the
+    // XR_FB_display_refresh_rate ones) call the runtime's through
+    // CensusNext.
+    bool HandshakeCensusActive() const { return handshake_census_.Active(); }
+    void CensusCall();
+    void CensusNote(std::string_view function, const std::string& detail, bool always = false);
+    void CensusProcAddr(std::string_view name, XrResult result, bool resolved);
+    void CensusFlushProcAddrs(std::string_view when);
+    // The formats xrEnumerateSwapchainFormats gave the application last.
+    void CensusSwapchainFormats(const int64_t* formats, uint32_t count);
+    // The instance's swapchain formats are DXGI's (a Direct3D application).
+    bool CensusDxgiFormats() const;
+    enum class CensusFunction : std::uint8_t {
+        kGetInstanceProperties,
+        kGetSystem,
+        kEnumerateDisplayRefreshRates,
+        kGetDisplayRefreshRate,
+        kRequestDisplayRefreshRate,
+        kCount
+    };
+    PFN_xrVoidFunction CensusNext(CensusFunction function) const {
+        return census_next_[static_cast<std::size_t>(function)].load(std::memory_order_acquire);
+    }
+    void SetCensusNext(CensusFunction function, PFN_xrVoidFunction next) {
+        census_next_[static_cast<std::size_t>(function)].store(next, std::memory_order_release);
+    }
 
   private:
 #if defined(DEPTHXR_TESTING)
@@ -642,6 +680,14 @@ class OpenXrLayer {
     void NoteSpaceWarpSwapchainLocked(XrSwapchain swapchain, const SwapchainInfo& info);
     std::string DescribeSpaceWarpSwapchainLocked(XrSwapchain swapchain) const;
     void LogSpaceWarpProbeSummaryLocked(std::string_view reason);
+    // The handshake census on a frame the probe handled (`frame` as the
+    // application submitted it): the swapchains the session's frames used by
+    // role (logged when one is new), with their calls as of now.
+    void CensusFrameLocked(const XrFrameEndInfo* frame, const SpaceWarpFrame& storage);
+    // The census's swapchains' calls as of now (a destroyed one's as of its end).
+    void CensusUpdateSwapchainsLocked();
+    // The census's motion vector and space-warp depth swapchains and their calls.
+    void LogCensusSwapchainCallsLocked(std::string_view reason);
     // xrEnumerateViewConfigurationViews before the probe's answer.
     XrResult ForwardEnumerateViewConfigurationViews(XrInstance instance,
                                                     XrSystemId system_id,
@@ -1814,6 +1860,15 @@ class OpenXrLayer {
     bool spacewarp_first_frame_logged_{false};
     std::chrono::steady_clock::time_point spacewarp_last_summary_{};
     std::string spacewarp_last_view_;
+    // The handshake census (handshake_census.h): its own lock; the runtime's
+    // functions only its hooks call; and, under mutex_, the swapchain formats
+    // the application was given last, and the swapchains the probe's frames
+    // used by role, with the application's calls on them as of the last frame.
+    HandshakeCensus handshake_census_;
+    std::array<std::atomic<PFN_xrVoidFunction>, static_cast<std::size_t>(CensusFunction::kCount)> census_next_{};
+    std::vector<int64_t> census_swapchain_formats_;
+    std::vector<CensusSwapchain> census_swapchains_;
+    std::vector<std::pair<const char*, XrSwapchain>> census_roles_; // census_swapchains_' roles, as last seen
     uint32_t cached_quadviews_stereo_recommended_width_{0};
     uint32_t cached_quadviews_stereo_recommended_height_{0};
     uint32_t cached_quadviews_stereo_max_width_{0};

@@ -217,6 +217,8 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         # Nor is the space-warp probe's frame handling, which needs the
         # OpenXR types the core library lacks.
         src/spacewarp_probe.cpp
+        # ...and its handshake census (handshake_census.h).
+        src/handshake_census.cpp
         # ...and the engine motion record and census made from it.
         src/engine_motion.cpp
         "${_framegen_out}/framegen_shaders.cpp"

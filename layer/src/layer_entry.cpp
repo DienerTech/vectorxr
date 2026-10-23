@@ -41,10 +41,52 @@ XrResult XRAPI_CALL DepthxrDestroyInstance(XrInstance instance) {
     return OpenXrLayer::Instance().DestroyInstance(instance);
 }
 
+// The handshake census (handshake_census.h): what the application asked, as
+// the layer's entry points saw it, and what it got back.
+bool ChainHas(const void* next, XrStructureType type) {
+    for (auto* node = static_cast<const XrBaseInStructure*>(next); node; node = node->next) {
+        if (node->type == type) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// "capacity=N count=M result=R": a two-call idiom's call.
+std::string CensusCounts(uint32_t capacity, const uint32_t* count, XrResult result) {
+    return "capacity=" + std::to_string(capacity) + " count=" + (count ? std::to_string(*count) : std::string("null")) +
+           " result=" + CensusResult(result);
+}
+
+// What a two-call idiom's populating call filled in, named by `name`.
+template <typename T, typename Name>
+std::string CensusFilled(uint32_t capacity, const uint32_t* count, const T* values, XrResult result, Name name) {
+    std::vector<std::string> names;
+    if (XR_SUCCEEDED(result) && values && count && capacity > 0) {
+        for (uint32_t i = 0; i < std::min(capacity, *count); ++i) {
+            names.push_back(name(values[i]));
+        }
+    }
+    return CensusList(names);
+}
+
 XrResult XRAPI_CALL DepthxrCreateSession(XrInstance instance,
                                          const XrSessionCreateInfo* create_info,
                                          XrSession* session) {
-    return OpenXrLayer::Instance().CreateSession(instance, create_info, session);
+    OpenXrLayer& layer = OpenXrLayer::Instance();
+    if (!layer.HandshakeCensusActive()) {
+        return layer.CreateSession(instance, create_info, session);
+    }
+    layer.CensusCall();
+    const XrResult result = layer.CreateSession(instance, create_info, session);
+    layer.CensusNote("xrCreateSession",
+                     (create_info ? "systemId=" + std::to_string(create_info->systemId) +
+                                        " createFlags=" + std::to_string(create_info->createFlags) +
+                                        " chain=" + CensusChain(create_info->next)
+                                  : std::string("createInfo=null")) +
+                         " result=" + CensusResult(result));
+    layer.CensusFlushProcAddrs("by xrCreateSession");
+    return result;
 }
 
 XrResult XRAPI_CALL DepthxrDestroySession(XrSession session) {
@@ -52,7 +94,20 @@ XrResult XRAPI_CALL DepthxrDestroySession(XrSession session) {
 }
 
 XrResult XRAPI_CALL DepthxrBeginSession(XrSession session, const XrSessionBeginInfo* begin_info) {
-    return OpenXrLayer::Instance().BeginSession(session, begin_info);
+    OpenXrLayer& layer = OpenXrLayer::Instance();
+    if (!layer.HandshakeCensusActive()) {
+        return layer.BeginSession(session, begin_info);
+    }
+    layer.CensusCall();
+    const XrResult result = layer.BeginSession(session, begin_info);
+    layer.CensusNote("xrBeginSession",
+                     (begin_info ? "primaryViewConfiguration=" +
+                                       CensusViewConfigurationType(begin_info->primaryViewConfigurationType) +
+                                       " chain=" + CensusChain(begin_info->next)
+                                 : std::string("beginInfo=null")) +
+                         " result=" + CensusResult(result));
+    layer.CensusFlushProcAddrs("by xrBeginSession");
+    return result;
 }
 
 XrResult XRAPI_CALL DepthxrEndSession(XrSession session) {
@@ -85,7 +140,16 @@ XrResult XRAPI_CALL DepthxrEndFrame(XrSession session, const XrFrameEndInfo* fra
 XrResult XRAPI_CALL DepthxrGetSystemProperties(XrInstance instance,
                                                XrSystemId system_id,
                                                XrSystemProperties* properties) {
-    return OpenXrLayer::Instance().GetSystemProperties(instance, system_id, properties);
+    OpenXrLayer& layer = OpenXrLayer::Instance();
+    if (!layer.HandshakeCensusActive()) {
+        return layer.GetSystemProperties(instance, system_id, properties);
+    }
+    layer.CensusCall();
+    const XrResult result = layer.GetSystemProperties(instance, system_id, properties);
+    // Every call that chains XrSystemSpaceWarpPropertiesFB (the first 16).
+    layer.CensusNote("xrGetSystemProperties", DescribeSystemProperties(system_id, properties, result),
+                     properties && ChainHas(properties->next, XR_TYPE_SYSTEM_SPACE_WARP_PROPERTIES_FB));
+    return result;
 }
 
 XrResult XRAPI_CALL DepthxrEnumerateEnvironmentBlendModes(
@@ -95,12 +159,26 @@ XrResult XRAPI_CALL DepthxrEnumerateEnvironmentBlendModes(
     uint32_t environment_blend_mode_capacity_input,
     uint32_t* environment_blend_mode_count_output,
     XrEnvironmentBlendMode* environment_blend_modes) {
-    return OpenXrLayer::Instance().EnumerateEnvironmentBlendModes(instance,
-                                                                 system_id,
-                                                                 view_configuration_type,
-                                                                 environment_blend_mode_capacity_input,
-                                                                 environment_blend_mode_count_output,
-                                                                 environment_blend_modes);
+    OpenXrLayer& layer = OpenXrLayer::Instance();
+    if (layer.HandshakeCensusActive()) {
+        layer.CensusCall();
+    }
+    const XrResult result = layer.EnumerateEnvironmentBlendModes(instance,
+                                                                system_id,
+                                                                view_configuration_type,
+                                                                environment_blend_mode_capacity_input,
+                                                                environment_blend_mode_count_output,
+                                                                environment_blend_modes);
+    if (layer.HandshakeCensusActive()) {
+        layer.CensusNote("xrEnumerateEnvironmentBlendModes",
+                         "viewConfiguration=" + CensusViewConfigurationType(view_configuration_type) + " " +
+                             CensusCounts(environment_blend_mode_capacity_input, environment_blend_mode_count_output,
+                                          result) +
+                             " modes=" +
+                             CensusFilled(environment_blend_mode_capacity_input, environment_blend_mode_count_output,
+                                          environment_blend_modes, result, CensusBlendMode));
+    }
+    return result;
 }
 
 XrResult XRAPI_CALL DepthxrEnumerateViewConfigurations(XrInstance instance,
@@ -108,11 +186,24 @@ XrResult XRAPI_CALL DepthxrEnumerateViewConfigurations(XrInstance instance,
                                                        uint32_t view_configuration_type_capacity_input,
                                                        uint32_t* view_configuration_type_count_output,
                                                        XrViewConfigurationType* view_configuration_types) {
-    return OpenXrLayer::Instance().EnumerateViewConfigurations(instance,
-                                                              system_id,
-                                                              view_configuration_type_capacity_input,
-                                                              view_configuration_type_count_output,
-                                                              view_configuration_types);
+    OpenXrLayer& layer = OpenXrLayer::Instance();
+    if (layer.HandshakeCensusActive()) {
+        layer.CensusCall();
+    }
+    const XrResult result = layer.EnumerateViewConfigurations(instance,
+                                                             system_id,
+                                                             view_configuration_type_capacity_input,
+                                                             view_configuration_type_count_output,
+                                                             view_configuration_types);
+    if (layer.HandshakeCensusActive()) {
+        layer.CensusNote("xrEnumerateViewConfigurations",
+                         CensusCounts(view_configuration_type_capacity_input, view_configuration_type_count_output,
+                                      result) +
+                             " types=" +
+                             CensusFilled(view_configuration_type_capacity_input, view_configuration_type_count_output,
+                                          view_configuration_types, result, CensusViewConfigurationType));
+    }
+    return result;
 }
 
 XrResult XRAPI_CALL DepthxrGetViewConfigurationProperties(
@@ -120,8 +211,23 @@ XrResult XRAPI_CALL DepthxrGetViewConfigurationProperties(
     XrSystemId system_id,
     XrViewConfigurationType view_configuration_type,
     XrViewConfigurationProperties* configuration_properties) {
-    return OpenXrLayer::Instance().GetViewConfigurationProperties(
-        instance, system_id, view_configuration_type, configuration_properties);
+    OpenXrLayer& layer = OpenXrLayer::Instance();
+    if (!layer.HandshakeCensusActive()) {
+        return layer.GetViewConfigurationProperties(instance, system_id, view_configuration_type,
+                                                    configuration_properties);
+    }
+    layer.CensusCall();
+    const XrResult result =
+        layer.GetViewConfigurationProperties(instance, system_id, view_configuration_type, configuration_properties);
+    std::string detail =
+        "viewConfiguration=" + CensusViewConfigurationType(view_configuration_type) + " result=" + CensusResult(result);
+    if (XR_SUCCEEDED(result) && configuration_properties) {
+        detail += " answered=" + CensusViewConfigurationType(configuration_properties->viewConfigurationType) +
+                  " fovMutable=" + std::to_string(configuration_properties->fovMutable) +
+                  " chain=" + CensusChain(configuration_properties->next);
+    }
+    layer.CensusNote("xrGetViewConfigurationProperties", detail);
+    return result;
 }
 
 XrResult XRAPI_CALL DepthxrEnumerateViewConfigurationViews(XrInstance instance,
@@ -130,8 +236,18 @@ XrResult XRAPI_CALL DepthxrEnumerateViewConfigurationViews(XrInstance instance,
                                                           uint32_t view_capacity_input,
                                                           uint32_t* view_count_output,
                                                           XrViewConfigurationView* views) {
-    return OpenXrLayer::Instance().EnumerateViewConfigurationViews(
-        instance, system_id, view_configuration_type, view_capacity_input, view_count_output, views);
+    OpenXrLayer& layer = OpenXrLayer::Instance();
+    if (!layer.HandshakeCensusActive()) {
+        return layer.EnumerateViewConfigurationViews(instance, system_id, view_configuration_type,
+                                                     view_capacity_input, view_count_output, views);
+    }
+    layer.CensusCall();
+    const XrResult result = layer.EnumerateViewConfigurationViews(instance, system_id, view_configuration_type,
+                                                                  view_capacity_input, view_count_output, views);
+    layer.CensusNote("xrEnumerateViewConfigurationViews",
+                     DescribeViewConfigurationViews(view_configuration_type, view_capacity_input, view_count_output,
+                                                    views, result));
+    return result;
 }
 
 XrResult XRAPI_CALL DepthxrGetVisibilityMaskKHR(XrSession session,
@@ -147,8 +263,22 @@ XrResult XRAPI_CALL DepthxrEnumerateSwapchainFormats(XrSession session,
                                                      uint32_t format_capacity_input,
                                                      uint32_t* format_count_output,
                                                      int64_t* formats) {
-    return OpenXrLayer::Instance().EnumerateSwapchainFormats(
-        session, format_capacity_input, format_count_output, formats);
+    OpenXrLayer& layer = OpenXrLayer::Instance();
+    if (!layer.HandshakeCensusActive()) {
+        return layer.EnumerateSwapchainFormats(session, format_capacity_input, format_count_output, formats);
+    }
+    layer.CensusCall();
+    const XrResult result =
+        layer.EnumerateSwapchainFormats(session, format_capacity_input, format_count_output, formats);
+    if (XR_SUCCEEDED(result) && formats && format_count_output && format_capacity_input > 0) {
+        layer.CensusSwapchainFormats(formats, std::min(format_capacity_input, *format_count_output));
+    }
+    const bool dxgi = layer.CensusDxgiFormats();
+    layer.CensusNote("xrEnumerateSwapchainFormats",
+                     CensusCounts(format_capacity_input, format_count_output, result) + " formats=" +
+                         CensusFilled(format_capacity_input, format_count_output, formats, result,
+                                      [dxgi](int64_t format) { return CensusSwapchainFormat(format, dxgi); }));
+    return result;
 }
 
 XrResult XRAPI_CALL DepthxrCreateSwapchain(XrSession session,
@@ -189,8 +319,16 @@ XrResult XRAPI_CALL DepthxrEnumerateReferenceSpaces(XrSession session,
                                                    uint32_t space_capacity_input,
                                                    uint32_t* space_count_output,
                                                    XrReferenceSpaceType* spaces) {
-    return OpenXrLayer::Instance().EnumerateReferenceSpaces(
-        session, space_capacity_input, space_count_output, spaces);
+    OpenXrLayer& layer = OpenXrLayer::Instance();
+    if (!layer.HandshakeCensusActive()) {
+        return layer.EnumerateReferenceSpaces(session, space_capacity_input, space_count_output, spaces);
+    }
+    layer.CensusCall();
+    const XrResult result = layer.EnumerateReferenceSpaces(session, space_capacity_input, space_count_output, spaces);
+    layer.CensusNote("xrEnumerateReferenceSpaces",
+                     CensusCounts(space_capacity_input, space_count_output, result) + " spaces=" +
+                         CensusFilled(space_capacity_input, space_count_output, spaces, result, CensusReferenceSpace));
+    return result;
 }
 
 XrResult XRAPI_CALL DepthxrGetReferenceSpaceBoundsRect(XrSession session,
@@ -202,7 +340,137 @@ XrResult XRAPI_CALL DepthxrGetReferenceSpaceBoundsRect(XrSession session,
 XrResult XRAPI_CALL DepthxrCreateReferenceSpace(XrSession session,
                                                 const XrReferenceSpaceCreateInfo* create_info,
                                                 XrSpace* space) {
-    return OpenXrLayer::Instance().CreateReferenceSpace(session, create_info, space);
+    OpenXrLayer& layer = OpenXrLayer::Instance();
+    if (!layer.HandshakeCensusActive()) {
+        return layer.CreateReferenceSpace(session, create_info, space);
+    }
+    layer.CensusCall();
+    const XrResult result = layer.CreateReferenceSpace(session, create_info, space);
+    layer.CensusNote("xrCreateReferenceSpace",
+                     (create_info ? "type=" + CensusReferenceSpace(create_info->referenceSpaceType) +
+                                        " chain=" + CensusChain(create_info->next)
+                                  : std::string("createInfo=null")) +
+                         " result=" + CensusResult(result));
+    return result;
+}
+
+// The functions only the census hooks: the runtime's (CensusNext), with
+// what the application asked and got logged.
+template <typename F>
+F CensusNextFunction(OpenXrLayer::CensusFunction function) {
+    return reinterpret_cast<F>(OpenXrLayer::Instance().CensusNext(function));
+}
+
+XrResult XRAPI_CALL CensusGetInstanceProperties(XrInstance instance, XrInstanceProperties* properties) {
+    const auto next =
+        CensusNextFunction<PFN_xrGetInstanceProperties>(OpenXrLayer::CensusFunction::kGetInstanceProperties);
+    if (!next) {
+        return XR_ERROR_FUNCTION_UNSUPPORTED;
+    }
+    OpenXrLayer& layer = OpenXrLayer::Instance();
+    layer.CensusCall();
+    const XrResult result = next(instance, properties);
+    std::string detail = "result=" + CensusResult(result);
+    if (properties) {
+        detail += " chain=" + CensusChain(properties->next);
+        if (XR_SUCCEEDED(result)) {
+            detail += " runtimeName=" + CensusQuoted(properties->runtimeName, XR_MAX_RUNTIME_NAME_SIZE) +
+                      " runtimeVersion=" + CensusVersion(properties->runtimeVersion);
+        }
+    }
+    layer.CensusNote("xrGetInstanceProperties", detail);
+    return result;
+}
+
+XrResult XRAPI_CALL CensusGetSystem(XrInstance instance, const XrSystemGetInfo* get_info, XrSystemId* system_id) {
+    const auto next = CensusNextFunction<PFN_xrGetSystem>(OpenXrLayer::CensusFunction::kGetSystem);
+    if (!next) {
+        return XR_ERROR_FUNCTION_UNSUPPORTED;
+    }
+    OpenXrLayer& layer = OpenXrLayer::Instance();
+    layer.CensusCall();
+    const XrResult result = next(instance, get_info, system_id);
+    layer.CensusNote("xrGetSystem",
+                     (get_info ? "formFactor=" + CensusFormFactor(get_info->formFactor) +
+                                     " chain=" + CensusChain(get_info->next)
+                               : std::string("getInfo=null")) +
+                         " result=" + CensusResult(result) +
+                         (XR_SUCCEEDED(result) && system_id ? " systemId=" + std::to_string(*system_id) : ""));
+    return result;
+}
+
+XrResult XRAPI_CALL CensusEnumerateDisplayRefreshRates(XrSession session, uint32_t capacity, uint32_t* count,
+                                                       float* rates) {
+    const auto next = CensusNextFunction<PFN_xrEnumerateDisplayRefreshRatesFB>(
+        OpenXrLayer::CensusFunction::kEnumerateDisplayRefreshRates);
+    if (!next) {
+        return XR_ERROR_FUNCTION_UNSUPPORTED;
+    }
+    OpenXrLayer& layer = OpenXrLayer::Instance();
+    layer.CensusCall();
+    const XrResult result = next(session, capacity, count, rates);
+    layer.CensusNote("xrEnumerateDisplayRefreshRatesFB",
+                     CensusCounts(capacity, count, result) + " rates=" +
+                         CensusFilled(capacity, count, rates, result,
+                                      [](float rate) { return std::to_string(rate); }));
+    return result;
+}
+
+XrResult XRAPI_CALL CensusGetDisplayRefreshRate(XrSession session, float* rate) {
+    const auto next =
+        CensusNextFunction<PFN_xrGetDisplayRefreshRateFB>(OpenXrLayer::CensusFunction::kGetDisplayRefreshRate);
+    if (!next) {
+        return XR_ERROR_FUNCTION_UNSUPPORTED;
+    }
+    OpenXrLayer& layer = OpenXrLayer::Instance();
+    layer.CensusCall();
+    const XrResult result = next(session, rate);
+    layer.CensusNote("xrGetDisplayRefreshRateFB",
+                     "result=" + CensusResult(result) +
+                         (XR_SUCCEEDED(result) && rate ? " rate=" + std::to_string(*rate) : ""));
+    return result;
+}
+
+XrResult XRAPI_CALL CensusRequestDisplayRefreshRate(XrSession session, float rate) {
+    const auto next = CensusNextFunction<PFN_xrRequestDisplayRefreshRateFB>(
+        OpenXrLayer::CensusFunction::kRequestDisplayRefreshRate);
+    if (!next) {
+        return XR_ERROR_FUNCTION_UNSUPPORTED;
+    }
+    OpenXrLayer& layer = OpenXrLayer::Instance();
+    layer.CensusCall();
+    const XrResult result = next(session, rate);
+    layer.CensusNote("xrRequestDisplayRefreshRateFB",
+                     "rate=" + std::to_string(rate) + " result=" + CensusResult(result));
+    return result;
+}
+
+// The census's own hook for `name`, if it has one, and its slot.
+PFN_xrVoidFunction CensusHook(std::string_view name, OpenXrLayer::CensusFunction& function) {
+    using Function = OpenXrLayer::CensusFunction;
+    struct Hook {
+        std::string_view name;
+        Function function;
+        PFN_xrVoidFunction hook;
+    };
+    static const Hook kHooks[] = {
+        {"xrGetInstanceProperties", Function::kGetInstanceProperties,
+         reinterpret_cast<PFN_xrVoidFunction>(CensusGetInstanceProperties)},
+        {"xrGetSystem", Function::kGetSystem, reinterpret_cast<PFN_xrVoidFunction>(CensusGetSystem)},
+        {"xrEnumerateDisplayRefreshRatesFB", Function::kEnumerateDisplayRefreshRates,
+         reinterpret_cast<PFN_xrVoidFunction>(CensusEnumerateDisplayRefreshRates)},
+        {"xrGetDisplayRefreshRateFB", Function::kGetDisplayRefreshRate,
+         reinterpret_cast<PFN_xrVoidFunction>(CensusGetDisplayRefreshRate)},
+        {"xrRequestDisplayRefreshRateFB", Function::kRequestDisplayRefreshRate,
+         reinterpret_cast<PFN_xrVoidFunction>(CensusRequestDisplayRefreshRate)},
+    };
+    for (const Hook& hook : kHooks) {
+        if (hook.name == name) {
+            function = hook.function;
+            return hook.hook;
+        }
+    }
+    return nullptr;
 }
 
 XrResult XRAPI_CALL DepthxrDestroySpace(XrSpace space) {
@@ -475,7 +743,8 @@ bool ActiveOpenXrRuntimeIsVarjo(std::string& out_path) {
 
 extern "C" {
 
-XrResult XRAPI_CALL xrGetInstanceProcAddr(XrInstance instance, const char* name, PFN_xrVoidFunction* function) {
+static XrResult XRAPI_CALL LayerGetInstanceProcAddr(XrInstance instance, const char* name,
+                                                    PFN_xrVoidFunction* function) {
     if (!function || !name) {
         return XR_ERROR_VALIDATION_FAILURE;
     }
@@ -632,7 +901,26 @@ XrResult XRAPI_CALL xrGetInstanceProcAddr(XrInstance instance, const char* name,
         return XR_SUCCESS;
     }
 
-    return depthxr::OpenXrLayer::Instance().GetInstanceProcAddr(instance, name, function);
+    depthxr::OpenXrLayer& layer = depthxr::OpenXrLayer::Instance();
+    const XrResult result = layer.GetInstanceProcAddr(instance, name, function);
+    // The handshake census's own hooks, on functions the runtime has.
+    if (layer.HandshakeCensusActive() && XR_SUCCEEDED(result) && *function) {
+        depthxr::OpenXrLayer::CensusFunction slot{};
+        if (const PFN_xrVoidFunction hook = depthxr::CensusHook(requested, slot)) {
+            layer.SetCensusNext(slot, *function);
+            *function = hook;
+        }
+    }
+    return result;
+}
+
+XrResult XRAPI_CALL xrGetInstanceProcAddr(XrInstance instance, const char* name, PFN_xrVoidFunction* function) {
+    const XrResult result = LayerGetInstanceProcAddr(instance, name, function);
+    depthxr::OpenXrLayer& layer = depthxr::OpenXrLayer::Instance();
+    if (layer.HandshakeCensusActive() && name) {
+        layer.CensusProcAddr(name, result, XR_SUCCEEDED(result) && function && *function);
+    }
+    return result;
 }
 
 XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instance_create_info,
@@ -744,10 +1032,15 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
         ApplicationRequestedExtension(instance_create_info, XR_FB_SPACE_WARP_EXTENSION_NAME);
     diagnostics.app_requested_frame_synthesis =
         ApplicationRequestedExtension(instance_create_info, XR_EXT_FRAME_SYNTHESIS_EXTENSION_NAME);
+    // The probe's look at the runtime's list, which its handshake census
+    // (handshake_census.h) logs too: taken whenever the variable is set.
+    RuntimeExtensionScan probe_scan;
+    if (!diagnostics.spacewarp_probe_value.empty()) {
+        probe_scan = extension_scan.ran ? extension_scan : ScanRuntimeInstanceExtensions(next_info);
+    }
     if (!diagnostics.spacewarp_probe_value.empty() &&
         (diagnostics.app_requested_fb_space_warp || diagnostics.app_requested_frame_synthesis)) {
-        const RuntimeExtensionScan spacewarp_scan =
-            extension_scan.ran ? extension_scan : ScanRuntimeInstanceExtensions(next_info);
+        const RuntimeExtensionScan& spacewarp_scan = probe_scan;
         diagnostics.spacewarp_scan_complete = spacewarp_scan.complete;
         diagnostics.runtime_lists_fb_space_warp = spacewarp_scan.Contains(XR_FB_SPACE_WARP_EXTENSION_NAME);
         diagnostics.runtime_lists_frame_synthesis = spacewarp_scan.Contains(XR_EXT_FRAME_SYNTHESIS_EXTENSION_NAME);
@@ -945,6 +1238,24 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
 
     diagnostics.turbo_clock_enabled =
         ExtensionListContains(*successful_downstream_extensions, turbo_clock_extension);
+    if (!diagnostics.spacewarp_probe_value.empty()) {
+        std::vector<std::string> requested;
+        for (uint32_t i = 0; instance_create_info->enabledExtensionNames && i < instance_create_info->enabledExtensionCount;
+             ++i) {
+            if (instance_create_info->enabledExtensionNames[i]) {
+                requested.emplace_back(instance_create_info->enabledExtensionNames[i]);
+            }
+        }
+        std::vector<std::string> sent(successful_downstream_extensions->begin(),
+                                      successful_downstream_extensions->end());
+        diagnostics.handshake_census.push_back("xrCreateInstance: " + DescribeInstanceRequest(*instance_create_info) +
+                                               " layersBelow=[" + diagnostics.layers_below +
+                                               "] createResult=" + CensusResult(result) + " (first " +
+                                               CensusResult(diagnostics.first_create_result) + ")");
+        diagnostics.handshake_census.push_back(
+            "xrCreateInstance extensions: " +
+            DescribeInstanceExtensions(requested, probe_scan.complete, probe_scan.detail, probe_scan.names, sent));
+    }
     // The runtime's instance exists from here. An exception must never leave
     // the layer (the loader turns it into a failure, or the game ends), and a
     // failure must not keep the instance: the runtime's is destroyed and the

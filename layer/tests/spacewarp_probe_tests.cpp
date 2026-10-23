@@ -490,6 +490,21 @@ XrResult XRAPI_CALL RtEnumerateViewConfigurationViews(XrInstance, XrSystemId, Xr
     return XR_SUCCESS;
 }
 
+XrResult XRAPI_CALL RtEnumerateSwapchainFormats(XrSession, std::uint32_t capacity, std::uint32_t* count,
+                                                std::int64_t* formats) {
+    constexpr std::int64_t kFormats[] = {29, 28, 10, 40, 20};
+    *count = 5;
+    if (capacity == 0) return XR_SUCCESS;
+    if (capacity < 5) return XR_ERROR_SIZE_INSUFFICIENT;
+    std::copy(std::begin(kFormats), std::end(kFormats), formats);
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtGetDisplayRefreshRate(XrSession, float* rate) {
+    *rate = 90.0f;
+    return XR_SUCCESS;
+}
+
 XrResult XRAPI_CALL RtCreateSwapchain(XrSession, const XrSwapchainCreateInfo*, XrSwapchain* swapchain) {
     *swapchain = Handle<XrSwapchain>(++g_runtime.handles);
     return XR_SUCCESS;
@@ -529,6 +544,10 @@ XrResult XRAPI_CALL RtGetInstanceProcAddr(XrInstance instance, const char* name,
         *function = Function(RtCreateSwapchain);
     } else if (requested == "xrEndFrame") {
         *function = Function(RtEndFrame);
+    } else if (requested == "xrEnumerateSwapchainFormats") {
+        *function = Function(RtEnumerateSwapchainFormats);
+    } else if (requested == "xrGetDisplayRefreshRateFB") {
+        *function = Function(RtGetDisplayRefreshRate);
     } else if (requested.starts_with("xr") && !requested.ends_with("KHR") && !requested.ends_with("EXT") &&
                !requested.ends_with("VARJO") && !requested.ends_with("FB")) {
         *function = Function(RtSucceed);
@@ -948,6 +967,172 @@ void TestThroughTheLayer() {
     }
 }
 
+std::size_t Occurrences(const std::string& text, const std::string& needle) {
+    std::size_t count = 0;
+    for (std::size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + needle.size())) {
+        ++count;
+    }
+    return count;
+}
+
+// The handshake census (handshake_census.h): with VECTORXR_SPACEWARP_PROBE
+// set, what the application asks and gets is logged, each distinct item once
+// (XrSystemSpaceWarpPropertiesFB's every call); unset, nothing is, and the
+// census's hooks are never handed out.
+void TestHandshakeCensus() {
+    const char* fb = XR_FB_SPACE_WARP_EXTENSION_NAME;
+    const char* depth = XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME;
+
+    // One instance, the application asking as a game might, twice over.
+    struct Census {
+        XrResult create{XR_ERROR_RUNTIME_FAILURE};
+        bool get_system_is_runtimes{false};
+        std::string log;
+    };
+    const auto run = [&](const char* probe) {
+        SetProbe(probe);
+        g_runtime = {};
+        g_runtime.extensions = {depth};
+        Census census;
+        XrInstance instance = XR_NULL_HANDLE;
+        census.create = CreateInstance(probe ? std::vector<const char*>{depth, fb} : std::vector<const char*>{depth},
+                                       instance);
+        if (XR_FAILED(census.create)) {
+            return census;
+        }
+        const auto get_system = LayerFunction<PFN_xrGetSystem>(instance, "xrGetSystem");
+        census.get_system_is_runtimes = reinterpret_cast<PFN_xrVoidFunction>(get_system) == Function(RtSucceed);
+        const auto instance_properties = LayerFunction<PFN_xrGetInstanceProperties>(instance, "xrGetInstanceProperties");
+        const auto system_properties = LayerFunction<PFN_xrGetSystemProperties>(instance, "xrGetSystemProperties");
+        PFN_xrVoidFunction unresolved = nullptr;
+        Check(XR_FAILED(xrGetInstanceProcAddr(instance, "xrEnumerateDisplayRefreshRatesFB", &unresolved)),
+              "a function the runtime lacks is not handed out");
+        const auto refresh_rate = LayerFunction<PFN_xrGetDisplayRefreshRateFB>(instance, "xrGetDisplayRefreshRateFB");
+        LayerFunction<PFN_xrGetSystemProperties>(instance, "xrGetSystemProperties"); // looked up again
+        for (int twice = 0; twice < 2; ++twice) {
+            XrInstanceProperties properties{XR_TYPE_INSTANCE_PROPERTIES};
+            Check(XR_SUCCEEDED(instance_properties(instance, &properties)), "xrGetInstanceProperties");
+            XrSystemGetInfo get_info{XR_TYPE_SYSTEM_GET_INFO};
+            get_info.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
+            XrSystemId system = kSystem;
+            Check(XR_SUCCEEDED(get_system(instance, &get_info, &system)), "xrGetSystem");
+            XrSystemProperties plain{XR_TYPE_SYSTEM_PROPERTIES};
+            Check(XR_SUCCEEDED(system_properties(instance, kSystem, &plain)), "xrGetSystemProperties");
+            XrSystemSpaceWarpPropertiesFB space_warp{XR_TYPE_SYSTEM_SPACE_WARP_PROPERTIES_FB};
+            XrSystemProperties chained{XR_TYPE_SYSTEM_PROPERTIES};
+            chained.next = &space_warp;
+            Check(XR_SUCCEEDED(system_properties(instance, kSystem, &chained)), "xrGetSystemProperties, chained");
+            float rate = 0.0f;
+            Check(XR_SUCCEEDED(refresh_rate(kSession, &rate)) && rate == 90.0f, "xrGetDisplayRefreshRateFB");
+        }
+
+        SpaceWarpProbeTestPeer::SetActiveSession(kSession);
+        const auto formats = LayerFunction<PFN_xrEnumerateSwapchainFormats>(instance, "xrEnumerateSwapchainFormats");
+        std::uint32_t count = 0;
+        std::int64_t offered[5]{};
+        Check(XR_SUCCEEDED(formats(kSession, 0, &count, nullptr)) && count == 5 &&
+                  XR_SUCCEEDED(formats(kSession, 5, &count, offered)) && XR_SUCCEEDED(formats(kSession, 5, &count, offered)),
+              "xrEnumerateSwapchainFormats");
+        XrSwapchainCreateInfo motion{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+        motion.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+        motion.format = 10;
+        motion.sampleCount = 1;
+        motion.width = 250;
+        motion.height = 300;
+        motion.faceCount = 1;
+        motion.arraySize = 2;
+        motion.mipCount = 1;
+        XrSwapchain motion_swapchain = XR_NULL_HANDLE;
+        Check(XR_SUCCEEDED(LayerFunction<PFN_xrCreateSwapchain>(instance, "xrCreateSwapchain")(kSession, &motion,
+                                                                                                &motion_swapchain)),
+              "xrCreateSwapchain");
+        std::uint32_t index = 0;
+        Check(XR_SUCCEEDED(LayerFunction<PFN_xrAcquireSwapchainImage>(instance, "xrAcquireSwapchainImage")(
+                  motion_swapchain, nullptr, &index)),
+              "xrAcquireSwapchainImage");
+        const auto end_frame = LayerFunction<PFN_xrEndFrame>(instance, "xrEndFrame");
+        for (int frames = 0; frames < 2; ++frames) {
+            XrCompositionLayerDepthInfoKHR left_depth = DepthInfo();
+            XrCompositionLayerSpaceWarpInfoFB left = SpaceWarpInfo(&left_depth);
+            left.motionVectorSubImage.swapchain = motion_swapchain;
+            XrCompositionLayerDepthInfoKHR right_depth = DepthInfo();
+            XrCompositionLayerSpaceWarpInfoFB right = SpaceWarpInfo(&right_depth);
+            right.motionVectorSubImage.swapchain = motion_swapchain;
+            Frame frame(&left, &right);
+            Check(XR_SUCCEEDED(end_frame(kSession, &frame.info)), "xrEndFrame");
+        }
+        Check(XR_SUCCEEDED(LayerFunction<PFN_xrDestroyInstance>(instance, "xrDestroyInstance")(instance)),
+              "xrDestroyInstance");
+        census.log = SpaceWarpProbeTestPeer::Log();
+        return census;
+    };
+
+    // Off: no census line, and the runtime's own functions.
+    {
+        const Census off = run(nullptr);
+        Check(off.create == XR_SUCCESS && off.log.find("Handshake census") == std::string::npos,
+              "with the probe off nothing is logged");
+        Check(off.get_system_is_runtimes, "with the probe off xrGetSystem is the runtime's own");
+    }
+
+    // On: each item once.
+    const Census on = run("fb");
+    const std::string& log = on.log;
+    Check(on.create == XR_SUCCESS && !on.get_system_is_runtimes, "with the probe on the census hooks xrGetSystem");
+    const auto once = [&log](const std::string& needle, const std::string& what) {
+        Check(Occurrences(log, needle) == 1,
+              what + ": \"" + needle + "\" " + std::to_string(Occurrences(log, needle)) + " times in\n" + log);
+    };
+    // 1. xrCreateInstance against the runtime's list, and what the layer took out.
+    once("Handshake census: xrCreateInstance: application=\"VectorXR space-warp probe test\"", "the instance");
+    once("apiVersion=1.0.0", "the API version");
+    once("extensions=(2)[XR_KHR_composition_layer_depth XR_FB_space_warp]", "the extensions requested");
+    once("Handshake census: xrCreateInstance extensions: runtimeLists(scan=complete)=(1)[XR_KHR_composition_layer_depth]; "
+         "requestedNotInRuntimeList=(1)[XR_FB_space_warp]; strippedByLayer=(1)[XR_FB_space_warp]; addedByLayer=(0)[]",
+         "the extensions against the runtime's list");
+    once("xrEnumerateInstanceExtensionProperties: unseen", "the list the loader answers is said to be unseen");
+    // 2. Every name looked up, once, unresolved ones said so.
+    once("xrGetInstanceProcAddr, 5 new name(s) before the application's first call the census watches",
+         "the names before the first call");
+    once("first lookups): xrGetSystem xrGetInstanceProperties xrGetSystemProperties "
+         "xrEnumerateDisplayRefreshRatesFB=unresolved(XR_ERROR_FUNCTION_UNSUPPORTED) xrGetDisplayRefreshRateFB",
+         "the names, in order, once each, an unresolved one said so");
+    once("xrGetInstanceProcAddr, 10 name(s) in all, 1 looked up more than once: xrGetSystemPropertiesx2",
+         "the names looked up more than once are counted");
+    // 3. Each distinct xrGetSystemProperties call, the space-warp one every time.
+    once("xrGetSystemProperties call 1: systemId=1 result=XR_SUCCESS chain=[] systemName=\"Stand-in headset\"",
+         "xrGetSystemProperties without a chain");
+    Check(Occurrences(log, "xrGetSystemProperties call ") == 3 &&
+              log.find("xrGetSystemProperties call 2: systemId=1 result=XR_SUCCESS chain=[SYSTEM_SPACE_WARP_PROPERTIES_FB]") !=
+                  std::string::npos &&
+              log.find("xrGetSystemProperties call 4: systemId=1 result=XR_SUCCESS chain=[SYSTEM_SPACE_WARP_PROPERTIES_FB]") !=
+                  std::string::npos &&
+              Occurrences(log, "SYSTEM_SPACE_WARP_PROPERTIES_FB.recommendedMotionVectorImageRect=250x300") == 2,
+          "xrGetSystemProperties with XrSystemSpaceWarpPropertiesFB on each call, with its answer:\n" + log);
+    // 4. xrGetInstanceProperties.
+    once("Handshake census: xrGetInstanceProperties call 1: result=XR_SUCCESS chain=[] runtimeName=\"Space-warp "
+         "stand-in\" runtimeVersion=1.0.0",
+         "xrGetInstanceProperties");
+    // 5. The formats given, and those the frames' swapchains have.
+    once("xrEnumerateSwapchainFormats call 1: capacity=0 count=5", "the count query");
+    once("formats=(5)[29 28 10 40 20]", "the formats given (a session without a graphics API: no DXGI names)");
+    once("Handshake census: the swapchains the frames use by role (frame 1): motionVectors ", "the roles");
+    once("(frame 1): motionVectors 0x1002(250x300 format=10 offered=#3/5 samples=1 array=2",
+         "the motion vectors' format, third of the list");
+    Check(log.find("spaceWarpDepth 0x3d(untracked)") != std::string::npos &&
+              log.find("color 0xc0(untracked)") != std::string::npos &&
+              log.find("depth 0xd0(untracked)") != std::string::npos,
+          "the space-warp depth, color and depth swapchains by role:\n" + log);
+    // 6. Other queries.
+    once("Handshake census: xrGetSystem call 1: formFactor=HEAD_MOUNTED_DISPLAY chain=[] result=XR_SUCCESS",
+         "xrGetSystem");
+    once("Handshake census: xrGetDisplayRefreshRateFB call 1: result=XR_SUCCESS rate=90", "xrGetDisplayRefreshRateFB");
+    // 7. The motion vector swapchains' calls (here at the session's end).
+    once("Handshake census (session end): motion vector and space-warp depth swapchains", "the calls line");
+    Check(log.find("images=0 acquires=1 waits=0 releases=0") != std::string::npos,
+          "the motion vectors' acquire is counted:\n" + log);
+}
+
 } // namespace
 
 // The census worker on records and censuses made up here: a head turning
@@ -1049,11 +1234,12 @@ int main() {
         TestEngineCensusWorker();
         TestThroughTheLayer();
         TestEngineRecordsThroughTheLayer();
+        TestHandshakeCensus();
     } catch (const std::exception& error) {
         std::cerr << "FAILED: " << error.what() << '\n';
         return 1;
     }
     std::cout << "Space-warp probe: selection, stripping, engine motion records and census, advertise/strip/forward "
-                 "through the layer passed\n";
+                 "through the layer, handshake census passed\n";
     return 0;
 }

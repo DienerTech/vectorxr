@@ -2279,6 +2279,17 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
                          "they are.");
         }
     }
+    // The handshake census (handshake_census.h), with the probe's variable set.
+    handshake_census_.Reset(spacewarp_probe_set);
+    for (std::atomic<PFN_xrVoidFunction>& next : census_next_) {
+        next.store(nullptr, std::memory_order_release);
+    }
+    census_swapchain_formats_.clear();
+    census_swapchains_.clear();
+    census_roles_.clear();
+    for (const std::string& line : diagnostics.handshake_census) {
+        logger_.Info("Handshake census: " + line);
+    }
 
     const bool log_eye_gaze_startup =
         diagnostics.app_requested_quad_views || diagnostics.app_requested_varjo_foveated_rendering ||
@@ -2410,6 +2421,7 @@ void OpenXrLayer::AbandonInstance() {
     has_loaded_config_ = false;
     ResetInstanceState();
     ResetSessionState();
+    handshake_census_.Reset(false);
 }
 
 XrResult OpenXrLayer::GetInstanceProcAddr(XrInstance instance, const char* name, PFN_xrVoidFunction* function) {
@@ -2426,6 +2438,12 @@ XrResult OpenXrLayer::GetInstanceProcAddr(XrInstance instance, const char* name,
 
 XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
     logger_.Info("xrDestroyInstance requested by application.");
+    if (handshake_census_.Active()) {
+        CensusFlushProcAddrs("since the last of them");
+        if (const std::string repeats = handshake_census_.ProcAddrRepeats(); !repeats.empty()) {
+            logger_.Info("Handshake census: " + repeats);
+        }
+    }
     TeardownWatch watch(logger_, "xrDestroyInstance", framegen_.TeardownWait(),
                         [this] { return framegen_.PresenterActivity(); },
                         framegen_teardowns_watched_.load(std::memory_order_acquire));
@@ -2501,8 +2519,9 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
         // MSFS 2024 makes one to probe the runtime before its real instance
         // (4 of the 7 logs in one tester's export). Its log would take a slot
         // of the log retention and could be picked as one of Export Debug's
-        // complete sessions, so it is removed unless it logged an error.
-        if (!instance_requested_session_ && instance_enabled_extension_count_ == 0) {
+        // complete sessions, so it is removed unless it logged an error, or
+        // the handshake census took one (that probe is part of the handshake).
+        if (!instance_requested_session_ && instance_enabled_extension_count_ == 0 && !handshake_census_.Active()) {
             logger_.DiscardSessionLog();
         }
         instance_ = XR_NULL_HANDLE;
@@ -2552,6 +2571,7 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
         ResetDepthToggleState();
         ResetInstanceState();
         ResetSessionState();
+        handshake_census_.Reset(false);
     }
 
     return result;
@@ -4426,6 +4446,14 @@ XrResult OpenXrLayer::DestroySwapchain(XrSwapchain swapchain) {
     }
 
     LogSwapchainSummary(swapchain, it->second, "destroyed");
+    for (CensusSwapchain& census : census_swapchains_) {
+        if (census.handle == swapchain && !census.destroyed) {
+            census.acquires = it->second.acquire_count;
+            census.waits = it->second.wait_count;
+            census.releases = it->second.release_count;
+            census.destroyed = true;
+        }
+    }
     SafeReleaseVector(it->second.d3d11_shader_resources);
     tracked_swapchains_.erase(it);
     return result;
@@ -12052,7 +12080,14 @@ void OpenXrLayer::ResetSessionState() {
         if (spacewarp_counts_.frames > 0) {
             LogSpaceWarpProbeSummaryLocked("session end");
         }
+        if (handshake_census_.Active() && !census_swapchains_.empty()) {
+            CensusUpdateSwapchainsLocked();
+            LogCensusSwapchainCallsLocked("session end");
+        }
     }
+    census_swapchains_.clear();
+    census_roles_.clear();
+    census_swapchain_formats_.clear();
     spacewarp_counts_ = {};
     spacewarp_counts_summarized_ = {};
     spacewarp_projection_frames_ = 0;
@@ -16130,11 +16165,152 @@ const XrFrameEndInfo* OpenXrLayer::ProbeSpaceWarpFrameLocked(const XrFrameEndInf
             }
         }
     }
+    if (handshake_census_.Active()) {
+        CensusFrameLocked(frame, storage);
+    }
     if (now - spacewarp_last_summary_ >= std::chrono::seconds(30)) {
         spacewarp_last_summary_ = now;
         LogSpaceWarpProbeSummaryLocked("30 s");
+        if (handshake_census_.Active()) {
+            LogCensusSwapchainCallsLocked("30 s");
+            CensusFlushProcAddrs("since the last of them");
+        }
     }
     return stripped;
+}
+
+void OpenXrLayer::CensusCall() {
+    if (handshake_census_.FirstApplicationCall()) {
+        CensusFlushProcAddrs("before the application's first call the census watches (the loader's dispatch "
+                             "table, built in xrCreateInstance, and the application's first lookups)");
+    }
+}
+
+void OpenXrLayer::CensusNote(std::string_view function, const std::string& detail, bool always) {
+    if (const std::optional<std::uint64_t> call = handshake_census_.Note(function, detail, always)) {
+        logger_.Info("Handshake census: " + std::string(function) + " call " + std::to_string(*call) + ": " + detail);
+    }
+}
+
+void OpenXrLayer::CensusProcAddr(std::string_view name, XrResult result, bool resolved) {
+    handshake_census_.NoteProcAddr(name, result, resolved);
+}
+
+void OpenXrLayer::CensusFlushProcAddrs(std::string_view when) {
+    if (const std::string line = handshake_census_.FlushProcAddrs(when); !line.empty()) {
+        logger_.Info("Handshake census: " + line);
+    }
+}
+
+void OpenXrLayer::CensusSwapchainFormats(const int64_t* formats, uint32_t count) {
+    std::scoped_lock lock(mutex_);
+    census_swapchain_formats_.assign(formats, formats + count);
+}
+
+bool OpenXrLayer::CensusDxgiFormats() const {
+    return vulkan_enable_version_ == 0 && (d3d12_extension_enabled_ || d3d11_graphics_extension_requested_);
+}
+
+void OpenXrLayer::CensusFrameLocked(const XrFrameEndInfo* frame, const SpaceWarpFrame& storage) {
+    // The swapchains the session's frames used by role, each the first time:
+    // the probe's structures' (motion vectors, their depth), then each
+    // projection view's color and depth. A frame that uses a new one logs
+    // them all.
+    const std::size_t known = census_roles_.size();
+    const auto add = [this](const char* role, XrSwapchain swapchain) {
+        if (swapchain != XR_NULL_HANDLE &&
+            std::find(census_roles_.begin(), census_roles_.end(), std::make_pair(role, swapchain)) ==
+                census_roles_.end()) {
+            census_roles_.emplace_back(role, swapchain);
+        }
+    };
+    for (const SpaceWarpViewInfo& view : storage.found) {
+        add("motionVectors", view.motion_vector.swapchain);
+    }
+    for (const SpaceWarpViewInfo& view : storage.found) {
+        add("spaceWarpDepth", view.depth.swapchain);
+    }
+    for (std::uint32_t i = 0; frame && frame->layers && i < frame->layerCount; ++i) {
+        const XrCompositionLayerBaseHeader* base = frame->layers[i];
+        if (!base) {
+            continue;
+        }
+        if (base->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+            const auto* projection = reinterpret_cast<const XrCompositionLayerProjection*>(base);
+            for (std::uint32_t v = 0; projection->views && v < projection->viewCount; ++v) {
+                add("color", projection->views[v].subImage.swapchain);
+                for (auto* node = static_cast<const XrBaseInStructure*>(projection->views[v].next); node;
+                     node = node->next) {
+                    if (node->type == XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR) {
+                        add("depth", reinterpret_cast<const XrCompositionLayerDepthInfoKHR*>(node)->subImage.swapchain);
+                    }
+                }
+            }
+        }
+    }
+    if (census_roles_.size() != known) {
+        const bool dxgi = CensusDxgiFormats();
+        for (std::size_t i = known; i < census_roles_.size(); ++i) {
+            const auto& [role, swapchain] = census_roles_[i];
+            CensusSwapchain census;
+            census.handle = swapchain;
+            census.role = role;
+            const auto found = tracked_swapchains_.find(swapchain);
+            if (found == tracked_swapchains_.end()) {
+                census.description = "untracked";
+            } else {
+                const SwapchainInfo& info = found->second;
+                const auto offered =
+                    std::find(census_swapchain_formats_.begin(), census_swapchain_formats_.end(), info.format);
+                std::ostringstream stream;
+                // Where the format is in the list the application was given
+                // (#1 is the runtime's preferred), "no" when not in it.
+                stream << info.width << "x" << info.height << " format=" << CensusSwapchainFormat(info.format, dxgi)
+                       << " offered="
+                       << (census_swapchain_formats_.empty()        ? std::string("unknown")
+                           : offered == census_swapchain_formats_.end() ? std::string("no")
+                                                                        : "#" + std::to_string(offered -
+                                                                                               census_swapchain_formats_.begin() + 1) +
+                                                                              "/" +
+                                                                              std::to_string(census_swapchain_formats_.size()))
+                       << " samples=" << info.sample_count
+                       << " array=" << info.array_size << " mips=" << info.mip_count
+                       << " usage=" << FormatUsageFlags(info.usage_flags) << " createFlags=" << info.create_flags;
+                census.description = stream.str();
+            }
+            census_swapchains_.push_back(std::move(census));
+        }
+        CensusUpdateSwapchainsLocked();
+        logger_.Info("Handshake census: the swapchains the frames use by role (frame " +
+                     std::to_string(spacewarp_counts_.frames) + "): " + DescribeCensusSwapchains(census_swapchains_));
+        return;
+    }
+    CensusUpdateSwapchainsLocked();
+}
+
+void OpenXrLayer::CensusUpdateSwapchainsLocked() {
+    for (CensusSwapchain& census : census_swapchains_) {
+        if (census.destroyed) {
+            continue;
+        }
+        if (const auto found = tracked_swapchains_.find(census.handle); found != tracked_swapchains_.end()) {
+            census.images = found->second.image_count;
+            census.acquires = found->second.acquire_count;
+            census.waits = found->second.wait_count;
+            census.releases = found->second.release_count;
+        }
+    }
+}
+
+void OpenXrLayer::LogCensusSwapchainCallsLocked(std::string_view reason) {
+    std::vector<CensusSwapchain> shown;
+    for (const CensusSwapchain& census : census_swapchains_) {
+        if (census.role == "motionVectors" || census.role == "spaceWarpDepth") {
+            shown.push_back(census);
+        }
+    }
+    logger_.Info("Handshake census (" + std::string(reason) + "): motion vector and space-warp depth swapchains, " +
+                 "the application's calls so far: " + DescribeCensusSwapchains(shown));
 }
 
 FrameGenEngineMotionFrame OpenXrLayer::EngineMotionFrameLocked(const XrFrameEndInfo& stripped,
