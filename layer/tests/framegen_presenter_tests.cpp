@@ -155,23 +155,28 @@ void SleepPrecise(std::chrono::steady_clock::time_point deadline) {
 // --- fake view locate (the eye probe, VECTORXR_FRAMEGEN_SYNTH_EYE_PROBE) ---------
 
 // Each xrLocateViews the presenter made: the time and space asked, the view
-// configuration, the calling thread, and whether the presenter's own lock
-// was free during the call (checked on the first few calls).
+// configuration and the room given for views, the calling thread, and
+// whether the presenter's own lock was free during the call (checked on the
+// first few calls).
 struct LocateCall {
     XrTime time{0};
     XrSpace space{XR_NULL_HANDLE};
     XrViewConfigurationType configuration{};
+    std::uint32_t capacity{0};
     DWORD thread{0};
     bool presenter_free{true};
 };
 
-// The runtime's answer: the eyes where App::End renders them at the time
-// asked (x = speed * (t - 1 s)), `offset_y` meters off that path, with
-// `flags`; `frozen`, the same position whatever time is asked; `result`, a
-// failure instead; `sleep_us`, that long first.
+// The runtime's answer: the first eye where App::End renders it at the time
+// asked (x = speed * (t - 1 s)), `offset_y` meters off that path, the other
+// views each 5 mm further up, with `flags`; `frozen`, the same position
+// whatever time is asked; `result`, a failure instead; `sleep_us`, that long
+// first. Asked for another view configuration than the session's
+// (`configuration`), it fails as OpenXR says; quad views have four views.
 struct FakeLocate {
     std::mutex mutex;
     std::vector<LocateCall> calls;
+    XrViewConfigurationType configuration{XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
     double speed{0.0};
     float offset_y{0.0f};
     XrViewStateFlags flags{XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT |
@@ -186,7 +191,7 @@ FakeLocate g_locate;
 
 XrResult XRAPI_PTR LocateViews(XrSession, const XrViewLocateInfo* info, XrViewState* state, std::uint32_t capacity,
                                std::uint32_t* count, XrView* views) {
-    LocateCall call{info->displayTime, info->space, info->viewConfigurationType, GetCurrentThreadId(), true};
+    LocateCall call{info->displayTime, info->space, info->viewConfigurationType, capacity, GetCurrentThreadId(), true};
     const FrameGenPresenter* presenter = nullptr;
     {
         std::scoped_lock lock(g_locate.mutex);
@@ -215,14 +220,17 @@ XrResult XRAPI_PTR LocateViews(XrSession, const XrViewLocateInfo* info, XrViewSt
     const float offset_y = g_locate.offset_y;
     const XrViewStateFlags flags = g_locate.flags;
     const bool frozen = g_locate.frozen;
+    const XrViewConfigurationType configuration = g_locate.configuration;
     lock.unlock();
     if (sleep_us) SleepPrecise(std::chrono::steady_clock::now() + std::chrono::microseconds(sleep_us));
     if (XR_FAILED(result)) return result;
-    *count = 2;
-    if (capacity < 2) return capacity ? XR_ERROR_SIZE_INSUFFICIENT : XR_SUCCESS;
+    if (info->viewConfigurationType != configuration) return XR_ERROR_VALIDATION_FAILURE;
+    const std::uint32_t needed = configuration == XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET ? 4 : 2;
+    *count = needed;
+    if (capacity < needed) return capacity ? XR_ERROR_SIZE_INSUFFICIENT : XR_SUCCESS;
     const double x = frozen ? 0.25 : speed * static_cast<double>(info->displayTime - 1'000'000'000) * 1e-9;
-    for (std::uint32_t i = 0; i < 2; ++i) {
-        views[i].pose = {{0.0f, 0.0f, 0.0f, 1.0f}, {static_cast<float>(x), offset_y, 0.0f}};
+    for (std::uint32_t i = 0; i < needed; ++i) {
+        views[i].pose = {{0.0f, 0.0f, 0.0f, 1.0f}, {static_cast<float>(x), offset_y + 0.005f * static_cast<float>(i), 0.0f}};
         views[i].fov = {-0.8f, 0.8f, 0.8f, -0.8f};
     }
     state->viewStateFlags = flags;
@@ -3229,11 +3237,15 @@ struct EyeProbeRun {
     }
 };
 
+// `begun`: the view configuration the layer says the runtime's session was
+// begun on (the presenter is left at its stereo when it is).
 EyeProbeRun RunEyeProbe(const std::string& name, FrameGenSynthesisMode mode, bool on,
-                        const std::function<void(FakeLocate&)>& answer = {}, std::chrono::milliseconds duration = 900ms) {
+                        const std::function<void(FakeLocate&)>& answer = {}, std::chrono::milliseconds duration = 900ms,
+                        XrViewConfigurationType begun = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO) {
     {
         std::scoped_lock lock(g_locate.mutex);
         g_locate.calls.clear();
+        g_locate.configuration = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
         g_locate.speed = 0.5;
         g_locate.offset_y = 0.0f;
         g_locate.flags = XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT |
@@ -3258,6 +3270,8 @@ EyeProbeRun RunEyeProbe(const std::string& name, FrameGenSynthesisMode mode, boo
         if (on) _putenv_s("VECTORXR_FRAMEGEN_SYNTH_EYE_PROBE", "1");
         StartJit(presenter, gpu, mode, FrameGenMultiplier::k2, app, runtime, owned, log.logger.get());
         _putenv_s("VECTORXR_FRAMEGEN_SYNTH_EYE_PROBE", "");
+        // As the layer at xrBeginSession, after Start.
+        if (begun != XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO) presenter.SetRuntimeViewConfiguration(begun);
         {
             std::scoped_lock lock(g_locate.mutex);
             g_locate.presenter = &presenter;
@@ -3382,8 +3396,40 @@ void TestEyeProbe() {
                   std::to_string(run.Count("slow")) + ")");
     }
 
+    // A runtime session begun on quad views natively (Varjo): the probe asks
+    // for that configuration's four views and keeps the first, the left
+    // context eye (the fake puts the others 5 mm and more above it).
+    {
+        constexpr XrViewConfigurationType kQuad = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET;
+        const EyeProbeRun run = RunEyeProbe(
+            "quad", FrameGenSynthesisMode::kExtrapolate, true,
+            [](FakeLocate& locate) {
+                locate.offset_y = 0.001f;
+                locate.configuration = kQuad;
+            },
+            900ms, kQuad);
+        Check(static_cast<int>(run.calls.size()) > run.frames / 2 &&
+                  std::all_of(run.calls.begin(), run.calls.end(),
+                              [](const LocateCall& call) { return call.configuration == kQuad && call.capacity >= 4; }),
+              "eye probe quad: the session's quad views, with room for their four (" + std::to_string(run.calls.size()) +
+                  " calls)");
+        int scored = 0;
+        for (const std::string& line : run.summaries) {
+            const auto miss = EyeProbeField(line, "eyeLocateMissMm");
+            if (!miss.first) continue;
+            ++scored;
+            Check(std::abs(*miss.first - 1.0) < 0.01,
+                  "eye probe quad: the first view, 1 mm off the real path, misses it by 1 mm (" + line + ")");
+        }
+        Check(scored > 0 && run.Count("failed") == 0,
+              "eye probe quad: its answers are used (failed " + std::to_string(run.Count("failed")) + ", " +
+                  std::to_string(scored) + " summaries scored)");
+    }
+
     // Answers the probe drops, each counted: no valid position, a position
-    // not tracked, the same position whatever the time, a failed call.
+    // not tracked, the same position whatever the time, a failed call (and
+    // one for stereo in a runtime session begun on quad views the layer was
+    // not told of: the runtime refuses it).
     struct Dropped {
         const char* name;
         const char* count;
@@ -3398,6 +3444,8 @@ void TestEyeProbe() {
          }},
         {"same", "same", [](FakeLocate& locate) { locate.frozen = true; }},
         {"failed", "failed", [](FakeLocate& locate) { locate.result = XR_ERROR_RUNTIME_FAILURE; }},
+        {"wrongconfig", "failed",
+         [](FakeLocate& locate) { locate.configuration = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET; }},
     };
     for (const Dropped& drop : dropped) {
         const EyeProbeRun run = RunEyeProbe(

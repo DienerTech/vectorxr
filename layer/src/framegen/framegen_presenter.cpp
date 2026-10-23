@@ -1290,6 +1290,11 @@ void FrameGenPresenter::SetQuadDecline(std::chrono::milliseconds first, std::chr
     quad_decline_ = first;
 }
 
+void FrameGenPresenter::SetRuntimeViewConfiguration(XrViewConfigurationType type) {
+    std::scoped_lock lock(mutex_);
+    runtime_view_configuration_ = type;
+}
+
 void FrameGenPresenter::SetInterpolateOnShaders(bool on) {
     std::scoped_lock lock(mutex_);
     interpolate_on_shaders_ = on;
@@ -5169,7 +5174,8 @@ void FrameGenPresenter::ProbeEyeLocate(XrSession session, const JitFrame& frame,
         return;
     }
     const XrSpace space = frame.copy.layers[frame.copy.projection_index].projection.space;
-    std::array<XrView, 2> located{};
+    // Room for quad views' four (stereo asks for two of them).
+    std::array<XrView, 4> located{};
     for (XrView& view : located) {
         view = {XR_TYPE_VIEW};
     }
@@ -5186,12 +5192,14 @@ void FrameGenPresenter::ProbeEyeLocate(XrSession session, const JitFrame& frame,
         // PiOpenXR does, answers it at once).
         std::scoped_lock submit(submit_mutex_);
         PFN_xrLocateViews locate = nullptr;
+        XrViewConfigurationType configuration = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
         {
             std::scoped_lock lock(mutex_);
             if (!eye_probe_ || eye_probe_stopped_ || !xr_.locate_views) {
                 return;
             }
             locate = xr_.locate_views;
+            configuration = runtime_view_configuration_;
             const bool kept =
                 space != XR_NULL_HANDLE && std::any_of(jit_frames_.begin(), jit_frames_.end(), [&](const JitFrame& candidate) {
                     return candidate.id == frame.id && candidate.copy.has_projection &&
@@ -5203,14 +5211,19 @@ void FrameGenPresenter::ProbeEyeLocate(XrSession session, const JitFrame& frame,
                 return;
             }
         }
+        // The runtime session's own configuration (xrLocateViews takes no
+        // other): a session begun on quad views natively (Varjo) locates its
+        // four, the first the left context eye, as views[0] in the frames.
         XrViewLocateInfo info{XR_TYPE_VIEW_LOCATE_INFO};
-        info.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+        info.viewConfigurationType = configuration;
         info.displayTime = time;
         info.space = space;
+        const std::uint32_t capacity =
+            configuration == XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET ? 4u : 2u;
         const auto entered = Clock::now();
         {
             const PresenterCall call(*this, "xrLocateViews");
-            result = locate(session, &info, &state, static_cast<std::uint32_t>(located.size()), &count, located.data());
+            result = locate(session, &info, &state, capacity, &count, located.data());
         }
         call_ms = Milliseconds(Clock::now() - entered);
     }

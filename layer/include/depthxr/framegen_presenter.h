@@ -314,6 +314,13 @@ class FrameGenPresenter {
     // earlier session's teardown found unfinished went with that session's
     // swapchains, so a later session's swapchains are never kept for it.
     void BeginSession();
+    // At each xrBeginSession the runtime accepted: the view configuration
+    // the runtime's session was begun on (the game's, or stereo where the
+    // layer emulates quad views). The eye probe (research) locates the
+    // runtime's views in it: xrLocateViews takes the session's own, and a
+    // session begun on quad views natively (Varjo) has four. Stereo until
+    // the layer says otherwise.
+    void SetRuntimeViewConfiguration(XrViewConfigurationType type);
     // Started with a working GPU backend; such a session keeps frame pacing
     // away from Turbo even while toggled off, so toggling never races Turbo.
     bool OwnsPacing() const;
@@ -939,9 +946,12 @@ class FrameGenPresenter {
     // that time, in `frame`'s projection space, under submit_mutex_ (the
     // space cannot go meanwhile), and keeps the first eye, located and as
     // `views` carry it, until the real frames either side of `time` say
-    // where it was (ResolveEyeProbeLocked). `ahead`: the frame is past its
-    // real frame (extrapolated, or a cover). A failed, invalid, untracked,
-    // repeated or slow answer is counted and dropped.
+    // where it was (ResolveEyeProbeLocked). The views are those of the
+    // runtime session's configuration (SetRuntimeViewConfiguration), the
+    // first the left eye (the left context view in quad views) as in the
+    // frames. `ahead`: the frame is past its real frame (extrapolated, or a
+    // cover). A failed, invalid, untracked, repeated or slow answer is
+    // counted and dropped.
     void ProbeEyeLocate(XrSession session, const JitFrame& frame, bool ahead,
                         const std::vector<XrCompositionLayerProjectionView>& views, XrTime time);
     // Each real frame's first eye at its display time (Generate), and the
@@ -1771,6 +1781,9 @@ class FrameGenPresenter {
     bool eye_probe_{false};
     bool eye_probe_stopped_{false};
     std::uint32_t eye_probe_slow_calls_{0}; // this session's
+    // The runtime session's view configuration (SetRuntimeViewConfiguration):
+    // the one the probe's locates ask for.
+    XrViewConfigurationType runtime_view_configuration_{XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
     // Probed frames waiting for the real frame after their time: the first
     // eye where the runtime put it and where the frame was shown from, in
     // the space of the real frame it was written from. `ahead`: past that

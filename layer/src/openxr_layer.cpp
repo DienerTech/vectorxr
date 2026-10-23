@@ -3089,6 +3089,10 @@ XrResult OpenXrLayer::BeginSession(XrSession session, const XrSessionBeginInfo* 
     // only when Windows reports a device's arrival or the app's Rescan
     // inputs asks; a timed retry stalled the game every 2 s.
     SetInputDeviceSessionActive(true);
+    // Frame Generation's eye probe (research) locates the runtime's views in
+    // the configuration its session was begun on (Varjo's own quad views
+    // included).
+    framegen_.SetRuntimeViewConfiguration(downstream_begin_info->primaryViewConfigurationType);
 
     std::scoped_lock lock(mutex_);
     if (varjo_native_foveation_diagnostic_.locate_calls > 0) {
