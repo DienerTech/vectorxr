@@ -1353,17 +1353,13 @@ bool FrameGenDepthEyes::Add(std::size_t source, const FrameGenDepthEvidence& che
     if (empty_ || source != source_) {
         return false;
     }
-    // Cells of the check's grid where depth differs from the view's centre:
-    // a scene shows a few dozen at least (a panel's outline); clear depth
-    // none at all.
-    constexpr double kVaried = 16.0;
     constexpr std::uint32_t kChecks = 6;
     // Either eye may be the empty one: the checked eye's (its depth was
     // judged until now, so the other eye takes over the check and the
     // validator starts over), or the other eye's (the check already reads
     // the right one).
-    const bool source_clear = check.source_varied == 0.0 && check.other_varied >= kVaried;
-    const bool other_clear = check.other_varied == 0.0 && check.source_varied >= kVaried;
+    const bool source_clear = check.source_varied == 0.0 && check.other_varied >= kFrameGenDepthVariedCells;
+    const bool other_clear = check.other_varied == 0.0 && check.source_varied >= kFrameGenDepthVariedCells;
     if (source_clear != other_clear && (source_clear ? source_streak_ : other_streak_) + 1 >= kChecks) {
         empty_ = source_clear ? source_ : 1 - source_;
         source_ = 1 - *empty_;
@@ -1376,7 +1372,7 @@ bool FrameGenDepthEyes::Add(std::size_t source, const FrameGenDepthEvidence& che
 
 void FrameGenDepthValidator::Add(const FrameGenDepthEvidence& check) {
     sums_ += check;
-    if (++checks_ < 3) {
+    if (++checks_ < kFrameGenDepthBatchChecks) {
         return;
     }
     evidence_ = sums_;
@@ -1399,16 +1395,37 @@ void FrameGenDepthValidator::Add(const FrameGenDepthEvidence& check) {
     const FrameGenDepthScore& swapped = evidence_.swapped;
     const bool decoded_adopts = judged(decoded) && decoded.Ratio() < kAdopt;
     const bool swapped_adopts = judged(swapped) && swapped.Ratio() < kAdopt;
-    if (!Usable()) {
-        if (swapped_adopts && (!decoded_adopts || swapped.Ratio() < decoded.Ratio())) {
+    // Depth that is the same all over the checked eye shows nothing of the
+    // scene, however it is read. Star Citizen Evocati's is all zero in both
+    // eyes (reversed, described correctly): as described all of it is
+    // infinitely far, swapped all of it 2 cm away, and the few samples that
+    // line up whatever moves them (dark space, plain panels) once made the
+    // swapped reading look better than no depth: it was taken up, and every
+    // pixel moved with the head. Only depth that varies (FrameGenDepthEyes'
+    // measure, on average over the batch's checks) is judged.
+    const bool varied = evidence_.source_varied >= kFrameGenDepthBatchChecks * kFrameGenDepthVariedCells;
+    // Swapping needs the reading as decoded now to move content too, and to
+    // line the eyes up worse there: swapped, depth that decodes all far (a
+    // buffer left clear) is all near, and would win against nothing.
+    const bool swap_beats = swapped_adopts && judged(decoded);
+    if (!varied) {
+        // Not taken up until it varies. Depth in use stays in use while it
+        // reads as infinitely far (MSFS 2024's menus clear it: no harm, and
+        // nothing to take up again afterwards), not where it moves content.
+        if (!Usable() || judged(decoded)) {
+            reading_ = FrameGenDepthReading::kUnusable;
+        }
+    } else if (!Usable()) {
+        const bool swap = swap_beats && (!decoded_adopts || swapped.Ratio() < decoded.Ratio());
+        if (swap) {
             swapped_ = !swapped_;
         }
-        if (decoded_adopts || swapped_adopts) {
+        if (decoded_adopts || swap) {
             reading_ = swapped_ ? FrameGenDepthReading::kReversed : FrameGenDepthReading::kAsSubmitted;
         } else if (judged(decoded) && judged(swapped)) {
             reading_ = FrameGenDepthReading::kUnusable;
         }
-    } else if (swapped_adopts && swapped.Ratio() < kAdopt * decoded.Ratio()) {
+    } else if (swap_beats && swapped.Ratio() < kAdopt * decoded.Ratio()) {
         swapped_ = !swapped_;
         reading_ = swapped_ ? FrameGenDepthReading::kReversed : FrameGenDepthReading::kAsSubmitted;
     } else if (judged(decoded) && decoded.Ratio() > kDrop) {
@@ -1417,21 +1434,33 @@ void FrameGenDepthValidator::Add(const FrameGenDepthEvidence& check) {
 
     // The scale that lines the eyes up best: the probes' minimum, refined by
     // a parabola through it and its neighbours; at the edge of the probes,
-    // a step that way with wider probes. A swap starts the search over.
+    // a step that way with wider probes. A swap starts the search over. It
+    // is searched only on depth that varies, where the reading moves content
+    // (before it is taken up too: a near plane described far enough off
+    // lines the eyes up only once scaled): the probes on Star Citizen's
+    // clear depth swapped were all alike, and their noise stepped the scale
+    // up to 1.88.
     const float scale_before = scale_;
     const float step_before = probe_step_;
     if (swapped_ != swapped_before) {
         scale_ = 1.0f;
         probe_step_ = 0.08f;
-    } else if (evidence_.probed >= std::max(200.0, 0.01 * evidence_.binocular)) {
+    } else if (varied && judged(decoded) && evidence_.probed >= std::max(200.0, 0.01 * evidence_.binocular)) {
         const auto& e = evidence_.probes;
         const double used = probe_step_; // the step these probes were taken with
         const std::size_t best = static_cast<std::size_t>(std::min_element(e.begin(), e.end()) - e.begin());
         const double centre = static_cast<double>(kFrameGenDepthScaleProbes / 2);
         double offset = static_cast<double>(best) - centre;
-        if (best == 0 || best + 1 == kFrameGenDepthScaleProbes) {
+        const bool edge = best == 0 || best + 1 == kFrameGenDepthScaleProbes;
+        // At the edge the probes must fall toward it all the way: one probe
+        // a little below the rest, which are alike, is noise.
+        bool trend = edge;
+        for (std::size_t j = 0; trend && j + 1 < kFrameGenDepthScaleProbes; ++j) {
+            trend = best == 0 ? e[j] < e[j + 1] : e[j + 1] < e[j];
+        }
+        if (trend) {
             probe_step_ = std::min(probe_step_ * 1.5f, 0.25f);
-        } else {
+        } else if (!edge) {
             const double curvature = e[best - 1] - 2.0 * e[best] + e[best + 1];
             if (curvature > 0.0) {
                 offset += std::clamp(0.5 * (e[best - 1] - e[best + 1]) / curvature, -0.5, 0.5);
@@ -1441,7 +1470,7 @@ void FrameGenDepthValidator::Add(const FrameGenDepthEvidence& check) {
         // Moves of under 1% (or that gain under 1% over the current scale)
         // are noise.
         const double step = std::exp(used * offset);
-        if (std::abs(offset) * used > 0.01 && e[best] < 0.99 * e[kFrameGenDepthScaleProbes / 2]) {
+        if ((trend || !edge) && std::abs(offset) * used > 0.01 && e[best] < 0.99 * e[kFrameGenDepthScaleProbes / 2]) {
             scale_ = static_cast<float>(std::clamp(scale_ * step, 0.5, 2.0));
         }
     }

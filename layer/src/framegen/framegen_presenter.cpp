@@ -5544,6 +5544,10 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
             " of the error without depth (swapped " + Number(evidence.swapped.Ratio(), 2) +
             "); the other eye disproves " + Number(moved > 0.0 ? 100.0 * evidence.decoded.fallback / moved : 0.0, 0) +
             "% of it, which is treated as far (cockpit glass written to depth, or depth wrong there)." +
+            (depth.reading == FrameGenDepthReading::kUnusable &&
+                     evidence.source_varied < kFrameGenDepthBatchChecks * kFrameGenDepthVariedCells
+                 ? " The depth is the same all over the eye checked (left clear), which shows nothing of the scene."
+                 : "") +
             (depth.reading == FrameGenDepthReading::kUnusable
                  ? " Some games only fill the depth they send while their own depth reprojection setting is on "
                    "(MSFS 2024: Motion reprojection set to Depth); it is checked again now and then."

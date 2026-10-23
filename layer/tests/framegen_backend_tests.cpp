@@ -1175,6 +1175,71 @@ int RunScenarios(Harness& harness) {
               harness.name + " a wrongly described near plane was not corrected");
         Check(std::abs(correct.scale - 1.0f) < 0.05f, harness.name + " correctly described depth was rescaled");
 
+        // 3c'. Depth the same all over an eye shows nothing of the scene,
+        // however it is read, and is never taken up. Star Citizen Evocati's
+        // is all zero in both eyes, reversed and described so (near 1e12 m,
+        // far 2 cm): as described all of it is infinitely far, swapped all of
+        // it 2 cm away; in space, where only the ship's own surfaces tell the
+        // eyes apart, the swapped reading lined up by chance once and every
+        // pixel moved with the head. Flat depth whose swapped reading is the
+        // panel's distance lines the panel up for real (the empty space
+        // around costs nothing), and so does flat depth at the panel's
+        // distance as described. Real reversed depth there is still used,
+        // and so is one eye's (Star Citizen filled only the right eye's on
+        // 2026-10-16), reversed too.
+        FrameGenDepthEncoding reversed;
+        reversed.near_z = 1e12f;
+        reversed.far_z = 0.02f;
+        const float reversed_panel =
+            (1.0f / kPanelDistance - 1.0f / reversed.near_z) / (1.0f / reversed.far_z - 1.0f / reversed.near_z);
+        // Swapped, 1/z = 1/far + raw (1/near - 1/far).
+        const float swapped_panel =
+            (1.0f / kPanelDistance - 1.0f / standard.far_z) / (1.0f / standard.near_z - 1.0f / standard.far_z);
+        const Outcome reversed_left_clear = run_case(reversed_panel, 0.0f, reversed, true, 0, 0.0f, false, true);
+        std::cout << harness.name << " reversed depth, left eye's clear: " << ToString(reversed_left_clear.reading)
+                  << ", empty view " << reversed_left_clear.empty_view << ", error " << error_of(reversed_left_clear)
+                  << std::endl;
+        Check(reversed_left_clear.empty_view == 0 && reversed_left_clear.used &&
+                  reversed_left_clear.reading == FrameGenDepthReading::kAsSubmitted &&
+                  error_of(reversed_left_clear) < 0.4 * rotation_error,
+              harness.name + " reversed depth the game fills in one eye only was not used");
+        // The panel over empty space (as Star Citizen's ships are).
+        auto in_space = [&](float head_x, float tan_left, float tan_right) {
+            Pixels pixels = Cockpit(head_x, tan_left, tan_right);
+            for (std::uint32_t y = 0; y < kSize; ++y) {
+                for (std::uint32_t x = 0; x < kSize; ++x) {
+                    const float tx = tan_left + (tan_right - tan_left) * (x + 0.5f) / kSize;
+                    const float ty = kTan - 2 * kTan * (y + 0.5f) / kSize;
+                    if (std::abs(head_x + kPanelDistance * tx) >= kPanelHalf || std::abs(kPanelDistance * ty) >= kPanelHalf) {
+                        pixels[y * kSize + x] = 0xff060606u;
+                    }
+                }
+            }
+            return pixels;
+        };
+        harness.upload(g_swapchains[kSource][0], in_space(-half_ipd, -outer, inner));
+        harness.upload(g_swapchains[kSource][1], in_space(shift - half_ipd, -outer, inner));
+        harness.upload(g_swapchains[right_source][0], in_space(half_ipd, -inner, outer));
+        harness.upload(g_swapchains[right_source][1], in_space(shift + half_ipd, -inner, outer));
+        const Outcome space_real = run_case(reversed_panel, 0.0f, reversed, true, 0);
+        const Outcome all_zero = run_case(0.0f, 0.0f, reversed, true, 0);
+        const Outcome flat_swapped = run_case(swapped_panel, swapped_panel, standard, true, 0);
+        const Outcome flat_panel = run_case(panel, panel, standard, true, 0);
+        harness.upload(g_swapchains[kSource][0], Cockpit(-half_ipd, -outer, inner));
+        harness.upload(g_swapchains[kSource][1], Cockpit(shift - half_ipd, -outer, inner));
+        harness.upload(g_swapchains[right_source][0], Cockpit(half_ipd, -inner, outer));
+        harness.upload(g_swapchains[right_source][1], Cockpit(shift + half_ipd, -inner, outer));
+        std::cout << harness.name << " in space: real reversed depth " << ToString(space_real.reading) << ", all zero "
+                  << ToString(all_zero.reading) << " (scale " << all_zero.scale << "), flat swapped at the panel "
+                  << ToString(flat_swapped.reading) << ", flat at the panel " << ToString(flat_panel.reading) << std::endl;
+        Check(space_real.used && space_real.reading == FrameGenDepthReading::kAsSubmitted,
+              harness.name + " real reversed depth in space was not used");
+        for (const Outcome* flat : {&all_zero, &flat_swapped, &flat_panel}) {
+            Check(!flat->used && flat->reading == FrameGenDepthReading::kUnusable && flat->scale == 1.0f &&
+                      flat->empty_view == -1,
+                  harness.name + " depth the same all over both eyes was taken up (" + ToString(flat->reading) + ")");
+        }
+
         // 3g. The head keeps moving after the newest frame: 4 cm sideways per
         // real frame interval, so the generated frame (half an interval on)
         // sees the panel from 2 cm further, ~10 px of parallax. Runtimes
@@ -5735,6 +5800,48 @@ MotionDumpImage ComposeReplayVectors(const MotionDumpImage& newest, const Motion
     return composed;
 }
 
+// A frame's dumped depth (linear, as the session decoded it: depth.txt's swap
+// and scale) decoded again as the game describes it, at scale 1: each
+// texel's normalized depth back from the session's decoding, then
+// FG_PASS_DEPTH's formula with the view's own near and far. False where the
+// frame has no depth.txt (older captures).
+bool ReplayDepthAsDescribed(const std::string& directory, ReplayFrame& frame) {
+    const std::string path = directory + "/depth.txt";
+    const std::vector<std::string> swapped = TextLine(path, "swapped");
+    const std::vector<std::string> scale = TextLine(path, "scale");
+    if (swapped.empty() || scale.empty()) return false;
+    const bool session_swapped = swapped[0] == "1";
+    const float session_scale = std::stof(scale[0]);
+    auto inverse = [](float z) { return std::isfinite(z) && z > 0.0f ? 1.0f / z : 0.0f; };
+    for (std::size_t v = 0; v < frame.views.size(); ++v) {
+        const std::vector<std::string> words = TextLine(path, "view " + std::to_string(v));
+        std::optional<float> near_z, far_z;
+        for (std::size_t i = 0; i + 1 < words.size(); ++i) {
+            if (words[i] == "near_z") near_z = std::stof(words[i + 1]);
+            if (words[i] == "far_z") far_z = std::stof(words[i + 1]);
+        }
+        if (!near_z || !far_z) return false;
+        // BuildFrameGenDepthDispatch's inverse depth at normalized 0 and its
+        // range, as the session decoded (near and far swapped, scaled) and
+        // as described.
+        const float session_near = inverse(session_swapped ? *far_z : *near_z) / session_scale;
+        const float session_range = inverse(session_swapped ? *near_z : *far_z) / session_scale - session_near;
+        const float described_near = inverse(*near_z);
+        const float described_range = inverse(*far_z) - described_near;
+        for (float& depth : frame.views[v].depth) {
+            // Infinitely far in the session: the inverse depth was below
+            // 1 / kFrameGenFarDepth, taken as 0.
+            const float z = std::abs(depth);
+            const float session_inverse = z < kFrameGenFarDepth ? 1.0f / z : 0.0f;
+            const float normalized =
+                session_range != 0.0f ? std::clamp((session_inverse - session_near) / session_range, 0.0f, 1.0f) : 0.0f;
+            const float described = described_near + normalized * described_range;
+            depth = described > 1.0f / kFrameGenFarDepth ? 1.0f / described : kFrameGenFarDepth;
+        }
+    }
+    return true;
+}
+
 int RunReplay(Harness& harness) {
     std::vector<ReplayFrame> frames;
     for (int k = 0;; ++k) {
@@ -5748,6 +5855,18 @@ int RunReplay(Harness& harness) {
     const ReplayView& first = frames[0].views[0];
     std::printf("Replaying %zu frames, %zu views, %ux%u (depth grid %ux%u)\n", frames.size(), view_count, first.width,
                 first.height, first.half_width, first.half_height);
+    // FG_REPLAY_DEPTH=described: the dumped depth decoded again as the game
+    // describes it (ReplayDepthAsDescribed), so the replay's depth check
+    // judges the game's depth from scratch, as a session starts, instead of
+    // the reading the session had settled on (its swap and scale).
+    if (const char* depth = std::getenv("FG_REPLAY_DEPTH"); depth && std::string(depth) == "described") {
+        std::size_t decoded = 0;
+        for (std::size_t k = 0; k < frames.size(); ++k) {
+            decoded += ReplayDepthAsDescribed(g_replay_directory + "/frame-" + std::to_string(k), frames[k]) ? 1 : 0;
+        }
+        std::printf("Depth as the game describes it (FG_REPLAY_DEPTH=described): %zu of %zu frames decoded again\n",
+                    decoded, frames.size());
+    }
     std::string error;
     auto gpu = CreateFrameGenGpu(harness.binding, error);
     if (gpu) gpu->SetCopyAfterRelease(true); // the tests' images are their own
@@ -6316,10 +6435,11 @@ int RunReplay(Harness& harness) {
         if (pass > 0 && !no_depth) {
             const FrameGenDepthStatus depth = gpu->DepthStatus();
             std::printf("Settle pass %d: depth %s, %u batches, empty view %d, varied cells %.0f/%.0f, moved %.0f of %.0f, "
-                        "ratio %.3f (swapped %.3f)\n",
+                        "ratio %.3f (swapped %.3f), swapped %d, scale %.3f\n",
                         pass, ToString(depth.reading), depth.batches, depth.empty_view, depth.evidence.source_varied,
                         depth.evidence.other_varied, depth.evidence.decoded.samples, depth.evidence.binocular,
-                        depth.evidence.decoded.Ratio(), depth.evidence.swapped.Ratio());
+                        depth.evidence.decoded.Ratio(), depth.evidence.swapped.Ratio(), depth.swapped ? 1 : 0,
+                        depth.scale);
         }
         gpu->ResetHistory();
         const bool measure = pass == settle;

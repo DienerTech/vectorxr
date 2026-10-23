@@ -9592,6 +9592,138 @@ void TestDepthEyes() {
     }
 }
 
+// The depth validator decides only on evidence. Star Citizen Evocati's
+// depth is all zero in both eyes (reversed, described so): as described
+// nothing moves, swapped everything sits 2 cm away, and a batch whose
+// swapped reading lined up by chance (0.69) took it up, then noise in its
+// alike scale probes stepped the scale to 1.88. Depth the same all over is
+// never taken up, near and far are swapped only against a reading as
+// described that moves content too, a reading holds on unchanged evidence,
+// and the scale moves only on probes that show a trend.
+void TestDepthValidator() {
+    constexpr double kBinocular = 13184.0; // samples both eyes see per check (a Pimax view)
+    auto score = [](double samples, double ratio, double fallback = 0.0) {
+        FrameGenDepthScore s;
+        s.samples = samples;
+        s.none = 0.05 * samples;
+        s.error = ratio * s.none;
+        s.fallback = fallback;
+        return s;
+    };
+    auto batches = [](FrameGenDepthValidator& validator, const FrameGenDepthEvidence& check, int count) {
+        for (int i = 0; i < count * static_cast<int>(kFrameGenDepthBatchChecks); ++i) validator.Add(check);
+    };
+    auto probes = [](FrameGenDepthEvidence& e, std::array<double, kFrameGenDepthScaleProbes> relative, double samples) {
+        e.probed = samples;
+        for (std::size_t j = 0; j < relative.size(); ++j) e.probes[j] = 0.1 * samples * relative[j];
+    };
+    // A cockpit (MSFS's): as described the cockpit moves and lines up, the
+    // scale probes are centred; swapped everything moves, lined up badly.
+    FrameGenDepthEvidence cockpit;
+    cockpit.binocular = kBinocular;
+    cockpit.decoded = score(10000.0, 0.3, 1500.0);
+    cockpit.swapped = score(kBinocular, 0.8, 9000.0);
+    cockpit.source_varied = cockpit.other_varied = 1024.0;
+    cockpit.cockpit = 11000.0;
+    probes(cockpit, {1.5, 1.25, 1.0, 1.25, 1.4}, 8000.0);
+    // Star Citizen's clear depth: no cell varies in either eye; swapped, a
+    // batch lines up by chance; its probes are alike but for one.
+    FrameGenDepthEvidence clear;
+    clear.binocular = kBinocular;
+    clear.swapped = score(kBinocular, 0.6, 12500.0);
+    probes(clear, {1.0, 1.0, 1.0, 1.0, 0.985}, 600.0);
+    {
+        FrameGenDepthValidator validator;
+        batches(validator, clear, 10);
+        Check(validator.Reading() == FrameGenDepthReading::kUnusable && !validator.Swapped() &&
+                  validator.Scale() == 1.0f && validator.Generation() == 0 && validator.Decisions() == 1,
+              std::string("depth validator: depth left clear is not usable, never swapped or scaled (") +
+                  ToString(validator.Reading()) + ")");
+        Check(!validator.WantsCheck(25) && validator.WantsCheck(40), "depth validator: clear depth is checked now and then");
+        // The same once depth already in use goes clear: what moves content
+        // stops being used.
+        FrameGenDepthEvidence clear_near = clear;
+        clear_near.decoded = score(kBinocular, 0.8, 12000.0);
+        FrameGenDepthValidator in_use;
+        batches(in_use, cockpit, 1);
+        batches(in_use, clear_near, 2);
+        Check(in_use.Reading() == FrameGenDepthReading::kUnusable && !in_use.Swapped(),
+              "depth validator: depth in use that goes clear and moves content is dropped");
+    }
+    {
+        // Depth in use goes clear and reads as far (MSFS 2024's menus): kept,
+        // nothing to take up again, never swapped.
+        FrameGenDepthValidator validator;
+        batches(validator, cockpit, 1);
+        Check(validator.Reading() == FrameGenDepthReading::kAsSubmitted && validator.Decisions() == 1,
+              "depth validator: a cockpit's depth is taken up as submitted");
+        const float scale = validator.Scale();
+        batches(validator, clear, 20);
+        Check(validator.Reading() == FrameGenDepthReading::kAsSubmitted && !validator.Swapped() &&
+                  validator.Scale() == scale && validator.Decisions() == 1,
+              std::string("depth validator: clear depth read as far keeps the reading in use (") +
+                  ToString(validator.Reading()) + ")");
+        batches(validator, cockpit, 1);
+        Check(validator.Reading() == FrameGenDepthReading::kAsSubmitted && validator.Decisions() == 1,
+              "depth validator: and nothing changes when the cockpit is back");
+    }
+    {
+        // Varied depth whose reading as described moves too little to be
+        // judged: the swapped reading wins against nothing.
+        FrameGenDepthEvidence scenery = cockpit;
+        scenery.decoded = score(40.0, 0.2);
+        scenery.swapped = score(kBinocular, 0.5, 6000.0);
+        FrameGenDepthValidator validator;
+        batches(validator, scenery, 10);
+        Check(validator.Reading() == FrameGenDepthReading::kUnknown && !validator.Swapped(),
+              std::string("depth validator: swapped against a reading that moves nothing decides nothing (") +
+                  ToString(validator.Reading()) + ")");
+        batches(validator, cockpit, 1);
+        Check(validator.Reading() == FrameGenDepthReading::kAsSubmitted, "depth validator: then the cockpit decides");
+    }
+    {
+        // Reversed depth described as standard, the evidence following the
+        // validator's decoding as a check's does: swapped once, then held.
+        FrameGenDepthEvidence wrong = cockpit;
+        wrong.decoded = score(kBinocular, 0.95, 11000.0);
+        wrong.swapped = score(10000.0, 0.3, 1500.0);
+        FrameGenDepthValidator validator;
+        for (int i = 0; i < 30; ++i) batches(validator, validator.Swapped() ? cockpit : wrong, 1);
+        Check(validator.Reading() == FrameGenDepthReading::kReversed && validator.Swapped() &&
+                  validator.Decisions() == 1,
+              "depth validator: reversed depth is swapped once and held (" + std::to_string(validator.Decisions()) +
+                  " decisions)");
+        for (int i = 0; i < 30; ++i) batches(validator, validator.Swapped() ? cockpit : wrong, 1);
+        Check(validator.Decisions() == 1, "depth validator: no flip-flopping on unchanged evidence");
+    }
+    {
+        // The scale: probes falling toward the far edge step it up; alike
+        // probes with one below the rest do not, nor any probes on depth
+        // the same all over.
+        FrameGenDepthEvidence further = cockpit;
+        probes(further, {1.5, 1.27, 1.0, 0.96, 0.8}, 8000.0);
+        FrameGenDepthValidator validator;
+        batches(validator, further, 1);
+        Check(validator.Scale() > 1.1f, "depth validator: probes falling toward the edge step the scale up (" +
+                                            std::to_string(validator.Scale()) + ")");
+        FrameGenDepthEvidence alike = cockpit;
+        probes(alike, {1.0, 1.0, 1.0, 1.0, 0.985}, 8000.0);
+        FrameGenDepthValidator noise;
+        batches(noise, alike, 20);
+        Check(noise.Reading() == FrameGenDepthReading::kAsSubmitted && noise.Scale() == 1.0f &&
+                  noise.ProbeStep() == 0.08f,
+              "depth validator: one probe below alike ones moves nothing (" + std::to_string(noise.Scale()) + ")");
+        FrameGenDepthEvidence flat = further;
+        flat.source_varied = flat.other_varied = 0.0;
+        FrameGenDepthValidator held;
+        batches(held, cockpit, 1);
+        const float scale = held.Scale();
+        batches(held, flat, 20);
+        Check(held.Scale() == scale, "depth validator: probes on depth the same all over move nothing (" +
+                                         std::to_string(held.Scale()) + ")");
+    }
+}
+
 // OpenComposite (an OpenVR game on OpenXR): IVRCompositor::WaitGetPoses
 // waits and begins a frame every time it is called, and ends one only once
 // both eyes are submitted. A game that asks for poses again first begins a
@@ -12760,6 +12892,7 @@ int main(int argc, char** argv) {
     RUN(TestDynamicSummaryShowsHold);
     RUN(TestViewExtentChangesLogged);
     RUN(TestDepthEyes);
+    RUN(TestDepthValidator);
     RUN(TestOpenCompositeAbandonsFrames);
     RUN(TestSingleAbandonedFrameLeavesNothingBehind);
     RUN(TestAbandonedBeforeFirstEnd);

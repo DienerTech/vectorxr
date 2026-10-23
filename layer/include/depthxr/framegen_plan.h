@@ -952,6 +952,12 @@ inline constexpr std::uint32_t kFrameGenDepthCheckSamples = 4; // per cell side
 inline constexpr std::uint32_t kFrameGenDepthCheckTexels = 5;  // per cell, side by side
 // Scale probes per check: the depth scaled by exp(step * (j - 2)).
 inline constexpr std::size_t kFrameGenDepthScaleProbes = 5;
+// Cells of a check where an eye's depth varies (FrameGenDepthEvidence::
+// source_varied) for a scene: a few dozen at least (a panel's outline);
+// depth left clear has none. FrameGenDepthValidator judges the checks in
+// batches of kFrameGenDepthBatchChecks.
+inline constexpr double kFrameGenDepthVariedCells = 16.0;
+inline constexpr std::uint32_t kFrameGenDepthBatchChecks = 3;
 // `scale` is the scale the checked depth was decoded with, `probe_step`
 // the probes' step (natural log).
 FrameGenDispatch BuildFrameGenDepthCheckDispatch(const FrameGenViewGeometry& view0, const FrameGenViewGeometry& view1,
@@ -1012,7 +1018,11 @@ struct FrameGenDepthEvidence {
 };
 
 // Decides how to read a game's depth from kDepthCheck evidence: whether to
-// use it, and whether to swap its near and far.
+// use it, and whether to swap its near and far. Only on evidence: depth the
+// same all over the checked eye (left clear) is not usable, near and far
+// are swapped only where the reading as decoded moves content too and lines
+// the eyes up worse, and the scale moves only on depth that varies, by
+// probes that show a trend.
 class FrameGenDepthValidator {
   public:
     void Add(const FrameGenDepthEvidence& check);
