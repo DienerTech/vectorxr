@@ -1009,6 +1009,10 @@ int RunScenarios(Harness& harness) {
             float scale{1.0f};
             int empty_view{-1};
             bool used_right{false};
+            // With depth used: each view's resolved depth, the resolve's
+            // decisions (kDepthDecided) and the trust scores, as last written.
+            std::array<std::vector<float>, 2> depth, decided, scores;
+            FrameGenExtent depth_extent{};
         };
         // Runs one depth case on a fresh backend: depth images for the newest
         // frame (panel and background values, the near value over the panel
@@ -1110,6 +1114,21 @@ int RunScenarios(Harness& harness) {
             outcome.scale = status.scale;
             outcome.empty_view = status.empty_view;
             outcome.used_right = result.depth.size() == 2 && result.depth[1];
+            for (std::size_t v = 0; outcome.used && v < 2; ++v) {
+                FrameGenExtent extent{};
+                std::uint32_t channels[3] = {};
+                const bool read =
+                    backend->ReadTexture(v, {FrameGenTextureKind::kDepth, 0}, outcome.depth[v], outcome.depth_extent,
+                                         channels[0]) &&
+                    backend->ReadTexture(v, {FrameGenTextureKind::kDepthDecided, 0}, outcome.decided[v], extent,
+                                         channels[1]) &&
+                    extent.width == outcome.depth_extent.width && extent.height == outcome.depth_extent.height &&
+                    backend->ReadTexture(v, {FrameGenTextureKind::kTrustNewest, 0}, outcome.scores[v], extent,
+                                         channels[2]) &&
+                    extent.width == outcome.depth_extent.width && extent.height == outcome.depth_extent.height &&
+                    channels[0] == 1 && channels[1] == 1 && channels[2] == 1;
+                Check(read, harness.name + " the resolved depth, its decisions or the trust scores were not read");
+            }
             const FrameGenDepthEvidence& evidence = status.evidence;
             std::cout << harness.name << " depth check: " << ToString(status.reading) << " after " << status.decisions
                       << " decisions; moved " << evidence.decoded.samples << " of " << evidence.binocular
@@ -1157,6 +1176,61 @@ int RunScenarios(Harness& harness) {
               harness.name + " nonsense depth was used");
         Check(glass.used && glass.reading == FrameGenDepthReading::kAsSubmitted && glass_error < 0.4 * rotation_error,
               harness.name + " depth wrong around the panel (glass) was not dropped there");
+        // The glass case again on a fresh backend: the same frame and the
+        // same resolved depth bit for bit (the resolve's surface test once
+        // read the depth other threads were writing, so runs differed). Of
+        // its decisions (kDepthDecided), each texel decided is resolved to
+        // that depth, and each left open is dropped exactly where the CPU's
+        // surface test on the decisions drops it (FG_PASS_TRUST_SURFACE),
+        // else kept.
+        {
+            const Outcome again = run_case(panel, 1.0f, standard, true, 40);
+            auto same_bits = [](const std::vector<float>& a, const std::vector<float>& b) {
+                return a.size() == b.size() && (a.empty() || std::memcmp(a.data(), b.data(), a.size() * sizeof(float)) == 0);
+            };
+            Check(again.output == glass.output && same_bits(again.depth[0], glass.depth[0]) &&
+                      same_bits(again.depth[1], glass.depth[1]) && same_bits(again.decided[0], glass.decided[0]) &&
+                      same_bits(again.decided[1], glass.decided[1]),
+                  harness.name + " the glass case wrote other frames or depth when run again");
+            const int width = static_cast<int>(glass.depth_extent.width);
+            const int height = static_cast<int>(glass.depth_extent.height);
+            std::size_t open = 0, dropped = 0, wrong = 0;
+            for (std::size_t v = 0; v < 2; ++v) {
+                const std::vector<float>& depth = glass.depth[v];
+                const std::vector<float>& decided = glass.decided[v];
+                const std::vector<float>& scores = glass.scores[v];
+                for (int y = 0; y < height; ++y) {
+                    for (int x = 0; x < width; ++x) {
+                        const std::size_t i = static_cast<std::size_t>(y) * width + x;
+                        if (!(decided[i] < 0.0f)) {
+                            const float magnitude = std::abs(depth[i]);
+                            wrong += magnitude == decided[i] || (std::isnan(magnitude) && std::isnan(decided[i])) ? 0 : 1;
+                            continue;
+                        }
+                        ++open;
+                        const float own = -decided[i];
+                        float surface = 0.0f, disproved = 0.0f;
+                        for (int dy = -2; dy <= 2; ++dy) {
+                            for (int dx = -2; dx <= 2; ++dx) {
+                                const std::size_t j = static_cast<std::size_t>(std::clamp(y + dy, 0, height - 1)) * width +
+                                                      std::clamp(x + dx, 0, width - 1);
+                                if (std::abs(std::abs(decided[j]) - own) <= 0.03f * own) {
+                                    surface += 1.0f;
+                                    disproved += scores[j] < -0.25f ? 1.0f : 0.0f;
+                                }
+                            }
+                        }
+                        const bool drop = disproved >= 0.6f * surface;
+                        dropped += drop ? 1 : 0;
+                        wrong += (drop ? depth[i] == -own : depth[i] > 0.0f) ? 0 : 1;
+                    }
+                }
+            }
+            std::cout << harness.name << " glass resolve: " << open << " texels left open, " << dropped
+                      << " of them dropped by their surface, " << wrong << " resolved otherwise" << std::endl;
+            Check(open > 0 && wrong == 0,
+                  harness.name + " the resolve's surface test did not run on its decisions alone");
+        }
         // Star Citizen: the left eye's depth left clear. The right eye's is
         // checked instead and moved to the left eye, which then compensates
         // head translation about as well as with its own.
@@ -2057,7 +2131,7 @@ const char* const kProfileNames[] = {"luma",        "downsample",  "search",    
                                      "shift resolve", "shift fill", "raw pack",   "trust resolve", "shading rate", "world reduce", "world solve", "trust vote", "depth scale", "scale vote", "depth stale", "cross splat", "cross resolve",
                                      "engine census", "engine capture", "engine reduce", "engine solve", "world set",
                                      "engine convert", "engine merge", "engine tiles", "engine splat", "engine resolve",
-                                     "engine fill", "source copy", "output copy",
+                                     "engine fill", "trust surface", "source copy", "output copy",
                                      "hardware wait", "compose", "flow merge"};
 static_assert(std::size(kProfileNames) == kFrameGenPassCount + 5, "a name per profiled category");
 

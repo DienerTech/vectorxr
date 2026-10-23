@@ -50,7 +50,8 @@ enum class FrameGenPass : std::uint8_t {
     // taken out), recorded with the capture (FrameGenViewRequest::hardware_raw).
     kFlowPackRaw,
     // Depth (Direct3D 12): drops the depth of regions the trust scores
-    // disprove (kTrustUpdate scores, this decides).
+    // disprove (kTrustUpdate scores, this decides), every texel it can
+    // without its neighbours; kTrustSurface the rest.
     kTrustResolve,
     // Direct3D 12: the shading-rate image of the synthesis draw (coarse
     // shading off the view axis where no cockpit content is), recorded by
@@ -118,8 +119,12 @@ enum class FrameGenPass : std::uint8_t {
     kShiftSplatEngine,
     kShiftResolveEngine,
     kShiftFillEngine,
+    // Depth (Direct3D 12): after kTrustResolve, the disproved texels it left
+    // open dropped or kept by the surface around them as it decided that
+    // (kDepthDecided), so no texel reads a neighbour another is writing.
+    kTrustSurface,
 };
-inline constexpr std::size_t kFrameGenPassCount = 39;
+inline constexpr std::size_t kFrameGenPassCount = 40;
 
 // Logical textures owned per view. History and filtered flow are ping-pong
 // pairs: "newest" is written this submission, "previous" is last
@@ -227,6 +232,10 @@ enum class FrameGenTextureKind : std::uint8_t {
     // motion map of the frames written from it later
     // (FrameGenViewRequest::engine_world).
     kWorldParamsNewest,
+    // kTrustResolve's second output at half resolution, for kTrustSurface:
+    // the depth of each texel it decided (its magnitude), negated where it
+    // left the texel open.
+    kDepthDecided,
 };
 
 // The flow level the optical flow hardware fills: a 4x4 grid on the
@@ -357,9 +366,13 @@ inline constexpr std::uint32_t kFrameGenWorldGrid = 128u;
 // The trust vote's tile side in half-resolution texels (FG_TRUST_TILE):
 // kTrustUpdate counts a tile per thread group.
 inline constexpr std::uint32_t kFrameGenTrustTile = 8u;
+// kTrustSurface's texels per thread each way (FG_SURFACE_SPAN): a thread a
+// texel, its thread groups' launches cost more than its work.
+inline constexpr std::uint32_t kFrameGenTrustSurfaceSpan = 4u;
 // kDepthScales texels per tile.
 inline constexpr std::uint32_t kFrameGenDepthScaleTexels = 3u;
-// kTrustResolve's options.x: this frame's stereo scale vote is in its t2.
+// kTrustResolve's and kTrustSurface's options.x: this frame's stereo scale
+// vote is in their t2.
 inline constexpr std::uint32_t kFrameGenResolveScale = 1u;
 // kDepthScaleVote's options.x: the second stage (the votes neighbours agree with).
 inline constexpr std::uint32_t kFrameGenScaleAccept = 1u;

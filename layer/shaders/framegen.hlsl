@@ -232,7 +232,8 @@ cbuffer FrameGenConstantBuffer : register(b0) {
 #define FG_SCALE_PROBES 7
 #define FG_SCALE_AS_READ 3
 static const float kDepthScaleProbes[FG_SCALE_PROBES] = {0.7, 0.8, 0.9, 1.0, 1.12, 1.25, 1.4};
-// options.x of FG_PASS_TRUST_RESOLVE: the stereo scale vote is in t2.
+// options.x of FG_PASS_TRUST_RESOLVE and FG_PASS_TRUST_SURFACE: the stereo
+// scale vote is in t2.
 #define FG_RESOLVE_SCALE 1u
 
 #define FG_VIEW_FLOW 1u
@@ -2908,9 +2909,8 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
 }
 #endif
 
-#if defined(FG_PASS_TRUST_RESOLVE)
+#if defined(FG_PASS_TRUST_RESOLVE) || defined(FG_PASS_TRUST_SURFACE)
 FG_BIND(0) Texture2D<float4> g_scores : register(t0);
-FG_BIND(1) Texture2D<float4> g_votes : register(t1);
 FG_BIND(2) Texture2D<float4> g_scale_votes : register(t2);
 FG_BIND(4) FG_FORMAT("r32f") RWTexture2D<float> g_depth : register(u0);
 
@@ -2938,10 +2938,11 @@ FG_BIND(4) FG_FORMAT("r32f") RWTexture2D<float> g_depth : register(u0);
 // the eyes up better at another scale of its depth. The tiles around blend
 // in (in log, weighted 1-2-1 by distance; tiles that keep the depth as
 // read count as 1), so where a correction stops, a flat surface stretches
-// over a few tiles instead of tearing at a tile's edge.
-void Keep(uint2 texel, float depth) {
+// over a few tiles instead of tearing at a tile's edge. Returns the depth
+// kept.
+float Keep(uint2 texel, float depth) {
     if ((g.options.x & FG_RESOLVE_SCALE) == 0u) {
-        return;
+        return depth;
     }
     uint width, height;
     g_scale_votes.GetDimensions(width, height);
@@ -2972,8 +2973,11 @@ void Keep(uint2 texel, float depth) {
         any_scaled = any_scaled || vote.x != 1.0;
     }
     if (any_scaled && weight > 0.0) {
-        g_depth[texel] = depth * exp(sum / weight);
+        const float kept = depth * exp(sum / weight);
+        g_depth[texel] = kept;
+        return kept;
     }
+    return depth;
 }
 
 // Drops the depth (negated: head movement is compensated for rotation only
@@ -2992,6 +2996,31 @@ void Keep(uint2 texel, float depth) {
 //     between confirmed ones (the plain ones between a label's letters)
 //     keep theirs.
 // The rest keep theirs, corrected by the stereo scale vote (Keep).
+// FG_PASS_TRUST_RESOLVE decides every texel it can without its neighbours;
+// FG_PASS_TRUST_SURFACE then judges the disproved texels the surface vote
+// leaves open by the surface around them, as TRUST_RESOLVE decided it.
+// One pass deciding all in place raced: a texel's neighbours were read
+// while other threads kept (rescaled) or dropped theirs, so runs differed
+// (by up to 0.004 pp of the cockpit's bad pixels on the GB10's replay). The
+// surface test now always sees its neighbours as decided without theirs
+// (the race's usual outcome: those threads mostly wrote first), the open
+// ones as read.
+#endif
+
+#if defined(FG_PASS_TRUST_RESOLVE)
+FG_BIND(1) Texture2D<float4> g_votes : register(t1);
+FG_BIND(5) FG_FORMAT("r32f") RWTexture2D<float> g_decided : register(u1);
+
+// The texel decided (u0 holds its depth from now on): what the surface test
+// reads of it, the depth's magnitude (its sign is the test's own: whether
+// it was dropped does not change its surface).
+void Decided(uint2 texel, float depth) {
+    g_decided[texel] = abs(depth);
+}
+
+// Every texel's decision that needs no neighbour (see above), and u1: the
+// decided texels' depth for FG_PASS_TRUST_SURFACE, the others' depth negated
+// (left open: the surface test decides them).
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID) {
     if (any(id.xy >= g.size.xy)) {
@@ -3000,10 +3029,11 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     const float depth = g_depth[id.xy];
     const float score = g_scores.Load(int3(id.xy, 0)).r;
     if (!(depth > 0.0) || depth >= FG_FAR_DEPTH) {
+        Decided(id.xy, depth);
         return;
     }
     if (score > FG_TRUST_THRESHOLD) {
-        Keep(id.xy, depth);
+        Decided(id.xy, Keep(id.xy, depth));
         return;
     }
     const float4 vote = g_votes.Load(int3(id.xy / uint(FG_TRUST_TILE), 0));
@@ -3016,19 +3046,35 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     if (score >= -FG_TRUST_THRESHOLD) {
         if (surface_disproved) {
             g_depth[id.xy] = -depth;
+            Decided(id.xy, depth);
         } else {
-            Keep(id.xy, depth);
+            Decided(id.xy, Keep(id.xy, depth));
         }
         return;
     }
     if (confirmed_votes >= FG_VOTE_CONFIRMED * max(disproved_votes, 1.0)) {
-        Keep(id.xy, depth);
+        Decided(id.xy, Keep(id.xy, depth));
         return;
     }
     if (surface_disproved) {
         g_depth[id.xy] = -depth;
+        Decided(id.xy, depth);
         return;
     }
+    g_decided[id.xy] = -depth;
+}
+#endif
+
+#if defined(FG_PASS_TRUST_SURFACE)
+FG_BIND(3) Texture2D<float4> g_decided : register(t3);
+
+// Texels per thread each way (kFrameGenTrustSurfaceSpan), a group's 8 apart.
+#define FG_SURFACE_SPAN 4
+
+// A texel FG_PASS_TRUST_RESOLVE left open: dropped where most of the surface
+// around it (FG_RESOLVE_RADIUS texels either way, as TRUST_RESOLVE decided
+// it) is disproved too, else kept.
+void Surface(uint2 at, float depth) {
     const int2 limit = int2(g.size.xy) - 1;
     float surface = 0.0;
     float disproved = 0.0;
@@ -3036,9 +3082,8 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     for (int y = -FG_RESOLVE_RADIUS; y <= FG_RESOLVE_RADIUS; ++y) {
         [loop]
         for (int x = -FG_RESOLVE_RADIUS; x <= FG_RESOLVE_RADIUS; ++x) {
-            const int2 texel = clamp(int2(id.xy) + int2(x, y), int2(0, 0), limit);
-            // Other threads may have negated it already.
-            const float neighbour = abs(g_depth[texel]);
+            const int2 texel = clamp(int2(at) + int2(x, y), int2(0, 0), limit);
+            const float neighbour = abs(g_decided.Load(int3(texel, 0)).r);
             if (abs(neighbour - depth) <= FG_RESOLVE_SURFACE * depth) {
                 surface += 1.0;
                 disproved += g_scores.Load(int3(texel, 0)).r < -FG_TRUST_THRESHOLD ? 1.0 : 0.0;
@@ -3046,9 +3091,36 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         }
     }
     if (disproved >= FG_RESOLVE_SHARE * surface) {
-        g_depth[id.xy] = -depth;
+        g_depth[at] = -depth;
     } else {
-        Keep(id.xy, depth);
+        Keep(at, depth);
+    }
+}
+
+// The texels left open (negative in t3), FG_SURFACE_SPAN each way per
+// thread: one each, the pass cost its thread groups' launches (0.11 ms a
+// frame for two 2712x2678 grids on the RTX 5090, as much with no work).
+[numthreads(8, 8, 1)]
+void CSMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID) {
+    const uint2 origin = group.xy * (8u * FG_SURFACE_SPAN) + thread.xy;
+    // Most threads have none: their texels read at once, then the open ones
+    // one by one (a copy of Surface each made the shader too big for WARP).
+    bool any_open = false;
+    [unroll]
+    for (uint i = 0; i < FG_SURFACE_SPAN * FG_SURFACE_SPAN; ++i) {
+        const uint2 at = origin + 8u * uint2(i % FG_SURFACE_SPAN, i / FG_SURFACE_SPAN);
+        any_open = any_open || (all(at < g.size.xy) && g_decided.Load(int3(at, 0)).r < 0.0);
+    }
+    if (!any_open) {
+        return;
+    }
+    [loop]
+    for (uint k = 0; k < FG_SURFACE_SPAN * FG_SURFACE_SPAN; ++k) {
+        const uint2 at = origin + 8u * uint2(k % FG_SURFACE_SPAN, k / FG_SURFACE_SPAN);
+        const float open = all(at < g.size.xy) ? g_decided.Load(int3(at, 0)).r : 0.0;
+        if (open < 0.0) {
+            Surface(at, -open);
+        }
     }
 }
 #endif

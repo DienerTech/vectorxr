@@ -1749,6 +1749,24 @@ void TestFrameGenPlan() {
                    resolve.inputs[2].kind == (stereo ? FrameGenTextureKind::kDepthScaleVotes : FrameGenTextureKind::kNone) &&
                    resolve.constants.options[0] == (stereo ? depthxr::kFrameGenResolveScale : 0u),
                "The resolve should read the trust vote, and the stereo scale vote only with this frame's stereo evidence");
+        // The texels the resolve leaves open, judged right after it by the
+        // surface around them as it decided that (kDepthDecided), never by
+        // the depth being written; a thread per span of texels each way.
+        const auto& surface = depth_plan.dispatches[passes.size()];
+        const std::uint32_t span = depthxr::kFrameGenTrustSurfaceSpan;
+        Expect(resolve.outputs[0].kind == FrameGenTextureKind::kDepth &&
+                   resolve.outputs[1].kind == FrameGenTextureKind::kDepthDecided &&
+                   surface.pass == FrameGenPass::kTrustSurface && surface.width == (half.width + span - 1) / span &&
+                   surface.height == (half.height + span - 1) / span && surface.constants.size[0] == half.width &&
+                   surface.constants.size[1] == half.height &&
+                   surface.inputs[0].kind == FrameGenTextureKind::kTrustNewest &&
+                   surface.inputs[1].kind == FrameGenTextureKind::kNone &&
+                   surface.inputs[2].kind == resolve.inputs[2].kind &&
+                   surface.inputs[3].kind == FrameGenTextureKind::kDepthDecided &&
+                   surface.outputs[0].kind == FrameGenTextureKind::kDepth &&
+                   surface.outputs[1].kind == FrameGenTextureKind::kNone &&
+                   surface.constants.options[0] == resolve.constants.options[0],
+               "The surface test should follow the resolve, reading its decisions and writing the depth alone");
         if (stereo) {
             Expect(depth_plan.dispatches[2].outputs[0].kind == FrameGenTextureKind::kDepthScaleRaw &&
                        depth_plan.dispatches[3].inputs[0].kind == FrameGenTextureKind::kDepthScaleRaw &&

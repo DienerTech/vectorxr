@@ -774,8 +774,18 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
                           request.trust_stereo ? Texture(FrameGenTextureKind::kDepthScaleVotes) : FrameGenTexture{}, {},
                           {}};
         resolve.constants.options[0] = request.trust_stereo ? kFrameGenResolveScale : 0u;
-        resolve.outputs = {Texture(FrameGenTextureKind::kDepth), {}};
+        resolve.outputs = {Texture(FrameGenTextureKind::kDepth), Texture(FrameGenTextureKind::kDepthDecided)};
         plan.dispatches.push_back(resolve);
+        // The texels it left open, by the surface around them as decided; a
+        // thread per kFrameGenTrustSurfaceSpan texels each way.
+        FrameGenDispatch surface = Dispatch(FrameGenPass::kTrustSurface, plan.levels[1], plan.levels[1], base);
+        surface.width = (plan.levels[1].width + kFrameGenTrustSurfaceSpan - 1) / kFrameGenTrustSurfaceSpan;
+        surface.height = (plan.levels[1].height + kFrameGenTrustSurfaceSpan - 1) / kFrameGenTrustSurfaceSpan;
+        surface.inputs = {Texture(FrameGenTextureKind::kTrustNewest), {}, resolve.inputs[2],
+                          Texture(FrameGenTextureKind::kDepthDecided), {}};
+        surface.constants.options[0] = resolve.constants.options[0];
+        surface.outputs = {Texture(FrameGenTextureKind::kDepth), {}};
+        plan.dispatches.push_back(surface);
     }
 
     // With the previous frame's depth, content it did not see is told apart

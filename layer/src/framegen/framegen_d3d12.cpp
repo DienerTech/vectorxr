@@ -249,6 +249,7 @@ struct ViewResources {
     Texture motion_map; // FrameGenTuning::depth_splat's, rebuilt for each generated frame
     Texture cross_keys; // kDepthCrossSplat's, for an eye given the other eye's depth (FrameGenDepthEyes)
     Texture depth_stale; // kDepthStale's, for a frame moved by the previous frame's motion
+    Texture depth_decided; // kTrustResolve's decisions, for kTrustSurface
     Texture trust_tiles; // the trust vote's counts per tile, then summed around each
     Texture trust_votes;
     Texture depth_scales; // the stereo depth-scale probe per tile, then the vote on it (raw, accepted)
@@ -2039,6 +2040,7 @@ class D3D12FrameGen final : public FrameGenGpu {
                       error) &&
                Create(view.shift_keys, half, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_UINT, true, error) &&
                Create(view.depth_stale, half, DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT, true, error) &&
+               Create(view.depth_decided, half, DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT, true, error) &&
                Create(view.shift_map, half, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_UINT, true, error);
     }
 
@@ -4493,7 +4495,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         for (auto& texture : view.engine_tiles) visit(texture);
         for (auto* texture : {&view.output, &view.compose_target, &view.shift_keys, &view.shift_map, &view.motion_map,
                               &view.cross_keys,
-                              &view.depth_stale,
+                              &view.depth_stale, &view.depth_decided,
                               &view.world_partials, &view.world_params, &view.shading_rate, &view.trust_tiles,
                               &view.trust_votes, &view.depth_scales, &view.depth_scale_raw, &view.depth_scale_votes,
                               &view.engine_partials, &view.engine_params, &view.engine_evidence, &view.engine_candidate,
@@ -5418,6 +5420,7 @@ class D3D12FrameGen final : public FrameGenGpu {
             view.motion_map = {};
             view.cross_keys = {};
             view.depth_stale = {};
+            view.depth_decided = {};
             view.trust_tiles = {};
             view.trust_votes = {};
             view.depth_scales = {};
@@ -6368,6 +6371,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         case FrameGenTextureKind::kShiftKeys: return &view.shift_keys;
         case FrameGenTextureKind::kShiftMap: return &view.shift_map;
         case FrameGenTextureKind::kDepthStale: return &view.depth_stale;
+        case FrameGenTextureKind::kDepthDecided: return &view.depth_decided;
         case FrameGenTextureKind::kMotionMap: return &view.motion_map;
         case FrameGenTextureKind::kWorldPartials: return &view.world_partials;
         case FrameGenTextureKind::kWorldParams: return &view.world_params;
