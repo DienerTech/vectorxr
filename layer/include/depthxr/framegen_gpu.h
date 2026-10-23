@@ -285,6 +285,10 @@ class FrameGenGpu {
     // Tests: the draws of generated frames into the output images recorded
     // so far (DrawsOutputs; frames drawn together count once).
     virtual std::uint64_t DrawsForTest() const { return 0; }
+    // Tests: the shading-rate images (variable-rate shading of those draws)
+    // recorded so far; a real frame's frames written just in time share one
+    // per view.
+    virtual std::uint64_t ShadingRatesForTest() const { return 0; }
     // FrameGenTuning::hardware_flow: empty until asked for, then "active",
     // or why the hardware cannot be used (block matching measures motion).
     virtual std::string HardwareFlowStatus() const { return "this graphics API has no optical flow hardware support"; }

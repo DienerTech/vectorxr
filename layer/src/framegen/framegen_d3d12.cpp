@@ -265,6 +265,11 @@ struct ViewResources {
     FrameGenExtent shading_extent{};
     std::array<float, 4> shading_fov{};
     bool shading_coarse{false}; // the field of view reaches the coarse-shading angle
+    // Just in time: the real frame (AnalyzedFrame::id) and depth (null: the
+    // angle alone) the image holds the rates of, which that frame's later
+    // frames read again (0: no frame's).
+    std::uint64_t shading_frame{0};
+    const Texture* shading_depth{nullptr};
     bool trust_stereo{false}; // this frame's stereo evidence is in trust[newest]
     bool depth_ready{false};  // captured since the last Execute
     bool depth_fresh{false};  // captured for this Execute's frame (for the check)
@@ -2712,6 +2717,7 @@ class D3D12FrameGen final : public FrameGenGpu {
     void SetDirectOutput(bool on) override { direct_output_ = on; }
     bool DrawsOutputs() const override { return direct_output_ && rtv_heap_; }
     std::uint64_t DrawsForTest() const override { return draws_; }
+    std::uint64_t ShadingRatesForTest() const override { return shading_rates_; }
 
     // A wide view's periphery is rendered far denser than a headset shows
     // it: angle per pixel shrinks with the square of the angle's tangent off
@@ -2726,12 +2732,19 @@ class D3D12FrameGen final : public FrameGenGpu {
 
     // Records the view's shading-rate image for the synthesis draw from this
     // frame's depth (`depth`, null when not in use: the angle alone decides).
-    // True when the draw should use it.
+    // True when the draw should use it. Frames of one real frame written just
+    // in time (drawing_frame_) read the image its first one recorded from the
+    // same depth: their view and its depth are the real frame's.
     bool RecordShadingRate(ViewResources& view, const FrameGenViewSubmission& submission, Texture* depth,
                            std::string& error) {
         if (!shading_tile_) {
             return false;
         }
+        if (drawing_frame_ && view.shading_frame == drawing_frame_ && view.shading_depth == depth &&
+            view.shading_rate.resource) {
+            return true;
+        }
+        view.shading_frame = 0;
         const FrameGenExtent extent = submission.request.extent;
         const FrameGenViewGeometry& geometry = submission.request.newest;
         const std::array<float, 4> fov{geometry.angle_left, geometry.angle_right, geometry.angle_up, geometry.angle_down};
@@ -2790,6 +2803,9 @@ class D3D12FrameGen final : public FrameGenGpu {
         commands_->Dispatch((tiles_x + kFrameGenThreadGroupSize - 1) / kFrameGenThreadGroupSize,
                             (tiles_y + kFrameGenThreadGroupSize - 1) / kFrameGenThreadGroupSize, 1);
         Stamp(static_cast<int>(FrameGenPass::kShadingRate));
+        view.shading_frame = drawing_frame_;
+        view.shading_depth = depth;
+        ++shading_rates_;
         return true;
     }
 
@@ -4051,7 +4067,9 @@ class D3D12FrameGen final : public FrameGenGpu {
         commands_->SetComputeRootSignature(root_signature_.Get());
         profile_labels_.clear();
         if (profiling_) commands_->EndQuery(profile_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
+        drawing_frame_ = frame.id;
         bool ok = record(error);
+        drawing_frame_ = 0;
         if (profiling_) {
             commands_->ResolveQueryData(profile_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0,
                                         static_cast<UINT>(profile_labels_.size() + 1), profile_readback_.Get(), 0);
@@ -4075,6 +4093,7 @@ class D3D12FrameGen final : public FrameGenGpu {
                     views_[i] = {};
                 } else {
                     views_[i].history_state = {};
+                    views_[i].shading_frame = 0; // its rates may not have been written
                 }
             }
             analyzed_.clear();
@@ -4093,6 +4112,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         if (FAILED(hr)) {
             error = Failure("D3D12 Frame Generation synthesis signal", hr);
             signal_failed_ = true;
+            for (std::size_t i = 0; i < frame.views.size(); ++i) views_[i].shading_frame = 0;
             return false;
         }
         slot.fence = done;
@@ -6915,6 +6935,10 @@ class D3D12FrameGen final : public FrameGenGpu {
     UINT clear_cursor_{0};
     bool direct_output_{true};
     std::uint64_t draws_{0}; // RecordDraw's draws (DrawsForTest)
+    // The real frame RecordSynthesis records frames of (0: an Execute's), and
+    // the shading-rate images recorded (ShadingRatesForTest).
+    std::uint64_t drawing_frame_{0};
+    std::uint64_t shading_rates_{0};
     bool copy_after_release_{false}; // SetCopyAfterRelease
     ComPtr<ID3D12DescriptorHeap> rtv_heap_;
     UINT rtv_size_{0};

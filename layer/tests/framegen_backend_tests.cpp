@@ -1199,10 +1199,40 @@ int RunScenarios(Harness& harness) {
                 // The previous frame measured, as the presenter waits for.
                 Check(backend->WaitIdle(), harness.name + " analyses did not finish");
                 const auto requests = views(1, true);
-                const bool written = backend->SynthesizeStale(
-                    result.frame, motion, tuning.fractions[0], {requests[0].outputs[0], requests[1].outputs[0]}, error);
-                Check(written, harness.name + " stale synthesize: " + error);
-                Check(backend->WaitIdle(), harness.name + " stale synthesis did not finish");
+                const std::vector<FrameGenImage> images{requests[0].outputs[0], requests[1].outputs[0]};
+                auto written = [&](bool own) {
+                    const bool ok = own ? backend->Synthesize(result.frame, FrameGenSynthesisMode::kExtrapolate,
+                                                              tuning.fractions[0], images, error)
+                                        : backend->SynthesizeStale(result.frame, motion, tuning.fractions[0], images, error);
+                    Check(ok, harness.name + (own ? " synthesize: " : " stale synthesize: ") + error);
+                    Check(backend->WaitIdle(), harness.name + " synthesis did not finish");
+                    return std::array<Pixels, 2>{harness.readback(g_swapchains[kOutput][0]),
+                                                 harness.readback(g_swapchains[right_output][0])};
+                };
+                // The real frame's frames written in turn by its own motion
+                // (its depth bound) and by the previous frame's (none): each
+                // the same bit for bit whichever was written before it. With
+                // variable-rate shading, the rates are recorded for the first
+                // frame and again for each that reads other depth than the
+                // frame before (four of five a view with depth in use, else
+                // one), never for a repeat.
+                std::uint64_t expected = 0;
+                for (std::size_t v = 0; v < 2; ++v) expected += result.depth.size() == 2 && result.depth[v] ? 4 : 1;
+                const std::uint64_t rates = backend->ShadingRatesForTest();
+                const std::array<Pixels, 2> own_first = written(true);
+                const std::array<Pixels, 2> own_repeat = written(true);
+                const std::array<Pixels, 2> stale_first = written(false);
+                const std::array<Pixels, 2> own_again = written(true);
+                const std::array<Pixels, 2> stale_again = written(false);
+                const std::uint64_t recorded = backend->ShadingRatesForTest() - rates;
+                std::cout << harness.name << " stale and own motion in turn: " << recorded << " shading-rate images"
+                          << std::endl;
+                Check(own_repeat == own_first && own_again == own_first && stale_again == stale_first,
+                      harness.name + " a real frame's frame differs with the frames written before it");
+                Check(recorded == 0 || recorded == expected,
+                      harness.name + " the shading rates were not recorded once per real frame and depth read (" +
+                          std::to_string(recorded) + " images for five frames, " + std::to_string(expected) +
+                          " expected)");
             }
             Outcome outcome;
             outcome.used = result.depth.size() == 2 && result.depth[0];
