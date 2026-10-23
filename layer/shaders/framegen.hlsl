@@ -122,6 +122,10 @@ cbuffer FrameGenConstantBuffer : register(b0) {
 // wherever the chosen vector carries content the newest frame does not show
 // moving that way.
 #define FG_FLAG_ENGINE_BIDIR 65536u
+// Research: the Flow view tints each pixel by its motion in pixels, in full
+// from 2 pixels (sub-pixel motion shows), instead of by its share of the
+// view. Bits 17-22 are kept for the head-motion shimmer design's research.
+#define FG_FLAG_FLOW_FINE 8388608u
 // The candidates' flags (FG_PASS_ENGINE_CONVERT; the nearest surface's in
 // bits 0-3 of its info, the farthest's in 4-7): not a vector (the capture's
 // sentinel), mapped behind the view, absent (a game that clears its vectors:
@@ -1663,7 +1667,11 @@ float4 Synthesize(float2 position, float fraction) {
     const uint view = g.options.z;
     if (view == FG_VIEW_FLOW) {
         const float2 v = flow_here.xy * aspect;
-        const float magnitude = saturate(length(v) * 20.0);
+        float magnitude = saturate(length(v) * 20.0);
+        if ((g.options.y & FG_FLAG_FLOW_FINE) != 0u) {
+            // In pixels: full at 2, the blend's 0.6 from half a pixel.
+            magnitude = saturate(length(flow_here.xy * float2(g.size.xy)) * 0.5);
+        }
         if (magnitude > 0.0) {
             // atan2(0, 0) is undefined on some GPUs; zero motion keeps the image.
             const float3 tint = Hue(frac(atan2(v.y, v.x) / 6.2831853 + 1.0)) * magnitude;

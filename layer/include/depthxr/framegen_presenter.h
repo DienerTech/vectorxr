@@ -1946,6 +1946,10 @@ class FrameGenPresenter {
     bool engine_filter_{false};
     bool engine_cockpit_{false};
     bool engine_tint_{false};
+    // Research (FrameGenTuning::flow_view_fine): the Flow view tints
+    // sub-pixel motion, with VECTORXR_FRAMEGEN_SYNTH_FLOW_VIEW=fine, read at
+    // Start and at each config reload.
+    bool flow_view_fine_{false};
     // Stage 6 (FrameGenTuning::engine_predicate, engine_interpolate), read at
     // Start: VECTORXR_FRAMEGEN_ENGINE_PREDICATE=0 and
     // VECTORXR_FRAMEGEN_ENGINE_INTERPOLATE=lead. A session in Lead holds the

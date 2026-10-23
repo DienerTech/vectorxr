@@ -1650,6 +1650,27 @@ void TestFrameGenPlan() {
            "Extrapolation flag set and no sRGB encode for float output");
     Expect(synth.constants.options[2] == static_cast<std::uint32_t>(depthxr::FrameGenDiagnosticView::kFlow),
            "Diagnostic view should reach the synthesis pass");
+    // The Flow view's fine tint (research): only with that view on; off, or
+    // with another view, every constant stays as it was.
+    Expect((synth.constants.options[1] & depthxr::kFrameGenFlagFlowFine) == 0, "The Flow view's fine tint is off by default");
+    {
+        depthxr::FrameGenTuning fine = tuning;
+        fine.flow_view_fine = true;
+        const auto fine_plan = depthxr::BuildFrameGenViewPlan(request, fine);
+        Expect((fine_plan.dispatches.back().constants.options[1] & depthxr::kFrameGenFlagFlowFine) != 0,
+               "The Flow view tints sub-pixel motion with flow_view_fine");
+        fine.diagnostic = depthxr::FrameGenDiagnosticView::kConfidence;
+        tuning.diagnostic = depthxr::FrameGenDiagnosticView::kConfidence;
+        const auto other = depthxr::BuildFrameGenViewPlan(request, fine);
+        const auto plain = depthxr::BuildFrameGenViewPlan(request, tuning);
+        bool same = other.dispatches.size() == plain.dispatches.size();
+        for (std::size_t i = 0; same && i < other.dispatches.size(); ++i) {
+            same = std::memcmp(&other.dispatches[i].constants, &plain.dispatches[i].constants,
+                               sizeof(depthxr::FrameGenConstants)) == 0;
+        }
+        Expect(same, "flow_view_fine leaves every constant as it was without the Flow view");
+        tuning.diagnostic = depthxr::FrameGenDiagnosticView::kFlow;
+    }
 
     // Depth: the trust scores, their surface vote, the stereo depth-scale
     // vote (with this frame's stereo evidence) in two stages, then the resolve.
@@ -4706,7 +4727,7 @@ void TestResearchSwitches() {
     for (const char* name : {"VECTORXR_FRAMEGEN_ENGINE_CUTS", "VECTORXR_FRAMEGEN_ENGINE_MV",
                              "VECTORXR_FRAMEGEN_DEPTH_ENCODING_CHECK", "VECTORXR_FRAMEGEN_JIT",
                              "VECTORXR_FRAMEGEN_ENGINE_MV_STATE", "VECTORXR_FRAMEGEN_DEPTH_SPLAT",
-                             "VECTORXR_FRAMEGEN_WORLD"}) {
+                             "VECTORXR_FRAMEGEN_WORLD", "VECTORXR_FRAMEGEN_SYNTH_FLOW_VIEW"}) {
         _putenv_s(name, "");
     }
     Expect(!depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_CUTS"), "Research switches: none without a file");
@@ -4721,7 +4742,8 @@ void TestResearchSwitches() {
              << "VECTORXR_FRAMEGEN_JIT=0\r\n"
              << "VECTORXR_FRAMEGEN_ENGINE_CUTS=1\r\n"
              << "VECTORXR_FRAMEGEN_DEPTH_SPLAT=1\r\n"
-             << "VECTORXR_FRAMEGEN_WORLD=0\r\n";
+             << "VECTORXR_FRAMEGEN_WORLD=0\r\n"
+             << "VECTORXR_FRAMEGEN_SYNTH_FLOW_VIEW=fine\r\n";
     }
     depthxr::TakeResearchFileSwitches(); // what earlier reads in the process left
     const std::uint64_t reads = depthxr::ResearchFileReads();
@@ -4764,6 +4786,8 @@ void TestResearchSwitches() {
                depthxr::TakeResearchFileSwitches() ==
                    std::vector<std::string>{"VECTORXR_FRAMEGEN_ENGINE_MV=census", "VECTORXR_FRAMEGEN_WORLD=0"},
            "Research switches: each session's are told, once each");
+    Expect(depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_SYNTH_FLOW_VIEW") == "fine",
+           "Research switches: the synthesis research's switches are among them");
     for (const char* name : {"VECTORXR_FRAMEGEN_ENGINE_CUTS", "VECTORXR_FRAMEGEN_JIT"}) {
         _putenv_s(name, "");
     }

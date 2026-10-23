@@ -128,6 +128,10 @@ FrameGenConstants BaseConstants(const FrameGenViewRequest& request, const FrameG
     if (tuning.depth_match && request.depth) {
         flags |= kFrameGenFlagDepthMatch;
     }
+    // Only with the Flow view on: elsewhere the constants stay as they were.
+    if (tuning.flow_view_fine && tuning.diagnostic == FrameGenDiagnosticView::kFlow) {
+        flags |= kFrameGenFlagFlowFine;
+    }
     base.options = {kFrameGenSearchRadius, flags, static_cast<std::uint32_t>(tuning.diagnostic), 0};
     base.tuning = {std::clamp(tuning.fractions[0], 0.0f, 1.0f), limit, 4.0f + 26.0f * suppression,
                    3.0f + 21.0f * suppression};
@@ -3586,7 +3590,7 @@ std::optional<std::string> ReadResearchSwitch(const char* name) {
     }
     const std::string_view wanted(name);
     if (wanted.rfind("VECTORXR_FRAMEGEN_ENGINE_", 0) != 0 && wanted.rfind("VECTORXR_FRAMEGEN_DEPTH_", 0) != 0 &&
-        wanted != "VECTORXR_FRAMEGEN_WORLD") {
+        wanted.rfind("VECTORXR_FRAMEGEN_SYNTH_", 0) != 0 && wanted != "VECTORXR_FRAMEGEN_WORLD") {
         return std::nullopt;
     }
     const std::filesystem::path local = LocalAppDataPath();

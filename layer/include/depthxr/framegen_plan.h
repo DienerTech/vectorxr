@@ -329,6 +329,13 @@ inline constexpr std::uint32_t kFrameGenFlagEngineVisibility = 32768u;
 // chosen vector carries content the newest frame does not show moving that
 // way (FrameGenTuning::engine_bidir).
 inline constexpr std::uint32_t kFrameGenFlagEngineBidir = 65536u;
+// Research (FrameGenTuning::flow_view_fine). Synthesis with the Flow view:
+// each pixel tinted by its motion in pixels, in full from 2 pixels, instead
+// of by its share of the view (tens of pixels before the tint shows): the
+// sub-pixel motion that moves content between real and generated frames.
+// Bits 17-22 are kept for the resampling, matched sharpness, smooth shift
+// and rotor research of the head-motion shimmer design.
+inline constexpr std::uint32_t kFrameGenFlagFlowFine = 1u << 23;
 // World motion: samples per side of the fit's grid, and its iterations.
 inline constexpr std::uint32_t kFrameGenWorldGrid = 128u;
 // The trust vote's tile side in half-resolution texels (FG_TRUST_TILE):
@@ -665,6 +672,9 @@ struct FrameGenTuning {
     FrameGenSynthesisMode mode{FrameGenSynthesisMode::kInterpolate};
     FrameGenFlowQuality quality{FrameGenFlowQuality::kBalanced};
     FrameGenDiagnosticView diagnostic{FrameGenDiagnosticView::kOff};
+    // Research: the Flow view tints sub-pixel motion too, in full at 2
+    // pixels (kFrameGenFlagFlowFine; VECTORXR_FRAMEGEN_SYNTH_FLOW_VIEW=fine).
+    bool flow_view_fine{false};
     int artifact_suppression{50};
     int motion_limit_percent{10};
     // One entry per generated frame (`generated` of them). Interpolation:
@@ -2147,9 +2157,10 @@ class FrameGenWorldDeltaCalibration {
 
 // --- Research switches ------------------------------------------------------
 
-// A research switch's value: the environment's, else, for the engine motion
-// and depth research's switches (VECTORXR_FRAMEGEN_ENGINE_*,
-// VECTORXR_FRAMEGEN_DEPTH_*, VECTORXR_FRAMEGEN_WORLD), a NAME=VALUE line of
+// A research switch's value: the environment's, else, for the engine motion,
+// depth and synthesis research's switches (VECTORXR_FRAMEGEN_ENGINE_*,
+// VECTORXR_FRAMEGEN_DEPTH_*, VECTORXR_FRAMEGEN_SYNTH_*,
+// VECTORXR_FRAMEGEN_WORLD), a NAME=VALUE line of
 // %LOCALAPPDATA%\VectorXR\framegen-research.txt, read at each call: a flight
 // changes them between a game's sessions without signing out to change the
 // environment. None where neither has it (an empty value is none).

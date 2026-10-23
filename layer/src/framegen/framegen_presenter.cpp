@@ -545,6 +545,9 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
     engine_filter_ = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_FILTER") == "1";
     engine_cockpit_ = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_COCKPIT") == "1";
     engine_tint_ = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_TINT") == "1";
+    // Research: the Flow view tinting sub-pixel motion (again at each config
+    // reload).
+    flow_view_fine_ = ReadResearchSwitch("VECTORXR_FRAMEGEN_SYNTH_FLOW_VIEW") == "fine";
     // Stage 6, Lead: no measured passes at all (VECTORXR_FRAMEGEN_ENGINE_PREDICATE=0)
     // and interpolating led too (VECTORXR_FRAMEGEN_ENGINE_INTERPOLATE=lead),
     // for the session; the vectors lead once their verdicts let them.
@@ -1057,9 +1060,11 @@ void FrameGenPresenter::Configure(const FrameGenResolvedSettings& settings) {
     const bool engine_filter = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_FILTER") == "1";
     const bool engine_cockpit = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_COCKPIT") == "1";
     const bool engine_tint = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_TINT") == "1";
+    const bool flow_view_fine = ReadResearchSwitch("VECTORXR_FRAMEGEN_SYNTH_FLOW_VIEW") == "fine";
     std::scoped_lock lock(mutex_);
     ReconfigureEngineLocked(ParseFrameGenEngineMode(engine_mode.value_or("").c_str()), engine_filter, engine_cockpit,
                             engine_tint);
+    flow_view_fine_ = flow_view_fine;
     // Just in time, the presenter thread keeps the mode it started with
     // (StayThreadedLocked): another one starts it again, after a fresh run of
     // steady frames, as turning Frame Generation off and on does. Frames
@@ -5162,6 +5167,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         tuning.engine_cockpit = engine_cockpit_;
         tuning.engine_tint = engine_tint_;
         tuning.diagnostic = settings_.diagnostic_view;
+        tuning.flow_view_fine = flow_view_fine_;
         tuning.artifact_suppression = settings_.artifact_suppression;
         tuning.motion_limit_percent = settings_.motion_limit_percent;
         tuning.generated = static_cast<std::uint8_t>(count);

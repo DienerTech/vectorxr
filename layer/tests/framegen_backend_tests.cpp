@@ -45,6 +45,8 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <tuple>
@@ -454,6 +456,29 @@ int RunScenarios(Harness& harness) {
     std::cout << harness.name << " interpolate: error " << interp_error << " vs hold " << hold_error << '\n';
     Check(interp_error < 0.3 * hold_error, harness.name + " interpolation is not better than repeating the newest frame");
     Check(MeanError(interpolated, truth_mid, 0, 0, 64, 64) < 0.01, harness.name + " static background was disturbed");
+    // The Flow view's fine tint (research, FrameGenTuning::flow_view_fine):
+    // without the Flow view the frame is as it was; with it, sub-pixel
+    // motion (the background's measured flow is not quite zero) is tinted
+    // too, so the frame changes more than with the view's own scale.
+    {
+        const auto again = [&] {
+            gpu->ResetHistory();
+            run(0, true, 0, 0);
+            return run(1, true, 0, 0);
+        };
+        tuning.flow_view_fine = true;
+        const Pixels unviewed = again();
+        tuning.diagnostic = FrameGenDiagnosticView::kFlow;
+        const Pixels fine_view = again();
+        tuning.flow_view_fine = false;
+        const Pixels coarse_view = again();
+        tuning.diagnostic = FrameGenDiagnosticView::kOff;
+        Check(unviewed == interpolated, harness.name + " the Flow view's fine tint changes nothing without the Flow view");
+        const double fine = MeanError(fine_view, interpolated, 0, 0, kSize, kSize);
+        const double coarse = MeanError(coarse_view, interpolated, 0, 0, kSize, kSize);
+        Check(fine > coarse + 0.005, harness.name + " the Flow view's fine tint shows more motion (" + std::to_string(fine) +
+                                         " against " + std::to_string(coarse) + ")");
+    }
 
     // 2b. A 3x multiplier: one flow field feeds two generated frames.
     {
@@ -5156,6 +5181,29 @@ int RunProfile(Harness& harness) {
 // FG_REPLAY_AHEAD=2 to the frame after next; interpolating, with
 // VECTORXR_FRAMEGEN_ENGINE_VISIBILITY=1|merge (and _BIDIR=1) the seen test
 // (and the forward map) of stage 8, led with _INTERPOLATE=lead.
+// Closer to a session (head-motion shimmer design, section 1):
+// FG_REPLAY_JIT=own with FG_REPLAY_MODE=interpolate interpolates just in
+// time (frames k - 1 and k + 1 analyzed alone, then written between them, as
+// a session writes them at each refresh); FG_REPLAY_PREDICT=1 holds just in
+// time too, and interpolating puts the eye on the line between the pair, as
+// the presenter does (EyeShiftsLocked), instead of where the truth was
+// rendered. FG_REPLAY_FRACTIONS=f1,f2,... (or live: the refreshes of the
+// display period in presenter.txt over each frame's interval) writes each
+// real frame just in time at those fractions from consecutive pairs, as a
+// session does (no real frame shows those times: the frame compared with is
+// the newest one, its aligned lines the newest moved to each frame's eye by
+// its own depth, valid for content still in the application's space, the
+// cockpit). FG_REPLAY_HARDWARE=capture takes the flow each frame was
+// captured with (frame.txt); unset it is the shader cores', whatever the
+// capture used. FG_REPLAY_TRUTH=cubic resamples the truth (turned and
+// aligned) by Catmull-Rom in linear light instead of bilinearly.
+// FG_REPLAY_DEPTH_SCALE=s gives the backend each frame's depth times s (the
+// evaluation keeps the captured depth). New measures (ReplayMeasures; off
+// with FG_REPLAY_MEASURES=0) print lines of their own: fine detail against
+// the truth as rendered and the newest frame, residual shifts, the luma
+// pair's residual, the flow by band, the eye-shift map against the CPU's.
+// With FG_REPLAY_CROP the crops include the aligned truth and four times
+// the difference from it.
 bool g_replay = false;
 std::string g_replay_directory, g_replay_output;
 
@@ -5214,8 +5262,11 @@ struct ReplayFrame {
     FrameGenTuning tuning;
     std::vector<ReplayView> views;
     // presenter.txt (optional): the interval to the frame's display time
-    // over the interval before, unclamped (FG_REPLAY_TIME=display).
+    // over the interval before, unclamped (FG_REPLAY_TIME=display); that
+    // interval and the runtime's display period (nanoseconds: the
+    // refreshes a session wrote generated frames at, FG_REPLAY_FRACTIONS=live).
     std::optional<float> display_ratio;
+    std::optional<double> interval, period;
     // motion.txt (optional): the frame's record and the record before it
     // (the layer's count of frames with a projection; 0: none).
     std::uint64_t record{0};
@@ -5272,6 +5323,13 @@ bool LoadReplayFrame(const std::string& directory, ReplayFrame& frame) {
     // it: its strict scan above stays as it is). Older captures have none.
     if (const std::vector<std::string> ratio = TextLine(directory + "/presenter.txt", "ratio"); ok && !ratio.empty()) {
         frame.display_ratio = std::stof(ratio[0]);
+    }
+    if (const std::vector<std::string> interval = TextLine(directory + "/presenter.txt", "interval");
+        ok && !interval.empty()) {
+        frame.interval = std::stod(interval[0]);
+    }
+    if (const std::vector<std::string> period = TextLine(directory + "/presenter.txt", "period"); ok && !period.empty()) {
+        frame.period = std::stod(period[0]);
     }
     for (std::size_t i = 0; i < count && ok; ++i) {
         ReplayView& view = frame.views[i];
@@ -5341,9 +5399,74 @@ std::array<std::array<double, 3>, 3> ReplayRotation(const std::array<float, 4>& 
              {2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)}}};
 }
 
+// Catmull-Rom weights of the four texels around a sample `t` (0 to 1) past
+// the second of them: the cubic FG_FLAG_RESAMPLE_CUBIC is to approximate
+// (head-motion shimmer design, fix A), here with all 16 taps.
+std::array<double, 4> CatmullRomWeights(double t) {
+    return {t * (-0.5 + t * (1.0 - 0.5 * t)), 1.0 + t * t * (-2.5 + 1.5 * t), t * (0.5 + t * (2.0 - 1.5 * t)),
+            t * t * (-0.5 + 0.5 * t)};
+}
+
+// A float image at (x, y) in texels (texel centres at whole numbers) by
+// Catmull-Rom, clamped at its edges.
+double SampleCatmullRom(const std::vector<float>& image, std::uint32_t width, std::uint32_t height, double x, double y) {
+    const double fx = std::floor(x), fy = std::floor(y);
+    const std::array<double, 4> wx = CatmullRomWeights(x - fx), wy = CatmullRomWeights(y - fy);
+    const int ix = static_cast<int>(fx), iy = static_cast<int>(fy);
+    double sum = 0.0;
+    for (int j = 0; j < 4; ++j) {
+        const int py = std::clamp(iy - 1 + j, 0, static_cast<int>(height) - 1);
+        double row = 0.0;
+        for (int i = 0; i < 4; ++i) {
+            const int px = std::clamp(ix - 1 + i, 0, static_cast<int>(width) - 1);
+            row += wx[i] * image[std::size_t(py) * width + std::size_t(px)];
+        }
+        sum += wy[j] * row;
+    }
+    return sum;
+}
+
+// The 256 sRGB codes in linear light (SrgbToLinear).
+const std::array<float, 256>& SrgbCodes() {
+    static const std::array<float, 256> codes = [] {
+        std::array<float, 256> table{};
+        for (int i = 0; i < 256; ++i) table[i] = SrgbToLinear(static_cast<float>(i) / 255.0f);
+        return table;
+    }();
+    return codes;
+}
+
+// An sRGB image's pixel at (x, y) in pixels (centres at whole numbers) by
+// Catmull-Rom in linear light, as the shaders filter an sRGB image, clamped
+// at the edges; a whole-pixel position gives the pixel itself.
+std::uint32_t CatmullRomPixel(const Pixels& image, std::uint32_t width, std::uint32_t height, double x, double y) {
+    const double fx = std::floor(x), fy = std::floor(y);
+    const std::array<double, 4> wx = CatmullRomWeights(x - fx), wy = CatmullRomWeights(y - fy);
+    const int ix = static_cast<int>(fx), iy = static_cast<int>(fy);
+    const std::array<float, 256>& codes = SrgbCodes();
+    double sum[3] = {};
+    for (int j = 0; j < 4; ++j) {
+        const int py = std::clamp(iy - 1 + j, 0, static_cast<int>(height) - 1);
+        for (int i = 0; i < 4; ++i) {
+            const int px = std::clamp(ix - 1 + i, 0, static_cast<int>(width) - 1);
+            const std::uint32_t p = image[std::size_t(py) * width + std::size_t(px)];
+            const double weight = wx[i] * wy[j];
+            for (int c = 0; c < 3; ++c) sum[c] += weight * codes[(p >> (8 * c)) & 255u];
+        }
+    }
+    std::uint32_t pixel = 0xff000000u;
+    for (int c = 0; c < 3; ++c) {
+        pixel |= static_cast<std::uint32_t>(std::lround(255.0f * LinearToSrgb(static_cast<float>(sum[c])))) << (8 * c);
+    }
+    return pixel;
+}
+
 // `next` turned to `view`'s orientation (the runtime's correction), sampled
-// bilinearly; `valid` marks pixels inside `next`'s view.
-Pixels TurnTo(const ReplayView& view, const ReplayView& next, std::vector<bool>& valid) {
+// bilinearly, or by Catmull-Rom in linear light (`cubic`,
+// FG_REPLAY_TRUTH=cubic: a sharper resample of the truth, which the bilinear
+// one softens as generated frames are softened); `valid` marks pixels
+// inside `next`'s view.
+Pixels TurnTo(const ReplayView& view, const ReplayView& next, std::vector<bool>& valid, bool cubic = false) {
     const auto a = ReplayRotation(view.newest.orientation);
     const auto b = ReplayRotation(next.newest.orientation);
     const double l = std::tan(view.newest.angle_left), r = std::tan(view.newest.angle_right);
@@ -5363,16 +5486,20 @@ Pixels TurnTo(const ReplayView& view, const ReplayView& next, std::vector<bool>&
                 const double sx = ((local[0] / -local[2]) - nl) / (nr - nl) * next.width - 0.5;
                 const double sy = ((local[1] / -local[2]) - nu) / (nd - nu) * next.height - 0.5;
                 if (sx < 0 || sy < 0 || sx > next.width - 1.001 || sy > next.height - 1.001) continue;
-                const int ix = static_cast<int>(sx), iy = static_cast<int>(sy);
-                const double fx = sx - ix, fy = sy - iy;
                 std::uint32_t pixel = 0xff000000u;
-                for (int c = 0; c < 3; ++c) {
-                    auto at = [&](int px, int py) {
-                        return static_cast<double>((next.color[std::size_t{static_cast<std::uint32_t>(py)} * next.width + px] >> (8 * c)) & 255u);
-                    };
-                    const double value = (at(ix, iy) * (1 - fx) + at(ix + 1, iy) * fx) * (1 - fy) +
-                                         (at(ix, iy + 1) * (1 - fx) + at(ix + 1, iy + 1) * fx) * fy;
-                    pixel |= static_cast<std::uint32_t>(std::lround(value)) << (8 * c);
+                if (cubic) {
+                    pixel = CatmullRomPixel(next.color, next.width, next.height, sx, sy);
+                } else {
+                    const int ix = static_cast<int>(sx), iy = static_cast<int>(sy);
+                    const double fx = sx - ix, fy = sy - iy;
+                    for (int c = 0; c < 3; ++c) {
+                        auto at = [&](int px, int py) {
+                            return static_cast<double>((next.color[std::size_t{static_cast<std::uint32_t>(py)} * next.width + px] >> (8 * c)) & 255u);
+                        };
+                        const double value = (at(ix, iy) * (1 - fx) + at(ix + 1, iy) * fx) * (1 - fy) +
+                                             (at(ix, iy + 1) * (1 - fx) + at(ix + 1, iy + 1) * fx) * fy;
+                        pixel |= static_cast<std::uint32_t>(std::lround(value)) << (8 * c);
+                    }
                 }
                 const std::size_t index = std::size_t{y} * view.width + x;
                 out[index] = pixel;
@@ -5530,9 +5657,14 @@ struct ReplayMasked {
 // - untrusted: a source's depth there disagrees with the surface, or the
 //   backend's trust pass disproved it (`newest_trusted`: the newest source's
 //   resolved depth, negative where disproved; empty when not read).
+// `next` is sampled bilinearly, or by Catmull-Rom (`cubic`, as TurnTo);
+// `nearest` (when given) receives, for each pixel kept, `next`'s own pixel
+// nearest the point it shows (its index; UINT32_MAX elsewhere): the truth as
+// rendered, never resampled (CompareDetail).
 Pixels ReplayAlign(const ReplayView& view, const std::array<double, 3>& eye, const ReplayView& next,
                    const std::vector<const ReplayView*>& sources, const std::vector<float>& newest_trusted,
-                   std::vector<bool>& valid, ReplayMasked& masked) {
+                   std::vector<bool>& valid, ReplayMasked& masked, bool cubic = false,
+                   std::vector<std::uint32_t>* nearest = nullptr) {
     struct Frame {
         std::array<std::array<double, 3>, 3> rotation;
         double l, r, u, d;
@@ -5564,6 +5696,7 @@ Pixels ReplayAlign(const ReplayView& view, const std::array<double, 3>& eye, con
     };
     Pixels out(view.color.size(), 0xff000000u);
     valid.assign(view.color.size(), false);
+    if (nearest) nearest->assign(view.color.size(), UINT32_MAX);
     std::atomic<std::uint64_t> counts[4] = {}; // kept by rotation alone, unaligned, disoccluded, untrusted
     auto rows = [&](std::uint32_t first, std::uint32_t step) {
         std::uint64_t local_counts[4] = {};
@@ -5644,20 +5777,29 @@ Pixels ReplayAlign(const ReplayView& view, const std::array<double, 3>& eye, con
                     local_counts[1] += 1;
                     continue;
                 }
-                const int ix = static_cast<int>(sx), iy = static_cast<int>(sy);
-                const double fx = sx - ix, fy = sy - iy;
                 std::uint32_t pixel = 0xff000000u;
-                for (int c = 0; c < 3; ++c) {
-                    auto at = [&](int px, int py) {
-                        return static_cast<double>((next.color[std::size_t{static_cast<std::uint32_t>(py)} * next.width + px] >> (8 * c)) & 255u);
-                    };
-                    const double value = (at(ix, iy) * (1 - fx) + at(ix + 1, iy) * fx) * (1 - fy) +
-                                         (at(ix, iy + 1) * (1 - fx) + at(ix + 1, iy + 1) * fx) * fy;
-                    pixel |= static_cast<std::uint32_t>(std::lround(value)) << (8 * c);
+                if (cubic) {
+                    pixel = CatmullRomPixel(next.color, next.width, next.height, sx, sy);
+                } else {
+                    const int ix = static_cast<int>(sx), iy = static_cast<int>(sy);
+                    const double fx = sx - ix, fy = sy - iy;
+                    for (int c = 0; c < 3; ++c) {
+                        auto at = [&](int px, int py) {
+                            return static_cast<double>((next.color[std::size_t{static_cast<std::uint32_t>(py)} * next.width + px] >> (8 * c)) & 255u);
+                        };
+                        const double value = (at(ix, iy) * (1 - fx) + at(ix + 1, iy) * fx) * (1 - fy) +
+                                             (at(ix, iy + 1) * (1 - fx) + at(ix + 1, iy + 1) * fx) * fy;
+                        pixel |= static_cast<std::uint32_t>(std::lround(value)) << (8 * c);
+                    }
                 }
                 const std::size_t index = std::size_t{y} * view.width + x;
                 out[index] = pixel;
                 valid[index] = true;
+                if (nearest) {
+                    const std::uint32_t nx = std::min(static_cast<std::uint32_t>(u * next.width), next.width - 1);
+                    const std::uint32_t ny = std::min(static_cast<std::uint32_t>(w * next.height), next.height - 1);
+                    (*nearest)[index] = ny * next.width + nx;
+                }
             }
         }
         for (int i = 0; i < 4; ++i) counts[i] += local_counts[i];
@@ -5846,6 +5988,859 @@ bool ReplayDepthAsDescribed(const std::string& directory, ReplayFrame& frame) {
     return true;
 }
 
+// --- Replay measures (head-motion shimmer design, section 1) ----------------
+// What a generated frame keeps of the real frames' fine detail, and where
+// its content sits, against real frames as rendered: the truth turned or
+// aligned (TurnTo, ReplayAlign) is resampled bilinearly, which softens it as
+// generated frames are softened and so hides what they lose. Printed as
+// lines of their own, beside the bad-pixel lines (which stay as they were).
+
+// Runs `rows(first, step)` on every hardware thread (rows first, first +
+// step, ...), as TurnTo does.
+void ReplayParallel(const std::function<void(std::uint32_t, std::uint32_t)>& rows) {
+    const std::uint32_t threads = std::max(1u, std::thread::hardware_concurrency());
+    std::vector<std::thread> workers;
+    for (std::uint32_t t = 0; t < threads; ++t) workers.emplace_back(rows, t, threads);
+    for (auto& worker : workers) worker.join();
+}
+
+// Values in pixels binned 1/200 pixel wide up to 128 pixels (the last bin
+// holds everything beyond), exact zeros apart (the cockpit's flow is set to
+// zero), for percentiles over millions of pixels.
+struct ReplayHistogram {
+    static constexpr double kBin = 0.005;
+    static constexpr std::size_t kBins = 25601;
+    std::vector<std::uint64_t> bins = std::vector<std::uint64_t>(kBins, 0);
+    double sum{0.0};
+    std::uint64_t count{0}, zeros{0};
+    void Add(double value) {
+        ++count;
+        if (value == 0.0) {
+            ++zeros;
+            return;
+        }
+        const double bin = std::isfinite(value) ? std::clamp(value / kBin, 0.0, double(kBins - 1)) : double(kBins - 1);
+        ++bins[static_cast<std::size_t>(bin)];
+        sum += std::isfinite(value) ? value : 0.0;
+    }
+    void Add(const ReplayHistogram& other) {
+        for (std::size_t i = 0; i < kBins; ++i) bins[i] += other.bins[i];
+        sum += other.sum;
+        count += other.count;
+        zeros += other.zeros;
+    }
+    double Mean() const { return count ? sum / static_cast<double>(count) : 0.0; }
+    // The centre of the bin where `q` of the values are reached (0 among
+    // the zeros).
+    double Percentile(double q) const {
+        const double wanted = q * static_cast<double>(count);
+        std::uint64_t seen = zeros;
+        if (seen > 0 && static_cast<double>(seen) >= wanted) return 0.0;
+        for (std::size_t i = 0; i < kBins; ++i) {
+            seen += bins[i];
+            if (seen > 0 && static_cast<double>(seen) >= wanted) return (static_cast<double>(i) + 0.5) * kBin;
+        }
+        return 0.0;
+    }
+};
+
+// A ratio as printed: "-" where there is nothing to divide by.
+std::string ReplayRatio(double numerator, double denominator) {
+    char text[32] = "-";
+    if (denominator > 0.0) std::snprintf(text, sizeof(text), "%.3f", numerator / denominator);
+    return text;
+}
+
+// One pixel's error as CompareTo counts it: mean |dRGB| over 255.
+double ReplayPixelError(std::uint32_t a, std::uint32_t b) {
+    double error = 0.0;
+    for (int c = 0; c < 3; ++c) {
+        error += std::abs(static_cast<int>((a >> (8 * c)) & 255u) - static_cast<int>((b >> (8 * c)) & 255u));
+    }
+    return error / (3 * 255.0);
+}
+
+// Luma (PixelLuma) of every pixel.
+std::vector<float> ReplayLuma(const Pixels& image) {
+    std::vector<float> luma(image.size());
+    ReplayParallel([&](std::uint32_t first, std::uint32_t step) {
+        for (std::size_t i = first; i < image.size(); i += step) luma[i] = static_cast<float>(PixelLuma(image[i]));
+    });
+    return luma;
+}
+
+// |Laplacian| of luma at an interior pixel: what a pixel holds that its
+// neighbours do not (fine detail, the first thing a resample softens).
+double ReplayLaplacian(const std::vector<float>& luma, std::size_t index, std::uint32_t width) {
+    return std::abs(4.0 * luma[index] - luma[index - 1] - luma[index + 1] - luma[index - width] - luma[index + width]);
+}
+
+// The tiles of `tile` pixels FG_PASS_SHADING_RATE shades once per 2x2
+// pixels (1 each, row by row, `tiles_x` a row): those whose centre lies off
+// the view axis by the tangent `coarse` (VECTORXR_FRAMEGEN_VRS) or more,
+// unless a texel of the newest frame's resolved depth (`depth`, empty when
+// the frame used none) under them is nearer than 4 m. Empty without
+// variable-rate shading (`tile` 0, or `coarse` 0).
+std::vector<std::uint8_t> ReplayCoarseTiles(const ReplayView& view, const std::vector<float>& depth, std::uint32_t tile,
+                                            double coarse, std::uint32_t& tiles_x) {
+    tiles_x = 0;
+    if (tile == 0 || !(coarse > 0.0)) return {};
+    tiles_x = (view.width + tile - 1) / tile;
+    const std::uint32_t tiles_y = (view.height + tile - 1) / tile;
+    const double l = std::tan(view.newest.angle_left), r = std::tan(view.newest.angle_right);
+    const double u = std::tan(view.newest.angle_up), d = std::tan(view.newest.angle_down);
+    const bool with_depth = depth.size() == std::size_t{view.half_width} * view.half_height;
+    const double scale_x = double(view.half_width) / view.width, scale_y = double(view.half_height) / view.height;
+    const int half_w = static_cast<int>(view.half_width), half_h = static_cast<int>(view.half_height);
+    std::vector<std::uint8_t> coarse_tiles(std::size_t{tiles_x} * tiles_y, 0);
+    for (std::uint32_t ty = 0; ty < tiles_y; ++ty) {
+        for (std::uint32_t tx = 0; tx < tiles_x; ++tx) {
+            const double cx = std::min((tx + 0.5) * tile, double(view.width)) / view.width;
+            const double cy = std::min((ty + 0.5) * tile, double(view.height)) / view.height;
+            bool per_2x2 = std::hypot(l + (r - l) * cx, u + (d - u) * cy) >= coarse;
+            if (per_2x2 && with_depth) {
+                // The shader's 2x2 gathers from each even step (clamped).
+                const int first_x = static_cast<int>(std::floor(tx * tile * scale_x));
+                const int first_y = static_cast<int>(std::floor(ty * tile * scale_y));
+                const int last_x = std::min(static_cast<int>(std::ceil((tx + 1.0) * tile * scale_x)), half_w) - 1;
+                const int last_y = std::min(static_cast<int>(std::ceil((ty + 1.0) * tile * scale_y)), half_h) - 1;
+                for (int y = first_y; y <= last_y && per_2x2; y += 2) {
+                    for (int x = first_x; x <= last_x && per_2x2; x += 2) {
+                        for (int i = 0; i < 4; ++i) {
+                            const int px = std::min(x + (i & 1), half_w - 1), py = std::min(y + (i >> 1), half_h - 1);
+                            const float z = depth[std::size_t(py) * view.half_width + std::size_t(px)];
+                            if (z >= 1e-6f && z <= 4.0f) per_2x2 = false;
+                        }
+                    }
+                }
+            }
+            coarse_tiles[std::size_t{ty} * tiles_x + tx] = per_2x2 ? 1 : 0;
+        }
+    }
+    return coarse_tiles;
+}
+
+// Fine detail (CompareDetail): summed |Laplacian| of luma of the generated
+// frame, of the truth as rendered (each pixel reads the truth's own pixel
+// nearest the point it shows: never resampled, so no resampler's softness
+// counts for the frame) and of the newest real frame (which generated
+// frames alternate with in the headset), by depth band (kReplayBands) and by
+// shading rate (FG_PASS_SHADING_RATE's tiles). Pixels where the truth's own
+// |Laplacian| is above kReplayDetailEdge hold fine detail: of them, those
+// off by more than a tenth against the aligned truth, generated and held
+// (the newest frame shown instead).
+inline constexpr double kReplayDetailEdge = 0.08;
+struct ReplayDetail {
+    std::array<double, 4> generated{}, truth{}, newest{}, pixels{};
+    std::array<double, 2> rate_generated{}, rate_truth{}, rate_newest{}, rate_pixels{}; // per pixel, per 2x2
+    std::array<double, 4> fine{}, fine_bad{}, fine_held_bad{};
+    void Add(const ReplayDetail& other) {
+        for (int b = 0; b < 4; ++b) {
+            generated[b] += other.generated[b];
+            truth[b] += other.truth[b];
+            newest[b] += other.newest[b];
+            pixels[b] += other.pixels[b];
+            fine[b] += other.fine[b];
+            fine_bad[b] += other.fine_bad[b];
+            fine_held_bad[b] += other.fine_held_bad[b];
+        }
+        for (int r = 0; r < 2; ++r) {
+            rate_generated[r] += other.rate_generated[r];
+            rate_truth[r] += other.rate_truth[r];
+            rate_newest[r] += other.rate_newest[r];
+            rate_pixels[r] += other.rate_pixels[r];
+        }
+    }
+    // "<4 m 0.912 (vs newest 0.934), ...; per pixel ..., per 2x2 ...;
+    // newest vs truth ...; fine detail ...".
+    std::string Describe() const {
+        std::string text = "R";
+        for (int b = 0; b < 4; ++b) {
+            text += std::string(b ? ", " : " ") + kReplayBands[b] + " " + ReplayRatio(generated[b], truth[b]) +
+                    " (vs newest " + ReplayRatio(generated[b], newest[b]) + ")";
+        }
+        text += "; shaded per pixel " + ReplayRatio(rate_generated[0], rate_truth[0]) + " (vs newest " +
+                ReplayRatio(rate_generated[0], rate_newest[0]) + "), per 2x2 " +
+                ReplayRatio(rate_generated[1], rate_truth[1]) + " (vs newest " +
+                ReplayRatio(rate_generated[1], rate_newest[1]) + ", " +
+                ReplayRatio(100.0 * rate_pixels[1], rate_pixels[0] + rate_pixels[1]) + "% of pixels)";
+        text += "; newest vs truth";
+        for (int b = 0; b < 4; ++b) {
+            text += std::string(b ? ", " : " ") + kReplayBands[b] + " " + ReplayRatio(newest[b], truth[b]);
+        }
+        const double all = pixels[0] + pixels[1] + pixels[2] + pixels[3];
+        const double fine_all = fine[0] + fine[1] + fine[2] + fine[3];
+        char tail[256];
+        std::snprintf(tail, sizeof(tail),
+                      "; fine detail %.1f%% of pixels: aligned bad %s%% (<4 m %s%%), held %s%% (<4 m %s%%)",
+                      all > 0.0 ? 100.0 * fine_all / all : 0.0,
+                      ReplayRatio(100.0 * (fine_bad[0] + fine_bad[1] + fine_bad[2] + fine_bad[3]), fine_all).c_str(),
+                      ReplayRatio(100.0 * fine_bad[0], fine[0]).c_str(),
+                      ReplayRatio(100.0 * (fine_held_bad[0] + fine_held_bad[1] + fine_held_bad[2] + fine_held_bad[3]),
+                                  fine_all)
+                          .c_str(),
+                      ReplayRatio(100.0 * fine_held_bad[0], fine[0]).c_str());
+        return text + tail;
+    }
+};
+
+// `generated` and `newest` (luma alongside) are in the generated view;
+// `aligned` with `valid` the aligned truth and `nearest` the truth's own
+// pixel behind each (ReplayAlign); `truth_luma` the truth's own luma;
+// `coarse` the shading tiles (ReplayCoarseTiles, empty: all per pixel).
+ReplayDetail CompareDetail(const Pixels& generated, const std::vector<float>& generated_luma, const Pixels& newest,
+                           const std::vector<float>& newest_luma, const Pixels& aligned, const std::vector<bool>& valid,
+                           const std::vector<std::uint32_t>& nearest, const ReplayView& view, const ReplayView& truth,
+                           const std::vector<float>& truth_luma, const std::vector<std::uint8_t>& coarse,
+                           std::uint32_t tile, std::uint32_t tiles_x) {
+    ReplayDetail total;
+    std::mutex mutex;
+    ReplayParallel([&](std::uint32_t first, std::uint32_t step) {
+        ReplayDetail local;
+        for (std::uint32_t y = 1 + first; y + 1 < view.height; y += step) {
+            const std::uint32_t hy = std::min(y / 2, view.half_height - 1);
+            for (std::uint32_t x = 1; x + 1 < view.width; ++x) {
+                const std::size_t index = std::size_t{y} * view.width + x;
+                if (!valid[index] || !valid[index - 1] || !valid[index + 1] || !valid[index - view.width] ||
+                    !valid[index + view.width]) {
+                    continue;
+                }
+                const std::uint32_t own = nearest[index];
+                if (own == UINT32_MAX) continue;
+                const std::uint32_t tx = own % truth.width, ty = own / truth.width;
+                if (tx == 0 || ty == 0 || tx + 1 >= truth.width || ty + 1 >= truth.height) continue;
+                const int band =
+                    ReplayBand(std::abs(view.depth[std::size_t{hy} * view.half_width + std::min(x / 2, view.half_width - 1)]));
+                const double g = ReplayLaplacian(generated_luma, index, view.width);
+                const double n = ReplayLaplacian(newest_luma, index, view.width);
+                const double t = ReplayLaplacian(truth_luma, own, truth.width);
+                local.generated[band] += g;
+                local.truth[band] += t;
+                local.newest[band] += n;
+                local.pixels[band] += 1.0;
+                const int rate = coarse.empty() ? 0 : coarse[std::size_t{y / tile} * tiles_x + x / tile];
+                local.rate_generated[rate] += g;
+                local.rate_truth[rate] += t;
+                local.rate_newest[rate] += n;
+                local.rate_pixels[rate] += 1.0;
+                if (t > kReplayDetailEdge) {
+                    local.fine[band] += 1.0;
+                    local.fine_bad[band] += ReplayPixelError(generated[index], aligned[index]) > 0.1 ? 1.0 : 0.0;
+                    local.fine_held_bad[band] += ReplayPixelError(newest[index], aligned[index]) > 0.1 ? 1.0 : 0.0;
+                }
+            }
+        }
+        std::scoped_lock lock(mutex);
+        total.Add(local);
+    });
+    return total;
+}
+
+// Where content sits (residual shift), tile by tile: Lucas-Kanade between
+// an image and a reference (luma) on tiles with texture both ways (the
+// smaller eigenvalue of the reference's gradient tensor at least
+// kReplayTextured a pixel): the whole-pixel offset within kReplaySearch
+// either way that matches best, then two iterations with both images'
+// gradients (the reference moved by Catmull-Rom). `shift`: how far the
+// image's content sits from the reference's (content at x in the reference
+// shows at x + shift in the image). kFlat for tiles without texture,
+// kUnsettled for ones that did not settle within the search.
+inline constexpr double kReplayTextured = 1e-4;
+inline constexpr int kReplaySearch = 2;
+enum class ReplayTile { kFlat, kUnsettled, kSettled };
+ReplayTile TileShift(const std::vector<float>& image, const std::vector<float>& reference, std::uint32_t width,
+                     std::uint32_t height, std::uint32_t x0, std::uint32_t y0, std::uint32_t side,
+                     std::array<double, 2>& shift) {
+    const auto at = [width](const std::vector<float>& from, int x, int y) {
+        return static_cast<double>(from[std::size_t(y) * width + std::size_t(x)]);
+    };
+    const int left = static_cast<int>(x0), top = static_cast<int>(y0), n = static_cast<int>(side);
+    double xx = 0.0, yy = 0.0, xy = 0.0;
+    for (int y = top; y < top + n; ++y) {
+        for (int x = left; x < left + n; ++x) {
+            const double gx = 0.5 * (at(reference, x + 1, y) - at(reference, x - 1, y));
+            const double gy = 0.5 * (at(reference, x, y + 1) - at(reference, x, y - 1));
+            xx += gx * gx;
+            yy += gy * gy;
+            xy += gx * gy;
+        }
+    }
+    const double half_trace = 0.5 * (xx + yy);
+    const double smaller = half_trace - std::sqrt(std::max(0.0, half_trace * half_trace - (xx * yy - xy * xy)));
+    if (smaller < kReplayTextured * n * n) return ReplayTile::kFlat;
+    int best_x = 0, best_y = 0;
+    double best = std::numeric_limits<double>::infinity();
+    for (int dy = -kReplaySearch; dy <= kReplaySearch; ++dy) {
+        for (int dx = -kReplaySearch; dx <= kReplaySearch; ++dx) {
+            double sum = 0.0;
+            for (int y = top; y < top + n; ++y) {
+                for (int x = left; x < left + n; ++x) {
+                    const double e = at(image, x, y) - at(reference, x - dx, y - dy);
+                    sum += e * e;
+                }
+            }
+            if (sum < best) {
+                best = sum;
+                best_x = dx;
+                best_y = dy;
+            }
+        }
+    }
+    shift = {static_cast<double>(best_x), static_cast<double>(best_y)};
+    const int stride = n + 2;
+    std::vector<double> moved(std::size_t(stride) * stride);
+    for (int iteration = 0; iteration < 2; ++iteration) {
+        // The reference moved by the shift, over the tile and a pixel round.
+        for (int j = 0; j < stride; ++j) {
+            for (int i = 0; i < stride; ++i) {
+                moved[std::size_t(j) * stride + i] =
+                    SampleCatmullRom(reference, width, height, left + i - 1 - shift[0], top + j - 1 - shift[1]);
+            }
+        }
+        const auto m = [&](int i, int j) { return moved[std::size_t(j) * stride + i]; };
+        double a = 0.0, b = 0.0, c = 0.0, ex = 0.0, ey = 0.0;
+        for (int j = 1; j <= n; ++j) {
+            for (int i = 1; i <= n; ++i) {
+                const int x = left + i - 1, y = top + j - 1;
+                const double gx = 0.25 * (at(image, x + 1, y) - at(image, x - 1, y) + m(i + 1, j) - m(i - 1, j));
+                const double gy = 0.25 * (at(image, x, y + 1) - at(image, x, y - 1) + m(i, j + 1) - m(i, j - 1));
+                const double e = at(image, x, y) - m(i, j);
+                a += gx * gx;
+                b += gx * gy;
+                c += gy * gy;
+                ex += gx * e;
+                ey += gy * e;
+            }
+        }
+        // image - moved ~ -gradient . step: the step that cancels it.
+        const double det = a * c - b * b;
+        if (!(det > 0.0)) return ReplayTile::kUnsettled;
+        shift[0] -= (c * ex - b * ey) / det;
+        shift[1] -= (a * ey - b * ex) / det;
+    }
+    return std::abs(shift[0]) <= kReplaySearch + 0.5 && std::abs(shift[1]) <= kReplaySearch + 0.5 ? ReplayTile::kSettled
+                                                                                              : ReplayTile::kUnsettled;
+}
+
+// Residual shifts by depth band: each settled tile's shift (pixels), and
+// how many tiles had texture.
+struct ReplayShifts {
+    std::array<std::vector<std::array<float, 2>>, 4> settled;
+    std::array<std::size_t, 4> textured{};
+    void Add(const ReplayShifts& other) {
+        for (int b = 0; b < 4; ++b) {
+            settled[b].insert(settled[b].end(), other.settled[b].begin(), other.settled[b].end());
+            textured[b] += other.textured[b];
+        }
+    }
+    // "<4 m +0.012,-0.004 px (|d| p50 0.080, p95 0.310; 1234 of 1300
+    // tiles), ...": per band the median shift and percentiles of its length.
+    std::string Describe() const {
+        std::string text;
+        for (int b = 0; b < 4; ++b) {
+            text += std::string(b ? ", " : "") + kReplayBands[b];
+            const std::vector<std::array<float, 2>>& tiles = settled[b];
+            if (tiles.empty()) {
+                text += " none";
+                continue;
+            }
+            std::vector<double> x, y, length;
+            for (const std::array<float, 2>& d : tiles) {
+                x.push_back(d[0]);
+                y.push_back(d[1]);
+                length.push_back(std::hypot(d[0], d[1]));
+            }
+            const auto quantile = [](std::vector<double>& values, double q) {
+                const std::size_t at = std::min(values.size() - 1, static_cast<std::size_t>(q * values.size()));
+                std::nth_element(values.begin(), values.begin() + std::ptrdiff_t(at), values.end());
+                return values[at];
+            };
+            char part[160];
+            std::snprintf(part, sizeof(part), " %+.3f,%+.3f px (|d| p50 %.3f, p95 %.3f; %zu of %zu tiles)",
+                          quantile(x, 0.5), quantile(y, 0.5), quantile(length, 0.5), quantile(length, 0.95),
+                          tiles.size(), textured[b]);
+            text += part;
+        }
+        return text;
+    }
+};
+
+// TileShift over every tile of `side` pixels whose pixels and a margin
+// around are all `usable` (1), each tile's band by `band` at its centre.
+ReplayShifts ResidualShifts(const std::vector<float>& image, const std::vector<float>& reference,
+                            const std::vector<std::uint8_t>& usable, std::uint32_t width, std::uint32_t height,
+                            const std::function<int(std::uint32_t, std::uint32_t)>& band, std::uint32_t side = 16) {
+    // Unusable pixels summed over every rectangle from the origin.
+    std::vector<std::uint32_t> holes(std::size_t(width + 1) * (height + 1), 0);
+    for (std::uint32_t y = 0; y < height; ++y) {
+        std::uint32_t row = 0;
+        for (std::uint32_t x = 0; x < width; ++x) {
+            row += usable[std::size_t{y} * width + x] ? 0u : 1u;
+            holes[std::size_t(y + 1) * (width + 1) + x + 1] = holes[std::size_t{y} * (width + 1) + x + 1] + row;
+        }
+    }
+    const auto holes_in = [&](std::uint32_t x0, std::uint32_t y0, std::uint32_t x1, std::uint32_t y1) {
+        return holes[std::size_t{y1} * (width + 1) + x1] - holes[std::size_t{y0} * (width + 1) + x1] -
+               holes[std::size_t{y1} * (width + 1) + x0] + holes[std::size_t{y0} * (width + 1) + x0];
+    };
+    const std::uint32_t margin = kReplaySearch + 3;
+    const std::uint32_t rows = height > side + 2 * margin ? (height - 2 * margin) / side : 0;
+    const std::uint32_t columns = width > side + 2 * margin ? (width - 2 * margin) / side : 0;
+    ReplayShifts total;
+    std::mutex mutex;
+    ReplayParallel([&](std::uint32_t first, std::uint32_t step) {
+        ReplayShifts local;
+        for (std::uint32_t row = first; row < rows; row += step) {
+            const std::uint32_t y0 = margin + row * side;
+            for (std::uint32_t column = 0; column < columns; ++column) {
+                const std::uint32_t x0 = margin + column * side;
+                if (holes_in(x0 - margin, y0 - margin, x0 + side + margin, y0 + side + margin) != 0) continue;
+                std::array<double, 2> shift{};
+                const ReplayTile tile = TileShift(image, reference, width, height, x0, y0, side, shift);
+                if (tile == ReplayTile::kFlat) continue;
+                const int b = band(x0 + side / 2, y0 + side / 2);
+                ++local.textured[b];
+                if (tile == ReplayTile::kSettled) {
+                    local.settled[b].push_back({static_cast<float>(shift[0]), static_cast<float>(shift[1])});
+                }
+            }
+        }
+        std::scoped_lock lock(mutex);
+        total.Add(local);
+    });
+    return total;
+}
+
+// The eye-shift map (kShiftMap read back) against a CPU reference: each
+// half-resolution texel of the resolved depth the map was built from split
+// 4x4, each part moved to where the moved eye sees it (MapToPrevious with
+// the map's mapping, AppendShiftMap; distant content stays) and splatted
+// into the generated frame's own pixels, the nearest surface winning, then
+// the part landing nearest the pixel's centre: the offset each pixel should
+// read the newest frame at. Against it, in full-resolution pixels, the
+// map's offset read as synthesis reads it (the nearest map texel,
+// SourceUv) and as a same-surface bilinear lookup would (fix B1's rule:
+// the map texels around within 2 texels of the nearest one's offset and 3%
+// of its source's depth), split by the source's depth (cockpit, nearer than
+// 4 m) and by depth edges within 2 texels of the source (silhouettes).
+// Pixels no part reached (what the eye's movement uncovers, FG_PASS_SHIFT_FILL's)
+// are counted apart.
+struct ReplayShiftError {
+    // [0] the nearest map texel, [1] same-surface bilinear; regions: cockpit
+    // smooth, cockpit edges, beyond smooth, beyond edges.
+    std::array<std::array<ReplayHistogram, 4>, 2> errors;
+    std::size_t pixels{0}, unreached{0};
+    void Add(const ReplayShiftError& other) {
+        for (int l = 0; l < 2; ++l) {
+            for (int r = 0; r < 4; ++r) errors[l][r].Add(other.errors[l][r]);
+        }
+        pixels += other.pixels;
+        unreached += other.unreached;
+    }
+    std::string Describe() const {
+        std::string text;
+        const char* lookups[2] = {"nearest texel", "same-surface bilinear"};
+        const char* regions[4] = {"<4 m smooth", "edges", ">=4 m smooth", "edges"};
+        for (int l = 0; l < 2; ++l) {
+            text += std::string(l ? "; " : "") + lookups[l];
+            for (int r = 0; r < 4; ++r) {
+                char part[96];
+                const ReplayHistogram& h = errors[l][r];
+                if (h.count) {
+                    std::snprintf(part, sizeof(part), "%s %s mean %.3f p95 %.3f p99 %.3f px", r ? "," : "", regions[r],
+                                  h.Mean(), h.Percentile(0.95), h.Percentile(0.99));
+                } else {
+                    std::snprintf(part, sizeof(part), "%s %s none", r ? "," : "", regions[r]);
+                }
+                text += part;
+            }
+        }
+        char tail[64];
+        std::snprintf(tail, sizeof(tail), "; unreached %.2f%%",
+                      pixels ? 100.0 * static_cast<double>(unreached) / static_cast<double>(pixels) : 0.0);
+        return text + tail;
+    }
+};
+
+// `depth`: the resolved depth (kDepth, half resolution, the map's grid);
+// `map`: kShiftMap as ReadTexture gives it (two halves per texel, not a
+// number where none was written); `eye`: the eye's offset in the newest
+// view's space (meters).
+ReplayShiftError CompareShiftMap(const ReplayView& view, const std::vector<float>& depth, const std::vector<float>& map,
+                                 FrameGenExtent map_extent, const std::array<double, 3>& eye) {
+    ReplayShiftError result;
+    const std::uint32_t width = view.width, height = view.height;
+    const std::uint32_t half_width = view.half_width, half_height = view.half_height;
+    if (depth.size() != std::size_t{half_width} * half_height || map_extent.width != half_width ||
+        map_extent.height != half_height || map.size() != std::size_t{half_width} * half_height * 2) {
+        return result;
+    }
+    FrameGenViewMapping mapping;
+    mapping.fov_current = {std::tan(view.newest.angle_left), std::tan(view.newest.angle_right),
+                           std::tan(view.newest.angle_up), std::tan(view.newest.angle_down)};
+    mapping.fov_previous = mapping.fov_current;
+    mapping.rotation = {{{1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}}};
+    mapping.translation = {static_cast<float>(-eye[0]), static_cast<float>(-eye[1]), static_cast<float>(-eye[2])};
+    mapping.depth = true;
+    const auto distant = [](float z) { return !(z > 0.0f) || z >= kFrameGenFarDepth; };
+    // Part `id` (texel * 16 + part): where it comes from and where it lands,
+    // in full-resolution pixels; false where the moved eye does not see it.
+    const auto part_of = [&](std::uint32_t id, std::array<double, 2>& source, std::array<double, 2>& landing) {
+        const std::uint32_t texel = id >> 4, part = id & 15u;
+        const std::uint32_t tx = texel % half_width, ty = texel / half_width;
+        const std::array<float, 2> uv{(static_cast<float>(tx) + ((part & 3u) + 0.5f) / 4.0f) / half_width,
+                                      (static_cast<float>(ty) + ((part >> 2) + 0.5f) / 4.0f) / half_height};
+        std::array<float, 2> moved{};
+        const bool seen = FrameGenMapToPrevious(mapping, uv, depth[texel], moved);
+        source = {uv[0] * double(width), uv[1] * double(height)};
+        landing = {moved[0] * double(width), moved[1] * double(height)};
+        return seen;
+    };
+    // Per pixel the nearest surface (its depth's bits, distant content last),
+    // then the part nearest the centre, then the lowest part: one 64-bit key.
+    const std::size_t pixels = std::size_t{width} * height;
+    std::unique_ptr<std::atomic<std::uint64_t>[]> best(new std::atomic<std::uint64_t>[pixels]);
+    ReplayParallel([&](std::uint32_t first, std::uint32_t step) {
+        for (std::size_t i = first; i < pixels; i += step) best[i].store(~0ull, std::memory_order_relaxed);
+    });
+    ReplayParallel([&](std::uint32_t first, std::uint32_t step) {
+        for (std::uint32_t ty = first; ty < half_height; ty += step) {
+            for (std::uint32_t tx = 0; tx < half_width; ++tx) {
+                const std::uint32_t texel = ty * half_width + tx;
+                const float z = depth[texel];
+                std::uint32_t bits = 0;
+                std::memcpy(&bits, &z, sizeof(bits));
+                const std::uint32_t rank = distant(z) ? 0xffffffc0u : (bits & ~63u);
+                for (std::uint32_t part = 0; part < 16; ++part) {
+                    std::array<double, 2> source{}, landing{};
+                    if (!part_of(texel * 16 + part, source, landing)) continue;
+                    const double fx = std::floor(landing[0]), fy = std::floor(landing[1]);
+                    if (fx < 0.0 || fy < 0.0 || fx >= width || fy >= height) continue;
+                    const double ox = landing[0] - fx - 0.5, oy = landing[1] - fy - 0.5;
+                    const std::uint32_t closeness =
+                        std::min(63u, static_cast<std::uint32_t>((ox * ox + oy * oy) * 126.0));
+                    const std::uint64_t key = (std::uint64_t{rank | closeness} << 32) | (texel * 16 + part);
+                    std::atomic<std::uint64_t>& slot = best[static_cast<std::size_t>(fy) * width + static_cast<std::size_t>(fx)];
+                    std::uint64_t current = slot.load(std::memory_order_relaxed);
+                    while (key < current && !slot.compare_exchange_weak(current, key, std::memory_order_relaxed)) {
+                    }
+                }
+            }
+        }
+    });
+    // Depth edges (ReplayDepthEdges' rule on the resolved depth, dropped
+    // depth as far), widened by 2 texels.
+    std::vector<std::uint8_t> edges(depth.size(), 0), near_edge(depth.size(), 0);
+    const auto far_or = [&](int x, int y) {
+        x = std::clamp(x, 0, static_cast<int>(half_width) - 1);
+        y = std::clamp(y, 0, static_cast<int>(half_height) - 1);
+        const float z = depth[std::size_t(y) * half_width + std::size_t(x)];
+        return distant(z) ? 1e5f : std::max(z, 0.01f);
+    };
+    for (int y = 0; y < static_cast<int>(half_height); ++y) {
+        for (int x = 0; x < static_cast<int>(half_width); ++x) {
+            float nearest = 1e30f, farthest = 0.0f;
+            for (int i = 0; i < 9; ++i) {
+                const float z = far_or(x + i % 3 - 1, y + i / 3 - 1);
+                nearest = std::min(nearest, z);
+                farthest = std::max(farthest, z);
+            }
+            edges[std::size_t(y) * half_width + std::size_t(x)] = farthest > 1.25f * nearest ? 1 : 0;
+        }
+    }
+    for (int y = 0; y < static_cast<int>(half_height); ++y) {
+        for (int x = 0; x < static_cast<int>(half_width); ++x) {
+            std::uint8_t any = 0;
+            for (int j = std::max(0, y - 2); j <= std::min(static_cast<int>(half_height) - 1, y + 2) && !any; ++j) {
+                for (int i = std::max(0, x - 2); i <= std::min(static_cast<int>(half_width) - 1, x + 2) && !any; ++i) {
+                    any = edges[std::size_t(j) * half_width + std::size_t(i)];
+                }
+            }
+            near_edge[std::size_t(y) * half_width + std::size_t(x)] = any;
+        }
+    }
+    // A map texel's offset in its texels (0 where none was written).
+    const auto back_at = [&](int x, int y) {
+        x = std::clamp(x, 0, static_cast<int>(half_width) - 1);
+        y = std::clamp(y, 0, static_cast<int>(half_height) - 1);
+        const std::size_t i = (std::size_t(y) * half_width + std::size_t(x)) * 2;
+        return std::array<double, 2>{std::isnan(map[i]) ? 0.0 : map[i], std::isnan(map[i + 1]) ? 0.0 : map[i + 1]};
+    };
+    // The depth a map texel's offset reads its content from.
+    const auto source_depth = [&](int x, int y, const std::array<double, 2>& back) {
+        return far_or(static_cast<int>(std::floor(x + 0.5 + back[0])), static_cast<int>(std::floor(y + 0.5 + back[1])));
+    };
+    const double to_x = double(width) / half_width, to_y = double(height) / half_height;
+    std::mutex mutex;
+    ReplayParallel([&](std::uint32_t first, std::uint32_t step) {
+        ReplayShiftError local;
+        for (std::uint32_t y = first; y < height; y += step) {
+            for (std::uint32_t x = 0; x < width; ++x) {
+                ++local.pixels;
+                const std::uint64_t key = best[std::size_t{y} * width + x].load(std::memory_order_relaxed);
+                if (key == ~0ull) {
+                    ++local.unreached;
+                    continue;
+                }
+                const std::uint32_t id = static_cast<std::uint32_t>(key);
+                std::array<double, 2> source{}, landing{};
+                part_of(id, source, landing);
+                const std::array<double, 2> wanted{source[0] - landing[0], source[1] - landing[1]};
+                const std::uint32_t texel = id >> 4;
+                const float z = depth[texel];
+                const int region = (!distant(z) && z < 4.0f ? 0 : 2) + near_edge[texel];
+                // Synthesis: the map texel under the pixel (SourceUv).
+                const int mx = std::min(static_cast<int>(x >> 1), static_cast<int>(half_width) - 1);
+                const int my = std::min(static_cast<int>(y >> 1), static_cast<int>(half_height) - 1);
+                const std::array<double, 2> own = back_at(mx, my);
+                local.errors[0][region].Add(std::hypot(own[0] * to_x - wanted[0], own[1] * to_y - wanted[1]));
+                // Same surface, bilinear: the texels around the pixel's centre
+                // whose offsets and sources agree with the nearest one's.
+                const double qx = (x + 0.5) / to_x - 0.5, qy = (y + 0.5) / to_y - 0.5;
+                const int bx = static_cast<int>(std::floor(qx)), by = static_cast<int>(std::floor(qy));
+                const double fx = qx - bx, fy = qy - by;
+                const float own_depth = source_depth(mx, my, own);
+                double weights = 0.0;
+                std::array<double, 2> blended{};
+                for (int i = 0; i < 4; ++i) {
+                    const int ex = bx + (i & 1), ey = by + (i >> 1);
+                    const std::array<double, 2> back = back_at(ex, ey);
+                    const float there = source_depth(ex, ey, back);
+                    const bool same = std::abs(back[0] - own[0]) <= 2.0 && std::abs(back[1] - own[1]) <= 2.0 &&
+                                      (there >= 1e5f ? own_depth >= 1e5f : std::abs(there - own_depth) <= 0.03f * own_depth);
+                    if (!same) continue;
+                    const double weight = ((i & 1) ? fx : 1.0 - fx) * ((i >> 1) ? fy : 1.0 - fy);
+                    weights += weight;
+                    blended[0] += weight * back[0];
+                    blended[1] += weight * back[1];
+                }
+                const std::array<double, 2> smooth =
+                    weights > 0.0 ? std::array<double, 2>{blended[0] / weights, blended[1] / weights} : own;
+                local.errors[1][region].Add(std::hypot(smooth[0] * to_x - wanted[0], smooth[1] * to_y - wanted[1]));
+            }
+        }
+        std::scoped_lock lock(mutex);
+        result.Add(local);
+    });
+    return result;
+}
+
+// The flow's length (ReadFlow, pixels) per cell by depth band at the
+// cell's centre, added to `bands`.
+void AddReplayFlow(const std::vector<float>& xy, FrameGenExtent cells, const ReplayView& view,
+                   std::array<ReplayHistogram, 4>& bands) {
+    for (std::uint32_t cy = 0; cy < cells.height; ++cy) {
+        for (std::uint32_t cx = 0; cx < cells.width; ++cx) {
+            const std::uint32_t hx = std::min(view.half_width - 1, (cx * 2 + 1) * view.half_width / (cells.width * 2));
+            const std::uint32_t hy = std::min(view.half_height - 1, (cy * 2 + 1) * view.half_height / (cells.height * 2));
+            const std::size_t i = (std::size_t{cy} * cells.width + cx) * 2;
+            bands[ReplayBand(std::abs(view.depth[std::size_t{hy} * view.half_width + hx]))].Add(std::hypot(xy[i], xy[i + 1]));
+        }
+    }
+}
+
+// "<4 m p50 0.012, p95 0.250 px (1234 cells), ...".
+std::string DescribeReplayFlow(const std::array<ReplayHistogram, 4>& bands) {
+    std::string text;
+    for (int b = 0; b < 4; ++b) {
+        char part[96];
+        if (bands[b].count) {
+            std::snprintf(part, sizeof(part), "%s%s p50 %.3f, p95 %.3f px (%llu cells)", b ? ", " : "", kReplayBands[b],
+                          bands[b].Percentile(0.5), bands[b].Percentile(0.95),
+                          static_cast<unsigned long long>(bands[b].count));
+        } else {
+            std::snprintf(part, sizeof(part), "%s%s none", b ? ", " : "", kReplayBands[b]);
+        }
+        text += part;
+    }
+    return text;
+}
+
+// Whether the application's own movement (appSpaceDeltaPose, motion.txt)
+// left the world still for the frame: under 5 mm and 0.03 degrees.
+bool ReplayWorldStill(const ReplayView& view) {
+    const auto& q = view.delta_orientation;
+    const auto& p = view.delta_position;
+    return view.app_delta && std::sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]) < 0.005f &&
+           std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2]) < 2.5e-4f;
+}
+
+// One evaluated view's inputs for the new measures (ReplayMeasures::Measure):
+// the generated frame's real frame (`newest`, its view), the frame compared
+// with (`truth`: the newest itself at live fractions), the images and masks
+// evaluate made, and what it read back (null or empty where not read).
+struct ReplayMeasureInput {
+    std::size_t frame{0}, view{0};
+    const ReplayView* newest{nullptr};
+    const ReplayView* truth{nullptr};
+    const Pixels* generated{nullptr};
+    const Pixels* turned{nullptr};
+    const std::vector<bool>* turned_valid{nullptr};
+    const Pixels* aligned{nullptr};
+    const std::vector<bool>* aligned_valid{nullptr};
+    const std::vector<std::uint32_t>* aligned_nearest{nullptr};
+    const std::vector<float>* resolved{nullptr}; // kDepth, empty when not read
+    bool depth_used{false};
+    const std::vector<float>* flow{nullptr}; // ReadFlow's, pixels
+    FrameGenExtent cells{};
+    std::vector<float> luma_newest, luma_previous; // kLumaNewest/kLumaPrevious at level 1
+    FrameGenExtent luma_extent{};
+    std::vector<float> shift_map; // kShiftMap where the frame had one
+    FrameGenExtent shift_extent{};
+    std::array<double, 3> eye{}; // the eye's offset, newest view space, meters
+    std::uint32_t shading_tile{0};
+    double coarse_tangent{0.0};
+};
+
+// The new measures over every evaluated view, each view's printed as it is
+// measured (lines of their own after its "bands" and "generated" lines).
+struct ReplayMeasures {
+    ReplayDetail detail;
+    ReplayShifts generated, held, seen, pair;
+    std::array<ReplayHistogram, 4> flow, flow_still;
+    std::size_t views{0}, flow_views{0}, still_views{0}, shift_views{0};
+    ReplayShiftError shift_map;
+    double shift_eye{0.0}; // meters, summed over shift_views
+
+    void Measure(const ReplayMeasureInput& in) {
+        const ReplayView& view = *in.newest;
+        const ReplayView& truth = *in.truth;
+        const std::size_t k = in.frame, v = in.view;
+        ++views;
+        const std::vector<float> generated_luma = ReplayLuma(*in.generated);
+        const std::vector<float> newest_luma = ReplayLuma(view.color);
+        const bool truth_is_newest = &truth == &view;
+        const std::vector<float> truth_luma = truth_is_newest ? std::vector<float>{} : ReplayLuma(truth.color);
+        const std::vector<float>& truth_own = truth_is_newest ? newest_luma : truth_luma;
+        const std::vector<float> aligned_luma = ReplayLuma(*in.aligned);
+        // Detail, against the truth's own pixels behind the aligned truth.
+        std::uint32_t tiles_x = 0;
+        static const std::vector<float> no_depth;
+        const std::vector<float>& rate_depth = in.depth_used && in.resolved ? *in.resolved : no_depth;
+        const std::vector<std::uint8_t> coarse =
+            ReplayCoarseTiles(view, rate_depth, in.shading_tile, in.coarse_tangent, tiles_x);
+        const ReplayDetail frame_detail =
+            CompareDetail(*in.generated, generated_luma, view.color, newest_luma, *in.aligned, *in.aligned_valid,
+                          *in.aligned_nearest, view, truth, truth_own, coarse, in.shading_tile, tiles_x);
+        detail.Add(frame_detail);
+        std::printf("frame %zu view %zu detail: %s\n", k, v, frame_detail.Describe().c_str());
+        // Residual shifts against the aligned truth (the generated frame,
+        // and the newest frame held instead), and against the truth from
+        // its own eye ("as seen": the eye's error too).
+        const auto band = [&](std::uint32_t x, std::uint32_t y) {
+            const std::uint32_t hx = std::min(x / 2, view.half_width - 1), hy = std::min(y / 2, view.half_height - 1);
+            return ReplayBand(std::abs(view.depth[std::size_t{hy} * view.half_width + hx]));
+        };
+        std::vector<std::uint8_t> usable(in.aligned_valid->size());
+        for (std::size_t i = 0; i < usable.size(); ++i) usable[i] = (*in.aligned_valid)[i] ? 1 : 0;
+        const ReplayShifts frame_generated =
+            ResidualShifts(generated_luma, aligned_luma, usable, view.width, view.height, band);
+        const ReplayShifts frame_held = ResidualShifts(newest_luma, aligned_luma, usable, view.width, view.height, band);
+        generated.Add(frame_generated);
+        held.Add(frame_held);
+        std::printf("frame %zu view %zu shift: %s\n", k, v, frame_generated.Describe().c_str());
+        std::printf("frame %zu view %zu held shift: %s\n", k, v, frame_held.Describe().c_str());
+        if (!truth_is_newest) {
+            for (std::size_t i = 0; i < usable.size(); ++i) usable[i] = (*in.turned_valid)[i] ? 1 : 0;
+            const ReplayShifts frame_seen =
+                ResidualShifts(generated_luma, ReplayLuma(*in.turned), usable, view.width, view.height, band);
+            seen.Add(frame_seen);
+            std::printf("frame %zu view %zu seen shift: %s\n", k, v, frame_seen.Describe().c_str());
+        }
+        // The analysis's luma pair (the previous frame mapped by pose and
+        // depth) where the filtered flow is still: what pose and depth leave.
+        const FrameGenExtent l1 = in.luma_extent;
+        if (!in.luma_newest.empty() && in.luma_newest.size() == in.luma_previous.size() &&
+            in.luma_newest.size() == std::size_t{l1.width} * l1.height && in.flow && in.cells.width && in.cells.height) {
+            std::vector<std::uint8_t> still(in.luma_newest.size(), 0);
+            for (std::uint32_t y = 0; y < l1.height; ++y) {
+                const std::uint32_t cy = std::min(in.cells.height - 1, y * in.cells.height / l1.height);
+                for (std::uint32_t x = 0; x < l1.width; ++x) {
+                    const std::uint32_t cx = std::min(in.cells.width - 1, x * in.cells.width / l1.width);
+                    const std::size_t cell = (std::size_t{cy} * in.cells.width + cx) * 2;
+                    const std::size_t i = std::size_t{y} * l1.width + x;
+                    still[i] = in.luma_newest[i] >= 0.0f && in.luma_previous[i] >= 0.0f &&
+                                       std::hypot((*in.flow)[cell], (*in.flow)[cell + 1]) < 0.25
+                                   ? 1
+                                   : 0;
+                }
+            }
+            const auto pair_band = [&](std::uint32_t x, std::uint32_t y) {
+                const std::uint32_t hx = std::min(x * view.half_width / l1.width, view.half_width - 1);
+                const std::uint32_t hy = std::min(y * view.half_height / l1.height, view.half_height - 1);
+                return ReplayBand(std::abs(view.depth[std::size_t{hy} * view.half_width + hx]));
+            };
+            ReplayShifts frame_pair =
+                ResidualShifts(in.luma_newest, in.luma_previous, still, l1.width, l1.height, pair_band);
+            // In full-resolution pixels.
+            const float to_x = float(view.width) / l1.width, to_y = float(view.height) / l1.height;
+            for (auto& tiles : frame_pair.settled) {
+                for (std::array<float, 2>& d : tiles) d = {d[0] * to_x, d[1] * to_y};
+            }
+            pair.Add(frame_pair);
+            std::printf("frame %zu view %zu pair residual: %s\n", k, v, frame_pair.Describe().c_str());
+        }
+        // The filtered flow's length by band (noise, where the world is still).
+        if (in.flow && in.cells.width && in.cells.height) {
+            std::array<ReplayHistogram, 4> frame_flow;
+            AddReplayFlow(*in.flow, in.cells, view, frame_flow);
+            const bool world_still = ReplayWorldStill(view);
+            for (int b = 0; b < 4; ++b) {
+                flow[b].Add(frame_flow[b]);
+                if (world_still) flow_still[b].Add(frame_flow[b]);
+            }
+            ++flow_views;
+            still_views += world_still ? 1 : 0;
+            std::printf("frame %zu view %zu flow: %s; world %s\n", k, v, DescribeReplayFlow(frame_flow).c_str(),
+                        !view.app_delta ? "unknown (no appSpaceDeltaPose)" : world_still ? "still" : "moving");
+        }
+        // The eye-shift map against the CPU's.
+        if (!in.shift_map.empty() && in.resolved && !in.resolved->empty()) {
+            const ReplayShiftError frame_shift = CompareShiftMap(view, *in.resolved, in.shift_map, in.shift_extent, in.eye);
+            if (frame_shift.pixels) {
+                shift_map.Add(frame_shift);
+                ++shift_views;
+                const double eye = std::sqrt(in.eye[0] * in.eye[0] + in.eye[1] * in.eye[1] + in.eye[2] * in.eye[2]);
+                shift_eye += eye;
+                std::printf("frame %zu view %zu eye shift map (eye %.2f mm): %s\n", k, v, 1000.0 * eye,
+                            frame_shift.Describe().c_str());
+            }
+        }
+    }
+
+    // The summaries, after the bad-pixel ones.
+    void Print() const {
+        if (!views) return;
+        std::printf("Detail over %zu views: %s\n", views, detail.Describe().c_str());
+        std::printf("Residual shift over %zu views (generated against the aligned truth): %s\n", views,
+                    generated.Describe().c_str());
+        std::printf("Held shift over %zu views (the newest frame against the aligned truth): %s\n", views,
+                    held.Describe().c_str());
+        std::size_t seen_tiles = 0;
+        for (const auto& tiles : seen.settled) seen_tiles += tiles.size();
+        if (seen_tiles) {
+            std::printf("Seen shift over %zu views (generated against the truth from its own eye): %s\n", views,
+                        seen.Describe().c_str());
+        }
+        std::size_t pair_tiles = 0;
+        for (const auto& tiles : pair.settled) pair_tiles += tiles.size();
+        if (pair_tiles) {
+            std::printf("Pair residual over %zu views (the luma pair where the flow is still): %s\n", views,
+                        pair.Describe().c_str());
+        }
+        if (flow_views) {
+            std::printf("Flow over %zu views: %s\n", flow_views, DescribeReplayFlow(flow).c_str());
+        }
+        if (still_views) {
+            std::printf("Flow over %zu views with the world still: %s\n", still_views, DescribeReplayFlow(flow_still).c_str());
+        }
+        if (shift_views) {
+            std::printf("Eye shift map over %zu views (eye %.2f mm): %s\n", shift_views,
+                        1000.0 * shift_eye / static_cast<double>(shift_views), shift_map.Describe().c_str());
+        }
+    }
+};
+
 int RunReplay(Harness& harness) {
     std::vector<ReplayFrame> frames;
     for (int k = 0;; ++k) {
@@ -5876,6 +6871,16 @@ int RunReplay(Harness& harness) {
     if (gpu) gpu->SetCopyAfterRelease(true); // the tests' images are their own
     Check(gpu != nullptr, "replay backend: " + error);
     const std::int64_t output_format = gpu->OutputFormats(FrameGenOutputKind::kSrgb8).front();
+    // FG_REPLAY_DEPTH_SCALE=s: the backend is given each frame's depth times
+    // s (known depth only: none and the sky stay as they are), to see which
+    // scale lines the luma pair up best ("Pair residual"); the evaluation
+    // keeps the captured depth.
+    const char* depth_scale_text = std::getenv("FG_REPLAY_DEPTH_SCALE");
+    const float depth_scale = depth_scale_text && *depth_scale_text ? static_cast<float>(std::atof(depth_scale_text)) : 1.0f;
+    Check(depth_scale > 0.0f, "replay: FG_REPLAY_DEPTH_SCALE is a positive scale");
+    if (depth_scale != 1.0f) {
+        std::printf("Depth given to the backend times %.3f (FG_REPLAY_DEPTH_SCALE)\n", static_cast<double>(depth_scale));
+    }
     std::vector<XrSwapchain> sources(view_count), depths(view_count), outputs(view_count);
     for (std::size_t v = 0; v < view_count; ++v) {
         const ReplayView& view = frames[0].views[v];
@@ -5892,6 +6897,12 @@ int RunReplay(Harness& harness) {
             // 1/z = 100 * raw (near infinitely far, far 1 cm).
             std::vector<float> raw(frame.views[v].depth.size());
             for (std::size_t i = 0; i < raw.size(); ++i) raw[i] = 0.01f / std::max(std::abs(frame.views[v].depth[i]), 0.01f);
+            if (depth_scale != 1.0f) {
+                for (std::size_t i = 0; i < raw.size(); ++i) {
+                    const float depth = std::abs(frame.views[v].depth[i]);
+                    if (depth > 0.0f && depth < 5e4f) raw[i] = 0.01f / std::max(depth * depth_scale, 0.01f);
+                }
+            }
             g_swapchains[depths[v]].push_back(harness.create_depth_data(view.half_width, view.half_height, raw));
         }
         g_swapchains[outputs[v]] = {harness.create(view.width, view.height)};
@@ -5919,6 +6930,78 @@ int RunReplay(Harness& harness) {
     if (std::array<int, 4> box{}; std::sscanf(env("FG_REPLAY_CROP").c_str(), "%d,%d,%d,%d", &box[0], &box[1], &box[2], &box[3]) == 4) {
         crop = box;
     }
+    // FG_REPLAY_HARDWARE=capture: each frame's flow as it was captured
+    // (frame.txt's hardware); =1 the hardware's, unset the shader cores'.
+    const bool hardware_as_captured = env("FG_REPLAY_HARDWARE") == "capture";
+    // FG_REPLAY_TRUTH=cubic: the truth resampled by Catmull-Rom.
+    const bool cubic_truth = env("FG_REPLAY_TRUTH") == "cubic";
+    Check(env("FG_REPLAY_TRUTH").empty() || cubic_truth || env("FG_REPLAY_TRUTH") == "bilinear",
+          "replay: FG_REPLAY_TRUTH is bilinear or cubic");
+    // FG_REPLAY_FRACTIONS: each real frame written just in time at these
+    // fractions, from consecutive pairs as a session. live: the display
+    // period's refreshes before the next real frame at the capture's
+    // shortest interval (presenter.txt): its steady rate, as the capture's
+    // own stall lengthens the intervals after it (to 145-200 ms).
+    const std::string fractions_text = env("FG_REPLAY_FRACTIONS");
+    const bool live_fractions = !fractions_text.empty();
+    std::vector<float> fractions;
+    if (fractions_text == "live") {
+        std::optional<double> steady, period;
+        for (const ReplayFrame& frame : frames) {
+            if (!frame.interval || !frame.period || !(*frame.interval > 0.0) || !(*frame.period > 0.0)) continue;
+            steady = steady ? std::min(*steady, *frame.interval) : *frame.interval;
+            period = frame.period;
+        }
+        Check(steady && period, "replay: FG_REPLAY_FRACTIONS=live needs presenter.txt's intervals and period");
+        for (int j = 1; j < 16 && j < *steady / *period - 0.5; ++j) {
+            fractions.push_back(static_cast<float>(j * *period / *steady));
+        }
+        Check(!fractions.empty(), "replay: FG_REPLAY_FRACTIONS=live: the frames come at the display's own rate");
+    } else if (live_fractions) {
+        std::istringstream list(fractions_text);
+        for (std::string item; std::getline(list, item, ',');) {
+            fractions.push_back(static_cast<float>(std::atof(item.c_str())));
+            Check(fractions.back() > 0.0f && fractions.back() <= 1.0f,
+                  "replay: FG_REPLAY_FRACTIONS is live, or fractions above 0 and up to 1 separated by commas");
+        }
+    }
+    if (live_fractions) {
+        std::string listed;
+        for (const float fraction : fractions) listed += (listed.empty() ? "" : ", ") + std::to_string(fraction).substr(0, 5);
+        std::printf("Live fractions (FG_REPLAY_FRACTIONS=%s): %s\n", fractions_text.c_str(), listed.c_str());
+    }
+    // Just in time: FG_REPLAY_JIT (own, or the stale variants extrapolating),
+    // and at live fractions always.
+    const std::string jit = jit_variant.empty() && live_fractions ? std::string("own") : jit_variant;
+    Check(!interpolate || jit.rfind("stale", 0) != 0, "replay: the stale variants of FG_REPLAY_JIT extrapolate");
+    // The new measures (ReplayMeasures); FG_REPLAY_MEASURES=0 leaves them out.
+    const bool measuring = env("FG_REPLAY_MEASURES") != "0";
+    std::uint32_t shading_tile = 0;
+    for (auto* base = static_cast<const XrBaseInStructure*>(harness.binding); base; base = base->next) {
+        if (base->type != XR_TYPE_GRAPHICS_BINDING_D3D12_KHR) continue;
+        ID3D12Device* device = reinterpret_cast<const XrGraphicsBindingD3D12KHR*>(base)->device;
+        D3D12_FEATURE_DATA_D3D12_OPTIONS6 options6{};
+        if (SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS6, &options6, sizeof(options6))) &&
+            options6.VariableShadingRateTier >= D3D12_VARIABLE_SHADING_RATE_TIER_2) {
+            shading_tile = options6.ShadingRateImageTileSize;
+        }
+    }
+    const double coarse_tangent = env("VECTORXR_FRAMEGEN_VRS").empty() ? 1.0 : std::atof(env("VECTORXR_FRAMEGEN_VRS").c_str());
+    const ReplayFrame& captured = frames[0];
+    std::printf("Replay setup: %s%s, the %s flow%s; eye %s; truth resampled %s%s; captured as %s with the %s flow; "
+                "shaded per 2x2 in tiles of %u px from tangent %.2f\n",
+                interpolate ? "Interpolate" : "Extrapolate", jit.empty() ? "" : " just in time",
+                hardware_as_captured ? "capture's" : hardware ? "hardware's" : "shader cores'",
+                hardware_as_captured || hardware ? "" : " (FG_REPLAY_HARDWARE=capture: the capture's)",
+                no_shift                      ? "unmoved"
+                : live_fractions && interpolate ? "on the line between the pair, as the presenter moves it"
+                : predict                     ? "predicted as the presenter moves it"
+                : live_fractions              ? "moving toward where the next frame was rendered"
+                                              : "where the truth was rendered",
+                cubic_truth ? "by Catmull-Rom" : "bilinearly",
+                live_fractions ? "; live fractions, compared with the newest frame (aligned: moved by its own depth)" : "",
+                captured.tuning.mode == FrameGenSynthesisMode::kInterpolate ? "Interpolate" : "Extrapolate",
+                captured.tuning.hardware_flow ? "hardware's" : "shader cores'", shading_tile, coarse_tangent);
     // FG_REPLAY_TIME=display: each frame at the ratio of the display times
     // the game gave it and the frame before (presenter.txt, unclamped),
     // instead of the presenter's interval ratio.
@@ -6074,8 +7157,10 @@ int RunReplay(Harness& harness) {
         FrameGenTuning tuning = frame.tuning;
         tuning.mode = mode;
         tuning.analyze_only = analyze_only;
-        tuning.cover = false;
-        tuning.hardware_flow = hardware;
+        // Analyzed for interpolating just in time, the flow is filtered for
+        // cover frames too, as the presenter asks.
+        tuning.cover = analyze_only && mode == FrameGenSynthesisMode::kInterpolate;
+        tuning.hardware_flow = hardware_as_captured ? frame.tuning.hardware_flow : hardware;
         if (quality == "performance") tuning.quality = FrameGenFlowQuality::kPerformance;
         if (quality == "balanced") tuning.quality = FrameGenFlowQuality::kBalanced;
         if (quality == "quality") tuning.quality = FrameGenFlowQuality::kQuality;
@@ -6086,7 +7171,7 @@ int RunReplay(Harness& harness) {
                              : assist          ? FrameGenEngineMode::kAssist
                              : engine != "off" ? FrameGenEngineMode::kObserve
                                                : FrameGenEngineMode::kOff;
-        tuning.hardware_level = hardware && assist;
+        tuning.hardware_level = tuning.hardware_flow && assist;
         tuning.engine_filter = engine_filter;
         tuning.engine_cockpit = engine_cockpit;
         tuning.engine_tint = engine_tint;
@@ -6274,6 +7359,45 @@ int RunReplay(Harness& harness) {
         }
         return shifts;
     };
+    // FG_REPLAY_PREDICT=1, extrapolating frame k at `fraction` toward frame
+    // k + 1: the eye keeps moving as it did from frame k - 1, for the
+    // intervals' ratio.
+    auto predicted_shifts = [&](std::size_t k, float fraction) {
+        std::vector<std::array<float, 3>> shifts = eye_shifts(k - 1, k, 1.0f);
+        for (std::size_t v = 0; v < view_count; ++v) {
+            // From frame k - 1's view space into frame k's; the eye
+            // keeps moving as it did, for the intervals' ratio.
+            const auto a = ReplayRotation(frames[k - 1].views[v].newest.orientation);
+            const auto b = ReplayRotation(frames[k].views[v].newest.orientation);
+            double world[3], local[3];
+            for (int i = 0; i < 3; ++i) world[i] = a[i][0] * shifts[v][0] + a[i][1] * shifts[v][1] + a[i][2] * shifts[v][2];
+            for (int i = 0; i < 3; ++i) local[i] = b[0][i] * world[0] + b[1][i] * world[1] + b[2][i] * world[2];
+            for (int i = 0; i < 3; ++i) {
+                shifts[v][i] = static_cast<float>(local[i] * frames[k + 1].tuning.interval_ratio / fraction);
+            }
+        }
+        return shifts;
+    };
+    // The eye's movement from frame `from` to frame `to` in frame `into`'s
+    // view space, divided by `time`: as the presenter shifts frames just in
+    // time (EyeShiftsLocked: forward, from the previous real frame to the
+    // newest, in the newest's view space).
+    auto eye_motion = [&](std::size_t from, std::size_t to, std::size_t into, float time) {
+        std::vector<std::array<float, 3>> shifts(view_count, {0.0f, 0.0f, 0.0f});
+        for (std::size_t v = 0; v < view_count && !no_shift && time > 0.0f; ++v) {
+            const auto rotation = ReplayRotation(frames[into].views[v].newest.orientation);
+            const auto& start = frames[from].views[v].newest.position;
+            const auto& end = frames[to].views[v].newest.position;
+            const double delta[3] = {end[0] - start[0], end[1] - start[1], end[2] - start[2]};
+            for (int i = 0; i < 3; ++i) {
+                const double local = rotation[0][i] * delta[0] + rotation[1][i] * delta[1] + rotation[2][i] * delta[2];
+                shifts[v][i] = static_cast<float>(local / time);
+            }
+        }
+        return shifts;
+    };
+    // The new measures, over the measuring pass.
+    ReplayMeasures measures;
     // Compares each view's generated frame (in frame `view_frame`'s view)
     // with frame `truth_frame` turned to that view; `hold` (view 0) is what
     // showing a real frame instead would give. Also with the truth aligned
@@ -6360,7 +7484,7 @@ int RunReplay(Harness& harness) {
             }
             const Pixels generated = harness.readback_sized(g_swapchains[outputs[v]][0]);
             std::vector<bool> valid;
-            const Pixels truth = TurnTo(view, frames[truth_frame].views[v], valid);
+            const Pixels truth = TurnTo(view, frames[truth_frame].views[v], valid, cubic_truth);
             const std::vector<std::uint8_t> depth_edges = ReplayDepthEdges(view);
             const ReplayError generated_error = CompareTo(generated, truth, valid, view, depth_edges);
             const ReplayError hold_error =
@@ -6386,8 +7510,9 @@ int RunReplay(Harness& harness) {
             }
             std::vector<bool> aligned_valid;
             ReplayMasked masked;
-            const Pixels aligned =
-                ReplayAlign(view, eye, frames[truth_frame].views[v], sources, trusted, aligned_valid, masked);
+            std::vector<std::uint32_t> aligned_nearest;
+            const Pixels aligned = ReplayAlign(view, eye, frames[truth_frame].views[v], sources, trusted, aligned_valid,
+                                               masked, cubic_truth, measuring ? &aligned_nearest : nullptr);
             const ReplayError aligned_error = CompareTo(generated, aligned, aligned_valid, view, depth_edges);
             rotation_sums.Add(generated_error);
             aligned_sums.Add(aligned_error);
@@ -6418,10 +7543,69 @@ int RunReplay(Harness& harness) {
             sums[5] += generated_error.sharpness_cockpit;
             sums[6] += generated_error.sharpness_newest;
             ++evaluated;
+            if (measuring) {
+                ReplayMeasureInput in;
+                in.frame = k;
+                in.view = v;
+                in.newest = &view;
+                in.truth = &frames[truth_frame].views[v];
+                in.generated = &generated;
+                in.turned = &truth;
+                in.turned_valid = &valid;
+                in.aligned = &aligned;
+                in.aligned_valid = &aligned_valid;
+                in.aligned_nearest = &aligned_nearest;
+                in.resolved = &trusted;
+                in.depth_used = result.depth.size() > v && result.depth[v];
+                in.flow = xy.empty() ? nullptr : &xy;
+                in.cells = cells;
+                // The analysis's luma pair at half resolution.
+                std::uint32_t channels = 0;
+                FrameGenExtent previous_extent{};
+                if (!gpu->ReadTexture(v, {FrameGenTextureKind::kLumaNewest, 1}, in.luma_newest, in.luma_extent, channels) ||
+                    channels != 1 ||
+                    !gpu->ReadTexture(v, {FrameGenTextureKind::kLumaPrevious, 1}, in.luma_previous, previous_extent,
+                                      channels) ||
+                    channels != 1 || previous_extent.width != in.luma_extent.width ||
+                    previous_extent.height != in.luma_extent.height) {
+                    in.luma_newest.clear();
+                    in.luma_previous.clear();
+                }
+                // The eye-shift map, where the frame had one (the plan's
+                // rule: depth in use and the eye moved kFrameGenMinimumShift;
+                // none when the engine motion map holds the eye's offset, and
+                // a stale frame's is built from the frame before's depth).
+                for (int i = 0; i < 3; ++i) in.eye[i] = v < shifts.size() ? double(shifts[v][i] * time) : 0.0;
+                const double moved = std::sqrt(in.eye[0] * in.eye[0] + in.eye[1] * in.eye[1] + in.eye[2] * in.eye[2]);
+                if (in.depth_used && moved >= kFrameGenMinimumShift && engine_map != FrameGenEngineMap::kMerged &&
+                    jit.rfind("stale", 0) != 0 &&
+                    (!gpu->ReadTexture(v, {FrameGenTextureKind::kShiftMap, 0}, in.shift_map, in.shift_extent, channels) ||
+                     channels != 2)) {
+                    in.shift_map.clear();
+                }
+                in.shading_tile = shading_tile;
+                in.coarse_tangent = coarse_tangent;
+                measures.Measure(in);
+            }
             if (!g_replay_output.empty() && v == 0 && crop) {
                 WriteCropPpm(prefix + "-crop-generated.ppm", generated, view.width, view.height, *crop, 3);
                 WriteCropPpm(prefix + "-crop-truth.ppm", truth, view.width, view.height, *crop, 3);
                 WriteCropPpm(prefix + "-crop-newest.ppm", frames[view_frame].views[v].color, view.width, view.height, *crop, 3);
+                // The aligned truth, and four times the generated frame's
+                // difference from it (purple where it has none).
+                WriteCropPpm(prefix + "-crop-aligned.ppm", aligned, view.width, view.height, *crop, 3);
+                Pixels difference(generated.size(), 0xff400040u);
+                for (std::size_t i = 0; i < generated.size(); ++i) {
+                    if (!aligned_valid[i]) continue;
+                    std::uint32_t pixel = 0xff000000u;
+                    for (int c = 0; c < 3; ++c) {
+                        const int d = std::abs(static_cast<int>((generated[i] >> (8 * c)) & 255u) -
+                                               static_cast<int>((aligned[i] >> (8 * c)) & 255u));
+                        pixel |= static_cast<std::uint32_t>(std::min(255, 4 * d)) << (8 * c);
+                    }
+                    difference[i] = pixel;
+                }
+                WriteCropPpm(prefix + "-crop-difference.ppm", difference, view.width, view.height, *crop, 3);
             }
             // Crops alone when cropping: whole frames are tens of MB each.
             if (!g_replay_output.empty() && v == 0 && !crop) {
@@ -6451,43 +7635,111 @@ int RunReplay(Harness& harness) {
         for (std::size_t k = 0; k < frames.size(); ++k) {
             FrameGenExecuteResult result;
             const bool has_next = k + 1 < frames.size();
-            if (!jit_variant.empty() && measure && !interpolate) {
-                // Just in time: frames k - 2, k - 1 and k analyzed alone, then
-                // frame k moved to frame k + 1 by its own motion or by frame
-                // k - 1's (seen from the eye moved as frame k's own, by frame
-                // k - 1's depth; FG_REPLAY_JIT=stale-noshift: unmoved, as
-                // before 2026-10-10).
-                if (k < 2 || !has_next) continue;
-                const float fraction = std::clamp(frames[k + 1].tuning.interval_ratio, 0.25f, 1.0f);
+            // The output images a frame written just in time goes to.
+            const auto jit_images = [&](std::size_t frame) {
+                std::vector<FrameGenImage> images;
+                for (std::size_t v = 0; v < view_count; ++v) {
+                    const ReplayView& view = frames[frame].views[v];
+                    images.push_back({outputs[v], 0, 0,
+                                      {{0, 0}, {static_cast<int>(view.width), static_cast<int>(view.height)}},
+                                      output_format});
+                }
+                return images;
+            };
+            if (live_fractions && measure) {
+                // Live fractions: frames k - 2, k - 1 and k analyzed alone (a
+                // session's consecutive pairs), then frame k written at each
+                // fraction: past it extrapolating, between frames k - 1 and k
+                // interpolating. No real frame shows those times: each is
+                // compared with frame k, aligned to the frame's eye by frame
+                // k's own depth. The eye moves on as it did (predicting, or
+                // interpolating) or toward where frame k + 1 was rendered.
+                if (k < 2 || (!interpolate && !predict && !has_next)) continue;
+                const std::vector<std::array<float, 3>> shifts =
+                    jit == "stale-noshift" ? std::vector<std::array<float, 3>>{}
+                    : interpolate || predict
+                        ? eye_motion(k - 1, k, k, 1.0f)
+                        : eye_motion(k, k + 1, k, std::clamp(frames[k + 1].tuning.interval_ratio, 0.25f, 4.0f));
+                const FrameGenSynthesisMode mode =
+                    interpolate ? FrameGenSynthesisMode::kInterpolate : FrameGenSynthesisMode::kExtrapolate;
                 gpu->ResetHistory();
                 std::uint64_t ids[3] = {};
                 for (std::size_t j = 0; j < 3; ++j) {
                     const std::size_t f = k - 2 + j;
-                    const auto shifts = f == k && jit_variant != "stale-noshift" ? eye_shifts(k, k + 1, fraction)
-                                                                                : std::vector<std::array<float, 3>>{};
+                    execute(f, j > 0 ? std::optional<std::size_t>(f - 1) : std::nullopt, mode,
+                            fractions.empty() ? 0.5f : fractions[0], f == k ? shifts : std::vector<std::array<float, 3>>{},
+                            result, true);
+                    ids[j] = result.frame;
+                }
+                Check(gpu->WaitIdle(), "replay: the analyses did not finish");
+                for (const float fraction : fractions) {
+                    const bool written = jit.rfind("stale", 0) == 0
+                                             ? gpu->SynthesizeStale(ids[2], ids[1], fraction, jit_images(k), error)
+                                             : gpu->Synthesize(ids[2], mode, fraction, jit_images(k), error);
+                    Check(written, "replay just in time (" + jit + ") at a live fraction: " + error);
+                    Check(gpu->WaitIdle(), "replay: the frame was not written");
+                    result.synthesized.assign(view_count, true);
+                    evaluate(k, k, k, frames[k].views[0].color, result, fraction, shifts,
+                             interpolate ? fraction - 1.0f : fraction,
+                             interpolate ? std::vector<std::size_t>{k - 1, k} : std::vector<std::size_t>{k});
+                }
+                continue;
+            }
+            if (!jit.empty() && measure && interpolate) {
+                // Interpolating just in time: frames k - 1 and k + 1 analyzed
+                // alone, then frame k written between them, with the eye's
+                // movement forward as a session gives it (EyeShiftsLocked),
+                // taken back to where frame k was rendered (predicting: on the
+                // line between the pair).
+                if (k == 0 || !has_next) continue;
+                const float ratio = std::clamp(frames[k + 1].tuning.interval_ratio, 0.25f, 4.0f);
+                const float fraction = 1.0f / (1.0f + ratio);
+                const auto shifts =
+                    predict ? eye_motion(k - 1, k + 1, k + 1, 1.0f) : eye_motion(k, k + 1, k + 1, 1.0f - fraction);
+                gpu->ResetHistory();
+                execute(k - 1, std::nullopt, FrameGenSynthesisMode::kInterpolate, fraction, {}, result, true);
+                execute(k + 1, k - 1, FrameGenSynthesisMode::kInterpolate, fraction, shifts, result, true);
+                const std::uint64_t id = result.frame;
+                Check(gpu->WaitIdle(), "replay: the analyses did not finish");
+                Check(gpu->Synthesize(id, FrameGenSynthesisMode::kInterpolate, fraction, jit_images(k + 1), error),
+                      "replay interpolating just in time: " + error);
+                Check(gpu->WaitIdle(), "replay: the frame was not written");
+                result.synthesized.assign(view_count, true);
+                evaluate(k, k + 1, k, frames[k + 1].views[0].color, result, fraction, shifts, fraction - 1.0f,
+                         {k - 1, k + 1});
+                continue;
+            }
+            if (!jit.empty() && measure && !interpolate) {
+                // Just in time: frames k - 2, k - 1 and k analyzed alone, then
+                // frame k moved to frame k + 1 by its own motion or by frame
+                // k - 1's (seen from the eye moved as frame k's own, by frame
+                // k - 1's depth; FG_REPLAY_JIT=stale-noshift: unmoved, as
+                // before 2026-10-10; FG_REPLAY_PREDICT=1: moving on as it did).
+                if (k < 2 || !has_next) continue;
+                const float fraction = std::clamp(frames[k + 1].tuning.interval_ratio, 0.25f, 1.0f);
+                const std::vector<std::array<float, 3>> own_shifts =
+                    jit == "stale-noshift" ? std::vector<std::array<float, 3>>{}
+                    : predict              ? predicted_shifts(k, fraction)
+                                           : eye_shifts(k, k + 1, fraction);
+                gpu->ResetHistory();
+                std::uint64_t ids[3] = {};
+                for (std::size_t j = 0; j < 3; ++j) {
+                    const std::size_t f = k - 2 + j;
+                    const auto shifts = f == k ? own_shifts : std::vector<std::array<float, 3>>{};
                     execute(f, j > 0 ? std::optional<std::size_t>(f - 1) : std::nullopt, FrameGenSynthesisMode::kExtrapolate,
                             fraction, shifts, result, true);
                     ids[j] = result.frame;
                 }
                 Check(gpu->WaitIdle(), "replay: the analyses did not finish");
-                std::vector<FrameGenImage> images;
-                for (std::size_t v = 0; v < view_count; ++v) {
-                    const ReplayView& view = frames[k].views[v];
-                    images.push_back({outputs[v], 0, 0,
-                                      {{0, 0}, {static_cast<int>(view.width), static_cast<int>(view.height)}},
-                                      output_format});
-                }
+                const std::vector<FrameGenImage> images = jit_images(k);
                 const bool written =
-                    jit_variant.rfind("stale", 0) == 0
+                    jit.rfind("stale", 0) == 0
                         ? gpu->SynthesizeStale(ids[2], ids[1], fraction, images, error)
                         : gpu->Synthesize(ids[2], FrameGenSynthesisMode::kExtrapolate, fraction, images, error);
-                Check(written, "replay just in time (" + jit_variant + "): " + error);
+                Check(written, "replay just in time (" + jit + "): " + error);
                 Check(gpu->WaitIdle(), "replay: the frame was not written");
                 result.synthesized.assign(view_count, true);
-                evaluate(k, k, k + 1, frames[k].views[0].color, result, fraction,
-                         jit_variant != "stale-noshift" ? eye_shifts(k, k + 1, fraction)
-                                                        : std::vector<std::array<float, 3>>{},
-                         fraction, {k});
+                evaluate(k, k, k + 1, frames[k].views[0].color, result, fraction, own_shifts, fraction, {k});
                 continue;
             }
             if (interpolate && measure) {
@@ -6519,19 +7771,7 @@ int RunReplay(Harness& harness) {
             std::vector<std::array<float, 3>> shifts;
             if (has_target && k > 0) {
                 if (predict && ahead == 1) {
-                    shifts = eye_shifts(k - 1, k, 1.0f);
-                    for (std::size_t v = 0; v < view_count; ++v) {
-                        // From frame k - 1's view space into frame k's; the eye
-                        // keeps moving as it did, for the intervals' ratio.
-                        const auto a = ReplayRotation(frames[k - 1].views[v].newest.orientation);
-                        const auto b = ReplayRotation(frames[k].views[v].newest.orientation);
-                        double world[3], local[3];
-                        for (int i = 0; i < 3; ++i) world[i] = a[i][0] * shifts[v][0] + a[i][1] * shifts[v][1] + a[i][2] * shifts[v][2];
-                        for (int i = 0; i < 3; ++i) local[i] = b[0][i] * world[0] + b[1][i] * world[1] + b[2][i] * world[2];
-                        for (int i = 0; i < 3; ++i) {
-                            shifts[v][i] = static_cast<float>(local[i] * frames[k + 1].tuning.interval_ratio / fraction);
-                        }
-                    }
+                    shifts = predicted_shifts(k, fraction);
                 } else {
                     shifts = eye_shifts(k, target, fraction);
                 }
@@ -6580,6 +7820,8 @@ int RunReplay(Harness& harness) {
                         view_evaluated[v] ? view_bad[v] / view_evaluated[v] : 0.0);
         }
     }
+    // The new measures' summaries (ReplayMeasures), after those.
+    measures.Print();
     // Engine motion vectors: the measuring pass's resamples against the
     // CPU's, and each dumped raw field against its frame's dumped vectors
     // (captures of stage 2 and later), texel by texel: a GPU's division
@@ -6672,6 +7914,161 @@ int RunReplay(Harness& harness) {
     }
     gpu->Reset();
     return 0;
+}
+
+// The replay's measures on the CPU (no GPU): the Catmull-Rom resample, the
+// residual shift, the shading tiles, fine detail and the eye-shift map's
+// reference, on images whose answers are known.
+void ReplayMeasureTest() {
+    // Catmull-Rom: the texels themselves at whole positions, weights summing
+    // to one, and quadratics reproduced exactly (Keys' cubic, a = -1/2).
+    const std::array<double, 4> at_zero = CatmullRomWeights(0.0), at_one = CatmullRomWeights(1.0);
+    const std::array<double, 4> at_half = CatmullRomWeights(0.5);
+    Check(at_zero == std::array<double, 4>{0.0, 1.0, 0.0, 0.0} && at_one == std::array<double, 4>{0.0, 0.0, 1.0, 0.0},
+          "replay measures: Catmull-Rom reads the texels themselves at whole positions");
+    Check(std::abs(at_half[0] + 0.0625) < 1e-12 && std::abs(at_half[1] - 0.5625) < 1e-12 &&
+              std::abs(at_half[2] - 0.5625) < 1e-12 && std::abs(at_half[3] + 0.0625) < 1e-12,
+          "replay measures: Catmull-Rom halfway is -1/16, 9/16, 9/16, -1/16");
+    for (int i = 0; i <= 100; ++i) {
+        const std::array<double, 4> w = CatmullRomWeights(i / 100.0);
+        Check(std::abs(w[0] + w[1] + w[2] + w[3] - 1.0) < 1e-12, "replay measures: Catmull-Rom weights sum to one");
+    }
+    {
+        constexpr std::uint32_t kSide = 24;
+        std::vector<float> quadratic(kSide * kSide);
+        const auto f = [](double x, double y) { return 0.002 * x * x - 0.003 * x * y + 0.001 * y * y + 0.01 * x - 0.02 * y; };
+        for (std::uint32_t y = 0; y < kSide; ++y) {
+            for (std::uint32_t x = 0; x < kSide; ++x) quadratic[y * kSide + x] = static_cast<float>(f(x, y));
+        }
+        double worst = 0.0;
+        for (int i = 0; i < 200; ++i) {
+            const double x = 3.0 + 17.0 * Hash(i, 1), y = 3.0 + 17.0 * Hash(i, 2);
+            worst = std::max(worst, std::abs(SampleCatmullRom(quadratic, kSide, kSide, x, y) - f(x, y)));
+        }
+        Check(worst < 1e-5, "replay measures: Catmull-Rom reproduces a quadratic (off by " + std::to_string(worst) + ")");
+    }
+    {
+        // Every sRGB code back through linear light at whole positions; a
+        // flat image stays flat anywhere.
+        Pixels ramp(256);
+        for (std::uint32_t i = 0; i < 256; ++i) ramp[i] = 0xff000000u | i | ((255u - i) << 8) | (((i * 7u) & 255u) << 16);
+        for (std::uint32_t i = 0; i < 256; ++i) {
+            Check(CatmullRomPixel(ramp, 256, 1, i, 0.0) == ramp[i], "replay measures: Catmull-Rom keeps every sRGB code");
+        }
+        const Pixels flat(16 * 16, Pack(0.3f, 0.5f, 0.7f));
+        Check(CatmullRomPixel(flat, 16, 16, 7.37, 4.81) == flat[0], "replay measures: Catmull-Rom keeps a flat image flat");
+    }
+    // Lucas-Kanade: a smooth texture moved by known sub-pixel and whole-pixel
+    // shifts, sampled exactly (no resampler between them).
+    {
+        constexpr std::uint32_t kSide = 160;
+        const auto texture = [](double x, double y) {
+            constexpr double kTau = 6.283185307179586;
+            return 0.5 + 0.12 * std::sin(kTau * x / 9.3 + 0.4) + 0.1 * std::sin(kTau * y / 7.1 + 1.1) +
+                   0.08 * std::sin(kTau * (x + y) / 12.7 + 2.0) + 0.06 * std::sin(kTau * (x - 1.7 * y) / 15.3);
+        };
+        std::vector<float> reference(kSide * kSide);
+        for (std::uint32_t y = 0; y < kSide; ++y) {
+            for (std::uint32_t x = 0; x < kSide; ++x) reference[y * kSide + x] = static_cast<float>(texture(x, y));
+        }
+        const std::vector<std::uint8_t> usable(kSide * kSide, 1);
+        const auto band = [](std::uint32_t, std::uint32_t) { return 0; };
+        for (const std::array<double, 2> wanted : {std::array<double, 2>{0.3, 0.0}, std::array<double, 2>{0.3, -0.15},
+                                                    std::array<double, 2>{-1.6, 0.7}, std::array<double, 2>{0.0, 0.0}}) {
+            std::vector<float> moved(kSide * kSide);
+            for (std::uint32_t y = 0; y < kSide; ++y) {
+                for (std::uint32_t x = 0; x < kSide; ++x) {
+                    moved[y * kSide + x] = static_cast<float>(texture(x - wanted[0], y - wanted[1]));
+                }
+            }
+            const ReplayShifts shifts = ResidualShifts(moved, reference, usable, kSide, kSide, band);
+            double worst = 0.0;
+            for (const std::array<float, 2>& d : shifts.settled[0]) {
+                worst = std::max(worst, std::hypot(d[0] - wanted[0], d[1] - wanted[1]));
+            }
+            Check(shifts.textured[0] == 81 && shifts.settled[0].size() == 81 && worst < 0.02,
+                  "replay measures: Lucas-Kanade finds a shift of " + std::to_string(wanted[0]) + ", " +
+                      std::to_string(wanted[1]) + " px within 0.02 px on every tile (" +
+                      std::to_string(shifts.settled[0].size()) + " of " + std::to_string(shifts.textured[0]) +
+                      " tiles, off by up to " + std::to_string(worst) + " px)");
+        }
+        // Flat tiles are left out.
+        const std::vector<float> flat(kSide * kSide, 0.5f);
+        Check(ResidualShifts(flat, flat, usable, kSide, kSide, band).textured[0] == 0,
+              "replay measures: Lucas-Kanade leaves flat tiles out");
+    }
+    // A view 64 pixels wide over tangents -1..1, its half-resolution grid 32.
+    ReplayView view;
+    view.width = view.height = 64;
+    view.half_width = view.half_height = 32;
+    view.newest.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
+    view.newest.angle_left = view.newest.angle_down = -std::atan(1.0f);
+    view.newest.angle_right = view.newest.angle_up = std::atan(1.0f);
+    view.depth.assign(32 * 32, 0.5f);
+    {
+        // Shading: per 2x2 off the axis by a tangent of 1 (the corners),
+        // per pixel at the centre and wherever cockpit depth is.
+        std::uint32_t tiles_x = 0;
+        const std::vector<std::uint8_t> angle = ReplayCoarseTiles(view, {}, 16, 1.0, tiles_x);
+        Check(tiles_x == 4 && angle.size() == 16 && angle[0] == 1 && angle[3] == 1 && angle[12] == 1 && angle[15] == 1 &&
+                  angle[5] == 0 && angle[6] == 0 && angle[9] == 0 && angle[10] == 0,
+              "replay measures: the shading tiles off the axis are shaded per 2x2");
+        const std::vector<std::uint8_t> cockpit = ReplayCoarseTiles(view, view.depth, 16, 1.0, tiles_x);
+        Check(std::count(cockpit.begin(), cockpit.end(), 1) == 0, "replay measures: cockpit depth keeps tiles per pixel");
+        Check(ReplayCoarseTiles(view, view.depth, 0, 1.0, tiles_x).empty() && tiles_x == 0,
+              "replay measures: no shading tiles without variable-rate shading");
+    }
+    {
+        // Fine detail: a frame against itself keeps all of it; blurred, less.
+        Pixels image(64 * 64);
+        for (std::uint32_t i = 0; i < image.size(); ++i) {
+            const float n = Hash(static_cast<int>(i % 64), static_cast<int>(i / 64));
+            image[i] = Pack(n, 0.5f * n + 0.2f, 1.0f - n);
+        }
+        Pixels blurred = image;
+        for (std::uint32_t y = 0; y < 64; ++y) {
+            for (std::uint32_t x = 1; x + 1 < 64; ++x) {
+                std::uint32_t pixel = 0xff000000u;
+                for (int c = 0; c < 3; ++c) {
+                    const auto channel = [&](std::uint32_t at) { return (image[y * 64 + at] >> (8 * c)) & 255u; };
+                    pixel |= ((channel(x - 1) + 2 * channel(x) + channel(x + 1) + 2) / 4) << (8 * c);
+                }
+                blurred[y * 64 + x] = pixel;
+            }
+        }
+        const std::vector<bool> valid(image.size(), true);
+        std::vector<std::uint32_t> nearest(image.size());
+        for (std::uint32_t i = 0; i < nearest.size(); ++i) nearest[i] = i;
+        const std::vector<float> luma = ReplayLuma(image), blurred_luma = ReplayLuma(blurred);
+        const ReplayDetail same = CompareDetail(image, luma, image, luma, image, valid, nearest, view, view, luma, {}, 0, 0);
+        const ReplayDetail soft =
+            CompareDetail(blurred, blurred_luma, image, luma, image, valid, nearest, view, view, luma, {}, 0, 0);
+        Check(same.truth[0] > 0.0 && same.generated[0] == same.truth[0] && same.generated[0] == same.newest[0] &&
+                  same.fine_bad[0] == 0.0,
+              "replay measures: a frame keeps all of its own detail");
+        Check(soft.generated[0] < 0.8 * soft.truth[0] && soft.fine_bad[0] > 0.0,
+              "replay measures: a blurred frame keeps less detail (" + ReplayRatio(soft.generated[0], soft.truth[0]) + ")");
+    }
+    {
+        // The eye-shift map's reference: a surface half a metre away, the eye
+        // 2 mm to the right, moves 0.128 px left everywhere (0.004 in
+        // tangent, 32 px per unit): a map holding exactly that is right, one
+        // a tenth of a texel off is 0.2 px off.
+        const std::array<double, 3> eye{0.002, 0.0, 0.0};
+        std::vector<float> map(32 * 32 * 2);
+        for (std::size_t i = 0; i < map.size(); i += 2) map[i] = 0.064f;
+        const ReplayShiftError exact = CompareShiftMap(view, view.depth, map, {32, 32}, eye);
+        Check(exact.pixels == 64 * 64 && exact.unreached == 0 && exact.errors[0][0].count == 64 * 64 &&
+                  exact.errors[0][0].Percentile(1.0) < 0.006 && exact.errors[1][0].Percentile(1.0) < 0.006,
+              "replay measures: the eye-shift map's reference agrees with an exact map (p100 " +
+                  std::to_string(exact.errors[0][0].Percentile(1.0)) + " px)");
+        for (std::size_t i = 0; i < map.size(); i += 2) map[i] = 0.164f;
+        const ReplayShiftError off = CompareShiftMap(view, view.depth, map, {32, 32}, eye);
+        Check(std::abs(off.errors[0][0].Mean() - 0.2) < 0.006,
+              "replay measures: a map a tenth of a texel off is 0.2 px off (" + std::to_string(off.errors[0][0].Mean()) + ")");
+    }
+    std::cout << "Replay measures (CPU): Catmull-Rom, Lucas-Kanade, shading tiles, detail and the eye-shift map's reference "
+                 "pass\n";
 }
 
 #ifdef DEPTHXR_NVOF_RESEARCH
@@ -12567,6 +13964,7 @@ int D3D12Test() {
         EngineCensusTest(harness, device.Get(), queue.Get());
         EngineCaptureTest(harness, queue.Get(), device.Get());
         ReplayMotionLoaderTest(harness);
+        ReplayMeasureTest();
     }
     int result = g_replay      ? RunReplay(harness)
                  : g_contention ? RunContention(harness)
