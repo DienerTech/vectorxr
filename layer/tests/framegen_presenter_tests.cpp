@@ -9597,9 +9597,11 @@ void TestDepthEyes() {
 // nothing moves, swapped everything sits 2 cm away, and a batch whose
 // swapped reading lined up by chance (0.69) took it up, then noise in its
 // alike scale probes stepped the scale to 1.88. Depth the same all over is
-// never taken up, near and far are swapped only against a reading as
-// described that moves content too, a reading holds on unchanged evidence,
-// and the scale moves only on probes that show a trend.
+// never taken up (read as far, it decides nothing: MSFS 2024 starting in
+// its menus is still being checked), near and far are swapped only against
+// a reading as described that moves content too, a reading holds on
+// unchanged evidence, and the scale moves only on probes that show a clear
+// trend.
 void TestDepthValidator() {
     constexpr double kBinocular = 13184.0; // samples both eyes see per check (a Pimax view)
     auto score = [](double samples, double ratio, double fallback = 0.0) {
@@ -9633,17 +9635,36 @@ void TestDepthValidator() {
     clear.swapped = score(kBinocular, 0.6, 12500.0);
     probes(clear, {1.0, 1.0, 1.0, 1.0, 0.985}, 600.0);
     {
+        // Read as far, depth left clear decides nothing: still being checked
+        // (the presenter reports it so, as before), every submission, never
+        // swapped or scaled.
         FrameGenDepthValidator validator;
         batches(validator, clear, 10);
-        Check(validator.Reading() == FrameGenDepthReading::kUnusable && !validator.Swapped() &&
-                  validator.Scale() == 1.0f && validator.Generation() == 0 && validator.Decisions() == 1,
-              std::string("depth validator: depth left clear is not usable, never swapped or scaled (") +
+        Check(validator.Reading() == FrameGenDepthReading::kUnknown && !validator.Swapped() &&
+                  validator.Scale() == 1.0f && validator.Generation() == 0 && validator.Decisions() == 0,
+              std::string("depth validator: depth left clear decides nothing, never swapped or scaled (") +
                   ToString(validator.Reading()) + ")");
-        Check(!validator.WantsCheck(25) && validator.WantsCheck(40), "depth validator: clear depth is checked now and then");
-        // The same once depth already in use goes clear: what moves content
-        // stops being used.
+        Check(validator.WantsCheck(25), "depth validator: depth left clear is still checked every submission");
+        // MSFS 2024 starting in its menus: the first batch of the cockpit
+        // takes its depth up.
+        batches(validator, cockpit, 1);
+        Check(validator.Reading() == FrameGenDepthReading::kAsSubmitted && validator.Decisions() == 1,
+              std::string("depth validator: the cockpit after clear depth takes it up (") +
+                  ToString(validator.Reading()) + ")");
+        // Depth the same all over that moves content (cleared to a near
+        // value) is not usable, and checked now and then.
         FrameGenDepthEvidence clear_near = clear;
         clear_near.decoded = score(kBinocular, 0.8, 12000.0);
+        FrameGenDepthValidator cleared_near;
+        batches(cleared_near, clear_near, 10);
+        Check(cleared_near.Reading() == FrameGenDepthReading::kUnusable && !cleared_near.Swapped() &&
+                  cleared_near.Scale() == 1.0f && cleared_near.Decisions() == 1,
+              std::string("depth validator: depth the same all over that moves content is not usable (") +
+                  ToString(cleared_near.Reading()) + ")");
+        Check(!cleared_near.WantsCheck(25) && cleared_near.WantsCheck(40),
+              "depth validator: unusable depth is checked now and then");
+        // The same once depth already in use goes clear: what moves content
+        // stops being used.
         FrameGenDepthValidator in_use;
         batches(in_use, cockpit, 1);
         batches(in_use, clear_near, 2);
@@ -9698,8 +9719,8 @@ void TestDepthValidator() {
     }
     {
         // The scale: probes falling toward the far edge step it up; alike
-        // probes with one below the rest do not, nor any probes on depth
-        // the same all over.
+        // probes with one below the rest do not, though noise orders them
+        // falling, nor any probes on depth the same all over.
         FrameGenDepthEvidence further = cockpit;
         probes(further, {1.5, 1.27, 1.0, 0.96, 0.8}, 8000.0);
         FrameGenDepthValidator validator;
@@ -9707,7 +9728,7 @@ void TestDepthValidator() {
         Check(validator.Scale() > 1.1f, "depth validator: probes falling toward the edge step the scale up (" +
                                             std::to_string(validator.Scale()) + ")");
         FrameGenDepthEvidence alike = cockpit;
-        probes(alike, {1.0, 1.0, 1.0, 1.0, 0.985}, 8000.0);
+        probes(alike, {1.0004, 1.0003, 1.0002, 1.0001, 0.985}, 8000.0);
         FrameGenDepthValidator noise;
         batches(noise, alike, 20);
         Check(noise.Reading() == FrameGenDepthReading::kAsSubmitted && noise.Scale() == 1.0f &&

@@ -1019,10 +1019,11 @@ struct FrameGenDepthEvidence {
 
 // Decides how to read a game's depth from kDepthCheck evidence: whether to
 // use it, and whether to swap its near and far. Only on evidence: depth the
-// same all over the checked eye (left clear) is not usable, near and far
-// are swapped only where the reading as decoded moves content too and lines
-// the eyes up worse, and the scale moves only on depth that varies, by
-// probes that show a trend.
+// same all over the checked eye is never taken up (where it reads as
+// infinitely far, left clear, it decides nothing; where it moves content it
+// is not usable), near and far are swapped only where the reading as
+// decoded moves content too and lines the eyes up worse, and the scale
+// moves only on depth that varies, by probes that show a clear trend.
 class FrameGenDepthValidator {
   public:
     void Add(const FrameGenDepthEvidence& check);

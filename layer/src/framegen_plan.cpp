@@ -1409,10 +1409,13 @@ void FrameGenDepthValidator::Add(const FrameGenDepthEvidence& check) {
     // buffer left clear) is all near, and would win against nothing.
     const bool swap_beats = swapped_adopts && judged(decoded);
     if (!varied) {
-        // Not taken up until it varies. Depth in use stays in use while it
-        // reads as infinitely far (MSFS 2024's menus clear it: no harm, and
-        // nothing to take up again afterwards), not where it moves content.
-        if (!Usable() || judged(decoded)) {
+        // Never taken up until it varies. Where it reads as infinitely far
+        // it decides nothing, in use or not: MSFS 2024 clears its depth in
+        // its menus (a session that starts there is still being checked,
+        // and the first batch of the cockpit takes it up; depth in use stays
+        // in use, nothing to take up again afterwards), and Star Citizen
+        // Evocati's is all zero. Where it moves content it is not usable.
+        if (judged(decoded)) {
             reading_ = FrameGenDepthReading::kUnusable;
         }
     } else if (!Usable()) {
@@ -1452,9 +1455,12 @@ void FrameGenDepthValidator::Add(const FrameGenDepthEvidence& check) {
         const double centre = static_cast<double>(kFrameGenDepthScaleProbes / 2);
         double offset = static_cast<double>(best) - centre;
         const bool edge = best == 0 || best + 1 == kFrameGenDepthScaleProbes;
-        // At the edge the probes must fall toward it all the way: one probe
-        // a little below the rest, which are alike, is noise.
-        bool trend = edge;
+        // At the edge the probes must fall toward it all the way, and from
+        // clearly higher: the probe at the other edge 1% above the centre,
+        // as the edge's must be 1% below it. One probe a little below the
+        // rest, which are alike and fall in order only by noise, is noise.
+        const std::size_t other = best == 0 ? kFrameGenDepthScaleProbes - 1 : 0;
+        bool trend = edge && e[other] > 1.01 * e[kFrameGenDepthScaleProbes / 2];
         for (std::size_t j = 0; trend && j + 1 < kFrameGenDepthScaleProbes; ++j) {
             trend = best == 0 ? e[j] < e[j + 1] : e[j + 1] < e[j];
         }

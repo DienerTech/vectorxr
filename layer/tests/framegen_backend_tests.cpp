@@ -1234,9 +1234,13 @@ int RunScenarios(Harness& harness) {
                   << ToString(flat_swapped.reading) << ", flat at the panel " << ToString(flat_panel.reading) << std::endl;
         Check(space_real.used && space_real.reading == FrameGenDepthReading::kAsSubmitted,
               harness.name + " real reversed depth in space was not used");
+        // All zero reads as infinitely far: it decides nothing (still being
+        // checked, as MSFS 2024's cleared depth in its menus); flat depth
+        // that moves content is not usable.
         for (const Outcome* flat : {&all_zero, &flat_swapped, &flat_panel}) {
-            Check(!flat->used && flat->reading == FrameGenDepthReading::kUnusable && flat->scale == 1.0f &&
-                      flat->empty_view == -1,
+            const FrameGenDepthReading expected =
+                flat == &all_zero ? FrameGenDepthReading::kUnknown : FrameGenDepthReading::kUnusable;
+            Check(!flat->used && flat->reading == expected && flat->scale == 1.0f && flat->empty_view == -1,
                   harness.name + " depth the same all over both eyes was taken up (" + ToString(flat->reading) + ")");
         }
 

@@ -5546,7 +5546,8 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
             "% of it, which is treated as far (cockpit glass written to depth, or depth wrong there)." +
             (depth.reading == FrameGenDepthReading::kUnusable &&
                      evidence.source_varied < kFrameGenDepthBatchChecks * kFrameGenDepthVariedCells
-                 ? " The depth is the same all over the eye checked (left clear), which shows nothing of the scene."
+                 ? " The depth is the same all over the eye checked (cleared to one value), which shows nothing of "
+                   "the scene."
                  : "") +
             (depth.reading == FrameGenDepthReading::kUnusable
                  ? " Some games only fill the depth they send while their own depth reprojection setting is on "
