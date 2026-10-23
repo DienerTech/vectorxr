@@ -690,6 +690,48 @@ struct FrameGenResampleChoice {
 // "cubic" or "cubic9" (any case) for both real frames, "cubic-newest" or
 // "cubic9-newest" for the newest alone; anything else is bilinear.
 FrameGenResampleChoice ParseFrameGenResample(const std::string& value);
+// Research (VECTORXR_FRAMEGEN_SYNTH_EYE, the head-motion shimmer diagnosis's
+// hypothesis D): where a generated frame's eyes are put, from the real
+// frames' eyes, each at its own display time (never one frame's pose for
+// another's time). kVelocity, the default, keeps the eye moving as it did
+// between the two newest real frames; kDamped moves it that way by a share of
+// it (the share the eye's next movement kept of its last, measured on flight
+// traces: 0.8-0.95); kTwoInterval at the velocity over the two intervals
+// before; kQuadratic on the parabola through the three newest; kTwist turns
+// the last movement on by the eye's last turn (constant velocity in the
+// eye's own view, a turn about any pivot followed exactly). The session's
+// summary measures each against the next real frame (eyePredictMissMm).
+enum class FrameGenEyePredictor : std::uint8_t {
+    kVelocity,
+    kDamped,
+    kTwoInterval,
+    kQuadratic,
+    kTwist,
+};
+const char* ToString(FrameGenEyePredictor predictor); // "velocity", "damped", "two", "quadratic", "twist"
+struct FrameGenEyePrediction {
+    FrameGenEyePredictor predictor{FrameGenEyePredictor::kVelocity};
+    double damping{0.9}; // kDamped's share of the last movement
+};
+// "velocity", "damped" (0.9) or "damped:<share>" (0.5 to 1), "two", "quadratic"
+// or "twist", any case; anything else is velocity.
+FrameGenEyePrediction ParseFrameGenEyePrediction(const std::string& value);
+// The real frames' eye at its display time.
+struct FrameGenEyeSample {
+    double time{0.0};                                  // seconds
+    std::array<double, 3> position{0.0, 0.0, 0.0};     // meters
+    std::array<float, 4> orientation{0.0f, 0.0f, 0.0f, 1.0f}; // x, y, z, w
+};
+// Where the eye is at `time` (seconds, after the newest sample's), from
+// `count` consecutive real frames' eyes, oldest first (times increasing).
+// kVelocity, kDamped and kTwist need two, kTwoInterval and kQuadratic three;
+// with fewer the eye moves at its last velocity, with fewer than two (or
+// times out of order) there is none. Everything but kQuadratic moves the eye
+// in a straight line, as far per unit of time as at `time` itself: as a
+// generated frame's eye shift does at any fraction.
+std::optional<std::array<double, 3>> FrameGenPredictEye(const FrameGenEyePrediction& prediction,
+                                                        const FrameGenEyeSample* samples, std::size_t count,
+                                                        double time);
 // Stage 9 (VECTORXR_FRAMEGEN_ENGINE_BRIDGE): a Vulkan game's motion vectors
 // through the Vulkan bridge, whose runtime images hold them only after the
 // bridge's copy. Released, the default: read at each release of them, after

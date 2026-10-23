@@ -552,6 +552,11 @@ class FrameGenPresenter {
         XrDuration interval{0}; // since the real frame before it, 0 when not continuous
         XrSpace space{XR_NULL_HANDLE};
         std::vector<ViewRecord> views;
+        // The real frame before it (when continuous): its display time and
+        // its views' eye positions, for predictors that look further back
+        // (VECTORXR_FRAMEGEN_SYNTH_EYE).
+        XrTime before_time{0};
+        std::vector<std::array<float, 3>> before_positions;
     };
 
     struct Output {
@@ -915,11 +920,14 @@ class FrameGenPresenter {
     // How far each eye moves per unit of generated-frame time from the real
     // frame shown at `newest_time` (FrameGenViewRequest::shift), in that
     // eye's view space: as far as it moved since the previous real frame
-    // (last_real_), whose display time `newest_time` follows.
+    // (last_real_), whose display time `newest_time` follows. `predicted`:
+    // the session extrapolates, and its eyes go where eye_prediction_ says
+    // (research; interpolating keeps the eye on the line between the pair).
     std::vector<std::array<float, 3>> EyeShiftsLocked(const XrCompositionLayerProjection& projection,
-                                                      XrTime newest_time, FrameGenSynthesisMode mode) const;
-    // Summary statistics: the eye shift's prediction, and when generation
-    // ran on the GPU.
+                                                      XrTime newest_time, FrameGenSynthesisMode mode,
+                                                      bool predicted) const;
+    // Summary statistics: the eye shift's prediction (and each candidate
+    // predictor's, eyePredictMissMm), and when generation ran on the GPU.
     void NoteEyeMovementLocked(const XrCompositionLayerProjection& projection, const PendingFrame& frame);
     void NoteGpuTimingLocked(std::uint64_t submission, const PendingFrame& frame,
                              const std::optional<FrameGenGpuWindow>& window,
@@ -1725,6 +1733,14 @@ class FrameGenPresenter {
     double eye_move_sum_mm_{0.0};
     double eye_miss_sum_mm_{0.0};
     std::uint64_t eye_frames_{0};
+    // The first eye at the three newest consecutive real frames (the newest
+    // is eye_history_sequence_'s), and how far each candidate predictor
+    // (kFrameGenEyeCandidates) put it from the next one, millimeters, since
+    // the last summary (research, VECTORXR_FRAMEGEN_SYNTH_EYE).
+    std::vector<FrameGenEyeSample> eye_history_;
+    std::uint64_t eye_history_sequence_{0};
+    std::array<double, 5> eye_predict_sum_mm_{};
+    std::uint64_t eye_predict_frames_{0};
     // When generation ran on the GPU: its start after the real frame's slot
     // was released and its end after the first generated slot was,
     // milliseconds, since the last summary (FrameGenGpu::LastGpuWindow).
@@ -1950,6 +1966,10 @@ class FrameGenPresenter {
     // sub-pixel motion, with VECTORXR_FRAMEGEN_SYNTH_FLOW_VIEW=fine, read at
     // Start and at each config reload.
     bool flow_view_fine_{false};
+    // Research (the head-motion shimmer diagnosis, D): where extrapolated
+    // frames' eyes go (FrameGenPredictEye; VECTORXR_FRAMEGEN_SYNTH_EYE), read
+    // at Start.
+    FrameGenEyePrediction eye_prediction_;
     // Stage 6 (FrameGenTuning::engine_predicate, engine_interpolate), read at
     // Start: VECTORXR_FRAMEGEN_ENGINE_PREDICATE=0 and
     // VECTORXR_FRAMEGEN_ENGINE_INTERPOLATE=lead. A session in Lead holds the

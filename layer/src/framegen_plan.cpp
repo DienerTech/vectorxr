@@ -1717,6 +1717,104 @@ FrameGenResampleChoice ParseFrameGenResample(const std::string& value) {
     return choice;
 }
 
+const char* ToString(FrameGenEyePredictor predictor) {
+    switch (predictor) {
+    case FrameGenEyePredictor::kDamped:
+        return "damped";
+    case FrameGenEyePredictor::kTwoInterval:
+        return "two";
+    case FrameGenEyePredictor::kQuadratic:
+        return "quadratic";
+    case FrameGenEyePredictor::kTwist:
+        return "twist";
+    default:
+        return "velocity";
+    }
+}
+
+FrameGenEyePrediction ParseFrameGenEyePrediction(const std::string& value) {
+    std::string text(value);
+    std::transform(text.begin(), text.end(), text.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    FrameGenEyePrediction prediction;
+    if (text == "damped" || text.rfind("damped:", 0) == 0) {
+        prediction.predictor = FrameGenEyePredictor::kDamped;
+        if (text.size() > 7) {
+            const double share = std::atof(text.c_str() + 7);
+            if (share >= 0.5 && share <= 1.0) prediction.damping = share;
+        }
+    } else if (text == "two") {
+        prediction.predictor = FrameGenEyePredictor::kTwoInterval;
+    } else if (text == "quadratic") {
+        prediction.predictor = FrameGenEyePredictor::kQuadratic;
+    } else if (text == "twist") {
+        prediction.predictor = FrameGenEyePredictor::kTwist;
+    }
+    return prediction;
+}
+
+std::optional<std::array<double, 3>> FrameGenPredictEye(const FrameGenEyePrediction& prediction,
+                                                        const FrameGenEyeSample* samples, std::size_t count,
+                                                        double time) {
+    if (!samples || count < 2) return std::nullopt;
+    for (std::size_t i = 1; i < count; ++i) {
+        if (!(samples[i].time > samples[i - 1].time)) return std::nullopt;
+    }
+    const FrameGenEyeSample& newest = samples[count - 1];
+    const FrameGenEyeSample& before = samples[count - 2];
+    const double last = newest.time - before.time;
+    const double ahead = time - newest.time;
+    std::array<double, 3> moved{};
+    for (int i = 0; i < 3; ++i) moved[i] = newest.position[i] - before.position[i];
+    std::array<double, 3> eye = newest.position;
+    FrameGenEyePredictor predictor = prediction.predictor;
+    if (count < 3 && (predictor == FrameGenEyePredictor::kTwoInterval || predictor == FrameGenEyePredictor::kQuadratic)) {
+        predictor = FrameGenEyePredictor::kVelocity;
+    }
+    switch (predictor) {
+    case FrameGenEyePredictor::kDamped:
+        for (int i = 0; i < 3; ++i) eye[i] += prediction.damping * moved[i] * ahead / last;
+        break;
+    case FrameGenEyePredictor::kTwoInterval: {
+        const FrameGenEyeSample& oldest = samples[count - 3];
+        const double span = newest.time - oldest.time;
+        for (int i = 0; i < 3; ++i) eye[i] += (newest.position[i] - oldest.position[i]) * ahead / span;
+        break;
+    }
+    case FrameGenEyePredictor::kQuadratic: {
+        // Lagrange's parabola through the three, at `time`.
+        const FrameGenEyeSample* p[3] = {&samples[count - 3], &before, &newest};
+        for (int i = 0; i < 3; ++i) eye[i] = 0.0;
+        for (int a = 0; a < 3; ++a) {
+            double weight = 1.0;
+            for (int b = 0; b < 3; ++b) {
+                if (b != a) weight *= (time - p[b]->time) / (p[a]->time - p[b]->time);
+            }
+            for (int i = 0; i < 3; ++i) eye[i] += weight * p[a]->position[i];
+        }
+        break;
+    }
+    case FrameGenEyePredictor::kTwist: {
+        // The last movement into the older eye's view, out of the newer's:
+        // turned on by the turn between them.
+        const auto rotate = [](const std::array<float, 4>& q, const std::array<double, 3>& v, double sign) {
+            const double x = sign * q[0], y = sign * q[1], z = sign * q[2], w = q[3];
+            // v + 2w (u x v) + 2 u x (u x v), u = (x, y, z)
+            const double cx = y * v[2] - z * v[1], cy = z * v[0] - x * v[2], cz = x * v[1] - y * v[0];
+            return std::array<double, 3>{v[0] + 2.0 * (w * cx + y * cz - z * cy), v[1] + 2.0 * (w * cy + z * cx - x * cz),
+                                         v[2] + 2.0 * (w * cz + x * cy - y * cx)};
+        };
+        const std::array<double, 3> turned = rotate(newest.orientation, rotate(before.orientation, moved, -1.0), 1.0);
+        for (int i = 0; i < 3; ++i) eye[i] += turned[i] * ahead / last;
+        break;
+    }
+    default:
+        for (int i = 0; i < 3; ++i) eye[i] += moved[i] * ahead / last;
+        break;
+    }
+    return eye;
+}
+
 const char* ToString(FrameGenEngineBridgeMode mode) {
     switch (mode) {
     case FrameGenEngineBridgeMode::kOff:

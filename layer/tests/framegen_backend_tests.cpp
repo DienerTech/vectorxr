@@ -5525,7 +5525,9 @@ int RunProfile(Harness& harness) {
 // aligned) by Catmull-Rom in linear light instead of bilinearly.
 // FG_REPLAY_DEPTH_SCALE=s gives the backend each frame's depth times s (the
 // evaluation keeps the captured depth); FG_REPLAY_DEPTH=locked takes the
-// dumped depth up as it is, the depth check locked. New measures
+// dumped depth up as it is, the depth check locked. With FG_REPLAY_PREDICT=1,
+// VECTORXR_FRAMEGEN_SYNTH_EYE puts extrapolated frames' eyes where that
+// predictor says (FrameGenPredictEye, as a session). New measures
 // (ReplayMeasures; off with FG_REPLAY_MEASURES=0) print lines of their own:
 // fine detail against the truth as rendered and the newest frame, residual
 // shifts, the luma pair's residual, the flow by band, the eye-shift map
@@ -7714,7 +7716,45 @@ int RunReplay(Harness& harness) {
     // FG_REPLAY_PREDICT=1, extrapolating frame k at `fraction` toward frame
     // k + 1: the eye keeps moving as it did from frame k - 1, for the
     // intervals' ratio.
+    // With VECTORXR_FRAMEGEN_SYNTH_EYE (as a session reads it), the eye goes
+    // where that predictor puts it at frame k + 1's time, from frames k - 2
+    // (when there is one), k - 1 and k at theirs (the intervals' ratios: the
+    // time unit is frame k's interval).
+    const FrameGenEyePrediction eye_prediction = ParseFrameGenEyePrediction(env("VECTORXR_FRAMEGEN_SYNTH_EYE"));
+    if (predict && eye_prediction.predictor != FrameGenEyePredictor::kVelocity) {
+        std::printf("Eye predictor (VECTORXR_FRAMEGEN_SYNTH_EYE): %s%s, extrapolating\n", ToString(eye_prediction.predictor),
+                    eye_prediction.predictor == FrameGenEyePredictor::kDamped
+                        ? (" " + std::to_string(eye_prediction.damping).substr(0, 4)).c_str()
+                        : "");
+    }
     auto predicted_shifts = [&](std::size_t k, float fraction) {
+        if (eye_prediction.predictor != FrameGenEyePredictor::kVelocity && !no_shift) {
+            std::vector<std::array<float, 3>> shifts(view_count, {0.0f, 0.0f, 0.0f});
+            for (std::size_t v = 0; v < view_count; ++v) {
+                std::array<FrameGenEyeSample, 3> samples;
+                std::size_t count = 0;
+                const auto sample = [&](std::size_t f, double time) {
+                    const ReplayView& view = frames[f].views[v];
+                    samples[count++] = {time,
+                                        {view.newest.position[0], view.newest.position[1], view.newest.position[2]},
+                                        view.newest.orientation};
+                };
+                if (k >= 2) sample(k - 2, -1.0 - 1.0 / std::max(frames[k].tuning.interval_ratio, 1e-3f));
+                sample(k - 1, -1.0);
+                sample(k, 0.0);
+                const auto eye = FrameGenPredictEye(eye_prediction, samples.data(), count,
+                                                    frames[k + 1].tuning.interval_ratio);
+                if (!eye) continue;
+                const auto rotation = ReplayRotation(frames[k].views[v].newest.orientation);
+                const auto& newest = frames[k].views[v].newest.position;
+                const double delta[3] = {(*eye)[0] - newest[0], (*eye)[1] - newest[1], (*eye)[2] - newest[2]};
+                for (int i = 0; i < 3; ++i) {
+                    const double local = rotation[0][i] * delta[0] + rotation[1][i] * delta[1] + rotation[2][i] * delta[2];
+                    shifts[v][i] = static_cast<float>(local / fraction);
+                }
+            }
+            return shifts;
+        }
         std::vector<std::array<float, 3>> shifts = eye_shifts(k - 1, k, 1.0f);
         for (std::size_t v = 0; v < view_count; ++v) {
             // From frame k - 1's view space into frame k's; the eye

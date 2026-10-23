@@ -1416,6 +1416,81 @@ void TestFrameGenModuleOptional() {
            "Default OSD body order should include the Frame Gen row after Turbo");
 }
 
+// Research (VECTORXR_FRAMEGEN_SYNTH_EYE): the eye predictors' values parse
+// as named, and each follows the motion it is made for exactly.
+void TestFrameGenEyePrediction() {
+    using depthxr::FrameGenEyePredictor;
+    Expect(depthxr::ParseFrameGenEyePrediction("").predictor == FrameGenEyePredictor::kVelocity &&
+               depthxr::ParseFrameGenEyePrediction("runtime").predictor == FrameGenEyePredictor::kVelocity &&
+               depthxr::ParseFrameGenEyePrediction("Damped").predictor == FrameGenEyePredictor::kDamped &&
+               depthxr::ParseFrameGenEyePrediction("damped").damping == 0.9 &&
+               depthxr::ParseFrameGenEyePrediction("damped:0.75").damping == 0.75 &&
+               depthxr::ParseFrameGenEyePrediction("damped:0.2").damping == 0.9 &&
+               depthxr::ParseFrameGenEyePrediction("two").predictor == FrameGenEyePredictor::kTwoInterval &&
+               depthxr::ParseFrameGenEyePrediction("QUADRATIC").predictor == FrameGenEyePredictor::kQuadratic &&
+               depthxr::ParseFrameGenEyePrediction("twist").predictor == FrameGenEyePredictor::kTwist,
+           "VECTORXR_FRAMEGEN_SYNTH_EYE's values parse as named (velocity otherwise, damping 0.5 to 1)");
+    const auto matches = [](const std::optional<std::array<double, 3>>& eye, const std::array<double, 3>& want) {
+        return eye && std::abs((*eye)[0] - want[0]) < 1e-9 && std::abs((*eye)[1] - want[1]) < 1e-9 &&
+               std::abs((*eye)[2] - want[2]) < 1e-9;
+    };
+    const auto predict = [](const char* name, const std::vector<depthxr::FrameGenEyeSample>& samples, double time) {
+        return depthxr::FrameGenPredictEye(depthxr::ParseFrameGenEyePrediction(name), samples.data(), samples.size(),
+                                           time);
+    };
+    // Steady movement, intervals of 30 and 20 ms: every straight-line
+    // predictor (and the parabola) carries it on exactly; damped by its share.
+    const std::array<double, 3> velocity{0.2, -0.1, 0.05}; // m/s
+    const auto at = [&](double t) {
+        return depthxr::FrameGenEyeSample{t, {velocity[0] * t, 1.6 + velocity[1] * t, velocity[2] * t}};
+    };
+    const std::vector<depthxr::FrameGenEyeSample> steady{at(-0.05), at(-0.02), at(0.0)};
+    for (const char* name : {"velocity", "two", "quadratic", "twist"}) {
+        Expect(matches(predict(name, steady, 0.025), at(0.025).position), std::string(name) + " carries steady movement on");
+    }
+    Expect(matches(predict("damped:0.8", steady, 0.025), {0.8 * 0.2 * 0.025, 1.6 - 0.8 * 0.1 * 0.025, 0.8 * 0.05 * 0.025}),
+           "damped carries its share of the movement on");
+    Expect(matches(predict("velocity", steady, 0.0), steady.back().position),
+           "A predictor puts the eye at the newest frame's position at its own time");
+    // Steady acceleration (4 m/s^2): the parabola follows it; the last
+    // velocity, the middle of the interval before's, falls behind.
+    const auto accelerating = [](double t) {
+        return depthxr::FrameGenEyeSample{t, {0.1 * t + 2.0 * t * t, 0.0, 0.0}};
+    };
+    const std::vector<depthxr::FrameGenEyeSample> curve{accelerating(-0.06), accelerating(-0.03), accelerating(0.0)};
+    Expect(matches(predict("quadratic", curve, 0.03), accelerating(0.03).position), "quadratic follows steady acceleration");
+    const auto velocity_eye = predict("velocity", curve, 0.03);
+    Expect(velocity_eye && std::abs(accelerating(0.03).position[0] - (*velocity_eye)[0] - 4.0 * 0.03 * 0.03) < 1e-9,
+           "velocity misses steady acceleration by the acceleration times the interval squared one interval on");
+    const auto two_eye = predict("two", curve, 0.03);
+    Expect(two_eye && (*two_eye)[0] < (*velocity_eye)[0], "two lags velocity under acceleration");
+    // A steady turn about a pivot behind the eye (a neck 10 cm back): the
+    // twist follows the circle one interval on, the velocity cuts across.
+    const auto turning = [](double t) {
+        const double angle = 1.5 * t; // rad/s about y
+        const double s = std::sin(0.5 * angle), c = std::cos(0.5 * angle);
+        // The eye 10 cm in front of the pivot (-z forward), turned about it.
+        return depthxr::FrameGenEyeSample{t,
+                                          {-0.1 * std::sin(angle), 1.6, -0.1 * std::cos(angle)},
+                                          {0.0f, static_cast<float>(s), 0.0f, static_cast<float>(c)}};
+    };
+    const std::vector<depthxr::FrameGenEyeSample> turn{turning(-0.04), turning(0.0)};
+    const auto twist_eye = predict("twist", turn, 0.04);
+    const auto straight_eye = predict("velocity", turn, 0.04);
+    const std::array<double, 3> truth = turning(0.04).position;
+    const auto miss = [&](const std::optional<std::array<double, 3>>& eye) {
+        return eye ? std::hypot((*eye)[0] - truth[0], (*eye)[1] - truth[1], (*eye)[2] - truth[2]) : 1.0;
+    };
+    Expect(miss(twist_eye) < 1e-6 && miss(straight_eye) > 1e-5,
+           "twist follows a steady turn about a pivot one interval on (miss " + std::to_string(miss(twist_eye)) +
+               " m, velocity's " + std::to_string(miss(straight_eye)) + " m)");
+    // Too few frames, or times out of order: none, or the last velocity.
+    Expect(!predict("velocity", {at(0.0)}, 0.01) && !predict("velocity", {at(0.0), at(-0.01)}, 0.01),
+           "No prediction from one frame, or from times out of order");
+    Expect(matches(predict("quadratic", {at(-0.02), at(0.0)}, 0.01), at(0.01).position),
+           "quadratic with two frames moves the eye at its last velocity");
+}
+
 void TestFrameGenProfileResolution() {
     const std::string module = R"json({
       "enabled": false,
@@ -7394,6 +7469,7 @@ int main() {
     TestTurboModuleOptional();
     TestFrameGenModuleOptional();
     TestFrameGenProfileResolution();
+    TestFrameGenEyePrediction();
     TestFrameGenInvalidSettingsRejected();
     TestFrameGenToggleBindingList();
     TestFrameGenOsdRows();

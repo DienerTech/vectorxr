@@ -3074,11 +3074,25 @@ void TestJitEyeShiftReported() {
     double largest = 0.0;
     int summaries = 0;
     const std::string key = "eyeShiftMm=";
+    // Each candidate predictor's miss: the eyes move steadily, so the
+    // straight-line ones (and the parabola) miss nothing and damped does.
+    const std::string predict_key = "eyePredictMissMm=velocity:";
+    int predicted = 0;
+    double velocity_miss = 1.0, damped_miss = 0.0;
     for (std::string line; std::getline(file, line);) {
         const std::size_t at = line.find(key);
         if (line.find("threaded=1") == std::string::npos || at == std::string::npos) continue;
         ++summaries;
         largest = std::max(largest, std::stod(line.substr(at + key.size())));
+        const std::size_t predict_at = line.find(predict_key);
+        const std::size_t damped_at = line.find("/damped0.90:");
+        if (predict_at != std::string::npos && damped_at != std::string::npos &&
+            line.find("/two:") != std::string::npos && line.find("/quadratic:") != std::string::npos &&
+            line.find("/twist:") != std::string::npos) {
+            ++predicted;
+            velocity_miss = std::min(velocity_miss, std::stod(line.substr(predict_at + predict_key.size())));
+            damped_miss = std::max(damped_miss, std::stod(line.substr(damped_at + 12)));
+        }
     }
     file.close();
     std::filesystem::remove_all(directory, ignored);
@@ -3086,6 +3100,10 @@ void TestJitEyeShiftReported() {
     Check(summaries > 0 && largest > 1.0,
           "jit eye shift: the summaries say how far frames moved with the eyes (" + std::to_string(largest) +
               " mm in " + std::to_string(summaries) + " summaries)");
+    Check(predicted > 0 && velocity_miss < 0.01 && damped_miss > velocity_miss,
+          "jit eye shift: the summaries measure each eye predictor against the next real frame (velocity " +
+              std::to_string(velocity_miss) + " mm, damped " + std::to_string(damped_miss) + " mm in " +
+              std::to_string(predicted) + " summaries)");
 }
 
 // Extrapolate at 3x, each generated frame written right before its refresh:
@@ -3497,6 +3515,48 @@ void TestDepthCapture() {
     Check(none.Status().depth == FrameGenDepthState::kUnknown, "depth: nothing reported before generated frames");
     for (int i = 0; i < 8; ++i) none_app.Frame();
     Check(none.Status().depth == FrameGenDepthState::kNotSent, "depth: a game without depth is reported");
+}
+
+// Research (VECTORXR_FRAMEGEN_SYNTH_EYE): extrapolating, generated frames'
+// eyes go where the chosen predictor puts them (damped: its share of the
+// movement); interpolating, they stay on the line between the pair.
+void TestEyePredictionSwitch() {
+    const auto shift_of = [](FrameGenSynthesisMode mode, const char* eye) {
+        _putenv_s("VECTORXR_FRAMEGEN_SYNTH_EYE", eye);
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        gpu.depth = true;
+        Runtime runtime;
+        StartPresenter(presenter, gpu, mode);
+        _putenv_s("VECTORXR_FRAMEGEN_SYNTH_EYE", "");
+        const XrSwapchain depth_chain = reinterpret_cast<XrSwapchain>(0x21);
+        presenter.TrackSwapchain(depth_chain, 20, 1,
+                                 XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+        App app(presenter, runtime);
+        app.depth.subImage.swapchain = depth_chain;
+        app.depth.subImage.imageRect = {{0, 0}, {1200, 1200}};
+        app.depth.minDepth = 0.0f;
+        app.depth.maxDepth = 1.0f;
+        app.depth.nearZ = 0.1f;
+        app.depth.farZ = 1000.0f;
+        app.eye_speed = 0.5;
+        for (int i = 0; i < 14; ++i) app.Frame();
+        presenter.Stop();
+        Check(gpu.executes > 0 && gpu.last[0].request.depth, std::string("eye prediction: frames generated with ") + eye);
+        return gpu.last[0].request.shift[0];
+    };
+    const float velocity = shift_of(FrameGenSynthesisMode::kExtrapolate, "");
+    const float damped = shift_of(FrameGenSynthesisMode::kExtrapolate, "damped:0.5");
+    const float two = shift_of(FrameGenSynthesisMode::kExtrapolate, "two");
+    Check(velocity > 1e-4f && std::abs(damped - 0.5f * velocity) < 0.02f * velocity,
+          "eye prediction: damped:0.5 moves extrapolated frames' eyes half as far (" + std::to_string(damped) + " vs " +
+              std::to_string(velocity) + ")");
+    Check(std::abs(two - velocity) < 0.02f * velocity, "eye prediction: two carries steady movement on as velocity does");
+    const float line = shift_of(FrameGenSynthesisMode::kInterpolate, "");
+    const float line_damped = shift_of(FrameGenSynthesisMode::kInterpolate, "damped:0.5");
+    Check(line < 0.0f && std::abs(line_damped - line) < 0.02f * -line,
+          "eye prediction: interpolated frames keep their eyes on the line between the pair (" +
+              std::to_string(line_damped) + " vs " + std::to_string(line) + ")");
 }
 
 // Engine motion vectors, stage 0 (VECTORXR_FRAMEGEN_ENGINE_MV=census): the
@@ -12860,6 +12920,7 @@ int main(int argc, char** argv) {
     RUN(TestSubmissionSpacing);
     RUN(TestOutputsKeptAcrossMultipliers);
     RUN(TestDepthCapture);
+    RUN(TestEyePredictionSwitch);
     RUN(TestEngineMotionCensus);
     RUN(TestEngineMotionGates);
     RUN(TestEngineMotionCapture);

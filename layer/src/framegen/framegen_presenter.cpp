@@ -185,6 +185,12 @@ FrameGenViewGeometry Geometry(const XrCompositionLayerProjectionView& view) {
 // between two real frames are a tracking glitch.
 constexpr double kMaxEyeSpeed = 2.0;
 
+// The eye predictors each summary measures against the next real frame
+// (eyePredictMissMm), in its order.
+constexpr std::array<FrameGenEyePredictor, 5> kFrameGenEyeCandidates{
+    FrameGenEyePredictor::kVelocity, FrameGenEyePredictor::kDamped, FrameGenEyePredictor::kTwoInterval,
+    FrameGenEyePredictor::kQuadratic, FrameGenEyePredictor::kTwist};
+
 // `v` rotated by the unit quaternion `q`, and by its inverse.
 std::array<double, 3> Rotate(const XrQuaternionf& q, const std::array<double, 3>& v) {
     const double x = q.x, y = q.y, z = q.z, w = q.w;
@@ -270,6 +276,23 @@ std::string Number(double value, int decimals) {
     char buffer[32];
     std::snprintf(buffer, sizeof(buffer), "%.*f", decimals, value);
     return buffer;
+}
+
+// Each candidate eye predictor's mean miss (kFrameGenEyeCandidates,
+// millimeters), "name:miss/..." ("damped0.90" with its share), "-" when no
+// frame was measured.
+std::string EyePredictMissText(const std::array<double, 5>& sums, std::uint64_t frames, double damping) {
+    if (frames == 0) {
+        return "-";
+    }
+    std::string text;
+    for (std::size_t i = 0; i < kFrameGenEyeCandidates.size(); ++i) {
+        const FrameGenEyePredictor predictor = kFrameGenEyeCandidates[i];
+        text += (text.empty() ? "" : "/") + std::string(ToString(predictor)) +
+                (predictor == FrameGenEyePredictor::kDamped ? Number(damping, 2) : std::string()) + ":" +
+                Number(sums[i] / static_cast<double>(frames), 3);
+    }
+    return text;
 }
 
 // "median/largest" of a summary window, "-" when empty.
@@ -548,6 +571,12 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
     // Research: the Flow view tinting sub-pixel motion (again at each config
     // reload).
     flow_view_fine_ = ReadResearchSwitch("VECTORXR_FRAMEGEN_SYNTH_FLOW_VIEW") == "fine";
+    // Research (the head-motion shimmer diagnosis, D), for the session: where
+    // extrapolated frames' eyes go (VECTORXR_FRAMEGEN_SYNTH_EYE).
+    eye_prediction_ = ParseFrameGenEyePrediction(ReadResearchSwitch("VECTORXR_FRAMEGEN_SYNTH_EYE").value_or(""));
+    eye_history_.clear();
+    eye_predict_sum_mm_ = {};
+    eye_predict_frames_ = 0;
     // Stage 6, Lead: no measured passes at all (VECTORXR_FRAMEGEN_ENGINE_PREDICATE=0)
     // and interpolating led too (VECTORXR_FRAMEGEN_ENGINE_INTERPOLATE=lead),
     // for the session; the vectors lead once their verdicts let them.
@@ -618,6 +647,15 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
         logger_->Info("Frame Generation research switches from %LOCALAPPDATA%\\VectorXR\\framegen-research.txt "
                       "(the environment has none of them): " +
                       switches + ".");
+    }
+    if (logger_ && eye_prediction_.predictor != FrameGenEyePredictor::kVelocity) {
+        logger_->Info(std::string("Frame Generation puts extrapolated frames' eyes where the ") +
+                      ToString(eye_prediction_.predictor) +
+                      (eye_prediction_.predictor == FrameGenEyePredictor::kDamped
+                           ? " (" + Number(eye_prediction_.damping, 2) + ")"
+                           : std::string()) +
+                      " predictor says (VECTORXR_FRAMEGEN_SYNTH_EYE, research); interpolated frames keep theirs on "
+                      "the line between the pair.");
     }
     if (!gpu_) {
         UnavailableLocked(error.empty() ? "no graphics backend" : error);
@@ -4959,6 +4997,13 @@ void FrameGenPresenter::RecordReal(const XrCompositionLayerProjection& projectio
     last_real_.interval = last_real_.valid && last_real_.sequence + 1 == sequence && display_time > last_real_.display_time
                               ? display_time - last_real_.display_time
                               : 0;
+    // The frame it follows, for predictors that look two intervals back.
+    last_real_.before_positions.clear();
+    last_real_.before_time = 0;
+    if (last_real_.interval > 0) {
+        last_real_.before_time = last_real_.display_time;
+        for (const ViewRecord& view : last_real_.views) last_real_.before_positions.push_back(view.geometry.position);
+    }
     last_real_.valid = true;
     last_real_.sequence = last_real_.generated_sequence = sequence;
     last_real_.display_time = display_time;
@@ -4970,8 +5015,8 @@ void FrameGenPresenter::RecordReal(const XrCompositionLayerProjection& projectio
 }
 
 std::vector<std::array<float, 3>> FrameGenPresenter::EyeShiftsLocked(const XrCompositionLayerProjection& projection,
-                                                                     XrTime newest_time,
-                                                                     FrameGenSynthesisMode mode) const {
+                                                                     XrTime newest_time, FrameGenSynthesisMode mode,
+                                                                     bool predicted) const {
     std::vector<std::array<float, 3>> shifts(projection.viewCount, {0.0f, 0.0f, 0.0f});
     const double seconds = static_cast<double>(newest_time - last_real_.display_time) / 1e9;
     if (!last_real_.valid || seconds <= 0.0 || last_real_.views.size() != projection.viewCount) {
@@ -4983,12 +5028,36 @@ std::vector<std::array<float, 3>> FrameGenPresenter::EyeShiftsLocked(const XrCom
     // interpolating. Runtimes are not asked where the eyes will be: Pimax
     // returns about the current pose for any later time, which kept
     // generated frames at the real frame's eye position.
+    // Research (VECTORXR_FRAMEGEN_SYNTH_EYE): extrapolating, the eye goes
+    // where its predictor puts it one interval on, from the real frames'
+    // eyes at their own times (seconds before the newest).
     const double sign = mode == FrameGenSynthesisMode::kExtrapolate ? 1.0 : -1.0;
+    const bool predicting = predicted && eye_prediction_.predictor != FrameGenEyePredictor::kVelocity;
+    const bool before = last_real_.before_time > 0 && last_real_.before_time < last_real_.display_time &&
+                        last_real_.before_positions.size() == projection.viewCount;
     for (std::uint32_t i = 0; i < projection.viewCount; ++i) {
         const XrPosef& pose = projection.views[i].pose;
         const std::array<float, 3>& previous = last_real_.views[i].geometry.position;
-        const std::array<double, 3> delta{pose.position.x - previous[0], pose.position.y - previous[1],
-                                          pose.position.z - previous[2]};
+        std::array<double, 3> delta{pose.position.x - previous[0], pose.position.y - previous[1],
+                                    pose.position.z - previous[2]};
+        if (predicting) {
+            std::array<FrameGenEyeSample, 3> samples;
+            std::size_t count = 0;
+            if (before) {
+                const std::array<float, 3>& p = last_real_.before_positions[i];
+                samples[count++] = {-static_cast<double>(newest_time - last_real_.before_time) / 1e9,
+                                    {p[0], p[1], p[2]}};
+            }
+            samples[count++] = {-seconds,
+                                {previous[0], previous[1], previous[2]},
+                                last_real_.views[i].geometry.orientation};
+            samples[count++] = {0.0,
+                                {pose.position.x, pose.position.y, pose.position.z},
+                                {pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w}};
+            if (const auto eye = FrameGenPredictEye(eye_prediction_, samples.data(), count, seconds)) {
+                delta = {(*eye)[0] - pose.position.x, (*eye)[1] - pose.position.y, (*eye)[2] - pose.position.z};
+            }
+        }
         // Into the eye's own view space at the newest frame: the same
         // movement in the view the game rendered, whatever it did to the
         // world around it.
@@ -5007,6 +5076,7 @@ void FrameGenPresenter::NoteEyeMovementLocked(const XrCompositionLayerProjection
     const double seconds = static_cast<double>(frame.app_time - last_real_.display_time) / 1e9;
     if (projection.viewCount == 0 || last_real_.views.empty() || seconds <= 0.0) {
         eye_velocity_.reset();
+        eye_history_.clear();
         return;
     }
     const XrVector3f& now = projection.views[0].pose.position;
@@ -5023,6 +5093,38 @@ void FrameGenPresenter::NoteEyeMovementLocked(const XrCompositionLayerProjection
     }
     eye_velocity_ = std::array<double, 3>{moved[0] / seconds, moved[1] / seconds, moved[2] / seconds};
     eye_velocity_sequence_ = frame.sequence;
+    // Research (VECTORXR_FRAMEGEN_SYNTH_EYE): each candidate predictor's
+    // miss, from the three real frames before this one (seconds before it,
+    // each at its own display time) to its eye, over the same frames for all.
+    const XrPosef& pose = projection.views[0].pose;
+    const FrameGenEyeSample sample{0.0,
+                                   {pose.position.x, pose.position.y, pose.position.z},
+                                   {pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w}};
+    if (!(length < kMaxEyeSpeed * seconds)) {
+        eye_history_.clear(); // a tracking glitch: measured again from this frame on
+    } else if (eye_history_.empty() || eye_history_sequence_ + 1 != frame.sequence) {
+        // Begun again from the real frame before (its eye as it was shown).
+        const FrameGenViewGeometry& last = last_real_.views[0].geometry;
+        eye_history_.assign(
+            1, FrameGenEyeSample{-seconds, {last.position[0], last.position[1], last.position[2]}, last.orientation});
+    } else {
+        for (FrameGenEyeSample& before : eye_history_) before.time -= seconds; // now before this frame
+    }
+    if (eye_history_.size() == 3) {
+        FrameGenEyePrediction candidate = eye_prediction_;
+        for (std::size_t i = 0; i < kFrameGenEyeCandidates.size(); ++i) {
+            candidate.predictor = kFrameGenEyeCandidates[i];
+            if (const auto eye = FrameGenPredictEye(candidate, eye_history_.data(), eye_history_.size(), 0.0)) {
+                const std::array<double, 3> miss{(*eye)[0] - sample.position[0], (*eye)[1] - sample.position[1],
+                                                 (*eye)[2] - sample.position[2]};
+                eye_predict_sum_mm_[i] += 1000.0 * std::sqrt(miss[0] * miss[0] + miss[1] * miss[1] + miss[2] * miss[2]);
+            }
+        }
+        ++eye_predict_frames_;
+        eye_history_.erase(eye_history_.begin());
+    }
+    eye_history_.push_back(sample);
+    eye_history_sequence_ = frame.sequence;
 }
 
 void FrameGenPresenter::NoteGpuTimingLocked(std::uint64_t submission, const PendingFrame& frame,
@@ -5247,7 +5349,8 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         if (continuous) {
             // Just in time the movement is kept forward in time: frames are
             // written past the newest frame or before it as each refresh needs.
-            shifts = EyeShiftsLocked(projection, frame.app_time, analyze ? FrameGenSynthesisMode::kExtrapolate : mode);
+            shifts = EyeShiftsLocked(projection, frame.app_time, analyze ? FrameGenSynthesisMode::kExtrapolate : mode,
+                                     mode == FrameGenSynthesisMode::kExtrapolate);
             NoteEyeMovementLocked(projection, frame);
         }
         notes.sequence = frame.sequence;
@@ -7777,6 +7880,7 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
             "/" + Number(shift_window_max_mm_, 1) +
             ", eyeMoveMm=" + Number(eye_frames_ ? eye_move_sum_mm_ / eye_frames_ : 0.0, 1) +
             ", eyeMissMm=" + Number(eye_frames_ ? eye_miss_sum_mm_ / eye_frames_ : 0.0, 1) +
+            ", eyePredictMissMm=" + EyePredictMissText(eye_predict_sum_mm_, eye_predict_frames_, eye_prediction_.damping) +
             ", gpuStartMs=" + MedianAndMax(gpu_start_ms_) + ", gpuDoneMs=" + MedianAndMax(gpu_done_ms_) +
             ", captureDoneMs=" + MedianAndMax(capture_done_ms_) + ", analysisMs=" + MedianAndMax(analysis_ms_) +
             ", measureLagMs=" + MedianAndMax(measure_lag_ms_) +
@@ -7819,6 +7923,8 @@ void FrameGenPresenter::NewSummaryWindowLocked(Clock::time_point now, double sta
     late_cycles_ = 0;
     eye_move_sum_mm_ = eye_miss_sum_mm_ = 0.0;
     eye_frames_ = 0;
+    eye_predict_sum_mm_ = {};
+    eye_predict_frames_ = 0;
     gpu_start_ms_.clear();
     gpu_done_ms_.clear();
     capture_done_ms_.clear();
