@@ -900,6 +900,17 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
     filter.outputs = {Texture(FrameGenTextureKind::kFilteredNewest, plan.final_flow_level), {}};
     filter.constants.options[3] = plan.final_flow_level;
     filter.constants.tuning[0] = std::clamp(tuning.interval_ratio, 0.25f, 4.0f);
+    // Research (hypothesis E): content with nothing to track keeps the head's
+    // predicted motion unless its match is clearly better; the cover filter
+    // below is a copy and holds it too.
+    const bool prior = tuning.flow_prior.enabled && (!tuning.flow_prior.still || FrameGenWorldStill(request));
+    if (prior) {
+        filter.pass = FrameGenPass::kFilterPrior;
+        filter.constants.options[1] |= kFrameGenFlagFlowPrior | (tuning.flow_prior.distant ? kFrameGenFlagFlowPriorFar : 0u);
+        filter.constants.tuning[1] = tuning.flow_prior.share;
+        filter.constants.tuning[2] = tuning.flow_prior.margin;
+        filter.constants.tuning[3] = tuning.flow_prior.per_pixel;
+    }
     const bool world = request.depth && request.world_motion;
     // Stage 4: the world's motion from the application's movement where the
     // request has it and the backend's calibration locked, else fitted; the
@@ -962,12 +973,17 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
             filter.constants.options[1] |= kFrameGenFlagEngine;
         }
     }
-    if (world && tuning.mode == FrameGenSynthesisMode::kExtrapolate) {
-        if (!assist) {
+    // The flow prior's prediction for the sky turns with the world (its
+    // rotation alone) where the world's motion is known; interpolating, the
+    // world's motion is worked out for the prior alone (the filter moves no
+    // world content by it: kFrameGenFlagFlowPriorWorld, not kFrameGenFlagWorld).
+    const bool prior_world = world && prior && tuning.mode == FrameGenSynthesisMode::kInterpolate;
+    if (world && (tuning.mode == FrameGenSynthesisMode::kExtrapolate || prior_world)) {
+        if (!assist || (prior_world && !covered)) {
             append_world();
         }
         filter.inputs[3] = Texture(FrameGenTextureKind::kWorldParams);
-        filter.constants.options[1] |= world_flags;
+        filter.constants.options[1] |= prior_world ? kFrameGenFlagFlowPriorWorld : world_flags;
     }
     plan.dispatches.push_back(filter);
     // Observe: the game's motion vectors judged against what the frame shows
@@ -982,8 +998,9 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
             FrameGenDispatch cover = filter;
             cover.outputs = {Texture(FrameGenTextureKind::kFilteredCover, plan.final_flow_level), {}};
             cover.constants.options[1] |= kFrameGenFlagExtrapolate;
+            cover.constants.options[1] &= ~kFrameGenFlagFlowPriorWorld;
             if (world) {
-                if (!assist) {
+                if (!assist && !prior_world) {
                     append_world();
                 }
                 cover.inputs[3] = Texture(FrameGenTextureKind::kWorldParams);
@@ -1813,6 +1830,51 @@ std::optional<std::array<double, 3>> FrameGenPredictEye(const FrameGenEyePredict
         break;
     }
     return eye;
+}
+
+FrameGenFlowPrior ParseFrameGenFlowPrior(const std::string& value) {
+    std::string text(value);
+    std::transform(text.begin(), text.end(), text.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    FrameGenFlowPrior prior;
+    const std::size_t colon = text.find(':');
+    std::string scope = text.substr(0, colon);
+    const std::string still = "-still";
+    if (scope.size() > still.size() && scope.compare(scope.size() - still.size(), still.size(), still) == 0) {
+        prior.still = true;
+        scope.erase(scope.size() - still.size());
+    }
+    if (scope != "sky" && scope != "1" && scope != "far") {
+        return FrameGenFlowPrior{};
+    }
+    prior.enabled = true;
+    prior.distant = scope == "far";
+    if (colon == std::string::npos) {
+        return prior;
+    }
+    float* const fields[3] = {&prior.share, &prior.margin, &prior.per_pixel};
+    std::size_t start = colon + 1;
+    for (float* field : fields) {
+        const std::size_t comma = text.find(',', start);
+        const std::string number = text.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+        char* end = nullptr;
+        const float parsed = std::strtof(number.c_str(), &end);
+        if (!number.empty() && end && *end == '\0' && parsed >= 0.0f && parsed <= 10.0f) {
+            *field = parsed;
+        }
+        if (comma == std::string::npos) {
+            break;
+        }
+        start = comma + 1;
+    }
+    return prior;
+}
+
+bool FrameGenWorldStill(const FrameGenViewRequest& request) {
+    const auto& q = request.delta_orientation;
+    const auto& p = request.delta_position;
+    return request.app_delta && std::sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]) < 0.005f &&
+           std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2]) < 2.5e-4f;
 }
 
 const char* ToString(FrameGenEngineBridgeMode mode) {
@@ -3754,7 +3816,8 @@ std::optional<std::string> ReadResearchSwitch(const char* name) {
     }
     const std::string_view wanted(name);
     if (wanted.rfind("VECTORXR_FRAMEGEN_ENGINE_", 0) != 0 && wanted.rfind("VECTORXR_FRAMEGEN_DEPTH_", 0) != 0 &&
-        wanted.rfind("VECTORXR_FRAMEGEN_SYNTH_", 0) != 0 && wanted != "VECTORXR_FRAMEGEN_WORLD") {
+        wanted.rfind("VECTORXR_FRAMEGEN_SYNTH_", 0) != 0 && wanted.rfind("VECTORXR_FRAMEGEN_FLOW_", 0) != 0 &&
+        wanted != "VECTORXR_FRAMEGEN_WORLD") {
         return std::nullopt;
     }
     const std::filesystem::path local = LocalAppDataPath();

@@ -753,6 +753,13 @@ class D3D12FrameGen final : public FrameGenGpu {
             resample_ = ParseFrameGenResample(*resample);
         }
         shift_smooth_ = ReadResearchSwitch("VECTORXR_FRAMEGEN_SYNTH_SHIFT") == "smooth";
+        // Research (hypothesis E): the filter's prior for content with nothing
+        // to track (FrameGenTuning::flow_prior; VECTORXR_FRAMEGEN_FLOW_PRIOR
+        // sky, far, sky-still or far-still, optionally :<share>,<margin>,<per
+        // pixel>), from the research file too.
+        if (const std::optional<std::string> prior = ReadResearchSwitch("VECTORXR_FRAMEGEN_FLOW_PRIOR")) {
+            flow_prior_ = ParseFrameGenFlowPrior(*prior);
+        }
         // Interpolation's occlusion handling (VECTORXR_FRAMEGEN_OCCLUSION=0:
         // off) and, for research, its cross-fade fallback
         // (VECTORXR_FRAMEGEN_CROSSFADE=1).
@@ -2988,6 +2995,9 @@ class D3D12FrameGen final : public FrameGenGpu {
             effective_tuning.resample_previous = resample_.previous;
         }
         effective_tuning.shift_smooth = tuning.shift_smooth || shift_smooth_;
+        if (flow_prior_.enabled) {
+            effective_tuning.flow_prior = flow_prior_;
+        }
         effective_tuning.hardware_flow = tuning.hardware_flow && HardwareFlowReady();
         // Engine motion vectors (stage 3): their evidence is taken with the
         // convention the validator has under test, or locked.
@@ -6850,6 +6860,7 @@ class D3D12FrameGen final : public FrameGenGpu {
     bool depth_splat_{false};                       // FrameGenTuning::depth_splat forced (research)
     FrameGenResampleChoice resample_;               // FrameGenTuning::resample forced (research)
     bool shift_smooth_{false};                      // FrameGenTuning::shift_smooth forced (research)
+    FrameGenFlowPrior flow_prior_;                  // FrameGenTuning::flow_prior forced (research)
     std::array<FrameSlot, kFramesInFlight> slots_;
     ComPtr<ID3D12GraphicsCommandList> capture_commands_;
     std::array<CaptureSlot, kCaptureSlots> capture_slots_; // views x frames in flight, color and depth

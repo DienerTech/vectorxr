@@ -1794,6 +1794,156 @@ void TestFrameGenPlan() {
         Expect(same, "Bilinear resampling leaves every constant as it was");
         request.depth = false;
     }
+    // The flow prior (research, hypothesis E): the filter alone takes its
+    // flag and strengths, Interpolate's cover filter too; off, or with a
+    // value it does not know, every constant stays as it was.
+    {
+        const auto filters_of = [&](const depthxr::FrameGenTuning& with) {
+            std::vector<depthxr::FrameGenDispatch> filters;
+            for (const auto& dispatch : depthxr::BuildFrameGenViewPlan(request, with).dispatches) {
+                if (dispatch.pass == FrameGenPass::kFilter || dispatch.pass == FrameGenPass::kFilterPrior) {
+                    filters.push_back(dispatch);
+                }
+            }
+            return filters;
+        };
+        const auto same_constants = [&](const depthxr::FrameGenTuning& a, const depthxr::FrameGenTuning& b) {
+            const auto one = depthxr::BuildFrameGenViewPlan(request, a);
+            const auto other = depthxr::BuildFrameGenViewPlan(request, b);
+            bool same = one.dispatches.size() == other.dispatches.size();
+            for (std::size_t i = 0; same && i < one.dispatches.size(); ++i) {
+                same = std::memcmp(&one.dispatches[i].constants, &other.dispatches[i].constants,
+                                   sizeof(depthxr::FrameGenConstants)) == 0;
+            }
+            return same;
+        };
+        const depthxr::FrameGenFlowPrior defaults = depthxr::ParseFrameGenFlowPrior("Sky");
+        Expect(defaults.enabled && !defaults.distant && defaults.share == 1.0f && defaults.margin == 0.002f &&
+                   defaults.per_pixel == 0.001f && depthxr::ParseFrameGenFlowPrior("1").enabled,
+               "VECTORXR_FRAMEGEN_FLOW_PRIOR=sky holds the sky at the default strengths");
+        const depthxr::FrameGenFlowPrior set = depthxr::ParseFrameGenFlowPrior("far:1.5,0.004,0.003");
+        Expect(set.enabled && set.distant && set.share == 1.5f && set.margin == 0.004f && set.per_pixel == 0.003f,
+               "VECTORXR_FRAMEGEN_FLOW_PRIOR=far:<share>,<margin>,<per pixel> sets all three");
+        const depthxr::FrameGenFlowPrior partial = depthxr::ParseFrameGenFlowPrior("sky:2,x");
+        Expect(partial.enabled && partial.share == 2.0f && partial.margin == 0.002f && partial.per_pixel == 0.001f,
+               "A bad or missing strength keeps its default");
+        Expect(!depthxr::ParseFrameGenFlowPrior("0").enabled && !depthxr::ParseFrameGenFlowPrior("skies").enabled &&
+                   !depthxr::ParseFrameGenFlowPrior("").enabled && !depthxr::ParseFrameGenFlowPrior("-still").enabled &&
+                   !depthxr::ParseFrameGenFlowPrior("moon-still").still,
+               "Any other value leaves the flow prior off");
+        const depthxr::FrameGenFlowPrior gated = depthxr::ParseFrameGenFlowPrior("Sky-Still:1,0.003");
+        Expect(gated.enabled && gated.still && !gated.distant && gated.margin == 0.003f && !defaults.still &&
+                   depthxr::ParseFrameGenFlowPrior("far-still").distant,
+               "VECTORXR_FRAMEGEN_FLOW_PRIOR=sky-still holds the sky on still-world frames only");
+
+        depthxr::FrameGenTuning prior = tuning;
+        prior.diagnostic = depthxr::FrameGenDiagnosticView::kOff;
+        depthxr::FrameGenTuning plain = prior;
+        Expect(same_constants(plain, plain) && filters_of(plain).size() == 1 &&
+                   (filters_of(plain)[0].constants.options[1] &
+                    (depthxr::kFrameGenFlagFlowPrior | depthxr::kFrameGenFlagFlowPriorFar)) == 0,
+               "The filter has no flow prior by default");
+        prior.flow_prior = depthxr::ParseFrameGenFlowPrior("off");
+        Expect(same_constants(prior, plain), "An unknown flow prior value leaves every constant as it was");
+        prior.flow_prior = set;
+        const auto filters = filters_of(prior);
+        const auto base_filter = filters_of(plain)[0];
+        Expect(filters.size() == 1 && base_filter.pass == FrameGenPass::kFilter && filters[0].pass == FrameGenPass::kFilterPrior &&
+                   filters[0].constants.options[1] == (base_filter.constants.options[1] | depthxr::kFrameGenFlagFlowPrior |
+                                                       depthxr::kFrameGenFlagFlowPriorFar) &&
+                   filters[0].constants.tuning[0] == base_filter.constants.tuning[0] &&
+                   filters[0].constants.tuning[1] == 1.5f && filters[0].constants.tuning[2] == 0.004f &&
+                   filters[0].constants.tuning[3] == 0.003f,
+               "The flow prior flags the filter and hands it its strengths");
+        {
+            // Every other dispatch is as it was.
+            const auto one = depthxr::BuildFrameGenViewPlan(request, prior);
+            const auto other = depthxr::BuildFrameGenViewPlan(request, plain);
+            bool same = one.dispatches.size() == other.dispatches.size();
+            for (std::size_t i = 0; same && i < one.dispatches.size(); ++i) {
+                same = one.dispatches[i].pass == FrameGenPass::kFilterPrior ||
+                       std::memcmp(&one.dispatches[i].constants, &other.dispatches[i].constants,
+                                   sizeof(depthxr::FrameGenConstants)) == 0;
+            }
+            Expect(same, "The flow prior changes the filter's constants only");
+        }
+        depthxr::FrameGenTuning cover = prior;
+        cover.mode = depthxr::FrameGenSynthesisMode::kInterpolate;
+        cover.analyze_only = true;
+        cover.cover = true;
+        cover.flow_prior = defaults;
+        const auto covers = filters_of(cover);
+        Expect(covers.size() == 2 && covers[1].pass == FrameGenPass::kFilterPrior &&
+                   (covers[0].constants.options[1] & depthxr::kFrameGenFlagFlowPrior) != 0 &&
+                   (covers[1].constants.options[1] & depthxr::kFrameGenFlagFlowPrior) != 0 &&
+                   (covers[1].constants.options[1] & depthxr::kFrameGenFlagFlowPriorFar) == 0 &&
+                   covers[1].constants.tuning[2] == 0.002f,
+               "Interpolate's cover filter holds the flow prior too");
+        // Gated on a still world: off without appSpaceDeltaPose or with the
+        // world moving (5 mm, 0.03 degrees), on while it is still.
+        {
+            depthxr::FrameGenTuning still_only = prior;
+            still_only.flow_prior = gated;
+            Expect(same_constants(still_only, plain), "sky-still: no flow prior without appSpaceDeltaPose");
+            request.app_delta = true;
+            request.delta_position = {0.004f, 0.0f, 0.0f};
+            request.delta_orientation = {0.0f, 2.0e-4f, 0.0f, 1.0f};
+            Expect(depthxr::FrameGenWorldStill(request) &&
+                       (filters_of(still_only)[0].constants.options[1] & depthxr::kFrameGenFlagFlowPrior) != 0,
+                   "sky-still: the flow prior with the world still");
+            request.delta_position = {0.006f, 0.0f, 0.0f};
+            Expect(!depthxr::FrameGenWorldStill(request) && same_constants(still_only, plain),
+                   "sky-still: no flow prior with the world moving 6 mm");
+            request.delta_position = {0.0f, 0.0f, 0.0f};
+            request.delta_orientation = {0.0f, 3.0e-4f, 0.0f, 1.0f};
+            Expect(!depthxr::FrameGenWorldStill(request) && same_constants(still_only, plain),
+                   "sky-still: no flow prior with the world turning 0.034 degrees");
+            request.app_delta = false;
+            request.delta_orientation = {0.0f, 0.0f, 0.0f, 1.0f};
+        }
+        // With depth and world motion, interpolating: the world's motion is
+        // fitted for the prior's prediction alone (the filter moves no world
+        // content by it); without the prior Interpolate fits none, and the
+        // cover filter keeps its world motion as before, fitted once.
+        request.depth = true;
+        request.world_motion = true;
+        const auto passes = [&](const depthxr::FrameGenTuning& with, FrameGenPass pass) {
+            std::size_t count = 0;
+            for (const auto& dispatch : depthxr::BuildFrameGenViewPlan(request, with).dispatches) {
+                count += dispatch.pass == pass ? 1u : 0u;
+            }
+            return count;
+        };
+        depthxr::FrameGenTuning world = plain;
+        world.mode = depthxr::FrameGenSynthesisMode::kInterpolate;
+        Expect(passes(world, FrameGenPass::kWorldSolve) == 0, "Interpolate fits no world motion without the flow prior");
+        world.flow_prior = defaults;
+        const auto world_filters = filters_of(world);
+        Expect(passes(world, FrameGenPass::kWorldSolve) == depthxr::kFrameGenWorldIterations && world_filters.size() == 1 &&
+                   (world_filters[0].constants.options[1] & depthxr::kFrameGenFlagFlowPriorWorld) != 0 &&
+                   (world_filters[0].constants.options[1] & depthxr::kFrameGenFlagWorld) == 0 &&
+                   world_filters[0].inputs[3].kind == depthxr::FrameGenTextureKind::kWorldParams,
+               "Interpolating, the flow prior turns its prediction with the world's fitted motion alone");
+        depthxr::FrameGenTuning world_cover = world;
+        world_cover.analyze_only = true;
+        world_cover.cover = true;
+        const auto world_covers = filters_of(world_cover);
+        Expect(passes(world_cover, FrameGenPass::kWorldSolve) == depthxr::kFrameGenWorldIterations &&
+                   world_covers.size() == 2 &&
+                   (world_covers[1].constants.options[1] & depthxr::kFrameGenFlagFlowPriorWorld) == 0 &&
+                   (world_covers[1].constants.options[1] & depthxr::kFrameGenFlagWorld) != 0,
+               "The cover filter keeps its world motion with the flow prior, fitted once");
+        depthxr::FrameGenTuning extrapolate_world = plain;
+        extrapolate_world.flow_prior = defaults;
+        const auto extrapolate_filters = filters_of(extrapolate_world);
+        Expect(extrapolate_filters.size() == 1 &&
+                   (extrapolate_filters[0].constants.options[1] & depthxr::kFrameGenFlagFlowPriorWorld) == 0 &&
+                   (extrapolate_filters[0].constants.options[1] & depthxr::kFrameGenFlagWorld) != 0 &&
+                   passes(extrapolate_world, FrameGenPass::kWorldSolve) == passes(plain, FrameGenPass::kWorldSolve),
+               "Extrapolating, the flow prior takes the world's motion the filter has");
+        request.world_motion = false;
+        request.depth = false;
+    }
 
     // Depth: the trust scores, their surface vote, the stereo depth-scale
     // vote (with this frame's stereo evidence) in two stages, then the resolve.
@@ -4868,7 +5018,8 @@ void TestResearchSwitches() {
     for (const char* name : {"VECTORXR_FRAMEGEN_ENGINE_CUTS", "VECTORXR_FRAMEGEN_ENGINE_MV",
                              "VECTORXR_FRAMEGEN_DEPTH_ENCODING_CHECK", "VECTORXR_FRAMEGEN_JIT",
                              "VECTORXR_FRAMEGEN_ENGINE_MV_STATE", "VECTORXR_FRAMEGEN_DEPTH_SPLAT",
-                             "VECTORXR_FRAMEGEN_WORLD", "VECTORXR_FRAMEGEN_SYNTH_FLOW_VIEW"}) {
+                             "VECTORXR_FRAMEGEN_WORLD", "VECTORXR_FRAMEGEN_SYNTH_FLOW_VIEW",
+                             "VECTORXR_FRAMEGEN_FLOW_PRIOR"}) {
         _putenv_s(name, "");
     }
     Expect(!depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_CUTS"), "Research switches: none without a file");
@@ -4884,7 +5035,8 @@ void TestResearchSwitches() {
              << "VECTORXR_FRAMEGEN_ENGINE_CUTS=1\r\n"
              << "VECTORXR_FRAMEGEN_DEPTH_SPLAT=1\r\n"
              << "VECTORXR_FRAMEGEN_WORLD=0\r\n"
-             << "VECTORXR_FRAMEGEN_SYNTH_FLOW_VIEW=fine\r\n";
+             << "VECTORXR_FRAMEGEN_SYNTH_FLOW_VIEW=fine\r\n"
+             << "VECTORXR_FRAMEGEN_FLOW_PRIOR=sky:1,0.003,0.0005\r\n";
     }
     depthxr::TakeResearchFileSwitches(); // what earlier reads in the process left
     const std::uint64_t reads = depthxr::ResearchFileReads();
@@ -4929,6 +5081,8 @@ void TestResearchSwitches() {
            "Research switches: each session's are told, once each");
     Expect(depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_SYNTH_FLOW_VIEW") == "fine",
            "Research switches: the synthesis research's switches are among them");
+    Expect(depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_FLOW_PRIOR") == "sky:1,0.003,0.0005",
+           "Research switches: the flow research's switches are among them");
     for (const char* name : {"VECTORXR_FRAMEGEN_ENGINE_CUTS", "VECTORXR_FRAMEGEN_JIT"}) {
         _putenv_s(name, "");
     }

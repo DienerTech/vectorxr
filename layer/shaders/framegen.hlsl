@@ -33,6 +33,13 @@
      defined(FG_PASS_SHIFT_FILL_ENGINE)) && !defined(__spirv__)
 #define FG_SHIFT_ENGINE 1
 #endif
+// The flow prior's filter (research, FG_FLAG_FLOW_PRIOR) is FG_PASS_FILTER
+// built with FlowPrior (FG_FILTER_PRIOR): the filter itself stays as it was,
+// its registers and cost too.
+#if defined(FG_PASS_FILTER_PRIOR)
+#define FG_PASS_FILTER 1
+#define FG_FILTER_PRIOR 1
+#endif
 
 #ifdef __spirv__
 #define FG_BIND(slot) [[vk::binding(slot, 0)]]
@@ -132,10 +139,21 @@ cbuffer FrameGenConstantBuffer : register(b0) {
 // Research (fix B1): synthesis with depth reads the eye-shift map between its
 // texels on the surface the texel under the pixel holds (SmoothShift).
 #define FG_FLAG_SHIFT_SMOOTH 2097152u
+// Research (the head-motion shimmer diagnosis's hypothesis E, the C172's
+// "prop chaos"): FG_PASS_FILTER keeps content with nothing to track on the
+// motion the head's pose predicts unless its match is clearly better (see
+// FlowPrior). Bit 20 is kept for the head-motion shimmer design's matched
+// sharpness.
+#define FG_FLAG_FLOW_PRIOR 4194304u
+// With it, FG_PASS_FILTER's prior holds world content at any distance that
+// took no world motion too, not only the sky and content without depth.
+#define FG_FLAG_FLOW_PRIOR_FAR 16777216u
+// With it, interpolating: the prior's prediction turns with the world's
+// motion (input 3) while the filter moves no world content by it.
+#define FG_FLAG_FLOW_PRIOR_WORLD 33554432u
 // Research: the Flow view tints each pixel by its motion in pixels, in full
 // from 2 pixels (sub-pixel motion shows), instead of by its share of the
-// view. Bits 20 and 22 are kept for the head-motion shimmer design's matched
-// sharpness and rotor research.
+// view.
 #define FG_FLAG_FLOW_FINE 8388608u
 // The candidates' flags (FG_PASS_ENGINE_CONVERT; the nearest surface's in
 // bits 0-3 of its info, the farthest's in 4-7): not a vector (the capture's
@@ -1031,9 +1049,64 @@ Texture2D<uint> g_labels : register(t4);
 // when extrapolating where it matches clearly (levers, a yoke, hands).
 #define FG_ENGINE_COCKPIT 1u
 
+// Research (FG_FLAG_FLOW_PRIOR): whether a cell of measured flow `flow` (w:
+// its cost with no motion) takes the motion predicted for it (`predicted`)
+// instead. With depth, it holds the sky, content without depth and content
+// the other eye put far (and with FG_FLAG_FLOW_PRIOR_FAR all world content
+// without a world motion); without depth, every cell. The prediction is no
+// residual flow (the head's pose), or where the world's motion is known
+// (input 3: FG_FLAG_WORLD, or FG_FLAG_FLOW_PRIOR_WORLD interpolating) the
+// world's: its rotation alone for the sky, as FG_FLAG_WORLD_SKY turns it. A
+// vector further from the prediction than the parallax the head's movement
+// gives content without depth as near as FG_PRIOR_NEAR (meters) must match
+// better than no motion by tuning.y of its cost plus tuning.z (luma), plus
+// tuning.w per full-resolution pixel past that parallax. Flat sky matches
+// every vector about as well as none (shader flow: p95 20-46 px with the
+// world still), and a faint translucent disc over it (the C172's prop, no
+// depth) finds aliases hundreds of pixels away that carry world-locked
+// markers and haze across the sky; textured content matches clearly worse
+// without its motion and keeps its vector. `anchor`: the cell kept a vector
+// past that parallax on its evidence (a moving edge: FG_PASS_FILTER then
+// holds none of its neighbours either).
+#if defined(FG_FILTER_PRIOR)
+#define FG_PRIOR_NEAR 0.5
+bool FlowPrior(float4 flow, float2 uv, float depth, float2 pixels, out float2 predicted, out bool anchor) {
+    predicted = float2(0.0, 0.0);
+    anchor = false;
+    if ((g.options.y & FG_FLAG_FLOW_PRIOR) == 0u || flow.w < 0.0) {
+        return false;
+    }
+    const bool distant = !(depth > 0.0 && depth < FG_WORLD_SKY) ||
+                         ((g.options.y & FG_FLAG_FLOW_PRIOR_FAR) != 0u && depth >= FG_WORLD_DEPTH);
+    if ((g.options.y & FG_FLAG_DEPTH) != 0u && !distant) {
+        return false;
+    }
+    if ((g.options.y & (FG_FLAG_WORLD | FG_FLAG_FLOW_PRIOR_WORLD)) != 0u && (g.options.y & FG_FLAG_DEPTH) != 0u &&
+        g_world.Load(int3(0, 0, 0)).w > 0.0) {
+        const float inv_z = depth >= FG_WORLD_DEPTH && depth < FG_WORLD_SKY ? 1.0 / depth : 0.0;
+        const bool delta = g_world.Load(int3(2, 0, 0)).y == 1.0;
+        predicted = (delta ? WorldFlowExact(g_world, uv, inv_z) : WorldFlow(g_world, uv, inv_z)) / WorldTangentScale();
+    }
+    // Content without depth need not be far (MSFS draws the airframe above
+    // the cabin without depth): the head's movement between the frames
+    // moves it by up to its parallax at FG_PRIOR_NEAR, and a vector within
+    // that of the prediction is kept as measured (a flat wing taken still
+    // inside its moving edge doubled the edge).
+    const float parallax = length(float3(g.rot0.w, g.rot1.w, g.rot2.w)) / FG_PRIOR_NEAR * pixels.x /
+                           abs(WorldTangentScale().x);
+    const float beyond = length((flow.xy - predicted) * pixels) - parallax;
+    if (!(beyond > 0.0)) {
+        return false;
+    }
+    anchor = flow.w > flow.z * g.tuning.y + g.tuning.z + g.tuning.w * beyond;
+    return !anchor;
+}
+#endif
+
 // A flow sample (w: its cost with no motion, negative where the previous
 // frame did not see the content: FG_PASS_REFINE) with the rigid test applied
-// at its cell; `rigid` when the cell is cockpit content.
+// at its cell; `rigid` when the cell is cockpit content. With `prior`
+// (FG_PASS_FILTER_PRIOR), the flow prior too (`anchor` as FlowPrior's).
 // With FG_FLAG_ENGINE, cells the game's vectors moved go by their label's
 // class instead of their distance: the head's movement alone is rigid, at
 // any distance; the world's is world content (the world's motion beyond
@@ -1041,7 +1114,8 @@ Texture2D<uint> g_labels : register(t4);
 // and nearer, extrapolating, only with FG_ENGINE_COCKPIT where no motion
 // matches clearly worse (as the rigid keep test) and they move more than the
 // pixels. The rest keep the distance's rules.
-float4 Rigid(float4 flow, int2 cell, float2 pixels, out bool rigid) {
+float4 Rigid(float4 flow, int2 cell, float2 pixels, bool prior, out bool rigid, out bool anchor) {
+    anchor = false;
     const float zero = flow.w;
     const float2 uv = (float2(cell) + 0.5) / float2(g.size.xy);
     const float depth = DepthNearest(g_depth, uv);
@@ -1096,6 +1170,14 @@ float4 Rigid(float4 flow, int2 cell, float2 pixels, out bool rigid) {
         } else if (zero < 0.0) {
             result.z = max(flow.z, FG_UNSEEN_COST);
         }
+#if defined(FG_FILTER_PRIOR)
+        else if (prior) {
+            float2 predicted;
+            if (FlowPrior(flow, uv, depth, pixels, predicted, anchor)) {
+                result = float4(predicted, min(flow.z, zero), 1.0);
+            }
+        }
+#endif
     }
     return result;
 }
@@ -1123,11 +1205,34 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     const float2 pixels = float2(g.size.xy) * float(1u << g.options.w);
     float4 samples[9];
     bool rigid[9];
+    // The flow prior holds no cell beside a vector kept on its evidence past
+    // the head's parallax (a moving edge): the flat content on either side
+    // of a silhouette without depth (a wing's) moves with it as measured,
+    // or the edge doubles.
+    bool anchored = false;
     [unroll]
     for (int i = 0; i < 9; ++i) {
         const int2 q = clamp(int2(id.xy) + int2(i % 3 - 1, i / 3 - 1), int2(0, 0), limit);
-        samples[i] = Rigid(g_flow_in.Load(int3(q, 0)), q, pixels, rigid[i]);
+        bool anchor;
+#if defined(FG_FILTER_PRIOR)
+        const bool prior = (g.options.y & FG_FLAG_FLOW_PRIOR) != 0u;
+#else
+        const bool prior = false;
+#endif
+        samples[i] = Rigid(g_flow_in.Load(int3(q, 0)), q, pixels, prior, rigid[i], anchor);
+        anchored = anchored || anchor;
     }
+#if defined(FG_FILTER_PRIOR)
+    [branch]
+    if (anchored) {
+        [unroll]
+        for (int i = 0; i < 9; ++i) {
+            const int2 q = clamp(int2(id.xy) + int2(i % 3 - 1, i / 3 - 1), int2(0, 0), limit);
+            bool anchor;
+            samples[i] = Rigid(g_flow_in.Load(int3(q, 0)), q, pixels, false, rigid[i], anchor);
+        }
+    }
+#endif
     int chosen = 4;
     float chosen_score = 1e30;
     [unroll]

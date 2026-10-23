@@ -479,6 +479,74 @@ int RunScenarios(Harness& harness) {
         Check(fine > coarse + 0.005, harness.name + " the Flow view's fine tint shows more motion (" + std::to_string(fine) +
                                          " against " + std::to_string(coarse) + ")");
     }
+    // 2a. The flow prior (research, FrameGenTuning::flow_prior; without depth
+    // it holds every cell): the background, which no motion matches as well
+    // as any vector, keeps no residual flow at all, while the square, whose
+    // texture matches clearly worse without its motion, keeps its vector and
+    // is interpolated as well as without the prior. Off, the frame is as it
+    // was (the prior's default values parsed, then disabled).
+    {
+        const auto filtered = [&](std::vector<float>& flow, FrameGenExtent& cells) {
+            std::uint32_t channels = 0;
+            return gpu->ReadTexture(0, {FrameGenTextureKind::kFilteredNewest, 0}, flow, cells, channels) && channels == 4;
+        };
+        // Cells with any residual motion outside the square (both its
+        // positions, grown by two cells), and the median length inside it in
+        // full-resolution pixels.
+        const auto census = [&](const std::vector<float>& flow, const FrameGenExtent& cells) {
+            const float cell = static_cast<float>(kSize) / static_cast<float>(cells.width);
+            std::size_t moving = 0;
+            std::vector<float> inside;
+            for (std::uint32_t y = 0; y < cells.height; ++y) {
+                for (std::uint32_t x = 0; x < cells.width; ++x) {
+                    const float cx = (x + 0.5f) * cell, cy = (y + 0.5f) * cell;
+                    const float* v = &flow[(static_cast<std::size_t>(y) * cells.width + x) * 4];
+                    const float length = std::hypot(v[0] * kSize, v[1] * kSize);
+                    if (cx >= 136 && cx < 216 && cy >= 136 && cy < 208) {
+                        inside.push_back(length);
+                    } else if (!(cx >= 120 - 2 * cell && cx < 232 + 2 * cell && cy >= 120 - 2 * cell && cy < 224 + 2 * cell) &&
+                               length > 0.0f) {
+                        ++moving;
+                    }
+                }
+            }
+            std::sort(inside.begin(), inside.end());
+            return std::pair<std::size_t, float>{moving, inside.empty() ? 0.0f : inside[inside.size() / 2]};
+        };
+        const auto again = [&] {
+            gpu->ResetHistory();
+            run(0, true, 0, 0);
+            return run(1, true, 0, 0);
+        };
+        std::vector<float> flow;
+        FrameGenExtent cells{};
+        const Pixels plain = again();
+        const bool readable = filtered(flow, cells);
+        Check(harness.name != "D3D12" || readable, harness.name + " flow prior: the filtered flow reads back");
+        const auto before = readable ? census(flow, cells) : std::pair<std::size_t, float>{};
+        tuning.flow_prior = ParseFrameGenFlowPrior("sky");
+        const Pixels held = again();
+        const auto after = readable && filtered(flow, cells) ? census(flow, cells) : std::pair<std::size_t, float>{};
+        tuning.flow_prior.enabled = false;
+        const Pixels off = again();
+        tuning.flow_prior = {};
+        const double held_error = MeanError(held, truth_mid, 96, 96, 256, 256);
+        std::cout << harness.name << " flow prior: background cells moving " << before.first << " -> " << after.first
+                  << ", the square's median " << before.second << " -> " << after.second << " px, error "
+                  << MeanError(plain, truth_mid, 96, 96, 256, 256) << " -> " << held_error << '\n';
+        Check(off == plain, harness.name + " flow prior: off, the frame is as it was");
+        // The background around the square is not held (its cells beside the
+        // square's kept vectors): the square interpolates as without it.
+        Check(held_error < 1.05 * MeanError(plain, truth_mid, 96, 96, 256, 256) + 0.0005,
+              harness.name + " flow prior: the moving square is interpolated as without it");
+        if (readable) {
+            Check(before.first > 0 && after.first == 0,
+                  harness.name + " flow prior: the background keeps no residual flow (" + std::to_string(before.first) +
+                      " cells before)");
+            Check(std::abs(after.second - before.second) < 0.5f && after.second > 15.0f,
+                  harness.name + " flow prior: the square keeps its motion");
+        }
+    }
 
     // 2b. A 3x multiplier: one flow field feeds two generated frames.
     {
@@ -2131,7 +2199,7 @@ const char* const kProfileNames[] = {"luma",        "downsample",  "search",    
                                      "shift resolve", "shift fill", "raw pack",   "trust resolve", "shading rate", "world reduce", "world solve", "trust vote", "depth scale", "scale vote", "depth stale", "cross splat", "cross resolve",
                                      "engine census", "engine capture", "engine reduce", "engine solve", "world set",
                                      "engine convert", "engine merge", "engine tiles", "engine splat", "engine resolve",
-                                     "engine fill", "trust surface", "source copy", "output copy",
+                                     "engine fill", "trust surface", "filter prior", "source copy", "output copy",
                                      "hardware wait", "compose", "flow merge"};
 static_assert(std::size(kProfileNames) == kFrameGenPassCount + 5, "a name per profiled category");
 

@@ -123,8 +123,11 @@ enum class FrameGenPass : std::uint8_t {
     // open dropped or kept by the surface around them as it decided that
     // (kDepthDecided), so no texel reads a neighbour another is writing.
     kTrustSurface,
+    // Research (FrameGenTuning::flow_prior): kFilter with the flow prior
+    // (kFrameGenFlagFlowPrior) built in; kFilter itself stays without it.
+    kFilterPrior,
 };
-inline constexpr std::size_t kFrameGenPassCount = 40;
+inline constexpr std::size_t kFrameGenPassCount = 41;
 
 // Logical textures owned per view. History and filtered flow are ping-pong
 // pairs: "newest" is written this submission, "previous" is last
@@ -354,12 +357,26 @@ inline constexpr std::uint32_t kFrameGenFlagResamplePrevious = 1u << 19;
 // on the surface of the texel under it, blended bilinearly, instead of that
 // texel alone (offsets in steps of two pixels).
 inline constexpr std::uint32_t kFrameGenFlagShiftSmooth = 1u << 21;
+// Research (FrameGenTuning::flow_prior, the head-motion shimmer diagnosis's
+// hypothesis E). kFilter keeps content with nothing to track on its
+// predicted motion (no residual flow, or the world's) unless its match beats
+// no motion clearly (tuning y-w: by a share of its cost, a margin and a
+// margin per pixel the vector lies off the prediction): with depth, the sky,
+// content without depth and content the other eye put far, and with
+// kFrameGenFlagFlowPriorFar all world content without a world motion;
+// without depth, every cell. Bit 20 is kept for the matched sharpness
+// research of the head-motion shimmer design.
+inline constexpr std::uint32_t kFrameGenFlagFlowPrior = 1u << 22;
+inline constexpr std::uint32_t kFrameGenFlagFlowPriorFar = 1u << 24;
+// With kFrameGenFlagFlowPrior, interpolating: the world's motion (input 3,
+// fitted or the application's) is the prior's prediction for world content
+// and the sky, while the filter moves no world content by it (extrapolating,
+// kFrameGenFlagWorld gives the prior the world's motion as it is).
+inline constexpr std::uint32_t kFrameGenFlagFlowPriorWorld = 1u << 25;
 // Research (FrameGenTuning::flow_view_fine). Synthesis with the Flow view:
 // each pixel tinted by its motion in pixels, in full from 2 pixels, instead
 // of by its share of the view (tens of pixels before the tint shows): the
 // sub-pixel motion that moves content between real and generated frames.
-// Bits 20 and 22 are kept for the matched sharpness and rotor research of
-// the head-motion shimmer design.
 inline constexpr std::uint32_t kFrameGenFlagFlowFine = 1u << 23;
 // World motion: samples per side of the fit's grid, and its iterations.
 inline constexpr std::uint32_t kFrameGenWorldGrid = 128u;
@@ -690,6 +707,43 @@ struct FrameGenResampleChoice {
 // "cubic" or "cubic9" (any case) for both real frames, "cubic-newest" or
 // "cubic9-newest" for the newest alone; anything else is bilinear.
 FrameGenResampleChoice ParseFrameGenResample(const std::string& value);
+// Research (VECTORXR_FRAMEGEN_FLOW_PRIOR, the head-motion shimmer
+// diagnosis's hypothesis E): the filter's prior for content with nothing to
+// track (kFrameGenFlagFlowPrior). Shader flow on flat sky matches any vector
+// about as well as none (p95 20-46 px with the world still), and the C172's
+// prop disc, a faint darkening over the sky without depth, finds aliases up to
+// 300 px away that carry world-locked markers and haze across the sky.
+// There a measured vector further from the predicted motion than the head's
+// movement moves content without depth half a meter away (its parallax:
+// MSFS draws parts of the airframe without depth) is kept only where its
+// cost beats no motion's by `share` of it plus `margin` plus `per_pixel` for
+// each full-resolution pixel past that (luma units, as the flow's costs);
+// else the prediction is taken: no residual motion, or with the world's
+// motion known (fitted, or the application's) the world's rotation for the
+// sky, its whole motion for world content with depth.
+struct FrameGenFlowPrior {
+    bool enabled{false};
+    bool distant{false}; // all world content without a world motion, at any distance
+    // Only on frames whose appSpaceDeltaPose left the world still
+    // (FrameGenWorldStill): in flight the replays' older MSFS captures lost
+    // real motion to it (bad pixels +0.06 pp on 14 captures, up to +0.86 pp:
+    // far terrain past the depth range turning with the aircraft, an
+    // airframe part without depth moving by the head's parallax).
+    bool still{false};
+    float share{1.0f};
+    float margin{0.002f};
+    float per_pixel{0.001f};
+};
+// "sky" (or "1", any case) for the sky and content without depth, "far" for
+// all world content without a world motion, "sky-still" or "far-still" the
+// same on still-world frames only; any may be followed by
+// ":<share>,<margin>,<per pixel>" (each 0 to 10; a missing or bad one keeps
+// its default). Anything else is off.
+FrameGenFlowPrior ParseFrameGenFlowPrior(const std::string& value);
+// Whether the application's movement (appSpaceDeltaPose) left the world
+// still for the request's frame: under 5 mm and a rotation's quaternion
+// vector part under 2.5e-4 (0.03 degrees). False where the request has none.
+bool FrameGenWorldStill(const FrameGenViewRequest& request);
 // Research (VECTORXR_FRAMEGEN_SYNTH_EYE, the head-motion shimmer diagnosis's
 // hypothesis D): where a generated frame's eyes are put, from the real
 // frames' eyes, each at its own display time (never one frame's pose for
@@ -775,6 +829,10 @@ struct FrameGenTuning {
     FrameGenResample resample{FrameGenResample::kBilinear};
     bool resample_previous{false};
     bool shift_smooth{false};
+    // Research (hypothesis E), set by backends from
+    // VECTORXR_FRAMEGEN_FLOW_PRIOR: the filter keeps content with nothing to
+    // track on the head's predicted motion (kFrameGenFlagFlowPrior).
+    FrameGenFlowPrior flow_prior;
     int artifact_suppression{50};
     int motion_limit_percent{10};
     // One entry per generated frame (`generated` of them). Interpolation:
