@@ -303,6 +303,9 @@ class FrameGenGpu {
     // Tests: the engine motion vectors' convention locked from now on
     // (FrameGenEngineValidator::LockForTest). Direct3D 12 only.
     virtual void LockEngineForTest(const FrameGenEngineConvention& /*convention*/) {}
+    // Tests and replays: the depth's reading, swap and scale locked from now
+    // on (FrameGenDepthValidator::LockForTest). Direct3D 12 only.
+    virtual void LockDepthForTest(FrameGenDepthReading /*reading*/, bool /*swapped*/, float /*scale*/) {}
     // Tests and research: the flow the last Execute measured for `view`
     // (the filtered field synthesis used) in full-resolution pixels, x and
     // y per cell row by row; `cells` receives the field's size. Waits for the

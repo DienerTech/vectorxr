@@ -9663,6 +9663,16 @@ void TestDepthValidator() {
                   ToString(cleared_near.Reading()) + ")");
         Check(!cleared_near.WantsCheck(25) && cleared_near.WantsCheck(40),
               "depth validator: unusable depth is checked now and then");
+        // Locked for a test or a replay (FG_REPLAY_DEPTH=locked): the reading
+        // holds whatever the evidence says, and a restart keeps it.
+        FrameGenDepthValidator locked;
+        locked.LockForTest(FrameGenDepthReading::kAsSubmitted, false, 1.0f);
+        const std::uint32_t locked_generation = locked.Generation();
+        batches(locked, clear_near, 10);
+        locked.Restart();
+        Check(locked.Usable() && locked.Reading() == FrameGenDepthReading::kAsSubmitted && !locked.Swapped() &&
+                  locked.Scale() == 1.0f && locked.Generation() == locked_generation && locked.Batches() == 10,
+              std::string("depth validator: a locked reading changed (") + ToString(locked.Reading()) + ")");
         // The same once depth already in use goes clear: what moves content
         // stops being used.
         FrameGenDepthValidator in_use;

@@ -5450,10 +5450,12 @@ int RunProfile(Harness& harness) {
 // capture used. FG_REPLAY_TRUTH=cubic resamples the truth (turned and
 // aligned) by Catmull-Rom in linear light instead of bilinearly.
 // FG_REPLAY_DEPTH_SCALE=s gives the backend each frame's depth times s (the
-// evaluation keeps the captured depth). New measures (ReplayMeasures; off
-// with FG_REPLAY_MEASURES=0) print lines of their own: fine detail against
-// the truth as rendered and the newest frame, residual shifts, the luma
-// pair's residual, the flow by band, the eye-shift map against the CPU's.
+// evaluation keeps the captured depth); FG_REPLAY_DEPTH=locked takes the
+// dumped depth up as it is, the depth check locked. New measures
+// (ReplayMeasures; off with FG_REPLAY_MEASURES=0) print lines of their own:
+// fine detail against the truth as rendered and the newest frame, residual
+// shifts, the luma pair's residual, the flow by band, the eye-shift map
+// against the CPU's.
 // With FG_REPLAY_CROP the crops include the aligned truth and four times
 // the difference from it.
 bool g_replay = false;
@@ -7122,6 +7124,14 @@ int RunReplay(Harness& harness) {
     auto gpu = CreateFrameGenGpu(harness.binding, error);
     if (gpu) gpu->SetCopyAfterRelease(true); // the tests' images are their own
     Check(gpu != nullptr, "replay backend: " + error);
+    // FG_REPLAY_DEPTH=locked: the dumped depth (the session's decoding)
+    // taken up as it is, whatever the depth check says: what generated frames
+    // showed with depth a session had taken up (Star Citizen Evocati's all
+    // zero depth, decoded swapped to a few centimetres, 2026-10-22).
+    if (const char* depth = std::getenv("FG_REPLAY_DEPTH"); depth && std::string(depth) == "locked") {
+        gpu->LockDepthForTest(FrameGenDepthReading::kAsSubmitted, false, 1.0f);
+        std::printf("Depth taken up as dumped, the depth check locked (FG_REPLAY_DEPTH=locked)\n");
+    }
     const std::int64_t output_format = gpu->OutputFormats(FrameGenOutputKind::kSrgb8).front();
     // FG_REPLAY_DEPTH_SCALE=s: the backend is given each frame's depth times
     // s (known depth only: none and the sky stay as they are), to see which

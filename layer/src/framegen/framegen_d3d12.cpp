@@ -1815,6 +1815,9 @@ class D3D12FrameGen final : public FrameGenGpu {
 
     void SetEnginePrior(const FrameGenEngineConvention& convention) override { engine_validator_.SetPrior(convention); }
     void LockEngineForTest(const FrameGenEngineConvention& convention) override { engine_validator_.LockForTest(convention); }
+    void LockDepthForTest(FrameGenDepthReading reading, bool swapped, float scale) override {
+        validator_.LockForTest(reading, swapped, scale);
+    }
 
     bool DumpMotion(const std::string& directory, bool all_images) override {
         motion_dump_directory_ = directory;

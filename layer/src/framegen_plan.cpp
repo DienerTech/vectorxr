@@ -1397,6 +1397,9 @@ void FrameGenDepthValidator::Add(const FrameGenDepthEvidence& check) {
     sums_ = {};
     checks_ = 0;
     ++batches_;
+    if (locked_) {
+        return;
+    }
     const FrameGenDepthReading reading_before = reading_;
     const bool swapped_before = swapped_;
 
@@ -1511,7 +1514,21 @@ void FrameGenDepthValidator::Add(const FrameGenDepthEvidence& check) {
     settled_ = !changed && reading_ != FrameGenDepthReading::kUnknown;
 }
 
+void FrameGenDepthValidator::LockForTest(FrameGenDepthReading reading, bool swapped, float scale) {
+    reading_ = reading;
+    swapped_ = swapped;
+    scale_ = scale;
+    settled_ = true;
+    locked_ = true;
+    ++generation_;
+    ++check_generation_;
+    ++decisions_;
+}
+
 void FrameGenDepthValidator::Restart() {
+    if (locked_) {
+        return;
+    }
     const std::uint32_t generation = generation_ + 1;
     const std::uint32_t check_generation = check_generation_ + 1;
     const std::uint32_t decisions = decisions_;

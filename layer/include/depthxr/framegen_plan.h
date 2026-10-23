@@ -1110,8 +1110,13 @@ class FrameGenDepthValidator {
     // Forgets every reading, as for a new game; the generations keep
     // counting, so depth decoded or checked before is never taken as new.
     void Restart();
+    // Tests and replays: this reading, swap and scale from now on, whatever
+    // the evidence says (checks are still counted): what depth does once
+    // taken up, apart from deciding whether to take it up.
+    void LockForTest(FrameGenDepthReading reading, bool swapped, float scale);
 
   private:
+    bool locked_{false}; // LockForTest
     std::uint32_t batches_{0};
     FrameGenDepthEvidence sums_;
     std::uint32_t checks_{0};
