@@ -1032,10 +1032,23 @@ FG_BIND(4) FG_FORMAT("rgba16f") RWTexture2D<float4> g_flow_out : register(u0);
 // pixels (full resolution): flat panels and bezels match any vector about
 // equally, and an alias carried their edges' colour across the cockpit
 // (holding all cockpit motion measured worse there: bad pixels 0.71% to 0.77%).
+// The keep test is as loose as it can be without keeping those aliases: a
+// vector no motion matches worse than half its cost plus 0.005, longer
+// than a pixel (replays of 21 MSFS captures against 1.5, 0.01 and 2 px:
+// cockpit bad pixels 0.75% to 0.72% on flights, depth edges 1.59% to 1.53%
+// under head motion; no margin at all made one flight worse). With the
+// world moving it keeps some vectors that are not the cockpit's (a C172 in
+// the air: fine cockpit detail 0.3 pp more bad).
 #define FG_RIGID_DEPTH 4.0
-#define FG_RIGID_SHARE 1.5
-#define FG_RIGID_MARGIN 0.01
-#define FG_RIGID_PIXELS 2.0
+#define FG_RIGID_SHARE 0.5
+#define FG_RIGID_MARGIN 0.005
+#define FG_RIGID_PIXELS 1.0
+// Extrapolating, the game's own near content keeps its vector by the keep
+// test's earlier, stricter constants: nothing corrects a vector pushed past
+// the newest frame.
+#define FG_ENGINE_KEEP_SHARE 1.5
+#define FG_ENGINE_KEEP_MARGIN 0.01
+#define FG_ENGINE_KEEP_PIXELS 2.0
 // The cost given to vectors of content the previous frame never saw
 // (outside its view, or behind something nearer): their matches are aliases,
 // and the median prefers its neighbours'.
@@ -1141,7 +1154,8 @@ float4 Rigid(float4 flow, int2 cell, float2 pixels, bool prior, out bool rigid, 
     } else if (engine == FG_ENGINE_CLASS_OWN) {
         if ((g.options.y & FG_FLAG_EXTRAPOLATE) != 0u && depth > 0.0 && depth < FG_RIGID_DEPTH) {
             const bool keep = (g.options.x & FG_ENGINE_COCKPIT) != 0u && zero >= 0.0 &&
-                              zero > flow.z * FG_RIGID_SHARE + FG_RIGID_MARGIN && length(flow.xy * pixels) > FG_RIGID_PIXELS;
+                              zero > flow.z * FG_ENGINE_KEEP_SHARE + FG_ENGINE_KEEP_MARGIN &&
+                              length(flow.xy * pixels) > FG_ENGINE_KEEP_PIXELS;
             if (!keep) {
                 result = float4(0.0, 0.0, zero < 0.0 ? flow.z : min(flow.z, zero), 1.0);
             }
@@ -1369,7 +1383,9 @@ float3 Hue(float h) {
 
 // Synthesis (FG_FLAG_OCCLUSION): the candidate error (CandidateError) above
 // which the two real frames see different content wherever a vector points.
-#define FG_OCCLUSION_ERROR 0.12
+// Interpolating only; 0.16 replays best between 0.12 and 0.24 (MSFS
+// captures: 0.12 leaves more bad pixels, 0.18 and up more at depth edges).
+#define FG_OCCLUSION_ERROR 0.16
 
 float MaxComponent(float3 value) {
     return max(value.x, max(value.y, value.z));
