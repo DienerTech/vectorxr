@@ -24,6 +24,8 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <thread>
@@ -107,6 +109,56 @@ float HalfFloat(std::uint16_t h) {
 
 std::string Failure(const char* operation, HRESULT hr) {
     return std::string(operation) + " failed: hr=" + std::to_string(static_cast<long>(hr));
+}
+
+// A research capture's writer (WriteDump, WriteRawDepth, WriteMotionDump):
+// `work` runs on a detached thread of its own, which holds a reference to
+// the layer's module meanwhile and drops it with FreeLibraryAndExitThread,
+// as input_devices.cpp's connector does. The loader may FreeLibrary the
+// layer once xrDestroyInstance returns, with the files still being written:
+// the thread never runs unmapped code. Where no thread can be made, `work`
+// runs here.
+struct WriterStart {
+    std::function<void()> work;
+    HMODULE module{nullptr};
+};
+
+DWORD WINAPI WriterThread(LPVOID parameter) {
+    HMODULE module = nullptr;
+    {
+        // The work and what it holds (the GPU's buffers among them) go
+        // before the module reference does.
+        const std::unique_ptr<WriterStart> start(static_cast<WriterStart*>(parameter));
+        module = start->module;
+        try {
+            start->work();
+        } catch (...) {
+            // A research capture never ends the game.
+        }
+    }
+    if (module) {
+        FreeLibraryAndExitThread(module, 0);
+    }
+    return 0;
+}
+
+void StartWriter(std::function<void()> work) {
+    auto start = std::make_unique<WriterStart>();
+    start->work = std::move(work);
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(&WriterThread),
+                            &start->module)) {
+        start->module = nullptr;
+    }
+    const HANDLE thread = CreateThread(nullptr, 0, &WriterThread, start.get(), 0, nullptr);
+    if (!thread) {
+        if (start->module) {
+            FreeLibrary(start->module);
+        }
+        start->work();
+        return;
+    }
+    start.release(); // the thread's now
+    CloseHandle(thread);
 }
 
 // The engine motion map's own passes (stage 7, FrameGenTuning::engine_map;
@@ -342,6 +394,7 @@ struct ViewRecording {
     bool temporal{false};
     std::size_t next{0};
     bool waits_for_hardware{false}; // stopped before kFlowUnpack
+    bool finished{false};           // its end recorded (its frames drawn): later RecordPlan calls record nothing
     // The view's engine motion vectors were captured for this frame (paired
     // with its color capture): what an analysis of the frame reads. With
     // `evidence`, the plan takes their evidence (stage 3); with `assist`, it
@@ -1290,8 +1343,9 @@ class D3D12FrameGen final : public FrameGenGpu {
     // resampled into the view's raw field as well (kEngineCapture), both eyes
     // in one dispatch when their grids are one size. A game that never
     // acquires or releases them (MSFS 2024) leaves their state unknown:
-    // motion_state_ decides the barriers. Census results are read without
-    // waiting, at a later call, for EngineStatus.
+    // motion_state_ decides the barriers. Images a game holds acquired
+    // (FrameGenMotionJob::acquired) are left as they are. Census results are
+    // read without waiting, at a later call, for EngineStatus.
     bool CaptureMotion(const std::vector<FrameGenMotionJob>& jobs, const std::vector<FrameGenViewRequest>& color,
                        std::string& error, std::vector<bool>* resampled_jobs) override {
         error.clear();
@@ -1378,10 +1432,17 @@ class D3D12FrameGen final : public FrameGenGpu {
         // of a session that could not make what reads them: engine_failed_).
         // Vectors the validator disabled are resampled no more (stage 3).
         const bool disabled = engine_validator_.GetState() == FrameGenEngineValidator::State::kDisabled;
+        // The images the game holds acquired, in a state of its own: never
+        // read (nor resampled, nor dumped), never moved out of it.
+        std::array<std::uint32_t, kMotionViews> acquired{};
+        for (std::size_t j = 0; j < count; ++j) {
+            acquired[j] = jobs[j].acquired & ((1u << found[j].count) - 1u);
+        }
         std::array<bool, kMotionViews> resample{};
         for (std::size_t j = 0; j < count; ++j) {
             const FrameGenMotionJob& job = jobs[j];
-            if (!job.capture || disabled) {
+            if (!job.capture || disabled ||
+                (job.vectors.image_index < found[j].count && ((acquired[j] >> job.vectors.image_index) & 1u))) {
                 continue;
             }
             const ViewResources* view = job.view < views_.size() ? &views_[job.view] : nullptr;
@@ -1454,28 +1515,31 @@ class D3D12FrameGen final : public FrameGenGpu {
             }
         };
         // Each eye's census reads every image, or the one the frame's vectors
-        // are thought to be in (the image its resample and dump read too).
+        // are thought to be in (the image its resample and dump read too),
+        // never one the game holds.
         std::array<std::uint32_t, kMotionViews> censused{};
         for (std::size_t j = 0; j < count; ++j) {
             const std::uint32_t every = (1u << found[j].count) - 1u;
             const std::uint32_t image = jobs[j].vectors.image_index;
-            censused[j] = jobs[j].census_all || image >= found[j].count ? every : 1u << image;
+            censused[j] = (jobs[j].census_all || image >= found[j].count ? every : 1u << image) & ~acquired[j];
         }
         // Each image read, once (both eyes may read one swapchain's images):
         // from the state it is held in to readable (copyable too when dumped)
         // for the whole list, and back at its end. The images not read keep
-        // their state untouched: a game following the specification may hold
-        // one it acquired for its next frame in a state of its own.
+        // their state untouched, and so do those the game holds: a game
+        // following the specification may hold one it acquired for its next
+        // frame in a state of its own.
         const D3D12_RESOURCE_STATES read = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
                                            (dumping ? D3D12_RESOURCE_STATE_COPY_SOURCE : D3D12_RESOURCE_STATE_COMMON);
         std::vector<std::pair<ID3D12Resource*, D3D12_RESOURCE_STATES>> held_images;
+        std::array<std::uint32_t, kMotionViews> touched{};
         for (std::size_t j = 0; j < count; ++j) {
             const std::optional<D3D12_RESOURCE_STATES> held = MotionHeldState(found[j].simultaneous);
             // The samples (stage 0) and a dump of every image read them all.
             const std::uint32_t every = (1u << found[j].count) - 1u;
-            const std::uint32_t touched = censused[j] | (jobs[j].samples || (dumping && dump_all) ? every : 0u);
+            touched[j] = (censused[j] | (jobs[j].samples || (dumping && dump_all) ? every : 0u)) & ~acquired[j];
             for (std::uint32_t k = 0; k < found[j].count && held; ++k) {
-                if (((touched >> k) & 1u) == 0) {
+                if (((touched[j] >> k) & 1u) == 0) {
                     continue;
                 }
                 ID3D12Resource* resource = found[j].resources[k];
@@ -1496,8 +1560,9 @@ class D3D12FrameGen final : public FrameGenGpu {
             MotionView& outputs = motion_views_[j];
             const UINT base = MotionBlock(slot_index, j);
             for (std::uint32_t k = 0; k < kFrameGenEngineImages; ++k) {
-                MotionImageView(k < images.count ? images.resources[k] : nullptr, images.format, images.array_size,
-                                base + k);
+                // An image left alone reads as zeros (the samples read all).
+                MotionImageView(k < images.count && ((touched[j] >> k) & 1u) ? images.resources[k] : nullptr,
+                                images.format, images.array_size, base + k);
             }
             // This frame's linear depth (captured at its release, since the
             // last Execute), where the samples are taken.
@@ -1538,7 +1603,7 @@ class D3D12FrameGen final : public FrameGenGpu {
             capture_commands_->Dispatch(images.count + (samples ? 1u : 0u), 1, 1);
             if (dumping) {
                 for (std::uint32_t k = 0; k < images.count; ++k) {
-                    if (dump_all || k == job.vectors.image_index) {
+                    if ((dump_all || k == job.vectors.image_index) && !((acquired[j] >> k) & 1u)) {
                         DumpMotionImage(images.resources[k], job, k, dump_all, dumps);
                     }
                 }
@@ -1853,7 +1918,7 @@ class D3D12FrameGen final : public FrameGenGpu {
              << encoding.near_z << "\nfar_z " << encoding.far_z << "\nreading "
              << ToString(validator_.Reading()) << "\nswapped " << validator_.Swapped() << "\nscale "
              << validator_.Scale() << '\n';
-        std::thread([buffer = std::move(raw.buffer), footprint = raw.footprint, rows = raw.rows,
+        StartWriter([buffer = std::move(raw.buffer), footprint = raw.footprint, rows = raw.rows,
                      row_bytes = raw.row_bytes, stem, meta = meta.str(), fence = ComPtr<ID3D12Fence>(CaptureFence()),
                      value, timeout = static_cast<DWORD>(10000 * wait_scale_)]() mutable {
             if (!WaitOnDumpThread(fence.Get(), value, timeout)) {
@@ -1872,7 +1937,7 @@ class D3D12FrameGen final : public FrameGenGpu {
                            static_cast<std::streamsize>(row_bytes));
             }
             buffer->Unmap(0, nullptr);
-        }).detach();
+        });
     }
 
     // Records what `other` says about `view`'s depth (see FG_PASS_DEPTH_TRUST)
@@ -2624,6 +2689,7 @@ class D3D12FrameGen final : public FrameGenGpu {
 
     void SetDirectOutput(bool on) override { direct_output_ = on; }
     bool DrawsOutputs() const override { return direct_output_ && rtv_heap_; }
+    std::uint64_t DrawsForTest() const override { return draws_; }
 
     // A wide view's periphery is rendered far denser than a headset shows
     // it: angle per pixel shrinks with the square of the angle's tangent off
@@ -2789,6 +2855,7 @@ class D3D12FrameGen final : public FrameGenGpu {
             commands5_->RSSetShadingRateImage(view.shading_rate.resource.Get());
         }
         commands_->DrawInstanced(3, 1, 0, 0);
+        ++draws_;
         if (coarse) {
             commands5_->RSSetShadingRateImage(nullptr);
             commands5_->RSSetShadingRate(D3D12_SHADING_RATE_1X1, nullptr);
@@ -4814,7 +4881,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         if (dumps.empty()) {
             return;
         }
-        std::thread([dumps = std::move(dumps), fence = ComPtr<ID3D12Fence>(CaptureFence()), value, directory,
+        StartWriter([dumps = std::move(dumps), fence = ComPtr<ID3D12Fence>(CaptureFence()), value, directory,
                      timeout = static_cast<DWORD>(10000 * wait_scale_)]() mutable {
             if (!WaitOnDumpThread(fence.Get(), value, timeout)) {
                 for (MotionDump& dump : dumps) dump.buffer.Detach();
@@ -4835,7 +4902,7 @@ class D3D12FrameGen final : public FrameGenGpu {
                 }
                 dump.buffer->Unmap(0, nullptr);
             }
-        }).detach();
+        });
     }
 
     // The debug layer's messages about resource states since the last read
@@ -4940,7 +5007,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         }
         // Hundreds of megabytes per frame: written by a thread of their own,
         // so the game only waits for this Execute to finish on the GPU.
-        std::thread([entries = std::move(dump), directory = dump_directory_]() mutable {
+        StartWriter([entries = std::move(dump), directory = dump_directory_]() mutable {
             for (DumpCopy& entry : entries) {
                 void* mapped = nullptr;
                 if (FAILED(entry.buffer->Map(0, nullptr, &mapped))) {
@@ -4954,7 +5021,7 @@ class D3D12FrameGen final : public FrameGenGpu {
                 }
                 entry.buffer->Unmap(0, nullptr);
             }
-        }).detach();
+        });
         std::ofstream meta(dump_directory_ + "\\frame.txt");
         meta.precision(9);
         meta << "mode " << static_cast<int>(tuning.mode) << "\nquality " << static_cast<int>(tuning.quality)
@@ -6508,12 +6575,18 @@ class D3D12FrameGen final : public FrameGenGpu {
     // copied into the view's predicate right after its dispatch
     // (kFrameGenPredicateSet): only their dispatches are skipped, and the
     // barriers recorded meanwhile run, so the states tracked here hold.
+    // The plan's end (its frames drawn) is recorded once: a call after the
+    // one that reached it (Execute's last, for a plan that never stopped
+    // early) records nothing.
     bool RecordPlan(ViewRecording& recording, RecordUntil until, std::string& error) {
+        recording.waits_for_hardware = false;
+        if (recording.finished) {
+            return true;
+        }
         ViewResources& view = *recording.view;
         const FrameGenViewSubmission& submission = *recording.submission;
         const std::vector<ID3D12Resource*>& outputs = recording.outputs;
         std::vector<D3D12_RESOURCE_BARRIER> barriers;
-        recording.waits_for_hardware = false;
         // Frames written in plan order (each eye-shift map is replaced by the
         // next): the frames after one map, drawn together before the next.
         std::vector<std::size_t> batch_indices;
@@ -6656,6 +6729,7 @@ class D3D12FrameGen final : public FrameGenGpu {
                 Stamp(kProfileOutputCopy);
             }
         }
+        recording.finished = true;
         predication(false);
         if (!recording.draw || recording.plan.frames_in_order) {
             return flush_batch();
@@ -6805,6 +6879,7 @@ class D3D12FrameGen final : public FrameGenGpu {
     ComPtr<ID3D12DescriptorHeap> clear_heap_;
     UINT clear_cursor_{0};
     bool direct_output_{true};
+    std::uint64_t draws_{0}; // RecordDraw's draws (DrawsForTest)
     bool copy_after_release_{false}; // SetCopyAfterRelease
     ComPtr<ID3D12DescriptorHeap> rtv_heap_;
     UINT rtv_size_{0};

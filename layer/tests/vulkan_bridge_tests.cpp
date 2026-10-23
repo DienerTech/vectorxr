@@ -3069,6 +3069,34 @@ void TestMotionTwin(Game& game) {
     }
     Check(Contains(bridge.Describe(swapchain), "handBacks=" + std::to_string(kFrames) + ","),
           "motion twin: every release handed back: " + bridge.Describe(swapchain));
+    // Unmarked (Frame Generation reads the vectors no more): a release hands
+    // nothing back, and its image's next acquire gives it back, as for any
+    // colour twin; an image handed back before needs nothing at its acquire.
+    Check(!bridge.UnmarkMotion(Handle(0x52)), "motion twin: a swapchain the bridge does not have is not unmarked");
+    Check(bridge.UnmarkMotion(swapchain) && !bridge.UnmarkMotion(swapchain) &&
+              !Contains(bridge.Describe(swapchain), "motion vectors"),
+          "motion twin: unmarked, once: " + bridge.Describe(swapchain));
+    g_log.erase(std::remove_if(g_log.begin(), g_log.end(),
+                               [](const std::string& line) { return Contains(line, "are read no more"); }),
+                g_log.end());
+    g_recorder.Take();
+    for (int frame = kFrames; frame < kFrames + 4; ++frame) {
+        const std::uint32_t index = frame % 3;
+        const std::string where = "motion twin unmarked, frame " + std::to_string(frame);
+        Acquire(bridge, swapchain, index);
+        const std::vector<Submission> acquired = g_recorder.Take();
+        Check(frame < kFrames + 3 ? acquired.empty() : acquired.size() == 1,
+              where + ": an image handed back needs nothing at its acquire, one released since gets it back there");
+        Clear(game, images[index], MotionVector(frame, 0));
+        Check(Release(bridge, swapchain), where + ": copied");
+        const std::vector<Submission> released = g_recorder.Take();
+        Check(released.size() == 1 && released[0].signals == 1, where + ": the release alone, nothing handed back");
+        bridge.FrameEnded();
+    }
+    Check(Contains(bridge.Describe(swapchain), "handBacks=" + std::to_string(kFrames) + ","),
+          "motion twin: nothing handed back once unmarked: " + bridge.Describe(swapchain));
+    Check(bridge.WaitIdle(10000), "the bridge's queue finishes");
+    GameIdle(game);
     // Depth is handed back already; neither it nor multisampled colour is marked.
     MakeRuntimeImages(device, 2, 32, 32, DXGI_FORMAT_D32_FLOAT, 1, RuntimeKind::kDepth);
     Check(bridge.AddSwapchain(Handle(0x53), DepthInfo(32, 32), FakeEnumerate, reason) && !bridge.MarkMotion(Handle(0x53)),

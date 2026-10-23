@@ -400,6 +400,10 @@ class FrameGenPresenter {
     // in flight may still name it (a runtime call past the teardown wait):
     // the space must then be kept, for the runtime to free with the session.
     bool ForgetSpace(XrSpace space);
+    // The application acquired an image: its own until NoteRelease, in a
+    // state of its own (a motion vector image so held is never read). Not a
+    // bridged swapchain's: its runtime images are the bridge's.
+    void NoteAcquire(XrSwapchain swapchain, std::uint32_t image_index);
     void NoteRelease(XrSwapchain swapchain, std::uint32_t image_index);
     // Call before forwarding a release: captures the image into history while
     // the application still owns it. With VECTORXR_FRAMEGEN_ENGINE_MV=census,
@@ -420,7 +424,9 @@ class FrameGenPresenter {
     // then), and its vectors are read from 3 s after the game last made a
     // swapchain (Star Citizen churns them at its world entry). True when they
     // are read then: the layer has the bridge give their images back at each
-    // release (VulkanBridge::MarkMotion).
+    // release (VulkanBridge::MarkMotion); false (within the settle time, once
+    // the validator disabled them, or with none read in the session), the
+    // layer has it stop (VulkanBridge::UnmarkMotion).
     bool NoteEngineMotion(FrameGenEngineMotionFrame frame, FrameGenEngineBridge bridge = FrameGenEngineBridge::kNone);
     // ...then, once the frame's bridged releases were handed over: with
     // VECTORXR_FRAMEGEN_ENGINE_MV=census and while frames are generated, its
@@ -488,6 +494,7 @@ class FrameGenPresenter {
         bool depth_capturable{false}; // created with the usage depth capture needs
         std::optional<std::uint32_t> released;
         std::uint64_t releases{0}; // images released so far
+        std::uint32_t acquired{0}; // the images (bits) acquired and not released yet (NoteAcquire)
         std::uint64_t captured_releases{0}; // `releases` when its latest color capture was submitted
         // Named as a frame's motion vectors (NoteEngineMotion): never a
         // color image, whatever its format.

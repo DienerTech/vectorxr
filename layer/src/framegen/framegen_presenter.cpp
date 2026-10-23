@@ -471,7 +471,8 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
     // Engine motion vectors (research, stage 0): their census while the
     // space-warp probe takes the game's structures over. The research
     // switches may come from framegen-research.txt too (ReadResearchSwitch),
-    // the backend's among them.
+    // the backend's among them: this session's are told from here.
+    ResetResearchFileSwitches();
     const std::uint64_t research_reads = ResearchFileReads();
     engine_requested_ =
         ParseFrameGenEngineMode(ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_MV").value_or("").c_str());
@@ -603,8 +604,8 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
     std::string error;
     gpu_ = factory ? factory(binding_chain, error) : nullptr;
     // The session's research switches from the file, the backend's among
-    // them (read as it was made): each logged once in the process, as the
-    // file first gave it, a session without a backend's too.
+    // them (read as it was made): each logged once per session, an earlier
+    // session's in the process or not, a session without a backend's too.
     const std::vector<std::string> research = TakeResearchFileSwitches();
     if (logger_ && !research.empty()) {
         std::string switches;
@@ -1541,11 +1542,19 @@ bool FrameGenPresenter::ForgetSpace(XrSpace space) {
     return submit_held;
 }
 
+void FrameGenPresenter::NoteAcquire(XrSwapchain swapchain, std::uint32_t image_index) {
+    std::scoped_lock lock(mutex_);
+    if (const auto it = swapchains_.find(swapchain); it != swapchains_.end() && image_index < 32) {
+        it->second.acquired |= 1u << image_index;
+    }
+}
+
 void FrameGenPresenter::NoteRelease(XrSwapchain swapchain, std::uint32_t image_index) {
     std::scoped_lock lock(mutex_);
     if (const auto it = swapchains_.find(swapchain); it != swapchains_.end()) {
         it->second.released = image_index;
         ++it->second.releases;
+        if (image_index < 32) it->second.acquired &= ~(1u << image_index);
     }
 }
 
@@ -1966,8 +1975,12 @@ bool FrameGenPresenter::NoteEngineMotion(FrameGenEngineMotionFrame frame, FrameG
         // Through the Vulkan bridge the vectors are read at their releases
         // from stage 2, and at the frame's end only by a hand-over
         // (VECTORXR_FRAMEGEN_ENGINE_BRIDGE=end): their images go back to the
-        // game's queue behind each copy from now on (VulkanBridge::MarkMotion).
+        // game's queue behind each copy from now on (VulkanBridge::MarkMotion),
+        // until they are not read (VulkanBridge::UnmarkMotion): while the game
+        // made a swapchain within the settle time, or once the validator
+        // disabled them.
         read = vulkan && settled && views > 0 && engine_worker_ &&
+               engine_validation_.state != FrameGenEngineValidation::State::kDisabled &&
                (engine_requested_ >= FrameGenEngineMode::kCapture ||
                 engine_bridge_mode_ == FrameGenEngineBridgeMode::kEndFrame);
         if (read && logger_ && !logged_engine_bridge_read_) {
@@ -1996,10 +2009,13 @@ void FrameGenPresenter::EngineJobsLocked(const EngineFrame& frame, std::vector<F
     for (std::size_t i = 0; i < frame.frame.views.size(); ++i) {
         const FrameGenEngineMotionView& view = frame.frame.views[i];
         std::int64_t format = view.vectors_format;
-        if (const auto vectors = swapchains_.find(view.vectors.swapchain); vectors != swapchains_.end() && !format) {
-            format = vectors->second.format;
+        std::uint32_t acquired = 0;
+        if (const auto vectors = swapchains_.find(view.vectors.swapchain); vectors != swapchains_.end()) {
+            format = format ? format : vectors->second.format;
+            acquired = vectors->second.acquired;
         }
         FrameGenMotionJob job;
+        job.acquired = acquired; // left alone: a game following the specification holds them in a state of its own
         job.view = view.view;
         // The image is the census worker's guess, made outside the lock.
         job.vectors = {view.vectors.swapchain, frame.color_index[i] % kFrameGenEngineImages, view.vectors.imageArrayIndex,

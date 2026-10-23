@@ -4753,6 +4753,17 @@ void TestResearchSwitches() {
     Expect(depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_MV") == "census" &&
                depthxr::TakeResearchFileSwitches().empty(),
            "Research switches: a switch taken again is not told again");
+    // A session's switches are told anew, an earlier session's or not; what
+    // was read before the session and not told is not its.
+    depthxr::ResetResearchFileSwitches();
+    Expect(depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_DEPTH_SPLAT") == "1", "Research switches: read again");
+    depthxr::ResetResearchFileSwitches();
+    Expect(depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_MV") == "census" &&
+               depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_MV") == "census" &&
+               depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_WORLD") == "0" &&
+               depthxr::TakeResearchFileSwitches() ==
+                   std::vector<std::string>{"VECTORXR_FRAMEGEN_ENGINE_MV=census", "VECTORXR_FRAMEGEN_WORLD=0"},
+           "Research switches: each session's are told, once each");
     for (const char* name : {"VECTORXR_FRAMEGEN_ENGINE_CUTS", "VECTORXR_FRAMEGEN_JIT"}) {
         _putenv_s(name, "");
     }

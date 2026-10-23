@@ -191,6 +191,13 @@ class VulkanBridge {
     // Star Citizen, would otherwise write the next frame's vectors while the
     // copy reads this one's). Colour twins only: false for any other.
     bool MarkMotion(XrSwapchain swapchain);
+    // Undoes MarkMotion while Frame Generation reads the vectors no more
+    // (Star Citizen made a swapchain within the settle time, the validator
+    // disabled them, the session reads none): releases give nothing back
+    // early and nothing arms the device-lost sentinel; an image given back
+    // already needs nothing at its next acquire. False when the swapchain was
+    // not marked.
+    bool UnmarkMotion(XrSwapchain swapchain);
     // For a game that writes its motion vector images without acquiring or
     // releasing them (stage 9's contingency), inside its xrEndFrame: each of
     // `images` (an image of a swapchain MarkMotion named that the game never

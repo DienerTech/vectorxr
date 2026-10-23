@@ -3577,6 +3577,13 @@ std::optional<std::string> ReadResearchSwitch(const char* name) {
     return value;
 }
 
+void ResetResearchFileSwitches() {
+    ResearchFile& research = Research();
+    std::scoped_lock lock(research.mutex);
+    research.taken.clear();
+    research.untaken.clear();
+}
+
 std::vector<std::string> TakeResearchFileSwitches() {
     ResearchFile& research = Research();
     std::scoped_lock lock(research.mutex);

@@ -2319,6 +2319,24 @@ bool VulkanBridge::MarkMotion(XrSwapchain swapchain) {
     return true;
 }
 
+bool VulkanBridge::UnmarkMotion(XrSwapchain swapchain) {
+    if (!impl_) {
+        return false;
+    }
+    Impl& impl = *impl_;
+    std::scoped_lock lock(impl.mutex);
+    Impl::Swapchain* chain = impl.Find(swapchain);
+    if (!chain || !chain->motion) {
+        return false;
+    }
+    chain->motion = false;
+    chain->hand_back = chain->plan.mode == Impl::Mode::kTwinDepth;
+    impl.Info("a swapchain's motion vectors are read no more: its releases give its images back at their next "
+              "acquires again (" +
+              impl.Describe(*chain) + ").");
+    return true;
+}
+
 std::vector<bool> VulkanBridge::EndFrameMotion(const std::vector<std::pair<XrSwapchain, std::uint32_t>>& images) {
     std::vector<bool> copied(images.size(), false);
     if (!impl_ || images.empty()) {

@@ -461,8 +461,15 @@ int RunScenarios(Harness& harness) {
         tuning.fractions = {1.0f / 3.0f, 2.0f / 3.0f, 0.0f};
         gpu->ResetHistory();
         run(0, true, 0, 0);
+        const std::uint64_t draws = gpu->DrawsForTest();
         const Pixels third = run(1, true, 0, 0);
         const Pixels two_thirds = harness.readback(g_swapchains[kOutputSecond][0]);
+        // Drawn straight into the outputs (Direct3D 12), by an Execute that
+        // writes them itself: both frames in one draw, once.
+        Check(harness.name != "D3D12" || gpu->DrawsOutputs(), harness.name + " draws into the outputs");
+        Check(!gpu->DrawsOutputs() || gpu->DrawsForTest() == draws + 1,
+              harness.name + " draws the generated frames once per Execute (" +
+                  std::to_string(gpu->DrawsForTest() - draws) + " draws)");
         const double third_error = MeanError(third, MovingSquare(120 + 16.0f / 3, 120 + 8.0f / 3), 96, 96, 256, 256);
         const double two_thirds_error = MeanError(two_thirds, MovingSquare(120 + 32.0f / 3, 120 + 16.0f / 3), 96, 96, 256, 256);
         const double third_hold = MeanError(b, MovingSquare(120 + 16.0f / 3, 120 + 8.0f / 3), 96, 96, 256, 256);
@@ -502,7 +509,11 @@ int RunScenarios(Harness& harness) {
         tuning.fractions = {0.25f, 0.5f, 0.75f, 1.0f};
         gpu->ResetHistory();
         four(0);
+        const std::uint64_t four_draws = gpu->DrawsForTest();
         four(1);
+        Check(!gpu->DrawsOutputs() || gpu->DrawsForTest() == four_draws + 1,
+              harness.name + " draws the four frames in one draw (" + std::to_string(gpu->DrawsForTest() - four_draws) +
+                  " draws)");
         const Pixels quarter = harness.readback(g_swapchains[kOutput][0]);
         const Pixels three_quarters = harness.readback(g_swapchains[kOutputThird][0]);
         const Pixels whole = harness.readback(g_swapchains[kOutputFourth][0]);
@@ -8250,6 +8261,38 @@ void EngineCensusTest(Harness& harness, ID3D12Device* device, ID3D12CommandQueue
     Check(std::filesystem::is_empty(dumps / "second", ignored),
           "engine census: no dump of a region outside the images, nor of a later frame");
     std::filesystem::remove_all(dumps, ignored);
+
+    // An image the game holds acquired (a game following the specification
+    // acquires its next frame's early) is in a state of its own: neither
+    // read nor moved out of it (FG_D3D12_DEBUG=1 checks the barriers), its
+    // census not taken, its samples zeros.
+    auto game_state = [&](D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) {
+        Check(SUCCEEDED(allocator->Reset()) && SUCCEEDED(list->Reset(allocator.Get(), nullptr)), "engine census: reset");
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition = {images[0].Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, before, after};
+        list->ResourceBarrier(1, &barrier);
+        finish();
+    };
+    game_state(D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_DEST);
+    job.acquired = 1u << 0;
+    const FrameGenEngineCensus held = census(9, rect);
+    job.acquired = 0;
+    game_state(D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET); // its release
+    Check(held.censused == 0b110u && held.image[1].Hash() == frames[3].image[1].Hash() &&
+              held.image[2].Hash() == frames[3].image[2].Hash(),
+          "engine census: an image the game holds is not read, the others are (censused " +
+              std::to_string(held.censused) + ")");
+    bool held_zeros = held.samples.size() == 16 * 16 * 4;
+    bool others_read = held_zeros;
+    for (std::uint32_t s = 0; s < 256 && held_zeros; ++s) {
+        held_zeros = held.samples[s * 4] == std::array<float, 4>{};
+        // Image 2's texels as before, bit for bit (some not finite).
+        others_read = others_read && std::memcmp(held.samples[s * 4 + 2].data(), sampled.samples[s * 4 + 2].data(),
+                                                 sizeof(std::array<float, 4>)) == 0;
+    }
+    Check(held_zeros && others_read, "engine census: the held image's samples are zeros, the others' its texels");
+    Check(census(10, rect).censused == 0b111u, "engine census: released, it is read again");
 
     // Every motion slot still on the GPU: the next call is skipped, never
     // waited for, and nothing is latched off.

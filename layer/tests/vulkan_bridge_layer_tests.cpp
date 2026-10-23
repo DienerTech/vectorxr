@@ -4273,6 +4273,24 @@ void TestStarCitizenMotion() {
               " frames)");
     Check(Contains(Peer::Log(), "Frame Generation engine motion through the Vulkan bridge"),
           "star citizen motion: the session says how it reads them");
+    // The game makes a swapchain (Star Citizen at a world entry): while its
+    // swapchains settle again nothing is read, and nothing is given back
+    // early (no new work on the game's queue, nothing to arm the bridge's
+    // device-lost sentinel).
+    const auto hand_backs = [](const std::string& described) {
+        const std::size_t at = described.find("handBacks=");
+        return at == std::string::npos ? std::string() : described.substr(at, described.find(',', at) - at);
+    };
+    const std::size_t read_before = captures().size();
+    const std::string settled = Peer::Bridge().Describe(motion.swapchain);
+    Target late = MakeTarget(app, ColorInfo(), "a swapchain made late");
+    Check(!Contains(Peer::Bridge().Describe(motion.swapchain), "motion vectors"),
+          "star citizen motion: a new swapchain unmarks the vectors' swapchain at once");
+    run(8);
+    const std::string later = Peer::Bridge().Describe(motion.swapchain);
+    Check(!Contains(later, "motion vectors") && !hand_backs(later).empty() && hand_backs(later) == hand_backs(settled) &&
+              captures().size() == read_before,
+          "star citizen motion: from a new swapchain on nothing is read or given back until they settle again: " + later);
     CheckValidation("star citizen motion");
     StopApp(app);
     SetEnv("VECTORXR_SPACEWARP_PROBE", "");

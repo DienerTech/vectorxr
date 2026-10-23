@@ -3,13 +3,16 @@
 // A research probe, off by default: does an application send its engine's
 // motion vectors through XR_FB_space_warp or XR_EXT_frame_synthesis when
 // VectorXR advertises them on a runtime that has neither? The probe's
-// manifests (spacewarp-probe-fb and spacewarp-probe-ext beside the layer's
-// own, each listing one of them and loaded only while VECTORXR_SPACEWARP_PROBE
-// is set) advertise them; VECTORXR_SPACEWARP_PROBE=fb|ext|both turns the
-// layer's side on. The layer then keeps the extension from the runtime,
-// answers its recommended motion vector size and takes its structure off each
-// projection view before xrEndFrame, logging what it carried. Nothing uses the
-// motion vectors yet. A runtime that lists the extension gets it as it is.
+// manifests (spacewarp-probe-fb, spacewarp-probe-ext and spacewarp-probe-both
+// beside the layer's own, listing one of them or both and loaded only while
+// VECTORXR_SPACEWARP_PROBE is set) advertise them; VECTORXR_SPACEWARP_PROBE=
+// fb|ext|both turns the layer's side on. The layer then keeps the extension
+// from the runtime, answers its recommended motion vector size and takes its
+// structure off each projection view before xrEndFrame, logging what it
+// carried. A manifest loads the layer for any value of the variable, and the
+// runtime would refuse an extension it advertised: set to anything else, the
+// layer takes over the same way (and warns). A runtime that lists the
+// extension gets it as it is.
 
 #include <openxr/openxr.h>
 
@@ -30,15 +33,18 @@ struct SpaceWarpProbeSelection {
 
 // "fb", "ext" or "both" (any case); anything else is off.
 SpaceWarpProbeSelection ParseSpaceWarpProbe(const char* value);
-// VECTORXR_SPACEWARP_PROBE.
+// VECTORXR_SPACEWARP_PROBE as set; empty when it is not (or set empty).
+std::string ReadSpaceWarpProbeVariable();
+// VECTORXR_SPACEWARP_PROBE, parsed.
 SpaceWarpProbeSelection ReadSpaceWarpProbeEnvironment();
 // "off", "fb", "ext" or "both".
 const char* SpaceWarpProbeName(SpaceWarpProbeSelection selection);
 
-// The layer takes an extension over while the probe is on, the application
-// enabled it and the runtime's list before the instance does not name it (a
-// list that could not be read names nothing: the runtime would refuse an
-// extension it lacks, so the instance would fail).
+// The layer takes an extension over while the probe is on (the variable set
+// to anything: a probe manifest loaded the layer and advertised the
+// extension), the application enabled it and the runtime's list before the
+// instance does not name it (a list that could not be read names nothing:
+// the runtime would refuse an extension it lacks, so the instance would fail).
 bool SpaceWarpProbeOwns(bool probe_on, bool application_enabled, bool runtime_lists);
 
 // How big a motion vector image the layer recommends, against an eye's

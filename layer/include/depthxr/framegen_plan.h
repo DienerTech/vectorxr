@@ -2143,8 +2143,11 @@ class FrameGenWorldDeltaCalibration {
 // changes them between a game's sessions without signing out to change the
 // environment. None where neither has it (an empty value is none).
 std::optional<std::string> ReadResearchSwitch(const char* name);
-// The switches ReadResearchSwitch took from the file ("NAME=VALUE"), each
-// once in the process: those no earlier call returned.
+// A session's switches start here (FrameGenPresenter::Start): every switch
+// the file gives from now on is told again, those not told yet forgotten.
+void ResetResearchFileSwitches();
+// The switches ReadResearchSwitch took from the file ("NAME=VALUE") since
+// ResetResearchFileSwitches, each once: those no earlier call returned.
 std::vector<std::string> TakeResearchFileSwitches();
 // How many reads the file answered in the process (a session's: the count
 // after its reads against the count before).

@@ -146,10 +146,12 @@ class OpenXrLayer {
         // through). Above VectorXR it gets a game's quad views, which it does
         // not support.
         std::string openxr_toolkit{"absent"};
-        // The space-warp probe (spacewarp_probe.h): VECTORXR_SPACEWARP_PROBE,
-        // what the application enabled, what the runtime's list before the
-        // instance names, and what the layer took over (kept from the runtime).
+        // The space-warp probe (spacewarp_probe.h): VECTORXR_SPACEWARP_PROBE
+        // (parsed, and as set: empty when it is not), what the application
+        // enabled, what the runtime's list before the instance names, and
+        // what the layer took over (kept from the runtime).
         std::string spacewarp_probe{"off"};
+        std::string spacewarp_probe_value;
         bool app_requested_fb_space_warp{false};
         bool app_requested_frame_synthesis{false};
         bool spacewarp_scan_complete{false};

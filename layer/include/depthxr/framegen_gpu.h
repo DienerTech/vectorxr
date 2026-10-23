@@ -89,6 +89,11 @@ struct FrameGenMotionJob {
     FrameGenImage vectors;
     std::uint32_t image_count{0}; // 0: the swapchain's own, up to kFrameGenEngineImages
     std::optional<std::uint32_t> released; // a game following the specification released this one
+    // The images (bits) the game acquired and has not released yet: in a
+    // state of its own until their release, so neither read nor moved out of
+    // it (their census says they were not read). None for a game that never
+    // acquires its motion vector images (MSFS 2024).
+    std::uint32_t acquired{0};
     std::uint32_t color_index{0};          // the images the frame's color and depth swapchains released
     std::uint32_t depth_index{0};
     std::uint64_t frame{0};                // the layer's count of frames with a projection layer
@@ -223,8 +228,9 @@ class FrameGenGpu {
     virtual bool SupportsDepth() const { return false; }
     // Engine motion vectors (Direct3D 12): reads each job's motion vector
     // images on the game's queue, as they are at the call (a game may never
-    // release them), and keeps what the census finds for EngineStatus a few
-    // frames later. `color` describes each view's color image, by view.
+    // release them; those it holds acquired are left alone), and keeps what
+    // the census finds for EngineStatus a few frames later. `color`
+    // describes each view's color image, by view.
     // Jobs with `capture` (stage 2) also resample their image into the
     // view's raw field (kEngineRaw), once Execute set the view up with
     // FrameGenTuning::engine_mode from kCapture; `resampled`, when given,
@@ -276,6 +282,9 @@ class FrameGenGpu {
     // Whether generated frames are drawn straight into the output images
     // (no intermediate image per view).
     virtual bool DrawsOutputs() const { return false; }
+    // Tests: the draws of generated frames into the output images recorded
+    // so far (DrawsOutputs; frames drawn together count once).
+    virtual std::uint64_t DrawsForTest() const { return 0; }
     // FrameGenTuning::hardware_flow: empty until asked for, then "active",
     // or why the hardware cannot be used (block matching measures motion).
     virtual std::string HardwareFlowStatus() const { return "this graphics API has no optical flow hardware support"; }

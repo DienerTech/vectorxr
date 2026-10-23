@@ -2244,13 +2244,16 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
         }
     }
 
-    if (diagnostics.spacewarp_probe != "off" || diagnostics.app_requested_fb_space_warp ||
-        diagnostics.app_requested_frame_synthesis) {
+    const bool spacewarp_probe_set = !diagnostics.spacewarp_probe_value.empty();
+    const bool spacewarp_probe_named = diagnostics.spacewarp_probe != "off";
+    if (spacewarp_probe_set || diagnostics.app_requested_fb_space_warp || diagnostics.app_requested_frame_synthesis) {
         std::string taken_over;
         if (spacewarp_fb_owned_) taken_over += " " XR_FB_SPACE_WARP_EXTENSION_NAME;
         if (spacewarp_ext_owned_) taken_over += " " XR_EXT_FRAME_SYNTHESIS_EXTENSION_NAME;
         std::ostringstream stream;
-        stream << "Space-warp probe: VECTORXR_SPACEWARP_PROBE=" << diagnostics.spacewarp_probe
+        stream << "Space-warp probe: VECTORXR_SPACEWARP_PROBE="
+               << (spacewarp_probe_named || !spacewarp_probe_set ? diagnostics.spacewarp_probe
+                                                                 : "'" + diagnostics.spacewarp_probe_value + "'")
                << ", appEnabledFbSpaceWarp=" << (diagnostics.app_requested_fb_space_warp ? 1 : 0)
                << ", appEnabledFrameSynthesis=" << (diagnostics.app_requested_frame_synthesis ? 1 : 0)
                << ", extScanComplete=" << (diagnostics.spacewarp_scan_complete ? 1 : 0)
@@ -2259,14 +2262,19 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
                << ", takenOver=" << (taken_over.empty() ? std::string("none") : taken_over.substr(1));
         logger_.Info(stream.str());
         const SpaceWarpProbeSelection selection = ParseSpaceWarpProbe(diagnostics.spacewarp_probe.c_str());
-        if ((spacewarp_fb_owned_ && !selection.fb) || (spacewarp_ext_owned_ && !selection.ext)) {
+        if (spacewarp_probe_set && !spacewarp_probe_named) {
+            logger_.Info("Space-warp probe: WARNING: VECTORXR_SPACEWARP_PROBE='" + diagnostics.spacewarp_probe_value +
+                         "' is not fb, ext or both. A probe manifest loads the layer for any value and advertises "
+                         "its extensions, so the layer takes over those the application enabled and the runtime "
+                         "lacks, as the runtime would refuse them; unset the variable to turn the probe off.");
+        } else if ((spacewarp_fb_owned_ && !selection.fb) || (spacewarp_ext_owned_ && !selection.ext)) {
             logger_.Info("Space-warp probe: WARNING: the application enabled an extension "
                          "VECTORXR_SPACEWARP_PROBE=" +
                          diagnostics.spacewarp_probe +
                          " does not name (the other probe manifest is registered?); the layer takes it over too, "
                          "as the runtime would refuse it.");
         }
-        if (diagnostics.spacewarp_probe == "off") {
+        if (!spacewarp_probe_set) {
             logger_.Info("Space-warp probe: off; the application's space-warp extensions go to the runtime as "
                          "they are.");
         }
@@ -4335,6 +4343,15 @@ XrResult OpenXrLayer::CreateSwapchain(XrSession session,
                               IsQuadViewConfiguration(active_primary_view_configuration_type_));
     tracked_swapchains_[*swapchain] = info;
     framegen_.TrackSwapchain(*swapchain, create_info->format, create_info->sampleCount, create_info->usageFlags);
+    if (vulkan_bridge_motion_) {
+        // A new swapchain restarts the wait for a Vulkan-bridged game's
+        // vectors to settle (Star Citizen's world entry): from its frame's
+        // releases on, nothing is given back early until a frame's record
+        // is read again (EndFrame marks them then).
+        for (const auto& tracked : tracked_swapchains_) {
+            vulkan_bridge_.UnmarkMotion(tracked.first);
+        }
+    }
     LogSwapchainSummary(*swapchain, info, "created");
     if (SpaceWarpProbeActive()) {
         NoteSpaceWarpSwapchainLocked(*swapchain, info);
@@ -4543,6 +4560,12 @@ XrResult OpenXrLayer::AcquireSwapchainImage(XrSwapchain swapchain,
             it->second.last_acquired_image_index = *index;
             it->second.has_last_acquired_image_index = true;
             it->second.image_states.Acquire(*index);
+            // The game's until its release, in a state of its own: Frame
+            // Generation never reads a motion vector image it holds. A
+            // bridged swapchain's runtime images are the bridge's.
+            if (!BridgedSwapchain(swapchain)) {
+                framegen_.NoteAcquire(swapchain, *index);
+            }
         }
         if (it->second.quadviews_session && it->second.acquire_count <= 3) {
             LogSwapchainSummary(swapchain, it->second, "acquired");
@@ -9195,10 +9218,17 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
             }
             // Read from now on: their images go back to the game's queue
             // behind each copy, so its next frame's vectors never overwrite
-            // the ones being copied.
+            // the ones being copied. Not read (the game made a swapchain
+            // within the settle time, the validator disabled them, the
+            // session reads none): nothing is given back early, and nothing
+            // new is asked of the game's queue.
             if (framegen_.NoteEngineMotion(std::move(*bridged_record), FrameGenEngineBridge::kVulkan)) {
                 for (const XrSwapchain swapchain : vectors) {
                     vulkan_bridge_motion_ = vulkan_bridge_.MarkMotion(swapchain) || vulkan_bridge_motion_;
+                }
+            } else {
+                for (const XrSwapchain swapchain : vectors) {
+                    vulkan_bridge_.UnmarkMotion(swapchain);
                 }
             }
         }

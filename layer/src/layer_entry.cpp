@@ -735,14 +735,16 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
 
     // The space-warp probe (spacewarp_probe.h): its manifests advertise the
     // extensions on a runtime without them, so the layer keeps them from such
-    // a runtime. One the runtime lists goes on as it is.
-    const SpaceWarpProbeSelection spacewarp_probe = ReadSpaceWarpProbeEnvironment();
-    diagnostics.spacewarp_probe = SpaceWarpProbeName(spacewarp_probe);
+    // a runtime. One the runtime lists goes on as it is. A manifest loads the
+    // layer while VECTORXR_SPACEWARP_PROBE is set, whatever its value, so any
+    // value takes them over (one other than fb, ext or both is warned about).
+    diagnostics.spacewarp_probe_value = ReadSpaceWarpProbeVariable();
+    diagnostics.spacewarp_probe = SpaceWarpProbeName(ParseSpaceWarpProbe(diagnostics.spacewarp_probe_value.c_str()));
     diagnostics.app_requested_fb_space_warp =
         ApplicationRequestedExtension(instance_create_info, XR_FB_SPACE_WARP_EXTENSION_NAME);
     diagnostics.app_requested_frame_synthesis =
         ApplicationRequestedExtension(instance_create_info, XR_EXT_FRAME_SYNTHESIS_EXTENSION_NAME);
-    if (spacewarp_probe.Any() &&
+    if (!diagnostics.spacewarp_probe_value.empty() &&
         (diagnostics.app_requested_fb_space_warp || diagnostics.app_requested_frame_synthesis)) {
         const RuntimeExtensionScan spacewarp_scan =
             extension_scan.ran ? extension_scan : ScanRuntimeInstanceExtensions(next_info);

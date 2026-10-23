@@ -200,6 +200,7 @@ struct GpuLog {
     std::atomic<std::uint64_t> verdict_frames{0};
     std::atomic<std::uint64_t> verdicts_held_back{0};
     std::atomic<std::uint64_t> lead_verdicts_held_back{0};
+    std::atomic<bool> engine_disabled{false}; // the validator disabled the vectors (EngineStatus)
     // Stage 7: such frames from Assist had the vectors merged into every
     // view (FrameGenExecuteResult::merged) while `merged`; the view whose
     // depth is never used (FrameGenExecuteResult::depth; -1: none).
@@ -809,6 +810,7 @@ class FakeGpu final : public FrameGenGpu {
         status.validation.frames = log_->verdict_frames;
         status.validation.held = log_->verdicts_held_back;
         status.validation.lead_held = log_->lead_verdicts_held_back;
+        if (log_->engine_disabled) status.validation.state = FrameGenEngineValidation::State::kDisabled;
         std::scoped_lock lock(log_->motion_mutex);
         for (const FrameGenEngineCensus& census : log_->census) {
             if (census.sequence > after) status.census.push_back(census);
@@ -4065,6 +4067,28 @@ void TestEngineMotionCapture() {
         session.presenter.Stop();
     }
 
+    // An image the game acquired (its next frame's, early) is its own until
+    // its release: every job names it, and the backend leaves it alone.
+    {
+        Session session;
+        start(session);
+        for (int i = 0; i < 4; ++i) session.app->Frame();
+        session.presenter.NoteAcquire(vectors, 2);
+        const std::size_t acquired_from = calls(session).size();
+        for (int i = 0; i < 4; ++i) session.app->Frame();
+        session.presenter.NoteRelease(vectors, 2);
+        const std::size_t released_from = calls(session).size();
+        for (int i = 0; i < 4; ++i) session.app->Frame();
+        const auto made = calls(session);
+        bool named = made.size() > released_from && released_from > acquired_from;
+        for (std::size_t i = acquired_from; i < made.size() && named; ++i) {
+            const std::uint32_t expected = i < released_from ? 0b100u : 0u;
+            named = made[i].size() == 2 && made[i][0].acquired == expected && made[i][1].acquired == expected;
+        }
+        Check(named, "engine capture: the image the game holds is named in every job until its release");
+        session.presenter.Stop();
+    }
+
     // Released after the colors: captured at the release with its index,
     // paired with the colors captured before; the frame's end leaves them.
     for (const Released when : {Released::kAfterColor, Released::kBeforeColor}) {
@@ -4287,6 +4311,14 @@ void TestEngineMotionBridge() {
         settle();
         for (int i = 0; i < 6; ++i) session.app->Frame();
         Check(calls(session).size() > before && session.read > read, "engine bridge: read again once it settled");
+        // The validator disabled them: not read from its next frame on (the
+        // layer then has the bridge give nothing back early).
+        session.gpu.engine_disabled = true;
+        session.app->Frame();
+        const int disabled = session.read;
+        for (int i = 0; i < 6; ++i) session.app->Frame();
+        Check(session.read == disabled, "engine bridge: vectors the validator disabled are not read");
+        session.gpu.engine_disabled = false;
         session.presenter.Stop();
         Check(!session.runtime.ordering_violation && !g_release_violation, "engine bridge: calls stayed ordered");
     }
@@ -9092,8 +9124,9 @@ struct SessionLog {
 // Research switches from %LOCALAPPDATA%\VectorXR\framegen-research.txt (a
 // folder of this test's own, which the policy tests' process never sees):
 // the OSD names them for the session that runs with them only, not once it
-// stopped, nor for one without a backend; the log names each once in the
-// process, a session without a backend's too.
+// stopped, nor for one without a backend; the log names each once per
+// session (an earlier session in the process took it too), a session
+// without a backend's too.
 void TestResearchFileSessions() {
     const std::wstring local_before = _wgetenv(L"LOCALAPPDATA") ? _wgetenv(L"LOCALAPPDATA") : L"";
     const std::filesystem::path local = std::filesystem::temp_directory_path() /
@@ -9128,9 +9161,12 @@ void TestResearchFileSessions() {
     presenter.Stop();
     _wputenv_s(L"LOCALAPPDATA", local_before.c_str());
     std::filesystem::remove_all(local, ignored);
-    Check(log.Lines("research switches from").size() == 1 &&
+    const std::vector<std::string> told = log.Lines("research switches from");
+    Check(told.size() == 2 &&
+              std::all_of(told.begin(), told.end(),
+                          [](const std::string& line) { return line.find("VECTORXR_FRAMEGEN_ENGINE_CUTS=1.") != std::string::npos; }) &&
               log.Lines("VECTORXR_FRAMEGEN_ENGINE_CUTS=1 (research)").size() == 1,
-          "research file: the switch logged once, its effect for the session with a backend");
+          "research file: the switch logged for each session that read it, its effect for the session with a backend");
 }
 
 // A game's depth description is logged with every digit (Star Citizen's

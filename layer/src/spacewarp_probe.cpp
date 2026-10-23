@@ -91,8 +91,13 @@ SpaceWarpProbeSelection ParseSpaceWarpProbe(const char* value) {
     return {};
 }
 
+std::string ReadSpaceWarpProbeVariable() {
+    const char* value = std::getenv("VECTORXR_SPACEWARP_PROBE");
+    return value ? value : "";
+}
+
 SpaceWarpProbeSelection ReadSpaceWarpProbeEnvironment() {
-    return ParseSpaceWarpProbe(std::getenv("VECTORXR_SPACEWARP_PROBE"));
+    return ParseSpaceWarpProbe(ReadSpaceWarpProbeVariable().c_str());
 }
 
 const char* SpaceWarpProbeName(SpaceWarpProbeSelection selection) {

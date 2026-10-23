@@ -192,7 +192,12 @@ void TestSelectionAndSizes() {
     using depthxr::ParseSpaceWarpProbe;
     Check(!ParseSpaceWarpProbe(nullptr).Any() && !ParseSpaceWarpProbe("").Any() && !ParseSpaceWarpProbe("1").Any() &&
               !ParseSpaceWarpProbe("on").Any(),
-          "only fb, ext and both turn the probe on");
+          "only fb, ext and both name the probe's extensions");
+    _putenv_s("VECTORXR_SPACEWARP_PROBE", "On");
+    Check(depthxr::ReadSpaceWarpProbeVariable() == "On" && !depthxr::ReadSpaceWarpProbeEnvironment().Any(),
+          "the variable as set, whatever it names");
+    _putenv_s("VECTORXR_SPACEWARP_PROBE", "");
+    Check(depthxr::ReadSpaceWarpProbeVariable().empty(), "the variable unset");
     Check(ParseSpaceWarpProbe("fb").fb && !ParseSpaceWarpProbe("fb").ext, "fb is XR_FB_space_warp alone");
     Check(ParseSpaceWarpProbe("EXT").ext && !ParseSpaceWarpProbe("EXT").fb, "ext is XR_EXT_frame_synthesis alone");
     Check(ParseSpaceWarpProbe("Both").fb && ParseSpaceWarpProbe("Both").ext, "both is both");
@@ -897,6 +902,33 @@ void TestThroughTheLayer() {
         Check(outcome.log.find("runtimeListsFbSpaceWarp=1") != std::string::npos &&
                   outcome.log.find("takenOver=none") != std::string::npos,
               "the probe line says the runtime has it");
+    }
+
+    // Set to anything but fb, ext or both: a probe manifest loads the layer
+    // for any value and advertises its extensions, so what the application
+    // enabled and the runtime lacks is taken over all the same, with a
+    // warning (the runtime would refuse it, and the instance fail).
+    {
+        const Outcome one = Run("1", {depth}, {depth, fb});
+        Check(one.create == XR_SUCCESS && !Has(one.runtime_instance, fb) && Has(one.runtime_instance, depth),
+              "VECTORXR_SPACEWARP_PROBE=1: the instance exists, its XR_FB_space_warp the layer's: " +
+                  std::to_string(one.create));
+        Check(one.fb.recommendedMotionVectorImageRectWidth == 250 && one.ended.size() == 2 && one.ended[0] == kDepthOnly,
+              "VECTORXR_SPACEWARP_PROBE=1: answered and taken off the frame as with fb");
+        Check(one.log.find("VECTORXR_SPACEWARP_PROBE='1'") != std::string::npos &&
+                  one.log.find("takenOver=XR_FB_space_warp") != std::string::npos &&
+                  one.log.find("WARNING: VECTORXR_SPACEWARP_PROBE='1' is not fb, ext or both") != std::string::npos &&
+                  one.log.find("Space-warp probe: off") == std::string::npos,
+              "VECTORXR_SPACEWARP_PROBE=1: logged as set, with a warning");
+        const Outcome spaced = Run("fb ", {depth}, {depth, fb, ext});
+        Check(spaced.create == XR_SUCCESS && !Has(spaced.runtime_instance, fb) && !Has(spaced.runtime_instance, ext) &&
+                  spaced.ended.size() == 2 && spaced.ended[0] == kDepthOnly && spaced.ended[1] == kDepthOnly &&
+                  spaced.log.find("is not fb, ext or both") != std::string::npos,
+              "VECTORXR_SPACEWARP_PROBE='fb ': both extensions the application enabled are the layer's");
+        const Outcome listed = Run("0", {depth, fb}, {depth, fb});
+        Check(listed.create == XR_SUCCESS && Has(listed.runtime_instance, fb) &&
+                  listed.log.find("takenOver=none") != std::string::npos,
+              "VECTORXR_SPACEWARP_PROBE=0: what the runtime lists goes to it");
     }
 
     // The probe off: nothing changes (a runtime without the extension refuses it).
