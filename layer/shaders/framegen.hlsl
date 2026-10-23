@@ -122,9 +122,20 @@ cbuffer FrameGenConstantBuffer : register(b0) {
 // wherever the chosen vector carries content the newest frame does not show
 // moving that way.
 #define FG_FLAG_ENGINE_BIDIR 65536u
+// Research (head-motion shimmer design, fix A): synthesis reads the newest
+// frame's colour by Catmull-Rom (SampleResampled: five bilinear taps, or
+// nine with FG_FLAG_RESAMPLE_WIDE) instead of one bilinear tap, and with
+// FG_FLAG_RESAMPLE_PREVIOUS the previous frame's too.
+#define FG_FLAG_RESAMPLE_CUBIC 131072u
+#define FG_FLAG_RESAMPLE_WIDE 262144u
+#define FG_FLAG_RESAMPLE_PREVIOUS 524288u
+// Research (fix B1): synthesis with depth reads the eye-shift map between its
+// texels on the surface the texel under the pixel holds (SmoothShift).
+#define FG_FLAG_SHIFT_SMOOTH 2097152u
 // Research: the Flow view tints each pixel by its motion in pixels, in full
 // from 2 pixels (sub-pixel motion shows), instead of by its share of the
-// view. Bits 17-22 are kept for the head-motion shimmer design's research.
+// view. Bits 20 and 22 are kept for the head-motion shimmer design's matched
+// sharpness and rotor research.
 #define FG_FLAG_FLOW_FINE 8388608u
 // The candidates' flags (FG_PASS_ENGINE_CONVERT; the nearest surface's in
 // bits 0-3 of its info, the farthest's in 4-7): not a vector (the capture's
@@ -1266,6 +1277,81 @@ float DepthAt(float2 uv) {
     return DepthNearest(g_depth, uv);
 }
 
+// Research (FG_FLAG_RESAMPLE_*, the head-motion shimmer design's fix A): a
+// real frame's colour at uv by Catmull-Rom instead of one bilinear tap.
+// Content moved by a fraction of a pixel (the eye's movement with depth,
+// sub-pixel flow) loses fine detail to the bilinear tap, most halfway between
+// texels, while real frames show theirs whole: generated frames come out
+// softer at every phase the head's movement leaves, and alternate with sharp
+// real frames. Five bilinear taps (the 4x4 filter's corners dropped, the rest
+// renormalized), or nine with FG_FLAG_RESAMPLE_WIDE (the whole filter);
+// either clamped to the four texels around the sample, so edges do not ring.
+// A sample on a texel's centre (content not moved) reads that texel, and one
+// halfway between four (a coarse pixel's centre under variable-rate shading,
+// content not moved) keeps the bilinear tap, the 2x2 box the coarse pixel
+// stands for: frames the head's movement leaves alone are as before.
+float4 SampleResampled(Texture2D<float4> image, float2 uv) {
+    uint width, height;
+    image.GetDimensions(width, height);
+    const float2 size = float2(width, height);
+    const int2 last = int2(width, height) - 1;
+    const float2 p = uv * size - 0.5;
+    const float2 b = floor(p);
+    const float2 f = p - b;
+    float4 result;
+    [branch]
+    if (all(abs(f - round(f)) < 1.0 / 512.0)) {
+        result = image.Load(int3(clamp(int2(round(p)), int2(0, 0), last), 0));
+    } else if (all(abs(f - 0.5) < 1.0 / 512.0)) {
+        result = image.SampleLevel(g_linear, uv, 0.0);
+    } else {
+        // The weights of the texels at b - 1 .. b + 2; the middle two are
+        // read with one bilinear tap between them.
+        const float2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+        const float2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+        const float2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+        const float2 w3 = f * f * (-0.5 + 0.5 * f);
+        const float2 w12 = w1 + w2;
+        const float2 t0 = (b - 0.5) / size;
+        const float2 t12 = (b + 0.5 + w2 / w12) / size;
+        const float2 t3 = (b + 2.5) / size;
+        float4 sum = image.SampleLevel(g_linear, t12, 0.0) * (w12.x * w12.y) +
+                     image.SampleLevel(g_linear, float2(t12.x, t0.y), 0.0) * (w12.x * w0.y) +
+                     image.SampleLevel(g_linear, float2(t0.x, t12.y), 0.0) * (w0.x * w12.y) +
+                     image.SampleLevel(g_linear, float2(t3.x, t12.y), 0.0) * (w3.x * w12.y) +
+                     image.SampleLevel(g_linear, float2(t12.x, t3.y), 0.0) * (w12.x * w3.y);
+        float weight = w12.x * w12.y + w12.x * w0.y + w0.x * w12.y + w3.x * w12.y + w12.x * w3.y;
+        if ((g.options.y & FG_FLAG_RESAMPLE_WIDE) != 0u) {
+            sum += image.SampleLevel(g_linear, t0, 0.0) * (w0.x * w0.y) +
+                   image.SampleLevel(g_linear, float2(t3.x, t0.y), 0.0) * (w3.x * w0.y) +
+                   image.SampleLevel(g_linear, float2(t0.x, t3.y), 0.0) * (w0.x * w3.y) +
+                   image.SampleLevel(g_linear, t3, 0.0) * (w3.x * w3.y);
+            weight += w0.x * w0.y + w3.x * w0.y + w0.x * w3.y + w3.x * w3.y;
+        }
+        const int2 i0 = clamp(int2(b), int2(0, 0), last);
+        const int2 i1 = clamp(int2(b) + 1, int2(0, 0), last);
+        const float4 a = image.Load(int3(i0, 0));
+        const float4 c = image.Load(int3(i1.x, i0.y, 0));
+        const float4 d = image.Load(int3(i0.x, i1.y, 0));
+        const float4 e = image.Load(int3(i1, 0));
+        result = clamp(sum / weight, min(min(a, c), min(d, e)), max(max(a, c), max(d, e)));
+    }
+    return result;
+}
+
+// A real frame's colour at uv: one bilinear tap, or with `cubic`
+// SampleResampled's.
+float4 SampleColor(Texture2D<float4> image, float2 uv, bool cubic) {
+    float4 result;
+    [branch]
+    if (cubic) {
+        result = SampleResampled(image, uv);
+    } else {
+        result = image.SampleLevel(g_linear, uv, 0.0);
+    }
+    return result;
+}
+
 // Depth for front-to-back order: unknown or disproved depth is far.
 float OrderDepth(float depth) {
     return depth > 0.0 ? depth : FG_FAR_DEPTH;
@@ -1363,6 +1449,65 @@ float CandidateError(float2 uv, float2 v, float step) {
     return MaxComponent(abs(newest - previous));
 }
 
+#if !defined(__spirv__)
+// The eye-shift map's offset at `texel` (map texels), none where it has none.
+float2 ShiftBack(int2 texel) {
+    const uint packed = g_shift.Load(int3(texel, 0));
+    return packed == FG_SHIFT_NONE ? float2(0.0, 0.0) : float2(f16tof32(packed & 0xffffu), f16tof32(packed >> 16));
+}
+
+// The depth the eye-shift map's offset `back` at `texel` reads its content
+// at (map texels; the map lies on the depth's grid): distant, unknown or
+// dropped depth as FG_FAR_DEPTH.
+float ShiftSourceDepth(int2 texel, float2 back, float2 size) {
+    const float z = DepthAt((float2(texel) + 0.5 + back) / size);
+    return z > 0.0 && z < FG_FAR_DEPTH ? max(z, 0.01) : FG_FAR_DEPTH;
+}
+
+// Research (FG_FLAG_SHIFT_SMOOTH, the head-motion shimmer design's fix B1):
+// the eye-shift map read between its texels instead of at the one under the
+// pixel. The map has a texel per 2x2 pixels, so a surface whose offset
+// varies across it (a panel at an angle to the eye) moves in steps of two
+// pixels, and the steps shift as the eye moves. The texel under the pixel
+// decides the surface: of the four texels around the pixel's centre, those
+// on it (offsets within 2 texels of its own, content read within 3% of its
+// depth) are blended bilinearly, the rest left out. Four offsets within a
+// quarter texel of its own are blended outright. `own_texel`, `own`: the
+// texel under the pixel and its offset; `size`: the map's.
+float2 SmoothShift(float2 uv, int2 own_texel, float2 own, float2 size) {
+    const int2 last = int2(size) - 1;
+    const float2 q = uv * size - 0.5;
+    const int2 base = int2(floor(q));
+    const float2 f = q - float2(base);
+    const float4 weights = float4((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y), (1.0 - f.x) * f.y, f.x * f.y);
+    float2 backs[4];
+    bool close = true;
+    [unroll]
+    for (int i = 0; i < 4; ++i) {
+        backs[i] = ShiftBack(clamp(base + int2(i & 1, i >> 1), int2(0, 0), last));
+        close = close && all(abs(backs[i] - own) <= 0.25);
+    }
+    float2 result = weights.x * backs[0] + weights.y * backs[1] + weights.z * backs[2] + weights.w * backs[3];
+    [branch]
+    if (!close) {
+        const float own_depth = ShiftSourceDepth(own_texel, own, size);
+        float2 blended = float2(0.0, 0.0);
+        float total = 0.0;
+        [unroll]
+        for (int k = 0; k < 4; ++k) {
+            const float there = ShiftSourceDepth(clamp(base + int2(k & 1, k >> 1), int2(0, 0), last), backs[k], size);
+            const bool surface =
+                own_depth >= FG_FAR_DEPTH ? there >= FG_FAR_DEPTH : abs(there - own_depth) <= 0.03 * own_depth;
+            const float weight = all(abs(backs[k] - own) <= 2.0) && surface ? weights[k] : 0.0;
+            blended += weight * backs[k];
+            total += weight;
+        }
+        result = total > 0.0 ? blended / total : own;
+    }
+    return result;
+}
+#endif
+
 // Where a generated pixel's content sits in the newest view: the pixel
 // itself, or with FG_FLAG_SHIFT where the eye-shift map says it comes from.
 // options.w holds the map's frame time (half float bits), in units of
@@ -1379,9 +1524,15 @@ float2 SourceUv(float2 position, float fraction) {
         const float time = (g.options.y & FG_FLAG_EXTRAPOLATE) != 0u ? fraction : 1.0 - fraction;
         uint width, height;
         g_shift.GetDimensions(width, height);
-        const uint packed = g_shift.Load(int3(min(int2(pixel >> 1), int2(width, height) - 1), 0));
-        const float2 back = packed == FG_SHIFT_NONE ? float2(0.0, 0.0)
-                                                    : float2(f16tof32(packed & 0xffffu), f16tof32(packed >> 16));
+        const int2 own_texel = min(int2(pixel >> 1), int2(width, height) - 1);
+        float2 back = ShiftBack(own_texel);
+        // FG_FLAG_SHIFT_SMOOTH needs the depth the map was built from (not
+        // bound for a frame moved by the previous frame's motion).
+        const uint smooth = FG_FLAG_SHIFT_SMOOTH | FG_FLAG_DEPTH;
+        [branch]
+        if ((g.options.y & smooth) == smooth) {
+            back = SmoothShift(uv, own_texel, back, float2(width, height));
+        }
         uv += time / max(map_time, 1e-6) * back / float2(width, height);
     }
 #endif
@@ -1617,12 +1768,16 @@ float4 Synthesize(float2 position, float fraction) {
     }
 
     const float2 source = uv + confidence * step * chosen.xy;
-    const float4 current = g_current.SampleLevel(g_linear, source, 0.0);
+    // FG_FLAG_RESAMPLE_* (research): the real frames' colour by Catmull-Rom;
+    // a still frame is a copy and keeps the bilinear tap.
+    const bool cubic = !still && (g.options.y & FG_FLAG_RESAMPLE_CUBIC) != 0u;
+    const bool cubic_previous = cubic && (g.options.y & FG_FLAG_RESAMPLE_PREVIOUS) != 0u;
+    const float4 current = SampleColor(g_current, source, cubic);
     float4 result = current;
     float photometric_confidence = 1.0;
     if (occlusion == 1) {
         // Revealed (or in front): the newest frame alone.
-        result = g_current.SampleLevel(g_linear, uv + confidence * step * occlusion_v, 0.0);
+        result = SampleColor(g_current, uv + confidence * step * occlusion_v, cubic);
     } else if (occlusion == 2) {
         // Being covered: the previous frame alone, where the content was
         // (FG_FLAG_ENGINE_BIDIR: where the forward map puts it, else by the
@@ -1633,16 +1788,16 @@ float4 Synthesize(float2 position, float fraction) {
         float2 back;
         forward = (g.options.y & FG_FLAG_ENGINE_BIDIR) != 0u && MotionMapBack(uv, fraction, back);
         if (forward) {
-            result = g_previous.SampleLevel(g_linear, uv + back, 0.0);
+            result = SampleColor(g_previous, uv + back, cubic_previous);
         }
 #endif
         if (!forward && MapToPrevious(uv - confidence * fraction * occlusion_v, occlusion_depth, previous_uv)) {
-            result = g_previous.SampleLevel(g_linear, previous_uv, 0.0);
+            result = SampleColor(g_previous, previous_uv, cubic_previous);
         }
     } else if (!extrapolate && !still) {
         float2 previous_uv;
         if (MapToPrevious(source - confidence * chosen.xy, DepthAt(source), previous_uv)) {
-            const float4 previous = g_previous.SampleLevel(g_linear, previous_uv, 0.0);
+            const float4 previous = SampleColor(g_previous, previous_uv, cubic_previous);
             const float difference = MaxComponent(abs(Perceptual(previous.rgb) - Perceptual(current.rgb)));
             photometric_confidence = saturate(1.0 - max(difference - 0.03, 0.0) * g.tuning.w);
             result = lerp(current, previous, (1.0 - fraction) * photometric_confidence);
@@ -1650,10 +1805,11 @@ float4 Synthesize(float2 position, float fraction) {
                 // Research: untrusted motion fades between the two real
                 // frames where they are, instead of showing the newest one.
                 float2 still_uv;
-                const float4 newest_here = g_current.SampleLevel(g_linear, uv, 0.0);
-                const float4 previous_here = MapToPrevious(uv, DepthAt(uv), still_uv)
-                                                 ? g_previous.SampleLevel(g_linear, still_uv, 0.0)
-                                                 : newest_here;
+                const float4 newest_here = SampleColor(g_current, uv, cubic);
+                float4 previous_here = newest_here;
+                if (MapToPrevious(uv, DepthAt(uv), still_uv)) {
+                    previous_here = SampleColor(g_previous, still_uv, cubic_previous);
+                }
                 const float4 fade = lerp(newest_here, previous_here, 1.0 - fraction);
                 const float4 paired = lerp(current, previous, 1.0 - fraction);
                 result = lerp(fade, paired, confidence * photometric_confidence);

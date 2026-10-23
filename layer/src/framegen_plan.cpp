@@ -132,6 +132,20 @@ FrameGenConstants BaseConstants(const FrameGenViewRequest& request, const FrameG
     if (tuning.flow_view_fine && tuning.diagnostic == FrameGenDiagnosticView::kFlow) {
         flags |= kFrameGenFlagFlowFine;
     }
+    // Research (the head-motion shimmer design): the real frames read by
+    // Catmull-Rom, and the eye-shift map (with depth) between its texels.
+    if (tuning.resample != FrameGenResample::kBilinear) {
+        flags |= kFrameGenFlagResampleCubic;
+        if (tuning.resample == FrameGenResample::kCubicWide) {
+            flags |= kFrameGenFlagResampleWide;
+        }
+        if (tuning.resample_previous) {
+            flags |= kFrameGenFlagResamplePrevious;
+        }
+    }
+    if (tuning.shift_smooth && request.depth) {
+        flags |= kFrameGenFlagShiftSmooth;
+    }
     base.options = {kFrameGenSearchRadius, flags, static_cast<std::uint32_t>(tuning.diagnostic), 0};
     base.tuning = {std::clamp(tuning.fractions[0], 0.0f, 1.0f), limit, 4.0f + 26.0f * suppression,
                    3.0f + 21.0f * suppression};
@@ -1649,6 +1663,31 @@ FrameGenEngineMap ParseFrameGenEngineMap(const std::string& value) {
     return text == "separate" ? FrameGenEngineMap::kSeparate
            : text == "merged" ? FrameGenEngineMap::kMerged
                               : FrameGenEngineMap::kOff;
+}
+
+const char* ToString(FrameGenResample resample) {
+    switch (resample) {
+    case FrameGenResample::kCubic:
+        return "cubic";
+    case FrameGenResample::kCubicWide:
+        return "cubic9";
+    default:
+        return "bilinear";
+    }
+}
+
+FrameGenResampleChoice ParseFrameGenResample(const std::string& value) {
+    std::string text(value);
+    std::transform(text.begin(), text.end(), text.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    FrameGenResampleChoice choice;
+    if (text == "cubic" || text == "cubic-newest") {
+        choice.resample = FrameGenResample::kCubic;
+    } else if (text == "cubic9" || text == "cubic9-newest") {
+        choice.resample = FrameGenResample::kCubicWide;
+    }
+    choice.previous = choice.resample != FrameGenResample::kBilinear && text.find("-newest") == std::string::npos;
+    return choice;
 }
 
 const char* ToString(FrameGenEngineBridgeMode mode) {

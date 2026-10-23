@@ -1370,6 +1370,258 @@ int RunScenarios(Harness& harness) {
         harness.upload(g_swapchains[kSource][1], Cockpit(shift - half_ipd, -outer, inner));
         harness.upload(g_swapchains[right_source][0], Cockpit(half_ipd, -inner, outer));
         harness.upload(g_swapchains[right_source][1], Cockpit(shift + half_ipd, -inner, outer));
+
+        // Shimmer 3i-3k (the head-motion shimmer design's research switches,
+        // VECTORXR_FRAMEGEN_SYNTH_RESAMPLE and VECTORXR_FRAMEGEN_SYNTH_SHIFT):
+        // the eye moves a fraction of a pixel's worth of the panel's parallax
+        // past the newest frame, as head rotation moves the eyes in a session.
+        // The panel carries three bands, in linear light: fine detail (lines 4
+        // and 3 px apart and a checker of 2 px squares, smooth enough that the
+        // truth is the same content shifted), bars 8 px wide with box-filtered
+        // edges, and a bright strip along its left edge, box-filtered, over
+        // dark scenery; the rest is the noise the depth check lines the eyes
+        // up with. The parallax is 240 px per meter the eye moves (half an
+        // interval on, the panel 0.5 m away).
+        {
+            constexpr float kDark = 0.05f, kBright = 0.7f;
+            constexpr float kPanelPixels = 480.0f; // panel px per meter at the panel
+            auto to_linear = [](std::uint32_t byte) {
+                const float c = static_cast<float>(byte) / 255.0f;
+                return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
+            };
+            auto gray = [](float linear) {
+                const float c = std::clamp(linear, 0.0f, 1.0f);
+                const float encoded = c <= 0.0031308f ? 12.92f * c : 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f;
+                return Pack(encoded, encoded, encoded);
+            };
+            // Panel coordinates: u right from its left edge, v down from its
+            // top, in px at the panel; the bands' rows.
+            constexpr float kDetailTop = 20.0f, kDetailBottom = 64.0f;
+            constexpr float kBarsTop = 76.0f, kBarsBottom = 120.0f;
+            constexpr float kEdgeTop = 132.0f, kEdgeBottom = 176.0f;
+            auto row_of = [](float v) {
+                const float ty = (kPanelHalf - v / kPanelPixels) / kPanelDistance;
+                return (kTan - ty) / (2 * kTan) * kSize - 0.5f;
+            };
+            // The panel's left edge as a continuous column (pixel x spans x..x + 1).
+            auto edge_of = [](float head_x, float tan_left, float tan_right) {
+                return ((-kPanelHalf - head_x) / kPanelDistance - tan_left) / (tan_right - tan_left) * kSize;
+            };
+            auto shimmer_cockpit = [&](float head_x, float tan_left, float tan_right) {
+                Pixels pixels = Cockpit(head_x, tan_left, tan_right);
+                const float edge = edge_of(head_x, tan_left, tan_right);
+                for (std::uint32_t y = 0; y < kSize; ++y) {
+                    const float ty = kTan - 2 * kTan * (y + 0.5f) / kSize;
+                    const float v = (kPanelHalf - kPanelDistance * ty) * kPanelPixels;
+                    const bool detail = v >= kDetailTop && v < kDetailBottom;
+                    const bool bars = v >= kBarsTop && v < kBarsBottom;
+                    const bool strip = v >= kEdgeTop && v < kEdgeBottom;
+                    if (!detail && !bars && !strip) continue;
+                    for (std::uint32_t x = 0; x < kSize; ++x) {
+                        const float tx = tan_left + (tan_right - tan_left) * (x + 0.5f) / kSize;
+                        const float px = head_x + kPanelDistance * tx;
+                        const float u = (px + kPanelHalf) * kPanelPixels;
+                        const bool inside = std::abs(px) < kPanelHalf && std::abs(kPanelDistance * ty) < kPanelHalf;
+                        std::uint32_t& out = pixels[y * kSize + x];
+                        if (strip) {
+                            // Dark scenery behind the strip's rows; the strip's
+                            // edge covers its pixels by area.
+                            const float cover = std::clamp(static_cast<float>(x) + 1.0f - edge, 0.0f, 1.0f);
+                            if (u < 16.0f) {
+                                out = gray(kDark + (kBright - kDark) * cover);
+                            } else if (!inside) {
+                                out = gray(kDark);
+                            }
+                            continue;
+                        }
+                        if (!inside) continue;
+                        if (detail) {
+                            const float n = Noise(u / 12.0f + 7.0f, v / 12.0f);
+                            const float level = 0.45f + 0.14f * std::cos(6.2831853f * u / 4.0f) +
+                                                0.10f * std::cos(6.2831853f * u / 3.0f + 1.0f) +
+                                                0.08f * std::cos(6.2831853f * u / 4.0f) * std::cos(6.2831853f * v / 4.0f) +
+                                                0.16f * (n - 0.5f);
+                            out = gray(level);
+                        } else {
+                            // Bars 8 px wide every 16 px, each pixel the share
+                            // of its width they cover.
+                            float cover = 0.0f;
+                            for (int s = 0; s < 64; ++s) {
+                                const float at = u - 0.5f + (s + 0.5f) / 64.0f;
+                                cover += std::fmod(at + 1600.0f, 16.0f) < 8.0f ? 1.0f / 64.0f : 0.0f;
+                            }
+                            out = gray(kDark + (kBright - kDark) * cover);
+                        }
+                    }
+                }
+                return pixels;
+            };
+            harness.upload(g_swapchains[kSource][0], shimmer_cockpit(-half_ipd, -outer, inner));
+            harness.upload(g_swapchains[kSource][1], shimmer_cockpit(shift - half_ipd, -outer, inner));
+            harness.upload(g_swapchains[right_source][0], shimmer_cockpit(half_ipd, -inner, outer));
+            harness.upload(g_swapchains[right_source][1], shimmer_cockpit(shift + half_ipd, -inner, outer));
+            // A band's interior in the left eye's generated frame: the panel's
+            // columns 12 px in from its edges, the band's rows 2 px in.
+            auto band_rect = [&](float head_x, float top, float bottom) {
+                const XrRect2Di panel_rect = CockpitPanelRect(head_x, -outer, inner);
+                const int y0 = static_cast<int>(std::ceil(row_of(top))) + 2;
+                const int y1 = static_cast<int>(std::floor(row_of(bottom))) - 2;
+                return std::array<int, 4>{panel_rect.offset.x + 12, y0, panel_rect.offset.x + panel_rect.extent.width - 12, y1};
+            };
+            auto luma = [&](const Pixels& image, int x, int y) {
+                const std::uint32_t p = image[static_cast<std::size_t>(y) * kSize + static_cast<std::size_t>(x)];
+                return 0.2126f * to_linear(p & 255u) + 0.7152f * to_linear((p >> 8) & 255u) + 0.0722f * to_linear((p >> 16) & 255u);
+            };
+            // Fine detail: summed |Laplacian| of luma (the replay's measure).
+            auto detail_of = [&](const Pixels& image, const std::array<int, 4>& r) {
+                double sum = 0.0;
+                for (int y = r[1]; y < r[3]; ++y) {
+                    for (int x = r[0]; x < r[2]; ++x) {
+                        sum += std::abs(4.0f * luma(image, x, y) - luma(image, x - 1, y) - luma(image, x + 1, y) -
+                                        luma(image, x, y - 1) - luma(image, x, y + 1));
+                    }
+                }
+                return sum;
+            };
+            auto error_in = [&](const Pixels& a, const Pixels& b, const std::array<int, 4>& r) {
+                return MeanError(a, b, static_cast<std::uint32_t>(r[0]), static_cast<std::uint32_t>(r[1]),
+                                 static_cast<std::uint32_t>(r[2]), static_cast<std::uint32_t>(r[3]));
+            };
+            // The strip's left edge per row of its band, by the area its
+            // brightness covers in a window across it: mean and largest
+            // distance from where it should be, in px.
+            const float dark_level = to_linear(gray(kDark) & 255u), bright_level = to_linear(gray(kBright) & 255u);
+            auto edge_error = [&](const Pixels& image, float head_x) {
+                const float wanted = edge_of(head_x, -outer, inner);
+                const int x0 = static_cast<int>(std::floor(wanted)) - 8, x1 = static_cast<int>(std::floor(wanted)) + 9;
+                const int y0 = static_cast<int>(std::ceil(row_of(kEdgeTop))) + 2;
+                const int y1 = static_cast<int>(std::floor(row_of(kEdgeBottom))) - 2;
+                double sum = 0.0, largest = 0.0;
+                for (int y = y0; y < y1; ++y) {
+                    double covered = 0.0;
+                    for (int x = x0; x < x1; ++x) {
+                        covered += std::clamp((luma(image, x, y) - dark_level) / (bright_level - dark_level), 0.0f, 1.0f);
+                    }
+                    const double error = std::abs((x1 - covered) - wanted);
+                    sum += error;
+                    largest = std::max(largest, error);
+                }
+                return std::array<double, 2>{sum / std::max(1, y1 - y0), largest};
+            };
+            const float head_newest = shift - half_ipd;
+            struct ShimmerRun {
+                float pixels; // the panel's parallax
+                Pixels output;
+                Pixels truth;
+            };
+            auto shimmer_run = [&](float parallax, const char* resample, const char* shift_lookup) {
+                _putenv_s("VECTORXR_FRAMEGEN_SYNTH_RESAMPLE", resample);
+                _putenv_s("VECTORXR_FRAMEGEN_SYNTH_SHIFT", shift_lookup);
+                const float eye_shift = parallax / (0.5f * kPanelPixels);
+                const Outcome outcome = run_case(panel, 1.0f, standard, true, 0, eye_shift);
+                _putenv_s("VECTORXR_FRAMEGEN_SYNTH_RESAMPLE", "");
+                _putenv_s("VECTORXR_FRAMEGEN_SYNTH_SHIFT", "");
+                Check(outcome.used, harness.name + " shimmer: depth not used");
+                return ShimmerRun{parallax, outcome.output, shimmer_cockpit(head_newest + 0.5f * eye_shift, -outer, inner)};
+            };
+
+            // 3i. Fine detail under a sub-pixel eye shift: Catmull-Rom keeps
+            // more of it than one bilinear tap halfway between texels, without
+            // a larger error; content not moved (the panel, whose flow the
+            // cockpit's rule zeroes, with the eye still) is the same bit for
+            // bit, and moved by a whole pixel it is the newest frame shifted.
+            // The scenery's measured flow is not exactly zero: it moves by a
+            // little either way.
+            const ShimmerRun still_bilinear = shimmer_run(0.0f, "", "");
+            const ShimmerRun still_cubic = shimmer_run(0.0f, "cubic", "");
+            // The panel 12 px in from its edges (the flow there blends the
+            // scenery's, as band_rect leaves out).
+            const XrRect2Di still_panel = CockpitPanelRect(head_newest, -outer, inner);
+            const double still_difference =
+                MeanError(still_bilinear.output, still_cubic.output, static_cast<std::uint32_t>(still_panel.offset.x + 12),
+                          static_cast<std::uint32_t>(still_panel.offset.y + 12),
+                          static_cast<std::uint32_t>(still_panel.offset.x + still_panel.extent.width - 12),
+                          static_cast<std::uint32_t>(still_panel.offset.y + still_panel.extent.height - 12));
+            std::cout << harness.name << " shimmer, eye still: Catmull-Rom vs bilinear " << still_difference << " on the panel, "
+                      << MeanError(still_bilinear.output, still_cubic.output, 0, 0, kSize, kSize) << " over the view"
+                      << std::endl;
+            Check(still_difference == 0.0, harness.name + " shimmer: Catmull-Rom changed content the eye's movement leaves alone");
+            std::array<ShimmerRun, 3> bilinear{shimmer_run(0.25f, "", ""), shimmer_run(0.5f, "", ""), shimmer_run(1.0f, "", "")};
+            std::array<ShimmerRun, 3> cubic{shimmer_run(0.25f, "cubic", ""), shimmer_run(0.5f, "cubic", ""),
+                                            shimmer_run(1.0f, "cubic", "")};
+            const std::array<int, 4> detail_rect = band_rect(head_newest, kDetailTop, kDetailBottom);
+            std::array<double, 3> bilinear_ratio{}, cubic_ratio{}, bilinear_error{}, cubic_error{};
+            for (std::size_t i = 0; i < bilinear.size(); ++i) {
+                const double truth_detail = detail_of(bilinear[i].truth, detail_rect);
+                bilinear_ratio[i] = detail_of(bilinear[i].output, detail_rect) / truth_detail;
+                cubic_ratio[i] = detail_of(cubic[i].output, detail_rect) / truth_detail;
+                bilinear_error[i] = error_in(bilinear[i].output, bilinear[i].truth, detail_rect);
+                cubic_error[i] = error_in(cubic[i].output, cubic[i].truth, detail_rect);
+                std::cout << harness.name << " shimmer fine detail, " << bilinear[i].pixels << " px: detail ratio "
+                          << bilinear_ratio[i] << " bilinear, " << cubic_ratio[i] << " Catmull-Rom; error "
+                          << bilinear_error[i] << ", " << cubic_error[i] << std::endl;
+            }
+            Dump(harness.name + "-shimmer-half-bilinear", bilinear[1].output);
+            Dump(harness.name + "-shimmer-half-cubic", cubic[1].output);
+            Dump(harness.name + "-shimmer-half-truth", bilinear[1].truth);
+            Check(cubic_ratio[1] >= bilinear_ratio[1] + 0.1 && cubic_error[1] <= 1.02 * bilinear_error[1],
+                  harness.name + " shimmer: Catmull-Rom did not keep the fine detail half a pixel's shift loses");
+            Check(cubic_error[2] * 255.0 <= 1.0 && error_in(cubic[2].output, bilinear[2].output, detail_rect) * 255.0 <= 1.0,
+                  harness.name + " shimmer: a whole pixel's shift is not the newest frame shifted");
+            Dump(harness.name + "-shimmer-sources", shimmer_cockpit(head_newest, -outer, inner));
+
+            // 3j. No ringing at a step: the bars, read by Catmull-Rom between
+            // texels, stay between their dark and bright levels.
+            const std::array<int, 4> bars_rect = band_rect(head_newest, kBarsTop, kBarsBottom);
+            const std::uint32_t dark_byte = gray(kDark) & 255u, bright_byte = gray(kBright) & 255u;
+            std::size_t rung = 0, bars_pixels = 0;
+            for (const ShimmerRun* run : {&cubic[0], &cubic[1]}) {
+                for (int y = bars_rect[1]; y < bars_rect[3]; ++y) {
+                    for (int x = bars_rect[0]; x < bars_rect[2]; ++x) {
+                        const std::uint32_t byte = run->output[static_cast<std::size_t>(y) * kSize + static_cast<std::size_t>(x)] & 255u;
+                        rung += byte + 1 < dark_byte || byte > bright_byte + 1 ? 1 : 0;
+                        ++bars_pixels;
+                    }
+                }
+            }
+            std::cout << harness.name << " shimmer bars: " << rung << " of " << bars_pixels
+                      << " pixels outside the bars' levels with Catmull-Rom; error "
+                      << error_in(cubic[1].output, cubic[1].truth, bars_rect) << " vs "
+                      << error_in(bilinear[1].output, bilinear[1].truth, bars_rect) << " bilinear" << std::endl;
+            Check(rung == 0, harness.name + " shimmer: Catmull-Rom rang at a step");
+
+            // 3k. Silhouette stepping: the strip's edge against the scenery
+            // follows the eye, whose map has a texel per 2x2 pixels; read
+            // between texels on one surface (smooth) it lands within a third
+            // of a pixel at every parallax up to 2 px.
+            const std::array<ShimmerRun, 4> nearest{bilinear[1], bilinear[2], shimmer_run(1.5f, "", ""),
+                                                    shimmer_run(2.0f, "", "")};
+            const std::array<ShimmerRun, 4> smooth{shimmer_run(0.5f, "", "smooth"), shimmer_run(1.0f, "", "smooth"),
+                                                   shimmer_run(1.5f, "", "smooth"), shimmer_run(2.0f, "", "smooth")};
+            const std::array<double, 2> still_edge = edge_error(still_bilinear.output, head_newest);
+            double nearest_largest = 0.0, smooth_largest = 0.0;
+            for (std::size_t i = 0; i < nearest.size(); ++i) {
+                const float head = head_newest + nearest[i].pixels / kPanelPixels;
+                const std::array<double, 2> a = edge_error(nearest[i].output, head);
+                const std::array<double, 2> b = edge_error(smooth[i].output, head);
+                nearest_largest = std::max(nearest_largest, a[1]);
+                smooth_largest = std::max(smooth_largest, b[1]);
+                std::cout << harness.name << " shimmer silhouette, " << nearest[i].pixels << " px: edge error mean "
+                          << a[0] << " max " << a[1] << " nearest texel, mean " << b[0] << " max " << b[1] << " smooth"
+                          << std::endl;
+            }
+            Dump(harness.name + "-shimmer-edge-nearest", nearest[1].output);
+            Dump(harness.name + "-shimmer-edge-smooth", smooth[1].output);
+            std::cout << harness.name << " shimmer silhouette, head still: edge error mean " << still_edge[0] << " max "
+                      << still_edge[1] << std::endl;
+            Check(still_edge[1] < 0.05, harness.name + " shimmer: the strip's edge is measured wrongly");
+            Check(smooth_largest <= 0.35 || smooth_largest <= nearest_largest + 0.02,
+                  harness.name + " shimmer: the smooth eye-shift lookup moved the silhouette further off");
+            harness.upload(g_swapchains[kSource][0], Cockpit(-half_ipd, -outer, inner));
+            harness.upload(g_swapchains[kSource][1], Cockpit(shift - half_ipd, -outer, inner));
+            harness.upload(g_swapchains[right_source][0], Cockpit(half_ipd, -inner, outer));
+            harness.upload(g_swapchains[right_source][1], Cockpit(shift + half_ipd, -inner, outer));
+        }
     }
 
     // 3i. Engine motion vectors, stage 3 (Direct3D 12): Observe judges a

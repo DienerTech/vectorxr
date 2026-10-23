@@ -1671,6 +1671,54 @@ void TestFrameGenPlan() {
         Expect(same, "flow_view_fine leaves every constant as it was without the Flow view");
         tuning.diagnostic = depthxr::FrameGenDiagnosticView::kFlow;
     }
+    // The head-motion shimmer research: Catmull-Rom resampling and the smooth
+    // eye-shift lookup set their flags (the smooth lookup with depth only),
+    // and off they leave every constant as it was.
+    {
+        Expect((synth.constants.options[1] & (depthxr::kFrameGenFlagResampleCubic | depthxr::kFrameGenFlagResampleWide |
+                                              depthxr::kFrameGenFlagResamplePrevious |
+                                              depthxr::kFrameGenFlagShiftSmooth)) == 0,
+               "Synthesis resamples bilinearly and reads the eye-shift map per texel by default");
+        const auto flags_of = [&](const depthxr::FrameGenTuning& with) {
+            return depthxr::BuildFrameGenViewPlan(request, with).dispatches.back().constants.options[1];
+        };
+        const std::uint32_t base_flags = flags_of(tuning);
+        depthxr::FrameGenTuning cubic = tuning;
+        const depthxr::FrameGenResampleChoice newest = depthxr::ParseFrameGenResample("cubic-newest");
+        cubic.resample = newest.resample;
+        cubic.resample_previous = newest.previous;
+        Expect(flags_of(cubic) == (base_flags | depthxr::kFrameGenFlagResampleCubic),
+               "cubic-newest reads the newest frame by Catmull-Rom alone");
+        const depthxr::FrameGenResampleChoice wide = depthxr::ParseFrameGenResample("CUBIC9");
+        cubic.resample = wide.resample;
+        cubic.resample_previous = wide.previous;
+        Expect(flags_of(cubic) == (base_flags | depthxr::kFrameGenFlagResampleCubic | depthxr::kFrameGenFlagResampleWide |
+                                   depthxr::kFrameGenFlagResamplePrevious),
+               "cubic9 reads both real frames by the whole Catmull-Rom filter");
+        Expect(depthxr::ParseFrameGenResample("cubic").previous &&
+                   depthxr::ParseFrameGenResample("lanczos").resample == depthxr::FrameGenResample::kBilinear &&
+                   !depthxr::ParseFrameGenResample("bilinear").previous,
+               "VECTORXR_FRAMEGEN_SYNTH_RESAMPLE's values parse as named");
+        depthxr::FrameGenTuning smooth = tuning;
+        smooth.shift_smooth = true;
+        Expect(flags_of(smooth) == base_flags, "The smooth eye-shift lookup needs depth");
+        request.depth = true;
+        const std::uint32_t depth_flags = flags_of(tuning);
+        Expect(flags_of(smooth) == (depth_flags | depthxr::kFrameGenFlagShiftSmooth),
+               "The smooth eye-shift lookup is flagged with depth");
+        depthxr::FrameGenTuning off = tuning;
+        off.resample = depthxr::FrameGenResample::kBilinear;
+        off.resample_previous = true; // ignored while bilinear
+        const auto with = depthxr::BuildFrameGenViewPlan(request, off);
+        const auto plain = depthxr::BuildFrameGenViewPlan(request, tuning);
+        bool same = with.dispatches.size() == plain.dispatches.size();
+        for (std::size_t i = 0; same && i < with.dispatches.size(); ++i) {
+            same = std::memcmp(&with.dispatches[i].constants, &plain.dispatches[i].constants,
+                               sizeof(depthxr::FrameGenConstants)) == 0;
+        }
+        Expect(same, "Bilinear resampling leaves every constant as it was");
+        request.depth = false;
+    }
 
     // Depth: the trust scores, their surface vote, the stereo depth-scale
     // vote (with this frame's stereo evidence) in two stages, then the resolve.

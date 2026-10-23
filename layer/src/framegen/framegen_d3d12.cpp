@@ -742,6 +742,16 @@ class D3D12FrameGen final : public FrameGenGpu {
         if (const std::optional<std::string> splat = ReadResearchSwitch("VECTORXR_FRAMEGEN_DEPTH_SPLAT")) {
             depth_splat_ = *splat == "1";
         }
+        // Research (the head-motion shimmer design): the real frames read by
+        // Catmull-Rom (FrameGenTuning::resample; VECTORXR_FRAMEGEN_SYNTH_RESAMPLE
+        // cubic, cubic-newest, cubic9 or cubic9-newest) and the eye-shift map
+        // read between its texels (FrameGenTuning::shift_smooth;
+        // VECTORXR_FRAMEGEN_SYNTH_SHIFT=smooth). Both may come from the
+        // research file too.
+        if (const std::optional<std::string> resample = ReadResearchSwitch("VECTORXR_FRAMEGEN_SYNTH_RESAMPLE")) {
+            resample_ = ParseFrameGenResample(*resample);
+        }
+        shift_smooth_ = ReadResearchSwitch("VECTORXR_FRAMEGEN_SYNTH_SHIFT") == "smooth";
         // Interpolation's occlusion handling (VECTORXR_FRAMEGEN_OCCLUSION=0:
         // off) and, for research, its cross-fade fallback
         // (VECTORXR_FRAMEGEN_CROSSFADE=1).
@@ -2968,6 +2978,11 @@ class D3D12FrameGen final : public FrameGenGpu {
         effective_tuning.cross_fade = tuning.cross_fade || cross_fade_;
         effective_tuning.depth_match = tuning.depth_match || depth_match_;
         effective_tuning.depth_splat = tuning.depth_splat || depth_splat_;
+        if (resample_.resample != FrameGenResample::kBilinear) {
+            effective_tuning.resample = resample_.resample;
+            effective_tuning.resample_previous = resample_.previous;
+        }
+        effective_tuning.shift_smooth = tuning.shift_smooth || shift_smooth_;
         effective_tuning.hardware_flow = tuning.hardware_flow && HardwareFlowReady();
         // Engine motion vectors (stage 3): their evidence is taken with the
         // convention the validator has under test, or locked.
@@ -6826,6 +6841,8 @@ class D3D12FrameGen final : public FrameGenGpu {
     bool cross_fade_{false};                        // FrameGenTuning::cross_fade forced (research)
     bool depth_match_{false};                       // FrameGenTuning::depth_match forced (research)
     bool depth_splat_{false};                       // FrameGenTuning::depth_splat forced (research)
+    FrameGenResampleChoice resample_;               // FrameGenTuning::resample forced (research)
+    bool shift_smooth_{false};                      // FrameGenTuning::shift_smooth forced (research)
     std::array<FrameSlot, kFramesInFlight> slots_;
     ComPtr<ID3D12GraphicsCommandList> capture_commands_;
     std::array<CaptureSlot, kCaptureSlots> capture_slots_; // views x frames in flight, color and depth

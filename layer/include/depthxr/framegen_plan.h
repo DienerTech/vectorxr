@@ -329,12 +329,28 @@ inline constexpr std::uint32_t kFrameGenFlagEngineVisibility = 32768u;
 // chosen vector carries content the newest frame does not show moving that
 // way (FrameGenTuning::engine_bidir).
 inline constexpr std::uint32_t kFrameGenFlagEngineBidir = 65536u;
+// Research (FrameGenTuning::resample, the head-motion shimmer design's fix
+// A). Synthesis reads the newest frame's colour by Catmull-Rom, clamped to
+// the four texels around the sample (no ringing), instead of one bilinear
+// tap: five bilinear taps, or with kFrameGenFlagResampleWide nine (the whole
+// 4x4 filter); with kFrameGenFlagResamplePrevious the previous frame's too.
+// A sample on a texel's centre, or halfway between four (a coarse pixel's
+// centre), keeps its one tap; still frames, CandidateError and the luma
+// pyramid stay bilinear.
+inline constexpr std::uint32_t kFrameGenFlagResampleCubic = 1u << 17;
+inline constexpr std::uint32_t kFrameGenFlagResampleWide = 1u << 18;
+inline constexpr std::uint32_t kFrameGenFlagResamplePrevious = 1u << 19;
+// Research (FrameGenTuning::shift_smooth, fix B1). Synthesis with depth reads
+// the eye-shift map between its texels: the four around the pixel that lie
+// on the surface of the texel under it, blended bilinearly, instead of that
+// texel alone (offsets in steps of two pixels).
+inline constexpr std::uint32_t kFrameGenFlagShiftSmooth = 1u << 21;
 // Research (FrameGenTuning::flow_view_fine). Synthesis with the Flow view:
 // each pixel tinted by its motion in pixels, in full from 2 pixels, instead
 // of by its share of the view (tens of pixels before the tint shows): the
 // sub-pixel motion that moves content between real and generated frames.
-// Bits 17-22 are kept for the resampling, matched sharpness, smooth shift
-// and rotor research of the head-motion shimmer design.
+// Bits 20 and 22 are kept for the matched sharpness and rotor research of
+// the head-motion shimmer design.
 inline constexpr std::uint32_t kFrameGenFlagFlowFine = 1u << 23;
 // World motion: samples per side of the fit's grid, and its iterations.
 inline constexpr std::uint32_t kFrameGenWorldGrid = 128u;
@@ -641,6 +657,26 @@ enum class FrameGenEngineMap : std::uint8_t {
 const char* ToString(FrameGenEngineMap map); // "off", "separate", "merged"
 // "separate" or "merged" (any case); anything else is off.
 FrameGenEngineMap ParseFrameGenEngineMap(const std::string& value);
+// Research (VECTORXR_FRAMEGEN_SYNTH_RESAMPLE, the head-motion shimmer
+// design's fix A): how synthesis reads the real frames' colour where it moves
+// content by a fraction of a pixel. One bilinear tap (the default) keeps
+// least of their fine detail halfway between texels; Catmull-Rom keeps more,
+// with five bilinear taps (the 4x4 filter's corners dropped) or nine (all
+// of it, kCubicWide).
+enum class FrameGenResample : std::uint8_t {
+    kBilinear,
+    kCubic,
+    kCubicWide,
+};
+const char* ToString(FrameGenResample resample); // "bilinear", "cubic", "cubic9"
+struct FrameGenResampleChoice {
+    FrameGenResample resample{FrameGenResample::kBilinear};
+    // The previous real frame too (interpolating), not the newest alone.
+    bool previous{false};
+};
+// "cubic" or "cubic9" (any case) for both real frames, "cubic-newest" or
+// "cubic9-newest" for the newest alone; anything else is bilinear.
+FrameGenResampleChoice ParseFrameGenResample(const std::string& value);
 // Stage 9 (VECTORXR_FRAMEGEN_ENGINE_BRIDGE): a Vulkan game's motion vectors
 // through the Vulkan bridge, whose runtime images hold them only after the
 // bridge's copy. Released, the default: read at each release of them, after
@@ -675,6 +711,15 @@ struct FrameGenTuning {
     // Research: the Flow view tints sub-pixel motion too, in full at 2
     // pixels (kFrameGenFlagFlowFine; VECTORXR_FRAMEGEN_SYNTH_FLOW_VIEW=fine).
     bool flow_view_fine{false};
+    // Research (the head-motion shimmer design), set by backends from their
+    // switches: how synthesis reads the newest real frame's colour, and with
+    // resample_previous the previous frame's too (kFrameGenFlagResample*;
+    // VECTORXR_FRAMEGEN_SYNTH_RESAMPLE); and the eye-shift map read between
+    // its texels on one surface (kFrameGenFlagShiftSmooth;
+    // VECTORXR_FRAMEGEN_SYNTH_SHIFT=smooth).
+    FrameGenResample resample{FrameGenResample::kBilinear};
+    bool resample_previous{false};
+    bool shift_smooth{false};
     int artifact_suppression{50};
     int motion_limit_percent{10};
     // One entry per generated frame (`generated` of them). Interpolation:
