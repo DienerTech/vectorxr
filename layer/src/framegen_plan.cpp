@@ -151,7 +151,13 @@ FrameGenConstants BaseConstants(const FrameGenViewRequest& request, const FrameG
     if (tuning.shift_smooth && request.depth) {
         flags |= kFrameGenFlagShiftSmooth;
     }
-    base.options = {kFrameGenSearchRadius, flags, static_cast<std::uint32_t>(tuning.diagnostic), 0};
+    // Research: the Interpolate blend sharpened on near content (with depth),
+    // its amount beside the diagnostic view.
+    std::uint32_t view = static_cast<std::uint32_t>(tuning.diagnostic);
+    if (tuning.sharpen > 0.0f && mode == FrameGenSynthesisMode::kInterpolate && request.depth) {
+        view |= FrameGenHalf(std::min(tuning.sharpen, 2.0f)) << kFrameGenSharpenShift;
+    }
+    base.options = {kFrameGenSearchRadius, flags, view, 0};
     base.tuning = {std::clamp(tuning.fractions[0], 0.0f, 1.0f), limit, 4.0f + 26.0f * suppression,
                    3.0f + 21.0f * suppression};
     return base;
@@ -1760,6 +1766,15 @@ FrameGenResampleChoice ParseFrameGenResample(const std::string& value) {
     choice.previous = choice.resample != FrameGenResample::kBilinear && text.find("-newest") == std::string::npos;
     choice.near_only = choice.near_only && choice.resample != FrameGenResample::kBilinear;
     return choice;
+}
+
+float ParseFrameGenSharpen(const std::string& value) {
+    char* end = nullptr;
+    const float amount = std::strtof(value.c_str(), &end);
+    if (value.empty() || end != value.c_str() + value.size() || !std::isfinite(amount) || amount <= 0.0f) {
+        return 0.0f;
+    }
+    return std::min(amount, 2.0f);
 }
 
 const char* ToString(FrameGenEyePredictor predictor) {

@@ -1949,6 +1949,47 @@ int RunScenarios(Harness& harness) {
                   harness.name + " shimmer: the near gate did not read the near panel by Catmull-Rom");
             Check(gate_scenery_bilinear == 0 && gate_scenery_cubic > 0,
                   harness.name + " shimmer: the near gate did not read the far scenery bilinearly");
+
+            // 3m. The Interpolate blend sharpened (VECTORXR_FRAMEGEN_SYNTH_SHARPEN,
+            // on top of cubic-near), halfway between the real frames, the eye
+            // half a pixel of the panel's parallax back from the newest frame:
+            // the panel keeps more of its fine detail, the bars stay between
+            // their dark and bright levels (the clamp to both reads'
+            // footprints), and the scenery, far, is left as it was.
+            auto interpolated = [&](const char* sharpen) {
+                tuning.mode = FrameGenSynthesisMode::kInterpolate;
+                _putenv_s("VECTORXR_FRAMEGEN_SYNTH_SHARPEN", sharpen);
+                const ShimmerRun run = shimmer_run(0.5f, "cubic-near", "");
+                _putenv_s("VECTORXR_FRAMEGEN_SYNTH_SHARPEN", "");
+                tuning.mode = FrameGenSynthesisMode::kExtrapolate;
+                return run.output;
+            };
+            const Pixels blend_plain = interpolated("");
+            const Pixels blend_sharp = interpolated("0.5");
+            const Pixels blend_truth = shimmer_cockpit(head_newest - 0.5f * 0.5f / (0.5f * kPanelPixels), -outer, inner);
+            const double blend_truth_detail = detail_of(blend_truth, detail_rect);
+            const double plain_ratio = detail_of(blend_plain, detail_rect) / blend_truth_detail;
+            const double sharp_ratio = detail_of(blend_sharp, detail_rect) / blend_truth_detail;
+            std::size_t sharp_rung = 0;
+            for (int y = bars_rect[1]; y < bars_rect[3]; ++y) {
+                for (int x = bars_rect[0]; x < bars_rect[2]; ++x) {
+                    const std::uint32_t byte = blend_sharp[static_cast<std::size_t>(y) * kSize + static_cast<std::size_t>(x)] & 255u;
+                    sharp_rung += byte + 1 < dark_byte || byte > bright_byte + 1 ? 1 : 0;
+                }
+            }
+            const std::size_t sharp_scenery = differing(blend_sharp, blend_plain, false);
+            const std::size_t sharp_panel = differing(blend_sharp, blend_plain, true);
+            std::cout << harness.name << " shimmer blend, interpolated: detail ratio " << plain_ratio << ", sharpened "
+                      << sharp_ratio << "; error " << error_in(blend_plain, blend_truth, detail_rect) << ", "
+                      << error_in(blend_sharp, blend_truth, detail_rect) << "; bars outside their levels " << sharp_rung
+                      << "; pixels changed on the panel " << sharp_panel << ", on the scenery " << sharp_scenery
+                      << std::endl;
+            Dump(harness.name + "-shimmer-blend-plain", blend_plain);
+            Dump(harness.name + "-shimmer-blend-sharp", blend_sharp);
+            Check(sharp_ratio > plain_ratio && sharp_panel > 0,
+                  harness.name + " shimmer: sharpening did not keep more of the blend's fine detail");
+            Check(sharp_rung == 0, harness.name + " shimmer: the sharpened blend rang at a step");
+            Check(sharp_scenery == 0, harness.name + " shimmer: sharpening changed the far scenery");
             harness.upload(g_swapchains[kSource][0], Cockpit(-half_ipd, -outer, inner));
             harness.upload(g_swapchains[kSource][1], Cockpit(shift - half_ipd, -outer, inner));
             harness.upload(g_swapchains[right_source][0], Cockpit(half_ipd, -inner, outer));

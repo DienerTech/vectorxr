@@ -139,6 +139,10 @@ cbuffer FrameGenConstantBuffer : register(b0) {
 // With FG_FLAG_RESAMPLE_CUBIC: only where depth is in use and the content is
 // near (FG_RESAMPLE_NEAR, NearContent); bilinear elsewhere.
 #define FG_FLAG_RESAMPLE_NEAR 67108864u
+// Research (the head-motion shimmer design): synthesis, interpolating with
+// depth, sharpens the blend of the two real frames on near content by the
+// amount in options.z's high half (half float bits; the low half is the
+// diagnostic view), see Synthesize.
 // Research (fix B1): synthesis with depth reads the eye-shift map between its
 // texels on the surface the texel under the pixel holds (SmoothShift).
 #define FG_FLAG_SHIFT_SMOOTH 2097152u
@@ -1547,6 +1551,23 @@ float DepthAt(float2 uv) {
     return DepthNearest(g_depth, uv);
 }
 
+// The range of the four texels around uv in `image` (a bilinear tap's
+// footprint, the resampling's clamp).
+void FootprintRange(Texture2D<float4> image, float2 uv, out float4 lo, out float4 hi) {
+    uint width, height;
+    image.GetDimensions(width, height);
+    const int2 last = int2(width, height) - 1;
+    const int2 b = int2(floor(uv * float2(width, height) - 0.5));
+    const int2 i0 = clamp(b, int2(0, 0), last);
+    const int2 i1 = clamp(b + 1, int2(0, 0), last);
+    const float4 a = image.Load(int3(i0, 0));
+    const float4 c = image.Load(int3(i1.x, i0.y, 0));
+    const float4 d = image.Load(int3(i0.x, i1.y, 0));
+    const float4 e = image.Load(int3(i1, 0));
+    lo = min(min(a, c), min(d, e));
+    hi = max(max(a, c), max(d, e));
+}
+
 // Research (FG_FLAG_RESAMPLE_*, the head-motion shimmer design's fix A): a
 // real frame's colour at uv by Catmull-Rom instead of one bilinear tap.
 // Content moved by a fraction of a pixel (the eye's movement with depth,
@@ -1560,7 +1581,8 @@ float DepthAt(float2 uv) {
 // halfway between four (a coarse pixel's centre under variable-rate shading,
 // content not moved) keeps the bilinear tap, the 2x2 box the coarse pixel
 // stands for: frames the head's movement leaves alone are as before.
-float4 SampleResampled(Texture2D<float4> image, float2 uv) {
+// `lo`, `hi`: the range of the four texels around the sample (the clamp's).
+float4 SampleResampled(Texture2D<float4> image, float2 uv, out float4 lo, out float4 hi) {
     uint width, height;
     image.GetDimensions(width, height);
     const float2 size = float2(width, height);
@@ -1572,8 +1594,10 @@ float4 SampleResampled(Texture2D<float4> image, float2 uv) {
     [branch]
     if (all(abs(f - round(f)) < 1.0 / 512.0)) {
         result = image.Load(int3(clamp(int2(round(p)), int2(0, 0), last), 0));
+        FootprintRange(image, uv, lo, hi);
     } else if (all(abs(f - 0.5) < 1.0 / 512.0)) {
         result = image.SampleLevel(g_linear, uv, 0.0);
+        FootprintRange(image, uv, lo, hi);
     } else {
         // The weights of the texels at b - 1 .. b + 2; the middle two are
         // read with one bilinear tap between them.
@@ -1604,7 +1628,9 @@ float4 SampleResampled(Texture2D<float4> image, float2 uv) {
         const float4 c = image.Load(int3(i1.x, i0.y, 0));
         const float4 d = image.Load(int3(i0.x, i1.y, 0));
         const float4 e = image.Load(int3(i1, 0));
-        result = clamp(sum / weight, min(min(a, c), min(d, e)), max(max(a, c), max(d, e)));
+        lo = min(min(a, c), min(d, e));
+        hi = max(max(a, c), max(d, e));
+        result = clamp(sum / weight, lo, hi);
     }
     return result;
 }
@@ -1631,16 +1657,34 @@ bool NearContent(float2 uv, float2 source) {
 }
 
 // A real frame's colour at uv: one bilinear tap, or with `cubic`
-// SampleResampled's.
-float4 SampleColor(Texture2D<float4> image, float2 uv, bool cubic) {
+// SampleResampled's; `lo`, `hi`: the range of its footprint (FootprintRange,
+// shared with the resampling's clamp; not read, it costs nothing).
+float4 SampleColor(Texture2D<float4> image, float2 uv, bool cubic, out float4 lo, out float4 hi) {
     float4 result;
     [branch]
     if (cubic) {
-        result = SampleResampled(image, uv);
+        result = SampleResampled(image, uv, lo, hi);
     } else {
         result = image.SampleLevel(g_linear, uv, 0.0);
+        FootprintRange(image, uv, lo, hi);
     }
     return result;
+}
+
+float4 SampleColor(Texture2D<float4> image, float2 uv, bool cubic) {
+    float4 lo, hi;
+    return SampleColor(image, uv, cubic, lo, hi);
+}
+
+// Research (the blend's sharpening, options.z's high half): the blur a blend
+// of two reads adds, as a 3x3 tent around uv (four bilinear taps half a
+// texel off diagonally).
+float4 SampleTent(Texture2D<float4> image, float2 uv) {
+    uint width, height;
+    image.GetDimensions(width, height);
+    const float2 h = 0.5 / float2(width, height);
+    return 0.25 * (image.SampleLevel(g_linear, uv - h, 0.0) + image.SampleLevel(g_linear, uv + float2(h.x, -h.y), 0.0) +
+                   image.SampleLevel(g_linear, uv + float2(-h.x, h.y), 0.0) + image.SampleLevel(g_linear, uv + h, 0.0));
 }
 
 // Depth for front-to-back order: unknown or disproved depth is far.
@@ -2068,7 +2112,8 @@ float4 Synthesize(float2 position, float fraction) {
         cubic = NearContent(uv, source);
     }
     const bool cubic_previous = cubic && (g.options.y & FG_FLAG_RESAMPLE_PREVIOUS) != 0u;
-    const float4 current = SampleColor(g_current, source, cubic);
+    float4 current_lo, current_hi;
+    const float4 current = SampleColor(g_current, source, cubic, current_lo, current_hi);
     float4 result = current;
     float photometric_confidence = 1.0;
     if (occlusion == 1) {
@@ -2093,10 +2138,30 @@ float4 Synthesize(float2 position, float fraction) {
     } else if (!extrapolate && !still) {
         float2 previous_uv;
         if (MapToPrevious(source - confidence * chosen.xy, DepthAt(source), previous_uv)) {
-            const float4 previous = SampleColor(g_previous, previous_uv, cubic_previous);
+            float4 previous_lo, previous_hi;
+            const float4 previous = SampleColor(g_previous, previous_uv, cubic_previous, previous_lo, previous_hi);
             const float difference = MaxComponent(abs(Perceptual(previous.rgb) - Perceptual(current.rgb)));
             photometric_confidence = saturate(1.0 - max(difference - 0.03, 0.0) * g.tuning.w);
             result = lerp(current, previous, (1.0 - fraction) * photometric_confidence);
+            // Research (VECTORXR_FRAMEGEN_SYNTH_SHARPEN: the amount in
+            // options.z's high half, set interpolating with depth): the blend
+            // of two registrations, each a fraction of a pixel off, is softer
+            // than either real frame, most where the previous frame weighs
+            // most. On near content (NearContent) the blend gets back what its
+            // own blur took, the two reads' tents blended alike, by the amount
+            // times the previous frame's share; clamped to the range of both
+            // reads' footprints so edges do not ring.
+            const float sharpen = f16tof32(g.options.z >> 16) * (1.0 - fraction) * photometric_confidence;
+            [branch]
+            if (sharpen > 0.0) {
+                [branch]
+                if (NearContent(uv, source)) {
+                    const float4 blurred = lerp(SampleTent(g_current, source), SampleTent(g_previous, previous_uv),
+                                                (1.0 - fraction) * photometric_confidence);
+                    result = clamp(result + sharpen * (result - blurred), min(current_lo, previous_lo),
+                                   max(current_hi, previous_hi));
+                }
+            }
             if ((g.options.y & FG_FLAG_CROSSFADE) != 0u) {
                 // Research: untrusted motion fades between the two real
                 // frames where they are, instead of showing the newest one.
@@ -2116,7 +2181,7 @@ float4 Synthesize(float2 position, float fraction) {
     }
     const float4 flow_here = chosen;
 
-    const uint view = g.options.z;
+    const uint view = g.options.z & 0xffffu;
     if (view == FG_VIEW_FLOW) {
         const float2 v = flow_here.xy * aspect;
         float magnitude = saturate(length(v) * 20.0);

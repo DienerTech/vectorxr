@@ -759,6 +759,12 @@ class D3D12FrameGen final : public FrameGenGpu {
             resample_ = ParseFrameGenResample(*resample);
         }
         shift_smooth_ = ReadResearchSwitch("VECTORXR_FRAMEGEN_SYNTH_SHIFT") == "smooth";
+        // Research: the Interpolate blend sharpened on near content
+        // (FrameGenTuning::sharpen; VECTORXR_FRAMEGEN_SYNTH_SHARPEN=<amount>,
+        // the research file too).
+        if (const std::optional<std::string> sharpen = ReadResearchSwitch("VECTORXR_FRAMEGEN_SYNTH_SHARPEN")) {
+            sharpen_ = ParseFrameGenSharpen(*sharpen);
+        }
         // Research (hypothesis E): the filter's prior for content with nothing
         // to track (FrameGenTuning::flow_prior; VECTORXR_FRAMEGEN_FLOW_PRIOR
         // sky, far, sky-still or far-still, optionally :<share>,<margin>,<per
@@ -3013,6 +3019,9 @@ class D3D12FrameGen final : public FrameGenGpu {
             effective_tuning.resample_near = resample_.near_only;
         }
         effective_tuning.shift_smooth = tuning.shift_smooth || shift_smooth_;
+        if (sharpen_ > 0.0f) {
+            effective_tuning.sharpen = sharpen_;
+        }
         if (flow_prior_.enabled) {
             effective_tuning.flow_prior = flow_prior_;
         }
@@ -6882,6 +6891,7 @@ class D3D12FrameGen final : public FrameGenGpu {
     bool depth_splat_{false};                       // FrameGenTuning::depth_splat forced (research)
     FrameGenResampleChoice resample_;               // FrameGenTuning::resample forced (research)
     bool shift_smooth_{false};                      // FrameGenTuning::shift_smooth forced (research)
+    float sharpen_{0.0f};                           // FrameGenTuning::sharpen forced (research)
     FrameGenFlowPrior flow_prior_;                  // FrameGenTuning::flow_prior forced (research)
     std::array<FrameSlot, kFramesInFlight> slots_;
     ComPtr<ID3D12GraphicsCommandList> capture_commands_;

@@ -358,6 +358,13 @@ inline constexpr std::uint32_t kFrameGenFlagResamplePrevious = 1u << 19;
 // depth the other eye disproved by its magnitude; bilinear elsewhere. Set
 // with depth only: without it synthesis stays bilinear.
 inline constexpr std::uint32_t kFrameGenFlagResampleNear = 1u << 26;
+// Research (FrameGenTuning::sharpen): synthesis, interpolating with depth,
+// sharpens the blend of the two real frames on near content (as
+// kFrameGenFlagResampleNear's) by the amount in options[2]'s high half (half
+// float bits, the low half the diagnostic view): amount x (1 - fraction) x
+// the blend's photometric confidence x (blend - the blend of the two reads'
+// 3x3 tents), clamped to both reads' footprints.
+inline constexpr std::uint32_t kFrameGenSharpenShift = 16u;
 // Research (FrameGenTuning::shift_smooth, fix B1). Synthesis with depth reads
 // the eye-shift map between its texels: the four around the pixel that lie
 // on the surface of the texel under it, blended bilinearly, instead of that
@@ -721,6 +728,10 @@ struct FrameGenResampleChoice {
 // "cubic9-newest" for the newest alone, each with "-near" for near content
 // only ("cubic-near", "cubic-newest-near"); anything else is bilinear.
 FrameGenResampleChoice ParseFrameGenResample(const std::string& value);
+// Research (VECTORXR_FRAMEGEN_SYNTH_SHARPEN, the head-motion shimmer
+// design): the Interpolate blend's sharpening amount, a number (at most 2);
+// anything else, or a negative one, is 0 (off).
+float ParseFrameGenSharpen(const std::string& value);
 // Research (VECTORXR_FRAMEGEN_FLOW_PRIOR, the head-motion shimmer
 // diagnosis's hypothesis E): the filter's prior for content with nothing to
 // track (kFrameGenFlagFlowPrior). Shader flow on flat sky matches any vector
@@ -844,6 +855,10 @@ struct FrameGenTuning {
     FrameGenResample resample{FrameGenResample::kBilinear};
     bool resample_previous{false};
     bool resample_near{false};
+    // Research (VECTORXR_FRAMEGEN_SYNTH_SHARPEN), set by backends: the
+    // Interpolate blend sharpened on near content, with depth, by this
+    // amount (kFrameGenSharpenShift); 0 is off.
+    float sharpen{0.0f};
     bool shift_smooth{false};
     // Research (hypothesis E), set by backends from
     // VECTORXR_FRAMEGEN_FLOW_PRIOR: the filter keeps content with nothing to

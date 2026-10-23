@@ -1823,6 +1823,53 @@ void TestFrameGenPlan() {
                    (depth_flags | depthxr::kFrameGenFlagResampleCubic | depthxr::kFrameGenFlagResampleNear),
                "cubic-newest-near reads the newest frame by Catmull-Rom alone where the content is near");
         Expect((depth_flags & depthxr::kFrameGenFlagResampleNear) == 0, "Synthesis is not gated near by default");
+        // The Interpolate blend's sharpening: its amount (half float bits)
+        // beside the diagnostic view, interpolating with depth only; off,
+        // every constant as it was.
+        Expect(depthxr::ParseFrameGenSharpen("0.2") == 0.2f && depthxr::ParseFrameGenSharpen("") == 0.0f &&
+                   depthxr::ParseFrameGenSharpen("sharp") == 0.0f && depthxr::ParseFrameGenSharpen("0.2x") == 0.0f &&
+                   depthxr::ParseFrameGenSharpen("-0.2") == 0.0f && depthxr::ParseFrameGenSharpen("5") == 2.0f &&
+                   depthxr::ParseFrameGenSharpen("nan") == 0.0f,
+               "VECTORXR_FRAMEGEN_SYNTH_SHARPEN's values parse as named");
+        {
+            // The last synthesis dispatch's options.z (the plan may add
+            // analysis after it, interpolating).
+            const auto view_of = [&](const depthxr::FrameGenTuning& with) {
+                std::uint32_t view = 0xffffffffu;
+                for (const depthxr::FrameGenDispatch& dispatch : depthxr::BuildFrameGenViewPlan(request, with).dispatches) {
+                    if (dispatch.pass == depthxr::FrameGenPass::kSynthesizeUnorm8 ||
+                        dispatch.pass == depthxr::FrameGenPass::kSynthesizeFloat16) {
+                        view = dispatch.constants.options[2];
+                    }
+                }
+                return view;
+            };
+            depthxr::FrameGenTuning interpolating = tuning;
+            interpolating.mode = depthxr::FrameGenSynthesisMode::kInterpolate;
+            depthxr::FrameGenTuning sharp = interpolating;
+            sharp.sharpen = 0.2f;
+            const std::uint32_t plain_view = view_of(interpolating);
+            Expect(plain_view != 0xffffffffu && plain_view >> depthxr::kFrameGenSharpenShift == 0,
+                   "Synthesis does not sharpen by default");
+            Expect(view_of(sharp) == (plain_view | (0x3266u << depthxr::kFrameGenSharpenShift)),
+                   "The sharpening amount (0.2 as half float bits) sits beside the diagnostic view, with depth");
+            sharp.mode = depthxr::FrameGenSynthesisMode::kExtrapolate;
+            Expect(view_of(sharp) == view_of(tuning), "Extrapolation does not sharpen");
+            sharp.mode = depthxr::FrameGenSynthesisMode::kInterpolate;
+            request.depth = false;
+            Expect(view_of(sharp) == view_of(interpolating), "Synthesis without depth does not sharpen");
+            request.depth = true;
+            depthxr::FrameGenTuning off = interpolating;
+            off.sharpen = 0.0f;
+            const auto with = depthxr::BuildFrameGenViewPlan(request, off);
+            const auto plain = depthxr::BuildFrameGenViewPlan(request, interpolating);
+            bool same = with.dispatches.size() == plain.dispatches.size();
+            for (std::size_t i = 0; same && i < with.dispatches.size(); ++i) {
+                same = std::memcmp(&with.dispatches[i].constants, &plain.dispatches[i].constants,
+                                   sizeof(depthxr::FrameGenConstants)) == 0;
+            }
+            Expect(same, "No sharpening leaves every constant as it was");
+        }
         depthxr::FrameGenTuning off = tuning;
         off.resample = depthxr::FrameGenResample::kBilinear;
         off.resample_previous = true; // ignored while bilinear
