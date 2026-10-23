@@ -5457,9 +5457,21 @@ int RunProfile(Harness& harness) {
 // shifts, the luma pair's residual, the flow by band, the eye-shift map
 // against the CPU's.
 // With FG_REPLAY_CROP the crops include the aligned truth and four times
-// the difference from it.
+// the difference from it. Each frame written and the resolved depth read
+// with it are hashed ("frame k view v hash", and all of them in "Output
+// hash"): runs that must agree compare those.
 bool g_replay = false;
 std::string g_replay_directory, g_replay_output;
+
+// FNV-1a over 32-bit words (the replay's "Output hash": two runs of one exe
+// on a capture must write the same frames bit for bit).
+inline constexpr std::uint64_t kReplayHashBasis = 14695981039346656037ull;
+std::uint64_t ReplayHash(std::uint64_t hash, const std::uint32_t* words, std::size_t count) {
+    for (std::size_t i = 0; i < count; ++i) {
+        hash = (hash ^ words[i]) * 1099511628211ull;
+    }
+    return hash;
+}
 
 // A captured frame's motion vectors (Capture-FrameGen.ps1 -Motion; older
 // captures have none): of a view's images dumped with it, the one its
@@ -7696,7 +7708,11 @@ int RunReplay(Harness& harness) {
     std::vector<double> view_bad(view_count, 0.0);
     std::vector<std::size_t> view_evaluated(view_count, 0);
     std::size_t evaluated = 0;
-    auto evaluate = [&](std::size_t k, std::size_t view_frame, std::size_t truth_frame, const Pixels& hold,
+    // Every generated frame read back, and the resolved depth read with it,
+    // hashed in the order evaluated ("Output hash").
+    std::uint64_t output_hash = kReplayHashBasis, depth_hash = kReplayHashBasis;
+    std::size_t hashed_frames = 0, hashed_depths = 0;
+    auto evaluate =[&](std::size_t k, std::size_t view_frame, std::size_t truth_frame, const Pixels& hold,
                         const FrameGenExecuteResult& result, float fraction,
                         const std::vector<std::array<float, 3>>& shifts, float time,
                         const std::vector<std::size_t>& source_frames) {
@@ -7773,6 +7789,18 @@ int RunReplay(Harness& harness) {
                 trusted_channels != 1 || trusted_extent.width != sources.back()->half_width ||
                 trusted_extent.height != sources.back()->half_height) {
                 trusted.clear();
+            }
+            {
+                const std::uint64_t frame_hash = ReplayHash(kReplayHashBasis, generated.data(), generated.size());
+                std::vector<std::uint32_t> bits(trusted.size());
+                if (!trusted.empty()) std::memcpy(bits.data(), trusted.data(), trusted.size() * sizeof(float));
+                const std::uint64_t trusted_hash = ReplayHash(kReplayHashBasis, bits.data(), bits.size());
+                output_hash = ReplayHash(output_hash, generated.data(), generated.size());
+                depth_hash = ReplayHash(depth_hash, bits.data(), bits.size());
+                hashed_frames += 1;
+                hashed_depths += trusted.empty() ? 0 : 1;
+                std::printf("frame %zu view %zu hash: generated %016llx, depth %016llx\n", k, v,
+                            static_cast<unsigned long long>(frame_hash), static_cast<unsigned long long>(trusted_hash));
             }
             std::vector<bool> aligned_valid;
             ReplayMasked masked;
@@ -8064,6 +8092,8 @@ int RunReplay(Harness& harness) {
                         static_cast<double>(gpu->DepthStatus().scale));
         }
     }
+    std::printf("Output hash: %zu frames written %016llx, %zu depth reads %016llx\n", hashed_frames,
+                static_cast<unsigned long long>(output_hash), hashed_depths, static_cast<unsigned long long>(depth_hash));
     if (evaluated) {
         std::printf("Mean over %zu views: cockpit %.4f (%.2f%% bad), outside %.4f (%.2f%% bad), cockpit edges %.4f,"
                     " sharpness %.3f, vs newest %.3f\n",
