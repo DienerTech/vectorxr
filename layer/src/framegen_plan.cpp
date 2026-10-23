@@ -101,6 +101,7 @@ FrameGenConstants BaseConstants(const FrameGenViewRequest& request, const FrameG
     // The w components carry the newest view's position in the previous
     // view's space (meters), used with depth: a point at newest-view depth z
     // along direction d lies at R d + t / z, up to scale, in the previous view.
+    // (The flow prior's filter takes it without depth too: BuildFrameGenViewPlan.)
     const std::array<float, 3> translation =
         request.depth ? RelativeTranslation(request.newest, request.previous) : std::array<float, 3>{0.0f, 0.0f, 0.0f};
     base.rot0 = {rotation[0][0], rotation[0][1], rotation[0][2], translation[0]};
@@ -910,6 +911,17 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
         filter.constants.tuning[1] = tuning.flow_prior.share;
         filter.constants.tuning[2] = tuning.flow_prior.margin;
         filter.constants.tuning[3] = tuning.flow_prior.per_pixel;
+        // Its allowance is the parallax the head's movement gives content
+        // without depth, so it needs the head's translation without depth
+        // too, where every cell is in scope and the base constants carry
+        // none: the filter takes it nowhere else without kFrameGenFlagDepth
+        // (MapToPrevious).
+        if (!request.depth) {
+            const std::array<float, 3> translation = RelativeTranslation(request.newest, request.previous);
+            filter.constants.rot0[3] = translation[0];
+            filter.constants.rot1[3] = translation[1];
+            filter.constants.rot2[3] = translation[2];
+        }
     }
     const bool world = request.depth && request.world_motion;
     // Stage 4: the world's motion from the application's movement where the

@@ -1104,7 +1104,8 @@ bool FlowPrior(float4 flow, float2 uv, float depth, float2 pixels, out float2 pr
     // the cabin without depth): the head's movement between the frames
     // moves it by up to its parallax at FG_PRIOR_NEAR, and a vector within
     // that of the prediction is kept as measured (a flat wing taken still
-    // inside its moving edge doubled the edge).
+    // inside its moving edge doubled the edge). The head's translation is
+    // rot*.w, with or without depth: the plan hands this pass it either way.
     const float parallax = length(float3(g.rot0.w, g.rot1.w, g.rot2.w)) / FG_PRIOR_NEAR * pixels.x /
                            abs(WorldTangentScale().x);
     const float beyond = length((flow.xy - predicted) * pixels) - parallax;

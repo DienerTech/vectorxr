@@ -1901,6 +1901,42 @@ void TestFrameGenPlan() {
             request.app_delta = false;
             request.delta_orientation = {0.0f, 0.0f, 0.0f, 1.0f};
         }
+        // Its allowance is the parallax the head's movement gives content
+        // without depth: without depth, where it holds every cell and the
+        // base constants carry no translation, the filter alone takes the
+        // head's; with depth it keeps the base constants' own.
+        {
+            request.newest.position = {0.01f, 0.0f, 0.004f};
+            const auto moved = filters_of(prior);
+            const auto unmoved = filters_of(plain);
+            Expect(moved.size() == 1 && moved[0].constants.rot0[3] == 0.01f && moved[0].constants.rot1[3] == 0.0f &&
+                       moved[0].constants.rot2[3] == 0.004f && unmoved[0].constants.rot0[3] == 0.0f &&
+                       unmoved[0].constants.rot2[3] == 0.0f,
+                   "Without depth the flow prior's filter takes the head's translation");
+            const auto one = depthxr::BuildFrameGenViewPlan(request, prior);
+            const auto other = depthxr::BuildFrameGenViewPlan(request, plain);
+            bool same = one.dispatches.size() == other.dispatches.size();
+            for (std::size_t i = 0; same && i < one.dispatches.size(); ++i) {
+                same = one.dispatches[i].pass == FrameGenPass::kFilterPrior ||
+                       std::memcmp(&one.dispatches[i].constants, &other.dispatches[i].constants,
+                                   sizeof(depthxr::FrameGenConstants)) == 0;
+            }
+            Expect(same, "Without depth no other dispatch takes the head's translation for the flow prior");
+            const auto moved_covers = filters_of(cover);
+            Expect(moved_covers.size() == 2 && moved_covers[0].constants.rot0[3] == 0.01f &&
+                       moved_covers[1].constants.rot0[3] == 0.01f && moved_covers[1].constants.rot2[3] == 0.004f,
+                   "Without depth Interpolate's cover filter takes the head's translation too");
+            request.depth = true;
+            const auto depth_moved = filters_of(prior);
+            const auto depth_unmoved = filters_of(plain);
+            Expect(depth_moved[0].constants.rot0 == depth_unmoved[0].constants.rot0 &&
+                       depth_moved[0].constants.rot1 == depth_unmoved[0].constants.rot1 &&
+                       depth_moved[0].constants.rot2 == depth_unmoved[0].constants.rot2 &&
+                       depth_unmoved[0].constants.rot0[3] == 0.01f,
+                   "With depth the flow prior's filter keeps the base constants' translation");
+            request.depth = false;
+            request.newest.position = {0.0f, 0.0f, 0.0f};
+        }
         // With depth and world motion, interpolating: the world's motion is
         // fitted for the prior's prediction alone (the filter moves no world
         // content by it); without the prior Interpolate fits none, and the

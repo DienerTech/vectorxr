@@ -546,6 +546,36 @@ int RunScenarios(Harness& harness) {
             Check(std::abs(after.second - before.second) < 0.5f && after.second > 15.0f,
                   harness.name + " flow prior: the square keeps its motion");
         }
+        // Its allowance, the parallax the head's movement gives content
+        // without depth half a meter away, comes from the head's translation
+        // without depth too: moved 1 cm across the pair (4.8 px here), the
+        // background's residual flow lies within it and is kept as measured,
+        // and the square (18 px) is judged by its match as before. Without
+        // the prior the translation changes nothing without depth.
+        const auto moved = [&] {
+            gpu->ResetHistory();
+            run(0, true, 0, 0);
+            std::vector<FrameGenViewSubmission> views{Submission(1, harness.format, output_format, true, 0, 0)};
+            views[0].request.newest.position = {0.01f, 0.0f, 0.0f};
+            Check(gpu->Execute(views, tuning, result, error), harness.name + " execute: " + error);
+            return harness.readback(g_swapchains[kOutput][0]);
+        };
+        const Pixels moved_plain = moved();
+        tuning.flow_prior = ParseFrameGenFlowPrior("sky");
+        const Pixels moved_held = moved();
+        const auto moved_after = readable && filtered(flow, cells) ? census(flow, cells) : std::pair<std::size_t, float>{};
+        tuning.flow_prior = {};
+        const double moved_difference = MeanError(moved_held, plain, 0, 0, kSize, kSize);
+        std::cout << harness.name << " flow prior, the head moved 1 cm: background cells moving " << moved_after.first
+                  << ", the square's median " << moved_after.second << " px, difference " << moved_difference << '\n';
+        Check(moved_plain == plain, harness.name + " flow prior: without it the head's translation changes nothing");
+        Check(moved_difference < 0.0005,
+              harness.name + " flow prior: within the head's parallax the frame is as without the prior");
+        if (readable) {
+            Check(moved_after.first == before.first && std::abs(moved_after.second - before.second) < 0.5f,
+                  harness.name + " flow prior: within the head's parallax the background keeps its residual flow (" +
+                      std::to_string(moved_after.first) + " of " + std::to_string(before.first) + " cells)");
+        }
     }
 
     // 2b. A 3x multiplier: one flow field feeds two generated frames.
