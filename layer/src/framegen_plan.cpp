@@ -134,14 +134,18 @@ FrameGenConstants BaseConstants(const FrameGenViewRequest& request, const FrameG
         flags |= kFrameGenFlagFlowFine;
     }
     // Research (the head-motion shimmer design): the real frames read by
-    // Catmull-Rom, and the eye-shift map (with depth) between its texels.
-    if (tuning.resample != FrameGenResample::kBilinear) {
+    // Catmull-Rom (near content only: with depth, else not at all), and the
+    // eye-shift map (with depth) between its texels.
+    if (tuning.resample != FrameGenResample::kBilinear && (!tuning.resample_near || request.depth)) {
         flags |= kFrameGenFlagResampleCubic;
         if (tuning.resample == FrameGenResample::kCubicWide) {
             flags |= kFrameGenFlagResampleWide;
         }
         if (tuning.resample_previous) {
             flags |= kFrameGenFlagResamplePrevious;
+        }
+        if (tuning.resample_near) {
+            flags |= kFrameGenFlagResampleNear;
         }
     }
     if (tuning.shift_smooth && request.depth) {
@@ -1743,12 +1747,18 @@ FrameGenResampleChoice ParseFrameGenResample(const std::string& value) {
     std::transform(text.begin(), text.end(), text.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     FrameGenResampleChoice choice;
+    constexpr std::string_view kNear = "-near";
+    if (text.size() > kNear.size() && text.compare(text.size() - kNear.size(), kNear.size(), kNear) == 0) {
+        text.resize(text.size() - kNear.size());
+        choice.near_only = true;
+    }
     if (text == "cubic" || text == "cubic-newest") {
         choice.resample = FrameGenResample::kCubic;
     } else if (text == "cubic9" || text == "cubic9-newest") {
         choice.resample = FrameGenResample::kCubicWide;
     }
     choice.previous = choice.resample != FrameGenResample::kBilinear && text.find("-newest") == std::string::npos;
+    choice.near_only = choice.near_only && choice.resample != FrameGenResample::kBilinear;
     return choice;
 }
 

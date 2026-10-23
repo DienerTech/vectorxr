@@ -1774,6 +1774,40 @@ void TestFrameGenPlan() {
                    depthxr::ParseFrameGenResample("lanczos").resample == depthxr::FrameGenResample::kBilinear &&
                    !depthxr::ParseFrameGenResample("bilinear").previous,
                "VECTORXR_FRAMEGEN_SYNTH_RESAMPLE's values parse as named");
+        // Near content only (-near, any value): parsed off the end, and
+        // flagged with depth alone; without depth synthesis stays bilinear,
+        // every constant as it was.
+        const depthxr::FrameGenResampleChoice near_both = depthxr::ParseFrameGenResample("Cubic-Near");
+        const depthxr::FrameGenResampleChoice near_newest = depthxr::ParseFrameGenResample("cubic-newest-near");
+        const depthxr::FrameGenResampleChoice near_wide = depthxr::ParseFrameGenResample("cubic9-newest-near");
+        Expect(near_both.resample == depthxr::FrameGenResample::kCubic && near_both.previous && near_both.near_only &&
+                   near_newest.resample == depthxr::FrameGenResample::kCubic && !near_newest.previous &&
+                   near_newest.near_only && near_wide.resample == depthxr::FrameGenResample::kCubicWide &&
+                   !near_wide.previous && near_wide.near_only && !depthxr::ParseFrameGenResample("cubic").near_only,
+               "VECTORXR_FRAMEGEN_SYNTH_RESAMPLE's -near values parse as named");
+        Expect(depthxr::ParseFrameGenResample("near").resample == depthxr::FrameGenResample::kBilinear &&
+                   !depthxr::ParseFrameGenResample("near").near_only &&
+                   depthxr::ParseFrameGenResample("-near").resample == depthxr::FrameGenResample::kBilinear &&
+                   depthxr::ParseFrameGenResample("cubic-nearest").resample == depthxr::FrameGenResample::kBilinear &&
+                   !depthxr::ParseFrameGenResample("bilinear-near").near_only,
+               "VECTORXR_FRAMEGEN_SYNTH_RESAMPLE's -near needs a resampling it gates");
+        auto gated_by = [&](const depthxr::FrameGenResampleChoice& choice) {
+            depthxr::FrameGenTuning gated = tuning;
+            gated.resample = choice.resample;
+            gated.resample_previous = choice.previous;
+            gated.resample_near = choice.near_only;
+            return gated;
+        };
+        {
+            const auto with = depthxr::BuildFrameGenViewPlan(request, gated_by(near_both));
+            const auto plain = depthxr::BuildFrameGenViewPlan(request, tuning);
+            bool same = with.dispatches.size() == plain.dispatches.size();
+            for (std::size_t i = 0; same && i < with.dispatches.size(); ++i) {
+                same = std::memcmp(&with.dispatches[i].constants, &plain.dispatches[i].constants,
+                                   sizeof(depthxr::FrameGenConstants)) == 0;
+            }
+            Expect(same, "cubic-near without depth leaves every constant as it was");
+        }
         depthxr::FrameGenTuning smooth = tuning;
         smooth.shift_smooth = true;
         Expect(flags_of(smooth) == base_flags, "The smooth eye-shift lookup needs depth");
@@ -1781,6 +1815,14 @@ void TestFrameGenPlan() {
         const std::uint32_t depth_flags = flags_of(tuning);
         Expect(flags_of(smooth) == (depth_flags | depthxr::kFrameGenFlagShiftSmooth),
                "The smooth eye-shift lookup is flagged with depth");
+        Expect(flags_of(gated_by(near_both)) == (depth_flags | depthxr::kFrameGenFlagResampleCubic |
+                                                 depthxr::kFrameGenFlagResamplePrevious |
+                                                 depthxr::kFrameGenFlagResampleNear),
+               "cubic-near reads both real frames by Catmull-Rom where the content is near, with depth");
+        Expect(flags_of(gated_by(near_newest)) ==
+                   (depth_flags | depthxr::kFrameGenFlagResampleCubic | depthxr::kFrameGenFlagResampleNear),
+               "cubic-newest-near reads the newest frame by Catmull-Rom alone where the content is near");
+        Expect((depth_flags & depthxr::kFrameGenFlagResampleNear) == 0, "Synthesis is not gated near by default");
         depthxr::FrameGenTuning off = tuning;
         off.resample = depthxr::FrameGenResample::kBilinear;
         off.resample_previous = true; // ignored while bilinear

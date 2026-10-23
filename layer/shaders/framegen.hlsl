@@ -136,6 +136,9 @@ cbuffer FrameGenConstantBuffer : register(b0) {
 #define FG_FLAG_RESAMPLE_CUBIC 131072u
 #define FG_FLAG_RESAMPLE_WIDE 262144u
 #define FG_FLAG_RESAMPLE_PREVIOUS 524288u
+// With FG_FLAG_RESAMPLE_CUBIC: only where depth is in use and the content is
+// near (FG_RESAMPLE_NEAR, NearContent); bilinear elsewhere.
+#define FG_FLAG_RESAMPLE_NEAR 67108864u
 // Research (fix B1): synthesis with depth reads the eye-shift map between its
 // texels on the surface the texel under the pixel holds (SmoothShift).
 #define FG_FLAG_SHIFT_SMOOTH 2097152u
@@ -1606,6 +1609,27 @@ float4 SampleResampled(Texture2D<float4> image, float2 uv) {
     return result;
 }
 
+// Research (FG_FLAG_RESAMPLE_NEAR): content nearer than this is the cockpit
+// (FG_RIGID_DEPTH's band), where the resampling keeps fine detail; farther
+// out the flow's sub-pixel noise and edges a fraction of a pixel off cost
+// more bad pixels than the detail gains.
+#define FG_RESAMPLE_NEAR 4.0
+
+// The content at the pixel (`uv`, in the newest view) or at the newest read
+// (`source`) is near, with depth in use (FG_FLAG_RESAMPLE_NEAR). Depth the
+// other eye disproved (negative) counts by its magnitude: it is still near
+// content, not unknown.
+bool NearContent(float2 uv, float2 source) {
+    bool result = false;
+    [branch]
+    if ((g.options.y & FG_FLAG_DEPTH) != 0u) {
+        const float here = abs(DepthAt(uv));
+        const float read = abs(DepthAt(source));
+        result = (here > 0.0 && here < FG_RESAMPLE_NEAR) || (read > 0.0 && read < FG_RESAMPLE_NEAR);
+    }
+    return result;
+}
+
 // A real frame's colour at uv: one bilinear tap, or with `cubic`
 // SampleResampled's.
 float4 SampleColor(Texture2D<float4> image, float2 uv, bool cubic) {
@@ -2036,8 +2060,13 @@ float4 Synthesize(float2 position, float fraction) {
 
     const float2 source = uv + confidence * step * chosen.xy;
     // FG_FLAG_RESAMPLE_* (research): the real frames' colour by Catmull-Rom;
-    // a still frame is a copy and keeps the bilinear tap.
-    const bool cubic = !still && (g.options.y & FG_FLAG_RESAMPLE_CUBIC) != 0u;
+    // a still frame is a copy and keeps the bilinear tap. With
+    // FG_FLAG_RESAMPLE_NEAR only near content, every read of the pixel alike.
+    bool cubic = !still && (g.options.y & FG_FLAG_RESAMPLE_CUBIC) != 0u;
+    [branch]
+    if (cubic && (g.options.y & FG_FLAG_RESAMPLE_NEAR) != 0u) {
+        cubic = NearContent(uv, source);
+    }
     const bool cubic_previous = cubic && (g.options.y & FG_FLAG_RESAMPLE_PREVIOUS) != 0u;
     const float4 current = SampleColor(g_current, source, cubic);
     float4 result = current;

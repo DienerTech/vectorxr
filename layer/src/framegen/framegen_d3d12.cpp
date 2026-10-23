@@ -750,7 +750,8 @@ class D3D12FrameGen final : public FrameGenGpu {
         }
         // Research (the head-motion shimmer design): the real frames read by
         // Catmull-Rom (FrameGenTuning::resample; VECTORXR_FRAMEGEN_SYNTH_RESAMPLE
-        // cubic, cubic-newest, cubic9 or cubic9-newest) and the eye-shift map
+        // cubic, cubic-newest, cubic9 or cubic9-newest, each with -near for
+        // near content only, FrameGenTuning::resample_near) and the eye-shift map
         // read between its texels (FrameGenTuning::shift_smooth;
         // VECTORXR_FRAMEGEN_SYNTH_SHIFT=smooth). Both may come from the
         // research file too.
@@ -3009,6 +3010,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         if (resample_.resample != FrameGenResample::kBilinear) {
             effective_tuning.resample = resample_.resample;
             effective_tuning.resample_previous = resample_.previous;
+            effective_tuning.resample_near = resample_.near_only;
         }
         effective_tuning.shift_smooth = tuning.shift_smooth || shift_smooth_;
         if (flow_prior_.enabled) {

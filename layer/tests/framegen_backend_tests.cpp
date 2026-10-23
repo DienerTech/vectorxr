@@ -1909,6 +1909,46 @@ int RunScenarios(Harness& harness) {
             Check(still_edge[1] < 0.05, harness.name + " shimmer: the strip's edge is measured wrongly");
             Check(smooth_largest <= 0.35 || smooth_largest <= nearest_largest + 0.02,
                   harness.name + " shimmer: the smooth eye-shift lookup moved the silhouette further off");
+
+            // 3l. The near gate (VECTORXR_FRAMEGEN_SYNTH_RESAMPLE=cubic-near):
+            // the panel, 0.5 m away, is read by Catmull-Rom exactly as
+            // ungated, and the scenery, 100 m away, by the bilinear tap
+            // exactly as with the switch off, where ungated Catmull-Rom
+            // changes it (its measured flow moves it by a little). The panel
+            // 12 px in from its edges; the scenery 32 px clear of them (the
+            // gate goes by the pixel and the newest read, either near).
+            const ShimmerRun near_half = shimmer_run(0.5f, "cubic-near", "");
+            const XrRect2Di gate_panel = CockpitPanelRect(head_newest, -outer, inner);
+            const XrRect2Di gate_clear = grow(gate_panel, 32);
+            auto differing = [&](const Pixels& a, const Pixels& b, bool on_panel) {
+                std::size_t count = 0;
+                for (int y = 0; y < static_cast<int>(kSize); ++y) {
+                    for (int x = 0; x < static_cast<int>(kSize); ++x) {
+                        const bool inside = x >= gate_panel.offset.x + 12 &&
+                                            x < gate_panel.offset.x + gate_panel.extent.width - 12 &&
+                                            y >= gate_panel.offset.y + 12 &&
+                                            y < gate_panel.offset.y + gate_panel.extent.height - 12;
+                        const bool clear = x < gate_clear.offset.x || x >= gate_clear.offset.x + gate_clear.extent.width ||
+                                           y < gate_clear.offset.y || y >= gate_clear.offset.y + gate_clear.extent.height;
+                        const std::size_t i = static_cast<std::size_t>(y) * kSize + static_cast<std::size_t>(x);
+                        count += (on_panel ? inside : clear) && a[i] != b[i] ? 1 : 0;
+                    }
+                }
+                return count;
+            };
+            const std::size_t gate_panel_cubic = differing(near_half.output, cubic[1].output, true);
+            const std::size_t gate_panel_bilinear = differing(near_half.output, bilinear[1].output, true);
+            const std::size_t gate_scenery_bilinear = differing(near_half.output, bilinear[1].output, false);
+            const std::size_t gate_scenery_cubic = differing(cubic[1].output, bilinear[1].output, false);
+            std::cout << harness.name << " shimmer near gate, 0.5 px: panel pixels differing from Catmull-Rom "
+                      << gate_panel_cubic << ", from bilinear " << gate_panel_bilinear
+                      << "; scenery pixels differing from bilinear " << gate_scenery_bilinear << " (ungated Catmull-Rom "
+                      << gate_scenery_cubic << ")" << std::endl;
+            Dump(harness.name + "-shimmer-half-cubic-near", near_half.output);
+            Check(gate_panel_cubic == 0 && gate_panel_bilinear > 0,
+                  harness.name + " shimmer: the near gate did not read the near panel by Catmull-Rom");
+            Check(gate_scenery_bilinear == 0 && gate_scenery_cubic > 0,
+                  harness.name + " shimmer: the near gate did not read the far scenery bilinearly");
             harness.upload(g_swapchains[kSource][0], Cockpit(-half_ipd, -outer, inner));
             harness.upload(g_swapchains[kSource][1], Cockpit(shift - half_ipd, -outer, inner));
             harness.upload(g_swapchains[right_source][0], Cockpit(half_ipd, -inner, outer));

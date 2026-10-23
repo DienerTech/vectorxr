@@ -352,6 +352,12 @@ inline constexpr std::uint32_t kFrameGenFlagEngineBidir = 65536u;
 inline constexpr std::uint32_t kFrameGenFlagResampleCubic = 1u << 17;
 inline constexpr std::uint32_t kFrameGenFlagResampleWide = 1u << 18;
 inline constexpr std::uint32_t kFrameGenFlagResamplePrevious = 1u << 19;
+// With kFrameGenFlagResampleCubic (FrameGenTuning::resample_near): only where
+// depth is in use and the content is nearer than 4 m (the cockpit, as
+// FG_RIGID_DEPTH) at the pixel or where synthesis reads the newest frame,
+// depth the other eye disproved by its magnitude; bilinear elsewhere. Set
+// with depth only: without it synthesis stays bilinear.
+inline constexpr std::uint32_t kFrameGenFlagResampleNear = 1u << 26;
 // Research (FrameGenTuning::shift_smooth, fix B1). Synthesis with depth reads
 // the eye-shift map between its texels: the four around the pixel that lie
 // on the surface of the texel under it, blended bilinearly, instead of that
@@ -706,9 +712,14 @@ struct FrameGenResampleChoice {
     FrameGenResample resample{FrameGenResample::kBilinear};
     // The previous real frame too (interpolating), not the newest alone.
     bool previous{false};
+    // Near content only (kFrameGenFlagResampleNear): the cockpit, where the
+    // detail shows, bilinear past it, where the flow's sub-pixel noise and
+    // edges landing a fraction of a pixel off cost more than detail gains.
+    bool near_only{false};
 };
 // "cubic" or "cubic9" (any case) for both real frames, "cubic-newest" or
-// "cubic9-newest" for the newest alone; anything else is bilinear.
+// "cubic9-newest" for the newest alone, each with "-near" for near content
+// only ("cubic-near", "cubic-newest-near"); anything else is bilinear.
 FrameGenResampleChoice ParseFrameGenResample(const std::string& value);
 // Research (VECTORXR_FRAMEGEN_FLOW_PRIOR, the head-motion shimmer
 // diagnosis's hypothesis E): the filter's prior for content with nothing to
@@ -828,9 +839,11 @@ struct FrameGenTuning {
     // resample_previous the previous frame's too (kFrameGenFlagResample*;
     // VECTORXR_FRAMEGEN_SYNTH_RESAMPLE); and the eye-shift map read between
     // its texels on one surface (kFrameGenFlagShiftSmooth;
-    // VECTORXR_FRAMEGEN_SYNTH_SHIFT=smooth).
+    // VECTORXR_FRAMEGEN_SYNTH_SHIFT=smooth). resample_near: the resampling
+    // only for near content, with depth (kFrameGenFlagResampleNear).
     FrameGenResample resample{FrameGenResample::kBilinear};
     bool resample_previous{false};
+    bool resample_near{false};
     bool shift_smooth{false};
     // Research (hypothesis E), set by backends from
     // VECTORXR_FRAMEGEN_FLOW_PRIOR: the filter keeps content with nothing to
