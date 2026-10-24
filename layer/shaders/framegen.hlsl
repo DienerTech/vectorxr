@@ -3139,6 +3139,21 @@ FG_BIND(4) FG_FORMAT("r32f") RWTexture2D<float> g_depth : register(u0);
 // their surface's inverse depth.
 #define FG_RESOLVE_SCALE_SURFACE 0.1
 
+#if defined(FG_PASS_TRUST_RESOLVE)
+// Texels per thread each way (kFrameGenTrustResolveSpan), a group's 8 apart:
+// a thread a texel, its thread groups' launches cost most of the pass.
+#define FG_RESOLVE_SPAN 4
+// The stereo scale votes a thread group's texels blend (Keep): its tiles
+// and two around them each way, one per thread, none outside the grid.
+#define FG_RESOLVE_VOTES (8 * FG_RESOLVE_SPAN / FG_TRUST_TILE + 4)
+#if FG_RESOLVE_VOTES * FG_RESOLVE_VOTES != 64
+#error "TRUST_RESOLVE loads a scale vote per thread"
+#endif
+groupshared float4 g_group_votes[FG_RESOLVE_VOTES * FG_RESOLVE_VOTES];
+// Whether one of them rescales (Keep keeps every depth as read otherwise).
+groupshared uint g_group_scaled;
+#endif
+
 // A texel keeps its depth: corrected where the accepted stereo scale votes
 // (FG_PASS_DEPTH_SCALE_VOTE, options.x FG_RESOLVE_SCALE) of its surface line
 // the eyes up better at another scale of its depth. The tiles around blend
@@ -3150,8 +3165,13 @@ float Keep(uint2 texel, float depth) {
     if ((g.options.x & FG_RESOLVE_SCALE) == 0u) {
         return depth;
     }
+#if defined(FG_PASS_TRUST_RESOLVE)
+    // The thread group's first vote (g_group_votes).
+    const int2 first = int2(texel / (8u * FG_RESOLVE_SPAN)) * (FG_RESOLVE_VOTES - 4) - 2;
+#else
     uint width, height;
     g_scale_votes.GetDimensions(width, height);
+#endif
     // The four tiles whose centres surround the texel, and the ring
     // around them: a tent over tile centres two tiles wide.
     const float2 position = (float2(texel) + 0.5) / float(FG_TRUST_TILE) - 0.5;
@@ -3165,10 +3185,15 @@ float Keep(uint2 texel, float depth) {
     for (int i = 0; i < 16; ++i) {
         const int2 offset = int2(i % 4, i / 4) - 1;
         const int2 tile = corner + offset;
+#if defined(FG_PASS_TRUST_RESOLVE)
+        const int2 slot = tile - first;
+        const float4 vote = g_group_votes[slot.y * FG_RESOLVE_VOTES + slot.x];
+#else
         if (any(tile < 0) || tile.x >= int(width) || tile.y >= int(height)) {
             continue;
         }
         const float4 vote = g_scale_votes.Load(int3(tile, 0));
+#endif
         if (!(vote.x > 0.0) || abs(vote.y - inverse) > FG_RESOLVE_SCALE_SURFACE * inverse) {
             continue;
         }
@@ -3224,50 +3249,79 @@ void Decided(uint2 texel, float depth) {
     g_decided[texel] = abs(depth);
 }
 
-// Every texel's decision that needs no neighbour (see above), and u1: the
-// decided texels' depth for FG_PASS_TRUST_SURFACE, the others' depth negated
-// (left open: the surface test decides them).
-[numthreads(8, 8, 1)]
-void CSMain(uint3 id : SV_DispatchThreadID) {
-    if (any(id.xy >= g.size.xy)) {
-        return;
-    }
-    const float depth = g_depth[id.xy];
-    const float score = g_scores.Load(int3(id.xy, 0)).r;
+// A texel's decision that needs no neighbour (see above), and u1: the
+// decided texel's depth for FG_PASS_TRUST_SURFACE, else its depth negated
+// (left open: the surface test decides it). scaled: a vote of the thread
+// group's rescales (else Keep keeps the depth as read).
+void Resolve(uint2 at, bool scaled) {
+    const float depth = g_depth[at];
+    const float score = g_scores.Load(int3(at, 0)).r;
     if (!(depth > 0.0) || depth >= FG_FAR_DEPTH) {
-        Decided(id.xy, depth);
+        Decided(at, depth);
         return;
     }
-    if (score > FG_TRUST_THRESHOLD) {
-        Decided(id.xy, Keep(id.xy, depth));
-        return;
-    }
-    const float4 vote = g_votes.Load(int3(id.xy / uint(FG_TRUST_TILE), 0));
-    const float inverse = 1.0 / depth;
-    const float disproved_votes = abs(vote.z - inverse) <= FG_VOTE_DEPTH * inverse ? vote.x : 0.0;
-    const float confirmed_votes = abs(vote.w - inverse) <= FG_VOTE_DEPTH * inverse ? vote.y : 0.0;
-    const float side = float((2 * FG_VOTE_RADIUS + 1) * FG_TRUST_TILE);
-    const bool surface_disproved =
-        disproved_votes >= FG_VOTE_AREA * side * side && disproved_votes >= confirmed_votes;
-    if (score >= -FG_TRUST_THRESHOLD) {
-        if (surface_disproved) {
-            g_depth[id.xy] = -depth;
-            Decided(id.xy, depth);
-        } else {
-            Decided(id.xy, Keep(id.xy, depth));
+    bool keep = score > FG_TRUST_THRESHOLD;
+    if (!keep) {
+        const float4 vote = g_votes.Load(int3(at / uint(FG_TRUST_TILE), 0));
+        const float inverse = 1.0 / depth;
+        const float disproved_votes = abs(vote.z - inverse) <= FG_VOTE_DEPTH * inverse ? vote.x : 0.0;
+        const float confirmed_votes = abs(vote.w - inverse) <= FG_VOTE_DEPTH * inverse ? vote.y : 0.0;
+        const float side = float((2 * FG_VOTE_RADIUS + 1) * FG_TRUST_TILE);
+        const bool surface_disproved =
+            disproved_votes >= FG_VOTE_AREA * side * side && disproved_votes >= confirmed_votes;
+        if (score >= -FG_TRUST_THRESHOLD) {
+            keep = !surface_disproved;
+        } else if (confirmed_votes >= FG_VOTE_CONFIRMED * max(disproved_votes, 1.0)) {
+            keep = true;
+        } else if (!surface_disproved) {
+            g_decided[at] = -depth;
+            return;
         }
+    }
+    if (!keep) {
+        g_depth[at] = -depth;
+        Decided(at, depth);
         return;
     }
-    if (confirmed_votes >= FG_VOTE_CONFIRMED * max(disproved_votes, 1.0)) {
-        Decided(id.xy, Keep(id.xy, depth));
-        return;
+    float kept = depth;
+    [branch] if (scaled) {
+        kept = Keep(at, depth);
     }
-    if (surface_disproved) {
-        g_depth[id.xy] = -depth;
-        Decided(id.xy, depth);
-        return;
+    Decided(at, kept);
+}
+
+// Every texel's decision (Resolve), FG_RESOLVE_SPAN each way per thread: one
+// each, the pass cost its thread groups' launches (as FG_PASS_TRUST_SURFACE).
+[numthreads(8, 8, 1)]
+void CSMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint index : SV_GroupIndex) {
+    // The scale votes the group's texels blend, read once for all of them.
+    if (index == 0u) {
+        g_group_scaled = 0u;
     }
-    g_decided[id.xy] = -depth;
+    GroupMemoryBarrierWithGroupSync();
+    float4 vote = float4(0.0, 0.0, 0.0, 0.0);
+    [branch] if ((g.options.x & FG_RESOLVE_SCALE) != 0u) {
+        uint width, height;
+        g_scale_votes.GetDimensions(width, height);
+        const int2 tile = int2(group.xy) * (FG_RESOLVE_VOTES - 4) - 2 + int2(thread.xy);
+        if (all(tile >= 0) && tile.x < int(width) && tile.y < int(height)) {
+            vote = g_scale_votes.Load(int3(tile, 0));
+        }
+        if (vote.x > 0.0 && vote.x != 1.0) {
+            InterlockedOr(g_group_scaled, 1u);
+        }
+    }
+    g_group_votes[index] = vote;
+    GroupMemoryBarrierWithGroupSync();
+    const bool scaled = g_group_scaled != 0u;
+    const uint2 origin = group.xy * (8u * FG_RESOLVE_SPAN) + thread.xy;
+    [loop]
+    for (uint k = 0; k < FG_RESOLVE_SPAN * FG_RESOLVE_SPAN; ++k) {
+        const uint2 at = origin + 8u * uint2(k % FG_RESOLVE_SPAN, k / FG_RESOLVE_SPAN);
+        if (all(at < g.size.xy)) {
+            Resolve(at, scaled);
+        }
+    }
 }
 #endif
 

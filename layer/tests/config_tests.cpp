@@ -2010,6 +2010,16 @@ void TestFrameGenPlan() {
                    resolve.inputs[2].kind == (stereo ? FrameGenTextureKind::kDepthScaleVotes : FrameGenTextureKind::kNone) &&
                    resolve.constants.options[0] == (stereo ? depthxr::kFrameGenResolveScale : 0u),
                "The resolve should read the trust vote, and the stereo scale vote only with this frame's stereo evidence");
+        // A thread per span of texels each way, a thread group's scale votes
+        // (its tiles and two around them each way) one a thread.
+        const std::uint32_t resolve_span = depthxr::kFrameGenTrustResolveSpan;
+        const std::uint32_t group_votes =
+            depthxr::kFrameGenThreadGroupSize * resolve_span / depthxr::kFrameGenTrustTile + 4u;
+        Expect(resolve.width == (half.width + resolve_span - 1) / resolve_span &&
+                   resolve.height == (half.height + resolve_span - 1) / resolve_span &&
+                   resolve.constants.size[0] == half.width && resolve.constants.size[1] == half.height &&
+                   group_votes * group_votes == depthxr::kFrameGenThreadGroupSize * depthxr::kFrameGenThreadGroupSize,
+               "The resolve should run a thread per span of texels over the half-resolution grid");
         // The texels the resolve leaves open, judged right after it by the
         // surface around them as it decided that (kDepthDecided), never by
         // the depth being written; a thread per span of texels each way.

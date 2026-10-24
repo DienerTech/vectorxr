@@ -386,6 +386,9 @@ inline constexpr std::uint32_t kFrameGenTrustTile = 8u;
 // kTrustSurface's texels per thread each way (FG_SURFACE_SPAN): a thread a
 // texel, its thread groups' launches cost more than its work.
 inline constexpr std::uint32_t kFrameGenTrustSurfaceSpan = 4u;
+// kTrustResolve's (FG_RESOLVE_SPAN), likewise; a thread group reads the
+// stereo scale votes of its tiles and two around them each way, one a thread.
+inline constexpr std::uint32_t kFrameGenTrustResolveSpan = 4u;
 // kDepthScales texels per tile.
 inline constexpr std::uint32_t kFrameGenDepthScaleTexels = 3u;
 // kTrustResolve's and kTrustSurface's options.x: this frame's stereo scale

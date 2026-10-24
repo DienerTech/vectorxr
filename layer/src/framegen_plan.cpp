@@ -770,7 +770,10 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
             accept.constants.options[0] = kFrameGenScaleAccept;
             plan.dispatches.push_back(accept);
         }
+        // A thread per kFrameGenTrustResolveSpan texels each way.
         FrameGenDispatch resolve = Dispatch(FrameGenPass::kTrustResolve, plan.levels[1], plan.levels[1], base);
+        resolve.width = (plan.levels[1].width + kFrameGenTrustResolveSpan - 1) / kFrameGenTrustResolveSpan;
+        resolve.height = (plan.levels[1].height + kFrameGenTrustResolveSpan - 1) / kFrameGenTrustResolveSpan;
         resolve.inputs = {Texture(FrameGenTextureKind::kTrustNewest), Texture(FrameGenTextureKind::kTrustVotes),
                           request.trust_stereo ? Texture(FrameGenTextureKind::kDepthScaleVotes) : FrameGenTexture{}, {},
                           {}};
