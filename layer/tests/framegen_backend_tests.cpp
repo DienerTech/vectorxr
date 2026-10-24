@@ -2142,6 +2142,66 @@ int RunScenarios(Harness& harness) {
             Check(held_patch * 100 <= patch_pixels && near_held_patch * 100 <= patch_pixels,
                   harness.name + " prop hold: the moving patch was held");
             Check(prop_unknown == prop_off, harness.name + " prop hold: frames not known still were changed");
+            // The patch's motion boundaries, where the hold could override what
+            // the analysis resolved there (Occlusion on, as the live tuning has
+            // it): its leading edge, being covered (the newest frame shows the
+            // patch there, the previous one and the truth the scenery), and its
+            // trailing edge, revealed, each 8 px wide over every row the patch
+            // has, against the truth at the generated frame's time (the patch
+            // moved half way, 3 px): pixels off it by more than 0.1 in a
+            // channel (as the replays' bands count them) with the switch off
+            // and held, pixels the hold changed, and those it took farther from
+            // the truth or nearer (by more than 2 of 255, the channel most off).
+            const Pixels prop_truth = propeller(Cockpit(shift - half_ipd, -outer, inner), 25.0f, kPatchMove / 2);
+            auto pixel_error = [](std::uint32_t a, std::uint32_t b) {
+                int most = 0;
+                for (int c = 0; c < 24; c += 8) {
+                    most = std::max(most, std::abs(static_cast<int>((a >> c) & 255u) - static_cast<int>((b >> c) & 255u)));
+                }
+                return most;
+            };
+            struct PropBand {
+                std::size_t off_bad{0}, held_bad{0}, changed{0}, worse{0}, better{0};
+            };
+            auto prop_band = [&](const Pixels& off, const Pixels& held, bool leading) {
+                PropBand band;
+                const int x0 = leading ? kPatchX + 96 - 1 : kPatchX - 1;
+                for (int y = kPatchY; y < kPatchY + 64; ++y) {
+                    for (int x = x0; x < x0 + kPatchMove + 2; ++x) {
+                        const std::size_t i = static_cast<std::size_t>(y) * kSize + static_cast<std::size_t>(x);
+                        const int off_error = pixel_error(off[i], prop_truth[i]);
+                        const int held_error = pixel_error(held[i], prop_truth[i]);
+                        band.off_bad += off_error > 25 ? 1 : 0;
+                        band.held_bad += held_error > 25 ? 1 : 0;
+                        band.changed += pixel_error(off[i], held[i]) > 2 ? 1 : 0;
+                        band.worse += held_error > off_error + 2 ? 1 : 0;
+                        band.better += off_error > held_error + 2 ? 1 : 0;
+                    }
+                }
+                return band;
+            };
+            std::size_t band_worse = 0, band_changed = 0;
+            for (const bool leading : {true, false}) {
+                const PropBand plain = prop_band(prop_off, prop_held, leading);
+                const PropBand cubic_near = prop_band(prop_near_off, prop_near_held, leading);
+                std::cout << harness.name << " prop hold, the patch's " << (leading ? "leading (covered)" : "trailing (revealed)")
+                          << " edge: " << 64 * (kPatchMove + 2) << " pixels, off the truth with the switch off "
+                          << plain.off_bad << ", held " << plain.held_bad << "; changed by the hold " << plain.changed
+                          << ", farther from the truth " << plain.worse << ", nearer " << plain.better << " (cubic-near "
+                          << cubic_near.off_bad << ", " << cubic_near.held_bad << "; " << cubic_near.changed << ", "
+                          << cubic_near.worse << ", " << cubic_near.better << ")" << std::endl;
+                band_worse += plain.held_bad > plain.off_bad || cubic_near.held_bad > cubic_near.off_bad ? 1 : 0;
+                band_changed = std::max(band_changed, std::max(plain.changed, cubic_near.changed));
+            }
+            // Never held where Occlusion() chose the previous frame, but at a
+            // covered pixel whose errors stay below FG_OCCLUSION_ERROR (there
+            // Occlusion() is not asked) the hold can still show the newest
+            // frame: off the truth, the still scenery the previous frame shows
+            // there, by zero motion's own error, which the margin keeps near
+            // the chosen candidate's. No pixel more off the truth by 0.1, few
+            // changed.
+            Check(band_worse == 0 && band_changed * 25 <= static_cast<std::size_t>(64 * (kPatchMove + 2)),
+                  harness.name + " prop hold: the hold took the moving patch's edges from the truth");
             harness.upload(g_swapchains[kSource][0], Cockpit(-half_ipd, -outer, inner));
             harness.upload(g_swapchains[kSource][1], Cockpit(shift - half_ipd, -outer, inner));
             harness.upload(g_swapchains[right_source][0], Cockpit(half_ipd, -inner, outer));

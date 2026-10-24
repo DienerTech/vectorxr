@@ -2131,8 +2131,14 @@ float4 Synthesize(float2 position, float fraction) {
         // standing still, so moving content keeps its vector). Known depth of
         // 4 m or more only: the cockpit is nearer, and no depth (0) is not
         // known. Thresholds in options.z's bits 4-9 and 10-15, 0.005 a step.
+        // Not where Occlusion() (or the engine's forward map) found the pixel
+        // being covered: there the newest frame already shows what moves
+        // over it (a far object's leading edge over still scenery, where
+        // neither its vector nor zero motion has the frames agree and the
+        // two errors lie close), and the previous frame alone shows what is
+        // there at this time.
         [branch]
-        if ((g.options.y & FG_FLAG_DEPTH) != 0u && abs(DepthAt(uv)) >= 4.0) {
+        if (occlusion != 2 && (g.options.y & FG_FLAG_DEPTH) != 0u && abs(DepthAt(uv)) >= 4.0) {
             float prop_error = chosen_error;
             [branch]
             if (!boundary) {
@@ -2172,6 +2178,13 @@ float4 Synthesize(float2 position, float fraction) {
                 occlusion = 0;
                 boundary = false;
             }
+#if defined(FG_SYNTH_PROP)
+            // Not held where the map has something nearer cover the pixel by
+            // this time: the newest frame's read there shows what lies behind.
+            if (surface < 0.97 * carried) {
+                prop_hold = false;
+            }
+#endif
         }
     }
 #endif
@@ -2180,8 +2193,9 @@ float4 Synthesize(float2 position, float fraction) {
     // A held pixel reads the newest frame where it is (the eye-shift map's
     // place, as every read), by the resampling the switches give it, and
     // shows that read alone: no motion, no previous-frame blend, no
-    // Occlusion() pick, no cross-fade, no sharpening, no Extrapolate
-    // agreement. Over the depth splat too.
+    // Occlusion() pick of the newest frame, no cross-fade, no sharpening, no
+    // Extrapolate agreement. Over the depth splat too, but for the pixels it
+    // has covered; never where Occlusion() chose the previous frame.
     if (prop_hold) {
         chosen.xy = float2(0.0, 0.0);
         chosen_error = 0.0;

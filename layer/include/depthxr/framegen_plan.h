@@ -391,9 +391,12 @@ inline constexpr std::uint32_t kFrameGenSharpenShift = 16u;
 // boundary, else the smooth field's vector scored once) is above the
 // threshold, and zero motion's is within the margin of it (nothing tracks the
 // pixel better than standing still), the pixel is the newest frame's read
-// there, unblended: no previous-frame blend, Occlusion() pick, cross-fade or
-// sharpening. The threshold and margin sit in options[2]'s bits 4-9 and
-// 10-15 in steps of kFrameGenPropStep (the diagnostic view keeps bits 0-3).
+// there, unblended: no previous-frame blend, Occlusion() pick of the newest
+// frame, cross-fade or sharpening. Never where Occlusion() found the pixel
+// being covered (the previous frame alone shows it) or the depth splat has
+// something nearer cover it. The threshold and margin sit in options[2]'s
+// bits 4-9 and 10-15 in steps of kFrameGenPropStep (the diagnostic view keeps
+// bits 0-3).
 inline constexpr std::uint32_t kFrameGenFlagPropHold = 1u << 20;
 inline constexpr std::uint32_t kFrameGenPropThresholdShift = 4u;
 inline constexpr std::uint32_t kFrameGenPropMarginShift = 10u;
