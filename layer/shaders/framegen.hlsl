@@ -443,7 +443,12 @@ float MotionTerm(int2 d, int2 extent) {
 #define FG_SEARCH_APRON (FG_SEARCH_MAX_RADIUS + FG_PATCH_RADIUS)
 #define FG_SEARCH_TILE (8 + 2 * FG_SEARCH_APRON)
 #define FG_PATCH_SIDE (2 * FG_PATCH_RADIUS + 1)
+// Threads per cell: each scans every FG_SEARCH_SLICES-th candidate, so the
+// coarsest level's few cells keep enough threads in flight.
+#define FG_SEARCH_SLICES 4
 groupshared float g_tile[FG_SEARCH_TILE * FG_SEARCH_TILE];
+groupshared float g_best_cost[FG_SEARCH_SLICES * 64];
+groupshared int g_best_index[FG_SEARCH_SLICES * 64];
 
 struct Patch {
     float luma[FG_PATCH_SIDE * FG_PATCH_SIDE];
@@ -467,41 +472,108 @@ float PatchCost(Patch patch, int2 corner, int2 d, int2 extent) {
     return sum / max(count, 1.0) + MotionTerm(d, extent);
 }
 
-// Exhaustive search on the coarsest level.
-[numthreads(8, 8, 1)]
-void CSMain(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint index : SV_GroupIndex) {
+// PatchCost where every patch texel is inside the image: the same terms in
+// the same order. `count` is the patch's texel count, passed in so the
+// division stays a division (a literal divisor becomes a multiply by its
+// rounded reciprocal).
+float InsidePatchCost(Patch patch, int2 corner, int2 d, int2 extent, float count) {
+    float sum = 0.0;
+    [unroll]
+    for (int i = 0; i < FG_PATCH_SIDE * FG_PATCH_SIDE; ++i) {
+        const int2 t = corner + int2(i % FG_PATCH_SIDE, i / FG_PATCH_SIDE) - d;
+        sum += MatchTerm(patch.luma[i], g_tile[t.y * FG_SEARCH_TILE + t.x]);
+    }
+    return sum / max(count, 1.0) + MotionTerm(d, extent);
+}
+
+// Exhaustive search on the coarsest level, in scan order (rows, then
+// columns, from -radius). Each slice scans every FG_SEARCH_SLICES-th
+// candidate from the zero displacement's cost with strict <, as the scan
+// does, and slice 0 takes the lowest (cost, scan index) of the four, the zero
+// displacement first: the scan's own choice, the earliest of equal costs (and
+// the zero displacement where its cost is NaN, which no cost replaces).
+[numthreads(8, 8, FG_SEARCH_SLICES)]
+void CSMain(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID,
+            uint index : SV_GroupIndex) {
     const int2 extent = MatchExtent();
     const int2 origin = int2(group.xy) * 8 - FG_SEARCH_APRON;
-    for (uint t = index; t < FG_SEARCH_TILE * FG_SEARCH_TILE; t += 64) {
+    for (uint t = index; t < FG_SEARCH_TILE * FG_SEARCH_TILE; t += 64 * FG_SEARCH_SLICES) {
         g_tile[t] = PreviousLuma(origin + int2(t % FG_SEARCH_TILE, t / FG_SEARCH_TILE), extent);
     }
     GroupMemoryBarrierWithGroupSync();
-    if (any(id.xy >= g.size.xy)) {
-        return;
-    }
+    const bool active = all(id.xy < g.size.xy);
     const int2 cell = int2(id.xy);
-    Patch patch;
-    [unroll]
-    for (int i = 0; i < FG_PATCH_SIDE * FG_PATCH_SIDE; ++i) {
-        const int2 q = cell + int2(i % FG_PATCH_SIDE, i / FG_PATCH_SIDE) - FG_PATCH_RADIUS;
-        patch.valid[i] = all(q >= 0) && all(q < extent);
-        patch.luma[i] = patch.valid[i] ? g_luma_current.Load(int3(q, 0)).r : 0.0;
-    }
-    const int2 corner = cell - origin - FG_PATCH_RADIUS;
+    const int slice = int(thread.z);
     const int radius = min(int(g.options.x), FG_SEARCH_MAX_RADIUS);
-    int2 best = int2(0, 0);
-    float best_cost = PatchCost(patch, corner, best, extent);
-    [loop]
-    for (int y = -radius; y <= radius; ++y) {
-        [loop]
-        for (int x = -radius; x <= radius; ++x) {
-            const float cost = PatchCost(patch, corner, int2(x, y), extent);
-            if (cost < best_cost) {
-                best_cost = cost;
-                best = int2(x, y);
+    const int side = 2 * radius + 1;
+    const int candidates = radius >= 0 ? side * side : 0;
+    float best_cost = 0.0;
+    int best_index = -1; // the zero displacement, ahead of the scan
+    if (active) {
+        Patch patch;
+        float count = 0.0;
+        [unroll]
+        for (int i = 0; i < FG_PATCH_SIDE * FG_PATCH_SIDE; ++i) {
+            const int2 q = cell + int2(i % FG_PATCH_SIDE, i / FG_PATCH_SIDE) - FG_PATCH_RADIUS;
+            patch.valid[i] = all(q >= 0) && all(q < extent);
+            patch.luma[i] = patch.valid[i] ? g_luma_current.Load(int3(q, 0)).r : 0.0;
+            count += patch.valid[i] ? 1.0 : 0.0;
+        }
+        const int2 corner = cell - origin - FG_PATCH_RADIUS;
+        int2 d = int2(uint(slice) % uint(side), uint(slice) / uint(side)) - radius;
+        [branch]
+        if (all(cell >= FG_PATCH_RADIUS) && all(cell + FG_PATCH_RADIUS < extent)) {
+            best_cost = InsidePatchCost(patch, corner, int2(0, 0), extent, count);
+            [loop]
+            for (int j = slice; j < candidates; j += FG_SEARCH_SLICES) {
+                const float cost = InsidePatchCost(patch, corner, d, extent, count);
+                if (cost < best_cost) {
+                    best_cost = cost;
+                    best_index = j;
+                }
+                d.x += FG_SEARCH_SLICES;
+                [loop]
+                while (d.x > radius) {
+                    d.x -= side;
+                    ++d.y;
+                }
+            }
+        } else {
+            best_cost = PatchCost(patch, corner, int2(0, 0), extent);
+            [loop]
+            for (int j = slice; j < candidates; j += FG_SEARCH_SLICES) {
+                const float cost = PatchCost(patch, corner, d, extent);
+                if (cost < best_cost) {
+                    best_cost = cost;
+                    best_index = j;
+                }
+                d.x += FG_SEARCH_SLICES;
+                [loop]
+                while (d.x > radius) {
+                    d.x -= side;
+                    ++d.y;
+                }
             }
         }
     }
+    const uint slot = thread.y * 8 + thread.x;
+    g_best_cost[slice * 64 + slot] = best_cost;
+    g_best_index[slice * 64 + slot] = best_index;
+    GroupMemoryBarrierWithGroupSync();
+    if (!active || slice != 0) {
+        return;
+    }
+    [unroll]
+    for (int s = 1; s < FG_SEARCH_SLICES; ++s) {
+        const float cost = g_best_cost[s * 64 + slot];
+        const int candidate = g_best_index[s * 64 + slot];
+        if (cost < best_cost || (cost == best_cost && candidate < best_index)) {
+            best_cost = cost;
+            best_index = candidate;
+        }
+    }
+    const int2 best = best_index < 0 ? int2(0, 0)
+                                     : int2(uint(best_index) % uint(side), uint(best_index) / uint(side)) - radius;
     g_flow[id.xy] = float4(float2(best) / float2(extent), best_cost, 1.0);
 }
 #endif

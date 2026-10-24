@@ -479,6 +479,96 @@ int RunScenarios(Harness& harness) {
         Check(fine > coarse + 0.005, harness.name + " the Flow view's fine tint shows more motion (" + std::to_string(fine) +
                                          " against " + std::to_string(coarse) + ")");
     }
+    // 2'. The coarsest level's exhaustive search, where the backend reads its
+    // textures back, against the scan on the CPU from the same luma: rows
+    // then columns from -radius, strict < from the zero displacement (so the
+    // earliest of equal costs), newest texels outside the image skipped and
+    // previous ones outside it or unseen at the penalty. The GPU may round
+    // its division and motion term differently, so cells whose two best
+    // costs lie within that rounding are left out. Unturned and turned (the
+    // previous view's edge unseen) pairs; the cells inside by the patch take
+    // the shader's all-valid path, the outer two rings the general one.
+    {
+        const auto searched = [&](float yaw, std::size_t& compared, std::size_t& moved) {
+            gpu->ResetHistory();
+            run(0, true, 0, 0);
+            run(1, true, yaw, 0);
+            std::vector<float> current, previous, flow;
+            FrameGenExtent extent{}, previous_extent{}, cells{};
+            std::uint32_t channels = 0, previous_channels = 0, flow_channels = 0;
+            if (!gpu->ReadTexture(0, {FrameGenTextureKind::kLumaNewest, kFrameGenPyramidLevels}, current, extent, channels) ||
+                !gpu->ReadTexture(0, {FrameGenTextureKind::kLumaPrevious, kFrameGenPyramidLevels}, previous,
+                                  previous_extent, previous_channels) ||
+                !gpu->ReadTexture(0, {FrameGenTextureKind::kFlow, kFrameGenPyramidLevels}, flow, cells, flow_channels)) {
+                return false;
+            }
+            Check(channels == 1 && previous_channels == 1 && flow_channels == 4 && previous_extent.width == extent.width &&
+                      previous_extent.height == extent.height && cells.width == extent.width &&
+                      cells.height == extent.height,
+                  harness.name + " search: the coarsest level's luma and flow read back");
+            const int w = static_cast<int>(extent.width), h = static_cast<int>(extent.height);
+            const auto luma_previous = [&](int x, int y) {
+                return x < 0 || y < 0 || x >= w || y >= h ? -1.0f : previous[static_cast<std::size_t>(y) * w + x];
+            };
+            const int radius = static_cast<int>(kFrameGenSearchRadius);
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    const auto cost = [&](int dx, int dy) {
+                        float sum = 0.0f, count = 0.0f;
+                        for (int i = 0; i < 25; ++i) {
+                            const int qx = x + i % 5 - 2, qy = y + i / 5 - 2;
+                            if (qx >= 0 && qy >= 0 && qx < w && qy < h) {
+                                const float p = luma_previous(qx - dx, qy - dy);
+                                sum += p < 0.0f ? 0.25f : std::abs(current[static_cast<std::size_t>(qy) * w + qx] - p);
+                                count += 1.0f;
+                            }
+                        }
+                        return sum / std::max(count, 1.0f) +
+                               0.05f * std::hypot(static_cast<float>(dx) / w, static_cast<float>(dy) / h);
+                    };
+                    int best_x = 0, best_y = 0;
+                    float best = cost(0, 0);
+                    float second = std::numeric_limits<float>::infinity();
+                    for (int dy = -radius; dy <= radius; ++dy) {
+                        for (int dx = -radius; dx <= radius; ++dx) {
+                            const float c = cost(dx, dy);
+                            if (c < best) {
+                                if (dx != best_x || dy != best_y) second = best;
+                                best = c;
+                                best_x = dx;
+                                best_y = dy;
+                            } else if ((dx != best_x || dy != best_y) && c < second) {
+                                second = c;
+                            }
+                        }
+                    }
+                    if (second - best <= 1e-5f * best + 1e-6f) {
+                        continue; // a near tie: the GPU's rounding may pick either
+                    }
+                    const float* v = &flow[(static_cast<std::size_t>(y) * w + x) * 4];
+                    const int gx = static_cast<int>(std::lround(v[0] * w)), gy = static_cast<int>(std::lround(v[1] * h));
+                    Check(gx == best_x && gy == best_y && std::abs(v[2] - best) <= 1e-3f * best + 1e-6f,
+                          harness.name + " search: cell " + std::to_string(x) + "," + std::to_string(y) + " found " +
+                              std::to_string(gx) + "," + std::to_string(gy) + " at " + std::to_string(v[2]) +
+                              ", the scan " + std::to_string(best_x) + "," + std::to_string(best_y) + " at " +
+                              std::to_string(best));
+                    ++compared;
+                    moved += best_x != 0 || best_y != 0 ? 1 : 0;
+                }
+            }
+            return true;
+        };
+        for (const float yaw : {0.0f, 0.08f}) {
+            std::size_t compared = 0, moved = 0;
+            const bool readable = searched(yaw, compared, moved);
+            Check(harness.name != "D3D12" || readable, harness.name + " search: the coarsest level reads back");
+            if (readable) {
+                std::cout << harness.name << " search, yaw " << yaw << ": " << compared << " cells as the scan, " << moved
+                          << " of them moved\n";
+                Check(compared >= 100, harness.name + " search: most cells compared (" + std::to_string(compared) + ")");
+            }
+        }
+    }
     // 2a. The flow prior (research, FrameGenTuning::flow_prior; without depth
     // it holds every cell): the background, which no motion matches as well
     // as any vector, keeps no residual flow at all, while the square, whose
@@ -7989,6 +8079,7 @@ int RunReplay(Harness& harness) {
                     {"shift0", {FrameGenTextureKind::kShiftMap, 0}},
                     {"keys", {FrameGenTextureKind::kShiftKeys, 0}},
                     {"filtered", {FrameGenTextureKind::kFilteredNewest, 0}},
+                    {"search", {FrameGenTextureKind::kFlow, kFrameGenPyramidLevels}},
                     {"world", {FrameGenTextureKind::kWorldParams, 0}},
                     {"scalevotes", {FrameGenTextureKind::kDepthScaleVotes, 0}},
                     {"scales", {FrameGenTextureKind::kDepthScales, 0}},
