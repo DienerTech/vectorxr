@@ -278,6 +278,34 @@ Pixels Panorama(float yaw, const Tangents& fov = kFullView) {
     return pixels;
 }
 
+// A menu screen at infinity in a black void, as DCS shows its menus: a plain
+// panel (46 degrees across, 34 down) with a textured tile near its top and a
+// textured row of icons along its bottom, seen through a camera yawed by
+// `yaw` radians. The void and the plain panel match any motion.
+std::uint32_t MenuPlain() { return Pack(0.10f, 0.16f, 0.20f); }
+Pixels MenuOnVoid(float yaw) {
+    Pixels pixels(kSize * kSize);
+    for (std::uint32_t y = 0; y < kSize; ++y) {
+        for (std::uint32_t x = 0; x < kSize; ++x) {
+            const float tx = -kTan + 2 * kTan * (x + 0.5f) / kSize;
+            const float ty = kTan - 2 * kTan * (y + 0.5f) / kSize;
+            const float dx = tx * std::cos(yaw) - std::sin(yaw);
+            const float dz = -tx * std::sin(yaw) - std::cos(yaw);
+            const float azimuth = std::atan2(dx, -dz);
+            const float elevation = std::atan2(ty, std::sqrt(dx * dx + dz * dz));
+            std::uint32_t pixel = 0xff000000u;
+            if (std::abs(azimuth) < 0.4f && std::abs(elevation) < 0.3f) {
+                const bool icons = elevation < -0.18f;
+                const bool tile = azimuth > -0.3f && azimuth < -0.1f && elevation > 0.08f && elevation < 0.24f;
+                const float n = Noise(azimuth * 180.0f / 2.5f, elevation * 180.0f / 2.5f);
+                pixel = icons || tile ? Pack(0.2f + 0.7f * n, 0.25f + 0.6f * n, 0.3f + 0.4f * n) : MenuPlain();
+            }
+            pixels[y * kSize + x] = pixel;
+        }
+    }
+    return pixels;
+}
+
 double MeanError(const Pixels& a, const Pixels& b, std::uint32_t x0, std::uint32_t y0, std::uint32_t x1, std::uint32_t y1) {
     double sum = 0;
     std::size_t count = 0;
@@ -291,6 +319,26 @@ double MeanError(const Pixels& a, const Pixels& b, std::uint32_t x0, std::uint32
         }
     }
     return sum / (255.0 * count);
+}
+
+// Of the pixels `truth` shows as `color` (at least `margin` from the edges),
+// the share `image` shows more than `tolerance` (of 255, in any channel) off.
+double ShareOff(const Pixels& image, const Pixels& truth, std::uint32_t color, int tolerance, std::uint32_t margin) {
+    std::size_t off = 0, count = 0;
+    for (std::uint32_t y = margin; y < kSize - margin; ++y) {
+        for (std::uint32_t x = margin; x < kSize - margin; ++x) {
+            if (truth[y * kSize + x] != color) continue;
+            ++count;
+            const std::uint32_t p = image[y * kSize + x];
+            for (int c = 0; c < 3; ++c) {
+                if (std::abs(static_cast<int>((p >> (8 * c)) & 255) - static_cast<int>((color >> (8 * c)) & 255)) > tolerance) {
+                    ++off;
+                    break;
+                }
+            }
+        }
+    }
+    return count ? static_cast<double>(off) / static_cast<double>(count) : 0.0;
 }
 
 // FG_TEST_DUMP=<directory> writes every compared image as a binary PPM.
@@ -1081,6 +1129,7 @@ int RunScenarios(Harness& harness) {
             Check(square_error < 0.5 * square_hold, harness.name + " motion matched at release is not extrapolated");
             Check(turned_error < 0.3 * turned_baseline, harness.name + " head rotation leaked into vectors matched at release");
         }
+
         if (status == "active" && StallChecksAllowed()) {
             // A match at release that never finishes, with the next
             // capture's work queued behind it (its input can never become
@@ -1105,6 +1154,84 @@ int RunScenarios(Harness& harness) {
                       << backend->HardwareFlowStatus() << std::endl;
             Check(backend->HardwareFlowStatus() == "the optical flow hardware stopped responding" && waited < 2000.0,
                   harness.name + " a stalled match at release, queued behind, was not released");
+        }
+        backend->Reset();
+    }
+
+    // 3i. A menu screen in a black void, interpolated or extrapolated as a
+    // head turns, on a backend of its own: its quality changes start new
+    // hardware sessions, whose first match 3h's stall check must not wait on.
+    if (harness.name == "D3D12" && g_hardware) {
+        auto backend = CreateFrameGenGpu(harness.binding, error);
+        if (backend) backend->SetCopyAfterRelease(true); // the tests' images are their own
+        Check(backend != nullptr, harness.name + " backend: " + error);
+        Check(backend->Track(kSource, EnumerateImages, error) && backend->Track(kOutput, EnumerateImages, error) &&
+                  backend->Track(kOutputSecond, EnumerateImages, error),
+              error);
+        // DCS's menus: where there is nothing to match, the hardware's vector
+        // is arbitrary yet costs nothing. Unless no motion wins there, the
+        // screen's content is carried into the void and across its plain
+        // background.
+        FrameGenTuning menu_tuning;
+        menu_tuning.fractions[0] = 0.5f;
+        menu_tuning.hardware_flow = true;
+        // `frames` frames, the head turning by `step` per frame, `last_step`
+        // between the last two; the source swapchain's three images in turn.
+        auto menu = [&](bool at_release, int frames, float step, float last_step, Pixels& truth) {
+            backend->ResetHistory();
+            float yaw = 0.0f, previous_yaw = 0.0f;
+            for (int i = 0; i < frames; ++i) {
+                previous_yaw = yaw;
+                if (i) yaw += i == frames - 1 ? last_step : step;
+                const std::uint32_t image = static_cast<std::uint32_t>(i % 3);
+                truth = MenuOnVoid(yaw);
+                harness.upload(g_swapchains[kSource][image], truth);
+                const std::vector<FrameGenViewSubmission> views{
+                    Submission(image, harness.format, output_format, true, yaw, previous_yaw)};
+                if (at_release) {
+                    Check(backend->Capture(0, views[0].source, views[0].request, menu_tuning.quality, error) || error.empty(),
+                          harness.name + " capture: " + error);
+                }
+                Check(backend->Execute(views, menu_tuning, result, error), harness.name + " execute: " + error);
+            }
+            return harness.readback(g_swapchains[kOutput][0]);
+        };
+        // Before no motion won there (2026-10-21): up to 1% of the void and 3%
+        // of the plain panel off, matched at release or packed alike.
+        const float degree = 3.14159265f / 180.0f;
+        struct MenuCase {
+            const char* name;
+            int frames;
+            float step, last_step;
+            FrameGenFlowQuality quality;
+        };
+        const MenuCase menu_cases[] = {
+            {"2deg", 3, 2 * degree, 2 * degree, FrameGenFlowQuality::kBalanced},
+            {"2deg-performance", 8, 2 * degree, 2 * degree, FrameGenFlowQuality::kPerformance},
+            {"5deg-stopping-performance", 8, 5 * degree, 0.0f, FrameGenFlowQuality::kPerformance},
+        };
+        for (const auto mode : {FrameGenSynthesisMode::kInterpolate, FrameGenSynthesisMode::kExtrapolate}) {
+            menu_tuning.mode = mode;
+            const bool interpolate = mode == FrameGenSynthesisMode::kInterpolate;
+            for (const MenuCase& c : menu_cases) {
+                menu_tuning.quality = c.quality;
+                for (const bool at_release : {true, false}) {
+                    Pixels truth;
+                    const Pixels generated = menu(at_release, c.frames, c.step, c.last_step, truth);
+                    const std::string name = std::string("menu-") + (interpolate ? "interpolated-" : "extrapolated-") +
+                                             c.name + (at_release ? "-released" : "-packed");
+                    Dump(name + "-truth", truth);
+                    Dump(name, generated);
+                    const double void_off = ShareOff(generated, truth, 0xff000000u, 24, 48);
+                    const double plain_off = ShareOff(generated, truth, MenuPlain(), 24, 48);
+                    std::cout << harness.name << " " << name << " (" << backend->HardwareFlowStatus() << "): void off "
+                              << void_off << ", plain panel off " << plain_off << std::endl;
+                    if (backend->HardwareFlowStatus() == "active") {
+                        Check(void_off < 0.0005 && plain_off < 0.0005,
+                              harness.name + " " + name + ": a menu's content was carried into the void or across its plain panel");
+                    }
+                }
+            }
         }
         backend->Reset();
     }

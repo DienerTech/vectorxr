@@ -3020,6 +3020,10 @@ FG_BIND(4) FG_FORMAT("rgba16f") RWTexture2D<float4> g_flow : register(u0);
 
 // options.x: the hardware matched the frames as rendered (FG_PASS_FLOW_PACK_RAW).
 #define FG_UNPACK_RAW 1u
+// No motion replaces the hardware's vector where it matches at least as well,
+// and clearly; extrapolating, only where it matches about exactly.
+#define FG_STILL_CLEAR 0.01
+#define FG_STILL_EXACT 0.002
 
 // The hardware's vectors (S10.5 half-resolution pixels, from the newest
 // frame to the previous one) as flow (previous to newest, normalized), each
@@ -3048,6 +3052,8 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     const int2 offset = int2(round(d));
     float sum = 0.0;
     float count = 0.0;
+    // No motion as a candidate, scored like the hardware's vector.
+    float still_sum = 0.0;
     // The cost of no motion over the texels the previous frame saw, as
     // FG_PASS_REFINE scores it (w).
     float zero_sum = 0.0;
@@ -3066,13 +3072,30 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
             sum += previous < 0.0 ? FG_INVALID_PENALTY : abs(current - previous);
             count += 1.0;
             const float still = g_luma_previous.Load(int3(q, 0)).r;
+            still_sum += still < 0.0 ? FG_INVALID_PENALTY : abs(current - still);
             if (still >= 0.0) {
                 zero_sum += abs(current - still);
                 zero_count += 1.0;
             }
         }
     }
-    const float cost = sum / max(count, 1.0) + FG_MOTION_PENALTY * length(float2(offset) / float2(extent));
+    float cost = sum / max(count, 1.0) + FG_MOTION_PENALTY * length(float2(offset) / float2(extent));
+    // Where there is nothing to match (a black void, a plain menu background:
+    // DCS's menus) the hardware's vector is arbitrary yet costs nothing, and
+    // synthesis carried the content beside the flat region across it. Block
+    // matching (FG_PASS_REFINE) keeps no motion there: it starts from it.
+    // Letting no motion win every tie also took vectors from the edges of
+    // moving objects (moving-object errors up 7-17%), hence a clear match.
+    // Extrapolating shows the newest frame moved: low-contrast scenery that
+    // does move (haze, soft cloud edges) lost its motion with a clear match
+    // (an MSFS capture's outside bad pixels 1.17% to 1.71%; 1.25% with an
+    // exact one).
+    const float still_cost = still_sum / max(count, 1.0);
+    const float still_limit = (g.options.y & FG_FLAG_EXTRAPOLATE) != 0u ? FG_STILL_EXACT : FG_STILL_CLEAR;
+    if (still_cost <= cost && still_cost <= still_limit) {
+        d = float2(0.0, 0.0);
+        cost = still_cost;
+    }
     const float zero = zero_count >= 0.5 * max(count, 1.0) ? zero_sum / zero_count : -1.0;
     g_flow[id.xy] = float4(d / float2(extent), cost, zero);
 }

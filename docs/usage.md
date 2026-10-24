@@ -1073,8 +1073,8 @@ Every setting on this page applies live after Save, including enabling the OSD i
 already running application. Visibility and layout changes made with bindings last for
 the current session; the next session uses the saved starting settings. Changing the
 automatic visibility option also updates visibility in the current session. The OSD
-can remain visible when the VectorXR enhancement master switch is off; disable it on
-its own page when you want no overlay.
+turns off with the *VectorXR Enabled* master switch, like every Enhancement, and comes
+back when the switch is turned on again.
 
 Both layouts keep a fixed header order: VectorXR, application name, OpenXR runtime, and
 local clock. Each header item can be turned off, and turning all of them off removes the
@@ -1220,8 +1220,10 @@ Discord's **welcome-and-rules** channel lets you opt into release notifications.
 
 VectorXR is designed to be reversible at every level:
 
-- **Pause everything** — turn *VectorXR Enabled* off in Settings to stop all Enhancements without
-  uninstalling.
+- **Pause everything** — turn *VectorXR Enabled* off in Settings to stop all Enhancements and the
+  OSD without uninstalling. A game already running with Quadviews keeps its four views, and one
+  running with Frame Generation keeps it pacing frames (without generating any), until the game
+  restarts; everything else stops at once.
 - **Per Enhancement** — toggle any Enhancement off from the sidebar, or turn off its profiles.
 - **Take it out of the pipeline** — disable the VectorXR layer from the OpenXR Layers tab.
 - **Remove it** — uninstall from Windows to remove the app and unregister the API layer.

@@ -61,6 +61,9 @@ EyeGazeRequestDecision DecideEyeGazeExtensionRequest(const EyeGazeRequestPolicyI
     if (!input.app_requested_layer_owned_quadviews) {
         return {false, EyeGazeRequestReason::kQuadviewsNotRequested};
     }
+    if (!input.suite_enabled) {
+        return {false, EyeGazeRequestReason::kSuiteDisabled};
+    }
     if (input.forwarding_native_quadviews) {
         return {false, EyeGazeRequestReason::kNativeQuadviews};
     }
@@ -115,6 +118,8 @@ std::string_view EyeGazeRequestReasonName(EyeGazeRequestReason reason) {
         return "reliable-negative";
     case EyeGazeRequestReason::kQuadviewsNotRequested:
         return "quadviews-not-requested";
+    case EyeGazeRequestReason::kSuiteDisabled:
+        return "suite-disabled";
     }
     return "unknown";
 }

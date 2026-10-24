@@ -394,6 +394,33 @@ class TurboFrameTestPeer {
         ++layer.config_generation_;
         return {first, second};
     }
+    // What runs under the settings last resolved: whether the OSD is drawn,
+    // whether the Frame Generation toggle is polled (a poll now), and the
+    // features the resolved settings leave on.
+    struct ResolvedFeatures {
+        bool osd{false};
+        bool framegen_toggle_polled{false};
+        bool core{false}, depth{false}, pivot{false}, turbo{false}, framegen{false}, head_prediction{false};
+    };
+    static ResolvedFeatures Features() {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.framegen_binding_last_poll_time_.reset();
+        layer.PollFrameGenToggle();
+        const ResolvedRuntimeConfig& resolved = layer.resolved_settings_;
+        return {layer.osd_monitoring_.load(), layer.framegen_binding_last_poll_time_.has_value(),
+                resolved.core.enabled, resolved.depthxr.enabled, resolved.pivotxr.enabled,
+                resolved.turbo.enabled, resolved.framegen.enabled, resolved.framegen.extend_head_prediction};
+    }
+    // `session` as a running Quadviews session (four views latched until it
+    // ends), or no session's Quadviews at all (XR_NULL_HANDLE).
+    static void QuadViewsSession(XrSession session) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.active_session_ = session;
+        layer.quadviews_session_active_ = session != XR_NULL_HANDLE;
+        layer.deferred_quadviews_config_active_.reset();
+    }
     static bool TurboEffective() { return Layer().turbo_effective_active_.load(); }
     static bool TurboYielded() {
         auto& layer = Layer();
@@ -4077,6 +4104,111 @@ void TestOsdDrawnWhenTheRuntimeReusesASessionHandle() {
     Expect(second, "The OSD stayed off in a session whose handle the runtime reused");
 }
 
+// VectorXR Enabled (the suite switch) off leaves the layer inert: a Discord
+// report found the OSD still drawn with it off. A game started with it off
+// draws no OSD; turned off in a Frame Generation session, generation stops,
+// its toggle stops listening and the OSD goes; turned back on, all return. A
+// Quadviews session keeps its four views until the game restarts, and
+// nothing else.
+void TestSuiteSwitchLeavesTheLayerInert() {
+    depthxr::ConfigDocument config;
+    config.core.enabled = false;
+    config.core.osd.enabled = true;
+    const auto [started_off, reused_off] =
+        depthxr::TurboFrameTestPeer::OsdDrawnAcrossReusedHandle(config, TestSession());
+    Expect(!started_off && !reused_off, "The OSD was drawn in a session started with VectorXR off");
+
+    const depthxr::ConfigDocument previous = depthxr::TurboFrameTestPeer::LoadedConfig();
+    FakeRuntime runtime;
+    runtime.NoOpenFrame();
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kSequenced);
+    depthxr::TurboFrameTestPeer::FreshSession();
+    int executes = 0;
+    depthxr::TurboFrameTestPeer::PrepareFrameGen(
+        TestSession(), [&](const void*, std::string&) { return std::make_unique<FgGpu>(&executes); },
+        {FgFormats, FgCreate, FgDestroy, FgImages, FgAcquire, FgWait, FgRelease});
+    const XrSwapchain left = reinterpret_cast<XrSwapchain>(0x91), right = reinterpret_cast<XrSwapchain>(0x92);
+    auto& framegen = depthxr::TurboFrameTestPeer::FrameGen();
+    framegen.TrackSwapchain(left, kFrameGenFormat, 1, XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT);
+    framegen.TrackSwapchain(right, kFrameGenFormat, 1, XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT);
+    std::array<XrCompositionLayerProjectionView, 2> views{};
+    for (int eye = 0; eye < 2; ++eye) {
+        views[eye] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+        views[eye].pose.orientation.w = 1.0f;
+        views[eye].fov = {-0.8f, 0.8f, 0.8f, -0.8f};
+        views[eye].subImage.swapchain = eye ? right : left;
+        views[eye].subImage.imageRect = {{0, 0}, {1024, 1024}};
+    }
+    XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    projection.viewCount = 2;
+    projection.views = views.data();
+    const auto* layer = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
+    // The period the app is given over a few frames, the last one's.
+    auto frames = [&] {
+        XrFrameState state{XR_TYPE_FRAME_STATE};
+        for (int i = 0; i < 3; ++i) {
+            state = {XR_TYPE_FRAME_STATE};
+            Expect(AppWait(&state) == XR_SUCCESS, "Suite switch test: app wait failed");
+            Expect(AppBegin() == XR_SUCCESS, "Suite switch test: app begin failed");
+            framegen.NoteRelease(left, 1);
+            framegen.NoteRelease(right, 1);
+            XrFrameEndInfo info = FrameEndInfo();
+            info.displayTime = state.predictedDisplayTime;
+            info.layerCount = 1;
+            info.layers = &layer;
+            Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &info) == XR_SUCCESS,
+                   "Suite switch test: app end failed");
+        }
+        return state.predictedDisplayPeriod;
+    };
+
+    // Every feature on, Frame Generation at 2x with head prediction.
+    config.core.enabled = true;
+    config.depthxr.enabled = true;
+    config.pivotxr.enabled = true;
+    config.quadviews.enabled = true;
+    config.turbo.enabled = true;
+    config.turbo.metrics_mode = depthxr::TurboMetricsMode::kOff;
+    config.framegen.enabled = true;
+    config.framegen.defaults.multiplier = depthxr::FrameGenMultiplier::k2;
+    config.framegen.defaults.extend_head_prediction = true;
+    depthxr::TurboFrameTestPeer::ReloadConfig(config);
+    Expect(frames() == 2 * kFrameGenPeriod, "Suite switch test: Frame Generation did not engage");
+    const auto on = depthxr::TurboFrameTestPeer::Features();
+    Expect(on.osd && on.framegen_toggle_polled, "Suite switch test: the OSD or the Frame Generation toggle was off");
+
+    config.core.enabled = false;
+    depthxr::TurboFrameTestPeer::ReloadConfig(config);
+    Expect(frames() == kFrameGenPeriod, "Frame Generation kept generating with VectorXR turned off");
+    const auto off = depthxr::TurboFrameTestPeer::Features();
+    Expect(!off.osd, "The OSD stayed on with VectorXR turned off");
+    Expect(!off.framegen_toggle_polled, "The Frame Generation toggle kept listening with VectorXR turned off");
+
+    config.core.enabled = true;
+    depthxr::TurboFrameTestPeer::ReloadConfig(config);
+    Expect(frames() == 2 * kFrameGenPeriod, "Frame Generation did not return with VectorXR turned back on");
+    const auto back = depthxr::TurboFrameTestPeer::Features();
+    Expect(back.osd && back.framegen_toggle_polled,
+           "The OSD or the Frame Generation toggle did not return with VectorXR turned back on");
+
+    // A running Quadviews session keeps the layer's frame path for its views
+    // (core stays on inside), with every other feature off.
+    depthxr::TurboFrameTestPeer::QuadViewsSession(TestSession());
+    config.core.enabled = false;
+    depthxr::TurboFrameTestPeer::ReloadConfig(config);
+    const auto latched = depthxr::TurboFrameTestPeer::Features();
+    Expect(latched.core, "A Quadviews session lost its frame path with VectorXR turned off");
+    Expect(!latched.depth && !latched.pivot && !latched.turbo && !latched.framegen && !latched.head_prediction,
+           "A Quadviews session kept a feature on with VectorXR turned off");
+    Expect(!latched.osd && !latched.framegen_toggle_polled,
+           "A Quadviews session kept the OSD or the Frame Generation toggle with VectorXR turned off");
+    Expect(frames() == kFrameGenPeriod, "A Quadviews session kept Frame Generation with VectorXR turned off");
+
+    depthxr::TurboFrameTestPeer::QuadViewsSession(XR_NULL_HANDLE);
+    depthxr::TurboFrameTestPeer::StopFrameGen();
+    depthxr::TurboFrameTestPeer::ReloadConfig(previous);
+}
+
 int main() {
     TestHandoverKeepsBlockedPollShielded();
     // Runtime-profile and fault-recovery simulations: none may stop frame
@@ -4142,6 +4274,7 @@ int main() {
     TestQuadViewsInactiveReasons();
     TestQuadViewsOsdTagFollowsBegunConfiguration();
     TestOsdDrawnWhenTheRuntimeReusesASessionHandle();
+    TestSuiteSwitchLeavesTheLayerInert();
     // Last: it points the layer's log at a file of its own.
     TestConfigWarningsLoggedOncePerKey();
     TestRecoveryBlockLogsWhatTurboDoes();
