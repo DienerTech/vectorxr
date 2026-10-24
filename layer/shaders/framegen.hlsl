@@ -847,9 +847,10 @@ FG_BIND(4) FG_FORMAT("rgba32f") RWTexture2D<float4> g_partials : register(u0);
 // aliases, moving objects and depth errors do not pull the motion.
 #define FG_WORLD_HUBER 1.5
 // The terms a sample adds: the 21 of the symmetric normal matrix, the 6 of
-// the right side, its weight and 1 (the count); padded to 8 float4.
+// the right side, its weight and 1 (the count); padded to 8 float4. A row a
+// term, so that a warp's threads reach consecutive banks.
 #define FG_WORLD_TERMS 29
-groupshared float g_terms[64][FG_WORLD_TERMS];
+groupshared float g_terms[FG_WORLD_TERMS][64];
 
 // One iteration of a robust least-squares fit of the world motion to the
 // measured flow (the final level, input 0) at a grid of samples (size.xy;
@@ -903,30 +904,33 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint index
     }
     [unroll]
     for (int term = 0; term < FG_WORLD_TERMS; ++term) {
-        g_terms[index][term] = terms[term];
+        g_terms[term][index] = terms[term];
     }
     GroupMemoryBarrierWithGroupSync();
+    // Pairwise, sample i taking sample i + stride's sums, the stride halving:
+    // each step's sums spread over every thread.
     [unroll]
     for (uint stride = 32u; stride > 0u; stride >>= 1) {
-        if (index < stride) {
-            [unroll]
-            for (int sum = 0; sum < FG_WORLD_TERMS; ++sum) {
-                g_terms[index][sum] += g_terms[index + stride][sum];
+        [unroll]
+        for (uint part = 0u; part < (stride * FG_WORLD_TERMS + 63u) / 64u; ++part) {
+            const uint item = index + 64u * part;
+            if (item < stride * FG_WORLD_TERMS) {
+                const uint sum = item / stride;
+                const uint sample = item % stride;
+                g_terms[sum][sample] += g_terms[sum][sample + stride];
             }
         }
         GroupMemoryBarrierWithGroupSync();
     }
-    if (index == 0u) {
+    // A thread a texel of the group's partials.
+    if (index < 8u) {
         const uint slot = group.y * ((g.size.x + 7u) / 8u) + group.x;
+        float4 value = float4(0.0, 0.0, 0.0, 0.0);
         [unroll]
-        for (int texel = 0; texel < 8; ++texel) {
-            float4 value = float4(0.0, 0.0, 0.0, 0.0);
-            [unroll]
-            for (int lane = 0; lane < 4; ++lane) {
-                if (4 * texel + lane < FG_WORLD_TERMS) value[lane] = g_terms[0][4 * texel + lane];
-            }
-            g_partials[uint2(slot * 8u + uint(texel), 0u)] = value;
+        for (uint lane = 0u; lane < 4u; ++lane) {
+            if (4u * index + lane < FG_WORLD_TERMS) value[lane] = g_terms[4u * index + lane][0];
         }
+        g_partials[uint2(slot * 8u + index, 0u)] = value;
     }
 }
 #endif
@@ -939,7 +943,10 @@ FG_BIND(4) FG_FORMAT("rgba32f") RWTexture2D<float4> g_world : register(u0);
 // the robust weights (most of the world agrees with one motion).
 #define FG_WORLD_MIN_SAMPLES 200.0
 #define FG_WORLD_MIN_INLIERS 0.5
-groupshared float g_sums[64][32];
+// The sums the solve reads (FG_PASS_WORLD_REDUCE's terms: the partials' last
+// three floats are padding), a row a sum as its terms.
+#define FG_WORLD_SUMS 29
+groupshared float g_sums[FG_WORLD_SUMS][64];
 
 // Sums the partials (FG_PASS_WORLD_REDUCE) and solves the normal equations:
 // texel 0 of the output holds the rotation and 1 when the fit is valid,
@@ -949,32 +956,49 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint index : SV_GroupIndex) {
     uint width, height;
     g_partials.GetDimensions(width, height);
     const uint groups = width / 8u;
-    float sums[32];
+    // Each thread sums every 64th group's partials in group order, four
+    // groups a loop with their 32 loads in flight together: past the last
+    // group they read outside the partials, which is zero, and a sum begun
+    // at +0 stays as it was for adding +0.
+    float4 sums[8];
     [unroll]
-    for (int i = 0; i < 32; ++i) {
-        sums[i] = 0.0;
+    for (int i = 0; i < 8; ++i) {
+        sums[i] = float4(0.0, 0.0, 0.0, 0.0);
     }
-    for (uint slot = index; slot < groups; slot += 64u) {
+    [loop]
+    for (uint slot = index; slot < groups; slot += 256u) {
+        float4 loaded[4][8];
         [unroll]
-        for (int j = 0; j < 8; ++j) {
-            const float4 value = g_partials.Load(int3(slot * 8u + uint(j), 0, 0));
-            sums[4 * j] += value.x;
-            sums[4 * j + 1] += value.y;
-            sums[4 * j + 2] += value.z;
-            sums[4 * j + 3] += value.w;
+        for (uint s = 0u; s < 4u; ++s) {
+            [unroll]
+            for (uint t = 0u; t < 8u; ++t) {
+                loaded[s][t] = g_partials.Load(int3(int((slot + 64u * s) * 8u + t), 0, 0));
+            }
+        }
+        [unroll]
+        for (uint u = 0u; u < 4u; ++u) {
+            [unroll]
+            for (int j = 0; j < 8; ++j) {
+                sums[j] += loaded[u][j];
+            }
         }
     }
     [unroll]
-    for (int term = 0; term < 32; ++term) {
-        g_sums[index][term] = sums[term];
+    for (int term = 0; term < FG_WORLD_SUMS; ++term) {
+        g_sums[term][index] = sums[term / 4][term % 4];
     }
     GroupMemoryBarrierWithGroupSync();
+    // Pairwise as FG_PASS_WORLD_REDUCE's, each step's sums spread over every
+    // thread.
     [unroll]
     for (uint stride = 32u; stride > 0u; stride >>= 1) {
-        if (index < stride) {
-            [unroll]
-            for (int sum = 0; sum < 32; ++sum) {
-                g_sums[index][sum] += g_sums[index + stride][sum];
+        [unroll]
+        for (uint part = 0u; part < (stride * FG_WORLD_SUMS + 63u) / 64u; ++part) {
+            const uint item = index + 64u * part;
+            if (item < stride * FG_WORLD_SUMS) {
+                const uint sum = item / stride;
+                const uint sample = item % stride;
+                g_sums[sum][sample] += g_sums[sum][sample + stride];
             }
         }
         GroupMemoryBarrierWithGroupSync();
@@ -988,34 +1012,52 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint index : SV_GroupIndex) {
     for (int r = 0; r < 6; ++r) {
         [unroll]
         for (int c = r; c < 6; ++c) {
-            a[r][c] = g_sums[0][k];
-            a[c][r] = g_sums[0][k];
+            a[r][c] = g_sums[k][0];
+            a[c][r] = g_sums[k][0];
             ++k;
         }
-        a[r][6] = g_sums[0][21 + r];
+        a[r][6] = g_sums[21 + r][0];
     }
-    const float weight = g_sums[0][27];
-    const float count = g_sums[0][28];
+    const float weight = g_sums[27][0];
+    const float count = g_sums[28][0];
     // A trace of damping: with the world far away (or only sky) the
     // translation is barely seen and must not make the system singular.
     [unroll]
     for (int d = 0; d < 6; ++d) {
         a[d][d] += weight * 1e-9;
     }
-    // Gaussian elimination with partial pivoting.
+    // Gaussian elimination with partial pivoting, by selects: the pivot row
+    // (the first of the largest, as a scan in row order finds it) taken
+    // along and swapped in by constant rows alone, so that the matrix stays
+    // in registers.
     bool solved = count >= FG_WORLD_MIN_SAMPLES && weight >= FG_WORLD_MIN_INLIERS * count;
     [unroll]
     for (int col = 0; col < 6; ++col) {
-        int pivot = col;
+        float pivot[7];
+        [unroll]
+        for (int held = 0; held < 7; ++held) {
+            pivot[held] = a[col][held];
+        }
+        int chosen = col;
         [unroll]
         for (int row = col + 1; row < 6; ++row) {
-            if (abs(a[row][col]) > abs(a[pivot][col])) pivot = row;
+            const bool larger = abs(a[row][col]) > abs(pivot[col]);
+            chosen = larger ? row : chosen;
+            [unroll]
+            for (int take = 0; take < 7; ++take) {
+                pivot[take] = larger ? a[row][take] : pivot[take];
+            }
         }
         [unroll]
-        for (int swap = 0; swap < 7; ++swap) {
-            const float held = a[col][swap];
-            a[col][swap] = a[pivot][swap];
-            a[pivot][swap] = held;
+        for (int below = col + 1; below < 6; ++below) {
+            [unroll]
+            for (int swap = 0; swap < 7; ++swap) {
+                a[below][swap] = chosen == below ? a[col][swap] : a[below][swap];
+            }
+        }
+        [unroll]
+        for (int put = 0; put < 7; ++put) {
+            a[col][put] = pivot[put];
         }
         solved = solved && abs(a[col][col]) > 1e-20;
         const float inverse = abs(a[col][col]) > 1e-20 ? 1.0 / a[col][col] : 0.0;
