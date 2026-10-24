@@ -28,6 +28,7 @@
 #include "depthxr/pivot_step.h"
 #include "depthxr/pivot_view.h"
 #include "depthxr/effects.h"
+#include "depthxr/external_status.h"
 #include "depthxr/head_prediction.h"
 #include "depthxr/logger.h"
 #include "depthxr/quadviews_frame_cache.h"
@@ -552,6 +553,10 @@ class OpenXrLayer {
     void PollFrameGenRecorder();
     // The app's status line for Frame Generation (RuntimeStatusDocument::framegen_reason).
     static std::string FrameGenStatusReason(const FrameGenStatus& framegen);
+    // Its rates as numbers (RuntimeStatusDocument::framegen_rates), and the
+    // public status file's Frame Generation block (external_status.h).
+    static RuntimeFrameGenRates FrameGenRates(const FrameGenStatus& framegen);
+    static ExternalFrameGenStatus ExternalFrameGen(const FrameGenStatus& framegen);
     void CaptureInstanceFunctions();
     void LogResolvedSettings(const ResolvedRuntimeConfig& settings);
     void ResetPivotActivationState();
@@ -718,6 +723,12 @@ class OpenXrLayer {
     XrResult HandOverBridgedReleasesLocked(XrSwapchain swapchain, SwapchainInfo& info, std::string_view reason,
                                            bool copy = true);
     XrResult HandOverBridgedReleasesLocked(std::string_view reason, bool copy = true);
+    // At a session's (or an instance's) end, before the Vulkan bridge's
+    // Escape: releases no frame's end handed over still give the game's
+    // rendering into their images to the bridge (its Released, not Frame
+    // Generation's capture), so End waits for the game's queue past that
+    // rendering before it frees the images. They stay kept for the runtime.
+    void SubmitKeptVulkanBridgeReleasesLocked();
     void PollQuadViewsDiagnosticVisualizationToggle();
     void ResetQuadViewsDiagnosticVisualizationState();
     bool PollInputBindingDown(const InputBinding& binding);
@@ -1206,6 +1217,15 @@ class OpenXrLayer {
     ProcessExitFile runtime_relay_exit_status_;
     ProcessExitFile runtime_relay_exit_control_;
     bool runtime_relay_pruned_{false}; // Watcher thread only.
+    // The public status file (external_status.h), written beside the relay's
+    // heartbeat while a session runs. Resolved with the relay root. A normal
+    // process exit removes it while it is still this process's (games that
+    // skip OpenXR teardown); guarded by mutex_.
+    std::filesystem::path external_status_path_;
+    ProcessExitFile external_status_exit_;
+    // A session's end could not remove it yet (a reader held it): tried again
+    // at the next polls while no session runs. Watcher thread only.
+    bool external_status_remove_pending_{false};
     // The app's last Rescan inputs request taken (Unix ms). Watcher thread only.
     std::uint64_t input_rescan_taken_at_{0};
     // The Frame Generation events PollFrameGenRecorder last saw (watcher

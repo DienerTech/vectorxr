@@ -35,6 +35,11 @@ constexpr int kAutoMaxBackoffDoublings = 3; // 10 s, 20 s, 40 s, 80 s
 // transition settle briefly, then judge its actual cadence rather than
 // spending the full engagement warmup on an unsustainable rate.
 constexpr std::chrono::milliseconds kAutoProbeSettle{250};
+// ...and judges it on this many frames at least (a slow game's half second
+// holds few: a 4x -> 3x probe at 90 Hz about fifteen).
+constexpr std::size_t kAutoProbeJudgedFrames = 16;
+// Auto counts a frame late once it takes this much longer than its refreshes.
+constexpr double kAutoLateFactor = 1.25;
 // Auto stays at full rate this long after inline cycles kept starting late.
 constexpr std::chrono::seconds kInlineHold{60};
 // The presenter thread waits this long for frames in flight when it stops.
@@ -57,6 +62,15 @@ constexpr std::chrono::milliseconds kPauseCeiling{1000};
 constexpr double kProbeReach = 0.10;
 // Pauses logged one by one per session; later ones only in summaries.
 constexpr std::uint32_t kLoggedPauses = 3;
+// Moves of the lead's ceiling from the history ring logged per session;
+// later ones only in summaries (ringMoves).
+constexpr std::uint32_t kLoggedRingMoves = 16;
+// A lowering of the lead's ceiling is the policy's calm probe when that
+// probe is due within this (a few frames): judged in its place, the policy
+// keeps what it showed. Further ahead the probe may never come (a hitch
+// resets its calm time first), and taking a hitch during the lowering for
+// its failure raised the policy's floors to the lead lowered.
+constexpr std::chrono::milliseconds kRingProbeAhead{100};
 // Summary sample windows keep at most this many values.
 constexpr std::size_t kMaxSamples = 4096;
 // ...and of those taken once per game frame, this many (a 30 s window at
@@ -334,6 +348,15 @@ std::string Percentiles(std::vector<double> values, double low, double high) {
         return values[index];
     };
     return Number(at(low), 1) + "/" + Number(at(high), 1);
+}
+
+// "lead:frames" for each lead told in a summary window, "-" when none.
+std::string LeadCountsText(const std::map<std::uint32_t, std::uint64_t>& counts) {
+    std::string text;
+    for (const auto& [lead, frames] : counts) {
+        text += (text.empty() ? "" : " ") + std::to_string(lead) + ":" + std::to_string(frames);
+    }
+    return text.empty() ? "-" : text;
 }
 
 std::optional<double> Median(std::vector<double> values) {
@@ -648,6 +671,26 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
     engine_window_ = {};
     gpu_frames_ahead_ = 1;
     gpu_timeouts_in_row_ = 0;
+    // VECTORXR_FRAMEGEN_LEAD=events: the lead steps by hitch events
+    // (FrameGenLeadPolicy::hitch_events), for comparisons in flight; off by
+    // default until flown.
+    const char* lead_setting = std::getenv("VECTORXR_FRAMEGEN_LEAD");
+    const bool event_lead = lead_setting && std::string(lead_setting) == "events";
+    if (event_lead) {
+        lead_policy_.hitch_events = true;
+    }
+    // VECTORXR_FRAMEGEN_LEAD_CEILING=ring (or on) or off: the lead's ceiling
+    // follows the history ring or not (FrameGenLeadPolicy::ring_ceiling,
+    // whose default this outranks), for comparisons in flight.
+    ring_ceiling_env_.reset();
+    if (const char* ceiling = std::getenv("VECTORXR_FRAMEGEN_LEAD_CEILING"); ceiling) {
+        const std::string setting = ceiling;
+        if (setting == "ring" || setting == "on") {
+            ring_ceiling_env_ = true;
+        } else if (setting == "off") {
+            ring_ceiling_env_ = false;
+        }
+    }
     std::string gpu_gate_setting;
     if (const char* ahead = std::getenv("VECTORXR_FRAMEGEN_GPU_AHEAD"); ahead && *ahead) {
         gpu_gate_setting = ahead;
@@ -841,6 +884,21 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
                                              " ignored (sign,scale: 1 or -1, 0.7-1.4)") +
                 (delta.sky ? "; the sky turns with it (VECTORXR_FRAMEGEN_ENGINE_SKY=1)." : "."));
         }
+        if (event_lead) {
+            logger_->Info("Frame Generation: the lead steps by hitch events, not frame by frame "
+                          "(VECTORXR_FRAMEGEN_LEAD=events).");
+        }
+        // Always: the default is on, and every flight log names its arm.
+        if (RingCeilingLocked()) {
+            logger_->Info(std::string("Frame Generation: the lead's ceiling follows the history ring: a lead whose "
+                                      "moved refreshes find their real frame's previous images replaced is lowered a "
+                                      "refresh ") +
+                          (ring_ceiling_env_ ? "(VECTORXR_FRAMEGEN_LEAD_CEILING=ring)."
+                                             : "(default; VECTORXR_FRAMEGEN_LEAD_CEILING=off turns it off)."));
+        } else {
+            logger_->Info("Frame Generation: the lead's ceiling is 4 refreshes per real frame; ring-short refreshes "
+                          "are counted only (VECTORXR_FRAMEGEN_LEAD_CEILING=off).");
+        }
         if (!gpu_gate_setting.empty()) {
             logger_->Info("Frame Generation: GPU-aware pacing set by VECTORXR_FRAMEGEN_GPU_AHEAD=" + gpu_gate_setting +
                           (gpu_gate_enabled_ ? ": the game's waits are held until its GPU has run the capture of " +
@@ -1023,6 +1081,7 @@ void FrameGenPresenter::Stop() {
     passthrough_copy_ = {};
     jit_covers_ = 0;
     logged_jit_ = false;
+    logged_ring_moves_ = 0;
     ResetLeadLocked();
     dynamic_interval_slots_ = 0.0;
     dynamic_standby_ = true;
@@ -1061,10 +1120,13 @@ void FrameGenPresenter::Stop() {
     end_call_ms_.clear();
     runtime_end_ms_.clear();
     synth_lock_ms_.clear();
+    ring_short_write_ms_.clear();
     told_lead_sum_ = 0;
     told_lead_frames_ = 0;
     told_lead_max_ = 0;
     game_ahead_ms_.clear();
+    told_ahead_ms_.clear();
+    told_lead_counts_.clear();
     ahead_jitter_ms_.clear();
     end_slack_ms_.clear();
     last_ahead_ms_ = 0.0;
@@ -1173,6 +1235,10 @@ void FrameGenPresenter::Configure(const FrameGenResolvedSettings& settings) {
         multiplier_changed_at_ = now;
         cadence_.clear();
         dynamic_below_since_.reset();
+        // The ring's ceilings are keyed by multiplier, and their floors
+        // follow the mode (a refresh per real frame for Dynamic): one learned
+        // under Dynamic capped a fixed 2x run below what its ring holds.
+        ResetRingCeilingLocked();
         if (was_dynamic && !dynamic) {
             if (standby_since_ && dynamic_standby_ && now > *standby_since_) {
                 standby_seconds_ += std::chrono::duration<double>(now - *standby_since_).count();
@@ -1254,11 +1320,20 @@ void FrameGenPresenter::SetLeadPolicy(const FrameGenLeadPolicy& policy) {
     lead_policy_ = policy;
     lead_explore_after_ = policy.explore_after;
     lead_return_after_ = policy.explore_after;
+    for (LeadRing& ring : lead_ring_) {
+        ring.retry = policy.explore_after;
+    }
+}
+
+void FrameGenPresenter::ClearLeadHistoryLocked() {
+    lead_history_.clear();
+    lead_event_start_.reset();
+    lead_events_.clear();
 }
 
 void FrameGenPresenter::ResetLeadLocked() {
     lead_slots_ = 0;
-    lead_history_.clear();
+    ClearLeadHistoryLocked();
     lead_calm_since_ = {};
     lead_probe_.reset();
     lead_floor_ = 0;
@@ -1266,6 +1341,231 @@ void FrameGenPresenter::ResetLeadLocked() {
     lead_explore_after_ = lead_policy_.explore_after;
     lead_return_after_ = lead_policy_.explore_after;
     lead_floor_failed_ = false;
+    // The ring's ceilings were this run's: another mode, rate or engagement
+    // captures on another timing.
+    ResetRingCeilingLocked();
+    logged_ring_held_ = false;
+}
+
+void FrameGenPresenter::ResetRingCeilingLocked() {
+    for (LeadRing& ring : lead_ring_) {
+        ring = LeadRing{};
+        ring.retry = lead_policy_.explore_after;
+    }
+    lead_ring_event_.reset();
+}
+
+std::uint32_t FrameGenPresenter::RingLeadFloorLocked(std::uint32_t multiplier) const {
+    return FrameGenRingLeadFloor(JitRingLocked(quad_mode_), jit_interpolate_, DynamicLocked() ? 1 : multiplier);
+}
+
+std::uint32_t FrameGenPresenter::LeadCapLocked(std::uint32_t multiplier) const {
+    if (!RingCeilingLocked() || multiplier > 4 || !jit_) {
+        return 4 * multiplier;
+    }
+    const std::uint32_t ceiling = lead_ring_[multiplier].ceiling;
+    // A ceiling is never below the lead the ring holds at any capture time,
+    // in the mode the run is in now.
+    return ceiling ? std::min(4 * multiplier, std::max(ceiling, RingLeadFloorLocked(multiplier))) : 4 * multiplier;
+}
+
+bool FrameGenPresenter::RingJudgedLocked(const LeadRing& ring, Clock::time_point now) const {
+    if (!ring.trial) {
+        return false;
+    }
+    if (now - *ring.trial < lead_policy_.judge) {
+        return true;
+    }
+    // A late event begun within judge awaits its second for event_window: a
+    // lead too short is late again a hitch_span on, which may be past judge.
+    return ring.late_event && *ring.late_event - *ring.trial < lead_policy_.judge &&
+           now - *ring.late_event <= lead_policy_.event_window;
+}
+
+void FrameGenPresenter::ExpireRingCeilingLocked(std::uint32_t multiplier, Clock::time_point now) {
+    if (multiplier > 4 || !DynamicLocked()) {
+        return;
+    }
+    LeadRing& ring = lead_ring_[multiplier];
+    const std::uint8_t slots = JitRingLocked(quad_mode_);
+    if (!ring.ceiling || ring.interval <= 0.0 || dynamic_interval_slots_ <= 0.0 || slots < 3) {
+        return;
+    }
+    // Each real frame's capture moves a frame's previous images a real frame
+    // interval nearer its release: the ring holds (slots - 2) intervals
+    // extrapolating, (slots - 1) interpolating, so the interval a refresh in
+    // that many longer holds a lead more. One ceiling covers 1.5 to 2.5
+    // refreshes per real frame at 2x: learned at 1.5 it capped the lead of
+    // the same run slowed to 2.3, whose ring holds two refreshes more.
+    const double more = 1.0 / static_cast<double>(slots - (jit_interpolate_ ? 1 : 2));
+    if (dynamic_interval_slots_ < ring.interval + more) {
+        return;
+    }
+    const std::uint32_t ceiling = ring.ceiling;
+    ring.ceiling = 0;
+    ring.trial.reset();
+    ring.late_event.reset();
+    ring.changed_at = now;
+    trace_.Record("ringcap", multiplier, 0, lead_slots_);
+    if (logger_ && logged_ring_moves_ < kLoggedRingMoves) {
+        ++logged_ring_moves_;
+        logger_->Info("Frame Generation drops the lead's ceiling of " + std::to_string(ceiling) + " at " +
+                      std::to_string(multiplier) + "x: the game slowed from " + Number(ring.interval, 2) + " to " +
+                      Number(dynamic_interval_slots_, 2) + " refreshes per real frame, and the history ring holds a " +
+                      "lead more.");
+    }
+}
+
+void FrameGenPresenter::ClampLeadLocked(std::uint32_t cap) {
+    lead_slots_ = cap;
+    lead_floor_ = std::min(lead_floor_, lead_slots_);
+    lead_floor_proven_ = std::min(lead_floor_proven_, lead_slots_);
+    lead_probe_.reset();
+    ClearLeadHistoryLocked();
+}
+
+void FrameGenPresenter::NoteRingShortLocked(const JitWrite& write, Clock::time_point returned, XrDuration period) {
+    ++totals_.ring_short;
+    const std::uint32_t multiplier = std::max(2u, EffectiveMultiplierLocked());
+    const auto found_after = write.ring_short_at - returned;
+    AddSample(ring_short_write_ms_, Milliseconds(found_after));
+    // Only the lead's doing: the run's own path with a deep ring, a frame
+    // told the current lead at the current multiplier, and found so within
+    // three quarters of a refresh of the presenter thread's wait returning
+    // (later, the presenter thread itself was late: its acquire or output
+    // wait, not the lead). Draining, frames are kept to their own refresh.
+    const bool late_write = found_after > std::chrono::nanoseconds(period * 3 / 4);
+    const bool counts = !compositor_drain_ && write.ring_short_composed == quad_mode_ &&
+                        JitRingLocked(write.ring_short_composed) >= kFrameGenHistoryRingMax &&
+                        write.ring_short_lead == lead_slots_ && write.ring_short_multiplier == multiplier &&
+                        multiplier <= 4 && !late_write;
+    if (!counts) {
+        ++totals_.ring_short_ignored;
+        totals_.ring_short_late += late_write ? 1 : 0;
+        return;
+    }
+    const auto now = Clock::now();
+    // Each real frame counts once; two at the same lead within event_window
+    // lower its ceiling.
+    if (lead_ring_event_ && lead_ring_event_->frame == write.ring_short_id) {
+        return;
+    }
+    if (!lead_ring_event_ || lead_ring_event_->lead != write.ring_short_lead ||
+        lead_ring_event_->multiplier != multiplier || now - lead_ring_event_->at > lead_policy_.event_window) {
+        lead_ring_event_ = LeadRingEvent{now, write.ring_short_id, write.ring_short_lead, multiplier};
+        return;
+    }
+    // While a probe or step down is judged the policy is bringing the lead
+    // down itself: the second frame waits for its verdict (the next
+    // ring-short frame after it lowers the ceiling). Lowered under it, the
+    // probe was dropped unjudged, and with it the wait it would have reset:
+    // a GPU-bound game's lead held a refresh higher for 1.4 s while its own
+    // steps down went on to it (TestLeadCeilingGpuBoundTrade). Turned off,
+    // too: ringWould counts the lowerings the ceiling would have made by its
+    // own rules, comparable with ringMoves of a flight with it on.
+    if (lead_probe_) {
+        return;
+    }
+    const LeadRingEvent first = *lead_ring_event_;
+    lead_ring_event_.reset();
+    const std::uint32_t lead = lead_slots_;
+    LeadRing& ring = lead_ring_[multiplier];
+    // Never below the lead the ring holds at any capture timing, nor one
+    // that frames late a refresh below it showed the game needs (for
+    // explore_max). Only a lowering's own verdict sets that: a probe or step
+    // down of the policy's that a hitch failed says nothing of the ring, and
+    // held the ceiling at a lead the ring is short for (DCS on Virtual
+    // Desktop, Pierpaolo 2026-10-20: lead 8 from hitches, three steps down
+    // undone, 198 refreshes in 30 s finding their images replaced). Nor the
+    // lowest lead the policy found to hold (lead_floor_proven_): a step down
+    // judged good proves only that, and it held a lead the ring was short for
+    // while the policy itself later went three refreshes lower
+    // (TestLeadCeilingGpuBoundTrade).
+    const bool needed = ring.needed && now - ring.needed_at < lead_policy_.explore_max;
+    const std::uint32_t floor = std::max({RingLeadFloorLocked(multiplier), needed ? ring.needed : 0u, 1u});
+    const std::uint32_t target = std::max(lead - 1, floor);
+    if (!RingCeilingLocked()) {
+        // What it would have done: a lowering for each lead it would have
+        // reached, not one for every pair of frames at a lead it would have
+        // left already (the lead stays here, its frames ring-short pair
+        // after pair).
+        if (target < lead && (!ring.would || lead <= ring.would)) {
+            ring.would = target;
+            ++totals_.ring_short_would;
+        }
+        return;
+    }
+    if (target >= lead) {
+        ++totals_.lead_ring_held;
+        if (logger_ && !logged_ring_held_) {
+            logged_ring_held_ = true;
+            logger_->Info("Frame Generation keeps a lead of " + std::to_string(lead) + " at " +
+                          std::to_string(multiplier) +
+                          "x though the history ring is a capture short there: frames were late a refresh below it, "
+                          "or the ring holds that lead at any capture time.");
+        }
+        return;
+    }
+    // A raise undone within explore_after: the next waits twice as long.
+    if (ring.raised && now - ring.changed_at < lead_policy_.explore_after) {
+        ring.retry = std::min(ring.retry * 2, lead_policy_.explore_max);
+    } else if (ring.raised) {
+        ring.retry = lead_policy_.explore_after;
+    }
+    ring.raised = false;
+    // The policy's own calm probe from this lead, already due (within
+    // kRingProbeAhead): the lowering is that probe. Its verdict is the
+    // policy's (late frames make this lead the lowest known to hold and the
+    // next try below it waits explore_after, doubling; held, the lead below
+    // is). Judged apart, its failure taught the policy nothing: the policy
+    // then failed its own probe from the same lead, and each later probe
+    // came that much later (a GPU-bound game, its captures replaced at 8 and
+    // late at 7: the lowering came 8 ms after the policy's probe was due, the
+    // policy came down from 8 0.35 s later than with the ceiling off, and 40
+    // refreshes found their images replaced against 29:
+    // TestLeadCeilingGpuBoundTrade). Any other lowering is a trial of its
+    // own: undone, the policy's floors and calm time are put back.
+    const auto calm_since = lead_calm_since_ == Clock::time_point{} ? now : lead_calm_since_;
+    const bool as_probe =
+        !lead_policy_.pinned_lead && lead > 1 && calm_since + CalmProbeWaitLocked() <= now + kRingProbeAhead;
+    // Judged as a probe is, by hitch events (UpdateLeadLocked): two late
+    // events at it put the ceiling before it back at once.
+    ring.trial = now;
+    ring.late_event.reset();
+    ring.trial_from = lead;
+    ring.trial_previous = ring.ceiling;
+    ring.trial_calm = lead_calm_since_;
+    ring.trial_floor = lead_floor_;
+    ring.trial_proven = lead_floor_proven_;
+    ring.trial_floor_failed = lead_floor_failed_;
+    ring.ceiling = target;
+    ring.changed_at = now;
+    ring.interval = dynamic_interval_slots_;
+    ++totals_.lead_ring_downs;
+    ClampLeadLocked(target);
+    if (as_probe) {
+        // As the policy's probe from this lead leaves them: held, the lead
+        // below is the lowest known to hold; undone, this one.
+        lead_floor_ = ring.trial_floor;
+        lead_floor_proven_ = ring.trial_proven;
+        lead_probe_ = LeadProbe{now, lead};
+        lead_probe_->ring = true;
+    }
+    lead_calm_since_ = now;
+    trace_.Record("ringcap", multiplier, target, lead);
+    if (logger_ && logged_ring_moves_ < kLoggedRingMoves) {
+        ++logged_ring_moves_;
+        logger_->Info("Frame Generation lowers the lead's ceiling at " + std::to_string(multiplier) + "x to " +
+                      std::to_string(target) + " refreshes: real frames " + std::to_string(first.frame) + " and " +
+                      std::to_string(write.ring_short_id) + ", told " + std::to_string(lead) +
+                      ", found their previous images replaced in the " +
+                      std::to_string(JitRingLocked(quad_mode_)) + "-frame history before their last moved refresh (" +
+                      Number(std::chrono::duration<double>(now - first.at).count(), 2) +
+                      " s apart); frames late at " + std::to_string(target) + " in two hitch events within " +
+                      Number(std::chrono::duration<double>(lead_policy_.judge).count(), 1) + " s put " +
+                      std::to_string(lead) + " back at once, later ones retry it after " +
+                      Number(std::chrono::duration<double>(ring.retry).count(), 1) + " s.");
+    }
 }
 
 void FrameGenPresenter::SetDynamicPolicy(const FrameGenDynamicPolicy& policy) {
@@ -3023,11 +3323,14 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
     // actual frames still have to establish persistent lateness before the
     // old multiplier is restored. Capture latency alone cannot tell whether
     // the game has the throughput for the lower multiplier.
-    const auto settle = probing_ ? std::min(auto_settle_, kAutoProbeSettle) : auto_settle_;
+    // Only the probe's own switch: a change since (new settings, the
+    // runtime's clock recovering, new output images) settles in full.
+    const bool probe_switch = probing_ && multiplier_changed_at_ == probe_started_at_;
+    const auto settle = probe_switch ? std::min(auto_settle_, kAutoProbeSettle) : auto_settle_;
     if (last_app_end_ && now - multiplier_changed_at_ >= settle) {
         // An engaged frame should take N refreshes; a passed-through one, one.
         const double multiplier = frame && frame->engaged ? static_cast<double>(frame->multiplier) : 1.0;
-        const auto expected = std::chrono::nanoseconds(static_cast<std::int64_t>(period * multiplier * 1.25));
+        const auto expected = std::chrono::nanoseconds(static_cast<std::int64_t>(period * multiplier * kAutoLateFactor));
         const bool late = now - *last_app_end_ > expected;
         cadence_.push_back({now, late, late && started_late});
     }
@@ -3050,6 +3353,15 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
             steady_late += entry.late ? 1 : 0;
         }
     }
+    // ...and the probe is judged once it has a quarter of the configured
+    // settle's frames past that (500 ms by default) and kAutoProbeJudgedFrames
+    // of them, or the configured settle has passed (a slow game), never on
+    // the first eight: a few late frames in a row as the short settle ends
+    // (a transition not quite over) made half of those late and failed a
+    // probe the game then held.
+    const auto since_switch = now - multiplier_changed_at_;
+    const bool judged = !probe_switch || (since_switch >= settle + auto_settle_ / 4 &&
+                                          (cadence_.size() >= kAutoProbeJudgedFrames || since_switch >= auto_settle_));
     const std::uint32_t before = auto_multiplier_;
     // A halving hold ends early where the game's own waits clear the report.
     // Only waits asked for well within a refresh, or released at the next
@@ -3063,7 +3375,7 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
     bool late_at_ceiling = false;
     std::chrono::duration<double> left_ceiling_after{}; // for the log: a probe down from there
     // More than 30% of the last second's frames missed the cadence: step up.
-    if (recent >= 8 && recent_late * 10 > recent * 3) {
+    if (judged && recent >= 8 && recent_late * 10 > recent * 3) {
         auto_late_percent_ = recent_late * 100 / recent;
         if (!compositor_running_ && auto_multiplier_ > 1 && recent_started_late * 2 >= recent_late) {
             // Inline cycles that start late hold the game's frame thread for
@@ -3105,7 +3417,9 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
             }
         }
         probe_not_before_ = now + probe_backoff_;
-    } else if (probing_ && now - multiplier_changed_at_ >= auto_probe_confirm_) {
+    } else if (probing_ && judged && now - multiplier_changed_at_ >= auto_probe_confirm_) {
+        // Not before it was judged: a probe still too short of frames to
+        // fail is not confirmed.
         probing_ = false;
         probe_backoff_ = auto_initial_backoff_;
         probe_not_before_ = now + probe_backoff_;
@@ -3127,6 +3441,9 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
     }
     if (auto_multiplier_ != before) {
         multiplier_changed_at_ = now;
+        if (probing_) {
+            probe_started_at_ = now;
+        }
         cadence_.clear();
         if (logger_ && gave_up_inline) {
             logger_->Info("Frame Generation automatic multiplier " + MultiplierText(before) +
@@ -5921,7 +6238,11 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
             "% of what both eyes see) it leaves " + Number(evidence.decoded.Ratio(), 2) +
             " of the error without depth (swapped " + Number(evidence.swapped.Ratio(), 2) +
             "); the other eye disproves " + Number(moved > 0.0 ? 100.0 * evidence.decoded.fallback / moved : 0.0, 0) +
-            "% of it, which is treated as far (cockpit glass written to depth, or depth wrong there)." +
+            "% of it (swapped " +
+            Number(evidence.swapped.samples > 0.0 ? 100.0 * evidence.swapped.fallback / evidence.swapped.samples : 0.0,
+                   0) +
+            "%; a reading disproved on over half is not used), which is treated as far "
+            "(cockpit glass written to depth, or depth wrong there)." +
             (depth.reading == FrameGenDepthReading::kUnusable &&
                      evidence.source_varied == 0.0
                  ? " The depth is the same all over the eye checked (cleared to one value), which shows nothing of "
@@ -7264,12 +7585,18 @@ void FrameGenPresenter::ExitThreadedLocked(std::unique_lock<std::mutex>& lock) {
 
 void FrameGenPresenter::UpdateLeadLocked(bool late, std::optional<double> slack_ms, std::uint32_t lead,
                                          std::uint32_t multiplier) {
+    if (lead_policy_.pinned_lead) {
+        return; // tests: the lead stays where it was pinned
+    }
     const auto now = Clock::now();
     if (lead_calm_since_ == Clock::time_point{}) {
         lead_calm_since_ = now;
     }
     // A probe nothing late undid within its judging time: its lead holds.
-    if (lead_probe_ && now - lead_probe_->at >= lead_policy_.judge) {
+    // A lowering of the ring's ceiling taken for it waits, as long as a late
+    // event at it awaits a second (RingJudgedLocked).
+    if (lead_probe_ && now - lead_probe_->at >= lead_policy_.judge &&
+        !(lead_probe_->ring && multiplier <= 4 && RingJudgedLocked(lead_ring_[multiplier], now))) {
         if (lead_floor_ == 0 || lead_slots_ < lead_floor_) {
             // Only back at the lowest lead a probe proved, from a floor late
             // frames raised: below it, tries still wait as long as the
@@ -7305,7 +7632,8 @@ void FrameGenPresenter::UpdateLeadLocked(bool late, std::optional<double> slack_
     } else if (lead == lead_slots_) {
         const double period_ms = static_cast<double>(std::max<XrDuration>(last_period_, 1)) / 1e6;
         // Slack: it could have arrived a refresh later and still made its slot.
-        lead_history_.push_back(late ? 1 : (slack_ms && *slack_ms > period_ms * 1.1) ? 2 : 0);
+        const bool spare = !late && slack_ms && *slack_ms > period_ms * 1.1;
+        lead_history_.push_back(late ? 1 : spare ? 2 : 0);
         while (lead_history_.size() > 10) {
             lead_history_.pop_front();
         }
@@ -7313,7 +7641,133 @@ void FrameGenPresenter::UpdateLeadLocked(bool late, std::optional<double> slack_
             return static_cast<std::size_t>(std::count(lead_history_.begin(), lead_history_.end(), kind));
         };
         const bool hysteresis = lead_policy_.slack_hysteresis;
-        if (count(1) >= 2) {
+        // Late: two in the last ten frames. Spare: seven of the last ten.
+        bool step_up = count(1) >= 2;
+        bool step_down = lead_history_.size() >= 8 && count(2) >= 7;
+        if (lead_policy_.hitch_events) {
+            // Late: two hitches within event_window, each the late frames
+            // within hitch_span of its first. A probe is still undone by two
+            // late frames in the last ten: a lead too short is late frame
+            // after frame, and judged by hitch events it showed a quarter
+            // second of them before going back. (Judging spare time over a
+            // longer window as well held a GPU-bound game, whose frames show
+            // a refresh to spare only now and then, three slots higher after
+            // a slow stretch: TestLeadStepsDownAfterHitches.)
+            if (late && (!lead_event_start_ || now - *lead_event_start_ > lead_policy_.hitch_span)) {
+                lead_event_start_ = now;
+                lead_events_.push_back(now);
+            }
+            while (!lead_events_.empty() && now - lead_events_.front() > lead_policy_.event_window) {
+                lead_events_.pop_front();
+            }
+            step_up = lead_probe_ ? count(1) >= 2 : lead_events_.size() >= 2;
+        }
+        // At the ring's lowered ceiling the ring's own verdict counts, by
+        // hitch events whatever the policy steps by: a lead the ring holds
+        // too short for the game is late frame after frame, a second event a
+        // hitch_span after the first; a lone hitch no lead cures is one. By
+        // the policy's two late frames in ten each hitch undid the lowering,
+        // and a game hitching every few seconds kept the lead the ring is
+        // short for (DCS on Virtual Desktop, Pierpaolo 2026-10-20:
+        // TestLeadCeilingActsThroughHitches).
+        std::uint32_t cap = LeadCapLocked(multiplier);
+        const bool at_ceiling = cap < 4 * multiplier && lead_slots_ >= cap;
+        const bool judged = at_ceiling && RingJudgedLocked(lead_ring_[multiplier], now);
+        bool repeated = false; // late in a second event within event_window
+        if (at_ceiling && late) {
+            std::optional<Clock::time_point>& event = lead_ring_[multiplier].late_event;
+            if (!event || now - *event > lead_policy_.hitch_span) {
+                repeated = event && now - *event <= lead_policy_.event_window;
+                event = now;
+            }
+        }
+        if (judged && !repeated && step_up) {
+            // A lone hitch at a lowering being judged (or its probe): it
+            // stays, the hitch's frames forgotten.
+            ClearLeadHistoryLocked();
+            lead_calm_since_ = now;
+            return;
+        }
+        // A second event at the ceiling is a step up of its own, judged or
+        // not: it undoes a lowering being judged, or raises (or is refused)
+        // after it. Left to the policy's own step up, frame by frame each
+        // burst's second late frame stepped up and cleared the history, so
+        // the next burst's first, the one in a second event, counted one late
+        // frame: a ceiling that bursts of lateness showed too low was never
+        // raised (TestLeadCeilingRaisesOnBursts).
+        if (repeated) {
+            step_up = true;
+        }
+        if (step_up) {
+            // Late at the ring's ceiling in a second event: it is tried a
+            // refresh higher again once its retry wait has run out (the ring
+            // may hold that lead now: the game's capture timing changed),
+            // else the lead stays (refused).
+            // An undone lowering not taken for a probe: the policy's state
+            // before it, put back once the lead is (as though never tried).
+            const LeadRing* undone = nullptr;
+            if (at_ceiling) {
+                LeadRing& ring = lead_ring_[multiplier];
+                if (judged) {
+                    // Taken for the policy's probe, it fails below as one.
+                    // Else the floors the lowering clamped come back, and
+                    // the policy's next probe keeps its time (reset to now,
+                    // it came a probe_after after the undo).
+                    if (!lead_probe_) {
+                        undone = &ring;
+                    }
+                    // Late in a second event while judged: undone at once,
+                    // and the lead it lowered is needed (for explore_max). A
+                    // late frame's refresh shows the frame before moved past
+                    // itself, which a refresh lower stands where it stood at
+                    // the lead above, its previous images as gone: the
+                    // ring's cost stayed, and the lateness came on top (a
+                    // game captured 83 ms after release, late at 7 and the
+                    // ring a capture short at 8: 303 refreshes found their
+                    // images replaced in 7 s against 302 at 8, and 282
+                    // frames late against 21).
+                    const std::uint32_t lowered = cap;
+                    ring.ceiling = ring.trial_previous;
+                    ring.needed = ring.trial_from;
+                    ring.needed_at = now;
+                    ring.trial.reset();
+                    ring.late_event.reset();
+                    ring.changed_at = now;
+                    ++totals_.lead_ring_undone;
+                    trace_.Record("ringcap", multiplier, ring.ceiling, lowered);
+                    if (logger_ && logged_ring_moves_ < kLoggedRingMoves) {
+                        ++logged_ring_moves_;
+                        logger_->Info("Frame Generation puts the lead's ceiling at " + std::to_string(multiplier) +
+                                      "x back to " +
+                                      (ring.ceiling ? std::to_string(ring.ceiling) + " refreshes"
+                                                    : std::string("none")) +
+                                      ": frames were late at " + std::to_string(lowered) +
+                                      " in two hitch events while it was judged; " + std::to_string(ring.needed) +
+                                      " is kept though the ring is a capture short there.");
+                    }
+                    cap = LeadCapLocked(multiplier);
+                } else if (repeated && now - ring.changed_at >= ring.retry) {
+                    ring.ceiling = cap + 1 >= 4 * multiplier ? 0 : cap + 1;
+                    ring.raised = true;
+                    ring.late_event.reset();
+                    ring.changed_at = now;
+                    ++totals_.lead_ring_raises;
+                    if (logger_ && logged_ring_moves_ < kLoggedRingMoves) {
+                        ++logged_ring_moves_;
+                        logger_->Info("Frame Generation tries the lead's ceiling at " + std::to_string(multiplier) +
+                                      "x at " + std::to_string(cap + 1) + " refreshes again: frames were late at " +
+                                      std::to_string(cap) + " (next try after " +
+                                      Number(std::chrono::duration<double>(
+                                                 std::min(ring.retry * 2, lead_policy_.explore_max))
+                                                 .count(),
+                                             1) +
+                                      " s if their images are replaced again).");
+                    }
+                    cap = LeadCapLocked(multiplier);
+                } else if (repeated) {
+                    ++totals_.lead_ring_refused;
+                }
+            }
             if (lead_probe_) {
                 // The probe (or step down) failed: the lead before it is the
                 // lowest known to hold, and below it is tried only rarely
@@ -7340,7 +7794,9 @@ void FrameGenPresenter::UpdateLeadLocked(bool late, std::optional<double> slack_
                     lead_return_after_ = lead_policy_.explore_after;
                 }
                 lead_floor_failed_ = true;
-                ++(lead_probe_->slack ? totals_.lead_downs_undone : totals_.lead_probes_failed);
+                if (!lead_probe_->ring) {
+                    ++(lead_probe_->slack ? totals_.lead_downs_undone : totals_.lead_probes_failed);
+                }
                 lead_probe_.reset();
             } else if (hysteresis && lead_floor_ != 0 && lead_slots_ <= lead_floor_) {
                 // Late at the lowest lead known to hold: it holds no longer.
@@ -7352,14 +7808,20 @@ void FrameGenPresenter::UpdateLeadLocked(bool late, std::optional<double> slack_
                 // probes back to the proven lead, which then come less often
                 // (explore_wait).
                 const std::uint32_t most = lead_floor_proven_ != 0 ? lead_floor_proven_ + 1 : lead_slots_ + 1;
-                lead_floor_ = std::max(lead_floor_, std::min({lead_slots_ + 1, 4 * multiplier, most}));
+                lead_floor_ = std::max(lead_floor_, std::min({lead_slots_ + 1, cap, most}));
                 lead_floor_failed_ = true;
             }
             // At the cap nothing moves: not counted (the summary marks the cap).
-            totals_.lead_ups += lead_slots_ < 4 * multiplier ? 1 : 0;
-            lead_slots_ = std::min(lead_slots_ + 1, 4 * multiplier);
-            lead_history_.clear();
+            totals_.lead_ups += lead_slots_ < cap ? 1 : 0;
+            lead_slots_ = std::min(lead_slots_ + 1, cap);
+            ClearLeadHistoryLocked();
             lead_calm_since_ = now;
+            if (undone) {
+                lead_floor_ = undone->trial_floor;
+                lead_floor_proven_ = undone->trial_proven;
+                lead_floor_failed_ = undone->trial_floor_failed;
+                lead_calm_since_ = undone->trial_calm;
+            }
             return;
         }
         // Frames with a refresh to spare: one slot less, judged as a probe.
@@ -7369,7 +7831,7 @@ void FrameGenPresenter::UpdateLeadLocked(bool late, std::optional<double> slack_
         // down and back up about once a second, each time with two late
         // frames (DCS and MSFS 2024, 2026-10-09).
         const bool exploring = lead_floor_ != 0 && lead_slots_ <= lead_floor_ && lead_floor_failed_;
-        if (lead_history_.size() >= 8 && count(2) >= 7 && lead_slots_ > 1 &&
+        if (step_down && lead_slots_ > 1 &&
             (!hysteresis || !exploring || now - lead_calm_since_ >= explore_wait)) {
             if (hysteresis) {
                 lead_probe_ = LeadProbe{now, lead_slots_};
@@ -7377,7 +7839,7 @@ void FrameGenPresenter::UpdateLeadLocked(bool late, std::optional<double> slack_
             }
             --lead_slots_;
             ++totals_.lead_downs;
-            lead_history_.clear();
+            ClearLeadHistoryLocked();
             lead_calm_since_ = now;
             return;
         }
@@ -7388,15 +7850,22 @@ void FrameGenPresenter::UpdateLeadLocked(bool late, std::optional<double> slack_
     if (lead_probe_ || lead_slots_ <= 1) {
         return;
     }
-    const auto wait = lead_floor_ != 0 && lead_slots_ <= lead_floor_ ? explore_wait : lead_policy_.probe_after;
-    if (now - lead_calm_since_ < wait) {
+    if (now - lead_calm_since_ < CalmProbeWaitLocked()) {
         return;
     }
     lead_probe_ = LeadProbe{now, lead_slots_};
     --lead_slots_;
     ++totals_.lead_probes;
-    lead_history_.clear();
+    ClearLeadHistoryLocked();
     lead_calm_since_ = now;
+}
+
+std::chrono::milliseconds FrameGenPresenter::CalmProbeWaitLocked() const {
+    if (lead_floor_ == 0 || lead_slots_ > lead_floor_) {
+        return lead_policy_.probe_after;
+    }
+    const bool above_proven = lead_floor_proven_ != 0 && lead_slots_ > lead_floor_proven_;
+    return above_proven ? lead_return_after_ : lead_explore_after_;
 }
 
 void FrameGenPresenter::ScoreLeadLocked(JitFrame& frame, bool late) {
@@ -7627,29 +8096,31 @@ std::optional<XrResult> FrameGenPresenter::ThreadedWaitLocked(std::unique_lock<s
     // after the previous one's: it must end about a real frame interval
     // earlier than it is shown.
     const bool interpolate_jit = interpolate && jit_;
+    ExpireRingCeilingLocked(multiplier, Clock::now());
+    const std::uint32_t cap = LeadCapLocked(multiplier);
     if (lead_slots_ == 0) {
         // Until measured, assume the frame takes one application frame.
         const double latency = app_latency_ms_ > 0.0 ? app_latency_ms_ : period_ms * multiplier;
         const double interval = interpolate_jit ? (dynamic ? latency : period_ms * multiplier) : 0.0;
-        lead_slots_ = static_cast<std::uint32_t>(std::clamp(
-            std::ceil((latency + interval + 1.0) / period_ms) - (interpolate_jit ? 1.0 : 0.0), 1.0, 4.0 * multiplier));
+        lead_slots_ = lead_policy_.pinned_lead
+                          ? lead_policy_.pinned_lead
+                          : static_cast<std::uint32_t>(std::clamp(std::ceil((latency + interval + 1.0) / period_ms) -
+                                                                      (interpolate_jit ? 1.0 : 0.0),
+                                                                  1.0, static_cast<double>(cap)));
     }
-    // The cap follows the multiplier (Dynamic's refreshes per real frame, 2-4):
-    // a lead above a lowered cap is the cap, or no frame (each told the cap)
-    // would match it to be scored, and it would come down only by a probe (DCS
-    // 231933: leadSlots=9 in the summary while the game was told 8).
-    if (lead_slots_ > 4 * multiplier) {
-        lead_slots_ = 4 * multiplier;
-        lead_floor_ = std::min(lead_floor_, lead_slots_);
-        lead_floor_proven_ = std::min(lead_floor_proven_, lead_slots_);
-        lead_probe_.reset();
-        lead_history_.clear();
+    // The cap follows the multiplier (Dynamic's refreshes per real frame, 2-4),
+    // and the history ring's ceiling below that (LeadCapLocked): a lead above
+    // a lowered cap is the cap, or no frame (each told the cap) would match
+    // it to be scored, and it would come down only by a probe (DCS 231933:
+    // leadSlots=9 in the summary while the game was told 8).
+    if (lead_slots_ > cap) {
+        ClampLeadLocked(cap);
     }
     // Predict the first slot the frame will really reach. Interpolated
     // frames before it are shown first, so the frame itself is shown (and
     // rendered for) multiplier - 1 slots later; just in time they are made
     // for the slots it is shown after instead.
-    const std::uint64_t slots = std::clamp<std::uint64_t>(lead_slots_, 1, 4 * multiplier);
+    const std::uint64_t slots = std::clamp<std::uint64_t>(lead_slots_, 1, cap);
     const std::uint64_t between = interpolate && !interpolate_jit ? multiplier - 1 : 0;
     ThreadedFrame frame;
     frame.id = ++threaded_id_;
@@ -7690,6 +8161,14 @@ std::optional<XrResult> FrameGenPresenter::ThreadedWaitLocked(std::unique_lock<s
     told_lead_sum_ += frame.lead;
     ++told_lead_frames_;
     told_lead_max_ = std::max(told_lead_max_, frame.lead);
+    ++told_lead_counts_[frame.lead];
+    if (phase_wall_ != Clock::time_point{}) {
+        // As below, from the presenter thread's last paced wait however long
+        // ago (the clocks run on together), so every window has it.
+        const XrTime now_xr =
+            phase_xr_ + std::chrono::duration_cast<std::chrono::nanoseconds>(frame.wait_return - phase_wall_).count();
+        AddSample(told_ahead_ms_, static_cast<double>(frame.target_time - now_xr) / 1e6, kMaxFrameSamples);
+    }
     if (phase_wall_ != Clock::time_point{} && frame.wait_return - phase_wall_ <= std::chrono::nanoseconds(4 * period)) {
         const XrTime runtime_time =
             phase_xr_ + std::chrono::duration_cast<std::chrono::nanoseconds>(frame.wait_return - phase_wall_).count();
@@ -8101,7 +8580,11 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
         // images newer captures had replaced (written unmoved, or the frame
         // before). staleSkipped: refreshes not submitted, nothing current to
         // show (a frame shown as it is had newer images in its swapchains).
-        // leadAvg/leadMax: the lead told to the game's frames. gameAheadMs
+        // leadAvg/leadMax: the lead told to the game's frames; leadHist: how
+        // many frames were told each lead ("lead:frames"). toldAheadMs
+        // (median/90th percentile): gameAheadMs measured from the presenter
+        // thread's last paced wait however long ago, so every window has
+        // it (gameAheadMs only from one within four refreshes). gameAheadMs
         // (median/95th percentile): how far past the runtime's own
         // prediction the game is told to render, Frame Generation's share
         // of its pose horizon (without Frame Generation 0, or a refresh for
@@ -8109,7 +8592,49 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
         // does). aheadJitterMs: its change from one game frame to the next
         // (Dynamic varies it by up to a refresh). endSlackMs (10th
         // percentile/median): the time to spare when the game's frame
-        // ended, negative when late.
+        // ended, negative when late. leadSlots marks " (cap)" at 4 refreshes
+        // per real frame and " (ring cap)" at the history ring's lower
+        // ceiling (FrameGenLeadPolicy::ring_ceiling). Just in time:
+        // ringShort: moved refreshes whose real frame's previous images alone
+        // newer captures had replaced / of those, not the lead's doing (the
+        // presenter thread late, a frame told another lead or multiplier, a
+        // short ring) / of those, found more than three quarters of a
+        // refresh after the presenter thread's wait returned (its own
+        // lateness). ringShortWriteMs (when any): that time, median/max.
+        // ringCeiling: the ceiling at the current multiplier ("-": none,
+        // "off": turned off). ringMoves: ceilings lowered / raised again.
+        // ringRefused: second late events at a ceiling before its retry wait
+        // ran out. ringUndone (when any): lowerings undone at once, frames
+        // late at them in two hitch events while judged (a lone hitch leaves
+        // them). ringHeld (when any): lowerings refused, the ring holding the
+        // lead at any capture time or frames late a refresh below it (a
+        // lowering from it undone). ringWould (turned off, when any):
+        // lowerings it would have made, by its own rules (none while a probe
+        // or step down of the policy's is judged, as with it on), so it
+        // compares with ringMoves of a flight with it on.
+        const std::uint32_t cap_multiplier = std::max(2u, EffectiveMultiplierLocked());
+        const std::uint32_t cap4 = 4 * cap_multiplier;
+        const std::uint32_t ring_cap = LeadCapLocked(cap_multiplier);
+        const std::string ring_text =
+            ", ringShort=" + std::to_string(delta(&Totals::ring_short)) + "/" +
+            std::to_string(delta(&Totals::ring_short_ignored)) + "/" +
+            std::to_string(delta(&Totals::ring_short_late)) +
+            (ring_short_write_ms_.empty() ? std::string()
+                                          : ", ringShortWriteMs=" + MedianAndMax(ring_short_write_ms_)) +
+            ", ringCeiling=" +
+            (!RingCeilingLocked() ? std::string("off")
+             : ring_cap < cap4    ? std::to_string(ring_cap)
+                                  : std::string("-")) +
+            ", ringMoves=-" + std::to_string(delta(&Totals::lead_ring_downs)) + "/+" +
+            std::to_string(delta(&Totals::lead_ring_raises)) +
+            ", ringRefused=" + std::to_string(delta(&Totals::lead_ring_refused)) +
+            (delta(&Totals::lead_ring_undone) ? ", ringUndone=" + std::to_string(delta(&Totals::lead_ring_undone))
+                                              : std::string()) +
+            (delta(&Totals::lead_ring_held) ? ", ringHeld=" + std::to_string(delta(&Totals::lead_ring_held))
+                                            : std::string()) +
+            (!RingCeilingLocked() && delta(&Totals::ring_short_would)
+                 ? ", ringWould=" + std::to_string(delta(&Totals::ring_short_would))
+                 : std::string());
         logger_->Info(
             "Frame Generation: multiplier=" + multiplier + ", threaded=1, appFps=" +
             Number(PerSecond(delta(&Totals::app_frames), seconds), 1) +
@@ -8118,7 +8643,7 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
             ", standbyS=" + Number(standby - summary_standby_seconds_, 1) +
             ", repeatedFrames=" + std::to_string(repeated_submissions_) + ", appLatencyMs=" + Number(app_latency_ms_, 1) +
             ", leadSlots=" + std::to_string(lead_slots_) +
-            (lead_slots_ >= 4 * std::max(2u, EffectiveMultiplierLocked()) ? " (cap)" : "") +
+            (lead_slots_ >= cap4 ? " (cap)" : lead_slots_ >= ring_cap && ring_cap < cap4 ? " (ring cap)" : "") +
             ", leadFloor=" + std::to_string(lead_floor_) +
             ", leadMoves=+" + std::to_string(delta(&Totals::lead_ups)) + "/-" +
             std::to_string(delta(&Totals::lead_downs)) + ", leadProbes=" + std::to_string(delta(&Totals::lead_probes)) +
@@ -8128,6 +8653,8 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
                  ? Number(static_cast<double>(told_lead_sum_) / static_cast<double>(told_lead_frames_), 2)
                  : std::string("-")) +
             ", leadMax=" + (told_lead_frames_ ? std::to_string(told_lead_max_) : std::string("-")) +
+            ", leadHist=" + LeadCountsText(told_lead_counts_) +
+            ", toldAheadMs=" + Percentiles(told_ahead_ms_, 0.5, 0.9) +
             ", gameAheadMs=" + Percentiles(game_ahead_ms_, 0.5, 0.95) +
             ", aheadJitterMs=" + Percentiles(ahead_jitter_ms_, 0.5, 0.95) +
             ", endSlackMs=" + Percentiles(end_slack_ms_, 0.1, 0.5) +
@@ -8169,7 +8696,7 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
                         std::to_string(delta(&Totals::unmeasured)) +
                         ", staleMotion=" + std::to_string(delta(&Totals::stale_motion)) +
                         ", ring=" + std::to_string(JitRingLocked(quad_mode_)) +
-                        ", ringExhausted=" + std::to_string(delta(&Totals::ring_exhausted)) +
+                        ", ringExhausted=" + std::to_string(delta(&Totals::ring_exhausted)) + ring_text +
                         ", staleSkipped=" + std::to_string(delta(&Totals::stale_skipped))
                   : std::string()) +
             ", runtimeHalved=" + std::to_string(delta(&Totals::halving_halved)) + "/" +
@@ -8206,10 +8733,13 @@ void FrameGenPresenter::NewSummaryWindowLocked(Clock::time_point now, double sta
     end_call_ms_.clear();
     runtime_end_ms_.clear();
     synth_lock_ms_.clear();
+    ring_short_write_ms_.clear();
     told_lead_sum_ = 0;
     told_lead_frames_ = 0;
     told_lead_max_ = 0;
     game_ahead_ms_.clear();
+    told_ahead_ms_.clear();
+    told_lead_counts_.clear();
     ahead_jitter_ms_.clear();
     end_slack_ms_.clear();
     pause_longest_ms_ = 0.0;
@@ -8663,6 +9193,21 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
     write = {};
     bool unmeasured = false; // a moved frame written as its real frame's exact copy
     double lock_wait_ms = 0.0;
+    // A cover frame shows a real frame past its time while the next is late:
+    // its images replaced says nothing of the lead (captured before
+    // exact_copy clears it).
+    const bool cover = choice.cover;
+    bool primary_source = true; // the refresh's own choice is written, not the fallback
+    // The ring was a capture short for the frame this refresh chose
+    // (JitWrite::ring_short): its previous images replaced, its newest kept.
+    const auto note_ring_short = [&](const JitFrame& frame) {
+        write.ring_short = true;
+        write.ring_short_id = frame.id;
+        write.ring_short_lead = frame.lead;
+        write.ring_short_multiplier = frame.multiplier;
+        write.ring_short_composed = frame.quad != nullptr;
+        write.ring_short_at = Clock::now();
+    };
     const auto exact_copy = [](JitChoice& unmoved) {
         unmoved.mode = FrameGenSynthesisMode::kInterpolate;
         unmoved.fraction = 1.0f;
@@ -8691,7 +9236,7 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
                                            choice.mode == FrameGenSynthesisMode::kInterpolate &&
                                            fallback_choice.mode == FrameGenSynthesisMode::kExtrapolate;
         bool motion_late = false;
-        auto ready = [&](const JitFrame& frame, JitChoice& choice, bool& not_captured, bool& stale,
+        auto ready = [&](const JitFrame& frame, JitChoice& choice, bool primary, bool& not_captured, bool& stale,
                          bool cover_instead = false) {
             stale = false;
             if (frame.as_is) {
@@ -8702,6 +9247,9 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
             // can only be shown unchanged; of its own images too: not at all
             // (writing would fail and repeat the last frame anyway).
             if (moved && !gpu_->Writable(frame.analyzed, false)) {
+                if (primary && !cover && gpu_->Writable(frame.analyzed, true)) {
+                    note_ring_short(frame);
+                }
                 write.ring_exhausted = true;
                 moved = false;
                 exact_copy(choice);
@@ -8738,11 +9286,14 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
             return true;
         };
         bool stale_source = false;
-        if (!ready(*source, choice, write.uncaptured, stale_source, cover_when_unmeasured)) {
+        if (!ready(*source, choice, true, write.uncaptured, stale_source, cover_when_unmeasured)) {
+            // The refresh's own choice is not written (its game frame not
+            // captured yet, say): its ring being short is not the lead's.
+            write.ring_short = false;
             JitChoice alternative = fallback_choice;
             bool fallback_uncaptured = false;
             bool stale_fallback = false;
-            if (!fallback || !ready(*fallback, alternative, fallback_uncaptured, stale_fallback)) {
+            if (!fallback || !ready(*fallback, alternative, false, fallback_uncaptured, stale_fallback)) {
                 std::scoped_lock lock(mutex_);
                 ++repeated_;
                 write.unmeasured = unmeasured;
@@ -8752,6 +9303,7 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
             source = fallback;
             choice = alternative;
             stale_source = stale_fallback;
+            primary_source = false;
             if (source->as_is) {
                 write.as_is = true;
                 write.unmeasured = unmeasured;
@@ -8877,6 +9429,9 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
         // needs (the game releases its next frame meanwhile): unmoved, or
         // not at all (the images stay acquired for the next refresh).
         if (ok && !write.exact && !gpu_->Writable(frame.analyzed, false)) {
+            if (primary_source && !cover && gpu_->Writable(frame.analyzed, true)) {
+                note_ring_short(frame);
+            }
             write.ring_exhausted = true;
             exact_copy(choice);
             write.exact = true;
@@ -9225,6 +9780,9 @@ void FrameGenPresenter::CompositorLoop() {
             lock.lock();
             totals_.unready += write.uncaptured ? 1 : 0;
             totals_.ring_exhausted += write.ring_exhausted ? 1 : 0;
+            if (write.ring_short) {
+                NoteRingShortLocked(write, returned, period);
+            }
             if (chosen_id) {
                 // Each real frame's lead sample, when a refresh first chooses
                 // it: late if its game frame was not on the GPU yet, its
@@ -9412,7 +9970,8 @@ void FrameGenPresenter::CompositorLoop() {
                     bit(write.unmeasured, 5) | bit(write.stale, 6) | bit(write.motion_late, 7) |
                     bit(write.ring_exhausted, 8) | bit(write.as_is, 9) | bit(write.failed, 10) | bit(choice.cover, 11) |
                     bit(submit, 12) | bit(distinct, 13) | bit(generated, 14) | bit(choice.index.has_value(), 15) |
-                    (static_cast<std::int64_t>(path) << 16) | (static_cast<std::int64_t>(shown_mode + 3) << 20);
+                    (static_cast<std::int64_t>(path) << 16) | (static_cast<std::int64_t>(shown_mode + 3) << 20) |
+                    bit(write.ring_short, 24);
                 trace_.Record("pick", shown_id, time, shown_frame != jit_frames_.end() ? shown_frame->time : 0, flags,
                               static_cast<std::int64_t>(std::llround(shown_fraction * 1e6)),
                               shown_frame != jit_frames_.end() ? shown_frame->previous_time : 0,
@@ -9565,6 +10124,54 @@ FrameGenStatus FrameGenPresenter::Status() const {
     status.automatic = settings_.multiplier == FrameGenMultiplier::kAuto ||
                        (settings_.multiplier == FrameGenMultiplier::kDynamic && !status.dynamic);
     status.full_rate = full_rate_ && state_ == FrameGenState::kActive;
+    const XrDuration grid = refresh_period_ > 0 ? GameGridLocked() : 0;
+    if (status.automatic && grid > 0) {
+        // UpdateAutoLocked's thresholds as frame rates: a step up once more
+        // than 30% of frames take kAutoLateFactor times their refreshes; a
+        // probe one step down after five steady seconds, from its own thread
+        // only for a game whose own time per frame is within reach of it
+        // (AutoProbeInReachLocked), inline for any game holding its step.
+        // None while it would not step up: held at full rate (inline cycles
+        // that kept starting late, or the runtime halving), or video memory
+        // near its budget.
+        const double grid_hz = 1e9 / static_cast<double>(grid);
+        const bool held = auto_multiplier_ == 1 && ((inline_hold_until_ && now < *inline_hold_until_) ||
+                                                     (runtime_halving_ && auto_halving_hold_until_ &&
+                                                      now < *auto_halving_hold_until_));
+        const bool memory_pressure = !(compositor_running_ && jit_) && memory_budget_ &&
+                                     memory_budget_->budget_bytes &&
+                                     memory_budget_->usage_bytes >
+                                         memory_budget_->budget_bytes - memory_budget_->budget_bytes / 20;
+        // Frames are judged late on the period the game is told (the runtime's
+        // as it reports it: under SteamVR's period echo, longer than the grid),
+        // and not at all while the runtime's clock is displaced.
+        const double judged_hz = last_period_ > 0 ? 1e9 / static_cast<double>(last_period_) : grid_hz;
+        if (auto_multiplier_ < std::min(auto_memory_ceiling_, kMaxMultiplier) && !held && !memory_pressure &&
+            !clock_displaced_) {
+            status.auto_step_up_below_fps = judged_hz / (kAutoLateFactor * auto_multiplier_);
+        }
+        if (auto_multiplier_ > 1) {
+            status.auto_step_down_above_fps =
+                compositor_running_ ? (dynamic_policy_.stay_above - kProbeReach) * grid_hz / (auto_multiplier_ - 1)
+                                    : grid_hz / auto_multiplier_;
+        }
+    }
+    if (status.automatic && compositor_running_) {
+        const std::size_t count = std::min(auto_busy_count_, auto_busy_.size());
+        if (count >= 8) {
+            std::array<double, 32> sorted = auto_busy_;
+            std::nth_element(sorted.begin(), sorted.begin() + count / 2, sorted.begin() + count);
+            status.auto_game_own_fps = sorted[count / 2] > 0.0 ? 1000.0 / sorted[count / 2] : 0.0;
+        }
+    }
+    // As the 30 s summary says it: just in time and Dynamic measure the
+    // refreshes between real frames' slots, while the presenter thread
+    // presents (frames passing through inline leave that value behind);
+    // otherwise their ends' interval.
+    status.refreshes_per_real_frame =
+        compositor_running_ && (DynamicLocked() || jit_) && dynamic_interval_slots_ > 0.0 ? dynamic_interval_slots_
+        : grid > 0 && real_interval_ns_ > 0.0 ? real_interval_ns_ / static_cast<double>(grid)
+                                              : 0.0;
     status.standby = status.dynamic && dynamic_standby_;
     status.dynamic_reason = dynamic_reason_;
     status.dynamic_engagements = dynamic_engagements_;
@@ -9581,6 +10188,21 @@ FrameGenStatus FrameGenPresenter::Status() const {
     status.lead_probes = totals_.lead_probes;
     status.lead_probes_failed = totals_.lead_probes_failed;
     status.lead_downs_undone = totals_.lead_downs_undone;
+    {
+        const std::uint32_t multiplier = std::max(2u, EffectiveMultiplierLocked());
+        const std::uint32_t cap = LeadCapLocked(multiplier);
+        status.lead_ceiling = cap < 4 * multiplier ? cap : 0;
+    }
+    status.lead_ceiling_on = RingCeilingLocked();
+    status.ring_short = totals_.ring_short;
+    status.ring_short_ignored = totals_.ring_short_ignored;
+    status.ring_short_late = totals_.ring_short_late;
+    status.ring_short_would = totals_.ring_short_would;
+    status.lead_ring_downs = totals_.lead_ring_downs;
+    status.lead_ring_raises = totals_.lead_ring_raises;
+    status.lead_ring_refused = totals_.lead_ring_refused;
+    status.lead_ring_held = totals_.lead_ring_held;
+    status.lead_ring_undone = totals_.lead_ring_undone;
     status.app_frames = totals_.app_frames;
     status.late_cpu = totals_.late_cpu;
     status.late_gpu = totals_.late_gpu;

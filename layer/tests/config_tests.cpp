@@ -2343,6 +2343,101 @@ void TestFrameGenPlan() {
            "Relative rotation should carry the newest view's yaw into previous-view space");
 }
 
+// Depth the other eye mostly disproves is never used (backlog item 2): Star
+// Citizen's depth read near/far swapped scored 0.70 against no depth with the
+// other eye disproving 88-95% of it; MSFS's as submitted leaves 0.18-0.46 of
+// the error, disproved on 8-14%.
+void TestFrameGenDepthGuard() {
+    using depthxr::FrameGenDepthReading;
+    // Three checks make a batch; each check here is a third of the batch.
+    const auto check = [](double decoded_ratio, double decoded_disproved, double swapped_ratio,
+                          double swapped_disproved) {
+        depthxr::FrameGenDepthEvidence evidence;
+        evidence.binocular = 10000.0;
+        evidence.source_varied = evidence.other_varied = depthxr::kFrameGenDepthVariedCells;
+        evidence.decoded = {decoded_ratio * 1000.0, 1000.0, 1000.0, decoded_disproved * 1000.0};
+        evidence.swapped = {swapped_ratio * 1000.0, 1000.0, 1000.0, swapped_disproved * 1000.0};
+        return evidence;
+    };
+    const auto batch = [](depthxr::FrameGenDepthValidator& validator, const depthxr::FrameGenDepthEvidence& evidence) {
+        for (int i = 0; i < 3; ++i) validator.Add(evidence);
+    };
+
+    // Star Citizen: the swapped reading just under the bar, mostly disproved.
+    depthxr::FrameGenDepthValidator sc;
+    batch(sc, check(1.0, 0.2, 0.69, 0.9));
+    Expect(sc.Reading() == FrameGenDepthReading::kUnusable && !sc.Swapped() && !sc.Usable(),
+           "depth the other eye mostly disproves should not be taken up");
+    batch(sc, check(1.0, 0.2, 0.60, 0.95));
+    Expect(!sc.Usable() && !sc.Swapped(), "a mostly disproved reading stays unused however well it scores");
+
+    // MSFS: as submitted, disproved on 8-29%, is taken up and kept; so is
+    // cockpit glass written to depth (44%), and up to half.
+    for (const double share : {0.08, 0.14, 0.29, 0.44, 0.5}) {
+        depthxr::FrameGenDepthValidator msfs;
+        batch(msfs, check(0.3, share, 1.2, 0.6));
+        Expect(msfs.Reading() == FrameGenDepthReading::kAsSubmitted && !msfs.Swapped(),
+               "depth disproved on " + std::to_string(share) + " of its samples should still be used");
+        batch(msfs, check(0.46, share, 1.2, 0.6));
+        Expect(msfs.Reading() == FrameGenDepthReading::kAsSubmitted, "used depth that still holds should be kept");
+        // Up to half, depth in use stays in use.
+        batch(msfs, check(0.46, 0.5, 1.2, 0.6));
+        Expect(msfs.Reading() == FrameGenDepthReading::kAsSubmitted, "used depth disproved on half is kept");
+    }
+    // A share hovering at half does not switch depth on and off every
+    // batch: once dropped for it, two passing batches in a row take it up.
+    {
+        depthxr::FrameGenDepthValidator hovering;
+        batch(hovering, check(0.4, 0.45, 1.2, 0.6));
+        Expect(hovering.Usable(), "depth disproved on 45% is taken up");
+        batch(hovering, check(0.4, 0.55, 1.2, 0.6));
+        Expect(!hovering.Usable(), "...and dropped at 55%");
+        batch(hovering, check(0.4, 0.45, 1.2, 0.6));
+        Expect(!hovering.Usable(), "...not taken up again by one batch at 45%");
+        batch(hovering, check(0.4, 0.55, 1.2, 0.6));
+        batch(hovering, check(0.4, 0.45, 1.2, 0.6));
+        Expect(!hovering.Usable(), "...a disproved batch between starts the wait over");
+        batch(hovering, check(0.4, 0.45, 1.2, 0.6));
+        Expect(hovering.Usable(), "...two in a row take it up again");
+    }
+
+    // In use, then mostly disproved (a scene the depth no longer matches):
+    // dropped, though it still scores under the drop bar.
+    depthxr::FrameGenDepthValidator dropped;
+    batch(dropped, check(0.3, 0.1, 1.2, 0.6));
+    Expect(dropped.Usable(), "the depth is taken up first");
+    batch(dropped, check(0.5, 0.6, 1.2, 0.6));
+    Expect(dropped.Reading() == FrameGenDepthReading::kUnusable,
+           "used depth the other eye comes to disprove on most samples should stop being used");
+
+    // The swapped reading wins only where the other eye does not disprove it.
+    depthxr::FrameGenDepthValidator reversed;
+    batch(reversed, check(1.0, 0.2, 0.3, 0.1));
+    Expect(reversed.Reading() == FrameGenDepthReading::kReversed && reversed.Swapped(),
+           "a swapped reading that holds is taken up");
+
+    // In use, then mostly disproved where the swap holds: straight to the
+    // swap (its ratio not 0.7 times the disproved one's), never a batch
+    // without depth.
+    depthxr::FrameGenDepthValidator switched;
+    batch(switched, check(0.3, 0.1, 1.2, 0.6));
+    batch(switched, check(0.6, 0.9, 0.5, 0.1));
+    Expect(switched.Reading() == FrameGenDepthReading::kReversed && switched.Swapped(),
+           "a disproved reading in use gives way to a swap that holds at once");
+
+    // Mostly disproved while the swap moves too little to judge: decided
+    // unusable, not left checking.
+    depthxr::FrameGenDepthValidator undecided;
+    depthxr::FrameGenDepthEvidence little = check(0.6, 0.9, 0.5, 0.1);
+    little.swapped.samples = 10.0;
+    little.swapped.none = 10.0;
+    little.swapped.error = 5.0;
+    little.swapped.fallback = 1.0;
+    batch(undecided, little);
+    Expect(undecided.Reading() == FrameGenDepthReading::kUnusable,
+           "a mostly disproved reading is decided unusable though the swap is not judged");
+}
+
 void TestFrameGenHistoryState() {
     depthxr::FrameGenHistoryState state;
     depthxr::FrameGenViewRequest request;
@@ -7095,6 +7190,21 @@ void TestDeviceInputPathsAndHatDirections() {
                repeated_missing_device.diagnostic_stage == first_missing_device.diagnostic_stage &&
                repeated_missing_device.result_code == first_missing_device.result_code,
            "A repeated missing-device binding must reuse the failure without touching DirectInput");
+
+    // xrDestroyInstance with its session still begun drains the device work:
+    // that ends the session's waiting for a rescan too, so a later instance
+    // in a process that kept the layer loaded retries on the timer again.
+    depthxr::SetInputDeviceSessionActive(true); // tries the absent device once more
+    bool waits_in_session = false;
+    for (int attempt = 0; attempt < 500 && !waits_in_session; ++attempt) {
+        waits_in_session = depthxr::PollInputBinding(missing_device_binding).device_waits_for_rescan;
+        if (!waits_in_session) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    Expect(waits_in_session, "In a session a missing device must wait for a rescan after its attempt");
+    depthxr::DrainInputDeviceWork(std::chrono::seconds(5));
+    Expect(!depthxr::PollInputBinding(missing_device_binding).device_waits_for_rescan,
+           "Draining the device work at instance teardown must end the session's wait for a rescan");
+    depthxr::DrainInputDeviceWork(std::chrono::seconds(5));
 #endif
 }
 
@@ -7884,6 +7994,7 @@ int main() {
     TestFrameGenOsdRows();
     TestOsdPerformanceRow();
     TestFrameGenPlan();
+    TestFrameGenDepthGuard();
     TestFrameGenHistoryState();
     TestFrameGenEngineImageTracker();
     TestFrameGenMotionCapturePlan();

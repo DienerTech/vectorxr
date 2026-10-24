@@ -1069,8 +1069,21 @@ inline constexpr std::uint8_t kFrameGenHistoryRingMax = 5;
 // memory allows (FrameGenTuning::history_ring): a game at 30 fps keeps a real
 // frame in use for 80-130 ms after its capture (Interpolate, and Extrapolate
 // at its slowest), three captures and more (MSFS 2024, 2026-10-09: up to
-// 308 refreshes in 30 s found the frame they needed replaced).
+// 308 refreshes in 30 s found the frame they needed replaced). A moved real
+// frame survives n - 2 newer captures (n - 1 for Interpolate's analysis), so
+// a ring holds a lead of S + ceil((w - delta) / P) refreshes, never less than
+// FrameGenRingLeadFloor's: S the refreshes from the frame's release to that
+// of the newer frame whose capture replaces its previous images, w that
+// capture's time after its release, delta how far past its refresh's due
+// point the frame's last moved refresh is written, P the refresh period.
 constexpr std::uint8_t FrameGenHistoryRing(bool composed) { return composed ? 5 : 3; }
+// The lead (refreshes) a ring of `ring` slots holds whenever the game's frames
+// are captured, at `cadence` refreshes per real frame (1 for Dynamic):
+// (ring - 2) cadences extrapolating, (ring - 1) interpolating; 1 for a ring
+// shorter than three.
+constexpr std::uint32_t FrameGenRingLeadFloor(std::uint8_t ring, bool interpolate, std::uint32_t cadence) {
+    return ring < 3 ? 1u : static_cast<std::uint32_t>(ring - (interpolate ? 1 : 2)) * cadence;
+}
 inline constexpr std::uint8_t kFrameGenCanvasRingRoomy = 5;
 // The ring a submission with `tuning` uses (two unless just in time).
 inline std::uint8_t FrameGenHistoryRing(const FrameGenTuning& tuning) {
@@ -1232,7 +1245,7 @@ enum class FrameGenDepthReading : std::uint8_t {
     kUnknown,     // not checked yet: depth is not used
     kAsSubmitted, // the game's description is right
     kReversed,    // near and far swapped (reversed depth described as standard, or the reverse)
-    kUnusable,    // no reading lines the eyes up better than no depth
+    kUnusable,    // no reading lines the eyes up better than no depth, or the other eye mostly disproves it
 };
 
 const char* ToString(FrameGenDepthReading reading);
@@ -1326,6 +1339,10 @@ class FrameGenDepthValidator {
     std::uint32_t check_generation_{0};
     std::uint32_t decisions_{0};
     FrameGenDepthEvidence evidence_;
+    // Dropped for being mostly disproved: passing batches in a row still
+    // needed before a reading is taken up again (FrameGenDepthValidator::Add).
+    static constexpr std::uint32_t kDisprovedWait = 2;
+    std::uint32_t disproved_wait_{0};
 };
 
 // Which eye's depth the check reads, and whether an eye takes the other's.

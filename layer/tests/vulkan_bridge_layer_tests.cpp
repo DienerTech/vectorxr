@@ -349,6 +349,31 @@ void LoadDeviceFunctions(VkDevice device) {
     TEST_VK_DEVICE(TEST_VK_LOAD_DEVICE)
 }
 
+// A number from the bridge's summary ("name=value").
+std::uint64_t SummaryValue(const std::string& summary, const std::string& name) {
+    const std::size_t at = summary.find(", " + name + "=");
+    Check(at != std::string::npos, "the summary has " + name + ": " + summary);
+    return std::stoull(summary.substr(at + name.size() + 3));
+}
+
+// A release no frame's end handed over (7b7f2a2 keeps it for one), the
+// session or instance ending with it: its barrier went onto the game's queue
+// before the runtime was told, the bridge's submissions and "written" one
+// further than before the game's last rendering, so End's wait for the
+// game's queue covers that rendering before the images it went into are
+// freed (B5). Ordering only.
+void CheckKeptReleaseSubmitted(const std::string& before, const std::string& kept, const std::string& at_end,
+                               const std::string& what) {
+    Check(SummaryValue(kept, "releases") == SummaryValue(before, "releases") &&
+              SummaryValue(kept, "writtenValue") == SummaryValue(before, "writtenValue"),
+          what + ": the game's last release is kept for a frame's end: " + kept);
+    Check(SummaryValue(at_end, "releases") == SummaryValue(before, "releases") + 1 &&
+              SummaryValue(at_end, "writtenValue") == SummaryValue(before, "writtenValue") + 1 &&
+              SummaryValue(at_end, "submits") > SummaryValue(kept, "submits"),
+          what + ": the kept release's barrier was submitted on the game's queue before the runtime was told: " +
+              at_end);
+}
+
 void CheckVk(VkResult result, const std::string& what) {
     Check(result == VK_SUCCESS, what + ": VkResult " + std::to_string(static_cast<int>(result)));
 }
@@ -3760,13 +3785,17 @@ void CheckTeardown(App& app, VulkanGame& game, Target& left, Target& right) {
     // gate, and a marker after everything on the bridge's queue.
     Gate gate(device, nullptr);
     gate.HoldQueue(bridge_queue);
+    const std::string before_render = Peer::Bridge().Summary();
     Render(app, vulkan, right, {4, 5, 6, 255});
+    const std::string kept = Peer::Bridge().Summary();
     ComPtr<ID3D12Fence> marker;
     Check(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&marker))), "a marker fence");
     bridge_queue->Signal(marker.Get(), 1);
     bool marker_done = false;
     bool idle = false;
+    std::string at_destroy;
     g_runtime.on_destroy_session = [&] {
+        at_destroy = Peer::Bridge().Summary();
         marker_done = marker->GetCompletedValue() >= 1;
         for (int poll = 0; poll < 50 && !idle; ++poll) {
             idle = Peer::Bridge().WaitIdle(poll ? 1 : 0);
@@ -3777,6 +3806,7 @@ void CheckTeardown(App& app, VulkanGame& game, Target& left, Target& right) {
     opener.join();
     app.session = XR_NULL_HANDLE;
     Check(result == XR_SUCCESS && g_runtime.Position("xrDestroySession") >= 0, "xrDestroySession");
+    CheckKeptReleaseSubmitted(before_render, kept, at_destroy, "xrDestroySession");
     Check(marker_done, "the bridge's queue had run everything queued on it when the runtime destroyed the session");
     Check(idle, "the bridge's queue was idle when the runtime destroyed the session");
     Check(!Peer::Bridge().Active() && !Peer::QueueSubstituted(), "the bridge and the substitution end with the session");
@@ -3936,20 +3966,25 @@ void TestDestroyInstanceWithSession() {
     ID3D12CommandQueue* bridge_queue = BridgeBinding()->queue;
     Gate gate(g_runtime.device12.Get(), nullptr);
     gate.HoldQueue(bridge_queue);
+    const std::string before_render = Peer::Bridge().Summary();
     Render(app, vulkan, left, {7, 8, 9, 255});
+    const std::string kept = Peer::Bridge().Summary();
     ComPtr<ID3D12Fence> marker;
     Check(SUCCEEDED(g_runtime.device12->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&marker))), "a marker fence");
     bridge_queue->Signal(marker.Get(), 1);
     bool destroyed = false;
     bool marker_done = false;
+    std::string at_destroy;
     g_runtime.on_destroy_instance = [&] {
         destroyed = true;
+        at_destroy = Peer::Bridge().Summary();
         marker_done = marker->GetCompletedValue() >= 1;
     };
     std::thread opener = gate.OpenLater(300);
     const XrResult result = app.api.destroy_instance(app.api.instance);
     opener.join();
     Check(result == XR_SUCCESS && destroyed, "xrDestroyInstance with the session alive");
+    CheckKeptReleaseSubmitted(before_render, kept, at_destroy, "xrDestroyInstance");
     Check(marker_done, "the bridge's queue had run everything queued on it when the runtime destroyed the instance");
     Check(g_runtime.Position("xrDestroySession") < 0, "the session went with the instance, not on its own");
     Check(Peer::Idle(), "nothing is left of the instance and its session");
@@ -5394,6 +5429,7 @@ void IsolateHost() {
     SetEnv("VECTORXR_LOG_PATH", (g_root / "logs" / "vectorxr.log").string());
     SetEnv("VECTORXR_SEEN_APPS_PATH", (g_root / "seen-apps.json").string());
     SetEnv("VECTORXR_RUNTIME_RELAY_PATH", (g_root / "runtime").string());
+    SetEnv("VECTORXR_EXTERNAL_STATUS_PATH", (g_root / "api" / "status.json").string());
     SetEnv("VECTORXR_RUNTIME_PACING_PATH", (g_root / "runtime-pacing.json").string());
     SetEnv("VECTORXR_TURBO_METRICS_PATH", (g_root / "turbo-metrics.json").string());
     SetEnv("XR_RUNTIME_JSON", (g_root / "no-runtime.json").string());

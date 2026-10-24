@@ -1494,10 +1494,23 @@ void FrameGenDepthValidator::Add(const FrameGenDepthEvidence& check) {
     // out at scenery, or a moment of noise, must not switch it on and off.
     constexpr double kAdopt = 0.7;
     constexpr double kDrop = 0.9;
+    // A reading the other eye disproves on most of its samples scores well
+    // only through the samples sent "infinitely far" instead: it is neither
+    // taken up nor kept. Star Citizen's depth read near/far swapped scored
+    // 0.70 with the other eye disproving 88-95% of it, and smeared the HUD,
+    // cockpit and distant geometry (2026-10-15); MSFS's as submitted, 8-29%
+    // (the more of the view the cockpit fills, the more), and cockpit glass
+    // written to depth about 44%. Once dropped for that, two batches in a
+    // row must pass before it is taken up again: a share hovering at the bar
+    // must not switch depth on and off every batch.
+    constexpr double kMostlyDisproved = 0.5;
+    auto disproved = [](const FrameGenDepthScore& score) {
+        return score.samples > 0.0 && score.fallback > kMostlyDisproved * score.samples;
+    };
     const FrameGenDepthScore& decoded = evidence_.decoded;
     const FrameGenDepthScore& swapped = evidence_.swapped;
-    const bool decoded_adopts = judged(decoded) && decoded.Ratio() < kAdopt;
-    const bool swapped_adopts = judged(swapped) && swapped.Ratio() < kAdopt;
+    bool decoded_adopts = judged(decoded) && decoded.Ratio() < kAdopt && !disproved(decoded);
+    bool swapped_adopts = judged(swapped) && swapped.Ratio() < kAdopt && !disproved(swapped);
     // Depth that is the same all over the checked eye shows nothing of the
     // scene, however it is read. Star Citizen Evocati's is all zero in both
     // eyes (reversed, described correctly): as described all of it is
@@ -1513,6 +1526,15 @@ void FrameGenDepthValidator::Add(const FrameGenDepthEvidence& check) {
     // Swapping needs the reading as decoded now to move content too, and to
     // line the eyes up worse there: swapped, depth that decodes all far (a
     // buffer left clear) is all near, and would win against nothing.
+    if (!Usable() && disproved_wait_ > 0) {
+        if ((!uniform && decoded_adopts) || (varied && swapped_adopts && judged(decoded))) {
+            if (--disproved_wait_ > 0) {
+                decoded_adopts = swapped_adopts = false;
+            }
+        } else if (disproved(decoded) || disproved(swapped)) {
+            disproved_wait_ = kDisprovedWait;
+        }
+    }
     const bool swap_beats = varied && swapped_adopts && judged(decoded);
     if (uniform) {
         // Never taken up until it varies. Where it reads as infinitely far
@@ -1531,14 +1553,21 @@ void FrameGenDepthValidator::Add(const FrameGenDepthEvidence& check) {
         }
         if (decoded_adopts || swap) {
             reading_ = swapped_ ? FrameGenDepthReading::kReversed : FrameGenDepthReading::kAsSubmitted;
-        } else if (judged(decoded) && judged(swapped)) {
+        } else if (judged(decoded) && (judged(swapped) || disproved(decoded))) {
+            // A reading mostly disproved is decided on, though the other
+            // moves too little to judge: not left checking for good.
             reading_ = FrameGenDepthReading::kUnusable;
         }
-    } else if (swap_beats && swapped.Ratio() < kAdopt * decoded.Ratio()) {
+    } else if (swap_beats && (disproved(decoded) || swapped.Ratio() < kAdopt * decoded.Ratio())) {
+        // The swap wins clearly, or the reading in use is mostly disproved
+        // and the swap holds: straight to it, not through a batch without.
         swapped_ = !swapped_;
         reading_ = swapped_ ? FrameGenDepthReading::kReversed : FrameGenDepthReading::kAsSubmitted;
-    } else if (judged(decoded) && decoded.Ratio() > kDrop) {
+    } else if (judged(decoded) && (decoded.Ratio() > kDrop || disproved(decoded))) {
         reading_ = FrameGenDepthReading::kUnusable;
+        if (disproved(decoded)) {
+            disproved_wait_ = kDisprovedWait;
+        }
     }
 
     // The scale that lines the eyes up best: the probes' minimum, refined by

@@ -2548,7 +2548,7 @@ void VulkanBridge::Acquired(XrSwapchain swapchain, std::uint32_t index) {
     }
 }
 
-bool VulkanBridge::Released(XrSwapchain swapchain) {
+bool VulkanBridge::Released(XrSwapchain swapchain, bool teardown) {
     if (!impl_) {
         return true;
     }
@@ -2619,7 +2619,7 @@ bool VulkanBridge::Released(XrSwapchain swapchain) {
         // ...and the runtime's image just after the copy.
         impl.QueueRuntimeProbe(*chain, image, index, serial, true);
     }
-    if (chain->hand_back && image.acquire) {
+    if (chain->hand_back && image.acquire && !teardown) {
         // Back to the game's queue now, waiting for the copy (its signal is
         // queued above, so the wait always ends): whatever the game submits
         // next, the next frame's rendering included, comes after it.

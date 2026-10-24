@@ -8,6 +8,7 @@ add_library(
     src/framegen_plan.cpp
     src/runtime_pacing.cpp
     src/runtime_relay.cpp
+    src/external_status.cpp
     src/runtime_compatibility.cpp
     src/seen_apps.cpp
     src/turbo_trace.cpp
@@ -562,8 +563,9 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         target_link_libraries(depthxr_framegen_presenter_tests PRIVATE depthxr_framegen)
         target_compile_definitions(depthxr_framegen_presenter_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
         add_test(NAME depthxr_framegen_presenter_tests COMMAND depthxr_framegen_presenter_tests)
-        # Paced by the wall clock: about 375 s on a fast desktop (0.19.2), longer on a shared CI runner.
-        set_tests_properties(depthxr_framegen_presenter_tests PROPERTIES TIMEOUT 900)
+        # Paced by the wall clock: about 375 s on a fast desktop (0.19.2), longer on a shared CI runner. The lead
+        # ceiling's tests add about 3 minutes; serially (FG_TEST_SERIAL=1) the suite takes about 16 minutes.
+        set_tests_properties(depthxr_framegen_presenter_tests PROPERTIES TIMEOUT 1200)
         add_executable(depthxr_osd_tests tests/osd_tests.cpp)
         target_link_libraries(depthxr_osd_tests PRIVATE depthxr_osd)
         target_compile_definitions(depthxr_osd_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11)
@@ -796,6 +798,10 @@ if(DEPTHXR_BUILD_TESTS)
     target_link_libraries(depthxr_runtime_relay_tests PRIVATE depthxr_core)
     add_test(NAME depthxr_runtime_relay_tests COMMAND depthxr_runtime_relay_tests)
     set_tests_properties(depthxr_runtime_relay_tests PROPERTIES TIMEOUT 20)
+    add_executable(depthxr_external_status_tests tests/external_status_tests.cpp)
+    target_link_libraries(depthxr_external_status_tests PRIVATE depthxr_core)
+    add_test(NAME depthxr_external_status_tests COMMAND depthxr_external_status_tests)
+    set_tests_properties(depthxr_external_status_tests PROPERTIES TIMEOUT 20)
     if(WIN32)
         add_library(depthxr_process_exit_probe SHARED tests/process_exit_probe.cpp src/dll_main.cpp)
         target_link_libraries(depthxr_process_exit_probe PRIVATE depthxr_core)

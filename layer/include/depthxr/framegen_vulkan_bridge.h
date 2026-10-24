@@ -188,8 +188,10 @@ class VulkanBridge {
     // runtime's image on the bridge's queue. False when the copy was skipped
     // (the bridge's queue is stalled, or the game's queue refused the
     // submission): the runtime's image holds an older frame, which Frame
-    // Generation must not capture as new.
-    bool Released(XrSwapchain swapchain);
+    // Generation must not capture as new. `teardown`: at the session's end,
+    // the image is not handed back to the game's queue (nothing renders into
+    // it again; a hand-back would make the game's queue wait for the copy).
+    bool Released(XrSwapchain swapchain, bool teardown = false);
     // The game's motion vectors (XR_FB_space_warp, XR_EXT_frame_synthesis)
     // are in `swapchain`'s images, which Frame Generation reads in the
     // runtime's images after each copy: from now on each release gives the
