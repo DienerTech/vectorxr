@@ -1,0 +1,53 @@
+{
+  "supportLinkError": "Nie można otworzyć przeglądarki. Odwiedź ko-fi.com/dienertech, aby wesprzeć VectorXR.",
+  "layerStatus": {
+    "checking": "Sprawdzanie",
+    "notFound": "Nie znaleziono",
+    "enabled": "Warstwa włączona",
+    "disabled": "Warstwa wyłączona"
+  },
+  "layerDescription": {
+    "checking": "Sprawdzanie zarejestrowanej warstwy API VectorXR.",
+    "notFound": "Nie znaleziono rejestracji warstwy API VectorXR. Ulepszenia nie będą działać, dopóki warstwa nie zostanie zarejestrowana i włączona.",
+    "enabled": "Warstwa API VectorXR jest włączona, więc Ulepszenia mogą działać w czasie wykonywania.",
+    "disabled": "Warstwa API VectorXR jest wyłączona. Żadne Ulepszenie nie zadziała, niezależnie od stanu włączenia pakietu lub Ulepszenia."
+  },
+  "runtime": {
+    "enabled": "Działanie włączone",
+    "disabled": "Działanie wyłączone",
+    "title": "Stan przełącznika działania na poziomie pakietu."
+  },
+  "systemHealth": {
+    "eyebrow": "Kondycja systemu",
+    "suiteOff": "Efekty działania są wyłączone przełącznikiem pakietu. Stan warstwy jest nadal dostępny do rozwiązywania problemów.",
+    "checking": "Sprawdzanie gotowości VectorXR i warstwy OpenXR.",
+    "layerNotFound": "VectorXR jest włączony, ale nie znaleziono rejestracji warstwy API OpenXR.",
+    "layerDisabled": "VectorXR jest włączony, ale warstwa API OpenXR jest wyłączona.",
+    "ready": "Stan VectorXR i warstwy OpenXR wskazuje gotowość na kolejne uruchomienia aplikacji OpenXR.",
+    "viewHealth": "Pokaż kondycję",
+    "exportDebug": "Eksportuj diagnostykę"
+  },
+  "enhancements": {
+    "eyebrow": "Ulepszenia",
+    "title": "Przegląd aktywnych",
+    "activeCount": "Aktywne: {active} z {total}",
+    "columns": {
+      "enhancement": "Ulepszenie",
+      "defaultProfile": "Profil domyślny",
+      "customProfiles": "Profile niestandardowe",
+      "status": "Stan"
+    },
+    "open": "Otwórz ustawienia: {module}",
+    "customEnabled": "Włączone: {enabled} / {total}",
+    "hint": "Wybierz Ulepszenie, aby otworzyć jego ustawienia."
+  },
+  "community": {
+    "eyebrow": "Społeczność i ogłoszenia",
+    "title": "Pomóż kształtować VectorXR",
+    "discordTitle": "Discord DienerTech",
+    "discordBody": "Pokaż swoją konfigurację, porównuj wyniki i bądź na bieżąco z najnowszymi ogłoszeniami VectorXR.",
+    "supportTitle": "Wesprzyj rozwój",
+    "supportBody": "Wesprzyj projekt, wspierając VectorXR na Ko-fi. Każde wsparcie pomaga finansować przyszłość VectorXR!",
+    "supportButton": "Wesprzyj VectorXR na Ko-fi ↗"
+  }
+}

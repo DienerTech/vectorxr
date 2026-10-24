@@ -12,6 +12,7 @@ import {
   stopInputDeviceDiscovery,
 } from '../lib/inputDeviceDiscovery'
 import { preserveBindingSound, type DeviceBinding } from '../lib/model'
+import { t, type MessageKey } from '../i18n/index.ts'
 
 const props = defineProps<{
   modelValue: DeviceBinding
@@ -45,27 +46,28 @@ let captureCancelDelayId: ReturnType<typeof window.setTimeout> | null = null
 let captureDeadline = 0
 
 const selectedDevice = computed(() => devices.value.find((device) => device.deviceGuid === props.modelValue.deviceGuid) ?? null)
-const hatDirections = [
-  ['up', 'Up'],
-  ['up-right', 'Up Right'],
-  ['right', 'Right'],
-  ['down-right', 'Down Right'],
-  ['down', 'Down'],
-  ['down-left', 'Down Left'],
-  ['left', 'Left'],
-  ['up-left', 'Up Left'],
-] as const
+const hatDirections = {
+  up: 'bindings.device.hatDirections.up',
+  'up-right': 'bindings.device.hatDirections.upRight',
+  right: 'bindings.device.hatDirections.right',
+  'down-right': 'bindings.device.hatDirections.downRight',
+  down: 'bindings.device.hatDirections.down',
+  'down-left': 'bindings.device.hatDirections.downLeft',
+  left: 'bindings.device.hatDirections.left',
+  'up-left': 'bindings.device.hatDirections.upLeft',
+} as const satisfies Record<string, MessageKey>
+type HatDirection = keyof typeof hatDirections
 const manualInputOptions = computed(() => {
   const device = selectedDevice.value
   if (!device) return []
 
   const options = Array.from({ length: device.buttonCount }, (_, index) => ({
     path: `button-${index + 1}`,
-    label: `Button ${index + 1}`,
+    label: t('bindings.device.button', { number: index + 1 }),
   }))
   for (let hatIndex = 1; hatIndex <= device.hatCount; hatIndex += 1) {
-    for (const [path, label] of hatDirections) {
-      options.push({ path: `hat-${hatIndex}-${path}`, label: `HAT ${hatIndex} ${label}` })
+    for (const [path, directionKey] of Object.entries(hatDirections)) {
+      options.push({ path: `hat-${hatIndex}-${path}`, label: t('bindings.device.hatInput', { number: hatIndex, direction: t(directionKey) }) })
     }
   }
   return options
@@ -77,7 +79,7 @@ const isBoundDeviceDisconnected = computed(() => (
   hasBoundDevice.value &&
   !selectedDevice.value
 ))
-const disconnectedDeviceName = computed(() => props.modelValue.deviceName?.trim() || '<device disconnected>')
+const disconnectedDeviceName = computed(() => props.modelValue.deviceName?.trim() || t('bindings.device.disconnectedName'))
 const deviceName = computed(() => {
   if (selectedDevice.value) {
     return selectedDevice.value.deviceName
@@ -87,14 +89,16 @@ const deviceName = computed(() => {
     return disconnectedDeviceName.value
   }
 
-  return props.modelValue.deviceGuid || 'No device selected'
+  return props.modelValue.deviceGuid || t('bindings.device.noDeviceSelected')
 })
-const inputLabel = computed(() => props.modelValue.inputLabel?.trim() || labelForInputPath(props.modelValue.inputPath))
+// The saved inputLabel stays in English (the backend's and the layer's
+// wording); a button or HAT path is shown in the app's language instead.
+const inputLabel = computed(() => translatedInputLabel(props.modelValue.inputPath) || props.modelValue.inputLabel?.trim() || labelForInputPath(props.modelValue.inputPath))
 const captureButtonLabel = computed(() => {
-  if (!capturing.value) return 'Capture Input'
-  if (cancelRequested.value) return 'Canceling...'
-  if (!canCancelCapture.value) return `Listening... ${captureSecondsRemaining.value}s`
-  return `Cancel Listening (${captureSecondsRemaining.value}s)`
+  if (!capturing.value) return t('bindings.device.capture')
+  if (cancelRequested.value) return t('bindings.device.canceling')
+  if (!canCancelCapture.value) return t('bindings.device.listening', { seconds: captureSecondsRemaining.value })
+  return t('bindings.device.cancelListening', { seconds: captureSecondsRemaining.value })
 })
 
 onMounted(() => {
@@ -111,11 +115,33 @@ onBeforeUnmount(() => {
   }
 })
 
-function labelForInputPath(inputPath: string) {
+// A button or HAT path in the app's language, '' for any other path.
+function translatedInputLabel(inputPath: string) {
   const normalized = inputPath.trim()
   const button = /^button-(\d+)$/.exec(normalized)
   if (button) {
-    return `Button ${button[1]}`
+    return t('bindings.device.button', { number: button[1] })
+  }
+
+  const hat = /^hat-(\d+)-(up|up-right|right|down-right|down|down-left|left|up-left)$/.exec(normalized)
+  if (hat) {
+    return t('bindings.device.hatInput', { number: hat[1], direction: t(hatDirections[hat[2] as HatDirection]) })
+  }
+
+  return ''
+}
+
+function labelForInputPath(inputPath: string) {
+  return inputPath.trim() || t('bindings.device.noInput')
+}
+
+// The label saved with a binding: English, as the backend captures it
+// ("Button 3", "HAT 1 Up Right"); the layer reads and compares it.
+function savedInputLabel(inputPath: string) {
+  const normalized = inputPath.trim()
+  const button = /^button-(\d+)$/.exec(normalized)
+  if (button) {
+    return `Button ${button[1]}` // i18n-ignore
   }
 
   const hat = /^hat-(\d+)-(up|up-right|right|down-right|down|down-left|left|up-left)$/.exec(normalized)
@@ -127,13 +153,14 @@ function labelForInputPath(inputPath: string) {
     return `HAT ${hat[1]} ${direction}`
   }
 
-  return normalized || 'No input captured'
+  return normalized
 }
 
 function deviceCapabilityLabel(device: InputDeviceInfo) {
-  const buttons = `${device.buttonCount} ${device.buttonCount === 1 ? 'button' : 'buttons'}`
-  const hats = `${device.hatCount} ${device.hatCount === 1 ? 'HAT' : 'HATs'}`
-  return `${buttons}, ${hats}`
+  return t('bindings.device.capabilities', {
+    buttons: t('bindings.device.buttonCount', { count: device.buttonCount }),
+    hats: t('bindings.device.hatCount', { count: device.hatCount }),
+  })
 }
 
 
@@ -186,21 +213,21 @@ async function cancelCapture() {
 
   cancelRequested.value = true
   canCancelCapture.value = false
-  status.value = 'Canceling input capture...'
+  status.value = t('bindings.device.status.canceling')
   try {
     await cancelDeviceBindingCapture()
   } catch (error) {
     cancelRequested.value = false
     canCancelCapture.value = true
     status.value = error instanceof Error
-      ? `Could not cancel capture: ${error.message}`
-      : 'Could not cancel capture. It will stop automatically at the time limit.'
+      ? t('bindings.device.status.cancelFailedWith', { message: error.message })
+      : t('bindings.device.status.cancelFailed')
   }
 }
 
 function updateRefreshStatus() {
   if (lastRefreshFailed.value) status.value = lastRefreshError.value
-  else if (devices.value.length === 0) status.value = 'No joystick devices found.'
+  else if (devices.value.length === 0) status.value = t('bindings.device.status.noDevices')
 }
 
 async function refreshDevices(options: { silent?: boolean } = {}) {
@@ -215,7 +242,7 @@ async function captureBinding() {
   }
   const device = selectedDevice.value
   if (!device) {
-    status.value = 'Select a connected joystick before capturing an input.'
+    status.value = t('bindings.device.status.selectFirst')
     return
   }
 
@@ -223,14 +250,14 @@ async function captureBinding() {
   manualInputOpen.value = false
   pauseInputDeviceDiscovery()
   startCaptureUi()
-  status.value = `Listening only to ${device.deviceName}. Press Escape to cancel; capture stops automatically after 15 seconds.`
+  status.value = t('bindings.device.status.listening', { device: device.deviceName })
 
   try {
     const binding = await captureDeviceBinding(device.deviceGuid, CAPTURE_TIMEOUT_MS)
     if (!binding) {
       status.value = cancelRequested.value
-        ? 'Input capture canceled.'
-        : 'Input capture timed out after 15 seconds.'
+        ? t('bindings.device.status.canceled')
+        : t('bindings.device.status.timedOut')
       return
     }
 
@@ -242,9 +269,9 @@ async function captureBinding() {
       inputPath: binding.inputPath,
       inputLabel: binding.inputLabel,
     }))
-    status.value = `Captured ${binding.deviceName} / ${binding.inputLabel}.`
+    status.value = t('bindings.device.status.captured', { device: binding.deviceName, input: translatedInputLabel(binding.inputPath) || binding.inputLabel })
   } catch (error) {
-    status.value = errorText(error, 'Failed to capture joystick input.')
+    status.value = errorText(error, t('bindings.device.status.captureFailed'))
   } finally {
     capturing.value = false
     resumeInputDeviceDiscovery()
@@ -265,7 +292,7 @@ function selectDevice(deviceGuid: string) {
     inputPath: '',
     inputLabel: '',
   })
-  status.value = device ? `Selected ${device.deviceName}. Capture or choose an input manually.` : ''
+  status.value = device ? t('bindings.device.status.selected', { device: device.deviceName }) : ''
 }
 
 function assignManualInput(inputPath: string) {
@@ -279,10 +306,10 @@ function assignManualInput(inputPath: string) {
     productGuid: device.productGuid,
     deviceName: device.deviceName,
     inputPath: input.path,
-    inputLabel: input.label,
+    inputLabel: savedInputLabel(input.path),
   }))
   manualInputOpen.value = false
-  status.value = `Assigned ${device.deviceName} / ${input.label} manually.`
+  status.value = t('bindings.device.status.assigned', { device: device.deviceName, input: input.label })
 }
 </script>
 
@@ -290,16 +317,16 @@ function assignManualInput(inputPath: string) {
   <div class="mt-4 space-y-3">
     <div class="grid gap-3 lg:grid-cols-[minmax(260px,480px)_minmax(260px,360px)]">
       <label class="block min-w-0">
-        <span class="mb-1.5 block text-sm font-medium">Joystick Device</span>
+        <span class="mb-1.5 block text-sm font-medium">{{ t('bindings.device.joystickDevice') }}</span>
         <select
           class="app-input h-11 w-full rounded-[0.75rem] px-4 py-2.5 text-sm"
           :disabled="loading || capturing"
           :value="modelValue.deviceGuid"
           @change="selectDevice(($event.target as HTMLSelectElement).value)"
         >
-          <option value="">{{ loading ? 'Scanning...' : 'Select a device' }}</option>
+          <option value="">{{ loading ? t('bindings.device.scanning') : t('bindings.device.selectDevice') }}</option>
           <option v-if="isBoundDeviceDisconnected" :value="modelValue.deviceGuid">
-            {{ disconnectedDeviceName }} (disconnected)
+            {{ t('bindings.device.disconnectedOption', { name: disconnectedDeviceName }) }}
           </option>
           <option v-for="device in devices" :key="device.deviceGuid" :value="device.deviceGuid">
             {{ device.deviceName }} ({{ deviceCapabilityLabel(device) }})
@@ -308,7 +335,7 @@ function assignManualInput(inputPath: string) {
       </label>
 
       <div>
-        <span class="mb-1.5 block text-sm font-medium">Assigned Input</span>
+        <span class="mb-1.5 block text-sm font-medium">{{ t('bindings.device.assignedInput') }}</span>
         <div
           class="app-readonly-field flex h-11 min-w-0 items-center rounded-[0.75rem] p-1 text-sm"
           :aria-readonly="manualInputOpen ? undefined : 'true'"
@@ -317,10 +344,10 @@ function assignManualInput(inputPath: string) {
             v-if="manualInputOpen"
             class="app-input manual-input-select min-w-0 flex-1 self-stretch rounded-[0.55rem] border-0 px-3 py-1.5 outline-none"
             :value="modelValue.inputPath"
-            aria-label="Choose joystick input manually"
+            :aria-label="t('bindings.device.manualAria')"
             @change="assignManualInput(($event.target as HTMLSelectElement).value)"
           >
-            <option value="">Select an input...</option>
+            <option value="">{{ t('bindings.device.selectInput') }}</option>
             <option v-for="input in manualInputOptions" :key="input.path" :value="input.path">
               {{ input.label }}
             </option>
@@ -330,10 +357,10 @@ function assignManualInput(inputPath: string) {
             class="button-secondary shrink-0 rounded-[0.55rem] px-2.5 py-1.5 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50"
             type="button"
             :disabled="!selectedDevice || capturing"
-            :title="selectedDevice ? 'Choose a button or HAT direction without listening for input.' : 'Select a connected joystick first.'"
+            :title="selectedDevice ? t('bindings.device.manualHint') : t('bindings.device.manualHintNoDevice')"
             @click="manualInputOpen = !manualInputOpen"
           >
-            {{ manualInputOpen ? 'Close' : 'Manual' }}
+            {{ manualInputOpen ? t('common.close') : t('bindings.device.manual') }}
           </button>
         </div>
       </div>
@@ -349,9 +376,9 @@ function assignManualInput(inputPath: string) {
           <path fill-rule="evenodd" d="M10 2.5c.44 0 .85.23 1.08.62l6.63 11.3A1.25 1.25 0 0 1 16.63 16H3.37a1.25 1.25 0 0 1-1.08-1.88l6.63-11.3A1.25 1.25 0 0 1 10 2.5Zm0 4a.75.75 0 0 0-.75.75v3.5a.75.75 0 0 0 1.5 0v-3.5A.75.75 0 0 0 10 6.5Zm0 7.25a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z" clip-rule="evenodd" />
         </svg>
         <div>
-          <p class="font-medium">Bound device not currently connected</p>
+          <p class="font-medium">{{ t('bindings.device.disconnectedTitle') }}</p>
           <p class="mt-1">
-            This binding is still saved as {{ deviceName }} / {{ inputLabel }}, but Windows is not currently reporting that joystick.
+            {{ t('bindings.device.disconnectedBody', { device: deviceName, input: inputLabel }) }}
           </p>
         </div>
       </div>
@@ -373,14 +400,14 @@ function assignManualInput(inputPath: string) {
         type="button"
         @click="void refreshDevices()"
       >
-        Refresh Devices
+        {{ t('bindings.device.refresh') }}
       </button>
       <button
         class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium transition"
         type="button"
         @click="metadataOpen = true"
       >
-        Metadata
+        {{ t('bindings.device.metadata') }}
       </button>
     </div>
 
@@ -390,33 +417,33 @@ function assignManualInput(inputPath: string) {
       <div class="w-full max-w-[680px] rounded-[1.25rem] border p-5 surface-panel-strong">
         <div class="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <p class="eyebrow text-xs uppercase tracking-[0.24em]">Joystick Metadata</p>
+            <p class="eyebrow text-xs uppercase tracking-[0.24em]">{{ t('bindings.device.metadataTitle') }}</p>
             <h2 class="mt-2 text-xl font-semibold tracking-tight">{{ deviceName }}</h2>
           </div>
           <button class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click="metadataOpen = false">
-            Close
+            {{ t('common.close') }}
           </button>
         </div>
 
         <dl class="mt-5 grid gap-3 text-sm sm:grid-cols-2">
           <div>
-            <dt class="text-muted">Device GUID</dt>
-            <dd class="mt-1 break-all font-mono text-xs">{{ modelValue.deviceGuid || 'Unassigned' }}</dd>
+            <dt class="text-muted">{{ t('bindings.device.deviceGuid') }}</dt>
+            <dd class="mt-1 break-all font-mono text-xs">{{ modelValue.deviceGuid || t('bindings.device.unassigned') }}</dd>
           </div>
           <div>
-            <dt class="text-muted">Connection Status</dt>
-            <dd class="mt-1 text-xs">{{ isBoundDeviceDisconnected ? 'Disconnected' : (modelValue.deviceGuid ? 'Connected' : 'Unassigned') }}</dd>
+            <dt class="text-muted">{{ t('bindings.device.connectionStatus') }}</dt>
+            <dd class="mt-1 text-xs">{{ isBoundDeviceDisconnected ? t('bindings.device.disconnected') : (modelValue.deviceGuid ? t('bindings.device.connected') : t('bindings.device.unassigned')) }}</dd>
           </div>
           <div>
-            <dt class="text-muted">Product GUID</dt>
-            <dd class="mt-1 break-all font-mono text-xs">{{ modelValue.productGuid || selectedDevice?.productGuid || 'Unavailable' }}</dd>
+            <dt class="text-muted">{{ t('bindings.device.productGuid') }}</dt>
+            <dd class="mt-1 break-all font-mono text-xs">{{ modelValue.productGuid || selectedDevice?.productGuid || t('bindings.device.unavailable') }}</dd>
           </div>
           <div>
-            <dt class="text-muted">Input Path</dt>
-            <dd class="mt-1 break-all font-mono text-xs">{{ modelValue.inputPath || 'Unassigned' }}</dd>
+            <dt class="text-muted">{{ t('bindings.device.inputPath') }}</dt>
+            <dd class="mt-1 break-all font-mono text-xs">{{ modelValue.inputPath || t('bindings.device.unassigned') }}</dd>
           </div>
           <div>
-            <dt class="text-muted">Input Label</dt>
+            <dt class="text-muted">{{ t('bindings.device.inputLabel') }}</dt>
             <dd class="mt-1 break-all font-mono text-xs">{{ inputLabel }}</dd>
           </div>
         </dl>

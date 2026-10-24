@@ -1,0 +1,63 @@
+{
+  "checks": {
+    "suiteEnabled": {
+      "label": "套件執行階段開關",
+      "enabled": "允許 VectorXR 執行階段效果執行。",
+      "disabled": "VectorXR 已由首頁的執行階段開關停用。"
+    },
+    "layerRegistered": {
+      "label": "OpenXR 層註冊",
+      "loading": "VectorXR 仍在讀取 OpenXR 層註冊。",
+      "registered": "已註冊於 {slice}。",
+      "missing": "在 OpenXR 隱含 API 層登錄中找不到 VectorXR。"
+    },
+    "layerEnabled": {
+      "label": "OpenXR 層已啟用",
+      "loading": "正在等待 OpenXR 層狀態。",
+      "enabled": "VectorXR API 層已針對之後的 OpenXR 啟動啟用。",
+      "disabled": "VectorXR API 層已停用或無法使用。"
+    },
+    "layerDuplicates": {
+      "label": "僅啟用一個 VectorXR 層",
+      "detail_other": "已啟用 {count} 個 VectorXR 註冊（{paths}）。同時載入兩份時 OpenXR 應用程式會當機；請在「OpenXR 層」頁面上只保留一個，停用其餘的註冊。"
+    },
+    "layerFiles": {
+      "label": "層檔案",
+      "pending": "找到層註冊後即可檢查層檔案。",
+      "resolved": "資訊清單與 DLL 路徑皆可解析。",
+      "missing": "已註冊的資訊清單或 DLL 路徑遺失。"
+    },
+    "configLoaded": {
+      "label": "設定路徑",
+      "pending": "設定載入後會顯示設定路徑。"
+    },
+    "recentLog": {
+      "label": "執行階段記錄",
+      "available_other": "有 {count} 個最近的記錄檔。",
+      "none": "目前還沒有 VectorXR 執行階段記錄。"
+    },
+    "seenApps": {
+      "label": "應用程式探索",
+      "observed_other": "已偵測到 {count} 個 OpenXR 應用程式。",
+      "none": "尚未偵測到任何 OpenXR 應用程式。"
+    }
+  },
+  "overall": {
+    "ready": "就緒",
+    "attention": "需要注意",
+    "inactive": "未作用",
+    "unknown": "檢查中"
+  },
+  "description": {
+    "ready": "VectorXR 看起來已就緒，可供之後啟動的 OpenXR 應用程式使用。",
+    "attention": "VectorXR 可以執行，但有一或多項診斷可能需要檢查。",
+    "inactive": "VectorXR 目前尚未就緒，無法套用 OpenXR 增強功能。",
+    "unknown": "VectorXR 仍在收集系統狀態。"
+  },
+  "state": {
+    "pass": "通過",
+    "warn": "警告",
+    "fail": "失敗",
+    "info": "資訊"
+  }
+}

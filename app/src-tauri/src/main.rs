@@ -16,6 +16,9 @@ mod input_devices;
 mod openxr_layers;
 mod single_instance;
 mod tray;
+mod user_error;
+
+use user_error::user_error;
 
 fn default_true() -> bool {
     true
@@ -333,6 +336,11 @@ struct OsdSettings {
     custom_color: String,
     custom_presets: Vec<serde_json::Value>,
     accent: String,
+    // The OSD's language: a code, or "app" for the app's, which the page
+    // writes as app_language. 0.19 layers ignore both keys.
+    language: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    app_language: String,
     // Toggle binding lists (normalize_toggle_bindings); absent: the defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     toggle_binding: Option<InputBinding>,
@@ -407,6 +415,8 @@ impl Default for OsdSettings {
             custom_color: "#51ddbd".into(),
             custom_presets: vec![],
             accent: "teal".into(),
+            language: "app".into(),
+            app_language: String::new(),
             toggle_binding: Some(binding("F10")),
             toggle_bindings: None,
             cycle_binding: Some(binding("F11")),
@@ -1831,9 +1841,10 @@ fn write_text_safely(path: &Path, content: &str) -> Result<(), String> {
             }
             Err(error) => {
                 let _ = fs::remove_file(&temporary_path);
-                return Err(format!(
-                    "Unable to replace {}: {error}",
-                    path.to_string_lossy()
+                return Err(user_error(
+                    "configReplace",
+                    &[("path", path.to_string_lossy().into_owned()), ("detail", error.to_string())],
+                    format!("Unable to replace {}: {error}", path.to_string_lossy()),
                 ));
             }
         }
@@ -2042,12 +2053,20 @@ fn load_config() -> Result<ConfigEnvelope, String> {
 
     // Name the file: the app shows this text, and a JSON error's line and
     // column mean nothing without it.
-    let content = fs::read_to_string(&path)
-        .map_err(|error| format!("Unable to read {}: {error}", path.to_string_lossy()))?;
-    let config = normalize_config(
-        parse_config(&content)
-            .map_err(|error| format!("Unable to parse {}: {error}", path.to_string_lossy()))?,
-    );
+    let content = fs::read_to_string(&path).map_err(|error| {
+        user_error(
+            "configRead",
+            &[("path", path.to_string_lossy().into_owned()), ("detail", error.to_string())],
+            format!("Unable to read {}: {error}", path.to_string_lossy()),
+        )
+    })?;
+    let config = normalize_config(parse_config(&content).map_err(|error| {
+        user_error(
+            "configParse",
+            &[("path", path.to_string_lossy().into_owned()), ("detail", error.to_string())],
+            format!("Unable to parse {}: {error}", path.to_string_lossy()),
+        )
+    })?);
 
     Ok(ConfigEnvelope {
         path: path.to_string_lossy().into_owned(),
@@ -2273,9 +2292,10 @@ fn open_file_directory(path: String) -> Result<(), String> {
         .ok_or_else(|| "Unable to determine file directory".to_string())?;
 
     if !directory.exists() {
-        return Err(format!(
-            "Directory does not exist: {}",
-            directory.to_string_lossy()
+        return Err(user_error(
+            "directoryMissing",
+            &[("path", directory.to_string_lossy().into_owned())],
+            format!("Directory does not exist: {}", directory.to_string_lossy()),
         ));
     }
 
@@ -2305,6 +2325,22 @@ fn open_file_directory(path: String) -> Result<(), String> {
             .map_err(|error| error.to_string())?;
         return Ok(());
     }
+}
+
+// The language chosen in the installer (windows/nsis-hooks.nsh writes its
+// code next to the app), which the page uses until the first pick in
+// Settings. None without one.
+#[tauri::command]
+fn installer_language() -> Option<String> {
+    let directory = env::current_exe().ok()?.parent()?.to_path_buf();
+    installer_language_in(&directory)
+}
+
+fn installer_language_in(directory: &Path) -> Option<String> {
+    let content = fs::read_to_string(directory.join("installer-language.txt")).ok()?;
+    let code = content.trim().trim_start_matches('\u{feff}');
+    let valid = !code.is_empty() && code.len() <= 16 && code.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    valid.then(|| code.to_string())
 }
 
 #[tauri::command]
@@ -2858,9 +2894,13 @@ fn set_runtime_quadviews_diagnostic_visualization(
     let session = read_live_runtime_statuses()
         .into_iter()
         .find(|status| status.session_id == session_id)
-        .ok_or_else(|| "The OpenXR session is no longer active".to_string())?;
+        .ok_or_else(|| user_error("sessionInactive", &[], "The OpenXR session is no longer active".into()))?;
     if !session.capabilities.quadviews_diagnostic_visualization {
-        return Err("Diagnostic visualization is unavailable for this OpenXR session".into());
+        return Err(user_error(
+            "diagnosticUnavailable",
+            &[],
+            "Diagnostic visualization is unavailable for this OpenXR session".into(),
+        ));
     }
 
     let now = unix_milliseconds();
@@ -3058,9 +3098,10 @@ fn play_test_sound_blocking(
     };
 
     if !resolved.exists() {
-        return Err(format!(
-            "Sound file not found: {}",
-            resolved.to_string_lossy()
+        return Err(user_error(
+            "soundMissing",
+            &[("path", resolved.to_string_lossy().into_owned())],
+            format!("Sound file not found: {}", resolved.to_string_lossy()),
         ));
     }
 
@@ -4039,6 +4080,7 @@ fn main() {
             load_log_snapshot,
             open_file_directory,
             open_external_url,
+            installer_language,
             load_seen_apps,
             clear_seen_apps,
             load_runtime_pacing,

@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted } from 'vue'
 
+import I18nText from './I18nText.vue'
+import { t } from '../i18n/index.ts'
 import type { ActiveRuntimeInfo } from '../lib/commands'
 import type { RuntimePacingObservation, TurboPacingMode, VectorXRConfig } from '../lib/model'
 
@@ -113,29 +115,29 @@ function setPin(runtimeName: string, value: string) {
 function rowModeLabel(row: PacingRow): string {
   const pinned = props.config.modules.turbo.runtimePins[row.runtimeName]
   if (pinned) {
-    return pinned === 'async' ? 'Async' : 'Sequenced'
+    return pinned === 'async' ? t('turbo.strategy.async') : t('turbo.strategy.sequenced')
   }
   if (row.mode === 'async') {
-    return 'Async'
+    return t('turbo.strategy.async')
   }
   if (row.mode === 'sequenced') {
-    return 'Sequenced'
+    return t('turbo.strategy.sequenced')
   }
   if (row.mode === 'unsupported') {
-    return 'Not supported'
+    return t('turbo.runtime.mode.notSupported')
   }
-  return 'Undiscovered'
+  return t('turbo.runtime.mode.undiscovered')
 }
 
 function rowBadge(row: PacingRow): string {
   if (props.config.modules.turbo.runtimePins[row.runtimeName]) {
-    return 'Pinned'
+    return t('turbo.runtime.badge.pinned')
   }
   if (row.mode === 'unsupported') {
-    return 'Suspended'
+    return t('turbo.runtime.badge.suspended')
   }
   if (row.source === 'discovered') {
-    return 'Discovered'
+    return t('turbo.runtime.badge.discovered')
   }
   return ''
 }
@@ -159,20 +161,20 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
     <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
       <div class="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <nav class="flex items-center gap-1.5 text-xs text-muted" aria-label="Breadcrumb">
-            <button class="underline-offset-2 hover:underline" type="button" @click="$emit('close')">Turbo</button>
+          <nav class="flex items-center gap-1.5 text-xs text-muted" :aria-label="t('turbo.breadcrumb')">
+            <button class="underline-offset-2 hover:underline" type="button" @click="$emit('close')">{{ t('turbo.title') }}</button>
             <span aria-hidden="true">›</span>
-            <span class="font-medium" style="color: var(--app-text)">Runtime Behavior</span>
+            <span class="font-medium" style="color: var(--app-text)">{{ t('turbo.runtime.title') }}</span>
           </nav>
-          <h2 class="mt-2 text-2xl font-semibold tracking-tight">Runtime Behavior</h2>
+          <h2 class="mt-2 text-2xl font-semibold tracking-tight">{{ t('turbo.runtime.title') }}</h2>
           <p class="mt-1 max-w-3xl text-sm leading-6 text-muted">
-            Choose how VectorXR Turbo coordinates with each OpenXR runtime. Auto is a safe starting point; to find the fastest strategy for a game, try Async and Sequenced and compare them in Performance Diagnostics. Profiles using the Toolkit-style or Custom strategy ignore these settings.
+            {{ t('turbo.runtime.intro') }}
           </p>
         </div>
         <button
           class="button-secondary inline-flex h-9 w-9 items-center justify-center rounded-[0.75rem]"
           type="button"
-          aria-label="Close runtime behavior and return to Turbo"
+          :aria-label="t('turbo.runtime.closeAria')"
           @click="$emit('close')"
         >
           <svg aria-hidden="true" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
@@ -184,21 +186,21 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
       <section class="mt-5 rounded-[1rem] border p-4 surface-panel-soft">
         <div class="flex flex-wrap items-start justify-between gap-4">
           <div class="max-w-2xl">
-            <p class="text-sm font-semibold tracking-tight">Pacing strategy</p>
+            <p class="text-sm font-semibold tracking-tight">{{ t('turbo.runtime.pacing.title') }}</p>
             <p class="mt-1 text-sm leading-6 text-muted">
-              Auto is stability-first: it starts with Async and tries Sequenced if Async stalls or repeatedly rejects frames, then remembers the strategy after 60 seconds of stable play. It does not compare performance, so the remembered strategy is not necessarily the fastest.
+              {{ t('turbo.runtime.pacing.intro') }}
             </p>
           </div>
           <label class="flex items-center gap-3 text-sm font-medium">
-            Mode
+            {{ t('turbo.runtime.pacing.mode') }}
             <select
               v-model="config.modules.turbo.pacingMode"
               class="rounded-[0.6rem] border px-3 py-1.5 text-sm surface-panel-strong"
               style="border-color: var(--app-border)"
             >
-              <option value="auto">Auto · stability-first</option>
-              <option value="async">Async only · usually fastest</option>
-              <option value="sequenced">Sequenced only · for runtimes that need it</option>
+              <option value="auto">{{ t('turbo.pacingMode.auto') }}</option>
+              <option value="async">{{ t('turbo.runtime.pacing.asyncOnly') }}</option>
+              <option value="sequenced">{{ t('turbo.runtime.pacing.sequencedOnly') }}</option>
             </select>
           </label>
         </div>
@@ -208,38 +210,38 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
           :class="pacingForced ? 'chip-warning' : 'chip-success'"
           style="border-color: var(--app-border)"
         >
-          <template v-if="!pacingForced">
-            <strong>Auto is active.</strong> Async overlaps the runtime wait with game work; Sequenced supports runtimes that require wait and submission to remain interlocked. Pin a runtime below to test a specific strategy.
-          </template>
-          <template v-else>
-            <strong>Manual override is active.</strong> Only the selected strategy runs. Automatic discovery is paused; Turbo Safety and live fault suspension still apply.
-          </template>
+          <I18nText v-if="!pacingForced" keypath="turbo.runtime.pacing.autoActive">
+            <template #strong><strong>{{ t('turbo.runtime.pacing.autoActiveStrong') }}</strong></template>
+          </I18nText>
+          <I18nText v-else keypath="turbo.runtime.pacing.manual">
+            <template #strong><strong>{{ t('turbo.runtime.pacing.manualStrong') }}</strong></template>
+          </I18nText>
         </div>
       </section>
 
       <section class="mt-5 border-t pt-5" style="border-color: var(--app-border)">
         <div class="mb-3 flex flex-wrap items-end justify-between gap-2">
           <div>
-            <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Runtime Decisions</p>
-            <p class="mt-1 text-sm leading-6 text-muted">Review what Auto learned or override one runtime without affecting the rest.</p>
+            <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">{{ t('turbo.runtime.decisions.eyebrow') }}</p>
+            <p class="mt-1 text-sm leading-6 text-muted">{{ t('turbo.runtime.decisions.intro') }}</p>
           </div>
-          <span v-if="activeRuntimeLabel" class="rounded-full border px-3 py-1 text-xs text-muted" style="border-color: var(--app-border)">
-            Active: <span class="font-medium" style="color: var(--app-text)">{{ activeRuntimeLabel }}</span>
-          </span>
+          <I18nText v-if="activeRuntimeLabel" keypath="turbo.runtime.decisions.active" class="rounded-full border px-3 py-1 text-xs text-muted" style="border-color: var(--app-border)">
+            <template #runtime><span class="font-medium" style="color: var(--app-text)">{{ activeRuntimeLabel }}</span></template>
+          </I18nText>
         </div>
 
         <div v-if="pacingRows.length === 0" class="rounded-[0.9rem] border border-dashed px-4 py-5 text-sm text-muted surface-panel-soft">
-          Nothing to manage yet. Auto records a decision after Turbo's first session on a runtime.
+          {{ t('turbo.runtime.decisions.empty') }}
         </div>
 
         <div v-else class="overflow-x-auto" :class="pacingForced ? 'pointer-events-none opacity-50' : ''">
           <table class="w-full text-sm">
             <thead>
               <tr class="text-left text-xs uppercase tracking-wide text-muted">
-                <th class="py-2 pr-3 font-medium">Environment</th>
-                <th class="py-2 pr-3 font-medium">Decision</th>
-                <th class="py-2 pr-3 font-medium">Learned</th>
-                <th class="py-2 pr-3 font-medium">Override</th>
+                <th class="py-2 pr-3 font-medium">{{ t('turbo.runtime.decisions.environment') }}</th>
+                <th class="py-2 pr-3 font-medium">{{ t('turbo.runtime.decisions.decision') }}</th>
+                <th class="py-2 pr-3 font-medium">{{ t('turbo.runtime.decisions.learned') }}</th>
+                <th class="py-2 pr-3 font-medium">{{ t('turbo.runtime.decisions.override') }}</th>
                 <th class="py-2 font-medium"></th>
               </tr>
             </thead>
@@ -253,9 +255,9 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
                 <td class="py-3 pr-3">
                   <span :class="row.isActive ? 'font-semibold' : ''">{{ row.runtimeName }}</span>
                   <span v-if="row.runtimeVersion" class="ml-1 text-xs text-muted">{{ row.runtimeVersion }}</span>
-                  <span v-if="row.isActive" class="ml-2 rounded-full border px-2 py-0.5 text-[0.65rem] uppercase tracking-wide" style="border-color: var(--app-border)">Active</span>
+                  <span v-if="row.isActive" class="ml-2 rounded-full border px-2 py-0.5 text-[0.65rem] uppercase tracking-wide" style="border-color: var(--app-border)">{{ t('turbo.runtime.decisions.activeBadge') }}</span>
                   <span v-if="row.systemName || row.graphicsApi" class="mt-0.5 block text-xs text-muted">
-                    {{ row.systemName || 'Unknown headset' }}<template v-if="row.graphicsApi"> · {{ row.graphicsApi }}</template>
+                    {{ row.systemName || t('turbo.runtime.decisions.unknownHeadset') }}<template v-if="row.graphicsApi"> · {{ row.graphicsApi }}</template>
                   </span>
                 </td>
                 <td class="py-3 pr-3">
@@ -270,9 +272,9 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
                     style="border-color: var(--app-border)"
                     @change="setPin(row.runtimeName, ($event.target as HTMLSelectElement).value)"
                   >
-                    <option value="auto">Use Auto</option>
-                    <option value="async">Pin Async</option>
-                    <option value="sequenced">Pin Sequenced</option>
+                    <option value="auto">{{ t('turbo.runtime.decisions.useAuto') }}</option>
+                    <option value="async">{{ t('turbo.runtime.decisions.pinAsync') }}</option>
+                    <option value="sequenced">{{ t('turbo.runtime.decisions.pinSequenced') }}</option>
                   </select>
                 </td>
                 <td class="py-3 text-right">
@@ -280,10 +282,10 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
                     v-if="row.source"
                     class="button-secondary rounded-[0.5rem] px-2.5 py-1 text-xs"
                     type="button"
-                    title="Clear this runtime's learned decisions and safety blocks. Relaunch the game in Auto without a manual override to test Async, then Sequenced if needed."
+                    :title="t('turbo.runtime.decisions.clearRetestTitle')"
                     @click="emit('rediscoverRuntime', row.runtimeName)"
                   >
-                    Clear &amp; retest
+                    {{ t('turbo.runtime.decisions.clearRetest') }}
                   </button>
                 </td>
               </tr>
@@ -292,15 +294,15 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
         </div>
 
         <p v-if="pacingForced && pacingRows.length > 0" class="mt-2 text-xs text-muted">
-          Runtime decisions are inactive while a global manual override is selected.
+          {{ t('turbo.runtime.decisions.inactiveNote') }}
         </p>
         <p v-else-if="activeRuntimeLabel && !activeRuntimeHasRow && pacingRows.length > 0" class="mt-2 text-xs text-muted">
-          Auto will test {{ activeRuntimeLabel }} during the next Turbo session, starting with Async.
+          {{ t('turbo.runtime.decisions.willTest', { runtime: activeRuntimeLabel }) }}
         </p>
       </section>
 
       <div class="mt-5 flex justify-end border-t pt-4" style="border-color: var(--app-border)">
-        <button class="button-accent rounded-[0.75rem] px-6 py-2.5 text-sm font-medium" type="button" @click="$emit('close')">Done</button>
+        <button class="button-accent rounded-[0.75rem] px-6 py-2.5 text-sm font-medium" type="button" @click="$emit('close')">{{ t('common.done') }}</button>
       </div>
     </article>
   </div>

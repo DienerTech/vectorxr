@@ -1,0 +1,13 @@
+{
+  "configRead": "No se puede leer {path}: {detail}",
+  "configParse": "No se puede analizar {path}: {detail}",
+  "configReplace": "No se puede reemplazar {path}: {detail}",
+  "directoryMissing": "El directorio no existe: {path}",
+  "soundMissing": "No se encontró el archivo de sonido: {path}",
+  "sessionInactive": "La sesión de OpenXR ya no está activa",
+  "diagnosticUnavailable": "La visualización de diagnóstico no está disponible para esta sesión de OpenXR",
+  "layerNotRegistered": "El manifiesto de la capa ya no está registrado en esa sección de OpenXR",
+  "layerConflict": "Ya hay otro registro de VectorXR activado ({slice}: {path}). Las aplicaciones OpenXR se bloquean cuando se cargan dos copias de VectorXR, así que desactiva esa primero.",
+  "elevationRequired": "Este cambio en la capa OpenXR requiere permisos elevados. Reinicia VectorXR como administrador y vuelve a intentarlo.",
+  "elevationCanceled": "El cambio en la capa OpenXR se canceló en la solicitud de elevación o el asistente con permisos elevados no se inició."
+}

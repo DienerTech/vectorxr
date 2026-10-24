@@ -1,0 +1,133 @@
+{
+  "shared": {
+    "pivot": "Pivot",
+    "breadcrumb": "階層リンク",
+    "returnToPivot": "Pivot に戻る",
+    "editTitle": "{name} の編集",
+    "yaw": "ヨー",
+    "pitch": "ピッチ",
+    "transition": "トランジション",
+    "unitSeconds": "秒",
+    "unitCm": "cm",
+    "behavior": "動作",
+    "hold": "長押し",
+    "toggle": "切り替え",
+    "addBinding": "バインドの追加",
+    "bindingLabel": "バインド {index}",
+    "holdDescription": "押している間だけビューが有効になります。",
+    "toggleDescription": "1 回押すと入り、もう一度押すと出ます。",
+    "bindingCount_other": "バインド {count} 件"
+  },
+  "viewControlsPage": {
+    "snapViews": "スナップ ビュー",
+    "title": "{context} — スナップ ビュー",
+    "returnHint": "Esc キーまたは [完了] を押すと戻ります。",
+    "returnToSnapViews": "スナップ ビューに戻る",
+    "name": "名前",
+    "yawHint": "負の値で左、正の値で右を向きます。",
+    "positionOffset": "位置オフセット (省略可能)",
+    "positionHint": "位置は取得した Pivot の原点を基準とします。自然な頭の平行移動は引き続き使用できます。",
+    "rightLeft": "右 / 左",
+    "upDown": "上 / 下",
+    "forwardBack": "前 / 後",
+    "bindings": "バインド",
+    "bindingsHint": "[長押し] は離すと戻ります。[切り替え] はもう一度押すか、別のクイック ビューに切り替わるまで維持されます。",
+    "noBindings": "バインドが割り当てられていません。バインドを追加するまで、このクイック ビューは機能しません。",
+    "quickViews": "クイック ビュー",
+    "quickViewsHint": "Pivot の原点を基準とした名前付きの姿勢で、目標の周りでは 1:1 の自然なヘッド トラッキングが行われます。",
+    "createPreset": "4 ビューのプリセットを作成",
+    "addQuickView": "クイック ビューの追加",
+    "empty": "クイック ビューはまだありません。手動で追加するか、4 ビューの HAT プリセットから始めてください。",
+    "summary_other": "ヨー {yaw}° · ピッチ {pitch}° · バインド {count} 件",
+    "position": "位置 右 {right} · 上 {up} · 前 {forward} cm",
+    "moveUp": "上へ",
+    "moveDown": "下へ",
+    "copyName": "{name} のコピー",
+    "presets": {
+      "lookLeft": "左を見る",
+      "lookRight": "右を見る",
+      "high12": "上方 12 時",
+      "checkSix": "後方確認"
+    }
+  },
+  "viewControlsPanel": {
+    "snapViews": "スナップ ビュー",
+    "viewCount_other": "ビュー {count} 個",
+    "editSnapViews": "スナップ ビューの編集…"
+  },
+  "nudgeSetPage": {
+    "nudgeSets": "微調整セット",
+    "linked_other": "{count} 個のプロファイルにリンクされています。変更は、このセットが選択されているすべての場所に適用されます。",
+    "setName": "セット名",
+    "allowWhileInactive": "Pivot が非アクティブのときも許可する",
+    "allowWhileInactiveHint": "リンクされたプロファイルが作動していないときでも、これらのバインドでグローバルなビュー オフセットを調整して保持できます。",
+    "yawStep": "ヨーのステップ",
+    "pitchStep": "ピッチのステップ",
+    "yawLeft": "ヨー左",
+    "yawRight": "ヨー右",
+    "pitchUp": "ピッチ上",
+    "pitchDown": "ピッチ下",
+    "yawStepDescription": "現在のビューにヨーを 1 ステップ加えます。",
+    "pitchStepDescription": "現在のビューにピッチを 1 ステップ加えます。",
+    "center": "微調整オフセットを中央に戻す",
+    "centerDescription": "累積した微調整オフセットを消去します。",
+    "resetToDefaults": "既定値にリセット",
+    "confirmReset": "移動量をリセットし、この微調整セットからすべてのバインドを削除しますか?",
+    "deleteSet": "微調整セットの削除",
+    "deleteTitle": "この微調整セットを削除",
+    "deleteRequired": "微調整セットは少なくとも 1 つ必要です",
+    "confirmDelete": "「{name}」を削除しますか? これを使用しているプロファイルは別の微調整セットに切り替わります。"
+  },
+  "snapBindingsPage": {
+    "snapViewBindings": "スナップ ビューのバインド",
+    "title": "{context} — スナップ ビューのバインド",
+    "hint": "保存されたビューの変換を変更せずに、長押しまたは切り替えの操作を割り当てます。",
+    "noBinding": "バインドが割り当てられていません。このスナップ ビューは非アクティブです。",
+    "empty": "スナップ ビューはまだありません。バインドを割り当てる前に、[スナップ ビューの編集] からビューを作成してください。"
+  },
+  "snapBindingsPanel": {
+    "snapViewBindings": "スナップ ビューのバインド",
+    "inactiveHint": "バインドが割り当てられるまで、スナップ ビューは非アクティブのままです。",
+    "editBindings": "バインドの編集…"
+  },
+  "snapStacking": {
+    "title": "スナップ ビューに強化モーションを適用",
+    "description": "スナップ ビューに入っても補助を維持するか、すでに選択されているビューを中心に補助を有効にします。このプロファイルの回転と位置の調整を使用します。"
+  },
+  "originPage": {
+    "originControls": "原点の操作",
+    "title": "{context} — 原点の操作",
+    "hint": "Pivot のニュートラルな姿勢をシミュレーターの再センタリング位置に合わせておきます。",
+    "closeLabel": "原点の操作を閉じて Pivot に戻る",
+    "setOrigin": "原点の設定 (省略可能)",
+    "setOriginDescription": "現在の頭の姿勢を Pivot のニュートラルな着座原点として取得します。ゲーム内でビューの再センタリングに使う操作と同じものにバインドすると、両方の原点が一緒に更新されます。",
+    "setOriginNone": "バインドが割り当てられていません。Pivot は HMD の原点を中心に回転します。",
+    "releaseOrigin": "原点の解除 (省略可能)",
+    "releaseOriginDescription": "取得した原点を消去し、Pivot を HMD の原点に戻します。中心からずれた方向を見ている間に原点が取得された場合に便利です。",
+    "releaseOriginNone": "バインドが割り当てられていません。取得した原点は、セッションが終了するか再取得されるまで有効なままです。"
+  },
+  "originPanel": {
+    "originControls": "原点の操作",
+    "setOrigin": "原点の設定",
+    "setOriginTitle": "現在の頭の姿勢を Pivot のニュートラルな着座原点として取得します。",
+    "releaseOrigin": "原点の解除",
+    "releaseOriginTitle": "取得した原点を解除し、Pivot を既定の HMD の原点に戻します。",
+    "editOrigin": "原点の編集…"
+  },
+  "bindingsPanel": {
+    "motionActivation": "モーションの有効化",
+    "alwaysActive": "常にアクティブ",
+    "manual": "手動",
+    "noSuspendControls": "一時停止の操作なし",
+    "noActivationControls": "有効化の操作なし",
+    "editActivation": "有効化の編集..."
+  },
+  "bindingsPage": {
+    "motionActivation": "モーションの有効化",
+    "title": "{context} — 有効化",
+    "returnHint": "Esc キーまたは [完了] を押すと Pivot に戻ります。",
+    "closeLabel": "有効化を閉じて Pivot に戻る",
+    "alwaysActiveDescription": "Pivot を一時停止またはオフに切り替える操作を選択します。",
+    "manualDescription": "Pivot を作動させる操作を選択します。"
+  }
+}

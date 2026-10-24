@@ -92,6 +92,22 @@ void TestOsdConfig() {
     const auto micro=parse(R"({"compactMetrics":"fps","compactShowBrand":false,"compactShowApp":false,"compactShowClock":false,"compactShowRuntime":false})");
     Expect(micro.ok && micro.document.core.osd.compact_metrics=="fps" && !micro.document.core.osd.compact_show_brand && !micro.document.core.osd.compact_show_app,"Micro settings were dropped");
     Expect(!parse(R"({"compactMetrics":"bad"})").ok,"Unknown compact metrics accepted");
+    // The OSD's language: a code, or "app" (the app's, saved as appLanguage).
+    // A code this layer does not ship (a newer app's) is ignored with a
+    // warning, the way 0.19 layers ignore both keys.
+    const auto mentions_language=[](const depthxr::ParseResult& result) {
+        return std::count_if(result.warnings.begin(),result.warnings.end(),[](const std::string& warning) {
+            return warning.find("anguage")!=std::string::npos;
+        });
+    };
+    const auto language=parse(R"({"language":"ja","appLanguage":"de"})");
+    Expect(language.ok && language.document.core.osd.language=="ja" && language.document.core.osd.app_language=="de" &&
+           !mentions_language(language),"The OSD language was not read: "+language.error);
+    Expect(parse("{}").document.core.osd.language=="app","The OSD did not follow the app by default");
+    const auto newer=parse(R"({"language":"xx-YY","appLanguage":"tlh"})");
+    Expect(newer.ok && newer.document.core.osd.language=="app" && newer.document.core.osd.app_language.empty() &&
+           mentions_language(newer)==2,"A newer app's OSD language was not ignored: "+newer.error);
+    Expect(!parse(R"({"language":3})").ok,"A non-string OSD language was accepted");
     const auto no_header=parse(R"({"showBrand":false,"showApp":false,"showRuntime":false,"showClock":false})");
     Expect(no_header.ok && !no_header.document.core.osd.show_brand && !no_header.document.core.osd.show_app &&
            !no_header.document.core.osd.show_runtime && !no_header.document.core.osd.show_clock,"Expanded header choices were dropped");

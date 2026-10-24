@@ -1,0 +1,110 @@
+{
+  "editor": {
+    "type": "Binding Type",
+    "types": {
+      "none": "None",
+      "keyboard": "Keyboard",
+      "device": "Device"
+    },
+    "noneText": "No binding assigned. This action will not run until a binding is selected.",
+    "modifiers": "Modifiers",
+    "primaryKey": "Primary Key"
+  },
+  "sound": {
+    "playOnFire": "Play a sound when this action fires",
+    "playOnTransition": "Play a sound on activate / deactivate",
+    "explanation": "An extra audible cue for this binding. Leave a slot on the default tone, or choose your own short .wav.",
+    "defaultTone": "Default tone",
+    "single": "Sound",
+    "activate": "Activate",
+    "deactivate": "Deactivate",
+    "browse": "Browse…",
+    "test": "Test",
+    "pickerFailed": "Failed to open file picker.",
+    "playFailed": "Failed to play sound."
+  },
+  "list": {
+    "add": "Add Binding",
+    "noneText": "No bindings assigned. This action will not run until a binding is added.",
+    "bindingNumber": "Binding {number}",
+    "bindingDescription": "Choose a keyboard shortcut or detected device input."
+  },
+  "panel": {
+    "soundEnabledHint": "Sound feedback is enabled for a binding",
+    "soundEnabledAria": "Sound feedback enabled",
+    "editOne": "Edit Binding…",
+    "editMany": "Edit Bindings…"
+  },
+  "page": {
+    "breadcrumbAria": "Breadcrumb",
+    "breadcrumbBinding": "Binding",
+    "returnHint": "Press Esc or Done to return to {module}.",
+    "closeAria": "Close binding and return to {module}",
+    "listDescription": "{description} Add a binding for each device you fly with; any one of them acts."
+  },
+  "device": {
+    "joystickDevice": "Joystick Device",
+    "scanning": "Scanning...",
+    "selectDevice": "Select a device",
+    "disconnectedOption": "{name} (disconnected)",
+    "disconnectedName": "<device disconnected>",
+    "noDeviceSelected": "No device selected",
+    "assignedInput": "Assigned Input",
+    "manualAria": "Choose joystick input manually",
+    "selectInput": "Select an input...",
+    "manualHint": "Choose a button or HAT direction without listening for input.",
+    "manualHintNoDevice": "Select a connected joystick first.",
+    "manual": "Manual",
+    "button": "Button {number}",
+    "hatInput": "HAT {number} {direction}",
+    "hatDirections": {
+      "up": "Up",
+      "upRight": "Up Right",
+      "right": "Right",
+      "downRight": "Down Right",
+      "down": "Down",
+      "downLeft": "Down Left",
+      "left": "Left",
+      "upLeft": "Up Left"
+    },
+    "noInput": "No input captured",
+    "buttonCount_one": "{count} button",
+    "buttonCount_other": "{count} buttons",
+    "hatCount_one": "{count} HAT",
+    "hatCount_other": "{count} HATs",
+    "capabilities": "{buttons}, {hats}",
+    "disconnectedTitle": "Bound device not currently connected",
+    "disconnectedBody": "This binding is still saved as {device} / {input}, but Windows is not currently reporting that joystick.",
+    "capture": "Capture Input",
+    "canceling": "Canceling...",
+    "listening": "Listening... {seconds}s",
+    "cancelListening": "Cancel Listening ({seconds}s)",
+    "refresh": "Refresh Devices",
+    "metadata": "Metadata",
+    "metadataTitle": "Joystick Metadata",
+    "deviceGuid": "Device GUID",
+    "connectionStatus": "Connection Status",
+    "productGuid": "Product GUID",
+    "inputPath": "Input Path",
+    "inputLabel": "Input Label",
+    "unassigned": "Unassigned",
+    "unavailable": "Unavailable",
+    "connected": "Connected",
+    "disconnected": "Disconnected",
+    "status": {
+      "canceling": "Canceling input capture...",
+      "cancelFailedWith": "Could not cancel capture: {message}",
+      "cancelFailed": "Could not cancel capture. It will stop automatically at the time limit.",
+      "noDevices": "No joystick devices found.",
+      "selectFirst": "Select a connected joystick before capturing an input.",
+      "listening": "Listening only to {device}. Press Escape to cancel; capture stops automatically after 15 seconds.",
+      "canceled": "Input capture canceled.",
+      "timedOut": "Input capture timed out after 15 seconds.",
+      "captured": "Captured {device} / {input}.",
+      "captureFailed": "Failed to capture joystick input.",
+      "selected": "Selected {device}. Capture or choose an input manually.",
+      "assigned": "Assigned {device} / {input} manually."
+    },
+    "listFailed": "Failed to list joystick devices."
+  }
+}

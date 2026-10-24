@@ -7,10 +7,12 @@
     "strict": true,
     "jsx": "preserve",
     "resolveJsonModule": true,
+    "allowImportingTsExtensions": true,
     "isolatedModules": true,
     "esModuleInterop": true,
     "lib": [
       "ES2020",
+      "ES2021.Intl",
       "DOM",
       "DOM.Iterable"
     ],

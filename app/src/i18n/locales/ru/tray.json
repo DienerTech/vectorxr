@@ -1,0 +1,14 @@
+{
+  "health": "Состояние: {label}",
+  "healthUnavailable": "Состояние: параметры не загружены",
+  "logLevel": "Уровень журнала: {level}",
+  "logLevelUnavailable": "Уровень журнала",
+  "info": "Info",
+  "debug": "Debug",
+  "tooltip": "VectorXR: {label}",
+  "tooltipDisabled": "VectorXR: отключено",
+  "enabled": "VectorXR включён",
+  "exportDebug": "Экспорт отладки...",
+  "open": "Открыть VectorXR",
+  "quit": "Выйти из VectorXR"
+}

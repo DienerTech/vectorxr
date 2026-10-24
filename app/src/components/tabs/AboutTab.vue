@@ -5,6 +5,8 @@ import { openExternalUrl } from '../../lib/commands'
 import { formatPatchNoteInlineHtml, type PatchNoteEntry } from '../../lib/patchNotes'
 import { useUpdateStore } from '../../stores/updateStore'
 import DiscordJoinButton from '../DiscordJoinButton.vue'
+import I18nText from '../I18nText.vue'
+import { t } from '../../i18n/index.ts'
 
 const props = defineProps<{
   latestPatch: PatchNoteEntry
@@ -38,26 +40,26 @@ const releaseDate = computed(() => {
 
 const updateSummary = computed(() => {
   if (updateStatus.value === 'checking') {
-    return 'Checking GitHub releases...'
+    return t('about.updates.summary.checking')
   }
 
   if (updateStatus.value === 'available' && latestRelease.value) {
-    return `VectorXR ${latestRelease.value.tagName} is available.`
+    return t('about.updates.summary.available', { tag: latestRelease.value.tagName })
   }
 
   if (updateStatus.value === 'upToDate' && latestRelease.value) {
-    return `You are on the latest published release, ${latestRelease.value.tagName}.`
+    return t('about.updates.summary.upToDate', { tag: latestRelease.value.tagName })
   }
 
   if (updateStatus.value === 'unavailable') {
-    return 'No published GitHub releases are available yet.'
+    return t('about.updates.summary.unavailable')
   }
 
   if (updateStatus.value === 'error') {
-    return updateError.value || 'Unable to check for updates right now.'
+    return updateError.value || t('app.updates.checkFailed')
   }
 
-  return 'Check GitHub for the latest published VectorXR build.'
+  return t('about.updates.summary.idle')
 })
 
 const updateChipClass = computed(() => {
@@ -78,19 +80,19 @@ const updateChipClass = computed(() => {
 
 const updateChipLabel = computed(() => {
   if (updateStatus.value === 'checking') {
-    return 'Checking'
+    return t('about.updates.chip.checking')
   }
 
   if (updateStatus.value === 'available') {
-    return 'Update'
+    return t('about.updates.chip.available')
   }
 
   if (updateStatus.value === 'upToDate') {
-    return 'Current'
+    return t('about.updates.chip.upToDate')
   }
 
   if (updateStatus.value === 'error') {
-    return 'Retry'
+    return t('about.updates.chip.error')
   }
 
   return 'GitHub'
@@ -116,25 +118,26 @@ onMounted(() => {
   <div class="space-y-5">
     <section class="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(20rem,0.42fr)]">
       <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
-        <p class="eyebrow text-xs uppercase tracking-[0.24em]">About</p>
+        <p class="eyebrow text-xs uppercase tracking-[0.24em]">{{ t('about.eyebrow') }}</p>
 
         <h2 class="mt-3 text-3xl font-semibold tracking-tight">VectorXR</h2>
         <p class="mt-1.5 text-sm font-medium accent-text">
-          OpenXR Enhancements, tuned per game.
+          {{ t('about.tagline') }}
         </p>
         <p class="mt-3 max-w-3xl text-sm leading-6 text-muted">
-          VectorXR is an OpenXR Enhancement platform that reshapes how your headset renders and tracks — title by title. Reclaim frame rate with dynamic foveated rendering, amplify head rotation so you can check your six without overturning, and deepen stereo separation for a stronger sense of scale and presence.
+          {{ t('about.intro') }}
         </p>
         <p class="mt-3 max-w-3xl text-sm leading-6 text-muted">
-          OpenXR layer management and per-application profiles keep every title configured exactly how you like it, all from one place.
+          {{ t('about.profiles') }}
         </p>
-        <p class="mt-3 max-w-3xl text-sm leading-6 text-muted">
-          <span class="font-semibold accent-text">The first and only</span> OpenXR solution where enhanced head rotation and quad-views foveated rendering work together — the foveated region follows your pivoted view instead of being left behind.
-        </p>
-        <p class="mt-4 text-sm leading-6 text-muted">Developed independently by DienerTech LLC.</p>
-        <p class="mt-2 text-sm leading-6 text-muted">(c) 2026 DienerTech LLC. Released under the Mozilla Public License 2.0.</p>
+        <I18nText keypath="about.firstAndOnly" tag="p" class="mt-3 max-w-3xl text-sm leading-6 text-muted">
+          <template #highlight><span class="font-semibold accent-text">{{ t('about.firstAndOnlyHighlight') }}</span></template>
+        </I18nText>
+        <p class="mt-4 text-sm leading-6 text-muted">{{ t('about.developedBy') }}</p>
+        <p class="mt-2 text-sm leading-6 text-muted">{{ t('about.copyright') }}</p>
 
         <div class="mt-5 flex flex-wrap gap-3">
+          <!-- i18n-ignore: company name -->
           <button
             class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium"
             type="button"
@@ -154,17 +157,17 @@ onMounted(() => {
       </article>
 
       <aside class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
-        <p class="eyebrow text-xs uppercase tracking-[0.24em]">Support Development</p>
-        <h2 class="mt-3 text-2xl font-semibold tracking-tight">Support VectorXR</h2>
+        <p class="eyebrow text-xs uppercase tracking-[0.24em]">{{ t('about.support.eyebrow') }}</p>
+        <h2 class="mt-3 text-2xl font-semibold tracking-tight">{{ t('about.support.title') }}</h2>
         <p class="mt-3 text-sm leading-6 text-muted">
-          Tips through Ko-fi help fund testing hardware, release work, and continued polish for OpenXR tools.
+          {{ t('about.support.body') }}
         </p>
         <button
           class="button-accent mt-5 w-full rounded-[0.75rem] px-4 py-2.5 text-sm font-semibold"
           type="button"
           @click="openLink(koFiUrl)"
         >
-          Support on Ko-fi
+          {{ t('about.support.button') }}
         </button>
       </aside>
     </section>
@@ -173,7 +176,7 @@ onMounted(() => {
       <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
         <div class="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <p class="eyebrow text-xs uppercase tracking-[0.24em]">Latest Patch Notes</p>
+            <p class="eyebrow text-xs uppercase tracking-[0.24em]">{{ t('about.patchNotes.eyebrow') }}</p>
             <h2 class="mt-2 text-2xl font-semibold tracking-tight">{{ props.latestPatch.title }}</h2>
           </div>
 
@@ -194,7 +197,7 @@ onMounted(() => {
             type="button"
             @click="$emit('openPatchNotes')"
           >
-            Read full patch notes
+            {{ t('about.patchNotes.readFull') }}
           </button>
         </div>
       </article>
@@ -202,8 +205,8 @@ onMounted(() => {
       <aside class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
         <div class="flex items-start justify-between gap-3">
           <div>
-            <p class="eyebrow text-xs uppercase tracking-[0.24em]">Updates</p>
-            <h2 class="mt-2 text-xl font-semibold tracking-tight">Release status</h2>
+            <p class="eyebrow text-xs uppercase tracking-[0.24em]">{{ t('about.updates.eyebrow') }}</p>
+            <h2 class="mt-2 text-xl font-semibold tracking-tight">{{ t('about.updates.title') }}</h2>
           </div>
 
           <span :class="['rounded-full px-3 py-1 text-xs font-medium uppercase tracking-[0.18em]', updateChipClass]">
@@ -213,7 +216,7 @@ onMounted(() => {
 
         <p class="mt-3 text-sm leading-6 text-muted">{{ updateSummary }}</p>
         <p v-if="releaseDate" class="mt-2 text-xs font-medium uppercase tracking-[0.16em] text-soft">
-          Published {{ releaseDate }}
+          {{ t('about.updates.published', { date: releaseDate }) }}
         </p>
 
         <div class="mt-4 grid grid-cols-2 gap-3">
@@ -223,14 +226,14 @@ onMounted(() => {
             :disabled="updateStatus === 'checking'"
             @click="refreshUpdates"
           >
-            Check
+            {{ t('about.updates.check') }}
           </button>
           <button
             class="button-secondary rounded-[0.75rem] px-3 py-2 text-sm font-medium"
             type="button"
             @click="openLink(latestRelease?.htmlUrl || releasesUrl)"
           >
-            Release
+            {{ t('about.updates.release') }}
           </button>
         </div>
       </aside>

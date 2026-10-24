@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 
+import { t } from '../../i18n/index.ts'
 import { loadRuntimeStatus, type RuntimeStatusSession } from '../../lib/commands'
+import I18nText from '../I18nText.vue'
 import DefaultProfileExclusions from '../DefaultProfileExclusions.vue'
 import FrameGenSettingsFields from '../FrameGenSettingsFields.vue'
 import { useGpuCapabilities } from '../../lib/gpuCapabilities'
@@ -42,26 +44,26 @@ const setupGuideOpen = !(props.config.modules.framegen.enabled || props.config.m
 const toggleBindingWarnings = computed(() => savedBindingConflictWarnings(props.config, framegen.value.toggleBindings))
 const turboWarnings = computed(() => configWarnings(props.config))
 
-const restartNote = 'Turning Frame Generation on takes effect the next time the game starts; turning it off applies at once.'
+const restartNote = computed(() => t('framegen.restartNote'))
 
-const diagnosticViews: { value: FrameGenDiagnosticView; label: string; description: string }[] = [
-  { value: 'off', label: 'Off', description: 'Generated frames are shown as they are.' },
-  { value: 'flow', label: 'Motion flow', description: 'Color-codes the motion Frame Generation measured on generated frames.' },
-  { value: 'confidence', label: 'Confidence', description: 'Paints generated frames red where they fell back to the real image; useful while tuning the Advanced settings.' },
-  { value: 'tint', label: 'Generated-frame tint', description: 'Tints generated frames faintly, so you can see they are shown.' },
-]
-const diagnosticDescription = computed(() => diagnosticViews.find((view) => view.value === framegen.value.diagnosticView)?.description ?? '')
+const diagnosticViews = computed<{ value: FrameGenDiagnosticView; label: string; description: string }[]>(() => [
+  { value: 'off', label: t('framegen.diagnostic.views.off.label'), description: t('framegen.diagnostic.views.off.description') },
+  { value: 'flow', label: t('framegen.diagnostic.views.flow.label'), description: t('framegen.diagnostic.views.flow.description') },
+  { value: 'confidence', label: t('framegen.diagnostic.views.confidence.label'), description: t('framegen.diagnostic.views.confidence.description') },
+  { value: 'tint', label: t('framegen.diagnostic.views.tint.label'), description: t('framegen.diagnostic.views.tint.description') },
+])
+const diagnosticDescription = computed(() => diagnosticViews.value.find((view) => view.value === framegen.value.diagnosticView)?.description ?? '')
 
 // Live session status relayed by the layer.
 const sessions = ref<RuntimeStatusSession[]>([])
-const statusError = ref('')
+const statusError = ref(false)
 let disposed = false
 let poll: ReturnType<typeof setTimeout> | undefined
 async function refresh() {
   try {
     const status = await loadRuntimeStatus()
-    if (!disposed) { sessions.value = status.sessions; statusError.value = '' }
-  } catch { if (!disposed) statusError.value = 'Runtime status is temporarily unavailable.' }
+    if (!disposed) { sessions.value = status.sessions; statusError.value = false }
+  } catch { if (!disposed) statusError.value = true }
   if (!disposed) poll = setTimeout(refresh, 2000)
 }
 onMounted(refresh)
@@ -70,16 +72,18 @@ onUnmounted(() => { disposed = true; if (poll) clearTimeout(poll) })
 // The layer's state and a short reason, in the words the OSD uses.
 function sessionStatus(session: RuntimeStatusSession): { label: string; chip: string } {
   const reason = session.state.framegenReason?.trim()
-  const withReason = (label: string, separator = ' · ') => reason ? `${label}${separator}${reason}` : label
+  // The reason comes from the layer and stays as it reads there.
+  const withReason = (status: string, colon = false) =>
+    reason ? t(colon ? 'framegen.session.withReasonColon' : 'framegen.session.withReason', { status, reason }) : status
   switch (session.state.framegenState) {
-    case 'active': return { label: withReason('On'), chip: 'chip-success' }
-    case 'standby': return { label: withReason('Standby'), chip: 'chip-idle' }
-    case 'waiting': return { label: withReason('Starting · waiting for steady frames'), chip: 'chip-idle' }
-    case 'paused': return { label: withReason('Paused'), chip: 'chip-warning' }
-    case 'unavailable': return { label: withReason('Unavailable', ': '), chip: 'chip-warning' }
-    case 'off': return { label: withReason('Off'), chip: 'chip-idle' }
-    case undefined: return { label: 'Needs the updated VectorXR layer', chip: 'chip-idle' }
-    default: return { label: withReason('Status unavailable'), chip: 'chip-idle' }
+    case 'active': return { label: withReason(t('framegen.session.active')), chip: 'chip-success' }
+    case 'standby': return { label: withReason(t('framegen.session.standby')), chip: 'chip-idle' }
+    case 'waiting': return { label: withReason(t('framegen.session.waiting')), chip: 'chip-idle' }
+    case 'paused': return { label: withReason(t('framegen.session.paused')), chip: 'chip-warning' }
+    case 'unavailable': return { label: withReason(t('framegen.session.unavailable'), true), chip: 'chip-warning' }
+    case 'off': return { label: withReason(t('framegen.session.off')), chip: 'chip-idle' }
+    case undefined: return { label: t('framegen.session.needsLayer'), chip: 'chip-idle' }
+    default: return { label: withReason(t('framegen.session.unknown')), chip: 'chip-idle' }
   }
 }
 
@@ -87,9 +91,9 @@ function sessionStatus(session: RuntimeStatusSession): { label: string; chip: st
 // head moves. Shown only while it is in use or when the player can act on it.
 function depthStatus(session: RuntimeStatusSession): { label: string; title: string; chip: string } | null {
   switch (session.state.framegenDepth) {
-    case 'in-use': return { label: 'Using game depth', title: 'The game shares its depth, so near objects stay steady as you move your head.', chip: 'chip-success' }
-    case 'empty': return { label: 'Game depth is empty', title: 'The game sends depth without filling it. If the game has a depth-based reprojection option, turning it on lets Frame Generation use it.', chip: 'chip-warning' }
-    case 'unusable': return { label: 'Game depth not used', title: 'The depth the game sends does not line up between the eyes, so Frame Generation works without it.', chip: 'chip-idle' }
+    case 'in-use': return { label: t('framegen.gameDepth.inUse.label'), title: t('framegen.gameDepth.inUse.title'), chip: 'chip-success' }
+    case 'empty': return { label: t('framegen.gameDepth.empty.label'), title: t('framegen.gameDepth.empty.title'), chip: 'chip-warning' }
+    case 'unusable': return { label: t('framegen.gameDepth.unusable.label'), title: t('framegen.gameDepth.unusable.title'), chip: 'chip-idle' }
     default: return null
   }
 }
@@ -129,7 +133,7 @@ const profileWarnings = computed(() => {
       const appName = applicationNameById.get(applicationId) ?? applicationId
       warnings.set(index, [
         ...(warnings.get(index) ?? []),
-        `${appName} is already targeted by Profile ${firstIndex + 1}. The first active profile wins.`,
+        t('framegen.customProfiles.duplicateApplication', { application: appName, profile: firstIndex + 1 }),
       ])
     }
   })
@@ -140,22 +144,26 @@ const profileWarnings = computed(() => {
 const gpuCapabilities = useGpuCapabilities()
 
 function settingsSummary(settings: FrameGenSettings) {
-  const mode = settings.synthesisMode === 'extrapolate' ? 'Extrapolate' : 'Interpolate'
-  const rate = settings.frameMultiplier === 'dynamic' ? 'Dynamic' : settings.frameMultiplier === 'auto' ? 'Fixed Auto' : `Fixed ${settings.frameMultiplier}`
+  const mode = settings.synthesisMode === 'extrapolate' ? t('framegen.settings.mode.extrapolate.label') : t('framegen.settings.mode.interpolate.label')
+  const rate = settings.frameMultiplier === 'dynamic'
+    ? t('framegen.summary.dynamic')
+    : settings.frameMultiplier === 'auto' ? t('framegen.summary.fixedAuto') : t('framegen.summary.fixed', { multiplier: settings.frameMultiplier })
   // The source in use: Shader while interpolating in Dynamic, or with no card that has the hardware.
-  const motion = motionSourceState(settings, gpuCapabilities.value).effective === 'hardware' ? 'NVIDIA hardware' : 'Shader'
-  return `${mode} · ${rate} · ${motion}`
+  const motion = motionSourceState(settings, gpuCapabilities.value).effective === 'hardware'
+    ? t('framegen.settings.motionSource.hardware.label')
+    : t('framegen.settings.motionSource.shader.label')
+  return t('framegen.summary.format', { mode, rate, motion })
 }
 </script>
 
 <template>
   <ModuleBindingPage
     v-if="bindingSubPageOpen"
-    module-label="Frame Generation"
+    :module-label="t('framegen.title')"
     :bindings="framegen.toggleBindings"
-    label="Frame Generation A/B Toggle"
-    description="Switches generated frames off and on in the headset, to compare motion in the same scene. Works in games that started with Frame Generation on."
-    none-text="No binding assigned. Frame Generation runs wherever it is on when the game starts."
+    :label="t('framegen.toggle.label')"
+    :description="t('framegen.toggle.description')"
+    :none-text="t('framegen.toggle.noneText')"
     :warnings="toggleBindingWarnings"
     @update:bindings="framegen.toggleBindings = $event"
     @close="closeToggleBinding"
@@ -165,11 +173,11 @@ function settingsSummary(settings: FrameGenSettings) {
       <div class="mb-4 flex flex-wrap items-start justify-between gap-4">
         <div>
           <div class="flex flex-wrap items-center gap-2">
-            <h2 class="text-2xl font-semibold tracking-tight">Frame Generation</h2>
-            <span class="rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em] chip-warning">Experimental</span>
+            <h2 class="text-2xl font-semibold tracking-tight">{{ t('framegen.title') }}</h2>
+            <span class="rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em] chip-warning">{{ t('framegen.experimental') }}</span>
           </div>
           <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">
-            Adds generated frames between the game's frames, so motion stays smooth at your headset's full refresh rate even when the game can't keep up. Try it per game and compare with the A/B toggle.
+            {{ t('framegen.intro') }}
           </p>
         </div>
         <button
@@ -178,7 +186,7 @@ function settingsSummary(settings: FrameGenSettings) {
           @click="howItWorksOpen = true"
         >
           <span class="inline-flex h-5 w-5 items-center justify-center rounded-full border text-xs" style="border-color: var(--app-border)">i</span>
-          How Frame Generation Works
+          {{ t('framegen.howItWorksTitle') }}
         </button>
       </div>
 
@@ -192,31 +200,48 @@ function settingsSummary(settings: FrameGenSettings) {
         {{ warning }}
       </div>
 
-      <SetupGuide class="mb-3" title="Setup guide" summary="Turn it on for one game, then compare in the headset" :open="setupGuideOpen">
+      <SetupGuide class="mb-3" :title="t('framegen.setupGuide.title')" :summary="t('framegen.setupGuide.summary')" :open="setupGuideOpen">
         <ol class="list-decimal space-y-1 pl-5 text-sm leading-6">
-          <li><strong>Turn off runtime smoothing</strong> for the game, in the runtime and in the headset's own software: SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW or Meta ASW. They fight Frame Generation's pacing.</li>
-          <li><strong>Keep the headset at its full refresh rate.</strong> Don't halve the frame rate with Pimax Play's Lock Frame Rate to Half Refresh Rate or a frame limit in SteamVR's Throttling Behavior; Frame Generation sets the game's rate itself.</li>
-          <li><strong>Get the game to half the refresh rate first.</strong> With Frame Generation off, lower the game's settings or the render resolution until it holds at least half the headset's rate (45 fps at 90 Hz). Frame Generation can take it from half to full, but it can't do the first half.</li>
-          <li><strong>Turn it on for one game:</strong> leave the Default Profile off, add a custom profile below and assign the game. The default settings suit most games.</li>
-          <li><strong>Save and restart the game.</strong> Turning Frame Generation on takes effect at the next launch.</li>
-          <li><strong>Check it in the headset:</strong> the <button class="underline underline-offset-2" type="button" @click="$emit('navigate', 'osd')">On-Screen Display</button> shows FG ON next to its FPS, or pick the Generated-frame tint diagnostic view (and set it back to Off afterwards).</li>
-          <li><strong>Compare:</strong> assign the A/B toggle and switch generated frames off and on in the same scene.</li>
+          <I18nText keypath="framegen.setupGuide.smoothing.body" tag="li">
+            <template #label><strong>{{ t('framegen.setupGuide.smoothing.label') }}</strong></template>
+          </I18nText>
+          <I18nText keypath="framegen.setupGuide.refreshRate.body" tag="li">
+            <template #label><strong>{{ t('framegen.setupGuide.refreshRate.label') }}</strong></template>
+          </I18nText>
+          <I18nText keypath="framegen.setupGuide.halfRate.body" tag="li">
+            <template #label><strong>{{ t('framegen.setupGuide.halfRate.label') }}</strong></template>
+          </I18nText>
+          <I18nText keypath="framegen.setupGuide.oneGame.body" tag="li">
+            <template #label><strong>{{ t('framegen.setupGuide.oneGame.label') }}</strong></template>
+          </I18nText>
+          <I18nText keypath="framegen.setupGuide.restart.body" tag="li">
+            <template #label><strong>{{ t('framegen.setupGuide.restart.label') }}</strong></template>
+          </I18nText>
+          <I18nText keypath="framegen.setupGuide.check.body" tag="li">
+            <template #label><strong>{{ t('framegen.setupGuide.check.label') }}</strong></template>
+            <template #osd><button class="underline underline-offset-2" type="button" @click="$emit('navigate', 'osd')">{{ t('framegen.setupGuide.check.osd') }}</button></template>
+          </I18nText>
+          <I18nText keypath="framegen.setupGuide.compare.body" tag="li">
+            <template #label><strong>{{ t('framegen.setupGuide.compare.label') }}</strong></template>
+          </I18nText>
         </ol>
         <p class="mt-3 text-xs leading-5 text-muted">
-          Turbo stays off in games where Frame Generation runs.
+          {{ t('framegen.setupGuide.turboNote') }}
         </p>
       </SetupGuide>
 
       <p class="mb-4 flex items-start gap-2 text-xs leading-5 text-muted" role="note">
         <span class="restart-required-mark" aria-hidden="true">&#8635;</span>
-        <span><strong class="font-semibold">Restart to apply:</strong> turning Frame Generation on for a game takes effect the next time the game starts. Turning it off, and every other setting on this page, applies during play.</span>
+        <I18nText keypath="framegen.restartToApply.body">
+          <template #label><strong class="font-semibold">{{ t('framegen.restartToApply.label') }}</strong></template>
+        </I18nText>
       </p>
 
       <div class="mb-4 space-y-3 rounded-[1rem] border p-4 surface-panel-soft">
         <div class="flex flex-wrap items-center gap-2">
-          <p class="eyebrow mr-1 text-xs uppercase tracking-[0.18em]">In-headset controls</p>
-          <span v-if="statusError" class="text-xs text-muted">{{ statusError }}</span>
-          <span v-else-if="!sessions.length" class="chip-idle rounded-full px-2.5 py-1 text-xs">No VR application running</span>
+          <p class="eyebrow mr-1 text-xs uppercase tracking-[0.18em]">{{ t('framegen.controls.heading') }}</p>
+          <span v-if="statusError" class="text-xs text-muted">{{ t('framegen.controls.statusUnavailable') }}</span>
+          <span v-else-if="!sessions.length" class="chip-idle rounded-full px-2.5 py-1 text-xs">{{ t('framegen.controls.noSession') }}</span>
           <template v-else>
             <template v-for="session in sessions" :key="session.sessionId">
               <span class="rounded-full px-2.5 py-1 text-xs" :class="sessionStatus(session).chip">
@@ -230,21 +255,21 @@ function settingsSummary(settings: FrameGenSettings) {
         </div>
         <div class="grid gap-3 lg:grid-cols-2">
           <ModuleBindingPanel
-            heading="A/B toggle"
+            :heading="t('framegen.toggle.heading')"
             :bindings="framegen.toggleBindings"
-            hint="Optional. Switches generated frames off and on in games that started with Frame Generation on."
+            :hint="t('framegen.toggle.hint')"
             @edit="openToggleBinding"
           />
           <div class="rounded-[1rem] border p-4 surface-panel-soft">
             <label class="flex flex-wrap items-center justify-between gap-3">
-              <span class="text-sm font-semibold tracking-tight">Diagnostic view</span>
+              <span class="text-sm font-semibold tracking-tight">{{ t('framegen.diagnostic.heading') }}</span>
               <select v-model="framegen.diagnosticView" class="app-input manual-input-select rounded-[0.75rem] px-3 py-1.5 text-sm">
                 <option v-for="view in diagnosticViews" :key="view.value" :value="view.value">{{ view.label }}</option>
               </select>
             </label>
-            <p class="mt-2 text-xs leading-5 text-muted">{{ diagnosticDescription }} Applies to every game and updates during play.</p>
+            <p class="mt-2 text-xs leading-5 text-muted">{{ t('framegen.diagnostic.hint', { description: diagnosticDescription }) }}</p>
             <p v-if="framegen.diagnosticView !== 'off'" class="mt-2 rounded-[0.75rem] border px-3 py-2 text-xs leading-5 chip-warning" style="border-color: var(--app-border)" role="note">
-              On: generated frames in the headset are drawn with this view's colors, which look like glitches in normal play. Set it to Off when you are done.
+              {{ t('framegen.diagnostic.onWarning') }}
             </p>
           </div>
         </div>
@@ -255,8 +280,8 @@ function settingsSummary(settings: FrameGenSettings) {
           <svg aria-hidden="true" class="section-chevron h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
             <path fill-rule="evenodd" d="M7.2 14.8a1 1 0 0 1 0-1.4L10.6 10 7.2 6.6a1 1 0 1 1 1.4-1.4l4.1 4.1a1 1 0 0 1 0 1.4l-4.1 4.1a1 1 0 0 1-1.4 0Z" clip-rule="evenodd" />
           </svg>
-          <span class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Default Profile</span>
-          <span class="text-xs text-muted">Applies to games without an enabled custom profile</span>
+          <span class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">{{ t('framegen.defaultProfile.heading') }}</span>
+          <span class="text-xs text-muted">{{ t('framegen.defaultProfile.appliesTo') }}</span>
           <span v-if="framegen.enabled" class="ml-auto rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em] chip-accent">
             {{ settingsSummary(framegen.defaults) }}
           </span>
@@ -264,18 +289,18 @@ function settingsSummary(settings: FrameGenSettings) {
         <div class="mt-3 flex flex-wrap items-center gap-2">
           <label class="pill-toggle inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium" :title="restartNote">
             <input v-model="framegen.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
-            Default Profile {{ framegen.enabled ? 'On' : 'Off' }}
+            {{ framegen.enabled ? t('framegen.defaultProfile.toggleOn') : t('framegen.defaultProfile.toggleOff') }}
             <span class="restart-required-mark" :title="restartNote">&#8635;</span>
           </label>
           <DefaultProfileExclusions :applications="applications" :profiles="framegen.profiles" />
         </div>
         <p v-if="!framegen.enabled" class="mt-2 text-xs text-muted">
-          Off for games without a custom profile. Custom profiles below still turn it on for their games.
+          {{ t('framegen.defaultProfile.offNote') }}
         </p>
         <template v-else>
-          <div class="mt-3 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 chip-warning" style="border-color: var(--app-border)">
-            <strong>On for every game without a custom profile,</strong> including ones you haven't tried it with. The safer setup is to leave this off and add a profile for each game you've checked.
-          </div>
+          <I18nText keypath="framegen.defaultProfile.onWarning.body" tag="div" class="mt-3 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 chip-warning" style="border-color: var(--app-border)">
+            <template #label><strong>{{ t('framegen.defaultProfile.onWarning.label') }}</strong></template>
+          </I18nText>
           <FrameGenSettingsFields class="mt-3" :settings="framegen.defaults" />
         </template>
       </details>
@@ -284,15 +309,15 @@ function settingsSummary(settings: FrameGenSettings) {
     <section class="space-y-3">
       <div class="sticky top-0 z-20 flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border px-4 py-3 shadow-panel backdrop-blur surface-panel-strong">
         <div class="min-w-0 flex-1">
-          <h2 class="text-lg font-semibold tracking-tight">Custom Profiles</h2>
-          <p class="text-sm text-muted">Turn Frame Generation on per game. The first enabled matching profile wins.</p>
+          <h2 class="text-lg font-semibold tracking-tight">{{ t('framegen.customProfiles.heading') }}</h2>
+          <p class="text-sm text-muted">{{ t('framegen.customProfiles.description') }}</p>
         </div>
         <button
           class="button-accent rounded-[0.75rem] px-5 py-2.5 text-sm font-medium"
           type="button"
           @click="$emit('addFrameGenProfile')"
         >
-          Add Profile
+          {{ t('framegen.customProfiles.add') }}
         </button>
       </div>
 
@@ -302,7 +327,7 @@ function settingsSummary(settings: FrameGenSettings) {
         :index="index"
         :profile="profile"
         :applications="applications"
-        module-label="Frame Generation"
+        :module-label="t('framegen.title')"
         :enabled-change-note="restartNote"
         :warnings="profileWarnings.get(index)"
         @remove="$emit('removeFrameGenProfile', index)"
@@ -319,7 +344,7 @@ function settingsSummary(settings: FrameGenSettings) {
         v-if="framegen.profiles.length === 0"
         class="rounded-[1rem] border border-dashed px-6 py-7 text-center text-sm surface-panel-soft"
       >
-        No custom profiles yet. Add a profile to turn Frame Generation on for a game.
+        {{ t('framegen.customProfiles.empty') }}
       </div>
     </section>
 
@@ -327,57 +352,61 @@ function settingsSummary(settings: FrameGenSettings) {
       <div class="max-h-[85vh] w-full max-w-[720px] overflow-y-auto rounded-[1.25rem] border p-5 surface-panel-strong">
         <div class="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <p class="eyebrow text-xs uppercase tracking-[0.24em]">Frame Generation</p>
-            <h2 class="mt-2 text-xl font-semibold tracking-tight">How Frame Generation Works</h2>
+            <p class="eyebrow text-xs uppercase tracking-[0.24em]">{{ t('framegen.title') }}</p>
+            <h2 class="mt-2 text-xl font-semibold tracking-tight">{{ t('framegen.howItWorksTitle') }}</h2>
           </div>
-          <button class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click="howItWorksOpen = false">Close</button>
+          <button class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click="howItWorksOpen = false">{{ t('common.close') }}</button>
         </div>
 
         <div class="mt-5 space-y-5 text-sm leading-6">
           <section class="space-y-3">
-            <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">What it does</p>
+            <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">{{ t('framegen.howItWorks.whatItDoes.heading') }}</p>
             <div class="rounded-[1rem] border px-4 py-3 surface-panel">
-              Frame Generation measures how the image moves between the game's frames and creates new frames from that motion, so the headset gets a fresh image every refresh even when the game renders fewer. Your head rotation is taken out first, because the headset's own reprojection already handles it.
+              {{ t('framegen.howItWorks.whatItDoes.body') }}
             </div>
           </section>
 
           <section class="space-y-3">
-            <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Mode</p>
+            <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">{{ t('framegen.howItWorks.mode.heading') }}</p>
+            <I18nText keypath="framegen.howItWorks.mode.interpolate" tag="div" class="rounded-[1rem] border px-4 py-3 surface-panel">
+              <template #name><strong>{{ t('framegen.settings.mode.interpolate.label') }}</strong></template>
+            </I18nText>
+            <I18nText keypath="framegen.howItWorks.mode.extrapolate" tag="div" class="rounded-[1rem] border px-4 py-3 surface-panel">
+              <template #name><strong>{{ t('framegen.settings.mode.extrapolate.label') }}</strong></template>
+            </I18nText>
+          </section>
+
+          <section class="space-y-3">
+            <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">{{ t('framegen.howItWorks.frameRate.heading') }}</p>
+            <I18nText keypath="framegen.howItWorks.frameRate.dynamic" tag="div" class="rounded-[1rem] border px-4 py-3 surface-panel">
+              <template #name><strong>{{ t('framegen.settings.frameRate.dynamic.label') }}</strong></template>
+            </I18nText>
+            <I18nText keypath="framegen.howItWorks.frameRate.fixed" tag="div" class="rounded-[1rem] border px-4 py-3 surface-panel">
+              <template #name><strong>{{ t('framegen.settings.frameRate.fixed.label') }}</strong></template>
+              <template #x2><strong>2x</strong></template>
+              <template #x3><strong>3x</strong></template>
+              <template #x4><strong>4x</strong></template>
+              <template #auto><strong>{{ t('common.auto') }}</strong></template>
+            </I18nText>
+          </section>
+
+          <section class="space-y-3">
+            <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">{{ t('framegen.howItWorks.beforeYouStart.heading') }}</p>
+            <I18nText keypath="framegen.howItWorks.beforeYouStart.smoothing" tag="div" class="rounded-[1rem] border px-4 py-3 chip-warning" style="border-color: var(--app-border)">
+              <template #label><strong>{{ t('framegen.setupGuide.smoothing.label') }}</strong></template>
+            </I18nText>
+            <I18nText keypath="framegen.howItWorks.beforeYouStart.turbo.body" tag="div" class="rounded-[1rem] border px-4 py-3 surface-panel">
+              <template #label><strong>{{ t('framegen.howItWorks.beforeYouStart.turbo.label') }}</strong></template>
+            </I18nText>
             <div class="rounded-[1rem] border px-4 py-3 surface-panel">
-              <strong>Interpolate</strong> (default) blends between the last two game frames. It looks smoothest and has the fewest artifacts, but shows each game frame a little later.
-            </div>
-            <div class="rounded-[1rem] border px-4 py-3 surface-panel">
-              <strong>Extrapolate</strong> projects the newest game frame forward along its motion, so it adds no latency. Fast motion and newly revealed areas show more artifacts; it looks best with NVIDIA hardware as the motion source.
+              {{ t('framegen.howItWorks.beforeYouStart.apis') }}
             </div>
           </section>
 
           <section class="space-y-3">
-            <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Frame rate</p>
+            <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">{{ t('framegen.howItWorks.knownLimits.heading') }}</p>
             <div class="rounded-[1rem] border px-4 py-3 surface-panel">
-              <strong>Dynamic</strong> (default) lets the game run as fast as it can and fills the refreshes between its frames with generated ones. When the game keeps up on its own, Frame Generation stands by and generates nothing.
-            </div>
-            <div class="rounded-[1rem] border px-4 py-3 surface-panel">
-              <strong>Fixed</strong> holds the game at a set fraction of the refresh rate for even pacing. On a 90 Hz headset, <strong>2x</strong> runs the game at 45 fps, <strong>3x</strong> at 30 fps and <strong>4x</strong> at 22.5 fps; <strong>Auto</strong> picks among them as the game needs. Each generated frame moves the image further, so higher rates show more artifacts.
-            </div>
-          </section>
-
-          <section class="space-y-3">
-            <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Before you start</p>
-            <div class="rounded-[1rem] border px-4 py-3 chip-warning" style="border-color: var(--app-border)">
-              <strong>Turn off runtime smoothing</strong> for the game, in the runtime and in the headset's own software (SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW, Meta ASW), and keep the headset at its full refresh rate: don't halve the frame rate with Pimax Play's Lock Frame Rate to Half Refresh Rate or a frame limit in SteamVR's Throttling Behavior. Frame Generation sets the game's rate itself.
-            </div>
-            <div class="rounded-[1rem] border px-4 py-3 surface-panel">
-              <strong>Turbo stays off while Frame Generation runs.</strong> The two pace frames in opposite ways, so Turbo yields in those games and reads Paused for Frame Generation. Your Turbo profiles are not changed.
-            </div>
-            <div class="rounded-[1rem] border px-4 py-3 surface-panel">
-              Works with Direct3D 11, Direct3D 12 and Vulkan games, including with Quadviews.
-            </div>
-          </section>
-
-          <section class="space-y-3">
-            <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Known limits</p>
-            <div class="rounded-[1rem] border px-4 py-3 surface-panel">
-              Motion is measured from the images the game shows, so text, HUDs, transparency and repeating patterns can shimmer or warp on generated frames. If it is distracting, raise Artifact suppression or lower Motion limit under Advanced.
+              {{ t('framegen.howItWorks.knownLimits.body') }}
             </div>
           </section>
         </div>

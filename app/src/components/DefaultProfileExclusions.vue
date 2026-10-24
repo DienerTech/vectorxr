@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
+import { formatList, t } from '../i18n/index.ts'
 import type { RegisteredApplication } from '../lib/model'
 
 interface ProfileAssignment {
@@ -22,6 +23,8 @@ const excludedApplications = computed(() => {
 
   return props.applications.filter((application) => excludedIds.has(application.id))
 })
+
+const excludedNames = computed(() => formatList(excludedApplications.value.map((application) => application.name)))
 </script>
 
 <template>
@@ -29,9 +32,9 @@ const excludedApplications = computed(() => {
     v-if="excludedApplications.length"
     class="inline-flex max-w-full flex-wrap items-center gap-x-1 rounded-full border px-3 py-2 text-xs text-muted"
     style="border-color: var(--app-border)"
-    :title="`Enabled custom profiles take priority for: ${excludedApplications.map((application) => application.name).join(', ')}`"
+    :title="t('registry.exclusions.title', { apps: excludedNames })"
   >
-    <span class="font-semibold" style="color: var(--app-text)">Does not apply to:</span>
-    <span>{{ excludedApplications.map((application) => application.name).join(', ') }}</span>
+    <span class="font-semibold" style="color: var(--app-text)">{{ t('registry.exclusions.label') }}</span>
+    <span>{{ excludedNames }}</span>
   </span>
 </template>

@@ -1,0 +1,86 @@
+{
+  "core": {
+    "title": "设置",
+    "intro": "应用全局开关、外观、日志、声音反馈和配置文件。",
+    "general": {
+      "heading": "常规",
+      "enabled": {
+        "title": "启用 VectorXR",
+        "description": "在运行时启用或禁用所有 VectorXR OpenXR 增强功能。"
+      },
+      "theme": {
+        "title": "主题",
+        "description": "仅存储在此电脑上。"
+      },
+      "language": {
+        "title": "语言",
+        "description": "“系统（自动）”跟随 Windows 显示语言。仅存储在此电脑上。",
+        "system": "系统（自动）",
+        "systemResolved": "系统（自动）· {language}",
+        "pseudo": "伪区域设置（测试）",
+        "machineTranslated": "此翻译由机器生成，读起来可能不够通顺。欢迎在 GitHub 上提交更正。"
+      },
+      "tray": {
+        "title": "系统托盘",
+        "description": "关闭此窗口后，应用会保留在通知区域中，提供运行状况、VectorXR 开关、日志级别和导出调试信息。关闭此项：关闭窗口即退出应用。仅存储在此电脑上。",
+        "helperNote": "本应用和托盘只是设置辅助程序，而不是 OpenXR 层。只要“启用 VectorXR”处于打开状态，即使关闭它们，VectorXR 也会在游戏中正常工作。"
+      },
+      "inputDevices": {
+        "title": "输入设备",
+        "description": "供游戏中使用：重新查找会话中途连接、但 VectorXR 未检测到的控制器。",
+        "rescan": "重新扫描输入",
+        "rescanning": "正在重新扫描…",
+        "noGame": "没有正在运行 VectorXR 的游戏。",
+        "asked_other": "已请求 {count} 个正在运行的游戏重新查找。",
+        "rescanFailed": "重新扫描输入失败"
+      },
+      "trackSeenApps": {
+        "title": "跟踪发现的 XR 应用",
+        "description": "记录您启动的 OpenXR 应用的可执行文件名以及首次/最近发现时间，以便您轻松地在应用程序注册表中注册它们。所有数据都只保存在此电脑本地。"
+      }
+    },
+    "logging": {
+      "heading": "日志",
+      "logLevel": "日志级别",
+      "logLevelHelp": "“信息”记录正常的运行消息和错误。“调试”会额外记录详细诊断信息，包括有限长度的 Turbo 帧时序跟踪。日志设置更改会实时生效；如需测量运行时时钟，请在启用“调试”的情况下启动 VR 应用。",
+      "levelInfo": "信息",
+      "levelDebug": "调试",
+      "retention": "日志保留",
+      "retentionHelp": "要保留的轮换日志文件数量。超过保留数量后会删除较旧的文件。",
+      "viewLogs": "查看日志",
+      "exportDebug": "导出调试信息",
+      "exportDebugHelp": "将日志、设置和诊断信息保存为一个 ZIP 文件以便分享，与“主页”选项卡中的功能相同。",
+      "latestLog": "最新日志：{path}",
+      "latestLogPending": "首次会话后可用"
+    },
+    "sound": {
+      "heading": "声音反馈",
+      "description": "可附加到绑定上的激活/停用提示音的主音量。",
+      "test": "测试",
+      "volume": "声音反馈音量",
+      "previewFailed": "无法播放声音。"
+    },
+    "configFiles": {
+      "heading": "配置文件",
+      "description": "导入其他设置文件、导出当前设置，或确认 VectorXR 本地配置的存放位置。",
+      "import": "导入配置",
+      "export": "导出配置",
+      "directory": "配置目录",
+      "directoryPending": "配置加载后可用",
+      "reset": {
+        "title": "重置为默认值",
+        "description": "使用默认值重建 settings.json，并清除本地 OpenXR 应用程序发现数据。",
+        "button": "重置为默认值"
+      }
+    }
+  },
+  "theme": {
+    "system": "系统",
+    "light": "浅色",
+    "dark": "深色"
+  },
+  "fileTypes": {
+    "jsonConfig": "JSON 配置",
+    "wavAudio": "WAV 音频"
+  }
+}

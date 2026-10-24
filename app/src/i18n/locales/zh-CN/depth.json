@@ -1,0 +1,216 @@
+{
+  "title": "深度",
+  "experimental": "实验性",
+  "intro": "将双眼尺度和深度位置作为一个整体来塑造，然后在某个游戏需要单独调校时使用按应用程序的配置文件。从中性值开始，每次只更改一个控制，并使用运行时绑定进行即时 A/B 对比。",
+  "tuningGuide": {
+    "title": "调校指南",
+    "summary": "设置尺度、放置深度，然后对比",
+    "ariaLabel": "深度调校指南",
+    "scale": {
+      "step": "第 1 步：设置尺度",
+      "name": "立体深度",
+      "body": "向左会增大感知到的世界尺度，当座舱感觉被微缩时可以恢复真实大小的比例。向右会增强立体形状和临场感，适用于画面看起来过于扁平或过大的游戏。近处几何体的变化最明显。"
+    },
+    "place": {
+      "step": "第 2 步：放置深度",
+      "name": "汇聚平面",
+      "body": "判断尺度时请将其保持为零，然后以小步长放置工作平面。向左可让拥挤的座舱有更多空间；向右可让远处的面板、瞄具或交互区域更近。"
+    },
+    "compare": {
+      "step": "第 3 步：对比",
+      "name": "成对调校",
+      "body": "请将每个游戏配置文件视为独立的视觉校准——不同的相机几何可能需要完全不同的组合，而不只是细微的变化。与原生几何进行 A/B 对比，一旦出现眼睛疲劳或难以融合的迹象，请立即停止。"
+    }
+  },
+  "ipdNote": {
+    "lead": "游戏内的 IPD 设置可能会覆盖立体深度。",
+    "body": "{lead} 请先禁用任何强制 IPD、虚拟 IPD、立体分离或世界尺度覆盖设置。在 DCS 中，请在 Options > VR 下取消勾选 {setting}。",
+    "forceIpdDistance": "Force IPD Distance"
+  },
+  "bindingsCard": {
+    "eyebrow": "调校与对比",
+    "heading": "游戏内绑定",
+    "description": "在一处配置完整的深度 A/B 切换和 Depth Lock A/B 切换。",
+    "assigned_other": "已分配 {count}/{total}",
+    "duplicateInputs_other": "{count} 个重复输入"
+  },
+  "defaultProfile": {
+    "heading": "默认配置文件",
+    "appliesTo": "适用于没有已启用的自定义配置文件的应用程序",
+    "toggleOn": "默认配置文件已开启",
+    "toggleOff": "默认配置文件已关闭",
+    "offNote": "关闭，除非某个已启用的自定义配置文件将其开启。下方的自定义配置文件仍会应用于其应用程序。"
+  },
+  "customProfiles": {
+    "heading": "自定义配置文件",
+    "description": "按应用程序覆盖深度设置。以第一个匹配的已启用配置文件为准。",
+    "add": "添加配置文件",
+    "empty": "还没有自定义配置文件。添加一个配置文件即可为特定应用程序覆盖深度值。",
+    "duplicateApplication": "{application} 已被配置文件 {profile} 作为目标。以第一个活动的配置文件为准。"
+  },
+  "troubleshooting": {
+    "title": "深度故障排除",
+    "heading": "深度表现异常时",
+    "override": "带有强制 IPD、虚拟 IPD、立体分离或世界尺度设置的游戏，可能会替换 OpenXR 报告的双眼间距。该覆盖优先于 VectorXR 的立体深度。",
+    "dcs": {
+      "label": "DCS：",
+      "body": "{label}在 Options > VR 下取消勾选 {setting}，然后完全重新启动 DCS。强制值会固定 DCS 自身的虚拟相机间距，可能导致立体深度看起来毫无作用。"
+    },
+    "expected": {
+      "label": "预期结果：",
+      "body": "{label}立体深度对近处几何体的双眼尺度影响最明显，因此座舱可能看起来更大或更小，而远处的地形和地平线几乎不变。这种随距离变化的响应是正常的。"
+    },
+    "convergence": {
+      "label": "汇聚的效果更细微：",
+      "body": "{label}它移动的是零视差平面，而不是缩放场景。以小步长调整时，请将近处的座舱边缘与远处的景物进行对比。如果禁用游戏级覆盖后立体深度仍然无效，请启用调试日志并导出会话日志。"
+    },
+    "depthLock": {
+      "label": "Depth Lock 在提交时保留调校后的图像：",
+      "body": "{label}游戏使用修改后的立体几何进行渲染，然后运行时接收头显原生的眼睛姿态和 FOV，因此无法将这种组合规范化抵消。请在相同数值下对比开启和关闭的效果；如果舒适度变差，请降低强度或将其禁用。"
+    }
+  },
+  "bindingsPage": {
+    "breadcrumb": "导航路径",
+    "current": "游戏内绑定",
+    "title": "深度 — 游戏内绑定",
+    "escHint": "按 Esc 或“完成”返回深度。",
+    "closeLabel": "关闭绑定并返回深度",
+    "compareGently": {
+      "heading": "温和地对比",
+      "body": "即使两种设置单独使用都很舒适，快速的 A/B 切换也可能短暂地给视觉融合带来负担。请在每次对比之间稍作停顿；如果图像感觉难以稳定，请减弱较强的那一项设置。"
+    },
+    "depthToggle": {
+      "label": "深度 A/B 切换",
+      "description": "在游戏中开启或关闭完整的深度增强功能，同时保留您调校好的数值，以便直接对比。为您飞行时使用的每个设备各添加一个绑定；其中任何一个都能触发。",
+      "noneText": "未分配绑定。深度遵循活动配置文件，没有游戏内 A/B 切换。"
+    },
+    "lockToggle": {
+      "label": "Depth Lock A/B 切换",
+      "description": "仅切换 Depth Lock，立体深度和汇聚保持活动。这样更容易感受到提交锁定对调校组合的贡献。为您飞行时使用的每个设备各添加一个绑定；其中任何一个都能触发。",
+      "noneText": "未分配绑定。Depth Lock 遵循活动配置文件。"
+    }
+  },
+  "depthLock": {
+    "name": "Depth Lock",
+    "description": "将调校后的立体几何锁定到渲染图像中，然后在提交时恢复头显原生的眼睛姿态和 FOV，使运行时无法将该效果规范化抵消。请按游戏逐一测试；如果出现不适或恶心，请降低强度。"
+  },
+  "stereoDepth": {
+    "title": "立体深度 / 世界尺度",
+    "subtitle": "更改虚拟双眼间距，同时不改变头显的物理 IPD。向右移动可获得更强的近场立体感，世界感觉更小；向左移动则世界感觉更大、更扁平。建议从 ±5–15% 左右开始。",
+    "left": "- 更大的世界",
+    "center": "0 原生尺度",
+    "right": "+ 3D 立体效果",
+    "extendedRange": "扩展范围（±100%）",
+    "extendedRangeHint": "仅在常规 ±25% 调校不够时使用。",
+    "badgeNative": "原生 IPD",
+    "badge": "立体 {value}%"
+  },
+  "convergence": {
+    "title": "汇聚 / 深度平面",
+    "subtitle": "放置零视差平面，而不改变相对深度。调校立体深度时请保持为 0，然后以小步长调整：负值使平面更远；正值使平面更近。",
+    "left": "- 平面更远",
+    "center": "0 应用默认值",
+    "right": "+ 平面更近",
+    "extendedRange": "扩展范围（±25）",
+    "extendedRangeHint": "仅在常规 ±5 调校不够时使用。",
+    "badgeDefault": "平面：应用默认值",
+    "badgeNearer": "平面：更近 +{value}",
+    "badgeFarther": "平面：更远 {value}"
+  },
+  "pairingMap": {
+    "heading": "深度组合图",
+    "hint": "拖动圆点可同时探索两个控制。使用滑块进行微调。",
+    "regionLabel": "组合深度效果",
+    "values": "深度 {depth} · 汇聚 {convergence}",
+    "lockOn": "Depth Lock 已开启",
+    "lockOff": "Depth Lock 已关闭",
+    "convergenceNearer": "汇聚：更近（+{limit}）",
+    "convergenceFarther": "汇聚：更远（−{limit}）",
+    "depthLarger": "深度：更大尺度（−{limit}%）",
+    "depthStronger": "深度：更强立体（+{limit}%）",
+    "mapLabel": "深度组合图。拖动可在水平方向设置立体深度、在垂直方向设置汇聚。箭头键用于微调；按住 Shift 可加大步长。",
+    "quadrants": {
+      "largerNear": {
+        "label": "更大尺度 · 近",
+        "axes": "深度 − · 汇聚 +"
+      },
+      "strongerNear": {
+        "label": "更强立体 · 近",
+        "axes": "深度 + · 汇聚 +"
+      },
+      "largerFar": {
+        "label": "更大尺度 · 远",
+        "axes": "深度 − · 汇聚 −"
+      },
+      "strongerFar": {
+        "label": "更强立体 · 远",
+        "axes": "深度 + · 汇聚 −"
+      }
+    }
+  },
+  "netEffect": {
+    "heading": "综合效果",
+    "goodFitLabel": "适用场景：",
+    "goodFit": "{label}{text}",
+    "watchForLabel": "注意事项：",
+    "watchFor": "{label}{text}",
+    "lockOff": "Depth Lock 已关闭，因此运行时可能会在提交时重新解释并部分规范化此组合。",
+    "lockOn": "在提交时恢复原生几何的同时，Depth Lock 会保留渲染的组合。",
+    "cases": {
+      "native": {
+        "title": "原生立体几何",
+        "description": "两个控制都没有改变应用程序的立体尺度或深度平面。",
+        "useCase": "用于了解游戏原本设计的尺度，并作为每个配置文件的 A/B 参考。",
+        "caution": "如果原生比例已经足够逼真，就无需校正。"
+      },
+      "compactNear": {
+        "title": "紧凑尺度，即时临场感",
+        "description": "更强的立体分离使世界感觉更小、更有立体感，而更近的平面会将工作区域拉向您。",
+        "useCase": "适用于座舱感觉过大或过远，而您希望面板、控制器和近处几何体感觉触手可及的情况。",
+        "caution": "两个控制都会增加近场负担，因此请以小步长接近此象限。"
+      },
+      "detailedFar": {
+        "title": "细腻立体，舒适放置",
+        "description": "更强的立体分离增加了形状感和临场感，而更远的平面让这种更紧凑的图像有更多空间。",
+        "useCase": "适用于原生比例感觉过大，但单独使用正立体深度又会让座舱显得拥挤的情况。",
+        "caution": "先调校立体深度，再将平面移动到恰好能让较强图像自然稳定的位置即可。"
+      },
+      "largerNear": {
+        "title": "更大尺度，近处工作平面",
+        "description": "减小立体分离会扩大感知到的世界尺度，而更近的平面让面板和控制在视觉上仍然易于触及。",
+        "useCase": "适用于座舱感觉像玩具，但仪表或交互区域仍应感觉近且易读的情况。",
+        "caution": "即使减小了立体深度，过大的正汇聚值仍可能让人疲劳。"
+      },
+      "lifeSizedFar": {
+        "title": "真实大小尺度，放松的放置",
+        "description": "减小立体分离会增大感知尺寸，而更远的平面让座舱环绕在您周围，而不是挤在您面前。",
+        "useCase": "适用于原生相机感觉被微缩或过近的飞机和载具模拟游戏；可以更好地匹配您记忆中的真实世界比例。",
+        "caution": "较柔和的立体感是有意为之——当尺度感觉自然时就停止，不要追求最强的 3D 效果。"
+      },
+      "strongerStereo": {
+        "title": "更强的相对立体深度",
+        "description": "近处几何体获得更多分离和形状感，临场感增强，同时世界感觉略小。",
+        "useCase": "适用于画面看起来扁平或过大，但现有深度平面位置已经感觉舒适的游戏。",
+        "caution": "如果场景开始显得拥挤，请搭配一个较小的负汇聚调整。"
+      },
+      "largerScale": {
+        "title": "更大、更柔和的世界尺度",
+        "description": "减小立体分离会柔化近场强度，并增大感知到的世界尺寸。",
+        "useCase": "适用于原生几何感觉被微缩、局促，或立体感比真实载具更强烈的情况。",
+        "caution": "只需减小到足以恢复可信的比例，并保留有用的形状线索。"
+      },
+      "planeNearer": {
+        "title": "工作平面移近",
+        "description": "场景的视差场向您移动，而不改变其相对深度梯度或整体尺度。",
+        "useCase": "适用于尺度看起来正确，但面板、瞄具或交互区域在视觉上感觉太远的情况。",
+        "caution": "正值可能让人感觉像斗鸡眼，尤其是与正立体深度搭配时。"
+      },
+      "planeFarther": {
+        "title": "工作平面移远",
+        "description": "场景的视差场向远处移动，而不改变其相对深度梯度或整体尺度。",
+        "useCase": "适用于尺度看起来正确，但座舱或近处几何体感觉太贴近您面前的情况。",
+        "caution": "只需移动到足以放松放置的程度，同时保持场景易于融合。"
+      }
+    }
+  }
+}

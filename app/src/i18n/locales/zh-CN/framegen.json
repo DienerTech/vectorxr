@@ -1,0 +1,237 @@
+{
+  "title": "Frame Generation",
+  "experimental": "实验性",
+  "intro": "在游戏的帧之间插入生成的帧，即使游戏跟不上，运动也能在头显的完整刷新率下保持流畅。请按游戏逐一尝试，并使用 A/B 切换进行对比。",
+  "howItWorksTitle": "Frame Generation 的工作原理",
+  "restartNote": "开启 Frame Generation 将在下次启动游戏时生效；关闭则立即生效。",
+  "restartToApply": {
+    "label": "重新启动以应用：",
+    "body": "{label}为某个游戏开启 Frame Generation 将在下次启动该游戏时生效。关闭它以及此页面上的所有其他设置都会在游玩期间生效。"
+  },
+  "setupGuide": {
+    "title": "设置指南",
+    "summary": "先为一个游戏开启，然后在头显中对比",
+    "smoothing": {
+      "label": "关闭运行时平滑",
+      "body": "{label}：请针对该游戏，在运行时和头显自身的软件中关闭：SteamVR Motion Smoothing、Pimax Smart Smoothing、Virtual Desktop SSW 或 Meta ASW。它们会与 Frame Generation 的帧节奏控制相冲突。"
+    },
+    "refreshRate": {
+      "label": "让头显保持完整刷新率。",
+      "body": "{label}不要使用 Pimax Play 的 Lock Frame Rate to Half Refresh Rate 或 SteamVR 的 Throttling Behavior 中的帧率限制将帧率减半；Frame Generation 会自行设置游戏的帧率。"
+    },
+    "halfRate": {
+      "label": "先让游戏达到刷新率的一半。",
+      "body": "{label}在关闭 Frame Generation 的情况下，降低游戏设置或渲染分辨率，直到游戏能稳定保持至少头显刷新率的一半（90 Hz 时为 45 fps）。Frame Generation 可以将帧率从一半提升到完整，但无法完成前一半。"
+    },
+    "oneGame": {
+      "label": "为一个游戏开启：",
+      "body": "{label}保持默认配置文件关闭，在下方添加一个自定义配置文件并分配该游戏。默认设置适合大多数游戏。"
+    },
+    "restart": {
+      "label": "保存并重新启动游戏。",
+      "body": "{label}开启 Frame Generation 将在下次启动时生效。"
+    },
+    "check": {
+      "label": "在头显中检查：",
+      "osd": "屏幕显示",
+      "body": "{label}{osd}会在其 FPS 旁显示“FG 开启”，或者选择“生成帧着色”诊断视图（之后请将其改回“关闭”）。"
+    },
+    "compare": {
+      "label": "对比：",
+      "body": "{label}分配 A/B 切换，并在同一场景中关闭和开启生成帧。"
+    },
+    "turboNote": "在运行 Frame Generation 的游戏中，Turbo 保持关闭。"
+  },
+  "controls": {
+    "heading": "头显内控制",
+    "statusUnavailable": "运行时状态暂时不可用。",
+    "noSession": "没有正在运行的 VR 应用程序"
+  },
+  "session": {
+    "withReason": "{status} · {reason}",
+    "withReasonColon": "{status}：{reason}",
+    "active": "开启",
+    "standby": "待机",
+    "waiting": "正在启动 · 等待稳定的帧",
+    "paused": "已暂停",
+    "unavailable": "不可用",
+    "off": "关闭",
+    "needsLayer": "需要更新后的 VectorXR 层",
+    "unknown": "状态不可用"
+  },
+  "gameDepth": {
+    "inUse": {
+      "label": "正在使用游戏深度",
+      "title": "游戏共享了其深度信息，因此移动头部时近处物体保持稳定。"
+    },
+    "empty": {
+      "label": "游戏深度为空",
+      "title": "游戏发送了深度但没有填充内容。如果游戏有基于深度的重投影选项，开启它即可让 Frame Generation 使用深度。"
+    },
+    "unusable": {
+      "label": "未使用游戏深度",
+      "title": "游戏发送的深度在两眼之间无法对齐，因此 Frame Generation 在不使用深度的情况下工作。"
+    }
+  },
+  "toggle": {
+    "heading": "A/B 切换",
+    "hint": "可选。在启动时已开启 Frame Generation 的游戏中关闭和开启生成帧。",
+    "label": "Frame Generation A/B 切换",
+    "description": "在头显中关闭和开启生成帧，以便在同一场景中对比运动效果。适用于启动时已开启 Frame Generation 的游戏。",
+    "noneText": "未分配绑定。Frame Generation 会在游戏启动时已开启的所有地方运行。"
+  },
+  "diagnostic": {
+    "heading": "诊断视图",
+    "hint": "{description} 适用于所有游戏，并在游玩期间更新。",
+    "onWarning": "开启：头显中的生成帧会以此视图的颜色绘制，在正常游玩时看起来像故障。完成后请将其设为“关闭”。",
+    "views": {
+      "off": {
+        "label": "关闭",
+        "description": "生成帧按原样显示。"
+      },
+      "flow": {
+        "label": "运动光流",
+        "description": "以颜色编码显示 Frame Generation 在生成帧上测得的运动。"
+      },
+      "confidence": {
+        "label": "置信度",
+        "description": "将生成帧中回退到真实图像的区域涂成红色；在调校高级设置时很有用。"
+      },
+      "tint": {
+        "label": "生成帧着色",
+        "description": "为生成帧添加淡淡的色调，以便您看出它们正在显示。"
+      }
+    }
+  },
+  "defaultProfile": {
+    "heading": "默认配置文件",
+    "appliesTo": "适用于没有已启用的自定义配置文件的游戏",
+    "toggleOn": "默认配置文件已开启",
+    "toggleOff": "默认配置文件已关闭",
+    "offNote": "对没有自定义配置文件的游戏关闭。下方的自定义配置文件仍会为其游戏开启它。",
+    "onWarning": {
+      "label": "对所有没有自定义配置文件的游戏开启，",
+      "body": "{label}包括您尚未用它尝试过的游戏。更安全的做法是保持此项关闭，并为您检查过的每个游戏添加配置文件。"
+    }
+  },
+  "customProfiles": {
+    "heading": "自定义配置文件",
+    "description": "按游戏开启 Frame Generation。以第一个匹配的已启用配置文件为准。",
+    "add": "添加配置文件",
+    "empty": "还没有自定义配置文件。添加一个配置文件即可为某个游戏开启 Frame Generation。",
+    "duplicateApplication": "{application} 已被配置文件 {profile} 作为目标。以第一个活动的配置文件为准。"
+  },
+  "summary": {
+    "format": "{mode} · {rate} · {motion}",
+    "dynamic": "动态",
+    "fixedAuto": "固定 自动",
+    "fixed": "固定 {multiplier}"
+  },
+  "howItWorks": {
+    "whatItDoes": {
+      "heading": "它的作用",
+      "body": "Frame Generation 会测量图像在游戏帧之间的移动方式，并根据该运动创建新帧，因此即使游戏渲染的帧更少，头显每次刷新时也能获得新图像。您的头部旋转会首先被剔除，因为头显自身的重投影已经处理了它。"
+    },
+    "mode": {
+      "heading": "模式",
+      "interpolate": "{name}（默认）在最近两个游戏帧之间进行混合。它看起来最流畅、瑕疵最少，但每个游戏帧的显示会稍晚一些。",
+      "extrapolate": "{name}沿运动方向向前投射最新的游戏帧，因此不会增加延迟。快速运动和新显露的区域会出现更多瑕疵；以 NVIDIA 硬件作为运动来源时效果最好。"
+    },
+    "frameRate": {
+      "heading": "帧率",
+      "dynamic": "{name}（默认）让游戏以尽可能快的速度运行，并用生成帧填充其帧之间的刷新。当游戏自身能够跟上时，Frame Generation 会待机且不生成任何帧。",
+      "fixed": "{name}将游戏保持在刷新率的固定比例，以获得均匀的帧节奏。在 90 Hz 头显上，{x2} 使游戏以 45 fps 运行，{x3} 为 30 fps，{x4} 为 22.5 fps；{auto} 会根据游戏需要在其中选择。每个生成帧都会让图像移动得更远，因此倍率越高瑕疵越多。"
+    },
+    "beforeYouStart": {
+      "heading": "开始之前",
+      "smoothing": "{label}：请针对该游戏，在运行时和头显自身的软件中关闭（SteamVR Motion Smoothing、Pimax Smart Smoothing、Virtual Desktop SSW、Meta ASW），并让头显保持完整刷新率：不要使用 Pimax Play 的 Lock Frame Rate to Half Refresh Rate 或 SteamVR 的 Throttling Behavior 中的帧率限制将帧率减半。Frame Generation 会自行设置游戏的帧率。",
+      "turbo": {
+        "label": "运行 Frame Generation 时 Turbo 保持关闭。",
+        "body": "{label}两者控制帧节奏的方式相反，因此在这些游戏中 Turbo 会让位，并显示“因 Frame Generation 暂停”。您的 Turbo 配置文件不会被更改。"
+      },
+      "apis": "适用于 Direct3D 11、Direct3D 12 和 Vulkan 游戏，包括使用 Quadviews 的情况。"
+    },
+    "knownLimits": {
+      "heading": "已知限制",
+      "body": "运动是根据游戏显示的图像测量的，因此文字、HUD、透明效果和重复图案在生成帧上可能会闪烁或扭曲。如果这让您分心，请在“高级”下提高“瑕疵抑制”或降低“运动限制”。"
+    }
+  },
+  "settings": {
+    "mode": {
+      "legend": "模式",
+      "interpolate": {
+        "label": "Interpolate",
+        "description": "在最近两个游戏帧之间进行混合。图像最流畅、瑕疵最少；会增加少许延迟。"
+      },
+      "extrapolate": {
+        "label": "Extrapolate",
+        "description": "向前投射最新的游戏帧。延迟最低，但运动边缘的瑕疵更多；配合 NVIDIA 硬件效果最好。"
+      }
+    },
+    "frameRate": {
+      "legend": "帧率",
+      "dynamic": {
+        "label": "动态",
+        "description": "游戏以尽可能快的速度运行，生成帧将其补足到头显的刷新率。"
+      },
+      "fixed": {
+        "label": "固定",
+        "description": "将游戏保持在刷新率的固定比例以获得均匀的帧节奏，其余部分由生成帧填充。"
+      },
+      "fixedRate": "固定倍率",
+      "rates": {
+        "auto": "根据游戏需要选择 2x、3x 或 4x，当游戏自身能够跟上时不生成任何帧。",
+        "x2": "游戏最高以刷新率的 1/2 运行，例如 90 Hz 时为 45 fps。低于此值时帧节奏不太均匀。",
+        "x3": "游戏最高以刷新率的 1/3 运行，例如 90 Hz 时为 30 fps。低于此值时帧节奏不太均匀。",
+        "x4": "游戏最高以刷新率的 1/4 运行，例如 90 Hz 时为 22.5 fps。瑕疵最多；适用于负载最重的游戏。"
+      }
+    },
+    "motionSource": {
+      "legend": "运动来源",
+      "shader": {
+        "label": "着色器",
+        "description": "在 GPU 的着色器核心上测量运动。适用于任何 GPU，与 Interpolate 搭配效果最好。"
+      },
+      "hardware": {
+        "label": "NVIDIA 硬件",
+        "description": "使用 NVIDIA RTX GPU 的光流单元：更精确，尤其是在重复图案上。供 Extrapolate 使用，也供固定或自动帧率下的 Interpolate 使用（实验性）。"
+      }
+    },
+    "advanced": {
+      "summary": "{flow} · 抑制 {suppression} · 运动限制 {motionLimit}%",
+      "summaryHeadPrediction": "{flow} · 抑制 {suppression} · 运动限制 {motionLimit}% · 头部预测",
+      "reset": "重置高级设置"
+    },
+    "flowQuality": {
+      "heading": "光流质量",
+      "resolution": "眼睛图像的 {resolution}",
+      "description": "运动测量的精细程度。越高越能追踪细小物体，但会消耗更多 GPU 时间。",
+      "levels": {
+        "performance": "性能",
+        "balanced": "平衡",
+        "quality": "质量"
+      },
+      "summary": {
+        "performance": "性能光流",
+        "balanced": "平衡光流",
+        "quality": "质量光流"
+      }
+    },
+    "artifactSuppression": {
+      "heading": "瑕疵抑制",
+      "valueLabel": "瑕疵抑制值",
+      "smoother": "运动更流畅",
+      "fewer": "瑕疵更少",
+      "description": "在运动不确定的地方，值越高越早显示真实图像：扭曲更少，抖动稍多。"
+    },
+    "motionLimit": {
+      "heading": "运动限制",
+      "valueLabel": "运动限制值（占视图宽度的百分比）",
+      "description": "生成帧可以移动图像的最大距离，以视图宽度的比例表示。更快的运动会显示真实图像。"
+    },
+    "headPrediction": {
+      "heading": "延长头部预测",
+      "description": "Frame Generation 会让游戏提前最多约 150 ms 进行渲染，而某些运行时（例如 Pimax 的运行时）只预测其中约 20 ms 的头部运动。此选项会将您的头部转动延续到剩余时间，从而减少您转向一侧边缘的黑边。请在启动游戏之前开启。"
+    }
+  }
+}

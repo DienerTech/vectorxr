@@ -1,0 +1,95 @@
+{
+  "keyGroups": {
+    "function": "Teclas de función",
+    "letter": "Teclas de letras",
+    "number": "Teclas numéricas",
+    "numpad": "Teclas del teclado numérico",
+    "special": "Teclas especiales"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "space": "Space",
+    "numpad": "Numpad{digit}"
+  },
+  "modules": {
+    "depthxr": "Profundidad",
+    "pivotxr": "Pivot",
+    "quadviews": "Quadviews",
+    "turbo": "Turbo",
+    "framegen": "Frame Generation"
+  },
+  "defaults": {
+    "newProfile": "Nuevo perfil",
+    "profile": "Perfil",
+    "standardNudges": "Ajustes finos estándar",
+    "nudgeSetNumbered": "Conjunto de ajustes finos {number}",
+    "profileNudges": "Ajustes finos de {profile}",
+    "newQuickView": "Nueva vista rápida",
+    "quickViewNumbered": "Vista rápida {number}",
+    "deviceButton": "Botón {number}",
+    "turboTimingProfile": "Tiempos de {name}"
+  },
+  "snapViews": {
+    "defaultProfileUnavailable": "No está disponible en el perfil predeterminado, que es Movimiento mejorado o Vistas fijas. Usa un perfil personalizado de Movimiento mejorado junto con un perfil personalizado de Vistas fijas para la misma aplicación.",
+    "noSnapPartner": "Todavía no hay ningún perfil de Vistas fijas activado dirigido a las aplicaciones de este perfil.",
+    "motionNoteNone": "Un perfil de Movimiento mejorado para la misma aplicación puede seguir funcionando en estas Vistas fijas si activa Aplicar Movimiento mejorado a las Vistas fijas.",
+    "motionNoteSources": "El Movimiento mejorado de {profiles} sigue funcionando en estas Vistas fijas."
+  },
+  "binding": {
+    "device": "{device} / {input}",
+    "unassignedDevice": "Dispositivo sin asignar",
+    "unassignedInput": "entrada sin asignar",
+    "none": "Ninguna",
+    "listMore_one": "{first} o {count} más",
+    "listMore_other": "{first} o {count} más",
+    "numbered": "{label} (asignación {number})"
+  },
+  "actions": {
+    "quadviewsDiagnostics": "Quadviews: visualización de diagnóstico",
+    "depthToggle": "Profundidad: alternar A/B",
+    "depthLock": "Profundidad: Depth Lock A/B",
+    "osdToggle": "OSD: mostrar/ocultar",
+    "osdCycle": "OSD: cambiar diseño",
+    "turboToggle": "Turbo: alternar A/B",
+    "turboMetrics": "Turbo: captura de métricas",
+    "framegenToggle": "Frame Generation: alternar A/B",
+    "nudgeLeft": "Pivot {set}: ajuste fino a la izquierda",
+    "nudgeRight": "Pivot {set}: ajuste fino a la derecha",
+    "nudgeUp": "Pivot {set}: ajuste fino hacia arriba",
+    "nudgeDown": "Pivot {set}: ajuste fino hacia abajo",
+    "nudgeCenter": "Pivot {set}: centrar desplazamiento de ajuste fino",
+    "defaultActivate": "Pivot predeterminado: activar",
+    "defaultSetOrigin": "Pivot predeterminado: fijar origen",
+    "defaultReleaseOrigin": "Pivot predeterminado: liberar origen",
+    "defaultQuickView": "Pivot predeterminado: {view}",
+    "profileNumbered": "Perfil {number}",
+    "profileActivate": "Pivot {profile}: activar",
+    "profileSetOrigin": "Pivot {profile}: fijar origen",
+    "profileReleaseOrigin": "Pivot {profile}: liberar origen",
+    "profileQuickView": "Pivot {profile}: {view}"
+  },
+  "conflicts": {
+    "sharedTitle": "{binding} está asignado más de una vez",
+    "sharedMessage": "Esta entrada está asignada a {actions}. Una pulsación puede activar varias acciones, o una acción de mayor prioridad puede ocultar a otra. Este aviso no impide guardar.",
+    "duplicateTitle": "{binding} está duplicado",
+    "duplicateMessage": "{action} contiene la misma entrada física más de una vez. El duplicado es redundante y solo se usa la primera copia en tiempo de ejecución.",
+    "duplicateActions": {
+      "suspendControls": "Controles de suspensión",
+      "activation": "Activación",
+      "setOrigin": "Fijar origen",
+      "releaseOrigin": "Liberar origen"
+    },
+    "everySuspendPress": "Cada pulsación del control de suspensión",
+    "everyActivationPress": "Cada pulsación del control de activación",
+    "allThreeTitle": "Una asignación controla tres acciones en conflicto",
+    "allThreeMessage": "Activación, Fijar origen y Liberar origen usan {binding}. {press} solicita una nueva dirección frontal neutra y la borra de inmediato, así que el origen no se captura. Asigna a Fijar origen o a Liberar origen su propia asignación.",
+    "setsOriginTitle": "La activación también fija el origen",
+    "setsOriginMessage": "Activación y Fijar origen usan {binding}. {press} vuelve a capturar la dirección actual de la cabeza como dirección frontal neutra de Pivot. Mantenlo solo si es intencionado; si no, asigna a Fijar origen su propia asignación, normalmente tu control de recentrado del juego.",
+    "releasesOriginTitle": "La activación también libera el origen",
+    "releasesOriginMessage": "Activación y Liberar origen usan {binding}. {press} borra cualquier origen de Pivot capturado. Mantenlo solo si es intencionado; si no, asigna a Liberar origen su propia asignación.",
+    "setCanceledTitle": "Fijar origen se cancela inmediatamente",
+    "setCanceledMessage": "Fijar origen y Liberar origen usan {binding}. Una pulsación solicita una nueva dirección frontal neutra y la borra de inmediato, así que el origen no se captura. Asigna una asignación diferente a una de las acciones."
+  }
+}

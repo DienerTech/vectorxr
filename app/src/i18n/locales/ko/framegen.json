@@ -1,0 +1,237 @@
+{
+  "title": "Frame Generation",
+  "experimental": "실험적",
+  "intro": "게임 프레임 사이에 생성된 프레임을 추가하므로 게임이 따라가지 못할 때에도 헤드셋의 최대 주사율에서 움직임이 부드럽게 유지됩니다. 게임별로 사용해 보고 A/B 전환으로 비교하십시오.",
+  "howItWorksTitle": "Frame Generation 작동 방식",
+  "restartNote": "Frame Generation 켜기는 다음에 게임을 시작할 때 적용되며, 끄기는 즉시 적용됩니다.",
+  "restartToApply": {
+    "label": "다시 시작하여 적용:",
+    "body": "{label} 게임에 대해 Frame Generation을 켜면 다음에 게임을 시작할 때 적용됩니다. 끄기와 이 페이지의 다른 모든 설정은 플레이 중에 적용됩니다."
+  },
+  "setupGuide": {
+    "title": "설정 가이드",
+    "summary": "한 게임에서 켠 다음 헤드셋에서 비교하십시오",
+    "smoothing": {
+      "label": "런타임 스무딩 끄기",
+      "body": "{label}: 게임에 대해 런타임과 헤드셋 자체 소프트웨어에서 SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW 또는 Meta ASW를 끄십시오. 이러한 기능은 Frame Generation의 페이싱과 충돌합니다."
+    },
+    "refreshRate": {
+      "label": "헤드셋을 최대 주사율로 유지하십시오.",
+      "body": "{label} Pimax Play의 Lock Frame Rate to Half Refresh Rate나 SteamVR의 Throttling Behavior 프레임 제한으로 프레임 속도를 절반으로 낮추지 마십시오. Frame Generation이 게임의 속도를 직접 설정합니다."
+    },
+    "halfRate": {
+      "label": "먼저 게임이 주사율의 절반에 도달하도록 하십시오.",
+      "body": "{label} Frame Generation을 끈 상태에서 게임이 헤드셋 주사율의 절반 이상(90 Hz에서 45 fps)을 유지할 때까지 게임 설정이나 렌더 해상도를 낮추십시오. Frame Generation은 절반에서 최대까지 끌어올릴 수 있지만, 처음 절반을 대신할 수는 없습니다."
+    },
+    "oneGame": {
+      "label": "한 게임에서 켜기:",
+      "body": "{label} 기본 프로필은 꺼 두고, 아래에 사용자 지정 프로필을 추가한 다음 게임을 할당하십시오. 대부분의 게임에는 기본 설정이 적합합니다."
+    },
+    "restart": {
+      "label": "저장하고 게임을 다시 시작하십시오.",
+      "body": "{label} Frame Generation 켜기는 다음 실행 시 적용됩니다."
+    },
+    "check": {
+      "label": "헤드셋에서 확인:",
+      "osd": "화면 표시(OSD)",
+      "body": "{label} {osd}의 FPS 옆에 FG 켜짐이 표시되거나, 생성된 프레임 색조 진단 보기를 선택할 수 있습니다(확인 후 다시 끄기로 설정하십시오)."
+    },
+    "compare": {
+      "label": "비교:",
+      "body": "{label} A/B 전환을 할당하고 같은 장면에서 생성된 프레임을 끄고 켜 보십시오."
+    },
+    "turboNote": "Frame Generation이 실행되는 게임에서는 Turbo가 꺼진 상태로 유지됩니다."
+  },
+  "controls": {
+    "heading": "헤드셋 내 컨트롤",
+    "statusUnavailable": "런타임 상태를 일시적으로 사용할 수 없습니다.",
+    "noSession": "실행 중인 VR 애플리케이션 없음"
+  },
+  "session": {
+    "withReason": "{status} · {reason}",
+    "withReasonColon": "{status}: {reason}",
+    "active": "켜짐",
+    "standby": "대기",
+    "waiting": "시작 중 · 안정된 프레임을 기다리는 중",
+    "paused": "일시 중지됨",
+    "unavailable": "사용할 수 없음",
+    "off": "꺼짐",
+    "needsLayer": "업데이트된 VectorXR 레이어 필요",
+    "unknown": "상태를 사용할 수 없음"
+  },
+  "gameDepth": {
+    "inUse": {
+      "label": "게임 깊이 사용 중",
+      "title": "게임이 깊이 정보를 공유하므로 머리를 움직여도 가까운 물체가 안정적으로 유지됩니다."
+    },
+    "empty": {
+      "label": "게임 깊이가 비어 있음",
+      "title": "게임이 깊이를 채우지 않고 보냅니다. 게임에 깊이 기반 재투영 옵션이 있다면 이를 켜면 Frame Generation이 깊이를 사용할 수 있습니다."
+    },
+    "unusable": {
+      "label": "게임 깊이 사용 안 함",
+      "title": "게임이 보내는 깊이가 양쪽 눈 사이에서 일치하지 않으므로 Frame Generation은 깊이 없이 작동합니다."
+    }
+  },
+  "toggle": {
+    "heading": "A/B 전환",
+    "hint": "선택 사항입니다. Frame Generation이 켜진 상태로 시작된 게임에서 생성된 프레임을 끄고 켭니다.",
+    "label": "Frame Generation A/B 전환",
+    "description": "같은 장면에서 움직임을 비교할 수 있도록 헤드셋에서 생성된 프레임을 끄고 켭니다. Frame Generation이 켜진 상태로 시작된 게임에서 작동합니다.",
+    "noneText": "할당된 바인딩이 없습니다. Frame Generation은 게임 시작 시 켜져 있는 곳 어디에서나 실행됩니다."
+  },
+  "diagnostic": {
+    "heading": "진단 보기",
+    "hint": "{description} 모든 게임에 적용되며 플레이 중에 업데이트됩니다.",
+    "onWarning": "켜짐: 헤드셋의 생성된 프레임이 이 보기의 색으로 그려지며, 일반 플레이에서는 결함처럼 보입니다. 확인이 끝나면 끄기로 설정하십시오.",
+    "views": {
+      "off": {
+        "label": "끄기",
+        "description": "생성된 프레임이 그대로 표시됩니다."
+      },
+      "flow": {
+        "label": "모션 흐름",
+        "description": "생성된 프레임에서 Frame Generation이 측정한 움직임을 색으로 구분하여 표시합니다."
+      },
+      "confidence": {
+        "label": "신뢰도",
+        "description": "생성된 프레임에서 실제 이미지로 대체된 부분을 빨간색으로 칠합니다. 고급 설정을 조정할 때 유용합니다."
+      },
+      "tint": {
+        "label": "생성된 프레임 색조",
+        "description": "생성된 프레임에 희미한 색조를 입혀 표시되고 있음을 확인할 수 있게 합니다."
+      }
+    }
+  },
+  "defaultProfile": {
+    "heading": "기본 프로필",
+    "appliesTo": "사용 설정된 사용자 지정 프로필이 없는 게임에 적용됩니다",
+    "toggleOn": "기본 프로필 켜짐",
+    "toggleOff": "기본 프로필 꺼짐",
+    "offNote": "사용자 지정 프로필이 없는 게임에서는 꺼져 있습니다. 아래의 사용자 지정 프로필은 계속 해당 게임에서 이 기능을 켭니다.",
+    "onWarning": {
+      "label": "사용자 지정 프로필이 없는 모든 게임에서 켜짐,",
+      "body": "{label} 아직 사용해 보지 않은 게임도 포함됩니다. 더 안전한 설정은 이 항목을 꺼 두고 확인한 게임마다 프로필을 추가하는 것입니다."
+    }
+  },
+  "customProfiles": {
+    "heading": "사용자 지정 프로필",
+    "description": "게임별로 Frame Generation을 켭니다. 처음으로 일치하는 사용 설정된 프로필이 우선합니다.",
+    "add": "프로필 추가",
+    "empty": "아직 사용자 지정 프로필이 없습니다. 게임에 Frame Generation을 켜려면 프로필을 추가하십시오.",
+    "duplicateApplication": "{application}은(는) 이미 프로필 {profile}의 대상입니다. 처음 활성화된 프로필이 우선합니다."
+  },
+  "summary": {
+    "format": "{mode} · {rate} · {motion}",
+    "dynamic": "동적",
+    "fixedAuto": "고정 자동",
+    "fixed": "고정 {multiplier}"
+  },
+  "howItWorks": {
+    "whatItDoes": {
+      "heading": "기능",
+      "body": "Frame Generation은 게임 프레임 사이에서 이미지가 어떻게 움직이는지 측정하고 그 움직임으로 새 프레임을 만들어, 게임이 더 적게 렌더링하더라도 헤드셋이 매 주사마다 새 이미지를 받도록 합니다. 머리 회전은 헤드셋 자체의 재투영이 이미 처리하므로 먼저 제외됩니다."
+    },
+    "mode": {
+      "heading": "모드",
+      "interpolate": "{name}(기본값)은 마지막 두 게임 프레임 사이를 혼합합니다. 가장 부드럽고 아티팩트가 가장 적지만, 각 게임 프레임이 조금 늦게 표시됩니다.",
+      "extrapolate": "{name}은 최신 게임 프레임을 움직임 방향으로 앞으로 투영하므로 지연 시간이 추가되지 않습니다. 빠른 움직임과 새로 드러난 영역에서 아티팩트가 더 많이 보이며, 모션 소스로 NVIDIA 하드웨어를 사용할 때 가장 좋게 보입니다."
+    },
+    "frameRate": {
+      "heading": "프레임 속도",
+      "dynamic": "{name}(기본값)은 게임을 가능한 한 빠르게 실행하고 게임 프레임 사이의 주사를 생성된 프레임으로 채웁니다. 게임이 스스로 따라갈 때는 Frame Generation이 대기하며 아무것도 생성하지 않습니다.",
+      "fixed": "{name}은 균일한 페이싱을 위해 게임을 주사율의 정해진 비율로 유지합니다. 90 Hz 헤드셋에서 {x2}는 게임을 45 fps로, {x3}는 30 fps로, {x4}는 22.5 fps로 실행하며, {auto}는 게임 상황에 따라 그중에서 선택합니다. 생성된 프레임마다 이미지가 더 많이 이동하므로 배율이 높을수록 아티팩트가 더 많이 보입니다."
+    },
+    "beforeYouStart": {
+      "heading": "시작하기 전에",
+      "smoothing": "{label}: 게임에 대해 런타임과 헤드셋 자체 소프트웨어에서(SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW, Meta ASW) 끄고, 헤드셋을 최대 주사율로 유지하십시오. Pimax Play의 Lock Frame Rate to Half Refresh Rate나 SteamVR의 Throttling Behavior 프레임 제한으로 프레임 속도를 절반으로 낮추지 마십시오. Frame Generation이 게임의 속도를 직접 설정합니다.",
+      "turbo": {
+        "label": "Frame Generation이 실행되는 동안 Turbo는 꺼진 상태로 유지됩니다.",
+        "body": "{label} 두 기능은 서로 반대 방식으로 프레임 페이싱을 하므로, 해당 게임에서는 Turbo가 양보하고 'Frame Generation으로 일시 정지'로 표시됩니다. Turbo 프로필은 변경되지 않습니다."
+      },
+      "apis": "Quadviews 사용 시를 포함하여 Direct3D 11, Direct3D 12 및 Vulkan 게임에서 작동합니다."
+    },
+    "knownLimits": {
+      "heading": "알려진 제한 사항",
+      "body": "움직임은 게임이 표시하는 이미지에서 측정되므로 생성된 프레임에서 텍스트, HUD, 투명 효과, 반복 패턴이 일렁이거나 뒤틀릴 수 있습니다. 거슬린다면 고급에서 아티팩트 억제를 높이거나 모션 한도를 낮추십시오."
+    }
+  },
+  "settings": {
+    "mode": {
+      "legend": "모드",
+      "interpolate": {
+        "label": "Interpolate",
+        "description": "마지막 두 게임 프레임 사이를 혼합합니다. 가장 부드럽고 아티팩트가 가장 적은 이미지이며, 지연 시간이 약간 추가됩니다."
+      },
+      "extrapolate": {
+        "label": "Extrapolate",
+        "description": "최신 게임 프레임을 앞으로 투영합니다. 지연 시간이 가장 낮지만 움직이는 가장자리에 아티팩트가 더 많으며, NVIDIA 하드웨어에서 가장 잘 작동합니다."
+      }
+    },
+    "frameRate": {
+      "legend": "프레임 속도",
+      "dynamic": {
+        "label": "동적",
+        "description": "게임이 가능한 한 빠르게 실행되고, 생성된 프레임이 헤드셋 주사율까지 나머지를 채웁니다."
+      },
+      "fixed": {
+        "label": "고정",
+        "description": "균일한 페이싱을 위해 게임을 주사율의 정해진 비율로 유지하고, 나머지를 생성된 프레임으로 채웁니다."
+      },
+      "fixedRate": "고정 배율",
+      "rates": {
+        "auto": "게임 상황에 따라 2x, 3x 또는 4x를 선택하며, 게임이 스스로 따라갈 때는 아무것도 생성하지 않습니다.",
+        "x2": "게임이 주사율의 최대 1/2(예: 90 Hz에서 45 fps)로 실행됩니다. 그보다 낮으면 페이싱이 덜 균일합니다.",
+        "x3": "게임이 주사율의 최대 1/3(예: 90 Hz에서 30 fps)로 실행됩니다. 그보다 낮으면 페이싱이 덜 균일합니다.",
+        "x4": "게임이 주사율의 최대 1/4(예: 90 Hz에서 22.5 fps)로 실행됩니다. 아티팩트가 가장 많으며, 가장 무거운 게임용입니다."
+      }
+    },
+    "motionSource": {
+      "legend": "모션 소스",
+      "shader": {
+        "label": "셰이더",
+        "description": "GPU의 셰이더 코어에서 움직임을 측정합니다. 모든 GPU에서 작동하며 Interpolate와 가장 잘 맞습니다."
+      },
+      "hardware": {
+        "label": "NVIDIA 하드웨어",
+        "description": "NVIDIA RTX GPU의 광학 흐름 장치를 사용합니다. 특히 반복 패턴에서 더 정확합니다. Extrapolate에서 사용되며, 고정 또는 자동 프레임 속도의 Interpolate에서도 사용됩니다(실험적)."
+      }
+    },
+    "advanced": {
+      "summary": "{flow} · 억제 {suppression} · 모션 한도 {motionLimit}%",
+      "summaryHeadPrediction": "{flow} · 억제 {suppression} · 모션 한도 {motionLimit}% · 머리 예측",
+      "reset": "고급 설정 초기화"
+    },
+    "flowQuality": {
+      "heading": "흐름 품질",
+      "resolution": "눈 이미지의 {resolution}",
+      "description": "움직임을 얼마나 세밀하게 측정할지 설정합니다. 높을수록 작고 가는 물체를 더 잘 추적하지만 GPU 시간이 더 많이 듭니다.",
+      "levels": {
+        "performance": "성능",
+        "balanced": "균형",
+        "quality": "품질"
+      },
+      "summary": {
+        "performance": "성능 흐름",
+        "balanced": "균형 흐름",
+        "quality": "품질 흐름"
+      }
+    },
+    "artifactSuppression": {
+      "heading": "아티팩트 억제",
+      "valueLabel": "아티팩트 억제 값",
+      "smoother": "더 부드러운 움직임",
+      "fewer": "더 적은 아티팩트",
+      "description": "움직임이 불확실한 곳에서 값이 높을수록 실제 이미지를 더 빨리 표시합니다. 뒤틀림은 줄고 떨림은 조금 늘어납니다."
+    },
+    "motionLimit": {
+      "heading": "모션 한도",
+      "valueLabel": "뷰 너비 대비 백분율로 나타낸 모션 한도 값",
+      "description": "생성된 프레임이 이미지를 이동할 수 있는 최대 거리이며, 뷰 너비에 대한 비율입니다. 이보다 빠른 움직임에서는 실제 이미지가 표시됩니다."
+    },
+    "headPrediction": {
+      "heading": "머리 예측 확장",
+      "description": "Frame Generation은 게임이 최대 약 150 ms 앞서 렌더링하도록 하는데, Pimax 등 일부 런타임은 그중 약 20 ms만큼만 머리 움직임을 예측합니다. 이 설정은 나머지 구간에도 머리 회전을 이어 적용하여, 머리를 돌리는 쪽 가장자리의 검은 영역을 줄입니다. 게임을 시작하기 전에 켜십시오."
+    }
+  }
+}

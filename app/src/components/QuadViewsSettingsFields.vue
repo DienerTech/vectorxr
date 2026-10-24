@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { t, type MessageKey } from '../i18n/index.ts'
 import type { QuadViewsSettings } from '../lib/model'
 
 // Shared Quadviews settings editor used by both the Default Profile and each
@@ -39,6 +40,12 @@ const presets: Record<QuadViewsPreset, Pick<QuadViewsSettings,
   },
 }
 
+const presetLabels: Record<QuadViewsPreset, MessageKey> = {
+  performance: 'quadviews.fields.preset.performance',
+  balanced: 'quadviews.fields.preset.balanced',
+  quality: 'quadviews.fields.preset.quality',
+}
+
 function applyPreset(preset: QuadViewsPreset) {
   Object.assign(props.settings, presets[preset])
 }
@@ -55,10 +62,10 @@ function presetActive(preset: QuadViewsPreset) {
     <div class="flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border px-4 py-3 surface-panel-soft">
       <div>
         <p class="eyebrow flex items-center gap-1.5 text-xs uppercase tracking-[0.18em]">
-          Vector Preset
-          <span class="restart-required-mark" title="Presets include settings that require a game restart for their complete effect.">&#8635;</span>
+          {{ t('quadviews.fields.preset.heading') }}
+          <span class="restart-required-mark" :title="t('quadviews.fields.preset.restartTitle')">&#8635;</span>
         </p>
-        <p class="mt-1 text-xs text-muted">A strong starting point; tracking and alignment remain yours.</p>
+        <p class="mt-1 text-xs text-muted">{{ t('quadviews.fields.preset.intro') }}</p>
       </div>
       <div class="flex flex-wrap gap-2">
         <button
@@ -67,22 +74,22 @@ function presetActive(preset: QuadViewsPreset) {
           class="rounded-[0.65rem] border px-3 py-1.5 text-xs font-semibold capitalize"
           :class="presetActive(preset) ? 'button-accent' : 'button-secondary'"
           type="button"
-          title="Presets change focus dimensions and resolution, so their complete effect requires a game restart."
+          :title="t('quadviews.fields.preset.buttonTitle')"
           @click="applyPreset(preset)"
         >
-          {{ preset }}
+          {{ t(presetLabels[preset]) }}
         </button>
       </div>
     </div>
 
     <div class="grid gap-3 lg:grid-cols-3">
     <div class="rounded-[1rem] border p-4 surface-panel-soft">
-      <p class="eyebrow text-xs uppercase tracking-[0.18em]">Focus Window</p>
+      <p class="eyebrow text-xs uppercase tracking-[0.18em]">{{ t('quadviews.fields.focusWindow') }}</p>
       <div class="mt-3 grid gap-3 sm:grid-cols-2">
         <label class="block">
           <span class="mb-1.5 flex min-h-[2.5rem] items-start gap-1.5 text-sm font-medium">
-            Focus Width
-            <span class="restart-required-mark" title="The focus window moves live, but DCS keeps its existing texture width and pixel workload until restart.">&#8635;</span>
+            {{ t('quadviews.fields.focusWidth.label') }}
+            <span class="restart-required-mark" :title="t('quadviews.fields.focusWidth.restart')">&#8635;</span>
           </span>
           <input
             v-model.number="settings.focusHorizontalSizePercent"
@@ -92,12 +99,12 @@ function presetActive(preset: QuadViewsPreset) {
             step="1"
             type="number"
           />
-          <span class="mt-1 block text-xs text-muted">% of FOV</span>
+          <span class="mt-1 block text-xs text-muted">{{ t('quadviews.fields.percentOfFov') }}</span>
         </label>
         <label class="block">
           <span class="mb-1.5 flex min-h-[2.5rem] items-start gap-1.5 text-sm font-medium">
-            Focus Height
-            <span class="restart-required-mark" title="The focus window moves live, but DCS keeps its existing texture height and pixel workload until restart.">&#8635;</span>
+            {{ t('quadviews.fields.focusHeight.label') }}
+            <span class="restart-required-mark" :title="t('quadviews.fields.focusHeight.restart')">&#8635;</span>
           </span>
           <input
             v-model.number="settings.focusVerticalSizePercent"
@@ -107,13 +114,13 @@ function presetActive(preset: QuadViewsPreset) {
             step="1"
             type="number"
           />
-          <span class="mt-1 block text-xs text-muted">% of FOV</span>
+          <span class="mt-1 block text-xs text-muted">{{ t('quadviews.fields.percentOfFov') }}</span>
         </label>
         <label class="block">
           <span class="mb-1.5 flex min-h-[2.5rem] items-start gap-1.5 text-sm font-medium">
-            Horizontal Offset
+            {{ t('quadviews.fields.horizontalOffset.label') }}
             <span
-              title="Moves the focus area left or right in degrees. Use this only if the sharp region feels off-center."
+              :title="t('quadviews.fields.horizontalOffset.help')"
               class="cursor-help select-none text-xs text-muted"
               >ⓘ</span
             >
@@ -129,9 +136,9 @@ function presetActive(preset: QuadViewsPreset) {
         </label>
         <label class="block">
           <span class="mb-1.5 flex min-h-[2.5rem] items-start gap-1.5 text-sm font-medium">
-            Vertical Offset
+            {{ t('quadviews.fields.verticalOffset.label') }}
             <span
-              title="Moves the focus area up or down in degrees. Helpful if a headset's gaze center feels vertically biased."
+              :title="t('quadviews.fields.verticalOffset.help')"
               class="cursor-help select-none text-xs text-muted"
               >ⓘ</span
             >
@@ -149,12 +156,12 @@ function presetActive(preset: QuadViewsPreset) {
     </div>
 
     <div class="rounded-[1rem] border p-4 surface-panel-soft">
-      <p class="eyebrow text-xs uppercase tracking-[0.18em]">Resolution</p>
+      <p class="eyebrow text-xs uppercase tracking-[0.18em]">{{ t('quadviews.fields.resolution') }}</p>
       <div class="mt-3 grid gap-3 sm:grid-cols-2">
         <label class="block">
           <span class="mb-1.5 flex min-h-[2.5rem] items-start gap-1.5 text-sm font-medium">
-            Focus Resolution
-            <span class="restart-required-mark" title="Restart required: DCS keeps its launch-time focus textures. Above 100% can resize VectorXR's output canvas and may cause a temporary frame-rate hitch.">&#8635;</span>
+            {{ t('quadviews.fields.focusResolution.label') }}
+            <span class="restart-required-mark" :title="t('quadviews.fields.focusResolution.restart')">&#8635;</span>
           </span>
           <input
             :value="Math.round(settings.focusScale * 100)"
@@ -165,21 +172,21 @@ function presetActive(preset: QuadViewsPreset) {
             type="number"
             @input="settings.focusScale = Number(($event.target as HTMLInputElement).value) / 100"
           />
-          <span class="mt-1 block text-xs text-muted">% of HMD resolution</span>
+          <span class="mt-1 block text-xs text-muted">{{ t('quadviews.fields.percentOfHmd') }}</span>
           <span
             v-if="settings.focusScale > 2"
             class="mt-2 block rounded-[0.75rem] border px-3 py-2 text-xs leading-5 chip-warning"
           >
-            VectorXR's full-view output image grows with Focus Resolution:
-            {{ Math.round(settings.focusScale * 100) }}% needs about
-            {{ (settings.focusScale * settings.focusScale).toFixed(1) }}× your headset's pixels in GPU memory and
-            compositing, on top of the app render cost shown above.
+            {{ t('quadviews.fields.focusResolution.warning', {
+              percent: Math.round(settings.focusScale * 100),
+              factor: (settings.focusScale * settings.focusScale).toFixed(1),
+            }) }}
           </span>
         </label>
         <label class="block">
           <span class="mb-1.5 flex min-h-[2.5rem] items-start gap-1.5 text-sm font-medium">
-            Peripheral Resolution
-            <span class="restart-required-mark" title="Restart required: DCS keeps its launch-time peripheral textures and pixel workload.">&#8635;</span>
+            {{ t('quadviews.fields.peripheralResolution.label') }}
+            <span class="restart-required-mark" :title="t('quadviews.fields.peripheralResolution.restart')">&#8635;</span>
           </span>
           <input
             :value="Math.round(settings.peripheralScale * 100)"
@@ -190,13 +197,13 @@ function presetActive(preset: QuadViewsPreset) {
             type="number"
             @input="settings.peripheralScale = Number(($event.target as HTMLInputElement).value) / 100"
           />
-          <span class="mt-1 block text-xs text-muted">% of HMD resolution</span>
+          <span class="mt-1 block text-xs text-muted">{{ t('quadviews.fields.percentOfHmd') }}</span>
         </label>
         <label class="block">
           <span class="mb-1.5 flex min-h-[2.5rem] items-start gap-1.5 text-sm font-medium">
-            Foveate Sharpness
+            {{ t('quadviews.fields.foveateSharpness.label') }}
             <span
-              title="Applies extra sharpening to the high-detail focus image. 0 is off; higher values add crispness but can create halos."
+              :title="t('quadviews.fields.foveateSharpness.help')"
               class="cursor-help select-none text-xs text-muted"
               >ⓘ</span
             >
@@ -212,9 +219,9 @@ function presetActive(preset: QuadViewsPreset) {
         </label>
         <label class="block">
           <span class="mb-1.5 flex min-h-[2.5rem] items-start gap-1.5 text-sm font-medium">
-            Transition Thickness
+            {{ t('quadviews.fields.transitionThickness.label') }}
             <span
-              title="Controls how wide the blended edge is between the focus and peripheral images. Higher values hide the boundary better but soften more of the focus window."
+              :title="t('quadviews.fields.transitionThickness.help')"
               class="cursor-help select-none text-xs text-muted"
               >ⓘ</span
             >
@@ -227,20 +234,20 @@ function presetActive(preset: QuadViewsPreset) {
             step="1"
             type="number"
           />
-          <span class="mt-1 block text-xs text-muted">% of focus window</span>
+          <span class="mt-1 block text-xs text-muted">{{ t('quadviews.fields.percentOfFocusWindow') }}</span>
         </label>
       </div>
     </div>
 
     <div class="rounded-[1rem] border p-4 surface-panel-soft">
-      <p class="eyebrow text-xs uppercase tracking-[0.18em]">Tracking</p>
+      <p class="eyebrow text-xs uppercase tracking-[0.18em]">{{ t('quadviews.fields.tracking') }}</p>
       <div class="mt-2 grid gap-2">
         <label class="block">
           <span class="mb-1 flex items-center gap-1.5 text-sm font-medium">
-            Mode
-            <span class="restart-required-mark" title="Switching to Eye tracked needs a game restart when the game started in Head tracked mode.">&#8635;</span>
+            {{ t('quadviews.fields.mode.label') }}
+            <span class="restart-required-mark" :title="t('quadviews.fields.mode.restart')">&#8635;</span>
             <span
-              title="Chooses whether the focus area follows head direction or eye gaze when eye tracking is available."
+              :title="t('quadviews.fields.mode.help')"
               class="cursor-help select-none text-xs text-muted"
               >ⓘ</span
             >
@@ -249,25 +256,25 @@ function presetActive(preset: QuadViewsPreset) {
             v-model="settings.trackingMode"
             class="app-input w-full rounded-[0.75rem] px-3 py-2"
           >
-            <option value="head">Head tracked</option>
-            <option value="eye">Eye tracked</option>
+            <option value="head">{{ t('quadviews.fields.mode.head') }}</option>
+            <option value="eye">{{ t('quadviews.fields.mode.eye') }}</option>
           </select>
         </label>
         <label class="block">
           <span class="mb-1 flex items-center gap-1.5 text-sm font-medium">
-            Eye Tracking Correction
-            <span title="Use Default unless eye tracking feels backwards; then try Flip Z Only." class="cursor-help select-none text-xs text-muted">ⓘ</span>
+            {{ t('quadviews.fields.eyeTrackingCorrection.label') }}
+            <span :title="t('quadviews.fields.eyeTrackingCorrection.help')" class="cursor-help select-none text-xs text-muted">ⓘ</span>
           </span>
           <select v-model="settings.eyeTrackingCorrection" class="app-input w-full rounded-[0.75rem] px-3 py-2">
-            <option value="default">Default</option>
-            <option value="flip-z">Flip Z Only</option>
+            <option value="default">{{ t('quadviews.fields.eyeTrackingCorrection.default') }}</option>
+            <option value="flip-z">{{ t('quadviews.fields.eyeTrackingCorrection.flipZ') }}</option>
           </select>
         </label>
         <label class="block">
           <span class="mb-1 flex items-center gap-1.5 text-sm font-medium">
-            Smoothing
+            {{ t('quadviews.fields.smoothing.label') }}
             <span
-              title="Softens focus-area movement. 0 is instant; higher values reduce jitter but add lag."
+              :title="t('quadviews.fields.smoothing.help')"
               class="cursor-help select-none text-xs text-muted"
               >ⓘ</span
             >
@@ -283,9 +290,9 @@ function presetActive(preset: QuadViewsPreset) {
         </label>
         <label class="block">
           <span class="mb-1 flex items-center gap-1.5 text-sm font-medium">
-            Deadzone
+            {{ t('quadviews.fields.deadzone.label') }}
             <span
-              title="Small gaze movements ignored before the focus area moves. Useful for reducing shimmer near center."
+              :title="t('quadviews.fields.deadzone.help')"
               class="cursor-help select-none text-xs text-muted"
               >ⓘ</span
             >

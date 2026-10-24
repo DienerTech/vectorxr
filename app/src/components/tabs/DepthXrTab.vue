@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed, nextTick, reactive, ref } from 'vue'
 
+import { t } from '../../i18n/index.ts'
 import ConvergenceField from '../ConvergenceField.vue'
 import DefaultProfileExclusions from '../DefaultProfileExclusions.vue'
 import DepthAnchorField from '../DepthAnchorField.vue'
 import DepthBindingsPage from '../DepthBindingsPage.vue'
 import DepthNetEffect from '../DepthNetEffect.vue'
+import I18nText from '../I18nText.vue'
 import ProfileShell from '../ProfileShell.vue'
 import SetupGuide from '../SetupGuide.vue'
 import StereoDepthField from '../StereoDepthField.vue'
@@ -93,7 +95,7 @@ const profileWarnings = computed(() => {
       }
 
       const appName = applicationNameById.get(applicationId) ?? applicationId
-      const message = `${appName} is already targeted by Profile ${firstIndex + 1}. The first active profile wins.`
+      const message = t('depth.customProfiles.duplicateApplication', { application: appName, profile: firstIndex + 1 })
       warnings.set(index, [...(warnings.get(index) ?? []), message])
     }
   })
@@ -109,9 +111,9 @@ const profileWarnings = computed(() => {
       <!-- Module header -->
       <div class="mb-4 flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h2 class="text-2xl font-semibold tracking-tight">Depth</h2>
+          <h2 class="text-2xl font-semibold tracking-tight">{{ t('depth.title') }}</h2>
           <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">
-            Shape binocular scale and depth placement as one system, then use per-application profiles where a title needs its own tuning. Start at neutral, change one control at a time, and use the runtime binding for immediate A/B comparisons.
+            {{ t('depth.intro') }}
           </p>
         </div>
         <button
@@ -122,43 +124,45 @@ const profileWarnings = computed(() => {
           <span class="inline-flex h-5 w-5 items-center justify-center rounded-full border text-xs" style="border-color: var(--app-border)">
             i
           </span>
-          Depth Troubleshooting
+          {{ t('depth.troubleshooting.title') }}
         </button>
       </div>
 
-      <SetupGuide class="mb-3" title="Tuning guide" summary="Set scale, place depth, then compare" :open="setupGuideOpen">
-      <div class="grid gap-3 lg:grid-cols-3" role="note" aria-label="Depth tuning guide">
+      <SetupGuide class="mb-3" :title="t('depth.tuningGuide.title')" :summary="t('depth.tuningGuide.summary')" :open="setupGuideOpen">
+      <div class="grid gap-3 lg:grid-cols-3" role="note" :aria-label="t('depth.tuningGuide.ariaLabel')">
         <div class="rounded-[1rem] border p-4 surface-panel-strong">
-          <p class="eyebrow text-[10px] font-semibold uppercase tracking-[0.18em]">Step 1: Set scale</p>
-          <p class="mt-2 text-sm font-semibold">Stereo Depth</p>
+          <p class="eyebrow text-[10px] font-semibold uppercase tracking-[0.18em]">{{ t('depth.tuningGuide.scale.step') }}</p>
+          <p class="mt-2 text-sm font-semibold">{{ t('depth.tuningGuide.scale.name') }}</p>
           <p class="mt-1 text-[13px] leading-5 text-muted">
-            Left increases apparent world scale and can restore life-sized proportions when a cockpit feels miniaturized. Right strengthens stereo shape and presence when a title looks too flat or oversized. Nearby geometry changes most.
+            {{ t('depth.tuningGuide.scale.body') }}
           </p>
         </div>
         <div class="rounded-[1rem] border p-4 surface-panel-strong">
-          <p class="eyebrow text-[10px] font-semibold uppercase tracking-[0.18em]">Step 2: Place depth</p>
-          <p class="mt-2 text-sm font-semibold">Convergence Plane</p>
+          <p class="eyebrow text-[10px] font-semibold uppercase tracking-[0.18em]">{{ t('depth.tuningGuide.place.step') }}</p>
+          <p class="mt-2 text-sm font-semibold">{{ t('depth.tuningGuide.place.name') }}</p>
           <p class="mt-1 text-[13px] leading-5 text-muted">
-            Leave this at zero while judging scale, then place the working plane with small steps. Left gives a crowded cockpit more breathing room; right brings a distant panel, sight, or interaction area nearer.
+            {{ t('depth.tuningGuide.place.body') }}
           </p>
         </div>
         <div class="rounded-[1rem] border p-4 surface-panel-strong">
-          <p class="eyebrow text-[10px] font-semibold uppercase tracking-[0.18em]">Step 3: Compare</p>
-          <p class="mt-2 text-sm font-semibold">Tune as a pair</p>
+          <p class="eyebrow text-[10px] font-semibold uppercase tracking-[0.18em]">{{ t('depth.tuningGuide.compare.step') }}</p>
+          <p class="mt-2 text-sm font-semibold">{{ t('depth.tuningGuide.compare.name') }}</p>
           <p class="mt-1 text-[13px] leading-5 text-muted">
-            Treat each game profile as its own visual calibration—different camera geometry may call for entirely different pairings, not mild variations. A/B against native geometry and stop at the first sign of eye strain or difficult fusion.
+            {{ t('depth.tuningGuide.compare.body') }}
           </p>
         </div>
       </div>
       </SetupGuide>
-      <p
+      <I18nText
+        keypath="depth.ipdNote.body"
+        tag="p"
         class="mb-3 rounded-[0.9rem] border px-4 py-2.5 text-sm leading-6 chip-warning"
         style="border-color: var(--app-border)"
         role="note"
       >
-        <strong class="font-semibold">In-game IPD settings can override Stereo Depth.</strong>
-        Disable any Force IPD, virtual IPD, stereo-separation, or world-scale override first. In DCS, uncheck <strong>Force IPD Distance</strong> under Options &gt; VR.
-      </p>
+        <template #lead><strong class="font-semibold">{{ t('depth.ipdNote.lead') }}</strong></template>
+        <template #setting><strong>{{ t('depth.ipdNote.forceIpdDistance') }}</strong></template>
+      </I18nText>
 
       <!-- Module-level binding — applies regardless of which profile is active -->
       <button
@@ -168,16 +172,16 @@ const profileWarnings = computed(() => {
       >
         <div class="flex flex-wrap items-center justify-between gap-4">
           <div>
-            <p class="eyebrow text-[10px] font-semibold uppercase tracking-[0.18em]">Tune &amp; Compare</p>
-            <h3 class="mt-1 text-base font-semibold tracking-tight">In-game Bindings</h3>
-            <p class="mt-1 text-sm text-muted">Configure the complete Depth and Depth Lock A/B toggles in one place.</p>
+            <p class="eyebrow text-[10px] font-semibold uppercase tracking-[0.18em]">{{ t('depth.bindingsCard.eyebrow') }}</p>
+            <h3 class="mt-1 text-base font-semibold tracking-tight">{{ t('depth.bindingsCard.heading') }}</h3>
+            <p class="mt-1 text-sm text-muted">{{ t('depth.bindingsCard.description') }}</p>
           </div>
           <div class="flex flex-wrap items-center gap-2">
             <span class="rounded-full border px-3 py-1 text-xs font-medium" style="border-color: var(--app-border)">
-              {{ depthBindingCount }} of 2 assigned
+              {{ t('depth.bindingsCard.assigned', { count: depthBindingCount, total: 2 }) }}
             </span>
             <span v-if="depthBindingWarnings.length" class="rounded-full px-3 py-1 text-xs font-medium chip-warning">
-              {{ depthBindingWarnings.length }} duplicate {{ depthBindingWarnings.length === 1 ? 'input' : 'inputs' }}
+              {{ t('depth.bindingsCard.duplicateInputs', { count: depthBindingWarnings.length }) }}
             </span>
             <span aria-hidden="true" class="transition group-hover:translate-x-1">&rarr;</span>
           </div>
@@ -190,12 +194,12 @@ const profileWarnings = computed(() => {
           <svg aria-hidden="true" class="section-chevron h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
             <path fill-rule="evenodd" d="M7.2 14.8a1 1 0 0 1 0-1.4L10.6 10 7.2 6.6a1 1 0 1 1 1.4-1.4l4.1 4.1a1 1 0 0 1 0 1.4l-4.1 4.1a1 1 0 0 1-1.4 0Z" clip-rule="evenodd" />
           </svg>
-          <span class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Default Profile</span>
-          <span class="text-xs text-muted">Applies to applications without an enabled custom profile</span>
+          <span class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">{{ t('depth.defaultProfile.heading') }}</span>
+          <span class="text-xs text-muted">{{ t('depth.defaultProfile.appliesTo') }}</span>
         </summary>
         <label class="pill-toggle mt-3 inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
           <input v-model="config.modules.depthxr.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
-          Default Profile {{ config.modules.depthxr.enabled ? 'On' : 'Off' }}
+          {{ config.modules.depthxr.enabled ? t('depth.defaultProfile.toggleOn') : t('depth.defaultProfile.toggleOff') }}
         </label>
         <DefaultProfileExclusions
           class="ml-2 mt-3"
@@ -203,7 +207,7 @@ const profileWarnings = computed(() => {
           :profiles="config.modules.depthxr.profiles"
         />
         <p v-if="!config.modules.depthxr.enabled" class="mt-2 text-xs text-muted">
-          Off unless an enabled custom profile turns it on. Custom profiles below still apply to their applications.
+          {{ t('depth.defaultProfile.offNote') }}
         </p>
         <div v-else class="mt-3 space-y-3">
           <div class="grid gap-3 lg:grid-cols-2">
@@ -235,11 +239,11 @@ const profileWarnings = computed(() => {
     <section class="space-y-3">
       <div class="sticky top-0 z-20 flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border px-4 py-3 shadow-panel backdrop-blur surface-panel-strong">
         <div class="min-w-0 flex-1">
-          <h2 class="text-lg font-semibold tracking-tight">Custom Profiles</h2>
-          <p class="text-sm text-muted">Override Depth per application. The first enabled matching profile wins.</p>
+          <h2 class="text-lg font-semibold tracking-tight">{{ t('depth.customProfiles.heading') }}</h2>
+          <p class="text-sm text-muted">{{ t('depth.customProfiles.description') }}</p>
         </div>
         <button class="button-accent rounded-[0.75rem] px-5 py-2.5 text-sm font-medium" type="button" @click="$emit('addProfile')">
-          Add Profile
+          {{ t('depth.customProfiles.add') }}
         </button>
       </div>
 
@@ -249,7 +253,7 @@ const profileWarnings = computed(() => {
         :index="index"
         :profile="profile"
         :applications="applications"
-        module-label="Depth"
+        :module-label="t('depth.title')"
         :warnings="profileWarnings.get(index)"
         @remove="$emit('removeProfile', index)"
         @sync-name="$emit('syncProfileName', index)"
@@ -288,7 +292,7 @@ const profileWarnings = computed(() => {
         v-if="config.modules.depthxr.profiles.length === 0"
         class="rounded-[1rem] border border-dashed px-6 py-7 text-center text-sm surface-panel-soft"
       >
-        No custom profiles yet. Add a profile to override depth values for a specific application.
+        {{ t('depth.customProfiles.empty') }}
       </div>
     </section>
 
@@ -296,34 +300,35 @@ const profileWarnings = computed(() => {
       <div class="w-full max-w-[720px] rounded-[1.25rem] border p-5 surface-panel-strong">
         <div class="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <p class="eyebrow text-xs uppercase tracking-[0.24em]">Depth Troubleshooting</p>
-            <h2 class="mt-2 text-xl font-semibold tracking-tight">When Depth Behaves Unexpectedly</h2>
+            <p class="eyebrow text-xs uppercase tracking-[0.24em]">{{ t('depth.troubleshooting.title') }}</p>
+            <h2 class="mt-2 text-xl font-semibold tracking-tight">{{ t('depth.troubleshooting.heading') }}</h2>
           </div>
           <button class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click="depthInfoOpen = false">
-            Close
+            {{ t('common.close') }}
           </button>
         </div>
 
         <div class="mt-5 space-y-4 text-sm leading-6">
           <div class="rounded-[1rem] border px-4 py-4 chip-warning" style="border-color: var(--app-border)">
-            Games with a Force IPD, virtual IPD, stereo-separation, or world-scale setting may replace the eye separation reported by OpenXR. That override takes precedence over VectorXR Stereo Depth.
+            {{ t('depth.troubleshooting.override') }}
           </div>
 
-          <div class="rounded-[1rem] border px-4 py-4 surface-panel">
-            <strong>DCS:</strong> uncheck <strong>Force IPD Distance</strong> under Options &gt; VR, then fully restart DCS. A forced value fixes DCS's own virtual camera separation and can make Stereo Depth appear to do nothing.
-          </div>
+          <I18nText keypath="depth.troubleshooting.dcs.body" tag="div" class="rounded-[1rem] border px-4 py-4 surface-panel">
+            <template #label><strong>{{ t('depth.troubleshooting.dcs.label') }}</strong></template>
+            <template #setting><strong>{{ t('depth.ipdNote.forceIpdDistance') }}</strong></template>
+          </I18nText>
 
-          <div class="rounded-[1rem] border px-4 py-4 surface-panel">
-            <strong>Expected result:</strong> Stereo Depth changes binocular scale most noticeably on nearby geometry, so a cockpit can look larger or smaller while the distant terrain and horizon appear nearly unchanged. That distance-dependent response is normal.
-          </div>
+          <I18nText keypath="depth.troubleshooting.expected.body" tag="div" class="rounded-[1rem] border px-4 py-4 surface-panel">
+            <template #label><strong>{{ t('depth.troubleshooting.expected.label') }}</strong></template>
+          </I18nText>
 
-          <div class="rounded-[1rem] border px-4 py-4 surface-panel">
-            <strong>Convergence is subtler:</strong> it shifts the zero-parallax plane rather than scaling the scene. Compare a nearby cockpit edge against distant scenery while moving it in small steps. If Stereo Depth still has no effect after disabling game-level overrides, enable debug logging and export the session logs.
-          </div>
+          <I18nText keypath="depth.troubleshooting.convergence.body" tag="div" class="rounded-[1rem] border px-4 py-4 surface-panel">
+            <template #label><strong>{{ t('depth.troubleshooting.convergence.label') }}</strong></template>
+          </I18nText>
 
-          <div class="rounded-[1rem] border px-4 py-4 surface-panel">
-            <strong>Depth Lock preserves the tuned image at submission:</strong> the game renders with altered stereo geometry, then the runtime receives headset-native eye poses and FOV so it cannot normalize the pairing away. Compare it on and off at identical values, and reduce intensity or disable it if comfort becomes worse.
-          </div>
+          <I18nText keypath="depth.troubleshooting.depthLock.body" tag="div" class="rounded-[1rem] border px-4 py-4 surface-panel">
+            <template #label><strong>{{ t('depth.troubleshooting.depthLock.label') }}</strong></template>
+          </I18nText>
         </div>
       </div>
     </div>

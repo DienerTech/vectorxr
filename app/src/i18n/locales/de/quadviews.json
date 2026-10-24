@@ -1,0 +1,320 @@
+{
+  "tab": {
+    "intro": "Konfigurieren Sie foveales und peripheres Rendering für Spiele, die bereits OpenXR-Quad-Views anfordern. Das Aktivieren dieses Moduls fügt gewöhnlichen Stereo-Spielen keine Quad-View-Unterstützung hinzu.",
+    "varjoCompatibility": "Varjo-Kompatibilität",
+    "setupGuide": {
+      "title": "Einrichtungsanleitung",
+      "summary": "Empfohlene DCS-Einrichtung und kompatible Titel",
+      "heading": "Empfohlene DCS-Einrichtung",
+      "gameLabel": "Spiel:",
+      "game": "{label} Schalten Sie {useQuadView} und, für Blickverfolgung, {useEyeTracking} ein.",
+      "useQuadView": "Use Quad View",
+      "useEyeTracking": "Use Eye Tracking",
+      "providerLabel": "Anbieter:",
+      "provider": "{label} Aktivieren Sie den VectorXR-Layer und das Quadviews-Profil, und deaktivieren Sie dann {layerName}. Schalten Sie bei Pimax außerdem „Native Pimax Quad Views“ aus. Native Varjo Quadviews bleiben von der Laufzeit gesteuert.",
+      "applyLabel": "Anwenden:",
+      "apply": "{label} Speichern Sie das Profil, und starten Sie DCS neu, nachdem Sie Laufzeit, Layer oder VR-Einstellungen im Spiel geändert haben.",
+      "titles": "DCS ist der hauptsächlich getestete Titel. Wahrscheinliche, aber unbestätigte D3D11-Kandidaten sind Pavlov VR, VAIL VR, The 7th Guest VR und Kayak VR: Mirage. Jeder Titel muss Quad Views selbst anfordern.",
+      "pixelEstimates": "Die Pixelschätzungen vergleichen nur das Rendering der Anwendungsansichten; die Laufzeit und die Komposition von VectorXR verursachen zusätzliche GPU-Kosten."
+    },
+    "restartNoteLabel": "Neustart zum Anwenden:",
+    "restartNote": "{label} Markierte Felder sowie das Ein-/Ausschalten von Quadviews werden vollständig wirksam, nachdem die aktuelle OpenXR-Anwendung beendet wurde. Nicht markierte Steuerelemente werden während des Spiels aktualisiert.",
+    "diagnostics": {
+      "eyebrow": "Diagnose im Headset",
+      "intro": "Sehen Sie Renderzonen, Fokusausrichtung, Blickfilterung und Tracking-Verfügbarkeit, während Sie Quadviews abstimmen.",
+      "howToRead": "So lesen Sie das Overlay",
+      "sessionControl": "Sitzungssteuerung",
+      "shownIn": "Angezeigt in {application}",
+      "hiddenIn": "Ausgeblendet in {application}",
+      "unavailable": "In der aktiven OpenXR-Sitzung nicht verfügbar",
+      "noSession": "Keine aktive synthetisierte Quadviews-Sitzung",
+      "applying": "Wird angewendet...",
+      "hide": "Visualisierung ausblenden",
+      "show": "Visualisierung anzeigen",
+      "shortcutHeading": "Tastenkürzel im Headset",
+      "shortcutHint": "Optional. Die Visualisierung startet in jeder OpenXR-Sitzung ausgeblendet.",
+      "guideHint": "Neu bei der Visualisierung? Die interaktive Anleitung erklärt jede Form und ordnet häufige Symptome der Einstellung zu, die sie steuert.",
+      "readStatusFailed": "Laufzeitstatus kann nicht gelesen werden",
+      "controlFailed": "Die Visualisierung kann nicht gesteuert werden",
+      "notAcknowledged": "Die OpenXR-Sitzung hat die Steuerungsanforderung nicht bestätigt"
+    },
+    "binding": {
+      "label": "Umschaltung der Diagnosevisualisierung",
+      "description": "Blendet die Quadviews-Kalibrierungsansicht im Spiel ein oder aus. Sie startet in jeder Sitzung ausgeblendet und ist nur verfügbar, wenn VectorXR Quadviews über seinen D3D11-Compositor synthetisiert.",
+      "noneText": "Kein Tastenkürzel im Headset zugewiesen. Sie können die Visualisierung weiterhin über die Quadviews-Seite steuern."
+    },
+    "defaultProfile": {
+      "heading": "Standardprofil",
+      "appliesTo": "Gilt für Anwendungen ohne aktiviertes eigenes Profil",
+      "toggleOn": "Standardprofil ein",
+      "toggleOff": "Standardprofil aus",
+      "restartTitle": "Das Aktivieren/Deaktivieren von Quadviews wird wirksam, nachdem die laufende OpenXR-Anwendung beendet wurde.",
+      "offNote": "Aus, sofern es nicht durch ein aktiviertes eigenes Profil eingeschaltet wird. Die eigenen Profile unten gelten weiterhin für ihre Anwendungen."
+    },
+    "launchStateNote": "Sofort gespeichert, aber eine laufende OpenXR-Anwendung behält ihren Quadviews-Status vom Start bei, bis sie beendet wird.",
+    "customProfiles": {
+      "heading": "Eigene Profile",
+      "intro": "Überschreiben Sie Quadviews pro Anwendung. Das erste aktivierte passende Profil hat Vorrang.",
+      "add": "Profil hinzufügen",
+      "empty": "Noch keine eigenen Profile. Fügen Sie ein Profil hinzu, um Quad-View-Werte für eine bestimmte Anwendung zu überschreiben.",
+      "alreadyTargeted": "{application} ist bereits Ziel von Profil {number}. Das erste aktive Profil hat Vorrang."
+    },
+    "budget": {
+      "estimate": "{percent} % geschätzte App-Renderpixel",
+      "light": "Leicht",
+      "moderate": "Mittel",
+      "heavy": "Hoch",
+      "detrimental": "⚠ Nachteilig"
+    },
+    "varjo": {
+      "title": "Varjo-kompatible Quadviews",
+      "biPanel": "Varjo-Headsets haben zwei Panels: pro Auge ein breites Kontextdisplay mit geringerer Dichte und ein kleines Fokusdisplay mit hoher Dichte. Die Varjo-kompatiblen Quadviews von VectorXR behalten die vier Ansichtsebenen bei, die Ihr Headset erwartet (zwei periphere, zwei fokale), sodass die physischen Fokuspanels direkt angesteuert werden. Infolgedessen übernimmt die Varjo-Laufzeit die Ansichtsgeometrie, und einige Quadviews-Einstellungen werden ignoriert.",
+      "notesIntro": "Hinweise zur Kompatibilität von VectorXR Quadviews mit der Varjo-Laufzeit:",
+      "stillApplies": "VectorXR gilt weiterhin",
+      "handledByRuntime": "Von der Varjo-Laufzeit gesteuert",
+      "focusScale": "Fokusskalierung",
+      "peripheralScale": "Peripherieskalierung",
+      "focusSharpness": "Fokusschärfe",
+      "focusSizeTransition": "Fokusgröße & Übergangsbreite",
+      "offsets": "Horizontaler & vertikaler Versatz",
+      "smoothingDeadzone": "Blickglättung & Totzone",
+      "diagnosticVisualization": "Diagnosevisualisierung",
+      "emulation": "Auf Headsets ohne physische Quad-View-Unterstützung durch Doppelpanel-Displays (z. B. Quest Pro, Pimax Crystal) verwendet VectorXR Quadviews den Standard-Emulationsmodus, und alle Einstellungen gelten. Diese Kompatibilitätshinweise gelten nur für Varjo-Laufzeiten.",
+      "diagnosticUnsupportedLead": "Die Diagnosevisualisierung wird auf Varjo-Headsets derzeit nicht unterstützt.",
+      "diagnosticUnsupported": "{lead} Die Varjo-Laufzeit übernimmt die native Quad-View-Komposition, daher läuft der synthetisierte D3D11-Compositor von VectorXR dort nicht."
+    }
+  },
+  "fields": {
+    "preset": {
+      "heading": "Vector-Voreinstellung",
+      "restartTitle": "Voreinstellungen enthalten Einstellungen, die für ihre volle Wirkung einen Neustart des Spiels erfordern.",
+      "intro": "Ein guter Ausgangspunkt; Tracking und Ausrichtung bleiben Ihnen überlassen.",
+      "buttonTitle": "Voreinstellungen ändern Fokusabmessungen und Auflösung, daher erfordert ihre volle Wirkung einen Neustart des Spiels.",
+      "performance": "Leistung",
+      "balanced": "Ausgewogen",
+      "quality": "Qualität"
+    },
+    "focusWindow": "Fokusfenster",
+    "focusWidth": {
+      "label": "Fokusbreite",
+      "restart": "Das Fokusfenster bewegt sich sofort, aber DCS behält seine bisherige Texturbreite und Pixellast bis zum Neustart bei."
+    },
+    "focusHeight": {
+      "label": "Fokushöhe",
+      "restart": "Das Fokusfenster bewegt sich sofort, aber DCS behält seine bisherige Texturhöhe und Pixellast bis zum Neustart bei."
+    },
+    "percentOfFov": "% des FOV",
+    "horizontalOffset": {
+      "label": "Horizontaler Versatz",
+      "help": "Verschiebt den Fokusbereich in Grad nach links oder rechts. Verwenden Sie dies nur, wenn sich der scharfe Bereich dezentriert anfühlt."
+    },
+    "verticalOffset": {
+      "label": "Vertikaler Versatz",
+      "help": "Verschiebt den Fokusbereich in Grad nach oben oder unten. Hilfreich, wenn sich die Blickmitte eines Headsets vertikal verschoben anfühlt."
+    },
+    "resolution": "Auflösung",
+    "focusResolution": {
+      "label": "Fokusauflösung",
+      "restart": "Neustart erforderlich: DCS behält seine Fokustexturen vom Start bei. Über 100 % kann die Ausgabefläche von VectorXR in der Größe ändern und einen vorübergehenden Einbruch der Bildrate verursachen.",
+      "warning": "Das Ausgabebild von VectorXR für die gesamte Ansicht wächst mit der Fokusauflösung: {percent} % benötigen etwa das {factor}× der Pixel Ihres Headsets in GPU-Speicher und Komposition, zusätzlich zu den oben angezeigten Renderkosten der App."
+    },
+    "percentOfHmd": "% der HMD-Auflösung",
+    "peripheralResolution": {
+      "label": "Peripherieauflösung",
+      "restart": "Neustart erforderlich: DCS behält seine peripheren Texturen und Pixellast vom Start bei."
+    },
+    "foveateSharpness": {
+      "label": "Fovea-Schärfe",
+      "help": "Wendet zusätzliche Schärfung auf das detailreiche Fokusbild an. 0 ist aus; höhere Werte erhöhen die Schärfe, können aber Lichthöfe erzeugen."
+    },
+    "transitionThickness": {
+      "label": "Übergangsbreite",
+      "help": "Steuert, wie breit der überblendete Rand zwischen Fokus- und Peripheriebild ist. Höhere Werte verbergen die Grenze besser, machen aber einen größeren Teil des Fokusfensters weicher."
+    },
+    "percentOfFocusWindow": "% des Fokusfensters",
+    "tracking": "Tracking",
+    "mode": {
+      "label": "Modus",
+      "restart": "Der Wechsel zu „Augengesteuert“ erfordert einen Neustart des Spiels, wenn das Spiel im Modus „Kopfgesteuert“ gestartet wurde.",
+      "help": "Wählt, ob der Fokusbereich der Kopfrichtung oder dem Blick folgt, wenn Eye-Tracking verfügbar ist.",
+      "head": "Kopfgesteuert",
+      "eye": "Augengesteuert"
+    },
+    "eyeTrackingCorrection": {
+      "label": "Eye-Tracking-Korrektur",
+      "help": "Verwenden Sie „Standard“, es sei denn, das Eye-Tracking fühlt sich umgekehrt an; versuchen Sie dann „Nur Z spiegeln“.",
+      "default": "Standard",
+      "flipZ": "Nur Z spiegeln"
+    },
+    "smoothing": {
+      "label": "Glättung",
+      "help": "Macht die Bewegung des Fokusbereichs weicher. 0 ist sofort; höhere Werte verringern Zittern, fügen aber Verzögerung hinzu."
+    },
+    "deadzone": {
+      "label": "Totzone",
+      "help": "Kleine Blickbewegungen, die ignoriert werden, bevor sich der Fokusbereich bewegt. Nützlich, um Flimmern nahe der Mitte zu verringern."
+    }
+  },
+  "dimensions": {
+    "peripheralLeft": "Peripherie L",
+    "peripheralRight": "Peripherie R",
+    "focusLeft": "Fokus L",
+    "focusRight": "Fokus R",
+    "waiting": "Die Ansichtsabmessungen werden hier angezeigt, während ein Quadviews-Spiel läuft.",
+    "view": "{name}: {width} × {height} (Textur {allocatedWidth} × {allocatedHeight})",
+    "footer": "Übermittelte Ansichtsgrößen, jede Sekunde aktualisiert. Gespeicherte Auflösungsänderungen können einen Neustart des Spiels erfordern.",
+    "labelNone": "Abmessungen –",
+    "labelLive": "Abmessungen · Live",
+    "labelLast": "Abmessungen · Zuletzt"
+  },
+  "guide": {
+    "eyebrow": "Interaktive Feldanleitung",
+    "title": "Das Quadviews-Overlay lesen",
+    "intro": "Lernen Sie zuerst das Bild kennen, und ändern Sie dann die Einstellung, die zu dem passt, was Sie tatsächlich sehen.",
+    "closeLabel": "Overlay-Anleitung schließen",
+    "stepsLabel": "Schritte der Overlay-Anleitung",
+    "steps": {
+      "zones": {
+        "title": "Zonen lesen",
+        "summary": "Sehen Sie, wo jedes Bild beiträgt."
+      },
+      "alignment": {
+        "title": "Ausrichtung prüfen",
+        "summary": "Vergleichen Sie Mittelpunkte, Versatz und Blick."
+      },
+      "motion": {
+        "title": "Tracking beurteilen",
+        "summary": "Erkennen Sie Zittern, Verzögerung und Tracking-Verlust."
+      },
+      "troubleshoot": {
+        "title": "Lösung wählen",
+        "summary": "Ordnen Sie ein Symptom der richtigen Einstellung zu."
+      }
+    },
+    "illustrationLabel": "Interaktive Darstellung des Quadviews-Diagnose-Overlays",
+    "svg": {
+      "peripheral": "BLAU - PERIPHERER KONTEXT",
+      "blend": "BERNSTEIN - ÜBERBLENDUNG",
+      "focus": "FOKUSBILD",
+      "headCenter": "KOPFMITTE",
+      "configuredOffset": "KONFIGURIERTER VERSATZ",
+      "raw": "ROH",
+      "smoothed": "GEGLÄTTET",
+      "dragHint": "KLICKEN ODER ZIEHEN, UM DEN ROHBLICK ZU BEWEGEN",
+      "trackingUnavailable": "TRACKING NICHT VERFÜGBAR - FALLBACK AKTIV"
+    },
+    "illustrative": "Illustration – keine pixelgenaue Aufnahme aus dem Headset",
+    "demo": {
+      "focusSize": "Fokusgröße",
+      "transitionThickness": "Übergangsbreite",
+      "horizontalOffset": "Horizontaler Versatz",
+      "verticalOffset": "Vertikaler Versatz",
+      "smoothing": "Glättung",
+      "degrees": "{value} Grad",
+      "eyeTrackingAvailable": "Eye-Tracking: Verfügbar",
+      "eyeTrackingLost": "Eye-Tracking: Verloren",
+      "reset": "Darstellung zurücksetzen"
+    },
+    "settingNames": {
+      "peripheralResolution": "Peripherieauflösung",
+      "transitionThickness": "Übergangsbreite",
+      "focusResolution": "Fokusauflösung",
+      "focusWidthHeight": "Fokusbreite / -höhe",
+      "referenceOnly": "Nur Referenz",
+      "horizontalVerticalOffset": "Horizontaler / vertikaler Versatz",
+      "horizontalOffset": "Horizontaler Versatz",
+      "verticalOffset": "Vertikaler Versatz",
+      "trackingSource": "Tracking-Quelle",
+      "smoothingDeadzone": "Glättung / Totzone",
+      "smoothing": "Glättung",
+      "deadzone": "Totzone",
+      "trackingMode": "Tracking-Modus",
+      "gameEyeTracking": "Eye-Tracking im Spiel",
+      "headsetRuntime": "Headset-Laufzeit"
+    },
+    "cards": {
+      "peripheral": {
+        "title": "Peripherer Bereich",
+        "body": "Blau deckt das Kontextbild ab. Eine geringere Auflösung hier spart meist die meisten Pixel, ohne Ihren scharfen Bereich zu verkleinern."
+      },
+      "transition": {
+        "title": "Übergangsband",
+        "body": "Bernstein ist die Überblendung zwischen den Bildern. Breiter kann eine Naht verbergen; zu breit kann den Rand weich wirken lassen."
+      },
+      "focusBoundary": {
+        "title": "Fokusgrenze",
+        "body": "Der grüne Umriss ist die Größe des Fokusfensters. Die Fokusauflösung ändert die Detaildichte, nicht diesen Umriss."
+      },
+      "headCenter": {
+        "title": "Kopfmitte",
+        "body": "Das weiße Kreuz zeigt vom Headset aus geradeaus. Es gibt jeder anderen Markierung eine stabile Referenz."
+      },
+      "configuredOffset": {
+        "title": "Konfigurierter Versatz",
+        "body": "Das magentafarbene L und der Ring zeigen Ihre beabsichtigte Korrektur gegenüber der Kopfmitte."
+      },
+      "rawGaze": {
+        "title": "Rohblick",
+        "body": "Cyan ist der unmittelbare Eye-Tracking-Messwert. Klicken Sie auf die Darstellung, um ihn zu bewegen."
+      },
+      "smoothedGaze": {
+        "title": "Geglätteter Blick",
+        "body": "Gelb ist die gefilterte Position, die das Fokusfenster steuert, bevor der konfigurierte Versatz hinzugefügt wird."
+      },
+      "greenOutline": {
+        "title": "Grüner Umriss",
+        "body": "Eye-Tracking ist verfügbar. Vergleichen Sie Cyan und Gelb, um die Filterung zu beurteilen."
+      },
+      "redOutline": {
+        "title": "Roter Umriss",
+        "body": "Die Augenquelle ist nicht verfügbar. VectorXR verwendet sein Ersatzverhalten für den Fokus."
+      }
+    },
+    "goodTracking": {
+      "heading": "So sieht gutes Tracking aus",
+      "cyan": "Cyan reagiert sofort auf Ihre Augen.",
+      "yellow": "Gelb folgt dicht, ohne ständiges Zittern.",
+      "window": "Das Fokusfenster bleibt auf dem gewünschten Detail."
+    },
+    "symptoms": {
+      "boundary": {
+        "label": "Sichtbare Naht",
+        "title": "Der Fokusrand ist leicht zu erkennen",
+        "body": "Erhöhen Sie die Übergangsbreite etwas. Wenn das Bernsteinband großflächig weich wird, verringern Sie sie wieder, und verkleinern Sie den Auflösungsunterschied zwischen Fokus und Peripherie."
+      },
+      "offset": {
+        "label": "Falsche Mitte",
+        "title": "Der scharfe Bereich ist durchgehend verschoben",
+        "body": "Prüfen Sie zuerst, ob die cyanfarbene und die gelbe Blickmarkierung dort landen, wo Sie hinsehen. Wenn ja, korrigieren Sie die durchgehende Verschiebung mit dem horizontalen oder vertikalen Versatz. Verwenden Sie den Versatz nicht, um Blickverzögerung zu verbergen."
+      },
+      "jitter": {
+        "label": "Zittern",
+        "title": "Das Fokusfenster zittert nahe Ihrem Blick",
+        "body": "Erhöhen Sie die Glättung schrittweise. Eine kleine Totzone kann winzige Augenbewegungen nahe der Mitte unterdrücken, aber zu viel erzeugt einen klebrigen Sprung, wenn sich der Fokus schließlich bewegt."
+      },
+      "lag": {
+        "label": "Zu viel Verzögerung",
+        "title": "Die gelbe Markierung hängt zu weit hinter Cyan zurück",
+        "body": "Verringern Sie die Glättung. Wenn die Bewegung spät beginnt und dann springt, verringern Sie auch die Totzone. Verwenden Sie die kleinsten Werte, bei denen das Fokusfenster visuell noch ruhig bleibt."
+      },
+      "lost": {
+        "label": "Roter Umriss",
+        "title": "Eye-Tracking ist nicht verfügbar",
+        "body": "Ein roter Fokusumriss ist eine Statuswarnung, keine Farbvorliebe. Prüfen Sie, ob Eye-Tracking im Spiel und in der Headset-Laufzeit aktiviert ist. VectorXR greift auf das Ersatzverhalten zurück, statt dem Blick zu folgen."
+      },
+      "performance": {
+        "label": "Mehr FPS nötig",
+        "title": "Pixel dort reduzieren, wo sie am wenigsten zählen",
+        "body": "Senken Sie zuerst die Peripherieauflösung. Verringern Sie dann bei Bedarf die Fokusbreite oder -höhe. Die Fokusauflösung ändert die Dichte innerhalb des Fensters – sie ändert nicht die Größe des grünen Umrisses."
+      }
+    },
+    "ifYouSee": "Wenn Sie dies sehen",
+    "tuningOrder": {
+      "heading": "Gute Abstimmungsreihenfolge:",
+      "tracking": "Prüfen Sie, ob Tracking verfügbar ist.",
+      "alignment": "Korrigieren Sie eine durchgehende Ausrichtungsverschiebung.",
+      "smoothing": "Wägen Sie Glättung gegen Verzögerung ab.",
+      "quality": "Stimmen Sie dann Bildqualität und Pixelkosten ab."
+    }
+  }
+}

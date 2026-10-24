@@ -1,0 +1,13 @@
+{
+  "configRead": "{path} を読み取れません: {detail}",
+  "configParse": "{path} を解析できません: {detail}",
+  "configReplace": "{path} を置き換えられません: {detail}",
+  "directoryMissing": "ディレクトリが存在しません: {path}",
+  "soundMissing": "サウンド ファイルが見つかりません: {path}",
+  "sessionInactive": "OpenXR セッションはアクティブではなくなりました",
+  "diagnosticUnavailable": "この OpenXR セッションでは診断用の可視化を使用できません",
+  "layerNotRegistered": "レイヤー マニフェストは、その OpenXR スライスに登録されていません",
+  "layerConflict": "別の VectorXR 登録がすでに有効になっています ({slice}: {path})。VectorXR のコピーが 2 つ読み込まれると OpenXR アプリがクラッシュするため、先にそちらを無効にしてください。",
+  "elevationRequired": "この OpenXR レイヤーの変更には管理者権限への昇格が必要です。VectorXR を管理者として再起動してから、もう一度お試しください。",
+  "elevationCanceled": "OpenXR レイヤーの変更は、昇格のプロンプトでキャンセルされたか、昇格したヘルパーが起動しませんでした。"
+}

@@ -1,0 +1,137 @@
+{
+  "shared": {
+    "pivot": "Pivot",
+    "breadcrumb": "Trilha de navegação",
+    "returnToPivot": "Voltar ao Pivot",
+    "editTitle": "Editar {name}",
+    "yaw": "Guinada",
+    "pitch": "Arfagem",
+    "transition": "Transição",
+    "unitSeconds": "s",
+    "unitCm": "cm",
+    "behavior": "Comportamento",
+    "hold": "Segurar",
+    "toggle": "Alternar",
+    "addBinding": "Adicionar atribuição",
+    "bindingLabel": "Atribuição {index}",
+    "holdDescription": "A vista fica ativa somente enquanto o controle é segurado.",
+    "toggleDescription": "Pressione uma vez para entrar; pressione de novo para sair.",
+    "bindingCount_one": "{count} atribuição",
+    "bindingCount_other": "{count} atribuições"
+  },
+  "viewControlsPage": {
+    "snapViews": "Vistas fixas",
+    "title": "{context} — Vistas fixas",
+    "returnHint": "Pressione Esc ou Concluído para voltar.",
+    "returnToSnapViews": "Voltar às Vistas fixas",
+    "name": "Nome",
+    "yawHint": "Negativo vira à esquerda; positivo vira à direita.",
+    "positionOffset": "Deslocamento de posição opcional",
+    "positionHint": "A posição é relativa à origem do Pivot capturada. A translação natural da cabeça continua disponível.",
+    "rightLeft": "Direita / esquerda",
+    "upDown": "Cima / baixo",
+    "forwardBack": "Frente / trás",
+    "bindings": "Atribuições",
+    "bindingsHint": "Segurar volta quando solto. Alternar permanece até ser pressionado de novo ou até outra Vista rápida assumir.",
+    "noBindings": "Nenhuma atribuição definida. Esta Vista rápida fica inerte até que uma atribuição seja adicionada.",
+    "quickViews": "Vistas rápidas",
+    "quickViewsHint": "Poses nomeadas em relação à origem do Pivot, com rastreamento natural da cabeça 1:1 em torno do alvo.",
+    "createPreset": "Criar predefinição de 4 vistas",
+    "addQuickView": "Adicionar vista rápida",
+    "empty": "Nenhuma Vista rápida ainda. Adicione uma manualmente ou comece com a predefinição de quatro vistas para HAT.",
+    "summary_one": "Guinada {yaw}° · Arfagem {pitch}° · {count} atribuição",
+    "summary_other": "Guinada {yaw}° · Arfagem {pitch}° · {count} atribuições",
+    "position": "Posição D {right} · C {up} · F {forward} cm",
+    "moveUp": "Subir",
+    "moveDown": "Descer",
+    "copyName": "Cópia de {name}",
+    "presets": {
+      "lookLeft": "Olhar à esquerda",
+      "lookRight": "Olhar à direita",
+      "high12": "12 horas alto",
+      "checkSix": "Checar seis horas"
+    }
+  },
+  "viewControlsPanel": {
+    "snapViews": "Vistas fixas",
+    "viewCount_one": "{count} vista",
+    "viewCount_other": "{count} vistas",
+    "editSnapViews": "Editar vistas fixas…"
+  },
+  "nudgeSetPage": {
+    "nudgeSets": "Conjuntos de deslocamentos",
+    "linked_one": "Vinculado a {count} perfil. As alterações se aplicam em todos os lugares em que este conjunto está selecionado.",
+    "linked_other": "Vinculado a {count} perfis. As alterações se aplicam em todos os lugares em que este conjunto está selecionado.",
+    "setName": "Nome do conjunto",
+    "allowWhileInactive": "Permitir enquanto o Pivot está inativo",
+    "allowWhileInactiveHint": "Estas atribuições podem ajustar e manter o deslocamento global da visão mesmo quando nenhum perfil vinculado está engatado.",
+    "yawStep": "Passo de guinada",
+    "pitchStep": "Passo de arfagem",
+    "yawLeft": "Guinada à esquerda",
+    "yawRight": "Guinada à direita",
+    "pitchUp": "Arfagem para cima",
+    "pitchDown": "Arfagem para baixo",
+    "yawStepDescription": "Adiciona um passo de guinada à visão atual.",
+    "pitchStepDescription": "Adiciona um passo de arfagem à visão atual.",
+    "center": "Centralizar deslocamento",
+    "centerDescription": "Limpa o deslocamento acumulado.",
+    "resetToDefaults": "Redefinir para o padrão",
+    "confirmReset": "Redefinir os valores de movimento e remover todas as atribuições deste conjunto de deslocamentos?",
+    "deleteSet": "Excluir conjunto de deslocamentos",
+    "deleteTitle": "Excluir este conjunto de deslocamentos",
+    "deleteRequired": "É necessário pelo menos um conjunto de deslocamentos",
+    "confirmDelete": "Excluir \"{name}\"? Os perfis que o usam passarão para outro conjunto de deslocamentos."
+  },
+  "snapBindingsPage": {
+    "snapViewBindings": "Atribuições das vistas fixas",
+    "title": "{context} — Atribuições das vistas fixas",
+    "hint": "Atribua controles de Segurar ou Alternar sem alterar as transformações de vista salvas.",
+    "noBinding": "Nenhuma atribuição definida. Esta Vista fixa está inativa.",
+    "empty": "Ainda não existem Vistas fixas. Crie vistas em Editar vistas fixas antes de definir atribuições."
+  },
+  "snapBindingsPanel": {
+    "snapViewBindings": "Atribuições das vistas fixas",
+    "inactiveHint": "As Vistas fixas ficam inativas até que uma atribuição seja definida.",
+    "editBindings": "Editar atribuições…"
+  },
+  "snapStacking": {
+    "title": "Aplicar Movimento aprimorado às Vistas fixas",
+    "description": "Mantém a assistência ao entrar em uma Vista fixa ou a ativa em torno de uma vista já selecionada. Usa o ajuste de rotação e posição deste perfil."
+  },
+  "originPage": {
+    "originControls": "Controles de origem",
+    "title": "{context} — Controles de origem",
+    "hint": "Mantenha a pose neutra do Pivot alinhada com a posição de recentralização do simulador.",
+    "closeLabel": "Fechar os controles de origem e voltar ao Pivot",
+    "setOrigin": "Definir origem (opcional)",
+    "setOriginDescription": "Captura a pose atual da cabeça como a origem neutra sentada do Pivot. Atribua isto ao mesmo controle que você usa para recentralizar a visão no jogo, para que as duas origens sejam atualizadas juntas.",
+    "setOriginNone": "Nenhuma atribuição definida. O Pivot gira em torno da origem do HMD.",
+    "releaseOrigin": "Liberar origem (opcional)",
+    "releaseOriginDescription": "Limpa uma origem capturada e devolve o Pivot à origem do HMD. Útil se uma origem foi capturada enquanto você olhava fora do centro.",
+    "releaseOriginNone": "Nenhuma atribuição definida. Uma origem capturada continua ativa até a sessão terminar ou até ser recapturada."
+  },
+  "originPanel": {
+    "originControls": "Controles de origem",
+    "setOrigin": "Definir origem",
+    "setOriginTitle": "Captura a pose atual da cabeça como a origem neutra sentada do Pivot.",
+    "releaseOrigin": "Liberar origem",
+    "releaseOriginTitle": "Libera uma origem capturada e devolve o Pivot à origem padrão do HMD.",
+    "editOrigin": "Editar origem…"
+  },
+  "bindingsPanel": {
+    "motionActivation": "Ativação do movimento",
+    "alwaysActive": "Sempre ativo",
+    "manual": "Manual",
+    "noSuspendControls": "Nenhum controle de suspensão",
+    "noActivationControls": "Nenhum controle de ativação",
+    "editActivation": "Editar ativação..."
+  },
+  "bindingsPage": {
+    "motionActivation": "Ativação do movimento",
+    "title": "{context} — Ativação",
+    "returnHint": "Pressione Esc ou Concluído para voltar ao Pivot.",
+    "closeLabel": "Fechar a ativação e voltar ao Pivot",
+    "alwaysActiveDescription": "Escolha controles que suspendem temporariamente ou desligam o Pivot.",
+    "manualDescription": "Escolha controles que engatam o Pivot."
+  }
+}

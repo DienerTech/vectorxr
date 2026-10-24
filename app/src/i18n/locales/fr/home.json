@@ -1,0 +1,53 @@
+{
+  "supportLinkError": "Impossible d'ouvrir le navigateur. Rendez-vous sur ko-fi.com/dienertech pour soutenir VectorXR.",
+  "layerStatus": {
+    "checking": "Vérification",
+    "notFound": "Introuvable",
+    "enabled": "Couche activée",
+    "disabled": "Couche désactivée"
+  },
+  "layerDescription": {
+    "checking": "Vérification de la couche API VectorXR inscrite.",
+    "notFound": "L'inscription de la couche API de VectorXR est introuvable. Les Améliorations ne s'appliqueront pas tant que la couche ne sera pas inscrite et activée.",
+    "enabled": "La couche API VectorXR est activée ; les Améliorations peuvent donc s'appliquer à l'exécution.",
+    "disabled": "La couche API VectorXR est désactivée. Aucune Amélioration ne s'appliquera, quel que soit l'état d'activation de la suite ou des Améliorations."
+  },
+  "runtime": {
+    "enabled": "Exécution activée",
+    "disabled": "Exécution désactivée",
+    "title": "État de l'interrupteur d'exécution au niveau de la suite."
+  },
+  "systemHealth": {
+    "eyebrow": "État du système",
+    "suiteOff": "Les effets d'exécution sont désactivés par l'interrupteur de la suite. L'état de la couche reste disponible pour le dépannage.",
+    "checking": "Vérification de l'exécution VectorXR et de la disponibilité de la couche OpenXR.",
+    "layerNotFound": "VectorXR est activé, mais l'inscription de la couche API OpenXR est introuvable.",
+    "layerDisabled": "VectorXR est activé, mais la couche API OpenXR est désactivée.",
+    "ready": "L'exécution VectorXR et l'état de la couche OpenXR semblent prêts pour les prochains lancements d'applications OpenXR.",
+    "viewHealth": "Voir l'état",
+    "exportDebug": "Exporter le débogage"
+  },
+  "enhancements": {
+    "eyebrow": "Améliorations",
+    "title": "Vue d'ensemble",
+    "activeCount": "{active} sur {total} actives",
+    "columns": {
+      "enhancement": "Amélioration",
+      "defaultProfile": "Profil par défaut",
+      "customProfiles": "Profils personnalisés",
+      "status": "État"
+    },
+    "open": "Ouvrir les paramètres de {module}",
+    "customEnabled": "{enabled} / {total} activés",
+    "hint": "Sélectionnez une Amélioration pour ouvrir ses paramètres."
+  },
+  "community": {
+    "eyebrow": "Communauté et annonces",
+    "title": "Participez à l'évolution de VectorXR",
+    "discordTitle": "Discord DienerTech",
+    "discordBody": "Partagez votre configuration, comparez vos résultats et suivez les dernières annonces de VectorXR.",
+    "supportTitle": "Soutenir le développement",
+    "supportBody": "Soutenez le projet en contribuant à VectorXR sur Ko-fi. Chaque soutien aide à financer l'avenir de VectorXR !",
+    "supportButton": "Soutenir VectorXR sur Ko-fi ↗"
+  }
+}

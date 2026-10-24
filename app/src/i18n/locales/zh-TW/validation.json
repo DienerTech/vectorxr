@@ -1,0 +1,87 @@
+{
+  "field": {
+    "between": "{field} 必須介於 {min} 與 {max} 之間",
+    "betweenCm": "{field} 必須介於 {min} 與 {max} cm 之間",
+    "integerBetween": "{field} 必須是介於 {min} 與 {max} 之間的整數",
+    "wholeNumberFromTo": "{field} 必須是 {min} 到 {max} 的整數",
+    "boolean": "{field} 必須是布林值",
+    "trueOrFalse": "{field} 必須是 true 或 false",
+    "required": "{field} 為必填",
+    "smallerThan": "{field} 必須小於 {other}",
+    "duplicates": "{field} 與 {value} 重複",
+    "wavFile": "{field} 必須指向 .wav 檔案"
+  },
+  "osd": {
+    "between": "OSD {field} 必須介於 {min} 與 {max} 之間",
+    "customColor": "OSD 自訂色彩必須是六位數的十六進位色碼",
+    "accent": "OSD 強調色無效",
+    "clockFormat": "OSD 時鐘格式必須是 12 或 24 小時制",
+    "compactMetrics": "OSD 精簡效能選項無效",
+    "bodyOrder": "OSD 內容順序必須讓每一列各出現一次"
+  },
+  "binding": {
+    "chordEmpty": "{field} 必須包含至少一個按鍵",
+    "chordUnsupportedKey": "{field} 包含不支援的按鍵：{key}",
+    "chordPrimaryKey": "{field} 必須剛好包含一個非輔助按鍵",
+    "inputPath": "{field} 必須使用 button-1 到 button-128，或 hat-1 到 hat-4 並搭配支援的方向"
+  },
+  "pivot": {
+    "positionAssistAngles": "{field} 需要 0 <= 起始角度 < 完整偏移角度 <= 180",
+    "responseMode": "{field} 必須是 \"continuous\" 或 \"stepped\"",
+    "stepGlideMode": "{field} 必須是 \"instant\" 或 \"glide\"",
+    "quickViewDuplicateId": "{field} 與另一個快速視角重複",
+    "nudgeSetReservedId": "{field} 使用了保留的「無」選項",
+    "nudgeSetDuplicateId": "{field} 與另一個微調組重複",
+    "unknownNudgeSet": "{field} 參照了未知的微調組"
+  },
+  "quadviews": {
+    "trackingMode": "{field} 必須是 head 或 eye"
+  },
+  "framegen": {
+    "synthesisMode": "{field} 必須是 interpolate 或 extrapolate",
+    "flowQuality": "{field} 必須是 performance、balanced 或 quality",
+    "motionEstimation": "{field} 必須是 shader 或 hardware",
+    "frameMultiplier": "{field} 必須是 auto、dynamic、2x、3x 或 4x",
+    "diagnosticView": "{field} 必須是 off、flow、confidence 或 tint"
+  },
+  "turbo": {
+    "predictionPercent": "Turbo 實驗性預測抑制必須是 50 到 100 的整數",
+    "frameLimit": "Turbo 實驗性影格上限必須是 0（關閉）或 20 到 240 的整數"
+  },
+  "applications": {
+    "idFormat": "{field} 只能使用小寫字母、數字與連字號",
+    "duplicateId": "{field} 與另一個應用程式重複",
+    "duplicateExe": "{field} 與另一個應用程式重複",
+    "unknownApplication": "{field} 參照了未知的應用程式：{application}"
+  },
+  "profiles": {
+    "conflict": "{profile} 與應用程式 {application} 的 profiles[{first}] 衝突；以第一個啟用的設定檔為準"
+  },
+  "version": "version 必須等於 {version}",
+  "warnings": {
+    "turboFrameGenOverlap": "{targets} 同時開啟了 Turbo 與 Frame Generation。Frame Generation 會接管影格節奏；在執行 Frame Generation 的工作階段中，Turbo 會保持關閉。",
+    "moreApplications_other": "另外 {count} 個",
+    "applicationsWithoutProfile": "沒有自訂設定檔的應用程式"
+  },
+  "store": {
+    "loadBlocked": "無法載入設定，因此已關閉儲存功能，以保留磁碟上的檔案：{error}。請修正檔案後重新開啟 VectorXR、匯入設定，或重設為預設值。",
+    "loadConfigFailed": "無法載入設定",
+    "loadSeenAppsFailed": "無法載入已偵測的應用程式",
+    "loadRuntimePacingFailed": "無法載入執行階段節奏狀態",
+    "loadTurboMetricsFailed": "無法載入 Turbo 效能指標",
+    "turboMetricsCleared": "已清除 Turbo 效能指標",
+    "clearTurboMetricsFailed": "無法清除 Turbo 效能指標",
+    "pacingVerdictCleared": "已清除 {runtime} 的節奏判定；「自動」會在下一個工作階段重新探索",
+    "clearPacingVerdictFailed": "無法清除節奏判定",
+    "configSaved": "已儲存設定",
+    "saveConfigFailed": "無法儲存設定",
+    "reloadedFromDisk": "已載入磁碟上變更的設定",
+    "configReset": "已將設定重設為預設值",
+    "resetConfigFailed": "無法重設設定",
+    "changesDiscarded": "已捨棄未儲存的變更",
+    "configImported": "已匯入設定，請儲存以寫入磁碟",
+    "applicationAdded": "已將 {exe} 新增至應用程式登錄",
+    "seenAppsCleared": "已清除已偵測的應用程式",
+    "clearSeenAppsFailed": "無法清除已偵測的應用程式"
+  }
+}

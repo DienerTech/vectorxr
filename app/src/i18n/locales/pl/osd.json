@@ -1,0 +1,239 @@
+{
+  "title": "Wyświetlacz ekranowy",
+  "liveAfterSave": "Na żywo po zapisaniu",
+  "intro": "Panel wydajności w VR podążający za głową. Direct3D 11, Direct3D 12 i Vulkan, w trybie stereo lub Quadviews.",
+  "toggleOn": "OSD wł.",
+  "toggleOff": "OSD wył.",
+  "runtimeStatusUnavailable": "Stan działania jest tymczasowo niedostępny.",
+  "controls": {
+    "heading": "Sterowanie w goglach",
+    "noSession": "Nie działa żadna aplikacja VR",
+    "needsUpdatedLayer": "Wymaga zaktualizowanej warstwy VectorXR",
+    "toggleHeading": "Pokaż / ukryj",
+    "cycleHeading": "Kompaktowy / rozszerzony",
+    "toggleBindingLabel": "Pokaż / ukryj wyświetlacz",
+    "cycleBindingLabel": "Przełącz kompaktowy / rozszerzony",
+    "bindingDescription": "Działa w aplikacji VR. Przypisz kombinację klawiszy, przycisk joysticka lub kierunek HAT. Zapisz, aby zastosować na żywo."
+  },
+  "explainer": {
+    "summary": "Co działa na żywo i co mierzę?",
+    "live": "Każde ustawienie na tej stronie działa po zapisaniu, w tym włączenie OSD w uruchomionej grze. Przypisania zmieniają widoczność i układ natychmiast w bieżącej sesji. Następna sesja używa zapisanego układu początkowego i widoczności.",
+    "measuring": "Nakładka mierzy odstępy między wywołaniami xrEndFrame aplikacji w ciągu ostatnich 120 klatek. P95 to odstęp na 95. percentylu; niższe i bardziej stabilne czasy klatek są lepsze. Te wartości nie mierzą pracy GPU, reprojekcji ani liczby klatek kompozytora. Turbo może sprawić, że tempo aplikacji różni się od częstotliwości odświeżania gogli. Przy włączonym Frame Generation oznaczenie FG WŁ. obok FPS pokazuje liczbę klatek na sekundę otrzymywanych przez gogle, łącznie z generowanymi.",
+    "headroom": "Zapas wydajności porównuje czas CPU gry na klatkę (od powrotu z xrWaitFrame do jej xrEndFrame) z budżetem klatki: okresem odświeżania gogli lub — gdy Frame Generation generuje klatki — własnym celem gry (45 fps przy 90 Hz i 2x). Zapas GPU to 100% minus wykorzystanie 3D całego GPU według liczników GPU systemu Windows, łącznie z kompozytorem środowiska uruchomieniowego i innymi aplikacjami; „gra” to udział samej gry, a „wątek” to zajętość wątku gry kończącego klatki. Czas CPU jest ukryty, gdy gra czeka na następną klatkę przed zakończeniem poprzedniej (tak robi OpenComposite) lub gdy tempo nadaje jej Turbo. VRAM to użycie pamięci wideo przez grę i budżet przydzielony jej przez system Windows, wraz z obrazami samego Frame Generation. LIMIT: CPU lub LIMIT: GPU pojawia się tylko wtedy, gdy jest to jednoznaczne; przy Frame Generation — po której stronie spóźniły się jego spóźnione klatki.",
+    "turbo": "Turbo można włączyć po zapisaniu w uruchomionej grze, a przypisanie w grze je wyłącza/włącza; włączanie na żywo i przełączanie Async zaobserwowano w DCS. Eksperymentalne ustawienia taktowania oraz zmiany włączenia/wyłączenia Quadviews nadal wymagają ponownego uruchomienia aplikacji; rozszerzony OSD pokazuje te oczekujące zmiany. Włączenie Frame Generation również wymaga ponownego uruchomienia; wyłączenie działa od razu. Pozostałe ustawienia VectorXR zachowują działanie opisane na ich własnych stronach ustawień.",
+    "panel": "To panel informacyjny ze sterowaniem widocznością i układem w grze. Ustawienia edytuje się w aplikacji na komputerze. OpenGL nie jest obsługiwany. Środowisko uruchomieniowe bez wolnych warstw kompozycji nie może wyświetlić panelu."
+  },
+  "layout": {
+    "compact": "Kompaktowy",
+    "expanded": "Rozszerzony",
+    "editAria": "Układ do podglądu i edycji",
+    "previewAria": "Układ do podglądu",
+    "starting": "Układ początkowy",
+    "startingHint": "OSD otwiera się w tym układzie w każdej sesji. Przypisanie w goglach przełącza układy w trakcie gry.",
+    "startInCompact": "Zacznij w kompaktowym",
+    "startInExpanded": "Zacznij w rozszerzonym"
+  },
+  "previewScale": {
+    "aria": "Skala podglądu",
+    "legible": "Czytelny",
+    "placement": "Położenie"
+  },
+  "popOut": "Odłącz",
+  "focusWindow": "Przejdź do okna",
+  "previewOpenElsewhere": "Podgląd jest otwarty w osobnym oknie.",
+  "contents": {
+    "compactHeading": "Zawartość kompaktowa",
+    "expandedHeading": "Zawartość rozszerzona",
+    "justFps": "Tylko FPS",
+    "justFpsHint": "Usuwa nagłówek i wiersze stanu, aby uzyskać bardzo mały wyświetlacz. Rozmiar nadal steruje wielkością tekstu.",
+    "alwaysShown": "FPS, średnia i P95 są zawsze wyświetlane",
+    "performance": "Wydajność",
+    "metrics": {
+      "all": "FPS + średni czas klatki",
+      "fps": "Tylko FPS",
+      "frameTime": "Tylko średni czas klatki",
+      "none": "Ukryte"
+    },
+    "headerLegend": "Nagłówek · wyłącz wszystko, aby go usunąć",
+    "statusLegend": "Stan",
+    "nothingSelected": "Nic nie wybrano. Widok kompaktowy pozostaje ukryty, dopóki nie wybierzesz wartości.",
+    "rowsLegend": "Wiersze · przeciągnij lub użyj strzałek, aby zmienić kolejność",
+    "dragRow": "Przeciągnij {row}, aby zmienić kolejność",
+    "dragHint": "Przeciągnij, aby zmienić kolejność; użyj klawiszy strzałek, aby przenieść",
+    "moveUp": "Przenieś {row} w górę",
+    "moveDown": "Przenieś {row} w dół",
+    "framegenFps": "Frame Generation obok FPS",
+    "bothLayouts": "(oba układy)",
+    "framegenFpsHint": "W grach z włączonym Frame Generation: FG WŁ. z liczbą klatek na sekundę wyświetlanych w goglach albo GOTOWY, CZEKA, PAUZA, WYŁ. lub N/D.",
+    "clockFormat": "Format zegara (oba układy)",
+    "clockFormatAria": "Format zegara",
+    "clock12": "12-godzinny · 8:42 PM",
+    "clock24": "24-godzinny · 20:42"
+  },
+  "header": {
+    "brand": "Nazwa VectorXR",
+    "app": "Nazwa aplikacji",
+    "runtime": "Środowisko uruchomieniowe OpenXR",
+    "clock": "Zegar lokalny"
+  },
+  "rows": {
+    "graph": {
+      "label": "Wykres czasu klatek",
+      "hint": "Bieżąca historia ostatnich 120 klatek aplikacji."
+    },
+    "performance": {
+      "label": "Zapas wydajności",
+      "hint": "Zapas CPU i GPU względem budżetu klatki, pamięć wideo z udziałem Frame Generation oraz LIMIT: CPU lub LIMIT: GPU, gdy jest to jednoznaczne. Próbkowane dwa razy na sekundę, tylko gdy układ to wyświetla."
+    },
+    "turbo": {
+      "label": "Stan Turbo",
+      "hint": "Rozróżnia stan wyłączony, włączony, ale nieaktywny, aktywną strategię, stany bezpieczeństwa oraz wstrzymanie dla Frame Generation."
+    },
+    "framegen": {
+      "label": "Stan Frame Generation",
+      "hint": "Wł., Gotowość, Wstrzymane lub Wył., z trybem i liczbą klatek, oraz drugi wiersz z liczbami klatek lub przyczyną. Wyświetlane tylko w grach, w których Frame Generation jest włączone."
+    },
+    "pivot": {
+      "label": "Stan Pivot",
+      "hint": "Stan ruchu, Position Assist i przesunięcia. Aplikacje z Widokami skokowymi dodają drugi wiersz dla widoku skokowego, nakładania i przejść."
+    },
+    "modules": {
+      "label": "Aktywne ulepszenia",
+      "hint": "Głębia, Pivot, Turbo, Quadviews i Frame Generation włączone dla tej aplikacji."
+    }
+  },
+  "compactRows": {
+    "performanceHint": "Zapas CPU i GPU oraz pamięć wideo w jednym wierszu; strona ograniczająca jest oznaczona.",
+    "turboHint": "Bieżąca strategia, wyłączone, oczekiwanie, stan bezpieczeństwa lub wstrzymanie dla Frame Generation.",
+    "framegenHint": "Liczba klatek oraz klatki gry i gogli albo Gotowość, Wstrzymane lub Wył.",
+    "pivotHint": "Stan ruchu w krótkiej etykiecie oraz wiersz Widoku skokowego, gdy skonfigurowano Widoki skokowe."
+  },
+  "position": {
+    "heading": "Położenie i rozmiar",
+    "center": "Wyśrodkuj w widoku",
+    "horizontal": "W poziomie",
+    "horizontalAria": "Położenie w poziomie",
+    "vertical": "W pionie",
+    "verticalAria": "Położenie w pionie",
+    "size": "Rozmiar",
+    "sizeAria": "Rozmiar wyświetlacza",
+    "distance": "Odległość widzenia",
+    "distanceAria": "Odległość widzenia"
+  },
+  "appearance": {
+    "heading": "Wygląd",
+    "opacity": "Nieprzezroczystość",
+    "opacityAria": "Nieprzezroczystość wyświetlacza",
+    "refreshRate": "Częstotliwość odświeżania",
+    "refreshRateHint": "Historia klatek próbkuje każdą klatkę. Wyższe częstotliwości częściej odrysowują panel.",
+    "rateRecommended": "{hz} Hz · Zalecane",
+    "accentAria": "Kolor akcentu",
+    "colors": {
+      "teal": "Morski",
+      "copper": "Miedziany",
+      "blue": "Niebieski",
+      "violet": "Fioletowy",
+      "rose": "Różany"
+    },
+    "visibleOnStart": "Pokazuj automatycznie po włączeniu lub rozpoczęciu sesji"
+  },
+  "language": {
+    "title": "Język OSD",
+    "description": "Język, w którym rysowany jest wyświetlacz w goglach. Opcja Jak w aplikacji używa języka wybranego w Ustawieniach.",
+    "sameAsApp": "Jak w aplikacji",
+    "sameAsAppResolved": "Jak w aplikacji · {language}",
+    "restartNote": "Warstwy VectorXR w wersji 0.19 i starszej ignorują to ustawienie i rysują po angielsku."
+  },
+  "colorPicker": {
+    "wheelAria": "Koło odcienia i nasycenia akcentu niestandardowego",
+    "brightness": "Jasność",
+    "brightnessAria": "Jasność akcentu niestandardowego",
+    "customAccent": "Akcent niestandardowy",
+    "colorAria": "Kolor akcentu niestandardowego",
+    "hex": "Kolor szesnastkowy"
+  },
+  "presets": {
+    "aria": "Ustawienia wstępne wyświetlacza",
+    "heading": "Ustawienia wstępne",
+    "hint": "Ustawienia wstępne stosują razem położenie, wygląd i zawartość.",
+    "expanded": "Rozszerzony",
+    "performance": "Wydajność",
+    "minimal": "Minimalny",
+    "savedAria": "Zapisane ustawienia wstępne użytkownika",
+    "savedPlaceholder": "Zapisane ustawienia…",
+    "noneSaved": "Brak zapisanych ustawień",
+    "reload": "Wczytaj ponownie",
+    "reloadHint": "Wczytaj ponownie wybrane ustawienie wstępne do kontrolek",
+    "delete": "Usuń wybrane ustawienie wstępne",
+    "nameAria": "Nazwa ustawienia wstępnego",
+    "namePlaceholder": "Zapisz bieżące jako…",
+    "update": "Zaktualizuj zapisane ustawienie",
+    "saveNew": "Zapisz nowe ustawienie",
+    "limit": "Możesz zapisać maksymalnie 50 ustawień wstępnych.",
+    "added": "Dodano {name}. Kliknij Zapisz zmiany, aby je zachować.",
+    "updated": "Zaktualizowano {name}. Kliknij Zapisz zmiany, aby je zachować.",
+    "loaded": "Wczytano {name}. Kliknij Zapisz zmiany, aby zastosować w VR.",
+    "removed": "Usunięto {name}. Kliknij Zapisz zmiany, aby zachować tę zmianę.",
+    "appliedExpanded": "Zastosowano Rozszerzony. Kliknij Zapisz zmiany, aby zastosować w VR.",
+    "appliedPerformance": "Zastosowano Wydajność. Kliknij Zapisz zmiany, aby zastosować w VR.",
+    "appliedMinimal": "Zastosowano Minimalny. Kliknij Zapisz zmiany, aby zastosować w VR."
+  },
+  "previewStage": {
+    "legibleNote": "PODGLĄD ZAWARTOŚCI · Przykładowe wartości · Użyj widoku Położenie, aby ocenić pozycję i rozmiar",
+    "placementNote": "PODGLĄD POŁOŻENIA · Widok odniesienia 100° × 80°",
+    "legibleAria": "Czytelny podgląd zawartości OSD, powiększony i wyśrodkowany",
+    "placementAria": "Szacowany rozmiar OSD w widoku odniesienia 100 na 80 stopni",
+    "emptyCompact": "Wybierz wartość kompaktową, aby pokazać wyświetlacz.",
+    "footer": "Szerokość panelu {width}° · Przeciągnij, aby ustawić położenie · Pole widzenia gogli jest różne"
+  },
+  "previewWindow": {
+    "title": "Podgląd OSD",
+    "windowTitle": "VectorXR — Podgląd OSD",
+    "connecting": "Łączenie ze sterowaniem OSD…",
+    "openFailed": "Nie można otworzyć okna podglądu. Spróbuj ponownie.",
+    "popupBlocked": "Zezwól na wyskakujące okienka, aby otworzyć okno podglądu."
+  },
+  "preview": {
+    "appName": "twoja-gra.exe",
+    "runtimeName": "Twoje środowisko uruchomieniowe OpenXR",
+    "clock12": "8:42 PM",
+    "clock24": "20:42",
+    "fgOn": "FG WŁ.",
+    "averageCompact": "{value} ms śr.",
+    "appFps": "FPS APLIKACJI",
+    "appFrameAverage": "KLATKA APL. / ŚR.",
+    "appFrameP95": "KLATKA APL. / P95",
+    "frameTimeGraph": "CZAS KLATKI / OSTATNIE 120",
+    "labels": {
+      "performance": "WYDAJNOŚĆ",
+      "performanceCompact": "WYDAJN.",
+      "turbo": "TURBO",
+      "framegen": "FRAME GEN",
+      "pivot": "PIVOT",
+      "modules": "ULEPSZENIA"
+    },
+    "turboPausedForFramegen": "Wstrzymane dla Frame Generation",
+    "turboAsyncExperimental": "Async / Eksperymentalne",
+    "turboAsyncCompact": "Async / EKSP.",
+    "framegenState": "Wł.  /  Interpolate  /  Dynamiczny",
+    "framegenDetail": "45 → 90 fps  /  GPU 3.1 ms",
+    "framegenCompact": "Dynamiczny / 45 → 90 fps",
+    "pivotState": "Ruch: Aktywne / Ciągły + Pozycja / Lot",
+    "pivotCompact": "Ruch: Ciągł. Aktywne + Pozycja",
+    "snapState": "Widok: aktywny / Nałożone / Sprawdź ogon",
+    "snapCompact": "Widok: aktywny / Nałożone",
+    "modulesWithFramegen": "Głębia / Pivot / Turbo / Frame Gen / Quadviews",
+    "modules": "Głębia / Pivot / Turbo / Quadviews",
+    "performanceTarget": "cel {fps} fps",
+    "cpuDetail": "{ms} ms, wątek {thread}%",
+    "gpuDetail": "użycie {busy}%, gra {game}%",
+    "vramDetail": "z {budget} GB",
+    "vramDetailWithFramegen": "z {budget} GB, FG {framegen} MB",
+    "diagnostics": {
+      "debugLog": "DZIENNIK DEBUG",
+      "flowView": "WIDOK PRZEPŁYWU",
+      "confidenceView": "WIDOK PEWNOŚCI",
+      "tintView": "WIDOK ZABARWIENIA"
+    }
+  }
+}

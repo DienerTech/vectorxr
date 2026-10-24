@@ -1,0 +1,218 @@
+{
+  "title": "Depth",
+  "experimental": "Experimental",
+  "intro": "Shape binocular scale and depth placement as one system, then use per-application profiles where a title needs its own tuning. Start at neutral, change one control at a time, and use the runtime binding for immediate A/B comparisons.",
+  "tuningGuide": {
+    "title": "Tuning guide",
+    "summary": "Set scale, place depth, then compare",
+    "ariaLabel": "Depth tuning guide",
+    "scale": {
+      "step": "Step 1: Set scale",
+      "name": "Stereo Depth",
+      "body": "Left increases apparent world scale and can restore life-sized proportions when a cockpit feels miniaturized. Right strengthens stereo shape and presence when a title looks too flat or oversized. Nearby geometry changes most."
+    },
+    "place": {
+      "step": "Step 2: Place depth",
+      "name": "Convergence Plane",
+      "body": "Leave this at zero while judging scale, then place the working plane with small steps. Left gives a crowded cockpit more breathing room; right brings a distant panel, sight, or interaction area nearer."
+    },
+    "compare": {
+      "step": "Step 3: Compare",
+      "name": "Tune as a pair",
+      "body": "Treat each game profile as its own visual calibration—different camera geometry may call for entirely different pairings, not mild variations. A/B against native geometry and stop at the first sign of eye strain or difficult fusion."
+    }
+  },
+  "ipdNote": {
+    "lead": "In-game IPD settings can override Stereo Depth.",
+    "body": "{lead} Disable any Force IPD, virtual IPD, stereo-separation, or world-scale override first. In DCS, uncheck {setting} under Options > VR.",
+    "forceIpdDistance": "Force IPD Distance"
+  },
+  "bindingsCard": {
+    "eyebrow": "Tune & Compare",
+    "heading": "In-game Bindings",
+    "description": "Configure the complete Depth and Depth Lock A/B toggles in one place.",
+    "assigned_one": "{count} of {total} assigned",
+    "assigned_other": "{count} of {total} assigned",
+    "duplicateInputs_one": "{count} duplicate input",
+    "duplicateInputs_other": "{count} duplicate inputs"
+  },
+  "defaultProfile": {
+    "heading": "Default Profile",
+    "appliesTo": "Applies to applications without an enabled custom profile",
+    "toggleOn": "Default Profile On",
+    "toggleOff": "Default Profile Off",
+    "offNote": "Off unless an enabled custom profile turns it on. Custom profiles below still apply to their applications."
+  },
+  "customProfiles": {
+    "heading": "Custom Profiles",
+    "description": "Override Depth per application. The first enabled matching profile wins.",
+    "add": "Add Profile",
+    "empty": "No custom profiles yet. Add a profile to override depth values for a specific application.",
+    "duplicateApplication": "{application} is already targeted by Profile {profile}. The first active profile wins."
+  },
+  "troubleshooting": {
+    "title": "Depth Troubleshooting",
+    "heading": "When Depth Behaves Unexpectedly",
+    "override": "Games with a Force IPD, virtual IPD, stereo-separation, or world-scale setting may replace the eye separation reported by OpenXR. That override takes precedence over VectorXR Stereo Depth.",
+    "dcs": {
+      "label": "DCS:",
+      "body": "{label} uncheck {setting} under Options > VR, then fully restart DCS. A forced value fixes DCS's own virtual camera separation and can make Stereo Depth appear to do nothing."
+    },
+    "expected": {
+      "label": "Expected result:",
+      "body": "{label} Stereo Depth changes binocular scale most noticeably on nearby geometry, so a cockpit can look larger or smaller while the distant terrain and horizon appear nearly unchanged. That distance-dependent response is normal."
+    },
+    "convergence": {
+      "label": "Convergence is subtler:",
+      "body": "{label} it shifts the zero-parallax plane rather than scaling the scene. Compare a nearby cockpit edge against distant scenery while moving it in small steps. If Stereo Depth still has no effect after disabling game-level overrides, enable debug logging and export the session logs."
+    },
+    "depthLock": {
+      "label": "Depth Lock preserves the tuned image at submission:",
+      "body": "{label} the game renders with altered stereo geometry, then the runtime receives headset-native eye poses and FOV so it cannot normalize the pairing away. Compare it on and off at identical values, and reduce intensity or disable it if comfort becomes worse."
+    }
+  },
+  "bindingsPage": {
+    "breadcrumb": "Breadcrumb",
+    "current": "In-game bindings",
+    "title": "Depth — In-game Bindings",
+    "escHint": "Press Esc or Done to return to Depth.",
+    "closeLabel": "Close bindings and return to Depth",
+    "compareGently": {
+      "heading": "Compare gently",
+      "body": "Rapid A/B changes can briefly challenge visual fusion even when both settings are comfortable on their own. Pause between comparisons and reduce the stronger setting if the image feels difficult to settle."
+    },
+    "depthToggle": {
+      "label": "Depth A/B Toggle",
+      "description": "Turn the complete Depth enhancement on or off while in-game, preserving your tuned values for a direct comparison. Add a binding for each device you fly with; any one of them acts.",
+      "noneText": "No binding assigned. Depth follows the active profile without an in-game A/B toggle."
+    },
+    "lockToggle": {
+      "label": "Depth Lock A/B Toggle",
+      "description": "Flip only Depth Lock while Stereo Depth and Convergence remain active. This makes it easier to hear and feel what submission locking contributes to the tuned pairing. Add a binding for each device you fly with; any one of them acts.",
+      "noneText": "No binding assigned. Depth Lock follows the active profile."
+    }
+  },
+  "depthLock": {
+    "name": "Depth Lock",
+    "description": "Lock the tuned stereo geometry into the rendered image, then restore headset-native eye poses and FOV for submission so the runtime cannot normalize the effect away. Test it per game and reduce intensity if discomfort or nausea appears."
+  },
+  "stereoDepth": {
+    "title": "Stereo Depth / World Scale",
+    "subtitle": "Changes virtual eye separation while keeping your physical headset IPD untouched. Move right for stronger near-field stereo and a smaller-feeling world; move left for a larger-feeling, flatter world. Start around ±5–15%.",
+    "left": "- Larger world",
+    "center": "0 Native scale",
+    "right": "+ 3D stereo effect",
+    "extendedRange": "Extended range (±100%)",
+    "extendedRangeHint": "Use only when normal ±25% tuning is not enough.",
+    "badgeNative": "Native IPD",
+    "badge": "Stereo {value}%"
+  },
+  "convergence": {
+    "title": "Convergence / Depth Plane",
+    "subtitle": "Places the zero-parallax plane without changing relative depth. Keep 0 while tuning Stereo Depth, then use small steps: negative moves the plane farther; positive moves it nearer.",
+    "left": "- Farther plane",
+    "center": "0 App default",
+    "right": "+ Nearer plane",
+    "extendedRange": "Extended range (±25)",
+    "extendedRangeHint": "Use only when normal ±5 tuning is not enough.",
+    "badgeDefault": "Plane: app default",
+    "badgeNearer": "Plane: nearer +{value}",
+    "badgeFarther": "Plane: farther {value}"
+  },
+  "pairingMap": {
+    "heading": "Depth pairing map",
+    "hint": "Drag the puck to explore both controls together. Use the sliders for fine tuning.",
+    "regionLabel": "Combined Depth effect",
+    "values": "Depth {depth} · Conv {convergence}",
+    "lockOn": "Depth Lock on",
+    "lockOff": "Depth Lock off",
+    "convergenceNearer": "Convergence: Nearer (+{limit})",
+    "convergenceFarther": "Convergence: Farther (−{limit})",
+    "depthLarger": "Depth: Larger Scale (−{limit}%)",
+    "depthStronger": "Depth: Stronger Stereo (+{limit}%)",
+    "mapLabel": "Depth pairing map. Drag to set Stereo Depth horizontally and Convergence vertically. Arrow keys make fine adjustments; hold Shift for larger steps.",
+    "quadrants": {
+      "largerNear": {
+        "label": "Larger Scale · Near",
+        "axes": "Depth − · Convergence +"
+      },
+      "strongerNear": {
+        "label": "Stronger Stereo · Near",
+        "axes": "Depth + · Convergence +"
+      },
+      "largerFar": {
+        "label": "Larger Scale · Far",
+        "axes": "Depth − · Convergence −"
+      },
+      "strongerFar": {
+        "label": "Stronger Stereo · Far",
+        "axes": "Depth + · Convergence −"
+      }
+    }
+  },
+  "netEffect": {
+    "heading": "Net effect",
+    "goodFitLabel": "Good fit:",
+    "goodFit": "{label} {text}",
+    "watchForLabel": "Watch for:",
+    "watchFor": "{label} {text}",
+    "lockOff": "Depth Lock is off, so the runtime may reinterpret and partially normalize this combination at submission.",
+    "lockOn": "Depth Lock preserves the rendered pairing when native geometry is restored for submission.",
+    "cases": {
+      "native": {
+        "title": "Native stereo geometry",
+        "description": "Neither control is shifting the application's stereo scale or depth plane.",
+        "useCase": "Use this to learn a title's authored scale and as the A/B reference for every profile.",
+        "caution": "If the native proportions already feel convincing, no correction is necessary."
+      },
+      "compactNear": {
+        "title": "Compact scale with immediate presence",
+        "description": "Stronger stereo separation makes the world feel smaller and more dimensional, while a nearer plane brings the working area toward you.",
+        "useCase": "Useful when a cockpit feels oversized or distant and you want panels, controls, and close geometry to feel immediate.",
+        "caution": "Both controls increase near-field demand, so approach this quadrant in small steps."
+      },
+      "detailedFar": {
+        "title": "Detailed stereo with comfortable placement",
+        "description": "Stronger stereo separation adds shape and presence while a farther plane gives that more compact image breathing room.",
+        "useCase": "Useful when native proportions feel too large, but positive Stereo Depth by itself makes the cockpit feel crowded.",
+        "caution": "Tune Stereo Depth first, then move the plane only far enough to make the stronger image settle naturally."
+      },
+      "largerNear": {
+        "title": "Larger scale with a near working plane",
+        "description": "Reduced stereo separation expands apparent world scale, while a nearer plane keeps the panel and controls visually accessible.",
+        "useCase": "Useful when a cockpit feels toy-like but its gauges or interaction area should still feel close and readable.",
+        "caution": "A strongly positive Convergence value can become tiring even when Stereo Depth is reduced."
+      },
+      "lifeSizedFar": {
+        "title": "Life-sized scale with relaxed placement",
+        "description": "Reduced stereo separation increases apparent size, while a farther plane lets the cockpit surround you instead of crowding your face.",
+        "useCase": "Useful in aircraft and vehicle sims whose native camera feels miniaturized or too close; it can better match remembered real-world proportions.",
+        "caution": "The softer stereo is intentional—stop when scale feels natural rather than chasing the strongest possible 3D effect."
+      },
+      "strongerStereo": {
+        "title": "Stronger relative stereo depth",
+        "description": "Nearby geometry gains separation and shape, increasing presence while making the world feel somewhat smaller.",
+        "useCase": "Useful when a title looks flat or oversized but its existing depth-plane placement already feels comfortable.",
+        "caution": "If the scene starts to crowd you, pair it with a small negative Convergence adjustment."
+      },
+      "largerScale": {
+        "title": "Larger, gentler world scale",
+        "description": "Reduced stereo separation softens near-field intensity and increases apparent world size.",
+        "useCase": "Useful when native geometry feels miniaturized, cramped, or more stereoscopically intense than the real vehicle.",
+        "caution": "Reduce only far enough to restore believable proportions and retain useful shape cues."
+      },
+      "planeNearer": {
+        "title": "Working plane moved nearer",
+        "description": "The scene's disparity field moves toward you without changing its relative depth gradient or overall scale.",
+        "useCase": "Useful when scale looks correct but the panel, sight, or interaction area feels visually too far away.",
+        "caution": "Positive values can feel cross-eyed, especially when paired with positive Stereo Depth."
+      },
+      "planeFarther": {
+        "title": "Working plane moved farther",
+        "description": "The scene's disparity field moves away without changing its relative depth gradient or overall scale.",
+        "useCase": "Useful when scale looks correct but the cockpit or near geometry feels pressed too close to your face.",
+        "caution": "Move only far enough to relax placement while keeping the scene easy to fuse."
+      }
+    }
+  }
+}

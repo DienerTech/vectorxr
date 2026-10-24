@@ -11552,24 +11552,28 @@ std::vector<std::string> OpenXrLayer::UnloggedConfigWarningsLocked() {
 
 OsdSnapshot OpenXrLayer::BuildOsdSnapshot() const {
     OsdSnapshot snapshot;
+    // The OSD's language (osd_strings.h); Frame Generation's own row text
+    // (OsdDescription) is still English.
+    const OsdLanguage language=ResolveOsdLanguage(resolved_settings_.core.osd);
+    const auto text=[language](OsdText id) { return std::string(OsdString(language,id)); };
     snapshot.application=current_exe_name_; snapshot.runtime=runtime_name_;
     const bool turbo_enabled=resolved_settings_.turbo.enabled && resolved_settings_.core.enabled;
-    snapshot.turbo=turbo_yielded_to_framegen_?"Paused for Frame Generation":
-        !turbo_enabled?"Disabled":!turbo_toggle_enabled_?"Enabled / Off":
-        turbo_recovery_blocked_.load()?"Recovery blocked":turbo_auto_suspended_.load()?"Suspended":
-        turbo_effective_active_.load()?(turbo_effective_async_.load()?"Async":"Sequenced"):
-        "Enabled / Waiting";
-    if(turbo_metrics_active_.load())snapshot.turbo+=" / Analyzing";
+    snapshot.turbo=text(turbo_yielded_to_framegen_?OsdText::TurboPausedForFrameGen:
+        !turbo_enabled?OsdText::Disabled:!turbo_toggle_enabled_?OsdText::TurboEnabledOff:
+        turbo_recovery_blocked_.load()?OsdText::TurboRecoveryBlocked:turbo_auto_suspended_.load()?OsdText::Suspended:
+        turbo_effective_active_.load()?(turbo_effective_async_.load()?OsdText::TurboAsync:OsdText::TurboSequenced):
+        OsdText::TurboEnabledWaiting);
+    if(turbo_metrics_active_.load())snapshot.turbo+=text(OsdText::TurboAnalyzingSuffix);
     snapshot.experimental=turbo_experiment_.enabled;
-    auto add=[&](const char* name) { if (!snapshot.modules.empty()) snapshot.modules+="  /  "; snapshot.modules+=name; };
-    if (resolved_settings_.core.enabled && resolved_settings_.depthxr.enabled && depthxr_toggle_enabled_) add("Depth");
-    if (resolved_settings_.core.enabled && resolved_settings_.pivotxr.enabled) add("Pivot");
-    if (turbo_enabled) add("Turbo");
-    if (framegen_owns_pacing_.load(std::memory_order_acquire)) add("Frame Gen");
+    auto add=[&](OsdText name) { if (!snapshot.modules.empty()) snapshot.modules+="  /  "; snapshot.modules+=text(name); };
+    if (resolved_settings_.core.enabled && resolved_settings_.depthxr.enabled && depthxr_toggle_enabled_) add(OsdText::ModuleDepth);
+    if (resolved_settings_.core.enabled && resolved_settings_.pivotxr.enabled) add(OsdText::ModulePivot);
+    if (turbo_enabled) add(OsdText::ModuleTurbo);
+    if (framegen_owns_pacing_.load(std::memory_order_acquire)) add(OsdText::ModuleFrameGen);
     // A session that began in stereo renders no quad views, though the module is on.
     if (quadviews_session_active_.value_or(false) &&
         (!has_active_primary_view_configuration_ ||
-         IsQuadViewConfiguration(active_primary_view_configuration_type_))) add("Quadviews");
+         IsQuadViewConfiguration(active_primary_view_configuration_type_))) add(OsdText::ModuleQuadviews);
     const FrameGenOsdText framegen=framegen_.OsdDescription();
     snapshot.framegen=framegen.row;
     snapshot.compact_framegen=framegen.compact;
@@ -11579,8 +11583,8 @@ OsdSnapshot OpenXrLayer::BuildOsdSnapshot() const {
     }
     snapshot.framegen_badge=framegen.badge;
     snapshot.framegen_fps=framegen.shown_fps;
-    if (snapshot.modules.empty()) snapshot.modules="Off";
-    snapshot.pivot="Motion: Disabled";
+    if (snapshot.modules.empty()) snapshot.modules=text(OsdText::Off);
+    snapshot.pivot=OsdFormat(language,OsdText::Motion,text(OsdText::Disabled));
     snapshot.compact_pivot=snapshot.pivot;
     if (resolved_settings_.core.enabled && resolved_settings_.pivotxr.enabled) {
         const auto& profiles=resolved_settings_.pivotxr.profiles;
@@ -11595,8 +11599,8 @@ OsdSnapshot OpenXrLayer::BuildOsdSnapshot() const {
             !PivotViewOffsetNearlyZero(pivotxr_profile_view_transition_.current);
         const bool position=motion_applied && !PivotViewOffsetNearlyZero(pivotxr_position_offset_);
         const bool continuous=motion.response_mode==PivotResponseMode::Continuous;
-        const std::string state=motion_applied ? (pivotxr_engaged_ ? "Active" : "Releasing") :
-            (snap_effect && !pivotxr_snap_stacked_ && pivotxr_quick_view_return_engaged_) ? "Suspended" : "Off";
+        const std::string state=text(motion_applied ? (pivotxr_engaged_ ? OsdText::Active : OsdText::MotionReleasing) :
+            (snap_effect && !pivotxr_snap_stacked_ && pivotxr_quick_view_return_engaged_) ? OsdText::Suspended : OsdText::Off);
         // The snap line is only reserved for apps with Snap Views (or while
         // a snap is still on screen); otherwise nudges join the motion line.
         const bool snaps_configured=std::any_of(profiles.begin(),profiles.end(),
@@ -11605,24 +11609,25 @@ OsdSnapshot OpenXrLayer::BuildOsdSnapshot() const {
             });
         const bool snap_line=snaps_configured || snap_effect;
         std::string modifiers;
-        if (position) modifiers+=" + Position";
-        if (nudged && !snap_line) modifiers+=" + Nudge";
-        snapshot.pivot="Motion: "+state;
-        snapshot.compact_pivot="Motion: "+std::string(motion_applied ? (continuous ? "Cont " : "Step ") : "")+state+modifiers;
-        if (motion_applied) snapshot.pivot+=std::string(" / ")+(continuous ? "Continuous" : "Stepped")+modifiers+" / "+motion.name;
+        if (position) modifiers+=text(OsdText::PlusPosition);
+        if (nudged && !snap_line) modifiers+=text(OsdText::PlusNudge);
+        snapshot.pivot=OsdFormat(language,OsdText::Motion,state);
+        snapshot.compact_pivot=OsdFormat(language,OsdText::Motion,
+            (motion_applied ? text(continuous ? OsdText::MotionContinuousShort : OsdText::MotionSteppedShort)+" " : std::string())+state)+modifiers;
+        if (motion_applied) snapshot.pivot+=" / "+text(continuous ? OsdText::MotionContinuous : OsdText::MotionStepped)+modifiers+" / "+motion.name;
         else snapshot.pivot+=modifiers;
         if (snap_line && snap_effect && pivotxr_quick_view_profile_index_<profiles.size()) {
             const auto& owner=profiles[pivotxr_quick_view_profile_index_];
             const bool entering=pivotxr_quick_view_transition_.active || pivotxr_quick_view_retarget_pending_;
-            snapshot.pivot_secondary=!pivotxr_quick_view_active_ ? "Snap: Returning" : entering ? "Snap: Entering" : "Snap: Active";
-            if (pivotxr_snap_stacked_ && motion_applied) snapshot.pivot_secondary+=" / Stacked";
-            if (nudged) snapshot.pivot_secondary+=" + Nudge";
+            snapshot.pivot_secondary=text(!pivotxr_quick_view_active_ ? OsdText::SnapReturning : entering ? OsdText::SnapEntering : OsdText::SnapActive);
+            if (pivotxr_snap_stacked_ && motion_applied) snapshot.pivot_secondary+=text(OsdText::StackedSuffix);
+            if (nudged) snapshot.pivot_secondary+=text(OsdText::PlusNudge);
             snapshot.compact_pivot_secondary=snapshot.pivot_secondary;
             if (pivotxr_quick_view_index_<owner.view_controls.quick_views.size())
                 snapshot.pivot_secondary+=" / "+owner.view_controls.quick_views[pivotxr_quick_view_index_].name;
             snapshot.pivot_secondary+=" / "+owner.name;
         } else if (snap_line) {
-            snapshot.pivot_secondary=nudged ? "Snap: Off / Nudge" : "Snap: Off";
+            snapshot.pivot_secondary=text(nudged ? OsdText::SnapOffNudge : OsdText::SnapOff);
             snapshot.compact_pivot_secondary=snapshot.pivot_secondary;
         }
     }
@@ -11630,22 +11635,23 @@ OsdSnapshot OpenXrLayer::BuildOsdSnapshot() const {
     if (e.enabled!=turbo_experiment_.enabled || (e.enabled &&
         (e.wait_for_submit!=turbo_experiment_.wait_for_submit || e.sample_at_entry!=turbo_experiment_.sample_at_entry ||
          e.prediction_percent!=turbo_experiment_.prediction_percent || e.frame_limit!=turbo_experiment_.frame_limit)))
-        snapshot.restart="Turbo experiments";
-    if (deferred_quadviews_config_active_) snapshot.restart+=(snapshot.restart.empty()?"":" + ")+std::string("Quadviews");
+        snapshot.restart=text(OsdText::RestartTurboExperiments);
+    if (deferred_quadviews_config_active_) snapshot.restart+=(snapshot.restart.empty()?"":" + ")+text(OsdText::RestartQuadviews);
     if (active_session_ != XR_NULL_HANDLE && resolved_settings_.core.enabled && resolved_settings_.framegen.enabled &&
         !framegen_session_enabled_)
-        snapshot.restart+=(snapshot.restart.empty()?"":" + ")+std::string("Frame Generation");
+        snapshot.restart+=(snapshot.restart.empty()?"":" + ")+text(OsdText::RestartFrameGeneration);
     snapshot.framegen_session=framegen_session_enabled_;
     if (resolved_settings_.core.osd.show_performance || resolved_settings_.core.osd.compact_show_performance)
-        snapshot.performance=DescribePerformance(performance_.Reading());
+        snapshot.performance=DescribePerformance(performance_.Reading(),language);
     // Diagnostic modes a tester may leave on name themselves after the brand:
     // debug logging (slower, with large traces) and, in a Frame Generation
     // session, a diagnostic view drawn into generated frames.
-    if (resolved_settings_.core.log_level==LogLevel::Debug) snapshot.diagnostics="DEBUG LOG";
+    if (resolved_settings_.core.log_level==LogLevel::Debug) snapshot.diagnostics=text(OsdText::DiagnosticsDebugLog);
     if (framegen_session_enabled_ && resolved_settings_.framegen.diagnostic_view!=FrameGenDiagnosticView::kOff) {
         const FrameGenDiagnosticView view=resolved_settings_.framegen.diagnostic_view;
         snapshot.diagnostics+=std::string(snapshot.diagnostics.empty()?"":" \xC2\xB7 ")+
-            (view==FrameGenDiagnosticView::kFlow?"FLOW VIEW":view==FrameGenDiagnosticView::kConfidence?"CONFIDENCE VIEW":"TINT VIEW");
+            text(view==FrameGenDiagnosticView::kFlow?OsdText::DiagnosticsFlowView:view==FrameGenDiagnosticView::kConfidence?
+                 OsdText::DiagnosticsConfidenceView:OsdText::DiagnosticsTintView);
     }
     // ...and Frame Generation research switches taken from its research
     // file (framegen-research.txt), which outlives the flight it was for.

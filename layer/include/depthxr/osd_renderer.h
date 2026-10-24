@@ -16,6 +16,7 @@
 #include <openxr/openxr.h>
 #include "depthxr/settings.h"
 #include "depthxr/osd_graphics.h"
+#include "depthxr/osd_strings.h"
 #include "depthxr/performance_monitor.h"
 
 struct ID3D11Device;
@@ -147,8 +148,9 @@ OsdCompactLayout CompactOsdLayout(const OsdSettings&, const OsdCompactLayoutOpti
 constexpr int kOsdCompactPerformanceWidth = 760;
 // The expanded PERFORMANCE row's height: its values over their details.
 constexpr int kOsdPerformanceRowHeight = 80;
-// The width the OSD's GDI text takes (Segoe UI at `size` pixels), for tests.
-int OsdTextWidth(int size, const std::string& text, bool bold);
+// The width the OSD's GDI text takes (the language's font, Segoe UI for
+// English, at `size` pixels), for tests.
+int OsdTextWidth(int size, const std::string& text, bool bold, OsdLanguage language = OsdLanguage::En);
 
 // RasterizeOsd's last step: feathers the panel's edges to transparent black and
 // premultiplies GDI's `bits` into `pixels`, both OsdBitmap::width wide and

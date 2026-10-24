@@ -1,0 +1,239 @@
+{
+  "title": "Información en pantalla",
+  "liveAfterSave": "En directo tras guardar",
+  "intro": "Un panel de rendimiento que sigue a la cabeza en RV. Direct3D 11, Direct3D 12 y Vulkan, en estéreo o con Quadviews.",
+  "toggleOn": "OSD activado",
+  "toggleOff": "OSD desactivado",
+  "runtimeStatusUnavailable": "El estado de ejecución no está disponible temporalmente.",
+  "controls": {
+    "heading": "Controles en el visor",
+    "noSession": "No hay ninguna aplicación de RV en ejecución",
+    "needsUpdatedLayer": "Requiere la capa de VectorXR actualizada",
+    "toggleHeading": "Mostrar / ocultar",
+    "cycleHeading": "Compacto / ampliado",
+    "toggleBindingLabel": "Mostrar / ocultar el panel",
+    "cycleBindingLabel": "Cambiar entre compacto / ampliado",
+    "bindingDescription": "Funciona en la aplicación de RV. Asigna una combinación de teclas, un botón del joystick o una dirección del HAT. Guarda para aplicarlo en directo."
+  },
+  "explainer": {
+    "summary": "¿Qué se aplica en directo y qué estoy midiendo?",
+    "live": "Todos los ajustes de esta página se aplican al guardar, incluida la activación del OSD en un juego en ejecución. Las asignaciones cambian la visibilidad y el diseño de inmediato en la sesión actual. La siguiente sesión usa el diseño inicial y la visibilidad que hayas guardado.",
+    "measuring": "La superposición mide los intervalos entre las llamadas a xrEndFrame de la aplicación durante los últimos 120 fotogramas. P95 es el intervalo en el percentil 95; cuanto más bajos y estables sean los tiempos de fotograma, mejor. Estos valores no miden el trabajo de la GPU, la reproyección ni la velocidad de fotogramas del compositor. Turbo puede hacer que la cadencia de la aplicación difiera de la frecuencia de actualización del visor. Con Frame Generation activado, FG ACTIVO junto a los FPS muestra los fotogramas por segundo que recibe el visor, incluidos los generados.",
+    "headroom": "El margen de rendimiento compara el tiempo de CPU por fotograma del juego (desde que vuelve su xrWaitFrame hasta su xrEndFrame) con el presupuesto de fotograma: el periodo de actualización del visor o, cuando Frame Generation está generando, el objetivo propio del juego (45 fps a 90 Hz y 2x). El margen de GPU es el 100% menos el uso 3D de toda la GPU según los contadores de GPU de Windows, incluidos el compositor del entorno de ejecución y otras aplicaciones; «juego» es la parte propia del juego, e «hilo» lo ocupado que está el hilo del juego que finaliza los fotogramas. El tiempo de CPU se oculta mientras el juego espera su siguiente fotograma antes de finalizar el último (como hace OpenComposite) o mientras Turbo marca su ritmo. VRAM es el uso de memoria de vídeo del juego y el presupuesto que le asigna Windows, con las imágenes propias de Frame Generation. LÍMITE: CPU o LÍMITE: GPU solo se muestra cuando está claro; con Frame Generation, indica en qué lado se retrasaron sus fotogramas tardíos.",
+    "turbo": "Turbo se puede activar al guardar en un juego en ejecución, y la asignación en el juego lo desactiva y activa; la activación en directo y los cambios de Async se han comprobado en DCS. Los controles de tiempos experimentales y los cambios de activación/desactivación de Quadviews siguen requiriendo reiniciar la aplicación; el OSD ampliado muestra estos cambios pendientes. Activar Frame Generation también requiere un reinicio; desactivarlo se aplica al instante. Los demás controles de VectorXR mantienen el comportamiento descrito en sus propias páginas de configuración.",
+    "panel": "Es un panel informativo con controles de visibilidad y diseño en el juego. Edita la configuración en la aplicación de escritorio. OpenGL no es compatible. Un entorno de ejecución sin capas de composición libres no puede mostrar el panel."
+  },
+  "layout": {
+    "compact": "Compacto",
+    "expanded": "Ampliado",
+    "editAria": "Diseño para previsualizar y editar",
+    "previewAria": "Diseño para previsualizar",
+    "starting": "Diseño inicial",
+    "startingHint": "El OSD se abre con este diseño en cada sesión. La asignación en el visor cambia de diseño durante el juego.",
+    "startInCompact": "Empezar en compacto",
+    "startInExpanded": "Empezar en ampliado"
+  },
+  "previewScale": {
+    "aria": "Escala de la vista previa",
+    "legible": "Legible",
+    "placement": "Ubicación"
+  },
+  "popOut": "Abrir aparte",
+  "focusWindow": "Enfocar ventana",
+  "previewOpenElsewhere": "La vista previa está abierta en una ventana aparte.",
+  "contents": {
+    "compactHeading": "Contenido compacto",
+    "expandedHeading": "Contenido ampliado",
+    "justFps": "Solo FPS",
+    "justFpsHint": "Quita el encabezado y las filas de estado para un panel diminuto. El tamaño sigue controlando el tamaño del texto.",
+    "alwaysShown": "FPS, media y P95 siempre visibles",
+    "performance": "Rendimiento",
+    "metrics": {
+      "all": "FPS + tiempo medio de fotograma",
+      "fps": "Solo FPS",
+      "frameTime": "Solo tiempo medio de fotograma",
+      "none": "Oculto"
+    },
+    "headerLegend": "Encabezado · desactívalo todo para quitarlo",
+    "statusLegend": "Estado",
+    "nothingSelected": "No hay nada seleccionado. El modo compacto permanece oculto hasta que elijas un valor.",
+    "rowsLegend": "Filas · arrastra o usa las flechas para reordenar",
+    "dragRow": "Arrastra {row} para reordenar",
+    "dragHint": "Arrastra para reordenar; usa las teclas de flecha para mover",
+    "moveUp": "Subir {row}",
+    "moveDown": "Bajar {row}",
+    "framegenFps": "Frame Generation junto a los FPS",
+    "bothLayouts": "(ambos diseños)",
+    "framegenFpsHint": "En juegos con Frame Generation activado: FG ACTIVO con los fotogramas por segundo que muestra el visor, o LISTO, ESPERA, PAUSA, INACTIVO o N/D.",
+    "clockFormat": "Formato del reloj (ambos diseños)",
+    "clockFormatAria": "Formato del reloj",
+    "clock12": "12 horas · 8:42 p. m.",
+    "clock24": "24 horas · 20:42"
+  },
+  "header": {
+    "brand": "Nombre de VectorXR",
+    "app": "Nombre de la aplicación",
+    "runtime": "Entorno de ejecución OpenXR",
+    "clock": "Reloj local"
+  },
+  "rows": {
+    "graph": {
+      "label": "Gráfico de tiempos de fotograma",
+      "hint": "Historial continuo de los últimos 120 fotogramas de la aplicación."
+    },
+    "performance": {
+      "label": "Margen de rendimiento",
+      "hint": "Margen de CPU y GPU respecto al presupuesto de fotograma, memoria de vídeo con la parte de Frame Generation, y LÍMITE: CPU o LÍMITE: GPU cuando está claro. Se muestrea dos veces por segundo, solo mientras un diseño lo muestra."
+    },
+    "turbo": {
+      "label": "Estado de Turbo",
+      "hint": "Distingue entre desactivado, activado pero apagado, estrategia activa, estados de seguridad y en pausa por Frame Generation."
+    },
+    "framegen": {
+      "label": "Estado de Frame Generation",
+      "hint": "Activo, En espera, En pausa o Apagado, con el modo y la velocidad de fotogramas, y una segunda línea con las velocidades de fotogramas o el motivo. Solo se muestra en juegos con Frame Generation activado."
+    },
+    "pivot": {
+      "label": "Estado de Pivot",
+      "hint": "Estado del movimiento, Position Assist y ajustes finos. Las aplicaciones con Vistas fijas añaden una segunda línea para la vista fija, el apilado y las transiciones."
+    },
+    "modules": {
+      "label": "Mejoras activas",
+      "hint": "Profundidad, Pivot, Turbo, Quadviews y Frame Generation activados para esta aplicación."
+    }
+  },
+  "compactRows": {
+    "performanceHint": "Margen de CPU y GPU y memoria de vídeo en una línea; se indica el lado que limita.",
+    "turboHint": "Estrategia actual, apagado, en espera, estado de seguridad o en pausa por Frame Generation.",
+    "framegenHint": "Velocidad de fotogramas y velocidades de fotogramas del juego al visor, o En espera, En pausa o Apagado.",
+    "pivotHint": "Estado del movimiento en una etiqueta corta, más una línea de vista fija cuando hay Vistas fijas configuradas."
+  },
+  "position": {
+    "heading": "Posición y tamaño",
+    "center": "Centrar en la vista",
+    "horizontal": "Horizontal",
+    "horizontalAria": "Posición horizontal",
+    "vertical": "Vertical",
+    "verticalAria": "Posición vertical",
+    "size": "Tamaño",
+    "sizeAria": "Tamaño del panel",
+    "distance": "Distancia de visualización",
+    "distanceAria": "Distancia de visualización"
+  },
+  "appearance": {
+    "heading": "Apariencia",
+    "opacity": "Opacidad",
+    "opacityAria": "Opacidad del panel",
+    "refreshRate": "Frecuencia de actualización",
+    "refreshRateHint": "El historial de fotogramas se muestrea en cada fotograma. Las frecuencias más altas redibujan el panel más a menudo.",
+    "rateRecommended": "{hz} Hz · Recomendado",
+    "accentAria": "Color de acento",
+    "colors": {
+      "teal": "Verde azulado",
+      "copper": "Cobre",
+      "blue": "Azul",
+      "violet": "Violeta",
+      "rose": "Rosa"
+    },
+    "visibleOnStart": "Mostrar automáticamente al activarlo o al iniciar una sesión"
+  },
+  "language": {
+    "title": "Idioma del OSD",
+    "description": "El idioma en el que se dibuja el panel del visor. Igual que la aplicación sigue el idioma elegido en Configuración.",
+    "sameAsApp": "Igual que la aplicación",
+    "sameAsAppResolved": "Igual que la aplicación · {language}",
+    "restartNote": "Las capas de VectorXR 0.19 y anteriores ignoran este ajuste y dibujan en inglés."
+  },
+  "colorPicker": {
+    "wheelAria": "Rueda de tono y saturación del acento personalizado",
+    "brightness": "Brillo",
+    "brightnessAria": "Brillo del acento personalizado",
+    "customAccent": "Acento personalizado",
+    "colorAria": "Color de acento personalizado",
+    "hex": "Color hexadecimal"
+  },
+  "presets": {
+    "aria": "Preajustes del panel",
+    "heading": "Preajustes",
+    "hint": "Los preajustes aplican la posición, la apariencia y el contenido a la vez.",
+    "expanded": "Ampliado",
+    "performance": "Rendimiento",
+    "minimal": "Mínimo",
+    "savedAria": "Preajustes personalizados guardados",
+    "savedPlaceholder": "Preajustes guardados…",
+    "noneSaved": "No hay preajustes guardados",
+    "reload": "Recargar",
+    "reloadHint": "Vuelve a cargar el preajuste seleccionado en los controles",
+    "delete": "Eliminar el preajuste seleccionado",
+    "nameAria": "Nombre del preajuste",
+    "namePlaceholder": "Guardar el actual como…",
+    "update": "Actualizar preajuste guardado",
+    "saveNew": "Guardar nuevo preajuste",
+    "limit": "Puedes guardar hasta 50 preajustes.",
+    "added": "Se agregó {name}. Guarda los cambios para conservarlo.",
+    "updated": "Se actualizó {name}. Guarda los cambios para conservarlo.",
+    "loaded": "Se cargó {name}. Guarda los cambios para aplicarlo en RV.",
+    "removed": "Se quitó {name}. Guarda los cambios para conservar este cambio.",
+    "appliedExpanded": "Se aplicó Ampliado. Guarda los cambios para aplicarlo en RV.",
+    "appliedPerformance": "Se aplicó Rendimiento. Guarda los cambios para aplicarlo en RV.",
+    "appliedMinimal": "Se aplicó Mínimo. Guarda los cambios para aplicarlo en RV."
+  },
+  "previewStage": {
+    "legibleNote": "VISTA PREVIA DEL CONTENIDO · Valores de ejemplo · Usa Ubicación para valorar la posición y el tamaño",
+    "placementNote": "VISTA PREVIA DE LA UBICACIÓN · Vista de referencia de 100° × 80°",
+    "legibleAria": "Vista previa legible del contenido del OSD, ampliada y centrada",
+    "placementAria": "Tamaño estimado del OSD dentro de una vista de referencia de 100 por 80 grados",
+    "emptyCompact": "Elige un valor compacto para mostrar el panel.",
+    "footer": "Ancho del panel: {width}° · Arrastra para colocarlo · El campo de visión varía según el visor"
+  },
+  "previewWindow": {
+    "title": "Vista previa del OSD",
+    "windowTitle": "VectorXR — Vista previa del OSD",
+    "connecting": "Conectando con los controles del OSD…",
+    "openFailed": "No se pudo abrir la ventana de vista previa. Inténtalo de nuevo.",
+    "popupBlocked": "Permite las ventanas emergentes para abrir la ventana de vista previa."
+  },
+  "preview": {
+    "appName": "tu-juego.exe",
+    "runtimeName": "Tu entorno de ejecución OpenXR",
+    "clock12": "8:42 p. m.",
+    "clock24": "20:42",
+    "fgOn": "FG ACTIVO",
+    "averageCompact": "{value} ms media",
+    "appFps": "FPS DE LA APP",
+    "appFrameAverage": "FOTOGRAMA APP / MEDIA",
+    "appFrameP95": "FOTOGRAMA APP / P95",
+    "frameTimeGraph": "TIEMPO DE FOTOGRAMA / ÚLTIMOS 120",
+    "labels": {
+      "performance": "RENDIMIENTO",
+      "performanceCompact": "REND.",
+      "turbo": "TURBO",
+      "framegen": "FRAME GEN",
+      "pivot": "PIVOT",
+      "modules": "MEJORAS"
+    },
+    "turboPausedForFramegen": "En pausa por Frame Generation",
+    "turboAsyncExperimental": "Async / Experimental",
+    "turboAsyncCompact": "Async / EXP",
+    "framegenState": "Activo  /  Interpolate  /  Dynamic",
+    "framegenDetail": "45 → 90 fps  /  GPU 3.1 ms",
+    "framegenCompact": "Dynamic / 45 → 90 fps",
+    "pivotState": "Movimiento: Activo / Continuo + Posición / Vuelo",
+    "pivotCompact": "Movimiento: Cont. Activo + Posición",
+    "snapState": "Vista: activa / Apilado / Vigilar las seis",
+    "snapCompact": "Vista: activa / Apilado",
+    "modulesWithFramegen": "Profundidad / Pivot / Turbo / Frame Gen / Quadviews",
+    "modules": "Profundidad / Pivot / Turbo / Quadviews",
+    "performanceTarget": "objetivo {fps} fps",
+    "cpuDetail": "{ms} ms, hilo {thread}%",
+    "gpuDetail": "uso {busy}%, juego {game}%",
+    "vramDetail": "de {budget} GB",
+    "vramDetailWithFramegen": "de {budget} GB, FG {framegen} MB",
+    "diagnostics": {
+      "debugLog": "REGISTRO DE DEPURACIÓN",
+      "flowView": "VISTA DE FLUJO",
+      "confidenceView": "VISTA DE CONFIANZA",
+      "tintView": "VISTA DE TINTE"
+    }
+  }
+}

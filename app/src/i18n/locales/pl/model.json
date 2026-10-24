@@ -1,0 +1,97 @@
+{
+  "keyGroups": {
+    "function": "Klawisze funkcyjne",
+    "letter": "Klawisze liter",
+    "number": "Klawisze cyfr",
+    "numpad": "Klawisze numeryczne",
+    "special": "Klawisze specjalne"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "space": "Spacja",
+    "numpad": "Numpad{digit}"
+  },
+  "modules": {
+    "depthxr": "Głębia",
+    "pivotxr": "Pivot",
+    "quadviews": "Quadviews",
+    "turbo": "Turbo",
+    "framegen": "Frame Generation"
+  },
+  "defaults": {
+    "newProfile": "Nowy profil",
+    "profile": "Profil",
+    "standardNudges": "Standardowe przesunięcia",
+    "nudgeSetNumbered": "Zestaw przesunięć {number}",
+    "profileNudges": "Przesunięcia: {profile}",
+    "newQuickView": "Nowy Szybki widok",
+    "quickViewNumbered": "Szybki widok {number}",
+    "deviceButton": "Przycisk {number}",
+    "turboTimingProfile": "Taktowanie: {name}"
+  },
+  "snapViews": {
+    "defaultProfileUnavailable": "Niedostępne w profilu Domyślnym, który jest albo profilem Wzmocnionego ruchu, albo Widoków skokowych. Użyj niestandardowego profilu Wzmocnionego ruchu razem z niestandardowym profilem Widoków skokowych dla tej samej aplikacji.",
+    "noSnapPartner": "Żaden włączony profil Widoków skokowych nie jest jeszcze ukierunkowany na aplikacje tego profilu.",
+    "motionNoteNone": "Profil Wzmocnionego ruchu dla tej samej aplikacji może nadal działać w tych Widokach skokowych, jeśli włączy opcję Stosuj Wzmocniony ruch do Widoków skokowych.",
+    "motionNoteSources": "Wzmocniony ruch z {profiles} nadal działa w tych Widokach skokowych."
+  },
+  "binding": {
+    "device": "{device} / {input}",
+    "unassignedDevice": "Nieprzypisane urządzenie",
+    "unassignedInput": "nieprzypisane wejście",
+    "none": "Brak",
+    "listMore_one": "{first} lub {count} inne",
+    "listMore_few": "{first} lub {count} inne",
+    "listMore_many": "{first} lub {count} innych",
+    "listMore_other": "{first} lub {count} innego",
+    "numbered": "{label} (przypisanie {number})"
+  },
+  "actions": {
+    "quadviewsDiagnostics": "Quadviews: wizualizacja diagnostyczna",
+    "depthToggle": "Głębia: przełącznik A/B",
+    "depthLock": "Głębia: Depth Lock A/B",
+    "osdToggle": "OSD: pokaż/ukryj",
+    "osdCycle": "OSD: przełącz układ",
+    "turboToggle": "Turbo: przełącznik A/B",
+    "turboMetrics": "Turbo: przechwytywanie metryk",
+    "framegenToggle": "Frame Generation: przełącznik A/B",
+    "nudgeLeft": "Pivot {set}: Przesuń w lewo",
+    "nudgeRight": "Pivot {set}: Przesuń w prawo",
+    "nudgeUp": "Pivot {set}: Przesuń w górę",
+    "nudgeDown": "Pivot {set}: Przesuń w dół",
+    "nudgeCenter": "Pivot {set}: Wyśrodkuj przesunięcie",
+    "defaultActivate": "Pivot Domyślny: Aktywuj",
+    "defaultSetOrigin": "Pivot Domyślny: Ustaw punkt zerowy",
+    "defaultReleaseOrigin": "Pivot Domyślny: Zwolnij punkt zerowy",
+    "defaultQuickView": "Pivot Domyślny: {view}",
+    "profileNumbered": "Profil {number}",
+    "profileActivate": "Pivot {profile}: Aktywuj",
+    "profileSetOrigin": "Pivot {profile}: Ustaw punkt zerowy",
+    "profileReleaseOrigin": "Pivot {profile}: Zwolnij punkt zerowy",
+    "profileQuickView": "Pivot {profile}: {view}"
+  },
+  "conflicts": {
+    "sharedTitle": "{binding} jest przypisane więcej niż raz",
+    "sharedMessage": "To wejście jest przypisane do: {actions}. Naciśnięcie może wywołać wiele akcji lub akcja o wyższym priorytecie może przesłonić inną. To ostrzeżenie nie blokuje zapisywania.",
+    "duplicateTitle": "{binding} jest zduplikowane",
+    "duplicateMessage": "{action} zawiera to samo fizyczne wejście więcej niż raz. Duplikat jest zbędny i w czasie działania używana jest tylko pierwsza kopia.",
+    "duplicateActions": {
+      "suspendControls": "Wstrzymanie sterowania",
+      "activation": "Aktywacja",
+      "setOrigin": "Ustaw punkt zerowy",
+      "releaseOrigin": "Zwolnij punkt zerowy"
+    },
+    "everySuspendPress": "Każde naciśnięcie wstrzymania sterowania",
+    "everyActivationPress": "Każde naciśnięcie aktywacji",
+    "allThreeTitle": "Jedno przypisanie steruje trzema sprzecznymi akcjami",
+    "allThreeMessage": "Aktywacja, Ustaw punkt zerowy i Zwolnij punkt zerowy używają {binding}. {press} żąda nowego neutralnego kierunku do przodu, a następnie natychmiast go czyści, więc punkt zerowy nie zostaje przechwycony. Przypisz osobne przypisanie do akcji Ustaw punkt zerowy lub Zwolnij punkt zerowy.",
+    "setsOriginTitle": "Aktywacja ustawia również punkt zerowy",
+    "setsOriginMessage": "Aktywacja i Ustaw punkt zerowy używają {binding}. {press} ponownie przechwytuje bieżący kierunek głowy jako neutralny kierunek do przodu dla Pivot. Zachowaj to tylko wtedy, gdy jest to zamierzone; w przeciwnym razie przypisz akcji Ustaw punkt zerowy osobne przypisanie, zwykle sterowanie wyśrodkowaniem w grze.",
+    "releasesOriginTitle": "Aktywacja zwalnia również punkt zerowy",
+    "releasesOriginMessage": "Aktywacja i Zwolnij punkt zerowy używają {binding}. {press} czyści każdy przechwycony punkt zerowy Pivot. Zachowaj to tylko wtedy, gdy jest to zamierzone; w przeciwnym razie przypisz akcji Zwolnij punkt zerowy osobne przypisanie.",
+    "setCanceledTitle": "Ustaw punkt zerowy jest natychmiast anulowane",
+    "setCanceledMessage": "Ustaw punkt zerowy i Zwolnij punkt zerowy używają {binding}. Naciśnięcie żąda nowego neutralnego kierunku do przodu, a następnie natychmiast go czyści, więc punkt zerowy nie zostaje przechwycony. Przypisz jednej z akcji inne przypisanie."
+  }
+}

@@ -22,7 +22,11 @@ import TurboTab from './components/tabs/TurboTab.vue'
 import { exportConfigFile, loadDebugSources, loadLogSnapshot, loadOpenXrLayers, loadRuntimeStatus, loadSeenApps, loadRuntimePacing, loadTurboMetrics, type LogSnapshot, type OpenXrLayerSnapshot } from './lib/commands'
 import { createDebugPackage, saveDebugPackage } from './lib/debugPackage'
 import { errorText } from './lib/errors'
-import { buildHealthSummary } from './lib/health'
+import { buildHealthSummary, type HealthSummary } from './lib/health'
+import { t, withLocale } from './i18n/index.ts'
+import { applyLanguagePreference } from './i18n/load.ts'
+import { loadLanguagePreference, storeLanguagePreference, type LanguagePreference } from './i18n/preference.ts'
+import { sourceLocale } from './i18n/locales.ts'
 import { moduleStateForApplication, normalizeConfig, type ModuleId, type VectorXRConfig } from './lib/model'
 import { patchNotes } from './lib/patchNotes'
 import { applyThemePreference, loadThemePreference, observeSystemThemeChanges, type ThemePreference } from './lib/theme'
@@ -53,6 +57,8 @@ const patchNotesOpen = ref(false)
 const logViewerLoading = ref(false)
 const logSnapshot = ref<LogSnapshot | null>(null)
 const themePreference = ref<ThemePreference>(loadThemePreference())
+// main.ts applied it (or the installer's language) before the first render.
+const languagePreference = ref<LanguagePreference>(loadLanguagePreference() ?? 'system')
 const trayEnabled = ref<boolean>(loadTrayEnabled())
 const importFileInput = ref<HTMLInputElement | null>(null)
 const importPreviewOpen = ref(false)
@@ -67,17 +73,27 @@ const latestPatch = patchNotes[0]
 const updateAvailable = updateStore.updateAvailable
 const updateTooltip = computed(() =>
   updateStore.state.latestRelease
-    ? `Version ${updateStore.state.latestRelease.version} is available. Click for details.`
+    ? t('app.updates.available', { version: updateStore.state.latestRelease.version })
     : '',
 )
-const healthSummary = computed(() => buildHealthSummary({
-  config: store.state.config,
-  configPath: store.state.path,
-  logSnapshot: logSnapshot.value,
-  openXrLayerSnapshot: openXrLayerSnapshot.value,
-  openXrLayersLoading: openXrLayersLoading.value,
-  seenApps: store.state.seenApps,
-}))
+function buildEditorHealthSummary(): HealthSummary {
+  return buildHealthSummary({
+    config: store.state.config,
+    configPath: store.state.path,
+    logSnapshot: logSnapshot.value,
+    openXrLayerSnapshot: openXrLayerSnapshot.value,
+    openXrLayersLoading: openXrLayersLoading.value,
+    seenApps: store.state.seenApps,
+  })
+}
+const healthSummary = computed(buildEditorHealthSummary)
+
+// The debug package stays English whatever language the app shows, so the
+// person reading a tester's report can follow it. t() is synchronous, so
+// switching the locale around the build is never visible on screen.
+function englishHealthSummary(): HealthSummary {
+  return withLocale(sourceLocale, buildEditorHealthSummary)
+}
 
 // The tray shows what is saved, which is what the layer uses.
 const trayHealthSummary = computed(() => buildHealthSummary({
@@ -102,79 +118,95 @@ function enhancementActive(moduleId: ModuleId) {
   return store.state.config.modules[moduleId].enabled || enabledProfileCount(moduleId) > 0
 }
 
+function enhancementStatus(moduleId: ModuleId) {
+  return enhancementActive(moduleId) ? t('common.active') : t('common.inactive')
+}
+
 const tabs = computed(() => [
   {
     id: 'home' as const,
-    label: 'Home',
-    subtitle: 'Status, updates, and support',
+    label: t('app.tabs.home.label'),
+    subtitle: t('app.tabs.home.subtitle'),
     status: latestPatch.version,
   },
   {
     id: 'core' as const,
-    label: 'Settings',
-    subtitle: 'Runtime, logging, theme, and config',
-    status: store.state.config.core.enabled ? 'Suite on' : 'Suite off',
+    label: t('app.tabs.core.label'),
+    subtitle: t('app.tabs.core.subtitle'),
+    status: store.state.config.core.enabled ? t('app.tabs.core.suiteOn') : t('app.tabs.core.suiteOff'),
+    statusWarning: !store.state.config.core.enabled,
   },
   {
     id: 'osd' as const,
-    label: 'On-Screen Display',
-    subtitle: 'Headset display, placement, and bindings',
-    status: store.state.config.core.osd.enabled ? 'Enabled' : 'Disabled',
+    label: t('app.tabs.osd.label'),
+    subtitle: t('app.tabs.osd.subtitle'),
+    status: store.state.config.core.osd.enabled ? t('common.enabled') : t('common.disabled'),
   },
   {
     id: 'registry' as const,
-    label: 'Application Registry',
-    subtitle: 'Register applications for profile assignment',
-    status: `${store.state.config.applications.length} app${store.state.config.applications.length === 1 ? '' : 's'}`,
+    label: t('app.tabs.registry.label'),
+    subtitle: t('app.tabs.registry.subtitle'),
+    status: t('app.tabs.registry.status', { count: store.state.config.applications.length }),
   },
   {
     id: 'layers' as const,
-    label: 'OpenXR Layers',
-    subtitle: 'Inspect and manage implicit layer order',
-    status: 'System',
+    label: t('app.tabs.layers.label'),
+    subtitle: t('app.tabs.layers.subtitle'),
+    status: t('app.tabs.layers.status'),
   },
   {
     id: 'about' as const,
-    label: 'About',
-    subtitle: 'Project info, patch notes, and support',
+    label: t('app.tabs.about.label'),
+    subtitle: t('app.tabs.about.subtitle'),
     status: latestPatch.version,
   },
   {
     id: 'quadviews' as const,
-    label: 'Quadviews',
-    subtitle: 'Dynamic foveated rendering control',
-    status: enhancementActive('quadviews') ? 'Active' : 'Inactive',
+    label: t('app.tabs.quadviews.label'),
+    subtitle: t('app.tabs.quadviews.subtitle'),
+    status: enhancementStatus('quadviews'),
     enhancementActive: enhancementActive('quadviews'),
   },
   {
     id: 'turbo' as const,
-    label: 'Turbo',
-    subtitle: 'Frame pacing override for stubborn fps caps',
-    status: enhancementActive('turbo') ? 'Active' : 'Inactive',
+    label: t('app.tabs.turbo.label'),
+    subtitle: t('app.tabs.turbo.subtitle'),
+    status: enhancementStatus('turbo'),
     enhancementActive: enhancementActive('turbo'),
   },
   {
     id: 'framegen' as const,
-    label: 'Frame Generation',
-    subtitle: 'Smoother motion with generated frames',
-    status: enhancementActive('framegen') ? 'Active' : 'Inactive',
+    label: t('app.tabs.framegen.label'),
+    subtitle: t('app.tabs.framegen.subtitle'),
+    status: enhancementStatus('framegen'),
     enhancementActive: enhancementActive('framegen'),
   },
   {
     id: 'pivotxr' as const,
-    label: 'Pivot',
-    subtitle: 'Rotation tuning - watch your six!',
-    status: enhancementActive('pivotxr') ? 'Active' : 'Inactive',
+    label: t('app.tabs.pivotxr.label'),
+    subtitle: t('app.tabs.pivotxr.subtitle'),
+    status: enhancementStatus('pivotxr'),
     enhancementActive: enhancementActive('pivotxr'),
   },
   {
     id: 'depthxr' as const,
-    label: 'Depth',
-    subtitle: 'Stereo depth tuning - see the world in a new way!',
-    status: enhancementActive('depthxr') ? 'Active' : 'Inactive',
+    label: t('app.tabs.depthxr.label'),
+    subtitle: t('app.tabs.depthxr.subtitle'),
+    status: enhancementStatus('depthxr'),
     enhancementActive: enhancementActive('depthxr'),
   },
 ])
+
+// A new language shows at once. The OSD follows the app's unless it names
+// its own: the saved settings carry the app's language (saveConfigEnvelope),
+// so save them again for the layer to pick it up.
+watch(languagePreference, async (preference) => {
+  storeLanguagePreference(preference)
+  await applyLanguagePreference(preference)
+  if (store.state.originalConfig.core.osd.language === 'app' && !store.state.loading && !store.state.loadError && store.state.path) {
+    await store.saveSetting(() => {}, t('validation.store.configSaved'))
+  }
+})
 
 watch(
   themePreference,
@@ -256,7 +288,7 @@ watch(
     storeTrayEnabled(enabled)
     configureTray(enabled)
       .then(() => updateTrayStatus(currentTrayStatus.value))
-      .catch((error) => { store.state.status = errorText(error, 'Failed to set up the tray icon') })
+      .catch((error) => { store.state.status = errorText(error, t('app.status.trayFailed')) })
   },
   { immediate: true },
 )
@@ -279,13 +311,13 @@ async function handleTrayAction(action: TrayAction) {
     case 'setEnabled':
       await store.saveSetting(
         (config) => { config.core.enabled = action.enabled },
-        action.enabled ? 'VectorXR enabled from the tray' : 'VectorXR disabled from the tray',
+        action.enabled ? t('app.status.enabledFromTray') : t('app.status.disabledFromTray'),
       )
       break
     case 'setLogLevel':
       await store.saveSetting(
         (config) => { config.core.logLevel = action.level },
-        `Log level set to ${action.level === 'debug' ? 'Debug' : 'Info'} from the tray`,
+        action.level === 'debug' ? t('app.status.logLevelDebugFromTray') : t('app.status.logLevelInfoFromTray'),
       )
       break
     case 'exportDebug':
@@ -304,7 +336,7 @@ async function handleTrayAction(action: TrayAction) {
 
 async function saveConfig() {
   if (errors.value.length > 0) {
-    store.state.status = 'Fix validation errors before saving'
+    store.state.status = t('app.status.fixBeforeSaving')
     return
   }
 
@@ -321,7 +353,7 @@ async function refreshLogs() {
   try {
     logSnapshot.value = await loadLogSnapshot()
   } catch (error) {
-    store.state.status = errorText(error, 'Failed to load logs')
+    store.state.status = errorText(error, t('app.status.loadLogsFailed'))
   } finally {
     logViewerLoading.value = false
   }
@@ -341,7 +373,7 @@ async function refreshOpenXrLayers(includeSignatures = false) {
     const complete = await loadOpenXrLayers(true)
     if (revision === layerRefreshRevision) openXrLayerSnapshot.value = complete
   } catch (error) {
-    if (revision === layerRefreshRevision) store.state.status = errorText(error, 'Failed to load OpenXR layer status')
+    if (revision === layerRefreshRevision) store.state.status = errorText(error, t('app.status.loadLayersFailed'))
   } finally {
     if (revision === layerRefreshRevision) openXrLayersLoading.value = false
   }
@@ -354,15 +386,15 @@ async function openLogs() {
 
 async function exportConfig() {
   if (errors.value.length > 0) {
-    store.state.status = 'Fix validation errors before exporting'
+    store.state.status = t('app.status.fixBeforeExporting')
     return
   }
 
   try {
     const exported = await exportConfigFile(store.state.config)
-    store.state.status = exported ? 'Config exported' : 'Export canceled'
+    store.state.status = exported ? t('app.status.configExported') : t('app.status.exportCanceled')
   } catch (error) {
-    store.state.status = errorText(error, 'Failed to export config')
+    store.state.status = errorText(error, t('app.status.exportFailed'))
   }
 }
 
@@ -370,6 +402,7 @@ async function exportDebugInformation() {
   debugExporting.value = true
 
   try {
+    // Collection errors go into the debug package, which stays English.
     const collectionErrors: string[] = []
     async function capture<T>(label: string, request: Promise<T>, fallback: T): Promise<T> {
       try { return await request } catch (error) {
@@ -378,17 +411,17 @@ async function exportDebugInformation() {
       }
     }
     const [seenApps, pacing, metrics, runtimeStatus, layers, logs, debugSources] = await Promise.all([
-      capture('Seen apps', loadSeenApps(), { path: '', observations: [] }),
-      capture('Runtime pacing', loadRuntimePacing(), { path: '', observations: [], activeRuntime: null }),
-      capture('Turbo metrics', loadTurboMetrics(), { path: '', sessions: [] }),
+      capture('Seen apps', loadSeenApps(), { path: '', observations: [] }), // i18n-ignore
+      capture('Runtime pacing', loadRuntimePacing(), { path: '', observations: [], activeRuntime: null }), // i18n-ignore
+      capture('Turbo metrics', loadTurboMetrics(), { path: '', sessions: [] }), // i18n-ignore
       loadRuntimeStatus().catch((error) => {
-        const message = `Runtime status: ${String(error)}`
+        const message = `Runtime status: ${String(error)}` // i18n-ignore
         collectionErrors.push(message)
         return { error: message }
       }),
-      capture('OpenXR layers', loadOpenXrLayers(true), null),
-      capture('Log preview', loadLogSnapshot(), null),
-      capture('Raw diagnostic files', loadDebugSources(), { files: [], warnings: [] }),
+      capture('OpenXR layers', loadOpenXrLayers(true), null), // i18n-ignore
+      capture('Log preview', loadLogSnapshot(), null), // i18n-ignore
+      capture('Raw diagnostic files', loadDebugSources(), { files: [], warnings: [] }), // i18n-ignore
     ])
     openXrLayerSnapshot.value = layers
     logSnapshot.value = logs
@@ -416,15 +449,15 @@ async function exportDebugInformation() {
       activeRuntime: pacing.activeRuntime,
       logSnapshot: logSnapshot.value,
       openXrLayerSnapshot: openXrLayerSnapshot.value,
-      healthSummary: healthSummary.value,
+      healthSummary: englishHealthSummary(),
     })
     const exported = await saveDebugPackage(packageBlob)
-    store.state.status = exported ? 'Debug information exported' : 'Debug export canceled'
+    store.state.status = exported ? t('app.status.debugExported') : t('app.status.debugExportCanceled')
     if (exported) {
       debugExportOpen.value = false
     }
   } catch (error) {
-    store.state.status = errorText(error, 'Failed to export debug information')
+    store.state.status = errorText(error, t('app.status.debugExportFailed'))
   } finally {
     debugExporting.value = false
   }
@@ -451,7 +484,7 @@ function handleImportFile(event: Event) {
       importErrors.value = validateConfig(config)
       importPreviewOpen.value = true
     } catch {
-      store.state.status = 'Import failed: file is not valid JSON'
+      store.state.status = t('app.status.importInvalidJson')
     }
     input.value = ''
   }
@@ -489,9 +522,7 @@ function handleOpenModule(moduleId: ModuleId, applicationId: string) {
 }
 
 async function confirmResetConfig() {
-  const confirmed = window.confirm(
-    'Reset VectorXR to defaults?\n\nThis will erase all saved settings, application registry entries, profiles, and OpenXR application discovery data. This cannot be undone.',
-  )
+  const confirmed = window.confirm(t('app.resetConfirm'))
 
   if (!confirmed) {
     return
@@ -531,6 +562,7 @@ async function confirmResetConfig() {
           :path="store.state.path"
           :log-path="logSnapshot?.activePath"
           :theme-preference="themePreference"
+          :language-preference="languagePreference"
           :tray-enabled="trayEnabled"
           :settings-actions-disabled="store.state.loading || store.state.saving"
           @view-logs="openLogs"
@@ -539,6 +571,7 @@ async function confirmResetConfig() {
           @export-config="exportConfig"
           @reset-config="confirmResetConfig"
           @update:theme-preference="themePreference = $event"
+          @update:language-preference="languagePreference = $event"
           @update:tray-enabled="trayEnabled = $event"
         />
         <OsdTab v-else-if="store.state.activeTab === 'osd'" :config="store.state.config" :saved-config="store.state.originalConfig" />

@@ -1,0 +1,97 @@
+{
+  "keyGroups": {
+    "function": "Функциональные клавиши",
+    "letter": "Буквенные клавиши",
+    "number": "Цифровые клавиши",
+    "numpad": "Цифровая клавиатура",
+    "special": "Специальные клавиши"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "space": "Space",
+    "numpad": "Numpad{digit}"
+  },
+  "modules": {
+    "depthxr": "Глубина",
+    "pivotxr": "Pivot",
+    "quadviews": "Quadviews",
+    "turbo": "Turbo",
+    "framegen": "Frame Generation"
+  },
+  "defaults": {
+    "newProfile": "Новый профиль",
+    "profile": "Профиль",
+    "standardNudges": "Стандартные сдвиги",
+    "nudgeSetNumbered": "Набор сдвигов {number}",
+    "profileNudges": "Сдвиги {profile}",
+    "newQuickView": "Новый быстрый вид",
+    "quickViewNumbered": "Быстрый вид {number}",
+    "deviceButton": "Кнопка {number}",
+    "turboTimingProfile": "Тайминг {name}"
+  },
+  "snapViews": {
+    "defaultProfileUnavailable": "Недоступно в профиле по умолчанию, который может быть либо «Усиленным движением», либо «Фиксированными видами». Используйте свой профиль «Усиленное движение» вместе со своим профилем «Фиксированные виды» для одного и того же приложения.",
+    "noSnapPartner": "Ни один включённый профиль «Фиксированные виды» пока не нацелен на приложения этого профиля.",
+    "motionNoteNone": "Профиль «Усиленное движение» для того же приложения может продолжать работать в этих фиксированных видах, если в нём включён параметр «Применять усиленное движение к фиксированным видам».",
+    "motionNoteSources": "Усиленное движение из {profiles} продолжает работать в этих фиксированных видах."
+  },
+  "binding": {
+    "device": "{device} / {input}",
+    "unassignedDevice": "Устройство не назначено",
+    "unassignedInput": "вход не назначен",
+    "none": "Нет",
+    "listMore_one": "{first} или ещё {count}",
+    "listMore_few": "{first} или ещё {count}",
+    "listMore_many": "{first} или ещё {count}",
+    "listMore_other": "{first} или ещё {count}",
+    "numbered": "{label} (привязка {number})"
+  },
+  "actions": {
+    "quadviewsDiagnostics": "Quadviews: диагностическая визуализация",
+    "depthToggle": "Глубина: переключение A/B",
+    "depthLock": "Глубина: Depth Lock A/B",
+    "osdToggle": "OSD: показать/скрыть",
+    "osdCycle": "OSD: сменить макет",
+    "turboToggle": "Turbo: переключение A/B",
+    "turboMetrics": "Turbo: запись метрик",
+    "framegenToggle": "Frame Generation: переключение A/B",
+    "nudgeLeft": "Pivot {set}: сдвиг влево",
+    "nudgeRight": "Pivot {set}: сдвиг вправо",
+    "nudgeUp": "Pivot {set}: сдвиг вверх",
+    "nudgeDown": "Pivot {set}: сдвиг вниз",
+    "nudgeCenter": "Pivot {set}: сбросить сдвиг в центр",
+    "defaultActivate": "Pivot по умолчанию: активация",
+    "defaultSetOrigin": "Pivot по умолчанию: задать начало отсчёта",
+    "defaultReleaseOrigin": "Pivot по умолчанию: сбросить начало отсчёта",
+    "defaultQuickView": "Pivot по умолчанию: {view}",
+    "profileNumbered": "Профиль {number}",
+    "profileActivate": "Pivot {profile}: активация",
+    "profileSetOrigin": "Pivot {profile}: задать начало отсчёта",
+    "profileReleaseOrigin": "Pivot {profile}: сбросить начало отсчёта",
+    "profileQuickView": "Pivot {profile}: {view}"
+  },
+  "conflicts": {
+    "sharedTitle": "{binding} назначено более одного раза",
+    "sharedMessage": "Этот вход назначен действиям: {actions}. Нажатие может запустить несколько действий, или действие с более высоким приоритетом может перекрыть другое. Это предупреждение не мешает сохранению.",
+    "duplicateTitle": "{binding} дублируется",
+    "duplicateMessage": "{action} содержит один и тот же физический вход более одного раза. Дубликат избыточен, во время работы используется только первая копия.",
+    "duplicateActions": {
+      "suspendControls": "Приостановка управления",
+      "activation": "Активация",
+      "setOrigin": "Задать начало отсчёта",
+      "releaseOrigin": "Сбросить начало отсчёта"
+    },
+    "everySuspendPress": "Каждое нажатие элемента приостановки",
+    "everyActivationPress": "Каждое нажатие элемента активации",
+    "allThreeTitle": "Одна привязка управляет тремя конфликтующими действиями",
+    "allThreeMessage": "«Активация», «Задать начало отсчёта» и «Сбросить начало отсчёта» используют {binding}. {press} запрашивает новое нейтральное направление вперёд и сразу же сбрасывает его, поэтому начало отсчёта не фиксируется. Назначьте отдельную привязку для «Задать начало отсчёта» или «Сбросить начало отсчёта».",
+    "setsOriginTitle": "Активация также задаёт начало отсчёта",
+    "setsOriginMessage": "«Активация» и «Задать начало отсчёта» используют {binding}. {press} заново фиксирует текущее направление головы как нейтральное направление вперёд для Pivot. Оставьте так, только если это сделано намеренно; иначе назначьте для «Задать начало отсчёта» отдельную привязку — обычно это ваша внутриигровая кнопка центрирования.",
+    "releasesOriginTitle": "Активация также сбрасывает начало отсчёта",
+    "releasesOriginMessage": "«Активация» и «Сбросить начало отсчёта» используют {binding}. {press} сбрасывает зафиксированное начало отсчёта Pivot. Оставьте так, только если это сделано намеренно; иначе назначьте для «Сбросить начало отсчёта» отдельную привязку.",
+    "setCanceledTitle": "«Задать начало отсчёта» сразу отменяется",
+    "setCanceledMessage": "«Задать начало отсчёта» и «Сбросить начало отсчёта» используют {binding}. Нажатие запрашивает новое нейтральное направление вперёд и сразу же сбрасывает его, поэтому начало отсчёта не фиксируется. Назначьте одному из действий другую привязку."
+  }
+}

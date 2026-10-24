@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { t, type MessageKey } from '../i18n/index.ts'
 import type { ThemePreference } from '../lib/theme'
 
 defineProps<{
@@ -9,10 +10,11 @@ defineEmits<{
   'update:modelValue': [value: ThemePreference]
 }>()
 
-const options: Array<{ value: ThemePreference; label: string }> = [
-  { value: 'system', label: 'System' },
-  { value: 'light', label: 'Light' },
-  { value: 'dark', label: 'Dark' },
+// Labels are keys, translated at render so a language change applies.
+const options: Array<{ value: ThemePreference; labelKey: MessageKey }> = [
+  { value: 'system', labelKey: 'settings.theme.system' },
+  { value: 'light', labelKey: 'settings.theme.light' },
+  { value: 'dark', labelKey: 'settings.theme.dark' },
 ]
 </script>
 
@@ -26,7 +28,7 @@ const options: Array<{ value: ThemePreference; label: string }> = [
       type="button"
       @click="$emit('update:modelValue', option.value)"
     >
-      {{ option.label }}
+      {{ t(option.labelKey) }}
     </button>
   </div>
 </template>

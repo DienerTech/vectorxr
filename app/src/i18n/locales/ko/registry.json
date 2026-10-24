@@ -1,0 +1,56 @@
+{
+  "applications": {
+    "eyebrow": "레지스트리",
+    "title": "애플리케이션 레지스트리",
+    "intro": "모듈 프로필이 실행 파일 이름으로 대상으로 지정할 수 있는 애플리케이션을 등록합니다. 각 카드의 칩은 각 모듈이 현재 해당 애플리케이션을 어떻게 처리하는지 보여 줍니다. 칩을 클릭하면 해당 프로필로 이동하거나 프로필을 새로 만들 수 있습니다.",
+    "add": "애플리케이션 추가",
+    "unnamed": "이름 없는 애플리케이션",
+    "editName": "애플리케이션 이름 편집",
+    "executable": "실행 파일",
+    "executableHelp": "실행 파일 일치는 대/소문자를 구분하지 않지만 이름에 애플리케이션 확장자가 포함되어야 합니다. 예: DCS.exe",
+    "empty": "아직 등록된 애플리케이션이 없습니다. 모듈 프로필을 만들기 전에 애플리케이션을 추가하십시오.",
+    "chip": {
+      "defaultOff": "{module} · 기본값 꺼짐",
+      "defaultOffTitle": "기본 {module} 프로필이 꺼져 있습니다. 이 애플리케이션의 사용자 지정 프로필을 만들려면 클릭하십시오.",
+      "custom": "{module} · {profile}",
+      "customTitle": "사용자 지정 {module} 프로필 \"{profile}\"이(가) 적용됩니다. 열려면 클릭하십시오.",
+      "default": "{module} · 기본값",
+      "defaultTitle": "기본 {module} 프로필이 적용됩니다. 이 애플리케이션의 사용자 지정 프로필을 만들려면 클릭하십시오."
+    }
+  },
+  "discovery": {
+    "eyebrow": "검색",
+    "trackingOnTitle": "검색 기능이 실행하는 OpenXR 앱을 추적하고 있습니다.",
+    "trackingOffTitle": "검색 기능이 꺼져 있습니다. 설정에서 추적을 사용 설정할 때까지 새로운 OpenXR 앱 실행이 기록되지 않습니다.",
+    "trackingOn": "추적 켜짐",
+    "trackingOff": "추적 꺼짐",
+    "title": "새 앱이 표시되는 곳",
+    "intro": "VectorXR은 실행한 OpenXR 앱을 기록해 두므로 클릭 한 번으로 쉽게 등록할 수 있습니다. 등록하기 전까지는 여기의 어떤 항목도 설정을 변경하지 않습니다. 추적은 설정에서 제어합니다.",
+    "clear": "감지된 앱 지우기",
+    "loading": "감지된 앱을 로드하는 중...",
+    "launches_other": "{count}회 실행",
+    "details": "세부 정보",
+    "register": "등록",
+    "allRegistered": "검색된 모든 앱이 등록되었습니다. 새로 실행하는 앱이 여기에 표시됩니다.",
+    "allRegisteredTrackingOff": "검색된 모든 앱이 등록되었습니다. 추적이 꺼져 있으므로 새 앱이 여기에 표시되지 않습니다.",
+    "alreadyRegistered": "이미 등록됨",
+    "registeredAs": "{name}(으)로 등록됨",
+    "empty": "아직 감지된 XR 앱이 없습니다. VectorXR이 활성 상태일 때 OpenXR 앱을 실행한 다음 이 목록을 새로 고치십시오.",
+    "emptyTrackingOff": "애플리케이션 추적이 사용 안 함으로 설정되어 있으므로 새 앱이 여기에 표시되지 않습니다. OpenXR 앱 실행을 기록하려면 설정에서 추적을 사용 설정하십시오."
+  },
+  "seenDetails": {
+    "eyebrow": "검색된 앱",
+    "registeredAs": "등록 이름",
+    "unregistered": "등록되지 않음",
+    "launches": "실행 횟수",
+    "firstSeen": "처음 감지",
+    "lastSeen": "마지막 감지"
+  },
+  "exclusions": {
+    "title": "다음 앱에는 사용 설정된 사용자 지정 프로필이 우선 적용됩니다: {apps}",
+    "label": "적용되지 않는 대상:"
+  },
+  "picker": {
+    "empty": "등록된 애플리케이션이 없습니다. 이 프로필을 활성화하려면 먼저 애플리케이션 레지스트리에서 애플리케이션을 추가하십시오."
+  }
+}

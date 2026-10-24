@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
+import { t } from '../i18n/index.ts'
 import type { PivotStepTuning } from '../lib/model'
 
 const props = defineProps<{
@@ -23,9 +24,9 @@ const hysteresisInvalid = computed(() => (
     <div class="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
       <label class="block">
         <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-          Deadzone
+          {{ t('pivot.stepTuning.deadzone') }}
           <span
-            title="The base head angle before step thresholds begin. Motion inside this angle never creates a step."
+            :title="t('pivot.stepTuning.deadzoneHint')"
             class="cursor-help select-none text-xs text-muted"
             >ⓘ</span
           >
@@ -34,9 +35,9 @@ const hysteresisInvalid = computed(() => (
       </label>
       <label class="block">
         <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-          Step Trigger
+          {{ t('pivot.stepTuning.stepTrigger') }}
           <span
-            title="How many more degrees you turn after the deadzone to add each step."
+            :title="t('pivot.stepTuning.stepTriggerHint')"
             class="cursor-help select-none text-xs text-muted"
             >ⓘ</span
           >
@@ -45,9 +46,9 @@ const hysteresisInvalid = computed(() => (
       </label>
       <label class="block">
         <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-          Step Amount
+          {{ t('pivot.stepTuning.stepAmount') }}
           <span
-            title="How much extra view rotation is added each time you cross a step trigger."
+            :title="t('pivot.stepTuning.stepAmountHint')"
             class="cursor-help select-none text-xs text-muted"
             >ⓘ</span
           >
@@ -56,9 +57,9 @@ const hysteresisInvalid = computed(() => (
       </label>
       <label class="block">
         <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-          Hysteresis
+          {{ t('pivot.stepTuning.hysteresis') }}
           <span
-            title="How far you must turn back below a trigger before its step is removed. This prevents flicker near a threshold and must be smaller than Step Trigger."
+            :title="t('pivot.stepTuning.hysteresisHint')"
             class="cursor-help select-none text-xs text-muted"
             >ⓘ</span
           >
@@ -74,14 +75,14 @@ const hysteresisInvalid = computed(() => (
           type="number"
         />
         <span class="mt-1 block text-xs" :class="hysteresisInvalid ? 'text-input-error' : 'text-muted'">
-          {{ hysteresisInvalid ? 'must be smaller than step trigger' : 'keep below trigger' }}
+          {{ hysteresisInvalid ? t('pivot.stepTuning.hysteresisInvalid') : t('pivot.stepTuning.hysteresisKeepBelow') }}
         </span>
       </label>
       <label class="block sm:col-span-2 xl:col-span-1">
         <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-          Max Extra
+          {{ t('pivot.stepTuning.maxExtra') }}
           <span
-            title="The most extra view rotation these steps can add. Set to 0 for no cap."
+            :title="t('pivot.stepTuning.maxExtraHint')"
             class="cursor-help select-none text-xs text-muted"
             >ⓘ</span
           >

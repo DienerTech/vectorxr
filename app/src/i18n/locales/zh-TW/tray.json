@@ -1,0 +1,14 @@
+{
+  "health": "健康狀態：{label}",
+  "healthUnavailable": "健康狀態：設定尚未載入",
+  "logLevel": "記錄層級：{level}",
+  "logLevelUnavailable": "記錄層級",
+  "info": "資訊",
+  "debug": "偵錯",
+  "tooltip": "VectorXR：{label}",
+  "tooltipDisabled": "VectorXR：已停用",
+  "enabled": "VectorXR 已啟用",
+  "exportDebug": "匯出偵錯資料…",
+  "open": "開啟 VectorXR",
+  "quit": "結束 VectorXR"
+}

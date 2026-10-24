@@ -1,0 +1,108 @@
+{
+  "editor": {
+    "type": "绑定类型",
+    "types": {
+      "none": "无",
+      "keyboard": "键盘",
+      "device": "设备"
+    },
+    "noneText": "未分配绑定。选择绑定之前，此操作不会运行。",
+    "modifiers": "修饰键",
+    "primaryKey": "主键"
+  },
+  "sound": {
+    "playOnFire": "此操作触发时播放声音",
+    "playOnTransition": "激活/停用时播放声音",
+    "explanation": "为此绑定额外提供一个声音提示。可以让某个槽位使用默认提示音，也可以选择您自己的简短 .wav 文件。",
+    "defaultTone": "默认提示音",
+    "single": "声音",
+    "activate": "激活",
+    "deactivate": "停用",
+    "browse": "浏览…",
+    "test": "测试",
+    "pickerFailed": "无法打开文件选择器。",
+    "playFailed": "无法播放声音。"
+  },
+  "list": {
+    "add": "添加绑定",
+    "noneText": "未分配任何绑定。添加绑定之前，此操作不会运行。",
+    "bindingNumber": "绑定 {number}",
+    "bindingDescription": "选择一个键盘快捷键或检测到的设备输入。"
+  },
+  "panel": {
+    "soundEnabledHint": "某个绑定已启用声音反馈",
+    "soundEnabledAria": "已启用声音反馈",
+    "editOne": "编辑绑定…",
+    "editMany": "编辑绑定…"
+  },
+  "page": {
+    "breadcrumbAria": "导航路径",
+    "breadcrumbBinding": "绑定",
+    "returnHint": "按 Esc 或“完成”返回 {module}。",
+    "closeAria": "关闭绑定并返回 {module}",
+    "listDescription": "{description} 为您飞行时使用的每个设备各添加一个绑定；其中任何一个都能触发。"
+  },
+  "device": {
+    "joystickDevice": "摇杆设备",
+    "scanning": "正在扫描...",
+    "selectDevice": "选择设备",
+    "disconnectedOption": "{name}（已断开连接）",
+    "disconnectedName": "<设备已断开连接>",
+    "noDeviceSelected": "未选择设备",
+    "assignedInput": "已分配的输入",
+    "manualAria": "手动选择摇杆输入",
+    "selectInput": "选择输入...",
+    "manualHint": "无需监听输入，直接选择按钮或 HAT 方向。",
+    "manualHintNoDevice": "请先选择一个已连接的摇杆。",
+    "manual": "手动",
+    "button": "按钮 {number}",
+    "hatInput": "HAT {number} {direction}",
+    "hatDirections": {
+      "up": "上",
+      "upRight": "右上",
+      "right": "右",
+      "downRight": "右下",
+      "down": "下",
+      "downLeft": "左下",
+      "left": "左",
+      "upLeft": "左上"
+    },
+    "noInput": "未捕获输入",
+    "buttonCount_other": "{count} 个按钮",
+    "hatCount_other": "{count} 个 HAT",
+    "capabilities": "{buttons}，{hats}",
+    "disconnectedTitle": "绑定的设备当前未连接",
+    "disconnectedBody": "此绑定仍保存为 {device} / {input}，但 Windows 当前未报告该摇杆。",
+    "capture": "捕获输入",
+    "canceling": "正在取消...",
+    "listening": "正在监听... {seconds} 秒",
+    "cancelListening": "取消监听（{seconds} 秒）",
+    "refresh": "刷新设备",
+    "metadata": "元数据",
+    "metadataTitle": "摇杆元数据",
+    "deviceGuid": "设备 GUID",
+    "connectionStatus": "连接状态",
+    "productGuid": "产品 GUID",
+    "inputPath": "输入路径",
+    "inputLabel": "输入标签",
+    "unassigned": "未分配",
+    "unavailable": "不可用",
+    "connected": "已连接",
+    "disconnected": "已断开连接",
+    "status": {
+      "canceling": "正在取消输入捕获...",
+      "cancelFailedWith": "无法取消捕获：{message}",
+      "cancelFailed": "无法取消捕获。达到时间限制后它会自动停止。",
+      "noDevices": "找不到摇杆设备。",
+      "selectFirst": "捕获输入之前，请先选择一个已连接的摇杆。",
+      "listening": "仅监听 {device}。按 Esc 取消；捕获会在 15 秒后自动停止。",
+      "canceled": "已取消输入捕获。",
+      "timedOut": "输入捕获在 15 秒后超时。",
+      "captured": "已捕获 {device} / {input}。",
+      "captureFailed": "无法捕获摇杆输入。",
+      "selected": "已选择 {device}。请捕获输入或手动选择输入。",
+      "assigned": "已手动分配 {device} / {input}。"
+    },
+    "listFailed": "无法列出摇杆设备。"
+  }
+}

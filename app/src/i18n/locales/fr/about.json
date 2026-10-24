@@ -1,0 +1,40 @@
+{
+  "eyebrow": "À propos",
+  "tagline": "Améliorations OpenXR, réglées pour chaque jeu.",
+  "intro": "VectorXR est une plateforme d'Améliorations OpenXR qui redéfinit la façon dont votre casque effectue le rendu et le suivi — jeu par jeu. Regagnez de la fréquence d'images avec le rendu fovéal dynamique, amplifiez la rotation de la tête pour surveiller vos six heures sans vous contorsionner, et accentuez la séparation stéréo pour un sens de l'échelle et de la présence plus fort.",
+  "profiles": "La gestion des couches OpenXR et les profils par application gardent chaque jeu configuré exactement comme vous le souhaitez, le tout depuis un seul endroit.",
+  "firstAndOnly": "{highlight} solution OpenXR où la rotation de tête amplifiée et le rendu fovéal quad-views fonctionnent ensemble — la zone fovéale suit votre vue pivotée au lieu de rester en arrière.",
+  "firstAndOnlyHighlight": "La première et la seule",
+  "developedBy": "Développé de manière indépendante par DienerTech LLC.",
+  "copyright": "(c) 2026 DienerTech LLC. Publié sous la Mozilla Public License 2.0.",
+  "support": {
+    "eyebrow": "Soutenir le développement",
+    "title": "Soutenir VectorXR",
+    "body": "Les dons via Ko-fi aident à financer le matériel de test, le travail de publication et les finitions continues des outils OpenXR.",
+    "button": "Soutenir sur Ko-fi"
+  },
+  "patchNotes": {
+    "eyebrow": "Dernières notes de version",
+    "readFull": "Lire toutes les notes de version"
+  },
+  "updates": {
+    "eyebrow": "Mises à jour",
+    "title": "État des versions",
+    "published": "Publiée le {date}",
+    "check": "Vérifier",
+    "release": "Version",
+    "summary": {
+      "checking": "Vérification des versions GitHub...",
+      "available": "VectorXR {tag} est disponible.",
+      "upToDate": "Vous utilisez la dernière version publiée, {tag}.",
+      "unavailable": "Aucune version GitHub publiée n'est encore disponible.",
+      "idle": "Vérifiez sur GitHub la dernière version publiée de VectorXR."
+    },
+    "chip": {
+      "checking": "Vérification",
+      "available": "Mise à jour",
+      "upToDate": "À jour",
+      "error": "Réessayer"
+    }
+  }
+}

@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue'
 
 import DeviceBindingEditor from './DeviceBindingEditor.vue'
+import { t } from '../i18n/index.ts'
 import { pickSoundFile, playTestSound } from '../lib/commands'
 import { errorText } from '../lib/errors'
 import { defaultDeviceBinding, defaultKeyboardBinding, defaultNoneBinding, defaultSoundFeedback, keyboardBindingKeyGroups, keyboardModifierKeys, preserveBindingSound, type InputBinding, type SoundFeedback } from '../lib/model'
@@ -49,7 +50,7 @@ function updateSound(patch: Partial<SoundFeedback>) {
 function soundFileName(path: string): string {
   const trimmed = path.trim()
   if (!trimmed) {
-    return 'Default tone'
+    return t('bindings.sound.defaultTone')
   }
 
   return trimmed.split(/[/\\]/).pop() || trimmed
@@ -63,7 +64,7 @@ async function browseSound(which: SoundPath) {
       updateSound({ [which]: picked })
     }
   } catch (error) {
-    soundError.value = errorText(error, 'Failed to open file picker.')
+    soundError.value = errorText(error, t('bindings.sound.pickerFailed'))
   }
 }
 
@@ -73,16 +74,16 @@ async function testSound(which: SoundPath) {
     const defaultName = which === 'activateSound' ? props.defaultActivateSound : props.defaultDeactivateSound
     await playTestSound(sound.value?.[which] ?? '', which === 'activateSound', 100, defaultName)
   } catch (error) {
-    soundError.value = errorText(error, 'Failed to play sound.')
+    soundError.value = errorText(error, t('bindings.sound.playFailed'))
   }
 }
 
 const soundRows = computed(() =>
   props.soundMode === 'single'
-    ? [{ key: 'activateSound' as const, label: 'Sound' }]
+    ? [{ key: 'activateSound' as const, label: t('bindings.sound.single') }]
     : [
-        { key: 'activateSound' as const, label: 'Activate' },
-        { key: 'deactivateSound' as const, label: 'Deactivate' },
+        { key: 'activateSound' as const, label: t('bindings.sound.activate') },
+        { key: 'deactivateSound' as const, label: t('bindings.sound.deactivate') },
       ],
 )
 
@@ -139,7 +140,7 @@ function toggleModifier(modifier: string, enabled: boolean) {
         type="button"
         @click="$emit('remove')"
       >
-        Remove
+        {{ t('common.remove') }}
       </button>
     </div>
 
@@ -147,22 +148,22 @@ function toggleModifier(modifier: string, enabled: boolean) {
       <slot name="controls" />
 
       <label class="block">
-        <span class="mb-1.5 block text-sm font-medium">Binding Type</span>
+        <span class="mb-1.5 block text-sm font-medium">{{ t('bindings.editor.type') }}</span>
         <select v-model="bindingType" class="app-input w-full rounded-[0.75rem] px-4 py-2.5">
-          <option value="none">None</option>
-          <option value="keyboard">Keyboard</option>
-          <option value="device">Device</option>
+          <option value="none">{{ t('bindings.editor.types.none') }}</option>
+          <option value="keyboard">{{ t('bindings.editor.types.keyboard') }}</option>
+          <option value="device">{{ t('bindings.editor.types.device') }}</option>
         </select>
       </label>
     </div>
 
     <div v-if="modelValue.type === 'none'" class="mt-4 rounded-[0.75rem] border border-dashed px-4 py-3 text-sm surface-panel-strong">
-      {{ noneText || 'No binding assigned. This action will not run until a binding is selected.' }}
+      {{ noneText || t('bindings.editor.noneText') }}
     </div>
 
     <div v-else-if="modelValue.type === 'keyboard'" class="mt-4 flex flex-wrap items-start gap-3">
       <div class="min-w-[240px]">
-        <span class="mb-1.5 block text-sm font-medium">Modifiers</span>
+        <span class="mb-1.5 block text-sm font-medium">{{ t('bindings.editor.modifiers') }}</span>
         <div class="flex flex-wrap gap-2">
           <label v-for="modifier in keyboardModifierKeys" :key="modifier" class="button-secondary inline-flex items-center gap-2 rounded-[0.75rem] px-3 py-2 text-sm">
             <input
@@ -177,7 +178,7 @@ function toggleModifier(modifier: string, enabled: boolean) {
       </div>
 
       <label class="block w-full sm:w-[220px]">
-        <span class="mb-1.5 block text-sm font-medium">Primary Key</span>
+        <span class="mb-1.5 block text-sm font-medium">{{ t('bindings.editor.primaryKey') }}</span>
         <select v-model="selectedPrimaryKey" class="app-input w-full rounded-[0.75rem] px-4 py-2.5">
           <optgroup v-for="group in keyboardBindingKeyGroups" :key="group.label" :label="group.label">
             <option v-for="option in group.options" :key="option" :value="option">{{ option }}</option>
@@ -192,8 +193,8 @@ function toggleModifier(modifier: string, enabled: boolean) {
       <label class="flex items-start gap-2.5">
         <input v-model="soundEnabled" class="mt-0.5 h-4 w-4 accent-depthxr-copper" type="checkbox" />
         <span>
-          <span class="block text-sm font-medium">{{ soundMode === 'single' ? 'Play a sound when this action fires' : 'Play a sound on activate / deactivate' }}</span>
-          <span class="mt-0.5 block text-sm leading-6 text-muted">An extra audible cue for this binding. Leave a slot on the default tone, or choose your own short .wav.</span>
+          <span class="block text-sm font-medium">{{ soundMode === 'single' ? t('bindings.sound.playOnFire') : t('bindings.sound.playOnTransition') }}</span>
+          <span class="mt-0.5 block text-sm leading-6 text-muted">{{ t('bindings.sound.explanation') }}</span>
         </span>
       </label>
 
@@ -204,11 +205,11 @@ function toggleModifier(modifier: string, enabled: boolean) {
           class="flex flex-wrap items-center gap-2"
         >
           <span class="w-[88px] shrink-0 text-sm font-medium">{{ row.label }}</span>
-          <span class="app-readonly-field min-w-0 flex-1 truncate rounded-[0.75rem] px-3 py-2 text-sm" :title="sound?.[row.key] || 'Default tone'">
+          <span class="app-readonly-field min-w-0 flex-1 truncate rounded-[0.75rem] px-3 py-2 text-sm" :title="sound?.[row.key] || t('bindings.sound.defaultTone')">
             {{ soundFileName(sound?.[row.key] ?? '') }}
           </span>
           <button class="button-secondary rounded-[0.75rem] px-3 py-2 text-sm font-medium" type="button" @click="browseSound(row.key)">
-            Browse…
+            {{ t('bindings.sound.browse') }}
           </button>
           <button
             v-if="sound?.[row.key]"
@@ -216,10 +217,10 @@ function toggleModifier(modifier: string, enabled: boolean) {
             type="button"
             @click="updateSound({ [row.key]: '' })"
           >
-            Reset
+            {{ t('common.reset') }}
           </button>
           <button class="button-accent rounded-[0.75rem] px-3 py-2 text-sm font-medium" type="button" @click="testSound(row.key)">
-            ▶ Test
+            ▶ {{ t('bindings.sound.test') }}
           </button>
         </div>
 

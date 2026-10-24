@@ -2,6 +2,7 @@ import { readonly, ref } from 'vue'
 
 import { listInputDevices, type InputDeviceInfo } from './commands'
 import { errorText } from './errors'
+import { t } from '../i18n/index.ts'
 
 const DEVICE_REFRESH_INTERVAL_MS = 5_000
 
@@ -38,7 +39,7 @@ export function refreshInputDevices(options: { showLoading?: boolean } = {}): Pr
     })
     .catch((error: unknown) => {
       lastRefreshFailed.value = true
-      lastRefreshError.value = errorText(error, 'Failed to list joystick devices.')
+      lastRefreshError.value = errorText(error, t('bindings.device.listFailed'))
     })
     .finally(() => {
       hasCompletedInitialScan.value = true

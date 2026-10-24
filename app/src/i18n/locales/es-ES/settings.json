@@ -1,0 +1,87 @@
+{
+  "core": {
+    "title": "Configuración",
+    "intro": "Interruptores generales de la aplicación, apariencia, registro, sonidos de confirmación y archivos de configuración.",
+    "general": {
+      "heading": "General",
+      "enabled": {
+        "title": "VectorXR activado",
+        "description": "Activa o desactiva todas las mejoras de OpenXR de VectorXR en tiempo de ejecución."
+      },
+      "theme": {
+        "title": "Tema",
+        "description": "Se guarda solo en este equipo."
+      },
+      "language": {
+        "title": "Idioma",
+        "description": "Sistema (automático) sigue el idioma de visualización de Windows. Se guarda solo en este equipo.",
+        "system": "Sistema (automático)",
+        "systemResolved": "Sistema (automático) · {language}",
+        "pseudo": "Pseudoidioma (prueba)",
+        "machineTranslated": "Esta traducción se ha hecho por máquina y puede sonar poco natural. Las correcciones son bienvenidas en GitHub."
+      },
+      "tray": {
+        "title": "Bandeja del sistema",
+        "description": "Al cerrar esta ventana, la aplicación sigue en el área de notificación, con el estado, el interruptor de VectorXR, el nivel de registro y Exportar depuración. Desactivado: al cerrar la ventana se sale de la aplicación. Se guarda solo en este equipo.",
+        "helperNote": "La aplicación y la bandeja son un asistente de configuración, no la capa OpenXR. VectorXR funciona en tus juegos con ellas cerradas, siempre que VectorXR activado esté encendido."
+      },
+      "inputDevices": {
+        "title": "Dispositivos de entrada",
+        "description": "Para usar dentro del juego: vuelve a buscar un mando conectado a mitad de sesión que VectorXR no detectó.",
+        "rescan": "Volver a buscar entradas",
+        "rescanning": "Buscando…",
+        "noGame": "No hay ningún juego en ejecución con VectorXR.",
+        "asked_one": "Se ha pedido a {count} juego en ejecución que vuelva a buscar.",
+        "asked_other": "Se ha pedido a {count} juegos en ejecución que vuelvan a buscar.",
+        "rescanFailed": "Error al volver a buscar entradas"
+      },
+      "trackSeenApps": {
+        "title": "Registrar aplicaciones XR detectadas",
+        "description": "Anota el nombre del ejecutable y la hora en que se vieron por primera y última vez las aplicaciones OpenXR que inicias, para que puedas registrarlas fácilmente desde el Registro de aplicaciones. Todos los datos se guardan localmente en este equipo."
+      }
+    },
+    "logging": {
+      "heading": "Registro",
+      "logLevel": "Nivel de registro",
+      "logLevelHelp": "Info escribe los mensajes de funcionamiento normales y los errores. Depuración añade diagnósticos detallados, incluidas trazas limitadas de tiempos de fotograma de Turbo. Los cambios de registro se aplican al momento; inicia la aplicación de RV con Depuración activado para obtener mediciones del reloj en tiempo de ejecución.",
+      "levelInfo": "Info",
+      "levelDebug": "Depuración",
+      "retention": "Retención de registros",
+      "retentionHelp": "Número de archivos de registro rotados que se conservan. Los archivos más antiguos se eliminan cuando se supera ese número.",
+      "viewLogs": "Ver registros",
+      "exportDebug": "Exportar depuración",
+      "exportDebugHelp": "Guarda los registros, la configuración y los diagnósticos en un único archivo ZIP para compartir, igual que en la pestaña Inicio.",
+      "latestLog": "Último registro: {path}",
+      "latestLogPending": "Disponible después de la primera sesión"
+    },
+    "sound": {
+      "heading": "Sonidos de confirmación",
+      "description": "Volumen general de los sonidos de activación / desactivación que puedes asociar a las asignaciones.",
+      "test": "Probar",
+      "volume": "Volumen de los sonidos de confirmación",
+      "previewFailed": "No se pudo reproducir el sonido."
+    },
+    "configFiles": {
+      "heading": "Archivos de configuración",
+      "description": "Importa otro archivo de configuración, exporta la configuración actual o comprueba dónde guarda VectorXR su configuración local.",
+      "import": "Importar configuración",
+      "export": "Exportar configuración",
+      "directory": "Directorio de configuración",
+      "directoryPending": "Disponible cuando se cargue la configuración",
+      "reset": {
+        "title": "Restablecer valores predeterminados",
+        "description": "Vuelve a generar settings.json con los valores predeterminados y borra los datos locales de detección de aplicaciones OpenXR.",
+        "button": "Restablecer"
+      }
+    }
+  },
+  "theme": {
+    "system": "Sistema",
+    "light": "Claro",
+    "dark": "Oscuro"
+  },
+  "fileTypes": {
+    "jsonConfig": "Configuración JSON",
+    "wavAudio": "Audio WAV"
+  }
+}

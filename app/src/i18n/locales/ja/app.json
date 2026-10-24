@@ -1,0 +1,206 @@
+{
+  "tabs": {
+    "home": {
+      "label": "ホーム",
+      "subtitle": "状態、更新、サポート"
+    },
+    "core": {
+      "label": "設定",
+      "subtitle": "ランタイム、ログ、テーマ、構成",
+      "suiteOn": "スイート オン",
+      "suiteOff": "スイート オフ"
+    },
+    "osd": {
+      "label": "オンスクリーン表示",
+      "subtitle": "ヘッドセットの表示、配置、バインド"
+    },
+    "registry": {
+      "label": "アプリケーション レジストリ",
+      "subtitle": "プロファイル割り当て用にアプリケーションを登録",
+      "status_other": "{count} 個のアプリ"
+    },
+    "layers": {
+      "label": "OpenXR レイヤー",
+      "subtitle": "暗黙的レイヤーの順序を確認・管理",
+      "status": "システム"
+    },
+    "about": {
+      "label": "バージョン情報",
+      "subtitle": "プロジェクト情報、パッチ ノート、サポート"
+    },
+    "quadviews": {
+      "label": "Quadviews",
+      "subtitle": "動的フォービエイテッド レンダリングの制御"
+    },
+    "turbo": {
+      "label": "Turbo",
+      "subtitle": "頑固な fps 上限を打ち破るフレーム ペーシングの上書き"
+    },
+    "framegen": {
+      "label": "Frame Generation",
+      "subtitle": "生成フレームでより滑らかな動き"
+    },
+    "pivotxr": {
+      "label": "Pivot",
+      "subtitle": "回転の調整 - 後方を確認しよう!"
+    },
+    "depthxr": {
+      "label": "深度",
+      "subtitle": "ステレオ奥行きの調整 - 世界を新しい見え方で!"
+    }
+  },
+  "status": {
+    "trayFailed": "トレイ アイコンを設定できませんでした",
+    "enabledFromTray": "トレイから VectorXR を有効にしました",
+    "disabledFromTray": "トレイから VectorXR を無効にしました",
+    "logLevelDebugFromTray": "トレイからログ レベルを [デバッグ] に設定しました",
+    "logLevelInfoFromTray": "トレイからログ レベルを [情報] に設定しました",
+    "fixBeforeSaving": "保存する前に検証エラーを修正してください",
+    "loadLogsFailed": "ログを読み込めませんでした",
+    "loadLayersFailed": "OpenXR レイヤーの状態を読み込めませんでした",
+    "fixBeforeExporting": "エクスポートする前に検証エラーを修正してください",
+    "configExported": "構成をエクスポートしました",
+    "exportCanceled": "エクスポートをキャンセルしました",
+    "exportFailed": "構成をエクスポートできませんでした",
+    "debugExported": "デバッグ情報をエクスポートしました",
+    "debugExportCanceled": "デバッグ情報のエクスポートをキャンセルしました",
+    "debugExportFailed": "デバッグ情報をエクスポートできませんでした",
+    "importInvalidJson": "インポートに失敗しました: ファイルが有効な JSON ではありません"
+  },
+  "resetConfirm": "VectorXR を既定値にリセットしますか?\n\n保存されたすべての設定、アプリケーション レジストリのエントリ、プロファイル、OpenXR アプリケーションの検出データが消去されます。この操作は元に戻せません。",
+  "updates": {
+    "available": "バージョン {version} が利用可能です。クリックすると詳細を表示します。",
+    "checkFailed": "現在、更新を確認できません。",
+    "httpFailed": "GitHub の更新確認が HTTP {status} で失敗しました",
+    "invalidRelease": "GitHub から有効なリリースが返されませんでした"
+  },
+  "sidebar": {
+    "appSettings": "アプリの設定",
+    "enhancements": "OpenXR 拡張機能",
+    "suiteOff": "VectorXR のランタイム効果はオフです",
+    "moduleTitle": "{subtitle}。{status}",
+    "saveHint": "設定を適用するには [変更を保存] をクリックしてください。VR アプリケーションの再起動が必要な変更は、各拡張機能に記載されています。",
+    "logoAlt": "VectorXR のロゴ",
+    "version": "v{version}",
+    "updateTooltip": "新しいバージョンが利用可能です。クリックすると詳細を表示します。",
+    "updateAria": "新しいバージョンが利用可能です"
+  },
+  "saveBar": {
+    "unsaved": "未保存の変更",
+    "allSaved": "すべての変更を保存済み",
+    "pending": "保留中",
+    "dirtyHint": "保存して適用するか、破棄して元に戻してください。",
+    "cleanHint": "構成はディスクと一致しています。",
+    "saving": "保存しています...",
+    "save": "変更を保存",
+    "discard": "破棄",
+    "fixBeforeSaving": "保存前に修正:",
+    "moreErrors_other": "…ほか {count} 件"
+  },
+  "importPreview": {
+    "eyebrow": "インポート",
+    "title": "適用前に確認",
+    "description": "有効なインポートはすぐに保存されます。検証の問題があるインポートも、修正のためにエディターに読み込むことができます。",
+    "whatWillLoad": "読み込まれる内容",
+    "applications": "アプリケーション: {number}",
+    "moduleDefault_other": "{module} の既定: {state} — プロファイル {count} 件",
+    "issuesFound_other": "検証の問題が {count} 件見つかりました",
+    "issuesHint": "このまま適用することもできます。エラーは [検証] パネルに表示され、解決するまで保存はブロックされます。",
+    "valid": "構成の構造と値の範囲は有効なようです。",
+    "applyToEditor": "エディターに適用",
+    "importAndSave": "インポートして保存"
+  },
+  "debugExport": {
+    "eyebrow": "診断",
+    "title": "デバッグ情報のエクスポート",
+    "description": "VectorXR はトラブルシューティングの詳細を、テスト中に共有できる ZIP ファイルにまとめます。",
+    "included": "含まれる内容",
+    "items": {
+      "settings": "現在の設定と保存済みの設定 (JSON)",
+      "seenApps": "検出した OpenXR アプリ",
+      "logs": "保持されている VectorXR のログと最新の Frame Generation トレース ([デバッグ] ログ)",
+      "layers": "OpenXR レイヤーのスナップショット",
+      "health": "状態チェックの概要",
+      "version": "アプリのバージョンと関連するパス",
+      "turboMetrics": "Turbo のメトリックとペーシングの判断",
+      "turboSafety": "Turbo の安全ブロックと障害の履歴",
+      "runtime": "ライブおよび保存済みのランタイム診断",
+      "inventory": "ファイルの一覧と収集エラー"
+    },
+    "limits": "未加工のファイルはそれぞれ 8 MiB、合計 64 MiB までに制限され、ZIP は圧縮されます。大きなログには先頭部分と最新の出力が含まれます。省略または制限されたファイルは ZIP 内に一覧表示されます。消去された履歴や記録されていないメトリックは利用できません。",
+    "privacy": "パッケージには、ローカルのファイル パスやゲームの実行可能ファイル名が含まれる場合があります。システムの環境変数や無関係なファイルは含まれません。",
+    "exporting": "エクスポートしています...",
+    "save": "ZIP を保存",
+    "fileType": "VectorXR デバッグ パッケージ"
+  },
+  "profile": {
+    "number": "プロファイル {number}",
+    "editName": "プロファイル名の編集",
+    "noApplications": "アプリケーションなし",
+    "priority": "優先順位 — 複数のプロファイルが同じアプリケーションで重なる場合、共有するバインドは上位のプロファイルが所有します。",
+    "moveUp": "プロファイルを上へ移動 (優先度を上げる)",
+    "moveDown": "プロファイルを下へ移動 (優先度を下げる)",
+    "enabledTitle": "このプロファイルは、割り当てられたアプリケーションにカスタムの {module} 設定を適用します。",
+    "disabledTitle": "このプロファイルは実行時に無視されます。",
+    "on": "プロファイル オン",
+    "off": "プロファイル オフ",
+    "conflict": "プロファイルの競合",
+    "applications": "アプリケーション",
+    "applicationsHelp": "このプロファイルが適用される登録済みアプリケーションです。最初に一致したアクティブなプロファイルが優先されます。",
+    "inactiveTitle": "このプロファイルは有効になりません",
+    "inactiveBody": "この有効なプロファイルはどのアプリケーションにも割り当てられていません。少なくとも 1 つのアプリケーションを選択するか、プロファイルをオフにしてください。",
+    "offNote": "このプロファイルはオフのため効果はありません。そのアプリケーションには既定の {module} プロファイルが使用されます。"
+  },
+  "logViewer": {
+    "eyebrow": "ログ",
+    "title": "VectorXR ログ ビューアー",
+    "description": "ランタイムの状態を確認しやすいように、最近のレイヤー ログを読み取り専用で表示します。",
+    "loading": "ログを読み込んでいます...",
+    "directory": "ログ ディレクトリ",
+    "unavailable": "利用不可",
+    "logs": "VectorXR のログ",
+    "empty": "ログ ファイルはまだ見つかりません。タイトルでレイヤーを起動してから、このビューアーを開き直してください。",
+    "selected": "選択したログ",
+    "noneSelected": "ログが選択されていません",
+    "copied": "コピーしました",
+    "copyFailed": "コピーに失敗しました",
+    "copy": "テキストをコピー",
+    "opened": "開きました",
+    "openFailed": "開けませんでした",
+    "open": "ディレクトリを開く",
+    "noContent": "ログの内容がありません。"
+  },
+  "discord": {
+    "loading": "Discord を読み込んでいます…",
+    "opening": "Discord を開いています…",
+    "join": "Discord に参加 ↗",
+    "unavailable": "Discord を利用できません",
+    "loadFailed": "Discord の招待を読み込めませんでした。もう一度お試しください。",
+    "invitesUnavailable": "Discord の招待は現在利用できません。",
+    "openFailed": "ブラウザーを開けませんでした。もう一度お試しください。",
+    "retryAria": "Discord の招待の読み込みを再試行",
+    "loadingStatus": "Discord の招待を読み込んでいます。"
+  },
+  "healthCheck": {
+    "eyebrow": "システムの状態",
+    "title": "状態チェック",
+    "layer": "VectorXR レイヤー",
+    "layerNotFound": "見つかりません",
+    "lastSeenApp": "最後に検出したアプリ",
+    "noApp": "OpenXR アプリはまだ検出されていません",
+    "exportHint": "トラブルシューティングの詳細を共有するときは、デバッグ パッケージをエクスポートしてください。",
+    "export": "デバッグ情報のエクスポート"
+  },
+  "healthLoading": {
+    "label": "状態の情報を読み込んでいます",
+    "checking": "確認中"
+  },
+  "patchNotes": {
+    "eyebrow": "パッチ ノート",
+    "title": "最近の更新",
+    "description": "アプリの新機能をすべて掲載しています。最新の項目が一番上に固定されています。"
+  },
+  "setupGuide": {
+    "title": "セットアップ ガイド"
+  }
+}

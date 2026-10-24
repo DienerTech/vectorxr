@@ -1,0 +1,40 @@
+{
+  "eyebrow": "Sobre",
+  "tagline": "Aprimoramentos OpenXR, ajustados para cada jogo.",
+  "intro": "VectorXR é uma plataforma de aprimoramentos OpenXR que transforma a forma como seu headset renderiza e rastreia — título por título. Recupere taxa de quadros com renderização foveada dinâmica, amplifique a rotação da cabeça para checar sua retaguarda sem virar demais e aumente a separação estereoscópica para uma sensação mais forte de escala e presença.",
+  "profiles": "O gerenciamento de camadas OpenXR e os perfis por aplicativo mantêm cada título configurado exatamente do seu jeito, tudo em um só lugar.",
+  "firstAndOnly": "{highlight} solução OpenXR em que a rotação aprimorada da cabeça e a renderização foveada quad-views funcionam juntas — a região foveada acompanha a sua visão girada em vez de ficar para trás.",
+  "firstAndOnlyHighlight": "A primeira e única",
+  "developedBy": "Desenvolvido de forma independente pela DienerTech LLC.",
+  "copyright": "(c) 2026 DienerTech LLC. Lançado sob a Mozilla Public License 2.0.",
+  "support": {
+    "eyebrow": "Apoie o desenvolvimento",
+    "title": "Apoie o VectorXR",
+    "body": "Gorjetas pelo Ko-fi ajudam a financiar hardware de teste, o trabalho de lançamento e o refinamento contínuo das ferramentas OpenXR.",
+    "button": "Apoiar no Ko-fi"
+  },
+  "patchNotes": {
+    "eyebrow": "Notas da versão mais recente",
+    "readFull": "Ler as notas da versão completas"
+  },
+  "updates": {
+    "eyebrow": "Atualizações",
+    "title": "Status da versão",
+    "published": "Publicado em {date}",
+    "check": "Verificar",
+    "release": "Versão",
+    "summary": {
+      "checking": "Verificando versões no GitHub...",
+      "available": "O VectorXR {tag} está disponível.",
+      "upToDate": "Você está na versão publicada mais recente, {tag}.",
+      "unavailable": "Ainda não há versões publicadas no GitHub.",
+      "idle": "Verifique no GitHub a build publicada mais recente do VectorXR."
+    },
+    "chip": {
+      "checking": "Verificando",
+      "available": "Atualizar",
+      "upToDate": "Atual",
+      "error": "Tentar de novo"
+    }
+  }
+}

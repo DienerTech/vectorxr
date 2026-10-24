@@ -114,6 +114,10 @@ struct OsdSettings {
     std::vector<std::string> body_order{"graph", "performance", "turbo", "framegen", "pivot", "modules"};
     std::string accent{"teal"};
     std::string custom_color{"#51ddbd"};
+    // The language the OSD draws in: a code ("de", "zh-CN"), or "app" for the
+    // app's language, which the app saves as app_language (osd_strings.h).
+    std::string language{"app"};
+    std::string app_language;
     // Any one of a list's bindings acts (one per device: a HOTAS's button and
     // a HOSAS's, say); none means none bound.
     std::vector<InputBinding> toggle_bindings{InputBinding{InputBindingType::Keyboard, {"Ctrl", "Alt", "F10"}}};

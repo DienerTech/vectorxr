@@ -1,0 +1,14 @@
+{
+  "health": "运行状况：{label}",
+  "healthUnavailable": "运行状况：设置未加载",
+  "logLevel": "日志级别：{level}",
+  "logLevelUnavailable": "日志级别",
+  "info": "信息",
+  "debug": "调试",
+  "tooltip": "VectorXR：{label}",
+  "tooltipDisabled": "VectorXR：已禁用",
+  "enabled": "VectorXR 已启用",
+  "exportDebug": "导出调试信息...",
+  "open": "打开 VectorXR",
+  "quit": "退出 VectorXR"
+}

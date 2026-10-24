@@ -14,8 +14,9 @@ import {
   type SeenApplication,
 } from '../lib/commands'
 import { errorText } from '../lib/errors'
+import { t } from '../i18n/index.ts'
 import { createTaskQueue } from '../lib/taskQueue'
-import { cloneConfig, createApplication, createFrameGenProfile, createProfile, createPivotProfile, createQuadViewsProfile, createTurboProfile, defaultConfig } from '../lib/model'
+import { cloneConfig, createApplication, createFrameGenProfile, createProfile, createPivotProfile, createQuadViewsProfile, createTurboProfile, defaultConfig, defaultProfileName, isDefaultProfileName } from '../lib/model'
 import type { AppTab, ModuleId, RuntimePacingObservation, TurboMetricsSession, VectorXRConfig } from '../lib/model'
 
 interface StoreState {
@@ -81,7 +82,7 @@ async function readBack() {
 }
 
 function loadBlockedStatus() {
-  return `Settings could not be loaded, so saving is off to keep the file on disk: ${state.loadError.replace(/\.\s*$/, '')}. Fix the file and reopen VectorXR, import a config, or reset to defaults.`
+  return t('validation.store.loadBlocked', { error: state.loadError.replace(/\.\s*$/, '') })
 }
 
 export function useConfigStore() {
@@ -99,7 +100,7 @@ export function useConfigStore() {
       state.status = ''
       await Promise.all([refreshSeenApps(), refreshRuntimePacing(), refreshTurboMetrics()])
     } catch (error) {
-      state.loadError = errorText(error, 'Failed to load config')
+      state.loadError = errorText(error, t('validation.store.loadConfigFailed'))
       state.status = loadBlockedStatus()
     } finally {
       state.loading = false
@@ -114,7 +115,7 @@ export function useConfigStore() {
       state.seenAppsPath = envelope.path
       state.seenApps = envelope.observations
     } catch (error) {
-      state.status = errorText(error, 'Failed to load seen apps')
+      state.status = errorText(error, t('validation.store.loadSeenAppsFailed'))
     } finally {
       state.seenAppsLoading = false
     }
@@ -135,7 +136,7 @@ export function useConfigStore() {
         state.activeRuntime = envelope.activeRuntime
       }
     } catch (error) {
-      state.status = errorText(error, 'Failed to load runtime pacing state')
+      state.status = errorText(error, t('validation.store.loadRuntimePacingFailed'))
     } finally {
       state.runtimePacingLoading = false
     }
@@ -151,7 +152,7 @@ export function useConfigStore() {
         state.turboMetrics = envelope.sessions
       }
     } catch (error) {
-      state.status = errorText(error, 'Failed to load turbo metrics')
+      state.status = errorText(error, t('validation.store.loadTurboMetricsFailed'))
     }
   }
 
@@ -160,9 +161,9 @@ export function useConfigStore() {
       const envelope = await clearTurboMetrics()
       state.turboMetricsPath = envelope.path
       state.turboMetrics = envelope.sessions
-      state.status = 'Turbo metrics cleared'
+      state.status = t('validation.store.turboMetricsCleared')
     } catch (error) {
-      state.status = errorText(error, 'Failed to clear turbo metrics')
+      state.status = errorText(error, t('validation.store.clearTurboMetricsFailed'))
     }
   }
 
@@ -172,9 +173,9 @@ export function useConfigStore() {
       state.runtimePacingPath = envelope.path
       state.runtimePacing = envelope.observations
       state.activeRuntime = envelope.activeRuntime
-      state.status = `Pacing verdict cleared for ${runtimeName}; Auto re-discovers at the next session`
+      state.status = t('validation.store.pacingVerdictCleared', { runtime: runtimeName })
     } catch (error) {
-      state.status = errorText(error, 'Failed to clear pacing verdict')
+      state.status = errorText(error, t('validation.store.clearPacingVerdictFailed'))
     }
   }
 
@@ -193,9 +194,9 @@ export function useConfigStore() {
         state.path = await saveConfigEnvelope(saved)
         state.originalConfig = saved
         await readBack()
-        state.status = 'Config saved'
+        state.status = t('validation.store.configSaved')
       } catch (error) {
-        state.status = errorText(error, 'Failed to save config')
+        state.status = errorText(error, t('validation.store.saveConfigFailed'))
       } finally {
         state.saving = false
       }
@@ -233,7 +234,7 @@ export function useConfigStore() {
         state.status = description
         return true
       } catch (error) {
-        state.status = errorText(error, 'Failed to save config')
+        state.status = errorText(error, t('validation.store.saveConfigFailed'))
         return false
       } finally {
         state.saving = false
@@ -258,7 +259,7 @@ export function useConfigStore() {
         lastDisk = read
         state.config = cloneConfig(disk)
         state.originalConfig = cloneConfig(disk)
-        state.status = 'Loaded settings changed on disk'
+        state.status = t('validation.store.reloadedFromDisk')
       } catch {
         // Reported by the next load or save.
       }
@@ -278,9 +279,9 @@ export function useConfigStore() {
       state.loadError = ''
       state.seenApps = []
       await readBack()
-      state.status = 'Config reset to defaults'
+      state.status = t('validation.store.configReset')
     } catch (error) {
-      state.status = errorText(error, 'Failed to reset config')
+      state.status = errorText(error, t('validation.store.resetConfigFailed'))
     } finally {
       state.saving = false
     }
@@ -288,7 +289,7 @@ export function useConfigStore() {
 
   function discardChanges() {
     state.config = cloneConfig(state.originalConfig)
-    state.status = 'Unsaved changes discarded'
+    state.status = t('validation.store.changesDiscarded')
   }
 
   function setActiveTab(tab: AppTab) {
@@ -310,9 +311,9 @@ export function useConfigStore() {
       return
     }
 
-    if (!profile.name.trim() || profile.name === 'New Profile') {
+    if (!profile.name.trim() || isDefaultProfileName(profile.name)) {
       const firstApplication = state.config.applications.find((application) => application.id === profile.applicationIds[0])
-      profile.name = firstApplication?.name || 'New Profile'
+      profile.name = firstApplication?.name || defaultProfileName()
     }
   }
 
@@ -355,9 +356,9 @@ export function useConfigStore() {
       return
     }
 
-    if (!profile.name.trim() || profile.name === 'New Profile') {
+    if (!profile.name.trim() || isDefaultProfileName(profile.name)) {
       const firstApplication = state.config.applications.find((application) => application.id === profile.applicationIds[0])
-      profile.name = firstApplication?.name || 'New Profile'
+      profile.name = firstApplication?.name || defaultProfileName()
     }
   }
 
@@ -378,9 +379,9 @@ export function useConfigStore() {
       return
     }
 
-    if (!profile.name.trim() || profile.name === 'New Profile') {
+    if (!profile.name.trim() || isDefaultProfileName(profile.name)) {
       const firstApplication = state.config.applications.find((application) => application.id === profile.applicationIds[0])
-      profile.name = firstApplication?.name || 'New Profile'
+      profile.name = firstApplication?.name || defaultProfileName()
     }
   }
 
@@ -399,9 +400,9 @@ export function useConfigStore() {
       return
     }
 
-    if (!profile.name.trim() || profile.name === 'New Profile') {
+    if (!profile.name.trim() || isDefaultProfileName(profile.name)) {
       const firstApplication = state.config.applications.find((application) => application.id === profile.applicationIds[0])
-      profile.name = firstApplication?.name || 'New Profile'
+      profile.name = firstApplication?.name || defaultProfileName()
     }
   }
 
@@ -422,9 +423,9 @@ export function useConfigStore() {
       return
     }
 
-    if (!profile.name.trim() || profile.name === 'New Profile') {
+    if (!profile.name.trim() || isDefaultProfileName(profile.name)) {
       const firstApplication = state.config.applications.find((application) => application.id === profile.applicationIds[0])
-      profile.name = firstApplication?.name || 'New Profile'
+      profile.name = firstApplication?.name || defaultProfileName()
     }
   }
 
@@ -468,7 +469,7 @@ export function useConfigStore() {
   function importConfig(config: VectorXRConfig) {
     state.config = cloneConfig(config)
     state.loadError = ''
-    state.status = 'Config imported — save to write to disk'
+    state.status = t('validation.store.configImported')
   }
 
   function addApplication() {
@@ -477,16 +478,16 @@ export function useConfigStore() {
 
   function addSeenApplication(exe: string) {
     state.config.applications.push(createApplication(exe, state.config.applications))
-    state.status = `${exe} added to the application registry`
+    state.status = t('validation.store.applicationAdded', { exe })
   }
 
   async function clearSeenApplications() {
     try {
       state.seenAppsPath = await clearSeenApps()
       state.seenApps = []
-      state.status = 'Seen apps cleared'
+      state.status = t('validation.store.seenAppsCleared')
     } catch (error) {
-      state.status = errorText(error, 'Failed to clear seen apps')
+      state.status = errorText(error, t('validation.store.clearSeenAppsFailed'))
     }
   }
 

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
+import { t } from '../i18n/index.ts'
 import EffectField from './EffectField.vue'
 import {
   convergenceBadge,
@@ -33,8 +34,8 @@ function setExtendedRange(enabled: boolean) {
   <EffectField
     :value="value"
     :muted="muted"
-    title="Convergence / Depth Plane"
-    subtitle="Places the zero-parallax plane without changing relative depth. Keep 0 while tuning Stereo Depth, then use small steps: negative moves the plane farther; positive moves it nearer."
+    :title="t('depth.convergence.title')"
+    :subtitle="t('depth.convergence.subtitle')"
     :min="-props.displayLimit / 100"
     :max="props.displayLimit / 100"
     :step="0.001"
@@ -44,9 +45,9 @@ function setExtendedRange(enabled: boolean) {
     :display-value="toConvergenceDisplay"
     :parse-display-value="fromConvergenceDisplay"
     :display-badge="convergenceBadge"
-    left-label="- Farther plane"
-    center-label="0 App default"
-    right-label="+ Nearer plane"
+    :left-label="t('depth.convergence.left')"
+    :center-label="t('depth.convergence.center')"
+    :right-label="t('depth.convergence.right')"
     @update:value="$emit('update:value', $event)"
   >
     <template #footer>
@@ -57,8 +58,8 @@ function setExtendedRange(enabled: boolean) {
           type="checkbox"
           @change="setExtendedRange(($event.target as HTMLInputElement).checked)"
         />
-        Extended range (&plusmn;25)
-        <span class="text-muted">Use only when normal &plusmn;5 tuning is not enough.</span>
+        {{ t('depth.convergence.extendedRange') }}
+        <span class="text-muted">{{ t('depth.convergence.extendedRangeHint') }}</span>
       </label>
     </template>
   </EffectField>

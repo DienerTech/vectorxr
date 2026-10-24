@@ -1,3 +1,4 @@
+import { t } from '../i18n/index.ts'
 import type { TurboRecoveryRecord } from './commands'
 import type { VectorXRConfig } from './model'
 
@@ -19,5 +20,5 @@ export function turboSafetyApplies(config: VectorXRConfig, application: string):
 }
 
 export function turboFaultReason(record: TurboRecoveryRecord): string {
-  return record.reason || 'The session ended without a clean shutdown. The exact cause and crash time are unknown.'
+  return record.reason || t('turbo.safety.uncleanExitReason')
 }

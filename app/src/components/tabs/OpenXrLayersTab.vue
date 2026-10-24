@@ -2,6 +2,7 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import HealthLoading from '../HealthLoading.vue'
 
+import { formatList, hasMessage, t } from '../../i18n/index.ts'
 import {
   deleteOpenXrLayer,
   ensureOpenXrLayerElevation,
@@ -54,7 +55,7 @@ const vectorQuadWarning = computed(() => {
     const quad = slice.layers.find(isQuadViewsLayer)
 
     if (vector && quad && vector.order < quad.order) {
-      warnings.push(`${slice.label}: Quad-Views-Foveated should be above VectorXR for Pivot compatibility.`)
+      warnings.push(t('layers.warnings.quadOrder', { slice: sliceLabel(slice) }))
     }
   }
 
@@ -82,8 +83,15 @@ const toolkitQuadSlices = computed(() => {
     const vector = slice.layers.find((layer) => layer.isVectorXr && layer.enabled)
     const toolkit = slice.layers.find((layer) => layer.enabled && layer.layerName.toLowerCase().includes('mbucchia_toolkit'))
     return vector && toolkit && toolkit.order < vector.order
-  }).map((slice) => slice.label)
+  }).map((slice) => sliceLabel(slice))
 })
+
+// The backend names each slice in English; show the name for its id when the
+// catalog has one.
+function sliceLabel(slice: OpenXrLayerRegistrySlice): string {
+  const key = `layers.slices.${slice.id}`
+  return hasMessage(key) ? t(key) : slice.label
+}
 
 watch(() => props.snapshot, (value) => {
   if (selectedLayer.value && value) {
@@ -102,10 +110,10 @@ async function unlockMachineWrites() {
   try {
     await ensureOpenXrLayerElevation()
     emit('machineWritesUnlocked', true)
-    emit('status', 'Machine-wide OpenXR layer writes are unlocked for this app session.')
+    emit('status', t('layers.status.unlocked'))
     await nextTick()
   } catch (error) {
-    emit('status', errorText(error, 'Administrator approval was not granted'))
+    emit('status', errorText(error, t('layers.status.unlockDenied')))
   } finally {
     unlockingMachineWrites.value = false
   }
@@ -113,7 +121,7 @@ async function unlockMachineWrites() {
 
 async function toggleLayer(slice: OpenXrLayerRegistrySliceId, layer: OpenXrLayerEntry) {
   if (activeSliceReadOnly.value) {
-    emit('status', 'Unlock admin writes before changing machine-wide OpenXR layers.')
+    emit('status', t('layers.status.unlockBeforeToggle'))
     return
   }
 
@@ -132,7 +140,7 @@ async function toggleLayer(slice: OpenXrLayerRegistrySliceId, layer: OpenXrLayer
     emit('snapshotUpdated', nextSnapshot)
     updateSelectedLayer(nextSnapshot, slice, layer.manifestPath)
   } catch (error) {
-    emit('status', errorText(error, 'Failed to update OpenXR layer'))
+    emit('status', errorText(error, t('layers.status.toggleFailed')))
     queueRefresh()
   } finally {
     busyKey.value = null
@@ -141,7 +149,7 @@ async function toggleLayer(slice: OpenXrLayerRegistrySliceId, layer: OpenXrLayer
 
 async function moveLayer(slice: OpenXrLayerRegistrySliceId, layer: OpenXrLayerEntry, direction: OpenXrLayerMoveDirection) {
   if (activeSliceReadOnly.value) {
-    emit('status', 'Unlock admin writes before reordering machine-wide OpenXR layers.')
+    emit('status', t('layers.status.unlockBeforeReorder'))
     return
   }
 
@@ -158,7 +166,7 @@ async function moveLayer(slice: OpenXrLayerRegistrySliceId, layer: OpenXrLayerEn
     emit('snapshotUpdated', nextSnapshot)
     updateSelectedLayer(nextSnapshot, slice, layer.manifestPath)
   } catch (error) {
-    emit('status', errorText(error, 'Failed to reorder OpenXR layer'))
+    emit('status', errorText(error, t('layers.status.reorderFailed')))
     queueRefresh()
   } finally {
     busyKey.value = null
@@ -167,7 +175,7 @@ async function moveLayer(slice: OpenXrLayerRegistrySliceId, layer: OpenXrLayerEn
 
 function requestLayerDeletion(slice: OpenXrLayerRegistrySliceId, layer: OpenXrLayerEntry) {
   if (activeSliceReadOnly.value) {
-    emit('status', 'Unlock admin writes before removing machine-wide OpenXR layer registrations.')
+    emit('status', t('layers.status.unlockBeforeRemove'))
     return
   }
 
@@ -200,10 +208,12 @@ async function confirmLayerDeletion() {
     emit('snapshotUpdated', nextSnapshot)
     selectedLayer.value = null
     pendingDeletion.value = null
-    emit('status', `Removed "${layer.layerName}" from ${activeSlice.value?.label ?? 'the OpenXR registry'}.`)
+    emit('status', activeSlice.value
+      ? t('layers.status.removed', { name: layer.layerName, slice: sliceLabel(activeSlice.value) })
+      : t('layers.status.removedFromRegistry', { name: layer.layerName }))
     emit('refresh')
   } catch (error) {
-    emit('status', errorText(error, 'Failed to remove OpenXR layer registration'))
+    emit('status', errorText(error, t('layers.status.removeFailed')))
     queueRefresh()
   } finally {
     busyKey.value = null
@@ -218,7 +228,7 @@ async function openFolder(path: string | undefined) {
   try {
     await openFileDirectory(path)
   } catch (error) {
-    emit('status', errorText(error, 'Unable to open folder'))
+    emit('status', errorText(error, t('layers.status.openFolderFailed')))
   }
 }
 
@@ -320,26 +330,26 @@ function isQuadViewsLayer(layer: OpenXrLayerEntry): boolean {
 
 function sliceDescription(slice: OpenXrLayerRegistrySlice): string {
   if (slice.recommended) {
-    return 'Recommended for most Windows PCVR layers. Order below applies only inside this registry slice.'
+    return t('layers.slice.descriptionRecommended')
   }
 
   if (slice.id.includes('32')) {
-    return 'Uncommon: usually only relevant for legacy 32-bit OpenXR applications.'
+    return t('layers.slice.description32')
   }
 
-  return 'Uncommon: valid for per-user registrations, but separate from machine-wide ordering.'
+  return t('layers.slice.descriptionPerUser')
 }
 
 function signatureLabel(status: OpenXrLayerSignatureStatus): string {
   switch (status) {
     case 'signed':
-      return 'Signed'
+      return t('layers.signature.signed')
     case 'unsigned':
-      return 'Unsigned'
+      return t('layers.signature.unsigned')
     case 'invalid':
-      return 'Signature invalid'
+      return t('layers.signature.invalid')
     default:
-      return 'Unknown'
+      return t('common.unknown')
   }
 }
 
@@ -358,36 +368,38 @@ function signatureChipClass(status: OpenXrLayerSignatureStatus): string {
 function signatureTooltip(layer: OpenXrLayerEntry): string {
   switch (layer.signatureStatus) {
     case 'signed':
-      return 'Signature verified'
+      return t('layers.signature.signedTooltip')
     case 'unsigned':
-      return 'Signature unverified. This may cause problems with games that use anti-cheat software.'
+      return t('layers.signature.unsignedTooltip')
     case 'invalid':
       return layer.signatureSignerNotAfter
-        ? `Signature invalid. Certificate was valid through ${layer.signatureSignerNotAfter}.`
-        : 'Signature invalid. Open details for Windows signature information.'
+        ? t('layers.signature.invalidTooltipWithDate', { date: layer.signatureSignerNotAfter })
+        : t('layers.signature.invalidTooltip')
     default:
-      return 'Signature status unknown. Open details for Windows signature information.'
+      return t('layers.signature.unknownTooltip')
   }
 }
 
 function vectorXrTooltip(): string {
-  return 'VectorXR API layer. You are here!'
+  return t('layers.layer.vectorXrTooltip')
 }
 
 function quadViewsTooltip(): string {
-  return 'Quad-Views-Foveated layer. For Pivot compatibility, this should occur above the VectorXR layer in the same registry slice.'
+  return t('layers.layer.quadViewsTooltip')
 }
 
+// `action` is a whole sentence naming the action; the message adds why it
+// does or does not need administrator approval.
 function elevatedWriteTooltip(action: string, slice: OpenXrLayerRegistrySlice): string {
   if (!slice.requiresElevationForWrites) {
-    return `${action} This per-user hive should not require administrator approval.`
+    return t('layers.layer.perUserWrite', { action })
   }
 
   if (!adminWritesAvailable.value) {
-    return `${action} Unlock admin writes before changing machine-wide OpenXR layers.`
+    return t('layers.layer.lockedWrite', { action })
   }
 
-  return `${action} Machine-wide writes are unlocked for this app session.`
+  return t('layers.layer.unlockedWrite', { action })
 }
 
 function attentionTooltip(layer: OpenXrLayerEntry): string {
@@ -396,28 +408,28 @@ function attentionTooltip(layer: OpenXrLayerEntry): string {
   }
 
   if (!layer.manifestExists) {
-    return 'The registered manifest path does not exist.'
+    return t('layers.layer.manifestMissing')
   }
 
   if (!layer.libraryExists) {
-    return 'The layer DLL could not be resolved or does not exist.'
+    return t('layers.layer.libraryMissing')
   }
 
-  return 'This layer has a condition that may need review.'
+  return t('layers.layer.needsReview')
 }
 
 function signatureGuidance(layer: OpenXrLayerEntry): string {
   switch (layer.signatureStatus) {
     case 'signed':
-      return 'Windows verified this binary signature.'
+      return t('layers.signature.signedGuidance')
     case 'unsigned':
-      return 'Unsigned OpenXR layers can be legitimate, but may conflict with games or platforms that enforce anti-cheat policies while the layer is enabled.'
+      return t('layers.signature.unsignedGuidance')
     case 'invalid':
       return layer.signatureSignerNotAfter
-        ? `Windows did not verify this signature. The signing certificate was valid through ${layer.signatureSignerNotAfter}.`
-        : 'Windows did not verify this signature.'
+        ? t('layers.signature.invalidGuidanceWithDate', { date: layer.signatureSignerNotAfter })
+        : t('layers.signature.invalidGuidance')
     default:
-      return 'Windows could not determine a signature status for this binary.'
+      return t('layers.signature.unknownGuidance')
   }
 }
 </script>
@@ -427,24 +439,24 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
     <article class="rounded-[1.25rem] border p-4 shadow-panel backdrop-blur surface-panel">
       <div class="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <p class="eyebrow text-xs uppercase tracking-[0.24em]">System OpenXR</p>
-          <h2 class="mt-1 text-2xl font-semibold tracking-tight">OpenXR Layer Manager</h2>
+          <p class="eyebrow text-xs uppercase tracking-[0.24em]">{{ t('layers.manager.eyebrow') }}</p>
+          <h2 class="mt-1 text-2xl font-semibold tracking-tight">{{ t('layers.manager.title') }}</h2>
         </div>
         <div class="flex flex-wrap items-center gap-2">
           <span v-if="activeSlice" class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] chip-accent">
-            {{ enabledLayerCount }}/{{ activeSlice.layers.length }} enabled
+            {{ t('layers.manager.enabledCount', { enabled: enabledLayerCount, total: activeSlice.layers.length }) }}
           </span>
           <span v-if="uncommonLayerCount > 0" class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] chip-warning">
-            {{ uncommonLayerCount }} uncommon
+            {{ t('layers.manager.uncommonCount', { count: uncommonLayerCount }) }}
           </span>
           <button class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" :disabled="loading" @click="$emit('refresh')">
-            {{ loading ? 'Refreshing...' : 'Refresh' }}
+            {{ loading ? t('layers.manager.refreshing') : t('common.refresh') }}
           </button>
         </div>
       </div>
 
       <p class="mt-2 max-w-4xl text-sm leading-6 text-muted">
-        Toggle implicit API layers and adjust order within one registry hive at a time. Changes apply to future XR app launches.
+        {{ t('layers.manager.intro') }}
       </p>
 
       <div
@@ -452,7 +464,7 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
         class="mt-3 rounded-[0.9rem] border px-3 py-2 text-sm leading-6 chip-warning"
         style="border-color: var(--app-border)"
       >
-        <span class="font-medium">Pivot compatibility:</span>
+        <span class="font-medium">{{ t('layers.warnings.pivotLabel') }}</span>
         {{ vectorQuadWarning.join(' ') }}
       </div>
 
@@ -461,8 +473,8 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
         class="mt-3 rounded-[0.9rem] border px-3 py-2 text-sm leading-6 chip-warning"
         style="border-color: var(--app-border)"
       >
-        <span class="font-medium">Turbo conflict:</span>
-        OpenXR Toolkit is enabled while VectorXR Turbo is in use. Two frame-pacing layers fight each other — if OXRTK's Turbo Mode is on, disable it there or in VectorXR, never both.
+        <span class="font-medium">{{ t('layers.warnings.turboLabel') }}</span>
+        {{ t('layers.warnings.toolkitTurbo') }}
       </div>
 
       <div
@@ -470,8 +482,8 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
         class="mt-3 rounded-[0.9rem] border px-3 py-2 text-sm leading-6 chip-warning"
         style="border-color: var(--app-border)"
       >
-        <span class="font-medium">Quadviews off:</span>
-        OpenXR Toolkit is above VectorXR ({{ toolkitQuadSlices.join(', ') }}). It does not support quad views, so VectorXR keeps Quadviews off for every game OpenXR Toolkit runs in. Disable OpenXR Toolkit, or turn it off for those games, to use Quadviews.
+        <span class="font-medium">{{ t('layers.warnings.quadviewsOffLabel') }}</span>
+        {{ t('layers.warnings.toolkitQuad', { slices: formatList(toolkitQuadSlices) }) }}
       </div>
 
     </article>
@@ -488,9 +500,9 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
         >
           <div class="flex items-start justify-between gap-2">
             <div>
-              <p class="text-sm font-semibold tracking-tight">{{ slice.label }}</p>
+              <p class="text-sm font-semibold tracking-tight">{{ sliceLabel(slice) }}</p>
               <p class="mt-0.5 text-xs" :class="activeSliceId === slice.id ? 'text-inverse-muted' : 'text-muted'">
-                {{ slice.recommended ? 'Recommended' : 'Uncommon' }}
+                {{ slice.recommended ? t('layers.slice.recommended') : t('layers.slice.uncommon') }}
               </p>
             </div>
             <span
@@ -507,19 +519,19 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
         <div class="flex flex-wrap items-center justify-between gap-3">
           <div>
             <div class="flex flex-wrap items-center gap-2">
-              <h3 class="text-lg font-semibold tracking-tight">{{ activeSlice.label }}</h3>
+              <h3 class="text-lg font-semibold tracking-tight">{{ sliceLabel(activeSlice) }}</h3>
               <span class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em]" :class="activeSlice.recommended ? 'chip-success' : 'chip-warning'">
-                {{ activeSlice.recommended ? 'Recommended' : 'Uncommon' }}
+                {{ activeSlice.recommended ? t('layers.slice.recommended') : t('layers.slice.uncommon') }}
               </span>
               <span v-if="activeSlice.requiresElevationForWrites" class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] chip-idle">
-                Admin writes
+                {{ t('layers.slice.adminWrites') }}
               </span>
               <span
                 v-if="activeSlice.requiresElevationForWrites"
                 class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em]"
                 :class="adminWritesAvailable ? 'chip-success' : 'chip-warning'"
               >
-                {{ adminWritesAvailable ? 'Unlocked' : 'Read only' }}
+                {{ adminWritesAvailable ? t('layers.slice.unlocked') : t('layers.slice.readOnly') }}
               </span>
             </div>
             <p class="mt-1 text-sm leading-6 text-muted">{{ sliceDescription(activeSlice) }}</p>
@@ -534,20 +546,20 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
           class="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-[0.9rem] border px-3 py-2 text-sm leading-6 chip-warning"
           style="border-color: var(--app-border)"
         >
-          <span>Machine-wide layer controls are read-only until administrator approval is granted.</span>
+          <span>{{ t('layers.slice.readOnlyNotice') }}</span>
           <button
             class="button-accent rounded-[0.7rem] px-3 py-1.5 text-sm font-medium"
             type="button"
             :disabled="unlockingMachineWrites || busyKey !== null"
-            title="Request administrator approval to enable machine-wide OpenXR layer controls for this app session."
+            :title="t('layers.slice.unlockHelp')"
             @click.stop="unlockMachineWrites"
           >
-            {{ unlockingMachineWrites ? 'Requesting...' : 'Unlock Admin Writes' }}
+            {{ unlockingMachineWrites ? t('layers.slice.requesting') : t('layers.slice.unlockButton') }}
           </button>
         </div>
 
         <div v-if="activeSlice.layers.length === 0" class="mt-3 rounded-[0.9rem] border border-dashed px-5 py-5 text-center text-sm surface-panel-soft">
-          No implicit OpenXR layers are registered in this slice.
+          {{ t('layers.slice.empty') }}
         </div>
 
         <TransitionGroup v-else name="openxr-layer-list" tag="div" class="mt-3 space-y-2">
@@ -564,8 +576,8 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
                 <button
                   class="button-secondary inline-flex h-7 w-8 items-center justify-center rounded-[0.5rem] text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-60"
                   type="button"
-                  aria-label="Move layer up"
-                  :title="elevatedWriteTooltip('Move this layer earlier in this hive.', activeSlice)"
+                  :aria-label="t('layers.layer.moveUp')"
+                  :title="elevatedWriteTooltip(t('layers.layer.moveUpAction'), activeSlice)"
                   :disabled="busyKey !== null || activeSliceReadOnly || index === 0"
                   @click.stop="moveLayer(activeSlice.id, layer, 'up')"
                 >
@@ -574,8 +586,8 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
                 <button
                   class="button-secondary inline-flex h-7 w-8 items-center justify-center rounded-[0.5rem] text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-60"
                   type="button"
-                  aria-label="Move layer down"
-                  :title="elevatedWriteTooltip('Move this layer later in this hive.', activeSlice)"
+                  :aria-label="t('layers.layer.moveDown')"
+                  :title="elevatedWriteTooltip(t('layers.layer.moveDownAction'), activeSlice)"
                   :disabled="busyKey !== null || activeSliceReadOnly || index === activeSlice.layers.length - 1"
                   @click.stop="moveLayer(activeSlice.id, layer, 'down')"
                 >
@@ -588,7 +600,7 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
                 class="inline-flex w-[6.25rem] shrink-0 items-center justify-center gap-2 rounded-[0.7rem] border px-2.5 py-2 text-center transition disabled:cursor-not-allowed disabled:opacity-60"
                 :class="layer.enabled ? 'layer-state-on' : 'layer-state-off'"
                 type="button"
-                :title="elevatedWriteTooltip(`${layer.enabled ? 'Disable' : 'Enable'} this OpenXR layer.`, activeSlice)"
+                :title="elevatedWriteTooltip(layer.enabled ? t('layers.layer.disableAction') : t('layers.layer.enableAction'), activeSlice)"
                 :disabled="busyKey !== null || activeSliceReadOnly"
                 @click.stop="toggleLayer(activeSlice.id, layer)"
               >
@@ -596,7 +608,7 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
                   <span></span>
                   <span></span>
                 </span>
-                <span class="block text-[0.68rem] font-semibold uppercase tracking-[0.16em]">{{ layer.enabled ? 'Enabled' : 'Disabled' }}</span>
+                <span class="block text-[0.68rem] font-semibold uppercase tracking-[0.16em]">{{ layer.enabled ? t('common.enabled') : t('common.disabled') }}</span>
               </button>
 
               <div class="min-w-0 flex-1">
@@ -622,9 +634,9 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
                       <span
                         v-if="layer.isVectorXr && !layer.enabled"
                         class="mr-2 cursor-default rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em] chip-warning"
-                        title="VectorXR's OpenXR layer is disabled. OpenXR Enhancements will not apply even if the suite or individual Enhancements are enabled."
+                        :title="t('layers.layer.vectorXrDisabledTooltip')"
                       >
-                        Enhancements inactive
+                        {{ t('layers.layer.enhancementsInactive') }}
                       </span>
                       <span
                         v-if="isQuadViewsLayer(layer)"
@@ -638,7 +650,7 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
                         class="mr-2 cursor-default rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em] chip-warning"
                         :title="attentionTooltip(layer)"
                       >
-                        Needs attention
+                        {{ t('layers.layer.needsAttention') }}
                       </span>
                     </div>
                     <p class="mt-0.5 truncate text-sm leading-5 text-muted">{{ layer.description }}</p>
@@ -646,16 +658,16 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
 
                   <div class="flex shrink-0 flex-wrap justify-end gap-2">
                     <button class="button-secondary rounded-[0.65rem] px-3 py-1.5 text-xs font-medium" type="button" @click.stop="selectedLayer = layer">
-                      Details
+                      {{ t('layers.layer.details') }}
                     </button>
                     <button
                       class="button-danger rounded-[0.65rem] px-3 py-1.5 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50"
                       type="button"
                       :disabled="busyKey !== null || activeSliceReadOnly"
-                      :title="elevatedWriteTooltip('Remove this registration from the selected registry hive. Files will remain on disk.', activeSlice)"
+                      :title="elevatedWriteTooltip(t('layers.layer.removeAction'), activeSlice)"
                       @click.stop="requestLayerDeletion(activeSlice.id, layer)"
                     >
-                      Remove
+                      {{ t('common.remove') }}
                     </button>
                   </div>
                 </div>
@@ -668,42 +680,42 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
     </section>
 
     <div v-else class="rounded-[1rem] border border-dashed px-6 py-7 text-center text-sm surface-panel-soft">
-      {{ loading ? 'Reading OpenXR layer registrations...' : 'OpenXR layer state has not loaded yet.' }}
+      {{ loading ? t('layers.manager.loadingLayers') : t('layers.manager.notLoaded') }}
     </div>
 
     <div v-if="selectedLayer" class="fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-4 py-6 backdrop-blur-sm" role="dialog" aria-modal="true" @click.self="selectedLayer = null">
       <div class="max-h-[calc(100vh-3rem)] w-full max-w-[820px] overflow-y-auto rounded-[1.25rem] border p-5 surface-panel-strong">
         <div class="sticky top-0 z-10 -mx-5 -mt-5 flex flex-wrap items-start justify-between gap-4 border-b px-5 py-4 surface-panel-strong" style="border-color: var(--app-border)">
           <div class="min-w-0 flex-1">
-            <p class="eyebrow text-xs uppercase tracking-[0.24em]">Layer Details</p>
+            <p class="eyebrow text-xs uppercase tracking-[0.24em]">{{ t('layers.details.eyebrow') }}</p>
             <h2 class="mt-2 truncate text-xl font-semibold tracking-tight">{{ selectedLayer.layerName }}</h2>
             <p class="mt-1 text-sm leading-6 text-muted">{{ selectedLayer.description }}</p>
           </div>
           <button class="button-secondary shrink-0 rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click.stop="selectedLayer = null">
-            Close
+            {{ t('common.close') }}
           </button>
         </div>
 
         <div class="mt-5 grid gap-3 md:grid-cols-2">
           <div class="rounded-[0.9rem] border p-3 surface-panel-soft">
-            <p class="text-xs font-semibold uppercase tracking-[0.16em] text-soft">Manifest</p>
+            <p class="text-xs font-semibold uppercase tracking-[0.16em] text-soft">{{ t('layers.details.manifest') }}</p>
             <p class="mt-2 break-all font-mono text-xs">{{ selectedLayer.manifestPath }}</p>
             <div class="mt-3 flex flex-wrap items-center gap-2">
               <span class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em]" :class="selectedLayer.manifestExists ? 'chip-success' : 'chip-warning'">
-                {{ selectedLayer.manifestExists ? 'Found' : 'Missing' }}
+                {{ selectedLayer.manifestExists ? t('layers.details.found') : t('layers.details.missing') }}
               </span>
               <button class="button-secondary rounded-[0.6rem] px-3 py-1.5 text-xs font-medium" type="button" @click.stop="openFolder(selectedLayer.manifestPath)">
-                Open Manifest Folder
+                {{ t('layers.details.openManifestFolder') }}
               </button>
             </div>
           </div>
 
           <div class="rounded-[0.9rem] border p-3 surface-panel-soft">
-            <p class="text-xs font-semibold uppercase tracking-[0.16em] text-soft">DLL</p>
-            <p class="mt-2 break-all font-mono text-xs">{{ selectedLayer.libraryPath || 'Not resolved from manifest' }}</p>
+            <p class="text-xs font-semibold uppercase tracking-[0.16em] text-soft">{{ t('layers.details.dll') }}</p>
+            <p class="mt-2 break-all font-mono text-xs">{{ selectedLayer.libraryPath || t('layers.details.libraryNotResolved') }}</p>
             <div class="mt-3 flex flex-wrap items-center gap-2">
               <span class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em]" :class="selectedLayer.libraryExists ? 'chip-success' : 'chip-warning'">
-                {{ selectedLayer.libraryExists ? 'Found' : 'Missing or Unknown' }}
+                {{ selectedLayer.libraryExists ? t('layers.details.found') : t('layers.details.libraryMissingOrUnknown') }}
               </span>
               <span
                 class="cursor-default rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em]"
@@ -719,14 +731,14 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
                 type="button"
                 @click.stop="openFolder(selectedLayer.libraryPath)"
               >
-                Open DLL Folder
+                {{ t('layers.details.openDllFolder') }}
               </button>
             </div>
           </div>
         </div>
 
         <div class="mt-3 rounded-[0.9rem] border p-3 surface-panel-soft">
-          <p class="text-xs font-semibold uppercase tracking-[0.16em] text-soft">Binary Signature</p>
+          <p class="text-xs font-semibold uppercase tracking-[0.16em] text-soft">{{ t('layers.details.binarySignature') }}</p>
           <div class="mt-2 flex flex-wrap items-center gap-2">
             <span class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em]" :class="signatureChipClass(selectedLayer.signatureStatus)">
               <HealthLoading v-if="loading" />
@@ -734,24 +746,27 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
             </span>
             <span v-if="!loading" class="text-sm leading-6 text-muted">{{ signatureGuidance(selectedLayer) }}</span>
           </div>
-          <p v-if="!loading" class="mt-2 text-xs leading-5 text-muted">Windows status: {{ selectedLayer.signatureStatusDescription }}</p>
+          <p v-if="!loading" class="mt-2 text-xs leading-5 text-muted">{{ t('layers.details.windowsStatus', { status: selectedLayer.signatureStatusDescription }) }}</p>
           <dl class="mt-3 grid gap-2 text-xs md:grid-cols-2">
             <div v-if="selectedLayer.signatureSignerNotBefore || selectedLayer.signatureSignerNotAfter" class="min-w-0 md:col-span-2">
-              <dt class="font-semibold uppercase tracking-[0.14em] text-soft">Certificate Validity</dt>
+              <dt class="font-semibold uppercase tracking-[0.14em] text-soft">{{ t('layers.details.certificateValidity') }}</dt>
               <dd class="mt-1 font-mono">
-                {{ selectedLayer.signatureSignerNotBefore || 'Unknown start' }} to {{ selectedLayer.signatureSignerNotAfter || 'Unknown end' }}
+                {{ t('layers.details.validityRange', {
+                  from: selectedLayer.signatureSignerNotBefore || t('layers.details.unknownStart'),
+                  to: selectedLayer.signatureSignerNotAfter || t('layers.details.unknownEnd'),
+                }) }}
               </dd>
             </div>
             <div v-if="selectedLayer.signatureSignerSubject" class="min-w-0">
-              <dt class="font-semibold uppercase tracking-[0.14em] text-soft">Signer</dt>
+              <dt class="font-semibold uppercase tracking-[0.14em] text-soft">{{ t('layers.details.signer') }}</dt>
               <dd class="mt-1 break-all font-mono">{{ selectedLayer.signatureSignerSubject }}</dd>
             </div>
             <div v-if="selectedLayer.signatureSignerIssuer" class="min-w-0">
-              <dt class="font-semibold uppercase tracking-[0.14em] text-soft">Issuer</dt>
+              <dt class="font-semibold uppercase tracking-[0.14em] text-soft">{{ t('layers.details.issuer') }}</dt>
               <dd class="mt-1 break-all font-mono">{{ selectedLayer.signatureSignerIssuer }}</dd>
             </div>
             <div v-if="selectedLayer.signatureSignerThumbprint" class="min-w-0 md:col-span-2">
-              <dt class="font-semibold uppercase tracking-[0.14em] text-soft">Thumbprint</dt>
+              <dt class="font-semibold uppercase tracking-[0.14em] text-soft">{{ t('layers.details.thumbprint') }}</dt>
               <dd class="mt-1 break-all font-mono">{{ selectedLayer.signatureSignerThumbprint }}</dd>
             </div>
           </dl>
@@ -773,13 +788,14 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
       @click.self="cancelLayerDeletion"
     >
       <div class="w-full max-w-[520px] rounded-[1.15rem] border p-5 shadow-panel surface-panel-strong">
-        <p class="eyebrow text-xs uppercase tracking-[0.24em]">Destructive action</p>
+        <p class="eyebrow text-xs uppercase tracking-[0.24em]">{{ t('layers.remove.eyebrow') }}</p>
         <h2 id="remove-layer-title" class="mt-2 text-xl font-semibold tracking-tight">
-          Remove {{ pendingDeletion.layer.layerName }}?
+          {{ t('layers.remove.title', { name: pendingDeletion.layer.layerName }) }}
         </h2>
         <p id="remove-layer-description" class="mt-3 text-sm leading-6 text-muted">
-          This permanently removes the layer registration from {{ activeSlice?.label ?? 'the selected registry hive' }}.
-          The manifest and DLL files will remain on disk, but this action cannot be undone from VectorXR.
+          {{ activeSlice
+            ? t('layers.remove.description', { slice: sliceLabel(activeSlice) })
+            : t('layers.remove.descriptionSelectedHive') }}
         </p>
         <p class="mt-3 break-all rounded-[0.75rem] border px-3 py-2 font-mono text-xs text-soft surface-panel-soft" style="border-color: var(--app-border)">
           {{ pendingDeletion.layer.manifestPath }}
@@ -791,7 +807,7 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
             :disabled="busyKey !== null"
             @click="cancelLayerDeletion"
           >
-            Cancel
+            {{ t('common.cancel') }}
           </button>
           <button
             class="button-danger rounded-[0.75rem] px-4 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50"
@@ -799,7 +815,7 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
             :disabled="busyKey !== null"
             @click="confirmLayerDeletion"
           >
-            {{ isActionBusy(pendingDeletion.layer, 'delete') ? 'Removing...' : 'Remove Registration' }}
+            {{ isActionBusy(pendingDeletion.layer, 'delete') ? t('layers.remove.removing') : t('layers.remove.confirm') }}
           </button>
         </div>
       </div>

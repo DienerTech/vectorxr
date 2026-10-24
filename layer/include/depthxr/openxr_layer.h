@@ -37,6 +37,7 @@
 #include "depthxr/runtime_pacing.h"
 #include "depthxr/runtime_relay.h"
 #include "depthxr/osd_renderer.h"
+#include "depthxr/osd_strings.h"
 #include "depthxr/performance_monitor.h"
 #include "depthxr/process_exit.h"
 #include "depthxr/framegen_d3d11_bridge.h"

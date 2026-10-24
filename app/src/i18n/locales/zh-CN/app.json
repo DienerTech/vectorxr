@@ -1,0 +1,206 @@
+{
+  "tabs": {
+    "home": {
+      "label": "主页",
+      "subtitle": "状态、更新和支持"
+    },
+    "core": {
+      "label": "设置",
+      "subtitle": "运行时、日志、主题和配置",
+      "suiteOn": "套件已开启",
+      "suiteOff": "套件已关闭"
+    },
+    "osd": {
+      "label": "屏幕显示",
+      "subtitle": "头显显示、位置和绑定"
+    },
+    "registry": {
+      "label": "应用程序注册表",
+      "subtitle": "注册应用程序以分配配置文件",
+      "status_other": "{count} 个应用"
+    },
+    "layers": {
+      "label": "OpenXR 层",
+      "subtitle": "检查和管理隐式层顺序",
+      "status": "系统"
+    },
+    "about": {
+      "label": "关于",
+      "subtitle": "项目信息、补丁说明和支持"
+    },
+    "quadviews": {
+      "label": "Quadviews",
+      "subtitle": "动态注视点渲染控制"
+    },
+    "turbo": {
+      "label": "Turbo",
+      "subtitle": "针对顽固 fps 上限的帧节奏覆盖"
+    },
+    "framegen": {
+      "label": "Frame Generation",
+      "subtitle": "借助生成帧获得更流畅的运动"
+    },
+    "pivotxr": {
+      "label": "Pivot",
+      "subtitle": "旋转调校 - 留意你的六点钟！"
+    },
+    "depthxr": {
+      "label": "深度",
+      "subtitle": "立体深度调校 - 以全新方式看世界！"
+    }
+  },
+  "status": {
+    "trayFailed": "无法设置托盘图标",
+    "enabledFromTray": "已从托盘启用 VectorXR",
+    "disabledFromTray": "已从托盘禁用 VectorXR",
+    "logLevelDebugFromTray": "已从托盘将日志级别设置为“调试”",
+    "logLevelInfoFromTray": "已从托盘将日志级别设置为“信息”",
+    "fixBeforeSaving": "保存前请修复验证错误",
+    "loadLogsFailed": "无法加载日志",
+    "loadLayersFailed": "无法加载 OpenXR 层状态",
+    "fixBeforeExporting": "导出前请修复验证错误",
+    "configExported": "配置已导出",
+    "exportCanceled": "导出已取消",
+    "exportFailed": "无法导出配置",
+    "debugExported": "调试信息已导出",
+    "debugExportCanceled": "调试信息导出已取消",
+    "debugExportFailed": "无法导出调试信息",
+    "importInvalidJson": "导入失败：文件不是有效的 JSON"
+  },
+  "resetConfirm": "要将 VectorXR 重置为默认值吗？\n\n这将清除所有已保存的设置、应用程序注册表条目、配置文件和 OpenXR 应用程序发现数据。此操作无法撤消。",
+  "updates": {
+    "available": "版本 {version} 已可用。单击查看详细信息。",
+    "checkFailed": "目前无法检查更新。",
+    "httpFailed": "GitHub 更新检查失败，HTTP {status}",
+    "invalidRelease": "GitHub 未返回有效的版本"
+  },
+  "sidebar": {
+    "appSettings": "应用设置",
+    "enhancements": "OpenXR 增强功能",
+    "suiteOff": "VectorXR 运行时效果已关闭",
+    "moduleTitle": "{subtitle}。{status}",
+    "saveHint": "单击“保存更改”以应用设置。每项增强功能都会注明哪些更改需要重新启动 VR 应用程序。",
+    "logoAlt": "VectorXR 徽标",
+    "version": "v{version}",
+    "updateTooltip": "有新版本可用。单击查看详细信息。",
+    "updateAria": "有新版本可用"
+  },
+  "saveBar": {
+    "unsaved": "未保存的更改",
+    "allSaved": "所有更改已保存",
+    "pending": "待处理",
+    "dirtyHint": "保存以应用，或放弃以还原。",
+    "cleanHint": "配置与磁盘一致。",
+    "saving": "正在保存...",
+    "save": "保存更改",
+    "discard": "放弃",
+    "fixBeforeSaving": "保存前请修复：",
+    "moreErrors_other": "…以及另外 {count} 个"
+  },
+  "importPreview": {
+    "eyebrow": "导入",
+    "title": "应用前请检查",
+    "description": "有效的导入将立即保存。存在验证问题的导入仍可加载到编辑器中进行修复。",
+    "whatWillLoad": "将加载的内容",
+    "applications": "应用程序：{number}",
+    "moduleDefault_other": "{module} 默认：{state} — {count} 个配置文件",
+    "issuesFound_other": "发现 {count} 个验证问题",
+    "issuesHint": "您仍然可以应用——错误将显示在“验证”面板中，并且在解决之前会阻止保存。",
+    "valid": "配置结构和值范围看起来有效。",
+    "applyToEditor": "应用到编辑器",
+    "importAndSave": "导入并保存"
+  },
+  "debugExport": {
+    "eyebrow": "诊断",
+    "title": "导出调试信息",
+    "description": "VectorXR 会将故障排除详细信息打包成一个 ZIP 文件，供您在测试期间分享。",
+    "included": "包含内容",
+    "items": {
+      "settings": "当前和已保存的设置 JSON",
+      "seenApps": "已发现的 OpenXR 应用",
+      "logs": "保留的 VectorXR 日志和最新的 Frame Generation 跟踪（调试日志）",
+      "layers": "OpenXR 层快照",
+      "health": "运行状况检查摘要",
+      "version": "应用版本和相关路径",
+      "turboMetrics": "Turbo 指标和帧节奏决策",
+      "turboSafety": "Turbo 安全阻止和故障历史记录",
+      "runtime": "实时和已保存的运行时诊断",
+      "inventory": "文件清单和收集错误"
+    },
+    "limits": "原始文件每个最多 8 MiB，总计最多 64 MiB，ZIP 文件经过压缩。较大的日志会包含其开头部分和最新输出；被省略或截断的文件会在 ZIP 中列出。已清除的历史记录和未记录的指标不可用。",
+    "privacy": "此包可能包含本地文件路径和游戏可执行文件名。它不包含系统环境变量或无关文件。",
+    "exporting": "正在导出...",
+    "save": "保存 ZIP",
+    "fileType": "VectorXR 调试包"
+  },
+  "profile": {
+    "number": "配置文件 {number}",
+    "editName": "编辑配置文件名称",
+    "noApplications": "无应用程序",
+    "priority": "优先级顺序——当多个配置文件作用于同一应用程序时，位置较高的配置文件拥有它们共用的任何绑定。",
+    "moveUp": "上移配置文件（更高优先级）",
+    "moveDown": "下移配置文件（更低优先级）",
+    "enabledTitle": "此配置文件会将自定义 {module} 设置应用于其分配的应用程序。",
+    "disabledTitle": "此配置文件在运行时会被忽略。",
+    "on": "配置文件已开启",
+    "off": "配置文件已关闭",
+    "conflict": "配置文件冲突",
+    "applications": "应用程序",
+    "applicationsHelp": "此配置文件适用的已注册应用程序。以第一个匹配的活动配置文件为准。",
+    "inactiveTitle": "此配置文件不会激活",
+    "inactiveBody": "此已启用的配置文件未分配给任何应用程序。请至少选择一个应用程序，或关闭此配置文件。",
+    "offNote": "此配置文件已关闭，不起任何作用。其应用程序将回退到默认 {module} 配置文件。"
+  },
+  "logViewer": {
+    "eyebrow": "日志",
+    "title": "VectorXR 日志查看器",
+    "description": "最近的层日志以只读方式显示，便于检查运行时状态。",
+    "loading": "正在加载日志...",
+    "directory": "日志目录",
+    "unavailable": "不可用",
+    "logs": "VectorXR 日志",
+    "empty": "尚未找到日志文件。请在某个游戏中启动该层，然后重新打开此查看器。",
+    "selected": "所选日志",
+    "noneSelected": "未选择日志",
+    "copied": "已复制！",
+    "copyFailed": "复制失败",
+    "copy": "复制文本",
+    "opened": "已打开！",
+    "openFailed": "打开失败",
+    "open": "打开目录",
+    "noContent": "没有可用的日志内容。"
+  },
+  "discord": {
+    "loading": "正在加载 Discord…",
+    "opening": "正在打开 Discord…",
+    "join": "加入 Discord ↗",
+    "unavailable": "Discord 不可用",
+    "loadFailed": "无法加载 Discord 邀请。请重试。",
+    "invitesUnavailable": "Discord 邀请当前不可用。",
+    "openFailed": "无法打开浏览器。请重试。",
+    "retryAria": "重试加载 Discord 邀请",
+    "loadingStatus": "正在加载 Discord 邀请。"
+  },
+  "healthCheck": {
+    "eyebrow": "系统运行状况",
+    "title": "运行状况检查",
+    "layer": "VectorXR 层",
+    "layerNotFound": "未找到",
+    "lastSeenApp": "最近发现的应用",
+    "noApp": "尚未发现 OpenXR 应用",
+    "exportHint": "分享故障排除详细信息时，请导出调试包。",
+    "export": "导出调试信息"
+  },
+  "healthLoading": {
+    "label": "正在加载运行状况信息",
+    "checking": "正在检查"
+  },
+  "patchNotes": {
+    "eyebrow": "补丁说明",
+    "title": "最近更新",
+    "description": "应用中的所有新内容，最新条目置顶显示。"
+  },
+  "setupGuide": {
+    "title": "设置指南"
+  }
+}

@@ -1,0 +1,320 @@
+{
+  "tab": {
+    "intro": "이미 OpenXR 쿼드 뷰를 요청하는 게임의 중심 시야 및 주변 시야 렌더링을 구성합니다. 이 모듈을 사용 설정해도 일반 스테레오 게임에 쿼드 뷰 지원이 추가되지는 않습니다.",
+    "varjoCompatibility": "Varjo 호환성",
+    "setupGuide": {
+      "title": "설정 가이드",
+      "summary": "권장 DCS 설정 및 호환 타이틀",
+      "heading": "권장 DCS 설정",
+      "gameLabel": "게임:",
+      "game": "{label} {useQuadView}를 켜고, 시선 추적을 사용하려면 {useEyeTracking}도 켜십시오.",
+      "useQuadView": "Use Quad View",
+      "useEyeTracking": "Use Eye Tracking",
+      "providerLabel": "제공자:",
+      "provider": "{label} VectorXR 레이어와 Quadviews 프로필을 사용 설정한 다음 {layerName}을(를) 사용 안 함으로 설정하십시오. Pimax에서는 Native Pimax Quad Views도 끄십시오. Varjo 기본 Quadviews는 계속 런타임에서 제어합니다.",
+      "applyLabel": "적용:",
+      "apply": "{label} 런타임, 레이어 또는 게임 내 VR 설정을 변경한 후에는 프로필을 저장하고 DCS를 다시 시작하십시오.",
+      "titles": "DCS가 주로 테스트된 타이틀입니다. 확인되지는 않았지만 가능성이 높은 D3D11 후보로는 Pavlov VR, VAIL VR, The 7th Guest VR, Kayak VR: Mirage가 있습니다. 각 타이틀이 직접 쿼드 뷰를 요청해야 합니다.",
+      "pixelEstimates": "픽셀 추정치는 애플리케이션 뷰 렌더링만 비교합니다. 런타임과 VectorXR 합성에는 추가 GPU 비용이 듭니다."
+    },
+    "restartNoteLabel": "다시 시작하여 적용:",
+    "restartNote": "{label} 표시된 필드와 Quadviews 켜기/끄기는 현재 OpenXR 애플리케이션이 종료된 후에 완전히 적용됩니다. 표시되지 않은 컨트롤은 플레이 중에 업데이트됩니다.",
+    "diagnostics": {
+      "eyebrow": "헤드셋 내 진단",
+      "intro": "Quadviews를 조정하는 동안 렌더 영역, 초점 정렬, 시선 필터링, 추적 가용성을 확인할 수 있습니다.",
+      "howToRead": "오버레이 읽는 방법",
+      "sessionControl": "세션 제어",
+      "shownIn": "{application}에 표시됨",
+      "hiddenIn": "{application}에서 숨겨짐",
+      "unavailable": "활성 OpenXR 세션에서 사용할 수 없음",
+      "noSession": "활성 합성 Quadviews 세션 없음",
+      "applying": "적용하는 중...",
+      "hide": "시각화 숨기기",
+      "show": "시각화 표시",
+      "shortcutHeading": "헤드셋 내 바로 가기",
+      "shortcutHint": "선택 사항입니다. 시각화는 OpenXR 세션마다 숨겨진 상태로 시작합니다.",
+      "guideHint": "시각화가 처음이신가요? 대화형 가이드에서 각 도형을 설명하고 흔한 증상을 해당 설정과 연결해 줍니다.",
+      "readStatusFailed": "런타임 상태를 읽을 수 없습니다",
+      "controlFailed": "시각화를 제어할 수 없습니다",
+      "notAcknowledged": "OpenXR 세션이 제어 요청을 확인하지 않았습니다"
+    },
+    "binding": {
+      "label": "진단 시각화 전환",
+      "description": "게임 중에 Quadviews 보정 뷰를 표시하거나 숨깁니다. 세션마다 숨겨진 상태로 시작하며, VectorXR이 D3D11 컴포지터를 통해 Quadviews를 합성할 때만 사용할 수 있습니다.",
+      "noneText": "할당된 헤드셋 내 바로 가기가 없습니다. Quadviews 페이지에서 시각화를 계속 제어할 수 있습니다."
+    },
+    "defaultProfile": {
+      "heading": "기본 프로필",
+      "appliesTo": "사용 설정된 사용자 지정 프로필이 없는 애플리케이션에 적용됩니다",
+      "toggleOn": "기본 프로필 켜짐",
+      "toggleOff": "기본 프로필 꺼짐",
+      "restartTitle": "Quadviews 사용/사용 안 함 변경은 실행 중인 OpenXR 애플리케이션이 종료된 후에 적용됩니다.",
+      "offNote": "사용 설정된 사용자 지정 프로필이 켜지 않는 한 꺼져 있습니다. 아래의 사용자 지정 프로필은 계속 해당 애플리케이션에 적용됩니다."
+    },
+    "launchStateNote": "즉시 저장되지만, 실행 중인 OpenXR 애플리케이션은 종료될 때까지 실행 시점의 Quadviews 상태를 유지합니다.",
+    "customProfiles": {
+      "heading": "사용자 지정 프로필",
+      "intro": "애플리케이션별로 Quadviews를 재정의합니다. 처음으로 일치하는 사용 설정된 프로필이 우선합니다.",
+      "add": "프로필 추가",
+      "empty": "아직 사용자 지정 프로필이 없습니다. 특정 애플리케이션의 쿼드 뷰 값을 재정의하려면 프로필을 추가하십시오.",
+      "alreadyTargeted": "{application}은(는) 이미 프로필 {number}의 대상입니다. 처음 활성화된 프로필이 우선합니다."
+    },
+    "budget": {
+      "estimate": "예상 앱 렌더 픽셀 {percent}%",
+      "light": "가벼움",
+      "moderate": "보통",
+      "heavy": "무거움",
+      "detrimental": "⚠ 역효과"
+    },
+    "varjo": {
+      "title": "Varjo 호환 Quadviews",
+      "biPanel": "Varjo 헤드셋은 듀얼 패널 방식으로, 눈마다 넓은 저밀도 컨텍스트 디스플레이와 작은 고밀도 초점 디스플레이가 있습니다. VectorXR의 Varjo 호환 쿼드 뷰는 헤드셋이 예상하는 네 개의 뷰 레이어(주변 두 개, 초점 두 개)를 유지하여 물리적 초점 패널을 직접 구동합니다. 그 결과 Varjo 런타임이 뷰 지오메트리를 담당하므로 일부 Quadviews 설정은 무시됩니다.",
+      "notesIntro": "VectorXR Quadviews 및 Varjo 런타임 호환성 참고 사항:",
+      "stillApplies": "VectorXR에서 계속 적용됨",
+      "handledByRuntime": "Varjo 런타임에서 처리됨",
+      "focusScale": "초점 배율",
+      "peripheralScale": "주변 배율",
+      "focusSharpness": "초점 선명도",
+      "focusSizeTransition": "초점 크기 및 전환 두께",
+      "offsets": "가로 및 세로 오프셋",
+      "smoothingDeadzone": "시선 스무딩 및 데드존",
+      "diagnosticVisualization": "진단 시각화",
+      "emulation": "듀얼 패널 디스플레이를 통한 물리적 쿼드 뷰 지원이 없는 헤드셋(예: Quest Pro, Pimax Crystal)에서는 VectorXR Quadviews가 표준 에뮬레이션 모드를 사용하며 모든 설정이 적용됩니다. 이 호환성 참고 사항은 Varjo 런타임에만 해당합니다.",
+      "diagnosticUnsupportedLead": "진단 시각화는 현재 Varjo 헤드셋에서 지원되지 않습니다.",
+      "diagnosticUnsupported": "{lead} Varjo 런타임이 기본 쿼드 뷰 합성을 담당하므로 VectorXR의 합성 D3D11 컴포지터가 그곳에서 실행되지 않습니다."
+    }
+  },
+  "fields": {
+    "preset": {
+      "heading": "Vector 사전 설정",
+      "restartTitle": "사전 설정에는 완전히 적용되려면 게임을 다시 시작해야 하는 설정이 포함되어 있습니다.",
+      "intro": "좋은 출발점입니다. 추적과 정렬은 직접 조정하십시오.",
+      "buttonTitle": "사전 설정은 초점 크기와 해상도를 변경하므로 완전히 적용되려면 게임을 다시 시작해야 합니다.",
+      "performance": "성능",
+      "balanced": "균형",
+      "quality": "품질"
+    },
+    "focusWindow": "초점 창",
+    "focusWidth": {
+      "label": "초점 너비",
+      "restart": "초점 창은 즉시 이동하지만, DCS는 다시 시작할 때까지 기존 텍스처 너비와 픽셀 작업량을 유지합니다."
+    },
+    "focusHeight": {
+      "label": "초점 높이",
+      "restart": "초점 창은 즉시 이동하지만, DCS는 다시 시작할 때까지 기존 텍스처 높이와 픽셀 작업량을 유지합니다."
+    },
+    "percentOfFov": "FOV의 %",
+    "horizontalOffset": {
+      "label": "가로 오프셋",
+      "help": "초점 영역을 도 단위로 왼쪽이나 오른쪽으로 이동합니다. 선명한 영역이 중심에서 벗어난 것처럼 느껴질 때만 사용하십시오."
+    },
+    "verticalOffset": {
+      "label": "세로 오프셋",
+      "help": "초점 영역을 도 단위로 위나 아래로 이동합니다. 헤드셋의 시선 중심이 세로로 치우친 것처럼 느껴질 때 유용합니다."
+    },
+    "resolution": "해상도",
+    "focusResolution": {
+      "label": "초점 해상도",
+      "restart": "다시 시작 필요: DCS는 실행 시점의 초점 텍스처를 유지합니다. 100%를 넘으면 VectorXR의 출력 캔버스 크기가 바뀔 수 있으며 일시적으로 프레임 속도가 끊길 수 있습니다.",
+      "warning": "VectorXR의 전체 뷰 출력 이미지는 초점 해상도에 따라 커집니다. {percent}%이면 위에 표시된 앱 렌더 비용에 더해 GPU 메모리와 합성에서 헤드셋 픽셀의 약 {factor}배가 필요합니다."
+    },
+    "percentOfHmd": "HMD 해상도의 %",
+    "peripheralResolution": {
+      "label": "주변 해상도",
+      "restart": "다시 시작 필요: DCS는 실행 시점의 주변 텍스처와 픽셀 작업량을 유지합니다."
+    },
+    "foveateSharpness": {
+      "label": "포비에이트 선명도",
+      "help": "고해상도 초점 이미지에 추가 선명화를 적용합니다. 0은 끄기이며, 값이 높을수록 선명해지지만 헤일로가 생길 수 있습니다."
+    },
+    "transitionThickness": {
+      "label": "전환 두께",
+      "help": "초점 이미지와 주변 이미지 사이의 혼합 가장자리 폭을 조절합니다. 값이 높을수록 경계가 잘 숨겨지지만 초점 창의 더 많은 부분이 부드러워집니다."
+    },
+    "percentOfFocusWindow": "초점 창의 %",
+    "tracking": "추적",
+    "mode": {
+      "label": "모드",
+      "restart": "게임이 머리 추적 모드로 시작된 경우 시선 추적으로 전환하려면 게임을 다시 시작해야 합니다.",
+      "help": "시선 추적을 사용할 수 있을 때 초점 영역이 머리 방향을 따를지 시선을 따를지 선택합니다.",
+      "head": "머리 추적",
+      "eye": "시선 추적"
+    },
+    "eyeTrackingCorrection": {
+      "label": "시선 추적 보정",
+      "help": "시선 추적이 반대로 느껴지지 않는 한 기본값을 사용하십시오. 반대로 느껴지면 Z만 반전을 사용해 보십시오.",
+      "default": "기본값",
+      "flipZ": "Z만 반전"
+    },
+    "smoothing": {
+      "label": "스무딩",
+      "help": "초점 영역의 움직임을 부드럽게 합니다. 0은 즉시이며, 값이 높을수록 떨림은 줄지만 지연이 늘어납니다."
+    },
+    "deadzone": {
+      "label": "데드존",
+      "help": "초점 영역이 움직이기 전에 무시되는 작은 시선 움직임입니다. 중앙 근처의 일렁임을 줄이는 데 유용합니다."
+    }
+  },
+  "dimensions": {
+    "peripheralLeft": "주변 L",
+    "peripheralRight": "주변 R",
+    "focusLeft": "초점 L",
+    "focusRight": "초점 R",
+    "waiting": "Quadviews 게임이 실행 중일 때 여기에 뷰 크기가 표시됩니다.",
+    "view": "{name}: {width} × {height}(텍스처 {allocatedWidth} × {allocatedHeight})",
+    "footer": "제출된 뷰 크기이며 1초마다 새로 고쳐집니다. 저장된 해상도 변경 사항은 게임을 다시 시작해야 적용될 수 있습니다.",
+    "labelNone": "크기 —",
+    "labelLive": "크기 · 실시간",
+    "labelLast": "크기 · 마지막"
+  },
+  "guide": {
+    "eyebrow": "대화형 현장 가이드",
+    "title": "Quadviews 오버레이 읽기",
+    "intro": "먼저 그림을 이해한 다음, 실제로 보이는 현상에 맞는 설정을 변경하십시오.",
+    "closeLabel": "오버레이 가이드 닫기",
+    "stepsLabel": "오버레이 가이드 단계",
+    "steps": {
+      "zones": {
+        "title": "영역 읽기",
+        "summary": "각 이미지가 어디에 기여하는지 확인합니다."
+      },
+      "alignment": {
+        "title": "정렬 확인",
+        "summary": "중심, 오프셋, 시선을 비교합니다."
+      },
+      "motion": {
+        "title": "추적 판단",
+        "summary": "떨림, 지연, 추적 손실을 찾아냅니다."
+      },
+      "troubleshoot": {
+        "title": "해결 방법 선택",
+        "summary": "증상을 알맞은 컨트롤과 연결합니다."
+      }
+    },
+    "illustrationLabel": "Quadviews 진단 오버레이의 대화형 그림",
+    "svg": {
+      "peripheral": "파랑 - 주변 컨텍스트",
+      "blend": "주황 - 혼합",
+      "focus": "초점 이미지",
+      "headCenter": "머리 중심",
+      "configuredOffset": "구성된 오프셋",
+      "raw": "원시",
+      "smoothed": "스무딩됨",
+      "dragHint": "클릭하거나 끌어서 원시 시선 이동",
+      "trackingUnavailable": "추적 사용 불가 - 대체 동작 활성"
+    },
+    "illustrative": "예시 그림 - 헤드셋 화면을 픽셀 단위로 정확히 캡처한 것이 아닙니다",
+    "demo": {
+      "focusSize": "초점 크기",
+      "transitionThickness": "전환 두께",
+      "horizontalOffset": "가로 오프셋",
+      "verticalOffset": "세로 오프셋",
+      "smoothing": "스무딩",
+      "degrees": "{value}도",
+      "eyeTrackingAvailable": "시선 추적: 사용 가능",
+      "eyeTrackingLost": "시선 추적: 손실됨",
+      "reset": "그림 초기화"
+    },
+    "settingNames": {
+      "peripheralResolution": "주변 해상도",
+      "transitionThickness": "전환 두께",
+      "focusResolution": "초점 해상도",
+      "focusWidthHeight": "초점 너비 / 높이",
+      "referenceOnly": "참조 전용",
+      "horizontalVerticalOffset": "가로 / 세로 오프셋",
+      "horizontalOffset": "가로 오프셋",
+      "verticalOffset": "세로 오프셋",
+      "trackingSource": "추적 소스",
+      "smoothingDeadzone": "스무딩 / 데드존",
+      "smoothing": "스무딩",
+      "deadzone": "데드존",
+      "trackingMode": "추적 모드",
+      "gameEyeTracking": "게임 시선 추적",
+      "headsetRuntime": "헤드셋 런타임"
+    },
+    "cards": {
+      "peripheral": {
+        "title": "주변 영역",
+        "body": "파란색은 컨텍스트 이미지를 나타냅니다. 해상도를 낮추면 선명한 영역을 줄이지 않고도 대개 가장 많은 픽셀을 절약할 수 있습니다."
+      },
+      "transition": {
+        "title": "전환 띠",
+        "body": "주황색은 이미지 사이의 혼합 부분입니다. 넓게 하면 이음새를 숨길 수 있지만, 너무 넓으면 가장자리가 흐릿하게 느껴질 수 있습니다."
+      },
+      "focusBoundary": {
+        "title": "초점 경계",
+        "body": "초록색 윤곽선은 초점 창의 크기입니다. 초점 해상도는 이 윤곽선이 아니라 세부 밀도를 변경합니다."
+      },
+      "headCenter": {
+        "title": "머리 중심",
+        "body": "흰색 십자는 헤드셋의 정면 방향입니다. 다른 모든 표시의 안정적인 기준이 됩니다."
+      },
+      "configuredOffset": {
+        "title": "구성된 오프셋",
+        "body": "자홍색 L과 고리는 머리 중심에서 의도적으로 보정한 위치를 나타냅니다."
+      },
+      "rawGaze": {
+        "title": "원시 시선",
+        "body": "청록색은 즉시 측정된 시선 추적 샘플입니다. 그림을 클릭하여 이동할 수 있습니다."
+      },
+      "smoothedGaze": {
+        "title": "스무딩된 시선",
+        "body": "노란색은 구성된 오프셋이 더해지기 전에 초점 창을 움직이는 필터링된 위치입니다."
+      },
+      "greenOutline": {
+        "title": "초록색 윤곽선",
+        "body": "시선 추적을 사용할 수 있습니다. 청록색과 노란색을 비교하여 필터링을 판단하십시오."
+      },
+      "redOutline": {
+        "title": "빨간색 윤곽선",
+        "body": "시선 소스를 사용할 수 없습니다. VectorXR이 대체 초점 동작을 사용하고 있습니다."
+      }
+    },
+    "goodTracking": {
+      "heading": "좋은 추적의 모습",
+      "cyan": "청록색이 눈의 움직임에 즉시 반응합니다.",
+      "yellow": "노란색이 계속 떨리지 않고 가깝게 따라갑니다.",
+      "window": "초점 창이 의도한 세부 위치에 머무릅니다."
+    },
+    "symptoms": {
+      "boundary": {
+        "label": "보이는 이음새",
+        "title": "초점 가장자리가 쉽게 보입니다",
+        "body": "전환 두께를 조금 늘리십시오. 주황색 띠가 넓게 흐려지면 다시 줄이고, 초점과 주변의 해상도 차이를 좁히십시오."
+      },
+      "offset": {
+        "label": "잘못된 중심",
+        "title": "선명한 영역이 일관되게 치우쳐 있습니다",
+        "body": "먼저 청록색과 노란색 시선 표시가 보고 있는 곳에 놓이는지 확인하십시오. 그렇다면 가로 또는 세로 오프셋으로 일관된 치우침을 보정하십시오. 시선 지연을 숨기려고 오프셋을 사용하지 마십시오."
+      },
+      "jitter": {
+        "label": "떨림",
+        "title": "초점 창이 시선 근처에서 떨립니다",
+        "body": "스무딩을 서서히 높이십시오. 작은 데드존은 중앙 근처의 미세한 눈 움직임을 억제할 수 있지만, 너무 크면 초점이 마침내 움직일 때 끈적하게 튀는 현상이 생깁니다."
+      },
+      "lag": {
+        "label": "지연이 너무 큼",
+        "title": "노란색 표시가 청록색보다 너무 뒤처집니다",
+        "body": "스무딩을 줄이십시오. 움직임이 늦게 시작된 후 튄다면 데드존도 줄이십시오. 초점 창이 시각적으로 안정된 상태를 유지하는 가장 작은 값을 사용하십시오."
+      },
+      "lost": {
+        "label": "빨간색 윤곽선",
+        "title": "시선 추적을 사용할 수 없습니다",
+        "body": "빨간색 초점 윤곽선은 색상 취향이 아니라 상태 경고입니다. 게임과 헤드셋 런타임에서 시선 추적이 사용 설정되어 있는지 확인하십시오. VectorXR은 시선을 따르는 대신 대체 동작을 사용합니다."
+      },
+      "performance": {
+        "label": "더 많은 FPS 필요",
+        "title": "가장 덜 중요한 곳의 픽셀을 줄이십시오",
+        "body": "먼저 주변 해상도를 낮추십시오. 그다음 필요하면 초점 너비나 높이를 줄이십시오. 초점 해상도는 창 안의 밀도를 변경할 뿐 초록색 윤곽선의 크기는 바꾸지 않습니다."
+      }
+    },
+    "ifYouSee": "이런 현상이 보이면",
+    "tuningOrder": {
+      "heading": "권장 조정 순서:",
+      "tracking": "추적을 사용할 수 있는지 확인합니다.",
+      "alignment": "일관된 정렬 치우침을 보정합니다.",
+      "smoothing": "스무딩과 지연 사이의 균형을 맞춥니다.",
+      "quality": "그다음 이미지 품질과 픽셀 비용을 조정합니다."
+    }
+  }
+}

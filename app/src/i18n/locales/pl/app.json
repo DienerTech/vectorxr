@@ -1,0 +1,218 @@
+{
+  "tabs": {
+    "home": {
+      "label": "Strona główna",
+      "subtitle": "Stan, aktualizacje i wsparcie"
+    },
+    "core": {
+      "label": "Ustawienia",
+      "subtitle": "Działanie, rejestrowanie, motyw i konfiguracja",
+      "suiteOn": "Pakiet wł.",
+      "suiteOff": "Pakiet wył."
+    },
+    "osd": {
+      "label": "Wyświetlacz ekranowy",
+      "subtitle": "Wyświetlacz w goglach, położenie i przypisania"
+    },
+    "registry": {
+      "label": "Rejestr aplikacji",
+      "subtitle": "Rejestrowanie aplikacji do przypisywania profili",
+      "status_one": "{count} aplikacja",
+      "status_few": "{count} aplikacje",
+      "status_many": "{count} aplikacji",
+      "status_other": "{count} aplikacji"
+    },
+    "layers": {
+      "label": "Warstwy OpenXR",
+      "subtitle": "Sprawdzanie kolejności niejawnych warstw i zarządzanie nią",
+      "status": "System"
+    },
+    "about": {
+      "label": "Informacje",
+      "subtitle": "Informacje o projekcie, poprawki i wsparcie"
+    },
+    "quadviews": {
+      "label": "Quadviews",
+      "subtitle": "Sterowanie dynamicznym renderowaniem foveated"
+    },
+    "turbo": {
+      "label": "Turbo",
+      "subtitle": "Wymuszanie taktowania klatek przy upartych limitach fps"
+    },
+    "framegen": {
+      "label": "Frame Generation",
+      "subtitle": "Płynniejszy ruch dzięki generowanym klatkom"
+    },
+    "pivotxr": {
+      "label": "Pivot",
+      "subtitle": "Dostrajanie obrotu — pilnuj swojego ogona!"
+    },
+    "depthxr": {
+      "label": "Głębia",
+      "subtitle": "Dostrajanie głębi stereo — zobacz świat na nowo!"
+    }
+  },
+  "status": {
+    "trayFailed": "Nie udało się skonfigurować ikony w zasobniku",
+    "enabledFromTray": "VectorXR włączony z zasobnika",
+    "disabledFromTray": "VectorXR wyłączony z zasobnika",
+    "logLevelDebugFromTray": "Poziom dziennika ustawiony na Debug z zasobnika",
+    "logLevelInfoFromTray": "Poziom dziennika ustawiony na Info z zasobnika",
+    "fixBeforeSaving": "Popraw błędy walidacji przed zapisaniem",
+    "loadLogsFailed": "Nie udało się załadować dzienników",
+    "loadLayersFailed": "Nie udało się załadować stanu warstw OpenXR",
+    "fixBeforeExporting": "Popraw błędy walidacji przed eksportem",
+    "configExported": "Wyeksportowano konfigurację",
+    "exportCanceled": "Eksport anulowany",
+    "exportFailed": "Nie udało się wyeksportować konfiguracji",
+    "debugExported": "Wyeksportowano informacje diagnostyczne",
+    "debugExportCanceled": "Eksport diagnostyki anulowany",
+    "debugExportFailed": "Nie udało się wyeksportować informacji diagnostycznych",
+    "importInvalidJson": "Import nie powiódł się: plik nie jest prawidłowym plikiem JSON"
+  },
+  "resetConfirm": "Przywrócić domyślne ustawienia VectorXR?\n\nSpowoduje to usunięcie wszystkich zapisanych ustawień, wpisów rejestru aplikacji, profili i danych wykrywania aplikacji OpenXR. Tej operacji nie można cofnąć.",
+  "updates": {
+    "available": "Dostępna jest wersja {version}. Kliknij, aby zobaczyć szczegóły.",
+    "checkFailed": "Nie można teraz sprawdzić dostępności aktualizacji.",
+    "httpFailed": "Sprawdzanie aktualizacji w serwisie GitHub nie powiodło się (HTTP {status})",
+    "invalidRelease": "Serwis GitHub nie zwrócił prawidłowego wydania"
+  },
+  "sidebar": {
+    "appSettings": "Ustawienia aplikacji",
+    "enhancements": "Ulepszenia OpenXR",
+    "suiteOff": "Efekty działania VectorXR są wyłączone",
+    "moduleTitle": "{subtitle}. {status}",
+    "saveHint": "Kliknij Zapisz zmiany, aby zastosować ustawienia. Każde ulepszenie informuje, które zmiany wymagają ponownego uruchomienia aplikacji VR.",
+    "logoAlt": "Logo VectorXR",
+    "version": "v{version}",
+    "updateTooltip": "Dostępna jest nowa wersja. Kliknij, aby zobaczyć szczegóły.",
+    "updateAria": "Dostępna jest nowa wersja"
+  },
+  "saveBar": {
+    "unsaved": "Niezapisane zmiany",
+    "allSaved": "Wszystkie zmiany zapisane",
+    "pending": "Oczekujące",
+    "dirtyHint": "Zapisz, aby zastosować, lub odrzuć, aby przywrócić.",
+    "cleanHint": "Konfiguracja zgodna z dyskiem.",
+    "saving": "Zapisywanie...",
+    "save": "Zapisz zmiany",
+    "discard": "Odrzuć",
+    "fixBeforeSaving": "Popraw przed zapisaniem:",
+    "moreErrors_one": "…i jeszcze {count}",
+    "moreErrors_few": "…i jeszcze {count}",
+    "moreErrors_many": "…i jeszcze {count}",
+    "moreErrors_other": "…i jeszcze {count}"
+  },
+  "importPreview": {
+    "eyebrow": "Import",
+    "title": "Przejrzyj przed zastosowaniem",
+    "description": "Prawidłowy import zostanie zapisany natychmiast. Importy z problemami walidacji można nadal załadować do edytora w celu naprawy.",
+    "whatWillLoad": "Co zostanie załadowane",
+    "applications": "Aplikacje: {number}",
+    "moduleDefault_one": "{module} domyślnie: {state} — {count} profil",
+    "moduleDefault_few": "{module} domyślnie: {state} — {count} profile",
+    "moduleDefault_many": "{module} domyślnie: {state} — {count} profili",
+    "moduleDefault_other": "{module} domyślnie: {state} — {count} profilu",
+    "issuesFound_one": "Znaleziono {count} problem walidacji",
+    "issuesFound_few": "Znaleziono {count} problemy walidacji",
+    "issuesFound_many": "Znaleziono {count} problemów walidacji",
+    "issuesFound_other": "Znaleziono {count} problemu walidacji",
+    "issuesHint": "Nadal można zastosować — błędy pojawią się w panelu Walidacja, a zapisywanie będzie zablokowane do czasu ich rozwiązania.",
+    "valid": "Struktura konfiguracji i zakresy wartości wyglądają na prawidłowe.",
+    "applyToEditor": "Zastosuj w edytorze",
+    "importAndSave": "Importuj i zapisz"
+  },
+  "debugExport": {
+    "eyebrow": "Diagnostyka",
+    "title": "Eksportuj informacje diagnostyczne",
+    "description": "VectorXR spakuje szczegóły dotyczące rozwiązywania problemów do pliku ZIP, który można udostępnić podczas testów.",
+    "included": "Zawartość",
+    "items": {
+      "settings": "Bieżące i zapisane ustawienia JSON",
+      "seenApps": "Wykryte aplikacje OpenXR",
+      "logs": "Zachowane dzienniki VectorXR i najnowszy ślad Frame Generation (rejestrowanie Debug)",
+      "layers": "Migawka warstw OpenXR",
+      "health": "Podsumowanie sprawdzania kondycji",
+      "version": "Wersja aplikacji i odpowiednie ścieżki",
+      "turboMetrics": "Metryki Turbo i decyzje dotyczące taktowania",
+      "turboSafety": "Blokady bezpieczeństwa Turbo i historia błędów",
+      "runtime": "Bieżąca i zapisana diagnostyka działania",
+      "inventory": "Spis plików i błędy zbierania"
+    },
+    "limits": "Pliki źródłowe są ograniczone do 8 MiB każdy i łącznie 64 MiB, a plik ZIP jest skompresowany. Większe dzienniki zawierają swój początek i najnowsze dane wyjściowe; pominięte lub ograniczone pliki są wymienione w pliku ZIP. Wyczyszczona historia i niezarejestrowane metryki są niedostępne.",
+    "privacy": "Pakiet może zawierać lokalne ścieżki plików i nazwy plików wykonywalnych gier. Nie zawiera systemowych zmiennych środowiskowych ani niepowiązanych plików.",
+    "exporting": "Eksportowanie...",
+    "save": "Zapisz ZIP",
+    "fileType": "Pakiet diagnostyczny VectorXR"
+  },
+  "profile": {
+    "number": "Profil {number}",
+    "editName": "Edytuj nazwę profilu",
+    "noApplications": "Brak aplikacji",
+    "priority": "Kolejność priorytetów — gdy profile nakładają się na jedną aplikację, wyższy profil przejmuje wszystkie wspólne przypisania.",
+    "moveUp": "Przenieś profil w górę (wyższy priorytet)",
+    "moveDown": "Przenieś profil w dół (niższy priorytet)",
+    "enabledTitle": "Ten profil stosuje niestandardowe ustawienia {module} do przypisanych mu aplikacji.",
+    "disabledTitle": "Ten profil jest ignorowany w czasie działania.",
+    "on": "Profil wł.",
+    "off": "Profil wył.",
+    "conflict": "Konflikt profili",
+    "applications": "Aplikacje",
+    "applicationsHelp": "Zarejestrowane aplikacje, do których stosuje się ten profil. Wygrywa pierwszy aktywny pasujący profil.",
+    "inactiveTitle": "Ten profil nie zostanie aktywowany",
+    "inactiveBody": "Ten włączony profil nie jest przypisany do żadnej aplikacji. Wybierz co najmniej jedną aplikację lub wyłącz profil.",
+    "offNote": "Ten profil jest wyłączony i nie ma żadnego efektu. Jego aplikacje korzystają z domyślnego profilu {module}."
+  },
+  "logViewer": {
+    "eyebrow": "Dzienniki",
+    "title": "Przeglądarka dzienników VectorXR",
+    "description": "Ostatnie dzienniki warstwy są wyświetlane tylko do odczytu, aby stan działania był łatwy do sprawdzenia.",
+    "loading": "Ładowanie dzienników...",
+    "directory": "Katalog dzienników",
+    "unavailable": "Niedostępny",
+    "logs": "Dzienniki VectorXR",
+    "empty": "Nie znaleziono jeszcze plików dziennika. Uruchom warstwę w grze i ponownie otwórz tę przeglądarkę.",
+    "selected": "Wybrany dziennik",
+    "noneSelected": "Nie wybrano dziennika",
+    "copied": "Skopiowano!",
+    "copyFailed": "Kopiowanie nie powiodło się",
+    "copy": "Kopiuj tekst",
+    "opened": "Otwarto!",
+    "openFailed": "Otwieranie nie powiodło się",
+    "open": "Otwórz katalog",
+    "noContent": "Brak zawartości dziennika."
+  },
+  "discord": {
+    "loading": "Ładowanie Discord…",
+    "opening": "Otwieranie Discord…",
+    "join": "Dołącz do Discord ↗",
+    "unavailable": "Discord niedostępny",
+    "loadFailed": "Nie udało się załadować zaproszenia Discord. Spróbuj ponownie.",
+    "invitesUnavailable": "Zaproszenia Discord są obecnie niedostępne.",
+    "openFailed": "Nie można otworzyć przeglądarki. Spróbuj ponownie.",
+    "retryAria": "Ponów ładowanie zaproszenia Discord",
+    "loadingStatus": "Ładowanie zaproszenia Discord."
+  },
+  "healthCheck": {
+    "eyebrow": "Kondycja systemu",
+    "title": "Sprawdzanie kondycji",
+    "layer": "Warstwa VectorXR",
+    "layerNotFound": "Nie znaleziono",
+    "lastSeenApp": "Ostatnio wykryta aplikacja",
+    "noApp": "Nie zaobserwowano jeszcze aplikacji OpenXR",
+    "exportHint": "Wyeksportuj pakiet diagnostyczny, udostępniając szczegóły dotyczące rozwiązywania problemów.",
+    "export": "Eksportuj informacje diagnostyczne"
+  },
+  "healthLoading": {
+    "label": "Ładowanie informacji o kondycji",
+    "checking": "Sprawdzanie"
+  },
+  "patchNotes": {
+    "eyebrow": "Informacje o poprawkach",
+    "title": "Ostatnie aktualizacje",
+    "description": "Wszystkie nowości w aplikacji, z najnowszym wpisem przypiętym na górze."
+  },
+  "setupGuide": {
+    "title": "Przewodnik konfiguracji"
+  }
+}

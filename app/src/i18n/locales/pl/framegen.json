@@ -1,0 +1,237 @@
+{
+  "title": "Frame Generation",
+  "experimental": "Eksperymentalne",
+  "intro": "Dodaje generowane klatki między klatkami gry, dzięki czemu ruch pozostaje płynny przy pełnej częstotliwości odświeżania gogli, nawet gdy gra nie nadąża. Wypróbuj dla każdej gry osobno i porównaj za pomocą przełącznika A/B.",
+  "howItWorksTitle": "Jak działa Frame Generation",
+  "restartNote": "Włączenie Frame Generation zaczyna działać przy następnym uruchomieniu gry; wyłączenie działa od razu.",
+  "restartToApply": {
+    "label": "Wymagane ponowne uruchomienie:",
+    "body": "{label} włączenie Frame Generation dla gry zaczyna działać przy następnym uruchomieniu gry. Wyłączenie oraz każde inne ustawienie na tej stronie działa w trakcie gry."
+  },
+  "setupGuide": {
+    "title": "Przewodnik konfiguracji",
+    "summary": "Włącz dla jednej gry, a następnie porównaj w goglach",
+    "smoothing": {
+      "label": "Wyłącz wygładzanie środowiska uruchomieniowego",
+      "body": "{label} dla gry, w środowisku uruchomieniowym i we własnym oprogramowaniu gogli: SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW lub Meta ASW. Kolidują one z taktowaniem Frame Generation."
+    },
+    "refreshRate": {
+      "label": "Utrzymuj gogle przy pełnej częstotliwości odświeżania.",
+      "body": "{label} Nie zmniejszaj liczby klatek o połowę opcją Lock Frame Rate to Half Refresh Rate w Pimax Play ani limitem klatek w Throttling Behavior w SteamVR; Frame Generation samo ustawia tempo gry."
+    },
+    "halfRate": {
+      "label": "Najpierw doprowadź grę do połowy częstotliwości odświeżania.",
+      "body": "{label} Przy wyłączonym Frame Generation obniż ustawienia gry lub rozdzielczość renderowania, aż utrzyma co najmniej połowę częstotliwości gogli (45 fps przy 90 Hz). Frame Generation może podnieść ją z połowy do pełnej, ale nie zrobi pierwszej połowy."
+    },
+    "oneGame": {
+      "label": "Włącz dla jednej gry:",
+      "body": "{label} pozostaw Profil domyślny wyłączony, dodaj poniżej profil niestandardowy i przypisz do niego grę. Ustawienia domyślne pasują do większości gier."
+    },
+    "restart": {
+      "label": "Zapisz i uruchom grę ponownie.",
+      "body": "{label} Włączenie Frame Generation zaczyna działać przy następnym uruchomieniu."
+    },
+    "check": {
+      "label": "Sprawdź w goglach:",
+      "osd": "Wyświetlacz ekranowy",
+      "body": "{label} {osd} pokazuje FG ON obok wartości FPS; możesz też wybrać widok diagnostyczny Zabarwienie generowanych klatek (i potem przywrócić Wył.)."
+    },
+    "compare": {
+      "label": "Porównaj:",
+      "body": "{label} przypisz przełącznik A/B i wyłączaj oraz włączaj generowane klatki w tej samej scenie."
+    },
+    "turboNote": "Turbo pozostaje wyłączone w grach, w których działa Frame Generation."
+  },
+  "controls": {
+    "heading": "Sterowanie w goglach",
+    "statusUnavailable": "Stan działania jest tymczasowo niedostępny.",
+    "noSession": "Nie działa żadna aplikacja VR"
+  },
+  "session": {
+    "withReason": "{status} · {reason}",
+    "withReasonColon": "{status}: {reason}",
+    "active": "Wł.",
+    "standby": "Gotowość",
+    "waiting": "Uruchamianie · oczekiwanie na stabilne klatki",
+    "paused": "Wstrzymane",
+    "unavailable": "Niedostępne",
+    "off": "Wył.",
+    "needsLayer": "Wymaga zaktualizowanej warstwy VectorXR",
+    "unknown": "Stan niedostępny"
+  },
+  "gameDepth": {
+    "inUse": {
+      "label": "Używa głębi gry",
+      "title": "Gra udostępnia swoją głębię, więc bliskie obiekty pozostają stabilne, gdy poruszasz głową."
+    },
+    "empty": {
+      "label": "Głębia gry jest pusta",
+      "title": "Gra wysyła głębię bez jej wypełnienia. Jeśli gra ma opcję reprojekcji opartej na głębi, jej włączenie pozwoli Frame Generation z niej korzystać."
+    },
+    "unusable": {
+      "label": "Głębia gry nieużywana",
+      "title": "Głębia wysyłana przez grę nie zgadza się między oczami, więc Frame Generation działa bez niej."
+    }
+  },
+  "toggle": {
+    "heading": "Przełącznik A/B",
+    "hint": "Opcjonalnie. Wyłącza i włącza generowane klatki w grach uruchomionych z włączonym Frame Generation.",
+    "label": "Przełącznik A/B Frame Generation",
+    "description": "Wyłącza i włącza generowane klatki w goglach, aby porównać ruch w tej samej scenie. Działa w grach uruchomionych z włączonym Frame Generation.",
+    "noneText": "Brak przypisania. Frame Generation działa wszędzie tam, gdzie jest włączone w chwili uruchomienia gry."
+  },
+  "diagnostic": {
+    "heading": "Widok diagnostyczny",
+    "hint": "{description} Dotyczy każdej gry i aktualizuje się w trakcie gry.",
+    "onWarning": "Wł.: generowane klatki w goglach są rysowane w kolorach tego widoku, które w normalnej grze wyglądają jak usterki. Po zakończeniu ustaw Wył.",
+    "views": {
+      "off": {
+        "label": "Wył.",
+        "description": "Generowane klatki są wyświetlane bez zmian."
+      },
+      "flow": {
+        "label": "Przepływ ruchu",
+        "description": "Koduje kolorami ruch zmierzony przez Frame Generation na generowanych klatkach."
+      },
+      "confidence": {
+        "label": "Pewność",
+        "description": "Maluje generowane klatki na czerwono tam, gdzie wróciły do rzeczywistego obrazu; przydatne podczas dostrajania ustawień zaawansowanych."
+      },
+      "tint": {
+        "label": "Zabarwienie generowanych klatek",
+        "description": "Lekko zabarwia generowane klatki, aby było widać, że są wyświetlane."
+      }
+    }
+  },
+  "defaultProfile": {
+    "heading": "Profil domyślny",
+    "appliesTo": "Dotyczy gier bez włączonego profilu niestandardowego",
+    "toggleOn": "Profil domyślny wł.",
+    "toggleOff": "Profil domyślny wył.",
+    "offNote": "Wyłączone dla gier bez profilu niestandardowego. Poniższe profile niestandardowe nadal włączają je dla swoich gier.",
+    "onWarning": {
+      "label": "Włączone dla każdej gry bez profilu niestandardowego,",
+      "body": "{label} w tym dla tych, z którymi go jeszcze nie testowano. Bezpieczniej jest pozostawić tę opcję wyłączoną i dodać profil dla każdej sprawdzonej gry."
+    }
+  },
+  "customProfiles": {
+    "heading": "Profile niestandardowe",
+    "description": "Włączaj Frame Generation dla poszczególnych gier. Wygrywa pierwszy włączony pasujący profil.",
+    "add": "Dodaj profil",
+    "empty": "Brak profili niestandardowych. Dodaj profil, aby włączyć Frame Generation dla gry.",
+    "duplicateApplication": "{application} jest już objęta Profilem {profile}. Wygrywa pierwszy aktywny profil."
+  },
+  "summary": {
+    "format": "{mode} · {rate} · {motion}",
+    "dynamic": "Dynamiczny",
+    "fixedAuto": "Stały Auto",
+    "fixed": "Stały {multiplier}"
+  },
+  "howItWorks": {
+    "whatItDoes": {
+      "heading": "Co robi",
+      "body": "Frame Generation mierzy, jak obraz przesuwa się między klatkami gry, i tworzy z tego ruchu nowe klatki, dzięki czemu gogle otrzymują świeży obraz przy każdym odświeżeniu, nawet gdy gra renderuje ich mniej. Obrót głowy jest najpierw usuwany, ponieważ zajmuje się nim już reprojekcja gogli."
+    },
+    "mode": {
+      "heading": "Tryb",
+      "interpolate": "{name} (domyślny) miesza dwie ostatnie klatki gry. Wygląda najpłynniej i ma najmniej artefaktów, ale pokazuje każdą klatkę gry nieco później.",
+      "extrapolate": "{name} rzutuje najnowszą klatkę gry do przodu wzdłuż jej ruchu, więc nie dodaje opóźnienia. Szybki ruch i nowo odsłonięte obszary pokazują więcej artefaktów; wygląda najlepiej ze sprzętem NVIDIA jako źródłem ruchu."
+    },
+    "frameRate": {
+      "heading": "Liczba klatek",
+      "dynamic": "{name} (domyślny) pozwala grze działać tak szybko, jak potrafi, i wypełnia odświeżenia między jej klatkami klatkami generowanymi. Gdy gra sama nadąża, Frame Generation pozostaje w gotowości i nic nie generuje.",
+      "fixed": "{name} utrzymuje grę na ustalonym ułamku częstotliwości odświeżania dla równego taktowania. W goglach 90 Hz {x2} uruchamia grę z 45 fps, {x3} z 30 fps, a {x4} z 22.5 fps; {auto} wybiera spośród nich zależnie od potrzeb gry. Każda generowana klatka przesuwa obraz dalej, więc wyższe mnożniki pokazują więcej artefaktów."
+    },
+    "beforeYouStart": {
+      "heading": "Zanim zaczniesz",
+      "smoothing": "{label} dla gry, w środowisku uruchomieniowym i we własnym oprogramowaniu gogli (SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW, Meta ASW) i utrzymuj gogle przy pełnej częstotliwości odświeżania: nie zmniejszaj liczby klatek o połowę opcją Lock Frame Rate to Half Refresh Rate w Pimax Play ani limitem klatek w Throttling Behavior w SteamVR. Frame Generation samo ustawia tempo gry.",
+      "turbo": {
+        "label": "Turbo pozostaje wyłączone, gdy działa Frame Generation.",
+        "body": "{label} Oba taktują klatki w przeciwny sposób, więc Turbo ustępuje w tych grach i pokazuje stan Wstrzymane z powodu Frame Generation. Twoje profile Turbo nie są zmieniane."
+      },
+      "apis": "Działa z grami Direct3D 11, Direct3D 12 i Vulkan, również z Quadviews."
+    },
+    "knownLimits": {
+      "heading": "Znane ograniczenia",
+      "body": "Ruch jest mierzony na podstawie obrazów wyświetlanych przez grę, więc tekst, HUD, przezroczystość i powtarzające się wzory mogą migotać lub się zniekształcać na generowanych klatkach. Jeśli to przeszkadza, zwiększ Tłumienie artefaktów lub obniż Limit ruchu w ustawieniach zaawansowanych."
+    }
+  },
+  "settings": {
+    "mode": {
+      "legend": "Tryb",
+      "interpolate": {
+        "label": "Interpolate",
+        "description": "Miesza dwie ostatnie klatki gry. Najpłynniejszy obraz z najmniejszą liczbą artefaktów; dodaje niewielkie opóźnienie."
+      },
+      "extrapolate": {
+        "label": "Extrapolate",
+        "description": "Rzutuje najnowszą klatkę gry do przodu. Najmniejsze opóźnienie, z większą liczbą artefaktów na ruchomych krawędziach; działa najlepiej ze sprzętem NVIDIA."
+      }
+    },
+    "frameRate": {
+      "legend": "Liczba klatek",
+      "dynamic": {
+        "label": "Dynamiczny",
+        "description": "Gra działa tak szybko, jak potrafi, a generowane klatki uzupełniają do częstotliwości odświeżania gogli."
+      },
+      "fixed": {
+        "label": "Stały",
+        "description": "Utrzymuje grę na ustalonym ułamku częstotliwości odświeżania dla równego taktowania i wypełnia resztę generowanymi klatkami."
+      },
+      "fixedRate": "Stały mnożnik",
+      "rates": {
+        "auto": "Wybiera 2x, 3x lub 4x zależnie od potrzeb gry i nic nie generuje, gdy gra sama nadąża.",
+        "x2": "Gra działa z co najwyżej 1/2 częstotliwości odświeżania, np. 45 fps przy 90 Hz. Poniżej tego taktowanie jest mniej równe.",
+        "x3": "Gra działa z co najwyżej 1/3 częstotliwości odświeżania, np. 30 fps przy 90 Hz. Poniżej tego taktowanie jest mniej równe.",
+        "x4": "Gra działa z co najwyżej 1/4 częstotliwości odświeżania, np. 22.5 fps przy 90 Hz. Najwięcej artefaktów; dla najcięższych gier."
+      }
+    },
+    "motionSource": {
+      "legend": "Źródło ruchu",
+      "shader": {
+        "label": "Shader",
+        "description": "Mierzy ruch na rdzeniach shaderów GPU. Działa na każdym GPU i najlepiej współpracuje z Interpolate."
+      },
+      "hardware": {
+        "label": "Sprzęt NVIDIA",
+        "description": "Używa jednostki przepływu optycznego kart NVIDIA RTX: dokładniejsza, zwłaszcza na powtarzających się wzorach. Używana przez Extrapolate oraz przez Interpolate przy stałej lub automatycznej (Auto) liczbie klatek (eksperymentalnie)."
+      }
+    },
+    "advanced": {
+      "summary": "{flow} · Tłumienie {suppression} · Limit ruchu {motionLimit}%",
+      "summaryHeadPrediction": "{flow} · Tłumienie {suppression} · Limit ruchu {motionLimit}% · Predykcja głowy",
+      "reset": "Resetuj ustawienia zaawansowane"
+    },
+    "flowQuality": {
+      "heading": "Jakość przepływu",
+      "resolution": "{resolution} obrazu oka",
+      "description": "Jak dokładnie mierzony jest ruch. Wyższa jakość lepiej śledzi małe, cienkie obiekty i zużywa więcej czasu GPU.",
+      "levels": {
+        "performance": "Wydajność",
+        "balanced": "Zrównoważona",
+        "quality": "Jakość"
+      },
+      "summary": {
+        "performance": "Przepływ: wydajność",
+        "balanced": "Przepływ: zrównoważony",
+        "quality": "Przepływ: jakość"
+      }
+    },
+    "artifactSuppression": {
+      "heading": "Tłumienie artefaktów",
+      "valueLabel": "Wartość tłumienia artefaktów",
+      "smoother": "Płynniejszy ruch",
+      "fewer": "Mniej artefaktów",
+      "description": "Tam, gdzie ruch jest niepewny, wyższe wartości szybciej pokazują rzeczywisty obraz: mniej zniekształceń, nieco więcej szarpania."
+    },
+    "motionLimit": {
+      "heading": "Limit ruchu",
+      "valueLabel": "Wartość limitu ruchu w procentach szerokości widoku",
+      "description": "Największe przesunięcie obrazu przez generowaną klatkę jako część szerokości widoku. Szybszy ruch pokazuje rzeczywisty obraz."
+    },
+    "headPrediction": {
+      "heading": "Rozszerz predykcję głowy",
+      "description": "Frame Generation sprawia, że gra renderuje nawet ~150 ms do przodu, a niektóre środowiska uruchomieniowe, np. Pimax, przewidują ruch głowy tylko dla ~20 ms z tego czasu. Ta opcja przenosi obrót głowy na resztę, aby było mniej czerni na krawędzi, w którą się obracasz. Włącz ją przed uruchomieniem gry."
+    }
+  }
+}

@@ -1,0 +1,314 @@
+{
+  "title": "Turbo",
+  "breadcrumb": "階層リンク",
+  "unknownApp": "不明なアプリ",
+  "strategy": {
+    "vectorxr": "VectorXR",
+    "vectorxrWithModes": "VectorXR · {modes}",
+    "toolkit": "Toolkit 方式",
+    "custom": "カスタム",
+    "unknown": "不明な戦略",
+    "async": "Async",
+    "sequenced": "Sequenced",
+    "auto": "自動"
+  },
+  "pacingMode": {
+    "auto": "自動 · 安定性優先",
+    "forcedAsync": "Async に固定",
+    "forcedSequenced": "Sequenced に固定"
+  },
+  "tab": {
+    "badge": "高度なペーシングの上書き",
+    "intro": "ペーシングがゲームの足を引っ張っている場合に、ランタイムの待機をゲームのクリティカル パスから外します。ゲーム内の A/B 比較で効果が実証された場合にのみ有効にしてください。",
+    "howItWorksButton": "Turbo のしくみ",
+    "recoveryUnavailable": "回復の状態を取得できません。保存済みの安全設定は引き続き適用されます。",
+    "toolkitConflict": "OpenXR Toolkit が VectorXR Turbo と同時に有効になっています。OXRTK の Turbo Mode もオンの場合は、2 つのペーシング レイヤーが競合しないよう、どちらか一方を無効にしてください。",
+    "frameGenNote": "一部のアプリケーションで Frame Generation がオンになっています。Frame Generation が動作するセッションでは Turbo はオフのままで、状態は「Frame Generation のため一時停止」と表示されます。",
+    "pacingSummary": {
+      "manual": "すべてのランタイムで手動の戦略が使用されています。",
+      "empty": "自動はランタイムごとに安定した戦略を選んで記憶します。最速の戦略を見つけるには Async と Sequenced を試してください。",
+      "observed_other": "{count} 個のランタイム環境を検出しました。自動はそれぞれに最も安定した戦略を選びますが、最速とは限りません。"
+    },
+    "metricsMode": {
+      "binding": "制御された記録",
+      "off": "収集オフ",
+      "always": "自動記録"
+    },
+    "metricsSummary": {
+      "empty": "同じフライトで Turbo のオンとオフを記録して、各戦略の効果を測定してください。",
+      "recorded_other": "{count} 回のフライトを記録しました。最新: {app}。",
+      "recordedLive_other": "{count} 回のフライトを記録しました。最新: {app} (進行中)。"
+    },
+    "toggleBinding": {
+      "label": "Turbo 切り替えのバインド",
+      "description": "ゲーム中に Turbo をオン/オフにして、fps とフレームの感触を直接比較します。表示が崩れた場合はすぐに無効にできます。このバインドを使うには、アプリケーションのプロファイルで Turbo が有効になっている必要があります。回復機能によってブロックされた場合や、ペーシングの問題で一時停止された場合に、Turbo を再試行することもできます。セッション中に切り替えると、再同期のために一瞬引っかかることがあります。",
+      "noneText": "バインドが割り当てられていません。回復機能やペーシング保護によってブロックされない限り、Turbo は有効な場所で自動的に開始します。"
+    },
+    "essentials": {
+      "eyebrow": "基本",
+      "intro": "既定をオフのままにしてカスタム プロファイルでアプリケーションごとに Turbo を有効にするか、全体でオンにします。有効化は保存時に適用され、切り替えのバインドで実行中のゲームの Turbo をオフ/オンにできます。",
+      "defaultProfile": "既定のプロファイル",
+      "defaultOnHint": "Turbo はカスタム プロファイルのないアプリケーションに適用されます。",
+      "defaultOffHint": "有効なカスタム プロファイルがオンにしない限りオフです。",
+      "defaultOn": "既定でオン",
+      "defaultOff": "既定でオフ",
+      "toggleHeading": "ゲーム内の Turbo 切り替え",
+      "toggleHint": "ゲーム中に Turbo をオン/オフにして直接比較します。"
+    },
+    "safety": {
+      "heldOff_other": "{count} 件のセットアップで Turbo がオフに保持されています。確認してから、消去するか切り替えのバインドで再試行してください。",
+      "idle": "中断されたセッションや繰り返されるランタイムの障害の後、Turbo をオフに保持します。",
+      "blockCount_other": "ブロック {count} 件",
+      "faultCount_other": "障害 {count} 件",
+      "review": "確認…",
+      "details": "詳細…"
+    },
+    "tune": {
+      "eyebrow": "調整と検証",
+      "intro": "Turbo の結果は、ゲーム、ヘッドセット、ランタイム、ドライバーによって異なります。最適なものを見つけるには、同じフライトで各戦略を Turbo オフと比較してください。",
+      "guideSummary": "ゲームに最適な戦略を見つける",
+      "guideStep1": "ゲーム用のカスタム プロファイルを作成し、ゲーム内の Turbo 切り替えを割り当てます。パフォーマンス診断で記録用のバインドを使用するように設定します。",
+      "guideStep2": "1 つの戦略でゲームを起動します。再現可能なシナリオを Turbo オンで約 1 分間飛行し、その後少なくとも 30 秒間オフに切り替えます。",
+      "guideStep3": "パフォーマンス診断で Turbo オフに対する効果を確認します。各フライトには使用した戦略のラベルが付きます。",
+      "guideStep4": "戦略を変更して保存し、再起動して繰り返します。[ランタイムの動作] で Async と Sequenced を試し、次にプロファイルの Toolkit 方式の戦略を試します。",
+      "guideStep5": "効果と 1% Low が最も良く、停止がない戦略を使い続けてください。自動は安全な既定値ですが、選ぶのは最も安定した戦略であり、最速とは限りません。"
+    },
+    "profiles": {
+      "title": "カスタム プロファイル",
+      "intro": "プロファイルごとにアプリケーションと Turbo の戦略を選択します。有効なプロファイルが重なる場合は、最初に一致したプロファイルが優先されます。",
+      "add": "プロファイルの追加",
+      "broadStrong": "全体での有効化がアクティブです。",
+      "broad": "{strong} Turbo は、検証していないものも含め、カスタム プロファイルのないアプリケーションに適用されます。より安全な設定は、既定でオフにし、この一覧をアプリケーションの許可リストとして使用することです。",
+      "legacyExperimental": "以前の実験的な設定は、アプリケーションの割り当てなしで保存されていました。",
+      "useSavedTiming": "このプロファイルで保存済みのタイミングを使用する",
+      "bypassSafety": "これらのアプリケーションでは Turbo の安全機能をバイパスする",
+      "bypassSafetyHint": "永続的な安全ブロックを無視します。ライブのペーシング フォールバックは引き続き失敗したセッションを一時停止します。再試行するには切り替えのバインドを使用してください。",
+      "empty": "カスタム プロファイルはまだありません。アプリケーションに既定とは異なる動作が必要な場合に追加してください。"
+    }
+  },
+  "howItWorks": {
+    "eyebrow": "Turbo モード",
+    "title": "Turbo のしくみ",
+    "whatItDoes": "機能",
+    "whatItDoesBody": "通常、ゲームはヘッドセットのランタイムが次のフレームを通知するまで待機しています。Turbo はその待機をゲームの邪魔にならない場所で行うため、ゲームは前のフレームを送信するとすぐに次のフレームを開始できます。VectorXR は下流のフレーム呼び出しの順序を維持しますが、ペーシングが行われるタイミングを変更し、次の表示時刻を推定する場合があります。",
+    "strategies": "{async} (通常は最速) はバックグラウンドで待機します。{sequenced} (それを必要とするランタイム向け) は待機と送信の歩調を合わせます。{auto} は Async から始め、Async が不安定な場合は Sequenced にフォールバックし、その結果をランタイムごとに記憶します。自動は安定性優先です。動作する戦略を選び、最速とは限りません。",
+    "toolkit": "{toolkit} は、mbucchia 氏が開発した OpenXR Toolkit の Turbo Mode のタイミングを再現する、実験的なプロファイルごとの戦略です。常に Async を使用し、ゲームの再起動後に反映されます。",
+    "whatToExpect": "期待できること",
+    "whatToExpectBody": "Turbo は汎用的な性能向上ではなく、的を絞った解決策です。ランタイムのペーシングによって fps がハードウェアの能力より低く抑えられている場合にのみ効果があり、ランタイムが強制するフレーム レートの固定を解除することはできません。パフォーマンス診断とゲーム内の切り替えを使って、タイトルごとに測定してください。",
+    "reprojectionLabel": "リプロジェクションとの互換性:",
+    "reprojection": "{label} Turbo は SteamVR の Motion Smoothing や、ASW などの他のリプロジェクション システムと干渉することがあります。Turbo をテストするときは Motion Smoothing を無効にしてください。フレーム時間の予測の精度が下がる場合があり、セッション中に Turbo を切り替えると、パイプラインの再同期中に一瞬引っかかることがあります。",
+    "bestStrategy": "最適な戦略を見つける",
+    "bestStrategyBody": "Turbo は仕様で正式に定義されていない OpenXR のタイミング動作に依存しているため、結果はハードウェア、ドライバー、ランタイム、ゲームによって異なります。戦略はセッション中に常に安全に切り替えられるとは限らないため、起動ごとに 1 つずつテストしてください。ゲーム内の切り替えを使って同じフライトで Turbo オンと Turbo オフを記録し、パフォーマンス診断で各戦略の効果を比較します。",
+    "safetyNet": "セーフティ ネット",
+    "safetyNetBody": "自動が適応した後でもペーシングが停止する場合、Turbo はそのセッションで自らを一時停止します。Turbo の安全機能が有効な場合、そのアプリケーションとランタイムのセットアップは、消去するかバインドで再試行するまでブロックされたままになります。障害の詳細は [Turbo の安全機能] ページに残ります。これはペーシングの停止を検出するもので、すべての表示やドライバーの障害を検出するわけではありません。再試行はセッションが安定してから行ってください。"
+  },
+  "profileTiming": {
+    "strategy": "戦略",
+    "strategyAria": "このプロファイルの Turbo の戦略",
+    "restartTitle": "この戦略への、またはこの戦略からの切り替えは、保存してゲームを再起動した後に反映されます。",
+    "restartNote": "マークの付いた戦略への、またはその戦略からの切り替えは、保存してゲームを再起動した後に反映されます。",
+    "descriptionVectorxr": "VectorXR 独自の Turbo です。[ランタイムの動作] の設定 ({pacing}) に従い、ゲーム内でオン/オフを切り替えられます。",
+    "descriptionToolkit": "OpenXR Toolkit の Turbo Mode のタイミングを再現します。実験的です。変更後はゲームを再起動してください。",
+    "descriptionCustom": "独自の調整を加えた Toolkit 方式です。実験的です。変更後はゲームを再起動してください。",
+    "summary": {
+      "waitForSubmission": "送信を待機",
+      "overlapSubmission": "送信と重複",
+      "sampleAtEntry": "開始時にサンプル",
+      "sampleAtReturn": "復帰時にサンプル",
+      "prediction": "予測 {percent}%",
+      "fpsCap": "上限 {fps} fps",
+      "noCap": "上限なし"
+    },
+    "advancedTitle": "高度なタイミング",
+    "advancedIntro": "実験用です。ほとんどのプレイヤーは変更しないでください。",
+    "waitForOverlap": "重複する送信を待機する",
+    "sampleAtWaitEntry": "待機の開始時に予測タイミングをサンプリングする",
+    "predictionLabel": "予測 (%)",
+    "frameCapLabel": "フレーム上限 (fps、0 = オフ)",
+    "changeNote": "いずれかの値を変更すると、プロファイルはカスタムに切り替わります。予測の調整にはランタイムのクロックのサポートが必要です。"
+  },
+  "safety": {
+    "title": "Turbo の安全機能",
+    "intro": "ブロックされたアプリケーションとランタイムのセットアップを確認し、Turbo を再試行し、記録された障害を調べます。",
+    "back": "Turbo に戻る",
+    "uncleanExitReason": "セッションは正常にシャットダウンされずに終了しました。正確な原因とクラッシュ時刻は不明です。",
+    "state": {
+      "recoveryDisabled": "Turbo 有効 · 安全ブロックによりオフ",
+      "suspended": "Turbo 有効 · 障害の後に一時停止",
+      "async": "Turbo アクティブ · Async",
+      "sequenced": "Turbo アクティブ · Sequenced",
+      "waiting": "Turbo の作動を待機中",
+      "off": "Turbo オフ",
+      "framegen": "Frame Generation のため一時停止",
+      "unavailable": "状態を取得できません"
+    },
+    "protection": {
+      "title": "自動保護",
+      "body": "セッションが中断されたり、ランタイムの障害が繰り返されたりすると、そのアプリケーションとランタイムのセットアップで Turbo がオフに保持されることがあります。Turbo はプロファイルでは有効なままなので、この UI を閉じていても、ゲーム内のバインドで再試行できます。",
+      "saveNote": "設定の変更を適用するには保存してください。カスタム プロファイルでは、選択したアプリケーションの安全機能をバイパスできます。ライブのペーシング フォールバックは引き続き失敗したセッションを一時停止しますが、バインドで再び有効にできます。"
+    },
+    "columns": {
+      "application": "アプリケーション / ランタイム",
+      "recorded": "記録日時",
+      "protection": "保護",
+      "actions": "操作",
+      "fault": "障害",
+      "details": "詳細"
+    },
+    "blocked": {
+      "title": "ブロックされたセットアップ",
+      "intro": "[消去して再テスト] は障害の記録を保持したまま、ランタイムが学習したペーシングの判断を消去します。新たに Async をテストするには、手動の上書きなしで自動のまま再起動してください。必要に応じて続けて Sequenced がテストされます。実行中のセッションでは現在のモードを再試行できますが、完全な再テストには再起動が必要です。",
+      "ariaLabel": "ブロックされた Turbo のセットアップ",
+      "blocked": "ブロック中",
+      "bypassed": "バイパス中",
+      "details": "詳細",
+      "clearing": "消去しています…",
+      "clearRetest": "消去して再テスト",
+      "empty": "記録された安全ブロックはありません。"
+    },
+    "faults": {
+      "title": "障害ログ",
+      "clearLogs": "ログを消去",
+      "clearing": "消去しています…",
+      "intro": "記録された障害は再試行後もここに残ります。異常終了の場合、記録された時刻は最後の安全マーカーの時刻であり、確認されたクラッシュ時刻ではありません。",
+      "clearHint": "[ログを消去] は障害の履歴を削除します。安全ブロックと学習したペーシングの判断はそのまま残ります。",
+      "ariaLabel": "Turbo の障害ログ",
+      "details": "詳細",
+      "empty": "記録された Turbo の障害はありません。"
+    },
+    "dialog": {
+      "title": "{application} · Turbo の障害",
+      "recorded": "記録日時",
+      "pacingMode": "ペーシング モード",
+      "runtime": "ランタイム",
+      "headset": "ヘッドセット",
+      "graphicsApi": "グラフィックス API",
+      "processId": "プロセス ID",
+      "notRecorded": "記録なし",
+      "armedNote": "停止したプロセスから異常終了と推測されました。これは Turbo がクラッシュを引き起こしたことを示すものではありません。",
+      "recoveredNote": "VectorXR は同じセッション中にこの障害から回復し、ゲームの実行を継続しました。これによって Turbo がブロックされることはありません。"
+    }
+  },
+  "diagnostics": {
+    "title": "パフォーマンス診断",
+    "moduleLabel": "Turbo の診断",
+    "intro": "重要なシナリオで Turbo を測定します。VectorXR は、両方の側でゲーム内の記録時間が十分にたまった後にのみ、Turbo のオンとオフを比較します。",
+    "closeAria": "診断を閉じて Turbo に戻る",
+    "binding": {
+      "label": "メトリック記録のバインド",
+      "description": "ゲーム中にメトリックの収集を開始・停止します。記録される数値が実際のプレイを反映するように、実際に飛行し始めてから記録を開始し、読み込み画面やメニューの前に一時停止してください。",
+      "noneText": "バインドが割り当てられていません。記録バインド モードでは、バインドを設定するまでメトリックは記録されません。",
+      "hint": "実際に飛行し始めてから記録を開始し、読み込み画面やメニューの前に一時停止してください。"
+    },
+    "capture": {
+      "title": "記録の動作",
+      "intro": "最も公正な結果を得るには、代表的なゲームプレイだけを記録してください。読み込み画面やメニューは、測定しようとしている効果をかき消してしまうことがあります。",
+      "collection": "収集",
+      "always": "ゲーム中は常に",
+      "binding": "記録用のバインドを使用",
+      "off": "オフ",
+      "bindingNote": "記録は記録用のバインドで開始・一時停止します。制御された比較にはこのモードをお勧めします。",
+      "alwaysNote": "Turbo が適用されている間は常に記録されます。1 秒を超える引っかかりは除外されますが、メニューや読み込み画面も含まれます。",
+      "offNote": "メトリックの収集は無効です。既存の結果は下で引き続き確認できます。"
+    },
+    "results": {
+      "eyebrow": "結果",
+      "intro": "フライトを選んで判定を確認し、必要な場合にのみ詳細な測定値を開いてください。",
+      "clearAllTitle": "記録されたすべてのメトリック セッションを削除",
+      "clearAll": "すべての結果を消去",
+      "emptyTitle": "パフォーマンスのチェックはまだありません",
+      "emptyBody": "ゲームで Turbo を実行すると、結果は約 15 秒ごとにここで更新されます。",
+      "flight": "フライト",
+      "strategy": "戦略",
+      "accumulateNote": "結果はセッション内で累積されます。戦略を比較するには、それぞれ新たに起動して Turbo オフに対する効果を比較してください。これらの数値は ASW の動作やヘッドセットでの表示を測定するものではありません。",
+      "versusOff": "Turbo オフに対する平均 fps",
+      "fpsChange": "このフライトでは {off} → {turbo} fps",
+      "needMoreTitle": "比較可能な飛行時間がさらに必要です",
+      "needMoreBody": "同様の条件で、Turbo オフで少なくとも 30 秒、Turbo オンで 30 秒記録してください。切り替えの間には Turbo 切り替えを使用してください。",
+      "evidenceNote": "この割合は約束ではなく根拠として使用してください。シーンの複雑さ、天候、交通量、バックグラウンドの処理も比較に影響します。"
+    },
+    "verdict": {
+      "faster": "高速",
+      "slower": "低速",
+      "within": "差 1% 以内"
+    },
+    "bucket": {
+      "off": "Turbo オフ",
+      "async": "Turbo — async",
+      "sequenced": "Turbo — sequenced"
+    },
+    "session": {
+      "unknownTime": "時刻不明",
+      "label": "{when} — {app} · {details}",
+      "labelLive": "{when} — {app} · {details} (ライブ)"
+    },
+    "duration": {
+      "minutes": "{minutes} 分 {seconds} 秒",
+      "seconds": "{seconds} 秒"
+    },
+    "detail": {
+      "title": "詳細な測定値",
+      "subtitle": "フレーム時間、ランタイムの待機、停止",
+      "empty": "このフライトにはまだ記録されたフレームがありません。",
+      "pacing": "ペーシング",
+      "time": "時間",
+      "avgFps": "平均 fps",
+      "onePercentLow": "1% Low",
+      "avgFrame": "平均フレーム",
+      "p99Frame": "p99 フレーム",
+      "waitBlocked": "待機ブロック",
+      "waitBlockedTitle": "ゲームがランタイムのペーシングでブロックされていた 1 フレームあたりの平均時間",
+      "stalls": "停止",
+      "stallsTitle": "安全回路が数えたフレーム ペーシングの停止",
+      "live": "フライト進行中 — 約 15 秒ごとに更新されます。",
+      "complete": "フライト完了。",
+      "collectionBinding": "収集: 記録用のバインド。",
+      "collectionAlways": "収集: 常に。",
+      "hitchesExcluded": "1 秒を超える引っかかりは除外されました。"
+    }
+  },
+  "runtime": {
+    "title": "ランタイムの動作",
+    "intro": "VectorXR Turbo が各 OpenXR ランタイムとどのように連携するかを選択します。自動は安全な出発点です。ゲームに最速の戦略を見つけるには、Async と Sequenced を試してパフォーマンス診断で比較してください。Toolkit 方式またはカスタムの戦略を使用するプロファイルは、これらの設定を無視します。",
+    "closeAria": "ランタイムの動作を閉じて Turbo に戻る",
+    "pacing": {
+      "title": "ペーシングの戦略",
+      "intro": "自動は安定性優先です。Async から始め、Async が停止したりフレームを繰り返し拒否したりする場合は Sequenced を試し、60 秒間安定してプレイできた後にその戦略を記憶します。パフォーマンスは比較しないため、記憶された戦略が最速とは限りません。",
+      "mode": "モード",
+      "asyncOnly": "Async のみ · 通常は最速",
+      "sequencedOnly": "Sequenced のみ · 必要とするランタイム向け",
+      "autoActiveStrong": "自動がアクティブです。",
+      "autoActive": "{strong} Async はランタイムの待機をゲームの処理と重ねます。Sequenced は待機と送信の連動を必要とするランタイムに対応します。特定の戦略をテストするには、下でランタイムを固定してください。",
+      "manualStrong": "手動の上書きがアクティブです。",
+      "manual": "{strong} 選択した戦略だけが実行されます。自動検出は一時停止されますが、Turbo の安全機能とライブの障害時の一時停止は引き続き適用されます。"
+    },
+    "decisions": {
+      "eyebrow": "ランタイムの判断",
+      "intro": "自動が学習した内容を確認するか、他に影響を与えずに 1 つのランタイムを上書きします。",
+      "active": "アクティブ: {runtime}",
+      "empty": "まだ管理する項目はありません。自動は、ランタイムでの Turbo の最初のセッションの後に判断を記録します。",
+      "environment": "環境",
+      "decision": "判断",
+      "learned": "学習日時",
+      "override": "上書き",
+      "activeBadge": "アクティブ",
+      "unknownHeadset": "不明なヘッドセット",
+      "useAuto": "自動を使用",
+      "pinAsync": "Async に固定",
+      "pinSequenced": "Sequenced に固定",
+      "clearRetestTitle": "このランタイムが学習した判断と安全ブロックを消去します。Async をテストするには、手動の上書きなしで自動のままゲームを再起動してください。必要に応じて続けて Sequenced がテストされます。",
+      "clearRetest": "消去して再テスト",
+      "inactiveNote": "全体の手動上書きが選択されている間は、ランタイムの判断は無効です。",
+      "willTest": "自動は次の Turbo セッションで {runtime} をテストします。Async から開始します。"
+    },
+    "mode": {
+      "notSupported": "サポート対象外",
+      "undiscovered": "未検出"
+    },
+    "badge": {
+      "pinned": "固定",
+      "suspended": "一時停止",
+      "discovered": "検出済み"
+    }
+  }
+}

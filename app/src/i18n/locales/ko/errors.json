@@ -1,0 +1,13 @@
+{
+  "configRead": "{path}을(를) 읽을 수 없습니다: {detail}",
+  "configParse": "{path}을(를) 구문 분석할 수 없습니다: {detail}",
+  "configReplace": "{path}을(를) 바꿀 수 없습니다: {detail}",
+  "directoryMissing": "디렉터리가 없습니다: {path}",
+  "soundMissing": "사운드 파일을 찾을 수 없습니다: {path}",
+  "sessionInactive": "OpenXR 세션이 더 이상 활성 상태가 아닙니다",
+  "diagnosticUnavailable": "이 OpenXR 세션에서는 진단 시각화를 사용할 수 없습니다",
+  "layerNotRegistered": "레이어 매니페스트가 더 이상 해당 OpenXR 슬라이스에 등록되어 있지 않습니다",
+  "layerConflict": "다른 VectorXR 등록이 이미 사용 설정되어 있습니다({slice}: {path}). VectorXR 사본 두 개가 로드되면 OpenXR 앱이 충돌하므로 먼저 해당 등록을 사용 안 함으로 설정하십시오.",
+  "elevationRequired": "이 OpenXR 레이어 변경에는 권한 상승이 필요합니다. VectorXR을 관리자 권한으로 다시 시작한 다음 다시 시도하십시오.",
+  "elevationCanceled": "권한 상승 프롬프트에서 OpenXR 레이어 변경이 취소되었거나 권한 상승된 도우미가 시작되지 않았습니다."
+}

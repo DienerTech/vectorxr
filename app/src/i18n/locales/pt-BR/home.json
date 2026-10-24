@@ -1,0 +1,53 @@
+{
+  "supportLinkError": "Não foi possível abrir o navegador. Acesse ko-fi.com/dienertech para apoiar o VectorXR.",
+  "layerStatus": {
+    "checking": "Verificando",
+    "notFound": "Não encontrada",
+    "enabled": "Camada ativada",
+    "disabled": "Camada desativada"
+  },
+  "layerDescription": {
+    "checking": "Verificando a camada de API registrada do VectorXR.",
+    "notFound": "O registro da camada de API do VectorXR não foi encontrado. Os aprimoramentos não serão aplicados até que a camada seja registrada e ativada.",
+    "enabled": "A camada de API do VectorXR está ativada, então os aprimoramentos podem ser aplicados durante a execução.",
+    "disabled": "A camada de API do VectorXR está desativada. Nenhum aprimoramento será aplicado, independentemente do estado de ativação da suíte ou do aprimoramento."
+  },
+  "runtime": {
+    "enabled": "Execução ativada",
+    "disabled": "Execução desativada",
+    "title": "Estado da chave de execução da suíte."
+  },
+  "systemHealth": {
+    "eyebrow": "Integridade do sistema",
+    "suiteOff": "Os efeitos de execução estão desativados pela chave da suíte. O status da camada continua disponível para solução de problemas.",
+    "checking": "Verificando a execução do VectorXR e a prontidão da camada OpenXR.",
+    "layerNotFound": "O VectorXR está ativado, mas o registro da camada de API OpenXR não foi encontrado.",
+    "layerDisabled": "O VectorXR está ativado, mas a camada de API OpenXR está desativada.",
+    "ready": "A execução do VectorXR e o status da camada OpenXR parecem prontos para as próximas inicializações de aplicativos OpenXR.",
+    "viewHealth": "Ver integridade",
+    "exportDebug": "Exportar depuração"
+  },
+  "enhancements": {
+    "eyebrow": "Aprimoramentos",
+    "title": "Visão geral dos ativos",
+    "activeCount": "{active} de {total} ativos",
+    "columns": {
+      "enhancement": "Aprimoramento",
+      "defaultProfile": "Perfil padrão",
+      "customProfiles": "Perfis personalizados",
+      "status": "Status"
+    },
+    "open": "Abrir as configurações de {module}",
+    "customEnabled": "{enabled} / {total} ativados",
+    "hint": "Selecione um aprimoramento para abrir as configurações dele."
+  },
+  "community": {
+    "eyebrow": "Comunidade e anúncios",
+    "title": "Ajude a moldar o VectorXR",
+    "discordTitle": "Discord da DienerTech",
+    "discordBody": "Compartilhe sua configuração, compare resultados e acompanhe os anúncios mais recentes do VectorXR.",
+    "supportTitle": "Apoie o desenvolvimento",
+    "supportBody": "Ajude o projeto contribuindo com o VectorXR no Ko-fi. Todo apoio ajuda a financiar o futuro do VectorXR!",
+    "supportButton": "Apoiar o VectorXR no Ko-fi ↗"
+  }
+}

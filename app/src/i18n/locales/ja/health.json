@@ -1,0 +1,63 @@
+{
+  "checks": {
+    "suiteEnabled": {
+      "label": "スイートのランタイム スイッチ",
+      "enabled": "VectorXR のランタイム効果の実行が許可されています。",
+      "disabled": "VectorXR はホームのランタイム スイッチで無効にされています。"
+    },
+    "layerRegistered": {
+      "label": "OpenXR レイヤーの登録",
+      "loading": "VectorXR は OpenXR レイヤーの登録をまだ読み取っています。",
+      "registered": "{slice} に登録済みです。",
+      "missing": "OpenXR 暗黙的 API レイヤーのレジストリに VectorXR が見つかりませんでした。"
+    },
+    "layerEnabled": {
+      "label": "OpenXR レイヤーの有効化",
+      "loading": "OpenXR レイヤーの状態を待っています。",
+      "enabled": "VectorXR API レイヤーは、今後の OpenXR 起動に対して有効です。",
+      "disabled": "VectorXR API レイヤーは無効か、利用できません。"
+    },
+    "layerDuplicates": {
+      "label": "有効な VectorXR レイヤーが 1 つ",
+      "detail_other": "{count} 件の VectorXR 登録が有効になっています ({paths})。コピーが 2 つ読み込まれると OpenXR アプリがクラッシュします。[OpenXR レイヤー] ページで 1 つを残してすべて無効にしてください。"
+    },
+    "layerFiles": {
+      "label": "レイヤー ファイル",
+      "pending": "レイヤー ファイルは、レイヤーの登録が見つかった後に確認できます。",
+      "resolved": "マニフェストと DLL のパスは両方とも解決できます。",
+      "missing": "登録されたマニフェストまたは DLL のパスが見つかりません。"
+    },
+    "configLoaded": {
+      "label": "構成のパス",
+      "pending": "構成のパスは設定の読み込み後に表示されます。"
+    },
+    "recentLog": {
+      "label": "ランタイム ログ",
+      "available_other": "最近のログ ファイルが {count} 件あります。",
+      "none": "VectorXR のランタイム ログはまだありません。"
+    },
+    "seenApps": {
+      "label": "アプリケーションの検出",
+      "observed_other": "{count} 個の OpenXR アプリを検出しました。",
+      "none": "OpenXR アプリケーションはまだ検出されていません。"
+    }
+  },
+  "overall": {
+    "ready": "準備完了",
+    "attention": "要確認",
+    "inactive": "非アクティブ",
+    "unknown": "確認中"
+  },
+  "description": {
+    "ready": "VectorXR は今後の OpenXR アプリの起動に向けて準備ができているようです。",
+    "attention": "VectorXR は動作できますが、1 つ以上の診断項目の確認が必要な可能性があります。",
+    "inactive": "VectorXR は現在、OpenXR 拡張機能を適用できる状態ではありません。",
+    "unknown": "VectorXR はシステムの状態をまだ収集しています。"
+  },
+  "state": {
+    "pass": "合格",
+    "warn": "警告",
+    "fail": "失敗",
+    "info": "情報"
+  }
+}

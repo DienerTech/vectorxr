@@ -1,0 +1,57 @@
+{
+  "applications": {
+    "eyebrow": "Registrierung",
+    "title": "Anwendungsregister",
+    "intro": "Registrieren Sie die Anwendungen, auf die Modulprofile über den Namen der ausführbaren Datei abzielen können. Die Chips auf jeder Karte zeigen, wie jedes Modul diese Anwendung derzeit behandelt – klicken Sie auf einen, um zu dessen Profil zu springen oder eines zu erstellen.",
+    "add": "Anwendung hinzufügen",
+    "unnamed": "Unbenannte Anwendung",
+    "editName": "Anwendungsnamen bearbeiten",
+    "executable": "Ausführbare Datei",
+    "executableHelp": "Beim Abgleich der ausführbaren Datei wird die Groß-/Kleinschreibung nicht beachtet, der Name muss jedoch die Dateierweiterung enthalten. Beispiel: DCS.exe",
+    "empty": "Noch keine Anwendungen registriert. Fügen Sie eine hinzu, bevor Sie Modulprofile erstellen.",
+    "chip": {
+      "defaultOff": "{module} · Standard aus",
+      "defaultOffTitle": "Das Standardprofil für {module} ist ausgeschaltet. Klicken Sie, um ein eigenes Profil für diese Anwendung zu erstellen.",
+      "custom": "{module} · {profile}",
+      "customTitle": "Das eigene {module}-Profil „{profile}“ gilt. Klicken Sie, um es zu öffnen.",
+      "default": "{module} · Standard",
+      "defaultTitle": "Das Standardprofil für {module} gilt. Klicken Sie, um ein eigenes Profil für diese Anwendung zu erstellen."
+    }
+  },
+  "discovery": {
+    "eyebrow": "Erkennung",
+    "trackingOnTitle": "Die Erkennung erfasst die OpenXR-Apps, die Sie starten.",
+    "trackingOffTitle": "Die Erkennung ist ausgeschaltet. Neue Starts von OpenXR-Apps werden erst aufgezeichnet, wenn Sie die Erfassung in den Einstellungen aktivieren.",
+    "trackingOn": "Erfassung ein",
+    "trackingOff": "Erfassung aus",
+    "title": "Woher neue Apps kommen",
+    "intro": "VectorXR merkt sich die OpenXR-Apps, die Sie starten, damit Sie sie mit einem Klick registrieren können. Nichts hier ändert Ihre Einstellungen, bis Sie es registrieren. Die Erfassung wird in den Einstellungen gesteuert.",
+    "clear": "Erkannte Apps löschen",
+    "loading": "Erkannte Apps werden geladen...",
+    "launches_one": "{count} Start",
+    "launches_other": "{count} Starts",
+    "details": "Details",
+    "register": "Registrieren",
+    "allRegistered": "Jede erkannte App ist registriert. Neue Apps, die Sie starten, werden hier angezeigt.",
+    "allRegisteredTrackingOff": "Jede erkannte App ist registriert. Die Erfassung ist ausgeschaltet, daher werden hier keine neuen Apps angezeigt.",
+    "alreadyRegistered": "Bereits registriert",
+    "registeredAs": "Registriert als {name}",
+    "empty": "Noch keine XR-Apps erkannt. Starten Sie eine OpenXR-App, während VectorXR aktiv ist, und aktualisieren Sie dann diese Liste.",
+    "emptyTrackingOff": "Die Anwendungserfassung ist deaktiviert, daher werden hier keine neuen Apps angezeigt. Aktivieren Sie die Erfassung in den Einstellungen, um Starts von OpenXR-Apps aufzuzeichnen."
+  },
+  "seenDetails": {
+    "eyebrow": "Erkannte App",
+    "registeredAs": "Registriert als",
+    "unregistered": "Nicht registriert",
+    "launches": "Starts",
+    "firstSeen": "Zuerst erkannt",
+    "lastSeen": "Zuletzt erkannt"
+  },
+  "exclusions": {
+    "title": "Aktivierte eigene Profile haben Vorrang für: {apps}",
+    "label": "Gilt nicht für:"
+  },
+  "picker": {
+    "empty": "Es sind keine Anwendungen registriert. Fügen Sie im Anwendungsregister eine hinzu, bevor dieses Profil aktiviert werden kann."
+  }
+}

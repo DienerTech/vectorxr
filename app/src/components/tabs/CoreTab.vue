@@ -1,7 +1,11 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 
+import I18nText from "../I18nText.vue";
 import ThemeToggle from "../ThemeToggle.vue";
+import { activeLocale, isMachineTranslated, t } from "../../i18n/index.ts";
+import { resolveLanguagePreference, type LanguagePreference } from "../../i18n/preference.ts";
+import { pseudoLocale, sourceLocale, supportedLocales } from "../../i18n/locales.ts";
 import { playTestSound, requestInputRescan } from "../../lib/commands";
 import { errorText } from "../../lib/errors";
 import type { VectorXRConfig } from "../../lib/model";
@@ -12,6 +16,7 @@ const props = defineProps<{
   path: string;
   logPath?: string;
   themePreference: ThemePreference;
+  languagePreference: LanguagePreference;
   trayEnabled: boolean;
   settingsActionsDisabled: boolean;
 }>();
@@ -23,6 +28,7 @@ defineEmits<{
   exportConfig: [];
   resetConfig: [];
   "update:themePreference": [value: ThemePreference];
+  "update:languagePreference": [value: LanguagePreference];
   "update:trayEnabled": [value: boolean];
 }>();
 
@@ -37,14 +43,25 @@ async function rescanInputs() {
     const games = await requestInputRescan();
     rescanResult.value =
       games === 0
-        ? "No game is running with VectorXR."
-        : `Asked ${games} running game${games === 1 ? "" : "s"} to look again.`;
+        ? t("settings.core.general.inputDevices.noGame")
+        : t("settings.core.general.inputDevices.asked", { count: games });
   } catch (error) {
-    rescanResult.value = errorText(error, "Rescan inputs failed");
+    rescanResult.value = errorText(error, t("settings.core.general.inputDevices.rescanFailed"));
   } finally {
     rescanning.value = false;
   }
 }
+
+// One select: System (auto), then every language by its own name. The
+// pseudo-locale is for development builds.
+const showPseudoLocale = import.meta.env.DEV;
+const systemLanguageName = computed(() => {
+  const code = resolveLanguagePreference("system");
+  return supportedLocales.find((locale) => locale.code === code)?.nativeName ?? code;
+});
+const machineTranslated = computed(
+  () => activeLocale.value !== sourceLocale && activeLocale.value !== pseudoLocale && isMachineTranslated(activeLocale.value),
+);
 
 const logPathShort = computed(() => {
   if (!props.logPath) return null;
@@ -53,7 +70,7 @@ const logPathShort = computed(() => {
 });
 
 const configDirectory = computed(() => {
-  if (!props.path) return "Available after config loads";
+  if (!props.path) return t("settings.core.configFiles.directoryPending");
   const directory = props.path.replace(/[\\/][^\\/]*$/, "");
   return directory || props.path;
 });
@@ -65,7 +82,7 @@ async function previewSoundVolume() {
   try {
     await playTestSound("", true, props.config.core.sound.volume);
   } catch (error) {
-    soundPreviewError.value = errorText(error, "Failed to play sound.");
+    soundPreviewError.value = errorText(error, t("settings.core.sound.previewFailed"));
   }
 }
 </script>
@@ -73,28 +90,28 @@ async function previewSoundVolume() {
 <template>
   <div class="space-y-4">
     <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
-      <h2 class="text-2xl font-semibold tracking-tight">Settings</h2>
+      <h2 class="text-2xl font-semibold tracking-tight">{{ t("settings.core.title") }}</h2>
       <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">
-        App-wide switches, appearance, logging, sound feedback, and config files.
+        {{ t("settings.core.intro") }}
       </p>
 
       <section class="mt-4 border-t pt-4" style="border-color: var(--app-border)">
-        <p class="eyebrow mb-3 text-xs font-semibold uppercase tracking-[0.24em]">General</p>
+        <p class="eyebrow mb-3 text-xs font-semibold uppercase tracking-[0.24em]">{{ t("settings.core.general.heading") }}</p>
         <div class="space-y-3">
           <div class="flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border p-4 surface-panel-soft">
             <div class="min-w-0">
-              <p class="text-sm font-semibold tracking-tight" style="color: var(--app-text)">VectorXR Enabled</p>
-              <p class="mt-0.5 text-xs leading-5 text-muted">Enables or disables all VectorXR OpenXR Enhancements at runtime.</p>
+              <p class="text-sm font-semibold tracking-tight" style="color: var(--app-text)">{{ t("settings.core.general.enabled.title") }}</p>
+              <p class="mt-0.5 text-xs leading-5 text-muted">{{ t("settings.core.general.enabled.description") }}</p>
             </div>
             <label class="pill-toggle inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
               <input v-model="config.core.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
-              {{ config.core.enabled ? "Enabled" : "Disabled" }}
+              {{ config.core.enabled ? t("common.enabled") : t("common.disabled") }}
             </label>
           </div>
           <div class="flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border p-4 surface-panel-soft">
             <div class="min-w-0">
-              <p class="text-sm font-semibold tracking-tight" style="color: var(--app-text)">Theme</p>
-              <p class="mt-0.5 text-xs leading-5 text-muted">Stored on this PC only.</p>
+              <p class="text-sm font-semibold tracking-tight" style="color: var(--app-text)">{{ t("settings.core.general.theme.title") }}</p>
+              <p class="mt-0.5 text-xs leading-5 text-muted">{{ t("settings.core.general.theme.description") }}</p>
             </div>
             <ThemeToggle
               :model-value="themePreference"
@@ -103,14 +120,33 @@ async function previewSoundVolume() {
           </div>
           <div class="flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border p-4 surface-panel-soft">
             <div class="min-w-0 max-w-2xl">
-              <p class="text-sm font-semibold tracking-tight" style="color: var(--app-text)">System Tray</p>
+              <p class="text-sm font-semibold tracking-tight" style="color: var(--app-text)">{{ t("settings.core.general.language.title") }}</p>
+              <p class="mt-0.5 text-xs leading-5 text-muted">{{ t("settings.core.general.language.description") }}</p>
+              <p v-if="machineTranslated" class="mt-1 text-xs leading-5 text-muted">
+                {{ t("settings.core.general.language.machineTranslated") }}
+              </p>
+            </div>
+            <select
+              :value="languagePreference"
+              :aria-label="t('settings.core.general.language.title')"
+              class="app-input manual-input-select h-10 min-w-[14rem] rounded-[0.75rem] px-3 py-2 text-sm"
+              @change="$emit('update:languagePreference', ($event.target as HTMLSelectElement).value as LanguagePreference)"
+            >
+              <option value="system">{{ t("settings.core.general.language.systemResolved", { language: systemLanguageName }) }}</option>
+              <option v-for="locale in supportedLocales" :key="locale.code" :value="locale.code" :lang="locale.code">
+                {{ locale.nativeName }}
+              </option>
+              <option v-if="showPseudoLocale" :value="pseudoLocale">{{ t("settings.core.general.language.pseudo") }}</option>
+            </select>
+          </div>
+          <div class="flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border p-4 surface-panel-soft">
+            <div class="min-w-0 max-w-2xl">
+              <p class="text-sm font-semibold tracking-tight" style="color: var(--app-text)">{{ t("settings.core.general.tray.title") }}</p>
               <p class="mt-0.5 text-xs leading-5 text-muted">
-                Closing this window keeps the app in the notification area, with health, the VectorXR switch, log
-                level and Export Debug. Off: closing the window quits the app. Stored on this PC only.
+                {{ t("settings.core.general.tray.description") }}
               </p>
               <p class="mt-1 text-xs leading-5 text-muted">
-                The app and tray are a settings helper, not the OpenXR layer. VectorXR works in your games with them
-                closed, while VectorXR Enabled is on.
+                {{ t("settings.core.general.tray.helperNote") }}
               </p>
             </div>
             <label class="pill-toggle inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
@@ -120,14 +156,14 @@ async function previewSoundVolume() {
                 type="checkbox"
                 @change="$emit('update:trayEnabled', ($event.target as HTMLInputElement).checked)"
               />
-              {{ trayEnabled ? "On" : "Off" }}
+              {{ trayEnabled ? t("common.on") : t("common.off") }}
             </label>
           </div>
           <div class="flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border p-4 surface-panel-soft">
             <div class="min-w-0 max-w-2xl">
-              <p class="text-sm font-semibold tracking-tight" style="color: var(--app-text)">Input Devices</p>
+              <p class="text-sm font-semibold tracking-tight" style="color: var(--app-text)">{{ t("settings.core.general.inputDevices.title") }}</p>
               <p class="mt-0.5 text-xs leading-5 text-muted">
-                For use in-game: looks again for a controller connected mid-session that VectorXR didn't detect.
+                {{ t("settings.core.general.inputDevices.description") }}
               </p>
               <p v-if="rescanResult" class="mt-1 text-xs leading-5" style="color: var(--app-text)">{{ rescanResult }}</p>
             </div>
@@ -138,47 +174,46 @@ async function previewSoundVolume() {
               :disabled="rescanning"
               @click="rescanInputs"
             >
-              {{ rescanning ? "Rescanning…" : "Rescan inputs" }}
+              {{ rescanning ? t("settings.core.general.inputDevices.rescanning") : t("settings.core.general.inputDevices.rescan") }}
             </button>
           </div>
           <div class="flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border p-4 surface-panel-soft">
             <div class="min-w-0 max-w-2xl">
-              <p class="text-sm font-semibold tracking-tight" style="color: var(--app-text)">Track discovered XR apps</p>
+              <p class="text-sm font-semibold tracking-tight" style="color: var(--app-text)">{{ t("settings.core.general.trackSeenApps.title") }}</p>
               <p class="mt-0.5 text-xs leading-5 text-muted">
-                Notes the executable name and first/last seen time of OpenXR apps you launch, so you can easily
-                register them from the Application Registry. All data is kept locally on this PC.
+                {{ t("settings.core.general.trackSeenApps.description") }}
               </p>
             </div>
             <label class="pill-toggle inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
               <input v-model="config.core.trackSeenApps" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
-              {{ config.core.trackSeenApps ? "On" : "Off" }}
+              {{ config.core.trackSeenApps ? t("common.on") : t("common.off") }}
             </label>
           </div>
         </div>
       </section>
 
       <section class="mt-5 border-t pt-4" style="border-color: var(--app-border)">
-        <p class="eyebrow mb-3 text-xs font-semibold uppercase tracking-[0.24em]">Logging</p>
+        <p class="eyebrow mb-3 text-xs font-semibold uppercase tracking-[0.24em]">{{ t("settings.core.logging.heading") }}</p>
         <div class="flex flex-wrap items-end gap-4">
           <label class="block w-48">
             <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-              Log Level
+              {{ t("settings.core.logging.logLevel") }}
               <span
-                title="Info writes normal operational messages and errors. Debug adds verbose diagnostics, including bounded Turbo frame-timing traces. Logging changes apply live; launch the VR app with Debug enabled for runtime clock measurements."
+                :title="t('settings.core.logging.logLevelHelp')"
                 class="cursor-help select-none text-xs text-muted"
                 >ⓘ</span
               >
             </span>
             <select v-model="config.core.logLevel" class="app-input manual-input-select h-10 w-full rounded-[0.75rem] px-3 py-2 text-sm">
-              <option value="info">Info</option>
-              <option value="debug">Debug</option>
+              <option value="info">{{ t("settings.core.logging.levelInfo") }}</option>
+              <option value="debug">{{ t("settings.core.logging.levelDebug") }}</option>
             </select>
           </label>
           <label class="block w-48">
             <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-              Log Retention
+              {{ t("settings.core.logging.retention") }}
               <span
-                title="Number of rotated log files to keep. Older files are removed after the retention count is exceeded."
+                :title="t('settings.core.logging.retentionHelp')"
                 class="cursor-help select-none text-xs text-muted"
                 >ⓘ</span
               >
@@ -193,36 +228,36 @@ async function previewSoundVolume() {
             />
           </label>
           <button class="button-secondary h-10 rounded-[0.75rem] px-4 text-sm font-medium" type="button" @click="$emit('viewLogs')">
-            View Logs
+            {{ t("settings.core.logging.viewLogs") }}
           </button>
           <button
             class="button-secondary h-10 rounded-[0.75rem] px-4 text-sm font-medium"
             type="button"
-            title="Saves the logs, settings and diagnostics as one ZIP file to share, as on the Home tab."
+            :title="t('settings.core.logging.exportDebugHelp')"
             @click="$emit('exportDebug')"
           >
-            Export Debug
+            {{ t("settings.core.logging.exportDebug") }}
           </button>
         </div>
-        <p class="mt-3 text-xs text-muted">
-          Latest log: <span class="mono-text font-mono">{{ logPathShort || "Available after first session" }}</span>
-        </p>
+        <I18nText keypath="settings.core.logging.latestLog" tag="p" class="mt-3 text-xs text-muted">
+          <template #path><span class="mono-text font-mono">{{ logPathShort || t("settings.core.logging.latestLogPending") }}</span></template>
+        </I18nText>
       </section>
 
       <section class="mt-5 border-t pt-4" style="border-color: var(--app-border)">
         <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
           <div>
-            <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Sound Feedback</p>
-            <p class="mt-1 text-xs leading-5 text-muted">Master volume for the activate / deactivate cues you can attach to bindings.</p>
+            <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">{{ t("settings.core.sound.heading") }}</p>
+            <p class="mt-1 text-xs leading-5 text-muted">{{ t("settings.core.sound.description") }}</p>
           </div>
           <button class="button-secondary rounded-[0.75rem] px-3 py-1.5 text-xs font-medium" type="button" @click="previewSoundVolume">
-            ▶ Test
+            ▶ {{ t("settings.core.sound.test") }}
           </button>
         </div>
         <div class="flex max-w-xl items-center gap-3">
           <input
             v-model.number="config.core.sound.volume"
-            aria-label="Sound feedback volume"
+            :aria-label="t('settings.core.sound.volume')"
             class="h-2 flex-1 cursor-pointer accent-depthxr-copper"
             type="range"
             min="0"
@@ -237,8 +272,8 @@ async function previewSoundVolume() {
       <section class="mt-5 border-t pt-4" style="border-color: var(--app-border)">
         <div class="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Config Files</p>
-            <p class="mt-1 text-xs leading-5 text-muted">Import another settings file, export the current settings, or confirm where VectorXR keeps its local config.</p>
+            <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">{{ t("settings.core.configFiles.heading") }}</p>
+            <p class="mt-1 text-xs leading-5 text-muted">{{ t("settings.core.configFiles.description") }}</p>
           </div>
           <div class="flex flex-wrap gap-2">
             <button
@@ -247,7 +282,7 @@ async function previewSoundVolume() {
               type="button"
               @click="$emit('importConfig')"
             >
-              Import Config
+              {{ t("settings.core.configFiles.import") }}
             </button>
             <button
               class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50"
@@ -255,13 +290,13 @@ async function previewSoundVolume() {
               type="button"
               @click="$emit('exportConfig')"
             >
-              Export Config
+              {{ t("settings.core.configFiles.export") }}
             </button>
           </div>
         </div>
 
         <label class="mt-3 block">
-          <span class="mb-1.5 block text-xs text-muted">Config directory</span>
+          <span class="mb-1.5 block text-xs text-muted">{{ t("settings.core.configFiles.directory") }}</span>
           <input
             class="app-input w-full rounded-[0.75rem] px-3 py-2 font-mono text-xs"
             :value="configDirectory"
@@ -272,8 +307,8 @@ async function previewSoundVolume() {
 
         <div class="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border p-4 surface-panel-soft">
           <div class="min-w-0">
-            <p class="text-sm font-semibold tracking-tight" style="color: var(--app-text)">Reset to defaults</p>
-            <p class="mt-0.5 text-xs leading-5 text-muted">Rebuild settings.json with default values and clear local OpenXR application discovery data.</p>
+            <p class="text-sm font-semibold tracking-tight" style="color: var(--app-text)">{{ t("settings.core.configFiles.reset.title") }}</p>
+            <p class="mt-0.5 text-xs leading-5 text-muted">{{ t("settings.core.configFiles.reset.description") }}</p>
           </div>
           <button
             class="button-danger rounded-[0.75rem] px-4 py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50"
@@ -281,7 +316,7 @@ async function previewSoundVolume() {
             type="button"
             @click="$emit('resetConfig')"
           >
-            Reset to Default
+            {{ t("settings.core.configFiles.reset.button") }}
           </button>
         </div>
       </section>

@@ -1,0 +1,86 @@
+{
+  "core": {
+    "title": "설정",
+    "intro": "앱 전체 스위치, 모양, 로깅, 사운드 피드백 및 구성 파일입니다.",
+    "general": {
+      "heading": "일반",
+      "enabled": {
+        "title": "VectorXR 사용",
+        "description": "런타임에 모든 VectorXR OpenXR 향상 기능을 사용하거나 사용하지 않도록 설정합니다."
+      },
+      "theme": {
+        "title": "테마",
+        "description": "이 PC에만 저장됩니다."
+      },
+      "language": {
+        "title": "언어",
+        "description": "시스템(자동)은 Windows 표시 언어를 따릅니다. 이 PC에만 저장됩니다.",
+        "system": "시스템(자동)",
+        "systemResolved": "시스템(자동) · {language}",
+        "pseudo": "의사 로캘(테스트)",
+        "machineTranslated": "이 번역은 기계 번역으로 만들어졌으므로 어색하게 읽힐 수 있습니다. GitHub에서 수정 제안을 환영합니다."
+      },
+      "tray": {
+        "title": "시스템 트레이",
+        "description": "이 창을 닫아도 앱이 알림 영역에 남아 있으며 상태, VectorXR 스위치, 로그 수준, 디버그 내보내기를 사용할 수 있습니다. 끄기: 창을 닫으면 앱이 종료됩니다. 이 PC에만 저장됩니다.",
+        "helperNote": "앱과 트레이는 설정 도우미일 뿐 OpenXR 레이어가 아닙니다. VectorXR 사용이 켜져 있으면 앱과 트레이를 닫아도 게임에서 VectorXR이 작동합니다."
+      },
+      "inputDevices": {
+        "title": "입력 장치",
+        "description": "게임 중 사용: 세션 도중 연결되어 VectorXR이 감지하지 못한 컨트롤러를 다시 찾습니다.",
+        "rescan": "입력 다시 검색",
+        "rescanning": "다시 검색하는 중…",
+        "noGame": "VectorXR과 함께 실행 중인 게임이 없습니다.",
+        "asked_other": "실행 중인 게임 {count}개에 다시 찾도록 요청했습니다.",
+        "rescanFailed": "입력 다시 검색에 실패했습니다"
+      },
+      "trackSeenApps": {
+        "title": "검색된 XR 앱 추적",
+        "description": "실행한 OpenXR 앱의 실행 파일 이름과 처음/마지막 감지 시간을 기록하여 애플리케이션 레지스트리에서 쉽게 등록할 수 있도록 합니다. 모든 데이터는 이 PC에만 로컬로 보관됩니다."
+      }
+    },
+    "logging": {
+      "heading": "로깅",
+      "logLevel": "로그 수준",
+      "logLevelHelp": "정보는 일반 작업 메시지와 오류를 기록합니다. 디버그는 범위가 제한된 Turbo 프레임 타이밍 추적을 포함한 상세 진단을 추가합니다. 로깅 변경 사항은 즉시 적용됩니다. 런타임 클럭 측정을 하려면 디버그를 사용 설정한 상태로 VR 앱을 실행하십시오.",
+      "levelInfo": "정보",
+      "levelDebug": "디버그",
+      "retention": "로그 보존",
+      "retentionHelp": "보관할 순환 로그 파일 수입니다. 보존 개수를 초과하면 오래된 파일이 제거됩니다.",
+      "viewLogs": "로그 보기",
+      "exportDebug": "디버그 내보내기",
+      "exportDebugHelp": "홈 탭에서와 마찬가지로 로그, 설정, 진단 정보를 공유용 ZIP 파일 하나로 저장합니다.",
+      "latestLog": "최신 로그: {path}",
+      "latestLogPending": "첫 세션 후 사용 가능"
+    },
+    "sound": {
+      "heading": "사운드 피드백",
+      "description": "바인딩에 연결할 수 있는 활성화/비활성화 신호음의 마스터 볼륨입니다.",
+      "test": "테스트",
+      "volume": "사운드 피드백 볼륨",
+      "previewFailed": "사운드를 재생하지 못했습니다."
+    },
+    "configFiles": {
+      "heading": "구성 파일",
+      "description": "다른 설정 파일을 가져오거나, 현재 설정을 내보내거나, VectorXR이 로컬 구성을 보관하는 위치를 확인합니다.",
+      "import": "구성 가져오기",
+      "export": "구성 내보내기",
+      "directory": "구성 디렉터리",
+      "directoryPending": "구성이 로드된 후 사용 가능",
+      "reset": {
+        "title": "기본값으로 초기화",
+        "description": "settings.json을 기본값으로 다시 만들고 로컬 OpenXR 애플리케이션 검색 데이터를 지웁니다.",
+        "button": "기본값으로 초기화"
+      }
+    }
+  },
+  "theme": {
+    "system": "시스템",
+    "light": "밝게",
+    "dark": "어둡게"
+  },
+  "fileTypes": {
+    "jsonConfig": "JSON 구성",
+    "wavAudio": "WAV 오디오"
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "supportLinkError": "No se pudo abrir el navegador. Visita ko-fi.com/dienertech para apoyar VectorXR.",
+  "layerStatus": {
+    "checking": "Comprobando",
+    "notFound": "No encontrada",
+    "enabled": "Capa activada",
+    "disabled": "Capa desactivada"
+  },
+  "layerDescription": {
+    "checking": "Comprobando la capa de API de VectorXR registrada.",
+    "notFound": "No se encontró el registro de la capa de API de VectorXR. Las mejoras no se aplicarán hasta que la capa esté registrada y activada.",
+    "enabled": "La capa de API de VectorXR está activada, así que las mejoras pueden aplicarse en tiempo de ejecución.",
+    "disabled": "La capa de API de VectorXR está desactivada. No se aplicará ninguna mejora, independientemente de si la suite o la mejora están activadas."
+  },
+  "runtime": {
+    "enabled": "Ejecución activada",
+    "disabled": "Ejecución desactivada",
+    "title": "Estado del interruptor de ejecución de la suite."
+  },
+  "systemHealth": {
+    "eyebrow": "Estado del sistema",
+    "suiteOff": "Los efectos en tiempo de ejecución están desactivados desde el interruptor de la suite. El estado de la capa sigue disponible para solucionar problemas.",
+    "checking": "Comprobando si la ejecución de VectorXR y la capa OpenXR están listas.",
+    "layerNotFound": "VectorXR está activado, pero no se encontró el registro de la capa de API de OpenXR.",
+    "layerDisabled": "VectorXR está activado, pero la capa de API de OpenXR está desactivada.",
+    "ready": "La ejecución de VectorXR y el estado de la capa OpenXR parecen listos para los próximos inicios de aplicaciones OpenXR.",
+    "viewHealth": "Ver estado",
+    "exportDebug": "Exportar depuración"
+  },
+  "enhancements": {
+    "eyebrow": "Mejoras",
+    "title": "Resumen activo",
+    "activeCount": "{active} de {total} activas",
+    "columns": {
+      "enhancement": "Mejora",
+      "defaultProfile": "Perfil predeterminado",
+      "customProfiles": "Perfiles personalizados",
+      "status": "Estado"
+    },
+    "open": "Abrir la configuración de {module}",
+    "customEnabled": "{enabled} / {total} activados",
+    "hint": "Selecciona una mejora para abrir su configuración."
+  },
+  "community": {
+    "eyebrow": "Comunidad y anuncios",
+    "title": "Ayuda a dar forma a VectorXR",
+    "discordTitle": "Discord de DienerTech",
+    "discordBody": "Comparte tu configuración, compara resultados y entérate de los últimos anuncios de VectorXR.",
+    "supportTitle": "Apoya el desarrollo",
+    "supportBody": "Ayuda al proyecto contribuyendo a VectorXR en Ko-fi. ¡Todo el apoyo ayuda a financiar el futuro de VectorXR!",
+    "supportButton": "Apoya VectorXR en Ko-fi ↗"
+  }
+}

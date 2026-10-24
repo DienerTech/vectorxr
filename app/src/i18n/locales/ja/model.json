@@ -1,0 +1,94 @@
+{
+  "keyGroups": {
+    "function": "ファンクション キー",
+    "letter": "文字キー",
+    "number": "数字キー",
+    "numpad": "テンキー",
+    "special": "特殊キー"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "space": "Space",
+    "numpad": "Numpad{digit}"
+  },
+  "modules": {
+    "depthxr": "深度",
+    "pivotxr": "Pivot",
+    "quadviews": "Quadviews",
+    "turbo": "Turbo",
+    "framegen": "Frame Generation"
+  },
+  "defaults": {
+    "newProfile": "新しいプロファイル",
+    "profile": "プロファイル",
+    "standardNudges": "標準の微調整",
+    "nudgeSetNumbered": "微調整セット {number}",
+    "profileNudges": "{profile} の微調整",
+    "newQuickView": "新しいクイック ビュー",
+    "quickViewNumbered": "クイック ビュー {number}",
+    "deviceButton": "ボタン {number}",
+    "turboTimingProfile": "{name} のタイミング"
+  },
+  "snapViews": {
+    "defaultProfileUnavailable": "既定のプロファイルは強化モーションまたはスナップ ビューのいずれかであるため、既定のプロファイルでは使用できません。同じアプリケーションに対して、カスタムの強化モーション プロファイルとカスタムのスナップ ビュー プロファイルを組み合わせて使用してください。",
+    "noSnapPartner": "このプロファイルのアプリケーションを対象とする有効なスナップ ビュー プロファイルはまだありません。",
+    "motionNoteNone": "同じアプリケーション用の強化モーション プロファイルで [スナップ ビューに強化モーションを適用] をオンにすると、これらのスナップ ビューでも強化モーションが引き続き機能します。",
+    "motionNoteSources": "{profiles} の強化モーションは、これらのスナップ ビューでも引き続き機能します。"
+  },
+  "binding": {
+    "device": "{device} / {input}",
+    "unassignedDevice": "未割り当てのデバイス",
+    "unassignedInput": "未割り当ての入力",
+    "none": "なし",
+    "listMore_other": "{first} またはほか {count} 件",
+    "numbered": "{label} (バインド {number})"
+  },
+  "actions": {
+    "quadviewsDiagnostics": "Quadviews: 診断用の可視化",
+    "depthToggle": "深度: A/B 切り替え",
+    "depthLock": "深度: Depth Lock A/B",
+    "osdToggle": "OSD: 表示/非表示",
+    "osdCycle": "OSD: レイアウトの切り替え",
+    "turboToggle": "Turbo: A/B 切り替え",
+    "turboMetrics": "Turbo: メトリックの記録",
+    "framegenToggle": "Frame Generation: A/B 切り替え",
+    "nudgeLeft": "Pivot {set}: 左へ微調整",
+    "nudgeRight": "Pivot {set}: 右へ微調整",
+    "nudgeUp": "Pivot {set}: 上へ微調整",
+    "nudgeDown": "Pivot {set}: 下へ微調整",
+    "nudgeCenter": "Pivot {set}: 微調整オフセットを中央に戻す",
+    "defaultActivate": "Pivot 既定: 有効化",
+    "defaultSetOrigin": "Pivot 既定: 原点の設定",
+    "defaultReleaseOrigin": "Pivot 既定: 原点の解除",
+    "defaultQuickView": "Pivot 既定: {view}",
+    "profileNumbered": "プロファイル {number}",
+    "profileActivate": "Pivot {profile}: 有効化",
+    "profileSetOrigin": "Pivot {profile}: 原点の設定",
+    "profileReleaseOrigin": "Pivot {profile}: 原点の解除",
+    "profileQuickView": "Pivot {profile}: {view}"
+  },
+  "conflicts": {
+    "sharedTitle": "{binding} は複数回割り当てられています",
+    "sharedMessage": "この入力は {actions} に割り当てられています。1 回押すと複数の操作が実行されるか、優先度の高い操作が別の操作を隠す可能性があります。この警告によって保存が妨げられることはありません。",
+    "duplicateTitle": "{binding} が重複しています",
+    "duplicateMessage": "{action} には同じ物理入力が複数含まれています。重複は冗長であり、実行時には最初のものだけが使用されます。",
+    "duplicateActions": {
+      "suspendControls": "一時停止の操作",
+      "activation": "有効化",
+      "setOrigin": "原点の設定",
+      "releaseOrigin": "原点の解除"
+    },
+    "everySuspendPress": "一時停止の操作を押すたびに",
+    "everyActivationPress": "有効化の操作を押すたびに",
+    "allThreeTitle": "1 つのバインドが競合する 3 つの操作を制御しています",
+    "allThreeMessage": "有効化、原点の設定、原点の解除がすべて {binding} を使用しています。{press}、新しいニュートラルな正面方向が要求された直後に消去されるため、原点は取得されません。原点の設定または原点の解除に専用のバインドを割り当ててください。",
+    "setsOriginTitle": "有効化で原点も設定されます",
+    "setsOriginMessage": "有効化と原点の設定の両方が {binding} を使用しています。{press}、現在の頭の向きが Pivot のニュートラルな正面方向として再取得されます。意図的な場合にのみこのままにしてください。そうでない場合は、原点の設定に専用のバインド (通常はゲーム内の再センタリング操作) を割り当ててください。",
+    "releasesOriginTitle": "有効化で原点も解除されます",
+    "releasesOriginMessage": "有効化と原点の解除の両方が {binding} を使用しています。{press}、取得済みの Pivot の原点が消去されます。意図的な場合にのみこのままにしてください。そうでない場合は、原点の解除に専用のバインドを割り当ててください。",
+    "setCanceledTitle": "原点の設定がすぐに取り消されます",
+    "setCanceledMessage": "原点の設定と原点の解除の両方が {binding} を使用しています。押すと新しいニュートラルな正面方向が要求された直後に消去されるため、原点は取得されません。どちらかの操作に別のバインドを割り当ててください。"
+  }
+}

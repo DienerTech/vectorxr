@@ -1,0 +1,110 @@
+{
+  "editor": {
+    "type": "Type d'affectation",
+    "types": {
+      "none": "Aucune",
+      "keyboard": "Clavier",
+      "device": "Périphérique"
+    },
+    "noneText": "Aucune affectation. Cette action ne s'exécutera pas tant qu'une affectation n'est pas sélectionnée.",
+    "modifiers": "Modificateurs",
+    "primaryKey": "Touche principale"
+  },
+  "sound": {
+    "playOnFire": "Jouer un son lorsque cette action se déclenche",
+    "playOnTransition": "Jouer un son à l'activation / désactivation",
+    "explanation": "Un signal sonore supplémentaire pour cette affectation. Laissez un emplacement sur la tonalité par défaut ou choisissez votre propre fichier .wav court.",
+    "defaultTone": "Tonalité par défaut",
+    "single": "Son",
+    "activate": "Activation",
+    "deactivate": "Désactivation",
+    "browse": "Parcourir…",
+    "test": "Tester",
+    "pickerFailed": "Impossible d'ouvrir le sélecteur de fichiers.",
+    "playFailed": "Impossible de lire le son."
+  },
+  "list": {
+    "add": "Ajouter une affectation",
+    "noneText": "Aucune affectation. Cette action ne s'exécutera pas tant qu'une affectation n'est pas ajoutée.",
+    "bindingNumber": "Affectation {number}",
+    "bindingDescription": "Choisissez un raccourci clavier ou une entrée de périphérique détectée."
+  },
+  "panel": {
+    "soundEnabledHint": "Le retour sonore est activé pour une affectation",
+    "soundEnabledAria": "Retour sonore activé",
+    "editOne": "Modifier l'affectation…",
+    "editMany": "Modifier les affectations…"
+  },
+  "page": {
+    "breadcrumbAria": "Fil d'Ariane",
+    "breadcrumbBinding": "Affectation",
+    "returnHint": "Appuyez sur Échap ou Terminé pour revenir à {module}.",
+    "closeAria": "Fermer l'affectation et revenir à {module}",
+    "listDescription": "{description} Ajoutez une affectation pour chaque périphérique avec lequel vous volez ; n'importe laquelle d'entre elles agit."
+  },
+  "device": {
+    "joystickDevice": "Joystick",
+    "scanning": "Recherche...",
+    "selectDevice": "Sélectionnez un périphérique",
+    "disconnectedOption": "{name} (déconnecté)",
+    "disconnectedName": "<périphérique déconnecté>",
+    "noDeviceSelected": "Aucun périphérique sélectionné",
+    "assignedInput": "Entrée affectée",
+    "manualAria": "Choisir manuellement l'entrée du joystick",
+    "selectInput": "Sélectionnez une entrée...",
+    "manualHint": "Choisissez un bouton ou une direction de HAT sans écouter les entrées.",
+    "manualHintNoDevice": "Sélectionnez d'abord un joystick connecté.",
+    "manual": "Manuel",
+    "button": "Bouton {number}",
+    "hatInput": "HAT {number} {direction}",
+    "hatDirections": {
+      "up": "Haut",
+      "upRight": "Haut droite",
+      "right": "Droite",
+      "downRight": "Bas droite",
+      "down": "Bas",
+      "downLeft": "Bas gauche",
+      "left": "Gauche",
+      "upLeft": "Haut gauche"
+    },
+    "noInput": "Aucune entrée capturée",
+    "buttonCount_one": "{count} bouton",
+    "buttonCount_other": "{count} boutons",
+    "hatCount_one": "{count} HAT",
+    "hatCount_other": "{count} HAT",
+    "capabilities": "{buttons}, {hats}",
+    "disconnectedTitle": "Le périphérique affecté n'est pas connecté actuellement",
+    "disconnectedBody": "Cette affectation est toujours enregistrée sous {device} / {input}, mais Windows ne signale pas ce joystick actuellement.",
+    "capture": "Capturer l'entrée",
+    "canceling": "Annulation...",
+    "listening": "Écoute... {seconds} s",
+    "cancelListening": "Annuler l'écoute ({seconds} s)",
+    "refresh": "Actualiser les périphériques",
+    "metadata": "Métadonnées",
+    "metadataTitle": "Métadonnées du joystick",
+    "deviceGuid": "GUID du périphérique",
+    "connectionStatus": "État de la connexion",
+    "productGuid": "GUID du produit",
+    "inputPath": "Chemin de l'entrée",
+    "inputLabel": "Libellé de l'entrée",
+    "unassigned": "Non affecté",
+    "unavailable": "Indisponible",
+    "connected": "Connecté",
+    "disconnected": "Déconnecté",
+    "status": {
+      "canceling": "Annulation de la capture d'entrée...",
+      "cancelFailedWith": "Impossible d'annuler la capture : {message}",
+      "cancelFailed": "Impossible d'annuler la capture. Elle s'arrêtera automatiquement à la limite de temps.",
+      "noDevices": "Aucun joystick trouvé.",
+      "selectFirst": "Sélectionnez un joystick connecté avant de capturer une entrée.",
+      "listening": "Écoute de {device} uniquement. Appuyez sur Échap pour annuler ; la capture s'arrête automatiquement après 15 secondes.",
+      "canceled": "Capture d'entrée annulée.",
+      "timedOut": "La capture d'entrée a expiré après 15 secondes.",
+      "captured": "{device} / {input} capturé.",
+      "captureFailed": "Échec de la capture de l'entrée du joystick.",
+      "selected": "{device} sélectionné. Capturez une entrée ou choisissez-la manuellement.",
+      "assigned": "{device} / {input} affecté manuellement."
+    },
+    "listFailed": "Impossible de lister les joysticks."
+  }
+}

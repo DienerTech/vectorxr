@@ -1,6 +1,8 @@
 ﻿<script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
+import { t, type Messages } from '../i18n/index.ts'
+
 const props = defineProps<{
   open: boolean
 }>()
@@ -23,51 +25,33 @@ const rawGazeX = ref(474)
 const rawGazeY = ref(150)
 const activeSymptom = ref<Symptom>('boundary')
 
-const steps: Array<{ id: GuideStep; number: string; title: string; summary: string }> = [
-  { id: 'zones', number: '01', title: 'Read the zones', summary: 'See where each image contributes.' },
-  { id: 'alignment', number: '02', title: 'Check alignment', summary: 'Compare centers, offset, and gaze.' },
-  { id: 'motion', number: '03', title: 'Judge tracking', summary: 'Spot jitter, lag, and tracking loss.' },
-  { id: 'troubleshoot', number: '04', title: 'Choose a fix', summary: 'Map a symptom to the right control.' },
-]
+const stepNumbers: Record<GuideStep, string> = { zones: '01', alignment: '02', motion: '03', troubleshoot: '04' }
 
-const symptoms: Record<Symptom, { label: string; title: string; body: string; controls: string[] }> = {
-  boundary: {
-    label: 'Visible seam',
-    title: 'The focus edge is easy to see',
-    body: 'Increase Transition Thickness a little. If the amber band becomes broadly soft, reduce it again and narrow the resolution difference between Focus and Peripheral.',
-    controls: ['Transition Thickness', 'Focus Resolution', 'Peripheral Resolution'],
-  },
-  offset: {
-    label: 'Wrong center',
-    title: 'The sharp region is consistently biased',
-    body: 'First confirm the cyan and yellow gaze markers land where you look. If they do, use Horizontal or Vertical Offset to correct the consistent bias. Do not use offset to hide gaze lag.',
-    controls: ['Horizontal Offset', 'Vertical Offset'],
-  },
-  jitter: {
-    label: 'Jitter',
-    title: 'The focus window trembles near your gaze',
-    body: 'Raise Smoothing gradually. A small Deadzone can suppress tiny eye movements near center, but too much creates a sticky jump when the focus finally moves.',
-    controls: ['Smoothing', 'Deadzone'],
-  },
-  lag: {
-    label: 'Too much lag',
-    title: 'The yellow marker trails too far behind cyan',
-    body: 'Reduce Smoothing. If movement starts late and then jumps, reduce Deadzone too. Use the smallest values that still keep the focus window visually calm.',
-    controls: ['Smoothing', 'Deadzone'],
-  },
-  lost: {
-    label: 'Red outline',
-    title: 'Eye tracking is unavailable',
-    body: 'A red focus outline is a status warning, not a color preference. Confirm eye tracking is enabled in the game and headset runtime. VectorXR falls back instead of following eye gaze.',
-    controls: ['Tracking Mode', 'Game eye tracking', 'Headset runtime'],
-  },
-  performance: {
-    label: 'Need more FPS',
-    title: 'Reduce pixels where they matter least',
-    body: 'Lower Peripheral Resolution first. Then reduce Focus Width or Height if needed. Focus Resolution changes density inside the window - it does not change the green outline size.',
-    controls: ['Peripheral Resolution', 'Focus Width / Height', 'Focus Resolution'],
-  },
+// Built per render so a language change applies.
+const steps = computed(() => (Object.keys(stepNumbers) as GuideStep[]).map((id) => ({
+  id,
+  number: stepNumbers[id],
+  title: t(`quadviews.guide.steps.${id}.title`),
+  summary: t(`quadviews.guide.steps.${id}.summary`),
+})))
+
+type SettingName = keyof Messages['quadviews']['guide']['settingNames']
+
+const symptomControls: Record<Symptom, SettingName[]> = {
+  boundary: ['transitionThickness', 'focusResolution', 'peripheralResolution'],
+  offset: ['horizontalOffset', 'verticalOffset'],
+  jitter: ['smoothing', 'deadzone'],
+  lag: ['smoothing', 'deadzone'],
+  lost: ['trackingMode', 'gameEyeTracking', 'headsetRuntime'],
+  performance: ['peripheralResolution', 'focusWidthHeight', 'focusResolution'],
 }
+
+const symptoms = computed(() => Object.fromEntries((Object.keys(symptomControls) as Symptom[]).map((id) => [id, {
+  label: t(`quadviews.guide.symptoms.${id}.label`),
+  title: t(`quadviews.guide.symptoms.${id}.title`),
+  body: t(`quadviews.guide.symptoms.${id}.body`),
+  controls: symptomControls[id].map((name) => t(`quadviews.guide.settingNames.${name}`)),
+}])) as Record<Symptom, { label: string; title: string; body: string; controls: string[] }>)
 
 const headX = 360
 const headY = 200
@@ -86,7 +70,7 @@ const focusLeft = computed(() => focusCenterX.value - focusWidth.value / 2)
 const focusTop = computed(() => focusCenterY.value - focusHeight.value / 2)
 const transitionX = computed(() => Math.min(focusWidth.value * transitionPercent.value / 100, focusWidth.value / 2 - 2))
 const transitionY = computed(() => Math.min(focusHeight.value * transitionPercent.value / 100, focusHeight.value / 2 - 2))
-const currentSymptom = computed(() => symptoms[activeSymptom.value])
+const currentSymptom = computed(() => symptoms.value[activeSymptom.value])
 
 function setGazeFromPointer(event: PointerEvent) {
   const target = event.currentTarget as SVGSVGElement
@@ -130,15 +114,15 @@ onUnmounted(() => window.removeEventListener('keydown', handleKeydown))
     <div class="flex h-[92vh] max-h-[760px] w-full max-w-[1180px] flex-col overflow-hidden rounded-[1.5rem] border shadow-panel surface-panel-strong">
       <header class="flex shrink-0 items-start justify-between gap-4 border-b px-5 py-4 md:px-6" style="border-color: var(--app-border)">
         <div>
-          <p class="eyebrow text-[10px] uppercase tracking-[0.22em]">Interactive field guide</p>
-          <h2 id="quadviews-guide-title" class="mt-1 text-xl font-semibold tracking-tight md:text-2xl">Reading the Quadviews overlay</h2>
-          <p class="mt-1 max-w-3xl text-sm leading-6 text-muted">Learn the picture first, then change the setting that matches what you actually see.</p>
+          <p class="eyebrow text-[10px] uppercase tracking-[0.22em]">{{ t('quadviews.guide.eyebrow') }}</p>
+          <h2 id="quadviews-guide-title" class="mt-1 text-xl font-semibold tracking-tight md:text-2xl">{{ t('quadviews.guide.title') }}</h2>
+          <p class="mt-1 max-w-3xl text-sm leading-6 text-muted">{{ t('quadviews.guide.intro') }}</p>
         </div>
-        <button class="button-secondary rounded-[0.7rem] px-3 py-2 text-sm font-medium" type="button" aria-label="Close overlay guide" @click="emit('close')">Close</button>
+        <button class="button-secondary rounded-[0.7rem] px-3 py-2 text-sm font-medium" type="button" :aria-label="t('quadviews.guide.closeLabel')" @click="emit('close')">{{ t('common.close') }}</button>
       </header>
 
       <div class="grid min-h-0 flex-1 overflow-hidden lg:grid-cols-[15rem_minmax(0,1fr)]">
-        <nav class="flex gap-2 overflow-x-auto border-b p-3 lg:flex-col lg:overflow-y-auto lg:border-b-0 lg:border-r lg:p-4" aria-label="Overlay guide steps" style="border-color: var(--app-border)">
+        <nav class="flex gap-2 overflow-x-auto border-b p-3 lg:flex-col lg:overflow-y-auto lg:border-b-0 lg:border-r lg:p-4" :aria-label="t('quadviews.guide.stepsLabel')" style="border-color: var(--app-border)">
           <button
             v-for="item in steps"
             :key="item.id"
@@ -161,7 +145,7 @@ onUnmounted(() => window.removeEventListener('keydown', handleKeydown))
                   class="block aspect-[16/9] w-full touch-none select-none"
                   viewBox="0 0 720 400"
                   role="img"
-                  aria-label="Interactive illustration of the Quadviews diagnostic overlay"
+                  :aria-label="t('quadviews.guide.illustrationLabel')"
                   @pointerdown="setGazeFromPointer"
                   @pointermove="($event.buttons & 1) && setGazeFromPointer($event)"
                 >
@@ -218,83 +202,83 @@ onUnmounted(() => window.removeEventListener('keydown', handleKeydown))
                   </g>
 
                   <g v-if="activeStep === 'zones'" class="qv-svg-labels">
-                    <text x="30" y="42">BLUE - PERIPHERAL CONTEXT</text>
-                    <text :x="focusLeft + 12" :y="focusTop + 24">AMBER - BLEND</text>
-                    <text :x="focusCenterX" :y="focusCenterY + 5" text-anchor="middle">FOCUS IMAGE</text>
+                    <text x="30" y="42">{{ t('quadviews.guide.svg.peripheral') }}</text>
+                    <text :x="focusLeft + 12" :y="focusTop + 24">{{ t('quadviews.guide.svg.blend') }}</text>
+                    <text :x="focusCenterX" :y="focusCenterY + 5" text-anchor="middle">{{ t('quadviews.guide.svg.focus') }}</text>
                   </g>
                   <g v-else-if="activeStep === 'alignment'" class="qv-svg-labels">
-                    <text :x="headX - 18" :y="headY + 32" text-anchor="end">HEAD CENTER</text>
-                    <text :x="configuredX - 14" :y="configuredY - 18" text-anchor="end">CONFIGURED OFFSET</text>
-                    <text :x="rawGazeX + 14" :y="rawGazeY - 12">RAW</text>
-                    <text :x="smoothedX + 18" :y="smoothedY + 34">SMOOTHED</text>
+                    <text :x="headX - 18" :y="headY + 32" text-anchor="end">{{ t('quadviews.guide.svg.headCenter') }}</text>
+                    <text :x="configuredX - 14" :y="configuredY - 18" text-anchor="end">{{ t('quadviews.guide.svg.configuredOffset') }}</text>
+                    <text :x="rawGazeX + 14" :y="rawGazeY - 12">{{ t('quadviews.guide.svg.raw') }}</text>
+                    <text :x="smoothedX + 18" :y="smoothedY + 34">{{ t('quadviews.guide.svg.smoothed') }}</text>
                   </g>
                   <g v-else-if="activeStep === 'motion'" class="qv-svg-labels">
-                    <text x="24" y="36">CLICK OR DRAG TO MOVE RAW GAZE</text>
-                    <text v-if="!trackingAvailable" x="360" y="370" text-anchor="middle" fill="#ff4a45">TRACKING UNAVAILABLE - FALLBACK ACTIVE</text>
+                    <text x="24" y="36">{{ t('quadviews.guide.svg.dragHint') }}</text>
+                    <text v-if="!trackingAvailable" x="360" y="370" text-anchor="middle" fill="#ff4a45">{{ t('quadviews.guide.svg.trackingUnavailable') }}</text>
                   </g>
                 </svg>
 
-                <div class="pointer-events-none absolute bottom-2 right-2 rounded-full bg-black/55 px-2.5 py-1 text-[10px] font-semibold tracking-wide text-white/75">Illustrative - not a pixel-perfect headset capture</div>
+                <div class="pointer-events-none absolute bottom-2 right-2 rounded-full bg-black/55 px-2.5 py-1 text-[10px] font-semibold tracking-wide text-white/75">{{ t('quadviews.guide.illustrative') }}</div>
               </div>
 
               <div v-if="activeStep === 'zones'" class="mt-3 grid gap-3 sm:grid-cols-2">
                 <label class="rounded-[0.85rem] border p-3 surface-panel-soft">
-                  <span class="flex justify-between gap-3 text-xs font-semibold"><span>Focus size</span><span>{{ focusSizePercent }}%</span></span>
+                  <span class="flex justify-between gap-3 text-xs font-semibold"><span>{{ t('quadviews.guide.demo.focusSize') }}</span><span>{{ focusSizePercent }}%</span></span>
                   <input v-model.number="focusSizePercent" class="mt-2 h-2 w-full cursor-pointer accent-depthxr-copper" type="range" min="20" max="72" step="1" />
                 </label>
                 <label class="rounded-[0.85rem] border p-3 surface-panel-soft">
-                  <span class="flex justify-between gap-3 text-xs font-semibold"><span>Transition thickness</span><span>{{ transitionPercent }}%</span></span>
+                  <span class="flex justify-between gap-3 text-xs font-semibold"><span>{{ t('quadviews.guide.demo.transitionThickness') }}</span><span>{{ transitionPercent }}%</span></span>
                   <input v-model.number="transitionPercent" class="mt-2 h-2 w-full cursor-pointer accent-depthxr-copper" type="range" min="0" max="42" step="1" />
                 </label>
               </div>
 
               <div v-else-if="activeStep === 'alignment'" class="mt-3 grid gap-3 sm:grid-cols-2">
                 <label class="rounded-[0.85rem] border p-3 surface-panel-soft">
-                  <span class="flex justify-between gap-3 text-xs font-semibold"><span>Horizontal offset</span><span>{{ offsetXDegrees }} deg</span></span>
+                  <span class="flex justify-between gap-3 text-xs font-semibold"><span>{{ t('quadviews.guide.demo.horizontalOffset') }}</span><span>{{ t('quadviews.guide.demo.degrees', { value: offsetXDegrees }) }}</span></span>
                   <input v-model.number="offsetXDegrees" class="mt-2 h-2 w-full cursor-pointer accent-depthxr-copper" type="range" min="-18" max="18" step="1" />
                 </label>
                 <label class="rounded-[0.85rem] border p-3 surface-panel-soft">
-                  <span class="flex justify-between gap-3 text-xs font-semibold"><span>Vertical offset</span><span>{{ offsetYDegrees }} deg</span></span>
+                  <span class="flex justify-between gap-3 text-xs font-semibold"><span>{{ t('quadviews.guide.demo.verticalOffset') }}</span><span>{{ t('quadviews.guide.demo.degrees', { value: offsetYDegrees }) }}</span></span>
                   <input v-model.number="offsetYDegrees" class="mt-2 h-2 w-full cursor-pointer accent-depthxr-copper" type="range" min="-12" max="12" step="1" />
                 </label>
               </div>
 
               <div v-else-if="activeStep === 'motion'" class="mt-3 grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
                 <label class="rounded-[0.85rem] border p-3 surface-panel-soft">
-                  <span class="flex justify-between gap-3 text-xs font-semibold"><span>Smoothing</span><span>{{ smoothingPercent }}%</span></span>
+                  <span class="flex justify-between gap-3 text-xs font-semibold"><span>{{ t('quadviews.guide.demo.smoothing') }}</span><span>{{ smoothingPercent }}%</span></span>
                   <input v-model.number="smoothingPercent" class="mt-2 h-2 w-full cursor-pointer accent-depthxr-copper" type="range" min="0" max="95" step="1" />
                 </label>
                 <button class="rounded-[0.85rem] border px-4 py-3 text-left text-xs font-semibold" :class="trackingAvailable ? 'chip-success' : 'chip-danger'" type="button" @click="trackingAvailable = !trackingAvailable">
-                  Eye tracking: {{ trackingAvailable ? 'Available' : 'Lost' }}
+                  {{ trackingAvailable ? t('quadviews.guide.demo.eyeTrackingAvailable') : t('quadviews.guide.demo.eyeTrackingLost') }}
                 </button>
               </div>
             </section>
 
             <aside class="space-y-3">
               <template v-if="activeStep === 'zones'">
-                <GuideCard color="#1447f2" title="Peripheral area" setting="Peripheral Resolution">Blue covers the context image. Lowering its resolution usually saves the most pixels without shrinking your sharp region.</GuideCard>
-                <GuideCard color="#ff8c0a" title="Transition band" setting="Transition Thickness">Amber is the blend between images. Wider can hide a seam; too wide can make the edge feel soft.</GuideCard>
-                <GuideCard color="#26ff50" title="Focus boundary" setting="Focus Width / Height">The green outline is the focus window size. Focus Resolution changes detail density, not this outline.</GuideCard>
+                <GuideCard color="#1447f2" :title="t('quadviews.guide.cards.peripheral.title')" :setting="t('quadviews.guide.settingNames.peripheralResolution')">{{ t('quadviews.guide.cards.peripheral.body') }}</GuideCard>
+                <GuideCard color="#ff8c0a" :title="t('quadviews.guide.cards.transition.title')" :setting="t('quadviews.guide.settingNames.transitionThickness')">{{ t('quadviews.guide.cards.transition.body') }}</GuideCard>
+                <GuideCard color="#26ff50" :title="t('quadviews.guide.cards.focusBoundary.title')" :setting="t('quadviews.guide.settingNames.focusWidthHeight')">{{ t('quadviews.guide.cards.focusBoundary.body') }}</GuideCard>
               </template>
 
               <template v-else-if="activeStep === 'alignment'">
-                <GuideCard color="#ffffff" title="Head center" setting="Reference only">The white cross is straight ahead from the headset. It gives every other marker a stable reference.</GuideCard>
-                <GuideCard color="#ff1ad9" title="Configured offset" setting="Horizontal / Vertical Offset">The magenta L and ring show your intentional correction from head center.</GuideCard>
-                <GuideCard color="#00f2ff" title="Raw gaze" setting="Tracking source">Cyan is the immediate eye-tracking sample. Click the illustration to move it.</GuideCard>
-                <GuideCard color="#fff20d" title="Smoothed gaze" setting="Smoothing / Deadzone">Yellow is the filtered position that drives the focus window before configured offset is added.</GuideCard>
+                <GuideCard color="#ffffff" :title="t('quadviews.guide.cards.headCenter.title')" :setting="t('quadviews.guide.settingNames.referenceOnly')">{{ t('quadviews.guide.cards.headCenter.body') }}</GuideCard>
+                <GuideCard color="#ff1ad9" :title="t('quadviews.guide.cards.configuredOffset.title')" :setting="t('quadviews.guide.settingNames.horizontalVerticalOffset')">{{ t('quadviews.guide.cards.configuredOffset.body') }}</GuideCard>
+                <GuideCard color="#00f2ff" :title="t('quadviews.guide.cards.rawGaze.title')" :setting="t('quadviews.guide.settingNames.trackingSource')">{{ t('quadviews.guide.cards.rawGaze.body') }}</GuideCard>
+                <GuideCard color="#fff20d" :title="t('quadviews.guide.cards.smoothedGaze.title')" :setting="t('quadviews.guide.settingNames.smoothingDeadzone')">{{ t('quadviews.guide.cards.smoothedGaze.body') }}</GuideCard>
               </template>
 
               <template v-else-if="activeStep === 'motion'">
                 <div class="rounded-[1rem] border p-4 surface-panel-soft">
-                  <p class="text-sm font-semibold">What good tracking looks like</p>
+                  <p class="text-sm font-semibold">{{ t('quadviews.guide.goodTracking.heading') }}</p>
                   <ul class="mt-2 list-disc space-y-1.5 pl-5 text-xs leading-5 text-muted">
-                    <li>Cyan responds immediately to your eyes.</li>
-                    <li>Yellow follows closely without constant trembling.</li>
-                    <li>The focus window stays on the intended detail.</li>
+                    <li>{{ t('quadviews.guide.goodTracking.cyan') }}</li>
+                    <li>{{ t('quadviews.guide.goodTracking.yellow') }}</li>
+                    <li>{{ t('quadviews.guide.goodTracking.window') }}</li>
                   </ul>
                 </div>
-                <GuideCard :color="trackingAvailable ? '#26ff50' : '#ff1710'" :title="trackingAvailable ? 'Green outline' : 'Red outline'" setting="Tracking Mode">{{ trackingAvailable ? 'Eye tracking is available. Compare cyan and yellow to judge filtering.' : 'The eye source is unavailable. VectorXR is using its fallback focus behavior.' }}</GuideCard>
-                <button class="button-secondary w-full rounded-[0.75rem] px-3 py-2 text-xs font-semibold" type="button" @click="resetDemo">Reset illustration</button>
+                <GuideCard :color="trackingAvailable ? '#26ff50' : '#ff1710'" :title="trackingAvailable ? t('quadviews.guide.cards.greenOutline.title') : t('quadviews.guide.cards.redOutline.title')" :setting="t('quadviews.guide.settingNames.trackingMode')">{{ trackingAvailable ? t('quadviews.guide.cards.greenOutline.body') : t('quadviews.guide.cards.redOutline.body') }}</GuideCard>
+                <button class="button-secondary w-full rounded-[0.75rem] px-3 py-2 text-xs font-semibold" type="button" @click="resetDemo">{{ t('quadviews.guide.demo.reset') }}</button>
               </template>
 
               <template v-else>
@@ -302,7 +286,7 @@ onUnmounted(() => window.removeEventListener('keydown', handleKeydown))
                   <button v-for="(symptom, id) in symptoms" :key="id" class="rounded-full border px-3 py-1.5 text-xs font-semibold" :class="activeSymptom === id ? 'button-accent' : 'button-secondary'" type="button" @click="activeSymptom = id as Symptom">{{ symptom.label }}</button>
                 </div>
                 <div class="rounded-[1rem] border p-4 surface-panel-soft">
-                  <p class="eyebrow text-[10px] uppercase tracking-[0.18em]">If you see this</p>
+                  <p class="eyebrow text-[10px] uppercase tracking-[0.18em]">{{ t('quadviews.guide.ifYouSee') }}</p>
                   <h3 class="mt-2 text-base font-semibold">{{ currentSymptom.title }}</h3>
                   <p class="mt-2 text-sm leading-6 text-muted">{{ currentSymptom.body }}</p>
                   <div class="mt-3 flex flex-wrap gap-2">
@@ -310,12 +294,12 @@ onUnmounted(() => window.removeEventListener('keydown', handleKeydown))
                   </div>
                 </div>
                 <div class="rounded-[1rem] border p-4 text-xs leading-5 surface-panel-soft">
-                  <strong>Good tuning order:</strong>
+                  <strong>{{ t('quadviews.guide.tuningOrder.heading') }}</strong>
                   <ol class="mt-2 list-decimal space-y-1 pl-5 text-muted">
-                    <li>Confirm tracking is available.</li>
-                    <li>Correct a consistent alignment bias.</li>
-                    <li>Balance smoothing versus lag.</li>
-                    <li>Then tune image quality and pixel cost.</li>
+                    <li>{{ t('quadviews.guide.tuningOrder.tracking') }}</li>
+                    <li>{{ t('quadviews.guide.tuningOrder.alignment') }}</li>
+                    <li>{{ t('quadviews.guide.tuningOrder.smoothing') }}</li>
+                    <li>{{ t('quadviews.guide.tuningOrder.quality') }}</li>
                   </ol>
                 </div>
               </template>

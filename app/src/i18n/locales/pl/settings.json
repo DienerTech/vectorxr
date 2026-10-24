@@ -1,0 +1,89 @@
+{
+  "core": {
+    "title": "Ustawienia",
+    "intro": "Przełączniki dla całej aplikacji, wygląd, rejestrowanie, sygnały dźwiękowe i pliki konfiguracji.",
+    "general": {
+      "heading": "Ogólne",
+      "enabled": {
+        "title": "VectorXR włączony",
+        "description": "Włącza lub wyłącza wszystkie Ulepszenia OpenXR VectorXR w czasie działania."
+      },
+      "theme": {
+        "title": "Motyw",
+        "description": "Przechowywane tylko na tym komputerze."
+      },
+      "language": {
+        "title": "Język",
+        "description": "Systemowy (auto) jest zgodny z językiem wyświetlania systemu Windows. Przechowywane tylko na tym komputerze.",
+        "system": "Systemowy (auto)",
+        "systemResolved": "Systemowy (auto) · {language}",
+        "pseudo": "Pseudolokalizacja (test)",
+        "machineTranslated": "To tłumaczenie zostało wykonane maszynowo i może brzmieć niezręcznie. Poprawki są mile widziane w serwisie GitHub."
+      },
+      "tray": {
+        "title": "Zasobnik systemowy",
+        "description": "Zamknięcie tego okna pozostawia aplikację w obszarze powiadomień, z kondycją, przełącznikiem VectorXR, poziomem dziennika i eksportem diagnostyki. Wyłączone: zamknięcie okna kończy działanie aplikacji. Przechowywane tylko na tym komputerze.",
+        "helperNote": "Aplikacja i zasobnik to pomocnik ustawień, a nie warstwa OpenXR. VectorXR działa w grach, gdy są zamknięte, o ile opcja VectorXR włączony jest aktywna."
+      },
+      "inputDevices": {
+        "title": "Urządzenia wejściowe",
+        "description": "Do użycia w grze: ponownie wyszukuje kontroler podłączony w trakcie sesji, którego VectorXR nie wykrył.",
+        "rescan": "Skanuj wejścia ponownie",
+        "rescanning": "Ponowne skanowanie…",
+        "noGame": "Żadna gra nie jest uruchomiona z VectorXR.",
+        "asked_one": "Poproszono {count} uruchomioną grę o ponowne wyszukanie.",
+        "asked_few": "Poproszono {count} uruchomione gry o ponowne wyszukanie.",
+        "asked_many": "Poproszono {count} uruchomionych gier o ponowne wyszukanie.",
+        "asked_other": "Poproszono {count} uruchomionej gry o ponowne wyszukanie.",
+        "rescanFailed": "Ponowne skanowanie wejść nie powiodło się"
+      },
+      "trackSeenApps": {
+        "title": "Śledź wykryte aplikacje XR",
+        "description": "Zapisuje nazwę pliku wykonywalnego oraz czas pierwszego i ostatniego wykrycia uruchamianych aplikacji OpenXR, aby można je było łatwo zarejestrować w Rejestrze aplikacji. Wszystkie dane są przechowywane lokalnie na tym komputerze."
+      }
+    },
+    "logging": {
+      "heading": "Rejestrowanie",
+      "logLevel": "Poziom dziennika",
+      "logLevelHelp": "Info zapisuje zwykłe komunikaty operacyjne i błędy. Debug dodaje szczegółową diagnostykę, w tym ograniczone ślady taktowania klatek Turbo. Zmiany rejestrowania są stosowane na bieżąco; uruchom aplikację VR z włączonym poziomem Debug, aby uzyskać pomiary zegara środowiska uruchomieniowego.",
+      "levelInfo": "Info",
+      "levelDebug": "Debug",
+      "retention": "Przechowywanie dzienników",
+      "retentionHelp": "Liczba rotowanych plików dziennika do zachowania. Starsze pliki są usuwane po przekroczeniu tej liczby.",
+      "viewLogs": "Pokaż dzienniki",
+      "exportDebug": "Eksportuj diagnostykę",
+      "exportDebugHelp": "Zapisuje dzienniki, ustawienia i diagnostykę jako jeden plik ZIP do udostępnienia, tak jak na karcie Strona główna.",
+      "latestLog": "Najnowszy dziennik: {path}",
+      "latestLogPending": "Dostępne po pierwszej sesji"
+    },
+    "sound": {
+      "heading": "Sygnały dźwiękowe",
+      "description": "Główna głośność sygnałów aktywacji / dezaktywacji, które można dołączyć do przypisań.",
+      "test": "Test",
+      "volume": "Głośność sygnałów dźwiękowych",
+      "previewFailed": "Nie udało się odtworzyć dźwięku."
+    },
+    "configFiles": {
+      "heading": "Pliki konfiguracji",
+      "description": "Zaimportuj inny plik ustawień, wyeksportuj bieżące ustawienia lub sprawdź, gdzie VectorXR przechowuje swoją lokalną konfigurację.",
+      "import": "Importuj konfigurację",
+      "export": "Eksportuj konfigurację",
+      "directory": "Katalog konfiguracji",
+      "directoryPending": "Dostępne po załadowaniu konfiguracji",
+      "reset": {
+        "title": "Przywróć wartości domyślne",
+        "description": "Odbudowuje plik settings.json z wartościami domyślnymi i czyści lokalne dane wykrywania aplikacji OpenXR.",
+        "button": "Przywróć domyślne"
+      }
+    }
+  },
+  "theme": {
+    "system": "Systemowy",
+    "light": "Jasny",
+    "dark": "Ciemny"
+  },
+  "fileTypes": {
+    "jsonConfig": "Konfiguracja JSON",
+    "wavAudio": "Dźwięk WAV"
+  }
+}

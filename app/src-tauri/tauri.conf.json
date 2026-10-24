@@ -48,7 +48,25 @@
     "windows": {
       "nsis": {
         "installMode": "perMachine",
-        "installerHooks": "./windows/nsis-hooks.nsh"
+        "installerHooks": "./windows/nsis-hooks.nsh",
+        "template": "./windows/installer.nsi",
+        "languages": [
+          "English",
+          "SimpChinese",
+          "Russian",
+          "Spanish",
+          "PortugueseBR",
+          "German",
+          "Japanese",
+          "French",
+          "Polish",
+          "Korean",
+          "TradChinese"
+        ],
+        "displayLanguageSelector": true,
+        "customLanguageFiles": {
+          "Polish": "./windows/languages/Polish.nsh"
+        }
       }
     }
   },

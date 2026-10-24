@@ -1,0 +1,53 @@
+{
+  "supportLinkError": "Не удалось открыть браузер. Чтобы поддержать VectorXR, посетите ko-fi.com/dienertech.",
+  "layerStatus": {
+    "checking": "Проверка",
+    "notFound": "Не найден",
+    "enabled": "Слой включён",
+    "disabled": "Слой отключён"
+  },
+  "layerDescription": {
+    "checking": "Проверка зарегистрированного слоя API VectorXR.",
+    "notFound": "Регистрация слоя API VectorXR не найдена. Улучшения не будут применяться, пока слой не будет зарегистрирован и включён.",
+    "enabled": "Слой API VectorXR включён, поэтому улучшения могут применяться во время работы.",
+    "disabled": "Слой API VectorXR отключён. Ни одно из улучшений не будет применяться, независимо от того, включены ли пакет или отдельные улучшения."
+  },
+  "runtime": {
+    "enabled": "Работа включена",
+    "disabled": "Работа отключена",
+    "title": "Состояние глобального переключателя."
+  },
+  "systemHealth": {
+    "eyebrow": "Состояние системы",
+    "suiteOff": "Эффекты отключены глобальным переключателем. Состояние слоя по-прежнему доступно для устранения неполадок.",
+    "checking": "Проверка готовности VectorXR и слоя OpenXR.",
+    "layerNotFound": "VectorXR включён, но регистрация слоя API OpenXR не найдена.",
+    "layerDisabled": "VectorXR включён, но слой API OpenXR отключён.",
+    "ready": "VectorXR и слой OpenXR готовы к последующим запускам приложений OpenXR.",
+    "viewHealth": "Состояние",
+    "exportDebug": "Экспорт отладки"
+  },
+  "enhancements": {
+    "eyebrow": "Улучшения",
+    "title": "Обзор активных",
+    "activeCount": "Активно: {active} из {total}",
+    "columns": {
+      "enhancement": "Улучшение",
+      "defaultProfile": "Профиль по умолчанию",
+      "customProfiles": "Свои профили",
+      "status": "Состояние"
+    },
+    "open": "Открыть параметры {module}",
+    "customEnabled": "Включено: {enabled} / {total}",
+    "hint": "Выберите улучшение, чтобы открыть его параметры."
+  },
+  "community": {
+    "eyebrow": "Сообщество и объявления",
+    "title": "Помогите развивать VectorXR",
+    "discordTitle": "Discord DienerTech",
+    "discordBody": "Делитесь своей конфигурацией, сравнивайте результаты и следите за последними объявлениями VectorXR.",
+    "supportTitle": "Поддержать разработку",
+    "supportBody": "Поддержите проект, сделав вклад в VectorXR на Ko-fi. Любая поддержка помогает финансировать будущее VectorXR!",
+    "supportButton": "Поддержать VectorXR на Ko-fi ↗"
+  }
+}

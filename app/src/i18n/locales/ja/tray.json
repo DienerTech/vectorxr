@@ -1,0 +1,14 @@
+{
+  "health": "状態: {label}",
+  "healthUnavailable": "状態: 設定が読み込まれていません",
+  "logLevel": "ログ レベル: {level}",
+  "logLevelUnavailable": "ログ レベル",
+  "info": "情報",
+  "debug": "デバッグ",
+  "tooltip": "VectorXR: {label}",
+  "tooltipDisabled": "VectorXR: 無効",
+  "enabled": "VectorXR 有効",
+  "exportDebug": "デバッグ情報のエクスポート...",
+  "open": "VectorXR を開く",
+  "quit": "VectorXR を終了"
+}

@@ -1,0 +1,218 @@
+{
+  "title": "Tiefe",
+  "experimental": "Experimentell",
+  "intro": "Gestalten Sie binokularen Maßstab und Tiefenplatzierung als ein System, und verwenden Sie dann anwendungsspezifische Profile, wenn ein Titel eine eigene Abstimmung benötigt. Beginnen Sie neutral, ändern Sie jeweils nur eine Einstellung, und verwenden Sie die Laufzeitbelegung für direkte A/B-Vergleiche.",
+  "tuningGuide": {
+    "title": "Abstimmungsanleitung",
+    "summary": "Maßstab festlegen, Tiefe platzieren, dann vergleichen",
+    "ariaLabel": "Anleitung zur Tiefenabstimmung",
+    "scale": {
+      "step": "Schritt 1: Maßstab festlegen",
+      "name": "Stereotiefe",
+      "body": "Nach links vergrößert sich der scheinbare Weltmaßstab, was lebensgroße Proportionen wiederherstellen kann, wenn ein Cockpit wie eine Miniatur wirkt. Nach rechts verstärken sich Stereoform und Präsenz, wenn ein Titel zu flach oder übergroß aussieht. Nahe Geometrie ändert sich am stärksten."
+    },
+    "place": {
+      "step": "Schritt 2: Tiefe platzieren",
+      "name": "Konvergenzebene",
+      "body": "Lassen Sie diesen Wert bei null, während Sie den Maßstab beurteilen, und platzieren Sie dann die Arbeitsebene in kleinen Schritten. Nach links erhält ein beengtes Cockpit mehr Luft; nach rechts rückt ein entferntes Panel, Visier oder Interaktionsbereich näher."
+    },
+    "compare": {
+      "step": "Schritt 3: Vergleichen",
+      "name": "Als Paar abstimmen",
+      "body": "Behandeln Sie jedes Spielprofil als eigene visuelle Kalibrierung – eine andere Kamerageometrie kann völlig andere Kombinationen erfordern, nicht nur leichte Abweichungen. Vergleichen Sie per A/B mit der nativen Geometrie, und hören Sie beim ersten Anzeichen von Augenbelastung oder erschwerter Fusion auf."
+    }
+  },
+  "ipdNote": {
+    "lead": "IPD-Einstellungen im Spiel können die Stereotiefe überschreiben.",
+    "body": "{lead} Deaktivieren Sie zuerst alle Überschreibungen wie Force IPD, virtuelle IPD, Stereotrennung oder Weltmaßstab. Deaktivieren Sie in DCS {setting} unter Options > VR.",
+    "forceIpdDistance": "Force IPD Distance"
+  },
+  "bindingsCard": {
+    "eyebrow": "Abstimmen & Vergleichen",
+    "heading": "Belegungen im Spiel",
+    "description": "Konfigurieren Sie die A/B-Umschaltungen für die gesamte Tiefe und für Depth Lock an einem Ort.",
+    "assigned_one": "{count} von {total} zugewiesen",
+    "assigned_other": "{count} von {total} zugewiesen",
+    "duplicateInputs_one": "{count} doppelte Eingabe",
+    "duplicateInputs_other": "{count} doppelte Eingaben"
+  },
+  "defaultProfile": {
+    "heading": "Standardprofil",
+    "appliesTo": "Gilt für Anwendungen ohne aktiviertes eigenes Profil",
+    "toggleOn": "Standardprofil ein",
+    "toggleOff": "Standardprofil aus",
+    "offNote": "Aus, sofern es nicht durch ein aktiviertes eigenes Profil eingeschaltet wird. Die eigenen Profile unten gelten weiterhin für ihre Anwendungen."
+  },
+  "customProfiles": {
+    "heading": "Eigene Profile",
+    "description": "Überschreiben Sie die Tiefe pro Anwendung. Das erste aktivierte passende Profil hat Vorrang.",
+    "add": "Profil hinzufügen",
+    "empty": "Noch keine eigenen Profile. Fügen Sie ein Profil hinzu, um Tiefenwerte für eine bestimmte Anwendung zu überschreiben.",
+    "duplicateApplication": "{application} ist bereits Ziel von Profil {profile}. Das erste aktive Profil hat Vorrang."
+  },
+  "troubleshooting": {
+    "title": "Problembehandlung für Tiefe",
+    "heading": "Wenn sich die Tiefe unerwartet verhält",
+    "override": "Spiele mit einer Einstellung für Force IPD, virtuelle IPD, Stereotrennung oder Weltmaßstab können den von OpenXR gemeldeten Augenabstand ersetzen. Diese Überschreibung hat Vorrang vor der Stereotiefe von VectorXR.",
+    "dcs": {
+      "label": "DCS:",
+      "body": "{label} Deaktivieren Sie {setting} unter Options > VR, und starten Sie DCS dann vollständig neu. Ein erzwungener Wert legt den Abstand der virtuellen Kameras von DCS selbst fest und kann dazu führen, dass die Stereotiefe scheinbar nichts bewirkt."
+    },
+    "expected": {
+      "label": "Erwartetes Ergebnis:",
+      "body": "{label} Die Stereotiefe ändert den binokularen Maßstab am deutlichsten bei naher Geometrie, sodass ein Cockpit größer oder kleiner wirken kann, während entferntes Gelände und der Horizont nahezu unverändert erscheinen. Diese entfernungsabhängige Wirkung ist normal."
+    },
+    "convergence": {
+      "label": "Die Konvergenz ist subtiler:",
+      "body": "{label} Sie verschiebt die Nullparallaxe-Ebene, statt die Szene zu skalieren. Vergleichen Sie eine nahe Cockpitkante mit entfernter Landschaft, während Sie sie in kleinen Schritten verschieben. Wenn die Stereotiefe nach dem Deaktivieren der Überschreibungen im Spiel immer noch keine Wirkung zeigt, aktivieren Sie die Debug-Protokollierung, und exportieren Sie die Sitzungsprotokolle."
+    },
+    "depthLock": {
+      "label": "Depth Lock bewahrt das abgestimmte Bild bei der Übergabe:",
+      "body": "{label} Das Spiel rendert mit veränderter Stereogeometrie, dann erhält die Laufzeit die nativen Augenposen und das native FOV des Headsets, sodass sie die Kombination nicht wegnormalisieren kann. Vergleichen Sie es ein- und ausgeschaltet bei identischen Werten, und verringern Sie die Intensität oder deaktivieren Sie es, wenn sich der Komfort verschlechtert."
+    }
+  },
+  "bindingsPage": {
+    "breadcrumb": "Navigationspfad",
+    "current": "Belegungen im Spiel",
+    "title": "Tiefe – Belegungen im Spiel",
+    "escHint": "Drücken Sie Esc oder „Fertig“, um zu „Tiefe“ zurückzukehren.",
+    "closeLabel": "Belegungen schließen und zu „Tiefe“ zurückkehren",
+    "compareGently": {
+      "heading": "Behutsam vergleichen",
+      "body": "Schnelle A/B-Wechsel können die visuelle Fusion kurzzeitig belasten, selbst wenn beide Einstellungen für sich genommen angenehm sind. Machen Sie Pausen zwischen den Vergleichen, und verringern Sie die stärkere Einstellung, wenn sich das Bild schwer einpendelt."
+    },
+    "depthToggle": {
+      "label": "A/B-Umschaltung Tiefe",
+      "description": "Schalten Sie die gesamte Tiefenverbesserung im Spiel ein oder aus, wobei Ihre abgestimmten Werte für einen direkten Vergleich erhalten bleiben. Fügen Sie für jedes Gerät, mit dem Sie fliegen, eine Belegung hinzu; jede davon löst die Aktion aus.",
+      "noneText": "Keine Belegung zugewiesen. Die Tiefe folgt dem aktiven Profil, ohne A/B-Umschaltung im Spiel."
+    },
+    "lockToggle": {
+      "label": "A/B-Umschaltung Depth Lock",
+      "description": "Schaltet nur Depth Lock um, während Stereotiefe und Konvergenz aktiv bleiben. So lässt sich leichter wahrnehmen, was das Sperren bei der Übergabe zur abgestimmten Kombination beiträgt. Fügen Sie für jedes Gerät, mit dem Sie fliegen, eine Belegung hinzu; jede davon löst die Aktion aus.",
+      "noneText": "Keine Belegung zugewiesen. Depth Lock folgt dem aktiven Profil."
+    }
+  },
+  "depthLock": {
+    "name": "Depth Lock",
+    "description": "Fixiert die abgestimmte Stereogeometrie im gerenderten Bild und stellt dann für die Übergabe die nativen Augenposen und das native FOV des Headsets wieder her, sodass die Laufzeit den Effekt nicht wegnormalisieren kann. Testen Sie es pro Spiel, und verringern Sie die Intensität, wenn Unbehagen oder Übelkeit auftritt."
+  },
+  "stereoDepth": {
+    "title": "Stereotiefe / Weltmaßstab",
+    "subtitle": "Ändert den virtuellen Augenabstand, während die physische IPD Ihres Headsets unverändert bleibt. Nach rechts für stärkeres Stereo im Nahbereich und eine kleiner wirkende Welt; nach links für eine größer wirkende, flachere Welt. Beginnen Sie bei etwa ±5–15 %.",
+    "left": "- Größere Welt",
+    "center": "0 Nativer Maßstab",
+    "right": "+ 3D-Stereoeffekt",
+    "extendedRange": "Erweiterter Bereich (±100 %)",
+    "extendedRangeHint": "Nur verwenden, wenn die normale Abstimmung mit ±25 % nicht ausreicht.",
+    "badgeNative": "Native IPD",
+    "badge": "Stereo {value} %"
+  },
+  "convergence": {
+    "title": "Konvergenz / Tiefenebene",
+    "subtitle": "Platziert die Nullparallaxe-Ebene, ohne die relative Tiefe zu ändern. Behalten Sie 0 bei, während Sie die Stereotiefe abstimmen, und verwenden Sie dann kleine Schritte: Negativ verschiebt die Ebene weiter weg; positiv bringt sie näher.",
+    "left": "- Fernere Ebene",
+    "center": "0 App-Standard",
+    "right": "+ Nähere Ebene",
+    "extendedRange": "Erweiterter Bereich (±25)",
+    "extendedRangeHint": "Nur verwenden, wenn die normale Abstimmung mit ±5 nicht ausreicht.",
+    "badgeDefault": "Ebene: App-Standard",
+    "badgeNearer": "Ebene: näher +{value}",
+    "badgeFarther": "Ebene: ferner {value}"
+  },
+  "pairingMap": {
+    "heading": "Tiefen-Kombinationskarte",
+    "hint": "Ziehen Sie den Puck, um beide Einstellungen gemeinsam zu erkunden. Verwenden Sie die Schieberegler für die Feinabstimmung.",
+    "regionLabel": "Kombinierter Tiefeneffekt",
+    "values": "Tiefe {depth} · Konv. {convergence}",
+    "lockOn": "Depth Lock ein",
+    "lockOff": "Depth Lock aus",
+    "convergenceNearer": "Konvergenz: Näher (+{limit})",
+    "convergenceFarther": "Konvergenz: Ferner (−{limit})",
+    "depthLarger": "Tiefe: Größerer Maßstab (−{limit} %)",
+    "depthStronger": "Tiefe: Stärkeres Stereo (+{limit} %)",
+    "mapLabel": "Tiefen-Kombinationskarte. Ziehen Sie, um die Stereotiefe horizontal und die Konvergenz vertikal einzustellen. Die Pfeiltasten ermöglichen feine Anpassungen; halten Sie Shift für größere Schritte.",
+    "quadrants": {
+      "largerNear": {
+        "label": "Größerer Maßstab · Nah",
+        "axes": "Tiefe − · Konvergenz +"
+      },
+      "strongerNear": {
+        "label": "Stärkeres Stereo · Nah",
+        "axes": "Tiefe + · Konvergenz +"
+      },
+      "largerFar": {
+        "label": "Größerer Maßstab · Fern",
+        "axes": "Tiefe − · Konvergenz −"
+      },
+      "strongerFar": {
+        "label": "Stärkeres Stereo · Fern",
+        "axes": "Tiefe + · Konvergenz −"
+      }
+    }
+  },
+  "netEffect": {
+    "heading": "Gesamtwirkung",
+    "goodFitLabel": "Gut geeignet:",
+    "goodFit": "{label} {text}",
+    "watchForLabel": "Achten Sie auf:",
+    "watchFor": "{label} {text}",
+    "lockOff": "Depth Lock ist ausgeschaltet, daher kann die Laufzeit diese Kombination bei der Übergabe neu interpretieren und teilweise normalisieren.",
+    "lockOn": "Depth Lock bewahrt die gerenderte Kombination, wenn für die Übergabe die native Geometrie wiederhergestellt wird.",
+    "cases": {
+      "native": {
+        "title": "Native Stereogeometrie",
+        "description": "Keine der beiden Einstellungen verschiebt den Stereomaßstab oder die Tiefenebene der Anwendung.",
+        "useCase": "Verwenden Sie dies, um den vorgesehenen Maßstab eines Titels kennenzulernen, und als A/B-Referenz für jedes Profil.",
+        "caution": "Wenn die nativen Proportionen bereits überzeugend wirken, ist keine Korrektur nötig."
+      },
+      "compactNear": {
+        "title": "Kompakter Maßstab mit unmittelbarer Präsenz",
+        "description": "Eine stärkere Stereotrennung lässt die Welt kleiner und plastischer wirken, während eine nähere Ebene den Arbeitsbereich zu Ihnen heranholt.",
+        "useCase": "Nützlich, wenn ein Cockpit übergroß oder entfernt wirkt und Panels, Bedienelemente und nahe Geometrie unmittelbar wirken sollen.",
+        "caution": "Beide Einstellungen erhöhen die Belastung im Nahbereich, nähern Sie sich diesem Quadranten daher in kleinen Schritten."
+      },
+      "detailedFar": {
+        "title": "Detailliertes Stereo mit angenehmer Platzierung",
+        "description": "Eine stärkere Stereotrennung fügt Form und Präsenz hinzu, während eine fernere Ebene diesem kompakteren Bild Luft verschafft.",
+        "useCase": "Nützlich, wenn die nativen Proportionen zu groß wirken, aber eine positive Stereotiefe allein das Cockpit beengt wirken lässt.",
+        "caution": "Stimmen Sie zuerst die Stereotiefe ab, und verschieben Sie die Ebene dann nur so weit, dass sich das stärkere Bild natürlich einpendelt."
+      },
+      "largerNear": {
+        "title": "Größerer Maßstab mit naher Arbeitsebene",
+        "description": "Eine verringerte Stereotrennung vergrößert den scheinbaren Weltmaßstab, während eine nähere Ebene Panel und Bedienelemente visuell erreichbar hält.",
+        "useCase": "Nützlich, wenn ein Cockpit wie ein Spielzeug wirkt, seine Instrumente oder sein Interaktionsbereich aber trotzdem nah und gut lesbar wirken sollen.",
+        "caution": "Ein stark positiver Konvergenzwert kann ermüdend werden, selbst wenn die Stereotiefe verringert ist."
+      },
+      "lifeSizedFar": {
+        "title": "Lebensgroßer Maßstab mit entspannter Platzierung",
+        "description": "Eine verringerte Stereotrennung erhöht die scheinbare Größe, während eine fernere Ebene das Cockpit Sie umgeben lässt, statt Ihnen zu nah ans Gesicht zu rücken.",
+        "useCase": "Nützlich in Flug- und Fahrzeugsimulationen, deren native Kamera wie eine Miniatur oder zu nah wirkt; so lassen sich erinnerte reale Proportionen besser treffen.",
+        "caution": "Das weichere Stereo ist beabsichtigt – hören Sie auf, wenn sich der Maßstab natürlich anfühlt, statt dem stärkstmöglichen 3D-Effekt nachzujagen."
+      },
+      "strongerStereo": {
+        "title": "Stärkere relative Stereotiefe",
+        "description": "Nahe Geometrie gewinnt an Trennung und Form, was die Präsenz erhöht, die Welt aber etwas kleiner wirken lässt.",
+        "useCase": "Nützlich, wenn ein Titel flach oder übergroß aussieht, seine bestehende Tiefenebene sich aber bereits angenehm anfühlt.",
+        "caution": "Wenn Ihnen die Szene zu nahe rückt, kombinieren Sie dies mit einer kleinen negativen Konvergenzanpassung."
+      },
+      "largerScale": {
+        "title": "Größerer, sanfterer Weltmaßstab",
+        "description": "Eine verringerte Stereotrennung mildert die Intensität im Nahbereich und vergrößert die scheinbare Weltgröße.",
+        "useCase": "Nützlich, wenn die native Geometrie wie eine Miniatur, beengt oder stereoskopisch intensiver als das echte Fahrzeug wirkt.",
+        "caution": "Verringern Sie nur so weit, dass glaubwürdige Proportionen wiederhergestellt werden und nützliche Formhinweise erhalten bleiben."
+      },
+      "planeNearer": {
+        "title": "Arbeitsebene näher gerückt",
+        "description": "Das Disparitätsfeld der Szene rückt näher zu Ihnen, ohne den relativen Tiefenverlauf oder den Gesamtmaßstab zu ändern.",
+        "useCase": "Nützlich, wenn der Maßstab richtig aussieht, Panel, Visier oder Interaktionsbereich aber visuell zu weit entfernt wirken.",
+        "caution": "Positive Werte können sich schielend anfühlen, besonders in Kombination mit positiver Stereotiefe."
+      },
+      "planeFarther": {
+        "title": "Arbeitsebene weiter weg gerückt",
+        "description": "Das Disparitätsfeld der Szene rückt weiter weg, ohne den relativen Tiefenverlauf oder den Gesamtmaßstab zu ändern.",
+        "useCase": "Nützlich, wenn der Maßstab richtig aussieht, das Cockpit oder nahe Geometrie aber zu dicht an Ihrem Gesicht wirkt.",
+        "caution": "Verschieben Sie die Ebene nur so weit, dass die Platzierung entspannter wird und die Szene leicht zu fusionieren bleibt."
+      }
+    }
+  }
+}

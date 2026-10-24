@@ -1,0 +1,87 @@
+{
+  "core": {
+    "title": "Paramètres",
+    "intro": "Interrupteurs globaux, apparence, journalisation, retour sonore et fichiers de configuration.",
+    "general": {
+      "heading": "Général",
+      "enabled": {
+        "title": "VectorXR activé",
+        "description": "Active ou désactive toutes les Améliorations OpenXR de VectorXR à l'exécution."
+      },
+      "theme": {
+        "title": "Thème",
+        "description": "Enregistré sur ce PC uniquement."
+      },
+      "language": {
+        "title": "Langue",
+        "description": "Système (auto) suit la langue d'affichage de Windows. Enregistré sur ce PC uniquement.",
+        "system": "Système (auto)",
+        "systemResolved": "Système (auto) · {language}",
+        "pseudo": "Pseudo-langue (test)",
+        "machineTranslated": "Cette traduction a été réalisée automatiquement et peut sembler maladroite. Les corrections sont les bienvenues sur GitHub."
+      },
+      "tray": {
+        "title": "Zone de notification",
+        "description": "La fermeture de cette fenêtre laisse l'application dans la zone de notification, avec l'état, l'interrupteur VectorXR, le niveau de journal et Exporter le débogage. Désactivé : la fermeture de la fenêtre quitte l'application. Enregistré sur ce PC uniquement.",
+        "helperNote": "L'application et l'icône de notification sont un assistant de paramétrage, pas la couche OpenXR. VectorXR fonctionne dans vos jeux même lorsqu'elles sont fermées, tant que VectorXR activé est sur Activé."
+      },
+      "inputDevices": {
+        "title": "Périphériques d'entrée",
+        "description": "À utiliser en jeu : recherche à nouveau un contrôleur branché en cours de session que VectorXR n'a pas détecté.",
+        "rescan": "Rechercher les entrées",
+        "rescanning": "Recherche…",
+        "noGame": "Aucun jeu n'est en cours d'exécution avec VectorXR.",
+        "asked_one": "{count} jeu en cours a été invité à rechercher à nouveau.",
+        "asked_other": "{count} jeux en cours ont été invités à rechercher à nouveau.",
+        "rescanFailed": "Échec de la recherche des entrées"
+      },
+      "trackSeenApps": {
+        "title": "Suivre les applications XR découvertes",
+        "description": "Note le nom de l'exécutable et l'heure de première/dernière détection des applications OpenXR que vous lancez, pour que vous puissiez les inscrire facilement depuis le Registre des applications. Toutes les données restent sur ce PC."
+      }
+    },
+    "logging": {
+      "heading": "Journalisation",
+      "logLevel": "Niveau de journal",
+      "logLevelHelp": "Info écrit les messages de fonctionnement normaux et les erreurs. Débogage ajoute des diagnostics détaillés, y compris des traces limitées de la synchronisation des images Turbo. Les modifications de journalisation s'appliquent en direct ; lancez l'application VR avec Débogage activé pour obtenir les mesures d'horloge d'exécution.",
+      "levelInfo": "Info",
+      "levelDebug": "Débogage",
+      "retention": "Conservation des journaux",
+      "retentionHelp": "Nombre de fichiers journaux en rotation à conserver. Les fichiers plus anciens sont supprimés une fois ce nombre dépassé.",
+      "viewLogs": "Voir les journaux",
+      "exportDebug": "Exporter le débogage",
+      "exportDebugHelp": "Enregistre les journaux, les paramètres et les diagnostics dans un seul fichier ZIP à partager, comme dans l'onglet Accueil.",
+      "latestLog": "Dernier journal : {path}",
+      "latestLogPending": "Disponible après la première session"
+    },
+    "sound": {
+      "heading": "Retour sonore",
+      "description": "Volume principal des signaux d'activation / désactivation que vous pouvez associer aux affectations.",
+      "test": "Tester",
+      "volume": "Volume du retour sonore",
+      "previewFailed": "Impossible de lire le son."
+    },
+    "configFiles": {
+      "heading": "Fichiers de configuration",
+      "description": "Importez un autre fichier de paramètres, exportez les paramètres actuels ou vérifiez où VectorXR conserve sa configuration locale.",
+      "import": "Importer la config",
+      "export": "Exporter la config",
+      "directory": "Dossier de configuration",
+      "directoryPending": "Disponible après le chargement de la configuration",
+      "reset": {
+        "title": "Rétablir les valeurs par défaut",
+        "description": "Recrée settings.json avec les valeurs par défaut et efface les données locales de découverte des applications OpenXR.",
+        "button": "Rétablir par défaut"
+      }
+    }
+  },
+  "theme": {
+    "system": "Système",
+    "light": "Clair",
+    "dark": "Sombre"
+  },
+  "fileTypes": {
+    "jsonConfig": "Configuration JSON",
+    "wavAudio": "Audio WAV"
+  }
+}

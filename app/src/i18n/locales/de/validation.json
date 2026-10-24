@@ -1,0 +1,88 @@
+{
+  "field": {
+    "between": "{field} muss zwischen {min} und {max} liegen",
+    "betweenCm": "{field} muss zwischen {min} und {max} cm liegen",
+    "integerBetween": "{field} muss eine ganze Zahl zwischen {min} und {max} sein",
+    "wholeNumberFromTo": "{field} muss eine ganze Zahl von {min} bis {max} sein",
+    "boolean": "{field} muss ein boolescher Wert sein",
+    "trueOrFalse": "{field} muss true oder false sein",
+    "required": "{field} ist erforderlich",
+    "smallerThan": "{field} muss kleiner als {other} sein",
+    "duplicates": "{field} dupliziert {value}",
+    "wavFile": "{field} muss auf eine .wav-Datei verweisen"
+  },
+  "osd": {
+    "between": "OSD-{field} muss zwischen {min} und {max} liegen",
+    "customColor": "Die benutzerdefinierte OSD-Farbe muss eine sechsstellige Hex-Farbe sein",
+    "accent": "Die OSD-Akzentfarbe ist ungültig",
+    "clockFormat": "Das OSD-Uhrzeitformat muss 12 oder 24 Stunden sein",
+    "compactMetrics": "Die kompakte OSD-Leistungsauswahl ist ungültig",
+    "bodyOrder": "Die OSD-Zeilenreihenfolge muss jede Zeile genau einmal enthalten"
+  },
+  "binding": {
+    "chordEmpty": "{field} muss mindestens eine Taste enthalten",
+    "chordUnsupportedKey": "{field} enthält eine nicht unterstützte Taste: {key}",
+    "chordPrimaryKey": "{field} muss genau eine Taste enthalten, die keine Zusatztaste ist",
+    "inputPath": "{field} muss button-1 bis button-128 oder hat-1 bis hat-4 mit einer unterstützten Richtung verwenden"
+  },
+  "pivot": {
+    "positionAssistAngles": "{field} erfordert 0 <= Startwinkel < Winkel für vollen Versatz <= 180",
+    "responseMode": "{field} muss \"continuous\" oder \"stepped\" sein",
+    "stepGlideMode": "{field} muss \"instant\" oder \"glide\" sein",
+    "quickViewDuplicateId": "{field} dupliziert eine andere Quick View",
+    "nudgeSetReservedId": "{field} verwendet die reservierte Auswahl „Keine“",
+    "nudgeSetDuplicateId": "{field} dupliziert einen anderen Nudge-Satz",
+    "unknownNudgeSet": "{field} verweist auf einen unbekannten Nudge-Satz"
+  },
+  "quadviews": {
+    "trackingMode": "{field} muss head oder eye sein"
+  },
+  "framegen": {
+    "synthesisMode": "{field} muss interpolate oder extrapolate sein",
+    "flowQuality": "{field} muss performance, balanced oder quality sein",
+    "motionEstimation": "{field} muss shader oder hardware sein",
+    "frameMultiplier": "{field} muss auto, dynamic, 2x, 3x oder 4x sein",
+    "diagnosticView": "{field} muss off, flow, confidence oder tint sein"
+  },
+  "turbo": {
+    "predictionPercent": "Die experimentelle Turbo-Vorhersagedämpfung muss eine ganze Zahl von 50 bis 100 sein",
+    "frameLimit": "Die experimentelle Turbo-Bildratenbegrenzung muss 0 (aus) oder eine ganze Zahl von 20 bis 240 sein"
+  },
+  "applications": {
+    "idFormat": "{field} darf nur Kleinbuchstaben, Ziffern und Bindestriche enthalten",
+    "duplicateId": "{field} dupliziert eine andere Anwendung",
+    "duplicateExe": "{field} dupliziert eine andere Anwendung",
+    "unknownApplication": "{field} verweist auf eine unbekannte Anwendung: {application}"
+  },
+  "profiles": {
+    "conflict": "{profile} steht im Konflikt mit profiles[{first}] für die Anwendung {application}; das erste aktivierte Profil hat Vorrang"
+  },
+  "version": "version muss {version} entsprechen",
+  "warnings": {
+    "turboFrameGenOverlap": "Turbo und Frame Generation sind beide für {targets} eingeschaltet. Frame Generation übernimmt die Bildtaktung; Turbo bleibt in Sitzungen, in denen Frame Generation läuft, ausgeschaltet.",
+    "moreApplications_one": "{count} weitere",
+    "moreApplications_other": "{count} weitere",
+    "applicationsWithoutProfile": "Anwendungen ohne eigenes Profil"
+  },
+  "store": {
+    "loadBlocked": "Die Einstellungen konnten nicht geladen werden, daher ist das Speichern deaktiviert, um die Datei auf dem Datenträger zu erhalten: {error}. Korrigieren Sie die Datei und öffnen Sie VectorXR erneut, importieren Sie eine Konfiguration, oder setzen Sie auf Standardwerte zurück.",
+    "loadConfigFailed": "Konfiguration konnte nicht geladen werden",
+    "loadSeenAppsFailed": "Erkannte Apps konnten nicht geladen werden",
+    "loadRuntimePacingFailed": "Taktungsstatus der Laufzeit konnte nicht geladen werden",
+    "loadTurboMetricsFailed": "Turbo-Metriken konnten nicht geladen werden",
+    "turboMetricsCleared": "Turbo-Metriken gelöscht",
+    "clearTurboMetricsFailed": "Turbo-Metriken konnten nicht gelöscht werden",
+    "pacingVerdictCleared": "Taktungsergebnis für {runtime} gelöscht; Auto ermittelt es in der nächsten Sitzung neu",
+    "clearPacingVerdictFailed": "Taktungsergebnis konnte nicht gelöscht werden",
+    "configSaved": "Konfiguration gespeichert",
+    "saveConfigFailed": "Konfiguration konnte nicht gespeichert werden",
+    "reloadedFromDisk": "Auf dem Datenträger geänderte Einstellungen geladen",
+    "configReset": "Konfiguration auf Standardwerte zurückgesetzt",
+    "resetConfigFailed": "Konfiguration konnte nicht zurückgesetzt werden",
+    "changesDiscarded": "Nicht gespeicherte Änderungen verworfen",
+    "configImported": "Konfiguration importiert – speichern, um sie auf den Datenträger zu schreiben",
+    "applicationAdded": "{exe} wurde zum Anwendungsregister hinzugefügt",
+    "seenAppsCleared": "Erkannte Apps gelöscht",
+    "clearSeenAppsFailed": "Erkannte Apps konnten nicht gelöscht werden"
+  }
+}

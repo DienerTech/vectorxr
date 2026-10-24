@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue'
 
 import AppPicker from './AppPicker.vue'
+import { t } from '../i18n/index.ts'
 import type { RegisteredApplication } from '../lib/model'
 
 interface ProfileLike {
@@ -44,7 +45,7 @@ const hasNoAssignedApplications = computed(
   >
     <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
       <div class="flex flex-wrap items-center gap-2">
-        <p class="eyebrow text-xs uppercase tracking-[0.24em]">Profile {{ index + 1 }}</p>
+        <p class="eyebrow text-xs uppercase tracking-[0.24em]">{{ t('app.profile.number', { number: index + 1 }) }}</p>
         <h3 v-if="!editingName" class="text-lg font-semibold tracking-tight">{{ profile.name }}</h3>
         <input
           v-else
@@ -59,7 +60,7 @@ const hasNoAssignedApplications = computed(
           v-if="!editingName"
           class="button-secondary inline-flex h-7 w-7 items-center justify-center rounded-[0.5rem]"
           type="button"
-          aria-label="Edit profile name"
+          :aria-label="t('app.profile.editName')"
           @click="editingName = true"
         >
           <svg aria-hidden="true" class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
@@ -70,17 +71,17 @@ const hasNoAssignedApplications = computed(
           v-if="hasNoAssignedApplications"
           class="rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] chip-warning"
         >
-          No applications
+          {{ t('app.profile.noApplications') }}
         </span>
         <slot name="badges" />
       </div>
 
       <div class="flex flex-wrap items-center gap-2">
-        <div v-if="reorderable" class="flex items-center gap-1" title="Priority order — when profiles overlap on an application, the higher profile owns any binding they share.">
+        <div v-if="reorderable" class="flex items-center gap-1" :title="t('app.profile.priority')">
           <button
             class="button-secondary inline-flex h-8 w-8 items-center justify-center rounded-[0.5rem] disabled:cursor-not-allowed disabled:opacity-35"
             type="button"
-            aria-label="Move profile up (higher priority)"
+            :aria-label="t('app.profile.moveUp')"
             :disabled="index === 0"
             @click="$emit('move', -1)"
           >
@@ -91,7 +92,7 @@ const hasNoAssignedApplications = computed(
           <button
             class="button-secondary inline-flex h-8 w-8 items-center justify-center rounded-[0.5rem] disabled:cursor-not-allowed disabled:opacity-35"
             type="button"
-            aria-label="Move profile down (lower priority)"
+            :aria-label="t('app.profile.moveDown')"
             :disabled="profileCount !== undefined && index >= profileCount - 1"
             @click="$emit('move', 1)"
           >
@@ -102,14 +103,14 @@ const hasNoAssignedApplications = computed(
         </div>
         <label
           class="pill-toggle inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium"
-          :title="enabledChangeNote ?? (profile.enabled ? `This profile applies custom ${moduleLabel} settings to its assigned applications.` : `This profile is ignored at runtime.`)"
+          :title="enabledChangeNote ?? (profile.enabled ? t('app.profile.enabledTitle', { module: moduleLabel }) : t('app.profile.disabledTitle'))"
         >
           <input v-model="profile.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
-          {{ profile.enabled ? 'Profile On' : 'Profile Off' }}
+          {{ profile.enabled ? t('app.profile.on') : t('app.profile.off') }}
           <span v-if="enabledChangeNote" class="restart-required-mark" :title="enabledChangeNote">&#8635;</span>
         </label>
         <button class="button-secondary rounded-[0.75rem] px-3.5 py-2 text-sm font-medium" type="button" @click="$emit('remove')">
-          Remove
+          {{ t('common.remove') }}
         </button>
       </div>
     </div>
@@ -119,7 +120,7 @@ const hasNoAssignedApplications = computed(
       class="mb-3 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 chip-warning"
       style="border-color: var(--app-border)"
     >
-      <p class="font-medium">{{ warningTitle ?? 'Profile conflict' }}</p>
+      <p class="font-medium">{{ warningTitle ?? t('app.profile.conflict') }}</p>
       <ul class="mt-2 space-y-1">
         <li v-for="warning in warnings" :key="warning">{{ warning }}</li>
       </ul>
@@ -127,9 +128,9 @@ const hasNoAssignedApplications = computed(
 
     <label class="block">
       <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-        Applications
+        {{ t('app.profile.applications') }}
         <span
-          :title="`Registered applications this profile applies to. The first active matching profile wins.`"
+          :title="t('app.profile.applicationsHelp')"
           class="cursor-help select-none text-xs text-muted"
           >ⓘ</span
         >
@@ -148,14 +149,14 @@ const hasNoAssignedApplications = computed(
       style="border-color: var(--app-border)"
       role="note"
     >
-      <p class="font-medium">This profile will not activate</p>
+      <p class="font-medium">{{ t('app.profile.inactiveTitle') }}</p>
       <p class="mt-1">
-        This enabled profile is not assigned to any applications. Select at least one application or turn the profile off.
+        {{ t('app.profile.inactiveBody') }}
       </p>
     </div>
 
     <div v-if="!profile.enabled" class="mt-3 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-strong">
-      This profile is off and has no effect. Its applications fall back to the default {{ moduleLabel }} profile.
+      {{ t('app.profile.offNote', { module: moduleLabel }) }}
     </div>
     <div v-else class="mt-3">
       <slot />

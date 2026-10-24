@@ -1,0 +1,66 @@
+{
+  "checks": {
+    "suiteEnabled": {
+      "label": "Chave de execução da suíte",
+      "enabled": "Os efeitos de execução do VectorXR têm permissão para rodar.",
+      "disabled": "O VectorXR está desativado pela chave de execução da página Início."
+    },
+    "layerRegistered": {
+      "label": "Registro da camada OpenXR",
+      "loading": "O VectorXR ainda está lendo os registros de camadas OpenXR.",
+      "registered": "Registrado em {slice}.",
+      "missing": "O VectorXR não foi encontrado no registro de camadas de API implícitas do OpenXR."
+    },
+    "layerEnabled": {
+      "label": "Camada OpenXR ativada",
+      "loading": "Aguardando o status da camada OpenXR.",
+      "enabled": "A camada de API do VectorXR está ativada para as próximas inicializações OpenXR.",
+      "disabled": "A camada de API do VectorXR está desativada ou indisponível."
+    },
+    "layerDuplicates": {
+      "label": "Uma camada VectorXR ativada",
+      "detail_one": "{count} registro do VectorXR está ativado ({paths}). Aplicativos OpenXR travam quando duas cópias são carregadas; desative todas, exceto uma, na página Camadas OpenXR.",
+      "detail_other": "{count} registros do VectorXR estão ativados ({paths}). Aplicativos OpenXR travam quando duas cópias são carregadas; desative todas, exceto uma, na página Camadas OpenXR."
+    },
+    "layerFiles": {
+      "label": "Arquivos da camada",
+      "pending": "Os arquivos da camada podem ser verificados depois que o registro da camada for encontrado.",
+      "resolved": "Os caminhos do manifesto e da DLL foram resolvidos.",
+      "missing": "O caminho registrado do manifesto ou da DLL está ausente."
+    },
+    "configLoaded": {
+      "label": "Caminho da configuração",
+      "pending": "O caminho da configuração aparecerá depois que as configurações forem carregadas."
+    },
+    "recentLog": {
+      "label": "Logs de execução",
+      "available_one": "{count} arquivo de log recente disponível.",
+      "available_other": "{count} arquivos de log recentes disponíveis.",
+      "none": "Ainda não há logs de execução do VectorXR disponíveis."
+    },
+    "seenApps": {
+      "label": "Descoberta de aplicativos",
+      "observed_one": "{count} aplicativo OpenXR observado.",
+      "observed_other": "{count} aplicativos OpenXR observados.",
+      "none": "Nenhum aplicativo OpenXR foi observado ainda."
+    }
+  },
+  "overall": {
+    "ready": "Pronto",
+    "attention": "Requer atenção",
+    "inactive": "Inativo",
+    "unknown": "Verificando"
+  },
+  "description": {
+    "ready": "O VectorXR parece pronto para as próximas inicializações de aplicativos OpenXR.",
+    "attention": "O VectorXR pode ser executado, mas um ou mais diagnósticos podem precisar de revisão.",
+    "inactive": "No momento, o VectorXR não está pronto para aplicar os aprimoramentos OpenXR.",
+    "unknown": "O VectorXR ainda está coletando o status do sistema."
+  },
+  "state": {
+    "pass": "ok",
+    "warn": "aviso",
+    "fail": "falha",
+    "info": "info"
+  }
+}

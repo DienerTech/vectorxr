@@ -1,0 +1,320 @@
+{
+  "tab": {
+    "intro": "Configurez le rendu fovéal et périphérique pour les jeux qui demandent déjà les quad views OpenXR. L'activation de ce module n'ajoute pas la prise en charge des quad views aux jeux stéréo ordinaires.",
+    "varjoCompatibility": "Compatibilité Varjo",
+    "setupGuide": {
+      "title": "Guide de configuration",
+      "summary": "Configuration DCS recommandée et jeux compatibles",
+      "heading": "Configuration DCS recommandée",
+      "gameLabel": "Jeu :",
+      "game": "{label} activez {useQuadView} et, pour le suivi du regard, {useEyeTracking}.",
+      "useQuadView": "Use Quad View",
+      "useEyeTracking": "Use Eye Tracking",
+      "providerLabel": "Fournisseur :",
+      "provider": "{label} activez la couche VectorXR et le profil Quadviews, puis désactivez {layerName}. Sur Pimax, désactivez aussi Native Pimax Quad Views. Les Quadviews natives de Varjo restent pilotées par le runtime.",
+      "applyLabel": "Application :",
+      "apply": "{label} enregistrez le profil et redémarrez DCS après avoir modifié le runtime, la couche ou les paramètres VR du jeu.",
+      "titles": "DCS est le principal jeu testé. Parmi les candidats D3D11 probables, mais non confirmés, figurent Pavlov VR, VAIL VR, The 7th Guest VR et Kayak VR: Mirage. Chaque jeu doit demander lui-même les quad views.",
+      "pixelEstimates": "Les estimations de pixels ne comparent que le rendu des vues de l'application ; le runtime et la composition de VectorXR ont un coût GPU supplémentaire."
+    },
+    "restartNoteLabel": "Redémarrage nécessaire :",
+    "restartNote": "{label} les champs marqués et l'activation/désactivation de Quadviews prennent pleinement effet après la fermeture de l'application OpenXR en cours. Les commandes non marquées se mettent à jour pendant le jeu.",
+    "diagnostics": {
+      "eyebrow": "Diagnostics dans le casque",
+      "intro": "Visualisez les zones de rendu, l'alignement du foyer, le filtrage du regard et la disponibilité du suivi pendant que vous réglez Quadviews.",
+      "howToRead": "Comment lire la superposition",
+      "sessionControl": "Contrôle de la session",
+      "shownIn": "Affichée dans {application}",
+      "hiddenIn": "Masquée dans {application}",
+      "unavailable": "Indisponible dans la session OpenXR active",
+      "noSession": "Aucune session Quadviews synthétisée active",
+      "applying": "Application...",
+      "hide": "Masquer la visualisation",
+      "show": "Afficher la visualisation",
+      "shortcutHeading": "Raccourci dans le casque",
+      "shortcutHint": "Facultatif. La visualisation démarre masquée à chaque session OpenXR.",
+      "guideHint": "Vous découvrez la visualisation ? Le guide interactif explique chaque forme et associe les symptômes courants au paramètre qui les contrôle.",
+      "readStatusFailed": "Impossible de lire l'état d'exécution",
+      "controlFailed": "Impossible de contrôler la visualisation",
+      "notAcknowledged": "La session OpenXR n'a pas accusé réception de la demande de contrôle"
+    },
+    "binding": {
+      "label": "Bascule de la visualisation de diagnostic",
+      "description": "Affiche ou masque la vue d'étalonnage de Quadviews en jeu. Elle démarre masquée à chaque session et n'est disponible que lorsque VectorXR synthétise Quadviews via son compositeur D3D11.",
+      "noneText": "Aucun raccourci dans le casque affecté. Vous pouvez toujours contrôler la visualisation depuis la page Quadviews."
+    },
+    "defaultProfile": {
+      "heading": "Profil par défaut",
+      "appliesTo": "S'applique aux applications sans profil personnalisé activé",
+      "toggleOn": "Profil par défaut activé",
+      "toggleOff": "Profil par défaut désactivé",
+      "restartTitle": "Les modifications d'activation/désactivation de Quadviews s'appliquent après la fermeture de l'application OpenXR en cours.",
+      "offNote": "Désactivé, sauf si un profil personnalisé activé l'active. Les profils personnalisés ci-dessous s'appliquent toujours à leurs applications."
+    },
+    "launchStateNote": "Enregistré immédiatement, mais une application OpenXR en cours conserve l'état Quadviews de son lancement jusqu'à sa fermeture.",
+    "customProfiles": {
+      "heading": "Profils personnalisés",
+      "intro": "Remplacez Quadviews par application. Le premier profil activé correspondant l'emporte.",
+      "add": "Ajouter un profil",
+      "empty": "Aucun profil personnalisé pour l'instant. Ajoutez un profil pour remplacer les valeurs quadview d'une application précise.",
+      "alreadyTargeted": "{application} est déjà ciblée par le profil {number}. Le premier profil actif l'emporte."
+    },
+    "budget": {
+      "estimate": "{percent} % des pixels de rendu de l'application (estimation)",
+      "light": "Léger",
+      "moderate": "Modéré",
+      "heavy": "Lourd",
+      "detrimental": "⚠ Contre-productif"
+    },
+    "varjo": {
+      "title": "Quadviews compatibles Varjo",
+      "biPanel": "Les casques Varjo sont à double panneau : un écran de contexte large et de plus faible densité, plus un petit écran de foyer haute densité par œil. Les quadviews compatibles Varjo de VectorXR conservent les quatre couches de vue attendues par votre casque (deux périphériques, deux de foyer) afin que les panneaux de foyer physiques soient pilotés directement. En conséquence, le runtime Varjo prend en charge la géométrie des vues, et certains paramètres de Quadviews sont ignorés.",
+      "notesIntro": "Notes de compatibilité entre Quadviews de VectorXR et le runtime Varjo :",
+      "stillApplies": "Toujours appliqué par VectorXR",
+      "handledByRuntime": "Géré par le runtime Varjo",
+      "focusScale": "Échelle du foyer",
+      "peripheralScale": "Échelle périphérique",
+      "focusSharpness": "Netteté du foyer",
+      "focusSizeTransition": "Taille du foyer et épaisseur de la transition",
+      "offsets": "Décalage horizontal et vertical",
+      "smoothingDeadzone": "Lissage du regard et zone morte",
+      "diagnosticVisualization": "Visualisation de diagnostic",
+      "emulation": "Sur les casques sans prise en charge physique des quad views par écrans à double panneau (par ex. Quest Pro, Pimax Crystal), Quadviews de VectorXR utilise le mode d'émulation standard et tous les paramètres s'appliquent. Ces notes de compatibilité ne concernent que les runtimes Varjo.",
+      "diagnosticUnsupportedLead": "La visualisation de diagnostic n'est actuellement pas prise en charge sur les casques Varjo.",
+      "diagnosticUnsupported": "{lead} Le runtime de Varjo gère la composition quad-view native ; le compositeur D3D11 synthétisé de VectorXR ne s'y exécute donc pas."
+    }
+  },
+  "fields": {
+    "preset": {
+      "heading": "Préréglage Vector",
+      "restartTitle": "Les préréglages incluent des paramètres qui nécessitent un redémarrage du jeu pour prendre pleinement effet.",
+      "intro": "Un bon point de départ ; le suivi et l'alignement restent à votre main.",
+      "buttonTitle": "Les préréglages modifient les dimensions et la résolution du foyer ; leur effet complet nécessite donc un redémarrage du jeu.",
+      "performance": "Performances",
+      "balanced": "Équilibré",
+      "quality": "Qualité"
+    },
+    "focusWindow": "Fenêtre de foyer",
+    "focusWidth": {
+      "label": "Largeur du foyer",
+      "restart": "La fenêtre de foyer se déplace en direct, mais DCS conserve sa largeur de texture et sa charge en pixels actuelles jusqu'au redémarrage."
+    },
+    "focusHeight": {
+      "label": "Hauteur du foyer",
+      "restart": "La fenêtre de foyer se déplace en direct, mais DCS conserve sa hauteur de texture et sa charge en pixels actuelles jusqu'au redémarrage."
+    },
+    "percentOfFov": "% du champ de vision",
+    "horizontalOffset": {
+      "label": "Décalage horizontal",
+      "help": "Déplace la zone de foyer vers la gauche ou la droite, en degrés. À utiliser uniquement si la région nette semble décentrée."
+    },
+    "verticalOffset": {
+      "label": "Décalage vertical",
+      "help": "Déplace la zone de foyer vers le haut ou le bas, en degrés. Utile si le centre du regard d'un casque semble biaisé verticalement."
+    },
+    "resolution": "Résolution",
+    "focusResolution": {
+      "label": "Résolution du foyer",
+      "restart": "Redémarrage nécessaire : DCS conserve les textures de foyer de son lancement. Au-delà de 100 %, le canevas de sortie de VectorXR peut être redimensionné, ce qui peut provoquer un à-coup temporaire de la fréquence d'images.",
+      "warning": "L'image de sortie pleine vue de VectorXR grandit avec la Résolution du foyer : {percent} % demande environ {factor}× les pixels de votre casque en mémoire GPU et en composition, en plus du coût de rendu de l'application indiqué ci-dessus."
+    },
+    "percentOfHmd": "% de la résolution du casque",
+    "peripheralResolution": {
+      "label": "Résolution périphérique",
+      "restart": "Redémarrage nécessaire : DCS conserve les textures périphériques et la charge en pixels de son lancement."
+    },
+    "foveateSharpness": {
+      "label": "Netteté fovéale",
+      "help": "Applique une accentuation supplémentaire à l'image de foyer haute définition. 0 la désactive ; des valeurs plus élevées ajoutent du piqué mais peuvent créer des halos."
+    },
+    "transitionThickness": {
+      "label": "Épaisseur de la transition",
+      "help": "Contrôle la largeur du bord fondu entre les images de foyer et périphérique. Des valeurs plus élevées masquent mieux la limite mais adoucissent une plus grande partie de la fenêtre de foyer."
+    },
+    "percentOfFocusWindow": "% de la fenêtre de foyer",
+    "tracking": "Suivi",
+    "mode": {
+      "label": "Mode",
+      "restart": "Passer au suivi oculaire nécessite un redémarrage du jeu si celui-ci a démarré en mode suivi de la tête.",
+      "help": "Détermine si la zone de foyer suit la direction de la tête ou le regard lorsque le suivi oculaire est disponible.",
+      "head": "Suivi de la tête",
+      "eye": "Suivi oculaire"
+    },
+    "eyeTrackingCorrection": {
+      "label": "Correction du suivi oculaire",
+      "help": "Utilisez Par défaut, sauf si le suivi oculaire semble inversé ; essayez alors Inverser Z uniquement.",
+      "default": "Par défaut",
+      "flipZ": "Inverser Z uniquement"
+    },
+    "smoothing": {
+      "label": "Lissage",
+      "help": "Adoucit le mouvement de la zone de foyer. 0 est instantané ; des valeurs plus élevées réduisent les tremblements mais ajoutent du retard."
+    },
+    "deadzone": {
+      "label": "Zone morte",
+      "help": "Petits mouvements du regard ignorés avant que la zone de foyer ne se déplace. Utile pour réduire le scintillement près du centre."
+    }
+  },
+  "dimensions": {
+    "peripheralLeft": "Périphérique G",
+    "peripheralRight": "Périphérique D",
+    "focusLeft": "Foyer G",
+    "focusRight": "Foyer D",
+    "waiting": "Les dimensions des vues apparaissent ici pendant l'exécution d'un jeu Quadviews.",
+    "view": "{name} : {width} × {height} (texture {allocatedWidth} × {allocatedHeight})",
+    "footer": "Tailles des vues soumises, actualisées chaque seconde. Les modifications de résolution enregistrées peuvent nécessiter un redémarrage du jeu.",
+    "labelNone": "Dimensions —",
+    "labelLive": "Dimensions · En direct",
+    "labelLast": "Dimensions · Dernières"
+  },
+  "guide": {
+    "eyebrow": "Guide de terrain interactif",
+    "title": "Lire la superposition Quadviews",
+    "intro": "Apprenez d'abord à lire l'image, puis modifiez le paramètre qui correspond à ce que vous voyez réellement.",
+    "closeLabel": "Fermer le guide de la superposition",
+    "stepsLabel": "Étapes du guide de la superposition",
+    "steps": {
+      "zones": {
+        "title": "Lire les zones",
+        "summary": "Voyez où chaque image contribue."
+      },
+      "alignment": {
+        "title": "Vérifier l'alignement",
+        "summary": "Comparez les centres, le décalage et le regard."
+      },
+      "motion": {
+        "title": "Juger le suivi",
+        "summary": "Repérez les tremblements, le retard et les pertes de suivi."
+      },
+      "troubleshoot": {
+        "title": "Choisir une correction",
+        "summary": "Associez un symptôme à la bonne commande."
+      }
+    },
+    "illustrationLabel": "Illustration interactive de la superposition de diagnostic de Quadviews",
+    "svg": {
+      "peripheral": "BLEU - CONTEXTE PÉRIPHÉRIQUE",
+      "blend": "AMBRE - FONDU",
+      "focus": "IMAGE DE FOYER",
+      "headCenter": "CENTRE DE LA TÊTE",
+      "configuredOffset": "DÉCALAGE CONFIGURÉ",
+      "raw": "BRUT",
+      "smoothed": "LISSÉ",
+      "dragHint": "CLIQUEZ OU FAITES GLISSER POUR DÉPLACER LE REGARD BRUT",
+      "trackingUnavailable": "SUIVI INDISPONIBLE - REPLI ACTIF"
+    },
+    "illustrative": "Illustration - pas une capture du casque au pixel près",
+    "demo": {
+      "focusSize": "Taille du foyer",
+      "transitionThickness": "Épaisseur de la transition",
+      "horizontalOffset": "Décalage horizontal",
+      "verticalOffset": "Décalage vertical",
+      "smoothing": "Lissage",
+      "degrees": "{value} deg",
+      "eyeTrackingAvailable": "Suivi oculaire : disponible",
+      "eyeTrackingLost": "Suivi oculaire : perdu",
+      "reset": "Réinitialiser l'illustration"
+    },
+    "settingNames": {
+      "peripheralResolution": "Résolution périphérique",
+      "transitionThickness": "Épaisseur de la transition",
+      "focusResolution": "Résolution du foyer",
+      "focusWidthHeight": "Largeur / hauteur du foyer",
+      "referenceOnly": "Référence uniquement",
+      "horizontalVerticalOffset": "Décalage horizontal / vertical",
+      "horizontalOffset": "Décalage horizontal",
+      "verticalOffset": "Décalage vertical",
+      "trackingSource": "Source du suivi",
+      "smoothingDeadzone": "Lissage / zone morte",
+      "smoothing": "Lissage",
+      "deadzone": "Zone morte",
+      "trackingMode": "Mode de suivi",
+      "gameEyeTracking": "Suivi oculaire du jeu",
+      "headsetRuntime": "Runtime du casque"
+    },
+    "cards": {
+      "peripheral": {
+        "title": "Zone périphérique",
+        "body": "Le bleu couvre l'image de contexte. Réduire sa résolution économise généralement le plus de pixels sans réduire votre région nette."
+      },
+      "transition": {
+        "title": "Bande de transition",
+        "body": "L'ambre est le fondu entre les images. Plus large, elle peut masquer une jointure ; trop large, elle peut rendre le bord flou."
+      },
+      "focusBoundary": {
+        "title": "Limite du foyer",
+        "body": "Le contour vert représente la taille de la fenêtre de foyer. La Résolution du foyer modifie la densité de détails, pas ce contour."
+      },
+      "headCenter": {
+        "title": "Centre de la tête",
+        "body": "La croix blanche correspond à l'avant du casque. Elle donne une référence stable à tous les autres repères."
+      },
+      "configuredOffset": {
+        "title": "Décalage configuré",
+        "body": "Le L et l'anneau magenta montrent votre correction volontaire par rapport au centre de la tête."
+      },
+      "rawGaze": {
+        "title": "Regard brut",
+        "body": "Le cyan est l'échantillon immédiat du suivi oculaire. Cliquez sur l'illustration pour le déplacer."
+      },
+      "smoothedGaze": {
+        "title": "Regard lissé",
+        "body": "Le jaune est la position filtrée qui pilote la fenêtre de foyer avant l'ajout du décalage configuré."
+      },
+      "greenOutline": {
+        "title": "Contour vert",
+        "body": "Le suivi oculaire est disponible. Comparez le cyan et le jaune pour juger le filtrage."
+      },
+      "redOutline": {
+        "title": "Contour rouge",
+        "body": "La source oculaire est indisponible. VectorXR utilise son comportement de foyer de repli."
+      }
+    },
+    "goodTracking": {
+      "heading": "À quoi ressemble un bon suivi",
+      "cyan": "Le cyan réagit immédiatement à vos yeux.",
+      "yellow": "Le jaune suit de près sans trembler constamment.",
+      "window": "La fenêtre de foyer reste sur le détail visé."
+    },
+    "symptoms": {
+      "boundary": {
+        "label": "Jointure visible",
+        "title": "Le bord du foyer est facile à voir",
+        "body": "Augmentez légèrement l'Épaisseur de la transition. Si la bande ambre devient largement floue, réduisez-la de nouveau et resserrez l'écart de résolution entre Foyer et Périphérique."
+      },
+      "offset": {
+        "label": "Mauvais centre",
+        "title": "La région nette est systématiquement décalée",
+        "body": "Vérifiez d'abord que les repères de regard cyan et jaune tombent là où vous regardez. Si c'est le cas, utilisez le Décalage horizontal ou vertical pour corriger ce biais constant. N'utilisez pas le décalage pour masquer un retard du regard."
+      },
+      "jitter": {
+        "label": "Tremblements",
+        "title": "La fenêtre de foyer tremble près de votre regard",
+        "body": "Augmentez progressivement le Lissage. Une petite Zone morte peut supprimer les infimes mouvements des yeux près du centre, mais trop de zone morte crée un saut collant lorsque le foyer se déplace enfin."
+      },
+      "lag": {
+        "label": "Trop de retard",
+        "title": "Le repère jaune traîne trop loin derrière le cyan",
+        "body": "Réduisez le Lissage. Si le mouvement démarre tard puis saute, réduisez aussi la Zone morte. Utilisez les plus petites valeurs qui gardent la fenêtre de foyer visuellement calme."
+      },
+      "lost": {
+        "label": "Contour rouge",
+        "title": "Le suivi oculaire est indisponible",
+        "body": "Un contour de foyer rouge est un avertissement d'état, pas une préférence de couleur. Vérifiez que le suivi oculaire est activé dans le jeu et dans le runtime du casque. VectorXR passe en mode de repli au lieu de suivre le regard."
+      },
+      "performance": {
+        "label": "Besoin de plus de FPS",
+        "title": "Réduisez les pixels là où ils comptent le moins",
+        "body": "Baissez d'abord la Résolution périphérique. Réduisez ensuite la Largeur ou la Hauteur du foyer si nécessaire. La Résolution du foyer modifie la densité à l'intérieur de la fenêtre - elle ne change pas la taille du contour vert."
+      }
+    },
+    "ifYouSee": "Si vous voyez ceci",
+    "tuningOrder": {
+      "heading": "Bon ordre de réglage :",
+      "tracking": "Vérifiez que le suivi est disponible.",
+      "alignment": "Corrigez un biais d'alignement constant.",
+      "smoothing": "Équilibrez le lissage et le retard.",
+      "quality": "Réglez ensuite la qualité d'image et le coût en pixels."
+    }
+  }
+}

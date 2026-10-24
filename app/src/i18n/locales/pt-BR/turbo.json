@@ -1,0 +1,320 @@
+{
+  "title": "Turbo",
+  "breadcrumb": "Trilha de navegação",
+  "unknownApp": "aplicativo desconhecido",
+  "strategy": {
+    "vectorxr": "VectorXR",
+    "vectorxrWithModes": "VectorXR · {modes}",
+    "toolkit": "Estilo Toolkit",
+    "custom": "Personalizada",
+    "unknown": "Estratégia desconhecida",
+    "async": "Async",
+    "sequenced": "Sequenced",
+    "auto": "Auto"
+  },
+  "pacingMode": {
+    "auto": "Auto · estabilidade primeiro",
+    "forcedAsync": "Async forçado",
+    "forcedSequenced": "Sequenced forçado"
+  },
+  "tab": {
+    "badge": "Substituição avançada de ritmo",
+    "intro": "Tira a espera do runtime do caminho crítico de um jogo quando o ritmo o está segurando. Ative somente onde uma comparação A/B no jogo comprovar que ajuda.",
+    "howItWorksButton": "Como o Turbo funciona",
+    "recoveryUnavailable": "O status de recuperação está indisponível. A sua configuração de segurança salva continua valendo.",
+    "toolkitConflict": "O OpenXR Toolkit está ativado junto com o Turbo do VectorXR. Se o Turbo Mode do OXRTK também estiver ligado, desative um deles para que as duas camadas de ritmo não concorram.",
+    "frameGenNote": "A Frame Generation está ligada para alguns aplicativos. O Turbo fica desligado nas sessões em que a Frame Generation é executada, e o status dele mostra Pausado pelo Frame Generation.",
+    "pacingSummary": {
+      "manual": "Uma estratégia manual está sendo usada em todos os runtimes.",
+      "empty": "O Auto escolhe e memoriza uma estratégia estável por runtime. Experimente Async e Sequenced para descobrir a mais rápida.",
+      "observed_one": "{count} ambiente de runtime observado. O Auto escolhe a estratégia mais estável para cada um, não necessariamente a mais rápida.",
+      "observed_other": "{count} ambientes de runtime observados. O Auto escolhe a estratégia mais estável para cada um, não necessariamente a mais rápida."
+    },
+    "metricsMode": {
+      "binding": "Captura controlada",
+      "off": "Coleta desligada",
+      "always": "Captura automática"
+    },
+    "metricsSummary": {
+      "empty": "Capture o Turbo ligado e desligado no mesmo voo para medir o ganho de cada estratégia.",
+      "recorded_one": "{count} voo registrado. Mais recente: {app}.",
+      "recorded_other": "{count} voos registrados. Mais recente: {app}.",
+      "recordedLive_one": "{count} voo registrado. Mais recente: {app} (em andamento).",
+      "recordedLive_other": "{count} voos registrados. Mais recente: {app} (em andamento)."
+    },
+    "toggleBinding": {
+      "label": "Atribuição de alternância do Turbo",
+      "description": "Liga e desliga o Turbo durante o jogo para comparar diretamente o fps e a sensação dos quadros — e para desativá-lo imediatamente se a apresentação quebrar. A atribuição exige que o Turbo esteja ativado para o aplicativo no perfil dele. Ela também pode tentar o Turbo de novo quando a recuperação o bloqueou ou quando problemas de ritmo o suspenderam. Alterná-lo no meio da sessão pode causar um breve engasgo de ressincronização.",
+      "noneText": "Nenhuma atribuição definida. O Turbo inicia automaticamente onde estiver ativado, a menos que a recuperação ou a proteção de ritmo o bloqueie."
+    },
+    "essentials": {
+      "eyebrow": "Essencial",
+      "intro": "Deixe o padrão desligado e ative o Turbo por aplicativo com um perfil personalizado, ou ligue-o de forma ampla. A ativação se aplica ao Salvar; a atribuição de alternância desliga e liga o Turbo no jogo em execução.",
+      "defaultProfile": "Perfil padrão",
+      "defaultOnHint": "O Turbo se aplica a aplicativos sem perfil personalizado.",
+      "defaultOffHint": "Desligado, a menos que um perfil personalizado ativado o ligue.",
+      "defaultOn": "Padrão ligado",
+      "defaultOff": "Padrão desligado",
+      "toggleHeading": "Alternância do Turbo no jogo",
+      "toggleHint": "Liga e desliga o Turbo durante o jogo para uma comparação direta."
+    },
+    "safety": {
+      "heldOff_one": "O Turbo está sendo mantido desligado em {count} configuração. Revise e depois limpe ou tente de novo com a atribuição de alternância.",
+      "heldOff_other": "O Turbo está sendo mantido desligado em {count} configurações. Revise e depois limpe ou tente de novo com a atribuição de alternância.",
+      "idle": "Mantém o Turbo desligado após uma sessão interrompida ou uma falha repetida do runtime.",
+      "blockCount_one": "{count} bloqueio",
+      "blockCount_other": "{count} bloqueios",
+      "faultCount_one": "{count} falha",
+      "faultCount_other": "{count} falhas",
+      "review": "Revisar…",
+      "details": "Detalhes…"
+    },
+    "tune": {
+      "eyebrow": "Ajuste e verifique",
+      "intro": "Os resultados do Turbo dependem do jogo, do headset, do runtime e do driver. Para descobrir o que funciona melhor, compare cada estratégia com o Turbo desligado no mesmo voo.",
+      "guideSummary": "Como encontrar a melhor estratégia para um jogo",
+      "guideStep1": "Crie um perfil personalizado para o jogo e atribua a alternância do Turbo no jogo. Configure o Diagnóstico de desempenho para usar uma atribuição de captura.",
+      "guideStep2": "Inicie o jogo com uma estratégia. Faça um cenário repetível por cerca de um minuto com o Turbo ligado e depois desligue-o por pelo menos 30 segundos.",
+      "guideStep3": "Anote o ganho em relação ao Turbo desligado no Diagnóstico de desempenho. Cada voo é rotulado com a estratégia que usou.",
+      "guideStep4": "Mude a estratégia, salve, reinicie o jogo e repita. Experimente Async e Sequenced em Comportamento do runtime e depois a estratégia de perfil Estilo Toolkit.",
+      "guideStep5": "Fique com a estratégia de melhor ganho e melhores mínimas de 1%, sem travamentos. O Auto continua sendo um padrão seguro, mas escolhe a estratégia mais estável, não necessariamente a mais rápida."
+    },
+    "profiles": {
+      "title": "Perfis personalizados",
+      "intro": "Escolha aplicativos e uma estratégia do Turbo por perfil. Se perfis ativados se sobrepuserem, o primeiro perfil correspondente tem prioridade.",
+      "add": "Adicionar perfil",
+      "broadStrong": "A ativação ampla está ativa.",
+      "broad": "{strong} O Turbo se aplica a aplicativos sem perfil personalizado, inclusive aqueles que você não validou. A configuração mais segura é Padrão desligado, com esta lista usada como lista de aplicativos permitidos.",
+      "legacyExperimental": "As configurações experimentais anteriores foram salvas sem um aplicativo atribuído.",
+      "useSavedTiming": "Usar o tempo salvo neste perfil",
+      "bypassSafety": "Ignorar a Segurança do Turbo para estes aplicativos",
+      "bypassSafetyHint": "Ignora os bloqueios de segurança persistentes. O fallback de ritmo ao vivo ainda suspende uma sessão com falha; use a atribuição de alternância para tentar de novo.",
+      "empty": "Nenhum perfil personalizado ainda. Adicione um quando um aplicativo precisar de um comportamento diferente do padrão."
+    }
+  },
+  "howItWorks": {
+    "eyebrow": "Modo Turbo",
+    "title": "Como o Turbo funciona",
+    "whatItDoes": "O que ele faz",
+    "whatItDoesBody": "Normalmente, um jogo fica ocioso até que o runtime do headset sinalize o próximo quadro. O Turbo faz essa espera fora do caminho do jogo, para que o jogo possa começar o próximo quadro assim que o anterior for enviado. O VectorXR preserva a ordem das chamadas de quadro a jusante, mas muda quando o ritmo acontece e pode estimar o próximo horário de exibição.",
+    "strategies": "{async} (geralmente a mais rápida) espera em segundo plano. {sequenced} (para runtimes que precisam) mantém a espera e o envio em sincronia. {auto} começa com Async e recorre a Sequenced se o Async estiver instável, depois memoriza o resultado por runtime. O Auto prioriza a estabilidade: escolhe a estratégia que funciona, não necessariamente a mais rápida.",
+    "toolkit": "{toolkit} é uma estratégia experimental, por perfil, que recria o tempo do Turbo Mode do OpenXR Toolkit, desenvolvido originalmente por mbucchia. Ela sempre usa Async e entra em vigor depois que o jogo é reiniciado.",
+    "whatToExpect": "O que esperar",
+    "whatToExpectBody": "O Turbo é uma correção direcionada, não um ganho geral. Ele só ajuda quando o ritmo do runtime mantém o fps abaixo do que o hardware consegue entregar, e não pode remover um limite de taxa de quadros imposto pelo runtime. Use o Diagnóstico de desempenho com a alternância no jogo para medir cada título.",
+    "reprojectionLabel": "Compatibilidade com reprojeção:",
+    "reprojection": "{label} O Turbo pode interferir no Motion Smoothing do SteamVR e em outros sistemas de reprojeção, como o ASW. Desative o Motion Smoothing ao testar o Turbo. A previsão do tempo de quadro pode ser menos precisa, e alternar o Turbo no meio da sessão pode causar um breve engasgo enquanto o pipeline se ressincroniza.",
+    "bestStrategy": "Como encontrar a melhor estratégia",
+    "bestStrategyBody": "O Turbo depende de um comportamento de tempo do OpenXR que a especificação não define formalmente, então os resultados variam conforme hardware, driver, runtime e jogo. Nem sempre é seguro trocar de estratégia no meio da sessão, então teste uma por inicialização: use a alternância no jogo para capturar o Turbo ligado e desligado no mesmo voo e depois compare o ganho de cada estratégia no Diagnóstico de desempenho.",
+    "safetyNet": "Rede de segurança",
+    "safetyNetBody": "Se o ritmo travar mesmo depois que o Auto se adaptar, o Turbo se suspende naquela sessão. Com a Segurança do Turbo ativada, a configuração de aplicativo e runtime fica bloqueada até você limpá-la ou tentar de novo com a atribuição. Os detalhes das falhas permanecem na página Segurança do Turbo. Isso detecta travamentos de ritmo, não todas as falhas visuais ou de driver; tente de novo somente depois que a sessão estiver estável."
+  },
+  "profileTiming": {
+    "strategy": "Estratégia",
+    "strategyAria": "Estratégia do Turbo para este perfil",
+    "restartTitle": "Mudar para esta estratégia ou a partir dela entra em vigor após Salvar e reiniciar o jogo.",
+    "restartNote": "Mudar para uma estratégia marcada ou a partir dela entra em vigor após Salvar e reiniciar o jogo.",
+    "descriptionVectorxr": "O próprio Turbo do VectorXR. Segue a sua configuração de Comportamento do runtime ({pacing}) e pode ser ligado e desligado durante o jogo.",
+    "descriptionToolkit": "Recria o tempo do Turbo Mode do OpenXR Toolkit. Experimental; reinicie o jogo após alterar.",
+    "descriptionCustom": "Estilo Toolkit com os seus próprios ajustes. Experimental; reinicie o jogo após alterar.",
+    "summary": {
+      "waitForSubmission": "Aguardar o envio",
+      "overlapSubmission": "Sobrepor o envio",
+      "sampleAtEntry": "Amostrar na entrada",
+      "sampleAtReturn": "Amostrar no retorno",
+      "prediction": "{percent}% de previsão",
+      "fpsCap": "Limite de {fps} fps",
+      "noCap": "Sem limite"
+    },
+    "advancedTitle": "Tempo avançado",
+    "advancedIntro": "Para experimentação. A maioria dos jogadores deve deixar isto como está.",
+    "waitForOverlap": "Aguardar um envio sobreposto",
+    "sampleAtWaitEntry": "Amostrar o tempo de previsão na entrada da espera",
+    "predictionLabel": "Previsão (%)",
+    "frameCapLabel": "Limite de quadros (fps; 0 = desligado)",
+    "changeNote": "Alterar qualquer valor muda o perfil para Personalizada. O ajuste de previsão exige suporte ao relógio do runtime."
+  },
+  "safety": {
+    "title": "Segurança do Turbo",
+    "intro": "Revise as configurações de aplicativo e runtime bloqueadas, tente o Turbo de novo e inspecione as falhas registradas.",
+    "back": "Voltar ao Turbo",
+    "uncleanExitReason": "A sessão terminou sem um encerramento limpo. A causa exata e o horário do travamento são desconhecidos.",
+    "state": {
+      "recoveryDisabled": "Turbo ativado · desligado após bloqueio de segurança",
+      "suspended": "Turbo ativado · suspenso após uma falha",
+      "async": "Turbo ativo · Async",
+      "sequenced": "Turbo ativo · Sequenced",
+      "waiting": "Turbo aguardando para entrar",
+      "off": "Turbo desligado",
+      "framegen": "Pausado pelo Frame Generation",
+      "unavailable": "Status indisponível"
+    },
+    "protection": {
+      "title": "Proteção automática",
+      "body": "Uma sessão interrompida ou uma falha repetida do runtime pode manter o Turbo desligado para aquela configuração de aplicativo e runtime. O Turbo continua ativado no perfil, então a atribuição no jogo pode tentar de novo mesmo com esta interface fechada.",
+      "saveNote": "Salve as alterações de configuração para aplicá-las. Perfis personalizados podem ignorar a segurança para aplicativos selecionados. O fallback de ritmo ao vivo ainda suspende uma sessão com falha; a atribuição pode rearmá-lo."
+    },
+    "columns": {
+      "application": "Aplicativo / runtime",
+      "recorded": "Registrado",
+      "protection": "Proteção",
+      "actions": "Ações",
+      "fault": "Falha",
+      "details": "Detalhes"
+    },
+    "blocked": {
+      "title": "Configurações bloqueadas",
+      "intro": "Limpar e testar de novo preserva as falhas e limpa a decisão de ritmo aprendida do runtime. Reinicie o jogo em Auto sem substituição manual para um novo teste de Async, seguido de Sequenced se necessário. Uma sessão em execução pode tentar de novo o modo atual; um novo teste completo exige reiniciar o jogo.",
+      "ariaLabel": "Configurações do Turbo bloqueadas",
+      "blocked": "Bloqueado",
+      "bypassed": "Ignorado",
+      "details": "Detalhes",
+      "clearing": "Limpando…",
+      "clearRetest": "Limpar e testar de novo",
+      "empty": "Nenhum bloqueio de segurança registrado."
+    },
+    "faults": {
+      "title": "Log de falhas",
+      "clearLogs": "Limpar logs",
+      "clearing": "Limpando…",
+      "intro": "As falhas registradas permanecem aqui após uma nova tentativa. Para um encerramento não limpo, o horário registrado é o último marcador de segurança, não um horário de travamento confirmado.",
+      "clearHint": "Limpar logs remove o histórico de falhas. Os bloqueios de segurança e as decisões de ritmo aprendidas permanecem.",
+      "ariaLabel": "Log de falhas do Turbo",
+      "details": "Detalhes",
+      "empty": "Nenhuma falha do Turbo registrada."
+    },
+    "dialog": {
+      "title": "{application} · Falha do Turbo",
+      "recorded": "Registrado",
+      "pacingMode": "Modo de ritmo",
+      "runtime": "Runtime",
+      "headset": "Headset",
+      "graphicsApi": "API gráfica",
+      "processId": "ID do processo",
+      "notRecorded": "Não registrado",
+      "armedNote": "Um encerramento não limpo foi deduzido a partir de um processo interrompido. Isso não demonstra que o Turbo causou um travamento.",
+      "recoveredNote": "O VectorXR se recuperou desta falha durante a mesma sessão e manteve o jogo em execução. Ela não bloqueia o Turbo."
+    }
+  },
+  "diagnostics": {
+    "title": "Diagnóstico de desempenho",
+    "moduleLabel": "Diagnóstico do Turbo",
+    "intro": "Meça o Turbo no cenário que importa para você. O VectorXR compara o Turbo ligado e desligado somente depois que os dois lados têm tempo de captura suficiente no jogo.",
+    "closeAria": "Fechar o diagnóstico e voltar ao Turbo",
+    "binding": {
+      "label": "Atribuição de captura de métricas",
+      "description": "Inicia e para a coleta de métricas durante o jogo. Arme-a quando estiver realmente voando e pause-a antes de telas de carregamento ou menus, para que os números registrados reflitam o jogo real.",
+      "noneText": "Nenhuma atribuição definida. No modo de atribuição de captura, nenhuma métrica é registrada até que uma atribuição seja definida.",
+      "hint": "Arme a captura quando estiver realmente voando; pause-a antes de telas de carregamento ou menus."
+    },
+    "capture": {
+      "title": "Comportamento da captura",
+      "intro": "Capture somente uma jogabilidade representativa para o resultado mais justo. Telas de carregamento e menus podem encobrir o efeito que você está tentando medir.",
+      "collection": "Coleta",
+      "always": "Sempre durante o jogo",
+      "binding": "Usar uma atribuição de captura",
+      "off": "Desligado",
+      "bindingNote": "A gravação inicia e pausa com a sua atribuição de captura. Este é o modo recomendado para comparações controladas.",
+      "alwaysNote": "A gravação ocorre sempre que o Turbo se aplica. Engasgos acima de um segundo são excluídos, mas menus e telas de carregamento ainda contam.",
+      "offNote": "A coleta de métricas está desativada. Os resultados existentes continuam disponíveis abaixo."
+    },
+    "results": {
+      "eyebrow": "Resultados",
+      "intro": "Escolha um voo, leia o veredito e abra as medições detalhadas somente se precisar delas.",
+      "clearAllTitle": "Excluir todas as sessões de métricas registradas",
+      "clearAll": "Limpar todos os resultados",
+      "emptyTitle": "Nenhuma verificação de desempenho ainda",
+      "emptyBody": "Execute o Turbo em um jogo e os resultados serão atualizados aqui a cada 15 segundos, aproximadamente.",
+      "flight": "Voo",
+      "strategy": "Estratégia",
+      "accumulateNote": "Os resultados se acumulam dentro de uma sessão. Para comparar estratégias, use uma inicialização nova para cada uma e compare o ganho em relação ao Turbo desligado; estes números não medem a atividade do ASW nem a apresentação no headset.",
+      "versusOff": "Fps médio em relação ao Turbo desligado",
+      "fpsChange": "{off} → {turbo} fps neste voo",
+      "needMoreTitle": "É necessário mais tempo de voo comparável",
+      "needMoreBody": "Capture pelo menos 30 segundos com o Turbo desligado e 30 segundos com o Turbo ligado em condições semelhantes. Use a alternância do Turbo entre as passagens.",
+      "evidenceNote": "Use a porcentagem como evidência, não como promessa: a complexidade da cena, o clima, o tráfego e as tarefas em segundo plano ainda afetam a comparação."
+    },
+    "verdict": {
+      "faster": "Mais rápido",
+      "slower": "Mais lento",
+      "within": "Dentro de 1%"
+    },
+    "bucket": {
+      "off": "Turbo desligado",
+      "async": "Turbo — async",
+      "sequenced": "Turbo — sequenced"
+    },
+    "session": {
+      "unknownTime": "Horário desconhecido",
+      "label": "{when} — {app} · {details}",
+      "labelLive": "{when} — {app} · {details} (ao vivo)"
+    },
+    "duration": {
+      "minutes": "{minutes}min {seconds}s",
+      "seconds": "{seconds}s"
+    },
+    "detail": {
+      "title": "Medições detalhadas",
+      "subtitle": "Tempos de quadro, espera do runtime e travamentos",
+      "empty": "Este voo ainda não tem quadros capturados.",
+      "pacing": "Ritmo",
+      "time": "Tempo",
+      "avgFps": "Fps médio",
+      "onePercentLow": "Mínima de 1%",
+      "avgFrame": "Quadro médio",
+      "p99Frame": "Quadro p99",
+      "waitBlocked": "Espera bloqueada",
+      "waitBlockedTitle": "Tempo médio por quadro em que o jogo ficou bloqueado pelo ritmo do runtime",
+      "stalls": "Travamentos",
+      "stallsTitle": "Travamentos de ritmo de quadros contados pelo circuito de segurança",
+      "live": "Voo em andamento — atualiza a cada ~15 segundos.",
+      "complete": "Voo concluído.",
+      "collectionBinding": "Coleta: atribuição de captura.",
+      "collectionAlways": "Coleta: sempre.",
+      "hitchesExcluded": "Engasgos acima de um segundo foram excluídos."
+    }
+  },
+  "runtime": {
+    "title": "Comportamento do runtime",
+    "intro": "Escolha como o Turbo do VectorXR se coordena com cada runtime OpenXR. Auto é um ponto de partida seguro; para descobrir a estratégia mais rápida para um jogo, experimente Async e Sequenced e compare-as no Diagnóstico de desempenho. Perfis que usam a estratégia Estilo Toolkit ou Personalizada ignoram estas configurações.",
+    "closeAria": "Fechar o comportamento do runtime e voltar ao Turbo",
+    "pacing": {
+      "title": "Estratégia de ritmo",
+      "intro": "O Auto prioriza a estabilidade: começa com Async e tenta Sequenced se o Async travar ou rejeitar quadros repetidamente, depois memoriza a estratégia após 60 segundos de jogo estável. Ele não compara desempenho, então a estratégia memorizada não é necessariamente a mais rápida.",
+      "mode": "Modo",
+      "asyncOnly": "Somente Async · geralmente a mais rápida",
+      "sequencedOnly": "Somente Sequenced · para runtimes que precisam",
+      "autoActiveStrong": "O Auto está ativo.",
+      "autoActive": "{strong} O Async sobrepõe a espera do runtime ao trabalho do jogo; o Sequenced oferece suporte a runtimes que exigem que a espera e o envio continuem interligados. Fixe um runtime abaixo para testar uma estratégia específica.",
+      "manualStrong": "A substituição manual está ativa.",
+      "manual": "{strong} Somente a estratégia selecionada é executada. A descoberta automática está pausada; a Segurança do Turbo e a suspensão por falha ao vivo continuam valendo."
+    },
+    "decisions": {
+      "eyebrow": "Decisões por runtime",
+      "intro": "Revise o que o Auto aprendeu ou substitua um runtime sem afetar os demais.",
+      "active": "Ativo: {runtime}",
+      "empty": "Nada para gerenciar ainda. O Auto registra uma decisão após a primeira sessão do Turbo em um runtime.",
+      "environment": "Ambiente",
+      "decision": "Decisão",
+      "learned": "Aprendido",
+      "override": "Substituição",
+      "activeBadge": "Ativo",
+      "unknownHeadset": "Headset desconhecido",
+      "useAuto": "Usar Auto",
+      "pinAsync": "Fixar Async",
+      "pinSequenced": "Fixar Sequenced",
+      "clearRetestTitle": "Limpa as decisões aprendidas e os bloqueios de segurança deste runtime. Reinicie o jogo em Auto sem substituição manual para testar Async e depois Sequenced, se necessário.",
+      "clearRetest": "Limpar e testar de novo",
+      "inactiveNote": "As decisões por runtime ficam inativas enquanto uma substituição manual global está selecionada.",
+      "willTest": "O Auto vai testar {runtime} durante a próxima sessão do Turbo, começando com Async."
+    },
+    "mode": {
+      "notSupported": "Sem suporte",
+      "undiscovered": "Não descoberto"
+    },
+    "badge": {
+      "pinned": "Fixado",
+      "suspended": "Suspenso",
+      "discovered": "Descoberto"
+    }
+  }
+}

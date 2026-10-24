@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
+import { layerLanguage, t } from '../i18n/index.ts'
 import {
   defaultConfig,
   normalizeConfig,
@@ -161,6 +162,9 @@ export async function loadConfigEnvelope(): Promise<ConfigEnvelope> {
 }
 
 export async function saveConfigEnvelope(config: VectorXRConfig): Promise<string> {
+  // The layer draws the OSD in the app's language unless core.osd.language
+  // names one; it reads the app's from appLanguage.
+  config = { ...config, core: { ...config.core, osd: { ...config.core.osd, appLanguage: layerLanguage() } as VectorXRConfig['core']['osd'] } }
   if (!tauriAvailable()) {
     window.localStorage.setItem(localKey, JSON.stringify(config))
     return './config/vectorxr.settings.json'
@@ -200,7 +204,7 @@ export async function exportConfigFile(config: VectorXRConfig): Promise<boolean>
         suggestedName: 'settings.json',
         types: [
           {
-            description: 'JSON config',
+            description: t('settings.fileTypes.jsonConfig'),
             accept: { 'application/json': ['.json'] },
           },
         ],
@@ -233,7 +237,7 @@ export async function exportConfigFile(config: VectorXRConfig): Promise<boolean>
 // (checked once per app run).
 export async function loadGpuCapabilities(): Promise<GpuCapabilities> {
   if (!tauriAvailable()) {
-    return { probed: false, adapters: [], opticalFlow: false, error: 'not running in the VectorXR app' }
+    return { probed: false, adapters: [], opticalFlow: false, error: 'not running in the VectorXR app' } // i18n-ignore: stands in for the backend's error text
   }
 
   return invoke<GpuCapabilities>('load_gpu_capabilities')
@@ -272,7 +276,7 @@ export async function pickSoundFile(): Promise<string | null> {
   const selected = await open({
     multiple: false,
     directory: false,
-    filters: [{ name: 'WAV audio', extensions: ['wav'] }],
+    filters: [{ name: t('settings.fileTypes.wavAudio'), extensions: ['wav'] }],
   })
 
   return typeof selected === 'string' ? selected : null
@@ -456,7 +460,7 @@ export interface DebugSourceSnapshot {
 }
 
 export async function loadDebugSources(): Promise<DebugSourceSnapshot> {
-  if (!tauriAvailable()) return { files: [], warnings: ['Raw diagnostic files are available only in the desktop app.'] }
+  if (!tauriAvailable()) return { files: [], warnings: ['Raw diagnostic files are available only in the desktop app.'] } // i18n-ignore: debug package content
   return invoke<DebugSourceSnapshot>('load_debug_sources')
 }
 
@@ -489,7 +493,7 @@ export async function loadOpenXrLayers(includeSignatures = false): Promise<OpenX
       slices: [
         {
           id: 'hklm64',
-          label: 'Machine-wide 64-bit',
+          label: t('layers.slices.hklm64'),
           registryPath: String.raw`HKLM\Software\Khronos\OpenXR\1\ApiLayers\Implicit`,
           recommended: true,
           uncommon: false,
