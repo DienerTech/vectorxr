@@ -50,10 +50,11 @@ for ($i = 1; $i -le $Count; $i++) {
     [System.IO.File]::WriteAllText($request, $text)
     Write-Host "Requested capture $i."
     $deadline = (Get-Date).AddSeconds(10)
-    while ((Test-Path $request) -and (Get-Date) -lt $deadline) {
+    # While the layer deletes the request, the file can refuse access for a moment: that counts as taken.
+    while ((Test-Path $request -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) {
         Start-Sleep -Milliseconds 250
     }
-    if (Test-Path $request) {
+    if (Test-Path $request -ErrorAction SilentlyContinue) {
         Remove-Item $request -Force
         Write-Warning "Frame Generation did not pick up the request: is it generating frames right now?"
     }
