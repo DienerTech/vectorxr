@@ -163,6 +163,17 @@ FrameGenConstants BaseConstants(const FrameGenViewRequest& request, const FrameG
     return base;
 }
 
+// The synthesis pass writing the request's output (8-bit or float); with the
+// sharpening's amount in `base` (research, BaseConstants), the one built with
+// it.
+FrameGenPass SynthesisPass(const FrameGenViewRequest& request, const FrameGenConstants& base) {
+    const bool float16 = request.output == FrameGenOutputKind::kFloat16;
+    if ((base.options[2] >> kFrameGenSharpenShift) != 0u) {
+        return float16 ? FrameGenPass::kSynthesizeFloat16Sharpen : FrameGenPass::kSynthesizeUnorm8Sharpen;
+    }
+    return float16 ? FrameGenPass::kSynthesizeFloat16 : FrameGenPass::kSynthesizeUnorm8;
+}
+
 // The eye-shift map for a generated frame seen from `eye` (meters, in the
 // newest view's space), built into the one map texture.
 void AppendShiftMap(FrameGenViewPlan& plan, const FrameGenConstants& base, const std::array<float, 3>& eye,
@@ -729,8 +740,7 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
     const std::size_t generated = std::clamp<std::size_t>(tuning.generated, 1, kFrameGenMaxGenerated);
     const auto all_outputs = static_cast<std::uint8_t>((1u << generated) - 1u);
 
-    const FrameGenPass synthesize = request.output == FrameGenOutputKind::kFloat16 ? FrameGenPass::kSynthesizeFloat16
-                                                                                   : FrameGenPass::kSynthesizeUnorm8;
+    const FrameGenPass synthesize = SynthesisPass(request, base);
     if (!plan.synthesize && tuning.analyze_only) {
         // Nothing to measure (no previous frame); synthesis writes it unchanged.
         return plan;
@@ -740,6 +750,7 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
         FrameGenDispatch still = Dispatch(synthesize, plan.levels[0], plan.levels[0], base);
         still.constants.options[1] |= kFrameGenFlagStill;
         still.constants.options[2] = static_cast<std::uint32_t>(FrameGenDiagnosticView::kOff);
+        still.pass = SynthesisPass(request, still.constants);
         still.inputs = {Texture(FrameGenTextureKind::kHistoryNewest), {}, {}, {}, {}};
         still.outputs = {Texture(FrameGenTextureKind::kOutput), {}};
         still.copy_mask = all_outputs;
@@ -1143,8 +1154,7 @@ FrameGenViewPlan BuildFrameGenSynthesisPlan(const FrameGenViewRequest& request, 
     fraction = std::clamp(fraction, 0.0f, mapped ? EngineReach(tuning) : 1.0f);
     FrameGenConstants base = BaseConstants(request, tuning, mode);
     base.tuning[0] = fraction;
-    const FrameGenPass synthesize = request.output == FrameGenOutputKind::kFloat16 ? FrameGenPass::kSynthesizeFloat16
-                                                                                   : FrameGenPass::kSynthesizeUnorm8;
+    const FrameGenPass synthesize = SynthesisPass(request, base);
     // The time synthesis moves content by (past the newest frame, or before
     // it), and the eye's offset at the frame's time: the shift is the eye's
     // movement per unit forward in time, so interpolated frames sit back
@@ -1154,6 +1164,7 @@ FrameGenViewPlan BuildFrameGenSynthesisPlan(const FrameGenViewRequest& request, 
         FrameGenDispatch still = Dispatch(synthesize, plan.levels[0], plan.levels[0], base);
         still.constants.options[1] |= kFrameGenFlagStill;
         still.constants.options[2] = static_cast<std::uint32_t>(FrameGenDiagnosticView::kOff);
+        still.pass = SynthesisPass(request, still.constants);
         still.inputs = {Texture(FrameGenTextureKind::kHistoryNewest), {}, {}, {}, {}};
         still.outputs = {Texture(FrameGenTextureKind::kOutput), {}};
         still.copy_mask = 1u;

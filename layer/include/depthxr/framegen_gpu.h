@@ -479,9 +479,11 @@ extern const std::array<Blob, kFrameGenPassCount> kDxbc;
 extern const std::array<Blob, kFrameGenPassCount> kSpirv;
 // Synthesis as a draw (Direct3D 12): the vertex shader, the pixel shader
 // writing 1 to kFrameGenMaxGenerated generated frames, then the quad views
-// compose pixel shader (empty while the build has none).
-inline constexpr std::size_t kDrawShaderCount = 2 + kFrameGenMaxGenerated;
-inline constexpr std::size_t kComposeDrawShader = kDrawShaderCount - 1;
+// compose pixel shader (empty while the build has none), then the pixel
+// shaders again with the Interpolate blend's sharpening (research,
+// kFrameGenSharpenShift): the one writing n frames at kComposeDrawShader + n.
+inline constexpr std::size_t kDrawShaderCount = 2 + 2 * kFrameGenMaxGenerated;
+inline constexpr std::size_t kComposeDrawShader = 1 + kFrameGenMaxGenerated;
 extern const std::array<Blob, kDrawShaderCount> kDxbcDraw;
 } // namespace framegen_shaders
 

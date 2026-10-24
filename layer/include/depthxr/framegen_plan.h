@@ -126,8 +126,13 @@ enum class FrameGenPass : std::uint8_t {
     // Research (FrameGenTuning::flow_prior): kFilter with the flow prior
     // (kFrameGenFlagFlowPrior) built in; kFilter itself stays without it.
     kFilterPrior,
+    // Research (FrameGenTuning::sharpen): kSynthesizeUnorm8 and
+    // kSynthesizeFloat16 with the Interpolate blend's sharpening
+    // (kFrameGenSharpenShift) built in; the plain passes stay without it.
+    kSynthesizeUnorm8Sharpen,
+    kSynthesizeFloat16Sharpen,
 };
-inline constexpr std::size_t kFrameGenPassCount = 41;
+inline constexpr std::size_t kFrameGenPassCount = 43;
 
 // Logical textures owned per view. History and filtered flow are ping-pong
 // pairs: "newest" is written this submission, "previous" is last
@@ -362,8 +367,12 @@ inline constexpr std::uint32_t kFrameGenFlagResampleNear = 1u << 26;
 // sharpens the blend of the two real frames on near content (as
 // kFrameGenFlagResampleNear's) by the amount in options[2]'s high half (half
 // float bits, the low half the diagnostic view): amount x (1 - fraction) x
-// the blend's photometric confidence x (blend - the blend of the two reads'
-// 3x3 tents), clamped to both reads' footprints.
+// the blend's photometric confidence x what bilinear taps at the two reads'
+// phases blur away, blended alike (per axis f (1 - f) / 2 of the second
+// difference across each read; nothing for a read on a texel's centre or
+// halfway between four, so content not moved is left as it is), clamped to
+// the range of the texels the reads take up. Set, synthesis runs as
+// kSynthesizeUnorm8Sharpen or kSynthesizeFloat16Sharpen.
 inline constexpr std::uint32_t kFrameGenSharpenShift = 16u;
 // Research (FrameGenTuning::shift_smooth, fix B1). Synthesis with depth reads
 // the eye-shift map between its texels: the four around the pixel that lie

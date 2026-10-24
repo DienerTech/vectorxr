@@ -2480,9 +2480,11 @@ class D3D12FrameGen final : public FrameGenGpu {
     std::vector<double> PassMilliseconds() const override { return profile_ms_; }
 
     // The graphics pipeline drawing `count` generated frames into render
-    // targets of these formats; null if it cannot be created.
-    ID3D12PipelineState* DrawPipeline(const std::array<DXGI_FORMAT, kFrameGenMaxGenerated>& formats, std::size_t count) {
-        std::uint64_t key = count;
+    // targets of these formats, with `sharpen` the Interpolate blend's
+    // sharpening built in (research); null if it cannot be created.
+    ID3D12PipelineState* DrawPipeline(const std::array<DXGI_FORMAT, kFrameGenMaxGenerated>& formats, std::size_t count,
+                                      bool sharpen = false) {
+        std::uint64_t key = count * 2 + (sharpen ? 1 : 0);
         for (std::size_t i = 0; i < count; ++i) {
             key = key * 1000 + static_cast<std::uint64_t>(formats[i]);
         }
@@ -2490,7 +2492,9 @@ class D3D12FrameGen final : public FrameGenGpu {
         if (found != draw_pipelines_.end()) {
             return found->second.Get();
         }
-        const ComPtr<ID3D12PipelineState> pipeline = CreateDrawPipeline(framegen_shaders::kDxbcDraw[count], formats.data(), count);
+        const framegen_shaders::Blob& pixel =
+            framegen_shaders::kDxbcDraw[sharpen ? framegen_shaders::kComposeDrawShader + count : count];
+        const ComPtr<ID3D12PipelineState> pipeline = CreateDrawPipeline(pixel, formats.data(), count);
         draw_pipelines_[key] = pipeline;
         return pipeline.Get();
     }
@@ -2826,12 +2830,14 @@ class D3D12FrameGen final : public FrameGenGpu {
         for (std::size_t i = 0; i < frames.size(); ++i) {
             formats[i] = static_cast<DXGI_FORMAT>(submission.outputs[indices[i]].format);
         }
-        ID3D12PipelineState* pipeline = DrawPipeline(formats, frames.size());
+        const FrameGenDispatch& first = *frames[0];
+        const bool sharpen = first.pass == FrameGenPass::kSynthesizeUnorm8Sharpen ||
+                             first.pass == FrameGenPass::kSynthesizeFloat16Sharpen;
+        ID3D12PipelineState* pipeline = DrawPipeline(formats, frames.size(), sharpen);
         if (!pipeline) {
             error = "D3D12 Frame Generation draw pipeline unavailable";
             return false;
         }
-        const FrameGenDispatch& first = *frames[0];
         // Its own dispatch first, its barriers flushed: the synthesis input
         // t3 is the newest frame's depth when it is in use. Without the image
         // the frames are drawn per pixel.
@@ -6480,7 +6486,9 @@ class D3D12FrameGen final : public FrameGenGpu {
     }
 
     static bool Generates(const FrameGenDispatch& dispatch) {
-        return dispatch.pass == FrameGenPass::kSynthesizeUnorm8 || dispatch.pass == FrameGenPass::kSynthesizeFloat16;
+        return dispatch.pass == FrameGenPass::kSynthesizeUnorm8 || dispatch.pass == FrameGenPass::kSynthesizeFloat16 ||
+               dispatch.pass == FrameGenPass::kSynthesizeUnorm8Sharpen ||
+               dispatch.pass == FrameGenPass::kSynthesizeFloat16Sharpen;
     }
 
     // Sets a view up for this frame and plans it; RecordPlan records it.

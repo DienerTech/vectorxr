@@ -128,7 +128,7 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         TRUST_UPDATE SHIFT_CLEAR SHIFT_SPLAT SHIFT_RESOLVE SHIFT_FILL FLOW_PACK_RAW TRUST_RESOLVE SHADING_RATE WORLD_REDUCE WORLD_SOLVE
         TRUST_VOTE DEPTH_SCALE DEPTH_SCALE_VOTE DEPTH_STALE DEPTH_CROSS_SPLAT DEPTH_CROSS_RESOLVE ENGINE_CENSUS ENGINE_CAPTURE
         ENGINE_REDUCE ENGINE_SOLVE WORLD_SET ENGINE_CONVERT ENGINE_MERGE ENGINE_TILES SHIFT_SPLAT_ENGINE SHIFT_RESOLVE_ENGINE
-        SHIFT_FILL_ENGINE TRUST_SURFACE FILTER_PRIOR)
+        SHIFT_FILL_ENGINE TRUST_SURFACE FILTER_PRIOR SYNTHESIZE_UNORM8_SHARPEN SYNTHESIZE_FLOAT16_SHARPEN)
     set(_framegen_hlsl "${CMAKE_CURRENT_SOURCE_DIR}/shaders/framegen.hlsl")
     set(_framegen_out "${CMAKE_CURRENT_BINARY_DIR}/framegen_shaders")
     file(MAKE_DIRECTORY "${_framegen_out}")
@@ -155,8 +155,11 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
     endforeach()
     # Synthesis as a draw into the output swapchains (Direct3D 12): the
     # vertex shader and a pixel shader per number of generated frames; then
-    # the quad views compose pixel shader, drawn by the same vertex shader.
-    set(_framegen_draw_shaders DRAW_VS DRAW_PS1 DRAW_PS2 DRAW_PS3 DRAW_PS4 COMPOSE_PS)
+    # the quad views compose pixel shader, drawn by the same vertex shader;
+    # then the pixel shaders with the Interpolate blend's sharpening
+    # (research, FG_SYNTH_SHARPEN).
+    set(_framegen_draw_shaders DRAW_VS DRAW_PS1 DRAW_PS2 DRAW_PS3 DRAW_PS4 COMPOSE_PS
+        DRAW_PS1_SHARPEN DRAW_PS2_SHARPEN DRAW_PS3_SHARPEN DRAW_PS4_SHARPEN)
     foreach(_framegen_draw IN LISTS _framegen_draw_shaders)
         if(_framegen_draw STREQUAL "DRAW_VS")
             set(_framegen_draw_args -T vs_5_0 -E VSMain -D FG_DRAW_OUTPUTS=1 -D FG_PASS_SYNTHESIZE_DRAW=1)
@@ -166,6 +169,9 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
             string(SUBSTRING "${_framegen_draw}" 7 1 _framegen_draw_outputs)
             set(_framegen_draw_args -T ps_5_0 -E PSMain -D "FG_DRAW_OUTPUTS=${_framegen_draw_outputs}"
                 -D FG_PASS_SYNTHESIZE_DRAW=1)
+            if(_framegen_draw MATCHES "_SHARPEN$")
+                list(APPEND _framegen_draw_args -D FG_SYNTH_SHARPEN=1)
+            endif()
         endif()
         add_custom_command(
             OUTPUT "${_framegen_out}/${_framegen_draw}.dxbc"

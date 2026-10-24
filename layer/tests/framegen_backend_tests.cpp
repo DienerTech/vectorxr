@@ -1210,9 +1210,11 @@ int RunScenarios(Harness& harness) {
         // still since) moved by the newest frame's motion and depth
         // (SynthesizeStale) instead. `left_clear`/`right_clear`: that eye's
         // depth all background (Star Citizen fills only the right eye's).
+        // `still_head`: the last frame's previous frame was taken where the
+        // newest one is (the caller uploads the newest image as the first).
         auto run_case = [&](float panel_value, float background_value, const FrameGenDepthEncoding& encoding,
                             bool use_depth, int glass, float eye = 0.0f, bool stale = false, bool left_clear = false,
-                            bool right_clear = false) {
+                            bool right_clear = false, bool still_head = false) {
             auto backend = CreateFrameGenGpu(harness.binding, error);
             if (backend) backend->SetCopyAfterRelease(true); // the tests' images are their own
             Check(backend != nullptr, harness.name + " backend: " + error);
@@ -1280,8 +1282,8 @@ int RunScenarios(Harness& harness) {
             last.cover = false;
             capture(0);
             Check(backend->Execute(views(0), last, result, error), harness.name + " execute: " + error);
-            capture(1);
-            Check(backend->Execute(views(1), last, result, error), harness.name + " execute: " + error);
+            capture(1, still_head);
+            Check(backend->Execute(views(1, still_head), last, result, error), harness.name + " execute: " + error);
             if (stale) {
                 const std::uint64_t motion = result.frame;
                 capture(1, true);
@@ -1990,6 +1992,40 @@ int RunScenarios(Harness& harness) {
                   harness.name + " shimmer: sharpening did not keep more of the blend's fine detail");
             Check(sharp_rung == 0, harness.name + " shimmer: the sharpened blend rang at a step");
             Check(sharp_scenery == 0, harness.name + " shimmer: sharpening changed the far scenery");
+
+            // 3n. Content the head's movement leaves alone: the head still
+            // since the previous frame (both real frames the newest image,
+            // from the newest frame's place) and the eye still, interpolated
+            // halfway. Every read of the panel sits on a texel's centre, and
+            // the sharpened blend is the blend bit for bit, over bilinear
+            // reads and Catmull-Rom alike, as 3i asks of Catmull-Rom.
+            harness.upload(g_swapchains[kSource][0], shimmer_cockpit(head_newest, -outer, inner));
+            harness.upload(g_swapchains[right_source][0], shimmer_cockpit(shift + half_ipd, -inner, outer));
+            auto held = [&](const char* resample, const char* sharpen) {
+                tuning.mode = FrameGenSynthesisMode::kInterpolate;
+                _putenv_s("VECTORXR_FRAMEGEN_SYNTH_RESAMPLE", resample);
+                _putenv_s("VECTORXR_FRAMEGEN_SYNTH_SHARPEN", sharpen);
+                const Outcome outcome = run_case(panel, 1.0f, standard, true, 0, 0.0f, false, false, false, true);
+                _putenv_s("VECTORXR_FRAMEGEN_SYNTH_RESAMPLE", "");
+                _putenv_s("VECTORXR_FRAMEGEN_SYNTH_SHARPEN", "");
+                tuning.mode = FrameGenSynthesisMode::kExtrapolate;
+                Check(outcome.used, harness.name + " shimmer: depth not used");
+                return outcome.output;
+            };
+            const Pixels held_plain = held("", "");
+            const Pixels held_sharp = held("", "0.5");
+            const Pixels held_near = held("cubic-near", "");
+            const Pixels held_near_sharp = held("cubic-near", "0.5");
+            const std::size_t held_newest = differing(held_plain, shimmer_cockpit(head_newest, -outer, inner), true);
+            const std::size_t held_changed = differing(held_sharp, held_plain, true);
+            const std::size_t held_near_changed = differing(held_near_sharp, held_near, true);
+            std::cout << harness.name << " shimmer blend, head still: panel pixels differing from the newest frame "
+                      << held_newest << "; changed by sharpening " << held_changed << ", over Catmull-Rom "
+                      << held_near_changed << std::endl;
+            Dump(harness.name + "-shimmer-held-sharp", held_near_sharp);
+            Check(held_newest == 0, harness.name + " shimmer: the head held still, the blend is not the newest frame");
+            Check(held_changed == 0 && held_near_changed == 0,
+                  harness.name + " shimmer: sharpening changed content the head's movement leaves alone");
             harness.upload(g_swapchains[kSource][0], Cockpit(-half_ipd, -outer, inner));
             harness.upload(g_swapchains[kSource][1], Cockpit(shift - half_ipd, -outer, inner));
             harness.upload(g_swapchains[right_source][0], Cockpit(half_ipd, -inner, outer));
@@ -2430,7 +2466,8 @@ const char* const kProfileNames[] = {"luma",        "downsample",  "search",    
                                      "shift resolve", "shift fill", "raw pack",   "trust resolve", "shading rate", "world reduce", "world solve", "trust vote", "depth scale", "scale vote", "depth stale", "cross splat", "cross resolve",
                                      "engine census", "engine capture", "engine reduce", "engine solve", "world set",
                                      "engine convert", "engine merge", "engine tiles", "engine splat", "engine resolve",
-                                     "engine fill", "trust surface", "filter prior", "source copy", "output copy",
+                                     "engine fill", "trust surface", "filter prior", "synthesize sharpened",
+                                     "synthesize16 sharpened", "source copy", "output copy",
                                      "hardware wait", "compose", "flow merge"};
 static_assert(std::size(kProfileNames) == kFrameGenPassCount + 5, "a name per profiled category");
 
@@ -5732,7 +5769,9 @@ int RunProfile(Harness& harness) {
             const double written = jit ? 3.0 : static_cast<double>(tuning.generated);
             double synthesis_ms = synthesis_samples ? synthesis_total / synthesis_samples : 0.0;
             if (!jit) {
-                for (const FrameGenPass pass : {FrameGenPass::kSynthesizeUnorm8, FrameGenPass::kSynthesizeFloat16}) {
+                for (const FrameGenPass pass : {FrameGenPass::kSynthesizeUnorm8, FrameGenPass::kSynthesizeFloat16,
+                                                FrameGenPass::kSynthesizeUnorm8Sharpen,
+                                                FrameGenPass::kSynthesizeFloat16Sharpen}) {
                     const auto index = static_cast<std::size_t>(pass);
                     synthesis_ms += index < sums.size() ? sums[index] / samples / written : 0.0;
                 }

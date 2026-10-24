@@ -1832,18 +1832,22 @@ void TestFrameGenPlan() {
                    depthxr::ParseFrameGenSharpen("nan") == 0.0f,
                "VECTORXR_FRAMEGEN_SYNTH_SHARPEN's values parse as named");
         {
-            // The last synthesis dispatch's options.z (the plan may add
-            // analysis after it, interpolating).
-            const auto view_of = [&](const depthxr::FrameGenTuning& with) {
-                std::uint32_t view = 0xffffffffu;
+            // The last synthesis dispatch's options.z and pass (the plan may
+            // add analysis after it, interpolating).
+            const auto synthesis_of = [&](const depthxr::FrameGenTuning& with) {
+                std::pair<std::uint32_t, depthxr::FrameGenPass> last{0xffffffffu, depthxr::FrameGenPass::kLuma};
                 for (const depthxr::FrameGenDispatch& dispatch : depthxr::BuildFrameGenViewPlan(request, with).dispatches) {
                     if (dispatch.pass == depthxr::FrameGenPass::kSynthesizeUnorm8 ||
-                        dispatch.pass == depthxr::FrameGenPass::kSynthesizeFloat16) {
-                        view = dispatch.constants.options[2];
+                        dispatch.pass == depthxr::FrameGenPass::kSynthesizeFloat16 ||
+                        dispatch.pass == depthxr::FrameGenPass::kSynthesizeUnorm8Sharpen ||
+                        dispatch.pass == depthxr::FrameGenPass::kSynthesizeFloat16Sharpen) {
+                        last = {dispatch.constants.options[2], dispatch.pass};
                     }
                 }
-                return view;
+                return last;
             };
+            const auto view_of = [&](const depthxr::FrameGenTuning& with) { return synthesis_of(with).first; };
+            const auto pass_of = [&](const depthxr::FrameGenTuning& with) { return synthesis_of(with).second; };
             depthxr::FrameGenTuning interpolating = tuning;
             interpolating.mode = depthxr::FrameGenSynthesisMode::kInterpolate;
             depthxr::FrameGenTuning sharp = interpolating;
@@ -1853,11 +1857,29 @@ void TestFrameGenPlan() {
                    "Synthesis does not sharpen by default");
             Expect(view_of(sharp) == (plain_view | (0x3266u << depthxr::kFrameGenSharpenShift)),
                    "The sharpening amount (0.2 as half float bits) sits beside the diagnostic view, with depth");
+            // The sharpening is built into passes of its own: the plain ones
+            // stay without it, in registers and cost.
+            const depthxr::FrameGenViewRequest plain_request = request;
+            request.output = depthxr::FrameGenOutputKind::kUnorm8;
+            Expect(pass_of(interpolating) == depthxr::FrameGenPass::kSynthesizeUnorm8 &&
+                       pass_of(sharp) == depthxr::FrameGenPass::kSynthesizeUnorm8Sharpen,
+                   "Sharpened synthesis runs as its own pass, unsharpened as the plain one");
+            request.output = depthxr::FrameGenOutputKind::kFloat16;
+            Expect(pass_of(interpolating) == depthxr::FrameGenPass::kSynthesizeFloat16 &&
+                       pass_of(sharp) == depthxr::FrameGenPass::kSynthesizeFloat16Sharpen,
+                   "Sharpened float synthesis runs as its own pass");
+            request = plain_request;
+            const depthxr::FrameGenPass plain_pass = pass_of(interpolating);
+            request.synthesize = false;
+            Expect(pass_of(sharp) == plain_pass && view_of(sharp) == 0,
+                   "A still image is written by the plain pass, sharpening or not");
+            request = plain_request;
             sharp.mode = depthxr::FrameGenSynthesisMode::kExtrapolate;
-            Expect(view_of(sharp) == view_of(tuning), "Extrapolation does not sharpen");
+            Expect(view_of(sharp) == view_of(tuning) && pass_of(sharp) == plain_pass, "Extrapolation does not sharpen");
             sharp.mode = depthxr::FrameGenSynthesisMode::kInterpolate;
             request.depth = false;
-            Expect(view_of(sharp) == view_of(interpolating), "Synthesis without depth does not sharpen");
+            Expect(view_of(sharp) == view_of(interpolating) && pass_of(sharp) == plain_pass,
+                   "Synthesis without depth does not sharpen");
             request.depth = true;
             depthxr::FrameGenTuning off = interpolating;
             off.sharpen = 0.0f;
