@@ -8082,6 +8082,7 @@ int RunReplay(Harness& harness) {
                     {"search", {FrameGenTextureKind::kFlow, kFrameGenPyramidLevels}},
                     {"world", {FrameGenTextureKind::kWorldParams, 0}},
                     {"scalevotes", {FrameGenTextureKind::kDepthScaleVotes, 0}},
+                    {"scaleraw", {FrameGenTextureKind::kDepthScaleRaw, 0}},
                     {"scales", {FrameGenTextureKind::kDepthScales, 0}},
                 };
                 for (const auto& [name, texture] : maps) {

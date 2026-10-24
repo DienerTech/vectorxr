@@ -2952,6 +2952,18 @@ float4 Accept(int2 centre) {
     return agree >= FG_SCALE_NEIGHBOURS ? vote : float4(1.0, vote.yzw);
 }
 
+// The tiles a thread group's votes sum: its 8x8 and FG_SCALE_RADIUS around
+// each way, read once for all of them; those outside the grid as no samples.
+#define FG_SCALE_SPAN (8 + 2 * FG_SCALE_RADIUS)
+groupshared float4 g_group_low[FG_SCALE_SPAN * FG_SCALE_SPAN];  // errors for probes 0-3
+groupshared float4 g_group_high[FG_SCALE_SPAN * FG_SCALE_SPAN]; // probes 4-6, the samples
+groupshared float g_group_inverse[FG_SCALE_SPAN * FG_SCALE_SPAN];
+
+// The error sum of probe j of the seven (low: 0-3, high: 4-6).
+float ScaleError(int j, float4 low, float4 high) {
+    return j == 0 ? low.x : j == 1 ? low.y : j == 2 ? low.z : j == 3 ? low.w : j == 4 ? high.x : j == 5 ? high.y : high.z;
+}
+
 // Per tile, the stereo probe (FG_PASS_DEPTH_SCALE) of the tiles around it
 // on its surface summed: (the scale its depth lines up best at, 1 when the
 // depth as read does or nothing tells; the surface's inverse depth; the
@@ -2959,20 +2971,48 @@ float4 Accept(int2 centre) {
 // surface. Then (FG_SCALE_ACCEPT) the votes enough neighbours agree with.
 // size.xy: the tiles.
 [numthreads(8, 8, 1)]
-void CSMain(uint3 id : SV_DispatchThreadID) {
+void CSMain(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID,
+            uint index : SV_GroupIndex) {
+    // Every thread reaches the barrier, the second stage's with nothing to
+    // share.
+    const bool accept = (g.options.x & FG_SCALE_ACCEPT) != 0u;
+    [branch] if (!accept) {
+        const int2 first = int2(group.xy) * 8 - FG_SCALE_RADIUS;
+        [unroll]
+        for (uint k = 0; k < (FG_SCALE_SPAN * FG_SCALE_SPAN + 63) / 64; ++k) {
+            const uint slot = index + 64u * k;
+            if (slot < FG_SCALE_SPAN * FG_SCALE_SPAN) {
+                const int2 tile = first + int2(slot % FG_SCALE_SPAN, slot / FG_SCALE_SPAN);
+                float4 low = float4(0.0, 0.0, 0.0, 0.0);
+                float4 high = float4(0.0, 0.0, 0.0, 0.0);
+                float inverse = 0.0;
+                if (all(tile >= 0) && all(tile < int2(g.size.xy))) {
+                    low = g_scales.Load(int3(tile.x * 3, tile.y, 0));
+                    high = g_scales.Load(int3(tile.x * 3 + 1, tile.y, 0));
+                    inverse = g_scales.Load(int3(tile.x * 3 + 2, tile.y, 0)).x;
+                }
+                g_group_low[slot] = low;
+                g_group_high[slot] = high;
+                g_group_inverse[slot] = inverse;
+            }
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
     if (any(id.xy >= g.size.xy)) {
         return;
     }
-    const int2 centre = int2(id.xy);
-    if ((g.options.x & FG_SCALE_ACCEPT) != 0u) {
-        g_votes[id.xy] = Accept(centre);
+    if (accept) {
+        g_votes[id.xy] = Accept(int2(id.xy));
         return;
     }
+    const int2 centre = int2(id.xy);
+    // The centre's slot; tile (x, y) around it is FG_SCALE_SPAN * y + x on.
+    const int own_slot = (int(thread.y) + FG_SCALE_RADIUS) * FG_SCALE_SPAN + int(thread.x) + FG_SCALE_RADIUS;
     float reference = 0.0;
     {
-        const float own = g_scales.Load(int3(centre.x * 3 + 1, centre.y, 0)).w;
+        const float own = g_group_high[own_slot].w;
         float samples = own;
-        float inverse = own > 0.0 ? g_scales.Load(int3(centre.x * 3 + 2, centre.y, 0)).x : 0.0;
+        float inverse = own > 0.0 ? g_group_inverse[own_slot] : 0.0;
         if (own <= 0.0) {
             [loop]
             for (int y = -FG_SCALE_RADIUS; y <= FG_SCALE_RADIUS; ++y) {
@@ -2982,47 +3022,49 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
                     if (any(tile < 0) || any(tile >= int2(g.size.xy))) {
                         continue;
                     }
-                    samples += g_scales.Load(int3(tile.x * 3 + 1, tile.y, 0)).w;
-                    inverse += g_scales.Load(int3(tile.x * 3 + 2, tile.y, 0)).x;
+                    const int slot = own_slot + y * FG_SCALE_SPAN + x;
+                    samples += g_group_high[slot].w;
+                    inverse += g_group_inverse[slot];
                 }
             }
         }
         reference = samples > 0.0 ? inverse / samples : 0.0;
     }
-    float errors[FG_SCALE_PROBES] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
-    float samples = 0.0;
-    [loop]
-    for (int y = -FG_SCALE_RADIUS; y <= FG_SCALE_RADIUS; ++y) {
+    // The error sums for probes 0-3, then 4-6 and the samples (as
+    // FG_PASS_DEPTH_SCALE writes them), each summed tile by tile, y then x.
+    // A row's tiles unrolled, not all 121: WARP faults running those.
+    float4 low_errors = float4(0.0, 0.0, 0.0, 0.0);
+    float4 high_errors = float4(0.0, 0.0, 0.0, 0.0);
+    if (!(reference <= 0.0)) {
         [loop]
-        for (int x = -FG_SCALE_RADIUS; x <= FG_SCALE_RADIUS; ++x) {
-            const int2 tile = centre + int2(x, y);
-            if (reference <= 0.0 || any(tile < 0) || any(tile >= int2(g.size.xy))) {
-                continue;
+        for (int y = -FG_SCALE_RADIUS; y <= FG_SCALE_RADIUS; ++y) {
+            [unroll]
+            for (int x = -FG_SCALE_RADIUS; x <= FG_SCALE_RADIUS; ++x) {
+                // Tiles outside the grid hold no samples (skipped here).
+                const int slot = own_slot + y * FG_SCALE_SPAN + x;
+                const float4 high = g_group_high[slot];
+                const float inverse = g_group_inverse[slot];
+                if (high.w <= 0.0 || abs(inverse / high.w - reference) > FG_SCALE_SURFACE * reference) {
+                    continue;
+                }
+                low_errors += g_group_low[slot];
+                high_errors += high;
             }
-            const float4 low = g_scales.Load(int3(tile.x * 3, tile.y, 0));
-            const float4 high = g_scales.Load(int3(tile.x * 3 + 1, tile.y, 0));
-            const float inverse = g_scales.Load(int3(tile.x * 3 + 2, tile.y, 0)).x;
-            if (high.w <= 0.0 || abs(inverse / high.w - reference) > FG_SCALE_SURFACE * reference) {
-                continue;
-            }
-            errors[0] += low.x;
-            errors[1] += low.y;
-            errors[2] += low.z;
-            errors[3] += low.w;
-            errors[4] += high.x;
-            errors[5] += high.y;
-            errors[6] += high.z;
-            samples += high.w;
         }
     }
+    const float samples = high_errors.w;
+    // The lowest error, the earliest of equals (strictly lower replaces).
     int best = FG_SCALE_AS_READ;
+    float least = ScaleError(FG_SCALE_AS_READ, low_errors, high_errors);
     [unroll]
     for (int j = 0; j < FG_SCALE_PROBES; ++j) {
-        best = errors[j] < errors[best] ? j : best;
+        const float error = ScaleError(j, low_errors, high_errors);
+        best = error < least ? j : best;
+        least = error < least ? error : least;
     }
-    const float as_read = errors[FG_SCALE_AS_READ];
-    const bool better = samples >= FG_SCALE_SAMPLES && errors[best] <= FG_SCALE_GAIN * as_read &&
-                        as_read - errors[best] >= FG_SCALE_MARGIN * samples;
+    const float as_read = ScaleError(FG_SCALE_AS_READ, low_errors, high_errors);
+    const bool better = samples >= FG_SCALE_SAMPLES && least <= FG_SCALE_GAIN * as_read &&
+                        as_read - least >= FG_SCALE_MARGIN * samples;
     float scale = 1.0;
     if (better) {
         // Between the probes either side (a parabola through the three
@@ -3030,9 +3072,9 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         // picked as 0.7 here and 0.8 next door.
         float position = 0.0;
         if (best > 0 && best < FG_SCALE_PROBES - 1) {
-            const float below = errors[best - 1];
-            const float above = errors[best + 1];
-            const float curve = below - 2.0 * errors[best] + above;
+            const float below = ScaleError(best - 1, low_errors, high_errors);
+            const float above = ScaleError(best + 1, low_errors, high_errors);
+            const float curve = below - 2.0 * least + above;
             position = curve > 0.0 ? clamp(0.5 * (below - above) / curve, -0.5, 0.5) : 0.0;
         }
         const int towards = position < 0.0 ? max(best - 1, 0) : min(best + 1, FG_SCALE_PROBES - 1);
