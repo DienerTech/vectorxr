@@ -1562,6 +1562,20 @@ float DepthAt(float2 uv) {
     return DepthNearest(g_depth, uv);
 }
 
+// The depth at the centre of flow cell `cell` of `cells`, where its motion
+// was measured. The centre is worked out only with depth in use, beside
+// where DepthAt scales it to the depth's texels: at the usual four depth
+// texels a cell it lands on a texel's edge, and worked out apart from that
+// scaling the driver rounds it to the other texel there.
+float CellDepth(int2 cell, float2 cells) {
+    float depth = 0.0;
+    [branch]
+    if ((g.options.y & FG_FLAG_DEPTH) != 0u) {
+        depth = DepthAt((float2(cell) + 0.5) / cells);
+    }
+    return depth;
+}
+
 // The range of the four texels around uv in `image` (a bilinear tap's
 // footprint, the resampling's clamp).
 void FootprintRange(Texture2D<float4> image, float2 uv, out float4 lo, out float4 hi) {
@@ -1991,9 +2005,6 @@ float4 Synthesize(float2 position, float fraction) {
         // zero motion. Later candidates carry a small bias so noise alone
         // never pulls a pixel off the smooth field.
         float4 candidates[7];
-        // Where each candidate's motion was measured, in the newest frame:
-        // its depth orders surfaces (FG_FLAG_OCCLUSION).
-        float candidate_depth[7];
         const float4 here = g_flow.SampleLevel(g_linear, uv + flow_offset, 0.0);
         float4 solved = g_flow.SampleLevel(g_linear, uv + step * here.xy + flow_offset, 0.0);
         // Where the solved field is read: the depth it was measured at
@@ -2010,10 +2021,8 @@ float4 Synthesize(float2 position, float fraction) {
         for (int i = 0; i < 4; ++i) {
             const int2 cell = clamp(base + int2(i & 1, i >> 1), int2(0, 0), limit_cell);
             candidates[2 + i] = g_flow.Load(int3(cell, 0));
-            candidate_depth[2 + i] = DepthAt((float2(cell) + 0.5) / float2(flow_width, flow_height));
         }
         candidates[6] = float4(0.0, 0.0, here.z, 1.0);
-        candidate_depth[0] = candidate_depth[1] = candidate_depth[6] = DepthAt(uv);
         chosen = candidates[0];
         // Smooth motion, most of a frame, leaves nothing to choose between;
         // only pixels near a motion boundary, where the surrounding block
@@ -2029,6 +2038,16 @@ float4 Synthesize(float2 position, float fraction) {
         boundary = spread > 0.5;
         [branch]
         if (boundary) {
+            // Where each candidate's motion was measured, in the newest frame:
+            // its depth orders surfaces (FG_FLAG_OCCLUSION) and weighs the
+            // choice (FG_FLAG_DEPTH_MATCH), both only here, so it is read here.
+            float candidate_depth[7];
+            [unroll]
+            for (int j = 0; j < 4; ++j) {
+                const int2 cell = clamp(base + int2(j & 1, j >> 1), int2(0, 0), limit_cell);
+                candidate_depth[2 + j] = CellDepth(cell, float2(flow_width, flow_height));
+            }
+            candidate_depth[0] = candidate_depth[1] = candidate_depth[6] = DepthAt(uv);
             chosen_error = CandidateError(uv, chosen.xy, step);
             // With FG_FLAG_DEPTH_MATCH the choice also weighs where each
             // vector was measured against the depth of what it carries here
