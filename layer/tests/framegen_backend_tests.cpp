@@ -123,9 +123,10 @@ std::uint32_t Patch(float x, float y) {
 }
 
 // Static background with a 96 px textured square whose top-left is at (px, py).
-// FG_TEST_NO_STALL=1: the hardware checks that leave a queue waiting on an
-// optical flow match that never finishes (the watchdog releases it) are
-// skipped; on some driver versions such waits have preceded system crashes.
+// FG_TEST_NO_STALL=1 skips every artificial GPU queue/hardware stall,
+// pending-resource teardown, stale/invalid dispatch attempt and allocation-fault
+// injection. Positive rendering/quality coverage remains enabled. On some
+// driver versions forced waits have preceded system crashes.
 bool StallChecksAllowed() {
     const char* value = std::getenv("FG_TEST_NO_STALL");
     return !(value && std::string(value) == "1");
@@ -840,8 +841,10 @@ int RunScenarios(Harness& harness) {
             // recorded: the real frame and its views stay as they were.
             FrameGenImage untracked = first_output;
             untracked.swapchain = reinterpret_cast<XrSwapchain>(0x5f);
-            Check(!gpu->Synthesize(frame, FrameGenSynthesisMode::kInterpolate, 0.5f, {untracked}, error),
-                  harness.name + " an output that is not tracked was written");
+            if (StallChecksAllowed()) {
+                Check(!gpu->Synthesize(frame, FrameGenSynthesisMode::kInterpolate, 0.5f, {untracked}, error),
+                      harness.name + " an output that is not tracked was written");
+            }
             Check(gpu->Writable(frame, false), harness.name + " a refused output dropped its real frame (" + error + ")");
             // Writable says what Synthesize then does (a canvas's ring of
             // three, FrameGenHistoryRing): one real frame on, all of the
@@ -856,15 +859,19 @@ int RunScenarios(Harness& harness) {
             measure(0);
             Check(!gpu->Writable(frame, false) && gpu->Writable(frame, true),
                   harness.name + " two real frames on, Writable does not refuse moved frames only");
-            Check(!gpu->Synthesize(frame, FrameGenSynthesisMode::kInterpolate, 0.5f, {first_output}, error),
-                  harness.name + " a real frame whose images were replaced is not synthesized from");
+            if (StallChecksAllowed()) {
+                Check(!gpu->Synthesize(frame, FrameGenSynthesisMode::kInterpolate, 0.5f, {first_output}, error),
+                      harness.name + " a real frame whose images were replaced is not synthesized from");
+            }
             const Pixels kept_copy = synthesize(FrameGenSynthesisMode::kInterpolate, 1.0f, first_output);
             Check(MeanError(kept_copy, b, 0, 0, kSize, kSize) < 0.002,
                   harness.name + " a real frame's exact copy is not its newest image while that is kept");
             measure(1);
             Check(!gpu->Writable(frame, true), harness.name + " a real frame whose newest images were replaced is writable");
-            Check(!gpu->Synthesize(frame, FrameGenSynthesisMode::kInterpolate, 1.0f, {first_output}, error),
-                  harness.name + " a real frame's replaced newest images are copied");
+            if (StallChecksAllowed()) {
+                Check(!gpu->Synthesize(frame, FrameGenSynthesisMode::kInterpolate, 1.0f, {first_output}, error),
+                      harness.name + " a real frame's replaced newest images are copied");
+            }
 
             // 2f. Stale motion: extrapolating, a real frame whose own motion
             // is not measured yet is moved by the previous one's. A, B and C
@@ -900,10 +907,14 @@ int RunScenarios(Harness& harness) {
                       << " vs hold " << stale_hold << std::endl;
             Check(stale_error < 0.5 * stale_hold && stale_error < own_error + 0.25 * stale_hold,
                   harness.name + " the previous frame's motion does not move a frame on as its own does");
-            Check(!gpu->SynthesizeStale(frame_c, frame_a, 0.5f, {first_output}, error),
-                  harness.name + " a frame was moved by motion other than its previous frame's");
-            Check(!gpu->SynthesizeStale(frame_b, frame_a, 0.5f, {first_output}, error),
-                  harness.name + " a frame was moved by a first frame's motion (never measured from a pair)");
+            if (StallChecksAllowed()) {
+                Check(!gpu->SynthesizeStale(frame_c, frame_a, 0.5f, {first_output}, error),
+                      harness.name + " a frame was moved by motion other than its previous frame's");
+            }
+            if (StallChecksAllowed()) {
+                Check(!gpu->SynthesizeStale(frame_b, frame_a, 0.5f, {first_output}, error),
+                      harness.name + " a frame was moved by a first frame's motion (never measured from a pair)");
+            }
             gpu->ResetHistory();
         }
         tuning.generated = 1;
@@ -3668,8 +3679,10 @@ int RunQuadViews(Harness& harness) {
                               << std::endl;
                     Check(stale_error < 0.75 * held_error && stale_error < own_error + 0.25 * held_error,
                           harness.name + " quad views: the previous frame's motion does not move a frame on");
-                    Check(!gpu->SynthesizeComposedStale(c.id, a.id, 0.5f, c.composition, eye_images, error),
-                          harness.name + " quad views: a frame was moved by motion other than its previous frame's");
+                    if (StallChecksAllowed()) {
+                        Check(!gpu->SynthesizeComposedStale(c.id, a.id, 0.5f, c.composition, eye_images, error),
+                              harness.name + " quad views: a frame was moved by motion other than its previous frame's");
+                    }
                 }
                 if (!hardware && interpolate) {
                     // Written by compute and copied instead of drawn: the same.
@@ -3686,8 +3699,10 @@ int RunQuadViews(Harness& harness) {
                     // the real frame and its views stay as they were.
                     FrameGenImage narrow = eye_images[1];
                     narrow.rect.extent.width -= 2;
-                    Check(!gpu->SynthesizeComposed(b.id, mode, 0.5f, b.composition, {eye_images[0], narrow}, error),
-                          harness.name + " a composed eye's output of the wrong size was accepted");
+                    if (StallChecksAllowed()) {
+                        Check(!gpu->SynthesizeComposed(b.id, mode, 0.5f, b.composition, {eye_images[0], narrow}, error),
+                              harness.name + " a composed eye's output of the wrong size was accepted");
+                    }
                     Check(gpu->Writable(b.id, false),
                           harness.name + " a refused composed eye's output dropped its real frame (" + error + ")");
                     const auto rewritten = generate(*gpu, b, mode, 0.5f, b.composition);
@@ -3726,8 +3741,10 @@ int RunQuadViews(Harness& harness) {
                     Check(gpu->Writable(b.id, false) && writes(b, 0.5f),
                           harness.name + " a quad views frame three real frames on is not composed from: " + error);
                     const QuadFrame f = analyze(*gpu, 1, moved_views, &e, moving(5.0f), tuning, 25.0, 0.0, true);
-                    Check(!gpu->Writable(b.id, false) && !writes(b, 0.5f),
-                          harness.name + " a quad views frame whose images were replaced is composed from");
+                    if (StallChecksAllowed()) {
+                        Check(!gpu->Writable(b.id, false) && !writes(b, 0.5f),
+                              harness.name + " a quad views frame whose images were replaced is composed from");
+                    }
                     Check(gpu->Writable(b.id, true) && writes(b, 1.0f),
                           harness.name + " a quad views frame's exact copy is refused while its newest images are kept: " +
                               error);
@@ -3736,8 +3753,10 @@ int RunQuadViews(Harness& harness) {
                     // An eye naming a view the frame does not have is refused.
                     FrameGenComposition wrong = c.composition;
                     wrong.eyes[1].focus = 4;
-                    Check(!gpu->SynthesizeComposed(c.id, mode, 0.5f, wrong, eye_images, error),
-                          harness.name + " a composed eye naming a missing view was accepted");
+                    if (StallChecksAllowed()) {
+                        Check(!gpu->SynthesizeComposed(c.id, mode, 0.5f, wrong, eye_images, error),
+                              harness.name + " a composed eye naming a missing view was accepted");
+                    }
                     // A newer capture into its newest images (the game's next
                     // release): its exact copy is refused too; the newest
                     // frame is still writable.
@@ -3746,8 +3765,10 @@ int RunQuadViews(Harness& harness) {
                         Check(gpu->Capture(i, next.source, next.request, tuning.quality, error),
                               harness.name + " quad capture: " + error);
                     }
-                    Check(!gpu->Writable(b.id, true) && !writes(b, 1.0f),
-                          harness.name + " a quad views frame whose newest images were replaced is written");
+                    if (StallChecksAllowed()) {
+                        Check(!gpu->Writable(b.id, true) && !writes(b, 1.0f),
+                              harness.name + " a quad views frame whose newest images were replaced is written");
+                    }
                     Check(gpu->Writable(f.id, false) && writes(f, 0.5f),
                           harness.name + " the newest quad views frame is not writable: " + error);
                 }
@@ -3967,30 +3988,33 @@ int RunQuadViews(Harness& harness) {
         Check(backend->WaitIdle() && backend->CaptureReached(mark) &&
                   backend->WaitCapture(mark, std::chrono::milliseconds(100)),
               harness.name + " a capture that has run is not reached");
-        // The game's queue held back: its capture is not reached, and a wait
-        // for it ends at its timeout.
-        ComPtr<ID3D12Fence> gate;
-        Check(SUCCEEDED(game->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate))), "gate fence");
-        const test_gates::Guard gate_guard(gate.Get());
-        game->queue->Wait(gate.Get(), 1);
-        const bool held_captured = backend->Capture(0, view.source, view.request, tuning.quality, error);
-        Check(held_captured, harness.name + " capture: " + error);
-        const std::uint64_t held = backend->CaptureMark();
-        const auto start = std::chrono::steady_clock::now();
-        const bool early = backend->WaitCapture(held, std::chrono::milliseconds(60));
-        const double waited = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-        Check(!early && !backend->CaptureReached(held) && waited >= 55.0 && waited < 1000.0,
-              harness.name + " a wait for a capture held back did not time out (" + std::to_string(waited) + " ms)");
-        // Waited for on another thread, as the presenter's wait: released
-        // once the queue runs.
-        bool reached = false;
-        std::thread waiter([&] { reached = backend->WaitCapture(held, std::chrono::milliseconds(5000)); });
-        Sleep(20);
-        Check(SUCCEEDED(gate->Signal(1)), "gate signal");
-        waiter.join();
-        Check(reached && backend->CaptureReached(held), harness.name + " a capture that ran was not reached");
-        std::cout << harness.name << " capture marks: a held capture's wait timed out after " << waited << " ms\n";
-
+        if (StallChecksAllowed()) {
+            // The game's queue held back: its capture is not reached, and a wait
+            // for it ends at its timeout.
+            ComPtr<ID3D12Fence> gate;
+            Check(SUCCEEDED(game->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate))), "gate fence");
+            const test_gates::Guard gate_guard(gate.Get());
+            game->queue->Wait(gate.Get(), 1);
+            const bool held_captured = backend->Capture(0, view.source, view.request, tuning.quality, error);
+            Check(held_captured, harness.name + " capture: " + error);
+            const std::uint64_t held = backend->CaptureMark();
+            const auto start = std::chrono::steady_clock::now();
+            const bool early = backend->WaitCapture(held, std::chrono::milliseconds(60));
+            const double waited = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+            Check(!early && !backend->CaptureReached(held) && waited >= 55.0 && waited < 1000.0,
+                  harness.name + " a wait for a capture held back did not time out (" + std::to_string(waited) + " ms)");
+            // Waited for on another thread, as the presenter's wait: released
+            // once the queue runs.
+            bool reached = false;
+            std::thread waiter([&] { reached = backend->WaitCapture(held, std::chrono::milliseconds(5000)); });
+            Sleep(20);
+            Check(SUCCEEDED(gate->Signal(1)), "gate signal");
+            waiter.join();
+            Check(reached && backend->CaptureReached(held), harness.name + " a capture that ran was not reached");
+            std::cout << harness.name << " capture marks: a held capture's wait timed out after " << waited << " ms\n";
+        } else {
+            std::cout << "FG_TEST_NO_STALL=1: skipped capture-mark queue stall\n";
+        }
         // Analysis timings: four analyses, each after its views' captures.
         backend->WaitIdle();
         backend->TakeTimings();
@@ -4153,7 +4177,7 @@ int RunQuadViews(Harness& harness) {
                 runtime_queue = static_cast<ID3D12CommandQueue*>(reinterpret_cast<const FrameGenRuntimeQueue*>(base)->d3d12_queue);
             }
         }
-        if (composes && device && runtime_queue) {
+        if (composes && device && runtime_queue && StallChecksAllowed()) {
             Check(backend->WaitIdle(), harness.name + " idle");
             ComPtr<ID3D12Fence> gate;
             Check(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate))), "gate fence");
@@ -4175,9 +4199,11 @@ int RunQuadViews(Harness& harness) {
                   << canvas_bytes / 1024 << " KiB (the focus views' history rings: " << focus_history / 1024 << " KiB)\n";
         Check(canvas_bytes > 0 && canvas_bytes + focus_history <= quad_bytes,
               harness.name + " the focus views' images are kept after leaving quad views");
-        Check(!backend->Writable(b.id, true) && !backend->SynthesizeComposed(b.id, tuning.mode, 1.0f, b.composition,
-                                                                             eye_images, error),
-              harness.name + " a quad views frame is written after its focus views' images were freed");
+        if (StallChecksAllowed()) {
+            Check(!backend->Writable(b.id, true) && !backend->SynthesizeComposed(b.id, tuning.mode, 1.0f, b.composition,
+                                                                                 eye_images, error),
+                  harness.name + " a quad views frame is written after its focus views' images were freed");
+        }
         Check(backend->Writable(canvas_result.frame, true), harness.name + " the canvas frame is not writable");
         // Quad views again: set up anew, measured and composed.
         const QuadFrame c = analyze(*backend, 2, views, nullptr, moving(2.0f), tuning, 25.0, 0.0, true);
@@ -4205,7 +4231,7 @@ int RunQuadViews(Harness& harness) {
         // runtime's queue (a GPU stall: held back here), nothing they use is
         // freed under them; on the GPU (its fence waits give up after 2 s,
         // WARP's after 40), with the periphery's shading-rate images in use.
-        if (variable_rate && composes && device && runtime_queue) {
+        if (variable_rate && composes && device && runtime_queue && StallChecksAllowed()) {
             auto stalled = CreateFrameGenGpu(harness.binding, error);
             Check(stalled != nullptr, harness.name + " backend: " + error);
             stalled->SetCopyAfterRelease(true);
@@ -4254,6 +4280,10 @@ int RunQuadViews(Harness& harness) {
 // `real_frame` captures and analyzes one real frame on `backend` (its
 // captures queued) and returns its FrameGenExecuteResult::submission.
 void ProfileUnderLoad(Harness& harness, double load_ms, const std::function<std::uint64_t(FrameGenGpu&, int)>& real_frame) {
+    if (!StallChecksAllowed()) {
+        std::cout << "FG_TEST_NO_STALL=1: skipped fence-gated load profile\n";
+        return;
+    }
     std::string error;
     const XrGraphicsBindingD3D12KHR* game = nullptr;
     for (auto* base = static_cast<const XrBaseInStructure*>(harness.binding); base; base = base->next) {
@@ -9980,6 +10010,10 @@ int RunContention(Harness& harness) {
 // The tests' gates (test_gates.h): what a failed check does before it exits
 // opens a gate still shut, and the queue held back by it runs on.
 void GatesOpenBeforeExitTest(ID3D12Device* device, ID3D12CommandQueue* queue) {
+    if (!StallChecksAllowed()) {
+        std::cout << "FG_TEST_NO_STALL=1: skipped GPU gate-open self-test\n";
+        return;
+    }
     ComPtr<ID3D12Fence> gate;
     ComPtr<ID3D12Fence> mark;
     Check(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate))) &&
@@ -10060,6 +10094,10 @@ XrResult XRAPI_PTR StrictRelease(XrSwapchain, const XrSwapchainImageReleaseInfo*
 }
 
 void SubstitutionTest(ID3D12Device* device, ID3D12CommandQueue* game_queue) {
+    if (!StallChecksAllowed()) {
+        std::cout << "FG_TEST_NO_STALL=1: skipped queue-substitution stall controls\n";
+        return;
+    }
     XrGraphicsBindingD3D12KHR binding{XR_TYPE_GRAPHICS_BINDING_D3D12_KHR};
     binding.device = device;
     binding.queue = game_queue;
@@ -10169,6 +10207,10 @@ void SubstitutionTest(ID3D12Device* device, ID3D12CommandQueue* game_queue) {
 // goes, before the wait); only once that takes too long does the runtime's
 // queue wait instead. Off by default: a frame showing it so changes nothing.
 void SubstitutionShownTest(ID3D12Device* device, ID3D12CommandQueue* game_queue) {
+    if (!StallChecksAllowed()) {
+        std::cout << "FG_TEST_NO_STALL=1: skipped shown-layer queue stall controls\n";
+        return;
+    }
     XrGraphicsBindingD3D12KHR binding{XR_TYPE_GRAPHICS_BINDING_D3D12_KHR};
     binding.device = device;
     binding.queue = game_queue;
@@ -10454,6 +10496,10 @@ void HardwareWatchOwnershipTest() {
 // recovered resource set before submitting any capture, so a broken recovery
 // fails safely instead of handing null resources to the graphics driver.
 void AllocationFailureRecoveryTest(Harness& harness) {
+    if (!StallChecksAllowed()) {
+        std::cout << "FG_TEST_NO_STALL=1: skipped working-texture allocation fault injection\n";
+        return;
+    }
     const XrSwapchain source = reinterpret_cast<XrSwapchain>(std::uintptr_t{0xfa110c});
     g_swapchains[source] = {harness.create(192, 192)};
     auto submission = [&](std::uint32_t size) {
@@ -10916,27 +10962,31 @@ void EngineCensusTest(Harness& harness, ID3D12Device* device, ID3D12CommandQueue
     Check(held_zeros && others_read, "engine census: the held image's samples are zeros, the others' its texels");
     Check(census(10, rect).censused == 0b111u, "engine census: released, it is read again");
 
-    // Every motion slot still on the GPU: the next call is skipped, never
-    // waited for, and nothing is latched off.
-    ComPtr<ID3D12Fence> gate;
-    Check(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate))), "engine census: gate fence");
-    const test_gates::Guard gate_guard(gate.Get());
-    queue->Wait(gate.Get(), 1);
-    const std::uint64_t busy_before = gpu->EngineStatus().busy;
-    for (std::uint64_t f = 10; f < 14; ++f) {
-        job.frame = f;
-        Check(gpu->CaptureMotion({job}, color, error), "engine census: a free slot: " + error);
+    if (StallChecksAllowed()) {
+        // Every motion slot still on the GPU: the next call is skipped, never
+        // waited for, and nothing is latched off.
+        ComPtr<ID3D12Fence> gate;
+        Check(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate))), "engine census: gate fence");
+        const test_gates::Guard gate_guard(gate.Get());
+        queue->Wait(gate.Get(), 1);
+        const std::uint64_t busy_before = gpu->EngineStatus().busy;
+        for (std::uint64_t f = 10; f < 14; ++f) {
+            job.frame = f;
+            Check(gpu->CaptureMotion({job}, color, error), "engine census: a free slot: " + error);
+        }
+        job.frame = 14;
+        const auto asked = std::chrono::steady_clock::now();
+        const bool skipped = !gpu->CaptureMotion({job}, color, error);
+        const double waited = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - asked).count();
+        Check(skipped && error.empty() && gpu->EngineStatus().busy == busy_before + 1 && waited < 50.0,
+              "engine census: a busy slot is skipped at once (" + std::to_string(waited) + " ms)");
+        Check(SUCCEEDED(gate->Signal(1)) && gpu->WaitIdle(), "engine census: the queue goes on");
+        job.frame = 15;
+        Check(gpu->CaptureMotion({job}, color, error) && gpu->WaitIdle(), "engine census: slots free again: " + error);
+        Check(gpu->EngineStatus().census.back().frame == 15, "engine census: read back after the busy stretch");
+    } else {
+        std::cout << "FG_TEST_NO_STALL=1: skipped engine-census queue stall/busy-slot control\n";
     }
-    job.frame = 14;
-    const auto asked = std::chrono::steady_clock::now();
-    const bool skipped = !gpu->CaptureMotion({job}, color, error);
-    const double waited = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - asked).count();
-    Check(skipped && error.empty() && gpu->EngineStatus().busy == busy_before + 1 && waited < 50.0,
-          "engine census: a busy slot is skipped at once (" + std::to_string(waited) + " ms)");
-    Check(SUCCEEDED(gate->Signal(1)) && gpu->WaitIdle(), "engine census: the queue goes on");
-    job.frame = 15;
-    Check(gpu->CaptureMotion({job}, color, error) && gpu->WaitIdle(), "engine census: slots free again: " + error);
-    Check(gpu->EngineStatus().census.back().frame == 15, "engine census: read back after the busy stretch");
     CloseHandle(event);
     gpu->Reset();
     for (const XrSwapchain chain : {source, output, depth_image, vectors}) g_swapchains.erase(chain);
@@ -11198,47 +11248,51 @@ void EngineCaptureTest(Harness& harness, ID3D12CommandQueue* queue, ID3D12Device
     status = gpu->EngineStatus();
     Check(status.waits == waits && status.paired == paired + 6,
           "engine capture: each frame's analysis takes its vectors; no wait once the analyses reading a field are done");
-    // ...but with the game's queue held, the analysis of frame 13 cannot run
-    // (it waits for frame 13's captures): frame 15's capture into the field
-    // it reads waits for it on the game's queue, never on the CPU (frame
-    // 14's, into the field frame 12's finished analysis read, does not).
-    ComPtr<ID3D12Fence> gate;
-    Check(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate))), "engine capture: gate fence");
-    const test_gates::Guard gate_guard(gate.Get());
-    queue->Wait(gate.Get(), 1);
-    for (std::uint32_t frame = 13; frame < 15; ++frame) {
-        views = submissions(frame, false);
+    if (StallChecksAllowed()) {
+        // ...but with the game's queue held, the analysis of frame 13 cannot run
+        // (it waits for frame 13's captures): frame 15's capture into the field
+        // it reads waits for it on the game's queue, never on the CPU (frame
+        // 14's, into the field frame 12's finished analysis read, does not).
+        ComPtr<ID3D12Fence> gate;
+        Check(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate))), "engine capture: gate fence");
+        const test_gates::Guard gate_guard(gate.Get());
+        queue->Wait(gate.Get(), 1);
+        for (std::uint32_t frame = 13; frame < 15; ++frame) {
+            views = submissions(frame, false);
+            capture_color(views);
+            Check(gpu->CaptureMotion(jobs(frame % 3), requests(views), error), "engine capture: held: " + error);
+            execute(views);
+        }
+        Check(gpu->EngineStatus().waits == waits, "engine capture: no wait for a field a finished analysis read");
+        views = submissions(15, false);
         capture_color(views);
-        Check(gpu->CaptureMotion(jobs(frame % 3), requests(views), error), "engine capture: held: " + error);
+        const auto asked = std::chrono::steady_clock::now();
+        Check(gpu->CaptureMotion(jobs(0), requests(views), error), "engine capture: over an unfinished analysis: " + error);
+        const double waited = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - asked).count();
+        status = gpu->EngineStatus();
+        Check(status.waits == waits + 2 && waited < 50.0,
+              "engine capture: a field an unfinished analysis reads is waited for on the GPU (" +
+                  std::to_string(status.waits - waits) + " waits, " + std::to_string(waited) + " ms)");
+        // Every motion slot still on the GPU (three held, one free): the next
+        // call but one is skipped at once.
+        const std::uint64_t busy = status.busy;
+        Check(gpu->CaptureMotion(jobs(1), requests(views), error), "engine capture: a free slot: " + error);
+        const auto skipped_at = std::chrono::steady_clock::now();
+        const bool skipped = !gpu->CaptureMotion(jobs(1), requests(views), error);
+        const double skip_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - skipped_at).count();
+        Check(skipped && error.empty() && gpu->EngineStatus().busy == busy + 1 && skip_ms < 50.0,
+              "engine capture: a busy motion slot is skipped at once (" + std::to_string(skip_ms) + " ms)");
+        Check(SUCCEEDED(gate->Signal(1)) && gpu->WaitIdle(), "engine capture: the queue goes on");
         execute(views);
+        check_raw(1, views, "after the held queue");
+    } else {
+        std::cout << "FG_TEST_NO_STALL=1: skipped engine-capture queue stall/busy-slot control\n";
     }
-    Check(gpu->EngineStatus().waits == waits, "engine capture: no wait for a field a finished analysis read");
-    views = submissions(15, false);
-    capture_color(views);
-    const auto asked = std::chrono::steady_clock::now();
-    Check(gpu->CaptureMotion(jobs(0), requests(views), error), "engine capture: over an unfinished analysis: " + error);
-    const double waited = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - asked).count();
-    status = gpu->EngineStatus();
-    Check(status.waits == waits + 2 && waited < 50.0,
-          "engine capture: a field an unfinished analysis reads is waited for on the GPU (" +
-              std::to_string(status.waits - waits) + " waits, " + std::to_string(waited) + " ms)");
-    // Every motion slot still on the GPU (three held, one free): the next
-    // call but one is skipped at once.
-    const std::uint64_t busy = status.busy;
-    Check(gpu->CaptureMotion(jobs(1), requests(views), error), "engine capture: a free slot: " + error);
-    const auto skipped_at = std::chrono::steady_clock::now();
-    const bool skipped = !gpu->CaptureMotion(jobs(1), requests(views), error);
-    const double skip_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - skipped_at).count();
-    Check(skipped && error.empty() && gpu->EngineStatus().busy == busy + 1 && skip_ms < 50.0,
-          "engine capture: a busy motion slot is skipped at once (" + std::to_string(skip_ms) + " ms)");
-    Check(SUCCEEDED(gate->Signal(1)) && gpu->WaitIdle(), "engine capture: the queue goes on");
-    execute(views);
-    check_raw(1, views, "after the held queue");
     gpu->Reset();
 
     // Raw fields that cannot be made leave the views out for the session;
     // Frame Generation goes on without them.
-    {
+    if (StallChecksAllowed()) {
         auto plain = CreateFrameGenGpu(harness.binding, error);
         Check(plain != nullptr, "engine capture: second backend: " + error);
         plain->SetCopyAfterRelease(true);
@@ -12400,7 +12454,7 @@ void EngineAssistScenarios(Harness& harness) {
     // textures the vectors are merged in with failing to be made: the frames
     // go on as without the vectors, byte for byte, noted once, and the raw
     // fields the GPU may still read are kept (not released under it).
-    {
+    if (StallChecksAllowed()) {
         std::optional<std::size_t> locked;
         std::vector<std::array<Pixels, 2>> failed;
         bool raw_kept = true;
@@ -12971,7 +13025,7 @@ void EngineLeadScenarios(Harness& harness) {
     // verdict holds them back and Assist's frames are mk1's): neither eye
     // leads or merges them that frame or after, every generated frame mk1's
     // byte for byte, noted once.
-    {
+    if (StallChecksAllowed()) {
         static constexpr std::size_t kLeadFrom = 10; // evidence is taken from frame 6
         std::vector<std::array<Pixels, 2>> failed;
         std::vector<std::array<bool, 2>> merged;
@@ -15344,6 +15398,9 @@ int main(int argc, char** argv) {
         std::filesystem::create_directories(app_data, ignored);
         _wputenv_s(L"LOCALAPPDATA", app_data.c_str());
         SetEnvironmentVariableW(L"LOCALAPPDATA", app_data.c_str());
+    }
+    if (!StallChecksAllowed()) {
+        std::cout << "FG_TEST_NO_STALL=1: GPU negative controls disabled; positive rendering and cubic-near quality checks remain enabled\n";
     }
     std::string api = argc > 1 ? argv[1] : "d3d11";
     if (api == "engine-calibrate") {

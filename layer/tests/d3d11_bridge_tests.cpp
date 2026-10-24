@@ -322,6 +322,11 @@ bool GameRuns(Game& game) {
 }
 
 // A fence the test opens: Direct3D 11 (or a Direct3D 12 queue) held back until Open.
+bool GpuNegativeControlsAllowed() {
+    const char* no_stall = std::getenv("FG_TEST_NO_STALL");
+    return !(no_stall && std::string(no_stall) == "1");
+}
+
 struct Gate {
     ComPtr<ID3D12Fence> fence;
     ComPtr<ID3D11Fence> fence11;
@@ -342,8 +347,14 @@ struct Gate {
     }
     Gate(const Gate&) = delete;
     Gate& operator=(const Gate&) = delete;
-    void HoldGame(Game& game) { game.context4->Wait(fence11.Get(), 1); }
-    void HoldQueue(ID3D12CommandQueue* queue) { queue->Wait(fence.Get(), 1); }
+    void HoldGame(Game& game) {
+        Check(GpuNegativeControlsAllowed(), "FG_TEST_NO_STALL=1 forbids an artificial game GPU hold");
+        game.context4->Wait(fence11.Get(), 1);
+    }
+    void HoldQueue(ID3D12CommandQueue* queue) {
+        Check(GpuNegativeControlsAllowed(), "FG_TEST_NO_STALL=1 forbids an artificial GPU queue hold");
+        queue->Wait(fence.Get(), 1);
+    }
     void Open() { fence->Signal(1); }
 };
 
@@ -1002,6 +1013,8 @@ void TestDeviceLost(Game& game) {
 } // namespace
 
 int main(int argc, char** argv) {
+    const char* no_stall = std::getenv("FG_TEST_NO_STALL");
+    const bool skip_negative_controls = no_stall && std::string(no_stall) == "1";
     const bool hardware = argc > 1 && std::string(argv[1]) == "hw";
     // Before any Direct3D 12 device exists.
     ComPtr<ID3D12Debug> debug;
@@ -1017,8 +1030,12 @@ int main(int argc, char** argv) {
     TestSessionGraphics(game, hardware);
     TestCreateInfo();
     TestTwinFrames(game);
-    TestWrittenOrdering(game);
-    TestPendingRelease(game);
+    if (!skip_negative_controls) {
+        TestWrittenOrdering(game);
+        TestPendingRelease(game);
+    } else {
+        std::cout << "FG_TEST_NO_STALL=1: skipped artificial ordering and pending-release holds\n";
+    }
     TestDoneWait(game);
     TestResolve(game);
     TestArray(game);
@@ -1026,11 +1043,17 @@ int main(int argc, char** argv) {
     TestMismatch(game);
     TestComposed(game);
     TestUnmatched(game);
-    TestStalledQueue(game);
-    TestSkippedCopy(game);
-    TestDrainPastGame(game);
+    if (!skip_negative_controls) {
+        TestStalledQueue(game);
+        TestSkippedCopy(game);
+        TestDrainPastGame(game);
+    }
     TestSecondThread(game);
-    TestDeviceLost(game);
+    if (!skip_negative_controls) {
+        TestDeviceLost(game);
+    } else {
+        std::cout << "FG_TEST_NO_STALL=1: skipped stalled-queue and device-removal controls\n";
+    }
     g_runtime_images.clear();
     std::cout << "d3d11 bridge tests passed (" << (hardware ? "hardware" : "WARP")
               << (debug ? ", D3D12 debug layer" : "") << (game.debug ? ", D3D11 debug layer" : "") << ")\n";

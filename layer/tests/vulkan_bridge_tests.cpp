@@ -1262,6 +1262,11 @@ ID3D12CommandQueue* BridgeQueue(const VulkanBridge& bridge) {
 
 // A fence the test opens: the game's queue or a Direct3D 12 queue held back
 // until Open. The game's side is the fence imported as a timeline semaphore.
+bool GpuNegativeControlsAllowed() {
+    const char* no_stall = std::getenv("FG_TEST_NO_STALL");
+    return !(no_stall && std::string(no_stall) == "1");
+}
+
 struct Gate {
     ComPtr<ID3D12Fence> fence;
     Game& game;
@@ -1291,6 +1296,7 @@ struct Gate {
     Gate& operator=(const Gate&) = delete;
     // Everything the game submits from here on waits for Open.
     void HoldGame() {
+        Check(GpuNegativeControlsAllowed(), "FG_TEST_NO_STALL=1 forbids an artificial game GPU hold");
         const std::uint64_t value = 1;
         const VkPipelineStageFlags stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
         VkTimelineSemaphoreSubmitInfo values{VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
@@ -1303,7 +1309,10 @@ struct Gate {
         submit.pWaitDstStageMask = &stage;
         Check(game.vkQueueSubmit(game.queue, 1, &submit, VK_NULL_HANDLE) == VK_SUCCESS, "the game is held");
     }
-    void HoldQueue(ID3D12CommandQueue* queue) { queue->Wait(fence.Get(), 1); }
+    void HoldQueue(ID3D12CommandQueue* queue) {
+        Check(GpuNegativeControlsAllowed(), "FG_TEST_NO_STALL=1 forbids an artificial GPU queue hold");
+        queue->Wait(fence.Get(), 1);
+    }
     void Open() { fence->Signal(1); }
     ~Gate() {
         test_gates::Remove(fence.Get());
@@ -3037,7 +3046,7 @@ void TestMotionTwin(Game& game) {
         // The bridge's queue held until the game rendered into the image
         // again: the copy is still queued then.
         Gate gate(device, game);
-        gate.HoldQueue(queue);
+        if (GpuNegativeControlsAllowed()) gate.HoldQueue(queue);
         Check(Release(bridge, swapchain), where + ": copied");
         const std::vector<Submission> released = g_recorder.Take();
         Check(released.size() == 2 && released[0].commands.size() == 1 && released[0].signals == 1 &&
@@ -3196,7 +3205,7 @@ void TestEndFrameMotion(Game& game) {
         for (int eye = 0; eye < 2; ++eye) Clear(game, images[eye][index[eye]], MotionVector(frame, eye));
         g_recorder.Take();
         Gate gate(device, game);
-        gate.HoldQueue(queue);
+        if (GpuNegativeControlsAllowed()) gate.HoldQueue(queue);
         const std::vector<bool> copied =
             EndFrame(bridge, {{swapchains[0], index[0]}, {swapchains[1], index[1]}, {swapchains[0], index[0]}});
         Check(copied == std::vector<bool>{true, true, true}, where + ": every image named is copied");
@@ -3241,7 +3250,7 @@ void TestEndFrameMotion(Game& game) {
     // The bridge's queue stalled: once every recording of an image's copy is
     // queued, its frame's end skips the copy at once (the game's xrEndFrame
     // is never held for it).
-    {
+    if (GpuNegativeControlsAllowed()) {
         Gate gate(device, game);
         gate.HoldQueue(queue);
         std::vector<bool> copies;
@@ -3259,31 +3268,35 @@ void TestEndFrameMotion(Game& game) {
     Check(bridge.WaitIdle(10000), "the bridge's queue finishes");
     GameIdle(game);
 
-    // A giving back refused (the device not lost): the image stays with
-    // Direct3D 12 until the next frame's end gives it back, named or not.
-    g_recorder.Take();
-    g_recorder.pass_submits = 1;
-    g_recorder.fail_submits = 1;
-    g_recorder.fail_result = VK_ERROR_OUT_OF_HOST_MEMORY;
-    Check(EndFrame(bridge, {{swapchains[1], 0}}) == std::vector<bool>{true} && g_recorder.Take().size() == 1,
-          "end-frame motion: copied, its giving back refused");
-    g_log.erase(std::remove_if(g_log.begin(), g_log.end(), [](const std::string& line) { return Contains(line, "refused"); }),
-                g_log.end());
-    Check(EndFrame(bridge, {{swapchains[1], 1}}) == std::vector<bool>{true}, "end-frame motion: the next frame's end copies");
-    {
-        const std::vector<Submission> retried = g_recorder.Take();
-        const std::vector<Command> back =
-            retried.size() == 2 && retried[1].commands.size() == 2 ? g_recorder.Commands(retried[1].commands[1])
-                                                                   : std::vector<Command>{};
-        Check(retried.size() == 2 && retried[0].commands.size() == 1 && retried[1].waits == 1 && back.size() == 1 &&
-                  back[0].barriers.size() == 1 && back[0].barriers[0].image == images[1][0] &&
-                  back[0].barriers[0].srcQueueFamilyIndex == VK_QUEUE_FAMILY_EXTERNAL &&
-                  back[0].barriers[0].dstQueueFamilyIndex == game.family,
-              "end-frame motion: the image whose giving back was refused is given back with the next");
+    if (GpuNegativeControlsAllowed()) {
+        // A giving back refused (the device not lost): the image stays with
+        // Direct3D 12 until the next frame's end gives it back, named or not.
+        g_recorder.Take();
+        g_recorder.pass_submits = 1;
+        g_recorder.fail_submits = 1;
+        g_recorder.fail_result = VK_ERROR_OUT_OF_HOST_MEMORY;
+        Check(EndFrame(bridge, {{swapchains[1], 0}}) == std::vector<bool>{true} && g_recorder.Take().size() == 1,
+              "end-frame motion: copied, its giving back refused");
+        g_log.erase(std::remove_if(g_log.begin(), g_log.end(), [](const std::string& line) { return Contains(line, "refused"); }),
+                    g_log.end());
+        Check(EndFrame(bridge, {{swapchains[1], 1}}) == std::vector<bool>{true}, "end-frame motion: the next frame's end copies");
+        {
+            const std::vector<Submission> retried = g_recorder.Take();
+            const std::vector<Command> back =
+                retried.size() == 2 && retried[1].commands.size() == 2 ? g_recorder.Commands(retried[1].commands[1])
+                                                                       : std::vector<Command>{};
+            Check(retried.size() == 2 && retried[0].commands.size() == 1 && retried[1].waits == 1 && back.size() == 1 &&
+                      back[0].barriers.size() == 1 && back[0].barriers[0].image == images[1][0] &&
+                      back[0].barriers[0].srcQueueFamilyIndex == VK_QUEUE_FAMILY_EXTERNAL &&
+                      back[0].barriers[0].dstQueueFamilyIndex == game.family,
+                  "end-frame motion: the image whose giving back was refused is given back with the next");
+        }
+        Check(EndFrame(bridge, {{swapchains[1], 0}}) == std::vector<bool>{true}, "end-frame motion: and handed over again");
+        Check(bridge.WaitIdle(10000), "the bridge's queue finishes");
+        GameIdle(game);
+    } else {
+        std::cout << "FG_TEST_NO_STALL=1: skipped refused hardware-submit control\n";
     }
-    Check(EndFrame(bridge, {{swapchains[1], 0}}) == std::vector<bool>{true}, "end-frame motion: and handed over again");
-    Check(bridge.WaitIdle(10000), "the bridge's queue finishes");
-    GameIdle(game);
 
     // Images the game never rendered into (it writes image 0 alone): their
     // first time puts them in the attachment layout, so their release
@@ -3695,6 +3708,8 @@ bool ValidationCanary(Game& game) {
 } // namespace
 
 int main(int argc, char** argv) {
+    const char* no_stall = std::getenv("FG_TEST_NO_STALL");
+    const bool skip_negative_controls = no_stall && std::string(no_stall) == "1";
     // `binary`: the cases run in both semaphore modes run in binary mode only.
     const bool binary_only = argc > 1 && std::string(argv[1]) == "binary";
     TestFormats();
@@ -3738,7 +3753,10 @@ int main(int argc, char** argv) {
     Check(MakeDevice(game, true, true, 1, error), error);
     // The fixture comes up clean: nothing it set off can pass for the canary.
     CheckClean(nullptr, "fixture setup");
-    if (g_validation) {
+    if (g_validation && skip_negative_controls) {
+        std::cout << "FG_TEST_NO_STALL=1: skipped deliberate validation-error canary\n";
+    }
+    if (g_validation && !skip_negative_controls) {
         const bool canary = ValidationCanary(game);
         if (!canary) std::printf("WARNING: the validation canary was not reported\n");
         Check(canary || !require, "the validation layer reports a wrong layout (canary)");
@@ -3751,18 +3769,20 @@ int main(int argc, char** argv) {
     TestBegin(game, bare_game);
     DestroyDevice(bare_game);
     CheckClean(nullptr, "device without the extensions destroyed");
-    TestBeginFailureCleanup(game);
+    if (!skip_negative_controls) TestBeginFailureCleanup(game);
     TestSwapchainChecks(game);
     for (const bool timeline : {true, false}) {
         if (timeline && binary_only) continue;
         TestTwinFrames(game, timeline, false);
         TestTwinFrames(game, timeline, true);
-        TestWrittenOrdering(game, timeline);
-        TestDoneWait(game, timeline);
+        if (!skip_negative_controls) {
+            TestWrittenOrdering(game, timeline);
+            TestDoneWait(game, timeline);
+        }
         TestRace(game, timeline);
     }
     TestColorFormats(game);
-    TestPendingRelease(game);
+    if (!skip_negative_controls) TestPendingRelease(game);
     TestResolve(game);
     TestArray(game);
     TestDepthValues(game);
@@ -3770,22 +3790,32 @@ int main(int argc, char** argv) {
     TestMismatch(game);
     TestPrivateDepth(game);
     TestUnmatched(game);
-    TestQfotRecorded(game);
+    if (!skip_negative_controls) {
+        TestQfotRecorded(game);
+    } else {
+        std::cout << "FG_TEST_NO_STALL=1: skipped artificial ordering, pending-release, and recorded-QFOT holds\n";
+    }
     TestMotionTwin(game);
     TestEndFrameMotion(game);
     TestQueueOnlyInAcquireRelease(game);
-    TestRefusedSubmissions(game);
-    TestMotionDeviceLost(game);
-    TestFenceDeviceLost(game);
-    TestStalledQueue(game);
-    TestSkippedCopy(game);
-    TestRingStall(game);
-    if (!binary_only) TestDrainPastGame(game, true);
-    TestDrainPastGame(game, false);
+    if (!skip_negative_controls) {
+        TestRefusedSubmissions(game);
+        TestMotionDeviceLost(game);
+        TestFenceDeviceLost(game);
+        TestStalledQueue(game);
+        TestSkippedCopy(game);
+        TestRingStall(game);
+        if (!binary_only) TestDrainPastGame(game, true);
+        TestDrainPastGame(game, false);
+    }
     TestSecondThread(game);
     TestVulkan10(game);
     TestCopyCost(game);
-    TestDeviceLost(game, false);
+    if (!skip_negative_controls) {
+        TestDeviceLost(game, false);
+    } else {
+        std::cout << "FG_TEST_NO_STALL=1: skipped stalled-queue and device-loss controls\n";
+    }
     g_runtime_images.clear();
     // The instance stays: a device of a bridge left to the process is on it.
     DestroyDevice(game);

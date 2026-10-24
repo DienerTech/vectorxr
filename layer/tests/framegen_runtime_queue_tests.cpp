@@ -383,11 +383,16 @@ int main(int argc, char** argv) {
     Check(SUCCEEDED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device))), "Direct3D 12 device");
     FrameGenQueueSubstitution inactive;
     Check(inactive.Describe() == "not substituted", "inactive queue diagnostics");
-    StoppedSourceTest(device.Get());
-    StoppedShownLayerTest(device.Get());
-    PassThroughUnderLoadTest(device.Get());
-    FirstShownImageTest(device.Get());
-    AcquireExhaustionTest(device.Get());
+    const char* no_stall = std::getenv("FG_TEST_NO_STALL");
+    if (!no_stall || std::string(no_stall) != "1") {
+        StoppedSourceTest(device.Get());
+        StoppedShownLayerTest(device.Get());
+        PassThroughUnderLoadTest(device.Get());
+        FirstShownImageTest(device.Get());
+        AcquireExhaustionTest(device.Get());
+    } else {
+        std::cout << "FG_TEST_NO_STALL=1: skipped GPU fence-hold controls\n";
+    }
     BusyDiagnosticsTest(device.Get());
     Check(SUCCEEDED(device->GetDeviceRemovedReason()), "queue tests leave the device healthy");
     ComPtr<ID3D12InfoQueue> messages;

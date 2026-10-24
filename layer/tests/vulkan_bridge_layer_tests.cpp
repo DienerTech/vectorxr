@@ -320,7 +320,7 @@ void SetEnv(const char* name, const std::string& value) {
     X(vkImportSemaphoreWin32HandleKHR) X(vkCreateCommandPool) X(vkDestroyCommandPool) X(vkAllocateCommandBuffers)    \
     X(vkBeginCommandBuffer) X(vkEndCommandBuffer) X(vkResetCommandBuffer) X(vkCmdPipelineBarrier)                    \
     X(vkCmdClearColorImage) X(vkCmdClearDepthStencilImage) X(vkQueueSubmit) X(vkQueueWaitIdle) X(vkDeviceWaitIdle)   \
-    X(vkCreateFence) X(vkDestroyFence) X(vkWaitForFences) X(vkResetFences) X(vkCreateBuffer) X(vkDestroyBuffer)      \
+    X(vkCreateFence) X(vkDestroyFence) X(vkWaitForFences) X(vkGetFenceStatus) X(vkResetFences) X(vkCreateBuffer) X(vkDestroyBuffer)      \
     X(vkGetBufferMemoryRequirements) X(vkBindBufferMemory) X(vkMapMemory) X(vkUnmapMemory) X(vkCmdCopyBufferToImage)  \
     X(vkCmdCopyImage) X(vkCreateImageView) X(vkDestroyImageView) X(vkCreateRenderPass) X(vkDestroyRenderPass)        \
     X(vkCreateFramebuffer) X(vkDestroyFramebuffer) X(vkCreateShaderModule) X(vkDestroyShaderModule)                  \
@@ -682,6 +682,11 @@ bool WaitFence(ID3D12Fence* fence, UINT64 value, DWORD timeout_ms) {
 // A fence the test opens: the game's Vulkan queue (or a Direct3D 12 queue)
 // held back until Open. On Vulkan it is the fence imported as a semaphore,
 // as the bridge imports its own.
+bool GpuNegativeControlsAllowed() {
+    const char* no_stall = std::getenv("FG_TEST_NO_STALL");
+    return !(no_stall && std::string(no_stall) == "1");
+}
+
 struct Gate {
     ComPtr<ID3D12Fence> fence;
     VulkanGame* game{nullptr};
@@ -716,6 +721,7 @@ struct Gate {
     Gate& operator=(const Gate&) = delete;
     // The game's queue runs nothing submitted after this until Open.
     void HoldGame() {
+        Check(GpuNegativeControlsAllowed(), "FG_TEST_NO_STALL=1 forbids an artificial game GPU hold");
         const UINT64 value = 1;
         VkD3D12FenceSubmitInfoKHR values{VK_STRUCTURE_TYPE_D3D12_FENCE_SUBMIT_INFO_KHR};
         values.waitSemaphoreValuesCount = 1;
@@ -728,7 +734,10 @@ struct Gate {
         submit.pWaitDstStageMask = &stage;
         CheckVk(g_vk.vkQueueSubmit(game->queue, 1, &submit, VK_NULL_HANDLE), "the game's queue held at the gate");
     }
-    void HoldQueue(ID3D12CommandQueue* queue) { queue->Wait(fence.Get(), 1); }
+    void HoldQueue(ID3D12CommandQueue* queue) {
+        Check(GpuNegativeControlsAllowed(), "FG_TEST_NO_STALL=1 forbids an artificial GPU queue hold");
+        queue->Wait(fence.Get(), 1);
+    }
     void Open() { fence->Signal(1); }
     // Opened from another thread after `ms`, while the layer waits for what it holds.
     std::thread OpenLater(DWORD ms) {
@@ -3621,7 +3630,7 @@ void CheckFrames(App& app, VulkanGame& game, Target& left, Target& right) {
     for (int frame = 0; frame < kFrames; ++frame) {
         const std::vector<Color> colors{FrameColor(frame, 0), FrameColor(frame, 1)};
         std::optional<Gate> gate;
-        if (frame == 2 || frame == 6) {
+        if (GpuNegativeControlsAllowed() && (frame == 2 || frame == 6)) {
             gate.emplace(g_runtime.device12.Get(), &game);
         }
         // Frame 6 releases the right eye first: the left is the one held.
@@ -3755,7 +3764,7 @@ void CheckTeardown(App& app, VulkanGame& game, Target& left, Target& right) {
     {
         // The left eye's last copy waits behind a gate the layer's wait outlasts.
         Gate gate(device, nullptr);
-        gate.HoldQueue(bridge_queue);
+        if (GpuNegativeControlsAllowed()) gate.HoldQueue(bridge_queue);
         const Color last{1, 2, 3, 255};
         Render(app, vulkan, left, last);
         bool destroyed = false;
@@ -3784,7 +3793,7 @@ void CheckTeardown(App& app, VulkanGame& game, Target& left, Target& right) {
     // The right eye is left to the session; its last copy waits behind a
     // gate, and a marker after everything on the bridge's queue.
     Gate gate(device, nullptr);
-    gate.HoldQueue(bridge_queue);
+    if (GpuNegativeControlsAllowed()) gate.HoldQueue(bridge_queue);
     const std::string before_render = Peer::Bridge().Summary();
     Render(app, vulkan, right, {4, 5, 6, 255});
     const std::string kept = Peer::Bridge().Summary();
@@ -3965,7 +3974,7 @@ void TestDestroyInstanceWithSession() {
           "a frame of the bridged session");
     ID3D12CommandQueue* bridge_queue = BridgeBinding()->queue;
     Gate gate(g_runtime.device12.Get(), nullptr);
-    gate.HoldQueue(bridge_queue);
+    if (GpuNegativeControlsAllowed()) gate.HoldQueue(bridge_queue);
     const std::string before_render = Peer::Bridge().Summary();
     Render(app, vulkan, left, {7, 8, 9, 255});
     const std::string kept = Peer::Bridge().Summary();
@@ -3994,6 +4003,54 @@ void TestDestroyInstanceWithSession() {
     Check(GameRuns(game), "the game's device works after its instance went with the session");
     DestroyGame(game);
     EndCase();
+}
+
+// A private depth image has no hand-over copy or barrier at release. A
+// final release followed directly by teardown must still retire the game's
+// rendering, both when the session ends itself and when its instance ends.
+void TestPrivateDepthTeardown() {
+    for (const bool with_instance : {false, true}) {
+        const std::string what = with_instance ? "xrDestroyInstance" : "xrDestroySession";
+        BeginCase(with_instance ? "private-depth-instance-teardown" : "private-depth-session-teardown");
+        App app = StartApp({kVulkan2Extension});
+        VulkanGame game = MakeVulkanGame(app);
+        SessionCreate create(game, app.system);
+        Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS &&
+                  Peer::Bridge().Active(), "a bridged session");
+        BeginSession(app);
+        Target depth = MakeTarget(app, DepthInfo(VK_FORMAT_D32_SFLOAT, 1, 4), "private depth");
+        Check(Peer::Bridge().Unmirrored(depth.swapchain), "multisampled depth stays private");
+        const Renderer renderer{&game, nullptr};
+        renderer.ClearDepth(depth, Acquire(app, depth), 0.25f);
+        const VkFence rendered = game.fences[(game.next - 1) % game.fences.size()];
+        const std::string before_release = Peer::Bridge().Summary();
+        Release(app, depth);
+        const std::string kept = Peer::Bridge().Summary();
+        Check(SummaryValue(kept, "submits") == SummaryValue(before_release, "submits"),
+              "the private release is kept without submitting work");
+        std::string at_destroy;
+        const auto note = [&] { at_destroy = Peer::Bridge().Summary(); };
+        if (with_instance) {
+            g_runtime.on_destroy_instance = note;
+            Check(app.api.destroy_instance(app.api.instance) == XR_SUCCESS, what);
+        } else {
+            Check(app.api.destroy_space(app.space) == XR_SUCCESS, "xrDestroySpace");
+            app.space = XR_NULL_HANDLE;
+            g_runtime.on_destroy_session = note;
+            Check(app.api.destroy_session(app.session) == XR_SUCCESS, what);
+            app.session = XR_NULL_HANDLE;
+            Check(app.api.destroy_instance(app.api.instance) == XR_SUCCESS, "xrDestroyInstance");
+        }
+        Check(SummaryValue(at_destroy, "submits") == SummaryValue(kept, "submits") + 1 &&
+                  SummaryValue(at_destroy, "copies") == SummaryValue(kept, "copies") &&
+                  SummaryValue(at_destroy, "writtenValue") == SummaryValue(kept, "writtenValue"),
+              what + ": private rendering is covered by one submission without a copy or hand-over");
+        CheckVk(g_vk.vkGetFenceStatus(game.device, rendered), what + ": the final private rendering finished");
+        Check(!Peer::Bridge().Active() && Peer::Idle(), "teardown released the bridge and instance");
+        Check(GameRuns(game), "the game's device works after teardown");
+        DestroyGame(game);
+        EndCase();
+    }
 }
 
 // 12. A runtime failing xrDestroySession: the Vulkan half of the bridge
@@ -5551,7 +5608,12 @@ std::string FindGpu() {
     if (!why.empty() && wanted && !test_adapter::FirstMatch(adapters, *wanted)) {
         why = test_adapter::NoMatch(*wanted, adapters);
     }
-    if (why.empty() && g_validation) {
+    const char* no_stall = std::getenv("FG_TEST_NO_STALL");
+    const bool skip_negative_controls = no_stall && std::string(no_stall) == "1";
+    if (why.empty() && g_validation && skip_negative_controls) {
+        std::cout << "FG_TEST_NO_STALL=1: skipped deliberate validation-error canary\n";
+    }
+    if (why.empty() && g_validation && !skip_negative_controls) {
         // The canary: a barrier from a layout the image is not in must be reported.
         fixture.family = GraphicsFamily(fixture.physical);
         const float priority = 1.0f;
@@ -5621,6 +5683,9 @@ std::string FindGpu() {
 int main(int argc, char** argv) {
     g_unbridged_only = argc > 1 && std::string(argv[1]) == "unbridged";
     const bool depth_paths_only = argc > 1 && std::string(argv[1]) == "depth-paths";
+    const bool teardown_only = argc > 1 && std::string(argv[1]) == "teardown";
+    const char* no_stall = std::getenv("FG_TEST_NO_STALL");
+    const bool skip_negative_controls = no_stall && std::string(no_stall) == "1";
     const bool require = vulkan_test::RequireHardware();
     const auto skip = [&](const std::string& why) {
         std::cout << (require ? "FAILED (VECTORXR_TESTS_REQUIRE_HW=1): " : "skipped: ") << why << "\n";
@@ -5647,13 +5712,21 @@ int main(int argc, char** argv) {
     IsolateHost();
     Peer::UseFrameGenGpu(MakeStandInGpu);
 
-    if (depth_paths_only) {
-        TestDepthWritePaths();
+    if (depth_paths_only || teardown_only) {
+        if (teardown_only) {
+            TestBridgedSession(2);
+            TestBridgedSession(1);
+            TestDestroyInstanceWithSession();
+            TestPrivateDepthTeardown();
+        } else {
+            TestDepthWritePaths();
+        }
         g_runtime = StandIn{};
         Peer::ReleaseLog(g_root / "released" / "vectorxr.log");
         std::error_code error;
         std::filesystem::remove_all(g_root, error);
-        std::cout << "vulkan bridge layer tests passed (the depth paths only)\n";
+        std::cout << "vulkan bridge layer tests passed (" << (teardown_only ? "teardown" : "depth paths")
+                  << " only)\n";
         return 0;
     }
     // The cases that need no working bridge.
@@ -5673,16 +5746,23 @@ int main(int argc, char** argv) {
         TestBridgedFallbacks();
         TestBothEnablesOwnDevice();
         TestDestroyInstanceWithSession();
+        TestPrivateDepthTeardown();
         TestRefusedDestroySession();
         TestBridgedFrameGen("interpolate");
         TestBridgedFrameGen("extrapolate");
         TestStarCitizenShapes();
         TestStarCitizenMotion();
         TestDepthWritePaths();
-        TestStalledTeardown(false);
-        TestStalledTeardown(true);
+        if (!skip_negative_controls) {
+            TestStalledTeardown(false);
+            TestStalledTeardown(true);
+        }
         TestNativeD3D12("native-d3d12-after-bridged");
-        TestDeviceLost();
+        if (!skip_negative_controls) {
+            TestDeviceLost();
+        } else {
+            std::cout << "FG_TEST_NO_STALL=1: skipped stalled teardown and device-removal controls\n";
+        }
     }
     g_runtime = StandIn{};
     Peer::ReleaseLog(g_root / "released" / "vectorxr.log");

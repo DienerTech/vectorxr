@@ -469,6 +469,11 @@ struct VulkanBridge::Impl {
     std::uint64_t submit_serial{0};    // the last serial handed out
     std::uint64_t last_serial{0};      // the newest submission that was made
     std::uint64_t completed_serial{0}; // every submission up to it has finished
+    // A refused teardown submission leaves later application rendering
+    // uncovered by last_serial. A subsequent successful submission must
+    // cover this serial before any Vulkan image can be retired; its fence
+    // also covers all application work queued before that refusal.
+    std::uint64_t required_teardown_serial{0};
     bool lost{false};                  // the game's Vulkan device was lost
     std::string lost_reason;
     // The bridge's last submission on the game's queue for the game's motion
@@ -722,6 +727,10 @@ struct VulkanBridge::Impl {
                     return true;
                 }
                 PollFences();
+                // A failed teardown marker was never submitted. Old fences
+                // cannot prove that the rendering after its acquire finished,
+                // even when a caller still holds that acquire's last_serial.
+                target = std::max(target, required_teardown_serial);
                 if (lost || completed_serial >= target) {
                     return true;
                 }
@@ -2182,7 +2191,8 @@ void VulkanBridge::End() {
         std::scoped_lock lock(impl_->mutex);
         last_serial = impl_->last_serial;
     }
-    if (impl_->WaitSubmissions(last_serial, kRetireWaitMs)) {
+    const bool retired = impl_->WaitSubmissions(last_serial, kRetireWaitMs);
+    if (retired) {
         std::scoped_lock lock(impl_->mutex);
         for (auto& [swapchain, chain] : impl_->swapchains) {
             impl_->DestroyVulkan(chain);
@@ -2195,7 +2205,10 @@ void VulkanBridge::End() {
         impl_->Log("the game's queue did not finish the bridge's submissions at teardown; their Vulkan objects are "
                    "kept for the process.");
     }
-    if (!idle) {
+    if (!idle || !retired) {
+        // Vulkan work that cannot be retired may still use the imported
+        // images and semaphores, even after the Direct3D 12 queue is idle.
+        // Keep their backing resources and shared fences alive with them.
         for (auto& [swapchain, chain] : impl_->swapchains) {
             Impl::DetachGpu(chain);
         }
@@ -2566,7 +2579,23 @@ bool VulkanBridge::Released(XrSwapchain swapchain, bool teardown) {
     }
     const std::uint32_t index = chain->acquired.front();
     chain->acquired.pop_front();
-    if (chain->plan.mode == Impl::Mode::kPrivate || index >= chain->images.size()) {
+    if (index >= chain->images.size()) {
+        return true;
+    }
+    if (chain->plan.mode == Impl::Mode::kPrivate) {
+        if (teardown && !impl.lost) {
+            // A private image has no release barrier or copy, but the game's
+            // rendering came after its acquire. Cover it with a fenced empty
+            // submission before End lets the image go, as a twin's release
+            // barrier does. Ordinary releases still submit nothing.
+            std::uint64_t serial = 0;
+            if (impl.Submit(VK_NULL_HANDLE, 0, 0, serial) != VK_SUCCESS) {
+                if (!impl.lost) impl.required_teardown_serial = impl.submit_serial + 1;
+                ++chain->failed_submits;
+                return false;
+            }
+            chain->last_serial = serial;
+        }
         return true;
     }
     impl.NoteThread();
@@ -2590,6 +2619,9 @@ bool VulkanBridge::Released(XrSwapchain swapchain, bool teardown) {
     if (impl.Submit(probe ? std::span<const VkCommandBuffer>(handed, 2) : std::span<const VkCommandBuffer>(handed + 1, 1),
                     0, written, serial) != VK_SUCCESS) {
         // Nothing was handed over: no copy, and the image stays the game's.
+        // At teardown its preceding rendering still needs a later marker;
+        // the acquire's old fence cannot safely retire this image.
+        if (teardown && !impl.lost) impl.required_teardown_serial = impl.submit_serial + 1;
         ++chain->failed_submits;
         return false;
     }
