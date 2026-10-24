@@ -1234,16 +1234,19 @@ bool FlowPrior(float4 flow, float2 uv, float depth, float2 pixels, out float2 pr
 // A flow sample (w: its cost with no motion, negative where the previous
 // frame did not see the content: FG_PASS_REFINE) with the rigid test applied
 // at its cell; `rigid` when the cell is cockpit content. With `prior`
-// (FG_PASS_FILTER_PRIOR), the flow prior too (`anchor` as FlowPrior's).
-// With FG_FLAG_ENGINE, cells the game's vectors moved go by their label's
-// class instead of their distance: the head's movement alone is rigid, at
-// any distance; the world's is world content (the world's motion beyond
-// 30 m); their own keep it beyond 4 m, never the world's (another aircraft),
-// and nearer, extrapolating, only with FG_ENGINE_COCKPIT where no motion
-// matches clearly worse (as the rigid keep test) and they move more than the
-// pixels. The rest keep the distance's rules.
-float4 Rigid(float4 flow, int2 cell, float2 pixels, bool prior, out bool rigid, out bool anchor) {
+// (FG_PASS_FILTER_PRIOR), the flow prior too (`anchor` as FlowPrior's;
+// `plain`: the sample without it). With FG_FLAG_ENGINE, cells the game's
+// vectors moved go by their label's class instead of their distance: the
+// head's movement alone is rigid, at any distance; the world's is world
+// content (the world's motion beyond 30 m); their own keep it beyond 4 m,
+// never the world's (another aircraft), and nearer, extrapolating, only with
+// FG_ENGINE_COCKPIT where no motion matches clearly worse (as the rigid keep
+// test) and they move more than the pixels. The rest keep the distance's
+// rules.
+float4 Rigid(float4 flow, int2 cell, float2 pixels, bool prior, out bool rigid, out bool anchor, out float4 plain) {
     anchor = false;
+    bool held = false; // the flow prior holds the cell on `predicted`
+    float2 predicted = float2(0.0, 0.0);
     const float zero = flow.w;
     const float2 uv = (float2(cell) + 0.5) / float2(g.size.xy);
     const float depth = DepthNearest(g_depth, uv);
@@ -1301,14 +1304,12 @@ float4 Rigid(float4 flow, int2 cell, float2 pixels, bool prior, out bool rigid, 
         }
 #if defined(FG_FILTER_PRIOR)
         else if (prior) {
-            float2 predicted;
-            if (FlowPrior(flow, uv, depth, pixels, predicted, anchor)) {
-                result = float4(predicted, min(flow.z, zero), 1.0);
-            }
+            held = FlowPrior(flow, uv, depth, pixels, predicted, anchor);
         }
 #endif
     }
-    return result;
+    plain = result;
+    return held ? float4(predicted, min(flow.z, zero), 1.0) : result;
 }
 
 // Cost-weighted vector median over 3x3: removes isolated mismatches without
@@ -1324,14 +1325,54 @@ float4 Rigid(float4 flow, int2 cell, float2 pixels, bool prior, out bool rigid, 
 // matching noise (instrument faces, fine text, anti-aliasing shimmer on
 // still cockpit detail) would make still content jitter at the real frame
 // rate; noise does not repeat from one frame pair to the next, motion does.
+//
+// The cells a thread group's medians read, its 8x8 and one around each way
+// (clamped to the grid as each median clamps them), take the rigid test
+// once for all of them: kinds bit 0 rigid, bit 1 a flow prior anchor; with
+// the flow prior, the samples without it follow (FG_FILTER_CELLS on).
+#define FG_FILTER_SPAN 10
+#define FG_FILTER_CELLS (FG_FILTER_SPAN * FG_FILTER_SPAN)
+#if defined(FG_FILTER_PRIOR)
+groupshared float4 g_group_samples[2 * FG_FILTER_CELLS];
+#else
+groupshared float4 g_group_samples[FG_FILTER_CELLS];
+#endif
+groupshared uint g_group_kinds[FG_FILTER_CELLS];
+
 [numthreads(8, 8, 1)]
-void CSMain(uint3 id : SV_DispatchThreadID) {
-    if (any(id.xy >= g.size.xy)) {
-        return;
-    }
+void CSMain(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID,
+            uint index : SV_GroupIndex) {
     const int2 limit = int2(g.size.xy) - 1;
     const float2 aspect = float2(1.0, float(g.size.y) / float(g.size.x));
     const float2 pixels = float2(g.size.xy) * float(1u << g.options.w);
+#if defined(FG_FILTER_PRIOR)
+    const bool prior = (g.options.y & FG_FLAG_FLOW_PRIOR) != 0u;
+#else
+    const bool prior = false;
+#endif
+    // Every thread reaches the barrier, those past the grid's edge too.
+    const int2 first = int2(group.xy) * 8 - 1;
+    [unroll]
+    for (uint k = 0; k < (FG_FILTER_CELLS + 63) / 64; ++k) {
+        const uint slot = index + 64u * k;
+        if (slot < FG_FILTER_CELLS) {
+            const int2 q = clamp(first + int2(slot % FG_FILTER_SPAN, slot / FG_FILTER_SPAN), int2(0, 0), limit);
+            bool rigid;
+            bool anchor;
+            float4 plain;
+            g_group_samples[slot] = Rigid(g_flow_in.Load(int3(q, 0)), q, pixels, prior, rigid, anchor, plain);
+            g_group_kinds[slot] = (rigid ? 1u : 0u) | (anchor ? 2u : 0u);
+#if defined(FG_FILTER_PRIOR)
+            g_group_samples[FG_FILTER_CELLS + slot] = plain;
+#endif
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (any(id.xy >= g.size.xy)) {
+        return;
+    }
+    // The centre's slot; cell (x, y) around it is FG_FILTER_SPAN * y + x on.
+    const int own_slot = (int(thread.y) + 1) * FG_FILTER_SPAN + int(thread.x) + 1;
     float4 samples[9];
     bool rigid[9];
     // The flow prior holds no cell beside a vector kept on its evidence past
@@ -1341,28 +1382,17 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     bool anchored = false;
     [unroll]
     for (int i = 0; i < 9; ++i) {
-        const int2 q = clamp(int2(id.xy) + int2(i % 3 - 1, i / 3 - 1), int2(0, 0), limit);
-        bool anchor;
-#if defined(FG_FILTER_PRIOR)
-        const bool prior = (g.options.y & FG_FLAG_FLOW_PRIOR) != 0u;
-#else
-        const bool prior = false;
-#endif
-        samples[i] = Rigid(g_flow_in.Load(int3(q, 0)), q, pixels, prior, rigid[i], anchor);
-        anchored = anchored || anchor;
+        const uint kinds = g_group_kinds[own_slot + (i / 3 - 1) * FG_FILTER_SPAN + i % 3 - 1];
+        rigid[i] = (kinds & 1u) != 0u;
+        anchored = anchored || (kinds & 2u) != 0u;
     }
-#if defined(FG_FILTER_PRIOR)
-    [branch]
-    if (anchored) {
-        [unroll]
-        for (int i = 0; i < 9; ++i) {
-            const int2 q = clamp(int2(id.xy) + int2(i % 3 - 1, i / 3 - 1), int2(0, 0), limit);
-            bool anchor;
-            samples[i] = Rigid(g_flow_in.Load(int3(q, 0)), q, pixels, false, rigid[i], anchor);
-        }
+    const int base = anchored ? FG_FILTER_CELLS : 0;
+    [unroll]
+    for (int n = 0; n < 9; ++n) {
+        samples[n] = g_group_samples[base + own_slot + (n / 3 - 1) * FG_FILTER_SPAN + n % 3 - 1];
     }
-#endif
-    int chosen = 4;
+    // The chosen sample carried along (the earliest of equal scores).
+    float4 chosen = samples[4];
     float chosen_score = 1e30;
     [unroll]
     for (int c = 0; c < 9; ++c) {
@@ -1374,10 +1404,10 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         }
         if (rigid[c] == rigid[4] && score < chosen_score) {
             chosen_score = score;
-            chosen = c;
+            chosen = samples[c];
         }
     }
-    const float2 v = samples[chosen].xy;
+    const float2 v = chosen.xy;
     const float2 uv = (float2(id.xy) + 0.5) / float2(g.size.xy);
     const float depth = DepthNearest(g_depth, uv);
     float steadiness = 1.0;
@@ -1393,7 +1423,7 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
             steadiness = saturate(2.0 - change / (FG_STEADY_PIXELS + FG_STEADY_SHARE * speed));
         }
     }
-    g_flow_out[id.xy] = float4(v, min(samples[chosen].z, samples[4].z), steadiness);
+    g_flow_out[id.xy] = float4(v, min(chosen.z, samples[4].z), steadiness);
 }
 #endif
 
