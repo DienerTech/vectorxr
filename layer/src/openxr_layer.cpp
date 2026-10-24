@@ -14908,6 +14908,9 @@ void OpenXrLayer::StartFrameGen(XrSession session, const void* binding_chain, co
                                                   error = unavailable;
                                                   return std::unique_ptr<FrameGenGpu>();
                                               }));
+        // Research (VECTORXR_FRAMEGEN_DEPTH_BRIDGE_PROBE=1, read with the
+        // session's research switches): log only.
+        vulkan_bridge_.SetDepthProbe(framegen_.DepthBridgeProbe());
     }
     framegen_owns_pacing_.store(framegen_.OwnsPacing(), std::memory_order_release);
     if (framegen_owns_pacing_.load(std::memory_order_acquire)) {

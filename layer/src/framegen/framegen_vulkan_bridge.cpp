@@ -55,6 +55,12 @@ constexpr std::uint32_t kMaxFences = 64;
 // Timing samples kept for the summary's percentiles: the most recent ones
 // (about 3.7 s of submits). Each summary's maximum covers its whole window.
 constexpr std::size_t kTimingSamples = 1024;
+// The depth probe (VECTORXR_FRAMEGEN_DEPTH_BRIDGE_PROBE=1, research): a grid
+// of this many texels a side of each slice, read about once a second.
+constexpr std::uint32_t kProbeGrid = 32;
+constexpr std::uint32_t kProbePoints = kProbeGrid * kProbeGrid;
+constexpr std::chrono::milliseconds kProbeInterval{1000};
+constexpr std::chrono::milliseconds kProbeDescribeInterval{5000};
 
 std::string Hex(std::uint64_t value) {
     char buffer[32];
@@ -243,7 +249,13 @@ void AddSample(std::vector<double>& samples, std::size_t& next, double& window_m
     X(vkCreateFence)                                                                                               \
     X(vkDestroyFence)                                                                                              \
     X(vkGetFenceStatus)                                                                                            \
-    X(vkResetFences)
+    X(vkResetFences)                                                                                               \
+    X(vkCreateBuffer)                                                                                              \
+    X(vkDestroyBuffer)                                                                                             \
+    X(vkGetBufferMemoryRequirements)                                                                               \
+    X(vkBindBufferMemory)                                                                                          \
+    X(vkMapMemory)                                                                                                 \
+    X(vkCmdCopyImageToBuffer)
 #define VB_DEVICE_FUNCTIONS_11(X) X(vkGetImageMemoryRequirements2)
 
 struct Vulkan {
@@ -320,6 +332,34 @@ struct VulkanBridge::Impl {
         // Given back to the game's queue at its release, behind the copy
         // (Swapchain::hand_back): its next acquire submits nothing.
         bool handed_back{false};
+        // The depth probe's read of the twin into DepthProbe::buffer
+        // (recorded at the image's first probe).
+        VkCommandBuffer probe{VK_NULL_HANDLE};
+    };
+    // The depth probe (VECTORXR_FRAMEGEN_DEPTH_BRIDGE_PROBE=1, research, log
+    // only) of a depth swapchain: at a hand-over about once a second, a grid
+    // of the twin read on the game's queue just before the release (what the
+    // game left there), and of the runtime's image on the bridge's queue just
+    // after the copy (what the runtime gets). One at a time.
+    struct DepthProbe {
+        VkBuffer buffer{VK_NULL_HANDLE}; // the twin's grid, slice by slice
+        VkDeviceMemory memory{VK_NULL_HANDLE};
+        const float* twin{nullptr}; // mapped
+        ComPtr<ID3D12Resource> readback; // the runtime image's slices, whole (depth copies whole subresources)
+        const std::uint8_t* runtime{nullptr}; // mapped
+        std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints;
+        ComPtr<ID3D12CommandAllocator> allocator;
+        ComPtr<ID3D12GraphicsCommandList> list;
+        bool unavailable{false}; // its format is not probed, or making it failed (reported once)
+        bool pending{false};
+        std::uint32_t image{0};
+        std::uint64_t serial{0}; // the game's queue's submission reading the twin
+        UINT64 idle{0};          // the bridge's queue's progress after reading the runtime's image
+        std::chrono::steady_clock::time_point next{};
+        std::uint64_t probes{0};
+        // The swapchain's counters are logged every kProbeDescribeInterval
+        // too: a depth swapchain never handed over is never probed.
+        std::chrono::steady_clock::time_point next_describe{};
     };
     // What a swapchain's images are, from the application's create info.
     struct Plan {
@@ -371,6 +411,7 @@ struct VulkanBridge::Impl {
         std::uint64_t unmatched_releases{0}; // releases with nothing acquired
         std::uint64_t failed_submits{0};
         std::uint64_t end_frame_copies{0}; // EndFrameMotion's
+        DepthProbe probe;
     };
     struct Fence {
         VkFence fence{VK_NULL_HANDLE};
@@ -435,6 +476,7 @@ struct VulkanBridge::Impl {
     DWORD thread{0}; // the first thread a swapchain or frame call came from
     bool reported_second_thread{false};
     bool debug_layer{false};          // VECTORXR_VULKAN_BRIDGE_DEBUG=1
+    bool depth_probe{false};          // VECTORXR_FRAMEGEN_DEPTH_BRIDGE_PROBE=1 (SetDepthProbe)
     std::uint32_t debug_reported{0};  // debug-layer messages reported
     std::uint64_t next_skip_report{1}; // skipped copies are reported at 1, 10, 100...
     std::uint64_t next_failure_report{1};
@@ -728,8 +770,13 @@ struct VulkanBridge::Impl {
             image.twin_memory = VK_NULL_HANDLE;
             image.private_image = VK_NULL_HANDLE;
             image.private_memory = VK_NULL_HANDLE;
-            image.first_acquire = image.acquire = image.release = VK_NULL_HANDLE;
+            image.first_acquire = image.acquire = image.release = image.probe = VK_NULL_HANDLE;
         }
+        if (chain.probe.buffer) vk.vkDestroyBuffer(device, chain.probe.buffer, nullptr);
+        if (chain.probe.memory) vk.vkFreeMemory(device, chain.probe.memory, nullptr); // unmaps it
+        chain.probe.buffer = VK_NULL_HANDLE;
+        chain.probe.memory = VK_NULL_HANDLE;
+        chain.probe.twin = nullptr;
         if (chain.pool) {
             vk.vkDestroyCommandPool(device, chain.pool, nullptr); // frees its command buffers
             chain.pool = VK_NULL_HANDLE;
@@ -765,6 +812,9 @@ struct VulkanBridge::Impl {
         }
         chain.timestamps.Detach();
         chain.stamps.Detach();
+        chain.probe.readback.Detach();
+        chain.probe.list.Detach();
+        chain.probe.allocator.Detach();
     }
 
     std::string VideoMemory() const {
@@ -1440,6 +1490,241 @@ struct VulkanBridge::Impl {
         return true;
     }
 
+    // --- The depth probe (VECTORXR_FRAMEGEN_DEPTH_BRIDGE_PROBE=1) ---------
+
+    // The probe's buffers and recording of a depth swapchain, at its first
+    // probe (holding `mutex`). False: it is not probed (reported once).
+    bool MakeProbe(Swapchain& chain) {
+        DepthProbe& probe = chain.probe;
+        if (probe.unavailable) return false;
+        if (probe.buffer) return true;
+        const Plan& plan = chain.plan;
+        const auto fail = [&](const std::string& why) {
+            probe.unavailable = true;
+            Info("the depth probe leaves a depth swapchain out: " + why + " (" + Describe(chain) + ").");
+            return false;
+        };
+        if (plan.format != VK_FORMAT_D32_SFLOAT && plan.format != VK_FORMAT_D32_SFLOAT_S8_UINT) {
+            return fail("only 32-bit float depth is probed");
+        }
+        if (plan.mip_count != 1 || chain.images.empty() || !chain.images.front().runtime) {
+            return fail("mipmapped depth is not probed");
+        }
+        VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        info.size = VkDeviceSize{kProbePoints} * plan.array_size * sizeof(float);
+        info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        if (vk.vkCreateBuffer(device, &info, nullptr, &probe.buffer) != VK_SUCCESS) {
+            probe.buffer = VK_NULL_HANDLE;
+            return fail("its buffer could not be made");
+        }
+        VkMemoryRequirements requirements{};
+        vk.vkGetBufferMemoryRequirements(device, probe.buffer, &requirements);
+        VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        allocate.allocationSize = requirements.size;
+        allocate.memoryTypeIndex = UINT32_MAX;
+        constexpr VkMemoryPropertyFlags kHost = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        for (std::uint32_t i = 0; i < memory.memoryTypeCount && allocate.memoryTypeIndex == UINT32_MAX; ++i) {
+            if ((requirements.memoryTypeBits & (1u << i)) && (memory.memoryTypes[i].propertyFlags & kHost) == kHost) {
+                allocate.memoryTypeIndex = i;
+            }
+        }
+        void* mapped = nullptr;
+        if (allocate.memoryTypeIndex == UINT32_MAX ||
+            vk.vkAllocateMemory(device, &allocate, nullptr, &probe.memory) != VK_SUCCESS) {
+            probe.memory = VK_NULL_HANDLE;
+            return fail("no host memory for its buffer");
+        }
+        if (vk.vkBindBufferMemory(device, probe.buffer, probe.memory, 0) != VK_SUCCESS ||
+            vk.vkMapMemory(device, probe.memory, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS) {
+            return fail("its buffer could not be mapped");
+        }
+        probe.twin = static_cast<const float*>(mapped);
+        // Direct3D 12 copies depth by whole subresources: each slice's
+        // (mip 0, the depth plane) at a placement of its own.
+        const D3D12_RESOURCE_DESC desc = chain.images.front().runtime->GetDesc();
+        probe.footprints.resize(plan.array_size);
+        UINT64 bytes = 0;
+        device12->GetCopyableFootprints(&desc, 0, plan.array_size, 0, probe.footprints.data(), nullptr, nullptr, &bytes);
+        D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_READBACK};
+        D3D12_RESOURCE_DESC buffer{};
+        buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        buffer.Width = std::max<UINT64>(bytes, 256);
+        buffer.Height = 1;
+        buffer.DepthOrArraySize = 1;
+        buffer.MipLevels = 1;
+        buffer.SampleDesc.Count = 1;
+        buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        void* readback = nullptr;
+        if (FAILED(device12->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_COPY_DEST,
+                                                     nullptr, IID_PPV_ARGS(&probe.readback))) ||
+            FAILED(probe.readback->Map(0, nullptr, &readback)) ||
+            FAILED(device12->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&probe.allocator))) ||
+            FAILED(device12->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, probe.allocator.Get(), nullptr,
+                                               IID_PPV_ARGS(&probe.list))) ||
+            FAILED(probe.list->Close())) {
+            return fail("its Direct3D 12 readback could not be made");
+        }
+        probe.runtime = static_cast<const std::uint8_t*>(readback);
+        Info("the depth probe reads a depth swapchain's twin and runtime image (" + Describe(chain) +
+             "): its Direct3D 12 readback holds " + std::to_string(MiB(bytes)) + " MiB.");
+        return true;
+    }
+
+    // The recording reading the grid of `image`'s twin into the probe's
+    // buffer on the game's queue, from the attachment layout and back
+    // (holding `mutex`), when a probe of the swapchain is due; else null.
+    VkCommandBuffer ProbeCommands(Swapchain& chain, Image& image) {
+        DepthProbe& probe = chain.probe;
+        const auto now = std::chrono::steady_clock::now();
+        if (probe.pending || now < probe.next || !MakeProbe(chain)) {
+            return VK_NULL_HANDLE;
+        }
+        if (!image.probe) {
+            const Plan& plan = chain.plan;
+            VkCommandBufferAllocateInfo allocate{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+            allocate.commandPool = chain.pool;
+            allocate.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            allocate.commandBufferCount = 1;
+            VkCommandBuffer commands = VK_NULL_HANDLE;
+            if (vk.vkAllocateCommandBuffers(device, &allocate, &commands) != VK_SUCCESS) {
+                probe.unavailable = true;
+                return VK_NULL_HANDLE;
+            }
+            std::vector<VkBufferImageCopy> regions;
+            for (std::uint32_t slice = 0; slice < plan.array_size; ++slice) {
+                for (std::uint32_t j = 0; j < kProbeGrid; ++j) {
+                    for (std::uint32_t i = 0; i < kProbeGrid; ++i) {
+                        VkBufferImageCopy region{};
+                        region.bufferOffset = (VkDeviceSize{slice} * kProbePoints + j * kProbeGrid + i) * sizeof(float);
+                        region.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, slice, 1};
+                        region.imageOffset = {static_cast<std::int32_t>(std::min(plan.width - 1, (2 * i + 1) * plan.width / (2 * kProbeGrid))),
+                                              static_cast<std::int32_t>(std::min(plan.height - 1, (2 * j + 1) * plan.height / (2 * kProbeGrid))), 0};
+                        region.imageExtent = {1, 1, 1};
+                        regions.push_back(region);
+                    }
+                }
+            }
+            const bool recorded = Record(commands, [&](VkCommandBuffer cb) {
+                const VkImageMemoryBarrier before =
+                    Barrier(image.twin_image, plan.aspect, plan, 1, plan.layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                            VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_QUEUE_FAMILY_IGNORED,
+                            VK_QUEUE_FAMILY_IGNORED);
+                vk.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0,
+                                        nullptr, 0, nullptr, 1, &before);
+                vk.vkCmdCopyImageToBuffer(cb, image.twin_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, probe.buffer,
+                                          static_cast<std::uint32_t>(regions.size()), regions.data());
+                const VkImageMemoryBarrier after =
+                    Barrier(image.twin_image, plan.aspect, plan, 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, plan.layout,
+                            VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+                            VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED);
+                VkMemoryBarrier host{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+                host.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+                vk.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &host, 0,
+                                        nullptr, 1, &after);
+            });
+            if (!recorded) {
+                probe.unavailable = true;
+                return VK_NULL_HANDLE;
+            }
+            image.probe = commands;
+        }
+        probe.next = now + kProbeInterval;
+        return image.probe;
+    }
+
+    // The runtime image's slices read on the bridge's queue after `image`'s
+    // copy (holding `mutex`); the probe is pending from here on.
+    void QueueRuntimeProbe(Swapchain& chain, Image& image, std::uint32_t index, std::uint64_t serial) {
+        DepthProbe& probe = chain.probe;
+        if (FAILED(probe.allocator->Reset()) || FAILED(probe.list->Reset(probe.allocator.Get(), nullptr))) {
+            return;
+        }
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = image.runtime.Get();
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        probe.list->ResourceBarrier(1, &barrier);
+        for (std::uint32_t slice = 0; slice < probe.footprints.size(); ++slice) {
+            D3D12_TEXTURE_COPY_LOCATION source{image.runtime.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+            source.SubresourceIndex = slice;
+            D3D12_TEXTURE_COPY_LOCATION destination{probe.readback.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
+            destination.PlacedFootprint = probe.footprints[slice];
+            probe.list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+        }
+        std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+        probe.list->ResourceBarrier(1, &barrier);
+        if (FAILED(probe.list->Close())) {
+            return;
+        }
+        ID3D12CommandList* lists[] = {probe.list.Get()};
+        queue->ExecuteCommandLists(1, lists);
+        probe.idle = MarkIdle();
+        probe.serial = serial;
+        probe.image = index;
+        probe.pending = true;
+    }
+
+    // A pending probe whose reads both finished, logged (holding `mutex`).
+    void FinishProbe(XrSwapchain swapchain, Swapchain& chain) {
+        DepthProbe& probe = chain.probe;
+        if (!probe.pending) return;
+        PollFences();
+        if (lost) {
+            probe.pending = false;
+            return;
+        }
+        if (completed_serial < probe.serial || idle->GetCompletedValue() < probe.idle) return;
+        probe.pending = false;
+        ++probe.probes;
+        const Plan& plan = chain.plan;
+        const auto number = [](float value) {
+            char text[32];
+            std::snprintf(text, sizeof(text), "%.6g", value);
+            return std::string(text);
+        };
+        for (std::uint32_t slice = 0; slice < plan.array_size; ++slice) {
+            const D3D12_PLACED_SUBRESOURCE_FOOTPRINT& footprint = probe.footprints[slice];
+            std::uint32_t twin_nonzero = 0;
+            std::uint32_t runtime_nonzero = 0;
+            std::uint32_t same = 0;
+            float twin_min = 0.0f, twin_max = 0.0f, runtime_min = 0.0f, runtime_max = 0.0f;
+            for (std::uint32_t j = 0; j < kProbeGrid; ++j) {
+                for (std::uint32_t i = 0; i < kProbeGrid; ++i) {
+                    const std::uint32_t x = std::min(plan.width - 1, (2 * i + 1) * plan.width / (2 * kProbeGrid));
+                    const std::uint32_t y = std::min(plan.height - 1, (2 * j + 1) * plan.height / (2 * kProbeGrid));
+                    const float twin = probe.twin[slice * kProbePoints + j * kProbeGrid + i];
+                    float runtime = 0.0f;
+                    std::memcpy(&runtime,
+                                probe.runtime + footprint.Offset + static_cast<UINT64>(footprint.Footprint.RowPitch) * y +
+                                    sizeof(float) * x,
+                                sizeof(float));
+                    const bool first = i == 0 && j == 0;
+                    twin_min = first ? twin : std::min(twin_min, twin);
+                    twin_max = first ? twin : std::max(twin_max, twin);
+                    runtime_min = first ? runtime : std::min(runtime_min, runtime);
+                    runtime_max = first ? runtime : std::max(runtime_max, runtime);
+                    twin_nonzero += twin != 0.0f ? 1 : 0;
+                    runtime_nonzero += runtime != 0.0f ? 1 : 0;
+                    same += std::memcmp(&twin, &runtime, sizeof(float)) == 0 ? 1 : 0;
+                }
+            }
+            std::ostringstream stream;
+            stream << "depth probe " << probe.probes << ": swapchain " << Hex(reinterpret_cast<std::uintptr_t>(swapchain))
+                   << ", image " << probe.image << " of " << chain.images.size() << ", slice " << slice << ", "
+                   << plan.width << "x" << plan.height << " grid of " << kProbePoints
+                   << ": the twin at the hand-over (Vulkan, before the copy) nonzero=" << twin_nonzero
+                   << " min=" << number(twin_min) << " max=" << number(twin_max)
+                   << "; the runtime's image after the copy (Direct3D 12) nonzero=" << runtime_nonzero
+                   << " min=" << number(runtime_min) << " max=" << number(runtime_max) << "; same in both=" << same
+                   << ".";
+            Info(stream.str());
+        }
+    }
+
     Swapchain* Find(XrSwapchain swapchain) {
         const auto it = swapchains.find(swapchain);
         return it == swapchains.end() ? nullptr : &it->second;
@@ -1948,6 +2233,32 @@ void VulkanBridge::FrameEnded() {
     impl_->ReportDebugMessages();
     // A lost device shows in its fences too (no queue is touched).
     impl_->PollFences();
+    if (impl_->depth_probe) {
+        const auto now = std::chrono::steady_clock::now();
+        for (auto& [swapchain, chain] : impl_->swapchains) {
+            if (chain.plan.mode != Impl::Mode::kTwinDepth) continue;
+            impl_->FinishProbe(swapchain, chain);
+            if (now >= chain.probe.next_describe) {
+                chain.probe.next_describe = now + kProbeDescribeInterval;
+                impl_->Info("depth probe: swapchain " + Hex(reinterpret_cast<std::uintptr_t>(swapchain)) + " so far (" +
+                            impl_->Describe(chain) + ", probes=" + std::to_string(chain.probe.probes) + ").");
+            }
+        }
+    }
+}
+
+void VulkanBridge::SetDepthProbe(bool on) {
+    if (!impl_) {
+        return;
+    }
+    std::scoped_lock lock(impl_->mutex);
+    if (on && !impl_->depth_probe) {
+        impl_->Info("the depth probe is on (VECTORXR_FRAMEGEN_DEPTH_BRIDGE_PROBE=1, research): about once a second "
+                    "each depth swapchain's twin is read on the game's queue at its hand-over, before the copy, and "
+                    "its runtime image on the bridge's queue after it (a grid of " +
+                    std::to_string(kProbePoints) + " texels a slice); nothing shown changes.");
+    }
+    impl_->depth_probe = on;
 }
 
 std::vector<std::int64_t> VulkanBridge::GameFormats(const std::vector<std::int64_t>& runtime_formats) const {
@@ -2251,10 +2562,19 @@ bool VulkanBridge::Released(XrSwapchain swapchain) {
         // the image was never the game's to hand over.
         return false;
     }
+    // Research (VECTORXR_FRAMEGEN_DEPTH_BRIDGE_PROBE=1): about once a second,
+    // a grid of a depth twin as the game left it, read just before its release.
+    VkCommandBuffer probe = VK_NULL_HANDLE;
+    if (impl.depth_probe && chain->plan.mode == Impl::Mode::kTwinDepth) {
+        impl.FinishProbe(swapchain, *chain);
+        probe = impl.ProbeCommands(*chain, image);
+    }
     // The game's rendering into the image is handed to the bridge's queue...
     const UINT64 written = impl.written_value + 1;
     std::uint64_t serial = 0;
-    if (impl.Submit(image.release, 0, written, serial) != VK_SUCCESS) {
+    const VkCommandBuffer handed[2] = {probe, image.release};
+    if (impl.Submit(probe ? std::span<const VkCommandBuffer>(handed, 2) : std::span<const VkCommandBuffer>(handed + 1, 1),
+                    0, written, serial) != VK_SUCCESS) {
         // Nothing was handed over: no copy, and the image stays the game's.
         ++chain->failed_submits;
         return false;
@@ -2264,6 +2584,10 @@ bool VulkanBridge::Released(XrSwapchain swapchain) {
     chain->last_serial = serial;
     Impl::Copy* copy = impl.ReadyCopy(*chain, image, index);
     if (!copy) {
+        if (probe) {
+            // The runtime's image as it stays.
+            impl.QueueRuntimeProbe(*chain, image, index, serial);
+        }
         // Every recording of the copy is still queued: the bridge's queue is
         // stalled. The runtime's image keeps what it had.
         ++chain->skipped_copies;
@@ -2277,6 +2601,10 @@ bool VulkanBridge::Released(XrSwapchain swapchain) {
     // ...which copies it into the runtime's image, ahead of anything else
     // queued on it for the release (Frame Generation's capture).
     const UINT64 done = impl.QueueCopy(*chain, image, *copy, written);
+    if (probe) {
+        // ...and the runtime's image just after the copy.
+        impl.QueueRuntimeProbe(*chain, image, index, serial);
+    }
     if (chain->hand_back && image.acquire) {
         // Back to the game's queue now, waiting for the copy (its signal is
         // queued above, so the wait always ends): whatever the game submits

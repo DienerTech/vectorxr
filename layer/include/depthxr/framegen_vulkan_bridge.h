@@ -126,6 +126,13 @@ class VulkanBridge {
     // VECTORXR_VULKAN_BRIDGE_DEBUG=1, also reports what the Direct3D 12 debug
     // layer found.
     void FrameEnded();
+    // Research, log only (VECTORXR_FRAMEGEN_DEPTH_BRIDGE_PROBE=1, read with
+    // Frame Generation's research switches at its Start): about once a second
+    // each depth swapchain's hand-over reads a grid of its twin on the game's
+    // queue just before the release, and its runtime image on the bridge's
+    // queue just after the copy, and logs both (nonzero texels, least and
+    // most). Off, nothing of it is made or submitted.
+    void SetDepthProbe(bool on);
 
     // Swapchain formats: a VkFormat's DXGI format for the runtime, and back
     // (0 when there is none).

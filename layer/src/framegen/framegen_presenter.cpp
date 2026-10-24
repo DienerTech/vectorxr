@@ -599,6 +599,9 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
     // views are at each generated frame's display time
     // (VECTORXR_FRAMEGEN_SYNTH_EYE_PROBE=1).
     eye_probe_ = ReadResearchSwitch("VECTORXR_FRAMEGEN_SYNTH_EYE_PROBE") == "1";
+    // Research (log only), for the session: the Vulkan bridge's depth probe
+    // (VECTORXR_FRAMEGEN_DEPTH_BRIDGE_PROBE=1; the layer hands it on).
+    depth_bridge_probe_ = ReadResearchSwitch("VECTORXR_FRAMEGEN_DEPTH_BRIDGE_PROBE") == "1";
     eye_probe_stopped_ = false;
     eye_probe_slow_calls_ = 0;
     eye_probe_pending_.clear();
@@ -3804,6 +3807,11 @@ void FrameGenPresenter::LogEngineSummaryLocked(double seconds) {
 bool FrameGenPresenter::ResearchFileInUse() const {
     std::scoped_lock lock(mutex_);
     return research_file_;
+}
+
+bool FrameGenPresenter::DepthBridgeProbe() const {
+    std::scoped_lock lock(mutex_);
+    return depth_bridge_probe_;
 }
 
 bool FrameGenPresenter::SupersedeOwnFramesLocked() {

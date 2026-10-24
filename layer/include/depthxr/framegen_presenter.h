@@ -482,6 +482,10 @@ class FrameGenPresenter {
     // %LOCALAPPDATA%\VectorXR\framegen-research.txt (ReadResearchSwitch): the
     // OSD says so, as such switches are easily left on.
     bool ResearchFileInUse() const;
+    // Research (VECTORXR_FRAMEGEN_DEPTH_BRIDGE_PROBE=1, read at Start with the
+    // session's other research switches): the Vulkan bridge's depth probe
+    // (VulkanBridge::SetDepthProbe), which the layer turns on.
+    bool DepthBridgeProbe() const;
     // Frame Generation captures the images of `swapchain` (a primary
     // projection's color or depth).
     bool CapturesFrom(XrSwapchain swapchain) const;
@@ -1779,6 +1783,7 @@ class FrameGenPresenter {
     // time (ProbeEyeLocate). Nothing it learns changes a frame. Stopped for
     // the session after kEyeProbeSlowStop slow calls.
     bool eye_probe_{false};
+    bool depth_bridge_probe_{false}; // DepthBridgeProbe
     bool eye_probe_stopped_{false};
     std::uint32_t eye_probe_slow_calls_{0}; // this session's
     // The runtime session's view configuration (SetRuntimeViewConfiguration):

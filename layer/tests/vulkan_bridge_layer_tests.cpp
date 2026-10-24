@@ -4961,9 +4961,11 @@ void DepthPathFrame(App& app, DepthWriter& writer, const Target& left, const Tar
 // image copy on a queue of another family too, ordered by semaphores. Each
 // path's frames with the runtime's images in turn (Virtual Desktop) and the
 // same image every frame (Pimax). Every path is reported before the case
-// fails on any.
+// fails on any. The depth probe (VECTORXR_FRAMEGEN_DEPTH_BRIDGE_PROBE=1) is on
+// throughout: what it reads must agree, and the runtime's depth must not change.
 void TestDepthWritePaths() {
     BeginCase("depth-write-paths");
+    SetEnv("VECTORXR_FRAMEGEN_DEPTH_BRIDGE_PROBE", "1");
     // Frame Generation does not engage: the runtime shows the game's own frames.
     Peer::SetFrameGenEngagement(1'000'000, std::chrono::hours(1));
     g_image_width = 1024;
@@ -5015,6 +5017,10 @@ void TestDepthWritePaths() {
             g_runtime.same_image = same_image;
         }
         for (const DepthPath& path : paths) {
+            if (&path == &paths[paths.size() / 2]) {
+                // The probe reads about once a second: a probe of this pass's later paths.
+                std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+            }
             std::array<DepthTally, 2> tally{};
             for (int i = 0; i < kFrames; ++i, ++frame) {
                 DepthPathFrame(app, writer, left, right, depth, path, frame);
@@ -5070,8 +5076,33 @@ void TestDepthWritePaths() {
     for (const Target* target : depth) {
         std::cout << "depth paths: " << Peer::Bridge().Describe(target->swapchain) << "\n";
     }
+    // The probe: on, and each read of it agreeing with the runtime (every
+    // path writes nonzero depth everywhere: all of its grid, in both).
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    DepthPathFrame(app, writer, left, right, depth, paths.front(), frame++);
+    DepthPathFrame(app, writer, left, right, depth, paths.front(), frame++);
+    const std::string log = Peer::Log();
+    std::size_t probes = 0;
+    std::size_t agreeing = 0;
+    for (std::size_t at = log.find("depth probe "); at != std::string::npos; at = log.find("depth probe ", at + 1)) {
+        const std::string line = log.substr(at, log.find('\n', at) - at);
+        if (!Contains(line, ": swapchain ")) continue;
+        std::cout << line << "\n";
+        ++probes;
+        agreeing += Contains(line, "(Vulkan, before the copy) nonzero=1024 ") &&
+                            Contains(line, "(Direct3D 12) nonzero=1024 ") && Contains(line, "same in both=1024.")
+                        ? 1
+                        : 0;
+    }
+    Check(Contains(log, "the depth probe is on (VECTORXR_FRAMEGEN_DEPTH_BRIDGE_PROBE=1, research)"),
+          "depth paths: the depth probe says it is on");
+    Check(probes >= 4, "depth paths: the depth probe read both eyes' depth at least twice (" + std::to_string(probes) +
+                           " reads)");
+    SetEnv("VECTORXR_FRAMEGEN_DEPTH_BRIDGE_PROBE", "");
     CheckValidation("depth paths");
     Check(all_arrive, "depth paths: every way of writing depth reaches the runtime's images texel for texel");
+    Check(agreeing == probes, "depth paths: every probe read found the game's depth in the twin and the runtime's image (" +
+                                  std::to_string(agreeing) + " of " + std::to_string(probes) + ")");
     writer.Destroy();
     {
         std::scoped_lock lock(g_runtime_mutex);
