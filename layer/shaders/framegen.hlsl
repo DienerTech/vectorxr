@@ -2283,20 +2283,25 @@ float Evidence(float near_error, float far_error) {
 // Evidence for `depth` at uv from `other`, an image the mapping
 // (MapToPrevious) takes uv into: the other eye, or the previous frame.
 // Zero where depth and "infinitely far" land within a texel of each other
-// or outside `other`.
+// or outside `other`. `flat`: zero on silhouettes too (FlatDepth at texel
+// `texel` of `depth_image`), tested after the mapping in a branch of its own
+// (HLSL's && and || evaluate both sides): between frames depth and far
+// mostly land within a texel, and its nine loads are the dearer test.
 float DepthEvidence(Texture2D<float4> own, Texture2D<float4> other, SamplerState linear_sampler, float2 uv, float depth,
-                    float2 size) {
+                    float2 size, bool flat, Texture2D<float4> depth_image, int2 texel) {
     float evidence = 0.0;
     float2 near_uv, far_uv;
     if (MapToPrevious(uv, depth, near_uv) && MapToPrevious(uv, FG_FAR_DEPTH, far_uv)) {
         const float2 apart = (near_uv - far_uv) * size;
         if (dot(apart, apart) >= 1.0) {
-            const float2 spacing = 1.0 / size;
-            const float2 step = normalize(apart) * spacing;
-            float reference[FG_CHECK_TAPS];
-            LoadPatch(own, linear_sampler, uv, spacing, reference);
-            evidence = Evidence(LineError(other, linear_sampler, near_uv, step, spacing, reference),
-                                LineError(other, linear_sampler, far_uv, step, spacing, reference));
+            [branch] if (!flat || FlatDepth(depth_image, texel, depth)) {
+                const float2 spacing = 1.0 / size;
+                const float2 step = normalize(apart) * spacing;
+                float reference[FG_CHECK_TAPS];
+                LoadPatch(own, linear_sampler, uv, spacing, reference);
+                evidence = Evidence(LineError(other, linear_sampler, near_uv, step, spacing, reference),
+                                    LineError(other, linear_sampler, far_uv, step, spacing, reference));
+            }
         }
     }
     return evidence;
@@ -2695,8 +2700,11 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     }
     const float depth = g_depth.Load(int3(id.xy, 0)).r;
     const float2 size = float2(g.size.xy);
+    // FlatDepth first here: in the other eye depth and far rarely land
+    // within a texel, and testing it after the mapping measured slower.
     g_evidence[id.xy] = depth > 0.0 && depth < FG_FAR_DEPTH && FlatDepth(g_depth, int2(id.xy), depth)
-                            ? DepthEvidence(g_own, g_other, g_linear, (float2(id.xy) + 0.5) / size, depth, size)
+                            ? DepthEvidence(g_own, g_other, g_linear, (float2(id.xy) + 0.5) / size, depth, size, false,
+                                            g_depth, int2(id.xy))
                             : 0.0;
 }
 #endif
@@ -2963,9 +2971,13 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint index
         const float2 size = float2(g.size.xy);
         const float2 uv = (float2(id.xy) + 0.5) / size;
         const float stereo = (g.options.x & FG_TRUST_STEREO) != 0u ? g_trust[id.xy] : 0.0;
-        const float motion = (g.options.x & FG_TRUST_MOTION) != 0u && FlatDepth(g_depth, int2(id.xy), depth)
-                                 ? DepthEvidence(g_newest, g_previous, g_linear, uv, depth, size)
-                                 : 0.0;
+        // FlatDepth after the mapping (DepthEvidence's `flat`); a branch, not
+        // a select: fxc folds a select into the weight's multiply, and the
+        // score's sum loses its mad (one rounding apart).
+        float motion = 0.0;
+        [branch] if ((g.options.x & FG_TRUST_MOTION) != 0u) {
+            motion = DepthEvidence(g_newest, g_previous, g_linear, uv, depth, size, true, g_depth, int2(id.xy));
+        }
         float carried = 0.0;
         float2 before_uv;
         if ((g.options.x & FG_TRUST_HISTORY) != 0u && MapToPrevious(uv, depth, before_uv)) {
