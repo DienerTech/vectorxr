@@ -4963,6 +4963,9 @@ void DepthPathFrame(App& app, DepthWriter& writer, const Target& left, const Tar
 // same image every frame (Pimax). Every path is reported before the case
 // fails on any. The depth probe (VECTORXR_FRAMEGEN_DEPTH_BRIDGE_PROBE=1) is on
 // throughout: what it reads must agree, and the runtime's depth must not change.
+// It lists a multisampled depth swapchain (private: never handed over), and
+// the depth swapchains are destroyed with its last reads still queued (Star
+// Citizen recreates its swapchains): the bridge waits for them and logs them.
 void TestDepthWritePaths() {
     BeginCase("depth-write-paths");
     SetEnv("VECTORXR_FRAMEGEN_DEPTH_BRIDGE_PROBE", "1");
@@ -4984,6 +4987,9 @@ void TestDepthWritePaths() {
     Target right_depth = MakeTarget(app, DepthInfo(VK_FORMAT_D32_SFLOAT, 1), "the right eye's depth");
     Check(!Peer::Bridge().Unmirrored(left_depth.swapchain) && !Peer::Bridge().Unmirrored(right_depth.swapchain),
           "depth paths: the depth swapchains are mirrored");
+    // Never used by a frame: the probe's "so far" lines list it.
+    Target private_depth = MakeTarget(app, DepthInfo(VK_FORMAT_D32_SFLOAT, 1, 4), "a multisampled depth swapchain");
+    Check(Peer::Bridge().Unmirrored(private_depth.swapchain), "depth paths: a multisampled depth swapchain is private");
     const std::array<const Target*, 2> depth{&left_depth, &right_depth};
     DepthWriter writer;
     writer.Make(game, g_image_width, g_image_height);
@@ -5081,23 +5087,70 @@ void TestDepthWritePaths() {
     std::this_thread::sleep_for(std::chrono::milliseconds(1100));
     DepthPathFrame(app, writer, left, right, depth, paths.front(), frame++);
     DepthPathFrame(app, writer, left, right, depth, paths.front(), frame++);
+    // The probe's reads logged so far (a line each slice).
+    const auto probe_reads = [] {
+        const std::string log = Peer::Log();
+        std::vector<std::string> lines;
+        for (std::size_t at = log.find("depth probe "); at != std::string::npos; at = log.find("depth probe ", at + 1)) {
+            const std::string line = log.substr(at, log.find('\n', at) - at);
+            if (Contains(line, ": swapchain ")) lines.push_back(line);
+        }
+        return lines;
+    };
+    const std::size_t before_destroy = probe_reads().size();
+    // A probe due at each eye's next release, then each depth swapchain
+    // destroyed before any frame ends: its reads are still queued.
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    CheckVk(g_vk.vkQueueWaitIdle(game.queue), "the game's queue idles");
+    if (game.other_queue) CheckVk(g_vk.vkQueueWaitIdle(game.other_queue), "the game's other queue idles");
+    for (int eye = 0; eye < 2; ++eye) {
+        const std::uint32_t index = Acquire(app, *depth[eye]);
+        writer.Write(paths.front(), eye, reinterpret_cast<VkImage>(depth[eye]->images[index]), frame);
+        Release(app, *depth[eye]);
+    }
+    ++frame;
+    for (Target* target : {&left_depth, &right_depth, &private_depth}) {
+        const XrSwapchain swapchain = target->swapchain;
+        Check(app.api.destroy_swapchain(swapchain) == XR_SUCCESS && !g_runtime.destroyed.empty() &&
+                  g_runtime.destroyed.back() == swapchain,
+              "depth paths: a depth swapchain is destroyed, and the runtime's with it");
+        target->swapchain = XR_NULL_HANDLE;
+    }
     const std::string log = Peer::Log();
     std::size_t probes = 0;
     std::size_t agreeing = 0;
-    for (std::size_t at = log.find("depth probe "); at != std::string::npos; at = log.find("depth probe ", at + 1)) {
-        const std::string line = log.substr(at, log.find('\n', at) - at);
-        if (!Contains(line, ": swapchain ")) continue;
+    for (const std::string& line : probe_reads()) {
         std::cout << line << "\n";
         ++probes;
         agreeing += Contains(line, "(Vulkan, before the copy) nonzero=1024 ") &&
-                            Contains(line, "(Direct3D 12) nonzero=1024 ") && Contains(line, "same in both=1024.")
+                            Contains(line, "; the runtime's image after the copy (Direct3D 12) nonzero=1024 ") &&
+                            Contains(line, "same in both=1024.")
                         ? 1
                         : 0;
     }
     Check(Contains(log, "the depth probe is on (VECTORXR_FRAMEGEN_DEPTH_BRIDGE_PROBE=1, research)"),
           "depth paths: the depth probe says it is on");
-    Check(probes >= 4, "depth paths: the depth probe read both eyes' depth at least twice (" + std::to_string(probes) +
-                           " reads)");
+    Check(probes >= 6, "depth paths: the depth probe read both eyes' depth at least three times (" +
+                           std::to_string(probes) + " reads)");
+    Check(probes == before_destroy + 2, "depth paths: the probe reads still queued when the depth swapchains were "
+                                        "destroyed were waited for and logged (" +
+                                            std::to_string(probes - before_destroy) + " of 2)");
+    Check(!Contains(log, "kept until the session ends") && !Contains(log, "is kept until its session ends"),
+          "depth paths: no destroyed depth swapchain is kept");
+    std::size_t private_listed = 0;
+    std::size_t destroyed = 0;
+    for (std::size_t at = log.find("depth probe: swapchain "); at != std::string::npos;
+         at = log.find("depth probe: swapchain ", at + 1)) {
+        const std::string line = log.substr(at, log.find('\n', at) - at);
+        private_listed += Contains(line, " so far (mode=private-depth, ") &&
+                                  Contains(line, "private because it is multisampled, probes=0): it stays the game's own")
+                              ? 1
+                              : 0;
+        destroyed += Contains(line, " destroyed (mode=") ? 1 : 0;
+    }
+    Check(private_listed >= 1, "depth paths: the probe lists the private depth swapchain");
+    Check(destroyed == 3, "depth paths: the probe logs each depth swapchain destroyed (" + std::to_string(destroyed) +
+                              " of 3)");
     SetEnv("VECTORXR_FRAMEGEN_DEPTH_BRIDGE_PROBE", "");
     CheckValidation("depth paths");
     Check(all_arrive, "depth paths: every way of writing depth reaches the runtime's images texel for texel");

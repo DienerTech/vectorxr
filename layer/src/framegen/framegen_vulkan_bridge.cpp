@@ -352,6 +352,10 @@ struct VulkanBridge::Impl {
         ComPtr<ID3D12GraphicsCommandList> list;
         bool unavailable{false}; // its format is not probed, or making it failed (reported once)
         bool pending{false};
+        // Whether the pending probe's release was copied into the runtime's
+        // image; else every recording of the copy was still queued (the
+        // bridge's queue stalled) and the runtime's image was read as it was.
+        bool copied{true};
         std::uint32_t image{0};
         std::uint64_t serial{0}; // the game's queue's submission reading the twin
         UINT64 idle{0};          // the bridge's queue's progress after reading the runtime's image
@@ -1635,8 +1639,9 @@ struct VulkanBridge::Impl {
     }
 
     // The runtime image's slices read on the bridge's queue after `image`'s
-    // copy (holding `mutex`); the probe is pending from here on.
-    void QueueRuntimeProbe(Swapchain& chain, Image& image, std::uint32_t index, std::uint64_t serial) {
+    // copy, or with `copied` false, as it stays without one (holding
+    // `mutex`); the probe is pending from here on.
+    void QueueRuntimeProbe(Swapchain& chain, Image& image, std::uint32_t index, std::uint64_t serial, bool copied) {
         DepthProbe& probe = chain.probe;
         if (FAILED(probe.allocator->Reset()) || FAILED(probe.list->Reset(probe.allocator.Get(), nullptr))) {
             return;
@@ -1665,6 +1670,7 @@ struct VulkanBridge::Impl {
         probe.idle = MarkIdle();
         probe.serial = serial;
         probe.image = index;
+        probe.copied = copied;
         probe.pending = true;
     }
 
@@ -1718,7 +1724,10 @@ struct VulkanBridge::Impl {
                    << plan.width << "x" << plan.height << " grid of " << kProbePoints
                    << ": the twin at the hand-over (Vulkan, before the copy) nonzero=" << twin_nonzero
                    << " min=" << number(twin_min) << " max=" << number(twin_max)
-                   << "; the runtime's image after the copy (Direct3D 12) nonzero=" << runtime_nonzero
+                   << (probe.copied ? "; the runtime's image after the copy (Direct3D 12) nonzero="
+                                    : "; no copy (the bridge's queue is stalled): the runtime's image as it stayed "
+                                      "(Direct3D 12) nonzero=")
+                   << runtime_nonzero
                    << " min=" << number(runtime_min) << " max=" << number(runtime_max) << "; same in both=" << same
                    << ".";
             Info(stream.str());
@@ -2236,12 +2245,17 @@ void VulkanBridge::FrameEnded() {
     if (impl_->depth_probe) {
         const auto now = std::chrono::steady_clock::now();
         for (auto& [swapchain, chain] : impl_->swapchains) {
-            if (chain.plan.mode != Impl::Mode::kTwinDepth) continue;
-            impl_->FinishProbe(swapchain, chain);
+            // A private depth swapchain (multisampled, or its runtime images
+            // no depth targets) is never handed over: its runtime images keep
+            // their zero initialisation. It is never probed, but listed.
+            const bool twin = chain.plan.mode == Impl::Mode::kTwinDepth;
+            if (!twin && chain.plan.mode != Impl::Mode::kPrivate) continue;
+            if (twin) impl_->FinishProbe(swapchain, chain);
             if (now >= chain.probe.next_describe) {
                 chain.probe.next_describe = now + kProbeDescribeInterval;
                 impl_->Info("depth probe: swapchain " + Hex(reinterpret_cast<std::uintptr_t>(swapchain)) + " so far (" +
-                            impl_->Describe(chain) + ", probes=" + std::to_string(chain.probe.probes) + ").");
+                            impl_->Describe(chain) + ", probes=" + std::to_string(chain.probe.probes) + ")" +
+                            (twin ? "." : ": it stays the game's own, so its runtime images are never written."));
             }
         }
     }
@@ -2585,8 +2599,8 @@ bool VulkanBridge::Released(XrSwapchain swapchain) {
     Impl::Copy* copy = impl.ReadyCopy(*chain, image, index);
     if (!copy) {
         if (probe) {
-            // The runtime's image as it stays.
-            impl.QueueRuntimeProbe(*chain, image, index, serial);
+            // The runtime's image as it stays (logged as no copy).
+            impl.QueueRuntimeProbe(*chain, image, index, serial, false);
         }
         // Every recording of the copy is still queued: the bridge's queue is
         // stalled. The runtime's image keeps what it had.
@@ -2603,7 +2617,7 @@ bool VulkanBridge::Released(XrSwapchain swapchain) {
     const UINT64 done = impl.QueueCopy(*chain, image, *copy, written);
     if (probe) {
         // ...and the runtime's image just after the copy.
-        impl.QueueRuntimeProbe(*chain, image, index, serial);
+        impl.QueueRuntimeProbe(*chain, image, index, serial, true);
     }
     if (chain->hand_back && image.acquire) {
         // Back to the game's queue now, waiting for the copy (its signal is
@@ -2811,6 +2825,7 @@ bool VulkanBridge::RemoveSwapchain(XrSwapchain swapchain) {
         return true;
     }
     UINT64 last_done = 0;
+    UINT64 probe_idle = 0;
     std::uint64_t last_serial = 0;
     {
         std::scoped_lock lock(impl_->mutex);
@@ -2820,22 +2835,38 @@ bool VulkanBridge::RemoveSwapchain(XrSwapchain swapchain) {
         }
         last_done = chain->last_done;
         last_serial = chain->last_serial;
+        // The depth probe's read of the runtime's image runs on the bridge's
+        // queue after the copy's "done" signal (or without a copy, the queue
+        // stalled): its readback, list and allocator go with the swapchain.
+        probe_idle = chain->probe.idle;
     }
     const bool copied = WaitFence(impl_->done.Get(), last_done, kRetireWaitMs);
-    const bool submitted = copied && impl_->WaitSubmissions(last_serial, kRetireWaitMs);
+    const bool probed = copied && WaitFence(impl_->idle.Get(), probe_idle, kRetireWaitMs);
+    const bool submitted = probed && impl_->WaitSubmissions(last_serial, kRetireWaitMs);
     std::scoped_lock lock(impl_->mutex);
     const auto it = impl_->swapchains.find(swapchain);
     if (it == impl_->swapchains.end()) {
         return true;
     }
-    if (copied && submitted) {
-        impl_->DestroyVulkan(it->second);
+    if (submitted) {
+        Impl::Swapchain& chain = it->second;
+        if (chain.probe.pending) {
+            // Both of its reads are done: the last probe is logged.
+            impl_->FinishProbe(swapchain, chain);
+        }
+        if (impl_->depth_probe && (chain.plan.mode == Impl::Mode::kTwinDepth || chain.plan.mode == Impl::Mode::kPrivate)) {
+            impl_->Info("depth probe: swapchain " + Hex(reinterpret_cast<std::uintptr_t>(swapchain)) + " destroyed (" +
+                        impl_->Describe(chain) + ", probes=" + std::to_string(chain.probe.probes) + ").");
+        }
+        impl_->DestroyVulkan(chain);
         impl_->swapchains.erase(it);
         return true;
     }
-    impl_->Log(copied ? "the game's queue did not finish the bridge's submissions for a destroyed swapchain; it is "
-                        "kept until the session ends."
-                      : "copies into a destroyed swapchain did not finish; it is kept until the session ends.");
+    impl_->Log(!copied   ? "copies into a destroyed swapchain did not finish; it is kept until the session ends."
+               : !probed ? "the depth probe's read of a destroyed swapchain's runtime image did not finish; it is kept "
+                           "until the session ends."
+                         : "the game's queue did not finish the bridge's submissions for a destroyed swapchain; it is "
+                           "kept until the session ends.");
     impl_->retired.push_back(std::move(it->second));
     impl_->swapchains.erase(it);
     return false;
