@@ -24,6 +24,7 @@ enum class OsdText {
     PlusPosition, PlusNudge, SnapReturning, SnapEntering, SnapActive, SnapOff, SnapOffNudge, StackedSuffix,
     RestartTurboExperiments, RestartQuadviews, RestartFrameGeneration,
     DiagnosticsDebugLog, DiagnosticsFlowView, DiagnosticsConfidenceView, DiagnosticsTintView,
+    FlowHardware, FlowShader, DiagnosticsResearch,
     FpsTarget, CpuBound, GpuBound, CpuThread, CpuPipelined, CpuTurboPaces, CpuWaiting, GpuBusy, GpuGame,
     GpuNoCounters, GpuReading, VramOf, VramUnknown,
     Count

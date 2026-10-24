@@ -933,6 +933,8 @@ struct FrameGenSettings {
     // "shader" or "hardware" (NVIDIA's optical flow accelerator, experimental).
     #[serde(default = "default_framegen_motion_estimation")]
     motion_estimation: String,
+    #[serde(default = "default_framegen_interpolate_flow")]
+    interpolate_flow: String,
     // "auto", "dynamic", "2x", "3x" or "4x": headset frames per real application frame.
     #[serde(default = "default_framegen_frame_multiplier")]
     frame_multiplier: String,
@@ -945,12 +947,15 @@ struct FrameGenSettings {
     extend_head_prediction: bool,
 }
 
+fn default_framegen_interpolate_flow() -> String { "auto".to_owned() }
+
 impl Default for FrameGenSettings {
     fn default() -> Self {
         Self {
             synthesis_mode: default_framegen_synthesis_mode(),
             flow_quality: default_framegen_flow_quality(),
             motion_estimation: default_framegen_motion_estimation(),
+            interpolate_flow: default_framegen_interpolate_flow(),
             frame_multiplier: default_framegen_frame_multiplier(),
             artifact_suppression: default_framegen_artifact_suppression(),
             motion_limit_percent: default_framegen_motion_limit_percent(),
@@ -1253,6 +1258,12 @@ struct RuntimeState {
     // "unusable"; empty before generated frames and from older layers.
     #[serde(default)]
     framegen_depth: String,
+    #[serde(default)]
+    framegen_flow: String,
+    #[serde(default)]
+    framegen_flow_mode: String,
+    #[serde(default)]
+    framegen_flow_reason: String,
     #[serde(default)]
     quadviews_diagnostic_visualization: bool,
 }
@@ -3416,13 +3427,13 @@ mod tests {
             "toggleBinding": { "type": "keyboard", "chord": ["Ctrl", "F7"] },
             "diagnosticView": "tint",
             "defaults": {
-                "synthesisMode": "extrapolate", "flowQuality": "quality", "motionEstimation": "hardware",
+                "synthesisMode": "extrapolate", "flowQuality": "quality", "motionEstimation": "hardware", "interpolateFlow": "auto",
                 "frameMultiplier": "4x", "artifactSuppression": 80, "motionLimitPercent": 4
             },
             "profiles": [{
                 "name": "DCS", "enabled": false, "applicationIds": ["dcs"],
                 "settings": {
-                    "synthesisMode": "interpolate", "flowQuality": "performance", "motionEstimation": "shader",
+                    "synthesisMode": "interpolate", "flowQuality": "performance", "motionEstimation": "shader", "interpolateFlow": "shader",
                     "frameMultiplier": "3x", "artifactSuppression": 0, "motionLimitPercent": 25,
                     "extendHeadPrediction": true
                 }
@@ -3440,6 +3451,7 @@ mod tests {
         .unwrap();
         assert_eq!(older.frame_multiplier, "dynamic");
         assert_eq!(older.motion_estimation, "shader");
+        assert_eq!(older.interpolate_flow, "auto");
         assert_eq!(serde_json::to_value(older).unwrap()["frameMultiplier"], "dynamic");
         assert_eq!(
             serde_json::to_value(super::FrameGenSettings::default()).unwrap()["frameMultiplier"],
@@ -3528,6 +3540,9 @@ mod tests {
         value["state"]["framegenState"] = "unavailable".into();
         value["state"]["framegenReason"] = "Runtime refresh rate unknown".into();
         value["state"]["framegenDepth"] = "empty".into();
+        value["state"]["framegenFlow"] = "shader".into();
+        value["state"]["framegenFlowMode"] = "auto".into();
+        value["state"]["framegenFlowReason"] = "hardware late".into();
         value["quadviewsDimensions"] = serde_json::json!([{"width": 1000, "height": 900, "allocatedWidth": 1200, "allocatedHeight": 1000}]);
         let current: super::RuntimeStatusDocument = serde_json::from_value(value).unwrap();
         assert_eq!(current.state.turbo_state, "recovery-disabled");
@@ -3538,6 +3553,10 @@ mod tests {
         assert!(old.state.framegen_state.is_empty() && old.state.framegen_reason.is_empty());
         assert_eq!(current.state.framegen_depth, "empty");
         assert!(old.state.framegen_depth.is_empty());
+        assert_eq!(current.state.framegen_flow, "shader");
+        assert_eq!(current.state.framegen_flow_mode, "auto");
+        assert_eq!(current.state.framegen_flow_reason, "hardware late");
+        assert!(old.state.framegen_flow.is_empty());
         assert_eq!(current.quadviews_dimensions[0].allocated_width, 1200);
     }
 

@@ -513,6 +513,25 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
     user_enabled_ = true;
     gpu_stalled_ = false; // the last session's stalled work went with its swapchains
     started_at_ = Clock::now();
+    interpolate_flow_env_.reset();
+    if (const char* hardware = std::getenv("VECTORXR_FRAMEGEN_INTERPOLATE_HARDWARE");
+        hardware && std::string(hardware) == "1") {
+        interpolate_flow_env_ = FrameGenInterpolateFlow::kHardware;
+    }
+    interpolate_flow_selected_.reset();
+    interpolate_flow_hardware_selected_ = false;
+    interpolate_flow_hardware_ = true;
+    interpolate_flow_available_.reset();
+    interpolate_flow_active_.clear();
+    interpolate_flow_reason_.clear();
+    interpolate_flow_window_.reset();
+    interpolate_flow_bad_windows_ = 0;
+    interpolate_flow_probing_ = false;
+    interpolate_flow_probe_started_ = {};
+    interpolate_flow_probe_due_ = {};
+    interpolate_flow_backoff_ = interpolate_flow_policy_.shader_hold;
+    interpolate_flow_switches_ = interpolate_flow_probes_ = interpolate_flow_fallbacks_ = 0;
+    interpolate_flow_delay_started_.reset();
     // The first summary's window starts with the session: without a start,
     // its rates were over no time and read 0.0 (in 14 of 14 sessions).
     last_summary_ = started_at_;
@@ -538,6 +557,25 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
     // the backend's among them: this session's are told from here.
     ResetResearchFileSwitches();
     const std::uint64_t research_reads = ResearchFileReads();
+    // A positive-control experiment: accept completed hardware vectors late
+    // for a finite period, then normally again. GPU work and its fences run
+    // unchanged. Inert unless explicitly set; never a GPU stall experiment.
+    const auto delay_ms = [](const std::optional<std::string>& value, long long fallback, long long most) {
+        if (!value || value->empty()) return std::chrono::milliseconds(fallback);
+        char* end = nullptr;
+        const long long parsed = std::strtoll(value->c_str(), &end, 10);
+        return std::chrono::milliseconds(end && !*end && parsed >= 0 ? std::min(parsed, most) : fallback);
+    };
+    interpolate_flow_delay_ = delay_ms(ReadResearchSwitch("VECTORXR_FRAMEGEN_INTERPOLATE_DELAY_MS"), 0, 1000);
+    interpolate_flow_delay_for_ =
+        delay_ms(ReadResearchSwitch("VECTORXR_FRAMEGEN_INTERPOLATE_DELAY_FOR_MS"), 25000, 600000);
+    if (logger_ && interpolate_flow_delay_.count()) {
+        logger_->Info("Frame Generation Interpolate flow research: accepting completed hardware vectors " +
+                      std::to_string(interpolate_flow_delay_.count()) + " ms late for the first " +
+                      std::to_string(interpolate_flow_delay_for_.count()) +
+                      " ms from the first hardware Interpolate analysis "
+                      "(VECTORXR_FRAMEGEN_INTERPOLATE_DELAY_MS/_DELAY_FOR_MS); GPU work is unchanged.");
+    }
     engine_requested_ =
         ParseFrameGenEngineMode(ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_MV").value_or("").c_str());
     // A game whose GPU device was removed within 2 s of its motion vectors
@@ -1605,6 +1643,193 @@ void FrameGenPresenter::SetInterpolateOnShaders(bool on) {
     logged_interpolate_on_hardware_ = false;
 }
 
+void FrameGenPresenter::SetInterpolateFlowPolicy(const FrameGenInterpolateFlowPolicy& policy) {
+    std::scoped_lock lock(mutex_);
+    interpolate_flow_policy_ = policy;
+    interpolate_flow_policy_.window = std::max(policy.window, std::chrono::milliseconds(1));
+    interpolate_flow_policy_.probe = std::max(policy.probe, std::chrono::milliseconds(1));
+    interpolate_flow_policy_.shader_hold = std::max(policy.shader_hold, std::chrono::milliseconds(1));
+    interpolate_flow_policy_.hold_max = std::max(policy.hold_max, interpolate_flow_policy_.shader_hold);
+    interpolate_flow_policy_.bad_windows = std::max(1u, policy.bad_windows);
+    interpolate_flow_backoff_ = interpolate_flow_policy_.shader_hold;
+    interpolate_flow_window_.reset();
+    interpolate_flow_bad_windows_ = 0;
+}
+
+Clock::time_point FrameGenPresenter::InterpolateFlowDelayUntilLocked(Clock::time_point now,
+                                                                     FrameGenSynthesisMode mode,
+                                                                     bool hardware_active) {
+    if (!hardware_active || mode != FrameGenSynthesisMode::kInterpolate ||
+        !interpolate_flow_delay_.count() || !interpolate_flow_delay_for_.count()) {
+        return {};
+    }
+    // Driver/session setup can take seconds. It is not part of the
+    // experiment, which starts only once hardware vectors exist to delay.
+    if (!interpolate_flow_delay_started_) interpolate_flow_delay_started_ = now;
+    return now - *interpolate_flow_delay_started_ < interpolate_flow_delay_for_ ? now + interpolate_flow_delay_
+                                                                             : Clock::time_point{};
+}
+
+void FrameGenPresenter::ResetInterpolateFlowWindowLocked(Clock::time_point now) {
+    interpolate_flow_window_ = InterpolateFlowWindow{now, totals_};
+}
+
+void FrameGenPresenter::SwitchInterpolateFlowLocked(bool hardware, Clock::time_point now,
+                                                  const std::string& reason) {
+    const bool changed = hardware != interpolate_flow_hardware_;
+    const char* before = interpolate_flow_hardware_ ? "hardware" : "shader";
+    interpolate_flow_hardware_ = hardware;
+    interpolate_flow_reason_ = reason;
+    if (changed) {
+        ++interpolate_flow_switches_;
+        // The next real frame uses this source. Existing analyzed frames
+        // retain their source and are presented normally; no GPU reset.
+        analysis_lag_ms_ = 0.0;
+        if (logger_) {
+            logger_->Info(std::string("Frame Generation Interpolate flow switch: ") + before + " -> " +
+                          (hardware ? "hardware" : "shader") + " (" + reason + ").");
+        }
+    }
+    interpolate_flow_bad_windows_ = 0;
+    ResetInterpolateFlowWindowLocked(now);
+}
+
+bool FrameGenPresenter::UpdateInterpolateFlowLocked(Clock::time_point now, FrameGenSynthesisMode mode,
+                                                   bool hardware_selected) {
+    if (mode != FrameGenSynthesisMode::kInterpolate) {
+        // Another synthesis mode has a different deadline and benefit. Its
+        // counters and elapsed time must not judge an Interpolate probe.
+        interpolate_flow_selected_.reset();
+        interpolate_flow_window_.reset();
+        interpolate_flow_bad_windows_ = 0;
+        interpolate_flow_probing_ = false;
+        interpolate_flow_probe_due_ = {};
+        interpolate_flow_backoff_ = interpolate_flow_policy_.shader_hold;
+        return hardware_selected;
+    }
+    const FrameGenInterpolateFlow selected =
+        interpolate_on_shaders_ && settings_.multiplier == FrameGenMultiplier::kDynamic
+            ? FrameGenInterpolateFlow::kShader
+            : interpolate_flow_env_.value_or(settings_.interpolate_flow);
+    // Never perturb a multiplier probe, including a live user selection.
+    // Its measurements must all use one motion source. Afterwards the next
+    // real frame applies the setting and starts a fresh evidence window.
+    if (probing_ || dynamic_probing_) {
+        interpolate_flow_window_.reset();
+        interpolate_flow_bad_windows_ = 0;
+        return interpolate_flow_selected_ ? interpolate_flow_hardware_ : hardware_selected;
+    }
+    const bool available = !interpolate_flow_available_ || *interpolate_flow_available_;
+    const bool changed = !interpolate_flow_selected_ || *interpolate_flow_selected_ != selected ||
+                         interpolate_flow_hardware_selected_ != hardware_selected;
+    if (changed) {
+        interpolate_flow_selected_ = selected;
+        interpolate_flow_hardware_selected_ = hardware_selected;
+        interpolate_flow_probing_ = false;
+        interpolate_flow_backoff_ = interpolate_flow_policy_.shader_hold;
+        interpolate_flow_probe_due_ = {};
+        const bool hardware = hardware_selected && selected != FrameGenInterpolateFlow::kShader && available;
+        SwitchInterpolateFlowLocked(hardware, now,
+                                    !hardware_selected ? "shader motion estimation selected"
+                                    : !available ? "hardware unavailable; shader flow"
+                                    : selected == FrameGenInterpolateFlow::kShader ? "shader selected"
+                                    : selected == FrameGenInterpolateFlow::kHardware ? "hardware selected"
+                                                                                  : "auto starts on hardware");
+    }
+    if (!hardware_selected || selected == FrameGenInterpolateFlow::kShader) return false;
+    if (!available) {
+        interpolate_flow_probing_ = false;
+        SwitchInterpolateFlowLocked(false, now, "hardware unavailable; shader flow");
+        return false;
+    }
+    if (selected == FrameGenInterpolateFlow::kHardware) {
+        SwitchInterpolateFlowLocked(true, now, "hardware selected");
+        return true;
+    }
+    // A request on an unsupported GPU must not be reported as hardware or
+    // start judging an automatic window: the backend answers after Execute.
+    if (!interpolate_flow_available_) return interpolate_flow_hardware_;
+    const auto& policy = interpolate_flow_policy_;
+    if (!interpolate_flow_hardware_) {
+        if (interpolate_flow_probe_due_ != Clock::time_point{} && now >= interpolate_flow_probe_due_) {
+            interpolate_flow_probing_ = true;
+            interpolate_flow_probe_started_ = now;
+            ++interpolate_flow_probes_;
+            SwitchInterpolateFlowLocked(true, now, "auto hardware probe after shader hold");
+        }
+        return interpolate_flow_hardware_;
+    }
+    if (!interpolate_flow_window_) ResetInterpolateFlowWindowLocked(now);
+    const auto& start = *interpolate_flow_window_;
+    // Pauses, loading/non-rendered refreshes and presenter restarts are not
+    // hardware-flow evidence. Do not count a hitch window across them.
+    if (totals_.pauses != start.totals.pauses || totals_.non_renderable != start.totals.non_renderable ||
+        totals_.unrendered != start.totals.unrendered || totals_.restarts != start.totals.restarts) {
+        interpolate_flow_bad_windows_ = 0;
+        if (interpolate_flow_probing_) interpolate_flow_probe_started_ = now;
+        ResetInterpolateFlowWindowLocked(now);
+        return true;
+    }
+    const auto length = interpolate_flow_probing_ ? policy.probe : policy.window;
+    if (now - start.start < length) return true;
+    const double seconds = std::chrono::duration<double>(now - start.start).count();
+    const auto delta = [&](std::uint64_t Totals::*field) { return totals_.*field - start.totals.*field; };
+    const auto generated = delta(&Totals::generated_distinct);
+    const auto stale = delta(&Totals::stale_motion);
+    const auto motion_outputs = delta(&Totals::motion_outputs);
+    // Both parts of the summary's unready=a/b matter: a real frame not
+    // captured yet, and a moved frame shown as a copy without ready motion.
+    const auto unready = delta(&Totals::unready) + delta(&Totals::unmeasured);
+    const auto timed = delta(&Totals::hardware_timed);
+    const auto late = delta(&Totals::hardware_late);
+    const double lag_ms = static_cast<double>(delta(&Totals::hardware_lag_ns)) / 1e6;
+    const bool stale_bad = motion_outputs >= policy.min_generated &&
+                           static_cast<double>(stale) > policy.stale_share * motion_outputs;
+    const bool unready_bad = seconds > 0.0 && static_cast<double>(unready) * 30.0 > policy.unready_per_30s * seconds;
+    const bool hardware_bad = timed >= policy.min_hardware_samples &&
+                              static_cast<double>(late) > policy.hardware_late_share * timed;
+    const bool evidence = generated || stale || unready || timed;
+    const bool bad = stale_bad || unready_bad || hardware_bad;
+    const std::string why = stale_bad ? "stale motion " +
+                                           Number(100.0 * stale / std::max<std::uint64_t>(1, motion_outputs), 1) +
+                                           "% of motion outputs (" + std::to_string(stale) + "/" +
+                                           std::to_string(motion_outputs) + ")"
+                            : unready_bad ? "unready " + Number(30.0 * unready / seconds, 1) + " per 30 s"
+                            : "hardware late " + Number(100.0 * late / std::max<std::uint64_t>(1, timed), 1) +
+                                  "% (" + Number(late ? lag_ms / late : 0.0, 1) + " ms past first in-between deadline)";
+    if (!evidence) {
+        // No generated work is not a successful probe. Wait for a complete
+        // active window rather than declaring recovery during a pause.
+        interpolate_flow_bad_windows_ = 0;
+        ResetInterpolateFlowWindowLocked(now);
+        return true;
+    }
+    interpolate_flow_bad_windows_ = bad ? interpolate_flow_bad_windows_ + 1 : 0;
+    if (bad && (interpolate_flow_probing_ || interpolate_flow_bad_windows_ >= policy.bad_windows)) {
+        const bool failed_probe = interpolate_flow_probing_;
+        interpolate_flow_probing_ = false;
+        ++interpolate_flow_fallbacks_;
+        if (failed_probe) {
+            interpolate_flow_backoff_ = std::min(interpolate_flow_backoff_ * 2, policy.hold_max);
+        }
+        interpolate_flow_probe_due_ = now + interpolate_flow_backoff_;
+        SwitchInterpolateFlowLocked(false, now,
+                                    std::string(failed_probe ? "auto hardware probe failed: " : "auto fallback: ") +
+                                        why + "; shader hold " +
+                                        Number(std::chrono::duration<double>(interpolate_flow_backoff_).count(), 0) + " s");
+        return false;
+    }
+    const bool enough_to_recover = generated >= policy.min_generated || timed >= policy.min_hardware_samples;
+    if (interpolate_flow_probing_ && !bad && enough_to_recover) {
+        interpolate_flow_probing_ = false;
+        interpolate_flow_backoff_ = policy.shader_hold;
+        interpolate_flow_reason_ = "auto hardware probe recovered; healthy window";
+        if (logger_) logger_->Info("Frame Generation Interpolate flow probe recovered: hardware (healthy window).");
+    }
+    ResetInterpolateFlowWindowLocked(now);
+    return true;
+}
+
 void FrameGenPresenter::SetEngagementPolicy(std::uint32_t steady_frames, std::chrono::milliseconds minimum_session_age) {
     std::scoped_lock lock(mutex_);
     engage_streak_frames_ = steady_frames;
@@ -1670,6 +1895,12 @@ bool FrameGenPresenter::ResetFrames() {
     presenter_frame_open_ = false;
     frames_.clear();
     healthy_streak_ = 0;
+    interpolate_flow_selected_.reset();
+    interpolate_flow_window_.reset();
+    interpolate_flow_bad_windows_ = 0;
+    interpolate_flow_probing_ = false;
+    interpolate_flow_probe_due_ = {};
+    interpolate_flow_backoff_ = interpolate_flow_policy_.shader_hold;
     InvalidateContinuityLocked();
     if (state_ == FrameGenState::kActive) {
         SetStateLocked(IdleStateLocked(), "");
@@ -5713,9 +5944,9 @@ std::string FrameGenPresenter::EyeProbeTextLocked() const {
 void FrameGenPresenter::NoteGpuTimingLocked(std::uint64_t submission, const PendingFrame& frame,
                                             const std::optional<FrameGenGpuWindow>& window,
                                             const std::vector<FrameGenAnalysisTiming>& timings,
-                                            Clock::time_point capture_pending_from) {
+                                            Clock::time_point capture_pending_from, bool hardware_flow) {
     if (submission && frame.real_due != Clock::time_point{} && frame.generated_due != Clock::time_point{}) {
-        gpu_due_.push_back({submission, frame.real_due, frame.generated_due, capture_pending_from});
+        gpu_due_.push_back({submission, frame.real_due, frame.generated_due, capture_pending_from, hardware_flow});
         while (gpu_due_.size() > 16) {
             gpu_due_.pop_front();
         }
@@ -5753,6 +5984,17 @@ void FrameGenPresenter::NoteGpuTimingLocked(std::uint64_t submission, const Pend
         if (timing.end != Clock::time_point{}) {
             ++totals_.analyses_timed;
             totals_.analyses_late += timing.end > due->generated_due ? 1 : 0;
+            if (due->hardware_flow && timing.hardware_start != Clock::time_point{} &&
+                timing.hardware_end != Clock::time_point{}) {
+                ++totals_.hardware_timed;
+                // Attribute lateness to the optical-flow work itself. A
+                // shader pass after timely hardware is not hardware lag.
+                if (timing.hardware_end > due->generated_due + interpolate_flow_policy_.hardware_grace) {
+                    ++totals_.hardware_late;
+                    totals_.hardware_lag_ns += static_cast<std::uint64_t>(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(timing.hardware_end - due->generated_due).count());
+                }
+            }
         }
     }
     if (!window) {
@@ -5800,33 +6042,10 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         tuning.spare = frame.spare;
         tuning.quality = settings_.flow_quality;
         tuning.hardware_flow = settings_.motion_estimation == FrameGenMotionEstimation::kHardware;
-        // Interpolating in Dynamic, the frames between real frames need the
-        // motion within a refresh of the newer frame, sooner than the
-        // hardware delivers it beside the game's rendering. At a fixed or
-        // automatic rate the game is held to every Nth refresh, which leaves
-        // the hardware that time (experimental, 2026-10-14).
-        if (tuning.hardware_flow && mode == FrameGenSynthesisMode::kInterpolate) {
-            if (interpolate_on_shaders_ && settings_.multiplier == FrameGenMultiplier::kDynamic) {
-                tuning.hardware_flow = false;
-                if (logger_ && !logged_interpolate_on_shaders_) {
-                    logged_interpolate_on_shaders_ = true;
-                    logger_->Info("Frame Generation measures motion on the shader cores while interpolating in "
-                                  "Dynamic, though NVIDIA's optical flow hardware is chosen: beside the game's "
-                                  "rendering the hardware's vectors come too late for the frames between real frames. "
-                                  "A fixed or Auto frame rate, or Extrapolate, uses the hardware.");
-                }
-            } else if (logger_ && !logged_interpolate_on_hardware_) {
-                // Asked for: whether the hardware takes it is the backend's
-                // own line (optical flow hardware active, or why not).
-                logged_interpolate_on_hardware_ = true;
-                logger_->Info(std::string("Frame Generation asks NVIDIA's optical flow hardware for the motion while "
-                                          "interpolating ") +
-                              (settings_.multiplier == FrameGenMultiplier::kDynamic
-                                   ? "in Dynamic (VECTORXR_FRAMEGEN_INTERPOLATE_HARDWARE=1)"
-                                   : "at a fixed or Auto frame rate") +
-                              " (experimental).");
-            }
-        }
+        // Select only at a real-frame boundary. Shader fallback leaves the
+        // backend's optical-flow sessions alive; returning to them only
+        // clears temporal hints for the intervening shader stretch.
+        tuning.hardware_flow = UpdateInterpolateFlowLocked(Clock::now(), mode, tuning.hardware_flow);
         // Engine motion vectors: from stage 2 the backend keeps raw fields
         // for them (made as the views are set up), in a session whose frames
         // came with vectors the layer reads, for frames the engine path may
@@ -6207,7 +6426,15 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         logger_->Info(std::string("Frame Generation world vs delta: ") +
                       (world_delta.locked ? "locked, " : "calibrating, ") + world_delta.reason + ".");
     }
-    NoteGpuTimingLocked(executed.submission, frame, window, timings, capture_pending_from);
+    const bool hardware_active = tuning.hardware_flow && hardware_status == "active";
+    NoteGpuTimingLocked(executed.submission, frame, window, timings, capture_pending_from, hardware_active);
+    if (tuning.hardware_flow && !hardware_status.empty()) {
+        interpolate_flow_available_ = hardware_active;
+    }
+    interpolate_flow_active_ = hardware_active ? "hardware" : "shader";
+    if (tuning.hardware_flow && !hardware_status.empty() && !hardware_active) {
+        interpolate_flow_reason_ = "hardware unavailable: " + hardware_status;
+    }
     if (logger_ && !hardware_status.empty() && hardware_status != logged_hardware_status_) {
         logged_hardware_status_ = hardware_status;
         // Its setup (the driver's optical flow API and sessions) runs in
@@ -6338,6 +6565,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
     if (analyze) {
         analyze->frame = executed.frame;
         analyze->synthesized = synthesized;
+        analyze->motion_not_before = InterpolateFlowDelayUntilLocked(Clock::now(), mode, hardware_active);
         analyze->kinds = kinds;
         analyze->velocity.assign(projection.viewCount, {0.0f, 0.0f, 0.0f});
         for (std::size_t i = 0; i < analyze->velocity.size() && i < executed.depth.size(); ++i) {
@@ -8825,11 +9053,13 @@ bool FrameGenPresenter::AnalyzeJit(const XrCompositionLayerProjection& projectio
     JitFrame jit = score;
     jit.id = frame.sequence;
     jit.analyzed = analysis.frame;
+    jit.motion_not_before = analysis.motion_not_before;
     jit.time = frame.app_time;
     jit.previous_time = analysis.synthesized ? previous_time : 0;
     if (jit.previous_time && !jit_frames_.empty() && !jit_frames_.back().as_is &&
         jit_frames_.back().time == jit.previous_time && jit_frames_.back().analyzed) {
         jit.previous_analyzed = jit_frames_.back().analyzed;
+        jit.previous_motion_not_before = jit_frames_.back().motion_not_before;
     }
     RecordDepthReleasesLocked(copy);
     jit.copy = std::move(copy);
@@ -9258,7 +9488,7 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
                 write.ring_exhausted = true;
                 return false;
             }
-            if (moved && gpu_->Measured(frame.analyzed)) {
+            if (moved && Clock::now() >= frame.motion_not_before && gpu_->Measured(frame.analyzed)) {
                 return true;
             }
             if (!gpu_->Captured(frame.analyzed)) {
@@ -9271,7 +9501,8 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
             // the next (MSFS 2024 with NVIDIA's flow, 2026-10-09: motion came
             // 16 ms after the capture, and 8% of refreshes stood still).
             if (moved && stale_motion_enabled_ && choice.mode == FrameGenSynthesisMode::kExtrapolate &&
-                frame.previous_analyzed && gpu_->Measured(frame.previous_analyzed) &&
+                frame.previous_analyzed && Clock::now() >= frame.previous_motion_not_before &&
+                gpu_->Measured(frame.previous_analyzed) &&
                 gpu_->Writable(frame.previous_analyzed, true)) {
                 stale = true;
                 return true;
@@ -9537,6 +9768,11 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
         ++shift_window_frames_;
     }
     totals_.unmeasured += unmeasured ? 1 : 0;
+    // Pair this denominator with stale_motion at the same successful write
+    // event. Stale safety copies count too; ordinary real-frame copies do
+    // not. A repeated or subsequently discarded write must contribute to
+    // both populations, unlike generated_distinct at runtime submission.
+    totals_.motion_outputs += !write.exact || write.stale || write.motion_late ? 1 : 0;
     totals_.stale_motion += write.stale || write.motion_late ? 1 : 0;
     // Stage 7: frames the engine motion map moved past one interval.
     engine_window_.reached += extrapolate && !write.exact && choice.fraction > 1.0f ? 1 : 0;
@@ -10112,6 +10348,13 @@ FrameGenStatus FrameGenPresenter::Status() const {
     status.output_fps = RatePerSecond(submissions_, now);
     status.distinct_fps = RatePerSecond(distinct_submissions_, now);
     status.gpu_ms = gpu_ms_;
+    status.interpolate_flow_active = interpolate_flow_active_;
+    status.interpolate_flow_mode = ToString(interpolate_flow_env_.value_or(settings_.interpolate_flow));
+    status.interpolate_flow_reason = interpolate_flow_reason_;
+    status.interpolate_flow_switches = interpolate_flow_switches_;
+    status.interpolate_flow_probes = interpolate_flow_probes_;
+    status.interpolate_flow_fallbacks = interpolate_flow_fallbacks_;
+    status.interpolate_flow_probing = interpolate_flow_probing_;
     status.generated = generated_;
     status.repeated = repeated_;
     status.failures = failures_;

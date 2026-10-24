@@ -1742,6 +1742,7 @@ bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig&
            lhs.framegen.synthesis_mode == rhs.framegen.synthesis_mode &&
            lhs.framegen.flow_quality == rhs.framegen.flow_quality &&
            lhs.framegen.motion_estimation == rhs.framegen.motion_estimation &&
+           lhs.framegen.interpolate_flow == rhs.framegen.interpolate_flow &&
            lhs.framegen.multiplier == rhs.framegen.multiplier &&
            lhs.framegen.artifact_suppression == rhs.framegen.artifact_suppression &&
            lhs.framegen.motion_limit_percent == rhs.framegen.motion_limit_percent &&
@@ -11653,10 +11654,17 @@ OsdSnapshot OpenXrLayer::BuildOsdSnapshot() const {
             text(view==FrameGenDiagnosticView::kFlow?OsdText::DiagnosticsFlowView:view==FrameGenDiagnosticView::kConfidence?
                  OsdText::DiagnosticsConfidenceView:OsdText::DiagnosticsTintView);
     }
+    if (framegen_session_enabled_) {
+        const FrameGenStatus flow = framegen_.Status();
+        if (!flow.interpolate_flow_active.empty()) {
+            snapshot.diagnostics += std::string(snapshot.diagnostics.empty() ? "" : " \xC2\xB7 ") +
+                text(flow.interpolate_flow_active == "hardware" ? OsdText::FlowHardware : OsdText::FlowShader);
+        }
+    }
     // ...and Frame Generation research switches taken from its research
     // file (framegen-research.txt), which outlives the flight it was for.
     if (framegen_session_enabled_ && framegen_.ResearchFileInUse())
-        snapshot.diagnostics+=std::string(snapshot.diagnostics.empty()?"":" \xC2\xB7 ")+"RESEARCH";
+        snapshot.diagnostics+=std::string(snapshot.diagnostics.empty()?"":" \xC2\xB7 ")+text(OsdText::DiagnosticsResearch);
     return snapshot;
 }
 
@@ -14934,11 +14942,6 @@ void OpenXrLayer::StartFrameGen(XrSession session, const void* binding_chain, co
         framegen_calls_.begin = [this](XrSession s, const XrFrameBeginInfo* i) { return TraceRuntimeBeginFrame(s, i); };
         framegen_calls_.submit = [this](XrSession s, const XrFrameEndInfo* i) { return SubmitRuntimeFrame(s, i); };
         framegen_.Configure(resolved_settings_.framegen);
-        // Interpolating in Dynamic, motion is measured on the shader cores
-        // (FrameGenPresenter::SetInterpolateOnShaders); =1 keeps the hardware
-        // there too.
-        const char* interpolate_hardware = std::getenv("VECTORXR_FRAMEGEN_INTERPOLATE_HARDWARE");
-        framegen_.SetInterpolateOnShaders(!(interpolate_hardware && std::string(interpolate_hardware) == "1"));
         // How long a teardown waits on the presenter thread (2 s unless set).
         std::chrono::milliseconds teardown_wait{2000};
         if (const char* wait = std::getenv("VECTORXR_FRAMEGEN_TEARDOWN_WAIT_MS"); wait && *wait) {
@@ -17362,6 +17365,9 @@ void OpenXrLayer::PollRuntimeRelay() {
             resolved_settings_.framegen.enabled && !framegen_session_enabled_)
             status.framegen_reason = "turned on after the game started; restart the game to use it";
         status.framegen_depth = framegen.depth == FrameGenDepthState::kUnknown ? "" : ToString(framegen.depth);
+        status.framegen_flow = framegen.interpolate_flow_active;
+        status.framegen_flow_mode = framegen.interpolate_flow_mode;
+        status.framegen_flow_reason = framegen.interpolate_flow_reason;
         if (framegen_session_enabled_) {
             // The same rates as framegen_reason, as numbers (MSFS_AutoFPS, issue 103).
             status.framegen_rates = FrameGenRates(framegen);

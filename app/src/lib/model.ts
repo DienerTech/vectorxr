@@ -662,6 +662,8 @@ export type FrameGenFlowQuality = typeof frameGenFlowQualities[number]
 // shader where it cannot be used).
 export const frameGenMotionEstimations = ['shader', 'hardware'] as const
 export type FrameGenMotionEstimation = typeof frameGenMotionEstimations[number]
+export const frameGenInterpolateFlows = ['auto', 'hardware', 'shader'] as const
+export type FrameGenInterpolateFlow = typeof frameGenInterpolateFlows[number]
 // Headset frames per real application frame. 'dynamic' (the default) holds
 // nothing: the application runs at its own rate and generated frames fill the
 // refreshes between its frames (the layer treats it as 'auto' where it cannot
@@ -689,6 +691,7 @@ export interface FrameGenSettings {
   synthesisMode: FrameGenSynthesisMode
   flowQuality: FrameGenFlowQuality
   motionEstimation: FrameGenMotionEstimation
+  interpolateFlow: FrameGenInterpolateFlow
   frameMultiplier: FrameGenFrameMultiplier
   // 0-100: higher falls back to the real image sooner where motion is uncertain.
   artifactSuppression: number
@@ -722,6 +725,7 @@ export function defaultFrameGenSettings(): FrameGenSettings {
     synthesisMode: 'interpolate',
     flowQuality: 'balanced',
     motionEstimation: 'shader',
+    interpolateFlow: 'auto',
     frameMultiplier: 'dynamic',
     artifactSuppression: 50,
     motionLimitPercent: 10,
@@ -757,6 +761,9 @@ export function normalizeFrameGenSettings(value: unknown, fallback: FrameGenSett
     motionEstimation: frameGenMotionEstimations.includes(source.motionEstimation as FrameGenMotionEstimation)
       ? source.motionEstimation as FrameGenMotionEstimation
       : fallback.motionEstimation,
+    interpolateFlow: frameGenInterpolateFlows.includes(source.interpolateFlow as FrameGenInterpolateFlow)
+      ? source.interpolateFlow as FrameGenInterpolateFlow
+      : fallback.interpolateFlow,
     frameMultiplier: frameGenFrameMultipliers.includes(source.frameMultiplier as FrameGenFrameMultiplier)
       ? source.frameMultiplier as FrameGenFrameMultiplier
       : fallback.frameMultiplier,

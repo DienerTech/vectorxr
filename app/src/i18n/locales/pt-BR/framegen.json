@@ -232,6 +232,12 @@
     "headPrediction": {
       "heading": "Estender a previsão da cabeça",
       "description": "A Frame Generation faz o jogo renderizar até ~150 ms adiante, e alguns runtimes, como o da Pimax, preveem a sua cabeça em apenas ~20 ms disso. Isto prolonga o giro da sua cabeça pelo restante, deixando menos preto na borda para onde você vira. Ligue antes de iniciar o jogo."
+    },
+    "interpolateFlow": {
+      "legend": "Fluxo de interpolação",
+      "description": "Auto usa fluxo por hardware; se os quadros atrasarem, muda para Shader e tenta o hardware novamente.",
+      "hardware": "Sempre usar fluxo por hardware.",
+      "shader": "Sempre usar fluxo Shader."
     }
   }
 }

@@ -232,6 +232,12 @@
     "headPrediction": {
       "heading": "延长头部预测",
       "description": "Frame Generation 会让游戏提前最多约 150 ms 进行渲染，而某些运行时（例如 Pimax 的运行时）只预测其中约 20 ms 的头部运动。此选项会将您的头部转动延续到剩余时间，从而减少您转向一侧边缘的黑边。请在启动游戏之前开启。"
+    },
+    "interpolateFlow": {
+      "legend": "插值光流",
+      "description": "自动使用硬件光流；帧延迟时切换到着色器，之后重试硬件。",
+      "hardware": "持续使用硬件光流。",
+      "shader": "持续使用着色器光流。"
     }
   }
 }

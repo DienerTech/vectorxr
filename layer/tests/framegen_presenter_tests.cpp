@@ -260,6 +260,7 @@ struct GpuLog {
     bool fail_frees{false};
     bool uncaptured{false}; // views not captured at release: nothing generated
     bool threaded{false};
+    bool hardware_available{true}; // the fake can model hardware unless explicitly unavailable
     bool depth{false};
     std::atomic<bool> memory_pressure{false}; // process video memory near its budget
     // Process video memory as a session's would be: with `memory_game` set,
@@ -435,6 +436,9 @@ class FakeGpu final : public FrameGenGpu {
   public:
     explicit FakeGpu(GpuLog* log) : log_(log) {}
     const char* Name() const override { return "Fake"; }
+    std::string HardwareFlowStatus() const override {
+        return log_->hardware_available ? "active" : "fake GPU has no optical flow hardware";
+    }
     std::optional<FrameGenOutputKind> Classify(std::int64_t format) const override {
         if (format == kFormat) return FrameGenOutputKind::kSrgb8;
         if (format == kFloatFormat) return FrameGenOutputKind::kFloat16;
@@ -14870,6 +14874,368 @@ void TestLeadCeilingRaisesOnBursts() {
     }
 }
 
+
+namespace depthxr {
+// Fake-backend telemetry sequences on a deterministic clock. The production
+// entry is Generate's real-frame boundary, under the same presenter mutex;
+// these tests advance that boundary without wall-clock sleeps or GPU work.
+class FrameGenFlowTestPeer {
+  public:
+    using Clock = std::chrono::steady_clock;
+    struct State {
+        bool hardware{false};
+        bool probing{false};
+        std::uint32_t bad{0};
+        std::chrono::milliseconds backoff{};
+        Clock::time_point probe_due{};
+        std::uint64_t fallbacks{0};
+        std::uint64_t probes{0};
+        std::uint64_t switches{0};
+        std::string reason;
+    };
+    static void Prepare(FrameGenPresenter& p, Clock::time_point now) {
+        std::scoped_lock lock(p.mutex_);
+        p.settings_.synthesis_mode = FrameGenSynthesisMode::kInterpolate;
+        p.settings_.motion_estimation = FrameGenMotionEstimation::kHardware;
+        p.settings_.multiplier = FrameGenMultiplier::kDynamic;
+        p.settings_.interpolate_flow = FrameGenInterpolateFlow::kAuto;
+        p.interpolate_flow_available_ = true;
+        p.UpdateInterpolateFlowLocked(now, FrameGenSynthesisMode::kInterpolate, true);
+    }
+    static bool Feed(FrameGenPresenter& p, Clock::time_point now, std::uint64_t generated = 1000,
+                     std::uint64_t stale = 0, std::uint64_t unready = 0, std::uint64_t timed = 100,
+                     std::uint64_t late = 0, bool auto_probe = false, bool dynamic_probe = false,
+                     std::optional<std::uint64_t> motion_outputs = std::nullopt) {
+        std::scoped_lock lock(p.mutex_);
+        p.totals_.generated_distinct += generated;
+        p.totals_.stale_motion += stale;
+        p.totals_.motion_outputs += motion_outputs.value_or(std::max(generated, stale));
+        p.totals_.unready += unready;
+        p.totals_.hardware_timed += timed;
+        p.totals_.hardware_late += late;
+        p.totals_.hardware_lag_ns += late * 2'000'000;
+        p.probing_ = auto_probe;
+        p.dynamic_probing_ = dynamic_probe;
+        return p.UpdateInterpolateFlowLocked(now, FrameGenSynthesisMode::kInterpolate, true);
+    }
+    static void Select(FrameGenPresenter& p, FrameGenInterpolateFlow mode) {
+        std::scoped_lock lock(p.mutex_);
+        p.settings_.interpolate_flow = mode;
+    }
+    static void Pause(FrameGenPresenter& p) {
+        std::scoped_lock lock(p.mutex_);
+        ++p.totals_.pauses;
+    }
+    static void Available(FrameGenPresenter& p, bool available) {
+        std::scoped_lock lock(p.mutex_);
+        p.interpolate_flow_available_ = available;
+    }
+    static bool OtherMode(FrameGenPresenter& p, Clock::time_point now) {
+        std::scoped_lock lock(p.mutex_);
+        return p.UpdateInterpolateFlowLocked(now, FrameGenSynthesisMode::kExtrapolate, true);
+    }
+    static void Timing(FrameGenPresenter& p, Clock::time_point now, std::chrono::milliseconds hardware_lag,
+                       std::chrono::milliseconds shader_lag, bool hardware) {
+        std::scoped_lock lock(p.mutex_);
+        FrameGenPresenter::PendingFrame frame;
+        frame.real_due = now - 10ms;
+        frame.generated_due = now;
+        FrameGenAnalysisTiming timing;
+        timing.submission = 100 + p.totals_.analyses_timed;
+        timing.capture_end = now - 5ms;
+        timing.start = now - 5ms;
+        timing.hardware_start = now - 4ms;
+        timing.hardware_end = now + hardware_lag;
+        timing.end = timing.hardware_end + shader_lag;
+        p.NoteGpuTimingLocked(timing.submission, frame, std::nullopt, {timing}, {}, hardware);
+    }
+    static std::pair<std::uint64_t, std::uint64_t> HardwareTimings(FrameGenPresenter& p) {
+        std::scoped_lock lock(p.mutex_);
+        return {p.totals_.hardware_timed, p.totals_.hardware_late};
+    }
+    static std::pair<std::uint64_t, std::uint64_t> MotionOutputs(FrameGenPresenter& p) {
+        std::scoped_lock lock(p.mutex_);
+        return {p.totals_.stale_motion, p.totals_.motion_outputs};
+    }
+    static void Delay(FrameGenPresenter& p, std::chrono::milliseconds delay,
+                      std::chrono::milliseconds duration, Clock::time_point session_started) {
+        std::scoped_lock lock(p.mutex_);
+        p.interpolate_flow_delay_ = delay;
+        p.interpolate_flow_delay_for_ = duration;
+        p.interpolate_flow_delay_started_.reset();
+        p.started_at_ = session_started;
+    }
+    static Clock::time_point DelayUntil(FrameGenPresenter& p, Clock::time_point now,
+                                       FrameGenSynthesisMode mode, bool hardware) {
+        std::scoped_lock lock(p.mutex_);
+        return p.InterpolateFlowDelayUntilLocked(now, mode, hardware);
+    }
+    static State Get(FrameGenPresenter& p) {
+        std::scoped_lock lock(p.mutex_);
+        return {p.interpolate_flow_hardware_, p.interpolate_flow_probing_, p.interpolate_flow_bad_windows_,
+                p.interpolate_flow_backoff_, p.interpolate_flow_probe_due_, p.interpolate_flow_fallbacks_,
+                p.interpolate_flow_probes_, p.interpolate_flow_switches_, p.interpolate_flow_reason_};
+    }
+};
+} // namespace depthxr
+
+void TestInterpolateFlowCounterWindows() {
+    using Peer = FrameGenFlowTestPeer;
+    const auto zero = TimePoint{} + 1s;
+    // The flown healthy case and the exact threshold stay on hardware.
+    FrameGenPresenter healthy;
+    Peer::Prepare(healthy, zero);
+    Check(Peer::Feed(healthy, zero + 10s, 1000, 15, 0, 100, 2), "flow: healthy hardware stays");
+    Check(Peer::Feed(healthy, zero + 20s, 1000, 50, 0, 100, 25), "flow: thresholds are strict");
+    Check(Peer::Get(healthy).fallbacks == 0, "flow: healthy/threshold windows have no fallback");
+    // Submission distinctness and successful output writes are different
+    // populations: five stale writes out of100 outputs is exactly5%, even
+    // when only90 generated frames were distinct at submission.
+    FrameGenPresenter repeated;
+    Peer::Prepare(repeated, zero);
+    Check(Peer::Feed(repeated, zero + 10s, 90, 5, 0, 100, 0, false, false, 100),
+          "flow: marginal5/100 output share stays despite90 distinct frames");
+    Check(Peer::Feed(repeated, zero + 20s, 90, 5, 0, 100, 0, false, false, 100) &&
+              Peer::Get(repeated).fallbacks == 0,
+          "flow: repeated writes do not inflate the stale share past5%");
+    FrameGenPresenter safety_copies;
+    Peer::Prepare(safety_copies, zero);
+    Check(Peer::Feed(safety_copies, zero + 10s, 0, 40, 0, 0, 0, false, false, 40),
+          "flow: first all-safety-copy window stays");
+    Check(!Peer::Feed(safety_copies, zero + 20s, 0, 40, 0, 0, 0, false, false, 40) &&
+              Peer::Get(safety_copies).reason.find("100.0% of motion outputs (40/40)") != std::string::npos,
+          "flow: safety copies with no distinct generation produce a bounded100% share");
+
+    FrameGenPresenter stale;
+    Peer::Prepare(stale, zero);
+    Check(Peer::Feed(stale, zero + 10s, 1000, 60), "flow: one bad stale window is a hitch");
+    Check(Peer::Get(stale).bad == 1, "flow: first stale window counted");
+    Check(Peer::Feed(stale, zero + 20s), "flow: good stale window resets the streak");
+    Check(Peer::Get(stale).bad == 0, "flow: the streak reset");
+    Check(Peer::Feed(stale, zero + 30s, 1000, 60), "flow: new first stale window stays");
+    Check(!Peer::Feed(stale, zero + 40s, 1000, 60), "flow: two stale windows fall back");
+    Check(Peer::Get(stale).reason.find("stale motion") != std::string::npos,
+          "flow: fallback explains stale motion");
+
+    FrameGenPresenter unready;
+    Peer::Prepare(unready, zero);
+    Check(Peer::Feed(unready, zero + 10s, 1000, 0, 4), "flow: first unready window stays");
+    Check(!Peer::Feed(unready, zero + 20s, 1000, 0, 4), "flow: 12 unready per30s twice falls back");
+    Check(Peer::Get(unready).reason.find("unready") != std::string::npos, "flow: unready reason");
+
+    FrameGenPresenter lag;
+    Peer::Prepare(lag, zero);
+    Check(Peer::Feed(lag, zero + 10s, 1000, 0, 0, 100, 30), "flow: first hardware-late window stays");
+    Check(!Peer::Feed(lag, zero + 20s, 1000, 0, 0, 100, 30), "flow: two hardware-late windows fall back");
+    Check(Peer::Get(lag).reason.find("first in-between deadline") != std::string::npos,
+          "flow: hardware lag names the deadline");
+
+    // A shader pass finishing late after timely hardware is not hardware
+    // lateness, nor are hardware-like fake stamps from a shader analysis.
+    FrameGenPresenter timing;
+    Peer::Timing(timing, zero, -2ms, 20ms, true);
+    Peer::Timing(timing, zero + 1s, 2ms, 0ms, true);
+    Peer::Timing(timing, zero + 2s, 20ms, 0ms, false);
+    Check(Peer::HardwareTimings(timing) == std::pair<std::uint64_t, std::uint64_t>{2, 1},
+          "flow: lag is attributed to hardware completion only");
+}
+
+void TestInterpolateFlowRecoveryBackoff() {
+    using Peer = FrameGenFlowTestPeer;
+    const auto zero = TimePoint{} + 1s;
+    FrameGenPresenter p;
+    Peer::Prepare(p, zero);
+    Peer::Feed(p, zero + 10s, 1000, 60);
+    Peer::Feed(p, zero + 20s, 1000, 60);
+    Check(!Peer::Get(p).hardware && Peer::Get(p).probe_due == zero + 80s, "flow: shader holds 60s");
+    Check(!Peer::Feed(p, zero + 79s), "flow: no early hardware probe");
+    Check(Peer::Feed(p, zero + 80s) && Peer::Get(p).probing, "flow: hardware probe at 60s");
+    // A probe uses its own complete window, not counters accumulated on
+    // shader or before switching, and sparse good evidence cannot recover.
+    Check(Peer::Feed(p, zero + 89s, 1000, 60) && Peer::Get(p).probing, "flow: probe waits full10s");
+    Check(!Peer::Feed(p, zero + 90s, 0, 0, 0, 0), "flow: failed probe returns to shader");
+    Check(Peer::Get(p).backoff == 120s && Peer::Get(p).probe_due == zero + 210s,
+          "flow: failed probe backs off2min");
+    Peer::Feed(p, zero + 210s);
+    Peer::Feed(p, zero + 220s, 1000, 60);
+    Check(!Peer::Get(p).hardware && Peer::Get(p).backoff == 240s, "flow: next failure backs off4min");
+    Peer::Feed(p, zero + 460s);
+    Peer::Feed(p, zero + 470s, 1000, 60);
+    Check(!Peer::Get(p).hardware && Peer::Get(p).backoff == 480s, "flow: next failure backs off8min");
+    Peer::Feed(p, zero + 950s);
+    Peer::Feed(p, zero + 960s, 1000, 60);
+    Check(Peer::Get(p).backoff == 480s, "flow: backoff caps at8min");
+    Peer::Feed(p, zero + 1440s);
+    Peer::Feed(p, zero + 1450s, 1, 0, 0, 1);
+    Check(Peer::Get(p).hardware && Peer::Get(p).probing, "flow: sparse probe evidence does not recover");
+    Peer::Feed(p, zero + 1460s);
+    Check(Peer::Get(p).hardware && !Peer::Get(p).probing && Peer::Get(p).backoff == 60s,
+          "flow: healthy probe recovers and resets backoff");
+    Check(Peer::Get(p).fallbacks == 5 && Peer::Get(p).probes == 5, "flow: every fallback and probe counted");
+}
+
+void TestInterpolateFlowProbeIsolation() {
+    using Peer = FrameGenFlowTestPeer;
+    const auto zero = TimePoint{} + 1s;
+    for (const bool dynamic_probe : {false, true}) {
+        FrameGenPresenter p;
+        Peer::Prepare(p, zero);
+        Peer::Feed(p, zero + 10s, 1000, 60);
+        Check(Peer::Feed(p, zero + 20s, 1000, 60, 0, 100, 0, !dynamic_probe, dynamic_probe),
+              "flow: no switch inside multiplier/standby probe");
+        Check(Peer::Get(p).switches == 0 && Peer::Get(p).bad == 0, "flow: probe discards mixed window");
+        Peer::Feed(p, zero + 30s, 1000, 60); // a new window begins
+        Peer::Feed(p, zero + 40s, 1000, 60);
+        Check(!Peer::Feed(p, zero + 50s, 1000, 60), "flow: fallback resumes after two new windows");
+        Check(!Peer::Feed(p, zero + 110s, 1000, 0, 0, 100, 0, !dynamic_probe, dynamic_probe),
+              "flow: no recovery switch inside multiplier/standby probe");
+        Check(Peer::Get(p).probes == 0, "flow: hardware probe waits until multiplier settled");
+        Check(Peer::Feed(p, zero + 111s) && Peer::Get(p).probing, "flow: next real boundary starts hardware probe");
+    }
+    FrameGenPresenter setting;
+    Peer::Prepare(setting, zero);
+    Peer::Select(setting, FrameGenInterpolateFlow::kShader);
+    Check(Peer::Feed(setting, zero + 1s, 0, 0, 0, 0, 0, true), "flow: live setting waits for Auto probe");
+    Check(!Peer::Feed(setting, zero + 2s), "flow: live setting applies at next real boundary");
+
+    FrameGenPresenter pause;
+    Peer::Prepare(pause, zero);
+    Peer::Feed(pause, zero + 10s, 1000, 60);
+    Peer::Pause(pause);
+    Check(Peer::Feed(pause, zero + 20s, 1000, 60) && Peer::Get(pause).bad == 0,
+          "flow: a pause clears the failing streak and its evidence");
+    Peer::Feed(pause, zero + 30s, 1000, 60);
+    Peer::Feed(pause, zero + 40s, 1000, 60);
+    Check(!Peer::Get(pause).hardware, "flow: post-pause bad windows still trigger");
+    Check(Peer::OtherMode(pause, zero + 45s), "flow: Extrapolate keeps the selected hardware");
+    Check(Peer::Feed(pause, zero + 50s) && !Peer::Get(pause).probing,
+          "flow: returning to Interpolate judges a new context");
+
+    FrameGenPresenter reset;
+    Peer::Prepare(reset, zero);
+    Peer::Feed(reset, zero + 10s, 1000, 60);
+    Peer::Feed(reset, zero + 20s, 1000, 60);
+    Check(reset.ResetFrames(), "flow: frame reset succeeds");
+    Check(Peer::Feed(reset, zero + 25s) && !Peer::Get(reset).probing && Peer::Get(reset).bad == 0,
+          "flow: frame reset starts a new hardware context");
+
+    FrameGenPresenter paused_probe;
+    Peer::Prepare(paused_probe, zero);
+    Peer::Feed(paused_probe, zero + 10s, 1000, 60);
+    Peer::Feed(paused_probe, zero + 20s, 1000, 60);
+    Peer::Feed(paused_probe, zero + 80s);
+    Peer::Pause(paused_probe);
+    Peer::Feed(paused_probe, zero + 85s);
+    Peer::Feed(paused_probe, zero + 90s);
+    Check(Peer::Get(paused_probe).probing, "flow: a pause restarts the full probe window");
+    Peer::Feed(paused_probe, zero + 95s);
+    Check(!Peer::Get(paused_probe).probing, "flow: full healthy post-pause window recovers");
+
+    for (const FrameGenInterpolateFlow mode : {FrameGenInterpolateFlow::kAuto, FrameGenInterpolateFlow::kHardware}) {
+        FrameGenPresenter unsupported;
+        Peer::Prepare(unsupported, zero);
+        Peer::Select(unsupported, mode);
+        Peer::Available(unsupported, false);
+        Check(!Peer::Feed(unsupported, zero + 10s), "flow: unsupported GPU stays shader");
+        Check(!Peer::Feed(unsupported, zero + 1000s) && Peer::Get(unsupported).probes == 0,
+              "flow: unsupported GPU never probes hardware");
+    }
+}
+
+void TestInterpolateFlowDelayStartsAtHardware() {
+    using Peer = FrameGenFlowTestPeer;
+    const auto zero = TimePoint{} + 1s;
+    FrameGenPresenter presenter;
+    Peer::Delay(presenter, 100ms, 3500ms, zero);
+    const auto interpolate = FrameGenSynthesisMode::kInterpolate;
+    const auto extrapolate = FrameGenSynthesisMode::kExtrapolate;
+    // Slow driver/backend setup and time spent in other modes do not use
+    // up a finite hardware readiness experiment before it can run.
+    Check(Peer::DelayUntil(presenter, zero + 10s, interpolate, false) == TimePoint{},
+          "flow delay anchor: shader prelude is inert");
+    Check(Peer::DelayUntil(presenter, zero + 20s, extrapolate, true) == TimePoint{},
+          "flow delay anchor: hardware Extrapolate prelude is inert");
+    const auto first = zero + 30s;
+    Check(Peer::DelayUntil(presenter, first, interpolate, true) == first + 100ms,
+          "flow delay anchor: first hardware analysis starts experiment after setup");
+    Check(Peer::DelayUntil(presenter, first + 3499ms, interpolate, true) == first + 3599ms,
+          "flow delay anchor: final in-window analysis is delayed");
+    Check(Peer::DelayUntil(presenter, first + 3500ms, interpolate, true) == TimePoint{},
+          "flow delay anchor: exact expiry accepts normally");
+    Check(Peer::DelayUntil(presenter, first + 60s, interpolate, true) == TimePoint{},
+          "flow delay anchor: recovery probe cannot re-arm experiment");
+    Check(presenter.ResetFrames(), "flow delay anchor: frame reset succeeds");
+    Check(Peer::DelayUntil(presenter, first + 70s, interpolate, true) == TimePoint{},
+          "flow delay anchor: frame reset cannot re-arm finite experiment");
+}
+
+// The exact research acceptance-delay path against the fake GPU/runtime:
+// hardware work completes normally, fallback and a healthy probe happen,
+// no unsafe synthesis is issued, and the session is never recreated.
+void TestInterpolateFlowAcceptanceDelay() {
+    const auto saved = [](const char* name) {
+        const char* value = std::getenv(name);
+        return value ? std::string(value) : std::string();
+    };
+    const std::string old_delay = saved("VECTORXR_FRAMEGEN_INTERPOLATE_DELAY_MS");
+    const std::string old_for = saved("VECTORXR_FRAMEGEN_INTERPOLATE_DELAY_FOR_MS");
+    const std::string old_force = saved("VECTORXR_FRAMEGEN_INTERPOLATE_HARDWARE");
+    _putenv_s("VECTORXR_FRAMEGEN_INTERPOLATE_HARDWARE", "");
+    _putenv_s("VECTORXR_FRAMEGEN_INTERPOLATE_DELAY_MS", "100");
+    _putenv_s("VECTORXR_FRAMEGEN_INTERPOLATE_DELAY_FOR_MS", "1000");
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    gpu.ofa = 1ms;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    SessionLog log("interpolate-flow-delay");
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kInterpolate, FrameGenMultiplier::k2, app, runtime, owned,
+             log.logger.get());
+    _putenv_s("VECTORXR_FRAMEGEN_INTERPOLATE_DELAY_MS", old_delay.c_str());
+    _putenv_s("VECTORXR_FRAMEGEN_INTERPOLATE_DELAY_FOR_MS", old_for.c_str());
+    _putenv_s("VECTORXR_FRAMEGEN_INTERPOLATE_HARDWARE", old_force.c_str());
+    FrameGenResolvedSettings settings;
+    settings.enabled = true;
+    settings.multiplier = FrameGenMultiplier::k2;
+    settings.motion_estimation = FrameGenMotionEstimation::kHardware;
+    presenter.Configure(settings);
+    FrameGenInterpolateFlowPolicy policy;
+    policy.window = 150ms;
+    policy.shader_hold = 400ms;
+    policy.probe = 250ms;
+    policy.hold_max = 1600ms;
+    policy.min_generated = 3;
+    policy.min_hardware_samples = 3;
+    policy.hardware_late_share = 2.0; // this test isolates readiness, not timing
+    presenter.SetInterpolateFlowPolicy(policy);
+    for (int i = 0; i < 3; ++i) app->Frame();
+    RunWork(*app, 3500ms, {3ms}, [&](const XrFrameState&) {
+        const auto status = presenter.Status();
+        return status.interpolate_flow_fallbacks > 0 && status.interpolate_flow_probes > 0 &&
+               status.interpolate_flow_active == "hardware" && !status.interpolate_flow_probing &&
+               status.interpolate_flow_reason.find("recovered") != std::string::npos;
+    });
+    const auto status = presenter.Status();
+    Check(status.interpolate_flow_fallbacks > 0 && status.interpolate_flow_probes > 0,
+          "flow delay: real readiness counters trigger fallback and a probe");
+    Check(status.interpolate_flow_active == "hardware" && !status.interpolate_flow_probing &&
+              status.interpolate_flow_reason.find("recovered") != std::string::npos,
+          "flow delay: expired delay recovers hardware (" + status.interpolate_flow_reason + ")");
+    Check(gpu.unmeasured_moves == 0 && gpu.uncaptured_writes == 0,
+          "flow delay: synthesis never uses unfinished motion or uncaptured images");
+    const auto [stale_outputs, motion_outputs] = FrameGenFlowTestPeer::MotionOutputs(presenter);
+    Check(motion_outputs > 0 && stale_outputs <= motion_outputs,
+          "flow delay: actual successful synthesis pairs stale outputs with their denominator (" +
+              std::to_string(stale_outputs) + "/" + std::to_string(motion_outputs) + ")");
+    Check(!runtime.ordering_violation && !g_release_violation, "flow delay: calls stayed ordered");
+    presenter.Stop();
+    Check(log.Lines("Interpolate flow switch:").size() >= 2 &&
+              log.Lines("Interpolate flow probe recovered:").size() == 1,
+          "flow delay: switches and recovery are logged with reasons");
+}
+
 #define RUN(test)                                                                                \
     do {                                                                                         \
         const char* only = std::getenv("FG_TEST_ONLY");                                          \
@@ -14912,6 +15278,11 @@ void RunPolicyTests() {
     RUN(TestPauseAndLoadingDoNotStandDown);
     RUN(TestWinningEngagementStays);
     RUN(TestWinningEngagementSurvivesLateCaptures);
+    RUN(TestInterpolateFlowCounterWindows);
+    RUN(TestInterpolateFlowRecoveryBackoff);
+    RUN(TestInterpolateFlowProbeIsolation);
+    RUN(TestInterpolateFlowDelayStartsAtHardware);
+    RUN(TestInterpolateFlowAcceptanceDelay);
     RUN(TestInterpolateOnShaders);
     RUN(TestInterpolateSourceFollowsLiveSwitch);
     RUN(TestDynamicToggleStandsBy);

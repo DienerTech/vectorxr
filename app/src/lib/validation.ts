@@ -354,6 +354,9 @@ function validateFrameGenSettings(prefix: string, settings: FrameGenSettings): s
   if (!frameGenMotionEstimationNames.includes(settings.motionEstimation)) {
     errors.push(t('validation.framegen.motionEstimation', { field: prefix + 'motionEstimation' }))
   }
+  if (settings.interpolateFlow !== undefined && !['auto', 'hardware', 'shader'].includes(settings.interpolateFlow)) {
+    errors.push(t('validation.framegen.interpolateFlow', { field: prefix + 'interpolateFlow' }))
+  }
   if (!frameGenFrameMultiplierNames.includes(settings.frameMultiplier)) {
     errors.push(t('validation.framegen.frameMultiplier', { field: prefix + 'frameMultiplier' }))
   }

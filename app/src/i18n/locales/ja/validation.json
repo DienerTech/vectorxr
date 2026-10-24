@@ -42,7 +42,8 @@
     "flowQuality": "{field} は performance、balanced、quality のいずれかである必要があります",
     "motionEstimation": "{field} は shader または hardware である必要があります",
     "frameMultiplier": "{field} は auto、dynamic、2x、3x、4x のいずれかである必要があります",
-    "diagnosticView": "{field} は off、flow、confidence、tint のいずれかである必要があります"
+    "diagnosticView": "{field} は off、flow、confidence、tint のいずれかである必要があります",
+    "interpolateFlow": "{field} は auto、hardware、shader のいずれかにしてください"
   },
   "turbo": {
     "predictionPercent": "Turbo の実験的な予測減衰は 50 から 100 の整数である必要があります",

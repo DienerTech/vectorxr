@@ -232,6 +232,12 @@
     "headPrediction": {
       "heading": "Étendre la prédiction de la tête",
       "description": "Frame Generation fait rendre le jeu jusqu'à ~150 ms à l'avance, et certains runtimes, comme celui de Pimax, ne prédisent votre tête que sur ~20 ms de cette durée. Cette option prolonge la rotation de votre tête sur le reste, pour moins de noir sur le bord vers lequel vous tournez. Activez-la avant de démarrer le jeu."
+    },
+    "interpolateFlow": {
+      "legend": "Flux d’interpolation",
+      "description": "Auto utilise le flux matériel, passe au Shader si les images sont en retard, puis réessaie le matériel.",
+      "hardware": "Conserver le flux matériel.",
+      "shader": "Conserver le flux Shader."
     }
   }
 }

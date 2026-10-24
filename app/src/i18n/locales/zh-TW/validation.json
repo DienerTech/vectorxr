@@ -42,7 +42,8 @@
     "flowQuality": "{field} 必須是 performance、balanced 或 quality",
     "motionEstimation": "{field} 必須是 shader 或 hardware",
     "frameMultiplier": "{field} 必須是 auto、dynamic、2x、3x 或 4x",
-    "diagnosticView": "{field} 必須是 off、flow、confidence 或 tint"
+    "diagnosticView": "{field} 必須是 off、flow、confidence 或 tint",
+    "interpolateFlow": "{field} 必須為 auto、hardware 或 shader"
   },
   "turbo": {
     "predictionPercent": "Turbo 實驗性預測抑制必須是 50 到 100 的整數",

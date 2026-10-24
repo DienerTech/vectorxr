@@ -24,7 +24,7 @@ test('configs written before Frame Generation load with it off and default setti
   delete config.modules.framegen
   const normalized = normalizeConfig(config)
   assert.deepEqual(normalized.modules.framegen, defaultFrameGenModule())
-  assert.deepEqual(normalized.modules.framegen.defaults, { synthesisMode: 'interpolate', flowQuality: 'balanced', motionEstimation: 'shader', frameMultiplier: 'dynamic', artifactSuppression: 50, motionLimitPercent: 10 })
+  assert.deepEqual(normalized.modules.framegen.defaults, { synthesisMode: 'interpolate', flowQuality: 'balanced', motionEstimation: 'shader', interpolateFlow: 'auto', frameMultiplier: 'dynamic', artifactSuppression: 50, motionLimitPercent: 10 })
   assert.deepEqual(normalized.modules.framegen.toggleBindings, [])
   assert.equal(normalized.modules.framegen.diagnosticView, 'off')
   assert.deepEqual(validateConfig(normalized), [])
@@ -36,7 +36,7 @@ test('configs written before Frame Generation load with it off and default setti
 test('invalid imported values normalize safely: enums fall back, integers clamp', () => {
   assert.deepEqual(normalizeFrameGenSettings({ synthesisMode: 'warp', flowQuality: 'ultra', motionEstimation: 'cuda', frameMultiplier: '8x', artifactSuppression: 'high', motionLimitPercent: Number.NaN }), defaultFrameGenSettings())
   assert.deepEqual(normalizeFrameGenSettings({ synthesisMode: 'extrapolate', flowQuality: 'quality', motionEstimation: 'hardware', frameMultiplier: '3x', artifactSuppression: 140, motionLimitPercent: 1 }),
-    { synthesisMode: 'extrapolate', flowQuality: 'quality', motionEstimation: 'hardware', frameMultiplier: '3x', artifactSuppression: 100, motionLimitPercent: 2 })
+    { synthesisMode: 'extrapolate', flowQuality: 'quality', motionEstimation: 'hardware', interpolateFlow: 'auto', frameMultiplier: '3x', artifactSuppression: 100, motionLimitPercent: 2 })
   // Head prediction is present only when on, so older layers see the six keys they know.
   assert.deepEqual(normalizeFrameGenSettings({ extendHeadPrediction: true }), { ...defaultFrameGenSettings(), extendHeadPrediction: true })
   assert.equal('extendHeadPrediction' in normalizeFrameGenSettings({ extendHeadPrediction: false }), false)
@@ -142,7 +142,7 @@ test('saved settings round-trip unchanged and emit only the keys the layer accep
     { type: 'device', deviceGuid: '{stick}', inputPath: 'button-7', productGuid: '', deviceName: 'Stick', inputLabel: 'Button 7' },
     { type: 'device', deviceGuid: '{left-stick}', inputPath: 'button-3', productGuid: '', deviceName: 'Left stick', inputLabel: 'Button 3' },
   ]
-  config.modules.framegen.defaults = { synthesisMode: 'extrapolate', flowQuality: 'performance', motionEstimation: 'hardware', frameMultiplier: '4x', artifactSuppression: 0, motionLimitPercent: 25 }
+  config.modules.framegen.defaults = { synthesisMode: 'extrapolate', flowQuality: 'performance', motionEstimation: 'hardware', interpolateFlow: 'auto', frameMultiplier: '4x', artifactSuppression: 0, motionLimitPercent: 25 }
   const profile = createFrameGenProfile(config.modules.framegen.defaults, ['dcs'])
   profile.name = 'DCS'
   profile.settings.flowQuality = 'quality'
@@ -155,7 +155,7 @@ test('saved settings round-trip unchanged and emit only the keys the layer accep
   assert.deepEqual(validateConfig(normalized), [])
   assert.deepEqual(Object.keys(normalized.modules.framegen), ['enabled', 'toggleBindings', 'diagnosticView', 'defaults', 'profiles'])
   assert.deepEqual(Object.keys(normalized.modules.framegen.profiles[0]), ['name', 'enabled', 'applicationIds', 'settings'])
-  assert.deepEqual(Object.keys(normalized.modules.framegen.defaults), ['synthesisMode', 'flowQuality', 'motionEstimation', 'frameMultiplier', 'artifactSuppression', 'motionLimitPercent'])
+  assert.deepEqual(Object.keys(normalized.modules.framegen.defaults), ['synthesisMode', 'flowQuality', 'motionEstimation', 'interpolateFlow', 'frameMultiplier', 'artifactSuppression', 'motionLimitPercent'])
   assert.equal(normalized.modules.framegen.defaults.frameMultiplier, '4x')
   assert.equal(normalized.modules.framegen.profiles[0].settings.frameMultiplier, '2x')
 
@@ -299,4 +299,12 @@ test('Frame Generation beside FPS widens only the compact FPS column, only when 
   assert.equal(osdCompactLayout(settings, { pivotSnapLine: true }).framegenBadge, false)
   // The old positional boolean meant different things on each branch; refuse it.
   assert.throws(() => osdCompactLayout(settings, true), TypeError)
+})
+
+test('Interpolate flow policy defaults to auto and preserves explicit overrides', () => {
+  assert.equal(normalizeFrameGenSettings({}).interpolateFlow, 'auto')
+  for (const interpolateFlow of ['auto', 'hardware', 'shader']) {
+    assert.equal(normalizeFrameGenSettings({ interpolateFlow }).interpolateFlow, interpolateFlow)
+  }
+  assert.equal(normalizeFrameGenSettings({ interpolateFlow: 'late' }).interpolateFlow, 'auto')
 })

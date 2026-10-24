@@ -1552,6 +1552,14 @@ void TestFrameGenProfileResolution() {
            "Dynamic frame multiplier was not parsed");
     Expect(std::string(depthxr::ToString(depthxr::FrameGenMultiplier::kDynamic)) == "dynamic",
            "Dynamic frame multiplier did not round-trip");
+    for (const std::string mode : {"auto", "hardware", "shader"}) {
+        const auto flow = depthxr::ParseConfig(FrameGenConfigJson(
+            "{\"enabled\":true,\"defaults\":{\"interpolateFlow\":\"" + mode + "\"}}"));
+        Expect(flow.ok && std::string(depthxr::ToString(flow.document.framegen.defaults.interpolate_flow)) == mode,
+               "Interpolate flow control did not round-trip: " + mode);
+    }
+    Expect(dynamic.document.framegen.defaults.interpolate_flow == depthxr::FrameGenInterpolateFlow::kAuto,
+           "Interpolate hardware fallback should default to auto");
     // The fixed rates, Auto among them, are still chosen explicitly.
     const depthxr::ParseResult automatic =
         depthxr::ParseConfig(FrameGenConfigJson(R"json({ "enabled": true, "defaults": { "frameMultiplier": "auto" } })json"));
@@ -1587,11 +1595,12 @@ void TestFrameGenToggleBindingList() {
 }
 
 void TestFrameGenInvalidSettingsRejected() {
-    const std::array<std::string, 8> invalid_modules{
+    const std::array<std::string, 9> invalid_modules{
         R"json({ "enabled": true, "defaults": { "frameMultiplier": "6x" } })json",
         R"json({ "enabled": true, "defaults": { "synthesisMode": "blend" } })json",
         R"json({ "enabled": true, "defaults": { "flowQuality": "ultra" } })json",
         R"json({ "enabled": true, "defaults": { "motionEstimation": "cuda" } })json",
+        R"json({ "enabled": true, "defaults": { "interpolateFlow": "fast" } })json",
         R"json({ "enabled": true, "defaults": { "artifactSuppression": 101 } })json",
         R"json({ "enabled": true, "defaults": { "motionLimitPercent": 1 } })json",
         R"json({ "enabled": true, "defaults": { "motionLimitPercent": 7.5 } })json",
@@ -6327,6 +6336,9 @@ void TestRuntimeRelayControlAndStatusRoundTrip() {
     status.application = "DCS.exe";
     status.updated_at_unix_milliseconds = 1000;
     status.acknowledged_revision = 17;
+    status.framegen_flow = "shader";
+    status.framegen_flow_mode = "auto";
+    status.framegen_flow_reason = "hardware late";
     status.quadviews_diagnostic_visualization_available = true;
     status.quadviews_diagnostic_visualization_enabled = true;
     const std::filesystem::path status_path = depthxr::RuntimeStatusPath(test_directory, session_id);
@@ -6337,6 +6349,10 @@ void TestRuntimeRelayControlAndStatusRoundTrip() {
     status_content << status_stream.rdbuf();
     Expect(status_content.str().find("\"acknowledgedRevision\": 17") != std::string::npos,
            "Runtime status acknowledgement was not serialized");
+    Expect(status_content.str().find("\"framegenFlow\": \"shader\"") != std::string::npos &&
+               status_content.str().find("\"framegenFlowMode\": \"auto\"") != std::string::npos &&
+               status_content.str().find("\"framegenFlowReason\": \"hardware late\"") != std::string::npos,
+           "Runtime status lost the active Interpolate flow and its reason");
     Expect(status_content.str().find("\"framegen\":") == std::string::npos,
            "Runtime status wrote Frame Generation rates for a session without it");
     status_stream.close(); // an open reader keeps the atomic replace from taking the file

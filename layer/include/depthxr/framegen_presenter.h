@@ -99,6 +99,15 @@ struct FrameGenStatus {
     // or the game ran late are left out.
     double distinct_fps{0.0};
     double gpu_ms{-1.0};
+    // The source actually used for the latest real frame, the Interpolate
+    // control, and its last decision (also used by the OSD and status file).
+    std::string interpolate_flow_active;
+    std::string interpolate_flow_mode;
+    std::string interpolate_flow_reason;
+    std::uint64_t interpolate_flow_switches{0};
+    std::uint64_t interpolate_flow_probes{0};
+    std::uint64_t interpolate_flow_fallbacks{0};
+    bool interpolate_flow_probing{false};
     std::uint64_t generated{0};
     std::uint64_t repeated{0};
     std::uint64_t failures{0};
@@ -273,6 +282,23 @@ struct FrameGenDynamicPolicy {
     double late_analyses_share{0.5}; // (d) analyses ending after their frames were needed, at most
 };
 
+// Interpolate's hardware-flow fallback. Tests shorten these times; the
+// production thresholds leave room above the healthy 2026-10-24 flights
+// (1.5% stale motion and one unready frame per 30 seconds).
+struct FrameGenInterpolateFlowPolicy {
+    std::chrono::milliseconds window{10000};
+    std::chrono::milliseconds shader_hold{60000};
+    std::chrono::milliseconds probe{10000};
+    std::chrono::milliseconds hold_max{480000};
+    double stale_share{0.05};
+    double unready_per_30s{10.0};
+    double hardware_late_share{0.25};
+    std::chrono::milliseconds hardware_grace{1};
+    std::uint64_t min_generated{30};
+    std::uint64_t min_hardware_samples{8};
+    std::uint32_t bad_windows{2};
+};
+
 // How the lead steps back down when nothing late made it grow for a while
 // (tests shorten the times). A probe takes one slot off; frames late again
 // within `judge` restore it, and that lead is then the lowest known to hold:
@@ -429,15 +455,12 @@ class FrameGenPresenter {
     // Quad views: how long the layer composes them after frames kept failing
     // to be written, doubling up to `longest` (tests shorten it).
     void SetQuadDecline(std::chrono::milliseconds first, std::chrono::milliseconds longest);
-    // Interpolating, motion is measured on the shader cores even with
-    // NVIDIA's optical flow hardware chosen. Beside a game's rendering the
-    // hardware's vectors come late on every graphics API (they wait for the
-    // busy GPU), while the frames between real frames need them first: DCS,
-    // flight 2, measured 8.6 ms against 1.1 on the shader cores, and 6-10% of
-    // refreshes repeated a frame; MSFS 2024 (2026-10-09) 9-17 ms, and its lead
-    // grew to 11-14 refreshes to make room. Both looked the same interpolated
-    // (MSFS, 2026-10-07). Extrapolate keeps the hardware.
+    // Compatibility override for older experiments and tests: force
+    // Dynamic Interpolate to shader. Production uses interpolate_flow;
+    // without this override hardware is honored with automatic fallback.
     void SetInterpolateOnShaders(bool on);
+    // Automatic flow fallback/probe timing (tests may shorten it).
+    void SetInterpolateFlowPolicy(const FrameGenInterpolateFlowPolicy& policy);
     // Delay before a paused session retries by itself, and how often; the
     // attempts are restored once the last retry has held this long without
     // another pause.
@@ -578,6 +601,7 @@ class FrameGenPresenter {
     // Drives the lead policy and the history ring's ceiling frame by frame,
     // without a presenter thread, for the presenter tests.
     friend class FrameGenLeadTestPeer;
+    friend class FrameGenFlowTestPeer;
     struct SwapchainRecord {
         std::int64_t format{0};
         std::uint32_t sample_count{1};
@@ -733,6 +757,10 @@ class FrameGenPresenter {
         // its motion moves this frame while this one's is still measured
         // (FrameGenGpu::SynthesizeStale).
         std::uint64_t previous_analyzed{0};
+        // Research only: accepting completed hardware vectors can be delayed
+        // without holding GPU work, changing fences, or sleeping any thread.
+        std::chrono::steady_clock::time_point motion_not_before{};
+        std::chrono::steady_clock::time_point previous_motion_not_before{};
         FrameCopy copy;            // its layers; the primary projection's views are its own
         std::vector<FrameGenOutputKind> kinds;       // per view
         std::vector<std::array<float, 3>> velocity; // per view (Analysis::velocity)
@@ -958,6 +986,7 @@ class FrameGenPresenter {
     struct Analysis {
         std::uint64_t frame{0}; // FrameGenExecuteResult::frame
         bool synthesized{false}; // motion was measured (a previous frame to measure it against)
+        std::chrono::steady_clock::time_point motion_not_before{};
         std::vector<FrameGenOutputKind> kinds;
         // Per view: how far the eye moves per unit forward in time (the
         // interval between the two real frames), in its view space, where
@@ -1046,7 +1075,17 @@ class FrameGenPresenter {
     void NoteGpuTimingLocked(std::uint64_t submission, const PendingFrame& frame,
                              const std::optional<FrameGenGpuWindow>& window,
                              const std::vector<FrameGenAnalysisTiming>& timings,
-                             std::chrono::steady_clock::time_point capture_pending_from = {});
+                             std::chrono::steady_clock::time_point capture_pending_from = {},
+                               bool hardware_flow = false);
+    // Called only while preparing a real frame's analysis. A multiplier
+    // probe freezes this controller, including explicit setting changes.
+    bool UpdateInterpolateFlowLocked(std::chrono::steady_clock::time_point now,
+                                     FrameGenSynthesisMode mode, bool hardware_selected);
+    void SwitchInterpolateFlowLocked(bool hardware, std::chrono::steady_clock::time_point now,
+                                     const std::string& reason);
+    void ResetInterpolateFlowWindowLocked(std::chrono::steady_clock::time_point now);
+    std::chrono::steady_clock::time_point InterpolateFlowDelayUntilLocked(
+        std::chrono::steady_clock::time_point now, FrameGenSynthesisMode mode, bool hardware_active);
     // One output image per spec in each of the first `sets` output sets.
     // `keep_replaced`: an output made anew keeps its old swapchain alive
     // (retired_outputs_) until a frame is written into the new ones.
@@ -1515,8 +1554,16 @@ class FrameGenPresenter {
         std::uint64_t unready{0};      // refreshes whose real frame was not captured yet
         std::uint64_t unmeasured{0};   // moved frames written as exact copies: motion not measured yet
         std::uint64_t stale_motion{0}; // moved frames moved by the previous real frame's motion instead
+        // Same successful-write population as stale_motion: moved outputs
+        // and their stale-motion safety copies, including repeated writes;
+        // ordinary real-frame copies are excluded. generated_distinct is a
+        // submission counter and is not the denominator for this signal.
+        std::uint64_t motion_outputs{0};
         std::uint64_t analyses_timed{0};
         std::uint64_t analyses_late{0};
+        std::uint64_t hardware_timed{0};
+        std::uint64_t hardware_late{0};
+        std::uint64_t hardware_lag_ns{0};
         std::uint64_t copies_skipped{0};
         std::uint64_t ring_exhausted{0}; // refreshes whose real frame's images newer captures had replaced
         std::uint64_t stale_skipped{0};  // refreshes not submitted: nothing current to show
@@ -1932,7 +1979,36 @@ class FrameGenPresenter {
     // Writing composed frames kept failing: the layer composes them until
     // then (doubling from quad_decline_first_ up to quad_decline_longest_).
     std::chrono::steady_clock::time_point quad_declined_until_{};
+    // Legacy test override: only Dynamic is forced to shader. Production
+    // uses settings_.interpolate_flow (the old env switch maps to hardware).
     bool interpolate_on_shaders_{false};
+    FrameGenInterpolateFlowPolicy interpolate_flow_policy_;
+    std::optional<FrameGenInterpolateFlow> interpolate_flow_env_;
+    std::optional<FrameGenInterpolateFlow> interpolate_flow_selected_;
+    bool interpolate_flow_hardware_selected_{false};
+    bool interpolate_flow_hardware_{true};
+    std::optional<bool> interpolate_flow_available_;
+    std::string interpolate_flow_active_;
+    std::string interpolate_flow_reason_;
+    struct InterpolateFlowWindow {
+        std::chrono::steady_clock::time_point start{};
+        Totals totals;
+    };
+    std::optional<InterpolateFlowWindow> interpolate_flow_window_;
+    std::uint32_t interpolate_flow_bad_windows_{0};
+    bool interpolate_flow_probing_{false};
+    std::chrono::steady_clock::time_point interpolate_flow_probe_started_{};
+    std::chrono::steady_clock::time_point interpolate_flow_probe_due_{};
+    std::chrono::milliseconds interpolate_flow_backoff_{60000};
+    std::uint64_t interpolate_flow_switches_{0};
+    std::uint64_t interpolate_flow_probes_{0};
+    std::uint64_t interpolate_flow_fallbacks_{0};
+    std::chrono::milliseconds interpolate_flow_delay_{0};
+    std::chrono::milliseconds interpolate_flow_delay_for_{25000};
+    // Anchored after backend/driver setup, on the first actual hardware
+    // Interpolate analysis. Once expired it stays expired for this session,
+    // including across frame resets and recovery probes.
+    std::optional<std::chrono::steady_clock::time_point> interpolate_flow_delay_started_;
     bool logged_interpolate_on_shaders_{false};
     bool logged_interpolate_on_hardware_{false};
     std::chrono::milliseconds quad_decline_first_{10000};
@@ -2045,6 +2121,7 @@ class FrameGenPresenter {
         std::chrono::steady_clock::time_point real_due{};
         std::chrono::steady_clock::time_point generated_due{};
         std::chrono::steady_clock::time_point capture_pending_from{};
+        bool hardware_flow{false};
     };
     std::deque<GpuDue> gpu_due_;
     std::vector<double> gpu_start_ms_;

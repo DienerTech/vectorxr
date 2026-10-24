@@ -42,7 +42,8 @@
     "flowQuality": "{field}은(는) performance, balanced 또는 quality여야 합니다",
     "motionEstimation": "{field}은(는) shader 또는 hardware여야 합니다",
     "frameMultiplier": "{field}은(는) auto, dynamic, 2x, 3x 또는 4x여야 합니다",
-    "diagnosticView": "{field}은(는) off, flow, confidence 또는 tint여야 합니다"
+    "diagnosticView": "{field}은(는) off, flow, confidence 또는 tint여야 합니다",
+    "interpolateFlow": "{field} 값은 auto, hardware 또는 shader여야 합니다"
   },
   "turbo": {
     "predictionPercent": "Turbo 실험적 예측 감쇠는 50에서 100 사이의 정수여야 합니다",

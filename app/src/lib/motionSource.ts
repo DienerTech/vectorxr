@@ -21,7 +21,7 @@ export interface GpuCapabilities {
 export interface MotionSourceState {
   // What Frame Generation measures motion with for these settings on this PC.
   effective: FrameGenMotionEstimation
-  // The choice does nothing: Interpolate in Dynamic measures with Shader whatever is chosen.
+  // The choice stays available in Dynamic; hardware may fall back while running.
   locked: boolean
   // Why NVIDIA hardware cannot be chosen (null: it can be, or it is not known).
   hardwareUnavailable: string | null
@@ -32,11 +32,11 @@ export interface MotionSourceState {
 // rewritten here: switching to Extrapolate, or to a PC with the hardware,
 // brings it back.
 export function motionSourceState(
-  settings: Pick<FrameGenSettings, 'synthesisMode' | 'motionEstimation' | 'frameMultiplier'>,
+  settings: Pick<FrameGenSettings, 'synthesisMode' | 'motionEstimation' | 'frameMultiplier'> & Partial<Pick<FrameGenSettings, 'interpolateFlow'>>,
   gpus: GpuCapabilities | null,
 ): MotionSourceState {
   const interpolate = settings.synthesisMode === 'interpolate'
-  const locked = interpolate && settings.frameMultiplier === 'dynamic'
+  const locked = false
   let hardwareUnavailable: string | null = null
   if (gpus?.probed && !gpus.opticalFlow) {
     // adapter.detail comes from the app backend and stays as it reads there.
@@ -45,14 +45,12 @@ export function motionSourceState(
       ? t('pivot.motionSource.hardwareUnavailableCards', { cards })
       : t('pivot.motionSource.hardwareUnavailable')
   }
-  const effective: FrameGenMotionEstimation = locked || hardwareUnavailable ? 'shader' : settings.motionEstimation
+  const effective: FrameGenMotionEstimation = hardwareUnavailable || (interpolate && settings.interpolateFlow === 'shader') ? 'shader' : settings.motionEstimation
   let note: string | null = null
-  if (locked) {
-    note = t('pivot.motionSource.lockedNote')
-  } else if (hardwareUnavailable && settings.motionEstimation === 'hardware') {
+  if (hardwareUnavailable && settings.motionEstimation === 'hardware') {
     note = t('pivot.motionSource.hardwareMissingNote')
   } else if (interpolate && effective === 'hardware') {
-    note = t('pivot.motionSource.experimentalNote')
+    note = t('framegen.settings.interpolateFlow.description')
   }
   return { effective, locked, hardwareUnavailable, note }
 }

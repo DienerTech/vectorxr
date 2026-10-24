@@ -232,6 +232,12 @@
     "headPrediction": {
       "heading": "Kopfvorhersage erweitern",
       "description": "Frame Generation lässt das Spiel bis zu ~150 ms im Voraus rendern, und manche Laufzeiten, etwa die von Pimax, sagen Ihren Kopf nur ~20 ms davon voraus. Diese Option führt die Drehung Ihres Kopfes über den Rest fort, für weniger Schwarz an dem Rand, zu dem Sie sich drehen. Schalten Sie sie vor dem Start des Spiels ein."
+    },
+    "interpolateFlow": {
+      "legend": "Interpolationsfluss",
+      "description": "Auto nutzt Hardware-Fluss, wechselt bei verspäteten Frames zu Shader und versucht später erneut Hardware.",
+      "hardware": "Hardware-Fluss beibehalten.",
+      "shader": "Shader-Fluss beibehalten."
     }
   }
 }

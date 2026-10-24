@@ -429,7 +429,7 @@ export interface RuntimeStatusSession {
   // framegenState: 'off' | 'waiting' | 'active' | 'standby' | 'paused' | 'unavailable';
   // framegenDepth: 'in-use' | 'checking' | 'not-sent' | 'not-readable' | 'empty' | 'unusable', or empty
   // before generated frames; Frame Generation fields are absent with older layers.
-  state: { osdVisible?: boolean; osdCompact?: boolean; osdMessage?: string; quadviewsDiagnosticVisualization: boolean; turboState?: string; turboReason?: string; framegenState?: string; framegenReason?: string; framegenDepth?: string }
+  state: { osdVisible?: boolean; osdCompact?: boolean; osdMessage?: string; quadviewsDiagnosticVisualization: boolean; turboState?: string; turboReason?: string; framegenState?: string; framegenReason?: string; framegenDepth?: string; framegenFlow?: string; framegenFlowMode?: string; framegenFlowReason?: string }
 }
 
 export interface RuntimeStatusEnvelope {

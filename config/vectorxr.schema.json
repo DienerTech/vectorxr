@@ -1685,6 +1685,12 @@
           "default": "shader",
           "description": "How motion is measured: block matching on the shader cores (any GPU), or the optical flow accelerator of NVIDIA RTX GPUs (recommended where available, and needed for extrapolate to look its best; shader is used where it cannot be)."
         },
+        "interpolateFlow": {
+          "type": "string",
+          "enum": ["auto", "hardware", "shader"],
+          "default": "auto",
+          "description": "When hardware motion estimation is selected, Interpolate automatically falls back to shader flow when hardware is late, then periodically retries. hardware or shader pins the source."
+        },
         "frameMultiplier": {
           "type": "string",
           "enum": [

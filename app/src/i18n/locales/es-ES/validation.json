@@ -42,7 +42,8 @@
     "flowQuality": "{field} debe ser performance, balanced o quality",
     "motionEstimation": "{field} debe ser shader o hardware",
     "frameMultiplier": "{field} debe ser auto, dynamic, 2x, 3x o 4x",
-    "diagnosticView": "{field} debe ser off, flow, confidence o tint"
+    "diagnosticView": "{field} debe ser off, flow, confidence o tint",
+    "interpolateFlow": "{field} debe ser auto, hardware o shader"
   },
   "turbo": {
     "predictionPercent": "La atenuación experimental de la predicción de Turbo debe ser un número entero de 50 a 100",

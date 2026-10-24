@@ -11,6 +11,7 @@ import {
   frameGenLimits,
   type FrameGenFixedMultiplier,
   type FrameGenFlowQuality,
+  type FrameGenInterpolateFlow,
   type FrameGenMotionEstimation,
   type FrameGenSettings,
   type FrameGenSynthesisMode,
@@ -80,14 +81,13 @@ const frameRate = computed<FrameRate>({
 })
 const fixedRateDescription = computed(() => fixedRates.value.find((rate) => rate.value === props.settings.frameMultiplier)?.description ?? '')
 
-// Interpolate in Dynamic always measures with Shader, and NVIDIA hardware needs a card
-// that has it (any card in the PC, as the driver reports): the cards show
-// the source in use, greyed where the choice does nothing; a click still
-// saves the choice.
+// NVIDIA hardware needs a card that has it. Interpolate can fall back to
+// shader flow while running; this editor preserves the saved hardware choice.
 const gpuCapabilities = useGpuCapabilities()
 const motionSource = computed(() => motionSourceState(props.settings, gpuCapabilities.value))
 const motionSourceModel = computed<FrameGenMotionEstimation>({
-  get: () => motionSource.value.effective,
+  // This card edits the saved source; the separate policy may temporarily use Shader.
+  get: () => motionSource.value.hardwareUnavailable ? 'shader' : props.settings.motionEstimation,
   set: (value) => { props.settings.motionEstimation = value },
 })
 const motionSources = computed(() => [
@@ -104,6 +104,12 @@ const motionSources = computed(() => [
     disabled: motionSource.value.hardwareUnavailable !== null,
     disabledReason: motionSource.value.hardwareUnavailable,
   },
+])
+
+const interpolateFlows = computed<{ value: FrameGenInterpolateFlow; label: string; description: string }[]>(() => [
+  { value: 'auto', label: t('common.auto'), description: t('framegen.settings.interpolateFlow.description') },
+  { value: 'hardware', label: t('framegen.settings.motionSource.hardware.label'), description: t('framegen.settings.interpolateFlow.hardware') },
+  { value: 'shader', label: t('framegen.settings.motionSource.shader.label'), description: t('framegen.settings.interpolateFlow.shader') },
 ])
 
 const flowQualities = computed<{ value: FrameGenFlowQuality; label: string; summary: string; resolution: string }[]>(() => [
@@ -168,6 +174,10 @@ function resetAdvanced() {
         </div>
         <p v-if="frameRate === 'fixed'" class="mt-2 text-xs leading-5 text-muted">{{ fixedRateDescription }}</p>
       </OptionCards>
+    </div>
+
+    <div v-if="settings.synthesisMode === 'interpolate' && settings.motionEstimation === 'hardware'" class="rounded-[1rem] border p-4 surface-panel-soft">
+      <OptionCards v-model="settings.interpolateFlow" :legend="t('framegen.settings.interpolateFlow.legend')" :options="interpolateFlows" />
     </div>
 
     <div class="rounded-[1rem] border p-4 surface-panel-soft">

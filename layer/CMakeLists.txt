@@ -564,6 +564,15 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         add_test(NAME depthxr_d3d11_bridge_hw_tests COMMAND depthxr_d3d11_bridge_tests hw)
         set_tests_properties(depthxr_d3d11_bridge_tests depthxr_d3d11_bridge_hw_tests PROPERTIES TIMEOUT 120
                              SKIP_RETURN_CODE 77)
+        # Positive Dynamic Interpolate fallback/recovery on real NVIDIA optical flow.
+        # Short CPU-only vector-acceptance delay; no GPU stall or negative control.
+        add_executable(depthxr_framegen_interpolate_flow_hw_tests tests/framegen_interpolate_flow_hw_tests.cpp)
+        target_link_libraries(depthxr_framegen_interpolate_flow_hw_tests PRIVATE depthxr_framegen d3d12 dxgi)
+        target_compile_definitions(depthxr_framegen_interpolate_flow_hw_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX
+            XR_USE_GRAPHICS_API_D3D12)
+        add_test(NAME depthxr_framegen_interpolate_flow_hw_tests COMMAND depthxr_framegen_interpolate_flow_hw_tests)
+        # Never let CTest terminate a process with live GPU work.
+        set_tests_properties(depthxr_framegen_interpolate_flow_hw_tests PROPERTIES TIMEOUT 0 SKIP_RETURN_CODE 77)
         add_executable(depthxr_framegen_presenter_tests tests/framegen_presenter_tests.cpp)
         target_link_libraries(depthxr_framegen_presenter_tests PRIVATE depthxr_framegen)
         target_compile_definitions(depthxr_framegen_presenter_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)

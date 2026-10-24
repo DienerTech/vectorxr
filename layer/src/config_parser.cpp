@@ -2458,6 +2458,7 @@ bool ParseFrameGenSettings(const JsonValue::Object& object, const char* field, F
         "synthesisMode",
         "flowQuality",
         "motionEstimation",
+        "interpolateFlow",
         "frameMultiplier",
         "artifactSuppression",
         "motionLimitPercent",
@@ -2468,12 +2469,22 @@ bool ParseFrameGenSettings(const JsonValue::Object& object, const char* field, F
     std::optional<std::string> synthesis_mode;
     std::optional<std::string> flow_quality;
     std::optional<std::string> motion_estimation;
+    std::optional<std::string> interpolate_flow;
     std::optional<std::string> multiplier;
     if (!ReadOptionalString(object, "synthesisMode", synthesis_mode, error) ||
         !ReadOptionalString(object, "flowQuality", flow_quality, error) ||
         !ReadOptionalString(object, "motionEstimation", motion_estimation, error) ||
+        !ReadOptionalString(object, "interpolateFlow", interpolate_flow, error) ||
         !ReadOptionalString(object, "frameMultiplier", multiplier, error)) {
         return false;
+    }
+    if (interpolate_flow) {
+        const auto parsed = ParseFrameGenInterpolateFlow(*interpolate_flow);
+        if (!parsed) {
+            error = std::string(field) + ".interpolateFlow must be auto, hardware, or shader";
+            return false;
+        }
+        out.interpolate_flow = *parsed;
     }
     if (motion_estimation) {
         const auto parsed = ParseFrameGenMotionEstimation(*motion_estimation);

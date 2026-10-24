@@ -42,7 +42,8 @@
     "flowQuality": "{field} 必须为 performance、balanced 或 quality",
     "motionEstimation": "{field} 必须为 shader 或 hardware",
     "frameMultiplier": "{field} 必须为 auto、dynamic、2x、3x 或 4x",
-    "diagnosticView": "{field} 必须为 off、flow、confidence 或 tint"
+    "diagnosticView": "{field} 必须为 off、flow、confidence 或 tint",
+    "interpolateFlow": "{field} 必须为 auto、hardware 或 shader"
   },
   "turbo": {
     "predictionPercent": "Turbo 实验性预测阻尼必须是 50 到 100 之间的整数",

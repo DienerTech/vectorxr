@@ -257,7 +257,10 @@ bool WriteRuntimeStatus(const std::filesystem::path& path, const RuntimeStatusDo
            << "\", \"turboReason\": \"" << EscapeJson(document.turbo_reason)
            << "\", \"framegenState\": \"" << EscapeJson(document.framegen_state)
            << "\", \"framegenReason\": \"" << EscapeJson(document.framegen_reason)
-           << "\", \"framegenDepth\": \"" << EscapeJson(document.framegen_depth) << "\" },\n";
+           << "\", \"framegenDepth\": \"" << EscapeJson(document.framegen_depth)
+           << "\", \"framegenFlow\": \"" << EscapeJson(document.framegen_flow)
+           << "\", \"framegenFlowMode\": \"" << EscapeJson(document.framegen_flow_mode)
+           << "\", \"framegenFlowReason\": \"" << EscapeJson(document.framegen_flow_reason) << "\" },\n";
     if (const auto& rates = document.framegen_rates) {
         stream << std::fixed << std::setprecision(1) << "  \"framegen\": { \"mode\": \"" << EscapeJson(rates->mode)
                << "\", \"frameRate\": \"" << EscapeJson(rates->frame_rate)

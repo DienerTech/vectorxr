@@ -42,7 +42,8 @@
     "flowQuality": "{field} должно иметь значение performance, balanced или quality",
     "motionEstimation": "{field} должно иметь значение shader или hardware",
     "frameMultiplier": "{field} должно иметь значение auto, dynamic, 2x, 3x или 4x",
-    "diagnosticView": "{field} должно иметь значение off, flow, confidence или tint"
+    "diagnosticView": "{field} должно иметь значение off, flow, confidence или tint",
+    "interpolateFlow": "{field} должно быть auto, hardware или shader"
   },
   "turbo": {
     "predictionPercent": "Экспериментальное ослабление прогноза Turbo должно быть целым числом от 50 до 100",

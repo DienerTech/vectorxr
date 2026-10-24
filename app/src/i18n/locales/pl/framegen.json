@@ -232,6 +232,12 @@
     "headPrediction": {
       "heading": "Rozszerz predykcję głowy",
       "description": "Frame Generation sprawia, że gra renderuje nawet ~150 ms do przodu, a niektóre środowiska uruchomieniowe, np. Pimax, przewidują ruch głowy tylko dla ~20 ms z tego czasu. Ta opcja przenosi obrót głowy na resztę, aby było mniej czerni na krawędzi, w którą się obracasz. Włącz ją przed uruchomieniem gry."
+    },
+    "interpolateFlow": {
+      "legend": "Przepływ interpolacji",
+      "description": "Auto używa sprzętu, przełącza na Shader przy opóźnionych klatkach, a potem ponawia próbę sprzętu.",
+      "hardware": "Zawsze używaj przepływu sprzętowego.",
+      "shader": "Zawsze używaj przepływu Shader."
     }
   }
 }
