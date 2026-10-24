@@ -157,6 +157,17 @@ FrameGenConstants BaseConstants(const FrameGenViewRequest& request, const FrameG
     if (tuning.sharpen > 0.0f && mode == FrameGenSynthesisMode::kInterpolate && request.depth) {
         view |= FrameGenHalf(std::min(tuning.sharpen, 2.0f)) << kFrameGenSharpenShift;
     }
+    // Research: the prop hold on still-world frames with depth (never
+    // without appSpaceDeltaPose: no frame is known still), its threshold and
+    // margin beside the diagnostic view.
+    if (tuning.prop_hold.enabled && request.depth && FrameGenWorldStill(request)) {
+        flags |= kFrameGenFlagPropHold;
+        const auto step = [](float value) {
+            return static_cast<std::uint32_t>(std::clamp(std::lround(value / kFrameGenPropStep), 0L, 63L));
+        };
+        view |= step(tuning.prop_hold.threshold) << kFrameGenPropThresholdShift |
+                step(tuning.prop_hold.margin) << kFrameGenPropMarginShift;
+    }
     base.options = {kFrameGenSearchRadius, flags, view, 0};
     base.tuning = {std::clamp(tuning.fractions[0], 0.0f, 1.0f), limit, 4.0f + 26.0f * suppression,
                    3.0f + 21.0f * suppression};
@@ -164,11 +175,19 @@ FrameGenConstants BaseConstants(const FrameGenViewRequest& request, const FrameG
 }
 
 // The synthesis pass writing the request's output (8-bit or float); with the
-// sharpening's amount in `base` (research, BaseConstants), the one built with
-// it.
+// sharpening's amount or the prop hold in `base` (research, BaseConstants),
+// the one built with them. A still image is a copy: the plain pass.
 FrameGenPass SynthesisPass(const FrameGenViewRequest& request, const FrameGenConstants& base) {
     const bool float16 = request.output == FrameGenOutputKind::kFloat16;
-    if ((base.options[2] >> kFrameGenSharpenShift) != 0u) {
+    const bool sharpen = (base.options[2] >> kFrameGenSharpenShift) != 0u;
+    const bool prop = (base.options[1] & (kFrameGenFlagPropHold | kFrameGenFlagStill)) == kFrameGenFlagPropHold;
+    if (prop) {
+        if (sharpen) {
+            return float16 ? FrameGenPass::kSynthesizeFloat16PropSharpen : FrameGenPass::kSynthesizeUnorm8PropSharpen;
+        }
+        return float16 ? FrameGenPass::kSynthesizeFloat16Prop : FrameGenPass::kSynthesizeUnorm8Prop;
+    }
+    if (sharpen) {
         return float16 ? FrameGenPass::kSynthesizeFloat16Sharpen : FrameGenPass::kSynthesizeUnorm8Sharpen;
     }
     return float16 ? FrameGenPass::kSynthesizeFloat16 : FrameGenPass::kSynthesizeUnorm8;
@@ -748,7 +767,7 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
     if (!plan.synthesize) {
         // Still image: the synthesis pass with the still flag and no flow.
         FrameGenDispatch still = Dispatch(synthesize, plan.levels[0], plan.levels[0], base);
-        still.constants.options[1] |= kFrameGenFlagStill;
+        still.constants.options[1] = (still.constants.options[1] | kFrameGenFlagStill) & ~kFrameGenFlagPropHold;
         still.constants.options[2] = static_cast<std::uint32_t>(FrameGenDiagnosticView::kOff);
         still.pass = SynthesisPass(request, still.constants);
         still.inputs = {Texture(FrameGenTextureKind::kHistoryNewest), {}, {}, {}, {}};
@@ -1162,7 +1181,7 @@ FrameGenViewPlan BuildFrameGenSynthesisPlan(const FrameGenViewRequest& request, 
     const float time = extrapolate ? fraction : 1.0f - fraction;
     if (!plan.synthesize || time <= 0.0f) {
         FrameGenDispatch still = Dispatch(synthesize, plan.levels[0], plan.levels[0], base);
-        still.constants.options[1] |= kFrameGenFlagStill;
+        still.constants.options[1] = (still.constants.options[1] | kFrameGenFlagStill) & ~kFrameGenFlagPropHold;
         still.constants.options[2] = static_cast<std::uint32_t>(FrameGenDiagnosticView::kOff);
         still.pass = SynthesisPass(request, still.constants);
         still.inputs = {Texture(FrameGenTextureKind::kHistoryNewest), {}, {}, {}, {}};
@@ -1786,6 +1805,37 @@ float ParseFrameGenSharpen(const std::string& value) {
         return 0.0f;
     }
     return std::min(amount, 2.0f);
+}
+
+FrameGenPropHold ParseFrameGenPropHold(const std::string& value) {
+    FrameGenPropHold hold;
+    std::string text(value);
+    std::transform(text.begin(), text.end(), text.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    const std::size_t colon = text.find(':');
+    if (text.substr(0, colon) != "hold-still") {
+        return hold;
+    }
+    hold.enabled = true;
+    if (colon == std::string::npos) {
+        return hold;
+    }
+    // Each in 0..63 steps of kFrameGenPropStep, as the constants carry it.
+    const auto parse = [](const std::string& part, float& out) {
+        char* end = nullptr;
+        const float number = std::strtof(part.c_str(), &end);
+        if (!part.empty() && end == part.c_str() + part.size() && std::isfinite(number) && number >= 0.0f &&
+            number <= 63.0f * kFrameGenPropStep + 1e-6f) {
+            out = static_cast<float>(std::lround(number / kFrameGenPropStep)) * kFrameGenPropStep;
+        }
+    };
+    const std::string rest = text.substr(colon + 1);
+    const std::size_t comma = rest.find(',');
+    parse(rest.substr(0, comma), hold.threshold);
+    if (comma != std::string::npos) {
+        parse(rest.substr(comma + 1), hold.margin);
+    }
+    return hold;
 }
 
 const char* ToString(FrameGenEyePredictor predictor) {

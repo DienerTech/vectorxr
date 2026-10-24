@@ -50,6 +50,23 @@
 #define FG_PASS_SYNTHESIZE_FLOAT16 1
 #define FG_SYNTH_SHARPEN 1
 #endif
+// The prop hold (research, FG_FLAG_PROP_HOLD; options.z's bits 4-15) too
+// (FG_SYNTH_PROP), alone or with the sharpening.
+#if defined(FG_PASS_SYNTHESIZE_UNORM8_PROP)
+#define FG_PASS_SYNTHESIZE_UNORM8 1
+#define FG_SYNTH_PROP 1
+#elif defined(FG_PASS_SYNTHESIZE_FLOAT16_PROP)
+#define FG_PASS_SYNTHESIZE_FLOAT16 1
+#define FG_SYNTH_PROP 1
+#elif defined(FG_PASS_SYNTHESIZE_UNORM8_PROP_SHARPEN)
+#define FG_PASS_SYNTHESIZE_UNORM8 1
+#define FG_SYNTH_PROP 1
+#define FG_SYNTH_SHARPEN 1
+#elif defined(FG_PASS_SYNTHESIZE_FLOAT16_PROP_SHARPEN)
+#define FG_PASS_SYNTHESIZE_FLOAT16 1
+#define FG_SYNTH_PROP 1
+#define FG_SYNTH_SHARPEN 1
+#endif
 
 #ifdef __spirv__
 #define FG_BIND(slot) [[vk::binding(slot, 0)]]
@@ -173,6 +190,10 @@ cbuffer FrameGenConstantBuffer : register(b0) {
 // from 2 pixels (sub-pixel motion shows), instead of by its share of the
 // view.
 #define FG_FLAG_FLOW_FINE 8388608u
+// Research (kFrameGenFlagPropHold, set on still-world frames with depth): the
+// plan runs synthesis as the passes built with FG_SYNTH_PROP then, so the
+// flag itself is not read; see Synthesize.
+#define FG_FLAG_PROP_HOLD 1048576u
 // The candidates' flags (FG_PASS_ENGINE_CONVERT; the nearest surface's in
 // bits 0-3 of its info, the farthest's in 4-7): not a vector (the capture's
 // sentinel), mapped behind the view, absent (a game that clears its vectors:
@@ -1979,6 +2000,9 @@ float4 Synthesize(float2 position, float fraction) {
     // outright; elsewhere (no depth or depth dropped, which the eye-shift map
     // leaves too) the field at the pixel, without an eye shift.
     bool mapped = false;
+#if defined(FG_SYNTH_PROP)
+    bool prop_hold = false; // research: the newest frame here, unblended
+#endif
 #if !defined(__spirv__)
     const uint merged = FG_FLAG_DEPTH_SPLAT | FG_FLAG_ENGINE | FG_FLAG_DEPTH;
     if (!still && (g.options.y & merged) == merged) {
@@ -2095,6 +2119,31 @@ float4 Synthesize(float2 position, float fraction) {
 #endif
             }
         }
+#if defined(FG_SYNTH_PROP)
+        // Research (VECTORXR_FRAMEGEN_SYNTH_PROP=hold-still, the GB10 sweep's
+        // stage P1; these passes run on still-world frames with depth alone): a
+        // transparent fast layer, the C172's propeller disc, writes no depth,
+        // so the runway's or the sky's is behind it, and no vector has the two
+        // real frames agree there: the chosen candidate's error (as chosen at a
+        // motion boundary, biases included; else the smooth field's vector,
+        // scored once) above the threshold, and zero motion explaining the
+        // pixel within the margin of it (nothing tracks it better than
+        // standing still, so moving content keeps its vector). Known depth of
+        // 4 m or more only: the cockpit is nearer, and no depth (0) is not
+        // known. Thresholds in options.z's bits 4-9 and 10-15, 0.005 a step.
+        [branch]
+        if ((g.options.y & FG_FLAG_DEPTH) != 0u && abs(DepthAt(uv)) >= 4.0) {
+            float prop_error = chosen_error;
+            [branch]
+            if (!boundary) {
+                prop_error = CandidateError(uv, chosen.xy, step);
+            }
+            [branch]
+            if (prop_error > 0.005 * float((g.options.z >> 4) & 63u)) {
+                prop_hold = CandidateError(uv, float2(0.0, 0.0), step) <= prop_error + 0.005 * float((g.options.z >> 10) & 63u);
+            }
+        }
+#endif
     }
 
 #if !defined(__spirv__)
@@ -2127,6 +2176,19 @@ float4 Synthesize(float2 position, float fraction) {
     }
 #endif
 
+#if defined(FG_SYNTH_PROP)
+    // A held pixel reads the newest frame where it is (the eye-shift map's
+    // place, as every read), by the resampling the switches give it, and
+    // shows that read alone: no motion, no previous-frame blend, no
+    // Occlusion() pick, no cross-fade, no sharpening, no Extrapolate
+    // agreement. Over the depth splat too.
+    if (prop_hold) {
+        chosen.xy = float2(0.0, 0.0);
+        chosen_error = 0.0;
+        occlusion = 0;
+        boundary = false;
+    }
+#endif
     // The motion limit guards flow, not the eye's movement: the merged map's
     // entries hold the eye's offset, and the map limited their flow itself.
     const float shift = length(step * chosen.xy * aspect);
@@ -2179,7 +2241,13 @@ float4 Synthesize(float2 position, float fraction) {
         if (!forward && MapToPrevious(uv - confidence * fraction * occlusion_v, occlusion_depth, previous_uv)) {
             result = SampleColor(g_previous, previous_uv, cubic_previous);
         }
-    } else if (!extrapolate && !still) {
+    }
+#if defined(FG_SYNTH_PROP)
+    else if (prop_hold) {
+        photometric_confidence = 0.0;
+    }
+#endif
+    else if (!extrapolate && !still) {
         float2 previous_uv;
         if (MapToPrevious(source - confidence * chosen.xy, DepthAt(source), previous_uv)) {
             const float4 previous = SampleColor(g_previous, previous_uv, cubic_previous);
@@ -2251,7 +2319,11 @@ float4 Synthesize(float2 position, float fraction) {
     }
     const float4 flow_here = chosen;
 
-#if defined(FG_SYNTH_SHARPEN)
+#if defined(FG_SYNTH_PROP)
+    // Bits 4-15 are the prop hold's thresholds, the high half the
+    // sharpening's amount (the plan sets them for these passes alone).
+    const uint view = g.options.z & 0xfu;
+#elif defined(FG_SYNTH_SHARPEN)
     // The high half is the sharpening's amount (the plan sets it for these
     // passes alone).
     const uint view = g.options.z & 0xffffu;

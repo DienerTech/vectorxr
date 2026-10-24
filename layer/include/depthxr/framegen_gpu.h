@@ -481,8 +481,11 @@ extern const std::array<Blob, kFrameGenPassCount> kSpirv;
 // writing 1 to kFrameGenMaxGenerated generated frames, then the quad views
 // compose pixel shader (empty while the build has none), then the pixel
 // shaders again with the Interpolate blend's sharpening (research,
-// kFrameGenSharpenShift): the one writing n frames at kComposeDrawShader + n.
-inline constexpr std::size_t kDrawShaderCount = 2 + 2 * kFrameGenMaxGenerated;
+// kFrameGenSharpenShift): the one writing n frames at kComposeDrawShader + n;
+// then with the prop hold (research, kFrameGenFlagPropHold) at
+// kComposeDrawShader + kFrameGenMaxGenerated + n, and with both at
+// kComposeDrawShader + 2 * kFrameGenMaxGenerated + n.
+inline constexpr std::size_t kDrawShaderCount = 2 + 4 * kFrameGenMaxGenerated;
 inline constexpr std::size_t kComposeDrawShader = 1 + kFrameGenMaxGenerated;
 extern const std::array<Blob, kDrawShaderCount> kDxbcDraw;
 } // namespace framegen_shaders

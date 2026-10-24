@@ -1892,6 +1892,104 @@ void TestFrameGenPlan() {
             }
             Expect(same, "No sharpening leaves every constant as it was");
         }
+        // The prop hold (VECTORXR_FRAMEGEN_SYNTH_PROP): its values; then its
+        // passes, flag and thresholds on still-world frames with depth alone.
+        {
+            const depthxr::FrameGenPropHold plain_hold = depthxr::ParseFrameGenPropHold("hold-still");
+            const depthxr::FrameGenPropHold tuned = depthxr::ParseFrameGenPropHold("HOLD-STILL:0.03,0.03");
+            const depthxr::FrameGenPropHold first = depthxr::ParseFrameGenPropHold("hold-still:0.1");
+            const depthxr::FrameGenPropHold bad = depthxr::ParseFrameGenPropHold("hold-still:x,0.011");
+            const depthxr::FrameGenPropHold wide = depthxr::ParseFrameGenPropHold("hold-still:0.5,0");
+            Expect(plain_hold.enabled && plain_hold.threshold == 0.06f && plain_hold.margin == 0.02f &&
+                       tuned.enabled && std::abs(tuned.threshold - 0.03f) < 1e-6f && std::abs(tuned.margin - 0.03f) < 1e-6f &&
+                       first.enabled && std::abs(first.threshold - 0.1f) < 1e-6f && first.margin == 0.02f &&
+                       bad.enabled && bad.threshold == 0.06f && std::abs(bad.margin - 0.01f) < 1e-6f &&
+                       wide.enabled && wide.threshold == 0.06f && wide.margin == 0.0f,
+                   "VECTORXR_FRAMEGEN_SYNTH_PROP's values parse as named (steps of 0.005, at most 0.315)");
+            Expect(!depthxr::ParseFrameGenPropHold("").enabled && !depthxr::ParseFrameGenPropHold("hold").enabled &&
+                       !depthxr::ParseFrameGenPropHold("1").enabled && !depthxr::ParseFrameGenPropHold("hold-stillx").enabled,
+                   "Anything else leaves the prop hold off");
+            const auto synthesis_of = [&](const depthxr::FrameGenTuning& with) {
+                depthxr::FrameGenDispatch last{};
+                last.pass = depthxr::FrameGenPass::kLuma;
+                for (const depthxr::FrameGenDispatch& dispatch : depthxr::BuildFrameGenViewPlan(request, with).dispatches) {
+                    switch (dispatch.pass) {
+                    case depthxr::FrameGenPass::kSynthesizeUnorm8:
+                    case depthxr::FrameGenPass::kSynthesizeFloat16:
+                    case depthxr::FrameGenPass::kSynthesizeUnorm8Sharpen:
+                    case depthxr::FrameGenPass::kSynthesizeFloat16Sharpen:
+                    case depthxr::FrameGenPass::kSynthesizeUnorm8Prop:
+                    case depthxr::FrameGenPass::kSynthesizeFloat16Prop:
+                    case depthxr::FrameGenPass::kSynthesizeUnorm8PropSharpen:
+                    case depthxr::FrameGenPass::kSynthesizeFloat16PropSharpen:
+                        last = dispatch;
+                        break;
+                    default:
+                        break;
+                    }
+                }
+                return last;
+            };
+            const depthxr::FrameGenViewRequest plain_request = request;
+            request.app_delta = true;
+            request.delta_orientation = {0.0f, 0.0f, 0.0f, 1.0f};
+            request.delta_position = {0.0f, 0.0f, 0.0f};
+            depthxr::FrameGenTuning held = tuning;
+            held.prop_hold = plain_hold;
+            const depthxr::FrameGenDispatch off_dispatch = synthesis_of(tuning);
+            const depthxr::FrameGenDispatch held_dispatch = synthesis_of(held);
+            const std::uint32_t thresholds = 12u << depthxr::kFrameGenPropThresholdShift | 4u << depthxr::kFrameGenPropMarginShift;
+            Expect((off_dispatch.constants.options[1] & depthxr::kFrameGenFlagPropHold) == 0 &&
+                       held_dispatch.constants.options[1] == (off_dispatch.constants.options[1] | depthxr::kFrameGenFlagPropHold) &&
+                       held_dispatch.constants.options[2] == (off_dispatch.constants.options[2] | thresholds),
+                   "A still-world frame with depth holds props: the flag, and 0.06 and 0.02 as steps of 0.005");
+            request.output = depthxr::FrameGenOutputKind::kUnorm8;
+            Expect(synthesis_of(tuning).pass == depthxr::FrameGenPass::kSynthesizeUnorm8 &&
+                       synthesis_of(held).pass == depthxr::FrameGenPass::kSynthesizeUnorm8Prop,
+                   "The prop hold runs as its own pass");
+            request.output = depthxr::FrameGenOutputKind::kFloat16;
+            Expect(synthesis_of(held).pass == depthxr::FrameGenPass::kSynthesizeFloat16Prop, "Float synthesis too");
+            depthxr::FrameGenTuning held_sharp = held;
+            held_sharp.mode = depthxr::FrameGenSynthesisMode::kInterpolate;
+            held_sharp.sharpen = 0.5f;
+            Expect(synthesis_of(held_sharp).pass == depthxr::FrameGenPass::kSynthesizeFloat16PropSharpen,
+                   "With the sharpening, the pass built with both");
+            request.output = depthxr::FrameGenOutputKind::kUnorm8;
+            Expect(synthesis_of(held_sharp).pass == depthxr::FrameGenPass::kSynthesizeUnorm8PropSharpen,
+                   "8-bit, the pass built with both");
+            held.mode = depthxr::FrameGenSynthesisMode::kInterpolate;
+            Expect(synthesis_of(held).pass == depthxr::FrameGenPass::kSynthesizeUnorm8Prop, "Interpolating too");
+            held.mode = tuning.mode;
+            request.output = plain_request.output;
+            // Off on every frame not known still, without depth, and for a
+            // still image: those are the plain pass with the constants it had.
+            const auto plain_as_off = [&](const char* what) {
+                const depthxr::FrameGenDispatch with = synthesis_of(held);
+                const depthxr::FrameGenDispatch without = synthesis_of(tuning);
+                Expect(with.pass == without.pass &&
+                           std::memcmp(&with.constants, &without.constants, sizeof(depthxr::FrameGenConstants)) == 0,
+                       what);
+            };
+            request.app_delta = false;
+            plain_as_off("Without appSpaceDeltaPose the prop hold is off: no frame is known still");
+            request.app_delta = true;
+            request.delta_position = {0.0f, 0.0f, 0.01f};
+            plain_as_off("A world moved 1 cm leaves the prop hold off");
+            request.delta_position = {0.0f, 0.0f, 0.0f};
+            request.delta_orientation = {0.0f, 0.001f, 0.0f, 0.9999995f};
+            plain_as_off("A world turned 0.11 degrees leaves the prop hold off");
+            request.delta_orientation = {0.0f, 0.0f, 0.0f, 1.0f};
+            request.depth = false;
+            plain_as_off("Without depth the prop hold is off");
+            request.depth = true;
+            request.synthesize = false;
+            const depthxr::FrameGenDispatch copy = synthesis_of(held);
+            Expect((copy.constants.options[1] & depthxr::kFrameGenFlagPropHold) == 0 &&
+                       (copy.pass == depthxr::FrameGenPass::kSynthesizeUnorm8 ||
+                        copy.pass == depthxr::FrameGenPass::kSynthesizeFloat16),
+                   "A still image is written by the plain pass, holding props or not");
+            request = plain_request;
+        }
         depthxr::FrameGenTuning off = tuning;
         off.resample = depthxr::FrameGenResample::kBilinear;
         off.resample_previous = true; // ignored while bilinear

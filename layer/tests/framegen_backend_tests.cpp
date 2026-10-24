@@ -1212,6 +1212,9 @@ int RunScenarios(Harness& harness) {
         // depth all background (Star Citizen fills only the right eye's).
         // `still_head`: the last frame's previous frame was taken where the
         // newest one is (the caller uploads the newest image as the first).
+        // `app_still`: the frames carry an appSpaceDeltaPose that leaves the
+        // world still (FrameGenWorldStill).
+        bool app_still = false;
         auto run_case = [&](float panel_value, float background_value, const FrameGenDepthEncoding& encoding,
                             bool use_depth, int glass, float eye = 0.0f, bool stale = false, bool left_clear = false,
                             bool right_clear = false, bool still_head = false) {
@@ -1248,6 +1251,11 @@ int RunScenarios(Harness& harness) {
                 right.request.previous.position = {head_still ? shift + half_ipd : half_ipd, 0, 0};
                 left.request.depth = right.request.depth = use_depth;
                 left.request.shift = right.request.shift = {eye, 0.0f, 0.0f};
+                for (FrameGenViewRequest* request : {&left.request, &right.request}) {
+                    request->app_delta = app_still;
+                    request->delta_orientation = {0.0f, 0.0f, 0.0f, 1.0f};
+                    request->delta_position = {0.0f, 0.0f, 0.0f};
+                }
                 return std::vector<FrameGenViewSubmission>{left, right};
             };
             // Color is captured at release, as games' frames are; the depth
@@ -2026,6 +2034,114 @@ int RunScenarios(Harness& harness) {
             Check(held_newest == 0, harness.name + " shimmer: the head held still, the blend is not the newest frame");
             Check(held_changed == 0 && held_near_changed == 0,
                   harness.name + " shimmer: sharpening changed content the head's movement leaves alone");
+
+            // 3o. The prop hold (VECTORXR_FRAMEGEN_SYNTH_PROP=hold-still), the
+            // world still by the frames' appSpaceDeltaPose and the head still,
+            // interpolated: a propeller disc over the far scenery (three blades
+            // faintly darkening it, 19 of 255, turned 50 degrees between the
+            // real frames: no vector explains them better than standing still,
+            // and the frames disagree by about 0.07) shows the newest frame as
+            // it is, where with the switch off the blend takes in part of the
+            // previous frame (its photometric confidence about 0.4); a textured
+            // patch over the scenery,
+            // moved 6 px, is interpolated as with the switch off. Without
+            // appSpaceDeltaPose no frame is known still: every pixel as off.
+            const float prop_cx = 90.0f, prop_cy = 48.0f, prop_radius = 34.0f;
+            constexpr int kPatchX = 40, kPatchY = 300, kPatchMove = 6;
+            auto propeller = [&](Pixels pixels, float blades, int patch_dx) {
+                for (int y = 0; y < static_cast<int>(kSize); ++y) {
+                    for (int x = 0; x < static_cast<int>(kSize); ++x) {
+                        std::uint32_t& pixel = pixels[static_cast<std::size_t>(y) * kSize + static_cast<std::size_t>(x)];
+                        const float dx = x + 0.5f - prop_cx, dy = y + 0.5f - prop_cy;
+                        if (dx * dx + dy * dy < prop_radius * prop_radius) {
+                            const float angle = std::fmod(std::atan2(dy, dx) * 57.29578f - blades + 720.0f, 120.0f);
+                            if (angle < 24.0f) {
+                                const auto dark = [&](int shift_bits) {
+                                    const int value = static_cast<int>((pixel >> shift_bits) & 255u);
+                                    return static_cast<std::uint32_t>(std::max(value - 19, 0)) << shift_bits;
+                                };
+                                pixel = dark(0) | dark(8) | dark(16) | 0xff000000u;
+                            }
+                        }
+                        if (y >= kPatchY && y < kPatchY + 64 && x >= kPatchX + patch_dx && x < kPatchX + 96 + patch_dx) {
+                            pixel = Patch(static_cast<float>(x - patch_dx), static_cast<float>(y));
+                        }
+                    }
+                }
+                return pixels;
+            };
+            const Pixels prop_previous = propeller(Cockpit(shift - half_ipd, -outer, inner), 0.0f, 0);
+            const Pixels prop_newest = propeller(Cockpit(shift - half_ipd, -outer, inner), 50.0f, kPatchMove);
+            harness.upload(g_swapchains[kSource][0], prop_previous);
+            harness.upload(g_swapchains[kSource][1], prop_newest);
+            harness.upload(g_swapchains[right_source][0], Cockpit(shift + half_ipd, -inner, outer));
+            harness.upload(g_swapchains[right_source][1], Cockpit(shift + half_ipd, -inner, outer));
+            auto prop_run = [&](const char* prop, const char* resample, bool still_world) {
+                tuning.mode = FrameGenSynthesisMode::kInterpolate;
+                _putenv_s("VECTORXR_FRAMEGEN_SYNTH_PROP", prop);
+                _putenv_s("VECTORXR_FRAMEGEN_SYNTH_RESAMPLE", resample);
+                app_still = still_world;
+                const Outcome outcome = run_case(panel, 1.0f, standard, true, 0, 0.0f, false, false, false, true);
+                app_still = false;
+                _putenv_s("VECTORXR_FRAMEGEN_SYNTH_PROP", "");
+                _putenv_s("VECTORXR_FRAMEGEN_SYNTH_RESAMPLE", "");
+                tuning.mode = FrameGenSynthesisMode::kExtrapolate;
+                Check(outcome.used, harness.name + " prop hold: depth not used");
+                return outcome.output;
+            };
+            // Pixels differing by more than 2 of 255 in a channel, in the disc
+            // where the blades moved, or inside the patch (8 px in from where
+            // both frames have it).
+            auto prop_differing = [&](const Pixels& a, const Pixels& b, bool disc) {
+                std::size_t count = 0, pixels = 0;
+                for (int y = 0; y < static_cast<int>(kSize); ++y) {
+                    for (int x = 0; x < static_cast<int>(kSize); ++x) {
+                        const std::size_t i = static_cast<std::size_t>(y) * kSize + static_cast<std::size_t>(x);
+                        const float dx = x + 0.5f - prop_cx, dy = y + 0.5f - prop_cy;
+                        const bool inside = disc ? dx * dx + dy * dy < (prop_radius - 1.0f) * (prop_radius - 1.0f) &&
+                                                       prop_previous[i] != prop_newest[i]
+                                                 : y >= kPatchY + 8 && y < kPatchY + 56 && x >= kPatchX + kPatchMove + 8 &&
+                                                       x < kPatchX + 96 - 8;
+                        if (!inside) continue;
+                        ++pixels;
+                        bool differs = false;
+                        for (int c = 0; c < 24; c += 8) {
+                            differs = differs || std::abs(static_cast<int>((a[i] >> c) & 255u) - static_cast<int>((b[i] >> c) & 255u)) > 2;
+                        }
+                        count += differs ? 1 : 0;
+                    }
+                }
+                return std::pair<std::size_t, std::size_t>{count, pixels};
+            };
+            const Pixels prop_off = prop_run("", "", true);
+            const Pixels prop_held = prop_run("hold-still", "", true);
+            const Pixels prop_unknown = prop_run("hold-still", "", false);
+            const Pixels prop_near_off = prop_run("", "cubic-near", true);
+            const Pixels prop_near_held = prop_run("hold-still", "cubic-near", true);
+            const auto [off_disc, disc_pixels] = prop_differing(prop_off, prop_newest, true);
+            const std::size_t held_disc = prop_differing(prop_held, prop_newest, true).first;
+            const std::size_t near_off_disc = prop_differing(prop_near_off, prop_newest, true).first;
+            const std::size_t near_held_disc = prop_differing(prop_near_held, prop_newest, true).first;
+            const auto [off_patch, patch_pixels] = prop_differing(prop_off, prop_newest, false);
+            const std::size_t held_patch = prop_differing(prop_held, prop_off, false).first;
+            const std::size_t near_held_patch = prop_differing(prop_near_held, prop_near_off, false).first;
+            std::cout << harness.name << " prop hold, world still: disc pixels the blades moved on " << disc_pixels
+                      << ", off the newest frame with the switch off " << off_disc << ", held " << held_disc
+                      << " (cubic-near " << near_off_disc << ", " << near_held_disc << "); patch pixels " << patch_pixels
+                      << ", off the newest frame with the switch off " << off_patch << ", changed by the hold "
+                      << held_patch << " (cubic-near " << near_held_patch << "); without appSpaceDeltaPose "
+                      << (prop_unknown == prop_off ? "as off" : "changed") << std::endl;
+            Dump(harness.name + "-prop-off", prop_off);
+            Dump(harness.name + "-prop-held", prop_held);
+            Check(disc_pixels > 200 && off_disc * 4 > disc_pixels,
+                  harness.name + " prop hold: with the switch off the moved blades are not blended");
+            Check(held_disc * 4 <= off_disc && near_held_disc * 4 <= near_off_disc,
+                  harness.name + " prop hold: the propeller disc was not held to the newest frame");
+            Check(off_patch * 2 > patch_pixels,
+                  harness.name + " prop hold: the moving patch was not moved with the switch off");
+            Check(held_patch * 100 <= patch_pixels && near_held_patch * 100 <= patch_pixels,
+                  harness.name + " prop hold: the moving patch was held");
+            Check(prop_unknown == prop_off, harness.name + " prop hold: frames not known still were changed");
             harness.upload(g_swapchains[kSource][0], Cockpit(-half_ipd, -outer, inner));
             harness.upload(g_swapchains[kSource][1], Cockpit(shift - half_ipd, -outer, inner));
             harness.upload(g_swapchains[right_source][0], Cockpit(half_ipd, -inner, outer));
@@ -2467,7 +2583,8 @@ const char* const kProfileNames[] = {"luma",        "downsample",  "search",    
                                      "engine census", "engine capture", "engine reduce", "engine solve", "world set",
                                      "engine convert", "engine merge", "engine tiles", "engine splat", "engine resolve",
                                      "engine fill", "trust surface", "filter prior", "synthesize sharpened",
-                                     "synthesize16 sharpened", "source copy", "output copy",
+                                     "synthesize16 sharpened", "synthesize prop", "synthesize16 prop",
+                                     "synthesize prop sharpened", "synthesize16 prop sharpened", "source copy", "output copy",
                                      "hardware wait", "compose", "flow merge"};
 static_assert(std::size(kProfileNames) == kFrameGenPassCount + 5, "a name per profiled category");
 
@@ -5332,6 +5449,10 @@ int RunProfile(Harness& harness) {
     // with VECTORXR_FRAMEGEN_ENGINE_DELTA=1 and its calibration fixed, so
     // kWorldSet stands in for the world fit (stage 4: compare the analysis
     // with a run without it).
+    // FG_PROFILE_DELTA=still: the application's movement says the world is
+    // still (FrameGenWorldStill; the prop hold's passes run with
+    // VECTORXR_FRAMEGEN_SYNTH_PROP), nothing fitted from it.
+    const bool delta_still = std::getenv("FG_PROFILE_DELTA") && std::string(std::getenv("FG_PROFILE_DELTA")) == "still";
     const bool delta = std::getenv("FG_PROFILE_DELTA") && std::string(std::getenv("FG_PROFILE_DELTA")) == "1";
     if (delta) {
         _putenv_s("VECTORXR_FRAMEGEN_ENGINE_DELTA", "1");
@@ -5498,10 +5619,14 @@ int RunProfile(Harness& harness) {
             view.request.game_newest = view.request.newest;
             view.request.game_previous = view.request.previous;
             // With FG_PROFILE_DELTA, the application's movement (stage 4).
-            view.request.app_delta = delta;
+            view.request.app_delta = delta || delta_still;
             view.request.delta_orientation = {0.0f, std::sin(-0.5f * std::atan(kScroll)), 0.0f,
                                               std::cos(-0.5f * std::atan(kScroll))};
             view.request.delta_position = {0.0f, 0.0f, 1.8f};
+            if (delta_still) {
+                view.request.delta_orientation = {0.0f, 0.0f, 0.0f, 1.0f};
+                view.request.delta_position = {0.0f, 0.0f, 0.0f};
+            }
             views.push_back(view);
         }
         for (std::size_t eye = 0; eye < 2; ++eye) {
@@ -5780,7 +5905,10 @@ int RunProfile(Harness& harness) {
             if (!jit) {
                 for (const FrameGenPass pass : {FrameGenPass::kSynthesizeUnorm8, FrameGenPass::kSynthesizeFloat16,
                                                 FrameGenPass::kSynthesizeUnorm8Sharpen,
-                                                FrameGenPass::kSynthesizeFloat16Sharpen}) {
+                                                FrameGenPass::kSynthesizeFloat16Sharpen, FrameGenPass::kSynthesizeUnorm8Prop,
+                                                FrameGenPass::kSynthesizeFloat16Prop,
+                                                FrameGenPass::kSynthesizeUnorm8PropSharpen,
+                                                FrameGenPass::kSynthesizeFloat16PropSharpen}) {
                     const auto index = static_cast<std::size_t>(pass);
                     synthesis_ms += index < sums.size() ? sums[index] / samples / written : 0.0;
                 }
@@ -7622,6 +7750,8 @@ int RunReplay(Harness& harness) {
 
     const bool interpolate = env("FG_REPLAY_MODE") == "interpolate";
     const bool dump_maps = env("FG_REPLAY_DUMP") == "1";
+    const bool delta_pairs = env("FG_REPLAY_DELTA_PAIRS") == "still";
+    std::size_t paired_still = 0; // views given a still appSpaceDeltaPose by FG_REPLAY_DELTA_PAIRS
     const std::string jit_variant = env("FG_REPLAY_JIT");
     std::optional<std::array<int, 4>> crop;
     if (std::array<int, 4> box{}; std::sscanf(env("FG_REPLAY_CROP").c_str(), "%d,%d,%d,%d", &box[0], &box[1], &box[2], &box[3]) == 4) {
@@ -7922,6 +8052,22 @@ int RunReplay(Harness& harness) {
                 submission.request.delta_position = view.delta_position;
                 submission.request.game_newest = view.game;
                 submission.request.game_previous = view.game_previous;
+            }
+            // FG_REPLAY_DELTA_PAIRS=still (research): a pair a frame apart
+            // (interpolating just in time: frames k - 1 and k + 1 around the
+            // frame written) carries no appSpaceDeltaPose above, so no frame
+            // is known still. Where motion.txt has both intervals recorded and
+            // each left the world still (ReplayWorldStill), the pair is given
+            // a still one, as a session interpolating between consecutive
+            // frames would have; nothing for any other pair.
+            if (!recorded && delta_pairs && before && *before + 2 == k && view.app_delta && ReplayWorldStill(view) &&
+                frame.previous_record != 0 && frame.previous_record == frames[k - 1].record &&
+                frames[k - 1].views[v].app_delta && ReplayWorldStill(frames[k - 1].views[v]) &&
+                frames[k - 1].previous_record != 0 && frames[k - 1].previous_record == frames[*before].record) {
+                submission.request.app_delta = true;
+                submission.request.delta_orientation = {0.0f, 0.0f, 0.0f, 1.0f};
+                submission.request.delta_position = {0.0f, 0.0f, 0.0f};
+                ++paired_still;
             }
             // The pair before by the same poses as this one: the declared
             // ones, or motion.txt's where it has the game's for that pair too
@@ -8554,6 +8700,9 @@ int RunReplay(Harness& harness) {
             std::printf("Depth reading: %s, scale %.3f\n", ToString(gpu->DepthStatus().reading),
                         static_cast<double>(gpu->DepthStatus().scale));
         }
+    }
+    if (delta_pairs) {
+        std::printf("Paired still appSpaceDeltaPose (FG_REPLAY_DELTA_PAIRS=still): %zu views\n", paired_still);
     }
     std::printf("Output hash: %zu frames written %016llx, %zu depth reads %016llx\n", hashed_frames,
                 static_cast<unsigned long long>(output_hash), hashed_depths, static_cast<unsigned long long>(depth_hash));

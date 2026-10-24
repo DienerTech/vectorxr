@@ -765,6 +765,13 @@ class D3D12FrameGen final : public FrameGenGpu {
         if (const std::optional<std::string> sharpen = ReadResearchSwitch("VECTORXR_FRAMEGEN_SYNTH_SHARPEN")) {
             sharpen_ = ParseFrameGenSharpen(*sharpen);
         }
+        // Research: content no vector tracks over distant depth held to the
+        // newest frame on still-world frames (FrameGenTuning::prop_hold;
+        // VECTORXR_FRAMEGEN_SYNTH_PROP=hold-still[:<threshold>,<margin>], the
+        // research file too, where the research-switch line logs it).
+        if (const std::optional<std::string> prop = ReadResearchSwitch("VECTORXR_FRAMEGEN_SYNTH_PROP")) {
+            prop_hold_ = ParseFrameGenPropHold(*prop);
+        }
         // Research (hypothesis E): the filter's prior for content with nothing
         // to track (FrameGenTuning::flow_prior; VECTORXR_FRAMEGEN_FLOW_PRIOR
         // sky, far, sky-still or far-still, optionally :<share>,<margin>,<per
@@ -2481,10 +2488,11 @@ class D3D12FrameGen final : public FrameGenGpu {
 
     // The graphics pipeline drawing `count` generated frames into render
     // targets of these formats, with `sharpen` the Interpolate blend's
-    // sharpening built in (research); null if it cannot be created.
+    // sharpening and with `prop` the prop hold built in (research); null if it
+    // cannot be created.
     ID3D12PipelineState* DrawPipeline(const std::array<DXGI_FORMAT, kFrameGenMaxGenerated>& formats, std::size_t count,
-                                      bool sharpen = false) {
-        std::uint64_t key = count * 2 + (sharpen ? 1 : 0);
+                                      bool sharpen = false, bool prop = false) {
+        std::uint64_t key = count * 4 + (sharpen ? 1 : 0) + (prop ? 2 : 0);
         for (std::size_t i = 0; i < count; ++i) {
             key = key * 1000 + static_cast<std::uint64_t>(formats[i]);
         }
@@ -2492,8 +2500,11 @@ class D3D12FrameGen final : public FrameGenGpu {
         if (found != draw_pipelines_.end()) {
             return found->second.Get();
         }
+        const std::size_t variant = (sharpen ? 1 : 0) + (prop ? 2 : 0);
         const framegen_shaders::Blob& pixel =
-            framegen_shaders::kDxbcDraw[sharpen ? framegen_shaders::kComposeDrawShader + count : count];
+            framegen_shaders::kDxbcDraw[variant ? framegen_shaders::kComposeDrawShader +
+                                                      (variant - 1) * kFrameGenMaxGenerated + count
+                                                : count];
         const ComPtr<ID3D12PipelineState> pipeline = CreateDrawPipeline(pixel, formats.data(), count);
         draw_pipelines_[key] = pipeline;
         return pipeline.Get();
@@ -2832,8 +2843,14 @@ class D3D12FrameGen final : public FrameGenGpu {
         }
         const FrameGenDispatch& first = *frames[0];
         const bool sharpen = first.pass == FrameGenPass::kSynthesizeUnorm8Sharpen ||
-                             first.pass == FrameGenPass::kSynthesizeFloat16Sharpen;
-        ID3D12PipelineState* pipeline = DrawPipeline(formats, frames.size(), sharpen);
+                             first.pass == FrameGenPass::kSynthesizeFloat16Sharpen ||
+                             first.pass == FrameGenPass::kSynthesizeUnorm8PropSharpen ||
+                             first.pass == FrameGenPass::kSynthesizeFloat16PropSharpen;
+        const bool prop = first.pass == FrameGenPass::kSynthesizeUnorm8Prop ||
+                          first.pass == FrameGenPass::kSynthesizeFloat16Prop ||
+                          first.pass == FrameGenPass::kSynthesizeUnorm8PropSharpen ||
+                          first.pass == FrameGenPass::kSynthesizeFloat16PropSharpen;
+        ID3D12PipelineState* pipeline = DrawPipeline(formats, frames.size(), sharpen, prop);
         if (!pipeline) {
             error = "D3D12 Frame Generation draw pipeline unavailable";
             return false;
@@ -3027,6 +3044,9 @@ class D3D12FrameGen final : public FrameGenGpu {
         effective_tuning.shift_smooth = tuning.shift_smooth || shift_smooth_;
         if (sharpen_ > 0.0f) {
             effective_tuning.sharpen = sharpen_;
+        }
+        if (prop_hold_.enabled) {
+            effective_tuning.prop_hold = prop_hold_;
         }
         if (flow_prior_.enabled) {
             effective_tuning.flow_prior = flow_prior_;
@@ -6488,7 +6508,10 @@ class D3D12FrameGen final : public FrameGenGpu {
     static bool Generates(const FrameGenDispatch& dispatch) {
         return dispatch.pass == FrameGenPass::kSynthesizeUnorm8 || dispatch.pass == FrameGenPass::kSynthesizeFloat16 ||
                dispatch.pass == FrameGenPass::kSynthesizeUnorm8Sharpen ||
-               dispatch.pass == FrameGenPass::kSynthesizeFloat16Sharpen;
+               dispatch.pass == FrameGenPass::kSynthesizeFloat16Sharpen ||
+               dispatch.pass == FrameGenPass::kSynthesizeUnorm8Prop || dispatch.pass == FrameGenPass::kSynthesizeFloat16Prop ||
+               dispatch.pass == FrameGenPass::kSynthesizeUnorm8PropSharpen ||
+               dispatch.pass == FrameGenPass::kSynthesizeFloat16PropSharpen;
     }
 
     // Sets a view up for this frame and plans it; RecordPlan records it.
@@ -6900,6 +6923,7 @@ class D3D12FrameGen final : public FrameGenGpu {
     FrameGenResampleChoice resample_;               // FrameGenTuning::resample forced (research)
     bool shift_smooth_{false};                      // FrameGenTuning::shift_smooth forced (research)
     float sharpen_{0.0f};                           // FrameGenTuning::sharpen forced (research)
+    FrameGenPropHold prop_hold_;                    // FrameGenTuning::prop_hold forced (research)
     FrameGenFlowPrior flow_prior_;                  // FrameGenTuning::flow_prior forced (research)
     std::array<FrameSlot, kFramesInFlight> slots_;
     ComPtr<ID3D12GraphicsCommandList> capture_commands_;

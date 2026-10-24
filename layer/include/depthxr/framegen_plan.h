@@ -131,8 +131,15 @@ enum class FrameGenPass : std::uint8_t {
     // (kFrameGenSharpenShift) built in; the plain passes stay without it.
     kSynthesizeUnorm8Sharpen,
     kSynthesizeFloat16Sharpen,
+    // Research (FrameGenTuning::prop_hold): the synthesis passes with the
+    // prop hold (kFrameGenFlagPropHold) built in, then with the sharpening
+    // too; the plain and sharpened passes stay without it.
+    kSynthesizeUnorm8Prop,
+    kSynthesizeFloat16Prop,
+    kSynthesizeUnorm8PropSharpen,
+    kSynthesizeFloat16PropSharpen,
 };
-inline constexpr std::size_t kFrameGenPassCount = 43;
+inline constexpr std::size_t kFrameGenPassCount = 47;
 
 // Logical textures owned per view. History and filtered flow are ping-pong
 // pairs: "newest" is written this submission, "previous" is last
@@ -374,6 +381,23 @@ inline constexpr std::uint32_t kFrameGenFlagResampleNear = 1u << 26;
 // the range of the texels the reads take up. Set, synthesis runs as
 // kSynthesizeUnorm8Sharpen or kSynthesizeFloat16Sharpen.
 inline constexpr std::uint32_t kFrameGenSharpenShift = 16u;
+// Research (FrameGenTuning::prop_hold, the GB10 sweep's stage P1: the C172's
+// propeller disc). Set by the plan with depth on frames whose
+// appSpaceDeltaPose left the world still (FrameGenWorldStill; never without
+// one), off still images; synthesis then runs as kSynthesize*Prop or
+// kSynthesize*PropSharpen. Where a generated pixel's newest depth is known
+// and 4 m or more (the disc writes none: the runway's or the sky's is
+// there), the chosen candidate's CandidateError (as chosen at a motion
+// boundary, else the smooth field's vector scored once) is above the
+// threshold, and zero motion's is within the margin of it (nothing tracks the
+// pixel better than standing still), the pixel is the newest frame's read
+// there, unblended: no previous-frame blend, Occlusion() pick, cross-fade or
+// sharpening. The threshold and margin sit in options[2]'s bits 4-9 and
+// 10-15 in steps of kFrameGenPropStep (the diagnostic view keeps bits 0-3).
+inline constexpr std::uint32_t kFrameGenFlagPropHold = 1u << 20;
+inline constexpr std::uint32_t kFrameGenPropThresholdShift = 4u;
+inline constexpr std::uint32_t kFrameGenPropMarginShift = 10u;
+inline constexpr float kFrameGenPropStep = 0.005f;
 // Research (FrameGenTuning::shift_smooth, fix B1). Synthesis with depth reads
 // the eye-shift map between its texels: the four around the pixel that lie
 // on the surface of the texel under it, blended bilinearly, instead of that
@@ -741,6 +765,17 @@ FrameGenResampleChoice ParseFrameGenResample(const std::string& value);
 // design): the Interpolate blend's sharpening amount, a number (at most 2);
 // anything else, or a negative one, is 0 (off).
 float ParseFrameGenSharpen(const std::string& value);
+// Research (VECTORXR_FRAMEGEN_SYNTH_PROP, the GB10 sweep's stage P1): the
+// prop hold (kFrameGenFlagPropHold) and its threshold and margin.
+struct FrameGenPropHold {
+    bool enabled{false};
+    float threshold{0.06f};
+    float margin{0.02f};
+};
+// "hold-still" (any case), optionally ":<threshold>,<margin>" (each 0 to
+// 0.315, rounded to kFrameGenPropStep; a missing or bad one keeps its
+// default); anything else is off.
+FrameGenPropHold ParseFrameGenPropHold(const std::string& value);
 // Research (VECTORXR_FRAMEGEN_FLOW_PRIOR, the head-motion shimmer
 // diagnosis's hypothesis E): the filter's prior for content with nothing to
 // track (kFrameGenFlagFlowPrior). Shader flow on flat sky matches any vector
@@ -868,6 +903,10 @@ struct FrameGenTuning {
     // Interpolate blend sharpened on near content, with depth, by this
     // amount (kFrameGenSharpenShift); 0 is off.
     float sharpen{0.0f};
+    // Research (VECTORXR_FRAMEGEN_SYNTH_PROP), set by backends: content no
+    // vector tracks over distant depth held to the newest frame on still-world
+    // frames (kFrameGenFlagPropHold).
+    FrameGenPropHold prop_hold;
     bool shift_smooth{false};
     // Research (hypothesis E), set by backends from
     // VECTORXR_FRAMEGEN_FLOW_PRIOR: the filter keeps content with nothing to
