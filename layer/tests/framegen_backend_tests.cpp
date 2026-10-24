@@ -1961,7 +1961,7 @@ int RunScenarios(Harness& harness) {
             // bit, and moved by a whole pixel it is the newest frame shifted.
             // The scenery's measured flow is not exactly zero: it moves by a
             // little either way.
-            const ShimmerRun still_bilinear = shimmer_run(0.0f, "", "");
+            const ShimmerRun still_bilinear = shimmer_run(0.0f, "bilinear", "");
             const ShimmerRun still_cubic = shimmer_run(0.0f, "cubic", "");
             // The panel 12 px in from its edges (the flow there blends the
             // scenery's, as band_rect leaves out).
@@ -1975,7 +1975,7 @@ int RunScenarios(Harness& harness) {
                       << MeanError(still_bilinear.output, still_cubic.output, 0, 0, kSize, kSize) << " over the view"
                       << std::endl;
             Check(still_difference == 0.0, harness.name + " shimmer: Catmull-Rom changed content the eye's movement leaves alone");
-            std::array<ShimmerRun, 3> bilinear{shimmer_run(0.25f, "", ""), shimmer_run(0.5f, "", ""), shimmer_run(1.0f, "", "")};
+            std::array<ShimmerRun, 3> bilinear{shimmer_run(0.25f, "bilinear", ""), shimmer_run(0.5f, "bilinear", ""), shimmer_run(1.0f, "bilinear", "")};
             std::array<ShimmerRun, 3> cubic{shimmer_run(0.25f, "cubic", ""), shimmer_run(0.5f, "cubic", ""),
                                             shimmer_run(1.0f, "cubic", "")};
             const std::array<int, 4> detail_rect = band_rect(head_newest, kDetailTop, kDetailBottom);
@@ -2055,6 +2055,9 @@ int RunScenarios(Harness& harness) {
             // 12 px in from its edges; the scenery 32 px clear of them (the
             // gate goes by the pixel and the newest read, either near).
             const ShimmerRun near_half = shimmer_run(0.5f, "cubic-near", "");
+            const ShimmerRun default_half = shimmer_run(0.5f, "", "");
+            Check(default_half.output == near_half.output,
+                  harness.name + " synthesis default is cubic-near bit for bit");
             const XrRect2Di gate_panel = CockpitPanelRect(head_newest, -outer, inner);
             const XrRect2Di gate_clear = grow(gate_panel, 32);
             auto differing = [&](const Pixels& a, const Pixels& b, bool on_panel) {

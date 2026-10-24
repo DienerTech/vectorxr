@@ -755,9 +755,10 @@ class D3D12FrameGen final : public FrameGenGpu {
         // read between its texels (FrameGenTuning::shift_smooth;
         // VECTORXR_FRAMEGEN_SYNTH_SHIFT=smooth). Both may come from the
         // research file too.
-        if (const std::optional<std::string> resample = ReadResearchSwitch("VECTORXR_FRAMEGEN_SYNTH_RESAMPLE")) {
-            resample_ = ParseFrameGenResample(*resample);
-        }
+        // The flown 0.20 default: cubic on near content, bilinear elsewhere.
+        // An explicit bilinear keeps the original synthesis constants/output.
+        resample_ = ParseFrameGenResample(
+            ReadResearchSwitch("VECTORXR_FRAMEGEN_SYNTH_RESAMPLE").value_or("cubic-near"));
         shift_smooth_ = ReadResearchSwitch("VECTORXR_FRAMEGEN_SYNTH_SHIFT") == "smooth";
         // Research: the Interpolate blend sharpened on near content
         // (FrameGenTuning::sharpen; VECTORXR_FRAMEGEN_SYNTH_SHARPEN=<amount>,
