@@ -5537,8 +5537,15 @@ int RunProfile(Harness& harness) {
         }
         return views;
     };
-    for (const int config : {0, 1, 2}) {
-        const auto quality = config == 1 ? FrameGenFlowQuality::kQuality : FrameGenFlowQuality::kBalanced;
+    // FG_PROFILE_PERFORMANCE=1: Performance flow too (final level 4), after
+    // the three.
+    const bool performance =
+        std::getenv("FG_PROFILE_PERFORMANCE") && std::string(std::getenv("FG_PROFILE_PERFORMANCE")) == "1";
+    for (const int config : {0, 1, 2, 3}) {
+        if (config == 3 && !performance) continue;
+        const auto quality = config == 1   ? FrameGenFlowQuality::kQuality
+                             : config == 3 ? FrameGenFlowQuality::kPerformance
+                                           : FrameGenFlowQuality::kBalanced;
         FrameGenTuning tuning;
         tuning.quality = quality;
         tuning.hardware_flow = config == 2;
@@ -5642,7 +5649,9 @@ int RunProfile(Harness& harness) {
         const FrameGenDepthStatus depth = gpu->DepthStatus();
         std::printf("\n%s flow, 2 eyes, 4 generated frames: %.2f ms GPU per real frame (depth %s, %s)\n",
                     config == 2 ? ("Hardware (" + gpu->HardwareFlowStatus() + ")").c_str()
-                    : quality == FrameGenFlowQuality::kQuality ? "Quality" : "Balanced",
+                    : quality == FrameGenFlowQuality::kQuality     ? "Quality"
+                    : quality == FrameGenFlowQuality::kPerformance ? "Performance"
+                                                                   : "Balanced",
                     samples ? total / samples : -1.0, depth_used ? "used" : "not used", ToString(depth.reading));
         for (std::size_t p = 0; p < sums.size() && p < std::size(kProfileNames); ++p) {
             if (sums[p] > 0.0) {
