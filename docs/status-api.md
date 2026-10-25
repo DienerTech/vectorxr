@@ -135,6 +135,22 @@ both thresholds (`appFps` against `autoStepUpBelowFps`, `autoGameOwnFps` against
 `autoStepDownAboveFps`), so that its own adjustments and Auto's steps do not chase each other across
 the boundary. Under a fixed rate, aim for `appFps` at `targetAppFps` and watch `holding`.
 
+## Flow status in the desktop app
+
+The desktop app's live session status also reports the motion source used by Interpolate:
+
+| Field | Meaning |
+| --- | --- |
+| `state.framegenFlow` | The source actually in use: `hardware` or `shader`. Empty before a source has been measured. |
+| `state.framegenFlowMode` | The selected Interpolate flow policy: `auto`, `hardware`, or `shader`. Under Auto, the actual source can change while this remains `auto`. |
+| `state.framegenFlowReason` | A diagnostic explanation of the current choice, such as hardware being unavailable, hardware arriving late, or a successful hardware retry. Treat it as display text; do not parse it for decisions. |
+
+These `state.*` fields describe the app's session status. They are **not present in the public
+`api\status.json` document** in 0.20.0 and are not part of its version 1 contract. External
+programs should keep reading the public file described above. The internal runtime channel
+remains unsupported for external readers. Future additions to the public document must keep
+[Compatibility](#compatibility): version 1 only gains fields, and readers ignore unknown fields.
+
 ## Testing without a headset
 
 `VECTORXR_EXTERNAL_STATUS_PATH` set to a file path in the game's environment makes VectorXR write

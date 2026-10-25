@@ -71,6 +71,13 @@ single master switch for all Enhancements at runtime.
 
 While you're here:
 
+- **Language** under **General** changes the app immediately. Choose **System (auto)** to
+  follow the Windows display language, or choose a language explicitly. VectorXR includes English,
+  Simplified Chinese, Russian, Spanish (Spain), Portuguese (Brazil), German, Japanese, French,
+  Polish, Korean, and Traditional Chinese. On first launch the app uses the installer language;
+  if it matches Windows, the app keeps following Windows. Without an installer choice it follows
+  Windows, falling back to English if no supported language matches. The language preference is
+  stored on this PC. Non-English catalogs are machine translated and welcome native-speaker review.
 - **General** also holds the **Theme** (System / Light / Dark, stored on this PC only) and
   **Track discovered XR apps**, which is on by default. It records the executable name of OpenXR
   apps you launch so you can register them in one click later (see Step 2). All data stays local.
@@ -840,23 +847,27 @@ needs a game restart; turning it off applies at once.
   [Frame rate](#frame-rate-dynamic-or-fixed). In `settings.json` both are `frameMultiplier`:
   `dynamic`, `auto`, `2x`, `3x`, or `4x`.
 - **Motion source**: **Shader** (default) measures motion by block matching on the GPU's
-  shader cores, on any GPU. **NVIDIA hardware** uses the optical flow accelerator of NVIDIA RTX
-  20-50 GPUs: repeating patterns such as building windows and railings stay put, and Extrapolate
-  needs it to look its best. Interpolate in **Dynamic** measures motion with Shader even when
-  NVIDIA hardware is chosen: while the game keeps the GPU busy, the accelerator's results arrive
-  too late for the frames between real frames. At a fixed or **Auto** frame rate the game is held
-  to every second (or third, fourth) refresh, which leaves the accelerator time, so Interpolate
-  uses it there (experimental: if its results arrive late, Frame Generation runs a refresh
-  further ahead, adding latency; changing the frame rate during play with **Quality** or
-  **Performance** flow quality briefly stutters while it switches). With **Performance** flow
-  quality it uses the accelerator's fastest preset, which is less accurate on repeating
-  patterns. Where it cannot be used, Shader
-  is, and the log says why. The page checks every graphics card in the PC with NVIDIA's driver,
-  not only the first one listed, and greys out **NVIDIA hardware**, with each card's reason, when
-  none has the accelerator. While the mode is Interpolate with a Dynamic frame rate the whole
-  Motion source is greyed out and shows Shader; the choice you made is kept for Extrapolate and
-  for fixed rates.
-  In `settings.json`, set `"motionEstimation": "hardware"` in a profile's settings.
+  shader cores, on any GPU. **NVIDIA hardware** uses the optical flow accelerator of supported
+  NVIDIA RTX GPUs. It is available with **Interpolate**, including **Dynamic**, and with
+  **Extrapolate**. In `settings.json`, set `"motionEstimation": "hardware"` in a profile's
+  settings to request it. Non-NVIDIA GPUs use Shader. When the accelerator is unavailable,
+  Shader is used and the log says why. The page checks every graphics card in the PC with
+  NVIDIA's driver and greys out **NVIDIA hardware**, with each card's reason, when none has it.
+  With **Performance** flow quality, hardware flow uses the accelerator's fastest preset,
+  which is less accurate on repeating patterns.
+- **Interpolate flow** controls the motion source while **Mode** is **Interpolate** and
+  **Motion source** is **NVIDIA hardware**. It applies to Dynamic, Auto, and fixed frame rates.
+  In a profile's settings it is `interpolateFlow`:
+
+  | Value | When to use it |
+  | --- | --- |
+  | `auto` (default) | Start with hardware flow, switch to Shader when hardware results repeatedly arrive late, and periodically retry hardware. Use this for normal play. |
+  | `hardware` | Keep hardware flow while the accelerator is available; use it to compare hardware behavior without Auto's timing-based fallback. Unavailable hardware still uses Shader. |
+  | `shader` | Keep Shader flow, for comparison or when it works better in a game. |
+
+  Selecting **Shader** as the Motion source always uses Shader, whatever `interpolateFlow`
+  says. Extrapolate uses the Motion source directly; `interpolateFlow` does not change it.
+  The OSD shows the motion source actually in use.
 - **Advanced** (collapsed by default):
   - **Flow quality** sets the resolution motion is measured at: **Performance** (1/16 of the eye
     image), **Balanced** (1/8, default), or **Quality** (1/4). Higher quality tracks small and
@@ -1043,6 +1054,14 @@ The **On-Screen Display** page adds a head-following information panel inside Di
 Direct3D 12, and Vulkan OpenXR applications. It works with stereo and Quadviews submissions
 and is off by default. VectorXR must be registered and loaded by the application; relaunch
 the application after updating the layer DLL.
+
+**OSD Language** chooses the headset panel's language independently of the desktop app.
+**Same as app** follows the language chosen in **Settings > General > Language**; choose a
+specific language to keep the OSD in that language instead. It offers the same 11 languages.
+Save Changes applies the OSD choice during play. Changing the app language also updates a
+saved OSD that follows the app. In `settings.json`, `core.osd.language` is `"app"` to follow the
+app or a language code for an explicit choice; the app saves its current language in
+`core.osd.appLanguage`. VectorXR 0.19 and older layers ignore these settings and draw in English.
 
 1. Open **On-Screen Display** and switch **OSD Off** to **OSD On**.
 2. Pick a starting point under **Presets** at the bottom of the page: **Expanded**,
