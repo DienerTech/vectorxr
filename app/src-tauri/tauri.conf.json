@@ -65,7 +65,10 @@
         ],
         "displayLanguageSelector": true,
         "customLanguageFiles": {
-          "Polish": "./windows/languages/Polish.nsh"
+          "Polish": "./windows/languages/Polish.nsh",
+          "German": "./windows/languages/German.nsh",
+          "PortugueseBR": "./windows/languages/PortugueseBR.nsh",
+          "French": "./windows/languages/French.nsh"
         }
       }
     }

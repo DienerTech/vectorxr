@@ -474,6 +474,16 @@ Function .onInit
   ${EndIf}
 
   !if "${DISPLAYLANGUAGESELECTOR}" == "true"
+    ; VectorXR: installers before 0.20 were English-only but still saved
+    ; "Installer Language", which skips the picker, runs this installer in
+    ; English and tells the app English was chosen. An install from 0.20 on
+    ; leaves installer-language.txt beside the app; without it, forget the
+    ; saved language so the picker shows with Windows' language preselected.
+    ; The install location is in the 32-bit view, where it was written.
+    ReadRegStr $R9 HKLM "${MANUPRODUCTKEY}" ""
+    ${IfNot} ${FileExists} "$R9\installer-language.txt"
+      DeleteRegValue HKCU "${MANUPRODUCTKEY}" "Installer Language"
+    ${EndIf}
     !insertmacro MUI_LANGDLL_DISPLAY
   !endif
 
