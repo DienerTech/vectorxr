@@ -42,7 +42,7 @@ test('Interpolate at a fixed or Auto rate can use the NVIDIA hardware (experimen
     const state = motionSourceState({ synthesisMode: 'interpolate', motionEstimation: 'hardware', frameMultiplier }, cards(rtx))
     assert.equal(state.locked, false)
     assert.equal(state.effective, 'hardware')
-    assert.match(state.note, /switches to Shader/)
+    assert.equal(state.note, null)
     const shader = motionSourceState({ synthesisMode: 'interpolate', motionEstimation: 'shader', frameMultiplier }, cards(rtx))
     assert.equal(shader.locked, false)
     assert.equal(shader.effective, 'shader')

@@ -194,7 +194,7 @@
       },
       "hardware": {
         "label": "Matériel NVIDIA",
-        "description": "Utilise l'unité de flux optique des GPU NVIDIA RTX : plus précis, en particulier sur les motifs répétitifs. Utilisé par Extrapolate, et par Interpolate à une fréquence d'images fixe ou Auto (expérimental)."
+        "description": "Utilise l'unité de flux optique des GPU NVIDIA RTX : plus précis, en particulier sur les motifs répétitifs."
       }
     },
     "advanced": {
@@ -234,10 +234,8 @@
       "description": "Frame Generation fait rendre le jeu jusqu'à ~150 ms à l'avance, et certains runtimes, comme celui de Pimax, ne prédisent votre tête que sur ~20 ms de cette durée. Cette option prolonge la rotation de votre tête sur le reste, pour moins de noir sur le bord vers lequel vous tournez. Activez-la avant de démarrer le jeu."
     },
     "interpolateFlow": {
-      "legend": "Flux d’interpolation",
-      "description": "Auto utilise le flux matériel, passe au Shader si les images sont en retard, puis réessaie le matériel.",
-      "hardware": "Conserver le flux matériel.",
-      "shader": "Conserver le flux Shader."
+      "fallback": "Passer au Shader si le flux matériel ne suit pas",
+      "fallbackHint": "Interpolate uniquement. Le flux matériel est réessayé après un moment."
     }
   }
 }

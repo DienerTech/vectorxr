@@ -194,7 +194,7 @@
       },
       "hardware": {
         "label": "Hardware de NVIDIA",
-        "description": "Usa la unidad de flujo óptico de las GPU NVIDIA RTX: más precisa, sobre todo en patrones repetitivos. La usa Extrapolate, e Interpolate con una velocidad de fotogramas fija o automática (experimental)."
+        "description": "Usa la unidad de flujo óptico de las GPU NVIDIA RTX: más precisa, sobre todo en patrones repetitivos."
       }
     },
     "advanced": {
@@ -234,10 +234,8 @@
       "description": "Frame Generation hace que el juego renderice hasta ~150 ms por adelantado, y algunos entornos de ejecución, como el de Pimax, solo predicen tu cabeza unos ~20 ms de ese tiempo. Esto prolonga el giro de tu cabeza durante el resto, para que haya menos negro en el borde hacia el que giras. Actívalo antes de iniciar el juego."
     },
     "interpolateFlow": {
-      "legend": "Flujo de interpolación",
-      "description": "Auto usa flujo por hardware; si los fotogramas se retrasan, cambia a Shader y vuelve a probar el hardware.",
-      "hardware": "Usar siempre flujo por hardware.",
-      "shader": "Usar siempre flujo Shader."
+      "fallback": "Cambiar a Shader si el flujo por hardware no da abasto",
+      "fallbackHint": "Solo Interpolate. El flujo por hardware se vuelve a probar al cabo de un rato."
     }
   }
 }

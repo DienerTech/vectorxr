@@ -194,7 +194,7 @@
       },
       "hardware": {
         "label": "NVIDIA 하드웨어",
-        "description": "NVIDIA RTX GPU의 광학 흐름 장치를 사용합니다. 특히 반복 패턴에서 더 정확합니다. Extrapolate에서 사용되며, 고정 또는 자동 프레임 속도의 Interpolate에서도 사용됩니다(실험적)."
+        "description": "NVIDIA RTX GPU의 광학 흐름 장치를 사용합니다. 특히 반복 패턴에서 더 정확합니다."
       }
     },
     "advanced": {
@@ -234,10 +234,8 @@
       "description": "Frame Generation은 게임이 최대 약 150 ms 앞서 렌더링하도록 하는데, Pimax 등 일부 런타임은 그중 약 20 ms만큼만 머리 움직임을 예측합니다. 이 설정은 나머지 구간에도 머리 회전을 이어 적용하여, 머리를 돌리는 쪽 가장자리의 검은 영역을 줄입니다. 게임을 시작하기 전에 켜십시오."
     },
     "interpolateFlow": {
-      "legend": "보간 흐름",
-      "description": "자동은 하드웨어 흐름을 사용하며 프레임이 늦으면 셰이더로 전환한 뒤 하드웨어를 다시 시도합니다.",
-      "hardware": "하드웨어 흐름을 계속 사용합니다.",
-      "shader": "셰이더 흐름을 계속 사용합니다."
+      "fallback": "하드웨어 흐름이 따라가지 못하면 셰이더로 전환",
+      "fallbackHint": "Interpolate에만 적용됩니다. 잠시 후 하드웨어 흐름을 다시 시도합니다."
     }
   }
 }

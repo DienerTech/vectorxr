@@ -11,7 +11,6 @@ import {
   frameGenLimits,
   type FrameGenFixedMultiplier,
   type FrameGenFlowQuality,
-  type FrameGenInterpolateFlow,
   type FrameGenMotionEstimation,
   type FrameGenSettings,
   type FrameGenSynthesisMode,
@@ -106,11 +105,14 @@ const motionSources = computed(() => [
   },
 ])
 
-const interpolateFlows = computed<{ value: FrameGenInterpolateFlow; label: string; description: string }[]>(() => [
-  { value: 'auto', label: t('common.auto'), description: t('framegen.settings.interpolateFlow.description') },
-  { value: 'hardware', label: t('framegen.settings.motionSource.hardware.label'), description: t('framegen.settings.interpolateFlow.hardware') },
-  { value: 'shader', label: t('framegen.settings.motionSource.shader.label'), description: t('framegen.settings.interpolateFlow.shader') },
-])
+// Interpolate on NVIDIA hardware: auto falls back to Shader when hardware flow
+// runs late and retries it later; hardware keeps it. A hand-edited "shader"
+// reads as on and is replaced only when the box is changed.
+const showShaderFallback = computed(() => props.settings.synthesisMode === 'interpolate' && motionSourceModel.value === 'hardware')
+const shaderFallback = computed<boolean>({
+  get: () => props.settings.interpolateFlow !== 'hardware',
+  set: (value) => { props.settings.interpolateFlow = value ? 'auto' : 'hardware' },
+})
 
 const flowQualities = computed<{ value: FrameGenFlowQuality; label: string; summary: string; resolution: string }[]>(() => [
   { value: 'performance', label: t('framegen.settings.flowQuality.levels.performance'), summary: t('framegen.settings.flowQuality.summary.performance'), resolution: '1/16' },
@@ -176,13 +178,16 @@ function resetAdvanced() {
       </OptionCards>
     </div>
 
-    <div v-if="settings.synthesisMode === 'interpolate' && settings.motionEstimation === 'hardware'" class="rounded-[1rem] border p-4 surface-panel-soft">
-      <OptionCards v-model="settings.interpolateFlow" :legend="t('framegen.settings.interpolateFlow.legend')" :options="interpolateFlows" />
-    </div>
-
     <div class="rounded-[1rem] border p-4 surface-panel-soft">
       <OptionCards v-model="motionSourceModel" :legend="t('framegen.settings.motionSource.legend')" :options="motionSources" :disabled="motionSource.locked">
         <p v-if="motionSource.note" class="mt-2 text-xs leading-5 text-muted">{{ motionSource.note }}</p>
+        <label v-if="showShaderFallback" class="mt-3 flex cursor-pointer items-start gap-3">
+          <input v-model="shaderFallback" class="mt-0.5 h-4 w-4 shrink-0 accent-depthxr-copper" type="checkbox" />
+          <span class="min-w-0">
+            <span class="block text-sm font-medium">{{ t('framegen.settings.interpolateFlow.fallback') }}</span>
+            <span class="mt-1 block text-xs leading-5 text-muted">{{ t('framegen.settings.interpolateFlow.fallbackHint') }}</span>
+          </span>
+        </label>
       </OptionCards>
     </div>
 

@@ -49,8 +49,6 @@ export function motionSourceState(
   let note: string | null = null
   if (hardwareUnavailable && settings.motionEstimation === 'hardware') {
     note = t('pivot.motionSource.hardwareMissingNote')
-  } else if (interpolate && effective === 'hardware') {
-    note = t('framegen.settings.interpolateFlow.description')
   }
   return { effective, locked, hardwareUnavailable, note }
 }

@@ -855,19 +855,13 @@ needs a game restart; turning it off applies at once.
   NVIDIA's driver and greys out **NVIDIA hardware**, with each card's reason, when none has it.
   With **Performance** flow quality, hardware flow uses the accelerator's fastest preset,
   which is less accurate on repeating patterns.
-- **Interpolate flow** controls the motion source while **Mode** is **Interpolate** and
-  **Motion source** is **NVIDIA hardware**. It applies to Dynamic, Auto, and fixed frame rates.
-  In a profile's settings it is `interpolateFlow`:
-
-  | Value | When to use it |
-  | --- | --- |
-  | `auto` (default) | Start with hardware flow, switch to Shader when hardware results repeatedly arrive late, and periodically retry hardware. Use this for normal play. |
-  | `hardware` | Keep hardware flow while the accelerator is available; use it to compare hardware behavior without Auto's timing-based fallback. Unavailable hardware still uses Shader. |
-  | `shader` | Keep Shader flow, for comparison or when it works better in a game. |
-
-  Selecting **Shader** as the Motion source always uses Shader, whatever `interpolateFlow`
-  says. Extrapolate uses the Motion source directly; `interpolateFlow` does not change it.
-  The OSD shows the motion source actually in use.
+- **Fall back to Shader when hardware flow can't keep up** (on by default) appears under
+  **Motion source** while **Mode** is **Interpolate** and **Motion source** is **NVIDIA
+  hardware**, at any frame rate. On, Interpolate switches to Shader when hardware results
+  repeatedly arrive late and retries hardware after a while. Off keeps hardware flow while the
+  accelerator is available, for comparing hardware behavior; unavailable hardware still uses
+  Shader. In a profile's settings it is `interpolateFlow`: `auto` (on) or `hardware` (off).
+  Extrapolate uses the Motion source directly. The OSD shows the motion source actually in use.
 - **Advanced** (collapsed by default):
   - **Flow quality** sets the resolution motion is measured at: **Performance** (1/16 of the eye
     image), **Balanced** (1/8, default), or **Quality** (1/4). Higher quality tracks small and

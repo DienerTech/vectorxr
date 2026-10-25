@@ -194,7 +194,7 @@
       },
       "hardware": {
         "label": "NVIDIA 硬體",
-        "description": "使用 NVIDIA RTX GPU 的光流單元：更準確，尤其是在重複圖樣上。供 Extrapolate 使用，以及 Interpolate 在固定或自動影格速率下使用（實驗性）。"
+        "description": "使用 NVIDIA RTX GPU 的光流單元：更準確，尤其是在重複圖樣上。"
       }
     },
     "advanced": {
@@ -234,10 +234,8 @@
       "description": "Frame Generation 會讓遊戲最多提前約 150 ms 渲染，而某些執行階段（例如 Pimax 的）只會預測其中約 20 ms 的頭部動作。此選項會將您頭部的轉動延續到剩餘的時間，讓您轉向的那一側邊緣出現較少黑邊。請在啟動遊戲前開啟。"
     },
     "interpolateFlow": {
-      "legend": "插值光流",
-      "description": "自動使用硬體光流；影格延遲時切換至著色器，之後重試硬體。",
-      "hardware": "持續使用硬體光流。",
-      "shader": "持續使用著色器光流。"
+      "fallback": "硬體光流跟不上時切換至著色器",
+      "fallbackHint": "僅限 Interpolate。一段時間後會重試硬體光流。"
     }
   }
 }

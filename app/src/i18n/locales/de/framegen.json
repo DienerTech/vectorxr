@@ -194,7 +194,7 @@
       },
       "hardware": {
         "label": "NVIDIA-Hardware",
-        "description": "Verwendet die Optical-Flow-Einheit von NVIDIA-RTX-GPUs: genauer, besonders bei sich wiederholenden Mustern. Wird von Extrapolate verwendet sowie von Interpolate bei fester oder automatischer Bildrate (experimentell)."
+        "description": "Verwendet die Optical-Flow-Einheit von NVIDIA-RTX-GPUs: genauer, besonders bei sich wiederholenden Mustern."
       }
     },
     "advanced": {
@@ -234,10 +234,8 @@
       "description": "Frame Generation lässt das Spiel bis zu ~150 ms im Voraus rendern, und manche Laufzeiten, etwa die von Pimax, sagen Ihren Kopf nur ~20 ms davon voraus. Diese Option führt die Drehung Ihres Kopfes über den Rest fort, für weniger Schwarz an dem Rand, zu dem Sie sich drehen. Schalten Sie sie vor dem Start des Spiels ein."
     },
     "interpolateFlow": {
-      "legend": "Interpolationsfluss",
-      "description": "Auto nutzt Hardware-Fluss, wechselt bei verspäteten Frames zu Shader und versucht später erneut Hardware.",
-      "hardware": "Hardware-Fluss beibehalten.",
-      "shader": "Shader-Fluss beibehalten."
+      "fallback": "Auf Shader wechseln, wenn der Hardware-Fluss nicht mithält",
+      "fallbackHint": "Nur Interpolate. Der Hardware-Fluss wird nach einer Weile erneut versucht."
     }
   }
 }

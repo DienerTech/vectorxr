@@ -194,7 +194,7 @@
       },
       "hardware": {
         "label": "NVIDIA hardware",
-        "description": "Uses the optical flow unit of NVIDIA RTX GPUs: more accurate, especially on repeating patterns. Used by Extrapolate, and by Interpolate at a fixed or Auto frame rate (experimental)."
+        "description": "Uses the optical flow unit of NVIDIA RTX GPUs: more accurate, especially on repeating patterns."
       }
     },
     "advanced": {
@@ -234,10 +234,8 @@
       "description": "Frame Generation has the game render up to ~150 ms ahead, and some runtimes, such as Pimax's, predict your head only ~20 ms of that. This carries your head's turn over the rest, for less black at the edge you turn toward. Turn it on before starting the game."
     },
     "interpolateFlow": {
-      "legend": "Interpolate flow",
-      "description": "Auto uses hardware flow and switches to Shader if frames arrive late, then retries hardware.",
-      "hardware": "Keep using hardware flow.",
-      "shader": "Keep using Shader flow."
+      "fallback": "Fall back to Shader when hardware flow can't keep up",
+      "fallbackHint": "Interpolate only. Hardware flow is tried again after a while."
     }
   }
 }
