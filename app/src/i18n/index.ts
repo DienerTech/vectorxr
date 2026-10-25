@@ -49,9 +49,13 @@ const machineTranslated = new Map<string, boolean>([[sourceLocale, false]])
 // The language messages are shown in. Reactive: anything rendering t() follows
 // a change of language.
 export const activeLocale = shallowRef<AppLocale>(sourceLocale)
+// Counts catalogs added, so text shown in a language other than the app's
+// (tIn) updates once that language's catalog arrives.
+const catalogsAdded = shallowRef(0)
 
 export function addMessages(locale: AppLocale, messages: unknown) {
   catalogs.set(locale, flattenMessages(messages))
+  catalogsAdded.value++
   const meta = (messages as { _meta?: { machineTranslated?: unknown } } | null)?._meta
   machineTranslated.set(locale, meta?.machineTranslated !== false)
 }
@@ -105,7 +109,14 @@ export function interpolate(message: string, params?: MessageParams): string {
 }
 
 export function t(key: MessageKey, params?: MessageParams): string {
-  const locale = activeLocale.value
+  return tIn(activeLocale.value, key, params)
+}
+
+// t() in `locale` rather than the app's language, for text that shows in its
+// own language (the OSD preview in the OSD's). English until that catalog has
+// been added (loadLanguage).
+export function tIn(locale: AppLocale, key: MessageKey, params?: MessageParams): string {
+  void catalogsAdded.value
   const count = typeof params?.count === 'number' ? params.count : undefined
   let message = lookup(locale, key, count)
   if (message === undefined && locale !== sourceLocale) message = lookup(sourceLocale, key, count)

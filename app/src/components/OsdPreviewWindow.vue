@@ -4,13 +4,15 @@ import { isTauri } from '@tauri-apps/api/core'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { defaultOsdSettings, normalizeOsdSettings } from '../lib/model'
 import OsdPreview from './OsdPreview.vue'
-import { t } from '../i18n/index.ts'
+import { isAppLocale } from '../i18n/locales.ts'
+import { t, type AppLocale } from '../i18n/index.ts'
 
 const settings = ref(defaultOsdSettings())
 const ready = ref(false)
 const legible = ref(false)
 const pivotSnapLine = ref(false)
 const diagnostics = ref('')
+const locale = ref<AppLocale | undefined>()
 const channel = new BroadcastChannel(new URLSearchParams(location.search).get('osd-preview')!)
 channel.onmessage = ({ data }) => {
   if (data?.type !== 'settings') return
@@ -18,6 +20,7 @@ channel.onmessage = ({ data }) => {
   legible.value = data.legible === true
   pivotSnapLine.value = data.pivotSnapLine === true
   diagnostics.value = typeof data.diagnostics === 'string' ? data.diagnostics : ''
+  locale.value = isAppLocale(data.locale) ? data.locale : undefined
   document.documentElement.dataset.theme = data.theme === 'dark' ? 'dark' : 'light'
   ready.value = true
 }
@@ -51,7 +54,7 @@ onUnmounted(() => { closed(); channel.close(); window.removeEventListener('befor
       </template>
       <button type="button" class="button-secondary rounded-[0.75rem] px-3 py-1.5 text-xs font-medium" @click="close">{{ t('common.close') }}</button>
     </header>
-    <OsdPreview v-if="ready" v-model:legible="legible" :settings="settings" :pivot-snap-line="pivotSnapLine" :diagnostics="diagnostics" @position="position" />
+    <OsdPreview v-if="ready" v-model:legible="legible" :settings="settings" :pivot-snap-line="pivotSnapLine" :diagnostics="diagnostics" :locale="locale" @position="position" />
     <p v-else class="p-5 text-sm text-muted">{{ t('osd.previewWindow.connecting') }}</p>
   </main>
 </template>

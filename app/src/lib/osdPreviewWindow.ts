@@ -2,9 +2,9 @@ import { onUnmounted, ref, watch, type Ref } from 'vue'
 import { isTauri } from '@tauri-apps/api/core'
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { osdLayout, type OsdSettings } from './model'
-import { t } from '../i18n/index.ts'
+import { t, type AppLocale } from '../i18n/index.ts'
 
-export function useOsdPreviewWindow(settings: Ref<OsdSettings>, compact: Ref<boolean>, legible: Ref<boolean>, pivotSnapLine: Readonly<Ref<boolean>>, diagnostics: Readonly<Ref<string>>) {
+export function useOsdPreviewWindow(settings: Ref<OsdSettings>, compact: Ref<boolean>, legible: Ref<boolean>, pivotSnapLine: Readonly<Ref<boolean>>, diagnostics: Readonly<Ref<string>>, locale: Readonly<Ref<AppLocale>>) {
   const opened = ref(false)
   const error = ref('')
   const channelId = `osd-preview-${crypto.randomUUID()}`
@@ -12,7 +12,7 @@ export function useOsdPreviewWindow(settings: Ref<OsdSettings>, compact: Ref<boo
   let nativeWindow: WebviewWindow | null = null
   let browserWindow: Window | null = null
   let disposed = false
-  const publish = () => channel.postMessage({ type: 'settings', settings: { ...osdLayout(settings.value), compact: compact.value }, legible: legible.value, pivotSnapLine: pivotSnapLine.value, diagnostics: diagnostics.value, theme: document.documentElement.dataset.theme })
+  const publish = () => channel.postMessage({ type: 'settings', settings: { ...osdLayout(settings.value), compact: compact.value }, legible: legible.value, pivotSnapLine: pivotSnapLine.value, diagnostics: diagnostics.value, locale: locale.value, theme: document.documentElement.dataset.theme })
   channel.onmessage = ({ data }) => {
     if (data?.type === 'ready') publish()
     if (data?.type === 'view' && typeof data.legible === 'boolean') legible.value = data.legible
@@ -23,7 +23,7 @@ export function useOsdPreviewWindow(settings: Ref<OsdSettings>, compact: Ref<boo
       settings.value.verticalDegrees = Math.round(Math.max(-35, Math.min(35, data.vertical)))
     }
   }
-  watch([settings, compact, legible, pivotSnapLine, diagnostics], publish, { deep: true })
+  watch([settings, compact, legible, pivotSnapLine, diagnostics, locale], publish, { deep: true })
   const themeObserver = new MutationObserver(publish)
   themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })
   function close() {

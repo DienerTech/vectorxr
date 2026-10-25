@@ -1,13 +1,20 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, useId } from 'vue'
+import { computed, onMounted, onUnmounted, ref, useId, watch } from 'vue'
 import { osdCompactLayout } from '../lib/osdCompactLayout'
 import { osdDiagnosticsTagWidth } from '../lib/osdDiagnostics'
 import { osdAccentColors, type OsdSettings, type OsdBodyRow } from '../lib/model'
-import { t } from '../i18n/index.ts'
+import { activeLocale, t, tIn, type AppLocale, type MessageKey, type MessageParams } from '../i18n/index.ts'
+import { loadLanguage } from '../i18n/load.ts'
 // pivotSnapLine mirrors the layer: the Pivot row gains a Snap View line only
 // when Snap Views are configured. diagnostics: the tag after the brand
-// (osdDiagnostics), empty for none.
-const props = withDefaults(defineProps<{ settings: OsdSettings; pivotSnapLine?: boolean; diagnostics?: string }>(), { pivotSnapLine: false, diagnostics: '' })
+// (osdDiagnostics), empty for none. locale: the language the OSD draws in,
+// the app's when not given.
+const props = withDefaults(defineProps<{ settings: OsdSettings; pivotSnapLine?: boolean; diagnostics?: string; locale?: AppLocale }>(), { pivotSnapLine: false, diagnostics: '', locale: undefined })
+// The panel's text is the OSD's (osd.preview.*), in its language; the stage
+// around it is the app's.
+const osdLocale = computed(() => props.locale ?? activeLocale.value)
+watch(osdLocale, locale => { void loadLanguage(locale) }, { immediate: true })
+const ot = (key: MessageKey, params?: MessageParams) => tIn(osdLocale.value, key, params)
 const tagWidth = computed(() => osdDiagnosticsTagWidth(props.diagnostics))
 const legible = defineModel<boolean>('legible', { default: false })
 const edgeId = useId()
@@ -46,7 +53,7 @@ onUnmounted(() => observer?.disconnect())
 const legibleScale = computed(() => Math.min(legibleMaxScale, stageSize.value.width > 0 ? (stageSize.value.width - legiblePadX) / legibleWidestPanel : legibleMaxScale))
 const legibleStageHeight = computed(() => Math.max(300, Math.ceil(height.value * legibleScale.value) + legiblePadY))
 const legibleView = computed(() => ({ width: stageSize.value.width || legibleWidestPanel, height: stageSize.value.height || legibleStageHeight.value }))
-const headerValues = computed(() => ({ brand: 'VECTORXR', app: t('osd.preview.appName'), runtime: t('osd.preview.runtimeName'), clock: props.settings.clockFormat === '12' ? t('osd.preview.clock12') : t('osd.preview.clock24') }))
+const headerValues = computed(() => ({ brand: 'VECTORXR', app: ot('osd.preview.appName'), runtime: ot('osd.preview.runtimeName'), clock: props.settings.clockFormat === '12' ? ot('osd.preview.clock12') : ot('osd.preview.clock24') }))
 // Whether the sample shows a game Frame Generation runs in: Turbo then yields
 // to it, as in the headset.
 const framegenShown = computed(() => {
@@ -56,11 +63,11 @@ const framegenShown = computed(() => {
 // The sample text matches the layer's English OSD wording (osd.preview.*).
 const labels = computed<Record<OsdBodyRow, [string, string]>>(() => ({
   graph: ['', ''],
-  performance: [t('osd.preview.labels.performance'), ''],
-  turbo: [t('osd.preview.labels.turbo'), framegenShown.value ? t('osd.preview.turboPausedForFramegen') : t('osd.preview.turboAsyncExperimental')],
-  framegen: [t('osd.preview.labels.framegen'), t('osd.preview.framegenState')],
-  pivot: [t('osd.preview.labels.pivot'), t('osd.preview.pivotState')],
-  modules: [t('osd.preview.labels.modules'), framegenShown.value ? t('osd.preview.modulesWithFramegen') : t('osd.preview.modules')],
+  performance: [ot('osd.preview.labels.performance'), ''],
+  turbo: [ot('osd.preview.labels.turbo'), framegenShown.value ? ot('osd.preview.turboPausedForFramegen') : ot('osd.preview.turboAsyncExperimental')],
+  framegen: [ot('osd.preview.labels.framegen'), ot('osd.preview.framegenState')],
+  pivot: [ot('osd.preview.labels.pivot'), ot('osd.preview.pivotState')],
+  modules: [ot('osd.preview.labels.modules'), framegenShown.value ? ot('osd.preview.modulesWithFramegen') : ot('osd.preview.modules')],
 }))
 // Sample readings: a game Frame Generation doubles while the preview shows
 // Frame Generation, a game at full rate otherwise.
@@ -70,8 +77,8 @@ const sample = computed(() => {
 // The PERFORMANCE row's sample, as the layer words it (DescribePerformance):
 // headroom against the game's target, video memory with Frame Generation's share.
 const performance = computed(() => framegenShown.value
-  ? { target: t('osd.preview.performanceTarget', { fps: 45 }), cells: [['CPU +56%', t('osd.preview.cpuDetail', { ms: '9.8', thread: 61 })], ['GPU +9%', t('osd.preview.gpuDetail', { busy: 91, game: 74 })], ['VRAM 11.4 GB', t('osd.preview.vramDetailWithFramegen', { budget: '14.2', framegen: 612 })]] }
-  : { target: t('osd.preview.performanceTarget', { fps: 90 }), cells: [['CPU +32%', t('osd.preview.cpuDetail', { ms: '7.6', thread: 84 })], ['GPU +18%', t('osd.preview.gpuDetail', { busy: 82, game: 70 })], ['VRAM 9.8 GB', t('osd.preview.vramDetail', { budget: '14.2' })]] })
+  ? { target: ot('osd.preview.performanceTarget', { fps: 45 }), cells: [['CPU +56%', ot('osd.preview.cpuDetail', { ms: '9.8', thread: 61 })], ['GPU +9%', ot('osd.preview.gpuDetail', { busy: 91, game: 74 })], ['VRAM 11.4 GB', ot('osd.preview.vramDetailWithFramegen', { budget: '14.2', framegen: 612 })]] }
+  : { target: ot('osd.preview.performanceTarget', { fps: 90 }), cells: [['CPU +32%', ot('osd.preview.cpuDetail', { ms: '7.6', thread: 84 })], ['GPU +18%', ot('osd.preview.gpuDetail', { busy: 82, game: 70 })], ['VRAM 9.8 GB', ot('osd.preview.vramDetail', { budget: '14.2' })]] })
 let drag: { x: number; y: number; h: number; v: number; unit: number } | null = null
 function start(event: PointerEvent) {
   if (event.button !== 0 || legible.value) return
@@ -92,7 +99,7 @@ function move(event: PointerEvent) {
     <svg :viewBox="legible ? `0 0 ${legibleView.width} ${legibleView.height}` : '-50 -40 100 80'" class="stage-svg" :aria-label="legible ? t('osd.previewStage.legibleAria') : t('osd.previewStage.placementAria')">
       <path v-if="!legible" d="M -50 0 H 50 M 0 -40 V 40" stroke="#a4c1d630" stroke-width=".15" />
       <circle v-if="!legible" r="1" fill="none" stroke="#a4c1d685" stroke-width=".15" />
-      <svg v-if="!settings.compact || !compactLayout.empty" :x="legible ? (legibleView.width - panelWidth * legibleScale) / 2 : settings.horizontalDegrees - width / 2" :y="legible ? (legibleView.height - height * legibleScale) / 2 + 8 : -settings.verticalDegrees - angularHeight / 2" :width="legible ? panelWidth * legibleScale : width" :height="legible ? height * legibleScale : angularHeight" :viewBox="`0 0 ${panelWidth} ${height}`" class="preview" :style="{ '--accent': accent, opacity: settings.opacity / 100 }"
+      <svg v-if="!settings.compact || !compactLayout.empty" :x="legible ? (legibleView.width - panelWidth * legibleScale) / 2 : settings.horizontalDegrees - width / 2" :y="legible ? (legibleView.height - height * legibleScale) / 2 + 8 : -settings.verticalDegrees - angularHeight / 2" :width="legible ? panelWidth * legibleScale : width" :height="legible ? height * legibleScale : angularHeight" :viewBox="`0 0 ${panelWidth} ${height}`":lang="osdLocale" class="preview" :style="{ '--accent': accent, opacity: settings.opacity / 100 }"
         @pointerdown="start" @pointermove="move" @pointerup="drag = null" @pointercancel="drag = null" @lostpointercapture="drag = null">
         <defs>
           <filter :id="`${edgeId}-blur`"><feGaussianBlur stdDeviation="2" /></filter>
@@ -107,28 +114,28 @@ function move(event: PointerEvent) {
           <g v-if="compactLayout.diagnostics" :transform="`translate(${compactLayout.diagnostics.x} ${compactLayout.headerY - 1})`"><rect :width="compactLayout.diagnostics.width" height="30" fill="#f5b96c" /><foreignObject x="10" :width="compactLayout.diagnostics.width - 16" height="30"><div class="diagnostics-tag">{{ diagnostics }}</div></foreignObject></g>
           <text v-if="compactLayout.fps" x="28" :y="compactLayout.metricsY + 40" font-size="40" fill="#e9f0f8" font-weight="600">{{ sample.fps }} fps</text>
           <g v-if="compactLayout.framegenBadge" font-size="20" font-weight="600">
-            <text x="150" :y="compactLayout.metricsY + 23" :fill="accent">{{ t('osd.preview.fgOn') }}</text>
+            <text x="150" :y="compactLayout.metricsY + 23" :fill="accent">{{ ot('osd.preview.fgOn') }}</text>
             <text x="150" :y="compactLayout.metricsY + 47" fill="#e9f0f8">90 fps</text>
           </g>
-          <text v-if="compactLayout.frameTime" :x="compactLayout.frameTimeX" :y="compactLayout.metricsY + 40" font-size="40" fill="#e9f0f8" font-weight="600">{{ t('osd.preview.averageCompact', { value: sample.average }) }}</text>
+          <text v-if="compactLayout.frameTime" :x="compactLayout.frameTimeX" :y="compactLayout.metricsY + 40" font-size="40" fill="#e9f0f8" font-weight="600">{{ ot('osd.preview.averageCompact', { value: sample.average }) }}</text>
           <g v-if="compactLayout.statusY >= 0">
             <path v-if="compactLayout.statusY > 18" :d="`M28 ${compactLayout.statusY - 8} H${panelWidth - 28}`" stroke="#141f2d" />
             <g v-if="settings.compactShowPerformance" :transform="`translate(0 ${compactLayout.performanceY})`">
-              <text x="30" y="22" font-size="20" fill="#94a5b8">{{ t('osd.preview.labels.performanceCompact') }}</text>
+              <text x="30" y="22" font-size="20" fill="#94a5b8">{{ ot('osd.preview.labels.performanceCompact') }}</text>
               <foreignObject :x="compactLayout.statusValueX" :width="panelWidth - compactLayout.statusValueX - 28" height="36"><div class="body-value" style="color: #e9f0f8">{{ performance.cells[0][0] }}<span class="separator">  /  </span>{{ performance.cells[1][0] }}<span class="separator">  /  </span>{{ performance.cells[2][0] }}</div></foreignObject>
             </g>
             <g v-if="settings.compactShowTurbo" :transform="`translate(0 ${compactLayout.turboY})`">
-              <text x="30" y="22" font-size="20" fill="#94a5b8">{{ t('osd.preview.labels.turbo') }}</text>
-              <foreignObject :x="compactLayout.statusValueX" :width="panelWidth - compactLayout.statusValueX - 28" height="36"><div class="body-value" :style="{ color: accent }">{{ framegenShown ? t('osd.preview.turboPausedForFramegen') : t('osd.preview.turboAsyncCompact') }}</div></foreignObject>
+              <text x="30" y="22" font-size="20" fill="#94a5b8">{{ ot('osd.preview.labels.turbo') }}</text>
+              <foreignObject :x="compactLayout.statusValueX" :width="panelWidth - compactLayout.statusValueX - 28" height="36"><div class="body-value" :style="{ color: accent }">{{ framegenShown ? ot('osd.preview.turboPausedForFramegen') : ot('osd.preview.turboAsyncCompact') }}</div></foreignObject>
             </g>
             <g v-if="settings.compactShowFramegen" :transform="`translate(0 ${compactLayout.framegenY})`">
-              <text x="30" y="22" font-size="20" fill="#94a5b8">{{ t('osd.preview.labels.framegen') }}</text>
-              <foreignObject :x="compactLayout.statusValueX" :width="panelWidth - compactLayout.statusValueX - 28" height="36"><div class="body-value" style="color: #e9f0f8">{{ t('osd.preview.framegenCompact') }}</div></foreignObject>
+              <text x="30" y="22" font-size="20" fill="#94a5b8">{{ ot('osd.preview.labels.framegen') }}</text>
+              <foreignObject :x="compactLayout.statusValueX" :width="panelWidth - compactLayout.statusValueX - 28" height="36"><div class="body-value" style="color: #e9f0f8">{{ ot('osd.preview.framegenCompact') }}</div></foreignObject>
             </g>
             <g v-if="settings.compactShowPivot" :transform="`translate(0 ${compactLayout.pivotY})`">
-              <text x="30" y="22" font-size="20" fill="#94a5b8">{{ t('osd.preview.labels.pivot') }}</text>
-              <foreignObject :x="compactLayout.statusValueX" :width="panelWidth - compactLayout.statusValueX - 28" height="36"><div class="body-value" style="color: #e9f0f8">{{ t('osd.preview.pivotCompact') }}</div></foreignObject>
-              <foreignObject v-if="pivotSnapLine" :x="compactLayout.statusValueX" y="32" :width="panelWidth - compactLayout.statusValueX - 28" height="36"><div class="body-value" style="color: #e9f0f8">{{ t('osd.preview.snapCompact') }}</div></foreignObject>
+              <text x="30" y="22" font-size="20" fill="#94a5b8">{{ ot('osd.preview.labels.pivot') }}</text>
+              <foreignObject :x="compactLayout.statusValueX" :width="panelWidth - compactLayout.statusValueX - 28" height="36"><div class="body-value" style="color: #e9f0f8">{{ ot('osd.preview.pivotCompact') }}</div></foreignObject>
+              <foreignObject v-if="pivotSnapLine" :x="compactLayout.statusValueX" y="32" :width="panelWidth - compactLayout.statusValueX - 28" height="36"><div class="body-value" style="color: #e9f0f8">{{ ot('osd.preview.snapCompact') }}</div></foreignObject>
             </g>
           </g>
         </template>
@@ -140,16 +147,16 @@ function move(event: PointerEvent) {
           <text v-if="settings.showClock" x="790" y="39" font-size="21" fill="#94a5b8">{{ headerValues.clock }}</text>
           <g :transform="`translate(0 ${-expandedHeader.shift})`">
             <g font-size="68" fill="#e9f0f8" font-weight="600"><text x="28" y="125">{{ sample.fps }}</text><text x="325" y="125">{{ sample.average }} ms</text><text x="655" y="125" :fill="accent">{{ sample.p95 }} ms</text></g>
-            <g v-if="settings.showFramegenFps" font-size="24" font-weight="600"><text x="120" y="99" :fill="accent">{{ t('osd.preview.fgOn') }}</text><text x="120" y="128" fill="#e9f0f8">90 fps</text></g>
-            <g font-size="20" fill="#94a5b8"><text x="30" y="161">{{ t('osd.preview.appFps') }}</text><text x="327" y="161">{{ t('osd.preview.appFrameAverage') }}</text><text x="657" y="161">{{ t('osd.preview.appFrameP95') }}</text></g>
+            <g v-if="settings.showFramegenFps" font-size="24" font-weight="600"><text x="120" y="99" :fill="accent">{{ ot('osd.preview.fgOn') }}</text><text x="120" y="128" fill="#e9f0f8">90 fps</text></g>
+            <g font-size="20" fill="#94a5b8"><text x="30" y="161">{{ ot('osd.preview.appFps') }}</text><text x="327" y="161">{{ ot('osd.preview.appFrameAverage') }}</text><text x="657" y="161">{{ ot('osd.preview.appFrameP95') }}</text></g>
           </g>
         </template>
         <template v-if="!settings.compact"><g v-for="row in rows" :key="row.key" :transform="`translate(0 ${row.y})`">
-          <template v-if="row.key === 'graph'"><rect x="28" width="904" height="130" fill="#141f2d" /><text x="40" y="22" font-size="18" fill="#94a5b8">{{ t('osd.preview.frameTimeGraph') }}</text><path d="M40 94 L100 90 160 98 220 94 280 92 340 35 400 87 460 91 520 96 580 92 640 90 700 99 760 88 820 94 920 93" fill="none" :stroke="accent" stroke-width="3" /></template>
-          <template v-else-if="row.key === 'performance'"><text x="30" y="20" font-size="20" fill="#94a5b8">{{ t('osd.preview.labels.performance') }}</text><text x="30" y="50" font-size="20" fill="#94a5b8">{{ performance.target }}</text>
+          <template v-if="row.key === 'graph'"><rect x="28" width="904" height="130" fill="#141f2d" /><text x="40" y="22" font-size="18" fill="#94a5b8">{{ ot('osd.preview.frameTimeGraph') }}</text><path d="M40 94 L100 90 160 98 220 94 280 92 340 35 400 87 460 91 520 96 580 92 640 90 700 99 760 88 820 94 920 93" fill="none" :stroke="accent" stroke-width="3" /></template>
+          <template v-else-if="row.key === 'performance'"><text x="30" y="20" font-size="20" fill="#94a5b8">{{ ot('osd.preview.labels.performance') }}</text><text x="30" y="50" font-size="20" fill="#94a5b8">{{ performance.target }}</text>
             <g v-for="(cell, index) in performance.cells" :key="index"><foreignObject :x="242 + index * 230" width="220" height="36"><div class="body-value" style="color: #e9f0f8">{{ cell[0] }}</div></foreignObject><foreignObject :x="242 + index * 230" y="30" width="220" height="30"><div class="body-detail">{{ cell[1] }}</div></foreignObject></g></template>
-          <template v-else><text x="30" y="20" font-size="20" fill="#94a5b8">{{ labels[row.key][0] }}</text><foreignObject x="242" width="680" height="36"><div class="body-value" :style="{ color: row.key === 'turbo' ? accent : '#e9f0f8' }">{{ labels[row.key][1] }}</div></foreignObject><foreignObject v-if="row.key === 'pivot' && pivotSnapLine" x="242" y="32" width="680" height="36"><div class="body-value">{{ t('osd.preview.snapState') }}</div></foreignObject>
-            <foreignObject v-if="row.key === 'framegen'" x="242" y="30" width="680" height="30"><div class="body-detail">{{ t('osd.preview.framegenDetail') }}</div></foreignObject></template>
+          <template v-else><text x="30" y="20" font-size="20" fill="#94a5b8">{{ labels[row.key][0] }}</text><foreignObject x="242" width="680" height="36"><div class="body-value" :style="{ color: row.key === 'turbo' ? accent : '#e9f0f8' }">{{ labels[row.key][1] }}</div></foreignObject><foreignObject v-if="row.key === 'pivot' && pivotSnapLine" x="242" y="32" width="680" height="36"><div class="body-value">{{ ot('osd.preview.snapState') }}</div></foreignObject>
+            <foreignObject v-if="row.key === 'framegen'" x="242" y="30" width="680" height="30"><div class="body-detail">{{ ot('osd.preview.framegenDetail') }}</div></foreignObject></template>
         </g></template>
       </svg>
     </svg>

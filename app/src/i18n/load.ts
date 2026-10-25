@@ -18,6 +18,17 @@ async function loadCatalog(locale: AppLocale) {
   addMessages(locale, messages)
 }
 
+// Loads `locale`'s catalog for text shown in it (tIn) without changing the
+// app's language. A catalog that fails to load leaves that text in English.
+export async function loadLanguage(locale: AppLocale) {
+  if (locale === sourceLocale || locale === pseudoLocale) return
+  try {
+    await loadCatalog(locale)
+  } catch (error) {
+    console.warn(`Failed to load the ${locale} catalog`, error)
+  }
+}
+
 // Shows `preference` once its catalog has loaded. A catalog that fails to load
 // leaves the language as it was.
 export async function applyLanguagePreference(preference: LanguagePreference): Promise<AppLocale> {

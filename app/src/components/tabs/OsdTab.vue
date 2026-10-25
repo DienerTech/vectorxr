@@ -10,7 +10,7 @@ import ModuleBindingPage from '../ModuleBindingPage.vue'
 import BindingConflictWarnings from '../BindingConflictWarnings.vue'
 import { bindingLabel, savedBindingConflictWarnings, osdAccentColors, osdBodyRows, osdLayout, pivotSnapViewsConfigured, type OsdBodyRow, type VectorXRConfig, type OsdSettings } from '../../lib/model'
 import { loadRuntimeStatus, type RuntimeStatusSession } from '../../lib/commands'
-import { layerLanguage, t, type MessageKey } from '../../i18n/index.ts'
+import { activeLocale, layerLanguage, t, type MessageKey } from '../../i18n/index.ts'
 import { supportedLocales } from '../../i18n/locales.ts'
 
 const props = defineProps<{ config: VectorXRConfig; savedConfig: VectorXRConfig }>()
@@ -25,7 +25,9 @@ const previewPivotSnapLine = computed(() => pivotSnapViewsConfigured(props.confi
 // Debug logging or a Frame Generation diagnostic view left on: named after
 // the brand, in the headset as here.
 const previewDiagnostics = computed(() => osdDiagnostics(props.config))
-const previewWindow = useOsdPreviewWindow(osd, previewCompact, previewLegible, previewPivotSnapLine, previewDiagnostics)
+// The preview draws in the OSD's language as it is picked.
+const previewLocale = computed(() => osd.value.language === 'app' ? activeLocale.value : osd.value.language)
+const previewWindow = useOsdPreviewWindow(osd, previewCompact, previewLegible, previewPivotSnapLine, previewDiagnostics, previewLocale)
 watch(() => osd.value.compact, compact => { previewCompact.value = compact })
 function customColor() { osd.value.accent = 'custom'; colorExpanded.value = !colorExpanded.value }
 const editing = ref<'toggleBindings' | 'cycleBindings' | null>(null)
@@ -232,7 +234,7 @@ function preset(name: 'balanced' | 'minimal' | 'performance') {
         </div>
       </div>
       <p v-if="previewWindow.error.value" role="alert" class="chip-danger px-5 py-2 text-xs">{{ previewWindow.error.value }}</p>
-      <OsdPreview v-if="!previewWindow.opened.value" v-model:legible="previewLegible" :settings="previewSettings" :pivot-snap-line="previewPivotSnapLine" :diagnostics="previewDiagnostics" @position="(horizontal, vertical) => { osd.horizontalDegrees = horizontal; osd.verticalDegrees = vertical }" />
+      <OsdPreview v-if="!previewWindow.opened.value" v-model:legible="previewLegible" :settings="previewSettings" :locale="previewLocale" :pivot-snap-line="previewPivotSnapLine" :diagnostics="previewDiagnostics" @position="(horizontal, vertical) => { osd.horizontalDegrees = horizontal; osd.verticalDegrees = vertical }" />
       <p v-else class="surface-panel-soft border-y px-5 py-4 text-xs text-muted" style="border-color: var(--app-border)">{{ t('osd.previewOpenElsewhere') }}</p>
 
       <div class="grid gap-x-8 gap-y-6 border-t p-5 lg:grid-cols-2" style="border-color: var(--app-border)">
