@@ -99,7 +99,7 @@ function move(event: PointerEvent) {
     <svg :viewBox="legible ? `0 0 ${legibleView.width} ${legibleView.height}` : '-50 -40 100 80'" class="stage-svg" :aria-label="legible ? t('osd.previewStage.legibleAria') : t('osd.previewStage.placementAria')">
       <path v-if="!legible" d="M -50 0 H 50 M 0 -40 V 40" stroke="#a4c1d630" stroke-width=".15" />
       <circle v-if="!legible" r="1" fill="none" stroke="#a4c1d685" stroke-width=".15" />
-      <svg v-if="!settings.compact || !compactLayout.empty" :x="legible ? (legibleView.width - panelWidth * legibleScale) / 2 : settings.horizontalDegrees - width / 2" :y="legible ? (legibleView.height - height * legibleScale) / 2 + 8 : -settings.verticalDegrees - angularHeight / 2" :width="legible ? panelWidth * legibleScale : width" :height="legible ? height * legibleScale : angularHeight" :viewBox="`0 0 ${panelWidth} ${height}`":lang="osdLocale" class="preview" :style="{ '--accent': accent, opacity: settings.opacity / 100 }"
+      <svg v-if="!settings.compact || !compactLayout.empty" :x="legible ? (legibleView.width - panelWidth * legibleScale) / 2 : settings.horizontalDegrees - width / 2" :y="legible ? (legibleView.height - height * legibleScale) / 2 + 8 : -settings.verticalDegrees - angularHeight / 2" :width="legible ? panelWidth * legibleScale : width" :height="legible ? height * legibleScale : angularHeight" :viewBox="`0 0 ${panelWidth} ${height}`" :lang="osdLocale" class="preview" :style="{ '--accent': accent, opacity: settings.opacity / 100 }"
         @pointerdown="start" @pointermove="move" @pointerup="drag = null" @pointercancel="drag = null" @lostpointercapture="drag = null">
         <defs>
           <filter :id="`${edgeId}-blur`"><feGaussianBlur stdDeviation="2" /></filter>

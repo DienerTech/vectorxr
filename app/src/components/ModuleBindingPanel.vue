@@ -30,7 +30,7 @@ const withSound = computed(() => list.value.some((binding) => binding.type !== '
   <div class="rounded-[1rem] border p-4 surface-panel-soft">
     <div class="flex items-start justify-between gap-3">
       <div class="flex min-w-0 flex-1 flex-wrap items-center gap-2">
-        <p class="shrink-0 text-sm font-semibold tracking-tight">{{ heading }}</p>
+        <p class="min-w-0 text-sm font-semibold tracking-tight">{{ heading }}</p>
         <span
           class="inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs"
           style="border-color: var(--app-border)"

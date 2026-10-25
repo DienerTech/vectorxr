@@ -46,7 +46,7 @@
     "description": "애플리케이션별로 깊이를 재정의합니다. 처음으로 일치하는 사용 설정된 프로필이 우선합니다.",
     "add": "프로필 추가",
     "empty": "아직 사용자 지정 프로필이 없습니다. 특정 애플리케이션의 깊이 값을 재정의하려면 프로필을 추가하십시오.",
-    "duplicateApplication": "{application}은(는) 이미 프로필 {profile}의 대상입니다. 처음 활성화된 프로필이 우선합니다."
+    "duplicateApplication": "{application}은(는) 이미 프로필 {profile}의 대상입니다. 목록에서 먼저 나오는 활성 프로필이 우선합니다."
   },
   "troubleshooting": {
     "title": "깊이 문제 해결",

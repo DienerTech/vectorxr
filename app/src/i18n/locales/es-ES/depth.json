@@ -18,7 +18,7 @@
     },
     "compare": {
       "step": "Paso 3: compara",
-      "name": "Ajusta en pareja",
+      "name": "Ajusta ambos controles juntos",
       "body": "Trata cada perfil de juego como su propia calibración visual: una geometría de cámara diferente puede requerir combinaciones totalmente distintas, no simples variaciones. Compara A/B con la geometría nativa y detente al primer signo de fatiga visual o de dificultad para fusionar la imagen."
     }
   },

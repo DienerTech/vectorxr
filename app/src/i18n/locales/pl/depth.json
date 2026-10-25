@@ -9,7 +9,7 @@
     "scale": {
       "step": "Krok 1: Ustaw skalę",
       "name": "Głębia stereo",
-      "body": "W lewo zwiększa pozorną skalę świata i może przywrócić naturalne proporcje, gdy kokpit wydaje się zminiaturyzowany. W prawo wzmacnia kształt stereo i poczucie obecności, gdy tytuł wygląda zbyt płasko lub zbyt dużo. Najbardziej zmienia się bliska geometria."
+      "body": "W lewo zwiększa pozorną skalę świata i może przywrócić naturalne proporcje, gdy kokpit wydaje się zminiaturyzowany. W prawo wzmacnia kształt stereo i poczucie obecności, gdy tytuł wygląda zbyt płasko albo świat gry wydaje się zbyt duży. Najbardziej zmienia się bliska geometria."
     },
     "place": {
       "step": "Krok 2: Umieść głębię",
@@ -196,7 +196,7 @@
       "strongerStereo": {
         "title": "Silniejsza względna głębia stereo",
         "description": "Bliska geometria zyskuje separację i kształt, co zwiększa obecność, ale sprawia, że świat wydaje się nieco mniejszy.",
-        "useCase": "Przydatne, gdy tytuł wygląda płasko lub zbyt dużo, ale istniejące rozmieszczenie płaszczyzny głębi jest już komfortowe.",
+        "useCase": "Przydatne, gdy tytuł wygląda płasko albo świat gry wydaje się zbyt duży, ale istniejące rozmieszczenie płaszczyzny głębi jest już komfortowe.",
         "caution": "Jeśli scena zaczyna napierać, połącz to z niewielką ujemną korektą Zbieżności."
       },
       "largerScale": {

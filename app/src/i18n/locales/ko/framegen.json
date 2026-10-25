@@ -1,7 +1,7 @@
 {
   "title": "Frame Generation",
   "experimental": "실험적",
-  "intro": "게임 프레임 사이에 생성된 프레임을 추가하므로 게임이 따라가지 못할 때에도 헤드셋의 최대 주사율에서 움직임이 부드럽게 유지됩니다. 게임별로 사용해 보고 A/B 전환으로 비교하십시오.",
+  "intro": "게임 프레임 사이에 생성된 프레임을 추가하므로 게임이 따라가지 못할 때에도 헤드셋에 설정된 주사율 그대로 움직임이 부드럽게 유지됩니다. 게임별로 사용해 보고 A/B 전환으로 비교하십시오.",
   "howItWorksTitle": "Frame Generation 작동 방식",
   "restartNote": "Frame Generation 켜기는 다음에 게임을 시작할 때 적용되며, 끄기는 즉시 적용됩니다.",
   "restartToApply": {
@@ -16,12 +16,12 @@
       "body": "{label}: 게임에 대해 런타임과 헤드셋 자체 소프트웨어에서 SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW 또는 Meta ASW를 끄십시오. 이러한 기능은 Frame Generation의 페이싱과 충돌합니다."
     },
     "refreshRate": {
-      "label": "헤드셋을 최대 주사율로 유지하십시오.",
+      "label": "헤드셋 주사율을 절반으로 낮추지 말고 설정한 주사율 그대로 유지하십시오.",
       "body": "{label} Pimax Play의 Lock Frame Rate to Half Refresh Rate나 SteamVR의 Throttling Behavior 프레임 제한으로 프레임 속도를 절반으로 낮추지 마십시오. Frame Generation이 게임의 속도를 직접 설정합니다."
     },
     "halfRate": {
       "label": "먼저 게임이 주사율의 절반에 도달하도록 하십시오.",
-      "body": "{label} Frame Generation을 끈 상태에서 게임이 헤드셋 주사율의 절반 이상(90 Hz에서 45 fps)을 유지할 때까지 게임 설정이나 렌더 해상도를 낮추십시오. Frame Generation은 절반에서 최대까지 끌어올릴 수 있지만, 처음 절반을 대신할 수는 없습니다."
+      "body": "{label} Frame Generation을 끈 상태에서 게임이 헤드셋 주사율의 절반 이상(90 Hz에서 45 fps)을 유지할 때까지 게임 설정이나 렌더 해상도를 낮추십시오. Frame Generation은 절반에서 설정된 주사율까지 끌어올릴 수 있지만, 처음 절반을 대신할 수는 없습니다."
     },
     "oneGame": {
       "label": "한 게임에서 켜기:",
@@ -119,7 +119,7 @@
     "description": "게임별로 Frame Generation을 켭니다. 처음으로 일치하는 사용 설정된 프로필이 우선합니다.",
     "add": "프로필 추가",
     "empty": "아직 사용자 지정 프로필이 없습니다. 게임에 Frame Generation을 켜려면 프로필을 추가하십시오.",
-    "duplicateApplication": "{application}은(는) 이미 프로필 {profile}의 대상입니다. 처음 활성화된 프로필이 우선합니다."
+    "duplicateApplication": "{application}은(는) 이미 프로필 {profile}의 대상입니다. 목록에서 먼저 나오는 활성 프로필이 우선합니다."
   },
   "summary": {
     "format": "{mode} · {rate} · {motion}",
@@ -144,7 +144,7 @@
     },
     "beforeYouStart": {
       "heading": "시작하기 전에",
-      "smoothing": "{label}: 게임에 대해 런타임과 헤드셋 자체 소프트웨어에서(SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW, Meta ASW) 끄고, 헤드셋을 최대 주사율로 유지하십시오. Pimax Play의 Lock Frame Rate to Half Refresh Rate나 SteamVR의 Throttling Behavior 프레임 제한으로 프레임 속도를 절반으로 낮추지 마십시오. Frame Generation이 게임의 속도를 직접 설정합니다.",
+      "smoothing": "{label}: 게임에 대해 런타임과 헤드셋 자체 소프트웨어에서(SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW, Meta ASW) 끄고, 헤드셋을 설정한 주사율 그대로 유지하십시오. Pimax Play의 Lock Frame Rate to Half Refresh Rate나 SteamVR의 Throttling Behavior 프레임 제한으로 프레임 속도를 절반으로 낮추지 마십시오. Frame Generation이 게임의 속도를 직접 설정합니다.",
       "turbo": {
         "label": "Frame Generation이 실행되는 동안 Turbo는 꺼진 상태로 유지됩니다.",
         "body": "{label} 두 기능은 서로 반대 방식으로 프레임 페이싱을 하므로, 해당 게임에서는 Turbo가 양보하고 'Frame Generation으로 일시 정지'로 표시됩니다. Turbo 프로필은 변경되지 않습니다."

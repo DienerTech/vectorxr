@@ -34,7 +34,7 @@
     "check": {
       "label": "Sprawdź w goglach:",
       "osd": "Wyświetlacz ekranowy",
-      "body": "{label} {osd} pokazuje FG ON obok wartości FPS; możesz też wybrać widok diagnostyczny Zabarwienie generowanych klatek (i potem przywrócić Wył.)."
+      "body": "{label} {osd} pokazuje FG WŁ. obok wartości FPS; możesz też wybrać widok diagnostyczny Zabarwienie generowanych klatek (i potem przywrócić Wył.)."
     },
     "compare": {
       "label": "Porównaj:",

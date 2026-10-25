@@ -59,8 +59,8 @@
       "toggleHint": "Activa y desactiva Turbo durante el juego para una comparación directa."
     },
     "safety": {
-      "heldOff_one": "Turbo se mantiene desactivado para {count} configuración. Revísala y luego bórrala o vuelve a intentarlo con la asignación del conmutador.",
-      "heldOff_other": "Turbo se mantiene desactivado para {count} configuraciones. Revísalas y luego bórralas o vuelve a intentarlo con la asignación del conmutador.",
+      "heldOff_one": "Turbo se mantiene desactivado para {count} configuración. Revísala y luego borra el bloqueo o vuelve a intentarlo con la asignación del conmutador.",
+      "heldOff_other": "Turbo se mantiene desactivado para {count} configuraciones. Revísalas y luego borra los bloqueos o vuelve a intentarlo con la asignación del conmutador.",
       "idle": "Mantiene Turbo desactivado tras una sesión interrumpida o un fallo repetido del entorno de ejecución.",
       "blockCount_one": "{count} bloqueo",
       "blockCount_other": "{count} bloqueos",
@@ -106,7 +106,7 @@
     "bestStrategy": "Cómo encontrar la mejor estrategia",
     "bestStrategyBody": "Turbo se basa en un comportamiento de los tiempos de OpenXR que la especificación no define formalmente, así que los resultados varían según el hardware, el controlador, el entorno de ejecución y el juego. Las estrategias no siempre se pueden cambiar con seguridad a mitad de sesión, así que prueba una por inicio: usa el conmutador del juego para capturar Turbo activado y Turbo desactivado en el mismo vuelo y luego compara la mejora de cada estrategia en Diagnóstico de rendimiento.",
     "safetyNet": "Red de seguridad",
-    "safetyNetBody": "Si el ritmo se bloquea incluso después de que Automático se adapte, Turbo se suspende durante esa sesión. Con Seguridad de Turbo activada, la configuración de aplicación y entorno de ejecución queda bloqueada hasta que la borres o vuelvas a intentarlo con la asignación. Los detalles del fallo se conservan en la página Seguridad de Turbo. Esto detecta los bloqueos de ritmo, no todos los fallos visuales o del controlador; vuelve a intentarlo solo cuando la sesión sea estable."
+    "safetyNetBody": "Si el ritmo se bloquea incluso después de que Automático se adapte, Turbo se suspende durante esa sesión. Con Seguridad de Turbo activada, la configuración de aplicación y entorno de ejecución queda bloqueada hasta que borres el bloqueo o vuelvas a intentarlo con la asignación. Los detalles del fallo se conservan en la página Seguridad de Turbo. Esto detecta los bloqueos de ritmo, no todos los fallos visuales o del controlador; vuelve a intentarlo solo cuando la sesión sea estable."
   },
   "profileTiming": {
     "strategy": "Estrategia",

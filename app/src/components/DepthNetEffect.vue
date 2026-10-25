@@ -142,7 +142,7 @@ const valuesText = computed(() => t('depth.pairingMap.values', {
   </button>
   <section
     v-show="!collapsible || expanded"
-    class="grid gap-4 lg:grid-cols-[minmax(17rem,0.9fr)_minmax(19rem,1.1fr)]"
+    class="grid gap-4 2xl:grid-cols-[minmax(17rem,0.9fr)_minmax(19rem,1.1fr)]"
     :class="collapsible ? 'mt-3' : ['rounded-[1rem] border p-4 shadow-panel backdrop-blur', muted ? 'surface-panel-soft opacity-70' : 'surface-panel']"
     :aria-label="t('depth.pairingMap.regionLabel')"
   >

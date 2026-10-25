@@ -82,7 +82,7 @@ function presetActive(preset: QuadViewsPreset) {
       </div>
     </div>
 
-    <div class="grid gap-3 lg:grid-cols-3">
+    <div class="grid gap-3 xl:grid-cols-3">
     <div class="rounded-[1rem] border p-4 surface-panel-soft">
       <p class="eyebrow text-xs uppercase tracking-[0.18em]">{{ t('quadviews.fields.focusWindow') }}</p>
       <div class="mt-3 grid gap-3 sm:grid-cols-2">

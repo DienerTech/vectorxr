@@ -77,7 +77,7 @@
     "clearPacingVerdictFailed": "Falha ao limpar o veredito de ritmo",
     "configSaved": "Configuração salva",
     "saveConfigFailed": "Falha ao salvar a configuração",
-    "reloadedFromDisk": "As configurações carregadas foram alteradas no disco",
+    "reloadedFromDisk": "As configurações alteradas no disco foram recarregadas",
     "configReset": "Configuração redefinida para o padrão",
     "resetConfigFailed": "Falha ao redefinir a configuração",
     "changesDiscarded": "Alterações não salvas descartadas",

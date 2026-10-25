@@ -224,7 +224,7 @@
       "versusOff": "Turbo オフに対する平均 fps",
       "fpsChange": "このフライトでは {off} → {turbo} fps",
       "needMoreTitle": "比較可能な飛行時間がさらに必要です",
-      "needMoreBody": "同様の条件で、Turbo オフで少なくとも 30 秒、Turbo オンで 30 秒記録してください。切り替えの間には Turbo 切り替えを使用してください。",
+      "needMoreBody": "同様の条件で、Turbo オフで少なくとも 30 秒、Turbo オンで 30 秒記録してください。各測定区間の間に Turbo 切り替えを使用してください。",
       "evidenceNote": "この割合は約束ではなく根拠として使用してください。シーンの複雑さ、天候、交通量、バックグラウンドの処理も比較に影響します。"
     },
     "verdict": {

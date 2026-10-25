@@ -267,7 +267,7 @@
       },
       "redOutline": {
         "title": "紅色外框",
-        "body": "眼睛來源無法使用。VectorXR 正在使用其後援焦點行為。"
+        "body": "眼動追蹤資料來源無法使用。VectorXR 正在使用其後援焦點行為。"
       }
     },
     "goodTracking": {

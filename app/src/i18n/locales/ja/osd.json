@@ -11,7 +11,7 @@
     "needsUpdatedLayer": "更新された VectorXR レイヤーが必要です",
     "toggleHeading": "表示 / 非表示",
     "cycleHeading": "コンパクト / 拡張",
-    "toggleBindingLabel": "表示の表示 / 非表示",
+    "toggleBindingLabel": "OSD の表示 / 非表示",
     "cycleBindingLabel": "コンパクト / 拡張の切り替え",
     "bindingDescription": "VR アプリケーション内で機能します。キーボードの組み合わせ、ジョイスティックのボタン、または HAT の方向を割り当ててください。保存するとすぐに反映されます。"
   },

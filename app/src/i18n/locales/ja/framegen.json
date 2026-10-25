@@ -1,7 +1,7 @@
 {
   "title": "Frame Generation",
   "experimental": "実験的",
-  "intro": "ゲームのフレームの間に生成フレームを追加するため、ゲームが追いつかないときでもヘッドセットの最大リフレッシュ レートで滑らかな動きを保てます。ゲームごとに試して、A/B 切り替えで比較してください。",
+  "intro": "ゲームのフレームの間に生成フレームを追加するため、ゲームが追いつかないときでもヘッドセットの設定どおりのリフレッシュ レートで滑らかな動きを保てます。ゲームごとに試して、A/B 切り替えで比較してください。",
   "howItWorksTitle": "Frame Generation のしくみ",
   "restartNote": "Frame Generation をオンにすると、次回ゲームを起動したときに反映されます。オフにした場合はすぐに反映されます。",
   "restartToApply": {
@@ -16,12 +16,12 @@
       "body": "{label}。ゲームに対して、ランタイムとヘッドセット独自のソフトウェアの両方で、SteamVR Motion Smoothing、Pimax Smart Smoothing、Virtual Desktop SSW、Meta ASW をオフにしてください。これらは Frame Generation のペーシングと干渉します。"
     },
     "refreshRate": {
-      "label": "ヘッドセットを最大リフレッシュ レートのままにします。",
+      "label": "ヘッドセットのリフレッシュ レートを半分にせず、設定どおりに保ちます。",
       "body": "{label} Pimax Play の Lock Frame Rate to Half Refresh Rate や SteamVR の Throttling Behavior のフレーム制限でフレーム レートを半分にしないでください。Frame Generation がゲームのレートを自ら設定します。"
     },
     "halfRate": {
       "label": "まずゲームをリフレッシュ レートの半分で動かします。",
-      "body": "{label} Frame Generation をオフにした状態で、ヘッドセットのレートの少なくとも半分 (90 Hz で 45 fps) を維持できるまで、ゲームの設定またはレンダリング解像度を下げてください。Frame Generation は半分から最大まで引き上げられますが、最初の半分を補うことはできません。"
+      "body": "{label} Frame Generation をオフにした状態で、ヘッドセットのレートの少なくとも半分 (90 Hz で 45 fps) を維持できるまで、ゲームの設定またはレンダリング解像度を下げてください。Frame Generation は半分のレートを設定どおりのレートまで引き上げられますが、最初の半分を補うことはできません。"
     },
     "oneGame": {
       "label": "1 つのゲームでオンにします:",
@@ -144,7 +144,7 @@
     },
     "beforeYouStart": {
       "heading": "始める前に",
-      "smoothing": "{label}。ゲームに対して、ランタイムとヘッドセット独自のソフトウェアの両方で (SteamVR Motion Smoothing、Pimax Smart Smoothing、Virtual Desktop SSW、Meta ASW) オフにし、ヘッドセットを最大リフレッシュ レートのままにしてください。Pimax Play の Lock Frame Rate to Half Refresh Rate や SteamVR の Throttling Behavior のフレーム制限でフレーム レートを半分にしないでください。Frame Generation がゲームのレートを自ら設定します。",
+      "smoothing": "{label}。ゲームに対して、ランタイムとヘッドセット独自のソフトウェアの両方で (SteamVR Motion Smoothing、Pimax Smart Smoothing、Virtual Desktop SSW、Meta ASW) オフにし、ヘッドセットのリフレッシュ レートを設定どおりに保ってください。Pimax Play の Lock Frame Rate to Half Refresh Rate や SteamVR の Throttling Behavior のフレーム制限でフレーム レートを半分にしないでください。Frame Generation がゲームのレートを自ら設定します。",
       "turbo": {
         "label": "Frame Generation の動作中は Turbo はオフのままです。",
         "body": "{label} この 2 つは逆の方法でフレームのペースを制御するため、それらのゲームでは Turbo が譲り、「Frame Generation のため一時停止」と表示されます。Turbo のプロファイルは変更されません。"

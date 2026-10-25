@@ -132,7 +132,7 @@
       "inventory": "Dateiverzeichnis und Erfassungsfehler"
     },
     "limits": "Rohdateien sind auf je 8 MiB und insgesamt 64 MiB begrenzt, und die ZIP-Datei ist komprimiert. Größere Protokolle enthalten ihren Anfang und ihre neueste Ausgabe; ausgelassene oder gekürzte Dateien sind in der ZIP-Datei aufgeführt. Gelöschter Verlauf und nicht aufgezeichnete Metriken sind nicht verfügbar.",
-    "privacy": "Das Paket kann lokale Dateipfade und Namen ausführbarer Spieldateien enthalten. Es enthält keine Systemumgebungsvariablen und keine unabhängigen Dateien.",
+    "privacy": "Das Paket kann lokale Dateipfade und Namen ausführbarer Spieldateien enthalten. Es enthält keine Systemumgebungsvariablen und keine Dateien, die nichts mit der Diagnose zu tun haben.",
     "exporting": "Wird exportiert...",
     "save": "ZIP speichern",
     "fileType": "VectorXR-Debugpaket"

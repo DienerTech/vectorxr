@@ -208,7 +208,7 @@
     },
     "capture": {
       "title": "Comportement de capture",
-      "intro": "Ne capturez qu'un jeu représentatif pour le résultat le plus juste. Les écrans de chargement et les menus peuvent masquer l'effet que vous essayez de mesurer.",
+      "intro": "Ne capturez que des séquences de jeu représentatives pour obtenir le résultat le plus juste. Les écrans de chargement et les menus peuvent masquer l'effet que vous essayez de mesurer.",
       "collection": "Collecte",
       "always": "Toujours en jeu",
       "binding": "Utiliser une affectation de capture",
