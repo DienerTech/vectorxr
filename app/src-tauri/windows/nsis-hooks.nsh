@@ -93,6 +93,31 @@ done:
     Delete "$INSTDIR\installer-language.txt"
     RMDir "$INSTDIR"
     DetailPrint "Unregistered the VectorXR OpenXR layer manifest from $INSTDIR"
+    !insertmacro VECTORXR_DELETE_USER_DATA
+  ${EndIf}
+!macroend
+
+; VectorXR's settings, logs and runtime state. Tests point this elsewhere.
+!ifndef VECTORXR_DATA_DIR
+  !define VECTORXR_DATA_DIR "$LOCALAPPDATA\VectorXR"
+!endif
+
+; The uninstaller's "Delete the application data" checkbox only removes
+; folders named after the bundle identifier (local.vectorxr.app), which hold
+; the app's WebView data. VectorXR's own data lives under its product name, so
+; remove it too when the box is checked. A game still running with the layer
+; loaded can hold a log open; that file stays and the uninstall says so.
+; RMDir /r does not set the error flag for a file it cannot delete, so check
+; whether the folder is still there instead.
+!macro VECTORXR_DELETE_USER_DATA
+  ${If} $DeleteAppDataCheckboxState = 1
+    SetShellVarContext current
+    RMDir /r "${VECTORXR_DATA_DIR}"
+    ${If} ${FileExists} "${VECTORXR_DATA_DIR}\*.*"
+      DetailPrint "Some VectorXR data in ${VECTORXR_DATA_DIR} is in use and was not removed. Close any VR apps and delete that folder."
+    ${Else}
+      DetailPrint "Removed VectorXR settings and logs from ${VECTORXR_DATA_DIR}"
+    ${EndIf}
   ${EndIf}
 !macroend
 !include "FileFunc.nsh"
