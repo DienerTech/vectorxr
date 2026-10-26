@@ -479,7 +479,11 @@ Function .onInit
     ; English and tells the app English was chosen. An install from 0.20 on
     ; leaves installer-language.txt beside the app; without it, forget the
     ; saved language so the picker shows with Windows' language preselected.
-    ; The install location is in the 32-bit view, where it was written.
+    ; The install location is read in the registry view SetContext (below)
+    ; wrote it in: the 64-bit one on 64-bit Windows.
+    ${If} ${RunningX64}
+      SetRegView 64
+    ${EndIf}
     ReadRegStr $R9 HKLM "${MANUPRODUCTKEY}" ""
     ${IfNot} ${FileExists} "$R9\installer-language.txt"
       DeleteRegValue HKCU "${MANUPRODUCTKEY}" "Installer Language"
