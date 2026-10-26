@@ -4,7 +4,7 @@ import test from 'node:test'
 
 import { addMessages, activeLocale, formatList, hasMessage, interpolate, layerLanguage, setActiveLocale, t, withLocale } from '../src/i18n/index.ts'
 import { preferenceForInstallerLanguage } from '../src/i18n/firstRun.ts'
-import { matchLocale, pseudoLocale, resolveSystemLocale, supportedLocales } from '../src/i18n/locales.ts'
+import { matchLocale, menuLocales, pseudoLocale, resolveSystemLocale, supportedLocales } from '../src/i18n/locales.ts'
 import { pseudoMessage } from '../src/i18n/pseudo.ts'
 import { errorText } from '../src/lib/errors.ts'
 import { catalogLocales, checkLocale, flatten, namespaces } from './i18nCatalogs.mjs'
@@ -118,6 +118,13 @@ test('coded backend errors show in the app language; others pass through without
   } finally {
     setActiveLocale('en')
   }
+})
+
+test('language menus list every shipped language once, by native name', () => {
+  assert.deepEqual(menuLocales.map((locale) => locale.code).sort(), supportedLocales.map((locale) => locale.code).sort())
+  // Latin and Cyrillic names sort as the installer's picker shows them.
+  const alphabetic = menuLocales.map((locale) => locale.nativeName).filter((name) => /^[\p{Script=Latin}\p{Script=Cyrillic}]/u.test(name))
+  assert.deepEqual(alphabetic, [...alphabetic].sort((a, b) => a.localeCompare(b, 'en')))
 })
 
 test('the layer and the installer ship the same languages as the app', () => {

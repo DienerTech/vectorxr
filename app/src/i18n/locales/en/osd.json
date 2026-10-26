@@ -4,6 +4,7 @@
   "intro": "A head-following performance panel in VR. Direct3D 11, Direct3D 12, and Vulkan, in stereo or Quadviews.",
   "toggleOn": "OSD On",
   "toggleOff": "OSD Off",
+  "offNotice": "The OSD is off, so nothing below takes effect. Turn it on with \"OSD Off\" above.",
   "runtimeStatusUnavailable": "Runtime status is temporarily unavailable.",
   "controls": {
     "heading": "In-headset controls",

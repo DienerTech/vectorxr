@@ -5,7 +5,7 @@ import I18nText from "../I18nText.vue";
 import ThemeToggle from "../ThemeToggle.vue";
 import { activeLocale, isMachineTranslated, t } from "../../i18n/index.ts";
 import { resolveLanguagePreference, type LanguagePreference } from "../../i18n/preference.ts";
-import { pseudoLocale, sourceLocale, supportedLocales } from "../../i18n/locales.ts";
+import { menuLocales, pseudoLocale, sourceLocale, supportedLocales } from "../../i18n/locales.ts";
 import { playTestSound, requestInputRescan } from "../../lib/commands";
 import { errorText } from "../../lib/errors";
 import type { VectorXRConfig } from "../../lib/model";
@@ -133,7 +133,7 @@ async function previewSoundVolume() {
               @change="$emit('update:languagePreference', ($event.target as HTMLSelectElement).value as LanguagePreference)"
             >
               <option value="system">{{ t("settings.core.general.language.systemResolved", { language: systemLanguageName }) }}</option>
-              <option v-for="locale in supportedLocales" :key="locale.code" :value="locale.code" :lang="locale.code">
+              <option v-for="locale in menuLocales" :key="locale.code" :value="locale.code" :lang="locale.code">
                 {{ locale.nativeName }}
               </option>
               <option v-if="showPseudoLocale" :value="pseudoLocale">{{ t("settings.core.general.language.pseudo") }}</option>

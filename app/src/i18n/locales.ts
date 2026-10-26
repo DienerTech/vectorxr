@@ -20,6 +20,15 @@ export const supportedLocales = [
 
 export type LocaleCode = (typeof supportedLocales)[number]['code']
 
+// The order language menus list the languages in, after "System" or "Same as
+// app": by native name, as the installer's language picker shows them on
+// English Windows (Windows sorts that list itself). Fixed here rather than
+// sorted at run time, so every menu agrees whatever language the app is in.
+// supportedLocales keeps its own order: the layer's string table follows it
+// (osd_strings.cpp, kCodes).
+const menuOrder: readonly LocaleCode[] = ['de', 'en', 'es-ES', 'fr', 'pl', 'pt-BR', 'ru', 'ko', 'zh-CN', 'zh-TW', 'ja']
+export const menuLocales = menuOrder.map((code) => supportedLocales.find((locale) => locale.code === code)!)
+
 // A test locale built from English at run time: accented and about 30%
 // longer, so a string that skipped the catalog or a label that truncates
 // stands out. Offered in the picker of development builds only.

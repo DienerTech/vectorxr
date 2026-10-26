@@ -4,6 +4,7 @@
   "intro": "Um painel de desempenho que acompanha a cabeça em VR. Direct3D 11, Direct3D 12 e Vulkan, em estéreo ou Quadviews.",
   "toggleOn": "OSD ligado",
   "toggleOff": "OSD desligado",
+  "offNotice": "O OSD está desligado, então nada abaixo tem efeito. Ligue-o em “OSD desligado”, acima.",
   "runtimeStatusUnavailable": "O status de execução está temporariamente indisponível.",
   "controls": {
     "heading": "Controles no headset",

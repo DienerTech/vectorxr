@@ -4,6 +4,7 @@
   "intro": "Un panel de rendimiento que sigue a la cabeza en RV. Direct3D 11, Direct3D 12 y Vulkan, en estéreo o con Quadviews.",
   "toggleOn": "OSD activado",
   "toggleOff": "OSD desactivado",
+  "offNotice": "El OSD está desactivado, así que nada de lo de abajo se aplica. Actívalo con «OSD desactivado», arriba.",
   "runtimeStatusUnavailable": "El estado de ejecución no está disponible temporalmente.",
   "controls": {
     "heading": "Controles en el visor",

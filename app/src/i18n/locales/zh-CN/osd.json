@@ -4,6 +4,7 @@
   "intro": "VR 中跟随头部的性能面板。支持 Direct3D 11、Direct3D 12 和 Vulkan，可用于立体或 Quadviews 渲染。",
   "toggleOn": "OSD 已开启",
   "toggleOff": "OSD 已关闭",
+  "offNotice": "OSD 已关闭，下面的设置都不会生效。请点击上方的“OSD 已关闭”将其开启。",
   "runtimeStatusUnavailable": "运行时状态暂时不可用。",
   "controls": {
     "heading": "头显内控制",

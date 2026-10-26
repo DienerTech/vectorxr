@@ -4,6 +4,7 @@
   "intro": "Panel wydajności w VR podążający za głową. Direct3D 11, Direct3D 12 i Vulkan, w trybie stereo lub Quadviews.",
   "toggleOn": "OSD wł.",
   "toggleOff": "OSD wył.",
+  "offNotice": "OSD jest wyłączone, więc nic poniżej nie działa. Włącz je przyciskiem „OSD wył.” powyżej.",
   "runtimeStatusUnavailable": "Stan działania jest tymczasowo niedostępny.",
   "controls": {
     "heading": "Sterowanie w goglach",

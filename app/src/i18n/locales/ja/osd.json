@@ -4,6 +4,7 @@
   "intro": "VR 内で頭の動きに追従するパフォーマンス パネルです。Direct3D 11、Direct3D 12、Vulkan に対応し、ステレオまたは Quadviews で表示できます。",
   "toggleOn": "OSD オン",
   "toggleOff": "OSD オフ",
+  "offNotice": "OSD がオフのため、以下の設定はどれも反映されません。上の「OSD オフ」でオンにしてください。",
   "runtimeStatusUnavailable": "ランタイムの状態は一時的に利用できません。",
   "controls": {
     "heading": "ヘッドセット内の操作",

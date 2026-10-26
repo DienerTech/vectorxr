@@ -4,6 +4,7 @@
   "intro": "Un panneau de performances qui suit la tête en VR. Direct3D 11, Direct3D 12 et Vulkan, en stéréo ou en Quadviews.",
   "toggleOn": "OSD activé",
   "toggleOff": "OSD désactivé",
+  "offNotice": "L’OSD est désactivé : rien de ce qui suit ne s’applique. Activez-le avec « OSD désactivé » ci-dessus.",
   "runtimeStatusUnavailable": "L'état d'exécution est temporairement indisponible.",
   "controls": {
     "heading": "Commandes dans le casque",

@@ -4,6 +4,7 @@
   "intro": "在 VR 中跟隨頭部的效能面板。支援 Direct3D 11、Direct3D 12 與 Vulkan，可用於立體或 Quadviews 模式。",
   "toggleOn": "OSD 開啟",
   "toggleOff": "OSD 關閉",
+  "offNotice": "OSD 已關閉，下方設定都不會生效。請按上方的「OSD 關閉」將其開啟。",
   "runtimeStatusUnavailable": "執行階段狀態暫時無法使用。",
   "controls": {
     "heading": "頭戴式裝置內控制",

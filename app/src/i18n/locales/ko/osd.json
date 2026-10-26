@@ -4,6 +4,7 @@
   "intro": "VR에서 머리를 따라다니는 성능 패널입니다. 스테레오 또는 Quadviews에서 Direct3D 11, Direct3D 12 및 Vulkan을 지원합니다.",
   "toggleOn": "OSD 켜짐",
   "toggleOff": "OSD 꺼짐",
+  "offNotice": "OSD가 꺼져 있어 아래 설정은 적용되지 않습니다. 위의 \"OSD 꺼짐\"을 눌러 켜십시오.",
   "runtimeStatusUnavailable": "런타임 상태를 일시적으로 사용할 수 없습니다.",
   "controls": {
     "heading": "헤드셋 내 컨트롤",

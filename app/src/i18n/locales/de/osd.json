@@ -4,6 +4,7 @@
   "intro": "Ein Leistungspanel in VR, das dem Kopf folgt. Direct3D 11, Direct3D 12 und Vulkan, in Stereo oder mit Quadviews.",
   "toggleOn": "OSD ein",
   "toggleOff": "OSD aus",
+  "offNotice": "Das OSD ist aus, daher wirkt nichts von dem, was unten eingestellt ist. Schalten Sie es oben mit „OSD aus“ ein.",
   "runtimeStatusUnavailable": "Der Laufzeitstatus ist vorübergehend nicht verfügbar.",
   "controls": {
     "heading": "Steuerung im Headset",

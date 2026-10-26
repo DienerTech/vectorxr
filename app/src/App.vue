@@ -141,6 +141,7 @@ const tabs = computed(() => [
     label: t('app.tabs.osd.label'),
     subtitle: t('app.tabs.osd.subtitle'),
     status: store.state.config.core.osd.enabled ? t('common.enabled') : t('common.disabled'),
+    enhancementActive: store.state.config.core.osd.enabled,
   },
   {
     id: 'registry' as const,

@@ -55,6 +55,7 @@ function moduleDotClass(tab: { enhancementActive?: boolean }): string {
       >
         <span>{{ tab.label }}</span>
         <span v-if="tab.id === 'core' && tab.statusWarning" class="nav-dot nav-dot-warn" :title="t('app.sidebar.suiteOff')" />
+        <span v-else-if="tab.id === 'osd'" class="nav-dot" :class="moduleDotClass(tab)" :title="tab.status" />
       </button>
     </div>
 
