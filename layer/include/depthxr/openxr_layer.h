@@ -1937,6 +1937,12 @@ class OpenXrLayer {
     uint32_t eye_gaze_sync_transition_logs_remaining_{32};
     std::optional<std::chrono::steady_clock::time_point> last_eye_gaze_bound_sources_probe_;
     std::string eye_gaze_bound_sources_diagnostic_{"not-probed"};
+    // Gaze read while the session is VISIBLE but another app or overlay holds
+    // input focus; reset whenever the session is focused again.
+    std::string eye_gaze_unfocused_outcome_;
+    std::optional<XrQuaternionf> eye_gaze_unfocused_last_orientation_;
+    uint32_t eye_gaze_unfocused_identical_frames_{0};
+    uint32_t eye_gaze_unfocused_logs_remaining_{16};
     std::vector<ViewAdjustmentData> locate_views_original_scratch_;
     std::vector<ViewAdjustmentData> locate_views_adjusted_scratch_;
     std::vector<ViewAdjustmentData> locate_views_depth_native_scratch_;

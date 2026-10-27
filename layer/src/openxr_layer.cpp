@@ -1579,6 +1579,10 @@ constexpr std::chrono::seconds kInputDeviceFailureLogInterval{10};
 // Debounces sub-second dropouts (e.g. blinks, which invalidate the gaze pose for
 // ~100-400ms) so transient gaze loss does not churn the log. ~1/3s at 90Hz.
 constexpr uint32_t kEyeGazeUnavailableLogThreshold = 30;
+// Identical gaze orientations in a row, read while the session is unfocused,
+// after which the runtime is taken to be returning a stale pose. Live eye
+// tracking jitters every sample. ~1/2s at 90Hz.
+constexpr uint32_t kEyeGazeUnfocusedFrozenFrames = 45;
 constexpr std::chrono::seconds kQuadViewsDebugHeartbeatInterval{2};
 constexpr std::chrono::seconds kQuadViewsInsetMotionSummaryInterval{30};
 // Hot-path throttles. xrLocateSpace/xrLocateViews/xrEndFrame run multiple
@@ -12458,6 +12462,10 @@ void OpenXrLayer::ResetEyeGazeInputState() {
     eye_gaze_sync_transition_logs_remaining_ = 32;
     last_eye_gaze_bound_sources_probe_.reset();
     eye_gaze_bound_sources_diagnostic_ = "not-probed";
+    eye_gaze_unfocused_outcome_.clear();
+    eye_gaze_unfocused_last_orientation_.reset();
+    eye_gaze_unfocused_identical_frames_ = 0;
+    eye_gaze_unfocused_logs_remaining_ = 16;
 }
 
 void OpenXrLayer::RecordEyeGazeSyncResult(bool application, XrResult result) {
@@ -12791,11 +12799,42 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
         log_eye_gaze_diagnostic("required OpenXR action/space functions are unavailable");
         return false;
     }
+    // Input is defined only while FOCUSED, but a VISIBLE session is still on
+    // screen: SteamVR hands input focus to a floating desktop or overlay window
+    // while the game stays in view. Read gaze there without syncing, and use it
+    // only while the runtime still reports it live.
+    const bool unfocused_visible = observed_session_state_ == XR_SESSION_STATE_VISIBLE;
     if (observed_session_state_ != XR_SESSION_STATE_UNKNOWN &&
-        observed_session_state_ != XR_SESSION_STATE_FOCUSED) {
+        observed_session_state_ != XR_SESSION_STATE_FOCUSED && !unfocused_visible) {
         log_eye_gaze_diagnostic("session is not focused");
         return false;
     }
+    if (!unfocused_visible) {
+        eye_gaze_unfocused_outcome_.clear();
+        eye_gaze_unfocused_last_orientation_.reset();
+        eye_gaze_unfocused_identical_frames_ = 0;
+    }
+    // Logs each change in what the runtime gives while unfocused; the first
+    // line of an episode answers whether that runtime keeps gaze live.
+    auto note_unfocused_outcome = [&](const char* outcome, XrResult state_result, bool active,
+                                      XrResult locate_result, XrSpaceLocationFlags flags) {
+        if (eye_gaze_unfocused_outcome_ == outcome) {
+            return;
+        }
+        eye_gaze_unfocused_outcome_ = outcome;
+        if (eye_gaze_unfocused_logs_remaining_ == 0) {
+            return;
+        }
+        --eye_gaze_unfocused_logs_remaining_;
+        logger_.Info(std::string("Quadviews eye-gaze while the session is visible but not focused: outcome=") +
+                     outcome + ", stateResult=" + std::to_string(static_cast<int>(state_result)) +
+                     ", active=" + std::to_string(active) +
+                     ", locateResult=" + std::to_string(static_cast<int>(locate_result)) +
+                     ", locationFlags=" + FormatHex(static_cast<uint64_t>(flags)) +
+                     ", appSyncResult=" +
+                     (last_app_action_sync_result_ ? std::to_string(static_cast<int>(*last_app_action_sync_result_))
+                                                   : std::string("never")));
+    };
 
     // The layer's action set rides along with the app's xrSyncActions; only
     // issue a downstream self-sync when the app has not synced recently.
@@ -12808,7 +12847,9 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
     // Throttle attempts separately from focused successes, including positive
     // XR_SESSION_NOT_FOCUSED. Unknown focus must still allow bounded retries
     // because some applications never poll session events.
-    if (!fresh(last_app_action_sync_attempt_time_) && !fresh(last_eye_gaze_self_sync_attempt_time_)) {
+    if (unfocused_visible) {
+        // A sync here could only return XR_SESSION_NOT_FOCUSED.
+    } else if (!fresh(last_app_action_sync_attempt_time_) && !fresh(last_eye_gaze_self_sync_attempt_time_)) {
         const XrActiveActionSet active_action_set{quadviews_action_set_, XR_NULL_PATH};
         XrActionsSyncInfo sync_info{XR_TYPE_ACTIONS_SYNC_INFO};
         sync_info.countActiveActionSets = 1;
@@ -12829,6 +12870,11 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
     action_state_info.action = quadviews_eye_gaze_action_;
     XrActionStatePose action_state{XR_TYPE_ACTION_STATE_POSE};
     const XrResult state_result = next_get_action_state_pose_(session, &action_state_info, &action_state);
+    if (unfocused_visible && (XR_FAILED(state_result) || !action_state.isActive)) {
+        note_unfocused_outcome("inactive", state_result, action_state.isActive, XR_SUCCESS, 0);
+        log_eye_gaze_diagnostic("session is not focused");
+        return false;
+    }
     if (XR_FAILED(state_result) || !action_state.isActive) {
         log_eye_gaze_diagnostic("action state is unavailable, result=" +
                                 FormatHex(static_cast<uint64_t>(state_result)) +
@@ -12846,6 +12892,23 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
     const XrResult locate_result = next_locate_space_(quadviews_eye_gaze_space_, gaze_base_space, time, &gaze_location);
     if (gaze_diag) {
         logger_.Debug("Turbo-diag: eye-gaze xrLocateSpace completed.");
+    }
+    if (unfocused_visible) {
+        const bool located = XR_SUCCEEDED(locate_result) &&
+                             (gaze_location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) != 0;
+        const XrQuaternionf& q = gaze_location.pose.orientation;
+        const auto& last = eye_gaze_unfocused_last_orientation_;
+        const bool identical = located && last && last->x == q.x && last->y == q.y && last->z == q.z &&
+                               last->w == q.w;
+        eye_gaze_unfocused_identical_frames_ = identical ? eye_gaze_unfocused_identical_frames_ + 1 : 0;
+        eye_gaze_unfocused_last_orientation_ = located ? std::optional<XrQuaternionf>(q) : std::nullopt;
+        const bool frozen = eye_gaze_unfocused_identical_frames_ >= kEyeGazeUnfocusedFrozenFrames;
+        note_unfocused_outcome(!located ? "unlocated" : frozen ? "frozen" : "live", state_result,
+                               action_state.isActive, locate_result, gaze_location.locationFlags);
+        if (!located || frozen) {
+            log_eye_gaze_diagnostic("session is not focused");
+            return false;
+        }
     }
     if (XR_FAILED(locate_result) ||
         (gaze_location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) == 0) {

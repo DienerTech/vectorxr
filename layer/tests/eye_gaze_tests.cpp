@@ -494,18 +494,28 @@ int main() {
         Peer::Gaze(); Peer::Gaze();
         Expect(syncs == 2 && state_queries == 0, "fresh unfocused app attempt must throttle private retry/query");
         FocusEvent(XR_SESSION_STATE_VISIBLE); Peer::AgeAttempts(); Peer::Gaze();
-        Expect(syncs == 2, "known lost focus must suspend private sync");
+        Expect(syncs == 2 && state_queries == 1, "known lost focus must suspend private sync but still read gaze state");
         FocusEvent(XR_SESSION_STATE_FOCUSED); sync_result = XR_SUCCESS; Peer::Gaze();
-        Expect(syncs == 3 && state_queries == 1 && Peer::GoodPrivateSync(), "focus return must allow current focused input");
+        Expect(syncs == 3 && state_queries == 2 && Peer::GoodPrivateSync(), "focus return must allow current focused input");
         Peer::Gaze(); Expect(syncs == 3 && source_queries <= 1, "fresh sync and source probes must be bounded");
         FocusEvent(XR_SESSION_STATE_VISIBLE, Handle<XrSession>(99)); Peer::Gaze();
-        Expect(state_queries == 3, "another session's events must not change focus");
+        Expect(state_queries == 4, "another session's events must not change focus");
         runtime_gaze_active = true;
         Expect(Peer::Gaze() && gaze_locates == 1, "focused active action must yield tracked gaze");
+        // SteamVR hands input focus to a floating window while the game stays visible.
         FocusEvent(XR_SESSION_STATE_VISIBLE);
-        Expect(!Peer::Gaze() && gaze_locates == 1, "focus loss must reject stale active gaze");
+        const int unfocused_syncs = syncs;
+        Expect(Peer::Gaze() && gaze_locates == 2 && syncs == unfocused_syncs,
+               "a visible session must keep gaze the runtime still reports live, without syncing");
+        for (int i = 0; i < 44; ++i) Peer::Gaze();
+        Expect(!Peer::Gaze(), "an unchanging gaze pose while unfocused must be treated as stale");
+        runtime_gaze_active = false;
+        const int inactive_locates = gaze_locates;
+        Expect(!Peer::Gaze() && gaze_locates == inactive_locates && syncs == unfocused_syncs,
+               "gaze the runtime reports inactive while unfocused must fall back");
+        runtime_gaze_active = true;
         FocusEvent(XR_SESSION_STATE_FOCUSED);
-        Expect(Peer::Gaze() && gaze_locates == 2, "focus return must reacquire valid gaze");
+        Expect(Peer::Gaze() && gaze_locates == inactive_locates + 1, "focus return must reacquire valid gaze");
         runtime_gaze_active = false; // Model a higher-priority application binding suppressing ours.
         const int before_suppression_suggestions = suggestions;
         Expect(!Peer::Gaze() && suggestions == before_suppression_suggestions && attachments == 1,
