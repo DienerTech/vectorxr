@@ -731,6 +731,45 @@ const XrSessionCreateInfo* D3D11Bridge::Begin(XrInstance instance, const XrSessi
         return nullptr;
     }
 
+    // Once the session is Direct3D 12, a swapchain whose images the game's
+    // device cannot open fails the game's xrCreateSwapchain. A device
+    // wrapped by another Direct3D 11 mod (REAL VR's dxgi.dll) can refuse
+    // shared textures while sharing fences, so one is opened here first and
+    // the session stays Direct3D 11 if that fails.
+    {
+        D3D12_HEAP_PROPERTIES heap{};
+        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+        D3D12_RESOURCE_DESC desc{};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        desc.Width = 16;
+        desc.Height = 16;
+        desc.DepthOrArraySize = 1;
+        desc.MipLevels = 1;
+        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        desc.SampleDesc.Count = 1;
+        desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
+        ComPtr<ID3D12Resource> probe;
+        ComPtr<ID3D11Texture2D> probe11;
+        HANDLE handle = nullptr;
+        hr = impl->device12->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_SHARED, &desc,
+                                                     D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&probe));
+        if (SUCCEEDED(hr)) {
+            hr = impl->device12->CreateSharedHandle(probe.Get(), nullptr, GENERIC_ALL, nullptr, &handle);
+        }
+        if (SUCCEEDED(hr)) {
+            hr = impl->device11->OpenSharedResource1(handle, IID_PPV_ARGS(&probe11));
+        }
+        if (handle) {
+            CloseHandle(handle);
+        }
+        if (FAILED(hr)) {
+            reason = Failure("Opening a shared texture on the game's Direct3D 11 device", hr) +
+                     " (another Direct3D 11 mod may wrap the game's device)";
+            return nullptr;
+        }
+    }
+
     impl->binding.next = game.next;
     impl->binding.device = impl->device12.Get();
     impl->binding.queue = impl->queue.Get();
