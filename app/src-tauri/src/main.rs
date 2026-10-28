@@ -671,6 +671,10 @@ struct PivotXRModuleConfig {
         deserialize_with = "deserialize_input_bindings"
     )]
     release_origin_bindings: Vec<InputBinding>,
+    // Owned by the frontend and the layer; carried through untouched so a save
+    // never drops it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    accel_override: Option<serde_json::Value>,
     #[serde(default)]
     view_controls: serde_json::Map<String, serde_json::Value>,
     #[serde(default)]
@@ -692,6 +696,7 @@ impl Default for PivotXRModuleConfig {
             activation_bindings: Vec::new(),
             set_origin_bindings: Vec::new(),
             release_origin_bindings: Vec::new(),
+            accel_override: None,
             view_controls: serde_json::Map::new(),
             profiles: Vec::new(),
         }

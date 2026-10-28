@@ -324,6 +324,16 @@ struct PivotXrProfile {
     PivotViewControls view_controls;
 };
 
+// Temporary acceleration override: while any binding is held, Enhanced Motion
+// replaces the profile's rotation multipliers with these (total view rotation
+// per degree of head rotation; 1.0 = no acceleration) for head movement made
+// after the press. Global to the Pivot module, not per profile.
+struct PivotAccelOverride {
+    std::vector<InputBinding> bindings;
+    double yaw_multiplier{1.0};
+    double pitch_multiplier{1.0};
+};
+
 struct PivotXrModuleConfig {
     bool enabled{false};
     PivotXrSettings defaults;
@@ -335,6 +345,7 @@ struct PivotXrModuleConfig {
     std::vector<PivotActivationBinding> activation_bindings;
     std::vector<InputBinding> set_origin_bindings;
     std::vector<InputBinding> release_origin_bindings;
+    PivotAccelOverride accel_override;
     PivotViewControls view_controls;
     std::vector<PivotXrProfile> profiles;
 };
@@ -385,6 +396,9 @@ struct PivotXrResolvedProfile {
 // profile owns that binding).
 struct PivotXrResolvedSettings {
     bool enabled{false};
+    // Copied from the module config when the default Pivot module is enabled;
+    // applies to whichever profile is engaged.
+    PivotAccelOverride accel_override;
     std::vector<PivotXrResolvedProfile> profiles;
 };
 

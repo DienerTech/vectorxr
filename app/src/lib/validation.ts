@@ -1,4 +1,4 @@
-import type { CoreConfig, DepthXRProfileConfig, DepthXRSettings, FrameGenProfileConfig, FrameGenSettings, InputBinding, PivotViewControls, PivotXRProfileConfig, PivotXRSettings, QuadViewsProfileConfig, QuadViewsSettings, RegisteredApplication, VectorXRConfig } from './model'
+import type { CoreConfig, DepthXRProfileConfig, DepthXRSettings, FrameGenProfileConfig, FrameGenSettings, InputBinding, PivotAccelOverrideSettings, PivotViewControls, PivotXRProfileConfig, PivotXRSettings, QuadViewsProfileConfig, QuadViewsSettings, RegisteredApplication, VectorXRConfig } from './model'
 
 // Runtime value imports from './model' are avoided so node:test can load this
 // module directly; keep these lists in sync with model.ts.
@@ -123,6 +123,16 @@ function validateInputBinding(prefix: string, binding: InputBinding): string[] {
   }
 
   return [...errors, ...validateSoundFeedback(prefix, binding)]
+}
+
+function validatePivotAccelOverride(prefix: string, override: PivotAccelOverrideSettings): string[] {
+  const errors = validateInputBindings(`${prefix}bindings`, override.bindings)
+  for (const [name, value] of [['yawMultiplier', override.yawMultiplier], ['pitchMultiplier', override.pitchMultiplier]] as const) {
+    if (!Number.isFinite(value) || value < 0 || value > 3) {
+      errors.push(`${prefix}${name} must be between 0 and 3`)
+    }
+  }
+  return errors
 }
 
 function validateInputBindings(prefix: string, bindings: InputBinding[]): string[] {
@@ -622,6 +632,7 @@ export function validateConfig(config: VectorXRConfig): string[] {
   errors.push(...validateInputBindings('modules.pivotxr.activationBindings', config.modules.pivotxr.activationBindings.map((item) => item.binding)))
   errors.push(...validateInputBindings('modules.pivotxr.setOriginBindings', config.modules.pivotxr.setOriginBindings))
   errors.push(...validateInputBindings('modules.pivotxr.releaseOriginBindings', config.modules.pivotxr.releaseOriginBindings))
+  errors.push(...validatePivotAccelOverride('modules.pivotxr.accelOverride.', config.modules.pivotxr.accelOverride))
   errors.push(...validatePivotViewControls('modules.pivotxr.viewControls.', config.modules.pivotxr.viewControls))
   const nudgeSetIds = new Set<string>()
   config.modules.pivotxr.nudgeSets.forEach((set, index) => {

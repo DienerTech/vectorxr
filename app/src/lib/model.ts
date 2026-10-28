@@ -110,6 +110,17 @@ export interface PivotViewControls {
   quickViews: PivotQuickView[]
 }
 
+// Temporary acceleration override: while a bound control is held, Enhanced
+// Motion ignores the profile's rotation multipliers and applies these instead
+// to head movement made after the press. A multiplier is total view rotation
+// per degree of head rotation (1.0 = no acceleration, as in the profile
+// fields); lower values dampen the view for precise aiming/zooming.
+export interface PivotAccelOverrideSettings {
+  bindings: InputBinding[]
+  yawMultiplier: number
+  pitchMultiplier: number
+}
+
 // Global feedback-sound settings shared by every binding's activate/deactivate cue.
 export interface SoundSettings {
   volume: number
@@ -518,6 +529,7 @@ export interface PivotXRModuleConfig {
   activationBindings: PivotActivationBinding[]
   setOriginBindings: InputBinding[]
   releaseOriginBindings: InputBinding[]
+  accelOverride: PivotAccelOverrideSettings
   viewControls: PivotViewControls
   profiles: PivotXRProfileConfig[]
 }
@@ -961,6 +973,19 @@ export function defaultPivotStepTuning(): PivotStepTuning {
   }
 }
 
+export function defaultPivotAccelOverride(): PivotAccelOverrideSettings {
+  return { bindings: [], yawMultiplier: 1, pitchMultiplier: 1 }
+}
+
+export function normalizePivotAccelOverride(value: unknown, fallback: PivotAccelOverrideSettings): PivotAccelOverrideSettings {
+  const source = isRecord(value) ? value : {}
+  return {
+    bindings: normalizeInputBindings(source.bindings),
+    yawMultiplier: normalizeNumber(source.yawMultiplier, fallback.yawMultiplier),
+    pitchMultiplier: normalizeNumber(source.pitchMultiplier, fallback.pitchMultiplier),
+  }
+}
+
 export function defaultPivotXRSettings(): PivotXRSettings {
   return {
     applyMotionToSnapViews: false,
@@ -1114,6 +1139,7 @@ export function defaultConfig(): VectorXRConfig {
         activationBindings: [],
         setOriginBindings: [],
         releaseOriginBindings: [],
+        accelOverride: defaultPivotAccelOverride(),
         viewControls: defaultPivotViewControls(),
         profiles: [],
       },
@@ -1689,6 +1715,7 @@ function savedBindingAssignments(config: VectorXRConfig): SavedBindingAssignment
   pushBindingAssignments(assignments, 'pivot.default.activate', 'Pivot Default: Activate', pivot.activationBindings.map((item) => item.binding))
   pushBindingAssignments(assignments, 'pivot.default.set-origin', 'Pivot Default: Set Origin', pivot.setOriginBindings)
   pushBindingAssignments(assignments, 'pivot.default.release-origin', 'Pivot Default: Release Origin', pivot.releaseOriginBindings)
+  pushBindingAssignments(assignments, 'pivot.default.accel-override', 'Pivot Default: Acceleration Override', pivot.accelOverride.bindings)
 
   pivot.viewControls.quickViews.forEach((quickView) => {
     pushBindingAssignments(assignments, `pivot.default.quick-view.${quickView.id}`, `Pivot Default: ${quickView.name}`, quickView.activationBindings.map((item) => item.binding))
@@ -1994,6 +2021,7 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
         activationBindings: normalizePivotActivationBindings(pivotxr.activationBindings, pivotxr.activationBinding, normalizeActivationMode(pivotxr.activationMode)),
         setOriginBindings: normalizeInputBindings(pivotxr.setOriginBindings, pivotxr.setOriginBinding),
         releaseOriginBindings: normalizeInputBindings(pivotxr.releaseOriginBindings, pivotxr.releaseOriginBinding),
+        accelOverride: normalizePivotAccelOverride(pivotxr.accelOverride, fallback.modules.pivotxr.accelOverride),
         viewControls: pivotViewControls,
         profiles: pivotProfileValues.map((profileValue) => {
           const profile = isRecord(profileValue) ? profileValue : {}

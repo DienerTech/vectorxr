@@ -1687,7 +1687,10 @@ bool SamePivotResolvedProfile(const PivotXrResolvedProfile& lhs, const PivotXrRe
 }
 
 bool SamePivotResolvedSettings(const PivotXrResolvedSettings& lhs, const PivotXrResolvedSettings& rhs) {
-    if (lhs.enabled != rhs.enabled || lhs.profiles.size() != rhs.profiles.size()) {
+    if (lhs.enabled != rhs.enabled || lhs.profiles.size() != rhs.profiles.size() ||
+        !SameInputBindings(lhs.accel_override.bindings, rhs.accel_override.bindings) ||
+        !NearlyEqual(lhs.accel_override.yaw_multiplier, rhs.accel_override.yaw_multiplier) ||
+        !NearlyEqual(lhs.accel_override.pitch_multiplier, rhs.accel_override.pitch_multiplier)) {
         return false;
     }
     for (size_t i = 0; i < lhs.profiles.size(); ++i) {
@@ -9231,6 +9234,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
                            ? "held_previous"
                            : "identity")
                    << ", pivotEngaged=" << (pivotxr_engaged_ ? "true" : "false")
+                   << ", accelOverride=" << (pivotxr_accel_override_.active ? "true" : "false")
                    << ", activationGain=" << FormatDiagnosticDouble(pivotxr_activation_gain_)
                    << ", selectedYaw="
                    << FormatDiagnosticDouble(ExtractPoseYawRadians(canonical_pose_delta))
@@ -14036,7 +14040,60 @@ XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
         settings.behavior != PivotProfileBehavior::SnapViews) {
         const int previous_yaw_step = pivotxr_yaw_step_;
         const int previous_pitch_step = pivotxr_pitch_step_;
-        if (settings.response_mode == PivotResponseMode::Stepped) {
+
+        // Temporary acceleration override: latch on press, clear on release.
+        PivotAccelOverride& accel_override = pivotxr_accel_override_;
+        if (accel_override.requested && !accel_override.active) {
+            // Press: remember where the head is and how much extra rotation is
+            // on screen right now. Everything after this is relative to it.
+            accel_override.ref_yaw_radians = motion_yaw_radians;
+            accel_override.ref_pitch_radians = motion_pitch_radians;
+            accel_override.base_extra_yaw_radians = pivotxr_smoothed_extra_yaw_radians_;
+            accel_override.base_extra_pitch_radians = pivotxr_smoothed_extra_pitch_radians_;
+            accel_override.active = true;
+            if (logger_.IsDebugEnabled()) {
+                logger_.Debug("PivotXR accel override engaged: yawMult=" +
+                              FormatDiagnosticDouble(accel_override.multiplier_yaw) +
+                              ", pitchMult=" + FormatDiagnosticDouble(accel_override.multiplier_pitch));
+            }
+        } else if (!accel_override.requested && accel_override.active) {
+            // Release: clear the latch. The normal path below then recomputes
+            // the target from the profile multipliers and the smoothing filter
+            // glides the on-screen extra from its current value to that target
+            // (no hard jump). Re-seed the stepped glide so Stepped mode also
+            // starts from what is on screen.
+            accel_override.active = false;
+            pivotxr_yaw_step_glide_ = {pivotxr_smoothed_extra_yaw_radians_,
+                                       pivotxr_smoothed_extra_yaw_radians_, 0.0};
+            pivotxr_pitch_step_glide_ = {pivotxr_smoothed_extra_pitch_radians_,
+                                         pivotxr_smoothed_extra_pitch_radians_, 0.0};
+            if (logger_.IsDebugEnabled()) {
+                logger_.Debug("PivotXR accel override released.");
+            }
+        }
+
+        if (accel_override.active) {
+            // Extra rotation = what was applied at the press, plus
+            // (multiplier - 1) times the head movement since the press.
+            // multiplier 1.0 -> extra frozen -> view follows the head 1:1.
+            const double yaw_multiplier = Clamp(accel_override.multiplier_yaw, 0.0, 10.0);
+            const double pitch_multiplier = Clamp(accel_override.multiplier_pitch, 0.0, 10.0);
+            const double yaw_since_press =
+                WrapRadians(motion_yaw_radians - accel_override.ref_yaw_radians);
+            const double pitch_since_press = motion_pitch_radians - accel_override.ref_pitch_radians;
+            const double target_extra_yaw = accel_override.base_extra_yaw_radians +
+                                            (yaw_multiplier - 1.0) * yaw_since_press;
+            const double target_extra_pitch = accel_override.base_extra_pitch_radians +
+                                              (pitch_multiplier - 1.0) * pitch_since_press;
+            // Same smoothing filter as the normal path, so behaviour is
+            // consistent and the release hand-off stays continuous.
+            const double override_blend = ComputeTimeBasedBlend(settings.smoothing, delta_seconds);
+            pivotxr_smoothed_extra_yaw_radians_ +=
+                (target_extra_yaw - pivotxr_smoothed_extra_yaw_radians_) * override_blend;
+            pivotxr_smoothed_extra_pitch_radians_ +=
+                (target_extra_pitch - pivotxr_smoothed_extra_pitch_radians_) * override_blend;
+            // Step state is intentionally left alone (hysteresis resumes on release).
+        } else if (settings.response_mode == PivotResponseMode::Stepped) {
             UpdatePivotSteppedExtraAngleRadians(motion_yaw_radians,
                                                 settings.yaw_step_positive,
                                                 settings.yaw_step_negative,
@@ -14106,6 +14163,11 @@ XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
             (position_target.up_meters - pivotxr_position_offset_.up_meters) * position_blend;
         pivotxr_position_offset_.forward_meters +=
             (position_target.forward_meters - pivotxr_position_offset_.forward_meters) * position_blend;
+    } else if (update_smoothing && pivotxr_accel_override_.active) {
+        // Motion tracking is not running (snap view active, pivot disengaged,
+        // ...). The saved head reference would be stale by the time tracking
+        // resumes, so drop the latch; a still-held button re-latches then.
+        pivotxr_accel_override_.active = false;
     }
 
     if (snap_return_handoff) {
@@ -14325,6 +14387,9 @@ void OpenXrLayer::ResetPivotPoseDeltaContinuityState() {
 
 void OpenXrLayer::ResetPivotActivationState() {
     ResetPivotPoseDeltaContinuityState();
+    pivotxr_accel_override_down_cached_ = false;
+    pivotxr_accel_override_.requested = false;
+    pivotxr_accel_override_.active = false;
     pivotxr_smoothed_extra_yaw_radians_ = 0.0;
     pivotxr_smoothed_extra_pitch_radians_ = 0.0;
     pivotxr_yaw_step_ = 0;
@@ -15839,6 +15904,12 @@ double OpenXrLayer::PivotPositionAssistYawRadians() const {
 }
 
 void OpenXrLayer::ResetPivotMotionState() {
+    // Drop the override latch (not `requested`: that is the live button state).
+    pivotxr_accel_override_.active = false;
+    pivotxr_accel_override_.ref_yaw_radians = 0.0;
+    pivotxr_accel_override_.ref_pitch_radians = 0.0;
+    pivotxr_accel_override_.base_extra_yaw_radians = 0.0;
+    pivotxr_accel_override_.base_extra_pitch_radians = 0.0;
     pivotxr_smoothed_extra_yaw_radians_ = 0.0;
     pivotxr_smoothed_extra_pitch_radians_ = 0.0;
     pivotxr_position_offset_ = {};
@@ -16143,7 +16214,25 @@ bool OpenXrLayer::IsPivotXrActive() {
                 }
             }
         }
+        // The acceleration override is global, so it is polled once, not per
+        // profile. It is level-based (held), so there is no edge state.
+        bool accel_override_down = false;
+        for (const InputBinding& binding : pivot.accel_override.bindings) {
+            if (PollInputBindingDown(binding)) {
+                accel_override_down = true;
+                break;
+            }
+        }
+        pivotxr_accel_override_down_cached_ = accel_override_down;
     }
+
+    // Publish the held state and multipliers for the motion code (read in
+    // ApplyPivotToLocatedSpace). Every call, so a binding list emptied by a
+    // config edit stops the override without waiting for the next poll.
+    pivotxr_accel_override_.requested =
+        pivotxr_accel_override_down_cached_ && !pivot.accel_override.bindings.empty();
+    pivotxr_accel_override_.multiplier_yaw = pivot.accel_override.yaw_multiplier;
+    pivotxr_accel_override_.multiplier_pitch = pivot.accel_override.pitch_multiplier;
 
     struct BindingTransitions {
         const InputBinding* pressed{nullptr};

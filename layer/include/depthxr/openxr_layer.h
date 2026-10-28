@@ -1137,6 +1137,33 @@ class OpenXrLayer {
     PivotDiagnosticState pivot_diagnostic_;
     double pivotxr_smoothed_extra_yaw_radians_{0.0};
     double pivotxr_smoothed_extra_pitch_radians_{0.0};
+    // Temporary acceleration override ("precision hold"). While `requested`
+    // is true, Enhanced Motion stops using the profile's rotation multipliers
+    // and instead applies `multiplier_*` to head movement made *after* the
+    // press, starting from the view that was on screen at the press.
+    //   multiplier = total view rotation per degree of head rotation,
+    //   same meaning as the profile's rotation_multiplier (1.0 = no
+    //   acceleration, 0.75 = view moves less than the head).
+    // INERT by default: with requested == false nothing here is read.
+    struct PivotAccelOverride {
+        // Input, written by the binding handler (next step). Level, not edge:
+        // true while the button is held.
+        bool requested{false};
+        double multiplier_yaw{1.0};
+        double multiplier_pitch{1.0};
+        // Internal latch, owned by ApplyPivotToLocatedSpace.
+        bool active{false};
+        // Head angles (motion frame) captured at the press.
+        double ref_yaw_radians{0.0};
+        double ref_pitch_radians{0.0};
+        // Extra angle that was applied at the press, so the view does not jump.
+        double base_extra_yaw_radians{0.0};
+        double base_extra_pitch_radians{0.0};
+    };
+    PivotAccelOverride pivotxr_accel_override_;
+    // Level of the (global) override bindings from the last poll: true while
+    // any is held. IsPivotXrActive publishes it as `requested` every call.
+    bool pivotxr_accel_override_down_cached_{false};
     // Stepped response mode: signed persistent step per axis (with hysteresis).
     int pivotxr_yaw_step_{0};
     int pivotxr_pitch_step_{0};

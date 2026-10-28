@@ -473,6 +473,74 @@ void TestPivotActivationBindingModel() {
            "Pivot Hold binding was not parsed");
 }
 
+void TestPivotAccelOverride() {
+    const auto make_config = [](bool module_enabled, const std::string& accel) {
+        return std::string(R"json(
+{
+  "version": 3,
+  "core": { "enabled": true, "logLevel": "info", "logRetentionFiles": 7 },
+  "applications": [
+    { "id": "dcs", "name": "DCS", "enabled": true, "match": { "exe": "DCS.exe" } }
+  ],
+  "modules": {
+    "depthxr": {},
+    "pivotxr": {
+      "enabled": )json") + (module_enabled ? "true" : "false") + std::string(R"json(,
+      "accelOverride": )json") + accel + std::string(R"json(,
+      "profiles": [
+        { "name": "DCS", "applicationIds": ["dcs"], "enabled": true, "alwaysActive": true }
+      ]
+    }
+  }
+}
+)json");
+    };
+
+    // Absent: inert defaults.
+    {
+        const depthxr::ParseResult result = depthxr::ParseConfig(make_config(true, "{}"));
+        Expect(result.ok, "Config parser rejected an empty accelOverride: " + result.error);
+        Expect(result.document.pivotxr.accel_override.bindings.empty(), "Empty accelOverride should have no bindings");
+        Expect(std::abs(result.document.pivotxr.accel_override.yaw_multiplier - 1.0) < 0.0001 &&
+                   std::abs(result.document.pivotxr.accel_override.pitch_multiplier - 1.0) < 0.0001,
+               "Empty accelOverride multipliers should default to 1.0");
+    }
+
+    const std::string accel = R"json({
+        "bindings": [ { "type": "keyboard", "chord": ["F9"] }, { "type": "keyboard", "chord": ["Ctrl", "F10"] } ],
+        "yawMultiplier": 0.75,
+        "pitchMultiplier": 1.25
+      })json";
+    const depthxr::ParseResult result = depthxr::ParseConfig(make_config(true, accel));
+    Expect(result.ok, "Config parser rejected a valid accelOverride: " + result.error);
+    const depthxr::PivotAccelOverride& parsed = result.document.pivotxr.accel_override;
+    Expect(parsed.bindings.size() == 2 && parsed.bindings[0].chord[0] == "F9" && parsed.bindings[1].chord.size() == 2,
+           "accelOverride bindings were not parsed");
+    Expect(std::abs(parsed.yaw_multiplier - 0.75) < 0.0001 && std::abs(parsed.pitch_multiplier - 1.25) < 0.0001,
+           "accelOverride multipliers were not parsed");
+
+    // Global: follows a custom profile for a matching exe and the default for others.
+    const depthxr::ResolvedRuntimeConfig dcs = depthxr::ResolveRuntimeConfig(result.document, "DCS.exe");
+    Expect(dcs.pivotxr.accel_override.bindings.size() == 2 &&
+               std::abs(dcs.pivotxr.accel_override.yaw_multiplier - 0.75) < 0.0001,
+           "accelOverride should resolve alongside a custom profile");
+    const depthxr::ResolvedRuntimeConfig other = depthxr::ResolveRuntimeConfig(result.document, "other.exe");
+    Expect(other.pivotxr.accel_override.bindings.size() == 2, "accelOverride should resolve for the default profile");
+
+    // A disabled default module does not apply the override.
+    const depthxr::ParseResult disabled = depthxr::ParseConfig(make_config(false, accel));
+    Expect(disabled.ok, "Config parser rejected accelOverride on a disabled Pivot module: " + disabled.error);
+    const depthxr::ResolvedRuntimeConfig disabled_resolved = depthxr::ResolveRuntimeConfig(disabled.document, "DCS.exe");
+    Expect(disabled_resolved.pivotxr.accel_override.bindings.empty(),
+           "accelOverride must not resolve while the default Pivot module is disabled");
+
+    // Out-of-range multipliers are rejected, matching the schema and the GUI.
+    Expect(!depthxr::ParseConfig(make_config(true, R"json({ "yawMultiplier": 3.5 })json")).ok,
+           "accelOverride yawMultiplier above 3 should be rejected");
+    Expect(!depthxr::ParseConfig(make_config(true, R"json({ "pitchMultiplier": -0.1 })json")).ok,
+           "accelOverride pitchMultiplier below 0 should be rejected");
+}
+
 void TestLogLevelCompatibility() {
     const auto info = depthxr::ParseLogLevel("info");
     const auto debug = depthxr::ParseLogLevel("debug");
@@ -4257,6 +4325,7 @@ int main() {
     TestLegacySingularViewControlBindings();
     TestParseConfig();
     TestPivotActivationBindingModel();
+    TestPivotAccelOverride();
     TestLogLevelCompatibility();
     TestResolveRuntimeConfig();
     TestDisabledProfileFallsBackToDefaults();
