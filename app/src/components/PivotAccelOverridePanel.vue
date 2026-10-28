@@ -25,9 +25,14 @@ const multiplierHint = [
 </script>
 
 <template>
-  <div class="rounded-[1rem] border p-4 surface-panel-soft">
-    <p class="text-sm font-semibold tracking-tight">Acceleration Override (while held)</p>
-    <p class="mt-1 text-sm leading-6 text-muted">
+  <details class="rounded-[1rem] border surface-panel-soft">
+    <summary class="flex cursor-pointer list-none items-center justify-between gap-3 rounded-[1rem] p-4 text-sm font-semibold tracking-tight [&::-webkit-details-marker]:hidden">
+      <span>Acceleration Override (while held)</span>
+      <span aria-hidden="true" class="text-muted">⌄</span>
+    </summary>
+
+    <div class="px-4 pb-4">
+      <p class="mt-1 text-sm leading-6 text-muted">
       Temporarily replaces the Enhanced Motion multipliers while a control is held, for example bind it to your zoom button so head jitter is not amplified while zoomed in. On release the normal multipliers apply again.
     </p>
 
@@ -73,5 +78,6 @@ const multiplierHint = [
       description="The override applies only while one of these controls is held down."
       none-text="No binding assigned. The override never engages."
     />
-  </div>
+    </div>
+  </details>
 </template>
