@@ -10557,6 +10557,8 @@ FrameGenOsdText DescribeFrameGen(const FrameGenStatus& status, bool started) {
         text.detail = rates + (gpu.empty() ? "" : kOsd + gpu);
         text.compact = rate + kOsd + rates;
         text.reason = mode + kApp + rate + kApp + rates + (gpu.empty() ? "" : kApp + gpu);
+        text.uses_depth = status.depth == FrameGenDepthState::kInUse;
+        text.uses_motion_vectors = status.motion_vectors;
         return halving(text);
     }
     case FrameGenState::kWaiting:

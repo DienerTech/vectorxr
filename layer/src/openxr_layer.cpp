@@ -11633,6 +11633,11 @@ OsdSnapshot OpenXrLayer::BuildOsdSnapshot() const {
     snapshot.framegen=framegen.row;
     snapshot.compact_framegen=framegen.compact;
     snapshot.framegen_detail=framegen.detail;
+    // What the generated frames use of the game's own data, in the OSD's language.
+    for (const auto& [uses, note] : {std::pair{framegen.uses_depth, OsdText::FrameGenUsesDepth},
+                                     std::pair{framegen.uses_motion_vectors, OsdText::FrameGenUsesMotionVectors}}) {
+        if (uses) snapshot.framegen_detail+=(snapshot.framegen_detail.empty()?"":"  /  ")+text(note);
+    }
     if (const std::string head=HeadPredictionOsdDetail(); !head.empty()) {
         snapshot.framegen_detail+=(snapshot.framegen_detail.empty()?"":"  /  ")+head;
     }

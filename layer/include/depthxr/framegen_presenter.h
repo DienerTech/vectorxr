@@ -158,6 +158,10 @@ struct FrameGenStatus {
     std::uint64_t runtime_clock_displacements{0};
     bool threaded{false};        // presenting from the presenter thread
     FrameGenDepthState depth{FrameGenDepthState::kUnknown};
+    // The game's motion vectors steer the generated frames. Engine motion
+    // vectors are research only so far: nothing sets this yet; the OSD and
+    // the app say so once it does.
+    bool motion_vectors{false};
     // Session totals for the summaries and tests.
     std::uint32_t lead_slots{0};      // refreshes between a game wait's release and its frame's refresh
     std::uint32_t lead_floor{0};      // the lowest lead known to hold this run (0: none yet)
@@ -235,6 +239,12 @@ struct FrameGenOsdText {
     double shown_fps{0.0}; // frames per second the headset shows while generating; 0 otherwise
     std::string state;     // the desktop app's state: active, standby, waiting, paused, unavailable or off
     std::string reason;    // the desktop app's status line beside that state; empty for none
+    // While generating: the game's data the frames actually use (depth that
+    // passed its checks, not depth merely sent), for a note on the OSD's line
+    // under the row, which says it in the OSD's language. The app shows depth
+    // from the relay's own field.
+    bool uses_depth{false};
+    bool uses_motion_vectors{false};
 };
 // `started`: the session started with Frame Generation on.
 FrameGenOsdText DescribeFrameGen(const FrameGenStatus& status, bool started);

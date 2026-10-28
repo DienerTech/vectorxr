@@ -13522,6 +13522,23 @@ void TestOsdDescription() {
     Check(text.badge == "ON" && text.shown_fps == 89.6 && text.state == "active", "generating: the FPS badge");
     Check(text.reason == "Interpolate" + dot + "Dynamic" + dot + "45" + arrow + "90 fps" + dot + "GPU 3.1 ms",
           "generating: the app's line " + text.reason);
+    Check(!text.uses_depth && !text.uses_motion_vectors, "generating without the game's data: no note");
+    // Depth is noted only once it is in use, not while sent or checked.
+    for (const FrameGenDepthState sent : {FrameGenDepthState::kNotSent, FrameGenDepthState::kChecking,
+                                          FrameGenDepthState::kEmpty, FrameGenDepthState::kUnusable}) {
+        status.depth = sent;
+        Check(!describe(status).uses_depth, "depth sent but not in use: no note");
+    }
+    status.depth = FrameGenDepthState::kInUse;
+    status.motion_vectors = true;
+    text = describe(status);
+    Check(text.uses_depth && text.uses_motion_vectors && text.detail == "45" + arrow + "90 fps  /  GPU 3.1 ms",
+          "generating with depth and motion vectors: noted apart from the detail text");
+    status.full_rate = true;
+    Check(!describe(status).uses_depth, "standing by: frames pass through, so no note");
+    status.full_rate = false;
+    status.depth = FrameGenDepthState::kUnknown;
+    status.motion_vectors = false;
 
     status.dynamic = false;
     status.multiplier = 3;

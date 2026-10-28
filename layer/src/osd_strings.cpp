@@ -105,6 +105,8 @@ constexpr Entry kEntries[] = {
     {OsdText::GpuReading, {"reading counters", "正在读取计数器", "чтение счётчиков", "leyendo contadores", "lendo contadores", "liest Zähler", "カウンター読み取り中", "lecture des compteurs", "odczyt liczników", "카운터 읽는 중", "正在讀取計數器"}},
     {OsdText::VramOf, {"of {0}", "/ {0}", "из {0}", "de {0}", "de {0}", "/ {0}", "/ {0}", "/ {0}", "z {0}", "/ {0}", "/ {0}"}},
     {OsdText::VramUnknown, {"unknown", "未知", "неизвестно", "desconocido", "desconhecido", "unbekannt", "不明", "inconnu", "nieznane", "알 수 없음", "未知"}},
+    {OsdText::FrameGenUsesDepth, {"uses depth", "使用深度", "с глубиной", "usa profundidad", "usa profundidade", "nutzt Tiefe", "深度を使用", "utilise la profondeur", "używa głębi", "깊이 사용", "使用深度"}},
+    {OsdText::FrameGenUsesMotionVectors, {"uses motion vectors", "使用运动矢量", "с векторами движения", "usa vectores de movimiento", "usa vetores de movimento", "nutzt Bewegungsvektoren", "モーションベクターを使用", "utilise les vecteurs de mouvement", "używa wektorów ruchu", "모션 벡터 사용", "使用運動向量"}},
 };
 
 constexpr bool EntriesInOrder() {

@@ -27,6 +27,7 @@ enum class OsdText {
     FlowHardware, FlowShader, DiagnosticsResearch,
     FpsTarget, CpuBound, GpuBound, CpuThread, CpuPipelined, CpuTurboPaces, CpuWaiting, GpuBusy, GpuGame,
     GpuNoCounters, GpuReading, VramOf, VramUnknown,
+    FrameGenUsesDepth, FrameGenUsesMotionVectors,
     Count
 };
 
