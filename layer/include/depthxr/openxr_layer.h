@@ -1001,6 +1001,14 @@ class OpenXrLayer {
     std::mutex osd_vulkan_queue_mutex_;
     std::atomic<bool> osd_monitoring_{false};
     std::atomic<bool> osd_should_render_{true};
+    // The runtime's frame timing as every runtime wait and begin passes it.
+    // SteamVR rejects (XR_ERROR_TIME_INVALID) an xrEndFrame whose displayTime is
+    // older than the prediction of the frame begun before the one ending;
+    // SubmitRuntimeFrame raises such a time to that floor.
+    std::atomic<XrTime> runtime_latest_wait_prediction_{0};
+    std::atomic<XrTime> runtime_begun_prediction_{0};
+    std::atomic<XrTime> runtime_end_floor_{0};
+    std::atomic<std::uint64_t> runtime_end_raises_{0};
     std::optional<std::chrono::steady_clock::time_point> osd_last_input_poll_;
     bool osd_toggle_down_{false}, osd_cycle_down_{false}, osd_was_enabled_{false};
     std::atomic<bool> performance_wanted_{false}; // last SetWanted: a shown layout has the PERFORMANCE row
@@ -1455,6 +1463,9 @@ class OpenXrLayer {
     bool turbo_last_should_render_{true};
     XrEnvironmentBlendMode turbo_last_environment_blend_mode_{XR_ENVIRONMENT_BLEND_MODE_OPAQUE};
     XrTime turbo_max_returned_display_time_{0};
+    // The sequenced post-submit runtime wait has started and not yet published
+    // its prediction: an app wait now gets the frame after the cached one.
+    bool turbo_seq_wait_in_flight_{false}; // turbo_mutex_
     TurboPredictionHistory turbo_prediction_history_; // turbo_mutex_, no pacing decisions
     int turbo_prediction_fault_log_budget_{3}; // turbo_mutex_
     std::optional<std::chrono::steady_clock::time_point> turbo_last_wait_frame_wall_time_;

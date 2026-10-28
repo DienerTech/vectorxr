@@ -6159,8 +6159,11 @@ XrResult OpenXrLayer::TraceRuntimeWaitFrame(XrSession session, const XrFrameWait
     const auto trace_call = turbo_trace_.Watch("runtime.wait");
     // Every runtime wait (the game's, Turbo's, Frame Generation's) tells the performance row the refresh period.
     const auto note_period = [this](XrResult result, const XrFrameState* state) {
-        if (XR_SUCCEEDED(result) && state && performance_.Wanted())
-            performance_.Frames().RuntimePeriod(state->predictedDisplayPeriod, std::chrono::steady_clock::now());
+        if (XR_SUCCEEDED(result) && state) {
+            runtime_latest_wait_prediction_.store(state->predictedDisplayTime, std::memory_order_release);
+            if (performance_.Wanted())
+                performance_.Frames().RuntimePeriod(state->predictedDisplayPeriod, std::chrono::steady_clock::now());
+        }
     };
     if (!turbo_trace_.Enabled()) {
         const auto result=next_wait_frame_(session, info, state);
@@ -6197,6 +6200,13 @@ XrResult OpenXrLayer::TraceRuntimeBeginFrame(XrSession session, const XrFrameBeg
     const auto result = next_begin_frame_(session, info);
     if (XR_FAILED(result)) turbo_trace_.Burst();
     if (sampled || XR_FAILED(result)) turbo_trace_.Record("runtime.begin.return", id, result);
+    if (XR_SUCCEEDED(result)) {
+        // A begin opens the frame of the latest wait (a second wait cannot
+        // return before it); the frame begun before bounds this one's end.
+        runtime_end_floor_.store(runtime_begun_prediction_.load(std::memory_order_acquire), std::memory_order_release);
+        runtime_begun_prediction_.store(runtime_latest_wait_prediction_.load(std::memory_order_acquire),
+                                        std::memory_order_release);
+    }
     return result;
 }
 
@@ -6327,6 +6337,26 @@ XrResult OpenXrLayer::SubmitRuntimeFrame(XrSession session, const XrFrameEndInfo
             with_osd.layerCount=static_cast<std::uint32_t>(layers.size()); with_osd.layers=layers.data();
             info=&with_osd;
         }
+    }
+    // SteamVR rejects an end whose displayTime is older than the prediction of
+    // the frame begun before this one, and the rejected frame is lost (measured
+    // with notes/steamvr-time-probe). A Turbo app frame can end a runtime frame
+    // newer than the one it was predicted for: raise it to the oldest time the
+    // runtime accepts. Pass-through frames are never below it.
+    XrFrameEndInfo raised{};
+    const XrTime end_floor = runtime_end_floor_.load(std::memory_order_acquire);
+    if (info && end_floor > 0 && info->displayTime < end_floor) {
+        raised = *info;
+        raised.displayTime = end_floor;
+        const std::uint64_t raises = runtime_end_raises_.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (raises <= 3 || raises % 1000 == 0) {
+            logger_.Info("Raised an xrEndFrame displayTime to the runtime's previous frame prediction: submitted=" +
+                         std::to_string(info->displayTime) + ", floor=" + std::to_string(end_floor) +
+                         ", raisedByNs=" + std::to_string(end_floor - info->displayTime) +
+                         ", raisesThisSession=" + std::to_string(raises));
+        }
+        turbo_trace_.Record("runtime.end.raise", 0, info->displayTime, end_floor);
+        info = &raised;
     }
     const auto submit=[&] {
         const auto submit_start=std::chrono::steady_clock::now();
@@ -6749,13 +6779,19 @@ XrResult OpenXrLayer::PaceWaitFrame(XrSession session,
                 if ((wait_pipelined || async_handoff) && !turbo_async_wait_completed_ &&
                     turbo_last_wait_frame_wall_time_.has_value()) {
                     // Async wait still in flight: extrapolate by the wall-clock
-                    // delta between the app's waits. Sequenced pacing keeps the
-                    // native cache, including when this app wait overlaps the
-                    // post-submit runtime wait on the frame thread.
+                    // delta between the app's waits.
                     predicted += std::chrono::duration_cast<std::chrono::nanoseconds>(
                                      now - *turbo_last_wait_frame_wall_time_)
                                      .count();
                     extrapolated = true;
+                } else if (turbo_pacing_mode_ == TurboPacingMode::kSequenced && turbo_seq_wait_in_flight_ &&
+                           turbo_last_predicted_display_period_ > 0) {
+                    // This app wait overlaps the post-submit runtime wait, so its
+                    // frame ends a runtime frame after that wait's: hand it the
+                    // prediction that wait is about to return, not the cached
+                    // one a frame older (SteamVR rejects a time older than the
+                    // previous frame's prediction).
+                    predicted += turbo_last_predicted_display_period_;
                 }
                 turbo_last_wait_frame_wall_time_ = now;
 
@@ -7617,6 +7653,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                         break;
                     }
                 }
+                turbo_seq_wait_in_flight_ = do_steady_wait;
             }
 
             if (do_steady_wait) {
@@ -7658,6 +7695,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                         turbo_last_should_render_ = frame_state.shouldRender == XR_TRUE;
                         NoteTurboShouldRenderLocked(turbo_last_should_render_);
                         turbo_async_wait_completed_ = true;
+                        turbo_seq_wait_in_flight_ = false;
                         pacing_wait_sum_ms_ += wait_ms;
                         pacing_wait_max_ms_ = std::max(pacing_wait_max_ms_, wait_ms);
                         ++pacing_wait_samples_;
@@ -7698,6 +7736,10 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                         }
                     }
                 } else {
+                    {
+                        std::scoped_lock lock(turbo_mutex_);
+                        turbo_seq_wait_in_flight_ = false;
+                    }
                     logger_.Error("Turbo: sequenced xrWaitFrame failed with " +
                                   std::to_string(static_cast<int>(wait_result)) +
                                   "; keeping previous frame timing.");
@@ -9171,6 +9213,11 @@ void OpenXrLayer::ResetTurboFrameState(bool stop_recorder) {
     turbo_last_should_render_ = true;
     turbo_last_environment_blend_mode_ = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
     turbo_max_returned_display_time_ = 0;
+    turbo_seq_wait_in_flight_ = false;
+    runtime_latest_wait_prediction_.store(0);
+    runtime_begun_prediction_.store(0);
+    runtime_end_floor_.store(0);
+    runtime_end_raises_.store(0);
     turbo_prediction_history_.Reset();
     turbo_prediction_fault_log_budget_ = 3;
     turbo_last_wait_frame_wall_time_.reset();
@@ -12144,6 +12191,10 @@ void OpenXrLayer::ResetSessionState() {
     spacewarp_last_summary_ = {};
     spacewarp_last_view_.clear();
     application_action_spaces_.clear();
+    runtime_latest_wait_prediction_.store(0);
+    runtime_begun_prediction_.store(0);
+    runtime_end_floor_.store(0);
+    runtime_end_raises_.store(0);
     osd_.Shutdown();
     osd_monitoring_.store(false);
     osd_should_render_.store(true);

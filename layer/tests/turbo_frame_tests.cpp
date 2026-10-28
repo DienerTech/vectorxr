@@ -988,6 +988,8 @@ class FakeRuntime {
         if (XR_SUCCEEDED(result) || runtime.begin_failure_consumes_frame_) {
             if (runtime.wait_tokens_ > 0) --runtime.wait_tokens_;
             runtime.frame_open_ = true;
+            runtime.previous_begun_ = runtime.current_begun_;
+            runtime.current_begun_ = runtime.native_predictions_.empty() ? 0 : runtime.native_predictions_.back();
         }
         return XR_FAILED(result) ? result : discarded ? XR_FRAME_DISCARDED : result;
     }
@@ -1006,8 +1008,12 @@ class FakeRuntime {
             ++runtime.end_rejections_;
             return XR_ERROR_CALL_ORDER_INVALID;
         }
-        const XrResult result = TakeResult(runtime.end_result_, runtime.end_failures_remaining_);
-        if (XR_SUCCEEDED(result) || runtime.end_failure_consumes_frame_) {
+        const bool stale = runtime.reject_stale_ && frame_end_info &&
+                           frame_end_info->displayTime < runtime.previous_begun_;
+        if (stale) ++runtime.stale_rejections_;
+        const XrResult result =
+            stale ? XR_ERROR_TIME_INVALID : TakeResult(runtime.end_result_, runtime.end_failures_remaining_);
+        if (XR_SUCCEEDED(result) || stale || runtime.end_failure_consumes_frame_) {
             runtime.frame_open_ = false;
         }
         if (runtime.release_wait_on_next_end_) {
@@ -1196,6 +1202,24 @@ class FakeRuntime {
         return end_rejections_;
     }
 
+    // SteamVR's measured rule (notes/steamvr-time-probe): an end whose
+    // displayTime is older than the prediction of the frame begun before this
+    // one fails with XR_ERROR_TIME_INVALID, and the frame is gone.
+    void RejectStaleDisplayTimes() {
+        std::scoped_lock lock(mutex_);
+        reject_stale_ = true;
+    }
+
+    int StaleRejections() const {
+        std::scoped_lock lock(mutex_);
+        return stale_rejections_;
+    }
+
+    XrTime PreviousBegunPrediction() const {
+        std::scoped_lock lock(mutex_);
+        return previous_begun_;
+    }
+
     int StackedWaits() const {
         std::scoped_lock lock(mutex_);
         return stacked_waits_;
@@ -1243,6 +1267,10 @@ class FakeRuntime {
     bool release_wait_on_next_end_{false};
     bool valid_structs_{true};
     bool frame_open_{true};
+    bool reject_stale_{false};
+    XrTime previous_begun_{0};
+    XrTime current_begun_{0};
+    int stale_rejections_{0};
     bool begin_failure_consumes_frame_{false};
     bool end_failure_consumes_frame_{false};
     int wait_tokens_{0};
@@ -1697,6 +1725,81 @@ void TestSequencedHandshakeAndSteadyStateOrdering() {
            "Prediction correction must retain runtime period and shouldRender");
 }
 
+// SteamVR (notes/steamvr-time-probe): an end older than the prediction of the
+// runtime frame begun before it is rejected and the frame lost. The layer raises
+// such a time to that floor instead.
+void TestStaleDisplayTimeRaisedToRuntimeFloor() {
+    FakeRuntime runtime;
+    runtime.RejectStaleDisplayTimes();
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kSequenced);
+    auto end = FrameEndInfo();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_SUCCESS,
+           "Stale-time establishment submit failed");
+    XrFrameState state{XR_TYPE_FRAME_STATE};
+    Expect(AppWait(&state) == XR_SUCCESS && XR_SUCCEEDED(AppBegin()), "Stale-time handshake failed");
+    const XrTime first = state.predictedDisplayTime;
+    end.displayTime = first;
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_SUCCESS &&
+               runtime.SubmittedPredictions().back() == first,
+           "A current display time must reach the runtime unchanged");
+
+    Expect(AppWait(&state) == XR_SUCCESS && XR_SUCCEEDED(AppBegin()), "Stale-time app frame failed");
+    const XrTime floor = runtime.PreviousBegunPrediction();
+    end.displayTime = floor - 11'111'111;
+    Expect(floor == first && end.displayTime < floor, "The fake runtime's floor is not the previous frame's");
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_SUCCESS,
+           "A display time older than the previous runtime frame must be raised, not rejected");
+    Expect(runtime.SubmittedPredictions().back() == floor && runtime.StaleRejections() == 0,
+           "The raised display time must be the previous runtime frame's prediction");
+
+    Expect(AppWait(&state) == XR_SUCCESS && XR_SUCCEEDED(AppBegin()), "Post-raise app frame failed");
+    end.displayTime = state.predictedDisplayTime;
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_SUCCESS &&
+               runtime.SubmittedPredictions().back() == state.predictedDisplayTime,
+           "Frames after a raise must pass through unchanged");
+}
+
+// The SteamVR field fault (DCS, sequenced): the app polls while the post-submit
+// runtime wait is still in flight. It must get the prediction that wait returns,
+// not the cached one a frame older, which SteamVR rejects when the frame ends.
+void TestSequencedPollDuringRuntimeWaitGetsNextPrediction() {
+    constexpr XrTime t = 19'381'688'851'000;
+    constexpr XrDuration period = 8'333'400;
+    FakeRuntime runtime;
+    runtime.RejectStaleDisplayTimes();
+    runtime.PredictionSequence(t, period);
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kSequenced);
+    auto end = FrameEndInfo();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_SUCCESS,
+           "Overlap establishment submit failed");
+    XrFrameState state{XR_TYPE_FRAME_STATE};
+    Expect(AppWait(&state) == XR_SUCCESS && XR_SUCCEEDED(AppBegin()) && state.predictedDisplayTime == t,
+           "Overlap handshake failed");
+
+    // Hold the post-submit runtime wait, as SteamVR does until its next refresh.
+    runtime.BlockWait();
+    end.displayTime = t;
+    const int waits = runtime.WaitCalls();
+    std::atomic<XrResult> submit{XR_ERROR_RUNTIME_FAILURE};
+    std::thread frame([&] { submit = depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end); });
+    const bool entered = runtime.WaitForWaitEntered(waits + 1);
+    XrFrameState overlapped{XR_TYPE_FRAME_STATE};
+    const XrResult overlapped_result = entered ? AppWait(&overlapped) : XR_ERROR_RUNTIME_FAILURE;
+    runtime.ReleaseWait();
+    frame.join();
+    Expect(entered && submit == XR_SUCCESS && overlapped_result == XR_SUCCESS,
+           "The overlapping app wait or its submit failed");
+    Expect(overlapped.predictedDisplayTime == t + period && runtime.NativePredictions().back() == t + period,
+           "An app wait overlapping the runtime wait must get the prediction that wait returns");
+
+    Expect(XR_SUCCEEDED(AppBegin()), "Overlapped app begin failed");
+    auto overlapped_end = FrameEndInfo();
+    overlapped_end.displayTime = overlapped.predictedDisplayTime;
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &overlapped_end) == XR_SUCCESS &&
+               runtime.SubmittedPredictions().back() == t + period && runtime.StaleRejections() == 0,
+           "The overlapped frame must be accepted as predicted, without a raise");
+}
+
 void TestRepeatedSubmissionFailuresSuspend() {
     FakeRuntime runtime;
     TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
@@ -1750,9 +1853,11 @@ void LocatePrediction(XrTime time) {
 
 // Reproduce the observed T/T+1/T+2 overlap with a runtime wait barrier, then
 // preserve exact wait -> locate -> submit identity across a scripted -30.
-// The script intentionally accepts T+1 and rejects T+2: it exercises recovery,
-// not a claimed SteamVR precision/age rule. The completed-before-poll control
-// returns fresh native timing instead of the in-flight wait's old cache.
+// The script rejects the overlapping frame: it exercises recovery. In the field
+// that frame got the cache + 2 ns (T+2), older than SteamVR's previous frame
+// prediction, so SteamVR rejected it; an app wait overlapping the in-flight
+// runtime wait now gets the cache plus one period, and the completed-before-poll
+// control returns the fresh native timing.
 void TestSequencedPredictionOverlapReplay(bool native_completed_before_poll) {
     constexpr XrTime t = 18'956'319'169'600;
     constexpr XrTime next = 18'956'327'499'300;
@@ -1795,7 +1900,7 @@ void TestSequencedPredictionOverlapReplay(bool native_completed_before_poll) {
     Expect(poll.wait_for(2s) == std::future_status::ready,
            "The sequenced interception shield blocked behind the native wait");
     const XrFrameState overlapping = poll.get();
-    const XrTime expected = native_completed_before_poll ? next : t + 2;
+    const XrTime expected = native_completed_before_poll ? next : t + first_period;
     Expect(overlapping.predictedDisplayTime == expected &&
                overlapping.predictedDisplayPeriod == (native_completed_before_poll ? next_period : first_period) &&
                overlapping.shouldRender == XR_TRUE,
@@ -4237,6 +4342,8 @@ int main() {
     TestWorkerStopAfterStuckSessionEndIsBounded();
     TestHealthyPipelineRetainsStrictOrder(depthxr::TurboPacingMode::kAsync);
     TestHealthyPipelineRetainsStrictOrder(depthxr::TurboPacingMode::kSequenced);
+    TestStaleDisplayTimeRaisedToRuntimeFloor();
+    TestSequencedPollDuringRuntimeWaitGetsNextPrediction();
     TestFrameGenOwnsFramePacing();
     TestConfigReloadWhileFrameGenOwnsPacing();
     TestAsyncTogglePreservesQueuedFrame(false);
