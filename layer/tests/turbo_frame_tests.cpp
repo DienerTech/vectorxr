@@ -4,6 +4,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
+#include <deque>
 #include <future>
 #include <filesystem>
 #include <fstream>
@@ -136,6 +137,14 @@ class TurboFrameTestPeer {
         layer.turbo_last_predicted_display_time_ = 10'020'000'000;
         layer.turbo_max_returned_display_time_ = 10'000'000'000;
         layer.turbo_convert_counter_time_ = clock ? reinterpret_cast<PFN_xrVoidFunction>(&Clock) : nullptr;
+        // No app frame is waiting to end: this wait's frame ends in the pending wait's.
+        layer.turbo_prediction_history_.Reset();
+    }
+
+    static void EndAppFrame(XrTime display_time) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.turbo_mutex_);
+        layer.turbo_prediction_history_.AppEnd(display_time);
     }
 
     static bool IsForced() { return Layer().turbo_pacing_source_ == OpenXrLayer::TurboPacingSource::kForced; }
@@ -1220,6 +1229,11 @@ class FakeRuntime {
         return previous_begun_;
     }
 
+    XrTime CurrentBegunPrediction() const {
+        std::scoped_lock lock(mutex_);
+        return current_begun_;
+    }
+
     int StackedWaits() const {
         std::scoped_lock lock(mutex_);
         return stacked_waits_;
@@ -1823,6 +1837,149 @@ void TestSequencedPollDuringRuntimeWaitGetsNextPrediction() {
     Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &overlapped_end) == XR_SUCCESS &&
                runtime.SubmittedPredictions().back() == t + period && runtime.StaleRejections() == 0,
            "The overlapped frame must be accepted as predicted, without a raise");
+}
+
+// Async pacing: each app end begins the pending runtime wait's frame, so an app
+// frame ends in the runtime frame after those of the app frames still unended
+// when it waited. DCS waits one or two frames ahead of the thread that ends
+// them (Oct 27 SteamVR flight): handed the cached prediction, its frames were
+// a frame early, and two ahead older than SteamVR's floor (raised a period).
+void TestAsyncAppFramesTargetTheirRuntimeFrame() {
+    FakeRuntime runtime;
+    runtime.RejectStaleDisplayTimes();
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    auto end = FrameEndInfo();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_SUCCESS &&
+               depthxr::TurboFrameTestPeer::WaitForAsyncPrediction(),
+           "Target-frame establishment did not publish its runtime wait");
+    std::deque<XrTime> waited;
+    const auto wait = [&] {
+        XrFrameState state{XR_TYPE_FRAME_STATE};
+        Expect(AppWait(&state) == XR_SUCCESS && state.shouldRender, "Target-frame app wait failed");
+        waited.push_back(state.predictedDisplayTime);
+    };
+    // Ends the oldest waited frame; returns how far its time is past the
+    // prediction of the runtime frame it ended in.
+    const auto finish = [&](bool settle = true) {
+        const XrTime time = waited.front();
+        waited.pop_front();
+        Expect(XR_SUCCEEDED(AppBegin()), "Target-frame app begin failed");
+        end.displayTime = time;
+        Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_SUCCESS &&
+                   (!settle || depthxr::TurboFrameTestPeer::WaitForAsyncPrediction()),
+               "Target-frame submit failed");
+        Expect(runtime.SubmittedPredictions().back() == time && runtime.StaleRejections() == 0,
+               "An app frame's display time had to be raised to the runtime's floor");
+        return time - runtime.CurrentBegunPrediction();
+    };
+
+    wait();
+    Expect(finish() == 0, "A frame waited after the previous one ended must target the pending wait's frame");
+    for (int ahead = 1; ahead <= 2; ++ahead) {
+        for (int frame = 0; frame <= ahead; ++frame) wait();
+        for (int frame = 0; frame <= ahead; ++frame)
+            Expect(finish() == 0, "A frame waited " + std::to_string(frame) +
+                                      " ahead must target the runtime frame it ends in");
+    }
+    // Steady state one ahead, as DCS mostly runs.
+    wait();
+    for (int frame = 0; frame < 4; ++frame) {
+        wait();
+        Expect(finish() == 0, "A frame waited one ahead must target the runtime frame it ends in");
+    }
+    Expect(finish() == 0, "The last frame one ahead must target the runtime frame it ends in");
+
+    // A runtime holding its wait (PiOpenXR until its refresh): a wait still
+    // pending is a frame further.
+    wait();
+    runtime.BlockWait();
+    const int waits = runtime.WaitCalls();
+    finish(false);
+    Expect(runtime.WaitForWaitEntered(waits + 1), "The held runtime wait did not start");
+    wait();
+    runtime.ReleaseWait();
+    Expect(depthxr::TurboFrameTestPeer::WaitForAsyncPrediction() && finish() == 0,
+           "A frame waited while the runtime holds its wait must target the frame that wait opens");
+
+    // An app polling twice for one frame abandons the first: the next frame
+    // may lead by a period, but the lead must not build up.
+    for (int repeat = 0; repeat < 3; ++repeat) {
+        wait();
+        Expect(XR_SUCCEEDED(AppBegin()), "Abandoned app begin failed");
+        waited.pop_front();
+        wait();
+        const XrDuration lead = finish();
+        Expect(lead >= 0 && lead <= 11'111'111, "An abandoned frame must lead the next by a period at most");
+        // That frame's time was handed out already: the next is a step past it.
+        wait();
+        const XrDuration bump = finish();
+        Expect(bump >= 0 && bump < 1'000, "The frame after an abandoned one must not lead its runtime frame");
+        wait();
+        Expect(finish() == 0, "Frames after an abandoned one must target their runtime frame again");
+    }
+}
+
+// The DCS shape on real threads: a main thread waits up to two frames ahead of a
+// render thread that begins and ends them. No frame may need a raise, nor lead
+// the runtime frame it ends in.
+void TestAsyncTwoThreadFramesNeedNoRaise() {
+    FakeRuntime runtime;
+    runtime.RejectStaleDisplayTimes();
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    auto end = FrameEndInfo();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_SUCCESS &&
+               depthxr::TurboFrameTestPeer::WaitForAsyncPrediction(),
+           "Two-thread establishment did not publish its runtime wait");
+    constexpr int kFrames = 150;
+    constexpr int kInFlight = 3; // waited and not yet ended, the newest included
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::deque<XrTime> waited;
+    int in_flight = 0;
+    std::atomic<bool> wait_failed{false};
+    std::thread main_thread([&] {
+        for (int frame = 0; frame < kFrames; ++frame) {
+            {
+                std::unique_lock lock(mutex);
+                cv.wait(lock, [&] { return in_flight < kInFlight; });
+                ++in_flight;
+            }
+            XrFrameState state{XR_TYPE_FRAME_STATE};
+            if (AppWait(&state) != XR_SUCCESS || !state.shouldRender) wait_failed = true;
+            if (frame % 3 == 0) std::this_thread::sleep_for(1ms);
+            {
+                std::scoped_lock lock(mutex);
+                waited.push_back(state.predictedDisplayTime);
+            }
+            cv.notify_all();
+        }
+    });
+    int raises = 0, leads = 0;
+    for (int frame = 0; frame < kFrames && !wait_failed; ++frame) {
+        XrTime time = 0;
+        {
+            std::unique_lock lock(mutex);
+            cv.wait(lock, [&] { return !waited.empty(); });
+            time = waited.front();
+            waited.pop_front();
+        }
+        Expect(XR_SUCCEEDED(AppBegin()), "Two-thread app begin failed");
+        if (frame % 2 == 0) std::this_thread::sleep_for(1ms);
+        end.displayTime = time;
+        Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_SUCCESS,
+               "Two-thread submit failed");
+        if (runtime.SubmittedPredictions().back() != time) ++raises;
+        if (time > runtime.CurrentBegunPrediction()) ++leads;
+        {
+            std::scoped_lock lock(mutex);
+            --in_flight;
+        }
+        cv.notify_all();
+    }
+    main_thread.join();
+    Expect(!wait_failed && runtime.StaleRejections() == 0, "A two-thread app frame failed or was rejected");
+    Expect(raises == 0 && leads == 0, "Two-thread frames needed " + std::to_string(raises) + " raises and led " +
+                                          std::to_string(leads) + " runtime frames");
 }
 
 void TestRepeatedSubmissionFailuresSuspend() {
@@ -2687,6 +2844,7 @@ void TestExperimentalPredictionAndLimiter() {
     Expect(state.predictedDisplayPeriod == 11'111'111 && state.shouldRender == XR_TRUE,
            "Prediction dampening altered runtime period or visibility");
     const auto previous = state.predictedDisplayTime;
+    depthxr::TurboFrameTestPeer::EndAppFrame(previous);
     Expect(AppWait(&state) == XR_SUCCESS && state.predictedDisplayTime == previous + 1,
            "Dampening broke monotonic predictions");
     depthxr::TurboFrameTestPeer::PredictionFixture(false);
@@ -4370,6 +4528,8 @@ int main() {
     TestStaleDisplayTimeRaisedToRuntimeFloor();
     TestRuntimeFloorNeverAboveOwnPrediction();
     TestSequencedPollDuringRuntimeWaitGetsNextPrediction();
+    TestAsyncAppFramesTargetTheirRuntimeFrame();
+    TestAsyncTwoThreadFramesNeedNoRaise();
     TestFrameGenOwnsFramePacing();
     TestConfigReloadWhileFrameGenOwnsPacing();
     TestAsyncTogglePreservesQueuedFrame(false);

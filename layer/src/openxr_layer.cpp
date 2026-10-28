@@ -6783,14 +6783,18 @@ XrResult OpenXrLayer::PaceWaitFrame(XrSession session,
                     ? entry_time : std::chrono::steady_clock::now();
                 XrTime predicted = turbo_last_predicted_display_time_;
                 bool extrapolated = false;
-                if ((wait_pipelined || async_handoff) && !turbo_async_wait_completed_ &&
-                    turbo_last_wait_frame_wall_time_.has_value()) {
-                    // Async wait still in flight: extrapolate by the wall-clock
-                    // delta between the app's waits.
-                    predicted += std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                     now - *turbo_last_wait_frame_wall_time_)
-                                     .count();
-                    extrapolated = true;
+                if (wait_pipelined || async_handoff) {
+                    // Every app end begins the pending runtime wait's frame,
+                    // so this frame ends in the one after those of the app
+                    // frames still unended: hand it that frame's prediction.
+                    // DCS waits on its main thread up to two frames ahead of
+                    // the thread that ends them; SteamVR rejects an end older
+                    // than the frame begun before its own. The pending wait's
+                    // prediction is the cached one once it has completed.
+                    const auto unended = std::min<std::uint64_t>(turbo_prediction_history_.Unended(), 2);
+                    const auto steps = static_cast<XrDuration>(unended) + (turbo_async_wait_completed_ ? 0 : 1);
+                    predicted += steps * turbo_prediction_history_.FrameStep(turbo_last_predicted_display_period_);
+                    extrapolated = steps > 0;
                 } else if (turbo_pacing_mode_ == TurboPacingMode::kSequenced && turbo_seq_wait_in_flight_ &&
                            turbo_last_predicted_display_period_ > 0) {
                     // This app wait overlaps the post-submit runtime wait, so its
@@ -7349,6 +7353,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
     bool timed_out = false;
     double frame_blocked_ms = 0.0;
     const XrTime submitted_display_time = frame_end_info ? frame_end_info->displayTime : 0;
+    bool app_end_noted = false;
     if (has_pending_wait) {
         // This is the latest point the pipelined frame must have been fully
         // waited. Some runtimes interlock an off-thread wait with the next
@@ -7450,6 +7455,10 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
             if (ready && pending_async_generation == turbo_async_wait_generation_) {
                 async_wait_result = turbo_async_wait_result_;
                 turbo_async_wait_ = {};
+                // With the retire, so an app wait sees this frame ended exactly
+                // when it sees the next wait pending.
+                turbo_prediction_history_.AppEnd(submitted_display_time);
+                app_end_noted = true;
                 if (turbo_seq_state_ == TurboSequencedState::kInactive) {
                     // Retire and shield atomically under turbo_mutex_: an app
                     // WaitFrame can observe the old future or the next shield,
@@ -7570,6 +7579,10 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
         }
     }
 
+    if (!app_end_noted) {
+        std::scoped_lock lock(turbo_mutex_);
+        turbo_prediction_history_.AppEnd(submitted_display_time);
+    }
     const auto pacing_after_drain = std::chrono::steady_clock::now();
     const bool diag_end = TurboSequencedDebugTick();
     if (diag_end) {

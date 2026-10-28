@@ -1,8 +1,10 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <optional>
 #include <openxr/openxr.h>
 
@@ -27,6 +29,10 @@ public:
 
     void Reset() { *this = {}; }
     void NativeWait(XrTime display_time, XrDuration period) {
+        if (native_generation_ > 0) {
+            previous_stride_ = stride_;
+            stride_ = display_time - native_display_time_;
+        }
         native_display_time_ = display_time;
         native_period_ = period;
         ++native_generation_;
@@ -44,6 +50,21 @@ public:
         }
         return std::nullopt;
     }
+    // An app frame ended: one showing a time handed out here also ends every
+    // earlier wait (frames the app abandoned); any other counts as the next.
+    void AppEnd(XrTime display_time) {
+        const auto prediction = Find(display_time);
+        ended_ = prediction && prediction->app_wait > ended_ ? prediction->app_wait
+                                                              : std::min(ended_ + 1, app_wait_);
+    }
+    // App waits whose frames have not ended yet.
+    std::uint64_t Unended() const { return app_wait_ - ended_; }
+    // The spacing of the runtime's frames: the period, unless the last two
+    // waits agree on a shorter one (SteamVR can report a multiple of it).
+    XrDuration FrameStep(XrDuration period) const {
+        const bool agree = stride_ > 0 && previous_stride_ > 0 && std::abs(stride_ - previous_stride_) < 1'000'000;
+        return agree && stride_ < period * 3 / 4 ? stride_ : period;
+    }
     std::uint64_t NativeGeneration() const { return native_generation_; }
     static const char* Name(Origin origin) {
         switch (origin) {
@@ -58,7 +79,8 @@ public:
 private:
     std::array<Prediction, kCapacity> predictions_{};
     std::size_t next_{0}, count_{0};
-    std::uint64_t app_wait_{0}, native_generation_{0};
+    std::uint64_t app_wait_{0}, ended_{0}, native_generation_{0};
+    XrDuration stride_{0}, previous_stride_{0};
     XrTime native_display_time_{0};
     XrDuration native_period_{0};
 };
