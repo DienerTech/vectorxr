@@ -233,6 +233,10 @@ public:
         Layer().last_app_action_sync_attempt_time_ = old;
         Layer().last_eye_gaze_self_sync_attempt_time_ = old;
     }
+    // The focused-inactive timer as if the whole "no data" delay had passed.
+    static void AgeGazeInactivity() {
+        Layer().eye_gaze_inactive_since_ = std::chrono::steady_clock::now() - std::chrono::seconds(11);
+    }
     static void NewSession() { Layer().ResetSessionState(); SetupSession(); runtime_attached.erase(private_set); }
     // A live Tracking Mode change in an emulated quadviews session.
     static void Track(QuadViewsTrackingMode mode) {
@@ -626,6 +630,18 @@ int main() {
         Expect(Occurrences(text, "is not enabled downstream") == 1 &&
                    Occurrences(text, "after quadviews tracking-mode change") == 1 && !Peer::Ready(),
                "settings reloads without the eye-gaze extension must not retry gaze or log a mode change");
+
+        // A focused, bound eye-gaze input the runtime keeps inactive is named
+        // once: the headset's eye tracker sends no data.
+        Peer::Prepare(); Peer::Resources(); AttachApp(); Peer::LogTo(logs / "no-data.log");
+        FocusEvent(XR_SESSION_STATE_FOCUSED); sync_result = XR_SUCCESS; runtime_gaze_active = false;
+        Expect(!Peer::Gaze() && Occurrences(Peer::Log(), "is not delivering data") == 0,
+               "inactive gaze must not be used or reported at once");
+        Peer::AgeGazeInactivity(); Peer::Gaze(); Peer::Gaze();
+        Expect(Occurrences(Peer::Log(), "is not delivering data") == 1,
+               "gaze inactive for the whole delay must be reported once per session");
+        runtime_gaze_active = true;
+        Expect(Peer::Gaze(), "gaze that arrives later must be used");
         Peer::LogTo(logs / "eye-gaze.log");
         std::error_code error;
         std::filesystem::remove_all(logs, error);

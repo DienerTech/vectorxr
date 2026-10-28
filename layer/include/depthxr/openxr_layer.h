@@ -1954,6 +1954,10 @@ class OpenXrLayer {
     std::optional<XrQuaternionf> eye_gaze_unfocused_last_orientation_;
     uint32_t eye_gaze_unfocused_identical_frames_{0};
     uint32_t eye_gaze_unfocused_logs_remaining_{16};
+    // Focused and inactive since (reset by valid gaze or focus loss); the
+    // "no data" line is logged once per session.
+    std::optional<std::chrono::steady_clock::time_point> eye_gaze_inactive_since_;
+    bool eye_gaze_no_data_logged_{false};
     std::vector<ViewAdjustmentData> locate_views_original_scratch_;
     std::vector<ViewAdjustmentData> locate_views_adjusted_scratch_;
     std::vector<ViewAdjustmentData> locate_views_depth_native_scratch_;

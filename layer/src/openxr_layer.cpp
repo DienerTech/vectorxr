@@ -1583,6 +1583,9 @@ constexpr uint32_t kEyeGazeUnavailableLogThreshold = 30;
 // after which the runtime is taken to be returning a stale pose. Live eye
 // tracking jitters every sample. ~1/2s at 90Hz.
 constexpr uint32_t kEyeGazeUnfocusedFrozenFrames = 45;
+// How long a focused session's bound eye-gaze input may stay inactive before
+// the log says the eye tracker is sending no data.
+constexpr std::chrono::seconds kEyeGazeNoDataLogDelay{10};
 constexpr std::chrono::seconds kQuadViewsDebugHeartbeatInterval{2};
 constexpr std::chrono::seconds kQuadViewsInsetMotionSummaryInterval{30};
 // Hot-path throttles. xrLocateSpace/xrLocateViews/xrEndFrame run multiple
@@ -12517,6 +12520,8 @@ void OpenXrLayer::ResetEyeGazeInputState() {
     eye_gaze_unfocused_last_orientation_.reset();
     eye_gaze_unfocused_identical_frames_ = 0;
     eye_gaze_unfocused_logs_remaining_ = 16;
+    eye_gaze_inactive_since_.reset();
+    eye_gaze_no_data_logged_ = false;
 }
 
 void OpenXrLayer::RecordEyeGazeSyncResult(bool application, XrResult result) {
@@ -12855,6 +12860,9 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
     // while the game stays in view. Read gaze there without syncing, and use it
     // only while the runtime still reports it live.
     const bool unfocused_visible = observed_session_state_ == XR_SESSION_STATE_VISIBLE;
+    if (observed_session_state_ != XR_SESSION_STATE_UNKNOWN && observed_session_state_ != XR_SESSION_STATE_FOCUSED) {
+        eye_gaze_inactive_since_.reset();
+    }
     if (observed_session_state_ != XR_SESSION_STATE_UNKNOWN &&
         observed_session_state_ != XR_SESSION_STATE_FOCUSED && !unfocused_visible) {
         log_eye_gaze_diagnostic("session is not focused");
@@ -12927,11 +12935,28 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
         return false;
     }
     if (XR_FAILED(state_result) || !action_state.isActive) {
+        // Focused, synced and bound, yet inactive: the runtime has wired up
+        // eye gaze but its eye tracker sends nothing. Say so once, plainly;
+        // the per-frame diagnostics only show the symptom.
+        const auto inactive_now = std::chrono::steady_clock::now();
+        if (!eye_gaze_inactive_since_) {
+            eye_gaze_inactive_since_ = inactive_now;
+        } else if (!eye_gaze_no_data_logged_ && inactive_now - *eye_gaze_inactive_since_ >= kEyeGazeNoDataLogDelay) {
+            eye_gaze_no_data_logged_ = true;
+            logger_.Info("Quadviews eye tracking: the runtime connected eye gaze (interaction profile " +
+                         describe_eye_profile() + ") but has reported no gaze for " +
+                         std::to_string(std::chrono::duration_cast<std::chrono::seconds>(
+                             inactive_now - *eye_gaze_inactive_since_).count()) +
+                         " s while the game has focus. The headset's eye tracker is not delivering data: check "
+                         "that eye tracking is on and calibrated in the headset's software (toggling it off and "
+                         "on can restart it). Quadviews uses head focus until gaze arrives.");
+        }
         log_eye_gaze_diagnostic("action state is unavailable, result=" +
                                 FormatHex(static_cast<uint64_t>(state_result)) +
                                 ", active=" + std::to_string(action_state.isActive));
         return false;
     }
+    eye_gaze_inactive_since_.reset();
 
     const XrSpace gaze_base_space = internal_view_space_ != XR_NULL_HANDLE ? internal_view_space_ : base_space;
 
