@@ -372,6 +372,10 @@ public:
         settings.pitch_multiplier = pitch_multiplier;
     }
 
+    static void ClearAccelOverrideBindings() {
+        Layer().resolved_settings_.pivotxr.accel_override.bindings.clear();
+    }
+
     static void SetAccelOverrideKey(bool down) {
         Layer().pivotxr_accel_override_down_cached_ = down;
     }
@@ -1168,7 +1172,7 @@ void AccelerationOverrideReplacesTheMultiplierWhileHeld() {
            "The profile multiplier must apply again after the second release");
 
     // With no bindings configured the key state is ignored.
-    Peer::Layer().resolved_settings_.pivotxr.accel_override.bindings.clear();
+    Peer::ClearAccelOverrideBindings();
     Peer::SetAccelOverrideKey(true);
     Peer::Head(50.0);
     Peer::Drive();
