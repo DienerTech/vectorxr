@@ -9234,6 +9234,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
                            ? "held_previous"
                            : "identity")
                    << ", pivotEngaged=" << (pivotxr_engaged_ ? "true" : "false")
+                   << ", accelOverride=" << (pivotxr_accel_override_.active ? "true" : "false")
                    << ", activationGain=" << FormatDiagnosticDouble(pivotxr_activation_gain_)
                    << ", selectedYaw="
                    << FormatDiagnosticDouble(ExtractPoseYawRadians(canonical_pose_delta))
@@ -14386,6 +14387,9 @@ void OpenXrLayer::ResetPivotPoseDeltaContinuityState() {
 
 void OpenXrLayer::ResetPivotActivationState() {
     ResetPivotPoseDeltaContinuityState();
+    pivotxr_accel_override_down_cached_ = false;
+    pivotxr_accel_override_.requested = false;
+    pivotxr_accel_override_.active = false;
     pivotxr_smoothed_extra_yaw_radians_ = 0.0;
     pivotxr_smoothed_extra_pitch_radians_ = 0.0;
     pivotxr_yaw_step_ = 0;
@@ -16210,7 +16214,25 @@ bool OpenXrLayer::IsPivotXrActive() {
                 }
             }
         }
+        // The acceleration override is global, so it is polled once, not per
+        // profile. It is level-based (held), so there is no edge state.
+        bool accel_override_down = false;
+        for (const InputBinding& binding : pivot.accel_override.bindings) {
+            if (PollInputBindingDown(binding)) {
+                accel_override_down = true;
+                break;
+            }
+        }
+        pivotxr_accel_override_down_cached_ = accel_override_down;
     }
+
+    // Publish the held state and multipliers for the motion code (read in
+    // ApplyPivotToLocatedSpace). Every call, so a binding list emptied by a
+    // config edit stops the override without waiting for the next poll.
+    pivotxr_accel_override_.requested =
+        pivotxr_accel_override_down_cached_ && !pivot.accel_override.bindings.empty();
+    pivotxr_accel_override_.multiplier_yaw = pivot.accel_override.yaw_multiplier;
+    pivotxr_accel_override_.multiplier_pitch = pivot.accel_override.pitch_multiplier;
 
     struct BindingTransitions {
         const InputBinding* pressed{nullptr};

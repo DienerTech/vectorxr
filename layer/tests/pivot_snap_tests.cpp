@@ -315,6 +315,7 @@ public:
         Reset();
         Layer().resolved_settings_.pivotxr.enabled = true;
         Layer().resolved_settings_.pivotxr.profiles = std::move(profiles);
+        Layer().resolved_settings_.pivotxr.accel_override = {};
         PrimeInput();
     }
 
@@ -360,6 +361,19 @@ public:
 
     static void SetNudgeLeft(size_t profile, bool down) {
         Layer().pivotxr_profile_input_states_[profile].nudge_yaw_left[0].down_cached = down;
+    }
+
+    // Configures the global acceleration override (one key, F5) and sets its
+    // cached held state, as the poll would.
+    static void ConfigureAccelOverride(double yaw_multiplier, double pitch_multiplier) {
+        auto& settings = Layer().resolved_settings_.pivotxr.accel_override;
+        settings.bindings = {Key("F5")};
+        settings.yaw_multiplier = yaw_multiplier;
+        settings.pitch_multiplier = pitch_multiplier;
+    }
+
+    static void SetAccelOverrideKey(bool down) {
+        Layer().pivotxr_accel_override_down_cached_ = down;
     }
 
     static void SetOriginKey(size_t profile, bool down) {
@@ -527,6 +541,7 @@ public:
     static bool Engaged() { return Layer().pivotxr_engaged_; }
     static size_t MotionOwner() { return Layer().pivotxr_active_profile_index_; }
     static size_t SelectedSnapView() { return Layer().pivotxr_quick_view_index_; }
+    static double AppliedExtraYawDegrees() { return Degrees(Layer().pivot_diagnostic_.eased_extra_yaw_radians); }
     static double AppliedExtraPitchDegrees() { return Degrees(Layer().pivot_diagnostic_.eased_extra_pitch_radians); }
     static OsdSnapshot Osd() { return Layer().BuildOsdSnapshot(); }
 
@@ -1105,6 +1120,62 @@ void PositionAssistIgnoresOriginPitch() {
                  "Position Assist must stay gravity-aligned when the origin was captured looking down");
 }
 
+void AccelerationOverrideReplacesTheMultiplierWhileHeld() {
+    auto flight = Motion("Flight", Toggle("F1"), false, 0.0);
+    flight.yaw_positive = flight.yaw_negative = flight.pitch_positive = flight.pitch_negative = {2.0, 0.0, 180.0, 0.0};
+    Peer::Start({flight});
+    Peer::ConfigureAccelOverride(1.0, 1.0);
+    EngageFlight();
+
+    // Normal behaviour: a x2 multiplier adds one extra degree per head degree.
+    Peer::Head(10.0);
+    Peer::Drive();
+    Expect(std::abs(std::abs(Peer::AppliedExtraYawDegrees()) - 10.0) < kAngleToleranceDegrees,
+           "Without the override a x2 multiplier must add 10 extra degrees at a 10 degree head angle (got " +
+               Describe(Peer::AppliedExtraYawDegrees()) + ")");
+
+    // Press: the view must not jump, and further head movement is unaccelerated.
+    Peer::SetAccelOverrideKey(true);
+    Peer::Drive();
+    Expect(std::abs(std::abs(Peer::AppliedExtraYawDegrees()) - 10.0) < kAngleToleranceDegrees,
+           "Pressing the override must not move the view (got " + Describe(Peer::AppliedExtraYawDegrees()) + ")");
+    Peer::Head(30.0);
+    Peer::Drive();
+    Expect(std::abs(std::abs(Peer::AppliedExtraYawDegrees()) - 10.0) < kAngleToleranceDegrees,
+           "A multiplier of 1.0 must freeze the extra angle while held (got " +
+               Describe(Peer::AppliedExtraYawDegrees()) + ")");
+
+    // Release: the profile multiplier applies again to the current head angle.
+    Peer::SetAccelOverrideKey(false);
+    Peer::Drive();
+    Expect(std::abs(std::abs(Peer::AppliedExtraYawDegrees()) - 30.0) < kAngleToleranceDegrees,
+           "Releasing the override must restore the profile multiplier (got " +
+               Describe(Peer::AppliedExtraYawDegrees()) + ")");
+
+    // A reduced multiplier damps head movement made after the press:
+    // 30 extra at the press, then (0.5 - 1) * 10 more head degrees = 25.
+    Peer::ConfigureAccelOverride(0.5, 0.5);
+    Peer::SetAccelOverrideKey(true);
+    Peer::Drive();
+    Peer::Head(40.0);
+    Peer::Drive();
+    Expect(std::abs(std::abs(Peer::AppliedExtraYawDegrees()) - 25.0) < kAngleToleranceDegrees,
+           "A multiplier of 0.5 must damp movement after the press (got " +
+               Describe(Peer::AppliedExtraYawDegrees()) + ")");
+    Peer::SetAccelOverrideKey(false);
+    Peer::Drive();
+    Expect(std::abs(std::abs(Peer::AppliedExtraYawDegrees()) - 40.0) < kAngleToleranceDegrees,
+           "The profile multiplier must apply again after the second release");
+
+    // With no bindings configured the key state is ignored.
+    Peer::Layer().resolved_settings_.pivotxr.accel_override.bindings.clear();
+    Peer::SetAccelOverrideKey(true);
+    Peer::Head(50.0);
+    Peer::Drive();
+    Expect(std::abs(std::abs(Peer::AppliedExtraYawDegrees()) - 50.0) < kAngleToleranceDegrees,
+           "A stale held state must not engage an override with no bindings");
+}
+
 void SnapEntryFromSaturatedPitchStartsMovingImmediately() {
     auto flight = Motion("Flight", Toggle("F1"), false, 0.0);
     flight.yaw_positive = flight.yaw_negative = {1.0, 0.0, 180.0, 0.0};
@@ -1409,6 +1480,7 @@ int main() {
         {"stacked snap keeps its nudges", StackedSnapKeepsItsNudgesWhenMotionChanges},
         {"Position Assist in check six", PositionAssistFollowsTheSnappedHeading},
         {"Position Assist with a pitched origin", PositionAssistIgnoresOriginPitch},
+        {"acceleration override while held", AccelerationOverrideReplacesTheMultiplierWhileHeld},
         {"snap entry from saturated pitch", SnapEntryFromSaturatedPitchStartsMovingImmediately},
         {"OSD motion and snap lines", OsdReportsMotionImmediatelyAndOnlyShowsSnapsWhenConfigured},
         {"mid-flight config edits", MidFlightEditsKeepTheSnap},

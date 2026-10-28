@@ -1161,6 +1161,9 @@ class OpenXrLayer {
         double base_extra_pitch_radians{0.0};
     };
     PivotAccelOverride pivotxr_accel_override_;
+    // Level of the (global) override bindings from the last poll: true while
+    // any is held. IsPivotXrActive publishes it as `requested` every call.
+    bool pivotxr_accel_override_down_cached_{false};
     // Stepped response mode: signed persistent step per axis (with hysteresis).
     int pivotxr_yaw_step_{0};
     int pivotxr_pitch_step_{0};
