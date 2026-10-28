@@ -6200,15 +6200,19 @@ XrResult OpenXrLayer::TraceRuntimeBeginFrame(XrSession session, const XrFrameBeg
     const bool sampled = turbo_trace_.Capturing();
     const auto id = turbo_trace_.NextId();
     if (sampled) turbo_trace_.Record("runtime.begin.enter", id);
+    // A begin opens the frame of the latest wait. Read it before the call:
+    // the begin releases the next wait, which a game waiting on another
+    // thread may store before this one returns.
+    const XrTime opening = runtime_latest_wait_prediction_.load(std::memory_order_acquire);
     const auto result = next_begin_frame_(session, info);
     if (XR_FAILED(result)) turbo_trace_.Burst();
     if (sampled || XR_FAILED(result)) turbo_trace_.Record("runtime.begin.return", id, result);
     if (XR_SUCCEEDED(result)) {
-        // A begin opens the frame of the latest wait (a second wait cannot
-        // return before it); the frame begun before bounds this one's end.
-        runtime_end_floor_.store(runtime_begun_prediction_.load(std::memory_order_acquire), std::memory_order_release);
-        runtime_begun_prediction_.store(runtime_latest_wait_prediction_.load(std::memory_order_acquire),
-                                        std::memory_order_release);
+        // The frame begun before bounds this one's end, never above this
+        // frame's own prediction (a runtime clock that steps back).
+        const XrTime previous = runtime_begun_prediction_.load(std::memory_order_acquire);
+        runtime_end_floor_.store(std::min(previous, opening), std::memory_order_release);
+        runtime_begun_prediction_.store(opening, std::memory_order_release);
     }
     return result;
 }
@@ -12836,6 +12840,7 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
     };
 
     if (settings.tracking_mode != QuadViewsTrackingMode::Eye) {
+        eye_gaze_inactive_since_.reset();
         quadviews_eye_gaze_loss_started_wall_time_.reset();
         quadviews_eye_gaze_loss_was_locate_failure_ = false;
         quadviews_has_seen_valid_gaze_ = false;

@@ -1759,6 +1759,31 @@ void TestStaleDisplayTimeRaisedToRuntimeFloor() {
            "Frames after a raise must pass through unchanged");
 }
 
+// A runtime clock that steps back (Varjo after a stall): the floor never rises
+// above the ending frame's own prediction, so an end at it is never raised.
+void TestRuntimeFloorNeverAboveOwnPrediction() {
+    constexpr XrTime t = 30'000'000'000;
+    constexpr XrTime back = t - 5'000'000;
+    FakeRuntime runtime;
+    runtime.PredictionSequence({{t, 11'111'111}, {back, 11'111'111}, {back + 11'111'111, 11'111'111}});
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kSequenced);
+    auto end = FrameEndInfo();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_SUCCESS,
+           "Backward-clock establishment submit failed");
+    XrFrameState state{XR_TYPE_FRAME_STATE};
+    Expect(AppWait(&state) == XR_SUCCESS && XR_SUCCEEDED(AppBegin()) && state.predictedDisplayTime == t,
+           "Backward-clock handshake failed");
+    end.displayTime = t;
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_SUCCESS,
+           "Backward-clock first frame failed");
+    Expect(runtime.NativePredictions().back() == back, "The runtime's prediction did not step back");
+    Expect(AppWait(&state) == XR_SUCCESS && XR_SUCCEEDED(AppBegin()), "Backward-clock app frame failed");
+    end.displayTime = back;
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_SUCCESS &&
+               runtime.SubmittedPredictions().back() == back,
+           "An end at its own runtime frame's prediction must not be raised after the clock stepped back");
+}
+
 // The SteamVR field fault (DCS, sequenced): the app polls while the post-submit
 // runtime wait is still in flight. It must get the prediction that wait returns,
 // not the cached one a frame older, which SteamVR rejects when the frame ends.
@@ -4343,6 +4368,7 @@ int main() {
     TestHealthyPipelineRetainsStrictOrder(depthxr::TurboPacingMode::kAsync);
     TestHealthyPipelineRetainsStrictOrder(depthxr::TurboPacingMode::kSequenced);
     TestStaleDisplayTimeRaisedToRuntimeFloor();
+    TestRuntimeFloorNeverAboveOwnPrediction();
     TestSequencedPollDuringRuntimeWaitGetsNextPrediction();
     TestFrameGenOwnsFramePacing();
     TestConfigReloadWhileFrameGenOwnsPacing();
