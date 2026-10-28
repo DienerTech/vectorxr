@@ -12,6 +12,7 @@
           "<strong>Sharper cockpits.</strong> Generated frames now use cubic resampling for nearby content in games that provide usable depth. In MSFS replays, cockpit fine detail in generated frames rose from 83-88% to 92-98% of the real frames'. Interpolate also keeps more valid cockpit motion through small movements.",
           "<strong>Dynamic Interpolate can use NVIDIA hardware optical flow.</strong> Choosing NVIDIA hardware as the motion source now applies in Dynamic too. A new option under Motion source, <strong>Fall back to Shader when hardware flow can't keep up</strong> (on by default), switches Interpolate to shader flow when hardware flow repeatedly can't keep pace, and tries hardware again later. Turn it off to stay on hardware flow. The OSD shows which source is active, and the log records why it switched. GPUs without supported NVIDIA optical flow use shader flow. In a 16-minute MSFS flight, Dynamic Interpolate on hardware flow held about 90 fps.",
           "<strong>Auto gives a lower multiplier a fair trial.</strong> A failed step-down attempt no longer disrupts the game for a full settle period, and a short burst of late frames during the switch no longer rules out a multiplier the game can sustain. Changes to settings, the runtime's clock or the output images still get the full settle.",
+          "<strong>The OSD shows when depth is helping.</strong> While generated frames use the game's depth, the line under the Frame Generation row ends with \"uses depth\". Depth that a game sends but that fails the checks is not noted.",
           "<strong>An adaptive lead ceiling, on by default.</strong> When Frame Generation times the game so far ahead that new captures replace images it still needs, the ceiling brings that lead down. It checks the result and backs out a lowering that keeps making frames late, so each game settles on its own limit instead of one fixed value."
         ]
       },
@@ -38,7 +39,8 @@
       {
         "html": "<strong>Quadviews eye tracking</strong>",
         "items": [
-          "<strong>Eye tracking can continue while another window has focus.</strong> On SteamVR, a desktop or app window floating in VR (for example on Steam Frame) takes input focus from the game, which stopped Quadviews eye tracking until you returned to the game. VectorXR now keeps using your gaze in that state whenever the runtime still provides it. When it doesn't, the focus area centres on your head as before and follows your eyes again once the game has focus."
+          "<strong>Eye tracking can continue while another window has focus.</strong> On SteamVR, a desktop or app window floating in VR (for example on Steam Frame) takes input focus from the game, which stopped Quadviews eye tracking until you returned to the game. VectorXR now keeps using your gaze in that state whenever the runtime still provides it. When it doesn't, the focus area centres on your head as before and follows your eyes again once the game has focus.",
+          "<strong>The log says when the eye tracker sends nothing.</strong> If the runtime connects eye gaze but no gaze arrives for 10 seconds while the game has focus, the log says the headset's eye tracker isn't delivering data and suggests checking its software. Toggling eye tracking off and on in the headset's software can restart a stuck tracker."
         ]
       },
       {
