@@ -264,6 +264,12 @@ PivotXrResolvedSettings ResolvePivotXrSettings(const ConfigDocument& config, std
         resolved.profiles.push_back(std::move(candidate));
     }
 
+    // Global, like the default module it is edited under: it follows whichever
+    // profile engages, but only while the default Pivot module is enabled.
+    if (config.pivotxr.enabled) {
+        resolved.accel_override = config.pivotxr.accel_override;
+    }
+
     resolved.enabled = !resolved.profiles.empty();
     return resolved;
 }

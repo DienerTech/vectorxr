@@ -1687,7 +1687,10 @@ bool SamePivotResolvedProfile(const PivotXrResolvedProfile& lhs, const PivotXrRe
 }
 
 bool SamePivotResolvedSettings(const PivotXrResolvedSettings& lhs, const PivotXrResolvedSettings& rhs) {
-    if (lhs.enabled != rhs.enabled || lhs.profiles.size() != rhs.profiles.size()) {
+    if (lhs.enabled != rhs.enabled || lhs.profiles.size() != rhs.profiles.size() ||
+        !SameInputBindings(lhs.accel_override.bindings, rhs.accel_override.bindings) ||
+        !NearlyEqual(lhs.accel_override.yaw_multiplier, rhs.accel_override.yaw_multiplier) ||
+        !NearlyEqual(lhs.accel_override.pitch_multiplier, rhs.accel_override.pitch_multiplier)) {
         return false;
     }
     for (size_t i = 0; i < lhs.profiles.size(); ++i) {

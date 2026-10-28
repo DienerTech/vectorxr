@@ -2014,6 +2014,39 @@ bool ParsePivotViewControls(const JsonValue& value, PivotViewControls& out, std:
 }
 
 
+bool ParsePivotAccelOverride(const JsonValue& value, PivotAccelOverride& out, std::string& error) {
+    const JsonValue::Object* object = RequireObject(value, "pivotxr.accelOverride", error);
+    if (!object) {
+        return false;
+    }
+    static const std::unordered_set<std::string> allowed = {"bindings", "yawMultiplier", "pitchMultiplier"};
+    NoteUnknownKeys(*object, allowed);
+
+    std::optional<double> yaw_multiplier;
+    std::optional<double> pitch_multiplier;
+    if (!ReadOptionalNumber(*object, "yawMultiplier", yaw_multiplier, error) ||
+        !ReadOptionalNumber(*object, "pitchMultiplier", pitch_multiplier, error)) {
+        return false;
+    }
+    const auto in_range = [](double multiplier) { return multiplier >= 0.0 && multiplier <= 3.0; };
+    if (yaw_multiplier.has_value()) {
+        if (!in_range(*yaw_multiplier)) {
+            error = "pivotxr.accelOverride.yawMultiplier must be between 0 and 3";
+            return false;
+        }
+        out.yaw_multiplier = *yaw_multiplier;
+    }
+    if (pitch_multiplier.has_value()) {
+        if (!in_range(*pitch_multiplier)) {
+            error = "pivotxr.accelOverride.pitchMultiplier must be between 0 and 3";
+            return false;
+        }
+        out.pitch_multiplier = *pitch_multiplier;
+    }
+    // No legacy single-binding spelling exists for this setting.
+    return ParseInputBindings(*object, "bindings", "binding", out.bindings, error);
+}
+
 bool ParsePivotProfile(const JsonValue& value, PivotXrProfile& out, std::string& error) {
     const JsonValue::Object* object = RequireObject(value, "pivotProfile", error);
     if (!object) {
@@ -2136,6 +2169,7 @@ bool ParsePivotModule(const JsonValue::Object& object, PivotXrModuleConfig& out,
         "activationBinding",
         "setOriginBinding",
         "releaseOriginBinding",
+        "accelOverride",
         "viewControls",
         "profiles",
     };
@@ -2188,6 +2222,12 @@ bool ParsePivotModule(const JsonValue::Object& object, PivotXrModuleConfig& out,
         !ParseInputBindings(object, "setOriginBindings", "setOriginBinding", out.set_origin_bindings, error) ||
         !ParseInputBindings(object, "releaseOriginBindings", "releaseOriginBinding", out.release_origin_bindings,
                             error)) {
+        return false;
+    }
+
+    const auto accel_override_it = object.find("accelOverride");
+    if (accel_override_it != object.end() &&
+        !ParsePivotAccelOverride(accel_override_it->second, out.accel_override, error)) {
         return false;
     }
 
