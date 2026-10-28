@@ -9,6 +9,7 @@ import PivotNudgeSetPage from '../PivotNudgeSetPage.vue'
 import PivotSettingsPage from '../PivotSettingsPage.vue'
 import PivotSettingsSummary from '../PivotSettingsSummary.vue'
 import PivotOriginPage from '../PivotOriginPage.vue'
+import PivotAccelOverridePanel from '../PivotAccelOverridePanel.vue'
 import PivotOriginPanel from '../PivotOriginPanel.vue'
 import PivotSnapBindingsPage from '../PivotSnapBindingsPage.vue'
 import PivotSnapBindingsPanel from '../PivotSnapBindingsPanel.vue'
@@ -410,6 +411,12 @@ const profileOverviewWarningIndexes = computed(() => new Set(
             :release-origin-bindings="config.modules.pivotxr.releaseOriginBindings"
             class="mt-3"
             @edit="openOrigin('default')"
+          />
+          <PivotAccelOverridePanel
+            v-if="config.modules.pivotxr.behavior !== 'snapViews'"
+            :settings="config.modules.pivotxr.accelOverride"
+            :config="config"
+            class="mt-3"
           />
 
         </div>

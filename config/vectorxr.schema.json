@@ -1159,6 +1159,28 @@
         }
       }
     },
+    "pivotAccelOverride": {
+      "type": "object",
+      "description": "Temporary Enhanced Motion acceleration override. While a bound control is held, these multipliers replace the profile's rotation multipliers for head movement made after the press. 1.0 means no acceleration.",
+      "additionalProperties": false,
+      "properties": {
+        "bindings": {
+          "$ref": "#/$defs/inputBindings"
+        },
+        "yawMultiplier": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 3,
+          "default": 1
+        },
+        "pitchMultiplier": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 3,
+          "default": 1
+        }
+      }
+    },
     "pivotViewControls": {
       "type": "object",
       "additionalProperties": false,
@@ -1306,6 +1328,9 @@
         },
         "releaseOriginBindings": {
           "$ref": "#/$defs/inputBindings"
+        },
+        "accelOverride": {
+          "$ref": "#/$defs/pivotAccelOverride"
         },
         "viewControls": {
           "$ref": "#/$defs/pivotViewControls"

@@ -613,3 +613,32 @@ test('0.15 and 0.15.1 configs preserve existing settings, profiles, and bindings
   assert.deepEqual(validateConfig(normalized), [])
   assert.deepEqual(normalizeConfig(normalized), normalized)
 })
+
+test('Pivot acceleration override defaults to inert, round-trips, and is validated', () => {
+  const config = defaultConfig()
+  assert.deepEqual(config.modules.pivotxr.accelOverride, { bindings: [], yawMultiplier: 1, pitchMultiplier: 1 })
+
+  config.modules.pivotxr.accelOverride = { bindings: [keyboard('F9')], yawMultiplier: 0.75, pitchMultiplier: 1.25 }
+  const normalized = normalizeConfig(config)
+  assert.deepEqual(normalized.modules.pivotxr.accelOverride, config.modules.pivotxr.accelOverride)
+  assert.deepEqual(validateConfig(normalized), [])
+
+  // Configs saved before the feature existed load with the inert default.
+  const legacy = JSON.parse(JSON.stringify(defaultConfig()))
+  delete legacy.modules.pivotxr.accelOverride
+  assert.deepEqual(normalizeConfig(legacy).modules.pivotxr.accelOverride, { bindings: [], yawMultiplier: 1, pitchMultiplier: 1 })
+
+  const invalid = normalizeConfig(config)
+  invalid.modules.pivotxr.accelOverride.yawMultiplier = 5
+  invalid.modules.pivotxr.accelOverride.pitchMultiplier = -1
+  const errors = validateConfig(invalid)
+  assert.ok(errors.some((error) => error.includes('accelOverride.yawMultiplier')))
+  assert.ok(errors.some((error) => error.includes('accelOverride.pitchMultiplier')))
+})
+
+test('acceleration override binding conflicts with another Pivot binding on the same control', () => {
+  const config = defaultConfig()
+  config.modules.pivotxr.setOriginBindings = [keyboard('F9')]
+  config.modules.pivotxr.accelOverride.bindings = [keyboard('F9')]
+  assert.ok(savedBindingConflictWarnings(config, config.modules.pivotxr.accelOverride.bindings).length > 0)
+})
