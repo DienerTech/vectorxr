@@ -46,7 +46,10 @@ This is the core idea, so it's worth understanding before you start clicking. Fo
 Enhancement, settings resolve in layers:
 
 1. **Runtime master switch** — *VectorXR Enabled* in **Settings**. If this is off, no
-   Enhancement does anything, regardless of profiles. It is on by default.
+   Enhancement does anything, regardless of profiles, and the On-Screen Display, its bindings and
+   sounds are off too. It is on by default. Switching it off during a session stops generated
+   frames at once; a session's four-view layout, Frame Generation pacing and graphics bridge stay
+   until the game restarts.
 2. **Default Profile** — one baseline per Enhancement. It *applies to applications without an
    enabled custom profile*. Ships **off**. Turn it on when you want an Enhancement to apply
    broadly to anything you haven't given a specific profile.
@@ -436,6 +439,15 @@ VectorXR can remain enabled for Pivot or Depth, with Quad-Views-Foveated ordered
 Turn on **Use Eye Tracking** in DCS and eye tracking in the headset software. The active OpenXR
 runtime must expose eye-gaze data to the layer; otherwise head/static focus is the safe fallback.
 
+If the runtime connects eye gaze but sends no gaze for 10 seconds while the game has focus, the
+VectorXR log says the headset's eye tracker isn't delivering data. Check that eye tracking is on
+and calibrated in the headset's software; toggling eye tracking off and on there can restart a
+stuck tracker.
+
+On SteamVR, a desktop or app window floating in VR (for example on Steam Frame) takes input focus
+from the game. VectorXR keeps using your gaze then whenever the runtime still provides it; when
+it doesn't, the focus centres on your head until the game has focus again.
+
 **Why does eye-tracked focus move backwards?**
 
 Try **Eye Tracking Correction → Flip Z Only** in the matching Quadviews profile.
@@ -456,6 +468,14 @@ this visualization; the saved in-headset shortcut also begins each new session w
 It is also unavailable in the rare session where Frame Generation generates frames from the composed
 image instead of composing the quad views itself, and the app reads **Unavailable in the active
 OpenXR session**: turn Frame Generation off for the game and restart the game to use it there.
+
+**Why do overlays such as OpenKneeboard look jagged at the edges of my view on Varjo?**
+
+On Varjo headsets, the Varjo runtime draws overlays into the same views the game renders, at their
+resolution. Outside the focus area an overlay therefore gets your **Peripheral** resolution, and
+fine text aliases at low values. VectorXR does not change the overlay itself. Raise Peripheral
+(100% matches Varjo's default) if overlays in your peripheral vision matter more than the
+performance gain.
 
 **What else should I disable while troubleshooting?**
 
@@ -541,16 +561,18 @@ on Auto for discovery; forced Async or Sequenced and manual runtime pins take pr
 A full strategy retest needs a relaunch in Auto without a manual override. An established
 Sequenced session keeps that strategy until relaunch even if you change the setting.
 
-#### SteamVR activation in 0.17
+#### Turbo on SteamVR
 
-The previous VectorXR activation restriction for **DCS + SteamVR + synthesized Quadviews**
-has been removed. This setup can now engage Turbo and use the same Auto strategy selection
-and Safety controls as other setups.
+SteamVR refuses a frame whose display time is older than the previous frame's prediction, and
+drops it. Turbo's frame pipelining could submit such frames, most often in DCS; before 0.20,
+three in a row switched Turbo off for the session, with **XR_ERROR_TIME_INVALID** in the log.
+VectorXR 0.20 never submits a display time SteamVR will refuse, and in Sequenced pacing it gives
+the game the timing of the refresh its frame will actually reach, so Turbo runs on SteamVR like on
+other runtimes. Runtimes that accept older display times, such as Pimax's, behave as before.
 
-This removes an application/runtime restriction, not a runtime-enforced FPS cap. Turbo
-still depends on the game, headset, driver, and runtime. Disable **SteamVR Motion Smoothing**
-when testing and compare both frame times and presentation. Other reprojection systems,
-including ASW, may also conflict with Turbo's timing.
+Turbo removes no runtime-enforced FPS cap, and still depends on the game, headset, driver, and
+runtime. Compare both frame times and presentation when testing. Turbo keeps runtime
+reprojection such as SteamVR Motion Smoothing or ASW from working, so use one or the other.
 
 #### Turbo Safety
 
@@ -647,13 +669,16 @@ image every refresh even when the game renders fewer. With the default **Dynamic
 fill the refreshes in between; a **Fixed** rate holds the game at a fraction of the refresh rate
 instead (2x, 3x, 4x, or Auto).
 
+![VectorXR Frame Generation page](screenshots/framegen.jpg)
+
 Generated frames come from GPU optical flow measured on the final color images the game
 submits. VectorXR removes your head rotation from the flow before matching, because the
 runtime's own reprojection already handles head rotation, so the flow follows world,
 vehicle, and object motion.
 
 Frame Generation is experimental. Keep the Default Profile off and enable it per game after
-comparing it in the headset. It has been tested on one PC so far:
+comparing it in the headset. It is developed and tested mainly on one PC, and beta testers have
+also run it on Varjo headsets and on Steam Frame through SteamVR:
 
 - **GPU:** NVIDIA GeForce RTX 5090.
 - **Headset and runtimes:** Pimax Crystal Super on PiOpenXR, Pimax's OpenXR runtime, and on
@@ -692,10 +717,11 @@ Report Frame Generation problems to VectorXR rather than to the game's developer
    game. An enabled matching custom profile turns Frame Generation on for that game even when
    the Default Profile is off.
 6. Start with the default settings (**Mode: Interpolate**, **Frame rate: Dynamic**, **Motion
-   source: Shader**), then click **Save Changes**. In Dynamic, Interpolate measures motion on the
-   GPU's shader cores. **NVIDIA hardware** motion, on an NVIDIA RTX GPU, is best with
-   **Extrapolate**, which has the lowest latency: try the two together. At a fixed or Auto frame
-   rate Interpolate can use it too (experimental).
+   source: Shader**), then click **Save Changes**. On an NVIDIA RTX GPU, try **NVIDIA hardware**
+   as the motion source: Interpolate uses it at every frame rate, Dynamic included, and with
+   **Fall back to Shader when hardware flow can't keep up** on (the default) switches to Shader
+   while the hardware can't keep pace. **Extrapolate**, which has the lowest latency, looks best
+   with NVIDIA hardware.
 7. Restart the game. Turning Frame Generation on, for the Default Profile or a custom profile,
    takes effect at the next launch. Turning it off applies to a running game at once: frames
    pass straight through.
@@ -738,7 +764,8 @@ stand still for a refresh and then jump.
 
 #### Game depth
 
-When a game sends depth to the headset, Frame Generation uses it on Direct3D 12 automatically.
+When a game sends depth to the headset, Frame Generation uses it automatically in Direct3D 12
+games, and in Vulkan games through the Vulkan bridge.
 MSFS 2024 only fills the depth it sends while its **Motion reprojection** setting is **Depth**;
 with it off, the depth is empty and Frame Generation does without. With depth, head movement is
 compensated exactly, so cockpit instruments, panels and text stay still in generated frames
@@ -746,8 +773,11 @@ instead of wobbling. Generated frames also show the
 cockpit from where your eyes will be when each frame is displayed: they keep moving as they did
 between the game's last two frames. Most headset runtimes only correct head rotation between
 frames, so without this, near cockpit detail would jump at the game's frame rate whenever your
-head moved. Direct3D 11 and Vulkan games
-use head rotation only for now.
+head moved. Depth also lets generated frames resample nearby content with a sharper (cubic)
+filter, so cockpit detail stays crisper. Direct3D 11 games such as DCS keep their depth to
+themselves through the Direct3D 11 bridge, so they use head rotation only for now, and Star
+Citizen's depth currently arrives empty. When a game supplies useful depth for only one eye,
+Frame Generation can use it for the other eye too.
 
 Games do not always describe their depth correctly, so Frame Generation first checks it against
 the other eye: depth that is right lines the two eyes' images up. It starts using depth once
@@ -769,7 +799,8 @@ Generated frames finishing much later than that miss their refresh, and the head
 previous frame again. **skippedGenerated** counts generated frames passed over because they were
 made for a refresh already past.
 
-The Frame Generation page's session status shows **Using game depth** while depth is in use,
+While depth is in use, the On-Screen Display's Frame Generation line ends with **uses depth**,
+and the Frame Generation page's session status shows **Using game depth**. The status shows
 **Game depth is empty** when the game sends depth but fills it only with its own depth-based
 reprojection on (turn that option on), or **Game depth not used** when the depth does not line
 the eyes up. The log reports every other case.
@@ -837,6 +868,8 @@ report the game process's video memory use and budget, and how much of it Frame 
 working images and output images take.
 
 #### Frame Generation settings
+
+![Frame Generation custom profile with NVIDIA hardware motion and the Shader fallback](screenshots/framegen-profiles.jpg)
 
 Every setting below applies live after **Save Changes**. Only turning Frame Generation on
 needs a game restart; turning it off applies at once.
@@ -961,7 +994,8 @@ engages, or sooner once the game's own frames show the runtime giving them every
 #### Current limits
 
 - Frame Generation does not use game motion vectors yet; motion is estimated from color
-  images, with the game's depth (Direct3D 12) used only to remove head movement.
+  images, with the game's depth (Direct3D 12, and Vulkan through the bridge) used to remove head
+  movement and sharpen nearby detail.
 - There is no HUD masking yet. Text, HUDs, and gauges baked into the 3D image can shimmer on
   generated frames.
 - Fast motion and newly revealed areas can warp, more so with Extrapolate. Raise **Artifact
@@ -1008,7 +1042,8 @@ on, save, restart the game, then use the binding.
 
 Interpolate has the fewest artifacts and adds about one real frame interval of latency;
 Extrapolate adds none and has more artifacts, and looks best with **NVIDIA hardware** as the
-motion source.
+motion source. On an NVIDIA RTX GPU, Interpolate can use NVIDIA hardware too, with an automatic
+fallback to Shader.
 
 **Why do HUDs, gauges, and text shimmer?**
 
@@ -1113,7 +1148,10 @@ or **FG N/A**. The Frame Generation row reads, for example, `On / Interpolate / 
 GPU time of Frame Generation's motion analysis of the latest real frame: writing each generated
 frame comes on top of it, and with NVIDIA optical flow most of it is the hardware's latency), or
 **Standby**, **Starting**, **Paused**, or **Unavailable**
-with the reason on the second line. The compact row is shorter, such as `Dynamic / 45 → 90 fps`.
+with the reason on the second line. While generated frames use the game's depth, the second line
+ends with **uses depth**, for example `45 → 90 fps / GPU 3.1 ms / uses depth`; depth that the game
+sends but that fails Frame Generation's checks is not noted (see [Game depth](#game-depth)). The
+compact row is shorter, such as `Dynamic / 45 → 90 fps`.
 
 The Pivot row starts with **Motion:**. It reads **Active** or **Releasing**, followed by
 **Continuous** or **Stepped**, **+ Position** while Position Assist moves you, and the profile

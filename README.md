@@ -15,8 +15,8 @@ Developed by DienerTech LLC.
 - Tune stereo depth and convergence through the Depth module.
 - Configure enhanced yaw and pitch rotation through the Pivot module.
 - Drive foveated-style rendering with a visible performance budget through the Quadviews module.
-- Override OpenXR runtime frame pacing per application with Turbo and compare strategies using built-in diagnostics.
-- Add optical-flow generated frames between real frames with experimental [Frame Generation](docs/usage.md#frame-generation-experimental), so the headset gets a fresh image every refresh even when the game renders fewer.
+- Override OpenXR runtime frame pacing per application with Turbo, on SteamVR too, and compare strategies using built-in diagnostics.
+- Add optical-flow generated frames between real frames with experimental [Frame Generation](docs/usage.md#frame-generation-experimental), so the headset gets a fresh image every refresh even when the game renders fewer. It can use NVIDIA's hardware optical flow and the game's depth.
 - Monitor application frame times, Turbo and Frame Generation state, and enhancements with a configurable [in-headset OSD](docs/usage.md#on-screen-display) for Direct3D 11, Direct3D 12, and Vulkan games.
 - Create per-application profiles so different OpenXR games can use different settings.
 - Track OpenXR apps VectorXR has seen and register them as profile targets.
@@ -25,6 +25,7 @@ Developed by DienerTech LLC.
 - View VectorXR runtime logs from inside the app.
 - Check for newer VectorXR releases from the About tab.
 - Import, export, reset, and validate local settings.
+- Use the app, tray, OSD, and installer in eleven languages: English, Simplified and Traditional Chinese, Japanese, Korean, German, French, Spanish, Brazilian Portuguese, Polish, and Russian.
 
 ## Screenshots
 
@@ -60,13 +61,14 @@ For the recommended DCS + synthesized VectorXR setup:
 
 - Turn on **Use Quad View** in DCS. Turn on **Use Eye Tracking** when you want gaze-tracked focus.
 - Keep the VectorXR OpenXR layer and the relevant VectorXR Quadviews profile enabled.
-- Use one software quadviews provider at a time. Disable `XR_APILAYER_MBUCCHIA_quad_views_foveated`; on Pimax, also turn **Native Pimax Quad Views** off. Native Varjo Quadviews remains runtime-driven.
+- Use one software quadviews provider at a time. Disable `XR_APILAYER_MBUCCHIA_quad_views_foveated`; on Pimax, also turn **Native Pimax Quad Views** off. Native Varjo Quadviews remains runtime-driven; on Varjo, overlays such as OpenKneeboard take the Peripheral resolution outside the focus area.
 
 Controls marked **Restart required** can be saved during play, but DCS must be fully restarted for their complete effect. See the usage guide's [live-update reference and Quadviews FAQ](docs/usage.md#live-tuning-and-restarts) for details, alternative layer setups, and common setup pitfalls.
 
-The in-headset diagnostic overlay now has a live session control and an interactive guide for
+The in-headset diagnostic overlay has a live session control and an interactive guide for
 reading render zones, focus alignment, gaze filtering, and tracking availability. See
 [Diagnostic visualization](docs/usage.md#diagnostic-visualization).
+
 ### Turbo
 
 ![VectorXR Turbo controls with Safety enabled](docs/screenshots/turbo.jpg)
@@ -76,7 +78,9 @@ Turbo provides an opt-in per-application frame-pacing override, automatic runtim
 Auto tries Async first, falls back to Sequenced when needed, and remembers a strategy after
 60 seconds of stable play. Custom profiles can also choose experimental **Toolkit-style** or
 **Custom** timing strategies, and Performance Diagnostics labels each capture with the strategy
-it used. Disable SteamVR Motion Smoothing when comparing Turbo; Turbo does not remove
+it used. Since 0.20 Turbo works on SteamVR, which used to reject some of its frames: see
+[Turbo on SteamVR](docs/usage.md#turbo-on-steamvr). Turbo keeps runtime reprojection such as
+SteamVR Motion Smoothing from working, so use one or the other, and it does not remove
 runtime-enforced FPS caps.
 
 ![VectorXR Turbo custom profiles with timing strategies](docs/screenshots/turbo-profiles.jpg)
@@ -93,19 +97,27 @@ See the [Turbo setup and Safety guide](docs/usage.md#turbo) for the controls and
 
 ### Frame Generation (experimental)
 
+![VectorXR Frame Generation page](docs/screenshots/framegen.jpg)
+
 Frame Generation inserts optical-flow generated frames between a game's frames, so the headset
 gets a fresh image every refresh even when the game renders fewer. By default (**Dynamic**) the
 game runs as fast as it can and generated frames fill the gaps; a **Fixed** rate (Auto, 2x, 3x,
 or 4x) holds it at a fraction of the refresh rate instead. Choose per profile between
-**Interpolate** (smoothest, fewest artifacts, a little latency), which measures motion on the
-GPU's shader cores, and **Extrapolate** (lowest latency, more edge artifacts), which can use an
-NVIDIA RTX GPU's optical flow hardware, and compare them in game with an A/B toggle and
-diagnostic views. The On-Screen Display shows **FG ON** and the headset's frame rate beside its
-FPS. It works with Direct3D 11, Direct3D 12, and Vulkan games, in stereo or Quadviews.
+**Interpolate** (smoothest, fewest artifacts, a little latency) and **Extrapolate** (lowest
+latency, more edge artifacts), and compare them in game with an A/B toggle and diagnostic views.
+Motion is measured on the GPU's shader cores on any GPU, or with an NVIDIA RTX GPU's optical flow
+hardware, which Interpolate falls back from automatically when it can't keep up. Where a game
+sends usable depth (Direct3D 12, and Vulkan through the bridge), generated frames use it to keep
+cockpit detail still and sharp. The On-Screen Display shows **FG ON** and the headset's frame
+rate beside its FPS, and notes **uses depth** while depth helps. It works with Direct3D 11,
+Direct3D 12, and Vulkan games, in stereo or Quadviews.
 
-It is experimental, and tested on one PC so far: an NVIDIA RTX 5090 with a Pimax Crystal Super on
-PiOpenXR and SteamVR, in DCS (Direct3D 11 with quad views), MSFS 2024 (Direct3D 12), and Star Citizen
-(Vulkan). AMD and Intel GPUs are untested: measuring motion on the shader cores works on any GPU,
+![VectorXR Frame Generation custom profile settings](docs/screenshots/framegen-profiles.jpg)
+
+It is experimental, and developed and tested mainly on one PC: an NVIDIA RTX 5090 with a Pimax
+Crystal Super on PiOpenXR and SteamVR, in DCS (Direct3D 11 with quad views), MSFS 2024 (Direct3D
+12), and Star Citizen (Vulkan); beta testers have also run it on Varjo headsets and on Steam Frame.
+AMD and Intel GPUs are untested: measuring motion on the shader cores works on any GPU,
 but the bridges that carry Direct3D 11 and Vulkan games' images to Frame Generation have not been
 verified on AMD. Motion is measured on the final images (no game motion vectors yet), text and
 HUDs can shimmer on generated frames, and the real frames it keeps take video memory: about
@@ -123,8 +135,8 @@ online games with anti-cheat, it is at your own risk: see [Current Status](#curr
 The On-Screen Display adds an optional head-following panel in Direct3D 11, Direct3D 12, and
 Vulkan games showing application FPS, frame times, a frame-time graph, CPU and GPU headroom
 with video memory, Turbo and Frame Generation state, Pivot, and active enhancements. Choose compact or expanded layouts, place the panel with a live preview,
-customize its contents and colors, save presets, and show or switch it in game with
-**Ctrl+Alt+F10** and **Ctrl+Alt+F11**. See the [On-Screen Display guide](docs/usage.md#on-screen-display).
+customize its contents and colors, save presets, pick its language (or follow the app's), and show
+or switch it in game with **Ctrl+Alt+F10** and **Ctrl+Alt+F11**. See the [On-Screen Display guide](docs/usage.md#on-screen-display).
 
 ### Application Registry
 
@@ -142,7 +154,7 @@ The OpenXR layer manager inspects installed implicit API layers across the Windo
 
 ![VectorXR Settings tab](docs/screenshots/settings.jpg)
 
-Settings holds the runtime master switch, theme, the system tray icon, discovered-app tracking, logging and the debug export, sound feedback volume, and config import/export/reset.
+Settings holds the runtime master switch, the app language, theme, the system tray icon, discovered-app tracking, input rescan, logging and the debug export, sound feedback volume, and config import/export/reset.
 
 ### About And Updates
 

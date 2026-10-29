@@ -1,7 +1,7 @@
 {
   "eyebrow": "Acerca de",
   "tagline": "Mejoras de OpenXR, ajustadas para cada juego.",
-  "intro": "VectorXR es una plataforma de mejoras de OpenXR que transforma la forma en que tu visor renderiza y realiza el seguimiento, título a título. Recupera fotogramas por segundo con renderizado foveado dinámico, amplifica la rotación de la cabeza para vigilar tus seis sin girarte de más y aumenta la separación estereoscópica para una sensación de escala y presencia más intensa.",
+  "intro": "VectorXR es una plataforma de mejoras de OpenXR que transforma la forma en que tu visor renderiza y realiza el seguimiento, título a título. Recupera fotogramas por segundo con renderizado foveado dinámico y Turbo, llena cada refresco con Frame Generation, amplifica la rotación de la cabeza para vigilar tus seis sin girarte de más y aumenta la separación estereoscópica para una sensación de escala y presencia más intensa.",
   "profiles": "La gestión de capas OpenXR y los perfiles por aplicación mantienen cada título configurado exactamente como te gusta, todo desde un mismo lugar.",
   "firstAndOnly": "{highlight} solución OpenXR en la que la rotación de cabeza mejorada y el renderizado foveado de cuatro vistas funcionan juntos: la región foveada sigue tu vista girada en lugar de quedarse atrás.",
   "firstAndOnlyHighlight": "La primera y única",

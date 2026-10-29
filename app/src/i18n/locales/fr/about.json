@@ -1,7 +1,7 @@
 {
   "eyebrow": "À propos",
   "tagline": "Améliorations OpenXR, réglées pour chaque jeu.",
-  "intro": "VectorXR est une plateforme d'Améliorations OpenXR qui redéfinit la façon dont votre casque effectue le rendu et le suivi — jeu par jeu. Regagnez de la fréquence d'images avec le rendu fovéal dynamique, amplifiez la rotation de la tête pour surveiller vos six heures sans vous contorsionner, et accentuez la séparation stéréo pour un sens de l'échelle et de la présence plus fort.",
+  "intro": "VectorXR est une plateforme d'Améliorations OpenXR qui redéfinit la façon dont votre casque effectue le rendu et le suivi — jeu par jeu. Regagnez de la fréquence d'images avec le rendu fovéal dynamique et Turbo, remplissez chaque rafraîchissement avec Frame Generation, amplifiez la rotation de la tête pour surveiller vos six heures sans vous contorsionner, et accentuez la séparation stéréo pour un sens de l'échelle et de la présence plus fort.",
   "profiles": "La gestion des couches OpenXR et les profils par application gardent chaque jeu configuré exactement comme vous le souhaitez, le tout depuis un seul endroit.",
   "firstAndOnly": "{highlight} solution OpenXR où la rotation de tête amplifiée et le rendu fovéal quad-views fonctionnent ensemble — la zone fovéale suit votre vue pivotée au lieu de rester en arrière.",
   "firstAndOnlyHighlight": "La première et la seule",

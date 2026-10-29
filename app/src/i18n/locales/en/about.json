@@ -1,7 +1,7 @@
 {
   "eyebrow": "About",
   "tagline": "OpenXR Enhancements, tuned per game.",
-  "intro": "VectorXR is an OpenXR Enhancement platform that reshapes how your headset renders and tracks — title by title. Reclaim frame rate with dynamic foveated rendering, amplify head rotation so you can check your six without overturning, and deepen stereo separation for a stronger sense of scale and presence.",
+  "intro": "VectorXR is an OpenXR Enhancement platform that reshapes how your headset renders and tracks — title by title. Reclaim frame rate with dynamic foveated rendering and Turbo, fill every refresh with Frame Generation, amplify head rotation so you can check your six without overturning, and deepen stereo separation for a stronger sense of scale and presence.",
   "profiles": "OpenXR layer management and per-application profiles keep every title configured exactly how you like it, all from one place.",
   "firstAndOnly": "{highlight} OpenXR solution where enhanced head rotation and quad-views foveated rendering work together — the foveated region follows your pivoted view instead of being left behind.",
   "firstAndOnlyHighlight": "The first and only",

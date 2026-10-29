@@ -1,7 +1,7 @@
 {
   "eyebrow": "Informacje",
   "tagline": "Ulepszenia OpenXR dostrojone do każdej gry.",
-  "intro": "VectorXR to platforma Ulepszeń OpenXR, która zmienia sposób renderowania i śledzenia w goglach — osobno dla każdego tytułu. Odzyskaj liczbę klatek dzięki dynamicznemu renderowaniu foveated, wzmocnij obrót głowy, aby sprawdzić tył samolotu bez wykręcania się, i pogłęb separację stereo, by uzyskać silniejsze poczucie skali i obecności.",
+  "intro": "VectorXR to platforma Ulepszeń OpenXR, która zmienia sposób renderowania i śledzenia w goglach — osobno dla każdego tytułu. Odzyskaj liczbę klatek dzięki dynamicznemu renderowaniu foveated i Turbo, wypełnij każde odświeżenie dzięki Frame Generation, wzmocnij obrót głowy, aby sprawdzić tył samolotu bez wykręcania się, i pogłęb separację stereo, by uzyskać silniejsze poczucie skali i obecności.",
   "profiles": "Zarządzanie warstwami OpenXR i profile dla poszczególnych aplikacji sprawiają, że każdy tytuł jest skonfigurowany dokładnie tak, jak lubisz — wszystko z jednego miejsca.",
   "firstAndOnly": "{highlight} rozwiązanie OpenXR, w którym wzmocniony obrót głowy i renderowanie foveated quad-views działają razem — obszar foveated podąża za obróconym widokiem zamiast zostawać w tyle.",
   "firstAndOnlyHighlight": "Pierwsze i jedyne",

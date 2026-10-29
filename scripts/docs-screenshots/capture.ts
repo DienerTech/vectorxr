@@ -11,7 +11,7 @@
 // Uses headless Microsoft Edge through the Chrome DevTools Protocol, so no
 // browser automation package is required. Set VECTORXR_BROWSER to use Chrome.
 import { spawn } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -28,11 +28,13 @@ const language = process.env.VECTORXR_SHOTS_LANGUAGE ?? ''
 class Cdp {
   private id = 0
   private pending = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void }>()
+  private listeners = new Map<string, (params: any) => void>()
   private socket: WebSocket
   constructor(socket: WebSocket) {
     this.socket = socket
     socket.addEventListener('message', (event) => {
       const message = JSON.parse(String(event.data))
+      if (message.method) this.listeners.get(message.method)?.(message.params)
       const waiter = message.id ? this.pending.get(message.id) : undefined
       if (!waiter) return
       this.pending.delete(message.id)
@@ -50,7 +52,32 @@ class Cdp {
     this.socket.send(JSON.stringify({ id, method, params }))
     return new Promise<any>((resolve, reject) => this.pending.set(id, { resolve, reject }))
   }
+  on(method: string, listener: (params: any) => void) { this.listeners.set(method, listener) }
   close() { this.socket.close() }
+}
+
+// The About tab's update check asks GitHub for the latest release. Answer it
+// with the release being documented (the newest patch notes entry), so the
+// screenshots show it as current before it is published.
+async function answerUpdateCheck(cdp: Cdp) {
+  const [release] = JSON.parse(readFileSync(join(root, 'app', 'src', 'lib', 'patchNotes.json'), 'utf8'))
+  const body = JSON.stringify({
+    tag_name: `v${release.version}`,
+    name: `VectorXR ${release.version}`,
+    html_url: `https://github.com/DienerTech/vectorxr/releases/tag/v${release.version}`,
+    published_at: `${release.date}T12:00:00Z`,
+    body: '',
+    assets: [],
+  })
+  cdp.on('Fetch.requestPaused', (event) => {
+    void cdp.send('Fetch.fulfillRequest', {
+      requestId: event.requestId,
+      responseCode: 200,
+      responseHeaders: [{ name: 'Content-Type', value: 'application/json' }, { name: 'Access-Control-Allow-Origin', value: '*' }],
+      body: Buffer.from(body).toString('base64'),
+    })
+  })
+  await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*api.github.com/repos/DienerTech/vectorxr/releases*' }] })
 }
 
 const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms))
@@ -133,6 +160,10 @@ const shots: Shot[] = [
   { name: 'home', tabOnly: true, run: tab('home') },
   { name: 'home-dark', theme: 'dark', tabOnly: true, run: tab('home') },
   { name: 'settings', tabOnly: true, run: tab('core') },
+  { name: 'framegen', tabOnly: true, run: tab('framegen') },
+  { name: 'framegen-profiles', run: async (p) => {
+    await p.tab('framegen'); await p.scrollTo('Custom Profiles', 16, 'h2, h3, p, span, div')
+  } },
   { name: 'osd', run: async (p) => { await p.tab('osd'); await p.click('Legible'); await p.top() } },
   { name: 'osd-compact', run: async (p) => {
     await p.tab('osd'); await p.click('Compact'); await p.click('Legible'); await p.scrollTo('Compact', 16, 'button')
@@ -175,6 +206,7 @@ async function main() {
     const cdp = await Cdp.connect(target.webSocketDebuggerUrl)
     await cdp.send('Page.enable')
     await cdp.send('Runtime.enable')
+    await answerUpdateCheck(cdp)
     await cdp.send('Emulation.setDeviceMetricsOverride', { ...viewport, mobile: false })
     await cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] })
     const page = new Page(cdp)

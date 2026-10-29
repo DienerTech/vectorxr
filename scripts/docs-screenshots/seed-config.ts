@@ -1,6 +1,7 @@
 // Builds the sample configuration shown in documentation screenshots, using
 // the desktop app's own model factories so it always matches the schema.
 import {
+  createFrameGenProfile,
   createPivotProfile,
   createPivotQuickView,
   createProfile,
@@ -18,6 +19,7 @@ export function sampleConfig() {
     { id: 'dcs-world', name: 'DCS World', enabled: true, match: { exe: 'DCS.exe' } },
     { id: 'msfs-2024', name: 'Microsoft Flight Simulator 2024', enabled: true, match: { exe: 'FlightSimulator2024.exe' } },
     { id: 'iracing', name: 'iRacing', enabled: true, match: { exe: 'iRacingSim64DX11.exe' } },
+    { id: 'star-citizen', name: 'Star Citizen', enabled: true, match: { exe: 'StarCitizen.exe' } },
   ]
   config.applications = applications
 
@@ -30,10 +32,18 @@ export function sampleConfig() {
   modules.turbo.enabled = false
   const dcsTurbo = createTurboProfile(['dcs-world'])
   dcsTurbo.name = 'DCS World'
-  const msfsTurbo = createTurboProfile(['msfs-2024'])
-  msfsTurbo.name = 'MSFS 2024'
-  msfsTurbo.experimental = { ...toolkitInspiredTurboExperimental(), applicationIds: [] }
-  modules.turbo.profiles = [dcsTurbo, msfsTurbo]
+  const iracingTurbo = createTurboProfile(['iracing'])
+  iracingTurbo.name = 'iRacing'
+  iracingTurbo.experimental = { ...toolkitInspiredTurboExperimental(), applicationIds: [] }
+  modules.turbo.profiles = [dcsTurbo, iracingTurbo]
+
+  modules.framegen.enabled = false
+  const msfsFrameGen = createFrameGenProfile(modules.framegen.defaults, ['msfs-2024'])
+  msfsFrameGen.name = 'MSFS 2024'
+  msfsFrameGen.settings.motionEstimation = 'hardware'
+  const scFrameGen = createFrameGenProfile(modules.framegen.defaults, ['star-citizen'])
+  scFrameGen.name = 'Star Citizen'
+  modules.framegen.profiles = [msfsFrameGen, scFrameGen]
 
   modules.pivotxr.enabled = true
   modules.pivotxr.behavior = 'snapViews'

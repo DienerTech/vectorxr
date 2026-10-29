@@ -1,7 +1,7 @@
 {
   "eyebrow": "Sobre",
   "tagline": "Aprimoramentos OpenXR, ajustados para cada jogo.",
-  "intro": "VectorXR é uma plataforma de aprimoramentos OpenXR que transforma a forma como seu headset renderiza e rastreia — título por título. Recupere taxa de quadros com renderização foveada dinâmica, amplifique a rotação da cabeça para checar sua retaguarda sem virar demais e aumente a separação estereoscópica para uma sensação mais forte de escala e presença.",
+  "intro": "VectorXR é uma plataforma de aprimoramentos OpenXR que transforma a forma como seu headset renderiza e rastreia — título por título. Recupere taxa de quadros com renderização foveada dinâmica e Turbo, preencha cada atualização da tela com Frame Generation, amplifique a rotação da cabeça para checar sua retaguarda sem virar demais e aumente a separação estereoscópica para uma sensação mais forte de escala e presença.",
   "profiles": "O gerenciamento de camadas OpenXR e os perfis por aplicativo mantêm cada título configurado exatamente do seu jeito, tudo em um só lugar.",
   "firstAndOnly": "{highlight} solução OpenXR em que a rotação aprimorada da cabeça e a renderização foveada quad-views funcionam juntas — a região foveada acompanha a sua visão girada em vez de ficar para trás.",
   "firstAndOnlyHighlight": "A primeira e única",
