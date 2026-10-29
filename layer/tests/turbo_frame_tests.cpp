@@ -1919,6 +1919,32 @@ void TestAsyncAppFramesTargetTheirRuntimeFrame() {
     }
 }
 
+// An app that shows its own display times instead of the handed-out ones and
+// abandons frames: its ends cannot say which frames are left, so abandoned
+// ones must not build up into frames predicted ahead of their runtime frame.
+void TestAsyncUnechoedAbandonedFramesDoNotLead() {
+    FakeRuntime runtime;
+    runtime.RejectStaleDisplayTimes();
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    auto end = FrameEndInfo();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_SUCCESS &&
+               depthxr::TurboFrameTestPeer::WaitForAsyncPrediction(),
+           "Unechoed establishment did not publish its runtime wait");
+    for (int repeat = 0; repeat < 6; ++repeat) {
+        XrFrameState abandoned{XR_TYPE_FRAME_STATE};
+        Expect(AppWait(&abandoned) == XR_SUCCESS && XR_SUCCEEDED(AppBegin()), "Unechoed abandoned frame failed");
+        XrFrameState state{XR_TYPE_FRAME_STATE};
+        Expect(AppWait(&state) == XR_SUCCESS && XR_SUCCEEDED(AppBegin()), "Unechoed app frame failed");
+        end.displayTime = state.predictedDisplayTime + 1;
+        Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_SUCCESS &&
+                   depthxr::TurboFrameTestPeer::WaitForAsyncPrediction(),
+               "Unechoed submit failed");
+        const XrDuration lead = state.predictedDisplayTime - runtime.CurrentBegunPrediction();
+        Expect(lead <= 11'111'111 && (repeat == 0 || lead < 1'000),
+               "Abandoned unechoed frames built up a lead of " + std::to_string(lead) + " ns");
+    }
+}
+
 // The DCS shape on real threads: a main thread waits up to two frames ahead of a
 // render thread that begins and ends them. No frame may need a raise, nor lead
 // the runtime frame it ends in.
@@ -4529,6 +4555,7 @@ int main() {
     TestRuntimeFloorNeverAboveOwnPrediction();
     TestSequencedPollDuringRuntimeWaitGetsNextPrediction();
     TestAsyncAppFramesTargetTheirRuntimeFrame();
+    TestAsyncUnechoedAbandonedFramesDoNotLead();
     TestAsyncTwoThreadFramesNeedNoRaise();
     TestFrameGenOwnsFramePacing();
     TestConfigReloadWhileFrameGenOwnsPacing();

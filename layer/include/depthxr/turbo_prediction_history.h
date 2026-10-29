@@ -52,13 +52,21 @@ public:
     }
     // An app frame ended: one showing a time handed out here also ends every
     // earlier wait (frames the app abandoned); any other counts as the next.
+    // That guess is only certain with one frame unended: with more, an app
+    // that abandons frames and shows its own times would build up a count of
+    // frames that will never end, so the count is not used until a match.
     void AppEnd(XrTime display_time) {
         const auto prediction = Find(display_time);
-        ended_ = prediction && prediction->app_wait > ended_ ? prediction->app_wait
-                                                              : std::min(ended_ + 1, app_wait_);
+        if (prediction && prediction->app_wait > ended_) {
+            ended_ = prediction->app_wait;
+            counted_ = true;
+        } else {
+            counted_ = app_wait_ - ended_ <= 1;
+            ended_ = std::min(ended_ + 1, app_wait_);
+        }
     }
-    // App waits whose frames have not ended yet.
-    std::uint64_t Unended() const { return app_wait_ - ended_; }
+    // App waits whose frames have not ended yet, or 0 while that is unknown.
+    std::uint64_t Unended() const { return counted_ ? app_wait_ - ended_ : 0; }
     // The spacing of the runtime's frames: the period, unless the last two
     // waits agree on a shorter one (SteamVR can report a multiple of it).
     XrDuration FrameStep(XrDuration period) const {
@@ -80,6 +88,7 @@ private:
     std::array<Prediction, kCapacity> predictions_{};
     std::size_t next_{0}, count_{0};
     std::uint64_t app_wait_{0}, ended_{0}, native_generation_{0};
+    bool counted_{true};
     XrDuration stride_{0}, previous_stride_{0};
     XrTime native_display_time_{0};
     XrDuration native_period_{0};
