@@ -566,8 +566,8 @@ Sequenced session keeps that strategy until relaunch even if you change the sett
 SteamVR refuses a frame whose display time is older than the previous frame's prediction, and
 drops it. Turbo's frame pipelining could submit such frames, most often in DCS; before 0.20,
 three in a row switched Turbo off for the session, with **XR_ERROR_TIME_INVALID** in the log.
-VectorXR 0.20 never submits a display time SteamVR will refuse, and in Sequenced pacing it gives
-the game the timing of the refresh its frame will actually reach, so Turbo runs on SteamVR like on
+VectorXR 0.20 never submits a display time SteamVR will refuse, and in both Async and Sequenced
+pacing it gives the game the timing of the refresh its frame will actually reach, so Turbo runs on SteamVR like on
 other runtimes. Runtimes that accept older display times, such as Pimax's, behave as before.
 
 Turbo removes no runtime-enforced FPS cap, and still depends on the game, headset, driver, and

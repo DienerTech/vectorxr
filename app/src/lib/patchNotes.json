@@ -27,7 +27,7 @@
       {
         "html": "<strong>Turbo</strong>",
         "items": [
-          "<strong>Turbo works on SteamVR.</strong> SteamVR rejects a frame whose display time is older than its previous frame's, and Turbo's frame pipelining could submit such frames, most often in DCS. SteamVR dropped them, and after three in a row VectorXR switched Turbo off for the session (\"XR_ERROR_TIME_INVALID\" in the log). VectorXR now never submits a display time SteamVR will refuse, and in sequenced pacing it gives the game the timing of the refresh its frame will actually reach. In a 15-minute DCS flight on SteamVR with Turbo, no frame was rejected. Runtimes that accept such frames, such as Pimax's, behave as before."
+          "<strong>Turbo works on SteamVR.</strong> SteamVR rejects a frame whose display time is older than its previous frame's, and Turbo's frame pipelining could submit such frames, most often in DCS. SteamVR dropped them, and after three in a row VectorXR switched Turbo off for the session (\"XR_ERROR_TIME_INVALID\" in the log). VectorXR now never submits a display time SteamVR will refuse, and gives the game the timing of the refresh its frame will actually reach, in both Async and Sequenced pacing. In a 15-minute DCS flight on SteamVR with Turbo, no frame was rejected. Runtimes that accept such frames, such as Pimax's, behave as before."
         ]
       },
       {
