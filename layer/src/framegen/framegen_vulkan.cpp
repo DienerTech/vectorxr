@@ -285,9 +285,11 @@ class VulkanFrameGen final : public FrameGenGpu {
 
     bool Execute(const std::vector<FrameGenViewSubmission>& views, const FrameGenTuning& requested,
                  FrameGenExecuteResult& result, std::string& error) override {
-        // No optical flow hardware path: block matching measures motion.
+        // No optical flow hardware path: block matching measures motion, at
+        // its quality's level (the views' textures are made for that), and
+        // no game's vectors stand in for it.
         FrameGenTuning tuning = requested;
-        tuning.hardware_flow = false;
+        tuning.hardware_flow = tuning.hardware_level = false;
         result.synthesized.assign(views.size(), false);
         if (Uncaptured(views, tuning, result, error)) {
             return false;

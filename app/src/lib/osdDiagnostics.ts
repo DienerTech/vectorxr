@@ -1,16 +1,18 @@
 import type { VectorXRConfig } from './model'
+import { t, type MessageKey } from '../i18n/index.ts'
 
 // Diagnostic modes a tester may leave on, named in a tag after the OSD's
 // brand as the layer does (OpenXrLayer::BuildOsdSnapshot): debug logging, and
 // a Frame Generation diagnostic view where Frame Generation is on.
-const viewLabels = { flow: 'FLOW VIEW', confidence: 'CONFIDENCE VIEW', tint: 'TINT VIEW' } as const
+// The English wording matches the layer's tag (osd.preview.diagnostics.*).
+const viewLabels = { flow: 'osd.preview.diagnostics.flowView', confidence: 'osd.preview.diagnostics.confidenceView', tint: 'osd.preview.diagnostics.tintView' } as const satisfies Record<string, MessageKey>
 
 export function osdDiagnostics(config: VectorXRConfig): string {
   const tags: string[] = []
-  if (config.core.logLevel === 'debug') tags.push('DEBUG LOG')
+  if (config.core.logLevel === 'debug') tags.push(t('osd.preview.diagnostics.debugLog'))
   const framegen = config.modules.framegen
   const framegenOn = framegen.enabled || framegen.profiles.some(profile => profile.enabled)
-  if (framegenOn && framegen.diagnosticView !== 'off') tags.push(viewLabels[framegen.diagnosticView])
+  if (framegenOn && framegen.diagnosticView !== 'off') tags.push(t(viewLabels[framegen.diagnosticView]))
   return tags.join(' · ')
 }
 

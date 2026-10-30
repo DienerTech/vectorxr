@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, ref } from 'vue'
 
+import { t } from '../../i18n/index.ts'
 import DefaultProfileExclusions from '../DefaultProfileExclusions.vue'
+import I18nText from '../I18nText.vue'
 import PivotBindingsPage from '../PivotBindingsPage.vue'
 import PivotBindingsPanel from '../PivotBindingsPanel.vue'
 import PivotBehaviorPanel from '../PivotBehaviorPanel.vue'
@@ -15,8 +17,8 @@ import PivotSnapBindingsPanel from '../PivotSnapBindingsPanel.vue'
 import PivotViewControlsPage from '../PivotViewControlsPage.vue'
 import PivotViewControlsPanel from '../PivotViewControlsPanel.vue'
 import ProfileShell from '../ProfileShell.vue'
-import type { RegisteredApplication, VectorXRConfig } from '../../lib/model'
-import { bindingLabel, bindingsMatchRuntimeActivation, createPivotNudgeSet, pivotBindingConflictWarnings, pivotSnapStackingStatus, pivotSnapViewMotionNote } from '../../lib/model'
+import type { InputBinding, PivotActivationBinding, RegisteredApplication, VectorXRConfig } from '../../lib/model'
+import { bindingLabel, bindingsMatchRuntimeActivation, bindingsShareInput, createPivotNudgeSet, pivotBindingConflictWarnings, pivotSnapStackingStatus, pivotSnapViewMotionNote } from '../../lib/model'
 
 const props = defineProps<{
   config: VectorXRConfig
@@ -113,7 +115,11 @@ function openNudgeSet(id: string) {
 
 function addNudgeSet(subject: { nudgeSetId: string }) {
   const source = props.config.modules.pivotxr.nudgeSets.find((set) => set.id === subject.nudgeSetId)
-  const set = createPivotNudgeSet(`${source?.name ?? 'Nudge Set'} Copy`, source?.settings, source?.allowWhileInactive ?? false)
+  const set = createPivotNudgeSet(
+    t('pivot.tab.nudgeSetCopyName', { name: source?.name ?? t('pivot.tab.nudgeSetDefaultName') }),
+    source?.settings,
+    source?.allowWhileInactive ?? false,
+  )
   props.config.modules.pivotxr.nudgeSets.push(set)
   subject.nudgeSetId = set.id
   openNudgeSet(set.id)
@@ -135,10 +141,10 @@ function deleteNudgeSet(id: string) {
 }
 function profileContextLabel(target: 'default' | number | null): string {
   if (target === 'default' || target === null) {
-    return 'Default Profile'
+    return t('pivot.tab.defaultProfile')
   }
   const profile = props.config.modules.pivotxr.profiles[target]
-  return profile?.name?.trim() || `Profile ${target + 1}`
+  return profile?.name?.trim() || t('pivot.tab.profileNumber', { number: target + 1 })
 }
 
 // Sub-page navigation preserves the main page's scroll position, so returning
@@ -197,12 +203,25 @@ const defaultBindingWarnings = computed(() => [
     props.config.modules.pivotxr.releaseOriginBindings,
   ),
   ...(props.config.modules.pivotxr.behavior !== 'snapViews' && !props.config.modules.pivotxr.alwaysActive && props.config.modules.pivotxr.activationBindings.length === 0
-    ? [{ title: 'No Motion Assist activation', message: 'Motion Assist will remain off until you add a Toggle or Hold binding, or enable Always active. Compatible Snap View profiles remain available.' }]
+    ? [{ title: t('pivot.warnings.noActivationTitle'), message: t('pivot.warnings.noActivationMessage') }]
     : []),
 ])
 
-const profileWarnings = computed(() => {
+// Keeps the first of each physical input, so comparing the conflict warnings
+// with and without duplicates tells whether a list repeats an input.
+function withoutDuplicateInputs(bindings: InputBinding[]): InputBinding[] {
+  return bindings.filter((binding, index) => !bindings.slice(0, index).some((earlier) => bindingsShareInput(earlier, binding)))
+}
+
+function withoutDuplicateActivationInputs(bindings: PivotActivationBinding[]): PivotActivationBinding[] {
+  return bindings.filter((item, index) => !bindings.slice(0, index).some((earlier) => bindingsShareInput(earlier.binding, item.binding)))
+}
+
+const profileWarningState = computed(() => {
   const warnings = new Map<number, string[]>()
+  // Profiles whose warnings include an activation overlap: a shadowed binding,
+  // a shared Always active title, or a repeated input.
+  const overlaps = new Set<number>()
   const applicationNameById = new Map(props.applications.map((application) => [application.id, application.name]))
   const enabledProfiles = props.config.modules.pivotxr.profiles
     .map((profile, index) => ({ profile, index }))
@@ -214,22 +233,32 @@ const profileWarnings = computed(() => {
         const owner = enabledProfiles.find((candidate) => candidate.index < index && candidate.profile.behavior === 'enhancedMotion' && candidate.profile.alwaysActive && candidate.profile.applicationIds.includes(applicationId))
         if (owner) {
           const appName = applicationNameById.get(applicationId) ?? applicationId
-          warnings.set(index, [...(warnings.get(index) ?? []), `Both this profile and "${owner.profile.name}" are Always active for ${appName}. The higher-priority profile engages first; use activation controls when you need predictable switching.`])
+          warnings.set(index, [...(warnings.get(index) ?? []), t('pivot.warnings.bothAlwaysActive', { owner: owner.profile.name, app: appName })])
+          overlaps.add(index)
         }
       }
     }
+    const conflictAlwaysActive = profile.behavior === 'snapViews' ? false : profile.alwaysActive
+    const conflictActivationBindings = profile.behavior === 'snapViews' ? [] : profile.activationBindings
     const conflictMessages = pivotBindingConflictWarnings(
-      profile.behavior === 'snapViews' ? false : profile.alwaysActive,
-      profile.behavior === 'snapViews' ? [] : profile.activationBindings,
+      conflictAlwaysActive,
+      conflictActivationBindings,
       profile.setOriginBindings,
       profile.releaseOriginBindings,
     ).map((warning) => warning.message)
     if (conflictMessages.length > 0) {
       warnings.set(index, [...(warnings.get(index) ?? []), ...conflictMessages])
+      const withoutDuplicates = pivotBindingConflictWarnings(
+        conflictAlwaysActive,
+        withoutDuplicateActivationInputs(conflictActivationBindings),
+        withoutDuplicateInputs(profile.setOriginBindings),
+        withoutDuplicateInputs(profile.releaseOriginBindings),
+      )
+      if (withoutDuplicates.length < conflictMessages.length) overlaps.add(index)
     }
 
     if (profile.behavior !== 'snapViews' && !profile.alwaysActive && profile.activationBindings.length === 0) {
-      warnings.set(index, [...(warnings.get(index) ?? []), 'Motion Assist has no activation bindings and will remain off. Add a Toggle or Hold binding, or enable Always active. Compatible Snap View profiles remain available.'])
+      warnings.set(index, [...(warnings.get(index) ?? []), t('pivot.warnings.profileNoActivation')])
     }
 
     for (const activationBinding of profile.behavior === 'snapViews' ? [] : profile.activationBindings) {
@@ -247,21 +276,20 @@ const profileWarnings = computed(() => {
 
         const appName = applicationNameById.get(applicationId) ?? applicationId
         const label = bindingLabel(binding)
+        const params = { app: appName, binding: label, owner: owner.profile.name, number: owner.index + 1 }
         const message = profile.alwaysActive
-          ? `For ${appName}, binding ${label} is owned by the higher-priority "${owner.profile.name}" (Profile ${owner.index + 1}). Always On still engages automatically, but this binding cannot suspend or resume it. Other unshadowed bindings still work.`
-          : `For ${appName}, binding ${label} is owned by the higher-priority "${owner.profile.name}" (Profile ${owner.index + 1}); this binding will not activate the profile. Other unshadowed bindings still work.`
+          ? t('pivot.warnings.bindingOwnedAlwaysOn', params)
+          : t('pivot.warnings.bindingOwned', params)
         warnings.set(index, [...(warnings.get(index) ?? []), message])
+        overlaps.add(index)
       }
     }
   }
 
-  return warnings
+  return { warnings, overlaps }
 })
-const profileOverviewWarningIndexes = computed(() => new Set(
-  [...profileWarnings.value.entries()]
-    .filter(([, messages]) => messages.some((message) => /owned by the higher-priority|same physical input|Both this profile/.test(message)))
-    .map(([index]) => index),
-))
+const profileWarnings = computed(() => profileWarningState.value.warnings)
+const profileOverviewWarningIndexes = computed(() => profileWarningState.value.overlaps)
 </script>
 
 <template>
@@ -315,7 +343,7 @@ const profileOverviewWarningIndexes = computed(() => new Set(
         <div>
           <h2 class="text-2xl font-semibold tracking-tight">Pivot</h2>
           <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">
-            Configure how Pivot activates and how much extra yaw or pitch it can add for each title. Use profiles to keep rotation behavior specific to the games and simulators that benefit from it.
+            {{ t('pivot.tab.intro') }}
           </p>
         </div>
         <div class="flex flex-wrap items-center gap-2">
@@ -327,7 +355,7 @@ const profileOverviewWarningIndexes = computed(() => new Set(
             <span class="inline-flex h-5 w-5 items-center justify-center rounded-full border text-xs" style="border-color: var(--app-border)">
               i
             </span>
-            Quadviews Compatibility
+            {{ t('pivot.tab.quadviewsCompatibilityButton') }}
           </button>
           <button
             class="button-secondary inline-flex items-center gap-2 rounded-[0.75rem] px-4 py-2 text-sm font-medium"
@@ -337,7 +365,7 @@ const profileOverviewWarningIndexes = computed(() => new Set(
             <span class="inline-flex h-5 w-5 items-center justify-center rounded-full border text-xs" style="border-color: var(--app-border)">
               i
             </span>
-            Centering &amp; Alignment
+            {{ t('pivot.tab.centeringButton') }}
           </button>
         </div>
       </div>
@@ -347,13 +375,13 @@ const profileOverviewWarningIndexes = computed(() => new Set(
           <svg aria-hidden="true" class="section-chevron h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
             <path fill-rule="evenodd" d="M7.2 14.8a1 1 0 0 1 0-1.4L10.6 10 7.2 6.6a1 1 0 1 1 1.4-1.4l4.1 4.1a1 1 0 0 1 0 1.4l-4.1 4.1a1 1 0 0 1-1.4 0Z" clip-rule="evenodd" />
           </svg>
-          <span class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Default Profile</span>
-          <span class="text-xs text-muted">Applies to applications without an enabled custom profile</span>
+          <span class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">{{ t('pivot.tab.defaultProfile') }}</span>
+          <span class="text-xs text-muted">{{ t('pivot.tab.defaultProfileScope') }}</span>
         </summary>
 
         <label class="pill-toggle mt-3 inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
           <input v-model="config.modules.pivotxr.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
-          Default Profile {{ config.modules.pivotxr.enabled ? 'On' : 'Off' }}
+          {{ config.modules.pivotxr.enabled ? t('pivot.tab.defaultProfileOn') : t('pivot.tab.defaultProfileOff') }}
         </label>
         <DefaultProfileExclusions
           class="ml-2 mt-3"
@@ -414,7 +442,7 @@ const profileOverviewWarningIndexes = computed(() => new Set(
 
         </div>
         <p v-else class="mt-2 text-xs text-muted">
-          Off unless an enabled custom profile turns it on. Custom profiles below still apply to their applications.
+          {{ t('pivot.tab.defaultProfileOffNote') }}
         </p>
       </details>
     </article>
@@ -424,9 +452,9 @@ const profileOverviewWarningIndexes = computed(() => new Set(
       <!-- Sticky so Add Profile stays reachable while scrolling a long profile list. -->
       <div class="sticky top-0 z-20 flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border px-4 py-3 shadow-panel backdrop-blur surface-panel-strong">
         <div class="min-w-0 flex-1">
-          <h2 class="text-lg font-semibold tracking-tight">Custom Profiles</h2>
+          <h2 class="text-lg font-semibold tracking-tight">{{ t('pivot.tab.customProfiles') }}</h2>
           <p class="text-sm text-muted">
-            Override Pivot per application. Profiles for the same title can use different bindings; the binding you press picks the profile, and order sets priority.
+            {{ t('pivot.tab.customProfilesIntro') }}
           </p>
         </div>
         <button
@@ -434,7 +462,7 @@ const profileOverviewWarningIndexes = computed(() => new Set(
           type="button"
           @click="$emit('addPivotProfile')"
         >
-          Add Profile
+          {{ t('pivot.tab.addProfile') }}
         </button>
       </div>
 
@@ -448,7 +476,7 @@ const profileOverviewWarningIndexes = computed(() => new Set(
           :profile="profile"
           :applications="applications"
           module-label="Pivot"
-          warning-title="Binding warning"
+          :warning-title="t('pivot.tab.bindingWarning')"
           :warnings="profileWarnings.get(index)"
           reorderable
           :profile-count="config.modules.pivotxr.profiles.length"
@@ -458,7 +486,7 @@ const profileOverviewWarningIndexes = computed(() => new Set(
         >
           <template #badges>
             <span v-if="profileOverviewWarningIndexes.has(index)" class="rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] chip-warning">
-              Activation overlap
+              {{ t('pivot.tab.activationOverlap') }}
             </span>
           </template>
           <PivotBehaviorPanel
@@ -504,7 +532,7 @@ const profileOverviewWarningIndexes = computed(() => new Set(
         v-if="config.modules.pivotxr.profiles.length === 0"
         class="rounded-[1rem] border border-dashed px-6 py-7 text-center text-sm surface-panel-soft"
       >
-        No custom profiles yet. Add a profile to bind Pivot rotation to a specific application.
+        {{ t('pivot.tab.noCustomProfiles') }}
       </div>
     </section>
 
@@ -512,33 +540,33 @@ const profileOverviewWarningIndexes = computed(() => new Set(
       <div class="w-full max-w-[720px] rounded-[1.25rem] border p-5 surface-panel-strong">
         <div class="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <p class="eyebrow text-xs uppercase tracking-[0.24em]">Pivot Compatibility</p>
-            <h2 class="mt-2 text-xl font-semibold tracking-tight">A Special Note About Quadviews</h2>
+            <p class="eyebrow text-xs uppercase tracking-[0.24em]">{{ t('pivot.compatibility.eyebrow') }}</p>
+            <h2 class="mt-2 text-xl font-semibold tracking-tight">{{ t('pivot.compatibility.title') }}</h2>
           </div>
           <button class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click="compatibilityInfoOpen = false">
-            Close
+            {{ t('common.close') }}
           </button>
         </div>
 
         <div class="mt-5 space-y-4 text-sm leading-6">
           <div class="rounded-[1rem] border px-4 py-4 chip-success" style="border-color: var(--app-border)">
-            VectorXR Quadviews is fully compatible with Pivot and Depth when all three modules are managed by VectorXR.
+            {{ t('pivot.compatibility.managed') }}
           </div>
 
           <div class="rounded-[1rem] border px-4 py-4 chip-warning" style="border-color: var(--app-border)">
-            Pivot is NOT currently compatible with quadviews supplied directly by the runtime, such as Pimax Play.
+            {{ t('pivot.compatibility.runtime') }}
           </div>
 
           <div class="rounded-[1rem] border px-4 py-4 surface-panel">
-            Pivot also works with external OpenXR quadviews layers, including mbucchia's `Quad-Views-Foveated`, when layer order is configured correctly.
+            {{ t('pivot.compatibility.external') }}
           </div>
 
           <div class="rounded-[1rem] border px-4 py-4 surface-panel">
-            When using quadviews, OpenXR layer order matters. `Quad-Views-Foveated` should be first in the Windows OpenXR API layers list, with VectorXR second. If VectorXR is above the quadviews layer, Pivot rotation will cause the scene to break, rendering no content in areas outside your head's natural field of view.
+            {{ t('pivot.compatibility.layerOrder') }}
           </div>
 
           <div class="rounded-[1rem] border px-4 py-4 surface-panel">
-            You can inspect and change that order with the OpenXR Layer Manager tab in VectorXR.
+            {{ t('pivot.compatibility.layerManager') }}
           </div>
         </div>
       </div>
@@ -548,29 +576,29 @@ const profileOverviewWarningIndexes = computed(() => new Set(
       <div class="w-full max-w-[720px] rounded-[1.25rem] border p-5 surface-panel-strong">
         <div class="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <p class="eyebrow text-xs uppercase tracking-[0.24em]">Pivot Centering</p>
-            <h2 class="mt-2 text-xl font-semibold tracking-tight">Keeping Pivot Aligned</h2>
+            <p class="eyebrow text-xs uppercase tracking-[0.24em]">{{ t('pivot.centering.eyebrow') }}</p>
+            <h2 class="mt-2 text-xl font-semibold tracking-tight">{{ t('pivot.centering.title') }}</h2>
           </div>
           <button class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click="centeringInfoOpen = false">
-            Close
+            {{ t('common.close') }}
           </button>
         </div>
 
         <div class="mt-5 space-y-4 text-sm leading-6">
           <div class="rounded-[1rem] border px-4 py-4 surface-panel">
-            Pivot rotates around your headset's center point, not the game's. These are two separate concepts of "forward," and by default Pivot uses the HMD one.
+            {{ t('pivot.centering.center') }}
           </div>
 
           <div class="rounded-[1rem] border px-4 py-4 chip-warning" style="border-color: var(--app-border)">
-            If Pivot rotation feels off-center or skewed to one side, your HMD center and your in-game center have drifted apart.
+            {{ t('pivot.centering.drift') }}
           </div>
 
-          <div class="rounded-[1rem] border px-4 py-4 surface-panel">
-            The best fix: assign the optional <strong>Set Origin</strong> binding (under Origin Controls) to the same button you use to recenter the view in-game. Every recenter then updates both origins together, so they can never drift apart.
-          </div>
+          <I18nText keypath="pivot.centering.bestFix" tag="div" class="rounded-[1rem] border px-4 py-4 surface-panel">
+            <template #setOrigin><strong>{{ t('pivot.centering.setOrigin') }}</strong></template>
+          </I18nText>
 
           <div class="rounded-[1rem] border px-4 py-4 surface-panel">
-            Without a Set Origin binding, you can re-align manually: recenter your HMD first, then recenter your view in the game. Doing both, in that order, re-aligns the two centers so Pivot rotates evenly around where you are actually looking.
+            {{ t('pivot.centering.manual') }}
           </div>
         </div>
       </div>

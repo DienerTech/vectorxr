@@ -394,6 +394,17 @@
           ],
           "default": "24"
         },
+        "language": {
+          "type": "string",
+          "description": "The language the OSD draws in: app (the app's language, saved as appLanguage) or a language code (en, zh-CN, ru, es-ES, pt-BR, de, ja, fr, pl, ko, zh-TW). A code the layer does not ship falls back to app. 0.19 layers ignore it.",
+          "pattern": "^(app|[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*)$",
+          "default": "app"
+        },
+        "appLanguage": {
+          "type": "string",
+          "description": "Written by the app: its own language, which the OSD uses while language is app. Without it, the Windows display language.",
+          "pattern": "^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$"
+        },
         "customColor": {
           "type": "string",
           "pattern": "^#[0-9a-fA-F]{6}$",
@@ -1673,6 +1684,12 @@
           ],
           "default": "shader",
           "description": "How motion is measured: block matching on the shader cores (any GPU), or the optical flow accelerator of NVIDIA RTX GPUs (recommended where available, and needed for extrapolate to look its best; shader is used where it cannot be)."
+        },
+        "interpolateFlow": {
+          "type": "string",
+          "enum": ["auto", "hardware", "shader"],
+          "default": "auto",
+          "description": "When hardware motion estimation is selected, Interpolate automatically falls back to shader flow when hardware is late, then periodically retries. hardware or shader pins the source."
         },
         "frameMultiplier": {
           "type": "string",

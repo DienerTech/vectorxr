@@ -1,3 +1,5 @@
+import { t } from '../i18n/index.ts'
+
 export type UpdateCheckStatus = 'idle' | 'checking' | 'upToDate' | 'available' | 'unavailable' | 'error'
 
 export interface GitHubReleaseAsset {
@@ -83,7 +85,7 @@ function parseRelease(data: GitHubReleaseApiResponse): GitHubReleaseInfo {
   const htmlUrl = asString(data.html_url)
 
   if (!tagName || !htmlUrl) {
-    throw new Error('GitHub did not return a valid release')
+    throw new Error(t('app.updates.invalidRelease'))
   }
 
   const assets = Array.isArray(data.assets)
@@ -129,7 +131,7 @@ export async function checkForUpdates(currentVersion: string): Promise<UpdateChe
   }
 
   if (!response.ok) {
-    throw new Error(`GitHub update check failed with HTTP ${response.status}`)
+    throw new Error(t('app.updates.httpFailed', { status: response.status }))
   }
 
   const release = parseRelease((await response.json()) as GitHubReleaseApiResponse)

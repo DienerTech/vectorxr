@@ -1,0 +1,59 @@
+{
+  "applications": {
+    "eyebrow": "Rejestr",
+    "title": "Rejestr aplikacji",
+    "intro": "Zarejestruj aplikacje, na które mogą być ukierunkowane profile modułów według nazwy pliku wykonywalnego. Etykiety na każdej karcie pokazują, jak każdy moduł obecnie traktuje daną aplikację — kliknij jedną, aby przejść do jej profilu lub go utworzyć.",
+    "add": "Dodaj aplikację",
+    "unnamed": "Aplikacja bez nazwy",
+    "editName": "Edytuj nazwę aplikacji",
+    "executable": "Plik wykonywalny",
+    "executableHelp": "Dopasowywanie pliku wykonywalnego nie uwzględnia wielkości liter, ale nazwa musi zawierać rozszerzenie aplikacji. Na przykład: DCS.exe",
+    "empty": "Nie zarejestrowano jeszcze żadnych aplikacji. Dodaj jedną przed utworzeniem profili modułów.",
+    "chip": {
+      "defaultOff": "{module} · Domyślny wył.",
+      "defaultOffTitle": "Domyślny profil {module} jest wyłączony. Kliknij, aby utworzyć profil niestandardowy dla tej aplikacji.",
+      "custom": "{module} · {profile}",
+      "customTitle": "Obowiązuje niestandardowy profil {module} „{profile}”. Kliknij, aby go otworzyć.",
+      "default": "{module} · Domyślny",
+      "defaultTitle": "Obowiązuje domyślny profil {module}. Kliknij, aby utworzyć profil niestandardowy dla tej aplikacji."
+    }
+  },
+  "discovery": {
+    "eyebrow": "Wykrywanie",
+    "trackingOnTitle": "Wykrywanie śledzi uruchamiane przez Ciebie aplikacje OpenXR.",
+    "trackingOffTitle": "Wykrywanie jest wyłączone. Nowe uruchomienia aplikacji OpenXR nie będą rejestrowane, dopóki nie włączysz śledzenia w Ustawieniach.",
+    "trackingOn": "Śledzenie wł.",
+    "trackingOff": "Śledzenie wył.",
+    "title": "Skąd pochodzą nowe aplikacje",
+    "intro": "VectorXR zapisuje uruchamiane przez Ciebie aplikacje OpenXR, aby można je było łatwo zarejestrować jednym kliknięciem. Nic tutaj nie zmienia ustawień, dopóki tego nie zarejestrujesz. Śledzeniem steruje się w Ustawieniach.",
+    "clear": "Wyczyść widziane aplikacje",
+    "loading": "Ładowanie widzianych aplikacji...",
+    "launches_one": "{count} uruchomienie",
+    "launches_few": "{count} uruchomienia",
+    "launches_many": "{count} uruchomień",
+    "launches_other": "{count} uruchomienia",
+    "details": "Szczegóły",
+    "register": "Zarejestruj",
+    "allRegistered": "Wszystkie wykryte aplikacje są zarejestrowane. Nowe uruchamiane aplikacje pojawią się tutaj.",
+    "allRegisteredTrackingOff": "Wszystkie wykryte aplikacje są zarejestrowane. Śledzenie jest wyłączone, więc żadne nowe aplikacje nie pojawią się tutaj.",
+    "alreadyRegistered": "Już zarejestrowana",
+    "registeredAs": "Zarejestrowana jako {name}",
+    "empty": "Nie wykryto jeszcze aplikacji XR. Uruchom aplikację OpenXR, gdy VectorXR jest aktywny, a następnie odśwież tę listę.",
+    "emptyTrackingOff": "Śledzenie aplikacji jest wyłączone, więc żadne nowe aplikacje nie pojawią się tutaj. Włącz śledzenie w Ustawieniach, aby rejestrować uruchomienia aplikacji OpenXR."
+  },
+  "seenDetails": {
+    "eyebrow": "Wykryta aplikacja",
+    "registeredAs": "Zarejestrowana jako",
+    "unregistered": "Niezarejestrowana",
+    "launches": "Uruchomienia",
+    "firstSeen": "Pierwsze wykrycie",
+    "lastSeen": "Ostatnie wykrycie"
+  },
+  "exclusions": {
+    "title": "Włączone profile niestandardowe mają pierwszeństwo dla: {apps}",
+    "label": "Nie dotyczy:"
+  },
+  "picker": {
+    "empty": "Nie zarejestrowano żadnych aplikacji. Dodaj jedną w Rejestrze aplikacji, zanim ten profil będzie mógł się aktywować."
+  }
+}

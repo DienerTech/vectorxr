@@ -1,0 +1,240 @@
+{
+  "title": "Exibição na tela",
+  "liveAfterSave": "Ao vivo após salvar",
+  "intro": "Um painel de desempenho que acompanha a cabeça em VR. Direct3D 11, Direct3D 12 e Vulkan, em estéreo ou Quadviews.",
+  "toggleOn": "OSD ligado",
+  "toggleOff": "OSD desligado",
+  "offNotice": "O OSD está desligado, então nada abaixo tem efeito. Ligue-o em “OSD desligado”, acima.",
+  "runtimeStatusUnavailable": "O status de execução está temporariamente indisponível.",
+  "controls": {
+    "heading": "Controles no headset",
+    "noSession": "Nenhum aplicativo de VR em execução",
+    "needsUpdatedLayer": "Requer a camada atualizada do VectorXR",
+    "toggleHeading": "Mostrar / ocultar",
+    "cycleHeading": "Compacto / expandido",
+    "toggleBindingLabel": "Mostrar / ocultar a exibição",
+    "cycleBindingLabel": "Alternar compacto / expandido",
+    "bindingDescription": "Funciona no aplicativo de VR. Atribua uma combinação de teclas, um botão de joystick ou uma direção de hat. Salve para aplicar na hora."
+  },
+  "explainer": {
+    "summary": "O que se aplica ao vivo e o que estou medindo?",
+    "live": "Todas as configurações desta página se aplicam após Salvar, inclusive ativar o OSD em um jogo em execução. As atribuições alteram a visibilidade e o layout imediatamente na sessão atual. A próxima sessão usa o layout inicial e a visibilidade salvos.",
+    "measuring": "A sobreposição mede os intervalos entre as chamadas xrEndFrame do aplicativo nos últimos 120 quadros. P95 é o intervalo no 95º percentil; tempos de quadro menores e mais estáveis são melhores. Esses valores não medem o trabalho da GPU, a reprojeção nem a taxa de quadros do compositor. O Turbo pode fazer a cadência do aplicativo diferir da taxa de atualização do headset. Com a Frame Generation ligada, FG ATIVO ao lado do FPS mostra os quadros por segundo que o headset recebe, incluindo os gerados.",
+    "headroom": "A margem de desempenho compara o tempo de CPU por quadro do jogo (do retorno do xrWaitFrame até o xrEndFrame) com o orçamento de quadro: o período de atualização do headset ou, com a Frame Generation gerando, a meta do próprio jogo (45 fps em 90 Hz e 2x). A margem da GPU é 100% menos a utilização 3D da GPU inteira segundo os contadores de GPU do Windows, incluindo o compositor do runtime e outros aplicativos; \"jogo\" é a parcela do próprio jogo, e \"thread\" é o quanto a thread do jogo que encerra os quadros está ocupada. O tempo de CPU fica oculto enquanto o jogo espera o próximo quadro antes de encerrar o último (como faz o OpenComposite) ou enquanto o Turbo dita o ritmo. VRAM é o uso de memória de vídeo do jogo e o orçamento que o Windows lhe dá, com as imagens da própria Frame Generation. LIMITE: CPU ou LIMITE: GPU só aparece quando está claro; com a Frame Generation, indica de que lado os quadros atrasados se atrasaram.",
+    "turbo": "O Turbo pode ser ativado após Salvar em um jogo em execução, e a atribuição no jogo o desliga/liga; a ativação ao vivo e as alternâncias de Async foram observadas no DCS. Os controles experimentais de tempo e a ativação/desativação do Quadviews ainda exigem reiniciar o aplicativo; o OSD expandido mostra essas alterações pendentes. Ligar a Frame Generation também exige reiniciar; desligá-la se aplica na hora. Os demais controles do VectorXR mantêm o comportamento descrito nas suas próprias páginas de configurações.",
+    "panel": "Este é um painel de informações com controles de visibilidade e layout no jogo. Edite as configurações no aplicativo da área de trabalho. OpenGL não é compatível. Um runtime sem camadas de composição livres não consegue mostrar o painel."
+  },
+  "layout": {
+    "compact": "Compacto",
+    "expanded": "Expandido",
+    "editAria": "Layout para visualizar e editar",
+    "previewAria": "Layout para visualizar",
+    "starting": "Layout inicial",
+    "startingHint": "O OSD abre neste layout em cada sessão. A atribuição no headset troca os layouts durante o jogo.",
+    "startInCompact": "Iniciar no compacto",
+    "startInExpanded": "Iniciar no expandido"
+  },
+  "previewScale": {
+    "aria": "Escala da visualização",
+    "legible": "Legível",
+    "placement": "Posicionamento"
+  },
+  "popOut": "Destacar",
+  "focusWindow": "Focar janela",
+  "previewOpenElsewhere": "A visualização está aberta em uma janela separada.",
+  "contents": {
+    "compactHeading": "Conteúdo compacto",
+    "expandedHeading": "Conteúdo expandido",
+    "justFps": "Só FPS",
+    "justFpsHint": "Remove o cabeçalho e as linhas de status para uma exibição minúscula. Tamanho continua controlando o tamanho do texto.",
+    "alwaysShown": "FPS, média e P95 sempre mostrados",
+    "performance": "Desempenho",
+    "metrics": {
+      "all": "FPS + tempo médio de quadro",
+      "fps": "Somente FPS",
+      "frameTime": "Somente tempo médio de quadro",
+      "none": "Oculto"
+    },
+    "headerLegend": "Cabeçalho · desligue tudo para removê-lo",
+    "statusLegend": "Status",
+    "nothingSelected": "Nada selecionado. O compacto fica oculto até você escolher um valor.",
+    "rowsLegend": "Linhas · arraste ou use as setas para reordenar",
+    "dragRow": "Arraste {row} para reordenar",
+    "dragHint": "Arraste para reordenar; use as teclas de seta para mover",
+    "moveUp": "Mover {row} para cima",
+    "moveDown": "Mover {row} para baixo",
+    "framegenFps": "Frame Generation ao lado do FPS",
+    "bothLayouts": "(ambos os layouts)",
+    "framegenFpsHint": "Em jogos com a Frame Generation ligada: FG ATIVO com os quadros por segundo que o headset mostra, ou PRONTO, AGUARDA, PAUSADO, DESL. ou N/D.",
+    "clockFormat": "Formato do relógio (ambos os layouts)",
+    "clockFormatAria": "Formato do relógio",
+    "clock12": "12 horas · 8:42 PM",
+    "clock24": "24 horas · 20:42"
+  },
+  "header": {
+    "brand": "Nome do VectorXR",
+    "app": "Nome do aplicativo",
+    "runtime": "Runtime OpenXR",
+    "clock": "Relógio local"
+  },
+  "rows": {
+    "graph": {
+      "label": "Gráfico de tempo de quadro",
+      "hint": "Histórico contínuo dos últimos 120 quadros do aplicativo."
+    },
+    "performance": {
+      "label": "Margem de desempenho",
+      "hint": "Margem de CPU e GPU em relação ao orçamento de quadro, memória de vídeo com a parcela da Frame Generation, e LIMITE: CPU ou LIMITE: GPU quando está claro. Amostrado duas vezes por segundo, somente enquanto um layout o mostra."
+    },
+    "turbo": {
+      "label": "Estado do Turbo",
+      "hint": "Distingue desativado, ativado mas desligado, estratégia ativa, estados de segurança e pausado pela Frame Generation."
+    },
+    "framegen": {
+      "label": "Estado da Frame Generation",
+      "hint": "Ativo, Pronto, Pausado ou Desligado, com o modo e a taxa de quadros, e uma segunda linha com as taxas de quadros ou o motivo. Mostrado somente em jogos em que a Frame Generation está ligada."
+    },
+    "pivot": {
+      "label": "Estado do Pivot",
+      "hint": "Estado do movimento, Position Assist e deslocamentos. Aplicativos com Vistas fixas adicionam uma segunda linha para a vista fixa, o empilhamento e as transições."
+    },
+    "modules": {
+      "label": "Aprimoramentos ativos",
+      "hint": "Profundidade, Pivot, Turbo, Quadviews e Frame Generation ativados para este aplicativo."
+    }
+  },
+  "compactRows": {
+    "performanceHint": "Margem de CPU e GPU e memória de vídeo em uma linha; o lado limitante é indicado.",
+    "turboHint": "Estratégia atual, desligado, aguardando, estado de segurança ou pausado pela Frame Generation.",
+    "framegenHint": "Taxa de quadros e taxas de quadros do jogo para o headset, ou Pronto, Pausado ou Desligado.",
+    "pivotHint": "Estado do movimento em um rótulo curto, mais uma linha de Vista fixa quando há Vistas fixas configuradas."
+  },
+  "position": {
+    "heading": "Posição e tamanho",
+    "center": "Centralizar na visão",
+    "horizontal": "Horizontal",
+    "horizontalAria": "Posição horizontal",
+    "vertical": "Vertical",
+    "verticalAria": "Posição vertical",
+    "size": "Tamanho",
+    "sizeAria": "Tamanho da exibição",
+    "distance": "Distância de visualização",
+    "distanceAria": "Distância de visualização"
+  },
+  "appearance": {
+    "heading": "Aparência",
+    "opacity": "Opacidade",
+    "opacityAria": "Opacidade da exibição",
+    "refreshRate": "Taxa de atualização",
+    "refreshRateHint": "O histórico de quadros é amostrado a cada quadro. Taxas mais altas redesenham o painel com mais frequência.",
+    "rateRecommended": "{hz} Hz · Recomendado",
+    "accentAria": "Cor de destaque",
+    "colors": {
+      "teal": "Verde-azulado",
+      "copper": "Cobre",
+      "blue": "Azul",
+      "violet": "Violeta",
+      "rose": "Rosa"
+    },
+    "visibleOnStart": "Mostrar automaticamente quando ativado ou quando uma sessão começar"
+  },
+  "language": {
+    "title": "Idioma do OSD",
+    "description": "O idioma em que a exibição do headset é desenhada. Igual ao aplicativo segue o idioma escolhido em Configurações.",
+    "sameAsApp": "Igual ao aplicativo",
+    "sameAsAppResolved": "Igual ao aplicativo · {language}",
+    "restartNote": "As camadas do VectorXR 0.19 e anteriores ignoram isto e desenham em inglês."
+  },
+  "colorPicker": {
+    "wheelAria": "Roda de matiz e saturação do destaque personalizado",
+    "brightness": "Brilho",
+    "brightnessAria": "Brilho do destaque personalizado",
+    "customAccent": "Destaque personalizado",
+    "colorAria": "Cor de destaque personalizada",
+    "hex": "Cor hexadecimal"
+  },
+  "presets": {
+    "aria": "Predefinições de exibição",
+    "heading": "Predefinições",
+    "hint": "As predefinições aplicam posição, aparência e conteúdo juntos.",
+    "expanded": "Expandido",
+    "performance": "Desempenho",
+    "minimal": "Mínimo",
+    "savedAria": "Predefinições personalizadas salvas",
+    "savedPlaceholder": "Predefinições salvas…",
+    "noneSaved": "Nenhuma predefinição salva",
+    "reload": "Recarregar",
+    "reloadHint": "Recarrega a predefinição selecionada nos controles",
+    "delete": "Excluir a predefinição selecionada",
+    "nameAria": "Nome da predefinição",
+    "namePlaceholder": "Salvar a atual como…",
+    "update": "Atualizar a predefinição salva",
+    "saveNew": "Salvar nova predefinição",
+    "limit": "Você pode salvar até 50 predefinições.",
+    "added": "{name} adicionada. Salve as alterações para mantê-la.",
+    "updated": "{name} atualizada. Salve as alterações para mantê-la.",
+    "loaded": "{name} carregada. Salve as alterações para aplicar em VR.",
+    "removed": "{name} removida. Salve as alterações para manter esta mudança.",
+    "appliedExpanded": "Expandido aplicado. Salve as alterações para aplicar em VR.",
+    "appliedPerformance": "Desempenho aplicado. Salve as alterações para aplicar em VR.",
+    "appliedMinimal": "Mínimo aplicado. Salve as alterações para aplicar em VR."
+  },
+  "previewStage": {
+    "legibleNote": "PRÉVIA DO CONTEÚDO · Valores de exemplo · Use Posicionamento para avaliar posição e tamanho",
+    "placementNote": "PRÉVIA DO POSICIONAMENTO · Visão de referência de 100° × 80°",
+    "legibleAria": "Prévia legível do conteúdo do OSD, ampliada e centralizada",
+    "placementAria": "Tamanho estimado do OSD dentro de uma visão de referência de 100 por 80 graus",
+    "emptyCompact": "Escolha um valor compacto para mostrar a exibição.",
+    "footer": "Largura do painel {width}° · Arraste para posicionar · O campo de visão do headset varia"
+  },
+  "previewWindow": {
+    "title": "Prévia do OSD",
+    "windowTitle": "VectorXR — Prévia do OSD",
+    "connecting": "Conectando aos controles do OSD…",
+    "openFailed": "Não foi possível abrir a janela de prévia. Tente de novo.",
+    "popupBlocked": "Permita pop-ups para abrir a janela de prévia."
+  },
+  "preview": {
+    "appName": "seu-jogo.exe",
+    "runtimeName": "Seu runtime OpenXR",
+    "clock12": "8:42 PM",
+    "clock24": "20:42",
+    "fgOn": "FG ATIVO",
+    "averageCompact": "{value} ms média",
+    "appFps": "FPS DO APP",
+    "appFrameAverage": "QUADRO DO APP / MÉDIA",
+    "appFrameP95": "QUADRO DO APP / P95",
+    "frameTimeGraph": "TEMPO DE QUADRO / ÚLTIMOS 120",
+    "labels": {
+      "performance": "DESEMPENHO",
+      "performanceCompact": "DESEMP.",
+      "turbo": "TURBO",
+      "framegen": "FRAME GEN",
+      "pivot": "PIVOT",
+      "modules": "MELHORIAS"
+    },
+    "turboPausedForFramegen": "Pausado pelo Frame Generation",
+    "turboAsyncExperimental": "Async / Experimental",
+    "turboAsyncCompact": "Async / EXP",
+    "framegenState": "Ativo  /  Interpolate  /  Dynamic",
+    "framegenDetail": "45 → 90 fps  /  GPU 3,1 ms",
+    "framegenCompact": "Dynamic / 45 → 90 fps",
+    "pivotState": "Movimento: Ativo / Contínuo + Posição / Voo",
+    "pivotCompact": "Movimento: Cont. Ativo + Posição",
+    "snapState": "Vista: ativa / Empilhado / Checar seis horas",
+    "snapCompact": "Vista: ativa / Empilhado",
+    "modulesWithFramegen": "Profundidade / Pivot / Turbo / Frame Gen / Quadviews",
+    "modules": "Profundidade / Pivot / Turbo / Quadviews",
+    "performanceTarget": "meta de {fps} fps",
+    "cpuDetail": "{ms} ms, thread {thread}%",
+    "gpuDetail": "uso {busy}%, jogo {game}%",
+    "vramDetail": "de {budget} GB",
+    "vramDetailWithFramegen": "de {budget} GB, FG {framegen} MB",
+    "diagnostics": {
+      "debugLog": "LOG DE DEPURAÇÃO",
+      "flowView": "VISTA DE FLUXO",
+      "confidenceView": "VISTA DE CONFIANÇA",
+      "tintView": "VISTA DE TINTA"
+    }
+  }
+}

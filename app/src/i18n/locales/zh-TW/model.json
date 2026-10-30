@@ -1,0 +1,94 @@
+{
+  "keyGroups": {
+    "function": "功能鍵",
+    "letter": "字母鍵",
+    "number": "數字鍵",
+    "numpad": "數字鍵台按鍵",
+    "special": "特殊鍵"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "space": "Space",
+    "numpad": "Numpad{digit}"
+  },
+  "modules": {
+    "depthxr": "深度",
+    "pivotxr": "Pivot",
+    "quadviews": "Quadviews",
+    "turbo": "Turbo",
+    "framegen": "Frame Generation"
+  },
+  "defaults": {
+    "newProfile": "新設定檔",
+    "profile": "設定檔",
+    "standardNudges": "標準微調",
+    "nudgeSetNumbered": "微調組 {number}",
+    "profileNudges": "{profile} 微調",
+    "newQuickView": "新的快速視角",
+    "quickViewNumbered": "快速視角 {number}",
+    "deviceButton": "按鈕 {number}",
+    "turboTimingProfile": "{name} 計時"
+  },
+  "snapViews": {
+    "defaultProfileUnavailable": "不適用於預設設定檔，因為預設設定檔只能是「增強動態」或「吸附視角」其中之一。請為同一個應用程式同時使用自訂的「增強動態」設定檔與自訂的「吸附視角」設定檔。",
+    "noSnapPartner": "目前還沒有任何已啟用的「吸附視角」設定檔指定此設定檔的應用程式。",
+    "motionNoteNone": "若同一應用程式的「增強動態」設定檔開啟了「將增強動態套用至吸附視角」，它便可在這些吸附視角中持續運作。",
+    "motionNoteSources": "來自 {profiles} 的「增強動態」會在這些吸附視角中持續運作。"
+  },
+  "binding": {
+    "device": "{device} / {input}",
+    "unassignedDevice": "未指派的裝置",
+    "unassignedInput": "未指派的輸入",
+    "none": "無",
+    "listMore_other": "{first} 或其他 {count} 個",
+    "numbered": "{label}（繫結 {number}）"
+  },
+  "actions": {
+    "quadviewsDiagnostics": "Quadviews：診斷視覺化",
+    "depthToggle": "深度：A/B 切換",
+    "depthLock": "深度：Depth Lock A/B",
+    "osdToggle": "OSD：顯示／隱藏",
+    "osdCycle": "OSD：切換版面配置",
+    "turboToggle": "Turbo：A/B 切換",
+    "turboMetrics": "Turbo：擷取效能指標",
+    "framegenToggle": "Frame Generation：A/B 切換",
+    "nudgeLeft": "Pivot {set}：向左微調",
+    "nudgeRight": "Pivot {set}：向右微調",
+    "nudgeUp": "Pivot {set}：向上微調",
+    "nudgeDown": "Pivot {set}：向下微調",
+    "nudgeCenter": "Pivot {set}：微調偏移歸零",
+    "defaultActivate": "Pivot 預設：啟用",
+    "defaultSetOrigin": "Pivot 預設：設定原點",
+    "defaultReleaseOrigin": "Pivot 預設：釋放原點",
+    "defaultQuickView": "Pivot 預設：{view}",
+    "profileNumbered": "設定檔 {number}",
+    "profileActivate": "Pivot {profile}：啟用",
+    "profileSetOrigin": "Pivot {profile}：設定原點",
+    "profileReleaseOrigin": "Pivot {profile}：釋放原點",
+    "profileQuickView": "Pivot {profile}：{view}"
+  },
+  "conflicts": {
+    "sharedTitle": "{binding} 被指派了不只一次",
+    "sharedMessage": "此輸入已指派給 {actions}。按一下可能會觸發多個動作，或優先順序較高的動作可能會遮蔽另一個動作。此警告不會阻止儲存。",
+    "duplicateTitle": "{binding} 重複",
+    "duplicateMessage": "{action} 多次包含相同的實體輸入。重複的項目是多餘的，執行階段只會使用第一個。",
+    "duplicateActions": {
+      "suspendControls": "暫停控制",
+      "activation": "啟用",
+      "setOrigin": "設定原點",
+      "releaseOrigin": "釋放原點"
+    },
+    "everySuspendPress": "每次按下暫停控制鍵",
+    "everyActivationPress": "每次按下啟用控制鍵",
+    "allThreeTitle": "一個繫結控制三個互相衝突的動作",
+    "allThreeMessage": "「啟用」、「設定原點」與「釋放原點」都使用 {binding}。{press}都會要求新的中立前方方向，隨即又將其清除，因此不會擷取到原點。請為「設定原點」或「釋放原點」指定專屬的繫結。",
+    "setsOriginTitle": "「啟用」也會設定原點",
+    "setsOriginMessage": "「啟用」與「設定原點」都使用 {binding}。{press}都會將目前的頭部方向重新擷取為 Pivot 的中立前方方向。除非這是刻意的設定，否則請為「設定原點」指定專屬的繫結，通常就是您遊戲內的重新置中控制鍵。",
+    "releasesOriginTitle": "「啟用」也會釋放原點",
+    "releasesOriginMessage": "「啟用」與「釋放原點」都使用 {binding}。{press}都會清除已擷取的 Pivot 原點。除非這是刻意的設定，否則請為「釋放原點」指定專屬的繫結。",
+    "setCanceledTitle": "「設定原點」會立即被取消",
+    "setCanceledMessage": "「設定原點」與「釋放原點」都使用 {binding}。按下時會要求新的中立前方方向，隨即又將其清除，因此不會擷取到原點。請為其中一個動作指定不同的繫結。"
+  }
+}

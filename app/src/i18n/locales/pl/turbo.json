@@ -1,0 +1,332 @@
+{
+  "title": "Turbo",
+  "breadcrumb": "Ścieżka nawigacji",
+  "unknownApp": "nieznana aplikacja",
+  "strategy": {
+    "vectorxr": "VectorXR",
+    "vectorxrWithModes": "VectorXR · {modes}",
+    "toolkit": "W stylu Toolkit",
+    "custom": "Niestandardowa",
+    "unknown": "Nieznana strategia",
+    "async": "Async",
+    "sequenced": "Sequenced",
+    "auto": "Auto"
+  },
+  "pacingMode": {
+    "auto": "Auto · najpierw stabilność",
+    "forcedAsync": "Wymuszone Async",
+    "forcedSequenced": "Wymuszone Sequenced"
+  },
+  "tab": {
+    "badge": "Zaawansowane wymuszanie taktowania",
+    "intro": "Przenosi oczekiwanie na środowisko uruchomieniowe poza ścieżkę krytyczną gry, gdy taktowanie ją spowalnia. Włączaj tylko tam, gdzie porównanie A/B w grze dowodzi, że pomaga.",
+    "howItWorksButton": "Jak działa Turbo",
+    "recoveryUnavailable": "Stan odzyskiwania jest niedostępny. Zapisane ustawienie bezpieczeństwa nadal obowiązuje.",
+    "toolkitConflict": "OpenXR Toolkit jest włączony razem z VectorXR Turbo. Jeśli tryb Turbo Mode w OXRTK jest również włączony, wyłącz jedno z nich, aby dwie warstwy taktowania nie rywalizowały ze sobą.",
+    "frameGenNote": "Frame Generation jest włączone dla niektórych aplikacji. Turbo pozostaje wyłączone w sesjach, w których działa Frame Generation, a jego stan to Wstrzymane dla Frame Generation.",
+    "pacingSummary": {
+      "manual": "Dla każdego środowiska uruchomieniowego używana jest ręcznie wybrana strategia.",
+      "empty": "Auto wybiera i zapamiętuje stabilną strategię dla każdego środowiska uruchomieniowego. Wypróbuj Async i Sequenced, aby znaleźć najszybszą.",
+      "observed_one": "Zaobserwowano {count} środowisko uruchomieniowe. Auto wybiera dla każdego najstabilniejszą strategię, niekoniecznie najszybszą.",
+      "observed_few": "Zaobserwowano {count} środowiska uruchomieniowe. Auto wybiera dla każdego najstabilniejszą strategię, niekoniecznie najszybszą.",
+      "observed_many": "Zaobserwowano {count} środowisk uruchomieniowych. Auto wybiera dla każdego najstabilniejszą strategię, niekoniecznie najszybszą.",
+      "observed_other": "Zaobserwowano {count} środowiska uruchomieniowego. Auto wybiera dla każdego najstabilniejszą strategię, niekoniecznie najszybszą."
+    },
+    "metricsMode": {
+      "binding": "Kontrolowane przechwytywanie",
+      "off": "Zbieranie wyłączone",
+      "always": "Automatyczne przechwytywanie"
+    },
+    "metricsSummary": {
+      "empty": "Przechwyć Turbo włączone i wyłączone w tym samym locie, aby zmierzyć zysk dla każdej strategii.",
+      "recorded_one": "Zarejestrowano {count} lot. Ostatni: {app}.",
+      "recorded_few": "Zarejestrowano {count} loty. Ostatni: {app}.",
+      "recorded_many": "Zarejestrowano {count} lotów. Ostatni: {app}.",
+      "recorded_other": "Zarejestrowano {count} lotu. Ostatni: {app}.",
+      "recordedLive_one": "Zarejestrowano {count} lot. Ostatni: {app} (w toku).",
+      "recordedLive_few": "Zarejestrowano {count} loty. Ostatni: {app} (w toku).",
+      "recordedLive_many": "Zarejestrowano {count} lotów. Ostatni: {app} (w toku).",
+      "recordedLive_other": "Zarejestrowano {count} lotu. Ostatni: {app} (w toku)."
+    },
+    "toggleBinding": {
+      "label": "Przypisanie przełącznika Turbo",
+      "description": "Włączaj i wyłączaj Turbo w trakcie gry, aby bezpośrednio porównać fps i odczucie płynności klatek — oraz aby natychmiast je wyłączyć, jeśli wyświetlanie się zepsuje. Przypisanie wymaga włączenia Turbo dla aplikacji w jej profilu. Może też ponowić próbę Turbo, gdy odzyskiwanie je zablokowało lub problemy z taktowaniem je wstrzymały. Przełączenie w trakcie sesji może spowodować krótkie zacięcie podczas ponownej synchronizacji.",
+      "noneText": "Brak przypisania. Turbo uruchamia się automatycznie tam, gdzie jest włączone, chyba że zablokuje je odzyskiwanie lub ochrona taktowania."
+    },
+    "essentials": {
+      "eyebrow": "Podstawy",
+      "intro": "Pozostaw ustawienie domyślne wyłączone i włączaj Turbo dla poszczególnych aplikacji za pomocą profilu niestandardowego albo włącz je szeroko. Włączenie działa po zapisaniu; przypisanie przełącznika wyłącza i włącza Turbo w uruchomionej grze.",
+      "defaultProfile": "Profil domyślny",
+      "defaultOnHint": "Turbo dotyczy aplikacji bez profilu niestandardowego.",
+      "defaultOffHint": "Wyłączone, chyba że włączy je włączony profil niestandardowy.",
+      "defaultOn": "Domyślnie wł.",
+      "defaultOff": "Domyślnie wył.",
+      "toggleHeading": "Przełącznik Turbo w grze",
+      "toggleHint": "Włączaj i wyłączaj Turbo w trakcie gry, aby bezpośrednio porównać."
+    },
+    "safety": {
+      "heldOff_one": "Turbo jest wstrzymane dla {count} konfiguracji. Przejrzyj, a następnie wyczyść lub ponów próbę przypisaniem przełącznika.",
+      "heldOff_few": "Turbo jest wstrzymane dla {count} konfiguracji. Przejrzyj, a następnie wyczyść lub ponów próbę przypisaniem przełącznika.",
+      "heldOff_many": "Turbo jest wstrzymane dla {count} konfiguracji. Przejrzyj, a następnie wyczyść lub ponów próbę przypisaniem przełącznika.",
+      "heldOff_other": "Turbo jest wstrzymane dla {count} konfiguracji. Przejrzyj, a następnie wyczyść lub ponów próbę przypisaniem przełącznika.",
+      "idle": "Wstrzymuje Turbo po przerwanej sesji lub powtarzającym się błędzie środowiska uruchomieniowego.",
+      "blockCount_one": "{count} blokada",
+      "blockCount_few": "{count} blokady",
+      "blockCount_many": "{count} blokad",
+      "blockCount_other": "{count} blokady",
+      "faultCount_one": "{count} błąd",
+      "faultCount_few": "{count} błędy",
+      "faultCount_many": "{count} błędów",
+      "faultCount_other": "{count} błędu",
+      "review": "Przejrzyj…",
+      "details": "Szczegóły…"
+    },
+    "tune": {
+      "eyebrow": "Dostrajanie i weryfikacja",
+      "intro": "Wyniki Turbo zależą od gry, gogli, środowiska uruchomieniowego i sterownika. Aby znaleźć najlepsze rozwiązanie, porównaj każdą strategię z wyłączonym Turbo w tym samym locie.",
+      "guideSummary": "Znajdowanie najlepszej strategii dla gry",
+      "guideStep1": "Utwórz profil niestandardowy dla gry i przypisz przełącznik Turbo w grze. Ustaw Diagnostykę wydajności na używanie przypisania przechwytywania.",
+      "guideStep2": "Uruchom grę z jedną strategią. Wykonaj powtarzalny scenariusz lotu przez około minutę z włączonym Turbo, a następnie wyłącz je na co najmniej 30 sekund.",
+      "guideStep3": "Zanotuj zysk względem wyłączonego Turbo w Diagnostyce wydajności. Każdy lot jest oznaczony użytą strategią.",
+      "guideStep4": "Zmień strategię, zapisz, uruchom ponownie i powtórz. Wypróbuj Async i Sequenced w Zachowaniu środowiska uruchomieniowego, a następnie strategię profilu W stylu Toolkit.",
+      "guideStep5": "Zachowaj strategię z najlepszym zyskiem i 1% najniższych wartości oraz bez przestojów. Auto pozostaje bezpiecznym ustawieniem domyślnym, ale wybiera najstabilniejszą strategię, niekoniecznie najszybszą."
+    },
+    "profiles": {
+      "title": "Profile niestandardowe",
+      "intro": "Wybierz aplikacje i strategię Turbo dla każdego profilu. Jeśli włączone profile się nakładają, pierwszeństwo ma pierwszy pasujący profil.",
+      "add": "Dodaj profil",
+      "broadStrong": "Szerokie włączenie jest aktywne.",
+      "broad": "{strong} Turbo dotyczy aplikacji bez profilu niestandardowego, w tym tych, których nie zweryfikowano. Bezpieczniejsza konfiguracja to Domyślnie wył., z tą listą używaną jako lista dozwolonych aplikacji.",
+      "legacyExperimental": "Poprzednie ustawienia eksperymentalne zostały zapisane bez przypisania aplikacji.",
+      "useSavedTiming": "Użyj zapisanego taktowania w tym profilu",
+      "bypassSafety": "Pomiń Bezpieczeństwo Turbo dla tych aplikacji",
+      "bypassSafetyHint": "Ignoruje trwałe blokady bezpieczeństwa. Awaryjne wycofanie taktowania na żywo nadal wstrzymuje nieudaną sesję; użyj przypisania przełącznika, aby ponowić próbę.",
+      "empty": "Brak profili niestandardowych. Dodaj profil, gdy aplikacja potrzebuje innego zachowania niż domyślne."
+    }
+  },
+  "howItWorks": {
+    "eyebrow": "Tryb Turbo",
+    "title": "Jak działa Turbo",
+    "whatItDoes": "Co robi",
+    "whatItDoesBody": "Gra zwykle czeka bezczynnie, aż środowisko uruchomieniowe gogli zasygnalizuje następną klatkę. Turbo wykonuje to oczekiwanie poza grą, dzięki czemu gra może rozpocząć następną klatkę zaraz po przesłaniu poprzedniej. VectorXR zachowuje kolejność dalszych wywołań klatek, ale zmienia moment taktowania i może szacować następny czas wyświetlenia.",
+    "strategies": "{async} (zwykle najszybsza) czeka w tle. {sequenced} (dla środowisk uruchomieniowych, które tego wymagają) utrzymuje oczekiwanie i przesyłanie w jednym rytmie. {auto} zaczyna od Async i przechodzi na Sequenced, jeśli Async jest niestabilne, a następnie zapamiętuje wynik dla każdego środowiska uruchomieniowego. Auto stawia na stabilność: wybiera strategię, która działa, niekoniecznie najszybszą.",
+    "toolkit": "{toolkit} to eksperymentalna strategia profilu, która odtwarza taktowanie trybu Turbo Mode z OpenXR Toolkit, pierwotnie opracowanego przez mbucchia. Zawsze używa Async i zaczyna działać po ponownym uruchomieniu gry.",
+    "whatToExpect": "Czego się spodziewać",
+    "whatToExpectBody": "Turbo to ukierunkowana poprawka, a nie ogólne przyspieszenie. Pomaga tylko wtedy, gdy taktowanie środowiska uruchomieniowego utrzymuje fps poniżej możliwości sprzętu, i nie może usunąć blokady liczby klatek wymuszonej przez środowisko uruchomieniowe. Używaj Diagnostyki wydajności z przełącznikiem w grze, aby zmierzyć każdy tytuł.",
+    "reprojectionLabel": "Zgodność z reprojekcją:",
+    "reprojection": "{label} Turbo może zakłócać SteamVR Motion Smoothing i inne systemy reprojekcji, takie jak ASW. Wyłącz Motion Smoothing podczas testowania Turbo. Predykcja czasu klatki może być mniej dokładna, a przełączenie Turbo w trakcie sesji może spowodować krótkie zacięcie podczas ponownej synchronizacji potoku.",
+    "bestStrategy": "Znajdowanie najlepszej strategii",
+    "bestStrategyBody": "Turbo opiera się na zachowaniu taktowania OpenXR, którego specyfikacja formalnie nie definiuje, więc wyniki różnią się w zależności od sprzętu, sterownika, środowiska uruchomieniowego i gry. Strategii nie zawsze można bezpiecznie przełączać w trakcie sesji, więc testuj jedną na uruchomienie: użyj przełącznika w grze, aby przechwycić Turbo włączone i wyłączone w tym samym locie, a następnie porównaj zysk dla każdej strategii w Diagnostyce wydajności.",
+    "safetyNet": "Zabezpieczenie",
+    "safetyNetBody": "Jeśli taktowanie zatrzymuje się nawet po dostosowaniu Auto, Turbo wstrzymuje się na czas tej sesji. Przy włączonym Bezpieczeństwie Turbo konfiguracja aplikacji i środowiska uruchomieniowego pozostaje zablokowana, dopóki jej nie wyczyścisz lub nie ponowisz próby przypisaniem. Szczegóły błędów pozostają na stronie Bezpieczeństwo Turbo. Wykrywa to przestoje taktowania, a nie każdą awarię obrazu lub sterownika; ponawiaj próbę dopiero po ustabilizowaniu się sesji."
+  },
+  "profileTiming": {
+    "strategy": "Strategia",
+    "strategyAria": "Strategia Turbo dla tego profilu",
+    "restartTitle": "Przełączenie na tę strategię lub z niej zaczyna działać po zapisaniu i ponownym uruchomieniu gry.",
+    "restartNote": "Przełączenie na oznaczoną strategię lub z niej zaczyna działać po zapisaniu i ponownym uruchomieniu gry.",
+    "descriptionVectorxr": "Własne Turbo VectorXR. Stosuje ustawienie Zachowania środowiska uruchomieniowego ({pacing}) i można je włączać i wyłączać w grze.",
+    "descriptionToolkit": "Odtwarza taktowanie trybu Turbo Mode z OpenXR Toolkit. Eksperymentalne; po zmianie uruchom ponownie grę.",
+    "descriptionCustom": "W stylu Toolkit z własnymi zmianami. Eksperymentalne; po zmianie uruchom ponownie grę.",
+    "summary": {
+      "waitForSubmission": "Czekaj na przesłanie",
+      "overlapSubmission": "Nakładaj przesłanie",
+      "sampleAtEntry": "Próbkuj przy wejściu",
+      "sampleAtReturn": "Próbkuj przy powrocie",
+      "prediction": "Predykcja {percent}%",
+      "fpsCap": "Limit {fps} fps",
+      "noCap": "Bez limitu"
+    },
+    "advancedTitle": "Zaawansowane taktowanie",
+    "advancedIntro": "Do eksperymentów. Większość graczy powinna zostawić te ustawienia bez zmian.",
+    "waitForOverlap": "Czekaj na nakładające się przesłanie",
+    "sampleAtWaitEntry": "Próbkuj taktowanie predykcji przy wejściu w oczekiwanie",
+    "predictionLabel": "Predykcja (%)",
+    "frameCapLabel": "Limit klatek (fps; 0 = wył.)",
+    "changeNote": "Zmiana dowolnej wartości przełącza profil na Niestandardowy. Dostosowanie predykcji wymaga obsługi zegara środowiska uruchomieniowego."
+  },
+  "safety": {
+    "title": "Bezpieczeństwo Turbo",
+    "intro": "Przeglądaj zablokowane konfiguracje aplikacji i środowisk uruchomieniowych, ponawiaj Turbo i sprawdzaj zarejestrowane błędy.",
+    "back": "Wróć do Turbo",
+    "uncleanExitReason": "Sesja zakończyła się bez prawidłowego zamknięcia. Dokładna przyczyna i czas awarii są nieznane.",
+    "state": {
+      "recoveryDisabled": "Turbo włączone · wyłączone po blokadzie bezpieczeństwa",
+      "suspended": "Turbo włączone · wstrzymane po błędzie",
+      "async": "Turbo aktywne · Async",
+      "sequenced": "Turbo aktywne · Sequenced",
+      "waiting": "Turbo czeka na włączenie",
+      "off": "Turbo wył.",
+      "framegen": "Wstrzymane dla Frame Generation",
+      "unavailable": "Stan niedostępny"
+    },
+    "protection": {
+      "title": "Automatyczna ochrona",
+      "body": "Przerwana sesja lub powtarzający się błąd środowiska uruchomieniowego może wstrzymać Turbo dla tej konfiguracji aplikacji i środowiska uruchomieniowego. Turbo pozostaje włączone w swoim profilu, więc jego przypisanie w grze może ponowić próbę nawet przy zamkniętym interfejsie.",
+      "saveNote": "Zapisz zmiany ustawień, aby je zastosować. Profile niestandardowe mogą pomijać bezpieczeństwo dla wybranych aplikacji. Awaryjne wycofanie taktowania na żywo nadal wstrzymuje nieudaną sesję; przypisanie może je ponownie uzbroić."
+    },
+    "columns": {
+      "application": "Aplikacja / środowisko",
+      "recorded": "Zarejestrowano",
+      "protection": "Ochrona",
+      "actions": "Akcje",
+      "fault": "Błąd",
+      "details": "Szczegóły"
+    },
+    "blocked": {
+      "title": "Zablokowane konfiguracje",
+      "intro": "Wyczyść i przetestuj ponownie zachowuje błędy i czyści wyuczoną decyzję taktowania środowiska uruchomieniowego. Uruchom ponownie w trybie Auto bez ręcznego wymuszenia, aby wykonać nowy test Async, a w razie potrzeby Sequenced. Działająca sesja może ponowić próbę w bieżącym trybie; pełny ponowny test wymaga ponownego uruchomienia.",
+      "ariaLabel": "Zablokowane konfiguracje Turbo",
+      "blocked": "Zablokowane",
+      "bypassed": "Pominięte",
+      "details": "Szczegóły",
+      "clearing": "Czyszczenie…",
+      "clearRetest": "Wyczyść i przetestuj ponownie",
+      "empty": "Brak zarejestrowanych blokad bezpieczeństwa."
+    },
+    "faults": {
+      "title": "Dziennik błędów",
+      "clearLogs": "Wyczyść dzienniki",
+      "clearing": "Czyszczenie…",
+      "intro": "Zarejestrowane błędy pozostają tutaj po ponowieniu próby. W przypadku nieprawidłowego zamknięcia zarejestrowany czas to ostatni znacznik bezpieczeństwa, a nie potwierdzony czas awarii.",
+      "clearHint": "Wyczyść dzienniki usuwa historię błędów. Blokady bezpieczeństwa i wyuczone decyzje taktowania pozostają bez zmian.",
+      "ariaLabel": "Dziennik błędów Turbo",
+      "details": "Szczegóły",
+      "empty": "Nie zarejestrowano błędów Turbo."
+    },
+    "dialog": {
+      "title": "{application} · Błąd Turbo",
+      "recorded": "Zarejestrowano",
+      "pacingMode": "Tryb taktowania",
+      "runtime": "Środowisko uruchomieniowe",
+      "headset": "Gogle",
+      "graphicsApi": "Interfejs graficzny",
+      "processId": "Identyfikator procesu",
+      "notRecorded": "Nie zarejestrowano",
+      "armedNote": "Nieprawidłowe zamknięcie wywnioskowano na podstawie zatrzymanego procesu. Nie oznacza to, że awarię spowodowało Turbo.",
+      "recoveredNote": "VectorXR odzyskał sprawność po tym błędzie w tej samej sesji i utrzymał działanie gry. Nie blokuje to Turbo."
+    }
+  },
+  "diagnostics": {
+    "title": "Diagnostyka wydajności",
+    "moduleLabel": "Diagnostyka Turbo",
+    "intro": "Mierz Turbo w scenariuszu, który ma dla Ciebie znaczenie. VectorXR porównuje Turbo włączone i wyłączone dopiero wtedy, gdy obie strony mają wystarczająco dużo czasu przechwytywania w grze.",
+    "closeAria": "Zamknij diagnostykę i wróć do Turbo",
+    "binding": {
+      "label": "Przypisanie przechwytywania metryk",
+      "description": "Rozpoczynaj i zatrzymuj zbieranie metryk w trakcie gry. Uzbrój je, gdy faktycznie lecisz, i wstrzymaj przed ekranami ładowania lub menu, aby zarejestrowane liczby odzwierciedlały rzeczywistą grę.",
+      "noneText": "Brak przypisania. W trybie przypisania przechwytywania żadne metryki nie są rejestrowane, dopóki nie ustawisz przypisania.",
+      "hint": "Uzbrój przechwytywanie, gdy faktycznie lecisz; wstrzymaj je przed ekranami ładowania lub menu."
+    },
+    "capture": {
+      "title": "Zachowanie przechwytywania",
+      "intro": "Przechwytuj tylko reprezentatywną rozgrywkę, aby uzyskać najrzetelniejszy wynik. Ekrany ładowania i menu mogą zagłuszyć efekt, który próbujesz zmierzyć.",
+      "collection": "Zbieranie",
+      "always": "Zawsze w trakcie gry",
+      "binding": "Użyj przypisania przechwytywania",
+      "off": "Wył.",
+      "bindingNote": "Rejestrowanie rozpoczyna się i wstrzymuje za pomocą przypisania przechwytywania. To zalecany tryb do kontrolowanych porównań.",
+      "alwaysNote": "Rejestrowanie działa zawsze, gdy Turbo jest stosowane. Zacięcia dłuższe niż sekunda są wykluczane, ale menu i ekrany ładowania nadal są liczone.",
+      "offNote": "Zbieranie metryk jest wyłączone. Istniejące wyniki pozostają dostępne poniżej."
+    },
+    "results": {
+      "eyebrow": "Wyniki",
+      "intro": "Wybierz lot, przeczytaj werdykt, a szczegółowe pomiary otwórz tylko wtedy, gdy ich potrzebujesz.",
+      "clearAllTitle": "Usuń wszystkie zarejestrowane sesje metryk",
+      "clearAll": "Wyczyść wszystkie wyniki",
+      "emptyTitle": "Brak testów wydajności",
+      "emptyBody": "Uruchom Turbo w grze, a wyniki będą się tu aktualizować mniej więcej co 15 sekund.",
+      "flight": "Lot",
+      "strategy": "Strategia",
+      "accumulateNote": "Wyniki kumulują się w obrębie sesji. Aby porównać strategie, używaj nowego uruchomienia dla każdej z nich i porównuj ich zysk względem wyłączonego Turbo; te wartości nie mierzą aktywności ASW ani wyświetlania w goglach.",
+      "versusOff": "Średnie fps względem wyłączonego Turbo",
+      "fpsChange": "{off} → {turbo} fps w tym locie",
+      "needMoreTitle": "Potrzeba więcej porównywalnego czasu lotu",
+      "needMoreBody": "Przechwyć co najmniej 30 sekund z wyłączonym Turbo i 30 sekund z włączonym Turbo w podobnych warunkach. Używaj przełącznika Turbo między przebiegami.",
+      "evidenceNote": "Traktuj procent jako dowód, a nie obietnicę: złożoność sceny, pogoda, ruch i praca w tle nadal wpływają na porównanie."
+    },
+    "verdict": {
+      "faster": "Szybciej",
+      "slower": "Wolniej",
+      "within": "W granicach 1%"
+    },
+    "bucket": {
+      "off": "Turbo wył.",
+      "async": "Turbo — async",
+      "sequenced": "Turbo — sequenced"
+    },
+    "session": {
+      "unknownTime": "Nieznany czas",
+      "label": "{when} — {app} · {details}",
+      "labelLive": "{when} — {app} · {details} (na żywo)"
+    },
+    "duration": {
+      "minutes": "{minutes} min {seconds} s",
+      "seconds": "{seconds} s"
+    },
+    "detail": {
+      "title": "Szczegółowe pomiary",
+      "subtitle": "Czasy klatek, oczekiwanie na środowisko uruchomieniowe i przestoje",
+      "empty": "Ten lot nie ma jeszcze przechwyconych klatek.",
+      "pacing": "Taktowanie",
+      "time": "Czas",
+      "avgFps": "Śr. fps",
+      "onePercentLow": "1% najniższych",
+      "avgFrame": "Śr. klatka",
+      "p99Frame": "Klatka p99",
+      "waitBlocked": "Blokada oczekiwania",
+      "waitBlockedTitle": "Średni czas na klatkę, przez który gra była zablokowana na taktowaniu środowiska uruchomieniowego",
+      "stalls": "Przestoje",
+      "stallsTitle": "Przestoje taktowania klatek zliczone przez obwód bezpieczeństwa",
+      "live": "Lot w toku — aktualizacja co ~15 sekund.",
+      "complete": "Lot zakończony.",
+      "collectionBinding": "Zbieranie: przypisanie przechwytywania.",
+      "collectionAlways": "Zbieranie: zawsze.",
+      "hitchesExcluded": "Wykluczono zacięcia dłuższe niż sekunda."
+    }
+  },
+  "runtime": {
+    "title": "Zachowanie środowiska uruchomieniowego",
+    "intro": "Wybierz, jak VectorXR Turbo współpracuje z każdym środowiskiem uruchomieniowym OpenXR. Auto to bezpieczny punkt wyjścia; aby znaleźć najszybszą strategię dla gry, wypróbuj Async i Sequenced i porównaj je w Diagnostyce wydajności. Profile używające strategii W stylu Toolkit lub Niestandardowej ignorują te ustawienia.",
+    "closeAria": "Zamknij zachowanie środowiska uruchomieniowego i wróć do Turbo",
+    "pacing": {
+      "title": "Strategia taktowania",
+      "intro": "Auto stawia na stabilność: zaczyna od Async i próbuje Sequenced, jeśli Async się zatrzymuje lub wielokrotnie odrzuca klatki, a następnie zapamiętuje strategię po 60 sekundach stabilnej gry. Nie porównuje wydajności, więc zapamiętana strategia niekoniecznie jest najszybsza.",
+      "mode": "Tryb",
+      "asyncOnly": "Tylko Async · zwykle najszybsza",
+      "sequencedOnly": "Tylko Sequenced · dla środowisk, które tego wymagają",
+      "autoActiveStrong": "Auto jest aktywne.",
+      "autoActive": "{strong} Async nakłada oczekiwanie na środowisko uruchomieniowe na pracę gry; Sequenced obsługuje środowiska uruchomieniowe, które wymagają ścisłego sprzężenia oczekiwania i przesyłania. Przypnij poniżej środowisko uruchomieniowe, aby przetestować konkretną strategię.",
+      "manualStrong": "Ręczne wymuszenie jest aktywne.",
+      "manual": "{strong} Działa tylko wybrana strategia. Automatyczne wykrywanie jest wstrzymane; Bezpieczeństwo Turbo i wstrzymywanie po błędach na żywo nadal obowiązują."
+    },
+    "decisions": {
+      "eyebrow": "Decyzje środowisk uruchomieniowych",
+      "intro": "Przejrzyj, czego nauczyło się Auto, lub wymuś ustawienie dla jednego środowiska uruchomieniowego bez wpływu na pozostałe.",
+      "active": "Aktywne: {runtime}",
+      "empty": "Nie ma jeszcze czym zarządzać. Auto zapisuje decyzję po pierwszej sesji Turbo w danym środowisku uruchomieniowym.",
+      "environment": "Środowisko",
+      "decision": "Decyzja",
+      "learned": "Wyuczone",
+      "override": "Wymuszenie",
+      "activeBadge": "Aktywne",
+      "unknownHeadset": "Nieznane gogle",
+      "useAuto": "Użyj Auto",
+      "pinAsync": "Przypnij Async",
+      "pinSequenced": "Przypnij Sequenced",
+      "clearRetestTitle": "Wyczyść wyuczone decyzje i blokady bezpieczeństwa tego środowiska uruchomieniowego. Uruchom ponownie grę w trybie Auto bez ręcznego wymuszenia, aby przetestować Async, a w razie potrzeby Sequenced.",
+      "clearRetest": "Wyczyść i przetestuj ponownie",
+      "inactiveNote": "Decyzje środowisk uruchomieniowych są nieaktywne, gdy wybrano globalne ręczne wymuszenie.",
+      "willTest": "Auto przetestuje {runtime} podczas następnej sesji Turbo, zaczynając od Async."
+    },
+    "mode": {
+      "notSupported": "Nieobsługiwane",
+      "undiscovered": "Niewykryte"
+    },
+    "badge": {
+      "pinned": "Przypięte",
+      "suspended": "Wstrzymane",
+      "discovered": "Wykryte"
+    }
+  }
+}

@@ -671,3 +671,15 @@ textarea {
   :is(.surface-panel, .surface-panel-strong, .shadow-panel):not(.sticky):not(.fixed > *) {
   box-shadow: none;
 }
+
+/* Korean breaks between words, not inside one (64비트), and Japanese sidebar
+   labels break at their spaces (アプリケーション レジストリ). A word too long for
+   its box still wraps. */
+:lang(ko) {
+  word-break: keep-all;
+  overflow-wrap: break-word;
+}
+:lang(ja) .side-nav-item {
+  word-break: keep-all;
+  overflow-wrap: break-word;
+}

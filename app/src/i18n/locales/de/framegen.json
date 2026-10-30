@@ -1,0 +1,241 @@
+{
+  "title": "Frame Generation",
+  "experimental": "Experimentell",
+  "intro": "Fügt generierte Bilder zwischen den Bildern des Spiels ein, sodass Bewegungen bei der vollen Bildwiederholrate Ihres Headsets flüssig bleiben, selbst wenn das Spiel nicht mithalten kann. Probieren Sie es pro Spiel aus, und vergleichen Sie mit der A/B-Umschaltung.",
+  "howItWorksTitle": "So funktioniert Frame Generation",
+  "restartNote": "Das Einschalten von Frame Generation wird beim nächsten Start des Spiels wirksam; das Ausschalten gilt sofort.",
+  "restartToApply": {
+    "label": "Neustart zum Anwenden:",
+    "body": "{label} Das Einschalten von Frame Generation für ein Spiel wird beim nächsten Start des Spiels wirksam. Das Ausschalten sowie jede andere Einstellung auf dieser Seite gelten während des Spiels."
+  },
+  "setupGuide": {
+    "title": "Einrichtungsanleitung",
+    "summary": "Für ein Spiel einschalten, dann im Headset vergleichen",
+    "smoothing": {
+      "label": "Schalten Sie die Glättung der Laufzeit aus",
+      "body": "{label} für das Spiel, in der Laufzeit und in der eigenen Software des Headsets: SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW oder Meta ASW. Sie behindern die Bildtaktung von Frame Generation."
+    },
+    "refreshRate": {
+      "label": "Belassen Sie das Headset bei seiner vollen Bildwiederholrate.",
+      "body": "{label} Halbieren Sie die Bildrate nicht mit „Lock Frame Rate to Half Refresh Rate“ in Pimax Play oder einer Bildratenbegrenzung unter „Throttling Behavior“ in SteamVR; Frame Generation legt die Rate des Spiels selbst fest."
+    },
+    "halfRate": {
+      "label": "Bringen Sie das Spiel zuerst auf die halbe Bildwiederholrate.",
+      "body": "{label} Senken Sie bei ausgeschalteter Frame Generation die Spieleinstellungen oder die Renderauflösung, bis das Spiel mindestens die halbe Rate des Headsets hält (45 fps bei 90 Hz). Frame Generation kann die Rate von der Hälfte auf das Volle bringen, aber nicht die erste Hälfte leisten."
+    },
+    "oneGame": {
+      "label": "Für ein Spiel einschalten:",
+      "body": "{label} Lassen Sie das Standardprofil ausgeschaltet, fügen Sie unten ein eigenes Profil hinzu, und weisen Sie das Spiel zu. Die Standardeinstellungen passen für die meisten Spiele."
+    },
+    "restart": {
+      "label": "Speichern Sie, und starten Sie das Spiel neu.",
+      "body": "{label} Das Einschalten von Frame Generation wird beim nächsten Start wirksam."
+    },
+    "check": {
+      "label": "Im Headset prüfen:",
+      "osd": "Bildschirmanzeige",
+      "body": "{label} Die {osd} zeigt FG AN neben ihren FPS an, oder wählen Sie die Diagnoseansicht „Tönung generierter Bilder“ (und stellen Sie sie danach wieder auf „Aus“)."
+    },
+    "compare": {
+      "label": "Vergleichen:",
+      "body": "{label} Weisen Sie die A/B-Umschaltung zu, und schalten Sie generierte Bilder in derselben Szene aus und ein."
+    },
+    "turboNote": "Turbo bleibt in Spielen, in denen Frame Generation läuft, ausgeschaltet."
+  },
+  "controls": {
+    "heading": "Steuerung im Headset",
+    "statusUnavailable": "Der Laufzeitstatus ist vorübergehend nicht verfügbar.",
+    "noSession": "Keine VR-Anwendung aktiv"
+  },
+  "session": {
+    "withReason": "{status} · {reason}",
+    "withReasonColon": "{status}: {reason}",
+    "active": "An",
+    "standby": "Bereit",
+    "waiting": "Startet · wartet auf gleichmäßige Bilder",
+    "paused": "Pausiert",
+    "unavailable": "Nicht verfügbar",
+    "off": "Aus",
+    "needsLayer": "Erfordert den aktualisierten VectorXR-Layer",
+    "unknown": "Status nicht verfügbar"
+  },
+  "gameDepth": {
+    "inUse": {
+      "label": "Spieltiefe wird verwendet",
+      "title": "Das Spiel stellt seine Tiefe bereit, sodass nahe Objekte bei Kopfbewegungen stabil bleiben."
+    },
+    "empty": {
+      "label": "Spieltiefe ist leer",
+      "title": "Das Spiel sendet Tiefe, ohne sie zu füllen. Wenn das Spiel eine tiefenbasierte Reprojektionsoption hat, kann Frame Generation die Tiefe nutzen, sobald diese eingeschaltet ist."
+    },
+    "unusable": {
+      "label": "Spieltiefe nicht verwendet",
+      "title": "Die vom Spiel gesendete Tiefe stimmt zwischen den Augen nicht überein, daher arbeitet Frame Generation ohne sie."
+    }
+  },
+  "toggle": {
+    "heading": "A/B-Umschaltung",
+    "hint": "Optional. Schaltet generierte Bilder in Spielen aus und ein, die mit eingeschalteter Frame Generation gestartet wurden.",
+    "label": "A/B-Umschaltung Frame Generation",
+    "description": "Schaltet generierte Bilder im Headset aus und ein, um Bewegungen in derselben Szene zu vergleichen. Funktioniert in Spielen, die mit eingeschalteter Frame Generation gestartet wurden.",
+    "noneText": "Keine Belegung zugewiesen. Frame Generation läuft überall dort, wo sie beim Start des Spiels eingeschaltet ist."
+  },
+  "diagnostic": {
+    "heading": "Diagnoseansicht",
+    "hint": "{description} Gilt für jedes Spiel und wird während des Spiels aktualisiert.",
+    "onWarning": "Ein: Generierte Bilder im Headset werden mit den Farben dieser Ansicht gezeichnet, die im normalen Spiel wie Grafikfehler aussehen. Stellen Sie sie auf „Aus“, wenn Sie fertig sind.",
+    "views": {
+      "off": {
+        "label": "Aus",
+        "description": "Generierte Bilder werden unverändert angezeigt."
+      },
+      "flow": {
+        "label": "Bewegungsfluss",
+        "description": "Färbt die Bewegung ein, die Frame Generation in generierten Bildern gemessen hat."
+      },
+      "confidence": {
+        "label": "Konfidenz",
+        "description": "Färbt generierte Bilder dort rot, wo auf das echte Bild zurückgegriffen wurde; nützlich beim Abstimmen der erweiterten Einstellungen."
+      },
+      "tint": {
+        "label": "Tönung generierter Bilder",
+        "description": "Tönt generierte Bilder leicht, damit Sie sehen, dass sie angezeigt werden."
+      }
+    }
+  },
+  "defaultProfile": {
+    "heading": "Standardprofil",
+    "appliesTo": "Gilt für Spiele ohne aktiviertes eigenes Profil",
+    "toggleOn": "Standardprofil ein",
+    "toggleOff": "Standardprofil aus",
+    "offNote": "Aus für Spiele ohne eigenes Profil. Die eigenen Profile unten schalten es für ihre Spiele weiterhin ein.",
+    "onWarning": {
+      "label": "Ein für jedes Spiel ohne eigenes Profil,",
+      "body": "{label} auch für solche, mit denen Sie es noch nicht ausprobiert haben. Sicherer ist es, dies ausgeschaltet zu lassen und für jedes geprüfte Spiel ein Profil hinzuzufügen."
+    }
+  },
+  "customProfiles": {
+    "heading": "Eigene Profile",
+    "description": "Schalten Sie Frame Generation pro Spiel ein. Das erste aktivierte passende Profil hat Vorrang.",
+    "add": "Profil hinzufügen",
+    "empty": "Noch keine eigenen Profile. Fügen Sie ein Profil hinzu, um Frame Generation für ein Spiel einzuschalten.",
+    "duplicateApplication": "{application} ist bereits Ziel von Profil {profile}. Das erste aktive Profil hat Vorrang."
+  },
+  "summary": {
+    "format": "{mode} · {rate} · {motion}",
+    "dynamic": "Dynamisch",
+    "fixedAuto": "Fest Auto",
+    "fixed": "Fest {multiplier}"
+  },
+  "howItWorks": {
+    "whatItDoes": {
+      "heading": "Was es tut",
+      "body": "Frame Generation misst, wie sich das Bild zwischen den Bildern des Spiels bewegt, und erzeugt aus dieser Bewegung neue Bilder, sodass das Headset bei jeder Bildwiederholung ein frisches Bild erhält, auch wenn das Spiel weniger rendert. Ihre Kopfdrehung wird zuerst herausgerechnet, da die eigene Reprojektion des Headsets sie bereits verarbeitet."
+    },
+    "mode": {
+      "heading": "Modus",
+      "interpolate": "{name} (Standard) überblendet zwischen den letzten beiden Bildern des Spiels. Es sieht am flüssigsten aus und hat die wenigsten Artefakte, zeigt aber jedes Spielbild etwas später an.",
+      "extrapolate": "{name} projiziert das neueste Spielbild entlang seiner Bewegung nach vorne und fügt daher keine Latenz hinzu. Schnelle Bewegungen und neu aufgedeckte Bereiche zeigen mehr Artefakte; am besten sieht es mit NVIDIA-Hardware als Bewegungsquelle aus."
+    },
+    "frameRate": {
+      "heading": "Bildrate",
+      "dynamic": "{name} (Standard) lässt das Spiel so schnell laufen, wie es kann, und füllt die Bildwiederholungen zwischen seinen Bildern mit generierten Bildern. Wenn das Spiel allein mithält, bleibt Frame Generation in Bereitschaft und generiert nichts.",
+      "fixed": "{name} hält das Spiel für eine gleichmäßige Taktung bei einem festen Bruchteil der Bildwiederholrate. Bei einem 90-Hz-Headset läuft das Spiel mit {x2} bei 45 fps, mit {x3} bei 30 fps und mit {x4} bei 22,5 fps; {auto} wählt je nach Bedarf des Spiels zwischen ihnen. Jedes generierte Bild verschiebt das Bild weiter, daher zeigen höhere Raten mehr Artefakte."
+    },
+    "beforeYouStart": {
+      "heading": "Bevor Sie beginnen",
+      "smoothing": "{label} für das Spiel, in der Laufzeit und in der eigenen Software des Headsets (SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW, Meta ASW), und belassen Sie das Headset bei seiner vollen Bildwiederholrate: Halbieren Sie die Bildrate nicht mit „Lock Frame Rate to Half Refresh Rate“ in Pimax Play oder einer Bildratenbegrenzung unter „Throttling Behavior“ in SteamVR. Frame Generation legt die Rate des Spiels selbst fest.",
+      "turbo": {
+        "label": "Turbo bleibt ausgeschaltet, während Frame Generation läuft.",
+        "body": "{label} Die beiden takten Bilder auf entgegengesetzte Weise, daher tritt Turbo in diesen Spielen zurück und zeigt „Pausiert für Frame Generation“ an. Ihre Turbo-Profile werden nicht geändert."
+      },
+      "apis": "Funktioniert mit Spielen unter Direct3D 11, Direct3D 12 und Vulkan, auch mit Quadviews."
+    },
+    "knownLimits": {
+      "heading": "Bekannte Einschränkungen",
+      "body": "Die Bewegung wird anhand der Bilder gemessen, die das Spiel anzeigt, daher können Text, HUDs, Transparenz und sich wiederholende Muster in generierten Bildern flimmern oder sich verzerren. Wenn das stört, erhöhen Sie unter „Erweitert“ die Artefaktunterdrückung, oder senken Sie die Bewegungsgrenze."
+    }
+  },
+  "settings": {
+    "mode": {
+      "legend": "Modus",
+      "interpolate": {
+        "label": "Interpolate",
+        "description": "Überblendet zwischen den letzten beiden Bildern des Spiels. Das flüssigste Bild mit den wenigsten Artefakten; fügt etwas Latenz hinzu."
+      },
+      "extrapolate": {
+        "label": "Extrapolate",
+        "description": "Projiziert das neueste Spielbild nach vorne. Die niedrigste Latenz, mit mehr Artefakten an bewegten Kanten; funktioniert am besten mit NVIDIA-Hardware."
+      }
+    },
+    "frameRate": {
+      "legend": "Bildrate",
+      "dynamic": {
+        "label": "Dynamisch",
+        "description": "Das Spiel läuft so schnell, wie es kann, und generierte Bilder füllen bis zur Bildwiederholrate Ihres Headsets auf."
+      },
+      "fixed": {
+        "label": "Fest",
+        "description": "Hält das Spiel für eine gleichmäßige Taktung bei einem festen Bruchteil der Bildwiederholrate und füllt den Rest mit generierten Bildern."
+      },
+      "fixedRate": "Feste Rate",
+      "rates": {
+        "auto": "Wählt je nach Bedarf des Spiels 2x, 3x oder 4x und generiert nichts, solange das Spiel allein mithält.",
+        "x2": "Das Spiel läuft mit bis zu 1/2 der Bildwiederholrate, etwa 45 fps bei 90 Hz. Darunter ist die Taktung weniger gleichmäßig.",
+        "x3": "Das Spiel läuft mit bis zu 1/3 der Bildwiederholrate, etwa 30 fps bei 90 Hz. Darunter ist die Taktung weniger gleichmäßig.",
+        "x4": "Das Spiel läuft mit bis zu 1/4 der Bildwiederholrate, etwa 22,5 fps bei 90 Hz. Die meisten Artefakte; für die anspruchsvollsten Spiele."
+      }
+    },
+    "motionSource": {
+      "legend": "Bewegungsquelle",
+      "shader": {
+        "label": "Shader",
+        "description": "Misst die Bewegung auf den Shader-Kernen der GPU. Funktioniert mit jeder GPU und passt am besten zu Interpolate."
+      },
+      "hardware": {
+        "label": "NVIDIA-Hardware",
+        "description": "Verwendet die Optical-Flow-Einheit von NVIDIA-RTX-GPUs: genauer, besonders bei sich wiederholenden Mustern."
+      }
+    },
+    "advanced": {
+      "summary": "{flow} · Unterdrückung {suppression} · Bewegungsgrenze {motionLimit} %",
+      "summaryHeadPrediction": "{flow} · Unterdrückung {suppression} · Bewegungsgrenze {motionLimit} % · Kopfvorhersage",
+      "reset": "Erweiterte Einstellungen zurücksetzen"
+    },
+    "flowQuality": {
+      "heading": "Flussqualität",
+      "resolution": "{resolution} des Augenbilds",
+      "description": "Wie fein die Bewegung gemessen wird. Höhere Stufen erfassen kleine, dünne Objekte besser und kosten mehr GPU-Zeit.",
+      "levels": {
+        "performance": "Leistung",
+        "balanced": "Ausgewogen",
+        "quality": "Qualität"
+      },
+      "summary": {
+        "performance": "Fluss: Leistung",
+        "balanced": "Fluss: Ausgewogen",
+        "quality": "Fluss: Qualität"
+      }
+    },
+    "artifactSuppression": {
+      "heading": "Artefaktunterdrückung",
+      "valueLabel": "Wert der Artefaktunterdrückung",
+      "smoother": "Flüssigere Bewegung",
+      "fewer": "Weniger Artefakte",
+      "description": "Wo die Bewegung unsicher ist, zeigen höhere Werte früher das echte Bild: weniger Verzerrung, etwas mehr Ruckeln."
+    },
+    "motionLimit": {
+      "heading": "Bewegungsgrenze",
+      "valueLabel": "Wert der Bewegungsgrenze in Prozent der Ansichtsbreite",
+      "description": "Wie weit ein generiertes Bild das Bild höchstens verschieben darf, als Anteil der Ansichtsbreite. Bei schnellerer Bewegung wird das echte Bild angezeigt."
+    },
+    "headPrediction": {
+      "heading": "Kopfvorhersage erweitern",
+      "description": "Frame Generation lässt das Spiel bis zu ~150 ms im Voraus rendern, und manche Laufzeiten, etwa die von Pimax, sagen Ihren Kopf nur ~20 ms davon voraus. Diese Option führt die Drehung Ihres Kopfes über den Rest fort, für weniger Schwarz an dem Rand, zu dem Sie sich drehen. Schalten Sie sie vor dem Start des Spiels ein."
+    },
+    "interpolateFlow": {
+      "fallback": "Auf Shader wechseln, wenn der Hardware-Fluss nicht mithält",
+      "fallbackHint": "Nur Interpolate. Der Hardware-Fluss wird nach einer Weile erneut versucht."
+    }
+  }
+}

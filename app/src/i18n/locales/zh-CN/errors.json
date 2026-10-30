@@ -1,0 +1,13 @@
+{
+  "configRead": "无法读取 {path}：{detail}",
+  "configParse": "无法解析 {path}：{detail}",
+  "configReplace": "无法替换 {path}：{detail}",
+  "directoryMissing": "目录不存在：{path}",
+  "soundMissing": "找不到声音文件：{path}",
+  "sessionInactive": "OpenXR 会话已不再活动",
+  "diagnosticUnavailable": "此 OpenXR 会话无法使用诊断可视化",
+  "layerNotRegistered": "层清单已不再注册在该 OpenXR 分区中",
+  "layerConflict": "已启用另一个 VectorXR 注册（{slice}：{path}）。加载两份 VectorXR 时 OpenXR 应用会崩溃，请先禁用那一个。",
+  "elevationRequired": "此 OpenXR 层更改需要提升权限。请以管理员身份重新启动 VectorXR，然后重试。",
+  "elevationCanceled": "OpenXR 层更改已在权限提升提示中被取消，或提升权限的辅助程序未能启动。"
+}

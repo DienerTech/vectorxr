@@ -28,6 +28,7 @@
 #include "depthxr/pivot_step.h"
 #include "depthxr/pivot_view.h"
 #include "depthxr/effects.h"
+#include "depthxr/external_status.h"
 #include "depthxr/head_prediction.h"
 #include "depthxr/logger.h"
 #include "depthxr/quadviews_frame_cache.h"
@@ -36,6 +37,7 @@
 #include "depthxr/runtime_pacing.h"
 #include "depthxr/runtime_relay.h"
 #include "depthxr/osd_renderer.h"
+#include "depthxr/osd_strings.h"
 #include "depthxr/performance_monitor.h"
 #include "depthxr/process_exit.h"
 #include "depthxr/framegen_d3d11_bridge.h"
@@ -43,8 +45,11 @@
 #include "depthxr/framegen_presenter.h"
 #include "depthxr/framegen_runtime_queue.h"
 #include "depthxr/turbo_recovery.h"
+#include "depthxr/turbo_prediction_history.h"
 #include "depthxr/turbo_trace.h"
 #include "depthxr/settings_resolver.h"
+#include "depthxr/handshake_census.h"
+#include "depthxr/spacewarp_probe.h"
 #include "depthxr/swapchain_state.h"
 #include "depthxr/thread_census.h"
 
@@ -144,6 +149,22 @@ class OpenXrLayer {
         // through). Above VectorXR it gets a game's quad views, which it does
         // not support.
         std::string openxr_toolkit{"absent"};
+        // The space-warp probe (spacewarp_probe.h): VECTORXR_SPACEWARP_PROBE
+        // (parsed, and as set: empty when it is not), what the application
+        // enabled, what the runtime's list before the instance names, and
+        // what the layer took over (kept from the runtime).
+        std::string spacewarp_probe{"off"};
+        std::string spacewarp_probe_value;
+        bool app_requested_fb_space_warp{false};
+        bool app_requested_frame_synthesis{false};
+        bool spacewarp_scan_complete{false};
+        bool runtime_lists_fb_space_warp{false};
+        bool runtime_lists_frame_synthesis{false};
+        bool fb_space_warp_owned{false};
+        bool frame_synthesis_owned{false};
+        // The handshake census (handshake_census.h), with the probe's variable
+        // set: its xrCreateInstance lines.
+        std::vector<std::string> handshake_census;
     };
 
     // True when VectorXR quadviews should run in Varjo compatible mode, i.e. core
@@ -151,6 +172,9 @@ class OpenXrLayer {
     // (loads config lazily). Does not consider runtime capability — the caller
     // pairs this with a runtime extension probe.
     bool IsVarjoCompatibleQuadviewsEligible();
+    // VectorXR Enabled (the suite switch). Safe at instance-creation time
+    // (loads config lazily).
+    bool IsSuiteEnabled();
     bool WantsTurboClockConversion();
     // Whether Frame Generation is enabled for this executable, so a Direct3D 11
     // application's instance needs XR_KHR_D3D12_enable for the bridge. Safe
@@ -245,6 +269,40 @@ class OpenXrLayer {
                          uint32_t* view_count_output,
                          XrView* views);
 
+    // The handshake census (handshake_census.h), active while the instance
+    // was created with VECTORXR_SPACEWARP_PROBE set; log-only. The layer's
+    // entry points (layer_entry.cpp) note what the application asks and
+    // gets: CensusCall at each call (the first one logs the names looked up
+    // before it), CensusNote a call's detail (logged the first time it is
+    // seen for `function`; with `always`, the first 16 calls), and
+    // CensusProcAddr each xrGetInstanceProcAddr. The functions only the
+    // census hooks (xrGetInstanceProperties, xrGetSystem and the
+    // XR_FB_display_refresh_rate ones) call the runtime's through
+    // CensusNext.
+    bool HandshakeCensusActive() const { return handshake_census_.Active(); }
+    void CensusCall();
+    void CensusNote(std::string_view function, const std::string& detail, bool always = false);
+    void CensusProcAddr(std::string_view name, XrResult result, bool resolved);
+    void CensusFlushProcAddrs(std::string_view when);
+    // The formats xrEnumerateSwapchainFormats gave the application last.
+    void CensusSwapchainFormats(const int64_t* formats, uint32_t count);
+    // The instance's swapchain formats are DXGI's (a Direct3D application).
+    bool CensusDxgiFormats() const;
+    enum class CensusFunction : std::uint8_t {
+        kGetInstanceProperties,
+        kGetSystem,
+        kEnumerateDisplayRefreshRates,
+        kGetDisplayRefreshRate,
+        kRequestDisplayRefreshRate,
+        kCount
+    };
+    PFN_xrVoidFunction CensusNext(CensusFunction function) const {
+        return census_next_[static_cast<std::size_t>(function)].load(std::memory_order_acquire);
+    }
+    void SetCensusNext(CensusFunction function, PFN_xrVoidFunction next) {
+        census_next_[static_cast<std::size_t>(function)].store(next, std::memory_order_release);
+    }
+
   private:
 #if defined(DEPTHXR_TESTING)
     friend class TurboFrameTestPeer;
@@ -255,6 +313,7 @@ class OpenXrLayer {
     friend class D3D11BridgeLayerTestPeer;
     friend class VulkanBridgeLayerTestPeer;
     friend class HeadPredictionTestPeer;
+    friend class SpaceWarpProbeTestPeer;
 #endif
 
     OpenXrLayer() = default;
@@ -291,6 +350,9 @@ class OpenXrLayer {
         // Citizen does), which a runtime reading the image at xrEndFrame
         // still shows; a copy at the release would not have it.
         std::deque<uint32_t> bridge_handovers;
+        // Whether the bridge copied each of them, where the frame's end made
+        // the copies ahead of the hand-overs (HandOverBridgedReleasesLocked).
+        std::deque<bool> bridge_copied;
         bool quadviews_session{false};
         SwapchainImageQueue image_states;
         std::unordered_set<uint32_t> d3d11_shader_resource_slices_attempted;
@@ -495,6 +557,10 @@ class OpenXrLayer {
     void PollFrameGenRecorder();
     // The app's status line for Frame Generation (RuntimeStatusDocument::framegen_reason).
     static std::string FrameGenStatusReason(const FrameGenStatus& framegen);
+    // Its rates as numbers (RuntimeStatusDocument::framegen_rates), and the
+    // public status file's Frame Generation block (external_status.h).
+    static RuntimeFrameGenRates FrameGenRates(const FrameGenStatus& framegen);
+    static ExternalFrameGenStatus ExternalFrameGen(const FrameGenStatus& framegen);
     void CaptureInstanceFunctions();
     void LogResolvedSettings(const ResolvedRuntimeConfig& settings);
     void ResetPivotActivationState();
@@ -604,6 +670,40 @@ class OpenXrLayer {
     bool QuadViewsDiagnosticVisualizationAvailable() const;
     void ResetSwapchainState();
     void LogSwapchainSummary(XrSwapchain swapchain, const SwapchainInfo& info, std::string_view event_name);
+    // The space-warp probe (spacewarp_probe.h), mutex_ held: whether it owns
+    // an extension, its recommended motion vector size for the runtime's
+    // primary stereo views, a frame without its structures (logging what they
+    // carried), a swapchain that looks like a motion vector or its depth, and
+    // the summary of the session's frames.
+    bool SpaceWarpProbeActive() const { return spacewarp_fb_owned_ || spacewarp_ext_owned_; }
+    // The size answered (ChooseMotionVectorSize): half the eye where Frame
+    // Generation will read the vectors, else an eighth, unless
+    // VECTORXR_FRAMEGEN_ENGINE_MV_SIZE says.
+    MotionVectorSize SpaceWarpVectorSizeLocked();
+    XrExtent2Di SpaceWarpMotionVectorSize(XrInstance instance, XrSystemId system_id, MotionVectorSize size);
+    const XrFrameEndInfo* ProbeSpaceWarpFrameLocked(const XrFrameEndInfo* frame, SpaceWarpFrame& storage);
+    // Frame Generation's record of the frame's structures (FrameGenEngineMotionFrame;
+    // no views when it carried none), from the frame the probe forwards and
+    // what it took off; counts the frames that carry a projection.
+    FrameGenEngineMotionFrame EngineMotionFrameLocked(const XrFrameEndInfo& stripped, const SpaceWarpFrame& storage);
+    void NoteSpaceWarpSwapchainLocked(XrSwapchain swapchain, const SwapchainInfo& info);
+    std::string DescribeSpaceWarpSwapchainLocked(XrSwapchain swapchain) const;
+    void LogSpaceWarpProbeSummaryLocked(std::string_view reason);
+    // The handshake census on a frame the probe handled (`frame` as the
+    // application submitted it): the swapchains the session's frames used by
+    // role (logged when one is new), with their calls as of now.
+    void CensusFrameLocked(const XrFrameEndInfo* frame, const SpaceWarpFrame& storage);
+    // The census's swapchains' calls as of now (a destroyed one's as of its end).
+    void CensusUpdateSwapchainsLocked();
+    // The census's motion vector and space-warp depth swapchains and their calls.
+    void LogCensusSwapchainCallsLocked(std::string_view reason);
+    // xrEnumerateViewConfigurationViews before the probe's answer.
+    XrResult ForwardEnumerateViewConfigurationViews(XrInstance instance,
+                                                    XrSystemId system_id,
+                                                    XrViewConfigurationType view_configuration_type,
+                                                    uint32_t view_capacity_input,
+                                                    uint32_t* view_count_output,
+                                                    XrViewConfigurationView* views);
     // Logs xrEnumerateSwapchainFormats' list when it differs from the last one this session.
     void LogSwapchainFormatsOnChange(const std::string& line);
     // Counts an application call on the calling thread; logs the first call of each kind on each thread.
@@ -620,10 +720,19 @@ class OpenXrLayer {
     // oldest first (SwapchainInfo::bridge_handovers): the bridge's copy into
     // the runtime's image, Frame Generation's capture of it, then the release
     // on to the runtime (or deferred, as ReleaseSwapchainImage would). With
-    // `copy` false (the session's end) only the releases go on.
+    // `copy` false (the session's end) only the releases go on. Every
+    // swapchain's: while the Vulkan bridge gives the game's motion vector
+    // images back at their releases (vulkan_bridge_motion_), each
+    // swapchain's copies are made first, then the captures and releases.
     XrResult HandOverBridgedReleasesLocked(XrSwapchain swapchain, SwapchainInfo& info, std::string_view reason,
                                            bool copy = true);
     XrResult HandOverBridgedReleasesLocked(std::string_view reason, bool copy = true);
+    // At a session's (or an instance's) end, before the Vulkan bridge's
+    // Escape: releases no frame's end handed over still give the game's
+    // rendering into their images to the bridge (its Released, not Frame
+    // Generation's capture), so End waits for the game's queue past that
+    // rendering before it frees the images. They stay kept for the runtime.
+    void SubmitKeptVulkanBridgeReleasesLocked();
     void PollQuadViewsDiagnosticVisualizationToggle();
     void ResetQuadViewsDiagnosticVisualizationState();
     bool PollInputBindingDown(const InputBinding& binding);
@@ -892,6 +1001,14 @@ class OpenXrLayer {
     std::mutex osd_vulkan_queue_mutex_;
     std::atomic<bool> osd_monitoring_{false};
     std::atomic<bool> osd_should_render_{true};
+    // The runtime's frame timing as every runtime wait and begin passes it.
+    // SteamVR rejects (XR_ERROR_TIME_INVALID) an xrEndFrame whose displayTime is
+    // older than the prediction of the frame begun before the one ending;
+    // SubmitRuntimeFrame raises such a time to that floor.
+    std::atomic<XrTime> runtime_latest_wait_prediction_{0};
+    std::atomic<XrTime> runtime_begun_prediction_{0};
+    std::atomic<XrTime> runtime_end_floor_{0};
+    std::atomic<std::uint64_t> runtime_end_raises_{0};
     std::optional<std::chrono::steady_clock::time_point> osd_last_input_poll_;
     bool osd_toggle_down_{false}, osd_cycle_down_{false}, osd_was_enabled_{false};
     std::atomic<bool> performance_wanted_{false}; // last SetWanted: a shown layout has the PERFORMANCE row
@@ -963,6 +1080,8 @@ class OpenXrLayer {
     // Direct3D 12: the runtime is given Frame Generation's queue (see
     // FrameGenQueueSubstitution); decided at xrCreateSession.
     FrameGenQueueSubstitution framegen_queue_;
+    bool framegen_queue_diagnostics_{false}; // session constant, opt-in slow-call snapshots
+    std::atomic<std::int64_t> framegen_queue_diagnostics_next_ms_{0};
     // Direct3D 11 games with Frame Generation: the session is Direct3D 12 and
     // the game renders into images shared with it (see D3D11Bridge); decided
     // at xrCreateSession.
@@ -1007,6 +1126,11 @@ class OpenXrLayer {
     VulkanBridge vulkan_bridge_;
     bool vulkan_bridge_lost_logged_{false};  // mutex_
     bool vulkan_bridge_depth_logged_{false}; // mutex_
+    // The bridge gives a swapchain of the game's motion vectors back to its
+    // queue at each release (VulkanBridge::MarkMotion): a giving back waits
+    // on the GPU for its copy, so the frame's end makes every copy before
+    // Frame Generation's captures (HandOverBridgedReleasesLocked). mutex_.
+    bool vulkan_bridge_motion_{false};
     std::chrono::steady_clock::time_point vulkan_bridge_last_summary_; // mutex_
     // Either bridge's swapchain, and one whose runtime images never get
     // anything (its calls need no ordering with the game's queue).
@@ -1105,6 +1229,15 @@ class OpenXrLayer {
     ProcessExitFile runtime_relay_exit_status_;
     ProcessExitFile runtime_relay_exit_control_;
     bool runtime_relay_pruned_{false}; // Watcher thread only.
+    // The public status file (external_status.h), written beside the relay's
+    // heartbeat while a session runs. Resolved with the relay root. A normal
+    // process exit removes it while it is still this process's (games that
+    // skip OpenXR teardown); guarded by mutex_.
+    std::filesystem::path external_status_path_;
+    ProcessExitFile external_status_exit_;
+    // A session's end could not remove it yet (a reader held it): tried again
+    // at the next polls while no session runs. Watcher thread only.
+    bool external_status_remove_pending_{false};
     // The app's last Rescan inputs request taken (Unix ms). Watcher thread only.
     std::uint64_t input_rescan_taken_at_{0};
     // The Frame Generation events PollFrameGenRecorder last saw (watcher
@@ -1330,6 +1463,11 @@ class OpenXrLayer {
     bool turbo_last_should_render_{true};
     XrEnvironmentBlendMode turbo_last_environment_blend_mode_{XR_ENVIRONMENT_BLEND_MODE_OPAQUE};
     XrTime turbo_max_returned_display_time_{0};
+    // The sequenced post-submit runtime wait has started and not yet published
+    // its prediction: an app wait now gets the frame after the cached one.
+    bool turbo_seq_wait_in_flight_{false}; // turbo_mutex_
+    TurboPredictionHistory turbo_prediction_history_; // turbo_mutex_, no pacing decisions
+    int turbo_prediction_fault_log_budget_{3}; // turbo_mutex_
     std::optional<std::chrono::steady_clock::time_point> turbo_last_wait_frame_wall_time_;
     // Toggle binding state (mutex_-guarded, polled from EndFrame like Depth's).
     bool turbo_toggle_enabled_{true};
@@ -1725,6 +1863,47 @@ class OpenXrLayer {
     bool has_logged_visibility_mask_mapping_{false};
     uint32_t logged_visibility_mask_shapes_{0}; // one bit per synthesized view and mask type
     bool has_logged_system_properties_{false};
+    // The space-warp probe (spacewarp_probe.h, mutex_): the extensions it took
+    // over for the instance, the motion vector size it last recommended, and
+    // the session's frames: all of them, those carrying either structure, the
+    // structures (stripped, or left behind a structure it cannot copy) and
+    // their frame-skip flags; as of the last summary too.
+    bool spacewarp_fb_owned_{false};
+    bool spacewarp_ext_owned_{false};
+    XrExtent2Di spacewarp_motion_vector_size_{};
+    bool spacewarp_properties_logged_{false};
+    bool spacewarp_config_views_logged_{false};
+    struct SpaceWarpProbeCounts {
+        std::uint64_t frames{0};
+        std::uint64_t frames_fb{0};
+        std::uint64_t frames_ext{0};
+        std::uint64_t views_stripped{0};
+        std::uint64_t views_left{0};
+        std::uint64_t frame_skips{0};
+        // XR_EXT_frame_synthesis' REQUEST_RELAXED_FRAME_INTERVAL: noted, not
+        // acted on (Auto may take it later).
+        std::uint64_t relaxed{0};
+        // Structures on the primary projection Frame Generation would not
+        // take as they are (ValidateEngineMotionView).
+        std::uint64_t invalid{0};
+    };
+    SpaceWarpProbeCounts spacewarp_counts_;
+    // Frames that carried a projection with views this session: Frame
+    // Generation's engine motion records count frames by it.
+    std::uint64_t spacewarp_projection_frames_{0};
+    SpaceWarpProbeCounts spacewarp_counts_summarized_;
+    bool spacewarp_first_frame_logged_{false};
+    std::chrono::steady_clock::time_point spacewarp_last_summary_{};
+    std::string spacewarp_last_view_;
+    // The handshake census (handshake_census.h): its own lock; the runtime's
+    // functions only its hooks call; and, under mutex_, the swapchain formats
+    // the application was given last, and the swapchains the probe's frames
+    // used by role, with the application's calls on them as of the last frame.
+    HandshakeCensus handshake_census_;
+    std::array<std::atomic<PFN_xrVoidFunction>, static_cast<std::size_t>(CensusFunction::kCount)> census_next_{};
+    std::vector<int64_t> census_swapchain_formats_;
+    std::vector<CensusSwapchain> census_swapchains_;
+    std::vector<std::pair<const char*, XrSwapchain>> census_roles_; // census_swapchains_' roles, as last seen
     uint32_t cached_quadviews_stereo_recommended_width_{0};
     uint32_t cached_quadviews_stereo_recommended_height_{0};
     uint32_t cached_quadviews_stereo_max_width_{0};
@@ -1769,6 +1948,16 @@ class OpenXrLayer {
     uint32_t eye_gaze_sync_transition_logs_remaining_{32};
     std::optional<std::chrono::steady_clock::time_point> last_eye_gaze_bound_sources_probe_;
     std::string eye_gaze_bound_sources_diagnostic_{"not-probed"};
+    // Gaze read while the session is VISIBLE but another app or overlay holds
+    // input focus; reset whenever the session is focused again.
+    std::string eye_gaze_unfocused_outcome_;
+    std::optional<XrQuaternionf> eye_gaze_unfocused_last_orientation_;
+    uint32_t eye_gaze_unfocused_identical_frames_{0};
+    uint32_t eye_gaze_unfocused_logs_remaining_{16};
+    // Focused and inactive since (reset by valid gaze or focus loss); the
+    // "no data" line is logged once per session.
+    std::optional<std::chrono::steady_clock::time_point> eye_gaze_inactive_since_;
+    bool eye_gaze_no_data_logged_{false};
     std::vector<ViewAdjustmentData> locate_views_original_scratch_;
     std::vector<ViewAdjustmentData> locate_views_adjusted_scratch_;
     std::vector<ViewAdjustmentData> locate_views_depth_native_scratch_;

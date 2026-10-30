@@ -15,7 +15,9 @@ signed layer into Program Files and registers it; Windows asks for an administra
 Guards:
 - Refuses a checkout with uncommitted changes to tracked files; -AllowDirty overrides, and
   the ledger records it.
-- Refuses a DLL older than any of the layer's source files; rebuild first.
+- Refuses a DLL older than any file compiled into it, a build not configured since its definition
+  (CMake files, tauri.conf.json's version) changed, and a staged manifest or sound that is not the
+  checkout's; rebuild first. Tests, tools and other files the DLL is not built from never count.
 - The signing client is a pinned NuGet package, checked against its SHA256 when it is
   downloaded and against Microsoft's signature before every use.
 - Only the Azure CLI credential is offered to Azure, and only the file's digest is sent.
@@ -52,8 +54,14 @@ $ClientPackage = "Microsoft.ArtifactSigning.Client"
 $ClientVersion = "1.0.128"
 $ClientSha256 = "74BD7D27E6CE1051409C38D9B46BC8DF0400ECD643D51FFBF2AC00869061E40B"
 $TimestampUrl = "http://timestamp.acs.microsoft.com"
-# The paths whose changes change the layer DLL (tauri.conf.json carries its version).
-$LayerSources = @("layer", "CMakeLists.txt", "cmake", "third_party", "app/src-tauri/tauri.conf.json")
+# What the layer DLL is compiled from: its sources and headers, the shaders and the script that
+# embeds them, the optical flow headers. A test, tool or asset is not: a change there relinks
+# nothing, so it never counts.
+$LayerSources = @("layer/src", "layer/include", "layer/shaders", "layer/cmake", "third_party/nvidia-optical-flow")
+# What it is built by: the build's definition, and tauri.conf.json, which carries its version. A
+# build configures first, then relinks the DLL if the change changed it; a change that does not
+# (a test added) relinks nothing, so these count against the configure, not the DLL.
+$LayerDefinition = @("CMakeLists.txt", "layer/CMakeLists.txt", "cmake", "app/src-tauri/tauri.conf.json")
 
 function Invoke-Git {
     param([string]$Root, [string[]]$Arguments)
@@ -129,17 +137,47 @@ foreach ($path in @($sourceDll, $sourceManifest)) {
         throw "'$path' was not found. Build the layer first (scripts\Build-Layer.ps1 -Configuration $Configuration)."
     }
 }
-# Built from these sources: none of the layer's tracked files is newer than the
-# DLL (with the checkout clean, they are the commit's). Commit times would not
-# do: building, testing, then committing leaves the DLL older than its commit,
-# and a rebuild of unchanged sources does not relink it.
+function Get-NewestTracked {
+    param([string[]]$Paths)
+    return Invoke-Git $repoRoot (@("ls-files", "--") + $Paths) | Where-Object { $_ } |
+        ForEach-Object { Get-Item -LiteralPath (Join-Path $repoRoot $_) -ErrorAction SilentlyContinue } |
+        Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+}
+# Built from these sources: none of the tracked files the DLL is compiled from
+# is newer than it (with the checkout clean, they are the commit's). Commit
+# times would not do: building, testing, then committing leaves the DLL older
+# than its commit, and a rebuild of unchanged sources does not relink it.
 $built = (Get-Item -LiteralPath $sourceDll).LastWriteTimeUtc
-$newest = Invoke-Git $repoRoot (@("ls-files", "--") + $LayerSources) | Where-Object { $_ } |
-    ForEach-Object { Get-Item -LiteralPath (Join-Path $repoRoot $_) -ErrorAction SilentlyContinue } |
-    Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+$newest = Get-NewestTracked $LayerSources
 if ($newest -and $newest.LastWriteTimeUtc -gt $built) {
     throw "'$sourceDll' was built at $($built.ToString('u')), before '$($newest.FullName)' last changed " +
           "($($newest.LastWriteTimeUtc.ToString('u'))): rebuild it."
+}
+# ...as the build's definition now says: configured since it last changed (each
+# configure rewrites the layer's generate stamp; the build then relinked the
+# DLL if the change changed it). Without the stamp, against the DLL itself.
+$configureStamp = Join-Path $repoRoot (Join-Path $BuildDir "layer\CMakeFiles\generate.stamp")
+$configured = if (Test-Path -LiteralPath $configureStamp -PathType Leaf) {
+    (Get-Item -LiteralPath $configureStamp).LastWriteTimeUtc
+} else {
+    $built
+}
+$newest = Get-NewestTracked $LayerDefinition
+if ($newest -and $newest.LastWriteTimeUtc -gt $configured) {
+    throw "'$sourceDll' was configured at $($configured.ToString('u')), before '$($newest.FullName)' last changed " +
+          "($($newest.LastWriteTimeUtc.ToString('u'))): rebuild it."
+}
+# Staged beside it as the build copies them: the manifest and the sounds, as
+# the checkout has them (copied only when they differ, so by content).
+$copies = @([pscustomobject]@{ built = $sourceManifest; source = "layer/manifest/$LayerManifest" })
+$copies += @(Invoke-Git $repoRoot @("ls-files", "--", "layer/assets/sounds") | Where-Object { $_ } |
+    ForEach-Object { [pscustomobject]@{ built = Join-Path $buildOutput (Join-Path "sounds" (Split-Path -Leaf $_)); source = $_ } })
+foreach ($copy in $copies) {
+    $source = Join-Path $repoRoot $copy.source
+    if (-not (Test-Path -LiteralPath $copy.built -PathType Leaf) -or
+        (Get-FileHash -LiteralPath $copy.built -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash) {
+        throw "'$($copy.built)' is not the checkout's '$source': rebuild it."
+    }
 }
 
 # --- Settings: the release workflow's variables, else the local file.

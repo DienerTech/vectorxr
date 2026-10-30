@@ -1,0 +1,89 @@
+{
+  "field": {
+    "between": "{field} must be between {min} and {max}",
+    "betweenCm": "{field} must be between {min} and {max} cm",
+    "integerBetween": "{field} must be an integer between {min} and {max}",
+    "wholeNumberFromTo": "{field} must be a whole number from {min} to {max}",
+    "boolean": "{field} must be a boolean",
+    "trueOrFalse": "{field} must be true or false",
+    "required": "{field} is required",
+    "smallerThan": "{field} must be smaller than {other}",
+    "duplicates": "{field} duplicates {value}",
+    "wavFile": "{field} must point to a .wav file"
+  },
+  "osd": {
+    "between": "OSD {field} must be between {min} and {max}",
+    "customColor": "OSD custom color must be a six-digit hex color",
+    "accent": "OSD accent is invalid",
+    "clockFormat": "OSD clock format must be 12 or 24 hour",
+    "compactMetrics": "OSD compact performance selection is invalid",
+    "bodyOrder": "OSD body order must contain each row once"
+  },
+  "binding": {
+    "chordEmpty": "{field} must include at least one key",
+    "chordUnsupportedKey": "{field} contains unsupported key: {key}",
+    "chordPrimaryKey": "{field} must include exactly one non-modifier key",
+    "inputPath": "{field} must use button-1 through button-128 or hat-1 through hat-4 with a supported direction"
+  },
+  "pivot": {
+    "positionAssistAngles": "{field} requires 0 <= start angle < full-offset angle <= 180",
+    "responseMode": "{field} must be \"continuous\" or \"stepped\"",
+    "stepGlideMode": "{field} must be \"instant\" or \"glide\"",
+    "quickViewDuplicateId": "{field} duplicates another Quick View",
+    "nudgeSetReservedId": "{field} uses the reserved None selection",
+    "nudgeSetDuplicateId": "{field} duplicates another Nudge Set",
+    "unknownNudgeSet": "{field} references an unknown Nudge Set"
+  },
+  "quadviews": {
+    "trackingMode": "{field} must be head or eye"
+  },
+  "framegen": {
+    "synthesisMode": "{field} must be interpolate or extrapolate",
+    "flowQuality": "{field} must be performance, balanced, or quality",
+    "motionEstimation": "{field} must be shader or hardware",
+    "frameMultiplier": "{field} must be auto, dynamic, 2x, 3x, or 4x",
+    "diagnosticView": "{field} must be off, flow, confidence, or tint",
+    "interpolateFlow": "{field} must be auto, hardware, or shader"
+  },
+  "turbo": {
+    "predictionPercent": "Turbo experimental prediction dampening must be an integer from 50 to 100",
+    "frameLimit": "Turbo experimental frame cap must be 0 (off) or an integer from 20 to 240"
+  },
+  "applications": {
+    "idFormat": "{field} must use lowercase letters, numbers, and hyphens",
+    "duplicateId": "{field} duplicates another application",
+    "duplicateExe": "{field} duplicates another application",
+    "unknownApplication": "{field} references unknown application: {application}"
+  },
+  "profiles": {
+    "conflict": "{profile} conflicts with profiles[{first}] for application {application}; first enabled profile wins"
+  },
+  "version": "version must equal {version}",
+  "warnings": {
+    "turboFrameGenOverlap": "Turbo and Frame Generation are both on for {targets}. Frame Generation takes over frame pacing; Turbo stays off in sessions where Frame Generation runs.",
+    "moreApplications_one": "{count} more",
+    "moreApplications_other": "{count} more",
+    "applicationsWithoutProfile": "applications without a custom profile"
+  },
+  "store": {
+    "loadBlocked": "Settings could not be loaded, so saving is off to keep the file on disk: {error}. Fix the file and reopen VectorXR, import a config, or reset to defaults.",
+    "loadConfigFailed": "Failed to load config",
+    "loadSeenAppsFailed": "Failed to load seen apps",
+    "loadRuntimePacingFailed": "Failed to load runtime pacing state",
+    "loadTurboMetricsFailed": "Failed to load turbo metrics",
+    "turboMetricsCleared": "Turbo metrics cleared",
+    "clearTurboMetricsFailed": "Failed to clear turbo metrics",
+    "pacingVerdictCleared": "Pacing verdict cleared for {runtime}; Auto re-discovers at the next session",
+    "clearPacingVerdictFailed": "Failed to clear pacing verdict",
+    "configSaved": "Config saved",
+    "saveConfigFailed": "Failed to save config",
+    "reloadedFromDisk": "Loaded settings changed on disk",
+    "configReset": "Config reset to defaults",
+    "resetConfigFailed": "Failed to reset config",
+    "changesDiscarded": "Unsaved changes discarded",
+    "configImported": "Config imported — save to write to disk",
+    "applicationAdded": "{exe} added to the application registry",
+    "seenAppsCleared": "Seen apps cleared",
+    "clearSeenAppsFailed": "Failed to clear seen apps"
+  }
+}

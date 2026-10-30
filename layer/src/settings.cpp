@@ -274,6 +274,21 @@ std::optional<FrameGenFlowQuality> ParseFrameGenFlowQuality(const std::string& v
     return std::nullopt;
 }
 
+const char* ToString(FrameGenInterpolateFlow flow) {
+    switch (flow) {
+    case FrameGenInterpolateFlow::kHardware: return "hardware";
+    case FrameGenInterpolateFlow::kShader: return "shader";
+    default: return "auto";
+    }
+}
+
+std::optional<FrameGenInterpolateFlow> ParseFrameGenInterpolateFlow(const std::string& value) {
+    if (value == "auto") return FrameGenInterpolateFlow::kAuto;
+    if (value == "hardware") return FrameGenInterpolateFlow::kHardware;
+    if (value == "shader") return FrameGenInterpolateFlow::kShader;
+    return std::nullopt;
+}
+
 const char* ToString(FrameGenMotionEstimation estimation) {
     return estimation == FrameGenMotionEstimation::kHardware ? "hardware" : "shader";
 }

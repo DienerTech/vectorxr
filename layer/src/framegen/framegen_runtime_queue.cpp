@@ -15,7 +15,9 @@
 #include <cstdlib>
 #include <deque>
 #include <mutex>
+#include <sstream>
 #include <unordered_map>
+#include <vector>
 
 namespace depthxr {
 
@@ -422,6 +424,46 @@ std::string FrameGenQueueSubstitution::ShownLayersSummary() const {
     return "Frame Generation's shown layers at session end (lazy): lazyReleases=" +
            std::to_string(counts.releases) + " cpuWaits=" + std::to_string(counts.cpu_waits) +
            " runtimeQueueWaits=" + std::to_string(counts.gpu_waits) + ".";
+}
+
+std::string FrameGenQueueSubstitution::Describe() const {
+    if (!impl_) {
+        return "not substituted";
+    }
+    // Runtime calls can hold a swapchain's calls mutex while the runtime
+    // stalls. Diagnostics must not join that stall, nor reverse the normal
+    // calls -> mutex lock order by waiting on calls under mutex.
+    std::unique_lock lock(impl_->mutex, std::try_to_lock);
+    if (!lock) {
+        return "queue state busy";
+    }
+    std::ostringstream text;
+    text << "released=" << impl_->released_value << '/' << impl_->released->GetCompletedValue()
+         << " handedBack=" << impl_->handed_back_value << '/' << impl_->handed_back->GetCompletedValue();
+    std::vector<std::pair<XrSwapchain, std::shared_ptr<Impl::Swapchain>>> swapchains(impl_->swapchains.begin(),
+                                                                                impl_->swapchains.end());
+    lock.unlock();
+    std::sort(swapchains.begin(), swapchains.end(), [](const auto& a, const auto& b) {
+        return reinterpret_cast<std::uintptr_t>(a.first) < reinterpret_cast<std::uintptr_t>(b.first);
+    });
+    for (const auto& [swapchain, state] : swapchains) {
+        text << " [swapchain=" << reinterpret_cast<std::uintptr_t>(swapchain);
+        std::unique_lock calls(state->calls, std::try_to_lock);
+        if (!calls) {
+            text << " calls=busy]";
+            continue;
+        }
+        const auto oldest = std::find_if(state->held_back.begin(), state->held_back.end(),
+                                         [](const Impl::Call& call) { return !call.wait; });
+        const auto waits = std::count_if(state->held_back.begin(), state->held_back.end(),
+                                         [](const Impl::Call& call) { return call.wait; });
+        text << " heldWaits=" << waits << " heldReleases=" << state->releases
+             << " oldest=" << (oldest != state->held_back.end() ? oldest->value : 0)
+             << " held=" << state->held << " images=" << state->image_count
+             << " directWaits=" << state->direct_waits << " shownLazily=" << state->shown_lazily
+             << " runtimeReleased=" << state->runtime_released << ']';
+    }
+    return text.str();
 }
 
 void FrameGenQueueSubstitution::Reset() {

@@ -1,0 +1,108 @@
+{
+  "editor": {
+    "type": "繫結類型",
+    "types": {
+      "none": "無",
+      "keyboard": "鍵盤",
+      "device": "裝置"
+    },
+    "noneText": "未指派繫結。在選取繫結之前，此動作不會執行。",
+    "modifiers": "輔助按鍵",
+    "primaryKey": "主要按鍵"
+  },
+  "sound": {
+    "playOnFire": "此動作觸發時播放音效",
+    "playOnTransition": "啟用／停用時播放音效",
+    "explanation": "為此繫結額外加上聲音提示。可將欄位保留為預設音調，或選擇您自己的簡短 .wav 檔。",
+    "defaultTone": "預設音調",
+    "single": "音效",
+    "activate": "啟用",
+    "deactivate": "停用",
+    "browse": "瀏覽…",
+    "test": "測試",
+    "pickerFailed": "無法開啟檔案選擇器。",
+    "playFailed": "無法播放音效。"
+  },
+  "list": {
+    "add": "新增繫結",
+    "noneText": "未指派任何繫結。在新增繫結之前，此動作不會執行。",
+    "bindingNumber": "繫結 {number}",
+    "bindingDescription": "選擇鍵盤快速鍵或偵測到的裝置輸入。"
+  },
+  "panel": {
+    "soundEnabledHint": "已為某個繫結啟用音效回饋",
+    "soundEnabledAria": "已啟用音效回饋",
+    "editOne": "編輯繫結…",
+    "editMany": "編輯繫結…"
+  },
+  "page": {
+    "breadcrumbAria": "階層連結",
+    "breadcrumbBinding": "繫結",
+    "returnHint": "按 Esc 或「完成」即可返回 {module}。",
+    "closeAria": "關閉繫結並返回 {module}",
+    "listDescription": "{description} 請為您飛行時使用的每個裝置各新增一個繫結；其中任何一個都能觸發動作。"
+  },
+  "device": {
+    "joystickDevice": "搖桿裝置",
+    "scanning": "正在掃描…",
+    "selectDevice": "選取裝置",
+    "disconnectedOption": "{name}（已中斷連線）",
+    "disconnectedName": "<裝置已中斷連線>",
+    "noDeviceSelected": "未選取裝置",
+    "assignedInput": "已指派的輸入",
+    "manualAria": "手動選擇搖桿輸入",
+    "selectInput": "選取輸入…",
+    "manualHint": "不需等待輸入，直接選擇按鈕或 HAT 方向。",
+    "manualHintNoDevice": "請先選取已連接的搖桿。",
+    "manual": "手動",
+    "button": "按鈕 {number}",
+    "hatInput": "HAT {number} {direction}",
+    "hatDirections": {
+      "up": "上",
+      "upRight": "右上",
+      "right": "右",
+      "downRight": "右下",
+      "down": "下",
+      "downLeft": "左下",
+      "left": "左",
+      "upLeft": "左上"
+    },
+    "noInput": "未擷取到輸入",
+    "buttonCount_other": "{count} 個按鈕",
+    "hatCount_other": "{count} 個 HAT",
+    "capabilities": "{buttons}、{hats}",
+    "disconnectedTitle": "已繫結的裝置目前未連接",
+    "disconnectedBody": "此繫結仍儲存為 {device} / {input}，但 Windows 目前未回報該搖桿。",
+    "capture": "擷取輸入",
+    "canceling": "正在取消…",
+    "listening": "正在聆聽… {seconds} 秒",
+    "cancelListening": "取消聆聽（{seconds} 秒）",
+    "refresh": "重新整理裝置",
+    "metadata": "中繼資料",
+    "metadataTitle": "搖桿中繼資料",
+    "deviceGuid": "裝置 GUID",
+    "connectionStatus": "連線狀態",
+    "productGuid": "產品 GUID",
+    "inputPath": "輸入路徑",
+    "inputLabel": "輸入標籤",
+    "unassigned": "未指派",
+    "unavailable": "無法使用",
+    "connected": "已連接",
+    "disconnected": "已中斷連線",
+    "status": {
+      "canceling": "正在取消輸入擷取…",
+      "cancelFailedWith": "無法取消擷取：{message}",
+      "cancelFailed": "無法取消擷取。擷取會在時間限制到達時自動停止。",
+      "noDevices": "找不到任何搖桿裝置。",
+      "selectFirst": "擷取輸入前，請先選取已連接的搖桿。",
+      "listening": "僅聆聽 {device}。按 Esc 可取消；擷取會在 15 秒後自動停止。",
+      "canceled": "已取消輸入擷取。",
+      "timedOut": "輸入擷取在 15 秒後逾時。",
+      "captured": "已擷取 {device} / {input}。",
+      "captureFailed": "無法擷取搖桿輸入。",
+      "selected": "已選取 {device}。請擷取輸入或手動選擇輸入。",
+      "assigned": "已手動指派 {device} / {input}。"
+    },
+    "listFailed": "無法列出搖桿裝置。"
+  }
+}

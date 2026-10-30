@@ -1,0 +1,210 @@
+{
+  "tabs": {
+    "home": {
+      "label": "Início",
+      "subtitle": "Status, atualizações e suporte"
+    },
+    "core": {
+      "label": "Configurações",
+      "subtitle": "Execução, logs, tema e configuração",
+      "suiteOn": "Suíte ligada",
+      "suiteOff": "Suíte desligada"
+    },
+    "osd": {
+      "label": "Exibição na tela",
+      "subtitle": "Exibição no headset, posicionamento e atribuições"
+    },
+    "registry": {
+      "label": "Registro de aplicativos",
+      "subtitle": "Registre aplicativos para atribuir perfis",
+      "status_one": "{count} aplicativo",
+      "status_other": "{count} aplicativos"
+    },
+    "layers": {
+      "label": "Camadas OpenXR",
+      "subtitle": "Inspecione e gerencie a ordem das camadas implícitas",
+      "status": "Sistema"
+    },
+    "about": {
+      "label": "Sobre",
+      "subtitle": "Informações do projeto, notas da versão e suporte"
+    },
+    "quadviews": {
+      "label": "Quadviews",
+      "subtitle": "Controle de renderização foveada dinâmica"
+    },
+    "turbo": {
+      "label": "Turbo",
+      "subtitle": "Substituição do ritmo de quadros para limites de fps teimosos"
+    },
+    "framegen": {
+      "label": "Frame Generation",
+      "subtitle": "Movimento mais fluido com quadros gerados"
+    },
+    "pivotxr": {
+      "label": "Pivot",
+      "subtitle": "Ajuste de rotação - cuide das suas seis horas!"
+    },
+    "depthxr": {
+      "label": "Profundidade",
+      "subtitle": "Ajuste de profundidade estéreo - veja o mundo de um jeito novo!"
+    }
+  },
+  "status": {
+    "trayFailed": "Falha ao configurar o ícone da bandeja",
+    "enabledFromTray": "VectorXR ativado pela bandeja",
+    "disabledFromTray": "VectorXR desativado pela bandeja",
+    "logLevelDebugFromTray": "Nível de log definido como Debug pela bandeja",
+    "logLevelInfoFromTray": "Nível de log definido como Info pela bandeja",
+    "fixBeforeSaving": "Corrija os erros de validação antes de salvar",
+    "loadLogsFailed": "Falha ao carregar os logs",
+    "loadLayersFailed": "Falha ao carregar o status das camadas OpenXR",
+    "fixBeforeExporting": "Corrija os erros de validação antes de exportar",
+    "configExported": "Configuração exportada",
+    "exportCanceled": "Exportação cancelada",
+    "exportFailed": "Falha ao exportar a configuração",
+    "debugExported": "Informações de depuração exportadas",
+    "debugExportCanceled": "Exportação de depuração cancelada",
+    "debugExportFailed": "Falha ao exportar as informações de depuração",
+    "importInvalidJson": "Falha na importação: o arquivo não é um JSON válido"
+  },
+  "resetConfirm": "Redefinir o VectorXR para o padrão?\n\nIsso apagará todas as configurações salvas, as entradas do registro de aplicativos, os perfis e os dados de descoberta de aplicativos OpenXR. Esta ação não pode ser desfeita.",
+  "updates": {
+    "available": "A versão {version} está disponível. Clique para ver os detalhes.",
+    "checkFailed": "Não é possível verificar atualizações agora.",
+    "httpFailed": "A verificação de atualizações no GitHub falhou com HTTP {status}",
+    "invalidRelease": "O GitHub não retornou uma versão válida"
+  },
+  "sidebar": {
+    "appSettings": "Configurações do aplicativo",
+    "enhancements": "Aprimoramentos OpenXR",
+    "suiteOff": "Os efeitos de execução do VectorXR estão desligados",
+    "moduleTitle": "{subtitle}. {status}",
+    "saveHint": "Salve as alterações para aplicar as configurações. Cada aprimoramento indica quais alterações exigem reiniciar o aplicativo de VR.",
+    "logoAlt": "Logotipo do VectorXR",
+    "version": "v{version}",
+    "updateTooltip": "Uma nova versão está disponível. Clique para ver os detalhes.",
+    "updateAria": "Uma nova versão está disponível"
+  },
+  "saveBar": {
+    "unsaved": "Alterações não salvas",
+    "allSaved": "Todas as alterações salvas",
+    "pending": "Pendente",
+    "dirtyHint": "Salve para aplicar ou descarte para reverter.",
+    "cleanHint": "A configuração corresponde ao disco.",
+    "saving": "Salvando...",
+    "save": "Salvar alterações",
+    "discard": "Descartar",
+    "fixBeforeSaving": "Corrija antes de salvar:",
+    "moreErrors_one": "…e mais {count}",
+    "moreErrors_other": "…e mais {count}"
+  },
+  "importPreview": {
+    "eyebrow": "Importar",
+    "title": "Revise antes de aplicar",
+    "description": "Uma importação válida será salva imediatamente. Importações com problemas de validação ainda podem ser carregadas no editor para correção.",
+    "whatWillLoad": "O que será carregado",
+    "applications": "Aplicativos: {number}",
+    "moduleDefault_one": "{module} padrão: {state} — {count} perfil",
+    "moduleDefault_other": "{module} padrão: {state} — {count} perfis",
+    "issuesFound_one": "{count} problema de validação encontrado",
+    "issuesFound_other": "{count} problemas de validação encontrados",
+    "issuesHint": "Você ainda pode aplicar — os erros aparecerão no painel Validação e o salvamento ficará bloqueado até que sejam resolvidos.",
+    "valid": "A estrutura e as faixas de valores da configuração parecem válidas.",
+    "applyToEditor": "Aplicar ao editor",
+    "importAndSave": "Importar e salvar"
+  },
+  "debugExport": {
+    "eyebrow": "Diagnóstico",
+    "title": "Exportar informações de depuração",
+    "description": "O VectorXR vai empacotar detalhes de solução de problemas em um arquivo ZIP que você pode compartilhar durante os testes.",
+    "included": "Incluído",
+    "items": {
+      "settings": "JSON das configurações atuais e salvas",
+      "seenApps": "Aplicativos OpenXR vistos",
+      "logs": "Logs retidos do VectorXR e o rastreamento mais recente da Frame Generation (log Debug)",
+      "layers": "Instantâneo das camadas OpenXR",
+      "health": "Resumo da verificação de integridade",
+      "version": "Versão do aplicativo e caminhos relevantes",
+      "turboMetrics": "Métricas do Turbo e decisões de ritmo",
+      "turboSafety": "Bloqueios de segurança do Turbo e histórico de falhas",
+      "runtime": "Diagnósticos do runtime ao vivo e salvos",
+      "inventory": "Inventário de arquivos e erros de coleta"
+    },
+    "limits": "Os arquivos brutos são limitados a 8 MiB cada e 64 MiB no total, e o ZIP é compactado. Logs maiores incluem o início e a saída mais recente; arquivos omitidos ou limitados são listados no ZIP. Históricos limpos e métricas que não foram registradas não estão disponíveis.",
+    "privacy": "O pacote pode incluir caminhos de arquivos locais e nomes de executáveis de jogos. Ele não inclui variáveis de ambiente do sistema nem arquivos não relacionados.",
+    "exporting": "Exportando...",
+    "save": "Salvar ZIP",
+    "fileType": "Pacote de depuração do VectorXR"
+  },
+  "profile": {
+    "number": "Perfil {number}",
+    "editName": "Editar o nome do perfil",
+    "noApplications": "Nenhum aplicativo",
+    "priority": "Ordem de prioridade — quando perfis se sobrepõem em um aplicativo, o perfil mais acima fica com qualquer atribuição que eles compartilhem.",
+    "moveUp": "Mover o perfil para cima (prioridade mais alta)",
+    "moveDown": "Mover o perfil para baixo (prioridade mais baixa)",
+    "enabledTitle": "Este perfil aplica configurações personalizadas de {module} aos aplicativos atribuídos.",
+    "disabledTitle": "Este perfil é ignorado durante a execução.",
+    "on": "Perfil ligado",
+    "off": "Perfil desligado",
+    "conflict": "Conflito de perfis",
+    "applications": "Aplicativos",
+    "applicationsHelp": "Aplicativos registrados aos quais este perfil se aplica. O primeiro perfil ativo correspondente prevalece.",
+    "inactiveTitle": "Este perfil não será ativado",
+    "inactiveBody": "Este perfil ativado não está atribuído a nenhum aplicativo. Selecione pelo menos um aplicativo ou desligue o perfil.",
+    "offNote": "Este perfil está desligado e não tem efeito. Os aplicativos dele voltam ao perfil padrão de {module}."
+  },
+  "logViewer": {
+    "eyebrow": "Logs",
+    "title": "Visualizador de logs do VectorXR",
+    "description": "Os logs recentes da camada são mostrados como somente leitura para que o estado do runtime continue fácil de inspecionar.",
+    "loading": "Carregando logs...",
+    "directory": "Pasta de logs",
+    "unavailable": "Indisponível",
+    "logs": "Logs do VectorXR",
+    "empty": "Nenhum arquivo de log foi encontrado ainda. Inicie a camada em um título e reabra este visualizador.",
+    "selected": "Log selecionado",
+    "noneSelected": "Nenhum log selecionado",
+    "copied": "Copiado!",
+    "copyFailed": "Falha ao copiar",
+    "copy": "Copiar texto",
+    "opened": "Aberto!",
+    "openFailed": "Falha ao abrir",
+    "open": "Abrir pasta",
+    "noContent": "Nenhum conteúdo de log disponível."
+  },
+  "discord": {
+    "loading": "Carregando o Discord…",
+    "opening": "Abrindo o Discord…",
+    "join": "Entrar no Discord ↗",
+    "unavailable": "Discord indisponível",
+    "loadFailed": "Não foi possível carregar o convite do Discord. Tente de novo.",
+    "invitesUnavailable": "Os convites do Discord estão indisponíveis no momento.",
+    "openFailed": "Não foi possível abrir o navegador. Tente de novo.",
+    "retryAria": "Tentar carregar o convite do Discord de novo",
+    "loadingStatus": "Carregando o convite do Discord."
+  },
+  "healthCheck": {
+    "eyebrow": "Integridade do sistema",
+    "title": "Verificação de integridade",
+    "layer": "Camada do VectorXR",
+    "layerNotFound": "Não encontrada",
+    "lastSeenApp": "Último aplicativo visto",
+    "noApp": "Nenhum aplicativo OpenXR observado ainda",
+    "exportHint": "Exporte um pacote de depuração ao compartilhar detalhes de solução de problemas.",
+    "export": "Exportar informações de depuração"
+  },
+  "healthLoading": {
+    "label": "Carregando informações de integridade",
+    "checking": "Verificando"
+  },
+  "patchNotes": {
+    "eyebrow": "Notas da versão",
+    "title": "Atualizações recentes",
+    "description": "Tudo o que há de novo no aplicativo, com a entrada mais recente fixada no topo."
+  },
+  "setupGuide": {
+    "title": "Guia de configuração"
+  }
+}

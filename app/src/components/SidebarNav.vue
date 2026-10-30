@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 
 import logoUrl from '../assets/logo.png'
+import { t } from '../i18n/index.ts'
 import type { AppTab } from '../lib/model'
 
 const props = defineProps<{
@@ -15,6 +16,7 @@ const props = defineProps<{
     subtitle: string
     status: string
     badge?: string
+    statusWarning?: boolean
     enhancementActive?: boolean
   }>
 }>()
@@ -39,7 +41,7 @@ function moduleDotClass(tab: { enhancementActive?: boolean }): string {
 
 <template>
   <nav class="side-nav flex h-full w-56 shrink-0 flex-col border-r px-3 py-4">
-    <p class="side-nav-group-label px-2">App Settings</p>
+    <p class="side-nav-group-label px-2">{{ t('app.sidebar.appSettings') }}</p>
     <div class="mt-1.5 grid gap-1">
       <button
         v-for="tab in primaryTabs"
@@ -47,15 +49,17 @@ function moduleDotClass(tab: { enhancementActive?: boolean }): string {
         class="side-nav-item flex items-center justify-between gap-2 rounded-[0.65rem] px-3 py-2 text-left text-sm font-medium transition"
         :class="activeTab === tab.id ? 'side-nav-item-active' : ''"
         type="button"
+        :data-tab="tab.id"
         :title="tab.subtitle"
         @click="$emit('select', tab.id)"
       >
         <span>{{ tab.label }}</span>
-        <span v-if="tab.id === 'core' && tab.status === 'Suite off'" class="nav-dot nav-dot-warn" title="VectorXR runtime effects are off" />
+        <span v-if="tab.id === 'core' && tab.statusWarning" class="nav-dot nav-dot-warn" :title="t('app.sidebar.suiteOff')" />
+        <span v-else-if="tab.id === 'osd'" class="nav-dot" :class="moduleDotClass(tab)" :title="tab.status" />
       </button>
     </div>
 
-    <p class="side-nav-group-label mt-5 px-2">OpenXR Enhancements</p>
+    <p class="side-nav-group-label mt-5 px-2">{{ t('app.sidebar.enhancements') }}</p>
     <div class="mt-1.5 grid gap-1">
       <button
         v-for="tab in moduleTabs"
@@ -63,7 +67,8 @@ function moduleDotClass(tab: { enhancementActive?: boolean }): string {
         class="side-nav-item flex items-center justify-between gap-2 rounded-[0.65rem] px-3 py-2 text-left text-sm font-medium transition"
         :class="activeTab === tab.id ? 'side-nav-item-active' : ''"
         type="button"
-        :title="`${tab.subtitle}. ${tab.status}`"
+        :data-tab="tab.id"
+        :title="t('app.sidebar.moduleTitle', { subtitle: tab.subtitle, status: tab.status })"
         @click="$emit('select', tab.id)"
       >
         <span class="flex items-center gap-1.5">
@@ -74,20 +79,20 @@ function moduleDotClass(tab: { enhancementActive?: boolean }): string {
     </div>
 
     <div class="mt-auto px-2 pt-4">
-      <p class="text-[0.68rem] leading-4 text-soft">Save Changes to apply settings. Each enhancement notes which changes need a VR application restart.</p>
+      <p class="text-[0.68rem] leading-4 text-soft">{{ t('app.sidebar.saveHint') }}</p>
 
       <div class="mt-4 flex items-center gap-2.5 border-t pt-3" style="border-color: var(--app-border)">
-        <img :src="logoUrl" alt="VectorXR logo" class="side-nav-mark h-10 w-10 rounded-[0.6rem] object-contain" />
+        <img :src="logoUrl" :alt="t('app.sidebar.logoAlt')" class="side-nav-mark h-10 w-10 rounded-[0.6rem] object-contain" />
         <div>
           <p class="text-sm font-semibold tracking-tight">VectorXR</p>
-          <p class="text-[0.68rem] text-soft">v{{ version }}</p>
+          <p class="text-[0.68rem] text-soft">{{ t('app.sidebar.version', { version }) }}</p>
         </div>
         <button
           v-if="updateAvailable"
           class="update-arrow ml-auto inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full"
           type="button"
-          :title="updateTooltip || 'A new version is available. Click for details.'"
-          aria-label="A new version is available"
+          :title="updateTooltip || t('app.sidebar.updateTooltip')"
+          :aria-label="t('app.sidebar.updateAria')"
           @click="$emit('showUpdates')"
         >
           <svg aria-hidden="true" viewBox="0 0 20 20" fill="currentColor" class="h-4 w-4">

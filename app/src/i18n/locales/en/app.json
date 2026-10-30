@@ -1,0 +1,210 @@
+{
+  "tabs": {
+    "home": {
+      "label": "Home",
+      "subtitle": "Status, updates, and support"
+    },
+    "core": {
+      "label": "Settings",
+      "subtitle": "Runtime, logging, theme, and config",
+      "suiteOn": "Suite on",
+      "suiteOff": "Suite off"
+    },
+    "osd": {
+      "label": "On-Screen Display",
+      "subtitle": "Headset display, placement, and bindings"
+    },
+    "registry": {
+      "label": "Application Registry",
+      "subtitle": "Register applications for profile assignment",
+      "status_one": "{count} app",
+      "status_other": "{count} apps"
+    },
+    "layers": {
+      "label": "OpenXR Layers",
+      "subtitle": "Inspect and manage implicit layer order",
+      "status": "System"
+    },
+    "about": {
+      "label": "About",
+      "subtitle": "Project info, patch notes, and support"
+    },
+    "quadviews": {
+      "label": "Quadviews",
+      "subtitle": "Dynamic foveated rendering control"
+    },
+    "turbo": {
+      "label": "Turbo",
+      "subtitle": "Frame pacing override for stubborn fps caps"
+    },
+    "framegen": {
+      "label": "Frame Generation",
+      "subtitle": "Smoother motion with generated frames"
+    },
+    "pivotxr": {
+      "label": "Pivot",
+      "subtitle": "Rotation tuning - watch your six!"
+    },
+    "depthxr": {
+      "label": "Depth",
+      "subtitle": "Stereo depth tuning - see the world in a new way!"
+    }
+  },
+  "status": {
+    "trayFailed": "Failed to set up the tray icon",
+    "enabledFromTray": "VectorXR enabled from the tray",
+    "disabledFromTray": "VectorXR disabled from the tray",
+    "logLevelDebugFromTray": "Log level set to Debug from the tray",
+    "logLevelInfoFromTray": "Log level set to Info from the tray",
+    "fixBeforeSaving": "Fix validation errors before saving",
+    "loadLogsFailed": "Failed to load logs",
+    "loadLayersFailed": "Failed to load OpenXR layer status",
+    "fixBeforeExporting": "Fix validation errors before exporting",
+    "configExported": "Config exported",
+    "exportCanceled": "Export canceled",
+    "exportFailed": "Failed to export config",
+    "debugExported": "Debug information exported",
+    "debugExportCanceled": "Debug export canceled",
+    "debugExportFailed": "Failed to export debug information",
+    "importInvalidJson": "Import failed: file is not valid JSON"
+  },
+  "resetConfirm": "Reset VectorXR to defaults?\n\nThis will erase all saved settings, application registry entries, profiles, and OpenXR application discovery data. This cannot be undone.",
+  "updates": {
+    "available": "Version {version} is available. Click for details.",
+    "checkFailed": "Unable to check for updates right now.",
+    "httpFailed": "GitHub update check failed with HTTP {status}",
+    "invalidRelease": "GitHub did not return a valid release"
+  },
+  "sidebar": {
+    "appSettings": "App Settings",
+    "enhancements": "OpenXR Enhancements",
+    "suiteOff": "VectorXR runtime effects are off",
+    "moduleTitle": "{subtitle}. {status}",
+    "saveHint": "Save Changes to apply settings. Each enhancement notes which changes need a VR application restart.",
+    "logoAlt": "VectorXR logo",
+    "version": "v{version}",
+    "updateTooltip": "A new version is available. Click for details.",
+    "updateAria": "A new version is available"
+  },
+  "saveBar": {
+    "unsaved": "Unsaved changes",
+    "allSaved": "All changes saved",
+    "pending": "Pending",
+    "dirtyHint": "Save to apply or discard to revert.",
+    "cleanHint": "Config matches disk.",
+    "saving": "Saving...",
+    "save": "Save Changes",
+    "discard": "Discard",
+    "fixBeforeSaving": "Fix before saving:",
+    "moreErrors_one": "…and {count} more",
+    "moreErrors_other": "…and {count} more"
+  },
+  "importPreview": {
+    "eyebrow": "Import",
+    "title": "Review before applying",
+    "description": "A valid import will be saved immediately. Imports with validation issues can still be loaded into the editor for repair.",
+    "whatWillLoad": "What will load",
+    "applications": "Applications: {number}",
+    "moduleDefault_one": "{module} default: {state} — {count} profile",
+    "moduleDefault_other": "{module} default: {state} — {count} profiles",
+    "issuesFound_one": "{count} validation issue found",
+    "issuesFound_other": "{count} validation issues found",
+    "issuesHint": "You can still apply — errors will appear in the Validation panel and save will be blocked until resolved.",
+    "valid": "Config structure and value ranges look valid.",
+    "applyToEditor": "Apply to Editor",
+    "importAndSave": "Import and Save"
+  },
+  "debugExport": {
+    "eyebrow": "Diagnostics",
+    "title": "Export Debug Information",
+    "description": "VectorXR will package troubleshooting details into a ZIP file you can share during testing.",
+    "included": "Included",
+    "items": {
+      "settings": "Current and saved settings JSON",
+      "seenApps": "Seen OpenXR apps",
+      "logs": "Retained VectorXR logs and the latest Frame Generation trace (Debug logging)",
+      "layers": "OpenXR layer snapshot",
+      "health": "Health check summary",
+      "version": "App version and relevant paths",
+      "turboMetrics": "Turbo metrics and pacing decisions",
+      "turboSafety": "Turbo safety blocks and fault history",
+      "runtime": "Live and saved runtime diagnostics",
+      "inventory": "File inventory and collection errors"
+    },
+    "limits": "Raw files are limited to 8 MiB each and 64 MiB total, and the ZIP is compressed. Larger logs include their start and their latest output; omitted or limited files are listed in the ZIP. Cleared history and metrics that were not recorded are unavailable.",
+    "privacy": "The package may include local file paths and game executable names. It does not include system environment variables or unrelated files.",
+    "exporting": "Exporting...",
+    "save": "Save ZIP",
+    "fileType": "VectorXR debug package"
+  },
+  "profile": {
+    "number": "Profile {number}",
+    "editName": "Edit profile name",
+    "noApplications": "No applications",
+    "priority": "Priority order — when profiles overlap on an application, the higher profile owns any binding they share.",
+    "moveUp": "Move profile up (higher priority)",
+    "moveDown": "Move profile down (lower priority)",
+    "enabledTitle": "This profile applies custom {module} settings to its assigned applications.",
+    "disabledTitle": "This profile is ignored at runtime.",
+    "on": "Profile On",
+    "off": "Profile Off",
+    "conflict": "Profile conflict",
+    "applications": "Applications",
+    "applicationsHelp": "Registered applications this profile applies to. The first active matching profile wins.",
+    "inactiveTitle": "This profile will not activate",
+    "inactiveBody": "This enabled profile is not assigned to any applications. Select at least one application or turn the profile off.",
+    "offNote": "This profile is off and has no effect. Its applications fall back to the default {module} profile."
+  },
+  "logViewer": {
+    "eyebrow": "Logs",
+    "title": "VectorXR Log Viewer",
+    "description": "Recent layer logs are shown read-only so the runtime state stays easy to inspect.",
+    "loading": "Loading logs...",
+    "directory": "Log Directory",
+    "unavailable": "Unavailable",
+    "logs": "VectorXR Logs",
+    "empty": "No log files were found yet. Start the layer in a title and reopen this viewer.",
+    "selected": "Selected Log",
+    "noneSelected": "No log selected",
+    "copied": "Copied!",
+    "copyFailed": "Copy Failed",
+    "copy": "Copy Text",
+    "opened": "Opened!",
+    "openFailed": "Open Failed",
+    "open": "Open Directory",
+    "noContent": "No log content available."
+  },
+  "discord": {
+    "loading": "Loading Discord…",
+    "opening": "Opening Discord…",
+    "join": "Join Discord ↗",
+    "unavailable": "Discord unavailable",
+    "loadFailed": "Could not load the Discord invite. Try again.",
+    "invitesUnavailable": "Discord invitations are currently unavailable.",
+    "openFailed": "Could not open the browser. Please try again.",
+    "retryAria": "Retry loading Discord invite",
+    "loadingStatus": "Loading Discord invite."
+  },
+  "healthCheck": {
+    "eyebrow": "System Health",
+    "title": "Health Check",
+    "layer": "VectorXR Layer",
+    "layerNotFound": "Not found",
+    "lastSeenApp": "Last Seen App",
+    "noApp": "No OpenXR app observed yet",
+    "exportHint": "Export a debug package when sharing troubleshooting details.",
+    "export": "Export Debug Information"
+  },
+  "healthLoading": {
+    "label": "Health information loading",
+    "checking": "Checking"
+  },
+  "patchNotes": {
+    "eyebrow": "Patch Notes",
+    "title": "Recent updates",
+    "description": "Everything new in the app, with the latest entry pinned at the top."
+  },
+  "setupGuide": {
+    "title": "Setup guide"
+  }
+}

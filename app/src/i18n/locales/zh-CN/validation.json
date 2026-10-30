@@ -1,0 +1,88 @@
+{
+  "field": {
+    "between": "{field} 必须介于 {min} 和 {max} 之间",
+    "betweenCm": "{field} 必须介于 {min} 和 {max} cm 之间",
+    "integerBetween": "{field} 必须是介于 {min} 和 {max} 之间的整数",
+    "wholeNumberFromTo": "{field} 必须是 {min} 到 {max} 之间的整数",
+    "boolean": "{field} 必须是布尔值",
+    "trueOrFalse": "{field} 必须为 true 或 false",
+    "required": "{field} 为必填项",
+    "smallerThan": "{field} 必须小于 {other}",
+    "duplicates": "{field} 与 {value} 重复",
+    "wavFile": "{field} 必须指向 .wav 文件"
+  },
+  "osd": {
+    "between": "OSD {field} 必须介于 {min} 和 {max} 之间",
+    "customColor": "OSD 自定义颜色必须是六位十六进制颜色",
+    "accent": "OSD 强调色无效",
+    "clockFormat": "OSD 时钟格式必须为 12 小时制或 24 小时制",
+    "compactMetrics": "OSD 紧凑性能选项无效",
+    "bodyOrder": "OSD 正文顺序必须包含每一行且仅包含一次"
+  },
+  "binding": {
+    "chordEmpty": "{field} 必须至少包含一个键",
+    "chordUnsupportedKey": "{field} 包含不受支持的键：{key}",
+    "chordPrimaryKey": "{field} 必须恰好包含一个非修饰键",
+    "inputPath": "{field} 必须使用 button-1 到 button-128，或使用 hat-1 到 hat-4 并带有受支持的方向"
+  },
+  "pivot": {
+    "positionAssistAngles": "{field} 要求 0 <= 起始角度 < 完全偏移角度 <= 180",
+    "responseMode": "{field} 必须为 \"continuous\" 或 \"stepped\"",
+    "stepGlideMode": "{field} 必须为 \"instant\" 或 \"glide\"",
+    "quickViewDuplicateId": "{field} 与另一个快速视图重复",
+    "nudgeSetReservedId": "{field} 使用了保留的“无”选项",
+    "nudgeSetDuplicateId": "{field} 与另一个微调组重复",
+    "unknownNudgeSet": "{field} 引用了未知的微调组"
+  },
+  "quadviews": {
+    "trackingMode": "{field} 必须为 head 或 eye"
+  },
+  "framegen": {
+    "synthesisMode": "{field} 必须为 interpolate 或 extrapolate",
+    "flowQuality": "{field} 必须为 performance、balanced 或 quality",
+    "motionEstimation": "{field} 必须为 shader 或 hardware",
+    "frameMultiplier": "{field} 必须为 auto、dynamic、2x、3x 或 4x",
+    "diagnosticView": "{field} 必须为 off、flow、confidence 或 tint",
+    "interpolateFlow": "{field} 必须为 auto、hardware 或 shader"
+  },
+  "turbo": {
+    "predictionPercent": "Turbo 实验性预测阻尼必须是 50 到 100 之间的整数",
+    "frameLimit": "Turbo 实验性帧率上限必须为 0（关闭）或 20 到 240 之间的整数"
+  },
+  "applications": {
+    "idFormat": "{field} 只能使用小写字母、数字和连字符",
+    "duplicateId": "{field} 与另一个应用程序重复",
+    "duplicateExe": "{field} 与另一个应用程序重复",
+    "unknownApplication": "{field} 引用了未知的应用程序：{application}"
+  },
+  "profiles": {
+    "conflict": "对于应用程序 {application}，{profile} 与 profiles[{first}] 冲突；以第一个启用的配置文件为准"
+  },
+  "version": "version 必须等于 {version}",
+  "warnings": {
+    "turboFrameGenOverlap": "{targets} 同时开启了 Turbo 和 Frame Generation。Frame Generation 会接管帧节奏控制；在运行 Frame Generation 的会话中，Turbo 保持关闭。",
+    "moreApplications_other": "另外 {count} 个",
+    "applicationsWithoutProfile": "没有自定义配置文件的应用程序"
+  },
+  "store": {
+    "loadBlocked": "无法加载设置，因此已关闭保存以保留磁盘上的文件：{error}。请修复该文件后重新打开 VectorXR、导入配置，或重置为默认值。",
+    "loadConfigFailed": "无法加载配置",
+    "loadSeenAppsFailed": "无法加载已发现的应用",
+    "loadRuntimePacingFailed": "无法加载运行时帧节奏状态",
+    "loadTurboMetricsFailed": "无法加载 Turbo 指标",
+    "turboMetricsCleared": "已清除 Turbo 指标",
+    "clearTurboMetricsFailed": "无法清除 Turbo 指标",
+    "pacingVerdictCleared": "已清除 {runtime} 的帧节奏判定；“自动”将在下次会话时重新探测",
+    "clearPacingVerdictFailed": "无法清除帧节奏判定",
+    "configSaved": "配置已保存",
+    "saveConfigFailed": "无法保存配置",
+    "reloadedFromDisk": "已加载磁盘上更改的设置",
+    "configReset": "配置已重置为默认值",
+    "resetConfigFailed": "无法重置配置",
+    "changesDiscarded": "已放弃未保存的更改",
+    "configImported": "配置已导入——保存后才会写入磁盘",
+    "applicationAdded": "已将 {exe} 添加到应用程序注册表",
+    "seenAppsCleared": "已清除已发现的应用",
+    "clearSeenAppsFailed": "无法清除已发现的应用"
+  }
+}

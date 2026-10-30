@@ -23,6 +23,7 @@
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
 
+#include "depthxr/framegen_plan.h"
 #include "depthxr/framegen_vulkan_bridge.h"
 #include "test_adapter.h"
 #include "test_gates.h"
@@ -37,8 +38,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iostream>
+#include <iterator>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -719,6 +723,7 @@ struct Recorder {
     std::vector<Submission> submissions;
     std::atomic<bool> in_call{false}; // inside Acquired or Released
     std::atomic<int> queue_calls_outside{0};
+    int pass_submits{0}; // these many go through before fail_submits applies
     int fail_submits{0}; // the next ones fail with `fail_result`
     VkResult fail_result{VK_SUCCESS};
     bool fail_import{false};
@@ -787,7 +792,9 @@ VKAPI_ATTR VkResult VKAPI_CALL RecordingSubmit(VkQueue queue, std::uint32_t coun
     {
         std::scoped_lock lock(g_recorder.mutex);
         if (!g_recorder.in_call) ++g_recorder.queue_calls_outside;
-        if (g_recorder.fail_submits > 0) {
+        if (g_recorder.fail_submits > 0 && g_recorder.pass_submits > 0) {
+            --g_recorder.pass_submits;
+        } else if (g_recorder.fail_submits > 0) {
             --g_recorder.fail_submits;
             return g_recorder.fail_result;
         }
@@ -1255,6 +1262,11 @@ ID3D12CommandQueue* BridgeQueue(const VulkanBridge& bridge) {
 
 // A fence the test opens: the game's queue or a Direct3D 12 queue held back
 // until Open. The game's side is the fence imported as a timeline semaphore.
+bool GpuNegativeControlsAllowed() {
+    const char* no_stall = std::getenv("FG_TEST_NO_STALL");
+    return !(no_stall && std::string(no_stall) == "1");
+}
+
 struct Gate {
     ComPtr<ID3D12Fence> fence;
     Game& game;
@@ -1284,6 +1296,7 @@ struct Gate {
     Gate& operator=(const Gate&) = delete;
     // Everything the game submits from here on waits for Open.
     void HoldGame() {
+        Check(GpuNegativeControlsAllowed(), "FG_TEST_NO_STALL=1 forbids an artificial game GPU hold");
         const std::uint64_t value = 1;
         const VkPipelineStageFlags stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
         VkTimelineSemaphoreSubmitInfo values{VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
@@ -1296,7 +1309,10 @@ struct Gate {
         submit.pWaitDstStageMask = &stage;
         Check(game.vkQueueSubmit(game.queue, 1, &submit, VK_NULL_HANDLE) == VK_SUCCESS, "the game is held");
     }
-    void HoldQueue(ID3D12CommandQueue* queue) { queue->Wait(fence.Get(), 1); }
+    void HoldQueue(ID3D12CommandQueue* queue) {
+        Check(GpuNegativeControlsAllowed(), "FG_TEST_NO_STALL=1 forbids an artificial GPU queue hold");
+        queue->Wait(fence.Get(), 1);
+    }
     void Open() { fence->Signal(1); }
     ~Gate() {
         test_gates::Remove(fence.Get());
@@ -2573,9 +2589,13 @@ void TestRefusedSubmissions(Game& game) {
         Check(!bridge.WaitIdle(200), "the bridge's queue waits for the game");
         g_recorder.fail_submits = 1;
         g_recorder.fail_result = VK_ERROR_DEVICE_LOST;
+        std::error_code ignored;
+        std::filesystem::remove(depthxr::FrameGenEngineRemovedPath(), ignored);
         Acquire(bridge, swapchain, 0);
         std::string lost;
         Check(bridge.Lost(lost) && Contains(lost, "Vulkan device was lost"), "the session is lost: " + lost);
+        Check(!std::filesystem::exists(depthxr::FrameGenEngineRemovedPath(), ignored),
+              "a loss with no work for the game's motion vectors leaves its later sessions reading them");
         Check(bridge.WaitIdle(1000), "the bridge's queue got through at once");
         Check(!Release(bridge, swapchain), "nothing more is copied");
         Check(g_log.size() == 1 && Contains(g_log[0], "lost"), "the loss is reported");
@@ -2897,6 +2917,489 @@ void TestQfotRecorded(Game& game) {
     CheckClean(nullptr, "qfot-recorded (End)");
 }
 
+// EndFrameMotion's calls, as the layer makes them inside xrEndFrame (the
+// game's queue may be used there too).
+std::vector<bool> EndFrame(VulkanBridge& bridge, const std::vector<std::pair<XrSwapchain, std::uint32_t>>& images) {
+    g_recorder.in_call = true;
+    const std::vector<bool> copied = bridge.EndFrameMotion(images);
+    g_recorder.in_call = false;
+    return copied;
+}
+
+// Frame Generation's capture of a runtime image as the bridge's queue runs
+// it after the bridge's copy: the centre texel of `image` (RGBA16F, a render
+// target) into slot `slot` of `readback`.
+void QueueTexelReadback(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12Resource* image,
+                        ID3D12Resource* readback, std::uint32_t slot,
+                        std::vector<ComPtr<ID3D12CommandAllocator>>& allocators,
+                        std::vector<ComPtr<ID3D12GraphicsCommandList>>& lists) {
+    allocators.emplace_back();
+    lists.emplace_back();
+    Check(SUCCEEDED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocators.back()))) &&
+              SUCCEEDED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocators.back().Get(), nullptr,
+                                                  IID_PPV_ARGS(&lists.back()))),
+          "a capture's list");
+    ID3D12GraphicsCommandList* list = lists.back().Get();
+    D3D12_RESOURCE_BARRIER barrier{};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = image;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    list->ResourceBarrier(1, &barrier);
+    const D3D12_RESOURCE_DESC desc = image->GetDesc();
+    D3D12_TEXTURE_COPY_LOCATION destination{readback, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
+    destination.PlacedFootprint.Offset = static_cast<UINT64>(slot) * D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT;
+    destination.PlacedFootprint.Footprint = {DXGI_FORMAT_R16G16B16A16_FLOAT, 1, 1, 1, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT};
+    D3D12_TEXTURE_COPY_LOCATION source{image, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+    const UINT x = static_cast<UINT>(desc.Width / 2);
+    const UINT y = desc.Height / 2;
+    const D3D12_BOX box{x, y, 0, x + 1, y + 1, 1};
+    list->CopyTextureRegion(&destination, 0, 0, 0, &source, &box);
+    std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+    list->ResourceBarrier(1, &barrier);
+    list->Close();
+    ID3D12CommandList* run[] = {list};
+    queue->ExecuteCommandLists(1, run);
+}
+
+ComPtr<ID3D12Resource> ReadbackSlots(ID3D12Device* device, std::uint32_t slots) {
+    D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_READBACK};
+    D3D12_RESOURCE_DESC buffer{};
+    buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    buffer.Width = slots * D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT;
+    buffer.Height = 1;
+    buffer.DepthOrArraySize = 1;
+    buffer.MipLevels = 1;
+    buffer.SampleDesc.Count = 1;
+    buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ComPtr<ID3D12Resource> readback;
+    Check(SUCCEEDED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_COPY_DEST,
+                                                    nullptr, IID_PPV_ARGS(&readback))),
+          "the readback buffer");
+    return readback;
+}
+
+// Slot `slot` of a readback buffer QueueTexelReadback filled, against a
+// vector (RGBA16F holds these exactly).
+bool SlotHolds(ID3D12Resource* readback, std::uint32_t slot, const std::array<float, 4>& vector, std::string& found) {
+    void* mapped = nullptr;
+    if (FAILED(readback->Map(0, nullptr, &mapped))) return false;
+    const auto* bytes = static_cast<const std::uint8_t*>(mapped) + slot * D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT;
+    bool same = true;
+    found.clear();
+    for (int c = 0; c < 4; ++c) {
+        std::uint16_t half = 0;
+        std::memcpy(&half, bytes + 2 * c, 2);
+        same = same && HalfToFloat(half) == vector[c];
+        found += (c ? "," : "") + std::to_string(HalfToFloat(half));
+    }
+    readback->Unmap(0, nullptr);
+    return same;
+}
+
+std::array<float, 4> MotionVector(int frame, int eye) {
+    return {0.25f * static_cast<float>(frame) - 1.0f, 0.5f + static_cast<float>(frame), eye ? -2.0f : 2.0f, 1.0f};
+}
+
+// A swapchain of the game's motion vectors (stage 9): once MarkMotion names
+// it, each release gives its image back to the game's queue behind the copy,
+// as depth's, so the game rendering the next frame's vectors into the image
+// before acquiring it (Star Citizen) waits for the copy; Frame Generation's
+// capture, queued on the bridge's queue after the release, reads this
+// frame's. The copy, then the hand-back: the release signals written, the
+// hand-back waits for done, from the external queue family to the game's;
+// the next acquire submits nothing. Only colour twins are marked.
+void TestMotionTwin(Game& game) {
+    VulkanBridge bridge;
+    Session session(game);
+    BeginBridge(game, bridge, session);
+    ID3D12Device* device = BridgeDevice(bridge);
+    ID3D12CommandQueue* queue = BridgeQueue(bridge);
+    constexpr int kFrames = 6;
+    MakeRuntimeImages(device, 3, 64, 48, DXGI_FORMAT_R16G16B16A16_FLOAT);
+    const std::vector<ComPtr<ID3D12Resource>> runtime = g_runtime_images;
+    const XrSwapchain swapchain = Handle(0x50);
+    std::string reason;
+    Check(bridge.AddSwapchain(swapchain, ColorInfo(64, 48, 1, 1, VK_FORMAT_R16G16B16A16_SFLOAT), FakeEnumerate, reason),
+          "bridged: " + reason);
+    const std::vector<VkImage> images = GameImages(bridge, swapchain);
+    Check(!bridge.MarkMotion(Handle(0x52)), "motion twin: a swapchain the bridge does not have is not marked");
+    Check(bridge.MarkMotion(swapchain) && bridge.MarkMotion(swapchain) &&
+              Contains(bridge.Describe(swapchain), "motion vectors (endFrameCopies=0)"),
+          "motion twin: marked, once: " + bridge.Describe(swapchain));
+    g_log.erase(std::remove_if(g_log.begin(), g_log.end(),
+                               [](const std::string& line) { return Contains(line, "holds the game's motion vectors"); }),
+                g_log.end());
+    const ComPtr<ID3D12Resource> readback = ReadbackSlots(device, kFrames);
+    std::vector<ComPtr<ID3D12CommandAllocator>> allocators;
+    std::vector<ComPtr<ID3D12GraphicsCommandList>> lists;
+    g_recorder.Take();
+    for (int frame = 0; frame < kFrames; ++frame) {
+        const std::uint32_t index = frame % 3;
+        const std::string where = "motion twin, frame " + std::to_string(frame);
+        Acquire(bridge, swapchain, index);
+        const std::vector<Submission> acquired = g_recorder.Take();
+        Check(frame < 3 ? acquired.size() == 1 : acquired.empty(),
+              where + ": an image given back at its release needs nothing at its acquire");
+        Clear(game, images[index], MotionVector(frame, 0));
+        // The bridge's queue held until the game rendered into the image
+        // again: the copy is still queued then.
+        Gate gate(device, game);
+        if (GpuNegativeControlsAllowed()) gate.HoldQueue(queue);
+        Check(Release(bridge, swapchain), where + ": copied");
+        const std::vector<Submission> released = g_recorder.Take();
+        Check(released.size() == 2 && released[0].commands.size() == 1 && released[0].signals == 1 &&
+                  released[0].waits == 0 && released[1].commands.size() == 1 && released[1].waits == 1 &&
+                  released[1].signals == 0,
+              where + ": the release signalling written, then the hand-back waiting for the copy");
+        const std::vector<Command> back = g_recorder.Commands(released[1].commands[0]);
+        Check(back.size() == 1 && back[0].barriers.size() == 1 && back[0].barriers[0].image == images[index] &&
+                  back[0].barriers[0].srcQueueFamilyIndex == VK_QUEUE_FAMILY_EXTERNAL &&
+                  back[0].barriers[0].dstQueueFamilyIndex == game.family &&
+                  back[0].barriers[0].oldLayout == VK_IMAGE_LAYOUT_GENERAL &&
+                  back[0].barriers[0].newLayout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+              where + ": the hand-back takes the image from Direct3D 12 to the game's queue, in the attachment layout");
+        // Frame Generation's capture, behind the copy on the bridge's queue...
+        QueueTexelReadback(device, queue, runtime[index].Get(), readback.Get(), static_cast<std::uint32_t>(frame),
+                           allocators, lists);
+        // ...and the game's next frame's vectors rendered into the image at
+        // once, before acquiring it (behind the hand-back on its queue).
+        Clear(game, images[index], {9.0f, 9.0f, 9.0f, 9.0f});
+        gate.Open();
+        bridge.FrameEnded();
+    }
+    Check(bridge.WaitIdle(10000), "the bridge's queue finishes");
+    GameIdle(game);
+    for (int frame = 0; frame < kFrames; ++frame) {
+        std::string found;
+        Check(SlotHolds(readback.Get(), static_cast<std::uint32_t>(frame), MotionVector(frame, 0), found),
+              "motion twin, frame " + std::to_string(frame) + ": the capture reads the frame's vectors: " + found);
+    }
+    Check(Contains(bridge.Describe(swapchain), "handBacks=" + std::to_string(kFrames) + ","),
+          "motion twin: every release handed back: " + bridge.Describe(swapchain));
+    // Unmarked (Frame Generation reads the vectors no more): a release hands
+    // nothing back, and its image's next acquire gives it back, as for any
+    // colour twin; an image handed back before needs nothing at its acquire.
+    Check(!bridge.UnmarkMotion(Handle(0x52)), "motion twin: a swapchain the bridge does not have is not unmarked");
+    Check(bridge.UnmarkMotion(swapchain) && !bridge.UnmarkMotion(swapchain) &&
+              !Contains(bridge.Describe(swapchain), "motion vectors"),
+          "motion twin: unmarked, once: " + bridge.Describe(swapchain));
+    g_log.erase(std::remove_if(g_log.begin(), g_log.end(),
+                               [](const std::string& line) { return Contains(line, "are read no more"); }),
+                g_log.end());
+    g_recorder.Take();
+    for (int frame = kFrames; frame < kFrames + 4; ++frame) {
+        const std::uint32_t index = frame % 3;
+        const std::string where = "motion twin unmarked, frame " + std::to_string(frame);
+        Acquire(bridge, swapchain, index);
+        const std::vector<Submission> acquired = g_recorder.Take();
+        Check(frame < kFrames + 3 ? acquired.empty() : acquired.size() == 1,
+              where + ": an image handed back needs nothing at its acquire, one released since gets it back there");
+        Clear(game, images[index], MotionVector(frame, 0));
+        Check(Release(bridge, swapchain), where + ": copied");
+        const std::vector<Submission> released = g_recorder.Take();
+        Check(released.size() == 1 && released[0].signals == 1, where + ": the release alone, nothing handed back");
+        bridge.FrameEnded();
+    }
+    Check(Contains(bridge.Describe(swapchain), "handBacks=" + std::to_string(kFrames) + ","),
+          "motion twin: nothing handed back once unmarked: " + bridge.Describe(swapchain));
+    Check(bridge.WaitIdle(10000), "the bridge's queue finishes");
+    GameIdle(game);
+    // Depth is handed back already; neither it nor multisampled colour is marked.
+    MakeRuntimeImages(device, 2, 32, 32, DXGI_FORMAT_D32_FLOAT, 1, RuntimeKind::kDepth);
+    Check(bridge.AddSwapchain(Handle(0x53), DepthInfo(32, 32), FakeEnumerate, reason) && !bridge.MarkMotion(Handle(0x53)),
+          "motion twin: a depth swapchain is not marked");
+    MakeRuntimeImages(device, 2, 32, 32, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
+    Check(bridge.AddSwapchain(Handle(0x54), ColorInfo(32, 32, 4), FakeEnumerate, reason) && !bridge.MarkMotion(Handle(0x54)),
+          "motion twin: a multisampled swapchain is not marked");
+    for (const XrSwapchain removed : {swapchain, Handle(0x53), Handle(0x54)}) {
+        Check(bridge.RemoveSwapchain(removed), "motion twin: removed");
+    }
+    CheckClean(&bridge, "motion twin");
+    bridge.End();
+    CheckClean(nullptr, "motion twin (End)");
+}
+
+// The contingency for a game that never acquires or releases its motion
+// vector images (stage 9): EndFrameMotion hands the images it is given over
+// at the frame's end in one submission (their release barriers, from the
+// attachment layout, signalling written), copies each into its runtime image
+// behind it on the bridge's queue, and gives them all back in one more
+// submission waiting for the copies; Frame Generation's capture after them
+// reads the frame's vectors, whatever the game renders next. An image's first
+// time is no copy: it starts over from UNDEFINED in the attachment layout
+// (the game may never have rendered into it), so every later release barrier
+// is valid. An image named twice (two views' slices) is handed over once. A
+// copy whose recordings are all queued is skipped, never waited for; an
+// image whose giving back was refused is given back at the next frame's end.
+// A swapchain not marked, or one the game acquires, is left alone.
+void TestEndFrameMotion(Game& game) {
+    VulkanBridge bridge;
+    Session session(game);
+    BeginBridge(game, bridge, session);
+    ID3D12Device* device = BridgeDevice(bridge);
+    ID3D12CommandQueue* queue = BridgeQueue(bridge);
+    constexpr int kFrames = 4;
+    std::array<XrSwapchain, 2> swapchains{Handle(0x60), Handle(0x61)};
+    std::array<std::vector<ComPtr<ID3D12Resource>>, 2> runtime;
+    std::array<std::vector<VkImage>, 2> images;
+    std::string reason;
+    for (int eye = 0; eye < 2; ++eye) {
+        MakeRuntimeImages(device, 3, 32, 32, DXGI_FORMAT_R16G16B16A16_FLOAT);
+        runtime[eye] = g_runtime_images;
+        Check(bridge.AddSwapchain(swapchains[eye], ColorInfo(32, 32, 1, 1, VK_FORMAT_R16G16B16A16_SFLOAT), FakeEnumerate,
+                                  reason),
+              "bridged: " + reason);
+        images[eye] = GameImages(bridge, swapchains[eye]);
+    }
+    g_recorder.Take();
+    Check(EndFrame(bridge, {{swapchains[0], 0}}) == std::vector<bool>{false} && g_recorder.Take().empty(),
+          "end-frame motion: a swapchain not marked is left alone");
+    Check(bridge.MarkMotion(swapchains[0]) && bridge.MarkMotion(swapchains[1]), "end-frame motion: marked");
+    g_log.erase(std::remove_if(g_log.begin(), g_log.end(),
+                               [](const std::string& line) { return Contains(line, "holds the game's motion vectors"); }),
+                g_log.end());
+    // The game takes its images for rendering itself (it never acquires them).
+    for (int eye = 0; eye < 2; ++eye) {
+        for (const VkImage image : images[eye]) {
+            GameSubmit(game, [&](VkCommandBuffer commands) {
+                const VkImageMemoryBarrier barrier =
+                    GameBarrier(image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 0, 1, 0, 1);
+                game.vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                          VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+            });
+        }
+    }
+    // Their first frame's end: none copied, all six put in the attachment
+    // layout from UNDEFINED in one submission, nothing handed over.
+    std::vector<std::pair<XrSwapchain, std::uint32_t>> every;
+    for (int eye = 0; eye < 2; ++eye) {
+        for (std::uint32_t i = 0; i < 3; ++i) every.push_back({swapchains[eye], i});
+    }
+    g_recorder.Take();
+    Check(EndFrame(bridge, every) == std::vector<bool>(6, false), "end-frame motion: an image's first time is no copy");
+    {
+        const std::vector<Submission> first = g_recorder.Take();
+        bool started = first.size() == 1 && first[0].commands.size() == 6 && first[0].signals == 0 && first[0].waits == 0;
+        for (std::size_t c = 0; started && c < 6; ++c) {
+            const std::vector<Command> start = g_recorder.Commands(first[0].commands[c]);
+            started = start.size() == 1 && start[0].barriers.size() == 1 &&
+                      start[0].barriers[0].image == images[c / 3][c % 3] &&
+                      start[0].barriers[0].oldLayout == VK_IMAGE_LAYOUT_UNDEFINED &&
+                      start[0].barriers[0].newLayout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL &&
+                      start[0].barriers[0].srcQueueFamilyIndex == VK_QUEUE_FAMILY_IGNORED;
+        }
+        Check(started, "end-frame motion: their first time puts them in the attachment layout from UNDEFINED, at once");
+        Check(SummaryValue(bridge.Summary(), "endFrameCopies") == 0 && SummaryValue(bridge.Summary(), "handBacks") == 0,
+              "end-frame motion: nothing copied or handed over yet: " + bridge.Summary());
+    }
+    const ComPtr<ID3D12Resource> readback = ReadbackSlots(device, 2 * kFrames);
+    std::vector<ComPtr<ID3D12CommandAllocator>> allocators;
+    std::vector<ComPtr<ID3D12GraphicsCommandList>> lists;
+    for (int frame = 0; frame < kFrames; ++frame) {
+        const std::array<std::uint32_t, 2> index{static_cast<std::uint32_t>(frame % 3),
+                                                 static_cast<std::uint32_t>((frame + 1) % 3)};
+        const std::string where = "end-frame motion, frame " + std::to_string(frame);
+        for (int eye = 0; eye < 2; ++eye) Clear(game, images[eye][index[eye]], MotionVector(frame, eye));
+        g_recorder.Take();
+        Gate gate(device, game);
+        if (GpuNegativeControlsAllowed()) gate.HoldQueue(queue);
+        const std::vector<bool> copied =
+            EndFrame(bridge, {{swapchains[0], index[0]}, {swapchains[1], index[1]}, {swapchains[0], index[0]}});
+        Check(copied == std::vector<bool>{true, true, true}, where + ": every image named is copied");
+        const std::vector<Submission> submitted = g_recorder.Take();
+        Check(submitted.size() == 2 && submitted[0].commands.size() == 2 && submitted[0].signals == 1 &&
+                  submitted[0].waits == 0 && submitted[1].commands.size() == 2 && submitted[1].waits == 1 &&
+                  submitted[1].signals == 0,
+              where + ": one submission handing both images over (written), one giving them back (after done)");
+        for (int eye = 0; eye < 2; ++eye) {
+            const std::vector<Command> handed = g_recorder.Commands(submitted[0].commands[eye]);
+            const std::vector<Command> back = g_recorder.Commands(submitted[1].commands[eye]);
+            Check(handed.size() == 1 && handed[0].barriers.size() == 1 &&
+                      handed[0].barriers[0].image == images[eye][index[eye]] &&
+                      handed[0].barriers[0].oldLayout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL &&
+                      handed[0].barriers[0].srcQueueFamilyIndex == game.family &&
+                      handed[0].barriers[0].dstQueueFamilyIndex == VK_QUEUE_FAMILY_EXTERNAL && back.size() == 1 &&
+                      back[0].barriers.size() == 1 && back[0].barriers[0].image == images[eye][index[eye]] &&
+                      back[0].barriers[0].srcQueueFamilyIndex == VK_QUEUE_FAMILY_EXTERNAL &&
+                      back[0].barriers[0].newLayout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                  where + ": eye " + std::to_string(eye) + "'s image from the attachment layout to Direct3D 12 and back");
+            QueueTexelReadback(device, queue, runtime[eye][index[eye]].Get(), readback.Get(),
+                               static_cast<std::uint32_t>(2 * frame + eye), allocators, lists);
+            Clear(game, images[eye][index[eye]], {9.0f, 9.0f, 9.0f, 9.0f});
+        }
+        gate.Open();
+        bridge.FrameEnded();
+    }
+    Check(bridge.WaitIdle(10000), "the bridge's queue finishes");
+    GameIdle(game);
+    for (int frame = 0; frame < kFrames; ++frame) {
+        for (int eye = 0; eye < 2; ++eye) {
+            std::string found;
+            Check(SlotHolds(readback.Get(), static_cast<std::uint32_t>(2 * frame + eye), MotionVector(frame, eye), found),
+                  "end-frame motion, frame " + std::to_string(frame) + ", eye " + std::to_string(eye) +
+                      ": the capture reads the frame's vectors: " + found);
+        }
+    }
+    Check(SummaryValue(bridge.Summary(), "endFrameCopies") == 2 * kFrames &&
+              Contains(bridge.Describe(swapchains[1]), "motion vectors (endFrameCopies=" + std::to_string(kFrames) + ")"),
+          "end-frame motion: counted: " + bridge.Summary());
+
+    // The bridge's queue stalled: once every recording of an image's copy is
+    // queued, its frame's end skips the copy at once (the game's xrEndFrame
+    // is never held for it).
+    if (GpuNegativeControlsAllowed()) {
+        Gate gate(device, game);
+        gate.HoldQueue(queue);
+        std::vector<bool> copies;
+        double longest_skip = 0.0;
+        for (int i = 0; i < 6; ++i) {
+            const auto start = std::chrono::steady_clock::now();
+            copies.push_back(EndFrame(bridge, {{swapchains[1], 2}}).front());
+            if (!copies.back()) longest_skip = std::max(longest_skip, SecondsSince(start));
+        }
+        gate.Open();
+        Check(copies == std::vector<bool>{true, true, true, true, false, false} && longest_skip < 0.05,
+              "end-frame motion: a stalled queue's copy is skipped, not waited for (" +
+                  std::to_string(longest_skip * 1000.0) + " ms)");
+    }
+    Check(bridge.WaitIdle(10000), "the bridge's queue finishes");
+    GameIdle(game);
+
+    if (GpuNegativeControlsAllowed()) {
+        // A giving back refused (the device not lost): the image stays with
+        // Direct3D 12 until the next frame's end gives it back, named or not.
+        g_recorder.Take();
+        g_recorder.pass_submits = 1;
+        g_recorder.fail_submits = 1;
+        g_recorder.fail_result = VK_ERROR_OUT_OF_HOST_MEMORY;
+        Check(EndFrame(bridge, {{swapchains[1], 0}}) == std::vector<bool>{true} && g_recorder.Take().size() == 1,
+              "end-frame motion: copied, its giving back refused");
+        g_log.erase(std::remove_if(g_log.begin(), g_log.end(), [](const std::string& line) { return Contains(line, "refused"); }),
+                    g_log.end());
+        Check(EndFrame(bridge, {{swapchains[1], 1}}) == std::vector<bool>{true}, "end-frame motion: the next frame's end copies");
+        {
+            const std::vector<Submission> retried = g_recorder.Take();
+            const std::vector<Command> back =
+                retried.size() == 2 && retried[1].commands.size() == 2 ? g_recorder.Commands(retried[1].commands[1])
+                                                                       : std::vector<Command>{};
+            Check(retried.size() == 2 && retried[0].commands.size() == 1 && retried[1].waits == 1 && back.size() == 1 &&
+                      back[0].barriers.size() == 1 && back[0].barriers[0].image == images[1][0] &&
+                      back[0].barriers[0].srcQueueFamilyIndex == VK_QUEUE_FAMILY_EXTERNAL &&
+                      back[0].barriers[0].dstQueueFamilyIndex == game.family,
+                  "end-frame motion: the image whose giving back was refused is given back with the next");
+        }
+        Check(EndFrame(bridge, {{swapchains[1], 0}}) == std::vector<bool>{true}, "end-frame motion: and handed over again");
+        Check(bridge.WaitIdle(10000), "the bridge's queue finishes");
+        GameIdle(game);
+    } else {
+        std::cout << "FG_TEST_NO_STALL=1: skipped refused hardware-submit control\n";
+    }
+
+    // Images the game never rendered into (it writes image 0 alone): their
+    // first time puts them in the attachment layout, so their release
+    // barriers are valid from then on.
+    const XrSwapchain one_image = Handle(0x62);
+    MakeRuntimeImages(device, 3, 32, 32, DXGI_FORMAT_R16G16B16A16_FLOAT);
+    const std::vector<ComPtr<ID3D12Resource>> one_runtime = g_runtime_images;
+    Check(bridge.AddSwapchain(one_image, ColorInfo(32, 32, 1, 1, VK_FORMAT_R16G16B16A16_SFLOAT), FakeEnumerate, reason) &&
+              bridge.MarkMotion(one_image),
+          "end-frame motion: a third swapchain, marked: " + reason);
+    const std::vector<VkImage> one_images = GameImages(bridge, one_image);
+    GameSubmit(game, [&](VkCommandBuffer commands) {
+        const VkImageMemoryBarrier barrier = GameBarrier(one_images[0], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                                                         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 0, 1, 0, 1);
+        game.vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0,
+                                  nullptr, 0, nullptr, 1, &barrier);
+    });
+    const std::vector<std::pair<XrSwapchain, std::uint32_t>> all_three{{one_image, 0}, {one_image, 1}, {one_image, 2}};
+    Check(EndFrame(bridge, all_three) == std::vector<bool>(3, false), "end-frame motion: untouched images' first time");
+    Clear(game, one_images[0], MotionVector(5, 0));
+    Check(EndFrame(bridge, all_three) == std::vector<bool>(3, true), "end-frame motion: then all three copied");
+    QueueTexelReadback(device, queue, one_runtime[0].Get(), readback.Get(), 0, allocators, lists);
+    Check(bridge.WaitIdle(10000), "the bridge's queue finishes");
+    GameIdle(game);
+    std::string found;
+    Check(SlotHolds(readback.Get(), 0, MotionVector(5, 0), found),
+          "end-frame motion: the image the game writes is read: " + found);
+    Check(bridge.RemoveSwapchain(one_image), "end-frame motion: removed");
+
+    // A swapchain the game acquires: its releases hand it over, the frame's
+    // end leaves it alone.
+    Acquire(bridge, swapchains[0], 0);
+    Clear(game, images[0][0], MotionVector(9, 0));
+    g_recorder.Take();
+    Check(EndFrame(bridge, {{swapchains[0], 0}, {swapchains[1], 1}}) == std::vector<bool>{false, true},
+          "end-frame motion: a swapchain the game acquired is left to its releases");
+    Check(Release(bridge, swapchains[0]), "end-frame motion: released");
+    Check(bridge.WaitIdle(10000), "the bridge's queue finishes");
+    GameIdle(game);
+    for (const XrSwapchain removed : swapchains) {
+        Check(bridge.RemoveSwapchain(removed), "end-frame motion: removed");
+    }
+    g_log.erase(std::remove_if(g_log.begin(), g_log.end(),
+                               [](const std::string& line) {
+                                   return Contains(line, "copied at its frame's end") ||
+                                          Contains(line, "holds the game's motion vectors");
+                               }),
+                g_log.end());
+    CheckClean(&bridge, "end-frame motion");
+    bridge.End();
+    CheckClean(nullptr, "end-frame motion (End)");
+}
+
+// The game's Vulkan device lost within 2 s of the bridge's work for its
+// motion vectors (a hand-back at a release): the game's later sessions read
+// none (FrameGenEngineRemovedPath, as for Frame Generation's device removed),
+// and the log says why. A loss without such work writes nothing
+// (TestRefusedSubmissions).
+void TestMotionDeviceLost(Game& game) {
+    const std::filesystem::path sentinel = depthxr::FrameGenEngineRemovedPath();
+    std::error_code ignored;
+    std::filesystem::remove(sentinel, ignored);
+    VulkanBridge bridge;
+    Session session(game);
+    BeginBridge(game, bridge, session);
+    ID3D12Device* device = BridgeDevice(bridge);
+    MakeRuntimeImages(device, 3, 32, 32, DXGI_FORMAT_R16G16B16A16_FLOAT);
+    const XrSwapchain swapchain = Handle(0x70);
+    std::string reason;
+    Check(bridge.AddSwapchain(swapchain, ColorInfo(32, 32, 1, 1, VK_FORMAT_R16G16B16A16_SFLOAT), FakeEnumerate, reason) &&
+              bridge.MarkMotion(swapchain),
+          "motion device lost: bridged and marked: " + reason);
+    const std::vector<VkImage> images = GameImages(bridge, swapchain);
+    Acquire(bridge, swapchain, 0);
+    Clear(game, images[0], MotionVector(1, 0));
+    Check(Release(bridge, swapchain), "motion device lost: released and handed back");
+    Check(bridge.WaitIdle(10000), "the bridge's queue finishes");
+    GameIdle(game);
+    Acquire(bridge, swapchain, 0);
+    g_recorder.fail_submits = 1;
+    g_recorder.fail_result = VK_ERROR_DEVICE_LOST;
+    Check(!Release(bridge, swapchain), "motion device lost: the release finds the device lost");
+    std::string lost;
+    Check(bridge.Lost(lost), "motion device lost: the session is lost: " + lost);
+    std::string text;
+    if (std::ifstream file(sentinel); file) {
+        text.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+    }
+    Check(!sentinel.empty() && Contains(text, "The game's Vulkan device was lost (vkQueueSubmit") &&
+              Contains(text, "within 2 s"),
+          "motion device lost: the game's later sessions read no motion vectors: " + text);
+    Check(std::any_of(g_log.begin(), g_log.end(),
+                      [](const std::string& line) { return Contains(line, "within 2 s of the bridge's work"); }),
+          "motion device lost: the log says why");
+    std::filesystem::remove(sentinel, ignored);
+    g_log.clear();
+    GameIdle(game);
+    Check(bridge.Drain(), "a lost bridge drains");
+    bridge.End();
+    g_recorder.fail_submits = 0;
+    CheckClean(nullptr, "motion device lost");
+}
+
 // The bridge uses the game's queue only inside the application's acquire and
 // release: nothing at swapchain creation, removal, Drain, Escape, End or
 // destruction (a bridge destroyed without End lets nothing go: it is left to
@@ -3205,6 +3708,8 @@ bool ValidationCanary(Game& game) {
 } // namespace
 
 int main(int argc, char** argv) {
+    const char* no_stall = std::getenv("FG_TEST_NO_STALL");
+    const bool skip_negative_controls = no_stall && std::string(no_stall) == "1";
     // `binary`: the cases run in both semaphore modes run in binary mode only.
     const bool binary_only = argc > 1 && std::string(argv[1]) == "binary";
     TestFormats();
@@ -3248,7 +3753,10 @@ int main(int argc, char** argv) {
     Check(MakeDevice(game, true, true, 1, error), error);
     // The fixture comes up clean: nothing it set off can pass for the canary.
     CheckClean(nullptr, "fixture setup");
-    if (g_validation) {
+    if (g_validation && skip_negative_controls) {
+        std::cout << "FG_TEST_NO_STALL=1: skipped deliberate validation-error canary\n";
+    }
+    if (g_validation && !skip_negative_controls) {
         const bool canary = ValidationCanary(game);
         if (!canary) std::printf("WARNING: the validation canary was not reported\n");
         Check(canary || !require, "the validation layer reports a wrong layout (canary)");
@@ -3261,18 +3769,20 @@ int main(int argc, char** argv) {
     TestBegin(game, bare_game);
     DestroyDevice(bare_game);
     CheckClean(nullptr, "device without the extensions destroyed");
-    TestBeginFailureCleanup(game);
+    if (!skip_negative_controls) TestBeginFailureCleanup(game);
     TestSwapchainChecks(game);
     for (const bool timeline : {true, false}) {
         if (timeline && binary_only) continue;
         TestTwinFrames(game, timeline, false);
         TestTwinFrames(game, timeline, true);
-        TestWrittenOrdering(game, timeline);
-        TestDoneWait(game, timeline);
+        if (!skip_negative_controls) {
+            TestWrittenOrdering(game, timeline);
+            TestDoneWait(game, timeline);
+        }
         TestRace(game, timeline);
     }
     TestColorFormats(game);
-    TestPendingRelease(game);
+    if (!skip_negative_controls) TestPendingRelease(game);
     TestResolve(game);
     TestArray(game);
     TestDepthValues(game);
@@ -3280,19 +3790,32 @@ int main(int argc, char** argv) {
     TestMismatch(game);
     TestPrivateDepth(game);
     TestUnmatched(game);
-    TestQfotRecorded(game);
+    if (!skip_negative_controls) {
+        TestQfotRecorded(game);
+    } else {
+        std::cout << "FG_TEST_NO_STALL=1: skipped artificial ordering, pending-release, and recorded-QFOT holds\n";
+    }
+    TestMotionTwin(game);
+    TestEndFrameMotion(game);
     TestQueueOnlyInAcquireRelease(game);
-    TestRefusedSubmissions(game);
-    TestFenceDeviceLost(game);
-    TestStalledQueue(game);
-    TestSkippedCopy(game);
-    TestRingStall(game);
-    if (!binary_only) TestDrainPastGame(game, true);
-    TestDrainPastGame(game, false);
+    if (!skip_negative_controls) {
+        TestRefusedSubmissions(game);
+        TestMotionDeviceLost(game);
+        TestFenceDeviceLost(game);
+        TestStalledQueue(game);
+        TestSkippedCopy(game);
+        TestRingStall(game);
+        if (!binary_only) TestDrainPastGame(game, true);
+        TestDrainPastGame(game, false);
+    }
     TestSecondThread(game);
     TestVulkan10(game);
     TestCopyCost(game);
-    TestDeviceLost(game, false);
+    if (!skip_negative_controls) {
+        TestDeviceLost(game, false);
+    } else {
+        std::cout << "FG_TEST_NO_STALL=1: skipped stalled-queue and device-loss controls\n";
+    }
     g_runtime_images.clear();
     // The instance stays: a device of a bridge left to the process is on it.
     DestroyDevice(game);

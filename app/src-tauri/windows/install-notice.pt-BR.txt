@@ -1,0 +1,11 @@
+﻿Antes de instalar o VectorXR
+
+O VectorXR é uma camada de API OpenXR. Enquanto estiver ativado, ele é carregado em todos os jogos OpenXR que você executar e trabalha nos quadros e nas chamadas que passam entre o jogo e o runtime do seu headset. Ele não lê nem altera a memória ou o código do jogo.
+
+O uso do VectorXR em jogos online com antitrapaça é por sua conta e risco, incluindo a sua conta do jogo. O desenvolvedor de cada jogo decide o que o seu antitrapaça permite e pode mudar isso a qualquer momento, e nenhum desenvolvedor de jogos endossou o VectorXR.
+
+Relate problemas do VectorXR ao VectorXR, não ao desenvolvedor do jogo.
+
+O VectorXR é um software gratuito e de código aberto da DienerTech LLC, licenciado sob a Mozilla Public License 2.0, que é instalada com ele como LICENSE.txt. Ele é fornecido "no estado em que se encontra", sem garantia de qualquer tipo (seções 6 e 7 da licença).
+
+Esta é uma tradução automática. Se ela divergir do aviso em inglês, vale o aviso em inglês.

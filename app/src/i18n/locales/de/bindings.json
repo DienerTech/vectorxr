@@ -1,0 +1,110 @@
+{
+  "editor": {
+    "type": "Belegungstyp",
+    "types": {
+      "none": "Keine",
+      "keyboard": "Tastatur",
+      "device": "Gerät"
+    },
+    "noneText": "Keine Belegung zugewiesen. Diese Aktion wird erst ausgeführt, wenn eine Belegung ausgewählt ist.",
+    "modifiers": "Zusatztasten",
+    "primaryKey": "Haupttaste"
+  },
+  "sound": {
+    "playOnFire": "Sound abspielen, wenn diese Aktion ausgelöst wird",
+    "playOnTransition": "Sound beim Aktivieren/Deaktivieren abspielen",
+    "explanation": "Ein zusätzliches akustisches Signal für diese Belegung. Belassen Sie einen Platz beim Standardton, oder wählen Sie Ihre eigene kurze .wav-Datei.",
+    "defaultTone": "Standardton",
+    "single": "Sound",
+    "activate": "Aktivieren",
+    "deactivate": "Deaktivieren",
+    "browse": "Durchsuchen…",
+    "test": "Testen",
+    "pickerFailed": "Die Dateiauswahl konnte nicht geöffnet werden.",
+    "playFailed": "Sound konnte nicht abgespielt werden."
+  },
+  "list": {
+    "add": "Belegung hinzufügen",
+    "noneText": "Keine Belegungen zugewiesen. Diese Aktion wird erst ausgeführt, wenn eine Belegung hinzugefügt wurde.",
+    "bindingNumber": "Belegung {number}",
+    "bindingDescription": "Wählen Sie eine Tastenkombination oder eine erkannte Geräteeingabe."
+  },
+  "panel": {
+    "soundEnabledHint": "Soundfeedback ist für eine Belegung aktiviert",
+    "soundEnabledAria": "Soundfeedback aktiviert",
+    "editOne": "Belegung bearbeiten…",
+    "editMany": "Belegungen bearbeiten…"
+  },
+  "page": {
+    "breadcrumbAria": "Navigationspfad",
+    "breadcrumbBinding": "Belegung",
+    "returnHint": "Drücken Sie Esc oder „Fertig“, um zu {module} zurückzukehren.",
+    "closeAria": "Belegung schließen und zu {module} zurückkehren",
+    "listDescription": "{description} Fügen Sie für jedes Gerät, mit dem Sie fliegen, eine Belegung hinzu; jede davon löst die Aktion aus."
+  },
+  "device": {
+    "joystickDevice": "Joystick-Gerät",
+    "scanning": "Suche läuft...",
+    "selectDevice": "Gerät auswählen",
+    "disconnectedOption": "{name} (getrennt)",
+    "disconnectedName": "<Gerät getrennt>",
+    "noDeviceSelected": "Kein Gerät ausgewählt",
+    "assignedInput": "Zugewiesene Eingabe",
+    "manualAria": "Joystick-Eingabe manuell auswählen",
+    "selectInput": "Eingabe auswählen...",
+    "manualHint": "Wählen Sie eine Taste oder HAT-Richtung, ohne auf eine Eingabe zu warten.",
+    "manualHintNoDevice": "Wählen Sie zuerst einen angeschlossenen Joystick aus.",
+    "manual": "Manuell",
+    "button": "Taste {number}",
+    "hatInput": "HAT {number} {direction}",
+    "hatDirections": {
+      "up": "Oben",
+      "upRight": "Oben rechts",
+      "right": "Rechts",
+      "downRight": "Unten rechts",
+      "down": "Unten",
+      "downLeft": "Unten links",
+      "left": "Links",
+      "upLeft": "Oben links"
+    },
+    "noInput": "Keine Eingabe erfasst",
+    "buttonCount_one": "{count} Taste",
+    "buttonCount_other": "{count} Tasten",
+    "hatCount_one": "{count} HAT",
+    "hatCount_other": "{count} HATs",
+    "capabilities": "{buttons}, {hats}",
+    "disconnectedTitle": "Zugewiesenes Gerät ist derzeit nicht angeschlossen",
+    "disconnectedBody": "Diese Belegung ist weiterhin als {device} / {input} gespeichert, aber Windows meldet diesen Joystick derzeit nicht.",
+    "capture": "Eingabe erfassen",
+    "canceling": "Wird abgebrochen...",
+    "listening": "Warte auf Eingabe... {seconds} s",
+    "cancelListening": "Warten abbrechen ({seconds} s)",
+    "refresh": "Geräte aktualisieren",
+    "metadata": "Metadaten",
+    "metadataTitle": "Joystick-Metadaten",
+    "deviceGuid": "Geräte-GUID",
+    "connectionStatus": "Verbindungsstatus",
+    "productGuid": "Produkt-GUID",
+    "inputPath": "Eingabepfad",
+    "inputLabel": "Eingabebezeichnung",
+    "unassigned": "Nicht zugewiesen",
+    "unavailable": "Nicht verfügbar",
+    "connected": "Verbunden",
+    "disconnected": "Getrennt",
+    "status": {
+      "canceling": "Eingabeerfassung wird abgebrochen...",
+      "cancelFailedWith": "Erfassung konnte nicht abgebrochen werden: {message}",
+      "cancelFailed": "Erfassung konnte nicht abgebrochen werden. Sie endet automatisch nach Ablauf des Zeitlimits.",
+      "noDevices": "Keine Joystick-Geräte gefunden.",
+      "selectFirst": "Wählen Sie einen angeschlossenen Joystick aus, bevor Sie eine Eingabe erfassen.",
+      "listening": "Es wird nur auf {device} gewartet. Drücken Sie Esc zum Abbrechen; die Erfassung endet automatisch nach 15 Sekunden.",
+      "canceled": "Eingabeerfassung abgebrochen.",
+      "timedOut": "Zeitüberschreitung der Eingabeerfassung nach 15 Sekunden.",
+      "captured": "{device} / {input} erfasst.",
+      "captureFailed": "Joystick-Eingabe konnte nicht erfasst werden.",
+      "selected": "{device} ausgewählt. Erfassen Sie eine Eingabe, oder wählen Sie sie manuell aus.",
+      "assigned": "{device} / {input} manuell zugewiesen."
+    },
+    "listFailed": "Joystick-Geräte konnten nicht aufgelistet werden."
+  }
+}

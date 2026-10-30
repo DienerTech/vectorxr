@@ -1,0 +1,40 @@
+{
+  "eyebrow": "Acerca de",
+  "tagline": "Mejoras de OpenXR, ajustadas para cada juego.",
+  "intro": "VectorXR es una plataforma de mejoras de OpenXR que transforma la forma en que tu visor renderiza y realiza el seguimiento, título a título. Recupera fotogramas por segundo con renderizado foveado dinámico y Turbo, llena cada refresco con Frame Generation, amplifica la rotación de la cabeza para vigilar tus seis sin girarte de más y aumenta la separación estereoscópica para una sensación de escala y presencia más intensa.",
+  "profiles": "La gestión de capas OpenXR y los perfiles por aplicación mantienen cada título configurado exactamente como te gusta, todo desde un mismo lugar.",
+  "firstAndOnly": "{highlight} solución OpenXR en la que la rotación de cabeza mejorada y el renderizado foveado de cuatro vistas funcionan juntos: la región foveada sigue tu vista girada en lugar de quedarse atrás.",
+  "firstAndOnlyHighlight": "La primera y única",
+  "developedBy": "Desarrollado de forma independiente por DienerTech LLC.",
+  "copyright": "(c) 2026 DienerTech LLC. Publicado bajo la Mozilla Public License 2.0.",
+  "support": {
+    "eyebrow": "Apoya el desarrollo",
+    "title": "Apoya VectorXR",
+    "body": "Las propinas a través de Ko-fi ayudan a financiar hardware de pruebas, el trabajo de publicación y el pulido continuo de las herramientas OpenXR.",
+    "button": "Apoyar en Ko-fi"
+  },
+  "patchNotes": {
+    "eyebrow": "Últimas notas de la versión",
+    "readFull": "Leer las notas completas"
+  },
+  "updates": {
+    "eyebrow": "Actualizaciones",
+    "title": "Estado de la versión",
+    "published": "Publicada el {date}",
+    "check": "Comprobar",
+    "release": "Versión",
+    "summary": {
+      "checking": "Comprobando las versiones de GitHub...",
+      "available": "VectorXR {tag} está disponible.",
+      "upToDate": "Tienes la última versión publicada, {tag}.",
+      "unavailable": "Todavía no hay versiones publicadas en GitHub.",
+      "idle": "Busca en GitHub la última compilación publicada de VectorXR."
+    },
+    "chip": {
+      "checking": "Comprobando",
+      "available": "Actualizar",
+      "upToDate": "Actual",
+      "error": "Reintentar"
+    }
+  }
+}

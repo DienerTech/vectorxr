@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -18,6 +19,7 @@
 
 #include <openxr/openxr.h>
 
+#include "depthxr/engine_motion.h"
 #include "depthxr/framegen_gpu.h"
 #include "depthxr/framegen_trace.h"
 #include "depthxr/settings.h"
@@ -43,7 +45,25 @@ struct FrameGenSwapchainDispatch {
     PFN_xrAcquireSwapchainImage acquire{};
     PFN_xrWaitSwapchainImage wait{};
     PFN_xrReleaseSwapchainImage release{};
+    // Research only (VECTORXR_FRAMEGEN_SYNTH_EYE_PROBE): where the runtime
+    // puts the views at each generated frame's display time. Never called
+    // with the switch off; null, the probe has nothing to ask.
+    PFN_xrLocateViews locate_views{};
 };
+
+// How a session's images reach the runtime, as engine motion vectors are
+// read (FrameGenPresenter::NoteEngineMotion).
+enum class FrameGenEngineBridge : std::uint8_t {
+    kNone,   // the game's own images
+    kD3D11,  // the Direct3D 11 bridge: the game's depth stays its own, so its vectors are never read
+    kVulkan, // the Vulkan bridge: the runtime's images get the game's vectors at the bridge's copies
+};
+
+// A Vulkan-bridged session's way to have images of the game's motion vectors
+// reach the runtime's images at the frame's end (VulkanBridge::EndFrameMotion):
+// per (swapchain, image) whether it was copied.
+using FrameGenMotionHandOver =
+    std::function<std::vector<bool>(const std::vector<std::pair<XrSwapchain, std::uint32_t>>&)>;
 
 enum class FrameGenState {
     kOff,         // not enabled for this session, toggled off, or turned off in settings
@@ -79,6 +99,15 @@ struct FrameGenStatus {
     // or the game ran late are left out.
     double distinct_fps{0.0};
     double gpu_ms{-1.0};
+    // The source actually used for the latest real frame, the Interpolate
+    // control, and its last decision (also used by the OSD and status file).
+    std::string interpolate_flow_active;
+    std::string interpolate_flow_mode;
+    std::string interpolate_flow_reason;
+    std::uint64_t interpolate_flow_switches{0};
+    std::uint64_t interpolate_flow_probes{0};
+    std::uint64_t interpolate_flow_fallbacks{0};
+    bool interpolate_flow_probing{false};
     std::uint64_t generated{0};
     std::uint64_t repeated{0};
     std::uint64_t failures{0};
@@ -91,6 +120,20 @@ struct FrameGenStatus {
     std::uint32_t multiplier{2}; // headset frames per real frame in use
     bool automatic{false};       // the multiplier is chosen automatically
     bool full_rate{false};       // automatic and the app holds full refresh
+    // Automatic: the game's rate below which it steps up (0 while it would
+    // not: no higher step, held at full rate, video memory near its
+    // budget), and the game's own rate (its time per frame, the hold left
+    // out) from which it tries one step down (0 at full rate). Frames per
+    // second, on the grid the game's frames are timed by (grid_period_ns).
+    double auto_step_up_below_fps{0.0};
+    double auto_step_down_above_fps{0.0};
+    // ...and that own rate as measured, presenting from its own thread (0
+    // until measured, or inline, where the game's waits say nothing of it).
+    double auto_game_own_fps{0.0};
+    // Grid periods per real frame, measured frame by frame (smoothed; 0
+    // until measured): what a fixed or Auto multiplier becomes for a slower
+    // game.
+    double refreshes_per_real_frame{0.0};
     // Dynamic: the app runs at its own rate and generated frames fill the
     // refreshes between; `multiplier` is then the typical refreshes per real
     // frame.
@@ -115,6 +158,10 @@ struct FrameGenStatus {
     std::uint64_t runtime_clock_displacements{0};
     bool threaded{false};        // presenting from the presenter thread
     FrameGenDepthState depth{FrameGenDepthState::kUnknown};
+    // The game's motion vectors steer the generated frames. Engine motion
+    // vectors are research only so far: nothing sets this yet; the OSD and
+    // the app say so once it does.
+    bool motion_vectors{false};
     // Session totals for the summaries and tests.
     std::uint32_t lead_slots{0};      // refreshes between a game wait's release and its frame's refresh
     std::uint32_t lead_floor{0};      // the lowest lead known to hold this run (0: none yet)
@@ -123,6 +170,20 @@ struct FrameGenStatus {
     std::uint64_t lead_probes{0};     // steps down after a calm while (FrameGenLeadPolicy)
     std::uint64_t lead_probes_failed{0}; // probes undone by late frames
     std::uint64_t lead_downs_undone{0};  // steps down undone by late frames within FrameGenLeadPolicy::judge
+    // The lead's ceiling from the history ring (FrameGenLeadPolicy::ring_ceiling)
+    // at the current multiplier, while below 4 refreshes per real frame (0:
+    // none), and whether that ceiling is on.
+    std::uint32_t lead_ceiling{0};
+    bool lead_ceiling_on{false};
+    std::uint64_t ring_short{0};         // moved refreshes whose real frame's previous images alone were replaced
+    std::uint64_t ring_short_ignored{0}; // ...of those, not taken as the lead's (late, another lead or path)
+    std::uint64_t ring_short_late{0};    // ...of those, found so with the presenter thread itself late
+    std::uint64_t ring_short_would{0};   // the ceiling off: times it would have been lowered
+    std::uint64_t lead_ring_downs{0};    // ceilings lowered a refresh
+    std::uint64_t lead_ring_raises{0};   // ...raised a refresh again (frames late at it)
+    std::uint64_t lead_ring_refused{0};  // second late events at the ceiling before its retry wait ran out
+    std::uint64_t lead_ring_held{0};     // lowerings refused: the ring holds the lead, or late frames proved it
+    std::uint64_t lead_ring_undone{0};   // lowerings undone at once: frames late at them within judge
     std::uint64_t app_frames{0};      // real frames this session
     std::uint64_t late_cpu{0};        // real frames ended after their refresh was due
     std::uint64_t late_gpu{0};        // real frames not captured on the GPU when first chosen for a refresh
@@ -178,6 +239,12 @@ struct FrameGenOsdText {
     double shown_fps{0.0}; // frames per second the headset shows while generating; 0 otherwise
     std::string state;     // the desktop app's state: active, standby, waiting, paused, unavailable or off
     std::string reason;    // the desktop app's status line beside that state; empty for none
+    // While generating: the game's data the frames actually use (depth that
+    // passed its checks, not depth merely sent), for a note on the OSD's line
+    // under the row, which says it in the OSD's language. The app shows depth
+    // from the relay's own field.
+    bool uses_depth{false};
+    bool uses_motion_vectors{false};
 };
 // `started`: the session started with Frame Generation on.
 FrameGenOsdText DescribeFrameGen(const FrameGenStatus& status, bool started);
@@ -225,6 +292,23 @@ struct FrameGenDynamicPolicy {
     double late_analyses_share{0.5}; // (d) analyses ending after their frames were needed, at most
 };
 
+// Interpolate's hardware-flow fallback. Tests shorten these times; the
+// production thresholds leave room above the healthy 2026-10-24 flights
+// (1.5% stale motion and one unready frame per 30 seconds).
+struct FrameGenInterpolateFlowPolicy {
+    std::chrono::milliseconds window{10000};
+    std::chrono::milliseconds shader_hold{60000};
+    std::chrono::milliseconds probe{10000};
+    std::chrono::milliseconds hold_max{480000};
+    double stale_share{0.05};
+    double unready_per_30s{10.0};
+    double hardware_late_share{0.25};
+    std::chrono::milliseconds hardware_grace{1};
+    std::uint64_t min_generated{30};
+    std::uint64_t min_hardware_samples{8};
+    std::uint32_t bad_windows{2};
+};
+
 // How the lead steps back down when nothing late made it grow for a while
 // (tests shorten the times). A probe takes one slot off; frames late again
 // within `judge` restore it, and that lead is then the lowest known to hold:
@@ -245,6 +329,51 @@ struct FrameGenLeadPolicy {
     // the lead is retried only after explore_after, doubling after each
     // failure (tests compare without).
     bool slack_hysteresis{true};
+    // Hitches, not frames: late frames within hitch_span of the first of
+    // them are one event (a hitch makes the next frames late too), and the
+    // lead steps up for two events within event_window, never for one alone
+    // (its refreshes show a cover frame meanwhile); a probe is still undone
+    // by two late frames in the last ten. A rare hitch ratcheted the lead up
+    // for every frame where two late frames in the last ten stepped it up
+    // (DCS on Virtual Desktop, 2026-10-20: lead 4-7, the game told a median
+    // 67 ms past the refresh it was picked for, with 0.5% of its frames
+    // late, in bursts). Spare time steps it down as before (seven of the
+    // last ten frames). Off by default until flown: a game that is late now
+    // and then is held at a shorter lead, and GPU-aware pacing arms for its
+    // late captures (TestGpuAwarePacing's pipelined MSFS-like game). On with
+    // VECTORXR_FRAMEGEN_LEAD=events.
+    bool hitch_events{false};
+    std::chrono::milliseconds hitch_span{250};
+    std::chrono::milliseconds event_window{2000};
+    // The lead's ceiling follows the history ring: once two real frames told
+    // the same lead found their previous images replaced before their last
+    // moved refresh (the ring a capture short there), the ceiling at that
+    // multiplier is a refresh lower, and the lead with it. Never below the
+    // lead the ring holds at any capture timing (FrameGenRingLeadFloor) or
+    // one that frames late a refresh below it showed the game needs (a
+    // lowering from it undone; not a probe or step down of the policy's that
+    // a hitch failed, which says nothing of the ring). Each lowering is
+    // judged as a probe is, by hitch events (hitch_span, event_window)
+    // whether hitch_events is on or not: two late events at it, the first
+    // within judge, put it back at once and keep that lead for explore_max.
+    // A lone hitch no lead cures leaves it (frame after frame late at a lead
+    // too short is a second event a hitch_span on). One that comes as the
+    // policy's own calm probe is already due (within 100 ms) is that probe,
+    // so the policy keeps what it showed; any other is a trial of its own,
+    // the policy's floors and calm time put back when it is undone. None
+    // comes while a probe or step down is judged (the policy is bringing the
+    // lead down itself). After that, raised a refresh again by two late
+    // events at it, once its retry wait has run out. A lead the ring
+    // cannot hold moves nothing: DCS on
+    // Virtual Desktop (Pierpaolo, 2026-10-20) ran at lead 8 with 198
+    // refreshes in 30 s finding their frame's images replaced, where MSFS
+    // 2024 (2026-10-19) needs leads of 7-8 and its ring holds them (none).
+    // On in the 20-lead exploration branch until flown;
+    // VECTORXR_FRAMEGEN_LEAD_CEILING=off for the control arm.
+    bool ring_ceiling{true};
+    // Tests only, never read from the environment: the lead starts here and
+    // UpdateLeadLocked makes no moves (the caps still clamp it).
+    std::uint32_t pinned_lead{0};
 };
 
 // Frame Generation pacing for one OpenXR session.
@@ -295,6 +424,13 @@ class FrameGenPresenter {
     // earlier session's teardown found unfinished went with that session's
     // swapchains, so a later session's swapchains are never kept for it.
     void BeginSession();
+    // At each xrBeginSession the runtime accepted: the view configuration
+    // the runtime's session was begun on (the game's, or stereo where the
+    // layer emulates quad views). The eye probe (research) locates the
+    // runtime's views in it: xrLocateViews takes the session's own, and a
+    // session begun on quad views natively (Varjo) has four. Stereo until
+    // the layer says otherwise.
+    void SetRuntimeViewConfiguration(XrViewConfigurationType type);
     // Started with a working GPU backend; such a session keeps frame pacing
     // away from Turbo even while toggled off, so toggling never races Turbo.
     bool OwnsPacing() const;
@@ -329,15 +465,12 @@ class FrameGenPresenter {
     // Quad views: how long the layer composes them after frames kept failing
     // to be written, doubling up to `longest` (tests shorten it).
     void SetQuadDecline(std::chrono::milliseconds first, std::chrono::milliseconds longest);
-    // Interpolating, motion is measured on the shader cores even with
-    // NVIDIA's optical flow hardware chosen. Beside a game's rendering the
-    // hardware's vectors come late on every graphics API (they wait for the
-    // busy GPU), while the frames between real frames need them first: DCS,
-    // flight 2, measured 8.6 ms against 1.1 on the shader cores, and 6-10% of
-    // refreshes repeated a frame; MSFS 2024 (2026-10-09) 9-17 ms, and its lead
-    // grew to 11-14 refreshes to make room. Both looked the same interpolated
-    // (MSFS, 2026-10-07). Extrapolate keeps the hardware.
+    // Compatibility override for older experiments and tests: force
+    // Dynamic Interpolate to shader. Production uses interpolate_flow;
+    // without this override hardware is honored with automatic fallback.
     void SetInterpolateOnShaders(bool on);
+    // Automatic flow fallback/probe timing (tests may shorten it).
+    void SetInterpolateFlowPolicy(const FrameGenInterpolateFlowPolicy& policy);
     // Delay before a paused session retries by itself, and how often; the
     // attempts are restored once the last retry has held this long without
     // another pause.
@@ -385,10 +518,43 @@ class FrameGenPresenter {
     // in flight may still name it (a runtime call past the teardown wait):
     // the space must then be kept, for the runtime to free with the session.
     bool ForgetSpace(XrSpace space);
+    // The application acquired an image: its own until NoteRelease, in a
+    // state of its own (a motion vector image so held is never read). Not a
+    // bridged swapchain's: its runtime images are the bridge's.
+    void NoteAcquire(XrSwapchain swapchain, std::uint32_t image_index);
     void NoteRelease(XrSwapchain swapchain, std::uint32_t image_index);
     // Call before forwarding a release: captures the image into history while
-    // the application still owns it.
+    // the application still owns it. With VECTORXR_FRAMEGEN_ENGINE_MV=census,
+    // a view's depth release also takes the early census of its motion
+    // vector images (named by the last frame's record); with =capture, a game
+    // releasing its motion vector images (the specification's way) has them
+    // captured here, with the released index (motion_targets_).
     void CaptureOnRelease(XrSwapchain swapchain, std::uint32_t image_index);
+    // Engine motion vectors (XR_FB_space_warp, XR_EXT_frame_synthesis): in
+    // xrEndFrame, under the layer's lock, every frame while the layer takes
+    // the structures over: the frame's record (no views when the frame
+    // carried none), kept with the frame before's. A Direct3D 11-bridged
+    // session's records are dropped (no depth to read them with), as are a
+    // Vulkan-bridged session's with VECTORXR_FRAMEGEN_ENGINE_BRIDGE=0. A
+    // Vulkan-bridged session's runtime images get the game's vectors only by
+    // the bridge's copy, at a release the layer hands over inside xrEndFrame:
+    // its record comes once they were handed over (its frame's releases
+    // then), and its vectors are read from 3 s after the game last made a
+    // swapchain (Star Citizen churns them at its world entry). True when they
+    // are read then: the layer has the bridge give their images back at each
+    // release (VulkanBridge::MarkMotion); false (within the settle time, once
+    // the validator disabled them, or with none read in the session), the
+    // layer has it stop (VulkanBridge::UnmarkMotion).
+    bool NoteEngineMotion(FrameGenEngineMotionFrame frame, FrameGenEngineBridge bridge = FrameGenEngineBridge::kNone);
+    // ...then, once the frame's bridged releases were handed over: with
+    // VECTORXR_FRAMEGEN_ENGINE_MV=census and while frames are generated, its
+    // motion vector images are read where the game left them (it may never
+    // release them): their census (FrameGenGpu::CaptureMotion). With
+    // =capture the image the frame's vectors are in is captured as well, for
+    // the views not captured at their release. A Vulkan-bridged session's
+    // are read here only where `hand_over` copied them into the runtime's
+    // images first (VECTORXR_FRAMEGEN_ENGINE_BRIDGE=end).
+    void CaptureEngineMotion(const FrameGenMotionHandOver& hand_over = {});
 
     XrResult WaitFrame(XrSession session, const XrFrameWaitInfo* info, XrFrameState* state, const FrameGenRuntimeCalls& calls);
     XrResult BeginFrame(XrSession session, const XrFrameBeginInfo* info, const FrameGenRuntimeCalls& calls);
@@ -419,6 +585,14 @@ class FrameGenPresenter {
     // The runtime shows only images of Frame Generation's own (just in time,
     // once its first frame is written): the game's are captured, never shown.
     bool ShowsOwnImagesOnly() const;
+    // A research switch of this session came from
+    // %LOCALAPPDATA%\VectorXR\framegen-research.txt (ReadResearchSwitch): the
+    // OSD says so, as such switches are easily left on.
+    bool ResearchFileInUse() const;
+    // Research (VECTORXR_FRAMEGEN_DEPTH_BRIDGE_PROBE=1, read at Start with the
+    // session's other research switches): the Vulkan bridge's depth probe
+    // (VulkanBridge::SetDepthProbe), which the layer turns on.
+    bool DepthBridgeProbe() const;
     // Frame Generation captures the images of `swapchain` (a primary
     // projection's color or depth).
     bool CapturesFrom(XrSwapchain swapchain) const;
@@ -432,6 +606,12 @@ class FrameGenPresenter {
   private:
     // Holds a presenter thread "in the runtime" for the layer's teardown tests.
     friend class TurboFrameTestPeer;
+    // Reads the engine motion records the layer hands over (its probe tests).
+    friend class SpaceWarpProbeTestPeer;
+    // Drives the lead policy and the history ring's ceiling frame by frame,
+    // without a presenter thread, for the presenter tests.
+    friend class FrameGenLeadTestPeer;
+    friend class FrameGenFlowTestPeer;
     struct SwapchainRecord {
         std::int64_t format{0};
         std::uint32_t sample_count{1};
@@ -440,7 +620,11 @@ class FrameGenPresenter {
         bool depth_capturable{false}; // created with the usage depth capture needs
         std::optional<std::uint32_t> released;
         std::uint64_t releases{0}; // images released so far
+        std::uint32_t acquired{0}; // the images (bits) acquired and not released yet (NoteAcquire)
         std::uint64_t captured_releases{0}; // `releases` when its latest color capture was submitted
+        // Named as a frame's motion vectors (NoteEngineMotion): never a
+        // color image, whatever its format.
+        bool motion{false};
     };
 
     // What each output swapchain holds, readable from release threads.
@@ -452,6 +636,9 @@ class FrameGenPresenter {
 
     struct PendingFrame {
         XrTime app_time{0};
+        // The display time the game ended the frame with (Generate: its
+        // engine motion record's; 0 where Generate is not called).
+        XrTime end_time{0};
         XrTime slot_time{0};
         XrDuration period{0};
         bool should_render{false};
@@ -484,10 +671,18 @@ class FrameGenPresenter {
     struct RealFrame {
         bool valid{false};
         std::uint64_t sequence{0};
+        // The frame's own sequence: `sequence` steps over the abandoned
+        // frames after it (BridgeAbandonedLocked), this one does not.
+        std::uint64_t generated_sequence{0};
         XrTime display_time{0};
         XrDuration interval{0}; // since the real frame before it, 0 when not continuous
         XrSpace space{XR_NULL_HANDLE};
         std::vector<ViewRecord> views;
+        // The real frame before it (when continuous): its display time and
+        // its views' eye positions, for predictors that look further back
+        // (VECTORXR_FRAMEGEN_SYNTH_EYE).
+        XrTime before_time{0};
+        std::vector<std::array<float, 3>> before_positions;
     };
 
     struct Output {
@@ -572,10 +767,18 @@ class FrameGenPresenter {
         // its motion moves this frame while this one's is still measured
         // (FrameGenGpu::SynthesizeStale).
         std::uint64_t previous_analyzed{0};
+        // Research only: accepting completed hardware vectors can be delayed
+        // without holding GPU work, changing fences, or sleeping any thread.
+        std::chrono::steady_clock::time_point motion_not_before{};
+        std::chrono::steady_clock::time_point previous_motion_not_before{};
         FrameCopy copy;            // its layers; the primary projection's views are its own
         std::vector<FrameGenOutputKind> kinds;       // per view
         std::vector<std::array<float, 3>> velocity; // per view (Analysis::velocity)
         bool depth{false};                          // Analysis::depth
+        // How many of its intervals it may be moved past itself: the engine
+        // motion map's reach where its analysis merged the game's vectors into
+        // every view (stage 7, FrameGenTuning::engine_reach), else one.
+        float reach{1.0f};
         // Its lead sample (UpdateLeadLocked), taken when a refresh first
         // chooses it: on time only if its game frame had reached the GPU.
         std::uint32_t lead{0};
@@ -643,7 +846,9 @@ class FrameGenPresenter {
         // its color image.
         bool depth{false};
         FrameGenDepthEncoding encoding;
-        FrameGenExtent color_extent; // the color view the depth belongs to
+        FrameGenExtent color_extent; // the color view the depth (or the motion vectors) belong to
+        // A view's motion vector image (stage 2: motion_targets_ only).
+        bool motion{false};
     };
 
     // Quad views: a view's latest color capture (CaptureOnRelease), as the
@@ -791,12 +996,17 @@ class FrameGenPresenter {
     struct Analysis {
         std::uint64_t frame{0}; // FrameGenExecuteResult::frame
         bool synthesized{false}; // motion was measured (a previous frame to measure it against)
+        std::chrono::steady_clock::time_point motion_not_before{};
         std::vector<FrameGenOutputKind> kinds;
         // Per view: how far the eye moves per unit forward in time (the
         // interval between the two real frames), in its view space, where
         // depth is used (generated frames are seen from where it will be).
         std::vector<std::array<float, 3>> velocity;
         bool depth{false}; // depth was used for a view
+        // The game's vectors were merged into every view, each with its depth
+        // (FrameGenExecuteResult::merged and depth): every view's cells are
+        // labelled, and the engine motion map takes every view.
+        bool merged{false};
     };
 
     // Generates one frame per fraction into the output swapchain sets from
@@ -841,15 +1051,51 @@ class FrameGenPresenter {
     // How far each eye moves per unit of generated-frame time from the real
     // frame shown at `newest_time` (FrameGenViewRequest::shift), in that
     // eye's view space: as far as it moved since the previous real frame
-    // (last_real_), whose display time `newest_time` follows.
+    // (last_real_), whose display time `newest_time` follows. `predicted`:
+    // the session extrapolates, and its eyes go where eye_prediction_ says
+    // (research; interpolating keeps the eye on the line between the pair).
     std::vector<std::array<float, 3>> EyeShiftsLocked(const XrCompositionLayerProjection& projection,
-                                                      XrTime newest_time, FrameGenSynthesisMode mode) const;
-    // Summary statistics: the eye shift's prediction, and when generation
-    // ran on the GPU.
+                                                      XrTime newest_time, FrameGenSynthesisMode mode,
+                                                      bool predicted) const;
+    // Summary statistics: the eye shift's prediction (and each candidate
+    // predictor's, eyePredictMissMm), and when generation ran on the GPU.
     void NoteEyeMovementLocked(const XrCompositionLayerProjection& projection, const PendingFrame& frame);
+    // Research (VECTORXR_FRAMEGEN_SYNTH_EYE_PROBE=1, log only): presenter
+    // thread, holding no lock, right after a generated frame was written for
+    // the refresh at `time`: asks the runtime where the views are at exactly
+    // that time, in `frame`'s projection space, under submit_mutex_ (the
+    // space cannot go meanwhile), and keeps the first eye, located and as
+    // `views` carry it, until the real frames either side of `time` say
+    // where it was (ResolveEyeProbeLocked). The views are those of the
+    // runtime session's configuration (SetRuntimeViewConfiguration), the
+    // first the left eye (the left context view in quad views) as in the
+    // frames. `ahead`: the frame is past its real frame (extrapolated, or a
+    // cover). A failed, invalid, untracked, repeated or slow answer is
+    // counted and dropped.
+    void ProbeEyeLocate(XrSession session, const JitFrame& frame, bool ahead,
+                        const std::vector<XrCompositionLayerProjectionView>& views, XrTime time);
+    // Each real frame's first eye at its display time (Generate), and the
+    // probed frames it brackets with the one before scored against the line
+    // between the two.
+    void NoteEyeProbeRealLocked(const XrCompositionLayerProjection& projection, XrTime display_time,
+                                std::uint64_t sequence);
+    void ResolveEyeProbeLocked();
+    // The eye probe's fields of the summary line (eyeLocate*).
+    std::string EyeProbeTextLocked() const;
     void NoteGpuTimingLocked(std::uint64_t submission, const PendingFrame& frame,
                              const std::optional<FrameGenGpuWindow>& window,
-                             const std::vector<FrameGenAnalysisTiming>& timings);
+                             const std::vector<FrameGenAnalysisTiming>& timings,
+                             std::chrono::steady_clock::time_point capture_pending_from = {},
+                               bool hardware_flow = false);
+    // Called only while preparing a real frame's analysis. A multiplier
+    // probe freezes this controller, including explicit setting changes.
+    bool UpdateInterpolateFlowLocked(std::chrono::steady_clock::time_point now,
+                                     FrameGenSynthesisMode mode, bool hardware_selected);
+    void SwitchInterpolateFlowLocked(bool hardware, std::chrono::steady_clock::time_point now,
+                                     const std::string& reason);
+    void ResetInterpolateFlowWindowLocked(std::chrono::steady_clock::time_point now);
+    std::chrono::steady_clock::time_point InterpolateFlowDelayUntilLocked(
+        std::chrono::steady_clock::time_point now, FrameGenSynthesisMode mode, bool hardware_active);
     // One output image per spec in each of the first `sets` output sets.
     // `keep_replaced`: an output made anew keeps its old swapchain alive
     // (retired_outputs_) until a frame is written into the new ones.
@@ -893,7 +1139,12 @@ class FrameGenPresenter {
     // engagement it does not need a fresh run of steady frames.
     bool StayThreadedLocked() const;
     void DropUnclaimedLocked();
+    // Forgets the frames judged at the lead (it changed, or starts over).
+    void ClearLeadHistoryLocked();
     void UpdateLeadLocked(bool late, std::optional<double> slack_ms, std::uint32_t lead, std::uint32_t multiplier);
+    // How long after lead_calm_since_ the next calm probe comes: probe_after,
+    // or the wait below the lowest lead known to hold.
+    std::chrono::milliseconds CalmProbeWaitLocked() const;
     // Just in time: a kept real frame's lead sample, once.
     void ScoreLeadLocked(JitFrame& frame, bool late);
     // A kept real frame dropped before any refresh chose it: late when its
@@ -1000,6 +1251,16 @@ class FrameGenPresenter {
         // itself instead (the fallback, a cover frame). Late for the lead.
         bool motion_late{false};
         bool ring_exhausted{false}; // images it was to be written from were replaced by newer captures (Writable)
+        // The refresh's own choice was to be moved (not a cover frame, not
+        // the fallback) and newer captures had replaced its real frame's
+        // previous images, its newest still kept: the ring was a capture
+        // short for the lead that frame was told (NoteRingShortLocked).
+        bool ring_short{false};
+        std::uint64_t ring_short_id{0};         // that real frame (JitFrame::id)...
+        std::uint32_t ring_short_lead{0};       // ...the lead it was told...
+        std::uint32_t ring_short_multiplier{0}; // ...at this multiplier...
+        bool ring_short_composed{false};        // ...a claimed quad frame's...
+        std::chrono::steady_clock::time_point ring_short_at{}; // ...and when the check found it so
         bool as_is{false};      // nothing written: the frame (JitFrame::as_is) is shown as the layer composed it
         bool failed{false};     // writing was attempted and failed: outputs, an acquire or wait, or the GPU
         bool timed_out{false};  // ...an output image the runtime did not hand back in time
@@ -1096,6 +1357,13 @@ class FrameGenPresenter {
     std::uint64_t wait_sequence_{0};
     XrTime last_returned_time_{0};
     std::vector<CaptureTarget> capture_targets_;
+    // Engine motion vectors (stage 2): the motion vector images a game
+    // following the specification released for the last frame, captured at
+    // their next release (CaptureOnRelease). Never in capture_targets_: the
+    // layer holds back calls on those swapchains for a frame's submission
+    // (FrameGenLazy, CapturesFrom), which flushes only the swapchains its
+    // layers name, and none names these.
+    std::vector<CaptureTarget> motion_targets_;
     std::vector<OutputKinds> output_kinds_;
     std::thread::id end_thread_; // the thread that last ended a frame
     bool logged_claimed_wait_{false};
@@ -1227,6 +1495,7 @@ class FrameGenPresenter {
     std::chrono::steady_clock::time_point probe_not_before_{};
     std::chrono::milliseconds probe_backoff_{10000};
     bool probing_{false};
+    std::chrono::steady_clock::time_point probe_started_at_{}; // the probe's own switch
     std::uint32_t probe_from_{0};
     // Since when every judgement found the game late with no higher
     // multiplier to step to (UpdateAutoLocked); before the last change, none.
@@ -1238,6 +1507,11 @@ class FrameGenPresenter {
     // (ThreadedEnd): the last such hold, left out of the time it falls in.
     std::array<double, 32> auto_busy_{};
     std::size_t auto_busy_count_{0};
+    // Diagnostic only: calibrated capture completion after CPU generation
+    // entry. Outstanding latency is not GPU service time or throughput and
+    // must not be used to prohibit a lower-multiplier probe.
+    std::array<double, 32> auto_capture_pending_ms_{};
+    std::size_t auto_capture_pending_count_{0};
     std::chrono::steady_clock::time_point auto_busy_since_{};
     std::chrono::steady_clock::time_point auto_end_held_from_{};
     std::chrono::steady_clock::time_point auto_end_held_to_{};
@@ -1290,8 +1564,16 @@ class FrameGenPresenter {
         std::uint64_t unready{0};      // refreshes whose real frame was not captured yet
         std::uint64_t unmeasured{0};   // moved frames written as exact copies: motion not measured yet
         std::uint64_t stale_motion{0}; // moved frames moved by the previous real frame's motion instead
+        // Same successful-write population as stale_motion: moved outputs
+        // and their stale-motion safety copies, including repeated writes;
+        // ordinary real-frame copies are excluded. generated_distinct is a
+        // submission counter and is not the denominator for this signal.
+        std::uint64_t motion_outputs{0};
         std::uint64_t analyses_timed{0};
         std::uint64_t analyses_late{0};
+        std::uint64_t hardware_timed{0};
+        std::uint64_t hardware_late{0};
+        std::uint64_t hardware_lag_ns{0};
         std::uint64_t copies_skipped{0};
         std::uint64_t ring_exhausted{0}; // refreshes whose real frame's images newer captures had replaced
         std::uint64_t stale_skipped{0};  // refreshes not submitted: nothing current to show
@@ -1312,6 +1594,17 @@ class FrameGenPresenter {
         std::uint64_t lead_probes{0};
         std::uint64_t lead_probes_failed{0};
         std::uint64_t lead_downs_undone{0};
+        // The lead's ceiling from the history ring (FrameGenStatus's of the
+        // same names).
+        std::uint64_t ring_short{0};
+        std::uint64_t ring_short_ignored{0};
+        std::uint64_t ring_short_late{0};
+        std::uint64_t ring_short_would{0};
+        std::uint64_t lead_ring_downs{0};
+        std::uint64_t lead_ring_raises{0};
+        std::uint64_t lead_ring_refused{0};
+        std::uint64_t lead_ring_held{0};
+        std::uint64_t lead_ring_undone{0};
         // Frames of the layer's quad compose site, by route (FrameGenQuadRoute).
         std::uint64_t quad_claimed{0};
         std::uint64_t quad_uncaptured{0};
@@ -1425,6 +1718,7 @@ class FrameGenPresenter {
     void LogViewExtentsLocked(const XrCompositionLayerProjection& projection);
     // The depth check's batches, one Debug line each (at most one a second).
     std::uint32_t logged_depth_batches_{0};
+    int logged_empty_view_{-1}; // FrameGenDepthStatus::empty_view last logged
     std::chrono::steady_clock::time_point depth_batch_logged_at_{};
     bool logged_capture_failure_{false};
     bool logged_uncaptured_{false};
@@ -1468,6 +1762,10 @@ class FrameGenPresenter {
     // anyway (a probe, FrameGenLeadPolicy).
     std::uint32_t lead_slots_{0};
     std::deque<std::uint8_t> lead_history_; // last frames at the current lead: 0 on time, 1 late, 2 slack
+    // FrameGenLeadPolicy::hitch_events, at the current lead: when the last
+    // late event began, and the events within event_window.
+    std::optional<std::chrono::steady_clock::time_point> lead_event_start_;
+    std::deque<std::chrono::steady_clock::time_point> lead_events_;
     FrameGenLeadPolicy lead_policy_;
     std::chrono::steady_clock::time_point lead_calm_since_{}; // the lead's last step (none yet: unset)
     struct LeadProbe {
@@ -1477,6 +1775,11 @@ class FrameGenPresenter {
         // the lead before it.
         std::uint32_t grace{2};
         bool slack{false}; // a step down for frames with a refresh to spare, not a calm probe
+        // A lowering of the history ring's ceiling, taken for the calm probe
+        // already due (NoteRingShortLocked): judged by the ring's hitch
+        // events (LeadRing::late_event), and its failure counts as
+        // lead_ring_undone, not as a failed probe.
+        bool ring{false};
     };
     std::optional<LeadProbe> lead_probe_; // a probe being judged
     std::uint32_t lead_floor_{0};         // the lowest lead known to hold (0: none yet)
@@ -1494,6 +1797,95 @@ class FrameGenPresenter {
     // Frames were late at lead_floor_ or below it (a probe or step down
     // undone): steps down for slack below it also wait, as calm probes do.
     bool lead_floor_failed_{false};
+    // The lead's ceiling from the history ring (FrameGenLeadPolicy::ring_ceiling)
+    // at one multiplier, for this presenter run (or until the multiplier or
+    // Dynamic is switched): each multiplier keeps its own, and its own waits.
+    struct LeadRing {
+        std::uint32_t ceiling{0}; // 0: none, the cap is 4 refreshes per real frame
+        // When it last moved, and the wait before frames late at it raise it
+        // again: explore_after, doubled each time a raise is undone within
+        // explore_after (up to explore_max).
+        std::chrono::steady_clock::time_point changed_at{};
+        std::chrono::milliseconds retry{10000};
+        bool raised{false}; // the last move raised it
+        // A lowering judged as a probe is, for FrameGenLeadPolicy::judge from
+        // its time (longer while a late event that began within it awaits a
+        // second, RingJudgedLocked): two late events at it put `previous`
+        // (the ceiling before) back at once, and `from` (the lead it
+        // lowered) is needed.
+        std::optional<std::chrono::steady_clock::time_point> trial;
+        std::uint32_t trial_from{0};
+        std::uint32_t trial_previous{0};
+        // The lead policy's own state before a lowering not taken for its
+        // calm probe: undone, it is put back, as though never tried
+        // (UpdateLeadLocked), so the policy's own probes keep their times.
+        std::chrono::steady_clock::time_point trial_calm{};
+        std::uint32_t trial_floor{0};
+        std::uint32_t trial_proven{0};
+        bool trial_floor_failed{false};
+        // The first late frame of the last late event at the ceiling (frames
+        // late within hitch_span of it are that event), while lowered: a
+        // second within event_window of it undoes a lowering being judged,
+        // or raises the ceiling once its retry wait has run out. A lone
+        // hitch does neither.
+        std::optional<std::chrono::steady_clock::time_point> late_event;
+        // The lowest lead frames late a refresh below it showed the game
+        // needs (a lowering from it undone, the ceiling's own verdict; a
+        // probe or step down of the policy's says nothing of the ring): no
+        // lowering goes below it until explore_max after `needed_at`.
+        std::uint32_t needed{0};
+        std::chrono::steady_clock::time_point needed_at{};
+        // Dynamic: its refreshes per real frame when it was lowered. A game
+        // that slows a refresh in (ring - 2) since (ring - 1 interpolating)
+        // has the ring hold a lead more: the ceiling goes.
+        double interval{0.0};
+        // Turned off: the ceiling it would have set (ringWould counts
+        // lowerings, not every ring-short pair at a lead it would have left).
+        std::uint32_t would{0};
+    };
+    // Index 2-4 (the multiplier).
+    std::array<LeadRing, 5> lead_ring_{};
+    // The first real frame that found the ring a capture short at a lead and
+    // multiplier, while a second one is awaited within event_window.
+    struct LeadRingEvent {
+        std::chrono::steady_clock::time_point at;
+        std::uint64_t frame{0};
+        std::uint32_t lead{0};
+        std::uint32_t multiplier{0};
+    };
+    std::optional<LeadRingEvent> lead_ring_event_;
+    // How long after the presenter thread's wait returned each ring-short
+    // refresh was found so (ringShortWriteMs), this summary window.
+    std::vector<double> ring_short_write_ms_;
+    // VECTORXR_FRAMEGEN_LEAD_CEILING (none: the policy's): outranks
+    // FrameGenLeadPolicy::ring_ceiling, so a policy set later keeps it.
+    std::optional<bool> ring_ceiling_env_;
+    std::uint32_t logged_ring_moves_{0}; // ceiling moves logged this session (at most 16)
+    bool logged_ring_held_{false};       // a refused lowering logged this run
+    bool RingCeilingLocked() const { return ring_ceiling_env_ ? *ring_ceiling_env_ : lead_policy_.ring_ceiling; }
+    // The lead the ring holds at any capture timing at `multiplier`
+    // (FrameGenRingLeadFloor, at a refresh per real frame for Dynamic).
+    std::uint32_t RingLeadFloorLocked(std::uint32_t multiplier) const;
+    // The lead's cap at `multiplier` refreshes per real frame: 4 per real
+    // frame, or the ring's ceiling below that (never below the ring's floor).
+    std::uint32_t LeadCapLocked(std::uint32_t multiplier) const;
+    // A lowering of `ring` still judged at `now`: within judge of it, or
+    // while a late event that began within judge awaits a second.
+    bool RingJudgedLocked(const LeadRing& ring, std::chrono::steady_clock::time_point now) const;
+    // Drops every multiplier's ceiling, its waits and what was proved: a new
+    // run, or a switch of the multiplier or of Dynamic.
+    void ResetRingCeilingLocked();
+    // Dynamic: drops the ceiling at `multiplier` once the game has slowed
+    // enough since its lowering for the ring to hold a lead more.
+    void ExpireRingCeilingLocked(std::uint32_t multiplier, std::chrono::steady_clock::time_point now);
+    // Brings the lead (and its floors) down to `cap`, its history and any
+    // probe dropped: a lead above its cap is told the cap, and no frame would
+    // match it to be scored.
+    void ClampLeadLocked(std::uint32_t cap);
+    // A refresh found the ring a capture short (JitWrite::ring_short): taken
+    // for the lead when the presenter thread was not late itself, lowering
+    // the ceiling once two real frames did (presenter thread, under mutex_).
+    void NoteRingShortLocked(const JitWrite& write, std::chrono::steady_clock::time_point returned, XrDuration period);
     // A new run measures its lead afresh (StartCompositorLocked, Start).
     void ResetLeadLocked();
     // Dynamic: refreshes between real frames' slots, smoothed, and the slot
@@ -1570,6 +1962,11 @@ class FrameGenPresenter {
     std::uint8_t held_ring_{0};
     std::uint64_t held_slot_bytes_{0};
     std::uint8_t CanvasRingLocked();
+    // Stage 7: whether the views' ring slots hold the engine motion map's
+    // labels and world motion (counted per slot): the map on, the vectors
+    // merged in (from Assist) on a backend that reads them, in a session
+    // whose frames came with vectors the layer reads (not bridged).
+    bool EngineMapRingLocked() const;
     // The real frames the backend keeps for a frame of this path.
     std::uint8_t JitRingLocked(bool quad) const {
         return quad ? FrameGenHistoryRing(true) : jit_canvas_ring_;
@@ -1592,7 +1989,36 @@ class FrameGenPresenter {
     // Writing composed frames kept failing: the layer composes them until
     // then (doubling from quad_decline_first_ up to quad_decline_longest_).
     std::chrono::steady_clock::time_point quad_declined_until_{};
+    // Legacy test override: only Dynamic is forced to shader. Production
+    // uses settings_.interpolate_flow (the old env switch maps to hardware).
     bool interpolate_on_shaders_{false};
+    FrameGenInterpolateFlowPolicy interpolate_flow_policy_;
+    std::optional<FrameGenInterpolateFlow> interpolate_flow_env_;
+    std::optional<FrameGenInterpolateFlow> interpolate_flow_selected_;
+    bool interpolate_flow_hardware_selected_{false};
+    bool interpolate_flow_hardware_{true};
+    std::optional<bool> interpolate_flow_available_;
+    std::string interpolate_flow_active_;
+    std::string interpolate_flow_reason_;
+    struct InterpolateFlowWindow {
+        std::chrono::steady_clock::time_point start{};
+        Totals totals;
+    };
+    std::optional<InterpolateFlowWindow> interpolate_flow_window_;
+    std::uint32_t interpolate_flow_bad_windows_{0};
+    bool interpolate_flow_probing_{false};
+    std::chrono::steady_clock::time_point interpolate_flow_probe_started_{};
+    std::chrono::steady_clock::time_point interpolate_flow_probe_due_{};
+    std::chrono::milliseconds interpolate_flow_backoff_{60000};
+    std::uint64_t interpolate_flow_switches_{0};
+    std::uint64_t interpolate_flow_probes_{0};
+    std::uint64_t interpolate_flow_fallbacks_{0};
+    std::chrono::milliseconds interpolate_flow_delay_{0};
+    std::chrono::milliseconds interpolate_flow_delay_for_{25000};
+    // Anchored after backend/driver setup, on the first actual hardware
+    // Interpolate analysis. Once expired it stays expired for this session,
+    // including across frame resets and recovery probes.
+    std::optional<std::chrono::steady_clock::time_point> interpolate_flow_delay_started_;
     bool logged_interpolate_on_shaders_{false};
     bool logged_interpolate_on_hardware_{false};
     std::chrono::milliseconds quad_decline_first_{10000};
@@ -1632,6 +2058,71 @@ class FrameGenPresenter {
     double eye_move_sum_mm_{0.0};
     double eye_miss_sum_mm_{0.0};
     std::uint64_t eye_frames_{0};
+    // The first eye at the three newest consecutive real frames (the newest
+    // is eye_history_sequence_'s), and how far each candidate predictor
+    // (kFrameGenEyeCandidates) put it from the next one, millimeters, since
+    // the last summary (research, VECTORXR_FRAMEGEN_SYNTH_EYE).
+    std::vector<FrameGenEyeSample> eye_history_;
+    std::uint64_t eye_history_sequence_{0};
+    std::array<double, 5> eye_predict_sum_mm_{};
+    std::uint64_t eye_predict_frames_{0};
+    // Research (VECTORXR_FRAMEGEN_SYNTH_EYE_PROBE=1, read at Start): the
+    // runtime asked where the views are at each generated frame's own display
+    // time (ProbeEyeLocate). Nothing it learns changes a frame. Stopped for
+    // the session after kEyeProbeSlowStop slow calls.
+    bool eye_probe_{false};
+    bool depth_bridge_probe_{false}; // DepthBridgeProbe
+    bool eye_probe_stopped_{false};
+    std::uint32_t eye_probe_slow_calls_{0}; // this session's
+    // The runtime session's view configuration (SetRuntimeViewConfiguration):
+    // the one the probe's locates ask for.
+    XrViewConfigurationType runtime_view_configuration_{XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
+    // Probed frames waiting for the real frame after their time: the first
+    // eye where the runtime put it and where the frame was shown from, in
+    // the space of the real frame it was written from. `ahead`: past that
+    // real frame (extrapolated, or a cover), else between two real frames.
+    struct EyeProbeFrame {
+        XrTime time{0};
+        XrSpace space{XR_NULL_HANDLE};
+        bool ahead{false};
+        std::array<double, 3> located{};
+        std::array<double, 3> used{};
+    };
+    std::deque<EyeProbeFrame> eye_probe_pending_;
+    // The newest real frames' first eye at their own display times; each
+    // continuous with the one before it (consecutive, same space) or not.
+    struct EyeProbeReal {
+        XrTime time{0};
+        XrSpace space{XR_NULL_HANDLE};
+        std::uint64_t sequence{0};
+        bool continuous{false};
+        std::array<double, 3> position{};
+    };
+    std::deque<EyeProbeReal> eye_probe_reals_;
+    // The previous answer's first eye and its display time: a later time
+    // answered with exactly the same position is a runtime not predicting.
+    std::optional<std::array<float, 3>> eye_probe_last_;
+    XrTime eye_probe_last_time_{0};
+    // Since the last summary. Index 0: frames ahead of their real frame,
+    // 1: frames between two real frames.
+    struct EyeProbeWindow {
+        std::uint64_t calls{0};
+        double call_ms_sum{0.0};
+        double call_ms_max{0.0};
+        std::uint64_t failed{0};    // the call failed, or located no view
+        std::uint64_t invalid{0};   // no valid position
+        std::uint64_t untracked{0}; // a valid position, not tracked
+        std::uint64_t same{0};      // the previous answer's position for a later time
+        std::uint64_t slow{0};      // the call took longer than kEyeProbeSlowMs
+        std::uint64_t gone{0};      // the frame's space went before it could be asked
+        std::uint64_t unresolved{0}; // no continuous real frames either side of its time
+        std::array<std::uint64_t, 2> apart{};        // located against used
+        std::array<double, 2> apart_sum_mm{};
+        std::array<std::uint64_t, 2> resolved{};     // scored against the real frames' line
+        std::array<double, 2> located_miss_sum_mm{};
+        std::array<double, 2> used_miss_sum_mm{};
+    };
+    EyeProbeWindow eye_probe_window_;
     // When generation ran on the GPU: its start after the real frame's slot
     // was released and its end after the first generated slot was,
     // milliseconds, since the last summary (FrameGenGpu::LastGpuWindow).
@@ -1639,6 +2130,8 @@ class FrameGenPresenter {
         std::uint64_t submission{0};
         std::chrono::steady_clock::time_point real_due{};
         std::chrono::steady_clock::time_point generated_due{};
+        std::chrono::steady_clock::time_point capture_pending_from{};
+        bool hardware_flow{false};
     };
     std::deque<GpuDue> gpu_due_;
     std::vector<double> gpu_start_ms_;
@@ -1667,6 +2160,11 @@ class FrameGenPresenter {
     std::uint64_t told_lead_frames_{0};   // the frames told one
     std::uint32_t told_lead_max_{0};      // the largest told
     std::vector<double> game_ahead_ms_;   // the time told past the runtime's own display time at the wait
+    // game_ahead_ms_ from the presenter thread's last paced wait at any
+    // age (measured in every window), and how many frames were told each
+    // lead.
+    std::vector<double> told_ahead_ms_;
+    std::map<std::uint32_t, std::uint64_t> told_lead_counts_;
     std::vector<double> ahead_jitter_ms_; // that against the frame told before's, unless a pause came between
     std::vector<double> end_slack_ms_;    // the time to spare when the frame ended (negative: late)
     double last_ahead_ms_{0.0};           // the frame told last's game_ahead_ms_ sample...
@@ -1674,15 +2172,251 @@ class FrameGenPresenter {
     double pause_longest_ms_{0.0};
     std::uint32_t logged_pauses_{0};
     // Research capture: a file %LOCALAPPDATA%\VectorXR\framegen-capture.request
-    // (checked once a second) writes the next kCaptureFrames real frames'
-    // inputs under %LOCALAPPDATA%\VectorXR\captures (FrameGenGpu::DumpNextExecute).
-    // Under gpu_mutex_.
+    // (checked once a second) writes the next real frames' inputs under
+    // %LOCALAPPDATA%\VectorXR\captures (FrameGenGpu::DumpNextExecute):
+    // kCaptureFrames of them, or as many as it says ("capture frames=7"),
+    // with the game's motion vector images too for "motion=all" (every image
+    // of the first frame dumped, then the one each frame's vectors are
+    // thought to be in; at most once per frame directory). Under gpu_mutex_.
     static constexpr std::uint32_t kCaptureFrames = 5;
+    // Starts a capture when the request is there; whether one is under way.
+    bool CaptureUnderWay();
+    // The next frame's directory (made here), and the frame counted.
     std::string NextCaptureDirectory();
     std::chrono::steady_clock::time_point last_capture_check_{};
+    std::uint32_t capture_frames_{kCaptureFrames};
     std::uint32_t capture_frames_left_{0};
     std::uint32_t capture_index_{0};
     std::string capture_root_;
+    bool capture_motion_{false};
+    bool capture_motion_all_{false};                    // no copy of every image taken yet
+    std::optional<std::uint32_t> capture_motion_armed_; // the directory (capture_index_) last armed
+    // What a captured frame's presenter.txt and motion.txt say (Generate):
+    // the presenter's view of the frame, and its engine motion record.
+    struct CaptureNotes {
+        std::uint64_t sequence{0};
+        XrTime display_time{0};
+        XrTime previous_time{0};
+        XrDuration previous_interval{0};
+        XrDuration period{0};
+        XrSpace space{XR_NULL_HANDLE};
+        std::uint32_t lead{0};
+        FrameGenSynthesisMode mode{FrameGenSynthesisMode::kInterpolate};
+        bool analyze{false};
+        bool continuous{false};
+        std::vector<FrameGenViewGeometry> declared; // the views as Frame Generation takes them
+    };
+    void WriteCaptureNotes(const std::string& directory, const CaptureNotes& notes);
+
+    // Engine motion vectors (VECTORXR_FRAMEGEN_ENGINE_MV, read at Start;
+    // NoteEngineMotion, CaptureEngineMotion). Under mutex_: the frame's
+    // record and the frame before's, each with what its views' swapchains
+    // had released then and whether its vectors were read (the census at its
+    // end; from stage 2 their capture, at its end or at their release).
+    struct EngineFrame {
+        bool valid{false};
+        FrameGenEngineMotionFrame frame;
+        std::vector<std::uint32_t> color_index; // per view
+        std::vector<std::uint32_t> depth_index;
+        std::vector<std::uint64_t> color_releases;
+        std::vector<std::uint64_t> vector_releases;
+        std::vector<std::optional<std::uint32_t>> released; // the vectors' swapchain released one since the frame before
+        std::vector<std::uint8_t> captured;
+        bool cut{false}; // its appSpaceDeltaPose is a camera cut (FrameGenEngineCuts)
+        // Generate's, once it generated from the frame (EngineGatesLocked):
+        // the frame (PendingFrame::sequence), the gates holding its vectors
+        // back, whether it came with a cut, a depth encoding change, a pause
+        // or a new swapchain, Pivot's change to each view (record order) and
+        // whether it moved since the frame before, and whether the frame may
+        // calibrate (FrameGenViewRequest::engine_calibrate).
+        std::uint64_t sequence{0};
+        std::uint32_t gates{0};
+        bool unsettled{false};
+        std::vector<FrameGenPoseChange> pivot;
+        bool pivot_moved{false};
+        bool calibrate{false};
+        // The poses the game rendered the frame before (its pair) with, per
+        // view in record order, once paired: the next frame's lag test reads
+        // them as the frame before the frame before.
+        std::vector<FrameGenViewGeometry> paired_game;
+    };
+    // Stage 3 (VECTORXR_FRAMEGEN_ENGINE_MV=observe): the frame's requests ask
+    // for its vectors' evidence where no gate holds them back
+    // (FrameGenViewRequest::engine_motion), with the game's poses, and the
+    // lag test's where both frames may calibrate and the head's turn changed
+    // by 2 degrees a frame.
+    void EngineRequestsLocked(const PendingFrame& frame, bool calibrate, std::vector<FrameGenViewSubmission>& submissions);
+    // Stage 4: the frame's requests carry the application's movement since
+    // the frame before (FrameGenViewRequest::app_delta) where its record is
+    // paired with the frame before's, without a camera cut or FRAME_SKIP, and
+    // every view carries the same: whatever the engine motion mode, as the
+    // world's motion follows from it alone (the backend's
+    // VECTORXR_FRAMEGEN_ENGINE_DELTA decides).
+    void EngineDeltaLocked(const PendingFrame& frame, std::vector<FrameGenViewSubmission>& submissions);
+    // The census jobs for `frame`'s views (stage 0: every image, sampled at
+    // its end; stage 2 captures too, CaptureEngineMotion chooses), with each
+    // view's color request.
+    void EngineJobsLocked(const EngineFrame& frame, std::vector<FrameGenMotionJob>& jobs,
+                          std::vector<FrameGenViewRequest>& color) const;
+    // A pause, an abandoned frame or a swapchain gone: the records are not a
+    // frame's and the one before's any more, nor are the motion targets.
+    void ForgetEngineFramesLocked();
+    // Stage 5, at a config reload (Configure): VECTORXR_FRAMEGEN_ENGINE_MV
+    // (observe or assist, and lead in a session started at assist or lead;
+    // another mode waits for the next session) and the filters' and tint's
+    // switches as the research switches name them now.
+    void ReconfigureEngineLocked(FrameGenEngineMode mode, bool filter, bool cockpit, bool tint);
+    FrameGenEngineMode engine_requested_{FrameGenEngineMode::kOff};
+    // Stage 2: the image a frame's vectors are taken from
+    // (VECTORXR_FRAMEGEN_ENGINE_MV_IMAGE=released|color|depth|0|1|2; none:
+    // auto, the census worker's tracker), and per view whether they were
+    // captured at their release since the last frame's end (CaptureOnRelease):
+    // its end captures the others.
+    std::optional<FrameGenEngineImageTracker::Hypothesis> engine_image_;
+    std::vector<std::uint8_t> engine_released_;
+    // Stage 2: a frame of this session came with motion vectors the layer
+    // reads (not through the Direct3D 11 bridge, nor through the Vulkan
+    // bridge before its swapchains settled): only then are the backend's raw
+    // fields made.
+    bool engine_capturable_{false};
+    EngineFrame engine_frame_;
+    EngineFrame engine_previous_;
+    // The census worker, while a session's backend reads motion vectors.
+    std::shared_ptr<FrameGenEngineCensusWorker> engine_worker_;
+    std::uint64_t engine_noted_{0};   // records handed over this session
+    std::uint64_t engine_invalid_{0}; // structures with problems among them
+    std::uint64_t engine_census_after_{0}; // the newest census taken from the backend (under gpu_mutex_)
+    std::size_t engine_notes_logged_{0};
+    bool logged_engine_failure_{false};
+    bool logged_engine_bridged_{false};
+    // Stage 9: the session's bridge as its newest record said, how the
+    // Vulkan bridge's vectors are read (VECTORXR_FRAMEGEN_ENGINE_BRIDGE, read
+    // at Start), and whether its first such record was logged.
+    FrameGenEngineBridge engine_bridge_{FrameGenEngineBridge::kNone};
+    FrameGenEngineBridgeMode engine_bridge_mode_{FrameGenEngineBridgeMode::kReleased};
+    bool logged_engine_bridge_read_{false};
+    // A Vulkan-bridged session reads its vectors only once the game made no
+    // swapchain for kFrameGenEngineSettleSeconds.
+    bool EngineBridgeSettledLocked() const;
+    // Stage 9, per view: its newest census at a frame's end found every image
+    // it read exactly zero everywhere in the view's region (none: no census
+    // yet), for G10; the first frame it held back is logged.
+    std::vector<std::optional<bool>> engine_empty_;
+    bool logged_engine_one_eye_{false};
+    // Stage 3, under mutex_: the backend's validator as last read
+    // (CaptureEngineMotion), its decisions logged, its totals at the last
+    // summary, and whether the game's prior (FrameGenEnginePriorFor) was
+    // looked for.
+    FrameGenEngineValidation engine_validation_;
+    std::uint32_t engine_decisions_logged_{0};
+    FrameGenEngineValidation engine_validation_logged_;
+    bool engine_prior_checked_{false};
+    // Stage 4, under mutex_: the backend's world delta calibration as last
+    // read (after each Execute), its decisions logged, and its totals at the
+    // last summary.
+    FrameGenWorldDeltaStatus world_delta_;
+    std::uint32_t world_delta_decisions_logged_{0};
+    FrameGenWorldDeltaStatus world_delta_logged_;
+    // The frame gates (stage 1), under mutex_: a record as the gates read it
+    // (none: no record), and the gates for the frame Generate generates
+    // from (`flipped`: a view's depth was decoded as the frame before
+    // described it): counted for the summary, kept with the frame's record
+    // (the next frame pairs with it, motion.txt), and whether the frame may
+    // calibrate.
+    std::optional<FrameGenEngineGateRecord> EngineGateRecordLocked(const EngineFrame& frame) const;
+    bool EngineGatesLocked(const XrCompositionLayerProjection& projection, const PendingFrame& frame,
+                           const FrameGenEngineGateRecord* record, const FrameGenEngineGateRecord* previous,
+                           const FrameGenEngineGateFacts& facts, bool flipped);
+    // The summary's engine motion line (engine_window_ over `seconds`), when
+    // the layer hands records over or depth was decoded as another frame
+    // described it.
+    void LogEngineSummaryLocked(double seconds);
+    // Research switches read at Start (ReadResearchSwitch).
+    // VECTORXR_FRAMEGEN_DEPTH_ENCODING_CHECK=1: a view whose depth was decoded
+    // as the frame before described it (the first frame after a game changes
+    // its nearZ) is generated without depth. VECTORXR_FRAMEGEN_ENGINE_CUTS=1:
+    // nothing is generated across a camera cut (G6).
+    bool depth_encoding_check_{false};
+    bool engine_cuts_{false};
+    bool research_file_{false}; // a switch of this session came from the research file
+    // Stage 5 (FrameGenTuning::engine_filter, engine_cockpit, engine_tint):
+    // VECTORXR_FRAMEGEN_ENGINE_FILTER=1, _COCKPIT=1 and _TINT=1, read at Start
+    // and again at each config reload (Configure) with
+    // VECTORXR_FRAMEGEN_ENGINE_MV: a session started observing or assisting
+    // takes either of the two from its next real frame on, so a flight
+    // compares them without a restart. The mode the session started in sets
+    // the flow's level (FrameGenTuning::hardware_level): switching never
+    // changes it.
+    bool engine_filter_{false};
+    bool engine_cockpit_{false};
+    bool engine_tint_{false};
+    // Research (FrameGenTuning::flow_view_fine): the Flow view tints
+    // sub-pixel motion, with VECTORXR_FRAMEGEN_SYNTH_FLOW_VIEW=fine, read at
+    // Start and at each config reload.
+    bool flow_view_fine_{false};
+    // Research (the head-motion shimmer diagnosis, D): where extrapolated
+    // frames' eyes go (FrameGenPredictEye; VECTORXR_FRAMEGEN_SYNTH_EYE), read
+    // at Start.
+    FrameGenEyePrediction eye_prediction_;
+    // Stage 6 (FrameGenTuning::engine_predicate, engine_interpolate), read at
+    // Start: VECTORXR_FRAMEGEN_ENGINE_PREDICATE=0 and
+    // VECTORXR_FRAMEGEN_ENGINE_INTERPOLATE=lead. A session in Lead holds the
+    // vectors at Assist until their verdicts let them lead
+    // (engine_lead_, fed in CaptureEngineMotion and Generate); the first
+    // frame they lead is logged once. A config reload into Lead starts it over.
+    bool engine_predicate_{true};
+    bool engine_interpolate_{false};
+    // Stage 7 (FrameGenTuning::engine_map, engine_map_reuse, engine_reach),
+    // read at Start: VECTORXR_FRAMEGEN_ENGINE_MAP=separate|merged, _MAP_REUSE=1
+    // and _REACH (1 to 2).
+    FrameGenEngineMap engine_map_{FrameGenEngineMap::kOff};
+    bool engine_map_reuse_{false};
+    float engine_reach_{1.0f};
+    // Stage 8 (FrameGenTuning::engine_visibility, engine_visibility_synthesis,
+    // engine_bidir), read at Start: VECTORXR_FRAMEGEN_ENGINE_VISIBILITY=1 (or
+    // =merge: the first alone) and VECTORXR_FRAMEGEN_ENGINE_BIDIR=1.
+    bool engine_visibility_{false};
+    bool engine_visibility_synthesis_{false};
+    bool engine_bidir_{false};
+    FrameGenEngineLeadControl engine_lead_;
+    bool logged_engine_lead_{false};
+    FrameGenEngineMode engine_started_{FrameGenEngineMode::kOff};
+    FrameGenEngineCuts engine_cut_window_;
+    bool logged_engine_cut_{false};
+    // Per view: the encoding its latest depth capture was decoded with, until
+    // Generate checks it.
+    std::vector<std::optional<FrameGenDepthEncoding>> depth_decoded_;
+    // When the game last made a swapchain, and totals_.app_frames then (G8).
+    std::optional<std::chrono::steady_clock::time_point> swapchain_created_at_;
+    std::uint64_t swapchain_created_frame_{0};
+    // Since the last summary: real frames generated from, those whose record
+    // had a structure on every view, frames each gate held back, frames whose
+    // depth was decoded as another frame described it, camera cuts among the
+    // records, frames Pivot's change moved in, and frames that may calibrate;
+    // frames no gate held back, and those of them whose vectors were read on
+    // every view (stage 2: captured); frames of a session in Lead on the
+    // engine path, those the vectors led, those held at Assist, those led
+    // with the optical flow hardware chosen (idle), and the times the
+    // vectors were held at Assist (stage 6); frames written past one interval
+    // of their real frame (stage 7, FrameGenTuning::engine_reach).
+    struct EngineWindow {
+        std::uint64_t frames{0};
+        std::uint64_t structs{0};
+        std::array<std::uint64_t, kFrameGenEngineGateCount> gated{};
+        std::uint64_t flips{0};
+        std::uint64_t cuts{0};
+        std::uint64_t pivot_moving{0};
+        std::uint64_t calibrate{0};
+        std::uint64_t open{0};
+        std::uint64_t captured{0};
+        std::uint64_t lead_frames{0};
+        std::uint64_t led{0};
+        std::uint64_t held_at_assist{0};
+        std::uint64_t hardware_idle{0};
+        std::uint64_t demotions{0};
+        std::uint64_t reached{0};
+    };
+    EngineWindow engine_window_;
     // Timed: teardown never waits on them for long (LockForTeardown).
     std::timed_mutex submit_mutex_;      // presenter-thread submissions vs output swapchain calls
     std::timed_mutex gpu_mutex_;         // the GPU backend (Track, Capture, Execute, WaitIdle, Forget, Reset)

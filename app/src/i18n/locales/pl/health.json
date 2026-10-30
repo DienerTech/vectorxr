@@ -1,0 +1,72 @@
+{
+  "checks": {
+    "suiteEnabled": {
+      "label": "Przełącznik działania pakietu",
+      "enabled": "Efekty działania VectorXR mogą być stosowane.",
+      "disabled": "VectorXR jest wyłączony przełącznikiem działania na stronie głównej."
+    },
+    "layerRegistered": {
+      "label": "Rejestracja warstwy OpenXR",
+      "loading": "VectorXR nadal odczytuje rejestracje warstw OpenXR.",
+      "registered": "Zarejestrowano w {slice}.",
+      "missing": "Nie znaleziono VectorXR w rejestrze niejawnych warstw API OpenXR."
+    },
+    "layerEnabled": {
+      "label": "Warstwa OpenXR włączona",
+      "loading": "Oczekiwanie na stan warstwy OpenXR.",
+      "enabled": "Warstwa API VectorXR jest włączona dla kolejnych uruchomień OpenXR.",
+      "disabled": "Warstwa API VectorXR jest wyłączona lub niedostępna."
+    },
+    "layerDuplicates": {
+      "label": "Włączona jedna warstwa VectorXR",
+      "detail_one": "Włączona jest {count} rejestracja VectorXR ({paths}). Aplikacje OpenXR ulegają awarii, gdy ładują się dwie kopie; wyłącz wszystkie oprócz jednej na stronie Warstwy OpenXR.",
+      "detail_few": "Włączone są {count} rejestracje VectorXR ({paths}). Aplikacje OpenXR ulegają awarii, gdy ładują się dwie kopie; wyłącz wszystkie oprócz jednej na stronie Warstwy OpenXR.",
+      "detail_many": "Włączonych jest {count} rejestracji VectorXR ({paths}). Aplikacje OpenXR ulegają awarii, gdy ładują się dwie kopie; wyłącz wszystkie oprócz jednej na stronie Warstwy OpenXR.",
+      "detail_other": "Włączonych jest {count} rejestracji VectorXR ({paths}). Aplikacje OpenXR ulegają awarii, gdy ładują się dwie kopie; wyłącz wszystkie oprócz jednej na stronie Warstwy OpenXR."
+    },
+    "layerFiles": {
+      "label": "Pliki warstwy",
+      "pending": "Pliki warstwy można sprawdzić po znalezieniu rejestracji warstwy.",
+      "resolved": "Ścieżki manifestu i biblioteki DLL są prawidłowe.",
+      "missing": "Brak zarejestrowanej ścieżki manifestu lub biblioteki DLL."
+    },
+    "configLoaded": {
+      "label": "Ścieżka konfiguracji",
+      "pending": "Ścieżka konfiguracji pojawi się po załadowaniu ustawień."
+    },
+    "recentLog": {
+      "label": "Dzienniki działania",
+      "available_one": "Dostępny jest {count} ostatni plik dziennika.",
+      "available_few": "Dostępne są {count} ostatnie pliki dziennika.",
+      "available_many": "Dostępnych jest {count} ostatnich plików dziennika.",
+      "available_other": "Dostępne jest {count} ostatniego pliku dziennika.",
+      "none": "Nie ma jeszcze dzienników działania VectorXR."
+    },
+    "seenApps": {
+      "label": "Wykrywanie aplikacji",
+      "observed_one": "Zaobserwowano {count} aplikację OpenXR.",
+      "observed_few": "Zaobserwowano {count} aplikacje OpenXR.",
+      "observed_many": "Zaobserwowano {count} aplikacji OpenXR.",
+      "observed_other": "Zaobserwowano {count} aplikacji OpenXR.",
+      "none": "Nie zaobserwowano jeszcze żadnych aplikacji OpenXR."
+    }
+  },
+  "overall": {
+    "ready": "Gotowe",
+    "attention": "Wymaga uwagi",
+    "inactive": "Nieaktywne",
+    "unknown": "Sprawdzanie"
+  },
+  "description": {
+    "ready": "VectorXR wygląda na gotowy na kolejne uruchomienia aplikacji OpenXR.",
+    "attention": "VectorXR może działać, ale co najmniej jedna diagnostyka może wymagać przejrzenia.",
+    "inactive": "VectorXR nie jest obecnie gotowy do stosowania Ulepszeń OpenXR.",
+    "unknown": "VectorXR nadal zbiera informacje o stanie systemu."
+  },
+  "state": {
+    "pass": "OK",
+    "warn": "ostrzeżenie",
+    "fail": "błąd",
+    "info": "info"
+  }
+}

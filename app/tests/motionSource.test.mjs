@@ -25,15 +25,16 @@ test('with no card that has the hardware, NVIDIA hardware is unavailable and eve
   assert.equal(settings.motionEstimation, 'hardware', 'the saved choice is kept')
 })
 
-test('Interpolate in Dynamic locks the motion source to Shader whatever is chosen, and keeps the choice', () => {
-  for (const gpus of [cards(rtx), cards(integrated), null]) {
+test('Dynamic Interpolate honors hardware and keeps unsupported GPUs on Shader', () => {
+  for (const [gpus, expected] of [[cards(rtx), 'hardware'], [cards(integrated), 'shader'], [null, 'hardware']]) {
     const settings = { synthesisMode: 'interpolate', motionEstimation: 'hardware', frameMultiplier: 'dynamic' }
     const state = motionSourceState(settings, gpus)
-    assert.equal(state.locked, true)
-    assert.equal(state.effective, 'shader')
-    assert.match(state.note, /In Dynamic, Interpolate measures motion with Shader/)
+    assert.equal(state.locked, false)
+    assert.equal(state.effective, expected)
     assert.equal(settings.motionEstimation, 'hardware')
   }
+  const forced = motionSourceState({ synthesisMode: 'interpolate', motionEstimation: 'hardware', frameMultiplier: 'dynamic', interpolateFlow: 'shader' }, cards(rtx))
+  assert.equal(forced.effective, 'shader')
 })
 
 test('Interpolate at a fixed or Auto rate can use the NVIDIA hardware (experimental)', () => {
@@ -41,7 +42,7 @@ test('Interpolate at a fixed or Auto rate can use the NVIDIA hardware (experimen
     const state = motionSourceState({ synthesisMode: 'interpolate', motionEstimation: 'hardware', frameMultiplier }, cards(rtx))
     assert.equal(state.locked, false)
     assert.equal(state.effective, 'hardware')
-    assert.match(state.note, /Experimental/)
+    assert.equal(state.note, null)
     const shader = motionSourceState({ synthesisMode: 'interpolate', motionEstimation: 'shader', frameMultiplier }, cards(rtx))
     assert.equal(shader.locked, false)
     assert.equal(shader.effective, 'shader')

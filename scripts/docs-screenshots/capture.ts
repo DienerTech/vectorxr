@@ -4,10 +4,14 @@
 //   npm --prefix app run dev        (in another terminal)
 //   node --experimental-strip-types scripts/docs-screenshots/capture.ts [name ...]
 //
+// VECTORXR_SHOTS_LANGUAGE=de (any app language code) captures the app in that
+// language, named <name>.<language>.jpg; only the shots that navigate by tab
+// alone, as the others click English text.
+//
 // Uses headless Microsoft Edge through the Chrome DevTools Protocol, so no
 // browser automation package is required. Set VECTORXR_BROWSER to use Chrome.
 import { spawn } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -19,15 +23,18 @@ const browser = process.env.VECTORXR_BROWSER ?? 'C:/Program Files (x86)/Microsof
 const appUrl = process.env.VECTORXR_APP_URL ?? 'http://localhost:5173/'
 const port = 9333
 const viewport = { width: 1300, height: 1000, deviceScaleFactor: 1.25 }
+const language = process.env.VECTORXR_SHOTS_LANGUAGE ?? ''
 
 class Cdp {
   private id = 0
   private pending = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void }>()
+  private listeners = new Map<string, (params: any) => void>()
   private socket: WebSocket
   constructor(socket: WebSocket) {
     this.socket = socket
     socket.addEventListener('message', (event) => {
       const message = JSON.parse(String(event.data))
+      if (message.method) this.listeners.get(message.method)?.(message.params)
       const waiter = message.id ? this.pending.get(message.id) : undefined
       if (!waiter) return
       this.pending.delete(message.id)
@@ -45,7 +52,32 @@ class Cdp {
     this.socket.send(JSON.stringify({ id, method, params }))
     return new Promise<any>((resolve, reject) => this.pending.set(id, { resolve, reject }))
   }
+  on(method: string, listener: (params: any) => void) { this.listeners.set(method, listener) }
   close() { this.socket.close() }
+}
+
+// The About tab's update check asks GitHub for the latest release. Answer it
+// with the release being documented (the newest patch notes entry), so the
+// screenshots show it as current before it is published.
+async function answerUpdateCheck(cdp: Cdp) {
+  const [release] = JSON.parse(readFileSync(join(root, 'app', 'src', 'lib', 'patchNotes.json'), 'utf8'))
+  const body = JSON.stringify({
+    tag_name: `v${release.version}`,
+    name: `VectorXR ${release.version}`,
+    html_url: `https://github.com/DienerTech/vectorxr/releases/tag/v${release.version}`,
+    published_at: `${release.date}T12:00:00Z`,
+    body: '',
+    assets: [],
+  })
+  cdp.on('Fetch.requestPaused', (event) => {
+    void cdp.send('Fetch.fulfillRequest', {
+      requestId: event.requestId,
+      responseCode: 200,
+      responseHeaders: [{ name: 'Content-Type', value: 'application/json' }, { name: 'Access-Control-Allow-Origin', value: '*' }],
+      body: Buffer.from(body).toString('base64'),
+    })
+  })
+  await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*api.github.com/repos/DienerTech/vectorxr/releases*' }] })
 }
 
 const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms))
@@ -79,7 +111,8 @@ class Page {
     await this.cdp.send('Page.navigate', { url: appUrl })
     await sleep(800)
     await this.eval(`localStorage.setItem('vectorxr-config', ${JSON.stringify(JSON.stringify(sampleConfig()))});
-      localStorage.setItem('vectorxr-theme-preference', '${theme}'); true`)
+      localStorage.setItem('vectorxr-theme-preference', '${theme}');
+      localStorage.setItem('vectorxr-language', ${JSON.stringify(language || 'en')}); true`)
     await this.cdp.send('Page.reload', { ignoreCache: true })
     await sleep(1500)
     await this.eval(helpers)
@@ -91,7 +124,14 @@ class Page {
     if (!found) throw new Error(`No clickable element with text "${text}"`)
     await sleep(500)
   }
-  async tab(label: string) { await this.click(label, 'nav button, nav a, aside button, aside a'); await this.top() }
+  // A sidebar tab by its id (SidebarNav's data-tab), so it works in any language.
+  async tab(id: string) {
+    const found = await this.eval<boolean>(`(() => { const el = document.querySelector('nav [data-tab=${JSON.stringify(id)}]');
+      if (!el) return false; el.click(); return true })()`)
+    if (!found) throw new Error(`No sidebar tab "${id}"`)
+    await sleep(500)
+    await this.top()
+  }
   async top() { await this.eval('(__shot.scroller().scrollTop = 0, true)'); await sleep(300) }
   // Scrolls the content so the element containing text sits offset CSS px below the top.
   async scrollTo(text: string, offset = 24, selector = 'h1, h2, h3, h4, p, span, div, summary, button, label') {
@@ -106,41 +146,46 @@ class Page {
   async shot(name: string) {
     await sleep(450)
     const { data } = await this.cdp.send('Page.captureScreenshot', { format: 'jpeg', quality: 86 })
-    writeFileSync(join(output, `${name}.jpg`), Buffer.from(data, 'base64'))
-    console.log(`captured ${name}.jpg`)
+    const file = language ? `${name}.${language}.jpg` : `${name}.jpg`
+    writeFileSync(join(output, file), Buffer.from(data, 'base64'))
+    console.log(`captured ${file}`)
     if (process.env.VECTORXR_SHOTS_TEXT) console.log(await this.eval<string>(`document.querySelector('main')?.innerText ?? document.body.innerText`))
   }
 }
 
-type Shot = { name: string; theme?: 'light' | 'dark'; run: (page: Page) => Promise<void> }
+type Shot = { name: string; theme?: 'light' | 'dark'; tabOnly?: boolean; run: (page: Page) => Promise<void> }
 
-const tab = (label: string) => async (page: Page) => { await page.tab(label) }
+const tab = (id: string) => async (page: Page) => { await page.tab(id) }
 const shots: Shot[] = [
-  { name: 'home', run: tab('Home') },
-  { name: 'home-dark', theme: 'dark', run: tab('Home') },
-  { name: 'settings', run: tab('Settings') },
-  { name: 'osd', run: async (p) => { await p.tab('On-Screen Display'); await p.click('Legible'); await p.top() } },
+  { name: 'home', tabOnly: true, run: tab('home') },
+  { name: 'home-dark', theme: 'dark', tabOnly: true, run: tab('home') },
+  { name: 'settings', tabOnly: true, run: tab('core') },
+  { name: 'framegen', tabOnly: true, run: tab('framegen') },
+  { name: 'framegen-profiles', run: async (p) => {
+    await p.tab('framegen'); await p.scrollTo('Custom Profiles', 16, 'h2, h3, p, span, div')
+  } },
+  { name: 'osd', run: async (p) => { await p.tab('osd'); await p.click('Legible'); await p.top() } },
   { name: 'osd-compact', run: async (p) => {
-    await p.tab('On-Screen Display'); await p.click('Compact'); await p.click('Legible'); await p.scrollTo('Compact', 16, 'button')
+    await p.tab('osd'); await p.click('Compact'); await p.click('Legible'); await p.scrollTo('Compact', 16, 'button')
   } },
-  { name: 'application-registry', run: tab('Application Registry') },
-  { name: 'openxr-layer-manager', run: tab('OpenXR Layers') },
-  { name: 'about', run: tab('About') },
-  { name: 'quadviews', run: tab('Quadviews') },
-  { name: 'quadviews-overlay-guide', run: async (p) => { await p.tab('Quadviews'); await p.click('How to read the overlay', 'button', false) } },
-  { name: 'depth', run: tab('Depth') },
-  { name: 'pivot', run: tab('Pivot') },
-  { name: 'pivot-snap-views', run: async (p) => { await p.tab('Pivot'); await p.click('Edit Snap Views…'); await p.top() } },
+  { name: 'application-registry', tabOnly: true, run: tab('registry') },
+  { name: 'openxr-layer-manager', tabOnly: true, run: tab('layers') },
+  { name: 'about', tabOnly: true, run: tab('about') },
+  { name: 'quadviews', tabOnly: true, run: tab('quadviews') },
+  { name: 'quadviews-overlay-guide', run: async (p) => { await p.tab('quadviews'); await p.click('How to read the overlay', 'button', false) } },
+  { name: 'depth', tabOnly: true, run: tab('depthxr') },
+  { name: 'pivot', tabOnly: true, run: tab('pivotxr') },
+  { name: 'pivot-snap-views', run: async (p) => { await p.tab('pivotxr'); await p.click('Edit Snap Views…'); await p.top() } },
   { name: 'pivot-snap-view-editor', run: async (p) => {
-    await p.tab('Pivot'); await p.click('Edit Snap Views…'); await p.click('Edit'); await p.top()
+    await p.tab('pivotxr'); await p.click('Edit Snap Views…'); await p.click('Edit'); await p.top()
   } },
-  { name: 'pivot-nudges', run: async (p) => { await p.tab('Pivot'); await p.click('Edit'); await p.top() } },
-  { name: 'turbo', run: tab('Turbo') },
+  { name: 'pivot-nudges', run: async (p) => { await p.tab('pivotxr'); await p.click('Edit'); await p.top() } },
+  { name: 'turbo', tabOnly: true, run: tab('turbo') },
   { name: 'turbo-profiles', run: async (p) => {
-    await p.tab('Turbo'); await p.click('Advanced timing', 'summary', false); await p.scrollTo('Custom Profiles', 16, 'h2, h3, p, span, div')
+    await p.tab('turbo'); await p.click('Advanced timing', 'summary', false); await p.scrollTo('Custom Profiles', 16, 'h2, h3, p, span, div')
   } },
-  { name: 'turbo-runtime-behavior', run: async (p) => { await p.tab('Turbo'); await p.click('Runtime Behavior', 'button', false); await p.top() } },
-  { name: 'turbo-safety', run: async (p) => { await p.tab('Turbo'); await p.click('Details…'); await p.top() } },
+  { name: 'turbo-runtime-behavior', run: async (p) => { await p.tab('turbo'); await p.click('Runtime Behavior', 'button', false); await p.top() } },
+  { name: 'turbo-safety', run: async (p) => { await p.tab('turbo'); await p.click('Details…'); await p.top() } },
 ]
 
 async function main() {
@@ -161,10 +206,11 @@ async function main() {
     const cdp = await Cdp.connect(target.webSocketDebuggerUrl)
     await cdp.send('Page.enable')
     await cdp.send('Runtime.enable')
+    await answerUpdateCheck(cdp)
     await cdp.send('Emulation.setDeviceMetricsOverride', { ...viewport, mobile: false })
     await cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] })
     const page = new Page(cdp)
-    for (const shot of shots.filter((entry) => !selected.length || selected.includes(entry.name))) {
+    for (const shot of shots.filter((entry) => (!selected.length || selected.includes(entry.name)) && (!language || entry.tabOnly))) {
       await page.load(shot.theme)
       await shot.run(page)
       await page.shot(shot.name)

@@ -4,6 +4,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
+#include <deque>
 #include <future>
 #include <filesystem>
 #include <fstream>
@@ -12,6 +13,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 #include <Windows.h>
 #include <d3d11.h>
@@ -135,6 +137,14 @@ class TurboFrameTestPeer {
         layer.turbo_last_predicted_display_time_ = 10'020'000'000;
         layer.turbo_max_returned_display_time_ = 10'000'000'000;
         layer.turbo_convert_counter_time_ = clock ? reinterpret_cast<PFN_xrVoidFunction>(&Clock) : nullptr;
+        // No app frame is waiting to end: this wait's frame ends in the pending wait's.
+        layer.turbo_prediction_history_.Reset();
+    }
+
+    static void EndAppFrame(XrTime display_time) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.turbo_mutex_);
+        layer.turbo_prediction_history_.AppEnd(display_time);
     }
 
     static bool IsForced() { return Layer().turbo_pacing_source_ == OpenXrLayer::TurboPacingSource::kForced; }
@@ -393,6 +403,33 @@ class TurboFrameTestPeer {
         ++layer.config_generation_;
         return {first, second};
     }
+    // What runs under the settings last resolved: whether the OSD is drawn,
+    // whether the Frame Generation toggle is polled (a poll now), and the
+    // features the resolved settings leave on.
+    struct ResolvedFeatures {
+        bool osd{false};
+        bool framegen_toggle_polled{false};
+        bool core{false}, depth{false}, pivot{false}, turbo{false}, framegen{false}, head_prediction{false};
+    };
+    static ResolvedFeatures Features() {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.framegen_binding_last_poll_time_.reset();
+        layer.PollFrameGenToggle();
+        const ResolvedRuntimeConfig& resolved = layer.resolved_settings_;
+        return {layer.osd_monitoring_.load(), layer.framegen_binding_last_poll_time_.has_value(),
+                resolved.core.enabled, resolved.depthxr.enabled, resolved.pivotxr.enabled,
+                resolved.turbo.enabled, resolved.framegen.enabled, resolved.framegen.extend_head_prediction};
+    }
+    // `session` as a running Quadviews session (four views latched until it
+    // ends), or no session's Quadviews at all (XR_NULL_HANDLE).
+    static void QuadViewsSession(XrSession session) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.active_session_ = session;
+        layer.quadviews_session_active_ = session != XR_NULL_HANDLE;
+        layer.deferred_quadviews_config_active_.reset();
+    }
     static bool TurboEffective() { return Layer().turbo_effective_active_.load(); }
     static bool TurboYielded() {
         auto& layer = Layer();
@@ -464,6 +501,22 @@ class TurboFrameTestPeer {
 
     static int ActiveState() {
         return static_cast<int>(OpenXrLayer::TurboSequencedState::kActive);
+    }
+
+    static std::optional<TurboPredictionHistory::Prediction> Prediction(XrTime time) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.turbo_mutex_);
+        return layer.turbo_prediction_history_.Find(time);
+    }
+
+    static bool WaitForAsyncPrediction() {
+        auto& layer = Layer();
+        std::shared_future<void> pending;
+        {
+            std::scoped_lock lock(layer.turbo_mutex_);
+            pending = layer.turbo_async_wait_;
+        }
+        return pending.valid() && pending.wait_for(2s) == std::future_status::ready;
     }
 
     static void SetPolicy(TurboPacingMode mode, Source source) {
@@ -787,6 +840,16 @@ class TurboFrameTestPeer {
     }
     static FrameGenQueueSubstitution::ShownLayerCounts ShownLayers() { return Layer().framegen_queue_.ShownLayers(); }
     static bool ShownLayersLazy() { return Layer().framegen_queue_.ShownLayersLazy(); }
+    static bool QueueDiagnosticsEnabled() { return Layer().framegen_queue_diagnostics_; }
+    static FrameGenQueueSubstitution& Queue() { return Layer().framegen_queue_; }
+    static void ConfigureQueueDiagnostics(bool enabled, bool reset_rate = true) {
+        auto& layer = Layer();
+        layer.framegen_queue_diagnostics_ = enabled;
+        if (reset_rate) layer.framegen_queue_diagnostics_next_ms_.store(0);
+    }
+    static XrResult SubmitRuntimeFrame(const XrFrameEndInfo* info) {
+        return Layer().SubmitRuntimeFrame(XR_NULL_HANDLE, info);
+    }
     // xrCreateSession through the layer's own hook with Frame Generation on
     // (no file is read), the runtime's being `create_session`. The settings
     // are put back after.
@@ -898,10 +961,17 @@ class FakeRuntime {
         const XrResult result = TakeResult(runtime.wait_result_, runtime.wait_failures_remaining_);
         if (XR_SUCCEEDED(result) && frame_state) {
             ++runtime.wait_tokens_;
-            runtime.next_display_time_ += runtime.display_period_;
+            if (runtime.native_predictions_.size() < runtime.scripted_predictions_.size()) {
+                const auto [time, period] = runtime.scripted_predictions_[runtime.native_predictions_.size()];
+                runtime.next_display_time_ = time;
+                runtime.display_period_ = period;
+            } else {
+                runtime.next_display_time_ += runtime.display_period_;
+            }
             frame_state->predictedDisplayTime = runtime.next_display_time_;
             frame_state->predictedDisplayPeriod = runtime.display_period_;
             frame_state->shouldRender = XR_TRUE;
+            runtime.native_predictions_.push_back(frame_state->predictedDisplayTime);
         }
         --runtime.active_waits_;
         ++runtime.wait_exited_;
@@ -927,6 +997,8 @@ class FakeRuntime {
         if (XR_SUCCEEDED(result) || runtime.begin_failure_consumes_frame_) {
             if (runtime.wait_tokens_ > 0) --runtime.wait_tokens_;
             runtime.frame_open_ = true;
+            runtime.previous_begun_ = runtime.current_begun_;
+            runtime.current_begun_ = runtime.native_predictions_.empty() ? 0 : runtime.native_predictions_.back();
         }
         return XR_FAILED(result) ? result : discarded ? XR_FRAME_DISCARDED : result;
     }
@@ -937,6 +1009,7 @@ class FakeRuntime {
         runtime.valid_structs_ = runtime.valid_structs_ && frame_end_info &&
                                  frame_end_info->type == XR_TYPE_FRAME_END_INFO;
         runtime.calls_.push_back(RuntimeCall::kEnd);
+        if (frame_end_info) runtime.submitted_predictions_.push_back(frame_end_info->displayTime);
         runtime.frame_thread_ = std::this_thread::get_id();
         ++runtime.end_entered_;
         runtime.cv_.notify_all();
@@ -944,8 +1017,12 @@ class FakeRuntime {
             ++runtime.end_rejections_;
             return XR_ERROR_CALL_ORDER_INVALID;
         }
-        const XrResult result = TakeResult(runtime.end_result_, runtime.end_failures_remaining_);
-        if (XR_SUCCEEDED(result) || runtime.end_failure_consumes_frame_) {
+        const bool stale = runtime.reject_stale_ && frame_end_info &&
+                           frame_end_info->displayTime < runtime.previous_begun_;
+        if (stale) ++runtime.stale_rejections_;
+        const XrResult result =
+            stale ? XR_ERROR_TIME_INVALID : TakeResult(runtime.end_result_, runtime.end_failures_remaining_);
+        if (XR_SUCCEEDED(result) || stale || runtime.end_failure_consumes_frame_) {
             runtime.frame_open_ = false;
         }
         if (runtime.release_wait_on_next_end_) {
@@ -965,6 +1042,48 @@ class FakeRuntime {
     void InterlockOffThreadWaits() {
         std::scoped_lock lock(mutex_);
         interlock_ = true;
+    }
+
+    static XrResult XRAPI_CALL LocateViews(XrSession, const XrViewLocateInfo* info, XrViewState* state,
+                                          std::uint32_t capacity, std::uint32_t* count, XrView* views) {
+        auto& runtime = Active();
+        std::scoped_lock lock(runtime.mutex_);
+        runtime.located_predictions_.push_back(info->displayTime);
+        *count = 2;
+        if (capacity < 2) return capacity == 0 ? XR_SUCCESS : XR_ERROR_SIZE_INSUFFICIENT;
+        state->viewStateFlags = XR_VIEW_STATE_POSITION_VALID_BIT | XR_VIEW_STATE_ORIENTATION_VALID_BIT;
+        for (std::uint32_t i = 0; i < 2; ++i) {
+            views[i] = {XR_TYPE_VIEW};
+            views[i].pose.orientation.w = 1.0f;
+            views[i].fov = {-0.7f, 0.7f, 0.7f, -0.7f};
+        }
+        return XR_SUCCESS;
+    }
+
+    void PredictionSequence(XrTime first, XrDuration period) {
+        std::scoped_lock lock(mutex_);
+        next_display_time_ = first - period;
+        display_period_ = period;
+    }
+
+    void PredictionSequence(std::vector<std::pair<XrTime, XrDuration>> predictions) {
+        std::scoped_lock lock(mutex_);
+        scripted_predictions_ = std::move(predictions);
+    }
+
+    std::vector<XrTime> NativePredictions() const {
+        std::scoped_lock lock(mutex_);
+        return native_predictions_;
+    }
+
+    std::vector<XrTime> SubmittedPredictions() const {
+        std::scoped_lock lock(mutex_);
+        return submitted_predictions_;
+    }
+
+    std::vector<XrTime> LocatedPredictions() const {
+        std::scoped_lock lock(mutex_);
+        return located_predictions_;
     }
 
     void BlockEnd() {
@@ -1092,6 +1211,29 @@ class FakeRuntime {
         return end_rejections_;
     }
 
+    // SteamVR's measured rule (notes/steamvr-time-probe): an end whose
+    // displayTime is older than the prediction of the frame begun before this
+    // one fails with XR_ERROR_TIME_INVALID, and the frame is gone.
+    void RejectStaleDisplayTimes() {
+        std::scoped_lock lock(mutex_);
+        reject_stale_ = true;
+    }
+
+    int StaleRejections() const {
+        std::scoped_lock lock(mutex_);
+        return stale_rejections_;
+    }
+
+    XrTime PreviousBegunPrediction() const {
+        std::scoped_lock lock(mutex_);
+        return previous_begun_;
+    }
+
+    XrTime CurrentBegunPrediction() const {
+        std::scoped_lock lock(mutex_);
+        return current_begun_;
+    }
+
     int StackedWaits() const {
         std::scoped_lock lock(mutex_);
         return stacked_waits_;
@@ -1128,6 +1270,8 @@ class FakeRuntime {
     mutable std::mutex mutex_;
     std::condition_variable cv_;
     std::vector<RuntimeCall> calls_;
+    std::vector<XrTime> native_predictions_, submitted_predictions_, located_predictions_;
+    std::vector<std::pair<XrTime, XrDuration>> scripted_predictions_;
     std::thread::id frame_thread_;
     bool interlock_{false};
     bool end_released_{true};
@@ -1137,6 +1281,10 @@ class FakeRuntime {
     bool release_wait_on_next_end_{false};
     bool valid_structs_{true};
     bool frame_open_{true};
+    bool reject_stale_{false};
+    XrTime previous_begun_{0};
+    XrTime current_begun_{0};
+    int stale_rejections_{0};
     bool begin_failure_consumes_frame_{false};
     bool end_failure_consumes_frame_{false};
     int wait_tokens_{0};
@@ -1591,6 +1739,275 @@ void TestSequencedHandshakeAndSteadyStateOrdering() {
            "Prediction correction must retain runtime period and shouldRender");
 }
 
+// SteamVR (notes/steamvr-time-probe): an end older than the prediction of the
+// runtime frame begun before it is rejected and the frame lost. The layer raises
+// such a time to that floor instead.
+void TestStaleDisplayTimeRaisedToRuntimeFloor() {
+    FakeRuntime runtime;
+    runtime.RejectStaleDisplayTimes();
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kSequenced);
+    auto end = FrameEndInfo();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_SUCCESS,
+           "Stale-time establishment submit failed");
+    XrFrameState state{XR_TYPE_FRAME_STATE};
+    Expect(AppWait(&state) == XR_SUCCESS && XR_SUCCEEDED(AppBegin()), "Stale-time handshake failed");
+    const XrTime first = state.predictedDisplayTime;
+    end.displayTime = first;
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_SUCCESS &&
+               runtime.SubmittedPredictions().back() == first,
+           "A current display time must reach the runtime unchanged");
+
+    Expect(AppWait(&state) == XR_SUCCESS && XR_SUCCEEDED(AppBegin()), "Stale-time app frame failed");
+    const XrTime floor = runtime.PreviousBegunPrediction();
+    end.displayTime = floor - 11'111'111;
+    Expect(floor == first && end.displayTime < floor, "The fake runtime's floor is not the previous frame's");
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_SUCCESS,
+           "A display time older than the previous runtime frame must be raised, not rejected");
+    Expect(runtime.SubmittedPredictions().back() == floor && runtime.StaleRejections() == 0,
+           "The raised display time must be the previous runtime frame's prediction");
+
+    Expect(AppWait(&state) == XR_SUCCESS && XR_SUCCEEDED(AppBegin()), "Post-raise app frame failed");
+    end.displayTime = state.predictedDisplayTime;
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_SUCCESS &&
+               runtime.SubmittedPredictions().back() == state.predictedDisplayTime,
+           "Frames after a raise must pass through unchanged");
+}
+
+// A runtime clock that steps back (Varjo after a stall): the floor never rises
+// above the ending frame's own prediction, so an end at it is never raised.
+void TestRuntimeFloorNeverAboveOwnPrediction() {
+    constexpr XrTime t = 30'000'000'000;
+    constexpr XrTime back = t - 5'000'000;
+    FakeRuntime runtime;
+    runtime.PredictionSequence({{t, 11'111'111}, {back, 11'111'111}, {back + 11'111'111, 11'111'111}});
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kSequenced);
+    auto end = FrameEndInfo();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_SUCCESS,
+           "Backward-clock establishment submit failed");
+    XrFrameState state{XR_TYPE_FRAME_STATE};
+    Expect(AppWait(&state) == XR_SUCCESS && XR_SUCCEEDED(AppBegin()) && state.predictedDisplayTime == t,
+           "Backward-clock handshake failed");
+    end.displayTime = t;
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_SUCCESS,
+           "Backward-clock first frame failed");
+    Expect(runtime.NativePredictions().back() == back, "The runtime's prediction did not step back");
+    Expect(AppWait(&state) == XR_SUCCESS && XR_SUCCEEDED(AppBegin()), "Backward-clock app frame failed");
+    end.displayTime = back;
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_SUCCESS &&
+               runtime.SubmittedPredictions().back() == back,
+           "An end at its own runtime frame's prediction must not be raised after the clock stepped back");
+}
+
+// The SteamVR field fault (DCS, sequenced): the app polls while the post-submit
+// runtime wait is still in flight. It must get the prediction that wait returns,
+// not the cached one a frame older, which SteamVR rejects when the frame ends.
+void TestSequencedPollDuringRuntimeWaitGetsNextPrediction() {
+    constexpr XrTime t = 19'381'688'851'000;
+    constexpr XrDuration period = 8'333'400;
+    FakeRuntime runtime;
+    runtime.RejectStaleDisplayTimes();
+    runtime.PredictionSequence(t, period);
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kSequenced);
+    auto end = FrameEndInfo();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_SUCCESS,
+           "Overlap establishment submit failed");
+    XrFrameState state{XR_TYPE_FRAME_STATE};
+    Expect(AppWait(&state) == XR_SUCCESS && XR_SUCCEEDED(AppBegin()) && state.predictedDisplayTime == t,
+           "Overlap handshake failed");
+
+    // Hold the post-submit runtime wait, as SteamVR does until its next refresh.
+    runtime.BlockWait();
+    end.displayTime = t;
+    const int waits = runtime.WaitCalls();
+    std::atomic<XrResult> submit{XR_ERROR_RUNTIME_FAILURE};
+    std::thread frame([&] { submit = depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end); });
+    const bool entered = runtime.WaitForWaitEntered(waits + 1);
+    XrFrameState overlapped{XR_TYPE_FRAME_STATE};
+    const XrResult overlapped_result = entered ? AppWait(&overlapped) : XR_ERROR_RUNTIME_FAILURE;
+    runtime.ReleaseWait();
+    frame.join();
+    Expect(entered && submit == XR_SUCCESS && overlapped_result == XR_SUCCESS,
+           "The overlapping app wait or its submit failed");
+    Expect(overlapped.predictedDisplayTime == t + period && runtime.NativePredictions().back() == t + period,
+           "An app wait overlapping the runtime wait must get the prediction that wait returns");
+
+    Expect(XR_SUCCEEDED(AppBegin()), "Overlapped app begin failed");
+    auto overlapped_end = FrameEndInfo();
+    overlapped_end.displayTime = overlapped.predictedDisplayTime;
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &overlapped_end) == XR_SUCCESS &&
+               runtime.SubmittedPredictions().back() == t + period && runtime.StaleRejections() == 0,
+           "The overlapped frame must be accepted as predicted, without a raise");
+}
+
+// Async pacing: each app end begins the pending runtime wait's frame, so an app
+// frame ends in the runtime frame after those of the app frames still unended
+// when it waited. DCS waits one or two frames ahead of the thread that ends
+// them (Oct 27 SteamVR flight): handed the cached prediction, its frames were
+// a frame early, and two ahead older than SteamVR's floor (raised a period).
+void TestAsyncAppFramesTargetTheirRuntimeFrame() {
+    FakeRuntime runtime;
+    runtime.RejectStaleDisplayTimes();
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    auto end = FrameEndInfo();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_SUCCESS &&
+               depthxr::TurboFrameTestPeer::WaitForAsyncPrediction(),
+           "Target-frame establishment did not publish its runtime wait");
+    std::deque<XrTime> waited;
+    const auto wait = [&] {
+        XrFrameState state{XR_TYPE_FRAME_STATE};
+        Expect(AppWait(&state) == XR_SUCCESS && state.shouldRender, "Target-frame app wait failed");
+        waited.push_back(state.predictedDisplayTime);
+    };
+    // Ends the oldest waited frame; returns how far its time is past the
+    // prediction of the runtime frame it ended in.
+    const auto finish = [&](bool settle = true) {
+        const XrTime time = waited.front();
+        waited.pop_front();
+        Expect(XR_SUCCEEDED(AppBegin()), "Target-frame app begin failed");
+        end.displayTime = time;
+        Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_SUCCESS &&
+                   (!settle || depthxr::TurboFrameTestPeer::WaitForAsyncPrediction()),
+               "Target-frame submit failed");
+        Expect(runtime.SubmittedPredictions().back() == time && runtime.StaleRejections() == 0,
+               "An app frame's display time had to be raised to the runtime's floor");
+        return time - runtime.CurrentBegunPrediction();
+    };
+
+    wait();
+    Expect(finish() == 0, "A frame waited after the previous one ended must target the pending wait's frame");
+    for (int ahead = 1; ahead <= 2; ++ahead) {
+        for (int frame = 0; frame <= ahead; ++frame) wait();
+        for (int frame = 0; frame <= ahead; ++frame)
+            Expect(finish() == 0, "A frame waited " + std::to_string(frame) +
+                                      " ahead must target the runtime frame it ends in");
+    }
+    // Steady state one ahead, as DCS mostly runs.
+    wait();
+    for (int frame = 0; frame < 4; ++frame) {
+        wait();
+        Expect(finish() == 0, "A frame waited one ahead must target the runtime frame it ends in");
+    }
+    Expect(finish() == 0, "The last frame one ahead must target the runtime frame it ends in");
+
+    // A runtime holding its wait (PiOpenXR until its refresh): a wait still
+    // pending is a frame further.
+    wait();
+    runtime.BlockWait();
+    const int waits = runtime.WaitCalls();
+    finish(false);
+    Expect(runtime.WaitForWaitEntered(waits + 1), "The held runtime wait did not start");
+    wait();
+    runtime.ReleaseWait();
+    Expect(depthxr::TurboFrameTestPeer::WaitForAsyncPrediction() && finish() == 0,
+           "A frame waited while the runtime holds its wait must target the frame that wait opens");
+
+    // An app polling twice for one frame abandons the first: the next frame
+    // may lead by a period, but the lead must not build up.
+    for (int repeat = 0; repeat < 3; ++repeat) {
+        wait();
+        Expect(XR_SUCCEEDED(AppBegin()), "Abandoned app begin failed");
+        waited.pop_front();
+        wait();
+        const XrDuration lead = finish();
+        Expect(lead >= 0 && lead <= 11'111'111, "An abandoned frame must lead the next by a period at most");
+        // That frame's time was handed out already: the next is a step past it.
+        wait();
+        const XrDuration bump = finish();
+        Expect(bump >= 0 && bump < 1'000, "The frame after an abandoned one must not lead its runtime frame");
+        wait();
+        Expect(finish() == 0, "Frames after an abandoned one must target their runtime frame again");
+    }
+}
+
+// An app that shows its own display times instead of the handed-out ones and
+// abandons frames: its ends cannot say which frames are left, so abandoned
+// ones must not build up into frames predicted ahead of their runtime frame.
+void TestAsyncUnechoedAbandonedFramesDoNotLead() {
+    FakeRuntime runtime;
+    runtime.RejectStaleDisplayTimes();
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    auto end = FrameEndInfo();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_SUCCESS &&
+               depthxr::TurboFrameTestPeer::WaitForAsyncPrediction(),
+           "Unechoed establishment did not publish its runtime wait");
+    for (int repeat = 0; repeat < 6; ++repeat) {
+        XrFrameState abandoned{XR_TYPE_FRAME_STATE};
+        Expect(AppWait(&abandoned) == XR_SUCCESS && XR_SUCCEEDED(AppBegin()), "Unechoed abandoned frame failed");
+        XrFrameState state{XR_TYPE_FRAME_STATE};
+        Expect(AppWait(&state) == XR_SUCCESS && XR_SUCCEEDED(AppBegin()), "Unechoed app frame failed");
+        end.displayTime = state.predictedDisplayTime + 1;
+        Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_SUCCESS &&
+                   depthxr::TurboFrameTestPeer::WaitForAsyncPrediction(),
+               "Unechoed submit failed");
+        const XrDuration lead = state.predictedDisplayTime - runtime.CurrentBegunPrediction();
+        Expect(lead <= 11'111'111 && (repeat == 0 || lead < 1'000),
+               "Abandoned unechoed frames built up a lead of " + std::to_string(lead) + " ns");
+    }
+}
+
+// The DCS shape on real threads: a main thread waits up to two frames ahead of a
+// render thread that begins and ends them. No frame may need a raise, nor lead
+// the runtime frame it ends in.
+void TestAsyncTwoThreadFramesNeedNoRaise() {
+    FakeRuntime runtime;
+    runtime.RejectStaleDisplayTimes();
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    auto end = FrameEndInfo();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_SUCCESS &&
+               depthxr::TurboFrameTestPeer::WaitForAsyncPrediction(),
+           "Two-thread establishment did not publish its runtime wait");
+    constexpr int kFrames = 150;
+    constexpr int kInFlight = 3; // waited and not yet ended, the newest included
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::deque<XrTime> waited;
+    int in_flight = 0;
+    std::atomic<bool> wait_failed{false};
+    std::thread main_thread([&] {
+        for (int frame = 0; frame < kFrames; ++frame) {
+            {
+                std::unique_lock lock(mutex);
+                cv.wait(lock, [&] { return in_flight < kInFlight; });
+                ++in_flight;
+            }
+            XrFrameState state{XR_TYPE_FRAME_STATE};
+            if (AppWait(&state) != XR_SUCCESS || !state.shouldRender) wait_failed = true;
+            if (frame % 3 == 0) std::this_thread::sleep_for(1ms);
+            {
+                std::scoped_lock lock(mutex);
+                waited.push_back(state.predictedDisplayTime);
+            }
+            cv.notify_all();
+        }
+    });
+    int raises = 0, leads = 0;
+    for (int frame = 0; frame < kFrames && !wait_failed; ++frame) {
+        XrTime time = 0;
+        {
+            std::unique_lock lock(mutex);
+            cv.wait(lock, [&] { return !waited.empty(); });
+            time = waited.front();
+            waited.pop_front();
+        }
+        Expect(XR_SUCCEEDED(AppBegin()), "Two-thread app begin failed");
+        if (frame % 2 == 0) std::this_thread::sleep_for(1ms);
+        end.displayTime = time;
+        Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_SUCCESS,
+               "Two-thread submit failed");
+        if (runtime.SubmittedPredictions().back() != time) ++raises;
+        if (time > runtime.CurrentBegunPrediction()) ++leads;
+        {
+            std::scoped_lock lock(mutex);
+            --in_flight;
+        }
+        cv.notify_all();
+    }
+    main_thread.join();
+    Expect(!wait_failed && runtime.StaleRejections() == 0, "A two-thread app frame failed or was rejected");
+    Expect(raises == 0 && leads == 0, "Two-thread frames needed " + std::to_string(raises) + " raises and led " +
+                                          std::to_string(leads) + " runtime frames");
+}
+
 void TestRepeatedSubmissionFailuresSuspend() {
     FakeRuntime runtime;
     TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
@@ -1604,6 +2021,167 @@ void TestRepeatedSubmissionFailuresSuspend() {
     }
     Expect(!depthxr::TurboFrameTestPeer::Handoff().wait_valid && runtime.WaitCalls() == 0,
            "Failed submissions must not start an async worker wait");
+}
+
+void TestPredictionHistoryIsBoundedAndSessionLocal() {
+    using History = depthxr::TurboPredictionHistory;
+    History history;
+    history.NativeWait(1000, 100);
+    history.AppWait(1001, History::Origin::kSequencedCache, 17);
+    auto prediction = history.Find(1001);
+    Expect(prediction && prediction->app_wait == 1 && prediction->native_display_time == 1000 &&
+               prediction->native_period == 100 && prediction->native_generation == 1 &&
+               prediction->trace_id == 17,
+           "Prediction history lost the app wait's native origin");
+    history.NativeWait(1100, 100);
+    history.AppWait(1001, History::Origin::kAsyncCache, 18);
+    prediction = history.Find(1001);
+    Expect(prediction && prediction->app_wait == 2 && prediction->native_generation == 2 &&
+               prediction->origin == History::Origin::kAsyncCache,
+           "Repeated times should identify their most recent app wait");
+    for (std::size_t i = 0; i < History::kCapacity; ++i)
+        history.AppWait(2000 + static_cast<XrTime>(i), History::Origin::kRuntime, 0);
+    Expect(!history.Find(1001) && history.Find(2000) && !history.Find(9000),
+           "Prediction history did not bound its storage or invented an unmatched origin");
+    history.Reset();
+    Expect(!history.Find(2000) && history.NativeGeneration() == 0,
+           "A session reset retained a prior session's prediction");
+}
+
+void LocatePrediction(XrTime time) {
+    XrViewLocateInfo info{XR_TYPE_VIEW_LOCATE_INFO};
+    info.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    info.displayTime = time;
+    std::array<XrView, 2> views{{{XR_TYPE_VIEW}, {XR_TYPE_VIEW}}};
+    std::uint32_t count = 0;
+    Expect(depthxr::TurboFrameTestPeer::LocateRuntimeViews(info, 2, &count, views.data(),
+                                                         &FakeRuntime::LocateViews) == XR_SUCCESS && count == 2,
+           "Prediction replay could not locate the app's views");
+}
+
+// Reproduce the observed T/T+1/T+2 overlap with a runtime wait barrier, then
+// preserve exact wait -> locate -> submit identity across a scripted -30.
+// The script rejects the overlapping frame: it exercises recovery. In the field
+// that frame got the cache + 2 ns (T+2), older than SteamVR's previous frame
+// prediction, so SteamVR rejected it; an app wait overlapping the in-flight
+// runtime wait now gets the cache plus one period, and the completed-before-poll
+// control returns the fresh native timing.
+void TestSequencedPredictionOverlapReplay(bool native_completed_before_poll) {
+    constexpr XrTime t = 18'956'319'169'600;
+    constexpr XrTime next = 18'956'327'499'300;
+    constexpr XrTime last = 18'956'335'835'700;
+    constexpr XrDuration first_period = 8'333'332;
+    constexpr XrDuration next_period = 8'333'400;
+    FakeRuntime runtime;
+    // Native timing from the forced-sequenced first-fault window, including
+    // jitter. These are data, not a manufactured acceptance threshold.
+    runtime.PredictionSequence({{t, first_period}, {next, next_period}, {last, next_period}});
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kSequenced);
+    auto end = FrameEndInfo();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_SUCCESS,
+           "Prediction replay failed to enter the sequenced handshake");
+    XrFrameState initial{XR_TYPE_FRAME_STATE};
+    Expect(AppWait(&initial) == XR_SUCCESS && initial.predictedDisplayTime == t && AppBegin() == XR_SUCCESS,
+           "Prediction replay's handshake did not expose its native time");
+    LocatePrediction(initial.predictedDisplayTime);
+    XrFrameState ahead{XR_TYPE_FRAME_STATE};
+    Expect(AppWait(&ahead) == XR_SUCCESS && ahead.predictedDisplayTime == t + 1 && AppBegin() == XR_SUCCESS,
+           "Prediction replay did not expose the queued app prediction");
+    LocatePrediction(ahead.predictedDisplayTime);
+
+    runtime.BlockWait();
+    end.displayTime = initial.predictedDisplayTime;
+    auto submitting = std::async(std::launch::async, [&] {
+        return depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end);
+    });
+    Expect(runtime.WaitForWaitEntered(2), "Prediction replay did not enter the post-submit native wait");
+    if (native_completed_before_poll) {
+        runtime.ReleaseWait();
+        Expect(submitting.wait_for(2s) == std::future_status::ready && submitting.get() == XR_SUCCESS,
+               "Completed-before-poll control did not publish native timing");
+    }
+    auto poll = std::async(std::launch::async, [] {
+        XrFrameState state{XR_TYPE_FRAME_STATE};
+        Expect(AppWait(&state) == XR_SUCCESS, "Prediction replay's overlapping app wait failed");
+        return state;
+    });
+    Expect(poll.wait_for(2s) == std::future_status::ready,
+           "The sequenced interception shield blocked behind the native wait");
+    const XrFrameState overlapping = poll.get();
+    const XrTime expected = native_completed_before_poll ? next : t + first_period;
+    Expect(overlapping.predictedDisplayTime == expected &&
+               overlapping.predictedDisplayPeriod == (native_completed_before_poll ? next_period : first_period) &&
+               overlapping.shouldRender == XR_TRUE,
+           "Prediction replay lost the controlled native/cache interleaving");
+    const auto provenance = depthxr::TurboFrameTestPeer::Prediction(expected);
+    Expect(provenance && provenance->native_display_time == (native_completed_before_poll ? next : t) &&
+               provenance->native_generation == (native_completed_before_poll ? 2 : 1) &&
+               provenance->origin == depthxr::TurboPredictionHistory::Origin::kSequencedCache,
+           "An overlapping app wait was correlated with a later native publication");
+    Expect(runtime.WaitCalls() == 2 && runtime.MaxConcurrentWaits() == 1,
+           "An overlapping app wait escaped the persistent shield");
+    LocatePrediction(overlapping.predictedDisplayTime);
+    if (!native_completed_before_poll) {
+        Expect(submitting.wait_for(0ms) == std::future_status::timeout,
+               "Native wait barrier did not hold the post-submit wait");
+        runtime.ReleaseWait();
+        Expect(submitting.wait_for(2s) == std::future_status::ready && submitting.get() == XR_SUCCESS,
+               "Prediction replay did not resume after releasing the native wait");
+    }
+
+    Expect(AppBegin() == XR_SUCCESS, "Queued replay frame did not begin");
+    end.displayTime = ahead.predictedDisplayTime;
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_SUCCESS,
+           "The accepted T+1 precision control was rejected");
+    Expect(AppBegin() == XR_SUCCESS, "Overlapping replay frame did not begin");
+    runtime.SetEndResult(XR_ERROR_TIME_INVALID, true, 1);
+    end.displayTime = overlapping.predictedDisplayTime;
+    const auto log_start = depthxr::TurboFrameTestPeer::Log().size();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_ERROR_TIME_INVALID,
+           "A scripted runtime rejection was not returned to the application");
+    const auto log = depthxr::TurboFrameTestPeer::Log().substr(log_start);
+    Expect(log.find("Turbo rejected display time: submitted=" + std::to_string(expected)) != std::string::npos &&
+               log.find("origin=sequenced-cache") != std::string::npos &&
+               log.find("nativeAtWait=" + std::to_string(native_completed_before_poll ? next : t)) !=
+                   std::string::npos,
+           "The first timestamp failure did not retain its original prediction provenance");
+    const std::vector<XrTime> located{t, t + 1, expected};
+    const std::vector<XrTime> submitted{20'000'000'000, t, t + 1, expected};
+    Expect(runtime.LocatedPredictions() == located && runtime.SubmittedPredictions() == submitted,
+           "The runtime received a substitute timestamp unrelated to the located app views, or a retry");
+    Expect(runtime.NativePredictions() == std::vector<XrTime>{t, next, last} &&
+               runtime.BeginRejections() == 0 && runtime.EndRejections() == 0 && runtime.StackedWaits() == 0,
+           "The replay's runtime wait/begin/end ownership became invalid before the timestamp rejection");
+}
+
+// A separate negative control from the no-clamp async failure class: a whole
+// 100ns native prediction can still receive -30. No test acceptance model
+// rejects timestamps by quantum or by an inferred latest-wait age threshold.
+void TestAsyncTimestampFailureWithoutMonotonicCorrection() {
+    constexpr XrTime t = 19'278'307'671'400;
+    FakeRuntime runtime;
+    runtime.PredictionSequence(t, 8'333'400);
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    auto end = FrameEndInfo();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_SUCCESS &&
+               depthxr::TurboFrameTestPeer::WaitForAsyncPrediction(),
+           "Async timestamp control did not publish its native wait");
+    XrFrameState state{XR_TYPE_FRAME_STATE};
+    Expect(AppWait(&state) == XR_SUCCESS && state.predictedDisplayTime == t && AppBegin() == XR_SUCCESS,
+           "Async no-clamp control changed the native timestamp");
+    LocatePrediction(t);
+    const auto origin = depthxr::TurboFrameTestPeer::Prediction(t);
+    Expect(origin && origin->origin == depthxr::TurboPredictionHistory::Origin::kAsyncCache &&
+               origin->native_display_time == t,
+           "Async no-clamp control was misidentified as extrapolation");
+    runtime.SetEndResult(XR_ERROR_TIME_INVALID, true, 1);
+    end.displayTime = t;
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_ERROR_TIME_INVALID,
+           "Async whole-100ns rejection was hidden or retried");
+    Expect(runtime.LocatedPredictions() == std::vector<XrTime>{t} &&
+               runtime.SubmittedPredictions() == std::vector<XrTime>{20'000'000'000, t} &&
+               runtime.StackedWaits() == 0 && runtime.BeginRejections() == 0 && runtime.EndRejections() == 0,
+           "Async timestamp failure changed pose timing or native call ownership");
 }
 
 XrResult AppFrame(const XrFrameEndInfo& end_info) {
@@ -2292,6 +2870,7 @@ void TestExperimentalPredictionAndLimiter() {
     Expect(state.predictedDisplayPeriod == 11'111'111 && state.shouldRender == XR_TRUE,
            "Prediction dampening altered runtime period or visibility");
     const auto previous = state.predictedDisplayTime;
+    depthxr::TurboFrameTestPeer::EndAppFrame(previous);
     Expect(AppWait(&state) == XR_SUCCESS && state.predictedDisplayTime == previous + 1,
            "Dampening broke monotonic predictions");
     depthxr::TurboFrameTestPeer::PredictionFixture(false);
@@ -3257,6 +3836,7 @@ namespace {
 ID3D12CommandQueue* g_created_queue = nullptr;
 INT g_created_priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
 bool g_created_shown_lazy = false;
+bool g_created_queue_diagnostics = false;
 
 // Records what it was given and refuses the session (the layer then lets
 // the queue substitution go).
@@ -3267,6 +3847,7 @@ XrResult XRAPI_PTR RefusingCreateSession(XrInstance, const XrSessionCreateInfo* 
         g_created_priority = binding->queue->GetDesc().Priority;
     }
     g_created_shown_lazy = depthxr::TurboFrameTestPeer::ShownLayersLazy();
+    g_created_queue_diagnostics = depthxr::TurboFrameTestPeer::QueueDiagnosticsEnabled();
     return XR_ERROR_RUNTIME_FAILURE;
 }
 
@@ -3289,6 +3870,8 @@ void TestFrameGenSessionKeepsShownLayersLazy() {
     create.next = &binding;
     for (const char* setting : {"", "off"}) {
         _putenv_s("VECTORXR_FRAMEGEN_SHOWN_LAYERS", setting);
+        const bool diagnostic = *setting == '\0';
+        _putenv_s("VECTORXR_FRAMEGEN_QUEUE_DIAGNOSTICS", diagnostic ? "1" : "");
         g_created_queue = nullptr;
         g_created_priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
         g_created_shown_lazy = false;
@@ -3301,8 +3884,99 @@ void TestFrameGenSessionKeepsShownLayersLazy() {
                          : "kept shown layers lazy with VECTORXR_FRAMEGEN_SHOWN_LAYERS=off") +
                    (g_created_queue == game.Get() ? " (the runtime got the game's queue)" : ""));
         Expect(!Peer::ShownLayersLazy(), "A refused session's queue substitution was kept");
+        Expect(g_created_queue_diagnostics == diagnostic,
+               "The queue diagnostics opt-in was not read at session creation");
     }
     _putenv_s("VECTORXR_FRAMEGEN_SHOWN_LAYERS", "");
+    _putenv_s("VECTORXR_FRAMEGEN_QUEUE_DIAGNOSTICS", "");
+}
+
+std::chrono::milliseconds g_slow_queue_end_delay{0};
+XrResult g_slow_queue_end_result = XR_SUCCESS;
+int g_slow_queue_end_calls = 0;
+XrResult XRAPI_PTR SlowQueueEndFrame(XrSession, const XrFrameEndInfo*) {
+    ++g_slow_queue_end_calls;
+    std::this_thread::sleep_for(g_slow_queue_end_delay);
+    return g_slow_queue_end_result;
+}
+
+// The real SubmitRuntimeFrame hook, with the same stand-in D3D12 queue as
+// the deferred-release tests. No slow-call snapshots are taken on the fast
+// or disabled path; slow calls preserve their result and are rate limited.
+void TestQueueSlowRuntimeDiagnosticsAreOptInAndBounded() {
+    using Peer = depthxr::TurboFrameTestPeer;
+    Peer::PrepareVarjoNative(&VarjoLocateViews, &SlowQueueEndFrame);
+    g_varjo_swapchain = {};
+    const auto device = MakeFake<FakeD3D12Device>();
+    const auto game = MakeFake<FakeD3D12Queue>(
+        device.Get(), D3D12_COMMAND_QUEUE_DESC{D3D12_COMMAND_LIST_TYPE_DIRECT, 0, D3D12_COMMAND_QUEUE_FLAG_NONE, 0});
+    XrGraphicsBindingD3D12KHR binding{XR_TYPE_GRAPHICS_BINDING_D3D12_KHR};
+    binding.device = device.Get();
+    binding.queue = game.Get();
+    XrSessionCreateInfo create{XR_TYPE_SESSION_CREATE_INFO};
+    create.next = &binding;
+    const auto swapchain = reinterpret_cast<XrSwapchain>(static_cast<std::uintptr_t>(149));
+    const depthxr::FrameGenQueueSubstitution::Calls calls{&VarjoAcquire, &VarjoWait, &VarjoRelease};
+    Expect(Peer::DeferVarjoReleases(TestSession(), swapchain, 3, &create, calls),
+           "Slow-call diagnostic test could not prepare queue substitution");
+    // A real queue entry makes the submitted ID directly comparable with
+    // the per-swapchain progress snapshot, including decimal formatting.
+    std::uint32_t index = 0;
+    const XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO, nullptr, XR_INFINITE_DURATION};
+    const XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+    Expect(Peer::Queue().Acquire(swapchain, 3, calls, nullptr, &index) == XR_SUCCESS &&
+               Peer::Queue().Wait(swapchain, false, calls, &wait) == XR_SUCCESS &&
+               Peer::Queue().Release(swapchain, false, calls, &release) == XR_SUCCESS,
+           "Slow-call diagnostic test could not seed swapchain queue state");
+    std::array<XrCompositionLayerProjectionView, 2> views{{{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},
+                                                        {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}}};
+    views[0].subImage.swapchain = swapchain;
+    views[1].subImage.swapchain = reinterpret_cast<XrSwapchain>(static_cast<std::uintptr_t>(150));
+    XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    projection.viewCount = 2;
+    projection.views = views.data();
+    XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+    quad.subImage.swapchain = swapchain; // ID already named by the projection
+    const std::array<const XrCompositionLayerBaseHeader*, 2> layers{
+        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection),
+        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad)};
+    auto info = FrameEndInfo();
+    info.layerCount = 2;
+    info.layers = layers.data();
+    const std::string marker = "Frame Generation slow runtime xrEndFrame:";
+    const std::size_t log_start = Peer::Log().size();
+    g_slow_queue_end_calls = 0;
+    g_slow_queue_end_result = XR_ERROR_TIME_INVALID;
+    g_slow_queue_end_delay = 275ms;
+    Peer::ConfigureQueueDiagnostics(false);
+    Expect(Peer::SubmitRuntimeFrame(&info) == XR_ERROR_TIME_INVALID,
+           "Disabled queue diagnostics changed the runtime result");
+    Expect(Peer::Log().substr(log_start).find(marker) == std::string::npos,
+           "A disabled slow-call diagnostic emitted a snapshot");
+    Peer::ConfigureQueueDiagnostics(true);
+    g_slow_queue_end_delay = 0ms;
+    Expect(Peer::SubmitRuntimeFrame(&info) == XR_ERROR_TIME_INVALID &&
+               Peer::Log().substr(log_start).find(marker) == std::string::npos,
+           "A fast runtime call emitted a slow-call snapshot or changed its result");
+    g_slow_queue_end_delay = 275ms;
+    Expect(Peer::SubmitRuntimeFrame(&info) == XR_ERROR_TIME_INVALID &&
+               Peer::SubmitRuntimeFrame(&info) == XR_ERROR_TIME_INVALID,
+           "Opt-in queue diagnostics changed the runtime failure result");
+    std::string log = Peer::Log().substr(log_start);
+    const auto first = log.find(marker);
+    Expect(first != std::string::npos && log.find(marker, first + marker.size()) == std::string::npos &&
+               log.find("submittedSwapchains=[149,150]") != std::string::npos &&
+               log.find("swapchain=149") != std::string::npos && log.find("result=-30") != std::string::npos,
+           "Slow-call snapshots were not rate limited or lost the correlated submitted IDs/result");
+    Peer::ConfigureQueueDiagnostics(true); // let the next diagnostic interval become eligible
+    Expect(Peer::SubmitRuntimeFrame(&info) == XR_ERROR_TIME_INVALID,
+           "A later slow-call snapshot changed the runtime result");
+    log = Peer::Log().substr(log_start);
+    Expect(log.find(marker, log.find(marker) + marker.size()) != std::string::npos && g_slow_queue_end_calls == 5,
+           "A later diagnostic interval stayed silent, or a failed EndFrame was retried");
+    Peer::ConfigureQueueDiagnostics(false);
+    Peer::EndVarjoReleases(swapchain);
+    Peer::EndVarjoNative();
 }
 
 // Frames whose quad views Frame Generation claims (four views, given to it)
@@ -3744,6 +4418,111 @@ void TestOsdDrawnWhenTheRuntimeReusesASessionHandle() {
     Expect(second, "The OSD stayed off in a session whose handle the runtime reused");
 }
 
+// VectorXR Enabled (the suite switch) off leaves the layer inert: a Discord
+// report found the OSD still drawn with it off. A game started with it off
+// draws no OSD; turned off in a Frame Generation session, generation stops,
+// its toggle stops listening and the OSD goes; turned back on, all return. A
+// Quadviews session keeps its four views until the game restarts, and
+// nothing else.
+void TestSuiteSwitchLeavesTheLayerInert() {
+    depthxr::ConfigDocument config;
+    config.core.enabled = false;
+    config.core.osd.enabled = true;
+    const auto [started_off, reused_off] =
+        depthxr::TurboFrameTestPeer::OsdDrawnAcrossReusedHandle(config, TestSession());
+    Expect(!started_off && !reused_off, "The OSD was drawn in a session started with VectorXR off");
+
+    const depthxr::ConfigDocument previous = depthxr::TurboFrameTestPeer::LoadedConfig();
+    FakeRuntime runtime;
+    runtime.NoOpenFrame();
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kSequenced);
+    depthxr::TurboFrameTestPeer::FreshSession();
+    int executes = 0;
+    depthxr::TurboFrameTestPeer::PrepareFrameGen(
+        TestSession(), [&](const void*, std::string&) { return std::make_unique<FgGpu>(&executes); },
+        {FgFormats, FgCreate, FgDestroy, FgImages, FgAcquire, FgWait, FgRelease});
+    const XrSwapchain left = reinterpret_cast<XrSwapchain>(0x91), right = reinterpret_cast<XrSwapchain>(0x92);
+    auto& framegen = depthxr::TurboFrameTestPeer::FrameGen();
+    framegen.TrackSwapchain(left, kFrameGenFormat, 1, XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT);
+    framegen.TrackSwapchain(right, kFrameGenFormat, 1, XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT);
+    std::array<XrCompositionLayerProjectionView, 2> views{};
+    for (int eye = 0; eye < 2; ++eye) {
+        views[eye] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+        views[eye].pose.orientation.w = 1.0f;
+        views[eye].fov = {-0.8f, 0.8f, 0.8f, -0.8f};
+        views[eye].subImage.swapchain = eye ? right : left;
+        views[eye].subImage.imageRect = {{0, 0}, {1024, 1024}};
+    }
+    XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    projection.viewCount = 2;
+    projection.views = views.data();
+    const auto* layer = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
+    // The period the app is given over a few frames, the last one's.
+    auto frames = [&] {
+        XrFrameState state{XR_TYPE_FRAME_STATE};
+        for (int i = 0; i < 3; ++i) {
+            state = {XR_TYPE_FRAME_STATE};
+            Expect(AppWait(&state) == XR_SUCCESS, "Suite switch test: app wait failed");
+            Expect(AppBegin() == XR_SUCCESS, "Suite switch test: app begin failed");
+            framegen.NoteRelease(left, 1);
+            framegen.NoteRelease(right, 1);
+            XrFrameEndInfo info = FrameEndInfo();
+            info.displayTime = state.predictedDisplayTime;
+            info.layerCount = 1;
+            info.layers = &layer;
+            Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &info) == XR_SUCCESS,
+                   "Suite switch test: app end failed");
+        }
+        return state.predictedDisplayPeriod;
+    };
+
+    // Every feature on, Frame Generation at 2x with head prediction.
+    config.core.enabled = true;
+    config.depthxr.enabled = true;
+    config.pivotxr.enabled = true;
+    config.quadviews.enabled = true;
+    config.turbo.enabled = true;
+    config.turbo.metrics_mode = depthxr::TurboMetricsMode::kOff;
+    config.framegen.enabled = true;
+    config.framegen.defaults.multiplier = depthxr::FrameGenMultiplier::k2;
+    config.framegen.defaults.extend_head_prediction = true;
+    depthxr::TurboFrameTestPeer::ReloadConfig(config);
+    Expect(frames() == 2 * kFrameGenPeriod, "Suite switch test: Frame Generation did not engage");
+    const auto on = depthxr::TurboFrameTestPeer::Features();
+    Expect(on.osd && on.framegen_toggle_polled, "Suite switch test: the OSD or the Frame Generation toggle was off");
+
+    config.core.enabled = false;
+    depthxr::TurboFrameTestPeer::ReloadConfig(config);
+    Expect(frames() == kFrameGenPeriod, "Frame Generation kept generating with VectorXR turned off");
+    const auto off = depthxr::TurboFrameTestPeer::Features();
+    Expect(!off.osd, "The OSD stayed on with VectorXR turned off");
+    Expect(!off.framegen_toggle_polled, "The Frame Generation toggle kept listening with VectorXR turned off");
+
+    config.core.enabled = true;
+    depthxr::TurboFrameTestPeer::ReloadConfig(config);
+    Expect(frames() == 2 * kFrameGenPeriod, "Frame Generation did not return with VectorXR turned back on");
+    const auto back = depthxr::TurboFrameTestPeer::Features();
+    Expect(back.osd && back.framegen_toggle_polled,
+           "The OSD or the Frame Generation toggle did not return with VectorXR turned back on");
+
+    // A running Quadviews session keeps the layer's frame path for its views
+    // (core stays on inside), with every other feature off.
+    depthxr::TurboFrameTestPeer::QuadViewsSession(TestSession());
+    config.core.enabled = false;
+    depthxr::TurboFrameTestPeer::ReloadConfig(config);
+    const auto latched = depthxr::TurboFrameTestPeer::Features();
+    Expect(latched.core, "A Quadviews session lost its frame path with VectorXR turned off");
+    Expect(!latched.depth && !latched.pivot && !latched.turbo && !latched.framegen && !latched.head_prediction,
+           "A Quadviews session kept a feature on with VectorXR turned off");
+    Expect(!latched.osd && !latched.framegen_toggle_polled,
+           "A Quadviews session kept the OSD or the Frame Generation toggle with VectorXR turned off");
+    Expect(frames() == kFrameGenPeriod, "A Quadviews session kept Frame Generation with VectorXR turned off");
+
+    depthxr::TurboFrameTestPeer::QuadViewsSession(XR_NULL_HANDLE);
+    depthxr::TurboFrameTestPeer::StopFrameGen();
+    depthxr::TurboFrameTestPeer::ReloadConfig(previous);
+}
+
 int main() {
     TestHandoverKeepsBlockedPollShielded();
     // Runtime-profile and fault-recovery simulations: none may stop frame
@@ -3772,6 +4551,12 @@ int main() {
     TestWorkerStopAfterStuckSessionEndIsBounded();
     TestHealthyPipelineRetainsStrictOrder(depthxr::TurboPacingMode::kAsync);
     TestHealthyPipelineRetainsStrictOrder(depthxr::TurboPacingMode::kSequenced);
+    TestStaleDisplayTimeRaisedToRuntimeFloor();
+    TestRuntimeFloorNeverAboveOwnPrediction();
+    TestSequencedPollDuringRuntimeWaitGetsNextPrediction();
+    TestAsyncAppFramesTargetTheirRuntimeFrame();
+    TestAsyncUnechoedAbandonedFramesDoNotLead();
+    TestAsyncTwoThreadFramesNeedNoRaise();
     TestFrameGenOwnsFramePacing();
     TestConfigReloadWhileFrameGenOwnsPacing();
     TestAsyncTogglePreservesQueuedFrame(false);
@@ -3791,6 +4576,10 @@ int main() {
     TestAsyncSecondPollWaitsForPublishedRuntimeWait();
     TestAsyncSubmitFailureCancelsHandoff();
     TestSequencedHandshakeAndSteadyStateOrdering();
+    TestPredictionHistoryIsBoundedAndSessionLocal();
+    TestSequencedPredictionOverlapReplay(false);
+    TestSequencedPredictionOverlapReplay(true);
+    TestAsyncTimestampFailureWithoutMonotonicCorrection();
     TestRepeatedSubmissionFailuresSuspend();
     TestAutoSubmissionErrorsTryBothModes();
     TestAutoHasNoRuntimeMappings();
@@ -3799,11 +4588,13 @@ int main() {
     TestVarjoNativeSubmittedFocusCountsEveryFrame();
     TestVarjoDeferredReleasesKeepFrameGenUnblocked();
     TestFrameGenSessionKeepsShownLayersLazy();
+    TestQueueSlowRuntimeDiagnosticsAreOptInAndBounded();
     TestVarjoNativeSubmittedFocusWithConvergence();
     TestTopologyFollowsFrameGenClaimsApart();
     TestQuadViewsInactiveReasons();
     TestQuadViewsOsdTagFollowsBegunConfiguration();
     TestOsdDrawnWhenTheRuntimeReusesASessionHandle();
+    TestSuiteSwitchLeavesTheLayerInert();
     // Last: it points the layer's log at a file of its own.
     TestConfigWarningsLoggedOncePerKey();
     TestRecoveryBlockLogsWhatTurboDoes();

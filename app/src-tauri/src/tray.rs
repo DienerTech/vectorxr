@@ -53,6 +53,47 @@ pub struct TrayStatus {
     pub health_label: String,
     pub enabled: bool,
     pub log_level: String,
+    #[serde(default)]
+    pub labels: TrayLabels,
+}
+
+// The menu's text in the app's language (app/src/i18n/locales/*/tray.json);
+// {label} and {level} mark where the health and the log level go. English
+// until the page reports.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TrayLabels {
+    pub health: String,
+    pub health_unavailable: String,
+    pub log_level: String,
+    pub log_level_unavailable: String,
+    pub info: String,
+    pub debug: String,
+    pub tooltip: String,
+    pub tooltip_disabled: String,
+    pub enabled: String,
+    pub export_debug: String,
+    pub open: String,
+    pub quit: String,
+}
+
+impl Default for TrayLabels {
+    fn default() -> Self {
+        Self {
+            health: "Health: {label}".into(),
+            health_unavailable: "Health: settings not loaded".into(),
+            log_level: "Log level: {level}".into(),
+            log_level_unavailable: "Log level".into(),
+            info: "Info".into(),
+            debug: "Debug".into(),
+            tooltip: "VectorXR: {label}".into(),
+            tooltip_disabled: "VectorXR: disabled".into(),
+            enabled: "VectorXR enabled".into(),
+            export_debug: "Export Debug...".into(),
+            open: "Open VectorXR".into(),
+            quit: "Quit VectorXR".into(),
+        }
+    }
 }
 
 // A click the page acts on.
@@ -75,6 +116,8 @@ struct TrayMenu {
     log_info: CheckMenuItem<Wry>,
     log_debug: CheckMenuItem<Wry>,
     export: MenuItem<Wry>,
+    open: MenuItem<Wry>,
+    quit: MenuItem<Wry>,
     icon: Image<'static>,
     icon_disabled: Image<'static>,
 }
@@ -91,29 +134,32 @@ struct TrayInner {
 pub struct TrayState(Mutex<TrayInner>);
 
 pub fn health_text(status: &TrayStatus) -> String {
+    let labels = &status.labels;
     if !status.available {
-        return "Health: settings not loaded".to_string();
+        return labels.health_unavailable.clone();
     }
-    format!("Health: {}", status.health_label)
+    labels.health.replace("{label}", &status.health_label)
 }
 
 pub fn log_level_text(status: &TrayStatus) -> String {
+    let labels = &status.labels;
     if !status.available {
-        return "Log level".to_string();
+        return labels.log_level_unavailable.clone();
     }
-    match status.log_level.as_str() {
-        "debug" => "Log level: Debug".to_string(),
-        _ => "Log level: Info".to_string(),
-    }
+    let level = match status.log_level.as_str() {
+        "debug" => &labels.debug,
+        _ => &labels.info,
+    };
+    labels.log_level.replace("{level}", level)
 }
 
 pub fn tooltip_text(status: &TrayStatus) -> String {
     if !status.available {
         "VectorXR".to_string()
     } else if !status.enabled {
-        "VectorXR: disabled".to_string()
+        status.labels.tooltip_disabled.clone()
     } else {
-        format!("VectorXR: {}", status.health_label)
+        status.labels.tooltip.replace("{label}", &status.health_label)
     }
 }
 
@@ -145,7 +191,14 @@ fn emit(app: &AppHandle, action: TrayAction) {
 // Shows the reported status: a click only asks the page for a change, and the
 // menu follows once the page saves it and reports again.
 fn apply_status(menu: &TrayMenu, tray: &TrayIcon<Wry>, status: &TrayStatus) {
+    let labels = &status.labels;
     let _ = menu.health.set_text(health_text(status));
+    let _ = menu.enabled.set_text(&labels.enabled);
+    let _ = menu.log_info.set_text(&labels.info);
+    let _ = menu.log_debug.set_text(&labels.debug);
+    let _ = menu.export.set_text(&labels.export_debug);
+    let _ = menu.open.set_text(&labels.open);
+    let _ = menu.quit.set_text(&labels.quit);
     let _ = menu.enabled.set_enabled(status.available);
     let _ = menu.enabled.set_checked(status.available && status.enabled);
     let _ = menu.log_level.set_text(log_level_text(status));
@@ -201,13 +254,14 @@ fn on_icon_event(tray: &TrayIcon<Wry>, event: TrayIconEvent) {
 
 fn build(app: &AppHandle, status: &TrayStatus) -> tauri::Result<(TrayIcon<Wry>, TrayMenu)> {
     let health = MenuItem::with_id(app, ITEM_HEALTH, health_text(status), true, None::<&str>)?;
-    let enabled = CheckMenuItem::with_id(app, ITEM_ENABLED, "VectorXR enabled", false, false, None::<&str>)?;
-    let log_info = CheckMenuItem::with_id(app, ITEM_LOG_INFO, "Info", true, false, None::<&str>)?;
-    let log_debug = CheckMenuItem::with_id(app, ITEM_LOG_DEBUG, "Debug", true, false, None::<&str>)?;
+    let labels = &status.labels;
+    let enabled = CheckMenuItem::with_id(app, ITEM_ENABLED, &labels.enabled, false, false, None::<&str>)?;
+    let log_info = CheckMenuItem::with_id(app, ITEM_LOG_INFO, &labels.info, true, false, None::<&str>)?;
+    let log_debug = CheckMenuItem::with_id(app, ITEM_LOG_DEBUG, &labels.debug, true, false, None::<&str>)?;
     let log_level = Submenu::with_items(app, log_level_text(status), false, &[&log_info, &log_debug])?;
-    let export = MenuItem::with_id(app, ITEM_EXPORT, "Export Debug...", true, None::<&str>)?;
-    let open = MenuItem::with_id(app, ITEM_OPEN, "Open VectorXR", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, ITEM_QUIT, "Quit VectorXR", true, None::<&str>)?;
+    let export = MenuItem::with_id(app, ITEM_EXPORT, &labels.export_debug, true, None::<&str>)?;
+    let open = MenuItem::with_id(app, ITEM_OPEN, &labels.open, true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, ITEM_QUIT, &labels.quit, true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
         &[
@@ -231,7 +285,7 @@ fn build(app: &AppHandle, status: &TrayStatus) -> tauri::Result<(TrayIcon<Wry>, 
         .on_menu_event(on_menu_event)
         .on_tray_icon_event(on_icon_event)
         .build(app)?;
-    let menu = TrayMenu { health, enabled, log_level, log_info, log_debug, export, icon, icon_disabled };
+    let menu = TrayMenu { health, enabled, log_level, log_info, log_debug, export, open, quit, icon, icon_disabled };
     apply_status(&menu, &tray, status);
     Ok((tray, menu))
 }
@@ -301,6 +355,7 @@ mod tests {
             health_label: health.to_string(),
             enabled,
             log_level: log_level.to_string(),
+            labels: TrayLabels::default(),
         }
     }
 
@@ -317,6 +372,22 @@ mod tests {
         assert_eq!(health_text(&unloaded), "Health: settings not loaded");
         assert_eq!(log_level_text(&unloaded), "Log level");
         assert_eq!(tooltip_text(&unloaded), "VectorXR");
+    }
+
+    #[test]
+    fn texts_use_the_page_labels() {
+        let mut german = status(true, "Bereit", true, "debug");
+        german.labels.health = "Zustand: {label}".into();
+        german.labels.log_level = "Protokollstufe: {level}".into();
+        german.labels.debug = "Debug".into();
+        german.labels.tooltip = "VectorXR: {label}".into();
+        assert_eq!(health_text(&german), "Zustand: Bereit");
+        assert_eq!(log_level_text(&german), "Protokollstufe: Debug");
+        assert_eq!(tooltip_text(&german), "VectorXR: Bereit");
+        // A page from before the labels sends none: English.
+        let reported: TrayStatus =
+            serde_json::from_str(r#"{"available":true,"healthLabel":"Ready","enabled":true,"logLevel":"info"}"#).unwrap();
+        assert_eq!(health_text(&reported), "Health: Ready");
     }
 
     #[test]

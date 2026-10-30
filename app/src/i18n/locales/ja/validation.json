@@ -1,0 +1,88 @@
+{
+  "field": {
+    "between": "{field} は {min} から {max} の範囲である必要があります",
+    "betweenCm": "{field} は {min} から {max} cm の範囲である必要があります",
+    "integerBetween": "{field} は {min} から {max} の整数である必要があります",
+    "wholeNumberFromTo": "{field} は {min} から {max} の整数である必要があります",
+    "boolean": "{field} はブール値である必要があります",
+    "trueOrFalse": "{field} は true または false である必要があります",
+    "required": "{field} は必須です",
+    "smallerThan": "{field} は {other} より小さい必要があります",
+    "duplicates": "{field} は {value} と重複しています",
+    "wavFile": "{field} は .wav ファイルを指定する必要があります"
+  },
+  "osd": {
+    "between": "OSD の {field} は {min} から {max} の範囲である必要があります",
+    "customColor": "OSD のカスタム色は 6 桁の 16 進カラーである必要があります",
+    "accent": "OSD のアクセントが無効です",
+    "clockFormat": "OSD の時計形式は 12 時間または 24 時間である必要があります",
+    "compactMetrics": "OSD のコンパクト パフォーマンスの選択が無効です",
+    "bodyOrder": "OSD の本文の順序には各行を 1 回ずつ含める必要があります"
+  },
+  "binding": {
+    "chordEmpty": "{field} には少なくとも 1 つのキーを含める必要があります",
+    "chordUnsupportedKey": "{field} にサポートされていないキーが含まれています: {key}",
+    "chordPrimaryKey": "{field} には修飾キー以外のキーをちょうど 1 つ含める必要があります",
+    "inputPath": "{field} には button-1 から button-128、またはサポートされている方向付きの hat-1 から hat-4 を使用する必要があります"
+  },
+  "pivot": {
+    "positionAssistAngles": "{field} には 0 <= 開始角度 < 最大オフセット角度 <= 180 が必要です",
+    "responseMode": "{field} は \"continuous\" または \"stepped\" である必要があります",
+    "stepGlideMode": "{field} は \"instant\" または \"glide\" である必要があります",
+    "quickViewDuplicateId": "{field} は別のクイック ビューと重複しています",
+    "nudgeSetReservedId": "{field} は予約済みの「なし」の選択を使用しています",
+    "nudgeSetDuplicateId": "{field} は別の微調整セットと重複しています",
+    "unknownNudgeSet": "{field} は不明な微調整セットを参照しています"
+  },
+  "quadviews": {
+    "trackingMode": "{field} は head または eye である必要があります"
+  },
+  "framegen": {
+    "synthesisMode": "{field} は interpolate または extrapolate である必要があります",
+    "flowQuality": "{field} は performance、balanced、quality のいずれかである必要があります",
+    "motionEstimation": "{field} は shader または hardware である必要があります",
+    "frameMultiplier": "{field} は auto、dynamic、2x、3x、4x のいずれかである必要があります",
+    "diagnosticView": "{field} は off、flow、confidence、tint のいずれかである必要があります",
+    "interpolateFlow": "{field} は auto、hardware、shader のいずれかにしてください"
+  },
+  "turbo": {
+    "predictionPercent": "Turbo の実験的な予測減衰は 50 から 100 の整数である必要があります",
+    "frameLimit": "Turbo の実験的なフレーム上限は 0 (オフ) または 20 から 240 の整数である必要があります"
+  },
+  "applications": {
+    "idFormat": "{field} には小文字、数字、ハイフンのみを使用する必要があります",
+    "duplicateId": "{field} は別のアプリケーションと重複しています",
+    "duplicateExe": "{field} は別のアプリケーションと重複しています",
+    "unknownApplication": "{field} は不明なアプリケーションを参照しています: {application}"
+  },
+  "profiles": {
+    "conflict": "{profile} はアプリケーション {application} について profiles[{first}] と競合しています。最初に有効になっているプロファイルが優先されます"
+  },
+  "version": "version は {version} である必要があります",
+  "warnings": {
+    "turboFrameGenOverlap": "{targets} で Turbo と Frame Generation の両方がオンになっています。Frame Generation がフレーム ペーシングを引き継ぐため、Frame Generation が動作するセッションでは Turbo はオフのままです。",
+    "moreApplications_other": "ほか {count} 件",
+    "applicationsWithoutProfile": "カスタム プロファイルのないアプリケーション"
+  },
+  "store": {
+    "loadBlocked": "設定を読み込めなかったため、ディスク上のファイルを保護するために保存はオフになっています: {error}。ファイルを修正して VectorXR を開き直すか、構成をインポートするか、既定値にリセットしてください。",
+    "loadConfigFailed": "構成を読み込めませんでした",
+    "loadSeenAppsFailed": "検出したアプリを読み込めませんでした",
+    "loadRuntimePacingFailed": "ランタイムのペーシング状態を読み込めませんでした",
+    "loadTurboMetricsFailed": "Turbo のメトリックを読み込めませんでした",
+    "turboMetricsCleared": "Turbo のメトリックを消去しました",
+    "clearTurboMetricsFailed": "Turbo のメトリックを消去できませんでした",
+    "pacingVerdictCleared": "{runtime} のペーシング判定を消去しました。次のセッションで自動が再検出します",
+    "clearPacingVerdictFailed": "ペーシング判定を消去できませんでした",
+    "configSaved": "構成を保存しました",
+    "saveConfigFailed": "構成を保存できませんでした",
+    "reloadedFromDisk": "ディスク上で変更された設定を読み込みました",
+    "configReset": "構成を既定値にリセットしました",
+    "resetConfigFailed": "構成をリセットできませんでした",
+    "changesDiscarded": "保存されていない変更を破棄しました",
+    "configImported": "構成をインポートしました — ディスクに書き込むには保存してください",
+    "applicationAdded": "{exe} をアプリケーション レジストリに追加しました",
+    "seenAppsCleared": "検出したアプリを消去しました",
+    "clearSeenAppsFailed": "検出したアプリを消去できませんでした"
+  }
+}

@@ -233,6 +233,10 @@ public:
         Layer().last_app_action_sync_attempt_time_ = old;
         Layer().last_eye_gaze_self_sync_attempt_time_ = old;
     }
+    // The focused-inactive timer as if the whole "no data" delay had passed.
+    static void AgeGazeInactivity() {
+        Layer().eye_gaze_inactive_since_ = std::chrono::steady_clock::now() - std::chrono::seconds(11);
+    }
     static void NewSession() { Layer().ResetSessionState(); SetupSession(); runtime_attached.erase(private_set); }
     // A live Tracking Mode change in an emulated quadviews session.
     static void Track(QuadViewsTrackingMode mode) {
@@ -494,18 +498,28 @@ int main() {
         Peer::Gaze(); Peer::Gaze();
         Expect(syncs == 2 && state_queries == 0, "fresh unfocused app attempt must throttle private retry/query");
         FocusEvent(XR_SESSION_STATE_VISIBLE); Peer::AgeAttempts(); Peer::Gaze();
-        Expect(syncs == 2, "known lost focus must suspend private sync");
+        Expect(syncs == 2 && state_queries == 1, "known lost focus must suspend private sync but still read gaze state");
         FocusEvent(XR_SESSION_STATE_FOCUSED); sync_result = XR_SUCCESS; Peer::Gaze();
-        Expect(syncs == 3 && state_queries == 1 && Peer::GoodPrivateSync(), "focus return must allow current focused input");
+        Expect(syncs == 3 && state_queries == 2 && Peer::GoodPrivateSync(), "focus return must allow current focused input");
         Peer::Gaze(); Expect(syncs == 3 && source_queries <= 1, "fresh sync and source probes must be bounded");
         FocusEvent(XR_SESSION_STATE_VISIBLE, Handle<XrSession>(99)); Peer::Gaze();
-        Expect(state_queries == 3, "another session's events must not change focus");
+        Expect(state_queries == 4, "another session's events must not change focus");
         runtime_gaze_active = true;
         Expect(Peer::Gaze() && gaze_locates == 1, "focused active action must yield tracked gaze");
+        // SteamVR hands input focus to a floating window while the game stays visible.
         FocusEvent(XR_SESSION_STATE_VISIBLE);
-        Expect(!Peer::Gaze() && gaze_locates == 1, "focus loss must reject stale active gaze");
+        const int unfocused_syncs = syncs;
+        Expect(Peer::Gaze() && gaze_locates == 2 && syncs == unfocused_syncs,
+               "a visible session must keep gaze the runtime still reports live, without syncing");
+        for (int i = 0; i < 44; ++i) Peer::Gaze();
+        Expect(!Peer::Gaze(), "an unchanging gaze pose while unfocused must be treated as stale");
+        runtime_gaze_active = false;
+        const int inactive_locates = gaze_locates;
+        Expect(!Peer::Gaze() && gaze_locates == inactive_locates && syncs == unfocused_syncs,
+               "gaze the runtime reports inactive while unfocused must fall back");
+        runtime_gaze_active = true;
         FocusEvent(XR_SESSION_STATE_FOCUSED);
-        Expect(Peer::Gaze() && gaze_locates == 2, "focus return must reacquire valid gaze");
+        Expect(Peer::Gaze() && gaze_locates == inactive_locates + 1, "focus return must reacquire valid gaze");
         runtime_gaze_active = false; // Model a higher-priority application binding suppressing ours.
         const int before_suppression_suggestions = suggestions;
         Expect(!Peer::Gaze() && suggestions == before_suppression_suggestions && attachments == 1,
@@ -616,6 +630,18 @@ int main() {
         Expect(Occurrences(text, "is not enabled downstream") == 1 &&
                    Occurrences(text, "after quadviews tracking-mode change") == 1 && !Peer::Ready(),
                "settings reloads without the eye-gaze extension must not retry gaze or log a mode change");
+
+        // A focused, bound eye-gaze input the runtime keeps inactive is named
+        // once: the headset's eye tracker sends no data.
+        Peer::Prepare(); Peer::Resources(); AttachApp(); Peer::LogTo(logs / "no-data.log");
+        FocusEvent(XR_SESSION_STATE_FOCUSED); sync_result = XR_SUCCESS; runtime_gaze_active = false;
+        Expect(!Peer::Gaze() && Occurrences(Peer::Log(), "is not delivering data") == 0,
+               "inactive gaze must not be used or reported at once");
+        Peer::AgeGazeInactivity(); Peer::Gaze(); Peer::Gaze();
+        Expect(Occurrences(Peer::Log(), "is not delivering data") == 1,
+               "gaze inactive for the whole delay must be reported once per session");
+        runtime_gaze_active = true;
+        Expect(Peer::Gaze(), "gaze that arrives later must be used");
         Peer::LogTo(logs / "eye-gaze.log");
         std::error_code error;
         std::filesystem::remove_all(logs, error);

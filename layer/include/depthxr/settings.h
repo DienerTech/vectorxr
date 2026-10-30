@@ -114,6 +114,10 @@ struct OsdSettings {
     std::vector<std::string> body_order{"graph", "performance", "turbo", "framegen", "pivot", "modules"};
     std::string accent{"teal"};
     std::string custom_color{"#51ddbd"};
+    // The language the OSD draws in: a code ("de", "zh-CN"), or "app" for the
+    // app's language, which the app saves as app_language (osd_strings.h).
+    std::string language{"app"};
+    std::string app_language;
     // Any one of a list's bindings acts (one per device: a HOTAS's button and
     // a HOSAS's, say); none means none bound.
     std::vector<InputBinding> toggle_bindings{InputBinding{InputBindingType::Keyboard, {"Ctrl", "Alt", "F10"}}};
@@ -531,6 +535,9 @@ enum class FrameGenFlowQuality {
 // How motion is measured. Shader: block matching on the GPU's shader cores
 // (any GPU). Hardware: the optical flow accelerator of NVIDIA RTX 20-50 GPUs
 // in Direct3D 12 games (experimental; falls back to shader elsewhere).
+// Interpolate hardware flow can yield to shaders and periodically retry.
+enum class FrameGenInterpolateFlow { kAuto, kHardware, kShader };
+
 enum class FrameGenMotionEstimation {
     kShader,
     kHardware,
@@ -564,6 +571,7 @@ struct FrameGenSettings {
     FrameGenSynthesisMode synthesis_mode{FrameGenSynthesisMode::kInterpolate};
     FrameGenFlowQuality flow_quality{FrameGenFlowQuality::kBalanced};
     FrameGenMotionEstimation motion_estimation{FrameGenMotionEstimation::kShader};
+    FrameGenInterpolateFlow interpolate_flow{FrameGenInterpolateFlow::kAuto};
     FrameGenMultiplier multiplier{FrameGenMultiplier::kDynamic};
     // 0-100: higher falls back to the real image sooner where motion is uncertain.
     int artifact_suppression{50};
@@ -643,6 +651,8 @@ const char* ToString(FrameGenSynthesisMode mode);
 std::optional<FrameGenSynthesisMode> ParseFrameGenSynthesisMode(const std::string& value);
 const char* ToString(FrameGenFlowQuality quality);
 std::optional<FrameGenFlowQuality> ParseFrameGenFlowQuality(const std::string& value);
+const char* ToString(FrameGenInterpolateFlow flow);
+std::optional<FrameGenInterpolateFlow> ParseFrameGenInterpolateFlow(const std::string& value);
 const char* ToString(FrameGenMotionEstimation estimation);
 std::optional<FrameGenMotionEstimation> ParseFrameGenMotionEstimation(const std::string& value);
 const char* ToString(FrameGenDiagnosticView view);

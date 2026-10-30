@@ -1,0 +1,137 @@
+{
+  "shared": {
+    "pivot": "Pivot",
+    "breadcrumb": "Navigationspfad",
+    "returnToPivot": "Zurück zu Pivot",
+    "editTitle": "{name} bearbeiten",
+    "yaw": "Gieren",
+    "pitch": "Nicken",
+    "transition": "Übergang",
+    "unitSeconds": "s",
+    "unitCm": "cm",
+    "behavior": "Verhalten",
+    "hold": "Halten",
+    "toggle": "Umschalten",
+    "addBinding": "Belegung hinzufügen",
+    "bindingLabel": "Belegung {index}",
+    "holdDescription": "Die Ansicht ist nur aktiv, solange gehalten wird.",
+    "toggleDescription": "Einmal drücken zum Aufrufen; erneut drücken zum Verlassen.",
+    "bindingCount_one": "{count} Belegung",
+    "bindingCount_other": "{count} Belegungen"
+  },
+  "viewControlsPage": {
+    "snapViews": "Snap Views",
+    "title": "{context} – Snap Views",
+    "returnHint": "Drücken Sie Esc oder „Fertig“, um zurückzukehren.",
+    "returnToSnapViews": "Zurück zu Snap Views",
+    "name": "Name",
+    "yawHint": "Negativ dreht nach links; positiv dreht nach rechts.",
+    "positionOffset": "Optionaler Positionsversatz",
+    "positionHint": "Die Position ist relativ zum erfassten Pivot-Ursprung. Die natürliche Kopfverschiebung bleibt verfügbar.",
+    "rightLeft": "Rechts / links",
+    "upDown": "Oben / unten",
+    "forwardBack": "Vor / zurück",
+    "bindings": "Belegungen",
+    "bindingsHint": "„Halten“ kehrt beim Loslassen zurück. „Umschalten“ bleibt bestehen, bis erneut gedrückt wird oder eine andere Quick View übernimmt.",
+    "noBindings": "Keine Belegungen zugewiesen. Diese Quick View ist wirkungslos, bis eine Belegung hinzugefügt wird.",
+    "quickViews": "Quick Views",
+    "quickViewsHint": "Benannte Posen relativ zum Pivot-Ursprung, mit natürlichem 1:1-Head-Tracking um das Ziel.",
+    "createPreset": "4-Ansichten-Voreinstellung erstellen",
+    "addQuickView": "Quick View hinzufügen",
+    "empty": "Noch keine Quick Views. Fügen Sie eine manuell hinzu, oder beginnen Sie mit der HAT-Voreinstellung mit vier Ansichten.",
+    "summary_one": "Gieren {yaw}° · Nicken {pitch}° · {count} Belegung",
+    "summary_other": "Gieren {yaw}° · Nicken {pitch}° · {count} Belegungen",
+    "position": "Position R {right} · O {up} · V {forward} cm",
+    "moveUp": "Nach oben",
+    "moveDown": "Nach unten",
+    "copyName": "{name} Kopie",
+    "presets": {
+      "lookLeft": "Blick links",
+      "lookRight": "Blick rechts",
+      "high12": "Hoch 12 Uhr",
+      "checkSix": "Sechs-Uhr-Check"
+    }
+  },
+  "viewControlsPanel": {
+    "snapViews": "Snap Views",
+    "viewCount_one": "{count} Ansicht",
+    "viewCount_other": "{count} Ansichten",
+    "editSnapViews": "Snap Views bearbeiten…"
+  },
+  "nudgeSetPage": {
+    "nudgeSets": "Nudge-Sätze",
+    "linked_one": "Mit {count} Profil verknüpft. Änderungen gelten überall, wo dieser Satz ausgewählt ist.",
+    "linked_other": "Mit {count} Profilen verknüpft. Änderungen gelten überall, wo dieser Satz ausgewählt ist.",
+    "setName": "Name des Satzes",
+    "allowWhileInactive": "Zulassen, während Pivot inaktiv ist",
+    "allowWhileInactiveHint": "Diese Belegungen können den globalen Ansichtsversatz anpassen und beibehalten, auch wenn kein verknüpftes Profil greift.",
+    "yawStep": "Gierschritt",
+    "pitchStep": "Nickschritt",
+    "yawLeft": "Gieren links",
+    "yawRight": "Gieren rechts",
+    "pitchUp": "Nicken hoch",
+    "pitchDown": "Nicken runter",
+    "yawStepDescription": "Einen Gierschritt zur aktuellen Ansicht hinzufügen.",
+    "pitchStepDescription": "Einen Nickschritt zur aktuellen Ansicht hinzufügen.",
+    "center": "Nudge-Versatz zentrieren",
+    "centerDescription": "Den angesammelten Nudge-Versatz löschen.",
+    "resetToDefaults": "Auf Standardwerte zurücksetzen",
+    "confirmReset": "Bewegungswerte zurücksetzen und alle Belegungen aus diesem Nudge-Satz entfernen?",
+    "deleteSet": "Nudge-Satz löschen",
+    "deleteTitle": "Diesen Nudge-Satz löschen",
+    "deleteRequired": "Mindestens ein Nudge-Satz ist erforderlich",
+    "confirmDelete": "„{name}“ löschen? Profile, die ihn verwenden, wechseln zu einem anderen Nudge-Satz."
+  },
+  "snapBindingsPage": {
+    "snapViewBindings": "Snap-View-Belegungen",
+    "title": "{context} – Snap-View-Belegungen",
+    "hint": "Weisen Sie Steuerungen zum Halten oder Umschalten zu, ohne die gespeicherten Ansichtstransformationen zu ändern.",
+    "noBinding": "Keine Belegung zugewiesen. Diese Snap View ist inaktiv.",
+    "empty": "Es gibt noch keine Snap Views. Erstellen Sie Ansichten unter „Snap Views bearbeiten“, bevor Sie Belegungen zuweisen."
+  },
+  "snapBindingsPanel": {
+    "snapViewBindings": "Snap-View-Belegungen",
+    "inactiveHint": "Snap Views bleiben inaktiv, bis eine Belegung zugewiesen wird.",
+    "editBindings": "Belegungen bearbeiten…"
+  },
+  "snapStacking": {
+    "title": "Enhanced Motion auf Snap Views anwenden",
+    "description": "Behält die Unterstützung beim Aufrufen einer Snap View bei oder aktiviert sie um eine bereits ausgewählte Ansicht. Verwendet die Dreh- und Positionsabstimmung dieses Profils."
+  },
+  "originPage": {
+    "originControls": "Ursprungssteuerung",
+    "title": "{context} – Ursprungssteuerung",
+    "hint": "Hält die neutrale Pose von Pivot an der Neuzentrierungsposition des Simulators ausgerichtet.",
+    "closeLabel": "Ursprungssteuerung schließen und zu Pivot zurückkehren",
+    "setOrigin": "Ursprung setzen (optional)",
+    "setOriginDescription": "Erfasst die aktuelle Kopfpose als neutralen Sitzursprung von Pivot. Belegen Sie damit dieselbe Steuerung, mit der Sie die Ansicht im Spiel neu zentrieren, damit beide Ursprünge gemeinsam aktualisiert werden.",
+    "setOriginNone": "Keine Belegung zugewiesen. Pivot dreht um den HMD-Ursprung.",
+    "releaseOrigin": "Ursprung freigeben (optional)",
+    "releaseOriginDescription": "Löscht einen erfassten Ursprung und setzt Pivot auf den HMD-Ursprung zurück. Nützlich, wenn ein Ursprung erfasst wurde, während Sie nicht geradeaus geblickt haben.",
+    "releaseOriginNone": "Keine Belegung zugewiesen. Ein erfasster Ursprung bleibt aktiv, bis die Sitzung endet oder er neu erfasst wird."
+  },
+  "originPanel": {
+    "originControls": "Ursprungssteuerung",
+    "setOrigin": "Ursprung setzen",
+    "setOriginTitle": "Erfasst die aktuelle Kopfpose als neutralen Sitzursprung von Pivot.",
+    "releaseOrigin": "Ursprung freigeben",
+    "releaseOriginTitle": "Gibt einen erfassten Ursprung frei und setzt Pivot auf den Standard-HMD-Ursprung zurück.",
+    "editOrigin": "Ursprung bearbeiten…"
+  },
+  "bindingsPanel": {
+    "motionActivation": "Bewegungsaktivierung",
+    "alwaysActive": "Immer aktiv",
+    "manual": "Manuell",
+    "noSuspendControls": "Keine Steuerungen zum Anhalten",
+    "noActivationControls": "Keine Aktivierungssteuerungen",
+    "editActivation": "Aktivierung bearbeiten..."
+  },
+  "bindingsPage": {
+    "motionActivation": "Bewegungsaktivierung",
+    "title": "{context} – Aktivierung",
+    "returnHint": "Drücken Sie Esc oder „Fertig“, um zu Pivot zurückzukehren.",
+    "closeLabel": "Aktivierung schließen und zu Pivot zurückkehren",
+    "alwaysActiveDescription": "Wählen Sie Steuerungen, die Pivot vorübergehend anhalten oder ausschalten.",
+    "manualDescription": "Wählen Sie Steuerungen, die Pivot einschalten."
+  }
+}

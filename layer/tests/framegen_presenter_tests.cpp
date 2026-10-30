@@ -69,6 +69,9 @@ int g_creates = 0;
 std::vector<XrSwapchain> g_destroyed; // swapchains the layer destroyed
 int g_wait_timeouts = 0; // number of upcoming output waits that time out
 int g_wait_timeouts_on_create = 0; // g_wait_timeouts once the next output swapchain is made
+// Each output image wait takes this long (the runtime slow to hand images
+// back): the presenter thread writes its refresh that much later.
+std::atomic<std::chrono::microseconds> g_wait_image_delay{std::chrono::microseconds(0)};
 bool g_release_violation = false;
 std::map<XrSwapchain, int> g_releases; // images released per swapchain
 // What the fake GPU drew into output images, as the eye position (x) the
@@ -77,6 +80,8 @@ std::map<XrSwapchain, int> g_releases; // images released per swapchain
 std::map<XrSwapchain, std::deque<float>> g_written;
 std::map<XrSwapchain, float> g_shown;
 std::vector<std::pair<std::uint32_t, std::uint32_t>> g_create_sizes; // each output swapchain's width and height
+
+void SleepPrecise(std::chrono::steady_clock::time_point deadline); // below
 
 XrResult XRAPI_PTR Formats(XrSession, std::uint32_t capacity, std::uint32_t* count, std::int64_t* formats) {
     *count = 1;
@@ -112,6 +117,9 @@ XrResult XRAPI_PTR Acquire(XrSwapchain swapchain, const XrSwapchainImageAcquireI
     return XR_SUCCESS;
 }
 XrResult XRAPI_PTR WaitImage(XrSwapchain swapchain, const XrSwapchainImageWaitInfo*) {
+    if (const std::chrono::microseconds delay = g_wait_image_delay.load(); delay.count() > 0) {
+        SleepPrecise(std::chrono::steady_clock::now() + delay);
+    }
     std::scoped_lock lock(g_xr_mutex);
     if (g_wait_timeouts > 0) {
         --g_wait_timeouts;
@@ -152,6 +160,91 @@ void SleepPrecise(std::chrono::steady_clock::time_point deadline) {
     }
 }
 
+// --- fake view locate (the eye probe, VECTORXR_FRAMEGEN_SYNTH_EYE_PROBE) ---------
+
+// Each xrLocateViews the presenter made: the time and space asked, the view
+// configuration and the room given for views, the calling thread, and
+// whether the presenter's own lock was free during the call (checked on the
+// first few calls).
+struct LocateCall {
+    XrTime time{0};
+    XrSpace space{XR_NULL_HANDLE};
+    XrViewConfigurationType configuration{};
+    std::uint32_t capacity{0};
+    DWORD thread{0};
+    bool presenter_free{true};
+};
+
+// The runtime's answer: the first eye where App::End renders it at the time
+// asked (x = speed * (t - 1 s)), `offset_y` meters off that path, the other
+// views each 5 mm further up, with `flags`; `frozen`, the same position
+// whatever time is asked; `result`, a failure instead; `sleep_us`, that long
+// first. Asked for another view configuration than the session's
+// (`configuration`), it fails as OpenXR says; quad views have four views.
+struct FakeLocate {
+    std::mutex mutex;
+    std::vector<LocateCall> calls;
+    XrViewConfigurationType configuration{XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
+    double speed{0.0};
+    float offset_y{0.0f};
+    XrViewStateFlags flags{XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT |
+                           XR_VIEW_STATE_ORIENTATION_TRACKED_BIT | XR_VIEW_STATE_POSITION_TRACKED_BIT};
+    bool frozen{false};
+    XrResult result{XR_SUCCESS};
+    int sleep_us{0};
+    bool check_lock{true}; // the presenter's lock checked free on the first calls
+    const FrameGenPresenter* presenter{nullptr};
+};
+FakeLocate g_locate;
+
+XrResult XRAPI_PTR LocateViews(XrSession, const XrViewLocateInfo* info, XrViewState* state, std::uint32_t capacity,
+                               std::uint32_t* count, XrView* views) {
+    LocateCall call{info->displayTime, info->space, info->viewConfigurationType, capacity, GetCurrentThreadId(), true};
+    const FrameGenPresenter* presenter = nullptr;
+    {
+        std::scoped_lock lock(g_locate.mutex);
+        if (g_locate.check_lock && g_locate.calls.size() < 3) presenter = g_locate.presenter;
+    }
+    if (presenter) {
+        // Another thread takes the presenter's lock (Status): held over this
+        // call, it would not get it.
+        auto taken = std::make_shared<std::atomic<bool>>(false);
+        std::thread([presenter, taken] {
+            (void)presenter->Status();
+            *taken = true;
+        }).detach();
+        const auto until = std::chrono::steady_clock::now() + 300ms;
+        // Spun, not slept (a sleep rounds up to the timer's resolution). The
+        // game's thread may hold the lock meanwhile: these calls may come out
+        // slow (the tests allow it).
+        while (!*taken && std::chrono::steady_clock::now() < until) std::this_thread::yield();
+        call.presenter_free = *taken;
+    }
+    std::unique_lock lock(g_locate.mutex);
+    g_locate.calls.push_back(call);
+    const int sleep_us = g_locate.sleep_us;
+    const XrResult result = g_locate.result;
+    const double speed = g_locate.speed;
+    const float offset_y = g_locate.offset_y;
+    const XrViewStateFlags flags = g_locate.flags;
+    const bool frozen = g_locate.frozen;
+    const XrViewConfigurationType configuration = g_locate.configuration;
+    lock.unlock();
+    if (sleep_us) SleepPrecise(std::chrono::steady_clock::now() + std::chrono::microseconds(sleep_us));
+    if (XR_FAILED(result)) return result;
+    if (info->viewConfigurationType != configuration) return XR_ERROR_VALIDATION_FAILURE;
+    const std::uint32_t needed = configuration == XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET ? 4 : 2;
+    *count = needed;
+    if (capacity < needed) return capacity ? XR_ERROR_SIZE_INSUFFICIENT : XR_SUCCESS;
+    const double x = frozen ? 0.25 : speed * static_cast<double>(info->displayTime - 1'000'000'000) * 1e-9;
+    for (std::uint32_t i = 0; i < needed; ++i) {
+        views[i].pose = {{0.0f, 0.0f, 0.0f, 1.0f}, {static_cast<float>(x), offset_y + 0.005f * static_cast<float>(i), 0.0f}};
+        views[i].fov = {-0.8f, 0.8f, 0.8f, -0.8f};
+    }
+    state->viewStateFlags = flags;
+    return XR_SUCCESS;
+}
+
 // --- fake GPU -------------------------------------------------------------------
 
 using TimePoint = std::chrono::steady_clock::time_point;
@@ -167,6 +260,7 @@ struct GpuLog {
     bool fail_frees{false};
     bool uncaptured{false}; // views not captured at release: nothing generated
     bool threaded{false};
+    bool hardware_available{true}; // the fake can model hardware unless explicitly unavailable
     bool depth{false};
     std::atomic<bool> memory_pressure{false}; // process video memory near its budget
     // Process video memory as a session's would be: with `memory_game` set,
@@ -184,6 +278,43 @@ struct GpuLog {
     std::atomic<int> canvas_ring{0};
     std::atomic<int> working_memory_queries{0}; // WorkingMemoryBytes calls
     std::atomic<int> depth_captures{0};
+    // Engine motion vectors (SupportsEngineMotion): each CaptureMotion
+    // call's jobs, in order. With engine_unready no capture job is
+    // resampled (as by a backend not set up for them), their census taken.
+    bool engine{false};
+    bool engine_unready{false};
+    // Stage 6: each Execute whose views all ask for their vectors' evidence
+    // is a frame judged (FrameGenEngineValidation::frames, as EngineStatus
+    // reports it), held back while `verdicts_held` (held and lead_held),
+    // held back as Lead judges it alone while `lead_verdicts_held` (lead_held:
+    // the vectors good enough for Assist's test, not for Lead's), and led
+    // where it runs at kLead (FrameGenExecuteResult::lead).
+    std::atomic<bool> verdicts_held{false};
+    std::atomic<bool> lead_verdicts_held{false};
+    std::atomic<std::uint64_t> verdict_frames{0};
+    std::atomic<std::uint64_t> verdicts_held_back{0};
+    std::atomic<std::uint64_t> lead_verdicts_held_back{0};
+    std::atomic<bool> engine_disabled{false}; // the validator disabled the vectors (EngineStatus)
+    // Stage 7: such frames from Assist had the vectors merged into every
+    // view (FrameGenExecuteResult::merged) while `merged`; the view whose
+    // depth is never used (FrameGenExecuteResult::depth; -1: none).
+    std::atomic<bool> merged{false};
+    std::atomic<int> depthless_view{-1};
+    std::mutex motion_mutex;
+    std::vector<std::vector<FrameGenMotionJob>> motion_calls;
+    // The color captures made before each call (`captures` then).
+    std::vector<int> motion_captures;
+    // Censuses EngineStatus hands out (those past the caller's sequence), and
+    // the convention SetEnginePrior was given (stage 9).
+    std::vector<FrameGenEngineCensus> census;
+    std::optional<FrameGenEngineConvention> prior;
+    // Calls at a frame's end, or at a depth release (early).
+    int MotionCalls(bool early) {
+        std::scoped_lock lock(motion_mutex);
+        return static_cast<int>(std::count_if(motion_calls.begin(), motion_calls.end(), [&](const auto& jobs) {
+            return !jobs.empty() && jobs.front().early == early;
+        }));
+    }
     std::vector<FrameGenViewSubmission> last;
     FrameGenImage last_capture;
     FrameGenTuning tuning;
@@ -305,6 +436,9 @@ class FakeGpu final : public FrameGenGpu {
   public:
     explicit FakeGpu(GpuLog* log) : log_(log) {}
     const char* Name() const override { return "Fake"; }
+    std::string HardwareFlowStatus() const override {
+        return log_->hardware_available ? "active" : "fake GPU has no optical flow hardware";
+    }
     std::optional<FrameGenOutputKind> Classify(std::int64_t format) const override {
         if (format == kFormat) return FrameGenOutputKind::kSrgb8;
         if (format == kFloatFormat) return FrameGenOutputKind::kFloat16;
@@ -443,6 +577,15 @@ class FakeGpu final : public FrameGenGpu {
         history_.resize(views.size());
         result.synthesized.clear();
         result.depth.clear();
+        if (tuning.engine_mode >= FrameGenEngineMode::kObserve && !views.empty() &&
+            std::all_of(views.begin(), views.end(),
+                        [](const FrameGenViewSubmission& view) { return view.request.engine_motion; })) {
+            ++log_->verdict_frames;
+            log_->verdicts_held_back += log_->verdicts_held ? 1 : 0;
+            log_->lead_verdicts_held_back += log_->verdicts_held || log_->lead_verdicts_held ? 1 : 0;
+            result.lead = tuning.engine_mode == FrameGenEngineMode::kLead;
+            result.merged.assign(views.size(), log_->merged && tuning.engine_mode >= FrameGenEngineMode::kAssist);
+        }
         Analyzed analyzed;
         std::uint64_t held_bytes = 0;
         for (std::size_t i = 0; i < views.size(); ++i) {
@@ -456,7 +599,8 @@ class FakeGpu final : public FrameGenGpu {
             const bool synthesized = history_[i].Effective(views[i].request).synthesize;
             history_[i].Commit(synthesized);
             result.synthesized.push_back(synthesized);
-            result.depth.push_back(synthesized && views[i].request.depth && log_->depth);
+            result.depth.push_back(synthesized && views[i].request.depth && log_->depth &&
+                                   static_cast<int>(i) != log_->depthless_view);
             Analyzed::View kept{views[i].request.newest.position[0],
                                 result.depth.back() ? views[i].request.shift[0] : 0.0f, synthesized};
             {
@@ -756,6 +900,37 @@ class FakeGpu final : public FrameGenGpu {
         error.clear();
         ++log_->depth_captures;
         return log_->depth;
+    }
+    bool SupportsEngineMotion() const override { return log_->engine; }
+    FrameGenEngineStatus EngineStatus(std::uint64_t after) const override {
+        FrameGenEngineStatus status;
+        status.validation.frames = log_->verdict_frames;
+        status.validation.held = log_->verdicts_held_back;
+        status.validation.lead_held = log_->lead_verdicts_held_back;
+        if (log_->engine_disabled) status.validation.state = FrameGenEngineValidation::State::kDisabled;
+        std::scoped_lock lock(log_->motion_mutex);
+        for (const FrameGenEngineCensus& census : log_->census) {
+            if (census.sequence > after) status.census.push_back(census);
+        }
+        return status;
+    }
+    void SetEnginePrior(const FrameGenEngineConvention& convention) override {
+        std::scoped_lock lock(log_->motion_mutex);
+        log_->prior = convention;
+    }
+    bool CaptureMotion(const std::vector<FrameGenMotionJob>& jobs, const std::vector<FrameGenViewRequest>&,
+                       std::string& error, std::vector<bool>* resampled) override {
+        error.clear();
+        std::scoped_lock lock(log_->motion_mutex);
+        log_->motion_calls.push_back(jobs);
+        log_->motion_captures.push_back(log_->captures);
+        if (resampled) {
+            resampled->clear();
+            for (const FrameGenMotionJob& job : jobs) {
+                resampled->push_back(log_->engine && job.capture && !log_->engine_unready);
+            }
+        }
+        return log_->engine;
     }
 
   private:
@@ -1284,6 +1459,9 @@ struct App {
     // (GpuLog::GameFrame) and what a test records around it.
     std::function<void()> before_begin;
     std::function<void()> before_release;
+    // Run in each end before the presenter's: what the layer does there
+    // first (its engine motion record and census), with the frame's time.
+    std::function<void(XrTime)> before_end;
 
     App(FrameGenPresenter& p, Runtime& r) : presenter(p), runtime(r), calls(r.Calls()) {
         for (int eye = 0; eye < 2; ++eye) {
@@ -1346,6 +1524,7 @@ struct App {
         info.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
         info.layerCount = layers ? static_cast<std::uint32_t>(this->layers.size()) : 0;
         info.layers = layers ? this->layers.data() : nullptr;
+        if (before_end) before_end(info.displayTime);
         return presenter.EndFrame(kSession, &info, calls);
     }
 
@@ -1359,7 +1538,7 @@ struct App {
 };
 
 FrameGenSwapchainDispatch Dispatch() {
-    return {Formats, Create, Destroy, Images, Acquire, WaitImage, Release};
+    return {Formats, Create, Destroy, Images, Acquire, WaitImage, Release, LocateViews};
 }
 
 constexpr XrSwapchainUsageFlags kAppUsage =
@@ -1417,6 +1596,7 @@ void StartPresenter(FrameGenPresenter& presenter, GpuLog& gpu, FrameGenSynthesis
     g_destroyed.clear();
     g_wait_timeouts = 0;
     g_wait_timeouts_on_create = 0;
+    g_wait_image_delay = std::chrono::microseconds(0);
     g_release_violation = false;
 }
 
@@ -1650,8 +1830,27 @@ void TestAutomaticMultiplier() {
             Check(XR_SUCCEEDED(app.End(state.predictedDisplayTime)), "auto: end");
         }
     };
+    // Its thresholds as frame rates (the public status file's): at full rate
+    // a step up below 80% of the refresh rate, no step down.
+    FrameGenStatus status = presenter.Status();
+    Check(status.grid_period_ns > 0, "auto: the grid is known");
+    double grid_hz = 1e9 / static_cast<double>(status.grid_period_ns);
+    Check(std::abs(status.auto_step_up_below_fps - grid_hz / 1.25) < 0.01 && status.auto_step_down_above_fps == 0.0,
+          "auto at full rate: steps up below " + std::to_string(status.auto_step_up_below_fps) + " fps");
     run(1500ms, 30ms);
     Check(presenter.Status().multiplier >= 3, "auto: a slow app steps up to 3x or more");
+    // Inline, a probe down needs only five steady seconds at the step; the
+    // last step has none above it.
+    status = presenter.Status();
+    grid_hz = 1e9 / static_cast<double>(status.grid_period_ns);
+    const double step = static_cast<double>(status.multiplier);
+    Check(std::abs(status.auto_step_up_below_fps - (status.multiplier < 4 ? grid_hz / (1.25 * step) : 0.0)) < 0.01 &&
+              std::abs(status.auto_step_down_above_fps - grid_hz / step) < 0.01,
+          "auto at " + std::to_string(status.multiplier) + "x: up below " +
+              std::to_string(status.auto_step_up_below_fps) + ", down from " +
+              std::to_string(status.auto_step_down_above_fps) + " fps");
+    Check(status.refreshes_per_real_frame >= 2.0, "auto: a 30 ms frame takes two refreshes or more (" +
+                                                      std::to_string(status.refreshes_per_real_frame) + ")");
     Check(app.Frame().predictedDisplayPeriod == presenter.Status().multiplier * kPeriod,
           "auto: the app's period follows the multiplier");
 
@@ -2058,6 +2257,7 @@ void TestHorizonTelemetryFixed() {
         StartJit(presenter, gpu, mode, FrameGenMultiplier::k2, app, runtime, owned, log.logger.get());
         FrameGenLeadPolicy policy;
         policy.probe_after = 600s; // no probes: the lead holds while measured
+        policy.ring_ceiling = false; // pins the lead policy's own moves; the ring ceiling has its own tests
         presenter.SetLeadPolicy(policy);
         // Windows of about 45 game frames, whose 95th percentile is not their
         // largest: a 300 ms window holds 13, and one late wake-up beside the
@@ -2110,6 +2310,15 @@ void TestHorizonTelemetryFixed() {
         Check(jitter->second <= 0.15 * period_ms,
               name + ": released on its refresh, the horizon holds from frame to frame (" + last + ")");
         Check(slack->first <= slack->second, name + ": endSlackMs is 10th percentile/median (" + last + ")");
+        // The horizon told past the refresh the presenter thread was at, in
+        // every window, and how many frames were told each lead.
+        const auto told = SummaryValues(last, "toldAheadMs");
+        Check(told && told->first > 0.0 && told->first <= told->second &&
+                  std::abs(told->first - lead_avg->first * period_ms) <= 1.5 * period_ms,
+              name + ": toldAheadMs is about the lead told (" + last + ")");
+        const std::size_t hist = last.find(", leadHist=");
+        Check(hist != std::string::npos && last.find(std::to_string(high) + ":", hist) != std::string::npos,
+              name + ": leadHist counts the leads told (" + last + ")");
     }
 }
 
@@ -2992,11 +3201,25 @@ void TestJitEyeShiftReported() {
     double largest = 0.0;
     int summaries = 0;
     const std::string key = "eyeShiftMm=";
+    // Each candidate predictor's miss: the eyes move steadily, so the
+    // straight-line ones (and the parabola) miss nothing and damped does.
+    const std::string predict_key = "eyePredictMissMm=velocity:";
+    int predicted = 0;
+    double velocity_miss = 1.0, damped_miss = 0.0;
     for (std::string line; std::getline(file, line);) {
         const std::size_t at = line.find(key);
         if (line.find("threaded=1") == std::string::npos || at == std::string::npos) continue;
         ++summaries;
         largest = std::max(largest, std::stod(line.substr(at + key.size())));
+        const std::size_t predict_at = line.find(predict_key);
+        const std::size_t damped_at = line.find("/damped0.90:");
+        if (predict_at != std::string::npos && damped_at != std::string::npos &&
+            line.find("/two:") != std::string::npos && line.find("/quadratic:") != std::string::npos &&
+            line.find("/twist:") != std::string::npos) {
+            ++predicted;
+            velocity_miss = std::min(velocity_miss, std::stod(line.substr(predict_at + predict_key.size())));
+            damped_miss = std::max(damped_miss, std::stod(line.substr(damped_at + 12)));
+        }
     }
     file.close();
     std::filesystem::remove_all(directory, ignored);
@@ -3004,6 +3227,304 @@ void TestJitEyeShiftReported() {
     Check(summaries > 0 && largest > 1.0,
           "jit eye shift: the summaries say how far frames moved with the eyes (" + std::to_string(largest) +
               " mm in " + std::to_string(summaries) + " summaries)");
+    Check(predicted > 0 && velocity_miss < 0.01 && damped_miss > velocity_miss,
+          "jit eye shift: the summaries measure each eye predictor against the next real frame (velocity " +
+              std::to_string(velocity_miss) + " mm, damped " + std::to_string(damped_miss) + " mm in " +
+              std::to_string(predicted) + " summaries)");
+}
+
+// The eye probe's "key=a/b" summary field, each half none when "-" (or the
+// field missing).
+std::pair<std::optional<double>, std::optional<double>> EyeProbeField(const std::string& line, const std::string& key) {
+    const std::size_t at = line.find(", " + key + "=");
+    if (at == std::string::npos) return {};
+    const std::string value = line.substr(at + key.size() + 3, line.find(',', at + 2) - (at + key.size() + 3));
+    const auto number = [](const std::string& text) -> std::optional<double> {
+        if (text.empty() || text[0] == '-') return std::nullopt;
+        return std::stod(text);
+    };
+    const std::size_t slash = value.find('/');
+    if (slash == std::string::npos) return {number(value), std::nullopt};
+    return {number(value.substr(0, slash)), number(value.substr(slash + 1))};
+}
+
+// A count of the summary's "eyeLocate=calls:N/resolved:A+B/..." field (for
+// resolved, `between` picks B), 0 when missing.
+std::uint64_t EyeProbeCount(const std::string& line, const std::string& name, bool between = false) {
+    const std::size_t field = line.find(", eyeLocate=");
+    if (field == std::string::npos) return 0;
+    const std::size_t end = line.find(',', field + 2);
+    const std::size_t at = line.find((name == "calls" ? "=" : "/") + name + ":", field);
+    if (at == std::string::npos || at > end) return 0;
+    std::size_t start = at + name.size() + 2;
+    if (between) start = line.find('+', start) + 1;
+    return std::stoull(line.substr(start));
+}
+
+// What a just-in-time session with the eye probe on or off did: the probe's
+// locates, the summaries, the real frames' display times and those submitted.
+struct EyeProbeRun {
+    std::vector<LocateCall> calls;
+    std::vector<std::string> summaries;
+    std::vector<std::string> log;
+    std::set<XrTime> real;
+    std::set<XrTime> submitted;
+    DWORD app_thread{0};
+    int frames{0};
+    // Each count summed over the summaries.
+    std::uint64_t Count(const std::string& name, bool between = false) const {
+        std::uint64_t total = 0;
+        for (const std::string& line : summaries) total += EyeProbeCount(line, name, between);
+        return total;
+    }
+};
+
+// `begun`: the view configuration the layer says the runtime's session was
+// begun on (the presenter is left at its stereo when it is).
+EyeProbeRun RunEyeProbe(const std::string& name, FrameGenSynthesisMode mode, bool on,
+                        const std::function<void(FakeLocate&)>& answer = {}, std::chrono::milliseconds duration = 900ms,
+                        XrViewConfigurationType begun = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO) {
+    {
+        std::scoped_lock lock(g_locate.mutex);
+        g_locate.calls.clear();
+        g_locate.configuration = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+        g_locate.speed = 0.5;
+        g_locate.offset_y = 0.0f;
+        g_locate.flags = XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT |
+                         XR_VIEW_STATE_ORIENTATION_TRACKED_BIT | XR_VIEW_STATE_POSITION_TRACKED_BIT;
+        g_locate.frozen = false;
+        g_locate.result = XR_SUCCESS;
+        g_locate.sleep_us = 0;
+        g_locate.check_lock = true;
+        g_locate.presenter = nullptr;
+        if (answer) answer(g_locate);
+    }
+    EyeProbeRun run;
+    run.app_thread = GetCurrentThreadId();
+    HorizonLog log("eyeprobe-" + name);
+    {
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        runtime.paced = true;
+        std::unique_ptr<App> owned;
+        App* app = nullptr;
+        if (on) _putenv_s("VECTORXR_FRAMEGEN_SYNTH_EYE_PROBE", "1");
+        StartJit(presenter, gpu, mode, FrameGenMultiplier::k2, app, runtime, owned, log.logger.get());
+        _putenv_s("VECTORXR_FRAMEGEN_SYNTH_EYE_PROBE", "");
+        // As the layer at xrBeginSession, after Start.
+        if (begun != XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO) presenter.SetRuntimeViewConfiguration(begun);
+        {
+            std::scoped_lock lock(g_locate.mutex);
+            g_locate.presenter = &presenter;
+        }
+        presenter.SetSummaryInterval(300ms);
+        app->eye_speed = 0.5;
+        for (int i = 0; i < 3; ++i) run.real.insert(app->Frame().predictedDisplayTime);
+        const auto start = std::chrono::steady_clock::now();
+        while (std::chrono::steady_clock::now() - start < duration) {
+            const XrFrameState state = app->Wait();
+            app->Begin();
+            std::this_thread::sleep_for(4ms);
+            app->Release();
+            Check(XR_SUCCEEDED(app->End(state.predictedDisplayTime)), "eye probe " + name + ": end");
+            run.real.insert(state.predictedDisplayTime);
+            ++run.frames;
+        }
+        presenter.Stop();
+        {
+            std::scoped_lock lock(g_locate.mutex);
+            g_locate.presenter = nullptr;
+            run.calls = g_locate.calls;
+        }
+        std::scoped_lock lock(g_xr_mutex);
+        run.submitted.insert(runtime.submitted_times.begin(), runtime.submitted_times.end());
+    }
+    {
+        const std::filesystem::path path = log.logger->ActiveLogPath();
+        run.summaries = log.Summaries(); // closes the log
+        std::ifstream file(path);
+        for (std::string line; std::getline(file, line);) run.log.push_back(line);
+    }
+    return run;
+}
+
+// Research (VECTORXR_FRAMEGEN_SYNTH_EYE_PROBE=1, log only): each generated
+// frame written just in time, the presenter thread asks the runtime where
+// the views are at exactly that frame's display time, in the real frame's
+// space, holding none of the presenter's locks (its own the fake checks),
+// and the summaries score the answer and the eye the frame was shown from
+// against the real frames' path. Off, the runtime is never asked. Invalid,
+// untracked, repeated, failed and slow answers are counted, never scored;
+// enough slow ones stop the probe for the session.
+void TestEyeProbe() {
+    // Off: not one call, and the summaries as they were.
+    const EyeProbeRun off = RunEyeProbe("off", FrameGenSynthesisMode::kExtrapolate, false);
+    Check(off.calls.empty(), "eye probe: off, the runtime is never asked (" + std::to_string(off.calls.size()) + ")");
+    Check(!off.summaries.empty() && std::none_of(off.summaries.begin(), off.summaries.end(), [](const std::string& line) {
+              return line.find("eyeLocate") != std::string::npos;
+          }),
+          "eye probe: off, the summaries carry none of its fields");
+
+    // The runtime answers 1 mm above the eyes' path, which the real frames
+    // follow: the answer misses their path by 1 mm, the eye moved at
+    // constant velocity by nothing.
+    const auto offset = [](FakeLocate& locate) { locate.offset_y = 0.001f; };
+    for (const FrameGenSynthesisMode mode : {FrameGenSynthesisMode::kExtrapolate, FrameGenSynthesisMode::kInterpolate}) {
+        const bool extrapolate = mode == FrameGenSynthesisMode::kExtrapolate;
+        const std::string name = extrapolate ? "extrapolate" : "interpolate";
+        const EyeProbeRun run = RunEyeProbe(name, mode, true, offset);
+        Check(static_cast<int>(run.calls.size()) > run.frames / 2,
+              "eye probe " + name + ": the runtime is asked for generated frames (" + std::to_string(run.calls.size()) +
+                  " calls, " + std::to_string(run.frames) + " real frames)");
+        std::size_t at_submitted = 0, at_real = 0, presenter_checked = 0;
+        bool ordered = true, own_thread = true, stereo = true, in_space = true, free = true;
+        for (std::size_t i = 0; i < run.calls.size(); ++i) {
+            const LocateCall& call = run.calls[i];
+            at_submitted += run.submitted.count(call.time);
+            at_real += run.real.count(call.time);
+            ordered = ordered && (i == 0 || call.time > run.calls[i - 1].time);
+            own_thread = own_thread && call.thread != run.app_thread && call.thread == run.calls.front().thread;
+            stereo = stereo && call.configuration == XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+            in_space = in_space && call.space == kSpace;
+            presenter_checked += i < 3 ? 1 : 0;
+            free = free && call.presenter_free;
+        }
+        // (The last frame written may never be submitted: the presenter
+        // stopped. A real frame not captured in time has its refresh moved
+        // on from the one before.)
+        Check(at_submitted + 1 >= run.calls.size() && at_real * 20 <= run.calls.size(),
+              "eye probe " + name + ": each call asks for its generated frame's own display time (" +
+                  std::to_string(at_submitted) + " of " + std::to_string(run.calls.size()) +
+                  " at a submitted time, " + std::to_string(at_real) + " at a real frame's)");
+        Check(ordered, "eye probe " + name + ": one call per generated frame, in display-time order");
+        Check(own_thread, "eye probe " + name + ": asked from the presenter thread only, never the game's");
+        Check(stereo && in_space, "eye probe " + name + ": the stereo views, in the real frame's projection space");
+        Check(presenter_checked > 0 && free, "eye probe " + name + ": the presenter's lock is free during the call");
+        const std::size_t kind = extrapolate ? 0 : 1;
+        // The answer misses by its 1 mm in every summary. The eye shown from
+        // is on the path once the game's pace settles (before, a frame past
+        // more than one of the previous intervals stays at one: it lags).
+        int scored = 0;
+        double used_best = 1e9, apart_best = 1e9;
+        for (const std::string& line : run.summaries) {
+            const auto miss = EyeProbeField(line, extrapolate ? "eyeLocateMissMm" : "eyeLocateBetweenMissMm");
+            const auto apart = EyeProbeField(line, "eyeLocateFromUsedMm");
+            const auto ms = EyeProbeField(line, "eyeLocateMs");
+            if (!miss.first) continue;
+            ++scored;
+            Check(miss.second && std::abs(*miss.first - 1.0) < 0.01,
+                  "eye probe " + name + ": the answer 1 mm off the real path misses it by 1 mm (" + line + ")");
+            const std::optional<double> apart_mm = kind == 0 ? apart.first : apart.second;
+            Check(apart_mm.has_value(), "eye probe " + name + ": how far the answer is from the eye shown from");
+            used_best = std::min(used_best, *miss.second);
+            apart_best = std::min(apart_best, std::abs(*apart_mm - 1.0));
+            Check(ms.first && ms.second && *ms.first >= 0.0 && *ms.second >= *ms.first,
+                  "eye probe " + name + ": the calls' mean and longest time");
+        }
+        Check(scored > 0 && run.Count("resolved", kind == 1) > 0,
+              "eye probe " + name + ": generated frames scored once the real frames either side came (" +
+                  std::to_string(scored) + " summaries)");
+        Check(used_best < 0.02 && apart_best < 0.02,
+              "eye probe " + name + ": settled, the eye shown from is on the path and 1 mm from the answer (" +
+                  std::to_string(used_best) + " mm off the path, " + std::to_string(apart_best) + " mm off 1 mm)");
+        // (The fake's lock check makes its first calls slow when the game's
+        // thread holds the presenter's lock meanwhile: those may be dropped.)
+        Check(run.Count("failed") + run.Count("invalid") + run.Count("untracked") + run.Count("same") == 0 &&
+                  run.Count("slow") <= presenter_checked,
+              "eye probe " + name + ": good answers are all used (failed " + std::to_string(run.Count("failed")) +
+                  ", invalid " + std::to_string(run.Count("invalid")) + ", untracked " +
+                  std::to_string(run.Count("untracked")) + ", same " + std::to_string(run.Count("same")) + ", slow " +
+                  std::to_string(run.Count("slow")) + ")");
+    }
+
+    // A runtime session begun on quad views natively (Varjo): the probe asks
+    // for that configuration's four views and keeps the first, the left
+    // context eye (the fake puts the others 5 mm and more above it).
+    {
+        constexpr XrViewConfigurationType kQuad = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET;
+        const EyeProbeRun run = RunEyeProbe(
+            "quad", FrameGenSynthesisMode::kExtrapolate, true,
+            [](FakeLocate& locate) {
+                locate.offset_y = 0.001f;
+                locate.configuration = kQuad;
+            },
+            900ms, kQuad);
+        Check(static_cast<int>(run.calls.size()) > run.frames / 2 &&
+                  std::all_of(run.calls.begin(), run.calls.end(),
+                              [](const LocateCall& call) { return call.configuration == kQuad && call.capacity >= 4; }),
+              "eye probe quad: the session's quad views, with room for their four (" + std::to_string(run.calls.size()) +
+                  " calls)");
+        int scored = 0;
+        for (const std::string& line : run.summaries) {
+            const auto miss = EyeProbeField(line, "eyeLocateMissMm");
+            if (!miss.first) continue;
+            ++scored;
+            Check(std::abs(*miss.first - 1.0) < 0.01,
+                  "eye probe quad: the first view, 1 mm off the real path, misses it by 1 mm (" + line + ")");
+        }
+        Check(scored > 0 && run.Count("failed") == 0,
+              "eye probe quad: its answers are used (failed " + std::to_string(run.Count("failed")) + ", " +
+                  std::to_string(scored) + " summaries scored)");
+    }
+
+    // Answers the probe drops, each counted: no valid position, a position
+    // not tracked, the same position whatever the time, a failed call (and
+    // one for stereo in a runtime session begun on quad views the layer was
+    // not told of: the runtime refuses it).
+    struct Dropped {
+        const char* name;
+        const char* count;
+        std::function<void(FakeLocate&)> answer;
+    };
+    const std::vector<Dropped> dropped{
+        {"invalid", "invalid", [](FakeLocate& locate) { locate.flags = XR_VIEW_STATE_ORIENTATION_VALID_BIT; }},
+        {"untracked", "untracked",
+         [](FakeLocate& locate) {
+             locate.flags = XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT |
+                            XR_VIEW_STATE_ORIENTATION_TRACKED_BIT;
+         }},
+        {"same", "same", [](FakeLocate& locate) { locate.frozen = true; }},
+        {"failed", "failed", [](FakeLocate& locate) { locate.result = XR_ERROR_RUNTIME_FAILURE; }},
+        {"wrongconfig", "failed",
+         [](FakeLocate& locate) { locate.configuration = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET; }},
+    };
+    for (const Dropped& drop : dropped) {
+        const EyeProbeRun run = RunEyeProbe(
+            drop.name, FrameGenSynthesisMode::kExtrapolate, true,
+            [&](FakeLocate& locate) {
+                locate.check_lock = false; // no call slow from the check
+                drop.answer(locate);
+            },
+            700ms);
+        const std::uint64_t calls = run.Count("calls");
+        const std::uint64_t counted = run.Count(drop.count);
+        // A frozen runtime's first answer is the one the others repeat.
+        const std::uint64_t expected = std::string(drop.name) == "same" && calls ? calls - 1 : calls;
+        Check(calls > 3 && counted >= expected && counted <= calls,
+              std::string("eye probe: ") + drop.name + " answers are counted (" + std::to_string(counted) + " of " +
+                  std::to_string(calls) + ")");
+        // Only a frozen runtime's first answer, the one repeated, is scored.
+        const bool same = std::string(drop.name) == "same";
+        Check(run.Count("resolved") + run.Count("resolved", true) <= (same ? 1u : 0u) &&
+                  (same || std::all_of(run.summaries.begin(), run.summaries.end(), [](const std::string& line) {
+                       return !EyeProbeField(line, "eyeLocateMissMm").first;
+                   })),
+              std::string("eye probe: ") + drop.name + " answers are never scored");
+    }
+
+    // Slow calls (4 ms each, past 3 ms) are dropped, and eight stop the probe
+    // for the session.
+    const EyeProbeRun slow = RunEyeProbe("slow", FrameGenSynthesisMode::kExtrapolate, true,
+                                         [](FakeLocate& locate) { locate.sleep_us = 4000; }, 700ms);
+    Check(slow.calls.size() == 8, "eye probe: eight slow calls stop it (" + std::to_string(slow.calls.size()) + ")");
+    Check(slow.Count("slow") == slow.Count("calls") && slow.Count("resolved") == 0,
+          "eye probe: slow answers are counted, never scored");
+    Check(std::any_of(slow.log.begin(), slow.log.end(),
+                      [](const std::string& line) { return line.find("eye probe stops for the session") != std::string::npos; }) &&
+              std::any_of(slow.summaries.begin(), slow.summaries.end(),
+                          [](const std::string& line) { return line.find("/stopped") != std::string::npos; }),
+          "eye probe: stopping is logged, and the summaries say so");
 }
 
 // Extrapolate at 3x, each generated frame written right before its refresh:
@@ -3415,6 +3936,1642 @@ void TestDepthCapture() {
     Check(none.Status().depth == FrameGenDepthState::kUnknown, "depth: nothing reported before generated frames");
     for (int i = 0; i < 8; ++i) none_app.Frame();
     Check(none.Status().depth == FrameGenDepthState::kNotSent, "depth: a game without depth is reported");
+}
+
+// Research (VECTORXR_FRAMEGEN_SYNTH_EYE): extrapolating, generated frames'
+// eyes go where the chosen predictor puts them (damped: its share of the
+// movement); interpolating, they stay on the line between the pair.
+void TestEyePredictionSwitch() {
+    const auto shift_of = [](FrameGenSynthesisMode mode, const char* eye) {
+        _putenv_s("VECTORXR_FRAMEGEN_SYNTH_EYE", eye);
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        gpu.depth = true;
+        Runtime runtime;
+        StartPresenter(presenter, gpu, mode);
+        _putenv_s("VECTORXR_FRAMEGEN_SYNTH_EYE", "");
+        const XrSwapchain depth_chain = reinterpret_cast<XrSwapchain>(0x21);
+        presenter.TrackSwapchain(depth_chain, 20, 1,
+                                 XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+        App app(presenter, runtime);
+        app.depth.subImage.swapchain = depth_chain;
+        app.depth.subImage.imageRect = {{0, 0}, {1200, 1200}};
+        app.depth.minDepth = 0.0f;
+        app.depth.maxDepth = 1.0f;
+        app.depth.nearZ = 0.1f;
+        app.depth.farZ = 1000.0f;
+        app.eye_speed = 0.5;
+        for (int i = 0; i < 14; ++i) app.Frame();
+        presenter.Stop();
+        Check(gpu.executes > 0 && gpu.last[0].request.depth, std::string("eye prediction: frames generated with ") + eye);
+        return gpu.last[0].request.shift[0];
+    };
+    const float velocity = shift_of(FrameGenSynthesisMode::kExtrapolate, "");
+    const float damped = shift_of(FrameGenSynthesisMode::kExtrapolate, "damped:0.5");
+    const float two = shift_of(FrameGenSynthesisMode::kExtrapolate, "two");
+    Check(velocity > 1e-4f && std::abs(damped - 0.5f * velocity) < 0.02f * velocity,
+          "eye prediction: damped:0.5 moves extrapolated frames' eyes half as far (" + std::to_string(damped) + " vs " +
+              std::to_string(velocity) + ")");
+    Check(std::abs(two - velocity) < 0.02f * velocity, "eye prediction: two carries steady movement on as velocity does");
+    const float line = shift_of(FrameGenSynthesisMode::kInterpolate, "");
+    const float line_damped = shift_of(FrameGenSynthesisMode::kInterpolate, "damped:0.5");
+    Check(line < 0.0f && std::abs(line_damped - line) < 0.02f * -line,
+          "eye prediction: interpolated frames keep their eyes on the line between the pair (" +
+              std::to_string(line_damped) + " vs " + std::to_string(line) + ")");
+}
+
+// Engine motion vectors, stage 0 (VECTORXR_FRAMEGEN_ENGINE_MV=census): the
+// layer hands each frame's record over in xrEndFrame and asks for its census
+// right after. The census is taken once per frame while frames are
+// generated (and never with the switch off), the early census at each depth
+// release, and the records are forgotten with an abandoned frame or a
+// destroyed swapchain.
+void TestEngineMotionCensus() {
+    const XrSwapchain depth_chain = reinterpret_cast<XrSwapchain>(0x21);
+    const XrSwapchain vectors = reinterpret_cast<XrSwapchain>(0x31);
+    struct Session {
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        std::unique_ptr<App> app;
+        std::uint64_t frames{0};
+        FrameGenEngineBridge bridge{FrameGenEngineBridge::kNone};
+    };
+    auto start = [&](Session& session, bool census) {
+        session.gpu.depth = true;
+        session.gpu.engine = true;
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", census ? "census" : "");
+        StartPresenter(session.presenter, session.gpu, FrameGenSynthesisMode::kExtrapolate);
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "");
+        session.presenter.TrackSwapchain(depth_chain, 20, 1,
+                                         XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+        session.presenter.TrackSwapchain(vectors, kFloatFormat, 1,
+                                         XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+        session.app = std::make_unique<App>(session.presenter, session.runtime);
+        App& app = *session.app;
+        app.depth.subImage.swapchain = depth_chain;
+        app.depth.subImage.imageRect = {{0, 0}, {1200, 1200}};
+        app.depth.maxDepth = 1.0f;
+        app.depth.nearZ = 0.1f;
+        app.depth.farZ = 1000.0f;
+        // As the layer: the frame's record, then its census.
+        app.before_end = [&session, vectors](XrTime time) {
+            FrameGenEngineMotionFrame record;
+            record.display_time = time;
+            record.projection_frame = ++session.frames;
+            for (std::uint32_t v = 0; v < 2; ++v) {
+                FrameGenEngineMotionView view;
+                view.view = v;
+                view.source = FrameGenMotionSource::kSpaceWarpFb;
+                view.vectors = {vectors, {{0, 0}, {800, 800}}, v};
+                view.depth = session.app->depth.subImage;
+                view.depth_is_khr = true;
+                view.color = session.app->views[v].subImage;
+                record.views.push_back(view);
+            }
+            record.complete = true;
+            session.presenter.NoteEngineMotion(record, session.bridge);
+            session.presenter.CaptureEngineMotion();
+        };
+    };
+
+    {
+        Session session;
+        start(session, true);
+        App& app = *session.app;
+        app.Frame();
+        Check(session.gpu.MotionCalls(false) == 0 && session.gpu.MotionCalls(true) == 0,
+              "engine motion: nothing is read while frames pass straight through");
+        for (int i = 0; i < 6; ++i) app.Frame();
+        const int engaged = session.gpu.MotionCalls(false);
+        Check(engaged > 0 && session.gpu.executes > 0, "engine motion: frames generated, the census is taken");
+        for (int i = 0; i < 5; ++i) app.Frame();
+        Check(session.gpu.MotionCalls(false) == engaged + 5, "engine motion: one census per frame end (" +
+                                                                 std::to_string(session.gpu.MotionCalls(false)) + ")");
+        {
+            std::scoped_lock lock(session.gpu.motion_mutex);
+            const auto& end = session.gpu.motion_calls.back();
+            Check(end.size() == 2 && end[0].census_all && end[0].samples && !end[0].early && end[0].view == 0 &&
+                      end[1].view == 1 && end[0].frame == session.frames && end[1].vectors.swapchain == vectors &&
+                      end[1].vectors.array_index == 1 && end[1].vectors.rect.extent.width == 800,
+                  "engine motion: both views' images, every one of them, sampled, for the frame ending");
+        }
+        Check(session.gpu.MotionCalls(true) > 0, "engine motion: the depth release takes the early census");
+        {
+            std::scoped_lock lock(session.gpu.motion_mutex);
+            const auto early = std::find_if(session.gpu.motion_calls.rbegin(), session.gpu.motion_calls.rend(),
+                                            [](const auto& jobs) { return jobs.front().early; });
+            Check(early->size() == 2 && !early->front().samples && early->front().frame == session.frames,
+                  "engine motion: the early census is of the frame ending next, its census only");
+        }
+
+        // An abandoned frame (the layer's hand-over failed after the record
+        // was handed over): no census of it, and no early census before the
+        // next record.
+        const int ends = session.gpu.MotionCalls(false);
+        const int earlies = session.gpu.MotionCalls(true);
+        const XrFrameState state = app.Wait();
+        app.Begin();
+        app.Release();
+        FrameGenEngineMotionFrame record;
+        record.display_time = state.predictedDisplayTime;
+        record.projection_frame = ++session.frames;
+        record.views.resize(2);
+        record.views[0].vectors = record.views[1].vectors = {vectors, {{0, 0}, {800, 800}}, 0};
+        record.views[1].view = 1;
+        session.presenter.NoteEngineMotion(record);
+        session.presenter.AbandonFrame(state.predictedDisplayTime);
+        session.presenter.CaptureEngineMotion();
+        Check(session.gpu.MotionCalls(false) == ends && session.gpu.MotionCalls(true) == earlies + 1,
+              "engine motion: an abandoned frame's record is forgotten");
+        const XrFrameState next = app.Wait();
+        app.Begin();
+        app.Release();
+        Check(session.gpu.MotionCalls(true) == earlies + 1, "engine motion: no early census without a record");
+        Check(XR_SUCCEEDED(app.End(next.predictedDisplayTime)), "engine motion: the next frame ends");
+        for (int i = 0; i < 3; ++i) app.Frame();
+        Check(session.gpu.MotionCalls(false) > ends, "engine motion: the census resumes after an abandoned frame");
+
+        // A motion vector swapchain destroyed: its records go with it.
+        const int before_destroy = session.gpu.MotionCalls(true);
+        Check(session.presenter.ForgetSwapchain(vectors), "engine motion: the swapchain is forgotten");
+        const XrFrameState last = app.Wait();
+        app.Begin();
+        app.Release();
+        Check(session.gpu.MotionCalls(true) == before_destroy,
+              "engine motion: no early census of a destroyed swapchain's images");
+        Check(XR_SUCCEEDED(app.End(last.predictedDisplayTime)), "engine motion: the frame ends");
+        session.presenter.Stop();
+        Check(!session.runtime.ordering_violation && !g_release_violation, "engine motion: calls stayed ordered");
+    }
+
+    // The switch off: the records are handed over, nothing is read.
+    {
+        Session session;
+        start(session, false);
+        for (int i = 0; i < 12; ++i) session.app->Frame();
+        Check(session.gpu.executes > 0 && session.gpu.MotionCalls(false) == 0 && session.gpu.MotionCalls(true) == 0,
+              "engine motion: nothing is read with the switch off");
+        session.presenter.Stop();
+    }
+
+    // A Direct3D 11-bridged session: the game's depth stays its own, so
+    // nothing is read there. A Vulkan-bridged one's runtime images hold the
+    // game's vectors only behind the bridge's copies: the census is taken
+    // only of images copied at a release (from stage 2) or handed over at the
+    // frame's end (VECTORXR_FRAMEGEN_ENGINE_BRIDGE=end), never early, so
+    // nothing is read here once the swapchains settled either.
+    for (const FrameGenEngineBridge bridge : {FrameGenEngineBridge::kD3D11, FrameGenEngineBridge::kVulkan}) {
+        const std::string name = bridge == FrameGenEngineBridge::kD3D11 ? "Direct3D 11" : "Vulkan";
+        Session session;
+        session.bridge = bridge;
+        start(session, true);
+        for (int i = 0; i < 12; ++i) session.app->Frame();
+        std::this_thread::sleep_for(std::chrono::milliseconds(3100));
+        for (int i = 0; i < 12; ++i) session.app->Frame();
+        Check(session.gpu.executes > 0 && session.gpu.MotionCalls(false) == 0 && session.gpu.MotionCalls(true) == 0,
+              "engine motion: nothing is read in a " + name + "-bridged census session");
+        session.presenter.Stop();
+    }
+}
+
+// Engine motion vectors, stage 1: the frame gates. A frame's record pairs
+// with the record of the frame generated from before it (by the display
+// time the game ended each with), never across an abandoned frame or a frame
+// the layer handed no record over for (across one begun over and never ended,
+// as Frame Generation's own continuity), and the frame may then calibrate
+// unless Pivot's change to the views moved. With
+// VECTORXR_FRAMEGEN_DEPTH_ENCODING_CHECK=1 a nearZ change takes the depth of
+// the first frame after it only; with VECTORXR_FRAMEGEN_ENGINE_CUTS=1 a
+// camera cut leaves its frame unmoved. Both are counted in the summary.
+void TestEngineMotionGates() {
+    const XrSwapchain depth_chain = reinterpret_cast<XrSwapchain>(0x21);
+    const XrSwapchain vectors = reinterpret_cast<XrSwapchain>(0x31);
+    struct Session {
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        std::unique_ptr<App> app;
+        std::uint64_t frames{0};  // the layer's projection frames
+        bool alternate{false};    // a record at every other end only
+        float delta_z{0.0f};      // the next record's appSpaceDeltaPose (meters ahead)
+        float pivot_x{0.0f};      // Pivot's change: the game rendered this far left of the pose declared
+        // The frame generated from last: whether it may calibrate, and with depth and moved.
+        bool Calibrate() const { return gpu.last.size() == 2 && gpu.last[0].request.engine_calibrate && gpu.last[1].request.engine_calibrate; }
+    };
+    auto start = [&](Session& session, const char* check, const char* cuts, Logger* logger = nullptr) {
+        session.gpu.depth = true;
+        _putenv_s("VECTORXR_FRAMEGEN_DEPTH_ENCODING_CHECK", check);
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_CUTS", cuts);
+        StartPresenter(session.presenter, session.gpu, FrameGenSynthesisMode::kExtrapolate, kFormat, kAppUsage,
+                       FrameGenMultiplier::k2, logger);
+        _putenv_s("VECTORXR_FRAMEGEN_DEPTH_ENCODING_CHECK", "");
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_CUTS", "");
+        session.presenter.TrackSwapchain(depth_chain, 20, 1,
+                                         XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+        session.presenter.TrackSwapchain(vectors, kFloatFormat, 1,
+                                         XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+        session.app = std::make_unique<App>(session.presenter, session.runtime);
+        App& app = *session.app;
+        app.depth.subImage.swapchain = depth_chain;
+        app.depth.subImage.imageRect = {{0, 0}, {1200, 1200}};
+        app.depth.maxDepth = 1.0f;
+        app.depth.nearZ = 0.1f;
+        app.depth.farZ = 1000.0f;
+        // As the layer: the frame's record, with the poses the game rendered
+        // with (before Pivot's change).
+        app.before_end = [&session, vectors](XrTime time) {
+            ++session.frames;
+            if (session.alternate && session.frames % 2) return;
+            App& app = *session.app;
+            FrameGenEngineMotionFrame record;
+            record.display_time = time;
+            record.projection_frame = session.frames;
+            for (std::uint32_t v = 0; v < 2; ++v) {
+                FrameGenEngineMotionView view;
+                view.view = v;
+                view.source = FrameGenMotionSource::kSpaceWarpFb;
+                view.vectors = {vectors, {{0, 0}, {800, 800}}, v};
+                view.depth = app.depth.subImage;
+                view.depth_is_khr = true;
+                view.color = app.views[v].subImage;
+                view.depth_encoding = {app.depth.minDepth, app.depth.maxDepth, app.depth.nearZ, app.depth.farZ};
+                view.app_delta.position.z = session.delta_z;
+                const XrPosef& pose = app.views[v].pose;
+                view.game.orientation = {pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w};
+                view.game.position = {pose.position.x - session.pivot_x, pose.position.y, pose.position.z};
+                record.views.push_back(view);
+            }
+            record.complete = true;
+            session.delta_z = 0.0f;
+            session.presenter.NoteEngineMotion(record);
+        };
+    };
+    // A frame Frame Generation generates from (what the backend was last
+    // asked is that frame's).
+    const auto step = [](Session& session, const std::string& what) {
+        const int executes = session.gpu.executes;
+        session.app->Frame();
+        Check(session.gpu.executes > executes, "engine gates: " + what + ": the frame is generated from");
+    };
+
+    // Records every frame: once paired, frames may calibrate.
+    {
+        Session session;
+        start(session, "", "");
+        App& app = *session.app;
+        for (int i = 0; i < 8; ++i) app.Frame();
+        step(session, "steady");
+        Check(session.Calibrate(), "engine gates: paired frames may calibrate");
+
+        // An abandoned frame (its record handed over, its end never came):
+        // the next frame generated from pairs with nothing, the one after
+        // with it.
+        const XrFrameState state = app.Wait();
+        app.Begin();
+        app.Release();
+        FrameGenEngineMotionFrame record;
+        record.display_time = state.predictedDisplayTime;
+        record.projection_frame = ++session.frames;
+        record.views.resize(2);
+        record.views[1].view = 1;
+        for (auto& view : record.views) view.vectors = {vectors, {{0, 0}, {800, 800}}, view.view};
+        record.complete = true;
+        session.presenter.NoteEngineMotion(record);
+        session.presenter.AbandonFrame(state.predictedDisplayTime);
+        const int executes = session.gpu.executes;
+        for (int i = 0; i < 10 && session.gpu.executes == executes; ++i) app.Frame();
+        Check(session.gpu.executes > executes && !session.Calibrate(), "engine gates: no pair across an abandoned frame");
+        step(session, "after an abandoned frame");
+        Check(session.Calibrate(), "engine gates: paired again after an abandoned frame");
+
+        // Frames begun over and never ended (OpenComposite asking for poses
+        // twice): Frame Generation bridges each, and the frames on either side
+        // still pair. (The first frame ended over an open one passes through,
+        // and the one after it follows no frame generated from.)
+        XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};
+        bool bridged = true;
+        for (int i = 0; i < 5; ++i) {
+            app.Wait();
+            Check(session.presenter.BeginFrame(kSession, &begin, app.calls) == XR_SUCCESS, "engine gates: begin");
+            const XrFrameState over = app.Wait();
+            Check(session.presenter.BeginFrame(kSession, &begin, app.calls) == XR_FRAME_DISCARDED,
+                  "engine gates: the begin over an open frame discards it");
+            app.Release();
+            const int before = session.gpu.executes;
+            Check(XR_SUCCEEDED(app.End(over.predictedDisplayTime)), "engine gates: the frame begun over ends");
+            if (i >= 2) bridged = bridged && session.gpu.executes > before && session.Calibrate();
+        }
+        Check(bridged, "engine gates: frames pair across a frame begun over and never ended");
+
+        // A record at every other end: a frame without one of its own never
+        // takes the one before as its own, nor pairs with it later.
+        session.alternate = true;
+        step(session, "alternate records"); // may still pair with the frame before
+        bool calibrated = false;
+        for (int i = 0; i < 6; ++i) {
+            step(session, "alternate records");
+            calibrated = calibrated || session.Calibrate();
+        }
+        Check(!calibrated, "engine gates: records pair only as their frames do (by display time)");
+        session.alternate = false;
+        step(session, "records again");
+        step(session, "records again");
+        Check(session.Calibrate(), "engine gates: paired again with a record each frame");
+
+        // Pivot's change: once moved, then held (calibrating again), then
+        // moving every frame.
+        session.pivot_x = 0.1f;
+        step(session, "Pivot");
+        Check(!session.Calibrate(), "engine gates: Pivot's change moved: no calibration");
+        step(session, "Pivot");
+        Check(session.Calibrate(), "engine gates: Pivot's change held: calibrating again");
+        calibrated = false;
+        for (int i = 0; i < 4; ++i) {
+            session.pivot_x += 0.001f;
+            step(session, "Pivot moving");
+            calibrated = calibrated || session.Calibrate();
+        }
+        Check(!calibrated, "engine gates: no calibration while Pivot's change moves 1 mm a frame");
+
+        // Without the check, a nearZ change keeps the depth (decoded as the
+        // frame before described it), and no frame calibrates around it.
+        session.pivot_x = 0.0f;
+        step(session, "Pivot off");
+        step(session, "Pivot off");
+        Check(session.Calibrate(), "engine gates: calibrating before the nearZ change");
+        app.depth.nearZ = 0.2f;
+        step(session, "nearZ");
+        Check(session.gpu.last[0].request.depth && session.gpu.last[1].request.depth && !session.Calibrate(),
+              "engine gates: without the check, a nearZ change keeps the depth, uncalibrated");
+        step(session, "nearZ");
+        Check(!session.Calibrate(), "engine gates: nor the frame after the nearZ change");
+        step(session, "nearZ");
+        Check(session.Calibrate(), "engine gates: calibrating again two frames after the nearZ change");
+
+        // A camera cut without the switch: counted, the frames still moved.
+        session.delta_z = 60.0f;
+        step(session, "cut");
+        Check(session.gpu.last[0].request.synthesize && !session.Calibrate(),
+              "engine gates: without the switch, a cut's frame is still moved, uncalibrated");
+        session.presenter.Stop();
+        Check(!session.runtime.ordering_violation && !g_release_violation, "engine gates: calls stayed ordered");
+    }
+
+    // VECTORXR_FRAMEGEN_DEPTH_ENCODING_CHECK=1 and VECTORXR_FRAMEGEN_ENGINE_CUTS=1,
+    // and the summary's line.
+    {
+        const std::filesystem::path directory = std::filesystem::temp_directory_path() /
+                                                ("vectorxr-presenter-gates-" + std::to_string(GetCurrentProcessId()));
+        std::error_code ignored;
+        std::filesystem::remove_all(directory, ignored);
+        auto logger = std::make_unique<Logger>();
+        logger->Initialize(directory / "gates.log");
+        Session session;
+        start(session, "1", "1", logger.get());
+        session.presenter.SetSummaryInterval(100ms);
+        App& app = *session.app;
+        for (int i = 0; i < 8; ++i) app.Frame();
+        step(session, "switches on");
+        Check(session.gpu.last[0].request.depth && session.gpu.last[0].request.synthesize,
+              "engine gates: depth and motion before the changes");
+        app.depth.nearZ = 0.2f;
+        step(session, "checked nearZ");
+        Check(!session.gpu.last[0].request.depth && !session.gpu.last[1].request.depth,
+              "engine gates: the depth decoded as the frame before described it is not used");
+        {
+            // The frame after it without its depth captured (as where the
+            // capture fails): no capture, nothing to check against the
+            // change, which was the frame before's.
+            const int executes = session.gpu.executes;
+            const XrFrameState state = app.Wait();
+            app.Begin();
+            app.image = (app.image + 1) % 3;
+            for (const XrSwapchain swapchain : {kLeft, kRight}) {
+                session.presenter.NoteRelease(swapchain, app.image);
+                session.presenter.CaptureOnRelease(swapchain, app.image);
+            }
+            Check(XR_SUCCEEDED(app.End(state.predictedDisplayTime)) && session.gpu.executes > executes,
+                  "engine gates: a frame without its depth captured is generated from");
+            Check(session.gpu.last[0].request.depth && session.gpu.last[1].request.depth,
+                  "engine gates: a frame without its depth captured counts no change");
+        }
+        step(session, "checked nearZ");
+        Check(session.gpu.last[0].request.depth && session.gpu.last[1].request.depth,
+              "engine gates: the next frame's depth is used again");
+        session.delta_z = 60.0f;
+        step(session, "cut");
+        Check(!session.gpu.last[0].request.synthesize && !session.gpu.last[1].request.synthesize,
+              "engine gates: nothing is moved across a camera cut");
+        step(session, "cut");
+        Check(session.gpu.last[0].request.synthesize, "engine gates: frames after the cut are moved again");
+        std::this_thread::sleep_for(150ms);
+        app.Frame();
+        session.presenter.Stop();
+        const std::filesystem::path path = logger->ActiveLogPath();
+        logger.reset(); // flushed
+        std::ifstream file(path);
+        // Summed over the summaries (a slow run may split the frames).
+        int summaries = 0;
+        int flips = 0;
+        int cuts = 0;
+        bool named = true;
+        bool research = false;
+        const auto count = [](const std::string& line, const std::string& key) {
+            const std::size_t at = line.find(key);
+            return at == std::string::npos ? 0 : std::stoi(line.substr(at + key.size()));
+        };
+        for (std::string line; std::getline(file, line);) {
+            if (line.find("Frame Generation engine motion (") != std::string::npos) {
+                ++summaries;
+                flips += count(line, "flips=");
+                cuts += count(line, "cuts=");
+                named = named &&
+                        line.find("(noStruct/skip/pairing/cut/decode/recreate/settle/uncaptured/oneEye)") != std::string::npos;
+            }
+            research = research || line.find("VECTORXR_FRAMEGEN_ENGINE_CUTS=1 (research)") != std::string::npos;
+        }
+        file.close();
+        std::filesystem::remove_all(directory, ignored);
+        Check(research, "engine gates: the switches are logged at the start");
+        Check(summaries > 0 && named && flips == 1 && cuts == 1,
+              "engine gates: the summaries count the nearZ change and the cut (" + std::to_string(summaries) +
+                  " summaries, flips " + std::to_string(flips) + ", cuts " + std::to_string(cuts) + ")");
+    }
+}
+
+// Engine motion vectors, stage 2 (VECTORXR_FRAMEGEN_ENGINE_MV=capture). A game
+// that never releases its motion vector images (MSFS) has them captured at
+// each frame's end, after both views' colors (their pair), with a census of
+// every image while the tracker is unsure, and no early census is taken; the
+// backend keeps raw fields (FrameGenTuning::engine_mode) only once a frame
+// came with vectors, analysed just in time. A game releasing them (the
+// specification's way) has them captured at the release, with the released
+// index, paired with the color released before them or else the next one,
+// and the frame's end leaves those views be, unless the backend left them
+// out. Their swapchain is never one the layer holds calls back for
+// (CapturesFrom), the release captures stop with an abandoned frame or the
+// swapchain gone, and a device-removed sentinel keeps the switch off.
+void TestEngineMotionCapture() {
+    const XrSwapchain depth_chain = reinterpret_cast<XrSwapchain>(0x21);
+    const XrSwapchain vectors = reinterpret_cast<XrSwapchain>(0x31);
+    enum class Released { kNever, kAfterColor, kBeforeColor };
+    struct Session {
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        std::unique_ptr<App> app;
+        std::uint64_t frames{0};
+        Released released{Released::kNever};
+        std::uint32_t vector_image{0}; // the image the game released last
+        bool records{true};            // the frames carry the structures
+    };
+    auto start = [&](Session& session, const char* image = "") {
+        session.gpu.depth = true;
+        session.gpu.engine = true;
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "capture");
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV_IMAGE", image);
+        StartPresenter(session.presenter, session.gpu, FrameGenSynthesisMode::kExtrapolate);
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "");
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV_IMAGE", "");
+        session.presenter.TrackSwapchain(depth_chain, 20, 1,
+                                         XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+        session.presenter.TrackSwapchain(vectors, kFloatFormat, 1,
+                                         XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+        session.app = std::make_unique<App>(session.presenter, session.runtime);
+        App& app = *session.app;
+        app.depth.subImage.swapchain = depth_chain;
+        app.depth.subImage.imageRect = {{0, 0}, {1200, 1200}};
+        app.depth.maxDepth = 1.0f;
+        app.depth.nearZ = 0.1f;
+        app.depth.farZ = 1000.0f;
+        // The game's release of its motion vector images, as the layer
+        // hands it over: before its colors or after them.
+        auto release_vectors = [&session, vectors] {
+            session.vector_image = (session.vector_image + 1) % 3;
+            session.presenter.NoteRelease(vectors, session.vector_image);
+            session.presenter.CaptureOnRelease(vectors, session.vector_image);
+        };
+        app.before_release = [&session, release_vectors] {
+            if (session.released == Released::kBeforeColor) release_vectors();
+        };
+        // As the layer: the frame's record, then its capture.
+        app.before_end = [&session, vectors, release_vectors](XrTime time) {
+            if (session.released == Released::kAfterColor) release_vectors();
+            if (!session.records) return;
+            FrameGenEngineMotionFrame record;
+            record.display_time = time;
+            record.projection_frame = ++session.frames;
+            for (std::uint32_t v = 0; v < 2; ++v) {
+                FrameGenEngineMotionView view;
+                view.view = v;
+                view.source = FrameGenMotionSource::kSpaceWarpFb;
+                view.vectors = {vectors, {{0, 0}, {1280, 1280}}, v};
+                view.depth = session.app->depth.subImage;
+                view.depth_is_khr = true;
+                view.color = session.app->views[v].subImage;
+                record.views.push_back(view);
+            }
+            record.complete = true;
+            session.presenter.NoteEngineMotion(record);
+            session.presenter.CaptureEngineMotion();
+        };
+    };
+    auto calls = [](Session& session) {
+        std::scoped_lock lock(session.gpu.motion_mutex);
+        return session.gpu.motion_calls;
+    };
+
+    // Never released: captured at each frame's end, after its colors.
+    {
+        Session session;
+        start(session);
+        for (int i = 0; i < 12; ++i) session.app->Frame();
+        Check(session.gpu.executes > 0 && session.gpu.tuning.engine_mode == FrameGenEngineMode::kCensus,
+              "engine capture: no raw fields for frames generated other than just in time");
+        const auto made = calls(session);
+        Check(made.size() > 4 && session.gpu.MotionCalls(true) == 0,
+              "engine capture: a capture per frame end, no early census");
+        bool jobs_right = true;
+        for (const auto& jobs : made) {
+            jobs_right = jobs_right && jobs.size() == 2 && jobs[0].capture && jobs[1].capture && !jobs[0].samples &&
+                         jobs[0].census_all && !jobs[0].pair_next && !jobs[0].released && jobs[1].vectors.array_index == 1;
+        }
+        Check(jobs_right, "engine capture: both views captured at the end, every image's census while unsure");
+        bool paired = true;
+        {
+            std::scoped_lock lock(session.gpu.motion_mutex);
+            for (std::size_t i = 1; i < session.gpu.motion_captures.size(); ++i) {
+                paired = paired && session.gpu.motion_captures[i] - session.gpu.motion_captures[i - 1] == 2;
+            }
+        }
+        Check(paired, "engine capture: each frame's vectors are captured after both its colors (their pair)");
+        Check(!session.presenter.CapturesFrom(vectors) && session.presenter.CapturesFrom(kLeft),
+              "engine capture: the motion vector swapchain is never one the layer holds calls back for");
+        session.presenter.Stop();
+    }
+
+    // Just in time: the raw fields are asked for once a frame came with
+    // vectors (a bridged session, or a game sending none, never does).
+    {
+        Session session;
+        session.gpu.threaded = session.gpu.jit = true;
+        session.runtime.paced = true;
+        session.records = false;
+        start(session);
+        for (int i = 0; i < 12 || (session.gpu.executes == 0 && i < 200); ++i) session.app->Frame();
+        Check(session.gpu.executes > 0 && session.gpu.tuning.engine_mode == FrameGenEngineMode::kCensus,
+              "engine capture: no raw fields while no frame came with vectors");
+        session.records = true;
+        const int executes = session.gpu.executes;
+        for (int i = 0; i < 12 || (session.gpu.executes <= executes + 1 && i < 200); ++i) session.app->Frame();
+        Check(session.gpu.executes > executes + 1 && session.gpu.tuning.engine_mode == FrameGenEngineMode::kCapture,
+              "engine capture: raw fields once a frame came with vectors, just in time");
+        session.presenter.Stop();
+        Check(!session.runtime.ordering_violation && !g_release_violation, "engine capture: just in time, calls stayed ordered");
+    }
+
+    // VECTORXR_FRAMEGEN_ENGINE_MV_IMAGE=2: that image, every image's census
+    // every 30th frame only.
+    {
+        Session session;
+        start(session, "2");
+        for (int i = 0; i < 40; ++i) session.app->Frame();
+        bool image = true;
+        int all = 0;
+        for (const auto& jobs : calls(session)) {
+            image = image && jobs.front().vectors.image_index == 2;
+            all += jobs.front().census_all ? 1 : 0;
+            image = image && jobs.front().census_all == (jobs.front().frame % 30 == 0);
+        }
+        Check(image && all == 1, "engine capture: the image the switch names, all images every 30th frame");
+        session.presenter.Stop();
+    }
+
+    // An image the game acquired (its next frame's, early) is its own until
+    // its release: every job names it, and the backend leaves it alone.
+    {
+        Session session;
+        start(session);
+        for (int i = 0; i < 4; ++i) session.app->Frame();
+        session.presenter.NoteAcquire(vectors, 2);
+        const std::size_t acquired_from = calls(session).size();
+        for (int i = 0; i < 4; ++i) session.app->Frame();
+        session.presenter.NoteRelease(vectors, 2);
+        const std::size_t released_from = calls(session).size();
+        for (int i = 0; i < 4; ++i) session.app->Frame();
+        const auto made = calls(session);
+        bool named = made.size() > released_from && released_from > acquired_from;
+        for (std::size_t i = acquired_from; i < made.size() && named; ++i) {
+            const std::uint32_t expected = i < released_from ? 0b100u : 0u;
+            named = made[i].size() == 2 && made[i][0].acquired == expected && made[i][1].acquired == expected;
+        }
+        Check(named, "engine capture: the image the game holds is named in every job until its release");
+        session.presenter.Stop();
+    }
+
+    // Released after the colors: captured at the release with its index,
+    // paired with the colors captured before; the frame's end leaves them.
+    for (const Released when : {Released::kAfterColor, Released::kBeforeColor}) {
+        const std::string order = when == Released::kAfterColor ? "after" : "before";
+        Session session;
+        start(session);
+        session.released = when;
+        for (int i = 0; i < 12; ++i) session.app->Frame();
+        const std::size_t before = calls(session).size();
+        for (int i = 0; i < 6; ++i) session.app->Frame();
+        const auto made = calls(session);
+        bool released = made.size() == before + 6;
+        for (std::size_t i = before; i < made.size() && released; ++i) {
+            const auto& jobs = made[i];
+            released = jobs.size() == 2 && jobs[0].capture && jobs[0].released && jobs[0].vectors.image_index == *jobs[0].released &&
+                       jobs[1].vectors.array_index == 1 && !jobs[0].census_all &&
+                       jobs[0].pair_next == (when == Released::kBeforeColor);
+        }
+        Check(released, "engine capture: vectors released " + order +
+                            " their colors are captured at the release, with its index, and not again at the end");
+        Check(made.back()[0].vectors.image_index == session.vector_image,
+              "engine capture: the index captured is the one released");
+        Check(!session.presenter.CapturesFrom(vectors),
+              "engine capture: released vectors never make their swapchain one the layer holds calls back for");
+
+        // Vectors the backend left out at their release (not set up for
+        // them) are captured again at the frame's end, with every image's
+        // census (the tracker unsure), the release's census without.
+        session.gpu.engine_unready = true;
+        const std::size_t left_out = calls(session).size();
+        for (int i = 0; i < 3; ++i) session.app->Frame();
+        session.gpu.engine_unready = false;
+        const auto retried = calls(session);
+        bool again = retried.size() == left_out + 6;
+        for (std::size_t i = left_out; i + 1 < retried.size() && again; i += 2) {
+            again = !retried[i][0].census_all && retried[i][0].vectors.image_index == *retried[i][0].released &&
+                    retried[i + 1].size() == 2 && retried[i + 1][0].census_all;
+        }
+        Check(again, "engine capture: vectors released " + order +
+                         " their colors but left out by the backend are captured again at the frame's end");
+
+        // An abandoned frame: its release is not captured at the release
+        // (the record it was named by is gone).
+        const XrFrameState state = session.app->Wait();
+        session.app->Begin();
+        session.app->Release();
+        session.presenter.AbandonFrame(state.predictedDisplayTime);
+        const std::size_t abandoned = calls(session).size();
+        const XrFrameState next = session.app->Wait();
+        session.app->Begin();
+        session.app->Release();
+        if (when == Released::kAfterColor) {
+            session.vector_image = (session.vector_image + 1) % 3;
+            session.presenter.NoteRelease(vectors, session.vector_image);
+            session.presenter.CaptureOnRelease(vectors, session.vector_image);
+        }
+        Check(calls(session).size() == abandoned, "engine capture: no capture at a release after an abandoned frame");
+        session.released = Released::kNever;
+        Check(XR_SUCCEEDED(session.app->End(next.predictedDisplayTime)), "engine capture: the frame ends");
+        session.released = when;
+
+        // The swapchain destroyed: nothing names it any more.
+        for (int i = 0; i < 3; ++i) session.app->Frame();
+        Check(session.presenter.ForgetSwapchain(vectors), "engine capture: the swapchain is forgotten");
+        const std::size_t forgotten = calls(session).size();
+        session.vector_image = (session.vector_image + 1) % 3;
+        session.presenter.NoteRelease(vectors, session.vector_image);
+        session.presenter.CaptureOnRelease(vectors, session.vector_image);
+        Check(calls(session).size() == forgotten, "engine capture: no capture of a destroyed swapchain's release");
+        session.presenter.Stop();
+        Check(!session.runtime.ordering_violation && !g_release_violation, "engine capture: calls stayed ordered");
+    }
+
+    // A device removed right after a session read this game's vectors: the
+    // next session reads none until the file is deleted.
+    {
+        const std::filesystem::path removed = FrameGenEngineRemovedPath();
+        std::error_code ignored;
+        std::filesystem::create_directories(removed.parent_path(), ignored);
+        std::ofstream(removed) << "test\n";
+        {
+            Session session;
+            start(session);
+            for (int i = 0; i < 12; ++i) session.app->Frame();
+            Check(session.gpu.executes > 0 && calls(session).empty() &&
+                      session.gpu.tuning.engine_mode == FrameGenEngineMode::kOff,
+                  "engine capture: the device-removed sentinel keeps the switch off");
+            session.presenter.Stop();
+        }
+        std::filesystem::remove(removed, ignored);
+        Session session;
+        start(session);
+        for (int i = 0; i < 12; ++i) session.app->Frame();
+        Check(!calls(session).empty(), "engine capture: deleting the sentinel lets the switch work again");
+        session.presenter.Stop();
+    }
+}
+
+// Engine motion vectors through the Vulkan bridge (stage 9). Its runtime
+// images hold the game's vectors only behind the bridge's copies, which the
+// layer makes in xrEndFrame before the frame's record. Nothing is read, and
+// the bridge is not asked to hand images back (NoteEngineMotion false), until
+// 3 s after the game last made a swapchain; then vectors released for a
+// frame are captured where the layer hands their release over, as that
+// frame's, and its end captures nothing more. With
+// VECTORXR_FRAMEGEN_ENGINE_BRIDGE=end, vectors the game never releases are
+// captured at the frame's end only where the hand-over copied the image they
+// are in (every image handed over while the census reads them all); with =0
+// the records are dropped. A Vulkan game's XR_FB_space_warp vectors are
+// expected in Vulkan's NDC (y down).
+void TestEngineMotionBridge() {
+    const XrSwapchain depth_chain = reinterpret_cast<XrSwapchain>(0x21);
+    const XrSwapchain vectors = reinterpret_cast<XrSwapchain>(0x31);
+    struct Session {
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        std::unique_ptr<App> app;
+        std::uint64_t frames{0};
+        bool release{true};            // the game releases its vectors (after its colors)
+        std::uint32_t vector_image{0}; // the image it released last
+        int read{0};                   // records NoteEngineMotion said are read
+        // The hand-over's calls, and the images it copies (bits).
+        std::vector<std::vector<std::pair<XrSwapchain, std::uint32_t>>> handed;
+        std::uint32_t copies{7};
+    };
+    auto start = [&](Session& session, const char* mode, const char* bridge) {
+        session.gpu.depth = true;
+        session.gpu.engine = true;
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", mode);
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_BRIDGE", bridge);
+        StartPresenter(session.presenter, session.gpu, FrameGenSynthesisMode::kExtrapolate);
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "");
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_BRIDGE", "");
+        session.presenter.TrackSwapchain(depth_chain, 20, 1,
+                                         XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+        session.presenter.TrackSwapchain(vectors, kFloatFormat, 1,
+                                         XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+        session.app = std::make_unique<App>(session.presenter, session.runtime);
+        App& app = *session.app;
+        app.depth.subImage.swapchain = depth_chain;
+        app.depth.subImage.imageRect = {{0, 0}, {1200, 1200}};
+        app.depth.maxDepth = 1.0f;
+        app.depth.nearZ = 0.1f;
+        app.depth.farZ = 1000.0f;
+        // As the layer in a Vulkan-bridged session: the frame's releases
+        // handed over (the bridge's copies, then their captures), then the
+        // frame's record, then the frame's end with the bridge's hand-over.
+        app.before_end = [&session, vectors](XrTime time) {
+            if (session.release) {
+                session.vector_image = (session.vector_image + 1) % 3;
+                session.presenter.NoteRelease(vectors, session.vector_image);
+                session.presenter.CaptureOnRelease(vectors, session.vector_image);
+            }
+            FrameGenEngineMotionFrame record;
+            record.display_time = time;
+            record.projection_frame = ++session.frames;
+            for (std::uint32_t v = 0; v < 2; ++v) {
+                FrameGenEngineMotionView view;
+                view.view = v;
+                view.source = FrameGenMotionSource::kSpaceWarpFb;
+                view.vectors = {vectors, {{0, 0}, {1280, 1280}}, v};
+                view.depth = session.app->depth.subImage;
+                view.depth_is_khr = true;
+                view.color = session.app->views[v].subImage;
+                record.views.push_back(view);
+            }
+            record.complete = true;
+            session.read += session.presenter.NoteEngineMotion(record, FrameGenEngineBridge::kVulkan) ? 1 : 0;
+            session.presenter.CaptureEngineMotion([&session](const auto& images) {
+                session.handed.push_back(images);
+                std::vector<bool> copied;
+                for (const auto& image : images) copied.push_back(((session.copies >> image.second) & 1u) != 0);
+                return copied;
+            });
+        };
+    };
+    auto calls = [](Session& session) {
+        std::scoped_lock lock(session.gpu.motion_mutex);
+        return session.gpu.motion_calls;
+    };
+    const auto settle = [] { std::this_thread::sleep_for(std::chrono::milliseconds(3100)); };
+
+    // Released: nothing while the swapchains settle, then each release
+    // captured as its own frame's, with its index, and nothing at the end.
+    {
+        Session session;
+        start(session, "observe", "");
+        for (int i = 0; i < 12; ++i) session.app->Frame();
+        Check(session.gpu.executes > 0 && calls(session).empty() && session.read == 0,
+              "engine bridge: nothing read, nothing handed back, while the swapchains settle");
+        settle();
+        for (int i = 0; i < 12; ++i) session.app->Frame();
+        const auto made = calls(session);
+        Check(!made.empty() && session.read > 0 && session.handed.empty(),
+              "engine bridge: settled, the vectors are read at their releases and handed back, no hand-over at the end");
+        bool released = true;
+        for (const auto& jobs : made) {
+            released = released && jobs.size() == 2 && jobs[0].capture && jobs[0].released &&
+                       jobs[0].vectors.image_index == *jobs[0].released && !jobs[0].census_all &&
+                       jobs[1].vectors.array_index == 1;
+        }
+        Check(released, "engine bridge: only the releases are captured, with their index");
+        Check(made.back()[0].frame == session.frames && made.back()[0].vectors.image_index == session.vector_image,
+              "engine bridge: a release handed over in xrEndFrame is captured as that frame's vectors");
+        {
+            std::scoped_lock lock(session.gpu.motion_mutex);
+            Check(session.gpu.prior && session.gpu.prior->gain[0] == 1.0f && session.gpu.prior->gain[1] == -1.0f,
+                  "engine bridge: a Vulkan game's XR_FB_space_warp vectors are expected in Vulkan's NDC, y down");
+        }
+
+        // A swapchain made again (Star Citizen's world entry): nothing read
+        // until it settled.
+        session.presenter.TrackSwapchain(reinterpret_cast<XrSwapchain>(0x41), kFormat, 1, kAppUsage);
+        const std::size_t before = calls(session).size();
+        const int read = session.read;
+        for (int i = 0; i < 6; ++i) session.app->Frame();
+        Check(calls(session).size() == before && session.read == read,
+              "engine bridge: nothing read while a new swapchain settles");
+        settle();
+        for (int i = 0; i < 6; ++i) session.app->Frame();
+        Check(calls(session).size() > before && session.read > read, "engine bridge: read again once it settled");
+        // The validator disabled them: not read from its next frame on (the
+        // layer then has the bridge give nothing back early).
+        session.gpu.engine_disabled = true;
+        session.app->Frame();
+        const int disabled = session.read;
+        for (int i = 0; i < 6; ++i) session.app->Frame();
+        Check(session.read == disabled, "engine bridge: vectors the validator disabled are not read");
+        session.gpu.engine_disabled = false;
+        session.presenter.Stop();
+        Check(!session.runtime.ordering_violation && !g_release_violation, "engine bridge: calls stayed ordered");
+    }
+
+    // =end, never released: handed over at the frame's end, every image
+    // while the census reads every one, captured only where copied.
+    {
+        Session session;
+        session.release = false;
+        start(session, "capture", "end");
+        for (int i = 0; i < 12; ++i) session.app->Frame();
+        Check(session.handed.empty() && calls(session).empty(), "engine bridge: no hand-over while the swapchains settle");
+        settle();
+        for (int i = 0; i < 12; ++i) session.app->Frame();
+        const auto made = calls(session);
+        Check(!session.handed.empty() && !made.empty() && session.read > 0,
+              "engine bridge: never released, the vectors are handed over and captured at the frame's end");
+        const auto& handed = session.handed.back();
+        const auto& jobs = made.back();
+        bool all = handed.size() == 6;
+        for (std::uint32_t k = 0; k < 6 && all; ++k) all = handed[k] == std::make_pair(vectors, k % 3);
+        Check(jobs.size() == 2 && jobs[0].census_all && !jobs[0].released && jobs[0].image_count == 3 && all,
+              "engine bridge: while the census reads every image, every image of both views is handed over");
+        // One image not copied (the bridge's first hand-over of it, or a
+        // stalled queue): the census reads the chosen image alone, where it
+        // was copied, and a view whose chosen image it is is not read.
+        session.copies = 3;
+        std::size_t copied = calls(session).size();
+        for (int i = 0; i < 12; ++i) session.app->Frame();
+        bool chosen_alone = calls(session).size() > copied;
+        for (std::size_t c = copied; c < calls(session).size(); ++c) {
+            for (const FrameGenMotionJob& job : calls(session)[c]) {
+                chosen_alone = chosen_alone && !job.census_all && !job.samples && job.vectors.image_index != 2;
+            }
+        }
+        Check(chosen_alone, "engine bridge: an image left out of a hand-over is not read, nor every image's census");
+        session.copies = 0;
+        copied = calls(session).size();
+        const std::size_t asked = session.handed.size();
+        for (int i = 0; i < 4; ++i) session.app->Frame();
+        Check(calls(session).size() == copied && session.handed.size() > asked,
+              "engine bridge: an image the hand-over did not copy is not read");
+        session.presenter.Stop();
+    }
+
+    // =0: the records are dropped, nothing read.
+    {
+        Session session;
+        start(session, "capture", "0");
+        for (int i = 0; i < 6; ++i) session.app->Frame();
+        settle();
+        for (int i = 0; i < 12; ++i) session.app->Frame();
+        Check(session.gpu.executes > 0 && calls(session).empty() && session.read == 0 && session.handed.empty(),
+              "engine bridge: VECTORXR_FRAMEGEN_ENGINE_BRIDGE=0 reads nothing");
+        session.presenter.Stop();
+    }
+}
+
+// Engine motion vectors, stage 5 (VECTORXR_FRAMEGEN_ENGINE_MV=assist): the
+// backend runs at kAssist, the flow at the hardware's level where the
+// hardware is chosen, with the filters' and the tint's switches
+// (VECTORXR_FRAMEGEN_ENGINE_FILTER, _COCKPIT, _TINT). A config reload reads
+// them again: Assist and Observe swap from the next real frame, the level as
+// the session started; another mode waits for the next session.
+void TestEngineMotionAssist() {
+    const XrSwapchain depth_chain = reinterpret_cast<XrSwapchain>(0x21);
+    const XrSwapchain vectors = reinterpret_cast<XrSwapchain>(0x31);
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    gpu.depth = gpu.engine = gpu.threaded = gpu.jit = true;
+    runtime.paced = true;
+    _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "assist");
+    _putenv_s("VECTORXR_FRAMEGEN_ENGINE_FILTER", "1");
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kExtrapolate);
+    FrameGenResolvedSettings settings;
+    settings.enabled = true;
+    settings.synthesis_mode = FrameGenSynthesisMode::kExtrapolate;
+    settings.multiplier = FrameGenMultiplier::k2;
+    settings.motion_estimation = FrameGenMotionEstimation::kHardware;
+    presenter.Configure(settings);
+    _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "");
+    _putenv_s("VECTORXR_FRAMEGEN_ENGINE_FILTER", "");
+    // A config reload with the research switches as they are then.
+    const auto reload = [&](const char* mode, const char* filter, const char* tint) {
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", mode);
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_FILTER", filter);
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_TINT", tint);
+        presenter.Configure(settings);
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "");
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_FILTER", "");
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_TINT", "");
+    };
+    presenter.TrackSwapchain(depth_chain, 20, 1, XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+    presenter.TrackSwapchain(vectors, kFloatFormat, 1, XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+    App app(presenter, runtime);
+    app.depth.subImage.swapchain = depth_chain;
+    app.depth.subImage.imageRect = {{0, 0}, {1200, 1200}};
+    app.depth.maxDepth = 1.0f;
+    app.depth.nearZ = 0.1f;
+    app.depth.farZ = 1000.0f;
+    // Each frame's vectors, as the layer notes them at its xrEndFrame.
+    const auto note = [&](FrameGenPresenter& target, const App& source, XrTime time, std::uint64_t frame) {
+        FrameGenEngineMotionFrame record;
+        record.display_time = time;
+        record.projection_frame = frame;
+        for (std::uint32_t v = 0; v < 2; ++v) {
+            FrameGenEngineMotionView view;
+            view.view = v;
+            view.source = FrameGenMotionSource::kSpaceWarpFb;
+            view.vectors = {vectors, {{0, 0}, {960, 960}}, v};
+            view.depth = source.depth.subImage;
+            view.depth_is_khr = true;
+            view.color = source.views[v].subImage;
+            view.depth_encoding = {source.depth.minDepth, source.depth.maxDepth, source.depth.nearZ, source.depth.farZ};
+            const XrPosef& pose = source.views[v].pose;
+            view.game.orientation = {pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w};
+            view.game.position = {pose.position.x, pose.position.y, pose.position.z};
+            record.views.push_back(view);
+        }
+        record.complete = true;
+        target.NoteEngineMotion(record);
+        target.CaptureEngineMotion();
+    };
+    std::uint64_t frames = 0;
+    app.before_end = [&](XrTime time) { note(presenter, app, time, ++frames); };
+    const auto run = [&](int count) {
+        const int executes = gpu.executes;
+        for (int i = 0; gpu.executes < executes + count && i < 400; ++i) app.Frame();
+        Check(gpu.executes >= executes + count, "engine assist: frames are analysed");
+    };
+    run(6);
+    Check(gpu.tuning.engine_mode == FrameGenEngineMode::kAssist && gpu.tuning.hardware_level && gpu.tuning.engine_filter &&
+              !gpu.tuning.engine_cockpit && !gpu.tuning.engine_tint,
+          "engine assist: at kAssist, the flow at the hardware's level, the filters' label rules on");
+    reload("observe", "", "1");
+    run(2);
+    Check(gpu.tuning.engine_mode == FrameGenEngineMode::kObserve && gpu.tuning.hardware_level && !gpu.tuning.engine_filter &&
+              gpu.tuning.engine_tint,
+          "engine assist: a reload to observe takes it from the next frame, the level kept, the switches read again");
+    reload("capture", "", "");
+    run(2);
+    Check(gpu.tuning.engine_mode == FrameGenEngineMode::kObserve && !gpu.tuning.engine_tint,
+          "engine assist: a reload to capture waits for the next session");
+    reload("assist", "1", "");
+    run(2);
+    Check(gpu.tuning.engine_mode == FrameGenEngineMode::kAssist && gpu.tuning.engine_filter,
+          "engine assist: and back to assist");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "engine assist: calls stayed ordered");
+
+    // A session started below Observe never switches to it at a reload.
+    FrameGenPresenter census;
+    GpuLog census_gpu;
+    census_gpu.engine = census_gpu.threaded = census_gpu.jit = true;
+    _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "capture");
+    StartPresenter(census, census_gpu, FrameGenSynthesisMode::kExtrapolate);
+    _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "assist");
+    census.Configure(settings);
+    _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "");
+    Runtime census_runtime;
+    census_runtime.paced = true;
+    App census_app(census, census_runtime);
+    for (int i = 0; census_gpu.executes < 3 && i < 400; ++i) census_app.Frame();
+    Check(census_gpu.executes >= 3 && census_gpu.tuning.engine_mode <= FrameGenEngineMode::kCapture,
+          "engine assist: a session started at capture stays below observe");
+    census.Stop();
+
+    // A backend that cannot read the vectors (Direct3D 11, Vulkan) keeps the
+    // flow at its quality's level, the game sending them or not: only frames
+    // the vectors may serve end at the hardware's.
+    FrameGenPresenter plain;
+    GpuLog plain_gpu;
+    plain_gpu.depth = plain_gpu.threaded = plain_gpu.jit = true;
+    _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "assist");
+    StartPresenter(plain, plain_gpu, FrameGenSynthesisMode::kExtrapolate);
+    plain.Configure(settings);
+    _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "");
+    Runtime plain_runtime;
+    plain_runtime.paced = true;
+    App plain_app(plain, plain_runtime);
+    std::uint64_t plain_frames = 0;
+    plain_app.before_end = [&](XrTime time) { note(plain, plain_app, time, ++plain_frames); };
+    for (int i = 0; plain_gpu.executes < 4 && i < 400; ++i) plain_app.Frame();
+    Check(plain_gpu.executes >= 4 && plain_frames > 0 && !plain_gpu.tuning.hardware_level,
+          "engine assist: a backend that cannot read the vectors keeps the flow at its quality's level");
+    plain.Stop();
+}
+
+// Engine motion vectors, stage 6 (VECTORXR_FRAMEGEN_ENGINE_MV=lead): a
+// session in Lead runs at kAssist until 30 verdicts in a row let the vectors
+// be used as Lead judges them (verdicts only Assist's test lets through do
+// not), then at kLead; more than 10% of the last 30 held back hold it at
+// kAssist for 300 real frames, then it leads again. The flow ends at the
+// hardware's level where the hardware is chosen, the research switches
+// (VECTORXR_FRAMEGEN_ENGINE_PREDICATE, _INTERPOLATE) go into the tuning, and
+// a config reload goes into Lead only in a session started at Assist or Lead.
+void TestEngineMotionLead() {
+    const XrSwapchain depth_chain = reinterpret_cast<XrSwapchain>(0x21);
+    const XrSwapchain vectors = reinterpret_cast<XrSwapchain>(0x31);
+    FrameGenResolvedSettings settings;
+    settings.enabled = true;
+    settings.synthesis_mode = FrameGenSynthesisMode::kExtrapolate;
+    settings.multiplier = FrameGenMultiplier::k2;
+    settings.motion_estimation = FrameGenMotionEstimation::kHardware;
+    struct Session {
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        std::unique_ptr<App> app;
+        std::uint64_t frames{0};
+    };
+    // A session started at `mode`, its frames carrying their vectors' records
+    // (with the poses the game rendered with), as the layer hands them over.
+    auto start = [&](Session& session, const char* mode, const char* predicate, const char* interpolate) {
+        session.gpu.depth = session.gpu.engine = session.gpu.threaded = session.gpu.jit = true;
+        session.runtime.paced = true;
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", mode);
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_PREDICATE", predicate);
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_INTERPOLATE", interpolate);
+        StartPresenter(session.presenter, session.gpu, FrameGenSynthesisMode::kExtrapolate);
+        session.presenter.Configure(settings);
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "");
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_PREDICATE", "");
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_INTERPOLATE", "");
+        session.presenter.TrackSwapchain(depth_chain, 20, 1,
+                                         XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+        session.presenter.TrackSwapchain(vectors, kFloatFormat, 1,
+                                         XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+        session.app = std::make_unique<App>(session.presenter, session.runtime);
+        App& app = *session.app;
+        app.depth.subImage.swapchain = depth_chain;
+        app.depth.subImage.imageRect = {{0, 0}, {1200, 1200}};
+        app.depth.maxDepth = 1.0f;
+        app.depth.nearZ = 0.1f;
+        app.depth.farZ = 1000.0f;
+        app.before_end = [&session, vectors](XrTime time) {
+            const App& source = *session.app;
+            FrameGenEngineMotionFrame record;
+            record.display_time = time;
+            record.projection_frame = ++session.frames;
+            for (std::uint32_t v = 0; v < 2; ++v) {
+                FrameGenEngineMotionView view;
+                view.view = v;
+                view.source = FrameGenMotionSource::kSpaceWarpFb;
+                view.vectors = {vectors, {{0, 0}, {960, 960}}, v};
+                view.depth = source.depth.subImage;
+                view.depth_is_khr = true;
+                view.color = source.views[v].subImage;
+                view.depth_encoding = {source.depth.minDepth, source.depth.maxDepth, source.depth.nearZ, source.depth.farZ};
+                const XrPosef& pose = source.views[v].pose;
+                view.game.orientation = {pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w};
+                view.game.position = {pose.position.x, pose.position.y, pose.position.z};
+                record.views.push_back(view);
+            }
+            record.complete = true;
+            session.presenter.NoteEngineMotion(record);
+            session.presenter.CaptureEngineMotion();
+        };
+    };
+    // Frames until `count` more were analysed, or `until` holds.
+    auto run = [](Session& session, int count, const std::function<bool()>& until = {}) {
+        const int executes = session.gpu.executes;
+        for (int i = 0; session.gpu.executes < executes + count && !(until && until()) && i < 4 * count + 40; ++i) {
+            session.app->Frame();
+        }
+        return session.gpu.executes - executes;
+    };
+    auto mode = [](Session& session) { return session.gpu.tuning.engine_mode; };
+
+    {
+        Session session;
+        start(session, "lead", "0", "lead");
+        // The swapchains made at the start settle for 3 s (G8): no evidence,
+        // so no verdicts, yet: at Assist.
+        run(session, 4);
+        Check(mode(session) == FrameGenEngineMode::kAssist && session.gpu.tuning.hardware_level &&
+                  !session.gpu.tuning.engine_predicate && session.gpu.tuning.engine_interpolate,
+              "engine lead: at kAssist before any verdict, the hardware's level, the research switches in the tuning");
+        std::this_thread::sleep_for(std::chrono::milliseconds(3100));
+        // Verdicts letting Assist use the vectors but not Lead (its own
+        // photometric test, against no motion): no Lead.
+        session.gpu.lead_verdicts_held = true;
+        run(session, 200, [&] { return session.gpu.verdict_frames >= 60; });
+        Check(session.gpu.verdict_frames >= 60 && session.gpu.verdicts_held_back == 0 &&
+                  mode(session) == FrameGenEngineMode::kAssist,
+              "engine lead: led on verdicts only Assist's test let through");
+        session.gpu.lead_verdicts_held = false;
+        const std::uint64_t judged = session.gpu.verdict_frames;
+        // 30 verdicts in a row letting the vectors be used: Lead.
+        run(session, 200, [&] { return session.gpu.verdict_frames >= judged + 25; });
+        Check(session.gpu.verdict_frames >= judged + 25 && mode(session) == FrameGenEngineMode::kAssist,
+              "engine lead: at kAssist before 30 verdicts in a row");
+        run(session, 40, [&] { return mode(session) == FrameGenEngineMode::kLead; });
+        const std::uint64_t entered = session.gpu.verdict_frames - judged;
+        Check(mode(session) == FrameGenEngineMode::kLead && entered >= 30 && entered <= 34,
+              "engine lead: kLead after 30 verdicts in a row (" + std::to_string(entered) + " judged)");
+        // Verdicts holding the vectors back: a fourth in the last 30 holds
+        // them at Assist.
+        session.gpu.verdicts_held = true;
+        run(session, 40, [&] { return mode(session) == FrameGenEngineMode::kAssist; });
+        const std::uint64_t held = session.gpu.verdicts_held_back;
+        Check(mode(session) == FrameGenEngineMode::kAssist && held >= 4 && held <= 7,
+              "engine lead: held at kAssist after 4 verdicts held back (" + std::to_string(held) + ")");
+        // Held there for 300 real frames, though the verdicts let the vectors
+        // be used again at once.
+        session.gpu.verdicts_held = false;
+        const int assisted = run(session, 400, [&] { return mode(session) == FrameGenEngineMode::kLead; });
+        Check(mode(session) == FrameGenEngineMode::kLead && assisted >= 300 && assisted <= 306,
+              "engine lead: kLead again after 300 frames at kAssist (" + std::to_string(assisted) + ")");
+        // Held at Assist again, its verdicts there letting Assist use the
+        // vectors but not Lead: still at kAssist past the 300 frames, then
+        // Lead after 30 that let Lead use them.
+        session.gpu.verdicts_held = true;
+        run(session, 40, [&] { return mode(session) == FrameGenEngineMode::kAssist; });
+        session.gpu.verdicts_held = false;
+        session.gpu.lead_verdicts_held = true;
+        const std::uint64_t held_twice = session.gpu.verdicts_held_back;
+        run(session, 340);
+        Check(mode(session) == FrameGenEngineMode::kAssist && session.gpu.verdicts_held_back <= held_twice + 1,
+              "engine lead: led again after the 300 frames on verdicts only Assist's test let through");
+        session.gpu.lead_verdicts_held = false;
+        const std::uint64_t judged_again = session.gpu.verdict_frames;
+        run(session, 60, [&] { return mode(session) == FrameGenEngineMode::kLead; });
+        const std::uint64_t reentered = session.gpu.verdict_frames - judged_again;
+        Check(mode(session) == FrameGenEngineMode::kLead && reentered >= 30 && reentered <= 34,
+              "engine lead: kLead after 30 verdicts in a row that let Lead use the vectors (" + std::to_string(reentered) +
+                  " judged)");
+        // A reload to Assist and back: Lead once 30 verdicts in a row came.
+        auto reload = [&](const char* to) {
+            _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", to);
+            session.presenter.Configure(settings);
+            _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "");
+        };
+        reload("assist");
+        run(session, 3);
+        Check(mode(session) == FrameGenEngineMode::kAssist, "engine lead: a reload to assist");
+        reload("lead");
+        run(session, 3);
+        Check(mode(session) == FrameGenEngineMode::kAssist, "engine lead: a reload into lead starts at kAssist");
+        run(session, 60, [&] { return mode(session) == FrameGenEngineMode::kLead; });
+        Check(mode(session) == FrameGenEngineMode::kLead, "engine lead: and leads after 30 verdicts in a row");
+        session.presenter.Stop();
+        Check(!session.runtime.ordering_violation && !g_release_violation, "engine lead: calls stayed ordered");
+    }
+
+    // A session started at Observe never leads at a reload (its flow's level
+    // was set by the mode it started in); the switches' defaults.
+    {
+        Session session;
+        start(session, "observe", "", "");
+        run(session, 2);
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "lead");
+        session.presenter.Configure(settings);
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "");
+        run(session, 3);
+        Check(mode(session) == FrameGenEngineMode::kObserve && !session.gpu.tuning.hardware_level &&
+                  session.gpu.tuning.engine_predicate && !session.gpu.tuning.engine_interpolate,
+              "engine lead: a session started at observe does not lead at a reload");
+        session.presenter.Stop();
+    }
+}
+
+// Engine motion vectors, stage 7 (VECTORXR_FRAMEGEN_ENGINE_MAP=merged,
+// _MAP_REUSE=1, _REACH=1.5, read at Start): the switches go into the tuning;
+// while the next real frame is late, a real frame whose analysis merged the
+// vectors into every view with its depth is moved past one interval up to the
+// reach (seen from where the eye will be then), one whose analysis did not,
+// or left one eye without depth (no engine motion map there: the eyes would
+// part), one interval at most.
+void TestEngineMap() {
+    const XrSwapchain depth_chain = reinterpret_cast<XrSwapchain>(0x21);
+    const XrSwapchain vectors = reinterpret_cast<XrSwapchain>(0x31);
+    FrameGenResolvedSettings settings;
+    settings.enabled = true;
+    settings.synthesis_mode = FrameGenSynthesisMode::kExtrapolate;
+    settings.multiplier = FrameGenMultiplier::k2;
+    for (int variant = 0; variant < 3; ++variant) {
+        const bool merged = variant != 1;
+        const bool one_eye = variant == 2;
+        const std::string name = variant == 0 ? "engine map" : merged ? "engine map, one eye without depth" : "engine map, not merged";
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        gpu.depth = gpu.engine = gpu.threaded = gpu.jit = true;
+        gpu.merged = merged;
+        gpu.depthless_view = one_eye ? 1 : -1;
+        runtime.paced = true;
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "assist");
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MAP", "merged");
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MAP_REUSE", "1");
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_REACH", "1.5");
+        StartPresenter(presenter, gpu, FrameGenSynthesisMode::kExtrapolate);
+        presenter.Configure(settings);
+        for (const char* name_of : {"VECTORXR_FRAMEGEN_ENGINE_MV", "VECTORXR_FRAMEGEN_ENGINE_MAP",
+                                    "VECTORXR_FRAMEGEN_ENGINE_MAP_REUSE", "VECTORXR_FRAMEGEN_ENGINE_REACH"}) {
+            _putenv_s(name_of, "");
+        }
+        presenter.TrackSwapchain(depth_chain, 20, 1, XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+        presenter.TrackSwapchain(vectors, kFloatFormat, 1, XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+        App app(presenter, runtime);
+        app.eye_speed = 0.5;
+        app.depth.subImage.swapchain = depth_chain;
+        app.depth.subImage.imageRect = {{0, 0}, {1200, 1200}};
+        app.depth.maxDepth = 1.0f;
+        app.depth.nearZ = 0.1f;
+        app.depth.farZ = 1000.0f;
+        std::uint64_t frames = 0;
+        app.before_end = [&](XrTime time) {
+            FrameGenEngineMotionFrame record;
+            record.display_time = time;
+            record.projection_frame = ++frames;
+            for (std::uint32_t v = 0; v < 2; ++v) {
+                FrameGenEngineMotionView view;
+                view.view = v;
+                view.source = FrameGenMotionSource::kSpaceWarpFb;
+                view.vectors = {vectors, {{0, 0}, {960, 960}}, v};
+                view.depth = app.depth.subImage;
+                view.depth_is_khr = true;
+                view.color = app.views[v].subImage;
+                view.depth_encoding = {app.depth.minDepth, app.depth.maxDepth, app.depth.nearZ, app.depth.farZ};
+                const XrPosef& pose = app.views[v].pose;
+                view.game.orientation = {pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w};
+                view.game.position = {pose.position.x, pose.position.y, pose.position.z};
+                record.views.push_back(view);
+            }
+            record.complete = true;
+            presenter.NoteEngineMotion(record);
+            presenter.CaptureEngineMotion();
+        };
+        for (int i = 0; gpu.executes < 4 && i < 60; ++i) app.Frame();
+        Check(gpu.tuning.engine_map == FrameGenEngineMap::kMerged && gpu.tuning.engine_map_reuse &&
+                  gpu.tuning.engine_reach == 1.5f,
+              name + ": the switches in the tuning");
+        // The swapchains made at the start settle for 3 s (G8); then frames
+        // whose vectors are merged in.
+        std::this_thread::sleep_for(std::chrono::milliseconds(3100));
+        const std::uint64_t judged = gpu.verdict_frames;
+        for (int i = 0; gpu.verdict_frames < judged + 10 && i < 100; ++i) app.Frame();
+        Check(gpu.verdict_frames >= judged + 10, name + ": frames judged");
+        // The next real frame three intervals late (six refreshes at 2x).
+        std::size_t before = 0;
+        {
+            std::scoped_lock lock(gpu.syntheses_mutex);
+            before = gpu.syntheses.size();
+        }
+        SleepPrecise(std::chrono::steady_clock::now() + std::chrono::nanoseconds(6 * kPeriod));
+        for (int i = 0; i < 4; ++i) app.Frame();
+        float farthest = 0.0f;
+        int past = 0;
+        {
+            std::scoped_lock lock(gpu.syntheses_mutex);
+            for (std::size_t i = before; i < gpu.syntheses.size(); ++i) {
+                const GpuLog::Synthesis& entry = gpu.syntheses[i];
+                if (entry.mode != FrameGenSynthesisMode::kExtrapolate) continue;
+                farthest = std::max(farthest, entry.fraction);
+                past += entry.fraction > 1.0f ? 1 : 0;
+            }
+        }
+        Check(merged && !one_eye ? past > 0 && farthest <= 1.5f : farthest <= 1.0f,
+              name + ": moved past one interval " + std::to_string(past) + " times, up to " + std::to_string(farthest));
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    }
+}
+
+// Engine motion vectors, stage 8 (VECTORXR_FRAMEGEN_ENGINE_VISIBILITY=1 or
+// =merge, _BIDIR=1, read at Start): the switches go into the tuning; other
+// values, or none, leave them off.
+void TestEngineVisibility() {
+    struct Variant {
+        const char* visibility;
+        const char* bidir;
+        bool seen;
+        bool synthesis;
+        bool forward;
+    };
+    for (const Variant& variant : {Variant{"1", "", true, true, false}, Variant{"merge", "1", true, false, true},
+                                   Variant{"2", "0", false, false, false}, Variant{"", "", false, false, false}}) {
+        const std::string name = std::string("engine visibility (") + variant.visibility + ", " + variant.bidir + ")";
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        gpu.depth = gpu.engine = gpu.threaded = gpu.jit = true;
+        runtime.paced = true;
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "assist");
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_VISIBILITY", variant.visibility);
+        _putenv_s("VECTORXR_FRAMEGEN_ENGINE_BIDIR", variant.bidir);
+        StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate);
+        for (const char* name_of :
+             {"VECTORXR_FRAMEGEN_ENGINE_MV", "VECTORXR_FRAMEGEN_ENGINE_VISIBILITY", "VECTORXR_FRAMEGEN_ENGINE_BIDIR"}) {
+            _putenv_s(name_of, "");
+        }
+        App app(presenter, runtime);
+        for (int i = 0; gpu.executes < 3 && i < 40; ++i) app.Frame();
+        Check(gpu.executes >= 3 && gpu.tuning.engine_visibility == variant.seen &&
+                  gpu.tuning.engine_visibility_synthesis == variant.synthesis && gpu.tuning.engine_bidir == variant.forward,
+              name + ": the switches in the tuning");
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    }
+}
+
+// Engine motion vectors, stage 3 (VECTORXR_FRAMEGEN_ENGINE_MV=observe): once
+// the game's swapchains settled, each frame analysed just in time whose
+// vectors no gate holds back asks for their evidence
+// (FrameGenViewRequest::engine_motion) with the poses the game rendered it
+// and the frame before with; where the head's turn changed by 2 degrees a
+// frame and both frames may calibrate, with the frame before that's too
+// (engine_lag). Pivot's change moving keeps a frame from calibrating, not
+// from its evidence; a gate (FRAME_SKIP) keeps it from both. The backend runs
+// at kObserve, the flow at its quality's level (the hardware's level is
+// Assist's).
+void TestEngineMotionObserve() {
+    const XrSwapchain depth_chain = reinterpret_cast<XrSwapchain>(0x21);
+    const XrSwapchain vectors = reinterpret_cast<XrSwapchain>(0x31);
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    gpu.depth = gpu.engine = gpu.threaded = gpu.jit = true;
+    runtime.paced = true;
+    _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "observe");
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kExtrapolate);
+    _putenv_s("VECTORXR_FRAMEGEN_ENGINE_MV", "");
+    presenter.TrackSwapchain(depth_chain, 20, 1, XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+    presenter.TrackSwapchain(vectors, kFloatFormat, 1, XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+    App app(presenter, runtime);
+    app.depth.subImage.swapchain = depth_chain;
+    app.depth.subImage.imageRect = {{0, 0}, {1200, 1200}};
+    app.depth.maxDepth = 1.0f;
+    app.depth.nearZ = 0.1f;
+    app.depth.farZ = 1000.0f;
+    std::uint64_t frames = 0;
+    float pivot_x = 0.0f; // Pivot's change: the game rendered this far left of the pose declared
+    bool skip = false;    // the game marks its frames FRAME_SKIP
+    bool one_view = false; // the right view alone carries a structure
+    // As the layer: the frame's record, with the poses the game rendered
+    // with, then its capture.
+    app.before_end = [&](XrTime time) {
+        FrameGenEngineMotionFrame record;
+        record.display_time = time;
+        record.projection_frame = ++frames;
+        for (std::uint32_t v = one_view ? 1 : 0; v < 2; ++v) {
+            FrameGenEngineMotionView view;
+            view.view = v;
+            view.source = FrameGenMotionSource::kSpaceWarpFb;
+            view.vectors = {vectors, {{0, 0}, {960, 960}}, v};
+            view.depth = app.depth.subImage;
+            view.depth_is_khr = true;
+            view.color = app.views[v].subImage;
+            view.depth_encoding = {app.depth.minDepth, app.depth.maxDepth, app.depth.nearZ, app.depth.farZ};
+            view.frame_skip = skip;
+            const XrPosef& pose = app.views[v].pose;
+            view.game.orientation = {pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w};
+            view.game.position = {pose.position.x - pivot_x, pose.position.y, pose.position.z};
+            record.views.push_back(view);
+        }
+        record.complete = !one_view;
+        presenter.NoteEngineMotion(record);
+        presenter.CaptureEngineMotion();
+    };
+    // Frames until `count` more were analysed.
+    const auto run = [&](int count) {
+        const int executes = gpu.executes;
+        for (int i = 0; gpu.executes < executes + count && i < 400; ++i) app.Frame();
+        Check(gpu.executes >= executes + count, "engine observe: frames are analysed");
+    };
+    const auto asked = [&] {
+        return gpu.last.size() == 2 && gpu.last[0].request.engine_motion && gpu.last[1].request.engine_motion;
+    };
+    const auto calibrating = [&] {
+        return gpu.last.size() == 2 && gpu.last[0].request.engine_calibrate && gpu.last[1].request.engine_calibrate;
+    };
+
+    // The swapchains made at the start settle for 3 s (G8): no evidence yet.
+    run(6);
+    Check(gpu.tuning.engine_mode == FrameGenEngineMode::kObserve && gpu.tuning.analyze_only && !gpu.tuning.hardware_level &&
+              !asked(),
+          "engine observe: just in time at kObserve, no evidence while the swapchains settle");
+    std::this_thread::sleep_for(std::chrono::milliseconds(3100));
+    run(4);
+    Check(asked() && calibrating() && !gpu.last[0].request.engine_lag,
+          "engine observe: settled and paired, the frame's vectors' evidence is asked for");
+    const FrameGenViewRequest& steady = gpu.last[1].request;
+    Check(steady.game_newest.position == steady.newest.position &&
+              steady.game_newest.orientation == steady.newest.orientation &&
+              steady.game_previous.position == steady.previous.position,
+          "engine observe: with the game's poses (Pivot's change none)");
+
+    // The head turning 2.5 degrees one way, then back, frame by frame: the
+    // turn changes by 5 degrees a frame, so the pair before is asked for.
+    const float half = 2.5f * 3.14159265f / 360.0f;
+    for (XrCompositionLayerProjectionView& view : app.views) view.pose.orientation = {0.0f, std::sin(half), 0.0f, std::cos(half)};
+    run(1);
+    bool lagged = false;
+    for (int i = 0; i < 6; ++i) {
+        for (XrCompositionLayerProjectionView& view : app.views) {
+            view.pose.orientation = view.pose.orientation.y != 0.0f ? XrQuaternionf{0.0f, 0.0f, 0.0f, 1.0f}
+                                                                    : XrQuaternionf{0.0f, std::sin(half), 0.0f, std::cos(half)};
+        }
+        run(1);
+        const FrameGenViewRequest& request = gpu.last[0].request;
+        lagged = lagged || (request.engine_lag && request.game_before.orientation == request.game_newest.orientation &&
+                            request.game_previous.orientation != request.game_newest.orientation);
+    }
+    Check(lagged, "engine observe: a turn changing by 5 degrees a frame asks for the pair before");
+    for (XrCompositionLayerProjectionView& view : app.views) view.pose.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
+    run(3);
+    Check(asked() && !gpu.last[0].request.engine_lag, "engine observe: a steady head asks for no pair before");
+
+    // Pivot's change moving: evidence, no calibration, the game's poses as
+    // rendered (the declared ones less the change).
+    bool moving = true;
+    for (int i = 0; i < 4; ++i) {
+        pivot_x += 0.002f;
+        run(1);
+        moving = moving && asked() && !calibrating() &&
+                 std::abs(gpu.last[0].request.game_newest.position[0] - (gpu.last[0].request.newest.position[0] - pivot_x)) < 1e-6f;
+    }
+    Check(moving, "engine observe: Pivot's change moving still asks for evidence, never calibrates");
+
+    // FRAME_SKIP: a gate, so no evidence.
+    skip = true;
+    run(3);
+    Check(!asked(), "engine observe: a frame a gate holds back asks for no evidence");
+    skip = false;
+    run(3);
+    Check(asked(), "engine observe: asked again once no gate holds the frames back");
+
+    // One eye's vectors alone (Star Citizen fills one eye's depth only), by
+    // the record (one view's structure) or by the views' newest censuses
+    // (one view's vectors exactly zero everywhere in its region, the
+    // other's not): neither eye's evidence is asked for.
+    one_view = true;
+    run(3);
+    Check(!asked() && gpu.last.size() == 2 && !gpu.last[1].request.engine_motion,
+          "engine observe: one eye's structure alone asks for neither eye's evidence");
+    one_view = false;
+    run(3);
+    Check(asked(), "engine observe: asked again with both eyes' structures");
+    std::uint64_t sequence = 0;
+    // A view's census: its region's statistics grid finite throughout, the
+    // longest vector there `longest`; the hash grid, over the whole image,
+    // `zeros` exact zeros.
+    const auto census = [&](std::size_t view, float longest, std::uint32_t zeros) {
+        FrameGenEngineCensus taken;
+        taken.sequence = ++sequence;
+        taken.frame = frames;
+        taken.view = view;
+        taken.images = 3;
+        taken.censused = 1u << 1; // the image the vectors are thought to be in alone
+        taken.image[1].finite = kFrameGenEngineStatsTexels;
+        taken.image[1].max_abs = longest;
+        taken.image[1].zeros = zeros;
+        taken.image[0].finite = kFrameGenEngineStatsTexels; // never read
+        std::scoped_lock lock(gpu.motion_mutex);
+        gpu.census.push_back(taken);
+    };
+    census(0, 0.0f, kFrameGenEngineHashTexels);
+    census(1, 0.25f, 120);
+    run(3);
+    Check(!asked(), "engine observe: one eye's vectors zero everywhere the census reads asks for neither eye's evidence");
+    census(0, 0.5f, 300);
+    run(3);
+    Check(asked(), "engine observe: asked again once both eyes' censuses find vectors");
+    // Both views side by side in one slice: the hash grid, over the whole
+    // image, finds the same zeros for both; the region says.
+    census(0, 0.5f, 2048);
+    census(1, 0.0f, 2048);
+    run(3);
+    Check(!asked(), "engine observe: one eye's half of a shared slice zero asks for neither eye's evidence");
+    census(1, 0.25f, 2048);
+    run(3);
+    Check(asked(), "engine observe: asked again once both halves hold vectors");
+    census(0, 0.0f, kFrameGenEngineHashTexels);
+    census(1, 0.0f, kFrameGenEngineHashTexels);
+    run(3);
+    Check(asked(), "engine observe: both eyes' vectors zero everywhere (nothing moved) is no one-eye frame");
+    Check(!gpu.prior, "engine observe: no prior for XR_FB_space_warp from an unknown Direct3D game");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "engine observe: calls stayed ordered");
+}
+
+// Engine motion vectors, stage 4: whatever VECTORXR_FRAMEGEN_ENGINE_MV says
+// (off here), each frame paired with the frame before's record carries the
+// application's movement (FrameGenViewRequest::app_delta) with the poses the
+// game rendered both frames with; not where the views' deltas differ, at
+// FRAME_SKIP or at a camera cut. Nothing waits for the swapchains to settle:
+// the movement is the frame's whatever its vectors are.
+void TestEngineDelta() {
+    const XrSwapchain depth_chain = reinterpret_cast<XrSwapchain>(0x21);
+    const XrSwapchain vectors = reinterpret_cast<XrSwapchain>(0x31);
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    gpu.depth = gpu.threaded = gpu.jit = true;
+    runtime.paced = true;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kExtrapolate);
+    presenter.TrackSwapchain(depth_chain, 20, 1, XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+    presenter.TrackSwapchain(vectors, kFloatFormat, 1, XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+    App app(presenter, runtime);
+    app.depth.subImage.swapchain = depth_chain;
+    app.depth.subImage.imageRect = {{0, 0}, {1200, 1200}};
+    app.depth.maxDepth = 1.0f;
+    app.depth.nearZ = 0.1f;
+    app.depth.farZ = 1000.0f;
+    std::uint64_t frames = 0;
+    float forward = 1.8f;      // the application's movement a frame
+    float other_forward = 1.8f; // ... as view 1's structure has it
+    bool skip = false;
+    app.before_end = [&](XrTime time) {
+        FrameGenEngineMotionFrame record;
+        record.display_time = time;
+        record.projection_frame = ++frames;
+        for (std::uint32_t v = 0; v < 2; ++v) {
+            FrameGenEngineMotionView view;
+            view.view = v;
+            view.source = FrameGenMotionSource::kSpaceWarpFb;
+            view.vectors = {vectors, {{0, 0}, {960, 960}}, v};
+            view.depth = app.depth.subImage;
+            view.depth_is_khr = true;
+            view.color = app.views[v].subImage;
+            view.depth_encoding = {app.depth.minDepth, app.depth.maxDepth, app.depth.nearZ, app.depth.farZ};
+            view.frame_skip = skip;
+            view.app_delta.position.z = v ? other_forward : forward;
+            const XrPosef& pose = app.views[v].pose;
+            view.game.orientation = {pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w};
+            // The game rendered 1 cm right of the declared pose (Pivot).
+            view.game.position = {pose.position.x + 0.01f, pose.position.y, pose.position.z};
+            record.views.push_back(view);
+        }
+        record.complete = true;
+        presenter.NoteEngineMotion(record);
+    };
+    const auto run = [&](int count) {
+        const int executes = gpu.executes;
+        for (int i = 0; gpu.executes < executes + count && i < 400; ++i) app.Frame();
+        Check(gpu.executes >= executes + count, "engine delta: frames are analysed");
+    };
+    const auto carried = [&] {
+        return gpu.last.size() == 2 && gpu.last[0].request.app_delta && gpu.last[1].request.app_delta;
+    };
+
+    run(4);
+    const FrameGenViewRequest& request = gpu.last[1].request;
+    Check(carried() && request.delta_position[2] == 1.8f && request.delta_orientation[3] == 1.0f &&
+              request.game_newest.position[0] == request.newest.position[0] + 0.01f &&
+              request.game_previous.position[0] == request.previous.position[0] + 0.01f && !request.engine_motion,
+          "engine delta: paired frames carry the movement and the game's poses, engine motion off");
+    // The views' structures disagree: the frame's movement is not known.
+    other_forward = 2.0f;
+    run(2);
+    Check(!gpu.last[0].request.app_delta && !gpu.last[1].request.app_delta, "engine delta: none where the views differ");
+    other_forward = forward;
+    run(2);
+    Check(carried(), "engine delta: carried again once they agree");
+    // FRAME_SKIP: the frame repeats the one before.
+    skip = true;
+    run(2);
+    Check(!carried(), "engine delta: none at FRAME_SKIP");
+    skip = false;
+    run(2);
+    Check(carried(), "engine delta: carried again after FRAME_SKIP");
+    // A camera cut (100 m in a frame), and the frame after (its pair).
+    forward = other_forward = 100.0f;
+    run(1);
+    Check(!carried(), "engine delta: none at a camera cut");
+    forward = other_forward = 1.8f;
+    run(3);
+    Check(carried(), "engine delta: carried again after the cut");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "engine delta: calls stayed ordered");
 }
 
 void TestOverlappingWaitIsHeld() {
@@ -4753,7 +6910,7 @@ void TestExtrapolateDuplicateTargetGuard() {
 // gap is not measured against the one before it (no motion across the gap),
 // and refreshes show their own time again from the next.
 void TestNoExtrapolationAcrossPauses() {
-    for (const auto pause : {1000ms, 400ms}) {
+    for (const auto pause : {1000ms, 400ms, 2100ms}) {
         const std::string name = "pause " + std::to_string(pause.count()) + " ms";
         FrameGenPresenter presenter;
         GpuLog gpu;
@@ -4766,6 +6923,8 @@ void TestNoExtrapolationAcrossPauses() {
         for (int i = 0; i < 3; ++i) app->Frame();
         RunWork(*app, 500ms, kLightWork);
         const auto last_end = std::chrono::steady_clock::now();
+        const float source_x = app->views[0].pose.position.x;
+        const std::size_t first_stalled = runtime.Submissions();
         const FrameGenStatus before = presenter.Status();
         std::size_t syntheses_before = 0;
         {
@@ -4774,6 +6933,21 @@ void TestNoExtrapolationAcrossPauses() {
         }
         SleepPrecise(last_end + pause);
         const FrameGenStatus paused = presenter.Status();
+        {
+            std::scoped_lock lock(g_xr_mutex);
+            // Time keeps advancing in the runtime while the game submits
+            // nothing. Depth-based eye correction is bounded by the same
+            // single real-frame interval as the image's optical-flow warp;
+            // it must not accumulate a translation throughout a load.
+            const double one_interval = app->eye_speed * static_cast<double>(4 * kPeriod) / 1e9;
+            for (std::size_t i = first_stalled; i < runtime.submitted_left_x.size(); ++i) {
+                const float x = runtime.submitted_left_x[i];
+                Check(std::isfinite(x) && x <= source_x + one_interval + 1e-5,
+                      name + ": a frozen source never accumulates eye translation");
+            }
+            Check(!runtime.submitted_left_x.empty() && std::abs(runtime.submitted_left_x.back() - source_x) < 1e-5,
+                  name + ": a long stall ends on the unchanged source pose");
+        }
         // Up to the last frame's refresh (its lead) the one before is still
         // moved on; past it, at most four intervals of four refreshes at 4x.
         Check(paused.generated - before.generated <= 16 + before.lead_slots + 1,
@@ -4908,7 +7082,7 @@ struct LeadRun {
     FrameGenStatus after;     // at the end
 };
 
-LeadRun RunLeadAfterHitches(bool probes) {
+LeadRun RunLeadAfterHitches(bool probes, bool hitch_events = false) {
     FrameGenPresenter presenter;
     GpuLog gpu;
     gpu.game_gpu = 19ms;
@@ -4927,6 +7101,10 @@ LeadRun RunLeadAfterHitches(bool probes) {
     // judged as a probe skips the frames in flight across it, so it too
     // brings the lead back down here).
     policy.slack_hysteresis = probes;
+    // These runs pin the rules as before 0.19.4 (frame by frame); the
+    // hitch-event rules are run alongside (TestLeadStepsDownAfterHitches).
+    policy.hitch_events = hitch_events;
+    policy.ring_ceiling = false; // pins the lead policy's own moves; the ring ceiling has its own tests
     presenter.SetLeadPolicy(policy);
     app->before_release = [&] { gpu.GameFrame(); };
     for (int i = 0; i < 3; ++i) app->Frame();
@@ -4951,6 +7129,7 @@ LeadRun RunLeadAfterHitches(bool probes) {
 void TestLeadStepsDownAfterHitches() {
     const LeadRun held = RunLeadAfterHitches(false);
     const LeadRun probed = RunLeadAfterHitches(true);
+    const LeadRun events = RunLeadAfterHitches(true, true);
     const auto late = [](const LeadRun& run) {
         return (run.after.late_cpu - run.before.late_cpu) + (run.after.late_gpu - run.before.late_gpu);
     };
@@ -4958,7 +7137,19 @@ void TestLeadStepsDownAfterHitches() {
               << " (late " << late(held) << "); with probes: " << probed.settled << " -> " << probed.peak << " -> "
               << probed.final << " (floor " << probed.after.lead_floor << ", probes " << probed.after.lead_probes
               << ", failed " << probed.after.lead_probes_failed << ", late " << late(probed) << ")" << std::endl;
+    std::cerr << "  with hitch events: " << events.settled << " -> " << events.peak << " -> " << events.final
+              << " (floor " << events.after.lead_floor << ", probes " << events.after.lead_probes << ", failed "
+              << events.after.lead_probes_failed << ", late " << late(events) << ")" << std::endl;
     Check(held.peak > held.settled && probed.peak > probed.settled, "lead probes: the hitches grow the lead");
+    // Hitch events raise the lead of a game late frame after frame too,
+    // but more slowly (a step per two hitch events, each 250 ms at least,
+    // against the probes these runs make every 250 ms): this game had not
+    // reached the lead it holds frame by frame (8) when the slow GPU came.
+    // The lead rises to that, and no further.
+    Check(events.final > events.settled && events.final <= probed.settled,
+          "lead probes, hitch events: the lead rises to what the game holds, no higher (" +
+              std::to_string(events.settled) + " -> " + std::to_string(events.peak) + " -> " +
+              std::to_string(events.final) + "; frame by frame " + std::to_string(probed.settled) + ")");
     // Without probes the lead comes down only by slack: once the game's rate
     // is back, Dynamic's cap (4 refreshes per real frame) is 8 again, below
     // the peak, and the lead comes down with it; frames scored there show
@@ -4991,7 +7182,7 @@ struct LeadFlapRun {
     std::uint64_t undone{0}; // steps down undone by late frames
 };
 
-LeadFlapRun RunLeadFlap(bool hysteresis) {
+LeadFlapRun RunLeadFlap(bool hysteresis, bool hitch_events = false) {
     FrameGenPresenter presenter;
     GpuLog gpu;
     gpu.frames_ahead = 3;
@@ -5006,6 +7197,10 @@ LeadFlapRun RunLeadFlap(bool hysteresis) {
     policy.explore_after = 1500ms;
     policy.explore_max = 3000ms;
     policy.slack_hysteresis = hysteresis;
+    // The rules as before 0.19.4, with and without hysteresis; then the
+    // hitch-event rules (TestLeadDoesNotFlap).
+    policy.hitch_events = hitch_events;
+    policy.ring_ceiling = false; // pins the lead policy's own moves; the ring ceiling has its own tests
     presenter.SetLeadPolicy(policy);
     // GPU-bound near 50 fps, one frame in five a refresh longer.
     const std::vector<std::chrono::microseconds> pattern = {18ms, 18ms, 18ms, 18ms, 30ms};
@@ -5053,6 +7248,7 @@ LeadFlapRun RunLeadFlap(bool hysteresis) {
 void TestLeadDoesNotFlap() {
     const LeadFlapRun flapping = RunLeadFlap(false);
     const LeadFlapRun held = RunLeadFlap(true);
+    const LeadFlapRun events = RunLeadFlap(true, true);
     std::cerr << "  lead flapping without hysteresis: " << flapping.changes << " changes, " << flapping.late
               << " late in 6 s, mean lead " << flapping.mean_lead << "; with: " << held.changes << " changes ("
               << held.undone << " undone), " << held.late << " late, mean lead " << held.mean_lead << ", floor "
@@ -5068,6 +7264,157 @@ void TestLeadDoesNotFlap() {
     Check(held.mean_lead <= flapping.mean_lead + 1.0,
           "lead flapping: the lead holds about where it flapped (" + std::to_string(held.mean_lead) + " vs " +
               std::to_string(flapping.mean_lead) + ")");
+    // Hitch events: the slow frame of every five is one late frame at a
+    // time, a refresh longer, frame after frame: the lead rises for it (the
+    // game is truly short of time) and stays, without flapping.
+    std::cerr << "  with hitch events: " << events.changes << " changes, " << events.late << " late, mean lead "
+              << events.mean_lead << ", floor " << events.floor << std::endl;
+    Check(events.changes <= 6 && events.late <= held.late + 10 && events.mean_lead <= held.mean_lead + 1.0,
+          "lead flapping, hitch events: the lead holds without flapping (" + std::to_string(events.changes) +
+              " changes, " + std::to_string(events.late) + " late, mean " + std::to_string(events.mean_lead) + ")");
+}
+
+// The lead over a run of a game whose GPU work per frame is `gpu(frame)`,
+// with the rules as before 0.19.4 (frame by frame) or hitch events. Probes
+// and explore waits are shortened about threefold from the defaults
+// (FrameGenLeadPolicy); the hitch-event windows keep theirs.
+struct LeadPatternRun {
+    FrameGenStatus settled;  // at the end of the settling run
+    FrameGenStatus after;    // at the end
+    double mean_lead{0.0};   // over the measured run, sampled each frame
+    std::uint32_t highest{0};
+    std::uint32_t lowest{0};
+    int changes{0};
+    std::uint64_t late{0};   // real frames late in the measured run
+};
+
+struct LeadPattern {
+    FrameGenSynthesisMode mode{FrameGenSynthesisMode::kInterpolate};
+    FrameGenMultiplier multiplier{FrameGenMultiplier::k2};
+    int end_offset_periods{0};
+    std::chrono::milliseconds settle{4000};
+    std::chrono::milliseconds measure{9000};
+    std::function<std::chrono::microseconds(int)> gpu;
+};
+
+LeadPatternRun RunLeadPattern(const LeadPattern& pattern, bool hitch_events) {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    gpu.frames_ahead = 3;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, pattern.mode, pattern.multiplier, app, runtime, owned);
+    app->end_offset_periods = pattern.end_offset_periods;
+    FrameGenLeadPolicy policy;
+    policy.probe_after = 1500ms;
+    policy.judge = 1000ms;
+    policy.explore_after = 3000ms;
+    policy.explore_max = 18000ms;
+    policy.hitch_events = hitch_events;
+    policy.ring_ceiling = false; // pins the lead policy's own moves; the ring ceiling has its own tests
+    presenter.SetLeadPolicy(policy);
+    int frame = 0;
+    app->before_release = [&] {
+        gpu.game_gpu = pattern.gpu(frame++);
+        gpu.GameFrame();
+    };
+    for (int i = 0; i < 3; ++i) app->Frame();
+    LeadPatternRun run;
+    RunWork(*app, pattern.settle, {6ms});
+    run.settled = presenter.Status();
+    std::uint32_t lead = run.settled.lead_slots;
+    run.highest = run.lowest = lead;
+    double sum = 0.0;
+    int samples = 0;
+    RunWork(*app, pattern.measure, {6ms}, [&](const XrFrameState&) {
+        const std::uint32_t now = presenter.Status().lead_slots;
+        sum += now;
+        ++samples;
+        run.highest = std::max(run.highest, now);
+        run.lowest = std::min(run.lowest, now);
+        run.changes += now != lead ? 1 : 0;
+        lead = now;
+        return false;
+    });
+    run.after = presenter.Status();
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "lead pattern: calls stayed ordered");
+    run.mean_lead = samples ? sum / samples : 0.0;
+    run.late = (run.after.late_cpu - run.settled.late_cpu) + (run.after.late_gpu - run.settled.late_gpu);
+    return run;
+}
+
+std::string LeadPatternText(const LeadPatternRun& run) {
+    return "lead " + std::to_string(run.settled.lead_slots) + " -> mean " + std::to_string(run.mean_lead) + " (" +
+           std::to_string(run.lowest) + "-" + std::to_string(run.highest) + ", " + std::to_string(run.changes) +
+           " changes, floor " + std::to_string(run.after.lead_floor) + "), " + std::to_string(run.late) + " late";
+}
+
+// DCS on Virtual Desktop (2026-10-20, 90 Hz, Interpolate): 0.5% of its real
+// frames late, in bursts of two or three, its others with 30-60 ms to
+// spare; the lead sat at 4-7 and the game was told a median 67 ms past the
+// refresh picked for it. Every burst stepped the lead up (two late in the
+// last ten frames), and back down took explore waits. With hitch events a
+// burst is one event and raises nothing. (Bursts every 3 s here, at
+// threefold shortened probes and waits.)
+void TestLeadIgnoresRareHitchBursts() {
+    LeadPattern pattern;
+    pattern.gpu = [](int frame) { return frame % 135 < 3 ? std::chrono::microseconds(20000) : 8000us; };
+    const LeadPatternRun legacy = RunLeadPattern(pattern, false);
+    const LeadPatternRun events = RunLeadPattern(pattern, true);
+    std::cerr << "  rare hitch bursts, frame by frame: " << LeadPatternText(legacy) << "; hitch events: "
+              << LeadPatternText(events) << std::endl;
+    // This stand-in game does not ratchet frame by frame as DCS did (its
+    // spare time is all on the CPU, DCS's late frames were mostly its GPU
+    // work not captured in time): what it shows is that the bursts raise
+    // nothing, the lead sits no higher, and the cost is the burst frames
+    // covered, not a lead held up for every frame.
+    Check(events.mean_lead <= legacy.mean_lead + 0.25 && events.highest <= events.settled.lead_slots + 1,
+          "rare hitch bursts: the bursts do not raise the lead (" + LeadPatternText(events) + " vs " +
+              LeadPatternText(legacy) + ")");
+    Check(events.changes <= 4, "rare hitch bursts: ...and it stays put (" + LeadPatternText(events) + ")");
+    Check(events.late <= 30, "rare hitch bursts: ...with the burst frames covered, a few more (" +
+                                 LeadPatternText(events) + ")");
+}
+
+// Star Citizen (2026-10-18, Virtual Desktop, fixed 2x Extrapolate): it ends
+// its frames a period after its told time, and hitches about every 30 s; the
+// lead stood at its cap of 8. A hitch no lead cures must not ratchet it.
+// (A 150 ms frame every 3 s here.)
+void TestLeadHitchesDoNotRatchet() {
+    LeadPattern pattern;
+    pattern.mode = FrameGenSynthesisMode::kExtrapolate;
+    pattern.end_offset_periods = 1;
+    pattern.gpu = [](int frame) { return frame > 0 && frame % 135 == 0 ? std::chrono::microseconds(150000) : 10000us; };
+    const LeadPatternRun legacy = RunLeadPattern(pattern, false);
+    const LeadPatternRun events = RunLeadPattern(pattern, true);
+    std::cerr << "  hitch every 3 s, frame by frame: " << LeadPatternText(legacy) << "; hitch events: "
+              << LeadPatternText(events) << std::endl;
+    Check(events.highest <= events.settled.lead_slots + 1 && events.after.lead_slots <= events.settled.lead_slots,
+          "hitches every 3 s: the lead does not ratchet (" + LeadPatternText(events) + ")");
+    Check(events.mean_lead <= legacy.mean_lead + 0.25,
+          "hitches every 3 s: no higher than frame by frame (" + LeadPatternText(events) + " vs " +
+              LeadPatternText(legacy) + ")");
+}
+
+// A game truly short of GPU time: every fourth frame a refresh and more
+// longer, late frame after frame. Hitch events still raise the lead for it,
+// about as high as frame by frame, and its frames are no more often late.
+void TestLeadRisesForFrequentLates() {
+    LeadPattern pattern;
+    pattern.gpu = [](int frame) { return frame % 4 == 3 ? std::chrono::microseconds(30000) : 14000us; };
+    const LeadPatternRun legacy = RunLeadPattern(pattern, false);
+    const LeadPatternRun events = RunLeadPattern(pattern, true);
+    std::cerr << "  frequent lates, frame by frame: " << LeadPatternText(legacy) << "; hitch events: "
+              << LeadPatternText(events) << std::endl;
+    Check(events.mean_lead + 1.0 >= legacy.mean_lead,
+          "frequent lates: hitch events raise the lead about as far (" + LeadPatternText(events) + " vs " +
+              LeadPatternText(legacy) + ")");
+    Check(events.late <= legacy.late * 3 / 2 + 20,
+          "frequent lates: ...and frames are no more often late (" + LeadPatternText(events) + " vs " +
+              LeadPatternText(legacy) + ")");
 }
 
 // A slow game (GPU-bound near 33 fps) that hitches every 0.6 s: each hitch
@@ -5094,6 +7441,7 @@ void TestLeadAfterRepeatedHitches() {
     policy.judge = 200ms;
     policy.explore_after = 700ms;
     policy.explore_max = 1400ms;
+    policy.ring_ceiling = false; // pins the lead policy's own moves; the ring ceiling has its own tests
     presenter.SetLeadPolicy(policy);
     bool hitches = false;
     int frames = 0;
@@ -5149,6 +7497,11 @@ FrameGenLeadPolicy ProvenLeadPolicy(std::chrono::milliseconds explore_max) {
     policy.judge = 200ms;
     policy.explore_after = 700ms;
     policy.explore_max = explore_max;
+    // The floor a hitch raises is a rule of the frame-by-frame steps (as
+    // before 0.19.4): with hitch events a lone hitch raises nothing
+    // (TestLeadHitchesDoNotRatchet).
+    policy.hitch_events = false;
+    policy.ring_ceiling = false; // pins the lead policy's own moves; the ring ceiling has its own tests
     return policy;
 }
 
@@ -5404,6 +7757,7 @@ void TestLeadFollowsLoweredCap() {
     StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic, app, runtime, owned);
     FrameGenLeadPolicy policy;
     policy.probe_after = 600s; // no probes: only scored frames move the lead
+    policy.ring_ceiling = false; // pins the lead policy's own moves; the ring ceiling has its own tests
     presenter.SetLeadPolicy(policy);
     for (int i = 0; i < 3; ++i) app->Frame();
     // A game at a third of the refresh rate (cap 12), its frames reaching the
@@ -5448,6 +7802,7 @@ void TestPassedOverFramesKeepLead() {
     gpu.frames_ahead = 3;
     FrameGenLeadPolicy policy;
     policy.probe_after = 600s;
+    policy.ring_ceiling = false; // pins the lead policy's own moves; the ring ceiling has its own tests
     presenter.SetLeadPolicy(policy);
     app->before_release = [&] { gpu.GameFrame(); };
     const std::vector<std::chrono::microseconds> work{6ms};
@@ -7309,6 +9664,14 @@ void TestQuadDynamicDeepRing() {
         runtime.paced = true;
         StartQuad(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic);
         presenter.SetDynamicPolicy(GuardDynamic());
+        if (shallow) {
+            // A ring of three behind quad views is a mismatch the backend
+            // cannot have (the presenter counts on five): the ring ceiling
+            // would chase it down to Dynamic's floor of 3.
+            FrameGenLeadPolicy policy;
+            policy.ring_ceiling = false; // pins the lead policy's own moves; the ring ceiling has its own tests
+            presenter.SetLeadPolicy(policy);
+        }
         QuadApp app(presenter, runtime);
         const auto works = QuadTicks(runtime, {1, 2, 2});
         auto composing = [&] {
@@ -7427,6 +9790,54 @@ struct SessionLog {
         return lines;
     }
 };
+
+// Research switches from %LOCALAPPDATA%\VectorXR\framegen-research.txt (a
+// folder of this test's own, which the policy tests' process never sees):
+// the OSD names them for the session that runs with them only, not once it
+// stopped, nor for one without a backend; the log names each once per
+// session (an earlier session in the process took it too), a session
+// without a backend's too.
+void TestResearchFileSessions() {
+    const std::wstring local_before = _wgetenv(L"LOCALAPPDATA") ? _wgetenv(L"LOCALAPPDATA") : L"";
+    const std::filesystem::path local = std::filesystem::temp_directory_path() /
+                                        ("vectorxr-presenter-research-" + std::to_string(GetCurrentProcessId()));
+    std::error_code ignored;
+    std::filesystem::remove_all(local, ignored);
+    _wputenv_s(L"LOCALAPPDATA", local.c_str());
+    const std::filesystem::path file = local / "VectorXR" / "framegen-research.txt";
+    std::filesystem::create_directories(file.parent_path(), ignored);
+    {
+        std::ofstream out(file, std::ios::binary);
+        out << "VECTORXR_FRAMEGEN_ENGINE_CUTS=1\n";
+    }
+    SessionLog log("research-file");
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    presenter.Start(kSession, nullptr, Dispatch(), log.logger.get(), nullptr,
+                    [](const void*, std::string& error) -> std::unique_ptr<FrameGenGpu> {
+                        error = "no device";
+                        return nullptr;
+                    });
+    Check(!presenter.ResearchFileInUse(), "research file: not named for a session without a backend");
+    presenter.Stop();
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, kFormat, kAppUsage, FrameGenMultiplier::k2,
+                   log.logger.get());
+    Check(presenter.ResearchFileInUse(), "research file: named for the session running with it");
+    presenter.Stop();
+    Check(!presenter.ResearchFileInUse(), "research file: not once that session stopped");
+    std::filesystem::remove(file, ignored);
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kExtrapolate);
+    Check(!presenter.ResearchFileInUse(), "research file: not for a session without it");
+    presenter.Stop();
+    _wputenv_s(L"LOCALAPPDATA", local_before.c_str());
+    std::filesystem::remove_all(local, ignored);
+    const std::vector<std::string> told = log.Lines("research switches from");
+    Check(told.size() == 2 &&
+              std::all_of(told.begin(), told.end(),
+                          [](const std::string& line) { return line.find("VECTORXR_FRAMEGEN_ENGINE_CUTS=1.") != std::string::npos; }) &&
+              log.Lines("VECTORXR_FRAMEGEN_ENGINE_CUTS=1 (research)").size() == 1,
+          "research file: the switch logged for each session that read it, its effect for the session with a backend");
+}
 
 // A game's depth description is logged with every digit (Star Citizen's
 // near plane hid behind one decimal), and again whenever it changes.
@@ -7801,6 +10212,357 @@ void TestViewExtentChangesLogged() {
               changed[1].find("changed to 1600x1600, 1600x1600 (1 change in 6 frames") != std::string::npos,
           "view sizes: each change says what it changed to (" +
               (changed.empty() ? std::string("none") : changed[0]) + ")");
+}
+
+// Star Citizen fills only one eye's depth: six checks in a row that find
+// the checked eye's depth uniform while the other eye's varies hand the
+// check to the other eye, and the empty eye takes its depth for the session.
+void TestDepthEyes() {
+    FrameGenDepthEvidence both;
+    both.source_varied = 300.0;
+    both.other_varied = 310.0;
+    FrameGenDepthEvidence left_clear;
+    left_clear.other_varied = 280.0;
+    FrameGenDepthEvidence all_far; // scenery only: neither eye varies
+    {
+        FrameGenDepthEyes eyes;
+        for (int i = 0; i < 40; ++i) Check(!eyes.Add(0, both), "depth eyes: a game filling both eyes keeps view 0");
+        for (int i = 0; i < 40; ++i) Check(!eyes.Add(0, all_far), "depth eyes: uniform scenery in both eyes decides nothing");
+        Check(eyes.Source() == 0 && !eyes.Empty(), "depth eyes: nothing changed for a normal game");
+    }
+    {
+        FrameGenDepthEyes eyes;
+        for (int i = 0; i < 5; ++i) Check(!eyes.Add(0, left_clear), "depth eyes: five checks are not enough");
+        Check(!eyes.Add(0, both), "depth eyes: a varied check starts over");
+        for (int i = 0; i < 5; ++i) Check(!eyes.Add(0, left_clear), "depth eyes: still counting again");
+        Check(eyes.Add(0, left_clear), "depth eyes: the sixth check in a row decides");
+        Check(eyes.Source() == 1 && eyes.Empty() == std::optional<std::size_t>(0),
+              "depth eyes: the right eye is checked and the left takes its depth");
+        Check(!eyes.Add(0, both) && !eyes.Add(1, left_clear) && eyes.Empty() == std::optional<std::size_t>(0),
+              "depth eyes: decided for the session");
+    }
+    {
+        // The mirror case: the checked eye (view 0) has depth, the other's is
+        // clear. The check keeps reading view 0 and the validator keeps what
+        // it judged; view 1 takes view 0's depth.
+        FrameGenDepthEyes eyes;
+        FrameGenDepthEvidence right_clear;
+        right_clear.source_varied = 280.0;
+        for (int i = 0; i < 5; ++i) Check(!eyes.Add(0, right_clear) && !eyes.Empty(), "depth eyes: mirror, counting");
+        Check(!eyes.Add(0, right_clear), "depth eyes: an empty other eye needs no fresh judgement");
+        Check(eyes.Source() == 0 && eyes.Empty() == std::optional<std::size_t>(1),
+              "depth eyes: the left eye is checked and the right takes its depth");
+    }
+    {
+        FrameGenDepthEyes eyes;
+        FrameGenDepthEvidence few = left_clear;
+        few.other_varied = 4.0; // a speck of near content: not enough to call the other eye real
+        for (int i = 0; i < 20; ++i) Check(!eyes.Add(0, few), "depth eyes: too little variation decides nothing");
+        Check(!eyes.Empty(), "depth eyes: still undecided");
+    }
+}
+
+// The depth validator decides only on evidence. Star Citizen Evocati's
+// depth is all zero in both eyes (reversed, described so): as described
+// nothing moves, swapped everything sits 2 cm away, and a batch whose
+// swapped reading lined up by chance (0.69) took it up, then noise in its
+// alike scale probes stepped the scale to 1.88. Depth the same all over is
+// never taken up (read as far, it decides nothing: MSFS 2024 starting in
+// its menus is still being checked), near and far are swapped only against
+// a reading as described that moves content too, a reading holds on
+// unchanged evidence, and the scale moves only on probes that show a clear
+// trend.
+void TestDepthValidator() {
+    constexpr double kBinocular = 13184.0; // samples both eyes see per check (a Pimax view)
+    auto score = [](double samples, double ratio, double fallback = 0.0) {
+        FrameGenDepthScore s;
+        s.samples = samples;
+        s.none = 0.05 * samples;
+        s.error = ratio * s.none;
+        s.fallback = fallback;
+        return s;
+    };
+    auto batches = [](FrameGenDepthValidator& validator, const FrameGenDepthEvidence& check, int count) {
+        for (int i = 0; i < count * static_cast<int>(kFrameGenDepthBatchChecks); ++i) validator.Add(check);
+    };
+    auto probes = [](FrameGenDepthEvidence& e, std::array<double, kFrameGenDepthScaleProbes> relative, double samples) {
+        e.probed = samples;
+        for (std::size_t j = 0; j < relative.size(); ++j) e.probes[j] = 0.1 * samples * relative[j];
+    };
+    // A cockpit (MSFS's): as described the cockpit moves and lines up, the
+    // scale probes are centred; swapped everything moves, lined up badly.
+    FrameGenDepthEvidence cockpit;
+    cockpit.binocular = kBinocular;
+    cockpit.decoded = score(10000.0, 0.3, 1500.0);
+    cockpit.swapped = score(kBinocular, 0.8, 9000.0);
+    cockpit.source_varied = cockpit.other_varied = 1024.0;
+    cockpit.cockpit = 11000.0;
+    probes(cockpit, {1.5, 1.25, 1.0, 1.25, 1.4}, 8000.0);
+    // Star Citizen's clear depth: no cell varies in either eye; swapped, a
+    // batch lines up by chance; its probes are alike but for one.
+    FrameGenDepthEvidence clear;
+    clear.binocular = kBinocular;
+    clear.swapped = score(kBinocular, 0.6, 12500.0);
+    probes(clear, {1.0, 1.0, 1.0, 1.0, 0.985}, 600.0);
+    {
+        // Read as far, depth left clear decides nothing: still being checked
+        // (the presenter reports it so, as before), every submission, never
+        // swapped or scaled.
+        FrameGenDepthValidator validator;
+        batches(validator, clear, 10);
+        Check(validator.Reading() == FrameGenDepthReading::kUnknown && !validator.Swapped() &&
+                  validator.Scale() == 1.0f && validator.Generation() == 0 && validator.Decisions() == 0,
+              std::string("depth validator: depth left clear decides nothing, never swapped or scaled (") +
+                  ToString(validator.Reading()) + ")");
+        Check(validator.WantsCheck(25), "depth validator: depth left clear is still checked every submission");
+        // MSFS 2024 starting in its menus: the first batch of the cockpit
+        // takes its depth up.
+        batches(validator, cockpit, 1);
+        Check(validator.Reading() == FrameGenDepthReading::kAsSubmitted && validator.Decisions() == 1,
+              std::string("depth validator: the cockpit after clear depth takes it up (") +
+                  ToString(validator.Reading()) + ")");
+        // Depth the same all over that moves content (cleared to a near
+        // value) is not usable, and checked now and then.
+        FrameGenDepthEvidence clear_near = clear;
+        clear_near.decoded = score(kBinocular, 0.8, 12000.0);
+        FrameGenDepthValidator cleared_near;
+        batches(cleared_near, clear_near, 10);
+        Check(cleared_near.Reading() == FrameGenDepthReading::kUnusable && !cleared_near.Swapped() &&
+                  cleared_near.Scale() == 1.0f && cleared_near.Decisions() == 1,
+              std::string("depth validator: depth the same all over that moves content is not usable (") +
+                  ToString(cleared_near.Reading()) + ")");
+        Check(!cleared_near.WantsCheck(25) && cleared_near.WantsCheck(40),
+              "depth validator: unusable depth is checked now and then");
+        // Locked for a test or a replay (FG_REPLAY_DEPTH=locked): the reading
+        // holds whatever the evidence says, and a restart keeps it.
+        FrameGenDepthValidator locked;
+        locked.LockForTest(FrameGenDepthReading::kAsSubmitted, false, 1.0f);
+        const std::uint32_t locked_generation = locked.Generation();
+        batches(locked, clear_near, 10);
+        locked.Restart();
+        Check(locked.Usable() && locked.Reading() == FrameGenDepthReading::kAsSubmitted && !locked.Swapped() &&
+                  locked.Scale() == 1.0f && locked.Generation() == locked_generation && locked.Batches() == 10,
+              std::string("depth validator: a locked reading changed (") + ToString(locked.Reading()) + ")");
+        // The same once depth already in use goes clear: what moves content
+        // stops being used.
+        FrameGenDepthValidator in_use;
+        batches(in_use, cockpit, 1);
+        batches(in_use, clear_near, 2);
+        Check(in_use.Reading() == FrameGenDepthReading::kUnusable && !in_use.Swapped(),
+              "depth validator: depth in use that goes clear and moves content is dropped");
+    }
+    {
+        // Depth in use goes clear and reads as far (MSFS 2024's menus): kept,
+        // nothing to take up again, never swapped.
+        FrameGenDepthValidator validator;
+        batches(validator, cockpit, 1);
+        Check(validator.Reading() == FrameGenDepthReading::kAsSubmitted && validator.Decisions() == 1,
+              "depth validator: a cockpit's depth is taken up as submitted");
+        const float scale = validator.Scale();
+        batches(validator, clear, 20);
+        Check(validator.Reading() == FrameGenDepthReading::kAsSubmitted && !validator.Swapped() &&
+                  validator.Scale() == scale && validator.Decisions() == 1,
+              std::string("depth validator: clear depth read as far keeps the reading in use (") +
+                  ToString(validator.Reading()) + ")");
+        batches(validator, cockpit, 1);
+        Check(validator.Reading() == FrameGenDepthReading::kAsSubmitted && validator.Decisions() == 1,
+              "depth validator: and nothing changes when the cockpit is back");
+    }
+    {
+        // Varied depth whose reading as described moves too little to be
+        // judged: the swapped reading wins against nothing.
+        FrameGenDepthEvidence scenery = cockpit;
+        scenery.decoded = score(40.0, 0.2);
+        scenery.swapped = score(kBinocular, 0.5, 6000.0);
+        FrameGenDepthValidator validator;
+        batches(validator, scenery, 10);
+        Check(validator.Reading() == FrameGenDepthReading::kUnknown && !validator.Swapped(),
+              std::string("depth validator: swapped against a reading that moves nothing decides nothing (") +
+                  ToString(validator.Reading()) + ")");
+        batches(validator, cockpit, 1);
+        Check(validator.Reading() == FrameGenDepthReading::kAsSubmitted, "depth validator: then the cockpit decides");
+    }
+    {
+        // Reversed depth described as standard, the evidence following the
+        // validator's decoding as a check's does: swapped once, then held.
+        FrameGenDepthEvidence wrong = cockpit;
+        wrong.decoded = score(kBinocular, 0.95, 11000.0);
+        wrong.swapped = score(10000.0, 0.3, 1500.0);
+        FrameGenDepthValidator validator;
+        for (int i = 0; i < 30; ++i) batches(validator, validator.Swapped() ? cockpit : wrong, 1);
+        Check(validator.Reading() == FrameGenDepthReading::kReversed && validator.Swapped() &&
+                  validator.Decisions() == 1,
+              "depth validator: reversed depth is swapped once and held (" + std::to_string(validator.Decisions()) +
+                  " decisions)");
+        for (int i = 0; i < 30; ++i) batches(validator, validator.Swapped() ? cockpit : wrong, 1);
+        Check(validator.Decisions() == 1, "depth validator: no flip-flopping on unchanged evidence");
+    }
+    {
+        // The scale: probes falling toward the far edge step it up; alike
+        // probes with one below the rest do not, though noise orders them
+        // falling, nor any probes on depth the same all over.
+        FrameGenDepthEvidence further = cockpit;
+        probes(further, {1.5, 1.27, 1.0, 0.96, 0.8}, 8000.0);
+        FrameGenDepthValidator validator;
+        batches(validator, further, 1);
+        Check(validator.Scale() > 1.1f, "depth validator: probes falling toward the edge step the scale up (" +
+                                            std::to_string(validator.Scale()) + ")");
+        FrameGenDepthEvidence alike = cockpit;
+        probes(alike, {1.0004, 1.0003, 1.0002, 1.0001, 0.985}, 8000.0);
+        FrameGenDepthValidator noise;
+        batches(noise, alike, 20);
+        Check(noise.Reading() == FrameGenDepthReading::kAsSubmitted && noise.Scale() == 1.0f &&
+                  noise.ProbeStep() == 0.08f,
+              "depth validator: one probe below alike ones moves nothing (" + std::to_string(noise.Scale()) + ")");
+        FrameGenDepthEvidence flat = further;
+        flat.source_varied = flat.other_varied = 0.0;
+        FrameGenDepthValidator held;
+        batches(held, cockpit, 1);
+        const float scale = held.Scale();
+        batches(held, flat, 20);
+        Check(held.Scale() == scale, "depth validator: probes on depth the same all over move nothing (" +
+                                         std::to_string(held.Scale()) + ")");
+    }
+    {
+        // A 1 m panel over sky, covering 3x5 check cells away from the view
+        // centre. Parallel eyes 6.4 cm apart, horizontal tangents [-2, 1]
+        // and [-1, 2], at 1024x1024 half resolution: the sample grid gives
+        // 10880 binocular samples, 240 moved by 21.85 px, and 15 varied
+        // cells per check. The batch's 720 moved samples exceed 652.8, the
+        // normal evidence threshold, despite only 45 varied cells.
+        FrameGenDepthEvidence sparse = cockpit;
+        sparse.binocular = 10880.0;
+        sparse.decoded = score(240.0, 0.3);
+        // Even a better swapped score cannot swap on sparse evidence.
+        sparse.swapped = score(10880.0, 0.1);
+        sparse.source_varied = 15.0;
+        sparse.other_varied = 20.0;
+        sparse.cockpit = 240.0;
+        // Enough probe samples and a strong trend, but scale still needs
+        // broader variation, independently of decoded adoption.
+        probes(sparse, {1.5, 1.27, 1.0, 0.96, 0.8}, 240.0);
+        FrameGenDepthValidator fresh;
+        batches(fresh, sparse, 20);
+        Check(fresh.Reading() == FrameGenDepthReading::kAsSubmitted && !fresh.Swapped() &&
+                  fresh.Scale() == 1.0f && fresh.ProbeStep() == 0.08f && fresh.Decisions() == 1,
+              "depth validator: sparse valid foreground is adopted as decoded, without swapping or scaling");
+
+        FrameGenDepthValidator after_menu;
+        batches(after_menu, clear, 10);
+        batches(after_menu, sparse, 1);
+        Check(after_menu.Reading() == FrameGenDepthReading::kAsSubmitted && !after_menu.Swapped() &&
+                  after_menu.Decisions() == 1,
+              "depth validator: sparse foreground after a clear menu takes up its depth");
+
+        FrameGenDepthValidator in_use;
+        batches(in_use, cockpit, 1);
+        const auto generation = in_use.Generation();
+        batches(in_use, sparse, 20);
+        Check(in_use.Reading() == FrameGenDepthReading::kAsSubmitted && !in_use.Swapped() &&
+                  in_use.Scale() == 1.0f && in_use.Generation() == generation && in_use.Decisions() == 1,
+              "depth validator: looking out at sparse foreground keeps depth already in use");
+
+        // Sparse depth still has to pass the normal evidence rules: bad
+        // decoded depth is rejected or dropped, never rescued by a swap.
+        FrameGenDepthEvidence wrong = sparse;
+        wrong.decoded = score(240.0, 0.95);
+        wrong.swapped = score(10880.0, 0.3);
+        FrameGenDepthValidator rejected;
+        batches(rejected, wrong, 10);
+        batches(in_use, wrong, 2);
+        Check(rejected.Reading() == FrameGenDepthReading::kUnusable && !rejected.Swapped() &&
+                  in_use.Reading() == FrameGenDepthReading::kUnusable && !in_use.Swapped(),
+              "depth validator: bad sparse depth is rejected or dropped without swapping");
+
+        // The existing swap boundary remains: the same scores can justify
+        // a swap once the depth varies in 16 cells per check.
+        wrong.source_varied = kFrameGenDepthVariedCells;
+        FrameGenDepthValidator broader;
+        batches(broader, wrong, 1);
+        Check(broader.Reading() == FrameGenDepthReading::kReversed && broader.Swapped(),
+              "depth validator: broader variation still permits a well-evidenced swap");
+    }
+    {
+        // SC Evocati's all-zero reversed depth must stay undecided even
+        // when some batches' swapped ratio dips just under kAdopt (0.69).
+        FrameGenDepthEvidence zero = clear;
+        FrameGenDepthValidator validator;
+        for (int i = 0; i < 20; ++i) {
+            zero.swapped = score(kBinocular, i % 2 == 0 ? 0.69 : 0.845);
+            batches(validator, zero, 1);
+        }
+        Check(validator.Reading() == FrameGenDepthReading::kUnknown && !validator.Swapped() &&
+                  validator.Scale() == 1.0f && validator.ProbeStep() == 0.08f && validator.Decisions() == 0,
+              "depth validator: clear reversed depth never adopts a chance swapped reading");
+
+        // A genuinely uniform near buffer is not evidence for adoption
+        // either, even when its decoded and swapped scores look good.
+        zero.decoded = score(kBinocular, 0.3);
+        zero.swapped = score(kBinocular, 0.69);
+        probes(zero, {1.5, 1.27, 1.0, 0.96, 0.8}, 8000.0);
+        FrameGenDepthValidator uniform;
+        batches(uniform, zero, 20);
+        Check(!uniform.Usable() && !uniform.Swapped() && uniform.Scale() == 1.0f && uniform.ProbeStep() == 0.08f,
+              "depth validator: uniform near depth cannot be adopted, swapped or scaled on good scores");
+    }
+    {
+        // The fallback-share guard and uniform/unjudged-swap gates must
+        // agree on which batches count toward recovery after a drop.
+        FrameGenDepthValidator recovery;
+        batches(recovery, cockpit, 1);
+        FrameGenDepthEvidence disproved = cockpit;
+        disproved.decoded = score(10000.0, 0.3, 6000.0);
+        batches(recovery, disproved, 1);
+        Check(!recovery.Usable(), "combined depth guard: mostly-disproved depth drops");
+
+        FrameGenDepthEvidence uniform = cockpit;
+        uniform.source_varied = uniform.other_varied = 0.0;
+        batches(recovery, uniform, 1);
+        Check(!recovery.Usable(), "combined depth guard: uniform depth cannot recover a dropped reading");
+
+        FrameGenDepthEvidence unjudged = cockpit;
+        unjudged.decoded = score(40.0, 0.2);
+        unjudged.swapped = score(kBinocular, 0.3, 1000.0);
+        batches(recovery, unjudged, 1);
+        Check(!recovery.Usable() && !recovery.Swapped(),
+              "combined depth guard: a swap against an unjudged decoding cannot recover depth");
+
+        batches(recovery, cockpit, 1);
+        Check(!recovery.Usable(),
+              "combined depth guard: ineligible batches did not consume the first recovery pass");
+        batches(recovery, cockpit, 1);
+        Check(recovery.Usable() && !recovery.Swapped(),
+              "combined depth guard: two eligible passing batches recover the decoded reading");
+    }
+    {
+        // Sparse foreground may recover as decoded, but a good swapped
+        // score on sparse evidence cannot consume a recovery pass.
+        FrameGenDepthEvidence sparse = cockpit;
+        sparse.binocular = 10880.0;
+        sparse.decoded = score(240.0, 0.3, 24.0);
+        sparse.swapped = score(10880.0, 0.1, 1000.0);
+        sparse.source_varied = 15.0;
+        sparse.other_varied = 20.0;
+        FrameGenDepthValidator recovery;
+        batches(recovery, sparse, 1);
+        Check(recovery.Usable() && !recovery.Swapped(), "sparse guard recovery: adopted as decoded");
+        FrameGenDepthEvidence disproved = sparse;
+        disproved.decoded = score(240.0, 0.3, 144.0);
+        batches(recovery, disproved, 1);
+        Check(!recovery.Usable() && !recovery.Swapped(),
+              "sparse guard recovery: majority fallback drops depth without a sparse swap");
+
+        FrameGenDepthEvidence swap_only = sparse;
+        swap_only.decoded = score(240.0, 0.8, 24.0);
+        batches(recovery, swap_only, 1);
+        Check(!recovery.Usable() && !recovery.Swapped(),
+              "sparse guard recovery: attractive ineligible swap does not bypass recovery");
+        batches(recovery, sparse, 1);
+        Check(!recovery.Usable(), "sparse guard recovery: one eligible decoded batch still waits");
+        batches(recovery, sparse, 1);
+        Check(recovery.Usable() && !recovery.Swapped() && recovery.Scale() == 1.0f,
+              "sparse guard recovery: two sparse decoded batches recover without swap or scale");
+    }
 }
 
 // OpenComposite (an OpenVR game on OpenXR): IVRCompositor::WaitGetPoses
@@ -10047,6 +12809,189 @@ void TestAutoProbesNeedRoom() {
     Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
 }
 
+// A CPU-fast/GPU-slow game only exposes its throughput limit once Auto
+// probes full rate and the driver's short render queue fills. The ordinary
+// engagement warmup is two seconds; keeping it throughout a probe spends
+// those seconds on persistently late frames. Judge the actual probe cadence
+// after a short transition instead, preserving normal engagement warmup.
+void TestAutoGpuBoundProbeReturnsPromptly() {
+    for (const FrameGenSynthesisMode mode : {FrameGenSynthesisMode::kExtrapolate, FrameGenSynthesisMode::kInterpolate}) {
+        const std::string name = std::string("auto GPU-bound probe, ") +
+                                 (mode == FrameGenSynthesisMode::kExtrapolate ? "extrapolate" : "interpolate");
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        gpu.game_gpu = 17ms;
+        gpu.frames_ahead = 4;
+        Runtime runtime;
+        runtime.paced = true;
+        std::unique_ptr<App> owned;
+        App* app = nullptr;
+        StartJit(presenter, gpu, mode, FrameGenMultiplier::kAuto, app, runtime, owned);
+        presenter.SetAutoPolicy(200ms, 500ms, 15s, 300ms);
+        app->before_release = [&] { gpu.GameFrame(); };
+        RunWork(*app, 2000ms, PeriodsOfWork(kPeriod, 1.6));
+        Check(presenter.Status().multiplier == 2 && presenter.Status().threaded,
+              name + ": starts with stable 2x output");
+        // Preserve the production two-second settle and fifteen-second
+        // confirmation. Only probe scheduling is shortened for the test.
+        presenter.SetAutoPolicy(2s, 500ms, 15s, 300ms);
+        std::optional<TimePoint> probing;
+        double failed_ms = 0.0;
+        RunWork(*app, 6000ms, {2ms}, [&](const XrFrameState&) {
+            const auto now = std::chrono::steady_clock::now();
+            const auto multiplier = presenter.Status().multiplier;
+            if (!probing && multiplier == 1) probing = now;
+            if (probing && multiplier >= 2) {
+                failed_ms = Seconds(now - *probing) * 1000.0;
+                return true;
+            }
+            return false;
+        });
+        std::cerr << "  " << name << ": failed probe lasted " << failed_ms << " ms" << std::endl;
+        Check(probing && failed_ms > 0.0 && failed_ms < 1000.0,
+              name + ": actual late cadence ends the failed probe within one second (" +
+                  std::to_string(failed_ms) + " ms)");
+        // The failed probe's backoff still permits a lighter scene to
+        // recover; no capture-latency observation permanently pins a rate.
+        {
+            std::scoped_lock lock(gpu.timeline_mutex);
+            gpu.game_gpu = 3ms;
+        }
+        RunWork(*app, 4500ms, {2ms});
+        Check(presenter.Status().multiplier == 1,
+              name + ": a lighter GPU workload returns to full rate");
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    }
+}
+
+// Constant capture latency can exceed a refresh while captures still finish
+// every refresh. It is not proof of a throughput limit. Such a game must
+// reach full rate, and a single transition hitch must not fail its probe.
+void TestAutoProbeAllowsLatencyAndShortHitch() {
+    for (const FrameGenSynthesisMode mode : {FrameGenSynthesisMode::kExtrapolate, FrameGenSynthesisMode::kInterpolate}) {
+        const std::string name = std::string("auto latency and transient, ") +
+                                 (mode == FrameGenSynthesisMode::kExtrapolate ? "extrapolate" : "interpolate");
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        gpu.capture_lag = 17ms;
+        Runtime runtime;
+        runtime.paced = true;
+        std::unique_ptr<App> owned;
+        App* app = nullptr;
+        StartJit(presenter, gpu, mode, FrameGenMultiplier::kAuto, app, runtime, owned);
+        presenter.SetAutoPolicy(200ms, 500ms, 15s, 300ms);
+        RunWork(*app, 2000ms, PeriodsOfWork(kPeriod, 1.6));
+        Check(presenter.Status().multiplier == 2, name + ": starts at 2x");
+        presenter.SetAutoPolicy(2s, 500ms, 15s, 300ms);
+        RunWork(*app, 5000ms, {2ms}, [&](const XrFrameState&) {
+            return presenter.Status().multiplier == 1;
+        });
+        Check(presenter.Status().multiplier == 1,
+              name + ": fixed latency does not prohibit full-rate throughput");
+        const auto started = std::chrono::steady_clock::now();
+        bool hitched = false;
+        bool failed = false;
+        RunWork(*app, 2400ms, {2ms}, [&](const XrFrameState&) {
+            if (!hitched && std::chrono::steady_clock::now() - started >= 300ms) {
+                runtime.stall_next_submit_us = 120'000;
+                hitched = true;
+            }
+            failed = failed || presenter.Status().multiplier != 1;
+            return false;
+        });
+        Check(hitched && !failed && presenter.Status().multiplier == 1,
+              name + ": one late frame does not fail an otherwise steady probe");
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    }
+}
+
+// A probe's settle is 250 ms since b2ef6a8, tested with one late frame. A
+// switch to a lower multiplier that costs a few late frames in a row (a
+// game's frame time catching up with its new period, the runtime's
+// compositor adjusting), followed by steady on-time frames, must not fail
+// a probe the game can hold, nor double the next probe's wait: whether
+// the burst comes at the switch or as its settle ends, and for a slow probe
+// (4x -> 3x: a third as many frames in the same time) too.
+void TestAutoProbeSurvivesTransitionBurst() {
+    struct Burst {
+        std::chrono::milliseconds after; // from the switch to the first late frame
+        int frames;                      // consecutive late frames
+    };
+    struct Probe {
+        const char* name;
+        double engage_periods; // the game's work while Auto steps up to `from`
+        std::uint32_t from;
+        double steady_periods; // then: within reach of `to`, held there
+        std::uint32_t to;
+        std::vector<Burst> bursts;
+    };
+    const std::vector<Probe> probes = {
+        {"2x -> full rate", 1.6, 2, 0.18, 1,
+         {Burst{0ms, 4}, Burst{150ms, 4}, Burst{240ms, 3}, Burst{240ms, 4}, Burst{300ms, 4}, Burst{700ms, 4}}},
+        {"4x -> 3x", 4.2, 4, 2.7, 3, {Burst{0ms, 4}, Burst{240ms, 4}, Burst{300ms, 4}}},
+    };
+    for (const FrameGenSynthesisMode mode : {FrameGenSynthesisMode::kExtrapolate, FrameGenSynthesisMode::kInterpolate}) {
+        for (const Probe& probe : probes) {
+            for (const Burst burst : probe.bursts) {
+                const std::string name = std::string("auto probe transition burst, ") +
+                                         (mode == FrameGenSynthesisMode::kExtrapolate ? "extrapolate" : "interpolate") +
+                                         ", " + probe.name + ", " + std::to_string(burst.frames) + " late frames " +
+                                         std::to_string(burst.after.count()) + " ms after the switch";
+                SessionLog log("auto-burst");
+                FrameGenPresenter presenter;
+                GpuLog gpu;
+                Runtime runtime;
+                runtime.paced = true;
+                std::unique_ptr<App> owned;
+                App* app = nullptr;
+                StartJit(presenter, gpu, mode, FrameGenMultiplier::kAuto, app, runtime, owned, log.logger.get());
+                presenter.SetAutoPolicy(200ms, 500ms, 15s, 300ms);
+                RunWork(*app, 4000ms, PeriodsOfWork(kPeriod, probe.engage_periods),
+                        [&](const XrFrameState&) { return presenter.Status().multiplier == probe.from; });
+                RunWork(*app, 300ms, PeriodsOfWork(kPeriod, probe.engage_periods));
+                Check(presenter.Status().multiplier == probe.from,
+                      name + ": starts at " + std::to_string(probe.from) + "x (" +
+                          std::to_string(presenter.Status().multiplier) + "x)");
+                // The production settle and confirmation; only the probe comes sooner.
+                presenter.SetAutoPolicy(2s, 500ms, 15s, 300ms);
+                const auto steady = PeriodsOfWork(kPeriod, probe.steady_periods);
+                RunWork(*app, 6000ms, steady, [&](const XrFrameState&) { return presenter.Status().multiplier == probe.to; });
+                Check(presenter.Status().multiplier == probe.to, name + ": the probe began");
+                const auto switched = std::chrono::steady_clock::now();
+                // No further probe in the window (5 s steady first).
+                presenter.SetAutoPolicy(2s, 5000ms, 15s, 300ms);
+                // Late frames take 1.25 times their refreshes and more; then
+                // the steady frames, which hold the probe's rate.
+                const auto late_work = PeriodsOfWork(kPeriod, 1.6 * probe.to).front();
+                int late = 0;
+                bool failed = false;
+                while (std::chrono::steady_clock::now() - switched < 2000ms) {
+                    const bool in_burst =
+                        late < burst.frames && std::chrono::steady_clock::now() - switched >= burst.after;
+                    const XrFrameState state = app->Wait();
+                    app->Begin();
+                    SleepPrecise(std::chrono::steady_clock::now() + (in_burst ? late_work : steady.front()));
+                    app->Release();
+                    Check(XR_SUCCEEDED(app->End(state.predictedDisplayTime)), name + ": end");
+                    late += in_burst ? 1 : 0;
+                    failed = failed || presenter.Status().multiplier != probe.to;
+                }
+                presenter.Stop();
+                const std::vector<std::string> steps = log.Lines("automatic multiplier");
+                std::cerr << "  " << name << ": " << (failed ? "FAILED" : "held") << " ("
+                          << (steps.empty() ? std::string("no step") : steps.back()) << ")" << std::endl;
+                Check(late == burst.frames, name + ": the burst ran");
+                Check(!failed && log.Lines("next probe in").empty(),
+                      name + ": a probe the game holds survives the burst, its backoff not doubled (" +
+                          (steps.empty() ? std::string("no step") : steps.back()) + ")");
+                Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+            }
+        }
+    }
+}
+
 // The same jump while Frame Generation presents (no game pause causes it
 // then, but a runtime may): the presenter thread's refreshes stop advancing,
 // so it stops and frames pass straight through within moments, the game never
@@ -10577,6 +13522,23 @@ void TestOsdDescription() {
     Check(text.badge == "ON" && text.shown_fps == 89.6 && text.state == "active", "generating: the FPS badge");
     Check(text.reason == "Interpolate" + dot + "Dynamic" + dot + "45" + arrow + "90 fps" + dot + "GPU 3.1 ms",
           "generating: the app's line " + text.reason);
+    Check(!text.uses_depth && !text.uses_motion_vectors, "generating without the game's data: no note");
+    // Depth is noted only once it is in use, not while sent or checked.
+    for (const FrameGenDepthState sent : {FrameGenDepthState::kNotSent, FrameGenDepthState::kChecking,
+                                          FrameGenDepthState::kEmpty, FrameGenDepthState::kUnusable}) {
+        status.depth = sent;
+        Check(!describe(status).uses_depth, "depth sent but not in use: no note");
+    }
+    status.depth = FrameGenDepthState::kInUse;
+    status.motion_vectors = true;
+    text = describe(status);
+    Check(text.uses_depth && text.uses_motion_vectors && text.detail == "45" + arrow + "90 fps  /  GPU 3.1 ms",
+          "generating with depth and motion vectors: noted apart from the detail text");
+    status.full_rate = true;
+    Check(!describe(status).uses_depth, "standing by: frames pass through, so no note");
+    status.full_rate = false;
+    status.depth = FrameGenDepthState::kUnknown;
+    status.motion_vectors = false;
 
     status.dynamic = false;
     status.multiplier = 3;
@@ -10674,6 +13636,1623 @@ void TestOsdDescription() {
     }
 }
 
+// --- The lead's ceiling from the history ring ----------------------------------------
+
+// The fake's history ring (FakeGpu::Capture) takes a slot at the capture on
+// the CPU, as the game releases its views; capture_lag only delays the
+// capture's GPU completion. In a ring of five a moved real frame keeps its
+// previous images until the fourth newer frame is captured: at 2x, 8
+// refreshes and the game's work after that frame's release. Its last moved
+// refresh at a lead of L is written right after refresh L + 1, so a game
+// working 5.5 ms after each wait holds a lead of 7 (half a refresh inside)
+// and not 8 (half a refresh past); at 3x (12 refreshes, two moved ones) 10
+// and not 11.
+
+// The lead the ring holds whatever the game's capture timing
+// (FrameGenRingLeadFloor): the ring's slots less two cadences extrapolating,
+// less one interpolating; a ring of three or less holds 1 (a refresh at a
+// time).
+void TestRingLeadFloor() {
+    Check(FrameGenRingLeadFloor(5, false, 2) == 6 && FrameGenRingLeadFloor(5, false, 3) == 9 &&
+              FrameGenRingLeadFloor(5, false, 4) == 12,
+          "ring lead floor: a ring of five extrapolating holds three cadences");
+    Check(FrameGenRingLeadFloor(5, true, 2) == 8, "ring lead floor: interpolating, four cadences");
+    Check(FrameGenRingLeadFloor(5, false, 1) == 3 && FrameGenRingLeadFloor(5, true, 1) == 4,
+          "ring lead floor: Dynamic's cadence of a refresh");
+    Check(FrameGenRingLeadFloor(3, false, 2) == 2, "ring lead floor: a ring of three");
+}
+
+// Moved frames written so far (composed ones too): extrapolated past their
+// real frame, or interpolated short of it.
+int MovedWrites(GpuLog& gpu) {
+    return SynthesesWhere(gpu, [](FrameGenSynthesisMode mode, float fraction) {
+        return mode == FrameGenSynthesisMode::kExtrapolate ? fraction > 0.0f : fraction < 1.0f;
+    });
+}
+
+// A game against a paced runtime at 90 Hz, presented just in time: its
+// canvas (App, with depth), or quad views Frame Generation composes
+// (QuadApp).
+struct CeilingGame {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    std::unique_ptr<App> owned;
+    App* app{nullptr};
+    std::unique_ptr<QuadApp> quad;
+
+    CeilingGame(bool quad_views, FrameGenSynthesisMode mode, FrameGenMultiplier multiplier, Logger* logger = nullptr) {
+        runtime.paced = true;
+        if (quad_views) {
+            StartQuad(presenter, gpu, mode, multiplier);
+            quad = std::make_unique<QuadApp>(presenter, runtime);
+        } else {
+            StartJit(presenter, gpu, mode, multiplier, app, runtime, owned, logger);
+        }
+    }
+    ~CeilingGame() { presenter.Stop(); }
+    CeilingGame(const CeilingGame&) = delete;
+    CeilingGame& operator=(const CeilingGame&) = delete;
+
+    void Frames(int count) {
+        for (int i = 0; i < count; ++i) {
+            if (quad) {
+                quad->Frame();
+            } else {
+                app->Frame();
+            }
+        }
+    }
+    // Frames working works[i % size] each, until `until` (when given).
+    void Run(std::chrono::milliseconds duration, const std::vector<std::chrono::microseconds>& works,
+             const std::function<bool()>& until = {}) {
+        if (quad) {
+            quad->RunWorks(duration, works, until);
+        } else {
+            RunWork(*app, duration, works, [&](const XrFrameState&) { return until && until(); });
+        }
+    }
+    bool Ordered() const { return !runtime.ordering_violation && !g_release_violation; }
+};
+
+// What a stretch of a CeilingGame's run did.
+struct CeilingWindow {
+    FrameGenStatus before;
+    FrameGenStatus after;
+    int refreshes{0}; // submissions
+    int moved{0};     // moved frames written
+
+    std::uint64_t Exhausted() const { return after.ring_exhausted - before.ring_exhausted; }
+    std::uint64_t Short() const { return after.ring_short - before.ring_short; }
+    std::string Text() const {
+        return "lead " + std::to_string(after.lead_slots) + ", ceiling " + std::to_string(after.lead_ceiling) +
+               ", ring moves -" + std::to_string(after.lead_ring_downs) + "/+" + std::to_string(after.lead_ring_raises) +
+               ", " + std::to_string(Exhausted()) + " found their images replaced (" + std::to_string(Short()) +
+               " a capture short, " + std::to_string(after.ring_short_ignored - before.ring_short_ignored) +
+               " of those ignored), " + std::to_string(moved) + " moved, of " + std::to_string(refreshes) +
+               " refreshes" +
+               (std::getenv("FG_TEST_STATS")
+                    ? "; generated +" + std::to_string(after.generated - before.generated) + ", unmeasured +" +
+                          std::to_string(after.unmeasured_copies - before.unmeasured_copies) + ", skipped +" +
+                          std::to_string(after.copies_skipped - before.copies_skipped) + ", unready +" +
+                          std::to_string(after.unready_capture - before.unready_capture) + ", unwritten +" +
+                          std::to_string(after.unwritten - before.unwritten) + ", app frames +" +
+                          std::to_string(after.app_frames - before.app_frames) + ", multiplier " +
+                          std::to_string(after.multiplier) + ", refreshes per real frame " +
+                          std::to_string(after.refreshes_per_real_frame)
+                    : std::string());
+    }
+};
+
+CeilingWindow MeasureCeiling(CeilingGame& game, std::chrono::milliseconds duration,
+                             const std::vector<std::chrono::microseconds>& works) {
+    CeilingWindow window;
+    window.before = game.presenter.Status();
+    const std::size_t first = game.runtime.Submissions();
+    const int moved = MovedWrites(game.gpu);
+    game.Run(duration, works);
+    window.after = game.presenter.Status();
+    window.refreshes = static_cast<int>(game.runtime.Submissions() - first);
+    window.moved = MovedWrites(game.gpu) - moved;
+    return window;
+}
+
+FrameGenLeadPolicy PinnedLead(std::uint32_t lead, bool ring_ceiling) {
+    FrameGenLeadPolicy policy;
+    policy.pinned_lead = lead;
+    policy.ring_ceiling = ring_ceiling;
+    return policy;
+}
+
+// DCS on Virtual Desktop (Pierpaolo, 2026-10-20): at a lead of 8, 198
+// refreshes in 30 s found their real frame's images replaced in the history
+// ring, its moved refreshes shown as exact copies. A lead the ring is a
+// capture short for: two real frames finding their previous images replaced
+// lower the lead's ceiling a refresh, and the lead with it, until the ring
+// holds it. Off, the lead stays and half the refreshes stand still. Canvas
+// and quad views at 2x, and the canvas at 3x (12, two refreshes above what
+// the ring holds: lowered twice).
+void TestLeadCeilingFollowsRing() {
+    struct Variant {
+        const char* name;
+        bool quad;
+        FrameGenMultiplier multiplier;
+        std::uint32_t pinned;
+        std::uint32_t holds; // the lead the ring holds
+        std::uint64_t downs;
+    };
+    for (const Variant& variant : {Variant{"ring ceiling 2x", false, FrameGenMultiplier::k2, 8, 7, 1},
+                                   Variant{"ring ceiling 3x", false, FrameGenMultiplier::k3, 12, 10, 2},
+                                   Variant{"ring ceiling quad 2x", true, FrameGenMultiplier::k2, 8, 7, 1}}) {
+        for (const bool on : {false, true}) {
+            const std::string name = std::string(variant.name) + (on ? "" : " (off)");
+            CeilingGame game(variant.quad, FrameGenSynthesisMode::kExtrapolate, variant.multiplier);
+            game.presenter.SetLeadPolicy(PinnedLead(variant.pinned, on));
+            game.Frames(3);
+            game.Run(1000ms, {5500us});
+            const CeilingWindow window = MeasureCeiling(game, 1000ms, {5500us});
+            const FrameGenStatus& status = window.after;
+            std::cerr << "  " << name << ": " << window.Text() << std::endl;
+            Check(game.Ordered(), name + ": calls stayed ordered");
+            if (!on) {
+                Check(status.lead_slots == variant.pinned && status.lead_ceiling == 0,
+                      name + ": the lead stays where it was pinned (" + window.Text() + ")");
+                Check(window.Exhausted() > static_cast<std::uint64_t>(window.refreshes / 4),
+                      name + ": its moved refreshes find their frame's images replaced (" + window.Text() + ")");
+                Check(window.Short() * 10 >= window.Exhausted() * 9,
+                      name + ": ...a capture short, their newest images kept (" + window.Text() + ")");
+                Check(!status.lead_ceiling_on, name + ": Status says the ceiling is off");
+                continue;
+            }
+            Check(status.lead_ceiling == variant.holds && status.lead_slots == variant.holds,
+                  name + ": the lead comes down to what the ring holds (" + window.Text() + ")");
+            Check(status.lead_ring_downs == variant.downs && status.lead_ring_raises == 0,
+                  name + ": a refresh at a time, " + std::to_string(variant.downs) + " (" + window.Text() + ")");
+            Check(window.Exhausted() <= static_cast<std::uint64_t>(window.refreshes / 50) &&
+                      window.moved > window.refreshes / 4,
+                  name + ": its refreshes move their frame again (" + window.Text() + ")");
+            Check(game.gpu.ring_refusals == 0 && status.quad_write_declines == 0,
+                  name + ": nothing is asked of the backend it no longer has");
+            Check(status.lead_ceiling_on, name + ": Status says the ceiling is on");
+        }
+    }
+}
+
+// Dynamic at the game's own rate (quad views, the backend's ring of five),
+// the game's work one, then two, then two refreshes less 3 ms: released at
+// once when it asks late, its real frames come 1.45 refreshes apart, and
+// only the refreshes in the longer gaps are moved. The ring holds a lead of
+// 6 for them. Pinned at 8, the ceiling comes down twice, keyed by Dynamic's
+// typical refreshes per real frame (2; its floor is 3); off, those
+// refreshes stand still. (A game a real frame every 1.13 refreshes, work of
+// one, one, then two refreshes, keeps its five newest frames for under six
+// refreshes: at a lead of 7 a frame is no longer kept by its last refresh,
+// nothing is moved, and nothing finds the ring short.)
+void TestLeadCeilingDynamicFollowsSpacing() {
+    for (const bool on : {true, false}) {
+        const std::string name = std::string("ring ceiling, Dynamic") + (on ? "" : " (off)");
+        CeilingGame game(true, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic);
+        game.presenter.SetDynamicPolicy(GuardDynamic());
+        game.presenter.SetLeadPolicy(PinnedLead(8, on));
+        const auto works = QuadTicks(game.runtime, {1, 2, 2});
+        auto composing = [&] {
+            const FrameGenStatus status = game.presenter.Status();
+            return status.threaded && status.quad && !status.standby;
+        };
+        game.Run(3000ms, works, composing);
+        Check(composing(), name + ": composing under Dynamic");
+        game.Run(1500ms, works);
+        const CeilingWindow window = MeasureCeiling(game, 1000ms, works);
+        const FrameGenStatus& status = window.after;
+        std::cerr << "  " << name << ": " << window.Text() << std::endl;
+        Check(game.Ordered() && composing(), name + ": calls stayed ordered, still composing");
+        if (on) {
+            Check(status.lead_ceiling == 6 && status.lead_slots == 6 && status.lead_ring_downs == 2,
+                  name + ": the ceiling comes down to what the ring holds (" + window.Text() + ")");
+            Check(window.Exhausted() <= static_cast<std::uint64_t>(window.refreshes / 50) &&
+                      window.moved > window.refreshes / 6,
+                  name + ": its refreshes move their frame again (" + window.Text() + ")");
+        } else {
+            Check(window.Exhausted() > static_cast<std::uint64_t>(window.refreshes / 10),
+                  name + ": its moved refreshes find their frame's images replaced (" + window.Text() + ")");
+        }
+    }
+}
+
+// Dynamic's floor is the ring's at a refresh per real frame (3), not at its
+// typical 2 refreshes per real frame (6): a game a real frame every 1.13
+// refreshes (work of one, one, then two refreshes) pinned at 6 finds the
+// ring short there, and the ceiling comes down to 5. With the fixed 2x floor
+// it would be held at 6.
+void TestLeadCeilingDynamicFloor() {
+    const std::string name = "ring ceiling, Dynamic's floor";
+    CeilingGame game(true, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic);
+    game.presenter.SetDynamicPolicy(GuardDynamic());
+    game.presenter.SetLeadPolicy(PinnedLead(6, true));
+    const auto works = QuadTicks(game.runtime, {1, 1, 2});
+    auto composing = [&] {
+        const FrameGenStatus status = game.presenter.Status();
+        return status.threaded && status.quad && !status.standby;
+    };
+    game.Run(3000ms, works, composing);
+    Check(composing(), name + ": composing under Dynamic");
+    game.Run(1500ms, works);
+    const CeilingWindow window = MeasureCeiling(game, 1000ms, works);
+    const FrameGenStatus& status = window.after;
+    std::cerr << "  " << name << ": " << window.Text() << ", held " << status.lead_ring_held << std::endl;
+    Check(game.Ordered() && composing(), name + ": calls stayed ordered, still composing");
+    Check(status.multiplier == 2, name + ": keyed by 2 refreshes per real frame (" + std::to_string(status.multiplier) +
+                                      ")");
+    Check(status.lead_ring_downs >= 1 && status.lead_ceiling == 5 && status.lead_slots == 5,
+          name + ": the ceiling comes below the fixed 2x floor of 6 (" + window.Text() + ")");
+}
+
+// One Dynamic ceiling covers 1.5 to 2.5 refreshes per real frame: lowered
+// to 6 for the game of TestLeadCeilingDynamicFollowsSpacing, it goes
+// once the same run slows to two or three refreshes a real frame, where the
+// ring holds a lead more for each third of a refresh.
+void TestLeadCeilingDynamicSlowsDown() {
+    const std::string name = "ring ceiling, Dynamic slows down";
+    CeilingGame game(true, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic);
+    game.presenter.SetDynamicPolicy(GuardDynamic());
+    game.presenter.SetLeadPolicy(PinnedLead(8, true));
+    const auto fast = QuadTicks(game.runtime, {1, 2, 2});
+    auto composing = [&] {
+        const FrameGenStatus status = game.presenter.Status();
+        return status.threaded && status.quad && !status.standby;
+    };
+    game.Run(3000ms, fast, composing);
+    Check(composing(), name + ": composing under Dynamic");
+    game.Run(2500ms, fast, [&] { return game.presenter.Status().lead_ceiling == 6; });
+    const FrameGenStatus lowered = game.presenter.Status();
+    Check(lowered.lead_ceiling == 6, name + ": the ceiling came down to 6 (" + std::to_string(lowered.lead_ceiling) +
+                                         ")");
+    const CeilingWindow window = MeasureCeiling(game, 1500ms, QuadTicks(game.runtime, {2, 2, 3}));
+    const FrameGenStatus& status = window.after;
+    std::cerr << "  " << name << ": " << lowered.refreshes_per_real_frame << " then "
+              << status.refreshes_per_real_frame << " refreshes per real frame: " << window.Text() << std::endl;
+    Check(game.Ordered() && composing(), name + ": calls stayed ordered, still composing");
+    Check(status.refreshes_per_real_frame >= 2.0 && status.lead_ceiling == 0,
+          name + ": slowed, the ceiling goes (" + window.Text() + ")");
+}
+
+// A real frame captured 150 ms late now and then: refreshes that needed it
+// show the frame before moved on past itself (the fallback), whose previous
+// images are long replaced. That is the capture's lateness, not the lead's:
+// the ceiling stays.
+void TestLeadCeilingIgnoresFallbackExhaustion() {
+    const std::string name = "ring ceiling, late captures";
+    _putenv_s("VECTORXR_FRAMEGEN_GPU_AHEAD", "off"); // the game's waits are not held for its GPU
+    CeilingGame game(false, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2);
+    _putenv_s("VECTORXR_FRAMEGEN_GPU_AHEAD", "");
+    game.presenter.SetLeadPolicy(PinnedLead(7, true));
+    int frames = 0;
+    game.app->before_release = [&] { game.gpu.capture_lag = ++frames % 15 == 0 ? 150ms : 0us; };
+    game.Frames(3);
+    const CeilingWindow window = MeasureCeiling(game, 2000ms, {5500us});
+    const FrameGenStatus& status = window.after;
+    std::cerr << "  " << name << ": " << window.Text() << std::endl;
+    Check(game.Ordered(), name + ": calls stayed ordered");
+    Check(window.Exhausted() > 0, name + ": refreshes found their frame's images replaced (" + window.Text() + ")");
+    Check(status.lead_ring_downs == 0 && status.lead_ceiling == 0 && status.lead_slots == 7,
+          name + ": the ceiling and the lead stay (" + window.Text() + ")");
+}
+
+// The presenter thread itself late (the runtime slow to hand its output
+// images back, 9 ms a refresh): a moved refresh at a lead the ring holds by
+// half a refresh is written past the capture that replaces its frame's
+// previous images. That is not the lead's doing: ignored, and the lead
+// stays. At 4 ms the same lead moves its refreshes.
+void TestLeadCeilingIgnoresLateWrites() {
+    for (const int total_us : {9000, 4000}) {
+        const std::string name = "ring ceiling, output waits of " + std::to_string(total_us / 1000) + " ms";
+        CeilingGame game(false, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2);
+        game.presenter.SetLeadPolicy(PinnedLead(7, true));
+        game.Frames(3);
+        // Two output images a refresh (one per view), waited one after the other.
+        g_wait_image_delay = std::chrono::microseconds(total_us / 2);
+        game.Run(1000ms, {5500us});
+        const CeilingWindow window = MeasureCeiling(game, 1000ms, {5500us});
+        g_wait_image_delay = std::chrono::microseconds(0);
+        const FrameGenStatus& status = window.after;
+        std::cerr << "  " << name << ": " << window.Text() << std::endl;
+        Check(game.Ordered(), name + ": calls stayed ordered");
+        if (total_us > 5000) {
+            Check(window.Exhausted() > static_cast<std::uint64_t>(window.refreshes / 5),
+                  name + ": moved refreshes are written too late for their frame's images (" + window.Text() + ")");
+            Check(status.ring_short > 0 && status.ring_short_ignored == status.ring_short,
+                  name + ": ...each found so after the presenter thread's own lateness, ignored (" + window.Text() +
+                      ")");
+            Check(status.lead_ring_downs == 0 && status.lead_slots == 7,
+                  name + ": the ceiling and the lead stay (" + window.Text() + ")");
+        } else {
+            Check(window.Exhausted() <= static_cast<std::uint64_t>(window.refreshes / 50),
+                  name + ": the lead's refreshes move their frame (" + window.Text() + ")");
+        }
+    }
+}
+
+// A canvas short of video memory keeps a ring of three (as in
+// TestJitRingExhaustion): its frames reach the GPU late, the lead grows past
+// what the ring holds, and refreshes show exact copies. A ring of three
+// moves the ceiling for no lead (it would lower the lead the game needs).
+void TestLeadCeilingInactiveOnShortRing() {
+    const std::string name = "ring ceiling, a ring of three";
+    CeilingGame game(false, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2);
+    game.gpu.capture_lag = 40ms;
+    game.gpu.memory_pressure = true;
+    game.presenter.SetLeadPolicy(PinnedLead(0, true));
+    game.Frames(3);
+    const CeilingWindow window = MeasureCeiling(game, 1200ms, kLightWork);
+    const FrameGenStatus& status = window.after;
+    std::cerr << "  " << name << ": " << window.Text() << std::endl;
+    Check(game.Ordered(), name + ": calls stayed ordered");
+    Check(status.lead_slots >= 4 && status.ring_exhausted > 10,
+          name + ": the lead grew and refreshes found their frame's images replaced (" + window.Text() + ")");
+    Check(status.lead_ceiling == 0 && status.lead_ring_downs == 0, name + ": the ceiling stays (" + window.Text() + ")");
+}
+
+// The switch and what the log says: on by default and with
+// VECTORXR_FRAMEGEN_LEAD_CEILING=ring (or on), off with =off, the variable
+// outranking a lead policy set after Start that says otherwise (off for
+// =ring and =on, on for =off). Every session log names its arm,
+// and the summaries carry the ceiling, its moves and the ring-short
+// refreshes (counted, and what the ceiling would have done, when off).
+void TestLeadCeilingSummaryAndSwitch() {
+    std::string outer;
+    if (const char* value = std::getenv("VECTORXR_FRAMEGEN_LEAD_CEILING")) outer = value;
+    for (const char* setting : {"", "ring", "on", "off"}) {
+        const bool off = std::string(setting) == "off";
+        const std::string name = std::string("ring ceiling switch ") + (*setting ? setting : "(unset)");
+        SessionLog log(std::string("ring-ceiling-") + (*setting ? setting : "unset"));
+        _putenv_s("VECTORXR_FRAMEGEN_LEAD_CEILING", setting);
+        CeilingGame game(false, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2, log.logger.get());
+        _putenv_s("VECTORXR_FRAMEGEN_LEAD_CEILING", outer.c_str());
+        game.presenter.SetSummaryInterval(300ms);
+        // The variable outranks it: unset, the policy's own (on) applies.
+        game.presenter.SetLeadPolicy(PinnedLead(8, !*setting || off));
+        game.Frames(3);
+        game.Run(2000ms, {5500us});
+        const FrameGenStatus status = game.presenter.Status();
+        game.presenter.Stop();
+        Check(game.Ordered(), name + ": calls stayed ordered");
+        const std::vector<std::string> started = log.Lines("Frame Generation: the lead's ceiling");
+        const std::vector<std::string> summaries = log.Lines("threaded=1");
+        Check(started.size() == 1, name + ": the start names the arm (" + std::to_string(started.size()) + " lines)");
+        Check(summaries.size() >= 3, name + ": summaries while engaged (" + std::to_string(summaries.size()) + ")");
+        const std::string& line = started.front();
+        const std::string& last = summaries.back();
+        const std::size_t lead_at = last.find(", leadSlots=");
+        const std::size_t ring_at = last.find(", ringExhausted=");
+        const std::size_t ring_end = last.find(", staleSkipped=");
+        if (lead_at != std::string::npos && ring_at != std::string::npos && ring_end != std::string::npos) {
+            std::cerr << "  " << name << ": " << last.substr(lead_at + 2, last.find(", leadFloor=") - lead_at - 2)
+                      << last.substr(ring_at, ring_end - ring_at) << std::endl;
+        }
+        const auto any = [&](const std::string& text) {
+            return std::any_of(summaries.begin(), summaries.end(),
+                               [&](const std::string& summary) { return summary.find(text) != std::string::npos; });
+        };
+        if (!off) {
+            Check(line.find(*setting ? "(VECTORXR_FRAMEGEN_LEAD_CEILING=ring)." : "(default;") != std::string::npos,
+                  name + ": the start says the ceiling follows the ring (" + line + ")");
+            Check(last.find(", ringCeiling=7") != std::string::npos &&
+                      last.find(", leadSlots=7 (ring cap)") != std::string::npos &&
+                      last.find(", ringShort=") != std::string::npos,
+                  name + ": the summary shows the ceiling (" + last + ")");
+            Check(any(", ringMoves=-1/+0"), name + ": ...and the window that lowered it (" + last + ")");
+            Check(status.lead_ceiling == 7 && status.lead_ceiling_on, name + ": Status has the ceiling");
+        } else {
+            Check(line.find("ring-short refreshes are counted only (VECTORXR_FRAMEGEN_LEAD_CEILING=off).") !=
+                      std::string::npos,
+                  name + ": the start says the ceiling is off (" + line + ")");
+            Check(last.find(", ringCeiling=off") != std::string::npos &&
+                      last.find(", leadSlots=8 (cap)") != std::string::npos,
+                  name + ": the summary shows the ceiling off, the lead at its cap (" + last + ")");
+            std::uint64_t would = 0;
+            for (const std::string& summary : summaries) {
+                if (const auto value = SummaryValues(summary, "ringWould")) would += static_cast<std::uint64_t>(value->first);
+            }
+            Check(would > 0 && would <= status.ring_short_would,
+                  name + ": ...and what it would have done (" + std::to_string(would) + ", " + last + ")");
+            Check(status.ring_short_would == 1,
+                  name + ": ...one lowering, not one for every ring-short pair at 8 (" +
+                      std::to_string(status.ring_short_would) + ")");
+            Check(status.lead_ceiling == 0 && !status.lead_ceiling_on && status.lead_slots == 8,
+                  name + ": Status has no ceiling");
+        }
+    }
+}
+
+// Captured 83 ms after its release, a real frame is late at a lead of 7 and
+// on time at 8; the ring holds 7. At 7 a late frame's refresh shows the frame
+// before moved past itself, which stands where it stood at 8, its previous
+// images as gone: a refresh lower costs as many refreshes their images and
+// adds the lateness. So each lowering is judged as a probe: frames late at 7
+// within judge in two hitch events (late frame after frame, the second a
+// hitch_span, 250 ms, after the first) put 8 back at once, and 8 is kept for
+// explore_max (1600 ms here) before the ring tries 7 again. Nothing is raised
+// by the retry wait, a hitch_span of frames are late for each lowering
+// (about 16, against 5 when two late frames in ten undid it, which a lone
+// hitch did too: TestLeadCeilingActsThroughHitches), and no more refreshes find
+// their images replaced than at 8 with the ceiling off.
+void TestLeadCeilingRetriesWhenLate() {
+    struct Arm {
+        std::uint64_t exhausted{0};
+        std::uint64_t late{0};
+        FrameGenStatus status;
+        std::vector<double> lowered_at; // seconds into the run
+        std::uint32_t lowest{std::numeric_limits<std::uint32_t>::max()};
+        std::uint32_t highest{0};
+    };
+    Arm arms[2];
+    for (const bool on : {true, false}) {
+        Arm& arm = arms[on ? 0 : 1];
+        const std::string name = std::string("ring ceiling retries") + (on ? "" : " (off)");
+        _putenv_s("VECTORXR_FRAMEGEN_GPU_AHEAD", "off");
+        CeilingGame game(false, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2);
+        _putenv_s("VECTORXR_FRAMEGEN_GPU_AHEAD", "");
+        FrameGenLeadPolicy policy;
+        policy.probe_after = 600s;
+        policy.judge = 300ms;
+        policy.explore_after = 400ms;
+        policy.explore_max = 1600ms;
+        policy.ring_ceiling = on;
+        game.presenter.SetLeadPolicy(policy);
+        game.gpu.capture_lag = 77500us;
+        game.Frames(3);
+        const FrameGenStatus before = game.presenter.Status();
+        const auto start = std::chrono::steady_clock::now();
+        std::uint64_t downs = before.lead_ring_downs;
+        game.Run(7000ms, {5500us}, [&] {
+            const FrameGenStatus now = game.presenter.Status();
+            const double at = Seconds(std::chrono::steady_clock::now() - start);
+            if (now.lead_ring_downs > downs) {
+                downs = now.lead_ring_downs;
+                arm.lowered_at.push_back(at);
+            }
+            if (at >= 1.0) {
+                arm.lowest = std::min(arm.lowest, now.lead_slots);
+                arm.highest = std::max(arm.highest, now.lead_slots);
+            }
+            return false;
+        });
+        arm.status = game.presenter.Status();
+        arm.exhausted = arm.status.ring_exhausted - before.ring_exhausted;
+        arm.late = (arm.status.late_cpu - before.late_cpu) + (arm.status.late_gpu - before.late_gpu);
+        std::string times;
+        for (const double at : arm.lowered_at) times += (times.empty() ? "" : ", ") + std::to_string(at);
+        std::cerr << "  " << name << ": lead " << arm.lowest << "-" << arm.highest << " after 1 s, ring moves -"
+                  << arm.status.lead_ring_downs << "/+" << arm.status.lead_ring_raises << " (lowered at " << times
+                  << " s), undone " << arm.status.lead_ring_undone << ", held " << arm.status.lead_ring_held
+                  << ", refused " << arm.status.lead_ring_refused << ", " << arm.exhausted
+                  << " found their images replaced (" << arm.status.ring_short - before.ring_short
+                  << " the refresh's own frame a capture short), " << arm.late << " late" << std::endl;
+        Check(game.Ordered(), name + ": calls stayed ordered");
+    }
+    const Arm& on = arms[0];
+    const Arm& off = arms[1];
+    const std::uint64_t downs = on.status.lead_ring_downs;
+    const std::uint64_t undone = on.status.lead_ring_undone;
+    Check(downs >= 2 && downs <= 6 && undone + 1 >= downs && undone <= downs && on.status.lead_ring_raises == 0,
+          "ring ceiling retries: each lowering is undone at once, none waits to be raised (-" + std::to_string(downs) +
+              "/+" + std::to_string(on.status.lead_ring_raises) + ", undone " + std::to_string(undone) + ")");
+    Check(on.status.lead_ring_held > 0, "ring ceiling retries: ...and 8 is kept for a while after each");
+    for (std::size_t i = 1; i < on.lowered_at.size(); ++i) {
+        const double gap = on.lowered_at[i] - on.lowered_at[i - 1];
+        Check(gap >= 1.5, "ring ceiling retries: the ring tries 7 again only after explore_max (" +
+                              std::to_string(gap) + " s)");
+    }
+    Check(on.lowest >= 7 && on.highest <= 8,
+          "ring ceiling retries: the lead stays at 7-8 (" + std::to_string(on.lowest) + "-" +
+              std::to_string(on.highest) + ")");
+    Check(on.late <= off.late + 20 * downs, "ring ceiling retries: a hitch_span's frames are late for each lowering (" +
+                                                std::to_string(on.late) + " vs " + std::to_string(off.late) +
+                                                " off, " + std::to_string(downs) + " lowerings)");
+    Check(on.exhausted <= off.exhausted + off.exhausted / 10 + 5,
+          "ring ceiling retries: no more refreshes find their images replaced (" + std::to_string(on.exhausted) +
+              " vs " + std::to_string(off.exhausted) + " off)");
+}
+
+// Leads the ring holds move nothing: a game working 20 ms after each wait
+// (its frames captured 8 refreshes and 20 ms later) at a lead of 8, and
+// Interpolate at 2x, whose ring of five holds 8 whatever the capture timing
+// (FrameGenRingLeadFloor).
+void TestLeadCeilingKeepsLeadTheRingHolds() {
+    struct Case {
+        const char* name;
+        FrameGenSynthesisMode mode;
+        std::chrono::microseconds work;
+        std::chrono::microseconds lag;
+    };
+    for (const Case& test : {Case{"ring ceiling, lead the ring holds", FrameGenSynthesisMode::kExtrapolate, 20000us, 60000us},
+                             Case{"ring ceiling, Interpolate", FrameGenSynthesisMode::kInterpolate, 5500us, 0us}}) {
+        const std::string name = test.name;
+        CeilingGame game(false, test.mode, FrameGenMultiplier::k2);
+        game.gpu.capture_lag = test.lag;
+        game.presenter.SetLeadPolicy(PinnedLead(8, true));
+        game.Frames(3);
+        game.Run(1000ms, {test.work});
+        const CeilingWindow window = MeasureCeiling(game, 1000ms, {test.work});
+        const FrameGenStatus& status = window.after;
+        std::cerr << "  " << name << ": " << window.Text() << std::endl;
+        Check(game.Ordered(), name + ": calls stayed ordered");
+        Check(status.ring_short == 0 && status.lead_ring_downs == 0 && status.lead_ceiling == 0 &&
+                  status.lead_slots == 8 && window.Exhausted() <= 2,
+              name + ": nothing found the ring short, the lead stays (" + window.Text() + ")");
+    }
+}
+
+// A lead the policy's probe found the game needs is not the ring's: first
+// frames captured 83 ms after release, 15 ms of it the game's own work (the
+// ring holds 8, a probe to 7 fails), then the same capture with 3 ms of work
+// (the ring holds 7). A failed probe says only that frames were late a
+// refresh below, which a hitch says too: the ceiling tries 7 itself, frames
+// late at it frame after frame put 8 back at once (two late events), and the
+// ring then holds the ceiling at 8.
+void TestLeadCeilingRespectsProvenLead() {
+    const std::string name = "ring ceiling, proven lead";
+    CeilingGame game(false, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2);
+    FrameGenLeadPolicy policy;
+    policy.probe_after = 250ms;
+    policy.judge = 300ms;
+    policy.explore_after = 10s;
+    policy.ring_ceiling = true;
+    game.presenter.SetLeadPolicy(policy);
+    game.gpu.capture_lag = 68ms;
+    game.Frames(3);
+    game.Run(2500ms, {15000us});
+    const FrameGenStatus proven = game.presenter.Status();
+    game.gpu.capture_lag = 80ms;
+    std::uint32_t lowest = proven.lead_slots;
+    std::uint32_t highest = proven.lead_slots;
+    game.Run(1500ms, {3000us}, [&] {
+        const std::uint32_t lead = game.presenter.Status().lead_slots;
+        lowest = std::min(lowest, lead);
+        highest = std::max(highest, lead);
+        return false;
+    });
+    const FrameGenStatus after = game.presenter.Status();
+    std::cerr << "  " << name << ": lead " << proven.lead_slots << " (floor " << proven.lead_floor << ", "
+              << proven.lead_probes_failed << " probes failed), then " << lowest << "-" << highest
+              << ": ring short +" << after.ring_short - proven.ring_short << " (ignored +"
+              << after.ring_short_ignored - proven.ring_short_ignored << "), held " << after.lead_ring_held
+              << ", ring moves -" << after.lead_ring_downs << "/+" << after.lead_ring_raises << ", undone "
+              << after.lead_ring_undone << std::endl;
+    Check(game.Ordered(), name + ": calls stayed ordered");
+    Check(proven.lead_slots == 8 && proven.lead_probes_failed >= 1,
+          name + ": a probe below 8 failed (lead " + std::to_string(proven.lead_slots) + ", " +
+              std::to_string(proven.lead_probes_failed) + " failed)");
+    Check(after.ring_short > proven.ring_short && after.lead_ring_downs == 1 && after.lead_ring_undone == 1 &&
+              after.lead_ring_held >= 1,
+          name + ": the ring is short at 8, its one lowering undone, then held (held " +
+              std::to_string(after.lead_ring_held) + ", lowered " + std::to_string(after.lead_ring_downs) +
+              ", undone " + std::to_string(after.lead_ring_undone) + ")");
+    Check(lowest >= 7 && highest == 8 && after.lead_slots == 8 && after.lead_floor == 8,
+          name + ": the lead is 8 again, as is the lowest known to hold (" + std::to_string(lowest) + "-" +
+              std::to_string(highest) + ", floor " + std::to_string(after.lead_floor) + ")");
+}
+
+// A presenter run's ceiling is not the next one's (another mode, rate or
+// engagement): restarted, the lead is measured afresh with no ceiling.
+void TestLeadCeilingResetsOnRestart() {
+    const std::string name = "ring ceiling reset";
+    CeilingGame game(false, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2);
+    game.presenter.SetLeadPolicy(PinnedLead(8, true));
+    game.Frames(3);
+    game.Run(3000ms, {5500us}, [&] { return game.presenter.Status().lead_ceiling != 0; });
+    const FrameGenStatus formed = game.presenter.Status();
+    Check(formed.lead_ceiling == 7, name + ": a ceiling formed (" + std::to_string(formed.lead_ceiling) + ")");
+    game.presenter.SetLeadPolicy({});
+    game.presenter.Toggle();
+    game.Frames(4);
+    Check(!game.presenter.Status().threaded, name + ": toggled off, the presenter thread stopped");
+    game.presenter.Toggle();
+    game.Run(3000ms, {1000us}, [&] { return game.presenter.Status().threaded; });
+    game.Run(30ms, {1000us});
+    const FrameGenStatus restarted = game.presenter.Status();
+    Check(game.Ordered(), name + ": calls stayed ordered");
+    Check(restarted.threaded && restarted.lead_ceiling == 0 && restarted.lead_slots <= 2,
+          name + ": the restarted presenter thread has no ceiling and measures its lead afresh (ceiling " +
+              std::to_string(restarted.lead_ceiling) + ", lead " + std::to_string(restarted.lead_slots) + ")");
+}
+
+// The GPU-bound game of RunLeadAfterHitches (19 ms of GPU a frame, three
+// frames queued, Dynamic at its own ~52 fps) climbs to a lead of 8 while it
+// settles, and the fake's ring is a capture short at 7 and 8. Its frames
+// are late a refresh below those leads then (a probe from 8 fails, as does
+// a lowering of the ceiling to 7), so the ceiling cannot spare it those
+// refreshes: the policy brings the lead down to 5 itself once the game has
+// settled (about 3 s in, when every frame at 8 finds its images replaced),
+// and the ring follows. The ceiling must cost little on the way: a lowering
+// from 8 that comes as the policy's calm probe from 8 is already due is that
+// probe (failed, the policy's next waits explore_after, doubling); any other
+// is a trial whose undoing puts the policy's floors and calm time back, so
+// the policy's own probes keep their times; and none comes while the
+// policy's probe or step down is judged. Judged apart, the policy failed
+// its own probe from 8 after the lowering's, came down from 8 0.35 s later
+// and was held at 6 for 1.4 s, its step down dropped unjudged: 40 refreshes
+// found their images replaced against 29 off. A failed probe of the
+// policy's no longer keeps 8 for the ring (a hitch fails one too), so the
+// ceiling tries 7 itself about twice while the game settles, each time late
+// for a hitch_span (two late events undo it; here shortened with the
+// policy's other windows, to 50 ms in 400 ms): a few frames more are late
+// for each, and no more refreshes find their images replaced. In this fake
+// that is a trade with no gain: both lowerings undone (2 in every run), 5-8
+// frames more late than off and as many refreshes finding their images
+// replaced. The lowerings undone are bounded, so the allowance for each
+// cannot grow with them; the cost of a lowering at the field's windows (a
+// hitch_span of 250 ms in 2 s) is TestLeadCeilingRetriesWhenLate's.
+void TestLeadCeilingGpuBoundTrade() {
+    struct Arm {
+        std::uint64_t exhausted{0};
+        std::uint64_t late{0};
+        FrameGenStatus status;
+    };
+    Arm arms[2];
+    for (const bool on : {true, false}) {
+        Arm& arm = arms[on ? 0 : 1];
+        const std::string name = std::string("ring ceiling, GPU-bound") + (on ? "" : " (off)");
+        CeilingGame game(false, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic);
+        game.gpu.game_gpu = 19ms;
+        game.gpu.frames_ahead = 3;
+        FrameGenLeadPolicy policy;
+        policy.probe_after = 250ms;
+        policy.judge = 200ms;
+        policy.explore_after = 700ms;
+        policy.explore_max = 1400ms;
+        // The hitch events that judge the ring's lowerings, shortened with
+        // the rest (a hitch_span of 250 ms is 13 of this game's frames).
+        policy.hitch_span = 50ms;
+        policy.event_window = 400ms;
+        policy.ring_ceiling = on;
+        game.presenter.SetLeadPolicy(policy);
+        game.app->before_release = [&] { game.gpu.GameFrame(); };
+        game.Frames(3);
+        game.Run(3000ms, {6ms}, [&] { return Engaged(game.presenter); });
+        Check(Engaged(game.presenter), name + ": Dynamic engages for the GPU-bound game");
+        const FrameGenStatus before = game.presenter.Status();
+        const bool trace = std::getenv("FG_TEST_LEAD_TRACE") != nullptr;
+        const auto trace_start = std::chrono::steady_clock::now();
+        FrameGenStatus traced = before;
+        auto polled = trace_start;
+        game.Run(6000ms, {6ms}, [&] {
+            // Polled every 40 ms: Status at every frame moved the game's timing.
+            if (!trace || std::chrono::steady_clock::now() - polled < 40ms) return false;
+            polled = std::chrono::steady_clock::now();
+            const FrameGenStatus now = game.presenter.Status();
+            if (now.lead_slots != traced.lead_slots || now.lead_ceiling != traced.lead_ceiling ||
+                now.lead_floor != traced.lead_floor) {
+                std::cerr << "    " << Seconds(std::chrono::steady_clock::now() - trace_start) << " s: lead "
+                          << now.lead_slots << " floor " << now.lead_floor << " ceiling " << now.lead_ceiling
+                          << " exhausted +" << now.ring_exhausted - before.ring_exhausted << " short +"
+                          << now.ring_short - before.ring_short << " late +"
+                          << (now.late_cpu - before.late_cpu) + (now.late_gpu - before.late_gpu) << " probes "
+                          << now.lead_probes << "/" << now.lead_probes_failed << " held " << now.lead_ring_held
+                          << std::endl;
+                traced = now;
+            }
+            return false;
+        });
+        arm.status = game.presenter.Status();
+        arm.exhausted = arm.status.ring_exhausted - before.ring_exhausted;
+        arm.late = (arm.status.late_cpu - before.late_cpu) + (arm.status.late_gpu - before.late_gpu);
+        std::cerr << "  " << name << ": lead " << arm.status.lead_slots << " (floor " << arm.status.lead_floor
+                  << ", ceiling " << arm.status.lead_ceiling << ", ring moves -" << arm.status.lead_ring_downs << "/+"
+                  << arm.status.lead_ring_raises << ", undone " << arm.status.lead_ring_undone << ", refused "
+                  << arm.status.lead_ring_refused << ", held " << arm.status.lead_ring_held << "), " << arm.exhausted
+                  << " found their images replaced (" << arm.status.ring_short - before.ring_short
+                  << " the refresh's own frame a capture short), " << arm.late << " late" << std::endl;
+        Check(game.Ordered(), name + ": calls stayed ordered");
+    }
+    const Arm& on = arms[0];
+    const Arm& off = arms[1];
+    Check(off.exhausted > 20, "ring ceiling, GPU-bound: off, the fake's ring is short for the lead (" +
+                                  std::to_string(off.exhausted) + ")");
+    Check(on.status.lead_ring_refused <= 2,
+          "ring ceiling, GPU-bound: frames late at a lowered ceiling put it back, not left to wait (refused " +
+              std::to_string(on.status.lead_ring_refused) + ", undone " + std::to_string(on.status.lead_ring_undone) +
+              ")");
+    Check(on.status.lead_ring_undone <= 2,
+          "ring ceiling, GPU-bound: the ceiling tries 7 about twice while the game settles (undone " +
+              std::to_string(on.status.lead_ring_undone) + " of " + std::to_string(on.status.lead_ring_downs) + ")");
+    Check(on.exhausted <= off.exhausted + std::max<std::uint64_t>(5, off.exhausted / 10),
+          "ring ceiling, GPU-bound: no more refreshes find their images replaced (" + std::to_string(on.exhausted) +
+              " vs " + std::to_string(off.exhausted) + " off)");
+    Check(on.late <= off.late + std::max<std::uint64_t>(5, off.late / 10) + 5 * on.status.lead_ring_undone,
+          "ring ceiling, GPU-bound: ...nor are frames more often late, but for each lowering undone (" +
+              std::to_string(on.late) + " vs " + std::to_string(off.late) + " off, " +
+              std::to_string(on.status.lead_ring_undone) + " undone)");
+}
+
+// What a run of RunCeilingHitches measured.
+struct CeilingHitchRun {
+    FrameGenStatus switched; // as the 66 ms capture began
+    FrameGenStatus before;   // at the measurement's start
+    FrameGenStatus after;    // at its end
+    std::uint64_t exhausted{0};
+    std::uint64_t late{0};
+    int refreshes{0};
+    std::uint32_t lowest{std::numeric_limits<std::uint32_t>::max()};
+    std::uint32_t highest{0};
+
+    std::string Text() const {
+        return "lead " + std::to_string(before.lead_slots) + " (ceiling " + std::to_string(before.lead_ceiling) +
+               ") then " + std::to_string(lowest) + "-" + std::to_string(highest) + ", floor " +
+               std::to_string(switched.lead_floor) + " -> " + std::to_string(after.lead_floor) + ", ring moves -" + std::to_string(after.lead_ring_downs) + "/+" +
+               std::to_string(after.lead_ring_raises) + ", undone " + std::to_string(after.lead_ring_undone) +
+               ", held " + std::to_string(after.lead_ring_held) + ", refused " +
+               std::to_string(after.lead_ring_refused) + "; the policy's steps down " +
+               std::to_string(after.lead_downs) + " (undone " + std::to_string(after.lead_downs_undone) +
+               "), probes " + std::to_string(after.lead_probes) + "/" + std::to_string(after.lead_probes_failed) +
+               "; " + std::to_string(exhausted) + " of " + std::to_string(refreshes) +
+               " refreshes found their images replaced, " + std::to_string(late) + " late";
+    }
+};
+
+// DCS on Virtual Desktop (Pierpaolo, 2026-10-20, Fixed 2x Extrapolate, lead
+// 8 from hitches, three of the policy's steps down undone and no calm probe
+// in 30 s, 198 refreshes finding their images replaced): a game captured
+// 66 ms after release (on time at a lead of 7, a refresh to spare at 8) that
+// works 5.5 ms after each wait (the canvas's ring of five holds 7, not 8),
+// and stalls 150 ms (three frames of 50 ms) every 112 frames, about 2.5 s,
+// under the lead policy's defaults. Frame by frame each stall is two late
+// frames and more: it steps the lead up, to 8, and fails each step down from
+// it within judge (3 s), which makes 8 the lowest lead known to hold, so the
+// next waits explore_after from a calm the next stall resets. With hitch
+// events a stall is one event and raises nothing: a slow stretch first
+// (2 s of 20 ms of work captured 60 ms later: the lead 8, which the ring
+// holds there) leaves the lead at 8, and the stalls fail its steps down.
+// Measured 6 s after 6 s of the stalls. `proven_first`: in Pierpaolo's order,
+// the stalls first come with 20 ms of work captured 51.5 ms after release (as
+// late after each wait as the 66 ms capture, a refresh to spare at 8; the
+// ring holds 8 there) until a step down of the policy's from 8 has failed, 8
+// the lowest lead known to hold, and only then is the ring short at 8.
+// (Captured 60 ms later, 8 has no refresh to spare: no step down.)
+// `stall_every`: frames from one stall to the next (112, about 2.5 s; 64,
+// about 1.5 s, closer than event_window).
+CeilingHitchRun RunCeilingHitches(bool on, bool hitch_events, bool proven_first = false,
+                                  std::size_t stall_every = 112) {
+    const std::string name = std::string("ring ceiling, hitches") + (hitch_events ? " (hitch events)" : "") +
+                             (proven_first ? " (8 proven first)" : "") +
+                             (stall_every != 112 ? " (every " + std::to_string(stall_every) + " frames)" : "") +
+                             (on ? "" : " (off)");
+    CeilingGame game(false, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2);
+    FrameGenLeadPolicy policy;
+    policy.hitch_events = hitch_events;
+    policy.ring_ceiling = on;
+    game.presenter.SetLeadPolicy(policy);
+    const auto stalls = [&](std::chrono::microseconds work) {
+        std::vector<std::chrono::microseconds> works(stall_every, work);
+        std::fill(works.end() - 3, works.end(), 50ms);
+        return works;
+    };
+    const std::vector<std::chrono::microseconds> works = stalls(5500us);
+    game.Frames(3);
+    if (hitch_events) {
+        game.gpu.capture_lag = 60ms;
+        game.Run(2000ms, {20000us});
+    }
+    CeilingHitchRun run;
+    if (proven_first) {
+        game.gpu.capture_lag = 51500us;
+        game.Run(15000ms, stalls(20000us), [&] {
+            const FrameGenStatus now = game.presenter.Status();
+            return now.lead_slots == 8 && now.lead_floor == 8 && now.lead_downs_undone + now.lead_probes_failed >= 1;
+        });
+    }
+    run.switched = game.presenter.Status();
+    if (proven_first) {
+        const FrameGenStatus& at = run.switched;
+        std::cerr << "  " << name << ": first lead " << at.lead_slots << " (floor " << at.lead_floor
+                  << ", ceiling " << at.lead_ceiling << ", ring moves -" << at.lead_ring_downs << "), the policy's steps down "
+                  << at.lead_downs << " (undone " << at.lead_downs_undone << "), probes " << at.lead_probes << "/"
+                  << at.lead_probes_failed << ", " << at.ring_short << " a capture short" << std::endl;
+    }
+    game.gpu.capture_lag = 66ms;
+    game.Run(6000ms, works);
+    run.before = game.presenter.Status();
+    const std::size_t first = game.runtime.Submissions();
+    game.Run(6000ms, works, [&] {
+        const std::uint32_t lead = game.presenter.Status().lead_slots;
+        run.lowest = std::min(run.lowest, lead);
+        run.highest = std::max(run.highest, lead);
+        return false;
+    });
+    run.after = game.presenter.Status();
+    run.refreshes = static_cast<int>(game.runtime.Submissions() - first);
+    run.exhausted = run.after.ring_exhausted - run.before.ring_exhausted;
+    run.late = (run.after.late_cpu - run.before.late_cpu) + (run.after.late_gpu - run.before.late_gpu);
+    std::cerr << "  " << name << ": " << run.Text() << std::endl;
+    Check(game.Ordered(), name + ": calls stayed ordered");
+    return run;
+}
+
+// A lone hitch says nothing of whether the ring holds a lead: the ceiling
+// still comes down to what the ring holds, and stays through the stalls.
+// Before, each stall's two late frames undid a lowering being judged, and
+// any step down of the policy's a stall failed kept the lead for
+// explore_max: the ceiling could not act in the window it exists for. Also
+// in Pierpaolo's order (a step down from 8 failed before the ring was short
+// there), and the boundary: stalls closer than event_window undo the
+// lowering, as frames late at a lead too short do.
+void TestLeadCeilingActsThroughHitches() {
+    for (const bool hitch_events : {false, true}) {
+        const std::string name = std::string("ring ceiling, hitches") + (hitch_events ? " (hitch events)" : "");
+        const CeilingHitchRun on = RunCeilingHitches(true, hitch_events);
+        const CeilingHitchRun off = RunCeilingHitches(false, hitch_events);
+        // Off: the window the ceiling is for.
+        Check(off.before.lead_slots == 8 && off.highest == 8 && off.after.lead_downs_undone >= 1,
+              name + " (off): the stalls hold the lead at 8, failing the policy's steps down (" + off.Text() + ")");
+        Check(off.exhausted > static_cast<std::uint64_t>(off.refreshes / 4),
+              name + " (off): its moved refreshes find their frame's images replaced (" + off.Text() + ")");
+        Check(on.before.lead_ceiling == 7 && on.after.lead_ceiling == 7 && on.after.lead_ring_downs >= 1,
+              name + ": the ceiling comes down to what the ring holds (" + on.Text() + ")");
+        Check(on.highest <= 7 && on.after.lead_ring_undone == 0 && on.after.lead_floor <= 7,
+              name + ": ...and the lead stays there through the stalls, the policy's floor below 8 (" + on.Text() +
+                  ")");
+        Check(on.exhausted <= off.exhausted / 4 + 5,
+              name + ": its refreshes move their frame again (" + std::to_string(on.exhausted) + " vs " +
+                  std::to_string(off.exhausted) + " off found their images replaced)");
+        Check(on.late <= off.late + std::max<std::uint64_t>(5, off.late / 10),
+              name + ": ...and frames are no more often late (" + std::to_string(on.late) + " vs " +
+                  std::to_string(off.late) + " off)");
+    }
+    {
+        // Pierpaolo's order: a step down from 8 failed (by a stall) before
+        // the ring was short there, 8 the lowest lead known to hold. That
+        // says nothing of the ring: the ceiling still comes down to 7, and
+        // the policy's floor with it, from 8.
+        const std::string name = "ring ceiling, hitches (8 proven first)";
+        const CeilingHitchRun on = RunCeilingHitches(true, false, true);
+        const CeilingHitchRun off = RunCeilingHitches(false, false, true);
+        Check(on.switched.lead_slots == 8 && on.switched.lead_floor == 8 &&
+                  on.switched.lead_downs_undone + on.switched.lead_probes_failed >= 1 &&
+                  on.switched.lead_ring_downs == 0,
+              name + ": a step down from 8 failed first, 8 the lowest lead known to hold (" + on.Text() + ")");
+        Check(on.after.lead_ceiling == 7 && on.after.lead_ring_downs >= 1 && on.after.lead_ring_undone == 0 &&
+                  on.highest <= 7 && on.after.lead_floor <= 7,
+              name + ": the ceiling comes down to 7 and stays, the floor from 8 with it (" + on.Text() + ")");
+        Check(on.exhausted <= off.exhausted / 4 + 5,
+              name + ": its refreshes move their frame again (" + std::to_string(on.exhausted) + " vs " +
+                  std::to_string(off.exhausted) + " off found their images replaced)");
+        Check(on.late <= off.late + std::max<std::uint64_t>(5, off.late / 10),
+              name + ": ...and frames are no more often late (" + std::to_string(on.late) + " vs " +
+                  std::to_string(off.late) + " off)");
+    }
+    {
+        // The boundary: stalls closer than event_window (about 1.5 s apart)
+        // are two late events while a lowering is judged, as a lead too
+        // short is. The lowering is undone once, 8 is needed (the next
+        // ring-short pairs at it held), and the lead stays at 8 as it does
+        // off: the ceiling cannot tell these stalls from a lead too short.
+        const std::string name = "ring ceiling, hitches (closer than event_window)";
+        const CeilingHitchRun on = RunCeilingHitches(true, false, false, 64);
+        const CeilingHitchRun off = RunCeilingHitches(false, false, false, 64);
+        Check(on.after.lead_ring_downs == 1 && on.after.lead_ring_undone == 1 && on.after.lead_ring_held >= 1 &&
+                  on.after.lead_ceiling == 0,
+              name + ": the lowering is undone once and 8 kept (" + on.Text() + ")");
+        Check(on.lowest == 8 && on.highest == 8 && off.highest == 8,
+              name + ": the lead stays at 8, as off (" + on.Text() + "; off " + off.Text() + ")");
+        Check(on.late <= off.late + std::max<std::uint64_t>(5, off.late / 10),
+              name + ": frames are no more often late (" + std::to_string(on.late) + " vs " +
+                  std::to_string(off.late) + " off)");
+    }
+}
+
+namespace depthxr {
+// Drives a presenter's lead policy and history-ring ceiling directly, frame
+// by frame, without a presenter thread or a runtime: a canvas just in time
+// at fixed 2x Extrapolate with the deep ring (it holds a lead of 6 at any
+// capture timing), at 90 Hz. Each call stands for the presenter thread's,
+// under the presenter's mutex.
+class FrameGenLeadTestPeer {
+  public:
+    using Clock = std::chrono::steady_clock;
+    struct State {
+        std::uint32_t lead{0};
+        std::uint32_t floor{0};
+        std::uint32_t proven{0};
+        bool floor_failed{false};
+        Clock::time_point calm{};
+        bool probe{false};      // a probe or step down judged...
+        bool ring_probe{false}; // ...a lowering of the ceiling taken for the policy's calm probe
+        std::uint32_t ceiling{0};
+        std::uint32_t needed{0};
+        std::uint64_t ring_downs{0};
+        std::uint64_t ring_undone{0};
+        std::uint64_t ring_held{0};
+        std::uint64_t ring_raises{0};
+        std::uint64_t ring_refused{0};
+        std::uint64_t probes_failed{0};
+        std::uint64_t downs_undone{0};
+    };
+
+    static void Prepare(FrameGenPresenter& presenter, const FrameGenLeadPolicy& policy) {
+        FrameGenResolvedSettings settings;
+        settings.enabled = true;
+        settings.synthesis_mode = FrameGenSynthesisMode::kExtrapolate;
+        settings.multiplier = FrameGenMultiplier::k2;
+        presenter.Configure(settings);
+        presenter.SetLeadPolicy(policy);
+        std::scoped_lock lock(presenter.mutex_);
+        presenter.jit_ = true;
+        presenter.jit_interpolate_ = false;
+        presenter.jit_canvas_ring_ = kFrameGenHistoryRingMax;
+        presenter.last_period_ = kPeriod;
+    }
+    // The lead, the policy's floors and its calm time, as a run left them.
+    static void Set(FrameGenPresenter& presenter, std::uint32_t lead, std::uint32_t floor, std::uint32_t proven,
+                    bool floor_failed, Clock::time_point calm) {
+        std::scoped_lock lock(presenter.mutex_);
+        presenter.lead_slots_ = lead;
+        presenter.lead_floor_ = floor;
+        presenter.lead_floor_proven_ = proven;
+        presenter.lead_floor_failed_ = floor_failed;
+        presenter.lead_calm_since_ = calm;
+        presenter.lead_probe_.reset();
+        presenter.ClearLeadHistoryLocked();
+    }
+    // A real frame told the current lead, scored: late, or on time with
+    // `slack_ms` to spare (more than 1.1 refreshes: a refresh to spare).
+    static void Frame(FrameGenPresenter& presenter, bool late, double slack_ms = 0.0) {
+        std::scoped_lock lock(presenter.mutex_);
+        presenter.UpdateLeadLocked(late, late ? std::nullopt : std::optional<double>(slack_ms), presenter.lead_slots_,
+                                   2);
+    }
+    // Real frame `id`, told the current lead: a moved refresh of it found its
+    // previous images replaced, the presenter thread on time.
+    static void RingShort(FrameGenPresenter& presenter, std::uint64_t id) {
+        std::scoped_lock lock(presenter.mutex_);
+        FrameGenPresenter::JitWrite write;
+        write.ring_short = true;
+        write.ring_short_id = id;
+        write.ring_short_lead = presenter.lead_slots_;
+        write.ring_short_multiplier = 2;
+        write.ring_short_at = Clock::now();
+        presenter.NoteRingShortLocked(write, write.ring_short_at, kPeriod);
+    }
+    // The ceiling's times moved `ago` earlier (its lowering, judge, retry
+    // wait and last late event), as though that much had passed since.
+    static void Age(FrameGenPresenter& presenter, Clock::duration ago) {
+        std::scoped_lock lock(presenter.mutex_);
+        FrameGenPresenter::LeadRing& ring = presenter.lead_ring_[2];
+        if (ring.trial) *ring.trial -= ago;
+        if (ring.late_event) *ring.late_event -= ago;
+        ring.changed_at -= ago;
+        ring.needed_at -= ago;
+    }
+    static State Get(FrameGenPresenter& presenter) {
+        std::scoped_lock lock(presenter.mutex_);
+        State state;
+        state.lead = presenter.lead_slots_;
+        state.floor = presenter.lead_floor_;
+        state.proven = presenter.lead_floor_proven_;
+        state.floor_failed = presenter.lead_floor_failed_;
+        state.calm = presenter.lead_calm_since_;
+        state.probe = presenter.lead_probe_.has_value();
+        state.ring_probe = presenter.lead_probe_ && presenter.lead_probe_->ring;
+        state.ceiling = presenter.lead_ring_[2].ceiling;
+        state.needed = presenter.lead_ring_[2].needed;
+        state.ring_downs = presenter.totals_.lead_ring_downs;
+        state.ring_undone = presenter.totals_.lead_ring_undone;
+        state.ring_held = presenter.totals_.lead_ring_held;
+        state.ring_raises = presenter.totals_.lead_ring_raises;
+        state.ring_refused = presenter.totals_.lead_ring_refused;
+        state.probes_failed = presenter.totals_.lead_probes_failed;
+        state.downs_undone = presenter.totals_.lead_downs_undone;
+        return state;
+    }
+};
+} // namespace depthxr
+
+std::string LeadStateText(const FrameGenLeadTestPeer::State& state) {
+    return "lead " + std::to_string(state.lead) + ", floor " + std::to_string(state.floor) + "/" +
+           std::to_string(state.proven) + (state.floor_failed ? " failed" : "") + ", ceiling " +
+           std::to_string(state.ceiling) + " (needed " + std::to_string(state.needed) + ")" +
+           (state.ring_probe ? ", ring probe" : state.probe ? ", probe" : "") + ", ring -" +
+           std::to_string(state.ring_downs) + " undone " + std::to_string(state.ring_undone) + " held " +
+           std::to_string(state.ring_held) + " raised " + std::to_string(state.ring_raises) + " refused " +
+           std::to_string(state.ring_refused) + ", probes failed " + std::to_string(state.probes_failed) +
+           ", steps down undone " + std::to_string(state.downs_undone);
+}
+
+// The ceiling's lowerings against the lead policy's own state, frame by frame
+// (FrameGenLeadTestPeer): probes 1 s apart, judged 500 ms, explore waits of
+// 700 ms, hitch events 40 ms long and paired within 400 ms.
+// - A lowering whose policy calm probe is 300 ms off (within judge, not
+//   already due) is a trial of its own: a lone hitch leaves it, a second
+//   late event undoes it, and the policy's floors, proven lead and calm time
+//   come back as they were (its next probe keeps its time); the lead it
+//   lowered is then kept.
+// - None comes while a step down of the policy's is judged; the next
+//   ring-short pair after its verdict lowers it.
+// - One as the policy's calm probe is due is that probe: undone, it fails as
+//   the policy's (the lead lowered the lowest known to hold), not counted as
+//   a failed probe; held, the lead below is the lowest known to hold.
+// - A step down of the policy's that a hitch failed does not keep the lead:
+//   the next ring-short pair lowers it.
+void TestLeadCeilingProbeAndTrial() {
+    using Peer = FrameGenLeadTestPeer;
+    using Clock = std::chrono::steady_clock;
+    FrameGenLeadPolicy policy;
+    policy.probe_after = 1000ms;
+    policy.judge = 500ms;
+    policy.explore_after = 700ms;
+    policy.explore_max = 1400ms;
+    policy.hitch_span = 40ms;
+    policy.event_window = 400ms;
+    policy.ring_ceiling = true;
+    const auto pair = [](FrameGenPresenter& presenter, std::uint64_t id) {
+        Peer::RingShort(presenter, id);
+        Peer::RingShort(presenter, id + 1);
+    };
+    const auto spare = [](FrameGenPresenter& presenter, int frames) {
+        for (int i = 0; i < frames; ++i) Peer::Frame(presenter, false, 20.0);
+    };
+    {
+        const std::string name = "ring ceiling trial";
+        FrameGenPresenter presenter;
+        Peer::Prepare(presenter, policy);
+        const Clock::time_point calm = Clock::now() - 400ms;
+        Peer::Set(presenter, 8, 8, 8, false, calm);
+        pair(presenter, 1);
+        const Peer::State lowered = Peer::Get(presenter);
+        Check(lowered.lead == 7 && lowered.ceiling == 7 && lowered.ring_downs == 1 && !lowered.probe,
+              name + ": lowered as a trial of its own, the policy's probe 300 ms off (" + LeadStateText(lowered) +
+                  ")");
+        Peer::Frame(presenter, true);
+        Peer::Frame(presenter, true);
+        const Peer::State hitch = Peer::Get(presenter);
+        Check(hitch.lead == 7 && hitch.ceiling == 7 && hitch.ring_undone == 0,
+              name + ": a lone hitch leaves it (" + LeadStateText(hitch) + ")");
+        std::this_thread::sleep_for(60ms);
+        Peer::Frame(presenter, true);
+        const Peer::State undone = Peer::Get(presenter);
+        Check(undone.lead == 8 && undone.ceiling == 0 && undone.ring_undone == 1 && undone.needed == 8,
+              name + ": a second late event undoes it, 8 kept (" + LeadStateText(undone) + ")");
+        Check(undone.floor == 8 && undone.proven == 8 && !undone.floor_failed && undone.calm == calm && !undone.probe,
+              name + ": ...and the policy's floors and calm time are as before it (" + LeadStateText(undone) + ")");
+        pair(presenter, 3);
+        const Peer::State held = Peer::Get(presenter);
+        Check(held.lead == 8 && held.ring_downs == 1 && held.ring_held == 1,
+              name + ": the next ring-short pair at 8 is held (" + LeadStateText(held) + ")");
+    }
+    {
+        const std::string name = "ring ceiling during a step down";
+        FrameGenPresenter presenter;
+        Peer::Prepare(presenter, policy);
+        Peer::Set(presenter, 8, 0, 0, false, Clock::now());
+        spare(presenter, 8);
+        const Peer::State stepped = Peer::Get(presenter);
+        Check(stepped.lead == 7 && stepped.probe, name + ": frames to spare step the lead down, judged (" +
+                                                      LeadStateText(stepped) + ")");
+        pair(presenter, 1);
+        const Peer::State waited = Peer::Get(presenter);
+        Check(waited.lead == 7 && waited.ring_downs == 0 && waited.ceiling == 0 && waited.probe,
+              name + ": no lowering while it is judged (" + LeadStateText(waited) + ")");
+        std::this_thread::sleep_for(510ms);
+        Peer::Frame(presenter, false);
+        const Peer::State held = Peer::Get(presenter);
+        Check(held.floor == 7 && !held.probe && held.ring_downs == 0,
+              name + ": the step down held (" + LeadStateText(held) + ")");
+        pair(presenter, 3);
+        const Peer::State after = Peer::Get(presenter);
+        Check(after.lead == 6 && after.ceiling == 6 && after.ring_downs == 1,
+              name + ": ...and the next ring-short pair lowers it (" + LeadStateText(after) + ")");
+    }
+    for (const bool fails : {true, false}) {
+        const std::string name = std::string("ring ceiling as the policy's probe") + (fails ? ", undone" : ", held");
+        FrameGenPresenter presenter;
+        Peer::Prepare(presenter, policy);
+        Peer::Set(presenter, 8, 0, 0, false, Clock::now() - 1000ms);
+        pair(presenter, 1);
+        const Peer::State lowered = Peer::Get(presenter);
+        Check(lowered.lead == 7 && lowered.ceiling == 7 && lowered.ring_probe,
+              name + ": lowered as the calm probe that was due (" + LeadStateText(lowered) + ")");
+        Peer::Frame(presenter, false); // the probe's first frames are not judged
+        Peer::Frame(presenter, false);
+        if (fails) {
+            Peer::Frame(presenter, true);
+            Peer::Frame(presenter, true);
+            const Peer::State hitch = Peer::Get(presenter);
+            Check(hitch.lead == 7 && hitch.ring_probe && hitch.floor == 0,
+                  name + ": a lone hitch leaves it (" + LeadStateText(hitch) + ")");
+            std::this_thread::sleep_for(60ms);
+            Peer::Frame(presenter, true);
+            const Peer::State undone = Peer::Get(presenter);
+            Check(undone.lead == 8 && undone.ceiling == 0 && undone.ring_undone == 1 && !undone.probe,
+                  name + ": a second late event undoes it (" + LeadStateText(undone) + ")");
+            Check(undone.floor == 8 && undone.proven == 8 && undone.floor_failed && undone.probes_failed == 0,
+                  name + ": ...as the policy's probe failed, not counted as one (" + LeadStateText(undone) + ")");
+        } else {
+            std::this_thread::sleep_for(510ms);
+            Peer::Frame(presenter, false);
+            const Peer::State held = Peer::Get(presenter);
+            Check(held.lead == 7 && held.ceiling == 7 && !held.probe && held.floor == 7 && held.proven == 7,
+                  name + ": held, 7 is the lowest lead known to hold (" + LeadStateText(held) + ")");
+        }
+    }
+    {
+        const std::string name = "ring ceiling after a failed step down";
+        FrameGenPresenter presenter;
+        Peer::Prepare(presenter, policy);
+        Peer::Set(presenter, 8, 0, 0, false, Clock::now());
+        spare(presenter, 8);
+        Peer::Frame(presenter, false); // not judged
+        Peer::Frame(presenter, false);
+        Peer::Frame(presenter, true);
+        Peer::Frame(presenter, true);
+        const Peer::State failed = Peer::Get(presenter);
+        Check(failed.lead == 8 && failed.floor == 8 && failed.downs_undone == 1 && failed.needed == 0,
+              name + ": a hitch undid the step down, 8 the lowest lead known to hold (" + LeadStateText(failed) +
+                  ")");
+        pair(presenter, 1);
+        const Peer::State lowered = Peer::Get(presenter);
+        Check(lowered.lead == 7 && lowered.ceiling == 7 && lowered.ring_downs == 1 && lowered.ring_held == 0,
+              name + ": the ceiling is still lowered (" + LeadStateText(lowered) + ")");
+    }
+}
+
+// A lowering judged and held that the game's lateness shows too low (its
+// capture moved later since), frame by frame (FrameGenLeadTestPeer, the
+// windows of TestLeadCeilingProbeAndTrial; the ceiling's clock moved on with
+// Peer::Age): late in bursts of two or three frames, each burst one event.
+// - A second burst within event_window raises it once its retry wait
+//   (explore_after, 700 ms) has run out, on that burst's first late frame.
+//   Each burst's second late frame steps the policy up at the ceiling and
+//   clears its history, so the next burst's first counts one late frame:
+//   left to the policy's step up, the second event was never seen and the
+//   ceiling stayed, nothing refused.
+// - Before the wait has run out it is refused (counted), the lead staying;
+//   a third burst within event_window of the second, after it, raises.
+// - A lone burst, or bursts further apart than event_window (a hitch no lead
+//   cures: Pierpaolo's stalls, TestLeadCeilingActsThroughHitches), raises
+//   nothing.
+void TestLeadCeilingRaisesOnBursts() {
+    using Peer = FrameGenLeadTestPeer;
+    using Clock = std::chrono::steady_clock;
+    FrameGenLeadPolicy policy;
+    policy.probe_after = 1000ms;
+    policy.judge = 500ms;
+    policy.explore_after = 700ms;
+    policy.explore_max = 1400ms;
+    policy.hitch_span = 40ms;
+    policy.event_window = 400ms;
+    policy.ring_ceiling = true;
+    Check(!policy.hitch_events, "ring ceiling bursts: frame by frame is the policy's default");
+    const auto burst = [](FrameGenPresenter& presenter, int frames) {
+        for (int i = 0; i < frames; ++i) Peer::Frame(presenter, true);
+    };
+    // Lowered from 8 to 7 as a trial of its own (the policy's probe 300 ms
+    // off), 8 the lowest lead known to hold.
+    const auto lower = [&](FrameGenPresenter& presenter, const std::string& name) {
+        Peer::Prepare(presenter, policy);
+        Peer::Set(presenter, 8, 8, 8, false, Clock::now() - 400ms);
+        Peer::RingShort(presenter, 1);
+        Peer::RingShort(presenter, 2);
+        const Peer::State lowered = Peer::Get(presenter);
+        Check(lowered.lead == 7 && lowered.ceiling == 7 && lowered.ring_downs == 1 && !lowered.probe,
+              name + ": lowered to 7 (" + LeadStateText(lowered) + ")");
+    };
+    {
+        const std::string name = "ring ceiling bursts, raised";
+        FrameGenPresenter presenter;
+        lower(presenter, name);
+        Peer::Age(presenter, 800ms); // judged and held, the retry wait run out
+        burst(presenter, 2);
+        const Peer::State first = Peer::Get(presenter);
+        Check(first.lead == 7 && first.ceiling == 7 && first.ring_raises == 0 && first.ring_refused == 0,
+              name + ": a lone burst leaves it (" + LeadStateText(first) + ")");
+        Peer::Age(presenter, 100ms);
+        Peer::Frame(presenter, true);
+        const Peer::State raised = Peer::Get(presenter);
+        Check(raised.lead == 8 && raised.ceiling == 0 && raised.ring_raises == 1 && raised.ring_undone == 0,
+              name + ": a second burst within event_window raises it on its first late frame (" +
+                  LeadStateText(raised) + ")");
+        burst(presenter, 2);
+        const Peer::State after = Peer::Get(presenter);
+        Check(after.lead == 8 && after.ring_raises == 1 && after.ring_refused == 0,
+              name + ": ...once (" + LeadStateText(after) + ")");
+    }
+    {
+        const std::string name = "ring ceiling bursts, apart";
+        FrameGenPresenter presenter;
+        lower(presenter, name);
+        Peer::Age(presenter, 800ms);
+        for (int i = 0; i < 4; ++i) {
+            burst(presenter, 3);
+            Peer::Age(presenter, 500ms); // past event_window
+        }
+        const Peer::State apart = Peer::Get(presenter);
+        Check(apart.lead == 7 && apart.ceiling == 7 && apart.ring_raises == 0 && apart.ring_refused == 0 &&
+                  apart.ring_undone == 0,
+              name + ": bursts further apart than event_window raise nothing (" + LeadStateText(apart) + ")");
+    }
+    {
+        const std::string name = "ring ceiling bursts, refused";
+        FrameGenPresenter presenter;
+        lower(presenter, name);
+        Peer::Age(presenter, 550ms); // judged and held, 150 ms of the retry wait left
+        burst(presenter, 2);
+        Peer::Age(presenter, 60ms);
+        burst(presenter, 3);
+        const Peer::State refused = Peer::Get(presenter);
+        Check(refused.lead == 7 && refused.ceiling == 7 && refused.ring_raises == 0 && refused.ring_refused == 1 &&
+                  refused.ring_undone == 0,
+              name + ": a second burst before the retry wait has run out is refused, counted once (" +
+                  LeadStateText(refused) + ")");
+        Peer::Age(presenter, 200ms);
+        Peer::Frame(presenter, true);
+        const Peer::State raised = Peer::Get(presenter);
+        Check(raised.lead == 8 && raised.ceiling == 0 && raised.ring_raises == 1 && raised.ring_refused == 1,
+              name + ": ...a third within event_window of it, after the wait, raises it (" + LeadStateText(raised) +
+                  ")");
+    }
+}
+
+
+namespace depthxr {
+// Fake-backend telemetry sequences on a deterministic clock. The production
+// entry is Generate's real-frame boundary, under the same presenter mutex;
+// these tests advance that boundary without wall-clock sleeps or GPU work.
+class FrameGenFlowTestPeer {
+  public:
+    using Clock = std::chrono::steady_clock;
+    struct State {
+        bool hardware{false};
+        bool probing{false};
+        std::uint32_t bad{0};
+        std::chrono::milliseconds backoff{};
+        Clock::time_point probe_due{};
+        std::uint64_t fallbacks{0};
+        std::uint64_t probes{0};
+        std::uint64_t switches{0};
+        std::string reason;
+    };
+    static void Prepare(FrameGenPresenter& p, Clock::time_point now) {
+        std::scoped_lock lock(p.mutex_);
+        p.settings_.synthesis_mode = FrameGenSynthesisMode::kInterpolate;
+        p.settings_.motion_estimation = FrameGenMotionEstimation::kHardware;
+        p.settings_.multiplier = FrameGenMultiplier::kDynamic;
+        p.settings_.interpolate_flow = FrameGenInterpolateFlow::kAuto;
+        p.interpolate_flow_available_ = true;
+        p.UpdateInterpolateFlowLocked(now, FrameGenSynthesisMode::kInterpolate, true);
+    }
+    static bool Feed(FrameGenPresenter& p, Clock::time_point now, std::uint64_t generated = 1000,
+                     std::uint64_t stale = 0, std::uint64_t unready = 0, std::uint64_t timed = 100,
+                     std::uint64_t late = 0, bool auto_probe = false, bool dynamic_probe = false,
+                     std::optional<std::uint64_t> motion_outputs = std::nullopt) {
+        std::scoped_lock lock(p.mutex_);
+        p.totals_.generated_distinct += generated;
+        p.totals_.stale_motion += stale;
+        p.totals_.motion_outputs += motion_outputs.value_or(std::max(generated, stale));
+        p.totals_.unready += unready;
+        p.totals_.hardware_timed += timed;
+        p.totals_.hardware_late += late;
+        p.totals_.hardware_lag_ns += late * 2'000'000;
+        p.probing_ = auto_probe;
+        p.dynamic_probing_ = dynamic_probe;
+        return p.UpdateInterpolateFlowLocked(now, FrameGenSynthesisMode::kInterpolate, true);
+    }
+    static void Select(FrameGenPresenter& p, FrameGenInterpolateFlow mode) {
+        std::scoped_lock lock(p.mutex_);
+        p.settings_.interpolate_flow = mode;
+    }
+    static void Pause(FrameGenPresenter& p) {
+        std::scoped_lock lock(p.mutex_);
+        ++p.totals_.pauses;
+    }
+    static void Available(FrameGenPresenter& p, bool available) {
+        std::scoped_lock lock(p.mutex_);
+        p.interpolate_flow_available_ = available;
+    }
+    static bool OtherMode(FrameGenPresenter& p, Clock::time_point now) {
+        std::scoped_lock lock(p.mutex_);
+        return p.UpdateInterpolateFlowLocked(now, FrameGenSynthesisMode::kExtrapolate, true);
+    }
+    static void Timing(FrameGenPresenter& p, Clock::time_point now, std::chrono::milliseconds hardware_lag,
+                       std::chrono::milliseconds shader_lag, bool hardware) {
+        std::scoped_lock lock(p.mutex_);
+        FrameGenPresenter::PendingFrame frame;
+        frame.real_due = now - 10ms;
+        frame.generated_due = now;
+        FrameGenAnalysisTiming timing;
+        timing.submission = 100 + p.totals_.analyses_timed;
+        timing.capture_end = now - 5ms;
+        timing.start = now - 5ms;
+        timing.hardware_start = now - 4ms;
+        timing.hardware_end = now + hardware_lag;
+        timing.end = timing.hardware_end + shader_lag;
+        p.NoteGpuTimingLocked(timing.submission, frame, std::nullopt, {timing}, {}, hardware);
+    }
+    static std::pair<std::uint64_t, std::uint64_t> HardwareTimings(FrameGenPresenter& p) {
+        std::scoped_lock lock(p.mutex_);
+        return {p.totals_.hardware_timed, p.totals_.hardware_late};
+    }
+    static std::pair<std::uint64_t, std::uint64_t> MotionOutputs(FrameGenPresenter& p) {
+        std::scoped_lock lock(p.mutex_);
+        return {p.totals_.stale_motion, p.totals_.motion_outputs};
+    }
+    static void Delay(FrameGenPresenter& p, std::chrono::milliseconds delay,
+                      std::chrono::milliseconds duration, Clock::time_point session_started) {
+        std::scoped_lock lock(p.mutex_);
+        p.interpolate_flow_delay_ = delay;
+        p.interpolate_flow_delay_for_ = duration;
+        p.interpolate_flow_delay_started_.reset();
+        p.started_at_ = session_started;
+    }
+    static Clock::time_point DelayUntil(FrameGenPresenter& p, Clock::time_point now,
+                                       FrameGenSynthesisMode mode, bool hardware) {
+        std::scoped_lock lock(p.mutex_);
+        return p.InterpolateFlowDelayUntilLocked(now, mode, hardware);
+    }
+    static State Get(FrameGenPresenter& p) {
+        std::scoped_lock lock(p.mutex_);
+        return {p.interpolate_flow_hardware_, p.interpolate_flow_probing_, p.interpolate_flow_bad_windows_,
+                p.interpolate_flow_backoff_, p.interpolate_flow_probe_due_, p.interpolate_flow_fallbacks_,
+                p.interpolate_flow_probes_, p.interpolate_flow_switches_, p.interpolate_flow_reason_};
+    }
+};
+} // namespace depthxr
+
+void TestInterpolateFlowCounterWindows() {
+    using Peer = FrameGenFlowTestPeer;
+    const auto zero = TimePoint{} + 1s;
+    // The flown healthy case and the exact threshold stay on hardware.
+    FrameGenPresenter healthy;
+    Peer::Prepare(healthy, zero);
+    Check(Peer::Feed(healthy, zero + 10s, 1000, 15, 0, 100, 2), "flow: healthy hardware stays");
+    Check(Peer::Feed(healthy, zero + 20s, 1000, 50, 0, 100, 25), "flow: thresholds are strict");
+    Check(Peer::Get(healthy).fallbacks == 0, "flow: healthy/threshold windows have no fallback");
+    // Submission distinctness and successful output writes are different
+    // populations: five stale writes out of100 outputs is exactly5%, even
+    // when only90 generated frames were distinct at submission.
+    FrameGenPresenter repeated;
+    Peer::Prepare(repeated, zero);
+    Check(Peer::Feed(repeated, zero + 10s, 90, 5, 0, 100, 0, false, false, 100),
+          "flow: marginal5/100 output share stays despite90 distinct frames");
+    Check(Peer::Feed(repeated, zero + 20s, 90, 5, 0, 100, 0, false, false, 100) &&
+              Peer::Get(repeated).fallbacks == 0,
+          "flow: repeated writes do not inflate the stale share past5%");
+    FrameGenPresenter safety_copies;
+    Peer::Prepare(safety_copies, zero);
+    Check(Peer::Feed(safety_copies, zero + 10s, 0, 40, 0, 0, 0, false, false, 40),
+          "flow: first all-safety-copy window stays");
+    Check(!Peer::Feed(safety_copies, zero + 20s, 0, 40, 0, 0, 0, false, false, 40) &&
+              Peer::Get(safety_copies).reason.find("100.0% of motion outputs (40/40)") != std::string::npos,
+          "flow: safety copies with no distinct generation produce a bounded100% share");
+
+    FrameGenPresenter stale;
+    Peer::Prepare(stale, zero);
+    Check(Peer::Feed(stale, zero + 10s, 1000, 60), "flow: one bad stale window is a hitch");
+    Check(Peer::Get(stale).bad == 1, "flow: first stale window counted");
+    Check(Peer::Feed(stale, zero + 20s), "flow: good stale window resets the streak");
+    Check(Peer::Get(stale).bad == 0, "flow: the streak reset");
+    Check(Peer::Feed(stale, zero + 30s, 1000, 60), "flow: new first stale window stays");
+    Check(!Peer::Feed(stale, zero + 40s, 1000, 60), "flow: two stale windows fall back");
+    Check(Peer::Get(stale).reason.find("stale motion") != std::string::npos,
+          "flow: fallback explains stale motion");
+
+    FrameGenPresenter unready;
+    Peer::Prepare(unready, zero);
+    Check(Peer::Feed(unready, zero + 10s, 1000, 0, 4), "flow: first unready window stays");
+    Check(!Peer::Feed(unready, zero + 20s, 1000, 0, 4), "flow: 12 unready per30s twice falls back");
+    Check(Peer::Get(unready).reason.find("unready") != std::string::npos, "flow: unready reason");
+
+    FrameGenPresenter lag;
+    Peer::Prepare(lag, zero);
+    Check(Peer::Feed(lag, zero + 10s, 1000, 0, 0, 100, 30), "flow: first hardware-late window stays");
+    Check(!Peer::Feed(lag, zero + 20s, 1000, 0, 0, 100, 30), "flow: two hardware-late windows fall back");
+    Check(Peer::Get(lag).reason.find("first in-between deadline") != std::string::npos,
+          "flow: hardware lag names the deadline");
+
+    // A shader pass finishing late after timely hardware is not hardware
+    // lateness, nor are hardware-like fake stamps from a shader analysis.
+    FrameGenPresenter timing;
+    Peer::Timing(timing, zero, -2ms, 20ms, true);
+    Peer::Timing(timing, zero + 1s, 2ms, 0ms, true);
+    Peer::Timing(timing, zero + 2s, 20ms, 0ms, false);
+    Check(Peer::HardwareTimings(timing) == std::pair<std::uint64_t, std::uint64_t>{2, 1},
+          "flow: lag is attributed to hardware completion only");
+}
+
+void TestInterpolateFlowRecoveryBackoff() {
+    using Peer = FrameGenFlowTestPeer;
+    const auto zero = TimePoint{} + 1s;
+    FrameGenPresenter p;
+    Peer::Prepare(p, zero);
+    Peer::Feed(p, zero + 10s, 1000, 60);
+    Peer::Feed(p, zero + 20s, 1000, 60);
+    Check(!Peer::Get(p).hardware && Peer::Get(p).probe_due == zero + 80s, "flow: shader holds 60s");
+    Check(!Peer::Feed(p, zero + 79s), "flow: no early hardware probe");
+    Check(Peer::Feed(p, zero + 80s) && Peer::Get(p).probing, "flow: hardware probe at 60s");
+    // A probe uses its own complete window, not counters accumulated on
+    // shader or before switching, and sparse good evidence cannot recover.
+    Check(Peer::Feed(p, zero + 89s, 1000, 60) && Peer::Get(p).probing, "flow: probe waits full10s");
+    Check(!Peer::Feed(p, zero + 90s, 0, 0, 0, 0), "flow: failed probe returns to shader");
+    Check(Peer::Get(p).backoff == 120s && Peer::Get(p).probe_due == zero + 210s,
+          "flow: failed probe backs off2min");
+    Peer::Feed(p, zero + 210s);
+    Peer::Feed(p, zero + 220s, 1000, 60);
+    Check(!Peer::Get(p).hardware && Peer::Get(p).backoff == 240s, "flow: next failure backs off4min");
+    Peer::Feed(p, zero + 460s);
+    Peer::Feed(p, zero + 470s, 1000, 60);
+    Check(!Peer::Get(p).hardware && Peer::Get(p).backoff == 480s, "flow: next failure backs off8min");
+    Peer::Feed(p, zero + 950s);
+    Peer::Feed(p, zero + 960s, 1000, 60);
+    Check(Peer::Get(p).backoff == 480s, "flow: backoff caps at8min");
+    Peer::Feed(p, zero + 1440s);
+    Peer::Feed(p, zero + 1450s, 1, 0, 0, 1);
+    Check(Peer::Get(p).hardware && Peer::Get(p).probing, "flow: sparse probe evidence does not recover");
+    Peer::Feed(p, zero + 1460s);
+    Check(Peer::Get(p).hardware && !Peer::Get(p).probing && Peer::Get(p).backoff == 60s,
+          "flow: healthy probe recovers and resets backoff");
+    Check(Peer::Get(p).fallbacks == 5 && Peer::Get(p).probes == 5, "flow: every fallback and probe counted");
+}
+
+void TestInterpolateFlowProbeIsolation() {
+    using Peer = FrameGenFlowTestPeer;
+    const auto zero = TimePoint{} + 1s;
+    for (const bool dynamic_probe : {false, true}) {
+        FrameGenPresenter p;
+        Peer::Prepare(p, zero);
+        Peer::Feed(p, zero + 10s, 1000, 60);
+        Check(Peer::Feed(p, zero + 20s, 1000, 60, 0, 100, 0, !dynamic_probe, dynamic_probe),
+              "flow: no switch inside multiplier/standby probe");
+        Check(Peer::Get(p).switches == 0 && Peer::Get(p).bad == 0, "flow: probe discards mixed window");
+        Peer::Feed(p, zero + 30s, 1000, 60); // a new window begins
+        Peer::Feed(p, zero + 40s, 1000, 60);
+        Check(!Peer::Feed(p, zero + 50s, 1000, 60), "flow: fallback resumes after two new windows");
+        Check(!Peer::Feed(p, zero + 110s, 1000, 0, 0, 100, 0, !dynamic_probe, dynamic_probe),
+              "flow: no recovery switch inside multiplier/standby probe");
+        Check(Peer::Get(p).probes == 0, "flow: hardware probe waits until multiplier settled");
+        Check(Peer::Feed(p, zero + 111s) && Peer::Get(p).probing, "flow: next real boundary starts hardware probe");
+    }
+    FrameGenPresenter setting;
+    Peer::Prepare(setting, zero);
+    Peer::Select(setting, FrameGenInterpolateFlow::kShader);
+    Check(Peer::Feed(setting, zero + 1s, 0, 0, 0, 0, 0, true), "flow: live setting waits for Auto probe");
+    Check(!Peer::Feed(setting, zero + 2s), "flow: live setting applies at next real boundary");
+
+    FrameGenPresenter pause;
+    Peer::Prepare(pause, zero);
+    Peer::Feed(pause, zero + 10s, 1000, 60);
+    Peer::Pause(pause);
+    Check(Peer::Feed(pause, zero + 20s, 1000, 60) && Peer::Get(pause).bad == 0,
+          "flow: a pause clears the failing streak and its evidence");
+    Peer::Feed(pause, zero + 30s, 1000, 60);
+    Peer::Feed(pause, zero + 40s, 1000, 60);
+    Check(!Peer::Get(pause).hardware, "flow: post-pause bad windows still trigger");
+    Check(Peer::OtherMode(pause, zero + 45s), "flow: Extrapolate keeps the selected hardware");
+    Check(Peer::Feed(pause, zero + 50s) && !Peer::Get(pause).probing,
+          "flow: returning to Interpolate judges a new context");
+
+    FrameGenPresenter reset;
+    Peer::Prepare(reset, zero);
+    Peer::Feed(reset, zero + 10s, 1000, 60);
+    Peer::Feed(reset, zero + 20s, 1000, 60);
+    Check(reset.ResetFrames(), "flow: frame reset succeeds");
+    Check(Peer::Feed(reset, zero + 25s) && !Peer::Get(reset).probing && Peer::Get(reset).bad == 0,
+          "flow: frame reset starts a new hardware context");
+
+    FrameGenPresenter paused_probe;
+    Peer::Prepare(paused_probe, zero);
+    Peer::Feed(paused_probe, zero + 10s, 1000, 60);
+    Peer::Feed(paused_probe, zero + 20s, 1000, 60);
+    Peer::Feed(paused_probe, zero + 80s);
+    Peer::Pause(paused_probe);
+    Peer::Feed(paused_probe, zero + 85s);
+    Peer::Feed(paused_probe, zero + 90s);
+    Check(Peer::Get(paused_probe).probing, "flow: a pause restarts the full probe window");
+    Peer::Feed(paused_probe, zero + 95s);
+    Check(!Peer::Get(paused_probe).probing, "flow: full healthy post-pause window recovers");
+
+    for (const FrameGenInterpolateFlow mode : {FrameGenInterpolateFlow::kAuto, FrameGenInterpolateFlow::kHardware}) {
+        FrameGenPresenter unsupported;
+        Peer::Prepare(unsupported, zero);
+        Peer::Select(unsupported, mode);
+        Peer::Available(unsupported, false);
+        Check(!Peer::Feed(unsupported, zero + 10s), "flow: unsupported GPU stays shader");
+        Check(!Peer::Feed(unsupported, zero + 1000s) && Peer::Get(unsupported).probes == 0,
+              "flow: unsupported GPU never probes hardware");
+    }
+}
+
+void TestInterpolateFlowDelayStartsAtHardware() {
+    using Peer = FrameGenFlowTestPeer;
+    const auto zero = TimePoint{} + 1s;
+    FrameGenPresenter presenter;
+    Peer::Delay(presenter, 100ms, 3500ms, zero);
+    const auto interpolate = FrameGenSynthesisMode::kInterpolate;
+    const auto extrapolate = FrameGenSynthesisMode::kExtrapolate;
+    // Slow driver/backend setup and time spent in other modes do not use
+    // up a finite hardware readiness experiment before it can run.
+    Check(Peer::DelayUntil(presenter, zero + 10s, interpolate, false) == TimePoint{},
+          "flow delay anchor: shader prelude is inert");
+    Check(Peer::DelayUntil(presenter, zero + 20s, extrapolate, true) == TimePoint{},
+          "flow delay anchor: hardware Extrapolate prelude is inert");
+    const auto first = zero + 30s;
+    Check(Peer::DelayUntil(presenter, first, interpolate, true) == first + 100ms,
+          "flow delay anchor: first hardware analysis starts experiment after setup");
+    Check(Peer::DelayUntil(presenter, first + 3499ms, interpolate, true) == first + 3599ms,
+          "flow delay anchor: final in-window analysis is delayed");
+    Check(Peer::DelayUntil(presenter, first + 3500ms, interpolate, true) == TimePoint{},
+          "flow delay anchor: exact expiry accepts normally");
+    Check(Peer::DelayUntil(presenter, first + 60s, interpolate, true) == TimePoint{},
+          "flow delay anchor: recovery probe cannot re-arm experiment");
+    Check(presenter.ResetFrames(), "flow delay anchor: frame reset succeeds");
+    Check(Peer::DelayUntil(presenter, first + 70s, interpolate, true) == TimePoint{},
+          "flow delay anchor: frame reset cannot re-arm finite experiment");
+}
+
+// The exact research acceptance-delay path against the fake GPU/runtime:
+// hardware work completes normally, fallback and a healthy probe happen,
+// no unsafe synthesis is issued, and the session is never recreated.
+void TestInterpolateFlowAcceptanceDelay() {
+    const auto saved = [](const char* name) {
+        const char* value = std::getenv(name);
+        return value ? std::string(value) : std::string();
+    };
+    const std::string old_delay = saved("VECTORXR_FRAMEGEN_INTERPOLATE_DELAY_MS");
+    const std::string old_for = saved("VECTORXR_FRAMEGEN_INTERPOLATE_DELAY_FOR_MS");
+    const std::string old_force = saved("VECTORXR_FRAMEGEN_INTERPOLATE_HARDWARE");
+    _putenv_s("VECTORXR_FRAMEGEN_INTERPOLATE_HARDWARE", "");
+    _putenv_s("VECTORXR_FRAMEGEN_INTERPOLATE_DELAY_MS", "100");
+    _putenv_s("VECTORXR_FRAMEGEN_INTERPOLATE_DELAY_FOR_MS", "1000");
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    gpu.ofa = 1ms;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    SessionLog log("interpolate-flow-delay");
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kInterpolate, FrameGenMultiplier::k2, app, runtime, owned,
+             log.logger.get());
+    _putenv_s("VECTORXR_FRAMEGEN_INTERPOLATE_DELAY_MS", old_delay.c_str());
+    _putenv_s("VECTORXR_FRAMEGEN_INTERPOLATE_DELAY_FOR_MS", old_for.c_str());
+    _putenv_s("VECTORXR_FRAMEGEN_INTERPOLATE_HARDWARE", old_force.c_str());
+    FrameGenResolvedSettings settings;
+    settings.enabled = true;
+    settings.multiplier = FrameGenMultiplier::k2;
+    settings.motion_estimation = FrameGenMotionEstimation::kHardware;
+    presenter.Configure(settings);
+    FrameGenInterpolateFlowPolicy policy;
+    policy.window = 150ms;
+    policy.shader_hold = 400ms;
+    policy.probe = 250ms;
+    policy.hold_max = 1600ms;
+    policy.min_generated = 3;
+    policy.min_hardware_samples = 3;
+    policy.hardware_late_share = 2.0; // this test isolates readiness, not timing
+    presenter.SetInterpolateFlowPolicy(policy);
+    for (int i = 0; i < 3; ++i) app->Frame();
+    RunWork(*app, 3500ms, {3ms}, [&](const XrFrameState&) {
+        const auto status = presenter.Status();
+        return status.interpolate_flow_fallbacks > 0 && status.interpolate_flow_probes > 0 &&
+               status.interpolate_flow_active == "hardware" && !status.interpolate_flow_probing &&
+               status.interpolate_flow_reason.find("recovered") != std::string::npos;
+    });
+    const auto status = presenter.Status();
+    Check(status.interpolate_flow_fallbacks > 0 && status.interpolate_flow_probes > 0,
+          "flow delay: real readiness counters trigger fallback and a probe");
+    Check(status.interpolate_flow_active == "hardware" && !status.interpolate_flow_probing &&
+              status.interpolate_flow_reason.find("recovered") != std::string::npos,
+          "flow delay: expired delay recovers hardware (" + status.interpolate_flow_reason + ")");
+    Check(gpu.unmeasured_moves == 0 && gpu.uncaptured_writes == 0,
+          "flow delay: synthesis never uses unfinished motion or uncaptured images");
+    const auto [stale_outputs, motion_outputs] = FrameGenFlowTestPeer::MotionOutputs(presenter);
+    Check(motion_outputs > 0 && stale_outputs <= motion_outputs,
+          "flow delay: actual successful synthesis pairs stale outputs with their denominator (" +
+              std::to_string(stale_outputs) + "/" + std::to_string(motion_outputs) + ")");
+    Check(!runtime.ordering_violation && !g_release_violation, "flow delay: calls stayed ordered");
+    presenter.Stop();
+    Check(log.Lines("Interpolate flow switch:").size() >= 2 &&
+              log.Lines("Interpolate flow probe recovered:").size() == 1,
+          "flow delay: switches and recovery are logged with reasons");
+}
+
 #define RUN(test)                                                                                \
     do {                                                                                         \
         const char* only = std::getenv("FG_TEST_ONLY");                                          \
@@ -10705,6 +15284,9 @@ void RunPolicyTests() {
     RUN(TestLeadResetOnRestart);
     RUN(TestLeadStepsDownAfterHitches);
     RUN(TestLeadDoesNotFlap);
+    RUN(TestLeadCeilingKeepsLeadTheRingHolds);
+    RUN(TestLeadCeilingRespectsProvenLead);
+    RUN(TestLeadCeilingResetsOnRestart);
     RUN(TestSkipIdenticalExactCopies);
     RUN(TestTelemetryWindows);
     RUN(TestDynamicSwitchStandby);
@@ -10713,6 +15295,11 @@ void RunPolicyTests() {
     RUN(TestPauseAndLoadingDoNotStandDown);
     RUN(TestWinningEngagementStays);
     RUN(TestWinningEngagementSurvivesLateCaptures);
+    RUN(TestInterpolateFlowCounterWindows);
+    RUN(TestInterpolateFlowRecoveryBackoff);
+    RUN(TestInterpolateFlowProbeIsolation);
+    RUN(TestInterpolateFlowDelayStartsAtHardware);
+    RUN(TestInterpolateFlowAcceptanceDelay);
     RUN(TestInterpolateOnShaders);
     RUN(TestInterpolateSourceFollowsLiveSwitch);
     RUN(TestDynamicToggleStandsBy);
@@ -10726,6 +15313,9 @@ void RunPolicyTests() {
     RUN(TestLateSubmissionRecovers);
     RUN(TestEchoRuntimeLatePresenter);
     RUN(TestRefreshPeriodChanges);
+    // The lead's ceiling against lateness at the lead below it.
+    RUN(TestLeadCeilingGpuBoundTrade);
+    RUN(TestLeadCeilingRetriesWhenLate);
 }
 
 // The policy tests in a second process of this executable, alongside the
@@ -10781,6 +15371,18 @@ int main(int argc, char** argv) {
         std::cerr << "FAILED: terminate: " << what << std::endl;
         std::_Exit(3);
     });
+    // Research switches (framegen-research.txt) and capture requests are
+    // read beside the tests, never from the user's VectorXR folder.
+    {
+        wchar_t exe_path[MAX_PATH]{};
+        GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
+        const std::filesystem::path app_data =
+            std::filesystem::path(exe_path).parent_path() / "framegen_presenter_tests_appdata";
+        std::error_code ignored;
+        std::filesystem::create_directories(app_data, ignored);
+        _wputenv_s(L"LOCALAPPDATA", app_data.c_str());
+        SetEnvironmentVariableW(L"LOCALAPPDATA", app_data.c_str());
+    }
     if (argc > 1 && std::string(argv[1]) == "--policy-tests") {
         RunPolicyTests();
         return 0;
@@ -10798,6 +15400,18 @@ int main(int argc, char** argv) {
     RUN(TestSubmissionSpacing);
     RUN(TestOutputsKeptAcrossMultipliers);
     RUN(TestDepthCapture);
+    RUN(TestEyePredictionSwitch);
+    RUN(TestEngineMotionCensus);
+    RUN(TestEngineMotionGates);
+    RUN(TestEngineMotionCapture);
+    RUN(TestEngineMotionBridge);
+    RUN(TestEngineMotionObserve);
+    RUN(TestEngineMotionAssist);
+    RUN(TestEngineMotionLead);
+    RUN(TestEngineMap);
+    RUN(TestEngineVisibility);
+    RUN(TestEngineDelta);
+    RUN(TestResearchFileSessions);
     RUN(TestAutomaticMultiplier);
     RUN(TestThreadedExtrapolation);
     RUN(TestThreadedDynamic);
@@ -10809,6 +15423,7 @@ int main(int argc, char** argv) {
     RUN(TestThreadedInterpolation);
     RUN(TestJitExtrapolation);
     RUN(TestJitEyeShiftReported);
+    RUN(TestEyeProbe);
     RUN(TestJitDynamicExtrapolation);
     RUN(TestJitStaleMotion);
     RUN(TestJitInterpolateCoversLateMotion);
@@ -10849,6 +15464,8 @@ int main(int argc, char** argv) {
     RUN(TestRetriesNotRestoredByALongPause);
     RUN(TestDynamicSummaryShowsHold);
     RUN(TestViewExtentChangesLogged);
+    RUN(TestDepthEyes);
+    RUN(TestDepthValidator);
     RUN(TestOpenCompositeAbandonsFrames);
     RUN(TestSingleAbandonedFrameLeavesNothingBehind);
     RUN(TestAbandonedBeforeFirstEnd);
@@ -10926,10 +15543,16 @@ int main(int argc, char** argv) {
         g_jit = jit;
         RUN(TestAutoProbesNeedRoom);
     }
+    RUN(TestAutoGpuBoundProbeReturnsPromptly);
+    RUN(TestAutoProbeAllowsLatencyAndShortHitch);
+    RUN(TestAutoProbeSurvivesTransitionBurst);
     g_jit = false;
     RUN(TestClockLogPairs);
     RUN(TestSteamVrMissedRefresh);
     RUN(TestLeadAfterRepeatedHitches);
+    RUN(TestLeadIgnoresRareHitchBursts);
+    RUN(TestLeadHitchesDoNotRatchet);
+    RUN(TestLeadRisesForFrequentLates);
     RUN(TestHitchReturnsToProvenLead);
     RUN(TestRaisedFloorProbesBackOff);
     RUN(TestHitchDuringProbeBack);
@@ -10940,6 +15563,19 @@ int main(int argc, char** argv) {
         RUN(TestLoadingFramesDoNotRaiseLead);
     }
     g_jit = false;
+    // The lead's ceiling from the history ring.
+    RUN(TestRingLeadFloor);
+    RUN(TestLeadCeilingFollowsRing);
+    RUN(TestLeadCeilingDynamicFollowsSpacing);
+    RUN(TestLeadCeilingDynamicFloor);
+    RUN(TestLeadCeilingDynamicSlowsDown);
+    RUN(TestLeadCeilingIgnoresFallbackExhaustion);
+    RUN(TestLeadCeilingIgnoresLateWrites);
+    RUN(TestLeadCeilingInactiveOnShortRing);
+    RUN(TestLeadCeilingSummaryAndSwitch);
+    RUN(TestLeadCeilingProbeAndTrial);
+    RUN(TestLeadCeilingRaisesOnBursts);
+    RUN(TestLeadCeilingActsThroughHitches);
     if (!policy) {
         RunPolicyTests();
     } else {

@@ -2,6 +2,8 @@
 
 The runtime relay is VectorXR's low-frequency control plane between the desktop app and layer processes. It is separate from saved settings: settings describe persistent launch behavior, while relay state belongs to one live OpenXR session.
 
+The relay is internal to VectorXR and changes between versions. Other programs read the public [status API](status-api.md) instead.
+
 The initial capability controls the Quadviews diagnostic visualization. The protocol is intentionally general enough to carry more live controls and status later.
 
 ## Transport

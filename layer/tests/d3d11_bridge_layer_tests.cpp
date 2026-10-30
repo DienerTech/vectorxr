@@ -198,6 +198,13 @@ class D3D11BridgeLayerTestPeer {
     static std::string FrameGenStatusReason(const FrameGenStatus& status) {
         return OpenXrLayer::FrameGenStatusReason(status);
     }
+    // The relay status's rates and the public status file's block for `status`.
+    static RuntimeFrameGenRates FrameGenRates(const FrameGenStatus& status) {
+        return OpenXrLayer::FrameGenRates(status);
+    }
+    static ExternalFrameGenStatus ExternalFrameGen(const FrameGenStatus& status) {
+        return OpenXrLayer::ExternalFrameGen(status);
+    }
     // Frame Generation left a presenter thread behind (for the process).
     static bool FrameGenPresenterAbandoned() {
         return OpenXrLayer::Instance().framegen_.PresenterAbandoned();
@@ -540,6 +547,11 @@ bool GameRuns(Game& game) {
 }
 
 // A fence the test opens: Direct3D 11 (or a Direct3D 12 queue) held back until Open.
+bool GpuNegativeControlsAllowed() {
+    const char* no_stall = std::getenv("FG_TEST_NO_STALL");
+    return !(no_stall && std::string(no_stall) == "1");
+}
+
 struct Gate {
     ComPtr<ID3D12Fence> fence;
     ComPtr<ID3D11Fence> fence11;
@@ -561,8 +573,14 @@ struct Gate {
     }
     Gate(const Gate&) = delete;
     Gate& operator=(const Gate&) = delete;
-    void HoldGame(Game& game) { game.context4->Wait(fence11.Get(), 1); }
-    void HoldQueue(ID3D12CommandQueue* queue) { queue->Wait(fence.Get(), 1); }
+    void HoldGame(Game& game) {
+        Check(GpuNegativeControlsAllowed(), "FG_TEST_NO_STALL=1 forbids an artificial game GPU hold");
+        game.context4->Wait(fence11.Get(), 1);
+    }
+    void HoldQueue(ID3D12CommandQueue* queue) {
+        Check(GpuNegativeControlsAllowed(), "FG_TEST_NO_STALL=1 forbids an artificial GPU queue hold");
+        queue->Wait(fence.Get(), 1);
+    }
     void Open() { fence->Signal(1); }
     // Opened from another thread after `ms`, while the layer waits for what it holds.
     std::thread OpenLater(DWORD ms) {
@@ -2627,7 +2645,7 @@ void CheckFrames(App& app, Game& game, Target& left, Target& right) {
     for (int frame = 0; frame < kFrames; ++frame) {
         const std::vector<Color> colors{FrameColor(frame, 0), FrameColor(frame, 1)};
         std::optional<Gate> gate;
-        if (frame == 2 || frame == 6) {
+        if (GpuNegativeControlsAllowed() && (frame == 2 || frame == 6)) {
             gate.emplace(g_runtime.device12.Get(), game);
         }
         // Frame 6 releases the right eye first: the left is the one held.
@@ -2715,7 +2733,7 @@ void CheckTeardown(App& app, Game& game, Target& left, Target& right) {
     {
         // The left eye's last copy waits behind a gate the layer's wait outlasts.
         Gate gate(device, game);
-        gate.HoldQueue(bridge_queue);
+        if (GpuNegativeControlsAllowed()) gate.HoldQueue(bridge_queue);
         Render(app, game, left, {1, 2, 3, 255});
         bool destroyed = false;
         std::string summary;
@@ -2741,7 +2759,7 @@ void CheckTeardown(App& app, Game& game, Target& left, Target& right) {
     // The right eye (and depth) are left to the session; its last copy waits
     // behind a gate, and a marker after everything on the bridge's queue.
     Gate gate(device, game);
-    gate.HoldQueue(bridge_queue);
+    if (GpuNegativeControlsAllowed()) gate.HoldQueue(bridge_queue);
     Render(app, game, right, {4, 5, 6, 255});
     ComPtr<ID3D12Fence> marker;
     Check(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&marker))), "a marker fence");
@@ -2809,6 +2827,57 @@ bool TestBridgedSession(Game& game) {
     CheckTeardown(app, game, left, right);
     EndCase(game);
     return true;
+}
+
+// The public status file (%LOCALAPPDATA%\VectorXR\api\status.json, here
+// the test's own): written on the relay's heartbeat while a session runs, as
+// this process's, with Frame Generation's block; removed at the session's
+// end, and with an instance destroyed with its session alive. (That a copy
+// leaves another process's file alone is the external status tests'.)
+void TestStatusFile(Game& game) {
+    BeginCase("status-file", game);
+    const std::filesystem::path path = g_root / "api" / "status.json";
+    std::error_code error;
+    std::filesystem::remove(path, error);
+    const auto text = [&] {
+        std::ifstream stream(path, std::ios::binary);
+        std::ostringstream buffer;
+        buffer << stream.rdbuf();
+        return buffer.str();
+    };
+    const auto eventually = [](const std::function<bool()>& done) {
+        const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!done()) {
+            if (std::chrono::steady_clock::now() > until) return false;
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        return true;
+    };
+    const std::string owner = "\"processId\": " + std::to_string(GetCurrentProcessId()) + ",";
+    App app = StartApp();
+    for (int session = 0; session < 2; ++session) {
+        SessionCreate create(game.device.Get(), app.system);
+        Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS, "xrCreateSession");
+        BeginSession(app);
+        Check(eventually([&] { return Contains(text(), owner); }), "the status file is written while a session runs");
+        const std::string written = text();
+        Check(Contains(written, "\"schema\": \"vectorxr.status\",\n  \"version\": 1,\n") &&
+                  Contains(written, "\"sessionId\": \"" + std::to_string(GetCurrentProcessId()) + "-") &&
+                  Contains(written, "\"framegen\": {\n") && Contains(written, "\"targetAppFps\": "),
+              "the status file names this session and carries Frame Generation's block: " + written);
+        if (session == 1) break;
+        Check(app.api.destroy_space(app.space) == XR_SUCCESS, "xrDestroySpace");
+        app.space = XR_NULL_HANDLE;
+        Check(app.api.destroy_session(app.session) == XR_SUCCESS, "xrDestroySession");
+        app.session = XR_NULL_HANDLE;
+        Check(eventually([&] { return !std::filesystem::exists(path); }), "the session's end removes its status file");
+    }
+    // The instance destroyed with its session alive: gone by the time
+    // xrDestroyInstance returns (the watcher is stopped first).
+    Check(app.api.destroy_instance(app.api.instance) == XR_SUCCESS, "xrDestroyInstance with the session alive");
+    Check(!std::filesystem::exists(path), "the instance's end removes the status file of its live session");
+    Check(Peer::Idle(), "nothing is left of the instance");
+    EndCase(game);
 }
 
 // 2d in a session of its own: the second thread is logged as an error, and
@@ -3027,6 +3096,37 @@ void TestInstanceExtensions(Game& game) {
           "the log names the layer below and where OpenXR Toolkit is");
     EndCase(game);
 
+    // Two layers down, behind a layer that forwards the probe to it
+    // (OpenKneeboard above OpenXR Toolkit): never asked either.
+    BeginCase("instance-template-layer-two-below", game);
+    depthxr::XrApiLayerNextInfo kneeboard = toolkit;
+    std::strncpy(kneeboard.layerName, "XR_APILAYER_FREDEMMOTT_OpenKneeboard", XR_MAX_API_LAYER_NAME_SIZE - 1);
+    kneeboard.next = &toolkit;
+    toolkit.next = nullptr;
+    g_layer_below = &kneeboard;
+    result = InstanceAttempts({kD3D11Extension}, attempts, log);
+    g_layer_below = nullptr;
+    Check(result == XR_SUCCESS && g_runtime.pre_instance_queries == 0 && attempts.size() == 1 &&
+              attempts[0] == Names{kD3D11Extension, kD3D12Extension},
+          "nothing asked through a forwarding layer above a template layer, the extension added: " +
+              Text(attempts));
+    Check(Contains(log, "OpenXR API layers below VectorXR: [XR_APILAYER_FREDEMMOTT_OpenKneeboard "
+                        "XR_APILAYER_MBUCCHIA_toolkit]") &&
+              Contains(log, "OpenXR Toolkit is loaded below VectorXR."),
+          "the log names both layers below and where OpenXR Toolkit is: " + log);
+    EndCase(game);
+
+    // A forwarding layer alone is asked as before.
+    BeginCase("instance-forwarding-layer-below", game);
+    kneeboard.next = nullptr;
+    g_layer_below = &kneeboard;
+    result = InstanceAttempts({kD3D11Extension}, attempts, log);
+    g_layer_below = nullptr;
+    Check(result == XR_SUCCESS && g_runtime.pre_instance_queries > 0 && attempts.size() == 1 &&
+              attempts[0] == Names{kD3D11Extension, kD3D12Extension},
+          "the runtime's extensions are asked through a layer not made from the template: " + Text(attempts));
+    EndCase(game);
+
     BeginCase("instance-bridge-off", game);
     SetEnv("VECTORXR_D3D11_BRIDGE", "off");
     result = InstanceAttempts({kD3D11Extension}, attempts, log);
@@ -3111,7 +3211,7 @@ void TestDestroyInstanceWithSession(Game& game) {
     // and a marker after everything on the bridge's queue.
     ID3D12CommandQueue* bridge_queue = BridgeBinding()->queue;
     Gate gate(g_runtime.device12.Get(), game);
-    gate.HoldQueue(bridge_queue);
+    if (GpuNegativeControlsAllowed()) gate.HoldQueue(bridge_queue);
     Render(app, game, left, {7, 8, 9, 255});
     ComPtr<ID3D12Fence> marker;
     Check(SUCCEEDED(g_runtime.device12->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&marker))),
@@ -3366,34 +3466,38 @@ void TestBridgedQuadViewsComposed(Game& game, bool framegen) {
     // is told of every release of the outputs all the same: the runtime
     // shows the image released last wherever a frame shows the swapchain.
     const std::array<XrSwapchain, 2> outputs = Peer::CompositorOutputs();
-    const auto runtime_releases = [](XrSwapchain swapchain) {
-        std::scoped_lock lock(g_runtime_mutex);
-        const StandInSwapchain* chain = FindSwapchain(swapchain);
-        return chain ? chain->releases : -1;
-    };
-    std::array<int, 2> released_before{};
-    std::array<std::uint64_t, 2> told_before{};
-    for (int eye = 0; eye < 2; ++eye) {
-        released_before[eye] = runtime_releases(outputs[eye]);
-        told_before[eye] = Peer::FrameGenReleases(outputs[eye]);
-    }
-    {
-        std::scoped_lock lock(g_runtime_mutex);
-        g_runtime.refuse_wait = {outputs[1]};
-        g_runtime.wait_refusals = 1;
-    }
-    const auto [d3d11_before, split_before] = Peer::QuadFrames();
-    Check(QuadFrame(app, game, targets, kFrames + 3) == XR_SUCCESS, "a quad frame whose right output's wait fails");
-    Check(QuadFrame(app, game, targets, kFrames + 4) == XR_SUCCESS, "a quad frame after it");
-    const auto [d3d11_after, split_after] = Peer::QuadFrames();
-    Check(d3d11_after == d3d11_before + 1 && split_after == split_before + 1,
-          "the frame whose output wait failed is split, the one after it composed");
-    for (int eye = 0; eye < 2; ++eye) {
-        const int released = runtime_releases(outputs[eye]) - released_before[eye];
-        const std::uint64_t told = Peer::FrameGenReleases(outputs[eye]) - told_before[eye];
-        Check(released == 2 && told == 2, "output " + std::to_string(eye) + ": the runtime got " +
-                                              std::to_string(released) + " releases, Frame Generation was told of " +
-                                              std::to_string(told));
+    if (GpuNegativeControlsAllowed()) {
+        const auto runtime_releases = [](XrSwapchain swapchain) {
+            std::scoped_lock lock(g_runtime_mutex);
+            const StandInSwapchain* chain = FindSwapchain(swapchain);
+            return chain ? chain->releases : -1;
+        };
+        std::array<int, 2> released_before{};
+        std::array<std::uint64_t, 2> told_before{};
+        for (int eye = 0; eye < 2; ++eye) {
+            released_before[eye] = runtime_releases(outputs[eye]);
+            told_before[eye] = Peer::FrameGenReleases(outputs[eye]);
+        }
+        {
+            std::scoped_lock lock(g_runtime_mutex);
+            g_runtime.refuse_wait = {outputs[1]};
+            g_runtime.wait_refusals = 1;
+        }
+        const auto [d3d11_before, split_before] = Peer::QuadFrames();
+        Check(QuadFrame(app, game, targets, kFrames + 3) == XR_SUCCESS, "a quad frame whose right output's wait fails");
+        Check(QuadFrame(app, game, targets, kFrames + 4) == XR_SUCCESS, "a quad frame after it");
+        const auto [d3d11_after, split_after] = Peer::QuadFrames();
+        Check(d3d11_after == d3d11_before + 1 && split_after == split_before + 1,
+              "the frame whose output wait failed is split, the one after it composed");
+        for (int eye = 0; eye < 2; ++eye) {
+            const int released = runtime_releases(outputs[eye]) - released_before[eye];
+            const std::uint64_t told = Peer::FrameGenReleases(outputs[eye]) - told_before[eye];
+            Check(released == 2 && told == 2, "output " + std::to_string(eye) + ": the runtime got " +
+                                                  std::to_string(released) + " releases, Frame Generation was told of " +
+                                                  std::to_string(told));
+        }
+    } else {
+        std::cout << "FG_TEST_NO_STALL=1: skipped refused compositor-output wait control\n";
     }
 
     // Frame Generation here (the stand-in backend, inline) cannot compose the
@@ -3718,7 +3822,7 @@ void TestBridgedQuadFrameGen(Game& game, const std::string& mode) {
     // is held back from just before xrEndFrame until the frame has ended,
     // and the stand-in counts the outputs' releases the application's thread
     // makes meanwhile.
-    {
+    if (GpuNegativeControlsAllowed()) {
         const std::array<XrSwapchain, 2> compositor = Peer::CompositorOutputs();
         Gate gate(g_runtime.device12.Get(), game);
         {
@@ -3766,41 +3870,47 @@ void TestBridgedQuadFrameGen(Game& game, const std::string& mode) {
         check_shown(moved_from, "rectangles changed");
     }
 
-    // The runtime refuses Frame Generation's output acquires: the last
-    // frame written is shown again (logged); refused ten times in a row, the
-    // layer composes for a while, then Frame Generation composes again.
-    {
-        std::scoped_lock lock(g_runtime_mutex);
-        g_runtime.refuse_acquire = {outputs[0], outputs[1]};
-        g_runtime.refusals = 12;
+    std::string log;
+    if (GpuNegativeControlsAllowed()) {
+        // The runtime refuses Frame Generation's output acquires: the last
+        // frame written is shown again (logged); refused ten times in a row, the
+        // layer composes for a while, then Frame Generation composes again.
+        {
+            std::scoped_lock lock(g_runtime_mutex);
+            g_runtime.refuse_acquire = {outputs[0], outputs[1]};
+            g_runtime.refusals = 12;
+        }
+        const std::size_t refused_from = ShownCount();
+        const std::uint64_t d3d11_refused = Peer::QuadFrames().first;
+        run(12, "refused");
+        log = Peer::Log();
+        Check(Contains(log, "Frame Generation could not write a composed frame ("), "refused: failed writes are logged");
+        Check(Contains(log, "Frame Generation could not write 10 composed frames in a row (output image acquire failed") &&
+                  Peer::FrameGen().quad_write_declines == 1,
+              "refused: ten in a row hand the quad views back to the layer");
+        Check(Peer::QuadFrames().first > d3d11_refused, "refused: the Direct3D 11 compositor composes meanwhile");
+        check_shown(refused_from, "refused");
+        // The app's status line says so while it lasts (when the case is still
+        // that quick).
+        if (const depthxr::FrameGenStatus declined = Peer::FrameGen(); declined.quad_declining) {
+            const std::string line = Peer::FrameGenStatusReason(declined);
+            Check(Contains(line, "could not be shown") && !Contains(line, " fps"),
+                  "refused: the app's status line says generated frames could not be shown for a while: " + line);
+        }
+        {
+            std::scoped_lock lock(g_runtime_mutex);
+            g_runtime.refusals = 0;
+        }
+        Sleep(350); // the decline ends
+        const std::uint64_t fg_resumed = Peer::QuadFramesComposedByFrameGen();
+        const std::size_t resumed_from = ShownCount();
+        run(10, "resumed");
+        Check(Peer::QuadFramesComposedByFrameGen() >= fg_resumed + 9 && check_shown(resumed_from, "resumed") > 0,
+              "resumed: Frame Generation composes again after the decline");
+
+    } else {
+        std::cout << "FG_TEST_NO_STALL=1: skipped real-backend refused-output control\n";
     }
-    const std::size_t refused_from = ShownCount();
-    const std::uint64_t d3d11_refused = Peer::QuadFrames().first;
-    run(12, "refused");
-    std::string log = Peer::Log();
-    Check(Contains(log, "Frame Generation could not write a composed frame ("), "refused: failed writes are logged");
-    Check(Contains(log, "Frame Generation could not write 10 composed frames in a row (output image acquire failed") &&
-              Peer::FrameGen().quad_write_declines == 1,
-          "refused: ten in a row hand the quad views back to the layer");
-    Check(Peer::QuadFrames().first > d3d11_refused, "refused: the Direct3D 11 compositor composes meanwhile");
-    check_shown(refused_from, "refused");
-    // The app's status line says so while it lasts (when the case is still
-    // that quick).
-    if (const depthxr::FrameGenStatus declined = Peer::FrameGen(); declined.quad_declining) {
-        const std::string line = Peer::FrameGenStatusReason(declined);
-        Check(Contains(line, "could not be shown") && !Contains(line, " fps"),
-              "refused: the app's status line says generated frames could not be shown for a while: " + line);
-    }
-    {
-        std::scoped_lock lock(g_runtime_mutex);
-        g_runtime.refusals = 0;
-    }
-    Sleep(350); // the decline ends
-    const std::uint64_t fg_resumed = Peer::QuadFramesComposedByFrameGen();
-    const std::size_t resumed_from = ShownCount();
-    run(10, "resumed");
-    Check(Peer::QuadFramesComposedByFrameGen() >= fg_resumed + 9 && check_shown(resumed_from, "resumed") > 0,
-          "resumed: Frame Generation composes again after the decline");
 
     // Toggled off: frames already in flight end through Frame Generation,
     // then the Direct3D 11 compositor composes each frame as it ends.
@@ -4663,154 +4773,159 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
               std::to_string(unready) + " not captured yet; " + std::to_string(status.generated) + " generated)");
     CheckValidation(game, "steady");
 
-    // The game GPU-bound, with the quad layer and without it: every frame
-    // ended while the game's work was held back, of Frame Generation's
-    // outputs, waited for that work on the runtime's queue or not: the
-    // queue reached its mark, or its quad layer read right after (as a
-    // compositor reads what it shows), only once the work could run.
-    // Frame Generation submits each frame as the runtime releases its wait,
-    // as the game's wait is released: one submitted a moment before the
-    // game's release of the quad layer is not behind it on the queue, but
-    // reading it is.
-    struct Backlog {
-        std::size_t during{0}; // frames of Frame Generation's ended while the game's work was held back
-        std::size_t waited{0}; // ...that the runtime's queue reached only once the work could run
-        std::vector<double> latencies; // of those that waited
-        std::vector<double> others;    // of the others
-        std::uint64_t moved{0};    // frames Frame Generation generated meanwhile
-        std::uint64_t repeated{0}; // refreshes it repeated the frame before at
-        depthxr::FrameGenQueueSubstitution::ShownLayerCounts shown; // the quad's, meanwhile
-        std::size_t behind{0}; // refreshes whose quad layer showed the release before the game's latest
-        double game_ms{0.0};   // the game's 16 frames took
-    };
-    const auto loaded = [&](bool quad_layer, const std::string& at) {
-        Backlog backlog;
-        const depthxr::FrameGenStatus before = Peer::FrameGen();
-        const depthxr::FrameGenQueueSubstitution::ShownLayerCounts shown_before = Peer::ShownLayers();
-        const std::size_t behind_before = quad_behind;
-        const std::size_t from = ShownCount();
-        {
-            GameLoad game_load(g_runtime.readback.Get());
-            {
-                std::scoped_lock lock(g_runtime_mutex);
-                load = &game_load;
-            }
-            SideBySideFrameOptions options;
-            options.quad_layer = quad_layer;
-            options.load = &game_load;
-            const auto game_start = std::chrono::steady_clock::now();
-            run(16, options);
-            backlog.game_ms =
-                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - game_start).count();
-            game_load.Finish();
-            std::scoped_lock lock(g_runtime_mutex);
-            load = nullptr;
-            for (std::size_t i = from; i < extras.size(); ++i) {
-                const SideBySideShown& extra = extras[i];
-                const std::vector<ShownView>& views = g_runtime.frames[i].views;
-                if (views.empty() || views[0].swapchain == session.eyes.swapchain) continue;
-                Check(extra.latency_ms < kGameLoadMs + 2000.0,
-                      at + ": the runtime's queue reaches a frame of Frame Generation's within the game's work (" +
-                          std::to_string(extra.latency_ms) + " ms)");
-                std::optional<bool> waited =
-                    extra.during ? game_load.Waited(*extra.during, extra.mark, extra.marked) : std::nullopt;
-                double latency_ms = extra.latency_ms;
-                if (waited && !*waited && extra.read_mark) {
-                    waited = game_load.Waited(*extra.during, extra.read_mark, extra.marked);
-                    latency_ms = extra.read_latency_ms;
-                }
-                if (!waited) continue;
-                ++backlog.during;
-                if (*waited) {
-                    ++backlog.waited;
-                    backlog.latencies.push_back(latency_ms);
-                } else {
-                    backlog.others.push_back(extra.latency_ms);
-                }
-            }
-        }
-        // Each frame's content held all the same.
-        check_shown(from, at, quad_layer);
-        const depthxr::FrameGenStatus after = Peer::FrameGen();
-        backlog.moved = after.generated - before.generated;
-        backlog.repeated = after.repeated - before.repeated;
-        const depthxr::FrameGenQueueSubstitution::ShownLayerCounts shown_after = Peer::ShownLayers();
-        backlog.shown.releases = shown_after.releases - shown_before.releases;
-        backlog.shown.cpu_waits = shown_after.cpu_waits - shown_before.cpu_waits;
-        backlog.shown.gpu_waits = shown_after.gpu_waits - shown_before.gpu_waits;
-        backlog.behind = quad_behind - behind_before;
-        return backlog;
-    };
-    const Backlog with_quad = loaded(true, "GPU-bound, with the quad layer");
-    // The game's frames without the quad layer for a while first: frames
-    // shown until one of them is real still have it.
-    SideBySideFrameOptions no_quad_layer;
-    no_quad_layer.quad_layer = false;
-    settle(no_quad_layer);
-    const Backlog without_quad = loaded(false, "GPU-bound, without the quad layer");
-    const auto describe = [](const Backlog& backlog) {
-        return std::to_string(backlog.waited) + " of " + std::to_string(backlog.during) + " (waited " +
-               Spread(backlog.latencies) + "; the others " + Spread(backlog.others) + "; " +
-               std::to_string(backlog.moved) + " generated, " + std::to_string(backlog.repeated) + " repeated; " +
-               "the game's 16 frames in " + std::to_string(static_cast<int>(backlog.game_ms)) + " ms)";
-    };
-    if (shown_lazy) {
-        // The quad layer's releases kept lazy: no frame of Frame
-        // Generation's waits for the game's work, with the quad layer or
-        // without it. Each of the game's releases of the quad (one a frame)
-        // was held back, its next wait waiting for it on the CPU, on the
-        // runtime's queue only past that wait's bound (far beyond the game's
-        // held-back work).
-        const auto counts = [](const Backlog& backlog) {
-            return std::to_string(backlog.shown.releases) + " lazy releases, " +
-                   std::to_string(backlog.shown.cpu_waits) + " waited for on the CPU, " +
-                   std::to_string(backlog.shown.gpu_waits) + " on the runtime's queue; " +
-                   std::to_string(backlog.behind) + " refreshes showed the release before the game's latest";
+    if (GpuNegativeControlsAllowed()) {
+        // The game GPU-bound, with the quad layer and without it: every frame
+        // ended while the game's work was held back, of Frame Generation's
+        // outputs, waited for that work on the runtime's queue or not: the
+        // queue reached its mark, or its quad layer read right after (as a
+        // compositor reads what it shows), only once the work could run.
+        // Frame Generation submits each frame as the runtime releases its wait,
+        // as the game's wait is released: one submitted a moment before the
+        // game's release of the quad layer is not behind it on the queue, but
+        // reading it is.
+        struct Backlog {
+            std::size_t during{0}; // frames of Frame Generation's ended while the game's work was held back
+            std::size_t waited{0}; // ...that the runtime's queue reached only once the work could run
+            std::vector<double> latencies; // of those that waited
+            std::vector<double> others;    // of the others
+            std::uint64_t moved{0};    // frames Frame Generation generated meanwhile
+            std::uint64_t repeated{0}; // refreshes it repeated the frame before at
+            depthxr::FrameGenQueueSubstitution::ShownLayerCounts shown; // the quad's, meanwhile
+            std::size_t behind{0}; // refreshes whose quad layer showed the release before the game's latest
+            double game_ms{0.0};   // the game's 16 frames took
         };
-        std::cout << g_case << ": shown layers kept lazy: the game's GPU work held back " << kGameLoadMs
-                  << " ms a frame, the runtime's queue waited for it before frames of Frame Generation's ended "
-                  << "meanwhile: with a quad layer released every frame " << describe(with_quad) << " ("
-                  << counts(with_quad) << "); without it " << describe(without_quad) << ".\n";
-        Check(with_quad.during > 0 && with_quad.waited == 0,
-              "GPU-bound, with the quad layer kept lazy: no frame of Frame Generation's waits for the game's work on "
-              "the runtime's queue: " +
-                  describe(with_quad));
-        // A release whose work outlasts the CPU wait's bound (100 ms: a busy
-        // or software GPU) goes on the runtime's queue instead, as designed;
-        // one of six local runs saw one (2026-10-14).
-        Check(with_quad.shown.releases == 16 && with_quad.shown.cpu_waits > 0 && with_quad.shown.gpu_waits <= 2,
-              "GPU-bound, with the quad layer kept lazy: its releases are held back until their work has run, "
-              "the game's next wait waiting for them on the CPU: " +
-                  counts(with_quad));
-        Check(without_quad.during > 0 && without_quad.waited == 0 && without_quad.shown.releases == 0,
-              "GPU-bound, without the quad layer: no frame of Frame Generation's waits for the game's work: " +
-                  describe(without_quad));
-        CheckValidation(game, "GPU-bound");
+        const auto loaded = [&](bool quad_layer, const std::string& at) {
+            Backlog backlog;
+            const depthxr::FrameGenStatus before = Peer::FrameGen();
+            const depthxr::FrameGenQueueSubstitution::ShownLayerCounts shown_before = Peer::ShownLayers();
+            const std::size_t behind_before = quad_behind;
+            const std::size_t from = ShownCount();
+            {
+                GameLoad game_load(g_runtime.readback.Get());
+                {
+                    std::scoped_lock lock(g_runtime_mutex);
+                    load = &game_load;
+                }
+                SideBySideFrameOptions options;
+                options.quad_layer = quad_layer;
+                options.load = &game_load;
+                const auto game_start = std::chrono::steady_clock::now();
+                run(16, options);
+                backlog.game_ms =
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - game_start).count();
+                game_load.Finish();
+                std::scoped_lock lock(g_runtime_mutex);
+                load = nullptr;
+                for (std::size_t i = from; i < extras.size(); ++i) {
+                    const SideBySideShown& extra = extras[i];
+                    const std::vector<ShownView>& views = g_runtime.frames[i].views;
+                    if (views.empty() || views[0].swapchain == session.eyes.swapchain) continue;
+                    Check(extra.latency_ms < kGameLoadMs + 2000.0,
+                          at + ": the runtime's queue reaches a frame of Frame Generation's within the game's work (" +
+                              std::to_string(extra.latency_ms) + " ms)");
+                    std::optional<bool> waited =
+                        extra.during ? game_load.Waited(*extra.during, extra.mark, extra.marked) : std::nullopt;
+                    double latency_ms = extra.latency_ms;
+                    if (waited && !*waited && extra.read_mark) {
+                        waited = game_load.Waited(*extra.during, extra.read_mark, extra.marked);
+                        latency_ms = extra.read_latency_ms;
+                    }
+                    if (!waited) continue;
+                    ++backlog.during;
+                    if (*waited) {
+                        ++backlog.waited;
+                        backlog.latencies.push_back(latency_ms);
+                    } else {
+                        backlog.others.push_back(extra.latency_ms);
+                    }
+                }
+            }
+            // Each frame's content held all the same.
+            check_shown(from, at, quad_layer);
+            const depthxr::FrameGenStatus after = Peer::FrameGen();
+            backlog.moved = after.generated - before.generated;
+            backlog.repeated = after.repeated - before.repeated;
+            const depthxr::FrameGenQueueSubstitution::ShownLayerCounts shown_after = Peer::ShownLayers();
+            backlog.shown.releases = shown_after.releases - shown_before.releases;
+            backlog.shown.cpu_waits = shown_after.cpu_waits - shown_before.cpu_waits;
+            backlog.shown.gpu_waits = shown_after.gpu_waits - shown_before.gpu_waits;
+            backlog.behind = quad_behind - behind_before;
+            return backlog;
+        };
+        const Backlog with_quad = loaded(true, "GPU-bound, with the quad layer");
+        // The game's frames without the quad layer for a while first: frames
+        // shown until one of them is real still have it.
+        SideBySideFrameOptions no_quad_layer;
+        no_quad_layer.quad_layer = false;
+        settle(no_quad_layer);
+        const Backlog without_quad = loaded(false, "GPU-bound, without the quad layer");
+        const auto describe = [](const Backlog& backlog) {
+            return std::to_string(backlog.waited) + " of " + std::to_string(backlog.during) + " (waited " +
+                   Spread(backlog.latencies) + "; the others " + Spread(backlog.others) + "; " +
+                   std::to_string(backlog.moved) + " generated, " + std::to_string(backlog.repeated) + " repeated; " +
+                   "the game's 16 frames in " + std::to_string(static_cast<int>(backlog.game_ms)) + " ms)";
+        };
+        if (shown_lazy) {
+            // The quad layer's releases kept lazy: no frame of Frame
+            // Generation's waits for the game's work, with the quad layer or
+            // without it. Each of the game's releases of the quad (one a frame)
+            // was held back, its next wait waiting for it on the CPU, on the
+            // runtime's queue only past that wait's bound (far beyond the game's
+            // held-back work).
+            const auto counts = [](const Backlog& backlog) {
+                return std::to_string(backlog.shown.releases) + " lazy releases, " +
+                       std::to_string(backlog.shown.cpu_waits) + " waited for on the CPU, " +
+                       std::to_string(backlog.shown.gpu_waits) + " on the runtime's queue; " +
+                       std::to_string(backlog.behind) + " refreshes showed the release before the game's latest";
+            };
+            std::cout << g_case << ": shown layers kept lazy: the game's GPU work held back " << kGameLoadMs
+                      << " ms a frame, the runtime's queue waited for it before frames of Frame Generation's ended "
+                      << "meanwhile: with a quad layer released every frame " << describe(with_quad) << " ("
+                      << counts(with_quad) << "); without it " << describe(without_quad) << ".\n";
+            Check(with_quad.during > 0 && with_quad.waited == 0,
+                  "GPU-bound, with the quad layer kept lazy: no frame of Frame Generation's waits for the game's work on "
+                  "the runtime's queue: " +
+                      describe(with_quad));
+            // A release whose work outlasts the CPU wait's bound (100 ms: a busy
+            // or software GPU) goes on the runtime's queue instead, as designed;
+            // one of six local runs saw one (2026-10-14).
+            Check(with_quad.shown.releases == 16 && with_quad.shown.cpu_waits > 0 && with_quad.shown.gpu_waits <= 2,
+                  "GPU-bound, with the quad layer kept lazy: its releases are held back until their work has run, "
+                  "the game's next wait waiting for them on the CPU: " +
+                      counts(with_quad));
+            Check(without_quad.during > 0 && without_quad.waited == 0 && without_quad.shown.releases == 0,
+                  "GPU-bound, without the quad layer: no frame of Frame Generation's waits for the game's work: " +
+                      describe(without_quad));
+            CheckValidation(game, "GPU-bound");
+        } else {
+            std::cout << g_case << ": KNOWN LIMITATION (the uncaptured-layer backlog, shown layers not lazy): the "
+                      << "game's GPU work held back " << kGameLoadMs << " ms a frame, the runtime's queue waited for it "
+                      << "before frames of Frame Generation's ended meanwhile: with a quad layer released every frame "
+                      << describe(with_quad) << "; without it " << describe(without_quad)
+                      << ". While a layer Frame Generation does not capture is shown, its frames wait for the game's "
+                      << "(with VECTORXR_FRAMEGEN_SHOWN_LAYERS=off).\n";
+            // What the code does with shown layers not lazy: each release of a
+            // swapchain Frame Generation does not capture queues a wait for the
+            // game's work on the runtime's queue
+            // (FrameGenQueueSubstitution::Release), and every frame of its own
+            // queued after it waits there (`shown_lazy` keeps them lazy
+            // instead). Without the quad layer nothing of the game's is waited
+            // for before them.
+            Check(with_quad.waited > 0,
+                  "GPU-bound, with the quad layer: frames of Frame Generation's wait for the game's work on the runtime's "
+                  "queue: " +
+                      describe(with_quad));
+            Check(without_quad.during > 0 && without_quad.waited == 0,
+                  "GPU-bound, without the quad layer: no frame of Frame Generation's waits for the game's work: " +
+                      describe(without_quad));
+            CheckValidation(game, "GPU-bound");
+            const depthxr::FrameGenQueueSubstitution::ShownLayerCounts off = Peer::ShownLayers();
+            Check(off.releases == 0 && off.cpu_waits == 0 && off.gpu_waits == 0 && quad_behind == 0,
+                  "shown layers are not kept lazy with VECTORXR_FRAMEGEN_SHOWN_LAYERS=off");
+        }
+
     } else {
-        std::cout << g_case << ": KNOWN LIMITATION (the uncaptured-layer backlog, shown layers not lazy): the "
-                  << "game's GPU work held back " << kGameLoadMs << " ms a frame, the runtime's queue waited for it "
-                  << "before frames of Frame Generation's ended meanwhile: with a quad layer released every frame "
-                  << describe(with_quad) << "; without it " << describe(without_quad)
-                  << ". While a layer Frame Generation does not capture is shown, its frames wait for the game's "
-                  << "(with VECTORXR_FRAMEGEN_SHOWN_LAYERS=off).\n";
-        // What the code does with shown layers not lazy: each release of a
-        // swapchain Frame Generation does not capture queues a wait for the
-        // game's work on the runtime's queue
-        // (FrameGenQueueSubstitution::Release), and every frame of its own
-        // queued after it waits there (`shown_lazy` keeps them lazy
-        // instead). Without the quad layer nothing of the game's is waited
-        // for before them.
-        Check(with_quad.waited > 0,
-              "GPU-bound, with the quad layer: frames of Frame Generation's wait for the game's work on the runtime's "
-              "queue: " +
-                  describe(with_quad));
-        Check(without_quad.during > 0 && without_quad.waited == 0,
-              "GPU-bound, without the quad layer: no frame of Frame Generation's waits for the game's work: " +
-                  describe(without_quad));
-        CheckValidation(game, "GPU-bound");
-        const depthxr::FrameGenQueueSubstitution::ShownLayerCounts off = Peer::ShownLayers();
-        Check(off.releases == 0 && off.cpu_waits == 0 && off.gpu_waits == 0 && quad_behind == 0,
-              "shown layers are not kept lazy with VECTORXR_FRAMEGEN_SHOWN_LAYERS=off");
+        std::cout << "FG_TEST_NO_STALL=1: skipped artificial side-by-side GPU-load controls\n";
     }
 
     // Depth in the same shape (one swapchain, each view's depth its half):
@@ -5111,6 +5226,56 @@ void CheckFrameGenStatusLine() {
     status.reason = "paused";
     status.quad_declining = true;
     Check(Peer::FrameGenStatusReason(status) == "paused", "paused: the reason alone");
+
+    // The numbers say what the state says: composing at 2x, generating and
+    // held to 45 fps; declining meanwhile, standing by and not generating
+    // (the relay said generating with a 45 fps hold until the next game wait).
+    status = {};
+    status.state = depthxr::FrameGenState::kActive;
+    status.multiplier = 2;
+    status.refresh_period_ns = 11'111'111;
+    status.grid_period_ns = 11'111'111;
+    status.refreshes_per_real_frame = 2.02;
+    status.quad = true;
+    depthxr::RuntimeFrameGenRates rates = Peer::FrameGenRates(status);
+    Check(rates.generating && std::abs(rates.hold_fps - 45.0) < 0.01, "composing: generating, held to 45 fps");
+    depthxr::ExternalFrameGenStatus external = Peer::ExternalFrameGen(status);
+    Check(external.state == "active" && external.generating && external.frame_rate == "2x" &&
+              std::abs(external.target_app_fps - 45.0) < 0.01 && external.holding && !external.automatic,
+          "composing: the public block aims for 45 fps, held");
+    status.quad_declining = true;
+    rates = Peer::FrameGenRates(status);
+    Check(!rates.generating && rates.hold_fps == 0.0, "declining: not generating, nothing held");
+    external = Peer::ExternalFrameGen(status);
+    Check(external.state == "standby" && !external.generating && std::abs(external.target_app_fps - 90.0) < 0.01 &&
+              !external.holding,
+          "declining: the public block stands by, the game may run at the refresh rate");
+
+    // Auto at 2x: its step and thresholds. The runtime holding frames to
+    // every second refresh: the measured grid periods are said in refreshes.
+    status.quad_declining = false;
+    status.automatic = true;
+    status.auto_step_up_below_fps = 36.0;
+    status.auto_step_down_above_fps = 76.5;
+    external = Peer::ExternalFrameGen(status);
+    Check(external.frame_rate == "auto" && external.automatic && external.automatic->step == 2 &&
+              external.automatic->step_up_below_fps == 36.0 && external.automatic->step_down_above_fps == 76.5,
+          "Auto: its step and thresholds");
+    status.grid_period_ns = 22'222'222;
+    status.refreshes_per_real_frame = 2.0;
+    external = Peer::ExternalFrameGen(status);
+    Check(std::abs(external.refreshes_per_real_frame - 4.0) < 0.01 &&
+              std::abs(external.target_app_fps - 22.5) < 0.01 && external.holding,
+          "the runtime holding frames to every second refresh: grid periods said in refreshes, the target on the "
+          "grid (2x of 45 Hz), held");
+    // Halving without reporting the longer period (Pimax Play's smoothing):
+    // the frames are shown at half the refresh rate all the same.
+    status.grid_period_ns = 11'111'111;
+    status.runtime_halving = true;
+    status.refreshes_per_real_frame = 4.0;
+    external = Peer::ExternalFrameGen(status);
+    Check(std::abs(external.target_app_fps - 22.5) < 0.01 && external.holding,
+          "the runtime halving without reporting it: the target at 2x of 45 Hz, held");
 }
 
 // Everything the layer reads and writes on the host goes to the test's own directory.
@@ -5126,9 +5291,13 @@ void IsolateHost() {
     SetEnv("VECTORXR_LOG_PATH", (g_root / "logs" / "vectorxr.log").string());
     SetEnv("VECTORXR_SEEN_APPS_PATH", (g_root / "seen-apps.json").string());
     SetEnv("VECTORXR_RUNTIME_RELAY_PATH", (g_root / "runtime").string());
+    SetEnv("VECTORXR_EXTERNAL_STATUS_PATH", (g_root / "api" / "status.json").string());
     SetEnv("VECTORXR_RUNTIME_PACING_PATH", (g_root / "runtime-pacing.json").string());
     SetEnv("VECTORXR_TURBO_METRICS_PATH", (g_root / "turbo-metrics.json").string());
     SetEnv("XR_RUNTIME_JSON", (g_root / "no-runtime.json").string());
+    // Frame Generation's research switches (framegen-research.txt) and
+    // capture requests.
+    SetEnv("LOCALAPPDATA", (g_root / "appdata").string());
     // Whatever the host sets for the bridge does not apply.
     SetEnv("VECTORXR_FRAMEGEN_QUEUE", "");
     SetEnv("VECTORXR_FRAMEGEN_SHOWN_LAYERS", "");
@@ -5152,8 +5321,14 @@ int RunQuadDeviceLostProcess() {
 } // namespace
 
 int main(int argc, char** argv) {
+    const char* no_stall = std::getenv("FG_TEST_NO_STALL");
+    const bool skip_negative_controls = no_stall && std::string(no_stall) == "1";
     const bool hardware = argc > 1 && std::string(argv[1]) == "hw";
     const bool quad_device_lost = std::string(argv[argc - 1]) == kQuadDeviceLost;
+    if (quad_device_lost && skip_negative_controls) {
+        std::cout << "FG_TEST_NO_STALL=1: skipped quad-view device-removal child control\n";
+        return kSkip;
+    }
     // Before any Direct3D 12 device exists.
     ComPtr<ID3D12Debug> debug;
     const HRESULT debug_result = D3D12GetDebugInterface(IID_PPV_ARGS(&debug));
@@ -5204,6 +5379,7 @@ int main(int argc, char** argv) {
         TestRefusedD3D12Session(game);
         TestInstanceExtensions(game);
         TestDestroyInstanceWithSession(game);
+        TestStatusFile(game);
         TestReleaseOnAnotherThread(game);
         TestBridgedQuadViewsComposed(game, false);
         TestBridgedQuadViewsComposed(game, true);
@@ -5214,9 +5390,11 @@ int main(int argc, char** argv) {
         TestSideBySideFrameGen(game, "interpolate");
         TestSideBySideFrameGen(game, "extrapolate", true);
         TestSideBySideFrameGen(game, "interpolate", true);
-        TestQuitWhilePresenterHeld(game, false);
-        TestQuitWhilePresenterHeld(game, true);
-        TestDeviceLost(game);
+        if (!skip_negative_controls) {
+            TestQuitWhilePresenterHeld(game, false);
+            TestQuitWhilePresenterHeld(game, true);
+            TestDeviceLost(game);
+        }
     }
     g_runtime = StandIn{};
     Peer::ReleaseLog(g_root / "released" / "vectorxr.log");
@@ -5225,7 +5403,9 @@ int main(int argc, char** argv) {
     if (!bridged) {
         return kSkip;
     }
-    if (SoftwareAdapter(game)) {
+    if (skip_negative_controls) {
+        std::cout << "FG_TEST_NO_STALL=1: skipped held-presenter and device-removal controls\n";
+    } else if (SoftwareAdapter(game)) {
         // Its Direct3D 12 work is still running when it reads as done after
         // the device's removal: letting it go at the teardown crashes WARP.
         std::cout << "quad views device loss not tested on WARP (`hw` tests it)\n";

@@ -1,3 +1,5 @@
+import { t } from '../i18n/index.ts'
+
 export function toStereoBoostDisplay(value: number): number {
   return Number(((value - 1) * 100).toFixed(1))
 }
@@ -9,9 +11,9 @@ export function fromStereoBoostDisplay(value: number): number {
 export function stereoBoostBadge(value: number): string {
   const display = toStereoBoostDisplay(value)
   if (Math.abs(display) < 0.05) {
-    return 'Native IPD'
+    return t('depth.stereoDepth.badgeNative')
   }
-  return `Stereo ${display > 0 ? '+' : ''}${display.toFixed(1)}%`
+  return t('depth.stereoDepth.badge', { value: `${display > 0 ? '+' : ''}${display.toFixed(1)}` })
 }
 
 export function toConvergenceDisplay(value: number): number {
@@ -25,10 +27,10 @@ export function fromConvergenceDisplay(value: number): number {
 export function convergenceBadge(value: number): string {
   const display = toConvergenceDisplay(value)
   if (Math.abs(display) < 0.05) {
-    return 'Plane: app default'
+    return t('depth.convergence.badgeDefault')
   }
   if (display > 0) {
-    return `Plane: nearer +${display.toFixed(1)}`
+    return t('depth.convergence.badgeNearer', { value: display.toFixed(1) })
   }
-  return `Plane: farther ${display.toFixed(1)}`
+  return t('depth.convergence.badgeFarther', { value: display.toFixed(1) })
 }

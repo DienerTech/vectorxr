@@ -8,6 +8,7 @@ add_library(
     src/framegen_plan.cpp
     src/runtime_pacing.cpp
     src/runtime_relay.cpp
+    src/external_status.cpp
     src/runtime_compatibility.cpp
     src/seen_apps.cpp
     src/turbo_trace.cpp
@@ -18,6 +19,7 @@ add_library(
     src/settings_resolver.cpp
     src/session_graphics.cpp
     src/performance_monitor.cpp
+    src/osd_strings.cpp
     src/swapchain_state.cpp
     src/thread_census.cpp
     src/util/config_path.cpp
@@ -35,6 +37,10 @@ add_library(
 )
 
 target_include_directories(depthxr_core PUBLIC include)
+# The OSD's translations are UTF-8 literals.
+if(MSVC)
+    set_source_files_properties(src/osd_strings.cpp PROPERTIES COMPILE_OPTIONS /utf-8)
+endif()
 target_compile_features(depthxr_core PUBLIC cxx_std_20)
 if(WIN32)
     target_sources(depthxr_core PRIVATE src/util/crt_failure_report.cpp src/performance_sampler.cpp)
@@ -126,7 +132,10 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
     endif()
     set(_framegen_passes LUMA DOWNSAMPLE SEARCH REFINE FILTER SYNTHESIZE_UNORM8 SYNTHESIZE_FLOAT16 DEPTH DEPTH_CHECK DEPTH_TRUST FLOW_PACK FLOW_UNPACK
         TRUST_UPDATE SHIFT_CLEAR SHIFT_SPLAT SHIFT_RESOLVE SHIFT_FILL FLOW_PACK_RAW TRUST_RESOLVE SHADING_RATE WORLD_REDUCE WORLD_SOLVE
-        TRUST_VOTE DEPTH_SCALE DEPTH_SCALE_VOTE DEPTH_STALE)
+        TRUST_VOTE DEPTH_SCALE DEPTH_SCALE_VOTE DEPTH_STALE DEPTH_CROSS_SPLAT DEPTH_CROSS_RESOLVE ENGINE_CENSUS ENGINE_CAPTURE
+        ENGINE_REDUCE ENGINE_SOLVE WORLD_SET ENGINE_CONVERT ENGINE_MERGE ENGINE_TILES SHIFT_SPLAT_ENGINE SHIFT_RESOLVE_ENGINE
+        SHIFT_FILL_ENGINE TRUST_SURFACE FILTER_PRIOR SYNTHESIZE_UNORM8_SHARPEN SYNTHESIZE_FLOAT16_SHARPEN
+        SYNTHESIZE_UNORM8_PROP SYNTHESIZE_FLOAT16_PROP SYNTHESIZE_UNORM8_PROP_SHARPEN SYNTHESIZE_FLOAT16_PROP_SHARPEN)
     set(_framegen_hlsl "${CMAKE_CURRENT_SOURCE_DIR}/shaders/framegen.hlsl")
     set(_framegen_out "${CMAKE_CURRENT_BINARY_DIR}/framegen_shaders")
     file(MAKE_DIRECTORY "${_framegen_out}")
@@ -153,8 +162,14 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
     endforeach()
     # Synthesis as a draw into the output swapchains (Direct3D 12): the
     # vertex shader and a pixel shader per number of generated frames; then
-    # the quad views compose pixel shader, drawn by the same vertex shader.
-    set(_framegen_draw_shaders DRAW_VS DRAW_PS1 DRAW_PS2 DRAW_PS3 DRAW_PS4 COMPOSE_PS)
+    # the quad views compose pixel shader, drawn by the same vertex shader;
+    # then the pixel shaders with the Interpolate blend's sharpening
+    # (research, FG_SYNTH_SHARPEN), with the prop hold (research,
+    # FG_SYNTH_PROP), and with both.
+    set(_framegen_draw_shaders DRAW_VS DRAW_PS1 DRAW_PS2 DRAW_PS3 DRAW_PS4 COMPOSE_PS
+        DRAW_PS1_SHARPEN DRAW_PS2_SHARPEN DRAW_PS3_SHARPEN DRAW_PS4_SHARPEN
+        DRAW_PS1_PROP DRAW_PS2_PROP DRAW_PS3_PROP DRAW_PS4_PROP
+        DRAW_PS1_PROP_SHARPEN DRAW_PS2_PROP_SHARPEN DRAW_PS3_PROP_SHARPEN DRAW_PS4_PROP_SHARPEN)
     foreach(_framegen_draw IN LISTS _framegen_draw_shaders)
         if(_framegen_draw STREQUAL "DRAW_VS")
             set(_framegen_draw_args -T vs_5_0 -E VSMain -D FG_DRAW_OUTPUTS=1 -D FG_PASS_SYNTHESIZE_DRAW=1)
@@ -164,6 +179,12 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
             string(SUBSTRING "${_framegen_draw}" 7 1 _framegen_draw_outputs)
             set(_framegen_draw_args -T ps_5_0 -E PSMain -D "FG_DRAW_OUTPUTS=${_framegen_draw_outputs}"
                 -D FG_PASS_SYNTHESIZE_DRAW=1)
+            if(_framegen_draw MATCHES "_SHARPEN$")
+                list(APPEND _framegen_draw_args -D FG_SYNTH_SHARPEN=1)
+            endif()
+            if(_framegen_draw MATCHES "_PROP")
+                list(APPEND _framegen_draw_args -D FG_SYNTH_PROP=1)
+            endif()
         endif()
         add_custom_command(
             OUTPUT "${_framegen_out}/${_framegen_draw}.dxbc"
@@ -212,6 +233,13 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         # Not Frame Generation's: the session's adapters for its log line,
         # which needs the Direct3D 12 and Vulkan types the layer lacks.
         src/session_graphics_query.cpp
+        # Nor is the space-warp probe's frame handling, which needs the
+        # OpenXR types the core library lacks.
+        src/spacewarp_probe.cpp
+        # ...and its handshake census (handshake_census.h).
+        src/handshake_census.cpp
+        # ...and the engine motion record and census made from it.
+        src/engine_motion.cpp
         "${_framegen_out}/framegen_shaders.cpp"
         "${_framegen_out}/framegen_flow_merge.h")
     target_include_directories(depthxr_framegen PUBLIC include)
@@ -282,6 +310,23 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 ${CMAKE_CURRENT_SOURCE_DIR}/manifest/XR_APILAYER_DIENERTECH_VECTORXR.json
                 $<TARGET_FILE_DIR:XR_APILAYER_DIENERTECH_VECTORXR>/XR_APILAYER_DIENERTECH_VECTORXR.json
+        # The space-warp probe's manifests (spacewarp_probe.h), never staged
+        # or installed: each in a folder of its own under the layer's file
+        # name, so Install-Layer.ps1 -ManifestPath swaps one in for the
+        # layer's own and back.
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+                $<TARGET_FILE_DIR:XR_APILAYER_DIENERTECH_VECTORXR>/spacewarp-probe-fb
+                $<TARGET_FILE_DIR:XR_APILAYER_DIENERTECH_VECTORXR>/spacewarp-probe-ext
+                $<TARGET_FILE_DIR:XR_APILAYER_DIENERTECH_VECTORXR>/spacewarp-probe-both
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${CMAKE_CURRENT_SOURCE_DIR}/manifest/spacewarp-probe-both.json
+                $<TARGET_FILE_DIR:XR_APILAYER_DIENERTECH_VECTORXR>/spacewarp-probe-both/XR_APILAYER_DIENERTECH_VECTORXR.json
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${CMAKE_CURRENT_SOURCE_DIR}/manifest/spacewarp-probe-fb.json
+                $<TARGET_FILE_DIR:XR_APILAYER_DIENERTECH_VECTORXR>/spacewarp-probe-fb/XR_APILAYER_DIENERTECH_VECTORXR.json
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${CMAKE_CURRENT_SOURCE_DIR}/manifest/spacewarp-probe-ext.json
+                $<TARGET_FILE_DIR:XR_APILAYER_DIENERTECH_VECTORXR>/spacewarp-probe-ext/XR_APILAYER_DIENERTECH_VECTORXR.json
         COMMAND ${CMAKE_COMMAND} -E make_directory
                 $<TARGET_FILE_DIR:XR_APILAYER_DIENERTECH_VECTORXR>/sounds
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -484,8 +529,9 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         add_test(NAME depthxr_framegen_d3d12_tests COMMAND depthxr_framegen_tests d3d12)
         add_test(NAME depthxr_framegen_vulkan_tests COMMAND depthxr_framegen_tests vulkan)
         set_tests_properties(depthxr_framegen_d3d11_tests depthxr_framegen_vulkan_tests PROPERTIES TIMEOUT 60)
-        # WARP runs on the CPU: slower while other builds share it.
-        set_tests_properties(depthxr_framegen_d3d12_tests PROPERTIES TIMEOUT 120)
+        # WARP runs on the CPU: slower while other builds share it (about 110 s
+        # alone on a desktop, more than 180 s on a CI runner).
+        set_tests_properties(depthxr_framegen_d3d12_tests PROPERTIES TIMEOUT 900)
         set_tests_properties(depthxr_framegen_vulkan_tests PROPERTIES SKIP_RETURN_CODE 77)
         # The Direct3D 12 scenarios on the GPU: variable-rate shading, the optical flow hardware (a
         # session per view, four for quad views) and a GPU's fence budgets, none of which WARP has.
@@ -493,6 +539,16 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         # hardware, its checks are skipped with a message).
         add_test(NAME depthxr_framegen_d3d12_hw_tests COMMAND depthxr_framegen_tests hw-d3d12)
         set_tests_properties(depthxr_framegen_d3d12_hw_tests PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 77)
+        # Queue substitution against a strict runtime and real queue fences:
+        # a stopped producer, repeated shown layers, and pass-through handover.
+        add_executable(depthxr_framegen_runtime_queue_tests tests/framegen_runtime_queue_tests.cpp)
+        target_link_libraries(depthxr_framegen_runtime_queue_tests PRIVATE depthxr_framegen d3d12 dxgi)
+        target_compile_definitions(depthxr_framegen_runtime_queue_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX
+            XR_USE_GRAPHICS_API_D3D12)
+        add_test(NAME depthxr_framegen_runtime_queue_tests COMMAND depthxr_framegen_runtime_queue_tests)
+        add_test(NAME depthxr_framegen_runtime_queue_hw_tests COMMAND depthxr_framegen_runtime_queue_tests hw)
+        set_tests_properties(depthxr_framegen_runtime_queue_tests depthxr_framegen_runtime_queue_hw_tests PROPERTIES
+            TIMEOUT 30 SKIP_RETURN_CODE 77)
         # Direct3D 11 <-> 12 sharing probe for the D3D11 bridge. It needs a real GPU, so it is
         # built here but is not a CTest (`depthxr_bridge_probe --help`).
         add_executable(depthxr_bridge_probe tests/bridge_probe.cpp)
@@ -508,12 +564,22 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         add_test(NAME depthxr_d3d11_bridge_hw_tests COMMAND depthxr_d3d11_bridge_tests hw)
         set_tests_properties(depthxr_d3d11_bridge_tests depthxr_d3d11_bridge_hw_tests PROPERTIES TIMEOUT 120
                              SKIP_RETURN_CODE 77)
+        # Positive Dynamic Interpolate fallback/recovery on real NVIDIA optical flow.
+        # Short CPU-only vector-acceptance delay; no GPU stall or negative control.
+        add_executable(depthxr_framegen_interpolate_flow_hw_tests tests/framegen_interpolate_flow_hw_tests.cpp)
+        target_link_libraries(depthxr_framegen_interpolate_flow_hw_tests PRIVATE depthxr_framegen d3d12 dxgi)
+        target_compile_definitions(depthxr_framegen_interpolate_flow_hw_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX
+            XR_USE_GRAPHICS_API_D3D12)
+        add_test(NAME depthxr_framegen_interpolate_flow_hw_tests COMMAND depthxr_framegen_interpolate_flow_hw_tests)
+        # Never let CTest terminate a process with live GPU work.
+        set_tests_properties(depthxr_framegen_interpolate_flow_hw_tests PROPERTIES TIMEOUT 0 SKIP_RETURN_CODE 77)
         add_executable(depthxr_framegen_presenter_tests tests/framegen_presenter_tests.cpp)
         target_link_libraries(depthxr_framegen_presenter_tests PRIVATE depthxr_framegen)
         target_compile_definitions(depthxr_framegen_presenter_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
         add_test(NAME depthxr_framegen_presenter_tests COMMAND depthxr_framegen_presenter_tests)
-        # Paced by the wall clock: about 375 s on a fast desktop (0.19.2), longer on a shared CI runner.
-        set_tests_properties(depthxr_framegen_presenter_tests PROPERTIES TIMEOUT 900)
+        # Paced by the wall clock: about 375 s on a fast desktop (0.19.2), longer on a shared CI runner. The lead
+        # ceiling's tests add about 3 minutes; serially (FG_TEST_SERIAL=1) the suite takes about 16 minutes.
+        set_tests_properties(depthxr_framegen_presenter_tests PROPERTIES TIMEOUT 1200)
         add_executable(depthxr_osd_tests tests/osd_tests.cpp)
         target_link_libraries(depthxr_osd_tests PRIVATE depthxr_osd)
         target_compile_definitions(depthxr_osd_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11)
@@ -603,6 +669,17 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
             WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 VECTORXR_VERSION="${_vectorxr_version}")
         add_test(NAME depthxr_head_prediction_layer_tests COMMAND depthxr_head_prediction_layer_tests)
         set_tests_properties(depthxr_head_prediction_layer_tests PROPERTIES TIMEOUT 15)
+        # The space-warp probe through the layer's own hooks (xrCreateApiLayerInstance
+        # on) against a stand-in runtime (CPU only).
+        add_executable(depthxr_spacewarp_probe_tests tests/spacewarp_probe_tests.cpp src/openxr_layer.cpp
+            src/layer_entry.cpp)
+        target_include_directories(depthxr_spacewarp_probe_tests PRIVATE include)
+        target_link_libraries(depthxr_spacewarp_probe_tests PRIVATE depthxr_core depthxr_osd depthxr_framegen
+            OpenXR::openxr_loader d3d11 d3dcompiler dxgi shlwapi)
+        target_compile_definitions(depthxr_spacewarp_probe_tests PRIVATE DEPTHXR_TESTING
+            WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 VECTORXR_VERSION="${_vectorxr_version}")
+        add_test(NAME depthxr_spacewarp_probe_tests COMMAND depthxr_spacewarp_probe_tests)
+        set_tests_properties(depthxr_spacewarp_probe_tests PROPERTIES TIMEOUT 30)
         # Frame Generation's Direct3D 11 bridge through the layer's own hooks
         # (xrCreateApiLayerInstance on) against a stand-in runtime whose
         # swapchain images are Direct3D 12 textures, on WARP
@@ -735,6 +812,10 @@ if(DEPTHXR_BUILD_TESTS)
     target_link_libraries(depthxr_runtime_relay_tests PRIVATE depthxr_core)
     add_test(NAME depthxr_runtime_relay_tests COMMAND depthxr_runtime_relay_tests)
     set_tests_properties(depthxr_runtime_relay_tests PROPERTIES TIMEOUT 20)
+    add_executable(depthxr_external_status_tests tests/external_status_tests.cpp)
+    target_link_libraries(depthxr_external_status_tests PRIVATE depthxr_core)
+    add_test(NAME depthxr_external_status_tests COMMAND depthxr_external_status_tests)
+    set_tests_properties(depthxr_external_status_tests PROPERTIES TIMEOUT 20)
     if(WIN32)
         add_library(depthxr_process_exit_probe SHARED tests/process_exit_probe.cpp src/dll_main.cpp)
         target_link_libraries(depthxr_process_exit_probe PRIVATE depthxr_core)

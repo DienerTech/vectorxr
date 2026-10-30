@@ -1,0 +1,210 @@
+{
+  "tabs": {
+    "home": {
+      "label": "Inicio",
+      "subtitle": "Estado, actualizaciones y soporte"
+    },
+    "core": {
+      "label": "Configuración",
+      "subtitle": "Ejecución, registro, tema y configuración",
+      "suiteOn": "Suite activada",
+      "suiteOff": "Suite desactivada"
+    },
+    "osd": {
+      "label": "Información en pantalla",
+      "subtitle": "Panel en el visor, ubicación y asignaciones"
+    },
+    "registry": {
+      "label": "Registro de aplicaciones",
+      "subtitle": "Registra aplicaciones para asignarles perfiles",
+      "status_one": "{count} aplicación",
+      "status_other": "{count} aplicaciones"
+    },
+    "layers": {
+      "label": "Capas OpenXR",
+      "subtitle": "Inspecciona y administra el orden de las capas implícitas",
+      "status": "Sistema"
+    },
+    "about": {
+      "label": "Acerca de",
+      "subtitle": "Información del proyecto, notas de la versión y soporte"
+    },
+    "quadviews": {
+      "label": "Quadviews",
+      "subtitle": "Control del renderizado foveado dinámico"
+    },
+    "turbo": {
+      "label": "Turbo",
+      "subtitle": "Control del ritmo de fotogramas para límites de fps persistentes"
+    },
+    "framegen": {
+      "label": "Frame Generation",
+      "subtitle": "Movimiento más fluido con fotogramas generados"
+    },
+    "pivotxr": {
+      "label": "Pivot",
+      "subtitle": "Ajuste de la rotación: ¡vigila tus seis!"
+    },
+    "depthxr": {
+      "label": "Profundidad",
+      "subtitle": "Ajuste de la profundidad estereoscópica: ¡mira el mundo de otra forma!"
+    }
+  },
+  "status": {
+    "trayFailed": "No se pudo configurar el icono del área de notificación",
+    "enabledFromTray": "VectorXR activado desde el área de notificación",
+    "disabledFromTray": "VectorXR desactivado desde el área de notificación",
+    "logLevelDebugFromTray": "Nivel de registro establecido en Depuración desde el área de notificación",
+    "logLevelInfoFromTray": "Nivel de registro establecido en Info desde el área de notificación",
+    "fixBeforeSaving": "Corrige los errores de validación antes de guardar",
+    "loadLogsFailed": "No se pudieron cargar los registros",
+    "loadLayersFailed": "No se pudo cargar el estado de las capas OpenXR",
+    "fixBeforeExporting": "Corrige los errores de validación antes de exportar",
+    "configExported": "Configuración exportada",
+    "exportCanceled": "Exportación cancelada",
+    "exportFailed": "No se pudo exportar la configuración",
+    "debugExported": "Información de depuración exportada",
+    "debugExportCanceled": "Exportación de depuración cancelada",
+    "debugExportFailed": "No se pudo exportar la información de depuración",
+    "importInvalidJson": "Error al importar: el archivo no es un JSON válido"
+  },
+  "resetConfirm": "¿Restablecer VectorXR a los valores predeterminados?\n\nSe borrarán toda la configuración guardada, las entradas del registro de aplicaciones, los perfiles y los datos de detección de aplicaciones OpenXR. Esta acción no se puede deshacer.",
+  "updates": {
+    "available": "La versión {version} está disponible. Haz clic para ver los detalles.",
+    "checkFailed": "No se pueden buscar actualizaciones en este momento.",
+    "httpFailed": "La búsqueda de actualizaciones en GitHub falló con HTTP {status}",
+    "invalidRelease": "GitHub no devolvió una versión válida"
+  },
+  "sidebar": {
+    "appSettings": "Configuración de la aplicación",
+    "enhancements": "Mejoras de OpenXR",
+    "suiteOff": "Los efectos de VectorXR en tiempo de ejecución están desactivados",
+    "moduleTitle": "{subtitle}. {status}",
+    "saveHint": "Guarda los cambios para aplicar la configuración. Cada mejora indica qué cambios requieren reiniciar la aplicación de RV.",
+    "logoAlt": "Logotipo de VectorXR",
+    "version": "v{version}",
+    "updateTooltip": "Hay una nueva versión disponible. Haz clic para ver los detalles.",
+    "updateAria": "Hay una nueva versión disponible"
+  },
+  "saveBar": {
+    "unsaved": "Cambios sin guardar",
+    "allSaved": "Todos los cambios guardados",
+    "pending": "Pendiente",
+    "dirtyHint": "Guarda para aplicar o descarta para revertir.",
+    "cleanHint": "La configuración coincide con el disco.",
+    "saving": "Guardando...",
+    "save": "Guardar cambios",
+    "discard": "Descartar",
+    "fixBeforeSaving": "Corrige antes de guardar:",
+    "moreErrors_one": "…y {count} más",
+    "moreErrors_other": "…y {count} más"
+  },
+  "importPreview": {
+    "eyebrow": "Importar",
+    "title": "Revisar antes de aplicar",
+    "description": "Una importación válida se guardará de inmediato. Las importaciones con problemas de validación pueden cargarse igualmente en el editor para repararlas.",
+    "whatWillLoad": "Qué se cargará",
+    "applications": "Aplicaciones: {number}",
+    "moduleDefault_one": "{module} predeterminado: {state} — {count} perfil",
+    "moduleDefault_other": "{module} predeterminado: {state} — {count} perfiles",
+    "issuesFound_one": "Se encontró {count} problema de validación",
+    "issuesFound_other": "Se encontraron {count} problemas de validación",
+    "issuesHint": "Puedes aplicarla igualmente: los errores aparecerán en el panel Validación y no se podrá guardar hasta que se resuelvan.",
+    "valid": "La estructura de la configuración y los rangos de valores parecen válidos.",
+    "applyToEditor": "Aplicar al editor",
+    "importAndSave": "Importar y guardar"
+  },
+  "debugExport": {
+    "eyebrow": "Diagnóstico",
+    "title": "Exportar información de depuración",
+    "description": "VectorXR empaquetará los detalles para solucionar problemas en un archivo ZIP que puedes compartir durante las pruebas.",
+    "included": "Incluido",
+    "items": {
+      "settings": "JSON de la configuración actual y guardada",
+      "seenApps": "Aplicaciones OpenXR vistas",
+      "logs": "Registros de VectorXR conservados y la última traza de Frame Generation (registro de Depuración)",
+      "layers": "Instantánea de las capas OpenXR",
+      "health": "Resumen de la comprobación de estado",
+      "version": "Versión de la aplicación y rutas relevantes",
+      "turboMetrics": "Métricas de Turbo y decisiones de ritmo",
+      "turboSafety": "Bloqueos de seguridad de Turbo e historial de fallos",
+      "runtime": "Diagnósticos de ejecución en directo y guardados",
+      "inventory": "Inventario de archivos y errores de recopilación"
+    },
+    "limits": "Los archivos sin procesar están limitados a 8 MiB cada uno y 64 MiB en total, y el ZIP está comprimido. Los registros más grandes incluyen su inicio y su salida más reciente; los archivos omitidos o limitados se enumeran en el ZIP. El historial borrado y las métricas que no se registraron no están disponibles.",
+    "privacy": "El paquete puede incluir rutas de archivos locales y nombres de ejecutables de juegos. No incluye variables de entorno del sistema ni archivos no relacionados.",
+    "exporting": "Exportando...",
+    "save": "Guardar ZIP",
+    "fileType": "Paquete de depuración de VectorXR"
+  },
+  "profile": {
+    "number": "Perfil {number}",
+    "editName": "Editar el nombre del perfil",
+    "noApplications": "Sin aplicaciones",
+    "priority": "Orden de prioridad: cuando los perfiles coinciden en una aplicación, el perfil superior se queda con las asignaciones que compartan.",
+    "moveUp": "Subir perfil (mayor prioridad)",
+    "moveDown": "Bajar perfil (menor prioridad)",
+    "enabledTitle": "Este perfil aplica una configuración personalizada de {module} a sus aplicaciones asignadas.",
+    "disabledTitle": "Este perfil se ignora en tiempo de ejecución.",
+    "on": "Perfil activado",
+    "off": "Perfil desactivado",
+    "conflict": "Conflicto de perfiles",
+    "applications": "Aplicaciones",
+    "applicationsHelp": "Aplicaciones registradas a las que se aplica este perfil. Prevalece el primer perfil activo que coincida.",
+    "inactiveTitle": "Este perfil no se activará",
+    "inactiveBody": "Este perfil activado no está asignado a ninguna aplicación. Selecciona al menos una aplicación o desactiva el perfil.",
+    "offNote": "Este perfil está desactivado y no tiene ningún efecto. Sus aplicaciones usan el perfil predeterminado de {module}."
+  },
+  "logViewer": {
+    "eyebrow": "Registros",
+    "title": "Visor de registros de VectorXR",
+    "description": "Los registros recientes de la capa se muestran en modo de solo lectura para que el estado de ejecución sea fácil de inspeccionar.",
+    "loading": "Cargando registros...",
+    "directory": "Directorio de registros",
+    "unavailable": "No disponible",
+    "logs": "Registros de VectorXR",
+    "empty": "Todavía no se ha encontrado ningún archivo de registro. Inicia la capa en un título y vuelve a abrir este visor.",
+    "selected": "Registro seleccionado",
+    "noneSelected": "Ningún registro seleccionado",
+    "copied": "¡Copiado!",
+    "copyFailed": "Error al copiar",
+    "copy": "Copiar texto",
+    "opened": "¡Abierto!",
+    "openFailed": "Error al abrir",
+    "open": "Abrir directorio",
+    "noContent": "No hay contenido de registro disponible."
+  },
+  "discord": {
+    "loading": "Cargando Discord…",
+    "opening": "Abriendo Discord…",
+    "join": "Unirse a Discord ↗",
+    "unavailable": "Discord no disponible",
+    "loadFailed": "No se pudo cargar la invitación de Discord. Inténtalo de nuevo.",
+    "invitesUnavailable": "Las invitaciones de Discord no están disponibles en este momento.",
+    "openFailed": "No se pudo abrir el navegador. Inténtalo de nuevo.",
+    "retryAria": "Reintentar la carga de la invitación de Discord",
+    "loadingStatus": "Cargando la invitación de Discord."
+  },
+  "healthCheck": {
+    "eyebrow": "Estado del sistema",
+    "title": "Comprobación de estado",
+    "layer": "Capa de VectorXR",
+    "layerNotFound": "No encontrada",
+    "lastSeenApp": "Última aplicación vista",
+    "noApp": "Todavía no se ha detectado ninguna aplicación OpenXR",
+    "exportHint": "Exporta un paquete de depuración cuando compartas detalles para solucionar problemas.",
+    "export": "Exportar información de depuración"
+  },
+  "healthLoading": {
+    "label": "Cargando información de estado",
+    "checking": "Comprobando"
+  },
+  "patchNotes": {
+    "eyebrow": "Notas de la versión",
+    "title": "Actualizaciones recientes",
+    "description": "Todas las novedades de la aplicación, con la entrada más reciente fijada arriba."
+  },
+  "setupGuide": {
+    "title": "Guía de configuración"
+  }
+}

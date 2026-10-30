@@ -1,0 +1,57 @@
+{
+  "applications": {
+    "eyebrow": "Registro",
+    "title": "Registro de aplicaciones",
+    "intro": "Registra las aplicaciones a las que pueden dirigirse los perfiles de los módulos por nombre de ejecutable. Las etiquetas de cada tarjeta muestran cómo trata cada módulo esa aplicación ahora mismo: haz clic en una para ir a su perfil o para crear uno.",
+    "add": "Agregar aplicación",
+    "unnamed": "Aplicación sin nombre",
+    "editName": "Editar el nombre de la aplicación",
+    "executable": "Ejecutable",
+    "executableHelp": "La coincidencia del ejecutable no distingue mayúsculas de minúsculas, pero el nombre debe incluir la extensión de la aplicación. Por ejemplo: DCS.exe",
+    "empty": "Todavía no hay aplicaciones registradas. Agrega una antes de crear perfiles de módulos.",
+    "chip": {
+      "defaultOff": "{module} · Predeterminado desactivado",
+      "defaultOffTitle": "El perfil predeterminado de {module} está desactivado. Haz clic para crear un perfil personalizado para esta aplicación.",
+      "custom": "{module} · {profile}",
+      "customTitle": "Se aplica el perfil personalizado de {module} «{profile}». Haz clic para abrirlo.",
+      "default": "{module} · Predeterminado",
+      "defaultTitle": "Se aplica el perfil predeterminado de {module}. Haz clic para crear un perfil personalizado para esta aplicación."
+    }
+  },
+  "discovery": {
+    "eyebrow": "Detección",
+    "trackingOnTitle": "La detección está registrando las aplicaciones OpenXR que inicias.",
+    "trackingOffTitle": "La detección está desactivada. Los nuevos inicios de aplicaciones OpenXR no se registrarán hasta que actives el seguimiento en Configuración.",
+    "trackingOn": "Seguimiento activado",
+    "trackingOff": "Seguimiento desactivado",
+    "title": "De dónde vienen las nuevas aplicaciones",
+    "intro": "VectorXR anota las aplicaciones OpenXR que inicias para que puedas registrarlas fácilmente con un clic. Nada de lo que hay aquí cambia tu configuración hasta que lo registres. El seguimiento se controla en Configuración.",
+    "clear": "Borrar aplicaciones vistas",
+    "loading": "Cargando aplicaciones vistas...",
+    "launches_one": "{count} inicio",
+    "launches_other": "{count} inicios",
+    "details": "Detalles",
+    "register": "Registrar",
+    "allRegistered": "Todas las aplicaciones detectadas están registradas. Las nuevas aplicaciones que inicies aparecerán aquí.",
+    "allRegisteredTrackingOff": "Todas las aplicaciones detectadas están registradas. El seguimiento está desactivado, así que no aparecerán aplicaciones nuevas aquí.",
+    "alreadyRegistered": "Ya registrada",
+    "registeredAs": "Registrada como {name}",
+    "empty": "Todavía no se ha visto ninguna aplicación XR. Inicia una aplicación OpenXR mientras VectorXR está activo y luego actualiza esta lista.",
+    "emptyTrackingOff": "El seguimiento de aplicaciones está desactivado, así que no aparecerán aplicaciones nuevas aquí. Activa el seguimiento en Configuración para registrar los inicios de aplicaciones OpenXR."
+  },
+  "seenDetails": {
+    "eyebrow": "Aplicación detectada",
+    "registeredAs": "Registrada como",
+    "unregistered": "No registrada",
+    "launches": "Inicios",
+    "firstSeen": "Vista por primera vez",
+    "lastSeen": "Vista por última vez"
+  },
+  "exclusions": {
+    "title": "Los perfiles personalizados activados tienen prioridad para: {apps}",
+    "label": "No se aplica a:"
+  },
+  "picker": {
+    "empty": "No hay aplicaciones registradas. Agrega una desde el Registro de aplicaciones para que este perfil pueda activarse."
+  }
+}

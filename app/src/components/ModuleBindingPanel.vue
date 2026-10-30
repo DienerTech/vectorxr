@@ -3,6 +3,7 @@ import { computed } from 'vue'
 
 import type { InputBinding } from '../lib/model'
 import { bindingListLabel } from '../lib/model'
+import { t } from '../i18n/index.ts'
 
 // Compact one-line summary of a module-level toggle's bindings (Turbo, Depth,
 // Frame Generation): any one of them acts, one per device for instance.
@@ -29,7 +30,7 @@ const withSound = computed(() => list.value.some((binding) => binding.type !== '
   <div class="rounded-[1rem] border p-4 surface-panel-soft">
     <div class="flex items-start justify-between gap-3">
       <div class="flex min-w-0 flex-1 flex-wrap items-center gap-2">
-        <p class="shrink-0 text-sm font-semibold tracking-tight">{{ heading }}</p>
+        <p class="min-w-0 text-sm font-semibold tracking-tight">{{ heading }}</p>
         <span
           class="inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs"
           style="border-color: var(--app-border)"
@@ -39,14 +40,14 @@ const withSound = computed(() => list.value.some((binding) => binding.type !== '
           <span
             v-if="withSound"
             class="text-muted"
-            title="Sound feedback is enabled for a binding"
-            aria-label="Sound feedback enabled"
+            :title="t('bindings.panel.soundEnabledHint')"
+            :aria-label="t('bindings.panel.soundEnabledAria')"
           >♪</span>
         </span>
       </div>
 
       <button class="button-secondary shrink-0 rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click="$emit('edit')">
-        {{ list.length > 1 ? 'Edit Bindings…' : 'Edit Binding…' }}
+        {{ list.length > 1 ? t('bindings.panel.editMany') : t('bindings.panel.editOne') }}
       </button>
     </div>
   </div>

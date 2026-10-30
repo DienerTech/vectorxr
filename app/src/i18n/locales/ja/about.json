@@ -1,0 +1,40 @@
+{
+  "eyebrow": "バージョン情報",
+  "tagline": "ゲームごとに調整する OpenXR 拡張機能。",
+  "intro": "VectorXR は、ヘッドセットのレンダリングとトラッキングをタイトルごとに作り変える OpenXR 拡張プラットフォームです。動的フォービエイテッド レンダリングと Turbo でフレーム レートを取り戻し、Frame Generation ですべてのリフレッシュを埋め、頭の回転を増幅して体をひねらずに後方確認ができ、ステレオの視差を深めてスケール感と臨場感を高めます。",
+  "profiles": "OpenXR レイヤーの管理とアプリケーションごとのプロファイルにより、すべてのタイトルを思いどおりの設定に保てます。すべて 1 か所で管理できます。",
+  "firstAndOnly": "{highlight}、頭の回転の強化とクアッドビュー フォービエイテッド レンダリングが連携する OpenXR ソリューションです。フォービエイテッド領域は取り残されることなく、回転した視線に追従します。",
+  "firstAndOnlyHighlight": "初の、そして唯一の",
+  "developedBy": "DienerTech LLC が独自に開発しています。",
+  "copyright": "(c) 2026 DienerTech LLC. Mozilla Public License 2.0 の下でリリースされています。",
+  "support": {
+    "eyebrow": "開発を支援",
+    "title": "VectorXR を支援",
+    "body": "Ko-fi でのチップは、テスト用ハードウェア、リリース作業、OpenXR ツールの継続的な改善の資金になります。",
+    "button": "Ko-fi で支援"
+  },
+  "patchNotes": {
+    "eyebrow": "最新のパッチ ノート",
+    "readFull": "パッチ ノート全文を読む"
+  },
+  "updates": {
+    "eyebrow": "更新",
+    "title": "リリースの状態",
+    "published": "公開日: {date}",
+    "check": "確認",
+    "release": "リリース",
+    "summary": {
+      "checking": "GitHub のリリースを確認しています...",
+      "available": "VectorXR {tag} が利用可能です。",
+      "upToDate": "最新の公開リリース {tag} を使用しています。",
+      "unavailable": "公開済みの GitHub リリースはまだありません。",
+      "idle": "GitHub で最新の公開済み VectorXR ビルドを確認します。"
+    },
+    "chip": {
+      "checking": "確認中",
+      "available": "更新あり",
+      "upToDate": "最新",
+      "error": "再試行"
+    }
+  }
+}

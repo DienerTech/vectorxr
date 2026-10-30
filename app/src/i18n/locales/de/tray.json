@@ -1,0 +1,14 @@
+{
+  "health": "Zustand: {label}",
+  "healthUnavailable": "Zustand: Einstellungen nicht geladen",
+  "logLevel": "Protokollebene: {level}",
+  "logLevelUnavailable": "Protokollebene",
+  "info": "Info",
+  "debug": "Debug",
+  "tooltip": "VectorXR: {label}",
+  "tooltipDisabled": "VectorXR: deaktiviert",
+  "enabled": "VectorXR aktiviert",
+  "exportDebug": "Debugdaten exportieren...",
+  "open": "VectorXR öffnen",
+  "quit": "VectorXR beenden"
+}

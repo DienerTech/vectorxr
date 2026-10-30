@@ -1,0 +1,14 @@
+{
+  "health": "Estado: {label}",
+  "healthUnavailable": "Estado: configuración no cargada",
+  "logLevel": "Nivel de registro: {level}",
+  "logLevelUnavailable": "Nivel de registro",
+  "info": "Info",
+  "debug": "Depuración",
+  "tooltip": "VectorXR: {label}",
+  "tooltipDisabled": "VectorXR: desactivado",
+  "enabled": "VectorXR activado",
+  "exportDebug": "Exportar depuración...",
+  "open": "Abrir VectorXR",
+  "quit": "Salir de VectorXR"
+}

@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue'
 
 import SeenAppDetailsModal from './SeenAppDetailsModal.vue'
+import { hasMessage, t } from '../i18n/index.ts'
 import type { SeenApplication } from '../lib/commands'
 import { moduleLabels, moduleStateForApplication, type ModuleId, type RegisteredApplication, type VectorXRConfig } from '../lib/model'
 
@@ -25,26 +26,29 @@ const moduleIds: ModuleId[] = ['quadviews', 'turbo', 'framegen', 'pivotxr', 'dep
 
 function moduleChip(applicationId: string, moduleId: ModuleId) {
   const moduleState = moduleStateForApplication(props.config, moduleId, applicationId)
-  const label = moduleLabels[moduleId]
+  const labelKey = `model.modules.${moduleId}`
+  const module = hasMessage(labelKey) ? t(labelKey) : moduleLabels[moduleId]
 
   switch (moduleState.kind) {
     case 'default-off':
       return {
-        text: `${label} · Default off`,
+        text: t('registry.applications.chip.defaultOff', { module }),
         chipClass: 'chip-idle',
-        title: `The default ${label} profile is off. Click to create a custom profile for this application.`,
+        title: t('registry.applications.chip.defaultOffTitle', { module }),
       }
-    case 'custom':
+    case 'custom': {
+      const profile = moduleState.profileName ?? ''
       return {
-        text: `${label} · ${moduleState.profileName}`,
+        text: t('registry.applications.chip.custom', { module, profile }),
         chipClass: 'chip-success',
-        title: `Custom ${label} profile "${moduleState.profileName}" applies. Click to open it.`,
+        title: t('registry.applications.chip.customTitle', { module, profile }),
       }
+    }
     default:
       return {
-        text: `${label} · Default`,
+        text: t('registry.applications.chip.default', { module }),
         chipClass: 'chip-idle',
-        title: `The default ${label} profile applies. Click to create a custom profile for this application.`,
+        title: t('registry.applications.chip.defaultTitle', { module }),
       }
   }
 }
@@ -87,15 +91,15 @@ function finishNameEdit() {
   <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
     <div class="flex flex-wrap items-center justify-between gap-3">
       <div>
-        <p class="eyebrow text-xs uppercase tracking-[0.24em]">Registry</p>
-        <h2 class="mt-2 text-2xl font-semibold tracking-tight">Application Registry</h2>
+        <p class="eyebrow text-xs uppercase tracking-[0.24em]">{{ t('registry.applications.eyebrow') }}</p>
+        <h2 class="mt-2 text-2xl font-semibold tracking-tight">{{ t('registry.applications.title') }}</h2>
         <p class="mt-2 text-sm leading-6 text-muted">
-          Register the applications that module profiles can target by executable name. The chips on each card show how every module currently treats that application — click one to jump to its profile, or to create one.
+          {{ t('registry.applications.intro') }}
         </p>
       </div>
 
       <button class="button-accent rounded-[0.75rem] px-5 py-2.5 text-sm font-medium" type="button" @click="$emit('add')">
-        Add Application
+        {{ t('registry.applications.add') }}
       </button>
     </div>
 
@@ -103,7 +107,7 @@ function finishNameEdit() {
       <div v-for="(application, index) in applications" :key="application.id" class="rounded-[1rem] border p-4 surface-panel-soft">
         <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
           <div class="flex flex-wrap items-center gap-2">
-            <p v-if="editingApplicationId !== application.id" class="text-base font-semibold tracking-tight">{{ application.name || 'Unnamed application' }}</p>
+            <p v-if="editingApplicationId !== application.id" class="text-base font-semibold tracking-tight">{{ application.name || t('registry.applications.unnamed') }}</p>
             <input
               v-else
               v-model="application.name"
@@ -117,7 +121,7 @@ function finishNameEdit() {
               v-if="editingApplicationId !== application.id"
               class="button-secondary inline-flex h-8 w-8 items-center justify-center rounded-[0.5rem]"
               type="button"
-              aria-label="Edit application name"
+              :aria-label="t('registry.applications.editName')"
               @click="editingApplicationId = application.id"
             >
               <svg aria-hidden="true" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
@@ -128,20 +132,21 @@ function finishNameEdit() {
 
           <div class="flex flex-wrap items-center gap-3">
             <button class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click="$emit('remove', index)">
-              Remove
+              {{ t('common.remove') }}
             </button>
           </div>
         </div>
 
         <label class="block">
           <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-            Executable
+            {{ t('registry.applications.executable') }}
             <span
-              title="Executable matching is case-insensitive, but the name must include the application extension. For example: DCS.exe"
+              :title="t('registry.applications.executableHelp')"
               class="cursor-help select-none text-xs text-muted"
               >ⓘ</span
             >
           </span>
+          <!-- i18n-ignore: an example file name, not text -->
           <input v-model="application.match.exe" class="app-input w-full rounded-[0.75rem] px-4 py-2.5" placeholder="DCS.exe" type="text" />
         </label>
 
@@ -162,7 +167,7 @@ function finishNameEdit() {
     </div>
 
     <div v-else class="mt-4 rounded-[1rem] border border-dashed px-6 py-7 text-center text-sm surface-panel-soft">
-      No applications registered yet. Add one before creating module profiles.
+      {{ t('registry.applications.empty') }}
     </div>
   </article>
 
@@ -170,35 +175,35 @@ function finishNameEdit() {
     <div class="flex flex-wrap items-start justify-between gap-3">
       <div>
         <div class="flex flex-wrap items-center gap-2">
-          <p class="eyebrow text-xs uppercase tracking-[0.24em]">Discovery</p>
+          <p class="eyebrow text-xs uppercase tracking-[0.24em]">{{ t('registry.discovery.eyebrow') }}</p>
           <span
             class="rounded-full px-2.5 py-0.5 text-xs font-semibold uppercase tracking-[0.14em]"
             :class="config.core.trackSeenApps ? 'chip-success' : 'chip-warning'"
             :title="config.core.trackSeenApps
-              ? 'Discovery is tracking the OpenXR apps you launch.'
-              : 'Discovery is off. New OpenXR app launches will not be recorded until you enable tracking in Settings.'"
+              ? t('registry.discovery.trackingOnTitle')
+              : t('registry.discovery.trackingOffTitle')"
           >
-            {{ config.core.trackSeenApps ? 'Tracking on' : 'Tracking off' }}
+            {{ config.core.trackSeenApps ? t('registry.discovery.trackingOn') : t('registry.discovery.trackingOff') }}
           </span>
         </div>
-        <h3 class="mt-1 text-lg font-semibold tracking-tight">Where new apps come from</h3>
+        <h3 class="mt-1 text-lg font-semibold tracking-tight">{{ t('registry.discovery.title') }}</h3>
         <p class="mt-1 max-w-3xl text-sm leading-6 text-muted">
-          VectorXR notes the OpenXR apps you launch so you can easily register them in one click. Nothing here changes your settings until you register it. Tracking is controlled in Settings.
+          {{ t('registry.discovery.intro') }}
         </p>
       </div>
 
       <div class="flex flex-wrap gap-2">
         <button class="button-secondary rounded-[0.65rem] px-3 py-1.5 text-xs font-medium" type="button" @click="$emit('refreshSeen')">
-          Refresh
+          {{ t('common.refresh') }}
         </button>
         <button class="button-secondary rounded-[0.65rem] px-3 py-1.5 text-xs font-medium" type="button" @click="$emit('clearSeen')">
-          Clear Seen Apps
+          {{ t('registry.discovery.clear') }}
         </button>
       </div>
     </div>
 
     <div v-if="seenAppsLoading" class="mt-4 rounded-[1rem] border border-dashed px-6 py-7 text-center text-sm surface-panel-soft">
-      Loading seen apps...
+      {{ t('registry.discovery.loading') }}
     </div>
 
     <template v-else-if="seenAppViews.length > 0">
@@ -212,7 +217,7 @@ function finishNameEdit() {
           <div class="min-w-0">
             <p class="font-mono text-base font-semibold tracking-tight">{{ seenApp.exe }}</p>
             <p class="mt-1 text-sm text-muted">
-              {{ seenApp.launchCount }} {{ seenApp.launchCount === 1 ? 'launch' : 'launches' }}
+              {{ t('registry.discovery.launches', { count: seenApp.launchCount }) }}
             </p>
           </div>
 
@@ -222,14 +227,14 @@ function finishNameEdit() {
               type="button"
               @click="detailsApp = seenApp"
             >
-              Details
+              {{ t('registry.discovery.details') }}
             </button>
             <button
               class="button-accent rounded-[0.75rem] px-5 py-2 text-sm font-semibold"
               type="button"
               @click="$emit('addSeen', seenApp.exe)"
             >
-              Register
+              {{ t('registry.discovery.register') }}
             </button>
           </div>
         </div>
@@ -237,16 +242,16 @@ function finishNameEdit() {
 
       <p v-else class="mt-4 rounded-[1rem] border border-dashed px-4 py-4 text-center text-sm text-muted surface-panel-soft">
         <template v-if="config.core.trackSeenApps">
-          Every discovered app is registered. New apps you launch will appear here.
+          {{ t('registry.discovery.allRegistered') }}
         </template>
         <template v-else>
-          Every discovered app is registered. Tracking is off, so no new apps will appear here.
+          {{ t('registry.discovery.allRegisteredTrackingOff') }}
         </template>
       </p>
 
       <!-- Filed: already-registered apps recede; they are done -->
       <div v-if="registeredSeenApps.length > 0" class="mt-5">
-        <p class="text-xs uppercase tracking-[0.18em] text-muted">Already registered</p>
+        <p class="text-xs uppercase tracking-[0.18em] text-muted">{{ t('registry.discovery.alreadyRegistered') }}</p>
         <div class="mt-2 space-y-1.5">
           <div
             v-for="seenApp in registeredSeenApps"
@@ -256,7 +261,7 @@ function finishNameEdit() {
             <div class="flex min-w-0 flex-wrap items-center gap-2">
               <span class="font-mono text-sm font-medium">{{ seenApp.exe }}</span>
               <span class="chip-success rounded-full px-2.5 py-0.5 text-xs font-medium">
-                Registered as {{ seenApp.registeredApplication?.name }}
+                {{ t('registry.discovery.registeredAs', { name: seenApp.registeredApplication?.name ?? '' }) }}
               </span>
             </div>
             <button
@@ -264,7 +269,7 @@ function finishNameEdit() {
               type="button"
               @click="detailsApp = seenApp"
             >
-              Details
+              {{ t('registry.discovery.details') }}
             </button>
           </div>
         </div>
@@ -273,10 +278,10 @@ function finishNameEdit() {
 
     <div v-else class="mt-4 rounded-[1rem] border border-dashed px-6 py-7 text-center text-sm surface-panel-soft">
       <template v-if="config.core.trackSeenApps">
-        No XR apps seen yet. Launch an OpenXR app while VectorXR is active, then refresh this list.
+        {{ t('registry.discovery.empty') }}
       </template>
       <template v-else>
-        Application tracking is disabled, so no new apps will appear here. Enable tracking in Settings to record OpenXR app launches.
+        {{ t('registry.discovery.emptyTrackingOff') }}
       </template>
     </div>
   </article>

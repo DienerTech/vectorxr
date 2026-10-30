@@ -22,7 +22,7 @@ export interface OsdCompactLayoutOptions {
 }
 export function osdCompactLayout(settings: OsdSettings, options: OsdCompactLayoutOptions = {}) {
   // Plain JavaScript callers are not type-checked: refuse the old boolean form.
-  if (typeof options !== 'object' || options === null) throw new TypeError('osdCompactLayout takes an options object')
+  if (typeof options !== 'object' || options === null) throw new TypeError('osdCompactLayout takes an options object') // i18n-ignore
   const { pivotSnapLine = false, framegenSession = false, diagnosticsWidth = 0 } = options
   const header = [
     { key: 'brand', show: settings.compactShowBrand, width: 155 },

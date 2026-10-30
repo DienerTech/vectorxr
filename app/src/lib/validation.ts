@@ -1,3 +1,4 @@
+import { formatList, t } from '../i18n/index.ts'
 import type { CoreConfig, DepthXRProfileConfig, DepthXRSettings, FrameGenProfileConfig, FrameGenSettings, InputBinding, PivotViewControls, PivotXRProfileConfig, PivotXRSettings, QuadViewsProfileConfig, QuadViewsSettings, RegisteredApplication, VectorXRConfig } from './model'
 
 // Runtime value imports from './model' are avoided so node:test can load this
@@ -18,25 +19,25 @@ function validateCoreConfig(core: CoreConfig): string[] {
   ] as const) {
     const value = core.osd[name]
     if (!Number.isFinite(value) || value < low || value > high ||
-        ((name === 'opacity' || name === 'updateHz') && !Number.isInteger(value))) errors.push(`OSD ${name} must be between ${low} and ${high}`)
+        ((name === 'opacity' || name === 'updateHz') && !Number.isInteger(value))) errors.push(t('validation.osd.between', { field: name, min: low, max: high }))
   }
   errors.push(...validateInputBindings('core.osd.toggleBindings', core.osd.toggleBindings), ...validateInputBindings('core.osd.cycleBindings', core.osd.cycleBindings))
-  if (!/^#[0-9a-f]{6}$/i.test(core.osd.customColor)) errors.push('OSD custom color must be a six-digit hex color')
-  if (!['teal', 'copper', 'blue', 'violet', 'rose', 'custom'].includes(core.osd.accent)) errors.push('OSD accent is invalid')
-  if (!['12', '24'].includes(core.osd.clockFormat)) errors.push('OSD clock format must be 12 or 24 hour')
-  if (!['all', 'fps', 'frameTime', 'none'].includes(core.osd.compactMetrics)) errors.push('OSD compact performance selection is invalid')
-  if (core.osd.bodyOrder.length !== osdBodyRowNames.length || new Set(core.osd.bodyOrder).size !== osdBodyRowNames.length || core.osd.bodyOrder.some(row => !osdBodyRowNames.includes(row))) errors.push('OSD body order must contain each row once')
+  if (!/^#[0-9a-f]{6}$/i.test(core.osd.customColor)) errors.push(t('validation.osd.customColor'))
+  if (!['teal', 'copper', 'blue', 'violet', 'rose', 'custom'].includes(core.osd.accent)) errors.push(t('validation.osd.accent'))
+  if (!['12', '24'].includes(core.osd.clockFormat)) errors.push(t('validation.osd.clockFormat'))
+  if (!['all', 'fps', 'frameTime', 'none'].includes(core.osd.compactMetrics)) errors.push(t('validation.osd.compactMetrics'))
+  if (core.osd.bodyOrder.length !== osdBodyRowNames.length || new Set(core.osd.bodyOrder).size !== osdBodyRowNames.length || core.osd.bodyOrder.some(row => !osdBodyRowNames.includes(row))) errors.push(t('validation.osd.bodyOrder'))
 
   if (!Number.isInteger(core.logRetentionFiles) || core.logRetentionFiles < 1 || core.logRetentionFiles > 50) {
-    errors.push('core.logRetentionFiles must be an integer between 1 and 50')
+    errors.push(t('validation.field.integerBetween', { field: 'core.logRetentionFiles', min: 1, max: 50 }))
   }
 
   if (typeof core.trackSeenApps !== 'boolean') {
-    errors.push('core.trackSeenApps must be a boolean')
+    errors.push(t('validation.field.boolean', { field: 'core.trackSeenApps' }))
   }
 
   if (!Number.isFinite(core.sound.volume) || core.sound.volume < 0 || core.sound.volume > 100) {
-    errors.push('core.sound.volume must be between 0 and 100')
+    errors.push(between('core.sound.volume', 0, 100))
   }
 
   return errors
@@ -46,7 +47,7 @@ function validateDepthXRSettings(prefix: string, settings: DepthXRSettings): str
   const errors: string[] = []
 
   if (typeof settings.depthAnchor !== 'boolean') {
-    errors.push(`${prefix}depthAnchor must be a boolean`)
+    errors.push(t('validation.field.boolean', { field: prefix + 'depthAnchor' }))
   }
 
   const bounded = [
@@ -56,7 +57,7 @@ function validateDepthXRSettings(prefix: string, settings: DepthXRSettings): str
 
   for (const [name, value, min, max] of bounded) {
     if (!Number.isFinite(value) || value < min || value > max) {
-      errors.push(`${prefix}${name} must be between ${min} and ${max}`)
+      errors.push(t('validation.field.between', { field: prefix + name, min, max }))
     }
   }
 
@@ -72,7 +73,7 @@ function validateSoundFeedback(prefix: string, binding: InputBinding): string[] 
   for (const field of ['activateSound', 'deactivateSound'] as const) {
     const path = binding.sound[field].trim()
     if (path && !/\.wav$/i.test(path)) {
-      errors.push(`${prefix}.sound.${field} must point to a .wav file`)
+      errors.push(t('validation.field.wavFile', { field: `${prefix}.sound.${field}` }))
     }
   }
 
@@ -89,37 +90,38 @@ function validateInputBinding(prefix: string, binding: InputBinding): string[] {
   }
 
   if (binding.type === 'keyboard') {
+    const chord = prefix + '.chord'
     if (binding.chord.length === 0) {
-      errors.push(`${prefix}.chord must include at least one key`)
+      errors.push(t('validation.binding.chordEmpty', { field: chord }))
     }
 
     const seen = new Set<string>()
     for (const key of binding.chord) {
       if (!/^(Ctrl|Alt|Shift|Space|F([1-9]|1[0-2])|Numpad[0-9]|[A-Z]|[0-9])$/.test(key)) {
-        errors.push(`${prefix}.chord contains unsupported key: ${key}`)
+        errors.push(t('validation.binding.chordUnsupportedKey', { field: chord, key }))
       }
       if (seen.has(key)) {
-        errors.push(`${prefix}.chord duplicates ${key}`)
+        errors.push(t('validation.field.duplicates', { field: chord, value: key }))
       }
       seen.add(key)
     }
 
     const primaryKeys = binding.chord.filter((key) => key !== 'Ctrl' && key !== 'Alt' && key !== 'Shift')
     if (primaryKeys.length !== 1) {
-      errors.push(`${prefix}.chord must include exactly one non-modifier key`)
+      errors.push(t('validation.binding.chordPrimaryKey', { field: chord }))
     }
 
     return [...errors, ...validateSoundFeedback(prefix, binding)]
   }
 
   if (!binding.deviceGuid.trim()) {
-    errors.push(`${prefix}.deviceGuid is required`)
+    errors.push(t('validation.field.required', { field: prefix + '.deviceGuid' }))
   }
 
   if (!binding.inputPath.trim()) {
-    errors.push(`${prefix}.inputPath is required`)
+    errors.push(t('validation.field.required', { field: prefix + '.inputPath' }))
   } else if (!deviceInputPathPattern.test(binding.inputPath.trim())) {
-    errors.push(`${prefix}.inputPath must use button-1 through button-128 or hat-1 through hat-4 with a supported direction`)
+    errors.push(t('validation.binding.inputPath', { field: prefix + '.inputPath' }))
   }
 
   return [...errors, ...validateSoundFeedback(prefix, binding)]
@@ -132,105 +134,115 @@ function validateInputBindings(prefix: string, bindings: InputBinding[]): string
 function validatePivotStepTuning(prefix: string, tuning: PivotXRSettings['yawStep'], deadzoneMax: number): string[] {
   const errors: string[] = []
   if (!Number.isFinite(tuning.deadzoneDegrees) || tuning.deadzoneDegrees < 0 || tuning.deadzoneDegrees > deadzoneMax) {
-    errors.push(`${prefix}deadzoneDegrees must be between 0 and ${deadzoneMax}`)
+    errors.push(between(prefix + 'deadzoneDegrees', 0, deadzoneMax))
   }
   if (!Number.isFinite(tuning.triggerDegrees) || tuning.triggerDegrees < 1 || tuning.triggerDegrees > 45) {
-    errors.push(`${prefix}triggerDegrees must be between 1 and 45`)
+    errors.push(between(prefix + 'triggerDegrees', 1, 45))
   }
   if (!Number.isFinite(tuning.amountDegrees) || tuning.amountDegrees < 0 || tuning.amountDegrees > 60) {
-    errors.push(`${prefix}amountDegrees must be between 0 and 60`)
+    errors.push(between(prefix + 'amountDegrees', 0, 60))
   }
   if (!Number.isFinite(tuning.hysteresisDegrees) || tuning.hysteresisDegrees < 0 || tuning.hysteresisDegrees > 20) {
-    errors.push(`${prefix}hysteresisDegrees must be between 0 and 20`)
+    errors.push(between(prefix + 'hysteresisDegrees', 0, 20))
   }
   if (Number.isFinite(tuning.hysteresisDegrees) && Number.isFinite(tuning.triggerDegrees) &&
     tuning.hysteresisDegrees >= tuning.triggerDegrees) {
-    errors.push(`${prefix}hysteresisDegrees must be smaller than triggerDegrees`)
+    errors.push(t('validation.field.smallerThan', { field: prefix + 'hysteresisDegrees', other: 'triggerDegrees' }))
   }
   if (!Number.isFinite(tuning.maxExtraDegrees) || tuning.maxExtraDegrees < 0 || tuning.maxExtraDegrees > 180) {
-    errors.push(`${prefix}maxExtraDegrees must be between 0 and 180`)
+    errors.push(between(prefix + 'maxExtraDegrees', 0, 180))
   }
   return errors
+}
+
+// "<field> must be between <min> and <max>"; field is a settings path, which
+// stays as written in settings.json.
+function between(field: string, min: number | string, max: number | string): string {
+  return t('validation.field.between', { field, min, max })
+}
+
+function required(field: string): string {
+  return t('validation.field.required', { field })
 }
 function validatePivotXRSettings(prefix: string, settings: PivotXRSettings): string[] {
   const errors: string[] = []
 
   if (typeof settings.applyMotionToSnapViews !== 'boolean') {
-    errors.push(`${prefix}applyMotionToSnapViews must be a boolean`)
+    errors.push(t('validation.field.boolean', { field: prefix + 'applyMotionToSnapViews' }))
   }
   const transitions: Array<[string, number]> = [
     ['deadzoneTransitionDegrees', settings.deadzoneTransitionDegrees],
     ['pitchDeadzoneTransitionDegrees', settings.pitchDeadzoneTransitionDegrees],
     ...(['yawLeft', 'yawRight', 'pitchUp', 'pitchDown'] as const).map(
-      (key): [string, number] => [`${key}.deadzoneTransitionDegrees`, settings[key].deadzoneTransitionDegrees],
+      (key): [string, number] => [key + '.deadzoneTransitionDegrees', settings[key].deadzoneTransitionDegrees],
     ),
   ]
   for (const [name, value] of transitions) {
     if (!Number.isFinite(value) || value < 0 || value > 180) {
-      errors.push(`${prefix}${name} must be between 0 and 180`)
+      errors.push(between(prefix + name, '0', '180'))
     }
   }
   for (const key of ['yaw', 'yawLeft', 'yawRight', 'pitchUp', 'pitchDown'] as const) {
     const direction = settings.positionAssist[key]
     for (const field of ['rightCm', 'upCm', 'forwardCm'] as const) {
       if (!Number.isFinite(direction[field]) || Math.abs(direction[field]) > 100) {
-        errors.push(`${prefix}positionAssist.${key}.${field} must be between -100 and 100 cm`)
+        errors.push(t('validation.field.betweenCm', { field: prefix + 'positionAssist.' + key + '.' + field, min: '-100', max: '100' }))
       }
     }
     const { startAngleDegrees, fullAngleDegrees } = direction
     if (!Number.isFinite(startAngleDegrees) || !Number.isFinite(fullAngleDegrees) ||
       startAngleDegrees < 0 || fullAngleDegrees > 180 || fullAngleDegrees <= startAngleDegrees) {
-      errors.push(`${prefix}positionAssist.${key} requires 0 <= start angle < full-offset angle <= 180`)
+      errors.push(t('validation.pivot.positionAssistAngles', { field: prefix + 'positionAssist.' + key }))
     }
   }
 
   if (!Number.isFinite(settings.rotationMultiplier) || settings.rotationMultiplier < 1.0 || settings.rotationMultiplier > 3.0) {
-    errors.push(`${prefix}rotationMultiplier must be between 1.0 and 3.0`)
+    errors.push(between(prefix + 'rotationMultiplier', '1.0', '3.0'))
   }
 
   if (!Number.isFinite(settings.smoothing) || settings.smoothing < 0 || settings.smoothing > 1) {
-    errors.push(`${prefix}smoothing must be between 0 and 1`)
+    errors.push(between(prefix + 'smoothing', '0', '1'))
   }
 
   if (!Number.isFinite(settings.activationRampSeconds) || settings.activationRampSeconds < 0 || settings.activationRampSeconds > 2) {
-    errors.push(`${prefix}activationRampSeconds must be between 0 and 2`)
+    errors.push(between(prefix + 'activationRampSeconds', '0', '2'))
   }
 
   if (!Number.isFinite(settings.deadzoneDegrees) || settings.deadzoneDegrees < 0 || settings.deadzoneDegrees > 180) {
-    errors.push(`${prefix}deadzoneDegrees must be between 0 and 180`)
+    errors.push(between(prefix + 'deadzoneDegrees', '0', '180'))
   }
 
   if (!Number.isFinite(settings.maxExtraYawDegrees) || settings.maxExtraYawDegrees < 0 || settings.maxExtraYawDegrees > 180) {
-    errors.push(`${prefix}maxExtraYawDegrees must be between 0 and 180`)
+    errors.push(between(prefix + 'maxExtraYawDegrees', '0', '180'))
   }
 
   if (!Number.isFinite(settings.pitchRotationMultiplier) || settings.pitchRotationMultiplier < 1.0 || settings.pitchRotationMultiplier > 3.0) {
-    errors.push(`${prefix}pitchRotationMultiplier must be between 1.0 and 3.0`)
+    errors.push(between(prefix + 'pitchRotationMultiplier', '1.0', '3.0'))
   }
 
   if (!Number.isFinite(settings.pitchDeadzoneDegrees) || settings.pitchDeadzoneDegrees < 0 || settings.pitchDeadzoneDegrees > 90) {
-    errors.push(`${prefix}pitchDeadzoneDegrees must be between 0 and 90`)
+    errors.push(between(prefix + 'pitchDeadzoneDegrees', '0', '90'))
   }
 
   if (!Number.isFinite(settings.maxExtraPitchDegrees) || settings.maxExtraPitchDegrees < 0 || settings.maxExtraPitchDegrees > 180) {
-    errors.push(`${prefix}maxExtraPitchDegrees must be between 0 and 180`)
+    errors.push(between(prefix + 'maxExtraPitchDegrees', '0', '180'))
   }
 
   if (settings.responseMode !== 'continuous' && settings.responseMode !== 'stepped') {
-    errors.push(`${prefix}responseMode must be "continuous" or "stepped"`)
+    errors.push(t('validation.pivot.responseMode', { field: prefix + 'responseMode' }))
   }
 
   if (settings.stepGlideMode !== 'instant' && settings.stepGlideMode !== 'glide') {
-    errors.push(`${prefix}stepGlideMode must be "instant" or "glide"`)
+    errors.push(t('validation.pivot.stepGlideMode', { field: prefix + 'stepGlideMode' }))
   }
 
   const minimumGlideSeconds = settings.stepGlideMode === 'glide' ? 0.01 : 0
   if (!Number.isFinite(settings.stepGlideSeconds) || settings.stepGlideSeconds < minimumGlideSeconds || settings.stepGlideSeconds > 2) {
-    errors.push(`${prefix}stepGlideSeconds must be between ${minimumGlideSeconds} and 2`)
+    errors.push(between(prefix + 'stepGlideSeconds', minimumGlideSeconds, '2'))
   }
 
-  errors.push(...validatePivotStepTuning(`${prefix}yawStep.`, settings.yawStep, 180))
-  errors.push(...validatePivotStepTuning(`${prefix}pitchStep.`, settings.pitchStep, 90))
+  errors.push(...validatePivotStepTuning(prefix + 'yawStep.', settings.yawStep, 180))
+  errors.push(...validatePivotStepTuning(prefix + 'pitchStep.', settings.pitchStep, 90))
 
   const tunings: Array<[string, typeof settings.yawLeft, number]> = [
     ['yawLeft', settings.yawLeft, 180],
@@ -240,13 +252,13 @@ function validatePivotXRSettings(prefix: string, settings: PivotXRSettings): str
   ]
   for (const [name, tuning, deadzoneMax] of tunings) {
     if (!Number.isFinite(tuning.rotationMultiplier) || tuning.rotationMultiplier < 1.0 || tuning.rotationMultiplier > 3.0) {
-      errors.push(`${prefix}${name}.rotationMultiplier must be between 1.0 and 3.0`)
+      errors.push(between(prefix + name + '.rotationMultiplier', '1.0', '3.0'))
     }
     if (!Number.isFinite(tuning.deadzoneDegrees) || tuning.deadzoneDegrees < 0 || tuning.deadzoneDegrees > deadzoneMax) {
-      errors.push(`${prefix}${name}.deadzoneDegrees must be between 0 and ${deadzoneMax}`)
+      errors.push(between(prefix + name + '.deadzoneDegrees', '0', deadzoneMax))
     }
     if (!Number.isFinite(tuning.maxExtraDegrees) || tuning.maxExtraDegrees < 0 || tuning.maxExtraDegrees > 180) {
-      errors.push(`${prefix}${name}.maxExtraDegrees must be between 0 and 180`)
+      errors.push(between(prefix + name + '.maxExtraDegrees', '0', '180'))
     }
   }
 
@@ -265,39 +277,39 @@ function validatePivotXRSettings(prefix: string, settings: PivotXRSettings): str
 
 function validatePivotNudgeSettings(prefix: string, nudges: PivotViewControls['nudges']): string[] {
   const errors: string[] = []
-  if (!Number.isFinite(nudges.yawStepDegrees) || nudges.yawStepDegrees < 1 || nudges.yawStepDegrees > 90) errors.push(`${prefix}yawStepDegrees must be between 1 and 90`)
-  if (!Number.isFinite(nudges.pitchStepDegrees) || nudges.pitchStepDegrees < 1 || nudges.pitchStepDegrees > 60) errors.push(`${prefix}pitchStepDegrees must be between 1 and 60`)
-  if (!Number.isFinite(nudges.transitionSeconds) || nudges.transitionSeconds < 0 || nudges.transitionSeconds > 2) errors.push(`${prefix}transitionSeconds must be between 0 and 2`)
-  errors.push(...validateInputBindings(`${prefix}yawLeftBindings`, nudges.yawLeftBindings))
-  errors.push(...validateInputBindings(`${prefix}yawRightBindings`, nudges.yawRightBindings))
-  errors.push(...validateInputBindings(`${prefix}pitchUpBindings`, nudges.pitchUpBindings))
-  errors.push(...validateInputBindings(`${prefix}pitchDownBindings`, nudges.pitchDownBindings))
-  errors.push(...validateInputBindings(`${prefix}centerBindings`, nudges.centerBindings))
+  if (!Number.isFinite(nudges.yawStepDegrees) || nudges.yawStepDegrees < 1 || nudges.yawStepDegrees > 90) errors.push(between(prefix + 'yawStepDegrees', '1', '90'))
+  if (!Number.isFinite(nudges.pitchStepDegrees) || nudges.pitchStepDegrees < 1 || nudges.pitchStepDegrees > 60) errors.push(between(prefix + 'pitchStepDegrees', '1', '60'))
+  if (!Number.isFinite(nudges.transitionSeconds) || nudges.transitionSeconds < 0 || nudges.transitionSeconds > 2) errors.push(between(prefix + 'transitionSeconds', '0', '2'))
+  errors.push(...validateInputBindings(prefix + 'yawLeftBindings', nudges.yawLeftBindings))
+  errors.push(...validateInputBindings(prefix + 'yawRightBindings', nudges.yawRightBindings))
+  errors.push(...validateInputBindings(prefix + 'pitchUpBindings', nudges.pitchUpBindings))
+  errors.push(...validateInputBindings(prefix + 'pitchDownBindings', nudges.pitchDownBindings))
+  errors.push(...validateInputBindings(prefix + 'centerBindings', nudges.centerBindings))
   return errors
 }
 
 function validatePivotViewControls(prefix: string, controls: PivotViewControls): string[] {
-  const errors = validatePivotNudgeSettings(`${prefix}nudges.`, controls.nudges)
+  const errors = validatePivotNudgeSettings(prefix + 'nudges.', controls.nudges)
 
   const ids = new Set<string>()
   controls.quickViews.forEach((view, index) => {
-    const viewPrefix = `${prefix}quickViews[${index}].`
-    if (!view.id.trim()) errors.push(`${viewPrefix}id is required`)
-    if (ids.has(view.id)) errors.push(`${viewPrefix}id duplicates another Quick View`)
+    const viewPrefix = `${prefix}quickViews[${index}].` // i18n-ignore
+    if (!view.id.trim()) errors.push(required(viewPrefix + 'id'))
+    if (ids.has(view.id)) errors.push(t('validation.pivot.quickViewDuplicateId', { field: viewPrefix + 'id' }))
     ids.add(view.id)
-    if (!view.name.trim()) errors.push(`${viewPrefix}name is required`)
-    if (!Number.isFinite(view.yawDegrees) || view.yawDegrees < -180 || view.yawDegrees > 180) errors.push(`${viewPrefix}yawDegrees must be between -180 and 180`)
-    if (!Number.isFinite(view.pitchDegrees) || view.pitchDegrees < -85 || view.pitchDegrees > 85) errors.push(`${viewPrefix}pitchDegrees must be between -85 and 85`)
-    if (!Number.isFinite(view.transitionSeconds) || view.transitionSeconds < 0 || view.transitionSeconds > 2) errors.push(`${viewPrefix}transitionSeconds must be between 0 and 2`)
+    if (!view.name.trim()) errors.push(required(viewPrefix + 'name'))
+    if (!Number.isFinite(view.yawDegrees) || view.yawDegrees < -180 || view.yawDegrees > 180) errors.push(between(viewPrefix + 'yawDegrees', '-180', '180'))
+    if (!Number.isFinite(view.pitchDegrees) || view.pitchDegrees < -85 || view.pitchDegrees > 85) errors.push(between(viewPrefix + 'pitchDegrees', '-85', '85'))
+    if (!Number.isFinite(view.transitionSeconds) || view.transitionSeconds < 0 || view.transitionSeconds > 2) errors.push(between(viewPrefix + 'transitionSeconds', '0', '2'))
     const positions: Array<[string, number]> = [
       ['positionRightCm', view.positionRightCm],
       ['positionUpCm', view.positionUpCm],
       ['positionForwardCm', view.positionForwardCm],
     ]
     positions.forEach(([name, value]) => {
-      if (!Number.isFinite(value) || value < -100 || value > 100) errors.push(`${viewPrefix}${name} must be between -100 and 100`)
+      if (!Number.isFinite(value) || value < -100 || value > 100) errors.push(between(viewPrefix + name, '-100', '100'))
     })
-    errors.push(...validateInputBindings(`${viewPrefix}activationBindings`, view.activationBindings.map((item) => item.binding)))
+    errors.push(...validateInputBindings(viewPrefix + 'activationBindings', view.activationBindings.map((item) => item.binding)))
   })
   return errors
 }
@@ -318,12 +330,12 @@ function validateQuadViewsSettings(prefix: string, settings: QuadViewsSettings):
   ] as const
 
   if (settings.trackingMode !== 'head' && settings.trackingMode !== 'eye') {
-    errors.push(`${prefix}trackingMode must be head or eye`)
+    errors.push(t('validation.quadviews.trackingMode', { field: prefix + 'trackingMode' }))
   }
 
   for (const [name, value, min, max] of bounded) {
     if (!Number.isFinite(value) || value < min || value > max) {
-      errors.push(`${prefix}${name} must be between ${min} and ${max}`)
+      errors.push(between(prefix + name, min, max))
     }
   }
 
@@ -334,20 +346,23 @@ function validateFrameGenSettings(prefix: string, settings: FrameGenSettings): s
   const errors: string[] = []
 
   if (!frameGenSynthesisModeNames.includes(settings.synthesisMode)) {
-    errors.push(`${prefix}synthesisMode must be interpolate or extrapolate`)
+    errors.push(t('validation.framegen.synthesisMode', { field: prefix + 'synthesisMode' }))
   }
   if (!frameGenFlowQualityNames.includes(settings.flowQuality)) {
-    errors.push(`${prefix}flowQuality must be performance, balanced, or quality`)
+    errors.push(t('validation.framegen.flowQuality', { field: prefix + 'flowQuality' }))
   }
   if (!frameGenMotionEstimationNames.includes(settings.motionEstimation)) {
-    errors.push(`${prefix}motionEstimation must be shader or hardware`)
+    errors.push(t('validation.framegen.motionEstimation', { field: prefix + 'motionEstimation' }))
+  }
+  if (settings.interpolateFlow !== undefined && !['auto', 'hardware', 'shader'].includes(settings.interpolateFlow)) {
+    errors.push(t('validation.framegen.interpolateFlow', { field: prefix + 'interpolateFlow' }))
   }
   if (!frameGenFrameMultiplierNames.includes(settings.frameMultiplier)) {
-    errors.push(`${prefix}frameMultiplier must be auto, dynamic, 2x, 3x, or 4x`)
+    errors.push(t('validation.framegen.frameMultiplier', { field: prefix + 'frameMultiplier' }))
   }
 
   if (settings.extendHeadPrediction !== undefined && typeof settings.extendHeadPrediction !== 'boolean') {
-    errors.push(`${prefix}extendHeadPrediction must be true or false`)
+    errors.push(t('validation.field.trueOrFalse', { field: prefix + 'extendHeadPrediction' }))
   }
 
   const bounded = [
@@ -356,7 +371,7 @@ function validateFrameGenSettings(prefix: string, settings: FrameGenSettings): s
   ] as const
   for (const [name, value, min, max] of bounded) {
     if (!Number.isInteger(value) || value < min || value > max) {
-      errors.push(`${prefix}${name} must be a whole number from ${min} to ${max}`)
+      errors.push(t('validation.field.wholeNumberFromTo', { field: prefix + name, min, max }))
     }
   }
 
@@ -372,25 +387,25 @@ function validateApplications(applications: RegisteredApplication[]): string[] {
     const prefix = `applications[${index}].`
 
     if (!application.id.trim()) {
-      errors.push(`${prefix}id is required`)
+      errors.push(required(prefix + 'id'))
     }
 
     if (!/^[a-z0-9][a-z0-9-]*$/.test(application.id)) {
-      errors.push(`${prefix}id must use lowercase letters, numbers, and hyphens`)
+      errors.push(t('validation.applications.idFormat', { field: prefix + 'id' }))
     }
 
     const normalizedId = application.id.trim().toLowerCase()
     if (seenIds.has(normalizedId)) {
-      errors.push(`${prefix}id duplicates another application`)
+      errors.push(t('validation.applications.duplicateId', { field: prefix + 'id' }))
     }
     seenIds.add(normalizedId)
 
     if (!application.name.trim()) {
-      errors.push(`${prefix}name is required`)
+      errors.push(required(prefix + 'name'))
     }
 
     if (!application.match.exe.trim()) {
-      errors.push(`${prefix}match.exe is required`)
+      errors.push(required(prefix + 'match.exe'))
     }
 
     const normalizedExe = application.match.exe
@@ -400,7 +415,7 @@ function validateApplications(applications: RegisteredApplication[]): string[] {
       ?.toLowerCase() ?? ''
     if (normalizedExe) {
       if (seenExes.has(normalizedExe)) {
-        errors.push(`${prefix}match.exe duplicates another application`)
+        errors.push(t('validation.applications.duplicateExe', { field: prefix + 'match.exe' }))
       }
       seenExes.add(normalizedExe)
     }
@@ -414,21 +429,21 @@ function validateDepthXRProfile(profile: DepthXRProfileConfig, index: number, ap
   const prefix = `modules.depthxr.profiles[${index}].`
 
   if (!profile.name.trim()) {
-    errors.push(`${prefix}name is required`)
+    errors.push(required(prefix + 'name'))
   }
 
   const seenProfileApplicationIds = new Set<string>()
   for (const applicationId of profile.applicationIds) {
     if (!applicationIds.has(applicationId)) {
-      errors.push(`${prefix}applicationIds references unknown application: ${applicationId}`)
+      errors.push(t('validation.applications.unknownApplication', { field: prefix + 'applicationIds', application: applicationId }))
     }
     if (seenProfileApplicationIds.has(applicationId)) {
-      errors.push(`${prefix}applicationIds duplicates ${applicationId}`)
+      errors.push(t('validation.field.duplicates', { field: prefix + 'applicationIds', value: applicationId }))
     }
     seenProfileApplicationIds.add(applicationId)
   }
 
-  errors.push(...validateDepthXRSettings(`${prefix}settings.`, profile.settings))
+  errors.push(...validateDepthXRSettings(prefix + 'settings.', profile.settings))
   return errors
 }
 
@@ -444,7 +459,7 @@ function validateDepthProfileConflicts(profiles: DepthXRProfileConfig[]): string
     for (const applicationId of profile.applicationIds) {
       const firstIndex = firstProfileByApplication.get(applicationId)
       if (firstIndex !== undefined) {
-        errors.push(`modules.depthxr.profiles[${index}] conflicts with profiles[${firstIndex}] for application ${applicationId}; first enabled profile wins`)
+        errors.push(profileConflict(`modules.depthxr.profiles[${index}]`, firstIndex, applicationId))
       } else {
         firstProfileByApplication.set(applicationId, index)
       }
@@ -459,25 +474,25 @@ function validatePivotXRProfile(profile: PivotXRProfileConfig, index: number, ap
   const prefix = `modules.pivotxr.profiles[${index}].`
 
   if (!profile.name.trim()) {
-    errors.push(`${prefix}name is required`)
+    errors.push(required(prefix + 'name'))
   }
 
   const seenProfileApplicationIds = new Set<string>()
   for (const applicationId of profile.applicationIds) {
     if (!applicationIds.has(applicationId)) {
-      errors.push(`${prefix}applicationIds references unknown application: ${applicationId}`)
+      errors.push(t('validation.applications.unknownApplication', { field: prefix + 'applicationIds', application: applicationId }))
     }
     if (seenProfileApplicationIds.has(applicationId)) {
-      errors.push(`${prefix}applicationIds duplicates ${applicationId}`)
+      errors.push(t('validation.field.duplicates', { field: prefix + 'applicationIds', value: applicationId }))
     }
     seenProfileApplicationIds.add(applicationId)
   }
 
-  errors.push(...validateInputBindings(`${prefix}activationBindings`, profile.activationBindings.map((item) => item.binding)))
-  errors.push(...validateInputBindings(`${prefix}setOriginBindings`, profile.setOriginBindings))
-  errors.push(...validateInputBindings(`${prefix}releaseOriginBindings`, profile.releaseOriginBindings))
+  errors.push(...validateInputBindings(prefix + 'activationBindings', profile.activationBindings.map((item) => item.binding)))
+  errors.push(...validateInputBindings(prefix + 'setOriginBindings', profile.setOriginBindings))
+  errors.push(...validateInputBindings(prefix + 'releaseOriginBindings', profile.releaseOriginBindings))
   errors.push(...validatePivotXRSettings(prefix, profile.settings))
-  errors.push(...validatePivotViewControls(`${prefix}viewControls.`, profile.viewControls))
+  errors.push(...validatePivotViewControls(prefix + 'viewControls.', profile.viewControls))
   return errors
 }
 
@@ -486,21 +501,21 @@ function validateQuadViewsProfile(profile: QuadViewsProfileConfig, index: number
   const prefix = `modules.quadviews.profiles[${index}].`
 
   if (!profile.name.trim()) {
-    errors.push(`${prefix}name is required`)
+    errors.push(required(prefix + 'name'))
   }
 
   const seenProfileApplicationIds = new Set<string>()
   for (const applicationId of profile.applicationIds) {
     if (!applicationIds.has(applicationId)) {
-      errors.push(`${prefix}applicationIds references unknown application: ${applicationId}`)
+      errors.push(t('validation.applications.unknownApplication', { field: prefix + 'applicationIds', application: applicationId }))
     }
     if (seenProfileApplicationIds.has(applicationId)) {
-      errors.push(`${prefix}applicationIds duplicates ${applicationId}`)
+      errors.push(t('validation.field.duplicates', { field: prefix + 'applicationIds', value: applicationId }))
     }
     seenProfileApplicationIds.add(applicationId)
   }
 
-  errors.push(...validateQuadViewsSettings(`${prefix}settings.`, profile.settings))
+  errors.push(...validateQuadViewsSettings(prefix + 'settings.', profile.settings))
   return errors
 }
 
@@ -516,7 +531,7 @@ function validateQuadViewsProfileConflicts(profiles: QuadViewsProfileConfig[]): 
     for (const applicationId of profile.applicationIds) {
       const firstIndex = firstProfileByApplication.get(applicationId)
       if (firstIndex !== undefined) {
-        errors.push(`modules.quadviews.profiles[${index}] conflicts with profiles[${firstIndex}] for application ${applicationId}; first enabled profile wins`)
+        errors.push(profileConflict(`modules.quadviews.profiles[${index}]`, firstIndex, applicationId))
       } else {
         firstProfileByApplication.set(applicationId, index)
       }
@@ -531,21 +546,21 @@ function validateFrameGenProfile(profile: FrameGenProfileConfig, index: number, 
   const prefix = `modules.framegen.profiles[${index}].`
 
   if (!profile.name.trim()) {
-    errors.push(`${prefix}name is required`)
+    errors.push(required(prefix + 'name'))
   }
 
   const seenProfileApplicationIds = new Set<string>()
   for (const applicationId of profile.applicationIds) {
     if (!applicationIds.has(applicationId)) {
-      errors.push(`${prefix}applicationIds references unknown application: ${applicationId}`)
+      errors.push(t('validation.applications.unknownApplication', { field: prefix + 'applicationIds', application: applicationId }))
     }
     if (seenProfileApplicationIds.has(applicationId)) {
-      errors.push(`${prefix}applicationIds duplicates ${applicationId}`)
+      errors.push(t('validation.field.duplicates', { field: prefix + 'applicationIds', value: applicationId }))
     }
     seenProfileApplicationIds.add(applicationId)
   }
 
-  errors.push(...validateFrameGenSettings(`${prefix}settings.`, profile.settings))
+  errors.push(...validateFrameGenSettings(prefix + 'settings.', profile.settings))
   return errors
 }
 
@@ -561,7 +576,7 @@ function validateFrameGenProfileConflicts(profiles: FrameGenProfileConfig[]): st
     for (const applicationId of profile.applicationIds) {
       const firstIndex = firstProfileByApplication.get(applicationId)
       if (firstIndex !== undefined) {
-        errors.push(`modules.framegen.profiles[${index}] conflicts with profiles[${firstIndex}] for application ${applicationId}; first enabled profile wins`)
+        errors.push(profileConflict(`modules.framegen.profiles[${index}]`, firstIndex, applicationId))
       } else {
         firstProfileByApplication.set(applicationId, index)
       }
@@ -595,22 +610,23 @@ export function frameGenTurboOverlap(config: VectorXRConfig): { applications: st
 export function configWarnings(config: VectorXRConfig): string[] {
   const overlap = frameGenTurboOverlap(config)
   const targets = overlap.applications.length > 3
-    ? [...overlap.applications.slice(0, 3), `${overlap.applications.length - 3} more`]
+    ? [...overlap.applications.slice(0, 3), t('validation.warnings.moreApplications', { count: overlap.applications.length - 3 })]
     : [...overlap.applications]
-  if (overlap.defaults) targets.push('applications without a custom profile')
+  if (overlap.defaults) targets.push(t('validation.warnings.applicationsWithoutProfile'))
   if (targets.length === 0) return []
 
-  const list = targets.length === 1
-    ? targets[0]
-    : `${targets.slice(0, -1).join(', ')} and ${targets[targets.length - 1]}`
-  return [`Turbo and Frame Generation are both on for ${list}. Frame Generation takes over frame pacing; Turbo stays off in sessions where Frame Generation runs.`]
+  return [t('validation.warnings.turboFrameGenOverlap', { targets: formatList(targets) })]
+}
+
+function profileConflict(profile: string, first: number, application: string): string {
+  return t('validation.profiles.conflict', { profile, first, application })
 }
 
 export function validateConfig(config: VectorXRConfig): string[] {
   const errors: string[] = []
 
   if (config.version !== 3) {
-    errors.push('version must equal 3')
+    errors.push(t('validation.version', { version: 3 }))
   }
 
   errors.push(...validateCoreConfig(config.core))
@@ -625,20 +641,20 @@ export function validateConfig(config: VectorXRConfig): string[] {
   errors.push(...validatePivotViewControls('modules.pivotxr.viewControls.', config.modules.pivotxr.viewControls))
   const nudgeSetIds = new Set<string>()
   config.modules.pivotxr.nudgeSets.forEach((set, index) => {
-    const prefix = `modules.pivotxr.nudgeSets[${index}].`
-    if (!set.id.trim()) errors.push(`${prefix}id is required`)
-    if (set.id === 'none') errors.push(`${prefix}id uses the reserved None selection`)
-    if (nudgeSetIds.has(set.id)) errors.push(`${prefix}id duplicates another Nudge Set`)
+    const prefix = `modules.pivotxr.nudgeSets[${index}].` // i18n-ignore
+    if (!set.id.trim()) errors.push(required(prefix + 'id'))
+    if (set.id === 'none') errors.push(t('validation.pivot.nudgeSetReservedId', { field: prefix + 'id' }))
+    if (nudgeSetIds.has(set.id)) errors.push(t('validation.pivot.nudgeSetDuplicateId', { field: prefix + 'id' }))
     nudgeSetIds.add(set.id)
-    if (!set.name.trim()) errors.push(`${prefix}name is required`)
-    errors.push(...validatePivotNudgeSettings(`${prefix}settings.`, set.settings))
+    if (!set.name.trim()) errors.push(required(prefix + 'name'))
+    errors.push(...validatePivotNudgeSettings(prefix + 'settings.', set.settings))
   })
   if (config.modules.pivotxr.nudgeSetId !== 'none' && !nudgeSetIds.has(config.modules.pivotxr.nudgeSetId)) {
-    errors.push('modules.pivotxr.nudgeSetId references an unknown Nudge Set')
+    errors.push(t('validation.pivot.unknownNudgeSet', { field: 'modules.pivotxr.nudgeSetId' }))
   }
   config.modules.pivotxr.profiles.forEach((profile, index) => {
     if (profile.nudgeSetId !== 'none' && !nudgeSetIds.has(profile.nudgeSetId)) {
-      errors.push(`modules.pivotxr.profiles[${index}].nudgeSetId references an unknown Nudge Set`)
+      errors.push(t('validation.pivot.unknownNudgeSet', { field: `modules.pivotxr.profiles[${index}].nudgeSetId` })) // i18n-ignore
     }
   })
   errors.push(...validateQuadViewsSettings('modules.quadviews.defaults.', config.modules.quadviews.defaults))
@@ -667,15 +683,15 @@ export function validateConfig(config: VectorXRConfig): string[] {
   errors.push(...validateInputBindings('modules.turbo.metricsBindings', config.modules.turbo.metricsBindings))
   for (const experiment of [config.modules.turbo.experimental, ...config.modules.turbo.profiles.map(profile => profile.experimental)]) {
   if (!Number.isInteger(experiment.predictionPercent) || experiment.predictionPercent < 50 || experiment.predictionPercent > 100) {
-    errors.push('Turbo experimental prediction dampening must be an integer from 50 to 100')
+    errors.push(t('validation.turbo.predictionPercent'))
   }
   if (!Number.isInteger(experiment.frameLimit) || (experiment.frameLimit !== 0 && (experiment.frameLimit < 20 || experiment.frameLimit > 240))) {
-    errors.push('Turbo experimental frame cap must be 0 (off) or an integer from 20 to 240')
+    errors.push(t('validation.turbo.frameLimit'))
   }
   }
   errors.push(...validateInputBindings('modules.framegen.toggleBindings', config.modules.framegen.toggleBindings))
   if (!frameGenDiagnosticViewNames.includes(config.modules.framegen.diagnosticView)) {
-    errors.push('modules.framegen.diagnosticView must be off, flow, confidence, or tint')
+    errors.push(t('validation.framegen.diagnosticView', { field: 'modules.framegen.diagnosticView' }))
   }
   errors.push(...validateFrameGenSettings('modules.framegen.defaults.', config.modules.framegen.defaults))
   config.modules.framegen.profiles.forEach((profile, index) => {
@@ -686,11 +702,11 @@ export function validateConfig(config: VectorXRConfig): string[] {
   config.modules.turbo.profiles.forEach((profile, index) => {
     const prefix = `modules.turbo.profiles[${index}].`
     if (!profile.name.trim()) {
-      errors.push(`${prefix}name is required`)
+      errors.push(required(prefix + 'name'))
     }
     for (const applicationId of profile.applicationIds) {
       if (!applicationIds.has(applicationId)) {
-        errors.push(`${prefix}applicationIds references unknown application: ${applicationId}`)
+        errors.push(t('validation.applications.unknownApplication', { field: prefix + 'applicationIds', application: applicationId }))
       }
     }
   })

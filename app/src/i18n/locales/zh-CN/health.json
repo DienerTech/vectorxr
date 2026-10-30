@@ -1,0 +1,63 @@
+{
+  "checks": {
+    "suiteEnabled": {
+      "label": "套件运行时开关",
+      "enabled": "允许运行 VectorXR 运行时效果。",
+      "disabled": "VectorXR 已通过“主页”上的运行时开关禁用。"
+    },
+    "layerRegistered": {
+      "label": "OpenXR 层注册",
+      "loading": "VectorXR 仍在读取 OpenXR 层注册。",
+      "registered": "已在 {slice} 中注册。",
+      "missing": "在 OpenXR 隐式 API 层注册表中找不到 VectorXR。"
+    },
+    "layerEnabled": {
+      "label": "OpenXR 层已启用",
+      "loading": "正在等待 OpenXR 层状态。",
+      "enabled": "VectorXR API 层已为今后的 OpenXR 启动启用。",
+      "disabled": "VectorXR API 层已禁用或不可用。"
+    },
+    "layerDuplicates": {
+      "label": "仅启用一个 VectorXR 层",
+      "detail_other": "已启用 {count} 个 VectorXR 注册（{paths}）。加载两份副本时 OpenXR 应用会崩溃；请在“OpenXR 层”页面上只保留一个，禁用其余的。"
+    },
+    "layerFiles": {
+      "label": "层文件",
+      "pending": "找到层注册后才能检查层文件。",
+      "resolved": "清单路径和 DLL 路径均可解析。",
+      "missing": "注册的清单或 DLL 路径不存在。"
+    },
+    "configLoaded": {
+      "label": "配置路径",
+      "pending": "设置加载后将显示配置路径。"
+    },
+    "recentLog": {
+      "label": "运行时日志",
+      "available_other": "有 {count} 个最近的日志文件可用。",
+      "none": "目前还没有 VectorXR 运行时日志。"
+    },
+    "seenApps": {
+      "label": "应用程序发现",
+      "observed_other": "已发现 {count} 个 OpenXR 应用。",
+      "none": "尚未发现任何 OpenXR 应用程序。"
+    }
+  },
+  "overall": {
+    "ready": "就绪",
+    "attention": "需要注意",
+    "inactive": "未激活",
+    "unknown": "正在检查"
+  },
+  "description": {
+    "ready": "VectorXR 看起来已准备好用于今后的 OpenXR 应用启动。",
+    "attention": "VectorXR 可以运行，但可能有一项或多项诊断需要查看。",
+    "inactive": "VectorXR 当前尚未准备好应用 OpenXR 增强功能。",
+    "unknown": "VectorXR 仍在收集系统状态。"
+  },
+  "state": {
+    "pass": "通过",
+    "warn": "警告",
+    "fail": "失败",
+    "info": "信息"
+  }
+}

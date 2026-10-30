@@ -5,12 +5,17 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
+#include <functional>
 #include <iostream>
 #include <fstream>
+#include <limits>
 #include <map>
+#include <optional>
 #include <sstream>
 #include <string>
+#include <tuple>
 
 #include "depthxr/config_parser.h"
 #include "depthxr/effects.h"
@@ -87,6 +92,22 @@ void TestOsdConfig() {
     const auto micro=parse(R"({"compactMetrics":"fps","compactShowBrand":false,"compactShowApp":false,"compactShowClock":false,"compactShowRuntime":false})");
     Expect(micro.ok && micro.document.core.osd.compact_metrics=="fps" && !micro.document.core.osd.compact_show_brand && !micro.document.core.osd.compact_show_app,"Micro settings were dropped");
     Expect(!parse(R"({"compactMetrics":"bad"})").ok,"Unknown compact metrics accepted");
+    // The OSD's language: a code, or "app" (the app's, saved as appLanguage).
+    // A code this layer does not ship (a newer app's) is ignored with a
+    // warning, the way 0.19 layers ignore both keys.
+    const auto mentions_language=[](const depthxr::ParseResult& result) {
+        return std::count_if(result.warnings.begin(),result.warnings.end(),[](const std::string& warning) {
+            return warning.find("anguage")!=std::string::npos;
+        });
+    };
+    const auto language=parse(R"({"language":"ja","appLanguage":"de"})");
+    Expect(language.ok && language.document.core.osd.language=="ja" && language.document.core.osd.app_language=="de" &&
+           !mentions_language(language),"The OSD language was not read: "+language.error);
+    Expect(parse("{}").document.core.osd.language=="app","The OSD did not follow the app by default");
+    const auto newer=parse(R"({"language":"xx-YY","appLanguage":"tlh"})");
+    Expect(newer.ok && newer.document.core.osd.language=="app" && newer.document.core.osd.app_language.empty() &&
+           mentions_language(newer)==2,"A newer app's OSD language was not ignored: "+newer.error);
+    Expect(!parse(R"({"language":3})").ok,"A non-string OSD language was accepted");
     const auto no_header=parse(R"({"showBrand":false,"showApp":false,"showRuntime":false,"showClock":false})");
     Expect(no_header.ok && !no_header.document.core.osd.show_brand && !no_header.document.core.osd.show_app &&
            !no_header.document.core.osd.show_runtime && !no_header.document.core.osd.show_clock,"Expanded header choices were dropped");
@@ -1411,6 +1432,81 @@ void TestFrameGenModuleOptional() {
            "Default OSD body order should include the Frame Gen row after Turbo");
 }
 
+// Research (VECTORXR_FRAMEGEN_SYNTH_EYE): the eye predictors' values parse
+// as named, and each follows the motion it is made for exactly.
+void TestFrameGenEyePrediction() {
+    using depthxr::FrameGenEyePredictor;
+    Expect(depthxr::ParseFrameGenEyePrediction("").predictor == FrameGenEyePredictor::kVelocity &&
+               depthxr::ParseFrameGenEyePrediction("runtime").predictor == FrameGenEyePredictor::kVelocity &&
+               depthxr::ParseFrameGenEyePrediction("Damped").predictor == FrameGenEyePredictor::kDamped &&
+               depthxr::ParseFrameGenEyePrediction("damped").damping == 0.9 &&
+               depthxr::ParseFrameGenEyePrediction("damped:0.75").damping == 0.75 &&
+               depthxr::ParseFrameGenEyePrediction("damped:0.2").damping == 0.9 &&
+               depthxr::ParseFrameGenEyePrediction("two").predictor == FrameGenEyePredictor::kTwoInterval &&
+               depthxr::ParseFrameGenEyePrediction("QUADRATIC").predictor == FrameGenEyePredictor::kQuadratic &&
+               depthxr::ParseFrameGenEyePrediction("twist").predictor == FrameGenEyePredictor::kTwist,
+           "VECTORXR_FRAMEGEN_SYNTH_EYE's values parse as named (velocity otherwise, damping 0.5 to 1)");
+    const auto matches = [](const std::optional<std::array<double, 3>>& eye, const std::array<double, 3>& want) {
+        return eye && std::abs((*eye)[0] - want[0]) < 1e-9 && std::abs((*eye)[1] - want[1]) < 1e-9 &&
+               std::abs((*eye)[2] - want[2]) < 1e-9;
+    };
+    const auto predict = [](const char* name, const std::vector<depthxr::FrameGenEyeSample>& samples, double time) {
+        return depthxr::FrameGenPredictEye(depthxr::ParseFrameGenEyePrediction(name), samples.data(), samples.size(),
+                                           time);
+    };
+    // Steady movement, intervals of 30 and 20 ms: every straight-line
+    // predictor (and the parabola) carries it on exactly; damped by its share.
+    const std::array<double, 3> velocity{0.2, -0.1, 0.05}; // m/s
+    const auto at = [&](double t) {
+        return depthxr::FrameGenEyeSample{t, {velocity[0] * t, 1.6 + velocity[1] * t, velocity[2] * t}};
+    };
+    const std::vector<depthxr::FrameGenEyeSample> steady{at(-0.05), at(-0.02), at(0.0)};
+    for (const char* name : {"velocity", "two", "quadratic", "twist"}) {
+        Expect(matches(predict(name, steady, 0.025), at(0.025).position), std::string(name) + " carries steady movement on");
+    }
+    Expect(matches(predict("damped:0.8", steady, 0.025), {0.8 * 0.2 * 0.025, 1.6 - 0.8 * 0.1 * 0.025, 0.8 * 0.05 * 0.025}),
+           "damped carries its share of the movement on");
+    Expect(matches(predict("velocity", steady, 0.0), steady.back().position),
+           "A predictor puts the eye at the newest frame's position at its own time");
+    // Steady acceleration (4 m/s^2): the parabola follows it; the last
+    // velocity, the middle of the interval before's, falls behind.
+    const auto accelerating = [](double t) {
+        return depthxr::FrameGenEyeSample{t, {0.1 * t + 2.0 * t * t, 0.0, 0.0}};
+    };
+    const std::vector<depthxr::FrameGenEyeSample> curve{accelerating(-0.06), accelerating(-0.03), accelerating(0.0)};
+    Expect(matches(predict("quadratic", curve, 0.03), accelerating(0.03).position), "quadratic follows steady acceleration");
+    const auto velocity_eye = predict("velocity", curve, 0.03);
+    Expect(velocity_eye && std::abs(accelerating(0.03).position[0] - (*velocity_eye)[0] - 4.0 * 0.03 * 0.03) < 1e-9,
+           "velocity misses steady acceleration by the acceleration times the interval squared one interval on");
+    const auto two_eye = predict("two", curve, 0.03);
+    Expect(two_eye && (*two_eye)[0] < (*velocity_eye)[0], "two lags velocity under acceleration");
+    // A steady turn about a pivot behind the eye (a neck 10 cm back): the
+    // twist follows the circle one interval on, the velocity cuts across.
+    const auto turning = [](double t) {
+        const double angle = 1.5 * t; // rad/s about y
+        const double s = std::sin(0.5 * angle), c = std::cos(0.5 * angle);
+        // The eye 10 cm in front of the pivot (-z forward), turned about it.
+        return depthxr::FrameGenEyeSample{t,
+                                          {-0.1 * std::sin(angle), 1.6, -0.1 * std::cos(angle)},
+                                          {0.0f, static_cast<float>(s), 0.0f, static_cast<float>(c)}};
+    };
+    const std::vector<depthxr::FrameGenEyeSample> turn{turning(-0.04), turning(0.0)};
+    const auto twist_eye = predict("twist", turn, 0.04);
+    const auto straight_eye = predict("velocity", turn, 0.04);
+    const std::array<double, 3> truth = turning(0.04).position;
+    const auto miss = [&](const std::optional<std::array<double, 3>>& eye) {
+        return eye ? std::hypot((*eye)[0] - truth[0], (*eye)[1] - truth[1], (*eye)[2] - truth[2]) : 1.0;
+    };
+    Expect(miss(twist_eye) < 1e-6 && miss(straight_eye) > 1e-5,
+           "twist follows a steady turn about a pivot one interval on (miss " + std::to_string(miss(twist_eye)) +
+               " m, velocity's " + std::to_string(miss(straight_eye)) + " m)");
+    // Too few frames, or times out of order: none, or the last velocity.
+    Expect(!predict("velocity", {at(0.0)}, 0.01) && !predict("velocity", {at(0.0), at(-0.01)}, 0.01),
+           "No prediction from one frame, or from times out of order");
+    Expect(matches(predict("quadratic", {at(-0.02), at(0.0)}, 0.01), at(0.01).position),
+           "quadratic with two frames moves the eye at its last velocity");
+}
+
 void TestFrameGenProfileResolution() {
     const std::string module = R"json({
       "enabled": false,
@@ -1456,6 +1552,14 @@ void TestFrameGenProfileResolution() {
            "Dynamic frame multiplier was not parsed");
     Expect(std::string(depthxr::ToString(depthxr::FrameGenMultiplier::kDynamic)) == "dynamic",
            "Dynamic frame multiplier did not round-trip");
+    for (const std::string mode : {"auto", "hardware", "shader"}) {
+        const auto flow = depthxr::ParseConfig(FrameGenConfigJson(
+            "{\"enabled\":true,\"defaults\":{\"interpolateFlow\":\"" + mode + "\"}}"));
+        Expect(flow.ok && std::string(depthxr::ToString(flow.document.framegen.defaults.interpolate_flow)) == mode,
+               "Interpolate flow control did not round-trip: " + mode);
+    }
+    Expect(dynamic.document.framegen.defaults.interpolate_flow == depthxr::FrameGenInterpolateFlow::kAuto,
+           "Interpolate hardware fallback should default to auto");
     // The fixed rates, Auto among them, are still chosen explicitly.
     const depthxr::ParseResult automatic =
         depthxr::ParseConfig(FrameGenConfigJson(R"json({ "enabled": true, "defaults": { "frameMultiplier": "auto" } })json"));
@@ -1491,11 +1595,12 @@ void TestFrameGenToggleBindingList() {
 }
 
 void TestFrameGenInvalidSettingsRejected() {
-    const std::array<std::string, 8> invalid_modules{
+    const std::array<std::string, 9> invalid_modules{
         R"json({ "enabled": true, "defaults": { "frameMultiplier": "6x" } })json",
         R"json({ "enabled": true, "defaults": { "synthesisMode": "blend" } })json",
         R"json({ "enabled": true, "defaults": { "flowQuality": "ultra" } })json",
         R"json({ "enabled": true, "defaults": { "motionEstimation": "cuda" } })json",
+        R"json({ "enabled": true, "defaults": { "interpolateFlow": "fast" } })json",
         R"json({ "enabled": true, "defaults": { "artifactSuppression": 101 } })json",
         R"json({ "enabled": true, "defaults": { "motionLimitPercent": 1 } })json",
         R"json({ "enabled": true, "defaults": { "motionLimitPercent": 7.5 } })json",
@@ -1645,6 +1750,470 @@ void TestFrameGenPlan() {
            "Extrapolation flag set and no sRGB encode for float output");
     Expect(synth.constants.options[2] == static_cast<std::uint32_t>(depthxr::FrameGenDiagnosticView::kFlow),
            "Diagnostic view should reach the synthesis pass");
+    // The Flow view's fine tint (research): only with that view on; off, or
+    // with another view, every constant stays as it was.
+    Expect((synth.constants.options[1] & depthxr::kFrameGenFlagFlowFine) == 0, "The Flow view's fine tint is off by default");
+    {
+        depthxr::FrameGenTuning fine = tuning;
+        fine.flow_view_fine = true;
+        const auto fine_plan = depthxr::BuildFrameGenViewPlan(request, fine);
+        Expect((fine_plan.dispatches.back().constants.options[1] & depthxr::kFrameGenFlagFlowFine) != 0,
+               "The Flow view tints sub-pixel motion with flow_view_fine");
+        fine.diagnostic = depthxr::FrameGenDiagnosticView::kConfidence;
+        tuning.diagnostic = depthxr::FrameGenDiagnosticView::kConfidence;
+        const auto other = depthxr::BuildFrameGenViewPlan(request, fine);
+        const auto plain = depthxr::BuildFrameGenViewPlan(request, tuning);
+        bool same = other.dispatches.size() == plain.dispatches.size();
+        for (std::size_t i = 0; same && i < other.dispatches.size(); ++i) {
+            same = std::memcmp(&other.dispatches[i].constants, &plain.dispatches[i].constants,
+                               sizeof(depthxr::FrameGenConstants)) == 0;
+        }
+        Expect(same, "flow_view_fine leaves every constant as it was without the Flow view");
+        tuning.diagnostic = depthxr::FrameGenDiagnosticView::kFlow;
+    }
+    // The head-motion shimmer research: Catmull-Rom resampling and the smooth
+    // eye-shift lookup set their flags (the smooth lookup with depth only),
+    // and off they leave every constant as it was.
+    {
+        Expect((synth.constants.options[1] & (depthxr::kFrameGenFlagResampleCubic | depthxr::kFrameGenFlagResampleWide |
+                                              depthxr::kFrameGenFlagResamplePrevious |
+                                              depthxr::kFrameGenFlagShiftSmooth)) == 0,
+               "Synthesis resamples bilinearly and reads the eye-shift map per texel by default");
+        const auto flags_of = [&](const depthxr::FrameGenTuning& with) {
+            return depthxr::BuildFrameGenViewPlan(request, with).dispatches.back().constants.options[1];
+        };
+        const std::uint32_t base_flags = flags_of(tuning);
+        depthxr::FrameGenTuning cubic = tuning;
+        const depthxr::FrameGenResampleChoice newest = depthxr::ParseFrameGenResample("cubic-newest");
+        cubic.resample = newest.resample;
+        cubic.resample_previous = newest.previous;
+        Expect(flags_of(cubic) == (base_flags | depthxr::kFrameGenFlagResampleCubic),
+               "cubic-newest reads the newest frame by Catmull-Rom alone");
+        const depthxr::FrameGenResampleChoice wide = depthxr::ParseFrameGenResample("CUBIC9");
+        cubic.resample = wide.resample;
+        cubic.resample_previous = wide.previous;
+        Expect(flags_of(cubic) == (base_flags | depthxr::kFrameGenFlagResampleCubic | depthxr::kFrameGenFlagResampleWide |
+                                   depthxr::kFrameGenFlagResamplePrevious),
+               "cubic9 reads both real frames by the whole Catmull-Rom filter");
+        Expect(depthxr::ParseFrameGenResample("cubic").previous &&
+                   depthxr::ParseFrameGenResample("lanczos").resample == depthxr::FrameGenResample::kBilinear &&
+                   !depthxr::ParseFrameGenResample("bilinear").previous,
+               "VECTORXR_FRAMEGEN_SYNTH_RESAMPLE's values parse as named");
+        // Near content only (-near, any value): parsed off the end, and
+        // flagged with depth alone; without depth synthesis stays bilinear,
+        // every constant as it was.
+        const depthxr::FrameGenResampleChoice near_both = depthxr::ParseFrameGenResample("Cubic-Near");
+        const depthxr::FrameGenResampleChoice near_newest = depthxr::ParseFrameGenResample("cubic-newest-near");
+        const depthxr::FrameGenResampleChoice near_wide = depthxr::ParseFrameGenResample("cubic9-newest-near");
+        Expect(near_both.resample == depthxr::FrameGenResample::kCubic && near_both.previous && near_both.near_only &&
+                   near_newest.resample == depthxr::FrameGenResample::kCubic && !near_newest.previous &&
+                   near_newest.near_only && near_wide.resample == depthxr::FrameGenResample::kCubicWide &&
+                   !near_wide.previous && near_wide.near_only && !depthxr::ParseFrameGenResample("cubic").near_only,
+               "VECTORXR_FRAMEGEN_SYNTH_RESAMPLE's -near values parse as named");
+        Expect(depthxr::ParseFrameGenResample("near").resample == depthxr::FrameGenResample::kBilinear &&
+                   !depthxr::ParseFrameGenResample("near").near_only &&
+                   depthxr::ParseFrameGenResample("-near").resample == depthxr::FrameGenResample::kBilinear &&
+                   depthxr::ParseFrameGenResample("cubic-nearest").resample == depthxr::FrameGenResample::kBilinear &&
+                   !depthxr::ParseFrameGenResample("bilinear-near").near_only,
+               "VECTORXR_FRAMEGEN_SYNTH_RESAMPLE's -near needs a resampling it gates");
+        auto gated_by = [&](const depthxr::FrameGenResampleChoice& choice) {
+            depthxr::FrameGenTuning gated = tuning;
+            gated.resample = choice.resample;
+            gated.resample_previous = choice.previous;
+            gated.resample_near = choice.near_only;
+            return gated;
+        };
+        {
+            const auto with = depthxr::BuildFrameGenViewPlan(request, gated_by(near_both));
+            const auto plain = depthxr::BuildFrameGenViewPlan(request, tuning);
+            bool same = with.dispatches.size() == plain.dispatches.size();
+            for (std::size_t i = 0; same && i < with.dispatches.size(); ++i) {
+                same = std::memcmp(&with.dispatches[i].constants, &plain.dispatches[i].constants,
+                                   sizeof(depthxr::FrameGenConstants)) == 0;
+            }
+            Expect(same, "cubic-near without depth leaves every constant as it was");
+        }
+        depthxr::FrameGenTuning smooth = tuning;
+        smooth.shift_smooth = true;
+        Expect(flags_of(smooth) == base_flags, "The smooth eye-shift lookup needs depth");
+        request.depth = true;
+        const std::uint32_t depth_flags = flags_of(tuning);
+        Expect(flags_of(smooth) == (depth_flags | depthxr::kFrameGenFlagShiftSmooth),
+               "The smooth eye-shift lookup is flagged with depth");
+        Expect(flags_of(gated_by(near_both)) == (depth_flags | depthxr::kFrameGenFlagResampleCubic |
+                                                 depthxr::kFrameGenFlagResamplePrevious |
+                                                 depthxr::kFrameGenFlagResampleNear),
+               "cubic-near reads both real frames by Catmull-Rom where the content is near, with depth");
+        Expect(flags_of(gated_by(near_newest)) ==
+                   (depth_flags | depthxr::kFrameGenFlagResampleCubic | depthxr::kFrameGenFlagResampleNear),
+               "cubic-newest-near reads the newest frame by Catmull-Rom alone where the content is near");
+        Expect((depth_flags & depthxr::kFrameGenFlagResampleNear) == 0, "Synthesis is not gated near by default");
+        // The Interpolate blend's sharpening: its amount (half float bits)
+        // beside the diagnostic view, interpolating with depth only; off,
+        // every constant as it was.
+        Expect(depthxr::ParseFrameGenSharpen("0.2") == 0.2f && depthxr::ParseFrameGenSharpen("") == 0.0f &&
+                   depthxr::ParseFrameGenSharpen("sharp") == 0.0f && depthxr::ParseFrameGenSharpen("0.2x") == 0.0f &&
+                   depthxr::ParseFrameGenSharpen("-0.2") == 0.0f && depthxr::ParseFrameGenSharpen("5") == 2.0f &&
+                   depthxr::ParseFrameGenSharpen("nan") == 0.0f,
+               "VECTORXR_FRAMEGEN_SYNTH_SHARPEN's values parse as named");
+        {
+            // The last synthesis dispatch's options.z and pass (the plan may
+            // add analysis after it, interpolating).
+            const auto synthesis_of = [&](const depthxr::FrameGenTuning& with) {
+                std::pair<std::uint32_t, depthxr::FrameGenPass> last{0xffffffffu, depthxr::FrameGenPass::kLuma};
+                for (const depthxr::FrameGenDispatch& dispatch : depthxr::BuildFrameGenViewPlan(request, with).dispatches) {
+                    if (dispatch.pass == depthxr::FrameGenPass::kSynthesizeUnorm8 ||
+                        dispatch.pass == depthxr::FrameGenPass::kSynthesizeFloat16 ||
+                        dispatch.pass == depthxr::FrameGenPass::kSynthesizeUnorm8Sharpen ||
+                        dispatch.pass == depthxr::FrameGenPass::kSynthesizeFloat16Sharpen) {
+                        last = {dispatch.constants.options[2], dispatch.pass};
+                    }
+                }
+                return last;
+            };
+            const auto view_of = [&](const depthxr::FrameGenTuning& with) { return synthesis_of(with).first; };
+            const auto pass_of = [&](const depthxr::FrameGenTuning& with) { return synthesis_of(with).second; };
+            depthxr::FrameGenTuning interpolating = tuning;
+            interpolating.mode = depthxr::FrameGenSynthesisMode::kInterpolate;
+            depthxr::FrameGenTuning sharp = interpolating;
+            sharp.sharpen = 0.2f;
+            const std::uint32_t plain_view = view_of(interpolating);
+            Expect(plain_view != 0xffffffffu && plain_view >> depthxr::kFrameGenSharpenShift == 0,
+                   "Synthesis does not sharpen by default");
+            Expect(view_of(sharp) == (plain_view | (0x3266u << depthxr::kFrameGenSharpenShift)),
+                   "The sharpening amount (0.2 as half float bits) sits beside the diagnostic view, with depth");
+            // The sharpening is built into passes of its own: the plain ones
+            // stay without it, in registers and cost.
+            const depthxr::FrameGenViewRequest plain_request = request;
+            request.output = depthxr::FrameGenOutputKind::kUnorm8;
+            Expect(pass_of(interpolating) == depthxr::FrameGenPass::kSynthesizeUnorm8 &&
+                       pass_of(sharp) == depthxr::FrameGenPass::kSynthesizeUnorm8Sharpen,
+                   "Sharpened synthesis runs as its own pass, unsharpened as the plain one");
+            request.output = depthxr::FrameGenOutputKind::kFloat16;
+            Expect(pass_of(interpolating) == depthxr::FrameGenPass::kSynthesizeFloat16 &&
+                       pass_of(sharp) == depthxr::FrameGenPass::kSynthesizeFloat16Sharpen,
+                   "Sharpened float synthesis runs as its own pass");
+            request = plain_request;
+            const depthxr::FrameGenPass plain_pass = pass_of(interpolating);
+            request.synthesize = false;
+            Expect(pass_of(sharp) == plain_pass && view_of(sharp) == 0,
+                   "A still image is written by the plain pass, sharpening or not");
+            request = plain_request;
+            sharp.mode = depthxr::FrameGenSynthesisMode::kExtrapolate;
+            Expect(view_of(sharp) == view_of(tuning) && pass_of(sharp) == plain_pass, "Extrapolation does not sharpen");
+            sharp.mode = depthxr::FrameGenSynthesisMode::kInterpolate;
+            request.depth = false;
+            Expect(view_of(sharp) == view_of(interpolating) && pass_of(sharp) == plain_pass,
+                   "Synthesis without depth does not sharpen");
+            request.depth = true;
+            depthxr::FrameGenTuning off = interpolating;
+            off.sharpen = 0.0f;
+            const auto with = depthxr::BuildFrameGenViewPlan(request, off);
+            const auto plain = depthxr::BuildFrameGenViewPlan(request, interpolating);
+            bool same = with.dispatches.size() == plain.dispatches.size();
+            for (std::size_t i = 0; same && i < with.dispatches.size(); ++i) {
+                same = std::memcmp(&with.dispatches[i].constants, &plain.dispatches[i].constants,
+                                   sizeof(depthxr::FrameGenConstants)) == 0;
+            }
+            Expect(same, "No sharpening leaves every constant as it was");
+        }
+        // The prop hold (VECTORXR_FRAMEGEN_SYNTH_PROP): its values; then its
+        // passes, flag and thresholds on still-world frames with depth alone.
+        {
+            const depthxr::FrameGenPropHold plain_hold = depthxr::ParseFrameGenPropHold("hold-still");
+            const depthxr::FrameGenPropHold tuned = depthxr::ParseFrameGenPropHold("HOLD-STILL:0.03,0.03");
+            const depthxr::FrameGenPropHold first = depthxr::ParseFrameGenPropHold("hold-still:0.1");
+            const depthxr::FrameGenPropHold bad = depthxr::ParseFrameGenPropHold("hold-still:x,0.011");
+            const depthxr::FrameGenPropHold wide = depthxr::ParseFrameGenPropHold("hold-still:0.5,0");
+            Expect(plain_hold.enabled && plain_hold.threshold == 0.06f && plain_hold.margin == 0.02f &&
+                       tuned.enabled && std::abs(tuned.threshold - 0.03f) < 1e-6f && std::abs(tuned.margin - 0.03f) < 1e-6f &&
+                       first.enabled && std::abs(first.threshold - 0.1f) < 1e-6f && first.margin == 0.02f &&
+                       bad.enabled && bad.threshold == 0.06f && std::abs(bad.margin - 0.01f) < 1e-6f &&
+                       wide.enabled && wide.threshold == 0.06f && wide.margin == 0.0f,
+                   "VECTORXR_FRAMEGEN_SYNTH_PROP's values parse as named (steps of 0.005, at most 0.315)");
+            Expect(!depthxr::ParseFrameGenPropHold("").enabled && !depthxr::ParseFrameGenPropHold("hold").enabled &&
+                       !depthxr::ParseFrameGenPropHold("1").enabled && !depthxr::ParseFrameGenPropHold("hold-stillx").enabled,
+                   "Anything else leaves the prop hold off");
+            const auto synthesis_of = [&](const depthxr::FrameGenTuning& with) {
+                depthxr::FrameGenDispatch last{};
+                last.pass = depthxr::FrameGenPass::kLuma;
+                for (const depthxr::FrameGenDispatch& dispatch : depthxr::BuildFrameGenViewPlan(request, with).dispatches) {
+                    switch (dispatch.pass) {
+                    case depthxr::FrameGenPass::kSynthesizeUnorm8:
+                    case depthxr::FrameGenPass::kSynthesizeFloat16:
+                    case depthxr::FrameGenPass::kSynthesizeUnorm8Sharpen:
+                    case depthxr::FrameGenPass::kSynthesizeFloat16Sharpen:
+                    case depthxr::FrameGenPass::kSynthesizeUnorm8Prop:
+                    case depthxr::FrameGenPass::kSynthesizeFloat16Prop:
+                    case depthxr::FrameGenPass::kSynthesizeUnorm8PropSharpen:
+                    case depthxr::FrameGenPass::kSynthesizeFloat16PropSharpen:
+                        last = dispatch;
+                        break;
+                    default:
+                        break;
+                    }
+                }
+                return last;
+            };
+            const depthxr::FrameGenViewRequest plain_request = request;
+            request.app_delta = true;
+            request.delta_orientation = {0.0f, 0.0f, 0.0f, 1.0f};
+            request.delta_position = {0.0f, 0.0f, 0.0f};
+            depthxr::FrameGenTuning held = tuning;
+            held.prop_hold = plain_hold;
+            const depthxr::FrameGenDispatch off_dispatch = synthesis_of(tuning);
+            const depthxr::FrameGenDispatch held_dispatch = synthesis_of(held);
+            const std::uint32_t thresholds = 12u << depthxr::kFrameGenPropThresholdShift | 4u << depthxr::kFrameGenPropMarginShift;
+            Expect((off_dispatch.constants.options[1] & depthxr::kFrameGenFlagPropHold) == 0 &&
+                       held_dispatch.constants.options[1] == (off_dispatch.constants.options[1] | depthxr::kFrameGenFlagPropHold) &&
+                       held_dispatch.constants.options[2] == (off_dispatch.constants.options[2] | thresholds),
+                   "A still-world frame with depth holds props: the flag, and 0.06 and 0.02 as steps of 0.005");
+            request.output = depthxr::FrameGenOutputKind::kUnorm8;
+            Expect(synthesis_of(tuning).pass == depthxr::FrameGenPass::kSynthesizeUnorm8 &&
+                       synthesis_of(held).pass == depthxr::FrameGenPass::kSynthesizeUnorm8Prop,
+                   "The prop hold runs as its own pass");
+            request.output = depthxr::FrameGenOutputKind::kFloat16;
+            Expect(synthesis_of(held).pass == depthxr::FrameGenPass::kSynthesizeFloat16Prop, "Float synthesis too");
+            depthxr::FrameGenTuning held_sharp = held;
+            held_sharp.mode = depthxr::FrameGenSynthesisMode::kInterpolate;
+            held_sharp.sharpen = 0.5f;
+            Expect(synthesis_of(held_sharp).pass == depthxr::FrameGenPass::kSynthesizeFloat16PropSharpen,
+                   "With the sharpening, the pass built with both");
+            request.output = depthxr::FrameGenOutputKind::kUnorm8;
+            Expect(synthesis_of(held_sharp).pass == depthxr::FrameGenPass::kSynthesizeUnorm8PropSharpen,
+                   "8-bit, the pass built with both");
+            held.mode = depthxr::FrameGenSynthesisMode::kInterpolate;
+            Expect(synthesis_of(held).pass == depthxr::FrameGenPass::kSynthesizeUnorm8Prop, "Interpolating too");
+            held.mode = tuning.mode;
+            request.output = plain_request.output;
+            // Off on every frame not known still, without depth, and for a
+            // still image: those are the plain pass with the constants it had.
+            const auto plain_as_off = [&](const char* what) {
+                const depthxr::FrameGenDispatch with = synthesis_of(held);
+                const depthxr::FrameGenDispatch without = synthesis_of(tuning);
+                Expect(with.pass == without.pass &&
+                           std::memcmp(&with.constants, &without.constants, sizeof(depthxr::FrameGenConstants)) == 0,
+                       what);
+            };
+            request.app_delta = false;
+            plain_as_off("Without appSpaceDeltaPose the prop hold is off: no frame is known still");
+            request.app_delta = true;
+            request.delta_position = {0.0f, 0.0f, 0.01f};
+            plain_as_off("A world moved 1 cm leaves the prop hold off");
+            request.delta_position = {0.0f, 0.0f, 0.0f};
+            request.delta_orientation = {0.0f, 0.001f, 0.0f, 0.9999995f};
+            plain_as_off("A world turned 0.11 degrees leaves the prop hold off");
+            request.delta_orientation = {0.0f, 0.0f, 0.0f, 1.0f};
+            request.depth = false;
+            plain_as_off("Without depth the prop hold is off");
+            request.depth = true;
+            request.synthesize = false;
+            const depthxr::FrameGenDispatch copy = synthesis_of(held);
+            Expect((copy.constants.options[1] & depthxr::kFrameGenFlagPropHold) == 0 &&
+                       (copy.pass == depthxr::FrameGenPass::kSynthesizeUnorm8 ||
+                        copy.pass == depthxr::FrameGenPass::kSynthesizeFloat16),
+                   "A still image is written by the plain pass, holding props or not");
+            request = plain_request;
+        }
+        depthxr::FrameGenTuning off = tuning;
+        off.resample = depthxr::FrameGenResample::kBilinear;
+        off.resample_previous = true; // ignored while bilinear
+        const auto with = depthxr::BuildFrameGenViewPlan(request, off);
+        const auto plain = depthxr::BuildFrameGenViewPlan(request, tuning);
+        bool same = with.dispatches.size() == plain.dispatches.size();
+        for (std::size_t i = 0; same && i < with.dispatches.size(); ++i) {
+            same = std::memcmp(&with.dispatches[i].constants, &plain.dispatches[i].constants,
+                               sizeof(depthxr::FrameGenConstants)) == 0;
+        }
+        Expect(same, "Bilinear resampling leaves every constant as it was");
+        request.depth = false;
+    }
+    // The flow prior (research, hypothesis E): the filter alone takes its
+    // flag and strengths, Interpolate's cover filter too; off, or with a
+    // value it does not know, every constant stays as it was.
+    {
+        const auto filters_of = [&](const depthxr::FrameGenTuning& with) {
+            std::vector<depthxr::FrameGenDispatch> filters;
+            for (const auto& dispatch : depthxr::BuildFrameGenViewPlan(request, with).dispatches) {
+                if (dispatch.pass == FrameGenPass::kFilter || dispatch.pass == FrameGenPass::kFilterPrior) {
+                    filters.push_back(dispatch);
+                }
+            }
+            return filters;
+        };
+        const auto same_constants = [&](const depthxr::FrameGenTuning& a, const depthxr::FrameGenTuning& b) {
+            const auto one = depthxr::BuildFrameGenViewPlan(request, a);
+            const auto other = depthxr::BuildFrameGenViewPlan(request, b);
+            bool same = one.dispatches.size() == other.dispatches.size();
+            for (std::size_t i = 0; same && i < one.dispatches.size(); ++i) {
+                same = std::memcmp(&one.dispatches[i].constants, &other.dispatches[i].constants,
+                                   sizeof(depthxr::FrameGenConstants)) == 0;
+            }
+            return same;
+        };
+        const depthxr::FrameGenFlowPrior defaults = depthxr::ParseFrameGenFlowPrior("Sky");
+        Expect(defaults.enabled && !defaults.distant && defaults.share == 1.0f && defaults.margin == 0.002f &&
+                   defaults.per_pixel == 0.001f && depthxr::ParseFrameGenFlowPrior("1").enabled,
+               "VECTORXR_FRAMEGEN_FLOW_PRIOR=sky holds the sky at the default strengths");
+        const depthxr::FrameGenFlowPrior set = depthxr::ParseFrameGenFlowPrior("far:1.5,0.004,0.003");
+        Expect(set.enabled && set.distant && set.share == 1.5f && set.margin == 0.004f && set.per_pixel == 0.003f,
+               "VECTORXR_FRAMEGEN_FLOW_PRIOR=far:<share>,<margin>,<per pixel> sets all three");
+        const depthxr::FrameGenFlowPrior partial = depthxr::ParseFrameGenFlowPrior("sky:2,x");
+        Expect(partial.enabled && partial.share == 2.0f && partial.margin == 0.002f && partial.per_pixel == 0.001f,
+               "A bad or missing strength keeps its default");
+        Expect(!depthxr::ParseFrameGenFlowPrior("0").enabled && !depthxr::ParseFrameGenFlowPrior("skies").enabled &&
+                   !depthxr::ParseFrameGenFlowPrior("").enabled && !depthxr::ParseFrameGenFlowPrior("-still").enabled &&
+                   !depthxr::ParseFrameGenFlowPrior("moon-still").still,
+               "Any other value leaves the flow prior off");
+        const depthxr::FrameGenFlowPrior gated = depthxr::ParseFrameGenFlowPrior("Sky-Still:1,0.003");
+        Expect(gated.enabled && gated.still && !gated.distant && gated.margin == 0.003f && !defaults.still &&
+                   depthxr::ParseFrameGenFlowPrior("far-still").distant,
+               "VECTORXR_FRAMEGEN_FLOW_PRIOR=sky-still holds the sky on still-world frames only");
+
+        depthxr::FrameGenTuning prior = tuning;
+        prior.diagnostic = depthxr::FrameGenDiagnosticView::kOff;
+        depthxr::FrameGenTuning plain = prior;
+        Expect(same_constants(plain, plain) && filters_of(plain).size() == 1 &&
+                   (filters_of(plain)[0].constants.options[1] &
+                    (depthxr::kFrameGenFlagFlowPrior | depthxr::kFrameGenFlagFlowPriorFar)) == 0,
+               "The filter has no flow prior by default");
+        prior.flow_prior = depthxr::ParseFrameGenFlowPrior("off");
+        Expect(same_constants(prior, plain), "An unknown flow prior value leaves every constant as it was");
+        prior.flow_prior = set;
+        const auto filters = filters_of(prior);
+        const auto base_filter = filters_of(plain)[0];
+        Expect(filters.size() == 1 && base_filter.pass == FrameGenPass::kFilter && filters[0].pass == FrameGenPass::kFilterPrior &&
+                   filters[0].constants.options[1] == (base_filter.constants.options[1] | depthxr::kFrameGenFlagFlowPrior |
+                                                       depthxr::kFrameGenFlagFlowPriorFar) &&
+                   filters[0].constants.tuning[0] == base_filter.constants.tuning[0] &&
+                   filters[0].constants.tuning[1] == 1.5f && filters[0].constants.tuning[2] == 0.004f &&
+                   filters[0].constants.tuning[3] == 0.003f,
+               "The flow prior flags the filter and hands it its strengths");
+        {
+            // Every other dispatch is as it was.
+            const auto one = depthxr::BuildFrameGenViewPlan(request, prior);
+            const auto other = depthxr::BuildFrameGenViewPlan(request, plain);
+            bool same = one.dispatches.size() == other.dispatches.size();
+            for (std::size_t i = 0; same && i < one.dispatches.size(); ++i) {
+                same = one.dispatches[i].pass == FrameGenPass::kFilterPrior ||
+                       std::memcmp(&one.dispatches[i].constants, &other.dispatches[i].constants,
+                                   sizeof(depthxr::FrameGenConstants)) == 0;
+            }
+            Expect(same, "The flow prior changes the filter's constants only");
+        }
+        depthxr::FrameGenTuning cover = prior;
+        cover.mode = depthxr::FrameGenSynthesisMode::kInterpolate;
+        cover.analyze_only = true;
+        cover.cover = true;
+        cover.flow_prior = defaults;
+        const auto covers = filters_of(cover);
+        Expect(covers.size() == 2 && covers[1].pass == FrameGenPass::kFilterPrior &&
+                   (covers[0].constants.options[1] & depthxr::kFrameGenFlagFlowPrior) != 0 &&
+                   (covers[1].constants.options[1] & depthxr::kFrameGenFlagFlowPrior) != 0 &&
+                   (covers[1].constants.options[1] & depthxr::kFrameGenFlagFlowPriorFar) == 0 &&
+                   covers[1].constants.tuning[2] == 0.002f,
+               "Interpolate's cover filter holds the flow prior too");
+        // Gated on a still world: off without appSpaceDeltaPose or with the
+        // world moving (5 mm, 0.03 degrees), on while it is still.
+        {
+            depthxr::FrameGenTuning still_only = prior;
+            still_only.flow_prior = gated;
+            Expect(same_constants(still_only, plain), "sky-still: no flow prior without appSpaceDeltaPose");
+            request.app_delta = true;
+            request.delta_position = {0.004f, 0.0f, 0.0f};
+            request.delta_orientation = {0.0f, 2.0e-4f, 0.0f, 1.0f};
+            Expect(depthxr::FrameGenWorldStill(request) &&
+                       (filters_of(still_only)[0].constants.options[1] & depthxr::kFrameGenFlagFlowPrior) != 0,
+                   "sky-still: the flow prior with the world still");
+            request.delta_position = {0.006f, 0.0f, 0.0f};
+            Expect(!depthxr::FrameGenWorldStill(request) && same_constants(still_only, plain),
+                   "sky-still: no flow prior with the world moving 6 mm");
+            request.delta_position = {0.0f, 0.0f, 0.0f};
+            request.delta_orientation = {0.0f, 3.0e-4f, 0.0f, 1.0f};
+            Expect(!depthxr::FrameGenWorldStill(request) && same_constants(still_only, plain),
+                   "sky-still: no flow prior with the world turning 0.034 degrees");
+            request.app_delta = false;
+            request.delta_orientation = {0.0f, 0.0f, 0.0f, 1.0f};
+        }
+        // Its allowance is the parallax the head's movement gives content
+        // without depth: without depth, where it holds every cell and the
+        // base constants carry no translation, the filter alone takes the
+        // head's; with depth it keeps the base constants' own.
+        {
+            request.newest.position = {0.01f, 0.0f, 0.004f};
+            const auto moved = filters_of(prior);
+            const auto unmoved = filters_of(plain);
+            Expect(moved.size() == 1 && moved[0].constants.rot0[3] == 0.01f && moved[0].constants.rot1[3] == 0.0f &&
+                       moved[0].constants.rot2[3] == 0.004f && unmoved[0].constants.rot0[3] == 0.0f &&
+                       unmoved[0].constants.rot2[3] == 0.0f,
+                   "Without depth the flow prior's filter takes the head's translation");
+            const auto one = depthxr::BuildFrameGenViewPlan(request, prior);
+            const auto other = depthxr::BuildFrameGenViewPlan(request, plain);
+            bool same = one.dispatches.size() == other.dispatches.size();
+            for (std::size_t i = 0; same && i < one.dispatches.size(); ++i) {
+                same = one.dispatches[i].pass == FrameGenPass::kFilterPrior ||
+                       std::memcmp(&one.dispatches[i].constants, &other.dispatches[i].constants,
+                                   sizeof(depthxr::FrameGenConstants)) == 0;
+            }
+            Expect(same, "Without depth no other dispatch takes the head's translation for the flow prior");
+            const auto moved_covers = filters_of(cover);
+            Expect(moved_covers.size() == 2 && moved_covers[0].constants.rot0[3] == 0.01f &&
+                       moved_covers[1].constants.rot0[3] == 0.01f && moved_covers[1].constants.rot2[3] == 0.004f,
+                   "Without depth Interpolate's cover filter takes the head's translation too");
+            request.depth = true;
+            const auto depth_moved = filters_of(prior);
+            const auto depth_unmoved = filters_of(plain);
+            Expect(depth_moved[0].constants.rot0 == depth_unmoved[0].constants.rot0 &&
+                       depth_moved[0].constants.rot1 == depth_unmoved[0].constants.rot1 &&
+                       depth_moved[0].constants.rot2 == depth_unmoved[0].constants.rot2 &&
+                       depth_unmoved[0].constants.rot0[3] == 0.01f,
+                   "With depth the flow prior's filter keeps the base constants' translation");
+            request.depth = false;
+            request.newest.position = {0.0f, 0.0f, 0.0f};
+        }
+        // With depth and world motion, interpolating: the world's motion is
+        // fitted for the prior's prediction alone (the filter moves no world
+        // content by it); without the prior Interpolate fits none, and the
+        // cover filter keeps its world motion as before, fitted once.
+        request.depth = true;
+        request.world_motion = true;
+        const auto passes = [&](const depthxr::FrameGenTuning& with, FrameGenPass pass) {
+            std::size_t count = 0;
+            for (const auto& dispatch : depthxr::BuildFrameGenViewPlan(request, with).dispatches) {
+                count += dispatch.pass == pass ? 1u : 0u;
+            }
+            return count;
+        };
+        depthxr::FrameGenTuning world = plain;
+        world.mode = depthxr::FrameGenSynthesisMode::kInterpolate;
+        Expect(passes(world, FrameGenPass::kWorldSolve) == 0, "Interpolate fits no world motion without the flow prior");
+        world.flow_prior = defaults;
+        const auto world_filters = filters_of(world);
+        Expect(passes(world, FrameGenPass::kWorldSolve) == depthxr::kFrameGenWorldIterations && world_filters.size() == 1 &&
+                   (world_filters[0].constants.options[1] & depthxr::kFrameGenFlagFlowPriorWorld) != 0 &&
+                   (world_filters[0].constants.options[1] & depthxr::kFrameGenFlagWorld) == 0 &&
+                   world_filters[0].inputs[3].kind == depthxr::FrameGenTextureKind::kWorldParams,
+               "Interpolating, the flow prior turns its prediction with the world's fitted motion alone");
+        depthxr::FrameGenTuning world_cover = world;
+        world_cover.analyze_only = true;
+        world_cover.cover = true;
+        const auto world_covers = filters_of(world_cover);
+        Expect(passes(world_cover, FrameGenPass::kWorldSolve) == depthxr::kFrameGenWorldIterations &&
+                   world_covers.size() == 2 &&
+                   (world_covers[1].constants.options[1] & depthxr::kFrameGenFlagFlowPriorWorld) == 0 &&
+                   (world_covers[1].constants.options[1] & depthxr::kFrameGenFlagWorld) != 0,
+               "The cover filter keeps its world motion with the flow prior, fitted once");
+        depthxr::FrameGenTuning extrapolate_world = plain;
+        extrapolate_world.flow_prior = defaults;
+        const auto extrapolate_filters = filters_of(extrapolate_world);
+        Expect(extrapolate_filters.size() == 1 &&
+                   (extrapolate_filters[0].constants.options[1] & depthxr::kFrameGenFlagFlowPriorWorld) == 0 &&
+                   (extrapolate_filters[0].constants.options[1] & depthxr::kFrameGenFlagWorld) != 0 &&
+                   passes(extrapolate_world, FrameGenPass::kWorldSolve) == passes(plain, FrameGenPass::kWorldSolve),
+               "Extrapolating, the flow prior takes the world's motion the filter has");
+        request.world_motion = false;
+        request.depth = false;
+    }
 
     // Depth: the trust scores, their surface vote, the stereo depth-scale
     // vote (with this frame's stereo evidence) in two stages, then the resolve.
@@ -1675,6 +2244,34 @@ void TestFrameGenPlan() {
                    resolve.inputs[2].kind == (stereo ? FrameGenTextureKind::kDepthScaleVotes : FrameGenTextureKind::kNone) &&
                    resolve.constants.options[0] == (stereo ? depthxr::kFrameGenResolveScale : 0u),
                "The resolve should read the trust vote, and the stereo scale vote only with this frame's stereo evidence");
+        // A thread per span of texels each way, a thread group's scale votes
+        // (its tiles and two around them each way) one a thread.
+        const std::uint32_t resolve_span = depthxr::kFrameGenTrustResolveSpan;
+        const std::uint32_t group_votes =
+            depthxr::kFrameGenThreadGroupSize * resolve_span / depthxr::kFrameGenTrustTile + 4u;
+        Expect(resolve.width == (half.width + resolve_span - 1) / resolve_span &&
+                   resolve.height == (half.height + resolve_span - 1) / resolve_span &&
+                   resolve.constants.size[0] == half.width && resolve.constants.size[1] == half.height &&
+                   group_votes * group_votes == depthxr::kFrameGenThreadGroupSize * depthxr::kFrameGenThreadGroupSize,
+               "The resolve should run a thread per span of texels over the half-resolution grid");
+        // The texels the resolve leaves open, judged right after it by the
+        // surface around them as it decided that (kDepthDecided), never by
+        // the depth being written; a thread per span of texels each way.
+        const auto& surface = depth_plan.dispatches[passes.size()];
+        const std::uint32_t span = depthxr::kFrameGenTrustSurfaceSpan;
+        Expect(resolve.outputs[0].kind == FrameGenTextureKind::kDepth &&
+                   resolve.outputs[1].kind == FrameGenTextureKind::kDepthDecided &&
+                   surface.pass == FrameGenPass::kTrustSurface && surface.width == (half.width + span - 1) / span &&
+                   surface.height == (half.height + span - 1) / span && surface.constants.size[0] == half.width &&
+                   surface.constants.size[1] == half.height &&
+                   surface.inputs[0].kind == FrameGenTextureKind::kTrustNewest &&
+                   surface.inputs[1].kind == FrameGenTextureKind::kNone &&
+                   surface.inputs[2].kind == resolve.inputs[2].kind &&
+                   surface.inputs[3].kind == FrameGenTextureKind::kDepthDecided &&
+                   surface.outputs[0].kind == FrameGenTextureKind::kDepth &&
+                   surface.outputs[1].kind == FrameGenTextureKind::kNone &&
+                   surface.constants.options[0] == resolve.constants.options[0],
+               "The surface test should follow the resolve, reading its decisions and writing the depth alone");
         if (stereo) {
             Expect(depth_plan.dispatches[2].outputs[0].kind == FrameGenTextureKind::kDepthScaleRaw &&
                        depth_plan.dispatches[3].inputs[0].kind == FrameGenTextureKind::kDepthScaleRaw &&
@@ -1686,7 +2283,65 @@ void TestFrameGenPlan() {
     Expect(scale.pass == FrameGenPass::kDepthScale && scale.outputs[0].kind == FrameGenTextureKind::kDepthScales &&
                scale.constants.size[2] == depthxr::FrameGenPyramid(request.extent)[1].width,
            "The stereo scale probe should run per trust tile over the half-resolution depth");
+    // Depth matching (research): the flag reaches synthesis only with depth,
+    // and never the stale-flow frame, which has no depth bound.
+    tuning.depth_match = true;
+    Expect((depthxr::BuildFrameGenViewPlan(request, tuning).dispatches.back().constants.options[1] &
+            depthxr::kFrameGenFlagDepthMatch) != 0,
+           "Depth matching should reach synthesis with depth");
+    {
+        auto stale = request;
+        stale.depth_previous = true;
+        stale.shift = {0.1f, 0.0f, 0.0f};
+        const auto plan = depthxr::BuildFrameGenSynthesisPlan(stale, tuning, depthxr::FrameGenSynthesisMode::kExtrapolate,
+                                                              0.5f, false, true);
+        Expect((plan.dispatches.back().constants.options[1] & depthxr::kFrameGenFlagDepthMatch) == 0,
+               "Depth matching should not reach a stale-flow frame");
+    }
+    tuning.depth_match = false;
+    // The motion map (research): built with the eye-shift map's passes into
+    // kMotionMap right before each generated frame, which reads it.
+    tuning.depth_splat = true;
+    tuning.generated = 2;
+    tuning.fractions = {0.5f, 1.0f, 0.5f, 0.5f};
+    {
+        const auto plan = depthxr::BuildFrameGenViewPlan(request, tuning);
+        int maps = 0;
+        bool read = true;
+        for (std::size_t i = 0; i < plan.dispatches.size(); ++i) {
+            const auto& dispatch = plan.dispatches[i];
+            if (dispatch.pass == FrameGenPass::kShiftClear && dispatch.outputs[1].kind == FrameGenTextureKind::kMotionMap) {
+                ++maps;
+                Expect((dispatch.constants.options[1] & depthxr::kFrameGenFlagDepthSplat) != 0 &&
+                           i + 4 < plan.dispatches.size() &&
+                           plan.dispatches[i + 3].pass == FrameGenPass::kShiftFill &&
+                           plan.dispatches[i + 2].inputs[1].kind == FrameGenTextureKind::kFilteredNewest,
+                       "The motion map should be splatted, resolved and filled from the filtered flow");
+                const auto& synth = plan.dispatches[i + 4];
+                read = read && synth.inputs[5].kind == FrameGenTextureKind::kMotionMap &&
+                       (synth.constants.options[1] & depthxr::kFrameGenFlagDepthSplat) != 0;
+            }
+        }
+        Expect(maps == 2 && read && plan.frames_in_order, "Each generated frame should read its own motion map");
+        // Interpolating, none (MSFS replays: worse there).
+        tuning.mode = depthxr::FrameGenSynthesisMode::kInterpolate;
+        bool none = true;
+        for (const auto& dispatch : depthxr::BuildFrameGenViewPlan(request, tuning).dispatches) {
+            none = none && dispatch.outputs[1].kind != FrameGenTextureKind::kMotionMap &&
+                   (dispatch.constants.options[1] & depthxr::kFrameGenFlagDepthSplat) == 0;
+        }
+        tuning.mode = depthxr::FrameGenSynthesisMode::kExtrapolate;
+        Expect(none, "Interpolation should build no motion map");
+    }
+    tuning.generated = 1;
+    tuning.fractions = {0.5f, 0.5f, 0.5f, 0.5f};
     request.depth = false;
+    tuning.depth_match = true;
+    Expect((depthxr::BuildFrameGenViewPlan(request, tuning).dispatches.back().constants.options[1] &
+            (depthxr::kFrameGenFlagDepthMatch | depthxr::kFrameGenFlagDepthSplat)) == 0,
+           "Depth matching and the motion map should need depth");
+    tuning.depth_match = false;
+    tuning.depth_splat = false;
     request.trust_stereo = false;
 
     // Fractions follow display times and clamp.
@@ -1713,6 +2368,101 @@ void TestFrameGenPlan() {
            "Relative rotation should carry the newest view's yaw into previous-view space");
 }
 
+// Depth the other eye mostly disproves is never used (backlog item 2): Star
+// Citizen's depth read near/far swapped scored 0.70 against no depth with the
+// other eye disproving 88-95% of it; MSFS's as submitted leaves 0.18-0.46 of
+// the error, disproved on 8-14%.
+void TestFrameGenDepthGuard() {
+    using depthxr::FrameGenDepthReading;
+    // Three checks make a batch; each check here is a third of the batch.
+    const auto check = [](double decoded_ratio, double decoded_disproved, double swapped_ratio,
+                          double swapped_disproved) {
+        depthxr::FrameGenDepthEvidence evidence;
+        evidence.binocular = 10000.0;
+        evidence.source_varied = evidence.other_varied = depthxr::kFrameGenDepthVariedCells;
+        evidence.decoded = {decoded_ratio * 1000.0, 1000.0, 1000.0, decoded_disproved * 1000.0};
+        evidence.swapped = {swapped_ratio * 1000.0, 1000.0, 1000.0, swapped_disproved * 1000.0};
+        return evidence;
+    };
+    const auto batch = [](depthxr::FrameGenDepthValidator& validator, const depthxr::FrameGenDepthEvidence& evidence) {
+        for (int i = 0; i < 3; ++i) validator.Add(evidence);
+    };
+
+    // Star Citizen: the swapped reading just under the bar, mostly disproved.
+    depthxr::FrameGenDepthValidator sc;
+    batch(sc, check(1.0, 0.2, 0.69, 0.9));
+    Expect(sc.Reading() == FrameGenDepthReading::kUnusable && !sc.Swapped() && !sc.Usable(),
+           "depth the other eye mostly disproves should not be taken up");
+    batch(sc, check(1.0, 0.2, 0.60, 0.95));
+    Expect(!sc.Usable() && !sc.Swapped(), "a mostly disproved reading stays unused however well it scores");
+
+    // MSFS: as submitted, disproved on 8-29%, is taken up and kept; so is
+    // cockpit glass written to depth (44%), and up to half.
+    for (const double share : {0.08, 0.14, 0.29, 0.44, 0.5}) {
+        depthxr::FrameGenDepthValidator msfs;
+        batch(msfs, check(0.3, share, 1.2, 0.6));
+        Expect(msfs.Reading() == FrameGenDepthReading::kAsSubmitted && !msfs.Swapped(),
+               "depth disproved on " + std::to_string(share) + " of its samples should still be used");
+        batch(msfs, check(0.46, share, 1.2, 0.6));
+        Expect(msfs.Reading() == FrameGenDepthReading::kAsSubmitted, "used depth that still holds should be kept");
+        // Up to half, depth in use stays in use.
+        batch(msfs, check(0.46, 0.5, 1.2, 0.6));
+        Expect(msfs.Reading() == FrameGenDepthReading::kAsSubmitted, "used depth disproved on half is kept");
+    }
+    // A share hovering at half does not switch depth on and off every
+    // batch: once dropped for it, two passing batches in a row take it up.
+    {
+        depthxr::FrameGenDepthValidator hovering;
+        batch(hovering, check(0.4, 0.45, 1.2, 0.6));
+        Expect(hovering.Usable(), "depth disproved on 45% is taken up");
+        batch(hovering, check(0.4, 0.55, 1.2, 0.6));
+        Expect(!hovering.Usable(), "...and dropped at 55%");
+        batch(hovering, check(0.4, 0.45, 1.2, 0.6));
+        Expect(!hovering.Usable(), "...not taken up again by one batch at 45%");
+        batch(hovering, check(0.4, 0.55, 1.2, 0.6));
+        batch(hovering, check(0.4, 0.45, 1.2, 0.6));
+        Expect(!hovering.Usable(), "...a disproved batch between starts the wait over");
+        batch(hovering, check(0.4, 0.45, 1.2, 0.6));
+        Expect(hovering.Usable(), "...two in a row take it up again");
+    }
+
+    // In use, then mostly disproved (a scene the depth no longer matches):
+    // dropped, though it still scores under the drop bar.
+    depthxr::FrameGenDepthValidator dropped;
+    batch(dropped, check(0.3, 0.1, 1.2, 0.6));
+    Expect(dropped.Usable(), "the depth is taken up first");
+    batch(dropped, check(0.5, 0.6, 1.2, 0.6));
+    Expect(dropped.Reading() == FrameGenDepthReading::kUnusable,
+           "used depth the other eye comes to disprove on most samples should stop being used");
+
+    // The swapped reading wins only where the other eye does not disprove it.
+    depthxr::FrameGenDepthValidator reversed;
+    batch(reversed, check(1.0, 0.2, 0.3, 0.1));
+    Expect(reversed.Reading() == FrameGenDepthReading::kReversed && reversed.Swapped(),
+           "a swapped reading that holds is taken up");
+
+    // In use, then mostly disproved where the swap holds: straight to the
+    // swap (its ratio not 0.7 times the disproved one's), never a batch
+    // without depth.
+    depthxr::FrameGenDepthValidator switched;
+    batch(switched, check(0.3, 0.1, 1.2, 0.6));
+    batch(switched, check(0.6, 0.9, 0.5, 0.1));
+    Expect(switched.Reading() == FrameGenDepthReading::kReversed && switched.Swapped(),
+           "a disproved reading in use gives way to a swap that holds at once");
+
+    // Mostly disproved while the swap moves too little to judge: decided
+    // unusable, not left checking.
+    depthxr::FrameGenDepthValidator undecided;
+    depthxr::FrameGenDepthEvidence little = check(0.6, 0.9, 0.5, 0.1);
+    little.swapped.samples = 10.0;
+    little.swapped.none = 10.0;
+    little.swapped.error = 5.0;
+    little.swapped.fallback = 1.0;
+    batch(undecided, little);
+    Expect(undecided.Reading() == FrameGenDepthReading::kUnusable,
+           "a mostly disproved reading is decided unusable though the swap is not judged");
+}
+
 void TestFrameGenHistoryState() {
     depthxr::FrameGenHistoryState state;
     depthxr::FrameGenViewRequest request;
@@ -1737,6 +2487,2983 @@ void TestFrameGenHistoryState() {
     state.Commit(false);
     state.Invalidate();
     Expect(!state.Effective(request).synthesize, "Invalidate should drop history");
+}
+
+// The image tracker fed `frames` frames, each written by `written` (the
+// image whose vectors change, kNone for none, kAll for every image alike)
+// with the color and depth indices `indices` gives for the frame.
+constexpr int kNoImage = -1;
+constexpr int kAllImages = -2;
+struct TrackerFeed {
+    std::uint64_t frame{0};
+    std::uint64_t handle{0x30};
+    std::array<std::int32_t, 4> rect{0, 0, 500, 600};
+    std::array<std::uint64_t, depthxr::kFrameGenEngineImages> hashes{1, 2, 3};
+    // Production (stage 2): the census reads every image while the tracker
+    // is not locked and every 30th frame, else the image it chooses.
+    bool production{false};
+    void Run(depthxr::FrameGenEngineImageTracker& tracker, int frames, bool informative,
+             const std::function<int(std::uint64_t, std::uint32_t, std::uint32_t)>& written,
+             const std::function<std::pair<std::uint32_t, std::uint32_t>(std::uint64_t)>& indices) {
+        for (int i = 0; i < frames; ++i) {
+            ++frame;
+            const auto [color, depth] = indices(frame);
+            const int image = written(frame, color, depth);
+            if (image == kAllImages) {
+                hashes.fill(1000 + frame);
+            } else if (image >= 0) {
+                hashes[static_cast<std::size_t>(image)] = 1000 * (static_cast<std::uint64_t>(image) + 1) + frame;
+            }
+            depthxr::FrameGenEngineTrackerFrame census;
+            census.frame = frame;
+            census.informative = informative;
+            census.handle = handle;
+            census.rect = rect;
+            census.images = depthxr::kFrameGenEngineImages;
+            census.hashes = hashes;
+            census.color_index = color;
+            census.depth_index = depth;
+            if (production && tracker.Locked() && frame % 30 != 0) {
+                census.censused = 1u << tracker.Image(frame, color, depth, std::nullopt).value_or(0);
+            }
+            tracker.Add(census);
+        }
+    }
+};
+
+// A color (or depth) swapchain index no image policy follows by itself.
+std::uint32_t Scrambled(std::uint64_t frame, std::uint64_t salt) {
+    std::uint64_t h = (frame + salt) * 0x9E3779B97F4A7C15ull;
+    h ^= h >> 29;
+    return static_cast<std::uint32_t>(h % 3);
+}
+
+void TestFrameGenEngineImageTracker() {
+    using depthxr::FrameGenEngineImageTracker;
+    using Policy = FrameGenEngineImageTracker::Policy;
+    const auto cycling = [](std::uint64_t frame) {
+        const auto index = static_cast<std::uint32_t>(frame % 3);
+        return std::pair<std::uint32_t, std::uint32_t>(index, index);
+    };
+    const auto scrambled = [](std::uint64_t frame) {
+        return std::pair<std::uint32_t, std::uint32_t>(Scrambled(frame, 1), Scrambled(frame, 7));
+    };
+    // A constant image, whatever the color swapchain does.
+    {
+        FrameGenEngineImageTracker tracker;
+        TrackerFeed feed;
+        feed.Run(tracker, 80, true, [](auto, auto, auto) { return 1; }, cycling);
+        Expect(tracker.Locked() && tracker.Best().policy == Policy::kConstant && tracker.Best().parameter == 1 &&
+                   tracker.Image(500, 2, 2, std::nullopt) == 1u,
+               "Engine image tracker: a constant image should lock");
+        Expect(tracker.RunnerUp().share <= 0.6, "Engine image tracker: the runner-up of a constant image is far behind");
+    }
+    // The frame's number modulo the images, against a color swapchain of two.
+    {
+        FrameGenEngineImageTracker tracker;
+        TrackerFeed feed;
+        feed.Run(tracker, 80, true, [](std::uint64_t frame, auto, auto) { return static_cast<int>((frame + 2) % 3); },
+                 [](std::uint64_t frame) {
+                     const auto index = static_cast<std::uint32_t>(frame % 2);
+                     return std::pair<std::uint32_t, std::uint32_t>(index, index);
+                 });
+        Expect(tracker.Locked() && tracker.Best().policy == Policy::kCycle && tracker.Best().parameter == 2 &&
+                   tracker.Image(601, 0, 0, std::nullopt) == static_cast<std::uint32_t>((601 + 2) % 3),
+               "Engine image tracker: a cycle with the frames should lock with its phase");
+    }
+    // Following the color swapchain, and following the depth swapchain.
+    {
+        FrameGenEngineImageTracker tracker;
+        TrackerFeed feed;
+        feed.Run(tracker, 80, true, [](auto, std::uint32_t color, auto) { return static_cast<int>(color); }, scrambled);
+        Expect(tracker.Locked() && tracker.Best().policy == Policy::kColor && tracker.Image(9, 2, 0, std::nullopt) == 2u,
+               "Engine image tracker: an image following the color swapchain should lock to it");
+    }
+    {
+        FrameGenEngineImageTracker tracker;
+        TrackerFeed feed;
+        feed.Run(tracker, 80, true, [](auto, auto, std::uint32_t depth) { return static_cast<int>(depth); }, scrambled);
+        Expect(tracker.Locked() && tracker.Best().policy == Policy::kDepth && tracker.Image(9, 2, 1, std::nullopt) == 1u,
+               "Engine image tracker: an image following the depth swapchain should lock to it");
+    }
+    // A color swapchain cycling with the frames: the color and the cycle
+    // predict alike, which is one policy (the color, preferred).
+    {
+        FrameGenEngineImageTracker tracker;
+        TrackerFeed feed;
+        feed.Run(tracker, 80, true, [](auto, std::uint32_t color, auto) { return static_cast<int>(color); }, cycling);
+        Expect(tracker.Locked() && tracker.Best().policy == Policy::kColor,
+               "Engine image tracker: policies predicting alike should not keep each other from locking");
+    }
+    // Every image written alike: any of them.
+    {
+        FrameGenEngineImageTracker tracker;
+        TrackerFeed feed;
+        feed.Run(tracker, 80, true, [](auto, auto, auto) { return kAllImages; }, cycling);
+        Expect(!tracker.Locked() && tracker.Best().policy == Policy::kAll && tracker.AllChanged() >= 79,
+               "Engine image tracker: images written alike should read as all written");
+    }
+    // Nothing written: no image after 300 informative frames.
+    {
+        FrameGenEngineImageTracker tracker;
+        TrackerFeed feed;
+        feed.Run(tracker, 299, true, [](auto, auto, auto) { return kNoImage; }, cycling);
+        Expect(!tracker.NotWritten() && tracker.Image(1, 1, 1, std::nullopt).has_value(),
+               "Engine image tracker: unwritten needs 300 informative frames");
+        feed.Run(tracker, 2, true, [](auto, auto, auto) { return kNoImage; }, cycling);
+        Expect(tracker.NotWritten() && tracker.Best().policy == Policy::kUnwritten &&
+                   !tracker.Image(1, 1, 1, std::nullopt).has_value(),
+               "Engine image tracker: images never written should read as not written");
+    }
+    // A still scene: frames that are not informative show nothing.
+    {
+        FrameGenEngineImageTracker tracker;
+        TrackerFeed feed;
+        feed.Run(tracker, 200, false, [](auto, auto, auto) { return 0; }, cycling);
+        Expect(!tracker.Locked() && tracker.WindowFrames() == 0 && tracker.Best().policy == Policy::kNone,
+               "Engine image tracker: frames that are not informative should be ignored");
+        feed.Run(tracker, 80, true, [](auto, auto, auto) { return 2; }, cycling);
+        Expect(tracker.Locked() && tracker.Best().policy == Policy::kConstant && tracker.Best().parameter == 2,
+               "Engine image tracker: informative frames after a still scene should lock");
+    }
+    // Another region, another swapchain, and mispredictions unlock.
+    {
+        FrameGenEngineImageTracker tracker;
+        TrackerFeed feed;
+        feed.Run(tracker, 80, true, [](auto, auto, auto) { return 1; }, cycling);
+        Expect(tracker.Locked(), "Engine image tracker: locked before the region changes");
+        feed.rect = {0, 0, 400, 600};
+        feed.Run(tracker, 1, true, [](auto, auto, auto) { return 1; }, cycling);
+        Expect(!tracker.Locked() && tracker.WindowFrames() == 0 && tracker.Unlocks() == 1,
+               "Engine image tracker: another region should unlock and start over");
+        feed.Run(tracker, 80, true, [](auto, auto, auto) { return 1; }, cycling);
+        Expect(tracker.Locked(), "Engine image tracker: locked again on the new region");
+        feed.handle = 0x31;
+        feed.Run(tracker, 1, true, [](auto, auto, auto) { return 1; }, cycling);
+        Expect(!tracker.Locked() && tracker.WindowFrames() == 0, "Engine image tracker: another swapchain should unlock");
+        feed.Run(tracker, 80, true, [](auto, auto, auto) { return 1; }, cycling);
+        feed.Run(tracker, 4, true, [](auto, auto, auto) { return 2; }, cycling);
+        Expect(tracker.Locked() && tracker.Mispredictions() == 4, "Engine image tracker: four mispredictions keep the lock");
+        feed.Run(tracker, 1, true, [](auto, auto, auto) { return 2; }, cycling);
+        Expect(!tracker.Locked() && tracker.Mispredictions() == 5, "Engine image tracker: the fifth misprediction unlocks");
+        feed.Run(tracker, 200, true, [](auto, auto, auto) { return 2; }, cycling);
+        Expect(tracker.Locked() && tracker.Best().parameter == 2, "Engine image tracker: the new image locks in time");
+    }
+    // A game following the specification: the released image.
+    {
+        FrameGenEngineImageTracker tracker;
+        Expect(tracker.Image(1, 0, 0, 2u) == 2u, "Engine image tracker: a released image is the frame's");
+    }
+    // Production (stage 2): once locked, the census reads the chosen image
+    // alone except every 30th frame. Those frames keep the hashes; frames
+    // reading every image are scored, each image against its own last census.
+    {
+        FrameGenEngineImageTracker tracker;
+        TrackerFeed feed;
+        feed.production = true;
+        feed.Run(tracker, 80, true, [](auto, auto, auto) { return 1; }, cycling);
+        Expect(tracker.Locked(), "Engine image tracker (production): a constant image locks while every image is read");
+        const std::uint32_t window = tracker.WindowFrames();
+        feed.Run(tracker, 600, true, [](auto, auto, auto) { return 1; }, cycling);
+        Expect(tracker.Locked() && tracker.Mispredictions() == 0 && tracker.Best().parameter == 1,
+               "Engine image tracker (production): the chosen image alone keeps the lock");
+        Expect(tracker.WindowFrames() == std::min<std::uint32_t>(window + 20, 120),
+               "Engine image tracker (production): only censuses of every image are scored (" +
+                   std::to_string(tracker.WindowFrames()) + " from " + std::to_string(window) + ")");
+        // The game moves to another image: the 30th frames find it changed
+        // (since its census 30 frames before) and the chosen one not, and
+        // their fifth misprediction unlocks; every image is read again, and
+        // the new one locks.
+        feed.Run(tracker, 129, true, [](auto, auto, auto) { return 2; }, cycling);
+        Expect(tracker.Locked() && tracker.Mispredictions() == 4,
+               "Engine image tracker (production): four 30th frames mispredicted keep the lock");
+        feed.Run(tracker, 1, true, [](auto, auto, auto) { return 2; }, cycling);
+        Expect(!tracker.Locked() && tracker.Mispredictions() == 5,
+               "Engine image tracker (production): the fifth unlocks");
+        feed.Run(tracker, 200, true, [](auto, auto, auto) { return 2; }, cycling);
+        Expect(tracker.Locked() && tracker.Best().parameter == 2,
+               "Engine image tracker (production): the new image locks once every image is read");
+    }
+    {
+        // An image following a color swapchain that changes images at random:
+        // the chosen image is a different one most frames, each read right
+        // after it was written, and the 30th frames find the one written then.
+        FrameGenEngineImageTracker tracker;
+        TrackerFeed feed;
+        feed.production = true;
+        feed.Run(tracker, 80, true, [](auto, std::uint32_t color, auto) { return static_cast<int>(color); }, scrambled);
+        Expect(tracker.Locked() && tracker.Best().policy == Policy::kColor,
+               "Engine image tracker (production): following the color locks");
+        feed.Run(tracker, 900, true, [](auto, std::uint32_t color, auto) { return static_cast<int>(color); }, scrambled);
+        Expect(tracker.Locked() && tracker.Mispredictions() == 0 && tracker.Best().policy == Policy::kColor,
+               "Engine image tracker (production): following the color stays locked on the chosen images' censuses");
+    }
+}
+
+// Stage 2: the switch's modes, and the capture dispatch's constants for two
+// eyes of one grid (the shader reads them as FG_PASS_ENGINE_CAPTURE says).
+void TestFrameGenMotionCapturePlan() {
+    Expect(depthxr::ParseFrameGenEngineMode("Capture") == depthxr::FrameGenEngineMode::kCapture &&
+               depthxr::ParseFrameGenEngineMode("census") == depthxr::FrameGenEngineMode::kCensus &&
+               depthxr::ParseFrameGenEngineMode("Observe") == depthxr::FrameGenEngineMode::kObserve &&
+               depthxr::ParseFrameGenEngineMode("Assist") == depthxr::FrameGenEngineMode::kAssist &&
+               depthxr::ParseFrameGenEngineMode("lead") == depthxr::FrameGenEngineMode::kLead &&
+               depthxr::ParseFrameGenEngineMode("leading") == depthxr::FrameGenEngineMode::kOff,
+           "Engine motion: the switch takes off, census, capture, observe, assist and lead");
+    const depthxr::FrameGenExtent l1 = depthxr::FrameGenPyramid({5424, 5356})[1];
+    const depthxr::FrameGenDispatch dispatch =
+        depthxr::BuildFrameGenMotionCaptureDispatch(l1, {0, 0, 4339, 4285}, {16, 8, 4300, 4200}, 0, 1, 2);
+    const depthxr::FrameGenConstants& c = dispatch.constants;
+    Expect(dispatch.pass == depthxr::FrameGenPass::kEngineCapture && dispatch.width == 2712 && dispatch.height == 2678 &&
+               dispatch.outputs[0].kind == depthxr::FrameGenTextureKind::kEngineRaw,
+           "Engine motion: the capture writes the raw field on the half-resolution grid");
+    Expect(c.size == std::array<std::uint32_t, 4>{2712, 2678, 4339, 4285} &&
+               c.fov_current == std::array<float, 4>{0.0f, 0.0f, 16.0f, 8.0f} &&
+               c.fov_previous == std::array<float, 4>{4300.0f, 4200.0f, 0.0f, 1.0f} && c.options[0] == 2,
+           "Engine motion: the capture's constants carry both eyes' regions and slices");
+}
+
+// The shaders' view mapping on the CPU: the previous view and back.
+void TestFrameGenViewMapping() {
+    depthxr::FrameGenViewGeometry newest;
+    depthxr::FrameGenViewGeometry previous;
+    for (auto* view : {&newest, &previous}) {
+        view->angle_left = -0.9f;
+        view->angle_right = 0.8f;
+        view->angle_up = 0.85f;
+        view->angle_down = -0.95f;
+    }
+    const float yaw = 0.03f, pitch = -0.02f;
+    newest.orientation = {std::sin(pitch / 2) * std::cos(yaw / 2), std::cos(pitch / 2) * std::sin(yaw / 2),
+                          -std::sin(pitch / 2) * std::sin(yaw / 2), std::cos(pitch / 2) * std::cos(yaw / 2)};
+    newest.position = {0.03f, -0.01f, -0.02f};
+    for (const bool depth : {true, false}) {
+        const auto mapping = depthxr::BuildFrameGenViewMapping(newest, previous, depth);
+        double worst = 0.0;
+        for (int y = 1; y < 10; ++y) {
+            for (int x = 1; x < 10; ++x) {
+                const std::array<float, 2> uv{x / 10.0f, y / 10.0f};
+                const float z = 0.4f + 0.3f * static_cast<float>(x * y);
+                std::array<float, 2> back{};
+                std::array<float, 2> again{};
+                Expect(depthxr::FrameGenMapToPrevious(mapping, uv, z, back),
+                       "View mapping: a central point should be seen in the previous view");
+                Expect(depthxr::FrameGenMapToNewest(mapping, back, z, again), "View mapping: and map back");
+                worst = (std::max)({worst, std::abs(static_cast<double>(again[0]) - uv[0]),
+                                    std::abs(static_cast<double>(again[1]) - uv[1])});
+            }
+        }
+        Expect(worst < 1e-4, "View mapping: MapToPrevious and MapToNewest should be inverses (" + std::to_string(worst) + ")");
+    }
+    // With depth, near content moves with the head's translation; far
+    // content (and rotation only) does not.
+    const auto with_depth = depthxr::BuildFrameGenViewMapping(newest, previous, true);
+    const auto rotation_only = depthxr::BuildFrameGenViewMapping(newest, previous, false);
+    std::array<float, 2> close_by{}, distant{}, rotated{};
+    depthxr::FrameGenMapToPrevious(with_depth, {0.5f, 0.5f}, 0.5f, close_by);
+    depthxr::FrameGenMapToPrevious(with_depth, {0.5f, 0.5f}, 200000.0f, distant);
+    depthxr::FrameGenMapToPrevious(rotation_only, {0.5f, 0.5f}, 0.5f, rotated);
+    Expect(std::abs(close_by[0] - rotated[0]) > 1e-3f && distant == rotated,
+           "View mapping: translation should move near content only");
+}
+
+// Engine motion calibration on synthetic vectors: each convention's gains
+// and camera model are found from the samples alone.
+void TestFrameGenEngineCalibration() {
+    using depthxr::FrameGenEngineCamera;
+    const depthxr::FrameGenExtent vectors{4339, 4285};
+    const depthxr::FrameGenExtent color{5424, 5356};
+    auto pose = [](float yaw, float pitch, std::array<float, 3> position) {
+        depthxr::FrameGenViewGeometry view;
+        view.angle_left = -0.95f;
+        view.angle_right = 0.8f;
+        view.angle_up = 0.85f;
+        view.angle_down = -0.9f;
+        view.orientation = {std::sin(pitch / 2) * std::cos(yaw / 2), std::cos(pitch / 2) * std::sin(yaw / 2),
+                            -std::sin(pitch / 2) * std::sin(yaw / 2), std::cos(pitch / 2) * std::cos(yaw / 2)};
+        view.position = position;
+        return view;
+    };
+    // Three frames of a head turning and leaning, the aircraft flying on
+    // and turning gently (appSpaceDeltaPose).
+    const std::array<depthxr::FrameGenViewGeometry, 4> heads{
+        pose(0.30f, 0.02f, {0.00f, 1.20f, 0.00f}), pose(0.32f, 0.01f, {0.02f, 1.21f, -0.01f}),
+        pose(0.35f, 0.03f, {0.03f, 1.19f, -0.03f}), pose(0.37f, 0.00f, {0.05f, 1.20f, -0.02f})};
+    const float turn = 0.01f; // radians per frame about +Y
+    const std::array<float, 4> delta{0.0f, std::sin(turn / 2), 0.0f, std::cos(turn / 2)};
+    const std::array<float, 3> delta_position{0.1f, -0.2f, 2.5f};
+    struct Truth {
+        FrameGenEngineCamera camera;
+        std::array<double, 2> gain;
+    };
+    std::vector<Truth> truths;
+    for (const FrameGenEngineCamera camera : {FrameGenEngineCamera::kIncluded, FrameGenEngineCamera::kExcluded}) {
+        for (const std::array<double, 2> gain : {std::array<double, 2>{1.0, 1.0}, std::array<double, 2>{1.0, -1.0},
+                                                 std::array<double, 2>{2.0, -2.0},
+                                                 std::array<double, 2>{2.0 / 4339.0, -2.0 / 4285.0}}) {
+            truths.push_back({camera, gain});
+            truths.push_back({camera, {-gain[0], -gain[1]}});
+        }
+    }
+    for (const Truth& truth : truths) {
+        std::vector<depthxr::FrameGenEngineCalibrationFrame> frames;
+        for (std::size_t k = 2; k < heads.size(); ++k) {
+            depthxr::FrameGenEngineCalibrationFrame frame;
+            frame.newest = heads[k];
+            frame.previous = heads[k - 1];
+            frame.before_previous = heads[k - 2];
+            frame.delta_orientation = delta;
+            frame.delta_position = delta_position;
+            frame.vectors = vectors;
+            frame.color = color;
+            for (int y = 0; y < 24; ++y) {
+                for (int x = 0; x < 24; ++x) {
+                    depthxr::FrameGenEngineCalibrationSample sample;
+                    sample.uv = {(x + 0.5f) / 24.0f, (y + 0.5f) / 24.0f};
+                    // The lower half a cockpit (0.5-3 m), the upper half
+                    // world (40 m to 4 km) and sky.
+                    const int cell = (x * 7 + y * 13) % 17;
+                    sample.depth = y >= 12 ? 0.5f + 0.15f * static_cast<float>(cell)
+                                           : (cell == 0 ? 0.0f : 40.0f * std::pow(1.33f, static_cast<float>(cell)));
+                    std::array<double, 2> q{};
+                    if (!depthxr::FrameGenEnginePrediction(frame.newest, frame.previous, delta, delta_position, 1,
+                                                           truth.camera, sample.uv, sample.depth, q)) {
+                        continue;
+                    }
+                    sample.vector = {static_cast<float>(q[0] / truth.gain[0]), static_cast<float>(q[1] / truth.gain[1])};
+                    frame.samples.push_back(sample);
+                }
+            }
+            frames.push_back(frame);
+        }
+        const auto calibration = depthxr::CalibrateFrameGenEngine(frames);
+        const auto& best = calibration.leaderboard.front();
+        const std::string what = std::string(depthxr::ToString(truth.camera)) + " gain " + std::to_string(truth.gain[0]) +
+                                 "," + std::to_string(truth.gain[1]);
+        Expect(best.camera == truth.camera && best.delta_sign == 1,
+               "Engine calibration: the camera model should be found (" + what + ": found " +
+                   depthxr::ToString(best.camera) + ", sign " + std::to_string(best.delta_sign) + ")");
+        Expect(std::abs(best.gain[0] / truth.gain[0] - 1.0) < 0.01 && std::abs(best.gain[1] / truth.gain[1] - 1.0) < 0.01,
+               "Engine calibration: the gains should be found within 1% (" + what + ": found " +
+                   std::to_string(best.gain[0]) + "," + std::to_string(best.gain[1]) + ")");
+        Expect(best.gain_error < 0.01 && std::abs(best.nearest.gain[0] - truth.gain[0]) < 1e-9,
+               "Engine calibration: the nearest canonical gain should be the truth's (" + what + ")");
+        if (truth.camera == FrameGenEngineCamera::kIncluded) {
+            // Cockpit content: a = b = 1 / g, nothing left at the intercept.
+            for (int axis = 0; axis < 2; ++axis) {
+                const auto& fit = calibration.cockpit[axis];
+                Expect(fit.valid && std::abs(fit.a * truth.gain[axis] - 1.0) < 0.01 && std::abs(fit.b / fit.a - 1.0) < 0.01 &&
+                           fit.corr2 > 0.99,
+                       "Engine calibration: the cockpit fit should find a = b = 1/g (" + what + ")");
+            }
+            Expect(calibration.intercept_spread_px && (*calibration.intercept_spread_px)[0] < 0.01 &&
+                       (*calibration.intercept_spread_px)[1] < 0.01,
+                   "Engine calibration: no jitter in exact vectors (" + what + ")");
+        }
+    }
+
+    // Jitter: vectors in the vectors' pixels, four frames of one head
+    // movement offset by +-0.5 pixels on x and +-0.25 on y in turn, found in
+    // vector pixels; with the head still, no gain, and the offsets in the
+    // vectors' own units.
+    for (const bool still : {false, true}) {
+        const std::array<double, 2> gain{2.0 / 4339.0, -2.0 / 4285.0};
+        std::vector<depthxr::FrameGenEngineCalibrationFrame> frames;
+        for (std::size_t k = 0; k < 4; ++k) {
+            depthxr::FrameGenEngineCalibrationFrame frame;
+            frame.newest = heads[still ? 0 : 2];
+            frame.previous = heads[still ? 0 : 1];
+            frame.vectors = vectors;
+            frame.color = color;
+            const double sign = k % 2 ? -1.0 : 1.0;
+            for (int y = 0; y < 24; ++y) {
+                for (int x = 0; x < 24; ++x) {
+                    depthxr::FrameGenEngineCalibrationSample sample;
+                    sample.uv = {(x + 0.5f) / 24.0f, (y + 0.5f) / 24.0f};
+                    sample.depth = 0.5f + 0.15f * static_cast<float>((x * 7 + y * 13) % 17);
+                    std::array<double, 2> q{};
+                    if (!depthxr::FrameGenEnginePrediction(frame.newest, frame.previous, delta, delta_position, 1,
+                                                           FrameGenEngineCamera::kIncluded, sample.uv, sample.depth, q)) {
+                        continue;
+                    }
+                    sample.vector = {static_cast<float>(q[0] / gain[0] + sign * 0.5),
+                                     static_cast<float>(q[1] / gain[1] + sign * 0.25)};
+                    frame.samples.push_back(sample);
+                }
+            }
+            frames.push_back(frame);
+        }
+        // +0.5, -0.5, +0.5, -0.5: a spread of sqrt(1/3).
+        const double x_spread = std::sqrt(1.0 / 3.0);
+        const double y_spread = 0.5 * std::sqrt(1.0 / 3.0);
+        const auto calibration = depthxr::CalibrateFrameGenEngine(frames);
+        if (still) {
+            Expect(!calibration.intercept_spread_px && std::abs(calibration.intercept_spread[0] - x_spread) < 0.01 &&
+                       std::abs(calibration.intercept_spread[1] - y_spread) < 0.01,
+                   "Engine calibration: with the head still, the jitter is in the vectors' units");
+        } else {
+            Expect(calibration.intercept_spread_px &&
+                       std::abs((*calibration.intercept_spread_px)[0] - x_spread) < 0.01 &&
+                       std::abs((*calibration.intercept_spread_px)[1] - y_spread) < 0.01,
+                   "Engine calibration: the jitter is found in vector pixels (" +
+                       (calibration.intercept_spread_px ? std::to_string((*calibration.intercept_spread_px)[0]) + ", " +
+                                                              std::to_string((*calibration.intercept_spread_px)[1])
+                                                        : std::string("none")) +
+                       ")");
+        }
+    }
+}
+
+// The frame gates (stage 1): a frame and the one generated from before it,
+// paired, then each gate on its own.
+void TestFrameGenEngineGates() {
+    using namespace depthxr;
+    Expect(std::string(FrameGenEngineGateName(0)) == "noStruct" && std::string(FrameGenEngineGateName(2)) == "pairing" &&
+               std::string(FrameGenEngineGateName(7)) == "uncaptured" &&
+               std::string(FrameGenEngineGateName(kFrameGenEngineGateCount - 1)) == "oneEye" &&
+               (1u << (kFrameGenEngineGateCount - 1)) == kFrameGenEngineOneEye,
+           "Engine gates: the summary names each gate");
+    const FrameGenDepthEncoding flight{0.0f, 1.0f, 356700.0f, 0.05f};
+    auto record = [&](std::int64_t time, std::uint64_t projection_frame, std::uint64_t sequence) {
+        FrameGenEngineGateRecord frame;
+        frame.display_time = time;
+        frame.projection_frame = projection_frame;
+        frame.complete = true;
+        frame.sequence = sequence;
+        for (std::uint32_t v = 0; v < 2; ++v) {
+            FrameGenEngineGateView view;
+            view.view = v;
+            view.vectors = 0x31;
+            view.rect = {0, 0, 4339, 4285};
+            view.readable = true;
+            view.depth = flight;
+            frame.views.push_back(view);
+        }
+        return frame;
+    };
+    const FrameGenEngineGateRecord before = record(1000, 41, 7);
+    const FrameGenEngineGateRecord now = record(1011, 42, 0);
+    FrameGenEngineGateFacts good;
+    good.views = 2;
+    good.end_time = 1011;
+    good.previous_sequence = 7;
+    good.continuous = true;
+    good.decoded = {flight, flight};
+    good.frames_since_swapchain = 500;
+    good.seconds_since_swapchain = 60.0;
+    good.captured = true;
+    good.just_in_time = true;
+    Expect(FrameGenEngineGates(&now, &before, good) == 0, "Engine gates: a frame paired with the one before passes");
+
+    // G1, G2: no structure the vectors can be read by.
+    Expect(FrameGenEngineGates(nullptr, &before, good) == kFrameGenEngineNoStruct,
+           "Engine gates: a frame without a record has no structure");
+    FrameGenEngineGateRecord other = now;
+    other.display_time = 1022;
+    Expect(FrameGenEngineGates(&other, &before, good) == kFrameGenEngineNoStruct,
+           "Engine gates: another frame's record is not this frame's");
+    FrameGenEngineGateRecord partial = now;
+    partial.complete = false;
+    Expect(FrameGenEngineGates(&partial, &before, good) == kFrameGenEngineNoStruct,
+           "Engine gates: a structure on one view only");
+    FrameGenEngineGateRecord unreadable = now;
+    unreadable.views[1].readable = false;
+    Expect(FrameGenEngineGates(&unreadable, &before, good) == kFrameGenEngineNoStruct,
+           "Engine gates: an unreadable structure");
+
+    // G4: FRAME_SKIP.
+    FrameGenEngineGateRecord skipped = now;
+    skipped.views[0].frame_skip = true;
+    Expect(FrameGenEngineGates(&skipped, &before, good) == kFrameGenEngineSkip, "Engine gates: FRAME_SKIP holds it back");
+
+    // G3, G5: the pair.
+    Expect(FrameGenEngineGates(&now, nullptr, good) == kFrameGenEnginePairing, "Engine gates: no record before");
+    // An abandoned frame between: its record (never generated from) is the
+    // one before, or the record before it is no longer the frame generated
+    // from last (the presenter forgot it with the abandoned frame).
+    const FrameGenEngineGateRecord abandoned = record(1005, 41, 0);
+    Expect(FrameGenEngineGates(&now, &abandoned, good) == kFrameGenEnginePairing,
+           "Engine gates: an abandoned frame's record pairs with nothing");
+    FrameGenEngineGateFacts forgotten = good;
+    forgotten.previous_sequence = 0;
+    forgotten.continuous = false;
+    Expect(FrameGenEngineGates(&now, &before, forgotten) == kFrameGenEnginePairing,
+           "Engine gates: an abandoned frame between breaks the pair");
+    // A frame without a projection between: its record (no number, no
+    // views) is the one before.
+    FrameGenEngineGateRecord empty;
+    empty.display_time = 1005;
+    Expect(FrameGenEngineGates(&now, &empty, good) == kFrameGenEnginePairing,
+           "Engine gates: a frame without a projection between breaks the pair");
+    FrameGenEngineGateRecord gap = before;
+    gap.projection_frame = 40;
+    Expect(FrameGenEngineGates(&now, &gap, good) == kFrameGenEnginePairing,
+           "Engine gates: projection frames must follow each other");
+    FrameGenEngineGateRecord swapped = before;
+    swapped.views[1].vectors = 0x32;
+    Expect(FrameGenEngineGates(&now, &swapped, good) == kFrameGenEnginePairing,
+           "Engine gates: other motion vector swapchains break the pair");
+    FrameGenEngineGateRecord moved = before;
+    moved.views[0].rect = {0, 0, 4000, 4285};
+    Expect(FrameGenEngineGates(&now, &moved, good) == kFrameGenEnginePairing,
+           "Engine gates: another region breaks the pair (G3)");
+    FrameGenEngineGateFacts paused = good;
+    paused.paused = true;
+    Expect(FrameGenEngineGates(&now, &before, paused) == kFrameGenEnginePairing, "Engine gates: a pause breaks the pair");
+    FrameGenEngineGateFacts discontinuous = good;
+    discontinuous.continuous = false;
+    Expect(FrameGenEngineGates(&now, &before, discontinuous) == kFrameGenEnginePairing,
+           "Engine gates: a frame not continuing the one before breaks the pair");
+
+    // G6.
+    FrameGenEngineGateRecord cut = now;
+    cut.cut = true;
+    Expect(FrameGenEngineGates(&cut, &before, good) == kFrameGenEngineCut, "Engine gates: a camera cut");
+
+    // G7: nearZ changes (MSFS's menus to flight). The depth captured at a
+    // frame's release is decoded as the frame before described its own: the
+    // first frame after the change, and only it, is held back.
+    {
+        const FrameGenDepthEncoding menus{0.0f, 1.0f, 1000.0f, 0.05f};
+        const std::array<FrameGenDepthEncoding, 6> described{menus, menus, flight, flight, flight, menus};
+        for (std::size_t f = 1; f < described.size(); ++f) {
+            FrameGenEngineGateRecord previous = record(1000 + 11 * static_cast<std::int64_t>(f - 1), 40 + f, f);
+            FrameGenEngineGateRecord frame = record(1000 + 11 * static_cast<std::int64_t>(f), 41 + f, 0);
+            for (FrameGenEngineGateView& view : frame.views) view.depth = described[f];
+            FrameGenEngineGateFacts facts = good;
+            facts.end_time = frame.display_time;
+            facts.previous_sequence = f;
+            facts.decoded = {described[f - 1], described[f - 1]};
+            const bool flipped = !SameFrameGenDepthDescription(described[f], described[f - 1]);
+            Expect(FrameGenEngineGates(&frame, &previous, facts) == (flipped ? kFrameGenEngineDecode : 0u),
+                   "Engine gates: depth decoded as the frame before described it only on the first frame after a change "
+                   "(frame " + std::to_string(f) + ")");
+        }
+        FrameGenEngineGateFacts undecoded = good;
+        undecoded.decoded = {std::nullopt, std::nullopt};
+        Expect(FrameGenEngineGates(&now, &before, undecoded) == 0, "Engine gates: no depth captured, nothing decoded wrongly");
+    }
+
+    // G8: a new swapchain, then settling.
+    for (std::uint64_t frames = 0; frames < 3; ++frames) {
+        FrameGenEngineGateFacts facts = good;
+        facts.frames_since_swapchain = frames;
+        Expect(FrameGenEngineGates(&now, &before, facts) == (frames < 2 ? kFrameGenEngineRecreate : 0u),
+               "Engine gates: a swapchain made in the last 2 frames (" + std::to_string(frames) + ")");
+    }
+    FrameGenEngineGateFacts settling = good;
+    settling.seconds_since_swapchain = 2.9;
+    Expect(FrameGenEngineGates(&now, &before, settling) == kFrameGenEngineSettle, "Engine gates: settling for 3 s");
+    settling.seconds_since_swapchain = 3.0;
+    Expect(FrameGenEngineGates(&now, &before, settling) == 0, "Engine gates: settled after 3 s");
+
+    // G9: frames the engine path serves.
+    for (int i = 0; i < 3; ++i) {
+        FrameGenEngineGateFacts facts = good;
+        if (i == 0) facts.captured = false;
+        if (i == 1) facts.just_in_time = false;
+        if (i == 2) facts.composed = true;
+        Expect(FrameGenEngineGates(&now, &before, facts) == kFrameGenEngineUncaptured,
+               "Engine gates: uncaptured, not just in time or quad views (" + std::to_string(i) + ")");
+    }
+    // G10: one eye's vectors alone.
+    FrameGenEngineGateFacts one_eye = good;
+    one_eye.one_eye = true;
+    Expect(FrameGenEngineGates(&now, &before, one_eye) == kFrameGenEngineOneEye, "Engine gates: one eye's vectors alone");
+    // Gates that need no record still count without one.
+    FrameGenEngineGateFacts fresh = good;
+    fresh.frames_since_swapchain = 0;
+    fresh.seconds_since_swapchain = 0.0;
+    fresh.captured = false;
+    Expect(FrameGenEngineGates(nullptr, nullptr, fresh) ==
+               (kFrameGenEngineNoStruct | kFrameGenEngineRecreate | kFrameGenEngineSettle | kFrameGenEngineUncaptured),
+           "Engine gates: without a record, the gates that need none still count");
+}
+
+// G6's cut detection: a floor of 50 m while the median of the frames
+// before is small or unknown, 8 times it beyond, and 10 degrees.
+void TestFrameGenEngineCuts() {
+    using depthxr::FrameGenEngineCuts;
+    const std::array<float, 4> still{0.0f, 0.0f, 0.0f, 1.0f};
+    auto ahead = [](float meters) { return std::array<float, 3>{0.0f, 0.0f, meters}; };
+    auto yaw = [](float degrees) {
+        const float half = degrees * 3.14159265f / 360.0f;
+        return std::array<float, 4>{0.0f, std::sin(half), 0.0f, std::cos(half)};
+    };
+    {
+        FrameGenEngineCuts cuts;
+        Expect(cuts.Median() == 0.0, "Engine cuts: no median before any frame");
+        Expect(cuts.Add(still, ahead(51.0f)), "Engine cuts: warming up, past 50 m is a cut");
+        cuts.Reset();
+        Expect(!cuts.Add(still, ahead(49.0f)) && cuts.Median() == 49.0, "Engine cuts: warming up, 49 m is not");
+    }
+    {
+        // Flight: 3 m a frame keeps the 50 m floor.
+        FrameGenEngineCuts cuts;
+        for (int i = 0; i < 30; ++i) Expect(!cuts.Add(still, ahead(3.0f)), "Engine cuts: steady movement is not a cut");
+        Expect(!cuts.Add(still, ahead(49.0f)) && cuts.Add(still, ahead(51.0f)),
+               "Engine cuts: 50 m holds while the movement is small");
+    }
+    {
+        // Faster: 10 m a frame, 81 m.
+        FrameGenEngineCuts cuts;
+        for (int i = 0; i < 30; ++i) cuts.Add(still, ahead(-10.0f));
+        Expect(std::abs(cuts.Median() - 10.0) < 1e-6, "Engine cuts: the median movement");
+        Expect(!cuts.Add(still, ahead(80.0f)) && cuts.Add(still, ahead(82.0f)) && cuts.Add(still, ahead(1000.0f)),
+               "Engine cuts: 8 times the median movement and a meter");
+        Expect(std::abs(cuts.Median() - 10.0) < 1e-6, "Engine cuts: a few cuts move the median nowhere");
+        // The median is the last 30 frames'.
+        for (int i = 0; i < 30; ++i) cuts.Add(still, ahead(1.0f));
+        Expect(std::abs(cuts.Median() - 1.0) < 1e-6 && cuts.Add(still, ahead(60.0f)),
+               "Engine cuts: the median of the last 30 frames");
+    }
+    {
+        // A game that speeds up for good (MSFS's sim rate at 16x, slew): its
+        // first frames at the new speed are cuts, then the speed is its own.
+        FrameGenEngineCuts cuts;
+        for (int i = 0; i < 30; ++i) cuts.Add(still, ahead(3.0f));
+        int cut = 0;
+        int last = -1;
+        for (int i = 0; i < 40; ++i) {
+            if (cuts.Add(still, ahead(60.0f))) {
+                ++cut;
+                last = i;
+            }
+        }
+        Expect(cut == 15 && last == 14 && std::abs(cuts.Median() - 60.0) < 1e-6,
+               "Engine cuts: a lasting new speed is cut for 15 frames, not for good (" + std::to_string(cut) + " cuts)");
+    }
+    {
+        FrameGenEngineCuts cuts;
+        Expect(!cuts.Add(yaw(9.0f), ahead(1.0f)) && cuts.Add(yaw(11.0f), ahead(1.0f)) && cuts.Add(yaw(-11.0f), ahead(0.0f)),
+               "Engine cuts: turning past 10 degrees in a frame is a cut");
+        Expect(cuts.Add(still, {std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f}),
+               "Engine cuts: a delta not finite is a cut");
+        Expect(cuts.Add({std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f, 1.0f}, ahead(1.0f)) &&
+                   cuts.Add({0.0f, std::numeric_limits<float>::infinity(), 0.0f, 1.0f}, ahead(1.0f)),
+               "Engine cuts: a rotation not finite is a cut");
+        Expect(!cuts.Add({0.0f, 0.0f, 0.0f, 0.0f}, ahead(0.0f)), "Engine cuts: an unset rotation turns nothing");
+        cuts.Reset();
+        Expect(cuts.Median() == 0.0, "Engine cuts: reset");
+    }
+}
+
+// Pivot's change to the views, from the pose the game rendered with and the
+// pose declared, and whether it moved between frames.
+void TestFrameGenDeclaredChange() {
+    using namespace depthxr;
+    using Quaternion = std::array<double, 4>;
+    auto multiply = [](const Quaternion& a, const Quaternion& b) {
+        return Quaternion{a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
+                          a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+                          a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
+                          a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2]};
+    };
+    auto turn = [](double degrees, std::array<double, 3> axis) {
+        const double half = degrees * 3.14159265358979 / 360.0;
+        const double length = std::sqrt(axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]);
+        return Quaternion{axis[0] / length * std::sin(half), axis[1] / length * std::sin(half),
+                          axis[2] / length * std::sin(half), std::cos(half)};
+    };
+    // declared = change * game, as Pivot applies its reverse delta.
+    auto declare = [&](const FrameGenViewGeometry& game, const Quaternion& q, std::array<double, 3> p) {
+        const Quaternion g{game.orientation[0], game.orientation[1], game.orientation[2], game.orientation[3]};
+        const Quaternion d = multiply(q, g);
+        const Quaternion rotated = multiply(multiply(q, {game.position[0], game.position[1], game.position[2], 0.0}),
+                                            {-q[0], -q[1], -q[2], q[3]});
+        FrameGenViewGeometry declared = game;
+        declared.orientation = {static_cast<float>(d[0]), static_cast<float>(d[1]), static_cast<float>(d[2]),
+                                static_cast<float>(d[3])};
+        for (int i = 0; i < 3; ++i) declared.position[i] = static_cast<float>(rotated[i] + p[i]);
+        return declared;
+    };
+    auto game = [&](double degrees, std::array<float, 3> position) {
+        FrameGenViewGeometry view;
+        const Quaternion q = turn(degrees, {0.2, 1.0, 0.1});
+        view.orientation = {static_cast<float>(q[0]), static_cast<float>(q[1]), static_cast<float>(q[2]),
+                            static_cast<float>(q[3])};
+        view.position = position;
+        return view;
+    };
+    const Quaternion pivot = turn(25.0, {0.0, 1.0, 0.0});
+    const std::array<double, 3> offset{0.3, -0.1, 0.7};
+    const FrameGenViewGeometry first = game(10.0, {0.1f, 1.2f, -0.3f});
+    const FrameGenViewGeometry second = game(14.0, {0.12f, 1.21f, -0.31f});
+    const FrameGenPoseChange a = FrameGenDeclaredChange(first, declare(first, pivot, offset));
+    double error = 0.0;
+    for (int i = 0; i < 4; ++i) error = (std::max)(error, std::abs(a.orientation[i] - pivot[i]));
+    for (int i = 0; i < 3; ++i) error = (std::max)(error, std::abs(a.position[i] - offset[i]));
+    Expect(error < 1e-5, "Declared change: Pivot's reverse delta is found (" + std::to_string(error) + ")");
+    Expect(!FrameGenDeclaredChangeMoved(a, FrameGenDeclaredChange(second, declare(second, pivot, offset))),
+           "Declared change: the same change with the head moved has not moved");
+    Expect(!FrameGenDeclaredChangeMoved(FrameGenDeclaredChange(first, first), FrameGenDeclaredChange(second, second)),
+           "Declared change: without Pivot nothing moves");
+    Expect(FrameGenDeclaredChangeMoved(a, FrameGenDeclaredChange(second, declare(second, multiply(turn(0.1, {1.0, 0.0, 0.0}), pivot), offset))) &&
+               !FrameGenDeclaredChangeMoved(
+                   a, FrameGenDeclaredChange(second, declare(second, multiply(turn(0.02, {1.0, 0.0, 0.0}), pivot), offset))),
+           "Declared change: turning by 0.1 degrees moves it, 0.02 degrees does not");
+    Expect(FrameGenDeclaredChangeMoved(a, FrameGenDeclaredChange(second, declare(second, pivot, {0.3, -0.1, 0.701}))) &&
+               !FrameGenDeclaredChangeMoved(
+                   a, FrameGenDeclaredChange(second, declare(second, pivot, {0.3, -0.1, 0.7002}))),
+           "Declared change: 1 mm moves it, 0.2 mm does not");
+}
+
+// Engine motion vectors, stage 3: the convention switch and decode, and the
+// evidence passes in a plan (after the filter, writing nothing else; none
+// without engine_motion, in capture, or in Lead); the hardware level.
+void TestFrameGenEngineEvidencePlan() {
+    using depthxr::FrameGenEngineCamera;
+    using depthxr::FrameGenPass;
+    using depthxr::FrameGenTextureKind;
+    const auto fixed = depthxr::ParseFrameGenEngineConvention("1, -1, excluded,jitter");
+    Expect(fixed && fixed->gain == std::array<float, 2>{1.0f, -1.0f} && fixed->camera == FrameGenEngineCamera::kExcluded &&
+               fixed->jitter,
+           "Engine evidence: a fixed convention parses");
+    Expect(!depthxr::ParseFrameGenEngineConvention("1,1") && !depthxr::ParseFrameGenEngineConvention("0,1,included") &&
+               !depthxr::ParseFrameGenEngineConvention("1,1,sideways") &&
+               depthxr::ParseFrameGenEngineConvention("2,-2,rotation") &&
+               depthxr::ParseFrameGenEngineConvention("2,-2,rotation")->camera == FrameGenEngineCamera::kRotationOnly,
+           "Engine evidence: conventions that are none are refused");
+    // FB: A = g / 2 (y negated), no offset; EXT: its scale and offset as well.
+    depthxr::FrameGenEngineConvention convention;
+    convention.gain = {2.0f, -2.0f};
+    depthxr::FrameGenMotionEncoding fb;
+    Expect(depthxr::FrameGenEngineDecode(convention, fb) == std::array<float, 4>{1.0f, 1.0f, 0.0f, 0.0f},
+           "Engine evidence: uv vectors decode as they are (y flipped twice)");
+    depthxr::FrameGenMotionEncoding ext;
+    ext.ext = true;
+    ext.scale = {0.5f, 0.25f, 1.0f};
+    ext.offset = {0.1f, -0.2f, 0.0f};
+    Expect(depthxr::FrameGenEngineDecode(convention, ext) == std::array<float, 4>{0.5f, 0.25f, 0.1f, -0.2f},
+           "Engine evidence: EXT's scale and offset go into the decode");
+    // The convention's own offset comes out of e.
+    convention.offset = {0.25f, -0.5f};
+    Expect(depthxr::FrameGenEngineDecode(convention, fb) == std::array<float, 4>{1.0f, 1.0f, -0.25f, 0.5f},
+           "Engine evidence: the convention's offset goes into the decode");
+    convention.offset = {0.0f, 0.0f};
+
+    depthxr::FrameGenViewRequest request;
+    request.extent = {1024, 1024};
+    request.synthesize = true;
+    request.depth = true;
+    request.newest.angle_left = request.previous.angle_left = -0.9f;
+    request.newest.angle_right = request.previous.angle_right = 0.9f;
+    request.newest.angle_up = request.previous.angle_up = 0.9f;
+    request.newest.angle_down = request.previous.angle_down = -0.9f;
+    request.newest.orientation = {0.0f, 0.01f, 0.0f, 0.99995f};
+    depthxr::FrameGenTuning tuning;
+    tuning.mode = depthxr::FrameGenSynthesisMode::kExtrapolate;
+    tuning.analyze_only = true;
+    tuning.engine_mode = depthxr::FrameGenEngineMode::kObserve;
+    tuning.engine = convention;
+    const depthxr::FrameGenViewPlan plain = depthxr::BuildFrameGenViewPlan(request, tuning);
+    request.engine_motion = true;
+    request.engine_images = {2, 1};
+    request.engine_vectors = {800, 790};
+    const depthxr::FrameGenViewPlan observed = depthxr::BuildFrameGenViewPlan(request, tuning);
+    // The plan without the evidence passes is the plan without engine motion.
+    std::vector<depthxr::FrameGenDispatch> rest;
+    std::vector<depthxr::FrameGenDispatch> engine;
+    for (const auto& dispatch : observed.dispatches) {
+        (dispatch.pass == FrameGenPass::kEngineReduce || dispatch.pass == FrameGenPass::kEngineSolve ? engine : rest)
+            .push_back(dispatch);
+    }
+    bool same = rest.size() == plain.dispatches.size();
+    for (std::size_t i = 0; same && i < rest.size(); ++i) {
+        // FrameGenTexture is two bytes, the constants 32 words: compared as bytes.
+        same = rest[i].pass == plain.dispatches[i].pass &&
+               std::memcmp(rest[i].inputs.data(), plain.dispatches[i].inputs.data(), sizeof(rest[i].inputs)) == 0 &&
+               std::memcmp(rest[i].outputs.data(), plain.dispatches[i].outputs.data(), sizeof(rest[i].outputs)) == 0 &&
+               std::memcmp(&rest[i].constants, &plain.dispatches[i].constants, sizeof(depthxr::FrameGenConstants)) == 0;
+    }
+    Expect(same, "Engine evidence: everything else in the plan is as without engine motion");
+    // Each reduce by the kinds it sums (1 cockpit, 2 photometric, 4 lag, 8
+    // the cockpit against the pair before), each solve by its stage.
+    auto kinds = [](const std::vector<depthxr::FrameGenDispatch>& dispatches) {
+        std::string order;
+        for (const auto& dispatch : dispatches) {
+            order += dispatch.pass == FrameGenPass::kEngineSolve ? "S" + std::to_string(dispatch.constants.options[0] & 15u)
+                                                                 : "R" + std::to_string(dispatch.constants.options[0] & 15u);
+            order += " ";
+        }
+        return order;
+    };
+    Expect(kinds(engine) == "R3 S1 ", "Engine evidence: cockpit and photometric together, solve (" + kinds(engine) + ")");
+    bool writes_engine_only = true;
+    for (const auto& dispatch : engine) {
+        for (const auto& output : dispatch.outputs) {
+            writes_engine_only = writes_engine_only && (output.kind == FrameGenTextureKind::kNone ||
+                                                        output.kind == FrameGenTextureKind::kEnginePartials ||
+                                                        output.kind == FrameGenTextureKind::kEngineParams ||
+                                                        output.kind == FrameGenTextureKind::kEngineEvidence);
+        }
+    }
+    Expect(writes_engine_only, "Engine evidence: the passes write their own textures alone");
+    // After the filter, which the measured flow they read is final for.
+    const auto filter = std::find_if(observed.dispatches.begin(), observed.dispatches.end(),
+                                     [](const auto& dispatch) { return dispatch.pass == FrameGenPass::kFilter; });
+    const auto first = std::find_if(observed.dispatches.begin(), observed.dispatches.end(),
+                                    [](const auto& dispatch) { return dispatch.pass == FrameGenPass::kEngineReduce; });
+    Expect(filter < first && engine[0].inputs[4].kind == FrameGenTextureKind::kFlow &&
+               engine[0].inputs[4].level == observed.final_flow_level,
+           "Engine evidence: taken after the filter, from the final level's measured flow");
+    // Every kind reads the vectors in the convention under test (the
+    // cockpit's sums come back to them as decoded on the CPU); the solve
+    // carries the images.
+    const depthxr::FrameGenConstants& reduce = engine[0].constants;
+    const depthxr::FrameGenConstants& solve = engine[1].constants;
+    Expect(reduce.tuning == std::array<float, 4>{1.0f, 1.0f, 0.0f, 0.0f} &&
+               reduce.size == std::array<std::uint32_t, 4>{128, 128, 512, 512} && engine[0].inputs[5].kind == FrameGenTextureKind::kNone &&
+               solve.options[2] == (2u | (1u << 8)) && solve.size == std::array<std::uint32_t, 4>{512, 512, 800, 790} &&
+               engine[1].outputs[1].kind == FrameGenTextureKind::kEngineEvidence,
+           "Engine evidence: decode, grid and images");
+    // The field before (the lag kind, with the others) and the pair before
+    // (the cockpit lag kind, by the game's poses, alone) when the request
+    // has them.
+    request.engine_previous = true;
+    request.engine_lag = true;
+    request.game_previous.orientation = {0.0f, 0.02f, 0.0f, 0.9998f};
+    request.game_before.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
+    const depthxr::FrameGenViewPlan lagged = depthxr::BuildFrameGenViewPlan(request, tuning);
+    std::vector<depthxr::FrameGenDispatch> lag;
+    for (const auto& dispatch : lagged.dispatches) {
+        if (dispatch.pass == FrameGenPass::kEngineReduce || dispatch.pass == FrameGenPass::kEngineSolve) lag.push_back(dispatch);
+    }
+    Expect(kinds(lag) == "R7 R8 S1 " && lag[0].inputs[5].kind == FrameGenTextureKind::kEngineRawPrevious &&
+               lag[0].inputs[0].kind == FrameGenTextureKind::kEngineRaw && lag[1].constants.rot0 != lag[0].constants.rot0 &&
+               lag[1].inputs[4].kind == FrameGenTextureKind::kNone && lag[1].constants.tuning == reduce.tuning &&
+               (lag[2].constants.options[0] & (1u << 7)) != 0 && (lag[2].constants.options[0] & (1u << 8)) != 0,
+           "Engine evidence: the field before and the pair before (" + kinds(lag) + ")");
+    // A jittered convention: the cockpit (and lag) kinds first, the bias
+    // from their sums (the solve's first stage), then the photometric kind
+    // taking it out (bit 9, kEngineParams as its fifth input).
+    convention.jitter = true;
+    tuning.engine = convention;
+    const depthxr::FrameGenViewPlan jittered = depthxr::BuildFrameGenViewPlan(request, tuning);
+    std::vector<depthxr::FrameGenDispatch> bias;
+    for (const auto& dispatch : jittered.dispatches) {
+        if (dispatch.pass == FrameGenPass::kEngineReduce || dispatch.pass == FrameGenPass::kEngineSolve) bias.push_back(dispatch);
+    }
+    Expect(kinds(bias) == "R5 S0 R2 R8 S1 " && bias[0].inputs[5].kind == FrameGenTextureKind::kEngineRawPrevious &&
+               (bias[0].constants.options[0] & (1u << 9)) == 0 && bias[2].inputs[5].kind == FrameGenTextureKind::kEngineParams &&
+               (bias[2].constants.options[0] & (1u << 9)) != 0 && (bias[4].constants.options[0] & (1u << 5)) != 0,
+           "Engine evidence: a jittered convention's bias first (" + kinds(bias) + ")");
+    convention.jitter = false;
+    tuning.engine = convention;
+    // None in capture, without engine_motion, or interpolating's cover alike.
+    tuning.engine_mode = depthxr::FrameGenEngineMode::kCapture;
+    Expect(depthxr::BuildFrameGenViewPlan(request, tuning).dispatches.size() == plain.dispatches.size(),
+           "Engine evidence: none in capture");
+    // The hardware level: the flow ends at the hardware's level.
+    tuning.engine_mode = depthxr::FrameGenEngineMode::kOff;
+    tuning.quality = depthxr::FrameGenFlowQuality::kQuality;
+    Expect(depthxr::FrameGenFinalFlowLevel(tuning) == 2, "Engine evidence: Quality ends at level 2");
+    tuning.hardware_level = true;
+    Expect(depthxr::FrameGenFinalFlowLevel(tuning) == depthxr::kFrameGenHardwareFlowLevel,
+           "Engine evidence: with hardware_level, at the hardware's level");
+}
+
+// Stage 5's plan: Observe's as before; Assist takes the evidence before the
+// filter, then kEngineConvert, kEngineMerge and kEngineTiles, the filters
+// reading the merged flow (kEngineFlow) and the world fit the measured one;
+// the constants the shaders read; Interpolate capped at Assist; the
+// filters' label rules and the confidence view's tint behind their switches.
+void TestFrameGenEngineAssistPlan() {
+    using depthxr::FrameGenEngineMode;
+    using depthxr::FrameGenPass;
+    using depthxr::FrameGenTextureKind;
+    depthxr::FrameGenEngineConvention convention;
+    convention.gain = {2.0f, -2.0f};
+    convention.camera = depthxr::FrameGenEngineCamera::kRotationOnly;
+    depthxr::FrameGenViewRequest request;
+    request.extent = {1024, 1024};
+    request.synthesize = request.temporal = request.depth = true;
+    request.newest.angle_left = request.previous.angle_left = -0.9f;
+    request.newest.angle_right = request.previous.angle_right = 0.9f;
+    request.newest.angle_up = request.previous.angle_up = 0.9f;
+    request.newest.angle_down = request.previous.angle_down = -0.9f;
+    request.newest.orientation = {0.0f, 0.01f, 0.0f, 0.99995f};
+    request.engine_motion = true;
+    request.engine_encoding.ext = true;
+    request.engine_encoding.scale = {0.5f, 0.25f, 1.0f};
+    request.engine_encoding.offset = {0.1f, -0.2f, 0.0f};
+    request.engine_vectors = {800, 790};
+    depthxr::FrameGenTuning tuning;
+    tuning.mode = depthxr::FrameGenSynthesisMode::kExtrapolate;
+    tuning.analyze_only = true;
+    tuning.engine_mode = FrameGenEngineMode::kObserve;
+    tuning.engine = convention;
+    const depthxr::FrameGenViewPlan observed = depthxr::BuildFrameGenViewPlan(request, tuning);
+    tuning.engine_mode = FrameGenEngineMode::kAssist;
+    const depthxr::FrameGenViewPlan assisted = depthxr::BuildFrameGenViewPlan(request, tuning);
+    auto order = [](const depthxr::FrameGenViewPlan& plan) {
+        std::string text;
+        for (const auto& dispatch : plan.dispatches) {
+            switch (dispatch.pass) {
+            case FrameGenPass::kRefine: text += "refine "; break;
+            case FrameGenPass::kFilter: text += "filter "; break;
+            case FrameGenPass::kEngineReduce: text += "R "; break;
+            case FrameGenPass::kEngineSolve: text += "S "; break;
+            case FrameGenPass::kEngineConvert: text += "convert "; break;
+            case FrameGenPass::kEngineMerge: text += "merge "; break;
+            case FrameGenPass::kEngineTiles: text += "tiles "; break;
+            case FrameGenPass::kWorldReduce: text += "W "; break;
+            case FrameGenPass::kWorldSolve: text += "w "; break;
+            default: break;
+            }
+        }
+        return text;
+    };
+    Expect(order(observed) == "refine refine filter R S ",
+           "Engine assist plan: Observe takes the evidence after the filter, as before (" + order(observed) + ")");
+    Expect(order(assisted) == "refine refine R S convert merge tiles filter ",
+           "Engine assist plan: Assist takes it first, then converts, merges and tiles before the filter (" +
+               order(assisted) + ")");
+    // Everything else as Observe's, the filter reading the merged flow.
+    std::vector<depthxr::FrameGenDispatch> rest, observed_rest;
+    auto engine_pass = [](FrameGenPass pass) {
+        return pass == FrameGenPass::kEngineReduce || pass == FrameGenPass::kEngineSolve ||
+               pass == FrameGenPass::kEngineConvert || pass == FrameGenPass::kEngineMerge || pass == FrameGenPass::kEngineTiles;
+    };
+    for (const auto& dispatch : assisted.dispatches) {
+        if (!engine_pass(dispatch.pass)) rest.push_back(dispatch);
+    }
+    for (const auto& dispatch : observed.dispatches) {
+        if (!engine_pass(dispatch.pass)) observed_rest.push_back(dispatch);
+    }
+    bool same = rest.size() == observed_rest.size();
+    for (std::size_t i = 0; same && i < rest.size(); ++i) {
+        depthxr::FrameGenDispatch expected = observed_rest[i];
+        if (expected.pass == FrameGenPass::kFilter) expected.inputs[0] = {FrameGenTextureKind::kEngineFlow, 0};
+        same = rest[i].pass == expected.pass &&
+               std::memcmp(rest[i].inputs.data(), expected.inputs.data(), sizeof(rest[i].inputs)) == 0 &&
+               std::memcmp(rest[i].outputs.data(), expected.outputs.data(), sizeof(rest[i].outputs)) == 0 &&
+               std::memcmp(&rest[i].constants, &expected.constants, sizeof(depthxr::FrameGenConstants)) == 0;
+    }
+    Expect(same, "Engine assist plan: the rest is Observe's, the filter reading kEngineFlow in place of kFlow");
+    auto find = [](const depthxr::FrameGenViewPlan& plan, FrameGenPass pass) {
+        return *std::find_if(plan.dispatches.begin(), plan.dispatches.end(),
+                             [&](const depthxr::FrameGenDispatch& dispatch) { return dispatch.pass == pass; });
+    };
+    const std::uint8_t level = assisted.final_flow_level;
+    const depthxr::FrameGenExtent cells = assisted.levels[level];
+    const depthxr::FrameGenDispatch convert = find(assisted, FrameGenPass::kEngineConvert);
+    const depthxr::FrameGenDispatch merge = find(assisted, FrameGenPass::kEngineMerge);
+    const depthxr::FrameGenDispatch tiles = find(assisted, FrameGenPass::kEngineTiles);
+    // A and B of the convention and the extension's encoding; the camera in
+    // bits 4-5; the level; the frame's verdict and bias from kEngineParams,
+    // the other eye's verdict from its own.
+    Expect(convert.inputs[0].kind == FrameGenTextureKind::kEngineRaw && convert.inputs[1].kind == FrameGenTextureKind::kDepth &&
+               convert.inputs[2].kind == FrameGenTextureKind::kEngineParams &&
+               convert.inputs[3].kind == FrameGenTextureKind::kNone && convert.inputs[4].kind == FrameGenTextureKind::kNone &&
+               convert.inputs[5].kind == FrameGenTextureKind::kEngineParamsOther &&
+               convert.outputs[0].kind == FrameGenTextureKind::kEngineCandidate &&
+               convert.outputs[1].kind == FrameGenTextureKind::kEngineInfo &&
+               convert.constants.tuning == depthxr::FrameGenEngineDecode(convention, request.engine_encoding) &&
+               convert.constants.tuning == std::array<float, 4>{0.5f, 0.25f, 0.1f, -0.2f} &&
+               convert.constants.options[0] == 1u << 4 && convert.constants.options[3] == level &&
+               convert.constants.size == std::array<std::uint32_t, 4>{cells.width, cells.height, 512, 512} &&
+               convert.width == cells.width && convert.height == cells.height &&
+               (convert.constants.options[1] & depthxr::kFrameGenFlagDepth) != 0,
+           "Engine assist plan: kEngineConvert's inputs, decode (A, B), camera bits and level");
+    // REFINE's block at its match level: the scale in options.w.
+    const std::uint8_t match = depthxr::FrameGenMatchLevel(level);
+    Expect(level == 3 && match == 1 && merge.inputs[0].kind == FrameGenTextureKind::kLumaNewest && merge.inputs[0].level == match &&
+               merge.inputs[1].kind == FrameGenTextureKind::kLumaPrevious && merge.inputs[1].level == match &&
+               merge.inputs[2].kind == FrameGenTextureKind::kEngineCandidate &&
+               merge.inputs[3].kind == FrameGenTextureKind::kEngineInfo &&
+               merge.inputs[4].kind == FrameGenTextureKind::kFlow && merge.inputs[4].level == level &&
+               merge.inputs[5].kind == FrameGenTextureKind::kNone &&
+               merge.outputs[0].kind == FrameGenTextureKind::kEngineFlow &&
+               merge.outputs[1].kind == FrameGenTextureKind::kEngineLabels &&
+               merge.constants.options[0] == depthxr::kFrameGenEngineMergeAssist && merge.constants.options[2] == level &&
+               merge.constants.options[3] == 4u,
+           "Engine assist plan: kEngineMerge reads REFINE's luma and the measured flow, its block scale 4 at level 3");
+    tuning.quality = depthxr::FrameGenFlowQuality::kQuality;
+    Expect(find(depthxr::BuildFrameGenViewPlan(request, tuning), FrameGenPass::kEngineMerge).constants.options[3] == 2u,
+           "Engine assist plan: scale 2 at level 2");
+    tuning.quality = depthxr::FrameGenFlowQuality::kPerformance;
+    const depthxr::FrameGenDispatch coarse = find(depthxr::BuildFrameGenViewPlan(request, tuning), FrameGenPass::kEngineMerge);
+    Expect(coarse.constants.options[3] == 4u && coarse.inputs[0].level == 2, "Engine assist plan: level 4 matches at level 2");
+    tuning.quality = depthxr::FrameGenFlowQuality::kBalanced;
+    // The tiles: a thread each, the head's turn (degrees) in tuning.y.
+    Expect(tiles.inputs[0].kind == FrameGenTextureKind::kEngineLabels && tiles.inputs[1].kind == FrameGenTextureKind::kNone &&
+               tiles.outputs[0].kind == FrameGenTextureKind::kEngineTiles &&
+               tiles.width == (cells.width + 7) / 8 && tiles.height == (cells.height + 7) / 8 &&
+               tiles.constants.options[0] == 0u && std::abs(tiles.constants.tuning[1] - 1.146f) < 0.002f,
+           "Engine assist plan: kEngineTiles per 8x8 cells, with the head's turn per frame (" +
+               std::to_string(tiles.constants.tuning[1]) + " degrees)");
+    request.engine_tiles = true;
+    const depthxr::FrameGenViewPlan tiled = depthxr::BuildFrameGenViewPlan(request, tuning);
+    Expect(find(tiled, FrameGenPass::kEngineConvert).inputs[3].kind == FrameGenTextureKind::kEngineTilesPrevious &&
+               find(tiled, FrameGenPass::kEngineConvert).constants.options[0] ==
+                   ((1u << 4) | depthxr::kFrameGenEngineConvertTiles) &&
+               find(tiled, FrameGenPass::kEngineTiles).inputs[1].kind == FrameGenTextureKind::kEngineTilesPrevious &&
+               find(tiled, FrameGenPass::kEngineTiles).constants.options[0] == 1u,
+           "Engine assist plan: the frame before's tiles where the backend has them");
+    request.engine_tiles = false;
+    // The filters' label rules behind their switch.
+    Expect(find(assisted, FrameGenPass::kFilter).inputs[4].kind == FrameGenTextureKind::kNone &&
+               (find(assisted, FrameGenPass::kFilter).constants.options[1] & depthxr::kFrameGenFlagEngine) == 0,
+           "Engine assist plan: no label rules without VECTORXR_FRAMEGEN_ENGINE_FILTER");
+    tuning.engine_filter = true;
+    const depthxr::FrameGenDispatch labelled = find(depthxr::BuildFrameGenViewPlan(request, tuning), FrameGenPass::kFilter);
+    tuning.engine_cockpit = true;
+    const depthxr::FrameGenDispatch cockpit = find(depthxr::BuildFrameGenViewPlan(request, tuning), FrameGenPass::kFilter);
+    Expect(labelled.inputs[4].kind == FrameGenTextureKind::kEngineLabels &&
+               (labelled.constants.options[1] & depthxr::kFrameGenFlagEngine) != 0 && labelled.constants.options[0] == 0u &&
+               cockpit.constants.options[0] == 1u,
+           "Engine assist plan: the labels at the filter's input 4, options.x 1 for the cockpit's movers");
+    tuning.engine_filter = tuning.engine_cockpit = false;
+    // With world motion: fitted (or set) before the conversion, for the
+    // classes, from the measured flow; the filter then reads it as before.
+    request.world_motion = true;
+    const depthxr::FrameGenViewPlan world = depthxr::BuildFrameGenViewPlan(request, tuning);
+    bool fit_measured = true;
+    for (const auto& dispatch : world.dispatches) {
+        if (dispatch.pass == FrameGenPass::kWorldReduce) {
+            fit_measured = fit_measured && dispatch.inputs[0].kind == FrameGenTextureKind::kFlow;
+        }
+    }
+    Expect(order(world) == "refine refine R S W w W w W w convert merge tiles filter " && fit_measured &&
+               find(world, FrameGenPass::kEngineConvert).inputs[4].kind == FrameGenTextureKind::kWorldParams &&
+               (find(world, FrameGenPass::kEngineConvert).constants.options[0] & depthxr::kFrameGenEngineConvertWorld) != 0 &&
+               find(world, FrameGenPass::kFilter).inputs[3].kind == FrameGenTextureKind::kWorldParams,
+           "Engine assist plan: the world fit before the conversion, from the measured flow (" + order(world) + ")");
+    // Interpolating just in time: the cover filter reads the merged flow
+    // too, and the world fit (the cover's) comes first; Lead is capped at
+    // Assist.
+    tuning.mode = depthxr::FrameGenSynthesisMode::kInterpolate;
+    tuning.cover = true;
+    tuning.engine_mode = FrameGenEngineMode::kLead;
+    const depthxr::FrameGenViewPlan interpolated = depthxr::BuildFrameGenViewPlan(request, tuning);
+    std::vector<depthxr::FrameGenDispatch> interpolated_filters;
+    for (const auto& dispatch : interpolated.dispatches) {
+        if (dispatch.pass == FrameGenPass::kFilter) interpolated_filters.push_back(dispatch);
+    }
+    Expect(depthxr::FrameGenEngineModeFor(tuning) == FrameGenEngineMode::kAssist &&
+               order(interpolated) == "refine refine R S W w W w W w convert merge tiles filter filter " &&
+               find(interpolated, FrameGenPass::kEngineMerge).constants.options[0] == depthxr::kFrameGenEngineMergeAssist &&
+               interpolated_filters.size() == 2 && interpolated_filters[0].inputs[0].kind == FrameGenTextureKind::kEngineFlow &&
+               interpolated_filters[1].inputs[0].kind == FrameGenTextureKind::kEngineFlow &&
+               interpolated_filters[1].inputs[3].kind == FrameGenTextureKind::kWorldParams &&
+               interpolated_filters[0].inputs[3].kind == FrameGenTextureKind::kNone,
+           "Engine assist plan: interpolating, capped at Assist, both filters read the merged flow (" +
+               order(interpolated) + ")");
+    tuning.mode = depthxr::FrameGenSynthesisMode::kExtrapolate;
+    tuning.cover = false;
+    // Extrapolating in Lead, Lead's rule once the convention is locked
+    // (stage 6); before, Assist's plan.
+    Expect(depthxr::FrameGenEngineModeFor(tuning) == FrameGenEngineMode::kLead && !depthxr::FrameGenEngineLeads(request, tuning) &&
+               find(depthxr::BuildFrameGenViewPlan(request, tuning), FrameGenPass::kEngineMerge).constants.options[0] ==
+                   depthxr::kFrameGenEngineMergeAssist,
+           "Engine assist plan: extrapolating in Lead, Assist's rule until the convention is locked");
+    tuning.engine_locked = true;
+    Expect(depthxr::FrameGenEngineLeads(request, tuning) &&
+               find(depthxr::BuildFrameGenViewPlan(request, tuning), FrameGenPass::kEngineMerge).constants.options[0] ==
+                   depthxr::kFrameGenEngineMergeLead,
+           "Engine assist plan: extrapolating, Lead's rule (stage 6)");
+    tuning.engine_locked = false;
+    tuning.engine_mode = FrameGenEngineMode::kAssist;
+    request.world_motion = false;
+    // None without the evidence (a gate, a view without vectors).
+    request.engine_motion = false;
+    const depthxr::FrameGenViewPlan without = depthxr::BuildFrameGenViewPlan(request, tuning);
+    Expect(order(without) == "refine refine filter " && find(without, FrameGenPass::kFilter).inputs[0].kind == FrameGenTextureKind::kFlow,
+           "Engine assist plan: none without the frame's evidence, the filter on the measured flow");
+    request.engine_motion = true;
+    // The confidence view's tint: the labels at synthesis's input 5, never
+    // in place of the motion map.
+    tuning.diagnostic = depthxr::FrameGenDiagnosticView::kConfidence;
+    auto synthesis = [&](const depthxr::FrameGenTuning& with) {
+        const depthxr::FrameGenViewPlan plan = depthxr::BuildFrameGenSynthesisPlan(
+            request, with, depthxr::FrameGenSynthesisMode::kExtrapolate, 0.5f, false);
+        return plan.dispatches.back();
+    };
+    Expect(synthesis(tuning).inputs[5].kind == FrameGenTextureKind::kNone, "Engine assist plan: no tint without its switch");
+    tuning.engine_tint = true;
+    const depthxr::FrameGenDispatch tinted = synthesis(tuning);
+    Expect(tinted.inputs[5].kind == FrameGenTextureKind::kEngineLabels &&
+               (tinted.constants.options[1] & depthxr::kFrameGenFlagEngine) != 0,
+           "Engine assist plan: the tint reads the labels at input 5");
+    tuning.depth_splat = true;
+    Expect(synthesis(tuning).inputs[5].kind == FrameGenTextureKind::kMotionMap &&
+               (synthesis(tuning).constants.options[1] & depthxr::kFrameGenFlagEngine) == 0,
+           "Engine assist plan: the motion map keeps input 5");
+    tuning.depth_splat = false;
+    tuning.diagnostic = depthxr::FrameGenDiagnosticView::kOff;
+    Expect(synthesis(tuning).inputs[5].kind == FrameGenTextureKind::kNone, "Engine assist plan: the tint is the confidence view's");
+}
+
+// Stage 6's plan: where the vectors lead (Lead, the convention locked, their
+// evidence asked for), the evidence right after the luma without measured
+// flow, the frame's verdict for both eyes (the predicate), then exactly the
+// downsample, search and refine passes predicated on it (but the downsample
+// to the merge's match level), never the optical flow hardware's pack and
+// unpack, the merge by Lead's rule and the filter on the merged flow; the
+// world's motion set before the conversion, or fitted to the merged flow
+// after it. With engine_predicate false no measured pass at all. Unlocked,
+// or interpolating, Assist's plan. The flow's level holds between the frames
+// the vectors lead and those measured without them (hardware_level): no
+// view's filtered flow is made anew.
+void TestFrameGenEngineLeadPlan() {
+    using depthxr::FrameGenEngineMode;
+    using depthxr::FrameGenPass;
+    using depthxr::FrameGenTextureKind;
+    depthxr::FrameGenViewRequest request;
+    request.extent = {1024, 1024};
+    request.synthesize = request.temporal = request.depth = true;
+    request.newest.angle_left = request.previous.angle_left = -0.9f;
+    request.newest.angle_right = request.previous.angle_right = 0.9f;
+    request.newest.angle_up = request.previous.angle_up = 0.9f;
+    request.newest.angle_down = request.previous.angle_down = -0.9f;
+    request.newest.orientation = {0.0f, 0.01f, 0.0f, 0.99995f};
+    request.engine_motion = true;
+    request.engine_vectors = {800, 790};
+    depthxr::FrameGenTuning tuning;
+    tuning.mode = depthxr::FrameGenSynthesisMode::kExtrapolate;
+    tuning.analyze_only = true;
+    tuning.engine_mode = FrameGenEngineMode::kLead;
+    tuning.engine_locked = true;
+    // The hardware chosen, Quality: the flow at the hardware's level.
+    tuning.hardware_flow = tuning.hardware_level = true;
+    tuning.quality = depthxr::FrameGenFlowQuality::kQuality;
+    // The passes in order (the depth's trust passes aside), a skippable one
+    // marked "?", the predicate (kEngineSolve's stage 2) as "P".
+    auto order = [](const depthxr::FrameGenViewPlan& plan) {
+        std::string text;
+        for (const auto& dispatch : plan.dispatches) {
+            std::string name;
+            switch (dispatch.pass) {
+            case FrameGenPass::kLuma: name = "luma"; break;
+            case FrameGenPass::kFlowPack: name = "pack"; break;
+            case FrameGenPass::kFlowUnpack: name = "unpack"; break;
+            case FrameGenPass::kDownsample: name = "down"; break;
+            case FrameGenPass::kSearch: name = "search"; break;
+            case FrameGenPass::kRefine: name = "refine"; break;
+            case FrameGenPass::kFilter: name = "filter"; break;
+            case FrameGenPass::kEngineReduce: name = "R"; break;
+            case FrameGenPass::kEngineSolve: name = (dispatch.constants.options[0] & 15u) == 2u ? "P" : "S"; break;
+            case FrameGenPass::kEngineConvert: name = "convert"; break;
+            case FrameGenPass::kEngineMerge: name = "merge"; break;
+            case FrameGenPass::kEngineTiles: name = "tiles"; break;
+            case FrameGenPass::kWorldReduce: name = "W"; break;
+            case FrameGenPass::kWorldSolve: name = "w"; break;
+            case FrameGenPass::kWorldSet: name = "set"; break;
+            default: continue;
+            }
+            text += name + (dispatch.predicate == depthxr::kFrameGenPredicateSkip ? "? " : " ");
+        }
+        return text;
+    };
+    auto find = [](const depthxr::FrameGenViewPlan& plan, FrameGenPass pass) {
+        return *std::find_if(plan.dispatches.begin(), plan.dispatches.end(),
+                             [&](const depthxr::FrameGenDispatch& dispatch) { return dispatch.pass == pass; });
+    };
+    auto same = [](const depthxr::FrameGenViewPlan& a, const depthxr::FrameGenViewPlan& b) {
+        bool equal = a.dispatches.size() == b.dispatches.size();
+        for (std::size_t i = 0; equal && i < a.dispatches.size(); ++i) {
+            equal = a.dispatches[i].pass == b.dispatches[i].pass && a.dispatches[i].predicate == b.dispatches[i].predicate &&
+                    std::memcmp(a.dispatches[i].inputs.data(), b.dispatches[i].inputs.data(), sizeof(a.dispatches[i].inputs)) == 0 &&
+                    std::memcmp(a.dispatches[i].outputs.data(), b.dispatches[i].outputs.data(), sizeof(a.dispatches[i].outputs)) == 0 &&
+                    std::memcmp(&a.dispatches[i].constants, &b.dispatches[i].constants, sizeof(depthxr::FrameGenConstants)) == 0;
+        }
+        return equal;
+    };
+    const depthxr::FrameGenViewPlan lead = depthxr::BuildFrameGenViewPlan(request, tuning);
+    Expect(lead.final_flow_level == depthxr::kFrameGenHardwareFlowLevel &&
+               order(lead) == "luma R S P down? down? down? down? search? refine? refine? convert merge tiles filter ",
+           "Engine lead plan: the evidence and predicate after the luma, the measured passes predicated, no optical flow "
+           "hardware (" + order(lead) + ")");
+    std::size_t predicated = 0, set = 0;
+    bool measured_only = true;
+    for (const auto& dispatch : lead.dispatches) {
+        predicated += dispatch.predicate == depthxr::kFrameGenPredicateSkip ? 1 : 0;
+        set += dispatch.predicate == depthxr::kFrameGenPredicateSet ? 1 : 0;
+        measured_only = measured_only && (dispatch.predicate != depthxr::kFrameGenPredicateSkip ||
+                                          dispatch.pass == FrameGenPass::kDownsample || dispatch.pass == FrameGenPass::kSearch ||
+                                          dispatch.pass == FrameGenPass::kRefine);
+    }
+    Expect(predicated == 7 && set == 1 && measured_only,
+           "Engine lead plan: exactly the downsample, search and refine passes predicated, one predicate");
+    // The evidence without measured flow (Lead's photometric test, against
+    // no motion); the predicate from both eyes' verdicts into kEngineVerdict;
+    // the merge by Lead's rule, the measured flow there for a frame whose
+    // verdict holds the vectors back.
+    const depthxr::FrameGenDispatch reduce = find(lead, FrameGenPass::kEngineReduce);
+    std::vector<depthxr::FrameGenDispatch> solves;
+    for (const auto& dispatch : lead.dispatches) {
+        if (dispatch.pass == FrameGenPass::kEngineSolve) solves.push_back(dispatch);
+    }
+    const depthxr::FrameGenDispatch merge = find(lead, FrameGenPass::kEngineMerge);
+    Expect(reduce.inputs[4].kind == FrameGenTextureKind::kNone && (reduce.constants.options[0] & (1u << 8)) == 0 &&
+               solves.size() == 2 && (solves[0].constants.options[0] & (1u << 6)) != 0 &&
+               (solves[0].constants.options[0] & (1u << 4)) != 0 &&
+               solves[1].inputs[3].kind == FrameGenTextureKind::kEngineParams &&
+               solves[1].inputs[5].kind == FrameGenTextureKind::kEngineParamsOther &&
+               solves[1].outputs[0].kind == FrameGenTextureKind::kEngineVerdict &&
+               solves[1].predicate == depthxr::kFrameGenPredicateSet && solves[1].width == 8 && solves[1].height == 8 &&
+               merge.constants.options[0] == depthxr::kFrameGenEngineMergeLead &&
+               merge.inputs[4].kind == FrameGenTextureKind::kFlow && merge.inputs[4].level == 3 &&
+               find(lead, FrameGenPass::kFilter).inputs[0].kind == FrameGenTextureKind::kEngineFlow,
+           "Engine lead plan: no measured flow in the evidence, both eyes' verdicts the predicate, Lead's merge");
+    // Balanced on the shader cores alike; Performance merges on level 2's
+    // luma, whose downsample runs whatever the verdict.
+    tuning.hardware_flow = tuning.hardware_level = false;
+    tuning.quality = depthxr::FrameGenFlowQuality::kBalanced;
+    Expect(order(depthxr::BuildFrameGenViewPlan(request, tuning)) ==
+               "luma R S P down? down? down? down? search? refine? refine? convert merge tiles filter ",
+           "Engine lead plan: Balanced alike");
+    tuning.quality = depthxr::FrameGenFlowQuality::kPerformance;
+    const depthxr::FrameGenViewPlan coarse = depthxr::BuildFrameGenViewPlan(request, tuning);
+    Expect(order(coarse) == "luma R S P down down? down? down? search? refine? convert merge tiles filter " &&
+               find(coarse, FrameGenPass::kEngineMerge).inputs[0].level == 2,
+           "Engine lead plan: Performance's downsample to level 2 is never skipped (" + order(coarse) + ")");
+    // VECTORXR_FRAMEGEN_ENGINE_PREDICATE=0: no measured pass, no predicate;
+    // the merge reads no measured flow.
+    tuning.engine_predicate = false;
+    const depthxr::FrameGenViewPlan unmeasured = depthxr::BuildFrameGenViewPlan(request, tuning);
+    tuning.quality = depthxr::FrameGenFlowQuality::kBalanced;
+    const depthxr::FrameGenViewPlan unmeasured_balanced = depthxr::BuildFrameGenViewPlan(request, tuning);
+    Expect(order(unmeasured) == "luma R S down convert merge tiles filter " &&
+               order(unmeasured_balanced) == "luma R S convert merge tiles filter " &&
+               find(unmeasured_balanced, FrameGenPass::kEngineMerge).constants.options[0] ==
+                   (depthxr::kFrameGenEngineMergeLead | depthxr::kFrameGenEngineMergeUnmeasured) &&
+               find(unmeasured_balanced, FrameGenPass::kEngineMerge).inputs[4].kind == FrameGenTextureKind::kNone,
+           "Engine lead plan: with engine_predicate false, nothing measured (" + order(unmeasured) + ", " +
+               order(unmeasured_balanced) + ")");
+    tuning.engine_predicate = true;
+    // Unlocked, interpolating, or without the evidence: Assist's plan (the
+    // optical flow hardware's where it is chosen), byte for byte.
+    tuning.hardware_flow = tuning.hardware_level = true;
+    tuning.quality = depthxr::FrameGenFlowQuality::kQuality;
+    tuning.engine_locked = false;
+    depthxr::FrameGenTuning assist = tuning;
+    assist.engine_mode = FrameGenEngineMode::kAssist;
+    Expect(same(depthxr::BuildFrameGenViewPlan(request, tuning), depthxr::BuildFrameGenViewPlan(request, assist)) &&
+               order(depthxr::BuildFrameGenViewPlan(request, tuning)) == "luma pack unpack R S convert merge tiles filter ",
+           "Engine lead plan: unlocked, Assist's plan with the hardware's flow");
+    tuning.engine_locked = assist.engine_locked = true;
+    tuning.mode = assist.mode = depthxr::FrameGenSynthesisMode::kInterpolate;
+    tuning.cover = assist.cover = true;
+    Expect(same(depthxr::BuildFrameGenViewPlan(request, tuning), depthxr::BuildFrameGenViewPlan(request, assist)),
+           "Engine lead plan: interpolating, Assist's plan");
+    tuning.engine_interpolate = true;
+    const depthxr::FrameGenViewPlan interpolated = depthxr::BuildFrameGenViewPlan(request, tuning);
+    std::vector<depthxr::FrameGenDispatch> interpolated_filters;
+    for (const auto& dispatch : interpolated.dispatches) {
+        if (dispatch.pass == FrameGenPass::kFilter) interpolated_filters.push_back(dispatch);
+    }
+    Expect(order(interpolated) == "luma R S P down? down? down? down? search? refine? refine? convert merge tiles filter filter " &&
+               interpolated_filters.size() == 2 && interpolated_filters[1].inputs[0].kind == FrameGenTextureKind::kEngineFlow,
+           "Engine lead plan: interpolating led with engine_interpolate, the cover on the merged flow (" +
+               order(interpolated) + ")");
+    tuning.engine_interpolate = false;
+    tuning.mode = depthxr::FrameGenSynthesisMode::kExtrapolate;
+    tuning.cover = false;
+    request.engine_motion = false;
+    assist.engine_mode = FrameGenEngineMode::kOff;
+    assist.mode = depthxr::FrameGenSynthesisMode::kExtrapolate;
+    assist.cover = false;
+    Expect(same(depthxr::BuildFrameGenViewPlan(request, tuning), depthxr::BuildFrameGenViewPlan(request, assist)),
+           "Engine lead plan: without the evidence, the plan without the vectors");
+    request.engine_motion = true;
+    // The world's motion: fitted to the merged flow after the merge, or the
+    // application's set before the conversion (its classes), on the
+    // watchdog's frames the fit after the merge and the set again.
+    request.world_motion = true;
+    const depthxr::FrameGenViewPlan fitted = depthxr::BuildFrameGenViewPlan(request, tuning);
+    bool fit_merged = true;
+    for (const auto& dispatch : fitted.dispatches) {
+        if (dispatch.pass == FrameGenPass::kWorldReduce) {
+            fit_merged = fit_merged && dispatch.inputs[0].kind == FrameGenTextureKind::kEngineFlow;
+        }
+    }
+    Expect(order(fitted) == "luma R S P down? down? down? down? search? refine? refine? convert merge tiles W w W w W w filter " &&
+               fit_merged && find(fitted, FrameGenPass::kEngineConvert).inputs[4].kind == FrameGenTextureKind::kNone &&
+               find(fitted, FrameGenPass::kFilter).inputs[3].kind == FrameGenTextureKind::kWorldParams,
+           "Engine lead plan: the world fitted to the merged flow after the merge (" + order(fitted) + ")");
+    request.app_delta = true;
+    request.game_newest = request.newest;
+    request.game_previous = request.previous;
+    request.delta_position = {0.0f, 0.0f, 1.8f};
+    tuning.world_delta = true;
+    const depthxr::FrameGenViewPlan set_first = depthxr::BuildFrameGenViewPlan(request, tuning);
+    tuning.delta_watchdog = true;
+    const depthxr::FrameGenViewPlan watched = depthxr::BuildFrameGenViewPlan(request, tuning);
+    Expect(order(set_first) == "luma R S P down? down? down? down? search? refine? refine? set convert merge tiles filter " &&
+               (find(set_first, FrameGenPass::kEngineConvert).constants.options[0] & depthxr::kFrameGenEngineConvertWorld) != 0 &&
+               order(watched) ==
+                   "luma R S P down? down? down? down? search? refine? refine? set convert merge tiles W w W w W w set filter ",
+           "Engine lead plan: the application's motion set before the conversion, the watchdog's fit after the merge (" +
+               order(set_first) + ", " + order(watched) + ")");
+    tuning.world_delta = tuning.delta_watchdog = false;
+    request.world_motion = request.app_delta = false;
+    // The level the backend's views are set up for: the frames the vectors
+    // lead (the hardware idle) and those measured without them (on it) end
+    // at one level with hardware_level, so their filtered flow is never
+    // made anew; without it a led frame would end at Quality's level 2.
+    depthxr::FrameGenTuning led = tuning;
+    led.hardware_flow = false;
+    depthxr::FrameGenTuning measured = tuning;
+    measured.engine_mode = FrameGenEngineMode::kAssist;
+    depthxr::FrameGenHistoryState history;
+    const unsigned first = history.Configure({1024, 1024}, 28, depthxr::FrameGenOutputKind::kSrgb8,
+                                             depthxr::FrameGenFinalFlowLevel(led), 3);
+    const unsigned fallback = history.Configure({1024, 1024}, 28, depthxr::FrameGenOutputKind::kSrgb8,
+                                                depthxr::FrameGenFinalFlowLevel(measured), 3);
+    const unsigned again = history.Configure({1024, 1024}, 28, depthxr::FrameGenOutputKind::kSrgb8,
+                                             depthxr::FrameGenFinalFlowLevel(led), 3);
+    led.hardware_level = false;
+    const unsigned unpinned = history.Configure({1024, 1024}, 28, depthxr::FrameGenOutputKind::kSrgb8,
+                                                depthxr::FrameGenFinalFlowLevel(led), 3);
+    Expect(first == depthxr::FrameGenHistoryState::kAll && fallback == depthxr::FrameGenHistoryState::kNone &&
+               again == depthxr::FrameGenHistoryState::kNone && unpinned == depthxr::FrameGenHistoryState::kFiltered,
+           "Engine lead plan: Lead -> Assist -> Lead keeps the views' filtered flow at the hardware's level");
+}
+
+// Stage 8's plans. Interpolating from Assist with the seen test
+// (engine_visibility) and the previous frame's depth, the solve's second
+// stage writes both eyes' verdict (no predicate) right before the conversion,
+// which reads it in place of the view's own parameters and the previous
+// frame's depth in place of the other view's; the merge keeps the surfaces'
+// depths in the labels. In Lead its predicate's verdict serves. Extrapolating,
+// without the previous frame's depth or the switch, the plans as before.
+// Interpolated frames read the labels at input 5 (with
+// engine_visibility_synthesis), or with engine_bidir the forward map built for
+// them from the previous frame's depth and filtered flow.
+void TestFrameGenEngineVisibilityPlan() {
+    using depthxr::FrameGenEngineMode;
+    using depthxr::FrameGenPass;
+    using depthxr::FrameGenSynthesisMode;
+    using depthxr::FrameGenTextureKind;
+    depthxr::FrameGenViewRequest request;
+    request.extent = {1024, 1024};
+    request.synthesize = request.temporal = request.depth = request.depth_previous = true;
+    for (auto* geometry : {&request.newest, &request.previous}) {
+        geometry->angle_left = geometry->angle_down = -0.9f;
+        geometry->angle_right = geometry->angle_up = 0.9f;
+    }
+    request.previous.orientation = {0.0f, 0.01f, 0.0f, 0.99995f};
+    request.shift = {0.02f, 0.0f, 0.004f};
+    request.engine_motion = true;
+    request.engine_vectors = {800, 790};
+    depthxr::FrameGenTuning tuning;
+    tuning.mode = FrameGenSynthesisMode::kInterpolate;
+    tuning.analyze_only = true;
+    tuning.engine_mode = FrameGenEngineMode::kAssist;
+    tuning.engine_locked = true;
+    auto order = [](const depthxr::FrameGenViewPlan& plan) {
+        std::string text;
+        for (const auto& dispatch : plan.dispatches) {
+            switch (dispatch.pass) {
+            case FrameGenPass::kEngineReduce: text += "R "; break;
+            case FrameGenPass::kEngineSolve: text += (dispatch.constants.options[0] & 15u) == 2u ? "P " : "S "; break;
+            case FrameGenPass::kEngineConvert: text += "convert "; break;
+            case FrameGenPass::kEngineMerge: text += "merge "; break;
+            case FrameGenPass::kShiftClear: text += dispatch.outputs[1].kind == FrameGenTextureKind::kShiftMap ? "C " : "c "; break;
+            case FrameGenPass::kShiftSplat: text += "s "; break;
+            case FrameGenPass::kShiftResolve: text += "r "; break;
+            case FrameGenPass::kShiftFill: text += "f "; break;
+            case FrameGenPass::kShiftSplatEngine: text += "es "; break;
+            case FrameGenPass::kShiftResolveEngine: text += "er "; break;
+            case FrameGenPass::kShiftFillEngine: text += "ef "; break;
+            case FrameGenPass::kSynthesizeUnorm8: text += "synth "; break;
+            default: break;
+            }
+        }
+        return text;
+    };
+    auto find = [](const depthxr::FrameGenViewPlan& plan, FrameGenPass pass) {
+        return *std::find_if(plan.dispatches.begin(), plan.dispatches.end(),
+                             [&](const depthxr::FrameGenDispatch& dispatch) { return dispatch.pass == pass; });
+    };
+    // kEngineSolve's second stage: both eyes' verdict.
+    auto verdict_of = [](const depthxr::FrameGenViewPlan& plan) {
+        return *std::find_if(plan.dispatches.begin(), plan.dispatches.end(), [](const depthxr::FrameGenDispatch& dispatch) {
+            return dispatch.pass == FrameGenPass::kEngineSolve && (dispatch.constants.options[0] & 15u) == 2u;
+        });
+    };
+    auto same = [](const depthxr::FrameGenViewPlan& a, const depthxr::FrameGenViewPlan& b) {
+        bool equal = a.dispatches.size() == b.dispatches.size();
+        for (std::size_t i = 0; equal && i < a.dispatches.size(); ++i) {
+            equal = a.dispatches[i].pass == b.dispatches[i].pass && a.dispatches[i].predicate == b.dispatches[i].predicate &&
+                    std::memcmp(a.dispatches[i].inputs.data(), b.dispatches[i].inputs.data(), sizeof(a.dispatches[i].inputs)) == 0 &&
+                    std::memcmp(a.dispatches[i].outputs.data(), b.dispatches[i].outputs.data(), sizeof(a.dispatches[i].outputs)) == 0 &&
+                    std::memcmp(&a.dispatches[i].constants, &b.dispatches[i].constants, sizeof(depthxr::FrameGenConstants)) == 0;
+        }
+        return equal;
+    };
+
+    // The analysis.
+    const depthxr::FrameGenViewPlan plain = depthxr::BuildFrameGenViewPlan(request, tuning);
+    tuning.engine_visibility = true;
+    Expect(depthxr::FrameGenEngineVisibility(tuning), "Engine visibility plan: the seen test interpolating from Assist");
+    const depthxr::FrameGenViewPlan seen = depthxr::BuildFrameGenViewPlan(request, tuning);
+    const depthxr::FrameGenDispatch verdict = verdict_of(seen);
+    const depthxr::FrameGenDispatch convert = find(seen, FrameGenPass::kEngineConvert);
+    const depthxr::FrameGenDispatch merge = find(seen, FrameGenPass::kEngineMerge);
+    Expect(order(plain) == "R S convert merge " && order(seen) == "R S P convert merge ",
+           "Engine visibility plan: both eyes' verdict right before the conversion (" + order(seen) + ")");
+    Expect(verdict.predicate == depthxr::kFrameGenPredicateNone && verdict.inputs[3].kind == FrameGenTextureKind::kEngineParams &&
+               verdict.inputs[5].kind == FrameGenTextureKind::kEngineParamsOther &&
+               verdict.outputs[0].kind == FrameGenTextureKind::kEngineVerdict && convert.inputs[2].kind == FrameGenTextureKind::kEngineVerdict &&
+               convert.inputs[5].kind == FrameGenTextureKind::kDepthPrevious &&
+               (convert.constants.options[0] & depthxr::kFrameGenEngineConvertSeen) != 0 &&
+               merge.inputs[5].kind == FrameGenTextureKind::kDepth &&
+               (merge.constants.options[0] & depthxr::kFrameGenEngineMergeDepths) != 0,
+           "Engine visibility plan: the verdict without a predicate, the conversion's seen test on the previous frame's "
+           "depth, the merge keeping the surfaces' depths");
+    // Nothing else of the analysis changes.
+    std::size_t changed = 0;
+    for (std::size_t i = 0, j = 0; i < plain.dispatches.size() && j < seen.dispatches.size(); ++i, ++j) {
+        if (seen.dispatches[j].pass == FrameGenPass::kEngineSolve && (seen.dispatches[j].constants.options[0] & 15u) == 2u) ++j;
+        const bool equal = plain.dispatches[i].pass == seen.dispatches[j].pass &&
+                           std::memcmp(&plain.dispatches[i].constants, &seen.dispatches[j].constants,
+                                       sizeof(depthxr::FrameGenConstants)) == 0 &&
+                           std::memcmp(plain.dispatches[i].inputs.data(), seen.dispatches[j].inputs.data(),
+                                       sizeof(plain.dispatches[i].inputs)) == 0;
+        changed += equal ? 0 : 1;
+    }
+    Expect(seen.dispatches.size() == plain.dispatches.size() + 1 && changed == 2,
+           "Engine visibility plan: only the conversion and the merge change (" + std::to_string(changed) + ")");
+    // Without the previous frame's depth, extrapolating, observing, or with
+    // the switch off: as before.
+    request.depth_previous = false;
+    depthxr::FrameGenTuning switched_off = tuning;
+    switched_off.engine_visibility = false;
+    Expect(same(depthxr::BuildFrameGenViewPlan(request, tuning), depthxr::BuildFrameGenViewPlan(request, switched_off)),
+           "Engine visibility plan: without the previous frame's depth, as without the switch");
+    request.depth_previous = true;
+    depthxr::FrameGenTuning extrapolating = tuning, extrapolating_plain = tuning;
+    extrapolating.mode = extrapolating_plain.mode = FrameGenSynthesisMode::kExtrapolate;
+    extrapolating_plain.engine_visibility = false;
+    Expect(!depthxr::FrameGenEngineVisibility(extrapolating) &&
+               same(depthxr::BuildFrameGenViewPlan(request, extrapolating),
+                    depthxr::BuildFrameGenViewPlan(request, extrapolating_plain)),
+           "Engine visibility plan: extrapolating, as without the switch");
+    depthxr::FrameGenTuning observing = tuning, observing_plain = tuning;
+    observing.engine_mode = observing_plain.engine_mode = FrameGenEngineMode::kObserve;
+    observing_plain.engine_visibility = false;
+    Expect(!depthxr::FrameGenEngineVisibility(observing) &&
+               same(depthxr::BuildFrameGenViewPlan(request, observing), depthxr::BuildFrameGenViewPlan(request, observing_plain)),
+           "Engine visibility plan: observing, as without the switch");
+    // Interpolating led (engine_interpolate): the predicate's verdict serves;
+    // with no measured pass at all, the verdict is written for the test.
+    tuning.engine_mode = FrameGenEngineMode::kLead;
+    tuning.engine_interpolate = true;
+    const depthxr::FrameGenViewPlan led = depthxr::BuildFrameGenViewPlan(request, tuning);
+    std::size_t verdicts = 0;
+    for (const auto& dispatch : led.dispatches) {
+        verdicts += dispatch.pass == FrameGenPass::kEngineSolve && (dispatch.constants.options[0] & 15u) == 2u ? 1 : 0;
+    }
+    Expect(verdicts == 1 && order(led) == "R S P convert merge " &&
+               verdict_of(led).predicate == depthxr::kFrameGenPredicateSet &&
+               find(led, FrameGenPass::kEngineConvert).inputs[2].kind == FrameGenTextureKind::kEngineVerdict &&
+               find(led, FrameGenPass::kEngineConvert).inputs[5].kind == FrameGenTextureKind::kDepthPrevious,
+           "Engine visibility plan: led, the predicate's verdict read by the conversion (" + order(led) + ")");
+    tuning.engine_predicate = false;
+    const depthxr::FrameGenViewPlan unmeasured = depthxr::BuildFrameGenViewPlan(request, tuning);
+    Expect(order(unmeasured) == "R S P convert merge " &&
+               verdict_of(unmeasured).predicate == depthxr::kFrameGenPredicateNone,
+           "Engine visibility plan: led with no measured pass, the verdict written for the test (" + order(unmeasured) + ")");
+    tuning.engine_predicate = true;
+    tuning.engine_interpolate = false;
+    tuning.engine_mode = FrameGenEngineMode::kAssist;
+
+    // The frames written just in time: the labels at input 5 with the
+    // synthesis switch (the analysed request labelled with depth), never
+    // extrapolating (cover frames); the forward map with engine_bidir.
+    auto synthesis = [&](const depthxr::FrameGenTuning& with, FrameGenSynthesisMode mode, float fraction) {
+        return depthxr::BuildFrameGenSynthesisPlan(request, with, mode, fraction, mode == FrameGenSynthesisMode::kExtrapolate);
+    };
+    depthxr::FrameGenTuning off = tuning;
+    off.engine_visibility = false;
+    const depthxr::FrameGenViewPlan written_plain = synthesis(off, FrameGenSynthesisMode::kInterpolate, 0.5f);
+    const depthxr::FrameGenViewPlan written_merge = synthesis(tuning, FrameGenSynthesisMode::kInterpolate, 0.5f);
+    tuning.engine_visibility_synthesis = true;
+    const depthxr::FrameGenViewPlan written = synthesis(tuning, FrameGenSynthesisMode::kInterpolate, 0.5f);
+    const depthxr::FrameGenDispatch& output = written.dispatches.back();
+    Expect(same(written_merge, written_plain) && written.dispatches.size() == written_plain.dispatches.size() &&
+               output.inputs[5].kind == FrameGenTextureKind::kEngineLabels &&
+               output.constants.options[1] ==
+                   (written_plain.dispatches.back().constants.options[1] | depthxr::kFrameGenFlagEngineVisibility),
+           "Engine visibility plan: interpolated frames read the labels at input 5 with the synthesis switch alone");
+    Expect(same(synthesis(tuning, FrameGenSynthesisMode::kExtrapolate, 0.5f),
+                synthesis(off, FrameGenSynthesisMode::kExtrapolate, 0.5f)),
+           "Engine visibility plan: cover frames (extrapolated) as without the switch");
+    request.engine_motion = false;
+    Expect(same(synthesis(tuning, FrameGenSynthesisMode::kInterpolate, 0.5f), written_plain),
+           "Engine visibility plan: a real frame without the vectors' labels, as without the switch");
+    request.engine_motion = true;
+
+    tuning.engine_bidir = true;
+    const depthxr::FrameGenViewPlan forward = synthesis(tuning, FrameGenSynthesisMode::kInterpolate, 0.25f);
+    const depthxr::FrameGenDispatch& forward_splat = forward.dispatches[forward.dispatches.size() - 3];
+    const depthxr::FrameGenDispatch& forward_resolve = forward.dispatches[forward.dispatches.size() - 2];
+    const depthxr::FrameGenDispatch& forward_output = forward.dispatches.back();
+    Expect(order(forward) == "C s r f c es er synth " &&
+               forward_splat.constants.options[0] == depthxr::kFrameGenEngineMapForward &&
+               forward_splat.constants.options[1] ==
+                   (depthxr::kFrameGenFlagDepth | depthxr::kFrameGenFlagDepthSplat | depthxr::kFrameGenFlagEngine) &&
+               forward_splat.constants.tuning[1] == 0.25f &&
+               forward_splat.constants.rot0 == written_plain.dispatches.back().constants.rot0 &&
+               forward_splat.inputs[0].kind == FrameGenTextureKind::kDepthPrevious &&
+               forward_splat.inputs[1].kind == FrameGenTextureKind::kFilteredPrevious &&
+               forward_splat.inputs[1].level == forward.final_flow_level &&
+               forward_resolve.inputs[2].kind == FrameGenTextureKind::kShiftKeys &&
+               forward_resolve.outputs[0].kind == FrameGenTextureKind::kMotionMap &&
+               !depthxr::FrameGenEngineMapTime(forward),
+           "Engine visibility plan: the forward map after the eye-shift map, from the previous frame's depth and "
+           "filtered flow, its fraction, no engine motion map's time (" + order(forward) + ")");
+    Expect(forward_output.inputs[5].kind == FrameGenTextureKind::kMotionMap &&
+               (forward_output.constants.options[1] & depthxr::kFrameGenFlagEngineBidir) != 0 &&
+               (forward_output.constants.options[1] & depthxr::kFrameGenFlagEngineVisibility) == 0,
+           "Engine visibility plan: the forward map read at input 5 in place of the labels");
+    // The previous frame's flow is the pair before's: moved the intervals'
+    // ratio as far (clamped as the filters clamp it).
+    depthxr::FrameGenTuning uneven = tuning;
+    uneven.interval_ratio = 1.5f;
+    const depthxr::FrameGenViewPlan forward_uneven = synthesis(uneven, FrameGenSynthesisMode::kInterpolate, 0.25f);
+    uneven.interval_ratio = 9.0f;
+    const depthxr::FrameGenViewPlan forward_clamped = synthesis(uneven, FrameGenSynthesisMode::kInterpolate, 0.25f);
+    Expect(forward_uneven.dispatches[forward_uneven.dispatches.size() - 3].constants.tuning[1] == 0.375f &&
+               forward_uneven.dispatches[forward_uneven.dispatches.size() - 2].constants.tuning[1] == 0.375f &&
+               forward_uneven.dispatches.back().constants.tuning[0] == 0.25f &&
+               forward_clamped.dispatches[forward_clamped.dispatches.size() - 3].constants.tuning[1] == 1.0f,
+           "Engine visibility plan: the forward map moves the previous frame's flow by the fraction times the "
+           "intervals' ratio");
+    // A real frame whose vectors were held back or missing: no forward map,
+    // its frames mk1's.
+    request.engine_motion = false;
+    Expect(same(synthesis(tuning, FrameGenSynthesisMode::kInterpolate, 0.5f), written_plain),
+           "Engine visibility plan: no forward map for a real frame without the vectors");
+    request.engine_motion = true;
+    request.depth_previous = false;
+    Expect(same(synthesis(tuning, FrameGenSynthesisMode::kInterpolate, 0.5f), written),
+           "Engine visibility plan: no forward map without the previous frame's depth (the labels read)");
+    request.depth_previous = true;
+    depthxr::FrameGenTuning bidir_observing = tuning;
+    bidir_observing.engine_mode = FrameGenEngineMode::kObserve;
+    Expect(same(synthesis(bidir_observing, FrameGenSynthesisMode::kInterpolate, 0.5f),
+                synthesis(off, FrameGenSynthesisMode::kInterpolate, 0.5f)),
+           "Engine visibility plan: observing, neither");
+
+    // Written together (frames generated with their analysis): the same.
+    tuning.analyze_only = false;
+    tuning.generated = 2;
+    tuning.fractions = {0.25f, 0.75f};
+    tuning.engine_bidir = false;
+    const depthxr::FrameGenViewPlan together = depthxr::BuildFrameGenViewPlan(request, tuning);
+    std::size_t reading = 0;
+    for (const auto& dispatch : together.dispatches) {
+        reading += dispatch.pass == FrameGenPass::kSynthesizeUnorm8 && dispatch.inputs[5].kind == FrameGenTextureKind::kEngineLabels &&
+                           (dispatch.constants.options[1] & depthxr::kFrameGenFlagEngineVisibility) != 0
+                       ? 1
+                       : 0;
+    }
+    tuning.engine_bidir = true;
+    const depthxr::FrameGenViewPlan together_forward = depthxr::BuildFrameGenViewPlan(request, tuning);
+    std::size_t forward_maps = 0, forward_reads = 0;
+    for (const auto& dispatch : together_forward.dispatches) {
+        forward_maps += dispatch.pass == FrameGenPass::kShiftSplatEngine &&
+                                (dispatch.constants.options[0] & depthxr::kFrameGenEngineMapForward) != 0
+                            ? 1
+                            : 0;
+        forward_reads += dispatch.pass == FrameGenPass::kSynthesizeUnorm8 &&
+                                 (dispatch.constants.options[1] & depthxr::kFrameGenFlagEngineBidir) != 0
+                             ? 1
+                             : 0;
+    }
+    Expect(reading == 2 && forward_maps == 2 && forward_reads == 2 && together_forward.frames_in_order,
+           "Engine visibility plan: written together, each frame reads the labels, or its own forward map");
+}
+
+// Stage 6's controller: a session in Lead starts at Assist and leads after
+// 30 verdicts in a row that let the vectors be used; more than 10% of the
+// last 30 frames held back hold it at Assist for 300 real frames, then 30
+// in a row lead again. Verdicts read together count the held ones last. The
+// validator counts the frames either eye's verdict held back.
+void TestFrameGenEngineLeadControl() {
+    depthxr::FrameGenEngineLeadControl control;
+    control.AddVerdicts(29, 0);
+    Expect(!control.Leads(), "Engine lead control: at Assist before 30 verdicts in a row");
+    control.AddVerdicts(1, 0);
+    Expect(control.Leads() && control.Demotions() == 0, "Engine lead control: leads after 30 in a row");
+    control.AddVerdicts(3, 3);
+    for (int i = 0; i < 10; ++i) control.AddFrame();
+    Expect(control.Leads(), "Engine lead control: 3 of the last 30 held back (10%) keep it leading");
+    control.AddVerdicts(1, 1);
+    Expect(!control.Leads() && control.Demotions() == 1, "Engine lead control: a fourth holds it at Assist");
+    control.AddVerdicts(60, 0);
+    for (int i = 0; i < 299; ++i) control.AddFrame();
+    Expect(!control.Leads(), "Engine lead control: at Assist for 300 frames, its verdicts as they may be");
+    control.AddFrame();
+    Expect(control.Leads() && control.Promotions() == 1, "Engine lead control: leads again after 300 frames");
+    // Held back again, its verdicts held back through the 300 frames: then
+    // 30 in a row more.
+    control.AddVerdicts(4, 4);
+    Expect(!control.Leads() && control.Demotions() == 2, "Engine lead control: held at Assist again");
+    for (int i = 0; i < 300; ++i) {
+        control.AddVerdicts(1, 1);
+        control.AddFrame();
+    }
+    control.AddVerdicts(29, 0);
+    Expect(!control.Leads(), "Engine lead control: after the 300 frames, 29 in a row do not lead");
+    // Read together, the held one last: no streak.
+    control.AddVerdicts(2, 1);
+    Expect(!control.Leads(), "Engine lead control: verdicts read together count the held one last");
+    control.AddVerdicts(30, 0);
+    Expect(control.Leads() && control.Promotions() == 2, "Engine lead control: 30 in a row lead again");
+
+    // The validator: a frame held back on either eye is one held frame.
+    depthxr::FrameGenEngineValidator validator;
+    depthxr::FrameGenEngineFrameEvidence frame;
+    frame.views.resize(2);
+    validator.Add(frame, 0.0);
+    frame.views[1].verdict = depthxr::kFrameGenEngineVerdictStale;
+    validator.Add(frame, 0.1);
+    frame.views[0].verdict = depthxr::kFrameGenEngineVerdictPhotometric;
+    validator.Add(frame, 0.2);
+    depthxr::FrameGenEngineValidation report = validator.Report();
+    Expect(report.frames == 3 && report.held == 2 && report.invalid == 3 && report.verdicts == 6 && report.lead_held == 2,
+           "Engine lead control: the validator counts the frames either eye held back (" + std::to_string(report.held) + ", " +
+               std::to_string(report.lead_held) + " as Lead judges them)");
+    // As Lead judges them (lead_held): vectors Assist's test lets be used
+    // (about as good as the measured flow) that beat no motion by less than
+    // 15% while content moves hold a frame back; Assist's photometric reason
+    // alone, the vectors beating no motion clearly, does not.
+    frame.views[0].verdict = frame.views[1].verdict = 0;
+    for (depthxr::FrameGenEngineEvidence& view : frame.views) {
+        view.textured = 1000.0;
+        view.moving = 500.0;
+        view.zero = 100.0;       // 0.1 a sample
+        view.variants[0] = 92.0; // 0.092: above 0.85 of it and the slack
+    }
+    validator.Add(frame, 0.3);
+    report = validator.Report();
+    Expect(report.held == 2 && report.lead_held == 3,
+           "Engine lead control: vectors barely better than no motion are held back as Lead judges them (" +
+               std::to_string(report.lead_held) + ")");
+    frame.views[1].verdict = depthxr::kFrameGenEngineVerdictPhotometric;
+    for (depthxr::FrameGenEngineEvidence& view : frame.views) view.variants[0] = 50.0;
+    validator.Add(frame, 0.4);
+    report = validator.Report();
+    Expect(report.held == 3 && report.lead_held == 3,
+           "Engine lead control: Assist's photometric reason alone does not hold a frame back as Lead judges it (" +
+               std::to_string(report.lead_held) + ")");
+    // Few moving samples: no worse than no motion (and the slack) passes.
+    frame.views[1].verdict = 0;
+    for (depthxr::FrameGenEngineEvidence& view : frame.views) {
+        view.moving = 100.0;
+        view.variants[0] = 104.0;
+    }
+    validator.Add(frame, 0.5);
+    report = validator.Report();
+    Expect(report.held == 3 && report.lead_held == 3,
+           "Engine lead control: with 100 samples moving, vectors within the slack of no motion are not held back (" +
+               std::to_string(report.lead_held) + ")");
+}
+
+// Engine motion validation on synthetic evidence: a game's vectors in a
+// convention (the truth), the head turning both ways at changing speeds and
+// leaning; each frame's evidence as the GPU sums it for the convention under
+// test (the validator's own): C1 from still samples near and far, the pair
+// before's fit, C2 against the measured flow, and photometric sums that
+// favour the convention under test only where it is the truth.
+struct EngineTruth {
+    std::array<double, 2> gain{1.0, 1.0};
+    depthxr::FrameGenEngineCamera camera{depthxr::FrameGenEngineCamera::kIncluded};
+    double jitter_px{0.0}; // each frame's vectors offset by up to this (vector pixels)
+    double offset_px{0.0}; // every frame's vectors offset by this (vector pixels)
+    double noise{0.0};     // noise on the vectors, as a share of the head's movement
+    bool late{false};      // a frame late: the vectors of the pair before
+    bool swapped{false};   // x holds y's vector and y x's
+    bool zero{false};      // the vectors are all zero
+    bool pitch{true};      // the head pitches as well as turns
+    bool still{true};      // still content to fit (none: on foot, nothing still)
+    bool correlated{false}; // the head pitches as it turns
+};
+
+class EngineScenario {
+  public:
+    explicit EngineScenario(EngineTruth truth) : truth_(truth) {}
+    // Frame `f`'s evidence, both views, for `tested` (what the GPU decoded
+    // with), the frame calibrating.
+    depthxr::FrameGenEngineFrameEvidence Frame(int f, const depthxr::FrameGenEngineConvention& tested, bool locked,
+                                              std::uint32_t verdict = 0) const {
+        depthxr::FrameGenEngineFrameEvidence frame;
+        frame.convention = tested;
+        frame.locked = locked;
+        for (int v = 0; v < 2; ++v) {
+            depthxr::FrameGenEngineEvidence view;
+            view.calibrate = true;
+            view.l1 = {2712, 2678};
+            view.vectors = {4339, 4285};
+            view.color = {5424, 5356};
+            view.lag = true;
+            view.verdict = verdict;
+            const auto now = Head(f), before = Head(f - 1);
+            const double jitter = truth_.jitter_px * (Hash(f, 3) * 2.0 - 1.0);
+            for (int s = 0; s < 200 && truth_.still; ++s) {
+                const double u = Hash(s, 5 + v), w = Hash(s, 7 + v);
+                const double z = s % 3 == 0 ? 0.0 : 0.5 + 2.5 * Hash(s, 11); // 0: far
+                auto predict = [&](const std::array<double, 3>& head, int axis, bool translation) {
+                    const double rotation = head[axis] * (1.0 + 0.2 * (axis ? w : u));
+                    return translation ? (z > 0.0 ? head[2] * (axis ? 0.3 : 1.0) / z : 0.0) : rotation;
+                };
+                std::array<double, 2> e{};
+                for (int axis = 0; axis < 2; ++axis) {
+                    const auto& head = truth_.late ? before : now;
+                    const int source = truth_.swapped ? 1 - axis : axis;
+                    const double r = predict(head, source, false), t = predict(head, source, true);
+                    const double movement = truth_.camera == depthxr::FrameGenEngineCamera::kIncluded ? r + t
+                                            : truth_.camera == depthxr::FrameGenEngineCamera::kRotationOnly ? r
+                                                                                                        : 0.0;
+                    const double noise = truth_.noise * (std::abs(r) + 0.01) * (Hash(s * 31 + f, 13 + axis) * 2.0 - 1.0) * 1.7;
+                    const double offset =
+                        (jitter * (axis ? 0.5 : 1.0) + truth_.offset_px) / (0.5 * (axis ? 4285.0 : 4339.0));
+                    e[axis] = truth_.zero ? 0.0 : (movement + noise + offset) / truth_.gain[axis];
+                }
+                for (int axis = 0; axis < 2; ++axis) {
+                    view.cockpit[axis].Add(e[axis], predict(now, axis, false), predict(now, axis, true));
+                    view.cockpit_lag[axis].Add(e[axis], predict(before, axis, false), predict(before, axis, true));
+                }
+                view.swapped[0] += e[0] * predict(now, 1, false);
+                view.swapped[1] += e[1] * predict(now, 0, false);
+            }
+            // C2: content moving on its own (h, NDC) besides the head (q =
+            // h + p); vectors without the head (excluded) follow h.
+            for (int s = 0; s < 200; ++s) {
+                for (int axis = 0; axis < 2; ++axis) {
+                    const double h = 0.01 * (Hash(s + 1000 * f, 17 + axis) * 2.0 - 1.0);
+                    const double p = now[axis];
+                    const double e = truth_.zero ? 0.0
+                                     : truth_.camera == depthxr::FrameGenEngineCamera::kExcluded ? h / truth_.gain[axis]
+                                                                                                  : (h + p) / truth_.gain[axis];
+                    view.measured[axis].Add(e, h + p, h);
+                }
+            }
+            // C3: the convention under test explains the image only where it
+            // is the truth (and the vectors are the frame's own).
+            const bool right = depthxr::SameFrameGenEngineConvention(tested, Truth()) && !truth_.late && !truth_.swapped &&
+                               !truth_.zero && truth_.noise < 0.5;
+            const double n = 1000.0;
+            view.textured = view.with_measured = n;
+            for (std::size_t c = 0; c < view.variants.size(); ++c) view.variants[c] = 0.05 * n;
+            if (right) view.variants[0] = 0.01 * n;
+            view.zero = 0.04 * n;
+            view.measured_cost = 0.0105 * n;
+            view.wins = (right ? 0.95 : 0.3) * n;
+            view.moving = 0.3 * n;
+            view.variant_moving = view.variants[0] * 0.3;
+            view.zero_moving = 0.05 * 0.3 * n;
+            view.lag_samples = n;
+            view.lag_variant = view.variants[0];
+            view.lag_cost = right ? 0.03 * n : view.variants[0];
+            view.epe = {0.4 * n, 0.8 * n, 0.3 * n};
+            view.epe_samples = {n, n, n};
+            frame.views.push_back(view);
+        }
+        return frame;
+    }
+    depthxr::FrameGenEngineConvention Truth() const {
+        depthxr::FrameGenEngineConvention convention;
+        convention.gain = {static_cast<float>(truth_.gain[0]), static_cast<float>(truth_.gain[1])};
+        convention.camera = truth_.camera;
+        return convention;
+    }
+    EngineTruth& truth() { return truth_; }
+
+  private:
+    static double Hash(int a, int b) {
+        std::uint32_t h = static_cast<std::uint32_t>(a) * 374761393u + static_cast<std::uint32_t>(b) * 668265263u;
+        h = (h ^ (h >> 13)) * 1274126177u;
+        return static_cast<double>((h ^ (h >> 16)) & 0xffffu) / 65535.0;
+    }
+    // The head's turn per frame (NDC, x and y) and lean (meters) at frame f:
+    // changing speed and direction from frame to frame.
+    std::array<double, 3> Head(int f) const {
+        const double yaw = 0.012 * std::sin(0.9 * f) + 0.008 * (Hash(f, 1) * 2.0 - 1.0);
+        const double pitch = !truth_.pitch    ? 0.0
+                             : truth_.correlated ? 0.9 * yaw + 0.002 * (Hash(f, 2) * 2.0 - 1.0)
+                                                 : 0.009 * std::cos(1.3 * f) + 0.006 * (Hash(f, 2) * 2.0 - 1.0);
+        return {yaw, pitch, 0.004 * std::sin(0.7 * f)};
+    }
+    EngineTruth truth_;
+};
+
+// Runs a scenario through a validator from frame `first` for `frames`
+// frames, `seconds_per_frame` apart; the frame it locked at (none: never).
+std::optional<int> RunEngineScenario(depthxr::FrameGenEngineValidator& validator, EngineScenario& scenario, int first,
+                                     int frames, double seconds_per_frame = 1.0 / 90.0) {
+    std::optional<int> locked;
+    for (int f = first; f < first + frames; ++f) {
+        validator.Add(scenario.Frame(f, validator.Convention(), validator.Locked()), f * seconds_per_frame);
+        if (!locked && validator.Locked()) locked = f;
+    }
+    return locked;
+}
+
+void TestFrameGenEngineValidator() {
+    using depthxr::FrameGenEngineCamera;
+    using State = depthxr::FrameGenEngineValidator::State;
+    // Each canonical convention, the head included (and its rotation only,
+    // and excluded, for one each), adopted within 30 frames.
+    const auto canonical = depthxr::FrameGenEngineCanonicalGains({4339, 4285}, {5424, 5356});
+    std::vector<EngineTruth> truths;
+    for (const auto& gain : canonical) {
+        EngineTruth truth;
+        truth.gain = gain.gain;
+        truths.push_back(truth);
+    }
+    EngineTruth rotation;
+    rotation.camera = FrameGenEngineCamera::kRotationOnly;
+    rotation.gain = {1.0, -1.0};
+    truths.push_back(rotation);
+    EngineTruth excluded;
+    excluded.camera = FrameGenEngineCamera::kExcluded;
+    excluded.gain = {2.0, -2.0};
+    truths.push_back(excluded);
+    // Excluded in vector pixels, with a little noise: still content's
+    // vectors are near zero in NDC, not in their own units.
+    excluded.gain = canonical[3].gain;
+    excluded.noise = 0.02;
+    truths.push_back(excluded);
+    for (const EngineTruth& truth : truths) {
+        EngineScenario scenario(truth);
+        depthxr::FrameGenEngineValidator validator;
+        const std::optional<int> locked = RunEngineScenario(validator, scenario, 0, 30);
+        const auto report = validator.Report();
+        const std::string what = std::to_string(truth.gain[0]) + "," + std::to_string(truth.gain[1]) + " " +
+                                 depthxr::ToString(truth.camera) + ": " + depthxr::ToString(report.state) + ", " +
+                                 report.reason;
+        Expect(locked && *locked <= 15 && depthxr::SameFrameGenEngineConvention(validator.Convention(), scenario.Truth()) &&
+                   !validator.Convention().jitter && validator.Convention().offset == std::array<float, 2>{0.0f, 0.0f},
+               "Engine validator: the convention is adopted (" + what + ")");
+    }
+
+    // Never adopted: the head never pitching (no batch), the vectors noisy,
+    // a frame late, axes swapped, axes swapped with the head pitching as it
+    // turns (the other axis explains each better), all zero.
+    auto never = [](EngineTruth truth, const std::string& what, const std::string& reason = "") {
+        EngineScenario scenario(truth);
+        depthxr::FrameGenEngineValidator validator;
+        const std::optional<int> locked = RunEngineScenario(validator, scenario, 0, 300);
+        Expect(!locked && validator.GetState() != State::kDisabled,
+               "Engine validator: never adopted " + what + " (" + depthxr::ToString(validator.Report().state) + ", " +
+                   validator.Report().reason + ")");
+        Expect(reason.empty() || validator.Report().reason.find(reason) != std::string::npos,
+               "Engine validator: " + what + ": " + validator.Report().reason);
+        return validator.Report();
+    };
+    EngineTruth yaw_only;
+    yaw_only.pitch = false;
+    const auto unbatched = never(yaw_only, "without the head pitching");
+    Expect(unbatched.batches == 0, "Engine validator: no batch completes without pitch");
+    EngineTruth noisy;
+    noisy.noise = 2.0;
+    never(noisy, "noisy vectors", "corr2");
+    EngineTruth late;
+    late.late = true;
+    const auto lagged = never(late, "late vectors");
+    Expect(lagged.lag, "Engine validator: late vectors fit the pair before better");
+    EngineTruth swapped;
+    swapped.swapped = true;
+    never(swapped, "swapped axes");
+    swapped.correlated = true;
+    never(swapped, "swapped axes of a head pitching as it turns", "swapped");
+    EngineTruth zero;
+    zero.zero = true;
+    never(zero, "zero vectors");
+
+    // A prior: one batch adopts it, sooner than three; never without a batch.
+    {
+        EngineScenario scenario(EngineTruth{});
+        depthxr::FrameGenEngineValidator plain;
+        const std::optional<int> without = RunEngineScenario(plain, scenario, 0, 40);
+        depthxr::FrameGenEngineValidator primed;
+        primed.SetPrior(scenario.Truth());
+        const std::optional<int> with = RunEngineScenario(primed, scenario, 0, 40);
+        Expect(with && without && *with < *without && primed.Report().prior,
+               "Engine validator: a prior is adopted after one batch (" + std::to_string(with.value_or(-1)) + " vs " +
+                   std::to_string(without.value_or(-1)) + ")");
+        EngineScenario flat(yaw_only);
+        depthxr::FrameGenEngineValidator unbatched_prior;
+        unbatched_prior.SetPrior(flat.Truth());
+        Expect(!RunEngineScenario(unbatched_prior, flat, 0, 300), "Engine validator: a prior alone never adopts");
+    }
+
+    // Fixed: only that convention locks.
+    {
+        EngineTruth uv;
+        uv.gain = {2.0, -2.0};
+        EngineScenario scenario(uv);
+        depthxr::FrameGenEngineValidator fixed;
+        fixed.Fix(depthxr::FrameGenEngineConvention{});
+        Expect(!RunEngineScenario(fixed, scenario, 0, 200) && fixed.Report().fixed,
+               "Engine validator: a fixed convention that is not the truth never locks");
+        depthxr::FrameGenEngineValidator right;
+        depthxr::FrameGenEngineConvention truth = scenario.Truth();
+        right.Fix(truth);
+        Expect(RunEngineScenario(right, scenario, 0, 40).has_value(), "Engine validator: the fixed truth locks");
+    }
+
+    // Jitter: each frame's vectors offset by up to 0.6 vector pixels.
+    {
+        EngineTruth jittered;
+        jittered.jitter_px = 0.6;
+        EngineScenario scenario(jittered);
+        depthxr::FrameGenEngineValidator validator;
+        const std::optional<int> locked = RunEngineScenario(validator, scenario, 0, 60);
+        Expect(locked && validator.Convention().jitter && validator.Report().jitter_px[0] > 0.15 &&
+                   validator.Convention().offset == std::array<float, 2>{0.0f, 0.0f},
+               "Engine validator: jitter is found (" + std::to_string(validator.Report().jitter_px[0]) + " px)");
+    }
+
+    // An offset every frame's vectors share (0.5 vector pixels): no jitter,
+    // the offset taken out (in e's units: NDC over the gain).
+    {
+        EngineTruth offset;
+        offset.gain = {1.0, -1.0};
+        offset.offset_px = 0.5;
+        EngineScenario scenario(offset);
+        depthxr::FrameGenEngineValidator validator;
+        const std::optional<int> locked = RunEngineScenario(validator, scenario, 0, 60);
+        const std::array<float, 2> found = validator.Convention().offset;
+        const std::array<double, 2> expected{0.5 / (0.5 * 4339.0) / 1.0, 0.5 / (0.5 * 4285.0) / -1.0};
+        Expect(locked && !validator.Convention().jitter && std::abs(found[0] - expected[0]) < 0.02 * std::abs(expected[0]) &&
+                   std::abs(found[1] - expected[1]) < 0.02 * std::abs(expected[1]),
+               "Engine validator: a constant offset is taken out (" + std::to_string(found[0]) + "/" +
+                   std::to_string(found[1]) + ")");
+    }
+
+    // Contradiction: locked, then the vectors fit another convention.
+    {
+        EngineScenario scenario(EngineTruth{});
+        depthxr::FrameGenEngineValidator validator;
+        Expect(RunEngineScenario(validator, scenario, 0, 30).has_value(), "Engine validator: locked before the change");
+        scenario.truth().gain = {1.0, -1.0};
+        RunEngineScenario(validator, scenario, 30, 10);
+        Expect(validator.GetState() == State::kSuspended, "Engine validator: a contradicting batch suspends (" +
+                                                              std::string(depthxr::ToString(validator.GetState())) + ")");
+        // 10 s on it calibrates again, and adopts the new convention.
+        const std::optional<int> relocked = RunEngineScenario(validator, scenario, 40, 1200);
+        Expect(relocked && depthxr::SameFrameGenEngineConvention(validator.Convention(), scenario.Truth()),
+               "Engine validator: after 10 s suspended, calibrated again");
+    }
+
+    // Disabled: 3 suspensions within 5 minutes; spread wider, never.
+    for (const double gap : {20.0, 200.0}) {
+        EngineScenario scenario(EngineTruth{});
+        depthxr::FrameGenEngineValidator validator;
+        int frame = 0;
+        for (int round = 0; round < 3; ++round) {
+            scenario.truth().gain = round % 2 ? std::array<double, 2>{1.0, -1.0} : std::array<double, 2>{1.0, 1.0};
+            RunEngineScenario(validator, scenario, frame, static_cast<int>(gap * 10), 0.1);
+            frame += static_cast<int>(gap * 10);
+        }
+        scenario.truth().gain = {2.0, -2.0};
+        RunEngineScenario(validator, scenario, frame, 100, 0.1);
+        Expect((validator.GetState() == State::kDisabled) == (gap < 100.0),
+               "Engine validator: 3 suspensions " + std::to_string(gap) + " s apart: " +
+                   depthxr::ToString(validator.GetState()) + " (" + validator.Report().reason + ")");
+    }
+
+    // Disabled: no convention over 5 minutes of batches; but never without
+    // still content (no batch, however long), and never by time without
+    // batches: frames that stop (Frame Generation off, a pause) or that
+    // have nothing still to fit.
+    {
+        EngineScenario scenario(noisy);
+        depthxr::FrameGenEngineValidator validator;
+        RunEngineScenario(validator, scenario, 0, 3100, 0.1);
+        Expect(validator.GetState() == State::kDisabled, "Engine validator: no convention after 5 minutes disables");
+        EngineTruth on_foot;
+        on_foot.still = false;
+        EngineScenario walking(on_foot);
+        depthxr::FrameGenEngineValidator patient;
+        RunEngineScenario(patient, walking, 0, 6000, 0.1);
+        Expect(patient.GetState() != State::kDisabled && patient.Report().batches == 0,
+               "Engine validator: no still content never disables");
+        depthxr::FrameGenEngineValidator paused;
+        RunEngineScenario(paused, scenario, 0, 6, 0.1);
+        RunEngineScenario(paused, scenario, 3600, 6, 0.1);
+        Expect(paused.GetState() != State::kDisabled && paused.Report().batches >= 3,
+               "Engine validator: 6 minutes without frames do not disable (" +
+                   std::string(depthxr::ToString(paused.GetState())) + ", " + paused.Report().reason + ")");
+        depthxr::FrameGenEngineValidator stepped_off;
+        RunEngineScenario(stepped_off, scenario, 0, 6, 0.1);
+        EngineScenario off(noisy);
+        off.truth().still = false;
+        RunEngineScenario(stepped_off, off, 6, 3100, 0.1);
+        RunEngineScenario(stepped_off, scenario, 3106, 6, 0.1);
+        Expect(stepped_off.GetState() != State::kDisabled && stepped_off.Report().batches >= 3,
+               "Engine validator: 5 minutes without still content after two batches do not disable (" +
+                   std::string(depthxr::ToString(stepped_off.GetState())) + ", " + stepped_off.Report().reason + ")");
+    }
+
+    // A batch that cannot close (no pitch) starts over rather than holding
+    // minutes of frames: once the head pitches, batches close as before.
+    {
+        EngineScenario flat(yaw_only);
+        depthxr::FrameGenEngineValidator validator;
+        RunEngineScenario(validator, flat, 0, 1000);
+        EngineScenario scenario(EngineTruth{});
+        const std::optional<int> locked = RunEngineScenario(validator, scenario, 1000, 40);
+        Expect(locked && *locked <= 1015,
+               "Engine validator: batches close after a long batch without pitch (" +
+                   std::to_string(locked.value_or(-1)) + ")");
+    }
+
+    // Verdicts: locked, then most frames held back by their verdict suspends.
+    {
+        EngineScenario scenario(EngineTruth{});
+        depthxr::FrameGenEngineValidator validator;
+        Expect(RunEngineScenario(validator, scenario, 0, 30).has_value(), "Engine validator: locked");
+        for (int f = 30; f < 130 && validator.Locked(); ++f) {
+            validator.Add(scenario.Frame(f, validator.Convention(), true, f % 3 ? 0u : depthxr::kFrameGenEngineVerdictStale),
+                          f / 90.0);
+        }
+        const auto report = validator.Report();
+        Expect(validator.GetState() == State::kSuspended && report.reasons[1] > 20,
+               "Engine validator: a third of the frames held back suspends (" + report.reason + ")");
+    }
+
+    // The evidence as the GPU writes it reads back into the same sums.
+    {
+        std::array<float, 4 * depthxr::kFrameGenEngineEvidenceTexels> evidence{};
+        std::array<float, 4 * depthxr::kFrameGenEngineParamsTexels> params{};
+        for (std::size_t i = 0; i < evidence.size(); ++i) evidence[i] = static_cast<float>(i + 1);
+        params = {0.25f, -0.5f, 6.0f, 0.9f};
+        params[11] = 1.0f;
+        const auto read = depthxr::ReadFrameGenEngineEvidence(evidence.data(), params.data(), {});
+        Expect(read.cockpit[0].Samples() == 1.0f && read.cockpit[1].Samples() == 11.0f && read.swapped[1] == 22.0f &&
+                   read.measured[1].Samples() == 33.0f && read.head_gap == 43.0f && read.variants[0] == 45.0f &&
+                   read.textured == 55.0f && read.epe_samples[2] == 68.0f && read.valid == 71.0f && read.flow_px == 72.0f &&
+                   read.lag_cost == 73.0f &&
+                   read.lag_moving == 78.0f && read.cockpit_lag[1].Samples() == 91.0f && read.lag &&
+                   read.lag_photometric && read.bias == std::array<float, 2>{0.25f, -0.5f} && read.verdict == 6u && read.stale,
+               "Engine validator: the evidence's texels read back in their places");
+        // Summed as a convention reads the vectors, g (e - offset): read back
+        // as decoded. The x axis's sums: n 1, p_r 2, p_t 3, e 4, ..., e p_r 8,
+        // e^2 10; y's p_r 12; e_x p_r,y 21.
+        depthxr::FrameGenEngineConvention convention;
+        convention.gain = {2.0f, -0.5f};
+        convention.offset = {0.5f, 0.0f};
+        const auto unscaled = depthxr::ReadFrameGenEngineEvidence(evidence.data(), params.data(), convention);
+        Expect(unscaled.cockpit[0].Intercept(0.0, 0.0) == 2.5 && unscaled.cockpit[0].ErrorRotation() == 5.0 &&
+                   unscaled.cockpit[0].ErrorSquares() == 4.75 && unscaled.swapped[0] == 16.5 &&
+                   unscaled.cockpit[1].Intercept(0.0, 0.0) == 14.0 / -0.5 / 11.0 &&
+                   unscaled.measured[0].Intercept(0.0, 0.0) == (26.0 / 2.0 + 0.5 * 23.0) / 23.0 &&
+                   unscaled.cockpit_lag[0].Samples() == 81.0 && unscaled.variants[0] == 45.0,
+               "Engine validator: the cockpit's sums come back to the vectors as decoded");
+    }
+}
+
+// The prior table: MSFS 2024's FB vectors on Direct3D 12; else Vulkan-style
+// NDC (y down) for XR_EXT_frame_synthesis on any API and for
+// XR_FB_space_warp from a Vulkan game; nothing for the rest.
+void TestFrameGenEnginePrior() {
+    const auto msfs = depthxr::FrameGenEnginePriorFor("FlightSimulator2024.exe", false, "D3D12");
+    Expect(msfs && depthxr::SameFrameGenEngineConvention(*msfs, depthxr::FrameGenEngineConvention{}),
+           "Engine prior: MSFS 2024 expects XR_FB_space_warp's convention");
+    depthxr::FrameGenEngineConvention y_down;
+    y_down.gain = {1.0f, -1.0f};
+    for (const auto& [executable, ext, api] :
+         {std::tuple<const char*, bool, const char*>{"FlightSimulator2024.exe", true, "D3D12"},
+          {"StarCitizen.exe", true, "Vulkan"},
+          {"StarCitizen.exe", false, "Vulkan"},
+          {"SomeGame.exe", true, "D3D11"}}) {
+        const auto prior = depthxr::FrameGenEnginePriorFor(executable, ext, api);
+        Expect(prior && depthxr::SameFrameGenEngineConvention(*prior, y_down) && !prior->jitter,
+               std::string("Engine prior: Vulkan-style NDC, y down, for ") + (ext ? "XR_EXT_frame_synthesis" : "XR_FB_space_warp") +
+                   " from " + executable + " on " + api);
+    }
+    Expect(!depthxr::FrameGenEnginePriorFor("StarCitizen.exe", false, "D3D12") &&
+               !depthxr::FrameGenEnginePriorFor("SomeGame.exe", false, "D3D11"),
+           "Engine prior: none for XR_FB_space_warp from another Direct3D game");
+    // The Vulkan bridge's switch.
+    using depthxr::FrameGenEngineBridgeMode;
+    Expect(depthxr::ParseFrameGenEngineBridgeMode("") == FrameGenEngineBridgeMode::kReleased &&
+               depthxr::ParseFrameGenEngineBridgeMode("1") == FrameGenEngineBridgeMode::kReleased &&
+               depthxr::ParseFrameGenEngineBridgeMode("0") == FrameGenEngineBridgeMode::kOff &&
+               depthxr::ParseFrameGenEngineBridgeMode("Off") == FrameGenEngineBridgeMode::kOff &&
+               depthxr::ParseFrameGenEngineBridgeMode("END") == FrameGenEngineBridgeMode::kEndFrame &&
+               std::string(depthxr::ToString(FrameGenEngineBridgeMode::kEndFrame)) == "end",
+           "Engine bridge: VECTORXR_FRAMEGEN_ENGINE_BRIDGE's values");
+    // The lag test's acceleration: a steady turn is none, a change is.
+    depthxr::FrameGenViewGeometry a, b, c;
+    auto yaw = [](double degrees) {
+        const double half = degrees * 3.14159265358979 / 360.0;
+        return std::array<float, 4>{0.0f, static_cast<float>(std::sin(half)), 0.0f, static_cast<float>(std::cos(half))};
+    };
+    a.orientation = yaw(0.0);
+    b.orientation = yaw(3.0);
+    c.orientation = yaw(6.0);
+    Expect(depthxr::FrameGenAngularAcceleration(c, b, a) < 1e-3, "Engine prior: a steady turn does not accelerate");
+    c.orientation = yaw(4.0);
+    Expect(std::abs(depthxr::FrameGenAngularAcceleration(c, b, a) - 2.0) < 1e-3, "Engine prior: 3 then 1 degree is 2");
+}
+
+// --- Stage 4: the world's motion from the application's movement ---------
+
+using WorldVec = std::array<double, 3>;
+using WorldQuat = std::array<double, 4>; // x, y, z, w
+using WorldMatrix = std::array<std::array<double, 4>, 4>;
+
+WorldQuat WorldAxisAngle(const WorldVec& axis, double radians) {
+    const double length = std::sqrt(axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]);
+    const double s = std::sin(radians / 2.0) / length;
+    return {axis[0] * s, axis[1] * s, axis[2] * s, std::cos(radians / 2.0)};
+}
+
+WorldQuat WorldMultiply(const WorldQuat& a, const WorldQuat& b) {
+    return {a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1], a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+            a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3], a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2]};
+}
+
+// A pose (unit quaternion, position) as a 4x4 matrix: camera to its space.
+WorldMatrix WorldPose(const std::array<float, 4>& orientation, const std::array<float, 3>& position) {
+    const double n = std::sqrt(static_cast<double>(orientation[0]) * orientation[0] +
+                               static_cast<double>(orientation[1]) * orientation[1] +
+                               static_cast<double>(orientation[2]) * orientation[2] +
+                               static_cast<double>(orientation[3]) * orientation[3]);
+    const double x = orientation[0] / n, y = orientation[1] / n, z = orientation[2] / n, w = orientation[3] / n;
+    return {{{1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w), position[0]},
+             {2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w), position[1]},
+             {2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y), position[2]},
+             {0.0, 0.0, 0.0, 1.0}}};
+}
+
+WorldMatrix WorldTimes(const WorldMatrix& a, const WorldMatrix& b) {
+    WorldMatrix result{};
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            for (int k = 0; k < 4; ++k) result[r][c] += a[r][k] * b[k][c];
+        }
+    }
+    return result;
+}
+
+WorldMatrix WorldInverse(const WorldMatrix& m) {
+    WorldMatrix result{};
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) result[r][c] = m[c][r];
+        result[r][3] = -(m[0][r] * m[0][3] + m[1][r] * m[1][3] + m[2][r] * m[2][3]);
+    }
+    result[3][3] = 1.0;
+    return result;
+}
+
+WorldVec WorldApply(const WorldMatrix& m, const WorldVec& p) {
+    return {m[0][0] * p[0] + m[0][1] * p[1] + m[0][2] * p[2] + m[0][3],
+            m[1][0] * p[0] + m[1][1] * p[1] + m[1][2] * p[2] + m[1][3],
+            m[2][0] * p[0] + m[2][1] * p[1] + m[2][2] * p[2] + m[2][3]};
+}
+
+std::array<float, 4> WorldFloats(const WorldQuat& q) {
+    return {static_cast<float>(q[0]), static_cast<float>(q[1]), static_cast<float>(q[2]), static_cast<float>(q[3])};
+}
+
+// A view of the scenes below: a Pimax-like field of view (wider outward).
+depthxr::FrameGenViewGeometry WorldView(const WorldQuat& orientation, const WorldVec& position, int eye) {
+    depthxr::FrameGenViewGeometry view;
+    view.orientation = WorldFloats(orientation);
+    view.position = {static_cast<float>(position[0]), static_cast<float>(position[1]), static_cast<float>(position[2])};
+    view.angle_left = eye ? -0.9f : -1.1f;
+    view.angle_right = eye ? 1.1f : 0.9f;
+    view.angle_up = 0.95f;
+    view.angle_down = -1.0f;
+    return view;
+}
+
+// One frame pair of a scene: per eye, the poses the game rendered the frame
+// and the one before with (an eye 32 mm to each side of a head, canted
+// outward by `cant`), the poses declared to Frame Generation (Pivot's change
+// times the game's, `pivot_*` at each frame), and the application's movement.
+struct WorldScene {
+    std::array<depthxr::FrameGenViewGeometry, 2> game_newest, game_previous, newest, previous;
+    std::array<float, 4> delta_orientation{0.0f, 0.0f, 0.0f, 1.0f};
+    std::array<float, 3> delta_position{};
+};
+
+struct WorldPivot {
+    WorldQuat orientation{0.0, 0.0, 0.0, 1.0};
+    WorldVec position{};
+};
+
+WorldScene MakeWorldScene(const WorldQuat& head_newest, const WorldVec& at_newest, const WorldQuat& head_previous,
+                          const WorldVec& at_previous, double cant, const WorldPivot& pivot_newest,
+                          const WorldPivot& pivot_previous, const WorldQuat& delta, const WorldVec& moved) {
+    WorldScene scene;
+    auto eye = [&](const WorldQuat& head, const WorldVec& at, int e) {
+        const WorldQuat orientation = WorldMultiply(head, WorldAxisAngle({0.0, 1.0, 0.0}, e ? -cant : cant));
+        const WorldMatrix rotation = WorldPose(WorldFloats(head), {0.0f, 0.0f, 0.0f});
+        const WorldVec side = WorldApply(rotation, {e ? 0.032 : -0.032, 0.0, 0.0});
+        return std::make_pair(orientation, WorldVec{at[0] + side[0], at[1] + side[1], at[2] + side[2]});
+    };
+    auto declared = [](const WorldPivot& pivot, const std::pair<WorldQuat, WorldVec>& game, int e) {
+        const WorldMatrix change = WorldPose(WorldFloats(pivot.orientation), {0.0f, 0.0f, 0.0f});
+        const WorldVec moved_by = WorldApply(change, game.second);
+        return WorldView(WorldMultiply(pivot.orientation, game.first),
+                         {moved_by[0] + pivot.position[0], moved_by[1] + pivot.position[1], moved_by[2] + pivot.position[2]},
+                         e);
+    };
+    for (int e = 0; e < 2; ++e) {
+        const auto now = eye(head_newest, at_newest, e);
+        const auto before = eye(head_previous, at_previous, e);
+        scene.game_newest[e] = WorldView(now.first, now.second, e);
+        scene.game_previous[e] = WorldView(before.first, before.second, e);
+        scene.newest[e] = declared(pivot_newest, now, e);
+        scene.previous[e] = declared(pivot_previous, before, e);
+    }
+    scene.delta_orientation = WorldFloats(delta);
+    scene.delta_position = {static_cast<float>(moved[0]), static_cast<float>(moved[1]), static_cast<float>(moved[2])};
+    return scene;
+}
+
+// FrameGenEngineWorldParams against a reference from 4x4 pose matrices: a
+// point y of the newest declared view (the head held) is at
+// T_gN^-1 T_D T_gP T_dP^-1 T_dN y at the newest frame (T_g, T_d: the game's
+// and the declared poses, T_D the application's movement). Then frames
+// rendered from the poses: the flow Frame Generation measures (the image's
+// correspondence with the declared head movement taken out, as
+// MapToNewest takes it out) is the model's, exactly and as FG_PASS_FILTER's
+// WorldFlow has it (small-angle).
+void TestFrameGenEngineWorldParams() {
+    constexpr double kDegree = 3.14159265358979 / 180.0;
+    const WorldQuat head_newest = WorldMultiply(WorldAxisAngle({0.0, 1.0, 0.0}, 30.0 * kDegree),
+                                                WorldAxisAngle({1.0, 0.0, 0.0}, -5.0 * kDegree));
+    const WorldQuat head_previous = WorldMultiply(WorldAxisAngle({0.0, 1.0, 0.0}, 29.5 * kDegree),
+                                                  WorldAxisAngle({1.0, 0.0, 0.0}, -4.8 * kDegree));
+    const WorldVec at_newest{0.02, 1.2, 0.01}, at_previous{0.0, 1.21, 0.0};
+    // 1.8 m a frame forward (world points come toward +Z in the
+    // application's space), banking gently.
+    const WorldQuat bank = WorldAxisAngle({0.1, 1.0, 0.2}, 0.3 * kDegree);
+    const WorldVec forward{0.0, 0.0, 1.8};
+    const WorldPivot pivot{WorldAxisAngle({0.0, 1.0, 0.0}, 15.0 * kDegree), {0.1, -0.05, 0.3}};
+    const WorldPivot pivot_ramp{WorldAxisAngle({0.0, 1.0, 0.0}, 14.5 * kDegree), {0.09, -0.05, 0.29}};
+    struct Case {
+        const char* name;
+        WorldPivot before;
+        float scale;
+    };
+    const std::array<Case, 3> cases{{{"Pivot's change held", pivot, 1.0f},
+                                     {"Pivot's change ramping", pivot_ramp, 1.0f},
+                                     {"s_t 1.1", pivot, 1.1f}}};
+    for (const Case& c : cases) {
+        const WorldScene scene =
+            MakeWorldScene(head_newest, at_newest, head_previous, at_previous, 10.0 * kDegree, pivot, c.before, bank, forward);
+        for (int e = 0; e < 2; ++e) {
+            const depthxr::FrameGenEngineWorld world = depthxr::FrameGenEngineWorldParams(
+                scene.game_newest[e], scene.game_previous[e], scene.newest[e], scene.previous[e], scene.delta_orientation,
+                scene.delta_position, 1, c.scale);
+            const WorldMatrix reference = WorldTimes(
+                WorldInverse(WorldPose(scene.game_newest[e].orientation, scene.game_newest[e].position)),
+                WorldTimes(WorldPose(scene.delta_orientation, scene.delta_position),
+                           WorldTimes(WorldPose(scene.game_previous[e].orientation, scene.game_previous[e].position),
+                                      WorldTimes(WorldInverse(WorldPose(scene.previous[e].orientation, scene.previous[e].position)),
+                                                 WorldPose(scene.newest[e].orientation, scene.newest[e].position)))));
+            const WorldMatrix rotation = WorldPose(world.quaternion, {0.0f, 0.0f, 0.0f});
+            double worst = 0.0;
+            for (int r = 0; r < 3; ++r) {
+                for (int k = 0; k < 3; ++k) worst = (std::max)(worst, std::abs(rotation[r][k] - reference[r][k]));
+                worst = (std::max)(worst, std::abs(world.translation[r] - c.scale * reference[r][3]));
+                worst = (std::max)(worst, std::abs(world.rotation[r] - 2.0 * world.quaternion[r]));
+            }
+            Expect(world.valid && world.quaternion[3] >= 0.0f && worst < 1e-5,
+                   std::string("World delta: the model matches the 4x4 reference (") + c.name + ", eye " +
+                       std::to_string(e) + ": " + std::to_string(worst) + ")");
+        }
+    }
+
+    // No movement of the application's space: the world holds still in the
+    // newest view whatever the head and a steady Pivot do.
+    const WorldScene still = MakeWorldScene(head_newest, at_newest, head_previous, at_previous, 10.0 * kDegree, pivot, pivot,
+                                            {0.0, 0.0, 0.0, 1.0}, {0.0, 0.0, 0.0});
+    for (int e = 0; e < 2; ++e) {
+        const depthxr::FrameGenEngineWorld world =
+            depthxr::FrameGenEngineWorldParams(still.game_newest[e], still.game_previous[e], still.newest[e],
+                                               still.previous[e], still.delta_orientation, still.delta_position, 1, 1.0f);
+        double largest = 0.0;
+        for (int i = 0; i < 3; ++i) {
+            largest = (std::max)({largest, std::abs(static_cast<double>(world.rotation[i])),
+                                  std::abs(static_cast<double>(world.translation[i]))});
+        }
+        Expect(world.valid && largest < 1e-6,
+               "World delta: an identity delta gives no world motion (" + std::to_string(largest) + ")");
+    }
+
+    // Sign -1 is the delta's rotation conjugated.
+    const WorldScene turning = MakeWorldScene(head_newest, at_newest, head_previous, at_previous, 10.0 * kDegree, pivot,
+                                              pivot_ramp, bank, forward);
+    const std::array<float, 4> conjugated{-turning.delta_orientation[0], -turning.delta_orientation[1],
+                                          -turning.delta_orientation[2], turning.delta_orientation[3]};
+    const depthxr::FrameGenEngineWorld minus = depthxr::FrameGenEngineWorldParams(
+        turning.game_newest[0], turning.game_previous[0], turning.newest[0], turning.previous[0], turning.delta_orientation,
+        turning.delta_position, -1, 1.0f);
+    const depthxr::FrameGenEngineWorld conjugate = depthxr::FrameGenEngineWorldParams(
+        turning.game_newest[0], turning.game_previous[0], turning.newest[0], turning.previous[0], conjugated,
+        turning.delta_position, 1, 1.0f);
+    const depthxr::FrameGenEngineWorld plus = depthxr::FrameGenEngineWorldParams(
+        turning.game_newest[0], turning.game_previous[0], turning.newest[0], turning.previous[0], turning.delta_orientation,
+        turning.delta_position, 1, 1.0f);
+    Expect(minus.rotation == conjugate.rotation && minus.translation == conjugate.translation &&
+               minus.quaternion == conjugate.quaternion && minus.rotation != plus.rotation,
+           "World delta: sign -1 conjugates the delta's rotation");
+    // Not finite: no model.
+    const depthxr::FrameGenEngineWorld broken = depthxr::FrameGenEngineWorldParams(
+        turning.game_newest[0], turning.game_previous[0], turning.newest[0], turning.previous[0], turning.delta_orientation,
+        {std::numeric_limits<float>::quiet_NaN(), 0.0f, 1.8f}, 1, 1.0f);
+    Expect(!broken.valid, "World delta: a delta not finite gives no model");
+
+    // Rendered: world points at 300 m to 5 km seen at the newest frame,
+    // where the game rendered them the frame before; Frame Generation's
+    // flow there is uv - MapToNewest(where they were, their depth) by the
+    // declared poses. The model's flow is the point moved back by the world's
+    // motion, projected (exact), or WorldRows' (the filter's, small-angle).
+    for (const Case& c : {cases[0], cases[1]}) {
+        const WorldScene scene =
+            MakeWorldScene(head_newest, at_newest, head_previous, at_previous, 10.0 * kDegree, pivot, c.before, bank, forward);
+        double exact_worst = 0.0, linear_worst = 0.0;
+        for (int e = 0; e < 2; ++e) {
+            const depthxr::FrameGenViewGeometry& game_now = scene.game_newest[e];
+            const depthxr::FrameGenViewGeometry& game_then = scene.game_previous[e];
+            const depthxr::FrameGenEngineWorld world = depthxr::FrameGenEngineWorldParams(
+                game_now, game_then, scene.newest[e], scene.previous[e], scene.delta_orientation, scene.delta_position, 1, 1.0f);
+            const auto mapping = depthxr::BuildFrameGenViewMapping(scene.newest[e], scene.previous[e], true);
+            const WorldMatrix camera_now = WorldPose(game_now.orientation, game_now.position);
+            const WorldMatrix camera_then = WorldPose(game_then.orientation, game_then.position);
+            const WorldMatrix moved = WorldPose(scene.delta_orientation, scene.delta_position);
+            const WorldMatrix motion = WorldPose(world.quaternion, world.translation);
+            const double l = std::tan(game_now.angle_left), r = std::tan(game_now.angle_right);
+            const double u = std::tan(game_now.angle_up), d = std::tan(game_now.angle_down);
+            for (int y = 1; y < 10; y += 2) {
+                for (int x = 1; x < 10; x += 2) {
+                    for (const double depth : {300.0, 1000.0, 5000.0}) {
+                        const std::array<float, 2> uv{x / 10.0f, y / 10.0f};
+                        const WorldVec point{(l + (r - l) * uv[0]) * depth, (u + (d - u) * uv[1]) * depth, -depth};
+                        // Where the game rendered it the frame before.
+                        const WorldVec seen = WorldApply(
+                            WorldInverse(camera_then), WorldApply(WorldInverse(moved), WorldApply(camera_now, point)));
+                        const std::array<float, 2> before{static_cast<float>((seen[0] / -seen[2] - l) / (r - l)),
+                                                          static_cast<float>((seen[1] / -seen[2] - u) / (d - u))};
+                        std::array<float, 2> back{};
+                        Expect(depthxr::FrameGenMapToNewest(mapping, before, static_cast<float>(depth), back),
+                               "World delta: the point maps back to the newest view");
+                        const double flow[2] = {uv[0] - back[0], uv[1] - back[1]};
+                        // The model: the point moved back by the world's motion.
+                        const WorldVec held = WorldApply(WorldInverse(motion), point);
+                        const double exact[2] = {uv[0] - (held[0] / -held[2] - l) / (r - l),
+                                                 uv[1] - (held[1] / -held[2] - u) / (d - u)};
+                        exact_worst = (std::max)({exact_worst, std::abs(flow[0] - exact[0]), std::abs(flow[1] - exact[1])});
+                        // WorldRows at the newest tangent and inverse depth.
+                        const double ax = l + (r - l) * uv[0], ay = u + (d - u) * uv[1], inv_z = 1.0 / depth;
+                        const auto& w = world.rotation;
+                        const auto& t = world.translation;
+                        const double dx = ax * ay * w[0] + (-1.0 - ax * ax) * w[1] - ay * w[2] + inv_z * t[0] + ax * inv_z * t[2];
+                        const double dy = (1.0 + ay * ay) * w[0] - ax * ay * w[1] + ax * w[2] + inv_z * t[1] + ay * inv_z * t[2];
+                        const double linear[2] = {dx / (r - l), dy / (d - u)};
+                        // Within tangent 1 of the view's axis (further out
+                        // the small-angle form drifts: 1.2e-4 uv at 1.6).
+                        if (c.before.orientation == pivot.orientation && std::abs(ax) <= 1.0 && std::abs(ay) <= 1.0) {
+                            linear_worst =
+                                (std::max)({linear_worst, std::abs(flow[0] - linear[0]), std::abs(flow[1] - linear[1])});
+                        }
+                    }
+                }
+            }
+        }
+        Expect(exact_worst < 1e-5, std::string("World delta: rendered frames move by the model exactly (") + c.name + ": " +
+                                       std::to_string(exact_worst) + " uv)");
+        Expect(linear_worst < 1e-4, std::string("World delta: and by the filter's small-angle model within 1e-4 uv (") +
+                                        c.name + ": " + std::to_string(linear_worst) + " uv)");
+    }
+}
+
+// The plan: kWorldSet in place of the fit where the backend's calibration
+// locked (FrameGenTuning::world_delta) and the request has the application's
+// movement, after the fit on the watchdog's frames (delta_watchdog); the
+// cover of just-in-time interpolation reads the same, and the
+// sky flag goes on the extrapolating filters with world_sky. Without
+// world_delta the plan is as without the movement, byte for byte.
+void TestFrameGenWorldDeltaPlan() {
+    using depthxr::FrameGenPass;
+    using depthxr::FrameGenTextureKind;
+    constexpr double kDegree = 3.14159265358979 / 180.0;
+    const WorldScene scene = MakeWorldScene(WorldAxisAngle({0.0, 1.0, 0.0}, 30.0 * kDegree), {0.0, 1.2, 0.0},
+                                            WorldAxisAngle({0.0, 1.0, 0.0}, 29.0 * kDegree), {0.0, 1.2, 0.0}, 0.0, {}, {},
+                                            WorldAxisAngle({0.0, 1.0, 0.0}, 0.3 * kDegree), {0.0, 0.0, 1.8});
+    depthxr::FrameGenViewRequest request;
+    request.extent = {1024, 1024};
+    request.synthesize = request.temporal = request.depth = request.world_motion = true;
+    request.newest = scene.newest[0];
+    request.previous = scene.previous[0];
+    request.game_newest = scene.game_newest[0];
+    request.game_previous = scene.game_previous[0];
+    depthxr::FrameGenTuning tuning;
+    tuning.mode = depthxr::FrameGenSynthesisMode::kExtrapolate;
+    tuning.analyze_only = true;
+    const depthxr::FrameGenViewPlan plain = depthxr::BuildFrameGenViewPlan(request, tuning);
+    auto same = [](const depthxr::FrameGenViewPlan& a, const depthxr::FrameGenViewPlan& b) {
+        bool equal = a.dispatches.size() == b.dispatches.size();
+        for (std::size_t i = 0; equal && i < a.dispatches.size(); ++i) {
+            equal = a.dispatches[i].pass == b.dispatches[i].pass &&
+                    std::memcmp(a.dispatches[i].inputs.data(), b.dispatches[i].inputs.data(), sizeof(a.dispatches[i].inputs)) == 0 &&
+                    std::memcmp(a.dispatches[i].outputs.data(), b.dispatches[i].outputs.data(), sizeof(a.dispatches[i].outputs)) == 0 &&
+                    std::memcmp(&a.dispatches[i].constants, &b.dispatches[i].constants, sizeof(depthxr::FrameGenConstants)) == 0;
+        }
+        return equal;
+    };
+    auto count = [](const depthxr::FrameGenViewPlan& plan, FrameGenPass pass) {
+        return std::count_if(plan.dispatches.begin(), plan.dispatches.end(),
+                             [&](const depthxr::FrameGenDispatch& dispatch) { return dispatch.pass == pass; });
+    };
+    auto filters = [](const depthxr::FrameGenViewPlan& plan) {
+        std::vector<depthxr::FrameGenDispatch> found;
+        for (const auto& dispatch : plan.dispatches) {
+            if (dispatch.pass == FrameGenPass::kFilter) found.push_back(dispatch);
+        }
+        return found;
+    };
+    request.app_delta = true;
+    request.delta_orientation = scene.delta_orientation;
+    request.delta_position = scene.delta_position;
+    Expect(same(depthxr::BuildFrameGenViewPlan(request, tuning), plain),
+           "World delta plan: the movement alone changes nothing (the backend's calibration has not locked)");
+    tuning.world_sky = true;
+    tuning.world_delta = true;
+    tuning.delta_sign = -1;
+    tuning.delta_scale = 1.1f;
+    const depthxr::FrameGenViewPlan set = depthxr::BuildFrameGenViewPlan(request, tuning);
+    const auto set_filters = filters(set);
+    const auto world_set = std::find_if(set.dispatches.begin(), set.dispatches.end(),
+                                        [](const auto& dispatch) { return dispatch.pass == FrameGenPass::kWorldSet; });
+    const depthxr::FrameGenEngineWorld expected = depthxr::FrameGenEngineWorldParams(
+        request.game_newest, request.game_previous, request.newest, request.previous, request.delta_orientation,
+        request.delta_position, -1, 1.1f);
+    Expect(count(set, FrameGenPass::kWorldSet) == 1 && count(set, FrameGenPass::kWorldReduce) == 0 &&
+               count(set, FrameGenPass::kWorldSolve) == 0 && count(plain, FrameGenPass::kWorldSolve) == 3 &&
+               set.dispatches.size() + 5 == plain.dispatches.size(),
+           "World delta plan: kWorldSet stands in for the fit's three iterations");
+    Expect(world_set != set.dispatches.end() && world_set->outputs[0].kind == FrameGenTextureKind::kWorldParams &&
+               world_set->width == 1 && world_set->height == 1 &&
+               world_set->constants.fov_current ==
+                   std::array<float, 4>{expected.rotation[0], expected.rotation[1], expected.rotation[2], 1.0f} &&
+               world_set->constants.fov_previous ==
+                   std::array<float, 4>{expected.translation[0], expected.translation[1], expected.translation[2], 1.0f} &&
+               world_set->constants.rot0 == std::array<float, 4>{1.1f, 1.0f, -1.0f, 0.0f} &&
+               world_set->constants.rot1 == expected.quaternion,
+           "World delta plan: kWorldSet writes the model's rotation, translation, source, sign, scale and quaternion");
+    Expect(set_filters.size() == 1 && set_filters[0].inputs[3].kind == FrameGenTextureKind::kWorldParams &&
+               (set_filters[0].constants.options[1] & depthxr::kFrameGenFlagWorld) != 0 &&
+               (set_filters[0].constants.options[1] & depthxr::kFrameGenFlagWorldSky) != 0 &&
+               world_set < std::find_if(set.dispatches.begin(), set.dispatches.end(),
+                                        [](const auto& dispatch) { return dispatch.pass == FrameGenPass::kFilter; }),
+           "World delta plan: the filter reads it after it is set, the sky flag with world_sky");
+    // The watchdog's frames: the fit runs as well, and the set after it, so
+    // the filter reads the same motion as on every other frame.
+    tuning.delta_watchdog = true;
+    const depthxr::FrameGenViewPlan watched = depthxr::BuildFrameGenViewPlan(request, tuning);
+    std::size_t last_solve = 0, watched_set = 0, watched_filter = 0;
+    for (std::size_t i = 0; i < watched.dispatches.size(); ++i) {
+        const FrameGenPass pass = watched.dispatches[i].pass;
+        if (pass == FrameGenPass::kWorldSolve) last_solve = i;
+        if (pass == FrameGenPass::kWorldSet) watched_set = i;
+        if (pass == FrameGenPass::kFilter && watched_filter == 0) watched_filter = i;
+    }
+    Expect(count(watched, FrameGenPass::kWorldSolve) == 3 && count(watched, FrameGenPass::kWorldSet) == 1 &&
+               watched.dispatches.size() == plain.dispatches.size() + 1 && last_solve < watched_set &&
+               watched_set < watched_filter &&
+               std::memcmp(&watched.dispatches[watched_set].constants, &world_set->constants,
+                           sizeof(depthxr::FrameGenConstants)) == 0,
+           "World delta plan: on the watchdog's frames the fit runs, then the set, then the filter");
+    tuning.delta_watchdog = false;
+    tuning.world_sky = false;
+    Expect((filters(depthxr::BuildFrameGenViewPlan(request, tuning))[0].constants.options[1] &
+            depthxr::kFrameGenFlagWorldSky) == 0,
+           "World delta plan: no sky flag without world_sky");
+    // A request without the movement, or a model not finite: the fit.
+    request.app_delta = false;
+    Expect(same(depthxr::BuildFrameGenViewPlan(request, tuning), plain), "World delta plan: the fit without the movement");
+    tuning.delta_watchdog = true;
+    Expect(same(depthxr::BuildFrameGenViewPlan(request, tuning), plain),
+           "World delta plan: the fit alone without the movement, on the watchdog's frames too");
+    tuning.delta_watchdog = false;
+    request.app_delta = true;
+    request.delta_position[0] = std::numeric_limits<float>::quiet_NaN();
+    Expect(same(depthxr::BuildFrameGenViewPlan(request, tuning), plain), "World delta plan: the fit for a broken delta");
+    request.delta_position = scene.delta_position;
+    // Interpolating just in time: the main filter keeps the measured flow
+    // (no world model, no sky); the cover reads the set motion, sky and all.
+    tuning.mode = depthxr::FrameGenSynthesisMode::kInterpolate;
+    tuning.cover = true;
+    tuning.world_sky = true;
+    const depthxr::FrameGenViewPlan interpolated = depthxr::BuildFrameGenViewPlan(request, tuning);
+    const auto interpolated_filters = filters(interpolated);
+    Expect(count(interpolated, FrameGenPass::kWorldSet) == 1 && count(interpolated, FrameGenPass::kWorldSolve) == 0 &&
+               interpolated_filters.size() == 2 &&
+               (interpolated_filters[0].constants.options[1] & (depthxr::kFrameGenFlagWorld | depthxr::kFrameGenFlagWorldSky)) == 0 &&
+               interpolated_filters[1].outputs[0].kind == FrameGenTextureKind::kFilteredCover &&
+               (interpolated_filters[1].constants.options[1] & depthxr::kFrameGenFlagWorldSky) != 0 &&
+               interpolated_filters[1].inputs[3].kind == FrameGenTextureKind::kWorldParams,
+           "World delta plan: interpolating, only the cover reads the set motion");
+    tuning.world_delta = tuning.world_sky = false;
+    request.app_delta = false;
+    const depthxr::FrameGenViewPlan interpolated_plain = depthxr::BuildFrameGenViewPlan(request, tuning);
+    Expect(count(interpolated_plain, FrameGenPass::kWorldSolve) == 3 &&
+               (filters(interpolated_plain)[1].constants.options[1] & depthxr::kFrameGenFlagWorldSky) == 0,
+           "World delta plan: interpolating without it, the cover's fit as before");
+}
+
+// The calibration of the application's movement against the world fit, on
+// fits made from the model (a sign and a scale, a little noise): a sign
+// and s_t found once 300 informative frames with turns came; none without
+// turns, nor at a scale out of range; locked, the watchdog drops it back
+// after 10 checks in a row 25% off, a check within resetting the count.
+void TestFrameGenWorldDeltaCalibration() {
+    using depthxr::FrameGenWorldDeltaMode;
+    Expect(depthxr::ParseFrameGenWorldDeltaMode("calibrate") == FrameGenWorldDeltaMode::kCalibrate &&
+               depthxr::ParseFrameGenWorldDeltaMode("Calibrate") == FrameGenWorldDeltaMode::kCalibrate &&
+               depthxr::ParseFrameGenWorldDeltaMode("1") == FrameGenWorldDeltaMode::kOn &&
+               depthxr::ParseFrameGenWorldDeltaMode("0") == FrameGenWorldDeltaMode::kOff &&
+               depthxr::ParseFrameGenWorldDeltaMode("") == FrameGenWorldDeltaMode::kOff,
+           "World delta calibration: the switch's modes parse");
+    const auto fixed = depthxr::ParseFrameGenWorldDeltaFixed(" -1, 1.05");
+    Expect(fixed && fixed->first == -1 && std::abs(fixed->second - 1.05f) < 1e-6f &&
+               !depthxr::ParseFrameGenWorldDeltaFixed("1") && !depthxr::ParseFrameGenWorldDeltaFixed("2,1") &&
+               !depthxr::ParseFrameGenWorldDeltaFixed("1,3") && !depthxr::ParseFrameGenWorldDeltaFixed("1,1,x"),
+           "World delta calibration: a fixed sign and scale parse, others are refused");
+    depthxr::FrameGenWorldDeltaCalibration fixed_calibration;
+    fixed_calibration.Fix(-1, 1.05f);
+    Expect(fixed_calibration.Locked() && fixed_calibration.Status().fixed && fixed_calibration.Sign() == -1 &&
+               fixed_calibration.Scale() == 1.05f && fixed_calibration.Status().decisions == 1,
+           "World delta calibration: fixed, locked from the start");
+
+    constexpr double kDegree = 3.14159265358979 / 180.0;
+    // Frame k: flying on 1.8 m a frame, banking 0.4 degrees a frame on
+    // frames 100-159 when `turns`; the head still, no Pivot.
+    auto frame_fits = [&](int k, bool turns, int sign, double scale, double off = 1.0) {
+        const double turn = turns && k >= 100 && k < 160 ? 0.4 * kDegree : 0.0;
+        const WorldQuat head = WorldAxisAngle({0.0, 1.0, 0.0}, 30.0 * kDegree);
+        const WorldScene scene = MakeWorldScene(head, {0.0, 1.2, 0.0}, head, {0.0, 1.2, 0.0}, 10.0 * kDegree, {}, {},
+                                                WorldAxisAngle({0.05, 1.0, 0.1}, turn), {0.0, 0.0, 1.8});
+        std::vector<depthxr::FrameGenWorldFit> fits;
+        for (int e = 0; e < 2; ++e) {
+            depthxr::FrameGenWorldFit fit;
+            fit.game_newest = scene.game_newest[e];
+            fit.game_previous = scene.game_previous[e];
+            fit.newest = scene.newest[e];
+            fit.previous = scene.previous[e];
+            fit.delta_orientation = scene.delta_orientation;
+            fit.delta_position = scene.delta_position;
+            const depthxr::FrameGenEngineWorld truth = depthxr::FrameGenEngineWorldParams(
+                fit.game_newest, fit.game_previous, fit.newest, fit.previous, fit.delta_orientation, fit.delta_position,
+                sign, static_cast<float>(scale));
+            for (int i = 0; i < 3; ++i) {
+                const double noise = std::sin(17.0 * k + 5.0 * i + 3.0 * e);
+                fit.rotation[i] = truth.rotation[i] + static_cast<float>(1e-4 * noise);
+                fit.translation[i] = static_cast<float>(off * truth.translation[i] + 0.02 * noise);
+            }
+            fit.valid = true;
+            fits.push_back(fit);
+        }
+        return fits;
+    };
+    for (const int sign : {1, -1}) {
+        depthxr::FrameGenWorldDeltaCalibration calibration;
+        for (int k = 0; k < 299; ++k) calibration.Add(frame_fits(k, true, sign, 1.08));
+        const bool early = calibration.Locked();
+        calibration.Add(frame_fits(299, true, sign, 1.08));
+        const depthxr::FrameGenWorldDeltaStatus& status = calibration.Status();
+        Expect(!early && calibration.Locked() && calibration.Sign() == sign && std::abs(calibration.Scale() - 1.08f) < 0.01f &&
+                   status.informative == 300 && status.turning == 60 && status.decisions == 1 &&
+                   status.rotation_correlation[sign > 0 ? 0 : 1] > 0.99 && status.translation_correlation > 0.99,
+               "World delta calibration: the sign and s_t lock after 300 informative frames (sign " + std::to_string(sign) +
+                   ": " + status.reason + ")");
+    }
+    // No turns: the sign cannot be told.
+    {
+        depthxr::FrameGenWorldDeltaCalibration calibration;
+        for (int k = 0; k < 400; ++k) calibration.Add(frame_fits(k, false, 1, 1.0));
+        Expect(!calibration.Locked() && calibration.Status().informative == 400 && calibration.Status().turning == 0,
+               "World delta calibration: straight flight alone never locks");
+    }
+    // s_t out of range (the depth or the delta far off): no lock.
+    {
+        depthxr::FrameGenWorldDeltaCalibration calibration;
+        for (int k = 0; k < 400; ++k) calibration.Add(frame_fits(k, true, 1, 2.0));
+        Expect(!calibration.Locked() && std::abs(calibration.Status().fitted_scale - 2.0) < 0.02,
+               "World delta calibration: s_t 2 does not lock");
+    }
+    // Fits that did not solve count for nothing.
+    {
+        depthxr::FrameGenWorldDeltaCalibration calibration;
+        auto fits = frame_fits(0, true, 1, 1.0);
+        for (auto& fit : fits) fit.valid = false;
+        calibration.Add(fits);
+        Expect(calibration.Status().frames == 0, "World delta calibration: unsolved fits are left out");
+    }
+    // The watchdog.
+    depthxr::FrameGenWorldDeltaCalibration calibration;
+    calibration.Fix(1, 1.0f);
+    for (int k = 0; k < 9; ++k) calibration.Add(frame_fits(k, false, 1, 1.0, 1.4));
+    const bool held = calibration.Locked() && calibration.Status().failed == 9;
+    calibration.Add(frame_fits(9, false, 1, 1.0));
+    for (int k = 10; k < 19; ++k) calibration.Add(frame_fits(k, false, 1, 1.0, 1.4));
+    const bool reset = calibration.Locked() && calibration.Status().checks == 19;
+    calibration.Add(frame_fits(19, false, 1, 1.0, 1.4));
+    const depthxr::FrameGenWorldDeltaStatus& dropped = calibration.Status();
+    Expect(held && reset && !calibration.Locked() && !dropped.fixed && dropped.drops == 1 && dropped.decisions == 2 &&
+               dropped.failed == 19 && std::abs(dropped.last_error - 0.4) < 0.05 && dropped.frames == 0,
+           "World delta calibration: 10 checks in a row 25% off drop it back to the fit (" + dropped.reason + ")");
+}
+
+// Stage 7's plans: frames extrapolated from a real frame whose cells were
+// labelled (its analysis merged the vectors in) build the engine motion map
+// (the shift passes into kMotionMap with the labels and the world's motion),
+// merged in place of the eye-shift map: one map per generated frame, four
+// dispatches, and no eye-shift map; separate beside it. Read again for a
+// later frame of the same real frame (no map built, its time in options.w's
+// high half), and past one interval with engine_reach. Without labels, the
+// switch off, interpolating or moved by an older frame's motion, the plans as
+// before.
+void TestFrameGenEngineMapPlan() {
+    using depthxr::FrameGenEngineMap;
+    using depthxr::FrameGenPass;
+    using depthxr::FrameGenTextureKind;
+    Expect(depthxr::ParseFrameGenEngineMap("merged") == FrameGenEngineMap::kMerged &&
+               depthxr::ParseFrameGenEngineMap("Separate") == FrameGenEngineMap::kSeparate &&
+               depthxr::ParseFrameGenEngineMap("1") == FrameGenEngineMap::kOff &&
+               depthxr::ParseFrameGenEngineMap("") == FrameGenEngineMap::kOff &&
+               std::string(depthxr::ToString(FrameGenEngineMap::kMerged)) == "merged",
+           "Engine map plan: VECTORXR_FRAMEGEN_ENGINE_MAP parses separate and merged, anything else off");
+    depthxr::FrameGenViewRequest request;
+    request.extent = {1024, 1024};
+    request.synthesize = request.temporal = request.depth = true;
+    for (auto* geometry : {&request.newest, &request.previous}) {
+        geometry->angle_left = geometry->angle_down = -0.9f;
+        geometry->angle_right = geometry->angle_up = 0.9f;
+    }
+    request.previous.orientation = {0.0f, 0.01f, 0.0f, 0.99995f};
+    request.shift = {0.02f, 0.0f, 0.004f};
+    request.engine_motion = true;
+    depthxr::FrameGenTuning tuning;
+    tuning.mode = depthxr::FrameGenSynthesisMode::kExtrapolate;
+    tuning.analyze_only = true;
+    tuning.engine_mode = depthxr::FrameGenEngineMode::kAssist;
+    auto synthesis = [&](const depthxr::FrameGenTuning& with, float fraction, float map_time = 0.0f, bool stale = false,
+                         depthxr::FrameGenSynthesisMode mode = depthxr::FrameGenSynthesisMode::kExtrapolate) {
+        return depthxr::BuildFrameGenSynthesisPlan(request, with, mode, fraction, false, stale, map_time);
+    };
+    auto order = [](const depthxr::FrameGenViewPlan& plan) {
+        std::string text;
+        for (const auto& dispatch : plan.dispatches) {
+            switch (dispatch.pass) {
+            case FrameGenPass::kShiftClear: text += dispatch.outputs[1].kind == FrameGenTextureKind::kShiftMap ? "C " : "c "; break;
+            case FrameGenPass::kShiftSplat: text += "s "; break;
+            case FrameGenPass::kShiftResolve: text += "r "; break;
+            case FrameGenPass::kShiftFill: text += "f "; break;
+            case FrameGenPass::kShiftSplatEngine: text += "es "; break;
+            case FrameGenPass::kShiftResolveEngine: text += "er "; break;
+            case FrameGenPass::kShiftFillEngine: text += "ef "; break;
+            case FrameGenPass::kSynthesizeUnorm8: text += "synth "; break;
+            default: text += "? "; break;
+            }
+        }
+        return text;
+    };
+    auto same = [](const depthxr::FrameGenViewPlan& a, const depthxr::FrameGenViewPlan& b) {
+        bool equal = a.dispatches.size() == b.dispatches.size();
+        for (std::size_t i = 0; equal && i < a.dispatches.size(); ++i) {
+            equal = a.dispatches[i].pass == b.dispatches[i].pass &&
+                    std::memcmp(a.dispatches[i].inputs.data(), b.dispatches[i].inputs.data(), sizeof(a.dispatches[i].inputs)) == 0 &&
+                    std::memcmp(a.dispatches[i].outputs.data(), b.dispatches[i].outputs.data(), sizeof(a.dispatches[i].outputs)) == 0 &&
+                    std::memcmp(&a.dispatches[i].constants, &b.dispatches[i].constants, sizeof(depthxr::FrameGenConstants)) == 0;
+        }
+        return equal;
+    };
+    const depthxr::FrameGenViewPlan mk1 = synthesis(tuning, 0.5f);
+    tuning.depth_splat = true;
+    const depthxr::FrameGenViewPlan m3 = synthesis(tuning, 0.5f);
+    tuning.depth_splat = false;
+    Expect(order(mk1) == "C s r f synth " && order(m3) == "C s r f c s r f synth " &&
+               !depthxr::FrameGenEngineMapTime(mk1) && !depthxr::FrameGenEngineMapTime(m3),
+           "Engine map plan: without the switch the eye-shift map (and with the depth splat the motion map), as before (" +
+               order(m3) + ")");
+
+    // Merged: one map, the eye's offset in it, no eye-shift map.
+    tuning.engine_map = FrameGenEngineMap::kMerged;
+    const depthxr::FrameGenViewPlan merged = synthesis(tuning, 0.5f);
+    bool shift_map = false;
+    for (const auto& dispatch : merged.dispatches) {
+        for (const auto& texture : dispatch.inputs) shift_map = shift_map || texture.kind == FrameGenTextureKind::kShiftMap;
+        for (const auto& texture : dispatch.outputs) shift_map = shift_map || texture.kind == FrameGenTextureKind::kShiftMap;
+    }
+    const depthxr::FrameGenDispatch& splat = merged.dispatches[1];
+    const depthxr::FrameGenDispatch& resolve = merged.dispatches[2];
+    const depthxr::FrameGenDispatch& fill = merged.dispatches[3];
+    const depthxr::FrameGenDispatch& output = merged.dispatches.back();
+    const std::uint32_t map_flags = depthxr::kFrameGenFlagDepth | depthxr::kFrameGenFlagDepthSplat | depthxr::kFrameGenFlagEngine;
+    Expect(order(merged) == "c es er ef synth " && !shift_map && merged.dispatches.size() == 5 &&
+               merged.dispatches[0].outputs[0].kind == FrameGenTextureKind::kShiftKeys &&
+               merged.dispatches[0].outputs[1].kind == FrameGenTextureKind::kMotionMap,
+           "Engine map plan: merged, one map per generated frame (4 dispatches) and no eye-shift map (" + order(merged) + ")");
+    Expect(splat.constants.rot0 == std::array<float, 4>{1.0f, 0.0f, 0.0f, -0.01f} &&
+               splat.constants.rot1 == std::array<float, 4>{0.0f, 1.0f, 0.0f, 0.0f} &&
+               splat.constants.rot2 == std::array<float, 4>{0.0f, 0.0f, 1.0f, -0.002f} &&
+               splat.constants.fov_previous == splat.constants.fov_current &&
+               splat.constants.options[0] == depthxr::kFrameGenEngineMapMerged && splat.constants.options[1] == map_flags &&
+               splat.constants.tuning[1] == -0.5f && splat.constants.tuning[2] == 0.1f && splat.width == 512 &&
+               splat.height == 512,
+           "Engine map plan: merged, the eye-shift map's mapping (the eye's offset at the frame's time), the step, the "
+           "motion limit and the engine flags");
+    Expect(splat.inputs[0].kind == FrameGenTextureKind::kDepth &&
+               splat.inputs[1].kind == FrameGenTextureKind::kFilteredNewest && splat.inputs[1].level == merged.final_flow_level &&
+               splat.inputs[3].kind == FrameGenTextureKind::kNone && splat.inputs[4].kind == FrameGenTextureKind::kEngineLabels &&
+               resolve.inputs[2].kind == FrameGenTextureKind::kShiftKeys &&
+               resolve.inputs[4].kind == FrameGenTextureKind::kEngineLabels &&
+               fill.inputs[0].kind == FrameGenTextureKind::kShiftKeys &&
+               fill.inputs[1].kind == FrameGenTextureKind::kFilteredNewest,
+           "Engine map plan: the labels at input 4, the filtered flow at 1, no world motion without the real frame's");
+    Expect(output.inputs[4].kind == FrameGenTextureKind::kNone && output.inputs[5].kind == FrameGenTextureKind::kMotionMap &&
+               (output.constants.options[1] & (depthxr::kFrameGenFlagDepthSplat | depthxr::kFrameGenFlagEngine)) ==
+                   (depthxr::kFrameGenFlagDepthSplat | depthxr::kFrameGenFlagEngine) &&
+               (output.constants.options[1] & depthxr::kFrameGenFlagShift) == 0 && output.constants.options[3] == 0u &&
+               depthxr::FrameGenEngineMapTime(merged) == 0.5f,
+           "Engine map plan: merged, synthesis reads the map at input 5, no eye shift of its own");
+    request.engine_world = true;
+    const depthxr::FrameGenViewPlan worlded = synthesis(tuning, 0.5f);
+    request.engine_world = false;
+    Expect(worlded.dispatches[1].inputs[3].kind == FrameGenTextureKind::kWorldParamsNewest &&
+               worlded.dispatches[2].inputs[3].kind == FrameGenTextureKind::kWorldParamsNewest &&
+               worlded.dispatches[1].constants.options[0] ==
+                   (depthxr::kFrameGenEngineMapWorld | depthxr::kFrameGenEngineMapMerged),
+           "Engine map plan: the real frame's world motion kept (kWorldParamsNewest) at input 3");
+
+    // Separate: the eye-shift map, then the engine motion map from the
+    // plan's own constants.
+    tuning.engine_map = FrameGenEngineMap::kSeparate;
+    const depthxr::FrameGenViewPlan separate = synthesis(tuning, 0.5f);
+    const depthxr::FrameGenDispatch& separate_splat = separate.dispatches[5];
+    const depthxr::FrameGenDispatch& separate_output = separate.dispatches.back();
+    Expect(order(separate) == "C s r f c es er ef synth " && separate_splat.constants.options[0] == 0u &&
+               separate_splat.constants.options[1] == map_flags && separate_splat.constants.tuning[1] == -0.5f &&
+               separate_splat.constants.rot0 == m3.dispatches[5].constants.rot0 &&
+               separate_splat.inputs[4].kind == FrameGenTextureKind::kEngineLabels &&
+               separate_output.inputs[4].kind == FrameGenTextureKind::kShiftMap &&
+               separate_output.inputs[5].kind == FrameGenTextureKind::kMotionMap &&
+               (separate_output.constants.options[1] & depthxr::kFrameGenFlagEngine) == 0 &&
+               (separate_output.constants.options[1] & depthxr::kFrameGenFlagShift) != 0,
+           "Engine map plan: separate, the eye-shift map and the engine motion map (" + order(separate) + ")");
+
+    // Read again: no map built, the time it was built for in options.w's high
+    // half (separate: the eye-shift map's own time in the low half).
+    tuning.engine_map = FrameGenEngineMap::kMerged;
+    const depthxr::FrameGenViewPlan reused = synthesis(tuning, 0.5f, 0.25f);
+    tuning.engine_map = FrameGenEngineMap::kSeparate;
+    const depthxr::FrameGenViewPlan reused_separate = synthesis(tuning, 0.5f, 0.25f);
+    Expect(order(reused) == "synth " && reused.dispatches.back().inputs[5].kind == FrameGenTextureKind::kMotionMap &&
+               reused.dispatches.back().constants.options[3] == 0x3400u << 16 && !depthxr::FrameGenEngineMapTime(reused) &&
+               order(reused_separate) == "C s r f synth " &&
+               reused_separate.dispatches.back().constants.options[3] == ((0x3400u << 16) | 0x3800u),
+           "Engine map plan: a map read again is not built; its time in options.w's high half (" + order(reused) + ")");
+
+    // Past one interval with the reach: the frame's fraction (the eye's
+    // offset and the map's step with it) up to engine_reach.
+    tuning.engine_map = FrameGenEngineMap::kMerged;
+    tuning.engine_reach = 1.5f;
+    const depthxr::FrameGenViewPlan reached = synthesis(tuning, 1.4f);
+    const depthxr::FrameGenViewPlan capped = synthesis(tuning, 2.5f);
+    Expect(reached.dispatches.back().constants.tuning[0] == 1.4f && reached.dispatches[1].constants.tuning[1] == -1.4f &&
+               std::abs(reached.dispatches[1].constants.rot0[3] + 0.028f) < 1e-6f &&
+               capped.dispatches.back().constants.tuning[0] == 1.5f,
+           "Engine map plan: past one interval up to the reach");
+    request.engine_motion = false;
+    const depthxr::FrameGenViewPlan unlabelled = synthesis(tuning, 1.4f);
+    request.engine_motion = true;
+    const depthxr::FrameGenViewPlan stale = synthesis(tuning, 1.4f, 0.0f, true);
+    Expect(unlabelled.dispatches.back().constants.tuning[0] == 1.0f && order(unlabelled) == "C s r f synth " &&
+               stale.dispatches.back().constants.tuning[0] == 1.0f && !depthxr::FrameGenEngineMapTime(stale),
+           "Engine map plan: one interval at most without labels, or moved by an older frame's motion");
+    tuning.engine_reach = 1.0f;
+
+    // Without labels (Observe), interpolating, or the switch off: as before.
+    tuning.engine_mode = depthxr::FrameGenEngineMode::kObserve;
+    const depthxr::FrameGenViewPlan observed = synthesis(tuning, 0.5f);
+    tuning.engine_mode = depthxr::FrameGenEngineMode::kAssist;
+    request.engine_motion = false;
+    const depthxr::FrameGenViewPlan without = synthesis(tuning, 0.5f);
+    request.engine_motion = true;
+    tuning.mode = depthxr::FrameGenSynthesisMode::kInterpolate;
+    tuning.cover = true;
+    tuning.engine_map = FrameGenEngineMap::kOff;
+    const depthxr::FrameGenViewPlan interpolated_mk1 =
+        synthesis(tuning, 0.5f, 0.0f, false, depthxr::FrameGenSynthesisMode::kInterpolate);
+    tuning.engine_map = FrameGenEngineMap::kMerged;
+    const depthxr::FrameGenViewPlan interpolated =
+        synthesis(tuning, 0.5f, 0.0f, false, depthxr::FrameGenSynthesisMode::kInterpolate);
+    // A cover frame (extrapolated from an interpolating analysis) takes it.
+    const depthxr::FrameGenViewPlan cover = synthesis(tuning, 0.5f);
+    tuning.mode = depthxr::FrameGenSynthesisMode::kExtrapolate;
+    tuning.cover = false;
+    Expect(same(observed, mk1) && same(without, mk1) && same(interpolated, interpolated_mk1) &&
+               order(cover) == "c es er ef synth ",
+           "Engine map plan: Observe, a frame without labels and interpolated frames as without the switch; cover frames "
+           "take the map");
+
+    // Written together (not just in time): a merged map per generated frame,
+    // with the world motion the analysis set or fitted itself.
+    tuning.analyze_only = false;
+    tuning.generated = 2;
+    tuning.fractions = {0.5f, 1.0f, 0.5f, 0.5f};
+    request.world_motion = true;
+    const depthxr::FrameGenViewPlan together = depthxr::BuildFrameGenViewPlan(request, tuning);
+    std::size_t maps = 0, outputs = 0;
+    bool shift_together = false, world_together = true;
+    for (const auto& dispatch : together.dispatches) {
+        if (dispatch.pass == FrameGenPass::kShiftClear) {
+            maps += dispatch.outputs[1].kind == FrameGenTextureKind::kMotionMap ? 1 : 0;
+            shift_together = shift_together || dispatch.outputs[1].kind == FrameGenTextureKind::kShiftMap;
+        }
+        if (dispatch.pass == FrameGenPass::kShiftSplatEngine) {
+            world_together = world_together && dispatch.inputs[3].kind == FrameGenTextureKind::kWorldParams &&
+                             (dispatch.constants.options[0] & depthxr::kFrameGenEngineMapWorld) != 0;
+        }
+        outputs += dispatch.pass == FrameGenPass::kSynthesizeUnorm8 ? 1 : 0;
+    }
+    Expect(maps == 2 && outputs == 2 && !shift_together && world_together && together.frames_in_order,
+           "Engine map plan: written together, a merged map per generated frame with kWorldParams");
+    // The merge keeps the depth of each label's surface for the map (the
+    // resolved depth at input 5); without the map it reads none, as before.
+    tuning.engine_map = FrameGenEngineMap::kOff;
+    const depthxr::FrameGenViewPlan unmapped = depthxr::BuildFrameGenViewPlan(request, tuning);
+    tuning.engine_map = FrameGenEngineMap::kMerged;
+    auto merge_of = [](const depthxr::FrameGenViewPlan& plan) {
+        const auto found = std::find_if(plan.dispatches.begin(), plan.dispatches.end(),
+                                        [](const depthxr::FrameGenDispatch& dispatch) { return dispatch.pass == FrameGenPass::kEngineMerge; });
+        return found != plan.dispatches.end() ? *found : depthxr::FrameGenDispatch{};
+    };
+    const depthxr::FrameGenDispatch mapped_merge = merge_of(together);
+    const depthxr::FrameGenDispatch plain_merge = merge_of(unmapped);
+    Expect(mapped_merge.pass == FrameGenPass::kEngineMerge && mapped_merge.inputs[5].kind == FrameGenTextureKind::kDepth &&
+               (mapped_merge.constants.options[0] & depthxr::kFrameGenEngineMergeDepths) != 0 &&
+               plain_merge.pass == FrameGenPass::kEngineMerge && plain_merge.inputs[5].kind == FrameGenTextureKind::kNone &&
+               (plain_merge.constants.options[0] & depthxr::kFrameGenEngineMergeDepths) == 0,
+           "Engine map plan: the merge keeps the labels' surface depths for the map, none without it");
+    request.world_motion = false;
+    tuning.analyze_only = true;
+    tuning.generated = 1;
+
+    // Read again only near the time it was built for, both within one
+    // interval: past it the map's flow stopped at one interval while its
+    // models went on, which no one scale keeps.
+    using depthxr::FrameGenEngineMapReusable;
+    Expect(FrameGenEngineMapReusable(0.5f, 0.25f) && FrameGenEngineMapReusable(0.75f, 1.0f) &&
+               !FrameGenEngineMapReusable(0.75f, 0.25f) && !FrameGenEngineMapReusable(1.5f, 1.25f) &&
+               !FrameGenEngineMapReusable(1.2f, 0.9f) && !FrameGenEngineMapReusable(0.5f, 0.0f),
+           "Engine map plan: a map read again within 0.35 of its time, both within one interval");
+
+    // The fraction up to the reach, extrapolating only.
+    using depthxr::FrameGenFraction;
+    using depthxr::FrameGenSynthesisMode;
+    Expect(FrameGenFraction(FrameGenSynthesisMode::kExtrapolate, 0, 100, 250) == 1.0f &&
+               FrameGenFraction(FrameGenSynthesisMode::kExtrapolate, 0, 100, 250, 1.5f) == 1.5f &&
+               FrameGenFraction(FrameGenSynthesisMode::kExtrapolate, 0, 100, 220, 1.5f) == 1.2f &&
+               FrameGenFraction(FrameGenSynthesisMode::kExtrapolate, 0, 100, 400, 3.0f) == 2.0f &&
+               FrameGenFraction(FrameGenSynthesisMode::kInterpolate, 0, 100, 250, 1.5f) == 1.0f,
+           "Engine map plan: FrameGenFraction past one interval up to the reach (2 at most), extrapolating only");
+}
+
+// Research switches: the environment first, then framegen-research.txt for
+// the engine motion research's switches only.
+void TestResearchSwitches() {
+#if defined(_WIN32)
+    namespace fs = std::filesystem;
+    const wchar_t* saved_local = _wgetenv(L"LOCALAPPDATA");
+    const std::wstring local_before = saved_local ? saved_local : L"";
+    const fs::path root =
+        fs::temp_directory_path() /
+        ("vectorxr-research-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::error_code ignored;
+    fs::remove_all(root, ignored);
+    fs::create_directories(root / "VectorXR", ignored);
+    _wputenv_s(L"LOCALAPPDATA", root.wstring().c_str());
+    for (const char* name : {"VECTORXR_FRAMEGEN_ENGINE_CUTS", "VECTORXR_FRAMEGEN_ENGINE_MV",
+                             "VECTORXR_FRAMEGEN_DEPTH_ENCODING_CHECK", "VECTORXR_FRAMEGEN_JIT",
+                             "VECTORXR_FRAMEGEN_ENGINE_MV_STATE", "VECTORXR_FRAMEGEN_DEPTH_SPLAT",
+                             "VECTORXR_FRAMEGEN_WORLD", "VECTORXR_FRAMEGEN_SYNTH_FLOW_VIEW",
+                             "VECTORXR_FRAMEGEN_FLOW_PRIOR"}) {
+        _putenv_s(name, "");
+    }
+    Expect(!depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_CUTS"), "Research switches: none without a file");
+    {
+        // Notepad's byte order mark, spaces, a comment, a switch outside the
+        // research's and one named twice.
+        std::ofstream file(root / "VectorXR" / "framegen-research.txt", std::ios::binary);
+        file << "\xEF\xBB\xBFVECTORXR_FRAMEGEN_ENGINE_MV=census\r\n"
+             << "# VECTORXR_FRAMEGEN_ENGINE_MV_STATE=common\r\n"
+             << "  VECTORXR_FRAMEGEN_ENGINE_CUTS = 0 \r\n"
+             << "VECTORXR_FRAMEGEN_DEPTH_ENCODING_CHECK=1\r\n"
+             << "VECTORXR_FRAMEGEN_JIT=0\r\n"
+             << "VECTORXR_FRAMEGEN_ENGINE_CUTS=1\r\n"
+             << "VECTORXR_FRAMEGEN_DEPTH_SPLAT=1\r\n"
+             << "VECTORXR_FRAMEGEN_WORLD=0\r\n"
+             << "VECTORXR_FRAMEGEN_SYNTH_FLOW_VIEW=fine\r\n"
+             << "VECTORXR_FRAMEGEN_FLOW_PRIOR=sky:1,0.003,0.0005\r\n";
+    }
+    depthxr::TakeResearchFileSwitches(); // what earlier reads in the process left
+    const std::uint64_t reads = depthxr::ResearchFileReads();
+    Expect(depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_MV") == "census",
+           "Research switches: the first line, after a byte order mark");
+    Expect(depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_CUTS") == "1",
+           "Research switches: the last line naming a switch holds, trimmed");
+    Expect(depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_DEPTH_ENCODING_CHECK") == "1",
+           "Research switches: the depth encoding check is one of them");
+    Expect(!depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_MV_STATE"), "Research switches: a commented line is not read");
+    Expect(!depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_JIT"),
+           "Research switches: switches outside the engine motion and depth research come from the environment only");
+    Expect(depthxr::ResearchFileReads() == reads + 3, "Research switches: three reads answered by the file");
+    Expect(depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_DEPTH_SPLAT") == "1" &&
+               depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_WORLD") == "0" && depthxr::ResearchFileReads() == reads + 5,
+           "Research switches: the depth research's switches and world motion are among them");
+    // The environment wins.
+    _putenv_s("VECTORXR_FRAMEGEN_ENGINE_CUTS", "0");
+    _putenv_s("VECTORXR_FRAMEGEN_JIT", "1");
+    Expect(depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_CUTS") == "0" &&
+               depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_JIT") == "1" && depthxr::ResearchFileReads() == reads + 5,
+           "Research switches: the environment wins");
+    // Each switch taken from the file is told once.
+    const std::vector<std::string> taken = depthxr::TakeResearchFileSwitches();
+    Expect(taken == std::vector<std::string>{"VECTORXR_FRAMEGEN_ENGINE_MV=census", "VECTORXR_FRAMEGEN_ENGINE_CUTS=1",
+                                             "VECTORXR_FRAMEGEN_DEPTH_ENCODING_CHECK=1",
+                                             "VECTORXR_FRAMEGEN_DEPTH_SPLAT=1", "VECTORXR_FRAMEGEN_WORLD=0"},
+           "Research switches: the switches taken from the file, in order");
+    Expect(depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_MV") == "census" &&
+               depthxr::TakeResearchFileSwitches().empty(),
+           "Research switches: a switch taken again is not told again");
+    // A session's switches are told anew, an earlier session's or not; what
+    // was read before the session and not told is not its.
+    depthxr::ResetResearchFileSwitches();
+    Expect(depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_DEPTH_SPLAT") == "1", "Research switches: read again");
+    depthxr::ResetResearchFileSwitches();
+    Expect(depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_MV") == "census" &&
+               depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_MV") == "census" &&
+               depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_WORLD") == "0" &&
+               depthxr::TakeResearchFileSwitches() ==
+                   std::vector<std::string>{"VECTORXR_FRAMEGEN_ENGINE_MV=census", "VECTORXR_FRAMEGEN_WORLD=0"},
+           "Research switches: each session's are told, once each");
+    Expect(depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_SYNTH_FLOW_VIEW") == "fine",
+           "Research switches: the synthesis research's switches are among them");
+    Expect(depthxr::ReadResearchSwitch("VECTORXR_FRAMEGEN_FLOW_PRIOR") == "sky:1,0.003,0.0005",
+           "Research switches: the flow research's switches are among them");
+    for (const char* name : {"VECTORXR_FRAMEGEN_ENGINE_CUTS", "VECTORXR_FRAMEGEN_JIT"}) {
+        _putenv_s(name, "");
+    }
+    _wputenv_s(L"LOCALAPPDATA", local_before.c_str());
+    fs::remove_all(root, ignored);
+#endif
 }
 
 void TestTurboMetricsSettingsParsing() {
@@ -2609,6 +6336,9 @@ void TestRuntimeRelayControlAndStatusRoundTrip() {
     status.application = "DCS.exe";
     status.updated_at_unix_milliseconds = 1000;
     status.acknowledged_revision = 17;
+    status.framegen_flow = "shader";
+    status.framegen_flow_mode = "auto";
+    status.framegen_flow_reason = "hardware late";
     status.quadviews_diagnostic_visualization_available = true;
     status.quadviews_diagnostic_visualization_enabled = true;
     const std::filesystem::path status_path = depthxr::RuntimeStatusPath(test_directory, session_id);
@@ -2619,6 +6349,10 @@ void TestRuntimeRelayControlAndStatusRoundTrip() {
     status_content << status_stream.rdbuf();
     Expect(status_content.str().find("\"acknowledgedRevision\": 17") != std::string::npos,
            "Runtime status acknowledgement was not serialized");
+    Expect(status_content.str().find("\"framegenFlow\": \"shader\"") != std::string::npos &&
+               status_content.str().find("\"framegenFlowMode\": \"auto\"") != std::string::npos &&
+               status_content.str().find("\"framegenFlowReason\": \"hardware late\"") != std::string::npos,
+           "Runtime status lost the active Interpolate flow and its reason");
     Expect(status_content.str().find("\"framegen\":") == std::string::npos,
            "Runtime status wrote Frame Generation rates for a session without it");
     status_stream.close(); // an open reader keeps the atomic replace from taking the file
@@ -3089,6 +6823,12 @@ void TestEyeGazeExtensionCompatibilityPolicy() {
                     "The layer must not duplicate an application-requested gaze extension");
 
     input.downstream_already_has_eye_gaze = false;
+    input.pre_instance_probe = EyeGazeProbeState::kPresent;
+    input.suite_enabled = false;
+    expect_decision(input, false, EyeGazeRequestReason::kSuiteDisabled,
+                    "With VectorXR turned off the layer must not add the gaze extension");
+
+    input.suite_enabled = true;
     input.app_requested_layer_owned_quadviews = false;
     expect_decision(input, false, EyeGazeRequestReason::kQuadviewsNotRequested,
                     "Applications without layer-owned quadviews should not receive an injected extension");
@@ -3104,7 +6844,8 @@ void TestEyeGazeExtensionCompatibilityPolicy() {
                depthxr::EyeGazeRequestReasonName(EyeGazeRequestReason::kRuntimeWorkaround) ==
                    "runtime-workaround" &&
                depthxr::EyeGazeRequestReasonName(EyeGazeRequestReason::kReliableNegative) ==
-                   "reliable-negative",
+                   "reliable-negative" &&
+               depthxr::EyeGazeRequestReasonName(EyeGazeRequestReason::kSuiteDisabled) == "suite-disabled",
            "Request reason names must remain stable for startup diagnostics");
 
     Expect(depthxr::ShouldRetryWithoutInjectedEyeGaze(true, true),
@@ -3488,6 +7229,21 @@ void TestDeviceInputPathsAndHatDirections() {
                repeated_missing_device.diagnostic_stage == first_missing_device.diagnostic_stage &&
                repeated_missing_device.result_code == first_missing_device.result_code,
            "A repeated missing-device binding must reuse the failure without touching DirectInput");
+
+    // xrDestroyInstance with its session still begun drains the device work:
+    // that ends the session's waiting for a rescan too, so a later instance
+    // in a process that kept the layer loaded retries on the timer again.
+    depthxr::SetInputDeviceSessionActive(true); // tries the absent device once more
+    bool waits_in_session = false;
+    for (int attempt = 0; attempt < 500 && !waits_in_session; ++attempt) {
+        waits_in_session = depthxr::PollInputBinding(missing_device_binding).device_waits_for_rescan;
+        if (!waits_in_session) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    Expect(waits_in_session, "In a session a missing device must wait for a rescan after its attempt");
+    depthxr::DrainInputDeviceWork(std::chrono::seconds(5));
+    Expect(!depthxr::PollInputBinding(missing_device_binding).device_waits_for_rescan,
+           "Draining the device work at instance teardown must end the session's wait for a rescan");
+    depthxr::DrainInputDeviceWork(std::chrono::seconds(5));
 #endif
 }
 
@@ -4271,12 +8027,33 @@ int main() {
     TestTurboModuleOptional();
     TestFrameGenModuleOptional();
     TestFrameGenProfileResolution();
+    TestFrameGenEyePrediction();
     TestFrameGenInvalidSettingsRejected();
     TestFrameGenToggleBindingList();
     TestFrameGenOsdRows();
     TestOsdPerformanceRow();
     TestFrameGenPlan();
+    TestFrameGenDepthGuard();
     TestFrameGenHistoryState();
+    TestFrameGenEngineImageTracker();
+    TestFrameGenMotionCapturePlan();
+    TestFrameGenViewMapping();
+    TestFrameGenEngineCalibration();
+    TestFrameGenEngineGates();
+    TestFrameGenEngineCuts();
+    TestFrameGenDeclaredChange();
+    TestFrameGenEngineEvidencePlan();
+    TestFrameGenEngineAssistPlan();
+    TestFrameGenEngineLeadPlan();
+    TestFrameGenEngineLeadControl();
+    TestFrameGenEngineValidator();
+    TestFrameGenEnginePrior();
+    TestFrameGenEngineWorldParams();
+    TestFrameGenWorldDeltaPlan();
+    TestFrameGenWorldDeltaCalibration();
+    TestFrameGenEngineMapPlan();
+    TestFrameGenEngineVisibilityPlan();
+    TestResearchSwitches();
     TestTurboMetricsSettingsParsing();
     TestTurboMetricsSessionRoundTrip();
     TestQuadViewsProfileResolution();

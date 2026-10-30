@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import type { VectorXRConfig } from '../lib/model'
+import I18nText from './I18nText.vue'
+import { t } from '../i18n/index.ts'
+import type { ModuleId, VectorXRConfig } from '../lib/model'
 
 defineProps<{
   open: boolean
@@ -11,6 +13,8 @@ defineEmits<{
   apply: []
   cancel: []
 }>()
+
+const previewModules: ModuleId[] = ['depthxr', 'pivotxr', 'quadviews', 'turbo', 'framegen']
 </script>
 
 <template>
@@ -18,45 +22,33 @@ defineEmits<{
     <div class="flex max-h-[85vh] w-full max-w-[640px] flex-col overflow-hidden rounded-[1.5rem] border surface-panel-strong">
       <header class="flex flex-wrap items-start justify-between gap-4 border-b px-6 py-5" style="border-color: var(--app-border)">
         <div>
-          <p class="eyebrow text-xs uppercase tracking-[0.24em]">Import</p>
-          <h2 class="mt-2 text-2xl font-semibold tracking-tight">Review before applying</h2>
+          <p class="eyebrow text-xs uppercase tracking-[0.24em]">{{ t('app.importPreview.eyebrow') }}</p>
+          <h2 class="mt-2 text-2xl font-semibold tracking-tight">{{ t('app.importPreview.title') }}</h2>
           <p class="mt-2 text-sm text-muted">
-            A valid import will be saved immediately. Imports with validation issues can still be loaded into the editor for repair.
+            {{ t('app.importPreview.description') }}
           </p>
         </div>
         <button class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click="$emit('cancel')">
-          Cancel
+          {{ t('common.cancel') }}
         </button>
       </header>
 
       <div class="overflow-auto px-6 py-5 space-y-4">
         <div class="rounded-[1rem] border p-4 text-sm leading-6 surface-panel">
-          <p class="font-medium">What will load</p>
+          <p class="font-medium">{{ t('app.importPreview.whatWillLoad') }}</p>
           <ul class="mt-3 space-y-2 text-muted">
-            <li>
-              Applications:
-              <span class="font-medium" style="color: var(--app-text)">{{ config.applications.length }}</span>
-            </li>
-            <li>
-              Depth default: <span class="font-medium" style="color: var(--app-text)">{{ config.modules.depthxr.enabled ? 'On' : 'Off' }}</span>
-              — {{ config.modules.depthxr.profiles.length }} {{ config.modules.depthxr.profiles.length === 1 ? 'profile' : 'profiles' }}
-            </li>
-            <li>
-              Pivot default: <span class="font-medium" style="color: var(--app-text)">{{ config.modules.pivotxr.enabled ? 'On' : 'Off' }}</span>
-              — {{ config.modules.pivotxr.profiles.length }} {{ config.modules.pivotxr.profiles.length === 1 ? 'profile' : 'profiles' }}
-            </li>
-            <li>
-              Quadviews default: <span class="font-medium" style="color: var(--app-text)">{{ config.modules.quadviews.enabled ? 'On' : 'Off' }}</span>
-              - {{ config.modules.quadviews.profiles.length }} {{ config.modules.quadviews.profiles.length === 1 ? 'profile' : 'profiles' }}
-            </li>
-            <li>
-              Turbo default: <span class="font-medium" style="color: var(--app-text)">{{ config.modules.turbo.enabled ? 'On' : 'Off' }}</span>
-              — {{ config.modules.turbo.profiles.length }} {{ config.modules.turbo.profiles.length === 1 ? 'profile' : 'profiles' }}
-            </li>
-            <li>
-              Frame Generation default: <span class="font-medium" style="color: var(--app-text)">{{ config.modules.framegen.enabled ? 'On' : 'Off' }}</span>
-              — {{ config.modules.framegen.profiles.length }} {{ config.modules.framegen.profiles.length === 1 ? 'profile' : 'profiles' }}
-            </li>
+            <I18nText tag="li" keypath="app.importPreview.applications">
+              <template #number><span class="font-medium" style="color: var(--app-text)">{{ config.applications.length }}</span></template>
+            </I18nText>
+            <I18nText
+              v-for="moduleId in previewModules"
+              :key="moduleId"
+              tag="li"
+              keypath="app.importPreview.moduleDefault"
+              :params="{ module: t(`app.tabs.${moduleId}.label`), count: config.modules[moduleId].profiles.length }"
+            >
+              <template #state><span class="font-medium" style="color: var(--app-text)">{{ config.modules[moduleId].enabled ? t('common.on') : t('common.off') }}</span></template>
+            </I18nText>
           </ul>
         </div>
 
@@ -65,9 +57,9 @@ defineEmits<{
           class="rounded-[1rem] border px-4 py-4 text-sm leading-6 chip-warning"
           style="border-color: var(--app-border)"
         >
-          <p class="font-medium">{{ errors.length }} validation {{ errors.length === 1 ? 'issue' : 'issues' }} found</p>
+          <p class="font-medium">{{ t('app.importPreview.issuesFound', { count: errors.length }) }}</p>
           <p class="mt-1 text-sm">
-            You can still apply — errors will appear in the Validation panel and save will be blocked until resolved.
+            {{ t('app.importPreview.issuesHint') }}
           </p>
           <ul class="mt-3 space-y-1.5">
             <li v-for="error in errors" :key="error">{{ error }}</li>
@@ -79,7 +71,7 @@ defineEmits<{
           class="rounded-[1rem] border px-4 py-4 text-sm chip-success"
           style="border-color: var(--app-border)"
         >
-          Config structure and value ranges look valid.
+          {{ t('app.importPreview.valid') }}
         </div>
       </div>
 
@@ -89,14 +81,14 @@ defineEmits<{
           type="button"
           @click="$emit('cancel')"
         >
-          Cancel
+          {{ t('common.cancel') }}
         </button>
         <button
           class="button-accent rounded-[0.75rem] px-5 py-2.5 text-sm font-medium"
           type="button"
           @click="$emit('apply')"
         >
-          {{ errors.length > 0 ? 'Apply to Editor' : 'Import and Save' }}
+          {{ errors.length > 0 ? t('app.importPreview.applyToEditor') : t('app.importPreview.importAndSave') }}
         </button>
       </footer>
     </div>

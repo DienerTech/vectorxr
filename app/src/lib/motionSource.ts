@@ -1,3 +1,4 @@
+import { t } from '../i18n/index.ts'
 import type { FrameGenMotionEstimation, FrameGenSettings } from './model'
 
 // What the app's graphics card check found (load_gpu_capabilities): every
@@ -20,7 +21,7 @@ export interface GpuCapabilities {
 export interface MotionSourceState {
   // What Frame Generation measures motion with for these settings on this PC.
   effective: FrameGenMotionEstimation
-  // The choice does nothing: Interpolate in Dynamic measures with Shader whatever is chosen.
+  // The choice stays available in Dynamic; hardware may fall back while running.
   locked: boolean
   // Why NVIDIA hardware cannot be chosen (null: it can be, or it is not known).
   hardwareUnavailable: string | null
@@ -31,26 +32,23 @@ export interface MotionSourceState {
 // rewritten here: switching to Extrapolate, or to a PC with the hardware,
 // brings it back.
 export function motionSourceState(
-  settings: Pick<FrameGenSettings, 'synthesisMode' | 'motionEstimation' | 'frameMultiplier'>,
+  settings: Pick<FrameGenSettings, 'synthesisMode' | 'motionEstimation' | 'frameMultiplier'> & Partial<Pick<FrameGenSettings, 'interpolateFlow'>>,
   gpus: GpuCapabilities | null,
 ): MotionSourceState {
   const interpolate = settings.synthesisMode === 'interpolate'
-  const locked = interpolate && settings.frameMultiplier === 'dynamic'
+  const locked = false
   let hardwareUnavailable: string | null = null
   if (gpus?.probed && !gpus.opticalFlow) {
-    const cards = gpus.adapters.map((adapter) => `${adapter.name}: ${adapter.detail}`).join('; ')
+    // adapter.detail comes from the app backend and stays as it reads there.
+    const cards = gpus.adapters.map((adapter) => t('pivot.motionSource.cardDetail', { name: adapter.name, detail: adapter.detail })).join('; ')
     hardwareUnavailable = cards
-      ? `No graphics card in this PC has NVIDIA's optical flow hardware (${cards}).`
-      : "No graphics card in this PC has NVIDIA's optical flow hardware."
+      ? t('pivot.motionSource.hardwareUnavailableCards', { cards })
+      : t('pivot.motionSource.hardwareUnavailable')
   }
-  const effective: FrameGenMotionEstimation = locked || hardwareUnavailable ? 'shader' : settings.motionEstimation
+  const effective: FrameGenMotionEstimation = hardwareUnavailable || (interpolate && settings.interpolateFlow === 'shader') ? 'shader' : settings.motionEstimation
   let note: string | null = null
-  if (locked) {
-    note = 'In Dynamic, Interpolate measures motion with Shader: its frames between real frames need motion sooner than the NVIDIA hardware delivers it beside a busy game. The choice applies to Extrapolate, and to Interpolate at a fixed or Auto frame rate.'
-  } else if (hardwareUnavailable && settings.motionEstimation === 'hardware') {
-    note = 'NVIDIA hardware is chosen, but no graphics card here has it, so Shader measures motion.'
-  } else if (interpolate && effective === 'hardware') {
-    note = 'Experimental: Interpolate measures motion with the NVIDIA hardware at a fixed or Auto frame rate. If its motion arrives late, Frame Generation runs a refresh further ahead (more latency); Shader is the safe choice.'
+  if (hardwareUnavailable && settings.motionEstimation === 'hardware') {
+    note = t('pivot.motionSource.hardwareMissingNote')
   }
   return { effective, locked, hardwareUnavailable, note }
 }

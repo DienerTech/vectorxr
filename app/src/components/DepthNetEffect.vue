@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 
+import { t } from '../i18n/index.ts'
 import { fromConvergenceDisplay, fromStereoBoostDisplay, toConvergenceDisplay, toStereoBoostDisplay } from '../lib/display'
+import I18nText from './I18nText.vue'
 
 const props = defineProps<{
   stereoBoost: number
@@ -93,118 +95,76 @@ const activeQuadrant = computed(() => {
   return `${depthSign.value > 0 ? 'positive' : 'negative'}-${convergenceSign.value > 0 ? 'positive' : 'negative'}`
 })
 
-const netEffect = computed(() => {
+type NetEffectCase =
+  | 'native' | 'compactNear' | 'detailedFar' | 'largerNear' | 'lifeSizedFar'
+  | 'strongerStereo' | 'largerScale' | 'planeNearer' | 'planeFarther'
+
+const netEffectCase = computed<NetEffectCase>(() => {
   const depth = depthSign.value
   const convergence = convergenceSign.value
 
-  if (depth === 0 && convergence === 0) {
-    return {
-      title: 'Native stereo geometry',
-      description: "Neither control is shifting the application's stereo scale or depth plane.",
-      useCase: "Use this to learn a title's authored scale and as the A/B reference for every profile.",
-      caution: 'If the native proportions already feel convincing, no correction is necessary.',
-    }
-  }
-  if (depth > 0 && convergence > 0) {
-    return {
-      title: 'Compact scale with immediate presence',
-      description: 'Stronger stereo separation makes the world feel smaller and more dimensional, while a nearer plane brings the working area toward you.',
-      useCase: 'Useful when a cockpit feels oversized or distant and you want panels, controls, and close geometry to feel immediate.',
-      caution: 'Both controls increase near-field demand, so approach this quadrant in small steps.',
-    }
-  }
-  if (depth > 0 && convergence < 0) {
-    return {
-      title: 'Detailed stereo with comfortable placement',
-      description: 'Stronger stereo separation adds shape and presence while a farther plane gives that more compact image breathing room.',
-      useCase: 'Useful when native proportions feel too large, but positive Stereo Depth by itself makes the cockpit feel crowded.',
-      caution: 'Tune Stereo Depth first, then move the plane only far enough to make the stronger image settle naturally.',
-    }
-  }
-  if (depth < 0 && convergence > 0) {
-    return {
-      title: 'Larger scale with a near working plane',
-      description: 'Reduced stereo separation expands apparent world scale, while a nearer plane keeps the panel and controls visually accessible.',
-      useCase: 'Useful when a cockpit feels toy-like but its gauges or interaction area should still feel close and readable.',
-      caution: 'A strongly positive Convergence value can become tiring even when Stereo Depth is reduced.',
-    }
-  }
-  if (depth < 0 && convergence < 0) {
-    return {
-      title: 'Life-sized scale with relaxed placement',
-      description: 'Reduced stereo separation increases apparent size, while a farther plane lets the cockpit surround you instead of crowding your face.',
-      useCase: 'Useful in aircraft and vehicle sims whose native camera feels miniaturized or too close; it can better match remembered real-world proportions.',
-      caution: 'The softer stereo is intentional—stop when scale feels natural rather than chasing the strongest possible 3D effect.',
-    }
-  }
-  if (depth > 0) {
-    return {
-      title: 'Stronger relative stereo depth',
-      description: 'Nearby geometry gains separation and shape, increasing presence while making the world feel somewhat smaller.',
-      useCase: 'Useful when a title looks flat or oversized but its existing depth-plane placement already feels comfortable.',
-      caution: 'If the scene starts to crowd you, pair it with a small negative Convergence adjustment.',
-    }
-  }
-  if (depth < 0) {
-    return {
-      title: 'Larger, gentler world scale',
-      description: 'Reduced stereo separation softens near-field intensity and increases apparent world size.',
-      useCase: 'Useful when native geometry feels miniaturized, cramped, or more stereoscopically intense than the real vehicle.',
-      caution: 'Reduce only far enough to restore believable proportions and retain useful shape cues.',
-    }
-  }
-  if (convergence > 0) {
-    return {
-      title: 'Working plane moved nearer',
-      description: "The scene's disparity field moves toward you without changing its relative depth gradient or overall scale.",
-      useCase: 'Useful when scale looks correct but the panel, sight, or interaction area feels visually too far away.',
-      caution: 'Positive values can feel cross-eyed, especially when paired with positive Stereo Depth.',
-    }
-  }
+  if (depth === 0 && convergence === 0) return 'native'
+  if (depth > 0 && convergence > 0) return 'compactNear'
+  if (depth > 0 && convergence < 0) return 'detailedFar'
+  if (depth < 0 && convergence > 0) return 'largerNear'
+  if (depth < 0 && convergence < 0) return 'lifeSizedFar'
+  if (depth > 0) return 'strongerStereo'
+  if (depth < 0) return 'largerScale'
+  if (convergence > 0) return 'planeNearer'
+  return 'planeFarther'
+})
+
+const netEffect = computed(() => {
+  const name = netEffectCase.value
   return {
-    title: 'Working plane moved farther',
-    description: "The scene's disparity field moves away without changing its relative depth gradient or overall scale.",
-    useCase: 'Useful when scale looks correct but the cockpit or near geometry feels pressed too close to your face.',
-    caution: 'Move only far enough to relax placement while keeping the scene easy to fuse.',
+    title: t(`depth.netEffect.cases.${name}.title`),
+    description: t(`depth.netEffect.cases.${name}.description`),
+    useCase: t(`depth.netEffect.cases.${name}.useCase`),
+    caution: t(`depth.netEffect.cases.${name}.caution`),
   }
 })
+
+const valuesText = computed(() => t('depth.pairingMap.values', {
+  depth: `${depthValue.value > 0 ? '+' : ''}${depthValue.value.toFixed(1)}`,
+  convergence: `${convergenceValue.value > 0 ? '+' : ''}${convergenceValue.value.toFixed(1)}`,
+}))
 </script>
 
 <template>
   <div :class="collapsible ? ['rounded-[1rem] border px-4 py-3 surface-panel-soft', { 'opacity-70': muted }] : undefined" :style="collapsible ? 'border-color: var(--app-border)' : undefined">
   <button v-if="collapsible" type="button" class="flex w-full flex-wrap items-center gap-2 text-left" :aria-expanded="expanded" @click="expanded = !expanded">
     <svg aria-hidden="true" class="depth-map-chevron h-3.5 w-3.5" :class="{ open: expanded }" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.2 14.8a1 1 0 0 1 0-1.4L10.6 10 7.2 6.6a1 1 0 1 1 1.4-1.4l4.1 4.1a1 1 0 0 1 0 1.4l-4.1 4.1a1 1 0 0 1-1.4 0Z" clip-rule="evenodd" /></svg>
-    <span class="text-sm font-semibold tracking-tight">Depth pairing map</span>
+    <span class="text-sm font-semibold tracking-tight">{{ t('depth.pairingMap.heading') }}</span>
     <span class="text-xs text-muted">{{ netEffect.title }}</span>
     <span class="rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] surface-panel-muted">
-      Depth {{ depthValue > 0 ? '+' : '' }}{{ depthValue.toFixed(1) }} &middot; Conv {{ convergenceValue > 0 ? '+' : '' }}{{ convergenceValue.toFixed(1) }}
+      {{ valuesText }}
     </span>
   </button>
   <section
     v-show="!collapsible || expanded"
-    class="grid gap-4 lg:grid-cols-[minmax(17rem,0.9fr)_minmax(19rem,1.1fr)]"
+    class="grid gap-4 2xl:grid-cols-[minmax(17rem,0.9fr)_minmax(19rem,1.1fr)]"
     :class="collapsible ? 'mt-3' : ['rounded-[1rem] border p-4 shadow-panel backdrop-blur', muted ? 'surface-panel-soft opacity-70' : 'surface-panel']"
-    aria-label="Combined Depth effect"
+    :aria-label="t('depth.pairingMap.regionLabel')"
   >
     <div class="min-w-0">
       <div class="mb-2 flex flex-wrap items-start justify-between gap-2">
         <div>
-          <p class="text-sm font-semibold tracking-tight">Depth pairing map</p>
-          <p class="mt-1 text-xs text-muted">Drag the puck to explore both controls together. Use the sliders for fine tuning.</p>
+          <p class="text-sm font-semibold tracking-tight">{{ t('depth.pairingMap.heading') }}</p>
+          <p class="mt-1 text-xs text-muted">{{ t('depth.pairingMap.hint') }}</p>
         </div>
         <span class="chip-accent rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.12em]">
-          {{ depthLock ? 'Depth Lock on' : 'Depth Lock off' }}
+          {{ depthLock ? t('depth.pairingMap.lockOn') : t('depth.pairingMap.lockOff') }}
         </span>
       </div>
-      <p class="mb-2 text-center text-[10px] font-medium uppercase tracking-[0.08em] text-muted">Convergence: Nearer (+{{ mapConvergenceLimit }})</p>
+      <p class="mb-2 text-center text-[10px] font-medium uppercase tracking-[0.08em] text-muted">{{ t('depth.pairingMap.convergenceNearer', { limit: mapConvergenceLimit }) }}</p>
       <div class="grid gap-2 sm:grid-cols-[minmax(6rem,0.32fr)_minmax(15rem,1fr)_minmax(6rem,0.32fr)] sm:items-center">
-        <p class="text-center text-[10px] font-medium uppercase tracking-[0.08em] text-muted sm:text-right">Depth: Larger Scale (&minus;{{ mapStereoDepthLimit }}%)</p>
+        <p class="text-center text-[10px] font-medium uppercase tracking-[0.08em] text-muted sm:text-right">{{ t('depth.pairingMap.depthLarger', { limit: mapStereoDepthLimit }) }}</p>
         <button
           class="depth-map relative grid aspect-[1.65/1] min-h-[12rem] w-full touch-none grid-cols-2 grid-rows-2 overflow-hidden rounded-[0.8rem] border text-left"
           :class="{ dragging }"
           :disabled="muted"
           type="button"
-          aria-label="Depth pairing map. Drag to set Stereo Depth horizontally and Convergence vertically. Arrow keys make fine adjustments; hold Shift for larger steps."
+          :aria-label="t('depth.pairingMap.mapLabel')"
           @pointerdown="beginDrag"
           @pointermove="continueDrag"
           @pointerup="endDrag"
@@ -212,44 +172,48 @@ const netEffect = computed(() => {
           @keydown="adjustFromKeyboard"
         >
           <span class="depth-quadrant border-b border-r p-3" :class="{ active: activeQuadrant === 'negative-positive' }">
-            <strong>Larger Scale &middot; Near</strong>
-            <small>Depth &minus; &middot; Convergence &plus;</small>
+            <strong>{{ t('depth.pairingMap.quadrants.largerNear.label') }}</strong>
+            <small>{{ t('depth.pairingMap.quadrants.largerNear.axes') }}</small>
           </span>
           <span class="depth-quadrant border-b p-3" :class="{ active: activeQuadrant === 'positive-positive' }">
-            <strong>Stronger Stereo &middot; Near</strong>
-            <small>Depth &plus; &middot; Convergence &plus;</small>
+            <strong>{{ t('depth.pairingMap.quadrants.strongerNear.label') }}</strong>
+            <small>{{ t('depth.pairingMap.quadrants.strongerNear.axes') }}</small>
           </span>
           <span class="depth-quadrant border-r p-3" :class="{ active: activeQuadrant === 'negative-negative' }">
-            <strong>Larger Scale &middot; Far</strong>
-            <small>Depth &minus; &middot; Convergence &minus;</small>
+            <strong>{{ t('depth.pairingMap.quadrants.largerFar.label') }}</strong>
+            <small>{{ t('depth.pairingMap.quadrants.largerFar.axes') }}</small>
           </span>
           <span class="depth-quadrant p-3" :class="{ active: activeQuadrant === 'positive-negative' }">
-            <strong>Stronger Stereo &middot; Far</strong>
-            <small>Depth &plus; &middot; Convergence &minus;</small>
+            <strong>{{ t('depth.pairingMap.quadrants.strongerFar.label') }}</strong>
+            <small>{{ t('depth.pairingMap.quadrants.strongerFar.axes') }}</small>
           </span>
           <span class="depth-marker" :style="markerStyle" aria-hidden="true"></span>
         </button>
-        <p class="text-center text-[10px] font-medium uppercase tracking-[0.08em] text-muted sm:text-left">Depth: Stronger Stereo (+{{ mapStereoDepthLimit }}%)</p>
+        <p class="text-center text-[10px] font-medium uppercase tracking-[0.08em] text-muted sm:text-left">{{ t('depth.pairingMap.depthStronger', { limit: mapStereoDepthLimit }) }}</p>
       </div>
-      <p class="mt-2 text-center text-[10px] font-medium uppercase tracking-[0.08em] text-muted">Convergence: Farther (&minus;{{ mapConvergenceLimit }})</p>
+      <p class="mt-2 text-center text-[10px] font-medium uppercase tracking-[0.08em] text-muted">{{ t('depth.pairingMap.convergenceFarther', { limit: mapConvergenceLimit }) }}</p>
     </div>
 
     <div class="min-w-0 rounded-[0.8rem] border p-4 surface-panel-strong" style="border-color: var(--app-border)">
       <div class="flex flex-wrap items-center gap-2">
-        <p class="text-sm font-semibold tracking-tight">Net effect</p>
+        <p class="text-sm font-semibold tracking-tight">{{ t('depth.netEffect.heading') }}</p>
         <span class="rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] surface-panel-muted">
-          Depth {{ depthValue > 0 ? '+' : '' }}{{ depthValue.toFixed(1) }} &middot; Conv {{ convergenceValue > 0 ? '+' : '' }}{{ convergenceValue.toFixed(1) }}
+          {{ valuesText }}
         </span>
       </div>
       <p class="mt-3 text-base font-semibold">{{ netEffect.title }}</p>
       <p class="mt-2 text-[13px] leading-5 text-muted">{{ netEffect.description }}</p>
-      <p class="mt-3 rounded-[0.7rem] px-3 py-2 text-[12px] leading-5 surface-panel-muted"><strong>Good fit:</strong> {{ netEffect.useCase }}</p>
-      <p class="mt-3 text-[12px] leading-5 text-muted"><strong>Watch for:</strong> {{ netEffect.caution }}</p>
+      <I18nText keypath="depth.netEffect.goodFit" :params="{ text: netEffect.useCase }" tag="p" class="mt-3 rounded-[0.7rem] px-3 py-2 text-[12px] leading-5 surface-panel-muted">
+        <template #label><strong>{{ t('depth.netEffect.goodFitLabel') }}</strong></template>
+      </I18nText>
+      <I18nText keypath="depth.netEffect.watchFor" :params="{ text: netEffect.caution }" tag="p" class="mt-3 text-[12px] leading-5 text-muted">
+        <template #label><strong>{{ t('depth.netEffect.watchForLabel') }}</strong></template>
+      </I18nText>
       <p v-if="!depthLock" class="mt-3 text-[12px] leading-5 text-muted">
-        Depth Lock is off, so the runtime may reinterpret and partially normalize this combination at submission.
+        {{ t('depth.netEffect.lockOff') }}
       </p>
       <p v-else class="mt-3 text-[12px] leading-5 text-muted">
-        Depth Lock preserves the rendered pairing when native geometry is restored for submission.
+        {{ t('depth.netEffect.lockOn') }}
       </p>
     </div>
   </section>

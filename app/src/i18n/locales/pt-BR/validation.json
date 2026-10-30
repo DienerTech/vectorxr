@@ -1,0 +1,89 @@
+{
+  "field": {
+    "between": "{field} deve estar entre {min} e {max}",
+    "betweenCm": "{field} deve estar entre {min} e {max} cm",
+    "integerBetween": "{field} deve ser um número inteiro entre {min} e {max}",
+    "wholeNumberFromTo": "{field} deve ser um número inteiro de {min} a {max}",
+    "boolean": "{field} deve ser um booleano",
+    "trueOrFalse": "{field} deve ser true ou false",
+    "required": "{field} é obrigatório",
+    "smallerThan": "{field} deve ser menor que {other}",
+    "duplicates": "{field} duplica {value}",
+    "wavFile": "{field} deve apontar para um arquivo .wav"
+  },
+  "osd": {
+    "between": "{field} do OSD deve estar entre {min} e {max}",
+    "customColor": "A cor personalizada do OSD deve ser uma cor hexadecimal de seis dígitos",
+    "accent": "A cor de destaque do OSD é inválida",
+    "clockFormat": "O formato do relógio do OSD deve ser de 12 ou 24 horas",
+    "compactMetrics": "A seleção de desempenho compacta do OSD é inválida",
+    "bodyOrder": "A ordem do corpo do OSD deve conter cada linha uma vez"
+  },
+  "binding": {
+    "chordEmpty": "{field} deve incluir pelo menos uma tecla",
+    "chordUnsupportedKey": "{field} contém uma tecla sem suporte: {key}",
+    "chordPrimaryKey": "{field} deve incluir exatamente uma tecla que não seja modificadora",
+    "inputPath": "{field} deve usar de button-1 a button-128 ou de hat-1 a hat-4 com uma direção com suporte"
+  },
+  "pivot": {
+    "positionAssistAngles": "{field} exige 0 <= ângulo inicial < ângulo de deslocamento total <= 180",
+    "responseMode": "{field} deve ser \"continuous\" ou \"stepped\"",
+    "stepGlideMode": "{field} deve ser \"instant\" ou \"glide\"",
+    "quickViewDuplicateId": "{field} duplica outra Vista rápida",
+    "nudgeSetReservedId": "{field} usa a seleção reservada Nenhum",
+    "nudgeSetDuplicateId": "{field} duplica outro Conjunto de deslocamentos",
+    "unknownNudgeSet": "{field} faz referência a um Conjunto de deslocamentos desconhecido"
+  },
+  "quadviews": {
+    "trackingMode": "{field} deve ser head ou eye"
+  },
+  "framegen": {
+    "synthesisMode": "{field} deve ser interpolate ou extrapolate",
+    "flowQuality": "{field} deve ser performance, balanced ou quality",
+    "motionEstimation": "{field} deve ser shader ou hardware",
+    "frameMultiplier": "{field} deve ser auto, dynamic, 2x, 3x ou 4x",
+    "diagnosticView": "{field} deve ser off, flow, confidence ou tint",
+    "interpolateFlow": "{field} deve ser auto, hardware ou shader"
+  },
+  "turbo": {
+    "predictionPercent": "O amortecimento experimental de previsão do Turbo deve ser um número inteiro de 50 a 100",
+    "frameLimit": "O limite experimental de quadros do Turbo deve ser 0 (desligado) ou um número inteiro de 20 a 240"
+  },
+  "applications": {
+    "idFormat": "{field} deve usar letras minúsculas, números e hifens",
+    "duplicateId": "{field} duplica outro aplicativo",
+    "duplicateExe": "{field} duplica outro aplicativo",
+    "unknownApplication": "{field} faz referência a um aplicativo desconhecido: {application}"
+  },
+  "profiles": {
+    "conflict": "{profile} entra em conflito com profiles[{first}] para o aplicativo {application}; o primeiro perfil ativado prevalece"
+  },
+  "version": "version deve ser igual a {version}",
+  "warnings": {
+    "turboFrameGenOverlap": "Turbo e Frame Generation estão ambos ligados para {targets}. A Frame Generation assume o ritmo de quadros; o Turbo fica desligado nas sessões em que a Frame Generation é executada.",
+    "moreApplications_one": "mais {count}",
+    "moreApplications_other": "mais {count}",
+    "applicationsWithoutProfile": "aplicativos sem perfil personalizado"
+  },
+  "store": {
+    "loadBlocked": "Não foi possível carregar as configurações, então o salvamento está desligado para preservar o arquivo no disco: {error}. Corrija o arquivo e reabra o VectorXR, importe uma configuração ou redefina para o padrão.",
+    "loadConfigFailed": "Falha ao carregar a configuração",
+    "loadSeenAppsFailed": "Falha ao carregar os aplicativos vistos",
+    "loadRuntimePacingFailed": "Falha ao carregar o estado de ritmo do runtime",
+    "loadTurboMetricsFailed": "Falha ao carregar as métricas do Turbo",
+    "turboMetricsCleared": "Métricas do Turbo limpas",
+    "clearTurboMetricsFailed": "Falha ao limpar as métricas do Turbo",
+    "pacingVerdictCleared": "Veredito de ritmo limpo para {runtime}; o Auto redescobre na próxima sessão",
+    "clearPacingVerdictFailed": "Falha ao limpar o veredito de ritmo",
+    "configSaved": "Configuração salva",
+    "saveConfigFailed": "Falha ao salvar a configuração",
+    "reloadedFromDisk": "As configurações alteradas no disco foram recarregadas",
+    "configReset": "Configuração redefinida para o padrão",
+    "resetConfigFailed": "Falha ao redefinir a configuração",
+    "changesDiscarded": "Alterações não salvas descartadas",
+    "configImported": "Configuração importada — salve para gravar no disco",
+    "applicationAdded": "{exe} adicionado ao registro de aplicativos",
+    "seenAppsCleared": "Aplicativos vistos limpos",
+    "clearSeenAppsFailed": "Falha ao limpar os aplicativos vistos"
+  }
+}

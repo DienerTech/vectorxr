@@ -1,0 +1,137 @@
+{
+  "shared": {
+    "pivot": "Pivot",
+    "breadcrumb": "Breadcrumb",
+    "returnToPivot": "Return to Pivot",
+    "editTitle": "Edit {name}",
+    "yaw": "Yaw",
+    "pitch": "Pitch",
+    "transition": "Transition",
+    "unitSeconds": "s",
+    "unitCm": "cm",
+    "behavior": "Behavior",
+    "hold": "Hold",
+    "toggle": "Toggle",
+    "addBinding": "Add Binding",
+    "bindingLabel": "Binding {index}",
+    "holdDescription": "The view is active only while held.",
+    "toggleDescription": "Press once to enter; press again to leave.",
+    "bindingCount_one": "{count} binding",
+    "bindingCount_other": "{count} bindings"
+  },
+  "viewControlsPage": {
+    "snapViews": "Snap Views",
+    "title": "{context} — Snap Views",
+    "returnHint": "Press Esc or Done to return.",
+    "returnToSnapViews": "Return to Snap Views",
+    "name": "Name",
+    "yawHint": "Negative turns left; positive turns right.",
+    "positionOffset": "Optional position offset",
+    "positionHint": "Position is relative to the captured Pivot origin. Natural head translation remains available.",
+    "rightLeft": "Right / left",
+    "upDown": "Up / down",
+    "forwardBack": "Forward / back",
+    "bindings": "Bindings",
+    "bindingsHint": "Hold returns when released. Toggle stays until pressed again or another Quick View takes over.",
+    "noBindings": "No bindings assigned. This Quick View is inert until a binding is added.",
+    "quickViews": "Quick Views",
+    "quickViewsHint": "Named poses relative to the Pivot origin, with 1:1 natural head tracking around the target.",
+    "createPreset": "Create 4-view preset",
+    "addQuickView": "Add Quick View",
+    "empty": "No Quick Views yet. Add one manually or start with the four-view HAT preset.",
+    "summary_one": "Yaw {yaw}° · Pitch {pitch}° · {count} binding",
+    "summary_other": "Yaw {yaw}° · Pitch {pitch}° · {count} bindings",
+    "position": "Position R {right} · U {up} · F {forward} cm",
+    "moveUp": "Up",
+    "moveDown": "Down",
+    "copyName": "{name} Copy",
+    "presets": {
+      "lookLeft": "Look Left",
+      "lookRight": "Look Right",
+      "high12": "High 12",
+      "checkSix": "Check Six"
+    }
+  },
+  "viewControlsPanel": {
+    "snapViews": "Snap Views",
+    "viewCount_one": "{count} view",
+    "viewCount_other": "{count} views",
+    "editSnapViews": "Edit Snap Views…"
+  },
+  "nudgeSetPage": {
+    "nudgeSets": "Nudge Sets",
+    "linked_one": "Linked to {count} profile. Changes apply everywhere this set is selected.",
+    "linked_other": "Linked to {count} profiles. Changes apply everywhere this set is selected.",
+    "setName": "Set name",
+    "allowWhileInactive": "Allow while Pivot is inactive",
+    "allowWhileInactiveHint": "These bindings can adjust and retain the global view offset even when no linked profile is engaged.",
+    "yawStep": "Yaw step",
+    "pitchStep": "Pitch step",
+    "yawLeft": "Yaw Left",
+    "yawRight": "Yaw Right",
+    "pitchUp": "Pitch Up",
+    "pitchDown": "Pitch Down",
+    "yawStepDescription": "Add one yaw step to the current view.",
+    "pitchStepDescription": "Add one pitch step to the current view.",
+    "center": "Center Nudge Offset",
+    "centerDescription": "Clear the accumulated nudge offset.",
+    "resetToDefaults": "Reset to Defaults",
+    "confirmReset": "Reset movement values and remove every binding from this nudge set?",
+    "deleteSet": "Delete Nudge Set",
+    "deleteTitle": "Delete this nudge set",
+    "deleteRequired": "At least one nudge set is required",
+    "confirmDelete": "Delete \"{name}\"? Profiles using it will switch to another nudge set."
+  },
+  "snapBindingsPage": {
+    "snapViewBindings": "Snap View Bindings",
+    "title": "{context} — Snap View Bindings",
+    "hint": "Assign Hold or Toggle controls without changing the saved view transforms.",
+    "noBinding": "No binding assigned. This Snap View is inactive.",
+    "empty": "No Snap Views exist yet. Create views from Edit Snap Views before assigning bindings."
+  },
+  "snapBindingsPanel": {
+    "snapViewBindings": "Snap View Bindings",
+    "inactiveHint": "Snap Views remain inactive until a binding is assigned.",
+    "editBindings": "Edit Bindings…"
+  },
+  "snapStacking": {
+    "title": "Apply Enhanced Motion to Snap Views",
+    "description": "Keep assistance when entering a Snap View, or activate it around a view already selected. Uses this profile’s rotation and position tuning."
+  },
+  "originPage": {
+    "originControls": "Origin Controls",
+    "title": "{context} — Origin Controls",
+    "hint": "Keep Pivot's neutral pose aligned with the simulator's recenter position.",
+    "closeLabel": "Close origin controls and return to Pivot",
+    "setOrigin": "Set Origin (optional)",
+    "setOriginDescription": "Captures the current head pose as Pivot's neutral seated origin. Bind this to the same control you use to recenter the view in-game so both origins update together.",
+    "setOriginNone": "No binding assigned. Pivot rotates around the HMD origin.",
+    "releaseOrigin": "Release Origin (optional)",
+    "releaseOriginDescription": "Clears a captured origin and returns Pivot to the HMD origin. Useful if an origin was captured while looking off-center.",
+    "releaseOriginNone": "No binding assigned. A captured origin stays active until the session ends or it is recaptured."
+  },
+  "originPanel": {
+    "originControls": "Origin Controls",
+    "setOrigin": "Set Origin",
+    "setOriginTitle": "Captures the current head pose as Pivot's neutral seated origin.",
+    "releaseOrigin": "Release Origin",
+    "releaseOriginTitle": "Releases a captured origin and returns Pivot to the default HMD origin.",
+    "editOrigin": "Edit Origin…"
+  },
+  "bindingsPanel": {
+    "motionActivation": "Motion Activation",
+    "alwaysActive": "Always active",
+    "manual": "Manual",
+    "noSuspendControls": "No suspend controls",
+    "noActivationControls": "No activation controls",
+    "editActivation": "Edit Activation..."
+  },
+  "bindingsPage": {
+    "motionActivation": "Motion Activation",
+    "title": "{context} — Activation",
+    "returnHint": "Press Esc or Done to return to Pivot.",
+    "closeLabel": "Close activation and return to Pivot",
+    "alwaysActiveDescription": "Choose controls that temporarily suspend or toggle off Pivot.",
+    "manualDescription": "Choose controls that engage Pivot."
+  }
+}

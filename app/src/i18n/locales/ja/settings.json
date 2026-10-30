@@ -1,0 +1,86 @@
+{
+  "core": {
+    "title": "設定",
+    "intro": "アプリ全体のスイッチ、外観、ログ、サウンド フィードバック、構成ファイル。",
+    "general": {
+      "heading": "全般",
+      "enabled": {
+        "title": "VectorXR を有効にする",
+        "description": "実行時にすべての VectorXR OpenXR 拡張機能を有効または無効にします。"
+      },
+      "theme": {
+        "title": "テーマ",
+        "description": "この PC にのみ保存されます。"
+      },
+      "language": {
+        "title": "言語",
+        "description": "[システム (自動)] は Windows の表示言語に従います。この PC にのみ保存されます。",
+        "system": "システム (自動)",
+        "systemResolved": "システム (自動) · {language}",
+        "pseudo": "疑似ロケール (テスト)",
+        "machineTranslated": "この翻訳は機械翻訳のため、不自然な表現が含まれる場合があります。GitHub での修正をお待ちしています。"
+      },
+      "tray": {
+        "title": "システム トレイ",
+        "description": "このウィンドウを閉じてもアプリは通知領域に残り、状態、VectorXR スイッチ、ログ レベル、デバッグ情報のエクスポートを利用できます。オフの場合、ウィンドウを閉じるとアプリが終了します。この PC にのみ保存されます。",
+        "helperNote": "アプリとトレイは設定用のヘルパーであり、OpenXR レイヤーではありません。[VectorXR を有効にする] がオンであれば、これらを閉じていても VectorXR はゲーム内で動作します。"
+      },
+      "inputDevices": {
+        "title": "入力デバイス",
+        "description": "ゲーム中に使用します。セッション中に接続され、VectorXR が検出しなかったコントローラーを再検索します。",
+        "rescan": "入力を再スキャン",
+        "rescanning": "再スキャンしています…",
+        "noGame": "VectorXR で実行中のゲームはありません。",
+        "asked_other": "実行中の {count} 個のゲームに再検索を依頼しました。",
+        "rescanFailed": "入力の再スキャンに失敗しました"
+      },
+      "trackSeenApps": {
+        "title": "検出した XR アプリを追跡する",
+        "description": "起動した OpenXR アプリの実行可能ファイル名と初回/最終検出時刻を記録し、アプリケーション レジストリから簡単に登録できるようにします。すべてのデータはこの PC 内にのみ保存されます。"
+      }
+    },
+    "logging": {
+      "heading": "ログ",
+      "logLevel": "ログ レベル",
+      "logLevelHelp": "[情報] は通常の動作メッセージとエラーを書き込みます。[デバッグ] は、範囲を限定した Turbo のフレーム タイミング トレースを含む詳細な診断を追加します。ログの変更はすぐに反映されます。ランタイム クロックの測定を行うには、[デバッグ] を有効にした状態で VR アプリを起動してください。",
+      "levelInfo": "情報",
+      "levelDebug": "デバッグ",
+      "retention": "ログの保持",
+      "retentionHelp": "保持するローテーション済みログ ファイルの数です。保持数を超えると、古いファイルから削除されます。",
+      "viewLogs": "ログを表示",
+      "exportDebug": "デバッグ情報のエクスポート",
+      "exportDebugHelp": "ホーム タブと同様に、ログ、設定、診断情報を共有用の 1 つの ZIP ファイルとして保存します。",
+      "latestLog": "最新のログ: {path}",
+      "latestLogPending": "最初のセッション後に利用可能"
+    },
+    "sound": {
+      "heading": "サウンド フィードバック",
+      "description": "バインドに設定できる有効化/無効化の合図音のマスター音量です。",
+      "test": "テスト",
+      "volume": "サウンド フィードバックの音量",
+      "previewFailed": "サウンドを再生できませんでした。"
+    },
+    "configFiles": {
+      "heading": "構成ファイル",
+      "description": "別の設定ファイルをインポートしたり、現在の設定をエクスポートしたり、VectorXR がローカル構成を保存している場所を確認したりします。",
+      "import": "構成のインポート",
+      "export": "構成のエクスポート",
+      "directory": "構成ディレクトリ",
+      "directoryPending": "構成の読み込み後に利用可能",
+      "reset": {
+        "title": "既定値にリセット",
+        "description": "settings.json を既定値で再作成し、ローカルの OpenXR アプリケーション検出データを消去します。",
+        "button": "既定値にリセット"
+      }
+    }
+  },
+  "theme": {
+    "system": "システム",
+    "light": "ライト",
+    "dark": "ダーク"
+  },
+  "fileTypes": {
+    "jsonConfig": "JSON 構成",
+    "wavAudio": "WAV オーディオ"
+  }
+}

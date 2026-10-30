@@ -1,0 +1,320 @@
+{
+  "tab": {
+    "intro": "為已經要求 OpenXR 四視圖的遊戲設定中央注視區與周邊的渲染。啟用此模組並不會為一般的立體遊戲加入四視圖支援。",
+    "varjoCompatibility": "Varjo 相容性",
+    "setupGuide": {
+      "title": "設定指南",
+      "summary": "建議的 DCS 設定與相容的遊戲",
+      "heading": "建議的 DCS 設定",
+      "gameLabel": "遊戲：",
+      "game": "{label}開啟 {useQuadView}，若要使用視線追蹤，另請開啟 {useEyeTracking}。",
+      "useQuadView": "Use Quad View",
+      "useEyeTracking": "Use Eye Tracking",
+      "providerLabel": "提供者：",
+      "provider": "{label}啟用 VectorXR 層與 Quadviews 設定檔，然後停用 {layerName}。在 Pimax 上，也請關閉 Native Pimax Quad Views。原生的 Varjo Quadviews 仍由執行階段驅動。",
+      "applyLabel": "套用：",
+      "apply": "{label}變更執行階段、層或遊戲內 VR 設定後，請儲存設定檔並重新啟動 DCS。",
+      "titles": "DCS 是主要的測試遊戲。可能可用但尚未確認的 D3D11 候選遊戲包括 Pavlov VR、VAIL VR、The 7th Guest VR 與 Kayak VR: Mirage。每款遊戲都必須自行要求四視圖。",
+      "pixelEstimates": "像素估計僅比較應用程式的視圖渲染；執行階段與 VectorXR 合成會有額外的 GPU 成本。"
+    },
+    "restartNoteLabel": "重新啟動以套用：",
+    "restartNote": "{label}標示的欄位以及 Quadviews 開啟／關閉，會在目前的 OpenXR 應用程式結束後完全生效。未標示的控制項會在遊玩期間更新。",
+    "diagnostics": {
+      "eyebrow": "頭戴式裝置內診斷",
+      "intro": "在調校 Quadviews 時，查看渲染區域、焦點對齊、視線濾波與追蹤可用性。",
+      "howToRead": "如何解讀疊加層",
+      "sessionControl": "工作階段控制",
+      "shownIn": "已在 {application} 中顯示",
+      "hiddenIn": "已在 {application} 中隱藏",
+      "unavailable": "在作用中的 OpenXR 工作階段中無法使用",
+      "noSession": "沒有作用中的合成 Quadviews 工作階段",
+      "applying": "正在套用…",
+      "hide": "隱藏視覺化",
+      "show": "顯示視覺化",
+      "shortcutHeading": "頭戴式裝置內快速鍵",
+      "shortcutHint": "選用。每個 OpenXR 工作階段開始時，視覺化都會先隱藏。",
+      "guideHint": "第一次使用視覺化嗎？互動式指南會說明每個形狀，並將常見症狀對應到控制它們的設定。",
+      "readStatusFailed": "無法讀取執行階段狀態",
+      "controlFailed": "無法控制視覺化",
+      "notAcknowledged": "OpenXR 工作階段未確認控制要求"
+    },
+    "binding": {
+      "label": "診斷視覺化切換",
+      "description": "在遊戲中顯示或隱藏 Quadviews 校準檢視。每個工作階段開始時都會先隱藏，且僅在 VectorXR 透過其 D3D11 合成器合成 Quadviews 時可用。",
+      "noneText": "未指派頭戴式裝置內快速鍵。您仍可從 Quadviews 頁面控制視覺化。"
+    },
+    "defaultProfile": {
+      "heading": "預設設定檔",
+      "appliesTo": "套用至沒有已啟用自訂設定檔的應用程式",
+      "toggleOn": "預設設定檔開啟",
+      "toggleOff": "預設設定檔關閉",
+      "restartTitle": "Quadviews 啟用／停用變更會在執行中的 OpenXR 應用程式結束後套用。",
+      "offNote": "除非已啟用的自訂設定檔將其開啟，否則保持關閉。下方的自訂設定檔仍會套用至其應用程式。"
+    },
+    "launchStateNote": "會立即儲存，但執行中的 OpenXR 應用程式會維持其啟動時的 Quadviews 狀態，直到結束為止。",
+    "customProfiles": {
+      "heading": "自訂設定檔",
+      "intro": "依應用程式覆寫 Quadviews 設定。以第一個相符且已啟用的設定檔為準。",
+      "add": "新增設定檔",
+      "empty": "尚無自訂設定檔。新增設定檔即可為特定應用程式覆寫四視圖數值。",
+      "alreadyTargeted": "{application} 已由設定檔 {number} 指定。以第一個作用中的設定檔為準。"
+    },
+    "budget": {
+      "estimate": "估計應用程式渲染像素為 {percent}%",
+      "light": "輕度",
+      "moderate": "中度",
+      "heavy": "重度",
+      "detrimental": "⚠ 有害"
+    },
+    "varjo": {
+      "title": "Varjo 相容的 Quadviews",
+      "biPanel": "Varjo 頭戴式裝置採用雙面板設計：每隻眼睛有一個寬廣、密度較低的情境顯示器，以及一個小型、高密度的焦點顯示器。VectorXR 的 Varjo 相容四視圖會保留頭戴式裝置所預期的四個視圖層（兩個周邊、兩個焦點），讓實體焦點面板直接受到驅動。因此，Varjo 執行階段會接管視圖幾何，部分 Quadviews 設定會被忽略。",
+      "notesIntro": "VectorXR Quadviews 與 Varjo 執行階段相容性說明：",
+      "stillApplies": "VectorXR 仍會套用",
+      "handledByRuntime": "由 Varjo 執行階段處理",
+      "focusScale": "焦點比例",
+      "peripheralScale": "周邊比例",
+      "focusSharpness": "焦點銳利度",
+      "focusSizeTransition": "焦點大小與過渡厚度",
+      "offsets": "水平與垂直偏移",
+      "smoothingDeadzone": "視線平滑化與死區",
+      "diagnosticVisualization": "診斷視覺化",
+      "emulation": "在沒有透過雙面板顯示器提供實體四視圖支援的頭戴式裝置上（例如 Quest Pro、Pimax Crystal），VectorXR Quadviews 會使用標準模擬模式，所有設定皆會套用。這些相容性說明僅適用於 Varjo 執行階段。",
+      "diagnosticUnsupportedLead": "Varjo 頭戴式裝置目前不支援診斷視覺化。",
+      "diagnosticUnsupported": "{lead} Varjo 的執行階段負責原生的四視圖合成，因此 VectorXR 合成用的 D3D11 合成器不會在該處執行。"
+    }
+  },
+  "fields": {
+    "preset": {
+      "heading": "Vector 預設組",
+      "restartTitle": "預設組包含需要重新啟動遊戲才能完全生效的設定。",
+      "intro": "很好的起點；追蹤與對齊仍由您自行設定。",
+      "buttonTitle": "預設組會變更焦點尺寸與解析度，因此需要重新啟動遊戲才能完全生效。",
+      "performance": "效能",
+      "balanced": "平衡",
+      "quality": "品質"
+    },
+    "focusWindow": "焦點視窗",
+    "focusWidth": {
+      "label": "焦點寬度",
+      "restart": "焦點視窗會即時移動，但 DCS 會保留其現有的紋理寬度與像素工作量，直到重新啟動為止。"
+    },
+    "focusHeight": {
+      "label": "焦點高度",
+      "restart": "焦點視窗會即時移動，但 DCS 會保留其現有的紋理高度與像素工作量，直到重新啟動為止。"
+    },
+    "percentOfFov": "FOV 的 %",
+    "horizontalOffset": {
+      "label": "水平偏移",
+      "help": "以度為單位將焦點區域向左或向右移動。僅在清晰區域感覺偏離中心時使用。"
+    },
+    "verticalOffset": {
+      "label": "垂直偏移",
+      "help": "以度為單位將焦點區域向上或向下移動。適用於頭戴式裝置的視線中心感覺有垂直偏差的情況。"
+    },
+    "resolution": "解析度",
+    "focusResolution": {
+      "label": "焦點解析度",
+      "restart": "需要重新啟動：DCS 會保留其啟動時的焦點紋理。超過 100% 可能會調整 VectorXR 輸出畫布的大小，並可能造成暫時性的影格速率頓挫。",
+      "warning": "VectorXR 的全視野輸出影像會隨焦點解析度增加：{percent}% 在 GPU 記憶體與合成上大約需要頭戴式裝置像素的 {factor}×，這還不包括上方顯示的應用程式渲染成本。"
+    },
+    "percentOfHmd": "HMD 解析度的 %",
+    "peripheralResolution": {
+      "label": "周邊解析度",
+      "restart": "需要重新啟動：DCS 會保留其啟動時的周邊紋理與像素工作量。"
+    },
+    "foveateSharpness": {
+      "label": "注視點銳利度",
+      "help": "對高細節的焦點影像套用額外的銳化。0 為關閉；數值越高越清晰，但可能產生光暈。"
+    },
+    "transitionThickness": {
+      "label": "過渡厚度",
+      "help": "控制焦點影像與周邊影像之間的混合邊緣有多寬。數值越高越能隱藏邊界，但焦點視窗會有更多部分變得柔和。"
+    },
+    "percentOfFocusWindow": "焦點視窗的 %",
+    "tracking": "追蹤",
+    "mode": {
+      "label": "模式",
+      "restart": "若遊戲以頭部追蹤模式啟動，切換為眼動追蹤需要重新啟動遊戲。",
+      "help": "選擇在可使用眼動追蹤時，焦點區域要跟隨頭部方向還是眼睛視線。",
+      "head": "頭部追蹤",
+      "eye": "眼動追蹤"
+    },
+    "eyeTrackingCorrection": {
+      "label": "眼動追蹤校正",
+      "help": "除非眼動追蹤感覺方向相反，否則請使用「預設」；若相反，請嘗試「僅翻轉 Z」。",
+      "default": "預設",
+      "flipZ": "僅翻轉 Z"
+    },
+    "smoothing": {
+      "label": "平滑化",
+      "help": "讓焦點區域的移動更柔和。0 為即時；數值越高越能減少抖動，但會增加延遲。"
+    },
+    "deadzone": {
+      "label": "死區",
+      "help": "焦點區域移動前會被忽略的微小視線移動。有助於減少中心附近的閃爍。"
+    }
+  },
+  "dimensions": {
+    "peripheralLeft": "周邊 左",
+    "peripheralRight": "周邊 右",
+    "focusLeft": "焦點 左",
+    "focusRight": "焦點 右",
+    "waiting": "Quadviews 遊戲執行時，視圖尺寸會顯示在這裡。",
+    "view": "{name}：{width} × {height}（紋理 {allocatedWidth} × {allocatedHeight}）",
+    "footer": "提交的視圖大小，每秒重新整理一次。已儲存的解析度變更可能需要重新啟動遊戲。",
+    "labelNone": "尺寸 —",
+    "labelLive": "尺寸 · 即時",
+    "labelLast": "尺寸 · 最後一次"
+  },
+  "guide": {
+    "eyebrow": "互動式現場指南",
+    "title": "解讀 Quadviews 疊加層",
+    "intro": "先了解畫面，再變更與您實際所見相符的設定。",
+    "closeLabel": "關閉疊加層指南",
+    "stepsLabel": "疊加層指南步驟",
+    "steps": {
+      "zones": {
+        "title": "解讀區域",
+        "summary": "查看每個影像所涵蓋的位置。"
+      },
+      "alignment": {
+        "title": "檢查對齊",
+        "summary": "比較中心、偏移與視線。"
+      },
+      "motion": {
+        "title": "判斷追蹤",
+        "summary": "找出抖動、延遲與追蹤遺失。"
+      },
+      "troubleshoot": {
+        "title": "選擇修正方式",
+        "summary": "將症狀對應到正確的控制項。"
+      }
+    },
+    "illustrationLabel": "Quadviews 診斷疊加層的互動式圖解",
+    "svg": {
+      "peripheral": "藍色 - 周邊情境",
+      "blend": "琥珀色 - 混合",
+      "focus": "焦點影像",
+      "headCenter": "頭部中心",
+      "configuredOffset": "設定的偏移",
+      "raw": "原始",
+      "smoothed": "平滑化",
+      "dragHint": "按一下或拖曳以移動原始視線",
+      "trackingUnavailable": "無法追蹤 - 後援模式作用中"
+    },
+    "illustrative": "示意圖 - 並非像素精確的頭戴式裝置擷取畫面",
+    "demo": {
+      "focusSize": "焦點大小",
+      "transitionThickness": "過渡厚度",
+      "horizontalOffset": "水平偏移",
+      "verticalOffset": "垂直偏移",
+      "smoothing": "平滑化",
+      "degrees": "{value} 度",
+      "eyeTrackingAvailable": "眼動追蹤：可用",
+      "eyeTrackingLost": "眼動追蹤：遺失",
+      "reset": "重設圖解"
+    },
+    "settingNames": {
+      "peripheralResolution": "周邊解析度",
+      "transitionThickness": "過渡厚度",
+      "focusResolution": "焦點解析度",
+      "focusWidthHeight": "焦點寬度／高度",
+      "referenceOnly": "僅供參考",
+      "horizontalVerticalOffset": "水平／垂直偏移",
+      "horizontalOffset": "水平偏移",
+      "verticalOffset": "垂直偏移",
+      "trackingSource": "追蹤來源",
+      "smoothingDeadzone": "平滑化／死區",
+      "smoothing": "平滑化",
+      "deadzone": "死區",
+      "trackingMode": "追蹤模式",
+      "gameEyeTracking": "遊戲眼動追蹤",
+      "headsetRuntime": "頭戴式裝置執行階段"
+    },
+    "cards": {
+      "peripheral": {
+        "title": "周邊區域",
+        "body": "藍色涵蓋情境影像。降低其解析度通常能節省最多像素，而不會縮小您的清晰區域。"
+      },
+      "transition": {
+        "title": "過渡帶",
+        "body": "琥珀色是影像之間的混合區。較寬可以隱藏接縫；太寬則可能讓邊緣感覺模糊。"
+      },
+      "focusBoundary": {
+        "title": "焦點邊界",
+        "body": "綠色外框是焦點視窗的大小。焦點解析度變更的是細節密度，而不是這個外框。"
+      },
+      "headCenter": {
+        "title": "頭部中心",
+        "body": "白色十字是頭戴式裝置的正前方。它為其他所有標記提供穩定的參考。"
+      },
+      "configuredOffset": {
+        "title": "設定的偏移",
+        "body": "洋紅色的 L 與圓環顯示您刻意從頭部中心所做的校正。"
+      },
+      "rawGaze": {
+        "title": "原始視線",
+        "body": "青色是即時的眼動追蹤取樣。按一下圖解即可移動它。"
+      },
+      "smoothedGaze": {
+        "title": "平滑化視線",
+        "body": "黃色是經過濾波的位置，在加入設定的偏移之前驅動焦點視窗。"
+      },
+      "greenOutline": {
+        "title": "綠色外框",
+        "body": "眼動追蹤可用。比較青色與黃色即可判斷濾波效果。"
+      },
+      "redOutline": {
+        "title": "紅色外框",
+        "body": "眼動追蹤資料來源無法使用。VectorXR 正在使用其後援焦點行為。"
+      }
+    },
+    "goodTracking": {
+      "heading": "良好的追蹤看起來是什麼樣子",
+      "cyan": "青色會立即回應您的眼睛。",
+      "yellow": "黃色會緊密跟隨，且不會持續顫動。",
+      "window": "焦點視窗會停留在預期的細節上。"
+    },
+    "symptoms": {
+      "boundary": {
+        "label": "可見的接縫",
+        "title": "焦點邊緣很容易看出來",
+        "body": "稍微增加過渡厚度。如果琥珀色帶大範圍變得模糊，請再次降低它，並縮小焦點與周邊之間的解析度差距。"
+      },
+      "offset": {
+        "label": "中心錯誤",
+        "title": "清晰區域持續偏向一側",
+        "body": "請先確認青色與黃色的視線標記落在您注視的位置。如果是，請使用水平或垂直偏移來校正這個固定的偏差。請勿使用偏移來掩蓋視線延遲。"
+      },
+      "jitter": {
+        "label": "抖動",
+        "title": "焦點視窗在您的視線附近顫動",
+        "body": "逐步提高平滑化。小幅的死區可以抑制中心附近的細微眼球移動，但死區太大會在焦點終於移動時造成黏滯的跳動。"
+      },
+      "lag": {
+        "label": "延遲太大",
+        "title": "黃色標記落後青色太多",
+        "body": "降低平滑化。如果移動開始得晚然後跳動，也請降低死區。請使用仍能讓焦點視窗在視覺上保持穩定的最小值。"
+      },
+      "lost": {
+        "label": "紅色外框",
+        "title": "眼動追蹤無法使用",
+        "body": "紅色的焦點外框是狀態警告，而不是色彩偏好。請確認已在遊戲與頭戴式裝置執行階段中啟用眼動追蹤。VectorXR 會改用後援行為，而不是跟隨眼睛視線。"
+      },
+      "performance": {
+        "label": "需要更多 FPS",
+        "title": "在最不重要的地方減少像素",
+        "body": "先降低周邊解析度。必要時再降低焦點寬度或高度。焦點解析度變更的是視窗內的密度，並不會改變綠色外框的大小。"
+      }
+    },
+    "ifYouSee": "如果您看到這個",
+    "tuningOrder": {
+      "heading": "良好的調校順序：",
+      "tracking": "確認追蹤可用。",
+      "alignment": "校正固定的對齊偏差。",
+      "smoothing": "在平滑化與延遲之間取得平衡。",
+      "quality": "然後調校影像品質與像素成本。"
+    }
+  }
+}

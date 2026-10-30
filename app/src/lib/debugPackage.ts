@@ -1,5 +1,6 @@
 import type { ActiveRuntimeInfo, DebugSourceSnapshot, LogSnapshot, OpenXrLayerSnapshot, SeenApplication, RuntimeStatusEnvelope } from './commands'
 import type { HealthSummary } from './health'
+import { t } from '../i18n/index.ts'
 import type { RuntimePacingObservation, TurboMetricsSession, VectorXRConfig } from './model'
 
 interface SaveFilePickerHandle {
@@ -230,7 +231,7 @@ function timestampName(): string {
 }
 
 export function defaultDebugPackageName(): string {
-  return `VectorXR-debug-report-${timestampName()}.zip`
+  return `VectorXR-debug-report-${timestampName()}.zip` // i18n-ignore
 }
 
 export async function createDebugPackage(input: DebugPackageInput): Promise<Blob> {
@@ -285,7 +286,7 @@ export async function saveDebugPackage(blob: Blob, suggestedName = defaultDebugP
         suggestedName,
         types: [
           {
-            description: 'VectorXR debug package',
+            description: t('app.debugExport.fileType'),
             accept: { 'application/zip': ['.zip'] },
           },
         ],

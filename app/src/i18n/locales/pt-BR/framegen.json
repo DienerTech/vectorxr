@@ -1,0 +1,241 @@
+{
+  "title": "Frame Generation",
+  "experimental": "Experimental",
+  "intro": "Adiciona quadros gerados entre os quadros do jogo, para que o movimento continue fluido na taxa de atualização máxima do seu headset mesmo quando o jogo não acompanha. Experimente em cada jogo e compare com a alternância A/B.",
+  "howItWorksTitle": "Como a Frame Generation funciona",
+  "restartNote": "Ligar a Frame Generation entra em vigor na próxima vez que o jogo for iniciado; desligá-la se aplica na hora.",
+  "restartToApply": {
+    "label": "Reinicie para aplicar:",
+    "body": "{label} ligar a Frame Generation para um jogo entra em vigor na próxima vez que o jogo for iniciado. Desligá-la, assim como todas as outras configurações desta página, se aplica durante o jogo."
+  },
+  "setupGuide": {
+    "title": "Guia de configuração",
+    "summary": "Ligue para um jogo e depois compare no headset",
+    "smoothing": {
+      "label": "Desligue a suavização do runtime",
+      "body": "{label} para o jogo, no runtime e no software do próprio headset: SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW ou Meta ASW. Eles brigam com o ritmo da Frame Generation."
+    },
+    "refreshRate": {
+      "label": "Mantenha o headset na taxa de atualização máxima.",
+      "body": "{label} Não reduza a taxa de quadros pela metade com o Lock Frame Rate to Half Refresh Rate do Pimax Play nem com um limite de quadros no Throttling Behavior do SteamVR; a Frame Generation define a taxa do jogo sozinha."
+    },
+    "halfRate": {
+      "label": "Primeiro, faça o jogo chegar à metade da taxa de atualização.",
+      "body": "{label} Com a Frame Generation desligada, reduza as configurações do jogo ou a resolução de renderização até que ele mantenha pelo menos metade da taxa do headset (45 fps em 90 Hz). A Frame Generation consegue levar da metade ao total, mas não consegue fazer a primeira metade."
+    },
+    "oneGame": {
+      "label": "Ligue para um jogo:",
+      "body": "{label} deixe o Perfil padrão desligado, adicione um perfil personalizado abaixo e atribua o jogo. As configurações padrão servem para a maioria dos jogos."
+    },
+    "restart": {
+      "label": "Salve e reinicie o jogo.",
+      "body": "{label} Ligar a Frame Generation entra em vigor na próxima inicialização."
+    },
+    "check": {
+      "label": "Confira no headset:",
+      "osd": "Exibição na tela",
+      "body": "{label} a {osd} mostra FG ATIVO ao lado do FPS, ou escolha a visualização de diagnóstico Tonalidade dos quadros gerados (e volte para Desligado depois)."
+    },
+    "compare": {
+      "label": "Compare:",
+      "body": "{label} atribua a alternância A/B e desligue e ligue os quadros gerados na mesma cena."
+    },
+    "turboNote": "O Turbo fica desligado nos jogos em que a Frame Generation é executada."
+  },
+  "controls": {
+    "heading": "Controles no headset",
+    "statusUnavailable": "O status de execução está temporariamente indisponível.",
+    "noSession": "Nenhum aplicativo de VR em execução"
+  },
+  "session": {
+    "withReason": "{status} · {reason}",
+    "withReasonColon": "{status}: {reason}",
+    "active": "Ativo",
+    "standby": "Pronto",
+    "waiting": "Iniciando · aguardando quadros estáveis",
+    "paused": "Pausado",
+    "unavailable": "Indisponível",
+    "off": "Desligado",
+    "needsLayer": "Requer a camada atualizada do VectorXR",
+    "unknown": "Status indisponível"
+  },
+  "gameDepth": {
+    "inUse": {
+      "label": "Usando a profundidade do jogo",
+      "title": "O jogo compartilha sua profundidade, então objetos próximos ficam estáveis quando você move a cabeça."
+    },
+    "empty": {
+      "label": "A profundidade do jogo está vazia",
+      "title": "O jogo envia a profundidade sem preenchê-la. Se o jogo tiver uma opção de reprojeção baseada em profundidade, ativá-la permite que a Frame Generation a use."
+    },
+    "unusable": {
+      "label": "Profundidade do jogo não usada",
+      "title": "A profundidade que o jogo envia não se alinha entre os olhos, então a Frame Generation funciona sem ela."
+    }
+  },
+  "toggle": {
+    "heading": "Alternância A/B",
+    "hint": "Opcional. Desliga e liga os quadros gerados em jogos que foram iniciados com a Frame Generation ligada.",
+    "label": "Alternância A/B da Frame Generation",
+    "description": "Desliga e liga os quadros gerados no headset para comparar o movimento na mesma cena. Funciona em jogos que foram iniciados com a Frame Generation ligada.",
+    "noneText": "Nenhuma atribuição definida. A Frame Generation é executada onde estiver ligada quando o jogo for iniciado."
+  },
+  "diagnostic": {
+    "heading": "Visualização de diagnóstico",
+    "hint": "{description} Aplica-se a todos os jogos e é atualizada durante o jogo.",
+    "onWarning": "Ligado: os quadros gerados no headset são desenhados com as cores desta visualização, que parecem falhas no jogo normal. Defina como Desligado quando terminar.",
+    "views": {
+      "off": {
+        "label": "Desligado",
+        "description": "Os quadros gerados são mostrados como são."
+      },
+      "flow": {
+        "label": "Fluxo de movimento",
+        "description": "Codifica por cores o movimento que a Frame Generation mediu nos quadros gerados."
+      },
+      "confidence": {
+        "label": "Confiança",
+        "description": "Pinta de vermelho os quadros gerados onde eles recorreram à imagem real; útil ao ajustar as configurações avançadas."
+      },
+      "tint": {
+        "label": "Tonalidade dos quadros gerados",
+        "description": "Aplica uma leve tonalidade aos quadros gerados para que você veja que eles estão sendo mostrados."
+      }
+    }
+  },
+  "defaultProfile": {
+    "heading": "Perfil padrão",
+    "appliesTo": "Aplica-se a jogos sem um perfil personalizado ativado",
+    "toggleOn": "Perfil padrão ligado",
+    "toggleOff": "Perfil padrão desligado",
+    "offNote": "Desligado para jogos sem um perfil personalizado. Os perfis personalizados abaixo continuam ligando-a para os seus jogos.",
+    "onWarning": {
+      "label": "Ligado para todos os jogos sem um perfil personalizado,",
+      "body": "{label} inclusive aqueles com que você ainda não testou. A configuração mais segura é deixar isto desligado e adicionar um perfil para cada jogo que você já verificou."
+    }
+  },
+  "customProfiles": {
+    "heading": "Perfis personalizados",
+    "description": "Ligue a Frame Generation por jogo. O primeiro perfil ativado correspondente prevalece.",
+    "add": "Adicionar perfil",
+    "empty": "Nenhum perfil personalizado ainda. Adicione um perfil para ligar a Frame Generation em um jogo.",
+    "duplicateApplication": "{application} já é atingido pelo Perfil {profile}. O primeiro perfil ativo prevalece."
+  },
+  "summary": {
+    "format": "{mode} · {rate} · {motion}",
+    "dynamic": "Dinâmico",
+    "fixedAuto": "Fixo automático",
+    "fixed": "Fixo {multiplier}"
+  },
+  "howItWorks": {
+    "whatItDoes": {
+      "heading": "O que ela faz",
+      "body": "A Frame Generation mede como a imagem se move entre os quadros do jogo e cria novos quadros a partir desse movimento, para que o headset receba uma imagem nova a cada atualização mesmo quando o jogo renderiza menos. A rotação da sua cabeça é removida primeiro, porque a reprojeção do próprio headset já cuida dela."
+    },
+    "mode": {
+      "heading": "Modo",
+      "interpolate": "{name} (padrão) mistura os dois últimos quadros do jogo. É o mais fluido e tem menos artefatos, mas mostra cada quadro do jogo um pouco mais tarde.",
+      "extrapolate": "{name} projeta o quadro mais recente do jogo para a frente ao longo do seu movimento, então não adiciona latência. Movimentos rápidos e áreas recém-reveladas mostram mais artefatos; fica melhor com o hardware da NVIDIA como fonte de movimento."
+    },
+    "frameRate": {
+      "heading": "Taxa de quadros",
+      "dynamic": "{name} (padrão) deixa o jogo rodar o mais rápido que puder e preenche as atualizações entre os quadros dele com quadros gerados. Quando o jogo acompanha sozinho, a Frame Generation fica de prontidão e não gera nada.",
+      "fixed": "{name} mantém o jogo em uma fração definida da taxa de atualização para um ritmo uniforme. Em um headset de 90 Hz, {x2} roda o jogo a 45 fps, {x3} a 30 fps e {x4} a 22,5 fps; {auto} escolhe entre eles conforme o jogo precisa. Cada quadro gerado move mais a imagem, então taxas mais altas mostram mais artefatos."
+    },
+    "beforeYouStart": {
+      "heading": "Antes de começar",
+      "smoothing": "{label} para o jogo, no runtime e no software do próprio headset (SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW, Meta ASW), e mantenha o headset na taxa de atualização máxima: não reduza a taxa de quadros pela metade com o Lock Frame Rate to Half Refresh Rate do Pimax Play nem com um limite de quadros no Throttling Behavior do SteamVR. A Frame Generation define a taxa do jogo sozinha.",
+      "turbo": {
+        "label": "O Turbo fica desligado enquanto a Frame Generation é executada.",
+        "body": "{label} Os dois ditam o ritmo dos quadros de formas opostas, então o Turbo cede nesses jogos e aparece como Pausado pelo Frame Generation. Seus perfis do Turbo não são alterados."
+      },
+      "apis": "Funciona com jogos Direct3D 11, Direct3D 12 e Vulkan, inclusive com Quadviews."
+    },
+    "knownLimits": {
+      "heading": "Limitações conhecidas",
+      "body": "O movimento é medido a partir das imagens que o jogo mostra, então textos, HUDs, transparências e padrões repetitivos podem tremeluzir ou se deformar nos quadros gerados. Se isso incomodar, aumente a Supressão de artefatos ou reduza o Limite de movimento em Avançado."
+    }
+  },
+  "settings": {
+    "mode": {
+      "legend": "Modo",
+      "interpolate": {
+        "label": "Interpolate",
+        "description": "Mistura os dois últimos quadros do jogo. A imagem mais fluida, com menos artefatos; adiciona um pouco de latência."
+      },
+      "extrapolate": {
+        "label": "Extrapolate",
+        "description": "Projeta o quadro mais recente do jogo para a frente. A menor latência, com mais artefatos nas bordas em movimento; funciona melhor com hardware da NVIDIA."
+      }
+    },
+    "frameRate": {
+      "legend": "Taxa de quadros",
+      "dynamic": {
+        "label": "Dinâmico",
+        "description": "O jogo roda o mais rápido que puder, e os quadros gerados completam até a taxa de atualização do seu headset."
+      },
+      "fixed": {
+        "label": "Fixo",
+        "description": "Mantém o jogo em uma fração definida da taxa de atualização para um ritmo uniforme e preenche o resto com quadros gerados."
+      },
+      "fixedRate": "Taxa fixa",
+      "rates": {
+        "auto": "Escolhe 2x, 3x ou 4x conforme o jogo precisa e não gera nada enquanto o jogo acompanha sozinho.",
+        "x2": "O jogo roda a até 1/2 da taxa de atualização, como 45 fps em 90 Hz. Abaixo disso, o ritmo fica menos uniforme.",
+        "x3": "O jogo roda a até 1/3 da taxa de atualização, como 30 fps em 90 Hz. Abaixo disso, o ritmo fica menos uniforme.",
+        "x4": "O jogo roda a até 1/4 da taxa de atualização, como 22,5 fps em 90 Hz. O que tem mais artefatos; para os jogos mais pesados."
+      }
+    },
+    "motionSource": {
+      "legend": "Fonte de movimento",
+      "shader": {
+        "label": "Shader",
+        "description": "Mede o movimento nos núcleos de shader da GPU. Funciona em qualquer GPU e combina melhor com Interpolate."
+      },
+      "hardware": {
+        "label": "Hardware da NVIDIA",
+        "description": "Usa a unidade de fluxo óptico das GPUs NVIDIA RTX: mais precisa, principalmente em padrões repetitivos."
+      }
+    },
+    "advanced": {
+      "summary": "{flow} · Supressão {suppression} · Limite de movimento {motionLimit}%",
+      "summaryHeadPrediction": "{flow} · Supressão {suppression} · Limite de movimento {motionLimit}% · Previsão da cabeça",
+      "reset": "Redefinir as configurações avançadas"
+    },
+    "flowQuality": {
+      "heading": "Qualidade do fluxo",
+      "resolution": "{resolution} da imagem do olho",
+      "description": "Com que precisão o movimento é medido. Mais alto rastreia melhor objetos pequenos e finos e custa mais tempo de GPU.",
+      "levels": {
+        "performance": "Desempenho",
+        "balanced": "Equilibrado",
+        "quality": "Qualidade"
+      },
+      "summary": {
+        "performance": "Fluxo de desempenho",
+        "balanced": "Fluxo equilibrado",
+        "quality": "Fluxo de qualidade"
+      }
+    },
+    "artifactSuppression": {
+      "heading": "Supressão de artefatos",
+      "valueLabel": "Valor da supressão de artefatos",
+      "smoother": "Movimento mais fluido",
+      "fewer": "Menos artefatos",
+      "description": "Onde o movimento é incerto, valores mais altos mostram a imagem real mais cedo: menos deformação, um pouco mais de trepidação."
+    },
+    "motionLimit": {
+      "heading": "Limite de movimento",
+      "valueLabel": "Valor do limite de movimento em porcentagem da largura da visão",
+      "description": "O máximo que um quadro gerado pode mover a imagem, como fração da largura da visão. Movimentos mais rápidos mostram a imagem real."
+    },
+    "headPrediction": {
+      "heading": "Estender a previsão da cabeça",
+      "description": "A Frame Generation faz o jogo renderizar até ~150 ms adiante, e alguns runtimes, como o da Pimax, preveem a sua cabeça em apenas ~20 ms disso. Isto prolonga o giro da sua cabeça pelo restante, deixando menos preto na borda para onde você vira. Ligue antes de iniciar o jogo."
+    },
+    "interpolateFlow": {
+      "fallback": "Mudar para Shader se o fluxo por hardware não acompanhar",
+      "fallbackHint": "Somente Interpolate. O fluxo por hardware é testado novamente depois de um tempo."
+    }
+  }
+}

@@ -356,14 +356,14 @@ std::string PerformanceMemoryText(std::uint64_t bytes) {
     return Fixed(value / kGiB, 1) + " GB";
 }
 
-PerformanceOsdText DescribePerformance(const PerformanceReading& reading) {
+PerformanceOsdText DescribePerformance(const PerformanceReading& reading, OsdLanguage language) {
     PerformanceOsdText text;
     if (reading.budget_ms > 0.0) {
-        text.target = std::to_string(std::lround(1000.0 / reading.budget_ms)) + " fps target";
+        text.target = OsdFormat(language, OsdText::FpsTarget, std::to_string(std::lround(1000.0 / reading.budget_ms)));
     }
     text.cpu_bound = reading.verdict == PerformanceVerdict::kCpuBound;
     text.gpu_bound = reading.verdict == PerformanceVerdict::kGpuBound;
-    text.verdict = text.cpu_bound ? "CPU-BOUND" : text.gpu_bound ? "GPU-BOUND" : "";
+    text.verdict = text.cpu_bound ? OsdString(language, OsdText::CpuBound) : text.gpu_bound ? OsdString(language, OsdText::GpuBound) : "";
 
     const std::optional<double> cpu = reading.CpuHeadroomPercent();
     text.cpu = "CPU " + (cpu ? PerformanceHeadroomText(*cpu) : std::string("--"));
@@ -371,47 +371,47 @@ PerformanceOsdText DescribePerformance(const PerformanceReading& reading) {
     case PerformanceCpuState::kMeasured:
         text.cpu_detail = Fixed(reading.cpu_ms.value_or(0.0), 1) + " ms";
         if (reading.thread_busy_percent) {
-            text.cpu_detail += ", thread " + Percent(*reading.thread_busy_percent);
+            text.cpu_detail += OsdFormat(language, OsdText::CpuThread, Percent(*reading.thread_busy_percent));
         }
         break;
     case PerformanceCpuState::kPipelined:
-        text.cpu_detail = "pipelined frames";
+        text.cpu_detail = OsdString(language, OsdText::CpuPipelined);
         break;
     case PerformanceCpuState::kTurbo:
-        text.cpu_detail = "Turbo paces the game";
+        text.cpu_detail = OsdString(language, OsdText::CpuTurboPaces);
         break;
     default:
-        text.cpu_detail = "waiting for frames";
+        text.cpu_detail = OsdString(language, OsdText::CpuWaiting);
         break;
     }
 
     const std::optional<double> gpu = reading.GpuHeadroomPercent();
     text.gpu = "GPU " + (gpu ? PerformanceHeadroomText(*gpu) : std::string("--"));
     if (reading.gpu_percent) {
-        text.gpu_detail = Percent(*reading.gpu_percent) + " busy";
+        text.gpu_detail = OsdFormat(language, OsdText::GpuBusy, Percent(*reading.gpu_percent));
         if (reading.gpu_game_percent) {
-            text.gpu_detail += ", game " + Percent(*reading.gpu_game_percent);
+            text.gpu_detail += OsdFormat(language, OsdText::GpuGame, Percent(*reading.gpu_game_percent));
         }
     } else {
         // Before the counters' second collection there is no rate yet.
-        text.gpu_detail = reading.gpu_unavailable ? "no GPU counters" : "reading counters";
+        text.gpu_detail = OsdString(language, reading.gpu_unavailable ? OsdText::GpuNoCounters : OsdText::GpuReading);
     }
 
     if (reading.usage_bytes) {
         text.vram = "VRAM " + PerformanceMemoryText(*reading.usage_bytes);
-        text.vram_detail = reading.budget_bytes ? "of " + PerformanceMemoryText(*reading.budget_bytes) : "";
+        text.vram_detail = reading.budget_bytes ? OsdFormat(language, OsdText::VramOf, PerformanceMemoryText(*reading.budget_bytes)) : "";
         text.vram_over = reading.budget_bytes && *reading.usage_bytes > *reading.budget_bytes;
     } else {
         text.vram = "VRAM --";
-        text.vram_detail = "unknown";
+        text.vram_detail = OsdString(language, OsdText::VramUnknown);
     }
     if (reading.framegen_bytes > 0) {
         text.vram_detail += (text.vram_detail.empty() ? "" : ", ") + std::string("FG ") +
                             PerformanceMemoryText(reading.framegen_bytes);
     }
 
-    text.compact_cpu = text.cpu_bound ? "CPU-BOUND" : text.cpu;
-    text.compact_gpu = text.gpu_bound ? "GPU-BOUND" : text.gpu;
+    text.compact_cpu = text.cpu_bound ? text.verdict : text.cpu;
+    text.compact_gpu = text.gpu_bound ? text.verdict : text.gpu;
     text.compact_vram = text.vram;
     return text;
 }

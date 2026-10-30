@@ -1,0 +1,66 @@
+{
+  "checks": {
+    "suiteEnabled": {
+      "label": "Interrupteur d'exécution de la suite",
+      "enabled": "Les effets d'exécution de VectorXR sont autorisés.",
+      "disabled": "VectorXR est désactivé par l'interrupteur d'exécution de l'Accueil."
+    },
+    "layerRegistered": {
+      "label": "Inscription de la couche OpenXR",
+      "loading": "VectorXR lit encore les inscriptions des couches OpenXR.",
+      "registered": "Inscrite dans {slice}.",
+      "missing": "VectorXR est introuvable dans le registre des couches API implicites OpenXR."
+    },
+    "layerEnabled": {
+      "label": "Couche OpenXR activée",
+      "loading": "En attente de l'état de la couche OpenXR.",
+      "enabled": "La couche API VectorXR est activée pour les prochains lancements OpenXR.",
+      "disabled": "La couche API VectorXR est désactivée ou indisponible."
+    },
+    "layerDuplicates": {
+      "label": "Une seule couche VectorXR activée",
+      "detail_one": "{count} inscription VectorXR est activée ({paths}). Les applications OpenXR plantent quand deux copies se chargent ; désactivez-les toutes sauf une dans la page Couches OpenXR.",
+      "detail_other": "{count} inscriptions VectorXR sont activées ({paths}). Les applications OpenXR plantent quand deux copies se chargent ; désactivez-les toutes sauf une dans la page Couches OpenXR."
+    },
+    "layerFiles": {
+      "label": "Fichiers de la couche",
+      "pending": "Les fichiers de la couche pourront être vérifiés une fois l'inscription de la couche trouvée.",
+      "resolved": "Les chemins du manifeste et de la DLL sont tous deux résolus.",
+      "missing": "Le chemin du manifeste ou de la DLL inscrit est manquant."
+    },
+    "configLoaded": {
+      "label": "Chemin de configuration",
+      "pending": "Le chemin de configuration apparaîtra après le chargement des paramètres."
+    },
+    "recentLog": {
+      "label": "Journaux d'exécution",
+      "available_one": "{count} fichier journal récent disponible.",
+      "available_other": "{count} fichiers journaux récents disponibles.",
+      "none": "Aucun journal d'exécution VectorXR n'est encore disponible."
+    },
+    "seenApps": {
+      "label": "Découverte des applications",
+      "observed_one": "{count} application OpenXR observée.",
+      "observed_other": "{count} applications OpenXR observées.",
+      "none": "Aucune application OpenXR n'a encore été observée."
+    }
+  },
+  "overall": {
+    "ready": "Prêt",
+    "attention": "Attention requise",
+    "inactive": "Inactif",
+    "unknown": "Vérification"
+  },
+  "description": {
+    "ready": "VectorXR semble prêt pour les prochains lancements d'applications OpenXR.",
+    "attention": "VectorXR peut fonctionner, mais un ou plusieurs diagnostics méritent peut-être un examen.",
+    "inactive": "VectorXR n'est pas prêt actuellement à appliquer les Améliorations OpenXR.",
+    "unknown": "VectorXR collecte encore l'état du système."
+  },
+  "state": {
+    "pass": "réussi",
+    "warn": "avert.",
+    "fail": "échec",
+    "info": "info"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "configRead": "無法讀取 {path}：{detail}",
+  "configParse": "無法剖析 {path}：{detail}",
+  "configReplace": "無法取代 {path}：{detail}",
+  "directoryMissing": "目錄不存在：{path}",
+  "soundMissing": "找不到音效檔案：{path}",
+  "sessionInactive": "OpenXR 工作階段已不再作用中",
+  "diagnosticUnavailable": "此 OpenXR 工作階段無法使用診斷視覺化",
+  "layerNotRegistered": "層資訊清單已不再註冊於該 OpenXR 區段中",
+  "layerConflict": "已有另一個 VectorXR 註冊處於啟用狀態（{slice}：{path}）。同時載入兩份 VectorXR 時 OpenXR 應用程式會當機，請先停用該註冊。",
+  "elevationRequired": "此 OpenXR 層變更需要提高權限。請以系統管理員身分重新啟動 VectorXR，然後再試一次。",
+  "elevationCanceled": "OpenXR 層變更已在提高權限提示中取消，或提高權限的協助程式未啟動。"
+}

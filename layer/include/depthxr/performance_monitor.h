@@ -15,6 +15,8 @@
 #include <utility>
 #include <vector>
 
+#include "depthxr/osd_strings.h"
+
 namespace depthxr {
 
 class Logger;
@@ -246,7 +248,8 @@ struct PerformanceOsdText {
     bool cpu_bound{false}, gpu_bound{false};
     std::string compact_cpu, compact_gpu, compact_vram;
 };
-PerformanceOsdText DescribePerformance(const PerformanceReading& reading);
+// In the OSD's language (English by default, as the tests read it).
+PerformanceOsdText DescribePerformance(const PerformanceReading& reading, OsdLanguage language = OsdLanguage::En);
 // "+32%", "-20%" with a minus sign (U+2212), "+0%"; clamped to -999..100.
 std::string PerformanceHeadroomText(double percent);
 // "9.8 GB" (GiB, as Task Manager shows them), "612 MB" under one.

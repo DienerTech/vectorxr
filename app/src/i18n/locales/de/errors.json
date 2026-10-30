@@ -1,0 +1,13 @@
+{
+  "configRead": "{path} kann nicht gelesen werden: {detail}",
+  "configParse": "{path} kann nicht analysiert werden: {detail}",
+  "configReplace": "{path} kann nicht ersetzt werden: {detail}",
+  "directoryMissing": "Verzeichnis ist nicht vorhanden: {path}",
+  "soundMissing": "Sounddatei nicht gefunden: {path}",
+  "sessionInactive": "Die OpenXR-Sitzung ist nicht mehr aktiv",
+  "diagnosticUnavailable": "Die Diagnosevisualisierung ist für diese OpenXR-Sitzung nicht verfügbar",
+  "layerNotRegistered": "Das Layer-Manifest ist in diesem OpenXR-Bereich nicht mehr registriert",
+  "layerConflict": "Eine andere VectorXR-Registrierung ist bereits aktiviert ({slice}: {path}). OpenXR-Apps stürzen ab, wenn zwei Kopien von VectorXR geladen werden. Deaktivieren Sie daher zuerst diese.",
+  "elevationRequired": "Diese Änderung am OpenXR-Layer erfordert erhöhte Rechte. Starten Sie VectorXR als Administrator neu, und versuchen Sie es dann erneut.",
+  "elevationCanceled": "Die Änderung am OpenXR-Layer wurde bei der Abfrage nach erhöhten Rechten abgebrochen, oder das Hilfsprogramm mit erhöhten Rechten wurde nicht gestartet."
+}

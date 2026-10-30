@@ -1,0 +1,89 @@
+{
+  "field": {
+    "between": "{field} doit être compris entre {min} et {max}",
+    "betweenCm": "{field} doit être compris entre {min} et {max} cm",
+    "integerBetween": "{field} doit être un entier compris entre {min} et {max}",
+    "wholeNumberFromTo": "{field} doit être un nombre entier de {min} à {max}",
+    "boolean": "{field} doit être un booléen",
+    "trueOrFalse": "{field} doit valoir true ou false",
+    "required": "{field} est obligatoire",
+    "smallerThan": "{field} doit être inférieur à {other}",
+    "duplicates": "{field} fait doublon avec {value}",
+    "wavFile": "{field} doit pointer vers un fichier .wav"
+  },
+  "osd": {
+    "between": "OSD : {field} doit être compris entre {min} et {max}",
+    "customColor": "La couleur personnalisée de l'OSD doit être une couleur hexadécimale à six chiffres",
+    "accent": "La couleur d'accent de l'OSD n'est pas valide",
+    "clockFormat": "Le format d'horloge de l'OSD doit être 12 ou 24 heures",
+    "compactMetrics": "La sélection de performances compacte de l'OSD n'est pas valide",
+    "bodyOrder": "L'ordre des lignes de l'OSD doit contenir chaque ligne une seule fois"
+  },
+  "binding": {
+    "chordEmpty": "{field} doit inclure au moins une touche",
+    "chordUnsupportedKey": "{field} contient une touche non prise en charge : {key}",
+    "chordPrimaryKey": "{field} doit inclure exactement une touche qui n'est pas un modificateur",
+    "inputPath": "{field} doit utiliser button-1 à button-128 ou hat-1 à hat-4 avec une direction prise en charge"
+  },
+  "pivot": {
+    "positionAssistAngles": "{field} exige 0 <= angle de début < angle de décalage complet <= 180",
+    "responseMode": "{field} doit être \"continuous\" ou \"stepped\"",
+    "stepGlideMode": "{field} doit être \"instant\" ou \"glide\"",
+    "quickViewDuplicateId": "{field} fait doublon avec une autre Vue rapide",
+    "nudgeSetReservedId": "{field} utilise la sélection réservée Aucun",
+    "nudgeSetDuplicateId": "{field} fait doublon avec un autre Jeu d'ajustements",
+    "unknownNudgeSet": "{field} fait référence à un Jeu d'ajustements inconnu"
+  },
+  "quadviews": {
+    "trackingMode": "{field} doit être head ou eye"
+  },
+  "framegen": {
+    "synthesisMode": "{field} doit être interpolate ou extrapolate",
+    "flowQuality": "{field} doit être performance, balanced ou quality",
+    "motionEstimation": "{field} doit être shader ou hardware",
+    "frameMultiplier": "{field} doit être auto, dynamic, 2x, 3x ou 4x",
+    "diagnosticView": "{field} doit être off, flow, confidence ou tint",
+    "interpolateFlow": "{field} doit être auto, hardware ou shader"
+  },
+  "turbo": {
+    "predictionPercent": "L'atténuation expérimentale de la prédiction Turbo doit être un entier de 50 à 100",
+    "frameLimit": "Le plafond d'images expérimental de Turbo doit être 0 (désactivé) ou un entier de 20 à 240"
+  },
+  "applications": {
+    "idFormat": "{field} doit utiliser des lettres minuscules, des chiffres et des traits d'union",
+    "duplicateId": "{field} fait doublon avec une autre application",
+    "duplicateExe": "{field} fait doublon avec une autre application",
+    "unknownApplication": "{field} fait référence à une application inconnue : {application}"
+  },
+  "profiles": {
+    "conflict": "{profile} est en conflit avec profiles[{first}] pour l'application {application} ; le premier profil activé l'emporte"
+  },
+  "version": "version doit être égal à {version}",
+  "warnings": {
+    "turboFrameGenOverlap": "Turbo et Frame Generation sont tous deux activés pour {targets}. Frame Generation prend en charge le cadencement des images ; Turbo reste désactivé dans les sessions où Frame Generation s'exécute.",
+    "moreApplications_one": "{count} autre",
+    "moreApplications_other": "{count} autres",
+    "applicationsWithoutProfile": "applications sans profil personnalisé"
+  },
+  "store": {
+    "loadBlocked": "Les paramètres n'ont pas pu être chargés ; l'enregistrement est donc désactivé pour préserver le fichier sur le disque : {error}. Corrigez le fichier et rouvrez VectorXR, importez une configuration ou rétablissez les valeurs par défaut.",
+    "loadConfigFailed": "Échec du chargement de la configuration",
+    "loadSeenAppsFailed": "Échec du chargement des applications vues",
+    "loadRuntimePacingFailed": "Échec du chargement de l'état de cadencement du runtime",
+    "loadTurboMetricsFailed": "Échec du chargement des métriques Turbo",
+    "turboMetricsCleared": "Métriques Turbo effacées",
+    "clearTurboMetricsFailed": "Échec de l'effacement des métriques Turbo",
+    "pacingVerdictCleared": "Verdict de cadencement effacé pour {runtime} ; Auto le redécouvrira à la prochaine session",
+    "clearPacingVerdictFailed": "Échec de l'effacement du verdict de cadencement",
+    "configSaved": "Configuration enregistrée",
+    "saveConfigFailed": "Échec de l'enregistrement de la configuration",
+    "reloadedFromDisk": "Paramètres modifiés sur le disque chargés",
+    "configReset": "Configuration rétablie par défaut",
+    "resetConfigFailed": "Échec de la réinitialisation de la configuration",
+    "changesDiscarded": "Modifications non enregistrées abandonnées",
+    "configImported": "Configuration importée — enregistrez pour l'écrire sur le disque",
+    "applicationAdded": "{exe} ajouté au registre des applications",
+    "seenAppsCleared": "Applications vues effacées",
+    "clearSeenAppsFailed": "Échec de l'effacement des applications vues"
+  }
+}

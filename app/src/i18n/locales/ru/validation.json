@@ -1,0 +1,91 @@
+{
+  "field": {
+    "between": "{field}: значение должно быть от {min} до {max}",
+    "betweenCm": "{field}: значение должно быть от {min} до {max} cm",
+    "integerBetween": "{field}: значение должно быть целым числом от {min} до {max}",
+    "wholeNumberFromTo": "{field}: значение должно быть целым числом от {min} до {max}",
+    "boolean": "{field}: значение должно быть логическим",
+    "trueOrFalse": "{field}: значение должно быть true или false",
+    "required": "{field}: обязательное поле",
+    "smallerThan": "{field}: значение должно быть меньше, чем {other}",
+    "duplicates": "{field} дублирует {value}",
+    "wavFile": "{field} должно указывать на файл .wav"
+  },
+  "osd": {
+    "between": "OSD, {field}: значение должно быть от {min} до {max}",
+    "customColor": "Свой цвет OSD должен быть шестизначным шестнадцатеричным кодом цвета",
+    "accent": "Недопустимый акцентный цвет OSD",
+    "clockFormat": "Формат часов OSD должен быть 12- или 24-часовым",
+    "compactMetrics": "Недопустимый выбор показателей производительности для компактного OSD",
+    "bodyOrder": "Порядок строк OSD должен содержать каждую строку один раз"
+  },
+  "binding": {
+    "chordEmpty": "{field} должно включать хотя бы одну клавишу",
+    "chordUnsupportedKey": "{field} содержит неподдерживаемую клавишу: {key}",
+    "chordPrimaryKey": "{field} должно включать ровно одну клавишу, не являющуюся модификатором",
+    "inputPath": "{field} должно использовать button-1 … button-128 или hat-1 … hat-4 с поддерживаемым направлением"
+  },
+  "pivot": {
+    "positionAssistAngles": "{field}: требуется 0 <= начальный угол < угол полного смещения <= 180",
+    "responseMode": "{field} должно иметь значение \"continuous\" или \"stepped\"",
+    "stepGlideMode": "{field} должно иметь значение \"instant\" или \"glide\"",
+    "quickViewDuplicateId": "{field} дублирует другой быстрый вид",
+    "nudgeSetReservedId": "{field} использует зарезервированный вариант «Нет»",
+    "nudgeSetDuplicateId": "{field} дублирует другой набор сдвигов",
+    "unknownNudgeSet": "{field} ссылается на неизвестный набор сдвигов"
+  },
+  "quadviews": {
+    "trackingMode": "{field} должно иметь значение head или eye"
+  },
+  "framegen": {
+    "synthesisMode": "{field} должно иметь значение interpolate или extrapolate",
+    "flowQuality": "{field} должно иметь значение performance, balanced или quality",
+    "motionEstimation": "{field} должно иметь значение shader или hardware",
+    "frameMultiplier": "{field} должно иметь значение auto, dynamic, 2x, 3x или 4x",
+    "diagnosticView": "{field} должно иметь значение off, flow, confidence или tint",
+    "interpolateFlow": "{field} должно быть auto, hardware или shader"
+  },
+  "turbo": {
+    "predictionPercent": "Экспериментальное ослабление прогноза Turbo должно быть целым числом от 50 до 100",
+    "frameLimit": "Экспериментальное ограничение кадров Turbo должно быть 0 (выкл.) или целым числом от 20 до 240"
+  },
+  "applications": {
+    "idFormat": "{field} должно состоять из строчных латинских букв, цифр и дефисов",
+    "duplicateId": "{field} дублирует другое приложение",
+    "duplicateExe": "{field} дублирует другое приложение",
+    "unknownApplication": "{field} ссылается на неизвестное приложение: {application}"
+  },
+  "profiles": {
+    "conflict": "{profile} конфликтует с profiles[{first}] для приложения {application}; действует первый включённый профиль"
+  },
+  "version": "version должно быть равно {version}",
+  "warnings": {
+    "turboFrameGenOverlap": "Turbo и Frame Generation одновременно включены для {targets}. Frame Generation берёт на себя темп кадров; Turbo остаётся выключенным в сеансах, где работает Frame Generation.",
+    "moreApplications_one": "ещё {count}",
+    "moreApplications_few": "ещё {count}",
+    "moreApplications_many": "ещё {count}",
+    "moreApplications_other": "ещё {count}",
+    "applicationsWithoutProfile": "приложения без своего профиля"
+  },
+  "store": {
+    "loadBlocked": "Не удалось загрузить параметры, поэтому сохранение отключено, чтобы не затронуть файл на диске: {error}. Исправьте файл и снова откройте VectorXR, импортируйте конфигурацию или выполните сброс до значений по умолчанию.",
+    "loadConfigFailed": "Не удалось загрузить конфигурацию",
+    "loadSeenAppsFailed": "Не удалось загрузить обнаруженные приложения",
+    "loadRuntimePacingFailed": "Не удалось загрузить состояние темпа кадров среды выполнения",
+    "loadTurboMetricsFailed": "Не удалось загрузить метрики Turbo",
+    "turboMetricsCleared": "Метрики Turbo очищены",
+    "clearTurboMetricsFailed": "Не удалось очистить метрики Turbo",
+    "pacingVerdictCleared": "Вердикт темпа кадров для {runtime} очищен; режим Auto повторно определит его в следующем сеансе",
+    "clearPacingVerdictFailed": "Не удалось очистить вердикт темпа кадров",
+    "configSaved": "Конфигурация сохранена",
+    "saveConfigFailed": "Не удалось сохранить конфигурацию",
+    "reloadedFromDisk": "Загружены параметры, изменённые на диске",
+    "configReset": "Конфигурация сброшена до значений по умолчанию",
+    "resetConfigFailed": "Не удалось сбросить конфигурацию",
+    "changesDiscarded": "Несохранённые изменения отменены",
+    "configImported": "Конфигурация импортирована — сохраните, чтобы записать её на диск",
+    "applicationAdded": "{exe} добавлен в реестр приложений",
+    "seenAppsCleared": "Список обнаруженных приложений очищен",
+    "clearSeenAppsFailed": "Не удалось очистить список обнаруженных приложений"
+  }
+}

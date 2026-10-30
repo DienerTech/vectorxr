@@ -21,12 +21,16 @@ test('the tray shows the saved switch, log level and health', () => {
   const saved = defaultConfig()
   saved.core.enabled = false
   saved.core.logLevel = 'debug'
-  assert.deepEqual(trayStatus(saved, health(saved), true), {
+  const { labels, ...status } = trayStatus(saved, health(saved), true)
+  assert.deepEqual(status, {
     available: true,
     healthLabel: 'Needs attention',
     enabled: false,
     logLevel: 'debug',
   })
+  // The tray fills in {label} and {level} (src-tauri/src/tray.rs).
+  assert.equal(labels.health, 'Health: {label}')
+  assert.equal(labels.quit, 'Quit VectorXR')
   saved.core.logLevel = 'verbose'
   assert.equal(trayStatus(saved, health(saved), false).logLevel, 'info')
   assert.equal(trayStatus(saved, health(saved), false).available, false)

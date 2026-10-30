@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "depthxr/config_path.h"
+#include "depthxr/osd_strings.h"
 
 namespace depthxr {
 namespace {
@@ -753,7 +754,8 @@ bool ParseOsdSettings(const JsonValue::Object& object, OsdSettings& out, std::st
         "showClock", "showPivot", "showFramegen", "showFramegenFps", "showPerformance", "compactShowRuntime", "compactShowClock", "compactShowTurbo", "compactShowPivot",
         "compactShowFramegen", "compactShowPerformance",
         "compactShowBrand", "compactShowApp", "compactMetrics",
-        "clockFormat", "bodyOrder", "rowOrder", "customColor", "customPresets", "accent", "toggleBinding", "cycleBinding", "toggleBindings", "cycleBindings"});
+        "clockFormat", "bodyOrder", "rowOrder", "customColor", "customPresets", "accent", "language", "appLanguage", "toggleBinding", "cycleBinding",
+        "toggleBindings", "cycleBindings"});
     for (const auto& [key, target] : {std::pair{"enabled", &out.enabled}, {"visibleOnStart", &out.visible_on_start},
         {"compact", &out.compact}, {"showGraph", &out.show_graph}, {"showRuntime", &out.show_runtime}, {"showBrand", &out.show_brand}, {"showApp", &out.show_app},
         {"showTurbo", &out.show_turbo}, {"showModules", &out.show_modules}, {"showClock", &out.show_clock}, {"showPivot", &out.show_pivot},
@@ -819,6 +821,16 @@ bool ParseOsdSettings(const JsonValue::Object& object, OsdSettings& out, std::st
     if (clock) {
         if (*clock!="12" && *clock!="24") { error="Invalid core.osd.clockFormat"; return false; }
         out.clock_format=*clock;
+    }
+    // A language this layer does not ship (a newer app's) is ignored with a
+    // warning and the OSD follows the app, then Windows (ResolveOsdLanguage).
+    // 0.19.x layers ignore both keys as unknown fields.
+    for (const auto& [key, target] : {std::pair{"language", &out.language}, {"appLanguage", &out.app_language}}) {
+        std::optional<std::string> code;
+        if (!ReadOptionalString(object, key, code, error)) return false;
+        if (!code) continue;
+        if (OsdLanguageFromCode(*code) != OsdLanguage::Count || (*code == "app" && std::string_view(key) == "language")) *target = *code;
+        else NoteUnknownValue(object, key, *code);
     }
     // The app writes the rows 0.19.0-0.19.2 layers know to bodyOrder (they
     // reject any other name) and the full order to rowOrder, which wins. A
@@ -2446,6 +2458,7 @@ bool ParseFrameGenSettings(const JsonValue::Object& object, const char* field, F
         "synthesisMode",
         "flowQuality",
         "motionEstimation",
+        "interpolateFlow",
         "frameMultiplier",
         "artifactSuppression",
         "motionLimitPercent",
@@ -2456,12 +2469,22 @@ bool ParseFrameGenSettings(const JsonValue::Object& object, const char* field, F
     std::optional<std::string> synthesis_mode;
     std::optional<std::string> flow_quality;
     std::optional<std::string> motion_estimation;
+    std::optional<std::string> interpolate_flow;
     std::optional<std::string> multiplier;
     if (!ReadOptionalString(object, "synthesisMode", synthesis_mode, error) ||
         !ReadOptionalString(object, "flowQuality", flow_quality, error) ||
         !ReadOptionalString(object, "motionEstimation", motion_estimation, error) ||
+        !ReadOptionalString(object, "interpolateFlow", interpolate_flow, error) ||
         !ReadOptionalString(object, "frameMultiplier", multiplier, error)) {
         return false;
+    }
+    if (interpolate_flow) {
+        const auto parsed = ParseFrameGenInterpolateFlow(*interpolate_flow);
+        if (!parsed) {
+            error = std::string(field) + ".interpolateFlow must be auto, hardware, or shader";
+            return false;
+        }
+        out.interpolate_flow = *parsed;
     }
     if (motion_estimation) {
         const auto parsed = ParseFrameGenMotionEstimation(*motion_estimation);

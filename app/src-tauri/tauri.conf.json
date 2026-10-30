@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "VectorXR",
-  "version": "0.19.3",
+  "version": "0.20.0",
   "identifier": "local.vectorxr.app",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -48,7 +48,28 @@
     "windows": {
       "nsis": {
         "installMode": "perMachine",
-        "installerHooks": "./windows/nsis-hooks.nsh"
+        "installerHooks": "./windows/nsis-hooks.nsh",
+        "template": "./windows/installer.nsi",
+        "languages": [
+          "English",
+          "SimpChinese",
+          "Russian",
+          "Spanish",
+          "PortugueseBR",
+          "German",
+          "Japanese",
+          "French",
+          "Polish",
+          "Korean",
+          "TradChinese"
+        ],
+        "displayLanguageSelector": true,
+        "customLanguageFiles": {
+          "Polish": "./windows/languages/Polish.nsh",
+          "German": "./windows/languages/German.nsh",
+          "PortugueseBR": "./windows/languages/PortugueseBR.nsh",
+          "French": "./windows/languages/French.nsh"
+        }
       }
     }
   },

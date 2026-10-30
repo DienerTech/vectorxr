@@ -1,0 +1,87 @@
+{
+  "core": {
+    "title": "Einstellungen",
+    "intro": "App-weite Schalter, Darstellung, Protokollierung, Soundfeedback und Konfigurationsdateien.",
+    "general": {
+      "heading": "Allgemein",
+      "enabled": {
+        "title": "VectorXR aktiviert",
+        "description": "Aktiviert oder deaktiviert alle OpenXR-Verbesserungen von VectorXR zur Laufzeit."
+      },
+      "theme": {
+        "title": "Design",
+        "description": "Nur auf diesem PC gespeichert."
+      },
+      "language": {
+        "title": "Sprache",
+        "description": "„System (automatisch)“ folgt der Anzeigesprache von Windows. Nur auf diesem PC gespeichert.",
+        "system": "System (automatisch)",
+        "systemResolved": "System (automatisch) · {language}",
+        "pseudo": "Pseudo-Gebietsschema (Test)",
+        "machineTranslated": "Diese Übersetzung wurde maschinell erstellt und kann holprig klingen. Korrekturen sind auf GitHub willkommen."
+      },
+      "tray": {
+        "title": "Infobereich",
+        "description": "Beim Schließen dieses Fensters bleibt die App im Infobereich, mit Zustand, VectorXR-Schalter, Protokollebene und Debugexport. Aus: Beim Schließen des Fensters wird die App beendet. Nur auf diesem PC gespeichert.",
+        "helperNote": "Die App und das Infobereichssymbol sind ein Einstellungshelfer, nicht der OpenXR-Layer. VectorXR funktioniert in Ihren Spielen auch, wenn beide geschlossen sind, solange „VectorXR aktiviert“ eingeschaltet ist."
+      },
+      "inputDevices": {
+        "title": "Eingabegeräte",
+        "description": "Zur Verwendung im Spiel: sucht erneut nach einem während der Sitzung angeschlossenen Controller, den VectorXR nicht erkannt hat.",
+        "rescan": "Eingaben neu suchen",
+        "rescanning": "Erneute Suche…",
+        "noGame": "Es läuft kein Spiel mit VectorXR.",
+        "asked_one": "{count} laufendes Spiel wurde zur erneuten Suche aufgefordert.",
+        "asked_other": "{count} laufende Spiele wurden zur erneuten Suche aufgefordert.",
+        "rescanFailed": "Erneute Suche nach Eingaben fehlgeschlagen"
+      },
+      "trackSeenApps": {
+        "title": "Erkannte XR-Apps erfassen",
+        "description": "Merkt sich den Namen der ausführbaren Datei sowie den Zeitpunkt der ersten und letzten Erkennung der OpenXR-Apps, die Sie starten, damit Sie sie einfach im Anwendungsregister registrieren können. Alle Daten bleiben lokal auf diesem PC."
+      }
+    },
+    "logging": {
+      "heading": "Protokollierung",
+      "logLevel": "Protokollebene",
+      "logLevelHelp": "„Info“ schreibt normale Betriebsmeldungen und Fehler. „Debug“ fügt ausführliche Diagnosen hinzu, einschließlich begrenzter Turbo-Frame-Timing-Traces. Änderungen an der Protokollierung gelten sofort; starten Sie die VR-App mit aktiviertem Debug, um Laufzeit-Taktmessungen zu erhalten.",
+      "levelInfo": "Info",
+      "levelDebug": "Debug",
+      "retention": "Aufbewahrung",
+      "retentionHelp": "Anzahl der rotierten Protokolldateien, die aufbewahrt werden. Ältere Dateien werden entfernt, sobald diese Anzahl überschritten ist.",
+      "viewLogs": "Protokolle anzeigen",
+      "exportDebug": "Debugdaten exportieren",
+      "exportDebugHelp": "Speichert Protokolle, Einstellungen und Diagnosen als eine ZIP-Datei zum Teilen, wie auf der Startseite.",
+      "latestLog": "Neuestes Protokoll: {path}",
+      "latestLogPending": "Nach der ersten Sitzung verfügbar"
+    },
+    "sound": {
+      "heading": "Soundfeedback",
+      "description": "Gesamtlautstärke für die Aktivierungs-/Deaktivierungssignale, die Sie Belegungen zuweisen können.",
+      "test": "Testen",
+      "volume": "Lautstärke des Soundfeedbacks",
+      "previewFailed": "Sound konnte nicht abgespielt werden."
+    },
+    "configFiles": {
+      "heading": "Konfigurationsdateien",
+      "description": "Importieren Sie eine andere Einstellungsdatei, exportieren Sie die aktuellen Einstellungen, oder prüfen Sie, wo VectorXR seine lokale Konfiguration speichert.",
+      "import": "Konfiguration importieren",
+      "export": "Konfiguration exportieren",
+      "directory": "Konfigurationsverzeichnis",
+      "directoryPending": "Verfügbar, sobald die Konfiguration geladen ist",
+      "reset": {
+        "title": "Auf Standardwerte zurücksetzen",
+        "description": "Erstellt settings.json mit Standardwerten neu und löscht die lokalen Erkennungsdaten der OpenXR-Anwendungen.",
+        "button": "Auf Standard zurücksetzen"
+      }
+    }
+  },
+  "theme": {
+    "system": "System",
+    "light": "Hell",
+    "dark": "Dunkel"
+  },
+  "fileTypes": {
+    "jsonConfig": "JSON-Konfiguration",
+    "wavAudio": "WAV-Audio"
+  }
+}

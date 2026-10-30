@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import BindingEditor from './BindingEditor.vue'
+import { t } from '../i18n/index.ts'
 import { bindingsShareInput, defaultKeyboardBinding, type InputBinding } from '../lib/model'
 
 const props = defineProps<{
@@ -53,12 +54,12 @@ function addBinding() {
         </div>
       </div>
       <button class="button-accent shrink-0 rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click="addBinding">
-        Add Binding
+        {{ t('bindings.list.add') }}
       </button>
     </div>
 
     <div v-if="modelValue.length === 0" class="mt-4 rounded-[0.75rem] border border-dashed px-4 py-3 text-sm surface-panel-strong">
-      {{ noneText || 'No bindings assigned. This action will not run until a binding is added.' }}
+      {{ noneText || t('bindings.list.noneText') }}
     </div>
 
     <div v-else class="mt-4 space-y-3">
@@ -66,8 +67,8 @@ function addBinding() {
         v-for="(binding, index) in modelValue"
         :key="index"
         :model-value="binding"
-        :label="`Binding ${index + 1}`"
-        description="Choose a keyboard shortcut or detected device input."
+        :label="t('bindings.list.bindingNumber', { number: index + 1 })"
+        :description="t('bindings.list.bindingDescription')"
         removable
         :sound-mode="soundMode"
         :default-activate-sound="defaultActivateSound"

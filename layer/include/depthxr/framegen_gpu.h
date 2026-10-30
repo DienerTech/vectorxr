@@ -36,6 +36,13 @@ struct FrameGenViewSubmission {
 struct FrameGenExecuteResult {
     std::vector<bool> synthesized; // per view; false = the newest frame was written unchanged
     std::vector<bool> depth;       // per view; the newest frame's depth was used
+    // Per view (Direct3D 12, from FrameGenEngineMode::kAssist): the game's
+    // motion vectors were merged into the flow (its kEngineLabels written).
+    std::vector<bool> merged;
+    // Direct3D 12, FrameGenEngineMode::kLead (stage 6): the game's vectors led
+    // the frame on every view (FrameGenEngineLeads): its measured passes were
+    // predicated on its verdict, and the optical flow hardware left idle.
+    bool lead{false};
     // Execute failed only because a view's image was not captured when the
     // application released it (SetCopyAfterRelease): nothing was generated,
     // and the views are now set up so the next releases are captured.
@@ -69,6 +76,115 @@ struct FrameGenAnalysisTiming {
 struct FrameGenMemoryBudget {
     std::uint64_t usage_bytes{0};
     std::uint64_t budget_bytes{0};
+};
+
+// Engine motion vectors (FrameGenGpu::CaptureMotion): one view's motion
+// vector images to read for a frame.
+struct FrameGenMotionJob {
+    std::size_t view{0};
+    // The swapchain and region the game named (XR_FB_space_warp,
+    // XR_EXT_frame_synthesis); image_index is the image the frame's vectors
+    // are thought to be in (FrameGenEngineImageTracker), which a dump copies
+    // without `census_all`'s.
+    FrameGenImage vectors;
+    std::uint32_t image_count{0}; // 0: the swapchain's own, up to kFrameGenEngineImages
+    std::optional<std::uint32_t> released; // a game following the specification released this one
+    // The images (bits) the game acquired and has not released yet: in a
+    // state of its own until their release, so neither read nor moved out of
+    // it (their census says they were not read). None for a game that never
+    // acquires its motion vector images (MSFS 2024).
+    std::uint32_t acquired{0};
+    std::uint32_t color_index{0};          // the images the frame's color and depth swapchains released
+    std::uint32_t depth_index{0};
+    std::uint64_t frame{0};                // the layer's count of frames with a projection layer
+    FrameGenMotionEncoding encoding;
+    bool informative{false};
+    // Stage 0: every image is fingerprinted, and the sparse samples taken.
+    // Without census_all only vectors.image_index is.
+    bool census_all{false};
+    bool samples{false};
+    // Taken when the frame's depth was released, before its xrEndFrame:
+    // whether the images are written by then (census only).
+    bool early{false};
+    // Stage 2: vectors.image_index is also resampled to the view's
+    // half-resolution grid (kEngineCapture), paired with the view's color
+    // capture: its latest, or with `pair_next` (the game released its vectors
+    // before its color this frame) the next one.
+    bool capture{false};
+    bool pair_next{false};
+};
+
+// The census's grids: the hash grid, 64 x 64 texels at fixed places of the
+// whole image, and the statistics grid, 32 x 32 texels inside the region.
+inline constexpr std::uint32_t kFrameGenEngineHashTexels = 64 * 64;
+inline constexpr std::uint32_t kFrameGenEngineStatsTexels = 32 * 32;
+
+// One image's census (kEngineCensus, see FG_PASS_ENGINE_CENSUS).
+struct FrameGenEngineImageCensus {
+    std::uint32_t xor_hash{0};
+    std::uint32_t sum_hash{0};
+    std::uint32_t zeros{0};     // exact zero vectors on the hash grid (of kFrameGenEngineHashTexels)
+    std::uint32_t non_finite{0}; // ... not finite
+    std::uint32_t large{0};      // longer than 4 on the statistics grid (of kFrameGenEngineStatsTexels)
+    float sum_abs{0.0f};
+    float max_abs{0.0f};
+    std::uint32_t finite{0};     // finite on the statistics grid
+    std::array<float, 4> sums{}; // r, g, b, a summed over those
+    std::uint32_t tag{0};
+    std::uint32_t image{0};
+    std::uint32_t rect_width{0};
+    std::uint32_t rect_height{0};
+    std::uint64_t Hash() const { return (static_cast<std::uint64_t>(xor_hash) << 32) | sum_hash; }
+};
+
+// What a job's census found, once read back (a few frames later).
+struct FrameGenEngineCensus {
+    std::uint64_t sequence{0}; // in the order read, from 1
+    std::uint64_t frame{0};
+    std::size_t view{0};
+    bool early{false};
+    std::uint32_t images{0};
+    std::uint32_t censused{~0u}; // the images read (bits): `image` holds only theirs
+    std::uint32_t color_index{0};
+    std::uint32_t depth_index{0};
+    std::uint64_t handle{0}; // the motion vector swapchain
+    std::array<std::int32_t, 4> rect{};
+    std::array<FrameGenEngineImageCensus, kFrameGenEngineImages> image{};
+    // 16x16 samples of 4 texels: the three images' raw texels, then the
+    // linear depth, the color image index and the half-resolution texel.
+    std::vector<std::array<float, 4>> samples;
+    double gpu_ms{-1.0}; // the census submission's time on the GPU (stage 2: its capture's too)
+};
+
+// The backend's engine motion state: counts, and the censuses read back
+// lately (the newest kept few; callers take those past the last sequence
+// they saw).
+struct FrameGenEngineStatus {
+    std::uint64_t submitted{0};
+    std::uint64_t busy{0};        // calls skipped: every motion slot still on the GPU (never waited for)
+    std::uint64_t refused{0};     // images that cannot be read (multisampled, integer, not shader-readable)
+    std::uint64_t failed{0};
+    std::uint64_t dumped{0};      // frames whose images were copied for a research capture
+    // Stage 2: views' vectors resampled (kEngineCapture), in how many
+    // dispatches (one for eyes of one size); views whose capture had the
+    // game's queue wait for the analysis that last read the field it writes
+    // (the CPU saw that analysis unfinished); views left out (not set up yet,
+    // or no color capture to pair with); and views analysed with their own
+    // frame's field (what a later stage reads).
+    std::uint64_t captured{0};
+    std::uint64_t dispatches{0};
+    std::uint64_t waits{0};
+    std::uint64_t unready{0};
+    std::uint64_t paired{0};
+    // Stage 3: frames whose evidence was taken (every view's), and what the
+    // validator makes of it.
+    std::uint64_t evidence{0};
+    FrameGenEngineValidation validation;
+    bool stopped{false};          // the device was removed: nothing more is read
+    // Each motion vector image's description (resource, heap), once each,
+    // and debug-layer messages about their states (VECTORXR_FRAMEGEN_ENGINE_MV_DEBUG).
+    std::vector<std::string> notes;
+    std::vector<FrameGenEngineCensus> census;
 };
 
 class FrameGenGpu {
@@ -110,9 +226,48 @@ class FrameGenGpu {
     // when the backend has no depth path).
     virtual XrSwapchainUsageFlags RequiredDepthUsage() const { return 0; }
     virtual bool SupportsDepth() const { return false; }
+    // Engine motion vectors (Direct3D 12): reads each job's motion vector
+    // images on the game's queue, as they are at the call (a game may never
+    // release them; those it holds acquired are left alone), and keeps what
+    // the census finds for EngineStatus a few frames later. `color`
+    // describes each view's color image, by view.
+    // Jobs with `capture` (stage 2) also resample their image into the
+    // view's raw field (kEngineRaw), once Execute set the view up with
+    // FrameGenTuning::engine_mode from kCapture; `resampled`, when given,
+    // says per job whether it was (a view not set up, or with no color
+    // capture to pair with, is left out while its census is still taken).
+    // From kObserve, Execute takes the evidence on the fields
+    // (FrameGenViewRequest::engine_motion) and judges their convention
+    // (FrameGenEngineValidator, in EngineStatus); a validator that disabled
+    // them leaves every view out.
+    // Never waits: with every motion slot still on the GPU the call is
+    // skipped (false, an empty error).
+    virtual bool SupportsEngineMotion() const { return false; }
+    virtual bool CaptureMotion(const std::vector<FrameGenMotionJob>& /*jobs*/,
+                               const std::vector<FrameGenViewRequest>& /*color*/, std::string& error,
+                               std::vector<bool>* resampled = nullptr) {
+        error.clear();
+        if (resampled) resampled->clear();
+        return false;
+    }
+    // With the censuses read back since sequence `after` (FrameGenEngineCensus::sequence).
+    virtual FrameGenEngineStatus EngineStatus(std::uint64_t /*after*/ = 0) const { return {}; }
+    // Stage 3: the convention the game is expected to use
+    // (FrameGenEnginePriorFor), for the validator (one batch adopts it).
+    virtual void SetEnginePrior(const FrameGenEngineConvention& /*convention*/) {}
+    // Research: the next CaptureMotion (not an early one) also copies the
+    // images into `directory` (which must exist), every image or only each
+    // job's vectors.image_index; files are written after the GPU, by a
+    // thread of their own.
+    virtual bool DumpMotion(const std::string& /*directory*/, bool /*all_images*/) { return false; }
     // How the game's depth is being read after checking it against the
     // other eye, with the evidence; counts decisions so callers log each once.
     virtual FrameGenDepthStatus DepthStatus() const { return {}; }
+    // Stage 4: the world's motion from the application's movement
+    // (VECTORXR_FRAMEGEN_ENGINE_DELTA; mode off where the backend has none):
+    // its calibration against the world fit, with decisions counted so
+    // callers log each once.
+    virtual FrameGenWorldDeltaStatus WorldDeltaStatus() const { return {}; }
     // Benchmarks only: while on, Execute stamps the GPU time after every
     // pass and waits for the GPU, and PassMilliseconds() reports the last
     // Execute's time per pass (kFrameGenPassCount entries, then source
@@ -127,6 +282,13 @@ class FrameGenGpu {
     // Whether generated frames are drawn straight into the output images
     // (no intermediate image per view).
     virtual bool DrawsOutputs() const { return false; }
+    // Tests: the draws of generated frames into the output images recorded
+    // so far (DrawsOutputs; frames drawn together count once).
+    virtual std::uint64_t DrawsForTest() const { return 0; }
+    // Tests: the shading-rate images (variable-rate shading of those draws)
+    // recorded so far; a real frame's frames written just in time share one
+    // per view.
+    virtual std::uint64_t ShadingRatesForTest() const { return 0; }
     // FrameGenTuning::hardware_flow: empty until asked for, then "active",
     // or why the hardware cannot be used (block matching measures motion).
     virtual std::string HardwareFlowStatus() const { return "this graphics API has no optical flow hardware support"; }
@@ -139,6 +301,15 @@ class FrameGenGpu {
     // Several views match on one optical flow atlas (the default) or on a
     // session each (tests, research; VECTORXR_FRAMEGEN_HARDWARE_ATLAS=0).
     virtual void SetHardwareAtlas(bool /*on*/) {}
+    // Tests: the last analysis used the optional multi-view hardware atlas,
+    // rather than the supported per-view fallback.
+    virtual bool UsesHardwareAtlasForTest() const { return false; }
+    // Tests: the engine motion vectors' convention locked from now on
+    // (FrameGenEngineValidator::LockForTest). Direct3D 12 only.
+    virtual void LockEngineForTest(const FrameGenEngineConvention& /*convention*/) {}
+    // Tests and replays: the depth's reading, swap and scale locked from now
+    // on (FrameGenDepthValidator::LockForTest). Direct3D 12 only.
+    virtual void LockDepthForTest(FrameGenDepthReading /*reading*/, bool /*swapped*/, float /*scale*/) {}
     // Tests and research: the flow the last Execute measured for `view`
     // (the filtered field synthesis used) in full-resolution pixels, x and
     // y per cell row by row; `cells` receives the field's size. Waits for the
@@ -189,8 +360,10 @@ class FrameGenGpu {
     // the OS budget for it; absent when the backend cannot query it.
     virtual std::optional<FrameGenMemoryBudget> MemoryBudget() const { return std::nullopt; }
     // Video memory of the backend's own images for all views (history, flow,
-    // depth, trust, eye-shift maps), as allocated; 0 when unknown. Output
-    // images belong to the runtime and are not included.
+    // depth, trust, eye-shift maps, active and cached optical-flow atlases),
+    // as allocated; 0 when unknown. Output images belong to the runtime and
+    // are not included. Driver-retained resources detached during teardown
+    // are reflected in MemoryBudget's process usage, not this live-image sum.
     virtual std::uint64_t WorkingMemoryBytes() const { return 0; }
     // The runtime may then be called from a presenter thread while the
     // application renders: the API's queue is free-threaded (Direct3D 12), so
@@ -306,9 +479,14 @@ extern const std::array<Blob, kFrameGenPassCount> kDxbc;
 extern const std::array<Blob, kFrameGenPassCount> kSpirv;
 // Synthesis as a draw (Direct3D 12): the vertex shader, the pixel shader
 // writing 1 to kFrameGenMaxGenerated generated frames, then the quad views
-// compose pixel shader (empty while the build has none).
-inline constexpr std::size_t kDrawShaderCount = 2 + kFrameGenMaxGenerated;
-inline constexpr std::size_t kComposeDrawShader = kDrawShaderCount - 1;
+// compose pixel shader (empty while the build has none), then the pixel
+// shaders again with the Interpolate blend's sharpening (research,
+// kFrameGenSharpenShift): the one writing n frames at kComposeDrawShader + n;
+// then with the prop hold (research, kFrameGenFlagPropHold) at
+// kComposeDrawShader + kFrameGenMaxGenerated + n, and with both at
+// kComposeDrawShader + 2 * kFrameGenMaxGenerated + n.
+inline constexpr std::size_t kDrawShaderCount = 2 + 4 * kFrameGenMaxGenerated;
+inline constexpr std::size_t kComposeDrawShader = 1 + kFrameGenMaxGenerated;
 extern const std::array<Blob, kDrawShaderCount> kDxbcDraw;
 } // namespace framegen_shaders
 

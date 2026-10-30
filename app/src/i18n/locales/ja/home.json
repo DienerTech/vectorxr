@@ -1,0 +1,53 @@
+{
+  "supportLinkError": "ブラウザーを開けませんでした。VectorXR を支援するには ko-fi.com/dienertech にアクセスしてください。",
+  "layerStatus": {
+    "checking": "確認中",
+    "notFound": "見つかりません",
+    "enabled": "レイヤー有効",
+    "disabled": "レイヤー無効"
+  },
+  "layerDescription": {
+    "checking": "登録済みの VectorXR API レイヤーを確認しています。",
+    "notFound": "VectorXR の API レイヤーの登録が見つかりませんでした。レイヤーが登録されて有効になるまで、拡張機能は適用されません。",
+    "enabled": "VectorXR API レイヤーが有効なため、実行時に拡張機能を適用できます。",
+    "disabled": "VectorXR API レイヤーは無効です。スイートや各拡張機能の有効状態にかかわらず、拡張機能は一切適用されません。"
+  },
+  "runtime": {
+    "enabled": "ランタイム有効",
+    "disabled": "ランタイム無効",
+    "title": "スイート全体のランタイム スイッチの状態。"
+  },
+  "systemHealth": {
+    "eyebrow": "システムの状態",
+    "suiteOff": "ランタイム効果はスイートのスイッチで無効にされています。トラブルシューティング用にレイヤーの状態は引き続き確認できます。",
+    "checking": "VectorXR のランタイムと OpenXR レイヤーの準備状況を確認しています。",
+    "layerNotFound": "VectorXR は有効ですが、OpenXR API レイヤーの登録が見つかりませんでした。",
+    "layerDisabled": "VectorXR は有効ですが、OpenXR API レイヤーが無効です。",
+    "ready": "VectorXR のランタイムと OpenXR レイヤーの状態は、今後の OpenXR アプリの起動に向けて準備ができているようです。",
+    "viewHealth": "状態を表示",
+    "exportDebug": "デバッグ情報のエクスポート"
+  },
+  "enhancements": {
+    "eyebrow": "拡張機能",
+    "title": "アクティブな機能の概要",
+    "activeCount": "{total} 件中 {active} 件がアクティブ",
+    "columns": {
+      "enhancement": "拡張機能",
+      "defaultProfile": "既定のプロファイル",
+      "customProfiles": "カスタム プロファイル",
+      "status": "状態"
+    },
+    "open": "{module} の設定を開く",
+    "customEnabled": "{enabled} / {total} 有効",
+    "hint": "拡張機能を選択すると、その設定が開きます。"
+  },
+  "community": {
+    "eyebrow": "コミュニティとお知らせ",
+    "title": "VectorXR の発展にご協力ください",
+    "discordTitle": "DienerTech Discord",
+    "discordBody": "セットアップを共有し、結果を比べ、VectorXR の最新のお知らせをチェックしましょう。",
+    "supportTitle": "開発を支援",
+    "supportBody": "Ko-fi で VectorXR に寄付してプロジェクトを支援してください。すべての支援が VectorXR の未来を支える資金になります。",
+    "supportButton": "Ko-fi で VectorXR を支援 ↗"
+  }
+}

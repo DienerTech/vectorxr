@@ -51,6 +51,9 @@ struct RuntimeStatusDocument {
     // FrameGenDepthState relay name ("in-use", "not-sent", ...), empty
     // before generated frames.
     std::string framegen_depth;
+    std::string framegen_flow;
+    std::string framegen_flow_mode;
+    std::string framegen_flow_reason;
     // Present while the session runs with Frame Generation on.
     std::optional<RuntimeFrameGenRates> framegen_rates;
     std::vector<QuadViewDimensions> quadviews_dimensions;

@@ -1,0 +1,222 @@
+{
+  "title": "Głębia",
+  "experimental": "Eksperymentalne",
+  "intro": "Kształtuj skalę obuoczną i rozmieszczenie głębi jako jeden system, a następnie używaj profili dla poszczególnych aplikacji tam, gdzie tytuł wymaga własnego dostrojenia. Zacznij od wartości neutralnych, zmieniaj jedno ustawienie naraz i używaj przypisania w czasie działania do natychmiastowych porównań A/B.",
+  "tuningGuide": {
+    "title": "Przewodnik dostrajania",
+    "summary": "Ustaw skalę, umieść głębię, a następnie porównaj",
+    "ariaLabel": "Przewodnik dostrajania głębi",
+    "scale": {
+      "step": "Krok 1: Ustaw skalę",
+      "name": "Głębia stereo",
+      "body": "W lewo zwiększa pozorną skalę świata i może przywrócić naturalne proporcje, gdy kokpit wydaje się zminiaturyzowany. W prawo wzmacnia kształt stereo i poczucie obecności, gdy tytuł wygląda zbyt płasko albo świat gry wydaje się zbyt duży. Najbardziej zmienia się bliska geometria."
+    },
+    "place": {
+      "step": "Krok 2: Umieść głębię",
+      "name": "Płaszczyzna zbieżności",
+      "body": "Pozostaw tę wartość na zerze podczas oceny skali, a następnie umieść płaszczyznę roboczą małymi krokami. W lewo daje ciasnemu kokpitowi więcej przestrzeni; w prawo przybliża odległy panel, celownik lub obszar interakcji."
+    },
+    "compare": {
+      "step": "Krok 3: Porównaj",
+      "name": "Dostrajaj w parze",
+      "body": "Traktuj każdy profil gry jako osobną kalibrację wizualną — inna geometria kamery może wymagać zupełnie innych par wartości, a nie drobnych odmian. Porównuj A/B z natywną geometrią i przerwij przy pierwszych oznakach zmęczenia oczu lub trudności z fuzją obrazu."
+    }
+  },
+  "ipdNote": {
+    "lead": "Ustawienia IPD w grze mogą zastępować Głębię stereo.",
+    "body": "{lead} Najpierw wyłącz wszelkie wymuszanie IPD (Force IPD), wirtualne IPD, separację stereo lub zastępowanie skali świata. W DCS odznacz {setting} w Options > VR.",
+    "forceIpdDistance": "Force IPD Distance"
+  },
+  "bindingsCard": {
+    "eyebrow": "Dostrajanie i porównanie",
+    "heading": "Przypisania w grze",
+    "description": "Skonfiguruj w jednym miejscu pełne przełączniki A/B dla Głębi i Depth Lock.",
+    "assigned_one": "Przypisano {count} z {total}",
+    "assigned_few": "Przypisano {count} z {total}",
+    "assigned_many": "Przypisano {count} z {total}",
+    "assigned_other": "Przypisano {count} z {total}",
+    "duplicateInputs_one": "{count} zduplikowane wejście",
+    "duplicateInputs_few": "{count} zduplikowane wejścia",
+    "duplicateInputs_many": "{count} zduplikowanych wejść",
+    "duplicateInputs_other": "{count} zduplikowanego wejścia"
+  },
+  "defaultProfile": {
+    "heading": "Profil domyślny",
+    "appliesTo": "Dotyczy aplikacji bez włączonego profilu niestandardowego",
+    "toggleOn": "Profil domyślny wł.",
+    "toggleOff": "Profil domyślny wył.",
+    "offNote": "Wyłączony, chyba że włączy go włączony profil niestandardowy. Poniższe profile niestandardowe nadal obowiązują dla swoich aplikacji."
+  },
+  "customProfiles": {
+    "heading": "Profile niestandardowe",
+    "description": "Zastąp ustawienia Głębi dla poszczególnych aplikacji. Wygrywa pierwszy włączony pasujący profil.",
+    "add": "Dodaj profil",
+    "empty": "Brak profili niestandardowych. Dodaj profil, aby zastąpić wartości głębi dla określonej aplikacji.",
+    "duplicateApplication": "{application} jest już objęta Profilem {profile}. Wygrywa pierwszy aktywny profil."
+  },
+  "troubleshooting": {
+    "title": "Rozwiązywanie problemów z głębią",
+    "heading": "Gdy Głębia działa nieoczekiwanie",
+    "override": "Gry z ustawieniem Force IPD, wirtualnego IPD, separacji stereo lub skali świata mogą zastępować rozstaw oczu zgłaszany przez OpenXR. Takie zastąpienie ma pierwszeństwo przed Głębią stereo VectorXR.",
+    "dcs": {
+      "label": "DCS:",
+      "body": "{label} odznacz {setting} w Options > VR, a następnie całkowicie uruchom ponownie DCS. Wymuszona wartość ustala własną separację wirtualnej kamery DCS i może sprawiać, że Głębia stereo pozornie nic nie robi."
+    },
+    "expected": {
+      "label": "Oczekiwany wynik:",
+      "body": "{label} Głębia stereo zmienia skalę obuoczną najbardziej zauważalnie na bliskiej geometrii, więc kokpit może wyglądać na większy lub mniejszy, podczas gdy odległy teren i horyzont wydają się prawie niezmienione. Taka zależna od odległości reakcja jest normalna."
+    },
+    "convergence": {
+      "label": "Zbieżność działa subtelniej:",
+      "body": "{label} przesuwa płaszczyznę zerowej paralaksy zamiast skalować scenę. Porównaj pobliską krawędź kokpitu z odległą scenerią, przesuwając ją małymi krokami. Jeśli Głębia stereo nadal nie działa po wyłączeniu zastąpień na poziomie gry, włącz rejestrowanie Debug i wyeksportuj dzienniki sesji."
+    },
+    "depthLock": {
+      "label": "Depth Lock zachowuje dostrojony obraz przy przesyłaniu:",
+      "body": "{label} gra renderuje ze zmienioną geometrią stereo, a następnie środowisko uruchomieniowe otrzymuje natywne pozy oczu i FOV gogli, więc nie może znormalizować tej pary. Porównaj z włączoną i wyłączoną opcją przy identycznych wartościach i zmniejsz intensywność lub ją wyłącz, jeśli komfort się pogorszy."
+    }
+  },
+  "bindingsPage": {
+    "breadcrumb": "Ścieżka nawigacji",
+    "current": "Przypisania w grze",
+    "title": "Głębia — Przypisania w grze",
+    "escHint": "Naciśnij Esc lub Gotowe, aby wrócić do Głębi.",
+    "closeLabel": "Zamknij przypisania i wróć do Głębi",
+    "compareGently": {
+      "heading": "Porównuj ostrożnie",
+      "body": "Szybkie zmiany A/B mogą chwilowo utrudniać fuzję obrazu, nawet gdy oba ustawienia są osobno komfortowe. Rób przerwy między porównaniami i zmniejsz silniejsze ustawienie, jeśli obraz trudno się stabilizuje."
+    },
+    "depthToggle": {
+      "label": "Przełącznik A/B Głębi",
+      "description": "Włączaj lub wyłączaj całe ulepszenie Głębia w trakcie gry, zachowując dostrojone wartości do bezpośredniego porównania. Dodaj przypisanie dla każdego urządzenia, którego używasz podczas lotu; zadziała dowolne z nich.",
+      "noneText": "Brak przypisania. Głębia podąża za aktywnym profilem bez przełącznika A/B w grze."
+    },
+    "lockToggle": {
+      "label": "Przełącznik A/B Depth Lock",
+      "description": "Przełącza tylko Depth Lock, podczas gdy Głębia stereo i Zbieżność pozostają aktywne. Ułatwia to wyczucie, co blokada przy przesyłaniu wnosi do dostrojonej pary. Dodaj przypisanie dla każdego urządzenia, którego używasz podczas lotu; zadziała dowolne z nich.",
+      "noneText": "Brak przypisania. Depth Lock podąża za aktywnym profilem."
+    }
+  },
+  "depthLock": {
+    "name": "Depth Lock",
+    "description": "Utrwala dostrojoną geometrię stereo w renderowanym obrazie, a następnie przywraca natywne pozy oczu i FOV gogli do przesłania, aby środowisko uruchomieniowe nie mogło znormalizować efektu. Przetestuj dla każdej gry i zmniejsz intensywność, jeśli pojawi się dyskomfort lub nudności."
+  },
+  "stereoDepth": {
+    "title": "Głębia stereo / Skala świata",
+    "subtitle": "Zmienia wirtualny rozstaw oczu, nie zmieniając fizycznego IPD gogli. Przesuń w prawo, aby uzyskać silniejsze stereo w bliskim polu i mniejszy świat; w lewo, aby świat wydawał się większy i bardziej płaski. Zacznij od około ±5–15%.",
+    "left": "- Większy świat",
+    "center": "0 Natywna skala",
+    "right": "+ Efekt stereo 3D",
+    "extendedRange": "Rozszerzony zakres (±100%)",
+    "extendedRangeHint": "Używaj tylko wtedy, gdy zwykłe dostrajanie ±25% nie wystarcza.",
+    "badgeNative": "Natywne IPD",
+    "badge": "Stereo {value}%"
+  },
+  "convergence": {
+    "title": "Zbieżność / Płaszczyzna głębi",
+    "subtitle": "Umieszcza płaszczyznę zerowej paralaksy bez zmiany względnej głębi. Pozostaw 0 podczas dostrajania Głębi stereo, a następnie używaj małych kroków: wartość ujemna oddala płaszczyznę; dodatnia ją przybliża.",
+    "left": "- Dalsza płaszczyzna",
+    "center": "0 Domyślna aplikacji",
+    "right": "+ Bliższa płaszczyzna",
+    "extendedRange": "Rozszerzony zakres (±25)",
+    "extendedRangeHint": "Używaj tylko wtedy, gdy zwykłe dostrajanie ±5 nie wystarcza.",
+    "badgeDefault": "Płaszczyzna: domyślna aplikacji",
+    "badgeNearer": "Płaszczyzna: bliżej +{value}",
+    "badgeFarther": "Płaszczyzna: dalej {value}"
+  },
+  "pairingMap": {
+    "heading": "Mapa par głębi",
+    "hint": "Przeciągnij znacznik, aby badać oba ustawienia jednocześnie. Do precyzyjnego dostrajania używaj suwaków.",
+    "regionLabel": "Łączny efekt Głębi",
+    "values": "Głębia {depth} · Zbieżn. {convergence}",
+    "lockOn": "Depth Lock wł.",
+    "lockOff": "Depth Lock wył.",
+    "convergenceNearer": "Zbieżność: bliżej (+{limit})",
+    "convergenceFarther": "Zbieżność: dalej (−{limit})",
+    "depthLarger": "Głębia: większa skala (−{limit}%)",
+    "depthStronger": "Głębia: silniejsze stereo (+{limit}%)",
+    "mapLabel": "Mapa par głębi. Przeciągnij, aby ustawić Głębię stereo w poziomie i Zbieżność w pionie. Klawisze strzałek pozwalają na precyzyjne zmiany; przytrzymaj Shift, aby zwiększyć krok.",
+    "quadrants": {
+      "largerNear": {
+        "label": "Większa skala · Blisko",
+        "axes": "Głębia − · Zbieżność +"
+      },
+      "strongerNear": {
+        "label": "Silniejsze stereo · Blisko",
+        "axes": "Głębia + · Zbieżność +"
+      },
+      "largerFar": {
+        "label": "Większa skala · Daleko",
+        "axes": "Głębia − · Zbieżność −"
+      },
+      "strongerFar": {
+        "label": "Silniejsze stereo · Daleko",
+        "axes": "Głębia + · Zbieżność −"
+      }
+    }
+  },
+  "netEffect": {
+    "heading": "Efekt końcowy",
+    "goodFitLabel": "Dobre dopasowanie:",
+    "goodFit": "{label} {text}",
+    "watchForLabel": "Uwaga na:",
+    "watchFor": "{label} {text}",
+    "lockOff": "Depth Lock jest wyłączony, więc środowisko uruchomieniowe może przy przesyłaniu zinterpretować tę kombinację na nowo i częściowo ją znormalizować.",
+    "lockOn": "Depth Lock zachowuje renderowaną parę, gdy natywna geometria zostaje przywrócona do przesłania.",
+    "cases": {
+      "native": {
+        "title": "Natywna geometria stereo",
+        "description": "Żadne z ustawień nie przesuwa skali stereo ani płaszczyzny głębi aplikacji.",
+        "useCase": "Użyj tego, aby poznać skalę zamierzoną przez twórców tytułu, oraz jako punktu odniesienia A/B dla każdego profilu.",
+        "caution": "Jeśli natywne proporcje już wydają się przekonujące, żadna korekta nie jest potrzebna."
+      },
+      "compactNear": {
+        "title": "Kompaktowa skala z bezpośrednią obecnością",
+        "description": "Silniejsza separacja stereo sprawia, że świat wydaje się mniejszy i bardziej trójwymiarowy, a bliższa płaszczyzna przybliża obszar roboczy.",
+        "useCase": "Przydatne, gdy kokpit wydaje się zbyt duży lub odległy, a panele, sterowanie i bliska geometria mają być na wyciągnięcie ręki.",
+        "caution": "Oba ustawienia zwiększają obciążenie w bliskim polu, więc w tej ćwiartce poruszaj się małymi krokami."
+      },
+      "detailedFar": {
+        "title": "Szczegółowe stereo z komfortowym rozmieszczeniem",
+        "description": "Silniejsza separacja stereo dodaje kształtu i obecności, a dalsza płaszczyzna daje temu bardziej kompaktowemu obrazowi więcej przestrzeni.",
+        "useCase": "Przydatne, gdy natywne proporcje wydają się zbyt duże, ale sama dodatnia Głębia stereo sprawia, że kokpit wydaje się ciasny.",
+        "caution": "Najpierw dostrój Głębię stereo, a następnie przesuń płaszczyznę tylko na tyle, by silniejszy obraz naturalnie się ustabilizował."
+      },
+      "largerNear": {
+        "title": "Większa skala z bliską płaszczyzną roboczą",
+        "description": "Zmniejszona separacja stereo powiększa pozorną skalę świata, a bliższa płaszczyzna utrzymuje panel i sterowanie w zasięgu wzroku.",
+        "useCase": "Przydatne, gdy kokpit wygląda jak zabawka, ale jego wskaźniki lub obszar interakcji nadal mają być blisko i czytelne.",
+        "caution": "Mocno dodatnia wartość Zbieżności może być męcząca nawet przy zmniejszonej Głębi stereo."
+      },
+      "lifeSizedFar": {
+        "title": "Naturalna skala ze swobodnym rozmieszczeniem",
+        "description": "Zmniejszona separacja stereo zwiększa pozorny rozmiar, a dalsza płaszczyzna pozwala kokpitowi otaczać Cię zamiast napierać na twarz.",
+        "useCase": "Przydatne w symulatorach samolotów i pojazdów, których natywna kamera wydaje się zminiaturyzowana lub zbyt bliska; może lepiej odpowiadać zapamiętanym rzeczywistym proporcjom.",
+        "caution": "Łagodniejsze stereo jest zamierzone — zatrzymaj się, gdy skala wydaje się naturalna, zamiast dążyć do najsilniejszego możliwego efektu 3D."
+      },
+      "strongerStereo": {
+        "title": "Silniejsza względna głębia stereo",
+        "description": "Bliska geometria zyskuje separację i kształt, co zwiększa obecność, ale sprawia, że świat wydaje się nieco mniejszy.",
+        "useCase": "Przydatne, gdy tytuł wygląda płasko albo świat gry wydaje się zbyt duży, ale istniejące rozmieszczenie płaszczyzny głębi jest już komfortowe.",
+        "caution": "Jeśli scena zaczyna napierać, połącz to z niewielką ujemną korektą Zbieżności."
+      },
+      "largerScale": {
+        "title": "Większa, łagodniejsza skala świata",
+        "description": "Zmniejszona separacja stereo łagodzi intensywność bliskiego pola i zwiększa pozorny rozmiar świata.",
+        "useCase": "Przydatne, gdy natywna geometria wydaje się zminiaturyzowana, ciasna lub bardziej intensywna stereoskopowo niż prawdziwy pojazd.",
+        "caution": "Zmniejszaj tylko na tyle, by przywrócić wiarygodne proporcje i zachować użyteczne wskazówki kształtu."
+      },
+      "planeNearer": {
+        "title": "Płaszczyzna robocza przybliżona",
+        "description": "Pole dysparycji sceny przesuwa się w Twoją stronę bez zmiany względnego gradientu głębi ani ogólnej skali.",
+        "useCase": "Przydatne, gdy skala wygląda poprawnie, ale panel, celownik lub obszar interakcji wydaje się wizualnie zbyt daleko.",
+        "caution": "Wartości dodatnie mogą powodować uczucie zeza, zwłaszcza w połączeniu z dodatnią Głębią stereo."
+      },
+      "planeFarther": {
+        "title": "Płaszczyzna robocza oddalona",
+        "description": "Pole dysparycji sceny oddala się bez zmiany względnego gradientu głębi ani ogólnej skali.",
+        "useCase": "Przydatne, gdy skala wygląda poprawnie, ale kokpit lub bliska geometria wydaje się przyciśnięta zbyt blisko twarzy.",
+        "caution": "Przesuwaj tylko na tyle, by rozluźnić rozmieszczenie, zachowując łatwą fuzję sceny."
+      }
+    }
+  }
+}

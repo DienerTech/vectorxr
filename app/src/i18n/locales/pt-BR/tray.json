@@ -1,0 +1,14 @@
+{
+  "health": "Integridade: {label}",
+  "healthUnavailable": "Integridade: configurações não carregadas",
+  "logLevel": "Nível de log: {level}",
+  "logLevelUnavailable": "Nível de log",
+  "info": "Info",
+  "debug": "Debug",
+  "tooltip": "VectorXR: {label}",
+  "tooltipDisabled": "VectorXR: desativado",
+  "enabled": "VectorXR ativado",
+  "exportDebug": "Exportar depuração...",
+  "open": "Abrir o VectorXR",
+  "quit": "Sair do VectorXR"
+}

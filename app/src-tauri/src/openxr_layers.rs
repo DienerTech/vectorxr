@@ -8,6 +8,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
+use crate::user_error::user_error;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(windows)]
@@ -286,7 +287,7 @@ pub fn set_openxr_layer_enabled(
         .iter()
         .any(|value| value.name.eq_ignore_ascii_case(&manifest_path))
     {
-        return Err("Layer manifest is no longer registered in that OpenXR slice".into());
+        return Err(layer_not_registered());
     }
 
     if enabled {
@@ -294,9 +295,13 @@ pub fn set_openxr_layer_enabled(
         if let Some((other_slice, other)) =
             conflicting_vector_xr_registration(&snapshot.slices, &slice, &manifest_path)
         {
-            return Err(format!(
-                "Another VectorXR registration is already enabled ({}: {}). OpenXR apps crash when two copies of VectorXR load, so disable that one first.",
-                other_slice.label, other.manifest_path
+            return Err(user_error(
+                "layerConflict",
+                &[("slice", other_slice.id.clone()), ("path", other.manifest_path.clone())],
+                format!(
+                    "Another VectorXR registration is already enabled ({}: {}). OpenXR apps crash when two copies of VectorXR load, so disable that one first.",
+                    other_slice.label, other.manifest_path
+                ),
             ));
         }
     }
@@ -350,7 +355,7 @@ pub fn move_openxr_layer(
         .iter()
         .any(|value| value.name.eq_ignore_ascii_case(&manifest_path))
     {
-        return Err("Layer manifest is no longer registered in that OpenXR slice".into());
+        return Err(layer_not_registered());
     }
 
     move_registry_value(definition, &manifest_path, direction)?;
@@ -371,7 +376,7 @@ fn plan_registry_move(
         .iter()
         .position(|value| value.name.eq_ignore_ascii_case(manifest_path))
     else {
-        return Err("Layer manifest is no longer registered in that OpenXR slice".into());
+        return Err(layer_not_registered());
     };
     let target = match direction {
         MoveDirection::Up if index > 0 => index - 1,
@@ -510,7 +515,7 @@ pub fn delete_openxr_layer(
         .iter()
         .any(|value| value.name.eq_ignore_ascii_case(&manifest_path))
     {
-        return Err("Layer manifest is no longer registered in that OpenXR slice".into());
+        return Err(layer_not_registered());
     }
 
     delete_registry_value(definition, &manifest_path)?;
@@ -783,7 +788,11 @@ fn run_powershell(script: &str) -> Result<String, String> {
     } else {
         let error = String::from_utf8_lossy(&output.stderr).trim().to_string();
         if error.to_ascii_lowercase().contains("access") {
-            Err("This OpenXR layer change requires elevation. Restart VectorXR as administrator, then try again.".into())
+            Err(user_error(
+                "elevationRequired",
+                &[],
+                "This OpenXR layer change requires elevation. Restart VectorXR as administrator, then try again.".into(),
+            ))
         } else if error.is_empty() {
             Err("OpenXR registry operation failed".into())
         } else {
@@ -895,7 +904,19 @@ fn accept_elevated_helper(
         }
     }
 
-    Err("OpenXR layer change was canceled at the elevation prompt or the elevated helper did not start.".into())
+    Err(user_error(
+        "elevationCanceled",
+        &[],
+        "OpenXR layer change was canceled at the elevation prompt or the elevated helper did not start.".into(),
+    ))
+}
+
+fn layer_not_registered() -> String {
+    user_error(
+        "layerNotRegistered",
+        &[],
+        "Layer manifest is no longer registered in that OpenXR slice".into(),
+    )
 }
 
 fn launch_elevated_helper_process(address: &str, token: &str) -> Result<(), String> {

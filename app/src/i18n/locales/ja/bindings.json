@@ -1,0 +1,108 @@
+{
+  "editor": {
+    "type": "バインドの種類",
+    "types": {
+      "none": "なし",
+      "keyboard": "キーボード",
+      "device": "デバイス"
+    },
+    "noneText": "バインドが割り当てられていません。バインドを選択するまで、この操作は実行されません。",
+    "modifiers": "修飾キー",
+    "primaryKey": "メイン キー"
+  },
+  "sound": {
+    "playOnFire": "この操作の実行時にサウンドを再生する",
+    "playOnTransition": "有効化/無効化の際にサウンドを再生する",
+    "explanation": "このバインド用の追加の合図音です。スロットを既定の音のままにするか、独自の短い .wav を選択してください。",
+    "defaultTone": "既定の音",
+    "single": "サウンド",
+    "activate": "有効化",
+    "deactivate": "無効化",
+    "browse": "参照…",
+    "test": "テスト",
+    "pickerFailed": "ファイルの選択画面を開けませんでした。",
+    "playFailed": "サウンドを再生できませんでした。"
+  },
+  "list": {
+    "add": "バインドの追加",
+    "noneText": "バインドが割り当てられていません。バインドを追加するまで、この操作は実行されません。",
+    "bindingNumber": "バインド {number}",
+    "bindingDescription": "キーボード ショートカットまたは検出されたデバイス入力を選択してください。"
+  },
+  "panel": {
+    "soundEnabledHint": "バインドでサウンド フィードバックが有効になっています",
+    "soundEnabledAria": "サウンド フィードバック有効",
+    "editOne": "バインドの編集…",
+    "editMany": "バインドの編集…"
+  },
+  "page": {
+    "breadcrumbAria": "階層リンク",
+    "breadcrumbBinding": "バインド",
+    "returnHint": "Esc キーまたは [完了] を押すと {module} に戻ります。",
+    "closeAria": "バインドを閉じて {module} に戻る",
+    "listDescription": "{description} フライトで使用するデバイスごとにバインドを追加してください。どれか 1 つで操作が実行されます。"
+  },
+  "device": {
+    "joystickDevice": "ジョイスティック デバイス",
+    "scanning": "スキャンしています...",
+    "selectDevice": "デバイスを選択",
+    "disconnectedOption": "{name} (切断済み)",
+    "disconnectedName": "<デバイス切断済み>",
+    "noDeviceSelected": "デバイスが選択されていません",
+    "assignedInput": "割り当てられた入力",
+    "manualAria": "ジョイスティックの入力を手動で選択",
+    "selectInput": "入力を選択...",
+    "manualHint": "入力を待ち受けずに、ボタンまたは HAT の方向を選択します。",
+    "manualHintNoDevice": "先に接続されたジョイスティックを選択してください。",
+    "manual": "手動",
+    "button": "ボタン {number}",
+    "hatInput": "HAT {number} {direction}",
+    "hatDirections": {
+      "up": "上",
+      "upRight": "右上",
+      "right": "右",
+      "downRight": "右下",
+      "down": "下",
+      "downLeft": "左下",
+      "left": "左",
+      "upLeft": "左上"
+    },
+    "noInput": "入力が取得されていません",
+    "buttonCount_other": "ボタン {count} 個",
+    "hatCount_other": "HAT {count} 個",
+    "capabilities": "{buttons}、{hats}",
+    "disconnectedTitle": "バインドされたデバイスは現在接続されていません",
+    "disconnectedBody": "このバインドは {device} / {input} として保存されたままですが、Windows は現在そのジョイスティックを認識していません。",
+    "capture": "入力を取得",
+    "canceling": "キャンセルしています...",
+    "listening": "待ち受け中... {seconds} 秒",
+    "cancelListening": "待ち受けをキャンセル ({seconds} 秒)",
+    "refresh": "デバイスを更新",
+    "metadata": "メタデータ",
+    "metadataTitle": "ジョイスティックのメタデータ",
+    "deviceGuid": "デバイス GUID",
+    "connectionStatus": "接続状態",
+    "productGuid": "製品 GUID",
+    "inputPath": "入力パス",
+    "inputLabel": "入力ラベル",
+    "unassigned": "未割り当て",
+    "unavailable": "利用不可",
+    "connected": "接続済み",
+    "disconnected": "切断済み",
+    "status": {
+      "canceling": "入力の取得をキャンセルしています...",
+      "cancelFailedWith": "取得をキャンセルできませんでした: {message}",
+      "cancelFailed": "取得をキャンセルできませんでした。制限時間になると自動的に停止します。",
+      "noDevices": "ジョイスティック デバイスが見つかりません。",
+      "selectFirst": "入力を取得する前に、接続されたジョイスティックを選択してください。",
+      "listening": "{device} のみを待ち受けています。Esc キーでキャンセルできます。取得は 15 秒後に自動的に停止します。",
+      "canceled": "入力の取得をキャンセルしました。",
+      "timedOut": "15 秒経過したため入力の取得がタイムアウトしました。",
+      "captured": "{device} / {input} を取得しました。",
+      "captureFailed": "ジョイスティックの入力を取得できませんでした。",
+      "selected": "{device} を選択しました。入力を取得するか、手動で選択してください。",
+      "assigned": "{device} / {input} を手動で割り当てました。"
+    },
+    "listFailed": "ジョイスティック デバイスの一覧を取得できませんでした。"
+  }
+}

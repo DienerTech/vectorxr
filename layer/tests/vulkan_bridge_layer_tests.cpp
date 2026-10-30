@@ -22,7 +22,8 @@
 // VECTORXR_TESTS_REQUIRE_HW=1 that fails instead, as does running without
 // validation or the Direct3D 12 debug layer). Past that, every bridge refusal
 // fails. `unbridged` runs only the cases that need no working bridge (the
-// hooks, the instance, fallbacks the bridge never sees, native Direct3D 12).
+// hooks, the instance, fallbacks the bridge never sees, native Direct3D 12);
+// `depth-paths` only the depth write paths' case (13e).
 #define VK_NO_PROTOTYPES
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <windows.h>
@@ -319,7 +320,12 @@ void SetEnv(const char* name, const std::string& value) {
     X(vkImportSemaphoreWin32HandleKHR) X(vkCreateCommandPool) X(vkDestroyCommandPool) X(vkAllocateCommandBuffers)    \
     X(vkBeginCommandBuffer) X(vkEndCommandBuffer) X(vkResetCommandBuffer) X(vkCmdPipelineBarrier)                    \
     X(vkCmdClearColorImage) X(vkCmdClearDepthStencilImage) X(vkQueueSubmit) X(vkQueueWaitIdle) X(vkDeviceWaitIdle)   \
-    X(vkCreateFence) X(vkDestroyFence) X(vkWaitForFences) X(vkResetFences)
+    X(vkCreateFence) X(vkDestroyFence) X(vkWaitForFences) X(vkGetFenceStatus) X(vkResetFences) X(vkCreateBuffer) X(vkDestroyBuffer)      \
+    X(vkGetBufferMemoryRequirements) X(vkBindBufferMemory) X(vkMapMemory) X(vkUnmapMemory) X(vkCmdCopyBufferToImage)  \
+    X(vkCmdCopyImage) X(vkCreateImageView) X(vkDestroyImageView) X(vkCreateRenderPass) X(vkDestroyRenderPass)        \
+    X(vkCreateFramebuffer) X(vkDestroyFramebuffer) X(vkCreateShaderModule) X(vkDestroyShaderModule)                  \
+    X(vkCreatePipelineLayout) X(vkDestroyPipelineLayout) X(vkCreateGraphicsPipelines) X(vkDestroyPipeline)           \
+    X(vkCmdBeginRenderPass) X(vkCmdEndRenderPass) X(vkCmdBindPipeline) X(vkCmdBindVertexBuffers) X(vkCmdDraw)
 
 #define TEST_VK_DECLARE(name) PFN_##name name = nullptr;
 // The loader's functions, for the game's instance and device (one game at a time).
@@ -341,6 +347,31 @@ void LoadInstanceFunctions(VkInstance instance) {
 void LoadDeviceFunctions(VkDevice device) {
 #define TEST_VK_LOAD_DEVICE(name) g_vk.name = reinterpret_cast<PFN_##name>(g_vk.vkGetDeviceProcAddr(device, #name));
     TEST_VK_DEVICE(TEST_VK_LOAD_DEVICE)
+}
+
+// A number from the bridge's summary ("name=value").
+std::uint64_t SummaryValue(const std::string& summary, const std::string& name) {
+    const std::size_t at = summary.find(", " + name + "=");
+    Check(at != std::string::npos, "the summary has " + name + ": " + summary);
+    return std::stoull(summary.substr(at + name.size() + 3));
+}
+
+// A release no frame's end handed over (7b7f2a2 keeps it for one), the
+// session or instance ending with it: its barrier went onto the game's queue
+// before the runtime was told, the bridge's submissions and "written" one
+// further than before the game's last rendering, so End's wait for the
+// game's queue covers that rendering before the images it went into are
+// freed (B5). Ordering only.
+void CheckKeptReleaseSubmitted(const std::string& before, const std::string& kept, const std::string& at_end,
+                               const std::string& what) {
+    Check(SummaryValue(kept, "releases") == SummaryValue(before, "releases") &&
+              SummaryValue(kept, "writtenValue") == SummaryValue(before, "writtenValue"),
+          what + ": the game's last release is kept for a frame's end: " + kept);
+    Check(SummaryValue(at_end, "releases") == SummaryValue(before, "releases") + 1 &&
+              SummaryValue(at_end, "writtenValue") == SummaryValue(before, "writtenValue") + 1 &&
+              SummaryValue(at_end, "submits") > SummaryValue(kept, "submits"),
+          what + ": the kept release's barrier was submitted on the game's queue before the runtime was told: " +
+              at_end);
 }
 
 void CheckVk(VkResult result, const std::string& what) {
@@ -457,6 +488,11 @@ struct VulkanGame {
     std::array<VkCommandBuffer, 16> commands{};
     std::array<VkFence, 16> fences{};
     std::uint32_t next{0};
+    // GameOptions::other_queue: a queue of another family (transfer-only,
+    // else compute-only), as a game's asynchronous copies use.
+    VkQueue other_queue{VK_NULL_HANDLE};
+    std::uint32_t other_family{UINT32_MAX};
+    VkCommandPool other_pool{VK_NULL_HANDLE};
 };
 
 void FinishGame(VulkanGame& game) {
@@ -501,6 +537,7 @@ void DestroyGame(VulkanGame& game) {
             if (fence) g_vk.vkDestroyFence(game.device, fence, nullptr);
         }
         if (game.pool) g_vk.vkDestroyCommandPool(game.device, game.pool, nullptr);
+        if (game.other_pool) g_vk.vkDestroyCommandPool(game.device, game.other_pool, nullptr);
         g_vk.vkDestroyDevice(game.device, nullptr);
     }
     if (game.messenger) g_vk.vkDestroyDebugUtilsMessengerEXT(game.instance, game.messenger, nullptr);
@@ -645,6 +682,11 @@ bool WaitFence(ID3D12Fence* fence, UINT64 value, DWORD timeout_ms) {
 // A fence the test opens: the game's Vulkan queue (or a Direct3D 12 queue)
 // held back until Open. On Vulkan it is the fence imported as a semaphore,
 // as the bridge imports its own.
+bool GpuNegativeControlsAllowed() {
+    const char* no_stall = std::getenv("FG_TEST_NO_STALL");
+    return !(no_stall && std::string(no_stall) == "1");
+}
+
 struct Gate {
     ComPtr<ID3D12Fence> fence;
     VulkanGame* game{nullptr};
@@ -679,6 +721,7 @@ struct Gate {
     Gate& operator=(const Gate&) = delete;
     // The game's queue runs nothing submitted after this until Open.
     void HoldGame() {
+        Check(GpuNegativeControlsAllowed(), "FG_TEST_NO_STALL=1 forbids an artificial game GPU hold");
         const UINT64 value = 1;
         VkD3D12FenceSubmitInfoKHR values{VK_STRUCTURE_TYPE_D3D12_FENCE_SUBMIT_INFO_KHR};
         values.waitSemaphoreValuesCount = 1;
@@ -691,7 +734,10 @@ struct Gate {
         submit.pWaitDstStageMask = &stage;
         CheckVk(g_vk.vkQueueSubmit(game->queue, 1, &submit, VK_NULL_HANDLE), "the game's queue held at the gate");
     }
-    void HoldQueue(ID3D12CommandQueue* queue) { queue->Wait(fence.Get(), 1); }
+    void HoldQueue(ID3D12CommandQueue* queue) {
+        Check(GpuNegativeControlsAllowed(), "FG_TEST_NO_STALL=1 forbids an artificial GPU queue hold");
+        queue->Wait(fence.Get(), 1);
+    }
     void Open() { fence->Signal(1); }
     // Opened from another thread after `ms`, while the layer waits for what it holds.
     std::thread OpenLater(DWORD ms) {
@@ -796,8 +842,10 @@ struct ShownView {
     bool depth{false};                          // the chain had XrCompositionLayerDepthInfoKHR
     bool application_chain{false};              // the unknown test structure survived anywhere in the chain
     XrSwapchain depth_swapchain{XR_NULL_HANDLE};
+    std::uint32_t depth_slice{0};     // its depth's imageArrayIndex
     std::optional<Color> texel;       // the centre of the image released last
     std::optional<float> depth_value; // the centre of its depth (StandIn::read_depth)
+    std::vector<float> depth_texels;  // all of its depth, row by row (StandIn::read_depth_all)
 };
 
 struct ShownFrame {
@@ -828,6 +876,7 @@ struct StandIn {
     bool skip_readback{false}; // shown frames are not read back
     std::uint32_t width_error{0}; // images this much wider than asked for
     bool read_depth{false};       // shown views' depth is read back too
+    bool read_depth_all{false};   // with read_depth: every texel of it
     LUID luid{};                  // the adapter it composes on
     // XR_KHR_vulkan_enable's lists, and what XR_KHR_vulkan_enable2's
     // creation adds of its own, as runtimes do (the fence capabilities among
@@ -1040,8 +1089,10 @@ bool SubmitReadback(ID3D12CommandQueue* queue, ID3D12Fence* fence, UINT64& fence
 }
 
 // Each source's centre: colour texels, and depth values (as the red
-// channel's float, in `depth`).
-bool FinishReadback(Readback& readback, std::vector<Color>& texels, std::vector<float>* depth = nullptr) {
+// channel's float, in `depth`); with `depth_all`, each depth source's every
+// texel too, row by row (none for colour sources).
+bool FinishReadback(Readback& readback, std::vector<Color>& texels, std::vector<float>* depth = nullptr,
+                    std::vector<std::vector<float>>* depth_all = nullptr) {
     if (!WaitFence(readback.fence, readback.value, 10000)) {
         return false;
     }
@@ -1051,6 +1102,7 @@ bool FinishReadback(Readback& readback, std::vector<Color>& texels, std::vector<
     }
     texels.clear();
     if (depth) depth->clear();
+    if (depth_all) depth_all->clear();
     for (std::size_t i = 0; i < readback.placements.size(); ++i) {
         const D3D12_PLACED_SUBRESOURCE_FOOTPRINT& placement = readback.placements[i];
         const auto* base = static_cast<const std::uint8_t*>(mapped) + placement.Offset;
@@ -1060,6 +1112,15 @@ bool FinishReadback(Readback& readback, std::vector<Color>& texels, std::vector<
             std::memcpy(&value, row + 4 * (placement.Footprint.Width / 2), sizeof(value));
             if (depth) depth->push_back(value);
             texels.push_back({0, 0, 0, 0});
+            if (depth_all) {
+                const std::uint32_t width = placement.Footprint.Width;
+                std::vector<float> all(static_cast<std::size_t>(width) * placement.Footprint.Height);
+                for (std::uint32_t y = 0; y < placement.Footprint.Height; ++y) {
+                    std::memcpy(all.data() + static_cast<std::size_t>(y) * width,
+                                base + static_cast<std::size_t>(placement.Footprint.RowPitch) * y, width * sizeof(float));
+                }
+                depth_all->push_back(std::move(all));
+            }
         } else {
             texels.push_back({base[0], base[1], base[2], base[3]});
             if (depth) depth->push_back(0.0f);
@@ -1076,7 +1137,8 @@ bool FinishReadback(Readback& readback, std::vector<Color>& texels, std::vector<
 // waiting a while later, nothing ordered after the game's rendering having
 // run; as a control, the same images read meanwhile on a queue of the
 // stand-in's own, ordered after nothing, do not hold the frame yet.
-bool ReadBack12(const Sources& sources, ShownFrame& frame, std::vector<Color>& texels, std::vector<float>& depth) {
+bool ReadBack12(const Sources& sources, ShownFrame& frame, std::vector<Color>& texels, std::vector<float>& depth,
+                std::vector<std::vector<float>>* depth_all = nullptr) {
     StandIn& rt = g_runtime;
     Readback shown;
     if (!SubmitReadback(rt.queue.Get(), rt.readback.Get(), rt.readback_value, sources, shown)) {
@@ -1098,7 +1160,7 @@ bool ReadBack12(const Sources& sources, ShownFrame& frame, std::vector<Color>& t
         rt.hold->Open();
         rt.hold = nullptr;
     }
-    return FinishReadback(shown, texels, &depth);
+    return FinishReadback(shown, texels, &depth, depth_all);
 }
 
 // What one image of a runtime swapchain holds now, read on a queue ordered
@@ -1594,8 +1656,9 @@ XrResult XRAPI_CALL RtEndFrame(XrSession, const XrFrameEndInfo* info) {
                 shown.application_chain = shown.application_chain || chain->type == kApplicationStructType;
                 if (chain->type == XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR) {
                     shown.depth = true;
-                    shown.depth_swapchain =
-                        reinterpret_cast<const XrCompositionLayerDepthInfoKHR*>(chain)->subImage.swapchain;
+                    const auto& depth_info = *reinterpret_cast<const XrCompositionLayerDepthInfoKHR*>(chain);
+                    shown.depth_swapchain = depth_info.subImage.swapchain;
+                    shown.depth_slice = depth_info.subImage.imageArrayIndex;
                 }
             }
             frame.views.push_back(shown);
@@ -1618,18 +1681,25 @@ XrResult XRAPI_CALL RtEndFrame(XrSession, const XrFrameEndInfo* info) {
                 const StandInSwapchain* depth = FindSwapchain(view.depth_swapchain);
                 if (depth && depth->released && !depth->images12.empty()) {
                     depth_at[v] = static_cast<int>(sources.size());
-                    sources.push_back({depth->images12[*depth->released].Get(), static_cast<std::uint32_t>(v)});
+                    sources.push_back({depth->images12[*depth->released].Get(), view.depth_slice});
                 }
             }
         }
         std::vector<Color> texels;
         std::vector<float> depth;
-        if (!sources.empty() && ReadBack12(sources, frame, texels, depth)) {
+        std::vector<std::vector<float>> depth_all;
+        if (!sources.empty() &&
+            ReadBack12(sources, frame, texels, depth, rt.read_depth_all ? &depth_all : nullptr)) {
             std::size_t at = 0;
+            std::size_t depth_source = 0;
             for (std::size_t v = 0; v < frame.views.size(); ++v) {
                 frame.views[v].texel = texels[at++];
                 if (depth_at[v] >= 0) {
                     frame.views[v].depth_value = depth[at++];
+                    if (depth_source < depth_all.size()) {
+                        frame.views[v].depth_texels = std::move(depth_all[depth_source]);
+                    }
+                    ++depth_source;
                 }
             }
         }
@@ -1887,9 +1957,67 @@ struct FrameGenChain {
 };
 FrameGenChain g_framegen_chain;
 
+// A motion vector capture as the stand-in backend saw it (stage 9): the job,
+// how many releases of its swapchain had reached the runtime then, and how
+// many application frames the test had ended.
+struct MotionCapture {
+    depthxr::FrameGenMotionJob job;
+    std::uint64_t runtime_releases{0};
+    std::uint64_t frames_ended{0};
+};
+std::mutex g_motion_mutex;
+std::vector<MotionCapture> g_motion;
+std::atomic<std::uint64_t> g_frames_ended{0};
+// The bridge's copies so far at each capture the stand-in backend saw, with
+// the application frames ended then and whether it was a motion capture.
+struct CaptureCopies {
+    std::uint64_t frames_ended{0};
+    std::uint64_t copies{0};
+    bool motion{false};
+};
+std::vector<CaptureCopies> g_capture_copies; // g_motion_mutex
+std::atomic<bool> g_note_copies{false};
+
+std::uint64_t BridgeCopies() {
+    const std::string summary = Peer::Bridge().Summary();
+    const std::size_t at = summary.find(", copies=");
+    return at == std::string::npos ? 0 : std::strtoull(summary.c_str() + at + 9, nullptr, 10);
+}
+
+void NoteCaptureCopies(bool motion) {
+    if (!g_note_copies) return;
+    const CaptureCopies noted{g_frames_ended.load(), BridgeCopies(), motion};
+    std::scoped_lock lock(g_motion_mutex);
+    g_capture_copies.push_back(noted);
+}
+
 class StandInGpu final : public depthxr::FrameGenGpu {
   public:
+    // `motion`: it reads a game's motion vectors (SupportsEngineMotion),
+    // noting each capture.
+    explicit StandInGpu(bool motion = false) : motion_(motion) {}
     const char* Name() const override { return "Stand-in"; }
+    bool SupportsEngineMotion() const override { return motion_; }
+    bool CaptureMotion(const std::vector<depthxr::FrameGenMotionJob>& jobs, const std::vector<depthxr::FrameGenViewRequest>&,
+                       std::string& error, std::vector<bool>* resampled) override {
+        error.clear();
+        NoteCaptureCopies(true);
+        std::vector<MotionCapture> captures;
+        {
+            std::scoped_lock lock(g_runtime_mutex);
+            for (const depthxr::FrameGenMotionJob& job : jobs) {
+                const StandInSwapchain* chain = FindSwapchain(job.vectors.swapchain);
+                captures.push_back(
+                    {job, chain ? static_cast<std::uint64_t>(chain->releases) : 0u, g_frames_ended.load()});
+            }
+        }
+        {
+            std::scoped_lock lock(g_motion_mutex);
+            g_motion.insert(g_motion.end(), captures.begin(), captures.end());
+        }
+        if (resampled) resampled->assign(jobs.size(), motion_);
+        return motion_;
+    }
     std::optional<depthxr::FrameGenOutputKind> Classify(std::int64_t) const override {
         return depthxr::FrameGenOutputKind::kSrgb8;
     }
@@ -1902,6 +2030,7 @@ class StandInGpu final : public depthxr::FrameGenGpu {
     void Forget(XrSwapchain) override {}
     bool Capture(std::size_t, const depthxr::FrameGenImage&, const depthxr::FrameGenViewRequest&,
                  depthxr::FrameGenFlowQuality, std::string&) override {
+        NoteCaptureCopies(false);
         return true;
     }
     bool WaitIdle() override { return true; }
@@ -1912,6 +2041,9 @@ class StandInGpu final : public depthxr::FrameGenGpu {
     }
     void ResetHistory() override {}
     void Reset() override {}
+
+  private:
+    bool motion_{false};
 };
 
 void NoteChain(const void* chain) {
@@ -1933,6 +2065,12 @@ void NoteChain(const void* chain) {
 std::unique_ptr<depthxr::FrameGenGpu> MakeStandInGpu(const void* chain, std::string&) {
     NoteChain(chain);
     return std::make_unique<StandInGpu>();
+}
+
+// The stand-in that reads a game's motion vectors.
+std::unique_ptr<depthxr::FrameGenGpu> MakeMotionStandInGpu(const void* chain, std::string&) {
+    NoteChain(chain);
+    return std::make_unique<StandInGpu>(true);
 }
 
 // The real backend, noting its chain.
@@ -2110,6 +2248,7 @@ struct GameOptions {
     int enable{2};                      // XR_KHR_vulkan_enable's version
     std::uint32_t api{VK_API_VERSION_1_3};
     const void* device_chain{nullptr};  // the application's VkDeviceCreateInfo chain
+    bool other_queue{false};            // VulkanGame::other_queue too, where the device has such a family
 };
 
 // The application's VkDeviceCreateInfo as it made it, to check nothing of
@@ -2199,16 +2338,39 @@ VulkanGame MakeVulkanGame(App& app, const GameOptions& options = {}) {
     }
     game.family = GraphicsFamily(game.physical);
     const float priority = 1.0f;
-    VkDeviceQueueCreateInfo queue{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+    std::array<VkDeviceQueueCreateInfo, 2> queues{};
+    VkDeviceQueueCreateInfo& queue = queues[0];
+    queue = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
     queue.queueFamilyIndex = game.family;
     queue.queueCount = 1;
     queue.pQueuePriorities = &priority;
+    if (options.other_queue) {
+        std::uint32_t count = 0;
+        g_vk.vkGetPhysicalDeviceQueueFamilyProperties(game.physical, &count, nullptr);
+        std::vector<VkQueueFamilyProperties> families(count);
+        g_vk.vkGetPhysicalDeviceQueueFamilyProperties(game.physical, &count, families.data());
+        for (const VkQueueFlags wanted : {VkQueueFlags{VK_QUEUE_TRANSFER_BIT}, VkQueueFlags{VK_QUEUE_COMPUTE_BIT}}) {
+            for (std::uint32_t i = 0; i < count && game.other_family == UINT32_MAX; ++i) {
+                const VkQueueFlags flags = families[i].queueFlags;
+                const bool transfer_only = !(flags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT));
+                const bool compute_only = !(flags & VK_QUEUE_GRAPHICS_BIT);
+                if ((flags & wanted) && (wanted == VK_QUEUE_TRANSFER_BIT ? transfer_only : compute_only) &&
+                    families[i].queueCount > 0) {
+                    game.other_family = i;
+                }
+            }
+        }
+        if (game.other_family != UINT32_MAX) {
+            queues[1] = queue;
+            queues[1].queueFamilyIndex = game.other_family;
+        }
+    }
     std::vector<const char*> device_names;
     for (const std::string& name : listed_device) device_names.push_back(name.c_str());
     VkDeviceCreateInfo device_info{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     device_info.pNext = options.device_chain;
-    device_info.queueCreateInfoCount = 1;
-    device_info.pQueueCreateInfos = &queue;
+    device_info.queueCreateInfoCount = game.other_family == UINT32_MAX ? 1u : 2u;
+    device_info.pQueueCreateInfos = queues.data();
     device_info.enabledExtensionCount = static_cast<std::uint32_t>(device_names.size());
     device_info.ppEnabledExtensionNames = device_names.empty() ? nullptr : device_names.data();
     const DeviceCreateSnapshot before{device_info, device_names};
@@ -2230,6 +2392,13 @@ VulkanGame MakeVulkanGame(App& app, const GameOptions& options = {}) {
           "the application's VkDeviceCreateInfo is not written");
     LoadDeviceFunctions(game.device);
     FinishGame(game);
+    if (game.other_family != UINT32_MAX) {
+        g_vk.vkGetDeviceQueue(game.device, game.other_family, 0, &game.other_queue);
+        VkCommandPoolCreateInfo pool{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+        pool.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+        pool.queueFamilyIndex = game.other_family;
+        CheckVk(g_vk.vkCreateCommandPool(game.device, &pool, nullptr, &game.other_pool), "the game's other command pool");
+    }
     return game;
 }
 
@@ -2386,6 +2555,12 @@ struct FrameOptions {
     // xrEndFrame is the frame; a copy at the release would be
     // kBeforeRendering. Not with `depth`, `hold` or `stall`.
     bool release_before_begin{false};
+    // The game's motion vectors (XR_FB_space_warp): a swapchain of two
+    // slices, one per eye, acquired after depth, cleared to `motion_color`
+    // and released after it; each view chains its structure (naming its
+    // depth slice too) ahead of its depth. Needs `depth`.
+    const Target* motion{nullptr};
+    Color motion_color{64, 128, 32, 255};
 };
 
 // What a Star Citizen-ordered frame's images hold when released (FrameOptions::release_before_begin).
@@ -2462,6 +2637,8 @@ XrResult Frame(App& app, const Renderer& renderer, const std::vector<const Targe
             indices.push_back(Acquire(app, *target));
         }
         const std::uint32_t depth_index = depth ? Acquire(app, *depth) : 0;
+        Check(!options.motion || depth, "a frame's motion vectors come with its depth");
+        const std::uint32_t motion_index = options.motion ? Acquire(app, *options.motion) : 0;
         for (std::size_t i = 0; i < targets.size(); ++i) {
             renderer.Clear(*targets[i], indices[i], colors[i]);
         }
@@ -2470,6 +2647,9 @@ XrResult Frame(App& app, const Renderer& renderer, const std::vector<const Targe
         }
         if (depth) {
             renderer.ClearDepth(*depth, depth_index, options.depth_value);
+        }
+        if (options.motion) {
+            renderer.Clear(*options.motion, motion_index, options.motion_color);
         }
         for (std::size_t i = 0; i < targets.size(); ++i) {
             if ((options.hold || options.stall) && i + 1 == targets.size()) {
@@ -2480,6 +2660,9 @@ XrResult Frame(App& app, const Renderer& renderer, const std::vector<const Targe
         if (depth) {
             Release(app, *depth);
         }
+        if (options.motion) {
+            Release(app, *options.motion);
+        }
         if (options.quad) {
             Release(app, *options.quad);
         }
@@ -2487,6 +2670,7 @@ XrResult Frame(App& app, const Renderer& renderer, const std::vector<const Targe
 
     XrBaseInStructure after_depth{kApplicationStructType};
     std::array<XrCompositionLayerDepthInfoKHR, 2> depth_infos{};
+    std::array<XrCompositionLayerSpaceWarpInfoFB, 2> space_warp{};
     std::array<XrCompositionLayerProjectionView, 2> views{};
     for (std::uint32_t eye = 0; eye < 2; ++eye) {
         views[eye] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
@@ -2508,6 +2692,23 @@ XrResult Frame(App& app, const Renderer& renderer, const std::vector<const Targe
             depth_infos[eye].nearZ = 0.05f;
             depth_infos[eye].farZ = 1000.0f;
             views[eye].next = &depth_infos[eye];
+        }
+        if (options.motion) {
+            XrCompositionLayerSpaceWarpInfoFB& info = space_warp[eye];
+            info = {XR_TYPE_COMPOSITION_LAYER_SPACE_WARP_INFO_FB};
+            info.next = views[eye].next;
+            info.motionVectorSubImage.swapchain = options.motion->swapchain;
+            info.motionVectorSubImage.imageRect = {{0, 0},
+                                                   {static_cast<std::int32_t>(options.motion->info.width),
+                                                    static_cast<std::int32_t>(options.motion->info.height)}};
+            info.motionVectorSubImage.imageArrayIndex = eye;
+            info.appSpaceDeltaPose.orientation.w = 1.0f;
+            info.depthSubImage = depth_infos[eye].subImage;
+            info.minDepth = depth_infos[eye].minDepth;
+            info.maxDepth = depth_infos[eye].maxDepth;
+            info.nearZ = depth_infos[eye].nearZ;
+            info.farZ = depth_infos[eye].farZ;
+            views[eye].next = &info;
         }
     }
     XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
@@ -3429,7 +3630,7 @@ void CheckFrames(App& app, VulkanGame& game, Target& left, Target& right) {
     for (int frame = 0; frame < kFrames; ++frame) {
         const std::vector<Color> colors{FrameColor(frame, 0), FrameColor(frame, 1)};
         std::optional<Gate> gate;
-        if (frame == 2 || frame == 6) {
+        if (GpuNegativeControlsAllowed() && (frame == 2 || frame == 6)) {
             gate.emplace(g_runtime.device12.Get(), &game);
         }
         // Frame 6 releases the right eye first: the left is the one held.
@@ -3563,7 +3764,7 @@ void CheckTeardown(App& app, VulkanGame& game, Target& left, Target& right) {
     {
         // The left eye's last copy waits behind a gate the layer's wait outlasts.
         Gate gate(device, nullptr);
-        gate.HoldQueue(bridge_queue);
+        if (GpuNegativeControlsAllowed()) gate.HoldQueue(bridge_queue);
         const Color last{1, 2, 3, 255};
         Render(app, vulkan, left, last);
         bool destroyed = false;
@@ -3592,14 +3793,18 @@ void CheckTeardown(App& app, VulkanGame& game, Target& left, Target& right) {
     // The right eye is left to the session; its last copy waits behind a
     // gate, and a marker after everything on the bridge's queue.
     Gate gate(device, nullptr);
-    gate.HoldQueue(bridge_queue);
+    if (GpuNegativeControlsAllowed()) gate.HoldQueue(bridge_queue);
+    const std::string before_render = Peer::Bridge().Summary();
     Render(app, vulkan, right, {4, 5, 6, 255});
+    const std::string kept = Peer::Bridge().Summary();
     ComPtr<ID3D12Fence> marker;
     Check(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&marker))), "a marker fence");
     bridge_queue->Signal(marker.Get(), 1);
     bool marker_done = false;
     bool idle = false;
+    std::string at_destroy;
     g_runtime.on_destroy_session = [&] {
+        at_destroy = Peer::Bridge().Summary();
         marker_done = marker->GetCompletedValue() >= 1;
         for (int poll = 0; poll < 50 && !idle; ++poll) {
             idle = Peer::Bridge().WaitIdle(poll ? 1 : 0);
@@ -3610,6 +3815,7 @@ void CheckTeardown(App& app, VulkanGame& game, Target& left, Target& right) {
     opener.join();
     app.session = XR_NULL_HANDLE;
     Check(result == XR_SUCCESS && g_runtime.Position("xrDestroySession") >= 0, "xrDestroySession");
+    CheckKeptReleaseSubmitted(before_render, kept, at_destroy, "xrDestroySession");
     Check(marker_done, "the bridge's queue had run everything queued on it when the runtime destroyed the session");
     Check(idle, "the bridge's queue was idle when the runtime destroyed the session");
     Check(!Peer::Bridge().Active() && !Peer::QueueSubstituted(), "the bridge and the substitution end with the session");
@@ -3768,21 +3974,26 @@ void TestDestroyInstanceWithSession() {
           "a frame of the bridged session");
     ID3D12CommandQueue* bridge_queue = BridgeBinding()->queue;
     Gate gate(g_runtime.device12.Get(), nullptr);
-    gate.HoldQueue(bridge_queue);
+    if (GpuNegativeControlsAllowed()) gate.HoldQueue(bridge_queue);
+    const std::string before_render = Peer::Bridge().Summary();
     Render(app, vulkan, left, {7, 8, 9, 255});
+    const std::string kept = Peer::Bridge().Summary();
     ComPtr<ID3D12Fence> marker;
     Check(SUCCEEDED(g_runtime.device12->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&marker))), "a marker fence");
     bridge_queue->Signal(marker.Get(), 1);
     bool destroyed = false;
     bool marker_done = false;
+    std::string at_destroy;
     g_runtime.on_destroy_instance = [&] {
         destroyed = true;
+        at_destroy = Peer::Bridge().Summary();
         marker_done = marker->GetCompletedValue() >= 1;
     };
     std::thread opener = gate.OpenLater(300);
     const XrResult result = app.api.destroy_instance(app.api.instance);
     opener.join();
     Check(result == XR_SUCCESS && destroyed, "xrDestroyInstance with the session alive");
+    CheckKeptReleaseSubmitted(before_render, kept, at_destroy, "xrDestroyInstance");
     Check(marker_done, "the bridge's queue had run everything queued on it when the runtime destroyed the instance");
     Check(g_runtime.Position("xrDestroySession") < 0, "the session went with the instance, not on its own");
     Check(Peer::Idle(), "nothing is left of the instance and its session");
@@ -3792,6 +4003,54 @@ void TestDestroyInstanceWithSession() {
     Check(GameRuns(game), "the game's device works after its instance went with the session");
     DestroyGame(game);
     EndCase();
+}
+
+// A private depth image has no hand-over copy or barrier at release. A
+// final release followed directly by teardown must still retire the game's
+// rendering, both when the session ends itself and when its instance ends.
+void TestPrivateDepthTeardown() {
+    for (const bool with_instance : {false, true}) {
+        const std::string what = with_instance ? "xrDestroyInstance" : "xrDestroySession";
+        BeginCase(with_instance ? "private-depth-instance-teardown" : "private-depth-session-teardown");
+        App app = StartApp({kVulkan2Extension});
+        VulkanGame game = MakeVulkanGame(app);
+        SessionCreate create(game, app.system);
+        Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS &&
+                  Peer::Bridge().Active(), "a bridged session");
+        BeginSession(app);
+        Target depth = MakeTarget(app, DepthInfo(VK_FORMAT_D32_SFLOAT, 1, 4), "private depth");
+        Check(Peer::Bridge().Unmirrored(depth.swapchain), "multisampled depth stays private");
+        const Renderer renderer{&game, nullptr};
+        renderer.ClearDepth(depth, Acquire(app, depth), 0.25f);
+        const VkFence rendered = game.fences[(game.next - 1) % game.fences.size()];
+        const std::string before_release = Peer::Bridge().Summary();
+        Release(app, depth);
+        const std::string kept = Peer::Bridge().Summary();
+        Check(SummaryValue(kept, "submits") == SummaryValue(before_release, "submits"),
+              "the private release is kept without submitting work");
+        std::string at_destroy;
+        const auto note = [&] { at_destroy = Peer::Bridge().Summary(); };
+        if (with_instance) {
+            g_runtime.on_destroy_instance = note;
+            Check(app.api.destroy_instance(app.api.instance) == XR_SUCCESS, what);
+        } else {
+            Check(app.api.destroy_space(app.space) == XR_SUCCESS, "xrDestroySpace");
+            app.space = XR_NULL_HANDLE;
+            g_runtime.on_destroy_session = note;
+            Check(app.api.destroy_session(app.session) == XR_SUCCESS, what);
+            app.session = XR_NULL_HANDLE;
+            Check(app.api.destroy_instance(app.api.instance) == XR_SUCCESS, "xrDestroyInstance");
+        }
+        Check(SummaryValue(at_destroy, "submits") == SummaryValue(kept, "submits") + 1 &&
+                  SummaryValue(at_destroy, "copies") == SummaryValue(kept, "copies") &&
+                  SummaryValue(at_destroy, "writtenValue") == SummaryValue(kept, "writtenValue"),
+              what + ": private rendering is covered by one submission without a copy or hand-over");
+        CheckVk(g_vk.vkGetFenceStatus(game.device, rendered), what + ": the final private rendering finished");
+        Check(!Peer::Bridge().Active() && Peer::Idle(), "teardown released the bridge and instance");
+        Check(GameRuns(game), "the game's device works after teardown");
+        DestroyGame(game);
+        EndCase();
+    }
 }
 
 // 12. A runtime failing xrDestroySession: the Vulkan half of the bridge
@@ -4067,6 +4326,939 @@ void TestStarCitizenShapes() {
     EndCase();
 }
 
+// 13d. Star Citizen sending its engine's motion vectors (stage 9):
+// XR_FB_space_warp taken over by the space-warp probe on a runtime without
+// it, VECTORXR_FRAMEGEN_ENGINE_MV=capture, Frame Generation on a stand-in
+// backend that reads motion vectors. The motion vector swapchain is bridged
+// as colour is. Nothing is read while the game's swapchains settle (3 s);
+// then each frame's vectors are read in the runtime's image as the layer
+// hands their release over inside the frame's xrEndFrame: behind the
+// bridge's copy, before the release reaches the runtime, and as that frame's
+// own (the frame's record comes after its releases, as a game's own images'
+// releases come before its xrEndFrame). The bridge gives their images back
+// to the game's queue at each release.
+void TestStarCitizenMotion() {
+    CaseSettings settings;
+    settings.frame_multiplier = "2x";
+    BeginCase("star-citizen-motion", settings);
+    SetEnv("VECTORXR_SPACEWARP_PROBE", "fb");
+    SetEnv("VECTORXR_FRAMEGEN_ENGINE_MV", "capture");
+    g_runtime.paced = true;
+    {
+        std::scoped_lock lock(g_motion_mutex);
+        g_motion.clear();
+        g_capture_copies.clear();
+    }
+    g_frames_ended = 0;
+    g_note_copies = true;
+    Peer::SetFrameGenEngagement(2, std::chrono::milliseconds(0));
+    Peer::UseFrameGenGpu(MakeMotionStandInGpu);
+    App app = StartApp({kVulkan2Extension, XR_FB_SPACE_WARP_EXTENSION_NAME});
+    Check(Contains(Peer::Log(), "takenOver=XR_FB_space_warp"), "star citizen motion: the probe takes XR_FB_space_warp over");
+    VulkanGame game = MakeVulkanGame(app);
+    SessionCreate create(game, app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS && Peer::Bridge().Active(),
+          "star citizen motion: a bridged session (" + Unbridged(Peer::Log()) + ")");
+    BeginSession(app);
+    const Renderer vulkan{&game, nullptr};
+    Target left = MakeTarget(app, ColorInfo(), "the left eye");
+    Target right = MakeTarget(app, ColorInfo(), "the right eye");
+    Target depth = MakeTarget(app, DepthInfo(VK_FORMAT_D32_SFLOAT, 2), "depth");
+    Target motion = MakeTarget(app, ColorInfo(VK_FORMAT_R16G16B16A16_SFLOAT, 1, 2), "motion vectors");
+    const auto run = [&](int frames) {
+        for (int frame = 0; frame < frames; ++frame) {
+            FrameOptions options;
+            options.depth = &depth;
+            options.motion = &motion;
+            Check(Frame(app, vulkan, {&left, &right}, {FrameColor(frame, 0), FrameColor(frame, 1)},
+                        {{{&left, 0}, {&right, 0}}}, options) == XR_SUCCESS,
+                  "star citizen motion: frame " + std::to_string(frame));
+            ++g_frames_ended;
+        }
+    };
+    const auto captures = [] {
+        std::scoped_lock lock(g_motion_mutex);
+        return g_motion;
+    };
+    run(24);
+    Check(Peer::FrameGen().generated > 0 && captures().empty(),
+          "star citizen motion: frames are generated, no vectors read while the swapchains settle (generated=" +
+              std::to_string(Peer::FrameGen().generated) + ")");
+    std::this_thread::sleep_for(std::chrono::milliseconds(3100));
+    run(24);
+    const std::vector<MotionCapture> read = captures();
+    Check(read.size() >= 2 * 20, "star citizen motion: settled, both views' vectors are read every frame (" +
+                                     std::to_string(read.size()) + " views)");
+    bool ordered = true;
+    std::string first_wrong;
+    for (const MotionCapture& capture : read) {
+        const bool right_one = capture.job.capture && capture.job.released && capture.job.vectors.swapchain == motion.swapchain &&
+                               capture.job.vectors.image_index == *capture.job.released &&
+                               capture.job.frame == capture.frames_ended + 1 &&
+                               capture.runtime_releases <= capture.frames_ended;
+        if (!right_one && ordered) {
+            first_wrong = "frame " + std::to_string(capture.job.frame) + " read during the " +
+                          std::to_string(capture.frames_ended + 1) + "th frame's end, " +
+                          std::to_string(capture.runtime_releases) + " releases at the runtime";
+        }
+        ordered = ordered && right_one;
+    }
+    Check(ordered, "star citizen motion: each frame's vectors are read at its release's hand-over, before the release "
+                   "reaches the runtime, as that frame's own (" +
+                       first_wrong + ")");
+    const std::string described = Peer::Bridge().Describe(motion.swapchain);
+    Check(Contains(described, "motion vectors (endFrameCopies=0)") && !Contains(described, "handBacks=0,"),
+          "star citizen motion: the bridge gives the vectors' images back at each release: " + described);
+    // While it gives them back, a frame's end makes every copy first: each
+    // capture of a frame whose vectors were read sees all of its copies, so
+    // no giving back waits for a capture.
+    g_note_copies = false;
+    std::vector<CaptureCopies> noted;
+    {
+        std::scoped_lock lock(g_motion_mutex);
+        noted = g_capture_copies;
+    }
+    std::size_t motion_frames = 0;
+    bool copies_first = true;
+    for (const CaptureCopies& at : noted) {
+        if (!at.motion) continue;
+        ++motion_frames;
+        for (const CaptureCopies& other : noted) {
+            copies_first = copies_first && (other.frames_ended != at.frames_ended || other.copies == at.copies);
+        }
+    }
+    Check(motion_frames >= 20 && copies_first,
+          "star citizen motion: the frame's copies are all made before its captures (" + std::to_string(motion_frames) +
+              " frames)");
+    Check(Contains(Peer::Log(), "Frame Generation engine motion through the Vulkan bridge"),
+          "star citizen motion: the session says how it reads them");
+    // The game makes a swapchain (Star Citizen at a world entry): while its
+    // swapchains settle again nothing is read, and nothing is given back
+    // early (no new work on the game's queue, nothing to arm the bridge's
+    // device-lost sentinel).
+    const auto hand_backs = [](const std::string& described) {
+        const std::size_t at = described.find("handBacks=");
+        return at == std::string::npos ? std::string() : described.substr(at, described.find(',', at) - at);
+    };
+    const std::size_t read_before = captures().size();
+    const std::string settled = Peer::Bridge().Describe(motion.swapchain);
+    Target late = MakeTarget(app, ColorInfo(), "a swapchain made late");
+    Check(!Contains(Peer::Bridge().Describe(motion.swapchain), "motion vectors"),
+          "star citizen motion: a new swapchain unmarks the vectors' swapchain at once");
+    run(8);
+    const std::string later = Peer::Bridge().Describe(motion.swapchain);
+    Check(!Contains(later, "motion vectors") && !hand_backs(later).empty() && hand_backs(later) == hand_backs(settled) &&
+              captures().size() == read_before,
+          "star citizen motion: from a new swapchain on nothing is read or given back until they settle again: " + later);
+    CheckValidation("star citizen motion");
+    StopApp(app);
+    SetEnv("VECTORXR_SPACEWARP_PROBE", "");
+    SetEnv("VECTORXR_FRAMEGEN_ENGINE_MV", "");
+    Peer::UseFrameGenGpu(MakeStandInGpu);
+    Peer::SetFrameGenEngagement(45, std::chrono::milliseconds(3000)); // the presenter's own
+    DestroyGame(game);
+    EndCase();
+}
+
+// --- Depth by each way a game writes it --------------------------------------
+
+// A vertex shader handing its one input on as the position (SPIR-V 1.0):
+//   layout(location = 0) in vec4 position; void main() { gl_Position = position; }
+constexpr std::uint32_t kPassThroughVertexShader[] = {
+    0x07230203, 0x00010000, 0, 12, 0,
+    (2u << 16) | 17, 1,                            // OpCapability Shader
+    (3u << 16) | 14, 0, 1,                         // OpMemoryModel Logical GLSL450
+    (7u << 16) | 15, 0, 1, 0x6E69616D, 0, 2, 3,    // OpEntryPoint Vertex %1 "main" %2 %3
+    (4u << 16) | 71, 2, 30, 0,                     // OpDecorate %2 Location 0
+    (4u << 16) | 71, 3, 11, 0,                     // OpDecorate %3 BuiltIn Position
+    (2u << 16) | 19, 4,                            // %4 = OpTypeVoid
+    (3u << 16) | 33, 5, 4,                         // %5 = OpTypeFunction %4
+    (3u << 16) | 22, 6, 32,                        // %6 = OpTypeFloat 32
+    (4u << 16) | 23, 7, 6, 4,                      // %7 = OpTypeVector %6 4
+    (4u << 16) | 32, 8, 1, 7,                      // %8 = OpTypePointer Input %7
+    (4u << 16) | 32, 9, 3, 7,                      // %9 = OpTypePointer Output %7
+    (4u << 16) | 59, 8, 2, 1,                      // %2 = OpVariable %8 Input
+    (4u << 16) | 59, 9, 3, 3,                      // %3 = OpVariable %9 Output
+    (5u << 16) | 54, 4, 1, 0, 5,                   // %1 = OpFunction %4 None %5
+    (2u << 16) | 248, 10,                          // %10 = OpLabel
+    (4u << 16) | 61, 7, 11, 2,                     // %11 = OpLoad %7 %2
+    (3u << 16) | 62, 3, 11,                        // OpStore %3 %11
+    (1u << 16) | 253,                              // OpReturn
+    (1u << 16) | 56,                               // OpFunctionEnd
+};
+
+// How the game writes its depth swapchain's image.
+enum class DepthWrite {
+    kClear,           // vkCmdClearDepthStencilImage (a uniform value)
+    kBuffer,          // vkCmdCopyBufferToImage of a gradient
+    kImageFromBuffer, // vkCmdCopyImage from an image of the game's holding a gradient copied from a buffer
+    kImageFromDraw,   // vkCmdCopyImage from an image of the game's its draw gave a depth plane
+    kDraw,            // a render pass drawing a depth plane into it
+};
+
+struct DepthPath {
+    const char* name;
+    DepthWrite write;
+    bool after_release{false}; // written after its release, before xrEndFrame (Star Citizen's order)
+    bool other_queue{false};   // the copy on VulkanGame::other_queue, ordered by semaphores with ownership transfers
+};
+
+// The draws' depth plane at a point of normalized device coordinates: varying
+// across the image, another for each eye and frame, inside [0, 1] at the
+// vertices of the triangle covering the image ((-1,-1), (3,-1), (-1,3)).
+float DepthPlane(int eye, int frame, double x, double y) {
+    const double step = 0.01 * (frame % 4);
+    return static_cast<float>(eye ? 0.45 - step - 0.1 * x + 0.1 * y : 0.5 + step + 0.2 * x + 0.15 * y);
+}
+
+// What `write` puts at texel (x, y) of a `width` by `height` image.
+float ExpectedDepth(DepthWrite write, int eye, int frame, std::uint32_t x, std::uint32_t y, std::uint32_t width,
+                    std::uint32_t height) {
+    switch (write) {
+    case DepthWrite::kClear:
+        return eye ? 0.6f + 0.05f * (frame % 4) : 0.3f + 0.05f * (frame % 4);
+    case DepthWrite::kBuffer:
+    case DepthWrite::kImageFromBuffer: {
+        const float at = static_cast<float>(static_cast<double>(y) * width + x) / (static_cast<float>(width) * height);
+        return eye ? 0.95f - 0.85f * at - 0.01f * (frame % 4) : 0.05f + 0.85f * at + 0.01f * (frame % 4);
+    }
+    default:
+        return DepthPlane(eye, frame, (2.0 * x + 1.0) / width - 1.0, (2.0 * y + 1.0) / height - 1.0);
+    }
+}
+
+std::uint32_t HostMemoryType(VkPhysicalDevice physical, std::uint32_t bits) {
+    VkPhysicalDeviceMemoryProperties properties{};
+    g_vk.vkGetPhysicalDeviceMemoryProperties(physical, &properties);
+    constexpr VkMemoryPropertyFlags kWanted = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    for (std::uint32_t i = 0; i < properties.memoryTypeCount; ++i) {
+        if ((bits & (1u << i)) && (properties.memoryTypes[i].propertyFlags & kWanted) == kWanted) return i;
+    }
+    return UINT32_MAX;
+}
+
+VkImageMemoryBarrier DepthBarrier(VkImage image, VkImageLayout from, VkImageLayout to, VkAccessFlags source,
+                                  VkAccessFlags destination, std::uint32_t source_family = VK_QUEUE_FAMILY_IGNORED,
+                                  std::uint32_t destination_family = VK_QUEUE_FAMILY_IGNORED) {
+    VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    barrier.srcAccessMask = source;
+    barrier.dstAccessMask = destination;
+    barrier.oldLayout = from;
+    barrier.newLayout = to;
+    barrier.srcQueueFamilyIndex = source_family;
+    barrier.dstQueueFamilyIndex = destination_family;
+    barrier.image = image;
+    barrier.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+    return barrier;
+}
+
+void PipelineBarrier(VkCommandBuffer commands, VkPipelineStageFlags from, VkPipelineStageFlags to,
+                     const VkImageMemoryBarrier& barrier) {
+    g_vk.vkCmdPipelineBarrier(commands, from, to, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+}
+
+// The game's depth writing: a staging buffer of each eye's gradient, the
+// triangle of each eye's plane, an image of its own per eye (the source of
+// its copies) and a depth-only pipeline.
+struct DepthWriter {
+    VulkanGame* game{nullptr};
+    std::uint32_t width{0};
+    std::uint32_t height{0};
+    VkBuffer staging{VK_NULL_HANDLE};
+    VkDeviceMemory staging_memory{VK_NULL_HANDLE};
+    float* staging_data{nullptr};
+    VkBuffer vertices{VK_NULL_HANDLE};
+    VkDeviceMemory vertex_memory{VK_NULL_HANDLE};
+    float* vertex_data{nullptr};
+    std::array<VkImage, 2> sources{};
+    std::array<VkDeviceMemory, 2> source_memory{};
+    VkRenderPass into_attachment{VK_NULL_HANDLE}; // ends in the attachment layout (swapchain images)
+    VkRenderPass into_transfer{VK_NULL_HANDLE};   // ends as a copy source (the game's own images)
+    VkShaderModule shader{VK_NULL_HANDLE};
+    VkPipelineLayout layout{VK_NULL_HANDLE};
+    VkPipeline pipeline{VK_NULL_HANDLE};
+    std::map<VkImage, std::pair<VkImageView, VkFramebuffer>> framebuffers;
+    VkSemaphore to_other{VK_NULL_HANDLE};
+    VkSemaphore from_other{VK_NULL_HANDLE};
+    VkCommandBuffer other_commands{VK_NULL_HANDLE};
+    VkFence other_fence{VK_NULL_HANDLE};
+
+    void Make(VulkanGame& vulkan, std::uint32_t w, std::uint32_t h) {
+        game = &vulkan;
+        width = w;
+        height = h;
+        const VkDevice device = game->device;
+        const auto buffer = [&](VkDeviceSize size, VkBufferUsageFlags usage, VkBuffer& made, VkDeviceMemory& memory) {
+            VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+            info.size = size;
+            info.usage = usage;
+            CheckVk(g_vk.vkCreateBuffer(device, &info, nullptr, &made), "a buffer of the game's");
+            VkMemoryRequirements requirements{};
+            g_vk.vkGetBufferMemoryRequirements(device, made, &requirements);
+            VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+            allocate.allocationSize = requirements.size;
+            allocate.memoryTypeIndex = HostMemoryType(game->physical, requirements.memoryTypeBits);
+            Check(allocate.memoryTypeIndex != UINT32_MAX, "host-visible memory for a buffer of the game's");
+            CheckVk(g_vk.vkAllocateMemory(device, &allocate, nullptr, &memory), "a buffer's memory");
+            CheckVk(g_vk.vkBindBufferMemory(device, made, memory, 0), "a buffer's memory bound");
+            void* mapped = nullptr;
+            CheckVk(g_vk.vkMapMemory(device, memory, 0, VK_WHOLE_SIZE, 0, &mapped), "a buffer mapped");
+            return static_cast<float*>(mapped);
+        };
+        staging_data = buffer(VkDeviceSize{2} * width * height * sizeof(float), VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                              staging, staging_memory);
+        vertex_data = buffer(2 * 3 * 4 * sizeof(float), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vertices, vertex_memory);
+        const std::uint32_t families[] = {game->family, game->other_family};
+        for (int eye = 0; eye < 2; ++eye) {
+            VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+            info.imageType = VK_IMAGE_TYPE_2D;
+            info.format = VK_FORMAT_D32_SFLOAT;
+            info.extent = {width, height, 1};
+            info.mipLevels = 1;
+            info.arrayLayers = 1;
+            info.samples = VK_SAMPLE_COUNT_1_BIT;
+            info.tiling = VK_IMAGE_TILING_OPTIMAL;
+            info.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                         VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+            if (game->other_queue) {
+                // Read on the other queue as well: shared by both families.
+                info.sharingMode = VK_SHARING_MODE_CONCURRENT;
+                info.queueFamilyIndexCount = 2;
+                info.pQueueFamilyIndices = families;
+            }
+            info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            CheckVk(g_vk.vkCreateImage(device, &info, nullptr, &sources[eye]), "a depth image of the game's");
+            VkMemoryRequirements requirements{};
+            g_vk.vkGetImageMemoryRequirements(device, sources[eye], &requirements);
+            VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+            allocate.allocationSize = requirements.size;
+            allocate.memoryTypeIndex = MemoryType(game->physical, requirements.memoryTypeBits);
+            CheckVk(g_vk.vkAllocateMemory(device, &allocate, nullptr, &source_memory[eye]), "its memory");
+            CheckVk(g_vk.vkBindImageMemory(device, sources[eye], source_memory[eye], 0), "its memory bound");
+        }
+        // Render passes clearing their one depth attachment and drawing over
+        // all of it, made visible to whatever comes after.
+        for (const bool into_swapchain : {true, false}) {
+            VkAttachmentDescription attachment{};
+            attachment.format = VK_FORMAT_D32_SFLOAT;
+            attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+            attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            attachment.initialLayout =
+                into_swapchain ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
+            attachment.finalLayout =
+                into_swapchain ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            const VkAttachmentReference reference{0, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+            VkSubpassDescription subpass{};
+            subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+            subpass.pDepthStencilAttachment = &reference;
+            constexpr VkPipelineStageFlags kTests =
+                VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+            constexpr VkAccessFlags kDepthAccess =
+                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+            const VkSubpassDependency dependencies[2] = {
+                {VK_SUBPASS_EXTERNAL, 0, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, kTests, VK_ACCESS_MEMORY_WRITE_BIT,
+                 kDepthAccess, 0},
+                {0, VK_SUBPASS_EXTERNAL, kTests, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                 VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+                 0},
+            };
+            VkRenderPassCreateInfo info{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+            info.attachmentCount = 1;
+            info.pAttachments = &attachment;
+            info.subpassCount = 1;
+            info.pSubpasses = &subpass;
+            info.dependencyCount = 2;
+            info.pDependencies = dependencies;
+            CheckVk(g_vk.vkCreateRenderPass(device, &info, nullptr, into_swapchain ? &into_attachment : &into_transfer),
+                    "a depth render pass");
+        }
+        VkShaderModuleCreateInfo module{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        module.codeSize = sizeof(kPassThroughVertexShader);
+        module.pCode = kPassThroughVertexShader;
+        CheckVk(g_vk.vkCreateShaderModule(device, &module, nullptr, &shader), "the vertex shader");
+        VkPipelineLayoutCreateInfo layout_info{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        CheckVk(g_vk.vkCreatePipelineLayout(device, &layout_info, nullptr, &layout), "the pipeline layout");
+        VkPipelineShaderStageCreateInfo stage{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+        stage.stage = VK_SHADER_STAGE_VERTEX_BIT;
+        stage.module = shader;
+        stage.pName = "main";
+        const VkVertexInputBindingDescription binding{0, 4 * sizeof(float), VK_VERTEX_INPUT_RATE_VERTEX};
+        const VkVertexInputAttributeDescription attribute{0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0};
+        VkPipelineVertexInputStateCreateInfo input{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+        input.vertexBindingDescriptionCount = 1;
+        input.pVertexBindingDescriptions = &binding;
+        input.vertexAttributeDescriptionCount = 1;
+        input.pVertexAttributeDescriptions = &attribute;
+        VkPipelineInputAssemblyStateCreateInfo assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+        assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        const VkViewport viewport{0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f};
+        const VkRect2D scissor{{0, 0}, {width, height}};
+        VkPipelineViewportStateCreateInfo viewports{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+        viewports.viewportCount = 1;
+        viewports.pViewports = &viewport;
+        viewports.scissorCount = 1;
+        viewports.pScissors = &scissor;
+        VkPipelineRasterizationStateCreateInfo raster{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+        raster.polygonMode = VK_POLYGON_MODE_FILL;
+        raster.cullMode = VK_CULL_MODE_NONE;
+        raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        raster.lineWidth = 1.0f;
+        VkPipelineMultisampleStateCreateInfo multisample{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+        multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        VkPipelineDepthStencilStateCreateInfo depth{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+        depth.depthTestEnable = VK_TRUE;
+        depth.depthWriteEnable = VK_TRUE;
+        depth.depthCompareOp = VK_COMPARE_OP_ALWAYS;
+        VkGraphicsPipelineCreateInfo pipeline_info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+        pipeline_info.stageCount = 1;
+        pipeline_info.pStages = &stage;
+        pipeline_info.pVertexInputState = &input;
+        pipeline_info.pInputAssemblyState = &assembly;
+        pipeline_info.pViewportState = &viewports;
+        pipeline_info.pRasterizationState = &raster;
+        pipeline_info.pMultisampleState = &multisample;
+        pipeline_info.pDepthStencilState = &depth;
+        pipeline_info.layout = layout;
+        pipeline_info.renderPass = into_attachment; // compatible with into_transfer
+        CheckVk(g_vk.vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &pipeline),
+                "the depth pipeline");
+        if (game->other_queue) {
+            VkSemaphoreCreateInfo semaphore{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+            CheckVk(g_vk.vkCreateSemaphore(device, &semaphore, nullptr, &to_other), "a semaphore");
+            CheckVk(g_vk.vkCreateSemaphore(device, &semaphore, nullptr, &from_other), "a semaphore");
+            VkCommandBufferAllocateInfo allocate{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+            allocate.commandPool = game->other_pool;
+            allocate.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            allocate.commandBufferCount = 1;
+            CheckVk(g_vk.vkAllocateCommandBuffers(device, &allocate, &other_commands), "the other queue's commands");
+            VkFenceCreateInfo fence{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+            fence.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+            CheckVk(g_vk.vkCreateFence(device, &fence, nullptr, &other_fence), "the other queue's fence");
+        }
+    }
+
+    void Destroy() {
+        if (!game) return;
+        const VkDevice device = game->device;
+        CheckVk(g_vk.vkDeviceWaitIdle(device), "the game's device idles");
+        for (const auto& [image, made] : framebuffers) {
+            g_vk.vkDestroyFramebuffer(device, made.second, nullptr);
+            g_vk.vkDestroyImageView(device, made.first, nullptr);
+        }
+        framebuffers.clear();
+        if (pipeline) g_vk.vkDestroyPipeline(device, pipeline, nullptr);
+        if (layout) g_vk.vkDestroyPipelineLayout(device, layout, nullptr);
+        if (shader) g_vk.vkDestroyShaderModule(device, shader, nullptr);
+        if (into_attachment) g_vk.vkDestroyRenderPass(device, into_attachment, nullptr);
+        if (into_transfer) g_vk.vkDestroyRenderPass(device, into_transfer, nullptr);
+        for (int eye = 0; eye < 2; ++eye) {
+            if (sources[eye]) g_vk.vkDestroyImage(device, sources[eye], nullptr);
+            if (source_memory[eye]) g_vk.vkFreeMemory(device, source_memory[eye], nullptr);
+        }
+        for (auto [buffer, memory] : {std::pair{staging, staging_memory}, std::pair{vertices, vertex_memory}}) {
+            if (buffer) g_vk.vkDestroyBuffer(device, buffer, nullptr);
+            if (memory) g_vk.vkFreeMemory(device, memory, nullptr);
+        }
+        if (to_other) g_vk.vkDestroySemaphore(device, to_other, nullptr);
+        if (from_other) g_vk.vkDestroySemaphore(device, from_other, nullptr);
+        if (other_fence) g_vk.vkDestroyFence(device, other_fence, nullptr);
+        // other_commands goes with the game's other pool.
+        *this = DepthWriter{};
+    }
+
+    VkFramebuffer FramebufferOf(VkImage image, VkRenderPass pass) {
+        auto it = framebuffers.find(image);
+        if (it == framebuffers.end()) {
+            VkImageViewCreateInfo view_info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+            view_info.image = image;
+            view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            view_info.format = VK_FORMAT_D32_SFLOAT;
+            view_info.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+            VkImageView view = VK_NULL_HANDLE;
+            CheckVk(g_vk.vkCreateImageView(game->device, &view_info, nullptr, &view), "a depth view");
+            VkFramebufferCreateInfo info{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+            info.renderPass = pass; // the two passes are compatible
+            info.attachmentCount = 1;
+            info.pAttachments = &view;
+            info.width = width;
+            info.height = height;
+            info.layers = 1;
+            VkFramebuffer framebuffer = VK_NULL_HANDLE;
+            CheckVk(g_vk.vkCreateFramebuffer(game->device, &info, nullptr, &framebuffer), "a depth framebuffer");
+            it = framebuffers.emplace(image, std::pair{view, framebuffer}).first;
+        }
+        return it->second.second;
+    }
+
+    // The eye's plane drawn over all of `image` (its pass's initial layout).
+    void Draw(VkCommandBuffer commands, VkImage image, VkRenderPass pass, int eye) {
+        VkRenderPassBeginInfo begin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+        begin.renderPass = pass;
+        begin.framebuffer = FramebufferOf(image, pass);
+        begin.renderArea = {{0, 0}, {width, height}};
+        VkClearValue clear{};
+        clear.depthStencil = {0.0f, 0};
+        begin.clearValueCount = 1;
+        begin.pClearValues = &clear;
+        g_vk.vkCmdBeginRenderPass(commands, &begin, VK_SUBPASS_CONTENTS_INLINE);
+        g_vk.vkCmdBindPipeline(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+        const VkDeviceSize offset = static_cast<VkDeviceSize>(eye) * 3 * 4 * sizeof(float);
+        g_vk.vkCmdBindVertexBuffers(commands, 0, 1, &vertices, &offset);
+        g_vk.vkCmdDraw(commands, 3, 1, 0, 0);
+        g_vk.vkCmdEndRenderPass(commands);
+    }
+
+    // The eye's image of the game's holding what `write` copies from, as a copy source.
+    void PrepareSource(VkCommandBuffer commands, DepthWrite write, int eye) {
+        if (write == DepthWrite::kImageFromDraw) {
+            Draw(commands, sources[eye], into_transfer, eye);
+            return;
+        }
+        PipelineBarrier(commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        DepthBarrier(sources[eye], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                     VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT));
+        CopyStaging(commands, sources[eye], eye);
+        PipelineBarrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        DepthBarrier(sources[eye], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+                                     VK_ACCESS_TRANSFER_READ_BIT));
+    }
+
+    void CopyStaging(VkCommandBuffer commands, VkImage image, int eye) {
+        VkBufferImageCopy region{};
+        region.bufferOffset = static_cast<VkDeviceSize>(eye) * width * height * sizeof(float);
+        region.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+        region.imageExtent = {width, height, 1};
+        g_vk.vkCmdCopyBufferToImage(commands, staging, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    }
+
+    void CopySource(VkCommandBuffer commands, VkImage image, int eye) {
+        VkImageCopy region{};
+        region.srcSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+        region.dstSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+        region.extent = {width, height, 1};
+        g_vk.vkCmdCopyImage(commands, sources[eye], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image,
+                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    }
+
+    // The game's writing of the eye's swapchain image `image`, in the
+    // attachment layout before and after, on its queue (and with
+    // `other_queue` the copy on the other one).
+    void Write(const DepthPath& path, int eye, VkImage image, int frame) {
+        float* gradient = staging_data + static_cast<std::size_t>(eye) * width * height;
+        for (std::uint32_t y = 0; y < height; ++y) {
+            for (std::uint32_t x = 0; x < width; ++x) {
+                gradient[static_cast<std::size_t>(y) * width + x] =
+                    ExpectedDepth(DepthWrite::kBuffer, eye, frame, x, y, width, height);
+            }
+        }
+        float* triangle = vertex_data + eye * 12;
+        const double corners[3][2] = {{-1.0, -1.0}, {3.0, -1.0}, {-1.0, 3.0}};
+        for (int v = 0; v < 3; ++v) {
+            triangle[v * 4 + 0] = static_cast<float>(corners[v][0]);
+            triangle[v * 4 + 1] = static_cast<float>(corners[v][1]);
+            triangle[v * 4 + 2] = DepthPlane(eye, frame, corners[v][0], corners[v][1]);
+            triangle[v * 4 + 3] = 1.0f;
+        }
+        constexpr VkAccessFlags kDepthAccess =
+            VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        const auto to_transfer = DepthBarrier(image, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                                              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_MEMORY_WRITE_BIT,
+                                              VK_ACCESS_TRANSFER_WRITE_BIT);
+        const auto back = DepthBarrier(image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                       VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+                                       kDepthAccess);
+        if (path.write == DepthWrite::kClear) {
+            ClearVulkanDepth(*game, image, 1, ExpectedDepth(DepthWrite::kClear, eye, frame, 0, 0, width, height));
+            return;
+        }
+        std::uint32_t slot = 0;
+        VkCommandBuffer commands = BeginCommands(*game, slot);
+        if (path.write == DepthWrite::kDraw) {
+            Draw(commands, image, into_attachment, eye);
+            SubmitCommands(*game, slot);
+            return;
+        }
+        if (path.write != DepthWrite::kBuffer) {
+            PrepareSource(commands, path.write, eye);
+        }
+        if (!path.other_queue) {
+            PipelineBarrier(commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, to_transfer);
+            if (path.write == DepthWrite::kBuffer) {
+                CopyStaging(commands, image, eye);
+            } else {
+                CopySource(commands, image, eye);
+            }
+            PipelineBarrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, back);
+            SubmitCommands(*game, slot);
+            return;
+        }
+        // The copy on the other queue: the image goes to its family and
+        // comes back (it is exclusive), each side ordered by a semaphore.
+        Check(path.write != DepthWrite::kBuffer && game->other_queue, "an image copy on the game's other queue");
+        const std::uint32_t graphics = game->family;
+        const std::uint32_t other = game->other_family;
+        PipelineBarrier(commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                        DepthBarrier(image, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_MEMORY_WRITE_BIT, 0, graphics,
+                                     other));
+        CheckVk(g_vk.vkEndCommandBuffer(commands), "a command buffer ends");
+        VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        submit.commandBufferCount = 1;
+        submit.pCommandBuffers = &commands;
+        submit.signalSemaphoreCount = 1;
+        submit.pSignalSemaphores = &to_other;
+        CheckVk(g_vk.vkQueueSubmit(game->queue, 1, &submit, game->fences[slot]), "the game's submission");
+
+        Check(g_vk.vkWaitForFences(game->device, 1, &other_fence, VK_TRUE, 10'000'000'000ull) == VK_SUCCESS,
+              "the other queue's earlier copy finished");
+        CheckVk(g_vk.vkResetFences(game->device, 1, &other_fence), "a fence reset");
+        CheckVk(g_vk.vkResetCommandBuffer(other_commands, 0), "a command buffer reset");
+        VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        CheckVk(g_vk.vkBeginCommandBuffer(other_commands, &begin), "a command buffer begins");
+        PipelineBarrier(other_commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        DepthBarrier(image, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT, graphics,
+                                     other));
+        CopySource(other_commands, image, eye);
+        PipelineBarrier(other_commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                        DepthBarrier(image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                     VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, 0,
+                                     other, graphics));
+        CheckVk(g_vk.vkEndCommandBuffer(other_commands), "a command buffer ends");
+        const VkPipelineStageFlags transfer_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        VkSubmitInfo copy{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        copy.waitSemaphoreCount = 1;
+        copy.pWaitSemaphores = &to_other;
+        copy.pWaitDstStageMask = &transfer_stage;
+        copy.commandBufferCount = 1;
+        copy.pCommandBuffers = &other_commands;
+        copy.signalSemaphoreCount = 1;
+        copy.pSignalSemaphores = &from_other;
+        CheckVk(g_vk.vkQueueSubmit(game->other_queue, 1, &copy, other_fence), "the other queue's copy");
+
+        commands = BeginCommands(*game, slot);
+        PipelineBarrier(commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                        DepthBarrier(image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                     VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, 0, kDepthAccess, other,
+                                     graphics));
+        CheckVk(g_vk.vkEndCommandBuffer(commands), "a command buffer ends");
+        const VkPipelineStageFlags all = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+        VkSubmitInfo after{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        after.waitSemaphoreCount = 1;
+        after.pWaitSemaphores = &from_other;
+        after.pWaitDstStageMask = &all;
+        after.commandBufferCount = 1;
+        after.pCommandBuffers = &commands;
+        CheckVk(g_vk.vkQueueSubmit(game->queue, 1, &after, game->fences[slot]), "the game's submission");
+    }
+};
+
+// What the runtime got of one eye's depth along one path, frame after frame.
+struct DepthTally {
+    std::uint64_t texels{0};
+    std::uint64_t wrong{0};
+    std::uint64_t zeros{0};
+    std::uint64_t unread{0}; // frames whose depth the stand-in could not read
+    float lowest{1e30f};
+    float highest{-1e30f};
+    std::string first; // the first texel wrong
+};
+
+// One frame of a depth path: each eye's colour rendered and released, each
+// eye's depth (a swapchain of its own, as Star Citizen's) written as the
+// path does, then a projection chaining it.
+void DepthPathFrame(App& app, DepthWriter& writer, const Target& left, const Target& right,
+                    const std::array<const Target*, 2>& depth, const DepthPath& path, int frame) {
+    VulkanGame& game = *writer.game;
+    CheckVk(g_vk.vkQueueWaitIdle(game.queue), "the game's queue idles");
+    if (game.other_queue) CheckVk(g_vk.vkQueueWaitIdle(game.other_queue), "the game's other queue idles");
+    XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
+    XrFrameState state{XR_TYPE_FRAME_STATE};
+    Check(app.api.wait_frame(app.session, &wait_info, &state) == XR_SUCCESS, "xrWaitFrame");
+    std::array<std::uint32_t, 2> index{};
+    if (path.after_release) {
+        for (int eye = 0; eye < 2; ++eye) {
+            index[eye] = Acquire(app, *depth[eye]);
+            Release(app, *depth[eye]);
+        }
+    }
+    XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
+    Check(app.api.begin_frame(app.session, &begin_info) == XR_SUCCESS, "xrBeginFrame");
+    XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO};
+    locate.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    locate.displayTime = state.predictedDisplayTime;
+    locate.space = app.space;
+    XrViewState view_state{XR_TYPE_VIEW_STATE};
+    std::array<XrView, 2> located{};
+    for (XrView& view : located) view.type = XR_TYPE_VIEW;
+    std::uint32_t located_count = 0;
+    Check(app.api.locate_views(app.session, &locate, &view_state, 2, &located_count, located.data()) == XR_SUCCESS,
+          "xrLocateViews");
+    const Renderer vulkan{&game, nullptr};
+    Render(app, vulkan, left, FrameColor(frame, 0));
+    Render(app, vulkan, right, FrameColor(frame, 1));
+    for (int eye = 0; eye < 2; ++eye) {
+        if (!path.after_release) {
+            index[eye] = Acquire(app, *depth[eye]);
+        }
+        writer.Write(path, eye, reinterpret_cast<VkImage>(depth[eye]->images[index[eye]]), frame);
+        if (!path.after_release) {
+            Release(app, *depth[eye]);
+        }
+    }
+    std::array<XrCompositionLayerDepthInfoKHR, 2> depth_infos{};
+    std::array<XrCompositionLayerProjectionView, 2> views{};
+    const XrRect2Di rect{{0, 0}, {static_cast<std::int32_t>(writer.width), static_cast<std::int32_t>(writer.height)}};
+    for (int eye = 0; eye < 2; ++eye) {
+        depth_infos[eye] = {XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR};
+        depth_infos[eye].subImage.swapchain = depth[eye]->swapchain;
+        depth_infos[eye].subImage.imageRect = rect;
+        depth_infos[eye].minDepth = 0.0f;
+        depth_infos[eye].maxDepth = 1.0f;
+        // Star Citizen's reversed Z.
+        depth_infos[eye].nearZ = 1e12f;
+        depth_infos[eye].farZ = 0.02f;
+        views[eye] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+        views[eye].next = &depth_infos[eye];
+        views[eye].pose = located[eye].pose;
+        views[eye].fov = located[eye].fov;
+        views[eye].subImage.swapchain = (eye ? right : left).swapchain;
+        views[eye].subImage.imageRect = rect;
+    }
+    XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    projection.space = app.space;
+    projection.viewCount = 2;
+    projection.views = views.data();
+    const XrCompositionLayerBaseHeader* layers[] = {reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection)};
+    XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};
+    end.displayTime = state.predictedDisplayTime;
+    end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    end.layerCount = 1;
+    end.layers = layers;
+    Check(app.api.end_frame(app.session, &end) == XR_SUCCESS, "xrEndFrame");
+}
+
+// 13e. Depth a Vulkan game writes into its depth swapchains (one per eye, as
+// Star Citizen's; D32, reversed Z) reaches the runtime's images texel for
+// texel, whichever way it is written: a clear (a uniform value, which
+// compression metadata alone can hold), a copy from a buffer of a gradient,
+// a copy from an image of the game's (holding a gradient from a buffer, or
+// the depth a draw gave it), a draw into the swapchain image itself; before
+// the release, and after it before xrEndFrame (Star Citizen's order); the
+// image copy on a queue of another family too, ordered by semaphores. Each
+// path's frames with the runtime's images in turn (Virtual Desktop) and the
+// same image every frame (Pimax). Every path is reported before the case
+// fails on any. The depth probe (VECTORXR_FRAMEGEN_DEPTH_BRIDGE_PROBE=1) is on
+// throughout: what it reads must agree, and the runtime's depth must not change.
+// It lists a multisampled depth swapchain (private: never handed over), and
+// the depth swapchains are destroyed with its last reads still queued (Star
+// Citizen recreates its swapchains): the bridge waits for them and logs them.
+void TestDepthWritePaths() {
+    BeginCase("depth-write-paths");
+    SetEnv("VECTORXR_FRAMEGEN_DEPTH_BRIDGE_PROBE", "1");
+    // Frame Generation does not engage: the runtime shows the game's own frames.
+    Peer::SetFrameGenEngagement(1'000'000, std::chrono::hours(1));
+    g_image_width = 1024;
+    g_image_height = 768;
+    App app = StartApp({kVulkan2Extension});
+    GameOptions options;
+    options.other_queue = true;
+    VulkanGame game = MakeVulkanGame(app, options);
+    SessionCreate create(game, app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS && Peer::Bridge().Active(),
+          "depth paths: a bridged session (" + Unbridged(Peer::Log()) + ")");
+    BeginSession(app);
+    Target left = MakeTarget(app, ColorInfo(), "the left eye");
+    Target right = MakeTarget(app, ColorInfo(), "the right eye");
+    Target left_depth = MakeTarget(app, DepthInfo(VK_FORMAT_D32_SFLOAT, 1), "the left eye's depth");
+    Target right_depth = MakeTarget(app, DepthInfo(VK_FORMAT_D32_SFLOAT, 1), "the right eye's depth");
+    Check(!Peer::Bridge().Unmirrored(left_depth.swapchain) && !Peer::Bridge().Unmirrored(right_depth.swapchain),
+          "depth paths: the depth swapchains are mirrored");
+    // Never used by a frame: the probe's "so far" lines list it.
+    Target private_depth = MakeTarget(app, DepthInfo(VK_FORMAT_D32_SFLOAT, 1, 4), "a multisampled depth swapchain");
+    Check(Peer::Bridge().Unmirrored(private_depth.swapchain), "depth paths: a multisampled depth swapchain is private");
+    const std::array<const Target*, 2> depth{&left_depth, &right_depth};
+    DepthWriter writer;
+    writer.Make(game, g_image_width, g_image_height);
+    std::vector<DepthPath> paths = {
+        {"clear", DepthWrite::kClear},
+        {"copy from a buffer", DepthWrite::kBuffer},
+        {"copy from an image (from a buffer)", DepthWrite::kImageFromBuffer},
+        {"copy from an image (drawn)", DepthWrite::kImageFromDraw},
+        {"draw", DepthWrite::kDraw},
+        {"copy from an image (from a buffer) after the release", DepthWrite::kImageFromBuffer, true},
+        {"copy from an image (drawn) after the release", DepthWrite::kImageFromDraw, true},
+        {"draw after the release", DepthWrite::kDraw, true},
+    };
+    if (game.other_queue) {
+        paths.push_back({"copy from an image (drawn) on another queue", DepthWrite::kImageFromDraw, false, true});
+        paths.push_back(
+            {"copy from an image (drawn) on another queue after the release", DepthWrite::kImageFromDraw, true, true});
+    } else {
+        std::cout << "depth paths: the GPU has no transfer-only or compute-only queue family: no other-queue path\n";
+    }
+    std::cout << "depth paths: " << writer.width << "x" << writer.height << ", other queue family "
+              << (game.other_queue ? std::to_string(game.other_family) : std::string("none")) << "\n";
+    constexpr int kFrames = 3;
+    bool all_arrive = true;
+    int frame = 0;
+    g_runtime.read_depth = true;
+    g_runtime.read_depth_all = true;
+    for (const bool same_image : {false, true}) {
+        {
+            std::scoped_lock lock(g_runtime_mutex);
+            g_runtime.same_image = same_image;
+        }
+        for (const DepthPath& path : paths) {
+            if (&path == &paths[paths.size() / 2]) {
+                // The probe reads about once a second: a probe of this pass's later paths.
+                std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+            }
+            std::array<DepthTally, 2> tally{};
+            for (int i = 0; i < kFrames; ++i, ++frame) {
+                DepthPathFrame(app, writer, left, right, depth, path, frame);
+                std::scoped_lock lock(g_runtime_mutex);
+                const ShownFrame& shown = g_runtime.frames.back();
+                Check(shown.views.size() == 2, "depth paths: two views");
+                for (int eye = 0; eye < 2; ++eye) {
+                    const ShownView& view = shown.views[eye];
+                    Check(view.depth && view.depth_swapchain == depth[eye]->swapchain,
+                          "depth paths: the runtime gets each eye's depth swapchain");
+                    DepthTally& t = tally[eye];
+                    if (view.depth_texels.size() != static_cast<std::size_t>(writer.width) * writer.height) {
+                        ++t.unread;
+                        continue;
+                    }
+                    const float tolerance =
+                        path.write == DepthWrite::kDraw || path.write == DepthWrite::kImageFromDraw ? 2e-5f : 0.0f;
+                    for (std::uint32_t y = 0; y < writer.height; ++y) {
+                        for (std::uint32_t x = 0; x < writer.width; ++x) {
+                            const float got = view.depth_texels[static_cast<std::size_t>(y) * writer.width + x];
+                            const float expected =
+                                ExpectedDepth(path.write, eye, frame, x, y, writer.width, writer.height);
+                            ++t.texels;
+                            t.zeros += got == 0.0f ? 1 : 0;
+                            t.lowest = std::min(t.lowest, got);
+                            t.highest = std::max(t.highest, got);
+                            if (!(std::abs(got - expected) <= tolerance)) {
+                                if (t.wrong++ == 0) {
+                                    t.first = "frame " + std::to_string(frame) + " (" + std::to_string(x) + "," +
+                                              std::to_string(y) + ") holds " + std::to_string(got) + ", written " +
+                                              std::to_string(expected);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            for (int eye = 0; eye < 2; ++eye) {
+                const DepthTally& t = tally[eye];
+                const bool arrived = t.unread == 0 && t.wrong == 0 && t.texels > 0;
+                all_arrive = all_arrive && arrived;
+                std::cout << "depth path " << (arrived ? "PASS" : "FAIL") << ": " << path.name
+                          << (same_image ? " (the same image every frame)" : " (images in turn)") << ", eye " << eye
+                          << ": " << t.wrong << " of " << t.texels << " texels wrong, " << t.zeros << " zero, "
+                          << t.unread << " frames unread, range " << t.lowest << ".." << t.highest
+                          << (t.first.empty() ? "" : ", first: " + t.first) << "\n";
+            }
+            std::cout << std::flush;
+        }
+    }
+    g_runtime.read_depth = false;
+    g_runtime.read_depth_all = false;
+    for (const Target* target : depth) {
+        std::cout << "depth paths: " << Peer::Bridge().Describe(target->swapchain) << "\n";
+    }
+    // The probe: on, and each read of it agreeing with the runtime (every
+    // path writes nonzero depth everywhere: all of its grid, in both).
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    DepthPathFrame(app, writer, left, right, depth, paths.front(), frame++);
+    DepthPathFrame(app, writer, left, right, depth, paths.front(), frame++);
+    // The probe's reads logged so far (a line each slice).
+    const auto probe_reads = [] {
+        const std::string log = Peer::Log();
+        std::vector<std::string> lines;
+        for (std::size_t at = log.find("depth probe "); at != std::string::npos; at = log.find("depth probe ", at + 1)) {
+            const std::string line = log.substr(at, log.find('\n', at) - at);
+            if (Contains(line, ": swapchain ")) lines.push_back(line);
+        }
+        return lines;
+    };
+    const std::size_t before_destroy = probe_reads().size();
+    // A probe due at each eye's next release, then each depth swapchain
+    // destroyed before any frame ends: its reads are still queued.
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    CheckVk(g_vk.vkQueueWaitIdle(game.queue), "the game's queue idles");
+    if (game.other_queue) CheckVk(g_vk.vkQueueWaitIdle(game.other_queue), "the game's other queue idles");
+    for (int eye = 0; eye < 2; ++eye) {
+        const std::uint32_t index = Acquire(app, *depth[eye]);
+        writer.Write(paths.front(), eye, reinterpret_cast<VkImage>(depth[eye]->images[index]), frame);
+        Release(app, *depth[eye]);
+    }
+    ++frame;
+    for (Target* target : {&left_depth, &right_depth, &private_depth}) {
+        const XrSwapchain swapchain = target->swapchain;
+        Check(app.api.destroy_swapchain(swapchain) == XR_SUCCESS && !g_runtime.destroyed.empty() &&
+                  g_runtime.destroyed.back() == swapchain,
+              "depth paths: a depth swapchain is destroyed, and the runtime's with it");
+        target->swapchain = XR_NULL_HANDLE;
+    }
+    const std::string log = Peer::Log();
+    std::size_t probes = 0;
+    std::size_t agreeing = 0;
+    for (const std::string& line : probe_reads()) {
+        std::cout << line << "\n";
+        ++probes;
+        agreeing += Contains(line, "(Vulkan, before the copy) nonzero=1024 ") &&
+                            Contains(line, "; the runtime's image after the copy (Direct3D 12) nonzero=1024 ") &&
+                            Contains(line, "same in both=1024.")
+                        ? 1
+                        : 0;
+    }
+    Check(Contains(log, "the depth probe is on (VECTORXR_FRAMEGEN_DEPTH_BRIDGE_PROBE=1, research)"),
+          "depth paths: the depth probe says it is on");
+    Check(probes >= 6, "depth paths: the depth probe read both eyes' depth at least three times (" +
+                           std::to_string(probes) + " reads)");
+    Check(probes == before_destroy + 2, "depth paths: the probe reads still queued when the depth swapchains were "
+                                        "destroyed were waited for and logged (" +
+                                            std::to_string(probes - before_destroy) + " of 2)");
+    Check(!Contains(log, "kept until the session ends") && !Contains(log, "is kept until its session ends"),
+          "depth paths: no destroyed depth swapchain is kept");
+    std::size_t private_listed = 0;
+    std::size_t destroyed = 0;
+    for (std::size_t at = log.find("depth probe: swapchain "); at != std::string::npos;
+         at = log.find("depth probe: swapchain ", at + 1)) {
+        const std::string line = log.substr(at, log.find('\n', at) - at);
+        private_listed += Contains(line, " so far (mode=private-depth, ") &&
+                                  Contains(line, "private because it is multisampled, probes=0): it stays the game's own")
+                              ? 1
+                              : 0;
+        destroyed += Contains(line, " destroyed (mode=") ? 1 : 0;
+    }
+    Check(private_listed >= 1, "depth paths: the probe lists the private depth swapchain");
+    Check(destroyed == 3, "depth paths: the probe logs each depth swapchain destroyed (" + std::to_string(destroyed) +
+                              " of 3)");
+    SetEnv("VECTORXR_FRAMEGEN_DEPTH_BRIDGE_PROBE", "");
+    CheckValidation("depth paths");
+    Check(all_arrive, "depth paths: every way of writing depth reaches the runtime's images texel for texel");
+    Check(agreeing == probes, "depth paths: every probe read found the game's depth in the twin and the runtime's image (" +
+                                  std::to_string(agreeing) + " of " + std::to_string(probes) + ")");
+    writer.Destroy();
+    {
+        std::scoped_lock lock(g_runtime_mutex);
+        g_runtime.same_image = false;
+    }
+    StopApp(app);
+    Peer::SetFrameGenEngagement(45, std::chrono::milliseconds(3000)); // the presenter's own
+    DestroyGame(game);
+    EndCase();
+}
+
 // 13b. The game's queue stalls before its last release of a frame while
 // Frame Generation (the real Direct3D 12 backend) generates, and the game
 // destroys its session (or its instance, the session alive): the bridge lets
@@ -4294,9 +5486,13 @@ void IsolateHost() {
     SetEnv("VECTORXR_LOG_PATH", (g_root / "logs" / "vectorxr.log").string());
     SetEnv("VECTORXR_SEEN_APPS_PATH", (g_root / "seen-apps.json").string());
     SetEnv("VECTORXR_RUNTIME_RELAY_PATH", (g_root / "runtime").string());
+    SetEnv("VECTORXR_EXTERNAL_STATUS_PATH", (g_root / "api" / "status.json").string());
     SetEnv("VECTORXR_RUNTIME_PACING_PATH", (g_root / "runtime-pacing.json").string());
     SetEnv("VECTORXR_TURBO_METRICS_PATH", (g_root / "turbo-metrics.json").string());
     SetEnv("XR_RUNTIME_JSON", (g_root / "no-runtime.json").string());
+    // Frame Generation's research switches (framegen-research.txt) and
+    // capture requests.
+    SetEnv("LOCALAPPDATA", (g_root / "appdata").string());
     // Whatever the host sets for the bridges does not apply.
     SetEnv("VECTORXR_FRAMEGEN_QUEUE", "");
     SetEnv("VECTORXR_D3D11_BRIDGE", "");
@@ -4412,7 +5608,12 @@ std::string FindGpu() {
     if (!why.empty() && wanted && !test_adapter::FirstMatch(adapters, *wanted)) {
         why = test_adapter::NoMatch(*wanted, adapters);
     }
-    if (why.empty() && g_validation) {
+    const char* no_stall = std::getenv("FG_TEST_NO_STALL");
+    const bool skip_negative_controls = no_stall && std::string(no_stall) == "1";
+    if (why.empty() && g_validation && skip_negative_controls) {
+        std::cout << "FG_TEST_NO_STALL=1: skipped deliberate validation-error canary\n";
+    }
+    if (why.empty() && g_validation && !skip_negative_controls) {
         // The canary: a barrier from a layout the image is not in must be reported.
         fixture.family = GraphicsFamily(fixture.physical);
         const float priority = 1.0f;
@@ -4481,6 +5682,10 @@ std::string FindGpu() {
 
 int main(int argc, char** argv) {
     g_unbridged_only = argc > 1 && std::string(argv[1]) == "unbridged";
+    const bool depth_paths_only = argc > 1 && std::string(argv[1]) == "depth-paths";
+    const bool teardown_only = argc > 1 && std::string(argv[1]) == "teardown";
+    const char* no_stall = std::getenv("FG_TEST_NO_STALL");
+    const bool skip_negative_controls = no_stall && std::string(no_stall) == "1";
     const bool require = vulkan_test::RequireHardware();
     const auto skip = [&](const std::string& why) {
         std::cout << (require ? "FAILED (VECTORXR_TESTS_REQUIRE_HW=1): " : "skipped: ") << why << "\n";
@@ -4507,6 +5712,23 @@ int main(int argc, char** argv) {
     IsolateHost();
     Peer::UseFrameGenGpu(MakeStandInGpu);
 
+    if (depth_paths_only || teardown_only) {
+        if (teardown_only) {
+            TestBridgedSession(2);
+            TestBridgedSession(1);
+            TestDestroyInstanceWithSession();
+            TestPrivateDepthTeardown();
+        } else {
+            TestDepthWritePaths();
+        }
+        g_runtime = StandIn{};
+        Peer::ReleaseLog(g_root / "released" / "vectorxr.log");
+        std::error_code error;
+        std::filesystem::remove_all(g_root, error);
+        std::cout << "vulkan bridge layer tests passed (" << (teardown_only ? "teardown" : "depth paths")
+                  << " only)\n";
+        return 0;
+    }
     // The cases that need no working bridge.
     TestInstanceExtensions();
     TestRefusedInstance();
@@ -4524,14 +5746,23 @@ int main(int argc, char** argv) {
         TestBridgedFallbacks();
         TestBothEnablesOwnDevice();
         TestDestroyInstanceWithSession();
+        TestPrivateDepthTeardown();
         TestRefusedDestroySession();
         TestBridgedFrameGen("interpolate");
         TestBridgedFrameGen("extrapolate");
         TestStarCitizenShapes();
-        TestStalledTeardown(false);
-        TestStalledTeardown(true);
+        TestStarCitizenMotion();
+        TestDepthWritePaths();
+        if (!skip_negative_controls) {
+            TestStalledTeardown(false);
+            TestStalledTeardown(true);
+        }
         TestNativeD3D12("native-d3d12-after-bridged");
-        TestDeviceLost();
+        if (!skip_negative_controls) {
+            TestDeviceLost();
+        } else {
+            std::cout << "FG_TEST_NO_STALL=1: skipped stalled teardown and device-removal controls\n";
+        }
     }
     g_runtime = StandIn{};
     Peer::ReleaseLog(g_root / "released" / "vectorxr.log");

@@ -1,0 +1,95 @@
+{
+  "keyGroups": {
+    "function": "Funktionstasten",
+    "letter": "Buchstabentasten",
+    "number": "Zifferntasten",
+    "numpad": "Ziffernblocktasten",
+    "special": "Sondertasten"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "space": "Space",
+    "numpad": "Numpad{digit}"
+  },
+  "modules": {
+    "depthxr": "Tiefe",
+    "pivotxr": "Pivot",
+    "quadviews": "Quadviews",
+    "turbo": "Turbo",
+    "framegen": "Frame Generation"
+  },
+  "defaults": {
+    "newProfile": "Neues Profil",
+    "profile": "Profil",
+    "standardNudges": "Standard-Nudges",
+    "nudgeSetNumbered": "Nudge-Satz {number}",
+    "profileNudges": "{profile} Nudges",
+    "newQuickView": "Neue Quick View",
+    "quickViewNumbered": "Quick View {number}",
+    "deviceButton": "Taste {number}",
+    "turboTimingProfile": "{name}-Timing"
+  },
+  "snapViews": {
+    "defaultProfileUnavailable": "Nicht verfügbar im Standardprofil, das entweder Enhanced Motion oder Snap Views ist. Verwenden Sie ein eigenes Enhanced-Motion-Profil zusammen mit einem eigenen Snap-Views-Profil für dieselbe Anwendung.",
+    "noSnapPartner": "Noch kein aktiviertes Snap-Views-Profil zielt auf die Anwendungen dieses Profils.",
+    "motionNoteNone": "Ein Enhanced-Motion-Profil für dieselbe Anwendung kann in diesen Snap Views weiterarbeiten, wenn darin „Enhanced Motion auf Snap Views anwenden“ eingeschaltet ist.",
+    "motionNoteSources": "Enhanced Motion aus {profiles} wirkt in diesen Snap Views weiter."
+  },
+  "binding": {
+    "device": "{device} / {input}",
+    "unassignedDevice": "Nicht zugewiesenes Gerät",
+    "unassignedInput": "nicht zugewiesene Eingabe",
+    "none": "Keine",
+    "listMore_one": "{first} oder {count} weitere",
+    "listMore_other": "{first} oder {count} weitere",
+    "numbered": "{label} (Belegung {number})"
+  },
+  "actions": {
+    "quadviewsDiagnostics": "Quadviews: Diagnosevisualisierung",
+    "depthToggle": "Tiefe: A/B-Umschaltung",
+    "depthLock": "Tiefe: Depth Lock A/B",
+    "osdToggle": "OSD: ein-/ausblenden",
+    "osdCycle": "OSD: Layout wechseln",
+    "turboToggle": "Turbo: A/B-Umschaltung",
+    "turboMetrics": "Turbo: Metrikerfassung",
+    "framegenToggle": "Frame Generation: A/B-Umschaltung",
+    "nudgeLeft": "Pivot {set}: Nudge links",
+    "nudgeRight": "Pivot {set}: Nudge rechts",
+    "nudgeUp": "Pivot {set}: Nudge hoch",
+    "nudgeDown": "Pivot {set}: Nudge runter",
+    "nudgeCenter": "Pivot {set}: Nudge-Versatz zentrieren",
+    "defaultActivate": "Pivot Standard: Aktivieren",
+    "defaultSetOrigin": "Pivot Standard: Ursprung setzen",
+    "defaultReleaseOrigin": "Pivot Standard: Ursprung freigeben",
+    "defaultQuickView": "Pivot Standard: {view}",
+    "profileNumbered": "Profil {number}",
+    "profileActivate": "Pivot {profile}: Aktivieren",
+    "profileSetOrigin": "Pivot {profile}: Ursprung setzen",
+    "profileReleaseOrigin": "Pivot {profile}: Ursprung freigeben",
+    "profileQuickView": "Pivot {profile}: {view}"
+  },
+  "conflicts": {
+    "sharedTitle": "{binding} ist mehrfach zugewiesen",
+    "sharedMessage": "Diese Eingabe ist {actions} zugewiesen. Ein Druck kann mehrere Aktionen auslösen, oder eine Aktion mit höherer Priorität kann eine andere überdecken. Diese Warnung verhindert das Speichern nicht.",
+    "duplicateTitle": "{binding} ist doppelt vorhanden",
+    "duplicateMessage": "{action} enthält dieselbe physische Eingabe mehrfach. Das Duplikat ist überflüssig, und zur Laufzeit wird nur die erste Kopie verwendet.",
+    "duplicateActions": {
+      "suspendControls": "Steuerungen zum Anhalten",
+      "activation": "Aktivierung",
+      "setOrigin": "Ursprung setzen",
+      "releaseOrigin": "Ursprung freigeben"
+    },
+    "everySuspendPress": "Jeder Druck auf eine Steuerung zum Anhalten",
+    "everyActivationPress": "Jeder Druck auf eine Aktivierungssteuerung",
+    "allThreeTitle": "Eine Belegung steuert drei widersprüchliche Aktionen",
+    "allThreeMessage": "„Aktivierung“, „Ursprung setzen“ und „Ursprung freigeben“ verwenden alle {binding}. {press} fordert eine neue neutrale Vorwärtsrichtung an und löscht sie sofort wieder, sodass der Ursprung nicht erfasst wird. Geben Sie „Ursprung setzen“ oder „Ursprung freigeben“ eine eigene Belegung.",
+    "setsOriginTitle": "Aktivierung setzt auch den Ursprung",
+    "setsOriginMessage": "„Aktivierung“ und „Ursprung setzen“ verwenden beide {binding}. {press} erfasst die aktuelle Kopfrichtung erneut als neutrale Vorwärtsrichtung von Pivot. Behalten Sie das nur bei, wenn es beabsichtigt ist; geben Sie „Ursprung setzen“ andernfalls eine eigene Belegung, normalerweise Ihre Neuzentrierungssteuerung im Spiel.",
+    "releasesOriginTitle": "Aktivierung gibt auch den Ursprung frei",
+    "releasesOriginMessage": "„Aktivierung“ und „Ursprung freigeben“ verwenden beide {binding}. {press} löscht jeden erfassten Pivot-Ursprung. Behalten Sie das nur bei, wenn es beabsichtigt ist; geben Sie „Ursprung freigeben“ andernfalls eine eigene Belegung.",
+    "setCanceledTitle": "„Ursprung setzen“ wird sofort aufgehoben",
+    "setCanceledMessage": "„Ursprung setzen“ und „Ursprung freigeben“ verwenden beide {binding}. Ein Druck fordert eine neue neutrale Vorwärtsrichtung an und löscht sie sofort wieder, sodass der Ursprung nicht erfasst wird. Geben Sie einer der Aktionen eine andere Belegung."
+  }
+}

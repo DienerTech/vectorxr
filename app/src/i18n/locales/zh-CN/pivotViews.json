@@ -1,0 +1,133 @@
+{
+  "shared": {
+    "pivot": "Pivot",
+    "breadcrumb": "导航路径",
+    "returnToPivot": "返回 Pivot",
+    "editTitle": "编辑 {name}",
+    "yaw": "偏航",
+    "pitch": "俯仰",
+    "transition": "过渡",
+    "unitSeconds": "秒",
+    "unitCm": "cm",
+    "behavior": "行为",
+    "hold": "按住",
+    "toggle": "切换",
+    "addBinding": "添加绑定",
+    "bindingLabel": "绑定 {index}",
+    "holdDescription": "仅在按住时视图处于活动状态。",
+    "toggleDescription": "按一次进入；再按一次退出。",
+    "bindingCount_other": "{count} 个绑定"
+  },
+  "viewControlsPage": {
+    "snapViews": "快照视图",
+    "title": "{context} — 快照视图",
+    "returnHint": "按 Esc 或“完成”返回。",
+    "returnToSnapViews": "返回快照视图",
+    "name": "名称",
+    "yawHint": "负值向左转；正值向右转。",
+    "positionOffset": "可选位置偏移",
+    "positionHint": "位置相对于捕获的 Pivot 原点。自然的头部平移仍然可用。",
+    "rightLeft": "右 / 左",
+    "upDown": "上 / 下",
+    "forwardBack": "前 / 后",
+    "bindings": "绑定",
+    "bindingsHint": "“按住”在松开时返回。“切换”会一直保持，直到再次按下或另一个快速视图接管。",
+    "noBindings": "未分配任何绑定。添加绑定之前，此快速视图不起作用。",
+    "quickViews": "快速视图",
+    "quickViewsHint": "相对于 Pivot 原点的命名姿态，在目标周围保持 1:1 的自然头部追踪。",
+    "createPreset": "创建四视图预设",
+    "addQuickView": "添加快速视图",
+    "empty": "还没有快速视图。可以手动添加一个，或从四视图 HAT 预设开始。",
+    "summary_other": "偏航 {yaw}° · 俯仰 {pitch}° · {count} 个绑定",
+    "position": "位置 右 {right} · 上 {up} · 前 {forward} cm",
+    "moveUp": "上移",
+    "moveDown": "下移",
+    "copyName": "{name} 副本",
+    "presets": {
+      "lookLeft": "向左看",
+      "lookRight": "向右看",
+      "high12": "上方 12 点",
+      "checkSix": "查看六点钟"
+    }
+  },
+  "viewControlsPanel": {
+    "snapViews": "快照视图",
+    "viewCount_other": "{count} 个视图",
+    "editSnapViews": "编辑快照视图…"
+  },
+  "nudgeSetPage": {
+    "nudgeSets": "微调组",
+    "linked_other": "已关联到 {count} 个配置文件。更改会应用到选择了此组的所有位置。",
+    "setName": "组名称",
+    "allowWhileInactive": "在 Pivot 非活动时也允许",
+    "allowWhileInactiveHint": "即使没有任何关联的配置文件处于启用状态，这些绑定也可以调整并保留全局视图偏移。",
+    "yawStep": "偏航步长",
+    "pitchStep": "俯仰步长",
+    "yawLeft": "向左偏航",
+    "yawRight": "向右偏航",
+    "pitchUp": "向上俯仰",
+    "pitchDown": "向下俯仰",
+    "yawStepDescription": "为当前视图增加一个偏航步长。",
+    "pitchStepDescription": "为当前视图增加一个俯仰步长。",
+    "center": "微调偏移归中",
+    "centerDescription": "清除累积的微调偏移。",
+    "resetToDefaults": "重置为默认值",
+    "confirmReset": "要重置移动值并从此微调组中移除所有绑定吗？",
+    "deleteSet": "删除微调组",
+    "deleteTitle": "删除此微调组",
+    "deleteRequired": "至少需要一个微调组",
+    "confirmDelete": "要删除“{name}”吗？使用它的配置文件将切换到另一个微调组。"
+  },
+  "snapBindingsPage": {
+    "snapViewBindings": "快照视图绑定",
+    "title": "{context} — 快照视图绑定",
+    "hint": "分配“按住”或“切换”控制，而不更改已保存的视图变换。",
+    "noBinding": "未分配绑定。此快照视图处于非活动状态。",
+    "empty": "还没有快照视图。请先在“编辑快照视图”中创建视图，再分配绑定。"
+  },
+  "snapBindingsPanel": {
+    "snapViewBindings": "快照视图绑定",
+    "inactiveHint": "分配绑定之前，快照视图保持非活动状态。",
+    "editBindings": "编辑绑定…"
+  },
+  "snapStacking": {
+    "title": "将增强运动应用于快照视图",
+    "description": "进入快照视图时保持辅助，或围绕已选择的视图激活辅助。使用此配置文件的旋转和位置调校。"
+  },
+  "originPage": {
+    "originControls": "原点控制",
+    "title": "{context} — 原点控制",
+    "hint": "使 Pivot 的中立姿态与模拟器的重新居中位置保持一致。",
+    "closeLabel": "关闭原点控制并返回 Pivot",
+    "setOrigin": "设置原点（可选）",
+    "setOriginDescription": "将当前头部姿态捕获为 Pivot 的中立坐姿原点。请将其绑定到您在游戏中用于重新居中视图的同一个控制，这样两个原点会一起更新。",
+    "setOriginNone": "未分配绑定。Pivot 围绕 HMD 原点旋转。",
+    "releaseOrigin": "释放原点（可选）",
+    "releaseOriginDescription": "清除已捕获的原点，让 Pivot 回到 HMD 原点。如果捕获原点时视线偏离了中心，此功能会很有用。",
+    "releaseOriginNone": "未分配绑定。已捕获的原点会一直有效，直到会话结束或被重新捕获。"
+  },
+  "originPanel": {
+    "originControls": "原点控制",
+    "setOrigin": "设置原点",
+    "setOriginTitle": "将当前头部姿态捕获为 Pivot 的中立坐姿原点。",
+    "releaseOrigin": "释放原点",
+    "releaseOriginTitle": "释放已捕获的原点，让 Pivot 回到默认 HMD 原点。",
+    "editOrigin": "编辑原点…"
+  },
+  "bindingsPanel": {
+    "motionActivation": "运动激活",
+    "alwaysActive": "始终活动",
+    "manual": "手动",
+    "noSuspendControls": "无暂停控制",
+    "noActivationControls": "无激活控制",
+    "editActivation": "编辑激活..."
+  },
+  "bindingsPage": {
+    "motionActivation": "运动激活",
+    "title": "{context} — 激活",
+    "returnHint": "按 Esc 或“完成”返回 Pivot。",
+    "closeLabel": "关闭激活并返回 Pivot",
+    "alwaysActiveDescription": "选择用于临时暂停或关闭 Pivot 的控制。",
+    "manualDescription": "选择用于启用 Pivot 的控制。"
+  }
+}

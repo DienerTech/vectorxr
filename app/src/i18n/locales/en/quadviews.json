@@ -1,0 +1,320 @@
+{
+  "tab": {
+    "intro": "Configure foveal and peripheral rendering for games that already request OpenXR quad views. Enabling this module does not add quad-view support to ordinary stereo games.",
+    "varjoCompatibility": "Varjo Compatibility",
+    "setupGuide": {
+      "title": "Setup guide",
+      "summary": "Recommended DCS setup and compatible titles",
+      "heading": "Recommended DCS setup",
+      "gameLabel": "Game:",
+      "game": "{label} turn on {useQuadView} and, for gaze tracking, {useEyeTracking}.",
+      "useQuadView": "Use Quad View",
+      "useEyeTracking": "Use Eye Tracking",
+      "providerLabel": "Provider:",
+      "provider": "{label} enable the VectorXR layer and Quadviews profile, then disable {layerName}. On Pimax, also turn Native Pimax Quad Views off. Native Varjo Quadviews remains runtime-driven.",
+      "applyLabel": "Apply:",
+      "apply": "{label} save the profile and restart DCS after changing runtime, layer, or in-game VR settings.",
+      "titles": "DCS is the primary tested title. Likely, but unconfirmed, D3D11 candidates include Pavlov VR, VAIL VR, The 7th Guest VR, and Kayak VR: Mirage. Each title must request quad views itself.",
+      "pixelEstimates": "Pixel estimates compare application view rendering only; the runtime and VectorXR composite have additional GPU cost."
+    },
+    "restartNoteLabel": "Restart to apply:",
+    "restartNote": "{label} marked fields and Quadviews on/off take full effect after the current OpenXR application exits. Unmarked controls update during play.",
+    "diagnostics": {
+      "eyebrow": "In-headset diagnostics",
+      "intro": "See render zones, focus alignment, gaze filtering, and tracking availability while you tune Quadviews.",
+      "howToRead": "How to read the overlay",
+      "sessionControl": "Session control",
+      "shownIn": "Shown in {application}",
+      "hiddenIn": "Hidden in {application}",
+      "unavailable": "Unavailable in the active OpenXR session",
+      "noSession": "No active synthesized Quadviews session",
+      "applying": "Applying...",
+      "hide": "Hide visualization",
+      "show": "Show visualization",
+      "shortcutHeading": "In-headset shortcut",
+      "shortcutHint": "Optional. The visualization starts hidden each OpenXR session.",
+      "guideHint": "New to the visualization? The interactive guide explains each shape and maps common symptoms to the setting that controls them.",
+      "readStatusFailed": "Unable to read runtime status",
+      "controlFailed": "Unable to control the visualization",
+      "notAcknowledged": "The OpenXR session did not acknowledge the control request"
+    },
+    "binding": {
+      "label": "Diagnostic Visualization Toggle",
+      "description": "Show or hide the Quadviews calibration view while in-game. It starts hidden each session and is available only when VectorXR synthesizes Quadviews through its D3D11 compositor.",
+      "noneText": "No in-headset shortcut assigned. You can still control the visualization from the Quadviews page."
+    },
+    "defaultProfile": {
+      "heading": "Default Profile",
+      "appliesTo": "Applies to applications without an enabled custom profile",
+      "toggleOn": "Default Profile On",
+      "toggleOff": "Default Profile Off",
+      "restartTitle": "Quadviews enable/disable changes apply after the running OpenXR application exits.",
+      "offNote": "Off unless an enabled custom profile turns it on. Custom profiles below still apply to their applications."
+    },
+    "launchStateNote": "Saved immediately, but a running OpenXR application keeps its launch-time Quadviews state until it exits.",
+    "customProfiles": {
+      "heading": "Custom Profiles",
+      "intro": "Override Quadviews per application. The first enabled matching profile wins.",
+      "add": "Add Profile",
+      "empty": "No custom profiles yet. Add a profile to override quadview values for a specific application.",
+      "alreadyTargeted": "{application} is already targeted by Profile {number}. The first active profile wins."
+    },
+    "budget": {
+      "estimate": "{percent}% estimated app render pixels",
+      "light": "Light",
+      "moderate": "Moderate",
+      "heavy": "Heavy",
+      "detrimental": "⚠ Detrimental"
+    },
+    "varjo": {
+      "title": "Varjo Compatible Quadviews",
+      "biPanel": "Varjo headsets are bi-panel: a wide, lower-density context display plus a small, high-density focus display per eye. VectorXR's Varjo compatible quadviews keeps the four view layers your headset expects (two peripheral, two focus) so the physical focus panels are driven directly. As a consequence, the Varjo runtime takes over the view geometry, and some Quadviews settings are ignored.",
+      "notesIntro": "VectorXR Quadviews & Varjo runtime compatibility notes:",
+      "stillApplies": "VectorXR Still applies",
+      "handledByRuntime": "Handled by the Varjo runtime",
+      "focusScale": "Focus Scale",
+      "peripheralScale": "Peripheral Scale",
+      "focusSharpness": "Focus Sharpness",
+      "focusSizeTransition": "Focus Size & Transition Thickness",
+      "offsets": "Horizontal & Vertical Offset",
+      "smoothingDeadzone": "Gaze Smoothing & Deadzone",
+      "diagnosticVisualization": "Diagnostic Visualization",
+      "emulation": "On headsets without physical quad-view support through bi-panel displays (e.g. Quest Pro, Pimax Crystal), VectorXR Quadviews uses the standard emulation mode and all settings apply. These compatibility notes apply only to Varjo runtimes.",
+      "diagnosticUnsupportedLead": "Diagnostic visualization is not currently supported on Varjo headsets.",
+      "diagnosticUnsupported": "{lead} Varjo's runtime owns the native quad-view composition, so VectorXR's synthesized D3D11 compositor does not run there."
+    }
+  },
+  "fields": {
+    "preset": {
+      "heading": "Vector Preset",
+      "restartTitle": "Presets include settings that require a game restart for their complete effect.",
+      "intro": "A strong starting point; tracking and alignment remain yours.",
+      "buttonTitle": "Presets change focus dimensions and resolution, so their complete effect requires a game restart.",
+      "performance": "Performance",
+      "balanced": "Balanced",
+      "quality": "Quality"
+    },
+    "focusWindow": "Focus Window",
+    "focusWidth": {
+      "label": "Focus Width",
+      "restart": "The focus window moves live, but DCS keeps its existing texture width and pixel workload until restart."
+    },
+    "focusHeight": {
+      "label": "Focus Height",
+      "restart": "The focus window moves live, but DCS keeps its existing texture height and pixel workload until restart."
+    },
+    "percentOfFov": "% of FOV",
+    "horizontalOffset": {
+      "label": "Horizontal Offset",
+      "help": "Moves the focus area left or right in degrees. Use this only if the sharp region feels off-center."
+    },
+    "verticalOffset": {
+      "label": "Vertical Offset",
+      "help": "Moves the focus area up or down in degrees. Helpful if a headset's gaze center feels vertically biased."
+    },
+    "resolution": "Resolution",
+    "focusResolution": {
+      "label": "Focus Resolution",
+      "restart": "Restart required: DCS keeps its launch-time focus textures. Above 100% can resize VectorXR's output canvas and may cause a temporary frame-rate hitch.",
+      "warning": "VectorXR's full-view output image grows with Focus Resolution: {percent}% needs about {factor}× your headset's pixels in GPU memory and compositing, on top of the app render cost shown above."
+    },
+    "percentOfHmd": "% of HMD resolution",
+    "peripheralResolution": {
+      "label": "Peripheral Resolution",
+      "restart": "Restart required: DCS keeps its launch-time peripheral textures and pixel workload."
+    },
+    "foveateSharpness": {
+      "label": "Foveate Sharpness",
+      "help": "Applies extra sharpening to the high-detail focus image. 0 is off; higher values add crispness but can create halos."
+    },
+    "transitionThickness": {
+      "label": "Transition Thickness",
+      "help": "Controls how wide the blended edge is between the focus and peripheral images. Higher values hide the boundary better but soften more of the focus window."
+    },
+    "percentOfFocusWindow": "% of focus window",
+    "tracking": "Tracking",
+    "mode": {
+      "label": "Mode",
+      "restart": "Switching to Eye tracked needs a game restart when the game started in Head tracked mode.",
+      "help": "Chooses whether the focus area follows head direction or eye gaze when eye tracking is available.",
+      "head": "Head tracked",
+      "eye": "Eye tracked"
+    },
+    "eyeTrackingCorrection": {
+      "label": "Eye Tracking Correction",
+      "help": "Use Default unless eye tracking feels backwards; then try Flip Z Only.",
+      "default": "Default",
+      "flipZ": "Flip Z Only"
+    },
+    "smoothing": {
+      "label": "Smoothing",
+      "help": "Softens focus-area movement. 0 is instant; higher values reduce jitter but add lag."
+    },
+    "deadzone": {
+      "label": "Deadzone",
+      "help": "Small gaze movements ignored before the focus area moves. Useful for reducing shimmer near center."
+    }
+  },
+  "dimensions": {
+    "peripheralLeft": "Peripheral L",
+    "peripheralRight": "Peripheral R",
+    "focusLeft": "Focus L",
+    "focusRight": "Focus R",
+    "waiting": "View dimensions appear here while a Quadviews game is running.",
+    "view": "{name}: {width} × {height} (texture {allocatedWidth} × {allocatedHeight})",
+    "footer": "Submitted view sizes, refreshed every second. Saved resolution changes may require a game restart.",
+    "labelNone": "Dimensions —",
+    "labelLive": "Dimensions · Live",
+    "labelLast": "Dimensions · Last"
+  },
+  "guide": {
+    "eyebrow": "Interactive field guide",
+    "title": "Reading the Quadviews overlay",
+    "intro": "Learn the picture first, then change the setting that matches what you actually see.",
+    "closeLabel": "Close overlay guide",
+    "stepsLabel": "Overlay guide steps",
+    "steps": {
+      "zones": {
+        "title": "Read the zones",
+        "summary": "See where each image contributes."
+      },
+      "alignment": {
+        "title": "Check alignment",
+        "summary": "Compare centers, offset, and gaze."
+      },
+      "motion": {
+        "title": "Judge tracking",
+        "summary": "Spot jitter, lag, and tracking loss."
+      },
+      "troubleshoot": {
+        "title": "Choose a fix",
+        "summary": "Map a symptom to the right control."
+      }
+    },
+    "illustrationLabel": "Interactive illustration of the Quadviews diagnostic overlay",
+    "svg": {
+      "peripheral": "BLUE - PERIPHERAL CONTEXT",
+      "blend": "AMBER - BLEND",
+      "focus": "FOCUS IMAGE",
+      "headCenter": "HEAD CENTER",
+      "configuredOffset": "CONFIGURED OFFSET",
+      "raw": "RAW",
+      "smoothed": "SMOOTHED",
+      "dragHint": "CLICK OR DRAG TO MOVE RAW GAZE",
+      "trackingUnavailable": "TRACKING UNAVAILABLE - FALLBACK ACTIVE"
+    },
+    "illustrative": "Illustrative - not a pixel-perfect headset capture",
+    "demo": {
+      "focusSize": "Focus size",
+      "transitionThickness": "Transition thickness",
+      "horizontalOffset": "Horizontal offset",
+      "verticalOffset": "Vertical offset",
+      "smoothing": "Smoothing",
+      "degrees": "{value} deg",
+      "eyeTrackingAvailable": "Eye tracking: Available",
+      "eyeTrackingLost": "Eye tracking: Lost",
+      "reset": "Reset illustration"
+    },
+    "settingNames": {
+      "peripheralResolution": "Peripheral Resolution",
+      "transitionThickness": "Transition Thickness",
+      "focusResolution": "Focus Resolution",
+      "focusWidthHeight": "Focus Width / Height",
+      "referenceOnly": "Reference only",
+      "horizontalVerticalOffset": "Horizontal / Vertical Offset",
+      "horizontalOffset": "Horizontal Offset",
+      "verticalOffset": "Vertical Offset",
+      "trackingSource": "Tracking source",
+      "smoothingDeadzone": "Smoothing / Deadzone",
+      "smoothing": "Smoothing",
+      "deadzone": "Deadzone",
+      "trackingMode": "Tracking Mode",
+      "gameEyeTracking": "Game eye tracking",
+      "headsetRuntime": "Headset runtime"
+    },
+    "cards": {
+      "peripheral": {
+        "title": "Peripheral area",
+        "body": "Blue covers the context image. Lowering its resolution usually saves the most pixels without shrinking your sharp region."
+      },
+      "transition": {
+        "title": "Transition band",
+        "body": "Amber is the blend between images. Wider can hide a seam; too wide can make the edge feel soft."
+      },
+      "focusBoundary": {
+        "title": "Focus boundary",
+        "body": "The green outline is the focus window size. Focus Resolution changes detail density, not this outline."
+      },
+      "headCenter": {
+        "title": "Head center",
+        "body": "The white cross is straight ahead from the headset. It gives every other marker a stable reference."
+      },
+      "configuredOffset": {
+        "title": "Configured offset",
+        "body": "The magenta L and ring show your intentional correction from head center."
+      },
+      "rawGaze": {
+        "title": "Raw gaze",
+        "body": "Cyan is the immediate eye-tracking sample. Click the illustration to move it."
+      },
+      "smoothedGaze": {
+        "title": "Smoothed gaze",
+        "body": "Yellow is the filtered position that drives the focus window before configured offset is added."
+      },
+      "greenOutline": {
+        "title": "Green outline",
+        "body": "Eye tracking is available. Compare cyan and yellow to judge filtering."
+      },
+      "redOutline": {
+        "title": "Red outline",
+        "body": "The eye source is unavailable. VectorXR is using its fallback focus behavior."
+      }
+    },
+    "goodTracking": {
+      "heading": "What good tracking looks like",
+      "cyan": "Cyan responds immediately to your eyes.",
+      "yellow": "Yellow follows closely without constant trembling.",
+      "window": "The focus window stays on the intended detail."
+    },
+    "symptoms": {
+      "boundary": {
+        "label": "Visible seam",
+        "title": "The focus edge is easy to see",
+        "body": "Increase Transition Thickness a little. If the amber band becomes broadly soft, reduce it again and narrow the resolution difference between Focus and Peripheral."
+      },
+      "offset": {
+        "label": "Wrong center",
+        "title": "The sharp region is consistently biased",
+        "body": "First confirm the cyan and yellow gaze markers land where you look. If they do, use Horizontal or Vertical Offset to correct the consistent bias. Do not use offset to hide gaze lag."
+      },
+      "jitter": {
+        "label": "Jitter",
+        "title": "The focus window trembles near your gaze",
+        "body": "Raise Smoothing gradually. A small Deadzone can suppress tiny eye movements near center, but too much creates a sticky jump when the focus finally moves."
+      },
+      "lag": {
+        "label": "Too much lag",
+        "title": "The yellow marker trails too far behind cyan",
+        "body": "Reduce Smoothing. If movement starts late and then jumps, reduce Deadzone too. Use the smallest values that still keep the focus window visually calm."
+      },
+      "lost": {
+        "label": "Red outline",
+        "title": "Eye tracking is unavailable",
+        "body": "A red focus outline is a status warning, not a color preference. Confirm eye tracking is enabled in the game and headset runtime. VectorXR falls back instead of following eye gaze."
+      },
+      "performance": {
+        "label": "Need more FPS",
+        "title": "Reduce pixels where they matter least",
+        "body": "Lower Peripheral Resolution first. Then reduce Focus Width or Height if needed. Focus Resolution changes density inside the window - it does not change the green outline size."
+      }
+    },
+    "ifYouSee": "If you see this",
+    "tuningOrder": {
+      "heading": "Good tuning order:",
+      "tracking": "Confirm tracking is available.",
+      "alignment": "Correct a consistent alignment bias.",
+      "smoothing": "Balance smoothing versus lag.",
+      "quality": "Then tune image quality and pixel cost."
+    }
+  }
+}

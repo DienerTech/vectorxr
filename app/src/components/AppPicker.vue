@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { t } from '../i18n/index.ts'
 import type { RegisteredApplication } from '../lib/model'
 
 const props = defineProps<{
@@ -36,6 +37,6 @@ function toggle(id: string) {
     </button>
   </div>
   <p v-else class="text-sm text-muted">
-    No applications are registered. Add one from Application Registry before this profile can activate.
+    {{ t('registry.picker.empty') }}
   </p>
 </template>

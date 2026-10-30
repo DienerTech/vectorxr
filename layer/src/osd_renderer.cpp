@@ -4,6 +4,7 @@
 #include <vulkan/vulkan_core.h>
 #include "depthxr/osd_renderer.h"
 #include "depthxr/logger.h"
+#include "depthxr/osd_strings.h"
 #include <openxr/openxr_platform.h>
 #include <algorithm>
 #include <array>
@@ -124,7 +125,10 @@ struct Canvas {
     HBITMAP bitmap{};
     HGDIOBJ old{};
     std::uint32_t* bits{};
-    Canvas(int w, int h) {
+    // The OSD language's UI font (OsdFontFace).
+    const wchar_t* face{L"Segoe UI"};
+    BYTE charset{DEFAULT_CHARSET};
+    Canvas(int w, int h, OsdLanguage language=OsdLanguage::En) : face(OsdFontFace(language)), charset(OsdFontCharset(language)) {
         BITMAPINFO info{};
         info.bmiHeader = {sizeof(BITMAPINFOHEADER), w, -h, 1, 32, BI_RGB};
         bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, reinterpret_cast<void**>(&bits), nullptr, 0);
@@ -134,9 +138,9 @@ struct Canvas {
     void Rect(int x, int y, int w, int h, COLORREF color) {
         const auto brush = CreateSolidBrush(color); RECT r{x,y,x+w,y+h}; FillRect(dc,&r,brush); DeleteObject(brush);
     }
-    static HFONT Font(int size, bool bold) {
+    HFONT Font(int size, bool bold) const {
         return CreateFontW(-size,0,0,0,bold?FW_SEMIBOLD:FW_NORMAL,FALSE,FALSE,FALSE,
-            DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,ANTIALIASED_QUALITY,DEFAULT_PITCH,L"Segoe UI");
+            charset,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,ANTIALIASED_QUALITY,DEFAULT_PITCH,face);
     }
     void Text(int x, int y, int width, int size, const std::string& text, COLORREF color, bool bold=false) {
         const auto font = Font(size,bold);
@@ -164,7 +168,9 @@ constexpr int kTagText=17, kTagPad=10, kTagHeight=30;
 constexpr COLORREF kAttention=RGB(245,185,108);
 }
 
-int OsdTextWidth(int size, const std::string& text, bool bold) { Canvas measure(1,1); return measure.Width(size,text,bold); }
+int OsdTextWidth(int size, const std::string& text, bool bold, OsdLanguage language) {
+    Canvas measure(1,1,language); return measure.Width(size,text,bold);
+}
 
 OsdCompactLayout CompactOsdLayout(const OsdSettings& settings, const OsdCompactLayoutOptions& options) {
     OsdCompactLayout layout;
@@ -278,8 +284,19 @@ void FeatherOsdPixels(const std::uint32_t* bits, std::uint32_t* pixels, int pane
     }
 }
 
+// Frame Generation's badge state (OsdSnapshot::framegen_badge) as the OSD
+// shows it; an unknown state as it is.
+static std::string FrameGenBadgeText(OsdLanguage language, const std::string& state) {
+    for (const auto& [code,text]:{std::pair{"ON",OsdText::BadgeOn},{"STBY",OsdText::BadgeStandby},{"WAIT",OsdText::BadgeWait},
+            {"PAUSED",OsdText::BadgePaused},{"OFF",OsdText::BadgeOff},{"N/A",OsdText::BadgeUnavailable}})
+        if (state==code) return OsdString(language,text);
+    return state;
+}
+
 OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnapshot& snapshot,
                        const OsdTelemetry& telemetry, bool rgba) {
+    const OsdLanguage language=ResolveOsdLanguage(settings);
+    const auto text=[language](OsdText id) { return std::string(OsdString(language,id)); };
     constexpr auto white=RGB(233,240,248), muted=RGB(148,165,184), bg=RGB(13,20,31), inset=RGB(20,31,45);
     COLORREF accent=RGB(81,221,189);
     if (settings.accent=="copper") accent=RGB(245,174,120);
@@ -294,7 +311,7 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
     const bool pivot_snap_line=!snapshot.pivot_secondary.empty() || !snapshot.compact_pivot_secondary.empty();
     // The diagnostics tag's width, measured before the layouts make room for it.
     int tag_width=0;
-    if(!snapshot.diagnostics.empty()) { Canvas measure(1,1); tag_width=measure.Width(kTagText,snapshot.diagnostics,true)+2*kTagPad; }
+    if(!snapshot.diagnostics.empty()) { Canvas measure(1,1,language); tag_width=measure.Width(kTagText,snapshot.diagnostics,true)+2*kTagPad; }
     const auto layout=CompactOsdLayout(settings,{.pivot_snap_line=pivot_snap_line,.framegen_session=snapshot.framegen_session,
                                                  .diagnostics_width=tag_width});
     const int panel_width=compact?layout.width:OsdBitmap::width;
@@ -305,13 +322,14 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
         (settings.show_pivot?pivot_row_height:0)+(settings.show_modules?52:0)+
         (!snapshot.restart.empty()?48:0);
     OsdBitmap output; output.height=height; output.content_width=panel_width; output.empty=compact&&layout.empty;
-    Canvas canvas(output.width,height);
+    Canvas canvas(output.width,height,language);
     if (!canvas.bits || !canvas.dc) return output;
     canvas.Rect(0,0,output.width,height,bg);
     SYSTEMTIME time; GetLocalTime(&time);
     char clock_label[24];
-    if (settings.clock_format=="12") snprintf(clock_label,sizeof(clock_label),"%u:%02u %s",time.wHour%12?time.wHour%12:12,time.wMinute,time.wHour<12?"AM":"PM");
+    if (settings.clock_format=="12") snprintf(clock_label,sizeof(clock_label),"%u:%02u",time.wHour%12?time.wHour%12:12,time.wMinute);
     else snprintf(clock_label,sizeof(clock_label),"%02u:%02u",time.wHour,time.wMinute);
+    const std::string clock=settings.clock_format=="12"?OsdFormat(language,time.wHour<12?OsdText::Am:OsdText::Pm,clock_label):clock_label;
     const auto mean=telemetry.Mean();
     const std::string fps=Number(mean>0?1000/mean:0,0);
     // Frame Generation's badge beside an FPS value: its state, in the accent
@@ -320,7 +338,7 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
     const auto framegen_badge=[&](int x,int top,int size,int first,int second,int single,int width) {
         if (snapshot.framegen_badge.empty() || width<=0) return;
         const bool on=snapshot.framegen_badge=="ON";
-        const std::string state="FG "+snapshot.framegen_badge;
+        const std::string state="FG "+FrameGenBadgeText(language,snapshot.framegen_badge);
         if (on && snapshot.framegen_fps>0) {
             canvas.Text(x,top+first,width,size,state,accent,true);
             canvas.Text(x,top+second,width,size,Number(snapshot.framegen_fps,0)+" fps",white,true);
@@ -333,7 +351,7 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
         canvas.Text(x+kTagPad,y+3,width-2*kTagPad+4,kTagText,snapshot.diagnostics,bg,true);
     };
     if (compact) {
-        const std::array<std::string,4> values{"VECTORXR",snapshot.application,snapshot.runtime,clock_label};
+        const std::array<std::string,4> values{"VECTORXR",snapshot.application,snapshot.runtime,clock};
         for(int i=0;i<4;++i) if(layout.header_x[i]>=0)
             canvas.Text(layout.header_x[i],layout.header_y,layout.header_width[i],i==0?22:21,values[i],i==0?accent:muted,i==0);
         if(layout.diagnostics_x>=0) diagnostics_tag(layout.diagnostics_x,layout.header_y,layout.diagnostics_width);
@@ -345,7 +363,7 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
                 framegen_badge(x,layout.metrics_y,20,2,26,14,28+column-x);
             }
         }
-        if(layout.frame_time) canvas.Text(layout.frame_time_x,layout.metrics_y,300,40,Number(mean)+" ms avg",white,true);
+        if(layout.frame_time) canvas.Text(layout.frame_time_x,layout.metrics_y,300,40,OsdFormat(language,OsdText::MsAvg,Number(mean)),white,true);
         if(layout.status_y>=0) {
             const int y=layout.status_y;
             if(y>18) canvas.Rect(28,y-8,panel_width-56,1,inset);
@@ -354,7 +372,7 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
                 // One line of three values, the bound side named, video memory
                 // over its budget in the attention colour.
                 const auto& p=snapshot.performance;
-                canvas.Text(30,layout.performance_y+2,value_x-38,20,"PERF",muted);
+                canvas.Text(30,layout.performance_y+2,value_x-38,20,text(OsdText::PerformanceCompact),muted);
                 int x=value_x; const int right=panel_width-28;
                 const auto part=[&](const std::string& text,COLORREF color) {
                     if(right-x<=0 || text.empty()) return;
@@ -365,15 +383,15 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
                 part(p.compact_vram,p.vram_over?kAttention:white);
             }
             if(settings.compact_show_turbo) {
-                canvas.Text(30,layout.turbo_y+2,90,20,"TURBO",muted);
-                canvas.Text(value_x,layout.turbo_y,panel_width-value_x-28,24,snapshot.turbo+(snapshot.experimental?" / EXP":""),accent,true);
+                canvas.Text(30,layout.turbo_y+2,90,20,text(OsdText::Turbo),muted);
+                canvas.Text(value_x,layout.turbo_y,panel_width-value_x-28,24,snapshot.turbo+(snapshot.experimental?text(OsdText::ExperimentalCompactSuffix):""),accent,true);
             }
             if(settings.compact_show_framegen) {
-                canvas.Text(30,layout.framegen_y+2,118,20,"FRAME GEN",muted);
+                canvas.Text(30,layout.framegen_y+2,118,20,text(OsdText::FrameGen),muted);
                 canvas.Text(value_x,layout.framegen_y,panel_width-value_x-28,24,snapshot.compact_framegen,white,true);
             }
             if(settings.compact_show_pivot) {
-                canvas.Text(30,layout.pivot_y+2,80,20,"PIVOT",muted);
+                canvas.Text(30,layout.pivot_y+2,80,20,text(OsdText::Pivot),muted);
                 canvas.Text(value_x,layout.pivot_y,panel_width-value_x-28,24,snapshot.compact_pivot.empty()?snapshot.pivot:snapshot.compact_pivot,white,true);
                 if(pivot_snap_line) canvas.Text(value_x,layout.pivot_y+32,panel_width-value_x-28,24,snapshot.compact_pivot_secondary.empty()?snapshot.pivot_secondary:snapshot.compact_pivot_secondary,white,true);
             }
@@ -387,7 +405,7 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
         const int runtime_x=settings.show_runtime?(settings.show_app?(app_x+clock_x)/2:app_x):clock_x;
         if(settings.show_app) canvas.Text(app_x,18,runtime_x-app_x-16,21,snapshot.application,muted);
         if(settings.show_runtime) canvas.Text(runtime_x,18,clock_x-runtime_x-18,21,snapshot.runtime,muted);
-        if(settings.show_clock) canvas.Text(clock_x,18,142,21,clock_label,muted);
+        if(settings.show_clock) canvas.Text(clock_x,18,142,21,clock,muted);
         canvas.Text(28,57-header_shift,265,68,fps,white,true);
         if(settings.show_framegen_fps && snapshot.framegen_session) {
             const int x=28+canvas.Width(68,fps,true)+16;
@@ -395,9 +413,9 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
         }
         canvas.Text(325,57-header_shift,280,68,Number(mean)+" ms",white,true);
         canvas.Text(655,57-header_shift,276,68,Number(telemetry.Percentile95())+" ms",accent,true);
-        canvas.Text(30,141-header_shift,270,20,"APP FPS",muted);
-        canvas.Text(327,141-header_shift,280,20,"APP FRAME / AVG",muted);
-        canvas.Text(657,141-header_shift,275,20,"APP FRAME / P95",muted);
+        canvas.Text(30,141-header_shift,270,20,text(OsdText::AppFps),muted);
+        canvas.Text(327,141-header_shift,280,20,text(OsdText::AppFrameAvg),muted);
+        canvas.Text(657,141-header_shift,275,20,text(OsdText::AppFrameP95),muted);
     }
     if (!compact) {
         int y=190-header_shift;
@@ -406,7 +424,7 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
                 canvas.Rect(28,y,904,130,inset);
                 double ceiling=22.2;
                 for (auto v:telemetry.samples) ceiling=std::max(ceiling,v*1.1);
-                canvas.Text(40,y+4,380,18,"FRAME TIME  /  LAST 120 FRAMES",muted);
+                canvas.Text(40,y+4,380,18,text(OsdText::FrameTimeGraph),muted);
                 canvas.Text(780,y+4,142,18,Number(ceiling)+" ms",muted);
                 const auto pen=CreatePen(PS_SOLID,3,accent); auto old=SelectObject(canvas.dc,pen);
                 std::size_t index=120-telemetry.samples.size(); bool first=true;
@@ -421,7 +439,7 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
                 // the frame budget as a rate; beside it three cells of a
                 // headline (headroom, or video memory) over its detail.
                 const auto& p=snapshot.performance;
-                canvas.Text(30,y,210,20,"PERFORMANCE",muted);
+                canvas.Text(30,y,210,20,text(OsdText::Performance),muted);
                 if(!p.verdict.empty()) canvas.Text(30,y+30,210,20,p.verdict,kAttention,true);
                 else canvas.Text(30,y+30,210,20,p.target,muted);
                 const std::array<std::tuple<const std::string*,const std::string*,bool>,3> cells{{
@@ -435,8 +453,8 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
                 y+=kOsdPerformanceRowHeight;
             } else if ((row=="turbo" && settings.show_turbo) || (row=="framegen" && settings.show_framegen && snapshot.framegen_session) ||
                        (row=="pivot" && settings.show_pivot) || (row=="modules" && settings.show_modules)) {
-                const auto label=row=="turbo"?"TURBO":row=="framegen"?"FRAME GEN":row=="pivot"?"PIVOT":"ENHANCEMENTS";
-                const auto value=row=="turbo"?snapshot.turbo+(snapshot.experimental?" / EXPERIMENTAL":""):
+                const auto label=text(row=="turbo"?OsdText::Turbo:row=="framegen"?OsdText::FrameGen:row=="pivot"?OsdText::Pivot:OsdText::Enhancements);
+                const auto value=row=="turbo"?snapshot.turbo+(snapshot.experimental?text(OsdText::ExperimentalSuffix):""):
                     row=="framegen"?snapshot.framegen:row=="pivot"?snapshot.pivot:snapshot.modules;
                 canvas.Text(30,y,210,20,label,muted);
                 canvas.Text(242,y,680,24,value,row=="turbo"?accent:white,true);
@@ -447,7 +465,7 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
                 }
             }
         }
-        if (!snapshot.restart.empty()) canvas.Text(30,y,902,20,"RESTART PENDING  /  "+snapshot.restart,kAttention);
+        if (!snapshot.restart.empty()) canvas.Text(30,y,902,20,OsdFormat(language,OsdText::RestartPending,snapshot.restart),kAttention);
     }
     // Complete batched GDI writes before reading the DIB directly.
     GdiFlush();

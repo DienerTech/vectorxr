@@ -1,0 +1,56 @@
+{
+  "applications": {
+    "eyebrow": "登錄",
+    "title": "應用程式登錄",
+    "intro": "註冊模組設定檔可依執行檔名稱指定的應用程式。每張卡片上的標籤會顯示各模組目前如何對待該應用程式；按一下標籤即可跳至其設定檔，或建立新的設定檔。",
+    "add": "新增應用程式",
+    "unnamed": "未命名的應用程式",
+    "editName": "編輯應用程式名稱",
+    "executable": "執行檔",
+    "executableHelp": "執行檔比對不區分大小寫，但名稱必須包含應用程式副檔名。例如：DCS.exe",
+    "empty": "尚未註冊任何應用程式。請先新增應用程式，再建立模組設定檔。",
+    "chip": {
+      "defaultOff": "{module} · 預設關閉",
+      "defaultOffTitle": "預設的 {module} 設定檔已關閉。按一下可為此應用程式建立自訂設定檔。",
+      "custom": "{module} · {profile}",
+      "customTitle": "套用自訂 {module} 設定檔「{profile}」。按一下即可開啟。",
+      "default": "{module} · 預設",
+      "defaultTitle": "套用預設的 {module} 設定檔。按一下可為此應用程式建立自訂設定檔。"
+    }
+  },
+  "discovery": {
+    "eyebrow": "探索",
+    "trackingOnTitle": "探索功能正在追蹤您啟動的 OpenXR 應用程式。",
+    "trackingOffTitle": "探索功能已關閉。在您於「設定」中啟用追蹤之前，不會記錄新啟動的 OpenXR 應用程式。",
+    "trackingOn": "追蹤開啟",
+    "trackingOff": "追蹤關閉",
+    "title": "新應用程式的來源",
+    "intro": "VectorXR 會記下您啟動的 OpenXR 應用程式，讓您只要按一下就能輕鬆註冊。在您註冊之前，這裡的任何項目都不會變更您的設定。追蹤功能可在「設定」中控制。",
+    "clear": "清除已偵測的應用程式",
+    "loading": "正在載入已偵測的應用程式…",
+    "launches_other": "啟動 {count} 次",
+    "details": "詳細資料",
+    "register": "註冊",
+    "allRegistered": "所有探索到的應用程式皆已註冊。您啟動的新應用程式會顯示在這裡。",
+    "allRegisteredTrackingOff": "所有探索到的應用程式皆已註冊。追蹤功能已關閉，因此這裡不會出現新的應用程式。",
+    "alreadyRegistered": "已註冊",
+    "registeredAs": "已註冊為 {name}",
+    "empty": "尚未偵測到任何 XR 應用程式。請在 VectorXR 作用中時啟動 OpenXR 應用程式，然後重新整理此清單。",
+    "emptyTrackingOff": "應用程式追蹤已停用，因此這裡不會出現新的應用程式。請在「設定」中啟用追蹤，以記錄 OpenXR 應用程式的啟動。"
+  },
+  "seenDetails": {
+    "eyebrow": "探索到的應用程式",
+    "registeredAs": "註冊名稱",
+    "unregistered": "未註冊",
+    "launches": "啟動次數",
+    "firstSeen": "首次偵測",
+    "lastSeen": "最後偵測"
+  },
+  "exclusions": {
+    "title": "已啟用的自訂設定檔優先套用於：{apps}",
+    "label": "不套用於："
+  },
+  "picker": {
+    "empty": "尚未註冊任何應用程式。請先從「應用程式登錄」新增應用程式，此設定檔才能啟用。"
+  }
+}
