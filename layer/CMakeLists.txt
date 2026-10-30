@@ -529,9 +529,9 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         add_test(NAME depthxr_framegen_d3d12_tests COMMAND depthxr_framegen_tests d3d12)
         add_test(NAME depthxr_framegen_vulkan_tests COMMAND depthxr_framegen_tests vulkan)
         set_tests_properties(depthxr_framegen_d3d11_tests depthxr_framegen_vulkan_tests PROPERTIES TIMEOUT 60)
-        # WARP runs on the CPU: slower while other builds share it (about 85 s
-        # alone).
-        set_tests_properties(depthxr_framegen_d3d12_tests PROPERTIES TIMEOUT 180)
+        # WARP runs on the CPU: slower while other builds share it (about 110 s
+        # alone on a desktop, more than 180 s on a CI runner).
+        set_tests_properties(depthxr_framegen_d3d12_tests PROPERTIES TIMEOUT 900)
         set_tests_properties(depthxr_framegen_vulkan_tests PROPERTIES SKIP_RETURN_CODE 77)
         # The Direct3D 12 scenarios on the GPU: variable-rate shading, the optical flow hardware (a
         # session per view, four for quad views) and a GPU's fence budgets, none of which WARP has.
