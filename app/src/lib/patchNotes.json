@@ -1,7 +1,7 @@
 [
   {
     "version": "0.20.0",
-    "date": "2026-10-27",
+    "date": "2026-10-29",
     "title": "Faster, Sharper Frame Generation, Turbo on SteamVR, and Eleven Languages",
     "summary": "A major Frame Generation release. Generated frames cost noticeably less GPU time and keep cockpit detail sharper, Dynamic Interpolate can now use NVIDIA's hardware optical flow with an automatic fallback, and Frame Generation is far more careful about the depth games provide. Turbo now works on SteamVR, where it used to switch itself off. The app, tray, On-Screen Display and installer are available in eleven languages. This release also includes every fix prepared for 0.19.4.",
     "items": [
