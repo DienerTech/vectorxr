@@ -82,6 +82,8 @@ struct OsdSnapshot {
     // The PERFORMANCE row's text (DescribePerformance), filled while a layout
     // shows the row.
     PerformanceOsdText performance;
+    std::string gaze;
+    int gaze_tone{0};
 };
 
 struct OsdPresentation {
@@ -104,7 +106,7 @@ struct OsdTelemetry {
 
 struct OsdBitmap {
     static constexpr int width = 960;
-    static constexpr int texture_height = 768;
+    static constexpr int texture_height = 896;
     int content_width{width};
     int height{};
     std::vector<std::uint32_t> pixels;

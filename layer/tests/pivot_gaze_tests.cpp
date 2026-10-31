@@ -132,6 +132,9 @@ public:
         return OpenXrLayer::Instance().IsHeadRelativeEyeGaze(space, base);
     }
     static void ResetSession() { OpenXrLayer::Instance().ResetSessionState(); }
+    static GazeStatusText Gaze() {
+        return OpenXrLayer::Instance().app_gaze_status_.Describe(true, true, GazeStatus::Clock::now());
+    }
     static void RestoreView() { OpenXrLayer::Instance().tracked_view_spaces_ = {view}; }
     static void ResetInstance() { OpenXrLayer::Instance().ResetInstanceState(); }
     static void CheckOtherTransforms(XrSpace controller) {
@@ -166,8 +169,11 @@ int main() {
             CheckPassThrough(view, gaze);
         }
         flags = 15;
+        CheckPassThrough(gaze, view);
+        Expect(Peer::Gaze().text == "Receiving / poses unchanged", "real app gaze locate must reach OSD monitor");
         locate_result = XR_ERROR_RUNTIME_FAILURE;
         CheckPassThrough(gaze, view);
+        Expect(Peer::Gaze().tone == 3, "failed runtime locate must invalidate OSD gaze");
         locate_result = XR_SUCCESS;
         Expect(!Peer::Exempt(gaze, local), "world-relative gaze must not use the VIEW-specific exemption");
         CheckPassThrough(gaze, local);

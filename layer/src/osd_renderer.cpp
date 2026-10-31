@@ -314,14 +314,15 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
     if(!snapshot.diagnostics.empty()) { Canvas measure(1,1,language); tag_width=measure.Width(kTagText,snapshot.diagnostics,true)+2*kTagPad; }
     const auto layout=CompactOsdLayout(settings,{.pivot_snap_line=pivot_snap_line,.framegen_session=snapshot.framegen_session,
                                                  .diagnostics_width=tag_width});
-    const int panel_width=compact?layout.width:OsdBitmap::width;
+    const int gaze_height=snapshot.gaze.empty()?0:44;
+    const int panel_width=compact?(gaze_height?std::max(layout.width,620):layout.width):OsdBitmap::width;
     const int header_shift=(settings.show_brand || settings.show_app || settings.show_runtime || settings.show_clock || tag_width)?0:40;
     const int pivot_row_height=pivot_snap_line?84:52;
-    const int height=compact?layout.height:210-header_shift+(settings.show_graph?156:0)+
+    const int height=gaze_height+(compact?layout.height:210-header_shift+(settings.show_graph?156:0)+
         (settings.show_performance?kOsdPerformanceRowHeight:0)+(settings.show_turbo?52:0)+(settings.show_framegen&&snapshot.framegen_session?(snapshot.framegen_detail.empty()?52:80):0)+
         (settings.show_pivot?pivot_row_height:0)+(settings.show_modules?52:0)+
-        (!snapshot.restart.empty()?48:0);
-    OsdBitmap output; output.height=height; output.content_width=panel_width; output.empty=compact&&layout.empty;
+        (!snapshot.restart.empty()?48:0));
+    OsdBitmap output; output.height=height; output.content_width=panel_width; output.empty=compact&&layout.empty&&!gaze_height;
     Canvas canvas(output.width,height,language);
     if (!canvas.bits || !canvas.dc) return output;
     canvas.Rect(0,0,output.width,height,bg);
@@ -466,6 +467,14 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
             }
         }
         if (!snapshot.restart.empty()) canvas.Text(30,y,902,20,OsdFormat(language,OsdText::RestartPending,snapshot.restart),kAttention);
+    }
+    if (gaze_height) {
+        const int y=height-gaze_height;
+        const COLORREF gaze_color=snapshot.gaze_tone==1?RGB(81,221,189):
+            snapshot.gaze_tone==3?RGB(255,119,119):snapshot.gaze_tone==2?kAttention:muted;
+        canvas.Rect(28,y-8,panel_width-56,1,inset);
+        canvas.Text(30,y+2,125,20,"GAME GAZE",muted);
+        canvas.Text(160,y,panel_width-188,24,snapshot.gaze,gaze_color,true);
     }
     // Complete batched GDI writes before reading the DIB directly.
     GdiFlush();
@@ -679,7 +688,7 @@ bool OsdRenderer::CreateResources() {
         " selected="+std::to_string(format)+" channels="+(rgba_?"RGBA":"BGRA"));
     XrSwapchainCreateInfo create{XR_TYPE_SWAPCHAIN_CREATE_INFO};
     create.usageFlags=XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT|XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
-    create.format=format; create.sampleCount=1; create.width=OsdBitmap::width; create.height=768;
+    create.format=format; create.sampleCount=1; create.width=OsdBitmap::width; create.height=OsdBitmap::texture_height;
     create.faceCount=1; create.arraySize=1; create.mipCount=1;
     result=api_.create(session_,&create,&swapchain_);
     if (XR_FAILED(result)) { Fail("OSD swapchain",result); return false; }
@@ -689,7 +698,7 @@ bool OsdRenderer::CreateResources() {
     space.referenceSpaceType=XR_REFERENCE_SPACE_TYPE_VIEW; space.poseInReferenceSpace.orientation.w=1;
     result=api_.create_space(session_,&space,&space_);
     if (XR_FAILED(result)) { Fail("OSD view space",result); return false; }
-    Event(false,"resources ready api="+std::string(graphics_->Name())+" format="+std::to_string(format)+" texture=960x768 usage=transfer-dst|color initializationCpuMs="+std::to_string(Milliseconds(initialization_start)));
+    Event(false,"resources ready api="+std::string(graphics_->Name())+" format="+std::to_string(format)+" texture=960x"+std::to_string(OsdBitmap::texture_height)+" usage=transfer-dst|color initializationCpuMs="+std::to_string(Milliseconds(initialization_start)));
     return true;
 }
 const XrCompositionLayerBaseHeader* OsdRenderer::Append(const XrFrameEndInfo& info, bool should_render) {

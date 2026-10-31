@@ -29,6 +29,7 @@
 #include "depthxr/pivot_view.h"
 #include "depthxr/effects.h"
 #include "depthxr/external_status.h"
+#include "depthxr/gaze_status.h"
 #include "depthxr/head_prediction.h"
 #include "depthxr/logger.h"
 #include "depthxr/quadviews_frame_cache.h"
@@ -1927,6 +1928,10 @@ class OpenXrLayer {
         bool includes_eyes{false};
     };
     std::unordered_map<XrSpace, ApplicationActionSpace> application_action_spaces_;
+    GazeStatus app_gaze_status_;
+    bool app_requested_eye_gaze_{false};
+    XrSpace app_gaze_last_space_{XR_NULL_HANDLE}, app_gaze_last_base_{XR_NULL_HANDLE};
+    void ObserveApplicationGazeLocked(XrSpace space, XrSpace base, XrResult result, const XrSpaceLocation* location);
     bool IsHeadRelativeEyeGaze(XrSpace space, XrSpace base_space) const;
     std::unordered_set<XrSpace> tracked_local_spaces_;
     std::unordered_set<XrSpace> tracked_stage_spaces_;

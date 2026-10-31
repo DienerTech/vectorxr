@@ -2090,6 +2090,7 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
     ResetVulkanEnableHooks(instance, next_get_instance_proc_addr_, vulkan_bridge_extensions_,
                            [this](const std::string& message) { logger_.Info(message); });
     eye_gaze_extension_enabled_ = eye_gaze_extension_enabled;
+    app_requested_eye_gaze_ = diagnostics.app_requested_eye_gaze;
     varjo_compatible_quadviews_active_ = diagnostics.varjo_compatible_quad_forwarded;
     spacewarp_fb_owned_ = diagnostics.fb_space_warp_owned;
     spacewarp_ext_owned_ = diagnostics.frame_synthesis_owned;
@@ -10597,6 +10598,7 @@ bool OpenXrLayer::PivotAnchorAffectedBy(XrReferenceSpaceType type) const {
 
 XrResult OpenXrLayer::LocateSpace(XrSpace space, XrSpace base_space, XrTime time, XrSpaceLocation* location) {
     bool pivotxr_active = false;
+    bool observe_game_gaze = false;
     bool pivot_processing_required = false;
     XrSpace anchor_space = XR_NULL_HANDLE;
     XrSpace reference_space = XR_NULL_HANDLE;
@@ -10607,6 +10609,9 @@ XrResult OpenXrLayer::LocateSpace(XrSpace space, XrSpace base_space, XrTime time
         std::scoped_lock lock(mutex_);
         ReloadConfigIfNeeded();
         RefreshResolvedSettings();
+        const auto gaze_space = application_action_spaces_.find(space);
+        observe_game_gaze = gaze_space != application_action_spaces_.end() &&
+            gaze_space->second.includes_eyes && gaze_space->second.action->eye_gaze;
         // VIEW located in a world space, or the reverse: head prediction
         // turns it as it turns the views for the same display time.
         head_world_space = HeadPredictionWorldSpace(space, base_space);
@@ -10654,6 +10659,10 @@ XrResult OpenXrLayer::LocateSpace(XrSpace space, XrSpace base_space, XrTime time
     if (!pivot_processing_required) {
         const XrResult result = next_locate_space_(space, base_space, time, location);
         extend_head(result);
+        if (observe_game_gaze) {
+            std::scoped_lock lock(mutex_);
+            ObserveApplicationGazeLocked(space, base_space, result, location);
+        }
         return result;
     }
 
@@ -10677,6 +10686,10 @@ XrResult OpenXrLayer::LocateSpace(XrSpace space, XrSpace base_space, XrTime time
         logger_.Debug("Turbo-diag: app xrLocateSpace completed.");
     }
     if (XR_FAILED(result)) {
+        if (observe_game_gaze) {
+            std::scoped_lock lock(mutex_);
+            ObserveApplicationGazeLocked(space, base_space, result, location);
+        }
         return result;
     }
     extend_head(result);
@@ -10690,8 +10703,24 @@ XrResult OpenXrLayer::LocateSpace(XrSpace space, XrSpace base_space, XrTime time
     std::scoped_lock lock(mutex_);
     const bool same_anchor_space = pivotxr_translation_anchor_ &&
         pivotxr_translation_anchor_->space == anchor_space;
-    return ApplyPivotToLocatedSpace(space, base_space, time, pivotxr_active, location, nullptr,
+    const auto transformed = ApplyPivotToLocatedSpace(space, base_space, time, pivotxr_active, location, nullptr,
                                     nullptr, nullptr, false, same_anchor_space ? &anchor_relation : nullptr);
+    ObserveApplicationGazeLocked(space, base_space, transformed, location);
+    return transformed;
+}
+
+void OpenXrLayer::ObserveApplicationGazeLocked(XrSpace space, XrSpace base, XrResult result,
+                                               const XrSpaceLocation* location) {
+    const auto found = application_action_spaces_.find(space);
+    if (found == application_action_spaces_.end() || !found->second.includes_eyes ||
+        !found->second.action->eye_gaze) return;
+    const bool valid = XR_SUCCEEDED(result) && location &&
+        (location->locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT);
+    const bool tracked = valid && (location->locationFlags & XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT);
+    const auto q = valid ? location->pose.orientation : XrQuaternionf{};
+    app_gaze_status_.Observe(valid, tracked, {q.x, q.y, q.z, q.w},
+        space == app_gaze_last_space_ && base == app_gaze_last_base_, GazeStatus::Clock::now());
+    app_gaze_last_space_ = space; app_gaze_last_base_ = base;
 }
 
 XrResult OpenXrLayer::LocateViews(XrSession session,
@@ -11624,6 +11653,9 @@ std::vector<std::string> OpenXrLayer::UnloggedConfigWarningsLocked() {
 
 OsdSnapshot OpenXrLayer::BuildOsdSnapshot() const {
     OsdSnapshot snapshot;
+    const auto gaze = app_gaze_status_.Describe(app_requested_eye_gaze_, eye_gaze_extension_enabled_, GazeStatus::Clock::now());
+    snapshot.gaze = gaze.text;
+    snapshot.gaze_tone = gaze.tone;
     // The OSD's language (osd_strings.h); Frame Generation's own row text
     // (OsdDescription) is still English.
     const OsdLanguage language=ResolveOsdLanguage(resolved_settings_.core.osd);
@@ -12254,6 +12286,8 @@ void OpenXrLayer::ResetSessionState() {
     }
     ResetD3D11QuadViewsCompositor();
     active_session_ = XR_NULL_HANDLE;
+    app_gaze_status_.Reset();
+    app_gaze_last_space_ = app_gaze_last_base_ = XR_NULL_HANDLE;
     quadviews_session_active_.reset();
     deferred_quadviews_config_active_.reset();
     session_begin_wall_time_.reset();
@@ -12350,6 +12384,7 @@ void OpenXrLayer::ResetSessionState() {
 
 void OpenXrLayer::ResetInstanceState() {
     instance_requested_session_ = false;
+    app_requested_eye_gaze_ = false;
     instance_enabled_extension_count_ = 0;
     application_action_spaces_.clear();
     application_pose_actions_.clear();

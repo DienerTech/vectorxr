@@ -158,6 +158,29 @@ std::vector<std::uint32_t> ReferenceFeather(const std::vector<std::uint32_t>& bi
 }
 }
 int main(int argc, char** argv) {
+    {
+        OsdSettings settings;
+        OsdSnapshot gaze;
+        gaze.gaze="Receiving / poses changing";
+        gaze.gaze_tone=1;
+        OsdTelemetry telemetry;
+        for (bool compact : {false, true}) {
+            const auto live=RasterizeOsd(settings,compact,gaze,telemetry,false);
+            Check(live.Valid() && !live.empty,"Gaze OSD must fit the texture in both layouts");
+            if (const char* path=std::getenv(compact?"OSD_GAZE_COMPACT_BMP":"OSD_GAZE_BMP")) WriteBitmap(path,live);
+            gaze.gaze_tone=3;
+            const auto invalid=RasterizeOsd(settings,compact,gaze,telemetry,false);
+            Check(live.pixels!=invalid.pixels,"Invalid gaze must change the visible status colour");
+            gaze.gaze_tone=1;
+        }
+        settings.show_graph=settings.show_performance=settings.show_turbo=settings.show_framegen=
+            settings.show_pivot=settings.show_modules=true;
+        gaze.framegen_session=true;
+        gaze.framegen_detail="Depth available";
+        gaze.pivot_secondary="Snap view";
+        gaze.restart="Pending";
+        Check(RasterizeOsd(settings,false,gaze,telemetry,false).Valid(),"Gaze row must fit alongside every expanded row");
+    }
     Check(SUCCEEDED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&device,nullptr,&context)),"WARP device creation failed");
     {
         OsdTelemetry stats; auto now=std::chrono::steady_clock::now(); stats.Tick(now);
