@@ -10687,20 +10687,20 @@ void OpenXrLayer::NoteSilentRecenterLocked(XrTime time, XrSpace reference_space,
     // PimaxXR recenters (Pimax Play, its system button held, a key, each
     // session's start) without queueing a reference space change: LOCAL
     // jumps under the seated anchor, and Pivot would orbit the old point.
-    // A head moves at most about 2 m/s and turns at most about 600 deg/s,
-    // even in a fast check over the shoulder. A step between two consecutive
-    // frames of more than 10 cm that is also faster than 3 m/s, or of more
-    // than 15 deg that is also faster than 1000 deg/s, cannot be the head:
-    // it is taken as the recenter the runtime did not announce (smaller
-    // recenters leave the anchor off by under 10 cm, as a lean would).
-    // Drives under 1 ms apart are not two frames; past 100 ms (a pause, a
-    // load) real motion can be anything, so nothing is judged there.
+    // The anchor is a position: how far it is off after a recenter is how
+    // far the head jumped, so the jump is judged by position alone (a turn
+    // made at the anchor leaves it right, and game-side snaps and instant
+    // turns are no recenter). A head moves at most about 2 m/s even in a
+    // fast check over the shoulder: a step between two consecutive frames of
+    // more than 10 cm that is also faster than 3 m/s cannot be the head, and
+    // is taken as the recenter the runtime did not announce (a smaller one
+    // leaves the anchor off by under 10 cm, as a lean would). Drives under
+    // 1 ms apart are not two frames; past 100 ms (a pause, a load) real
+    // motion can be anything, so nothing is judged there.
     constexpr XrTime kMinGap = 1'000'000;
     constexpr XrTime kMaxGap = 100'000'000;
     constexpr double kMinJumpMeters = 0.10;
-    constexpr double kMinJumpDegrees = 15.0;
-    constexpr double kHeadMetersPerSecond = 3.0;     // above any real head speed (~2 m/s)
-    constexpr double kHeadDegreesPerSecond = 1000.0; // above any real head turn (~600 deg/s)
+    constexpr double kHeadMetersPerSecond = 3.0; // above any real head speed (~2 m/s)
     const std::optional<PivotDriveSample> previous = pivotxr_last_drive_;
     pivotxr_last_drive_ = PivotDriveSample{time, reference_space, view_pose};
     if (!previous || pivotxr_runtime_reports_recenters_ || !pivotxr_translation_anchor_ ||
@@ -10716,16 +10716,7 @@ void OpenXrLayer::NoteSilentRecenterLocked(XrTime time, XrSpace reference_space,
     const double dy = view_pose.position.y - previous->view_pose.position.y;
     const double dz = view_pose.position.z - previous->view_pose.position.z;
     const double meters = std::sqrt(dx * dx + dy * dy + dz * dz);
-    const XrQuaternionf turn = MultiplyQuaternion(ConjugateQuaternion(NormalizeQuaternion(previous->view_pose.orientation)),
-                                                  NormalizeQuaternion(view_pose.orientation));
-    const double degrees = 2.0 *
-                           std::atan2(std::sqrt(static_cast<double>(turn.x) * turn.x +
-                                                static_cast<double>(turn.y) * turn.y +
-                                                static_cast<double>(turn.z) * turn.z),
-                                      std::abs(static_cast<double>(turn.w))) *
-                           180.0 / 3.14159265358979323846;
-    const bool jumped = meters > std::max(kMinJumpMeters, kHeadMetersPerSecond * seconds) ||
-                        degrees > std::max(kMinJumpDegrees, kHeadDegreesPerSecond * seconds);
+    const bool jumped = meters > std::max(kMinJumpMeters, kHeadMetersPerSecond * seconds);
     if (!jumped) {
         return;
     }
@@ -10738,8 +10729,8 @@ void OpenXrLayer::NoteSilentRecenterLocked(XrTime time, XrSpace reference_space,
     pivotxr_reference_changes_.push_back({type, time});
     if (pivotxr_silent_recenter_logs_ < 5) {
         ++pivotxr_silent_recenter_logs_;
-        logger_.Info("PivotXR: the head moved " + FormatDiagnosticDouble(meters) + " m and turned " +
-                     FormatDiagnosticDouble(degrees) + " deg in " + FormatDiagnosticDouble(seconds * 1000.0) +
+        logger_.Info("PivotXR: the head moved " + FormatDiagnosticDouble(meters) + " m in " +
+                     FormatDiagnosticDouble(seconds * 1000.0) +
                      " ms, faster than a head can, and the runtime sent no recenter event; taking it as a "
                      "recenter.");
     }
