@@ -13538,29 +13538,59 @@ void TestSteamVrMissedRefresh() {
         RunPipelined(*app, 900ms, 16ms, 26ms, {}, nullptr, 8ms);
         Check(presenter.Status().threaded && !presenter.Status().standby, name + ": engages");
         // About every 0.4 s, one of the runtime's waits misses a refresh.
+        const FrameGenStatus engaged = presenter.Status();
         runtime.miss_every = 37;
         std::vector<XrDuration> leads;
+        std::vector<std::uint32_t> told; // the presenter's lead as each frame ended
         RunPipelined(
             *app, 3000ms, 16ms, 26ms,
             [&](int, const XrFrameState& state) {
+                const std::uint32_t lead_slots = presenter.Status().lead_slots;
                 std::scoped_lock lock(g_xr_mutex);
-                if (!runtime.submitted_times.empty()) leads.push_back(state.predictedDisplayTime - runtime.submitted_times.back());
+                if (!runtime.submitted_times.empty()) {
+                    leads.push_back(state.predictedDisplayTime - runtime.submitted_times.back());
+                    told.push_back(lead_slots);
+                }
             },
             nullptr, 8ms);
         const FrameGenStatus status = presenter.Status();
         Check(status.threaded && !status.standby && !status.runtime_halving,
               name + ": stays engaged, the misses too rare to be halving (" + status.dynamic_reason + ")");
-        std::vector<XrDuration> sorted = leads;
+        // Each frame's lead less the presenter's own lead's change: the lead
+        // moving (a probe, or frames late in a hitch of the test's own
+        // threads, which raises it a few refreshes for a while) is the
+        // presenter's choice, not the period's timing this checks. Counted
+        // as they were, 4-7 of about 120 frames went over in 2 of ~70 runs
+        // here, each while the lead had risen (TestSteamVrMissedRefresh, Nov 2).
+        std::vector<std::uint32_t> told_sorted = told;
+        std::sort(told_sorted.begin(), told_sorted.end());
+        const std::int64_t told_median = told_sorted.empty() ? 0 : told_sorted[told_sorted.size() / 2];
+        std::vector<XrDuration> own(leads.size());
+        for (std::size_t i = 0; i < leads.size(); ++i) {
+            own[i] = leads[i] - (static_cast<std::int64_t>(told[i]) - told_median) * kPeriod;
+        }
+        std::vector<XrDuration> sorted = own;
         std::sort(sorted.begin(), sorted.end());
         const XrDuration median = sorted.empty() ? 0 : sorted[sorted.size() / 2];
-        const auto ahead = std::count_if(leads.begin(), leads.end(),
+        const auto ahead = std::count_if(own.begin(), own.end(),
                                          [&](XrDuration lead) { return lead > median + 2 * kPeriod; });
         // Timed by the reported period, 8-20% of the frames ran more than 2
         // refreshes past the median (up to 9); on the refresh grid none do.
+        if (std::getenv("FG_TEST_STATS")) {
+            std::cerr << name << ": lead " << engaged.lead_slots << " -> " << status.lead_slots << ", ups "
+                      << status.lead_ups - engaged.lead_ups << ", downs " << status.lead_downs - engaged.lead_downs
+                      << ", " << ahead << " frames over 2 refreshes past the median" << std::endl;
+        }
+        std::string sequence;
+        for (std::size_t i = 0; i < leads.size(); ++i) {
+            sequence += " " + std::to_string((leads[i] + kPeriod / 2) / kPeriod) + "/" + std::to_string(told[i]);
+        }
         Check(!leads.empty() && ahead <= 2,
               name + ": the game's frames stay about as far ahead of the refreshes (" + std::to_string(ahead) + " of " +
                   std::to_string(leads.size()) + " over 2 refreshes past the median of " +
-                  std::to_string(static_cast<double>(median) / kPeriod) + ")");
+                  std::to_string(static_cast<double>(median) / kPeriod) + "; lead " +
+                  std::to_string(status.lead_slots) + ", ups " + std::to_string(status.lead_ups) + ", downs " +
+                  std::to_string(status.lead_downs) + "; leads in refreshes:" + sequence + ")");
         Check(status.distinct_fps > 0.8 * status.output_fps,
               name + ": refreshes show new frames (" + std::to_string(status.distinct_fps) + " of " +
                   std::to_string(status.output_fps) + " fps)");
