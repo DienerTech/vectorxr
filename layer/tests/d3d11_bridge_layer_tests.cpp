@@ -5743,7 +5743,18 @@ void TestBridgedGpuBoundDynamic(Game& game, bool pimax, bool quad = false) {
     Peer::SetFrameGenDynamicPolicy(policy);
     rate(std::chrono::milliseconds(6000), engaged);
     Check(engaged(), name + ": engages for a game at half the refresh rate");
-    rate(std::chrono::milliseconds(300));
+    // Engaging sets Frame Generation's GPU work up on the game's frame thread
+    // (its pipelines and views, made by its first Executes and again when its
+    // interpolation flow switches: on WARP 180 ms, then 1.2-1.5 s, now and
+    // then a third; one game frame held each time). Measured before that is
+    // done, the window took such a frame in or not by chance: the PimaxXR
+    // case failed about 3 runs in 8 right after the quad case, and any case
+    // could (Nov 2 2026). The rate is measured once two settling windows in a
+    // row kept the rate (6 s at most): a game slowed on every frame never
+    // does, and fails below.
+    for (int settled = 0, tries = 0; settled < 2 && tries < 20; ++tries) {
+        settled = rate(std::chrono::milliseconds(300)) >= 0.75 * through ? settled + 1 : 0;
+    }
     pimax_line();
     calls_line();
     std::uint64_t blank_before = 0;
@@ -6148,11 +6159,8 @@ int main(int argc, char** argv) {
         TestSideBySideFrameGen(game, "extrapolate", true);
         TestSideBySideFrameGen(game, "interpolate", true);
         TestBridgedGpuBoundDynamic(game, false);
-        // The quad case after the PimaxXR one: run just before it on WARP, the
-        // PimaxXR case failed about 3 runs in 8 (a stand-in swapchain call held
-        // up to 488 ms), cause not found (notes, quad-layer-acquire-throttle).
-        TestBridgedGpuBoundDynamic(game, true);
         TestBridgedGpuBoundDynamic(game, false, true);
+        TestBridgedGpuBoundDynamic(game, true);
         if (!skip_negative_controls) {
             TestQuitWhilePresenterHeld(game, false);
             TestQuitWhilePresenterHeld(game, true);
