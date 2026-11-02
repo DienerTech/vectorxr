@@ -61,6 +61,14 @@ bool NearlyEqual(double lhs, double rhs) {
     return std::abs(lhs - rhs) < 0.0001;
 }
 
+// Runtimes whose Direct3D 12 xrAcquire/xrWaitSwapchainImage queue nothing on
+// the session's queue, which gets work for an image only at its first
+// xrEnumerateSwapchainImages (PimaxXR 0.4.x and HEAD, Virtual Desktop's,
+// whose names start so: "PimaxXR (Unofficial)", "VirtualDesktopXR").
+bool RuntimeQueuesOnlyFirstUse(std::string_view runtime_name) {
+    return runtime_name.rfind("PimaxXR", 0) == 0 || runtime_name.rfind("VirtualDesktopXR", 0) == 0;
+}
+
 template <typename Position>
 double PositionSeparationMeters(const Position& left, const Position& right) {
     const double x = left.x - right.x;
@@ -2708,6 +2716,20 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
             // for the game's GPU work: on a GPU-bound game, a refresh missed
             // wherever the runtime's xrEndFrame waits for its queue (Varjo).
             downstream_info = framegen_queue_.Prepare(game_info, note, true);
+            if (framegen_queue_.Active() && RuntimeQueuesOnlyFirstUse(runtime_name_)) {
+                // PimaxXR and Virtual Desktop's runtime queue work for a game
+                // image only at its first enumeration (a barrier batch); they
+                // compose on a device of their own. VECTORXR_FRAMEGEN_AFTER_WAIT=every
+                // keeps every wait ordered (A/B).
+                const char* after_wait = std::getenv("VECTORXR_FRAMEGEN_AFTER_WAIT");
+                if (!(after_wait && std::string_view(after_wait) == "every")) {
+                    framegen_queue_.SetRuntimeQueuesOnlyFirstUse(true);
+                    logger_.Info("Frame Generation: " + runtime_name_ +
+                                 " queues work for the game's images only before their first use, so the game's "
+                                 "queue waits for the runtime's only then, not behind Frame Generation's frames at "
+                                 "every image wait (VECTORXR_FRAMEGEN_AFTER_WAIT=every turns this off).");
+                }
+            }
             const char* queue_diagnostics = std::getenv("VECTORXR_FRAMEGEN_QUEUE_DIAGNOSTICS");
             framegen_queue_diagnostics_ = queue_diagnostics && std::string_view(queue_diagnostics) == "1";
             framegen_queue_diagnostics_next_ms_.store(0, std::memory_order_relaxed);

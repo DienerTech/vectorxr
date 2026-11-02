@@ -1210,7 +1210,14 @@ XrResult XRAPI_CALL RtDestroyInstance(XrInstance instance) {
 
 XrResult XRAPI_CALL RtGetInstanceProperties(XrInstance, XrInstanceProperties* properties) {
     properties->runtimeVersion = XR_MAKE_VERSION(1, 0, 0);
-    std::strncpy(properties->runtimeName, "VectorXR stand-in runtime", XR_MAX_RUNTIME_NAME_SIZE - 1);
+    bool pimax = false;
+    {
+        std::scoped_lock lock(g_runtime_mutex);
+        pimax = g_runtime.pimax;
+    }
+    // As PimaxXR names itself (its instance.cpp), for what the layer keys on its name.
+    std::strncpy(properties->runtimeName, pimax ? "PimaxXR (Unofficial)" : "VectorXR stand-in runtime",
+                 XR_MAX_RUNTIME_NAME_SIZE - 1);
     return XR_SUCCESS;
 }
 
@@ -5615,6 +5622,23 @@ void TestBridgedGpuBoundDynamic(Game& game, bool pimax, bool quad = false) {
         g_pimax.ends = g_pimax.waits = 0;
         return line.str();
     };
+    // Direct3D 11's waits for the bridge's copy of the image it acquires
+    // (D3D11Bridge::Acquired), per game frame since asked last.
+    std::uint64_t done_waits_seen = 0;
+    int done_frames_seen = 0;
+    double done_waits_per_frame = 0.0;
+    const auto done_waits_line = [&] {
+        const std::uint64_t waits = SummaryValue(Peer::Bridge().Summary(), "doneWaits");
+        const int frames = session.frames;
+        done_waits_per_frame = frames > done_frames_seen ? static_cast<double>(waits - done_waits_seen) /
+                                                               (frames - done_frames_seen)
+                                                         : 0.0;
+        done_waits_seen = waits;
+        done_frames_seen = frames;
+        std::ostringstream line;
+        line << std::fixed << std::setprecision(2) << " [bridge doneWaits/frame " << done_waits_per_frame << "]";
+        return line.str();
+    };
     const auto rate = [&](std::chrono::milliseconds duration, const std::function<bool()>& until = {}) {
         const auto start = std::chrono::steady_clock::now();
         int frames = 0;
@@ -5632,8 +5656,9 @@ void TestBridgedGpuBoundDynamic(Game& game, bool pimax, bool quad = false) {
     rate(std::chrono::milliseconds(1000));
     pimax_line();
     calls_line();
+    done_waits_line();
     const double through = rate(std::chrono::milliseconds(2000));
-    const std::string through_pimax = pimax_line() + calls_line();
+    const std::string through_pimax = pimax_line() + calls_line() + done_waits_line();
     Check(Peer::FrameGen().standby, name + ": standing by first");
     policy.engage_after = std::chrono::milliseconds(500);
     Peer::SetFrameGenDynamicPolicy(policy);
@@ -5642,8 +5667,9 @@ void TestBridgedGpuBoundDynamic(Game& game, bool pimax, bool quad = false) {
     rate(std::chrono::milliseconds(300));
     pimax_line();
     calls_line();
+    done_waits_line();
     const double during = rate(std::chrono::milliseconds(1500));
-    const std::string during_pimax = pimax_line() + calls_line();
+    const std::string during_pimax = pimax_line() + calls_line() + done_waits_line();
     const depthxr::FrameGenStatus status = Peer::FrameGen();
     std::cout << name << ": " << through << " fps passing through" << through_pimax << ", " << during
               << " fps engaged" << during_pimax << " (generated " << status.generated << ", gpuWaits "
@@ -5659,6 +5685,10 @@ void TestBridgedGpuBoundDynamic(Game& game, bool pimax, bool quad = false) {
     }
     Check(during >= 0.75 * through, name + ": engaged, the game keeps most of its rate (" + std::to_string(during) +
                                         " fps against " + std::to_string(through) + " passing through)");
+    // PimaxXR queues work for a game image only before its first wait: the
+    // game's queue waits for the runtime's only then.
+    Check(!pimax || Contains(Peer::Log(), "queues work for the game's images only before their first use"),
+          name + ": the image waits are ordered at their first use only");
     for (const Target& extra : extras) {
         Check(app.api.destroy_swapchain(extra.swapchain) == XR_SUCCESS, "an extra view's swapchain is destroyed");
     }

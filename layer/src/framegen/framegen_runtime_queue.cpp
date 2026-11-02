@@ -51,6 +51,9 @@ struct FrameGenQueueSubstitution::Impl {
     // VECTORXR_FRAMEGEN_AFTER_WAIT=off: the game's queue does not wait for the
     // runtime's after its image waits (research).
     bool after_wait{true};
+    // SetRuntimeQueuesOnlyFirstUse.
+    bool only_first_use{false};
+    std::atomic<std::uint64_t> unordered_waits{0}; // waits it left unordered
     std::atomic<std::uint64_t> shown_releases{0};
     std::atomic<std::uint64_t> shown_cpu_waits{0};
     std::atomic<std::uint64_t> shown_gpu_waits{0};
@@ -80,6 +83,8 @@ struct FrameGenQueueSubstitution::Impl {
         std::deque<std::uint32_t> unwaited;
         std::uint64_t forwarded{0};
         std::vector<std::uint64_t> released_as;
+        // Images whose first wait ordered the game's queue (AfterWait; under `mutex`).
+        std::vector<bool> ordered;
         HANDLE event{nullptr};
         ~Swapchain() {
             if (event) CloseHandle(event);
@@ -187,10 +192,20 @@ struct FrameGenQueueSubstitution::Impl {
     }
 
     // After the runtime handed an image back: anything it queued for the
-    // image runs before the game's rendering into it.
-    void AfterWait() {
+    // image runs before the game's rendering into it. A runtime that queues
+    // work for an image only before its first wait (only_first_use): only
+    // then (and for an image not known).
+    void AfterWait(Swapchain* state, std::uint32_t image) {
         if (!after_wait) return;
         std::scoped_lock lock(mutex);
+        if (only_first_use && state && image != kUnknownImage) {
+            if (image >= state->ordered.size()) state->ordered.resize(image + 1, false);
+            if (state->ordered[image]) {
+                ++unordered_waits;
+                return;
+            }
+            state->ordered[image] = true;
+        }
         const UINT64 value = ++handed_back_value;
         runtime->Signal(handed_back.Get(), value);
         game->Wait(handed_back.Get(), value);
@@ -282,6 +297,13 @@ void FrameGenQueueSubstitution::SetLog(std::function<void(const std::string&)> l
     }
 }
 
+void FrameGenQueueSubstitution::SetRuntimeQueuesOnlyFirstUse(bool only_first_use) {
+    if (impl_) {
+        std::scoped_lock lock(impl_->mutex);
+        impl_->only_first_use = only_first_use;
+    }
+}
+
 const void* FrameGenQueueSubstitution::FrameGenChain(const void* game_chain) {
     if (!impl_) {
         return game_chain;
@@ -351,7 +373,7 @@ XrResult FrameGenQueueSubstitution::Wait(XrSwapchain swapchain, bool lazy, const
             // A release before it is still held back: so is this wait.
             state->held_back.push_back({true, 0});
             calls.unlock();
-            impl_->AfterWait();
+            impl_->AfterWait(state.get(), image);
             return XR_SUCCESS;
         }
         if (state->shown_lazily && state->releases) {
@@ -396,7 +418,7 @@ XrResult FrameGenQueueSubstitution::Wait(XrSwapchain swapchain, bool lazy, const
             if (state->releases && !Impl::NewestShown(*state, image)) {
                 state->held_back.push_back({true, 0});
                 calls.unlock();
-                impl_->AfterWait();
+                impl_->AfterWait(state.get(), image);
                 return XR_SUCCESS;
             }
             impl_->shown_gpu_waits += impl_->Pending(*state);
@@ -412,7 +434,7 @@ XrResult FrameGenQueueSubstitution::Wait(XrSwapchain swapchain, bool lazy, const
     }
     const XrResult result = next.wait(swapchain, info);
     if (XR_SUCCEEDED(result) && result != XR_TIMEOUT_EXPIRED) {
-        impl_->AfterWait();
+        impl_->AfterWait(state.get(), image);
     } else if (state && result == XR_TIMEOUT_EXPIRED) {
         // Waited for again.
         std::scoped_lock calls(state->calls);
@@ -509,6 +531,7 @@ std::string FrameGenQueueSubstitution::Describe() const {
     std::ostringstream text;
     text << "released=" << impl_->released_value << '/' << impl_->released->GetCompletedValue()
          << " handedBack=" << impl_->handed_back_value << '/' << impl_->handed_back->GetCompletedValue();
+    if (impl_->only_first_use) text << " unorderedWaits=" << impl_->unordered_waits.load();
     std::vector<std::pair<XrSwapchain, std::shared_ptr<Impl::Swapchain>>> swapchains(impl_->swapchains.begin(),
                                                                                 impl_->swapchains.end());
     lock.unlock();
