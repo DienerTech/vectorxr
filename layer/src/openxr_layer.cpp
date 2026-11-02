@@ -10598,6 +10598,10 @@ XrResult OpenXrLayer::PollEvent(XrInstance instance, XrEventDataBuffer* event_da
         return result;
     }
     std::scoped_lock lock(mutex_);
+    if (change.session == active_session_) {
+        // This runtime says when it recenters: a jump is then real motion.
+        pivotxr_runtime_reports_recenters_ = true;
+    }
     // Only Pivot keeps a seated position to re-anchor.
     if (change.session == active_session_ && resolved_settings_.core.enabled && resolved_settings_.pivotxr.enabled) {
         // A bounded queue keeps the newest changes: a later recenter must
@@ -10628,6 +10632,68 @@ bool OpenXrLayer::PivotAnchorAffectedBy(XrReferenceSpaceType type) const {
     // Unknown app space type (e.g. LOCAL_FLOOR or a custom origin): any
     // tracking-origin change may move it.
     return true;
+}
+
+void OpenXrLayer::NoteSilentRecenterLocked(XrTime time, XrSpace reference_space, const XrPosef& view_pose) {
+    // PimaxXR recenters (Pimax Play, its system button held, a key, each
+    // session's start) without queueing a reference space change: LOCAL
+    // jumps under the seated anchor, and Pivot would orbit the old point.
+    // A head moves at most about 2 m/s and turns at most about 600 deg/s,
+    // even in a fast check over the shoulder. A step between two consecutive
+    // frames of more than 10 cm that is also faster than 3 m/s, or of more
+    // than 15 deg that is also faster than 1000 deg/s, cannot be the head:
+    // it is taken as the recenter the runtime did not announce (smaller
+    // recenters leave the anchor off by under 10 cm, as a lean would).
+    // Drives under 1 ms apart are not two frames; past 100 ms (a pause, a
+    // load) real motion can be anything, so nothing is judged there.
+    constexpr XrTime kMinGap = 1'000'000;
+    constexpr XrTime kMaxGap = 100'000'000;
+    constexpr double kMinJumpMeters = 0.10;
+    constexpr double kMinJumpDegrees = 15.0;
+    constexpr double kHeadMetersPerSecond = 3.0;     // above any real head speed (~2 m/s)
+    constexpr double kHeadDegreesPerSecond = 1000.0; // above any real head turn (~600 deg/s)
+    const std::optional<PivotDriveSample> previous = pivotxr_last_drive_;
+    pivotxr_last_drive_ = PivotDriveSample{time, reference_space, view_pose};
+    if (!previous || pivotxr_runtime_reports_recenters_ || !pivotxr_translation_anchor_ ||
+        previous->reference_space != reference_space) {
+        return;
+    }
+    const XrTime gap = time - previous->time;
+    if (gap < kMinGap || gap > kMaxGap) {
+        return;
+    }
+    const double seconds = static_cast<double>(gap) / 1e9;
+    const double dx = view_pose.position.x - previous->view_pose.position.x;
+    const double dy = view_pose.position.y - previous->view_pose.position.y;
+    const double dz = view_pose.position.z - previous->view_pose.position.z;
+    const double meters = std::sqrt(dx * dx + dy * dy + dz * dz);
+    const XrQuaternionf turn = MultiplyQuaternion(ConjugateQuaternion(NormalizeQuaternion(previous->view_pose.orientation)),
+                                                  NormalizeQuaternion(view_pose.orientation));
+    const double degrees = 2.0 *
+                           std::atan2(std::sqrt(static_cast<double>(turn.x) * turn.x +
+                                                static_cast<double>(turn.y) * turn.y +
+                                                static_cast<double>(turn.z) * turn.z),
+                                      std::abs(static_cast<double>(turn.w))) *
+                           180.0 / 3.14159265358979323846;
+    const bool jumped = meters > std::max(kMinJumpMeters, kHeadMetersPerSecond * seconds) ||
+                        degrees > std::max(kMinJumpDegrees, kHeadDegreesPerSecond * seconds);
+    if (!jumped) {
+        return;
+    }
+    const XrReferenceSpaceType type = tracked_stage_spaces_.contains(pivotxr_translation_anchor_->space)
+                                          ? XR_REFERENCE_SPACE_TYPE_STAGE
+                                          : XR_REFERENCE_SPACE_TYPE_LOCAL;
+    if (pivotxr_reference_changes_.size() >= 16) {
+        pivotxr_reference_changes_.erase(pivotxr_reference_changes_.begin());
+    }
+    pivotxr_reference_changes_.push_back({type, time});
+    if (pivotxr_silent_recenter_logs_ < 5) {
+        ++pivotxr_silent_recenter_logs_;
+        logger_.Info("PivotXR: the head moved " + FormatDiagnosticDouble(meters) + " m and turned " +
+                     FormatDiagnosticDouble(degrees) + " deg in " + FormatDiagnosticDouble(seconds * 1000.0) +
+                     " ms, faster than a head can, and the runtime sent no recenter event; taking it as a "
+                     "recenter.");
+    }
 }
 
 XrResult OpenXrLayer::LocateSpace(XrSpace space, XrSpace base_space, XrTime time, XrSpaceLocation* location) {
@@ -12360,6 +12426,9 @@ void OpenXrLayer::ResetSessionState() {
     has_active_primary_view_configuration_ = false;
     has_logged_quad_view_short_count_ = false;
     has_logged_canted_quadviews_eyes_ = false;
+    pivotxr_last_drive_.reset();
+    pivotxr_runtime_reports_recenters_ = false;
+    pivotxr_silent_recenter_logs_ = 0;
     has_logged_pivotxr_spike_mode_ = false;
     has_logged_quadviews_view_configuration_capabilities_ = false;
     has_logged_visibility_mask_mapping_ = false;
@@ -14580,6 +14649,9 @@ XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
     const XrPosef view_pose = space_is_view ? location->pose : InvertPose(location->pose);
     const XrSpace reference_space = space_is_view ? base_space : space;
     const bool position_valid = (location->locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0;
+    if (update_smoothing && position_valid) {
+        NoteSilentRecenterLocked(time, reference_space, view_pose);
+    }
     if (update_smoothing && !pivotxr_reference_changes_.empty()) {
         // A recenter reached this frame: the stored anchor coordinates now
         // name a different physical point, which would orbit the camera.
@@ -14998,6 +15070,7 @@ void OpenXrLayer::ResetPivotActivationState() {
     pivotxr_origin_capture_pending_ = false;
     pivotxr_translation_anchor_.reset();
     pivotxr_reference_changes_.clear();
+    pivotxr_last_drive_.reset();
     pivotxr_binding_last_poll_time_.reset();
     pivot_diagnostic_stride_counter_ = 0;
     pivot_diagnostic_ = PivotDiagnosticState{};

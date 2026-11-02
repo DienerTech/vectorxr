@@ -1445,6 +1445,19 @@ class OpenXrLayer {
     };
     std::vector<PivotReferenceChange> pivotxr_reference_changes_;
     bool PivotAnchorAffectedBy(XrReferenceSpaceType type) const;
+    // A runtime that recenters without the event (PimaxXR): the head located
+    // at the previous drive, against which a jump no head can make is taken
+    // as a recenter (NoteSilentRecenterLocked). Not watched once the runtime
+    // has sent a reference space change itself.
+    struct PivotDriveSample {
+        XrTime time{0};
+        XrSpace reference_space{XR_NULL_HANDLE};
+        XrPosef view_pose{};
+    };
+    std::optional<PivotDriveSample> pivotxr_last_drive_;
+    bool pivotxr_runtime_reports_recenters_{false};
+    uint32_t pivotxr_silent_recenter_logs_{0};
+    void NoteSilentRecenterLocked(XrTime time, XrSpace reference_space, const XrPosef& view_pose);
     bool depthxr_toggle_enabled_{true};
     bool depthxr_toggle_binding_was_down_{false};
     std::optional<std::chrono::steady_clock::time_point> pivotxr_binding_last_poll_time_;
