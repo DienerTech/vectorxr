@@ -12462,6 +12462,7 @@ void OpenXrLayer::ResetSessionState() {
     varjo_native_view_space_ = XR_NULL_HANDLE;
     varjo_native_combined_eye_space_ = XR_NULL_HANDLE;
     varjo_native_rendering_gaze_tracked_ = false;
+    has_logged_varjo_native_rendering_gaze_uninformative_ = false;
     has_logged_varjo_native_rendering_gaze_active_ = false;
     has_logged_varjo_native_rendering_gaze_unavailable_ = false;
     varjo_native_foveation_resources_attempted_ = false;
@@ -13476,8 +13477,29 @@ bool OpenXrLayer::LocateVarjoRenderingGaze(XrTime display_time,
     } else if (combined_eye_space != XR_NULL_HANDLE && view_space != XR_NULL_HANDLE) {
         result = next_locate_space_(combined_eye_space, view_space, display_time, &location);
     }
-    const bool tracked = XR_SUCCEEDED(result) &&
-                         (location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT) != 0;
+    bool tracked = XR_SUCCEEDED(result) &&
+                   (location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT) != 0;
+    // PimaxXR's combined-eye space carries ORIENTATION_TRACKED alone (no VALID
+    // bit) while its tracker has gaze, and its xrLocateSpace answers flags 0
+    // for any pose that is not valid: located, it never says tracked, and
+    // asking for the fixed focus would switch its gaze foveation off for good.
+    // A locate that succeeds with no flags at all says nothing about gaze
+    // (Varjo's own runtime always gives VALID bits): the runtime is asked for
+    // gaze foveation and decides itself (PimaxXR falls back to its fixed focus
+    // FOVs while its tracker has no gaze).
+    bool uninformative = false;
+    {
+        std::scoped_lock lock(mutex_);
+        uninformative = XR_SUCCEEDED(result) && combined_eye_space != XR_NULL_HANDLE && view_space != XR_NULL_HANDLE &&
+                        location.locationFlags == 0 && runtime_name_.find("Varjo") == std::string::npos;
+        if (uninformative && !has_logged_varjo_native_rendering_gaze_uninformative_) {
+            has_logged_varjo_native_rendering_gaze_uninformative_ = true;
+            logger_.Info("Native quad views: the runtime's combined-eye space locates with no flags (" + runtime_name_ +
+                         "), so it cannot tell whether gaze is tracked; asking the runtime for its gaze foveation "
+                         "and leaving gaze validity to it.");
+        }
+    }
+    tracked = tracked || uninformative;
 
     if (locate_result) {
         *locate_result = result;

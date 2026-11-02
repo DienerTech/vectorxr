@@ -1882,6 +1882,7 @@ class OpenXrLayer {
     XrSpace varjo_native_view_space_{XR_NULL_HANDLE};
     XrSpace varjo_native_combined_eye_space_{XR_NULL_HANDLE};
     bool varjo_native_rendering_gaze_tracked_{false};
+    bool has_logged_varjo_native_rendering_gaze_uninformative_{false};
     bool has_logged_varjo_native_rendering_gaze_active_{false};
     bool has_logged_varjo_native_rendering_gaze_unavailable_{false};
     bool varjo_native_foveation_resources_attempted_{false};
