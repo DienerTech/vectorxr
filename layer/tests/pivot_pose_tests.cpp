@@ -53,6 +53,7 @@ public:
     static void Prepare(Mode mode, double yaw, double pitch = 0) {
         auto& l=OpenXrLayer::Instance();
         l.ResetPivotActivationState();
+        l.pivotxr_runtime_reports_recenters_=false; // a new session's runtime, not yet heard from
         l.resolved_settings_={};
         l.resolved_settings_.pivotxr.enabled=true;
         PivotXrResolvedProfile profile;
@@ -127,6 +128,22 @@ public:
     }
     static void Gain(double gain) { OpenXrLayer::Instance().pivotxr_activation_gain_=gain; }
     static bool HasAnchor() { return OpenXrLayer::Instance().pivotxr_translation_anchor_.has_value(); }
+    static XrVector3f AnchorPosition() { return OpenXrLayer::Instance().pivotxr_translation_anchor_->position; }
+    static bool HasOrigin() { return OpenXrLayer::Instance().pivotxr_origin_.has_value(); }
+    static bool Engaged() { return OpenXrLayer::Instance().pivotxr_engaged_; }
+    static void Engage() { OpenXrLayer::Instance().pivotxr_engaged_=true; }
+    static XrResult XRAPI_CALL DestroyRuntimeSession(XrSession) { return XR_SUCCESS; }
+    // xrDestroySession of the running session without xrEndSession first (a
+    // VR toggle, a session restart). PimaxXR and VDXR hand the next session
+    // the same handle, (XrSession)1, and can reuse its spaces' addresses.
+    static void DestroyWithoutEnd() {
+        auto& l=OpenXrLayer::Instance();
+        l.active_session_=reinterpret_cast<XrSession>(uintptr_t{1});
+        l.next_destroy_session_=&DestroyRuntimeSession;
+        Expect(l.DestroySession(l.active_session_)==XR_SUCCESS,"xrDestroySession must succeed");
+        l.next_destroy_session_=nullptr;
+        l.active_session_=reinterpret_cast<XrSession>(uintptr_t{1}); // the next session, the same handle
+    }
     static void FullyRelease(XrPosef pose) {
         auto& l=OpenXrLayer::Instance();
         l.pivotxr_activation_gain_=0;
@@ -290,6 +307,53 @@ int main() {
                    "Lean after a recenter must rotate about the new seated position");
         }
 
+        // PimaxXR recenters without the event (it queues only session-state
+        // and interaction-profile events): LOCAL jumps under the anchor
+        // between two frames. A jump no head can make re-anchors; fast real
+        // motion, a long gap and a runtime that sends the event do not.
+        constexpr XrTime frame=11'111'111, start=1'000'000'000;
+        for (bool explicit_origin : {false,true}) {
+            Peer::Prepare(Peer::Mode::GlobalNudge,pi/2);
+            Peer::TrackLocal(Space(2));
+            if (explicit_origin) Peer::Origin(Pose());
+            Peer::Apply(Pose(),nullptr,false,Space(2),valid_pose,true,start);
+            const auto recentered=Pose(pi/6,{0,1.6f,0});
+            Expect(Close(Peer::Apply(recentered,nullptr,false,Space(2),valid_pose,true,start+frame).position,
+                         recentered.position),
+                   "A silent recenter (36 cm, 30 deg in one frame) must re-anchor the seated position");
+            auto leaned_after=recentered; leaned_after.position.x+=.02f;
+            Expect(Close(Peer::Apply(leaned_after,nullptr,false,Space(2),valid_pose,true,start+2*frame).position,
+                         {0,1.6f,-.02f}),
+                   "Lean after a silent recenter must rotate about the new seated position");
+        }
+        {
+            // A fast check over the shoulder: 600 deg/s and 2 m/s for a second.
+            Peer::Prepare(Peer::Mode::GlobalNudge,pi/2);
+            Peer::TrackLocal(Space(2));
+            Peer::Apply(Pose(),nullptr,false,Space(2),valid_pose,true,start);
+            const XrVector3f anchor=Peer::AnchorPosition();
+            for (int i=1; i<=90; ++i) {
+                const double seconds=i*static_cast<double>(frame)/1e9;
+                const auto moving=Pose(seconds*600*pi/180,{.3f+static_cast<float>(2*seconds),1.6f,-.2f});
+                Peer::Apply(moving,nullptr,false,Space(2),valid_pose,true,start+i*frame);
+            }
+            Expect(Close(Peer::AnchorPosition(),anchor),"Fast real head motion must keep the seated anchor");
+            // The same jump after a 200 ms gap (a pause) is not judged.
+            Peer::Prepare(Peer::Mode::GlobalNudge,pi/2);
+            Peer::TrackLocal(Space(2));
+            Peer::Apply(Pose(),nullptr,false,Space(2),valid_pose,true,start);
+            Peer::Apply(Pose(pi/6,{0,1.6f,0}),nullptr,false,Space(2),valid_pose,true,start+200'000'000);
+            Expect(Close(Peer::AnchorPosition(),Pose().position),"A jump across a pause must not be judged");
+            // A runtime that announces recenters (VDXR) is taken at its word.
+            Peer::Prepare(Peer::Mode::GlobalNudge,pi/2);
+            Peer::TrackLocal(Space(2));
+            Peer::Apply(Pose(),nullptr,false,Space(2),valid_pose,true,start);
+            Peer::Recenter(XR_REFERENCE_SPACE_TYPE_LOCAL,start+1'000'000'000);
+            Peer::Apply(Pose(pi/6,{0,1.6f,0}),nullptr,false,Space(2),valid_pose,true,start+frame);
+            Expect(Close(Peer::AnchorPosition(),Pose().position),
+                   "A runtime that sends recenter events must not have jumps taken as recenters");
+        }
+
         Peer::Prepare(Peer::Mode::GlobalNudge,pi/2);
         Peer::TrackLocal(XR_NULL_HANDLE);
         Peer::Apply(Pose());
@@ -307,6 +371,18 @@ int main() {
             Expect(Close(Peer::Apply(alternate_raw,nullptr,false,Space(3)).position,alternate_raw.position),
                    "Failed reference conversion must not apply an anchor from the wrong space");
         }
+        // A session destroyed without xrEndSession leaves no Pivot state for
+        // the next: the same handle and LOCAL address would take the old
+        // origin, anchor and engagement as their own.
+        Peer::Prepare(Peer::Mode::GlobalNudge,pi/2);
+        Peer::TrackLocal(Space(2));
+        Peer::Origin(Pose());
+        Peer::Engage();
+        Peer::Apply(Pose());
+        Expect(Peer::HasAnchor() && Peer::HasOrigin() && Peer::Engaged(),"Pivot fixture must be engaged and anchored");
+        Peer::DestroyWithoutEnd();
+        Expect(!Peer::HasAnchor() && !Peer::HasOrigin() && !Peer::Engaged(),
+               "xrDestroySession without xrEndSession must clear Pivot's origin, anchor and engagement");
         // Snap View stacking scenarios live in pivot_snap_tests.cpp.
         std::cout << "Pivot pose regression tests passed\n";
     } catch (const std::exception& error) {

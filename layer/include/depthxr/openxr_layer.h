@@ -86,8 +86,20 @@ class OpenXrLayer {
     void SetLayerDirectory(std::filesystem::path dll_directory);
     void SetNextProcAddr(PFN_xrGetInstanceProcAddr next_get_instance_proc_addr);
     bool CanCreateInstance();
+    // A second instance passed straight through (layer_entry.cpp's
+    // PassThroughInstance): said in the first instance's log.
+    void NotePassThroughInstance(const std::string& application_name, XrResult result);
+    // The application's name as it created the instance.
+    std::string application_name_;
+    // Native quad views on a runtime that shows the focus views with the FOVs
+    // it located for the frame's display time (PimaxXR, DCS World).
+    bool RuntimeTakesFocusFovsFromLocateLocked() const;
+    bool native_quad_focus_shares_eye_poses_{false};
+    bool has_logged_focus_fov_quirk_convergence_{false};
 
     struct InstanceCreateDiagnostics {
+        // "absent", "above" or "below" VectorXR.
+        std::string quad_views_foveated{"absent"};
         bool turbo_clock_enabled{false};
         bool app_requested_quad_views{false};
         bool app_requested_varjo_foveated_rendering{false};
@@ -891,13 +903,23 @@ class OpenXrLayer {
     bool EnsureD3D11QuadViewsPixelProbeResources(int64_t format);
     void ReleaseD3D11QuadViewsPixelProbeResources(bool preserve_history);
     void PollD3D11QuadViewsPixelProbe();
+    // `eye_in_view`: each stereo eye's orientation relative to VIEW when the
+    // runtime's eyes are canted (CantedEyeOrientations), else null.
     bool SynthesizeQuadViewsFromStereo(std::span<const XrView> stereo_views,
                                        const QuadViewsSettings& quadviews_settings,
                                        double focus_yaw_radians,
                                        double focus_pitch_radians,
                                        uint32_t view_capacity_input,
                                        uint32_t* view_count_output,
-                                       XrView* views) const;
+                                       XrView* views,
+                                       const std::array<XrQuaternionf, 2>* eye_in_view = nullptr) const;
+    // Whether the two stereo eyes the runtime located are turned from each
+    // other (a canted display), and if so each eye's orientation relative to
+    // VIEW at the locate's display time. Caller holds mutex_.
+    bool CantedEyeOrientations(XrSession session,
+                               const XrViewLocateInfo& view_locate_info,
+                               std::span<const XrView> stereo_views,
+                               std::array<XrQuaternionf, 2>* eye_in_view);
     XrResult LocateSpaceWithPivot(XrSpace space,
                                   XrSpace base_space,
                                   XrTime time,
@@ -1435,6 +1457,19 @@ class OpenXrLayer {
     };
     std::vector<PivotReferenceChange> pivotxr_reference_changes_;
     bool PivotAnchorAffectedBy(XrReferenceSpaceType type) const;
+    // A runtime that recenters without the event (PimaxXR): the head located
+    // at the previous drive, against which a jump no head can make is taken
+    // as a recenter (NoteSilentRecenterLocked). Not watched once the runtime
+    // has sent a reference space change itself.
+    struct PivotDriveSample {
+        XrTime time{0};
+        XrSpace reference_space{XR_NULL_HANDLE};
+        XrPosef view_pose{};
+    };
+    std::optional<PivotDriveSample> pivotxr_last_drive_;
+    bool pivotxr_runtime_reports_recenters_{false};
+    uint32_t pivotxr_silent_recenter_logs_{0};
+    void NoteSilentRecenterLocked(XrTime time, XrSpace reference_space, const XrPosef& view_pose);
     bool depthxr_toggle_enabled_{true};
     bool depthxr_toggle_binding_was_down_{false};
     std::optional<std::chrono::steady_clock::time_point> pivotxr_binding_last_poll_time_;
@@ -1859,6 +1894,7 @@ class OpenXrLayer {
     XrSpace varjo_native_view_space_{XR_NULL_HANDLE};
     XrSpace varjo_native_combined_eye_space_{XR_NULL_HANDLE};
     bool varjo_native_rendering_gaze_tracked_{false};
+    bool has_logged_varjo_native_rendering_gaze_uninformative_{false};
     bool has_logged_varjo_native_rendering_gaze_active_{false};
     bool has_logged_varjo_native_rendering_gaze_unavailable_{false};
     bool varjo_native_foveation_resources_attempted_{false};
@@ -1901,6 +1937,7 @@ class OpenXrLayer {
     uint32_t pending_quadviews_pixel_diagnostics_{0};
     bool has_active_primary_view_configuration_{false};
     bool has_logged_quad_view_short_count_{false};
+    bool has_logged_canted_quadviews_eyes_{false};
     bool has_logged_pivotxr_spike_mode_{false};
     bool has_logged_quadviews_view_configuration_capabilities_{false};
     uint64_t varjo_native_view_configuration_calls_{0};
@@ -1992,6 +2029,26 @@ class OpenXrLayer {
     std::optional<XrResult> last_app_action_sync_result_;
     std::optional<XrResult> last_eye_gaze_self_sync_result_;
     XrSessionState observed_session_state_{XR_SESSION_STATE_UNKNOWN};
+    // A new session's first state event not yet seen: events the runtime kept
+    // from the previous session (PimaxXR) are not taken as this one's state.
+    // Head prediction's answer to one xrLocateSpace query (space, base) at one
+    // display time, as its first locate gave it: later locates of the query
+    // at that time answer the same (LocateSpace). Never used for another time.
+    struct HeadExtensionAnswer {
+        XrTime time{0};
+        XrSpace space{XR_NULL_HANDLE};
+        XrSpace base_space{XR_NULL_HANDLE};
+        XrTime limit{0};
+        bool applied{false};
+        XrPosef pose{};
+    };
+    static constexpr std::size_t kHeadExtensionAnswersKept = 8;
+    std::vector<HeadExtensionAnswer> head_extension_answers_;
+    bool awaiting_session_start_event_{false};
+    XrTime session_create_time_{0};
+    uint32_t stale_session_event_logs_{0};
+    void NoteSessionCreatedLocked(XrTime create_time);
+    bool IsStaleSessionEventLocked(const XrEventDataSessionStateChanged& change);
     bool eye_gaze_sync_not_focused_{false};
     uint32_t eye_gaze_sync_transition_logs_remaining_{32};
     std::optional<std::chrono::steady_clock::time_point> last_eye_gaze_bound_sources_probe_;
@@ -2001,6 +2058,12 @@ class OpenXrLayer {
     std::string eye_gaze_unfocused_outcome_;
     std::optional<XrQuaternionf> eye_gaze_unfocused_last_orientation_;
     uint32_t eye_gaze_unfocused_identical_frames_{0};
+    // The focused session's gaze as last located, at which display time, and
+    // for how many display times in a row it has not changed at all.
+    std::optional<XrQuaternionf> eye_gaze_focused_last_orientation_;
+    XrTime eye_gaze_focused_last_time_{0};
+    uint32_t eye_gaze_focused_identical_frames_{0};
+    bool eye_gaze_focused_frozen_logged_{false};
     uint32_t eye_gaze_unfocused_logs_remaining_{16};
     // Focused and inactive since (reset by valid gaze or focus loss); the
     // "no data" line is logged once per session.

@@ -202,13 +202,12 @@ AngularWindow ClampProjectedWindow(float base_negative,
     return {std::atan(negative_tan), std::atan(positive_tan)};
 }
 
-XrFovf BuildFocusFov(const XrFovf& base_fov,
-                     const QuadViewsSettings& settings,
-                     double focus_yaw_radians,
-                     double focus_pitch_radians) {
-    const double horizontal_center = DegreesToRadians(settings.horizontal_offset_degrees) + focus_yaw_radians;
-    const double vertical_center = DegreesToRadians(settings.vertical_offset_degrees) + focus_pitch_radians;
-
+// The focus window centred at `horizontal_center` / `vertical_center`, angles
+// in the eye's own tangent space.
+XrFovf BuildFocusFovAt(const XrFovf& base_fov,
+                       const QuadViewsSettings& settings,
+                       double horizontal_center,
+                       double vertical_center) {
     const AngularWindow horizontal =
         ClampProjectedWindow(base_fov.angleLeft,
                              base_fov.angleRight,
@@ -226,6 +225,16 @@ XrFovf BuildFocusFov(const XrFovf& base_fov,
         static_cast<float>(vertical.positive),
         static_cast<float>(vertical.negative),
     };
+}
+
+XrFovf BuildFocusFov(const XrFovf& base_fov,
+                     const QuadViewsSettings& settings,
+                     double focus_yaw_radians,
+                     double focus_pitch_radians) {
+    return BuildFocusFovAt(base_fov,
+                           settings,
+                           DegreesToRadians(settings.horizontal_offset_degrees) + focus_yaw_radians,
+                           DegreesToRadians(settings.vertical_offset_degrees) + focus_pitch_radians);
 }
 
 template <typename T>
@@ -1214,6 +1223,24 @@ GazeRayAngles ExtractGazeRayAngles(const XrQuaternionf& orientation, bool flip_z
     };
 }
 
+// Where a direction `yaw` / `pitch` from head-forward (VIEW) falls in an eye
+// turned `eye_in_view` from the head: angles in the eye's own tangent space,
+// as Quad-Views-Foveated's and PimaxXR's ProjectPoint place the gaze (here a
+// direction, a point at infinity, so the eye's offset from the head's centre
+// drops out). None when the direction is not in front of the eye.
+std::optional<std::pair<double, double>> ProjectViewDirectionIntoEye(const XrQuaternionf& eye_in_view,
+                                                                      double yaw_radians,
+                                                                      double pitch_radians) {
+    const XrVector3f direction{static_cast<float>(std::tan(yaw_radians)),
+                               static_cast<float>(std::tan(pitch_radians)), -1.0f};
+    const XrVector3f in_eye = RotateVector(ConjugateQuaternion(NormalizeQuaternion(eye_in_view)), direction);
+    if (in_eye.z > -0.000001f) {
+        return std::nullopt;
+    }
+    return std::pair<double, double>{std::atan2(static_cast<double>(in_eye.x), -static_cast<double>(in_eye.z)),
+                                     std::atan2(static_cast<double>(in_eye.y), -static_cast<double>(in_eye.z))};
+}
+
 XrQuaternionf YawQuaternion(float yaw_radians) {
     const float half = yaw_radians * 0.5f;
     return {0.0f, std::sin(half), 0.0f, std::cos(half)};
@@ -1583,6 +1610,12 @@ constexpr uint32_t kEyeGazeUnavailableLogThreshold = 30;
 // after which the runtime is taken to be returning a stale pose. Live eye
 // tracking jitters every sample. ~1/2s at 90Hz.
 constexpr uint32_t kEyeGazeUnfocusedFrozenFrames = 45;
+// The same, while focused: frames (display times) in a row with the very same
+// gaze, after which a tracker the runtime still reports valid is taken to
+// have stopped (PimaxXR's Droolon / aSeeVR path keeps its last sample once
+// ready). Far past any fixation: live gaze never repeats bit for bit. ~2 s
+// at 90 Hz.
+constexpr uint32_t kEyeGazeFocusedFrozenFrames = 180;
 // How long a focused session's bound eye-gaze input may stay inactive before
 // the log says the eye tracker is sending no data.
 constexpr std::chrono::seconds kEyeGazeNoDataLogDelay{10};
@@ -2062,9 +2095,28 @@ bool OpenXrLayer::PollInputBindingDown(const InputBinding& binding) {
     return poll.down;
 }
 
+bool OpenXrLayer::RuntimeTakesFocusFovsFromLocateLocked() const {
+    // PimaxXR (0.4.4, quad views on), for an application named "DCS World",
+    // keeps the focus FOVs each quad xrLocateViews returns for its display
+    // time and shows the focus views with those at xrEndFrame, not with the
+    // submitted ones (DCS submits other ones; Quad-Views-Foveated does the
+    // same, but VectorXR never forwards quad views to it). Varjo's runtime is
+    // not known to: it keeps VectorXR's behaviour.
+    return varjo_compatible_quadviews_active_ && application_name_ == "DCS World" &&
+           runtime_name_.find("Varjo") == std::string::npos;
+}
+
 bool OpenXrLayer::CanCreateInstance() {
     std::scoped_lock lock(mutex_);
     return instance_ == XR_NULL_HANDLE;
+}
+
+void OpenXrLayer::NotePassThroughInstance(const std::string& application_name, XrResult result) {
+    logger_.Info("A second OpenXR instance (application \"" + application_name + "\", result=" +
+                 std::to_string(static_cast<int>(result)) +
+                 ") was created while VectorXR's is alive; it passes straight through VectorXR, which stays with "
+                 "its first instance. OpenXR Toolkit and Quad-Views-Foveated keep their probe instance alive on "
+                 "VIVE runtimes, which makes the game's instance the second.");
 }
 
 XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
@@ -2138,6 +2190,8 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
             ExtensionRequested(create_info, XR_KHR_D3D11_ENABLE_EXTENSION_NAME);
 
         std::ostringstream stream;
+        application_name_.assign(create_info->applicationInfo.applicationName,
+                                 strnlen(create_info->applicationInfo.applicationName, XR_MAX_APPLICATION_NAME_SIZE));
         const XrVersion api_version = create_info->applicationInfo.apiVersion;
         application_can_select_quad_views_ = quad_views_extension_requested_ ||
                                              varjo_foveated_rendering_extension_requested_ ||
@@ -2159,6 +2213,12 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
         }
         logger_.Info(ext_stream.str());
         logger_.Info("OpenXR API layers below VectorXR: [" + diagnostics.layers_below + "]");
+        if (diagnostics.quad_views_foveated == "above") {
+            logger_.Info("Quad-Views-Foveated is loaded above VectorXR: for a Direct3D 11 application it does the "
+                         "quad views itself and VectorXR sees a stereo application.");
+        } else if (diagnostics.quad_views_foveated == "below") {
+            logger_.Info("Quad-Views-Foveated is loaded below VectorXR: it sees the views VectorXR sends on.");
+        }
         if (diagnostics.openxr_toolkit != "absent") {
             logger_.Info("OpenXR Toolkit is loaded " +
                          std::string(diagnostics.openxr_toolkit == "below" ? "below VectorXR."
@@ -2775,6 +2835,9 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
     if (!vulkan_bridge_.Active()) {
         requery_vulkan_requirements();
     }
+    // Before the runtime's xrCreateSession: the new session's first event is
+    // queued in it, so anything stamped earlier is not this session's.
+    const XrTime session_create_time = TurboClockNow();
     XrResult result = next_create_session_(instance, downstream_info, session);
     if (XR_FAILED(result) && d3d11_bridge_.Active()) {
         logger_.Error("xrCreateSession refused the bridged Direct3D 12 session (result=" +
@@ -2869,6 +2932,7 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
     }
     ResetSessionState();
     active_session_ = *session;
+    NoteSessionCreatedLocked(session_create_time);
     d3d11_bridge_lost_logged_ = false;
     d3d11_bridge_depth_logged_ = false;
     d3d11_bridge_last_summary_ = std::chrono::steady_clock::now();
@@ -3081,6 +3145,11 @@ XrResult OpenXrLayer::DestroySession(XrSession session) {
         if (session == active_session_) {
             ResetSwapchainState();
             ResetSessionState();
+            // As at xrEndSession, which an application may skip: PimaxXR and
+            // VDXR give the next session the same handle and can give its
+            // LOCAL space the same address, so a kept origin, anchor or
+            // engagement would pass for the next session's own.
+            ResetPivotActivationState();
         }
     }
 
@@ -10540,6 +10609,9 @@ XrResult OpenXrLayer::PollEvent(XrInstance instance, XrEventDataBuffer* event_da
         logger_.Info("Runtime session state changed: state=" + std::to_string(static_cast<int>(change.state)) +
                      " (" + SessionStateName(change.state) + "), time=" + std::to_string(change.time));
         std::scoped_lock lock(mutex_);
+        if (change.session == active_session_ && IsStaleSessionEventLocked(change)) {
+            return result;
+        }
         if (change.session == active_session_) {
             observed_session_state_ = change.state;
             if (change.state == XR_SESSION_STATE_FOCUSED) {
@@ -10571,6 +10643,10 @@ XrResult OpenXrLayer::PollEvent(XrInstance instance, XrEventDataBuffer* event_da
         return result;
     }
     std::scoped_lock lock(mutex_);
+    if (change.session == active_session_) {
+        // This runtime says when it recenters: a jump is then real motion.
+        pivotxr_runtime_reports_recenters_ = true;
+    }
     // Only Pivot keeps a seated position to re-anchor.
     if (change.session == active_session_ && resolved_settings_.core.enabled && resolved_settings_.pivotxr.enabled) {
         // A bounded queue keeps the newest changes: a later recenter must
@@ -10587,6 +10663,43 @@ XrResult OpenXrLayer::PollEvent(XrInstance instance, XrEventDataBuffer* event_da
     return result;
 }
 
+void OpenXrLayer::NoteSessionCreatedLocked(XrTime create_time) {
+    awaiting_session_start_event_ = true;
+    session_create_time_ = create_time;
+}
+
+bool OpenXrLayer::IsStaleSessionEventLocked(const XrEventDataSessionStateChanged& change) {
+    // PimaxXR keeps its session event queue across sessions and stamps every
+    // event with the one handle it gives each session: an application that
+    // destroyed its session without reading the last events (STOPPING, IDLE,
+    // EXITING) gets them for its next session, ahead of that session's IDLE.
+    // They are not this session's state. With the runtime's clock, an event
+    // stamped before this session was created is the last session's; without
+    // it, anything before the session's first IDLE is (an old IDLE among them
+    // then closes the window early). The application still gets every event
+    // as the runtime sent it.
+    if (!awaiting_session_start_event_) {
+        return false;
+    }
+    const bool stale = session_create_time_ > 0
+                           ? change.time > 0 && change.time < session_create_time_
+                           : change.state != XR_SESSION_STATE_IDLE;
+    if (!stale) {
+        awaiting_session_start_event_ = false;
+        return false;
+    }
+    if (stale_session_event_logs_ < 8) {
+        ++stale_session_event_logs_;
+        logger_.Info("Runtime session event from before this session (state=" +
+                     std::to_string(static_cast<int>(change.state)) + " " + SessionStateName(change.state) +
+                     ", time=" + std::to_string(change.time) + ", session created at " +
+                     std::to_string(session_create_time_) +
+                     "): the runtime kept it from the previous session. VectorXR does not take it as this "
+                     "session's state; the application receives it as sent.");
+    }
+    return true;
+}
+
 bool OpenXrLayer::PivotAnchorAffectedBy(XrReferenceSpaceType type) const {
     if (!pivotxr_translation_anchor_) {
         return false;
@@ -10601,6 +10714,59 @@ bool OpenXrLayer::PivotAnchorAffectedBy(XrReferenceSpaceType type) const {
     // Unknown app space type (e.g. LOCAL_FLOOR or a custom origin): any
     // tracking-origin change may move it.
     return true;
+}
+
+void OpenXrLayer::NoteSilentRecenterLocked(XrTime time, XrSpace reference_space, const XrPosef& view_pose) {
+    // PimaxXR recenters (Pimax Play, its system button held, a key, each
+    // session's start) without queueing a reference space change: LOCAL
+    // jumps under the seated anchor, and Pivot would orbit the old point.
+    // The anchor is a position: how far it is off after a recenter is how
+    // far the head jumped, so the jump is judged by position alone (a turn
+    // made at the anchor leaves it right, and game-side snaps and instant
+    // turns are no recenter). A head moves at most about 2 m/s even in a
+    // fast check over the shoulder: a step between two consecutive frames of
+    // more than 10 cm that is also faster than 3 m/s cannot be the head, and
+    // is taken as the recenter the runtime did not announce (a smaller one
+    // leaves the anchor off by under 10 cm, as a lean would). Drives under
+    // 1 ms apart are not two frames; past 100 ms (a pause, a load) real
+    // motion can be anything, so nothing is judged there.
+    constexpr XrTime kMinGap = 1'000'000;
+    constexpr XrTime kMaxGap = 100'000'000;
+    constexpr double kMinJumpMeters = 0.10;
+    constexpr double kHeadMetersPerSecond = 3.0; // above any real head speed (~2 m/s)
+    const std::optional<PivotDriveSample> previous = pivotxr_last_drive_;
+    pivotxr_last_drive_ = PivotDriveSample{time, reference_space, view_pose};
+    if (!previous || pivotxr_runtime_reports_recenters_ || !pivotxr_translation_anchor_ ||
+        previous->reference_space != reference_space) {
+        return;
+    }
+    const XrTime gap = time - previous->time;
+    if (gap < kMinGap || gap > kMaxGap) {
+        return;
+    }
+    const double seconds = static_cast<double>(gap) / 1e9;
+    const double dx = view_pose.position.x - previous->view_pose.position.x;
+    const double dy = view_pose.position.y - previous->view_pose.position.y;
+    const double dz = view_pose.position.z - previous->view_pose.position.z;
+    const double meters = std::sqrt(dx * dx + dy * dy + dz * dz);
+    const bool jumped = meters > std::max(kMinJumpMeters, kHeadMetersPerSecond * seconds);
+    if (!jumped) {
+        return;
+    }
+    const XrReferenceSpaceType type = tracked_stage_spaces_.contains(pivotxr_translation_anchor_->space)
+                                          ? XR_REFERENCE_SPACE_TYPE_STAGE
+                                          : XR_REFERENCE_SPACE_TYPE_LOCAL;
+    if (pivotxr_reference_changes_.size() >= 16) {
+        pivotxr_reference_changes_.erase(pivotxr_reference_changes_.begin());
+    }
+    pivotxr_reference_changes_.push_back({type, time});
+    if (pivotxr_silent_recenter_logs_ < 5) {
+        ++pivotxr_silent_recenter_logs_;
+        logger_.Info("PivotXR: the head moved " + FormatDiagnosticDouble(meters) + " m in " +
+                     FormatDiagnosticDouble(seconds * 1000.0) +
+                     " ms, faster than a head can, and the runtime sent no recenter event; taking it as a "
+                     "recenter.");
+    }
 }
 
 XrResult OpenXrLayer::LocateSpace(XrSpace space, XrSpace base_space, XrTime time, XrSpaceLocation* location) {
@@ -10653,10 +10819,34 @@ XrResult OpenXrLayer::LocateSpace(XrSpace space, XrSpace base_space, XrTime time
             (location->locationFlags & kHeadPredictionPoseFlags) != kHeadPredictionPoseFlags) {
             return;
         }
+        // DCS locates VIEW several times a frame. Each query answers what its
+        // first locate at this display time did: the same pose (not one
+        // extended against a later "now"), for one runtime locate instead of
+        // four. Kept for that display time only.
+        {
+            std::scoped_lock lock(mutex_);
+            const auto answered = std::find_if(
+                head_extension_answers_.begin(), head_extension_answers_.end(), [&](const HeadExtensionAnswer& answer) {
+                    return answer.time == time && answer.space == space && answer.base_space == base_space &&
+                           answer.limit == head_plan.limit;
+                });
+            if (answered != head_extension_answers_.end()) {
+                if (answered->applied) {
+                    location->pose = answered->pose;
+                }
+                return;
+            }
+        }
         const HeadExtension extension = ExtendHead(head_plan, head_world_space, time, TurboClockNow());
         const HeadPredictionPose pose = ToHeadPose(location->pose);
         location->pose = ToXrPose(space == head_world_space ? ApplyHeadExtensionInverse(extension, pose)
                                                             : ApplyHeadExtension(extension, pose));
+        std::scoped_lock lock(mutex_);
+        if (head_extension_answers_.size() >= kHeadExtensionAnswersKept) {
+            head_extension_answers_.erase(head_extension_answers_.begin());
+        }
+        head_extension_answers_.push_back(
+            {time, space, base_space, head_plan.limit, extension.applied, location->pose});
     };
 
     if (!pivot_processing_required) {
@@ -10724,6 +10914,12 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         &head_extension);
 
     if (XR_FAILED(result) || !views || !view_count_output) {
+        return result;
+    }
+    // A runtime that could not locate the views leaves them as they were
+    // (PimaxXR before its first valid head pose: flags 0, all or nothing):
+    // nothing is adjusted, cached or derived from them.
+    if (view_state && (view_state->viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT) == 0) {
         return result;
     }
 
@@ -11051,6 +11247,23 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
     }
     if (depthxr_active && !NearlyEqual(resolved_settings_.depthxr.convergence, 0.0)) {
         ApplyConvergence(adjusted_views, resolved_settings_.depthxr.convergence, view_layout);
+        // The runtime shows these focus views with the FOVs it located itself
+        // (RuntimeTakesFocusFovsFromLocateLocked). Without Depth Anchor the
+        // periphery is shown as rendered, so the focus views are rendered with
+        // the runtime's FOVs too; with it, both are shown shifted back to the
+        // runtime's and convergence applies to all four.
+        if (!depth_anchor_active_ && count >= 4 && IsQuadViewConfiguration(view_configuration_type) &&
+            RuntimeTakesFocusFovsFromLocateLocked()) {
+            for (uint32_t i = 2; i < 4; ++i) {
+                adjusted_views[i].fov = original_views[i].fov;
+            }
+            if (!has_logged_focus_fov_quirk_convergence_) {
+                has_logged_focus_fov_quirk_convergence_ = true;
+                logger_.Info("Depth convergence on " + application_name_ + "'s native quad views (" + runtime_name_ +
+                             "): the runtime shows the focus views with the FOVs it located, so without Depth Anchor "
+                             "convergence is applied to the peripheral views only.");
+            }
+        }
     }
     if (cache_depth_submission_geometry) {
         CacheDepthSubmissionGeometry(view_locate_info->displayTime,
@@ -11077,6 +11290,18 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         CacheQuadViewsFrame(
             view_locate_info->displayTime, std::span<const XrView>(views, count), gaze_diagnostic);
         if (varjo_compatible_quadviews_active_) {
+            // Whether the runtime's focus views sit at their eyes' poses (as
+            // PimaxXR's do): then a stereo locate gives every view's offset.
+            const auto same_pose = [&](uint32_t a, uint32_t b) {
+                return original_views[a].position.x == original_views[b].position.x &&
+                       original_views[a].position.y == original_views[b].position.y &&
+                       original_views[a].position.z == original_views[b].position.z &&
+                       original_views[a].orientation.x == original_views[b].orientation.x &&
+                       original_views[a].orientation.y == original_views[b].orientation.y &&
+                       original_views[a].orientation.z == original_views[b].orientation.z &&
+                       original_views[a].orientation.w == original_views[b].orientation.w;
+            };
+            native_quad_focus_shares_eye_poses_ = same_pose(2, 0) && same_pose(3, 1);
             NoteVarjoNativeLocatedFocusLocked(view_locate_info->displayTime, views);
         }
     }
@@ -12299,6 +12524,7 @@ void OpenXrLayer::ResetSessionState() {
     varjo_native_view_space_ = XR_NULL_HANDLE;
     varjo_native_combined_eye_space_ = XR_NULL_HANDLE;
     varjo_native_rendering_gaze_tracked_ = false;
+    has_logged_varjo_native_rendering_gaze_uninformative_ = false;
     has_logged_varjo_native_rendering_gaze_active_ = false;
     has_logged_varjo_native_rendering_gaze_unavailable_ = false;
     varjo_native_foveation_resources_attempted_ = false;
@@ -12332,6 +12558,15 @@ void OpenXrLayer::ResetSessionState() {
     active_runtime_view_configuration_type_ = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
     has_active_primary_view_configuration_ = false;
     has_logged_quad_view_short_count_ = false;
+    has_logged_canted_quadviews_eyes_ = false;
+    pivotxr_last_drive_.reset();
+    pivotxr_runtime_reports_recenters_ = false;
+    pivotxr_silent_recenter_logs_ = 0;
+    awaiting_session_start_event_ = false;
+    session_create_time_ = 0;
+    head_extension_answers_.clear();
+    native_quad_focus_shares_eye_poses_ = false;
+    has_logged_focus_fov_quirk_convergence_ = false;
     has_logged_pivotxr_spike_mode_ = false;
     has_logged_quadviews_view_configuration_capabilities_ = false;
     has_logged_visibility_mask_mapping_ = false;
@@ -12550,6 +12785,10 @@ void OpenXrLayer::ResetEyeGazeInputState() {
     eye_gaze_unfocused_last_orientation_.reset();
     eye_gaze_unfocused_identical_frames_ = 0;
     eye_gaze_unfocused_logs_remaining_ = 16;
+    eye_gaze_focused_last_orientation_.reset();
+    eye_gaze_focused_last_time_ = 0;
+    eye_gaze_focused_identical_frames_ = 0;
+    eye_gaze_focused_frozen_logged_ = false;
     eye_gaze_inactive_since_.reset();
     eye_gaze_no_data_logged_ = false;
 }
@@ -13017,6 +13256,35 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
             return false;
         }
     }
+    if (!unfocused_visible && XR_SUCCEEDED(locate_result) &&
+        (gaze_location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) != 0) {
+        // Valid but frozen: see kEyeGazeFocusedFrozenFrames. A frame's
+        // repeated locates (one display time) are not counted.
+        const XrQuaternionf& q = gaze_location.pose.orientation;
+        const auto& last = eye_gaze_focused_last_orientation_;
+        const bool identical = last && last->x == q.x && last->y == q.y && last->z == q.z && last->w == q.w;
+        if (!identical) {
+            eye_gaze_focused_identical_frames_ = 0;
+            eye_gaze_focused_frozen_logged_ = false;
+        } else if (time != eye_gaze_focused_last_time_) {
+            ++eye_gaze_focused_identical_frames_;
+        }
+        eye_gaze_focused_last_orientation_ = q;
+        eye_gaze_focused_last_time_ = time;
+        if (eye_gaze_focused_identical_frames_ >= kEyeGazeFocusedFrozenFrames) {
+            if (!eye_gaze_focused_frozen_logged_) {
+                eye_gaze_focused_frozen_logged_ = true;
+                logger_.Info("Quadviews eye tracking: the runtime has reported the very same gaze for " +
+                             std::to_string(eye_gaze_focused_identical_frames_) +
+                             " frames while calling it valid; the eye tracker has likely stopped. Quadviews uses "
+                             "head focus until the gaze moves again.");
+            }
+            log_eye_gaze_diagnostic("gaze has not changed for " + std::to_string(eye_gaze_focused_identical_frames_) +
+                                        " frames",
+                                    true);
+            return false;
+        }
+    }
     if (XR_FAILED(locate_result) ||
         (gaze_location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) == 0) {
         log_eye_gaze_diagnostic("gaze space locate failed, result=" +
@@ -13306,8 +13574,29 @@ bool OpenXrLayer::LocateVarjoRenderingGaze(XrTime display_time,
     } else if (combined_eye_space != XR_NULL_HANDLE && view_space != XR_NULL_HANDLE) {
         result = next_locate_space_(combined_eye_space, view_space, display_time, &location);
     }
-    const bool tracked = XR_SUCCEEDED(result) &&
-                         (location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT) != 0;
+    bool tracked = XR_SUCCEEDED(result) &&
+                   (location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT) != 0;
+    // PimaxXR's combined-eye space carries ORIENTATION_TRACKED alone (no VALID
+    // bit) while its tracker has gaze, and its xrLocateSpace answers flags 0
+    // for any pose that is not valid: located, it never says tracked, and
+    // asking for the fixed focus would switch its gaze foveation off for good.
+    // A locate that succeeds with no flags at all says nothing about gaze
+    // (Varjo's own runtime always gives VALID bits): the runtime is asked for
+    // gaze foveation and decides itself (PimaxXR falls back to its fixed focus
+    // FOVs while its tracker has no gaze).
+    bool uninformative = false;
+    {
+        std::scoped_lock lock(mutex_);
+        uninformative = XR_SUCCEEDED(result) && combined_eye_space != XR_NULL_HANDLE && view_space != XR_NULL_HANDLE &&
+                        location.locationFlags == 0 && runtime_name_.find("Varjo") == std::string::npos;
+        if (uninformative && !has_logged_varjo_native_rendering_gaze_uninformative_) {
+            has_logged_varjo_native_rendering_gaze_uninformative_ = true;
+            logger_.Info("Native quad views: the runtime's combined-eye space locates with no flags (" + runtime_name_ +
+                         "), so it cannot tell whether gaze is tracked; asking the runtime for its gaze foveation "
+                         "and leaving gaze validity to it.");
+        }
+    }
+    tracked = tracked || uninformative;
 
     if (locate_result) {
         *locate_result = result;
@@ -13397,18 +13686,33 @@ bool OpenXrLayer::EnsureEyeOffsets(XrSession session,
         return true;
     }
 
+    // A quad locate of VectorXR's own at the game's display time would replace
+    // the focus FOVs a runtime keeps from the game's locate for that time
+    // (RuntimeTakesFocusFovsFromLocateLocked), with the fixed focus: the frame
+    // would be shown with the inset off the gaze. Where the runtime's focus
+    // views sit at their eyes' poses, the stereo locate gives the same offsets
+    // and leaves that entry alone.
+    const bool stereo_for_quad = IsQuadViewConfiguration(view_configuration_type) && view_count == 4 &&
+                                 native_quad_focus_shares_eye_poses_ && RuntimeTakesFocusFovsFromLocateLocked();
+    const uint32_t locate_count = stereo_for_quad ? 2 : view_count;
     std::vector<XrView>& eye_views = eye_offset_views_scratch_;
     eye_views.assign(view_count, XrView{XR_TYPE_VIEW});
     XrViewState eye_view_state{XR_TYPE_VIEW_STATE};
     uint32_t eye_view_count = 0;
     XrViewLocateInfo eye_view_locate_info{XR_TYPE_VIEW_LOCATE_INFO};
-    eye_view_locate_info.viewConfigurationType = view_configuration_type;
+    eye_view_locate_info.viewConfigurationType =
+        stereo_for_quad ? XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO : view_configuration_type;
     eye_view_locate_info.displayTime = display_time;
     eye_view_locate_info.space = internal_view_space_;
 
-    const XrResult result =
-        next_locate_views_(session, &eye_view_locate_info, &eye_view_state, view_count, &eye_view_count, eye_views.data());
-    if (XR_FAILED(result) || eye_view_count < view_count) {
+    const XrResult result = next_locate_views_(session, &eye_view_locate_info, &eye_view_state, locate_count,
+                                               &eye_view_count, eye_views.data());
+    if (XR_SUCCEEDED(result) && (eye_view_state.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT) == 0) {
+        // Not located (the views are left as they were): nothing to keep.
+        pivot_diagnostic_.has_eye_offsets = false;
+        return false;
+    }
+    if (XR_FAILED(result) || eye_view_count < locate_count) {
         logger_.Error("Failed to capture internal eye offsets for PivotXR view-space recomposition.");
         pivot_diagnostic_.has_eye_offsets = false;
         return false;
@@ -13416,7 +13720,7 @@ bool OpenXrLayer::EnsureEyeOffsets(XrSession session,
 
     cached_eye_offset_poses_.resize(view_count);
     for (uint32_t i = 0; i < view_count; ++i) {
-        cached_eye_offset_poses_[i] = eye_views[i].pose;
+        cached_eye_offset_poses_[i] = eye_views[stereo_for_quad ? i % 2 : i].pose;
     }
     cached_eye_offsets_view_configuration_ = view_configuration_type;
     cached_eye_offsets_display_time_ = display_time;
@@ -13977,8 +14281,10 @@ void OpenXrLayer::NoteVarjoNativeSubmittedFocusLocked(XrTime display_time, const
                      "displayTime=" + std::to_string(display_time) + ", submittedFocusView2=" +
                      FormatFov(views[2].fov) + ", locatedFocusView2=" + FormatFov((*located)[0]) +
                      ", submittedFocusView3=" + FormatFov(views[3].fov) + ", locatedFocusView3=" +
-                     FormatFov((*located)[1]) + ". The runtime places the focus insets by the FOVs submitted; counts "
-                     "are in the foveation summary (submittedFocusFov=checked/mismatched/unlocated).");
+                     FormatFov((*located)[1]) + ". A runtime places the focus insets by the FOVs submitted, except "
+                     "one that keeps the located ones for the display time (PimaxXR for an application named DCS "
+                     "World): there this mismatch is not what is shown. Counts are in the foveation summary "
+                     "(submittedFocusFov=checked/mismatched/unlocated).");
     }
 }
 
@@ -14268,8 +14574,13 @@ XrResult OpenXrLayer::LocateRuntimeViews(XrSession session,
 
     double focus_yaw_radians = 0.0;
     double focus_pitch_radians = 0.0;
+    std::array<XrQuaternionf, 2> eye_in_view{};
+    bool canted_eyes = false;
     {
         std::scoped_lock lock(mutex_);
+        // Only from eyes the runtime located (it may leave them untouched).
+        canted_eyes = (!view_state || (runtime_view_state.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT) != 0) &&
+                      CantedEyeOrientations(session, *view_locate_info, stereo_views, &eye_in_view);
         const bool has_eye_focus = LocateEyeGazeFocusOffsets(session,
                                                             view_locate_info->space,
                                                             ClampInternalLocateTime(view_locate_info->displayTime),
@@ -14321,7 +14632,8 @@ XrResult OpenXrLayer::LocateRuntimeViews(XrSession session,
                                        focus_pitch_radians,
                                        view_capacity_input,
                                        view_count_output,
-                                       views)) {
+                                       views,
+                                       canted_eyes ? &eye_in_view : nullptr)) {
         return XR_ERROR_RUNTIME_FAILURE;
     }
     if (synthesized_quad_views) {
@@ -14336,7 +14648,8 @@ bool OpenXrLayer::SynthesizeQuadViewsFromStereo(std::span<const XrView> stereo_v
                                                 double focus_pitch_radians,
                                                 uint32_t view_capacity_input,
                                                 uint32_t* view_count_output,
-                                                XrView* views) const {
+                                                XrView* views,
+                                                const std::array<XrQuaternionf, 2>* eye_in_view) const {
     if (stereo_views.size() < 2 || !views || !view_count_output || view_capacity_input < 4) {
         return false;
     }
@@ -14354,8 +14667,68 @@ bool OpenXrLayer::SynthesizeQuadViewsFromStereo(std::span<const XrView> stereo_v
         views[i].next = app_next[i];
     }
 
-    views[2].fov = BuildFocusFov(stereo_views[0].fov, quadviews_settings, focus_yaw_radians, focus_pitch_radians);
-    views[3].fov = BuildFocusFov(stereo_views[1].fov, quadviews_settings, focus_yaw_radians, focus_pitch_radians);
+    for (uint32_t eye = 0; eye < 2; ++eye) {
+        // Canted eyes: head-forward plus the offsets and the gaze is a
+        // direction in VIEW, placed in each eye through its own turn (both
+        // insets then cover the same direction). Parallel eyes keep the
+        // angles as they are.
+        const std::optional<std::pair<double, double>> center =
+            eye_in_view ? ProjectViewDirectionIntoEye(
+                              (*eye_in_view)[eye],
+                              DegreesToRadians(quadviews_settings.horizontal_offset_degrees) + focus_yaw_radians,
+                              DegreesToRadians(quadviews_settings.vertical_offset_degrees) + focus_pitch_radians)
+                        : std::nullopt;
+        views[2 + eye].fov =
+            center ? BuildFocusFovAt(stereo_views[eye].fov, quadviews_settings, center->first, center->second)
+                   : BuildFocusFov(stereo_views[eye].fov, quadviews_settings, focus_yaw_radians, focus_pitch_radians);
+    }
+    return true;
+}
+
+bool OpenXrLayer::CantedEyeOrientations(XrSession session,
+                                        const XrViewLocateInfo& view_locate_info,
+                                        std::span<const XrView> stereo_views,
+                                        std::array<XrQuaternionf, 2>* eye_in_view) {
+    if (!eye_in_view || stereo_views.size() < 2) {
+        return false;
+    }
+    // The turn between the two eyes, from this locate alone: none (the same
+    // orientation, as every runtime with parallel projection answers) costs
+    // nothing and changes nothing.
+    constexpr double kParallelEyesRadians = 0.0001;
+    const XrQuaternionf relative = MultiplyQuaternion(ConjugateQuaternion(NormalizeQuaternion(stereo_views[0].pose.orientation)),
+                                                      NormalizeQuaternion(stereo_views[1].pose.orientation));
+    const double sine = std::sqrt(static_cast<double>(relative.x) * relative.x +
+                                  static_cast<double>(relative.y) * relative.y +
+                                  static_cast<double>(relative.z) * relative.z);
+    if (2.0 * std::atan2(sine, std::abs(static_cast<double>(relative.w))) < kParallelEyesRadians) {
+        return false;
+    }
+    if (IsTrackedViewSpace(view_locate_info.space)) {
+        (*eye_in_view)[0] = NormalizeQuaternion(stereo_views[0].pose.orientation);
+        (*eye_in_view)[1] = NormalizeQuaternion(stereo_views[1].pose.orientation);
+        return true;
+    }
+    // The eyes relative to VIEW for this display time (Pivot's eye offsets,
+    // shared with it and kept for this display time only).
+    if (!EnsureEyeOffsets(session, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
+                          ClampInternalLocateTime(view_locate_info.displayTime), 2) ||
+        cached_eye_offset_poses_.size() < 2) {
+        return false;
+    }
+    (*eye_in_view)[0] = cached_eye_offset_poses_[0].orientation;
+    (*eye_in_view)[1] = cached_eye_offset_poses_[1].orientation;
+    if (!has_logged_canted_quadviews_eyes_) {
+        has_logged_canted_quadviews_eyes_ = true;
+        const double left_yaw = ExtractYawRadians({(*eye_in_view)[0].x, (*eye_in_view)[0].y, (*eye_in_view)[0].z,
+                                                   (*eye_in_view)[0].w});
+        const double right_yaw = ExtractYawRadians({(*eye_in_view)[1].x, (*eye_in_view)[1].y, (*eye_in_view)[1].z,
+                                                    (*eye_in_view)[1].w});
+        logger_.Info("Quadviews: the runtime's eyes are canted (left eye yaw " +
+                     FormatDiagnosticDouble(left_yaw * 180.0 / 3.14159265358979323846) + " deg, right eye " +
+                     FormatDiagnosticDouble(right_yaw * 180.0 / 3.14159265358979323846) +
+                     " deg from the head); the focus insets are placed through each eye's turn.");
+    }
     return true;
 }
 
@@ -14487,6 +14860,9 @@ XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
     const XrPosef view_pose = space_is_view ? location->pose : InvertPose(location->pose);
     const XrSpace reference_space = space_is_view ? base_space : space;
     const bool position_valid = (location->locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0;
+    if (update_smoothing && position_valid) {
+        NoteSilentRecenterLocked(time, reference_space, view_pose);
+    }
     if (update_smoothing && !pivotxr_reference_changes_.empty()) {
         // A recenter reached this frame: the stored anchor coordinates now
         // name a different physical point, which would orbit the camera.
@@ -14905,6 +15281,7 @@ void OpenXrLayer::ResetPivotActivationState() {
     pivotxr_origin_capture_pending_ = false;
     pivotxr_translation_anchor_.reset();
     pivotxr_reference_changes_.clear();
+    pivotxr_last_drive_.reset();
     pivotxr_binding_last_poll_time_.reset();
     pivot_diagnostic_stride_counter_ = 0;
     pivot_diagnostic_ = PivotDiagnosticState{};

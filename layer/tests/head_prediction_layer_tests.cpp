@@ -3,6 +3,7 @@
 #include "depthxr/openxr_layer.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -103,8 +104,17 @@ struct FakeRuntime {
 
     static XrPosef Answer(XrTime time) { return Head(std::min(time, now + limit)); }
 
+    // Each eye turned outward by this much (a canted display: Pimax without
+    // parallel projection, as pvr_calcEyePoses gives them); 0 is parallel.
+    inline static double cant_degrees = 0.0;
+    // False: the runtime cannot locate the views yet (PimaxXR before its first
+    // valid head pose): flags 0 and the views left as they were.
+    inline static bool views_valid = true;
+
     static XrPosef EyeOffset(uint32_t eye) {
-        return {{0.0f, 0.0f, 0.0f, 1.0f}, {eye == 0 ? -0.032f : 0.032f, 0.0f, 0.0f}};
+        const double half = Radians(eye == 0 ? cant_degrees : -cant_degrees) / 2.0;
+        return {{0.0f, static_cast<float>(std::sin(half)), 0.0f, static_cast<float>(std::cos(half))},
+                {eye == 0 ? -0.032f : 0.032f, 0.0f, 0.0f}};
     }
 
     static XrResult XRAPI_CALL LocateSpace(XrSpace space, XrSpace base, XrTime time, XrSpaceLocation* location) {
@@ -125,10 +135,12 @@ struct FakeRuntime {
         ++locates;
         *count = 2;
         if (state) {
-            state->viewStateFlags = XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT |
-                                    XR_VIEW_STATE_ORIENTATION_TRACKED_BIT | XR_VIEW_STATE_POSITION_TRACKED_BIT;
+            state->viewStateFlags = views_valid ? XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT |
+                                                      XR_VIEW_STATE_ORIENTATION_TRACKED_BIT |
+                                                      XR_VIEW_STATE_POSITION_TRACKED_BIT
+                                                : 0;
         }
-        if (!views || capacity < 2) {
+        if (!views || capacity < 2 || !views_valid) {
             return XR_SUCCESS;
         }
         const XrPosef base =
@@ -177,7 +189,51 @@ public:
         FakeRuntime::now = 2'000 * kMs;
         FakeRuntime::limit = 20 * kMs;
         FakeRuntime::degrees_per_second = 120.0;
+        FakeRuntime::cant_degrees = 0.0;
+        FakeRuntime::views_valid = true;
         FakeRuntime::locates = 0;
+    }
+
+    static bool QuadFrameCached(XrTime time) {
+        OpenXrLayer::QuadViewsFrameState frame;
+        XrTime matched = 0;
+        return Layer().FindQuadViewsFrame(time, &frame, &matched) && matched == time;
+    }
+    static XrTime EyeOffsetsTime() { return Layer().cached_eye_offsets_display_time_; }
+    static bool EnsureEyeOffsets(XrTime time) {
+        return Layer().EnsureEyeOffsets(kSession, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, time, 2);
+    }
+
+    // Emulated quad views from the stand-in's stereo eyes, the focus held
+    // `focus_yaw` right of head-forward (as a gaze the layer holds): each
+    // focus view's centre, the tangent mid-way across it in its eye's frame.
+    static std::array<double, 2> FocusCentres(XrTime time, XrSpace space, double focus_yaw) {
+        auto& layer = Layer();
+        layer.resolved_settings_.quadviews.enabled = true;
+        layer.resolved_settings_.quadviews.tracking_mode = QuadViewsTrackingMode::Head;
+        layer.quadviews_session_active_ = true;
+        layer.d3d11_graphics_extension_requested_ = true;
+        layer.varjo_compatible_quadviews_active_ = false;
+        layer.quadviews_smoothed_focus_yaw_radians_ = focus_yaw;
+        layer.quadviews_smoothed_focus_pitch_radians_ = 0.0;
+        layer.quadviews_last_valid_gaze_wall_time_.reset();
+        XrViewLocateInfo info{XR_TYPE_VIEW_LOCATE_INFO};
+        info.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET;
+        info.displayTime = time;
+        info.space = space;
+        XrViewState state{XR_TYPE_VIEW_STATE};
+        XrView views[4]{{XR_TYPE_VIEW}, {XR_TYPE_VIEW}, {XR_TYPE_VIEW}, {XR_TYPE_VIEW}};
+        uint32_t count = 0;
+        Expect(layer.LocateViews(kSession, &info, &state, 4, &count, views) == XR_SUCCESS && count == 4,
+               "quad xrLocateViews must succeed");
+        Expect(std::memcmp(&views[2].pose, &views[0].pose, sizeof(XrPosef)) == 0 &&
+                   std::memcmp(&views[3].pose, &views[1].pose, sizeof(XrPosef)) == 0,
+               "each focus view must keep its eye's pose");
+        std::array<double, 2> centres{};
+        for (uint32_t eye = 0; eye < 2; ++eye) {
+            centres[eye] = (std::tan(views[2 + eye].fov.angleLeft) + std::tan(views[2 + eye].fov.angleRight)) / 2.0;
+        }
+        return centres;
     }
 
     static void Finish() {
@@ -427,6 +483,100 @@ void NoClockNoExtension() {
     Peer::Finish();
 }
 
+void CantedEyesPlaceTheInsetThroughEachEye() {
+    // Head-forward and a gaze are directions in VIEW: in an eye turned c
+    // outward they fall c further in (QVF's ProjectPoint), so both insets
+    // cover the same direction. Parallel eyes keep the angles as they were.
+    Peer::Reset(false, false);
+    const double cant = 10.0;
+    for (const XrSpace space : {kLocalSpace, kViewSpace}) {
+        for (const double gaze : {0.0, 8.0, -15.0}) {
+            FakeRuntime::cant_degrees = cant;
+            const XrTime time = FakeRuntime::now + static_cast<XrTime>(10 + gaze) * kMs;
+            const auto canted = Peer::FocusCentres(time, space, Radians(gaze));
+            const double left = std::tan(Radians(gaze + cant));
+            const double right = std::tan(Radians(gaze - cant));
+            Expect(std::abs(canted[0] - left) < 1e-4 && std::abs(canted[1] - right) < 1e-4,
+                   "a canted eye's inset must sit where the direction falls in it: gaze " + Describe(gaze) +
+                       " deg, left " + Describe(canted[0]) + " (want " + Describe(left) + "), right " +
+                       Describe(canted[1]) + " (want " + Describe(right) + ")");
+            FakeRuntime::cant_degrees = 0.0;
+            const auto parallel = Peer::FocusCentres(time + 1, space, Radians(gaze));
+            Expect(std::abs(parallel[0] - std::tan(Radians(gaze))) < 1e-6 &&
+                       std::abs(parallel[1] - std::tan(Radians(gaze))) < 1e-6,
+                   "parallel eyes must keep the inset at the gaze's own angle");
+        }
+    }
+    // The eyes' turn from the head is asked for once per display time (the
+    // same one Pivot's eye offsets keep), never for parallel eyes.
+    FakeRuntime::cant_degrees = cant;
+    const XrTime time = FakeRuntime::now + 50 * kMs;
+    FakeRuntime::locates = 0;
+    Peer::FocusCentres(time, kLocalSpace, 0.0);
+    Peer::FocusCentres(time, kLocalSpace, 0.0);
+    Expect(FakeRuntime::locates == 3, "canted eyes: one extra locate per display time (" +
+                                          std::to_string(FakeRuntime::locates) + ")");
+    Peer::FocusCentres(time + kMs, kLocalSpace, 0.0);
+    Expect(FakeRuntime::locates == 5, "a new display time must locate the eyes again (" +
+                                          std::to_string(FakeRuntime::locates) + ")");
+    FakeRuntime::cant_degrees = 0.0;
+    FakeRuntime::locates = 0;
+    Peer::FocusCentres(time + 2 * kMs, kLocalSpace, 0.0);
+    Expect(FakeRuntime::locates == 1, "parallel eyes: no extra locate (" + std::to_string(FakeRuntime::locates) + ")");
+    Peer::Finish();
+}
+
+void ViewsTheRuntimeDidNotLocateAreLeftAlone() {
+    // PimaxXR answers "all or nothing": before its first valid head pose it
+    // returns flags 0 and leaves the views untouched. Nothing is cached or
+    // derived from such views.
+    Peer::Reset(false, false);
+    FakeRuntime::cant_degrees = 10.0;
+    FakeRuntime::views_valid = false;
+    const XrTime time = FakeRuntime::now + 20 * kMs;
+    FakeRuntime::locates = 0;
+    Peer::FocusCentres(time, kLocalSpace, 0.0);
+    Expect(!Peer::QuadFrameCached(time), "a quad frame of views the runtime did not locate must not be cached");
+    Expect(FakeRuntime::locates == 1 && Peer::EyeOffsetsTime() != time,
+           "no eye offsets may be derived from views the runtime did not locate");
+    Expect(!Peer::EnsureEyeOffsets(time + kMs) && Peer::EyeOffsetsTime() != time + kMs,
+           "eye offsets the runtime did not locate must not be kept");
+    FakeRuntime::views_valid = true;
+    Peer::FocusCentres(time + 2 * kMs, kLocalSpace, 0.0);
+    Expect(Peer::QuadFrameCached(time + 2 * kMs) && Peer::EyeOffsetsTime() == time + 2 * kMs,
+           "located views must be cached as before");
+    Peer::Finish();
+}
+
+void RepeatedSpaceLocatesOfOneDisplayTimeAnswerTheSame() {
+    // DCS locates VIEW in LOCAL several times a frame at one display time.
+    // The first locate extends the head (three extra runtime locates); the
+    // others give the same answer for one locate each. A new display time is
+    // extended afresh: nothing is kept across display times.
+    Peer::Reset();
+    Peer::SettleLimit();
+    const XrTime time = FakeRuntime::now + 100 * kMs;
+    FakeRuntime::locates = 0;
+    const XrPosef first = Peer::SpaceHead(time);
+    Expect(FakeRuntime::locates == 4, "the first locate extends the head with three extra locates (" +
+                                          std::to_string(FakeRuntime::locates) + ")");
+    Expect(AngleBetween(first, FakeRuntime::Answer(time)) > 1.0, "the head must be extended");
+    for (int i = 1; i <= 3; ++i) {
+        FakeRuntime::now += 4 * kMs;
+        const XrPosef again = Peer::SpaceHead(time);
+        Expect(std::memcmp(&again, &first, sizeof(first)) == 0,
+               "a later locate of the same display time must answer the same (off by " +
+                   Describe(AngleBetween(again, first)) + " deg)");
+    }
+    Expect(FakeRuntime::locates == 7, "later locates of the same display time cost one runtime locate each (" +
+                                          std::to_string(FakeRuntime::locates) + ")");
+    const XrPosef next = Peer::SpaceHead(time + 11 * kMs);
+    Expect(FakeRuntime::locates == 11, "a new display time is extended afresh (" +
+                                           std::to_string(FakeRuntime::locates) + ")");
+    Expect(AngleBetween(next, first) > 0.5, "a new display time must not take the last one's answer");
+    Peer::Finish();
+}
+
 struct Scenario {
     const char* name;
     std::function<void()> run;
@@ -446,6 +596,9 @@ int main() {
         {"off by default and only under Frame Generation", OffByDefaultAndOnlyUnderFrameGeneration},
         {"a runtime that predicts is left alone", ARuntimeThatPredictsIsLeftAlone},
         {"no runtime clock, no extension", NoClockNoExtension},
+        {"repeated space locates of one display time answer the same", RepeatedSpaceLocatesOfOneDisplayTimeAnswerTheSame},
+        {"canted eyes place the inset through each eye", CantedEyesPlaceTheInsetThroughEachEye},
+        {"views the runtime did not locate are left alone", ViewsTheRuntimeDidNotLocateAreLeftAlone},
     };
     int failures = 0;
     for (const Scenario& scenario : scenarios) {
