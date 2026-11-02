@@ -1178,6 +1178,7 @@ void FrameGenPresenter::Stop() {
     end_call_ms_.clear();
     runtime_end_ms_.clear();
     runtime_end_hold_ms_.clear();
+    runtime_wait_ms_.clear();
     synth_lock_ms_.clear();
     ring_short_write_ms_.clear();
     told_lead_sum_ = 0;
@@ -7485,13 +7486,20 @@ XrFrameEndInfo FrameGenPresenter::BuildFrame(FrameCopy& copy, const std::vector<
 XrResult FrameGenPresenter::RuntimeWait(const FrameGenRuntimeCalls& calls, XrSession session, const XrFrameWaitInfo* info,
                                         XrFrameState* state) {
     XrResult result = XR_SUCCESS;
+    const auto called = Clock::now();
     {
         const PresenterCall call(*this, "xrWaitFrame");
         result = calls.wait(session, info, state);
     }
     if (XR_SUCCEEDED(result)) {
+        const double call_ms = Milliseconds(Clock::now() - called);
         std::scoped_lock lock(mutex_);
         ++runtime_waits_;
+        AddSample(runtime_wait_ms_, call_ms);
+        // Blocked as NotePhaseLocked counts it: by the period this wait reported.
+        const double period_ms = state ? static_cast<double>(state->predictedDisplayPeriod) / 1e6 : 0.0;
+        ++totals_.runtime_waits_timed;
+        totals_.runtime_waits_blocked += call_ms >= std::max(1.0, period_ms / 10.0) ? 1 : 0;
     }
     return result;
 }
@@ -8980,7 +8988,11 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
         // Generation. runtimeEndMs: the runtime's xrEndFrame for the frames
         // Frame Generation submits (long where the runtime waits for its
         // queue). runtimeEndHeldMs: frames held back before it, for a
-        // runtime that holds them there until its slot. synthLockMs: the presenter thread's wait for the GPU
+        // runtime that holds them there until its slot. runtimeWaitMs: the
+        // runtime's xrWaitFrame (every caller's), and runtimeWaitsBlocked:
+        // of those waits, the ones that blocked (none: a runtime pacing in
+        // xrEndFrame instead, as PimaxXR does with "Prefer framerate over
+        // latency"; few: a caller coming late). synthLockMs: the presenter thread's wait for the GPU
         // lock before writing. ringExhausted: refreshes whose real frame's
         // images newer captures had replaced (written unmoved, or the frame
         // before). staleSkipped: refreshes not submitted, nothing current to
@@ -9092,6 +9104,9 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
             (gpu_gate_enabled_ && gpu_gate_armed_ ? "" : gpu_gate_enabled_ ? " (not armed)" : " (off)") +
             ", endCallMs=" + MedianAndMax(end_call_ms_) + ", runtimeEndMs=" + MedianAndMax(runtime_end_ms_) +
             ", runtimeEndHeldMs=" + MedianAndMax(runtime_end_hold_ms_) +
+            ", runtimeWaitMs=" + MedianAndMax(runtime_wait_ms_) +
+            ", runtimeWaitsBlocked=" + std::to_string(delta(&Totals::runtime_waits_blocked)) + "/" +
+            std::to_string(delta(&Totals::runtime_waits_timed)) +
             ", synthLockMs=" + MedianAndMax(synth_lock_ms_) +
             (jit_ ? ", justInTime=1, covers=" + std::to_string(jit_covers_) + ", unwritten=" +
                         std::to_string(delta(&Totals::unwritten_wait)) + "/" +
@@ -9139,6 +9154,7 @@ void FrameGenPresenter::NewSummaryWindowLocked(Clock::time_point now, double sta
     end_call_ms_.clear();
     runtime_end_ms_.clear();
     runtime_end_hold_ms_.clear();
+    runtime_wait_ms_.clear();
     synth_lock_ms_.clear();
     ring_short_write_ms_.clear();
     told_lead_sum_ = 0;

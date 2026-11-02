@@ -1634,6 +1634,10 @@ class FrameGenPresenter {
         // that found it so (NoteRuntimeClockLocked).
         std::uint64_t clock_displacements{0};
         std::uint64_t clock_unsteady_waits{0};
+        // Runtime waits made (RuntimeWait), and of those, ones that blocked
+        // (at least max(1 ms, a tenth of a refresh), as NotePhaseLocked counts).
+        std::uint64_t runtime_waits_timed{0};
+        std::uint64_t runtime_waits_blocked{0};
     };
     // ", quad=..." for summaries over the window since `start` (empty when
     // no frame of the quad compose site ended in it).
@@ -2169,6 +2173,10 @@ class FrameGenPresenter {
     std::vector<double> gpu_wait_ms_;
     std::vector<double> end_call_ms_;
     std::vector<double> runtime_end_ms_;
+    // The runtime's xrWaitFrame time (RuntimeWait): beside runtime_end_ms_,
+    // it tells a runtime pacing in xrEndFrame (PimaxXR's "Prefer framerate
+    // over latency": no wait ever blocks) from a late caller.
+    std::vector<double> runtime_wait_ms_;
     std::vector<double> synth_lock_ms_;
     // A runtime whose xrEndFrame holds each frame until its own slot
     // (PimaxXR with defer_frame_wait, as its async submission waits there)
