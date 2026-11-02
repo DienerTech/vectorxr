@@ -24,6 +24,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <cmath>
 #include <limits>
 #include <cstdlib>
@@ -1154,6 +1155,18 @@ struct Runtime {
     // Every Nth wait misses a refresh: it is released a refresh later than
     // asked for (paced runtimes only; 0: none).
     std::atomic<int> miss_every{0};
+    // Throttle::kPeriod reports the throttled period one wait late, as
+    // PimaxXR does with Pimax's Smart Smoothing (its frame duration is
+    // updated in xrBeginFrame, the next xrWaitFrame reports it; pimax-openxr
+    // frame.cpp): the first held wait still reports the refresh period, the
+    // first wait after the hold ends still twice it.
+    bool period_one_late{false}; // set before the first wait
+    bool period_throttled{false}; // under g_xr_mutex: what the next wait reports
+    // The next waits (paced runtimes only) report a display time 1 ns after
+    // the last, still blocking a refresh each: PimaxXR clamps a prediction of
+    // PVR's that did not advance (pimax-openxr frame.cpp xrWaitFrame).
+    std::atomic<int> clamp_next{0};
+    std::atomic<int> clamped_waits{0};
     // ...and reports twice the period for that wait, as SteamVR with Pimax's
     // driver does after its compositor misses a refresh.
     std::atomic<bool> miss_reports_multiple{false};
@@ -1315,15 +1328,25 @@ struct Runtime {
                     if (const XrDuration lag = lag_next.exchange(0)) {
                         display = std::max(clock_floor + kClockCreep, display - lag);
                     }
+                    if (clamp_next > 0 && clock_floor > 0) {
+                        --clamp_next;
+                        ++clamped_waits;
+                        display = clock_floor + 1;
+                    }
                     if (display <= clock_floor || (stall_clock && clock_floor > 0)) {
                         display = clock_floor + kClockCreep;
                         ++crept_waits;
                     }
                     clock_floor = display;
                 }
-                return report(display, throttling && throttle == Throttle::kPeriod ? throttle_refreshes * period
-                                       : miss && miss_reports_multiple   ? 2 * period
-                                                                         : period);
+                bool reported_throttled = throttling;
+                if (period_one_late) {
+                    std::scoped_lock lock(g_xr_mutex);
+                    reported_throttled = std::exchange(period_throttled, throttling);
+                }
+                return report(display, reported_throttled && throttle == Throttle::kPeriod ? throttle_refreshes * period
+                                       : miss && miss_reports_multiple                  ? 2 * period
+                                                                                        : period);
             }
             return report(next_display.fetch_add(period), period);
         };
@@ -11338,6 +11361,7 @@ void TestRuntimeHalvingStandsDown() {
         bool after_full_rate{false};
         FrameGenMultiplier multiplier{FrameGenMultiplier::kDynamic};
         const char* evidence;
+        bool one_late{false}; // Runtime::period_one_late (PimaxXR's Smart Smoothing)
     };
     const std::vector<Case> cases{
         {"halving waits", Runtime::Throttle::kWaits, 2, true, false, false, FrameGenMultiplier::kDynamic,
@@ -11354,6 +11378,11 @@ void TestRuntimeHalvingStandsDown() {
         {"a third, the period", Runtime::Throttle::kPeriod, 3, false, false, true, FrameGenMultiplier::kDynamic,
          "to every third refresh at 90 Hz for 1 s (its frame waits blocked; it reported a frame period of 33.3 ms, "
          "three times its refresh period)."},
+        {"halving the period a wait late", Runtime::Throttle::kPeriod, 2, false, false, true,
+         FrameGenMultiplier::kDynamic,
+         "to every other refresh at 90 Hz for 1 s (its frame waits blocked; it reported a frame period of 22.2 ms, "
+         "twice its refresh period).",
+         true},
     };
     const double refresh = 1e9 / static_cast<double>(kPeriod);
     for (const Case& test : cases) {
@@ -11364,6 +11393,7 @@ void TestRuntimeHalvingStandsDown() {
         runtime.throttle = test.throttle;
         runtime.throttle_refreshes = test.refreshes;
         runtime.throttled = test.from_start;
+        runtime.period_one_late = test.one_late;
         // Late at full rate (a frame of 1.35 refreshes), and every frame late
         // for a runtime wanting them two refreshes before they are shown.
         std::vector<std::chrono::microseconds> work = kLightWork;
@@ -11424,6 +11454,16 @@ void TestRuntimeHalvingStandsDown() {
         status = presenter.Status();
         Check(!cleared && (dynamic ? status.standby && status.dynamic_engagements == 1 : status.threaded),
               name + ": the report stays while the runtime halves the frame rate, and nothing engages again");
+        if (test.one_late) {
+            // The period reported a wait late, the switch's first held wait
+            // read as a refresh's: no two submissions went to one refresh.
+            std::scoped_lock lock(g_xr_mutex);
+            std::size_t paired = 0;
+            for (std::size_t i = 1; i < runtime.submitted_times.size(); ++i) {
+                paired += runtime.submitted_times[i] - runtime.submitted_times[i - 1] < kPeriod / 2 ? 1 : 0;
+            }
+            Check(paired == 0, name + ": no two submissions for one refresh (" + std::to_string(paired) + ")");
+        }
         presenter.Stop();
         Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
         const std::vector<std::string> lines = log.Lines(kHalvingLogged);
@@ -12732,6 +12772,114 @@ void TestStalledClockWhilePresenting() {
     Check(std::any_of(lines.begin(), lines.end(),
                       [](const std::string& line) { return line.find("stopped advancing with the time") != std::string::npos; }),
           name + ": the log says the display times stopped advancing");
+}
+
+// OpenXR Toolkit's Turbo above VectorXR (its layer.cpp xrWaitFrame,
+// xrBeginFrame, xrEndFrame): after each xrEndFrame it calls the next layer's
+// xrWaitFrame on a pool thread (std::async), the game's own xrWaitFrame
+// returns a time it makes up without waiting, its xrBeginFrame does nothing,
+// and the next xrEndFrame first waits for that pool wait (1 s at most), then
+// calls xrBeginFrame and xrEndFrame back to back. Frame Generation, fixed 2x
+// and Dynamic, sees each wait from another thread than the one ending, its
+// begin right before its end: it engages and stays engaged, demotes,
+// abandons and pauses nothing, holds no pool wait past OpenXR Toolkit's 1 s,
+// keeps the runtime's calls ordered, and fills the refreshes.
+void TestToolkitTurboAbove() {
+    for (const FrameGenMultiplier multiplier : {FrameGenMultiplier::k2, FrameGenMultiplier::kDynamic}) {
+        const std::string name =
+            std::string("toolkit turbo above, ") + (multiplier == FrameGenMultiplier::k2 ? "2x" : "dynamic");
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        runtime.paced = true;
+        std::unique_ptr<App> owned;
+        App* app = nullptr;
+        StartJit(presenter, gpu, FrameGenSynthesisMode::kInterpolate, multiplier, app, runtime, owned);
+        app->eye_speed = 0.5;
+        std::future<XrFrameState> pending = std::async(std::launch::async, [&] { return app->Wait(); });
+        int late_waits = 0;
+        const auto run = [&](std::chrono::milliseconds duration) {
+            const auto start = std::chrono::steady_clock::now();
+            while (std::chrono::steady_clock::now() - start < duration) {
+                // The game renders its frame (for OpenXR Toolkit's made-up time).
+                SleepPrecise(std::chrono::steady_clock::now() + 18ms);
+                app->Release();
+                if (pending.wait_for(1s) != std::future_status::ready) {
+                    ++late_waits; // OpenXR Toolkit would go on without it
+                    pending.wait();
+                }
+                const XrFrameState state = pending.get();
+                app->Begin();
+                Check(XR_SUCCEEDED(app->End(state.predictedDisplayTime)), name + ": end");
+                pending = std::async(std::launch::async, [&] { return app->Wait(); });
+            }
+        };
+        run(1500ms);
+        const FrameGenStatus engaged = presenter.Status();
+        Check(engaged.threaded && !engaged.standby, name + ": engages");
+        const std::size_t first = runtime.Submissions();
+        const auto start = std::chrono::steady_clock::now();
+        run(2000ms);
+        const double seconds = Seconds(std::chrono::steady_clock::now() - start);
+        const double output = static_cast<double>(runtime.Submissions() - first) / seconds;
+        const FrameGenStatus status = presenter.Status();
+        pending.get();
+        app->Begin();
+        app->End(0, false);
+        presenter.Stop();
+        Check(status.threaded && !status.standby && status.demoted == 0 && status.abandoned == 0 && status.pauses == 0,
+              name + ": stays engaged, nothing demoted, abandoned or paused (demoted " + std::to_string(status.demoted) +
+                  ", abandoned " + std::to_string(status.abandoned) + ", pauses " + std::to_string(status.pauses) + ")");
+        Check(late_waits == 0, name + ": no pool wait held past OpenXR Toolkit's second (" + std::to_string(late_waits) + ")");
+        const double refresh = 1e9 / static_cast<double>(kPeriod);
+        Check(output > 0.9 * refresh, name + ": every refresh gets a frame (" + std::to_string(output) + " fps)");
+        Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    }
+}
+
+// PimaxXR clamps a prediction of PVR's that did not advance to 1 ns after the
+// last (pimax-openxr frame.cpp xrWaitFrame), as after a wait that returned
+// without pacing. Now and then two waits in a row come back so, each still a
+// refresh apart: Frame Generation stays engaged (two waits are no stalled
+// clock), never gives two of the game's frames the same refresh (their times
+// told at least half a refresh apart), and the runtime's submissions keep
+// their order.
+void TestClampedDisplayTimes() {
+    const std::string name = "clamped display times";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kInterpolate, FrameGenMultiplier::kDynamic, app, runtime, owned);
+    app->eye_speed = 0.5;
+    RunPipelined(*app, 1000ms, 16ms, 26ms, {}, nullptr, 8ms);
+    Check(presenter.Status().threaded && !presenter.Status().standby, name + ": engages");
+    const std::size_t first = runtime.Submissions();
+    std::vector<XrTime> told;
+    bool left = false;
+    RunPipelined(
+        *app, 2500ms, 16ms, 26ms,
+        [&](int frame, const XrFrameState& state) {
+            if (frame % 20 == 10) runtime.clamp_next = 2;
+            told.push_back(state.predictedDisplayTime);
+            left = left || !presenter.Status().threaded;
+        },
+        nullptr, 8ms);
+    const FrameGenStatus status = presenter.Status();
+    Check(runtime.clamped_waits >= 10, name + ": the runtime clamped waits (" +
+                                           std::to_string(runtime.clamped_waits.load()) + ")");
+    Check(!left && status.threaded && !status.standby && !status.runtime_clock_displaced,
+          name + ": stays engaged, the clock not displaced");
+    std::size_t close = 0;
+    for (std::size_t i = 1; i < told.size(); ++i) close += told[i] - told[i - 1] < kPeriod / 2 ? 1 : 0;
+    Check(close == 0, name + ": the game's frames are told times at least half a refresh apart (" +
+                          std::to_string(close) + " of " + std::to_string(told.size()) + " closer)");
+    const auto log = runtime.Snapshot();
+    CheckOrderedTimes(std::vector<Submission>(log.begin() + static_cast<std::ptrdiff_t>(first), log.end()), name);
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
 }
 
 // Auto, its multiplier chosen for a slow game, while the runtime's clock is
@@ -15763,6 +15911,8 @@ int main(int argc, char** argv) {
     RUN(TestSteamVrLagIsNotDisplaced);
     RUN(TestLowFirstClockSample);
     RUN(TestStalledClockWhilePresenting);
+    RUN(TestClampedDisplayTimes);
+    RUN(TestToolkitTurboAbove);
     RUN(TestAutoHoldsWhileClockDisplaced);
     RUN(TestAutoSettlesAfterClockRecovery);
     RUN(TestAutoLeavesLateCeiling);
