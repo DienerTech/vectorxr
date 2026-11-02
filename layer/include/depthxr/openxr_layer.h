@@ -86,6 +86,9 @@ class OpenXrLayer {
     void SetLayerDirectory(std::filesystem::path dll_directory);
     void SetNextProcAddr(PFN_xrGetInstanceProcAddr next_get_instance_proc_addr);
     bool CanCreateInstance();
+    // A second instance passed straight through (layer_entry.cpp's
+    // PassThroughInstance): said in the first instance's log.
+    void NotePassThroughInstance(const std::string& application_name, XrResult result);
     // The application's name as it created the instance.
     std::string application_name_;
     // Native quad views on a runtime that shows the focus views with the FOVs

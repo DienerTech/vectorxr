@@ -12,8 +12,10 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <mutex>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include <Windows.h>
@@ -39,6 +41,41 @@ std::filesystem::path GetModuleDirectory() {
 
 XrResult XRAPI_CALL DepthxrDestroyInstance(XrInstance instance) {
     return OpenXrLayer::Instance().DestroyInstance(instance);
+}
+
+// An instance created while VectorXR's own is alive. OpenXR Toolkit and
+// Quad-Views-Foveated create a probe instance through the chain before the
+// game's, and on a VIVE runtime ("Vive Reality system") never destroy it:
+// VectorXR serves one instance, so the game's would be refused. Any other
+// instance passes straight through: its functions are the layers' below.
+struct PassThroughInstance {
+    PFN_xrGetInstanceProcAddr next_get_instance_proc_addr{};
+    PFN_xrDestroyInstance next_destroy_instance{};
+};
+std::mutex g_pass_through_mutex;
+std::unordered_map<XrInstance, PassThroughInstance> g_pass_through_instances;
+
+bool FindPassThroughInstance(XrInstance instance, PassThroughInstance* found) {
+    std::scoped_lock lock(g_pass_through_mutex);
+    const auto entry = g_pass_through_instances.find(instance);
+    if (entry == g_pass_through_instances.end()) {
+        return false;
+    }
+    *found = entry->second;
+    return true;
+}
+
+XrResult XRAPI_CALL PassThroughDestroyInstance(XrInstance instance) {
+    PFN_xrDestroyInstance next_destroy_instance = nullptr;
+    {
+        std::scoped_lock lock(g_pass_through_mutex);
+        const auto entry = g_pass_through_instances.find(instance);
+        if (entry != g_pass_through_instances.end()) {
+            next_destroy_instance = entry->second.next_destroy_instance;
+            g_pass_through_instances.erase(entry);
+        }
+    }
+    return next_destroy_instance ? next_destroy_instance(instance) : XR_ERROR_HANDLE_INVALID;
 }
 
 // The handshake census (handshake_census.h): what the application asked, as
@@ -921,6 +958,22 @@ static XrResult XRAPI_CALL LayerGetInstanceProcAddr(XrInstance instance, const c
 }
 
 XrResult XRAPI_CALL xrGetInstanceProcAddr(XrInstance instance, const char* name, PFN_xrVoidFunction* function) {
+    // An instance VectorXR passes straight through: the functions below it,
+    // but its xrDestroyInstance forgets it first (a handle can come back).
+    depthxr::PassThroughInstance pass_through;
+    if (instance != XR_NULL_HANDLE && name && function &&
+        depthxr::FindPassThroughInstance(instance, &pass_through)) {
+        const std::string_view requested(name);
+        if (requested == "xrDestroyInstance") {
+            *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::PassThroughDestroyInstance);
+            return XR_SUCCESS;
+        }
+        if (requested == "xrGetInstanceProcAddr") {
+            *function = reinterpret_cast<PFN_xrVoidFunction>(xrGetInstanceProcAddr);
+            return XR_SUCCESS;
+        }
+        return pass_through.next_get_instance_proc_addr(instance, name, function);
+    }
     const XrResult result = LayerGetInstanceProcAddr(instance, name, function);
     depthxr::OpenXrLayer& layer = depthxr::OpenXrLayer::Instance();
     if (layer.HandshakeCensusActive() && name) {
@@ -953,7 +1006,27 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
     }
 
     if (!OpenXrLayer::Instance().CanCreateInstance()) {
-        return XR_ERROR_LIMIT_REACHED;
+        // A second instance (a layer's probe instance kept alive above, see
+        // PassThroughInstance): straight through, untouched.
+        XrApiLayerCreateInfo pass_through_info = *layer_info;
+        pass_through_info.nextInfo = next_info->next;
+        const XrResult result =
+            next_info->nextCreateApiLayerInstance(instance_create_info, &pass_through_info, instance);
+        if (XR_SUCCEEDED(result)) {
+            PassThroughInstance pass_through;
+            pass_through.next_get_instance_proc_addr = next_info->nextGetInstanceProcAddr;
+            PFN_xrVoidFunction destroy = nullptr;
+            if (XR_SUCCEEDED(next_info->nextGetInstanceProcAddr(*instance, "xrDestroyInstance", &destroy))) {
+                pass_through.next_destroy_instance = reinterpret_cast<PFN_xrDestroyInstance>(destroy);
+            }
+            std::scoped_lock lock(g_pass_through_mutex);
+            g_pass_through_instances[*instance] = pass_through;
+        }
+        OpenXrLayer::Instance().NotePassThroughInstance(
+            std::string(instance_create_info->applicationInfo.applicationName,
+                        strnlen(instance_create_info->applicationInfo.applicationName, XR_MAX_APPLICATION_NAME_SIZE)),
+            result);
+        return result;
     }
 
     OpenXrLayer::Instance().SetNextProcAddr(next_info->nextGetInstanceProcAddr);
@@ -1264,6 +1337,12 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
         diagnostics.handshake_census.push_back(
             "xrCreateInstance extensions: " +
             DescribeInstanceExtensions(requested, probe_scan.complete, probe_scan.detail, probe_scan.names, sent));
+    }
+    {
+        // A handle a pass-through instance had (destroyed some other way) is
+        // this instance's now.
+        std::scoped_lock lock(g_pass_through_mutex);
+        g_pass_through_instances.erase(*instance);
     }
     // The runtime's instance exists from here. An exception must never leave
     // the layer (the loader turns it into a failure, or the game ends), and a

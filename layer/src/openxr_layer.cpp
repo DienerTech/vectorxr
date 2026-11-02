@@ -2111,6 +2111,14 @@ bool OpenXrLayer::CanCreateInstance() {
     return instance_ == XR_NULL_HANDLE;
 }
 
+void OpenXrLayer::NotePassThroughInstance(const std::string& application_name, XrResult result) {
+    logger_.Info("A second OpenXR instance (application \"" + application_name + "\", result=" +
+                 std::to_string(static_cast<int>(result)) +
+                 ") was created while VectorXR's is alive; it passes straight through VectorXR, which stays with "
+                 "its first instance. OpenXR Toolkit and Quad-Views-Foveated keep their probe instance alive on "
+                 "VIVE runtimes, which makes the game's instance the second.");
+}
+
 XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
                                         XrInstance instance,
                                         bool eye_gaze_extension_enabled,
