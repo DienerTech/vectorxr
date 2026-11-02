@@ -3315,8 +3315,14 @@ void TestQuadViewsOsdTagFollowsBegunConfiguration() {
 constexpr XrFovf kVarjoFocusFov{-0.3f, 0.3f, 0.25f, -0.25f};
 int g_varjo_ends = 0;
 
-XrResult XRAPI_PTR VarjoLocateViews(XrSession, const XrViewLocateInfo*, XrViewState*, std::uint32_t capacity,
+XrResult XRAPI_PTR VarjoLocateViews(XrSession, const XrViewLocateInfo*, XrViewState* state, std::uint32_t capacity,
                                     std::uint32_t* count, XrView* views) {
+    // Located and tracked, as the runtime says (a view state of 0 would be
+    // views it left untouched).
+    if (state) {
+        state->viewStateFlags = XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT |
+                                XR_VIEW_STATE_ORIENTATION_TRACKED_BIT | XR_VIEW_STATE_POSITION_TRACKED_BIT;
+    }
     *count = 4;
     if (capacity < 4) return capacity ? XR_ERROR_SIZE_INSUFFICIENT : XR_SUCCESS;
     for (std::uint32_t view = 0; view < 4; ++view) {

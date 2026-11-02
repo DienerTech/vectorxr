@@ -10859,6 +10859,12 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
     if (XR_FAILED(result) || !views || !view_count_output) {
         return result;
     }
+    // A runtime that could not locate the views leaves them as they were
+    // (PimaxXR before its first valid head pose: flags 0, all or nothing):
+    // nothing is adjusted, cached or derived from them.
+    if (view_state && (view_state->viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT) == 0) {
+        return result;
+    }
 
     std::scoped_lock lock(mutex_);
     ReloadConfigIfNeeded();
@@ -13547,6 +13553,11 @@ bool OpenXrLayer::EnsureEyeOffsets(XrSession session,
 
     const XrResult result =
         next_locate_views_(session, &eye_view_locate_info, &eye_view_state, view_count, &eye_view_count, eye_views.data());
+    if (XR_SUCCEEDED(result) && (eye_view_state.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT) == 0) {
+        // Not located (the views are left as they were): nothing to keep.
+        pivot_diagnostic_.has_eye_offsets = false;
+        return false;
+    }
     if (XR_FAILED(result) || eye_view_count < view_count) {
         logger_.Error("Failed to capture internal eye offsets for PivotXR view-space recomposition.");
         pivot_diagnostic_.has_eye_offsets = false;
@@ -14411,7 +14422,9 @@ XrResult OpenXrLayer::LocateRuntimeViews(XrSession session,
     bool canted_eyes = false;
     {
         std::scoped_lock lock(mutex_);
-        canted_eyes = CantedEyeOrientations(session, *view_locate_info, stereo_views, &eye_in_view);
+        // Only from eyes the runtime located (it may leave them untouched).
+        canted_eyes = (!view_state || (runtime_view_state.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT) != 0) &&
+                      CantedEyeOrientations(session, *view_locate_info, stereo_views, &eye_in_view);
         const bool has_eye_focus = LocateEyeGazeFocusOffsets(session,
                                                             view_locate_info->space,
                                                             ClampInternalLocateTime(view_locate_info->displayTime),

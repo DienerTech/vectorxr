@@ -107,6 +107,9 @@ struct FakeRuntime {
     // Each eye turned outward by this much (a canted display: Pimax without
     // parallel projection, as pvr_calcEyePoses gives them); 0 is parallel.
     inline static double cant_degrees = 0.0;
+    // False: the runtime cannot locate the views yet (PimaxXR before its first
+    // valid head pose): flags 0 and the views left as they were.
+    inline static bool views_valid = true;
 
     static XrPosef EyeOffset(uint32_t eye) {
         const double half = Radians(eye == 0 ? cant_degrees : -cant_degrees) / 2.0;
@@ -132,10 +135,12 @@ struct FakeRuntime {
         ++locates;
         *count = 2;
         if (state) {
-            state->viewStateFlags = XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT |
-                                    XR_VIEW_STATE_ORIENTATION_TRACKED_BIT | XR_VIEW_STATE_POSITION_TRACKED_BIT;
+            state->viewStateFlags = views_valid ? XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT |
+                                                      XR_VIEW_STATE_ORIENTATION_TRACKED_BIT |
+                                                      XR_VIEW_STATE_POSITION_TRACKED_BIT
+                                                : 0;
         }
-        if (!views || capacity < 2) {
+        if (!views || capacity < 2 || !views_valid) {
             return XR_SUCCESS;
         }
         const XrPosef base =
@@ -185,7 +190,18 @@ public:
         FakeRuntime::limit = 20 * kMs;
         FakeRuntime::degrees_per_second = 120.0;
         FakeRuntime::cant_degrees = 0.0;
+        FakeRuntime::views_valid = true;
         FakeRuntime::locates = 0;
+    }
+
+    static bool QuadFrameCached(XrTime time) {
+        OpenXrLayer::QuadViewsFrameState frame;
+        XrTime matched = 0;
+        return Layer().FindQuadViewsFrame(time, &frame, &matched) && matched == time;
+    }
+    static XrTime EyeOffsetsTime() { return Layer().cached_eye_offsets_display_time_; }
+    static bool EnsureEyeOffsets(XrTime time) {
+        return Layer().EnsureEyeOffsets(kSession, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, time, 2);
     }
 
     // Emulated quad views from the stand-in's stereo eyes, the focus held
@@ -510,6 +526,28 @@ void CantedEyesPlaceTheInsetThroughEachEye() {
     Peer::Finish();
 }
 
+void ViewsTheRuntimeDidNotLocateAreLeftAlone() {
+    // PimaxXR answers "all or nothing": before its first valid head pose it
+    // returns flags 0 and leaves the views untouched. Nothing is cached or
+    // derived from such views.
+    Peer::Reset(false, false);
+    FakeRuntime::cant_degrees = 10.0;
+    FakeRuntime::views_valid = false;
+    const XrTime time = FakeRuntime::now + 20 * kMs;
+    FakeRuntime::locates = 0;
+    Peer::FocusCentres(time, kLocalSpace, 0.0);
+    Expect(!Peer::QuadFrameCached(time), "a quad frame of views the runtime did not locate must not be cached");
+    Expect(FakeRuntime::locates == 1 && Peer::EyeOffsetsTime() != time,
+           "no eye offsets may be derived from views the runtime did not locate");
+    Expect(!Peer::EnsureEyeOffsets(time + kMs) && Peer::EyeOffsetsTime() != time + kMs,
+           "eye offsets the runtime did not locate must not be kept");
+    FakeRuntime::views_valid = true;
+    Peer::FocusCentres(time + 2 * kMs, kLocalSpace, 0.0);
+    Expect(Peer::QuadFrameCached(time + 2 * kMs) && Peer::EyeOffsetsTime() == time + 2 * kMs,
+           "located views must be cached as before");
+    Peer::Finish();
+}
+
 struct Scenario {
     const char* name;
     std::function<void()> run;
@@ -530,6 +568,7 @@ int main() {
         {"a runtime that predicts is left alone", ARuntimeThatPredictsIsLeftAlone},
         {"no runtime clock, no extension", NoClockNoExtension},
         {"canted eyes place the inset through each eye", CantedEyesPlaceTheInsetThroughEachEye},
+        {"views the runtime did not locate are left alone", ViewsTheRuntimeDidNotLocateAreLeftAlone},
     };
     int failures = 0;
     for (const Scenario& scenario : scenarios) {
