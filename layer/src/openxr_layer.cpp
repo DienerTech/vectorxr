@@ -4578,7 +4578,9 @@ XrResult OpenXrLayer::AcquireSwapchainImage(XrSwapchain swapchain,
     NoteThread(ThreadCensus::Call::AcquireSwapchainImage);
     std::uint32_t image_count = 0;
     {
-        std::scoped_lock lock(mutex_);
+        // The releases go on without mutex_ (ForwardHandedOverReleases).
+        std::unique_lock handover(bridge_handover_mutex_);
+        std::unique_lock lock(mutex_);
         auto it = tracked_swapchains_.find(swapchain);
         if (it != tracked_swapchains_.end()) {
             image_count = it->second.image_count;
@@ -4586,14 +4588,21 @@ XrResult OpenXrLayer::AcquireSwapchainImage(XrSwapchain swapchain,
             // before goes on first (the runtime hands out an image only while
             // the application holds fewer than all, and the bridge copies
             // the image acquired earliest).
-            const XrResult handed = HandOverBridgedReleasesLocked(swapchain, it->second, "swapchain acquire");
+            std::vector<XrSwapchain> releases;
+            XrResult handed =
+                HandOverBridgedReleasesLocked(swapchain, it->second, "swapchain acquire", true, &releases);
+            const XrResult forwarded = ForwardHandedOverReleases(lock, releases, "swapchain acquire");
+            if (XR_SUCCEEDED(handed)) handed = forwarded;
             if (XR_FAILED(handed)) {
                 return handed;
             }
-            const XrResult flush_result =
-                FlushDeferredSwapchainReleaseLocked(swapchain, it->second, "swapchain acquire");
-            if (XR_FAILED(flush_result)) {
-                return flush_result;
+            it = tracked_swapchains_.find(swapchain);
+            if (it != tracked_swapchains_.end()) {
+                const XrResult flush_result =
+                    FlushDeferredSwapchainReleaseLocked(swapchain, it->second, "swapchain acquire");
+                if (XR_FAILED(flush_result)) {
+                    return flush_result;
+                }
             }
         }
     }
@@ -4654,12 +4663,17 @@ XrResult OpenXrLayer::WaitSwapchainImage(XrSwapchain swapchain, const XrSwapchai
     {
         // An image acquired ahead is waited for once the one before it is
         // released (OpenXR's order): a bridged release kept for the frame's
-        // end goes on first, as at the next acquire.
-        std::scoped_lock lock(mutex_);
+        // end goes on first, as at the next acquire (without mutex_:
+        // ForwardHandedOverReleases).
+        std::unique_lock handover(bridge_handover_mutex_);
+        std::unique_lock lock(mutex_);
         if (const auto it = tracked_swapchains_.find(swapchain);
             it != tracked_swapchains_.end() && !it->second.bridge_handovers.empty()) {
-            if (const XrResult handed = HandOverBridgedReleasesLocked(swapchain, it->second, "swapchain wait");
-                XR_FAILED(handed)) {
+            std::vector<XrSwapchain> releases;
+            XrResult handed = HandOverBridgedReleasesLocked(swapchain, it->second, "swapchain wait", true, &releases);
+            const XrResult forwarded = ForwardHandedOverReleases(lock, releases, "swapchain wait");
+            if (XR_SUCCEEDED(handed)) handed = forwarded;
+            if (XR_FAILED(handed)) {
                 return handed;
             }
         }
@@ -9310,6 +9324,12 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     if (diag) {
         logger_.Debug("Turbo-diag: xrEndFrame entered; acquiring config lock.");
     }
+    // A bridged session's hand-over below forwards its releases without
+    // mutex_ (ForwardHandedOverReleases); no other hand-over comes between.
+    std::unique_lock handover(bridge_handover_mutex_, std::defer_lock);
+    if (d3d11_bridge_.Active() || vulkan_bridge_.Active()) {
+        handover.lock();
+    }
     // unique_lock because ForwardEndFrame releases it before blocking runtime
     // calls (turbo drain + next_end_frame_).
     std::unique_lock lock(mutex_);
@@ -9341,10 +9361,21 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     // runtime reads them: everything the game submitted before this call is
     // in them, its rendering after a release included. Frame Generation
     // captures them here too, before anything below reads or composes them.
-    if (const XrResult handed = HandOverBridgedReleasesLocked("end frame"); XR_FAILED(handed)) {
-        DropPendingFrameGenQuad(false);
-        framegen_.AbandonFrame(frame_end_info->displayTime);
-        return handed;
+    {
+        std::vector<XrSwapchain> releases;
+        XrResult handed = HandOverBridgedReleasesLocked("end frame", true, &releases);
+        // The runtime's swapchain calls may wait out Frame Generation's
+        // xrEndFrame (PimaxXR's lock): the game's other threads do not.
+        const XrResult forwarded = ForwardHandedOverReleases(lock, releases, "end frame");
+        if (handover.owns_lock()) {
+            handover.unlock();
+        }
+        if (XR_SUCCEEDED(handed)) handed = forwarded;
+        if (XR_FAILED(handed)) {
+            DropPendingFrameGenQuad(false);
+            framegen_.AbandonFrame(frame_end_info->displayTime);
+            return handed;
+        }
     }
     // ...and the game's motion vector images, which it may never release:
     // as they are now (through the Vulkan bridge, as a hand-over copies them
@@ -15486,7 +15517,8 @@ XrResult OpenXrLayer::FlushDeferredSwapchainReleasesLocked(std::string_view reas
 }
 
 XrResult OpenXrLayer::HandOverBridgedReleasesLocked(XrSwapchain swapchain, SwapchainInfo& info,
-                                                    std::string_view reason, bool copy) {
+                                                    std::string_view reason, bool copy,
+                                                    std::vector<XrSwapchain>* forward_later) {
     while (!info.bridge_handovers.empty()) {
         const uint32_t index = info.bridge_handovers.front();
         info.bridge_handovers.pop_front();
@@ -15515,6 +15547,10 @@ XrResult OpenXrLayer::HandOverBridgedReleasesLocked(XrSwapchain swapchain, Swapc
         ++info.release_count;
         if (ShouldDeferSwapchainRelease(info)) {
             ++info.deferred_release_count;
+            continue;
+        }
+        if (forward_later) {
+            forward_later->push_back(swapchain);
             continue;
         }
         XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
@@ -15547,7 +15583,43 @@ void OpenXrLayer::SubmitKeptVulkanBridgeReleasesLocked() {
     }
 }
 
-XrResult OpenXrLayer::HandOverBridgedReleasesLocked(std::string_view reason, bool copy) {
+XrResult OpenXrLayer::ForwardHandedOverReleases(std::unique_lock<std::mutex>& lock,
+                                                std::vector<XrSwapchain>& releases, std::string_view reason) {
+    if (releases.empty()) {
+        return XR_SUCCESS;
+    }
+    std::vector<XrResult> results;
+    results.reserve(releases.size());
+    lock.unlock();
+    for (const XrSwapchain swapchain : releases) {
+        XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+        results.push_back(ForwardAppRelease(swapchain, &release_info));
+    }
+    lock.lock();
+    XrResult first_failure = XR_SUCCESS;
+    for (std::size_t i = 0; i < releases.size(); ++i) {
+        if (XR_FAILED(results[i])) {
+            logger_.Error("Bridged swapchain release failed: handle=" + FormatHandle(releases[i]) +
+                          ", reason=" + std::string(reason) +
+                          ", result=" + FormatHex(static_cast<uint64_t>(results[i])));
+            if (XR_SUCCEEDED(first_failure)) first_failure = results[i];
+            continue;
+        }
+        const auto it = tracked_swapchains_.find(releases[i]);
+        if (it == tracked_swapchains_.end()) {
+            continue;
+        }
+        it->second.image_states.ReleaseDownstreamOldest();
+        if (it->second.quadviews_session && it->second.release_count <= 3) {
+            LogSwapchainSummary(releases[i], it->second, "released");
+        }
+    }
+    releases.clear();
+    return first_failure;
+}
+
+XrResult OpenXrLayer::HandOverBridgedReleasesLocked(std::string_view reason, bool copy,
+                                                    std::vector<XrSwapchain>* forward_later) {
     // While the Vulkan bridge gives the game's motion vector images back at
     // their releases, every swapchain's copies go first: a giving back waits
     // on the GPU for its copy, and a capture of Frame Generation's queued
@@ -15562,7 +15634,7 @@ XrResult OpenXrLayer::HandOverBridgedReleasesLocked(std::string_view reason, boo
     }
     XrResult first_failure = XR_SUCCESS;
     for (auto& [swapchain, info] : tracked_swapchains_) {
-        const XrResult result = HandOverBridgedReleasesLocked(swapchain, info, reason, copy);
+        const XrResult result = HandOverBridgedReleasesLocked(swapchain, info, reason, copy, forward_later);
         if (XR_FAILED(result) && XR_SUCCEEDED(first_failure)) {
             first_failure = result;
         }

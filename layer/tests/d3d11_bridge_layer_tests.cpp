@@ -5706,6 +5706,107 @@ void TestBridgedGpuBoundDynamic(Game& game, bool pimax, bool quad = false) {
     EndCase(game);
 }
 
+// A runtime swapchain call the layer makes for the game stalls on PimaxXR's
+// swapchain lock (its xrEndFrame holds it for a refresh, called from Frame
+// Generation's thread): the game's other threads' calls into the layer must
+// not wait for it. The bridge hands the game's releases over at its
+// xrEndFrame; that forwarded them to the runtime with the layer's lock held,
+// so the game's xrLocateViews on another thread (DCS's frame loop has a few)
+// waited out the runtime's stall too.
+void TestRuntimeStallOutsideLayerLock(Game& game) {
+    const std::string name = "runtime-stall-outside-layer-lock";
+    CaseSettings settings;
+    settings.frame_multiplier = "dynamic";
+    BeginCase(name, game, settings);
+    g_runtime.pimax = true;
+    depthxr::FrameGenDynamicPolicy policy;
+    policy.engage_after = std::chrono::milliseconds(600000); // passing through: releases go at once
+    Peer::SetFrameGenDynamicPolicy(policy);
+    App app = StartApp();
+    SessionCreate create(game.device.Get(), app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS &&
+              Peer::Bridge().Active() && Peer::QueueSubstituted(),
+          name + ": the session is bridged");
+    BeginSession(app);
+    Target left = MakeTarget(app, ColorInfo(), "left eye");
+    Target right = MakeTarget(app, ColorInfo(), "right eye");
+    for (int frame = 0; frame < 3; ++frame) {
+        Check(Frame(app, game, {&left, &right}, {FrameColor(frame, 0), FrameColor(frame, 1)}, {{{&left}, {&right}}}) ==
+                  XR_SUCCESS,
+              name + ": a frame");
+    }
+    XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
+    XrFrameState state{XR_TYPE_FRAME_STATE};
+    Check(app.api.wait_frame(app.session, &wait_info, &state) == XR_SUCCESS, name + ": xrWaitFrame");
+    XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
+    Check(app.api.begin_frame(app.session, &begin_info) == XR_SUCCESS, name + ": xrBeginFrame");
+    for (const Target* target : {&left, &right}) {
+        Draw(game, target->images[Acquire(app, *target)], FrameColor(3, target == &left ? 0 : 1));
+        Release(app, *target); // a bridged release: handed over at xrEndFrame
+    }
+    std::array<XrCompositionLayerProjectionView, 2> views{};
+    for (std::uint32_t eye = 0; eye < 2; ++eye) {
+        views[eye] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+        views[eye].pose = {{0, 0, 0, 1}, {0, 0, 0}};
+        views[eye].fov = g_runtime.fovs[eye];
+        views[eye].subImage.swapchain = (eye ? right : left).swapchain;
+        views[eye].subImage.imageRect = {{0, 0}, {static_cast<std::int32_t>(kWidth), static_cast<std::int32_t>(kHeight)}};
+    }
+    XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    projection.space = app.space;
+    projection.viewCount = 2;
+    projection.views = views.data();
+    const XrCompositionLayerBaseHeader* layers[] = {reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection)};
+    XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};
+    end.displayTime = state.predictedDisplayTime;
+    end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    end.layerCount = 1;
+    end.layers = layers;
+    // PimaxXR's xrEndFrame (Frame Generation's) holds its swapchain lock.
+    constexpr auto kStall = std::chrono::milliseconds(400);
+    std::unique_lock stalled(g_pimax_swapchains);
+    std::atomic<bool> ended{false};
+    XrResult end_result = XR_ERROR_RUNTIME_FAILURE;
+    std::thread render([&] {
+        end_result = app.api.end_frame(app.session, &end);
+        ended = true;
+    });
+    Sleep(50); // the game's xrEndFrame reaches the runtime's release
+    std::atomic<double> located_ms{0.0};
+    std::thread frame_loop([&] {
+        XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO};
+        locate.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+        locate.displayTime = state.predictedDisplayTime;
+        locate.space = app.space;
+        XrViewState view_state{XR_TYPE_VIEW_STATE};
+        std::array<XrView, 2> located{};
+        for (XrView& view : located) view.type = XR_TYPE_VIEW;
+        std::uint32_t count = 0;
+        const auto start = std::chrono::steady_clock::now();
+        app.api.locate_views(app.session, &locate, &view_state, 2, &count, located.data());
+        located_ms = MsSince(start);
+    });
+    const auto stall_start = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - stall_start < kStall && located_ms == 0.0) Sleep(5);
+    const bool end_held = !ended;
+    Sleep(20);
+    stalled.unlock();
+    frame_loop.join();
+    render.join();
+    std::cout << name << ": xrLocateViews on another thread took " << located_ms.load()
+              << " ms while the runtime held the game's release " << kStall.count() << " ms\n";
+    Check(end_held, name + ": the game's xrEndFrame waited for the runtime's swapchain lock");
+    Check(end_result == XR_SUCCESS, name + ": xrEndFrame");
+    Check(located_ms < 100.0, name + ": xrLocateViews did not wait for the runtime's stalled swapchain call (" +
+                                  std::to_string(located_ms.load()) + " ms)");
+    for (const Target* target : {&left, &right}) {
+        Check(app.api.destroy_swapchain(target->swapchain) == XR_SUCCESS, "a swapchain is destroyed");
+    }
+    StopApp(app);
+    Peer::SetFrameGenDynamicPolicy({});
+    EndCase(game);
+}
+
 // 15. A game quitting while Frame Generation presents from its own thread,
 // the runtime holding that thread inside xrWaitFrame until the session ends
 // (DCS hung so on quitting, 2026-10-09). With `ends_session` the game ends
@@ -6031,7 +6132,9 @@ int main(int argc, char** argv) {
     CheckFrameGenStatusLine();
     const bool bridged = TestBridgedSession(game);
     const char* only = std::getenv("BRIDGE_TEST_ONLY");
-    if (bridged && only && std::string(only).rfind("gpu-bound-dynamic", 0) == 0) {
+    if (bridged && only && std::string(only) == "runtime-stall-outside-layer-lock") {
+        TestRuntimeStallOutsideLayerLock(game);
+    } else if (bridged && only && std::string(only).rfind("gpu-bound-dynamic", 0) == 0) {
         const std::string which = only;
         if (which == "gpu-bound-dynamic" || which == "gpu-bound-dynamic-plain") TestBridgedGpuBoundDynamic(game, false);
         if (which == "gpu-bound-dynamic" || which == "gpu-bound-dynamic-quad") TestBridgedGpuBoundDynamic(game, false, true);
@@ -6044,6 +6147,7 @@ int main(int argc, char** argv) {
         TestDestroyInstanceWithSession(game);
         TestStatusFile(game);
         TestReleaseOnAnotherThread(game);
+        TestRuntimeStallOutsideLayerLock(game);
         TestBridgedQuadViewsComposed(game, false);
         TestBridgedQuadViewsComposed(game, true);
         TestBridgedQuadFrameGen(game, "extrapolate");

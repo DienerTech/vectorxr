@@ -725,9 +725,21 @@ class OpenXrLayer {
     // swapchain's: while the Vulkan bridge gives the game's motion vector
     // images back at their releases (vulkan_bridge_motion_), each
     // swapchain's copies are made first, then the captures and releases.
+    // `forward_later`: the releases due on to the runtime are added to it
+    // (a swapchain per release) instead, for ForwardHandedOverReleases.
     XrResult HandOverBridgedReleasesLocked(XrSwapchain swapchain, SwapchainInfo& info, std::string_view reason,
-                                           bool copy = true);
-    XrResult HandOverBridgedReleasesLocked(std::string_view reason, bool copy = true);
+                                           bool copy = true, std::vector<XrSwapchain>* forward_later = nullptr);
+    XrResult HandOverBridgedReleasesLocked(std::string_view reason, bool copy = true,
+                                           std::vector<XrSwapchain>* forward_later = nullptr);
+    // The releases a hand-over left for later, on to the runtime with
+    // `lock` (of mutex_) let go meanwhile: a runtime's swapchain calls can
+    // stall for a refresh (PimaxXR's xrEndFrame holds their lock, called from
+    // Frame Generation's thread), and the game's other threads' calls into
+    // the layer must not wait for that. The caller holds
+    // bridge_handover_mutex_, so no other hand-over or swapchain call of the
+    // game's comes between the hand-over and its releases.
+    XrResult ForwardHandedOverReleases(std::unique_lock<std::mutex>& lock, std::vector<XrSwapchain>& releases,
+                                       std::string_view reason);
     // At a session's (or an instance's) end, before the Vulkan bridge's
     // Escape: releases no frame's end handed over still give the game's
     // rendering into their images to the bridge (its Released, not Frame
@@ -984,6 +996,9 @@ class OpenXrLayer {
     void SharpenNativeFocusViews(std::vector<XrCompositionLayerProjectionView>& views, XrTime display_time);
 
     std::mutex mutex_;
+    // Held across a bridged hand-over and its releases' runtime calls
+    // (ForwardHandedOverReleases), which go without mutex_; taken before mutex_.
+    std::mutex bridge_handover_mutex_;
     std::filesystem::path dll_directory_;
     std::filesystem::path config_path_;
     std::filesystem::path log_path_;
