@@ -1658,6 +1658,11 @@ void FrameGenPresenter::SetRuntimeViewConfiguration(XrViewConfigurationType type
     runtime_view_configuration_ = type;
 }
 
+void FrameGenPresenter::SetRuntimeBlanksOpenFrames(bool blanks) {
+    std::scoped_lock lock(mutex_);
+    runtime_blanks_open_frames_ = blanks;
+}
+
 void FrameGenPresenter::SetInterpolateOnShaders(bool on) {
     std::scoped_lock lock(mutex_);
     interpolate_on_shaders_ = on;
@@ -7295,7 +7300,8 @@ bool FrameGenPresenter::ColorReleasedSinceLocked(const FrameCopy& copy) const {
     return false;
 }
 
-FrameGenPresenter::AsIs FrameGenPresenter::CurrentAsIsLocked(const FrameCopy& copy, std::uint64_t id, XrTime time) const {
+FrameGenPresenter::AsIs FrameGenPresenter::CurrentAsIsLocked(const FrameCopy& copy, std::uint64_t id, XrTime time,
+                                                             bool past_written) const {
     // A copy without its projection (a swapchain or space it used was
     // destroyed) shows nothing of the scene either.
     const auto current = [&](const FrameCopy& candidate) {
@@ -7314,6 +7320,7 @@ FrameGenPresenter::AsIs FrameGenPresenter::CurrentAsIsLocked(const FrameCopy& co
             continue;
         }
         if (!frame.as_is) {
+            if (past_written) continue;
             return {};
         }
         if (current(frame.copy)) {
@@ -8997,6 +9004,8 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
         // images newer captures had replaced (written unmoved, or the frame
         // before). staleSkipped: refreshes not submitted, nothing current to
         // show (a frame shown as it is had newer images in its swapchains).
+        // staleShownAhead (when any): such refreshes shown with a later frame
+        // as it is instead, for a runtime blanking frames left open.
         // leadAvg/leadMax: the lead told to the game's frames; leadHist: how
         // many frames were told each lead ("lead:frames"). toldAheadMs
         // (median/90th percentile): gameAheadMs measured from the presenter
@@ -9118,7 +9127,10 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
                         ", staleMotion=" + std::to_string(delta(&Totals::stale_motion)) +
                         ", ring=" + std::to_string(JitRingLocked(quad_mode_)) +
                         ", ringExhausted=" + std::to_string(delta(&Totals::ring_exhausted)) + ring_text +
-                        ", staleSkipped=" + std::to_string(delta(&Totals::stale_skipped))
+                        ", staleSkipped=" + std::to_string(delta(&Totals::stale_skipped)) +
+                        (delta(&Totals::stale_shown_ahead)
+                             ? ", staleShownAhead=" + std::to_string(delta(&Totals::stale_shown_ahead))
+                             : std::string())
                   : std::string()) +
             ", runtimeHalved=" + std::to_string(delta(&Totals::halving_halved)) + "/" +
             std::to_string(delta(&Totals::halving_measured)) + (runtime_halving_ ? " (halving)" : "") +
@@ -10291,8 +10303,25 @@ void FrameGenPresenter::CompositorLoop() {
             // images are still the newest in their swapchains, else a newer
             // frame the layer composed, early, else nothing. What is shown is
             // what a refresh nothing is written for shows again.
+            // A runtime that shows a blank refresh for a frame left open
+            // (SetRuntimeBlanksOpenFrames) gets the next frame the layer
+            // composed, past frames written first, while one is current: its
+            // own images and views, early (a written frame shown after it
+            // steps back a frame, which beats a blank refresh).
             const auto show_as_is = [&](FrameCopy copy, std::uint64_t id, XrTime made_for) {
-                const AsIs current = CurrentAsIsLocked(copy, id, made_for);
+                AsIs current = CurrentAsIsLocked(copy, id, made_for);
+                if (!current.copy && runtime_blanks_open_frames_) {
+                    current = CurrentAsIsLocked(copy, id, made_for, true);
+                    if (current.copy) {
+                        ++totals_.stale_shown_ahead;
+                        if (logger_ && !logged_open_frame_shown_) {
+                            logged_open_frame_shown_ = true;
+                            logger_->Info("Frame Generation: a refresh with nothing current to show goes with the next "
+                                          "frame shown as it is, early: this runtime shows a blank refresh for a frame "
+                                          "left open (PimaxXR 0.4.4).");
+                        }
+                    }
+                }
                 if (!current.copy) {
                     submit = false;
                     ++totals_.stale_skipped;
@@ -10374,10 +10403,16 @@ void FrameGenPresenter::CompositorLoop() {
             } else {
                 // Composing quad views, with nothing the layer composed since
                 // the last frame written: that frame again, as the runtime
-                // shows it.
+                // shows it (a runtime blanking frames left open: a later
+                // frame shown as it is, as above, if any).
                 path = 8;
-                submit = false;
-                ++totals_.stale_skipped;
+                if (runtime_blanks_open_frames_) {
+                    const auto shown = jit_shown_ ? find_kept(std::get<0>(*jit_shown_)) : jit_frames_.end();
+                    show_as_is(FrameCopy{}, 0, shown != jit_frames_.end() ? shown->time : jit_content_time_);
+                } else {
+                    submit = false;
+                    ++totals_.stale_skipped;
+                }
             }
             DropStaleDepthLocked(content);
             const bool usable = content.valid && content.has_projection && content.projection_index < content.layers.size();
@@ -10661,6 +10696,7 @@ FrameGenStatus FrameGenPresenter::Status() const {
                        totals_.unwritten_source;
     status.ring_exhausted = totals_.ring_exhausted;
     status.stale_skipped = totals_.stale_skipped;
+    status.stale_shown_ahead = totals_.stale_shown_ahead;
     status.analyses_timed = totals_.analyses_timed;
     status.analyses_late = totals_.analyses_late;
     status.quad = quad_mode_ && compositor_running_;

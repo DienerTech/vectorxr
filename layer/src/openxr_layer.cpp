@@ -1890,6 +1890,44 @@ void AppendViewSummary(std::ostringstream& stream, std::span<const ViewAdjustmen
 constexpr std::chrono::milliseconds kTurboDrainTimeout{250};
 constexpr std::chrono::milliseconds kTurboLateWaitTimeout{2000};
 
+// A PimaxXR setting as PimaxXR reads it (HKLM\SOFTWARE\PimaxXR, a DWORD;
+// pimax-openxr runtime.h RegPrefix, instance.cpp getSetting). Read only.
+std::optional<DWORD> PimaxXrSetting(const char* name) {
+    DWORD value = 0;
+    DWORD size = sizeof(value);
+    if (RegGetValueA(HKEY_LOCAL_MACHINE, "SOFTWARE\\PimaxXR", name, RRF_RT_REG_DWORD, nullptr, &value, &size) !=
+        ERROR_SUCCESS) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+// The PimaxXR settings that shape its frame loop, as one log line: each
+// "name=value", or "name=default (value)" when unset (pimax-openxr 0.4.4
+// session.cpp and instance.cpp defaults).
+std::string PimaxXrFrameSettingsText() {
+    struct Setting {
+        const char* name;
+        DWORD fallback;
+    };
+    static constexpr Setting kSettings[] = {
+        {"defer_frame_wait", 0},                 // "Prefer framerate over latency"
+        {"quirk_sync_gpu_work_in_end_frame", 0}, // "Wait for GPU work in EndFrame"
+        {"async_submission", 1},
+        {"quirk_complete_discarded_frames", 1},
+        {"quirk_disable_running_start", 0},
+        {"lock_framerate", 0},
+    };
+    std::string text;
+    for (const Setting& setting : kSettings) {
+        const std::optional<DWORD> value = PimaxXrSetting(setting.name);
+        if (!text.empty()) text += ", ";
+        text += std::string(setting.name) + "=" +
+                (value ? std::to_string(*value) : "default (" + std::to_string(setting.fallback) + ")");
+    }
+    return text;
+}
+
 } // namespace
 
 OpenXrLayer& OpenXrLayer::Instance() {
@@ -2380,6 +2418,24 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
                          "\", version=" + runtime_version_);
             if (defer_quadviews_swapchain_releases_) {
                 logger_.Info("Varjo runtime detected; deferring app quadviews swapchain releases until xrEndFrame.");
+            }
+            if (runtime_name_.find("PimaxXR") != std::string::npos) {
+                // Its frame loop changes with these (defer_frame_wait: its
+                // xrEndFrame waits for the refresh instead of xrWaitFrame).
+                logger_.Info("PimaxXR frame settings: " + PimaxXrFrameSettingsText() + ".");
+                // Up to 0.4.4, a frame begun and never ended becomes a PVR
+                // frame with one disabled layer (a blank refresh) and a
+                // refresh's wait more (pimax-openxr frame.cpp
+                // asyncSubmissionThread, quirk_complete_discarded_frames;
+                // later versions repeat the last layers instead).
+                const bool blanks = rt < XR_MAKE_VERSION(0, 4, 5) &&
+                                    PimaxXrSetting("async_submission").value_or(1) != 0 &&
+                                    PimaxXrSetting("quirk_complete_discarded_frames").value_or(1) != 0;
+                framegen_.SetRuntimeBlanksOpenFrames(blanks);
+                if (blanks) {
+                    logger_.Info("Frame Generation: this PimaxXR shows a blank refresh for a frame left open, so its "
+                                 "presenter thread leaves none open while anything consistent can be shown.");
+                }
             }
         } else {
             logger_.Info("OpenXR runtime identity unavailable: xrGetInstanceProperties returned " +

@@ -9503,6 +9503,58 @@ void TestQuadAsIsShowsNewestImage() {
     Check(!runtime.ordering_violation && !g_release_violation, "as is newest: calls stayed ordered");
 }
 
+// A runtime that shows a blank refresh for a frame begun and never ended
+// (PimaxXR 0.4.4: its submission thread completes the PVR frame left out with
+// one disabled layer, then waits a refresh more; pimax-openxr frame.cpp
+// asyncSubmissionThread). Interpolating at 3x, frames the layer composes
+// alternate with claimed frames whose writes fail: a refresh with nothing
+// written finds the frame last shown as it is no longer current (the next
+// one the layer composed is in its images) with a frame to write between
+// them, and was left open (the runtime shows its last frame again, but this
+// one a blank refresh). Told about the runtime, the presenter shows the next
+// frame the layer composed there instead: no frame is left open, and no image
+// is shown with another frame's views. FG_TEST_BLANKS_OFF=1 leaves it
+// untold (the refreshes left open are counted, and the test fails).
+void TestQuadNoOpenFrameOnBlankingRuntime() {
+    const bool told = !std::getenv("FG_TEST_BLANKS_OFF");
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    StartQuad(presenter, gpu, FrameGenSynthesisMode::kInterpolate, FrameGenMultiplier::k3);
+    presenter.SetRuntimeBlanksOpenFrames(told);
+    presenter.SetQuadDecline(3000ms, 3000ms);
+    QuadApp app(presenter, runtime);
+    for (int i = 0; i < 3; ++i) app.Frame();
+    app.Run(400ms);
+    Check(presenter.Status().quad, "blanking runtime: composing quad views first");
+    const std::size_t first = runtime.Submissions();
+    const int open_before = runtime.discarded;
+    const auto start = std::chrono::steady_clock::now();
+    for (int i = 0; std::chrono::steady_clock::now() - start < 1500ms; ++i) {
+        // The layer composes every second frame; the claimed frame after
+        // each fails to be written.
+        app.force = i % 4 == 0 || i % 4 == 2 ? std::optional<FrameGenQuadRoute>(FrameGenQuadRoute::kBusy) : std::nullopt;
+        gpu.compose_fail = i % 4 == 1;
+        app.Frame(4000us);
+    }
+    gpu.compose_fail = false;
+    app.force.reset();
+    app.Run(100ms);
+    const FrameGenStatus status = presenter.Status();
+    const int left_open = runtime.discarded - open_before;
+    std::cerr << "  blanking runtime (" << (told ? "told" : "untold") << "): " << left_open << " refreshes left open, "
+              << status.stale_skipped << " stale, " << status.stale_shown_ahead << " shown with a later frame, "
+              << StepsBack(runtime, first) << " steps back, " << runtime.mismatched_images << " mismatched, "
+              << gpu.compose_failures << " failed writes" << std::endl;
+    Check(gpu.compose_failures >= 5, "blanking runtime: writes failed (" + std::to_string(gpu.compose_failures.load()) + ")");
+    Check(left_open == 0, "blanking runtime: no refresh is left open (" + std::to_string(left_open) + ")");
+    Check(runtime.mismatched_images == 0 && runtime.not_stereo == 0 && !runtime.used_destroyed,
+          "blanking runtime: images matching their views, two views each, nothing destroyed");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "blanking runtime: calls stayed ordered");
+}
+
 // A refresh nothing can be written for shows again what was submitted last:
 // after a claimed frame written, then a frame the layer composed shown as it
 // is, a claimed frame whose write fails shows the composed frame again (its
@@ -15651,6 +15703,7 @@ int main(int argc, char** argv) {
     RUN(TestQuadClaimNeedsLatestCapture);
     RUN(TestQuadOutputsResized);
     RUN(TestQuadAsIsShowsNewestImage);
+    RUN(TestQuadNoOpenFrameOnBlankingRuntime);
     RUN(TestQuadFailedWriteRepeatsLastShown);
     RUN(TestQuadRetiredOutputsFreed);
     RUN(TestQuadHeadsetOffBreak);
