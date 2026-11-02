@@ -1131,6 +1131,7 @@ void FrameGenPresenter::Stop() {
     summary_evidence_.reset();
     display_offset_periods_ = 0.0;
     display_offset_samples_ = 0;
+    display_offset_earlier_ = 0;
     slot_index_ = 0;
     slot_time_ = slot_period_ = 0;
     app_latency_ms_ = 0.0;
@@ -1178,6 +1179,7 @@ void FrameGenPresenter::Stop() {
     end_call_ms_.clear();
     runtime_end_ms_.clear();
     runtime_end_hold_ms_.clear();
+    runtime_wait_ms_.clear();
     synth_lock_ms_.clear();
     ring_short_write_ms_.clear();
     told_lead_sum_ = 0;
@@ -1655,6 +1657,11 @@ void FrameGenPresenter::SetQuadDecline(std::chrono::milliseconds first, std::chr
 void FrameGenPresenter::SetRuntimeViewConfiguration(XrViewConfigurationType type) {
     std::scoped_lock lock(mutex_);
     runtime_view_configuration_ = type;
+}
+
+void FrameGenPresenter::SetRuntimeBlanksOpenFrames(bool blanks) {
+    std::scoped_lock lock(mutex_);
+    runtime_blanks_open_frames_ = blanks;
 }
 
 void FrameGenPresenter::SetInterpolateOnShaders(bool on) {
@@ -7294,7 +7301,8 @@ bool FrameGenPresenter::ColorReleasedSinceLocked(const FrameCopy& copy) const {
     return false;
 }
 
-FrameGenPresenter::AsIs FrameGenPresenter::CurrentAsIsLocked(const FrameCopy& copy, std::uint64_t id, XrTime time) const {
+FrameGenPresenter::AsIs FrameGenPresenter::CurrentAsIsLocked(const FrameCopy& copy, std::uint64_t id, XrTime time,
+                                                             bool past_written) const {
     // A copy without its projection (a swapchain or space it used was
     // destroyed) shows nothing of the scene either.
     const auto current = [&](const FrameCopy& candidate) {
@@ -7313,6 +7321,7 @@ FrameGenPresenter::AsIs FrameGenPresenter::CurrentAsIsLocked(const FrameCopy& co
             continue;
         }
         if (!frame.as_is) {
+            if (past_written) continue;
             return {};
         }
         if (current(frame.copy)) {
@@ -7485,13 +7494,20 @@ XrFrameEndInfo FrameGenPresenter::BuildFrame(FrameCopy& copy, const std::vector<
 XrResult FrameGenPresenter::RuntimeWait(const FrameGenRuntimeCalls& calls, XrSession session, const XrFrameWaitInfo* info,
                                         XrFrameState* state) {
     XrResult result = XR_SUCCESS;
+    const auto called = Clock::now();
     {
         const PresenterCall call(*this, "xrWaitFrame");
         result = calls.wait(session, info, state);
     }
     if (XR_SUCCEEDED(result)) {
+        const double call_ms = Milliseconds(Clock::now() - called);
         std::scoped_lock lock(mutex_);
         ++runtime_waits_;
+        AddSample(runtime_wait_ms_, call_ms);
+        // Blocked as NotePhaseLocked counts it: by the period this wait reported.
+        const double period_ms = state ? static_cast<double>(state->predictedDisplayPeriod) / 1e6 : 0.0;
+        ++totals_.runtime_waits_timed;
+        totals_.runtime_waits_blocked += call_ms >= std::max(1.0, period_ms / 10.0) ? 1 : 0;
     }
     return result;
 }
@@ -7623,9 +7639,21 @@ void FrameGenPresenter::NoteDisplayOffsetLocked(XrTime submitted, XrTime returne
     if (period <= 0 || returned <= 0 || submitted <= 0) {
         return;
     }
-    const double sample = static_cast<double>(submitted - returned) / static_cast<double>(period);
+    double sample = static_cast<double>(submitted - returned) / static_cast<double>(period);
     if (sample < -2.0 || sample > 3.0) {
         return; // not a convention, just a stray time
+    }
+    if (sample < 0.0) {
+        // Ended for an earlier time than it was given: a layer above scaling
+        // the prediction down (OpenXR Toolkit's prediction dampening, which
+        // never restores the time it changed). Telling engaged frames a later
+        // time would undo what the user set there: counted as no offset.
+        if (++display_offset_earlier_ == 30 && logger_) {
+            logger_->Info("Frame Generation: the game ends frames for earlier times than it was given (" +
+                          Number(sample, 2) + " periods; a layer above VectorXR scales its predictions down, as "
+                          "OpenXR Toolkit's prediction dampening does); engaged frames keep the times they are given.");
+        }
+        sample = 0.0;
     }
     display_offset_periods_ =
         display_offset_samples_ == 0 ? sample : display_offset_periods_ * 0.9 + sample * 0.1;
@@ -8980,11 +9008,17 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
         // Generation. runtimeEndMs: the runtime's xrEndFrame for the frames
         // Frame Generation submits (long where the runtime waits for its
         // queue). runtimeEndHeldMs: frames held back before it, for a
-        // runtime that holds them there until its slot. synthLockMs: the presenter thread's wait for the GPU
+        // runtime that holds them there until its slot. runtimeWaitMs: the
+        // runtime's xrWaitFrame (every caller's), and runtimeWaitsBlocked:
+        // of those waits, the ones that blocked (none: a runtime pacing in
+        // xrEndFrame instead, as PimaxXR does with "Prefer framerate over
+        // latency"; few: a caller coming late). synthLockMs: the presenter thread's wait for the GPU
         // lock before writing. ringExhausted: refreshes whose real frame's
         // images newer captures had replaced (written unmoved, or the frame
         // before). staleSkipped: refreshes not submitted, nothing current to
         // show (a frame shown as it is had newer images in its swapchains).
+        // staleShownAhead (when any): such refreshes shown with a later frame
+        // as it is instead, for a runtime blanking frames left open.
         // leadAvg/leadMax: the lead told to the game's frames; leadHist: how
         // many frames were told each lead ("lead:frames"). toldAheadMs
         // (median/90th percentile): gameAheadMs measured from the presenter
@@ -9092,6 +9126,9 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
             (gpu_gate_enabled_ && gpu_gate_armed_ ? "" : gpu_gate_enabled_ ? " (not armed)" : " (off)") +
             ", endCallMs=" + MedianAndMax(end_call_ms_) + ", runtimeEndMs=" + MedianAndMax(runtime_end_ms_) +
             ", runtimeEndHeldMs=" + MedianAndMax(runtime_end_hold_ms_) +
+            ", runtimeWaitMs=" + MedianAndMax(runtime_wait_ms_) +
+            ", runtimeWaitsBlocked=" + std::to_string(delta(&Totals::runtime_waits_blocked)) + "/" +
+            std::to_string(delta(&Totals::runtime_waits_timed)) +
             ", synthLockMs=" + MedianAndMax(synth_lock_ms_) +
             (jit_ ? ", justInTime=1, covers=" + std::to_string(jit_covers_) + ", unwritten=" +
                         std::to_string(delta(&Totals::unwritten_wait)) + "/" +
@@ -9103,7 +9140,10 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
                         ", staleMotion=" + std::to_string(delta(&Totals::stale_motion)) +
                         ", ring=" + std::to_string(JitRingLocked(quad_mode_)) +
                         ", ringExhausted=" + std::to_string(delta(&Totals::ring_exhausted)) + ring_text +
-                        ", staleSkipped=" + std::to_string(delta(&Totals::stale_skipped))
+                        ", staleSkipped=" + std::to_string(delta(&Totals::stale_skipped)) +
+                        (delta(&Totals::stale_shown_ahead)
+                             ? ", staleShownAhead=" + std::to_string(delta(&Totals::stale_shown_ahead))
+                             : std::string())
                   : std::string()) +
             ", runtimeHalved=" + std::to_string(delta(&Totals::halving_halved)) + "/" +
             std::to_string(delta(&Totals::halving_measured)) + (runtime_halving_ ? " (halving)" : "") +
@@ -9139,6 +9179,7 @@ void FrameGenPresenter::NewSummaryWindowLocked(Clock::time_point now, double sta
     end_call_ms_.clear();
     runtime_end_ms_.clear();
     runtime_end_hold_ms_.clear();
+    runtime_wait_ms_.clear();
     synth_lock_ms_.clear();
     ring_short_write_ms_.clear();
     told_lead_sum_ = 0;
@@ -10275,8 +10316,25 @@ void FrameGenPresenter::CompositorLoop() {
             // images are still the newest in their swapchains, else a newer
             // frame the layer composed, early, else nothing. What is shown is
             // what a refresh nothing is written for shows again.
+            // A runtime that shows a blank refresh for a frame left open
+            // (SetRuntimeBlanksOpenFrames) gets the next frame the layer
+            // composed, past frames written first, while one is current: its
+            // own images and views, early (a written frame shown after it
+            // steps back a frame, which beats a blank refresh).
             const auto show_as_is = [&](FrameCopy copy, std::uint64_t id, XrTime made_for) {
-                const AsIs current = CurrentAsIsLocked(copy, id, made_for);
+                AsIs current = CurrentAsIsLocked(copy, id, made_for);
+                if (!current.copy && runtime_blanks_open_frames_) {
+                    current = CurrentAsIsLocked(copy, id, made_for, true);
+                    if (current.copy) {
+                        ++totals_.stale_shown_ahead;
+                        if (logger_ && !logged_open_frame_shown_) {
+                            logged_open_frame_shown_ = true;
+                            logger_->Info("Frame Generation: a refresh with nothing current to show goes with the next "
+                                          "frame shown as it is, early: this runtime shows a blank refresh for a frame "
+                                          "left open (PimaxXR 0.4.4).");
+                        }
+                    }
+                }
                 if (!current.copy) {
                     submit = false;
                     ++totals_.stale_skipped;
@@ -10358,10 +10416,16 @@ void FrameGenPresenter::CompositorLoop() {
             } else {
                 // Composing quad views, with nothing the layer composed since
                 // the last frame written: that frame again, as the runtime
-                // shows it.
+                // shows it (a runtime blanking frames left open: a later
+                // frame shown as it is, as above, if any).
                 path = 8;
-                submit = false;
-                ++totals_.stale_skipped;
+                if (runtime_blanks_open_frames_) {
+                    const auto shown = jit_shown_ ? find_kept(std::get<0>(*jit_shown_)) : jit_frames_.end();
+                    show_as_is(FrameCopy{}, 0, shown != jit_frames_.end() ? shown->time : jit_content_time_);
+                } else {
+                    submit = false;
+                    ++totals_.stale_skipped;
+                }
             }
             DropStaleDepthLocked(content);
             const bool usable = content.valid && content.has_projection && content.projection_index < content.layers.size();
@@ -10645,6 +10709,7 @@ FrameGenStatus FrameGenPresenter::Status() const {
                        totals_.unwritten_source;
     status.ring_exhausted = totals_.ring_exhausted;
     status.stale_skipped = totals_.stale_skipped;
+    status.stale_shown_ahead = totals_.stale_shown_ahead;
     status.analyses_timed = totals_.analyses_timed;
     status.analyses_late = totals_.analyses_late;
     status.quad = quad_mode_ && compositor_running_;

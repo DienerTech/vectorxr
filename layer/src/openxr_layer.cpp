@@ -1931,6 +1931,44 @@ void AppendViewSummary(std::ostringstream& stream, std::span<const ViewAdjustmen
 constexpr std::chrono::milliseconds kTurboDrainTimeout{250};
 constexpr std::chrono::milliseconds kTurboLateWaitTimeout{2000};
 
+// A PimaxXR setting as PimaxXR reads it (HKLM\SOFTWARE\PimaxXR, a DWORD;
+// pimax-openxr runtime.h RegPrefix, instance.cpp getSetting). Read only.
+std::optional<DWORD> PimaxXrSetting(const char* name) {
+    DWORD value = 0;
+    DWORD size = sizeof(value);
+    if (RegGetValueA(HKEY_LOCAL_MACHINE, "SOFTWARE\\PimaxXR", name, RRF_RT_REG_DWORD, nullptr, &value, &size) !=
+        ERROR_SUCCESS) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+// The PimaxXR settings that shape its frame loop, as one log line: each
+// "name=value", or "name=default (value)" when unset (pimax-openxr 0.4.4
+// session.cpp and instance.cpp defaults).
+std::string PimaxXrFrameSettingsText() {
+    struct Setting {
+        const char* name;
+        DWORD fallback;
+    };
+    static constexpr Setting kSettings[] = {
+        {"defer_frame_wait", 0},                 // "Prefer framerate over latency"
+        {"quirk_sync_gpu_work_in_end_frame", 0}, // "Wait for GPU work in EndFrame"
+        {"async_submission", 1},
+        {"quirk_complete_discarded_frames", 1},
+        {"quirk_disable_running_start", 0},
+        {"lock_framerate", 0},
+    };
+    std::string text;
+    for (const Setting& setting : kSettings) {
+        const std::optional<DWORD> value = PimaxXrSetting(setting.name);
+        if (!text.empty()) text += ", ";
+        text += std::string(setting.name) + "=" +
+                (value ? std::to_string(*value) : "default (" + std::to_string(setting.fallback) + ")");
+    }
+    return text;
+}
+
 } // namespace
 
 OpenXrLayer& OpenXrLayer::Instance() {
@@ -2453,6 +2491,24 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
                          "\", version=" + runtime_version_);
             if (defer_quadviews_swapchain_releases_) {
                 logger_.Info("Varjo runtime detected; deferring app quadviews swapchain releases until xrEndFrame.");
+            }
+            if (runtime_name_.find("PimaxXR") != std::string::npos) {
+                // Its frame loop changes with these (defer_frame_wait: its
+                // xrEndFrame waits for the refresh instead of xrWaitFrame).
+                logger_.Info("PimaxXR frame settings: " + PimaxXrFrameSettingsText() + ".");
+                // Up to 0.4.4, a frame begun and never ended becomes a PVR
+                // frame with one disabled layer (a blank refresh) and a
+                // refresh's wait more (pimax-openxr frame.cpp
+                // asyncSubmissionThread, quirk_complete_discarded_frames;
+                // later versions repeat the last layers instead).
+                const bool blanks = rt < XR_MAKE_VERSION(0, 4, 5) &&
+                                    PimaxXrSetting("async_submission").value_or(1) != 0 &&
+                                    PimaxXrSetting("quirk_complete_discarded_frames").value_or(1) != 0;
+                framegen_.SetRuntimeBlanksOpenFrames(blanks);
+                if (blanks) {
+                    logger_.Info("Frame Generation: this PimaxXR shows a blank refresh for a frame left open, so its "
+                                 "presenter thread leaves none open while anything consistent can be shown.");
+                }
             }
         } else {
             logger_.Info("OpenXR runtime identity unavailable: xrGetInstanceProperties returned " +
@@ -6670,6 +6726,11 @@ XrResult OpenXrLayer::PaceWaitFrame(XrSession session,
     }
     const auto trace_id = turbo_trace_.NextId();
     turbo_trace_.Record("wait.enter", trace_id);
+    if (turbo_frame_interception_required_.load(std::memory_order_acquire)) {
+        std::scoped_lock lock(turbo_mutex_);
+        upstream_wait_thread_ = std::this_thread::get_id();
+        upstream_wait_at_ = std::chrono::steady_clock::now();
+    }
     const bool experimental_active = turbo_experiment_.enabled &&
         turbo_effective_active_.load(std::memory_order_relaxed) && turbo_effective_async_.load(std::memory_order_relaxed);
     if (experimental_active && turbo_experiment_.frame_limit > 0) {
@@ -7071,6 +7132,10 @@ XrResult OpenXrLayer::BeginFrame(XrSession session, const XrFrameBeginInfo* fram
     if (performance_.Wanted()) {
         performance_.Frames().Begin(static_cast<std::uint32_t>(GetCurrentThreadId()));
     }
+    if (turbo_frame_interception_required_.load(std::memory_order_acquire)) {
+        std::scoped_lock lock(turbo_mutex_);
+        upstream_begin_at_ = std::chrono::steady_clock::now();
+    }
     {
         std::scoped_lock lock(mutex_);
         if (session == active_session_) {
@@ -7169,9 +7234,47 @@ void OpenXrLayer::ObserveCompositionLayerTopology(const XrFrameEndInfo* frame_en
                       : "."));
 }
 
+bool OpenXrLayer::NoteUpstreamTurboFrame() {
+    // OpenXR Toolkit's Turbo above (its layer.cpp xrEndFrame): xrWaitFrame on
+    // a pool thread as soon as the app's xrEndFrame returns, xrBeginFrame
+    // right before the next xrEndFrame. Games that wait on a thread of their
+    // own begin before they render (DCS, MSFS), so all three together, frame
+    // after frame, are the layer's.
+    constexpr auto kBeginBeforeEnd = std::chrono::milliseconds(1);
+    constexpr auto kWaitAfterEnd = std::chrono::milliseconds(2);
+    constexpr std::uint32_t kFrames = 60;
+    const auto now = std::chrono::steady_clock::now();
+    std::scoped_lock lock(turbo_mutex_);
+    const bool pattern = upstream_wait_thread_ != std::thread::id{} &&
+                         upstream_wait_thread_ != std::this_thread::get_id() &&
+                         upstream_end_returned_ != std::chrono::steady_clock::time_point{} &&
+                         upstream_wait_at_ >= upstream_end_returned_ &&
+                         upstream_wait_at_ - upstream_end_returned_ < kWaitAfterEnd &&
+                         upstream_begin_at_ > upstream_wait_at_ && now - upstream_begin_at_ < kBeginBeforeEnd;
+    upstream_turbo_frames_ = pattern ? upstream_turbo_frames_ + 1 : 0;
+    if (!upstream_turbo_ && upstream_turbo_frames_ >= kFrames) {
+        upstream_turbo_ = true;
+        logger_.Info("Turbo: a layer above VectorXR pipelines the game's frames already (each xrWaitFrame comes from "
+                     "another thread as the last xrEndFrame returns, each xrBeginFrame right before its xrEndFrame: "
+                     "OpenXR Toolkit's Turbo mode). VectorXR's Turbo stands aside for this session; turn one of the "
+                     "two off.");
+    }
+    return upstream_turbo_;
+}
+
 XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                                       const XrFrameEndInfo* frame_end_info,
                                       std::unique_lock<std::mutex>& config_lock) {
+    // When the app's xrEndFrame returns (NoteUpstreamTurboFrame: a layer
+    // above waits right after); this is its tail.
+    struct EndReturned {
+        OpenXrLayer& layer;
+        ~EndReturned() {
+            if (!layer.turbo_frame_interception_required_.load(std::memory_order_acquire)) return;
+            std::scoped_lock lock(layer.turbo_mutex_);
+            layer.upstream_end_returned_ = std::chrono::steady_clock::now();
+        }
+    } end_returned{*this};
     // Runtime wait/begin can fail before TraceRuntimeEndFrame is reached: a
     // quad views frame Frame Generation claimed that never reached
     // TraceRuntimeEndFrame is abandoned.
@@ -7262,6 +7365,12 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
     }
 
     bool turbo_engaged = IsTurboActive();
+    // A layer above pipelining the game's frames already: Turbo stands aside
+    // (two pipelined frames would only add latency).
+    const bool upstream_turbo = NoteUpstreamTurboFrame();
+    if (upstream_turbo) {
+        turbo_engaged = false;
+    }
     // Recovery is independent of Auto/forced/pinned pacing. Disabling the
     // setting bypasses only interrupted-session protection, not live stalls.
     if (!resolved_settings_.turbo.interrupted_session_recovery) {
@@ -7402,6 +7511,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
     const char* async_release_reason =
         turbo_engaged ? nullptr :
         !metrics_available ? "Turbo disabled in settings" :
+        upstream_turbo ? "a layer above pipelines the frames already" :
         suspended_now ? "Turbo safety suspension" :
         recovery_blocked_now ? "Turbo recovery block" :
         turbo_async_recouple_stalled_ ? "runtime wait stalled while Turbo was off" : nullptr;
@@ -9332,6 +9442,10 @@ void OpenXrLayer::ResetTurboFrameState(bool stop_recorder) {
     pacing_end_sum_ms_ = 0.0;
     pacing_end_max_ms_ = 0.0;
     std::scoped_lock lock(turbo_mutex_);
+    upstream_wait_thread_ = {};
+    upstream_wait_at_ = upstream_begin_at_ = upstream_end_returned_ = {};
+    upstream_turbo_frames_ = 0;
+    upstream_turbo_ = false;
     should_render_log_budget_ = 8;
     last_noted_should_render_.reset();
     pacing_wait_sum_ms_ = 0.0;

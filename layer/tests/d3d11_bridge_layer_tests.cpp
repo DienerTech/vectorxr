@@ -731,6 +731,18 @@ struct StandIn {
     std::uint64_t frame_waits{0};
     std::uint64_t frame_begins{0};
     std::uint64_t frame_ends{0};
+    // A frame begun and not ended yet, and how many such frames a begin
+    // discarded (the runtime shows its last frame again; PimaxXR 0.4.4 a
+    // blank refresh, PimaxCompositor::blank_refreshes).
+    bool frame_open{false};
+    std::uint64_t frames_left_open{0};
+    // pimax: the next `pimax_clamp` waits report a display time 1 ns after
+    // the last (PimaxXR clamps a PVR prediction that did not advance), every
+    // `pimax_clamp_every`th wait (0: never). `reported` is the last reported.
+    int pimax_clamp_every{0};
+    int pimax_clamp{0};
+    std::uint64_t pimax_clamped{0};
+    XrTime reported{0};
     std::uintptr_t handles{0x1000};
 
     // The index of the first `call` at or after `from`, or -1.
@@ -747,6 +759,8 @@ StandIn g_runtime;
 // the runtime as the application's thread does. The test reads what the
 // stand-in saw under it too (Shown).
 std::recursive_mutex g_runtime_mutex;
+// With g_runtime_mutex: a frame began (StandIn::pimax's xrWaitFrame waits for it).
+std::condition_variable_any g_frame_begun;
 // Frame loop calls in progress: xrWaitFrame never overlaps another wait, nor
 // xrBeginFrame or xrEndFrame another begin or end, whichever threads make them.
 std::atomic<int> g_waits_in{0};
@@ -836,6 +850,15 @@ struct PimaxCompositor {
     double wait_wait_ms{0.0};
     std::uint64_t ends{0};
     std::uint64_t waits{0};
+    // Frames begun and never ended (Gap): each a PVR frame with one disabled
+    // layer, shown as a blank refresh, that waits a refresh of its own.
+    int gaps{0};
+    std::uint64_t blank_refreshes{0};
+    // quirk_sync_gpu_work_in_end_frame ("Wait for GPU work in EndFrame"):
+    // xrEndFrame waits on the CPU for the session queue's work so far, its
+    // locks held (d3d11_native.cpp serializeD3D12Frame's CPU wait).
+    bool sync_gpu_in_end{false};
+    double end_sync_ms{0.0};
 
     void Start(ID3D12Device* device) {
         Check(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&serialize))) &&
@@ -857,18 +880,40 @@ struct PimaxCompositor {
         thread.join();
         WaitFence(rendered.Get(), rendered_value, 2000);
         std::scoped_lock lock(mutex);
-        running = stop = idle = handed = defer = false;
+        running = stop = idle = handed = defer = sync_gpu_in_end = false;
         serialize.Reset();
         submission.Reset();
         rendered.Reset();
-        serialized = rendered_value = ends = waits = 0;
-        end_wait_ms = wait_wait_ms = 0.0;
+        serialized = rendered_value = ends = waits = blank_refreshes = 0;
+        gaps = 0;
+        end_wait_ms = wait_wait_ms = end_sync_ms = 0.0;
+    }
+
+    // A frame begun and never ended (xrBeginFrame over it).
+    void Gap() {
+        std::scoped_lock lock(mutex);
+        if (!running) return;
+        ++gaps;
+        ++blank_refreshes;
     }
 
     void Run() {
         const std::chrono::nanoseconds period(kPeriod);
         Clock::time_point refresh = Clock::now();
         for (;;) {
+            // Frame IDs left out by frames begun and never ended: each waited
+            // for and completed with a disabled layer first.
+            int gap = 0;
+            {
+                std::scoped_lock lock(mutex);
+                gap = std::exchange(gaps, 0);
+            }
+            for (; gap > 0; --gap) {
+                WaitFence(rendered.Get(), rendered_value, 1000);
+                const auto now = Clock::now();
+                while (refresh <= now) refresh += period;
+                SleepUntil(refresh);
+            }
             // pvr_waitToBeginFrame: the frame before rendered, then the next refresh.
             WaitFence(rendered.Get(), rendered_value, 1000);
             const auto now = Clock::now();
@@ -916,6 +961,14 @@ struct PimaxCompositor {
         if (stop) return;
         ++serialized;
         queue->Signal(serialize.Get(), serialized);
+        if (sync_gpu_in_end) {
+            // On the CPU, its locks held (bounded: a stand-in never waits forever).
+            const auto sync = Clock::now();
+            lock.unlock();
+            WaitFence(serialize.Get(), serialized, 1000);
+            lock.lock();
+            end_sync_ms += std::chrono::duration<double, std::milli>(Clock::now() - sync).count();
+        }
         idle = false;
         handed = true;
         cv.notify_all();
@@ -1212,13 +1265,13 @@ XrResult XRAPI_CALL RtDestroyInstance(XrInstance instance) {
 }
 
 XrResult XRAPI_CALL RtGetInstanceProperties(XrInstance, XrInstanceProperties* properties) {
-    properties->runtimeVersion = XR_MAKE_VERSION(1, 0, 0);
     bool pimax = false;
     {
         std::scoped_lock lock(g_runtime_mutex);
         pimax = g_runtime.pimax;
     }
-    // As PimaxXR names itself (its instance.cpp), for what the layer keys on its name.
+    // StandIn::pimax: as PimaxXR 0.4.4 names itself (pimax-openxr instance.cpp).
+    properties->runtimeVersion = pimax ? XR_MAKE_VERSION(0, 4, 4) : XR_MAKE_VERSION(1, 0, 0);
     std::strncpy(properties->runtimeName, pimax ? "PimaxXR (Unofficial)" : "VectorXR stand-in runtime",
                  XR_MAX_RUNTIME_NAME_SIZE - 1);
     return XR_SUCCESS;
@@ -1436,8 +1489,17 @@ XrResult XRAPI_CALL RtWaitFrame(XrSession, const XrFrameWaitInfo*, XrFrameState*
     XrTime time = 0;
     bool pimax = false;
     {
-        std::scoped_lock lock(g_runtime_mutex);
+        std::unique_lock lock(g_runtime_mutex);
         pimax = g_runtime.pimax;
+        if (pimax) {
+            // PimaxXR waits, with no timeout, until the frame waited before
+            // has begun (frame.cpp xrWaitFrame, m_frameCondVar): a second
+            // wait from the thread that would begin hangs it for good. A
+            // watchdog fails the case instead.
+            Check(g_frame_begun.wait_for(lock, std::chrono::seconds(2),
+                                         [] { return g_runtime.frame_waits == g_runtime.frame_begins; }),
+                  "xrWaitFrame waited 2 s for the frame waited before it to begin (PimaxXR would hang there)");
+        }
     }
     if (pimax) g_pimax.Wait();
     {
@@ -1470,6 +1532,17 @@ XrResult XRAPI_CALL RtWaitFrame(XrSession, const XrFrameWaitInfo*, XrFrameState*
         }
         rt.time += kPeriod * refreshes;
         time = rt.time;
+        if (rt.pimax && rt.pimax_clamp_every > 0 && rt.frame_waits % rt.pimax_clamp_every == 0) {
+            rt.pimax_clamp = 2;
+        }
+        if (rt.pimax && rt.pimax_clamp > 0 && rt.reported > 0) {
+            // PVR's prediction did not advance: PimaxXR's clamp (frame.cpp xrWaitFrame).
+            --rt.pimax_clamp;
+            ++rt.pimax_clamped;
+            time = rt.reported + 1;
+        }
+        time = std::max(time, rt.reported + 1);
+        rt.reported = time;
     }
     if (until) SleepUntil(*until);
     state->predictedDisplayTime = time;
@@ -1484,6 +1557,19 @@ XrResult XRAPI_CALL RtBeginFrame(XrSession, const XrFrameBeginInfo*) {
     StandIn& rt = g_runtime;
     Check(rt.frame_begins < rt.frame_waits, "xrBeginFrame begins a frame waited for");
     ++rt.frame_begins;
+    g_frame_begun.notify_all();
+    const bool discarded = rt.frame_open;
+    rt.frame_open = true;
+    if (discarded) {
+        // A begin over an open frame discards it. PimaxXR 0.4.4's submission
+        // thread completes that PVR frame with one disabled layer (a blank
+        // refresh) and waits a refresh more for it (frame.cpp
+        // asyncSubmissionThread, quirk_complete_discarded_frames).
+        ++rt.frames_left_open;
+        if (rt.pimax) g_pimax.Gap();
+        // (PimaxXR says so; the plain stand-in has always reported success.)
+        if (rt.pimax) return XR_FRAME_DISCARDED;
+    }
     return XR_SUCCESS;
 }
 
@@ -1521,6 +1607,7 @@ XrResult XRAPI_CALL RtEndFrame(XrSession, const XrFrameEndInfo* info) {
     }
     Check(rt.frame_ends < rt.frame_begins, "xrEndFrame ends a begun frame");
     ++rt.frame_ends;
+    rt.frame_open = false;
     ShownFrame frame;
     frame.time = info->displayTime;
     for (std::uint32_t i = 0; i < info->layerCount; ++i) {
@@ -5591,6 +5678,13 @@ void TestBridgedGpuBoundDynamic(Game& game, bool pimax, bool quad = false, bool 
         // for Frame Generation's frames); BRIDGE_TEST_PIMAX_DEFER=0 for PimaxXR's default.
         const char* defer = std::getenv("BRIDGE_TEST_PIMAX_DEFER");
         g_pimax.defer = !(defer && std::string(defer) == "0");
+        // BRIDGE_TEST_PIMAX_SYNC_GPU=1: "Wait for GPU work in EndFrame"
+        // (quirk_sync_gpu_work_in_end_frame) on PimaxXR's Experimental page.
+        const char* sync = std::getenv("BRIDGE_TEST_PIMAX_SYNC_GPU");
+        g_pimax.sync_gpu_in_end = sync && std::string(sync) == "1";
+        // BRIDGE_TEST_PIMAX_CLAMP_EVERY=N: every Nth wait, two waits whose
+        // display times PimaxXR clamps to 1 ns after the last.
+        if (const char* clamp = std::getenv("BRIDGE_TEST_PIMAX_CLAMP_EVERY")) g_runtime.pimax_clamp_every = std::atoi(clamp);
         g_pimax.Start(g_runtime.device12.Get());
     }
     BeginSession(app);
@@ -5647,11 +5741,14 @@ void TestBridgedGpuBoundDynamic(Game& game, bool pimax, bool quad = false, bool 
         const std::uint64_t waited_us = g_pimax_swapchain_wait_us.exchange(0);
         const std::uint64_t max_us = g_pimax_swapchain_wait_max_us.exchange(0);
         line << std::fixed << std::setprecision(2) << " (PimaxXR xrEndFrame waited "
-             << (g_pimax.ends ? g_pimax.end_wait_ms / g_pimax.ends : 0.0) << " ms, xrWaitFrame "
-             << (g_pimax.waits ? g_pimax.wait_wait_ms / g_pimax.waits : 0.0) << " ms, swapchain calls "
-             << (calls ? waited_us / 1000.0 / calls : 0.0) << " ms on average (" << calls << " calls, at most "
-             << max_us / 1000.0 << " ms))";
-        g_pimax.end_wait_ms = g_pimax.wait_wait_ms = 0.0;
+             << (g_pimax.ends ? g_pimax.end_wait_ms / g_pimax.ends : 0.0) << " ms";
+        if (g_pimax.sync_gpu_in_end) {
+            line << " (" << (g_pimax.ends ? g_pimax.end_sync_ms / g_pimax.ends : 0.0) << " for GPU work)";
+        }
+        line << ", xrWaitFrame " << (g_pimax.waits ? g_pimax.wait_wait_ms / g_pimax.waits : 0.0)
+             << " ms, swapchain calls " << (calls ? waited_us / 1000.0 / calls : 0.0) << " ms on average (" << calls
+             << " calls, at most " << max_us / 1000.0 << " ms), blank refreshes " << g_pimax.blank_refreshes << ")";
+        g_pimax.end_wait_ms = g_pimax.wait_wait_ms = g_pimax.end_sync_ms = 0.0;
         g_pimax.ends = g_pimax.waits = 0;
         return line.str();
     };
@@ -5730,10 +5827,26 @@ void TestBridgedGpuBoundDynamic(Game& game, bool pimax, bool quad = false, bool 
     Peer::SetFrameGenDynamicPolicy(policy);
     rate(std::chrono::milliseconds(6000), engaged);
     Check(engaged(), name + ": engages for a game at half the refresh rate");
-    rate(std::chrono::milliseconds(300));
+    // Engaging sets Frame Generation's GPU work up on the game's frame thread
+    // (its pipelines and views, made by its first Executes and again when its
+    // interpolation flow switches: on WARP 180 ms, then 1.2-1.5 s, now and
+    // then a third; one game frame held each time). Measured before that is
+    // done, the window took such a frame in or not by chance: the PimaxXR
+    // case failed about 3 runs in 8 right after the quad case, and any case
+    // could (Nov 2 2026). The rate is measured once two settling windows in a
+    // row kept the rate (6 s at most): a game slowed on every frame never
+    // does, and fails below.
+    for (int settled = 0, tries = 0; settled < 2 && tries < 20; ++tries) {
+        settled = rate(std::chrono::milliseconds(300)) >= 0.75 * through ? settled + 1 : 0;
+    }
     pimax_line();
     calls_line();
     done_waits_line();
+    std::uint64_t blank_before = 0;
+    {
+        std::scoped_lock lock(g_pimax.mutex);
+        blank_before = g_pimax.blank_refreshes;
+    }
     const double during = rate(std::chrono::milliseconds(1500));
     const std::string during_pimax = pimax_line() + calls_line() + done_waits_line();
     watching = false;
@@ -5753,6 +5866,21 @@ void TestBridgedGpuBoundDynamic(Game& game, bool pimax, bool quad = false, bool 
     }
     Check(during >= 0.75 * through, name + ": engaged, the game keeps most of its rate (" + std::to_string(during) +
                                         " fps against " + std::to_string(through) + " passing through)");
+    if (pimax) {
+        // PimaxXR 0.4.4 shows a frame begun and never ended as a blank
+        // refresh. Engaged, none; the first refreshes after engaging, before
+        // anything is written, still leave a few open (nothing consistent to
+        // show: the frame passed through has newer images in its swapchains).
+        std::scoped_lock lock(g_pimax.mutex);
+        Check(g_pimax.blank_refreshes == blank_before,
+              name + ": engaged, no frame is left open (" + std::to_string(g_pimax.blank_refreshes - blank_before) +
+                  " blank refreshes; " + std::to_string(blank_before) + " while engaging)");
+        const std::string log = Peer::Log();
+        // (Read from this machine's registry, as PimaxXR reads them.)
+        Check(Contains(log, "PimaxXR frame settings: defer_frame_wait="), name + ": the log names PimaxXR's frame settings");
+        Check(Contains(log, "runtimeWaitMs=") && Contains(log, "runtimeWaitsBlocked="),
+              name + ": the summaries tell how long the runtime's waits took");
+    }
     for (const Target& extra : extras) {
         Check(app.api.destroy_swapchain(extra.swapchain) == XR_SUCCESS, "an extra view's swapchain is destroyed");
     }
@@ -6279,11 +6407,8 @@ int main(int argc, char** argv) {
         TestSideBySideFrameGen(game, "extrapolate", true);
         TestSideBySideFrameGen(game, "interpolate", true);
         TestBridgedGpuBoundDynamic(game, false);
-        // The quad case after the PimaxXR one: run just before it on WARP, the
-        // PimaxXR case failed about 3 runs in 8 (a stand-in swapchain call held
-        // up to 488 ms), cause not found (notes, quad-layer-acquire-throttle).
-        TestBridgedGpuBoundDynamic(game, true);
         TestBridgedGpuBoundDynamic(game, false, true);
+        TestBridgedGpuBoundDynamic(game, true);
         // OpenKneeboard above VectorXR on PimaxXR (the report's setup): its
         // quad acquired, waited for, drawn and released inside xrEndFrame.
         TestBridgedGpuBoundDynamic(game, true, false, true);

@@ -225,6 +225,9 @@ struct FrameGenStatus {
     // its swapchains by then (the runtime shows a swapchain's newest), and no
     // newer frame shown as it is could take its place.
     std::uint64_t stale_skipped{0};
+    // Such refreshes shown with a later frame as it is instead, past frames
+    // written first (a runtime that blanks frames left open, PimaxXR 0.4.4).
+    std::uint64_t stale_shown_ahead{0};
 };
 
 // What the On-Screen Display and the desktop app say about a Frame Generation
@@ -432,6 +435,13 @@ class FrameGenPresenter {
     // session begun on quad views natively (Varjo) has four. Stereo until
     // the layer says otherwise.
     void SetRuntimeViewConfiguration(XrViewConfigurationType type);
+    // The runtime shows a blank refresh for a frame begun and never ended
+    // (PimaxXR 0.4.4 and earlier: its submission thread completes the PVR
+    // frame left out with one disabled layer, then waits a refresh more), so
+    // the presenter thread never leaves one open where anything consistent
+    // can be shown: the frame shown as it is nearest after the last, even
+    // past frames it writes, rather than nothing. Off unless the layer says.
+    void SetRuntimeBlanksOpenFrames(bool blanks);
     // Started with a working GPU backend; such a session keeps frame pacing
     // away from Turbo even while toggled off, so toggling never races Turbo.
     bool OwnsPacing() const;
@@ -1051,7 +1061,10 @@ class FrameGenPresenter {
         std::uint64_t id{0};
         XrTime time{0};
     };
-    AsIs CurrentAsIsLocked(const FrameCopy& copy, std::uint64_t id, XrTime time) const;
+    // `past_written`: frames Frame Generation writes do not end the search
+    // (a runtime that shows a blank refresh for a frame left open: a step
+    // back later beats it).
+    AsIs CurrentAsIsLocked(const FrameCopy& copy, std::uint64_t id, XrTime time, bool past_written = false) const;
     // How far each eye moves per unit of generated-frame time from the real
     // frame shown at `newest_time` (FrameGenViewRequest::shift), in that
     // eye's view space: as far as it moved since the previous real frame
@@ -1590,6 +1603,9 @@ class FrameGenPresenter {
         std::uint64_t copies_skipped{0};
         std::uint64_t ring_exhausted{0}; // refreshes whose real frame's images newer captures had replaced
         std::uint64_t stale_skipped{0};  // refreshes not submitted: nothing current to show
+        // Refreshes that would have been left open, shown with a later frame
+        // as it is instead (SetRuntimeBlanksOpenFrames).
+        std::uint64_t stale_shown_ahead{0};
         std::uint64_t unrendered{0};     // refreshes the runtime did not render (shouldRender false)
         std::uint64_t late_cpu{0};
         std::uint64_t late_gpu{0};
@@ -1634,6 +1650,10 @@ class FrameGenPresenter {
         // that found it so (NoteRuntimeClockLocked).
         std::uint64_t clock_displacements{0};
         std::uint64_t clock_unsteady_waits{0};
+        // Runtime waits made (RuntimeWait), and of those, ones that blocked
+        // (at least max(1 ms, a tenth of a refresh), as NotePhaseLocked counts).
+        std::uint64_t runtime_waits_timed{0};
+        std::uint64_t runtime_waits_blocked{0};
     };
     // ", quad=..." for summaries over the window since `start` (empty when
     // no frame of the quad compose site ended in it).
@@ -1920,6 +1940,7 @@ class FrameGenPresenter {
     bool logged_order_guard_{false};
     double display_offset_periods_{0.0};
     std::uint32_t display_offset_samples_{0};
+    std::uint64_t display_offset_earlier_{0}; // frames ended for an earlier time than given (not compensated)
     // For the watchdog logs and PresenterActivity (read without locks).
     std::atomic<const char*> compositor_phase_{"stopped"};
     bool logged_watchdog_{false};
@@ -2093,6 +2114,8 @@ class FrameGenPresenter {
     // The runtime session's view configuration (SetRuntimeViewConfiguration):
     // the one the probe's locates ask for.
     XrViewConfigurationType runtime_view_configuration_{XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
+    bool runtime_blanks_open_frames_{false}; // SetRuntimeBlanksOpenFrames
+    bool logged_open_frame_shown_{false};
     // Probed frames waiting for the real frame after their time: the first
     // eye where the runtime put it and where the frame was shown from, in
     // the space of the real frame it was written from. `ahead`: past that
@@ -2169,6 +2192,10 @@ class FrameGenPresenter {
     std::vector<double> gpu_wait_ms_;
     std::vector<double> end_call_ms_;
     std::vector<double> runtime_end_ms_;
+    // The runtime's xrWaitFrame time (RuntimeWait): beside runtime_end_ms_,
+    // it tells a runtime pacing in xrEndFrame (PimaxXR's "Prefer framerate
+    // over latency": no wait ever blocks) from a late caller.
+    std::vector<double> runtime_wait_ms_;
     std::vector<double> synth_lock_ms_;
     // A runtime whose xrEndFrame holds each frame until its own slot
     // (PimaxXR with defer_frame_wait, as its async submission waits there)

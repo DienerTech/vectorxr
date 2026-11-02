@@ -2042,6 +2042,45 @@ void TestAsyncTwoThreadFramesNeedNoRaise() {
                                           std::to_string(leads) + " runtime frames");
 }
 
+// OpenXR Toolkit's Turbo mode above VectorXR (its layer.cpp xrEndFrame): as
+// each xrEndFrame returns it calls xrWaitFrame on a pool thread, and calls
+// xrBeginFrame right before the next xrEndFrame. VectorXR's Turbo stacked on
+// it would pipeline the frames twice: it sees the pattern and stands aside.
+// A game that waits on a thread of its own and begins before rendering (as
+// DCS does) keeps Turbo.
+void TestUpstreamToolkitTurboStandsAside() {
+    for (const bool toolkit : {true, false}) {
+        FakeRuntime runtime;
+        TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+        auto end = FrameEndInfo();
+        Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_SUCCESS &&
+                   depthxr::TurboFrameTestPeer::WaitForAsyncPrediction(),
+               "Upstream Turbo establishment did not publish its runtime wait");
+        for (int frame = 0; frame < 90; ++frame) {
+            // The pool thread's wait, as the last end returned.
+            std::future<XrFrameState> waited = std::async(std::launch::async, [] {
+                XrFrameState state{XR_TYPE_FRAME_STATE};
+                Expect(AppWait(&state) == XR_SUCCESS, "Upstream Turbo app wait failed");
+                return state;
+            });
+            const XrFrameState state = waited.get();
+            if (toolkit) {
+                std::this_thread::sleep_for(3ms); // the game renders, then the layer above begins and ends
+                Expect(XR_SUCCEEDED(AppBegin()), "Upstream Turbo app begin failed");
+            } else {
+                Expect(XR_SUCCEEDED(AppBegin()), "Upstream Turbo app begin failed");
+                std::this_thread::sleep_for(3ms); // the game renders between its begin and end
+            }
+            end.displayTime = state.predictedDisplayTime;
+            Expect(XR_SUCCEEDED(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end)),
+                   "Upstream Turbo submit failed");
+        }
+        Expect(depthxr::TurboFrameTestPeer::TurboEffective() == !toolkit,
+               toolkit ? "Turbo must stand aside for OpenXR Toolkit's Turbo above it"
+                       : "Turbo must stay engaged for a game that begins before it renders");
+    }
+}
+
 void TestRepeatedSubmissionFailuresSuspend() {
     FakeRuntime runtime;
     TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
@@ -4728,6 +4767,7 @@ int main() {
     TestAsyncAppFramesTargetTheirRuntimeFrame();
     TestAsyncUnechoedAbandonedFramesDoNotLead();
     TestAsyncTwoThreadFramesNeedNoRaise();
+    TestUpstreamToolkitTurboStandsAside();
     TestFrameGenOwnsFramePacing();
     TestConfigReloadWhileFrameGenOwnsPacing();
     TestAsyncTogglePreservesQueuedFrame(false);
