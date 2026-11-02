@@ -2724,15 +2724,17 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
             if (framegen_queue_.Active() && RuntimeQueuesOnlyFirstUse(runtime_name_)) {
                 // PimaxXR and Virtual Desktop's runtime queue work for a game
                 // image only at its first enumeration (a barrier batch); they
-                // compose on a device of their own. VECTORXR_FRAMEGEN_AFTER_WAIT=every
-                // keeps every wait ordered (A/B).
+                // compose on a device of their own. Opt-in until flown
+                // (VECTORXR_FRAMEGEN_AFTER_WAIT=first): with OpenKneeboard's
+                // per-frame quad on the PimaxXR stand-in the game stalled for
+                // about a second now and then (notes, swapchains-fixes).
                 const char* after_wait = std::getenv("VECTORXR_FRAMEGEN_AFTER_WAIT");
-                if (!(after_wait && std::string_view(after_wait) == "every")) {
+                if (after_wait && std::string_view(after_wait) == "first") {
                     framegen_queue_.SetRuntimeQueuesOnlyFirstUse(true);
                     logger_.Info("Frame Generation: " + runtime_name_ +
                                  " queues work for the game's images only before their first use, so the game's "
                                  "queue waits for the runtime's only then, not behind Frame Generation's frames at "
-                                 "every image wait (VECTORXR_FRAMEGEN_AFTER_WAIT=every turns this off).");
+                                 "every image wait (VECTORXR_FRAMEGEN_AFTER_WAIT=first).");
                 }
             }
             const char* queue_diagnostics = std::getenv("VECTORXR_FRAMEGEN_QUEUE_DIAGNOSTICS");

@@ -5685,10 +5685,6 @@ void TestBridgedGpuBoundDynamic(Game& game, bool pimax, bool quad = false) {
     }
     Check(during >= 0.75 * through, name + ": engaged, the game keeps most of its rate (" + std::to_string(during) +
                                         " fps against " + std::to_string(through) + " passing through)");
-    // PimaxXR queues work for a game image only before its first wait: the
-    // game's queue waits for the runtime's only then.
-    Check(!pimax || Contains(Peer::Log(), "queues work for the game's images only before their first use"),
-          name + ": the image waits are ordered at their first use only");
     for (const Target& extra : extras) {
         Check(app.api.destroy_swapchain(extra.swapchain) == XR_SUCCESS, "an extra view's swapchain is destroyed");
     }
