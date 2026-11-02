@@ -2018,6 +2018,19 @@ class OpenXrLayer {
     XrSessionState observed_session_state_{XR_SESSION_STATE_UNKNOWN};
     // A new session's first state event not yet seen: events the runtime kept
     // from the previous session (PimaxXR) are not taken as this one's state.
+    // Head prediction's answer to one xrLocateSpace query (space, base) at one
+    // display time, as its first locate gave it: later locates of the query
+    // at that time answer the same (LocateSpace). Never used for another time.
+    struct HeadExtensionAnswer {
+        XrTime time{0};
+        XrSpace space{XR_NULL_HANDLE};
+        XrSpace base_space{XR_NULL_HANDLE};
+        XrTime limit{0};
+        bool applied{false};
+        XrPosef pose{};
+    };
+    static constexpr std::size_t kHeadExtensionAnswersKept = 8;
+    std::vector<HeadExtensionAnswer> head_extension_answers_;
     bool awaiting_session_start_event_{false};
     XrTime session_create_time_{0};
     uint32_t stale_session_event_logs_{0};

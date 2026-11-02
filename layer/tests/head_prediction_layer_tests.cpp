@@ -548,6 +548,35 @@ void ViewsTheRuntimeDidNotLocateAreLeftAlone() {
     Peer::Finish();
 }
 
+void RepeatedSpaceLocatesOfOneDisplayTimeAnswerTheSame() {
+    // DCS locates VIEW in LOCAL several times a frame at one display time.
+    // The first locate extends the head (three extra runtime locates); the
+    // others give the same answer for one locate each. A new display time is
+    // extended afresh: nothing is kept across display times.
+    Peer::Reset();
+    Peer::SettleLimit();
+    const XrTime time = FakeRuntime::now + 100 * kMs;
+    FakeRuntime::locates = 0;
+    const XrPosef first = Peer::SpaceHead(time);
+    Expect(FakeRuntime::locates == 4, "the first locate extends the head with three extra locates (" +
+                                          std::to_string(FakeRuntime::locates) + ")");
+    Expect(AngleBetween(first, FakeRuntime::Answer(time)) > 1.0, "the head must be extended");
+    for (int i = 1; i <= 3; ++i) {
+        FakeRuntime::now += 4 * kMs;
+        const XrPosef again = Peer::SpaceHead(time);
+        Expect(std::memcmp(&again, &first, sizeof(first)) == 0,
+               "a later locate of the same display time must answer the same (off by " +
+                   Describe(AngleBetween(again, first)) + " deg)");
+    }
+    Expect(FakeRuntime::locates == 7, "later locates of the same display time cost one runtime locate each (" +
+                                          std::to_string(FakeRuntime::locates) + ")");
+    const XrPosef next = Peer::SpaceHead(time + 11 * kMs);
+    Expect(FakeRuntime::locates == 11, "a new display time is extended afresh (" +
+                                           std::to_string(FakeRuntime::locates) + ")");
+    Expect(AngleBetween(next, first) > 0.5, "a new display time must not take the last one's answer");
+    Peer::Finish();
+}
+
 struct Scenario {
     const char* name;
     std::function<void()> run;
@@ -567,6 +596,7 @@ int main() {
         {"off by default and only under Frame Generation", OffByDefaultAndOnlyUnderFrameGeneration},
         {"a runtime that predicts is left alone", ARuntimeThatPredictsIsLeftAlone},
         {"no runtime clock, no extension", NoClockNoExtension},
+        {"repeated space locates of one display time answer the same", RepeatedSpaceLocatesOfOneDisplayTimeAnswerTheSame},
         {"canted eyes place the inset through each eye", CantedEyesPlaceTheInsetThroughEachEye},
         {"views the runtime did not locate are left alone", ViewsTheRuntimeDidNotLocateAreLeftAlone},
     };
