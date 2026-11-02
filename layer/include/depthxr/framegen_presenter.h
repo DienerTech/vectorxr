@@ -1940,6 +1940,7 @@ class FrameGenPresenter {
     bool logged_order_guard_{false};
     double display_offset_periods_{0.0};
     std::uint32_t display_offset_samples_{0};
+    std::uint64_t display_offset_earlier_{0}; // frames ended for an earlier time than given (not compensated)
     // For the watchdog logs and PresenterActivity (read without locks).
     std::atomic<const char*> compositor_phase_{"stopped"};
     bool logged_watchdog_{false};

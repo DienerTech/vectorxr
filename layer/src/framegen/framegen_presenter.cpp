@@ -1131,6 +1131,7 @@ void FrameGenPresenter::Stop() {
     summary_evidence_.reset();
     display_offset_periods_ = 0.0;
     display_offset_samples_ = 0;
+    display_offset_earlier_ = 0;
     slot_index_ = 0;
     slot_time_ = slot_period_ = 0;
     app_latency_ms_ = 0.0;
@@ -7638,9 +7639,21 @@ void FrameGenPresenter::NoteDisplayOffsetLocked(XrTime submitted, XrTime returne
     if (period <= 0 || returned <= 0 || submitted <= 0) {
         return;
     }
-    const double sample = static_cast<double>(submitted - returned) / static_cast<double>(period);
+    double sample = static_cast<double>(submitted - returned) / static_cast<double>(period);
     if (sample < -2.0 || sample > 3.0) {
         return; // not a convention, just a stray time
+    }
+    if (sample < 0.0) {
+        // Ended for an earlier time than it was given: a layer above scaling
+        // the prediction down (OpenXR Toolkit's prediction dampening, which
+        // never restores the time it changed). Telling engaged frames a later
+        // time would undo what the user set there: counted as no offset.
+        if (++display_offset_earlier_ == 30 && logger_) {
+            logger_->Info("Frame Generation: the game ends frames for earlier times than it was given (" +
+                          Number(sample, 2) + " periods; a layer above VectorXR scales its predictions down, as "
+                          "OpenXR Toolkit's prediction dampening does); engaged frames keep the times they are given.");
+        }
+        sample = 0.0;
     }
     display_offset_periods_ =
         display_offset_samples_ == 0 ? sample : display_offset_periods_ * 0.9 + sample * 0.1;

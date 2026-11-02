@@ -2855,6 +2855,48 @@ void TestThreadedMsfsTiming() {
     Check(!runtime.ordering_violation && !g_release_violation, "msfs timing: calls stayed ordered");
 }
 
+// OpenXR Toolkit's prediction dampening above VectorXR: the game is handed
+// now + d * (time - now) and ends its frames for that, which OpenXR Toolkit
+// never restores (its layer.cpp xrWaitFrame/xrEndFrame), so frames end for an
+// earlier time than VectorXR gave (here a period of the game's earlier). That is not a game convention to compensate (as MSFS's
+// period later is): engaged frames keep being told their slot's time. The
+// game is told the same times as one ending at the time it was given, while
+// MSFS's frames (a period later) are still told a period earlier.
+void TestDampenedEndsAreNotCompensated() {
+    const auto told_lead = [](int end_offset_periods) {
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        runtime.paced = true;
+        StartThreaded(presenter, gpu, FrameGenMultiplier::k2);
+        App app(presenter, runtime);
+        app.end_offset_periods = end_offset_periods;
+        RunPipelined(app, 600ms, 8ms, 10ms);
+        Check(presenter.Status().threaded, "dampened ends: presents from its own thread");
+        std::vector<XrDuration> leads;
+        RunPipelined(app, 1200ms, 8ms, 10ms, [&](int, const XrFrameState& state) {
+            std::scoped_lock lock(g_xr_mutex);
+            if (!runtime.submitted_times.empty()) leads.push_back(state.predictedDisplayTime - runtime.submitted_times.back());
+        });
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation, "dampened ends: calls stayed ordered");
+        std::sort(leads.begin(), leads.end());
+        Check(!leads.empty(), "dampened ends: frames ended");
+        return leads[leads.size() / 2];
+    };
+    const XrDuration as_given = told_lead(0);
+    const XrDuration dampened = told_lead(-1);
+    const XrDuration msfs = told_lead(1);
+    const auto periods = [](XrDuration duration) { return std::to_string(static_cast<double>(duration) / kPeriod); };
+    Check(std::abs(dampened - as_given) < kPeriod / 2,
+          "dampened ends: frames ending earlier than given are told the same times (" + periods(dampened) + " against " +
+              periods(as_given) + " periods ahead)");
+    // At 2x the game's period is two refreshes.
+    Check(std::abs(as_given - msfs - 2 * kPeriod) < kPeriod / 2,
+          "dampened ends: frames ending a period later are still told a period earlier (" + periods(msfs) +
+              " against " + periods(as_given) + " periods ahead)");
+}
+
 void TestThreadedPauseRetryMsfsTiming() {
     FrameGenPresenter presenter;
     GpuLog gpu;
@@ -15634,6 +15676,7 @@ int main(int argc, char** argv) {
     }
     g_jit = false;
     RUN(TestThreadedMsfsTiming);
+    RUN(TestDampenedEndsAreNotCompensated);
     RUN(TestThreadedUnsupportedLayerPresentsInline);
     RUN(TestOverlappingWaitIsHeld);
     RUN(TestUnclaimedFrameIsDemoted);
