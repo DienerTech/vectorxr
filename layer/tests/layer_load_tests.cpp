@@ -250,11 +250,19 @@ int wmain(int argc, wchar_t** argv) {
         Expect(destroy_probe && destroy_probe(probe) == XR_SUCCESS && g_destroyed == 2 && g_last_destroyed == probe,
                "instances: the first instance is destroyed through the layer");
 
+        // Quad-Views-Foveated below the layer is named in its log.
+        XrInstance with_qvf = XR_NULL_HANDLE;
+        Expect(CreateInstance(create, "Game", "XR_APILAYER_MBUCCHIA_quad_views_foveated", with_qvf) == XR_SUCCESS,
+               "instances: an instance above Quad-Views-Foveated is created");
+        const auto destroy_qvf = reinterpret_cast<PFN_xrDestroyInstance>(Function(get, with_qvf, "xrDestroyInstance"));
+        Expect(destroy_qvf && destroy_qvf(with_qvf) == XR_SUCCESS, "instances: it is destroyed");
         Expect(FreeLibrary(layer) != FALSE, "instances: the layer is freed");
         // The logs as written once the layer has gone.
         const std::string log = ReadLogs(app_data);
         Expect(log.find("A second OpenXR instance (application \"Game\"") != std::string::npos,
                "instances: the pass-through is said in the log");
+        Expect(log.find("Quad-Views-Foveated is loaded below VectorXR") != std::string::npos,
+               "instances: Quad-Views-Foveated below the layer is named in the log");
     }
 
     std::cout << "Layer load tests passed: loaded, negotiated and unloaded three times without the VC++ runtime DLLs; "

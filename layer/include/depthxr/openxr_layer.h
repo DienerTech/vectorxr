@@ -98,6 +98,8 @@ class OpenXrLayer {
     bool has_logged_focus_fov_quirk_convergence_{false};
 
     struct InstanceCreateDiagnostics {
+        // "absent", "above" or "below" VectorXR.
+        std::string quad_views_foveated{"absent"};
         bool turbo_clock_enabled{false};
         bool app_requested_quad_views{false};
         bool app_requested_varjo_foveated_rendering{false};

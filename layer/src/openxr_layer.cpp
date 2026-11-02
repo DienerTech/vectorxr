@@ -2213,6 +2213,12 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
         }
         logger_.Info(ext_stream.str());
         logger_.Info("OpenXR API layers below VectorXR: [" + diagnostics.layers_below + "]");
+        if (diagnostics.quad_views_foveated == "above") {
+            logger_.Info("Quad-Views-Foveated is loaded above VectorXR: for a Direct3D 11 application it does the "
+                         "quad views itself and VectorXR sees a stereo application.");
+        } else if (diagnostics.quad_views_foveated == "below") {
+            logger_.Info("Quad-Views-Foveated is loaded below VectorXR: it sees the views VectorXR sends on.");
+        }
         if (diagnostics.openxr_toolkit != "absent") {
             logger_.Info("OpenXR Toolkit is loaded " +
                          std::string(diagnostics.openxr_toolkit == "below" ? "below VectorXR."

@@ -631,6 +631,17 @@ bool OpenXrToolkitBypasses(const XrInstanceCreateInfo& create_info) {
            bypass != 0;
 }
 
+// Quad-Views-Foveated (its manifest's and DLL's name), above or below
+// VectorXR, as for the Toolkit: support can then tell who does the quad views.
+std::string QuadViewsFoveatedPosition(const XrApiLayerNextInfo* next_info) {
+    for (const XrApiLayerNextInfo* below = next_info ? next_info->next : nullptr; below; below = below->next) {
+        if (LayerName(*below) == "XR_APILAYER_MBUCCHIA_quad_views_foveated") {
+            return "below";
+        }
+    }
+    return GetModuleHandleW(L"XR_APILAYER_MBUCCHIA_quad_views_foveated.dll") ? "above" : "absent";
+}
+
 // The loader loads every layer's library before it creates the chain, so a
 // loaded Toolkit that is not below VectorXR is above it.
 std::string OpenXrToolkitPosition(const XrInstanceCreateInfo& create_info, const XrApiLayerNextInfo* next_info) {
@@ -1045,6 +1056,7 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
         diagnostics.layers_below += std::string(below->layerName, strnlen(below->layerName, XR_MAX_API_LAYER_NAME_SIZE));
     }
     diagnostics.openxr_toolkit = OpenXrToolkitPosition(*instance_create_info, next_info);
+    diagnostics.quad_views_foveated = QuadViewsFoveatedPosition(next_info);
     diagnostics.app_requested_quad_views =
         ApplicationRequestedExtension(instance_create_info, XR_VARJO_QUAD_VIEWS_EXTENSION_NAME);
     diagnostics.app_requested_varjo_foveated_rendering =
