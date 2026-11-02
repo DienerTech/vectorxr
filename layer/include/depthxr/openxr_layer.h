@@ -614,6 +614,9 @@ class OpenXrLayer {
                              const XrFrameEndInfo* frame_end_info,
                              std::unique_lock<std::mutex>& config_lock);
     void ObserveCompositionLayerTopology(const XrFrameEndInfo* frame_end_info);
+    // At the app's xrEndFrame: whether a layer above pipelines its frames
+    // already (upstream_turbo_); logs once when that is first seen.
+    bool NoteUpstreamTurboFrame();
     void ArmTurboAsyncHandoffLocked(const char* reason);
     void PublishTurboAsyncHandoffLocked();
     void CancelTurboAsyncHandoffLocked(const char* reason);
@@ -1606,6 +1609,17 @@ class OpenXrLayer {
     std::optional<std::chrono::steady_clock::time_point> session_begin_wall_time_;
     bool turbo_cadence_pause_logged_{false};
     double turbo_last_frame_blocked_ms_{0.0};
+    // A layer above already pipelining the game's frames (OpenXR Toolkit's
+    // Turbo: it calls xrWaitFrame on a pool thread right after each
+    // xrEndFrame returns, and xrBeginFrame right before the next xrEndFrame).
+    // Under turbo_mutex_: when the app's calls last came, and how many frames
+    // in a row came so. Detected, Turbo stands aside for the session.
+    std::thread::id upstream_wait_thread_{};
+    std::chrono::steady_clock::time_point upstream_wait_at_{};
+    std::chrono::steady_clock::time_point upstream_begin_at_{};
+    std::chrono::steady_clock::time_point upstream_end_returned_{};
+    std::uint32_t upstream_turbo_frames_{0};
+    bool upstream_turbo_{false};
     // Sequenced pacing state machine (turbo_mutex_). DCS overlaps xrWaitFrame
     // (sim thread) with xrEndFrame (render thread) — spec-legal — so the
     // fabrication shield must never have a per-frame gap, and establishment
