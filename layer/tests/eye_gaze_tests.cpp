@@ -179,11 +179,11 @@ XrResult SyncApp(const void* next = nullptr) {
     info.countActiveActionSets = 1; info.activeActionSets = &active;
     return Layer().SyncActions(session, &info);
 }
-void FocusEvent(XrSessionState state, XrSession target = session) {
+void FocusEvent(XrSessionState state, XrSession target = session, XrTime time = 123456) {
     event = {XR_TYPE_EVENT_DATA_BUFFER};
     auto& change = reinterpret_cast<XrEventDataSessionStateChanged&>(event);
     change.type = XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED; change.session = target; change.state = state;
-    change.time = 123456; event_pending = true;
+    change.time = time; event_pending = true;
     XrEventDataBuffer out{XR_TYPE_EVENT_DATA_BUFFER};
     Expect(Layer().PollEvent(instance, &out) == XR_SUCCESS && std::memcmp(&out, &event, sizeof(event)) == 0,
            "session event must reach application unchanged");
@@ -247,6 +247,9 @@ public:
         l.UpdateEyeGazeResources(previous);
     }
     static bool Ready() { return Layer().eye_gaze_resources_ready_; }
+    // As xrCreateSession notes its session, with the runtime's clock then.
+    static void SessionCreated(XrTime time) { Layer().NoteSessionCreatedLocked(time); }
+    static XrSessionState Observed() { return Layer().observed_session_state_; }
     // A swapchain of the quad views session with enumerated images, as
     // CreateSwapchain and EnumerateSwapchainImages track it.
     static void QuadSwapchain(uintptr_t handle, XrSwapchainUsageFlags usage) {
@@ -642,6 +645,30 @@ int main() {
                "gaze inactive for the whole delay must be reported once per session");
         runtime_gaze_active = true;
         Expect(Peer::Gaze(), "gaze that arrives later must be used");
+        // PimaxXR keeps its session event queue across sessions and stamps
+        // every event (XrSession)1: the last session's STOPPING, IDLE and
+        // EXITING, never read, come first in the next session. They pass to
+        // the application as sent but are not the new session's state.
+        Peer::Prepare(); Peer::LogTo(logs / "stale-events.log"); Peer::SessionCreated(1000);
+        FocusEvent(XR_SESSION_STATE_STOPPING, session, 400);
+        FocusEvent(XR_SESSION_STATE_IDLE, session, 500);
+        FocusEvent(XR_SESSION_STATE_EXITING, session, 600);
+        Expect(Peer::Observed() == XR_SESSION_STATE_UNKNOWN,
+               "the previous session's events must not become this session's state");
+        FocusEvent(XR_SESSION_STATE_IDLE, session, 1500);
+        Expect(Peer::Observed() == XR_SESSION_STATE_IDLE, "the session's own IDLE must be taken");
+        FocusEvent(XR_SESSION_STATE_READY, session, 1600);
+        FocusEvent(XR_SESSION_STATE_FOCUSED, session, 1700);
+        Expect(Peer::Observed() == XR_SESSION_STATE_FOCUSED, "the session's later events must be taken");
+        Expect(Occurrences(Peer::Log(), "from before this session") == 3, "each stale event must be logged");
+        // Without the runtime's clock: whatever comes before the first IDLE.
+        Peer::Prepare(); Peer::SessionCreated(0);
+        FocusEvent(XR_SESSION_STATE_EXITING, session, 600);
+        Expect(Peer::Observed() == XR_SESSION_STATE_UNKNOWN, "an EXITING before the first IDLE must not be taken");
+        FocusEvent(XR_SESSION_STATE_IDLE, session, 1500);
+        FocusEvent(XR_SESSION_STATE_READY, session, 1600);
+        Expect(Peer::Observed() == XR_SESSION_STATE_READY, "events from the first IDLE on must be taken");
+
         Peer::LogTo(logs / "eye-gaze.log");
         std::error_code error;
         std::filesystem::remove_all(logs, error);

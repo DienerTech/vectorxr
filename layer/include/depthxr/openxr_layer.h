@@ -2016,6 +2016,13 @@ class OpenXrLayer {
     std::optional<XrResult> last_app_action_sync_result_;
     std::optional<XrResult> last_eye_gaze_self_sync_result_;
     XrSessionState observed_session_state_{XR_SESSION_STATE_UNKNOWN};
+    // A new session's first state event not yet seen: events the runtime kept
+    // from the previous session (PimaxXR) are not taken as this one's state.
+    bool awaiting_session_start_event_{false};
+    XrTime session_create_time_{0};
+    uint32_t stale_session_event_logs_{0};
+    void NoteSessionCreatedLocked(XrTime create_time);
+    bool IsStaleSessionEventLocked(const XrEventDataSessionStateChanged& change);
     bool eye_gaze_sync_not_focused_{false};
     uint32_t eye_gaze_sync_transition_logs_remaining_{32};
     std::optional<std::chrono::steady_clock::time_point> last_eye_gaze_bound_sources_probe_;

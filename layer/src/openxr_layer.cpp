@@ -2802,6 +2802,9 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
     if (!vulkan_bridge_.Active()) {
         requery_vulkan_requirements();
     }
+    // Before the runtime's xrCreateSession: the new session's first event is
+    // queued in it, so anything stamped earlier is not this session's.
+    const XrTime session_create_time = TurboClockNow();
     XrResult result = next_create_session_(instance, downstream_info, session);
     if (XR_FAILED(result) && d3d11_bridge_.Active()) {
         logger_.Error("xrCreateSession refused the bridged Direct3D 12 session (result=" +
@@ -2896,6 +2899,7 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
     }
     ResetSessionState();
     active_session_ = *session;
+    NoteSessionCreatedLocked(session_create_time);
     d3d11_bridge_lost_logged_ = false;
     d3d11_bridge_depth_logged_ = false;
     d3d11_bridge_last_summary_ = std::chrono::steady_clock::now();
@@ -10572,6 +10576,9 @@ XrResult OpenXrLayer::PollEvent(XrInstance instance, XrEventDataBuffer* event_da
         logger_.Info("Runtime session state changed: state=" + std::to_string(static_cast<int>(change.state)) +
                      " (" + SessionStateName(change.state) + "), time=" + std::to_string(change.time));
         std::scoped_lock lock(mutex_);
+        if (change.session == active_session_ && IsStaleSessionEventLocked(change)) {
+            return result;
+        }
         if (change.session == active_session_) {
             observed_session_state_ = change.state;
             if (change.state == XR_SESSION_STATE_FOCUSED) {
@@ -10621,6 +10628,43 @@ XrResult OpenXrLayer::PollEvent(XrInstance instance, XrEventDataBuffer* event_da
                      "; Pivot re-anchors its seated position at the change.");
     }
     return result;
+}
+
+void OpenXrLayer::NoteSessionCreatedLocked(XrTime create_time) {
+    awaiting_session_start_event_ = true;
+    session_create_time_ = create_time;
+}
+
+bool OpenXrLayer::IsStaleSessionEventLocked(const XrEventDataSessionStateChanged& change) {
+    // PimaxXR keeps its session event queue across sessions and stamps every
+    // event with the one handle it gives each session: an application that
+    // destroyed its session without reading the last events (STOPPING, IDLE,
+    // EXITING) gets them for its next session, ahead of that session's IDLE.
+    // They are not this session's state. With the runtime's clock, an event
+    // stamped before this session was created is the last session's; without
+    // it, anything before the session's first IDLE is (an old IDLE among them
+    // then closes the window early). The application still gets every event
+    // as the runtime sent it.
+    if (!awaiting_session_start_event_) {
+        return false;
+    }
+    const bool stale = session_create_time_ > 0
+                           ? change.time > 0 && change.time < session_create_time_
+                           : change.state != XR_SESSION_STATE_IDLE;
+    if (!stale) {
+        awaiting_session_start_event_ = false;
+        return false;
+    }
+    if (stale_session_event_logs_ < 8) {
+        ++stale_session_event_logs_;
+        logger_.Info("Runtime session event from before this session (state=" +
+                     std::to_string(static_cast<int>(change.state)) + " " + SessionStateName(change.state) +
+                     ", time=" + std::to_string(change.time) + ", session created at " +
+                     std::to_string(session_create_time_) +
+                     "): the runtime kept it from the previous session. VectorXR does not take it as this "
+                     "session's state; the application receives it as sent.");
+    }
+    return true;
 }
 
 bool OpenXrLayer::PivotAnchorAffectedBy(XrReferenceSpaceType type) const {
@@ -12434,6 +12478,8 @@ void OpenXrLayer::ResetSessionState() {
     pivotxr_last_drive_.reset();
     pivotxr_runtime_reports_recenters_ = false;
     pivotxr_silent_recenter_logs_ = 0;
+    awaiting_session_start_event_ = false;
+    session_create_time_ = 0;
     has_logged_pivotxr_spike_mode_ = false;
     has_logged_quadviews_view_configuration_capabilities_ = false;
     has_logged_visibility_mask_mapping_ = false;
