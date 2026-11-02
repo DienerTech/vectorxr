@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -783,6 +784,39 @@ class TurboFrameTestPeer {
         return result;
     }
     // Depth on with convergence: LocateViews shifts each eye's projection.
+    // DCS World on PimaxXR, Depth Anchor on or off; an internal VIEW space
+    // for Pivot's eye offsets.
+    static void PimaxDcs(bool depth_anchor) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.application_name_ = "DCS World";
+        layer.runtime_name_ = "PimaxXR (Unofficial)";
+        layer.resolved_settings_.depthxr.depth_anchor = depth_anchor;
+        layer.depth_anchor_toggle_inverted_ = false;
+        layer.active_primary_view_configuration_type_ = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET;
+        layer.has_active_primary_view_configuration_ = true;
+        layer.internal_view_space_ = reinterpret_cast<XrSpace>(std::uintptr_t{0x7701});
+        layer.cached_eye_offset_poses_.clear();
+        layer.cached_eye_offsets_display_time_ = 0;
+    }
+    // Pivot's eye offsets for a display time when the views it recomposes
+    // could not give them: VectorXR's own quad locate.
+    static bool EyeOffsets(XrTime time) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        return layer.EnsureEyeOffsets(layer.active_session_, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET,
+                                      time, 4);
+    }
+    static void EndPimaxDcs() {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.application_name_.clear();
+        layer.runtime_name_.clear();
+        layer.internal_view_space_ = XR_NULL_HANDLE;
+        layer.active_primary_view_configuration_type_ = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+        layer.has_active_primary_view_configuration_ = false;
+        layer.cached_depth_submission_geometry_.clear();
+    }
     static void ConvergeVarjoDepth(double convergence) {
         auto& layer = Layer();
         std::scoped_lock lock(layer.mutex_);
@@ -3331,6 +3365,66 @@ XrResult XRAPI_PTR VarjoLocateViews(XrSession, const XrViewLocateInfo*, XrViewSt
     }
     return XR_SUCCESS;
 }
+// PimaxXR 0.4.4 with enable_quad_views, for an application named "DCS World"
+// (instance.cpp's m_needFocusFovCorrectionQuirk): each quad xrLocateViews
+// keeps the focus FOVs it returned for that displayTime (space.cpp,
+// insert_or_assign), and xrEndFrame shows the focus views with those instead
+// of the submitted ones (frame.cpp), the periphery with the submitted ones.
+// Its focus follows the gaze only when the locate asks for foveated
+// rendering (prefer_foveated_rendering is off by default).
+constexpr XrFovf kPimaxPeripheryFov{-0.9f, 0.9f, 0.9f, -0.9f};
+constexpr XrFovf kPimaxFixedFocusFov{-0.3f, 0.3f, 0.3f, -0.3f};
+constexpr XrFovf kPimaxGazeFocusFov{-0.1f, 0.5f, 0.35f, -0.25f};
+struct PimaxDcsStandIn {
+    std::map<XrTime, std::pair<XrFovf, XrFovf>> focus_for_time;
+    std::map<XrTime, int> quad_locates;
+    std::array<XrFovf, 4> shown{};
+    int ends = 0;
+};
+PimaxDcsStandIn g_pimax_dcs;
+XrResult XRAPI_PTR PimaxDcsLocateViews(XrSession, const XrViewLocateInfo* info, XrViewState* state,
+                                       std::uint32_t capacity, std::uint32_t* count, XrView* views) {
+    const bool quad = info->viewConfigurationType == XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET;
+    *count = quad ? 4 : 2;
+    if (state) {
+        state->viewStateFlags = XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT |
+                                XR_VIEW_STATE_ORIENTATION_TRACKED_BIT | XR_VIEW_STATE_POSITION_TRACKED_BIT;
+    }
+    if (capacity == 0) return XR_SUCCESS;
+    if (capacity < *count) return XR_ERROR_SIZE_INSUFFICIENT;
+    bool foveated = false;
+    for (auto* chain = static_cast<const XrBaseInStructure*>(info->next); chain; chain = chain->next) {
+        if (chain->type == XR_TYPE_VIEW_LOCATE_FOVEATED_RENDERING_VARJO) {
+            foveated = reinterpret_cast<const XrViewLocateFoveatedRenderingVARJO*>(chain)->foveatedRenderingActive;
+        }
+    }
+    for (std::uint32_t view = 0; view < *count; ++view) {
+        views[view].pose = {{0.0f, 0.0f, 0.0f, 1.0f}, {view % 2 == 0 ? -0.032f : 0.032f, 0.0f, 0.0f}};
+        views[view].fov = view < 2 ? kPimaxPeripheryFov : foveated ? kPimaxGazeFocusFov : kPimaxFixedFocusFov;
+    }
+    if (quad) {
+        g_pimax_dcs.focus_for_time.insert_or_assign(info->displayTime, std::make_pair(views[2].fov, views[3].fov));
+        ++g_pimax_dcs.quad_locates[info->displayTime];
+    }
+    return XR_SUCCESS;
+}
+XrResult XRAPI_PTR PimaxDcsEndFrame(XrSession, const XrFrameEndInfo* info) {
+    ++g_pimax_dcs.ends;
+    for (std::uint32_t i = 0; i < info->layerCount; ++i) {
+        if (info->layers[i]->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) continue;
+        const auto* projection = reinterpret_cast<const XrCompositionLayerProjection*>(info->layers[i]);
+        for (std::uint32_t view = 0; view < projection->viewCount && view < 4; ++view) {
+            XrFovf fov = projection->views[view].fov;
+            const auto stored = g_pimax_dcs.focus_for_time.find(info->displayTime);
+            if (view >= 2 && stored != g_pimax_dcs.focus_for_time.end()) {
+                fov = view == 2 ? stored->second.first : stored->second.second;
+            }
+            g_pimax_dcs.shown[view] = fov;
+        }
+    }
+    return XR_SUCCESS;
+}
+
 XrResult XRAPI_PTR VarjoEndFrame(XrSession, const XrFrameEndInfo*) {
     ++g_varjo_ends;
     return XR_SUCCESS;
@@ -4339,6 +4433,77 @@ void TestVarjoNativeSubmittedFocusWithConvergence() {
     Peer::EndVarjoNative();
 }
 
+// DCS World on PimaxXR's native quad views: the runtime shows the focus views
+// with the FOVs it located for the frame's display time, whatever the game
+// submits (the game's own are not right, hence the runtime's quirk). What it
+// shows of each focus view must stand to what the game rendered as the
+// periphery does, with Depth's convergence set: as rendered without Depth
+// Anchor, shifted back to the runtime's own with it. A locate of VectorXR's
+// own at the game's display time must not replace the game's entry.
+void TestPimaxDcsFocusFovQuirk() {
+    using Peer = depthxr::TurboFrameTestPeer;
+    for (const bool anchor : {false, true}) {
+        g_pimax_dcs = {};
+        Peer::PrepareVarjoNative(&PimaxDcsLocateViews, &PimaxDcsEndFrame);
+        Peer::ConvergeVarjoDepth(0.05);
+        Peer::PimaxDcs(anchor);
+        const XrTime time = 32'000'000'000 + (anchor ? 11'111'111 : 0);
+        XrViewLocateFoveatedRenderingVARJO foveated{XR_TYPE_VIEW_LOCATE_FOVEATED_RENDERING_VARJO};
+        foveated.foveatedRenderingActive = XR_TRUE;
+        XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO, &foveated};
+        locate.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET;
+        locate.displayTime = time;
+        XrViewState state{XR_TYPE_VIEW_STATE};
+        std::array<XrView, 4> located{};
+        for (auto& view : located) view = {XR_TYPE_VIEW};
+        std::uint32_t count = 0;
+        Expect(Peer::Layer().LocateViews(TestSession(), &locate, &state, 4, &count, located.data()) == XR_SUCCESS &&
+                   count == 4,
+               "A PimaxXR quad locate failed");
+        Expect(located[0].fov.angleLeft != kPimaxPeripheryFov.angleLeft,
+               "Convergence did not shift the periphery (the test would prove nothing)");
+        std::array<XrCompositionLayerProjectionView, 4> views{};
+        for (std::uint32_t view = 0; view < 4; ++view) {
+            views[view] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+            views[view].pose = located[view].pose;
+            // DCS submits its focus views with other FOVs than located.
+            views[view].fov = view < 2 ? located[view].fov : kPimaxFixedFocusFov;
+            views[view].subImage.swapchain = reinterpret_cast<XrSwapchain>(static_cast<std::uintptr_t>(0x91 + view));
+            views[view].subImage.imageRect = {{0, 0}, {1024, 1024}};
+        }
+        XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+        projection.viewCount = 4;
+        projection.views = views.data();
+        const auto* layer = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
+        XrFrameEndInfo info = FrameEndInfo();
+        info.displayTime = time;
+        info.layerCount = 1;
+        info.layers = &layer;
+        Expect(Peer::Layer().EndFrame(TestSession(), &info) == XR_SUCCESS && g_pimax_dcs.ends == 1,
+               "A PimaxXR quad frame did not end");
+        const std::string mode = anchor ? "with Depth Anchor" : "without Depth Anchor";
+        // Convergence moves each view's projection centre by one tangent.
+        const auto moved = [](const XrFovf& shown, const XrFovf& rendered) {
+            return std::tan(static_cast<double>(shown.angleLeft)) - std::tan(static_cast<double>(rendered.angleLeft));
+        };
+        for (std::uint32_t eye = 0; eye < 2; ++eye) {
+            const double periphery = moved(g_pimax_dcs.shown[eye], located[eye].fov);
+            const double focus = moved(g_pimax_dcs.shown[2 + eye], located[2 + eye].fov);
+            Expect(std::abs(focus - periphery) < 1e-5,
+                   "The focus view must be shown as the periphery is against what was rendered, " + mode +
+                       " (eye " + std::to_string(eye) + ": periphery " + std::to_string(periphery) + ", focus " +
+                       std::to_string(focus) + ")");
+        }
+        const auto entry = g_pimax_dcs.focus_for_time.at(time);
+        Expect(Peer::EyeOffsets(time) && g_pimax_dcs.quad_locates[time] == 1 &&
+                   entry.first.angleLeft == g_pimax_dcs.focus_for_time.at(time).first.angleLeft &&
+                   g_pimax_dcs.focus_for_time.at(time).first.angleLeft == kPimaxGazeFocusFov.angleLeft,
+               "Pivot's eye offsets must not replace the game's focus FOVs at its display time, " + mode);
+        Peer::EndPimaxDcs();
+        Peer::EndVarjoNative();
+    }
+}
+
 // A settings file with a key this layer does not know (a newer app's) still
 // loads. Each unknown key is logged once per log: at the first load, not again
 // on reloads, and a reload that adds one logs only that one; the next
@@ -4596,6 +4761,7 @@ int main() {
     TestFrameGenSessionKeepsShownLayersLazy();
     TestQueueSlowRuntimeDiagnosticsAreOptInAndBounded();
     TestVarjoNativeSubmittedFocusWithConvergence();
+    TestPimaxDcsFocusFovQuirk();
     TestTopologyFollowsFrameGenClaimsApart();
     TestQuadViewsInactiveReasons();
     TestQuadViewsOsdTagFollowsBegunConfiguration();

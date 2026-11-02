@@ -2089,6 +2089,17 @@ bool OpenXrLayer::PollInputBindingDown(const InputBinding& binding) {
     return poll.down;
 }
 
+bool OpenXrLayer::RuntimeTakesFocusFovsFromLocateLocked() const {
+    // PimaxXR (0.4.4, quad views on), for an application named "DCS World",
+    // keeps the focus FOVs each quad xrLocateViews returns for its display
+    // time and shows the focus views with those at xrEndFrame, not with the
+    // submitted ones (DCS submits other ones; Quad-Views-Foveated does the
+    // same, but VectorXR never forwards quad views to it). Varjo's runtime is
+    // not known to: it keeps VectorXR's behaviour.
+    return varjo_compatible_quadviews_active_ && application_name_ == "DCS World" &&
+           runtime_name_.find("Varjo") == std::string::npos;
+}
+
 bool OpenXrLayer::CanCreateInstance() {
     std::scoped_lock lock(mutex_);
     return instance_ == XR_NULL_HANDLE;
@@ -2165,6 +2176,8 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
             ExtensionRequested(create_info, XR_KHR_D3D11_ENABLE_EXTENSION_NAME);
 
         std::ostringstream stream;
+        application_name_.assign(create_info->applicationInfo.applicationName,
+                                 strnlen(create_info->applicationInfo.applicationName, XR_MAX_APPLICATION_NAME_SIZE));
         const XrVersion api_version = create_info->applicationInfo.apiVersion;
         application_can_select_quad_views_ = quad_views_extension_requested_ ||
                                              varjo_foveated_rendering_extension_requested_ ||
@@ -11214,6 +11227,23 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
     }
     if (depthxr_active && !NearlyEqual(resolved_settings_.depthxr.convergence, 0.0)) {
         ApplyConvergence(adjusted_views, resolved_settings_.depthxr.convergence, view_layout);
+        // The runtime shows these focus views with the FOVs it located itself
+        // (RuntimeTakesFocusFovsFromLocateLocked). Without Depth Anchor the
+        // periphery is shown as rendered, so the focus views are rendered with
+        // the runtime's FOVs too; with it, both are shown shifted back to the
+        // runtime's and convergence applies to all four.
+        if (!depth_anchor_active_ && count >= 4 && IsQuadViewConfiguration(view_configuration_type) &&
+            RuntimeTakesFocusFovsFromLocateLocked()) {
+            for (uint32_t i = 2; i < 4; ++i) {
+                adjusted_views[i].fov = original_views[i].fov;
+            }
+            if (!has_logged_focus_fov_quirk_convergence_) {
+                has_logged_focus_fov_quirk_convergence_ = true;
+                logger_.Info("Depth convergence on " + application_name_ + "'s native quad views (" + runtime_name_ +
+                             "): the runtime shows the focus views with the FOVs it located, so without Depth Anchor "
+                             "convergence is applied to the peripheral views only.");
+            }
+        }
     }
     if (cache_depth_submission_geometry) {
         CacheDepthSubmissionGeometry(view_locate_info->displayTime,
@@ -11240,6 +11270,18 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         CacheQuadViewsFrame(
             view_locate_info->displayTime, std::span<const XrView>(views, count), gaze_diagnostic);
         if (varjo_compatible_quadviews_active_) {
+            // Whether the runtime's focus views sit at their eyes' poses (as
+            // PimaxXR's do): then a stereo locate gives every view's offset.
+            const auto same_pose = [&](uint32_t a, uint32_t b) {
+                return original_views[a].position.x == original_views[b].position.x &&
+                       original_views[a].position.y == original_views[b].position.y &&
+                       original_views[a].position.z == original_views[b].position.z &&
+                       original_views[a].orientation.x == original_views[b].orientation.x &&
+                       original_views[a].orientation.y == original_views[b].orientation.y &&
+                       original_views[a].orientation.z == original_views[b].orientation.z &&
+                       original_views[a].orientation.w == original_views[b].orientation.w;
+            };
+            native_quad_focus_shares_eye_poses_ = same_pose(2, 0) && same_pose(3, 1);
             NoteVarjoNativeLocatedFocusLocked(view_locate_info->displayTime, views);
         }
     }
@@ -12503,6 +12545,8 @@ void OpenXrLayer::ResetSessionState() {
     awaiting_session_start_event_ = false;
     session_create_time_ = 0;
     head_extension_answers_.clear();
+    native_quad_focus_shares_eye_poses_ = false;
+    has_logged_focus_fov_quirk_convergence_ = false;
     has_logged_pivotxr_spike_mode_ = false;
     has_logged_quadviews_view_configuration_capabilities_ = false;
     has_logged_visibility_mask_mapping_ = false;
@@ -13589,23 +13633,33 @@ bool OpenXrLayer::EnsureEyeOffsets(XrSession session,
         return true;
     }
 
+    // A quad locate of VectorXR's own at the game's display time would replace
+    // the focus FOVs a runtime keeps from the game's locate for that time
+    // (RuntimeTakesFocusFovsFromLocateLocked), with the fixed focus: the frame
+    // would be shown with the inset off the gaze. Where the runtime's focus
+    // views sit at their eyes' poses, the stereo locate gives the same offsets
+    // and leaves that entry alone.
+    const bool stereo_for_quad = IsQuadViewConfiguration(view_configuration_type) && view_count == 4 &&
+                                 native_quad_focus_shares_eye_poses_ && RuntimeTakesFocusFovsFromLocateLocked();
+    const uint32_t locate_count = stereo_for_quad ? 2 : view_count;
     std::vector<XrView>& eye_views = eye_offset_views_scratch_;
     eye_views.assign(view_count, XrView{XR_TYPE_VIEW});
     XrViewState eye_view_state{XR_TYPE_VIEW_STATE};
     uint32_t eye_view_count = 0;
     XrViewLocateInfo eye_view_locate_info{XR_TYPE_VIEW_LOCATE_INFO};
-    eye_view_locate_info.viewConfigurationType = view_configuration_type;
+    eye_view_locate_info.viewConfigurationType =
+        stereo_for_quad ? XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO : view_configuration_type;
     eye_view_locate_info.displayTime = display_time;
     eye_view_locate_info.space = internal_view_space_;
 
-    const XrResult result =
-        next_locate_views_(session, &eye_view_locate_info, &eye_view_state, view_count, &eye_view_count, eye_views.data());
+    const XrResult result = next_locate_views_(session, &eye_view_locate_info, &eye_view_state, locate_count,
+                                               &eye_view_count, eye_views.data());
     if (XR_SUCCEEDED(result) && (eye_view_state.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT) == 0) {
         // Not located (the views are left as they were): nothing to keep.
         pivot_diagnostic_.has_eye_offsets = false;
         return false;
     }
-    if (XR_FAILED(result) || eye_view_count < view_count) {
+    if (XR_FAILED(result) || eye_view_count < locate_count) {
         logger_.Error("Failed to capture internal eye offsets for PivotXR view-space recomposition.");
         pivot_diagnostic_.has_eye_offsets = false;
         return false;
@@ -13613,7 +13667,7 @@ bool OpenXrLayer::EnsureEyeOffsets(XrSession session,
 
     cached_eye_offset_poses_.resize(view_count);
     for (uint32_t i = 0; i < view_count; ++i) {
-        cached_eye_offset_poses_[i] = eye_views[i].pose;
+        cached_eye_offset_poses_[i] = eye_views[stereo_for_quad ? i % 2 : i].pose;
     }
     cached_eye_offsets_view_configuration_ = view_configuration_type;
     cached_eye_offsets_display_time_ = display_time;
@@ -14174,8 +14228,10 @@ void OpenXrLayer::NoteVarjoNativeSubmittedFocusLocked(XrTime display_time, const
                      "displayTime=" + std::to_string(display_time) + ", submittedFocusView2=" +
                      FormatFov(views[2].fov) + ", locatedFocusView2=" + FormatFov((*located)[0]) +
                      ", submittedFocusView3=" + FormatFov(views[3].fov) + ", locatedFocusView3=" +
-                     FormatFov((*located)[1]) + ". The runtime places the focus insets by the FOVs submitted; counts "
-                     "are in the foveation summary (submittedFocusFov=checked/mismatched/unlocated).");
+                     FormatFov((*located)[1]) + ". A runtime places the focus insets by the FOVs submitted, except "
+                     "one that keeps the located ones for the display time (PimaxXR for an application named DCS "
+                     "World): there this mismatch is not what is shown. Counts are in the foveation summary "
+                     "(submittedFocusFov=checked/mismatched/unlocated).");
     }
 }
 

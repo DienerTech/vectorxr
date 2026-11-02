@@ -86,6 +86,13 @@ class OpenXrLayer {
     void SetLayerDirectory(std::filesystem::path dll_directory);
     void SetNextProcAddr(PFN_xrGetInstanceProcAddr next_get_instance_proc_addr);
     bool CanCreateInstance();
+    // The application's name as it created the instance.
+    std::string application_name_;
+    // Native quad views on a runtime that shows the focus views with the FOVs
+    // it located for the frame's display time (PimaxXR, DCS World).
+    bool RuntimeTakesFocusFovsFromLocateLocked() const;
+    bool native_quad_focus_shares_eye_poses_{false};
+    bool has_logged_focus_fov_quirk_convergence_{false};
 
     struct InstanceCreateDiagnostics {
         bool turbo_clock_enabled{false};
