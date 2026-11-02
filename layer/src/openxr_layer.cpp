@@ -202,13 +202,12 @@ AngularWindow ClampProjectedWindow(float base_negative,
     return {std::atan(negative_tan), std::atan(positive_tan)};
 }
 
-XrFovf BuildFocusFov(const XrFovf& base_fov,
-                     const QuadViewsSettings& settings,
-                     double focus_yaw_radians,
-                     double focus_pitch_radians) {
-    const double horizontal_center = DegreesToRadians(settings.horizontal_offset_degrees) + focus_yaw_radians;
-    const double vertical_center = DegreesToRadians(settings.vertical_offset_degrees) + focus_pitch_radians;
-
+// The focus window centred at `horizontal_center` / `vertical_center`, angles
+// in the eye's own tangent space.
+XrFovf BuildFocusFovAt(const XrFovf& base_fov,
+                       const QuadViewsSettings& settings,
+                       double horizontal_center,
+                       double vertical_center) {
     const AngularWindow horizontal =
         ClampProjectedWindow(base_fov.angleLeft,
                              base_fov.angleRight,
@@ -226,6 +225,16 @@ XrFovf BuildFocusFov(const XrFovf& base_fov,
         static_cast<float>(vertical.positive),
         static_cast<float>(vertical.negative),
     };
+}
+
+XrFovf BuildFocusFov(const XrFovf& base_fov,
+                     const QuadViewsSettings& settings,
+                     double focus_yaw_radians,
+                     double focus_pitch_radians) {
+    return BuildFocusFovAt(base_fov,
+                           settings,
+                           DegreesToRadians(settings.horizontal_offset_degrees) + focus_yaw_radians,
+                           DegreesToRadians(settings.vertical_offset_degrees) + focus_pitch_radians);
 }
 
 template <typename T>
@@ -1212,6 +1221,24 @@ GazeRayAngles ExtractGazeRayAngles(const XrQuaternionf& orientation, bool flip_z
         forward,
         hemisphere_corrected,
     };
+}
+
+// Where a direction `yaw` / `pitch` from head-forward (VIEW) falls in an eye
+// turned `eye_in_view` from the head: angles in the eye's own tangent space,
+// as Quad-Views-Foveated's and PimaxXR's ProjectPoint place the gaze (here a
+// direction, a point at infinity, so the eye's offset from the head's centre
+// drops out). None when the direction is not in front of the eye.
+std::optional<std::pair<double, double>> ProjectViewDirectionIntoEye(const XrQuaternionf& eye_in_view,
+                                                                      double yaw_radians,
+                                                                      double pitch_radians) {
+    const XrVector3f direction{static_cast<float>(std::tan(yaw_radians)),
+                               static_cast<float>(std::tan(pitch_radians)), -1.0f};
+    const XrVector3f in_eye = RotateVector(ConjugateQuaternion(NormalizeQuaternion(eye_in_view)), direction);
+    if (in_eye.z > -0.000001f) {
+        return std::nullopt;
+    }
+    return std::pair<double, double>{std::atan2(static_cast<double>(in_eye.x), -static_cast<double>(in_eye.z)),
+                                     std::atan2(static_cast<double>(in_eye.y), -static_cast<double>(in_eye.z))};
 }
 
 XrQuaternionf YawQuaternion(float yaw_radians) {
@@ -12332,6 +12359,7 @@ void OpenXrLayer::ResetSessionState() {
     active_runtime_view_configuration_type_ = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
     has_active_primary_view_configuration_ = false;
     has_logged_quad_view_short_count_ = false;
+    has_logged_canted_quadviews_eyes_ = false;
     has_logged_pivotxr_spike_mode_ = false;
     has_logged_quadviews_view_configuration_capabilities_ = false;
     has_logged_visibility_mask_mapping_ = false;
@@ -14268,8 +14296,11 @@ XrResult OpenXrLayer::LocateRuntimeViews(XrSession session,
 
     double focus_yaw_radians = 0.0;
     double focus_pitch_radians = 0.0;
+    std::array<XrQuaternionf, 2> eye_in_view{};
+    bool canted_eyes = false;
     {
         std::scoped_lock lock(mutex_);
+        canted_eyes = CantedEyeOrientations(session, *view_locate_info, stereo_views, &eye_in_view);
         const bool has_eye_focus = LocateEyeGazeFocusOffsets(session,
                                                             view_locate_info->space,
                                                             ClampInternalLocateTime(view_locate_info->displayTime),
@@ -14321,7 +14352,8 @@ XrResult OpenXrLayer::LocateRuntimeViews(XrSession session,
                                        focus_pitch_radians,
                                        view_capacity_input,
                                        view_count_output,
-                                       views)) {
+                                       views,
+                                       canted_eyes ? &eye_in_view : nullptr)) {
         return XR_ERROR_RUNTIME_FAILURE;
     }
     if (synthesized_quad_views) {
@@ -14336,7 +14368,8 @@ bool OpenXrLayer::SynthesizeQuadViewsFromStereo(std::span<const XrView> stereo_v
                                                 double focus_pitch_radians,
                                                 uint32_t view_capacity_input,
                                                 uint32_t* view_count_output,
-                                                XrView* views) const {
+                                                XrView* views,
+                                                const std::array<XrQuaternionf, 2>* eye_in_view) const {
     if (stereo_views.size() < 2 || !views || !view_count_output || view_capacity_input < 4) {
         return false;
     }
@@ -14354,8 +14387,68 @@ bool OpenXrLayer::SynthesizeQuadViewsFromStereo(std::span<const XrView> stereo_v
         views[i].next = app_next[i];
     }
 
-    views[2].fov = BuildFocusFov(stereo_views[0].fov, quadviews_settings, focus_yaw_radians, focus_pitch_radians);
-    views[3].fov = BuildFocusFov(stereo_views[1].fov, quadviews_settings, focus_yaw_radians, focus_pitch_radians);
+    for (uint32_t eye = 0; eye < 2; ++eye) {
+        // Canted eyes: head-forward plus the offsets and the gaze is a
+        // direction in VIEW, placed in each eye through its own turn (both
+        // insets then cover the same direction). Parallel eyes keep the
+        // angles as they are.
+        const std::optional<std::pair<double, double>> center =
+            eye_in_view ? ProjectViewDirectionIntoEye(
+                              (*eye_in_view)[eye],
+                              DegreesToRadians(quadviews_settings.horizontal_offset_degrees) + focus_yaw_radians,
+                              DegreesToRadians(quadviews_settings.vertical_offset_degrees) + focus_pitch_radians)
+                        : std::nullopt;
+        views[2 + eye].fov =
+            center ? BuildFocusFovAt(stereo_views[eye].fov, quadviews_settings, center->first, center->second)
+                   : BuildFocusFov(stereo_views[eye].fov, quadviews_settings, focus_yaw_radians, focus_pitch_radians);
+    }
+    return true;
+}
+
+bool OpenXrLayer::CantedEyeOrientations(XrSession session,
+                                        const XrViewLocateInfo& view_locate_info,
+                                        std::span<const XrView> stereo_views,
+                                        std::array<XrQuaternionf, 2>* eye_in_view) {
+    if (!eye_in_view || stereo_views.size() < 2) {
+        return false;
+    }
+    // The turn between the two eyes, from this locate alone: none (the same
+    // orientation, as every runtime with parallel projection answers) costs
+    // nothing and changes nothing.
+    constexpr double kParallelEyesRadians = 0.0001;
+    const XrQuaternionf relative = MultiplyQuaternion(ConjugateQuaternion(NormalizeQuaternion(stereo_views[0].pose.orientation)),
+                                                      NormalizeQuaternion(stereo_views[1].pose.orientation));
+    const double sine = std::sqrt(static_cast<double>(relative.x) * relative.x +
+                                  static_cast<double>(relative.y) * relative.y +
+                                  static_cast<double>(relative.z) * relative.z);
+    if (2.0 * std::atan2(sine, std::abs(static_cast<double>(relative.w))) < kParallelEyesRadians) {
+        return false;
+    }
+    if (IsTrackedViewSpace(view_locate_info.space)) {
+        (*eye_in_view)[0] = NormalizeQuaternion(stereo_views[0].pose.orientation);
+        (*eye_in_view)[1] = NormalizeQuaternion(stereo_views[1].pose.orientation);
+        return true;
+    }
+    // The eyes relative to VIEW for this display time (Pivot's eye offsets,
+    // shared with it and kept for this display time only).
+    if (!EnsureEyeOffsets(session, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
+                          ClampInternalLocateTime(view_locate_info.displayTime), 2) ||
+        cached_eye_offset_poses_.size() < 2) {
+        return false;
+    }
+    (*eye_in_view)[0] = cached_eye_offset_poses_[0].orientation;
+    (*eye_in_view)[1] = cached_eye_offset_poses_[1].orientation;
+    if (!has_logged_canted_quadviews_eyes_) {
+        has_logged_canted_quadviews_eyes_ = true;
+        const double left_yaw = ExtractYawRadians({(*eye_in_view)[0].x, (*eye_in_view)[0].y, (*eye_in_view)[0].z,
+                                                   (*eye_in_view)[0].w});
+        const double right_yaw = ExtractYawRadians({(*eye_in_view)[1].x, (*eye_in_view)[1].y, (*eye_in_view)[1].z,
+                                                    (*eye_in_view)[1].w});
+        logger_.Info("Quadviews: the runtime's eyes are canted (left eye yaw " +
+                     FormatDiagnosticDouble(left_yaw * 180.0 / 3.14159265358979323846) + " deg, right eye " +
+                     FormatDiagnosticDouble(right_yaw * 180.0 / 3.14159265358979323846) +
+                     " deg from the head); the focus insets are placed through each eye's turn.");
+    }
     return true;
 }
 

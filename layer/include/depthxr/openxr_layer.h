@@ -891,13 +891,23 @@ class OpenXrLayer {
     bool EnsureD3D11QuadViewsPixelProbeResources(int64_t format);
     void ReleaseD3D11QuadViewsPixelProbeResources(bool preserve_history);
     void PollD3D11QuadViewsPixelProbe();
+    // `eye_in_view`: each stereo eye's orientation relative to VIEW when the
+    // runtime's eyes are canted (CantedEyeOrientations), else null.
     bool SynthesizeQuadViewsFromStereo(std::span<const XrView> stereo_views,
                                        const QuadViewsSettings& quadviews_settings,
                                        double focus_yaw_radians,
                                        double focus_pitch_radians,
                                        uint32_t view_capacity_input,
                                        uint32_t* view_count_output,
-                                       XrView* views) const;
+                                       XrView* views,
+                                       const std::array<XrQuaternionf, 2>* eye_in_view = nullptr) const;
+    // Whether the two stereo eyes the runtime located are turned from each
+    // other (a canted display), and if so each eye's orientation relative to
+    // VIEW at the locate's display time. Caller holds mutex_.
+    bool CantedEyeOrientations(XrSession session,
+                               const XrViewLocateInfo& view_locate_info,
+                               std::span<const XrView> stereo_views,
+                               std::array<XrQuaternionf, 2>* eye_in_view);
     XrResult LocateSpaceWithPivot(XrSpace space,
                                   XrSpace base_space,
                                   XrTime time,
@@ -1901,6 +1911,7 @@ class OpenXrLayer {
     uint32_t pending_quadviews_pixel_diagnostics_{0};
     bool has_active_primary_view_configuration_{false};
     bool has_logged_quad_view_short_count_{false};
+    bool has_logged_canted_quadviews_eyes_{false};
     bool has_logged_pivotxr_spike_mode_{false};
     bool has_logged_quadviews_view_configuration_capabilities_{false};
     uint64_t varjo_native_view_configuration_calls_{0};
