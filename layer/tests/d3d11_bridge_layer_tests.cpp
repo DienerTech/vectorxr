@@ -5546,6 +5546,18 @@ void TestBridgedGpuBoundDynamic(Game& game, bool pimax, bool quad = false) {
     policy.probe_after = std::chrono::milliseconds(600000);
     Peer::SetFrameGenDynamicPolicy(policy);
     Peer::SetFrameGenSummaryInterval(std::chrono::milliseconds(1000));
+    // The plain case has a forwarding layer below VectorXR (OpenKneeboard
+    // after an update, neighbor-layers.md): it gets every frame Frame
+    // Generation shows, and the log says so and how many.
+    const bool layer_below = !pimax && !quad && !kneeboard;
+    depthxr::XrApiLayerNextInfo below{};
+    below.structType = depthxr::XR_LOADER_INTERFACE_STRUCT_API_LAYER_NEXT_INFO;
+    below.structVersion = depthxr::XR_API_LAYER_NEXT_INFO_STRUCT_VERSION;
+    below.structSize = sizeof(below);
+    std::strncpy(below.layerName, "XR_APILAYER_FREDEMMOTT_OpenKneeboard", XR_MAX_API_LAYER_NAME_SIZE - 1);
+    below.nextGetInstanceProcAddr = RtGetInstanceProcAddr;
+    below.nextCreateApiLayerInstance = RtCreateApiLayerInstance;
+    if (layer_below) g_layer_below = &below;
     SideBySideSession session;
     App& app = session.app;
     app = StartApp();
@@ -5691,7 +5703,25 @@ void TestBridgedGpuBoundDynamic(Game& game, bool pimax, bool quad = false) {
     for (const Target* target : {&session.eyes, &session.ui, &session.depth}) {
         Check(app.api.destroy_swapchain(target->swapchain) == XR_SUCCESS, "a swapchain is destroyed");
     }
+    if (layer_below) {
+        Check(app.api.destroy_session(app.session) == XR_SUCCESS, name + ": xrDestroySession");
+        app.session = XR_NULL_HANDLE;
+        const std::string log = Peer::Log();
+        const std::string end_line = "Frame Generation at session end: the runtime and the layers below VectorXR "
+                                     "[XR_APILAYER_FREDEMMOTT_OpenKneeboard] got ";
+        const std::size_t at = log.find(end_line);
+        Check(Contains(log, "Frame Generation: the API layers below VectorXR [XR_APILAYER_FREDEMMOTT_OpenKneeboard] get "
+                            "every frame it shows") &&
+                  at != std::string::npos,
+              name + ": the log names the layer below and what it gets");
+        const std::string counts = log.substr(at + end_line.size(), log.find('\n', at) - at - end_line.size());
+        const std::size_t per = counts.find('(');
+        const double ratio = per == std::string::npos ? 0.0 : std::atof(counts.c_str() + per + 1);
+        std::cout << name << ": the layer below got " << counts << "\n";
+        Check(ratio > 1.1, name + ": the layer below got more frames than the game ended (" + counts + ")");
+    }
     StopApp(app);
+    g_layer_below = nullptr;
     g_pimax.Stop();
     Peer::SetFrameGenSummaryInterval(std::chrono::milliseconds(30000));
     g_side_by_side_eye_width = small_width;

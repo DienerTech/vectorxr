@@ -1866,6 +1866,14 @@ class OpenXrLayer {
     // stays off.
     bool openxr_toolkit_below_{false};
     bool openxr_toolkit_framegen_logged_{false};
+    // The layers below VectorXR (names, nearest first) for this instance:
+    // with Frame Generation they get every frame it shows, from its thread,
+    // and (Direct3D 12) its queue as the session's. The session's frames the
+    // game ended and the frames the runtime got, for the session's end.
+    std::string layers_below_;
+    std::atomic<std::uint64_t> game_frames_ended_{0};
+    std::atomic<std::uint64_t> runtime_frames_ended_{0};
+    bool layers_below_get_framegen_{false}; // the session's (StartFrameGen)
     bool defer_quadviews_swapchain_releases_{false};
     // Quadviews changes the application's view/swapchain topology. Once a session
     // is created, keep its initial activation state until teardown so a config

@@ -2105,6 +2105,7 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
     openxr_toolkit_quadviews_logged_ = false;
     openxr_toolkit_below_ = diagnostics.openxr_toolkit == "below";
     openxr_toolkit_framegen_logged_ = false;
+    layers_below_ = diagnostics.layers_below;
     resolved_settings_generation_ = ~0ull; // resolve again with the Toolkit's position
     ResetSessionState();
     config_path_ = ResolveConfigPath();
@@ -3096,6 +3097,16 @@ XrResult OpenXrLayer::DestroySession(XrSession session) {
     watch.Step("ending the bridges");
     if (destroying_active && XR_SUCCEEDED(result)) {
         if (const std::string shown = framegen_queue_.ShownLayersSummary(); !shown.empty()) logger_.Info(shown);
+        const std::uint64_t game_frames = game_frames_ended_.load(std::memory_order_relaxed);
+        const std::uint64_t runtime_frames = runtime_frames_ended_.load(std::memory_order_relaxed);
+        if (layers_below_get_framegen_ && game_frames > 0) {
+            std::ostringstream ratio;
+            ratio << std::fixed << std::setprecision(2)
+                  << static_cast<double>(runtime_frames) / static_cast<double>(game_frames);
+            logger_.Info("Frame Generation at session end: the runtime and the layers below VectorXR [" +
+                         layers_below_ + "] got " + std::to_string(runtime_frames) + " frames for the game's " +
+                         std::to_string(game_frames) + " (" + ratio.str() + " per game frame).");
+        }
         framegen_queue_.Reset();
         EndD3D11Bridge();
     }
@@ -6330,6 +6341,7 @@ XrResult OpenXrLayer::TraceRuntimeEndFrame(XrSession session, const XrFrameEndIn
 }
 
 XrResult OpenXrLayer::SubmitRuntimeFrame(XrSession session, const XrFrameEndInfo* info) {
+    runtime_frames_ended_.fetch_add(1, std::memory_order_relaxed);
     const bool queue_diagnostics = framegen_queue_diagnostics_ && framegen_queue_.Active();
     std::vector<XrSwapchain> submitted_swapchains;
     if (framegen_queue_.Active() && info) {
@@ -9324,6 +9336,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
                                   static_cast<std::uint32_t>(GetCurrentThreadId()));
     }
     NoteThread(ThreadCensus::Call::EndFrame);
+    game_frames_ended_.fetch_add(1, std::memory_order_relaxed);
 
     // Hang forensics: if a log ends between these two markers, a thread is
     // parked inside a runtime call while holding mutex_.
@@ -15175,6 +15188,17 @@ void OpenXrLayer::PinModulesForAbandonedPresenter() {
 
 void OpenXrLayer::StartFrameGen(XrSession session, const void* binding_chain, const std::string& unavailable) {
     framegen_session_enabled_ = resolved_settings_.core.enabled && resolved_settings_.framegen.enabled;
+    game_frames_ended_.store(0, std::memory_order_relaxed);
+    runtime_frames_ended_.store(0, std::memory_order_relaxed);
+    layers_below_get_framegen_ = framegen_session_enabled_ && !layers_below_.empty();
+    if (layers_below_get_framegen_) {
+        logger_.Info("Frame Generation: the API layers below VectorXR [" + layers_below_ +
+                     "] get every frame it shows (up to four for each of the game's), from its own thread, and " +
+                     (framegen_queue_.Active() ? std::string("its high-priority Direct3D 12 queue as the session's. ")
+                                               : std::string()) +
+                     "A layer there that waits for something that never comes stalls Frame Generation, and through "
+                     "it the game: if the game freezes, move that layer above VectorXR.");
+    }
     framegen_toggle_binding_was_down_ = false;
     framegen_binding_down_cached_ = false;
     framegen_binding_last_poll_time_.reset();
