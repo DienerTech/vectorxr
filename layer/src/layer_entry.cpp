@@ -647,7 +647,7 @@ std::string QuadViewsFoveatedPosition(const XrApiLayerNextInfo* next_info) {
 std::string OpenXrToolkitPosition(const XrInstanceCreateInfo& create_info, const XrApiLayerNextInfo* next_info) {
     for (const XrApiLayerNextInfo* below = next_info ? next_info->next : nullptr; below; below = below->next) {
         if (LayerName(*below) == "XR_APILAYER_MBUCCHIA_toolkit") {
-            return "below";
+            return OpenXrToolkitBypasses(create_info) ? "below-bypassed" : "below";
         }
     }
     if (!GetModuleHandleW(L"XR_APILAYER_MBUCCHIA_toolkit.dll")) {

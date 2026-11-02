@@ -61,6 +61,14 @@ bool NearlyEqual(double lhs, double rhs) {
     return std::abs(lhs - rhs) < 0.0001;
 }
 
+// Runtimes whose Direct3D 12 xrAcquire/xrWaitSwapchainImage queue nothing on
+// the session's queue, which gets work for an image only at its first
+// xrEnumerateSwapchainImages (PimaxXR 0.4.x and HEAD, Virtual Desktop's,
+// whose names start so: "PimaxXR (Unofficial)", "VirtualDesktopXR").
+bool RuntimeQueuesOnlyFirstUse(std::string_view runtime_name) {
+    return runtime_name.rfind("PimaxXR", 0) == 0 || runtime_name.rfind("VirtualDesktopXR", 0) == 0;
+}
+
 template <typename Position>
 double PositionSeparationMeters(const Position& left, const Position& right) {
     const double x = left.x - right.x;
@@ -2147,6 +2155,9 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
     spacewarp_ext_owned_ = diagnostics.frame_synthesis_owned;
     openxr_toolkit_above_ = diagnostics.openxr_toolkit == "above";
     openxr_toolkit_quadviews_logged_ = false;
+    openxr_toolkit_below_ = diagnostics.openxr_toolkit == "below";
+    openxr_toolkit_framegen_logged_ = false;
+    layers_below_ = diagnostics.layers_below;
     resolved_settings_generation_ = ~0ull; // resolve again with the Toolkit's position
     ResetSessionState();
     config_path_ = ResolveConfigPath();
@@ -2221,10 +2232,12 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
         }
         if (diagnostics.openxr_toolkit != "absent") {
             logger_.Info("OpenXR Toolkit is loaded " +
-                         std::string(diagnostics.openxr_toolkit == "below" ? "below VectorXR."
-                                     : diagnostics.openxr_toolkit == "above"
-                                         ? "above VectorXR."
-                                         : "above VectorXR, bypassed for this application."));
+                         std::string(diagnostics.openxr_toolkit == "below"            ? "below VectorXR."
+                                     : diagnostics.openxr_toolkit == "below-bypassed" ? "below VectorXR, bypassed for "
+                                                                                        "this application."
+                                     : diagnostics.openxr_toolkit == "above"          ? "above VectorXR."
+                                                                             : "above VectorXR, bypassed for this "
+                                                                               "application."));
         }
         // The bridge the instance's XR_KHR_D3D12_enable is for, and what Frame
         // Generation does without it.
@@ -2696,7 +2709,8 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
             std::scoped_lock lock(mutex_);
             ReloadConfigIfNeeded();
             const ResolvedRuntimeConfig resolved = ResolveRuntimeConfig(config_, current_exe_name_);
-            framegen_wanted = resolved.core.enabled && resolved.framegen.enabled;
+            // OpenXR Toolkit below keeps it off (RefreshResolvedSettings).
+            framegen_wanted = resolved.core.enabled && resolved.framegen.enabled && !openxr_toolkit_below_;
         }
         framegen_queue_.Reset();
         d3d11_bridge_.End();
@@ -2768,6 +2782,22 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
             // for the game's GPU work: on a GPU-bound game, a refresh missed
             // wherever the runtime's xrEndFrame waits for its queue (Varjo).
             downstream_info = framegen_queue_.Prepare(game_info, note, true);
+            if (framegen_queue_.Active() && RuntimeQueuesOnlyFirstUse(runtime_name_)) {
+                // PimaxXR and Virtual Desktop's runtime queue work for a game
+                // image only at its first enumeration (a barrier batch); they
+                // compose on a device of their own. Opt-in until flown
+                // (VECTORXR_FRAMEGEN_AFTER_WAIT=first): with OpenKneeboard's
+                // per-frame quad on the PimaxXR stand-in the game stalled for
+                // about a second now and then (notes, swapchains-fixes).
+                const char* after_wait = std::getenv("VECTORXR_FRAMEGEN_AFTER_WAIT");
+                if (after_wait && std::string_view(after_wait) == "first") {
+                    framegen_queue_.SetRuntimeQueuesOnlyFirstUse(true);
+                    logger_.Info("Frame Generation: " + runtime_name_ +
+                                 " queues work for the game's images only before their first use, so the game's "
+                                 "queue waits for the runtime's only then, not behind Frame Generation's frames at "
+                                 "every image wait (VECTORXR_FRAMEGEN_AFTER_WAIT=first).");
+                }
+            }
             const char* queue_diagnostics = std::getenv("VECTORXR_FRAMEGEN_QUEUE_DIAGNOSTICS");
             framegen_queue_diagnostics_ = queue_diagnostics && std::string_view(queue_diagnostics) == "1";
             framegen_queue_diagnostics_next_ms_.store(0, std::memory_order_relaxed);
@@ -3131,6 +3161,16 @@ XrResult OpenXrLayer::DestroySession(XrSession session) {
     watch.Step("ending the bridges");
     if (destroying_active && XR_SUCCEEDED(result)) {
         if (const std::string shown = framegen_queue_.ShownLayersSummary(); !shown.empty()) logger_.Info(shown);
+        const std::uint64_t game_frames = game_frames_ended_.load(std::memory_order_relaxed);
+        const std::uint64_t runtime_frames = runtime_frames_ended_.load(std::memory_order_relaxed);
+        if (layers_below_get_framegen_ && game_frames > 0) {
+            std::ostringstream ratio;
+            ratio << std::fixed << std::setprecision(2)
+                  << static_cast<double>(runtime_frames) / static_cast<double>(game_frames);
+            logger_.Info("Frame Generation at session end: the runtime and the layers below VectorXR [" +
+                         layers_below_ + "] got " + std::to_string(runtime_frames) + " frames for the game's " +
+                         std::to_string(game_frames) + " (" + ratio.str() + " per game frame).");
+        }
         framegen_queue_.Reset();
         EndD3D11Bridge();
     }
@@ -4625,7 +4665,9 @@ XrResult OpenXrLayer::AcquireSwapchainImage(XrSwapchain swapchain,
     NoteThread(ThreadCensus::Call::AcquireSwapchainImage);
     std::uint32_t image_count = 0;
     {
-        std::scoped_lock lock(mutex_);
+        // The releases go on without mutex_ (ForwardHandedOverReleases).
+        std::unique_lock handover(bridge_handover_mutex_);
+        std::unique_lock lock(mutex_);
         auto it = tracked_swapchains_.find(swapchain);
         if (it != tracked_swapchains_.end()) {
             image_count = it->second.image_count;
@@ -4633,14 +4675,21 @@ XrResult OpenXrLayer::AcquireSwapchainImage(XrSwapchain swapchain,
             // before goes on first (the runtime hands out an image only while
             // the application holds fewer than all, and the bridge copies
             // the image acquired earliest).
-            const XrResult handed = HandOverBridgedReleasesLocked(swapchain, it->second, "swapchain acquire");
+            std::vector<XrSwapchain> releases;
+            XrResult handed =
+                HandOverBridgedReleasesLocked(swapchain, it->second, "swapchain acquire", true, &releases);
+            const XrResult forwarded = ForwardHandedOverReleases(lock, releases, "swapchain acquire");
+            if (XR_SUCCEEDED(handed)) handed = forwarded;
             if (XR_FAILED(handed)) {
                 return handed;
             }
-            const XrResult flush_result =
-                FlushDeferredSwapchainReleaseLocked(swapchain, it->second, "swapchain acquire");
-            if (XR_FAILED(flush_result)) {
-                return flush_result;
+            it = tracked_swapchains_.find(swapchain);
+            if (it != tracked_swapchains_.end()) {
+                const XrResult flush_result =
+                    FlushDeferredSwapchainReleaseLocked(swapchain, it->second, "swapchain acquire");
+                if (XR_FAILED(flush_result)) {
+                    return flush_result;
+                }
             }
         }
     }
@@ -4701,12 +4750,17 @@ XrResult OpenXrLayer::WaitSwapchainImage(XrSwapchain swapchain, const XrSwapchai
     {
         // An image acquired ahead is waited for once the one before it is
         // released (OpenXR's order): a bridged release kept for the frame's
-        // end goes on first, as at the next acquire.
-        std::scoped_lock lock(mutex_);
+        // end goes on first, as at the next acquire (without mutex_:
+        // ForwardHandedOverReleases).
+        std::unique_lock handover(bridge_handover_mutex_);
+        std::unique_lock lock(mutex_);
         if (const auto it = tracked_swapchains_.find(swapchain);
             it != tracked_swapchains_.end() && !it->second.bridge_handovers.empty()) {
-            if (const XrResult handed = HandOverBridgedReleasesLocked(swapchain, it->second, "swapchain wait");
-                XR_FAILED(handed)) {
+            std::vector<XrSwapchain> releases;
+            XrResult handed = HandOverBridgedReleasesLocked(swapchain, it->second, "swapchain wait", true, &releases);
+            const XrResult forwarded = ForwardHandedOverReleases(lock, releases, "swapchain wait");
+            if (XR_SUCCEEDED(handed)) handed = forwarded;
+            if (XR_FAILED(handed)) {
                 return handed;
             }
         }
@@ -6356,6 +6410,7 @@ XrResult OpenXrLayer::TraceRuntimeEndFrame(XrSession session, const XrFrameEndIn
 }
 
 XrResult OpenXrLayer::SubmitRuntimeFrame(XrSession session, const XrFrameEndInfo* info) {
+    runtime_frames_ended_.fetch_add(1, std::memory_order_relaxed);
     const bool queue_diagnostics = framegen_queue_diagnostics_ && framegen_queue_.Active();
     std::vector<XrSwapchain> submitted_swapchains;
     if (framegen_queue_.Active() && info) {
@@ -9350,12 +9405,19 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
                                   static_cast<std::uint32_t>(GetCurrentThreadId()));
     }
     NoteThread(ThreadCensus::Call::EndFrame);
+    game_frames_ended_.fetch_add(1, std::memory_order_relaxed);
 
     // Hang forensics: if a log ends between these two markers, a thread is
     // parked inside a runtime call while holding mutex_.
     const bool diag = TurboSequencedDebugTick();
     if (diag) {
         logger_.Debug("Turbo-diag: xrEndFrame entered; acquiring config lock.");
+    }
+    // A bridged session's hand-over below forwards its releases without
+    // mutex_ (ForwardHandedOverReleases); no other hand-over comes between.
+    std::unique_lock handover(bridge_handover_mutex_, std::defer_lock);
+    if (d3d11_bridge_.Active() || vulkan_bridge_.Active()) {
+        handover.lock();
     }
     // unique_lock because ForwardEndFrame releases it before blocking runtime
     // calls (turbo drain + next_end_frame_).
@@ -9388,10 +9450,21 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     // runtime reads them: everything the game submitted before this call is
     // in them, its rendering after a release included. Frame Generation
     // captures them here too, before anything below reads or composes them.
-    if (const XrResult handed = HandOverBridgedReleasesLocked("end frame"); XR_FAILED(handed)) {
-        DropPendingFrameGenQuad(false);
-        framegen_.AbandonFrame(frame_end_info->displayTime);
-        return handed;
+    {
+        std::vector<XrSwapchain> releases;
+        XrResult handed = HandOverBridgedReleasesLocked("end frame", true, &releases);
+        // The runtime's swapchain calls may wait out Frame Generation's
+        // xrEndFrame (PimaxXR's lock): the game's other threads do not.
+        const XrResult forwarded = ForwardHandedOverReleases(lock, releases, "end frame");
+        if (handover.owns_lock()) {
+            handover.unlock();
+        }
+        if (XR_SUCCEEDED(handed)) handed = forwarded;
+        if (XR_FAILED(handed)) {
+            DropPendingFrameGenQuad(false);
+            framegen_.AbandonFrame(frame_end_info->displayTime);
+            return handed;
+        }
     }
     // ...and the game's motion vector images, which it may never release:
     // as they are now (through the Vulkan bridge, as a hand-over copies them
@@ -12043,6 +12116,22 @@ void OpenXrLayer::RefreshResolvedSettings() {
     // turns off with the Enhancements.
     if (!resolved_settings_.core.enabled) {
         resolved_settings_.core.osd.enabled = false;
+    }
+    // OpenXR Toolkit below VectorXR holds every release back until its next
+    // xrEndFrame, then releases every swapchain it held, and writes its
+    // upscaled image only for swapchains that frame shows; its swapchain map
+    // is not safe from two threads. Frame Generation's frames (several per
+    // game frame, from its own thread) would make it release the game's
+    // images without its work, and race the game's swapchain calls.
+    if (openxr_toolkit_below_ && resolved_settings_.framegen.enabled) {
+        resolved_settings_.framegen.enabled = false;
+        if (!openxr_toolkit_framegen_logged_) {
+            openxr_toolkit_framegen_logged_ = true;
+            logger_.Error("Frame Generation is off for this game: OpenXR Toolkit is loaded below VectorXR, and it "
+                          "cannot take Frame Generation's frames. Move OpenXR Toolkit above VectorXR (in the "
+                          "VectorXR app's layer order), turn it off for this game, or set its per-game bypass to "
+                          "use Frame Generation.");
+        }
     }
     framegen_.Configure(resolved_settings_.framegen);
     framegen_.SetConfigured(resolved_settings_.core.enabled && resolved_settings_.framegen.enabled);
@@ -15476,6 +15565,17 @@ void OpenXrLayer::PinModulesForAbandonedPresenter() {
 
 void OpenXrLayer::StartFrameGen(XrSession session, const void* binding_chain, const std::string& unavailable) {
     framegen_session_enabled_ = resolved_settings_.core.enabled && resolved_settings_.framegen.enabled;
+    game_frames_ended_.store(0, std::memory_order_relaxed);
+    runtime_frames_ended_.store(0, std::memory_order_relaxed);
+    layers_below_get_framegen_ = framegen_session_enabled_ && !layers_below_.empty();
+    if (layers_below_get_framegen_) {
+        logger_.Info("Frame Generation: the API layers below VectorXR [" + layers_below_ +
+                     "] get every frame it shows (up to four for each of the game's), from its own thread, and " +
+                     (framegen_queue_.Active() ? std::string("its high-priority Direct3D 12 queue as the session's. ")
+                                               : std::string()) +
+                     "A layer there that waits for something that never comes stalls Frame Generation, and through "
+                     "it the game: if the game freezes, move that layer above VectorXR.");
+    }
     framegen_toggle_binding_was_down_ = false;
     framegen_binding_down_cached_ = false;
     framegen_binding_last_poll_time_.reset();
@@ -15841,7 +15941,8 @@ XrResult OpenXrLayer::FlushDeferredSwapchainReleasesLocked(std::string_view reas
 }
 
 XrResult OpenXrLayer::HandOverBridgedReleasesLocked(XrSwapchain swapchain, SwapchainInfo& info,
-                                                    std::string_view reason, bool copy) {
+                                                    std::string_view reason, bool copy,
+                                                    std::vector<XrSwapchain>* forward_later) {
     while (!info.bridge_handovers.empty()) {
         const uint32_t index = info.bridge_handovers.front();
         info.bridge_handovers.pop_front();
@@ -15870,6 +15971,10 @@ XrResult OpenXrLayer::HandOverBridgedReleasesLocked(XrSwapchain swapchain, Swapc
         ++info.release_count;
         if (ShouldDeferSwapchainRelease(info)) {
             ++info.deferred_release_count;
+            continue;
+        }
+        if (forward_later) {
+            forward_later->push_back(swapchain);
             continue;
         }
         XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
@@ -15902,7 +16007,43 @@ void OpenXrLayer::SubmitKeptVulkanBridgeReleasesLocked() {
     }
 }
 
-XrResult OpenXrLayer::HandOverBridgedReleasesLocked(std::string_view reason, bool copy) {
+XrResult OpenXrLayer::ForwardHandedOverReleases(std::unique_lock<std::mutex>& lock,
+                                                std::vector<XrSwapchain>& releases, std::string_view reason) {
+    if (releases.empty()) {
+        return XR_SUCCESS;
+    }
+    std::vector<XrResult> results;
+    results.reserve(releases.size());
+    lock.unlock();
+    for (const XrSwapchain swapchain : releases) {
+        XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+        results.push_back(ForwardAppRelease(swapchain, &release_info));
+    }
+    lock.lock();
+    XrResult first_failure = XR_SUCCESS;
+    for (std::size_t i = 0; i < releases.size(); ++i) {
+        if (XR_FAILED(results[i])) {
+            logger_.Error("Bridged swapchain release failed: handle=" + FormatHandle(releases[i]) +
+                          ", reason=" + std::string(reason) +
+                          ", result=" + FormatHex(static_cast<uint64_t>(results[i])));
+            if (XR_SUCCEEDED(first_failure)) first_failure = results[i];
+            continue;
+        }
+        const auto it = tracked_swapchains_.find(releases[i]);
+        if (it == tracked_swapchains_.end()) {
+            continue;
+        }
+        it->second.image_states.ReleaseDownstreamOldest();
+        if (it->second.quadviews_session && it->second.release_count <= 3) {
+            LogSwapchainSummary(releases[i], it->second, "released");
+        }
+    }
+    releases.clear();
+    return first_failure;
+}
+
+XrResult OpenXrLayer::HandOverBridgedReleasesLocked(std::string_view reason, bool copy,
+                                                    std::vector<XrSwapchain>* forward_later) {
     // While the Vulkan bridge gives the game's motion vector images back at
     // their releases, every swapchain's copies go first: a giving back waits
     // on the GPU for its copy, and a capture of Frame Generation's queued
@@ -15917,7 +16058,7 @@ XrResult OpenXrLayer::HandOverBridgedReleasesLocked(std::string_view reason, boo
     }
     XrResult first_failure = XR_SUCCESS;
     for (auto& [swapchain, info] : tracked_swapchains_) {
-        const XrResult result = HandOverBridgedReleasesLocked(swapchain, info, reason, copy);
+        const XrResult result = HandOverBridgedReleasesLocked(swapchain, info, reason, copy, forward_later);
         if (XR_FAILED(result) && XR_SUCCEEDED(first_failure)) {
             first_failure = result;
         }

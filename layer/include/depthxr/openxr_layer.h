@@ -158,9 +158,9 @@ class OpenXrLayer {
         // The names of the layers below VectorXR, nearest first.
         std::string layers_below;
         // Where OpenXR Toolkit is: "absent", "below", "above", or
-        // "above-bypassed" (its per-application bypass passes everything
-        // through). Above VectorXR it gets a game's quad views, which it does
-        // not support.
+        // "above-bypassed" / "below-bypassed" (its per-application bypass
+        // passes everything through). Above VectorXR it gets a game's quad
+        // views, which it does not support; below it, Frame Generation's frames.
         std::string openxr_toolkit{"absent"};
         // The space-warp probe (spacewarp_probe.h): VECTORXR_SPACEWARP_PROBE
         // (parsed, and as set: empty when it is not), what the application
@@ -737,9 +737,21 @@ class OpenXrLayer {
     // swapchain's: while the Vulkan bridge gives the game's motion vector
     // images back at their releases (vulkan_bridge_motion_), each
     // swapchain's copies are made first, then the captures and releases.
+    // `forward_later`: the releases due on to the runtime are added to it
+    // (a swapchain per release) instead, for ForwardHandedOverReleases.
     XrResult HandOverBridgedReleasesLocked(XrSwapchain swapchain, SwapchainInfo& info, std::string_view reason,
-                                           bool copy = true);
-    XrResult HandOverBridgedReleasesLocked(std::string_view reason, bool copy = true);
+                                           bool copy = true, std::vector<XrSwapchain>* forward_later = nullptr);
+    XrResult HandOverBridgedReleasesLocked(std::string_view reason, bool copy = true,
+                                           std::vector<XrSwapchain>* forward_later = nullptr);
+    // The releases a hand-over left for later, on to the runtime with
+    // `lock` (of mutex_) let go meanwhile: a runtime's swapchain calls can
+    // stall for a refresh (PimaxXR's xrEndFrame holds their lock, called from
+    // Frame Generation's thread), and the game's other threads' calls into
+    // the layer must not wait for that. The caller holds
+    // bridge_handover_mutex_, so no other hand-over or swapchain call of the
+    // game's comes between the hand-over and its releases.
+    XrResult ForwardHandedOverReleases(std::unique_lock<std::mutex>& lock, std::vector<XrSwapchain>& releases,
+                                       std::string_view reason);
     // At a session's (or an instance's) end, before the Vulkan bridge's
     // Escape: releases no frame's end handed over still give the game's
     // rendering into their images to the bridge (its Released, not Frame
@@ -1006,6 +1018,9 @@ class OpenXrLayer {
     void SharpenNativeFocusViews(std::vector<XrCompositionLayerProjectionView>& views, XrTime display_time);
 
     std::mutex mutex_;
+    // Held across a bridged hand-over and its releases' runtime calls
+    // (ForwardHandedOverReleases), which go without mutex_; taken before mutex_.
+    std::mutex bridge_handover_mutex_;
     std::filesystem::path dll_directory_;
     std::filesystem::path config_path_;
     std::filesystem::path log_path_;
@@ -1879,6 +1894,21 @@ class OpenXrLayer {
     // Quadviews stays off and the game runs stereo.
     bool openxr_toolkit_above_{false};
     bool openxr_toolkit_quadviews_logged_{false};
+    // OpenXR Toolkit is below VectorXR for this instance (not bypassed): it
+    // holds every release back until its next xrEndFrame and then releases
+    // every swapchain it held, and is not safe to call from two threads, so
+    // Frame Generation (more frames than the game's, from its own thread)
+    // stays off.
+    bool openxr_toolkit_below_{false};
+    bool openxr_toolkit_framegen_logged_{false};
+    // The layers below VectorXR (names, nearest first) for this instance:
+    // with Frame Generation they get every frame it shows, from its thread,
+    // and (Direct3D 12) its queue as the session's. The session's frames the
+    // game ended and the frames the runtime got, for the session's end.
+    std::string layers_below_;
+    std::atomic<std::uint64_t> game_frames_ended_{0};
+    std::atomic<std::uint64_t> runtime_frames_ended_{0};
+    bool layers_below_get_framegen_{false}; // the session's (StartFrameGen)
     bool defer_quadviews_swapchain_releases_{false};
     // Quadviews changes the application's view/swapchain topology. Once a session
     // is created, keep its initial activation state until teardown so a config

@@ -78,6 +78,15 @@ class FrameGenQueueSubstitution {
     bool Active() const;
     // Where a held-back call the runtime failed is reported (a few times).
     void SetLog(std::function<void(const std::string&)> log);
+    // The runtime queues work for an application image on the session's
+    // queue only once, before its first wait (PimaxXR and Virtual Desktop's
+    // runtime: a barrier batch at the first xrEnumerateSwapchainImages; their
+    // compositors read images on a device of their own, after a fence on the
+    // queue at xrEndFrame). Then only each image's first wait makes the
+    // game's queue wait for the runtime's: later ones would only make the
+    // game's next frame wait for Frame Generation's work queued there (each
+    // frame it writes, which waits for the game's last frame to be measured).
+    void SetRuntimeQueuesOnlyFirstUse(bool only_first_use);
     // The chain Frame Generation's backend is created from: the runtime's
     // queue (a FrameGenRuntimeQueue) ahead of the game's own `game_chain`.
     const void* FrameGenChain(const void* game_chain);
