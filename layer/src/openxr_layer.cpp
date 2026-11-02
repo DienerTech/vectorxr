@@ -2103,6 +2103,8 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
     spacewarp_ext_owned_ = diagnostics.frame_synthesis_owned;
     openxr_toolkit_above_ = diagnostics.openxr_toolkit == "above";
     openxr_toolkit_quadviews_logged_ = false;
+    openxr_toolkit_below_ = diagnostics.openxr_toolkit == "below";
+    openxr_toolkit_framegen_logged_ = false;
     resolved_settings_generation_ = ~0ull; // resolve again with the Toolkit's position
     ResetSessionState();
     config_path_ = ResolveConfigPath();
@@ -2169,10 +2171,12 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
         logger_.Info("OpenXR API layers below VectorXR: [" + diagnostics.layers_below + "]");
         if (diagnostics.openxr_toolkit != "absent") {
             logger_.Info("OpenXR Toolkit is loaded " +
-                         std::string(diagnostics.openxr_toolkit == "below" ? "below VectorXR."
-                                     : diagnostics.openxr_toolkit == "above"
-                                         ? "above VectorXR."
-                                         : "above VectorXR, bypassed for this application."));
+                         std::string(diagnostics.openxr_toolkit == "below"            ? "below VectorXR."
+                                     : diagnostics.openxr_toolkit == "below-bypassed" ? "below VectorXR, bypassed for "
+                                                                                        "this application."
+                                     : diagnostics.openxr_toolkit == "above"          ? "above VectorXR."
+                                                                             : "above VectorXR, bypassed for this "
+                                                                               "application."));
         }
         // The bridge the instance's XR_KHR_D3D12_enable is for, and what Frame
         // Generation does without it.
@@ -2644,7 +2648,8 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
             std::scoped_lock lock(mutex_);
             ReloadConfigIfNeeded();
             const ResolvedRuntimeConfig resolved = ResolveRuntimeConfig(config_, current_exe_name_);
-            framegen_wanted = resolved.core.enabled && resolved.framegen.enabled;
+            // OpenXR Toolkit below keeps it off (RefreshResolvedSettings).
+            framegen_wanted = resolved.core.enabled && resolved.framegen.enabled && !openxr_toolkit_below_;
         }
         framegen_queue_.Reset();
         d3d11_bridge_.End();
@@ -11871,6 +11876,22 @@ void OpenXrLayer::RefreshResolvedSettings() {
     // turns off with the Enhancements.
     if (!resolved_settings_.core.enabled) {
         resolved_settings_.core.osd.enabled = false;
+    }
+    // OpenXR Toolkit below VectorXR holds every release back until its next
+    // xrEndFrame, then releases every swapchain it held, and writes its
+    // upscaled image only for swapchains that frame shows; its swapchain map
+    // is not safe from two threads. Frame Generation's frames (several per
+    // game frame, from its own thread) would make it release the game's
+    // images without its work, and race the game's swapchain calls.
+    if (openxr_toolkit_below_ && resolved_settings_.framegen.enabled) {
+        resolved_settings_.framegen.enabled = false;
+        if (!openxr_toolkit_framegen_logged_) {
+            openxr_toolkit_framegen_logged_ = true;
+            logger_.Error("Frame Generation is off for this game: OpenXR Toolkit is loaded below VectorXR, and it "
+                          "cannot take Frame Generation's frames. Move OpenXR Toolkit above VectorXR (in the "
+                          "VectorXR app's layer order), turn it off for this game, or set its per-game bypass to "
+                          "use Frame Generation.");
+        }
     }
     framegen_.Configure(resolved_settings_.framegen);
     framegen_.SetConfigured(resolved_settings_.core.enabled && resolved_settings_.framegen.enabled);

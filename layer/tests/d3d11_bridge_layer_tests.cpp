@@ -5706,6 +5706,39 @@ void TestBridgedGpuBoundDynamic(Game& game, bool pimax, bool quad = false) {
     EndCase(game);
 }
 
+// OpenXR Toolkit below VectorXR, not bypassed: Frame Generation stays off.
+// The Toolkit holds every release back until its next xrEndFrame and then
+// releases every swapchain it held, shown in that frame or not, and writes
+// its upscaled image into the runtime's only for swapchains the frame shows
+// (OpenXR-Toolkit layer.cpp xrReleaseSwapchainImage, xrEndFrame). Frame
+// Generation's frames (2-4 per game frame, from its own thread) would make
+// it release the game's images without its work and race its unlocked
+// swapchain map against the game's thread.
+void TestToolkitBelowKeepsFrameGenOff(Game& game) {
+    const std::string name = "toolkit-below-framegen-off";
+    BeginCase(name, game);
+    depthxr::XrApiLayerNextInfo toolkit{};
+    toolkit.structType = depthxr::XR_LOADER_INTERFACE_STRUCT_API_LAYER_NEXT_INFO;
+    toolkit.structVersion = depthxr::XR_API_LAYER_NEXT_INFO_STRUCT_VERSION;
+    toolkit.structSize = sizeof(toolkit);
+    std::strncpy(toolkit.layerName, "XR_APILAYER_MBUCCHIA_toolkit", XR_MAX_API_LAYER_NAME_SIZE - 1);
+    toolkit.nextGetInstanceProcAddr = RtGetInstanceProcAddr;
+    toolkit.nextCreateApiLayerInstance = RtCreateApiLayerInstance;
+    g_layer_below = &toolkit;
+    App app = StartApp();
+    SessionCreate create(game.device.Get(), app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS, name + ": a session");
+    Check(!Peer::Bridge().Active() && !Peer::QueueSubstituted(),
+          name + ": the session is kept as it is (no bridge, no queue of Frame Generation's)");
+    const std::string log = Peer::Log();
+    Check(Contains(log, "OpenXR Toolkit is loaded below VectorXR.") &&
+              Contains(log, "Frame Generation is off for this game: OpenXR Toolkit is loaded below VectorXR"),
+          name + ": the log says why Frame Generation is off");
+    StopApp(app);
+    g_layer_below = nullptr;
+    EndCase(game);
+}
+
 // A runtime swapchain call the layer makes for the game stalls on PimaxXR's
 // swapchain lock (its xrEndFrame holds it for a refresh, called from Frame
 // Generation's thread): the game's other threads' calls into the layer must
@@ -6134,6 +6167,8 @@ int main(int argc, char** argv) {
     const char* only = std::getenv("BRIDGE_TEST_ONLY");
     if (bridged && only && std::string(only) == "runtime-stall-outside-layer-lock") {
         TestRuntimeStallOutsideLayerLock(game);
+    } else if (bridged && only && std::string(only) == "toolkit-below-framegen-off") {
+        TestToolkitBelowKeepsFrameGenOff(game);
     } else if (bridged && only && std::string(only).rfind("gpu-bound-dynamic", 0) == 0) {
         const std::string which = only;
         if (which == "gpu-bound-dynamic" || which == "gpu-bound-dynamic-plain") TestBridgedGpuBoundDynamic(game, false);
@@ -6148,6 +6183,7 @@ int main(int argc, char** argv) {
         TestStatusFile(game);
         TestReleaseOnAnotherThread(game);
         TestRuntimeStallOutsideLayerLock(game);
+        TestToolkitBelowKeepsFrameGenOff(game);
         TestBridgedQuadViewsComposed(game, false);
         TestBridgedQuadViewsComposed(game, true);
         TestBridgedQuadFrameGen(game, "extrapolate");

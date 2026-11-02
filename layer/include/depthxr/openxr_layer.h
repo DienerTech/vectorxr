@@ -146,9 +146,9 @@ class OpenXrLayer {
         // The names of the layers below VectorXR, nearest first.
         std::string layers_below;
         // Where OpenXR Toolkit is: "absent", "below", "above", or
-        // "above-bypassed" (its per-application bypass passes everything
-        // through). Above VectorXR it gets a game's quad views, which it does
-        // not support.
+        // "above-bypassed" / "below-bypassed" (its per-application bypass
+        // passes everything through). Above VectorXR it gets a game's quad
+        // views, which it does not support; below it, Frame Generation's frames.
         std::string openxr_toolkit{"absent"};
         // The space-warp probe (spacewarp_probe.h): VECTORXR_SPACEWARP_PROBE
         // (parsed, and as set: empty when it is not), what the application
@@ -1859,6 +1859,13 @@ class OpenXrLayer {
     // Quadviews stays off and the game runs stereo.
     bool openxr_toolkit_above_{false};
     bool openxr_toolkit_quadviews_logged_{false};
+    // OpenXR Toolkit is below VectorXR for this instance (not bypassed): it
+    // holds every release back until its next xrEndFrame and then releases
+    // every swapchain it held, and is not safe to call from two threads, so
+    // Frame Generation (more frames than the game's, from its own thread)
+    // stays off.
+    bool openxr_toolkit_below_{false};
+    bool openxr_toolkit_framegen_logged_{false};
     bool defer_quadviews_swapchain_releases_{false};
     // Quadviews changes the application's view/swapchain topology. Once a session
     // is created, keep its initial activation state until teardown so a config
