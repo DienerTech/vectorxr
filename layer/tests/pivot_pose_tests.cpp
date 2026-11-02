@@ -129,6 +129,21 @@ public:
     static void Gain(double gain) { OpenXrLayer::Instance().pivotxr_activation_gain_=gain; }
     static bool HasAnchor() { return OpenXrLayer::Instance().pivotxr_translation_anchor_.has_value(); }
     static XrVector3f AnchorPosition() { return OpenXrLayer::Instance().pivotxr_translation_anchor_->position; }
+    static bool HasOrigin() { return OpenXrLayer::Instance().pivotxr_origin_.has_value(); }
+    static bool Engaged() { return OpenXrLayer::Instance().pivotxr_engaged_; }
+    static void Engage() { OpenXrLayer::Instance().pivotxr_engaged_=true; }
+    static XrResult XRAPI_CALL DestroyRuntimeSession(XrSession) { return XR_SUCCESS; }
+    // xrDestroySession of the running session without xrEndSession first (a
+    // VR toggle, a session restart). PimaxXR and VDXR hand the next session
+    // the same handle, (XrSession)1, and can reuse its spaces' addresses.
+    static void DestroyWithoutEnd() {
+        auto& l=OpenXrLayer::Instance();
+        l.active_session_=reinterpret_cast<XrSession>(uintptr_t{1});
+        l.next_destroy_session_=&DestroyRuntimeSession;
+        Expect(l.DestroySession(l.active_session_)==XR_SUCCESS,"xrDestroySession must succeed");
+        l.next_destroy_session_=nullptr;
+        l.active_session_=reinterpret_cast<XrSession>(uintptr_t{1}); // the next session, the same handle
+    }
     static void FullyRelease(XrPosef pose) {
         auto& l=OpenXrLayer::Instance();
         l.pivotxr_activation_gain_=0;
@@ -356,6 +371,18 @@ int main() {
             Expect(Close(Peer::Apply(alternate_raw,nullptr,false,Space(3)).position,alternate_raw.position),
                    "Failed reference conversion must not apply an anchor from the wrong space");
         }
+        // A session destroyed without xrEndSession leaves no Pivot state for
+        // the next: the same handle and LOCAL address would take the old
+        // origin, anchor and engagement as their own.
+        Peer::Prepare(Peer::Mode::GlobalNudge,pi/2);
+        Peer::TrackLocal(Space(2));
+        Peer::Origin(Pose());
+        Peer::Engage();
+        Peer::Apply(Pose());
+        Expect(Peer::HasAnchor() && Peer::HasOrigin() && Peer::Engaged(),"Pivot fixture must be engaged and anchored");
+        Peer::DestroyWithoutEnd();
+        Expect(!Peer::HasAnchor() && !Peer::HasOrigin() && !Peer::Engaged(),
+               "xrDestroySession without xrEndSession must clear Pivot's origin, anchor and engagement");
         // Snap View stacking scenarios live in pivot_snap_tests.cpp.
         std::cout << "Pivot pose regression tests passed\n";
     } catch (const std::exception& error) {

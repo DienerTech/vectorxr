@@ -3108,6 +3108,11 @@ XrResult OpenXrLayer::DestroySession(XrSession session) {
         if (session == active_session_) {
             ResetSwapchainState();
             ResetSessionState();
+            // As at xrEndSession, which an application may skip: PimaxXR and
+            // VDXR give the next session the same handle and can give its
+            // LOCAL space the same address, so a kept origin, anchor or
+            // engagement would pass for the next session's own.
+            ResetPivotActivationState();
         }
     }
 
