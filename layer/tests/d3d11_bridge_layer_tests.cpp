@@ -80,6 +80,9 @@ class D3D11BridgeLayerTestPeer {
     static bool QueueSubstituted() {
         return OpenXrLayer::Instance().framegen_queue_.Active();
     }
+    static std::string QueueState() {
+        return OpenXrLayer::Instance().framegen_queue_.Describe();
+    }
     // What keeping shown layers lazy did in the session so far.
     static FrameGenQueueSubstitution::ShownLayerCounts ShownLayers() {
         return OpenXrLayer::Instance().framegen_queue_.ShownLayers();
@@ -4603,12 +4606,17 @@ struct SideBySideFrameOptions {
     GameLoad* load{nullptr}; // the game's work held back from before the eyes' rendering
     std::function<void()> before_render; // the game's own CPU and GPU work, before the eyes' rendering
     bool unknown_after_depth{false}; // separate from the supported depth-only generation case
+    // With quad_layer: the quad's image is acquired, waited for, drawn and
+    // released after the eyes' release, right before xrEndFrame, as
+    // OpenKneeboard above VectorXR does inside the game's xrEndFrame
+    // (OpenXRKneeboard.cpp), not at the frame's start.
+    bool kneeboard{false};
 };
 
 // The game's time in its calls on the side-by-side session's swapchains
 // (acquire with its wait, release), per kind, milliseconds since cleared.
 struct CallTimes {
-    double eyes_acquire{0}, eyes_release{0}, ui_acquire{0}, ui_release{0}, end{0};
+    double eyes_acquire{0}, eyes_release{0}, ui_acquire{0}, ui_release{0}, end{0}, wait{0}, max_frame{0};
     int frames{0};
 };
 CallTimes g_call_times;
@@ -4626,7 +4634,9 @@ void SideBySideFrame(SideBySideSession& session, Game& game, const SideBySideFra
     const std::string at = "side-by-side frame " + std::to_string(frame);
     XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
     XrFrameState state{XR_TYPE_FRAME_STATE};
+    const auto frame_start = std::chrono::steady_clock::now();
     Check(app.api.wait_frame(app.session, &wait_info, &state) == XR_SUCCESS, at + ": xrWaitFrame");
+    g_call_times.wait += MsSince(frame_start);
     XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
     Check(app.api.begin_frame(app.session, &begin_info) == XR_SUCCESS, at + ": xrBeginFrame");
     XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO};
@@ -4646,7 +4656,7 @@ void SideBySideFrame(SideBySideSession& session, Game& game, const SideBySideFra
     g_call_times.eyes_acquire += MsSince(timed);
     const std::uint32_t depth_index = options.depth ? Acquire(app, session.depth) : 0;
     timed = std::chrono::steady_clock::now();
-    const std::uint32_t ui_index = options.quad_layer ? Acquire(app, session.ui) : 0;
+    std::uint32_t ui_index = options.quad_layer && !options.kneeboard ? Acquire(app, session.ui) : 0;
     g_call_times.ui_acquire += MsSince(timed);
     ++g_call_times.frames;
     if (options.load) {
@@ -4664,6 +4674,11 @@ void SideBySideFrame(SideBySideSession& session, Game& game, const SideBySideFra
     g_call_times.eyes_release += MsSince(timed);
     if (options.depth) {
         Release(app, session.depth);
+    }
+    if (options.quad_layer && options.kneeboard) {
+        timed = std::chrono::steady_clock::now();
+        ui_index = Acquire(app, session.ui);
+        g_call_times.ui_acquire += MsSince(timed);
     }
     if (options.quad_layer) {
         Draw(game, session.ui.images[ui_index], QuadLayerColor(session.ui_releases++));
@@ -4715,7 +4730,10 @@ void SideBySideFrame(SideBySideSession& session, Game& game, const SideBySideFra
     end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
     end.layerCount = options.quad_layer ? 2 : 1;
     end.layers = layers;
+    timed = std::chrono::steady_clock::now();
     const XrResult result = app.api.end_frame(app.session, &end);
+    g_call_times.end += MsSince(timed);
+    g_call_times.max_frame = std::max(g_call_times.max_frame, MsSince(frame_start));
     Check(result == XR_SUCCESS, at + ": xrEndFrame " + std::to_string(result));
     if (options.quad_layer) {
         // A bridged release reaches the runtime at the frame's end.
@@ -5501,8 +5519,9 @@ float4 PSMain(float4 position : SV_Position) : SV_Target {
 // engaged against 48 passing through, the GPU idle through the game's CPU
 // work). On WARP the game's GPU time is held back by gates; on a GPU it is
 // real draws (a GPU's device is never held: gpu-test-bsod-hazard).
-void TestBridgedGpuBoundDynamic(Game& game, bool pimax, bool quad = false) {
-    const std::string name = pimax ? "gpu-bound-dynamic-pimax" : quad ? "gpu-bound-dynamic-quad" : "gpu-bound-dynamic";
+void TestBridgedGpuBoundDynamic(Game& game, bool pimax, bool quad = false, bool kneeboard = false) {
+    const std::string name = std::string(pimax ? "gpu-bound-dynamic-pimax" : quad ? "gpu-bound-dynamic-quad" : "gpu-bound-dynamic") +
+                             (pimax && quad ? "-quad" : "") + (kneeboard ? "-kneeboard" : "");
     const bool software = SoftwareAdapter(game);
     // A headset's eyes (the reporter's: 3456x4035): Frame Generation's GPU work in proportion.
     const std::uint32_t small_width = g_side_by_side_eye_width, small_height = g_side_by_side_eye_height;
@@ -5589,7 +5608,8 @@ void TestBridgedGpuBoundDynamic(Game& game, bool pimax, bool quad = false) {
     SideBySideFrameOptions options;
     // BRIDGE_TEST_QUAD=1: a quad layer the game renders, waits for and shows each frame (OpenKneeboard's).
     const char* quad_env = std::getenv("BRIDGE_TEST_QUAD");
-    options.quad_layer = quad || (quad_env && std::string(quad_env) == "1");
+    options.quad_layer = quad || kneeboard || (quad_env && std::string(quad_env) == "1");
+    options.kneeboard = kneeboard;
     std::vector<Target> extras;
     for (int view = 0; view < extra_views; ++view) {
         extras.push_back(MakeTarget(app, view % 4 < 2 ? XPlaneInfo(932, 1092) : XPlaneInfo(1556, 1636),
@@ -5615,7 +5635,8 @@ void TestBridgedGpuBoundDynamic(Game& game, bool pimax, bool quad = false) {
         std::ostringstream line;
         line << std::fixed << std::setprecision(2) << " [game calls ms/frame: eyes acquire " << t.eyes_acquire / t.frames
              << ", release " << t.eyes_release / t.frames << "; quad acquire " << t.ui_acquire / t.frames
-             << ", release " << t.ui_release / t.frames << "]";
+             << ", release " << t.ui_release / t.frames << "; xrWaitFrame " << t.wait / t.frames << ", xrEndFrame "
+             << t.end / t.frames << "; longest frame " << t.max_frame << "]";
         return line.str();
     };
     const auto pimax_line = [&] {
@@ -5651,10 +5672,43 @@ void TestBridgedGpuBoundDynamic(Game& game, bool pimax, bool quad = false) {
         line << std::fixed << std::setprecision(2) << " [bridge doneWaits/frame " << done_waits_per_frame << "]";
         return line.str();
     };
+    // BRIDGE_TEST_STALL_DUMP=1: a game frame taking over 300 ms prints the
+    // queues' state while it is held (diagnostics).
+    std::atomic<std::int64_t> frame_began{0};
+    std::atomic<bool> watching{true};
+    std::thread watchdog;
+    if (const char* dump = std::getenv("BRIDGE_TEST_STALL_DUMP"); dump && std::string(dump) == "1") {
+        watchdog = std::thread([&] {
+            std::int64_t dumped = 0, dumped_at = 0;
+            while (watching) {
+                Sleep(20);
+                const std::int64_t began = frame_began.load();
+                const std::int64_t now = std::chrono::steady_clock::now().time_since_epoch().count();
+                if (began && now - began > 300'000'000 && (began != dumped || now - dumped_at > 400'000'000)) {
+                    dumped = began;
+                    dumped_at = now;
+                    std::cout << name << ": STALL " << (now - began) / 1'000'000 << " ms\n  queue: " << Peer::QueueState()
+                              << "\n  bridge: " << Peer::Bridge().Summary();
+                    if (pimax) {
+                        std::scoped_lock lock(g_pimax.mutex);
+                        std::cout << "\n  pimax: idle=" << g_pimax.idle << " handed=" << g_pimax.handed
+                                  << " serialized=" << g_pimax.serialized << "/"
+                                  << (g_pimax.serialize ? g_pimax.serialize->GetCompletedValue() : 0)
+                                  << " rendered=" << g_pimax.rendered_value << "/"
+                                  << (g_pimax.rendered ? g_pimax.rendered->GetCompletedValue() : 0);
+                    }
+                    const depthxr::FrameGenStatus status = Peer::FrameGen();
+                    std::cout << "\n  framegen: generated=" << status.generated << " gpuWaits=" << status.gpu_waits
+                              << " reason=" << Peer::FrameGenStatusReason(status) << std::endl;
+                }
+            }
+        });
+    }
     const auto rate = [&](std::chrono::milliseconds duration, const std::function<bool()>& until = {}) {
         const auto start = std::chrono::steady_clock::now();
         int frames = 0;
         while (std::chrono::steady_clock::now() - start < duration) {
+            frame_began = std::chrono::steady_clock::now().time_since_epoch().count();
             SideBySideFrame(session, game, options);
             ++frames;
             if (until && until()) break;
@@ -5682,6 +5736,8 @@ void TestBridgedGpuBoundDynamic(Game& game, bool pimax, bool quad = false) {
     done_waits_line();
     const double during = rate(std::chrono::milliseconds(1500));
     const std::string during_pimax = pimax_line() + calls_line() + done_waits_line();
+    watching = false;
+    if (watchdog.joinable()) watchdog.join();
     const depthxr::FrameGenStatus status = Peer::FrameGen();
     std::cout << name << ": " << through << " fps passing through" << through_pimax << ", " << during
               << " fps engaged" << during_pimax << " (generated " << status.generated << ", gpuWaits "
@@ -6200,6 +6256,9 @@ int main(int argc, char** argv) {
         if (which == "gpu-bound-dynamic" || which == "gpu-bound-dynamic-plain") TestBridgedGpuBoundDynamic(game, false);
         if (which == "gpu-bound-dynamic" || which == "gpu-bound-dynamic-quad") TestBridgedGpuBoundDynamic(game, false, true);
         if (which == "gpu-bound-dynamic" || which == "gpu-bound-dynamic-pimax") TestBridgedGpuBoundDynamic(game, true);
+        if (which == "gpu-bound-dynamic-kneeboard") TestBridgedGpuBoundDynamic(game, false, false, true);
+        if (which == "gpu-bound-dynamic-pimax-quad") TestBridgedGpuBoundDynamic(game, true, true);
+        if (which == "gpu-bound-dynamic-pimax-kneeboard") TestBridgedGpuBoundDynamic(game, true, false, true);
     } else if (bridged) {
         TestKeepGameQueue(game);
         TestBridgeOffSession(game);
@@ -6225,6 +6284,9 @@ int main(int argc, char** argv) {
         // up to 488 ms), cause not found (notes, quad-layer-acquire-throttle).
         TestBridgedGpuBoundDynamic(game, true);
         TestBridgedGpuBoundDynamic(game, false, true);
+        // OpenKneeboard above VectorXR on PimaxXR (the report's setup): its
+        // quad acquired, waited for, drawn and released inside xrEndFrame.
+        TestBridgedGpuBoundDynamic(game, true, false, true);
         if (!skip_negative_controls) {
             TestQuitWhilePresenterHeld(game, false);
             TestQuitWhilePresenterHeld(game, true);
