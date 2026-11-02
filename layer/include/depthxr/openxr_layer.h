@@ -2053,6 +2053,12 @@ class OpenXrLayer {
     std::string eye_gaze_unfocused_outcome_;
     std::optional<XrQuaternionf> eye_gaze_unfocused_last_orientation_;
     uint32_t eye_gaze_unfocused_identical_frames_{0};
+    // The focused session's gaze as last located, at which display time, and
+    // for how many display times in a row it has not changed at all.
+    std::optional<XrQuaternionf> eye_gaze_focused_last_orientation_;
+    XrTime eye_gaze_focused_last_time_{0};
+    uint32_t eye_gaze_focused_identical_frames_{0};
+    bool eye_gaze_focused_frozen_logged_{false};
     uint32_t eye_gaze_unfocused_logs_remaining_{16};
     // Focused and inactive since (reset by valid gaze or focus loss); the
     // "no data" line is logged once per session.

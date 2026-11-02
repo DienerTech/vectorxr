@@ -109,11 +109,14 @@ XrResult XRAPI_CALL State(XrSession, const XrActionStateGetInfo*, XrActionStateP
 XrResult XRAPI_CALL Sources(XrSession, const XrBoundSourcesForActionEnumerateInfo*, uint32_t, uint32_t* count, XrPath*) {
     ++source_queries; *count = 1; return XR_SUCCESS;
 }
+// The gaze, turned `gaze_turn` radians about the head's up axis.
+float gaze_turn = 0.0f;
+XrTime gaze_time = 123456;
 XrResult XRAPI_CALL Locate(XrSpace space, XrSpace, XrTime time, XrSpaceLocation* out) {
     ++gaze_locates;
-    Expect(space == Handle<XrSpace>(8) && time == 123456, "private gaze space and requested time must reach runtime");
+    Expect(space == Handle<XrSpace>(8) && time == gaze_time, "private gaze space and requested time must reach runtime");
     out->locationFlags = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
-    out->pose.orientation.w = 1;
+    out->pose.orientation = {0.0f, std::sin(gaze_turn / 2.0f), 0.0f, std::cos(gaze_turn / 2.0f)};
     return XR_SUCCESS;
 }
 XrResult XRAPI_CALL DestroyAction(XrAction) { return XR_SUCCESS; }
@@ -250,6 +253,8 @@ public:
         suggestions = attachments = syncs = state_queries = source_queries = gaze_locates = 0;
         suggestion_result = attachment_result = sync_result = XR_SUCCESS;
         reject_private = event_pending = runtime_gaze_active = false;
+        gaze_turn = 0.0f;
+        gaze_time = 123456;
         runtime_bindings.clear(); runtime_sets.clear(); runtime_active_sets.clear(); runtime_next = nullptr;
         runtime_attached.clear(); runtime_owner.clear();
     }
@@ -261,6 +266,13 @@ public:
         QuadViewsResolvedSettings settings{}; settings.tracking_mode = QuadViewsTrackingMode::Eye;
         double yaw{}, pitch{};
         return Layer().LocateEyeGazeFocusOffsets(session, Handle<XrSpace>(9), 123456, settings, &yaw, &pitch);
+    }
+    // The gaze for a frame at `time`.
+    static bool GazeAt(XrTime time) {
+        gaze_time = time;
+        QuadViewsResolvedSettings settings{}; settings.tracking_mode = QuadViewsTrackingMode::Eye;
+        double yaw{}, pitch{};
+        return Layer().LocateEyeGazeFocusOffsets(session, Handle<XrSpace>(9), time, settings, &yaw, &pitch);
     }
     static bool GoodAppSync() { return Layer().last_app_action_sync_time_.has_value(); }
     static bool GoodPrivateSync() { return Layer().last_eye_gaze_self_sync_time_.has_value(); }
@@ -727,6 +739,22 @@ int main() {
                "gaze inactive for the whole delay must be reported once per session");
         runtime_gaze_active = true;
         Expect(Peer::Gaze(), "gaze that arrives later must be used");
+        // A tracker that stops while its runtime still reports gaze valid
+        // (PimaxXR's Droolon / aSeeVR path keeps its last sample once ready)
+        // leaves the inset stuck. Two seconds of frames with the very same
+        // gaze are taken as gaze lost; repeated locates of one frame are not
+        // counted, and any change brings the gaze back.
+        Peer::Prepare(); Peer::Resources(); AttachApp(); FocusEvent(XR_SESSION_STATE_FOCUSED);
+        sync_result = XR_SUCCESS; runtime_gaze_active = true; gaze_turn = 0.05f;
+        bool live = true;
+        for (XrTime frame = 0; frame <= 180 && live; ++frame) {
+            live = Peer::GazeAt(1'000'000 + frame * 11'111'111) && Peer::GazeAt(1'000'000 + frame * 11'111'111);
+            Expect(live || frame == 180, "a gaze repeated for under two seconds of frames must be used");
+        }
+        Expect(!live, "the same gaze for two seconds of frames must be taken as lost");
+        gaze_turn = 0.051f;
+        Expect(Peer::GazeAt(3'000'000'000), "a gaze that moves again must be used");
+
         // PimaxXR's native quad views (enable_quad_views): its combined-eye
         // space never locates with flags (ORIENTATION_TRACKED alone is not a
         // valid pose), so it says nothing about gaze. Eye tracking must ask

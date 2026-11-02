@@ -1610,6 +1610,12 @@ constexpr uint32_t kEyeGazeUnavailableLogThreshold = 30;
 // after which the runtime is taken to be returning a stale pose. Live eye
 // tracking jitters every sample. ~1/2s at 90Hz.
 constexpr uint32_t kEyeGazeUnfocusedFrozenFrames = 45;
+// The same, while focused: frames (display times) in a row with the very same
+// gaze, after which a tracker the runtime still reports valid is taken to
+// have stopped (PimaxXR's Droolon / aSeeVR path keeps its last sample once
+// ready). Far past any fixation: live gaze never repeats bit for bit. ~2 s
+// at 90 Hz.
+constexpr uint32_t kEyeGazeFocusedFrozenFrames = 180;
 // How long a focused session's bound eye-gaze input may stay inactive before
 // the log says the eye tracker is sending no data.
 constexpr std::chrono::seconds kEyeGazeNoDataLogDelay{10};
@@ -12765,6 +12771,10 @@ void OpenXrLayer::ResetEyeGazeInputState() {
     eye_gaze_unfocused_last_orientation_.reset();
     eye_gaze_unfocused_identical_frames_ = 0;
     eye_gaze_unfocused_logs_remaining_ = 16;
+    eye_gaze_focused_last_orientation_.reset();
+    eye_gaze_focused_last_time_ = 0;
+    eye_gaze_focused_identical_frames_ = 0;
+    eye_gaze_focused_frozen_logged_ = false;
     eye_gaze_inactive_since_.reset();
     eye_gaze_no_data_logged_ = false;
 }
@@ -13229,6 +13239,35 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
                                action_state.isActive, locate_result, gaze_location.locationFlags);
         if (!located || frozen) {
             log_eye_gaze_diagnostic("session is not focused");
+            return false;
+        }
+    }
+    if (!unfocused_visible && XR_SUCCEEDED(locate_result) &&
+        (gaze_location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) != 0) {
+        // Valid but frozen: see kEyeGazeFocusedFrozenFrames. A frame's
+        // repeated locates (one display time) are not counted.
+        const XrQuaternionf& q = gaze_location.pose.orientation;
+        const auto& last = eye_gaze_focused_last_orientation_;
+        const bool identical = last && last->x == q.x && last->y == q.y && last->z == q.z && last->w == q.w;
+        if (!identical) {
+            eye_gaze_focused_identical_frames_ = 0;
+            eye_gaze_focused_frozen_logged_ = false;
+        } else if (time != eye_gaze_focused_last_time_) {
+            ++eye_gaze_focused_identical_frames_;
+        }
+        eye_gaze_focused_last_orientation_ = q;
+        eye_gaze_focused_last_time_ = time;
+        if (eye_gaze_focused_identical_frames_ >= kEyeGazeFocusedFrozenFrames) {
+            if (!eye_gaze_focused_frozen_logged_) {
+                eye_gaze_focused_frozen_logged_ = true;
+                logger_.Info("Quadviews eye tracking: the runtime has reported the very same gaze for " +
+                             std::to_string(eye_gaze_focused_identical_frames_) +
+                             " frames while calling it valid; the eye tracker has likely stopped. Quadviews uses "
+                             "head focus until the gaze moves again.");
+            }
+            log_eye_gaze_diagnostic("gaze has not changed for " + std::to_string(eye_gaze_focused_identical_frames_) +
+                                        " frames",
+                                    true);
             return false;
         }
     }
