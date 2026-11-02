@@ -60,6 +60,15 @@ constexpr std::chrono::milliseconds kPauseCeiling{1000};
 // this share of the refresh rate of stay_above (what it runs at standing by
 // is not much faster: the generated frames' own cost is about that).
 constexpr double kProbeReach = 0.10;
+// A runtime whose xrEndFrame calls made at once take at least this share of
+// a refresh (smoothed, after kEndPacedSamples of them) holds frames there
+// until its slot; frames then go kEndMarginMs before the slot (RuntimeEnd),
+// more when the slot comes earlier than that, never within kEndMarginCeiling
+// of a whole refresh (made at once again).
+constexpr double kEndPacedShare = 0.5;
+constexpr std::uint32_t kEndPacedSamples = 8;
+constexpr double kEndMarginMs = 2.0;
+constexpr double kEndMarginCeiling = 0.9;
 // Pauses logged one by one per session; later ones only in summaries.
 constexpr std::uint32_t kLoggedPauses = 3;
 // Moves of the lead's ceiling from the history ring logged per session;
@@ -729,6 +738,10 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
             ring_ceiling_env_ = false;
         }
     }
+    // VECTORXR_FRAMEGEN_END_HOLD=off: frames go to a runtime that holds them
+    // in xrEndFrame as soon as they are written (RuntimeEnd).
+    const char* end_hold = std::getenv("VECTORXR_FRAMEGEN_END_HOLD");
+    runtime_end_hold_ = !(end_hold && std::string(end_hold) == "off");
     std::string gpu_gate_setting;
     if (const char* ahead = std::getenv("VECTORXR_FRAMEGEN_GPU_AHEAD"); ahead && *ahead) {
         gpu_gate_setting = ahead;
@@ -1111,6 +1124,11 @@ void FrameGenPresenter::Stop() {
     runtime_waits_ = runtime_begins_ = runtime_ends_ = 0;
     presenter_frame_open_ = false;
     logged_order_guard_ = logged_watchdog_ = false;
+    runtime_end_block_ms_ = runtime_end_margin_ms_ = 0.0;
+    runtime_end_block_samples_ = 0;
+    runtime_end_return_.reset();
+    logged_runtime_end_hold_ = false;
+    summary_evidence_.reset();
     display_offset_periods_ = 0.0;
     display_offset_samples_ = 0;
     slot_index_ = 0;
@@ -1130,6 +1148,7 @@ void FrameGenPresenter::Stop() {
     dynamic_engaged_at_ = {};
     dynamic_probing_ = false;
     passthrough_fps_ = 0.0;
+    dynamic_rate_check_fps_.reset();
     dynamic_reason_.clear();
     dynamic_engagements_ = dynamic_stand_downs_ = dynamic_probes_ = 0;
     standby_since_.reset();
@@ -1142,6 +1161,7 @@ void FrameGenPresenter::Stop() {
     guard_failing_ = {};
     guard_capture_done_ms_.clear();
     gpu_gate_armed_ = false;
+    summary_evidence_.reset();
     gpu_timeouts_in_row_ = 0;
     gpu_reached_mark_ = 0;
     last_capture_mark_ = 0;
@@ -1157,6 +1177,7 @@ void FrameGenPresenter::Stop() {
     gpu_wait_ms_.clear();
     end_call_ms_.clear();
     runtime_end_ms_.clear();
+    runtime_end_hold_ms_.clear();
     synth_lock_ms_.clear();
     ring_short_write_ms_.clear();
     told_lead_sum_ = 0;
@@ -1892,6 +1913,11 @@ bool FrameGenPresenter::ResetFrames() {
     dropped_unbegun_ = 0;
     // A new session starts with no runtime frame in flight.
     runtime_waits_ = runtime_begins_ = runtime_ends_ = 0;
+    runtime_end_block_ms_ = runtime_end_margin_ms_ = 0.0;
+    runtime_end_block_samples_ = 0;
+    runtime_end_return_.reset();
+    logged_runtime_end_hold_ = false;
+    summary_evidence_.reset();
     presenter_frame_open_ = false;
     frames_.clear();
     healthy_streak_ = 0;
@@ -3384,7 +3410,9 @@ std::string FrameGenPresenter::DynamicSummaryLocked() const {
     }
     // standDownHoldS: how long the next stand-down passes frames straight
     // through (doubling after short engagements, DynamicStandDownLocked).
-    return std::string(", dynamic=") + (dynamic_standby_ ? (dynamic_probing_ ? "probing" : "standby") : "engaged") +
+    return std::string(", dynamic=") +
+           (dynamic_standby_ ? (dynamic_probing_ ? "probing" : dynamic_rate_check_fps_ ? "checking" : "standby")
+                             : "engaged") +
            (dynamic_reason_.empty() ? std::string() : " (" + dynamic_reason_ + ")") +
            ", standDownHoldS=" + Number(std::chrono::duration<double>(dynamic_hold_).count(), 1) +
            ", standDowns=" + std::to_string(dynamic_stand_downs_);
@@ -3743,6 +3771,33 @@ void FrameGenPresenter::UpdateDynamicLocked(Clock::time_point now, XrDuration pe
             return;
         }
         const double rate = RateSince(app_frames_, now, multiplier_changed_at_);
+        if (dynamic_rate_check_fps_) {
+            // (e)'s check: the game's rate standing by, against its rate
+            // engaged. Clearly faster standing by, engaging slowed it: a
+            // stand-down, held as any. Not, its scene slowed it: engaged
+            // again at once, the guard judging from its rate now.
+            if (now - multiplier_changed_at_ < policy.settle + policy.engage_after) {
+                return;
+            }
+            const double engaged = *dynamic_rate_check_fps_;
+            dynamic_rate_check_fps_.reset();
+            if (rate > 0.0 && engaged < policy.game_rate_share * rate) {
+                DynamicStandDownLocked(now,
+                                       "the game ran at " + Number(engaged, 1) + " fps engaged against " +
+                                           Number(rate, 1) + " passing through",
+                                       false);
+                return;
+            }
+            if (logger_) {
+                logger_->Info("Frame Generation (dynamic): the game runs at " + Number(rate, 1) +
+                              " fps passing through too, not slowed by engaging (" + Number(engaged, 1) +
+                              " fps engaged).");
+            }
+            if (rate > 0.0 && rate < policy.engage_below * refresh) {
+                DynamicEngageLocked(now, rate, refresh);
+            }
+            return;
+        }
         const double share = dynamic_probing_ ? policy.stay_above : policy.engage_below;
         if (rate > 0.0 && rate < share * refresh) {
             if (!dynamic_below_since_) {
@@ -3803,8 +3858,16 @@ void FrameGenPresenter::UpdateDynamicLocked(Clock::time_point now, XrDuration pe
     const std::uint64_t pauses = totals_.pauses - start.pauses;
     std::vector<double> capture_done = std::move(guard_capture_done_ms_);
     guard_capture_done_ms_.clear();
-    NoteGpuEvidenceLocked(app_frames, totals_.late_gpu - start.late_gpu, std::move(capture_done));
     const bool mostly_pauses = app_frames >= 4 && pauses * 2 >= app_frames;
+    // Nor is a window with a pause evidence for GPU-aware pacing, nor one a
+    // pause ends (judged at the frame after it): a GPU stall's frames before
+    // a pause are late and captured seconds after their refresh (DCS,
+    // 2026-10-22: "2444.7 ms after their refresh" armed it for the session).
+    const bool paused_after =
+        last_app_end_ && now - *last_app_end_ > std::chrono::nanoseconds(PauseLimitLocked());
+    const bool clean = pauses == 0 && !paused_after && totals_.non_renderable == start.non_renderable &&
+                       totals_.unrendered == start.unrendered && totals_.restarts == start.restarts;
+    NoteGpuEvidenceLocked(nullptr, clean, {app_frames, totals_.late_gpu - start.late_gpu, std::move(capture_done)});
     if ((pauses > 0 && !mostly_pauses) || totals_.non_renderable != start.non_renderable ||
         totals_.unrendered != start.unrendered || totals_.restarts != start.restarts) {
         return;
@@ -3825,12 +3888,18 @@ void FrameGenPresenter::UpdateDynamicLocked(Clock::time_point now, XrDuration pe
     // window that still shows more. (b), (c) and (d) then judge nothing;
     // probes check whether standing by would hold.
     const bool winning = passthrough_fps_ > 0.0 && distinct >= passthrough_fps_ + policy.distinct_margin_fps;
-    const std::array<bool, 4> failing{
+    // (e) judges winning engagements too: generated frames fill every
+    // refresh however slow the game's own frames become, so distinct frames
+    // alone cannot tell a game that engaging slowed (DCS through the
+    // Direct3D 11 bridge, 2026-10-22: 44 fps passing through, 17 engaged,
+    // still 90 distinct, engaged until Frame Generation was turned off).
+    const std::array<bool, 5> failing{
         passthrough_fps_ > 0.0 && !winning,
         !winning && generated < policy.generated_share * gap,
         !winning && refreshes > 0 &&
             static_cast<double>(unready) > policy.unready_share * static_cast<double>(refreshes),
         !winning && timed > 0 && static_cast<double>(late) > policy.late_analyses_share * static_cast<double>(timed),
+        passthrough_fps_ > 0.0 && app_rate < policy.game_rate_share * passthrough_fps_,
     };
     for (std::size_t i = 0; i < failing.size(); ++i) {
         guard_failing_[i] = failing[i] ? guard_failing_[i] + 1 : 0;
@@ -3838,20 +3907,28 @@ void FrameGenPresenter::UpdateDynamicLocked(Clock::time_point now, XrDuration pe
     auto percent = [](std::uint64_t part, std::uint64_t whole) {
         return Number(whole ? 100.0 * static_cast<double>(part) / static_cast<double>(whole) : 0.0, 0) + "%";
     };
-    const std::array<std::string, 4> reasons{
+    const std::array<std::string, 5> reasons{
         "it showed " + Number(distinct, 0) + " distinct frames/s against " + Number(passthrough_fps_, 0) +
             " passing through",
         "it generated too few frames (" + Number(generated, 1) + "/s of a " + Number(gap, 1) + "/s gap)",
         "real frames reached the GPU too late (" + percent(unready, refreshes) + " of refreshes)",
         "motion was measured too late (" + percent(late, timed) + " of analyses)",
+        "the game ran at " + Number(app_rate, 1) + " fps engaged against " + Number(passthrough_fps_, 1) +
+            " passing through",
     };
     // Two failing windows in a row: one can be a hitch. A cause failing now
     // (frames on the GPU too late, motion measured too late, too few
-    // generated) is named rather than its effect (no more distinct frames
-    // than the game alone).
-    const std::array<std::size_t, 3> causes{2, 3, 1};
+    // generated, the game slowed) is named rather than its effect (no more
+    // distinct frames than the game alone).
+    const std::array<std::size_t, 4> causes{2, 3, 1, 4};
     for (const std::size_t i : causes) {
         if (guard_failing_[i] >= 2) {
+            if (i == 4) {
+                // A heavier scene slows the game engaged or not: standing by
+                // tells which (UpdateDynamicLocked).
+                DynamicStandDownLocked(now, reasons[i], false, app_rate);
+                return;
+            }
             DynamicStandDownLocked(now, reasons[i], false);
             return;
         }
@@ -3895,6 +3972,7 @@ void FrameGenPresenter::DynamicEngageLocked(Clock::time_point now, double rate, 
     }
     guard_.valid = false;
     guard_failing_ = {};
+    dynamic_rate_check_fps_.reset();
     ++dynamic_engagements_;
     if (probe_failed) {
         dynamic_probing_ = false;
@@ -3912,7 +3990,8 @@ void FrameGenPresenter::DynamicEngageLocked(Clock::time_point now, double rate, 
     }
 }
 
-void FrameGenPresenter::DynamicStandDownLocked(Clock::time_point now, const std::string& reason, bool probe) {
+void FrameGenPresenter::DynamicStandDownLocked(Clock::time_point now, const std::string& reason, bool probe,
+                                               std::optional<double> check_engaged_fps) {
     const FrameGenDynamicPolicy& policy = dynamic_policy_;
     dynamic_standby_ = true;
     dynamic_below_since_.reset();
@@ -3922,6 +4001,16 @@ void FrameGenPresenter::DynamicStandDownLocked(Clock::time_point now, const std:
     guard_.valid = false;
     guard_failing_ = {};
     dynamic_reason_ = reason;
+    dynamic_rate_check_fps_ = check_engaged_fps;
+    if (check_engaged_fps) {
+        // No hold yet: standing by, the game's own rate decides (e).
+        dynamic_probing_ = false;
+        if (logger_) {
+            logger_->Info("Frame Generation (dynamic): " + reason +
+                          "; frames pass straight through while it checks the game's rate standing by.");
+        }
+        return;
+    }
     if (probe) {
         // No hold: the probe engages again as soon as the game falls short.
         dynamic_probing_ = true;
@@ -3959,6 +4048,7 @@ void FrameGenPresenter::DynamicReenableLocked(Clock::time_point now) {
     }
     dynamic_below_since_.reset();
     dynamic_probing_ = false;
+    dynamic_rate_check_fps_.reset();
     multiplier_changed_at_ = now;
     cadence_.clear();
     guard_.valid = false;
@@ -5964,7 +6054,11 @@ void FrameGenPresenter::NoteGpuTimingLocked(std::uint64_t submission, const Pend
         if (timing.capture_end != Clock::time_point{}) {
             const double done = Milliseconds(timing.capture_end - due->real_due);
             AddSample(capture_done_ms_, done);
-            AddSample(guard_capture_done_ms_, done);
+            // Later than a pause, a GPU stall: not a game running frames
+            // ahead, so no evidence for GPU-aware pacing (NoteGpuEvidenceLocked).
+            if (done <= static_cast<double>(PauseLimitLocked()) / 1e6) {
+                AddSample(guard_capture_done_ms_, done);
+            }
             if (due->capture_pending_from != Clock::time_point{}) {
                 auto_capture_pending_ms_[auto_capture_pending_count_++ % auto_capture_pending_ms_.size()] =
                     std::max(0.0, Milliseconds(timing.capture_end - due->capture_pending_from));
@@ -7443,13 +7537,69 @@ XrResult FrameGenPresenter::RuntimeEnd(const FrameGenRuntimeCalls& calls, XrSess
         }
     }
     const auto entered = Clock::now();
+    // A runtime holding frames in xrEndFrame until its slot holds its
+    // swapchain lock meanwhile (PimaxXR): the frame goes shortly before the
+    // slot instead, the runtime's next after its last return.
+    std::optional<Clock::time_point> call_at;
+    double period_ms = 0.0;
+    {
+        std::scoped_lock lock(mutex_);
+        period_ms = static_cast<double>(last_period_) / 1e6;
+        if (runtime_end_hold_ && paced && period_ms > 0.0 && runtime_end_return_ &&
+            runtime_end_block_samples_ >= kEndPacedSamples &&
+            runtime_end_block_ms_ >= kEndPacedShare * period_ms &&
+            runtime_end_margin_ms_ < kEndMarginCeiling * period_ms) {
+            const auto period = std::chrono::nanoseconds(last_period_);
+            auto slot = *runtime_end_return_ + period;
+            while (slot <= entered) slot += period;
+            call_at = slot - std::chrono::duration_cast<Clock::duration>(
+                                 std::chrono::duration<double, std::milli>(std::max(runtime_end_margin_ms_, kEndMarginMs)));
+            if (!logged_runtime_end_hold_ && logger_) {
+                logged_runtime_end_hold_ = true;
+                logger_->Info("Frame Generation: the runtime holds frames in xrEndFrame until its refresh (" +
+                              Number(runtime_end_block_ms_, 1) + " ms of " + Number(period_ms, 1) +
+                              "), and its swapchain calls wait for it meanwhile (PimaxXR with \"Prefer framerate "
+                              "over latency\"): frames now go shortly before the refresh, so the game's swapchain "
+                              "calls are not held (VECTORXR_FRAMEGEN_END_HOLD=off turns this off).");
+            }
+        }
+    }
+    const bool held = call_at && *call_at > entered;
+    if (held) {
+        thread_local struct EndTimer {
+            HANDLE handle = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+            ~EndTimer() {
+                if (handle) CloseHandle(handle);
+            }
+        } timer;
+        SleepUntil(timer.handle, *call_at);
+    }
+    const auto called = Clock::now();
     {
         const PresenterCall call(*this, "xrEndFrame");
         result = calls.submit(session, info);
     }
     {
         std::scoped_lock lock(mutex_);
-        AddSample(runtime_end_ms_, Milliseconds(Clock::now() - entered));
+        const auto returned = Clock::now();
+        const double call_ms = Milliseconds(returned - called);
+        AddSample(runtime_end_ms_, call_ms);
+        runtime_end_return_ = returned;
+        if (held) {
+            AddSample(runtime_end_hold_ms_, Milliseconds(called - entered));
+            // Returned at once: the slot came before the frame (or the
+            // runtime no longer holds frames), so frames go earlier; else
+            // back towards the margin.
+            runtime_end_margin_ms_ = call_ms < 0.5 ? runtime_end_margin_ms_ * 1.5 + 0.5
+                                                    : std::max(kEndMarginMs, runtime_end_margin_ms_ * 0.98);
+        } else if (paced && !call_at) {
+            runtime_end_block_ms_ =
+                runtime_end_block_samples_ == 0 ? call_ms : runtime_end_block_ms_ * 0.9 + call_ms * 0.1;
+            if (runtime_end_block_samples_ < kEndPacedSamples) ++runtime_end_block_samples_;
+            // Made at once (the margin grew to a refresh) and held to the slot
+            // again: the slot is where it was.
+            if (period_ms > 0.0 && call_ms >= kEndPacedShare * period_ms) runtime_end_margin_ms_ = kEndMarginMs;
+        }
         // Counted even when the runtime rejects the frame: it is over either way.
         if (runtime_ends_ < runtime_begins_) {
             ++runtime_ends_;
@@ -8171,17 +8321,29 @@ void FrameGenPresenter::NoteGpuWaitLocked(double waited_ms, bool reached, bool p
     }
 }
 
-void FrameGenPresenter::NoteGpuEvidenceLocked(std::uint64_t real_frames, std::uint64_t late_gpu,
-                                              std::vector<double> capture_done_ms) {
-    if (gpu_gate_armed_ || !gpu_gate_enabled_) {
+void FrameGenPresenter::NoteGpuEvidenceLocked(std::optional<GpuEvidence>* pending, bool clean, GpuEvidence window) {
+    // With `pending`, a window is taken once the next is clean too (a
+    // summary's ends before the pause that follows a stall shows).
+    std::optional<GpuEvidence> taken;
+    if (!pending) {
+        if (clean) taken = std::move(window);
+    } else if (clean) {
+        taken = std::exchange(*pending, std::move(window));
+    } else {
+        pending->reset();
+    }
+    if (!taken || gpu_gate_armed_ || !gpu_gate_enabled_) {
         return;
     }
-    const std::optional<double> capture_done = Median(std::move(capture_done_ms));
-    const bool late_frames = real_frames > 0 && late_gpu * 100 > real_frames;
+    // Late frames say the game runs ahead on its GPU only while that GPU
+    // finishes them: a stalled one (a hitch) finishes none in the window.
+    const bool finishing = taken->capture_done_ms.size() * 2 >= taken->real_frames;
+    const std::optional<double> capture_done = Median(std::move(taken->capture_done_ms));
+    const bool late_frames = taken->real_frames > 0 && taken->late_gpu * 100 > taken->real_frames && finishing;
     if (!late_frames && !(capture_done && *capture_done > 0.0)) {
         return;
     }
-    ArmGpuGateLocked(late_frames ? std::to_string(late_gpu) + " of " + std::to_string(real_frames) +
+    ArmGpuGateLocked(late_frames ? std::to_string(taken->late_gpu) + " of " + std::to_string(taken->real_frames) +
                                        " real frames were not on the GPU when first needed"
                                  : "its frames were captured " + Number(*capture_done, 1) +
                                        " ms after their refresh, typically");
@@ -8780,7 +8942,21 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
     const Totals& start = summary_totals_;
     const auto delta = [&](std::uint64_t Totals::*field) { return totals_.*field - start.*field; };
     const double standby = StandbySecondsLocked(now);
-    NoteGpuEvidenceLocked(delta(&Totals::app_frames), delta(&Totals::late_gpu), capture_done_ms_);
+    // Evidence for GPU-aware pacing as the benefit guard takes it: none from
+    // a window with a pause, a frame without a projection, an unrendered
+    // refresh or a restart, nor a capture later than a pause (a GPU stall's,
+    // DCS 2026-10-22: "captured 2444.7 ms after their refresh" armed it for
+    // the session from this window). Thirty seconds of it are enough.
+    {
+        const double pause_ms = static_cast<double>(PauseLimitLocked()) / 1e6;
+        GpuEvidence evidence{delta(&Totals::app_frames), delta(&Totals::late_gpu), {}};
+        std::copy_if(capture_done_ms_.begin(), capture_done_ms_.end(), std::back_inserter(evidence.capture_done_ms),
+                     [&](double done) { return done <= pause_ms; });
+        NoteGpuEvidenceLocked(&summary_evidence_,
+                              delta(&Totals::pauses) == 0 && delta(&Totals::non_renderable) == 0 &&
+                                  delta(&Totals::unrendered) == 0 && delta(&Totals::restarts) == 0,
+                              std::move(evidence));
+    }
     if (logger_) {
         LogMemoryBudgetLocked();
         // A fixed or Auto rate is the most the game is let run: a slower
@@ -8803,7 +8979,8 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
         // nothing to write. endCallMs: the game's xrEndFrame in Frame
         // Generation. runtimeEndMs: the runtime's xrEndFrame for the frames
         // Frame Generation submits (long where the runtime waits for its
-        // queue). synthLockMs: the presenter thread's wait for the GPU
+        // queue). runtimeEndHeldMs: frames held back before it, for a
+        // runtime that holds them there until its slot. synthLockMs: the presenter thread's wait for the GPU
         // lock before writing. ringExhausted: refreshes whose real frame's
         // images newer captures had replaced (written unmoved, or the frame
         // before). staleSkipped: refreshes not submitted, nothing current to
@@ -8914,6 +9091,7 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
             std::to_string(delta(&Totals::gpu_wait_timeouts)) +
             (gpu_gate_enabled_ && gpu_gate_armed_ ? "" : gpu_gate_enabled_ ? " (not armed)" : " (off)") +
             ", endCallMs=" + MedianAndMax(end_call_ms_) + ", runtimeEndMs=" + MedianAndMax(runtime_end_ms_) +
+            ", runtimeEndHeldMs=" + MedianAndMax(runtime_end_hold_ms_) +
             ", synthLockMs=" + MedianAndMax(synth_lock_ms_) +
             (jit_ ? ", justInTime=1, covers=" + std::to_string(jit_covers_) + ", unwritten=" +
                         std::to_string(delta(&Totals::unwritten_wait)) + "/" +
@@ -8960,6 +9138,7 @@ void FrameGenPresenter::NewSummaryWindowLocked(Clock::time_point now, double sta
     gpu_wait_ms_.clear();
     end_call_ms_.clear();
     runtime_end_ms_.clear();
+    runtime_end_hold_ms_.clear();
     synth_lock_ms_.clear();
     ring_short_write_ms_.clear();
     told_lead_sum_ = 0;

@@ -21,6 +21,7 @@
 #include <d3d11_4.h>
 #include <d3d12.h>
 #include <dxgi1_4.h>
+#include <d3dcompiler.h>
 #include <wrl/client.h>
 #include <openxr/openxr_platform.h>
 
@@ -115,6 +116,15 @@ class D3D11BridgeLayerTestPeer {
     // session is `minimum_age` old (kept across sessions).
     static void SetFrameGenEngagement(std::uint32_t steady_frames, std::chrono::milliseconds minimum_age) {
         OpenXrLayer::Instance().framegen_.SetEngagementPolicy(steady_frames, minimum_age);
+    }
+    static void SetFrameGenDynamicPolicy(const FrameGenDynamicPolicy& policy) {
+        OpenXrLayer::Instance().framegen_.SetDynamicPolicy(policy);
+    }
+    static std::filesystem::path ActiveLogPath() {
+        return OpenXrLayer::Instance().logger_.ActiveLogPath();
+    }
+    static void SetFrameGenSummaryInterval(std::chrono::milliseconds interval) {
+        OpenXrLayer::Instance().framegen_.SetSummaryInterval(interval);
     }
     // Frame Generation's hotkey: whether it is on afterwards.
     static bool ToggleFrameGen() {
@@ -610,6 +620,7 @@ struct StandInSwapchain {
     std::deque<std::uint32_t> acquired;            // oldest first
     std::uint32_t next{0};
     std::optional<std::uint32_t> released; // the image released last
+    std::uint32_t current{0}; // StandIn::pimax: PVR's current image, the next once shown (committed)
     int acquires{0};
     int waits{0};
     int releases{0};
@@ -650,8 +661,15 @@ struct StandIn {
     // xrAcquireSwapchainImage hands out the image released last again, as
     // Pimax's runtime does (else each in turn, as Virtual Desktop's does).
     bool same_image{false};
+    // PimaxXR 0.4.4's frame loop and swapchains (g_pimax): its compositor
+    // thread paces the frames, xrEndFrame waits for it, and a swapchain's
+    // images advance only when shown.
+    bool pimax{false};
     // Where each shown view's image is read besides its centre (fractions of its size).
     std::vector<std::array<float, 2>> probes;
+    // xrEndFrame reads nothing back (it never waits for the frame's work, as
+    // a compositor's does not): a GPU-bound game's frames overlap its CPU work.
+    bool unread{false};
     // Direct3D 11 held back behind it: the next readback is checked to wait
     // for the game's rendering, then the gate is opened.
     Gate* hold{nullptr};
@@ -784,6 +802,150 @@ void SleepUntil(std::chrono::steady_clock::time_point until) {
         std::this_thread::sleep_until(until);
     }
     if (timer) CloseHandle(timer);
+}
+
+// PimaxXR 0.4.4's frame loop with async_submission (its default;
+// pimax-openxr frame.cpp, d3d12_interop.cpp). Its submission thread calls
+// pvr_waitToBeginFrame (the next refresh, once the frame before has rendered)
+// then is idle until xrEndFrame hands it the frame for pvr_endFrame.
+// xrWaitFrame waits for it to be idle, giving up 2 ms early ("running
+// start"); xrEndFrame waits for it to be idle with no timeout, then
+// serializes the session's queue to PVR's submission device (a fence
+// signalled on the queue, which that device waits for before composing).
+// The submission device is a queue of the stand-in's own here.
+struct PimaxCompositor {
+    using Clock = std::chrono::steady_clock;
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool running{false};
+    bool stop{false};
+    bool idle{false};      // no frame handed over (PimaxXR: m_layersForAsyncSubmission empty)
+    bool handed{false};    // a frame handed over, not yet taken
+    UINT64 serialized{0};  // the session queue's value the frame handed over waits for
+    Clock::time_point began{}; // the last pvr_waitToBeginFrame's return
+    ComPtr<ID3D12Fence> serialize; // signalled on the session's queue at xrEndFrame
+    ComPtr<ID3D12CommandQueue> submission;
+    ComPtr<ID3D12Fence> rendered;
+    UINT64 rendered_value{0};
+    std::thread thread;
+    // What the frame loop's calls waited.
+    double end_wait_ms{0.0};
+    double wait_wait_ms{0.0};
+    std::uint64_t ends{0};
+    std::uint64_t waits{0};
+
+    void Start(ID3D12Device* device) {
+        Check(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&serialize))) &&
+                  SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&rendered))),
+              "PimaxXR's fences");
+        D3D12_COMMAND_QUEUE_DESC desc{};
+        Check(SUCCEEDED(device->CreateCommandQueue(&desc, IID_PPV_ARGS(&submission))), "PVR's submission queue");
+        running = true;
+        thread = std::thread([this] { Run(); });
+    }
+    void Stop() {
+        {
+            std::scoped_lock lock(mutex);
+            if (!running) return;
+            stop = true;
+            idle = true;
+        }
+        cv.notify_all();
+        thread.join();
+        WaitFence(rendered.Get(), rendered_value, 2000);
+        std::scoped_lock lock(mutex);
+        running = stop = idle = handed = defer = false;
+        serialize.Reset();
+        submission.Reset();
+        rendered.Reset();
+        serialized = rendered_value = ends = waits = 0;
+        end_wait_ms = wait_wait_ms = 0.0;
+    }
+
+    void Run() {
+        const std::chrono::nanoseconds period(kPeriod);
+        Clock::time_point refresh = Clock::now();
+        for (;;) {
+            // pvr_waitToBeginFrame: the frame before rendered, then the next refresh.
+            WaitFence(rendered.Get(), rendered_value, 1000);
+            const auto now = Clock::now();
+            while (refresh <= now) refresh += period;
+            SleepUntil(refresh);
+            UINT64 value = 0;
+            {
+                std::unique_lock lock(mutex);
+                began = Clock::now();
+                idle = true;
+                cv.notify_all();
+                cv.wait(lock, [&] { return stop || handed; });
+                if (stop) return;
+                handed = false;
+                value = serialized;
+            }
+            // pvr_endFrame: PVR's submission device composes once the session's queue is serialized.
+            submission->Wait(serialize.Get(), value);
+            submission->Signal(rendered.Get(), ++rendered_value);
+        }
+    }
+
+    // defer_frame_wait (its "Prefer framerate over latency"): xrWaitFrame does not wait.
+    bool defer{false};
+
+    // xrWaitFrame's wait (running start).
+    void Wait() {
+        const auto start = Clock::now();
+        std::unique_lock lock(mutex);
+        if (!running || defer) return;
+        const auto until = began + std::chrono::nanoseconds(kPeriod) - std::chrono::microseconds(2000);
+        cv.wait_until(lock, until, [&] { return idle; });
+        wait_wait_ms += std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+        ++waits;
+    }
+
+    // xrEndFrame: waits for the thread to be idle, serializes `queue`, hands the frame over.
+    void End(ID3D12CommandQueue* queue) {
+        const auto start = Clock::now();
+        std::unique_lock lock(mutex);
+        if (!running) return;
+        cv.wait(lock, [&] { return idle; });
+        end_wait_ms += std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+        ++ends;
+        if (stop) return;
+        ++serialized;
+        queue->Signal(serialize.Get(), serialized);
+        idle = false;
+        handed = true;
+        cv.notify_all();
+    }
+};
+PimaxCompositor g_pimax;
+// PimaxXR's m_swapchainsMutex: xrEndFrame holds it across its wait for the
+// submission thread (frame.cpp), and its swapchain calls take it
+// (swapchain.cpp), so a game's swapchain calls wait out the presenter's end.
+std::mutex g_pimax_swapchains;
+std::atomic<std::uint64_t> g_pimax_swapchain_calls{0};
+std::atomic<std::uint64_t> g_pimax_swapchain_wait_us{0};
+std::atomic<std::uint64_t> g_pimax_swapchain_wait_max_us{0};
+std::thread::id g_pimax_game_thread; // the game's calls are the ones timed
+std::unique_lock<std::mutex> PimaxSwapchainsLock(bool timed) {
+    bool pimax = false;
+    {
+        std::scoped_lock lock(g_runtime_mutex);
+        pimax = g_runtime.pimax;
+    }
+    if (!pimax) return {};
+    const auto start = std::chrono::steady_clock::now();
+    std::unique_lock lock(g_pimax_swapchains);
+    if (timed && std::this_thread::get_id() == g_pimax_game_thread) {
+        const auto waited = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
+        g_pimax_swapchain_wait_us += waited;
+        ++g_pimax_swapchain_calls;
+        std::uint64_t max = g_pimax_swapchain_wait_max_us.load();
+        while (waited > max && !g_pimax_swapchain_wait_max_us.compare_exchange_weak(max, waited)) {
+        }
+    }
+    return lock;
 }
 
 StandInSwapchain* FindSwapchain(XrSwapchain swapchain) {
@@ -1262,13 +1424,27 @@ XrResult XRAPI_CALL RtWaitFrame(XrSession, const XrFrameWaitInfo*, XrFrameState*
     }
     std::optional<std::chrono::steady_clock::time_point> until;
     XrTime time = 0;
+    bool pimax = false;
+    {
+        std::scoped_lock lock(g_runtime_mutex);
+        pimax = g_runtime.pimax;
+    }
+    if (pimax) g_pimax.Wait();
     {
         std::scoped_lock lock(g_runtime_mutex);
         StandIn& rt = g_runtime;
         Check(rt.frame_waits == rt.frame_begins, "xrWaitFrame comes only once the frame waited before it began");
         ++rt.frame_waits;
         XrDuration refreshes = 1;
-        if (rt.paced) {
+        if (rt.pimax) {
+            // A refresh on from the last wait's, or as many as went by.
+            const auto now = std::chrono::steady_clock::now();
+            const std::chrono::nanoseconds period(kPeriod);
+            if (rt.refresh != std::chrono::steady_clock::time_point{}) {
+                refreshes = std::max<XrDuration>(1, static_cast<XrDuration>((now - rt.refresh + period / 2) / period));
+            }
+            rt.refresh = now;
+        } else if (rt.paced) {
             // The next refresh, or the first one after a wait that comes late.
             const auto now = std::chrono::steady_clock::now();
             const std::chrono::nanoseconds period(kPeriod);
@@ -1303,9 +1479,36 @@ XrResult XRAPI_CALL RtBeginFrame(XrSession, const XrFrameBeginInfo*) {
 
 XrResult XRAPI_CALL RtEndFrame(XrSession, const XrFrameEndInfo* info) {
     const InCall in(g_begins_ends_in, "xrBeginFrame or xrEndFrame");
+    ComPtr<ID3D12CommandQueue> pimax_queue;
+    {
+        std::scoped_lock lock(g_runtime_mutex);
+        if (g_runtime.pimax) pimax_queue = g_runtime.queue;
+    }
+    const std::unique_lock pimax_swapchains = PimaxSwapchainsLock(false);
+    if (pimax_queue) g_pimax.End(pimax_queue.Get());
     std::scoped_lock lock(g_runtime_mutex);
     StandIn& rt = g_runtime;
     rt.calls.push_back("xrEndFrame");
+    if (rt.pimax) {
+        // Committing a swapchain shown moves PVR's current image on.
+        std::set<XrSwapchain> committed;
+        for (std::uint32_t i = 0; i < info->layerCount; ++i) {
+            const XrCompositionLayerBaseHeader* base = info->layers[i];
+            if (base && base->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+                const auto& projection = *reinterpret_cast<const XrCompositionLayerProjection*>(base);
+                for (std::uint32_t v = 0; v < projection.viewCount; ++v) {
+                    committed.insert(projection.views[v].subImage.swapchain);
+                }
+            } else if (base && base->type == XR_TYPE_COMPOSITION_LAYER_QUAD) {
+                committed.insert(reinterpret_cast<const XrCompositionLayerQuad*>(base)->subImage.swapchain);
+            }
+        }
+        for (const XrSwapchain swapchain : committed) {
+            if (StandInSwapchain* chain = FindSwapchain(swapchain); chain && chain->Count()) {
+                chain->current = (chain->current + 1) % static_cast<std::uint32_t>(chain->Count());
+            }
+        }
+    }
     Check(rt.frame_ends < rt.frame_begins, "xrEndFrame ends a begun frame");
     ++rt.frame_ends;
     ShownFrame frame;
@@ -1338,7 +1541,9 @@ XrResult XRAPI_CALL RtEndFrame(XrSession, const XrFrameEndInfo* info) {
     std::size_t per_view = 1; // texels read per view: the centre, then the probes (Direct3D 12)
     // Nothing is read on a removed device: its fences read as done at once,
     // and WARP may still be running the readback when it is let go.
-    if (rt.device12 && SUCCEEDED(rt.device12->GetDeviceRemovedReason())) {
+    if (rt.unread) {
+        // A compositor whose xrEndFrame never waits for the frame's work.
+    } else if (rt.device12 && SUCCEEDED(rt.device12->GetDeviceRemovedReason())) {
         Sources sources;
         per_view += rt.probes.size();
         for (const ShownView& view : frame.views) {
@@ -1484,6 +1689,7 @@ XrResult XRAPI_CALL RtEnumerateSwapchainImages(XrSwapchain swapchain, std::uint3
 }
 
 XrResult XRAPI_CALL RtAcquire(XrSwapchain swapchain, const XrSwapchainImageAcquireInfo*, std::uint32_t* index) {
+    const std::unique_lock pimax_swapchains = PimaxSwapchainsLock(true);
     std::scoped_lock lock(g_runtime_mutex);
     StandInSwapchain* chain = FindSwapchain(swapchain);
     if (!chain) return XR_ERROR_HANDLE_INVALID;
@@ -1494,7 +1700,12 @@ XrResult XRAPI_CALL RtAcquire(XrSwapchain swapchain, const XrSwapchainImageAcqui
     }
     if (chain->acquired.size() >= chain->Count()) return XR_ERROR_CALL_ORDER_INVALID;
     // Pimax's runtime hands the image back released last, every frame.
-    *index = g_runtime.same_image && chain->released && chain->acquired.empty() ? *chain->released : chain->next;
+    if (g_runtime.pimax) {
+        // PimaxXR resynchronizes to PVR's current image when nothing is acquired.
+        *index = chain->acquired.empty() ? chain->current : chain->next;
+    } else {
+        *index = g_runtime.same_image && chain->released && chain->acquired.empty() ? *chain->released : chain->next;
+    }
     chain->next = (*index + 1) % static_cast<std::uint32_t>(chain->Count());
     chain->acquired.push_back(*index);
     ++chain->acquires;
@@ -1505,6 +1716,7 @@ XrResult XRAPI_CALL RtAcquire(XrSwapchain swapchain, const XrSwapchainImageAcqui
 }
 
 XrResult XRAPI_CALL RtWait(XrSwapchain swapchain, const XrSwapchainImageWaitInfo*) {
+    const std::unique_lock pimax_swapchains = PimaxSwapchainsLock(true);
     std::scoped_lock lock(g_runtime_mutex);
     StandInSwapchain* chain = FindSwapchain(swapchain);
     if (!chain) return XR_ERROR_HANDLE_INVALID;
@@ -1522,6 +1734,7 @@ XrResult XRAPI_CALL RtWait(XrSwapchain swapchain, const XrSwapchainImageWaitInfo
 }
 
 XrResult XRAPI_CALL RtRelease(XrSwapchain swapchain, const XrSwapchainImageReleaseInfo*) {
+    const std::unique_lock pimax_swapchains = PimaxSwapchainsLock(true);
     std::scoped_lock lock(g_runtime_mutex);
     StandIn& rt = g_runtime;
     StandInSwapchain* chain = FindSwapchain(swapchain);
@@ -4239,8 +4452,9 @@ Color QuadLayerColor(int release) {
 }
 
 // Each eye's view of the side-by-side session, and the quad layer's swapchain.
-constexpr std::uint32_t kSideBySideEyeWidth = 128;
-constexpr std::uint32_t kSideBySideEyeHeight = 96;
+// BRIDGE_TEST_EYE=WxH sizes the eyes for the GPU-bound cases.
+std::uint32_t g_side_by_side_eye_width = 128;
+std::uint32_t g_side_by_side_eye_height = 96;
 constexpr std::uint32_t kQuadLayerSize = 128;
 // How long the game's GPU work of a loaded frame takes (three refreshes).
 constexpr DWORD kGameLoadMs = 30;
@@ -4380,8 +4594,20 @@ struct SideBySideFrameOptions {
     bool quad_layer{true};   // the UI rendered, released and submitted as a quad layer after the projection
     bool depth{false};       // depth rendered and chained to each view, its half
     GameLoad* load{nullptr}; // the game's work held back from before the eyes' rendering
+    std::function<void()> before_render; // the game's own CPU and GPU work, before the eyes' rendering
     bool unknown_after_depth{false}; // separate from the supported depth-only generation case
 };
+
+// The game's time in its calls on the side-by-side session's swapchains
+// (acquire with its wait, release), per kind, milliseconds since cleared.
+struct CallTimes {
+    double eyes_acquire{0}, eyes_release{0}, ui_acquire{0}, ui_release{0}, end{0};
+    int frames{0};
+};
+CallTimes g_call_times;
+double MsSince(std::chrono::steady_clock::time_point since) {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - since).count();
+}
 
 // One frame of the X-Plane-shaped game: both eyes rendered into their halves
 // of one image and released, depth likewise, then the UI rendered and
@@ -4408,32 +4634,44 @@ void SideBySideFrame(SideBySideSession& session, Game& game, const SideBySideFra
               located_count == 2,
           at + ": xrLocateViews");
 
+    auto timed = std::chrono::steady_clock::now();
     const std::uint32_t eyes_index = Acquire(app, session.eyes);
+    g_call_times.eyes_acquire += MsSince(timed);
     const std::uint32_t depth_index = options.depth ? Acquire(app, session.depth) : 0;
+    timed = std::chrono::steady_clock::now();
     const std::uint32_t ui_index = options.quad_layer ? Acquire(app, session.ui) : 0;
+    g_call_times.ui_acquire += MsSince(timed);
+    ++g_call_times.frames;
     if (options.load) {
         options.load->HoldGame(game);
+    }
+    if (options.before_render) {
+        options.before_render();
     }
     ClearHalves(game, session.eyes.images[eyes_index], {SideBySideColor(frame, 0), SideBySideColor(frame, 1)});
     if (options.depth) {
         ClearDepth(game, session.depth.images[depth_index], 0);
     }
+    timed = std::chrono::steady_clock::now();
     Release(app, session.eyes);
+    g_call_times.eyes_release += MsSince(timed);
     if (options.depth) {
         Release(app, session.depth);
     }
     if (options.quad_layer) {
         Draw(game, session.ui.images[ui_index], QuadLayerColor(session.ui_releases++));
+        timed = std::chrono::steady_clock::now();
         Release(app, session.ui);
+        g_call_times.ui_release += MsSince(timed);
     }
 
     XrBaseInStructure after_depth{kApplicationStructType};
     std::array<XrCompositionLayerDepthInfoKHR, 2> depth_infos{};
     std::array<XrCompositionLayerProjectionView, 2> views{};
     for (std::uint32_t eye = 0; eye < 2; ++eye) {
-        const XrRect2Di half{{static_cast<std::int32_t>(eye * kSideBySideEyeWidth), 0},
-                             {static_cast<std::int32_t>(kSideBySideEyeWidth),
-                              static_cast<std::int32_t>(kSideBySideEyeHeight)}};
+        const XrRect2Di half{{static_cast<std::int32_t>(eye * g_side_by_side_eye_width), 0},
+                             {static_cast<std::int32_t>(g_side_by_side_eye_width),
+                              static_cast<std::int32_t>(g_side_by_side_eye_height)}};
         views[eye] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
         views[eye].pose = located[eye].pose;
         views[eye].fov = located[eye].fov;
@@ -4520,18 +4758,19 @@ std::string Spread(std::vector<double> values) {
 // otherwise, for what that costs): the quad layer's
 // releases are kept lazy instead, so under the same load no frame of Frame
 // Generation's waits for the game's work on the runtime's queue (the
-// game's next wait on the quad's swapchain waits for its release on the
-// CPU), and every refresh shows the quad's newest finished release, the
-// game's latest or the one before it; the runtime still sees every call on
-// it in order.
+// game's next wait on the quad's swapchain waits on the CPU for its oldest
+// held-back release, only when the image it waits for is the newest the
+// runtime has), and every refresh shows the quad's newest finished release,
+// at most two behind the game's latest (with its three images); the runtime
+// still sees every call on it in order.
 void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy = false) {
     CaseSettings settings;
     settings.frame_multiplier = "2x";
     settings.synthesis_mode = mode;
     BeginCase("side-by-side-framegen-" + mode + (shown_lazy ? "-shown-lazy" : ""), game, settings);
     SetEnv("VECTORXR_FRAMEGEN_SHOWN_LAYERS", shown_lazy ? "" : "off");
-    g_runtime.recommended_width = kSideBySideEyeWidth;
-    g_runtime.recommended_height = kSideBySideEyeHeight;
+    g_runtime.recommended_width = g_side_by_side_eye_width;
+    g_runtime.recommended_height = g_side_by_side_eye_height;
     g_runtime.paced = true;
     {
         std::scoped_lock lock(g_runtime_mutex);
@@ -4556,17 +4795,17 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
           std::string("the log tells once that shown layers are kept lazy, only when they are (") +
               (shown_lazy ? "on" : "off") + ")");
     BeginSession(app);
-    session.eyes = MakeTarget(app, XPlaneInfo(2 * kSideBySideEyeWidth, kSideBySideEyeHeight), "both eyes side by side");
+    session.eyes = MakeTarget(app, XPlaneInfo(2 * g_side_by_side_eye_width, g_side_by_side_eye_height), "both eyes side by side");
     session.ui = MakeTarget(app, XPlaneInfo(kQuadLayerSize, kQuadLayerSize), "the quad layer's");
     XrSwapchainCreateInfo depth_info = DepthInfo(1);
-    depth_info.width = 2 * kSideBySideEyeWidth;
-    depth_info.height = kSideBySideEyeHeight;
+    depth_info.width = 2 * g_side_by_side_eye_width;
+    depth_info.height = g_side_by_side_eye_height;
     session.depth = MakeTarget(app, depth_info, "both eyes' depth side by side");
     {
         std::scoped_lock lock(g_runtime_mutex);
         const StandInSwapchain* eyes = FindSwapchain(session.eyes.swapchain);
         const StandInSwapchain* ui = FindSwapchain(session.ui.swapchain);
-        Check(eyes && ui && eyes->info.width == 2 * kSideBySideEyeWidth && eyes->info.format == 29 &&
+        Check(eyes && ui && eyes->info.width == 2 * g_side_by_side_eye_width && eyes->info.format == 29 &&
                   (eyes->info.usageFlags & XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT) &&
                   (eyes->info.usageFlags & XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT) && ui->info.width == kQuadLayerSize &&
                   (ui->info.usageFlags & XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT),
@@ -4656,8 +4895,8 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
     // layer after the projection (`quad_layer`) showing the game's latest
     // release; Frame Generation's outputs, or the game's image, each eye
     // its own half. How many showed Frame Generation's outputs.
-    constexpr auto kEyeWidth = static_cast<std::int32_t>(kSideBySideEyeWidth);
-    constexpr auto kEyeHeight = static_cast<std::int32_t>(kSideBySideEyeHeight);
+    static const auto kEyeWidth = static_cast<std::int32_t>(g_side_by_side_eye_width);
+    static const auto kEyeHeight = static_cast<std::int32_t>(g_side_by_side_eye_height);
     // Refreshes whose quad layer showed the game's release before its latest.
     std::size_t quad_behind = 0;
     const auto check_shown = [&](std::size_t from, const std::string& at, bool quad_layer) {
@@ -4678,10 +4917,13 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
                       where + ": the quad layer shows " + (extra.quad_texel ? Text(*extra.quad_texel) : "nothing") +
                           ", the game's latest release (" + std::to_string(extra.quad_releases) + ") rendered " +
                           Text(expected));
-                // Lazy, the newest release whose rendering is done: the
-                // game's latest, or the one before it.
+                // Lazy, the newest release whose rendering is done: at most
+                // two behind the game's latest (the game's wait on the quad's
+                // swapchain waits for the oldest of them only when the image
+                // it waits for is the runtime's newest, so a GPU-bound game's
+                // CPU stays a frame ahead of its GPU).
                 const int behind = extra.game_quad_releases - extra.quad_releases;
-                Check(behind <= (shown_lazy ? 1 : 0),
+                Check(behind <= (shown_lazy ? 2 : 0),
                       where + ": the runtime had the game's releases of the quad layer's swapchain but " +
                           std::to_string(behind) + " (" + std::to_string(extra.quad_releases) + " of " +
                           std::to_string(extra.game_quad_releases) + ")");
@@ -4791,7 +5033,7 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
             std::uint64_t moved{0};    // frames Frame Generation generated meanwhile
             std::uint64_t repeated{0}; // refreshes it repeated the frame before at
             depthxr::FrameGenQueueSubstitution::ShownLayerCounts shown; // the quad's, meanwhile
-            std::size_t behind{0}; // refreshes whose quad layer showed the release before the game's latest
+            std::size_t behind{0}; // refreshes whose quad layer showed a release before the game's latest
             double game_ms{0.0};   // the game's 16 frames took
         };
         const auto loaded = [&](bool quad_layer, const std::string& at) {
@@ -4869,14 +5111,15 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
             // The quad layer's releases kept lazy: no frame of Frame
             // Generation's waits for the game's work, with the quad layer or
             // without it. Each of the game's releases of the quad (one a frame)
-            // was held back, its next wait waiting for it on the CPU, on the
-            // runtime's queue only past that wait's bound (far beyond the game's
+            // was held back, a later wait waiting for it on the CPU (when the
+            // image waited for was the runtime's newest), on the runtime's
+            // queue only past that wait's bound (far beyond the game's
             // held-back work).
             const auto counts = [](const Backlog& backlog) {
                 return std::to_string(backlog.shown.releases) + " lazy releases, " +
                        std::to_string(backlog.shown.cpu_waits) + " waited for on the CPU, " +
                        std::to_string(backlog.shown.gpu_waits) + " on the runtime's queue; " +
-                       std::to_string(backlog.behind) + " refreshes showed the release before the game's latest";
+                       std::to_string(backlog.behind) + " refreshes showed a release before the game's latest";
             };
             std::cout << g_case << ": shown layers kept lazy: the game's GPU work held back " << kGameLoadMs
                       << " ms a frame, the runtime's queue waited for it before frames of Frame Generation's ended "
@@ -4888,10 +5131,12 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
                       describe(with_quad));
             // A release whose work outlasts the CPU wait's bound (100 ms: a busy
             // or software GPU) goes on the runtime's queue instead, as designed;
-            // one of six local runs saw one (2026-10-14).
-            Check(with_quad.shown.releases == 16 && with_quad.shown.cpu_waits > 0 && with_quad.shown.gpu_waits <= 2,
+            // one of six local runs saw one (2026-10-14). CPU waits may be
+            // none: a wait for an image the runtime does not show is held
+            // back behind the releases instead (FrameGenQueueSubstitution::Wait).
+            Check(with_quad.shown.releases == 16 && with_quad.shown.gpu_waits <= 2,
                   "GPU-bound, with the quad layer kept lazy: its releases are held back until their work has run, "
-                  "the game's next wait waiting for them on the CPU: " +
+                  "the game's waits held back behind them or waiting for them on the CPU: " +
                       counts(with_quad));
             Check(without_quad.during > 0 && without_quad.waited == 0 && without_quad.shown.releases == 0,
                   "GPU-bound, without the quad layer: no frame of Frame Generation's waits for the game's work: " +
@@ -5049,6 +5294,388 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
     EndCase(game);
 }
 
+// A GPU-bound game's Direct3D 11 frames on a timeline of their own: each
+// frame's work is held back until `gpu` after the one before it finished
+// (or after it was submitted, if later), as a GPU running one frame at a
+// time does, with nothing actually drawn (no real GPU load, no stall of the
+// device: software adapter only).
+struct SerialGameGpu {
+    using Clock = std::chrono::steady_clock;
+    struct Hold {
+        std::unique_ptr<Gate> gate;
+        Clock::time_point due;
+        bool open{false};
+    };
+    std::chrono::microseconds gpu;
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::deque<Hold> holds;
+    Clock::time_point last_due{};
+    bool stop{false};
+    std::thread opener;
+
+    explicit SerialGameGpu(std::chrono::microseconds frame) : gpu(frame) {
+        opener = std::thread([this] {
+            std::unique_lock lock(mutex);
+            for (;;) {
+                const auto next = std::find_if(holds.begin(), holds.end(), [](const Hold& hold) { return !hold.open; });
+                if (stop && next == holds.end()) return;
+                if (next == holds.end()) {
+                    cv.wait(lock);
+                    continue;
+                }
+                if (Clock::now() < next->due) {
+                    cv.wait_until(lock, next->due);
+                    continue;
+                }
+                next->gate->Open();
+                next->open = true;
+                // The game's device may still be past a gate's wait only
+                // once later frames were held behind it: keep a few.
+                while (holds.size() > 16 && holds.front().open) holds.pop_front();
+            }
+        });
+    }
+    ~SerialGameGpu() {
+        {
+            std::scoped_lock lock(mutex);
+            stop = true;
+        }
+        cv.notify_all();
+        opener.join();
+    }
+    void HoldFrame(Game& game) {
+        std::scoped_lock lock(mutex);
+        Hold& hold = holds.emplace_back();
+        hold.gate = std::make_unique<Gate>(g_runtime.device12.Get(), game);
+        hold.gate->HoldGame(game);
+        hold.due = std::max(last_due, Clock::now()) + gpu;
+        last_due = hold.due;
+        cv.notify_all();
+    }
+};
+
+// A GPU-bound game's real Direct3D 11 work on a GPU: full-screen draws on the
+// game's own context, each about `chunk` long (short, so nothing holds the
+// GPU), as many per frame as make up `frame`. Calibrated with timestamps.
+struct GameDraws {
+    Game& game;
+    ComPtr<ID3D11VertexShader> vs;
+    ComPtr<ID3D11PixelShader> ps;
+    ComPtr<ID3D11Texture2D> target;
+    ComPtr<ID3D11RenderTargetView> rtv;
+    ComPtr<ID3D11Buffer> constants;
+    std::uint32_t iterations{64};
+    double chunk_ms{0.0};
+    int chunks{1};
+    static constexpr UINT kSize = 2048;
+
+    GameDraws(Game& g, double frame_ms, double chunk_target_ms = 0.5) : game(g) {
+        static const char source[] = R"(
+cbuffer Load : register(b0) { uint iterations; uint3 pad; };
+float4 VSMain(uint id : SV_VertexID) : SV_Position {
+    const float2 uv = float2((id << 1) & 2, id & 2);
+    return float4(uv * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
+}
+float4 PSMain(float4 position : SV_Position) : SV_Target {
+    float4 v = float4(position.xy * 0.001, 0.5, 1.0);
+    [loop] for (uint i = 0; i < iterations; ++i) { v = frac(v * 1.0001 + v.yzwx * 0.37 + 0.11); }
+    return v;
+}
+)";
+        ComPtr<ID3DBlob> vs_blob, ps_blob;
+        Check(SUCCEEDED(D3DCompile(source, std::strlen(source), "load", nullptr, nullptr, "VSMain", "vs_5_0", 0, 0,
+                                   &vs_blob, nullptr)) &&
+                  SUCCEEDED(D3DCompile(source, std::strlen(source), "load", nullptr, nullptr, "PSMain", "ps_5_0", 0, 0,
+                                       &ps_blob, nullptr)) &&
+                  SUCCEEDED(game.device->CreateVertexShader(vs_blob->GetBufferPointer(), vs_blob->GetBufferSize(),
+                                                            nullptr, &vs)) &&
+                  SUCCEEDED(game.device->CreatePixelShader(ps_blob->GetBufferPointer(), ps_blob->GetBufferSize(),
+                                                           nullptr, &ps)),
+              "the game load's shaders");
+        D3D11_TEXTURE2D_DESC desc{};
+        desc.Width = desc.Height = kSize;
+        desc.MipLevels = desc.ArraySize = 1;
+        desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        desc.SampleDesc.Count = 1;
+        desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+        D3D11_BUFFER_DESC buffer{16, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER, 0, 0, 0};
+        Check(SUCCEEDED(game.device->CreateTexture2D(&desc, nullptr, &target)) &&
+                  SUCCEEDED(game.device->CreateRenderTargetView(target.Get(), nullptr, &rtv)) &&
+                  SUCCEEDED(game.device->CreateBuffer(&buffer, nullptr, &constants)),
+              "the game load's target");
+        double ms = Measure(iterations);
+        while (ms < chunk_target_ms * 0.5 && iterations < (1u << 22)) {
+            iterations *= 2;
+            ms = Measure(iterations);
+        }
+        iterations = std::max<std::uint32_t>(1, static_cast<std::uint32_t>(iterations * chunk_target_ms / std::max(ms, 1e-3)));
+        chunk_ms = Measure(iterations);
+        chunks = std::max(1, static_cast<int>(std::lround(frame_ms / std::max(chunk_ms, 1e-3))));
+    }
+
+    void Bind(std::uint32_t count) {
+        const std::uint32_t data[4]{count, 0, 0, 0};
+        ID3D11DeviceContext* context = game.context.Get();
+        context->UpdateSubresource(constants.Get(), 0, nullptr, data, 0, 0);
+        const D3D11_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(kSize), static_cast<float>(kSize), 0.0f, 1.0f};
+        context->RSSetViewports(1, &viewport);
+        context->OMSetRenderTargets(1, rtv.GetAddressOf(), nullptr);
+        context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        context->IASetInputLayout(nullptr);
+        context->VSSetShader(vs.Get(), nullptr, 0);
+        context->PSSetShader(ps.Get(), nullptr, 0);
+        context->PSSetConstantBuffers(0, 1, constants.GetAddressOf());
+    }
+
+    void Unbind() {
+        ID3D11DeviceContext* context = game.context.Get();
+        ID3D11RenderTargetView* none = nullptr;
+        context->OMSetRenderTargets(1, &none, nullptr);
+        context->VSSetShader(nullptr, nullptr, 0);
+        context->PSSetShader(nullptr, nullptr, 0);
+    }
+
+    // One draw's GPU time at `count` iterations (median of five).
+    double Measure(std::uint32_t count) {
+        ComPtr<ID3D11Query> disjoint, begin, end;
+        const D3D11_QUERY_DESC disjoint_desc{D3D11_QUERY_TIMESTAMP_DISJOINT, 0}, stamp{D3D11_QUERY_TIMESTAMP, 0};
+        Check(SUCCEEDED(game.device->CreateQuery(&disjoint_desc, &disjoint)) &&
+                  SUCCEEDED(game.device->CreateQuery(&stamp, &begin)) && SUCCEEDED(game.device->CreateQuery(&stamp, &end)),
+              "the game load's timing queries");
+        ID3D11DeviceContext* context = game.context.Get();
+        Bind(count);
+        std::vector<double> times;
+        for (int i = 0; i < 5; ++i) {
+            context->Begin(disjoint.Get());
+            context->End(begin.Get());
+            context->Draw(3, 0);
+            context->End(end.Get());
+            context->End(disjoint.Get());
+            D3D11_QUERY_DATA_TIMESTAMP_DISJOINT frequency{};
+            while (context->GetData(disjoint.Get(), &frequency, sizeof(frequency), 0) == S_FALSE) std::this_thread::yield();
+            UINT64 a = 0, b = 0;
+            while (context->GetData(begin.Get(), &a, sizeof(a), 0) == S_FALSE) std::this_thread::yield();
+            while (context->GetData(end.Get(), &b, sizeof(b), 0) == S_FALSE) std::this_thread::yield();
+            if (!frequency.Disjoint && b > a) times.push_back(static_cast<double>(b - a) * 1000.0 / frequency.Frequency);
+        }
+        Unbind();
+        std::sort(times.begin(), times.end());
+        return times.empty() ? 0.0 : times[times.size() / 2];
+    }
+
+    // One frame's work, on the game's context (`share` of it).
+    void Frame(double share = 1.0) {
+        Bind(iterations);
+        const int count = std::max(1, static_cast<int>(std::lround(chunks * share)));
+        for (int chunk = 0; chunk < count; ++chunk) {
+            game.context->Draw(3, 0);
+            if (chunk % 4 == 3) game.context->Flush();
+        }
+        Unbind();
+        game.context->Flush();
+    }
+};
+
+// A DCS-shaped game, GPU-bound at about half the refresh rate (its frame's
+// GPU work 20 ms, its CPU work 9 ms of it before rendering), in Dynamic
+// interpolate through the bridge: engaged, the game must keep most of the
+// rate it ran at passing through (DCS on a 4080 SUPER, 2026-10-22: 44 fps
+// passing through, 17 engaged with the GPU half idle). `pimax`: on PimaxXR
+// 0.4.4's frame loop and swapchains (PimaxCompositor) with "Prefer framerate
+// over latency", the reporter's runtime: its xrEndFrame holds Frame
+// Generation's frames until its refresh with its swapchain lock taken, and
+// the game's swapchain calls must not wait for it (each did, up to a
+// refresh: 36 fps passing through, 13 engaged). `quad`: the game also
+// acquires and waits for a quad layer's image at each frame's start, draws
+// it after releasing the eyes and shows it (OpenKneeboard above VectorXR, or
+// a game's interface): the layer's wait must not wait for the game's last
+// frame's GPU work (it did, for the newest held-back release: 32 fps
+// engaged against 48 passing through, the GPU idle through the game's CPU
+// work). On WARP the game's GPU time is held back by gates; on a GPU it is
+// real draws (a GPU's device is never held: gpu-test-bsod-hazard).
+void TestBridgedGpuBoundDynamic(Game& game, bool pimax, bool quad = false) {
+    const std::string name = pimax ? "gpu-bound-dynamic-pimax" : quad ? "gpu-bound-dynamic-quad" : "gpu-bound-dynamic";
+    const bool software = SoftwareAdapter(game);
+    // A headset's eyes (the reporter's: 3456x4035): Frame Generation's GPU work in proportion.
+    const std::uint32_t small_width = g_side_by_side_eye_width, small_height = g_side_by_side_eye_height;
+    if (const char* eye = std::getenv("BRIDGE_TEST_EYE")) {
+        unsigned width = 0, height = 0;
+        if (std::sscanf(eye, "%ux%u", &width, &height) == 2 && width && height) {
+            g_side_by_side_eye_width = width;
+            g_side_by_side_eye_height = height;
+        }
+    }
+    // The game's GPU and CPU work per frame, and the views it renders into
+    // swapchains of their own before the eyes (DCS: four, 932x1092 and
+    // 1556x1636 pairs), each acquired, rendered and released in turn.
+    // On PimaxXR the game is DCS-shaped (on a 4080 SUPER, 2026-10-22: about
+    // 26 ms of CPU and 27 of GPU a frame, four views besides the eyes); on
+    // WARP, whose Frame Generation takes the CPU's time, a lighter one.
+    double game_gpu_ms = pimax && !software ? 26.0 : 20.0;
+    if (const char* ms = std::getenv("BRIDGE_TEST_GAME_GPU_MS")) game_gpu_ms = std::atof(ms);
+    double game_cpu_ms = !pimax ? 9.0 : software ? 12.0 : 25.0;
+    if (const char* ms = std::getenv("BRIDGE_TEST_GAME_CPU_MS")) game_cpu_ms = std::atof(ms);
+    int extra_views = !pimax ? 0 : software ? 2 : 4;
+    if (const char* views = std::getenv("BRIDGE_TEST_EXTRA_VIEWS")) extra_views = std::atoi(views);
+    CaseSettings settings;
+    settings.frame_multiplier = "dynamic";
+    settings.synthesis_mode = "interpolate";
+    settings.debug_log = true;
+    BeginCase(name, game, settings);
+    g_runtime.recommended_width = g_side_by_side_eye_width;
+    g_runtime.recommended_height = g_side_by_side_eye_height;
+    g_runtime.paced = !pimax;
+    g_runtime.pimax = pimax;
+    g_runtime.unread = true;
+    if (const char* same = std::getenv("BRIDGE_TEST_SAME_IMAGE")) g_runtime.same_image = std::string(same) == "1";
+    Peer::SetFrameGenEngagement(2, std::chrono::milliseconds(0));
+    Peer::UseFrameGenGpu(depthxr::CreateFrameGenGpu);
+    depthxr::FrameGenDynamicPolicy policy;
+    policy.engage_after = std::chrono::milliseconds(60000); // passing through first
+    policy.settle = std::chrono::milliseconds(500);
+    policy.guard_window = std::chrono::milliseconds(1000);
+    policy.hold = std::chrono::milliseconds(60000);
+    policy.probe_after = std::chrono::milliseconds(600000);
+    Peer::SetFrameGenDynamicPolicy(policy);
+    Peer::SetFrameGenSummaryInterval(std::chrono::milliseconds(1000));
+    SideBySideSession session;
+    App& app = session.app;
+    app = StartApp();
+    session.create = std::make_unique<SessionCreate>(game.device.Get(), app.system);
+    Check(app.api.create_session(app.api.instance, &session.create->info, &app.session) == XR_SUCCESS &&
+              Peer::Bridge().Active() && Peer::QueueSubstituted(),
+          name + ": the session is bridged");
+    if (pimax) {
+        std::scoped_lock lock(g_runtime_mutex);
+        g_pimax_game_thread = std::this_thread::get_id();
+        // "Prefer framerate over latency" (the reporter's: xrEndFrame 10.7 ms
+        // for Frame Generation's frames); BRIDGE_TEST_PIMAX_DEFER=0 for PimaxXR's default.
+        const char* defer = std::getenv("BRIDGE_TEST_PIMAX_DEFER");
+        g_pimax.defer = !(defer && std::string(defer) == "0");
+        g_pimax.Start(g_runtime.device12.Get());
+    }
+    BeginSession(app);
+    session.eyes = MakeTarget(app, XPlaneInfo(2 * g_side_by_side_eye_width, g_side_by_side_eye_height), "both eyes side by side");
+    session.ui = MakeTarget(app, XPlaneInfo(kQuadLayerSize, kQuadLayerSize), "the quad layer's");
+    session.depth = MakeTarget(app, DepthInfo(1), "depth");
+    std::optional<SerialGameGpu> gates;
+    std::optional<GameDraws> draws;
+    if (software) {
+        gates.emplace(std::chrono::microseconds(static_cast<long long>(game_gpu_ms * 1000.0)));
+    } else {
+        draws.emplace(game, game_gpu_ms);
+        std::cout << name << ": game load " << draws->chunks << " draws of " << draws->chunk_ms << " ms\n";
+    }
+    SideBySideFrameOptions options;
+    // BRIDGE_TEST_QUAD=1: a quad layer the game renders, waits for and shows each frame (OpenKneeboard's).
+    const char* quad_env = std::getenv("BRIDGE_TEST_QUAD");
+    options.quad_layer = quad || (quad_env && std::string(quad_env) == "1");
+    std::vector<Target> extras;
+    for (int view = 0; view < extra_views; ++view) {
+        extras.push_back(MakeTarget(app, view % 4 < 2 ? XPlaneInfo(932, 1092) : XPlaneInfo(1556, 1636),
+                                    "an extra view's"));
+    }
+    options.before_render = [&] {
+        const double slices = static_cast<double>(extras.size() + 1);
+        const auto cpu = std::chrono::microseconds(static_cast<long long>(game_cpu_ms * 1000.0 / slices));
+        for (const Target& extra : extras) {
+            SleepUntil(std::chrono::steady_clock::now() + cpu);
+            const std::uint32_t index = Acquire(app, extra);
+            if (draws) draws->Frame(1.0 / slices);
+            Clear(game, extra.images[index], {40, 80, 120, 255}, 0);
+            Release(app, extra);
+        }
+        SleepUntil(std::chrono::steady_clock::now() + cpu);
+        if (gates) gates->HoldFrame(game);
+        if (draws) draws->Frame(1.0 / slices);
+    };
+    const auto calls_line = [&] {
+        const CallTimes t = std::exchange(g_call_times, {});
+        if (!t.frames) return std::string();
+        std::ostringstream line;
+        line << std::fixed << std::setprecision(2) << " [game calls ms/frame: eyes acquire " << t.eyes_acquire / t.frames
+             << ", release " << t.eyes_release / t.frames << "; quad acquire " << t.ui_acquire / t.frames
+             << ", release " << t.ui_release / t.frames << "]";
+        return line.str();
+    };
+    const auto pimax_line = [&] {
+        if (!pimax) return std::string();
+        std::scoped_lock lock(g_pimax.mutex);
+        std::ostringstream line;
+        const std::uint64_t calls = g_pimax_swapchain_calls.exchange(0);
+        const std::uint64_t waited_us = g_pimax_swapchain_wait_us.exchange(0);
+        const std::uint64_t max_us = g_pimax_swapchain_wait_max_us.exchange(0);
+        line << std::fixed << std::setprecision(2) << " (PimaxXR xrEndFrame waited "
+             << (g_pimax.ends ? g_pimax.end_wait_ms / g_pimax.ends : 0.0) << " ms, xrWaitFrame "
+             << (g_pimax.waits ? g_pimax.wait_wait_ms / g_pimax.waits : 0.0) << " ms, swapchain calls "
+             << (calls ? waited_us / 1000.0 / calls : 0.0) << " ms on average (" << calls << " calls, at most "
+             << max_us / 1000.0 << " ms))";
+        g_pimax.end_wait_ms = g_pimax.wait_wait_ms = 0.0;
+        g_pimax.ends = g_pimax.waits = 0;
+        return line.str();
+    };
+    const auto rate = [&](std::chrono::milliseconds duration, const std::function<bool()>& until = {}) {
+        const auto start = std::chrono::steady_clock::now();
+        int frames = 0;
+        while (std::chrono::steady_clock::now() - start < duration) {
+            SideBySideFrame(session, game, options);
+            ++frames;
+            if (until && until()) break;
+        }
+        return frames / std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    };
+    const auto engaged = [] {
+        const depthxr::FrameGenStatus status = Peer::FrameGen();
+        return status.threaded && !status.standby;
+    };
+    rate(std::chrono::milliseconds(1000));
+    pimax_line();
+    calls_line();
+    const double through = rate(std::chrono::milliseconds(2000));
+    const std::string through_pimax = pimax_line() + calls_line();
+    Check(Peer::FrameGen().standby, name + ": standing by first");
+    policy.engage_after = std::chrono::milliseconds(500);
+    Peer::SetFrameGenDynamicPolicy(policy);
+    rate(std::chrono::milliseconds(6000), engaged);
+    Check(engaged(), name + ": engages for a game at half the refresh rate");
+    rate(std::chrono::milliseconds(300));
+    pimax_line();
+    calls_line();
+    const double during = rate(std::chrono::milliseconds(1500));
+    const std::string during_pimax = pimax_line() + calls_line();
+    const depthxr::FrameGenStatus status = Peer::FrameGen();
+    std::cout << name << ": " << through << " fps passing through" << through_pimax << ", " << during
+              << " fps engaged" << during_pimax << " (generated " << status.generated << ", gpuWaits "
+              << status.gpu_waits << ", gating " << status.gpu_gating << ")\n";
+    // BRIDGE_TEST_LOG_DIR: the case's log kept (its summaries every second),
+    // before the session's end can discard it.
+    if (const char* keep = std::getenv("BRIDGE_TEST_LOG_DIR")) {
+        std::error_code error;
+        std::filesystem::create_directories(keep, error);
+        std::filesystem::copy_file(Peer::ActiveLogPath(), std::filesystem::path(keep) / (name + ".log"),
+                                   std::filesystem::copy_options::overwrite_existing, error);
+        if (error) std::cout << name << ": the log was not kept (" << error.message() << ")\n";
+    }
+    Check(during >= 0.75 * through, name + ": engaged, the game keeps most of its rate (" + std::to_string(during) +
+                                        " fps against " + std::to_string(through) + " passing through)");
+    for (const Target& extra : extras) {
+        Check(app.api.destroy_swapchain(extra.swapchain) == XR_SUCCESS, "an extra view's swapchain is destroyed");
+    }
+    for (const Target* target : {&session.eyes, &session.ui, &session.depth}) {
+        Check(app.api.destroy_swapchain(target->swapchain) == XR_SUCCESS, "a swapchain is destroyed");
+    }
+    StopApp(app);
+    g_pimax.Stop();
+    Peer::SetFrameGenSummaryInterval(std::chrono::milliseconds(30000));
+    g_side_by_side_eye_width = small_width;
+    g_side_by_side_eye_height = small_height;
+    Peer::UseFrameGenGpu(MakeStandInGpu);
+    Peer::SetFrameGenEngagement(45, std::chrono::milliseconds(3000)); // the presenter's own
+    Peer::SetFrameGenDynamicPolicy({});
+    EndCase(game);
+}
+
 // 15. A game quitting while Frame Generation presents from its own thread,
 // the runtime holding that thread inside xrWaitFrame until the session ends
 // (DCS hung so on quitting, 2026-10-09). With `ends_session` the game ends
@@ -5064,8 +5691,8 @@ void TestQuitWhilePresenterHeld(Game& game, bool ends_session) {
     settings.synthesis_mode = "extrapolate";
     BeginCase(std::string("quit-presenter-held") + (ends_session ? "-session-ended" : ""), game, settings);
     SetEnv("VECTORXR_FRAMEGEN_TEARDOWN_WAIT_MS", "400");
-    g_runtime.recommended_width = kSideBySideEyeWidth;
-    g_runtime.recommended_height = kSideBySideEyeHeight;
+    g_runtime.recommended_width = g_side_by_side_eye_width;
+    g_runtime.recommended_height = g_side_by_side_eye_height;
     g_runtime.paced = true;
     Peer::SetFrameGenEngagement(2, std::chrono::milliseconds(0));
     Peer::UseFrameGenGpu(depthxr::CreateFrameGenGpu);
@@ -5078,7 +5705,7 @@ void TestQuitWhilePresenterHeld(Game& game, bool ends_session) {
           "a bridged session");
     SetEnv("VECTORXR_FRAMEGEN_TEARDOWN_WAIT_MS", "");
     BeginSession(app);
-    session.eyes = MakeTarget(app, XPlaneInfo(2 * kSideBySideEyeWidth, kSideBySideEyeHeight), "both eyes side by side");
+    session.eyes = MakeTarget(app, XPlaneInfo(2 * g_side_by_side_eye_width, g_side_by_side_eye_height), "both eyes side by side");
     SideBySideFrameOptions options;
     options.quad_layer = false;
     int frames = 0;
@@ -5373,7 +6000,13 @@ int main(int argc, char** argv) {
     }
     CheckFrameGenStatusLine();
     const bool bridged = TestBridgedSession(game);
-    if (bridged) {
+    const char* only = std::getenv("BRIDGE_TEST_ONLY");
+    if (bridged && only && std::string(only).rfind("gpu-bound-dynamic", 0) == 0) {
+        const std::string which = only;
+        if (which == "gpu-bound-dynamic" || which == "gpu-bound-dynamic-plain") TestBridgedGpuBoundDynamic(game, false);
+        if (which == "gpu-bound-dynamic" || which == "gpu-bound-dynamic-quad") TestBridgedGpuBoundDynamic(game, false, true);
+        if (which == "gpu-bound-dynamic" || which == "gpu-bound-dynamic-pimax") TestBridgedGpuBoundDynamic(game, true);
+    } else if (bridged) {
         TestKeepGameQueue(game);
         TestBridgeOffSession(game);
         TestRefusedD3D12Session(game);
@@ -5390,6 +6023,12 @@ int main(int argc, char** argv) {
         TestSideBySideFrameGen(game, "interpolate");
         TestSideBySideFrameGen(game, "extrapolate", true);
         TestSideBySideFrameGen(game, "interpolate", true);
+        TestBridgedGpuBoundDynamic(game, false);
+        // The quad case after the PimaxXR one: run just before it on WARP, the
+        // PimaxXR case failed about 3 runs in 8 (a stand-in swapchain call held
+        // up to 488 ms), cause not found (notes, quad-layer-acquire-throttle).
+        TestBridgedGpuBoundDynamic(game, true);
+        TestBridgedGpuBoundDynamic(game, false, true);
         if (!skip_negative_controls) {
             TestQuitWhilePresenterHeld(game, false);
             TestQuitWhilePresenterHeld(game, true);

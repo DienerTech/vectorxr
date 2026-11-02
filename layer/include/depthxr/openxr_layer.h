@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -1120,6 +1121,53 @@ class OpenXrLayer {
     std::optional<TraceQuadSpace> pending_trace_quad_space_;
     D3D11BridgeQuadFrames d3d11_bridge_quad_frames_;
     D3D11BridgeQuadFrames d3d11_bridge_quad_frames_summarized_;
+    // The game's swapchain calls while the bridge is active: how long each
+    // took in the layer and the runtime, for the bridge's summary (a game
+    // blocked inside its own frame, DCS 2026-10-22: 57 ms of a frame with
+    // its thread 41% busy, the GPU half idle).
+    struct BridgeCallTiming {
+        std::atomic<std::uint64_t> calls{0};
+        std::atomic<std::uint64_t> total_ns{0};
+        std::atomic<std::uint64_t> max_ns{0};
+        void Add(std::uint64_t ns) {
+            ++calls;
+            total_ns += ns;
+            for (std::uint64_t seen = max_ns.load(); ns > seen && !max_ns.compare_exchange_weak(seen, ns);) {
+            }
+        }
+        // "avg/max" ms since the last call, then starts over.
+        std::string Take() {
+            const std::uint64_t count = calls.exchange(0);
+            const std::uint64_t total = total_ns.exchange(0);
+            const std::uint64_t most = max_ns.exchange(0);
+            if (!count) return "-";
+            const auto ms = [](double ns) {
+                const long long hundredths = std::llround(ns / 1e4);
+                return std::to_string(hundredths / 100) + "." + (hundredths % 100 < 10 ? "0" : "") +
+                       std::to_string(hundredths % 100);
+            };
+            return ms(static_cast<double>(total) / static_cast<double>(count)) + "/" + ms(static_cast<double>(most));
+        }
+    };
+    std::array<BridgeCallTiming, 3> bridge_call_timing_; // acquire, wait, release
+    class BridgeCallTimer {
+      public:
+        explicit BridgeCallTimer(BridgeCallTiming* timing)
+            : timing_(timing), start_(timing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}) {}
+        ~BridgeCallTimer() {
+            if (timing_) {
+                timing_->Add(static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start_)
+                        .count()));
+            }
+        }
+        BridgeCallTimer(const BridgeCallTimer&) = delete;
+        BridgeCallTimer& operator=(const BridgeCallTimer&) = delete;
+
+      private:
+        BridgeCallTiming* timing_;
+        std::chrono::steady_clock::time_point start_;
+    };
     // Vulkan games with Frame Generation: the session is Direct3D 12 and the
     // game renders into images shared with it (see VulkanBridge); decided at
     // xrCreateSession. Frame Generation runs a Vulkan session only through it.

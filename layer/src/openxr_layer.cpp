@@ -4552,6 +4552,7 @@ XrResult OpenXrLayer::AcquireSwapchainImage(XrSwapchain swapchain,
                                             const XrSwapchainImageAcquireInfo* acquire_info,
                                             uint32_t* index) {
     const auto trace_call = turbo_trace_.Watch("app.acquireImage");
+    const BridgeCallTimer timed(d3d11_bridge_.Active() ? &bridge_call_timing_[0] : nullptr);
     NoteThread(ThreadCensus::Call::AcquireSwapchainImage);
     std::uint32_t image_count = 0;
     {
@@ -4626,6 +4627,7 @@ XrResult OpenXrLayer::AcquireSwapchainImage(XrSwapchain swapchain,
 
 XrResult OpenXrLayer::WaitSwapchainImage(XrSwapchain swapchain, const XrSwapchainImageWaitInfo* wait_info) {
     const auto trace_call = turbo_trace_.Watch("app.waitImage");
+    const BridgeCallTimer timed(d3d11_bridge_.Active() ? &bridge_call_timing_[1] : nullptr);
     NoteThread(ThreadCensus::Call::WaitSwapchainImage);
     {
         // An image acquired ahead is waited for once the one before it is
@@ -4675,6 +4677,7 @@ XrResult OpenXrLayer::WaitSwapchainImage(XrSwapchain swapchain, const XrSwapchai
 XrResult OpenXrLayer::ReleaseSwapchainImage(XrSwapchain swapchain,
                                             const XrSwapchainImageReleaseInfo* release_info) {
     const auto trace_call = turbo_trace_.Watch("app.releaseImage");
+    const BridgeCallTimer timed(d3d11_bridge_.Active() ? &bridge_call_timing_[2] : nullptr);
     NoteThread(ThreadCensus::Call::ReleaseSwapchainImage);
     {
         std::scoped_lock lock(mutex_);
@@ -9378,7 +9381,12 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
                                              d3d11_bridge_quad_frames_summarized_.split);
             }
             d3d11_bridge_quad_frames_summarized_ = d3d11_bridge_quad_frames_;
-            logger_.Info("Frame Generation's Direct3D 11 bridge: " + d3d11_bridge_.Summary() + quad_frames);
+            // The game's swapchain calls this window (avg/max ms each): where a
+            // game slower engaged than passing through spends its frame.
+            const std::string calls = ", gameCallsMs=acquire:" + bridge_call_timing_[0].Take() +
+                                      ",wait:" + bridge_call_timing_[1].Take() +
+                                      ",release:" + bridge_call_timing_[2].Take();
+            logger_.Info("Frame Generation's Direct3D 11 bridge: " + d3d11_bridge_.Summary() + quad_frames + calls);
         }
         if (d3d11_bridge_.Lost(lost)) {
             if (!d3d11_bridge_lost_logged_) {

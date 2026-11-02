@@ -2222,6 +2222,42 @@ struct HorizonLog {
     }
 };
 
+// A session log of its own in the temporary folder (not beside this
+// executable: on a worktree whose build is the installed layer that is the
+// active layer folder), read back once the presenter has stopped.
+struct SessionLog {
+    std::filesystem::path directory;
+    std::unique_ptr<Logger> logger{std::make_unique<Logger>()};
+    std::filesystem::path path; // the log, once Lines closed it
+
+    explicit SessionLog(const std::string& name)
+        : directory(std::filesystem::temp_directory_path() /
+                    ("vectorxr-presenter-test-log-" + std::to_string(GetCurrentProcessId()) + "-" + name)) {
+        std::error_code ignored;
+        std::filesystem::remove_all(directory, ignored);
+        logger->Initialize(directory / "session.log");
+    }
+    ~SessionLog() {
+        logger.reset();
+        std::error_code ignored;
+        std::filesystem::remove_all(directory, ignored);
+    }
+    // The lines holding `text` (closes the log: call once the presenter has
+    // stopped). Later calls read the closed log again.
+    std::vector<std::string> Lines(const std::string& text) {
+        if (logger) {
+            path = logger->ActiveLogPath();
+            logger.reset(); // flushed
+        }
+        std::ifstream file(path);
+        std::vector<std::string> lines;
+        for (std::string line; std::getline(file, line);) {
+            if (line.find(text) != std::string::npos) lines.push_back(line);
+        }
+        return lines;
+    }
+};
+
 // A summary's "key=low/high" (or "key=value": both the same); none when
 // missing or "-".
 std::optional<std::pair<double, double>> SummaryValues(const std::string& line, const std::string& key) {
@@ -6648,6 +6684,7 @@ void TestBenefitGuardBacksOff() {
         StartJit(presenter, gpu, test.mode, FrameGenMultiplier::kDynamic, app, runtime, owned);
         FrameGenDynamicPolicy policy = GuardDynamic();
         test.isolate(policy);
+        policy.game_rate_share = 0.0; // (e): each fault slows the game too (TestBenefitGuardGameSlowedByEngaging)
         presenter.SetDynamicPolicy(policy);
         EngageDynamic(presenter, *app, name);
         RunTicks(*app, 300ms, {1, 2, 2});
@@ -6672,6 +6709,130 @@ void TestBenefitGuardBacksOff() {
     }
 }
 
+// (e) The game itself slowed by engaging: a game passing through at 45 fps
+// that runs at 17 engaged still shows 90 distinct frames a second, the
+// generated ones filling every refresh, so (a)-(d) never fail; the guard
+// passes frames straight through to compare, finds the game faster there,
+// stands down (held as any stand-down), and the game runs at its own rate
+// again. One that keeps most of its rate engaged (45 to 40, Frame
+// Generation's own GPU cost) stays engaged; one whose scene slows it as
+// much passing through is engaged again at once, without a stand-down. DCS
+// on a 4080 SUPER through the Direct3D 11 bridge, 2026-10-22: 44-71 fps
+// passing through, 17 engaged with the GPU half idle, engaged 90 s until
+// Frame Generation was turned off.
+void TestBenefitGuardGameSlowedByEngaging() {
+    struct Case {
+        const char* name;
+        std::chrono::microseconds engaged_work;
+        bool stands_down;
+        bool scene{false}; // the engaged work holds passing through too, once engaged
+    };
+    const auto through_work = std::chrono::microseconds(19'000); // two refreshes: 45 fps passing through
+    const std::vector<Case> cases{
+        {"slowed by engaging", std::chrono::microseconds(58'000), true},
+        {"own cost engaged", std::chrono::microseconds(25'000), false},
+        {"heavier scene", std::chrono::microseconds(58'000), false, true},
+    };
+    for (const FrameGenSynthesisMode mode : {FrameGenSynthesisMode::kInterpolate, FrameGenSynthesisMode::kExtrapolate}) {
+        for (const Case& test : cases) {
+            const std::string name = std::string(test.name) +
+                                     (mode == FrameGenSynthesisMode::kInterpolate ? " (interpolate)" : " (extrapolate)");
+            FrameGenPresenter presenter;
+            GpuLog gpu;
+            Runtime runtime;
+            runtime.paced = true;
+            std::unique_ptr<App> owned;
+            App* app = nullptr;
+            StartJit(presenter, gpu, mode, FrameGenMultiplier::kDynamic, app, runtime, owned);
+            FrameGenDynamicPolicy policy = GuardDynamic();
+            policy.hold = 3000ms; // long enough to see the game's rate standing by
+            presenter.SetDynamicPolicy(policy);
+            // The game's frame takes its engaged time while Frame Generation
+            // presents from its thread, as the DCS frames did on its GPU.
+            bool heavier = false;
+            auto frames = [&](std::chrono::milliseconds duration, const std::function<bool()>& until = {}) {
+                const auto start = std::chrono::steady_clock::now();
+                int count = 0;
+                while (std::chrono::steady_clock::now() - start < duration) {
+                    const XrFrameState state = app->Wait();
+                    app->Begin();
+                    heavier = heavier || (test.scene && Engaged(presenter));
+                    SleepPrecise(std::chrono::steady_clock::now() +
+                                 (heavier || Engaged(presenter) ? test.engaged_work : through_work));
+                    app->Release();
+                    Check(XR_SUCCEEDED(app->End(state.predictedDisplayTime)), name + ": end");
+                    ++count;
+                    if (until && until()) break;
+                }
+                return count / Seconds(std::chrono::steady_clock::now() - start);
+            };
+            frames(3000ms, [&] { return Engaged(presenter); });
+            Check(Engaged(presenter), name + ": dynamic engages for a game at half the refresh rate");
+            frames(4000ms, [&] {
+                const FrameGenStatus now = presenter.Status();
+                return now.dynamic_stand_downs > 0 || now.dynamic_engagements > 1;
+            });
+            frames(300ms); // engaging again takes a few frames
+            FrameGenStatus status = presenter.Status();
+            if (test.scene) {
+                Check(Engaged(presenter) && status.dynamic_stand_downs == 0 && status.dynamic_engagements == 2,
+                      name + ": engaged again at once, no stand-down (" + status.dynamic_reason + ")");
+            } else if (!test.stands_down) {
+                Check(Engaged(presenter) && status.dynamic_stand_downs == 0 && status.dynamic_engagements == 1,
+                      name + ": stays engaged (" + status.dynamic_reason + ")");
+            } else {
+                Check(status.standby && status.dynamic_stand_downs == 1 &&
+                          status.dynamic_reason.find("engaged against") != std::string::npos,
+                      name + ": stands down on the game's own rate (" + status.dynamic_reason + ")");
+                frames(300ms);
+                const double after = frames(700ms);
+                Check(presenter.Status().standby && after > 35.0,
+                      name + ": the game runs at its own rate again (" + std::to_string(after) + " fps)");
+            }
+            presenter.Stop();
+            Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+        }
+    }
+}
+
+// A guard window left out (a pause, a loading frame) is not evidence for
+// GPU-aware pacing either: a GPU stall's frames, captured seconds after
+// their refresh before the game paused, are a hitch, not a game running
+// frames ahead on its GPU (DCS 2026-10-22: a 2.5 s pause with frames
+// "captured 2444.7 ms after their refresh" armed it for the session).
+void TestGpuPacingIgnoresPausedWindows() {
+    SessionLog log("paused-windows");
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kInterpolate, FrameGenMultiplier::kDynamic, app, runtime, owned,
+             log.logger.get());
+    FrameGenDynamicPolicy policy = GuardDynamic();
+    policy.distinct_margin_fps = -1000.0; // always winning: the pauses stand nothing down
+    presenter.SetDynamicPolicy(policy);
+    presenter.SetSummaryInterval(1000ms); // the summaries' windows are evidence too
+    EngageDynamic(presenter, *app, "paused windows");
+    RunTicks(*app, 900ms, {1, 2, 2});
+    Check(Engaged(presenter) && !presenter.Status().gpu_gating, "paused windows: engaged, not holding waits");
+    for (int i = 0; i < 3; ++i) {
+        gpu.capture_lag = 2400ms; // the GPU stalls...
+        RunTicks(*app, 300ms, {1, 2, 2});
+        gpu.capture_lag = 0us;
+        std::this_thread::sleep_for(2500ms); // ...and the game sends nothing
+        RunTicks(*app, 700ms, {1, 2, 2});
+    }
+    const FrameGenStatus status = presenter.Status();
+    presenter.Stop();
+    const std::vector<std::string> armed = log.Lines("holds the game's waits");
+    Check(!status.gpu_gating && status.gpu_waits == 0 && armed.empty(),
+          "paused windows: pauses never arm GPU-aware pacing (" + std::to_string(status.gpu_waits) + " waits" +
+              (armed.empty() ? std::string() : ": " + armed.front()) + ")");
+    Check(!runtime.ordering_violation && !g_release_violation, "paused windows: calls stayed ordered");
+}
+
 // Real frames on the GPU too late for more than (c)'s share of refreshes do
 // not stand down an engagement showing more distinct frames than the game
 // alone (DCS, flight 2: a hitch's late frames in two 2.5 s windows stood
@@ -6688,6 +6849,9 @@ void TestWinningEngagementSurvivesLateCaptures() {
     policy.distinct_margin_fps = -1000.0; // always winning
     policy.generated_share = 0.0;
     policy.late_analyses_share = 2.0;
+    // (e) off: the fake's fixed capture latency holds the game's waits to it
+    // once GPU-aware pacing arms, which a real GPU's queue would not.
+    policy.game_rate_share = 0.0;
     presenter.SetDynamicPolicy(policy);
     EngageDynamic(presenter, *app, "winning late captures");
     RunTicks(*app, 300ms, {1, 2, 2});
@@ -9755,41 +9919,6 @@ constexpr const char* kHalvingDetail = "Runtime holds frames to half rate: check
 constexpr const char* kHalvingReason = "the runtime holds frames to half rate: check its smoothing";
 constexpr const char* kHalvingStandDown = "the runtime holds frames to half rate";
 
-// A session log of its own in the temporary folder (not beside this
-// executable: on a worktree whose build is the installed layer that is the
-// active layer folder), read back once the presenter has stopped.
-struct SessionLog {
-    std::filesystem::path directory;
-    std::unique_ptr<Logger> logger{std::make_unique<Logger>()};
-    std::filesystem::path path; // the log, once Lines closed it
-
-    explicit SessionLog(const std::string& name)
-        : directory(std::filesystem::temp_directory_path() /
-                    ("vectorxr-presenter-test-log-" + std::to_string(GetCurrentProcessId()) + "-" + name)) {
-        std::error_code ignored;
-        std::filesystem::remove_all(directory, ignored);
-        logger->Initialize(directory / "session.log");
-    }
-    ~SessionLog() {
-        logger.reset();
-        std::error_code ignored;
-        std::filesystem::remove_all(directory, ignored);
-    }
-    // The lines holding `text` (closes the log: call once the presenter has
-    // stopped). Later calls read the closed log again.
-    std::vector<std::string> Lines(const std::string& text) {
-        if (logger) {
-            path = logger->ActiveLogPath();
-            logger.reset(); // flushed
-        }
-        std::ifstream file(path);
-        std::vector<std::string> lines;
-        for (std::string line; std::getline(file, line);) {
-            if (line.find(text) != std::string::npos) lines.push_back(line);
-        }
-        return lines;
-    }
-};
 
 // Research switches from %LOCALAPPDATA%\VectorXR\framegen-research.txt (a
 // folder of this test's own, which the policy tests' process never sees):
@@ -15278,6 +15407,8 @@ void RunPolicyTests() {
     RUN(TestDynamicOwnRate);
     RUN(TestDynamicHysteresis);
     RUN(TestBenefitGuardBacksOff);
+    RUN(TestBenefitGuardGameSlowedByEngaging);
+    RUN(TestGpuPacingIgnoresPausedWindows);
     RUN(TestDynamicProbe);
     RUN(TestExtrapolateDuplicateTargetGuard);
     RUN(TestNoExtrapolationAcrossPauses);

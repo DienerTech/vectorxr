@@ -10203,8 +10203,8 @@ void SubstitutionTest(ID3D12Device* device, ID3D12CommandQueue* game_queue) {
 // releases go at once (the runtime's queue waiting for the game's work);
 // after, a release whose work has not run is held back, a frame showing the
 // layer does not get it and the runtime's queue never waits for the game's
-// work, and the game's next wait first waits for it on the CPU (then it
-// goes, before the wait); only once that takes too long does the runtime's
+// work, and the game's next wait for the image the runtime shows first waits
+// for it on the CPU (then it goes, before the wait); only once that takes too long does the runtime's
 // queue wait instead. Off by default: a frame showing it so changes nothing.
 void SubstitutionShownTest(ID3D12Device* device, ID3D12CommandQueue* game_queue) {
     if (!StallChecksAllowed()) {
@@ -10244,6 +10244,10 @@ void SubstitutionShownTest(ID3D12Device* device, ID3D12CommandQueue* game_queue)
     const XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO, nullptr, XR_INFINITE_DURATION};
     const XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
     g_strict = {};
+    // Two images: each wait below is for the image the runtime shows (with
+    // more, a wait for another is held back behind the release instead:
+    // framegen_runtime_queue_tests' ShownLayerPipelinedWaitTest).
+    g_strict.images = 2;
     ComPtr<ID3D12Fence> busy;
     ComPtr<ID3D12Fence> idle;
     ComPtr<ID3D12Fence> marks;

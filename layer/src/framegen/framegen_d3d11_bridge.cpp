@@ -376,7 +376,14 @@ struct D3D11Bridge::Impl {
         if (!adapter || FAILED(adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &memory))) {
             return "unavailable";
         }
-        return std::to_string(MiB(memory.CurrentUsage)) + "/" + std::to_string(MiB(memory.Budget)) + " MiB";
+        std::string text = std::to_string(MiB(memory.CurrentUsage)) + "/" + std::to_string(MiB(memory.Budget)) + " MiB";
+        // The process's system memory on the adapter: it grows when Windows
+        // moves video memory out over the budget (the GPU then waits on it).
+        DXGI_QUERY_VIDEO_MEMORY_INFO shared{};
+        if (SUCCEEDED(adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &shared))) {
+            text += ", sharedMemory=" + std::to_string(MiB(shared.CurrentUsage)) + " MiB";
+        }
+        return text;
     }
 
     std::string Describe(const Swapchain& chain) const {

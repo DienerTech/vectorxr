@@ -290,6 +290,7 @@ struct FrameGenDynamicPolicy {
     double generated_share{0.2};     // (b) generated frames per second over the refreshes the game misses
     double unready_share{0.05};      // (c) refreshes whose real frame was not on the GPU yet, at most
     double late_analyses_share{0.5}; // (d) analyses ending after their frames were needed, at most
+    double game_rate_share{0.75};    // (e) the game's own rate engaged, at least this share of its rate before
 };
 
 // Interpolate's hardware-flow fallback. Tests shorten these times; the
@@ -895,7 +896,10 @@ class FrameGenPresenter {
     // refresh period.
     void UpdateDynamicLocked(std::chrono::steady_clock::time_point now, XrDuration period);
     void DynamicEngageLocked(std::chrono::steady_clock::time_point now, double rate, double refresh);
-    void DynamicStandDownLocked(std::chrono::steady_clock::time_point now, const std::string& reason, bool probe);
+    // With check_engaged_fps (the game's rate engaged, (e)), it stands by
+    // without a hold while the game's rate standing by decides.
+    void DynamicStandDownLocked(std::chrono::steady_clock::time_point now, const std::string& reason, bool probe,
+                                std::optional<double> check_engaged_fps = std::nullopt);
     // Turned back on (toggled, configured, retried after a pause): Dynamic
     // stands by again and judges the game's rate afresh.
     void DynamicReenableLocked(std::chrono::steady_clock::time_point now);
@@ -1164,7 +1168,15 @@ class FrameGenPresenter {
     // Arms GPU-aware pacing once a window shows the game's frames reaching
     // the GPU late (real frames uncaptured when needed, or captures ending
     // after their refresh was due).
-    void NoteGpuEvidenceLocked(std::uint64_t real_frames, std::uint64_t late_gpu, std::vector<double> capture_done_ms);
+    struct GpuEvidence {
+        std::uint64_t real_frames{0};
+        std::uint64_t late_gpu{0};
+        std::vector<double> capture_done_ms;
+    };
+    // `window`'s evidence, if `clean` (no pause, loading, unrendered refresh
+    // or restart); with `pending`, it waits there for the next window and is
+    // taken only if that one is clean too.
+    void NoteGpuEvidenceLocked(std::optional<GpuEvidence>* pending, bool clean, GpuEvidence window);
     // Wakes the presenter thread and app threads waiting on slots.
     void WakeSlots();
     // Every runtime frame call goes through these, so the presenter knows the
@@ -1546,6 +1558,7 @@ class FrameGenPresenter {
     std::chrono::steady_clock::time_point dynamic_engaged_at_{};
     bool dynamic_probing_{false};
     double passthrough_fps_{0.0}; // the game's own rate when Dynamic last engaged
+    std::optional<double> dynamic_rate_check_fps_; // (e): its rate engaged, while standing by checks it
     std::string dynamic_reason_;
     std::uint64_t dynamic_engagements_{0};
     std::uint64_t dynamic_stand_downs_{0};
@@ -1639,7 +1652,7 @@ class FrameGenPresenter {
         Totals totals;
     };
     GuardWindow guard_;
-    std::array<std::uint32_t, 4> guard_failing_{}; // windows in a row each trigger (a)-(d) failed
+    std::array<std::uint32_t, 5> guard_failing_{}; // windows in a row each trigger (a)-(e) failed
     std::vector<double> guard_capture_done_ms_;
 
     // GPU-aware pacing (VECTORXR_FRAMEGEN_GPU_AHEAD: off, 0, 1, 2 or
@@ -1650,6 +1663,9 @@ class FrameGenPresenter {
     // no capture running meanwhile (a slow GPU is held for, a stuck one not).
     bool gpu_gate_enabled_{true};
     bool gpu_gate_armed_{false};
+    // The last summary window's evidence for GPU-aware pacing, pending the
+    // next window (NoteGpuEvidenceLocked).
+    std::optional<GpuEvidence> summary_evidence_;
     void ArmGpuGateLocked(const std::string& why);
     int gpu_frames_ahead_{1};
     std::uint32_t gpu_timeouts_in_row_{0};
@@ -2154,6 +2170,21 @@ class FrameGenPresenter {
     std::vector<double> end_call_ms_;
     std::vector<double> runtime_end_ms_;
     std::vector<double> synth_lock_ms_;
+    // A runtime whose xrEndFrame holds each frame until its own slot
+    // (PimaxXR with defer_frame_wait, as its async submission waits there)
+    // holds its swapchain lock all that time, and the game's swapchain calls
+    // wait for it. Its frames are then submitted shortly before the slot
+    // (RuntimeEnd): `runtime_end_block_ms_` is how long its calls made at
+    // once took (smoothed), `runtime_end_return_` the last one's return, and
+    // `runtime_end_margin_ms_` how long before the slot a frame goes.
+    // `runtime_end_hold_ms_`: since the last summary, how long frames waited.
+    double runtime_end_block_ms_{0.0};
+    std::uint32_t runtime_end_block_samples_{0};
+    std::optional<std::chrono::steady_clock::time_point> runtime_end_return_;
+    double runtime_end_margin_ms_{0.0};
+    std::vector<double> runtime_end_hold_ms_;
+    bool runtime_end_hold_{true}; // VECTORXR_FRAMEGEN_END_HOLD (on unless "off")
+    bool logged_runtime_end_hold_{false};
     // Since the last summary, for the game's frames (ThreadedWaitLocked,
     // ThreadedEndJit):
     std::uint64_t told_lead_sum_{0};      // the leads told, summed
