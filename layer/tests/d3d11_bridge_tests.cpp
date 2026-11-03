@@ -1478,6 +1478,7 @@ void MeasureDepthCost(Game& game) {
     };
     const Size sizes[] = {
         {"iRacing (D16 6904x3184)", DXGI_FORMAT_D16_UNORM, 6904, 3184, 1},
+        {"iRacing's size as D32 (6904x3184)", DXGI_FORMAT_D32_FLOAT, 6904, 3184, 1},
         {"UEVR double wide (D32S8 5120x2560)", DXGI_FORMAT_D32_FLOAT_S8X24_UINT, 5120, 2560, 1},
         {"two slices (D24S8 2x2560x2560)", DXGI_FORMAT_D24_UNORM_S8_UINT, 2560, 2560, 2},
     };
@@ -1531,6 +1532,14 @@ void MeasureDepthCost(Game& game) {
         UINT64 frequency12 = 0;
         queue->GetTimestampFrequency(&frequency12);
 
+        // The GPU's clocks up first: an idle GPU's first milliseconds of work
+        // run several times slower.
+        for (int release = 0; release < 90; ++release) {
+            bridge.Acquired(swapchain, static_cast<std::uint32_t>(release) % 3);
+            Check(bridge.Released(swapchain), std::string(size.name) + ": warmed");
+        }
+        Check(bridge.WaitIdle(10000) && GameRuns(game), std::string(size.name) + ": warm-up finished");
+
         std::vector<double> copy_ms, ready_ms;
         for (int iteration = 0; iteration < 40; ++iteration) {
             const std::uint32_t index = static_cast<std::uint32_t>(iteration) % 3;
@@ -1553,6 +1562,7 @@ void MeasureDepthCost(Game& game) {
             Check(bridge.Released(swapchain), std::string(size.name) + ": copied");
             game.context->End(after11.Get());
             game.context->End(disjoint.Get());
+            game.context->Flush(); // the end stamp right after the copy, not at a later flush
             ID3D12CommandList* second[] = {lists[1].Get()};
             queue->ExecuteCommandLists(1, second);
             Check(bridge.WaitIdle(10000) && GameRuns(game), std::string(size.name) + ": finished");
@@ -1579,9 +1589,31 @@ void MeasureDepthCost(Game& game) {
         const auto worst = [](const std::vector<double>& values) {
             return values.empty() ? -1.0 : *std::max_element(values.begin(), values.end());
         };
+        // Back to back, as a session releases one image after another: the
+        // bridge's queue's time from before the first release to the last
+        // drawn, per release (the copies and draws of releases overlapping as
+        // they may).
+        constexpr int kBackToBack = 30;
+        ID3D12CommandList* first[] = {lists[0].Get()};
+        queue->ExecuteCommandLists(1, first);
+        for (int release = 0; release < kBackToBack; ++release) {
+            bridge.Acquired(swapchain, static_cast<std::uint32_t>(release) % 3);
+            Check(bridge.Released(swapchain), std::string(size.name) + ": copied back to back");
+        }
+        ID3D12CommandList* second[] = {lists[1].Get()};
+        queue->ExecuteCommandLists(1, second);
+        Check(bridge.WaitIdle(10000) && GameRuns(game), std::string(size.name) + ": back to back finished");
+        void* mapped = nullptr;
+        Check(SUCCEEDED(stamp_buffer->Map(0, nullptr, &mapped)), "map the timestamps");
+        UINT64 span[2]{};
+        std::memcpy(span, mapped, sizeof(span));
+        stamp_buffer->Unmap(0, nullptr);
+        const double per_release =
+            1000.0 * static_cast<double>(span[1] - span[0]) / static_cast<double>(frequency12) / kBackToBack;
         std::cout << "depth cost " << size.name << ": Direct3D 11 copy " << median(copy_ms) << " ms (max "
                   << worst(copy_ms) << "), release to runtime image drawn " << median(ready_ms) << " ms (max "
-                  << worst(ready_ms) << "), " << bridge.Describe(swapchain) << '\n';
+                  << worst(ready_ms) << "), back to back " << per_release << " ms a release, "
+                  << bridge.Describe(swapchain) << '\n';
         CheckClean(bridge, game, std::string("depth cost ") + size.name);
         Check(bridge.RemoveSwapchain(swapchain), std::string(size.name) + ": removed");
         bridge.End();
