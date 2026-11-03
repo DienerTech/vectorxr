@@ -532,7 +532,11 @@ void Clear(Game& game, ID3D11Texture2D* texture, const Color& color, std::uint32
     game.context->ClearRenderTargetView(target.Get(), rgba);
 }
 
-void ClearDepth(Game& game, ID3D11Texture2D* texture, std::uint32_t slice) {
+// The depth Frame clears its depth target's first slice to (the second to
+// half of it): a test sets it per frame to see each frame's depth arrive.
+float g_frame_depth = 0.5f;
+
+void ClearDepth(Game& game, ID3D11Texture2D* texture, std::uint32_t slice, float value = 0.5f) {
     D3D11_DEPTH_STENCIL_VIEW_DESC view{};
     view.Format = DXGI_FORMAT_D32_FLOAT;
     view.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2DARRAY;
@@ -540,7 +544,7 @@ void ClearDepth(Game& game, ID3D11Texture2D* texture, std::uint32_t slice) {
     view.Texture2DArray.ArraySize = 1;
     ComPtr<ID3D11DepthStencilView> target;
     Check(SUCCEEDED(game.device->CreateDepthStencilView(texture, &view, &target)), "a depth view of an image");
-    game.context->ClearDepthStencilView(target.Get(), D3D11_CLEAR_DEPTH, 0.5f, 0);
+    game.context->ClearDepthStencilView(target.Get(), D3D11_CLEAR_DEPTH, value, 0);
 }
 
 // Direct3D 11 still works: an event query after a flush completes.
@@ -636,8 +640,12 @@ struct ShownView {
     std::uint32_t slice{0};
     XrStructureType next_type{XR_TYPE_UNKNOWN}; // the first structure of the view's chain
     bool depth{false};                          // the chain had XrCompositionLayerDepthInfoKHR
+    XrSwapchain depth_swapchain{XR_NULL_HANDLE}; // ...naming this depth swapchain
+    std::uint32_t depth_slice{0};               // ...and slice
+    XrStructureType after_depth{XR_TYPE_UNKNOWN}; // ...followed by this structure
     std::optional<Color> texel;                 // the centre of the image released last
     std::vector<Color> probed;                  // its texels at StandIn::probes
+    std::optional<float> depth_value;           // the centre of the depth image released last (Direct3D 12)
 };
 
 struct ShownFrame {
@@ -1033,6 +1041,7 @@ struct Source {
     ID3D12Resource* image{nullptr};
     std::uint32_t slice{0};
     std::array<float, 2> at{0.5f, 0.5f};
+    bool depth{false}; // a depth image (D32): in the depth-write state while the runtime holds it
 };
 using Sources = std::vector<Source>;
 
@@ -1072,14 +1081,17 @@ bool SubmitReadback(ID3D12CommandQueue* queue, ID3D12Fence* fence, UINT64& fence
                                          IID_PPV_ARGS(&readback.list)))) {
         return false;
     }
-    // Colour images are render targets whenever the runtime holds them.
+    // Colour images are render targets whenever the runtime holds them, depth
+    // images depth targets.
     std::vector<D3D12_RESOURCE_BARRIER> barriers;
     for (const Source& texel : sources) {
         if (std::none_of(barriers.begin(), barriers.end(), [&](const D3D12_RESOURCE_BARRIER& barrier) {
                 return barrier.Transition.pResource == texel.image;
             })) {
-            barriers.push_back(
-                Transition(texel.image, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE));
+            barriers.push_back(Transition(texel.image,
+                                          texel.depth ? D3D12_RESOURCE_STATE_DEPTH_WRITE
+                                                      : D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                          D3D12_RESOURCE_STATE_COPY_SOURCE));
         }
     }
     readback.list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
@@ -1089,7 +1101,14 @@ bool SubmitReadback(ID3D12CommandQueue* queue, ID3D12Fence* fence, UINT64& fence
         source.SubresourceIndex = sources[i].slice * image.MipLevels;
         D3D12_TEXTURE_COPY_LOCATION destination{readback.buffer.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
         destination.PlacedFootprint.Offset = kReadbackStride * i;
-        destination.PlacedFootprint.Footprint = {image.Format, 1, 1, 1, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT};
+        DXGI_FORMAT format = image.Format;
+        if (sources[i].depth) {
+            // A depth plane copies through its own format (D32_FLOAT's: R32_TYPELESS).
+            D3D12_PLACED_SUBRESOURCE_FOOTPRINT plane{};
+            device->GetCopyableFootprints(&image, source.SubresourceIndex, 1, 0, &plane, nullptr, nullptr, nullptr);
+            format = plane.Footprint.Format;
+        }
+        destination.PlacedFootprint.Footprint = {format, 1, 1, 1, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT};
         const UINT x = TexelAt(sources[i].at[0], static_cast<UINT>(image.Width));
         const UINT y = TexelAt(sources[i].at[1], image.Height);
         const D3D12_BOX box{x, y, 0, x + 1, y + 1, 1};
@@ -1625,7 +1644,14 @@ XrResult XRAPI_CALL RtEndFrame(XrSession, const XrFrameEndInfo* info) {
             const auto* chain = static_cast<const XrBaseInStructure*>(view.next);
             shown.next_type = chain ? chain->type : XR_TYPE_UNKNOWN;
             for (; chain; chain = chain->next) {
-                shown.depth = shown.depth || chain->type == XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR;
+                if (chain->type == XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR) {
+                    const auto& depth = *reinterpret_cast<const XrCompositionLayerDepthInfoKHR*>(chain);
+                    shown.depth = true;
+                    shown.depth_swapchain = depth.subImage.swapchain;
+                    shown.depth_slice = depth.subImage.imageArrayIndex;
+                    const auto* after = static_cast<const XrBaseInStructure*>(depth.next);
+                    shown.after_depth = after ? after->type : XR_TYPE_UNKNOWN;
+                }
             }
             frame.views.push_back(shown);
         }
@@ -1655,7 +1681,23 @@ XrResult XRAPI_CALL RtEndFrame(XrSession, const XrFrameEndInfo* info) {
                 sources.push_back({image, view.slice, probe});
             }
         }
+        // Then each view's depth, as a compositor reprojecting with it reads it.
+        std::vector<std::size_t> depth_views;
+        for (std::size_t i = 0; !sources.empty() && i < frame.views.size(); ++i) {
+            const StandInSwapchain* chain = FindSwapchain(frame.views[i].depth_swapchain);
+            if (chain && chain->released && !chain->images12.empty()) {
+                sources.push_back({chain->images12[*chain->released].Get(), frame.views[i].depth_slice, {0.5f, 0.5f},
+                                   true});
+                depth_views.push_back(i);
+            }
+        }
         read = !sources.empty() && ReadBack12(sources, frame, texels);
+        for (std::size_t i = 0; read && i < depth_views.size(); ++i) {
+            const Color& texel = texels[frame.views.size() * per_view + i];
+            float value = 0.0f;
+            std::memcpy(&value, texel.data(), sizeof(value));
+            frame.views[depth_views[i]].depth_value = value;
+        }
     } else if (rt.device11) {
         std::vector<std::pair<ID3D11Texture2D*, std::uint32_t>> sources;
         for (const ShownView& view : frame.views) {
@@ -2271,8 +2313,8 @@ XrResult Frame(App& app, Game& game, const std::vector<const Target*>& targets, 
         Draw(game, targets[i]->images[indices[i]], colors[i]);
     }
     if (depth) {
-        ClearDepth(game, depth->images[depth_index], 0);
-        ClearDepth(game, depth->images[depth_index], 1);
+        ClearDepth(game, depth->images[depth_index], 0, g_frame_depth);
+        ClearDepth(game, depth->images[depth_index], 1, g_frame_depth * 0.5f);
     }
     for (std::size_t i = 0; i < targets.size(); ++i) {
         if (hold && i + 1 == targets.size()) {
@@ -2996,11 +3038,14 @@ void CheckFrames(App& app, Game& game, Target& left, Target& right) {
     }
 }
 
-// 4. Depth on a bridged session stays the game's: its swapchain's calls reach
-// the runtime, its depth never reaches submitted frames.
+// 4. Depth on a bridged session reaches the runtime: its swapchain's calls go
+// on, each frame's views name it (with the rest of their chains), and the
+// runtime's depth image holds the frame's depth when it reads it, each eye
+// its slice.
 void CheckDepth(App& app, Game& game, Target& left, Target& right, Target& depth) {
-    Check(Peer::Bridge().Bridged(depth.swapchain) && Peer::Bridge().Unmirrored(depth.swapchain),
-          "the depth swapchain is the game's own");
+    Check(Peer::Bridge().Bridged(depth.swapchain) && !Peer::Bridge().Unmirrored(depth.swapchain) &&
+              Contains(Peer::Bridge().Describe(depth.swapchain), "mode=depth,"),
+          "the depth swapchain is mirrored: " + Peer::Bridge().Describe(depth.swapchain));
     for (ID3D11Texture2D* image : depth.images) {
         D3D11_TEXTURE2D_DESC desc{};
         image->GetDesc(&desc);
@@ -3008,9 +3053,16 @@ void CheckDepth(App& app, Game& game, Target& left, Target& right, Target& depth
                   desc.Format == DXGI_FORMAT_R32_TYPELESS,
               "the game gets typeless depth images");
     }
+    {
+        std::scoped_lock lock(g_runtime_mutex);
+        const StandInSwapchain* runtime = FindSwapchain(depth.swapchain);
+        Check(runtime && (runtime->info.usageFlags & XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT),
+              "the runtime's depth swapchain is asked for as a depth target");
+    }
     constexpr int kFrames = 8;
     for (int frame = 0; frame < kFrames; ++frame) {
         const std::vector<Color> colors{FrameColor(frame + 10, 0), FrameColor(frame + 10, 1)};
+        g_frame_depth = 0.1f + 0.1f * static_cast<float>(frame);
         const XrResult result = Frame(app, game, {&left, &right}, colors, {{{&left, 0}, {&right, 0}}}, &depth,
                                      nullptr, true); // explicit unknown metadata: preserve it in pass-through
         Check(result == XR_SUCCESS, "depth frame " + std::to_string(frame) + ": xrEndFrame " + std::to_string(result));
@@ -3018,18 +3070,29 @@ void CheckDepth(App& app, Game& game, Target& left, Target& right, Target& depth
         Check(shown.views.size() == 2, "depth frame: two views");
         for (int eye = 0; eye < 2; ++eye) {
             const ShownView& view = shown.views[eye];
-            Check(!view.depth, "the runtime gets no depth in a bridged session's views");
-            Check(view.next_type == kApplicationStructType,
-                  "the rest of a view's chain reaches the runtime: " + std::to_string(view.next_type));
+            const float expected = eye == 0 ? g_frame_depth : g_frame_depth * 0.5f;
+            Check(view.depth && view.depth_swapchain == depth.swapchain &&
+                      view.depth_slice == static_cast<std::uint32_t>(eye),
+                  "the runtime gets each view's depth in a bridged session");
+            Check(view.after_depth == kApplicationStructType,
+                  "the rest of a view's chain reaches the runtime after its depth: " +
+                      std::to_string(view.after_depth));
+            Check(view.depth_value && *view.depth_value == expected,
+                  "depth frame " + std::to_string(frame) + " eye " + std::to_string(eye) + ": the runtime's depth " +
+                      (view.depth_value ? std::to_string(*view.depth_value) : "unread") + ", rendered " +
+                      std::to_string(expected));
             Check(Near(view.texel, colors[eye]),
                   "depth frame " + std::to_string(frame) + " eye " + std::to_string(eye) + ": the runtime shows " +
                       (view.texel ? Text(*view.texel) : "nothing") + ", rendered " + Text(colors[eye]));
         }
     }
+    g_frame_depth = 0.5f;
     const StandInSwapchain* runtime = FindSwapchain(depth.swapchain);
     Check(runtime && runtime->acquires == kFrames && runtime->waits == kFrames && runtime->releases == kFrames,
           "the depth swapchain's acquires, waits and releases reach the runtime");
-    Check(Contains(Peer::Log(), "keeps the game's depth to itself"), "the log tells depth is left out");
+    Check(!Contains(Peer::Log(), "keeps the game's depth to itself"), "the log tells of no depth left out");
+    Check(SummaryValue(Peer::Bridge().Summary(), "depthCopies") == static_cast<std::uint64_t>(kFrames),
+          "a depth copy per frame: " + Peer::Bridge().Summary());
     // CheckFrames' 10 frames, CheckRenderAfterRelease's 16 and
     // CheckAcquireAhead's two releases before these.
     Check(Contains(Peer::Bridge().Describe(left.swapchain), "copies=" + std::to_string(10 + 16 + 2 + kFrames)),
@@ -3203,6 +3266,56 @@ void TestReleaseOnAnotherThread(Game& game) {
     Target right = MakeTarget(app, ColorInfo(), "the right eye");
     CheckReleaseOnAnotherThread(app, game, left, right);
     StopApp(app);
+    EndCase(game);
+}
+
+// 4b. VECTORXR_D3D11_BRIDGE_DEPTH=private: depth stays the game's own, as
+// before the bridge mirrored it. Its swapchain's calls reach the runtime; its
+// depth never reaches submitted frames, the rest of each view's chain does.
+void TestPrivateDepthSession(Game& game) {
+    BeginCase("private-depth", game);
+    SetEnv("VECTORXR_D3D11_BRIDGE_DEPTH", "private");
+    App app = StartApp();
+    SessionCreate create(game.device.Get(), app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS && Peer::Bridge().Active(),
+          "private depth: a bridged session");
+    BeginSession(app);
+    Target left = MakeTarget(app, ColorInfo(), "the left eye");
+    Target right = MakeTarget(app, ColorInfo(), "the right eye");
+    Target depth = MakeTarget(app, DepthInfo(2), "depth");
+    Check(Peer::Bridge().Bridged(depth.swapchain) && Peer::Bridge().Unmirrored(depth.swapchain) &&
+              Contains(Peer::Bridge().Describe(depth.swapchain), "VECTORXR_D3D11_BRIDGE_DEPTH=private"),
+          "the depth swapchain is the game's own: " + Peer::Bridge().Describe(depth.swapchain));
+    constexpr int kFrames = 6;
+    for (int frame = 0; frame < kFrames; ++frame) {
+        const std::vector<Color> colors{FrameColor(frame + 30, 0), FrameColor(frame + 30, 1)};
+        const XrResult result = Frame(app, game, {&left, &right}, colors, {{{&left, 0}, {&right, 0}}}, &depth,
+                                     nullptr, true); // explicit unknown metadata: preserve it in pass-through
+        Check(result == XR_SUCCESS, "private depth frame " + std::to_string(frame) + ": xrEndFrame " +
+                                        std::to_string(result));
+        const ShownFrame& shown = g_runtime.frames.back();
+        Check(shown.views.size() == 2, "private depth frame: two views");
+        for (int eye = 0; eye < 2; ++eye) {
+            const ShownView& view = shown.views[eye];
+            Check(!view.depth, "the runtime gets no private depth in a bridged session's views");
+            Check(view.next_type == kApplicationStructType,
+                  "the rest of a view's chain reaches the runtime: " + std::to_string(view.next_type));
+            Check(Near(view.texel, colors[eye]), "private depth frame " + std::to_string(frame) + " eye " +
+                                                     std::to_string(eye) + ": the runtime shows " +
+                                                     (view.texel ? Text(*view.texel) : "nothing"));
+        }
+    }
+    {
+        std::scoped_lock lock(g_runtime_mutex);
+        const StandInSwapchain* runtime = FindSwapchain(depth.swapchain);
+        Check(runtime && runtime->acquires == kFrames && runtime->waits == kFrames && runtime->releases == kFrames,
+              "the private depth swapchain's acquires, waits and releases reach the runtime");
+    }
+    Check(Contains(Peer::Log(), "keeps the game's depth to itself"), "the log tells depth is left out");
+    Check(SummaryValue(Peer::Bridge().Summary(), "depthCopies") == 0, "no depth copies: " + Peer::Bridge().Summary());
+    CheckValidation(game, "private depth");
+    StopApp(app);
+    SetEnv("VECTORXR_D3D11_BRIDGE_DEPTH", "");
     EndCase(game);
 }
 
@@ -4924,8 +5037,8 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
               "the runtime's swapchains are the bridge's copy destinations, whatever usage the game asked for");
     }
     Check(Peer::Bridge().Bridged(session.eyes.swapchain) && Peer::Bridge().Bridged(session.ui.swapchain) &&
-              Peer::Bridge().Unmirrored(session.depth.swapchain),
-          "both colour swapchains are bridged, depth is the game's own");
+              Peer::Bridge().Bridged(session.depth.swapchain) && !Peer::Bridge().Unmirrored(session.depth.swapchain),
+          "both colour swapchains and depth are bridged, depth mirrored");
 
     // What the stand-in saw of each frame: its layers, and the runtime's
     // queue reaching it (with the quad layer read there).
@@ -5288,7 +5401,7 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
     // Depth in the same shape (one swapchain, each view's depth its half):
     // colour still captured and shown through Frame Generation; then, Frame
     // Generation toggled off, the game's frames reach the runtime as they
-    // are, without the bridge-private depth. Unknown metadata is checked
+    // are, with the depth the bridge mirrors. Unknown metadata is checked
     // separately below, once supported depth has passed generation.
     settle({});
     const depthxr::FrameGenStatus before_depth = Peer::FrameGen();
@@ -5315,10 +5428,18 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
         std::scoped_lock lock(g_runtime_mutex);
         for (std::size_t i = depth_from; i < g_runtime.frames.size(); ++i) {
             for (const ShownView& view : g_runtime.frames[i].views) {
-                Check(!view.depth, "depth: the runtime gets no depth in a bridged session's views");
+                // Frame Generation's own frames carry no depth (they show its
+                // image); any frame that does carries the game's.
+                if (view.depth) {
+                    Check(view.depth_swapchain == session.depth.swapchain && view.depth_value &&
+                              *view.depth_value == 0.5f,
+                          "depth: a view's depth is the game's (" +
+                              (view.depth_value ? std::to_string(*view.depth_value) : std::string("unread")) + ")");
+                }
                 if (i >= as_is_from) {
-                    Check(view.next_type == XR_TYPE_UNKNOWN,
-                          "depth-only, Frame Generation off: the stripped view has no other metadata");
+                    Check(view.depth && view.next_type == XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR &&
+                              view.after_depth == XR_TYPE_UNKNOWN,
+                          "depth-only, Frame Generation off: the view has its depth and no other metadata");
                 }
             }
         }
@@ -5326,9 +5447,9 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
         Check(depth && depth->releases == 26, "depth: the depth swapchain's releases reach the runtime");
     }
     std::string log = Peer::Log();
-    Check(Contains(log, "keeps the game's depth to itself"), "depth: the log tells depth is left out");
+    Check(!Contains(log, "keeps the game's depth to itself"), "depth: the log tells of no depth left out");
 
-    for (const Target* target : {&session.eyes, &session.ui}) {
+    for (const Target* target : {&session.eyes, &session.ui, &session.depth}) {
         const std::string describe = Peer::Bridge().Describe(target->swapchain);
         Check(Contains(describe, "skippedCopies=0"), "every release copied: " + describe);
     }
@@ -5378,8 +5499,8 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
             Check(g_runtime.frames.size() >= unknown_from + 6, "unknown metadata frames reached the runtime");
             for (std::size_t i = unknown_from; i < g_runtime.frames.size(); ++i) {
                 for (const ShownView& view : g_runtime.frames[i].views) {
-                    Check(!view.depth && view.next_type == kApplicationStructType,
-                          "the bridge strips private depth and preserves the following unknown metadata");
+                    Check(view.depth && view.after_depth == kApplicationStructType,
+                          "mirrored depth and the unknown metadata after it reach the runtime");
                 }
             }
         }
@@ -6395,6 +6516,7 @@ int main(int argc, char** argv) {
         TestDestroyInstanceWithSession(game);
         TestStatusFile(game);
         TestReleaseOnAnotherThread(game);
+        TestPrivateDepthSession(game);
         TestRuntimeStallOutsideLayerLock(game);
         TestToolkitBelowKeepsFrameGenOff(game);
         TestBridgedQuadViewsComposed(game, false);

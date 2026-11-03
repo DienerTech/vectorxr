@@ -102,6 +102,12 @@ DXGI_FORMAT DepthReadFormat(DXGI_FORMAT storage) {
     }
 }
 
+// A depth twin's format: D16's depth fits R16_UNORM exactly (half the
+// memory of iRacing's 6904x3184 depth images), every other R32_FLOAT.
+DXGI_FORMAT DepthTwinFormat(DXGI_FORMAT storage) {
+    return storage == DXGI_FORMAT_R16_TYPELESS ? DXGI_FORMAT_R16_UNORM : DXGI_FORMAT_R32_FLOAT;
+}
+
 // The depth-stencil view format of a runtime's depth image, typed or
 // typeless: what the bridge's draw writes it through.
 DXGI_FORMAT DepthTargetFormat(DXGI_FORMAT format) {
@@ -251,7 +257,7 @@ struct D3D11Bridge::Impl {
     enum class Mode {
         kTwin,    // rendered into the twin
         kResolve, // multisampled: rendered privately, resolved into the twin at release
-        kDepth,   // depth: rendered privately, copied into an R32_FLOAT twin at release and drawn into the runtime's
+        kDepth,   // depth: rendered privately, copied into a twin at release and drawn into the runtime's
         kPrivate, // depth the bridge cannot mirror: rendered privately, never reaches the runtime's images
     };
     // A recording of the copy of a twin into the runtime's image (for depth,
@@ -753,10 +759,11 @@ struct D3D11Bridge::Impl {
         return true;
     }
 
-    // A depth image's twin (R32_FLOAT, shared, opened on the game's device),
-    // the views each pass uses and the first recording of its draw. The
-    // chain's descriptor heaps hold `index`'s views.
+    // A depth image's twin (DepthTwinFormat, shared, opened on the game's
+    // device), the views each pass uses and the first recording of its draw.
+    // The chain's descriptor heaps hold `index`'s views.
     bool MakeDepthTwin(Swapchain& chain, Image& image, std::uint32_t index, std::string& reason) {
+        const DXGI_FORMAT twin_format = DepthTwinFormat(chain.storage);
         D3D12_HEAP_PROPERTIES heap{};
         heap.Type = D3D12_HEAP_TYPE_DEFAULT;
         D3D12_RESOURCE_DESC desc{};
@@ -765,7 +772,7 @@ struct D3D11Bridge::Impl {
         desc.Height = chain.height;
         desc.DepthOrArraySize = static_cast<UINT16>(chain.array_size);
         desc.MipLevels = 1;
-        desc.Format = DXGI_FORMAT_R32_FLOAT;
+        desc.Format = twin_format;
         desc.SampleDesc.Count = 1;
         desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
         // Direct3D 11 opens it only as a render target, and writes it as an
@@ -802,7 +809,7 @@ struct D3D11Bridge::Impl {
         hr = device11->CreateShaderResourceView(image.private11.Get(), &read, &image.depth_read11);
         if (SUCCEEDED(hr)) {
             D3D11_UNORDERED_ACCESS_VIEW_DESC write{};
-            write.Format = DXGI_FORMAT_R32_FLOAT;
+            write.Format = twin_format;
             write.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2DARRAY;
             write.Texture2DArray.ArraySize = chain.array_size;
             hr = device11->CreateUnorderedAccessView(image.twin11.Get(), &write, &image.twin_write11);
@@ -814,7 +821,7 @@ struct D3D11Bridge::Impl {
 
         const UINT read_size = device12->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         D3D12_SHADER_RESOURCE_VIEW_DESC twin_read{};
-        twin_read.Format = DXGI_FORMAT_R32_FLOAT;
+        twin_read.Format = twin_format;
         twin_read.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
         twin_read.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         twin_read.Texture2DArray.MipLevels = 1;

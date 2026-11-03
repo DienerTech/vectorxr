@@ -15,16 +15,22 @@
 #include <openxr/openxr_platform.h>
 
 #include "depthxr/framegen_d3d11_bridge.h"
+#include "depthxr/framegen_gpu.h"
+#include "depthxr/framegen_plan.h"
 #include "depthxr/session_graphics.h"
 #include "test_adapter.h"
 #include "test_gates.h"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <limits>
+#include <map>
 #include <string>
 #include <thread>
 #include <vector>
@@ -1254,6 +1260,8 @@ void TestDepthDoneWait(Game& game) {
     Check(compare.exact == compare.texels, "the last release's depth arrives exact (" + std::to_string(compare.wrong) +
                                                " wrong, " + compare.first_wrong + ")");
     std::cout << "depth done waits (releases whose twin was still being drawn): " << bridge.Summary() << '\n';
+    // D16's twin is R16_UNORM: 2048x2048 at two bytes a texel.
+    Check(SummaryValue(bridge.Summary(), "liveTwinMiB") == 8, "a D16 twin takes two bytes a texel: " + bridge.Summary());
     CheckClean(bridge, game, "depth done wait");
     bridge.End();
 }
@@ -1298,6 +1306,286 @@ void TestDepthPrivate(Game& game) {
     check_private("switched off", DepthSwapchainInfo(DXGI_FORMAT_D32_FLOAT, 32, 32, 1), true,
                   "VECTORXR_D3D11_BRIDGE_DEPTH=private", false);
     _putenv_s("VECTORXR_D3D11_BRIDGE_DEPTH", "");
+}
+
+// Frame Generation's own swapchains' images (its Track's enumerations), by swapchain.
+std::map<XrSwapchain, std::vector<ID3D12Resource*>> g_framegen_images;
+
+XrResult XRAPI_CALL FrameGenEnumerate(XrSwapchain swapchain, uint32_t capacity, uint32_t* count,
+                                      XrSwapchainImageBaseHeader* images) {
+    const std::vector<ID3D12Resource*>& list = g_framegen_images[swapchain];
+    *count = static_cast<uint32_t>(list.size());
+    if (capacity == 0) return XR_SUCCESS;
+    if (capacity < list.size()) return XR_ERROR_SIZE_INSUFFICIENT;
+    auto* d3d12_images = reinterpret_cast<XrSwapchainImageD3D12KHR*>(images);
+    for (std::size_t i = 0; i < list.size(); ++i) d3d12_images[i].texture = list[i];
+    return XR_SUCCESS;
+}
+
+// The raw depth `encoding` stores for `meters` (1/z linear from minDepth at
+// nearZ to maxDepth at farZ, either of them infinitely far).
+float RawDepth(const depthxr::FrameGenDepthEncoding& encoding, double meters) {
+    const auto inverse = [](double z) { return std::isfinite(z) && z > 0.0 ? 1.0 / z : 0.0; };
+    const double near_inverse = inverse(encoding.near_z);
+    const double normalized = (1.0 / meters - near_inverse) / (inverse(encoding.far_z) - near_inverse);
+    return static_cast<float>(encoding.min_depth + normalized * (encoding.max_depth - encoding.min_depth));
+}
+
+// Frame Generation reads a bridged game's depth: the game clears its depth to
+// a plane `meters` away as its encoding stores it, the bridge mirrors it into
+// the runtime's image at release, and Frame Generation's Direct3D 12 backend
+// (on the bridge's device and queue, as in a session) captures it there and
+// decodes it to that distance. Its depth check is locked to the depth as
+// described: what it decides is the backend's own tests', not the bridge's.
+void TestDepthReachesFrameGen(Game& game) {
+    struct Case {
+        const char* name;
+        DXGI_FORMAT format;
+        depthxr::FrameGenDepthEncoding encoding;
+        double meters;
+        double tolerance; // relative
+    };
+    depthxr::FrameGenDepthEncoding uevr; // reversed, infinitely far plane at 0, near plane 10 cm at 1
+    uevr.near_z = std::numeric_limits<float>::max();
+    uevr.far_z = 0.1f;
+    depthxr::FrameGenDepthEncoding iracing; // standard, 5 cm to 1 km
+    iracing.near_z = 0.05f;
+    iracing.far_z = 1000.0f;
+    depthxr::FrameGenDepthEncoding reversed; // reversed and finite
+    reversed.near_z = 2000.0f;
+    reversed.far_z = 0.2f;
+    const Case cases[] = {
+        {"UEVR (D32S8, reversed, infinite)", DXGI_FORMAT_D32_FLOAT_S8X24_UINT, uevr, 2.0, 1e-3},
+        {"iRacing (D16, standard)", DXGI_FORMAT_D16_UNORM, iracing, 5.0, 0.02},
+        {"D24S8 (reversed, finite)", DXGI_FORMAT_D24_UNORM_S8_UINT, reversed, 12.0, 1e-3},
+    };
+    constexpr std::uint32_t kSize = 64;
+    for (const Case& test : cases) {
+        D3D11Bridge bridge;
+        Session session(game.device.Get());
+        BeginBridge(game, bridge, session);
+        ID3D12Device* device = BridgeDevice(bridge);
+        std::string error;
+        auto gpu = depthxr::CreateFrameGenGpu(bridge.Binding(), error);
+        Check(gpu != nullptr && gpu->SupportsDepth(), std::string(test.name) + ": Frame Generation's backend: " + error);
+        gpu->LockDepthForTest(depthxr::FrameGenDepthReading::kAsSubmitted, false, 1.0f);
+
+        // The runtime's depth swapchain (the bridge's), a colour source and
+        // Frame Generation's output.
+        MakeRuntimeDepthImages(device, 2, kSize, kSize, test.format, 1);
+        const XrSwapchain depth = Handle(0x70);
+        std::string reason;
+        Check(bridge.AddSwapchain(depth, DepthSwapchainInfo(test.format, kSize, kSize, 1), FakeEnumerate, reason),
+              std::string(test.name) + ": bridged: " + reason);
+        std::vector<ComPtr<ID3D12Resource>> runtime_depth = g_runtime_images;
+        MakeRuntimeImages(device, 1, kSize, kSize, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
+        std::vector<ComPtr<ID3D12Resource>> source = g_runtime_images;
+        const std::int64_t output_format = gpu->OutputFormats(depthxr::FrameGenOutputKind::kSrgb8).front();
+        MakeRuntimeImages(device, 1, kSize, kSize, static_cast<DXGI_FORMAT>(output_format));
+        std::vector<ComPtr<ID3D12Resource>> output = g_runtime_images;
+        const XrSwapchain source_chain = Handle(0x71);
+        const XrSwapchain output_chain = Handle(0x72);
+        g_framegen_images = {{depth, {runtime_depth[0].Get(), runtime_depth[1].Get()}},
+                             {source_chain, {source[0].Get()}},
+                             {output_chain, {output[0].Get()}}};
+        for (const XrSwapchain chain : {depth, source_chain, output_chain}) {
+            Check(gpu->Track(chain, FrameGenEnumerate, error), std::string(test.name) + ": track: " + error);
+        }
+
+        const XrRect2Di rect{{0, 0}, {static_cast<int>(kSize), static_cast<int>(kSize)}};
+        depthxr::FrameGenViewSubmission view;
+        view.source = {source_chain, 0, 0, rect, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB};
+        view.outputs = {{output_chain, 0, 0, rect, output_format}};
+        view.request.extent = {kSize, kSize};
+        view.request.output = depthxr::FrameGenOutputKind::kSrgb8;
+        for (auto* geometry : {&view.request.newest, &view.request.previous}) {
+            geometry->angle_left = geometry->angle_down = -std::atan(1.0f);
+            geometry->angle_right = geometry->angle_up = std::atan(1.0f);
+        }
+        depthxr::FrameGenTuning tuning;
+        depthxr::FrameGenExecuteResult result;
+        // A first frame sets the view up: nothing was captured for it, so it
+        // is not generated from ("not captured when the game released it").
+        const bool primed = gpu->Execute({view}, tuning, result, error);
+        Check(!primed, std::string(test.name) + ": the first frame only sets the view up");
+        // The game's frames: colour captured at release, its depth cleared
+        // to the plane, released (the bridge's draw), then captured as the
+        // layer captures a release; generated from once a frame came before.
+        const float raw = RawDepth(test.encoding, test.meters);
+        view.request.depth = true;
+        view.request.synthesize = true;
+        for (std::uint32_t frame = 0; frame < 3; ++frame) {
+            const bool colour = gpu->Capture(0, view.source, view.request, tuning.quality, error);
+            Check(colour, std::string(test.name) + ": colour captured at release: " + error);
+            const std::uint32_t index = frame % 2;
+            bridge.Acquired(depth, index);
+            D3D11_DEPTH_STENCIL_VIEW_DESC target_desc{};
+            target_desc.Format = test.format;
+            target_desc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2DARRAY;
+            target_desc.Texture2DArray.ArraySize = 1;
+            ComPtr<ID3D11DepthStencilView> target;
+            Check(SUCCEEDED(game.device->CreateDepthStencilView(bridge.Images(depth)[index], &target_desc, &target)),
+                  "a depth view");
+            game.context->ClearDepthStencilView(target.Get(), D3D11_CLEAR_DEPTH, raw, 0);
+            Check(bridge.Released(depth), std::string(test.name) + ": the release is copied");
+            const bool captured =
+                gpu->CaptureDepth(0, {depth, index, 0, rect, test.format}, test.encoding, view.request, error);
+            Check(captured, std::string(test.name) + ": Frame Generation captures the runtime's depth: " + error);
+            const bool executed = gpu->Execute({view}, tuning, result, error);
+            Check(executed, std::string(test.name) + ": execute: " + error);
+        }
+        Check(result.depth.size() == 1 && result.depth[0], std::string(test.name) + ": the frame used the depth");
+
+        std::vector<float> linear;
+        depthxr::FrameGenExtent extent{};
+        std::uint32_t channels = 0;
+        Check(gpu->ReadTexture(0, {depthxr::FrameGenTextureKind::kDepth, 0}, linear, extent, channels) &&
+                  channels == 1 && !linear.empty(),
+              std::string(test.name) + ": Frame Generation's linear depth read back");
+        double worst = 0.0;
+        for (const float meters : linear) {
+            worst = std::max(worst, std::abs(meters - test.meters) / test.meters);
+        }
+        std::cout << test.name << ": raw " << raw << " decoded to " << linear[linear.size() / 2] << " m (plane "
+                  << test.meters << " m, worst " << worst * 100.0 << "% off over " << extent.width << "x"
+                  << extent.height << ")\n";
+        Check(worst <= test.tolerance, std::string(test.name) + ": Frame Generation decodes the bridged depth to " +
+                                           std::to_string(linear[linear.size() / 2]) + " m, the plane is " +
+                                           std::to_string(test.meters) + " m");
+
+        Check(gpu->WaitIdle(), std::string(test.name) + ": Frame Generation's work finishes");
+        for (const XrSwapchain chain : {depth, source_chain, output_chain}) gpu->Forget(chain);
+        gpu.reset();
+        Check(bridge.WaitIdle(10000), std::string(test.name) + ": the bridge's queue finishes");
+        CheckClean(bridge, game, std::string("depth to Frame Generation ") + test.name);
+        Check(bridge.RemoveSwapchain(depth), std::string(test.name) + ": removed");
+        bridge.End();
+    }
+    g_framegen_images.clear();
+}
+
+// BRIDGE_TEST_DEPTH_PERF=1 (`hw`): what mirroring a game's depth costs at
+// games' sizes, on the GPU, per release: the Direct3D 11 copy into the twin
+// (timestamps around the release on the game's context), and the time from
+// just before the release to the runtime's image drawn on the bridge's queue
+// (which waits for that copy first). Nothing is held back: each release
+// finishes before the next.
+void MeasureDepthCost(Game& game) {
+    struct Size {
+        const char* name;
+        DXGI_FORMAT format;
+        std::uint32_t width, height, slices;
+    };
+    const Size sizes[] = {
+        {"iRacing (D16 6904x3184)", DXGI_FORMAT_D16_UNORM, 6904, 3184, 1},
+        {"UEVR double wide (D32S8 5120x2560)", DXGI_FORMAT_D32_FLOAT_S8X24_UINT, 5120, 2560, 1},
+        {"two slices (D24S8 2x2560x2560)", DXGI_FORMAT_D24_UNORM_S8_UINT, 2560, 2560, 2},
+    };
+    for (const Size& size : sizes) {
+        D3D11Bridge bridge;
+        Session session(game.device.Get());
+        BeginBridge(game, bridge, session);
+        ID3D12Device* device = BridgeDevice(bridge);
+        ID3D12CommandQueue* queue = BridgeQueue(bridge);
+        MakeRuntimeDepthImages(device, 3, size.width, size.height, size.format, size.slices);
+        const XrSwapchain swapchain = Handle(0x80);
+        std::string reason;
+        Check(bridge.AddSwapchain(swapchain, DepthSwapchainInfo(size.format, size.width, size.height, size.slices),
+                                  FakeEnumerate, reason),
+              std::string(size.name) + ": bridged: " + reason);
+        const std::vector<ID3D11Texture2D*> images = bridge.Images(swapchain);
+
+        D3D11_QUERY_DESC disjoint_desc{D3D11_QUERY_TIMESTAMP_DISJOINT};
+        D3D11_QUERY_DESC stamp_desc{D3D11_QUERY_TIMESTAMP};
+        ComPtr<ID3D11Query> disjoint, before11, after11;
+        Check(SUCCEEDED(game.device->CreateQuery(&disjoint_desc, &disjoint)) &&
+                  SUCCEEDED(game.device->CreateQuery(&stamp_desc, &before11)) &&
+                  SUCCEEDED(game.device->CreateQuery(&stamp_desc, &after11)),
+              "Direct3D 11 timestamps");
+        D3D12_QUERY_HEAP_DESC heap_desc{D3D12_QUERY_HEAP_TYPE_TIMESTAMP, 2, 0};
+        ComPtr<ID3D12QueryHeap> stamps;
+        ComPtr<ID3D12Resource> stamp_buffer;
+        D3D12_HEAP_PROPERTIES readback{D3D12_HEAP_TYPE_READBACK};
+        D3D12_RESOURCE_DESC buffer_desc{};
+        buffer_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        buffer_desc.Width = 16;
+        buffer_desc.Height = buffer_desc.DepthOrArraySize = buffer_desc.MipLevels = 1;
+        buffer_desc.SampleDesc.Count = 1;
+        buffer_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        ComPtr<ID3D12CommandAllocator> allocators[2];
+        ComPtr<ID3D12GraphicsCommandList> lists[2];
+        Check(SUCCEEDED(device->CreateQueryHeap(&heap_desc, IID_PPV_ARGS(&stamps))) &&
+                  SUCCEEDED(device->CreateCommittedResource(&readback, D3D12_HEAP_FLAG_NONE, &buffer_desc,
+                                                            D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                            IID_PPV_ARGS(&stamp_buffer))),
+              "Direct3D 12 timestamps");
+        for (int i = 0; i < 2; ++i) {
+            Check(SUCCEEDED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocators[i]))) &&
+                      SUCCEEDED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocators[i].Get(), nullptr,
+                                                          IID_PPV_ARGS(&lists[i]))),
+                  "timestamp commands");
+            lists[i]->EndQuery(stamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, i);
+            if (i == 1) lists[i]->ResolveQueryData(stamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 2, stamp_buffer.Get(), 0);
+            lists[i]->Close();
+        }
+        UINT64 frequency12 = 0;
+        queue->GetTimestampFrequency(&frequency12);
+
+        std::vector<double> copy_ms, ready_ms;
+        for (int iteration = 0; iteration < 40; ++iteration) {
+            const std::uint32_t index = static_cast<std::uint32_t>(iteration) % 3;
+            bridge.Acquired(swapchain, index);
+            for (std::uint32_t slice = 0; slice < size.slices; ++slice) {
+                D3D11_DEPTH_STENCIL_VIEW_DESC view{};
+                view.Format = size.format;
+                view.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2DARRAY;
+                view.Texture2DArray.FirstArraySlice = slice;
+                view.Texture2DArray.ArraySize = 1;
+                ComPtr<ID3D11DepthStencilView> target;
+                Check(SUCCEEDED(game.device->CreateDepthStencilView(images[index], &view, &target)), "a depth view");
+                game.context->ClearDepthStencilView(target.Get(), D3D11_CLEAR_DEPTH, 0.25f + 0.01f * iteration, 0);
+            }
+            Check(GameRuns(game), "the game's clear finishes");
+            game.context->Begin(disjoint.Get());
+            game.context->End(before11.Get());
+            ID3D12CommandList* first[] = {lists[0].Get()};
+            queue->ExecuteCommandLists(1, first);
+            Check(bridge.Released(swapchain), std::string(size.name) + ": copied");
+            game.context->End(after11.Get());
+            game.context->End(disjoint.Get());
+            ID3D12CommandList* second[] = {lists[1].Get()};
+            queue->ExecuteCommandLists(1, second);
+            Check(bridge.WaitIdle(10000) && GameRuns(game), std::string(size.name) + ": finished");
+            D3D11_QUERY_DATA_TIMESTAMP_DISJOINT timing{};
+            UINT64 begin11 = 0, end11 = 0;
+            while (game.context->GetData(disjoint.Get(), &timing, sizeof(timing), 0) != S_OK) Sleep(0);
+            game.context->GetData(before11.Get(), &begin11, sizeof(begin11), 0);
+            game.context->GetData(after11.Get(), &end11, sizeof(end11), 0);
+            void* mapped = nullptr;
+            Check(SUCCEEDED(stamp_buffer->Map(0, nullptr, &mapped)), "map the timestamps");
+            UINT64 stamps12[2]{};
+            std::memcpy(stamps12, mapped, sizeof(stamps12));
+            stamp_buffer->Unmap(0, nullptr);
+            if (iteration >= 5 && !timing.Disjoint) {
+                copy_ms.push_back(1000.0 * static_cast<double>(end11 - begin11) / static_cast<double>(timing.Frequency));
+                ready_ms.push_back(1000.0 * static_cast<double>(stamps12[1] - stamps12[0]) /
+                                   static_cast<double>(frequency12));
+            }
+        }
+        const auto median = [](std::vector<double> values) {
+            std::sort(values.begin(), values.end());
+            return values.empty() ? -1.0 : values[values.size() / 2];
+        };
+        const auto worst = [](const std::vector<double>& values) {
+            return values.empty() ? -1.0 : *std::max_element(values.begin(), values.end());
+        };
+        std::cout << "depth cost " << size.name << ": Direct3D 11 copy " << median(copy_ms) << " ms (max "
+                  << worst(copy_ms) << "), release to runtime image drawn " << median(ready_ms) << " ms (max "
+                  << worst(ready_ms) << "), " << bridge.Describe(swapchain) << '\n';
+        CheckClean(bridge, game, std::string("depth cost ") + size.name);
+        Check(bridge.RemoveSwapchain(swapchain), std::string(size.name) + ": removed");
+        bridge.End();
+    }
 }
 
 // A runtime image that does not match is refused, with the reason.
@@ -1571,6 +1859,10 @@ int main(int argc, char** argv) {
     TestDepthStillBound(game);
     TestDepthDoneWait(game);
     TestDepthPrivate(game);
+    TestDepthReachesFrameGen(game);
+    if (const char* perf = std::getenv("BRIDGE_TEST_DEPTH_PERF"); hardware && perf && std::string(perf) == "1") {
+        MeasureDepthCost(game);
+    }
     TestMismatch(game);
     TestComposed(game);
     TestUnmatched(game);

@@ -1,8 +1,9 @@
 // The Direct3D 11 bridge's depth (framegen_d3d11_bridge.cpp). Direct3D 12
 // shares no depth texture with simultaneous access, and Direct3D 11 opens a
 // Direct3D 12 texture only as a render target, so a game's depth reaches the
-// runtime's Direct3D 12 depth image in two passes through a shared R32_FLOAT
-// twin: Direct3D 11 copies the game's depth into the twin at its release
+// runtime's Direct3D 12 depth image in two passes through a shared twin
+// (R16_UNORM for D16, R32_FLOAT otherwise): Direct3D 11 copies the game's
+// depth into the twin at its release
 // (BRIDGE_DEPTH_TO_TWIN), and the bridge's queue writes the twin into the
 // runtime's image as depth (BRIDGE_DEPTH_VS and BRIDGE_DEPTH_PS). The depth
 // view gives every format's depth as a float (D16 and D24 normalized), and

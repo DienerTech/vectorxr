@@ -35,7 +35,8 @@ namespace depthxr {
 // Images a twin cannot be: multisampled ones are rendered privately and
 // resolved into the twin at release. Depth is rendered privately too
 // (Direct3D 12 shares no depth with simultaneous access): at release,
-// Direct3D 11 copies its depth plane into an R32_FLOAT twin, and the bridge's
+// Direct3D 11 copies its depth plane into a twin (R16_UNORM for D16, else
+// R32_FLOAT), and the bridge's
 // queue draws the twin into the runtime's depth image as depth, ahead of
 // Frame Generation's capture as for colour, so the runtime and Frame
 // Generation both get the game's depth (D16, D24S8, D32 and D32S8 alike,
