@@ -204,6 +204,33 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         DEPENDS "${_framegen_hlsl}"
         COMMENT "Compiling Frame Generation FLOW_MERGE (DXBC)"
         VERBATIM)
+    # The Direct3D 11 bridge's depth: a Direct3D 11 compute shader copying the
+    # game's depth into a shared twin, and the Direct3D 12 draw writing the
+    # twin into the runtime's depth image, included by the bridge as headers.
+    set(_bridge_depth_hlsl "${CMAKE_CURRENT_SOURCE_DIR}/shaders/bridge_depth.hlsl")
+    set(_bridge_depth_headers "")
+    foreach(_bridge_depth_shader TO_TWIN VS PS)
+        if(_bridge_depth_shader STREQUAL "TO_TWIN")
+            set(_bridge_depth_args -T cs_5_0 -E CSMain)
+            set(_bridge_depth_name kBridgeDepthToTwinDxbc)
+        elseif(_bridge_depth_shader STREQUAL "VS")
+            set(_bridge_depth_args -T vs_5_0 -E VSMain)
+            set(_bridge_depth_name kBridgeDepthVsDxbc)
+        else()
+            set(_bridge_depth_args -T ps_5_0 -E PSMain)
+            set(_bridge_depth_name kBridgeDepthPsDxbc)
+        endif()
+        string(TOLOWER "${_bridge_depth_shader}" _bridge_depth_file)
+        set(_bridge_depth_header "${_framegen_out}/bridge_depth_${_bridge_depth_file}.h")
+        add_custom_command(
+            OUTPUT "${_bridge_depth_header}"
+            COMMAND "${DEPTHXR_FXC}" -nologo ${_bridge_depth_args} -D "BRIDGE_DEPTH_${_bridge_depth_shader}=1" -O3 -WX
+                    -Vn ${_bridge_depth_name} -Fh "${_bridge_depth_header}" "${_bridge_depth_hlsl}"
+            DEPENDS "${_bridge_depth_hlsl}"
+            COMMENT "Compiling the Direct3D 11 bridge's depth ${_bridge_depth_shader} (DXBC)"
+            VERBATIM)
+        list(APPEND _bridge_depth_headers "${_bridge_depth_header}")
+    endforeach()
     string(REPLACE ";" "," _framegen_pass_list "${_framegen_passes}")
     string(REPLACE ";" "," _framegen_draw_list "${_framegen_draw_shaders}")
     set(_framegen_spirv_dir "")
@@ -241,7 +268,8 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         # ...and the engine motion record and census made from it.
         src/engine_motion.cpp
         "${_framegen_out}/framegen_shaders.cpp"
-        "${_framegen_out}/framegen_flow_merge.h")
+        "${_framegen_out}/framegen_flow_merge.h"
+        ${_bridge_depth_headers})
     target_include_directories(depthxr_framegen PUBLIC include)
     target_include_directories(depthxr_framegen PRIVATE "${_framegen_out}")
     target_compile_features(depthxr_framegen PUBLIC cxx_std_20)
@@ -558,7 +586,7 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         # Frame Generation's Direct3D 11 bridge against a stand-in runtime, on WARP
         # (`depthxr_d3d11_bridge_tests hw` runs it on the GPU).
         add_executable(depthxr_d3d11_bridge_tests tests/d3d11_bridge_tests.cpp)
-        target_link_libraries(depthxr_d3d11_bridge_tests PRIVATE depthxr_framegen d3d11 d3d12 dxgi)
+        target_link_libraries(depthxr_d3d11_bridge_tests PRIVATE depthxr_framegen d3d11 d3d12 dxgi d3dcompiler)
         target_compile_definitions(depthxr_d3d11_bridge_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 XR_USE_GRAPHICS_API_D3D12)
         add_test(NAME depthxr_d3d11_bridge_tests COMMAND depthxr_d3d11_bridge_tests)
         add_test(NAME depthxr_d3d11_bridge_hw_tests COMMAND depthxr_d3d11_bridge_tests hw)

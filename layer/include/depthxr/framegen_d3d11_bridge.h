@@ -33,8 +33,16 @@ namespace depthxr {
 // acquired again. Neither API waits for the other on the CPU.
 //
 // Images a twin cannot be: multisampled ones are rendered privately and
-// resolved into the twin at release; depth stays private and never reaches
-// the runtime (the caller keeps it out of submitted frames).
+// resolved into the twin at release. Depth is rendered privately too
+// (Direct3D 12 shares no depth with simultaneous access): at release,
+// Direct3D 11 copies its depth plane into an R32_FLOAT twin, and the bridge's
+// queue draws the twin into the runtime's depth image as depth, ahead of
+// Frame Generation's capture as for colour, so the runtime and Frame
+// Generation both get the game's depth (D16, D24S8, D32 and D32S8 alike,
+// value for value). Depth the bridge cannot mirror (multisampled, a runtime
+// image that is no depth target, or VECTORXR_D3D11_BRIDGE_DEPTH=private)
+// stays private and never reaches the runtime (the caller keeps it out of
+// submitted frames).
 //
 // Every Direct3D 11 call is made inside the application's own OpenXR calls,
 // on its thread; nothing here is called from the presenter thread.
@@ -89,8 +97,8 @@ class D3D11Bridge {
     void FrameEnded();
 
     // The runtime's create info for the application's: the bridge's copies
-    // write the runtime's colour images as render targets do, and
-    // multisampled images are resolved to one sample.
+    // write the runtime's colour images as render targets do, multisampled
+    // images are resolved to one sample, and depth images are depth targets.
     static XrSwapchainCreateInfo RuntimeCreateInfo(const XrSwapchainCreateInfo& info);
     // After the runtime created `swapchain` from RuntimeCreateInfo(info):
     // makes an image for each of its images (`enumerate` is the runtime's).
@@ -102,9 +110,9 @@ class D3D11Bridge {
     // fails: their releases need not wait on the runtime's queue.
     void SetComposed(XrSwapchain swapchain, bool composed);
     bool Composed(XrSwapchain swapchain) const;
-    // Bridged, and the runtime's images never get anything (depth): the
-    // runtime's calls on it need no ordering with the bridge's queue, and its
-    // depth stays out of submitted frames.
+    // Bridged, and the runtime's images never get anything (depth the
+    // bridge cannot mirror): the runtime's calls on it need no ordering with
+    // the bridge's queue, and its depth stays out of submitted frames.
     bool Unmirrored(XrSwapchain swapchain) const;
     bool HasUnmirrored() const;
     // The Direct3D 11 textures rendered into, by image index (empty when not bridged).

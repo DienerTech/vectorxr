@@ -8,6 +8,10 @@
 
 #include "depthxr/framegen_d3d11_bridge.h"
 
+#include "bridge_depth_ps.h"
+#include "bridge_depth_to_twin.h"
+#include "bridge_depth_vs.h"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -78,6 +82,44 @@ DXGI_FORMAT DepthStorageFormat(DXGI_FORMAT format) {
         return DXGI_FORMAT_R16_TYPELESS;
     default:
         return format;
+    }
+}
+
+// The depth plane of private depth, as the bridge's copy into the twin reads
+// it (normalized for D16 and D24).
+DXGI_FORMAT DepthReadFormat(DXGI_FORMAT storage) {
+    switch (storage) {
+    case DXGI_FORMAT_R32_TYPELESS:
+        return DXGI_FORMAT_R32_FLOAT;
+    case DXGI_FORMAT_R32G8X24_TYPELESS:
+        return DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
+    case DXGI_FORMAT_R24G8_TYPELESS:
+        return DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+    case DXGI_FORMAT_R16_TYPELESS:
+        return DXGI_FORMAT_R16_UNORM;
+    default:
+        return DXGI_FORMAT_UNKNOWN;
+    }
+}
+
+// The depth-stencil view format of a runtime's depth image, typed or
+// typeless: what the bridge's draw writes it through.
+DXGI_FORMAT DepthTargetFormat(DXGI_FORMAT format) {
+    switch (format) {
+    case DXGI_FORMAT_D32_FLOAT:
+    case DXGI_FORMAT_R32_TYPELESS:
+        return DXGI_FORMAT_D32_FLOAT;
+    case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
+    case DXGI_FORMAT_R32G8X24_TYPELESS:
+        return DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
+    case DXGI_FORMAT_D24_UNORM_S8_UINT:
+    case DXGI_FORMAT_R24G8_TYPELESS:
+        return DXGI_FORMAT_D24_UNORM_S8_UINT;
+    case DXGI_FORMAT_D16_UNORM:
+    case DXGI_FORMAT_R16_TYPELESS:
+        return DXGI_FORMAT_D16_UNORM;
+    default:
+        return DXGI_FORMAT_UNKNOWN;
     }
 }
 
@@ -209,9 +251,11 @@ struct D3D11Bridge::Impl {
     enum class Mode {
         kTwin,    // rendered into the twin
         kResolve, // multisampled: rendered privately, resolved into the twin at release
-        kPrivate, // depth: rendered privately, never reaches the runtime's images
+        kDepth,   // depth: rendered privately, copied into an R32_FLOAT twin at release and drawn into the runtime's
+        kPrivate, // depth the bridge cannot mirror: rendered privately, never reaches the runtime's images
     };
-    // A recording of the copy of a twin into the runtime's image.
+    // A recording of the copy of a twin into the runtime's image (for depth,
+    // the draw of the twin into it).
     struct Copy {
         ComPtr<ID3D12CommandAllocator> allocator;
         ComPtr<ID3D12GraphicsCommandList> list;
@@ -221,6 +265,11 @@ struct D3D11Bridge::Impl {
         ComPtr<ID3D12Resource> twin;
         ComPtr<ID3D11Texture2D> twin11;    // the twin, opened on the game's device
         ComPtr<ID3D11Texture2D> private11; // rendered into instead of the twin
+        // Depth: the game's depth as read into the twin, and the twin as written.
+        ComPtr<ID3D11ShaderResourceView> depth_read11;
+        ComPtr<ID3D11UnorderedAccessView> twin_write11;
+        D3D12_GPU_DESCRIPTOR_HANDLE twin_read{};                // the twin, read by the draw
+        std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> depth_targets; // the runtime's image, by slice
         // The runtime's image, referenced: a copy still queued when the
         // runtime lets the image go writes memory that still exists.
         ComPtr<ID3D12Resource> runtime;
@@ -231,12 +280,18 @@ struct D3D11Bridge::Impl {
         Mode mode{Mode::kTwin};
         DXGI_FORMAT format{DXGI_FORMAT_UNKNOWN}; // as the application asked
         DXGI_FORMAT storage{DXGI_FORMAT_UNKNOWN};
+        DXGI_FORMAT depth_target{DXGI_FORMAT_UNKNOWN}; // depth: the runtime images' depth-stencil view format
+        std::string private_reason;                    // depth kept private: why
         std::uint32_t width{0};
         std::uint32_t height{0};
         std::uint32_t array_size{1};
         std::uint32_t mip_count{1};
         std::uint32_t sample_count{1};
         bool composed{false};
+        // Depth: the twins' views read by the draws (shader-visible, kept
+        // while the draws are queued) and the runtime images' depth targets.
+        ComPtr<ID3D12DescriptorHeap> twin_reads;
+        ComPtr<ID3D12DescriptorHeap> depth_targets;
         std::vector<Image> images;
         std::deque<std::uint32_t> acquired; // acquired and not released yet, oldest first
         UINT64 last_done{0};
@@ -258,6 +313,15 @@ struct D3D11Bridge::Impl {
     ComPtr<ID3D12Fence> idle;    // the bridge's queue's progress, for retiring
     ComPtr<ID3D11Fence> written11;
     ComPtr<ID3D11Fence> done11;
+    // Depth reaches the runtime's images unless VECTORXR_D3D11_BRIDGE_DEPTH=private.
+    bool mirror_depth{true};
+
+    // The depth passes, made with the first depth swapchain mirrored (each
+    // with `pipeline_mutex`; a draw's pipeline only for its target format).
+    std::mutex pipeline_mutex;
+    ComPtr<ID3D11ComputeShader> depth_to_twin;
+    ComPtr<ID3D12RootSignature> depth_root;
+    std::unordered_map<DXGI_FORMAT, ComPtr<ID3D12PipelineState>> depth_pipelines;
 
     // Everything below, and the order of signals on both APIs: each fence's
     // values are signalled in the order they are handed out.
@@ -279,6 +343,8 @@ struct D3D11Bridge::Impl {
     std::atomic<std::uint64_t> recordings{0}; // also counted outside the mutex, as swapchains are made
     std::uint64_t done_waits{0};
     std::uint64_t unmatched_releases{0};
+    std::uint64_t depth_copies{0};         // releases of depth copied into a twin
+    std::uint64_t depth_target_unbinds{0}; // of them, with the image still the game's depth target
     // The game thread's time in a release's handover (Direct3D 11's flush, a
     // recording of the copy, the bridge queue's submission), milliseconds:
     // the session's total and longest, and how many took kSlowHandoverMs.
@@ -361,6 +427,7 @@ struct D3D11Bridge::Impl {
 
     // For the process: work still queued may use them.
     static void DetachGpu(Swapchain& chain) {
+        chain.twin_reads.Detach();
         for (Image& image : chain.images) {
             image.twin.Detach();
             image.runtime.Detach();
@@ -368,6 +435,13 @@ struct D3D11Bridge::Impl {
                 copy.list.Detach();
                 copy.allocator.Detach();
             }
+        }
+    }
+    // ...and the depth draws' pipelines.
+    void DetachPipelines() {
+        depth_root.Detach();
+        for (auto& [format, pipeline] : depth_pipelines) {
+            pipeline.Detach();
         }
     }
 
@@ -389,8 +463,14 @@ struct D3D11Bridge::Impl {
     std::string Describe(const Swapchain& chain) const {
         std::ostringstream stream;
         stream << "mode="
-               << (chain.mode == Mode::kTwin ? "twin" : chain.mode == Mode::kResolve ? "resolve" : "private-depth")
-               << ", images=" << chain.images.size() << ", format=" << static_cast<int>(chain.format)
+               << (chain.mode == Mode::kTwin      ? "twin"
+                   : chain.mode == Mode::kResolve ? "resolve"
+                   : chain.mode == Mode::kDepth   ? "depth"
+                                                  : "private-depth");
+        if (!chain.private_reason.empty()) {
+            stream << " (" << chain.private_reason << ")";
+        }
+        stream << ", images=" << chain.images.size() << ", format=" << static_cast<int>(chain.format)
                << ", storage=" << static_cast<int>(chain.storage) << ", size=" << chain.width << "x" << chain.height
                << ", array=" << chain.array_size << ", mips=" << chain.mip_count << ", samples=" << chain.sample_count
                << ", twinMiB=" << MiB(chain.twin_bytes) << ", composed=" << (chain.composed ? 1 : 0)
@@ -402,7 +482,7 @@ struct D3D11Bridge::Impl {
     // Records the twin's copy into the runtime's image. The runtime's colour
     // images are render targets whenever the game holds them; the twin, with
     // simultaneous access, needs no transition of its own.
-    bool RecordCopy(Image& image, Copy& copy, std::string& reason) {
+    bool RecordCopy(const Swapchain& chain, Image& image, Copy& copy, std::string& reason) {
         HRESULT hr = device12->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&copy.allocator));
         if (SUCCEEDED(hr)) {
             hr = device12->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, copy.allocator.Get(), nullptr,
@@ -411,6 +491,9 @@ struct D3D11Bridge::Impl {
         if (FAILED(hr)) {
             reason = Failure("Creating the bridge's copy commands", hr);
             return false;
+        }
+        if (chain.mode == Mode::kDepth) {
+            return RecordDepthDraw(chain, image, copy, reason);
         }
         D3D12_RESOURCE_BARRIER barrier{};
         barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -434,7 +517,7 @@ struct D3D11Bridge::Impl {
     // A recording of the image's copy whose last execution is done (holding
     // `mutex`): one more is made while fewer than kCopyRecordings exist, and
     // otherwise the oldest is waited for, a while. nullptr: none in time.
-    Copy* ReadyCopy(Image& image) {
+    Copy* ReadyCopy(const Swapchain& chain, Image& image) {
         const UINT64 completed = done->GetCompletedValue();
         for (Copy& copy : image.copies) {
             if (copy.done <= completed) {
@@ -444,7 +527,7 @@ struct D3D11Bridge::Impl {
         if (image.copies.size() < kCopyRecordings) {
             std::string reason;
             image.copies.emplace_back();
-            if (RecordCopy(image, image.copies.back(), reason)) {
+            if (RecordCopy(chain, image, image.copies.back(), reason)) {
                 return &image.copies.back();
             }
             image.copies.pop_back();
@@ -522,7 +605,353 @@ struct D3D11Bridge::Impl {
             return false;
         }
         image.copies.emplace_back();
-        return RecordCopy(image, image.copies.back(), reason);
+        return RecordCopy(chain, image, image.copies.back(), reason);
+    }
+
+    // Records the draw of a depth twin into the runtime's depth image, slice
+    // by slice (mip 0). The runtime's depth images are depth targets whenever
+    // the game holds them (XR_KHR_D3D12_enable), so the draw needs no
+    // transition; the twin, with simultaneous access, neither.
+    bool RecordDepthDraw(const Swapchain& chain, Image& image, Copy& copy, std::string& reason) {
+        ID3D12PipelineState* pipeline = nullptr;
+        {
+            std::scoped_lock lock(pipeline_mutex);
+            const auto it = depth_pipelines.find(chain.depth_target);
+            pipeline = it == depth_pipelines.end() ? nullptr : it->second.Get();
+        }
+        if (!pipeline || !depth_root) {
+            reason = "the bridge's depth draw has no pipeline";
+            return false;
+        }
+        ID3D12DescriptorHeap* heaps[] = {chain.twin_reads.Get()};
+        copy.list->SetDescriptorHeaps(1, heaps);
+        copy.list->SetGraphicsRootSignature(depth_root.Get());
+        copy.list->SetPipelineState(pipeline);
+        copy.list->SetGraphicsRootDescriptorTable(1, image.twin_read);
+        const D3D12_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(chain.width), static_cast<float>(chain.height),
+                                      0.0f, 1.0f};
+        const D3D12_RECT scissor{0, 0, static_cast<LONG>(chain.width), static_cast<LONG>(chain.height)};
+        copy.list->RSSetViewports(1, &viewport);
+        copy.list->RSSetScissorRects(1, &scissor);
+        copy.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        for (std::uint32_t slice = 0; slice < chain.array_size; ++slice) {
+            copy.list->SetGraphicsRoot32BitConstant(0, slice, 0);
+            copy.list->OMSetRenderTargets(0, nullptr, FALSE, &image.depth_targets[slice]);
+            copy.list->DrawInstanced(3, 1, 0, 0);
+        }
+        const HRESULT hr = copy.list->Close();
+        if (FAILED(hr)) {
+            reason = Failure("Recording the bridge's depth draw", hr);
+            return false;
+        }
+        ++recordings;
+        return true;
+    }
+
+    // The depth passes: the Direct3D 11 copy into twins (once), the draw's
+    // root signature (once) and its pipeline for `target`.
+    bool MakeDepthPasses(DXGI_FORMAT target, std::string& reason) {
+        std::scoped_lock lock(pipeline_mutex);
+        if (!depth_to_twin) {
+            const HRESULT hr = device11->CreateComputeShader(kBridgeDepthToTwinDxbc, sizeof(kBridgeDepthToTwinDxbc),
+                                                             nullptr, &depth_to_twin);
+            if (FAILED(hr)) {
+                reason = Failure("Creating the Direct3D 11 depth copy (the game's device needs feature level 11)", hr);
+                return false;
+            }
+        }
+        if (!depth_root) {
+            D3D12_DESCRIPTOR_RANGE range{};
+            range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+            range.NumDescriptors = 1;
+            D3D12_ROOT_PARAMETER parameters[2]{};
+            parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+            parameters[0].Constants.Num32BitValues = 1;
+            parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            parameters[1].DescriptorTable.NumDescriptorRanges = 1;
+            parameters[1].DescriptorTable.pDescriptorRanges = &range;
+            parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            D3D12_ROOT_SIGNATURE_DESC desc{};
+            desc.NumParameters = 2;
+            desc.pParameters = parameters;
+            desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
+                         D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
+                         D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS;
+            ComPtr<ID3DBlob> blob;
+            ComPtr<ID3DBlob> error;
+            HRESULT hr = D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &error);
+            if (SUCCEEDED(hr)) {
+                hr = device12->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
+                                                   IID_PPV_ARGS(&depth_root));
+            }
+            if (FAILED(hr)) {
+                reason = Failure("Creating the bridge's depth root signature", hr);
+                return false;
+            }
+        }
+        if (depth_pipelines.count(target)) {
+            return true;
+        }
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC desc{};
+        desc.pRootSignature = depth_root.Get();
+        desc.VS = {kBridgeDepthVsDxbc, sizeof(kBridgeDepthVsDxbc)};
+        desc.PS = {kBridgeDepthPsDxbc, sizeof(kBridgeDepthPsDxbc)};
+        desc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+        desc.SampleMask = UINT_MAX;
+        desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+        desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        desc.RasterizerState.DepthClipEnable = TRUE;
+        // Every texel written, whatever the image held.
+        desc.DepthStencilState.DepthEnable = TRUE;
+        desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+        desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+        desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        desc.NumRenderTargets = 0;
+        desc.DSVFormat = target;
+        desc.SampleDesc.Count = 1;
+        ComPtr<ID3D12PipelineState> pipeline;
+        const HRESULT hr = device12->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&pipeline));
+        if (FAILED(hr)) {
+            reason = Failure("Creating the bridge's depth draw", hr) + " for format " +
+                     std::to_string(static_cast<int>(target));
+            return false;
+        }
+        pipeline->SetName(L"VectorXR Direct3D 11 bridge depth");
+        depth_pipelines[target] = pipeline;
+        return true;
+    }
+
+    // Whether the runtime's images can take the game's depth, and how: depth
+    // targets of the depth format's family, one sample, the chain's size.
+    bool CheckRuntimeDepth(Swapchain& chain, std::string& reason) {
+        for (const Image& image : chain.images) {
+            if (!image.runtime) {
+                reason = "the runtime's image is null";
+                return false;
+            }
+            const D3D12_RESOURCE_DESC runtime = image.runtime->GetDesc();
+            const DXGI_FORMAT target = DepthTargetFormat(runtime.Format);
+            if (runtime.Width != chain.width || runtime.Height != chain.height ||
+                runtime.DepthOrArraySize != chain.array_size || runtime.SampleDesc.Count != 1 ||
+                target == DXGI_FORMAT_UNKNOWN || DepthStorageFormat(target) != chain.storage) {
+                std::ostringstream stream;
+                stream << "the runtime's depth image (" << runtime.Width << "x" << runtime.Height << ", array "
+                       << runtime.DepthOrArraySize << ", samples " << runtime.SampleDesc.Count << ", format "
+                       << static_cast<int>(runtime.Format) << ") does not match the game's (" << chain.width << "x"
+                       << chain.height << ", array " << chain.array_size << ", format "
+                       << static_cast<int>(chain.format) << ")";
+                reason = stream.str();
+                return false;
+            }
+            if ((runtime.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) == 0) {
+                reason = "the runtime's depth image is not a depth target";
+                return false;
+            }
+            chain.depth_target = target;
+        }
+        return true;
+    }
+
+    // A depth image's twin (R32_FLOAT, shared, opened on the game's device),
+    // the views each pass uses and the first recording of its draw. The
+    // chain's descriptor heaps hold `index`'s views.
+    bool MakeDepthTwin(Swapchain& chain, Image& image, std::uint32_t index, std::string& reason) {
+        D3D12_HEAP_PROPERTIES heap{};
+        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+        D3D12_RESOURCE_DESC desc{};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        desc.Width = chain.width;
+        desc.Height = chain.height;
+        desc.DepthOrArraySize = static_cast<UINT16>(chain.array_size);
+        desc.MipLevels = 1;
+        desc.Format = DXGI_FORMAT_R32_FLOAT;
+        desc.SampleDesc.Count = 1;
+        desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+        // Direct3D 11 opens it only as a render target, and writes it as an
+        // unordered-access view, which needs simultaneous access.
+        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS |
+                     D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        HRESULT hr = device12->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_SHARED, &desc,
+                                                       D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                                       IID_PPV_ARGS(&image.twin));
+        if (FAILED(hr)) {
+            reason = Failure("Creating a shared Direct3D 12 depth twin", hr);
+            return false;
+        }
+        image.twin->SetName(L"VectorXR Direct3D 11 bridge depth twin");
+        chain.twin_bytes += device12->GetResourceAllocationInfo(0, 1, &desc).SizeInBytes;
+        HANDLE handle = nullptr;
+        hr = device12->CreateSharedHandle(image.twin.Get(), nullptr, GENERIC_ALL, nullptr, &handle);
+        if (FAILED(hr)) {
+            reason = Failure("Sharing a Direct3D 12 depth twin", hr);
+            return false;
+        }
+        hr = device11->OpenSharedResource1(handle, IID_PPV_ARGS(&image.twin11));
+        CloseHandle(handle);
+        if (FAILED(hr)) {
+            reason = Failure("Opening a shared depth twin on the game's Direct3D 11 device", hr);
+            return false;
+        }
+
+        D3D11_SHADER_RESOURCE_VIEW_DESC read{};
+        read.Format = DepthReadFormat(chain.storage);
+        read.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+        read.Texture2DArray.MipLevels = 1;
+        read.Texture2DArray.ArraySize = chain.array_size;
+        hr = device11->CreateShaderResourceView(image.private11.Get(), &read, &image.depth_read11);
+        if (SUCCEEDED(hr)) {
+            D3D11_UNORDERED_ACCESS_VIEW_DESC write{};
+            write.Format = DXGI_FORMAT_R32_FLOAT;
+            write.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2DARRAY;
+            write.Texture2DArray.ArraySize = chain.array_size;
+            hr = device11->CreateUnorderedAccessView(image.twin11.Get(), &write, &image.twin_write11);
+        }
+        if (FAILED(hr)) {
+            reason = Failure("Making the Direct3D 11 views of the depth copy", hr);
+            return false;
+        }
+
+        const UINT read_size = device12->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        D3D12_SHADER_RESOURCE_VIEW_DESC twin_read{};
+        twin_read.Format = DXGI_FORMAT_R32_FLOAT;
+        twin_read.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+        twin_read.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        twin_read.Texture2DArray.MipLevels = 1;
+        twin_read.Texture2DArray.ArraySize = chain.array_size;
+        D3D12_CPU_DESCRIPTOR_HANDLE read_cpu = chain.twin_reads->GetCPUDescriptorHandleForHeapStart();
+        read_cpu.ptr += static_cast<SIZE_T>(index) * read_size;
+        device12->CreateShaderResourceView(image.twin.Get(), &twin_read, read_cpu);
+        image.twin_read = chain.twin_reads->GetGPUDescriptorHandleForHeapStart();
+        image.twin_read.ptr += static_cast<UINT64>(index) * read_size;
+
+        const UINT target_size = device12->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+        for (std::uint32_t slice = 0; slice < chain.array_size; ++slice) {
+            D3D12_DEPTH_STENCIL_VIEW_DESC target{};
+            target.Format = chain.depth_target;
+            target.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DARRAY;
+            target.Texture2DArray.FirstArraySlice = slice;
+            target.Texture2DArray.ArraySize = 1;
+            D3D12_CPU_DESCRIPTOR_HANDLE handle12 = chain.depth_targets->GetCPUDescriptorHandleForHeapStart();
+            handle12.ptr += static_cast<SIZE_T>(index * chain.array_size + slice) * target_size;
+            device12->CreateDepthStencilView(image.runtime.Get(), &target, handle12);
+            image.depth_targets.push_back(handle12);
+        }
+        image.copies.emplace_back();
+        return RecordCopy(chain, image, image.copies.back(), reason);
+    }
+
+    // The twins and views of a depth chain whose images are made privately:
+    // false (with `reason`) when the runtime's images or the devices cannot
+    // take them, the chain then stays private.
+    bool MirrorDepth(Swapchain& chain, std::string& reason) {
+        if (!CheckRuntimeDepth(chain, reason) || !MakeDepthPasses(chain.depth_target, reason)) {
+            return false;
+        }
+        const auto images = static_cast<UINT>(chain.images.size());
+        D3D12_DESCRIPTOR_HEAP_DESC reads{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, images,
+                                         D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0};
+        D3D12_DESCRIPTOR_HEAP_DESC targets{D3D12_DESCRIPTOR_HEAP_TYPE_DSV, images * chain.array_size,
+                                           D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0};
+        HRESULT hr = device12->CreateDescriptorHeap(&reads, IID_PPV_ARGS(&chain.twin_reads));
+        if (SUCCEEDED(hr)) {
+            hr = device12->CreateDescriptorHeap(&targets, IID_PPV_ARGS(&chain.depth_targets));
+        }
+        if (FAILED(hr)) {
+            reason = Failure("Making the bridge's depth descriptors", hr);
+            return false;
+        }
+        for (std::uint32_t i = 0; i < images; ++i) {
+            if (!MakeDepthTwin(chain, chain.images[i], i, reason)) {
+                reason = "image " + std::to_string(i) + ": " + reason;
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Lets a depth chain's twins go, nothing having used them (MirrorDepth failed).
+    static void KeepDepthPrivate(Swapchain& chain, const std::string& reason) {
+        for (Image& image : chain.images) {
+            image.twin.Reset();
+            image.twin11.Reset();
+            image.depth_read11.Reset();
+            image.twin_write11.Reset();
+            image.depth_targets.clear();
+            image.copies.clear();
+        }
+        chain.twin_reads.Reset();
+        chain.depth_targets.Reset();
+        chain.twin_bytes = 0;
+        chain.mode = Mode::kPrivate;
+        chain.private_reason = reason;
+    }
+
+    // Copies the game's depth into the image's twin on the game's immediate
+    // context (holding `mutex`), leaving the context's compute state as it
+    // was. A game still holding the image as its depth target gets the
+    // target back after the copy: Direct3D 11 reads no texture bound for
+    // writing (it would unbind the copy's read instead).
+    void CopyDepthToTwin(const Swapchain& chain, Image& image) {
+        ID3D11DeviceContext4* context = context11.Get();
+        ID3D11RenderTargetView* targets[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
+        ID3D11DepthStencilView* depth_target = nullptr;
+        context->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, targets, &depth_target);
+        bool unbound = false;
+        if (depth_target) {
+            ComPtr<ID3D11Resource> bound;
+            depth_target->GetResource(&bound);
+            if (bound.Get() == image.private11.Get()) {
+                context->OMSetRenderTargetsAndUnorderedAccessViews(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, targets,
+                                                                   nullptr, 0, D3D11_KEEP_UNORDERED_ACCESS_VIEWS,
+                                                                   nullptr, nullptr);
+                unbound = true;
+                ++depth_target_unbinds;
+            }
+        }
+
+        ID3D11ComputeShader* shader = nullptr;
+        ID3D11ClassInstance* instances[256]{};
+        UINT instance_count = 256;
+        context->CSGetShader(&shader, instances, &instance_count);
+        ID3D11ShaderResourceView* read = nullptr;
+        context->CSGetShaderResources(0, 1, &read);
+        ID3D11UnorderedAccessView* write = nullptr;
+        context->CSGetUnorderedAccessViews(0, 1, &write);
+
+        ID3D11ShaderResourceView* depth_read = image.depth_read11.Get();
+        ID3D11UnorderedAccessView* twin_write = image.twin_write11.Get();
+        context->CSSetShader(depth_to_twin.Get(), nullptr, 0);
+        context->CSSetShaderResources(0, 1, &depth_read);
+        context->CSSetUnorderedAccessViews(0, 1, &twin_write, nullptr);
+        context->Dispatch((chain.width + 7) / 8, (chain.height + 7) / 8, chain.array_size);
+
+        // Unbound before the game's views go back, whichever slot they held.
+        ID3D11UnorderedAccessView* no_write = nullptr;
+        ID3D11ShaderResourceView* no_read = nullptr;
+        context->CSSetUnorderedAccessViews(0, 1, &no_write, nullptr);
+        context->CSSetShaderResources(0, 1, &no_read);
+        const UINT keep_counter = static_cast<UINT>(-1);
+        context->CSSetUnorderedAccessViews(0, 1, &write, &keep_counter);
+        context->CSSetShaderResources(0, 1, &read);
+        context->CSSetShader(shader, instances, instance_count);
+        if (unbound) {
+            context->OMSetRenderTargetsAndUnorderedAccessViews(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, targets,
+                                                               depth_target, 0, D3D11_KEEP_UNORDERED_ACCESS_VIEWS,
+                                                               nullptr, nullptr);
+        }
+
+        for (ID3D11ClassInstance* instance : instances) {
+            if (instance) instance->Release();
+        }
+        if (shader) shader->Release();
+        if (read) read->Release();
+        if (write) write->Release();
+        for (ID3D11RenderTargetView* target : targets) {
+            if (target) target->Release();
+        }
+        if (depth_target) depth_target->Release();
+        ++depth_copies;
     }
 
     bool MakePrivate(const Swapchain& chain, Image& image, const XrSwapchainCreateInfo& info, std::string& reason) {
@@ -534,17 +963,19 @@ struct D3D11Bridge::Impl {
         desc.Format = chain.storage;
         desc.SampleDesc.Count = chain.sample_count;
         desc.Usage = D3D11_USAGE_DEFAULT;
-        if (chain.mode == Mode::kPrivate) {
+        const bool depth = chain.mode == Mode::kDepth || chain.mode == Mode::kPrivate;
+        if (depth) {
             desc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
-            if (info.usageFlags & XR_SWAPCHAIN_USAGE_SAMPLED_BIT) desc.BindFlags |= D3D11_BIND_SHADER_RESOURCE;
+            // Mirrored depth is read by the copy into its twin.
+            if ((info.usageFlags & XR_SWAPCHAIN_USAGE_SAMPLED_BIT) || chain.mode == Mode::kDepth) {
+                desc.BindFlags |= D3D11_BIND_SHADER_RESOURCE;
+            }
         } else {
             desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
         }
         const HRESULT hr = device11->CreateTexture2D(&desc, nullptr, &image.private11);
         if (FAILED(hr)) {
-            reason = Failure(chain.mode == Mode::kPrivate ? "Creating a private depth texture"
-                                                          : "Creating a private multisampled texture",
-                             hr);
+            reason = Failure(depth ? "Creating a private depth texture" : "Creating a private multisampled texture", hr);
             return false;
         }
         return true;
@@ -567,9 +998,12 @@ D3D11Bridge::~D3D11Bridge() {
     if (impl_) {
         const auto detach = [](Impl::Swapchain& chain) {
             Impl::DetachGpu(chain);
+            chain.depth_targets.Detach();
             for (Impl::Image& image : chain.images) {
                 image.twin11.Detach();
                 image.private11.Detach();
+                image.depth_read11.Detach();
+                image.twin_write11.Detach();
             }
         };
         for (auto& [swapchain, chain] : impl_->swapchains) {
@@ -578,6 +1012,8 @@ D3D11Bridge::~D3D11Bridge() {
         for (Impl::Swapchain& chain : impl_->retired) {
             detach(chain);
         }
+        impl_->DetachPipelines();
+        impl_->depth_to_twin.Detach();
         impl_->queue.Detach();
         impl_->written.Detach();
         impl_->done.Detach();
@@ -777,6 +1213,12 @@ const XrSessionCreateInfo* D3D11Bridge::Begin(XrInstance instance, const XrSessi
         }
     }
 
+    // VECTORXR_D3D11_BRIDGE_DEPTH=private keeps depth the game's own, as
+    // before the bridge mirrored it (left out of submitted frames).
+    if (const char* depth = std::getenv("VECTORXR_D3D11_BRIDGE_DEPTH"); depth && std::string(depth) == "private") {
+        impl->mirror_depth = false;
+    }
+
     impl->binding.next = game.next;
     impl->binding.device = impl->device12.Get();
     impl->binding.queue = impl->queue.Get();
@@ -791,6 +1233,7 @@ const XrSessionCreateInfo* D3D11Bridge::Begin(XrInstance instance, const XrSessi
            << ", sharedResourceCompatibilityTier=" << static_cast<int>(options4.SharedResourceCompatibilityTier)
            << ", d3d11SharedResourceTier=" << static_cast<int>(options5.SharedResourceTier)
            << ", multithreadProtected=" << (impl->multithread_protected ? "yes" : "no")
+           << ", depth=" << (impl->mirror_depth ? "mirrored" : "private (VECTORXR_D3D11_BRIDGE_DEPTH=private)")
            << ", videoMemory=" << impl->VideoMemory() << (impl->debug_layer ? ", debugLayer=on" : "");
     description = stream.str();
     impl_ = std::move(impl);
@@ -860,6 +1303,7 @@ void D3D11Bridge::End() {
         for (Impl::Swapchain& chain : impl_->retired) {
             Impl::DetachGpu(chain);
         }
+        impl_->DetachPipelines();
         impl_->queue.Detach();
         impl_->written.Detach();
         impl_->done.Detach();
@@ -895,6 +1339,11 @@ XrSwapchainCreateInfo D3D11Bridge::RuntimeCreateInfo(const XrSwapchainCreateInfo
     if (!IsDepthSwapchain(info)) {
         runtime.usageFlags |= XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
         runtime.sampleCount = 1;
+    } else {
+        // The bridge's draw writes depth through a depth target: PimaxXR and
+        // Virtual Desktop make an image one (in the depth-write state) only
+        // when asked for depth-stencil use.
+        runtime.usageFlags |= XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
     }
     return runtime;
 }
@@ -914,8 +1363,19 @@ bool D3D11Bridge::AddSwapchain(XrSwapchain swapchain, const XrSwapchainCreateInf
     chain.mip_count = std::max(1u, info.mipCount);
     chain.sample_count = std::max(1u, info.sampleCount);
     const bool depth = IsDepthSwapchain(info);
-    chain.mode = depth ? Impl::Mode::kPrivate : chain.sample_count > 1 ? Impl::Mode::kResolve : Impl::Mode::kTwin;
+    chain.mode = depth ? Impl::Mode::kDepth : chain.sample_count > 1 ? Impl::Mode::kResolve : Impl::Mode::kTwin;
     chain.storage = depth ? DepthStorageFormat(chain.format) : ColorStorageFormat(chain.format);
+    // Depth the bridge cannot mirror stays the game's own (with why).
+    if (depth && !impl_->mirror_depth) {
+        chain.mode = Impl::Mode::kPrivate;
+        chain.private_reason = "VECTORXR_D3D11_BRIDGE_DEPTH=private";
+    } else if (depth && chain.sample_count > 1) {
+        chain.mode = Impl::Mode::kPrivate;
+        chain.private_reason = "multisampled";
+    } else if (depth && !IsDepthFormat(chain.format)) {
+        chain.mode = Impl::Mode::kPrivate;
+        chain.private_reason = "format " + std::to_string(static_cast<int>(chain.format)) + " is not depth";
+    }
 
     std::uint32_t count = 0;
     if (!enumerate || XR_FAILED(enumerate(swapchain, 0, &count, nullptr)) || count == 0) {
@@ -934,7 +1394,8 @@ bool D3D11Bridge::AddSwapchain(XrSwapchain swapchain, const XrSwapchainCreateInf
     for (std::uint32_t i = 0; i < count; ++i) {
         Impl::Image& image = chain.images[i];
         image.runtime = runtime_images[i].texture;
-        if (chain.mode != Impl::Mode::kPrivate && !impl_->MakeTwin(chain, image, unordered_access, reason)) {
+        const bool twin = chain.mode == Impl::Mode::kTwin || chain.mode == Impl::Mode::kResolve;
+        if (twin && !impl_->MakeTwin(chain, image, unordered_access, reason)) {
             reason = "image " + std::to_string(i) + ": " + reason;
             return false;
         }
@@ -942,6 +1403,16 @@ bool D3D11Bridge::AddSwapchain(XrSwapchain swapchain, const XrSwapchainCreateInf
             reason = "image " + std::to_string(i) + ": " + reason;
             return false;
         }
+    }
+    if (chain.mode == Impl::Mode::kDepth) {
+        std::string why;
+        if (!impl_->MirrorDepth(chain, why)) {
+            Impl::KeepDepthPrivate(chain, why);
+        }
+    }
+    if (chain.mode == Impl::Mode::kPrivate && chain.private_reason.rfind("VECTORXR_", 0) != 0 && impl_->log) {
+        impl_->log("Direct3D 11 bridge: depth swapchain " + Hex(reinterpret_cast<std::uintptr_t>(swapchain)) +
+                   " stays the game's own (its depth is left out of submitted frames): " + chain.private_reason + ".");
     }
     std::scoped_lock lock(impl_->mutex);
     impl_->swapchains[swapchain] = std::move(chain);
@@ -1018,7 +1489,8 @@ void D3D11Bridge::Acquired(XrSwapchain swapchain, std::uint32_t index) {
         return;
     }
     chain->acquired.push_back(index);
-    if (chain->mode == Impl::Mode::kPrivate || index >= chain->images.size()) {
+    // Depth is rendered privately: its twin is written only at release.
+    if (chain->mode == Impl::Mode::kPrivate || chain->mode == Impl::Mode::kDepth || index >= chain->images.size()) {
         return;
     }
     // Until the bridge's queue is done reading the image's last release, the
@@ -1056,6 +1528,18 @@ bool D3D11Bridge::Released(XrSwapchain swapchain) {
     }
     impl_->NoteThread();
     Impl::Image& image = chain->images[index];
+    if (chain->mode == Impl::Mode::kDepth) {
+        // The twin is written again only after the bridge's queue is done
+        // drawing its last release (a wait on the GPU, ending as the
+        // colour's at acquire does); then the game's depth goes into it.
+        const UINT64 value = image.done;
+        if (value && impl_->done->GetCompletedValue() < value) {
+            impl_->context11->Wait(impl_->done11.Get(), value);
+            ++chain->done_waits;
+            ++impl_->done_waits;
+        }
+        impl_->CopyDepthToTwin(*chain, image);
+    }
     if (chain->mode == Impl::Mode::kResolve) {
         const DXGI_FORMAT format = ResolveFormat(chain->format);
         for (UINT slice = 0; slice < chain->array_size; ++slice) {
@@ -1069,7 +1553,7 @@ bool D3D11Bridge::Released(XrSwapchain swapchain) {
     const UINT64 written = ++impl_->written_value;
     impl_->context11->Signal(impl_->written11.Get(), written);
     impl_->context11->Flush();
-    Impl::Copy* copy = impl_->ReadyCopy(image);
+    Impl::Copy* copy = impl_->ReadyCopy(*chain, image);
     if (!copy) {
         impl_->NoteHandover(handover);
         // Every recording of the copy is still queued: the bridge's queue is
@@ -1191,6 +1675,7 @@ std::string D3D11Bridge::Summary() const {
            << ", releases=" << impl_->releases << ", copies=" << impl_->copies
            << ", skippedCopies=" << impl_->skipped_copies << ", copyRecordings=" << impl_->recordings.load()
            << ", doneWaits=" << impl_->done_waits << ", unmatchedReleases=" << impl_->unmatched_releases
+           << ", depthCopies=" << impl_->depth_copies << ", depthTargetUnbinds=" << impl_->depth_target_unbinds
            << ", handoverMs=" << HandoverText(impl_->handover_ms_total, impl_->handovers, impl_->handover_ms_max)
            << ", slowHandovers=" << impl_->slow_handovers
            << ", writtenValue=" << impl_->written_value << ", doneValue=" << impl_->done_value
