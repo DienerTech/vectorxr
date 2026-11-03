@@ -1256,6 +1256,20 @@ class D3D12FrameGen final : public FrameGenGpu {
             error = "Frame Generation cannot read depth format " + std::to_string(static_cast<int>(desc.Format));
             return false;
         }
+        // Texels past the image read as zero, which decodes as near or
+        // infinitely far: a rect the game placed by its colour image's size
+        // in a smaller depth image (UEVR with an upscaler or screen
+        // percentage) is refused instead.
+        const XrRect2Di& rect = depth.rect;
+        if (rect.offset.x < 0 || rect.offset.y < 0 || rect.extent.width <= 0 || rect.extent.height <= 0 ||
+            static_cast<UINT64>(rect.offset.x) + static_cast<UINT64>(rect.extent.width) > desc.Width ||
+            static_cast<UINT64>(rect.offset.y) + static_cast<UINT64>(rect.extent.height) > desc.Height) {
+            error = "Frame Generation's depth rect (" + std::to_string(rect.offset.x) + "," +
+                    std::to_string(rect.offset.y) + " " + std::to_string(rect.extent.width) + "x" +
+                    std::to_string(rect.extent.height) + ") lies outside its " + std::to_string(desc.Width) + "x" +
+                    std::to_string(desc.Height) + " image";
+            return false;
+        }
         HRESULT hr = DeviceRemovedReason();
         if (FAILED(hr)) {
             error = Failure("D3D12 device", hr);

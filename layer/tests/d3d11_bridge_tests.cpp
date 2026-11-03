@@ -1435,6 +1435,13 @@ void TestDepthReachesFrameGen(Game& game) {
             Check(executed, std::string(test.name) + ": execute: " + error);
         }
         Check(result.depth.size() == 1 && result.depth[0], std::string(test.name) + ": the frame used the depth");
+        // UEVR places its depth rect by its colour image's size: in a smaller
+        // depth image (an upscaler's internal resolution) it reaches past
+        // the image, and is refused rather than read as zeros.
+        const XrRect2Di past{{static_cast<int>(kSize / 2), 0}, {static_cast<int>(kSize), static_cast<int>(kSize)}};
+        const bool outside = gpu->CaptureDepth(0, {depth, 0, 0, past, test.format}, test.encoding, view.request, error);
+        Check(!outside && Contains(error, "lies outside its 64x64 image"),
+              std::string(test.name) + ": a depth rect past its image is refused: " + error);
 
         std::vector<float> linear;
         depthxr::FrameGenExtent extent{};
