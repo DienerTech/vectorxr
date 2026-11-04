@@ -39,11 +39,12 @@ namespace depthxr {
 // R32_FLOAT), and the bridge's
 // queue draws the twin into the runtime's depth image as depth, ahead of
 // Frame Generation's capture as for colour, so the runtime and Frame
-// Generation both get the game's depth (D16, D24S8, D32 and D32S8 alike,
-// value for value). Depth the bridge cannot mirror (multisampled, a runtime
-// image that is no depth target, or VECTORXR_D3D11_BRIDGE_DEPTH=private)
-// stays private and never reaches the runtime (the caller keeps it out of
-// submitted frames).
+// Generation both get the game's depth plane (D16, D24S8, D32 and D32S8
+// alike: value for value, but for D24S8, whose 24-bit depth is read
+// normalized and may arrive one 24-bit step off; stencil is not carried).
+// Depth the bridge cannot mirror (multisampled, a runtime image that is no
+// depth target, or VECTORXR_D3D11_BRIDGE_DEPTH=private) stays private and
+// never reaches the runtime (the caller keeps it out of submitted frames).
 //
 // Every Direct3D 11 call is made inside the application's own OpenXR calls,
 // on its thread; nothing here is called from the presenter thread.

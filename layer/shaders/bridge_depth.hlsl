@@ -7,7 +7,9 @@
 // (BRIDGE_DEPTH_TO_TWIN), and the bridge's queue writes the twin into the
 // runtime's image as depth (BRIDGE_DEPTH_VS and BRIDGE_DEPTH_PS). The depth
 // view gives every format's depth as a float (D16 and D24 normalized), and
-// writing it as SV_Depth converts it back, so each value arrives as it was.
+// writing it as SV_Depth converts it back: D16, D32 and D32S8's depth
+// arrives as it was, and D24's may arrive one 24-bit step off (its
+// normalized float is not always converted back to the same step).
 
 #if defined(BRIDGE_DEPTH_TO_TWIN)
 

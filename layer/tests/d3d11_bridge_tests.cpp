@@ -1063,11 +1063,12 @@ DepthCompare CompareDepth(const std::vector<std::uint32_t>& game, const std::vec
     return compare;
 }
 
-// Depth reaches the runtime's depth images, every format value for value,
-// every slice, every image its last release, with the runtime's images typed
-// or typeless (PimaxXR's and Virtual Desktop's are the game's format, opened
-// from Direct3D 11): drawn by the game, copied into the twin by Direct3D 11
-// and drawn into the runtime's image by the bridge's queue.
+// Depth reaches the runtime's depth images, value for value (D24S8: within
+// one 24-bit step, CompareDepth), every slice, every image its last
+// release, with the runtime's images typed or typeless (PimaxXR's and
+// Virtual Desktop's are the game's format, opened from Direct3D 11): drawn
+// by the game, copied into the twin by Direct3D 11 and drawn into the
+// runtime's image by the bridge's queue.
 void TestDepthFormats(Game& game) {
     GameDepthDraw draw(game);
     for (const DepthFormat& format : kDepthFormats) {
