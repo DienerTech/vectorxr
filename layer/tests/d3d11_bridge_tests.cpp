@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -1230,6 +1231,373 @@ void TestDepthStillBound(Game& game) {
     bridge.End();
 }
 
+// The game's output-merger and compute bindings, as Direct3D 11 reports them:
+// what a depth copy must leave as it found.
+struct ContextState {
+    std::array<ComPtr<ID3D11RenderTargetView>, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> targets;
+    ComPtr<ID3D11DepthStencilView> depth_target;
+    std::array<ComPtr<ID3D11UnorderedAccessView>, D3D11_PS_CS_UAV_REGISTER_COUNT> om_writes;
+    ComPtr<ID3D11ComputeShader> shader;
+    std::array<ComPtr<ID3D11ShaderResourceView>, 8> cs_reads;
+    std::array<ComPtr<ID3D11UnorderedAccessView>, D3D11_PS_CS_UAV_REGISTER_COUNT> cs_writes;
+};
+
+ContextState ReadContextState(Game& game) {
+    ContextState state;
+    ID3D11RenderTargetView* targets[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
+    ID3D11DepthStencilView* depth_target = nullptr;
+    ID3D11UnorderedAccessView* om_writes[D3D11_PS_CS_UAV_REGISTER_COUNT]{};
+    game.context->OMGetRenderTargetsAndUnorderedAccessViews(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, targets,
+                                                            &depth_target, 0, D3D11_PS_CS_UAV_REGISTER_COUNT,
+                                                            om_writes);
+    for (std::size_t i = 0; i < state.targets.size(); ++i) state.targets[i].Attach(targets[i]);
+    state.depth_target.Attach(depth_target);
+    for (std::size_t i = 0; i < state.om_writes.size(); ++i) state.om_writes[i].Attach(om_writes[i]);
+    game.context->CSGetShader(&state.shader, nullptr, nullptr);
+    ID3D11ShaderResourceView* cs_reads[8]{};
+    game.context->CSGetShaderResources(0, 8, cs_reads);
+    for (std::size_t i = 0; i < state.cs_reads.size(); ++i) state.cs_reads[i].Attach(cs_reads[i]);
+    ID3D11UnorderedAccessView* cs_writes[D3D11_PS_CS_UAV_REGISTER_COUNT]{};
+    game.context->CSGetUnorderedAccessViews(0, D3D11_PS_CS_UAV_REGISTER_COUNT, cs_writes);
+    for (std::size_t i = 0; i < state.cs_writes.size(); ++i) state.cs_writes[i].Attach(cs_writes[i]);
+    return state;
+}
+
+// Where `after` differs from `before`, slot by slot (empty: nowhere).
+std::string StateDifferences(const ContextState& before, const ContextState& after) {
+    std::string differences;
+    const auto compare = [&](const char* name, std::size_t slot, const void* was, const void* is) {
+        if (was != is) {
+            differences += std::string(name) + "[" + std::to_string(slot) + "] " + (was ? "bound" : "empty") +
+                           " -> " + (is ? (was ? "another view" : "bound") : "empty") + "; ";
+        }
+    };
+    for (std::size_t i = 0; i < before.targets.size(); ++i)
+        compare("render target", i, before.targets[i].Get(), after.targets[i].Get());
+    compare("depth target", 0, before.depth_target.Get(), after.depth_target.Get());
+    for (std::size_t i = 0; i < before.om_writes.size(); ++i)
+        compare("output-merger UAV", i, before.om_writes[i].Get(), after.om_writes[i].Get());
+    compare("compute shader", 0, before.shader.Get(), after.shader.Get());
+    for (std::size_t i = 0; i < before.cs_reads.size(); ++i)
+        compare("compute SRV", i, before.cs_reads[i].Get(), after.cs_reads[i].Get());
+    for (std::size_t i = 0; i < before.cs_writes.size(); ++i)
+        compare("compute UAV", i, before.cs_writes[i].Get(), after.cs_writes[i].Get());
+    return differences;
+}
+
+// An append buffer's hidden counter, as the GPU holds it.
+std::uint32_t Counter(Game& game, ID3D11UnorderedAccessView* view) {
+    D3D11_BUFFER_DESC desc{};
+    desc.ByteWidth = 16;
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Buffer> staging;
+    Check(SUCCEEDED(game.device->CreateBuffer(&desc, nullptr, &staging)), "a counter readback buffer");
+    game.context->CopyStructureCount(staging.Get(), 0, view);
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    Check(SUCCEEDED(game.context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped)), "map the counter readback");
+    const std::uint32_t value = *static_cast<const std::uint32_t*>(mapped.pData);
+    game.context->Unmap(staging.Get(), 0);
+    return value;
+}
+
+// The game's views for the bindings below: colour targets and unordered-
+// access textures of the depth's size (a texture each: views 8 to 11 are
+// for compute, apart from the output merger's 0 to 7), and append buffers.
+struct GameViews {
+    std::vector<ComPtr<ID3D11RenderTargetView>> targets;
+    std::vector<ComPtr<ID3D11UnorderedAccessView>> writes;
+    std::vector<ComPtr<ID3D11UnorderedAccessView>> appends;
+    std::vector<ComPtr<ID3D11ShaderResourceView>> reads;
+    ComPtr<ID3D11ComputeShader> shader;
+    ComPtr<ID3D11DepthStencilView> other_depth; // a depth target that is not the swapchain's
+
+    GameViews(Game& game, std::uint32_t width, std::uint32_t height) {
+        D3D11_TEXTURE2D_DESC desc{};
+        desc.Width = width;
+        desc.Height = height;
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = DXGI_FORMAT_R32_FLOAT;
+        desc.SampleDesc.Count = 1;
+        desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
+        for (int i = 0; i < 12; ++i) {
+            ComPtr<ID3D11Texture2D> texture;
+            ComPtr<ID3D11RenderTargetView> target;
+            ComPtr<ID3D11UnorderedAccessView> write;
+            ComPtr<ID3D11ShaderResourceView> read;
+            Check(SUCCEEDED(game.device->CreateTexture2D(&desc, nullptr, &texture)) &&
+                      SUCCEEDED(game.device->CreateRenderTargetView(texture.Get(), nullptr, &target)) &&
+                      SUCCEEDED(game.device->CreateUnorderedAccessView(texture.Get(), nullptr, &write)) &&
+                      SUCCEEDED(game.device->CreateShaderResourceView(texture.Get(), nullptr, &read)),
+                  "the game's views");
+            targets.push_back(target);
+            writes.push_back(write);
+            reads.push_back(read);
+        }
+        for (int i = 0; i < 2; ++i) {
+            D3D11_BUFFER_DESC buffer{};
+            buffer.ByteWidth = 64 * 4;
+            buffer.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+            buffer.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+            buffer.StructureByteStride = 4;
+            D3D11_UNORDERED_ACCESS_VIEW_DESC view{};
+            view.Format = DXGI_FORMAT_UNKNOWN;
+            view.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+            view.Buffer.NumElements = 64;
+            view.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_APPEND;
+            ComPtr<ID3D11Buffer> resource;
+            ComPtr<ID3D11UnorderedAccessView> append;
+            Check(SUCCEEDED(game.device->CreateBuffer(&buffer, nullptr, &resource)) &&
+                      SUCCEEDED(game.device->CreateUnorderedAccessView(resource.Get(), &view, &append)),
+                  "the game's append buffers");
+            appends.push_back(append);
+        }
+        const char* source = "AppendStructuredBuffer<uint> o : register(u0); Texture2D<float> i : register(t0);"
+                             "[numthreads(1,1,1)] void CSMain() { o.Append(asuint(i[uint2(0,0)])); }";
+        ComPtr<ID3DBlob> blob;
+        Check(SUCCEEDED(D3DCompile(source, std::strlen(source), "game_cs", nullptr, nullptr, "CSMain", "cs_5_0", 0, 0,
+                                   &blob, nullptr)) &&
+                  SUCCEEDED(game.device->CreateComputeShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr,
+                                                             &shader)),
+              "the game's compute shader");
+        D3D11_TEXTURE2D_DESC depth = desc;
+        depth.Format = DXGI_FORMAT_D32_FLOAT;
+        depth.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+        ComPtr<ID3D11Texture2D> depth_texture;
+        Check(SUCCEEDED(game.device->CreateTexture2D(&depth, nullptr, &depth_texture)) &&
+                  SUCCEEDED(game.device->CreateDepthStencilView(depth_texture.Get(), nullptr, &other_depth)),
+              "the game's other depth target");
+    }
+};
+
+// Unbinds everything the cases below bind.
+void ClearContextState(Game& game) {
+    game.context->OMSetRenderTargetsAndUnorderedAccessViews(0, nullptr, nullptr, 0, 0, nullptr, nullptr);
+    game.context->CSSetShader(nullptr, nullptr, 0);
+    ID3D11ShaderResourceView* no_reads[8]{};
+    ID3D11UnorderedAccessView* no_writes[D3D11_PS_CS_UAV_REGISTER_COUNT]{};
+    game.context->CSSetShaderResources(0, 8, no_reads);
+    game.context->CSSetUnorderedAccessViews(0, D3D11_PS_CS_UAV_REGISTER_COUNT, no_writes, nullptr);
+}
+
+// The game's output merger at a release, its depth image still bound or not,
+// beside render targets (sparse ones too) and pixel-shader unordered-access
+// views in the slots past them (an append buffer's hidden counter among
+// them), with compute state of its own (another append buffer in the copy's
+// slot): after the copy every binding is in its slot as the game left it,
+// both counters hold their values, and the depth arrives all the same. A
+// copy that set all eight render target slots again would unbind every
+// one of those views; a depth swapchain the bridge keeps private changes
+// nothing either.
+void TestDepthKeepsGameState(Game& game) {
+    constexpr std::uint32_t kWidth = 40;
+    constexpr std::uint32_t kHeight = 24;
+    GameDepthDraw draw(game);
+    GameViews views(game, kWidth, kHeight);
+    struct Case {
+        const char* name;
+        std::vector<int> targets; // render target slots: a view, or -1 for none
+        bool depth_bound;         // the swapchain's depth target (else `other_depth`, or none)
+        bool other_depth;
+        UINT write_start;
+        std::vector<int> writes; // output-merger UAVs from write_start: a view, -1 none, 100 + n append n
+    };
+    const Case cases[] = {
+        {"no render targets, UAV 1", {}, true, false, 1, {0}},
+        {"no render targets, UAV 0", {}, true, false, 0, {0}},
+        {"render target 0, UAV 1", {0}, true, false, 1, {1}},
+        {"sparse render targets 0 and 2, UAVs 3 and 5", {0, -1, 2}, true, false, 3, {3, -1, 4}},
+        {"render target 0, UAVs 1 to 4 with an append buffer", {0}, true, false, 1, {1, 100, 2, 3}},
+        {"render targets 0 to 6, UAV 7", {0, 1, 2, 3, 4, 5, 6}, true, false, 7, {7}},
+        {"depth already unbound, render target 0, UAV 1", {0}, false, false, 1, {1}},
+        {"another depth target, UAV 1", {}, false, true, 1, {1}},
+    };
+    for (const bool mirrored : {true, false}) {
+        if (!mirrored) _putenv_s("VECTORXR_D3D11_BRIDGE_DEPTH", "private");
+        D3D11Bridge bridge;
+        Session session(game.device.Get());
+        BeginBridge(game, bridge, session);
+        if (!mirrored) _putenv_s("VECTORXR_D3D11_BRIDGE_DEPTH", "");
+        ID3D12Device* device = BridgeDevice(bridge);
+        MakeRuntimeDepthImages(device, 2, kWidth, kHeight, DXGI_FORMAT_D32_FLOAT, 1);
+        const XrSwapchain swapchain = Handle(0x55);
+        std::string reason;
+        Check(bridge.AddSwapchain(swapchain, DepthSwapchainInfo(DXGI_FORMAT_D32_FLOAT, kWidth, kHeight, 1),
+                                  FakeEnumerate, reason),
+              "bridged: " + reason);
+        Check(bridge.Unmirrored(swapchain) == !mirrored, "the depth is mirrored or private as asked");
+        std::uint64_t unbinds = 0;
+        std::uint32_t frame = 0;
+        for (const Case& test : cases) {
+            const std::string name = std::string(mirrored ? "" : "private depth: ") + test.name;
+            const std::uint32_t index = frame % 2;
+            ID3D11Texture2D* image = bridge.Images(swapchain)[index];
+            bridge.Acquired(swapchain, index);
+            draw.Draw(game, image, DXGI_FORMAT_D32_FLOAT, 0, frame++, /*keep_bound=*/true);
+            ComPtr<ID3D11DepthStencilView> depth_target;
+            game.context->OMGetRenderTargets(0, nullptr, &depth_target);
+            ClearContextState(game);
+
+            std::vector<ID3D11RenderTargetView*> targets;
+            for (const int target : test.targets) targets.push_back(target < 0 ? nullptr : views.targets[target].Get());
+            std::vector<ID3D11UnorderedAccessView*> writes;
+            std::vector<UINT> counts;
+            ID3D11UnorderedAccessView* om_append = nullptr;
+            for (const int write : test.writes) {
+                if (write >= 100) {
+                    om_append = views.appends[0].Get();
+                    writes.push_back(om_append);
+                    counts.push_back(5);
+                } else {
+                    writes.push_back(write < 0 ? nullptr : views.writes[write].Get());
+                    counts.push_back(0);
+                }
+            }
+            ID3D11DepthStencilView* bound_depth = test.depth_bound   ? depth_target.Get()
+                                                  : test.other_depth ? views.other_depth.Get()
+                                                                     : nullptr;
+            game.context->OMSetRenderTargetsAndUnorderedAccessViews(
+                static_cast<UINT>(targets.size()), targets.empty() ? nullptr : targets.data(), bound_depth,
+                test.write_start, static_cast<UINT>(writes.size()), writes.data(), counts.data());
+            // Compute state of the game's own: its shader, reads in slots 0
+            // and 3, an append buffer in slot 0 (the copy's) and a write in 2.
+            const UINT cs_count = 7;
+            ID3D11UnorderedAccessView* cs_append = views.appends[1].Get();
+            game.context->CSSetShader(views.shader.Get(), nullptr, 0);
+            game.context->CSSetShaderResources(0, 1, views.reads[8].GetAddressOf());
+            game.context->CSSetShaderResources(3, 1, views.reads[9].GetAddressOf());
+            game.context->CSSetUnorderedAccessViews(0, 1, &cs_append, &cs_count);
+            game.context->CSSetUnorderedAccessViews(2, 1, views.writes[10].GetAddressOf(), nullptr);
+
+            const ContextState before = ReadContextState(game);
+            // Every view went where it was asked to (the case is the state it names).
+            for (std::size_t i = 0; i < targets.size(); ++i)
+                Check(before.targets[i].Get() == targets[i], name + ": render target " + std::to_string(i) + " bound");
+            for (std::size_t i = 0; i < writes.size(); ++i)
+                Check(before.om_writes[test.write_start + i].Get() == writes[i],
+                      name + ": UAV " + std::to_string(test.write_start + i) + " bound");
+            Check(before.depth_target.Get() == bound_depth, name + ": depth target as asked");
+
+            bridge.Released(swapchain);
+            const ContextState after = ReadContextState(game);
+            const std::string differences = StateDifferences(before, after);
+            Check(differences.empty(), name + ": the game's bindings are as it left them: " + differences);
+            if (om_append) {
+                Check(Counter(game, om_append) == 5, name + ": the output merger's append counter keeps its value (" +
+                                                         std::to_string(Counter(game, om_append)) + ")");
+            }
+            Check(Counter(game, cs_append) == 7,
+                  name + ": the compute append counter keeps its value (" + std::to_string(Counter(game, cs_append)) + ")");
+            unbinds += mirrored && test.depth_bound ? 1 : 0;
+            Check(SummaryValue(bridge.Summary(), "depthTargetUnbinds") == unbinds,
+                  name + ": the depth target is unbound only while it is the image: " + bridge.Summary());
+
+            ClearContextState(game);
+            if (mirrored) {
+                const std::vector<std::uint32_t> game_depth = ReadGameDepth(game, image, 0);
+                Check(bridge.WaitIdle(10000), name + ": the bridge's queue finishes");
+                const DepthCompare compare = CompareDepth(
+                    game_depth, ReadRuntimeDepth(device, index, DXGI_FORMAT_R32_TYPELESS, 0), DXGI_FORMAT_R32_TYPELESS);
+                Check(compare.exact == compare.texels, name + ": the depth arrives exact (" +
+                                                           std::to_string(compare.wrong) + " wrong, " +
+                                                           compare.first_wrong + ")");
+            }
+        }
+        const std::string summary = bridge.Summary();
+        Check(SummaryValue(summary, "depthCopies") == (mirrored ? std::size(cases) : 0),
+              std::string(mirrored ? "" : "private depth: ") + "one copy a release: " + summary);
+        Check(bridge.WaitIdle(10000), "the bridge's queue finishes");
+        CheckClean(bridge, game, mirrored ? "depth keeps the game's state" : "private depth keeps the game's state");
+        bridge.End();
+    }
+    Check(GameRuns(game), "the game's device works after its state was kept");
+}
+
+// Another thread of the game's, with multithread protection on, issues its
+// own compute work while a depth copy has its state bound: it runs only once
+// the copy has put the game's state back (it never sees the copy's shader),
+// and what it binds stays bound (the copy's restore does not overwrite it).
+// Each Direct3D 11 call being serialized on its own would let it in between.
+void TestDepthCopyHoldsContext(Game& game) {
+    ComPtr<ID3D11Multithread> multithread;
+    Check(SUCCEEDED(game.context.As(&multithread)), "the game's context has ID3D11Multithread");
+    multithread->SetMultithreadProtected(TRUE);
+    GameDepthDraw draw(game);
+    GameViews views(game, 32, 32);
+    D3D11Bridge bridge;
+    Session session(game.device.Get());
+    BeginBridge(game, bridge, session);
+    ID3D12Device* device = BridgeDevice(bridge);
+    MakeRuntimeDepthImages(device, 2, 32, 32, DXGI_FORMAT_D32_FLOAT, 1);
+    const XrSwapchain swapchain = Handle(0x56);
+    std::string reason;
+    Check(bridge.AddSwapchain(swapchain, DepthSwapchainInfo(DXGI_FORMAT_D32_FLOAT, 32, 32, 1), FakeEnumerate, reason),
+          "bridged: " + reason);
+    ID3D11Texture2D* image = bridge.Images(swapchain)[0];
+
+    // The game's other compute shader, the other thread's.
+    const char* source = "RWTexture2D<float> o : register(u0);"
+                         "[numthreads(1,1,1)] void CSMain(uint3 id : SV_DispatchThreadID) { o[id.xy] = 42.0; }";
+    ComPtr<ID3DBlob> blob;
+    ComPtr<ID3D11ComputeShader> other_shader;
+    Check(SUCCEEDED(D3DCompile(source, std::strlen(source), "other_cs", nullptr, nullptr, "CSMain", "cs_5_0", 0, 0,
+                               &blob, nullptr)) &&
+              SUCCEEDED(game.device->CreateComputeShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr,
+                                                         &other_shader)),
+          "the other thread's compute shader");
+    game.context->CSSetShader(views.shader.Get(), nullptr, 0);
+
+    const HANDLE inside = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    std::atomic<bool> copy_bound{false}; // the copy's state is bound (between the hook's start and its end)
+    std::atomic<bool> other_ran_inside{false};
+    ComPtr<ID3D11ComputeShader> other_saw;
+    bridge.SetDepthCopyHookForTest([&] {
+        copy_bound = true;
+        SetEvent(inside);
+        // Long enough for the other thread's calls to land here, were they let in.
+        Sleep(200);
+        copy_bound = false;
+    });
+    std::thread other([&] {
+        WaitForSingleObject(inside, 10000);
+        // With the copy's state bound, a call let in reads the copy's shader.
+        game.context->CSGetShader(&other_saw, nullptr, nullptr);
+        other_ran_inside = other_ran_inside || copy_bound;
+        game.context->CSSetShader(other_shader.Get(), nullptr, 0);
+        game.context->CSSetUnorderedAccessViews(0, 1, views.writes[0].GetAddressOf(), nullptr);
+        other_ran_inside = other_ran_inside || copy_bound;
+        game.context->Dispatch(1, 1, 1);
+    });
+    bridge.Acquired(swapchain, 0);
+    draw.Draw(game, image, DXGI_FORMAT_D32_FLOAT, 0, 1);
+    Check(bridge.Released(swapchain), "the release is copied");
+    other.join();
+    CloseHandle(inside);
+    bridge.SetDepthCopyHookForTest(nullptr);
+
+    Check(!other_ran_inside, "the other thread's calls wait for the copy to put the game's state back");
+    Check(other_saw.Get() == views.shader.Get(), "the other thread sees the game's own compute shader");
+    ComPtr<ID3D11ComputeShader> shader;
+    game.context->CSGetShader(&shader, nullptr, nullptr);
+    ComPtr<ID3D11UnorderedAccessView> write;
+    game.context->CSGetUnorderedAccessViews(0, 1, &write);
+    Check(shader.Get() == other_shader.Get() && write.Get() == views.writes[0].Get(),
+          "what the other thread bound stays bound");
+
+    ClearContextState(game);
+    const std::vector<std::uint32_t> game_depth = ReadGameDepth(game, image, 0);
+    Check(bridge.WaitIdle(10000), "the bridge's queue finishes");
+    const DepthCompare compare =
+        CompareDepth(game_depth, ReadRuntimeDepth(device, 0, DXGI_FORMAT_R32_TYPELESS, 0), DXGI_FORMAT_R32_TYPELESS);
+    Check(compare.exact == compare.texels, "the depth arrives exact beside the other thread's work (" +
+                                               std::to_string(compare.wrong) + " wrong, " + compare.first_wrong + ")");
+    g_log.clear();
+    CheckClean(bridge, game, "depth copy holds the context");
+    bridge.End();
+    multithread->SetMultithreadProtected(FALSE);
+}
+
 // A depth image released again before the bridge's queue drew its last
 // release: Direct3D 11 waits for that draw before writing the twin again, so
 // the runtime gets each release in turn and the last one at the end.
@@ -1896,6 +2264,8 @@ int main(int argc, char** argv) {
     TestArray(game);
     TestDepthFormats(game);
     TestDepthStillBound(game);
+    TestDepthKeepsGameState(game);
+    TestDepthCopyHoldsContext(game);
     TestDepthDoneWait(game);
     TestDepthPrivate(game);
     TestDepthReachesFrameGen(game);

@@ -135,6 +135,10 @@ class D3D11Bridge {
     // the game's swapchain and frame calls' threads, as it did when the copy
     // ran there (a second thread turns multithread protection on).
     void ReleaseCalled();
+    // Tests: called inside a depth copy into its twin, holding the game's
+    // immediate context with the copy's compute state bound, before its
+    // dispatch and before the game's state goes back.
+    void SetDepthCopyHookForTest(std::function<void()> hook);
     // A release of an image nothing was drawn into: no copy; the runtime's
     // image keeps what it had.
     void Abandoned(XrSwapchain swapchain);

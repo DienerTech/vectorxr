@@ -244,6 +244,29 @@ std::uint64_t MiB(std::uint64_t bytes) {
     return (bytes + (1u << 19)) >> 20;
 }
 
+// Holds the game's immediate context for a sequence of the bridge's calls
+// that changes its state and puts it back (the depth copy). Multithread
+// protection serializes each Direct3D 11 call on its own: without the hold,
+// another thread's draw could land between the bridge's calls, under the
+// bridge's state, or have its own state overwritten when the game's goes
+// back. Taken whether protection is on or not (a thread entering it alone
+// does not wait); it serializes the CPU's calls only, nothing waits for the
+// GPU inside it.
+class ContextHold {
+  public:
+    explicit ContextHold(ID3D11Multithread* multithread) : multithread_(multithread) {
+        if (multithread_) multithread_->Enter();
+    }
+    ~ContextHold() {
+        if (multithread_) multithread_->Leave();
+    }
+    ContextHold(const ContextHold&) = delete;
+    ContextHold& operator=(const ContextHold&) = delete;
+
+  private:
+    ID3D11Multithread* multithread_;
+};
+
 // The session's mean and longest handover, "mean/max" in milliseconds.
 std::string HandoverText(double total_ms, std::uint64_t count, double max_ms) {
     char buffer[48];
@@ -310,6 +333,7 @@ struct D3D11Bridge::Impl {
 
     ComPtr<ID3D11Device5> device11;
     ComPtr<ID3D11DeviceContext4> context11;
+    ComPtr<ID3D11Multithread> multithread; // the immediate context's lock (ContextHold)
     bool multithread_protected{false};
     ComPtr<ID3D12Device> device12;
     ComPtr<IDXGIAdapter3> adapter; // for video memory figures
@@ -359,6 +383,7 @@ struct D3D11Bridge::Impl {
     std::uint64_t handovers{0};
     std::uint64_t slow_handovers{0};
     std::function<void(const std::string&)> log;
+    std::function<void()> depth_copy_hook; // SetDepthCopyHookForTest
 
     // Counts a handover that started at `start` (holding `mutex`).
     void NoteHandover(std::chrono::steady_clock::time_point start) {
@@ -386,8 +411,7 @@ struct D3D11Bridge::Impl {
             return;
         }
         reported_second_thread = true;
-        ComPtr<ID3D11Multithread> multithread;
-        if (SUCCEEDED(context11.As(&multithread))) {
+        if (multithread) {
             multithread->SetMultithreadProtected(TRUE);
             multithread_protected = multithread->GetMultithreadProtected() != FALSE;
         }
@@ -895,21 +919,46 @@ struct D3D11Bridge::Impl {
     }
 
     // Copies the game's depth into the image's twin on the game's immediate
-    // context (holding `mutex`), leaving the context's compute state as it
-    // was. A game still holding the image as its depth target gets the
-    // target back after the copy: Direct3D 11 reads no texture bound for
-    // writing (it would unbind the copy's read instead).
+    // context (holding `mutex`), leaving the context's state as it was. A
+    // game still holding the image as its depth target gets the target back
+    // after the copy: Direct3D 11 reads no texture bound for writing (it
+    // would unbind the copy's read instead). The whole sequence holds the
+    // context (ContextHold), so no other thread's call lands inside it.
     void CopyDepthToTwin(const Swapchain& chain, Image& image) {
-        ID3D11DeviceContext4* context = context11.Get();
+        {
+            const ContextHold hold(multithread.Get());
+            CopyDepthToTwinHeld(chain, image, context11.Get());
+        }
+        ++depth_copies;
+    }
+
+    // CopyDepthToTwin's calls, holding the context.
+    void CopyDepthToTwinHeld(const Swapchain& chain, Image& image, ID3D11DeviceContext4* context) {
+        // The output merger: only its depth target changes, and only while it
+        // is the image. Its render targets are set again up to the last one
+        // bound, with its unordered-access views kept: a view in a slot the
+        // targets set would be unbound (the keep flag keeps only the slots
+        // past them), and Direct3D 11 keeps none in a slot below a bound
+        // target, so every one stays where it was, its hidden counter with it
+        // (which a view set again could not be given back). OMSetRenderTargets
+        // would unbind them all.
         ID3D11RenderTargetView* targets[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
-        ID3D11DepthStencilView* depth_target = nullptr;
-        context->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, targets, &depth_target);
+        ID3D11DepthStencilView* depth_target_raw = nullptr;
+        context->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, targets, &depth_target_raw);
+        ComPtr<ID3D11RenderTargetView> held_targets[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT];
+        UINT target_count = 0;
+        for (UINT i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i) {
+            held_targets[i].Attach(targets[i]);
+            if (targets[i]) target_count = i + 1;
+        }
+        ComPtr<ID3D11DepthStencilView> depth_target;
+        depth_target.Attach(depth_target_raw);
         bool unbound = false;
         if (depth_target) {
             ComPtr<ID3D11Resource> bound;
             depth_target->GetResource(&bound);
             if (bound.Get() == image.private11.Get()) {
-                context->OMSetRenderTargetsAndUnorderedAccessViews(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, targets,
+                context->OMSetRenderTargetsAndUnorderedAccessViews(target_count, target_count ? targets : nullptr,
                                                                    nullptr, 0, D3D11_KEEP_UNORDERED_ACCESS_VIEWS,
                                                                    nullptr, nullptr);
                 unbound = true;
@@ -917,13 +966,19 @@ struct D3D11Bridge::Impl {
             }
         }
 
-        ID3D11ComputeShader* shader = nullptr;
+        ID3D11ComputeShader* shader_raw = nullptr;
         ID3D11ClassInstance* instances[256]{};
         UINT instance_count = 256;
-        context->CSGetShader(&shader, instances, &instance_count);
-        ID3D11ShaderResourceView* read = nullptr;
+        context->CSGetShader(&shader_raw, instances, &instance_count);
+        ComPtr<ID3D11ComputeShader> shader;
+        shader.Attach(shader_raw);
+        ComPtr<ID3D11ClassInstance> held_instances[256];
+        for (UINT i = 0; i < 256; ++i) {
+            held_instances[i].Attach(instances[i]);
+        }
+        ComPtr<ID3D11ShaderResourceView> read;
         context->CSGetShaderResources(0, 1, &read);
-        ID3D11UnorderedAccessView* write = nullptr;
+        ComPtr<ID3D11UnorderedAccessView> write;
         context->CSGetUnorderedAccessViews(0, 1, &write);
 
         ID3D11ShaderResourceView* depth_read = image.depth_read11.Get();
@@ -931,6 +986,9 @@ struct D3D11Bridge::Impl {
         context->CSSetShader(depth_to_twin.Get(), nullptr, 0);
         context->CSSetShaderResources(0, 1, &depth_read);
         context->CSSetUnorderedAccessViews(0, 1, &twin_write, nullptr);
+        if (depth_copy_hook) {
+            depth_copy_hook();
+        }
         context->Dispatch((chain.width + 7) / 8, (chain.height + 7) / 8, chain.array_size);
 
         // Unbound before the game's views go back, whichever slot they held.
@@ -938,27 +996,16 @@ struct D3D11Bridge::Impl {
         ID3D11ShaderResourceView* no_read = nullptr;
         context->CSSetUnorderedAccessViews(0, 1, &no_write, nullptr);
         context->CSSetShaderResources(0, 1, &no_read);
+        // -1: the game's view keeps its hidden counter.
         const UINT keep_counter = static_cast<UINT>(-1);
-        context->CSSetUnorderedAccessViews(0, 1, &write, &keep_counter);
-        context->CSSetShaderResources(0, 1, &read);
-        context->CSSetShader(shader, instances, instance_count);
+        context->CSSetUnorderedAccessViews(0, 1, write.GetAddressOf(), &keep_counter);
+        context->CSSetShaderResources(0, 1, read.GetAddressOf());
+        context->CSSetShader(shader.Get(), instance_count ? instances : nullptr, instance_count);
         if (unbound) {
-            context->OMSetRenderTargetsAndUnorderedAccessViews(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, targets,
-                                                               depth_target, 0, D3D11_KEEP_UNORDERED_ACCESS_VIEWS,
+            context->OMSetRenderTargetsAndUnorderedAccessViews(target_count, target_count ? targets : nullptr,
+                                                               depth_target.Get(), 0, D3D11_KEEP_UNORDERED_ACCESS_VIEWS,
                                                                nullptr, nullptr);
         }
-
-        for (ID3D11ClassInstance* instance : instances) {
-            if (instance) instance->Release();
-        }
-        if (shader) shader->Release();
-        if (read) read->Release();
-        if (write) write->Release();
-        for (ID3D11RenderTargetView* target : targets) {
-            if (target) target->Release();
-        }
-        if (depth_target) depth_target->Release();
-        ++depth_copies;
     }
 
     bool MakePrivate(const Swapchain& chain, Image& image, const XrSwapchainCreateInfo& info, std::string& reason) {
@@ -1029,6 +1076,7 @@ D3D11Bridge::~D3D11Bridge() {
         impl_->done11.Detach();
         impl_->adapter.Detach();
         impl_->device12.Detach();
+        impl_->multithread.Detach();
         impl_->context11.Detach();
         impl_->device11.Detach();
     }
@@ -1075,9 +1123,8 @@ const XrSessionCreateInfo* D3D11Bridge::Begin(XrInstance instance, const XrSessi
         reason = "the game's immediate context has no ID3D11DeviceContext4";
         return nullptr;
     }
-    ComPtr<ID3D11Multithread> multithread;
-    if (SUCCEEDED(immediate.As(&multithread))) {
-        impl->multithread_protected = multithread->GetMultithreadProtected() != FALSE;
+    if (SUCCEEDED(immediate.As(&impl->multithread))) {
+        impl->multithread_protected = impl->multithread->GetMultithreadProtected() != FALSE;
     }
 
     ComPtr<IDXGIDevice> dxgi_device;
@@ -1588,6 +1635,13 @@ bool D3D11Bridge::Released(XrSwapchain swapchain) {
     ++impl_->copies;
     impl_->NoteHandover(handover);
     return true;
+}
+
+void D3D11Bridge::SetDepthCopyHookForTest(std::function<void()> hook) {
+    if (impl_) {
+        std::scoped_lock lock(impl_->mutex);
+        impl_->depth_copy_hook = std::move(hook);
+    }
 }
 
 void D3D11Bridge::ReleaseCalled() {
