@@ -1222,6 +1222,9 @@ void TestDepthStillBound(Game& game) {
     Check(compare.exact == compare.texels, "depth still bound at release arrives exact (" +
                                                std::to_string(compare.wrong) + " wrong, " + compare.first_wrong + ")");
     Check(SummaryValue(bridge.Summary(), "depthTargetUnbinds") == 1, "the unbind is counted: " + bridge.Summary());
+    // The copy's own time on the game's thread, apart from the handover's.
+    Check(Contains(bridge.Summary(), ", depthCopyMs=") && Contains(bridge.Summary(), ", handoverMs="),
+          "the depth copy's time is summarized: " + bridge.Summary());
     game.context->CSSetShader(nullptr, nullptr, 0);
     ID3D11ShaderResourceView* no_read = nullptr;
     ID3D11UnorderedAccessView* no_write = nullptr;

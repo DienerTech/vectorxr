@@ -375,7 +375,13 @@ struct D3D11Bridge::Impl {
     std::uint64_t unmatched_releases{0};
     std::uint64_t depth_copies{0};         // releases of depth copied into a twin
     std::uint64_t depth_target_unbinds{0}; // of them, with the image still the game's depth target
-    // The game thread's time in a release's handover (Direct3D 11's flush, a
+    // The game thread's time issuing those copies (CopyDepthToTwin, its
+    // Direct3D 11 calls only; the GPU's work is not timed), milliseconds: the
+    // session's total and longest.
+    double depth_copy_ms_total{0.0};
+    double depth_copy_ms_max{0.0};
+    // The game thread's time in a release's handover (a depth image's copy
+    // into its twin or a multisampled image's resolve, Direct3D 11's flush, a
     // recording of the copy, the bridge queue's submission), milliseconds:
     // the session's total and longest, and how many took kSlowHandoverMs.
     double handover_ms_total{0.0};
@@ -925,10 +931,15 @@ struct D3D11Bridge::Impl {
     // would unbind the copy's read instead). The whole sequence holds the
     // context (ContextHold), so no other thread's call lands inside it.
     void CopyDepthToTwin(const Swapchain& chain, Image& image) {
+        const auto start = std::chrono::steady_clock::now();
+        ID3D11DeviceContext4* context = context11.Get();
         {
             const ContextHold hold(multithread.Get());
-            CopyDepthToTwinHeld(chain, image, context11.Get());
+            CopyDepthToTwinHeld(chain, image, context);
         }
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        depth_copy_ms_total += ms;
+        depth_copy_ms_max = std::max(depth_copy_ms_max, ms);
         ++depth_copies;
     }
 
@@ -1582,6 +1593,9 @@ bool D3D11Bridge::Released(XrSwapchain swapchain) {
     }
     impl_->NoteThread();
     Impl::Image& image = chain->images[index];
+    // The game's rendering into the image is handed to the bridge's queue
+    // (depth copied into its twin first, multisampled images resolved)...
+    const auto handover = std::chrono::steady_clock::now();
     if (chain->mode == Impl::Mode::kDepth) {
         // The twin is written again only after the bridge's queue is done
         // drawing its last release (a wait on the GPU, ending as the
@@ -1602,8 +1616,6 @@ bool D3D11Bridge::Released(XrSwapchain swapchain) {
                                                  subresource, format);
         }
     }
-    // The game's rendering into the image is handed to the bridge's queue...
-    const auto handover = std::chrono::steady_clock::now();
     const UINT64 written = ++impl_->written_value;
     impl_->context11->Signal(impl_->written11.Get(), written);
     impl_->context11->Flush();
@@ -1737,6 +1749,8 @@ std::string D3D11Bridge::Summary() const {
            << ", skippedCopies=" << impl_->skipped_copies << ", copyRecordings=" << impl_->recordings.load()
            << ", doneWaits=" << impl_->done_waits << ", unmatchedReleases=" << impl_->unmatched_releases
            << ", depthCopies=" << impl_->depth_copies << ", depthTargetUnbinds=" << impl_->depth_target_unbinds
+           << ", depthCopyMs="
+           << HandoverText(impl_->depth_copy_ms_total, impl_->depth_copies, impl_->depth_copy_ms_max)
            << ", handoverMs=" << HandoverText(impl_->handover_ms_total, impl_->handovers, impl_->handover_ms_max)
            << ", slowHandovers=" << impl_->slow_handovers
            << ", writtenValue=" << impl_->written_value << ", doneValue=" << impl_->done_value
