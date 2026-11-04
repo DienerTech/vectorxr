@@ -11033,26 +11033,37 @@ XrResult OpenXrLayer::LocateSpace(XrSpace space, XrSpace base_space, XrTime time
         // DCS locates VIEW several times a frame. Each query answers what its
         // first locate at this display time did: the same pose (not one
         // extended against a later "now"), for one runtime locate instead of
-        // four. Kept for that display time only.
-        {
-            std::scoped_lock lock(mutex_);
+        // four. Kept for that display time only. Under mutex_.
+        const XrPosef runtime_pose = location->pose;
+        const auto answer_kept = [&] {
             const auto answered = std::find_if(
                 head_extension_answers_.begin(), head_extension_answers_.end(), [&](const HeadExtensionAnswer& answer) {
                     return answer.time == time && answer.space == space && answer.base_space == base_space &&
                            answer.limit == head_plan.limit;
                 });
-            if (answered != head_extension_answers_.end()) {
-                if (answered->applied) {
-                    location->pose = answered->pose;
-                }
+            if (answered == head_extension_answers_.end()) {
+                return false;
+            }
+            location->pose = answered->applied ? answered->pose : runtime_pose;
+            return true;
+        };
+        {
+            std::scoped_lock lock(mutex_);
+            if (answer_kept()) {
                 return;
             }
         }
+        // Extended without the lock (its locates go to the runtime).
         const HeadExtension extension = ExtendHead(head_plan, head_world_space, time, TurboClockNow());
         const HeadPredictionPose pose = ToHeadPose(location->pose);
         location->pose = ToXrPose(space == head_world_space ? ApplyHeadExtensionInverse(extension, pose)
                                                             : ApplyHeadExtension(extension, pose));
         std::scoped_lock lock(mutex_);
+        // Another thread's locate of the query, extended beside this one,
+        // kept its answer first: it is the query's answer here too.
+        if (answer_kept()) {
+            return;
+        }
         if (head_extension_answers_.size() >= kHeadExtensionAnswersKept) {
             head_extension_answers_.erase(head_extension_answers_.begin());
         }

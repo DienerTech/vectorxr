@@ -4,14 +4,18 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <condition_variable>
 #include <cstring>
 #include <functional>
 #include <iostream>
+#include <mutex>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <tuple>
 #include <vector>
 
@@ -91,7 +95,40 @@ struct FakeRuntime {
     inline static XrTime now = 0;          // the runtime's clock, as VectorXR reads it
     inline static XrTime limit = 20 * kMs; // how far past now it predicts
     inline static double degrees_per_second = 120.0;
-    inline static int locates = 0;
+    inline static std::atomic<int> locates = 0;
+
+    // Two threads locating one query at once (RacedLocatesOfOneDisplayTimeAnswerTheSame):
+    // both runtime locates return together, and the first thread's head
+    // extension holds until the second has missed the kept answers too and
+    // is extending as well; the second goes on once the first has answered.
+    struct Race {
+        std::mutex mutex;
+        std::condition_variable changed;
+        int arrived{0};
+        bool second_extending{false};
+        bool first_answered{false};
+    };
+    inline static Race race;
+    inline static thread_local int race_role = 0; // 1: the first thread, 2: the second
+    inline static thread_local int race_locates = 0;
+
+    static void RaceStep() {
+        if (race_role == 0) {
+            return;
+        }
+        std::unique_lock lock(race.mutex);
+        if (++race_locates == 1) {
+            ++race.arrived;
+            race.changed.notify_all();
+            race.changed.wait(lock, [] { return race.arrived == 2; });
+        } else if (race_locates == 2 && race_role == 1) {
+            race.changed.wait(lock, [] { return race.second_extending; });
+        } else if (race_locates == 2) {
+            race.second_extending = true;
+            race.changed.notify_all();
+            race.changed.wait(lock, [] { return race.first_answered; });
+        }
+    }
 
     // Yawing at a constant rate from a pitched-down seated start.
     static XrPosef Head(XrTime time) {
@@ -118,6 +155,7 @@ struct FakeRuntime {
     }
 
     static XrResult XRAPI_CALL LocateSpace(XrSpace space, XrSpace base, XrTime time, XrSpaceLocation* location) {
+        RaceStep();
         ++locates;
         location->locationFlags = kTrackedPose;
         if (space == kViewSpace && base == kLocalSpace) {
@@ -577,6 +615,44 @@ void RepeatedSpaceLocatesOfOneDisplayTimeAnswerTheSame() {
     Peer::Finish();
 }
 
+void RacedLocatesOfOneDisplayTimeAnswerTheSame() {
+    // A game's two threads locate VIEW at one display time together: both miss
+    // the kept answers and extend the head, the second against a later "now".
+    // Both must answer the same, the first one kept.
+    Peer::Reset();
+    Peer::SettleLimit();
+    const XrTime time = FakeRuntime::now + 100 * kMs;
+    FakeRuntime::locates = 0;
+    FakeRuntime::race.arrived = 0;
+    FakeRuntime::race.second_extending = false;
+    FakeRuntime::race.first_answered = false;
+    XrPosef first{};
+    XrPosef second{};
+    std::thread first_thread([&] {
+        FakeRuntime::race_role = 1;
+        first = Peer::SpaceHead(time);
+        std::scoped_lock lock(FakeRuntime::race.mutex);
+        FakeRuntime::now += 4 * kMs;
+        FakeRuntime::race.first_answered = true;
+        FakeRuntime::race.changed.notify_all();
+    });
+    std::thread second_thread([&] {
+        FakeRuntime::race_role = 2;
+        second = Peer::SpaceHead(time);
+    });
+    first_thread.join();
+    second_thread.join();
+    Expect(FakeRuntime::locates == 8, "both threads must have missed and extended the head (" +
+                                          std::to_string(FakeRuntime::locates.load()) + " locates)");
+    Expect(AngleBetween(first, FakeRuntime::Answer(time)) > 1.0, "the head must be extended");
+    Expect(std::memcmp(&first, &second, sizeof(first)) == 0,
+           "two threads' locates of one display time must answer the same (off by " +
+               Describe(AngleBetween(first, second)) + " deg)");
+    const XrPosef again = Peer::SpaceHead(time);
+    Expect(std::memcmp(&again, &first, sizeof(first)) == 0, "a later locate must answer as the first thread did");
+    Peer::Finish();
+}
+
 struct Scenario {
     const char* name;
     std::function<void()> run;
@@ -597,6 +673,7 @@ int main() {
         {"a runtime that predicts is left alone", ARuntimeThatPredictsIsLeftAlone},
         {"no runtime clock, no extension", NoClockNoExtension},
         {"repeated space locates of one display time answer the same", RepeatedSpaceLocatesOfOneDisplayTimeAnswerTheSame},
+        {"raced locates of one display time answer the same", RacedLocatesOfOneDisplayTimeAnswerTheSame},
         {"canted eyes place the inset through each eye", CantedEyesPlaceTheInsetThroughEachEye},
         {"views the runtime did not locate are left alone", ViewsTheRuntimeDidNotLocateAreLeftAlone},
     };
