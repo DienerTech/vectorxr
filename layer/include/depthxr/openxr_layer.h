@@ -47,6 +47,7 @@
 #include "depthxr/framegen_runtime_queue.h"
 #include "depthxr/turbo_recovery.h"
 #include "depthxr/turbo_prediction_history.h"
+#include "depthxr/upstream_turbo.h"
 #include "depthxr/turbo_trace.h"
 #include "depthxr/settings_resolver.h"
 #include "depthxr/handshake_census.h"
@@ -1683,16 +1684,10 @@ class OpenXrLayer {
     bool turbo_cadence_pause_logged_{false};
     double turbo_last_frame_blocked_ms_{0.0};
     // A layer above already pipelining the game's frames (OpenXR Toolkit's
-    // Turbo: it calls xrWaitFrame on a pool thread right after each
-    // xrEndFrame returns, and xrBeginFrame right before the next xrEndFrame).
-    // Under turbo_mutex_: when the app's calls last came, and how many frames
-    // in a row came so. Detected, Turbo stands aside for the session.
-    std::thread::id upstream_wait_thread_{};
-    std::chrono::steady_clock::time_point upstream_wait_at_{};
-    std::chrono::steady_clock::time_point upstream_begin_at_{};
-    std::chrono::steady_clock::time_point upstream_end_returned_{};
-    std::uint32_t upstream_turbo_frames_{0};
-    bool upstream_turbo_{false};
+    // Turbo, upstream_turbo.h), under turbo_mutex_. Detected, Turbo stands
+    // aside for the session.
+    UpstreamTurboDetector upstream_turbo_;
+    bool upstream_turbo_logged_{false};
     // Sequenced pacing state machine (turbo_mutex_). DCS overlaps xrWaitFrame
     // (sim thread) with xrEndFrame (render thread) — spec-legal — so the
     // fabrication shield must never have a per-frame gap, and establishment

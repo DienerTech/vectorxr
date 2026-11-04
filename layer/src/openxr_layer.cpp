@@ -6765,8 +6765,7 @@ XrResult OpenXrLayer::PaceWaitFrame(XrSession session,
     turbo_trace_.Record("wait.enter", trace_id);
     if (turbo_frame_interception_required_.load(std::memory_order_acquire)) {
         std::scoped_lock lock(turbo_mutex_);
-        upstream_wait_thread_ = std::this_thread::get_id();
-        upstream_wait_at_ = std::chrono::steady_clock::now();
+        upstream_turbo_.Wait(std::this_thread::get_id(), std::chrono::steady_clock::now());
     }
     const bool experimental_active = turbo_experiment_.enabled &&
         turbo_effective_active_.load(std::memory_order_relaxed) && turbo_effective_async_.load(std::memory_order_relaxed);
@@ -7171,7 +7170,7 @@ XrResult OpenXrLayer::BeginFrame(XrSession session, const XrFrameBeginInfo* fram
     }
     if (turbo_frame_interception_required_.load(std::memory_order_acquire)) {
         std::scoped_lock lock(turbo_mutex_);
-        upstream_begin_at_ = std::chrono::steady_clock::now();
+        upstream_turbo_.Begin(std::chrono::steady_clock::now());
     }
     {
         std::scoped_lock lock(mutex_);
@@ -7272,31 +7271,21 @@ void OpenXrLayer::ObserveCompositionLayerTopology(const XrFrameEndInfo* frame_en
 }
 
 bool OpenXrLayer::NoteUpstreamTurboFrame() {
-    // OpenXR Toolkit's Turbo above (its layer.cpp xrEndFrame): xrWaitFrame on
-    // a pool thread as soon as the app's xrEndFrame returns, xrBeginFrame
-    // right before the next xrEndFrame. Games that wait on a thread of their
-    // own begin before they render (DCS, MSFS), so all three together, frame
-    // after frame, are the layer's.
-    constexpr auto kBeginBeforeEnd = std::chrono::milliseconds(1);
-    constexpr auto kWaitAfterEnd = std::chrono::milliseconds(2);
-    constexpr std::uint32_t kFrames = 60;
-    const auto now = std::chrono::steady_clock::now();
     std::scoped_lock lock(turbo_mutex_);
-    const bool pattern = upstream_wait_thread_ != std::thread::id{} &&
-                         upstream_wait_thread_ != std::this_thread::get_id() &&
-                         upstream_end_returned_ != std::chrono::steady_clock::time_point{} &&
-                         upstream_wait_at_ >= upstream_end_returned_ &&
-                         upstream_wait_at_ - upstream_end_returned_ < kWaitAfterEnd &&
-                         upstream_begin_at_ > upstream_wait_at_ && now - upstream_begin_at_ < kBeginBeforeEnd;
-    upstream_turbo_frames_ = pattern ? upstream_turbo_frames_ + 1 : 0;
-    if (!upstream_turbo_ && upstream_turbo_frames_ >= kFrames) {
-        upstream_turbo_ = true;
-        logger_.Info("Turbo: a layer above VectorXR pipelines the game's frames already (each xrWaitFrame comes from "
-                     "another thread as the last xrEndFrame returns, each xrBeginFrame right before its xrEndFrame: "
-                     "OpenXR Toolkit's Turbo mode). VectorXR's Turbo stands aside for this session; turn one of the "
-                     "two off.");
+    const bool seen =
+        upstream_turbo_.End(std::this_thread::get_id(), std::chrono::steady_clock::now(), openxr_toolkit_above_);
+    if (seen && !upstream_turbo_logged_) {
+        upstream_turbo_logged_ = true;
+        logger_.Info("Turbo: a layer above VectorXR pipelines the game's frames already (" +
+                     std::to_string(upstream_turbo_.Matching()) + " of the last " +
+                     std::to_string(upstream_turbo_.Frames()) +
+                     " frames: each xrWaitFrame from another thread as the last xrEndFrame returns, each "
+                     "xrBeginFrame right before its xrEndFrame" +
+                     (openxr_toolkit_above_ ? "; OpenXR Toolkit is loaded above VectorXR" : "") +
+                     "). That is OpenXR Toolkit's Turbo mode: VectorXR's Turbo stands aside for this session and "
+                     "lets its pipelined frame go; turn one of the two off.");
     }
-    return upstream_turbo_;
+    return seen;
 }
 
 XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
@@ -7309,7 +7298,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
         ~EndReturned() {
             if (!layer.turbo_frame_interception_required_.load(std::memory_order_acquire)) return;
             std::scoped_lock lock(layer.turbo_mutex_);
-            layer.upstream_end_returned_ = std::chrono::steady_clock::now();
+            layer.upstream_turbo_.EndReturned(std::chrono::steady_clock::now());
         }
     } end_returned{*this};
     // Runtime wait/begin can fail before TraceRuntimeEndFrame is reached: a
@@ -9479,10 +9468,8 @@ void OpenXrLayer::ResetTurboFrameState(bool stop_recorder) {
     pacing_end_sum_ms_ = 0.0;
     pacing_end_max_ms_ = 0.0;
     std::scoped_lock lock(turbo_mutex_);
-    upstream_wait_thread_ = {};
-    upstream_wait_at_ = upstream_begin_at_ = upstream_end_returned_ = {};
-    upstream_turbo_frames_ = 0;
-    upstream_turbo_ = false;
+    upstream_turbo_.Reset();
+    upstream_turbo_logged_ = false;
     should_render_log_budget_ = 8;
     last_noted_should_render_.reset();
     pacing_wait_sum_ms_ = 0.0;
