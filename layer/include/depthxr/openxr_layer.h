@@ -47,6 +47,7 @@
 #include "depthxr/framegen_runtime_queue.h"
 #include "depthxr/turbo_recovery.h"
 #include "depthxr/turbo_prediction_history.h"
+#include "depthxr/upstream_turbo.h"
 #include "depthxr/turbo_trace.h"
 #include "depthxr/settings_resolver.h"
 #include "depthxr/handshake_census.h"
@@ -89,6 +90,20 @@ class OpenXrLayer {
     // A second instance passed straight through (layer_entry.cpp's
     // PassThroughInstance): said in the first instance's log.
     void NotePassThroughInstance(const std::string& application_name, XrResult result);
+    // Another instance is being created while VectorXR's is alive. An instance
+    // that enabled no graphics extension and never asked for a session cannot
+    // have a session VectorXR could serve: OpenXR Toolkit's and
+    // Quad-Views-Foveated's probe instance, which they keep alive on VIVE
+    // runtimes. VectorXR lets it go as at xrDestroyInstance, without
+    // destroying it in the runtime, and answers true with what its calls
+    // go on to (it passes straight through from here); the new instance is
+    // VectorXR's. Any other instance keeps VectorXR (false).
+    struct RetiredInstance {
+        XrInstance instance{XR_NULL_HANDLE};
+        PFN_xrGetInstanceProcAddr next_get_instance_proc_addr{nullptr};
+        PFN_xrDestroyInstance next_destroy_instance{nullptr};
+    };
+    bool RetireIdleInstance(const std::string& next_application_name, RetiredInstance* retired);
     // The application's name as it created the instance.
     std::string application_name_;
     // Native quad views on a runtime that shows the focus views with the FOVs
@@ -208,6 +223,9 @@ class OpenXrLayer {
     void AbandonInstance();
     XrResult GetInstanceProcAddr(XrInstance instance, const char* name, PFN_xrVoidFunction* function);
     XrResult DestroyInstance(XrInstance instance);
+    // DestroyInstance's teardown; `in_runtime` false keeps the runtime's
+    // instance (RetireIdleInstance).
+    XrResult EndInstance(XrInstance instance, bool in_runtime);
     XrResult CreateSession(XrInstance instance, const XrSessionCreateInfo* create_info, XrSession* session);
     XrResult DestroySession(XrSession session);
     XrResult BeginSession(XrSession session, const XrSessionBeginInfo* begin_info);
@@ -1408,6 +1426,12 @@ class OpenXrLayer {
     // number of extensions it enabled for it.
     bool instance_requested_session_{false};
     uint32_t instance_enabled_extension_count_{0};
+    // The application enabled a graphics API's extension (or a headless
+    // one): the instance can create a session.
+    bool instance_enabled_session_extension_{false};
+    // RetireIdleInstance's line for the next instance's log (the retired
+    // instance's own log is a probe's, removed with it).
+    std::string retired_instance_note_;
     std::vector<PivotProfileInputState> pivotxr_profile_input_states_;
     // IsPivotXrActive's per-call claim lists (under mutex_), kept so the
     // locate paths do not allocate.
@@ -1661,16 +1685,10 @@ class OpenXrLayer {
     bool turbo_cadence_pause_logged_{false};
     double turbo_last_frame_blocked_ms_{0.0};
     // A layer above already pipelining the game's frames (OpenXR Toolkit's
-    // Turbo: it calls xrWaitFrame on a pool thread right after each
-    // xrEndFrame returns, and xrBeginFrame right before the next xrEndFrame).
-    // Under turbo_mutex_: when the app's calls last came, and how many frames
-    // in a row came so. Detected, Turbo stands aside for the session.
-    std::thread::id upstream_wait_thread_{};
-    std::chrono::steady_clock::time_point upstream_wait_at_{};
-    std::chrono::steady_clock::time_point upstream_begin_at_{};
-    std::chrono::steady_clock::time_point upstream_end_returned_{};
-    std::uint32_t upstream_turbo_frames_{0};
-    bool upstream_turbo_{false};
+    // Turbo, upstream_turbo.h), under turbo_mutex_. Detected, Turbo stands
+    // aside for the session.
+    UpstreamTurboDetector upstream_turbo_;
+    bool upstream_turbo_logged_{false};
     // Sequenced pacing state machine (turbo_mutex_). DCS overlaps xrWaitFrame
     // (sim thread) with xrEndFrame (render thread) — spec-legal — so the
     // fabrication shield must never have a per-frame gap, and establishment

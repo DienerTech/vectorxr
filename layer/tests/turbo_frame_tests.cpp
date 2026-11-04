@@ -25,6 +25,7 @@
 #include "depthxr/openxr_layer.h"
 #include "depthxr/framegen_gpu.h"
 #include "depthxr/turbo_metrics.h"
+#include "depthxr/upstream_turbo.h"
 
 using namespace std::chrono_literals;
 
@@ -432,6 +433,11 @@ class TurboFrameTestPeer {
         layer.deferred_quadviews_config_active_.reset();
     }
     static bool TurboEffective() { return Layer().turbo_effective_active_.load(); }
+    static void SetToolkitAbove(bool above) { Layer().openxr_toolkit_above_ = above; }
+    static bool UpstreamTurboSeen() {
+        std::scoped_lock lock(Layer().turbo_mutex_);
+        return Layer().upstream_turbo_.Seen();
+    }
     static bool TurboYielded() {
         auto& layer = Layer();
         std::scoped_lock lock(layer.mutex_);
@@ -2042,23 +2048,126 @@ void TestAsyncTwoThreadFramesNeedNoRaise() {
                                           std::to_string(leads) + " runtime frames");
 }
 
+// The detector on scripted times (no OS scheduling): OpenXR Toolkit's Turbo
+// above (a pool thread waits as each end returns, begin right before the
+// next end) with the misses a busy PC gives it, against games that are not
+// it. `frame` scripts one frame's calls, `at` running on in microseconds.
+void TestUpstreamTurboDetectorWindow() {
+    using Detector = depthxr::UpstreamTurboDetector;
+    using Clock = Detector::Clock;
+    std::thread pool_a([] {}), pool_b([] {}), sim([] {});
+    const std::thread::id a = pool_a.get_id(), b = pool_b.get_id(), game_sim = sim.get_id();
+    pool_a.join();
+    pool_b.join();
+    sim.join();
+    const std::thread::id end_thread = std::this_thread::get_id();
+
+    struct Frame {
+        std::thread::id wait_thread;
+        int wait_after_end_us;  // from the last end's return to the wait
+        int begin_before_end_us; // from the begin to the end
+    };
+    // Frames until the detector first answers true (0: never, in `frames`).
+    const auto run = [&](bool toolkit_above, int frames, auto frame_of) {
+        Detector detector;
+        Clock::time_point at = Clock::time_point{} + std::chrono::seconds(1);
+        detector.EndReturned(at);
+        for (int i = 1; i <= frames; ++i) {
+            const Frame frame = frame_of(i);
+            at += std::chrono::microseconds(frame.wait_after_end_us);
+            detector.Wait(frame.wait_thread, at);
+            at += std::chrono::microseconds(10'000 - frame.wait_after_end_us); // the game renders
+            detector.Begin(at);
+            at += std::chrono::microseconds(frame.begin_before_end_us);
+            if (detector.End(end_thread, at, toolkit_above)) {
+                return i;
+            }
+            at += std::chrono::microseconds(500); // the runtime's xrEndFrame
+            detector.EndReturned(at);
+        }
+        return 0;
+    };
+    const auto toolkit = [&](int i) { return Frame{i % 2 ? a : b, 200, 50}; };
+    // Every 15th pool wait starts 4 ms late (the reviewer's reproduction), and
+    // every 20th begin is preempted 2 ms before its end.
+    const auto toolkit_jitter = [&](int i) {
+        Frame frame = toolkit(i);
+        if (i % 15 == 0) frame.wait_after_end_us = 4'200;
+        if (i % 20 == 0) frame.begin_before_end_us = 2'000;
+        return frame;
+    };
+    // A busy PC: one frame in four misses a window.
+    const auto toolkit_busy = [&](int i) {
+        Frame frame = toolkit(i);
+        if (i % 4 == 0) frame.wait_after_end_us = 6'000;
+        return frame;
+    };
+    const auto dcs = [&](int) { return Frame{game_sim, 200, 8'000}; };
+    // A game rendering on two threads whose begin lands near its end on half
+    // its frames (short frames on its render thread).
+    const auto two_thread_game = [&](int i) { return Frame{game_sim, 200, i % 2 ? 300 : 6'000}; };
+    const auto single_thread = [&](int) { return Frame{end_thread, 200, 50}; };
+
+    Expect(run(true, 60, toolkit) == 60 && run(false, 60, toolkit) == 60,
+           "Toolkit's Turbo above must be seen at the end of the first window");
+    Expect(run(true, 60, toolkit_jitter) == 60,
+           "Toolkit's Turbo above must be seen through periodic pool-thread and begin delays");
+    Expect(run(false, 60, toolkit_jitter) == 60,
+           "A few late frames must not hide the pattern with no layer known above either");
+    Expect(run(true, 120, toolkit_busy) == 60,
+           "With OpenXR Toolkit known above, a quarter of the frames late must not hide its Turbo");
+    Expect(run(false, 300, toolkit_busy) == 0,
+           "With no layer known above, a pattern that holds on only three frames in four must not be taken");
+    for (const bool above : {true, false}) {
+        Expect(run(above, 300, dcs) == 0, "A game that renders between its begin and end must keep Turbo");
+        Expect(run(above, 300, two_thread_game) == 0,
+               "A two-thread game whose begin sometimes lands near its end must keep Turbo");
+        Expect(run(above, 300, single_thread) == 0, "A game that waits on its frame thread must keep Turbo");
+    }
+    // The window slides: a game's first frames (loading, no pattern) do not
+    // keep a Toolkit pipeline from being seen later.
+    Expect(run(true, 200, [&](int i) { return i <= 100 ? dcs(i) : toolkit(i); }) == 142,
+           "The pattern must be seen once a whole window of it has passed");
+
+    Detector detector;
+    Clock::time_point at = Clock::time_point{} + std::chrono::seconds(1);
+    for (int i = 0; i < 60; ++i) {
+        detector.EndReturned(at);
+        detector.Wait(a, at += 100us);
+        detector.Begin(at += 10ms);
+        detector.End(end_thread, at += 50us, true);
+        at += 500us;
+    }
+    Expect(detector.Seen(), "The scripted Toolkit session must be seen");
+    detector.End(end_thread, at += 10ms, true);
+    Expect(detector.Seen(), "Once seen, the pattern stays seen for the session");
+    detector.Reset();
+    Expect(!detector.Seen() && detector.Frames() == 0, "A session's end must forget the pattern");
+}
+
 // OpenXR Toolkit's Turbo mode above VectorXR (its layer.cpp xrEndFrame): as
 // each xrEndFrame returns it calls xrWaitFrame on a pool thread, and calls
 // xrBeginFrame right before the next xrEndFrame. VectorXR's Turbo stacked on
-// it would pipeline the frames twice: it sees the pattern and stands aside.
-// A game that waits on a thread of its own and begins before rendering (as
-// DCS does) keeps Turbo.
+// it would pipeline the frames twice: it sees the pattern and stands aside,
+// letting its engaged pipeline go, through the scheduling delays of a busy
+// PC. A game that waits on a thread of its own and begins before rendering
+// (as DCS does) keeps Turbo.
 void TestUpstreamToolkitTurboStandsAside() {
     for (const bool toolkit : {true, false}) {
         FakeRuntime runtime;
         TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+        depthxr::TurboFrameTestPeer::SetToolkitAbove(true);
         auto end = FrameEndInfo();
         Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_SUCCESS &&
                    depthxr::TurboFrameTestPeer::WaitForAsyncPrediction(),
                "Upstream Turbo establishment did not publish its runtime wait");
-        for (int frame = 0; frame < 90; ++frame) {
-            // The pool thread's wait, as the last end returned.
-            std::future<XrFrameState> waited = std::async(std::launch::async, [] {
+        Expect(depthxr::TurboFrameTestPeer::TurboEffective(), "Turbo must be engaged before the pattern is seen");
+        int seen_at = 0;
+        for (int frame = 1; frame <= 120; ++frame) {
+            // The pool thread's wait, as the last end returned; every 15th
+            // starts late, as on a busy PC.
+            std::future<XrFrameState> waited = std::async(std::launch::async, [frame] {
+                if (frame % 15 == 0) std::this_thread::sleep_for(5ms);
                 XrFrameState state{XR_TYPE_FRAME_STATE};
                 Expect(AppWait(&state) == XR_SUCCESS, "Upstream Turbo app wait failed");
                 return state;
@@ -2073,11 +2182,21 @@ void TestUpstreamToolkitTurboStandsAside() {
             }
             end.displayTime = state.predictedDisplayTime;
             Expect(XR_SUCCEEDED(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end)),
-                   "Upstream Turbo submit failed");
+                   "Upstream Turbo submit failed (frame " + std::to_string(frame) + ")");
+            if (!seen_at && depthxr::TurboFrameTestPeer::UpstreamTurboSeen()) {
+                seen_at = frame;
+            }
         }
         Expect(depthxr::TurboFrameTestPeer::TurboEffective() == !toolkit,
                toolkit ? "Turbo must stand aside for OpenXR Toolkit's Turbo above it"
                        : "Turbo must stay engaged for a game that begins before it renders");
+        if (toolkit) {
+            Expect(seen_at > 0 && seen_at <= 90, "Toolkit's Turbo was seen at frame " + std::to_string(seen_at));
+            Expect(!depthxr::TurboFrameTestPeer::Handoff().wait_valid,
+                   "Standing aside must let the engaged async pipeline's worker wait go");
+        }
+        Expect(runtime.StaleRejections() == 0, "Standing aside must not submit a stale frame");
+        depthxr::TurboFrameTestPeer::SetToolkitAbove(false);
     }
 }
 
@@ -4767,6 +4886,7 @@ int main() {
     TestAsyncAppFramesTargetTheirRuntimeFrame();
     TestAsyncUnechoedAbandonedFramesDoNotLead();
     TestAsyncTwoThreadFramesNeedNoRaise();
+    TestUpstreamTurboDetectorWindow();
     TestUpstreamToolkitTurboStandsAside();
     TestFrameGenOwnsFramePacing();
     TestConfigReloadWhileFrameGenOwnsPacing();

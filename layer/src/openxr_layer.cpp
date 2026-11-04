@@ -2194,9 +2194,8 @@ bool OpenXrLayer::CanCreateInstance() {
 void OpenXrLayer::NotePassThroughInstance(const std::string& application_name, XrResult result) {
     logger_.Info("A second OpenXR instance (application \"" + application_name + "\", result=" +
                  std::to_string(static_cast<int>(result)) +
-                 ") was created while VectorXR's is alive; it passes straight through VectorXR, which stays with "
-                 "its first instance. OpenXR Toolkit and Quad-Views-Foveated keep their probe instance alive on "
-                 "VIVE runtimes, which makes the game's instance the second.");
+                 ") was created while VectorXR's, which can have a session, is alive; it passes straight through "
+                 "VectorXR, which stays with its first instance.");
 }
 
 XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
@@ -2240,6 +2239,10 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
     logger_.Info(std::string("VectorXR layer version: ") + VECTORXR_VERSION);
     logger_.Info(std::string("VectorXR layer build: ") + __DATE__ + " " + __TIME__);
     logger_.Info("VectorXR attached to process: " + current_exe_name_);
+    if (!retired_instance_note_.empty()) {
+        logger_.Info(retired_instance_note_);
+        retired_instance_note_.clear();
+    }
     {
         const ProcessInteropSnapshot interop = GetProcessInteropSnapshot();
         std::ostringstream stream;
@@ -2287,6 +2290,12 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
         logger_.Info(stream.str());
 
         instance_enabled_extension_count_ = create_info->enabledExtensionCount;
+        for (const char* extension : {"XR_KHR_D3D11_enable", "XR_KHR_D3D12_enable", "XR_KHR_vulkan_enable",
+                                      "XR_KHR_vulkan_enable2", "XR_KHR_opengl_enable", "XR_KHR_opengl_es_enable",
+                                      "XR_MND_headless", "XR_EXT_headless"}) {
+            instance_enabled_session_extension_ =
+                instance_enabled_session_extension_ || ExtensionRequested(create_info, extension);
+        }
         std::ostringstream ext_stream;
         ext_stream << "Application enabled OpenXR extensions (" << create_info->enabledExtensionCount << "):";
         for (uint32_t i = 0; i < create_info->enabledExtensionCount; ++i) {
@@ -2607,8 +2616,36 @@ XrResult OpenXrLayer::GetInstanceProcAddr(XrInstance instance, const char* name,
     return next_get_instance_proc_addr_(instance, name, function);
 }
 
+bool OpenXrLayer::RetireIdleInstance(const std::string& next_application_name, RetiredInstance* retired) {
+    {
+        std::scoped_lock lock(mutex_);
+        if (instance_ == XR_NULL_HANDLE || instance_requested_session_ || instance_enabled_session_extension_ ||
+            active_session_ != XR_NULL_HANDLE) {
+            return false;
+        }
+        retired->instance = instance_;
+        retired->next_get_instance_proc_addr = next_get_instance_proc_addr_;
+        retired->next_destroy_instance = next_destroy_instance_;
+        retired_instance_note_ =
+            "An earlier OpenXR instance (application \"" + application_name_ + "\", " +
+            std::to_string(instance_enabled_extension_count_) +
+            " extensions, no graphics extension, no session) was alive as \"" + next_application_name +
+            "\" created this one: it passes straight through VectorXR from here and VectorXR is this instance's. "
+            "OpenXR Toolkit and Quad-Views-Foveated keep such a probe instance alive on VIVE runtimes.";
+    }
+    logger_.Info("Another OpenXR instance (application \"" + next_application_name +
+                 "\") is being created; this instance has no graphics extension and no session, so VectorXR moves to "
+                 "the new one and this one passes straight through.");
+    EndInstance(retired->instance, false);
+    return true;
+}
+
 XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
     logger_.Info("xrDestroyInstance requested by application.");
+    return EndInstance(instance, true);
+}
+
+XrResult OpenXrLayer::EndInstance(XrInstance instance, bool in_runtime) {
     if (handshake_census_.Active()) {
         CensusFlushProcAddrs("since the last of them");
         if (const std::string repeats = handshake_census_.ProcAddrRepeats(); !repeats.empty()) {
@@ -2681,7 +2718,7 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
         return XR_SUCCESS;
     }
     watch.Step("in the runtime's xrDestroyInstance");
-    const XrResult result = next_destroy_instance_(instance);
+    const XrResult result = in_runtime ? next_destroy_instance_(instance) : XR_SUCCESS;
     watch.Step("ending the bridges");
     framegen_queue_.Reset();
     EndD3D11Bridge();
@@ -6763,8 +6800,7 @@ XrResult OpenXrLayer::PaceWaitFrame(XrSession session,
     turbo_trace_.Record("wait.enter", trace_id);
     if (turbo_frame_interception_required_.load(std::memory_order_acquire)) {
         std::scoped_lock lock(turbo_mutex_);
-        upstream_wait_thread_ = std::this_thread::get_id();
-        upstream_wait_at_ = std::chrono::steady_clock::now();
+        upstream_turbo_.Wait(std::this_thread::get_id(), std::chrono::steady_clock::now());
     }
     const bool experimental_active = turbo_experiment_.enabled &&
         turbo_effective_active_.load(std::memory_order_relaxed) && turbo_effective_async_.load(std::memory_order_relaxed);
@@ -7169,7 +7205,7 @@ XrResult OpenXrLayer::BeginFrame(XrSession session, const XrFrameBeginInfo* fram
     }
     if (turbo_frame_interception_required_.load(std::memory_order_acquire)) {
         std::scoped_lock lock(turbo_mutex_);
-        upstream_begin_at_ = std::chrono::steady_clock::now();
+        upstream_turbo_.Begin(std::chrono::steady_clock::now());
     }
     {
         std::scoped_lock lock(mutex_);
@@ -7270,31 +7306,21 @@ void OpenXrLayer::ObserveCompositionLayerTopology(const XrFrameEndInfo* frame_en
 }
 
 bool OpenXrLayer::NoteUpstreamTurboFrame() {
-    // OpenXR Toolkit's Turbo above (its layer.cpp xrEndFrame): xrWaitFrame on
-    // a pool thread as soon as the app's xrEndFrame returns, xrBeginFrame
-    // right before the next xrEndFrame. Games that wait on a thread of their
-    // own begin before they render (DCS, MSFS), so all three together, frame
-    // after frame, are the layer's.
-    constexpr auto kBeginBeforeEnd = std::chrono::milliseconds(1);
-    constexpr auto kWaitAfterEnd = std::chrono::milliseconds(2);
-    constexpr std::uint32_t kFrames = 60;
-    const auto now = std::chrono::steady_clock::now();
     std::scoped_lock lock(turbo_mutex_);
-    const bool pattern = upstream_wait_thread_ != std::thread::id{} &&
-                         upstream_wait_thread_ != std::this_thread::get_id() &&
-                         upstream_end_returned_ != std::chrono::steady_clock::time_point{} &&
-                         upstream_wait_at_ >= upstream_end_returned_ &&
-                         upstream_wait_at_ - upstream_end_returned_ < kWaitAfterEnd &&
-                         upstream_begin_at_ > upstream_wait_at_ && now - upstream_begin_at_ < kBeginBeforeEnd;
-    upstream_turbo_frames_ = pattern ? upstream_turbo_frames_ + 1 : 0;
-    if (!upstream_turbo_ && upstream_turbo_frames_ >= kFrames) {
-        upstream_turbo_ = true;
-        logger_.Info("Turbo: a layer above VectorXR pipelines the game's frames already (each xrWaitFrame comes from "
-                     "another thread as the last xrEndFrame returns, each xrBeginFrame right before its xrEndFrame: "
-                     "OpenXR Toolkit's Turbo mode). VectorXR's Turbo stands aside for this session; turn one of the "
-                     "two off.");
+    const bool seen =
+        upstream_turbo_.End(std::this_thread::get_id(), std::chrono::steady_clock::now(), openxr_toolkit_above_);
+    if (seen && !upstream_turbo_logged_) {
+        upstream_turbo_logged_ = true;
+        logger_.Info("Turbo: a layer above VectorXR pipelines the game's frames already (" +
+                     std::to_string(upstream_turbo_.Matching()) + " of the last " +
+                     std::to_string(upstream_turbo_.Frames()) +
+                     " frames: each xrWaitFrame from another thread as the last xrEndFrame returns, each "
+                     "xrBeginFrame right before its xrEndFrame" +
+                     (openxr_toolkit_above_ ? "; OpenXR Toolkit is loaded above VectorXR" : "") +
+                     "). That is OpenXR Toolkit's Turbo mode: VectorXR's Turbo stands aside for this session and "
+                     "lets its pipelined frame go; turn one of the two off.");
     }
-    return upstream_turbo_;
+    return seen;
 }
 
 XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
@@ -7307,7 +7333,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
         ~EndReturned() {
             if (!layer.turbo_frame_interception_required_.load(std::memory_order_acquire)) return;
             std::scoped_lock lock(layer.turbo_mutex_);
-            layer.upstream_end_returned_ = std::chrono::steady_clock::now();
+            layer.upstream_turbo_.EndReturned(std::chrono::steady_clock::now());
         }
     } end_returned{*this};
     // Runtime wait/begin can fail before TraceRuntimeEndFrame is reached: a
@@ -9477,10 +9503,8 @@ void OpenXrLayer::ResetTurboFrameState(bool stop_recorder) {
     pacing_end_sum_ms_ = 0.0;
     pacing_end_max_ms_ = 0.0;
     std::scoped_lock lock(turbo_mutex_);
-    upstream_wait_thread_ = {};
-    upstream_wait_at_ = upstream_begin_at_ = upstream_end_returned_ = {};
-    upstream_turbo_frames_ = 0;
-    upstream_turbo_ = false;
+    upstream_turbo_.Reset();
+    upstream_turbo_logged_ = false;
     should_render_log_budget_ = 8;
     last_noted_should_render_.reset();
     pacing_wait_sum_ms_ = 0.0;
@@ -12864,6 +12888,7 @@ void OpenXrLayer::ResetSessionState() {
 void OpenXrLayer::ResetInstanceState() {
     instance_requested_session_ = false;
     instance_enabled_extension_count_ = 0;
+    instance_enabled_session_extension_ = false;
     application_action_spaces_.clear();
     application_pose_actions_.clear();
     application_action_owners_.clear();

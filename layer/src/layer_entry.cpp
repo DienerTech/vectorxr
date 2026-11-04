@@ -7,6 +7,7 @@
 #include "depthxr/vulkan_enable_hooks.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
@@ -39,23 +40,38 @@ std::filesystem::path GetModuleDirectory() {
     return std::filesystem::path(buffer).parent_path();
 }
 
-XrResult XRAPI_CALL DepthxrDestroyInstance(XrInstance instance) {
-    return OpenXrLayer::Instance().DestroyInstance(instance);
-}
-
-// An instance created while VectorXR's own is alive. OpenXR Toolkit and
+// An instance VectorXR passes straight through: its functions are the
+// layers' below. VectorXR serves one instance. OpenXR Toolkit and
 // Quad-Views-Foveated create a probe instance through the chain before the
-// game's, and on a VIVE runtime ("Vive Reality system") never destroy it:
-// VectorXR serves one instance, so the game's would be refused. Any other
-// instance passes straight through: its functions are the layers' below.
+// game's, and on a VIVE runtime ("Vive Reality system") never destroy it: the
+// probe (no graphics extension, no session) is let go as the game's instance
+// is created (OpenXrLayer::RetireIdleInstance), and the game's is VectorXR's.
+// An instance created while VectorXR's can have a session passes through.
 struct PassThroughInstance {
     PFN_xrGetInstanceProcAddr next_get_instance_proc_addr{};
     PFN_xrDestroyInstance next_destroy_instance{};
 };
 std::mutex g_pass_through_mutex;
 std::unordered_map<XrInstance, PassThroughInstance> g_pass_through_instances;
+// The map's size, so the per-frame hooks below skip its lock while it is empty.
+std::atomic<std::size_t> g_pass_through_count{0};
+
+void RememberPassThroughInstance(XrInstance instance, const PassThroughInstance& pass_through) {
+    std::scoped_lock lock(g_pass_through_mutex);
+    g_pass_through_instances[instance] = pass_through;
+    g_pass_through_count.store(g_pass_through_instances.size(), std::memory_order_release);
+}
+
+void ForgetPassThroughInstance(XrInstance instance) {
+    std::scoped_lock lock(g_pass_through_mutex);
+    g_pass_through_instances.erase(instance);
+    g_pass_through_count.store(g_pass_through_instances.size(), std::memory_order_release);
+}
 
 bool FindPassThroughInstance(XrInstance instance, PassThroughInstance* found) {
+    if (instance == XR_NULL_HANDLE || g_pass_through_count.load(std::memory_order_acquire) == 0) {
+        return false;
+    }
     std::scoped_lock lock(g_pass_through_mutex);
     const auto entry = g_pass_through_instances.find(instance);
     if (entry == g_pass_through_instances.end()) {
@@ -73,9 +89,35 @@ XrResult XRAPI_CALL PassThroughDestroyInstance(XrInstance instance) {
         if (entry != g_pass_through_instances.end()) {
             next_destroy_instance = entry->second.next_destroy_instance;
             g_pass_through_instances.erase(entry);
+            g_pass_through_count.store(g_pass_through_instances.size(), std::memory_order_release);
         }
     }
     return next_destroy_instance ? next_destroy_instance(instance) : XR_ERROR_HANDLE_INVALID;
+}
+
+// A retired probe's caller may hold VectorXR's functions from before it was
+// retired: an instance-level one called with its handle goes to the layers
+// below, as the instance's own functions would (true, with their `result`).
+template <typename Function, typename... Args>
+bool ForwardPassThrough(XrInstance instance, const char* name, XrResult& result, Args... args) {
+    PassThroughInstance pass_through;
+    if (!FindPassThroughInstance(instance, &pass_through)) {
+        return false;
+    }
+    PFN_xrVoidFunction function = nullptr;
+    result = pass_through.next_get_instance_proc_addr(instance, name, &function);
+    if (XR_SUCCEEDED(result)) {
+        result = function ? reinterpret_cast<Function>(function)(instance, args...) : XR_ERROR_FUNCTION_UNSUPPORTED;
+    }
+    return true;
+}
+
+XrResult XRAPI_CALL DepthxrDestroyInstance(XrInstance instance) {
+    PassThroughInstance pass_through;
+    if (FindPassThroughInstance(instance, &pass_through)) {
+        return PassThroughDestroyInstance(instance);
+    }
+    return OpenXrLayer::Instance().DestroyInstance(instance);
 }
 
 // The handshake census (handshake_census.h): what the application asked, as
@@ -110,6 +152,10 @@ std::string CensusFilled(uint32_t capacity, const uint32_t* count, const T* valu
 XrResult XRAPI_CALL DepthxrCreateSession(XrInstance instance,
                                          const XrSessionCreateInfo* create_info,
                                          XrSession* session) {
+    if (XrResult result;
+        ForwardPassThrough<PFN_xrCreateSession>(instance, "xrCreateSession", result, create_info, session)) {
+        return result;
+    }
     OpenXrLayer& layer = OpenXrLayer::Instance();
     if (!layer.HandshakeCensusActive()) {
         return layer.CreateSession(instance, create_info, session);
@@ -177,6 +223,11 @@ XrResult XRAPI_CALL DepthxrEndFrame(XrSession session, const XrFrameEndInfo* fra
 XrResult XRAPI_CALL DepthxrGetSystemProperties(XrInstance instance,
                                                XrSystemId system_id,
                                                XrSystemProperties* properties) {
+    if (XrResult result;
+        ForwardPassThrough<PFN_xrGetSystemProperties>(instance, "xrGetSystemProperties", result, system_id,
+                                                      properties)) {
+        return result;
+    }
     OpenXrLayer& layer = OpenXrLayer::Instance();
     if (!layer.HandshakeCensusActive()) {
         return layer.GetSystemProperties(instance, system_id, properties);
@@ -196,6 +247,14 @@ XrResult XRAPI_CALL DepthxrEnumerateEnvironmentBlendModes(
     uint32_t environment_blend_mode_capacity_input,
     uint32_t* environment_blend_mode_count_output,
     XrEnvironmentBlendMode* environment_blend_modes) {
+    if (XrResult result;
+        ForwardPassThrough<PFN_xrEnumerateEnvironmentBlendModes>(instance, "xrEnumerateEnvironmentBlendModes", result,
+                                                                 system_id, view_configuration_type,
+                                                                 environment_blend_mode_capacity_input,
+                                                                 environment_blend_mode_count_output,
+                                                                 environment_blend_modes)) {
+        return result;
+    }
     OpenXrLayer& layer = OpenXrLayer::Instance();
     if (layer.HandshakeCensusActive()) {
         layer.CensusCall();
@@ -223,6 +282,13 @@ XrResult XRAPI_CALL DepthxrEnumerateViewConfigurations(XrInstance instance,
                                                        uint32_t view_configuration_type_capacity_input,
                                                        uint32_t* view_configuration_type_count_output,
                                                        XrViewConfigurationType* view_configuration_types) {
+    if (XrResult result;
+        ForwardPassThrough<PFN_xrEnumerateViewConfigurations>(instance, "xrEnumerateViewConfigurations", result,
+                                                              system_id, view_configuration_type_capacity_input,
+                                                              view_configuration_type_count_output,
+                                                              view_configuration_types)) {
+        return result;
+    }
     OpenXrLayer& layer = OpenXrLayer::Instance();
     if (layer.HandshakeCensusActive()) {
         layer.CensusCall();
@@ -248,6 +314,12 @@ XrResult XRAPI_CALL DepthxrGetViewConfigurationProperties(
     XrSystemId system_id,
     XrViewConfigurationType view_configuration_type,
     XrViewConfigurationProperties* configuration_properties) {
+    if (XrResult result;
+        ForwardPassThrough<PFN_xrGetViewConfigurationProperties>(instance, "xrGetViewConfigurationProperties", result,
+                                                                 system_id, view_configuration_type,
+                                                                 configuration_properties)) {
+        return result;
+    }
     OpenXrLayer& layer = OpenXrLayer::Instance();
     if (!layer.HandshakeCensusActive()) {
         return layer.GetViewConfigurationProperties(instance, system_id, view_configuration_type,
@@ -273,6 +345,12 @@ XrResult XRAPI_CALL DepthxrEnumerateViewConfigurationViews(XrInstance instance,
                                                           uint32_t view_capacity_input,
                                                           uint32_t* view_count_output,
                                                           XrViewConfigurationView* views) {
+    if (XrResult result;
+        ForwardPassThrough<PFN_xrEnumerateViewConfigurationViews>(instance, "xrEnumerateViewConfigurationViews", result,
+                                                                  system_id, view_configuration_type,
+                                                                  view_capacity_input, view_count_output, views)) {
+        return result;
+    }
     OpenXrLayer& layer = OpenXrLayer::Instance();
     if (!layer.HandshakeCensusActive()) {
         return layer.EnumerateViewConfigurationViews(instance, system_id, view_configuration_type,
@@ -399,6 +477,10 @@ F CensusNextFunction(OpenXrLayer::CensusFunction function) {
 }
 
 XrResult XRAPI_CALL CensusGetInstanceProperties(XrInstance instance, XrInstanceProperties* properties) {
+    if (XrResult result;
+        ForwardPassThrough<PFN_xrGetInstanceProperties>(instance, "xrGetInstanceProperties", result, properties)) {
+        return result;
+    }
     const auto next =
         CensusNextFunction<PFN_xrGetInstanceProperties>(OpenXrLayer::CensusFunction::kGetInstanceProperties);
     if (!next) {
@@ -420,6 +502,10 @@ XrResult XRAPI_CALL CensusGetInstanceProperties(XrInstance instance, XrInstanceP
 }
 
 XrResult XRAPI_CALL CensusGetSystem(XrInstance instance, const XrSystemGetInfo* get_info, XrSystemId* system_id) {
+    if (XrResult result;
+        ForwardPassThrough<PFN_xrGetSystem>(instance, "xrGetSystem", result, get_info, system_id)) {
+        return result;
+    }
     const auto next = CensusNextFunction<PFN_xrGetSystem>(OpenXrLayer::CensusFunction::kGetSystem);
     if (!next) {
         return XR_ERROR_FUNCTION_UNSUPPORTED;
@@ -524,6 +610,11 @@ XrResult XRAPI_CALL DepthxrDestroyActionSet(XrActionSet set) {
     return OpenXrLayer::Instance().DestroyActionSet(set);
 }
 XrResult XRAPI_CALL DepthxrSuggestInteractionProfileBindings(XrInstance instance, const XrInteractionProfileSuggestedBinding* bindings) {
+    if (XrResult result;
+        ForwardPassThrough<PFN_xrSuggestInteractionProfileBindings>(instance, "xrSuggestInteractionProfileBindings", result,
+                                                                    bindings)) {
+        return result;
+    }
     return OpenXrLayer::Instance().SuggestInteractionProfileBindings(instance, bindings);
 }
 XrResult XRAPI_CALL DepthxrCreateActionSpace(XrSession session, const XrActionSpaceCreateInfo* info, XrSpace* space) {
@@ -531,6 +622,10 @@ XrResult XRAPI_CALL DepthxrCreateActionSpace(XrSession session, const XrActionSp
 }
 
 XrResult XRAPI_CALL DepthxrPollEvent(XrInstance instance, XrEventDataBuffer* event_data) {
+    if (XrResult result;
+        ForwardPassThrough<PFN_xrPollEvent>(instance, "xrPollEvent", result, event_data)) {
+        return result;
+    }
     return OpenXrLayer::Instance().PollEvent(instance, event_data);
 }
 
@@ -1016,9 +1111,22 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
         return XR_ERROR_INITIALIZATION_FAILED;
     }
 
+    const std::string application_name(
+        instance_create_info->applicationInfo.applicationName,
+        strnlen(instance_create_info->applicationInfo.applicationName, XR_MAX_APPLICATION_NAME_SIZE));
+    if (OpenXrLayer::RetiredInstance retired;
+        !OpenXrLayer::Instance().CanCreateInstance() &&
+        OpenXrLayer::Instance().RetireIdleInstance(application_name, &retired)) {
+        // A probe instance kept alive above (see PassThroughInstance): it
+        // passes through from here, and this instance is VectorXR's.
+        PassThroughInstance pass_through;
+        pass_through.next_get_instance_proc_addr = retired.next_get_instance_proc_addr;
+        pass_through.next_destroy_instance = retired.next_destroy_instance;
+        RememberPassThroughInstance(retired.instance, pass_through);
+    }
     if (!OpenXrLayer::Instance().CanCreateInstance()) {
-        // A second instance (a layer's probe instance kept alive above, see
-        // PassThroughInstance): straight through, untouched.
+        // A second instance while VectorXR's can have a session: straight
+        // through, untouched.
         XrApiLayerCreateInfo pass_through_info = *layer_info;
         pass_through_info.nextInfo = next_info->next;
         const XrResult result =
@@ -1030,13 +1138,9 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
             if (XR_SUCCEEDED(next_info->nextGetInstanceProcAddr(*instance, "xrDestroyInstance", &destroy))) {
                 pass_through.next_destroy_instance = reinterpret_cast<PFN_xrDestroyInstance>(destroy);
             }
-            std::scoped_lock lock(g_pass_through_mutex);
-            g_pass_through_instances[*instance] = pass_through;
+            RememberPassThroughInstance(*instance, pass_through);
         }
-        OpenXrLayer::Instance().NotePassThroughInstance(
-            std::string(instance_create_info->applicationInfo.applicationName,
-                        strnlen(instance_create_info->applicationInfo.applicationName, XR_MAX_APPLICATION_NAME_SIZE)),
-            result);
+        OpenXrLayer::Instance().NotePassThroughInstance(application_name, result);
         return result;
     }
 
@@ -1350,12 +1454,9 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
             "xrCreateInstance extensions: " +
             DescribeInstanceExtensions(requested, probe_scan.complete, probe_scan.detail, probe_scan.names, sent));
     }
-    {
-        // A handle a pass-through instance had (destroyed some other way) is
-        // this instance's now.
-        std::scoped_lock lock(g_pass_through_mutex);
-        g_pass_through_instances.erase(*instance);
-    }
+    // A handle a pass-through instance had (destroyed some other way) is
+    // this instance's now.
+    ForgetPassThroughInstance(*instance);
     // The runtime's instance exists from here. An exception must never leave
     // the layer (the loader turns it into a failure, or the game ends), and a
     // failure must not keep the instance: the runtime's is destroyed and the
