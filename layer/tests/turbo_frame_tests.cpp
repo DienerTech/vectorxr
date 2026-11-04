@@ -792,6 +792,17 @@ class TurboFrameTestPeer {
     // Depth on with convergence: LocateViews shifts each eye's projection.
     // DCS World on PimaxXR, Depth Anchor on or off; an internal VIEW space
     // for Pivot's eye offsets.
+    // Whether the session's runtime is taken to show the focus views with the
+    // FOVs it located, as PimaxXR does for DCS World, on runtime `runtime`.
+    static bool TakesFocusFovsFromLocate(const char* runtime) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        const std::string kept = layer.runtime_name_;
+        layer.runtime_name_ = runtime;
+        const bool takes = layer.RuntimeTakesFocusFovsFromLocateLocked();
+        layer.runtime_name_ = kept;
+        return takes;
+    }
     static void PimaxDcs(bool depth_anchor) {
         auto& layer = Layer();
         std::scoped_lock lock(layer.mutex_);
@@ -4605,6 +4616,10 @@ void TestPimaxDcsFocusFovQuirk() {
         Peer::PrepareVarjoNative(&PimaxDcsLocateViews, &PimaxDcsEndFrame);
         Peer::ConvergeVarjoDepth(0.05);
         Peer::PimaxDcs(anchor);
+        Expect(Peer::TakesFocusFovsFromLocate("PimaxXR (Unofficial)") &&
+                   !Peer::TakesFocusFovsFromLocate("Varjo OpenXR Runtime") &&
+                   !Peer::TakesFocusFovsFromLocate("Some other native quad views runtime"),
+               "Only a Pimax runtime is taken to show DCS's focus views with its located FOVs");
         const XrTime time = 32'000'000'000 + (anchor ? 11'111'111 : 0);
         XrViewLocateFoveatedRenderingVARJO foveated{XR_TYPE_VIEW_LOCATE_FOVEATED_RENDERING_VARJO};
         foveated.foveatedRenderingActive = XR_TRUE;
