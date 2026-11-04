@@ -1,5 +1,35 @@
 [
   {
+    "version": "0.20.1",
+    "date": "2026-11-04",
+    "title": "Draft: Fixes for PimaxXR, OpenXR Toolkit and Frame Generation",
+    "summary": "Draft notes, to be rewritten before release. A fix release for 0.20.0: Frame Generation no longer stalls games on PimaxXR, VectorXR works beside OpenXR Toolkit and Quad-Views-Foveated in more setups, and Pivot follows a Pimax recenter.",
+    "items": [
+      {
+        "html": "<strong>Frame Generation</strong>",
+        "items": [
+          "<strong>No more stalls on PimaxXR.</strong> With Frame Generation engaged, PimaxXR's end of frame could block the game's own swapchain calls for most of a refresh; in DCS the frame rate fell from about 37 to 17 fps. Frame Generation now times that call so the game is not held up.",
+          "<strong>Frame Generation stays off when OpenXR Toolkit is below VectorXR,</strong> where Toolkit cannot handle Frame Generation's extra frames."
+        ]
+      },
+      {
+        "html": "<strong>Compatibility</strong>",
+        "items": [
+          "<strong>Games start with OpenXR Toolkit or Quad-Views-Foveated on VIVE runtimes.</strong> Their probe instance no longer makes VectorXR refuse the game's own.",
+          "<strong>Turbo stands aside when OpenXR Toolkit's Turbo runs above VectorXR,</strong> instead of pipelining frames twice."
+        ]
+      },
+      {
+        "html": "<strong>Pimax</strong>",
+        "items": [
+          "<strong>Eye-tracked foveation is no longer switched off</strong> in native quad views with eye tracking.",
+          "<strong>DCS's focus views stay aligned</strong> on PimaxXR's native quad views.",
+          "<strong>Pivot follows a Pimax recenter,</strong> which PimaxXR does without telling the game."
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.20.0",
     "date": "2026-10-29",
     "title": "Faster, Sharper Frame Generation, Turbo on SteamVR, and Eleven Languages",
