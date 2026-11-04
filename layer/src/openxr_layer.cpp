@@ -2146,10 +2146,12 @@ bool OpenXrLayer::RuntimeTakesFocusFovsFromLocateLocked() const {
     // keeps the focus FOVs each quad xrLocateViews returns for its display
     // time and shows the focus views with those at xrEndFrame, not with the
     // submitted ones (DCS submits other ones; Quad-Views-Foveated does the
-    // same, but VectorXR never forwards quad views to it). Varjo's runtime is
-    // not known to: it keeps VectorXR's behaviour.
+    // same, but VectorXR never forwards quad views to it). Only a runtime
+    // that names itself Pimax's ("PimaxXR (Unofficial)", Pimax Play's) is
+    // taken to: Varjo's and any other native quad views runtime keep
+    // VectorXR's behaviour.
     return varjo_compatible_quadviews_active_ && application_name_ == "DCS World" &&
-           runtime_name_.find("Varjo") == std::string::npos;
+           runtime_name_.find("Pimax") != std::string::npos;
 }
 
 bool OpenXrLayer::CanCreateInstance() {
