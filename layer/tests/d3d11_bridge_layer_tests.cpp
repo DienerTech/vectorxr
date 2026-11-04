@@ -725,6 +725,10 @@ struct StandIn {
     std::vector<XrSwapchain> created;
     std::vector<XrSwapchain> destroyed;
     std::vector<ShownFrame> frames;
+    // Frames xrEndFrame refused for a projection's sub-image outside its
+    // image (SubImageRefusal), and the first one's reason.
+    int refused_frames{0};
+    std::string refusal;
     std::function<void(XrSwapchain)> on_destroy_swapchain;
     std::function<void()> on_destroy_session;
     std::function<void()> on_destroy_instance; // before a session still alive goes with the instance
@@ -1592,6 +1596,54 @@ XrResult XRAPI_CALL RtBeginFrame(XrSession, const XrFrameBeginInfo*) {
     return XR_SUCCESS;
 }
 
+// As PimaxXR's and Virtual Desktop's xrEndFrame check a projection's
+// sub-images (holding g_runtime_mutex): each view's colour and depth rect
+// inside its image (XR_ERROR_SWAPCHAIN_RECT_INVALID), and its depth's slice
+// one of the image's (XR_ERROR_VALIDATION_FAILURE). XR_SUCCESS: none
+// outside. `why` says which.
+XrResult SubImageRefusal(const XrFrameEndInfo& info, std::string& why) {
+    const auto check = [&](const XrSwapchainSubImage& sub, const char* what, bool depth) {
+        const StandInSwapchain* chain = FindSwapchain(sub.swapchain);
+        if (!chain) {
+            why = std::string(what) + " names no swapchain";
+            return XR_ERROR_HANDLE_INVALID;
+        }
+        const XrRect2Di& rect = sub.imageRect;
+        const std::int64_t right = static_cast<std::int64_t>(rect.offset.x) + rect.extent.width;
+        const std::int64_t bottom = static_cast<std::int64_t>(rect.offset.y) + rect.extent.height;
+        std::ostringstream text;
+        text << what << " rect " << rect.offset.x << "," << rect.offset.y << " " << rect.extent.width << "x"
+             << rect.extent.height << " slice " << sub.imageArrayIndex << " on " << chain->info.width << "x"
+             << chain->info.height << " of " << chain->info.arraySize;
+        if (depth && sub.imageArrayIndex >= chain->info.arraySize) {
+            why = text.str();
+            return XR_ERROR_VALIDATION_FAILURE;
+        }
+        if (rect.offset.x < 0 || rect.offset.y < 0 || rect.extent.width <= 0 || rect.extent.height <= 0 ||
+            right > static_cast<std::int64_t>(chain->info.width) ||
+            bottom > static_cast<std::int64_t>(chain->info.height)) {
+            why = text.str();
+            return XR_ERROR_SWAPCHAIN_RECT_INVALID;
+        }
+        return XR_SUCCESS;
+    };
+    for (std::uint32_t i = 0; i < info.layerCount; ++i) {
+        const XrCompositionLayerBaseHeader* base = info.layers[i];
+        if (!base || base->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) continue;
+        const auto& projection = *reinterpret_cast<const XrCompositionLayerProjection*>(base);
+        for (std::uint32_t v = 0; v < projection.viewCount; ++v) {
+            const XrCompositionLayerProjectionView& view = projection.views[v];
+            if (const XrResult result = check(view.subImage, "colour", false); result != XR_SUCCESS) return result;
+            for (auto* chain = static_cast<const XrBaseInStructure*>(view.next); chain; chain = chain->next) {
+                if (chain->type != XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR) continue;
+                const auto& depth = *reinterpret_cast<const XrCompositionLayerDepthInfoKHR*>(chain);
+                if (const XrResult result = check(depth.subImage, "depth", true); result != XR_SUCCESS) return result;
+            }
+        }
+    }
+    return XR_SUCCESS;
+}
+
 XrResult XRAPI_CALL RtEndFrame(XrSession, const XrFrameEndInfo* info) {
     const InCall in(g_begins_ends_in, "xrBeginFrame or xrEndFrame");
     ComPtr<ID3D12CommandQueue> pimax_queue;
@@ -1627,6 +1679,11 @@ XrResult XRAPI_CALL RtEndFrame(XrSession, const XrFrameEndInfo* info) {
     Check(rt.frame_ends < rt.frame_begins, "xrEndFrame ends a begun frame");
     ++rt.frame_ends;
     rt.frame_open = false;
+    std::string why;
+    if (const XrResult refused = SubImageRefusal(*info, why); refused != XR_SUCCESS) {
+        if (rt.refused_frames++ == 0) rt.refusal = why;
+        return refused;
+    }
     ShownFrame frame;
     frame.time = info->displayTime;
     for (std::uint32_t i = 0; i < info->layerCount; ++i) {
@@ -2279,14 +2336,16 @@ struct Eye {
 // One application frame: each colour target acquired, waited, cleared to its
 // colour and released, in the order given (with `depth`, cleared, when given);
 // then a stereo projection of `eyes`, each view chaining its slice of `depth`
-// (and a structure of the application's after it) when given. With `hold`,
+// (and a structure of the application's after it) when given, as
+// `edit_depth` leaves the views' depth structures. With `hold`,
 // Direct3D 11 waits for the gate from just before the LAST colour target's
 // release on (after the others' releases): that image alone is not written
 // yet, and nothing queued for the releases before it waits for the gate. The
 // stand-in opens the gate once it has seen its readback wait all the same.
 XrResult Frame(App& app, Game& game, const std::vector<const Target*>& targets, const std::vector<Color>& colors,
                const std::array<Eye, 2>& eyes, const Target* depth = nullptr, Gate* hold = nullptr,
-               bool unknown_after_depth = false) {
+               bool unknown_after_depth = false,
+               const std::function<void(std::array<XrCompositionLayerDepthInfoKHR, 2>&)>& edit_depth = {}) {
     XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
     XrFrameState state{XR_TYPE_FRAME_STATE};
     Check(app.api.wait_frame(app.session, &wait_info, &state) == XR_SUCCESS, "xrWaitFrame");
@@ -2352,6 +2411,9 @@ XrResult Frame(App& app, Game& game, const std::vector<const Target*>& targets, 
             depth_infos[eye].farZ = 1000.0f;
             views[eye].next = &depth_infos[eye];
         }
+    }
+    if (depth && edit_depth) {
+        edit_depth(depth_infos);
     }
     XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
     projection.space = app.space;
@@ -3316,6 +3378,180 @@ void TestPrivateDepthSession(Game& game) {
     CheckValidation(game, "private depth");
     StopApp(app);
     SetEnv("VECTORXR_D3D11_BRIDGE_DEPTH", "");
+    EndCase(game);
+}
+
+// 1d. Depth sub-images a runtime refuses: mirrored depth reaches the runtime,
+// and PimaxXR and Virtual Desktop fail the whole xrEndFrame for a depth rect
+// outside its image (as the stand-in does, SubImageRefusal). UEVR places its
+// depth rect by its colour image's size, which an upscaler or screen
+// percentage makes larger than its depth image. Such depth is left out of
+// every view of its projection (never one eye's alone), never clamped, and
+// the frame's colour and the rest of the views' chains still reach the
+// runtime; valid depth, at a nonzero origin, side by side or on either slice,
+// reaches it as before. Standing by (each frame passed through), and with
+// Frame Generation engaged (frames presented from its copies of the game's,
+// and the game's depth no longer sent to Frame Generation either).
+void TestDepthRects(Game& game, bool engaged) {
+    CaseSettings settings;
+    if (engaged) settings.frame_multiplier = "2x";
+    const std::string name = engaged ? "depth-rects-engaged" : "depth-rects";
+    BeginCase(name, game, settings);
+    if (engaged) {
+        g_runtime.paced = true;
+        Peer::SetFrameGenEngagement(2, std::chrono::milliseconds(0));
+    }
+    App app = StartApp();
+    SessionCreate create(game.device.Get(), app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS && Peer::Bridge().Active(),
+          name + ": a bridged session");
+    BeginSession(app);
+    Target left = MakeTarget(app, ColorInfo(), "the left eye");
+    Target right = MakeTarget(app, ColorInfo(), "the right eye");
+    const auto depth_target = [&](std::uint32_t width, std::uint32_t height, const char* what) {
+        XrSwapchainCreateInfo info = DepthInfo(2);
+        info.width = width;
+        info.height = height;
+        Target target = MakeTarget(app, info, what);
+        Check(!Peer::Bridge().Unmirrored(target.swapchain), std::string(what) + ": mirrored");
+        return target;
+    };
+    // The colour images are 64x48. An upscaler's smaller depth, a larger
+    // one, and one image for both eyes side by side.
+    Target smaller = depth_target(48, 36, "smaller depth");
+    Target larger = depth_target(80, 60, "larger depth");
+    Target side_by_side = depth_target(2 * kWidth, kHeight, "side-by-side depth");
+    constexpr std::int32_t kMax = std::numeric_limits<std::int32_t>::max();
+    struct Case {
+        const char* what;
+        const Target* depth;
+        std::array<XrRect2Di, 2> rects;
+        std::array<std::uint32_t, 2> slices;
+        bool kept;
+    };
+    const XrRect2Di colour_rect{{0, 0}, {static_cast<std::int32_t>(kWidth), static_cast<std::int32_t>(kHeight)}};
+    const std::vector<Case> cases{
+        {"valid, both slices", &smaller, {{{{0, 0}, {48, 36}}, {{0, 0}, {48, 36}}}}, {0, 1}, true},
+        {"the colour's rect on a smaller depth image (UEVR)", &smaller, {colour_rect, colour_rect}, {0, 1}, false},
+        {"one texel too wide, left eye only", &smaller, {{{{0, 0}, {49, 36}}, {{0, 0}, {48, 36}}}}, {0, 1}, false},
+        {"one texel too high, right eye only", &smaller, {{{{0, 0}, {48, 36}}, {{0, 0}, {48, 37}}}}, {0, 1}, false},
+        {"valid at a nonzero origin on a larger image", &larger, {{{{8, 6}, {64, 48}}, {{16, 12}, {64, 48}}}}, {0, 1},
+         true},
+        {"one texel past the larger image's bottom", &larger, {{{{8, 13}, {64, 48}}, {{8, 12}, {64, 48}}}}, {0, 1},
+         false},
+        {"side by side, one slice", &side_by_side, {{colour_rect, {{static_cast<std::int32_t>(kWidth), 0}, colour_rect.extent}}},
+         {0, 0}, true},
+        {"side by side, the right eye one texel past",
+         &side_by_side,
+         {{colour_rect, {{static_cast<std::int32_t>(kWidth) + 1, 0}, colour_rect.extent}}},
+         {0, 0},
+         false},
+        {"a negative offset", &smaller, {{{{-1, 0}, {48, 36}}, {{0, 0}, {48, 36}}}}, {0, 1}, false},
+        {"a zero extent", &smaller, {{{{0, 0}, {0, 36}}, {{0, 0}, {48, 36}}}}, {0, 1}, false},
+        {"a negative extent", &smaller, {{{{0, 0}, {48, 36}}, {{0, 0}, {48, -36}}}}, {0, 1}, false},
+        {"a slice past the image", &smaller, {{{{0, 0}, {48, 36}}, {{0, 0}, {48, 36}}}}, {0, 2}, false},
+        {"an offset whose far edge overflows", &smaller, {{{{kMax, 0}, {1, 36}}, {{0, 0}, {48, 36}}}}, {0, 1}, false},
+        {"an extent whose far edge overflows", &smaller, {{{{0, 0}, {48, 36}}, {{1, 1}, {kMax, kMax}}}}, {0, 1}, false},
+        {"valid again", &smaller, {{{{0, 0}, {48, 36}}, {{0, 0}, {48, 36}}}}, {0, 1}, true},
+    };
+
+    // Why the runtime refused its first frame, if it did (its thread may be Frame Generation's).
+    const auto refusal = [] {
+        std::scoped_lock lock(g_runtime_mutex);
+        return std::to_string(g_runtime.refused_frames) + " refused" +
+               (g_runtime.refusal.empty() ? "" : ", the first: " + g_runtime.refusal);
+    };
+    int frame_index = 0;
+    const auto run = [&](const Case& test, int frames) {
+        for (int frame = 0; frame < frames; ++frame) {
+            const std::string at = name + ": " + test.what + ", frame " + std::to_string(frame);
+            const std::vector<Color> colors{FrameColor(frame_index + 50, 0), FrameColor(frame_index + 50, 1)};
+            ++frame_index;
+            const std::size_t before = ShownCount();
+            const XrResult result =
+                Frame(app, game, {&left, &right}, colors, {{{&left, 0}, {&right, 0}}}, test.depth, nullptr, !engaged,
+                      [&](std::array<XrCompositionLayerDepthInfoKHR, 2>& depth) {
+                          for (int eye = 0; eye < 2; ++eye) {
+                              depth[eye].subImage.imageRect = test.rects[eye];
+                              depth[eye].subImage.imageArrayIndex = test.slices[eye];
+                          }
+                      });
+            Check(result == XR_SUCCESS, at + ": xrEndFrame " + std::to_string(result) + " (" + refusal() + ")");
+            if (engaged) continue; // shown from Frame Generation's thread, checked below
+            const std::vector<ShownFrame> shown = Shown(before);
+            Check(shown.size() == 1 && shown[0].views.size() == 2, at + ": one frame of two views shown");
+            for (int eye = 0; eye < 2; ++eye) {
+                const ShownView& view = shown[0].views[eye];
+                Check(view.depth == test.kept, at + ": eye " + std::to_string(eye) + (test.kept ? " has" : " has no") +
+                                                   " depth");
+                Check(view.next_type == (test.kept ? XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR : kApplicationStructType) &&
+                          (!test.kept || view.after_depth == kApplicationStructType),
+                      at + ": the rest of the view's chain reaches the runtime");
+                Check(!test.kept || view.depth_swapchain == test.depth->swapchain,
+                      at + ": the view's depth is the game's");
+                Check(Near(view.texel, colors[eye]), at + ": eye " + std::to_string(eye) + " shows " +
+                                                         (view.texel ? Text(*view.texel) : "nothing") + ", rendered " +
+                                                         Text(colors[eye]));
+            }
+        }
+    };
+
+    if (!engaged) {
+        for (const Case& test : cases) run(test, 2);
+    } else {
+        // Engaged on valid depth first.
+        int frames = 0;
+        do {
+            run(cases.front(), 1);
+        } while (Peer::FrameGen().generated == 0 && ++frames < 96);
+        Check(Peer::FrameGen().generated > 0, name + ": Frame Generation generates frames");
+        // Every refused case, each for a while: once the frames before them
+        // are shown, nothing the runtime gets carries depth, and Frame
+        // Generation is sent none.
+        for (std::size_t i = 1; i + 1 < cases.size(); ++i) {
+            if (cases[i].kept) continue;
+            run(cases[i], 4);
+            const std::size_t from = ShownCount();
+            const std::uint64_t generated = Peer::FrameGen().generated;
+            run(cases[i], 6);
+            const std::vector<ShownFrame> shown = Shown(from);
+            Check(!shown.empty(), name + ": " + cases[i].what + ": frames shown");
+            for (const ShownFrame& frame : shown) {
+                for (const ShownView& view : frame.views) {
+                    Check(!view.depth, name + ": " + cases[i].what + ": no frame shown carries the refused depth");
+                }
+            }
+            Check(Peer::FrameGen().generated > generated,
+                  name + ": " + cases[i].what + ": Frame Generation keeps generating");
+            Check(Peer::FrameGen().depth == depthxr::FrameGenDepthState::kNotSent,
+                  name + ": " + cases[i].what + ": Frame Generation is sent no depth (" +
+                      depthxr::ToString(Peer::FrameGen().depth) + ")");
+        }
+        // Valid depth again reaches the runtime with the game's frames.
+        run(cases.back(), 4);
+        const std::size_t from = ShownCount();
+        run(cases.back(), 8);
+        bool depth_shown = false;
+        for (const ShownFrame& frame : Shown(from)) {
+            for (const ShownView& view : frame.views) {
+                depth_shown = depth_shown || (view.depth && view.depth_swapchain == smaller.swapchain);
+            }
+        }
+        Check(depth_shown, name + ": valid depth reaches the runtime again");
+        Check(Peer::FrameGen().depth != depthxr::FrameGenDepthState::kNotSent,
+              name + ": Frame Generation is sent depth again (" + depthxr::ToString(Peer::FrameGen().depth) + ")");
+    }
+    Check(refusal() == "0 refused", name + ": the runtime refused no frame (" + refusal() + ")");
+    const std::string log = Peer::Log();
+    Check(Count(log, "The game's depth sub-image lies outside its depth image") == 1,
+          name + ": the log tells once of depth outside its image");
+    Check(!Contains(log, "keeps the game's depth to itself"), name + ": no depth swapchain is private");
+    CheckValidation(game, name);
+    StopApp(app);
+    if (engaged) {
+        Peer::SetFrameGenEngagement(45, std::chrono::milliseconds(3000)); // the presenter's own
+    }
+    Check(GameRuns(game), "the game's device works");
     EndCase(game);
 }
 
@@ -6496,7 +6732,10 @@ int main(int argc, char** argv) {
     CheckFrameGenStatusLine();
     const bool bridged = TestBridgedSession(game);
     const char* only = std::getenv("BRIDGE_TEST_ONLY");
-    if (bridged && only && std::string(only) == "runtime-stall-outside-layer-lock") {
+    if (bridged && only && std::string(only) == "depth-rects") {
+        TestDepthRects(game, false);
+        TestDepthRects(game, true);
+    } else if (bridged && only && std::string(only) == "runtime-stall-outside-layer-lock") {
         TestRuntimeStallOutsideLayerLock(game);
     } else if (bridged && only && std::string(only) == "toolkit-below-framegen-off") {
         TestToolkitBelowKeepsFrameGenOff(game);
@@ -6517,6 +6756,8 @@ int main(int argc, char** argv) {
         TestStatusFile(game);
         TestReleaseOnAnotherThread(game);
         TestPrivateDepthSession(game);
+        TestDepthRects(game, false);
+        TestDepthRects(game, true);
         TestRuntimeStallOutsideLayerLock(game);
         TestToolkitBelowKeepsFrameGenOff(game);
         TestBridgedQuadViewsComposed(game, false);

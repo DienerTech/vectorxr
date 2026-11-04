@@ -629,8 +629,9 @@ const void* FindStructInChain(const void* next, XrStructureType type) {
     return nullptr;
 }
 
-// A frame without the depth of some swapchains (a bridged session's depth
-// stays the game's, see D3D11Bridge), and the copies it needs.
+// A frame without some of its depth (a bridged session's depth that stays
+// the game's, see D3D11Bridge, or whose sub-image lies outside its image),
+// and the copies it needs.
 struct DepthlessFrame {
     XrFrameEndInfo info{XR_TYPE_FRAME_END_INFO};
     std::vector<const XrCompositionLayerBaseHeader*> layers;
@@ -638,15 +639,26 @@ struct DepthlessFrame {
     std::deque<std::vector<XrCompositionLayerProjectionView>> views;
 };
 
-// `frame` itself when no projection view's depth is to be dropped. A view's
-// chain loses its depth structure when that comes first, otherwise the whole
-// chain (another structure ahead of it cannot be copied without knowing it).
+// `frame` itself when no projection view's depth is to be dropped (`drop`
+// of its XrCompositionLayerDepthInfoKHR). A projection with any view's depth
+// dropped loses every view's, so the runtime never gets depth for one eye
+// and not the other. A view's chain loses its depth structure when that
+// comes first, otherwise the whole chain (another structure ahead of it
+// cannot be copied without knowing it).
 template <typename Drop>
 const XrFrameEndInfo* WithoutDepth(const XrFrameEndInfo* frame, DepthlessFrame& storage, const Drop& drop) {
     const auto dropped = [&](const XrCompositionLayerProjectionView& view) {
         for (auto* base = static_cast<const XrBaseInStructure*>(view.next); base; base = base->next) {
             if (base->type == XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR &&
-                drop(reinterpret_cast<const XrCompositionLayerDepthInfoKHR*>(base)->subImage.swapchain)) {
+                drop(*reinterpret_cast<const XrCompositionLayerDepthInfoKHR*>(base))) {
+                return true;
+            }
+        }
+        return false;
+    };
+    const auto has_depth = [](const XrCompositionLayerProjectionView& view) {
+        for (auto* base = static_cast<const XrBaseInStructure*>(view.next); base; base = base->next) {
+            if (base->type == XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR) {
                 return true;
             }
         }
@@ -678,7 +690,7 @@ const XrFrameEndInfo* WithoutDepth(const XrFrameEndInfo* frame, DepthlessFrame& 
         }
         storage.views.emplace_back(projection->views, projection->views + projection->viewCount);
         for (XrCompositionLayerProjectionView& view : storage.views.back()) {
-            if (dropped(view)) {
+            if (has_depth(view)) {
                 const auto* first = static_cast<const XrBaseInStructure*>(view.next);
                 view.next = first->type == XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR ? first->next : nullptr;
             }
@@ -689,6 +701,28 @@ const XrFrameEndInfo* WithoutDepth(const XrFrameEndInfo* frame, DepthlessFrame& 
     }
     storage.info.layers = storage.layers.data();
     return &storage.info;
+}
+
+// Why `sub` does not lie inside an image of `width`x`height` with
+// `array_size` slices (empty: it does), as a runtime checks a submitted
+// depth sub-image (PimaxXR's and Virtual Desktop's xrEndFrame fail with
+// XR_ERROR_SWAPCHAIN_RECT_INVALID otherwise): offsets from zero, extents of
+// at least a texel, its far edges inside the image (without overflow), and
+// its slice one of the image's.
+std::string SubImageOutsideImage(const XrSwapchainSubImage& sub, std::uint32_t width, std::uint32_t height,
+                                 std::uint32_t array_size) {
+    const XrRect2Di& rect = sub.imageRect;
+    const std::int64_t right = static_cast<std::int64_t>(rect.offset.x) + rect.extent.width;
+    const std::int64_t bottom = static_cast<std::int64_t>(rect.offset.y) + rect.extent.height;
+    if (rect.offset.x >= 0 && rect.offset.y >= 0 && rect.extent.width > 0 && rect.extent.height > 0 &&
+        right <= static_cast<std::int64_t>(width) && bottom <= static_cast<std::int64_t>(height) &&
+        sub.imageArrayIndex < std::max(1u, array_size)) {
+        return {};
+    }
+    return "rect " + std::to_string(rect.offset.x) + "," + std::to_string(rect.offset.y) + " " +
+           std::to_string(rect.extent.width) + "x" + std::to_string(rect.extent.height) + " slice " +
+           std::to_string(sub.imageArrayIndex) + " on a " + std::to_string(width) + "x" + std::to_string(height) +
+           " image of " + std::to_string(std::max(1u, array_size)) + " slices";
 }
 
 const void* StripVarjoFoveatedViewLocateNextChain(const void* next) {
@@ -3021,6 +3055,7 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
     NoteSessionCreatedLocked(session_create_time);
     d3d11_bridge_lost_logged_ = false;
     d3d11_bridge_depth_logged_ = false;
+    d3d11_bridge_depth_rect_logged_ = false;
     d3d11_bridge_last_summary_ = std::chrono::steady_clock::now();
     d3d11_bridge_quad_frames_ = {};
     d3d11_bridge_quad_frames_summarized_ = {};
@@ -9653,17 +9688,48 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
             framegen_.AbandonFrame(frame_end_info->displayTime);
             return XR_ERROR_SESSION_LOST;
         }
-        if (d3d11_bridge_.HasUnmirrored()) {
-            const XrFrameEndInfo* without_depth = WithoutDepth(
-                frame_end_info, depthless_frame.emplace(),
-                [this](XrSwapchain swapchain) { return d3d11_bridge_.Unmirrored(swapchain); });
-            if (without_depth != frame_end_info && !d3d11_bridge_depth_logged_) {
-                d3d11_bridge_depth_logged_ = true;
-                logger_.Info("Frame Generation's Direct3D 11 bridge keeps the game's depth to itself: it is left "
-                             "out of the frames the runtime and Frame Generation get.");
-            }
-            frame_end_info = without_depth;
+        // Mirrored depth reaches the runtime, which refuses the whole frame
+        // for a depth sub-image outside its image (UEVR places its depth
+        // rect by its colour image's size, which an upscaler or screen
+        // percentage makes larger than its depth image): such depth is left
+        // out, of every view of its projection, before Frame Generation or
+        // the runtime gets the frame. Never clamped: a smaller rect would no
+        // longer match its colour, and depth reprojection would misplace
+        // what it moves.
+        bool unmirrored = false;
+        std::string outside;
+        const XrFrameEndInfo* without_depth = WithoutDepth(
+            frame_end_info, depthless_frame.emplace(), [&](const XrCompositionLayerDepthInfoKHR& depth) {
+                if (d3d11_bridge_.Unmirrored(depth.subImage.swapchain)) {
+                    unmirrored = true;
+                    return true;
+                }
+                const auto tracked = tracked_swapchains_.find(depth.subImage.swapchain);
+                if (tracked == tracked_swapchains_.end()) {
+                    return false;
+                }
+                std::string why = SubImageOutsideImage(depth.subImage, tracked->second.width, tracked->second.height,
+                                                       tracked->second.array_size);
+                if (why.empty()) {
+                    return false;
+                }
+                if (outside.empty()) {
+                    outside = std::move(why);
+                }
+                return true;
+            });
+        if (unmirrored && !d3d11_bridge_depth_logged_) {
+            d3d11_bridge_depth_logged_ = true;
+            logger_.Info("Frame Generation's Direct3D 11 bridge keeps the game's depth to itself: it is left "
+                         "out of the frames the runtime and Frame Generation get.");
         }
+        if (!outside.empty() && !d3d11_bridge_depth_rect_logged_) {
+            d3d11_bridge_depth_rect_logged_ = true;
+            logger_.Info("The game's depth sub-image lies outside its depth image (" + outside +
+                         "): its projection's depth is left out of the frames the runtime and Frame Generation get "
+                         "while it does (a runtime refuses such a frame).");
+        }
+        frame_end_info = without_depth;
     }
     if (vulkan_bridge_.Active()) {
         std::string lost;
@@ -9684,8 +9750,9 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         }
         if (vulkan_bridge_.HasUnmirrored()) {
             const XrFrameEndInfo* without_depth = WithoutDepth(
-                frame_end_info, depthless_frame.emplace(),
-                [this](XrSwapchain swapchain) { return vulkan_bridge_.Unmirrored(swapchain); });
+                frame_end_info, depthless_frame.emplace(), [this](const XrCompositionLayerDepthInfoKHR& depth) {
+                    return vulkan_bridge_.Unmirrored(depth.subImage.swapchain);
+                });
             if (without_depth != frame_end_info && !vulkan_bridge_depth_logged_) {
                 vulkan_bridge_depth_logged_ = true;
                 logger_.Info("Frame Generation's Vulkan bridge keeps the game's depth to itself (multisampled, or the "
