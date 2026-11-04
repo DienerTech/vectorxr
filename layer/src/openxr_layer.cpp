@@ -2160,9 +2160,8 @@ bool OpenXrLayer::CanCreateInstance() {
 void OpenXrLayer::NotePassThroughInstance(const std::string& application_name, XrResult result) {
     logger_.Info("A second OpenXR instance (application \"" + application_name + "\", result=" +
                  std::to_string(static_cast<int>(result)) +
-                 ") was created while VectorXR's is alive; it passes straight through VectorXR, which stays with "
-                 "its first instance. OpenXR Toolkit and Quad-Views-Foveated keep their probe instance alive on "
-                 "VIVE runtimes, which makes the game's instance the second.");
+                 ") was created while VectorXR's, which can have a session, is alive; it passes straight through "
+                 "VectorXR, which stays with its first instance.");
 }
 
 XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
@@ -2206,6 +2205,10 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
     logger_.Info(std::string("VectorXR layer version: ") + VECTORXR_VERSION);
     logger_.Info(std::string("VectorXR layer build: ") + __DATE__ + " " + __TIME__);
     logger_.Info("VectorXR attached to process: " + current_exe_name_);
+    if (!retired_instance_note_.empty()) {
+        logger_.Info(retired_instance_note_);
+        retired_instance_note_.clear();
+    }
     {
         const ProcessInteropSnapshot interop = GetProcessInteropSnapshot();
         std::ostringstream stream;
@@ -2253,6 +2256,12 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
         logger_.Info(stream.str());
 
         instance_enabled_extension_count_ = create_info->enabledExtensionCount;
+        for (const char* extension : {"XR_KHR_D3D11_enable", "XR_KHR_D3D12_enable", "XR_KHR_vulkan_enable",
+                                      "XR_KHR_vulkan_enable2", "XR_KHR_opengl_enable", "XR_KHR_opengl_es_enable",
+                                      "XR_MND_headless", "XR_EXT_headless"}) {
+            instance_enabled_session_extension_ =
+                instance_enabled_session_extension_ || ExtensionRequested(create_info, extension);
+        }
         std::ostringstream ext_stream;
         ext_stream << "Application enabled OpenXR extensions (" << create_info->enabledExtensionCount << "):";
         for (uint32_t i = 0; i < create_info->enabledExtensionCount; ++i) {
@@ -2573,8 +2582,36 @@ XrResult OpenXrLayer::GetInstanceProcAddr(XrInstance instance, const char* name,
     return next_get_instance_proc_addr_(instance, name, function);
 }
 
+bool OpenXrLayer::RetireIdleInstance(const std::string& next_application_name, RetiredInstance* retired) {
+    {
+        std::scoped_lock lock(mutex_);
+        if (instance_ == XR_NULL_HANDLE || instance_requested_session_ || instance_enabled_session_extension_ ||
+            active_session_ != XR_NULL_HANDLE) {
+            return false;
+        }
+        retired->instance = instance_;
+        retired->next_get_instance_proc_addr = next_get_instance_proc_addr_;
+        retired->next_destroy_instance = next_destroy_instance_;
+        retired_instance_note_ =
+            "An earlier OpenXR instance (application \"" + application_name_ + "\", " +
+            std::to_string(instance_enabled_extension_count_) +
+            " extensions, no graphics extension, no session) was alive as \"" + next_application_name +
+            "\" created this one: it passes straight through VectorXR from here and VectorXR is this instance's. "
+            "OpenXR Toolkit and Quad-Views-Foveated keep such a probe instance alive on VIVE runtimes.";
+    }
+    logger_.Info("Another OpenXR instance (application \"" + next_application_name +
+                 "\") is being created; this instance has no graphics extension and no session, so VectorXR moves to "
+                 "the new one and this one passes straight through.");
+    EndInstance(retired->instance, false);
+    return true;
+}
+
 XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
     logger_.Info("xrDestroyInstance requested by application.");
+    return EndInstance(instance, true);
+}
+
+XrResult OpenXrLayer::EndInstance(XrInstance instance, bool in_runtime) {
     if (handshake_census_.Active()) {
         CensusFlushProcAddrs("since the last of them");
         if (const std::string repeats = handshake_census_.ProcAddrRepeats(); !repeats.empty()) {
@@ -2647,7 +2684,7 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
         return XR_SUCCESS;
     }
     watch.Step("in the runtime's xrDestroyInstance");
-    const XrResult result = next_destroy_instance_(instance);
+    const XrResult result = in_runtime ? next_destroy_instance_(instance) : XR_SUCCESS;
     watch.Step("ending the bridges");
     framegen_queue_.Reset();
     EndD3D11Bridge();
@@ -12797,6 +12834,7 @@ void OpenXrLayer::ResetSessionState() {
 void OpenXrLayer::ResetInstanceState() {
     instance_requested_session_ = false;
     instance_enabled_extension_count_ = 0;
+    instance_enabled_session_extension_ = false;
     application_action_spaces_.clear();
     application_pose_actions_.clear();
     application_action_owners_.clear();
