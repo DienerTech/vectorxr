@@ -7021,14 +7021,19 @@ XrResult OpenXrLayer::PaceWaitFrame(XrSession session,
                     const auto steps = static_cast<XrDuration>(unended) + (turbo_async_wait_completed_ ? 0 : 1);
                     predicted += steps * turbo_prediction_history_.FrameStep(turbo_last_predicted_display_period_);
                     extrapolated = steps > 0;
-                } else if (turbo_pacing_mode_ == TurboPacingMode::kSequenced && turbo_seq_wait_in_flight_ &&
+                } else if (turbo_pacing_mode_ == TurboPacingMode::kSequenced &&
                            turbo_last_predicted_display_period_ > 0) {
-                    // This app wait overlaps the post-submit runtime wait, so its
-                    // frame ends a runtime frame after that wait's: hand it the
-                    // prediction that wait is about to return, not the cached
-                    // one a frame older (SteamVR rejects a time older than the
-                    // previous frame's prediction).
-                    predicted += turbo_last_predicted_display_period_;
+                    // The async rule on the frame thread: each app end is
+                    // followed by the wait+begin of the next runtime frame,
+                    // so a frame waited with app frames still unended ends
+                    // that many runtime frames after the cached one, and one
+                    // more while the post-submit wait is still to return (the
+                    // SteamVR fault: a frame older than the previous frame's
+                    // prediction is rejected). DCS waits on its main thread
+                    // up to two frames ahead of the render thread.
+                    const auto unended = std::min<std::uint64_t>(turbo_prediction_history_.Unended(), 2);
+                    const auto steps = static_cast<XrDuration>(unended) + (turbo_seq_wait_in_flight_ ? 1 : 0);
+                    predicted += steps * turbo_prediction_history_.FrameStep(turbo_last_predicted_display_period_);
                 }
                 turbo_last_wait_frame_wall_time_ = now;
 
@@ -7853,6 +7858,16 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
     if (!app_end_noted) {
         std::scoped_lock lock(turbo_mutex_);
         turbo_prediction_history_.AppEnd(submitted_display_time);
+        // Sequenced: this end is followed by the frame-thread wait for the
+        // next runtime frame. From here an app wait targets the frame that
+        // wait returns, so it counts as in flight from the end on, not only
+        // once the runtime wait starts (an app wait during the submit was
+        // handed the cached prediction, a frame early).
+        if (turbo_pacing_mode_ == TurboPacingMode::kSequenced &&
+            turbo_seq_state_ == TurboSequencedState::kActive && !turbo_async_wait_.valid() &&
+            !turbo_begin_owed_) {
+            turbo_seq_wait_in_flight_ = true;
+        }
     }
     const auto pacing_after_drain = std::chrono::steady_clock::now();
     const bool diag_end = TurboSequencedDebugTick();
@@ -8105,6 +8120,8 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
     } else {
         std::scoped_lock lock(turbo_mutex_);
         CancelTurboAsyncHandoffLocked("runtime xrEndFrame failed");
+        // No frame-thread wait follows a failed submit.
+        turbo_seq_wait_in_flight_ = false;
         if (turbo_auto_suspended_.load()) {
             turbo_valve_open_ = false;
             turbo_valve_cv_.notify_all();
