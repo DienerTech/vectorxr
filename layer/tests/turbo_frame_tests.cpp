@@ -24,6 +24,7 @@
 
 #include "depthxr/openxr_layer.h"
 #include "depthxr/framegen_gpu.h"
+#include "depthxr/runtime_pacing.h"
 #include "depthxr/turbo_metrics.h"
 #include "depthxr/turbo_probe_guard.h"
 #include "depthxr/upstream_turbo.h"
@@ -62,6 +63,8 @@ class TurboFrameTestPeer {
         layer.StopTurboAsyncWorker();
         layer.ResetTurboFrameState();
         layer.turbo_probe_guard_.Configure({});
+        layer.turbo_fallback_early_ = false;
+        layer.turbo_reprobe_of_.reset();
 
         {
             std::scoped_lock lock(layer.mutex_);
@@ -558,6 +561,37 @@ class TurboFrameTestPeer {
     static void ProbeAppFrame(std::chrono::steady_clock::time_point at, double app_frame_ms) {
         Layer().turbo_probe_guard_.AppFrame(at, app_frame_ms);
     }
+    static bool FallbackEarly() { return Layer().turbo_fallback_early_; }
+    static bool Reprobing() { return Layer().turbo_reprobe_of_.has_value(); }
+    static bool SourceIsProbing() {
+        return Layer().turbo_pacing_source_ == OpenXrLayer::TurboPacingSource::kProbing;
+    }
+    static bool SourceIsDiscovered() {
+        return Layer().turbo_pacing_source_ == OpenXrLayer::TurboPacingSource::kDiscovered;
+    }
+    static bool VerdictPending() { return Layer().turbo_pacing_verdict_pending_; }
+
+    // Auto resolution against the sidecar at VECTORXR_RUNTIME_PACING_PATH,
+    // keeping the runtime identity so verdicts are written for it.
+    static void ResolveAutoFor(const std::string& runtime, const std::string& system) {
+        auto& layer = Layer();
+        layer.turbo_experiment_.enabled = false;
+        layer.runtime_name_ = runtime;
+        layer.runtime_version_ = "test";
+        layer.system_name_ = system;
+        layer.system_vendor_id_ = 7;
+        layer.graphics_api_ = "D3D11";
+        layer.turbo_test_started_at_ = static_cast<std::uint64_t>(RuntimeRelayUnixMilliseconds());
+        layer.resolved_settings_.turbo.pacing_mode = TurboPacingSetting::kAuto;
+        layer.resolved_settings_.turbo.runtime_pins.clear();
+        layer.turbo_auto_suspended_.store(false, std::memory_order_relaxed);
+        layer.ResolveTurboPacingModeLocked();
+    }
+
+    // A minute of healthy frames in the current mode (the verdict window).
+    static void StableMinute() { Layer().NoteTurboPacingStableFrame(60000.0); }
+    static void FlushPacingWrites() { Layer().DrainRuntimePacingWrites(); }
+    static void ForgetRuntime() { Layer().runtime_name_.clear(); }
 
     static TurboPacingMode PacingMode() {
         return Layer().turbo_pacing_mode_;
@@ -3156,7 +3190,7 @@ void TestProbeGuardScriptedTimes() {
 // S4 (DCS on Pimax, Oct 29): async engaged as the game left its loading screen
 // and the first two drains timed out within half a second, so Auto fell back
 // the moment it engaged. Those stalls are not counted now; stalls that persist
-// past the grace still fall back.
+// past the grace still fall back, and that fallback is early.
 void TestAutoProbeGraceIgnoresEngagementStalls() {
     FakeRuntime runtime;
     TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
@@ -3173,8 +3207,8 @@ void TestAutoProbeGraceIgnoresEngagementStalls() {
     Expect(!Peer::HandleTimeout(t0 + 3s) && Peer::PacingMode() == depthxr::TurboPacingMode::kAsync,
            "The first counted stall must not end the probe on its own");
     Expect(!Peer::HandleTimeout(t0 + 3250ms) && Peer::PacingMode() == depthxr::TurboPacingMode::kSequenced &&
-               !Peer::AutoSuspended(),
-           "Two counted stalls after the grace must fall back to sequenced");
+               !Peer::AutoSuspended() && Peer::FallbackEarly(),
+           "Two counted stalls after the grace must fall back to sequenced, as an early fallback");
 
     // A game still hitching: stalls stay uncounted until a second after its
     // last hitch, never past five seconds.
@@ -3198,8 +3232,8 @@ void TestAutoProbeGraceIgnoresEngagementStalls() {
     const auto t2 = t0 + 120s;
     Peer::EngageProbe(t2);
     Expect(!Peer::HandleTimeout(t2 + 20s) && !Peer::HandleTimeout(t2 + 20100ms) &&
-               Peer::PacingMode() == depthxr::TurboPacingMode::kSequenced,
-           "Two stalls twenty seconds in must fall back");
+               Peer::PacingMode() == depthxr::TurboPacingMode::kSequenced && !Peer::FallbackEarly(),
+           "A fallback twenty seconds in must not count as early");
 
     // Forced async keeps its plain safety threshold: no grace.
     Peer::SetPolicy(depthxr::TurboPacingMode::kAsync, Peer::Source::kForced);
@@ -3241,7 +3275,215 @@ void TestInterlockedRuntimeAutoFallsBackAfterProbeGrace() {
     Expect(elapsed >= 2000.0 && elapsed < 4500.0 && frames >= 6,
            "The interlocked fallback took " + std::to_string(elapsed) + " ms over " + std::to_string(frames) +
                " frames; the grace is two seconds");
+    Expect(Peer::FallbackEarly(), "A fallback seconds after engaging must be early");
     ExpectHealthyFrames(runtime, 32, "Interlocked fallback after the grace");
+}
+
+struct ScopedPacingSidecar {
+    explicit ScopedPacingSidecar(const char* name) {
+        char previous_value[1024]{};
+        std::size_t size = 0;
+        had_previous = getenv_s(&size, previous_value, sizeof(previous_value), "VECTORXR_RUNTIME_PACING_PATH") == 0 &&
+                       size > 1;
+        if (had_previous) previous = previous_value;
+        path = std::filesystem::temp_directory_path() /
+               ("vectorxr-turbo-" + std::string(name) + "-" + std::to_string(GetCurrentProcessId())) /
+               "runtime-pacing.json";
+        std::error_code ec;
+        std::filesystem::remove_all(path.parent_path(), ec);
+        _putenv_s("VECTORXR_RUNTIME_PACING_PATH", path.string().c_str());
+    }
+    ~ScopedPacingSidecar() {
+        depthxr::TurboFrameTestPeer::FlushPacingWrites();
+        depthxr::TurboFrameTestPeer::ForgetRuntime();
+        _putenv_s("VECTORXR_RUNTIME_PACING_PATH", had_previous ? previous.c_str() : "");
+        std::error_code ec;
+        std::filesystem::remove_all(path.parent_path(), ec);
+    }
+    std::optional<depthxr::RuntimePacingObservation> Read() const {
+        depthxr::TurboFrameTestPeer::FlushPacingWrites();
+        const auto observations = depthxr::ReadRuntimePacingObservations(path);
+        if (observations.size() != 1) return std::nullopt;
+        return observations.front();
+    }
+    void Write(const depthxr::RuntimePacingObservation& observation) const {
+        depthxr::TurboFrameTestPeer::FlushPacingWrites();
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+        std::string error;
+        Expect(depthxr::RecordRuntimePacingObservation(path, observation, &error), "Sidecar rewrite failed: " + error);
+    }
+    std::filesystem::path path;
+    std::string previous;
+    bool had_previous{false};
+};
+
+// An early fallback leaves a provisional sequenced verdict: the next session
+// probes async again. A second early failure in a row lets the verdict stand,
+// so a runtime that really interlocks is not probed every session.
+void TestEarlyProbeFailureVerdictIsProvisional() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    ScopedPacingSidecar sidecar("early-probe");
+    using Peer = depthxr::TurboFrameTestPeer;
+    const std::string kRuntime = "Probe Test Runtime";
+    const std::string kSystem = "probe-test headset";
+    const auto t0 = std::chrono::steady_clock::now();
+
+    Peer::ResolveAutoFor(kRuntime, kSystem);
+    Expect(Peer::PacingMode() == depthxr::TurboPacingMode::kAsync && Peer::SourceIsProbing() && !Peer::Reprobing(),
+           "A runtime without a verdict must probe async");
+    Peer::EngageProbe(t0);
+    Peer::HandleTimeout(t0 + 3s);
+    Peer::HandleTimeout(t0 + 3100ms);
+    Expect(Peer::PacingMode() == depthxr::TurboPacingMode::kSequenced && Peer::FallbackEarly() && Peer::VerdictPending(),
+           "The probe did not fall back early");
+    Expect(!sidecar.Read(), "An early fallback must not record anything before sequenced has run clean");
+    Peer::StableMinute();
+    auto recorded = sidecar.Read();
+    Expect(recorded && recorded->mode == depthxr::TurboPacingMode::kSequenced && recorded->early_probe_failures == 1 &&
+               recorded->source == "discovered" && recorded->stable_seconds >= 60,
+           "An early fallback must record a provisional sequenced verdict (earlyProbeFailures=1)");
+    Expect(depthxr::RuntimePacingReprobeReason(*recorded, VECTORXR_VERSION, "test",
+                                               static_cast<std::int64_t>(recorded->test_started_at)).has_value(),
+           "A provisional verdict must be due a re-probe");
+
+    // Next session: re-probe; it fails early again, which is recorded at once.
+    Peer::ResolveAutoFor(kRuntime, kSystem);
+    Expect(Peer::PacingMode() == depthxr::TurboPacingMode::kAsync && Peer::SourceIsProbing() && Peer::Reprobing(),
+           "A provisional sequenced verdict must be re-probed with async");
+    const auto t1 = t0 + 60s;
+    Peer::EngageProbe(t1);
+    Expect(!Peer::HandleTimeout(t1 + 300ms), "A re-probe stall in the grace must not count");
+    Peer::HandleTimeout(t1 + 2500ms);
+    Peer::HandleTimeout(t1 + 2600ms);
+    Expect(Peer::PacingMode() == depthxr::TurboPacingMode::kSequenced && Peer::SourceIsDiscovered() &&
+               !Peer::VerdictPending() && !Peer::Reprobing(),
+           "A failed re-probe must fall back to the recorded sequenced verdict at once");
+    recorded = sidecar.Read();
+    Expect(recorded && recorded->mode == depthxr::TurboPacingMode::kSequenced && recorded->early_probe_failures == 2 &&
+               recorded->stable_seconds >= 60 && recorded->layer_version == VECTORXR_VERSION,
+           "A second early failure must be recorded at once (earlyProbeFailures=2)");
+
+    // The third session uses the verdict: no probing loop.
+    Peer::ResolveAutoFor(kRuntime, kSystem);
+    Expect(Peer::PacingMode() == depthxr::TurboPacingMode::kSequenced && Peer::SourceIsDiscovered() && !Peer::Reprobing(),
+           "Two early failures in a row must let the sequenced verdict stand");
+    Expect(runtime.Calls().empty(), "A policy-only test unexpectedly issued runtime calls");
+}
+
+// A sequenced verdict from another VectorXR version is re-probed once. A late
+// failure confirms it (recorded at once, so the next session does not probe);
+// an async that runs clean replaces it.
+void TestSequencedVerdictReprobe() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    ScopedPacingSidecar sidecar("reprobe");
+    using Peer = depthxr::TurboFrameTestPeer;
+    const std::string kRuntime = "Reprobe Test Runtime";
+    const std::string kSystem = "reprobe-test headset";
+    depthxr::RuntimePacingObservation old;
+    old.test_started_at = static_cast<std::uint64_t>(depthxr::RuntimeRelayUnixMilliseconds()) - 1000;
+    old.runtime_name = kRuntime;
+    old.runtime_version = "test";
+    old.system_name = kSystem;
+    old.vendor_id = 7;
+    old.graphics_api = "D3D11";
+    old.mode = depthxr::TurboPacingMode::kSequenced;
+    old.source = "discovered";
+    old.layer_version = "0.17.0";
+    old.last_used_unix_seconds = 1;
+    old.stable_seconds = 75;
+    sidecar.Write(old);
+
+    Peer::ResolveAutoFor(kRuntime, kSystem);
+    Expect(Peer::PacingMode() == depthxr::TurboPacingMode::kAsync && Peer::Reprobing(),
+           "A sequenced verdict from another version must be re-probed");
+    const auto t0 = std::chrono::steady_clock::now();
+    Peer::EngageProbe(t0);
+    Peer::HandleTimeout(t0 + 30s);
+    Peer::HandleTimeout(t0 + 30100ms);
+    Expect(Peer::PacingMode() == depthxr::TurboPacingMode::kSequenced && !Peer::FallbackEarly(),
+           "The late re-probe failure did not fall back");
+    auto recorded = sidecar.Read();
+    Expect(recorded && recorded->mode == depthxr::TurboPacingMode::kSequenced && recorded->early_probe_failures == 0 &&
+               recorded->layer_version == VECTORXR_VERSION && recorded->stable_seconds == 75 &&
+               recorded->test_started_at > old.test_started_at,
+           "A late re-probe failure must re-record the sequenced verdict for this version at once");
+    Peer::ResolveAutoFor(kRuntime, kSystem);
+    Expect(Peer::PacingMode() == depthxr::TurboPacingMode::kSequenced && !Peer::Reprobing(),
+           "A confirmed sequenced verdict must not be re-probed again");
+
+    // Old again, and this time async runs clean for its minute.
+    sidecar.Write(old);
+    Peer::ResolveAutoFor(kRuntime, kSystem);
+    Expect(Peer::Reprobing(), "The rewritten old verdict must be re-probed");
+    Peer::StableMinute();
+    recorded = sidecar.Read();
+    Expect(recorded && recorded->mode == depthxr::TurboPacingMode::kAsync && recorded->early_probe_failures == 0,
+           "A clean async re-probe must replace the sequenced verdict");
+    Peer::ResolveAutoFor(kRuntime, kSystem);
+    Expect(Peer::PacingMode() == depthxr::TurboPacingMode::kAsync && Peer::SourceIsDiscovered() && !Peer::Reprobing(),
+           "The async verdict from the re-probe must be used");
+    Expect(runtime.Calls().empty(), "A policy-only test unexpectedly issued runtime calls");
+}
+
+// The re-probe rule itself: only sequenced verdicts, each reason bounded.
+void TestRuntimePacingReprobeReasons() {
+    depthxr::RuntimePacingObservation verdict;
+    verdict.mode = depthxr::TurboPacingMode::kSequenced;
+    verdict.layer_version = "0.20.1";
+    verdict.runtime_version = "1.2";
+    constexpr std::int64_t now = 2'000'000'000'000;
+    verdict.test_started_at = static_cast<std::uint64_t>(now - 1000);
+    const auto reason = [&](const depthxr::RuntimePacingObservation& o, const std::string& layer = "0.20.1",
+                            const std::string& rt = "1.2", std::int64_t at = 2'000'000'000'000) {
+        return depthxr::RuntimePacingReprobeReason(o, layer, rt, at);
+    };
+    Expect(!reason(verdict), "A fresh sequenced verdict for this version and runtime must stand");
+    auto o = verdict;
+    o.early_probe_failures = 1;
+    Expect(reason(o).has_value(), "One early failure must be re-probed");
+    o.early_probe_failures = depthxr::kEarlyProbeFailureLimit;
+    Expect(!reason(o), "Early failures at the limit must let the verdict stand");
+    Expect(reason(verdict, "0.20.2").has_value(), "A verdict from another VectorXR version must be re-probed");
+    Expect(reason(verdict, "0.20.1", "1.3").has_value(), "A runtime update must re-probe");
+    Expect(!reason(verdict, "", "").has_value(), "Unknown versions are no reason to re-probe");
+    o = verdict;
+    o.layer_version.clear();
+    o.runtime_version.clear();
+    Expect(!reason(o), "A record without versions is no reason to re-probe");
+    Expect(reason(verdict, "0.20.1", "1.2", now + depthxr::kReprobeAgeMs).has_value(),
+           "A verdict older than 30 days must be re-probed");
+    Expect(!reason(verdict, "0.20.1", "1.2", now + depthxr::kReprobeAgeMs - 2000),
+           "A verdict younger than 30 days must stand");
+    o = verdict;
+    o.mode = depthxr::TurboPacingMode::kAsync;
+    o.early_probe_failures = 1;
+    Expect(!reason(o, "0.20.2", "1.3", now + 2 * depthxr::kReprobeAgeMs), "Async verdicts are never re-probed");
+
+    // The new field round-trips, and records from before it read as zero.
+    const auto path = std::filesystem::temp_directory_path() /
+                      ("vectorxr-reprobe-reasons-" + std::to_string(GetCurrentProcessId())) / "runtime-pacing.json";
+    std::error_code ec;
+    std::filesystem::remove_all(path.parent_path(), ec);
+    o = verdict;
+    o.runtime_name = "Round Trip";
+    o.source = "discovered";
+    o.stable_seconds = 60;
+    o.early_probe_failures = 1;
+    std::string error;
+    Expect(depthxr::RecordRuntimePacingObservation(path, o, &error), "Round-trip write failed: " + error);
+    auto read = depthxr::ReadRuntimePacingObservations(path);
+    Expect(read.size() == 1 && read.front().early_probe_failures == 1, "earlyProbeFailures did not round-trip");
+    {
+        std::ofstream legacy(path, std::ios::trunc);
+        legacy << R"({"version":2,"observations":[{"testStartedAt":5,"runtimeName":"Legacy","mode":"sequenced",)"
+               << R"("source":"discovered","stableSeconds":60}]})";
+    }
+    read = depthxr::ReadRuntimePacingObservations(path);
+    Expect(read.size() == 1 && read.front().early_probe_failures == 0, "A legacy record must read zero early failures");
+    std::filesystem::remove_all(path.parent_path(), ec);
 }
 
 } // namespace
@@ -5066,6 +5308,9 @@ int main() {
     TestProbeGuardScriptedTimes();
     TestAutoProbeGraceIgnoresEngagementStalls();
     TestInterlockedRuntimeAutoFallsBackAfterProbeGrace();
+    TestEarlyProbeFailureVerdictIsProvisional();
+    TestSequencedVerdictReprobe();
+    TestRuntimePacingReprobeReasons();
     Expect(depthxr::TurboFrameTestPeer::OsdStateTransitions(), "OSD lost enabled/off Turbo or applied/ready/disabled Pivot state");
     TestVarjoNativeSubmittedFocusCountsEveryFrame();
     TestVarjoDeferredReleasesKeepFrameGenUnblocked();

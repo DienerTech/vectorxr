@@ -631,7 +631,8 @@ class OpenXrLayer {
     // (and again after a config change); the verdict/stall helpers run on the
     // frame thread after the lock is released.
     void ResolveTurboPacingModeLocked();
-    void RecordTurboPacingVerdict(TurboPacingMode mode, const char* source, std::int64_t stable_seconds);
+    void RecordTurboPacingVerdict(TurboPacingMode mode, const char* source, std::int64_t stable_seconds,
+                                  std::int64_t early_probe_failures = 0);
     void QueueRuntimePacingWrite(RuntimePacingObservation observation);
     void DrainRuntimePacingWrites();
     void NoteTurboPacingStableFrame(double app_frame_delta_ms);
@@ -1654,11 +1655,18 @@ class OpenXrLayer {
     // runtime, or the in-session fallback after async tripped.
     enum class TurboPacingSource { kForced, kPinned, kDiscovered, kProbing, kFallback };
     std::uint64_t turbo_test_started_at_{0};
-    bool TryTurboAutoFallbackLocked(const std::string& reason);
-    // Auto's async pacing (frame thread): stalls in its first seconds are
-    // not counted (TurboProbeGuard).
+    bool TryTurboAutoFallbackLocked(const std::string& reason,
+                                    std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
+    // Auto's async probe (frame thread): stalls in its first seconds are not
+    // counted, and a fallback within seconds of engaging is "early"
+    // (TurboProbeGuard, runtime_pacing.h).
     TurboProbeGuard turbo_probe_guard_;
     int turbo_probe_grace_log_budget_{0};
+    // This session's sequenced fallback came from a probe that failed early.
+    bool turbo_fallback_early_{false};
+    // The recorded sequenced verdict a re-probe is testing again: its outcome
+    // is recorded at once if async falls back (sequenced is already proven).
+    std::optional<RuntimePacingObservation> turbo_reprobe_of_;
     // Frame-submission-thread only (resolved under the config lock at
     // EndFrame, consumed after it is released); the sequenced state machine
     // below is turbo_mutex_-guarded because WaitFrame/BeginFrame consult it.

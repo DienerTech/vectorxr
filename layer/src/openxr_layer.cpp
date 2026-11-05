@@ -8411,6 +8411,8 @@ void OpenXrLayer::ResolveTurboPacingModeLocked() {
     turbo_stable_accumulated_ms_ = 0.0;
     turbo_drain_timeout_count_ = 0;
     turbo_timeout_window_start_.reset();
+    turbo_fallback_early_ = false;
+    turbo_reprobe_of_.reset();
     turbo_probe_grace_log_budget_ = 3;
 
     const TurboPacingSetting setting = turbo_experiment_.enabled ? TurboPacingSetting::kAsync
@@ -8434,11 +8436,16 @@ void OpenXrLayer::ResolveTurboPacingModeLocked() {
         }
     }
 
-    if (const auto observation = FindRuntimePacingObservation(ResolveRuntimePacingPath(),
-                                                              runtime_name_,
-                                                              system_name_,
-                                                              system_vendor_id_,
-                                                              graphics_api_)) {
+    const auto observation = FindRuntimePacingObservation(ResolveRuntimePacingPath(),
+                                                          runtime_name_,
+                                                          system_name_,
+                                                          system_vendor_id_,
+                                                          graphics_api_);
+    const std::optional<std::string> reprobe_reason =
+        observation ? RuntimePacingReprobeReason(*observation, VECTORXR_VERSION, runtime_version_,
+                                                 static_cast<std::int64_t>(RuntimeRelayUnixMilliseconds()))
+                    : std::nullopt;
+    if (observation && !reprobe_reason) {
         turbo_pacing_mode_ = observation->mode;
         turbo_pacing_source_ = TurboPacingSource::kDiscovered;
         logger_.Info(std::string("Turbo pacing: ") + ToString(turbo_pacing_mode_) +
@@ -8460,13 +8467,22 @@ void OpenXrLayer::ResolveTurboPacingModeLocked() {
     turbo_pacing_mode_ = TurboPacingMode::kAsync;
     turbo_pacing_source_ = TurboPacingSource::kProbing;
     turbo_pacing_verdict_pending_ = true;
+    if (reprobe_reason) {
+        turbo_reprobe_of_ = *observation;
+        logger_.Info("Turbo pacing: re-probing async for runtime \"" + runtime_name_ +
+                     "\": its recorded sequenced verdict is due a retest (" + *reprobe_reason +
+                     "; earlyProbeFailures=" + std::to_string(observation->early_probe_failures) +
+                     "). Falls back to sequenced on stalls or submission errors, and records the outcome.");
+        return;
+    }
     logger_.Info("Turbo pacing: no tested decision for runtime \"" + runtime_name_ +
                  "\"; probing async pacing first (falls back to sequenced on stalls or submission errors).");
 }
 
 void OpenXrLayer::RecordTurboPacingVerdict(TurboPacingMode mode,
                                            const char* source,
-                                           std::int64_t stable_seconds) {
+                                           std::int64_t stable_seconds,
+                                           std::int64_t early_probe_failures) {
     if (runtime_name_.empty() || turbo_experiment_.enabled) {
         return;
     }
@@ -8488,10 +8504,16 @@ void OpenXrLayer::RecordTurboPacingVerdict(TurboPacingMode mode,
             .count();
     observation.probe_timeouts = turbo_probe_timeout_total_;
     observation.stable_seconds = stable_seconds;
+    observation.early_probe_failures = early_probe_failures;
 
     QueueRuntimePacingWrite(std::move(observation));
     logger_.Info(std::string("Turbo pacing: queued ") + ToString(mode) +
-                 " verdict for runtime \"" + runtime_name_ + "\" (" + source + ").");
+                 " verdict for runtime \"" + runtime_name_ + "\" (" + source +
+                 ", earlyProbeFailures=" + std::to_string(early_probe_failures) +
+                 (mode == TurboPacingMode::kSequenced && early_probe_failures > 0 &&
+                          early_probe_failures < kEarlyProbeFailureLimit
+                      ? "; provisional: the next session probes async again)."
+                      : ")."));
 }
 
 void OpenXrLayer::QueueRuntimePacingWrite(RuntimePacingObservation observation) {
@@ -8547,15 +8569,52 @@ void OpenXrLayer::NoteTurboPacingStableFrame(double app_frame_delta_ms) {
         turbo_pacing_source_ == TurboPacingSource::kFallback) {
         turbo_pacing_source_ = TurboPacingSource::kDiscovered;
     }
+    const std::int64_t early_failures =
+        turbo_pacing_mode_ == TurboPacingMode::kSequenced && turbo_fallback_early_
+            ? (turbo_reprobe_of_ ? turbo_reprobe_of_->early_probe_failures : 0) + 1
+            : 0;
     RecordTurboPacingVerdict(turbo_pacing_mode_, source,
-                             static_cast<std::int64_t>(turbo_stable_accumulated_ms_ / 1000.0));
+                             static_cast<std::int64_t>(turbo_stable_accumulated_ms_ / 1000.0), early_failures);
 }
 
-bool OpenXrLayer::TryTurboAutoFallbackLocked(const std::string& reason) {
+bool OpenXrLayer::TryTurboAutoFallbackLocked(const std::string& reason,
+                                             std::chrono::steady_clock::time_point now) {
     if (turbo_pacing_mode_ != TurboPacingMode::kAsync ||
         turbo_pacing_source_ == TurboPacingSource::kForced || turbo_pacing_source_ == TurboPacingSource::kPinned) return false;
     turbo_recovery_.Fail(reason + " Auto is trying sequenced pacing next.");
     if (!turbo_recovery_.Prepare(resolved_settings_.turbo.interrupted_session_recovery, true, "sequenced")) return false;
+    const bool probing = turbo_pacing_source_ == TurboPacingSource::kProbing;
+    turbo_fallback_early_ = probing && turbo_probe_guard_.Early(now);
+    const auto since_engaged = turbo_probe_guard_.SinceEngaged(now);
+    const std::string after = since_engaged
+        ? std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(*since_engaged).count()) + "ms"
+        : std::string("an unknown time");
+    if (probing && turbo_reprobe_of_) {
+        // Sequenced is this runtime's proven verdict already: record the
+        // re-probe's outcome now, so a session cut short cannot re-probe
+        // again next time for the same reason.
+        const std::int64_t early_failures =
+            turbo_fallback_early_ ? turbo_reprobe_of_->early_probe_failures + 1 : 0;
+        logger_.Info("Turbo Auto: the async re-probe fell back " + after +
+                     " after engaging; keeping the recorded sequenced verdict.");
+        turbo_pacing_mode_ = TurboPacingMode::kSequenced;
+        RecordTurboPacingVerdict(TurboPacingMode::kSequenced, "discovered",
+                                 std::max<std::int64_t>(turbo_reprobe_of_->stable_seconds, 60), early_failures);
+        turbo_reprobe_of_.reset();
+        turbo_pacing_source_ = TurboPacingSource::kDiscovered;
+        turbo_pacing_verdict_pending_ = false;
+        turbo_stable_accumulated_ms_ = 0.0;
+        turbo_runtime_error_streak_.store(0);
+        turbo_drain_timeout_count_ = 0;
+        turbo_timeout_window_start_.reset();
+        logger_.Info("Turbo Auto: async failed; trying sequenced. reason=" + reason);
+        return true;
+    }
+    if (turbo_fallback_early_) {
+        logger_.Info("Turbo Auto: the async probe fell back " + after +
+                     " after engaging (early); the sequenced verdict it leads to is provisional, and the next "
+                     "session probes async again.");
+    }
     turbo_pacing_mode_ = TurboPacingMode::kSequenced;
     turbo_pacing_source_ = TurboPacingSource::kFallback;
     turbo_pacing_verdict_pending_ = true;
@@ -8802,7 +8861,7 @@ bool OpenXrLayer::HandleTurboDrainTimeout(std::chrono::steady_clock::time_point 
             return false;
         }
         std::scoped_lock lock(mutex_);
-        if (TryTurboAutoFallbackLocked("Repeated xrWaitFrame stalls in async pacing.")) return false;
+        if (TryTurboAutoFallbackLocked("Repeated xrWaitFrame stalls in async pacing.", now)) return false;
     }
 
     // Level 2 (sequenced pacing still stalling), or a forced/pinned mode the

@@ -18,6 +18,9 @@ namespace depthxr {
 // is short and capped: a runtime that interlocks every off-thread wait (the
 // case the fallback exists for) still falls back a few seconds after engaging.
 //
+// A fallback soon after engaging is "early": its sequenced verdict is recorded
+// as provisional, so the next session probes async again (runtime_pacing.h).
+//
 // The times come from the caller (steady_clock in the layer, a script in its
 // tests); the frame thread serializes the calls.
 class TurboProbeGuard {
