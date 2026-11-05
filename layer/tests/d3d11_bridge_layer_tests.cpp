@@ -3392,19 +3392,25 @@ void TestPrivateDepthSession(Game& game) {
 // reaches it as before. Standing by (each frame passed through), and with
 // Frame Generation engaged (frames presented from its copies of the game's,
 // and the game's depth no longer sent to Frame Generation either).
-void TestDepthRects(Game& game, bool engaged) {
+// `bridged` false: the game's own Direct3D 11 session (VECTORXR_D3D11_BRIDGE=off),
+// whose depth the layer forwards as it is: the same depth is left out.
+void TestDepthRects(Game& game, bool engaged, bool bridged = true) {
     CaseSettings settings;
     if (engaged) settings.frame_multiplier = "2x";
-    const std::string name = engaged ? "depth-rects-engaged" : "depth-rects";
+    const std::string name =
+        std::string(engaged ? "depth-rects-engaged" : "depth-rects") + (bridged ? "" : "-native-d3d11");
     BeginCase(name, game, settings);
+    if (!bridged) SetEnv("VECTORXR_D3D11_BRIDGE", "off");
     if (engaged) {
         g_runtime.paced = true;
         Peer::SetFrameGenEngagement(2, std::chrono::milliseconds(0));
     }
     App app = StartApp();
     SessionCreate create(game.device.Get(), app.system);
-    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS && Peer::Bridge().Active(),
-          name + ": a bridged session");
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS &&
+              Peer::Bridge().Active() == bridged &&
+              g_runtime.binding == (bridged ? XR_TYPE_GRAPHICS_BINDING_D3D12_KHR : XR_TYPE_GRAPHICS_BINDING_D3D11_KHR),
+          name + (bridged ? ": a bridged session" : ": the game's own Direct3D 11 session"));
     BeginSession(app);
     Target left = MakeTarget(app, ColorInfo(), "the left eye");
     Target right = MakeTarget(app, ColorInfo(), "the right eye");
@@ -3551,6 +3557,7 @@ void TestDepthRects(Game& game, bool engaged) {
     if (engaged) {
         Peer::SetFrameGenEngagement(45, std::chrono::milliseconds(3000)); // the presenter's own
     }
+    if (!bridged) SetEnv("VECTORXR_D3D11_BRIDGE", "");
     Check(GameRuns(game), "the game's device works");
     EndCase(game);
 }
@@ -6735,6 +6742,7 @@ int main(int argc, char** argv) {
     if (bridged && only && std::string(only) == "depth-rects") {
         TestDepthRects(game, false);
         TestDepthRects(game, true);
+        TestDepthRects(game, false, false);
     } else if (bridged && only && std::string(only) == "runtime-stall-outside-layer-lock") {
         TestRuntimeStallOutsideLayerLock(game);
     } else if (bridged && only && std::string(only) == "toolkit-below-framegen-off") {
@@ -6758,6 +6766,7 @@ int main(int argc, char** argv) {
         TestPrivateDepthSession(game);
         TestDepthRects(game, false);
         TestDepthRects(game, true);
+        TestDepthRects(game, false, false);
         TestRuntimeStallOutsideLayerLock(game);
         TestToolkitBelowKeepsFrameGenOff(game);
         TestBridgedQuadViewsComposed(game, false);

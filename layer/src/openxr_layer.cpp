@@ -725,6 +725,50 @@ std::string SubImageOutsideImage(const XrSwapchainSubImage& sub, std::uint32_t w
            " image of " + std::to_string(std::max(1u, array_size)) + " slices";
 }
 
+// What WithSubmittableDepth left out, for the log.
+struct LeftOutDepth {
+    bool kept_private{false}; // depth a bridge keeps the game's
+    std::string outside;      // the first depth sub-image outside its image: why (SubImageOutsideImage)
+};
+
+// `frame` without the depth no runtime may be given, in any session that
+// forwards XR_KHR_composition_layer_depth: depth a bridge keeps the game's
+// (`kept_private(swapchain)`), and depth whose sub-image lies outside its
+// image (`image_of(swapchain, width, height, array_size)`, false for a
+// swapchain the layer does not know: left as it is). A runtime refuses the
+// whole frame for the latter (PimaxXR and Virtual Desktop:
+// XR_ERROR_SWAPCHAIN_RECT_INVALID); UEVR places its depth rect by its colour
+// image's size, which an upscaler or screen percentage makes larger than its
+// depth image. A projection with any such depth loses every view's
+// (WithoutDepth), so no eye has depth the other has not. Never clamped: a
+// smaller rect would no longer match its colour, and depth reprojection would
+// misplace what it moves. `frame` itself when nothing is left out.
+template <typename KeptPrivate, typename ImageOf>
+const XrFrameEndInfo* WithSubmittableDepth(const XrFrameEndInfo* frame, DepthlessFrame& storage,
+                                           const KeptPrivate& kept_private, const ImageOf& image_of,
+                                           LeftOutDepth& left_out) {
+    return WithoutDepth(frame, storage, [&](const XrCompositionLayerDepthInfoKHR& depth) {
+        if (kept_private(depth.subImage.swapchain)) {
+            left_out.kept_private = true;
+            return true;
+        }
+        std::uint32_t width = 0;
+        std::uint32_t height = 0;
+        std::uint32_t array_size = 0;
+        if (!image_of(depth.subImage.swapchain, width, height, array_size)) {
+            return false;
+        }
+        std::string why = SubImageOutsideImage(depth.subImage, width, height, array_size);
+        if (why.empty()) {
+            return false;
+        }
+        if (left_out.outside.empty()) {
+            left_out.outside = std::move(why);
+        }
+        return true;
+    });
+}
+
 const void* StripVarjoFoveatedViewLocateNextChain(const void* next) {
     const auto* header = reinterpret_cast<const XrBaseInStructure*>(next);
     if (!header) {
@@ -3094,7 +3138,7 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
     NoteSessionCreatedLocked(session_create_time);
     d3d11_bridge_lost_logged_ = false;
     d3d11_bridge_depth_logged_ = false;
-    d3d11_bridge_depth_rect_logged_ = false;
+    depth_rect_logged_ = false;
     d3d11_bridge_last_summary_ = std::chrono::steady_clock::now();
     d3d11_bridge_quad_frames_ = {};
     d3d11_bridge_quad_frames_summarized_ = {};
@@ -9674,8 +9718,8 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         }
         framegen_.CaptureEngineMotion(hand_over);
     }
-    // A bridged session lives on the bridge's device; depth that stays the
-    // game's is left out of its frames.
+    // A bridged session lives on the bridge's device. Depth no runtime may
+    // be given is left out of every session's frames below (the storage).
     std::optional<DepthlessFrame> depthless_frame;
     if (d3d11_bridge_.Active()) {
         std::string lost;
@@ -9714,48 +9758,6 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
             framegen_.AbandonFrame(frame_end_info->displayTime);
             return XR_ERROR_SESSION_LOST;
         }
-        // Mirrored depth reaches the runtime, which refuses the whole frame
-        // for a depth sub-image outside its image (UEVR places its depth
-        // rect by its colour image's size, which an upscaler or screen
-        // percentage makes larger than its depth image): such depth is left
-        // out, of every view of its projection, before Frame Generation or
-        // the runtime gets the frame. Never clamped: a smaller rect would no
-        // longer match its colour, and depth reprojection would misplace
-        // what it moves.
-        bool unmirrored = false;
-        std::string outside;
-        const XrFrameEndInfo* without_depth = WithoutDepth(
-            frame_end_info, depthless_frame.emplace(), [&](const XrCompositionLayerDepthInfoKHR& depth) {
-                if (d3d11_bridge_.Unmirrored(depth.subImage.swapchain)) {
-                    unmirrored = true;
-                    return true;
-                }
-                const auto tracked = tracked_swapchains_.find(depth.subImage.swapchain);
-                if (tracked == tracked_swapchains_.end()) {
-                    return false;
-                }
-                std::string why = SubImageOutsideImage(depth.subImage, tracked->second.width, tracked->second.height,
-                                                       tracked->second.array_size);
-                if (why.empty()) {
-                    return false;
-                }
-                if (outside.empty()) {
-                    outside = std::move(why);
-                }
-                return true;
-            });
-        if (unmirrored && !d3d11_bridge_depth_logged_) {
-            d3d11_bridge_depth_logged_ = true;
-            logger_.Info("Frame Generation's Direct3D 11 bridge keeps the game's depth to itself: it is left "
-                         "out of the frames the runtime and Frame Generation get.");
-        }
-        if (!outside.empty() && !d3d11_bridge_depth_rect_logged_) {
-            d3d11_bridge_depth_rect_logged_ = true;
-            logger_.Info("The game's depth sub-image lies outside its depth image (" + outside +
-                         "): its projection's depth is left out of the frames the runtime and Frame Generation get "
-                         "while it does (a runtime refuses such a frame).");
-        }
-        frame_end_info = without_depth;
     }
     if (vulkan_bridge_.Active()) {
         std::string lost;
@@ -9774,18 +9776,41 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
             framegen_.AbandonFrame(frame_end_info->displayTime);
             return XR_ERROR_SESSION_LOST;
         }
-        if (vulkan_bridge_.HasUnmirrored()) {
-            const XrFrameEndInfo* without_depth = WithoutDepth(
-                frame_end_info, depthless_frame.emplace(), [this](const XrCompositionLayerDepthInfoKHR& depth) {
-                    return vulkan_bridge_.Unmirrored(depth.subImage.swapchain);
-                });
-            if (without_depth != frame_end_info && !vulkan_bridge_depth_logged_) {
-                vulkan_bridge_depth_logged_ = true;
-                logger_.Info("Frame Generation's Vulkan bridge keeps the game's depth to itself (multisampled, or the "
-                             "runtime's depth images are not depth targets: its swapchain line says which): it is "
-                             "left out of the frames the runtime and Frame Generation get.");
-            }
-            frame_end_info = without_depth;
+    }
+    // Depth no runtime may be given is left out, in every session, before
+    // Frame Generation or the runtime gets the frame (WithSubmittableDepth).
+    {
+        LeftOutDepth left_out;
+        frame_end_info = WithSubmittableDepth(
+            frame_end_info, depthless_frame.emplace(),
+            [this](XrSwapchain swapchain) { return UnmirroredSwapchain(swapchain); },
+            [this](XrSwapchain swapchain, std::uint32_t& width, std::uint32_t& height, std::uint32_t& array_size) {
+                const auto tracked = tracked_swapchains_.find(swapchain);
+                if (tracked == tracked_swapchains_.end()) {
+                    return false;
+                }
+                width = tracked->second.width;
+                height = tracked->second.height;
+                array_size = tracked->second.array_size;
+                return true;
+            },
+            left_out);
+        if (left_out.kept_private && d3d11_bridge_.Active() && !d3d11_bridge_depth_logged_) {
+            d3d11_bridge_depth_logged_ = true;
+            logger_.Info("Frame Generation's Direct3D 11 bridge keeps the game's depth to itself: it is left "
+                         "out of the frames the runtime and Frame Generation get.");
+        }
+        if (left_out.kept_private && vulkan_bridge_.Active() && !vulkan_bridge_depth_logged_) {
+            vulkan_bridge_depth_logged_ = true;
+            logger_.Info("Frame Generation's Vulkan bridge keeps the game's depth to itself (multisampled, or the "
+                         "runtime's depth images are not depth targets: its swapchain line says which): it is "
+                         "left out of the frames the runtime and Frame Generation get.");
+        }
+        if (!left_out.outside.empty() && !depth_rect_logged_) {
+            depth_rect_logged_ = true;
+            logger_.Info("The game's depth sub-image lies outside its depth image (" + left_out.outside +
+                         "): its projection's depth is left out of the frames the runtime and Frame Generation get "
+                         "while it does (a runtime refuses such a frame).");
         }
     }
     ReloadConfigIfNeeded();

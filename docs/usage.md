@@ -789,6 +789,11 @@ targets. The log says so for each such depth swapchain, and the game's depth the
 neither Frame Generation nor the runtime. `VECTORXR_D3D11_BRIDGE_DEPTH=private` keeps every
 Direct3D 11 game's depth to itself, if copying it ever causes a problem in a game.
 
+Depth whose rectangle lies outside its depth image, as UEVR sends with an upscaler or a screen
+percentage that makes its depth image smaller than its color image, is left out of the frame for
+both eyes, in every kind of game: some runtimes (PimaxXR, Virtual Desktop) refuse a whole frame
+for it. The log says so once a session. The color goes on as before.
+
 Games do not always describe their depth correctly, so Frame Generation first checks it against
 the other eye: depth that is right lines the two eyes' images up. It starts using depth once
 that check passes, recognizes depth stored the other way round, corrects depth whose scale is

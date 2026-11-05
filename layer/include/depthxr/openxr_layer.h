@@ -1147,7 +1147,7 @@ class OpenXrLayer {
     D3D11Bridge d3d11_bridge_;
     bool d3d11_bridge_lost_logged_{false};    // mutex_
     bool d3d11_bridge_depth_logged_{false};   // mutex_
-    bool d3d11_bridge_depth_rect_logged_{false}; // mutex_: a depth sub-image outside its image was left out
+    bool depth_rect_logged_{false}; // mutex_: a depth sub-image outside its image was left out (any session)
     bool d3d11_bridge_sharpen_logged_{false}; // mutex_
     std::chrono::steady_clock::time_point d3d11_bridge_last_summary_; // mutex_
     // Quad views frames of a bridged session (mutex_): composed by Frame
