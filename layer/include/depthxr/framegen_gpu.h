@@ -23,6 +23,12 @@ struct FrameGenImage {
     std::uint32_t array_index{0};
     XrRect2Di rect{};
     std::int64_t format{0}; // swapchain creation format, native to the graphics API
+    // Edge fill (an output image, FrameGenGpu::SupportsEdgeFill): where the
+    // view's frame starts in `rect`, which is then wider than the frame (its
+    // FrameGenViewRequest::extent, or a composed eye's) by a margin on each
+    // side; every margin pixel repeats the frame's nearest edge pixel. {0, 0}
+    // with `rect` the frame's own size: no fill.
+    XrOffset2Di content{0, 0};
 };
 
 struct FrameGenViewSubmission {
@@ -282,6 +288,11 @@ class FrameGenGpu {
     // Whether generated frames are drawn straight into the output images
     // (no intermediate image per view).
     virtual bool DrawsOutputs() const { return false; }
+    // Edge fill: output images wider than their frame, the frame placed at
+    // FrameGenImage::content and the margin around it its nearest edge
+    // repeated (Direct3D 12, while it draws generated frames straight into
+    // the outputs). Without it, outputs are the frame's own size.
+    virtual bool SupportsEdgeFill() const { return false; }
     // Tests: the draws of generated frames into the output images recorded
     // so far (DrawsOutputs; frames drawn together count once).
     virtual std::uint64_t DrawsForTest() const { return 0; }

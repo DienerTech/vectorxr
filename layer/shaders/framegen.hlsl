@@ -95,6 +95,18 @@ cbuffer FrameGenConstantBuffer : register(b0) {
 };
 #endif
 
+#if defined(FG_PASS_SYNTHESIZE_DRAW) || defined(FG_PASS_COMPOSE_DRAW)
+// Edge fill (Direct3D 12 draws, FrameGenImage::content): xy is where the
+// frame's own pixels start in the render target, which is wider than the
+// frame by a margin on each side. Every pixel of the margin repeats the
+// frame's nearest edge pixel, so a runtime that turns the frame toward the
+// head finds the edge smeared outward there instead of nothing (black). Zero
+// for an output the frame's own size.
+cbuffer FrameGenFillBuffer : register(b1) {
+    uint4 g_fill;
+};
+#endif
+
 #define FG_FLAG_SRGB_ENCODE 1u
 #define FG_FLAG_EXTRAPOLATE 2u
 #define FG_FLAG_TEMPORAL 4u
@@ -2410,7 +2422,9 @@ struct DrawOutput {
 };
 
 DrawOutput PSMain(float4 position : SV_Position) {
-    const float2 pixel = position.xy;
+    // Edge fill: a margin pixel is the frame's nearest edge pixel (its
+    // centre; a coarse pixel's centre inside the frame is left as it is).
+    const float2 pixel = clamp(position.xy - float2(g_fill.xy), 0.5, float2(g.size.xy) - 0.5);
     DrawOutput output;
     output.frame0 = Synthesize(pixel, g.tuning.x);
 #if FG_DRAW_OUTPUTS > 1
@@ -2539,8 +2553,9 @@ float3 Overlay(float3 composed, float2 uv, bool inside, float alpha) {
 }
 
 float4 PSMain(float4 position : SV_Position) : SV_Target {
-    // The pixel's centre: the Direct3D 11 compositor's interpolated uv.
-    const float2 uv = saturate(position.xy / float2(g.size.xy));
+    // The pixel's centre: the Direct3D 11 compositor's interpolated uv. With
+    // edge fill (g_fill) the margin around the eye reads its nearest edge.
+    const float2 uv = saturate((position.xy - float2(g_fill.xy)) / float2(g.size.xy));
     const float4 rect = g.fov_current;
     float4 composed = g_peripheral.SampleLevel(g_linear, uv, 0.0);
     const bool inside = all(uv >= rect.xy) && all(uv <= rect.zw);
@@ -4346,9 +4361,11 @@ FG_BIND(4) FG_FORMAT("r8ui") RWTexture2D<uint> g_rates : register(u0);
 // angle) is shaded per 2x2 pixels unless it shows cockpit content: a wide
 // view's periphery is rendered far denser than the headset shows it, while
 // cockpit edges there are what generated frames must keep sharp. size.xy:
-// tiles, size.zw: the output extent, options.x: the tile's side in pixels,
+// tiles, size.zw: the frame's extent, options.x: the tile's side in pixels,
 // options.y: FG_FLAG_DEPTH when the newest frame's depth is bound (without
-// it, the angle alone decides).
+// it, the angle alone decides), options.zw: with edge fill, where the frame
+// starts in the output image (the tiles cover the whole image; a tile of
+// the margin is judged as the frame's nearest edge, which it repeats).
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID) {
     if (any(id.xy >= g.size.xy)) {
@@ -4356,7 +4373,8 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     }
     const float tile = float(g.options.x);
     const float2 extent = float2(g.size.zw);
-    const float2 centre = min((float2(id.xy) + 0.5) * tile, extent) / extent;
+    const float2 start = float2(id.xy) * tile - float2(g.options.zw);
+    const float2 centre = clamp(start + 0.5 * tile, 0.0, extent) / extent;
     const float2 tangent = float2(lerp(g.fov_current.x, g.fov_current.y, centre.x),
                                   lerp(g.fov_current.z, g.fov_current.w, centre.y));
     uint rate = length(tangent) >= g.tuning.x ? FG_RATE_2X2 : FG_RATE_1X1;
@@ -4364,8 +4382,8 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         uint width, height;
         g_depth.GetDimensions(width, height);
         const float2 scale = float2(width, height) / extent;
-        const int2 first = int2(floor(float2(id.xy) * tile * scale));
-        const int2 last = min(int2(ceil((float2(id.xy) + 1.0) * tile * scale)), int2(width, height)) - 1;
+        const int2 first = min(int2(floor(max(start, 0.0) * scale)), int2(width, height) - 1);
+        const int2 last = max(min(int2(ceil((start + tile) * scale)), int2(width, height)) - 1, first);
         // Four texels a fetch: the 2x2 block from (x, y) (clamped at edges).
         const float2 texel = 1.0 / float2(width, height);
         [loop]

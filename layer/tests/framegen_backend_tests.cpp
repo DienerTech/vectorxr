@@ -788,6 +788,128 @@ int RunScenarios(Harness& harness) {
               harness.name + " 4x frames are not placed at 1/4 and 3/4 of the motion");
         Check(copy_error < 0.002, harness.name + " the frame at fraction 1 is not the newest real frame");
 
+        // 2d'. Edge fill (Direct3D 12): an output wider than the frame by a
+        // margin each side (whole 32-pixel tiles, as the presenter makes
+        // them) holds the frame at its content offset exactly as drawn into
+        // an output the frame's size, and every margin pixel repeats the
+        // frame's nearest edge pixel, none black: written together
+        // (Execute), one at a time (Synthesize), and as an exact copy.
+        if (gpu->SupportsEdgeFill() && harness.readback_sized) {
+            const FrameGenTuning saved = tuning;
+            const FrameGenEdgeMargins margins{32, 64, 32, 32};
+            const std::uint32_t width = kSize + margins.left + margins.right;
+            const std::uint32_t height = kSize + margins.up + margins.down;
+            const XrSwapchain fill_first = reinterpret_cast<XrSwapchain>(0x5c);
+            const XrSwapchain fill_second = reinterpret_cast<XrSwapchain>(0x5d);
+            g_swapchains[fill_first] = {harness.create(width, height)};
+            g_swapchains[fill_second] = {harness.create(width, height)};
+            Check(gpu->Track(fill_first, EnumerateImages, error) && gpu->Track(fill_second, EnumerateImages, error), error);
+            auto filled = [&](XrSwapchain chain) {
+                FrameGenImage image{chain, 0, 0, {{0, 0}, {static_cast<int>(width), static_cast<int>(height)}}, output_format};
+                image.content = {static_cast<int>(margins.left), static_cast<int>(margins.up)};
+                return image;
+            };
+            auto check_fill = [&](XrSwapchain chain, const Pixels& plain, const std::string& what) {
+                const Pixels wide = harness.readback_sized(g_swapchains[chain][0]);
+                Check(wide.size() == std::size_t{width} * height, harness.name + " edge fill: " + what + " read back");
+                // A margin pixel is its nearest edge pixel. Where the
+                // periphery is shaded per 2x2 (a GPU's variable-rate shading
+                // past tangent 1: the corners here), the margin's coarse
+                // pixel is the edge pixel's own centre while the frame's
+                // coarse pixel shows a point between pixels: within a few
+                // levels of the edge pixels around it.
+                std::size_t inside_off = 0, margin_exact = 0, margin_off = 0, black = 0, margin = 0;
+                for (std::uint32_t y = 0; y < height; ++y) {
+                    for (std::uint32_t x = 0; x < width; ++x) {
+                        const int fx = std::clamp(static_cast<int>(x) - static_cast<int>(margins.left), 0, int(kSize) - 1);
+                        const int fy = std::clamp(static_cast<int>(y) - static_cast<int>(margins.up), 0, int(kSize) - 1);
+                        const bool inside = x >= margins.left && x < margins.left + kSize && y >= margins.up &&
+                                            y < margins.up + kSize;
+                        const std::uint32_t got = wide[std::size_t{y} * width + x] & 0xffffffu;
+                        const std::uint32_t want = plain[std::size_t(fy) * kSize + fx] & 0xffffffu;
+                        if (inside) {
+                            inside_off += got != want ? 1 : 0;
+                            continue;
+                        }
+                        ++margin;
+                        black += got == 0 ? 1 : 0;
+                        if (got == want) {
+                            ++margin_exact;
+                            continue;
+                        }
+                        const double tx = -kTan + 2.0 * kTan * (fx + 0.5) / kSize;
+                        const double ty = kTan - 2.0 * kTan * (fy + 0.5) / kSize;
+                        const int slack = std::hypot(tx, ty) >= 0.9 ? 8 : -1000; // exact off the corners
+                        bool within = slack > 0;
+                        for (int c = 0; c < 3 && within; ++c) {
+                            int lo = 255, hi = 0;
+                            for (int dy = -1; dy <= 1; ++dy) {
+                                for (int dx = -1; dx <= 1; ++dx) {
+                                    const int ex = std::clamp(fx + dx, 0, int(kSize) - 1);
+                                    const int ey = std::clamp(fy + dy, 0, int(kSize) - 1);
+                                    const int value = static_cast<int>((plain[std::size_t(ey) * kSize + ex] >> (8 * c)) & 255u);
+                                    lo = std::min(lo, value);
+                                    hi = std::max(hi, value);
+                                }
+                            }
+                            const int value = static_cast<int>((got >> (8 * c)) & 255u);
+                            within = within && value >= lo - slack && value <= hi + slack;
+                        }
+                        if (!within && margin_off < 6) {
+                            std::printf("  margin pixel (%u, %u): %06x, edge pixel (%d, %d) %06x\n", x, y, got, fx, fy, want);
+                        }
+                        margin_off += within ? 0 : 1;
+                    }
+                }
+                std::cout << harness.name << " edge fill " << what << ": " << inside_off << " frame pixels differ; "
+                          << margin_exact << " of " << margin << " margin pixels repeat their edge pixel exactly, "
+                          << margin_off << " are not a blend of the edge beside them, " << black << " black\n";
+                Check(inside_off == 0, harness.name + " edge fill: " + what + " changes the frame's own pixels");
+                Check(margin_off == 0 && black == 0 && margin_exact * 2 > margin,
+                      harness.name + " edge fill: " + what + "'s margin does not repeat the frame's nearest edge");
+            };
+            tuning.generated = 2;
+            tuning.fractions = {1.0f / 3.0f, 2.0f / 3.0f, 0.0f, 0.0f};
+            gpu->ResetHistory();
+            run(0, true, 0, 0);
+            const Pixels plain_third = run(1, true, 0, 0);
+            const Pixels plain_two_thirds = harness.readback(g_swapchains[kOutputSecond][0]);
+            auto run_filled = [&](std::uint32_t index) {
+                std::vector<FrameGenViewSubmission> views{Submission(index, harness.format, output_format, true, 0, 0)};
+                views[0].outputs = {filled(fill_first), filled(fill_second)};
+                Check(gpu->Execute(views, tuning, result, error), harness.name + " edge fill execute: " + error);
+            };
+            gpu->ResetHistory();
+            run_filled(0);
+            const std::uint64_t fill_draws = gpu->DrawsForTest();
+            run_filled(1);
+            Check(gpu->DrawsForTest() == fill_draws + 1, harness.name + " edge fill: both frames in one draw");
+            check_fill(fill_first, plain_third, "Execute's first frame");
+            check_fill(fill_second, plain_two_thirds, "Execute's second frame");
+            if (gpu->SupportsJustInTime()) {
+                FrameGenTuning analyze = tuning;
+                analyze.analyze_only = true;
+                gpu->ResetHistory();
+                std::uint64_t frame = 0;
+                for (std::uint32_t index = 0; index < 2; ++index) {
+                    const std::vector<FrameGenViewSubmission> views{
+                        Submission(index, harness.format, output_format, true, 0, 0)};
+                    Check(gpu->Execute(views, analyze, result, error), harness.name + " edge fill analyze: " + error);
+                    frame = result.frame;
+                }
+                const FrameGenImage plain_output = Submission(1, harness.format, output_format, true, 0, 0).outputs[0];
+                for (const float fraction : {0.5f, 1.0f}) {
+                    Check(gpu->Synthesize(frame, FrameGenSynthesisMode::kInterpolate, fraction, {plain_output}, error),
+                          harness.name + " edge fill synthesize: " + error);
+                    const Pixels plain = harness.readback(g_swapchains[kOutput][0]);
+                    Check(gpu->Synthesize(frame, FrameGenSynthesisMode::kInterpolate, fraction, {filled(fill_first)}, error),
+                          harness.name + " edge fill synthesize: " + error);
+                    check_fill(fill_first, plain, fraction < 1.0f ? "Synthesize" : "Synthesize's exact copy");
+                }
+            }
+            tuning = saved;
+        }
+
         // 2e. Just-in-time synthesis (Direct3D 12): the motion measured once
         // per real frame and each generated frame written on its own, later,
         // is what writing them together gives; from the same measurement a
