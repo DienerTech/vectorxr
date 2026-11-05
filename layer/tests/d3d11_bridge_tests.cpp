@@ -2019,6 +2019,480 @@ void MeasureDepthCost(Game& game) {
     }
 }
 
+// BRIDGE_TEST_MT_PERF=1 (or `only`: nothing else runs): what the device's
+// multithread protection, which mirroring a game's depth (and a second
+// thread's swapchain calls) turns on, costs the game's own Direct3D 11
+// calls. A device of its own, made as a game makes it (no debug layer, which
+// would dwarf the lock), submits game-like frames on its immediate context
+// with protection off, on, and on with a second thread taking the device's
+// lock as the bridge's releases do. The modes alternate in rounds (the order
+// turning each round) after a warm-up, so drift falls on all of them alike.
+// CPU submit time per frame (from the first call to the frame's Flush), two
+// frames in flight, the GPU's waits outside the timing.
+void MeasureMultithreadCost(bool hardware) {
+    ComPtr<IDXGIAdapter1> adapter;
+    if (hardware) {
+        ComPtr<IDXGIFactory1> factory;
+        Check(SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))), "multithread cost: a DXGI factory");
+        if (const std::optional<std::string> wanted = test_adapter::Wanted()) {
+            std::string why;
+            adapter = test_adapter::FindDxgiAdapter(factory.Get(), *wanted, why);
+            Check(adapter != nullptr, "multithread cost: " + why);
+        } else {
+            Check(SUCCEEDED(factory->EnumAdapters1(0, &adapter)), "multithread cost: an adapter");
+        }
+    }
+    const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
+    ComPtr<ID3D11Device> device;
+    ComPtr<ID3D11DeviceContext> context;
+    Check(SUCCEEDED(D3D11CreateDevice(adapter.Get(), hardware ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_WARP,
+                                      nullptr, 0, levels, 2, D3D11_SDK_VERSION, &device, nullptr, &context)),
+          "multithread cost: a Direct3D 11 device");
+    ComPtr<ID3D11DeviceContext4> context4;
+    ComPtr<ID3D11Device5> device5;
+    ComPtr<ID3D11Multithread> multithread;
+    Check(SUCCEEDED(context.As(&context4)) && SUCCEEDED(device.As(&device5)) && SUCCEEDED(context.As(&multithread)),
+          "multithread cost: ID3D11DeviceContext4, ID3D11Device5, ID3D11Multithread");
+    {
+        ComPtr<IDXGIDevice> dxgi;
+        ComPtr<IDXGIAdapter> used;
+        DXGI_ADAPTER_DESC desc{};
+        if (SUCCEEDED(device.As(&dxgi)) && SUCCEEDED(dxgi->GetAdapter(&used)) && SUCCEEDED(used->GetDesc(&desc))) {
+            std::string name;
+            for (const wchar_t* c = desc.Description; *c; ++c) name += *c < 128 ? static_cast<char>(*c) : '?';
+            std::cout << "multithread cost on " << name << std::endl;
+        }
+    }
+
+    const char* source = R"(
+cbuffer Draw : register(b0) { float4 offset; float4 tint; };
+Texture2D<float4> image : register(t0);
+SamplerState linear_sampler : register(s0);
+struct Out { float4 position : SV_Position; float2 uv : TEXCOORD0; };
+Out VSMain(float3 position : POSITION) {
+    Out o;
+    o.position = float4(position.xy * 0.05 + offset.xy + VARIANT * 0.001, 0.5, 1.0);
+    o.uv = position.xy * 0.5 + 0.5;
+    return o;
+}
+float4 PSMain(Out i) : SV_Target { return image.Sample(linear_sampler, i.uv) * tint + VARIANT * 0.01; }
+Out FullVS(uint id : SV_VertexID) {
+    Out o;
+    o.uv = float2((id << 1) & 2, id & 2);
+    o.position = float4(o.uv * float2(2, -2) + float2(-1, 1), 0.5, 1.0);
+    return o;
+}
+float4 HeavyPS(Out i) : SV_Target {
+    float4 sum = 0;
+    [loop] for (int k = 0; k < 48; ++k) sum += image.SampleLevel(linear_sampler, i.uv + k * 0.001, 0) * sin(k + i.uv.x);
+    return sum * tint;
+}
+RWTexture2D<float> twin : register(u0);
+[numthreads(8, 8, 1)] void CopyCS(uint3 id : SV_DispatchThreadID) { twin[id.xy] = image[id.xy].r; }
+)";
+    const auto compile = [&](const char* entry, const char* target, int variant) {
+        const std::string value = std::to_string(variant);
+        const D3D_SHADER_MACRO macros[] = {{"VARIANT", value.c_str()}, {nullptr, nullptr}};
+        ComPtr<ID3DBlob> code, errors;
+        Check(SUCCEEDED(D3DCompile(source, std::strlen(source), "mt_cost", macros, nullptr, entry, target, 0, 0, &code,
+                                   &errors)),
+              std::string("multithread cost: ") + entry + " compiles: " +
+                  (errors ? static_cast<const char*>(errors->GetBufferPointer()) : ""));
+        return code;
+    };
+    constexpr int kVariants = 4;
+    ComPtr<ID3D11VertexShader> vs[kVariants];
+    ComPtr<ID3D11PixelShader> ps[kVariants];
+    ComPtr<ID3D11InputLayout> layout;
+    for (int v = 0; v < kVariants; ++v) {
+        const ComPtr<ID3DBlob> vs_code = compile("VSMain", "vs_5_0", v);
+        const ComPtr<ID3DBlob> ps_code = compile("PSMain", "ps_5_0", v);
+        Check(SUCCEEDED(device->CreateVertexShader(vs_code->GetBufferPointer(), vs_code->GetBufferSize(), nullptr, &vs[v])) &&
+                  SUCCEEDED(device->CreatePixelShader(ps_code->GetBufferPointer(), ps_code->GetBufferSize(), nullptr,
+                                                      &ps[v])),
+              "multithread cost: shaders");
+        if (v == 0) {
+            const D3D11_INPUT_ELEMENT_DESC element{"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,
+                                                   D3D11_INPUT_PER_VERTEX_DATA, 0};
+            Check(SUCCEEDED(device->CreateInputLayout(&element, 1, vs_code->GetBufferPointer(), vs_code->GetBufferSize(),
+                                                      &layout)),
+                  "multithread cost: input layout");
+        }
+    }
+    ComPtr<ID3D11VertexShader> full_vs;
+    ComPtr<ID3D11PixelShader> heavy_ps;
+    ComPtr<ID3D11ComputeShader> copy_cs;
+    {
+        const ComPtr<ID3DBlob> a = compile("FullVS", "vs_5_0", 0);
+        const ComPtr<ID3DBlob> b = compile("HeavyPS", "ps_5_0", 0);
+        const ComPtr<ID3DBlob> c = compile("CopyCS", "cs_5_0", 0);
+        Check(SUCCEEDED(device->CreateVertexShader(a->GetBufferPointer(), a->GetBufferSize(), nullptr, &full_vs)) &&
+                  SUCCEEDED(device->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &heavy_ps)) &&
+                  SUCCEEDED(device->CreateComputeShader(c->GetBufferPointer(), c->GetBufferSize(), nullptr, &copy_cs)),
+              "multithread cost: heavy and copy shaders");
+    }
+
+    // A cube's corners and triangles.
+    const float corners[8][3] = {{-1, -1, -1}, {1, -1, -1}, {1, 1, -1}, {-1, 1, -1},
+                                 {-1, -1, 1},  {1, -1, 1},  {1, 1, 1},  {-1, 1, 1}};
+    const std::uint16_t indices[36] = {0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6, 0, 4, 5, 0, 5, 1,
+                                       3, 2, 6, 3, 6, 7, 1, 5, 6, 1, 6, 2, 0, 3, 7, 0, 7, 4};
+    ComPtr<ID3D11Buffer> vertex_buffer, index_buffer;
+    {
+        D3D11_BUFFER_DESC desc{sizeof(corners), D3D11_USAGE_IMMUTABLE, D3D11_BIND_VERTEX_BUFFER};
+        D3D11_SUBRESOURCE_DATA data{corners};
+        Check(SUCCEEDED(device->CreateBuffer(&desc, &data, &vertex_buffer)), "multithread cost: vertices");
+        desc = {sizeof(indices), D3D11_USAGE_IMMUTABLE, D3D11_BIND_INDEX_BUFFER};
+        data = {indices};
+        Check(SUCCEEDED(device->CreateBuffer(&desc, &data, &index_buffer)), "multithread cost: indices");
+    }
+    constexpr int kConstantBuffers = 8;
+    ComPtr<ID3D11Buffer> constants[kConstantBuffers];
+    for (auto& buffer : constants) {
+        D3D11_BUFFER_DESC desc{256, D3D11_USAGE_DYNAMIC, D3D11_BIND_CONSTANT_BUFFER, D3D11_CPU_ACCESS_WRITE};
+        Check(SUCCEEDED(device->CreateBuffer(&desc, nullptr, &buffer)), "multithread cost: constant buffers");
+    }
+    constexpr int kTextures = 64;
+    ComPtr<ID3D11ShaderResourceView> textures[kTextures];
+    {
+        std::vector<std::uint32_t> pixels(64 * 64);
+        for (int t = 0; t < kTextures; ++t) {
+            for (std::size_t p = 0; p < pixels.size(); ++p) pixels[p] = 0xff000000u | static_cast<std::uint32_t>(t * 2654435761u + p);
+            D3D11_TEXTURE2D_DESC desc{64, 64, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, {1, 0}, D3D11_USAGE_IMMUTABLE,
+                                      D3D11_BIND_SHADER_RESOURCE};
+            D3D11_SUBRESOURCE_DATA data{pixels.data(), 64 * 4};
+            ComPtr<ID3D11Texture2D> texture;
+            Check(SUCCEEDED(device->CreateTexture2D(&desc, &data, &texture)) &&
+                      SUCCEEDED(device->CreateShaderResourceView(texture.Get(), nullptr, &textures[t])),
+                  "multithread cost: textures");
+        }
+    }
+    const auto target = [&](UINT width, UINT height, ComPtr<ID3D11RenderTargetView>& view) {
+        D3D11_TEXTURE2D_DESC desc{width, height, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, {1, 0}, D3D11_USAGE_DEFAULT,
+                                  D3D11_BIND_RENDER_TARGET};
+        ComPtr<ID3D11Texture2D> texture;
+        Check(SUCCEEDED(device->CreateTexture2D(&desc, nullptr, &texture)) &&
+                  SUCCEEDED(device->CreateRenderTargetView(texture.Get(), nullptr, &view)),
+              "multithread cost: a render target");
+    };
+    ComPtr<ID3D11RenderTargetView> small_target, large_target;
+    target(1024, 1024, small_target);
+    // Pimax scale: both eyes of a ~6000x6000 frame are the GPU's time, not the CPU's.
+    if (hardware) target(6000, 6000, large_target);
+    ComPtr<ID3D11SamplerState> sampler;
+    ComPtr<ID3D11BlendState> blends[2];
+    ComPtr<ID3D11RasterizerState> rasters[2];
+    {
+        D3D11_SAMPLER_DESC desc{D3D11_FILTER_MIN_MAG_MIP_LINEAR, D3D11_TEXTURE_ADDRESS_WRAP, D3D11_TEXTURE_ADDRESS_WRAP,
+                                D3D11_TEXTURE_ADDRESS_WRAP};
+        desc.MaxLOD = D3D11_FLOAT32_MAX;
+        Check(SUCCEEDED(device->CreateSamplerState(&desc, &sampler)), "multithread cost: sampler");
+        for (int b = 0; b < 2; ++b) {
+            D3D11_BLEND_DESC blend{};
+            blend.RenderTarget[0].BlendEnable = b;
+            blend.RenderTarget[0].SrcBlend = blend.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_SRC_ALPHA;
+            blend.RenderTarget[0].DestBlend = blend.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+            blend.RenderTarget[0].BlendOp = blend.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+            blend.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+            D3D11_RASTERIZER_DESC raster{};
+            raster.FillMode = D3D11_FILL_SOLID;
+            raster.CullMode = b ? D3D11_CULL_BACK : D3D11_CULL_NONE;
+            raster.DepthClipEnable = TRUE;
+            Check(SUCCEEDED(device->CreateBlendState(&blend, &blends[b])) &&
+                      SUCCEEDED(device->CreateRasterizerState(&raster, &rasters[b])),
+                  "multithread cost: blend and raster states");
+        }
+    }
+    // The second thread's stand-in for a release's depth copy: a small compute
+    // copy into a texture of its own.
+    ComPtr<ID3D11UnorderedAccessView> twin_write;
+    {
+        D3D11_TEXTURE2D_DESC desc{64, 64, 1, 1, DXGI_FORMAT_R32_FLOAT, {1, 0}, D3D11_USAGE_DEFAULT,
+                                  D3D11_BIND_UNORDERED_ACCESS};
+        ComPtr<ID3D11Texture2D> texture;
+        Check(SUCCEEDED(device->CreateTexture2D(&desc, nullptr, &texture)) &&
+                  SUCCEEDED(device->CreateUnorderedAccessView(texture.Get(), nullptr, &twin_write)),
+              "multithread cost: the second thread's texture");
+    }
+    ComPtr<ID3D11Fence> fence;
+    Check(SUCCEEDED(device5->CreateFence(0, D3D11_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence))), "multithread cost: a fence");
+    constexpr int kInFlight = 2;
+    ComPtr<ID3D11Query> frame_done[kInFlight + 1];
+    for (auto& query : frame_done) {
+        D3D11_QUERY_DESC desc{D3D11_QUERY_EVENT};
+        Check(SUCCEEDED(device->CreateQuery(&desc, &query)), "multithread cost: event queries");
+    }
+
+    // One frame's calls; returns how many Direct3D 11 calls it made.
+    enum class Shape { kDraws, kMaps, kHeavy };
+    const auto frame = [&](Shape shape, int count) -> std::uint64_t {
+        std::uint64_t calls = 0;
+        const D3D11_VIEWPORT small_view{0, 0, 1024, 1024, 0, 1};
+        if (shape == Shape::kHeavy) {
+            const D3D11_VIEWPORT view{0, 0, 6000, 6000, 0, 1};
+            context->OMSetRenderTargets(1, large_target.GetAddressOf(), nullptr);
+            context->RSSetViewports(1, &view);
+            context->RSSetState(rasters[0].Get());
+            context->OMSetBlendState(blends[0].Get(), nullptr, 0xffffffff);
+            context->IASetInputLayout(nullptr);
+            context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            context->VSSetShader(full_vs.Get(), nullptr, 0);
+            context->PSSetShader(heavy_ps.Get(), nullptr, 0);
+            context->PSSetSamplers(0, 1, sampler.GetAddressOf());
+            calls += 9;
+            for (int draw = 0; draw < count; ++draw) {
+                D3D11_MAPPED_SUBRESOURCE mapped{};
+                context->Map(constants[draw % kConstantBuffers].Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+                static_cast<float*>(mapped.pData)[4] = 1.0f / (draw + 1);
+                context->Unmap(constants[draw % kConstantBuffers].Get(), 0);
+                context->PSSetConstantBuffers(0, 1, constants[draw % kConstantBuffers].GetAddressOf());
+                context->PSSetShaderResources(0, 1, textures[draw % kTextures].GetAddressOf());
+                context->Draw(3, 0);
+                calls += 5;
+            }
+        } else if (shape == Shape::kDraws) {
+            const float clear[4] = {0, 0, 0, 1};
+            context->OMSetRenderTargets(1, small_target.GetAddressOf(), nullptr);
+            context->ClearRenderTargetView(small_target.Get(), clear);
+            context->RSSetViewports(1, &small_view);
+            context->IASetInputLayout(layout.Get());
+            context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            context->IASetIndexBuffer(index_buffer.Get(), DXGI_FORMAT_R16_UINT, 0);
+            context->PSSetSamplers(0, 1, sampler.GetAddressOf());
+            calls += 7;
+            const UINT stride = 12, offset = 0;
+            for (int draw = 0; draw < count; ++draw) {
+                // Per material: shaders and fixed-function state (every 8th draw).
+                if (draw % 8 == 0) {
+                    const int material = (draw / 8) % kVariants;
+                    context->VSSetShader(vs[material].Get(), nullptr, 0);
+                    context->PSSetShader(ps[material].Get(), nullptr, 0);
+                    context->OMSetBlendState(blends[material & 1].Get(), nullptr, 0xffffffff);
+                    context->RSSetState(rasters[(material >> 1) & 1].Get());
+                    calls += 4;
+                }
+                // Per object: its constants (a dynamic buffer, discarded), its
+                // texture and mesh, the draw.
+                ID3D11Buffer* buffer = constants[draw % kConstantBuffers].Get();
+                D3D11_MAPPED_SUBRESOURCE mapped{};
+                context->Map(buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+                float* values = static_cast<float*>(mapped.pData);
+                values[0] = static_cast<float>((draw * 37) % 200) / 100.0f - 1.0f;
+                values[1] = static_cast<float>((draw * 91) % 200) / 100.0f - 1.0f;
+                values[4] = values[5] = values[6] = values[7] = 0.5f;
+                context->Unmap(buffer, 0);
+                context->VSSetConstantBuffers(0, 1, &buffer);
+                context->PSSetConstantBuffers(0, 1, &buffer);
+                context->PSSetShaderResources(0, 1, textures[draw % kTextures].GetAddressOf());
+                context->IASetVertexBuffers(0, 1, vertex_buffer.GetAddressOf(), &stride, &offset);
+                context->DrawIndexed(36, 0, 0);
+                calls += 7;
+            }
+        } else {
+            for (int map = 0; map < count; ++map) {
+                ID3D11Buffer* buffer = constants[map % kConstantBuffers].Get();
+                D3D11_MAPPED_SUBRESOURCE mapped{};
+                context->Map(buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+                std::memset(mapped.pData, map & 0xff, 64);
+                context->Unmap(buffer, 0);
+                calls += 2;
+            }
+        }
+        context->Flush();
+        return calls + 1;
+    };
+
+    enum class Mode { kOff, kOn, kOnSecondThread, kOnBusySecondThread, kCount };
+    const char* mode_names[] = {"off", "on", "on + 2nd thread 270/s", "on + 2nd thread 1000/s"};
+    // The second thread: a release's work under the device's lock, as the
+    // bridge does it (its state saved, a small compute copy, its state back,
+    // a fence signal, a flush), at three releases a 90 Hz frame (two eyes and
+    // depth), or at 1000 a second for an upper bound.
+    std::atomic<int> second_period_us{0};
+    std::atomic<bool> stop{false};
+    std::atomic<std::uint64_t> second_bursts{0};
+    std::atomic<double> second_hold_us{0.0};
+    std::thread second([&] {
+        std::uint64_t value = 0;
+        auto next = std::chrono::steady_clock::now();
+        while (!stop.load()) {
+            const int period = second_period_us.load();
+            if (period == 0) {
+                Sleep(1);
+                next = std::chrono::steady_clock::now();
+                continue;
+            }
+            next += std::chrono::microseconds(period);
+            while (std::chrono::steady_clock::now() < next) {
+                const auto left = next - std::chrono::steady_clock::now();
+                if (left > std::chrono::microseconds(1500)) Sleep(1);
+                else std::this_thread::yield();
+            }
+            if (second_period_us.load() == 0) continue; // the mode ended while it waited
+            const auto start = std::chrono::steady_clock::now();
+            multithread->Enter();
+            ID3D11ComputeShader* shader = nullptr;
+            ID3D11ClassInstance* instances[256];
+            UINT instance_count = 256;
+            context->CSGetShader(&shader, instances, &instance_count);
+            ID3D11ShaderResourceView* read = nullptr;
+            ID3D11UnorderedAccessView* write = nullptr;
+            context->CSGetShaderResources(0, 1, &read);
+            context->CSGetUnorderedAccessViews(0, 1, &write);
+            context->CSSetShader(copy_cs.Get(), nullptr, 0);
+            context->CSSetShaderResources(0, 1, textures[0].GetAddressOf());
+            context->CSSetUnorderedAccessViews(0, 1, twin_write.GetAddressOf(), nullptr);
+            context->Dispatch(8, 8, 1);
+            ID3D11UnorderedAccessView* no_write = nullptr;
+            ID3D11ShaderResourceView* no_read = nullptr;
+            context->CSSetUnorderedAccessViews(0, 1, &no_write, nullptr);
+            context->CSSetShaderResources(0, 1, &no_read);
+            context->CSSetUnorderedAccessViews(0, 1, &write, nullptr);
+            context->CSSetShaderResources(0, 1, &read);
+            context->CSSetShader(shader, instance_count ? instances : nullptr, instance_count);
+            context4->Signal(fence.Get(), ++value);
+            context->Flush();
+            multithread->Leave();
+            if (shader) shader->Release();
+            for (UINT i = 0; i < instance_count; ++i) if (instances[i]) instances[i]->Release();
+            if (read) read->Release();
+            if (write) write->Release();
+            second_hold_us = second_hold_us.load() +
+                             std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count();
+            ++second_bursts;
+        }
+    });
+
+    struct Case {
+        const char* name;
+        Shape shape;
+        int count;
+        int frames;
+    };
+    const std::vector<Case> cases =
+        hardware ? std::vector<Case>{{"5k draws (UE4-like)", Shape::kDraws, 5000, 100},
+                                     {"10k draws", Shape::kDraws, 10000, 80},
+                                     {"20k draws (iRacing-like)", Shape::kDraws, 20000, 60},
+                                     {"20k Map/Unmap of dynamic constants", Shape::kMaps, 20000, 100},
+                                     {"8 heavy draws at 6000x6000", Shape::kHeavy, 8, 40}}
+                 : std::vector<Case>{{"5k draws (UE4-like)", Shape::kDraws, 5000, 30},
+                                     {"20k Map/Unmap of dynamic constants", Shape::kMaps, 20000, 30}};
+    const char* rounds_text = std::getenv("BRIDGE_TEST_MT_PERF_ROUNDS");
+    const int rounds = rounds_text ? std::max(1, std::atoi(rounds_text)) : (hardware ? 8 : 3);
+    const int modes = static_cast<int>(Mode::kCount);
+    LARGE_INTEGER frequency{};
+    QueryPerformanceFrequency(&frequency);
+    const auto percentile = [](std::vector<double> values, double p) {
+        std::sort(values.begin(), values.end());
+        if (values.empty()) return -1.0;
+        return values[std::min(values.size() - 1, static_cast<std::size_t>(p * values.size()))];
+    };
+    const auto wait_query = [&](ID3D11Query* query) {
+        while (context->GetData(query, nullptr, 0, 0) == S_FALSE) std::this_thread::yield();
+    };
+    // A frame that does not come back in 20 s ends the run (it would hold the
+    // GPU lock).
+    std::atomic<std::int64_t> last_frame{static_cast<std::int64_t>(GetTickCount64())};
+    std::atomic<const char*> where{"setup"};
+    std::thread watchdog([&] {
+        while (!stop.load()) {
+            Sleep(250);
+            if (static_cast<std::int64_t>(GetTickCount64()) - last_frame.load() > 20000) {
+                std::cout << "FAILED: multithread cost: no frame for 20 s (" << where.load() << ")" << std::endl;
+                TerminateProcess(GetCurrentProcess(), 1);
+            }
+        }
+    });
+    std::cout << std::fixed;
+    std::cout.precision(3);
+    for (const Case& test : cases) {
+        where = test.name;
+        std::cout << "mt cost case: " << test.name << std::endl;
+        std::vector<double> submit_ms[4], frame_ms[4], round_medians[4];
+        std::uint64_t calls = 0;
+        double hold_us[4]{};
+        std::uint64_t bursts[4]{};
+        for (int round = 0; round < rounds; ++round) {
+            for (int step = 0; step < modes; ++step) {
+                const int mode = (step + round) % modes; // each mode first in turn
+                multithread->SetMultithreadProtected(mode == static_cast<int>(Mode::kOff) ? FALSE : TRUE);
+                second_period_us = mode == static_cast<int>(Mode::kOnSecondThread)      ? 3704
+                                   : mode == static_cast<int>(Mode::kOnBusySecondThread) ? 1000
+                                                                                         : 0;
+                where = mode_names[mode];
+                const std::uint64_t bursts_before = second_bursts.load();
+                const double hold_before = second_hold_us.load();
+                std::vector<double> round_ms;
+                const int warm = std::max(10, test.frames / 4);
+                for (int index = 0; index < warm + test.frames; ++index) {
+                    ID3D11Query* done = frame_done[index % (kInFlight + 1)].Get();
+                    if (index > kInFlight) wait_query(done); // that slot's frame, kInFlight + 1 frames back
+                    LARGE_INTEGER begin{}, end{};
+                    QueryPerformanceCounter(&begin);
+                    calls = frame(test.shape, test.count);
+                    QueryPerformanceCounter(&end);
+                    context->End(done);
+                    const double ms = 1000.0 * static_cast<double>(end.QuadPart - begin.QuadPart) /
+                                      static_cast<double>(frequency.QuadPart);
+                    if (test.shape == Shape::kHeavy) {
+                        wait_query(done); // the frame to the GPU's last pixel
+                        LARGE_INTEGER finished{};
+                        QueryPerformanceCounter(&finished);
+                        if (index >= warm) {
+                            frame_ms[mode].push_back(1000.0 * static_cast<double>(finished.QuadPart - begin.QuadPart) /
+                                                     static_cast<double>(frequency.QuadPart));
+                        }
+                    }
+                    last_frame = static_cast<std::int64_t>(GetTickCount64());
+                    if (index >= warm) {
+                        submit_ms[mode].push_back(ms);
+                        round_ms.push_back(ms);
+                    }
+                }
+                for (auto& query : frame_done) wait_query(query.Get());
+                round_medians[mode].push_back(percentile(round_ms, 0.5));
+                second_period_us = 0;
+                bursts[mode] += second_bursts.load() - bursts_before;
+                hold_us[mode] += second_hold_us.load() - hold_before;
+            }
+        }
+        const double off_median = percentile(submit_ms[0], 0.5);
+        std::cout << "mt cost " << (hardware ? "hw" : "WARP") << " | " << test.name << " | " << calls
+                  << " calls a frame | " << rounds << " rounds x " << test.frames << " frames a mode\n";
+        for (int mode = 0; mode < modes; ++mode) {
+            const double median = percentile(submit_ms[mode], 0.5);
+            // Paired by round: each round's median against the same round's off.
+            std::vector<double> deltas;
+            for (int round = 0; round < rounds; ++round) {
+                deltas.push_back(round_medians[mode][round] - round_medians[0][round]);
+            }
+            const double delta = percentile(deltas, 0.5);
+            std::cout << "  " << mode_names[mode] << ": submit median " << median << " ms, p95 "
+                      << percentile(submit_ms[mode], 0.95) << ", p99 " << percentile(submit_ms[mode], 0.99) << ", "
+                      << static_cast<double>(calls) / median / 1000.0 << " M calls/s";
+            if (mode != 0) {
+                std::cout << " | vs off: " << (median - off_median) << " ms pooled, " << delta
+                          << " ms paired (rounds " << percentile(deltas, 0.0) << " .. " << percentile(deltas, 1.0)
+                          << "), " << 1e6 * delta / static_cast<double>(calls) << " ns a call";
+            }
+            if (bursts[mode]) {
+                std::cout << " | 2nd thread " << bursts[mode] << " holds, " << hold_us[mode] / bursts[mode]
+                          << " us each";
+            }
+            if (!frame_ms[mode].empty()) {
+                std::cout << " | to GPU done median " << percentile(frame_ms[mode], 0.5) << " ms";
+            }
+            std::cout << std::endl;
+        }
+    }
+    stop = true;
+    second.join();
+    watchdog.join();
+    multithread->SetMultithreadProtected(FALSE);
+    std::cout.unsetf(std::ios::fixed);
+    std::cout.precision(6);
+}
+
 // A runtime image that does not match is refused, with the reason.
 void TestMismatch(Game& game) {
     D3D11Bridge bridge;
@@ -2341,6 +2815,11 @@ int main(int argc, char** argv) {
     ComPtr<ID3D12Debug> debug;
     if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)))) {
         debug->EnableDebugLayer();
+    }
+    if (const char* perf = std::getenv("BRIDGE_TEST_MT_PERF");
+        perf && (std::string(perf) == "1" || std::string(perf) == "only")) {
+        MeasureMultithreadCost(hardware);
+        if (std::string(perf) == "only") return 0;
     }
     Game game;
     if (!MakeGame(hardware, game)) {
