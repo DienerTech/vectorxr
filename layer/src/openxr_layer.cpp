@@ -1624,6 +1624,15 @@ constexpr uint32_t kEyeGazeUnfocusedFrozenFrames = 45;
 // ready). Far past any fixation: live gaze never repeats bit for bit. ~2 s
 // at 90 Hz.
 constexpr uint32_t kEyeGazeFocusedFrozenFrames = 180;
+// Diagnostic only: a focused, valid gaze that stays this close to one point
+// (either angle) for this long. The Oct 29 M3 flight (headset taken off) showed
+// ~26 s of such a gaze, wobbling by about 0.002 rad, before it froze bit for
+// bit, and even then it moved by under 0.001 rad now and then, which resets the
+// bit-for-bit count. Whether live gaze ever stays this still is what the line
+// is for: it changes nothing.
+constexpr double kEyeGazeStillRadians = 0.003;
+constexpr XrDuration kEyeGazeStillWindow = 10'000'000'000;
+constexpr int kEyeGazeStillLogBudget = 8;
 // How long a focused session's bound eye-gaze input may stay inactive before
 // the log says the eye tracker is sending no data.
 constexpr std::chrono::seconds kEyeGazeNoDataLogDelay{10};
@@ -13132,6 +13141,9 @@ void OpenXrLayer::ResetEyeGazeInputState() {
     eye_gaze_focused_last_time_ = 0;
     eye_gaze_focused_identical_frames_ = 0;
     eye_gaze_focused_frozen_logged_ = false;
+    eye_gaze_still_since_.reset();
+    eye_gaze_still_logged_ = false;
+    eye_gaze_still_logs_remaining_ = kEyeGazeStillLogBudget;
     eye_gaze_inactive_since_.reset();
     eye_gaze_no_data_logged_ = false;
 }
@@ -13648,6 +13660,33 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
     const double euler_pitch = ExtractPitchRadians(diagnostic_orientation);
     double target_yaw = gaze_ray_angles.yaw_radians;
     double target_pitch = gaze_ray_angles.pitch_radians;
+    if (!unfocused_visible) {
+        // See kEyeGazeStillRadians: logged, never acted on.
+        const bool moved = !eye_gaze_still_since_ ||
+                           std::abs(target_yaw - eye_gaze_still_yaw_) > kEyeGazeStillRadians ||
+                           std::abs(target_pitch - eye_gaze_still_pitch_) > kEyeGazeStillRadians ||
+                           time < *eye_gaze_still_since_;
+        if (moved) {
+            eye_gaze_still_since_ = time;
+            eye_gaze_still_yaw_ = target_yaw;
+            eye_gaze_still_pitch_ = target_pitch;
+            eye_gaze_still_logged_ = false;
+        } else if (!eye_gaze_still_logged_ && time - *eye_gaze_still_since_ >= kEyeGazeStillWindow) {
+            eye_gaze_still_logged_ = true;
+            if (eye_gaze_still_logs_remaining_ > 0) {
+                --eye_gaze_still_logs_remaining_;
+                logger_.Info("Quadviews eye tracking: the gaze has stayed within " +
+                             FormatDiagnosticDouble(kEyeGazeStillRadians) + " rad of yaw=" +
+                             FormatDiagnosticDouble(eye_gaze_still_yaw_) + ", pitch=" +
+                             FormatDiagnosticDouble(eye_gaze_still_pitch_) + " for " +
+                             std::to_string((time - *eye_gaze_still_since_) / 1'000'000'000) +
+                             " s while the runtime calls it valid (tracker stalled or headset off?). Diagnostic "
+                             "only: focus still follows it." +
+                             (eye_gaze_still_logs_remaining_ == 0 ? " Further such lines suppressed this session."
+                                                                  : ""));
+            }
+        }
+    }
     quadviews_raw_focus_yaw_radians_ = target_yaw;
     quadviews_raw_focus_pitch_radians_ = target_pitch;
     quadviews_raw_focus_valid_ = true;

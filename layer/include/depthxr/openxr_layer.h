@@ -2139,6 +2139,13 @@ class OpenXrLayer {
     XrTime eye_gaze_focused_last_time_{0};
     uint32_t eye_gaze_focused_identical_frames_{0};
     bool eye_gaze_focused_frozen_logged_{false};
+    // Diagnostic: the display time since which the focused gaze has stayed
+    // near (yaw, pitch); logged once per episode, a few times per session.
+    std::optional<XrTime> eye_gaze_still_since_;
+    double eye_gaze_still_yaw_{0.0};
+    double eye_gaze_still_pitch_{0.0};
+    bool eye_gaze_still_logged_{false};
+    int eye_gaze_still_logs_remaining_{8};
     uint32_t eye_gaze_unfocused_logs_remaining_{16};
     // Focused and inactive since (reset by valid gaze or focus loss); the
     // "no data" line is logged once per session.
