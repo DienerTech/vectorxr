@@ -61,6 +61,14 @@ constexpr std::uint32_t kProbeGrid = 32;
 constexpr std::uint32_t kProbePoints = kProbeGrid * kProbeGrid;
 constexpr std::chrono::milliseconds kProbeInterval{1000};
 constexpr std::chrono::milliseconds kProbeDescribeInterval{5000};
+// The depth timing check (LateDepth): about once a second
+// (VECTORXR_VULKAN_BRIDGE_DEPTH_CHECK_MS), a grid like the probe's, at a
+// hand-over and at the swapchain's next acquire. Depth found only at the
+// acquire this many checks in a row is taken from there; once taken, this
+// many checks in a row with depth nowhere give it up.
+constexpr std::chrono::milliseconds kLateCheckInterval{1000};
+constexpr int kLateAfterChecks = 2;
+constexpr int kLateQuietChecks = 3;
 
 std::string Hex(std::uint64_t value) {
     char buffer[32];
@@ -310,6 +318,9 @@ struct VulkanBridge::Impl {
     struct Copy {
         ComPtr<ID3D12CommandAllocator> allocator;
         ComPtr<ID3D12GraphicsCommandList> list;
+        // The same copy from the swapchain's late depth (LateDepth::resource)
+        // instead of the twin, recorded when first needed.
+        ComPtr<ID3D12GraphicsCommandList> late;
         UINT64 done{0};          // the done value after its last execution
         std::uint32_t query{0};  // its two timestamps' first index
         bool timed{false};       // executed, its timestamps not read yet
@@ -365,6 +376,63 @@ struct VulkanBridge::Impl {
         // too: a depth swapchain never handed over is never probed.
         std::chrono::steady_clock::time_point next_describe{};
     };
+    // When the game's depth is in a depth swapchain's image. OpenXR: by its
+    // release. The hand-over is at the frame's end, so depth written before
+    // xrEndFrame arrives too. Star Citizen (PTU and EPTU, October 2026) writes
+    // its depth after the release, CIG said, and every hand-over at the
+    // frame's end found its image all zero (1,126 probe records on Oct 24, 100
+    // on Oct 28): it is not there by then.
+    //
+    // The check, about once a second: a grid of the twin read on the game's
+    // queue at its hand-over (as the copy reads it), and of the same image at
+    // the swapchain's next acquire (what the game left there after the
+    // frame's end, before its next frame). Depth that varies only at the
+    // acquire, kLateAfterChecks checks in a row (DepthTiming::kAuto), is taken
+    // from there: at each acquire the image handed over last is copied into
+    // `resource` (it goes to Direct3D 12 and straight back on the game's
+    // queue), and each hand-over copies `resource` into the runtime's image
+    // instead of its twin. That is the frame before's depth with this frame's
+    // colour: Frame Generation checks it against the other eye as any depth.
+    // Depth that varies at the hand-over again (the game fixed) gives it up
+    // at once, and so do kLateQuietChecks checks in a row with depth nowhere.
+    struct LateDepth {
+        VkBuffer buffer{VK_NULL_HANDLE}; // the check's grids: [hand-over, acquire][slice][point]
+        VkDeviceMemory memory{VK_NULL_HANDLE};
+        const std::uint32_t* grid{nullptr}; // mapped
+        std::vector<VkCommandBuffer> reads; // by image: 2 * index (hand-over), 2 * index + 1 (acquire)
+        bool unavailable{false};            // the check could not be made (reported once)
+        enum class Step {
+            kIdle,
+            kHandedOver, // the hand-over's grid is queued; the acquire's comes next
+            kQueued,     // both are queued (`serial`)
+        };
+        Step step{Step::kIdle};
+        std::uint32_t image{0};
+        std::uint64_t serial{0};
+        std::chrono::steady_clock::time_point next{};
+        std::uint64_t checks{0};
+        int streak{0}; // checks in a row with depth only at the acquire
+        int quiet{0};  // taken: checks in a row with depth nowhere
+        bool engaged{false};
+        bool reported_end_frame{false}; // kEndFrame: told once that it would take it
+        std::optional<bool> last_at_end, last_after; // the last check's findings (logged as they change)
+        // Taken from the acquire (engaged):
+        ComPtr<ID3D12Resource> resource; // the twin's shape, the bridge's alone
+        std::vector<ComPtr<ID3D12CommandAllocator>> allocators;
+        std::vector<ComPtr<ID3D12GraphicsCommandList>> lists; // by image: its twin into `resource`
+        bool resource_failed{false};
+        std::optional<std::uint32_t> handed; // the image the last hand-over named
+        bool fresh{false};                   // `resource` holds a copy no hand-over took yet
+        std::uint64_t copies{0};             // into `resource`
+        std::uint64_t used{0};               // hand-overs that copied `resource`
+        std::uint64_t engagements{0};
+        std::uint64_t bytes{0};
+        // The checks' findings: depth varying at the hand-over; only at the
+        // acquire; at neither.
+        std::uint64_t at_end_checks{0};
+        std::uint64_t late_only_checks{0};
+        std::uint64_t neither_checks{0};
+    };
     // What a swapchain's images are, from the application's create info.
     struct Plan {
         Mode mode{Mode::kTwin};
@@ -416,6 +484,7 @@ struct VulkanBridge::Impl {
         std::uint64_t failed_submits{0};
         std::uint64_t end_frame_copies{0}; // EndFrameMotion's
         DepthProbe probe;
+        LateDepth late; // depth swapchains' (kTwinDepth)
     };
     struct Fence {
         VkFence fence{VK_NULL_HANDLE};
@@ -486,6 +555,22 @@ struct VulkanBridge::Impl {
     bool reported_second_thread{false};
     bool debug_layer{false};          // VECTORXR_VULKAN_BRIDGE_DEBUG=1
     bool depth_probe{false};          // VECTORXR_FRAMEGEN_DEPTH_BRIDGE_PROBE=1 (SetDepthProbe)
+    // VECTORXR_VULKAN_BRIDGE_DEPTH (read at Begin): when the game's depth is
+    // taken (LateDepth), or kept private.
+    enum class DepthTiming {
+        kAuto,     // at the hand-over, or at the next acquire when only that has it (default, "auto")
+        kEndFrame, // at the hand-over only ("end-frame"; the check still runs and reports)
+        kLate,     // at the next acquire from the start ("late")
+        kPrivate,  // depth stays private and out of submitted frames ("private")
+    };
+    DepthTiming depth_timing{DepthTiming::kAuto};
+    std::chrono::milliseconds late_check_interval{kLateCheckInterval}; // VECTORXR_VULKAN_BRIDGE_DEPTH_CHECK_MS
+    std::uint64_t late_copies{0};
+    // The CPU time of each hand-over (Released), all of it: its submissions,
+    // the copy queued and the hand-back.
+    std::vector<double> handover_us;
+    std::size_t next_handover_sample{0};
+    double handover_us_window_max{0.0};
     std::uint32_t debug_reported{0};  // debug-layer messages reported
     std::uint64_t next_skip_report{1}; // skipped copies are reported at 1, 10, 100...
     std::uint64_t next_failure_report{1};
@@ -785,6 +870,12 @@ struct VulkanBridge::Impl {
             image.private_memory = VK_NULL_HANDLE;
             image.first_acquire = image.acquire = image.release = image.probe = VK_NULL_HANDLE;
         }
+        if (chain.late.buffer) vk.vkDestroyBuffer(device, chain.late.buffer, nullptr);
+        if (chain.late.memory) vk.vkFreeMemory(device, chain.late.memory, nullptr); // unmaps it
+        chain.late.buffer = VK_NULL_HANDLE;
+        chain.late.memory = VK_NULL_HANDLE;
+        chain.late.grid = nullptr;
+        chain.late.reads.clear(); // freed with the pool
         if (chain.probe.buffer) vk.vkDestroyBuffer(device, chain.probe.buffer, nullptr);
         if (chain.probe.memory) vk.vkFreeMemory(device, chain.probe.memory, nullptr); // unmaps it
         chain.probe.buffer = VK_NULL_HANDLE;
@@ -820,9 +911,13 @@ struct VulkanBridge::Impl {
             image.runtime.Detach();
             for (Copy& copy : image.copies) {
                 copy.list.Detach();
+                copy.late.Detach();
                 copy.allocator.Detach();
             }
         }
+        chain.late.resource.Detach();
+        for (auto& list : chain.late.lists) list.Detach();
+        for (auto& allocator : chain.late.allocators) allocator.Detach();
         chain.timestamps.Detach();
         chain.stamps.Detach();
         chain.probe.readback.Detach();
@@ -866,6 +961,16 @@ struct VulkanBridge::Impl {
                << ", failedSubmits=" << chain.failed_submits << ", semaphores=" << (timeline ? "timeline" : "binary");
         if (chain.motion) {
             stream << ", motion vectors (endFrameCopies=" << chain.end_frame_copies << ")";
+        }
+        if (plan.mode == Mode::kTwinDepth) {
+            const LateDepth& late = chain.late;
+            stream << ", depth=" << DepthTimingName(depth_timing)
+                   << ", depthTaken=" << (late.engaged ? "late" : "end-frame")
+                   << ", depthChecks=" << late.at_end_checks << "/" << late.late_only_checks << "/"
+                   << late.neither_checks << " (at the hand-over/only at the next acquire/neither)"
+                   << ", lateCopies=" << late.copies << ", lateUsed=" << late.used
+                   << ", lateTaken=" << late.engagements;
+            if (late.bytes) stream << ", lateMiB=" << MiB(late.bytes);
         }
         if (!chain.private_reason.empty()) {
             stream << ", private because " << chain.private_reason;
@@ -1262,15 +1367,28 @@ struct VulkanBridge::Impl {
     // depth targets; colour twins, with simultaneous access, need no
     // transition of their own, depth twins go to copy source and back.
     bool RecordCopy(Swapchain& chain, Image& image, Copy& copy, std::uint32_t query, std::string& reason) {
-        HRESULT hr = device12->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&copy.allocator));
-        if (SUCCEEDED(hr)) {
-            hr = device12->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, copy.allocator.Get(), nullptr,
-                                             IID_PPV_ARGS(&copy.list));
-        }
+        const HRESULT hr =
+            device12->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&copy.allocator));
         if (FAILED(hr)) {
             reason = Failure("Creating the bridge's copy commands", hr);
             return false;
         }
+        copy.query = query;
+        return RecordCopyList(chain, image, copy, image.twin.Get(), copy.list, reason);
+    }
+
+    // The copy of `source` (the twin, or the late depth copy) into the
+    // runtime's image, recorded into `list` from `copy`'s allocator, with
+    // `copy`'s timestamps.
+    bool RecordCopyList(Swapchain& chain, Image& image, Copy& copy, ID3D12Resource* source,
+                        ComPtr<ID3D12GraphicsCommandList>& list, std::string& reason) {
+        HRESULT hr = device12->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, copy.allocator.Get(), nullptr,
+                                                 IID_PPV_ARGS(&list));
+        if (FAILED(hr)) {
+            reason = Failure("Creating the bridge's copy commands", hr);
+            return false;
+        }
+        const std::uint32_t query = copy.query;
         const bool depth = chain.plan.mode == Mode::kTwinDepth;
         D3D12_RESOURCE_BARRIER barriers[2]{};
         barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -1280,29 +1398,28 @@ struct VulkanBridge::Impl {
             depth ? D3D12_RESOURCE_STATE_DEPTH_WRITE : D3D12_RESOURCE_STATE_RENDER_TARGET;
         barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
         barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barriers[1].Transition.pResource = image.twin.Get();
+        barriers[1].Transition.pResource = source;
         barriers[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
         barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
         const UINT count = depth ? 2 : 1;
-        copy.list->ResourceBarrier(count, barriers);
-        copy.query = query;
+        list->ResourceBarrier(count, barriers);
         if (chain.timestamps) {
-            copy.list->EndQuery(chain.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, query);
+            list->EndQuery(chain.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, query);
         }
-        copy.list->CopyResource(image.runtime.Get(), image.twin.Get());
+        list->CopyResource(image.runtime.Get(), source);
         if (chain.timestamps) {
-            copy.list->EndQuery(chain.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, query + 1);
+            list->EndQuery(chain.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, query + 1);
         }
         for (D3D12_RESOURCE_BARRIER& barrier : barriers) {
             std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
         }
-        copy.list->ResourceBarrier(count, barriers);
+        list->ResourceBarrier(count, barriers);
         if (chain.timestamps) {
-            copy.list->ResolveQueryData(chain.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, query, 2,
-                                        chain.stamps.Get(), query * sizeof(UINT64));
+            list->ResolveQueryData(chain.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, query, 2, chain.stamps.Get(),
+                                   query * sizeof(UINT64));
         }
-        hr = copy.list->Close();
+        hr = list->Close();
         if (FAILED(hr)) {
             reason = Failure("Recording the bridge's copy", hr);
             return false;
@@ -1346,9 +1463,9 @@ struct VulkanBridge::Impl {
     // (holding `mutex`), behind the game's rendering into it ("written"
     // reaching `after`) and ahead of anything else queued there for the
     // image (Frame Generation's capture). Returns the done value it signals.
-    UINT64 QueueCopy(Swapchain& chain, Image& image, Copy& copy, UINT64 after) {
+    UINT64 QueueCopy(Swapchain& chain, Image& image, Copy& copy, UINT64 after, bool late = false) {
         queue->Wait(written.Get(), after);
-        ID3D12CommandList* lists[] = {copy.list.Get()};
+        ID3D12CommandList* lists[] = {late ? copy.late.Get() : copy.list.Get()};
         queue->ExecuteCommandLists(1, lists);
         const UINT64 value = ++done_value;
         queue->Signal(done.Get(), value);
@@ -1583,6 +1700,65 @@ struct VulkanBridge::Impl {
         return true;
     }
 
+    // A recording reading a grid of kProbeGrid x kProbeGrid texels of each
+    // slice of `image`'s twin (the depth plane, mip 0) on the game's queue
+    // into `buffer`, four bytes a texel from texel `first` on (slice by
+    // slice, row by row), from the attachment layout and back (holding
+    // `mutex`). Null when it could not be made.
+    VkCommandBuffer RecordGridRead(Swapchain& chain, Image& image, VkBuffer buffer, std::uint32_t first) {
+        const Plan& plan = chain.plan;
+        VkCommandBufferAllocateInfo allocate{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        allocate.commandPool = chain.pool;
+        allocate.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        allocate.commandBufferCount = 1;
+        VkCommandBuffer commands = VK_NULL_HANDLE;
+        if (vk.vkAllocateCommandBuffers(device, &allocate, &commands) != VK_SUCCESS) {
+            return VK_NULL_HANDLE;
+        }
+        std::vector<VkBufferImageCopy> regions;
+        for (std::uint32_t slice = 0; slice < plan.array_size; ++slice) {
+            for (std::uint32_t j = 0; j < kProbeGrid; ++j) {
+                for (std::uint32_t i = 0; i < kProbeGrid; ++i) {
+                    VkBufferImageCopy region{};
+                    region.bufferOffset =
+                        (VkDeviceSize{first} + VkDeviceSize{slice} * kProbePoints + j * kProbeGrid + i) * sizeof(float);
+                    region.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, slice, 1};
+                    region.imageOffset = {static_cast<std::int32_t>(GridX(plan, i)),
+                                          static_cast<std::int32_t>(GridY(plan, j)), 0};
+                    region.imageExtent = {1, 1, 1};
+                    regions.push_back(region);
+                }
+            }
+        }
+        const bool recorded = Record(commands, [&](VkCommandBuffer cb) {
+            const VkImageMemoryBarrier before =
+                Barrier(image.twin_image, plan.aspect, plan, 1, plan.layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_QUEUE_FAMILY_IGNORED,
+                        VK_QUEUE_FAMILY_IGNORED);
+            vk.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0,
+                                    nullptr, 0, nullptr, 1, &before);
+            vk.vkCmdCopyImageToBuffer(cb, image.twin_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer,
+                                      static_cast<std::uint32_t>(regions.size()), regions.data());
+            const VkImageMemoryBarrier after =
+                Barrier(image.twin_image, plan.aspect, plan, 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, plan.layout,
+                        VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+                        VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED);
+            VkMemoryBarrier host{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+            host.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+            vk.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                    VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &host, 0,
+                                    nullptr, 1, &after);
+        });
+        return recorded ? commands : VK_NULL_HANDLE;
+    }
+    static std::uint32_t GridX(const Plan& plan, std::uint32_t i) {
+        return std::min(plan.width - 1, (2 * i + 1) * plan.width / (2 * kProbeGrid));
+    }
+    static std::uint32_t GridY(const Plan& plan, std::uint32_t j) {
+        return std::min(plan.height - 1, (2 * j + 1) * plan.height / (2 * kProbeGrid));
+    }
+
     // The recording reading the grid of `image`'s twin into the probe's
     // buffer on the game's queue, from the attachment layout and back
     // (holding `mutex`), when a probe of the swapchain is due; else null.
@@ -1593,55 +1769,11 @@ struct VulkanBridge::Impl {
             return VK_NULL_HANDLE;
         }
         if (!image.probe) {
-            const Plan& plan = chain.plan;
-            VkCommandBufferAllocateInfo allocate{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-            allocate.commandPool = chain.pool;
-            allocate.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-            allocate.commandBufferCount = 1;
-            VkCommandBuffer commands = VK_NULL_HANDLE;
-            if (vk.vkAllocateCommandBuffers(device, &allocate, &commands) != VK_SUCCESS) {
+            image.probe = RecordGridRead(chain, image, probe.buffer, 0);
+            if (!image.probe) {
                 probe.unavailable = true;
                 return VK_NULL_HANDLE;
             }
-            std::vector<VkBufferImageCopy> regions;
-            for (std::uint32_t slice = 0; slice < plan.array_size; ++slice) {
-                for (std::uint32_t j = 0; j < kProbeGrid; ++j) {
-                    for (std::uint32_t i = 0; i < kProbeGrid; ++i) {
-                        VkBufferImageCopy region{};
-                        region.bufferOffset = (VkDeviceSize{slice} * kProbePoints + j * kProbeGrid + i) * sizeof(float);
-                        region.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, slice, 1};
-                        region.imageOffset = {static_cast<std::int32_t>(std::min(plan.width - 1, (2 * i + 1) * plan.width / (2 * kProbeGrid))),
-                                              static_cast<std::int32_t>(std::min(plan.height - 1, (2 * j + 1) * plan.height / (2 * kProbeGrid))), 0};
-                        region.imageExtent = {1, 1, 1};
-                        regions.push_back(region);
-                    }
-                }
-            }
-            const bool recorded = Record(commands, [&](VkCommandBuffer cb) {
-                const VkImageMemoryBarrier before =
-                    Barrier(image.twin_image, plan.aspect, plan, 1, plan.layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                            VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_QUEUE_FAMILY_IGNORED,
-                            VK_QUEUE_FAMILY_IGNORED);
-                vk.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0,
-                                        nullptr, 0, nullptr, 1, &before);
-                vk.vkCmdCopyImageToBuffer(cb, image.twin_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, probe.buffer,
-                                          static_cast<std::uint32_t>(regions.size()), regions.data());
-                const VkImageMemoryBarrier after =
-                    Barrier(image.twin_image, plan.aspect, plan, 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, plan.layout,
-                            VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
-                            VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED);
-                VkMemoryBarrier host{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-                host.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-                host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-                vk.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &host, 0,
-                                        nullptr, 1, &after);
-            });
-            if (!recorded) {
-                probe.unavailable = true;
-                return VK_NULL_HANDLE;
-            }
-            image.probe = commands;
         }
         probe.next = now + kProbeInterval;
         return image.probe;
@@ -1740,6 +1872,330 @@ struct VulkanBridge::Impl {
                    << " min=" << number(runtime_min) << " max=" << number(runtime_max) << "; same in both=" << same
                    << ".";
             Info(stream.str());
+        }
+    }
+
+    // --- When the game's depth is taken (LateDepth) ------------------------
+
+    static const char* DepthTimingName(DepthTiming timing) {
+        switch (timing) {
+        case DepthTiming::kEndFrame:
+            return "end-frame";
+        case DepthTiming::kLate:
+            return "late";
+        case DepthTiming::kPrivate:
+            return "private";
+        default:
+            return "auto";
+        }
+    }
+
+    // The bits of a depth texel a grid read holds (four bytes a texel; D16's
+    // depth takes two of them, D24's three).
+    static std::uint32_t DepthBits(VkFormat format) {
+        switch (format) {
+        case VK_FORMAT_D16_UNORM:
+        case VK_FORMAT_D16_UNORM_S8_UINT:
+            return 0xFFFFu;
+        case VK_FORMAT_X8_D24_UNORM_PACK32:
+        case VK_FORMAT_D24_UNORM_S8_UINT:
+            return 0xFFFFFFu;
+        default:
+            return 0xFFFFFFFFu;
+        }
+    }
+
+    // The check's buffer, at its first check (holding `mutex`). False: the
+    // swapchain is not checked (reported once), and its depth is taken at the
+    // hand-over.
+    bool MakeLateCheck(Swapchain& chain) {
+        LateDepth& late = chain.late;
+        if (late.unavailable) return false;
+        if (late.buffer) return true;
+        const Plan& plan = chain.plan;
+        const auto fail = [&](const std::string& why) {
+            late.unavailable = true;
+            Info("the depth timing check leaves a depth swapchain out, its depth is taken at the hand-over: " + why +
+                 " (" + Describe(chain) + ").");
+            return false;
+        };
+        VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        info.size = VkDeviceSize{2} * kProbePoints * plan.array_size * sizeof(std::uint32_t);
+        info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        if (vk.vkCreateBuffer(device, &info, nullptr, &late.buffer) != VK_SUCCESS) {
+            late.buffer = VK_NULL_HANDLE;
+            return fail("its buffer could not be made");
+        }
+        VkMemoryRequirements requirements{};
+        vk.vkGetBufferMemoryRequirements(device, late.buffer, &requirements);
+        VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        allocate.allocationSize = requirements.size;
+        allocate.memoryTypeIndex = UINT32_MAX;
+        constexpr VkMemoryPropertyFlags kHost = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        for (std::uint32_t i = 0; i < memory.memoryTypeCount && allocate.memoryTypeIndex == UINT32_MAX; ++i) {
+            if ((requirements.memoryTypeBits & (1u << i)) && (memory.memoryTypes[i].propertyFlags & kHost) == kHost) {
+                allocate.memoryTypeIndex = i;
+            }
+        }
+        void* mapped = nullptr;
+        if (allocate.memoryTypeIndex == UINT32_MAX ||
+            vk.vkAllocateMemory(device, &allocate, nullptr, &late.memory) != VK_SUCCESS) {
+            late.memory = VK_NULL_HANDLE;
+            return fail("no host memory for its buffer");
+        }
+        if (vk.vkBindBufferMemory(device, late.buffer, late.memory, 0) != VK_SUCCESS ||
+            vk.vkMapMemory(device, late.memory, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS) {
+            return fail("its buffer could not be mapped");
+        }
+        late.grid = static_cast<const std::uint32_t*>(mapped);
+        late.reads.assign(chain.images.size() * 2, VK_NULL_HANDLE);
+        return true;
+    }
+
+    // The check's grid read of `image` (`which` 0 at its hand-over, 1 at the
+    // next acquire), recorded at its first use (holding `mutex`); null when
+    // it could not be.
+    VkCommandBuffer LateRead(Swapchain& chain, Image& image, std::uint32_t index, std::uint32_t which) {
+        LateDepth& late = chain.late;
+        if (late.unavailable || !late.buffer || 2 * index + which >= late.reads.size()) return VK_NULL_HANDLE;
+        VkCommandBuffer& commands = late.reads[2 * index + which];
+        if (!commands) {
+            commands = RecordGridRead(chain, image, late.buffer, which * chain.plan.array_size * kProbePoints);
+            if (!commands) {
+                late.unavailable = true;
+                Info("the depth timing check leaves a depth swapchain out, its depth is taken at the hand-over: its "
+                     "grid read could not be recorded (" +
+                     Describe(chain) + ").");
+            }
+        }
+        return commands;
+    }
+
+    // A check whose grid reads both finished, judged (holding `mutex`).
+    void FinishLateCheck(XrSwapchain swapchain, Swapchain& chain) {
+        LateDepth& late = chain.late;
+        if (late.step != LateDepth::Step::kQueued) return;
+        PollFences();
+        if (lost) {
+            late.step = LateDepth::Step::kIdle;
+            return;
+        }
+        if (completed_serial < late.serial) return;
+        late.step = LateDepth::Step::kIdle;
+        ++late.checks;
+        const Plan& plan = chain.plan;
+        const std::uint32_t bits = DepthBits(plan.format);
+        struct Found {
+            bool varies{false};
+            std::uint32_t nonzero{0};
+            std::uint32_t first{0};
+        };
+        Found found[2];
+        for (std::uint32_t which = 0; which < 2; ++which) {
+            for (std::uint32_t slice = 0; slice < plan.array_size; ++slice) {
+                const std::uint32_t* grid =
+                    late.grid + (std::size_t{which} * plan.array_size + slice) * kProbePoints;
+                const std::uint32_t first = grid[0] & bits;
+                if (slice == 0) found[which].first = first;
+                for (std::uint32_t point = 0; point < kProbePoints; ++point) {
+                    const std::uint32_t value = grid[point] & bits;
+                    found[which].varies = found[which].varies || value != first;
+                    found[which].nonzero += value != 0 ? 1 : 0;
+                }
+            }
+        }
+        const bool at_end = found[0].varies;
+        const bool after = found[1].varies;
+        const std::string name = "swapchain " + Hex(reinterpret_cast<std::uintptr_t>(swapchain));
+        // Counted always; logged as it changes to or from depth found only
+        // at the acquire (a game that keeps its depth uniform or empty, or
+        // writes it in time, is not worth a line a check).
+        const bool late_only = after && !at_end;
+        ++(at_end ? late.at_end_checks : late_only ? late.late_only_checks : late.neither_checks);
+        const bool was_late_only = late.last_at_end && late.last_after && !*late.last_at_end && *late.last_after;
+        const bool changed = late.last_at_end != at_end || late.last_after != after;
+        late.last_at_end = at_end;
+        late.last_after = after;
+        if (changed && (late_only || was_late_only)) {
+            const std::uint32_t points = kProbePoints * plan.array_size;
+            const auto finding = [&](const Found& f) {
+                std::ostringstream text;
+                if (f.varies) {
+                    text << "varies (" << f.nonzero << " of " << points << " texels nonzero)";
+                } else {
+                    text << "is uniform (" << Hex(f.first) << " in all " << points << " texels)";
+                }
+                return text.str();
+            };
+            Info("depth timing check " + std::to_string(late.checks) + " of " + name + ", image " +
+                 std::to_string(late.image) + ": at its hand-over (the frame's end) the game's depth " +
+                 finding(found[0]) + "; at the swapchain's next acquire it " + finding(found[1]) + " (" +
+                 Describe(chain) + ").");
+        }
+        switch (depth_timing) {
+        case DepthTiming::kAuto:
+            if (!late.engaged) {
+                if (!at_end && after) {
+                    if (++late.streak >= kLateAfterChecks && !late.resource_failed) {
+                        late.engaged = true;
+                        late.streak = 0;
+                        late.quiet = 0;
+                        ++late.engagements;
+                        Info("the game writes its depth after its frame's end (" + name + ": " +
+                             std::to_string(kLateAfterChecks) +
+                             " checks in a row found it only at the swapchain's next acquire): from now on each "
+                             "acquire copies the image handed over last, and each hand-over gives the runtime that "
+                             "copy, the frame before's depth (" +
+                             Describe(chain) + ").");
+                    }
+                } else {
+                    late.streak = 0;
+                }
+            } else if (at_end || (!after && ++late.quiet >= kLateQuietChecks)) {
+                late.engaged = false;
+                late.fresh = false;
+                late.streak = 0;
+                late.quiet = 0;
+                Info("the game's depth is taken at its hand-over again (" + name + ": " +
+                     (at_end ? std::string("it is in its image at the frame's end")
+                             : std::to_string(kLateQuietChecks) + " checks in a row found no depth either way") +
+                     ").");
+            } else if (after) {
+                late.quiet = 0;
+            }
+            break;
+        case DepthTiming::kEndFrame:
+            if (!at_end && after && !late.reported_end_frame) {
+                late.reported_end_frame = true;
+                Info("the game's depth (" + name +
+                     ") varies only at the swapchain's next acquire, after its frame's end; "
+                     "VECTORXR_VULKAN_BRIDGE_DEPTH=end-frame keeps taking it at the hand-over, where it is not.");
+            }
+            break;
+        default:
+            break;
+        }
+    }
+
+    // The late copy and its recordings, when first taken (holding `mutex`).
+    // False: it could not be made (reported once), and depth stays the
+    // hand-over's.
+    bool EnsureLateResource(Swapchain& chain) {
+        LateDepth& late = chain.late;
+        if (late.resource) return true;
+        if (late.resource_failed || chain.images.empty() || !chain.images.front().twin) return false;
+        const D3D12_RESOURCE_DESC desc = chain.images.front().twin->GetDesc();
+        D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_DEFAULT};
+        HRESULT hr = device12->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON,
+                                                       nullptr, IID_PPV_ARGS(&late.resource));
+        late.allocators.assign(chain.images.size(), nullptr);
+        late.lists.assign(chain.images.size(), nullptr);
+        for (std::size_t i = 0; SUCCEEDED(hr) && i < chain.images.size(); ++i) {
+            hr = device12->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&late.allocators[i]));
+            if (SUCCEEDED(hr)) {
+                hr = device12->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, late.allocators[i].Get(), nullptr,
+                                                 IID_PPV_ARGS(&late.lists[i]));
+            }
+            if (FAILED(hr)) break;
+            D3D12_RESOURCE_BARRIER barriers[2]{};
+            for (D3D12_RESOURCE_BARRIER& barrier : barriers) {
+                barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+            }
+            barriers[0].Transition.pResource = chain.images[i].twin.Get();
+            barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+            barriers[1].Transition.pResource = late.resource.Get();
+            barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+            late.lists[i]->ResourceBarrier(2, barriers);
+            late.lists[i]->CopyResource(late.resource.Get(), chain.images[i].twin.Get());
+            for (D3D12_RESOURCE_BARRIER& barrier : barriers) {
+                std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+            }
+            late.lists[i]->ResourceBarrier(2, barriers);
+            hr = late.lists[i]->Close();
+        }
+        if (FAILED(hr)) {
+            late.resource.Reset();
+            late.allocators.clear();
+            late.lists.clear();
+            late.resource_failed = true;
+            late.engaged = false;
+            Info(Failure("Making the late depth copy", hr) + ": the game's depth is taken at the hand-over (" +
+                 Describe(chain) + ").");
+            return false;
+        }
+        late.bytes = device12->GetResourceAllocationInfo(0, 1, &desc).SizeInBytes;
+        Info("the late depth copy of a depth swapchain holds " + std::to_string(MiB(late.bytes)) + " MiB (" +
+             Describe(chain) + ").");
+        return true;
+    }
+
+    // At an acquire on a depth swapchain, before the image acquired is
+    // handled (holding `mutex`): what the game left in the image handed over
+    // last, after its frame's end, is read for a pending check and, while
+    // depth is taken from here, copied into the late copy: the image goes to
+    // Direct3D 12 and straight back to the game's queue, behind the copy.
+    void LateAtAcquire(XrSwapchain swapchain, Swapchain& chain) {
+        LateDepth& late = chain.late;
+        FinishLateCheck(swapchain, chain);
+        const std::optional<std::uint32_t> handed = std::exchange(late.handed, std::nullopt);
+        const bool checking = late.step == LateDepth::Step::kHandedOver;
+        if (checking) late.step = LateDepth::Step::kIdle; // unless queued below
+        if (!handed || *handed >= chain.images.size()) return;
+        // Only between frames: with another of its images acquired and not
+        // handed over yet (a game acquiring ahead, or its next frame begun
+        // before this one ended), the game may be rendering into it now.
+        if (chain.acquired.size() != 1) return;
+        Image& image = chain.images[*handed];
+        if (image.state != State::kGame || !image.acquire) return;
+        const VkCommandBuffer check =
+            checking && late.image == *handed ? LateRead(chain, image, *handed, 1) : VK_NULL_HANDLE;
+        const bool copy = late.engaged && EnsureLateResource(chain);
+        if (!check && !copy) return;
+        std::uint64_t serial = 0;
+        if (!copy) {
+            if (Submit(check, 0, 0, serial) != VK_SUCCESS) {
+                ++chain.failed_submits;
+                return;
+            }
+            chain.last_serial = serial;
+            late.step = LateDepth::Step::kQueued;
+            late.serial = serial;
+            return;
+        }
+        const UINT64 written_next = written_value + 1;
+        const VkCommandBuffer commands[2] = {check, image.release};
+        if (Submit(check ? std::span<const VkCommandBuffer>(commands, 2)
+                         : std::span<const VkCommandBuffer>(commands + 1, 1),
+                   0, written_next, serial) != VK_SUCCESS) {
+            ++chain.failed_submits;
+            return;
+        }
+        written_value = written_next;
+        image.state = State::kExternal;
+        chain.last_serial = serial;
+        if (check) {
+            late.step = LateDepth::Step::kQueued;
+            late.serial = serial;
+        }
+        queue->Wait(written.Get(), written_next);
+        ID3D12CommandList* lists[] = {late.lists[*handed].Get()};
+        queue->ExecuteCommandLists(1, lists);
+        const UINT64 value = ++done_value;
+        queue->Signal(done.Get(), value);
+        image.done = value;
+        chain.last_done = value;
+        late.fresh = true;
+        ++late.copies;
+        std::uint64_t back = 0;
+        if (Submit(image.acquire, value, 0, back) == VK_SUCCESS) {
+            image.state = State::kGame;
+            image.handed_back = true;
+            chain.last_serial = back;
+        } else {
+            // It stays with the bridge: its next acquire gives it back.
+            ++chain.failed_submits;
         }
     }
 
@@ -1977,6 +2433,18 @@ const XrSessionCreateInfo* VulkanBridge::Begin(XrInstance instance, const XrSess
             impl->debug_layer = true;
         }
     }
+    if (const char* timing = std::getenv("VECTORXR_VULKAN_BRIDGE_DEPTH")) {
+        const std::string value = timing;
+        impl->depth_timing = value == "private"     ? Impl::DepthTiming::kPrivate
+                             : value == "late"      ? Impl::DepthTiming::kLate
+                             : value == "end-frame" ? Impl::DepthTiming::kEndFrame
+                                                    : Impl::DepthTiming::kAuto;
+    }
+    if (const char* interval = std::getenv("VECTORXR_VULKAN_BRIDGE_DEPTH_CHECK_MS"); interval && *interval) {
+        char* end = nullptr;
+        const long ms = std::strtol(interval, &end, 10);
+        if (end && *end == '\0' && ms >= 0) impl->late_check_interval = std::chrono::milliseconds(ms);
+    }
     ComPtr<IDXGIFactory4> factory;
     ComPtr<IDXGIAdapter1> adapter;
     HRESULT hr = CreateDXGIFactory1(IID_PPV_ARGS(&factory));
@@ -2092,6 +2560,7 @@ const XrSessionCreateInfo* VulkanBridge::Begin(XrInstance instance, const XrSess
            << ", queueFamily=" << impl->family << ", queueIndex=" << impl->queue_index
            << ", semaphores=" << (impl->timeline ? "timeline" : "binary")
            << ", formatLists=" << (impl->api12 ? "yes" : "no") << ", videoMemory=" << impl->VideoMemory()
+           << ", depth=" << Impl::DepthTimingName(impl->depth_timing)
            << (impl->debug_layer ? ", debugLayer=on" : "");
     description = stream.str();
     impl_ = std::move(impl);
@@ -2342,6 +2811,11 @@ bool VulkanBridge::AddSwapchain(XrSwapchain swapchain, const XrSwapchainCreateIn
     }
     if (chain.plan.mode == Impl::Mode::kPrivate) {
         chain.private_reason = "it is multisampled";
+    } else if (chain.plan.mode == Impl::Mode::kTwinDepth && impl.depth_timing == Impl::DepthTiming::kPrivate) {
+        // The switch to rule the bridge's depth out (logged once a session,
+        // in the session's line).
+        chain.plan.mode = Impl::Mode::kPrivate;
+        chain.private_reason = "VECTORXR_VULKAN_BRIDGE_DEPTH=private";
     } else if (chain.plan.mode == Impl::Mode::kTwinDepth) {
         for (const XrSwapchainImageD3D12KHR& image : runtime_images) {
             if (image.texture && (image.texture->GetDesc().Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) == 0) {
@@ -2355,6 +2829,7 @@ bool VulkanBridge::AddSwapchain(XrSwapchain swapchain, const XrSwapchainCreateIn
         }
     }
     chain.hand_back = chain.plan.mode == Impl::Mode::kTwinDepth;
+    chain.late.engaged = chain.plan.mode == Impl::Mode::kTwinDepth && impl.depth_timing == Impl::DepthTiming::kLate;
     const Impl::Plan& plan = chain.plan;
 
     // Everything made here is the swapchain's alone until it is added, and
@@ -2515,6 +2990,11 @@ void VulkanBridge::Acquired(XrSwapchain swapchain, std::uint32_t index) {
     if (impl.lost) {
         return;
     }
+    if (chain->plan.mode == Impl::Mode::kTwinDepth) {
+        // What the game left in the image handed over last, after its frame's
+        // end (LateDepth), before anything of this acquire.
+        impl.LateAtAcquire(swapchain, *chain);
+    }
     Impl::Image& image = chain->images[index];
     const Impl::Mode mode = chain->plan.mode;
     if (mode == Impl::Mode::kPrivate) {
@@ -2599,6 +3079,15 @@ bool VulkanBridge::Released(XrSwapchain swapchain, bool teardown) {
         return true;
     }
     impl.NoteThread();
+    // The hand-over's whole CPU time, its submissions, copy and hand-back.
+    struct Timed {
+        Impl& impl;
+        std::chrono::steady_clock::time_point start;
+        ~Timed() {
+            AddSample(impl.handover_us, impl.next_handover_sample, impl.handover_us_window_max,
+                      std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count());
+        }
+    } timed{impl, std::chrono::steady_clock::now()};
     Impl::Image& image = chain->images[index];
     if (impl.lost || image.state != Impl::State::kGame) {
         // The game's device is lost, or the acquire's submission was refused:
@@ -2612,12 +3101,29 @@ bool VulkanBridge::Released(XrSwapchain swapchain, bool teardown) {
         impl.FinishProbe(swapchain, *chain);
         probe = impl.ProbeCommands(*chain, image);
     }
+    // When the game's depth is in its image (LateDepth): about once a second,
+    // a grid of the twin as the copy reads it, read just before its release
+    // (the same image is read again at the swapchain's next acquire).
+    const bool depth = chain->plan.mode == Impl::Mode::kTwinDepth && !teardown;
+    VkCommandBuffer check = VK_NULL_HANDLE;
+    if (depth) {
+        Impl::LateDepth& late = chain->late;
+        impl.FinishLateCheck(swapchain, *chain);
+        const auto now = std::chrono::steady_clock::now();
+        if (late.step == Impl::LateDepth::Step::kIdle && now >= late.next && impl.MakeLateCheck(*chain)) {
+            check = impl.LateRead(*chain, image, index, 0);
+            if (check) late.next = now + impl.late_check_interval;
+        }
+    }
     // The game's rendering into the image is handed to the bridge's queue...
     const UINT64 written = impl.written_value + 1;
     std::uint64_t serial = 0;
-    const VkCommandBuffer handed[2] = {probe, image.release};
-    if (impl.Submit(probe ? std::span<const VkCommandBuffer>(handed, 2) : std::span<const VkCommandBuffer>(handed + 1, 1),
-                    0, written, serial) != VK_SUCCESS) {
+    VkCommandBuffer handed[3]{};
+    std::size_t handed_count = 0;
+    if (probe) handed[handed_count++] = probe;
+    if (check) handed[handed_count++] = check;
+    handed[handed_count++] = image.release;
+    if (impl.Submit(std::span<const VkCommandBuffer>(handed, handed_count), 0, written, serial) != VK_SUCCESS) {
         // Nothing was handed over: no copy, and the image stays the game's.
         // At teardown its preceding rendering still needs a later marker;
         // the acquire's old fence cannot safely retire this image.
@@ -2628,6 +3134,10 @@ bool VulkanBridge::Released(XrSwapchain swapchain, bool teardown) {
     impl.written_value = written;
     image.state = Impl::State::kExternal;
     chain->last_serial = serial;
+    if (check) {
+        chain->late.step = Impl::LateDepth::Step::kHandedOver;
+        chain->late.image = index;
+    }
     Impl::Copy* copy = impl.ReadyCopy(*chain, image, index);
     if (!copy) {
         if (probe) {
@@ -2645,8 +3155,25 @@ bool VulkanBridge::Released(XrSwapchain swapchain, bool teardown) {
         return false;
     }
     // ...which copies it into the runtime's image, ahead of anything else
-    // queued on it for the release (Frame Generation's capture).
-    const UINT64 done = impl.QueueCopy(*chain, image, *copy, written);
+    // queued on it for the release (Frame Generation's capture): while the
+    // game's depth is taken after its frame's end, the copy the last acquire
+    // made instead of the twin.
+    bool late = false;
+    if (depth) {
+        Impl::LateDepth& taken = chain->late;
+        late = taken.engaged && taken.fresh && taken.resource;
+        std::string why;
+        if (late && !copy->late && !impl.RecordCopyList(*chain, image, *copy, taken.resource.Get(), copy->late, why)) {
+            late = false;
+        }
+        taken.fresh = false;
+        taken.handed = index;
+        if (late) {
+            ++taken.used;
+            ++impl.late_copies;
+        }
+    }
+    const UINT64 done = impl.QueueCopy(*chain, image, *copy, written, late);
     if (probe) {
         // ...and the runtime's image just after the copy.
         impl.QueueRuntimeProbe(*chain, image, index, serial, true);
@@ -2932,8 +3459,12 @@ std::string VulkanBridge::Summary() const {
     std::scoped_lock lock(impl_->mutex);
     impl_->ReadAllCopyTimes();
     std::uint64_t twin_bytes = 0;
+    std::uint64_t checks[3]{};
     for (const auto& [swapchain, chain] : impl_->swapchains) {
-        twin_bytes += chain.twin_bytes;
+        twin_bytes += chain.twin_bytes + chain.late.bytes;
+        checks[0] += chain.late.at_end_checks;
+        checks[1] += chain.late.late_only_checks;
+        checks[2] += chain.late.neither_checks;
     }
     const auto whole = [](double value) { return static_cast<std::uint64_t>(value + 0.5); };
     std::ostringstream stream;
@@ -2945,7 +3476,15 @@ std::string VulkanBridge::Summary() const {
            << ", unmatchedReleases=" << impl_->unmatched_releases << ", endFrameCopies=" << impl_->end_frame_copies
            << ", submits=" << impl_->submits << ", failedSubmits=" << impl_->failed_submits
            << ", submitUs p50/max=" << whole(Percentile(impl_->submit_us, 0.5)) << "/"
-           << whole(std::exchange(impl_->submit_us_window_max, 0.0)) << ", liveFences=" << impl_->fence_count
+           << whole(std::exchange(impl_->submit_us_window_max, 0.0))
+           << ", handoverUs p50/max=" << whole(Percentile(impl_->handover_us, 0.5)) << "/"
+           << whole(std::exchange(impl_->handover_us_window_max, 0.0))
+           << ", depth=" << Impl::DepthTimingName(impl_->depth_timing)
+
+           << ", depthChecks=" << checks[0] << "/" << checks[1] << "/" << checks[2]
+           << ", lateDepthCopies=" << impl_->late_copies
+
+           << ", liveFences=" << impl_->fence_count
            << ", fenceGrowth=" << impl_->fence_growth << ", unfencedSubmits=" << impl_->unfenced_submits
            << ", semaphores=" << (impl_->timeline ? "timeline" : "binary")
            << ", copyGpuUs p50/p99=" << whole(Percentile(impl_->copy_gpu_us, 0.5)) << "/"
