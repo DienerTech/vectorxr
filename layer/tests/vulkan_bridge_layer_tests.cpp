@@ -596,10 +596,10 @@ void ClearVulkan(VulkanGame& game, VkImage image, std::uint32_t layers, const Co
     SubmitCommands(game, slot);
 }
 
-void ClearVulkanDepth(VulkanGame& game, VkImage image, std::uint32_t layers, float depth) {
+void ClearVulkanDepth(VulkanGame& game, VkImage image, std::uint32_t layers, float depth, std::uint32_t first = 0) {
     std::uint32_t slot = 0;
     const VkCommandBuffer commands = BeginCommands(game, slot);
-    const VkImageSubresourceRange range{VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, layers};
+    const VkImageSubresourceRange range{VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, first, layers};
     VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     barrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
     barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -4276,6 +4276,173 @@ void TestBridgedFrameGen(const std::string& mode) {
     EndCase();
 }
 
+std::uint32_t HostMemoryType(VkPhysicalDevice physical, std::uint32_t bits);
+
+// The game writes slice `layer` of a D32 depth image: `top` in its upper
+// half, `bottom` in its lower (the stand-in reads the centre: `bottom`),
+// through a buffer, from the attachment layout and back. Waits for it.
+void WriteVulkanDepthHalves(VulkanGame& game, VkImage image, std::uint32_t width, std::uint32_t height,
+                            std::uint32_t layer, float top, float bottom) {
+    VkBuffer staging = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    info.size = VkDeviceSize{width} * height * sizeof(float);
+    info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    CheckVk(g_vk.vkCreateBuffer(game.device, &info, nullptr, &staging), "a depth upload buffer");
+    VkMemoryRequirements requirements{};
+    g_vk.vkGetBufferMemoryRequirements(game.device, staging, &requirements);
+    VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    allocate.allocationSize = requirements.size;
+    allocate.memoryTypeIndex = HostMemoryType(game.physical, requirements.memoryTypeBits);
+    Check(allocate.memoryTypeIndex != UINT32_MAX, "host-visible memory for the depth upload");
+    CheckVk(g_vk.vkAllocateMemory(game.device, &allocate, nullptr, &memory), "the depth upload's memory");
+    CheckVk(g_vk.vkBindBufferMemory(game.device, staging, memory, 0), "the depth upload's memory bound");
+    void* mapped = nullptr;
+    CheckVk(g_vk.vkMapMemory(game.device, memory, 0, VK_WHOLE_SIZE, 0, &mapped), "the depth upload mapped");
+    auto* values = static_cast<float*>(mapped);
+    for (std::uint32_t y = 0; y < height; ++y) {
+        for (std::uint32_t x = 0; x < width; ++x) values[y * width + x] = y < height / 2 ? top : bottom;
+    }
+    std::uint32_t slot = 0;
+    const VkCommandBuffer commands = BeginCommands(game, slot);
+    VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    barrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = image;
+    barrier.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, layer, 1};
+    const VkPipelineStageFlags depth_stages =
+        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    g_vk.vkCmdPipelineBarrier(commands, depth_stages, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                              &barrier);
+    VkBufferImageCopy region{};
+    region.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, layer, 1};
+    region.imageExtent = {width, height, 1};
+    g_vk.vkCmdCopyBufferToImage(commands, staging, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    std::swap(barrier.oldLayout, barrier.newLayout);
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    g_vk.vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, depth_stages, 0, 0, nullptr, 0, nullptr, 1,
+                              &barrier);
+    SubmitCommands(game, slot);
+    Check(g_vk.vkWaitForFences(game.device, 1, &game.fences[slot], VK_TRUE, 10'000'000'000ull) == VK_SUCCESS,
+          "the depth upload finishes");
+    g_vk.vkDestroyBuffer(game.device, staging, nullptr);
+    g_vk.vkFreeMemory(game.device, memory, nullptr);
+}
+// 13b. Depth Star Citizen writes after its frame's end (CIG, 2026-10-29: after
+// xrReleaseSwapchainImage; every hand-over at xrEndFrame found it all zero).
+// Each frame the game's depth swapchain holds zero at its release and gets the
+// frame's depth (each eye's slice its own value) after xrEndFrame. The bridge
+// checks at every hand-over here (VECTORXR_VULKAN_BRIDGE_DEPTH_CHECK_MS=0):
+// the runtime's depth is zero until the bridge finds the depth at the next
+// acquire, then each frame's views carry the frame before's depth, for each
+// eye its own. With VECTORXR_VULKAN_BRIDGE_DEPTH=end-frame it stays zero;
+// with =private the views carry no depth at all (the colour still arrives).
+void TestLateDepthSession() {
+    SetEnv("VECTORXR_VULKAN_BRIDGE_DEPTH_CHECK_MS", "0");
+    for (const std::string timing : {"", "end-frame", "private"}) {
+        SetEnv("VECTORXR_VULKAN_BRIDGE_DEPTH", timing);
+        // Frame Generation on (the bridge is made for it), standing by: the
+        // runtime gets the game's frames as they are.
+        BeginCase(timing.empty() ? "late-depth" : "late-depth-" + timing);
+        App app = StartApp({kVulkan2Extension});
+        VulkanGame game = MakeVulkanGame(app);
+        SessionCreate create(game, app.system);
+        Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS &&
+                  Peer::Bridge().Active(),
+              "a bridged session (" + Unbridged(Peer::Log()) + ")");
+        BeginSession(app);
+        const Renderer vulkan{&game, nullptr};
+        Target left = MakeTarget(app, ColorInfo(), "the left eye");
+        Target right = MakeTarget(app, ColorInfo(), "the right eye");
+        Target depth = MakeTarget(app, DepthInfo(VK_FORMAT_D32_SFLOAT, 2), "depth");
+        // Each eye's slice: its upper half 0.1 nearer than its lower, which
+        // the stand-in reads (the centre).
+        const auto written = [](int frame, int eye) { return 0.2f + 0.05f * static_cast<float>(frame) + 0.01f * eye; };
+        g_runtime.read_depth = true;
+        int late_from = -1;
+        constexpr int kFrames = 10;
+        for (int frame = 0; frame < kFrames; ++frame) {
+            const std::vector<Color> colors{FrameColor(frame + 30, 0), FrameColor(frame + 30, 1)};
+            FrameOptions options;
+            options.depth = &depth;
+            options.depth_value = 0.0f; // what it holds at its release
+            const bool depth_mirrored = timing != "private";
+            const std::uint64_t used_before =
+                depth_mirrored ? SummaryValue(Peer::Bridge().Describe(depth.swapchain), "lateUsed") : 0;
+            Check(Frame(app, vulkan, {&left, &right}, colors, {{{&left, 0}, {&right, 0}}}, options) == XR_SUCCESS,
+                  "late depth frame " + std::to_string(frame));
+            // The frame's hand-over copied the late copy (which the frame's
+            // acquire made, once the check had decided; at its end or at that
+            // acquire, as the game's queue got through the check's reads).
+            const bool late =
+                depth_mirrored && SummaryValue(Peer::Bridge().Describe(depth.swapchain), "lateUsed") > used_before;
+            if (late && late_from < 0) late_from = frame;
+            Check(!(late_from >= 0 && !late), "late depth: once taken late, every frame is (frame " +
+                                                  std::to_string(frame) + ")");
+            std::uint32_t released = 0;
+            {
+                std::scoped_lock lock(g_runtime_mutex);
+                const ShownFrame& shown = g_runtime.frames.back();
+                Check(shown.views.size() == 2, "late depth: two views");
+                for (int eye = 0; eye < 2 && shown.views.size() == 2; ++eye) {
+                    const ShownView& view = shown.views[eye];
+                    Check(Near(view.texel, colors[eye]), "late depth frame: the runtime shows " + Text(view.texel));
+                    if (timing == "private") {
+                        Check(!view.depth, "private depth: the views carry none");
+                        continue;
+                    }
+                    const float expected = late ? written(frame - 1, eye) : 0.0f;
+                    Check(view.depth && view.depth_value && *view.depth_value == expected,
+                          "late depth (" + timing + ") frame " + std::to_string(frame) + " eye " + std::to_string(eye) +
+                              ": the runtime's depth holds " +
+                              (view.depth_value ? std::to_string(*view.depth_value) : "nothing") + ", expected " +
+                              std::to_string(expected) + (late ? " (the frame before's)" : "") + "; " +
+                              Peer::Bridge().Describe(depth.swapchain));
+                }
+                const StandInSwapchain* chain = FindSwapchain(depth.swapchain);
+                Check(chain && chain->released, "late depth: the depth image is released to the runtime");
+                if (chain && chain->released) released = *chain->released;
+            }
+            // After xrEndFrame: the game's depth for this frame, each eye's slice.
+            for (int eye = 0; eye < 2; ++eye) {
+                WriteVulkanDepthHalves(game, reinterpret_cast<VkImage>(depth.images[released]), depth.info.width,
+                                       depth.info.height, static_cast<std::uint32_t>(eye), written(frame, eye) + 0.1f,
+                                       written(frame, eye));
+            }
+
+        }
+        g_runtime.read_depth = false;
+        const std::string log = Peer::Log();
+        if (timing.empty()) {
+            Check(late_from >= 3 && late_from <= 6,
+                  "late depth: the bridge takes it late within a few frames (from frame " + std::to_string(late_from) +
+                      "): " + Peer::Bridge().Describe(depth.swapchain));
+            Check(Contains(log, "the game writes its depth after its frame's end"), "late depth: the log says so");
+        } else {
+            Check(late_from < 0, "late depth (" + timing + "): never taken late");
+        }
+        if (timing == "end-frame") {
+            Check(Contains(log, "VECTORXR_VULKAN_BRIDGE_DEPTH=end-frame keeps taking it"),
+                  "late depth (end-frame): the log says where the depth is");
+        }
+        if (timing == "private") {
+            Check(Contains(log, "keeps the game's depth to itself") &&
+                      Contains(log, "private because VECTORXR_VULKAN_BRIDGE_DEPTH=private"),
+                  "late depth (private): the log says the depth is left out, and why");
+        }
+        CheckValidation("late depth " + timing);
+        Check(app.api.destroy_swapchain(depth.swapchain) == XR_SUCCESS, "the depth swapchain is destroyed");
+        StopApp(app);
+        DestroyGame(game);
+        EndCase();
+    }
+    SetEnv("VECTORXR_VULKAN_BRIDGE_DEPTH", "");
+    SetEnv("VECTORXR_VULKAN_BRIDGE_DEPTH_CHECK_MS", "");
+}
 // 13c. Star Citizen's shapes (its log, 2026-10-09): XR_KHR_vulkan_enable2, an
 // sRGB swapchain per eye the game only copies into (TRANSFER_DST alone), and
 // its interface on a quad swapchain (TRANSFER_DST alone too) shown over the
@@ -5886,6 +6053,7 @@ int main(int argc, char** argv) {
     g_unbridged_only = argc > 1 && std::string(argv[1]) == "unbridged";
     const bool depth_paths_only = argc > 1 && std::string(argv[1]) == "depth-paths";
     const bool teardown_only = argc > 1 && std::string(argv[1]) == "teardown";
+    const bool late_depth_only = argc > 1 && std::string(argv[1]) == "late-depth";
     const char* no_stall = std::getenv("FG_TEST_NO_STALL");
     const bool skip_negative_controls = no_stall && std::string(no_stall) == "1";
     const bool require = vulkan_test::RequireHardware();
@@ -5914,8 +6082,10 @@ int main(int argc, char** argv) {
     IsolateHost();
     Peer::UseFrameGenGpu(MakeStandInGpu);
 
-    if (depth_paths_only || teardown_only) {
-        if (teardown_only) {
+    if (depth_paths_only || teardown_only || late_depth_only) {
+        if (late_depth_only) {
+            TestLateDepthSession();
+        } else if (teardown_only) {
             TestBridgedSession(2);
             TestBridgedSession(1);
             TestDestroyInstanceWithSession();
@@ -5927,8 +6097,8 @@ int main(int argc, char** argv) {
         Peer::ReleaseLog(g_root / "released" / "vectorxr.log");
         std::error_code error;
         std::filesystem::remove_all(g_root, error);
-        std::cout << "vulkan bridge layer tests passed (" << (teardown_only ? "teardown" : "depth paths")
-                  << " only)\n";
+        std::cout << "vulkan bridge layer tests passed ("
+                  << (teardown_only ? "teardown" : late_depth_only ? "late depth" : "depth paths") << " only)\n";
         return 0;
     }
     // The cases that need no working bridge.
@@ -5956,6 +6126,7 @@ int main(int argc, char** argv) {
         TestBridgedFrameGen("extrapolate");
         TestStarCitizenShapes();
         TestStarCitizenMotion();
+        TestLateDepthSession();
         TestDepthWritePaths();
         TestDepthRects("vulkan-bridge");
         if (!skip_negative_controls) {

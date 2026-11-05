@@ -23,6 +23,7 @@
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
 
+#include "depthxr/framegen_gpu.h"
 #include "depthxr/framegen_plan.h"
 #include "depthxr/framegen_vulkan_bridge.h"
 #include "test_adapter.h"
@@ -2135,6 +2136,573 @@ void TestDepthValues(Game& game) {
     CheckClean(nullptr, "depth values (End)");
 }
 
+// The game's depth texels written from host memory, as a game's own copy
+// into its depth swapchain's image would (a 32-bit float depth image, one
+// slice at a time): from the attachment layout and back.
+struct DepthUpload {
+    VkBuffer buffer{VK_NULL_HANDLE};
+    VkDeviceMemory memory{VK_NULL_HANDLE};
+    float* values{nullptr};
+    std::uint32_t width{0};
+    std::uint32_t height{0};
+};
+
+DepthUpload MakeDepthUpload(Game& game, std::uint32_t width, std::uint32_t height) {
+    DepthUpload upload;
+    upload.width = width;
+    upload.height = height;
+    VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    info.size = VkDeviceSize{width} * height * sizeof(float);
+    info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    Check(game.vkCreateBuffer(game.device, &info, nullptr, &upload.buffer) == VK_SUCCESS, "a depth upload buffer");
+    VkMemoryRequirements requirements{};
+    game.vkGetBufferMemoryRequirements(game.device, upload.buffer, &requirements);
+    VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    allocate.allocationSize = requirements.size;
+    allocate.memoryTypeIndex = MemoryType(game, requirements.memoryTypeBits,
+                                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    void* mapped = nullptr;
+    Check(game.vkAllocateMemory(game.device, &allocate, nullptr, &upload.memory) == VK_SUCCESS &&
+              game.vkBindBufferMemory(game.device, upload.buffer, upload.memory, 0) == VK_SUCCESS &&
+              game.vkMapMemory(game.device, upload.memory, 0, VK_WHOLE_SIZE, 0, &mapped) == VK_SUCCESS,
+          "depth upload memory");
+    upload.values = static_cast<float*>(mapped);
+    return upload;
+}
+
+void FreeDepthUpload(Game& game, DepthUpload& upload) {
+    GameIdle(game);
+    game.vkDestroyBuffer(game.device, upload.buffer, nullptr);
+    game.vkFreeMemory(game.device, upload.memory, nullptr); // unmaps it
+    upload = {};
+}
+
+// The game writes `value(x, y)` into slice `layer` of `image`. The game's
+// queue is idle first: the upload is free to fill again.
+void WriteDepth(Game& game, VkImage image, DepthUpload& upload, std::uint32_t layer,
+                const std::function<float(std::uint32_t, std::uint32_t)>& value) {
+    GameIdle(game);
+    for (std::uint32_t y = 0; y < upload.height; ++y) {
+        for (std::uint32_t x = 0; x < upload.width; ++x) upload.values[y * upload.width + x] = value(x, y);
+    }
+    GameSubmit(game, [&](VkCommandBuffer commands) {
+        VkImageMemoryBarrier barrier =
+            GameBarrier(image, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, 1, layer, 1);
+        game.vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0,
+                                  0, nullptr, 0, nullptr, 1, &barrier);
+        VkBufferImageCopy region{};
+        region.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, layer, 1};
+        region.imageExtent = {upload.width, upload.height, 1};
+        game.vkCmdCopyBufferToImage(commands, upload.buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        std::swap(barrier.oldLayout, barrier.newLayout);
+        game.vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0,
+                                  0, nullptr, 0, nullptr, 1, &barrier);
+    });
+}
+
+float ReadRuntimeDepth(ID3D12Device* device, std::uint32_t index, std::uint32_t slice = 0) {
+    const auto texel = ReadRuntimeImage(device, index, slice, RuntimeKind::kDepth);
+    float value = -1.0f;
+    if (texel.size() >= sizeof(float)) std::memcpy(&value, texel.data(), sizeof(float));
+    return value;
+}
+
+// The bridge's lines matching `part`, taken out of the log (CheckClean
+// wants it empty).
+std::vector<std::string> TakeLog(const std::string& part) {
+    std::vector<std::string> taken;
+    for (auto it = g_log.begin(); it != g_log.end();) {
+        if (Contains(*it, part)) {
+            taken.push_back(*it);
+            it = g_log.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    return taken;
+}
+
+// When the game's depth is in its image (VectorXR's LateDepth). Star Citizen
+// (PTU and EPTU, October 2026) writes its depth after releasing the image, and
+// every hand-over at the frame's end found it all zero. Each frame here: the
+// depth swapchain's image is acquired, holds what the game wrote "in time"
+// (before its release: zero, or this frame's gradient), is released (the
+// hand-over, as at xrEndFrame), and then, in Star Citizen's order, gets this
+// frame's gradient after the frame's end. The runtime's image is read after
+// each hand-over:
+//   auto, Star Citizen's order: zero for the three frames the check needs
+//     (two checks in a row), then each frame the frame before's gradient;
+//     once the game writes in time again, the next frame has its own;
+//   auto, in time: every frame its own gradient, never taken late;
+//   end-frame: zero throughout (and said once);
+//   late: from the second frame on, the frame before's;
+//   private: the depth stays the game's (not mirrored, nothing copied).
+// Images in turn (Virtual Desktop) and the same image every frame (Pimax),
+// two slices.
+void TestLateDepth(Game& game) {
+    constexpr std::uint32_t kWidth = 64;
+    constexpr std::uint32_t kHeight = 48;
+    constexpr int kFrames = 9;
+    // Frame `frame`'s depth in slice `slice`: varying over the image, its
+    // centre telling frames and slices apart.
+    const auto gradient = [](int frame, std::uint32_t slice) {
+        return [frame, slice](std::uint32_t x, std::uint32_t y) {
+            return 0.1f + 0.05f * static_cast<float>(frame) + 0.02f * static_cast<float>(slice) +
+                   1e-5f * static_cast<float>(x + y * kWidth);
+        };
+    };
+    const auto centre = [&](int frame, std::uint32_t slice) { return gradient(frame, slice)(kWidth / 2, kHeight / 2); };
+    _putenv_s("VECTORXR_VULKAN_BRIDGE_DEPTH_CHECK_MS", "0"); // a check at every hand-over
+    struct Case {
+        const char* name;
+        const char* timing; // VECTORXR_VULKAN_BRIDGE_DEPTH
+        bool late_writes;   // Star Citizen's order
+        bool same_image;
+        bool writes{true};  // false: the game never writes its depth (all zero, Oct 2026's Star Citizen)
+    };
+    const Case cases[] = {
+        {"auto, written after the frame's end, images in turn", "", true, false},
+        {"auto, written after the frame's end, the same image", "auto", true, true},
+        {"auto, written in time", "", false, false},
+        {"end-frame, written after the frame's end", "end-frame", true, false},
+        {"late, written after the frame's end", "late", true, true},
+        {"late, written in time", "late", false, false},
+        {"auto, never written (all zero)", "", true, false, false},
+    };
+    for (const Case& test : cases) {
+        _putenv_s("VECTORXR_VULKAN_BRIDGE_DEPTH", test.timing);
+        VulkanBridge bridge;
+        Session session(game);
+        BeginBridge(game, bridge, session);
+        ID3D12Device* device = BridgeDevice(bridge);
+        MakeRuntimeImages(device, 3, kWidth, kHeight, DXGI_FORMAT_D32_FLOAT, 2, RuntimeKind::kDepth);
+        const XrSwapchain swapchain = Handle(0x140);
+        std::string reason;
+        Check(bridge.AddSwapchain(swapchain, DepthInfo(kWidth, kHeight, VK_FORMAT_D32_SFLOAT, 2), FakeEnumerate,
+                                  reason),
+              std::string(test.name) + ": bridged: " + reason);
+        const std::vector<VkImage> images = GameImages(bridge, swapchain);
+        DepthUpload upload = MakeDepthUpload(game, kWidth, kHeight);
+        const bool late_mode = std::string(test.timing) == "late";
+        int engaged_at = -1; // the first frame whose acquire took depth late
+        for (int frame = 0; frame < kFrames; ++frame) {
+            const std::uint32_t index = test.same_image ? 0 : static_cast<std::uint32_t>(frame % 3);
+            const bool engaged_before = Contains(bridge.Describe(swapchain), "depthTaken=late");
+            Acquire(bridge, swapchain, index);
+            for (std::uint32_t slice = 0; slice < 2; ++slice) {
+                if (test.late_writes) {
+                    WriteDepth(game, images[index], upload, slice, [](std::uint32_t, std::uint32_t) { return 0.0f; });
+                } else {
+                    WriteDepth(game, images[index], upload, slice, gradient(frame, slice));
+                }
+            }
+            GameIdle(game); // the check's reads are done: deterministic
+            Check(Release(bridge, swapchain), std::string(test.name) + ": copied");
+            Check(bridge.WaitIdle(10000), "the bridge's queue finishes");
+            // Taken late: the copy the acquire made of the frame before's.
+            const bool took_late = engaged_before && frame > 0;
+            if (took_late && engaged_at < 0) engaged_at = frame;
+            for (std::uint32_t slice = 0; slice < 2; ++slice) {
+                const float got = ReadRuntimeDepth(device, index, slice);
+                float expected = test.late_writes ? 0.0f : centre(frame, slice);
+                if (took_late) expected = test.late_writes ? centre(frame - 1, slice) : centre(frame - 1, slice);
+                Check(got == expected, std::string(test.name) + ", frame " + std::to_string(frame) + " slice " +
+                                           std::to_string(slice) + ": the runtime's depth is " + std::to_string(got) +
+                                           ", expected " + std::to_string(expected) +
+                                           (took_late ? " (the frame before's)" : "") + "; " +
+                                           bridge.Describe(swapchain));
+            }
+            if (test.late_writes && test.writes) {
+                for (std::uint32_t slice = 0; slice < 2; ++slice) {
+                    WriteDepth(game, images[index], upload, slice, gradient(frame, slice));
+                }
+            }
+        }
+        const std::string described = bridge.Describe(swapchain);
+        const std::string mode(test.timing);
+        if (mode == "late") {
+            Check(engaged_at == 1, std::string(test.name) + ": taken late from the second frame on (" +
+                                       std::to_string(engaged_at) + "): " + described);
+        } else if (test.late_writes && test.writes && mode != "end-frame") {
+            // Two checks (hand-over and next acquire) in a row: decided at the
+            // third frame's hand-over, taken from the fourth's acquire.
+            Check(engaged_at == 3, std::string(test.name) + ": taken late from the fourth frame on (" +
+                                       std::to_string(engaged_at) + "): " + described);
+            Check(TakeLog("the game writes its depth after its frame's end").size() == 1,
+                  std::string(test.name) + ": the decision is logged once");
+            Check(TakeLog("holds").size() == 1, std::string(test.name) + ": the late copy's memory is logged");
+            Check(Contains(described, "lateMiB="), std::string(test.name) + ": its memory is described: " + described);
+        } else {
+            Check(engaged_at < 0 && !Contains(described, "depthTaken=late"),
+                  std::string(test.name) + ": never taken late: " + described);
+        }
+        if (mode == "end-frame") {
+            Check(TakeLog("VECTORXR_VULKAN_BRIDGE_DEPTH=end-frame keeps taking it").size() == 1,
+                  std::string(test.name) + ": the depth it leaves is said once");
+        }
+        if (mode == "late") {
+            Check(TakeLog("holds").size() == 1, std::string(test.name) + ": the late copy's memory is logged");
+        }
+        TakeLog("varies only"); // the end-frame line's text holds it too
+        TakeLog("depth timing check"); // findings that changed to or from late only
+        if (!test.writes) {
+            Check(Contains(described, "depthChecks=0/0/"), std::string(test.name) + ": the checks found no depth: " +
+                                                               described);
+        }
+        Check(Contains(described, test.late_writes ? "depthChecks=0/" : "/0/0 ("),
+
+              std::string(test.name) + ": the checks found " +
+                  (test.late_writes ? "no depth at the hand-over: " : "depth at the hand-over: ") + described);
+        FreeDepthUpload(game, upload);
+        Check(bridge.RemoveSwapchain(swapchain), std::string(test.name) + ": removed");
+        CheckClean(&bridge, std::string("late depth: ") + test.name);
+        bridge.End();
+        CheckClean(nullptr, std::string("late depth: ") + test.name + " (End)");
+    }
+
+    // The game fixed (CIG's fix): written late at first, then in time. Taken
+    // late from the fourth frame; the first frame written in time still gets
+    // the frame before's late copy (the acquire made it), its hand-over's
+    // check sees depth in time, and the next frame's hand-over (judging that
+    // check) takes it in time again.
+    _putenv_s("VECTORXR_VULKAN_BRIDGE_DEPTH", "");
+    {
+        VulkanBridge bridge;
+        Session session(game);
+        BeginBridge(game, bridge, session);
+        ID3D12Device* device = BridgeDevice(bridge);
+        MakeRuntimeImages(device, 3, kWidth, kHeight, DXGI_FORMAT_D32_FLOAT, 1, RuntimeKind::kDepth);
+        const XrSwapchain swapchain = Handle(0x141);
+        std::string reason;
+        Check(bridge.AddSwapchain(swapchain, DepthInfo(kWidth, kHeight), FakeEnumerate, reason), "bridged: " + reason);
+        const std::vector<VkImage> images = GameImages(bridge, swapchain);
+        DepthUpload upload = MakeDepthUpload(game, kWidth, kHeight);
+        constexpr int kFixedFrom = 6;
+        for (int frame = 0; frame < 10; ++frame) {
+            const std::uint32_t index = static_cast<std::uint32_t>(frame % 3);
+            Acquire(bridge, swapchain, index);
+            const bool in_time = frame >= kFixedFrom;
+            const std::function<float(std::uint32_t, std::uint32_t)> zero = [](std::uint32_t, std::uint32_t) {
+                return 0.0f;
+            };
+            WriteDepth(game, images[index], upload, 0, in_time ? gradient(frame, 0) : zero);
+            GameIdle(game);
+            Check(Release(bridge, swapchain), "copied");
+            Check(bridge.WaitIdle(10000), "the bridge's queue finishes");
+            const float got = ReadRuntimeDepth(device, index);
+            const float expected = frame < 3                ? 0.0f
+                                   : frame <= kFixedFrom     ? centre(frame - 1, 0)
+                                                             : centre(frame, 0);
+            Check(got == expected, "fixed game, frame " + std::to_string(frame) + ": the runtime's depth is " +
+                                       std::to_string(got) + ", expected " + std::to_string(expected) + "; " +
+                                       bridge.Describe(swapchain));
+            if (!in_time) WriteDepth(game, images[index], upload, 0, gradient(frame, 0));
+        }
+        Check(TakeLog("the game writes its depth after its frame's end").size() == 1, "fixed game: taken late once");
+        Check(TakeLog("is taken at its hand-over again").size() == 1 &&
+                  !Contains(bridge.Describe(swapchain), "depthTaken=late"),
+              "fixed game: taken in time again, logged: " + bridge.Describe(swapchain));
+        TakeLog("holds");
+        TakeLog("depth timing check");
+        FreeDepthUpload(game, upload);
+        Check(bridge.RemoveSwapchain(swapchain), "removed");
+        CheckClean(&bridge, "late depth: the game fixed");
+        bridge.End();
+    }
+
+    // private: the switch keeps depth the game's.
+    _putenv_s("VECTORXR_VULKAN_BRIDGE_DEPTH", "private");
+    {
+        VulkanBridge bridge;
+        Session session(game);
+        BeginBridge(game, bridge, session);
+        MakeRuntimeImages(BridgeDevice(bridge), 2, 32, 32, DXGI_FORMAT_D32_FLOAT, 1, RuntimeKind::kDepth);
+        const XrSwapchain swapchain = Handle(0x142);
+        std::string reason;
+        Check(bridge.AddSwapchain(swapchain, DepthInfo(32, 32), FakeEnumerate, reason), "bridged: " + reason);
+        Check(bridge.Unmirrored(swapchain) &&
+                  Contains(bridge.Describe(swapchain), "private because VECTORXR_VULKAN_BRIDGE_DEPTH=private"),
+              "VECTORXR_VULKAN_BRIDGE_DEPTH=private keeps depth private: " + bridge.Describe(swapchain));
+        const VkImage image = GameImages(bridge, swapchain)[0];
+        for (int frame = 0; frame < 2; ++frame) {
+            Acquire(bridge, swapchain, 0);
+            ClearDepth(game, image, VK_IMAGE_ASPECT_DEPTH_BIT, 0.75f, 0);
+            Release(bridge, swapchain);
+        }
+        Check(SummaryValue(bridge.Summary(), "copies") == 0 && Contains(bridge.Summary(), "depth=private"),
+              "nothing is copied: " + bridge.Summary());
+        GameIdle(game);
+        Check(bridge.RemoveSwapchain(swapchain), "removed");
+        CheckClean(&bridge, "late depth: private");
+        bridge.End();
+    }
+    _putenv_s("VECTORXR_VULKAN_BRIDGE_DEPTH", "");
+    _putenv_s("VECTORXR_VULKAN_BRIDGE_DEPTH_CHECK_MS", "");
+    CheckClean(nullptr, "late depth (End)");
+}
+
+// Frame Generation's own swapchains' images (its Track's enumerations), by swapchain.
+std::unordered_map<XrSwapchain, std::vector<ID3D12Resource*>> g_framegen_images;
+
+XrResult XRAPI_CALL FrameGenEnumerate(XrSwapchain swapchain, uint32_t capacity, uint32_t* count,
+                                      XrSwapchainImageBaseHeader* images) {
+    const std::vector<ID3D12Resource*>& list = g_framegen_images[swapchain];
+    *count = static_cast<uint32_t>(list.size());
+    if (capacity == 0) return XR_SUCCESS;
+    if (capacity < list.size()) return XR_ERROR_SIZE_INSUFFICIENT;
+    auto* d3d12_images = reinterpret_cast<XrSwapchainImageD3D12KHR*>(images);
+    for (std::size_t i = 0; i < list.size(); ++i) d3d12_images[i].texture = list[i];
+    return XR_SUCCESS;
+}
+
+// The raw depth `encoding` stores for `meters` (1/z linear from minDepth at
+// nearZ to maxDepth at farZ, either of them infinitely far).
+float RawDepth(const depthxr::FrameGenDepthEncoding& encoding, double meters) {
+    const auto inverse = [](double z) { return std::isfinite(z) && z > 0.0 ? 1.0 / z : 0.0; };
+    const double near_inverse = inverse(encoding.near_z);
+    const double normalized = (1.0 / meters - near_inverse) / (inverse(encoding.far_z) - near_inverse);
+    return static_cast<float>(encoding.min_depth + normalized * (encoding.max_depth - encoding.min_depth));
+}
+
+// Frame Generation reads a bridged Vulkan game's depth: the game writes its
+// depth (Star Citizen's description: D32, reversed, its near plane 2 cm and
+// its far one 1e12 m away), the bridge mirrors it into the runtime's image at
+// the hand-over, and Frame Generation's Direct3D 12 backend (on the bridge's
+// device and queue, as in a session) captures it there after the copy and
+// decodes it. Its depth check is locked to the depth as described: what it
+// decides is the backend's own tests', not the bridge's.
+//   - written in time: one plane, 3 m away;
+//   - Star Citizen's order (zero at the hand-over, written after the frame's
+//     end): the top half 2 m away and the bottom half 8 m; the bridge takes
+//     it late (auto), and Frame Generation decodes the frame before's.
+void TestDepthReachesFrameGen(Game& game) {
+    depthxr::FrameGenDepthEncoding sc; // Star Citizen's, from its logs (Oct 2026)
+    sc.near_z = 1e12f;
+    sc.far_z = 0.02f;
+    constexpr std::uint32_t kSize = 64;
+    _putenv_s("VECTORXR_VULKAN_BRIDGE_DEPTH_CHECK_MS", "0");
+    for (const bool late : {false, true}) {
+        const std::string name = late ? "Star Citizen's order (written after the frame's end)" : "written in time";
+        VulkanBridge bridge;
+        Session session(game);
+        BeginBridge(game, bridge, session);
+        ID3D12Device* device = BridgeDevice(bridge);
+        std::string error;
+        auto gpu = depthxr::CreateFrameGenGpu(bridge.Binding(), error);
+        Check(gpu != nullptr && gpu->SupportsDepth(), name + ": Frame Generation's backend: " + error);
+        gpu->LockDepthForTest(depthxr::FrameGenDepthReading::kAsSubmitted, false, 1.0f);
+
+        // The runtime's depth swapchain (the bridge's), a colour source and
+        // Frame Generation's output.
+        MakeRuntimeImages(device, 3, kSize, kSize, DXGI_FORMAT_D32_FLOAT, 1, RuntimeKind::kDepth);
+        const XrSwapchain depth = Handle(0x150);
+        std::string reason;
+        Check(bridge.AddSwapchain(depth, DepthInfo(kSize, kSize), FakeEnumerate, reason),
+              name + ": bridged: " + reason);
+        const std::vector<ComPtr<ID3D12Resource>> runtime_depth = g_runtime_images;
+        MakeRuntimeImages(device, 1, kSize, kSize, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
+        const std::vector<ComPtr<ID3D12Resource>> source = g_runtime_images;
+        const std::int64_t output_format = gpu->OutputFormats(depthxr::FrameGenOutputKind::kSrgb8).front();
+        MakeRuntimeImages(device, 1, kSize, kSize, static_cast<DXGI_FORMAT>(output_format));
+        const std::vector<ComPtr<ID3D12Resource>> output = g_runtime_images;
+        const XrSwapchain source_chain = Handle(0x151);
+        const XrSwapchain output_chain = Handle(0x152);
+        g_framegen_images = {{depth, {runtime_depth[0].Get(), runtime_depth[1].Get(), runtime_depth[2].Get()}},
+                             {source_chain, {source[0].Get()}},
+                             {output_chain, {output[0].Get()}}};
+        for (const XrSwapchain chain : {depth, source_chain, output_chain}) {
+            Check(gpu->Track(chain, FrameGenEnumerate, error), name + ": track: " + error);
+        }
+        const std::vector<VkImage> images = GameImages(bridge, depth);
+        DepthUpload upload = MakeDepthUpload(game, kSize, kSize);
+
+        const XrRect2Di rect{{0, 0}, {static_cast<int>(kSize), static_cast<int>(kSize)}};
+        depthxr::FrameGenViewSubmission view;
+        view.source = {source_chain, 0, 0, rect, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB};
+        view.outputs = {{output_chain, 0, 0, rect, output_format}};
+        view.request.extent = {kSize, kSize};
+        view.request.output = depthxr::FrameGenOutputKind::kSrgb8;
+        for (auto* geometry : {&view.request.newest, &view.request.previous}) {
+            geometry->angle_left = geometry->angle_down = -std::atan(1.0f);
+            geometry->angle_right = geometry->angle_up = std::atan(1.0f);
+        }
+        depthxr::FrameGenTuning tuning;
+        depthxr::FrameGenExecuteResult result;
+        // A first frame sets the view up: nothing was captured for it.
+        Check(!gpu->Execute({view}, tuning, result, error), name + ": the first frame only sets the view up");
+        const double top = late ? 2.0 : 3.0;
+        const double bottom = late ? 8.0 : 3.0;
+        const float raw_top = RawDepth(sc, top);
+        const float raw_bottom = RawDepth(sc, bottom);
+        const auto planes = [&](std::uint32_t, std::uint32_t y) { return y < kSize / 2 ? raw_top : raw_bottom; };
+        view.request.depth = true;
+        view.request.synthesize = true;
+        const int frames = late ? 6 : 3;
+        for (int frame = 0; frame < frames; ++frame) {
+            Check(gpu->Capture(0, view.source, view.request, tuning.quality, error),
+                  name + ": colour captured at release: " + error);
+            const std::uint32_t index = static_cast<std::uint32_t>(frame % 3);
+            Acquire(bridge, depth, index);
+            if (late) {
+                WriteDepth(game, images[index], upload, 0, [](std::uint32_t, std::uint32_t) { return 0.0f; });
+            } else {
+                WriteDepth(game, images[index], upload, 0, planes);
+            }
+            GameIdle(game);
+            Check(Release(bridge, depth), name + ": the release is copied");
+            Check(gpu->CaptureDepth(0, {depth, index, 0, rect, DXGI_FORMAT_D32_FLOAT}, sc, view.request, error),
+                  name + ": Frame Generation captures the runtime's depth: " + error);
+            Check(gpu->Execute({view}, tuning, result, error), name + ": execute: " + error);
+            if (late) WriteDepth(game, images[index], upload, 0, planes);
+        }
+        Check(result.depth.size() == 1 && result.depth[0], name + ": the frame used the depth");
+        if (late) {
+            Check(Contains(bridge.Describe(depth), "depthTaken=late"),
+                  name + ": taken late: " + bridge.Describe(depth));
+
+        }
+        std::vector<float> linear;
+        depthxr::FrameGenExtent extent{};
+        std::uint32_t channels = 0;
+        Check(gpu->ReadTexture(0, {depthxr::FrameGenTextureKind::kDepth, 0}, linear, extent, channels) &&
+                  channels == 1 && !linear.empty() && extent.width * extent.height == linear.size(),
+              name + ": Frame Generation's linear depth read back");
+        double worst = 0.0;
+        for (std::uint32_t y = 0; y < extent.height; ++y) {
+            // Rows by the boundary between the planes may blend them.
+            const double at = (y + 0.5) * kSize / extent.height;
+            if (std::abs(at - kSize / 2.0) < 2.0) continue;
+            const double meters = at < kSize / 2.0 ? top : bottom;
+            for (std::uint32_t x = 0; x < extent.width; ++x) {
+                worst = std::max(worst, std::abs(linear[y * extent.width + x] - meters) / meters);
+            }
+        }
+        std::cout << "depth to Frame Generation, " << name << ": raw " << raw_top << "/" << raw_bottom
+                  << " decoded to " << linear[extent.width / 2] << "/" << linear[linear.size() - extent.width / 2]
+                  << " m (planes " << top << "/" << bottom << " m, worst " << worst * 100.0 << "% off over "
+                  << extent.width << "x" << extent.height << ")\n";
+        Check(worst <= 1e-3, name + ": Frame Generation decodes the bridged depth to " +
+                                 std::to_string(linear[extent.width / 2]) + "/" +
+                                 std::to_string(linear[linear.size() - extent.width / 2]) + " m, the planes are " +
+                                 std::to_string(top) + "/" + std::to_string(bottom) + " m");
+
+        Check(gpu->WaitIdle(), name + ": Frame Generation's work finishes");
+        for (const XrSwapchain chain : {depth, source_chain, output_chain}) gpu->Forget(chain);
+        gpu.reset();
+        FreeDepthUpload(game, upload);
+        Check(bridge.WaitIdle(10000), name + ": the bridge's queue finishes");
+        TakeLog("the game writes its depth after its frame's end");
+        TakeLog("holds");
+        TakeLog("depth timing check");
+        CheckClean(&bridge, "depth to Frame Generation, " + name);
+        Check(bridge.RemoveSwapchain(depth), name + ": removed");
+        bridge.End();
+    }
+    _putenv_s("VECTORXR_VULKAN_BRIDGE_DEPTH_CHECK_MS", "");
+    g_framegen_images.clear();
+    CheckClean(nullptr, "depth to Frame Generation (End)");
+}
+
+// BRIDGE_TEST_DEPTH_PERF=1: what mirroring a Vulkan game's depth costs at
+// games' sizes, per frame: the hand-over (the release barrier, the copy into
+// the runtime's image on the bridge's queue, the hand-back), from just before
+// it to the runtime's image written (wall time, the bridge's queue idle
+// after), its copy's GPU time (the bridge's timestamps) and its CPU time; and,
+// taken late (VECTORXR_VULKAN_BRIDGE_DEPTH=late), the acquire's extra copy,
+// from just before the acquire to the game's queue having the image back.
+// Each frame finishes before the next; then 30 frames back to back. 90
+// frames warm the GPU's clocks first.
+void MeasureDepthCost(Game& game) {
+    struct Size {
+        const char* name;
+        std::uint32_t width, height, slices;
+    };
+    const Size sizes[] = {
+        {"Star Citizen (D32 5424x5356, a swapchain an eye)", 5424, 5356, 1},
+        {"two slices (D32 2x2560x2560)", 2560, 2560, 2},
+    };
+    const auto median = [](std::vector<double> values) {
+        if (values.empty()) return 0.0;
+        std::sort(values.begin(), values.end());
+        return values[values.size() / 2];
+    };
+    const auto maximum = [](const std::vector<double>& values) {
+        return values.empty() ? 0.0 : *std::max_element(values.begin(), values.end());
+    };
+    for (const Size& size : sizes) {
+        for (const char* timing : {"end-frame", "late"}) {
+            _putenv_s("VECTORXR_VULKAN_BRIDGE_DEPTH", timing);
+            VulkanBridge bridge;
+            Session session(game);
+            BeginBridge(game, bridge, session);
+            ID3D12Device* device = BridgeDevice(bridge);
+            MakeRuntimeImages(device, 3, size.width, size.height, DXGI_FORMAT_D32_FLOAT, size.slices,
+                              RuntimeKind::kDepth);
+            const XrSwapchain swapchain = Handle(0x160);
+            std::string reason;
+            Check(bridge.AddSwapchain(swapchain, DepthInfo(size.width, size.height, VK_FORMAT_D32_SFLOAT, size.slices),
+                                      FakeEnumerate, reason),
+                  std::string(size.name) + ": bridged: " + reason);
+            const std::vector<VkImage> images = GameImages(bridge, swapchain);
+            std::vector<double> handover_ms, acquire_ms;
+            using Clock = std::chrono::steady_clock;
+            const auto ms = [](Clock::time_point a, Clock::time_point b) {
+                return std::chrono::duration<double, std::milli>(b - a).count();
+            };
+            for (int frame = 0; frame < 130; ++frame) {
+                const std::uint32_t index = static_cast<std::uint32_t>(frame) % 3;
+                Check(bridge.WaitIdle(10000), "idle");
+                GameIdle(game);
+                const auto acquire_start = Clock::now();
+                Acquire(bridge, swapchain, index);
+                GameIdle(game); // the image is the game's again (late: behind the acquire's copy)
+                const auto acquired = Clock::now();
+                for (std::uint32_t slice = 0; slice < size.slices; ++slice) {
+                    ClearDepth(game, images[index], VK_IMAGE_ASPECT_DEPTH_BIT, 0.25f + 0.001f * frame, 0, slice);
+                }
+                GameIdle(game);
+                const auto start = Clock::now();
+                Check(Release(bridge, swapchain), std::string(size.name) + ": copied");
+                Check(bridge.WaitIdle(10000), std::string(size.name) + ": the bridge's queue finishes");
+                const auto end = Clock::now();
+                if (frame >= 90) {
+                    handover_ms.push_back(ms(start, end));
+                    acquire_ms.push_back(ms(acquire_start, acquired));
+                }
+            }
+            const std::string single = bridge.Summary(); // its samples so far: the single frames
+            const auto copy_single = SummaryPair(single, "copyGpuUs p50/p99");
+            const auto cpu_single = SummaryPair(single, "handoverUs p50/max");
+            const auto back_start = Clock::now();
+            for (int frame = 0; frame < 30; ++frame) {
+                const std::uint32_t index = static_cast<std::uint32_t>(frame) % 3;
+                Acquire(bridge, swapchain, index);
+                ClearDepth(game, images[index], VK_IMAGE_ASPECT_DEPTH_BIT, 0.5f, 0);
+                Release(bridge, swapchain);
+            }
+            Check(bridge.WaitIdle(10000), "the back-to-back frames finish");
+            GameIdle(game);
+            const double back_ms = ms(back_start, Clock::now()) / 30.0;
+            const double mib = static_cast<double>(size.width) * size.height * size.slices * 4.0 / (1024.0 * 1024.0);
+            std::printf("depth cost, %s, %s: hand-over to the runtime's image written %.3f / %.3f ms (median / max), "
+                        "acquire to the image the game's again %.3f / %.3f ms, copy GPU p50/p99 %llu/%llu us, "
+                        "hand-over CPU p50/max %llu/%llu us, back to back %.3f ms a frame; %.0f MiB an image\n",
+                        size.name, timing, median(handover_ms), maximum(handover_ms), median(acquire_ms),
+                        maximum(acquire_ms), static_cast<unsigned long long>(copy_single.first),
+                        static_cast<unsigned long long>(copy_single.second),
+                        static_cast<unsigned long long>(cpu_single.first),
+                        static_cast<unsigned long long>(cpu_single.second), back_ms, mib);
+            TakeLog("holds");
+            Check(bridge.RemoveSwapchain(swapchain), "removed");
+            CheckClean(&bridge, std::string("depth cost ") + size.name);
+            bridge.End();
+        }
+    }
+    _putenv_s("VECTORXR_VULKAN_BRIDGE_DEPTH", "");
+    g_runtime_images.clear();
+}
+
 // The images get their attachment, transfer and sampled usage whatever the
 // application asked (OpenXR hands them out in the attachment layout).
 
@@ -3786,7 +4354,13 @@ int main(int argc, char** argv) {
     TestResolve(game);
     TestArray(game);
     TestDepthValues(game);
+    TestLateDepth(game);
+    TestDepthReachesFrameGen(game);
+    if (const char* perf = std::getenv("BRIDGE_TEST_DEPTH_PERF"); perf && std::string(perf) == "1") {
+        MeasureDepthCost(game);
+    }
     TestUsage(game);
+
     TestMismatch(game);
     TestPrivateDepth(game);
     TestUnmatched(game);

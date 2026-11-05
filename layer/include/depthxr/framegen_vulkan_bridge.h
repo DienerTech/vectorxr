@@ -49,7 +49,19 @@ struct VulkanBridgeGame {
 // Depth is a twin as well (the runtime gets the game's depth). Multisampled
 // colour is rendered privately and resolved into the twin at release;
 // multisampled depth stays private and never reaches the runtime (the caller
-// keeps it out of submitted frames).
+// keeps it out of submitted frames), as does all depth with
+// VECTORXR_VULKAN_BRIDGE_DEPTH=private.
+//
+// A game may write its depth after the frame's end (Star Citizen in October
+// 2026, which CIG said it will fix). About once a second the bridge reads a
+// grid of a depth swapchain's image at its hand-over and again at the
+// swapchain's next acquire; depth that varies only at the acquire, twice in a
+// row, is taken from there: each acquire copies the image handed over last,
+// and each hand-over gives the runtime that copy (the frame before's depth)
+// until depth is in the image at the hand-over again.
+// VECTORXR_VULKAN_BRIDGE_DEPTH=end-frame keeps it at the hand-over, =late takes
+// it at the acquire from the start; VECTORXR_VULKAN_BRIDGE_DEPTH_CHECK_MS sets
+// the check's interval (tests: 0, every hand-over).
 //
 // Every Vulkan call that uses the game's queue is made inside the
 // application's own xrAcquireSwapchainImage, xrReleaseSwapchainImage and
