@@ -384,6 +384,10 @@ struct D3D11Bridge::Impl {
     UINT64 idle_value{0};
     DWORD thread{0}; // the first thread a swapchain or frame call came from
     bool reported_second_thread{false};
+    DWORD second_thread{0}; // the first other thread NoteThread saw
+    // A second thread was seen and protection is off: ApplyWantedProtection
+    // turns it on (read without `mutex`).
+    std::atomic<bool> protection_wanted{false};
     bool debug_layer{false};          // VECTORXR_D3D11_BRIDGE_DEBUG=1
     std::uint32_t debug_reported{0};  // debug-layer messages reported
     std::uint64_t next_skip_report{1}; // skipped copies are reported at 1, 10, 100...
@@ -434,7 +438,11 @@ struct D3D11Bridge::Impl {
     // A swapchain or frame call's thread (holding `mutex`): Direct3D 11's
     // immediate context is the game's, and is only safe from another thread
     // when the device is multithread protected. Calls from more than one
-    // thread turn that protection on.
+    // thread want that protection on: ApplyWantedProtection turns it on,
+    // never here. SetMultithreadProtected waits for the device's lock, which
+    // a thread holding the context (ContextHold, or a game thread of its
+    // own) may hold while it waits for `mutex`, or for the layer's locks
+    // these calls are made under.
     void NoteThread() {
         const DWORD current = GetCurrentThreadId();
         if (!thread) {
@@ -445,18 +453,34 @@ struct D3D11Bridge::Impl {
             return;
         }
         reported_second_thread = true;
+        second_thread = current;
+        protection_wanted = true;
+    }
+
+    // Turns protection on once NoteThread wanted it, holding neither `mutex`
+    // nor any lock of the layer's (or holding the context already, which
+    // makes the device's lock this thread's): at the start of a hand-over
+    // (StageReleases, called before any of the layer's locks), before the
+    // bridge's Direct3D 11 calls there. Until then a second thread's calls
+    // are not serialized, as the calls before it never were.
+    void ApplyWantedProtection() {
+        if (!protection_wanted.exchange(false)) {
+            return;
+        }
+        bool on = false;
         if (multithread) {
             multithread->SetMultithreadProtected(TRUE);
-            multithread_protected = multithread->GetMultithreadProtected() != FALSE;
+            on = multithread->GetMultithreadProtected() != FALSE;
         }
+        std::scoped_lock lock(mutex);
+        multithread_protected = multithread_protected || on;
         if (log) {
             log("Direct3D 11 bridge: the game's swapchain and frame calls come from more than one thread (" +
-                std::to_string(current) + ", first " + std::to_string(thread) + "); " +
-                (multithread_protected
-                     ? "turned the game device's multithread protection on, so each of the bridge's Direct3D 11 "
-                       "calls is serialized with the game's (calls made before this one were not)."
-                     : "its device has no multithread protection to turn on: the bridge's Direct3D 11 calls there "
-                       "may race the game's rendering."));
+                std::to_string(second_thread) + ", first " + std::to_string(thread) + "); " +
+                (on ? "turned the game device's multithread protection on, so each of the bridge's Direct3D 11 "
+                      "calls is serialized with the game's (calls made before this one were not)."
+                    : "its device has no multithread protection to turn on: the bridge's Direct3D 11 calls there "
+                      "may race the game's rendering."));
         }
     }
 
@@ -1776,9 +1800,12 @@ void D3D11Bridge::StageReleases(XrSwapchain swapchain) {
     const auto waiting = [&](const Impl::Swapchain& chain) {
         return chain.pending > chain.staged.size() && chain.acquired.size() > 0;
     };
+    bool any = false;
     {
         std::scoped_lock lock(impl_->mutex);
-        bool any = false;
+        // This call's thread counts (a frame's or swapchain call's, as
+        // FrameEnded and ReleaseCalled note theirs).
+        impl_->NoteThread();
         if (swapchain != XR_NULL_HANDLE) {
             const Impl::Swapchain* chain = impl_->Find(swapchain);
             any = chain && waiting(*chain);
@@ -1786,9 +1813,12 @@ void D3D11Bridge::StageReleases(XrSwapchain swapchain) {
             any = std::any_of(impl_->swapchains.begin(), impl_->swapchains.end(),
                               [&](const auto& entry) { return waiting(entry.second); });
         }
-        if (!any) {
-            return;
-        }
+    }
+    // Before the context and `mutex`: a second thread seen since the last
+    // hand-over (this one included) turns protection on first.
+    impl_->ApplyWantedProtection();
+    if (!any) {
+        return;
     }
     // The context first, holding nothing else (ContextHold's lock order)...
     const ContextHold hold = impl_->HoldContext();

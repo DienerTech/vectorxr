@@ -96,7 +96,9 @@ class D3D11Bridge {
     // At each xrEndFrame (the application's thread): the game's immediate
     // context is used by the bridge from the threads its swapchain calls come
     // from; when those (or the frame's) differ, the device's multithread
-    // protection is turned on, so the bridge's calls cannot race the game's.
+    // protection is turned on at the next StageReleases (before any lock,
+    // as it waits for the device's lock), so the bridge's calls cannot race
+    // the game's.
     // With VECTORXR_D3D11_BRIDGE_DEBUG=1, also reports what the Direct3D 12
     // debug layer found.
     void FrameEnded();

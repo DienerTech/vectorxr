@@ -2206,6 +2206,9 @@ void TestSecondThread(Game& game) {
     bridge.Acquired(swapchain, 0);
     std::thread release([&] { bridge.Released(swapchain); });
     release.join();
+    Check(!multithread->GetMultithreadProtected() && g_log.empty(),
+          "the second thread's call itself does not turn protection on (it waits for the device's lock)");
+    bridge.StageReleases(XR_NULL_HANDLE); // the next hand-over, before the layer's locks
     Check(multithread->GetMultithreadProtected() != FALSE, "a second thread turns multithread protection on");
     Check(g_log.size() == 1 && Contains(g_log[0], "turned the game device's multithread protection on"),
           "and says so");
@@ -2216,6 +2219,77 @@ void TestSecondThread(Game& game) {
     Check(bridge.WaitIdle(10000), "the bridge's queue finishes");
     g_log.clear();
     CheckClean(bridge, game, "second thread");
+    bridge.End();
+    multithread->SetMultithreadProtected(FALSE);
+}
+
+// A colour-only game (DCS: no depth, protection off) whose second thread
+// makes its first swapchain call while another thread holds the device's
+// lock and then needs the bridge: the hand-over's context hold
+// (StageReleases), or a game thread of its own. Turning protection on waits
+// for that lock; done inside the second thread's call, holding the bridge's
+// mutex, it deadlocked with the holder's next bridge call. Events drive it:
+// a thread enters the lock, the second thread releases (ReleaseCalled, as
+// the layer calls it), and the holder waits for that release (2 s), then
+// calls StageReleases, which takes the context (its own lock again) and the
+// bridge's mutex. Both must finish; a deadlock fails the test after 10 s
+// (the process ends: its threads cannot be got back). Protection goes on in
+// that StageReleases, reported once.
+void TestSecondThreadUnderHeldContext(Game& game) {
+    ComPtr<ID3D11Multithread> multithread;
+    Check(SUCCEEDED(game.context.As(&multithread)), "the game's context has ID3D11Multithread");
+    multithread->SetMultithreadProtected(FALSE);
+    D3D11Bridge bridge;
+    Session session(game.device.Get());
+    BeginBridge(game, bridge, session);
+    MakeRuntimeImages(BridgeDevice(bridge), 2, 16, 16, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
+    const XrSwapchain swapchain = Handle(0xc1);
+    std::string reason;
+    Check(bridge.AddSwapchain(swapchain, ColorInfo(16, 16), FakeEnumerate, reason), "bridged: " + reason);
+    bridge.FrameEnded(); // the frame's thread (this one)
+    bridge.Acquired(swapchain, 0);
+
+    const auto await = [](HANDLE event, DWORD ms, const char* what) {
+        if (WaitForSingleObject(event, ms) == WAIT_OBJECT_0) return true;
+        if (what) {
+            std::cout << "FAILED: second thread under a held context: " << what
+                      << ": deadlocked (turning protection on waits for the device's lock, holding the bridge's "
+                         "mutex the lock's holder waits for)\n"
+                      << std::flush;
+            TerminateProcess(GetCurrentProcess(), 1);
+        }
+        return false;
+    };
+    const HANDLE entered = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    const HANDLE released = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    const HANDLE staged = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    std::atomic<bool> released_while_held{false};
+    std::thread holder([&] {
+        multithread->Enter();
+        SetEvent(entered);
+        released_while_held = await(released, 2000, nullptr);
+        bridge.StageReleases(XR_NULL_HANDLE);
+        multithread->Leave();
+        SetEvent(staged);
+    });
+    await(entered, 10000, "the holder did not enter the device's lock");
+    std::thread second([&] {
+        bridge.ReleaseCalled(swapchain);
+        SetEvent(released);
+    });
+    await(released, 10000, "the second thread's release did not return");
+    await(staged, 10000, "the holder's StageReleases did not return");
+    holder.join();
+    second.join();
+    for (const HANDLE event : {entered, released, staged}) CloseHandle(event);
+    Check(released_while_held, "the second thread's release returned while the device's lock was held");
+    Check(multithread->GetMultithreadProtected() != FALSE, "the hand-over turned protection on");
+    Check(g_log.size() == 1 && Contains(g_log[0], "turned the game device's multithread protection on"),
+          "and said so, once");
+    Check(bridge.Released(swapchain), "the release is handed over");
+    Check(bridge.WaitIdle(10000), "the bridge's queue finishes");
+    g_log.clear();
+    CheckClean(bridge, game, "second thread under a held context");
     bridge.End();
     multithread->SetMultithreadProtected(FALSE);
 }
@@ -2306,6 +2380,7 @@ int main(int argc, char** argv) {
         TestDrainPastGame(game);
     }
     TestSecondThread(game);
+    TestSecondThreadUnderHeldContext(game);
     if (!skip_negative_controls) {
         TestDeviceLost(game);
     } else {
