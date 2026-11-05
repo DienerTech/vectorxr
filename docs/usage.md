@@ -779,9 +779,22 @@ filter, so cockpit detail stays crisper. Direct3D 11 games that send depth, such
 and Unreal Engine games through UEVR with its **Enable Depth-based Latency Reduction** option
 on, have it copied from the game's private depth images into the headset runtime's at each
 release, so the runtime gets it as well (about 0.1 to 0.2 ms of the game's GPU time on an
-RTX 5090 at headset resolutions). DCS sends no depth, so it uses head rotation only. Star
-Citizen's depth currently arrives empty. When a game supplies useful depth for only one eye,
-Frame Generation can use it for the other eye too.
+RTX 5090 at headset resolutions). DCS sends no depth, so it uses head rotation only. When a
+game supplies useful depth for only one eye, Frame Generation can use it for the other eye too.
+
+Star Citizen currently writes its depth after it has handed the image over for the frame, so the
+depth is still empty when the frame ends (CIG plans to fix this). About once a second the Vulkan
+bridge checks a Vulkan game's depth image at the frame's end and again just before the game's
+next frame. When depth turns up only at the second check, twice in a row, the bridge takes it
+from there: each frame then carries the depth of the frame before. Frame Generation checks that
+depth against the other eye like any other, and uses it only when it lines the eyes up. The log
+says when this starts (**the game writes its depth after its frame's end**) and when it stops
+again, as soon as the depth is there at the frame's end. Taking depth this way costs one more
+copy of each depth image per frame, and one more depth image of memory per depth swapchain
+(about 110 MB for each eye at Star Citizen's 5424x5356). `VECTORXR_VULKAN_BRIDGE_DEPTH=end-frame`
+only takes a Vulkan game's depth at the frame's end, and `VECTORXR_VULKAN_BRIDGE_DEPTH=private`
+keeps every Vulkan game's depth to itself, out of the frames Frame Generation and the runtime get.
+
 
 The bridge keeps a Direct3D 11 game's depth to itself, as before, when it cannot copy it: depth
 images with more than one sample, or a runtime that does not make its depth images depth
