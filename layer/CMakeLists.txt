@@ -576,10 +576,18 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         add_executable(depthxr_framegen_presenter_tests tests/framegen_presenter_tests.cpp)
         target_link_libraries(depthxr_framegen_presenter_tests PRIVATE depthxr_framegen)
         target_compile_definitions(depthxr_framegen_presenter_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
-        add_test(NAME depthxr_framegen_presenter_tests COMMAND depthxr_framegen_presenter_tests)
-        # Paced by the wall clock: about 375 s on a fast desktop (0.19.2), longer on a shared CI runner. The lead
-        # ceiling's tests add about 3 minutes; serially (FG_TEST_SERIAL=1) the suite takes about 16 minutes.
-        set_tests_properties(depthxr_framegen_presenter_tests PROPERTIES TIMEOUT 1200)
+        # Paced by the wall clock, mostly waiting: about 680 s on a fast desktop (0.20.1) in one process beside its
+        # policy tests (no argument). CTest runs its groups (--group, GROUP in the test) as tests of their own, side by
+        # side under ctest -j: 45-160 s each on a desktop, about 18 minutes in all. -R depthxr_framegen_presenter_tests_
+        # selects them. They create no graphics device.
+        set(_presenter_tests "")
+        foreach(_group IN ITEMS pacing lifecycle quad clocks probe_burst lead ceiling policy policy_late)
+            add_test(NAME depthxr_framegen_presenter_tests_${_group}
+                     COMMAND depthxr_framegen_presenter_tests --group ${_group})
+            list(APPEND _presenter_tests depthxr_framegen_presenter_tests_${_group})
+        endforeach()
+        # COST: CTest starts the longest tests first, before it has timings of its own.
+        set_tests_properties(${_presenter_tests} PROPERTIES TIMEOUT 600 COST 200)
         add_executable(depthxr_osd_tests tests/osd_tests.cpp)
         target_link_libraries(depthxr_osd_tests PRIVATE depthxr_osd)
         target_compile_definitions(depthxr_osd_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11)
@@ -851,4 +859,44 @@ if(DEPTHXR_BUILD_TESTS)
     target_include_directories(depthxr_action_set_attachment_tests PRIVATE include)
     add_test(NAME depthxr_action_set_attachment_tests COMMAND depthxr_action_set_attachment_tests)
     set_tests_properties(depthxr_action_set_attachment_tests PROPERTIES TIMEOUT 10)
+endif()
+
+if(DEPTHXR_BUILD_TESTS)
+    # CTest may run tests side by side (ctest -j, as Build-Layer.ps1 does), but a test that touches a graphics device
+    # runs alone (RUN_SERIAL), WARP and the software Vulkan device included: never two at once (0x139 bug checks on
+    # this machine's GPU), and never beside the presenter's wall-clock pacing, which WARP's load on every core makes
+    # late (four presenter groups failed beside it under -j 8; none failed with only the CPU tests beside them).
+    # Every test is such a test except those listed here, which create no Direct3D or Vulkan device at all
+    # (stand-in runtimes and devices, or none).
+    set(_cpu_only_tests
+        vectorxr_hardware_probe_self_test
+        depthxr_layer_crt_imports_tests
+        depthxr_layer_load_tests
+        depthxr_crt_failure_report_tests
+        depthxr_test_adapter_tests
+        ${_presenter_tests}
+        depthxr_turbo_frame_tests
+        depthxr_pivot_pose_tests
+        depthxr_pivot_snap_tests
+        depthxr_pivot_gaze_tests
+        depthxr_eye_gaze_tests
+        depthxr_head_prediction_layer_tests
+        depthxr_spacewarp_probe_tests
+        depthxr_layer_tests
+        depthxr_head_prediction_tests
+        depthxr_turbo_trace_tests
+        depthxr_turbo_recovery_tests
+        depthxr_runtime_relay_tests
+        depthxr_external_status_tests
+        depthxr_process_exit_tests
+        depthxr_path_unicode_tests
+        depthxr_sound_player_tests
+        depthxr_thread_census_tests
+        depthxr_action_set_attachment_tests)
+    get_property(_layer_tests DIRECTORY PROPERTY TESTS)
+    foreach(_test IN LISTS _layer_tests)
+        if(NOT _test IN_LIST _cpu_only_tests)
+            set_property(TEST ${_test} PROPERTY RUN_SERIAL TRUE)
+        endif()
+    endforeach()
 endif()

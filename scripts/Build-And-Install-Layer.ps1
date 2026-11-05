@@ -6,6 +6,9 @@ param(
     [switch]$SkipTests,
     [switch]$SkipFresh,
     [switch]$CleanScratch,
+    # Tests run side by side (Build-Layer.ps1's -TestJobs; 0: its default).
+    [ValidateRange(0, 64)]
+    [int]$TestJobs = 0,
     # Signs the built layer locally and installs that signed copy instead
     # (Sign-LocalLayer.ps1): for testing in games with anti-cheat only.
     [switch]$Sign,
@@ -33,6 +36,10 @@ if ($SkipFresh) {
 
 if ($CleanScratch) {
     $buildArgs.CleanScratch = $true
+}
+
+if ($TestJobs -gt 0) {
+    $buildArgs.TestJobs = $TestJobs
 }
 
 & $buildScript @buildArgs
