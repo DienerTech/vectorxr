@@ -2771,6 +2771,16 @@ class D3D12FrameGen final : public FrameGenGpu {
     // The margin is drawn with the frame (FG_PASS_SYNTHESIZE_DRAW, and the
     // quad views compose draw); a frame copied by compute fills none.
     bool SupportsEdgeFill() const override { return DrawsOutputs(); }
+    bool EdgesFilled() const override { return edges_filled_; }
+    // Edge fill: no output with a margin written by the copy fallback since
+    // the frame function began (EdgesFilled).
+    bool edges_filled_{true};
+    // Whether image has a margin around a frame of extent.
+    static bool HasMargin(const FrameGenImage& image, FrameGenExtent extent) {
+        return image.content.x != 0 || image.content.y != 0 ||
+               static_cast<std::uint32_t>(image.rect.extent.width) != extent.width ||
+               static_cast<std::uint32_t>(image.rect.extent.height) != extent.height;
+    }
     std::uint64_t DrawsForTest() const override { return draws_; }
     std::uint64_t ShadingRatesForTest() const override { return shading_rates_; }
 
@@ -3031,6 +3041,7 @@ class D3D12FrameGen final : public FrameGenGpu {
 
     bool Execute(const std::vector<FrameGenViewSubmission>& views, const FrameGenTuning& tuning,
                  FrameGenExecuteResult& result, std::string& error) override {
+        edges_filled_ = true;
         result.synthesized.assign(views.size(), false);
         result.depth.assign(views.size(), false);
         result.merged.assign(views.size(), false);
@@ -3529,6 +3540,7 @@ class D3D12FrameGen final : public FrameGenGpu {
 
     bool Synthesize(std::uint64_t frame_id, FrameGenSynthesisMode mode, float fraction,
                     const std::vector<FrameGenImage>& outputs, std::string& error) override {
+        edges_filled_ = true;
         HRESULT hr = DeviceRemovedReason();
         if (FAILED(hr)) {
             error = Failure("D3D12 device", hr);
@@ -3601,6 +3613,7 @@ class D3D12FrameGen final : public FrameGenGpu {
 
     bool SynthesizeStale(std::uint64_t frame_id, std::uint64_t motion_id, float fraction,
                          const std::vector<FrameGenImage>& outputs, std::string& error) override {
+        edges_filled_ = true;
         HRESULT hr = DeviceRemovedReason();
         if (FAILED(hr)) {
             error = Failure("D3D12 Frame Generation device", hr);
@@ -3692,6 +3705,9 @@ class D3D12FrameGen final : public FrameGenGpu {
     bool ComposeSynthesis(std::uint64_t frame_id, std::uint64_t motion_id, FrameGenSynthesisMode mode, float fraction,
                           const FrameGenComposition& composition, const std::vector<FrameGenImage>& outputs,
                           std::string& error) {
+        // The compose draw fills every eye's margin (ComposeOutput refuses
+        // an output it cannot draw into).
+        edges_filled_ = true;
         if (!supports_composition_) {
             error = "this Direct3D 12 device cannot compose quad views";
             return false;
@@ -6881,8 +6897,10 @@ class D3D12FrameGen final : public FrameGenGpu {
                 out_destination.SubresourceIndex = image.array_index * output_desc.MipLevels;
                 D3D12_TEXTURE_COPY_LOCATION out_source{view.output.resource.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
                 out_source.SubresourceIndex = 0;
-                // Copied, a frame keeps its place in an image with edge fill
-                // (whose margin only a draw fills: SupportsEdgeFill).
+                // Copied, a frame keeps its place in an image with edge fill;
+                // its margin keeps what it held, so the caller shows the frame
+                // from its own region (EdgesFilled).
+                if (HasMargin(image, submission.request.extent)) edges_filled_ = false;
                 commands_->CopyTextureRegion(&out_destination, static_cast<UINT>(image.rect.offset.x + image.content.x),
                                              static_cast<UINT>(image.rect.offset.y + image.content.y), 0, &out_source,
                                              nullptr);

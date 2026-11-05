@@ -335,6 +335,8 @@ struct GpuLog {
     std::vector<std::vector<FrameGenImage>> synthesis_outputs;
     // Edge fill (SupportsEdgeFill): the backend fills output images' margins.
     bool edge_fill{false};
+    // EdgesFilled: false as when the backend copies frames in (margins not drawn).
+    std::atomic<bool> edges_filled{true};
     std::atomic<int> synthesis_failures{0};
     // SynthesizeStale: supported, written, and asked of a motion frame that
     // was not the frame's previous one or not measured yet.
@@ -442,6 +444,7 @@ class FakeGpu final : public FrameGenGpu {
     explicit FakeGpu(GpuLog* log) : log_(log) {}
     const char* Name() const override { return "Fake"; }
     bool SupportsEdgeFill() const override { return log_->edge_fill; }
+    bool EdgesFilled() const override { return log_->edges_filled; }
     std::string HardwareFlowStatus() const override {
         return log_->hardware_available ? "active" : "fake GPU has no optical flow hardware";
     }
@@ -1971,6 +1974,35 @@ void TestEdgeFill() {
         }
     }
     Check(generated >= 2 && real >= 2, "edge fill: generated and real frames were shown");
+    // A frame the backend copied in (its margin not drawn: the copy fallback)
+    // is shown from its own region with the game's field of view: what the
+    // margin holds never reaches the runtime.
+    gpu.edges_filled = false;
+    std::size_t before = 0;
+    {
+        std::scoped_lock lock(g_xr_mutex);
+        before = runtime.submitted_views.size();
+    }
+    for (int i = 0; i < 4; ++i) app.Frame();
+    std::size_t unfilled = 0;
+    {
+        std::scoped_lock lock(g_xr_mutex);
+        for (std::size_t i = before; i < runtime.submitted_views.size(); ++i) {
+            const auto& views = runtime.submitted_views[i];
+            if (views.empty() || IsAppImage(runtime.submitted_swapchains[i])) continue;
+            ++unfilled;
+            for (const XrCompositionLayerProjectionView& view : views) {
+                const XrRect2Di& rect = view.subImage.imageRect;
+                Check(rect.offset.x == static_cast<std::int32_t>(margins.left) &&
+                          rect.offset.y == static_cast<std::int32_t>(margins.up) && rect.extent.width == 1600 &&
+                          rect.extent.height == 1600 && view.fov.angleLeft == -0.8f && view.fov.angleRight == 0.8f &&
+                          view.fov.angleUp == 0.8f && view.fov.angleDown == -0.8f,
+                      "edge fill: a frame copied in is shown from its own region with the game's field of view");
+            }
+        }
+    }
+    Check(unfilled >= 2, "edge fill: frames copied in were shown");
+    gpu.edges_filled = true;
     // Off while running: the next frames' outputs are the frame's size again.
     settings.edge_fill = false;
     presenter.Configure(settings);
@@ -3935,6 +3967,38 @@ void TestJitEdgeFill() {
         creates = g_creates;
     }
     Check(creates == 2, "jit edge fill: one output per eye, made once (" + std::to_string(creates) + ")");
+    // Frames the backend copied in: shown from their own region, unwidened.
+    gpu.edges_filled = false;
+    std::size_t copied_from = 0;
+    {
+        std::scoped_lock lock(g_xr_mutex);
+        copied_from = runtime.submitted_views.size();
+    }
+    const auto copied_start = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - copied_start < 300ms) {
+        const XrFrameState state = app->Wait();
+        app->Begin();
+        std::this_thread::sleep_for(4ms);
+        app->Release();
+        Check(XR_SUCCEEDED(app->End(state.predictedDisplayTime)), "jit edge fill: end");
+    }
+    std::size_t copied_shown = 0, widened = 0;
+    {
+        std::scoped_lock lock(g_xr_mutex);
+        // A few refreshes in: frames written before the switch may still show.
+        for (std::size_t i = copied_from + 6; i < runtime.submitted_views.size(); ++i) {
+            const auto& views = runtime.submitted_views[i];
+            if (views.empty()) continue;
+            ++copied_shown;
+            const XrRect2Di& rect = views[0].subImage.imageRect;
+            widened += rect.offset.x == static_cast<std::int32_t>(margins.left) && rect.extent.width == 1600 &&
+                               views[0].fov.angleLeft == -0.8f
+                           ? 0
+                           : 1;
+        }
+    }
+    Check(copied_shown > 5 && widened == 0, "jit edge fill: frames copied in are shown from their own region (" +
+                                                std::to_string(widened) + " of " + std::to_string(copied_shown) + " not)");
     presenter.Stop();
     Check(!runtime.ordering_violation && !g_release_violation, "jit edge fill: calls stayed ordered");
 }
