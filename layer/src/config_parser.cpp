@@ -2463,6 +2463,7 @@ bool ParseFrameGenSettings(const JsonValue::Object& object, const char* field, F
         "artifactSuppression",
         "motionLimitPercent",
         "extendHeadPrediction",
+        "edgeFill",
     };
     NoteUnknownKeys(object, allowed);
 
@@ -2524,6 +2525,13 @@ bool ParseFrameGenSettings(const JsonValue::Object& object, const char* field, F
     }
     if (extend_head_prediction) {
         out.extend_head_prediction = *extend_head_prediction;
+    }
+    std::optional<bool> edge_fill;
+    if (!ReadOptionalBool(object, "edgeFill", edge_fill, error)) {
+        return false;
+    }
+    if (edge_fill) {
+        out.edge_fill = *edge_fill;
     }
     return ReadOptionalBoundedInt(object, "artifactSuppression", field, 0, 100, out.artifact_suppression, error) &&
         ReadOptionalBoundedInt(object, "motionLimitPercent", field, 2, 25, out.motion_limit_percent, error);

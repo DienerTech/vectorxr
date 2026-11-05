@@ -581,6 +581,11 @@ struct FrameGenSettings {
     // Generation tells the game that the runtime does not predict (see
     // head_prediction.h). Off by default.
     bool extend_head_prediction{false};
+    // Edge fill: frames Frame Generation writes reach a few degrees past the
+    // game's field of view, the margin repeating the frame's edge, so a fast
+    // head turn shows a smeared edge instead of black on its leading side
+    // (FrameGenEdgeMargins). Direct3D 12 and the bridges only. Off by default.
+    bool edge_fill{false};
 };
 
 struct FrameGenProfile {

@@ -698,7 +698,8 @@ class FrameGenPresenter {
 
     struct Output {
         XrSwapchain swapchain{XR_NULL_HANDLE};
-        FrameGenExtent extent;
+        FrameGenExtent extent; // the whole image: with edge fill, the frame and its margins
+        FrameGenEdgeMargins margins;
         std::int64_t format{0};
         FrameGenOutputKind requested{FrameGenOutputKind::kSrgb8}; // what the source asked for
         FrameGenOutputKind kind{FrameGenOutputKind::kSrgb8};      // what the swapchain format holds
@@ -875,9 +876,19 @@ class FrameGenPresenter {
 
     // An output image per output index: its extent and what it holds.
     struct OutputSpec {
-        FrameGenExtent extent;
+        FrameGenExtent extent; // the frame's (the image adds `margins`)
         FrameGenOutputKind kind{FrameGenOutputKind::kSrgb8};
+        FrameGenEdgeMargins margins; // edge fill (EdgeMarginsLocked)
     };
+    // Edge fill: the margins of the output image for a frame of `extent`
+    // seen with `fov` (none while the setting is off or the backend cannot
+    // fill them: FrameGenGpu::SupportsEdgeFill).
+    FrameGenEdgeMargins EdgeMarginsLocked(const XrFovf& fov, FrameGenExtent extent) const;
+    // An output image's region and where its frame starts in it.
+    static FrameGenImage OutputImage(const Output& output);
+    // A view shown from `output`: its image, and with edge fill its field of
+    // view widened across the margins.
+    static void ShowOutput(XrCompositionLayerProjectionView& view, const Output& output);
 
     bool WantsEngagementLocked() const;
     // Frames are generated or about to be: the game's releases are captured.
@@ -2412,6 +2423,11 @@ class FrameGenPresenter {
     // sub-pixel motion, with VECTORXR_FRAMEGEN_SYNTH_FLOW_VIEW=fine, read at
     // Start and at each config reload.
     bool flow_view_fine_{false};
+    // Edge fill (FrameGenSettings::edge_fill): degrees each margin reaches
+    // past the frame's edge, horizontally and vertically; research
+    // VECTORXR_FRAMEGEN_EDGE_FILL=h[,v] changes them, read at Start and at
+    // each config reload.
+    std::array<float, 2> edge_fill_degrees_{kFrameGenEdgeFillHorizontalDegrees, kFrameGenEdgeFillVerticalDegrees};
     // Research (the head-motion shimmer diagnosis, D): where extrapolated
     // frames' eyes go (FrameGenPredictEye; VECTORXR_FRAMEGEN_SYNTH_EYE), read
     // at Start.

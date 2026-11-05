@@ -1804,6 +1804,7 @@ bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig&
            lhs.framegen.artifact_suppression == rhs.framegen.artifact_suppression &&
            lhs.framegen.motion_limit_percent == rhs.framegen.motion_limit_percent &&
            lhs.framegen.extend_head_prediction == rhs.framegen.extend_head_prediction &&
+           lhs.framegen.edge_fill == rhs.framegen.edge_fill &&
            lhs.framegen.diagnostic_view == rhs.framegen.diagnostic_view &&
            SameInputBindings(lhs.framegen.toggle_bindings, rhs.framegen.toggle_bindings);
 }
@@ -15625,6 +15626,7 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
            << ", framegenArtifactSuppression=" << settings.framegen.artifact_suppression
            << ", framegenMotionLimitPercent=" << settings.framegen.motion_limit_percent
            << ", framegenExtendHeadPrediction=" << settings.framegen.extend_head_prediction
+           << ", framegenEdgeFill=" << settings.framegen.edge_fill
            << ", framegenDiagnosticView=" << ToString(settings.framegen.diagnostic_view)
            << ", framegenToggleBindings=" << BindingListLabel(settings.framegen.toggle_bindings);
     logger_.Debug(stream.str());

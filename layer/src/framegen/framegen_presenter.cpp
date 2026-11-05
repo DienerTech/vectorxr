@@ -288,6 +288,37 @@ FrameGenExtent Extent(const XrCompositionLayerProjectionView& view) {
             static_cast<std::uint32_t>(std::max(0, view.subImage.imageRect.extent.height))};
 }
 
+FrameGenFov Fov(const XrFovf& fov) {
+    return {fov.angleLeft, fov.angleRight, fov.angleUp, fov.angleDown};
+}
+
+// Edge fill: whether a view written by Frame Generation shows the game's
+// own field of view (an exact copy may then carry the game's depth, which
+// describes that image), not one widened by a margin.
+bool SameFov(const XrCompositionLayerProjectionView& a, const XrCompositionLayerProjectionView& b) {
+    return a.fov.angleLeft == b.fov.angleLeft && a.fov.angleRight == b.fov.angleRight &&
+           a.fov.angleUp == b.fov.angleUp && a.fov.angleDown == b.fov.angleDown;
+}
+
+// Edge fill: output images whose margins are this many pixels wider than a
+// frame asks for at most are kept (EnsureOutputs).
+constexpr std::uint32_t kEdgeFillSlack = 64;
+// Edge fill: margins made anew are rounded up to whole tiles of this many
+// pixels, the largest shading-rate tile: the frame then lies on the tiles
+// and the 2x2 coarse pixels of its draw as without the fill, and its own
+// pixels come out the same.
+constexpr std::uint32_t kEdgeFillRound = 32;
+
+// Edge fill's margins in degrees (research: VECTORXR_FRAMEGEN_EDGE_FILL=h[,v]).
+std::array<float, 2> EdgeFillDegrees() {
+    if (const std::optional<std::string> value = ReadResearchSwitch("VECTORXR_FRAMEGEN_EDGE_FILL")) {
+        if (const auto parsed = ParseFrameGenEdgeFillDegrees(*value)) {
+            return *parsed;
+        }
+    }
+    return {kFrameGenEdgeFillHorizontalDegrees, kFrameGenEdgeFillVerticalDegrees};
+}
+
 // One history slot of these views, estimated: each view's image, and
 // depth, trust and flow at half resolution or less (about one and a half
 // images' worth); with the engine motion map (`map`, stage 7:
@@ -659,6 +690,7 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
     // Research: the Flow view tinting sub-pixel motion (again at each config
     // reload).
     flow_view_fine_ = ReadResearchSwitch("VECTORXR_FRAMEGEN_SYNTH_FLOW_VIEW") == "fine";
+    edge_fill_degrees_ = EdgeFillDegrees(); // again at each config reload
     // Research (the head-motion shimmer diagnosis, D), for the session: where
     // extrapolated frames' eyes go (VECTORXR_FRAMEGEN_SYNTH_EYE).
     eye_prediction_ = ParseFrameGenEyePrediction(ReadResearchSwitch("VECTORXR_FRAMEGEN_SYNTH_EYE").value_or(""));
@@ -1261,10 +1293,21 @@ void FrameGenPresenter::Configure(const FrameGenResolvedSettings& settings) {
     const bool engine_cockpit = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_COCKPIT") == "1";
     const bool engine_tint = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_TINT") == "1";
     const bool flow_view_fine = ReadResearchSwitch("VECTORXR_FRAMEGEN_SYNTH_FLOW_VIEW") == "fine";
+    const std::array<float, 2> edge_fill_degrees = EdgeFillDegrees();
     std::scoped_lock lock(mutex_);
     ReconfigureEngineLocked(ParseFrameGenEngineMode(engine_mode.value_or("").c_str()), engine_filter, engine_cockpit,
                             engine_tint);
     flow_view_fine_ = flow_view_fine;
+    // Edge fill on or off, or its margins changed: the next frame written
+    // makes its output images anew (EnsureOutputs), and the log says so.
+    if (started_ && logger_ && (settings.edge_fill != settings_.edge_fill || edge_fill_degrees != edge_fill_degrees_)) {
+        logger_->Info(std::string("Frame Generation edge fill ") + (settings.edge_fill ? "on" : "off") + " (" +
+                      Number(edge_fill_degrees[0], 1) + " degrees left and right, " + Number(edge_fill_degrees[1], 1) +
+                      " up and down" +
+                      (gpu_ && !gpu_->SupportsEdgeFill() ? "; this graphics API's frames are written without it" : "") +
+                      ").");
+    }
+    edge_fill_degrees_ = edge_fill_degrees;
     // Just in time, the presenter thread keeps the mode it started with
     // (StayThreadedLocked): another one starts it again, after a fresh run of
     // steady frames, as turning Frame Generation off and on does. Frames
@@ -5563,6 +5606,11 @@ XrResult FrameGenPresenter::RunCycle(XrSession session, const XrFrameEndInfo& in
         generated_layer.layerFlags = flags;
         generated_layer.viewCount = static_cast<std::uint32_t>(views.size());
         generated_layer.views = views.data();
+        // Not on an image widened by edge fill: the game's depth describes
+        // its own field of view.
+        for (std::size_t i = 0; depth && i < views.size() && i < projection.viewCount; ++i) {
+            depth = SameFov(views[i], projection.views[i]);
+        }
         if (depth && views.size() == projection.viewCount) {
             // The newest real frame's depth chain, valid during this end: its
             // depth image is the one the game just released.
@@ -6368,8 +6416,12 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         EngineDeltaLocked(frame, submissions);
     }
     std::vector<OutputSpec> specs(projection.viewCount);
-    for (std::uint32_t i = 0; i < projection.viewCount; ++i) {
-        specs[i] = {Extent(projection.views[i]), kinds[i]};
+    {
+        std::scoped_lock lock(mutex_);
+        for (std::uint32_t i = 0; i < projection.viewCount; ++i) {
+            const FrameGenExtent extent = Extent(projection.views[i]);
+            specs[i] = {extent, kinds[i], EdgeMarginsLocked(projection.views[i].fov, extent)};
+        }
     }
     if (count && !EnsureOutputs(specs, count, error)) {
         std::scoped_lock lock(mutex_);
@@ -6416,10 +6468,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
             for (std::size_t set = 0; set < count && ok; ++set) {
                 const Output& output = output_sets_[set][i];
                 submissions[i].request.output = output.kind;
-                submissions[i].outputs.push_back({output.swapchain, output.index, 0,
-                                                  {{0, 0}, {static_cast<std::int32_t>(output.extent.width),
-                                                            static_cast<std::int32_t>(output.extent.height)}},
-                                                  output.format});
+                submissions[i].outputs.push_back(OutputImage(output));
                 ok = gpu_->Track(output.swapchain, xr_.images, error);
             }
         }
@@ -6694,9 +6743,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         views.assign(projection.views, projection.views + projection.viewCount);
         for (std::size_t i = 0; i < views.size(); ++i) {
             views[i].next = nullptr; // a generated image has no matching depth
-            views[i].subImage.swapchain = output_sets_[set][i].swapchain;
-            views[i].subImage.imageRect = submissions[i].outputs[set].rect;
-            views[i].subImage.imageArrayIndex = 0;
+            ShowOutput(views[i], output_sets_[set][i]);
             if (i < executed.depth.size() && executed.depth[i]) {
                 // Seen from where the eye will be (FrameGenViewRequest::shift);
                 // the runtime still corrects the rotation.
@@ -6930,6 +6977,36 @@ void FrameGenPresenter::WriteCaptureNotes(const std::string& directory, const Ca
     }
 }
 
+FrameGenEdgeMargins FrameGenPresenter::EdgeMarginsLocked(const XrFovf& fov, FrameGenExtent extent) const {
+    if (!settings_.edge_fill || !gpu_ || !gpu_->SupportsEdgeFill()) {
+        return {};
+    }
+    return FrameGenEdgeFillMargins(Fov(fov), extent, edge_fill_degrees_[0], edge_fill_degrees_[1]);
+}
+
+FrameGenImage FrameGenPresenter::OutputImage(const Output& output) {
+    FrameGenImage image{output.swapchain, output.index, 0,
+                        {{0, 0}, {static_cast<std::int32_t>(output.extent.width), static_cast<std::int32_t>(output.extent.height)}},
+                        output.format};
+    image.content = {static_cast<std::int32_t>(output.margins.left), static_cast<std::int32_t>(output.margins.up)};
+    return image;
+}
+
+void FrameGenPresenter::ShowOutput(XrCompositionLayerProjectionView& view, const Output& output) {
+    view.subImage.swapchain = output.swapchain;
+    view.subImage.imageArrayIndex = 0;
+    view.subImage.imageRect = {{0, 0}, {static_cast<std::int32_t>(output.extent.width),
+                                        static_cast<std::int32_t>(output.extent.height)}};
+    if (output.margins.Any()) {
+        // The image's own projection: the frame's tangents carried on across
+        // the margins, which the runtime turns into view on a fast turn.
+        const FrameGenExtent frame{output.extent.width - output.margins.left - output.margins.right,
+                                   output.extent.height - output.margins.up - output.margins.down};
+        const FrameGenFov widened = FrameGenEdgeFillFov(Fov(view.fov), frame, output.margins);
+        view.fov = {widened.left, widened.right, widened.up, widened.down};
+    }
+}
+
 bool FrameGenPresenter::EnsureOutputs(const std::vector<OutputSpec>& specs, std::size_t sets, std::string& error,
                                       bool keep_replaced) {
     const std::uint32_t count = static_cast<std::uint32_t>(specs.size());
@@ -6977,10 +7054,37 @@ bool FrameGenPresenter::EnsureOutputs(const std::vector<OutputSpec>& specs, std:
     for (std::size_t set = 0; set < sets; ++set) {
         for (std::uint32_t i = 0; i < count; ++i) {
             Output& output = output_sets_[set][i];
-            const FrameGenExtent extent = specs[i].extent;
+            // With edge fill, the frame and its margins. Margins a little
+            // wider than asked keep their images: a field of view that wavers
+            // (a runtime's per-frame eye poses) never makes them anew.
+            FrameGenEdgeMargins margins = specs[i].margins;
+            const auto close = [](std::uint32_t kept, std::uint32_t asked) {
+                return kept >= asked && kept <= asked + kEdgeFillSlack;
+            };
+            if (output.swapchain && margins.Any() && output.margins.Any() &&
+                output.extent.width == specs[i].extent.width + output.margins.left + output.margins.right &&
+                output.extent.height == specs[i].extent.height + output.margins.up + output.margins.down &&
+                close(output.margins.left, margins.left) && close(output.margins.right, margins.right) &&
+                close(output.margins.up, margins.up) && close(output.margins.down, margins.down)) {
+                margins = output.margins;
+            } else if (margins.Any()) {
+                // Made anew: each margin rounded up to whole tiles
+                // (kEdgeFillRound), within the largest image.
+                const auto round = [](std::uint32_t margin, std::uint32_t frame, std::uint32_t other) {
+                    const std::uint32_t rounded =
+                        margin ? (margin + kEdgeFillRound - 1) / kEdgeFillRound * kEdgeFillRound : 0u;
+                    return frame + other + rounded <= kFrameGenEdgeFillMaxExtent ? rounded : margin;
+                };
+                margins.left = round(margins.left, specs[i].extent.width, margins.right);
+                margins.right = round(margins.right, specs[i].extent.width, margins.left);
+                margins.up = round(margins.up, specs[i].extent.height, margins.down);
+                margins.down = round(margins.down, specs[i].extent.height, margins.up);
+            }
+            const FrameGenExtent extent{specs[i].extent.width + margins.left + margins.right,
+                                        specs[i].extent.height + margins.up + margins.down};
             const FrameGenOutputKind kind = specs[i].kind;
             if (output.swapchain && output.extent.width == extent.width && output.extent.height == extent.height &&
-                output.requested == kind) {
+                output.margins == margins && output.requested == kind) {
                 continue;
             }
             if (output.swapchain) {
@@ -7040,6 +7144,7 @@ bool FrameGenPresenter::EnsureOutputs(const std::vector<OutputSpec>& specs, std:
             }
             std::scoped_lock lock(mutex_);
             output.extent = extent;
+            output.margins = margins;
             output.format = format;
             output.requested = kind;
             // An sRGB fallback for a UNORM or float source must also encode.
@@ -7090,7 +7195,21 @@ bool FrameGenPresenter::EnsureOutputs(const std::vector<OutputSpec>& specs, std:
                           ", imagesPerSwapchain=" + std::to_string(output_sets_.front().front().image_count) +
                           ", estimated video memory " + Number((working + swapchains) / megabytes, 0) +
                           " MB (working " + Number(working / megabytes, 0) + " MB" + (working_bytes_ ? "" : " estimated") +
-                          ", output swapchains " + Number(swapchains / megabytes, 0) + " MB).");
+                          ", output swapchains " + Number(swapchains / megabytes, 0) + " MB)" +
+                          [&] {
+                              // Edge fill: each view's margins (left/right/up/down pixels).
+                              std::string fill;
+                              for (const Output& output : output_sets_.front()) {
+                                  if (!output.margins.Any()) continue;
+                                  fill += std::string(fill.empty() ? ", edge fill margins " : "; ") +
+                                          std::to_string(output.margins.left) + "/" + std::to_string(output.margins.right) +
+                                          "/" + std::to_string(output.margins.up) + "/" +
+                                          std::to_string(output.margins.down) + " px of " +
+                                          std::to_string(output.extent.width) + "x" + std::to_string(output.extent.height);
+                              }
+                              return fill;
+                          }() +
+                          ".");
             LogMemoryBudgetLocked();
         }
     }
@@ -7435,10 +7554,15 @@ XrFrameEndInfo FrameGenPresenter::BuildFrame(FrameCopy& copy, const std::vector<
                 // position, so such a runtime only rotates them. An exact
                 // copy of the real frame keeps it (while the game has not
                 // released a newer depth image: DropStaleDepthLocked).
+                // Nor on an image widened by edge fill (SameFov).
+                bool depth = generated_depth && layer.views.size() == generated->size();
+                for (std::size_t view = 0; depth && view < layer.views.size(); ++view) {
+                    depth = SameFov(layer.views[view], (*generated)[view]);
+                }
                 layer.views = *generated;
                 layer.depth.resize(layer.views.size(), XrCompositionLayerDepthInfoKHR{XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR});
                 layer.has_depth.resize(layer.views.size(), 0);
-                if (!generated_depth) {
+                if (!depth) {
                     std::fill(layer.has_depth.begin(), layer.has_depth.end(), std::uint8_t{0});
                 }
                 layer.projection.space = generated_space;
@@ -8784,7 +8908,11 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
             FindProjection(info, &projection_index);
             layers.assign(info.layers, info.layers + info.layerCount);
             generated_views = between[skip];
-            const bool depth = skip < between_exact.size() && between_exact[skip];
+            bool depth = skip < between_exact.size() && between_exact[skip];
+            // Not on an image widened by edge fill (SameFov).
+            for (std::size_t i = 0; depth && i < generated_views.size() && i < projection->viewCount; ++i) {
+                depth = SameFov(generated_views[i], projection->views[i]);
+            }
             for (std::size_t i = 0; i < generated_views.size() && i < projection->viewCount; ++i) {
                 generated_views[i].next = depth ? projection->views[i].next : nullptr;
             }
@@ -9788,15 +9916,20 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
         if (composition.eyes.size() != quad->eyes.size()) {
             return false;
         }
-        for (const FrameGenComposeEye& eye : composition.eyes) {
+        std::scoped_lock lock(mutex_);
+        for (std::size_t e = 0; e < composition.eyes.size(); ++e) {
+            const FrameGenComposeEye& eye = composition.eyes[e];
             if (eye.peripheral >= frame.kinds.size() || eye.focus >= frame.kinds.size()) {
                 return false;
             }
-            specs.push_back({composition.output, frame.kinds[eye.focus]});
+            specs.push_back({composition.output, frame.kinds[eye.focus],
+                             EdgeMarginsLocked(quad->eyes[e].fov, composition.output)});
         }
     } else {
+        std::scoped_lock lock(mutex_);
         for (std::size_t i = 0; i < layer.views.size(); ++i) {
-            specs.push_back({Extent(layer.views[i]), frame.kinds[i]});
+            const FrameGenExtent extent = Extent(layer.views[i]);
+            specs.push_back({extent, frame.kinds[i], EdgeMarginsLocked(layer.views[i].fov, extent)});
         }
     }
     std::string error;
@@ -9866,9 +9999,7 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
             }
             output.waited = true;
         }
-        images.push_back({output.swapchain, output.index, 0,
-                          {{0, 0}, {static_cast<std::int32_t>(output.extent.width), static_cast<std::int32_t>(output.extent.height)}},
-                          output.format});
+        images.push_back(OutputImage(output));
     }
     bool ok = false;
     {
@@ -9956,10 +10087,7 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
     for (std::size_t i = 0; i < views.size(); ++i) {
         const Output& output = output_sets_.front()[i];
         views[i].next = nullptr;
-        views[i].subImage.swapchain = output.swapchain;
-        views[i].subImage.imageArrayIndex = 0;
-        views[i].subImage.imageRect = {{0, 0}, {static_cast<std::int32_t>(output.extent.width),
-                                                static_cast<std::int32_t>(output.extent.height)}};
+        ShowOutput(views[i], output);
         const std::size_t moved_as = quad ? quad->composition.eyes[i].peripheral : i;
         if (eye_time != 0.0f && moved_as < frame.velocity.size()) {
             const std::array<float, 3>& velocity = frame.velocity[moved_as];

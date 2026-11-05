@@ -1721,6 +1721,11 @@
           "type": "boolean",
           "default": false,
           "description": "Frame Generation has the game render for a display time up to ~150 ms ahead; some runtimes (Pimax's) predict the head only ~20 ms of that. When on, VectorXR measures how far the runtime predicts and carries the head's turn over the rest, which shrinks the black band at the edge you turn toward. Turn it on before the game starts: it needs the runtime's clock, which is requested at startup."
+        },
+        "edgeFill": {
+          "type": "boolean",
+          "default": false,
+          "description": "Frames Frame Generation writes reach a few degrees past the game's field of view (3 degrees left and right, 1.5 up and down), the extra margin repeating the frame's edge. On a fast head turn the runtime then shows a smeared edge on the side you turn toward instead of a black band. Costs some GPU time and video memory for the wider images. Direct3D 12 games and Direct3D 11 or Vulkan games through the bridge; it can be changed while the game runs."
         }
       }
     },
