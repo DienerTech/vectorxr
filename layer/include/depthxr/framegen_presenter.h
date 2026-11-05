@@ -158,6 +158,12 @@ struct FrameGenStatus {
     std::uint64_t runtime_clock_displacements{0};
     bool threaded{false};        // presenting from the presenter thread
     FrameGenDepthState depth{FrameGenDepthState::kUnknown};
+    // The last depth check found the game's depth the same all over in both
+    // eyes (no varying cells): sent and readable, but empty or never written
+    // (Star Citizen's, October 2026). The Vulkan bridge then checks when the
+    // game writes it (VulkanBridge::WantDepthTimingCheck).
+    bool depth_uniform{false};
+
     // The game's motion vectors steer the generated frames. Engine motion
     // vectors are research only so far: nothing sets this yet; the OSD and
     // the app say so once it does.

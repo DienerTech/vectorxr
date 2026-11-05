@@ -1239,6 +1239,8 @@ class OpenXrLayer {
     // Frame Generation's captures (HandOverBridgedReleasesLocked). mutex_.
     bool vulkan_bridge_motion_{false};
     std::chrono::steady_clock::time_point vulkan_bridge_last_summary_; // mutex_
+    std::chrono::steady_clock::time_point vulkan_bridge_last_depth_poll_; // mutex_
+
     // Either bridge's swapchain, and one whose runtime images never get
     // anything (its calls need no ordering with the game's queue).
     bool BridgedSwapchain(XrSwapchain swapchain) const {

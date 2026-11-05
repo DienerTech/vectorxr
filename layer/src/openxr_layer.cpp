@@ -9765,6 +9765,14 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
             vulkan_bridge_last_summary_ = now;
             logger_.Info("Frame Generation's Vulkan bridge: " + vulkan_bridge_.Summary());
         }
+        // Depth Frame Generation found the same all over (Star Citizen's,
+        // written after the frame's end): the bridge checks when it arrives.
+        // Other games' submissions stay as they were.
+        if (now - vulkan_bridge_last_depth_poll_ >= std::chrono::milliseconds(500)) {
+            vulkan_bridge_last_depth_poll_ = now;
+            vulkan_bridge_.WantDepthTimingCheck(framegen_.Status().depth_uniform);
+        }
+
         if (vulkan_bridge_.Lost(lost)) {
             if (!vulkan_bridge_lost_logged_) {
                 vulkan_bridge_lost_logged_ = true;

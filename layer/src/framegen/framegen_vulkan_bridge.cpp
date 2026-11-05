@@ -565,6 +565,9 @@ struct VulkanBridge::Impl {
     };
     DepthTiming depth_timing{DepthTiming::kAuto};
     std::chrono::milliseconds late_check_interval{kLateCheckInterval}; // VECTORXR_VULKAN_BRIDGE_DEPTH_CHECK_MS
+    bool check_wanted{false}; // WantDepthTimingCheck
+    bool check_always{false}; // VECTORXR_VULKAN_BRIDGE_DEPTH_CHECK=always
+    bool check_reported{false};
     std::uint64_t late_copies{0};
     // The CPU time of each hand-over (Released), all of it: its submissions,
     // the copy queued and the hand-back.
@@ -2440,6 +2443,9 @@ const XrSessionCreateInfo* VulkanBridge::Begin(XrInstance instance, const XrSess
                              : value == "end-frame" ? Impl::DepthTiming::kEndFrame
                                                     : Impl::DepthTiming::kAuto;
     }
+    if (const char* check = std::getenv("VECTORXR_VULKAN_BRIDGE_DEPTH_CHECK"); check && std::string(check) == "always") {
+        impl->check_always = true;
+    }
     if (const char* interval = std::getenv("VECTORXR_VULKAN_BRIDGE_DEPTH_CHECK_MS"); interval && *interval) {
         char* end = nullptr;
         const long ms = std::strtol(interval, &end, 10);
@@ -2743,7 +2749,21 @@ void VulkanBridge::FrameEnded() {
     }
 }
 
+void VulkanBridge::WantDepthTimingCheck(bool want) {
+    if (!impl_) {
+        return;
+    }
+    std::scoped_lock lock(impl_->mutex);
+    if (want && !impl_->check_reported && !impl_->check_always) {
+        impl_->check_reported = true;
+        impl_->Info("Frame Generation finds the game's depth the same all over: the bridge checks when the game "
+                    "writes it (at the frame's end, or only by its next frame).");
+    }
+    impl_->check_wanted = want;
+}
+
 void VulkanBridge::SetDepthProbe(bool on) {
+
     if (!impl_) {
         return;
     }
@@ -3110,7 +3130,10 @@ bool VulkanBridge::Released(XrSwapchain swapchain, bool teardown) {
         Impl::LateDepth& late = chain->late;
         impl.FinishLateCheck(swapchain, *chain);
         const auto now = std::chrono::steady_clock::now();
-        if (late.step == Impl::LateDepth::Step::kIdle && now >= late.next && impl.MakeLateCheck(*chain)) {
+        // Only while depth looks empty to Frame Generation, or is taken late:
+        // a game whose depth arrives in time submits exactly as before.
+        const bool wanted = impl.check_wanted || impl.check_always || late.engaged;
+        if (wanted && late.step == Impl::LateDepth::Step::kIdle && now >= late.next && impl.MakeLateCheck(*chain)) {
             check = impl.LateRead(*chain, image, index, 0);
             if (check) late.next = now + impl.late_check_interval;
         }

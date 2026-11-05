@@ -10730,8 +10730,11 @@ FrameGenStatus FrameGenPresenter::Status() const {
                                   ? FrameGenDepthState::kEmpty
                                   : FrameGenDepthState::kUnusable)
                            : FrameGenDepthState::kInUse;
+        status.depth_uniform = depth_sent_ && depth_readable_ && evidence.binocular > 0.0 &&
+                               evidence.source_varied == 0.0 && evidence.other_varied == 0.0;
     }
     return status;
+
 }
 
 FrameGenOsdText DescribeFrameGen(const FrameGenStatus& status, bool started) {

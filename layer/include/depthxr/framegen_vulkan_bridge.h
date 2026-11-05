@@ -61,7 +61,9 @@ struct VulkanBridgeGame {
 // until depth is in the image at the hand-over again.
 // VECTORXR_VULKAN_BRIDGE_DEPTH=end-frame keeps it at the hand-over, =late takes
 // it at the acquire from the start; VECTORXR_VULKAN_BRIDGE_DEPTH_CHECK_MS sets
-// the check's interval (tests: 0, every hand-over).
+// the check's interval (tests: 0, every hand-over). The check runs only while
+// Frame Generation finds the game's depth empty (WantDepthTimingCheck).
+
 //
 // Every Vulkan call that uses the game's queue is made inside the
 // application's own xrAcquireSwapchainImage, xrReleaseSwapchainImage and
@@ -145,6 +147,12 @@ class VulkanBridge {
     // queue just after the copy, and logs both (nonzero texels, least and
     // most). Off, nothing of it is made or submitted.
     void SetDepthProbe(bool on);
+    // Whether the bridge checks when the game's depth arrives (above): while
+    // Frame Generation finds the game's depth the same all over (empty, or
+    // written after the frame's end), and while the bridge takes it late.
+    // Otherwise a game's submissions are exactly as without the check.
+    // VECTORXR_VULKAN_BRIDGE_DEPTH_CHECK=always checks every depth swapchain.
+    void WantDepthTimingCheck(bool want);
 
     // Swapchain formats: a VkFormat's DXGI format for the runtime, and back
     // (0 when there is none).
