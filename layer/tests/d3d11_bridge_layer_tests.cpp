@@ -2843,6 +2843,10 @@ void BeginCase(const std::string& name, const Game& game, const CaseSettings& ca
     Check(Peer::Idle(), name + ": nothing is left of the cases before it");
     g_case = name;
     g_device12 = MakeDevice12(game);
+    // Each case's game starts without multithread protection: a case before
+    // it may have left it on (a mirrored depth swapchain turns it on).
+    ComPtr<ID3D11Multithread> multithread;
+    if (SUCCEEDED(game.context.As(&multithread))) multithread->SetMultithreadProtected(FALSE);
     // The runtime's clock runs on across sessions, as a runtime's does.
     const XrTime time = g_runtime.time;
     g_runtime = StandIn{};
