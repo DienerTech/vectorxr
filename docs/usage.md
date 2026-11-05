@@ -783,9 +783,9 @@ RTX 5090 at headset resolutions). DCS sends no depth, so it uses head rotation o
 game supplies useful depth for only one eye, Frame Generation can use it for the other eye too.
 
 Star Citizen currently writes its depth after it has handed the image over for the frame, so the
-depth is still empty when the frame ends (CIG plans to fix this). About once a second the Vulkan
-bridge checks a Vulkan game's depth image at the frame's end and again just before the game's
-next frame. When depth turns up only at the second check, twice in a row, the bridge takes it
+depth is still empty when the frame ends (CIG plans to fix this). While Frame Generation finds a
+Vulkan game's depth empty, the Vulkan bridge checks its depth image about once a second at the
+frame's end and again just before the game's next frame. When depth turns up only at the second check, twice in a row, the bridge takes it
 from there: each frame then carries the depth of the frame before. Frame Generation checks that
 depth against the other eye like any other, and uses it only when it lines the eyes up. The log
 says when this starts (**the game writes its depth after its frame's end**) and when it stops
