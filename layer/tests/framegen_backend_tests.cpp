@@ -884,8 +884,35 @@ int RunScenarios(Harness& harness) {
             const std::uint64_t fill_draws = gpu->DrawsForTest();
             run_filled(1);
             Check(gpu->DrawsForTest() == fill_draws + 1, harness.name + " edge fill: both frames in one draw");
+            Check(gpu->EdgesFilled(), harness.name + " edge fill: drawn frames report their margins filled");
             check_fill(fill_first, plain_third, "Execute's first frame");
             check_fill(fill_second, plain_two_thirds, "Execute's second frame");
+            // The copy fallback (generated frames written by compute and
+            // copied, as when an output cannot be drawn into): the frame lands
+            // at its content offset, its margin is not drawn, and the backend
+            // says so, so the presenter shows the frame's own region alone.
+            gpu->SetDirectOutput(false);
+            gpu->ResetHistory();
+            run_filled(0);
+            run_filled(1);
+            const bool copied_filled = gpu->EdgesFilled();
+            gpu->SetDirectOutput(true);
+            Check(!copied_filled, harness.name + " edge fill: frames copied in report their margins filled");
+            {
+                const Pixels wide = harness.readback_sized(g_swapchains[fill_first][0]);
+                Pixels inner(std::size_t{kSize} * kSize);
+                for (std::uint32_t y = 0; y < kSize; ++y) {
+                    std::copy_n(wide.begin() + (std::size_t{y + margins.up} * width + margins.left), kSize,
+                                inner.begin() + std::size_t{y} * kSize);
+                }
+                const double copied_difference = MeanError(inner, plain_third, 0, 0, kSize, kSize);
+                std::cout << harness.name << " edge fill copied in: frame vs drawn " << copied_difference << '\n';
+                Check(copied_difference < 0.001, harness.name + " edge fill: a frame copied in is not at its content offset");
+            }
+            gpu->ResetHistory();
+            run_filled(0);
+            run_filled(1);
+            Check(gpu->EdgesFilled(), harness.name + " edge fill: drawn again, the margins are filled");
             if (gpu->SupportsJustInTime()) {
                 FrameGenTuning analyze = tuning;
                 analyze.analyze_only = true;
