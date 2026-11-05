@@ -490,15 +490,18 @@ struct D3D11Bridge::Impl {
     }
 
     // When a depth swapchain is mirrored, before its first copy (holding
-    // `mutex`, AddSwapchain having turned protection on before): the copy
+    // `mutex`, AddSwapchain having turned protection on, and read it as
+    // `now_protected`, before: Direct3D 11's debug layer reads it under the
+    // device's lock, which a thread holding the context may hold while it
+    // waits for `mutex`): the copy
     // changes the immediate context's state and puts it back over many
     // calls, which only multithread protection keeps the game's other
     // threads out of (ContextHold), and a game rendering on a thread that
     // never calls OpenXR would otherwise never get it (NoteThread sees
     // OpenXR's threads only). Turned on once, never off; a game's own is
     // left as it is. What the chain's description says of it.
-    std::string NoteDepthProtection(bool was_protected) {
-        multithread_protected = multithread->GetMultithreadProtected() != FALSE;
+    std::string NoteDepthProtection(bool was_protected, bool now_protected) {
+        multithread_protected = now_protected;
         if (multithread_protected) {
             return was_protected ? "on" : "turned on";
         }
@@ -1642,13 +1645,14 @@ bool D3D11Bridge::AddSwapchain(XrSwapchain swapchain, const XrSwapchainCreateInf
     if (protect && !was_protected) {
         impl_->multithread->SetMultithreadProtected(TRUE);
     }
+    const bool now_protected = protect && impl_->multithread->GetMultithreadProtected() != FALSE;
     if (chain.mode == Impl::Mode::kPrivate && chain.private_reason.rfind("VECTORXR_", 0) != 0 && impl_->log) {
         impl_->log("Direct3D 11 bridge: depth swapchain " + Hex(reinterpret_cast<std::uintptr_t>(swapchain)) +
                    " stays the game's own (its depth is left out of submitted frames): " + chain.private_reason + ".");
     }
     std::scoped_lock lock(impl_->mutex);
     if (protect) {
-        chain.protection = impl_->NoteDepthProtection(was_protected);
+        chain.protection = impl_->NoteDepthProtection(was_protected, now_protected);
     }
     impl_->swapchains[swapchain] = std::move(chain);
     ++impl_->swapchains_added;

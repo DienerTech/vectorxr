@@ -71,6 +71,9 @@ struct ID3D11VertexShader;
 
 namespace depthxr {
 
+class GameContextLock;
+class GameContextHold;
+
 #if defined(DEPTHXR_TESTING)
 class TurboFrameTestPeer;
 #endif
@@ -347,7 +350,7 @@ class OpenXrLayer {
     friend class SpaceWarpProbeTestPeer;
 #endif
 
-    OpenXrLayer() = default;
+    OpenXrLayer();
     ~OpenXrLayer();
 
     struct SwapchainInfo {
@@ -640,9 +643,12 @@ class OpenXrLayer {
     // Releases config_lock (mutex_) before any blocking runtime call so
     // xrLocateViews/xrLocateSpace from other app threads are never serialized
     // behind the compositor pacing wait. Call as the tail of EndFrame only.
+    // `context_hold`: EndFrame's hold of the game's Direct3D 11 context
+    // (game_context_), let go with config_lock.
     XrResult ForwardEndFrame(XrSession session,
                              const XrFrameEndInfo* frame_end_info,
-                             std::unique_lock<std::mutex>& config_lock);
+                             std::unique_lock<std::mutex>& config_lock,
+                             GameContextHold* context_hold = nullptr);
     void ObserveCompositionLayerTopology(const XrFrameEndInfo* frame_end_info);
     // At the app's xrEndFrame: whether a layer above pipelines its frames
     // already (upstream_turbo_); logs once when that is first seen.
@@ -1038,6 +1044,12 @@ class OpenXrLayer {
     // be sharpened is left untouched (submits the app's unsharpened focus).
     void SharpenNativeFocusViews(std::vector<XrCompositionLayerProjectionView>& views, XrTime display_time);
 
+    // The game's Direct3D 11 device's lock (a Direct3D 11 session's, bridged
+    // or not; set at xrCreateSession): taken before bridge_handover_mutex_
+    // and mutex_ by every call that uses the game's immediate context under
+    // them (GameContextLock), while the game's device is multithread
+    // protected. Made with the layer, never replaced.
+    std::unique_ptr<GameContextLock> game_context_;
     std::mutex mutex_;
     // Held across a bridged hand-over and its releases' runtime calls
     // (ForwardHandedOverReleases), which go without mutex_; taken before mutex_.

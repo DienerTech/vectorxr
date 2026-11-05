@@ -21,6 +21,8 @@ public:
     virtual OsdUpload Upload(std::uint32_t, const OsdBitmap&, std::string& error) = 0;
     // Only teardown/retry may wait for this backend's outstanding copy.
     virtual void Reset() = 0;
+    // Direct3D 11: the game's device, whose immediate context Upload uses.
+    virtual ID3D11Device* D3D11Device() const { return nullptr; }
 };
 std::unique_ptr<OsdGraphics> CreateOsdGraphics(const void* binding_chain, std::string& error);
 std::unique_ptr<OsdGraphics> CreateOsdD3D11(ID3D11Device*);

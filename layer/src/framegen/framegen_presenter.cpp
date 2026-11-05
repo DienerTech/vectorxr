@@ -3,6 +3,7 @@
 #include "depthxr/framegen_presenter.h"
 
 #include "depthxr/config_path.h"
+#include "depthxr/game_context_lock.h"
 #include "depthxr/logger.h"
 #include "depthxr/process_info.h"
 
@@ -1858,6 +1859,10 @@ bool FrameGenPresenter::UpdateInterpolateFlowLocked(Clock::time_point now, Frame
     return true;
 }
 
+void FrameGenPresenter::SetGameContextLock(GameContextLock* lock) {
+    game_context_lock_.store(lock, std::memory_order_release);
+}
+
 void FrameGenPresenter::SetEngagementPolicy(std::uint32_t steady_frames, std::chrono::milliseconds minimum_session_age) {
     std::scoped_lock lock(mutex_);
     engage_streak_frames_ = steady_frames;
@@ -2275,8 +2280,10 @@ void FrameGenPresenter::CaptureOnRelease(XrSwapchain swapchain, std::uint32_t im
             return;
         }
     }
-    // Lock order everywhere: submit, queue, GPU, presenter. The copy may wait
-    // on a fence, so it runs without the presenter lock.
+    // Lock order everywhere: the game's Direct3D 11 device (in its own
+    // session; the layer's release and xrEndFrame take it before theirs,
+    // GameContextLock), submit, queue, GPU, presenter. The copy may wait on a
+    // fence, so it runs without the presenter lock.
     std::unique_lock<std::mutex> queue_lock;
     if (queue_mutex_) {
         queue_lock = std::unique_lock<std::mutex>(*queue_mutex_);
@@ -6401,6 +6408,12 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
     FrameGenWorldDeltaStatus world_delta;
     std::string hardware_status;
     {
+        // The game's Direct3D 11 context (the game's own Direct3D 11
+        // session): its device's lock before any of these (GameContextLock).
+        GameContextHold context_hold;
+        if (GameContextLock* context_lock = game_context_lock_.load(std::memory_order_acquire)) {
+            context_hold = context_lock->Hold();
+        }
         // Vulkan queues need external synchronization with the runtime's own
         // submissions on the session queue. Lock order: queue, GPU,
         // presenter; the backend may wait on fences, so not under mutex_.
