@@ -2254,6 +2254,9 @@ void TestLateDepth(Game& game) {
     };
     const auto centre = [&](int frame, std::uint32_t slice) { return gradient(frame, slice)(kWidth / 2, kHeight / 2); };
     _putenv_s("VECTORXR_VULKAN_BRIDGE_DEPTH_CHECK_MS", "0"); // a check at every hand-over
+    // The check runs only when wanted (Frame Generation finding the depth
+    // empty, WantDepthTimingCheck); here always, but for the case after.
+    _putenv_s("VECTORXR_VULKAN_BRIDGE_DEPTH_CHECK", "always");
     struct Case {
         const char* name;
         const char* timing; // VECTORXR_VULKAN_BRIDGE_DEPTH
@@ -2411,6 +2414,70 @@ void TestLateDepth(Game& game) {
         bridge.End();
     }
 
+    // Not wanted (the default: Frame Generation has not found the depth
+    // empty): Star Citizen's order is never checked, the hand-over submits
+    // exactly the release barrier (the QFOT test's pattern), and nothing is
+    // taken late; once wanted, the check finds it and takes it late.
+    _putenv_s("VECTORXR_VULKAN_BRIDGE_DEPTH_CHECK", "");
+    {
+        VulkanBridge bridge;
+        Session session(game);
+        BeginBridge(game, bridge, session);
+        ID3D12Device* device = BridgeDevice(bridge);
+        MakeRuntimeImages(device, 3, kWidth, kHeight, DXGI_FORMAT_D32_FLOAT, 1, RuntimeKind::kDepth);
+        const XrSwapchain swapchain = Handle(0x143);
+        std::string reason;
+        Check(bridge.AddSwapchain(swapchain, DepthInfo(kWidth, kHeight), FakeEnumerate, reason), "bridged: " + reason);
+        const std::vector<VkImage> images = GameImages(bridge, swapchain);
+        DepthUpload upload = MakeDepthUpload(game, kWidth, kHeight);
+        const std::function<float(std::uint32_t, std::uint32_t)> zero = [](std::uint32_t, std::uint32_t) {
+            return 0.0f;
+        };
+        int late_from = -1;
+        for (int frame = 0; frame < 12; ++frame) {
+            if (frame == 6) bridge.WantDepthTimingCheck(true);
+            const std::uint32_t index = static_cast<std::uint32_t>(frame % 3);
+            const std::uint64_t before_acquire = SummaryValue(bridge.Summary(), "submits");
+            Acquire(bridge, swapchain, index);
+            const std::uint64_t submits = SummaryValue(bridge.Summary(), "submits");
+            if (frame >= 3 && frame < 6) {
+                Check(submits == before_acquire, "not wanted, frame " + std::to_string(frame) +
+                                                     ": nothing at the acquire (handed back at the release)");
+            }
+            WriteDepth(game, images[index], upload, 0, zero);
+            GameIdle(game);
+            g_recorder.Take();
+            Check(Release(bridge, swapchain), "not wanted: copied");
+            const std::vector<Submission> released = g_recorder.Take();
+            if (frame < 6) {
+                // As before the check: one submission of the release barrier
+                // alone (and the hand-back), nothing at the acquire.
+                Check(SummaryValue(bridge.Summary(), "submits") == submits + 2 && !released.empty() &&
+                          released[0].commands.size() == 1,
+                      "not wanted, frame " + std::to_string(frame) + ": the hand-over submits as before: " +
+                          bridge.Summary());
+            }
+            Check(bridge.WaitIdle(10000), "the bridge's queue finishes");
+            const float got = ReadRuntimeDepth(device, index);
+            const bool late = Contains(bridge.Describe(swapchain), "lateUsed=0") == false;
+            if (late && late_from < 0) late_from = frame;
+            Check(got == (late ? centre(frame - 1, 0) : 0.0f),
+                  "not wanted, frame " + std::to_string(frame) + ": the runtime's depth is " + std::to_string(got) +
+                      "; " + bridge.Describe(swapchain));
+            WriteDepth(game, images[index], upload, 0, gradient(frame, 0));
+        }
+        Check(late_from == 9, "not wanted until frame 6, then taken late from frame 9 (" + std::to_string(late_from) +
+                                  "): " + bridge.Describe(swapchain));
+        Check(TakeLog("finds the game's depth the same all over").size() == 1, "the wanted check is logged once");
+        TakeLog("the game writes its depth after its frame's end");
+        TakeLog("holds");
+        TakeLog("depth timing check");
+        FreeDepthUpload(game, upload);
+        Check(bridge.RemoveSwapchain(swapchain), "removed");
+        CheckClean(&bridge, "late depth: not wanted, then wanted");
+        bridge.End();
+    }
+
     // private: the switch keeps depth the game's.
     _putenv_s("VECTORXR_VULKAN_BRIDGE_DEPTH", "private");
     {
@@ -2482,6 +2549,7 @@ void TestDepthReachesFrameGen(Game& game) {
     sc.far_z = 0.02f;
     constexpr std::uint32_t kSize = 64;
     _putenv_s("VECTORXR_VULKAN_BRIDGE_DEPTH_CHECK_MS", "0");
+    _putenv_s("VECTORXR_VULKAN_BRIDGE_DEPTH_CHECK", "always");
     for (const bool late : {false, true}) {
         const std::string name = late ? "Star Citizen's order (written after the frame's end)" : "written in time";
         VulkanBridge bridge;
@@ -2600,6 +2668,7 @@ void TestDepthReachesFrameGen(Game& game) {
         bridge.End();
     }
     _putenv_s("VECTORXR_VULKAN_BRIDGE_DEPTH_CHECK_MS", "");
+    _putenv_s("VECTORXR_VULKAN_BRIDGE_DEPTH_CHECK", "");
     g_framegen_images.clear();
     CheckClean(nullptr, "depth to Frame Generation (End)");
 }

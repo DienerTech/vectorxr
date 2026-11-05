@@ -4343,6 +4343,9 @@ void WriteVulkanDepthHalves(VulkanGame& game, VkImage image, std::uint32_t width
 // with =private the views carry no depth at all (the colour still arrives).
 void TestLateDepthSession() {
     SetEnv("VECTORXR_VULKAN_BRIDGE_DEPTH_CHECK_MS", "0");
+    // Frame Generation stands by here (it never sees the depth to find it
+    // empty): the check is forced on.
+    SetEnv("VECTORXR_VULKAN_BRIDGE_DEPTH_CHECK", "always");
     for (const std::string timing : {"", "end-frame", "private"}) {
         SetEnv("VECTORXR_VULKAN_BRIDGE_DEPTH", timing);
         // Frame Generation on (the bridge is made for it), standing by: the
@@ -4442,6 +4445,7 @@ void TestLateDepthSession() {
     }
     SetEnv("VECTORXR_VULKAN_BRIDGE_DEPTH", "");
     SetEnv("VECTORXR_VULKAN_BRIDGE_DEPTH_CHECK_MS", "");
+    SetEnv("VECTORXR_VULKAN_BRIDGE_DEPTH_CHECK", "");
 }
 // 13c. Star Citizen's shapes (its log, 2026-10-09): XR_KHR_vulkan_enable2, an
 // sRGB swapchain per eye the game only copies into (TRANSFER_DST alone), and
