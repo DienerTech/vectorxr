@@ -293,6 +293,13 @@ class FrameGenGpu {
     // repeated (Direct3D 12, while it draws generated frames straight into
     // the outputs). Without it, outputs are the frame's own size.
     virtual bool SupportsEdgeFill() const { return false; }
+    // Edge fill: whether the last Execute, Synthesize, SynthesizeStale or
+    // SynthesizeComposed(Stale) drew the margin of every output it wrote
+    // that has one. False when an output was written by the copy fallback
+    // (its margin keeps what it held): the caller then shows that frame from
+    // its own region (FrameGenImage::content, the frame's extent) with the
+    // game's field of view. Under the caller's GPU lock, right after the call.
+    virtual bool EdgesFilled() const { return false; }
     // Tests: the draws of generated frames into the output images recorded
     // so far (DrawsOutputs; frames drawn together count once).
     virtual std::uint64_t DrawsForTest() const { return 0; }

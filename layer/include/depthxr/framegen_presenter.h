@@ -887,8 +887,10 @@ class FrameGenPresenter {
     // An output image's region and where its frame starts in it.
     static FrameGenImage OutputImage(const Output& output);
     // A view shown from `output`: its image, and with edge fill its field of
-    // view widened across the margins.
-    static void ShowOutput(XrCompositionLayerProjectionView& view, const Output& output);
+    // view widened across the margins; unless the backend did not draw them
+    // (`filled` false: FrameGenGpu::EdgesFilled), then the frame's own region
+    // with the game's field of view.
+    static void ShowOutput(XrCompositionLayerProjectionView& view, const Output& output, bool filled);
 
     bool WantsEngagementLocked() const;
     // Frames are generated or about to be: the game's releases are captured.

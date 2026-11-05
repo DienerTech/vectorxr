@@ -1,8 +1,12 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
+#include <climits>
+#include <cstdint>
 #include <chrono>
 #include <optional>
+#include <type_traits>
 
 namespace depthxr {
 
@@ -22,7 +26,8 @@ namespace depthxr {
 // as provisional, so the next session probes async again (runtime_pacing.h).
 //
 // The times come from the caller (steady_clock in the layer, a script in its
-// tests); the frame thread serializes the calls.
+// tests). The frame thread makes the calls; the times are atomic so an Auto
+// fallback on another thread may read Early and SinceEngaged.
 class TurboProbeGuard {
   public:
     using Clock = std::chrono::steady_clock;
@@ -41,38 +46,62 @@ class TurboProbeGuard {
         std::chrono::milliseconds early_failure{10000};
     };
 
+    // Limits are set before use (tests); never while frames run.
     void Configure(const Limits& limits) { limits_ = limits; }
     const Limits& Settings() const { return limits_; }
-    void Reset() { engaged_at_.reset(); grace_until_ = {}; }
+    void Reset() {
+        engaged_ns_.store(kNotEngaged, std::memory_order_relaxed);
+        grace_until_ns_.store(kNotEngaged, std::memory_order_relaxed);
+    }
 
     // Async pacing engaged (each engage, re-engages after a toggle included).
     void Engaged(Clock::time_point now) {
-        engaged_at_ = now;
-        grace_until_ = now + limits_.grace;
+        grace_until_ns_.store(Ns(now + limits_.grace), std::memory_order_relaxed);
+        engaged_ns_.store(Ns(now), std::memory_order_relaxed);
     }
 
     // Every app frame, with its app-only frame time (negative when unknown).
     void AppFrame(Clock::time_point now, double app_frame_ms) {
-        if (!engaged_at_ || app_frame_ms < limits_.hitch_ms) return;
-        const Clock::time_point cap = *engaged_at_ + limits_.max_grace;
-        grace_until_ = std::max(grace_until_, std::min(cap, now + limits_.hitch_grace));
+        const std::int64_t engaged = engaged_ns_.load(std::memory_order_relaxed);
+        if (engaged == kNotEngaged || app_frame_ms < limits_.hitch_ms) return;
+        const std::int64_t cap = engaged + Ns(limits_.max_grace);
+        const std::int64_t until = std::min(cap, Ns(now + limits_.hitch_grace));
+        if (until > grace_until_ns_.load(std::memory_order_relaxed))
+            grace_until_ns_.store(until, std::memory_order_relaxed);
     }
 
-    bool InGrace(Clock::time_point now) const { return engaged_at_ && now < grace_until_; }
+    bool InGrace(Clock::time_point now) const {
+        return engaged_ns_.load(std::memory_order_relaxed) != kNotEngaged &&
+               Ns(now) < grace_until_ns_.load(std::memory_order_relaxed);
+    }
 
     std::optional<Clock::duration> SinceEngaged(Clock::time_point now) const {
-        if (!engaged_at_) return std::nullopt;
-        return now - *engaged_at_;
+        const std::int64_t engaged = engaged_ns_.load(std::memory_order_relaxed);
+        if (engaged == kNotEngaged) return std::nullopt;
+        return std::chrono::duration_cast<Clock::duration>(std::chrono::nanoseconds(Ns(now) - engaged));
     }
 
     bool Early(Clock::time_point now) const {
-        return engaged_at_ && now - *engaged_at_ < limits_.early_failure;
+        const auto since = SinceEngaged(now);
+        return since && *since < limits_.early_failure;
     }
 
   private:
+    // Written on the frame thread; an Auto fallback can read them from the
+    // app's wait/begin thread (NoteTurboRuntimeFailure), so they are atomic
+    // (single words: no torn reads, no lock on the frame path).
+    static constexpr std::int64_t kNotEngaged = INT64_MIN;
+    template <typename T>
+    static std::int64_t Ns(T value) {
+        if constexpr (std::is_same_v<T, Clock::time_point>) {
+            return std::chrono::duration_cast<std::chrono::nanoseconds>(value.time_since_epoch()).count();
+        } else {
+            return std::chrono::duration_cast<std::chrono::nanoseconds>(value).count();
+        }
+    }
     Limits limits_{};
-    std::optional<Clock::time_point> engaged_at_;
-    Clock::time_point grace_until_{};
+    std::atomic<std::int64_t> engaged_ns_{kNotEngaged};
+    std::atomic<std::int64_t> grace_until_ns_{kNotEngaged};
 };
 
 } // namespace depthxr

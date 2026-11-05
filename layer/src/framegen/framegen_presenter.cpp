@@ -6444,6 +6444,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
 
     FrameGenExecuteResult executed;
     bool ok = true;
+    bool edges_filled = false; // FrameGenGpu::EdgesFilled after Execute
     double gpu_ms = -1.0;
     std::uint64_t working_bytes = 0;
     double execute_ms = 0.0; // the backend's Execute, on this thread
@@ -6483,6 +6484,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         }
         const auto execute_start = Clock::now();
         ok = ok && gpu_->Execute(submissions, tuning, executed, error);
+        edges_filled = ok && gpu_ && gpu_->EdgesFilled();
         execute_ms = Milliseconds(Clock::now() - execute_start);
         if (gpu_) {
             gpu_ms = gpu_->LastGpuMilliseconds();
@@ -6743,7 +6745,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         views.assign(projection.views, projection.views + projection.viewCount);
         for (std::size_t i = 0; i < views.size(); ++i) {
             views[i].next = nullptr; // a generated image has no matching depth
-            ShowOutput(views[i], output_sets_[set][i]);
+            ShowOutput(views[i], output_sets_[set][i], edges_filled);
             if (i < executed.depth.size() && executed.depth[i]) {
                 // Seen from where the eye will be (FrameGenViewRequest::shift);
                 // the runtime still corrects the rotation.
@@ -6992,12 +6994,19 @@ FrameGenImage FrameGenPresenter::OutputImage(const Output& output) {
     return image;
 }
 
-void FrameGenPresenter::ShowOutput(XrCompositionLayerProjectionView& view, const Output& output) {
+void FrameGenPresenter::ShowOutput(XrCompositionLayerProjectionView& view, const Output& output, bool filled) {
     view.subImage.swapchain = output.swapchain;
     view.subImage.imageArrayIndex = 0;
     view.subImage.imageRect = {{0, 0}, {static_cast<std::int32_t>(output.extent.width),
                                         static_cast<std::int32_t>(output.extent.height)}};
-    if (output.margins.Any()) {
+    if (output.margins.Any() && !filled) {
+        // The backend copied the frame in (FrameGenGpu::EdgesFilled): its
+        // margin holds whatever it held, so only the frame's own region is
+        // shown, with the game's field of view.
+        view.subImage.imageRect = {{static_cast<std::int32_t>(output.margins.left), static_cast<std::int32_t>(output.margins.up)},
+                                   {static_cast<std::int32_t>(output.extent.width - output.margins.left - output.margins.right),
+                                    static_cast<std::int32_t>(output.extent.height - output.margins.up - output.margins.down)}};
+    } else if (output.margins.Any()) {
         // The image's own projection: the frame's tangents carried on across
         // the margins, which the runtime turns into view on a fast turn.
         const FrameGenExtent frame{output.extent.width - output.margins.left - output.margins.right,
@@ -10002,6 +10011,7 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
         images.push_back(OutputImage(output));
     }
     bool ok = false;
+    bool edges_filled = false; // FrameGenGpu::EdgesFilled after the write
     {
         const auto asked = Clock::now();
         std::scoped_lock gpu_lock(gpu_mutex_);
@@ -10049,6 +10059,8 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
                                                         quad->composition, images, error)
                              : gpu_->Synthesize(frame.analyzed, choice.mode, choice.fraction, images, error));
         }
+        // Edge fill: a frame the backend copied in has no margin drawn.
+        edges_filled = ok && gpu_ && gpu_->EdgesFilled();
     }
     const bool extrapolate = choice.mode == FrameGenSynthesisMode::kExtrapolate;
     if (!ok) {
@@ -10087,7 +10099,7 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
     for (std::size_t i = 0; i < views.size(); ++i) {
         const Output& output = output_sets_.front()[i];
         views[i].next = nullptr;
-        ShowOutput(views[i], output);
+        ShowOutput(views[i], output, edges_filled);
         const std::size_t moved_as = quad ? quad->composition.eyes[i].peripheral : i;
         if (eye_time != 0.0f && moved_as < frame.velocity.size()) {
             const std::array<float, 3>& velocity = frame.velocity[moved_as];
