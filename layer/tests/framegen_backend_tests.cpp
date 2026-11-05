@@ -5878,6 +5878,29 @@ int RunProfile(Harness& harness) {
     std::array<XrSwapchain, 2> depths{reinterpret_cast<XrSwapchain>(0x63), reinterpret_cast<XrSwapchain>(0x64)};
     std::array<XrSwapchain, 2> vectors{reinterpret_cast<XrSwapchain>(0x65), reinterpret_cast<XrSwapchain>(0x66)};
     std::array<std::array<XrSwapchain, 4>, 2> outputs{};
+    // FG_PROFILE_EDGE_FILL=1 (or h[,v] degrees): outputs widened by edge
+    // fill's margins (whole 32-pixel tiles, as the presenter makes them), the
+    // frames drawn at their corner: what the margins cost.
+    std::array<FrameGenEdgeMargins, 2> fill_margins{};
+    if (const char* fill = std::getenv("FG_PROFILE_EDGE_FILL"); fill && *fill && std::string(fill) != "0") {
+        std::array<float, 2> degrees{kFrameGenEdgeFillHorizontalDegrees, kFrameGenEdgeFillVerticalDegrees};
+        if (std::string(fill) != "1") {
+            const auto parsed = ParseFrameGenEdgeFillDegrees(fill);
+            Check(parsed.has_value(), "profile: FG_PROFILE_EDGE_FILL is 1 or h[,v] degrees");
+            degrees = *parsed;
+        }
+        for (std::size_t eye = 0; eye < 2; ++eye) {
+            FrameGenEdgeMargins& margins = fill_margins[eye];
+            margins = FrameGenEdgeFillMargins({std::atan(eye == 0 ? -outer : -inner), std::atan(eye == 0 ? inner : outer),
+                                               std::atan(vertical), -std::atan(vertical)},
+                                              {width, height}, degrees[0], degrees[1]);
+            for (std::uint32_t* margin : {&margins.left, &margins.right, &margins.up, &margins.down}) {
+                *margin = (*margin + 31) / 32 * 32;
+            }
+            std::printf("Edge fill: eye %zu margins %u/%u/%u/%u px, outputs %ux%u\n", eye, margins.left, margins.right,
+                        margins.up, margins.down, width + margins.left + margins.right, height + margins.up + margins.down);
+        }
+    }
     for (std::size_t eye = 0; eye < 2; ++eye) {
         const float head = eye == 0 ? -half_ipd : half_ipd;
         const float left = eye == 0 ? -outer : -inner, right = eye == 0 ? inner : outer;
@@ -5898,7 +5921,8 @@ int RunProfile(Harness& harness) {
         g_swapchains[depths[eye]] = {harness.create_depth_sized(depth_width, depth_height, panel_depth, panel, 0.0f)};
         for (std::size_t set = 0; set < 4; ++set) {
             outputs[eye][set] = reinterpret_cast<XrSwapchain>(0x70 + eye * 4 + set);
-            g_swapchains[outputs[eye][set]] = {harness.create(width, height)};
+            g_swapchains[outputs[eye][set]] = {harness.create(width + fill_margins[eye].left + fill_margins[eye].right,
+                                                              height + fill_margins[eye].up + fill_margins[eye].down)};
         }
         Check(gpu->Track(sources[eye], EnumerateImages, error) && gpu->Track(depths[eye], EnumerateImages, error), error);
         for (const XrSwapchain output : outputs[eye]) {
@@ -5938,7 +5962,14 @@ int RunProfile(Harness& harness) {
             const XrRect2Di rect{{0, 0}, {static_cast<int>(width), static_cast<int>(height)}};
             view.source = {sources[eye], frame, 0, rect, harness.format};
             for (const XrSwapchain output : outputs[eye]) {
-                view.outputs.push_back({output, 0, 0, rect, output_format});
+                const FrameGenEdgeMargins& margins = fill_margins[eye];
+                FrameGenImage image{output, 0, 0,
+                                    {{0, 0},
+                                     {static_cast<int>(width + margins.left + margins.right),
+                                      static_cast<int>(height + margins.up + margins.down)}},
+                                    output_format};
+                image.content = {static_cast<int>(margins.left), static_cast<int>(margins.up)};
+                view.outputs.push_back(image);
             }
             view.request.extent = {width, height};
             view.request.output = FrameGenOutputKind::kSrgb8;
@@ -6671,6 +6702,101 @@ Pixels TurnTo(const ReplayView& view, const ReplayView& next, std::vector<bool>&
     for (std::uint32_t t = 0; t < threads; ++t) workers.emplace_back(rows, t, threads);
     for (auto& worker : workers) worker.join();
     return out;
+}
+
+// Edge fill (FG_REPLAY_EDGE_FILL, "Edge reveal"): a generated frame turned
+// from its view's pose to `truth`'s, as a runtime turns a frame to where the
+// head is when it shows it (rotation only, bilinear). `wide` is the output
+// image, the frame at `margins`' corner. Of the truth's pixels: those the
+// frame itself does not reach (revealed: the runtime shows black there) and
+// of those the ones the margins do not reach either (beyond), and the mean
+// error against the truth over the revealed ones shown black and shown from
+// the margins. `black` and `filled` (optional) get the truth's view showing
+// the frame without and with its margins.
+struct ReplayReveal {
+    std::size_t pixels{0}, revealed{0}, beyond{0};
+    double black_error{0.0}, fill_error{0.0};
+};
+ReplayReveal RevealTurned(const ReplayView& view, const Pixels& wide, const FrameGenEdgeMargins& margins,
+                          const ReplayView& truth, Pixels* black, Pixels* filled) {
+    const auto a = ReplayRotation(truth.newest.orientation);
+    const auto b = ReplayRotation(view.newest.orientation);
+    const double l = std::tan(truth.newest.angle_left), r = std::tan(truth.newest.angle_right);
+    const double u = std::tan(truth.newest.angle_up), d = std::tan(truth.newest.angle_down);
+    const double nl = std::tan(view.newest.angle_left), nr = std::tan(view.newest.angle_right);
+    const double nu = std::tan(view.newest.angle_up), nd = std::tan(view.newest.angle_down);
+    const std::uint32_t wide_width = view.width + margins.left + margins.right;
+    const std::uint32_t wide_height = view.height + margins.up + margins.down;
+    if (black) black->assign(std::size_t{truth.width} * truth.height, 0xff000000u);
+    if (filled) filled->assign(std::size_t{truth.width} * truth.height, 0xff000000u);
+    const std::uint32_t threads = std::max(1u, std::thread::hardware_concurrency());
+    std::vector<ReplayReveal> parts(threads);
+    auto rows = [&](std::uint32_t first, std::uint32_t step) {
+        ReplayReveal& part = parts[first];
+        for (std::uint32_t y = first; y < truth.height; y += step) {
+            for (std::uint32_t x = 0; x < truth.width; ++x) {
+                const double dir[3] = {l + (r - l) * (x + 0.5) / truth.width, u + (d - u) * (y + 0.5) / truth.height, -1.0};
+                double world[3], local[3];
+                for (int i = 0; i < 3; ++i) world[i] = a[i][0] * dir[0] + a[i][1] * dir[1] + a[i][2] * dir[2];
+                for (int i = 0; i < 3; ++i) local[i] = b[0][i] * world[0] + b[1][i] * world[1] + b[2][i] * world[2];
+                ++part.pixels;
+                // In the frame's texels (centres at whole numbers), then the
+                // output image's.
+                const bool ahead = local[2] < -1e-6;
+                const double sx = ahead ? ((local[0] / -local[2]) - nl) / (nr - nl) * view.width - 0.5 : -1e9;
+                const double sy = ahead ? ((local[1] / -local[2]) - nu) / (nd - nu) * view.height - 0.5 : -1e9;
+                const bool reached = sx >= -0.5 && sy >= -0.5 && sx <= view.width - 0.5 && sy <= view.height - 0.5;
+                const double wx = sx + margins.left, wy = sy + margins.up;
+                const bool margin = wx >= -0.5 && wy >= -0.5 && wx <= wide_width - 0.5 && wy <= wide_height - 0.5;
+                std::uint32_t pixel = 0xff000000u;
+                if (margin) {
+                    const double cx = std::clamp(wx, 0.0, wide_width - 1.0), cy = std::clamp(wy, 0.0, wide_height - 1.0);
+                    const int ix = std::min(static_cast<int>(cx), static_cast<int>(wide_width) - 2);
+                    const int iy = std::min(static_cast<int>(cy), static_cast<int>(wide_height) - 2);
+                    const double fx = cx - ix, fy = cy - iy;
+                    for (int c = 0; c < 3; ++c) {
+                        auto at = [&](int px, int py) {
+                            return static_cast<double>((wide[std::size_t(py) * wide_width + px] >> (8 * c)) & 255u);
+                        };
+                        const double value = (at(ix, iy) * (1 - fx) + at(ix + 1, iy) * fx) * (1 - fy) +
+                                             (at(ix, iy + 1) * (1 - fx) + at(ix + 1, iy + 1) * fx) * fy;
+                        pixel |= static_cast<std::uint32_t>(std::lround(value)) << (8 * c);
+                    }
+                }
+                const std::size_t index = std::size_t{y} * truth.width + x;
+                if (black && reached) (*black)[index] = pixel;
+                if (filled) (*filled)[index] = pixel;
+                if (reached) continue;
+                ++part.revealed;
+                part.beyond += margin ? 0 : 1;
+                const std::uint32_t want = truth.color[index];
+                double black_sum = 0.0, fill_sum = 0.0;
+                for (int c = 0; c < 3; ++c) {
+                    const double t = static_cast<double>((want >> (8 * c)) & 255u);
+                    black_sum += t;
+                    fill_sum += std::abs(t - static_cast<double>((pixel >> (8 * c)) & 255u));
+                }
+                part.black_error += black_sum / (3.0 * 255.0);
+                part.fill_error += fill_sum / (3.0 * 255.0);
+            }
+        }
+    };
+    std::vector<std::thread> workers;
+    for (std::uint32_t t = 0; t < threads; ++t) workers.emplace_back(rows, t, threads);
+    for (auto& worker : workers) worker.join();
+    ReplayReveal total;
+    for (const ReplayReveal& part : parts) {
+        total.pixels += part.pixels;
+        total.revealed += part.revealed;
+        total.beyond += part.beyond;
+        total.black_error += part.black_error;
+        total.fill_error += part.fill_error;
+    }
+    if (total.revealed) {
+        total.black_error /= static_cast<double>(total.revealed);
+        total.fill_error /= static_cast<double>(total.revealed);
+    }
+    return total;
 }
 
 // Mean error over valid pixels, all and split by the newest frame's depth
@@ -8048,6 +8174,57 @@ int RunReplay(Harness& harness) {
     if (depth_scale != 1.0f) {
         std::printf("Depth given to the backend times %.3f (FG_REPLAY_DEPTH_SCALE)\n", static_cast<double>(depth_scale));
     }
+    // FG_REPLAY_EDGE_FILL=h[,v] (degrees past each edge; 1: the defaults):
+    // edge fill, as a session with it on writes frames: each view's output
+    // wider by the margins (whole 32-pixel tiles, as the presenter makes
+    // them), the frame at their corner. Every measure below reads the
+    // frame's own pixels as without it (the output hash too, so a run
+    // without the fill gives the same hash), and "Edge reveal" turns each
+    // generated frame to its truth's pose as a runtime turns it to the head,
+    // comparing what the revealed edge shows black and shown from the
+    // margins (FG_REPLAY_REVEAL=1 measures it without the fill as well).
+    std::vector<FrameGenEdgeMargins> fill_margins(view_count);
+    const char* fill_text = std::getenv("FG_REPLAY_EDGE_FILL");
+    const bool edge_fill = fill_text && *fill_text && std::string(fill_text) != "0";
+    const bool reveal = edge_fill || (std::getenv("FG_REPLAY_REVEAL") && std::string(std::getenv("FG_REPLAY_REVEAL")) == "1");
+    if (edge_fill) {
+        std::array<float, 2> degrees{kFrameGenEdgeFillHorizontalDegrees, kFrameGenEdgeFillVerticalDegrees};
+        if (std::string(fill_text) != "1") {
+            const auto parsed = ParseFrameGenEdgeFillDegrees(fill_text);
+            Check(parsed.has_value(), "replay: FG_REPLAY_EDGE_FILL is 1 or h[,v] degrees (0-15)");
+            degrees = *parsed;
+        }
+        for (std::size_t v = 0; v < view_count; ++v) {
+            const ReplayView& view = frames[0].views[v];
+            FrameGenEdgeMargins& margins = fill_margins[v];
+            margins = FrameGenEdgeFillMargins({view.newest.angle_left, view.newest.angle_right, view.newest.angle_up,
+                                               view.newest.angle_down},
+                                              {view.width, view.height}, degrees[0], degrees[1]);
+            for (std::uint32_t* margin : {&margins.left, &margins.right, &margins.up, &margins.down}) {
+                *margin = (*margin + 31) / 32 * 32;
+            }
+            std::printf("Edge fill (FG_REPLAY_EDGE_FILL, %.1f / %.1f degrees): view %zu margins %u/%u/%u/%u px "
+                        "(left/right/up/down), output %ux%u (%.1f%% more pixels)\n",
+                        static_cast<double>(degrees[0]), static_cast<double>(degrees[1]), v, margins.left, margins.right,
+                        margins.up, margins.down, view.width + margins.left + margins.right,
+                        view.height + margins.up + margins.down,
+                        100.0 * (double(view.width + margins.left + margins.right) * (view.height + margins.up + margins.down) /
+                                     (double(view.width) * view.height) -
+                                 1.0));
+        }
+    }
+    // An output image of view `v` (with edge fill, wider, the frame at the
+    // margins' corner).
+    auto output_image = [&](XrSwapchain chain, std::size_t v, const ReplayView& view, std::int64_t format) {
+        const FrameGenEdgeMargins& margins = fill_margins[v];
+        FrameGenImage image{chain, 0, 0,
+                            {{0, 0},
+                             {static_cast<int>(view.width + margins.left + margins.right),
+                              static_cast<int>(view.height + margins.up + margins.down)}},
+                            format};
+        image.content = {static_cast<int>(margins.left), static_cast<int>(margins.up)};
+        return image;
+    };
     std::vector<XrSwapchain> sources(view_count), depths(view_count), outputs(view_count);
     for (std::size_t v = 0; v < view_count; ++v) {
         const ReplayView& view = frames[0].views[v];
@@ -8072,7 +8249,8 @@ int RunReplay(Harness& harness) {
             }
             g_swapchains[depths[v]].push_back(harness.create_depth_data(view.half_width, view.half_height, raw));
         }
-        g_swapchains[outputs[v]] = {harness.create(view.width, view.height)};
+        g_swapchains[outputs[v]] = {harness.create(view.width + fill_margins[v].left + fill_margins[v].right,
+                                                   view.height + fill_margins[v].up + fill_margins[v].down)};
         Check(gpu->Track(sources[v], EnumerateImages, error) && gpu->Track(depths[v], EnumerateImages, error) &&
                   gpu->Track(outputs[v], EnumerateImages, error),
               error);
@@ -8370,7 +8548,7 @@ int RunReplay(Harness& harness) {
             FrameGenViewSubmission& submission = views[v];
             const XrRect2Di rect{{0, 0}, {static_cast<int>(view.width), static_cast<int>(view.height)}};
             submission.source = {sources[v], static_cast<std::uint32_t>(k), 0, rect, harness.format};
-            submission.outputs = {{outputs[v], 0, 0, rect, output_format}};
+            submission.outputs = {output_image(outputs[v], v, view, output_format)};
             submission.request.extent = {view.width, view.height};
             submission.request.output = FrameGenOutputKind::kSrgb8;
             submission.request.synthesize = before.has_value();
@@ -8652,6 +8830,12 @@ int RunReplay(Harness& harness) {
         }
     };
     BandSums rotation_sums, aligned_sums;
+    // Edge reveal (FG_REPLAY_EDGE_FILL, FG_REPLAY_REVEAL): shares of the
+    // views revealed, the revealed pixels' errors summed by pixel, the turns.
+    struct RevealSums {
+        double revealed{0}, beyond{0}, black{0}, filled{0}, pixels{0}, degrees{0};
+        std::size_t views{0};
+    } reveal_sums;
     ReplayMasked masked_sums;
     // Per view: with one eye's depth the eyes differ.
     std::vector<double> view_bad(view_count, 0.0);
@@ -8715,7 +8899,59 @@ int RunReplay(Harness& harness) {
                 std::printf("frame %zu view %zu cockpit motion: mean %.3f px, %.1f%% of cells above 0.5 px\n", k, v,
                             cockpit_motion / cockpit_cells, 100.0 * cockpit_moving / cockpit_cells);
             }
-            const Pixels generated = harness.readback_sized(g_swapchains[outputs[v]][0]);
+            // With edge fill the output image and the frame's own pixels in it.
+            const Pixels wide = harness.readback_sized(g_swapchains[outputs[v]][0]);
+            const FrameGenEdgeMargins& margins = fill_margins[v];
+            Pixels generated;
+            if (margins.Any()) {
+                const std::uint32_t wide_width = view.width + margins.left + margins.right;
+                generated.resize(std::size_t{view.width} * view.height);
+                for (std::uint32_t y = 0; y < view.height; ++y) {
+                    std::copy_n(wide.begin() + (std::size_t{y + margins.up} * wide_width + margins.left), view.width,
+                                generated.begin() + std::size_t{y} * view.width);
+                }
+            } else {
+                generated = wide;
+            }
+            if (reveal) {
+                // The frame turned to its truth's pose, as a runtime turns it.
+                const bool images = !g_replay_output.empty() && v == 0 && !crop;
+                Pixels black, filled;
+                const ReplayReveal turned = RevealTurned(view, wide, margins, frames[truth_frame].views[v],
+                                                         images ? &black : nullptr, images ? &filled : nullptr);
+                const auto a = ReplayRotation(view.newest.orientation);
+                const auto b = ReplayRotation(frames[truth_frame].views[v].newest.orientation);
+                double trace = 0.0;
+                for (int i = 0; i < 3; ++i) {
+                    for (int j = 0; j < 3; ++j) trace += a[j][i] * b[j][i];
+                }
+                const double turned_degrees = std::acos(std::clamp((trace - 1.0) / 2.0, -1.0, 1.0)) * 57.29577951308232;
+                const double revealed = turned.pixels ? 100.0 * turned.revealed / turned.pixels : 0.0;
+                const double beyond = turned.pixels ? 100.0 * turned.beyond / turned.pixels : 0.0;
+                std::printf("frame %zu view %zu edge reveal: turned %.2f degrees to the truth's pose; %.2f%% of the view "
+                            "revealed (%.2f%% past the margins too); there error black %.4f, %s %.4f\n",
+                            k, v, turned_degrees, revealed, beyond, turned.black_error,
+                            margins.Any() ? "filled" : "unfilled", turned.fill_error);
+                reveal_sums.revealed += revealed;
+                reveal_sums.beyond += beyond;
+                reveal_sums.black += turned.black_error * turned.revealed;
+                reveal_sums.filled += turned.fill_error * turned.revealed;
+                reveal_sums.pixels += static_cast<double>(turned.revealed);
+                reveal_sums.degrees += turned_degrees;
+                ++reveal_sums.views;
+                if (images) {
+                    WriteHalfPpm(prefix + "-reveal-black.ppm", black, frames[truth_frame].views[v].width,
+                                 frames[truth_frame].views[v].height);
+                    WriteHalfPpm(prefix + "-reveal-filled.ppm", filled, frames[truth_frame].views[v].width,
+                                 frames[truth_frame].views[v].height);
+                    WriteHalfPpm(prefix + "-reveal-truth.ppm", frames[truth_frame].views[v].color,
+                                 frames[truth_frame].views[v].width, frames[truth_frame].views[v].height);
+                    if (margins.Any()) {
+                        WriteHalfPpm(prefix + "-wide.ppm", wide, view.width + margins.left + margins.right,
+                                     view.height + margins.up + margins.down);
+                    }
+                }
+            }
             std::vector<bool> valid;
             const Pixels truth = TurnTo(view, frames[truth_frame].views[v], valid, cubic_truth);
             const std::vector<std::uint8_t> depth_edges = ReplayDepthEdges(view);
@@ -8884,10 +9120,7 @@ int RunReplay(Harness& harness) {
             const auto jit_images = [&](std::size_t frame) {
                 std::vector<FrameGenImage> images;
                 for (std::size_t v = 0; v < view_count; ++v) {
-                    const ReplayView& view = frames[frame].views[v];
-                    images.push_back({outputs[v], 0, 0,
-                                      {{0, 0}, {static_cast<int>(view.width), static_cast<int>(view.height)}},
-                                      output_format});
+                    images.push_back(output_image(outputs[v], v, frames[frame].views[v], output_format));
                 }
                 return images;
             };
@@ -9045,6 +9278,14 @@ int RunReplay(Harness& harness) {
     }
     if (delta_pairs) {
         std::printf("Paired still appSpaceDeltaPose (FG_REPLAY_DELTA_PAIRS=still): %zu views\n", paired_still);
+    }
+    if (reveal && reveal_sums.views) {
+        const double n = static_cast<double>(reveal_sums.views);
+        std::printf("Edge reveal: %zu views turned %.2f degrees on average to their truth's pose; %.2f%% of a view "
+                    "revealed (%.2f%% past the margins too); there mean error black %.4f, %s %.4f\n",
+                    reveal_sums.views, reveal_sums.degrees / n, reveal_sums.revealed / n, reveal_sums.beyond / n,
+                    reveal_sums.pixels ? reveal_sums.black / reveal_sums.pixels : 0.0, edge_fill ? "filled" : "unfilled",
+                    reveal_sums.pixels ? reveal_sums.filled / reveal_sums.pixels : 0.0);
     }
     std::printf("Output hash: %zu frames written %016llx, %zu depth reads %016llx\n", hashed_frames,
                 static_cast<unsigned long long>(output_hash), hashed_depths, static_cast<unsigned long long>(depth_hash));
