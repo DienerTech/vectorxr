@@ -47,6 +47,7 @@
 #include "depthxr/framegen_runtime_queue.h"
 #include "depthxr/turbo_recovery.h"
 #include "depthxr/turbo_prediction_history.h"
+#include "depthxr/turbo_probe_guard.h"
 #include "depthxr/upstream_turbo.h"
 #include "depthxr/turbo_trace.h"
 #include "depthxr/settings_resolver.h"
@@ -1654,6 +1655,10 @@ class OpenXrLayer {
     enum class TurboPacingSource { kForced, kPinned, kDiscovered, kProbing, kFallback };
     std::uint64_t turbo_test_started_at_{0};
     bool TryTurboAutoFallbackLocked(const std::string& reason);
+    // Auto's async pacing (frame thread): stalls in its first seconds are
+    // not counted (TurboProbeGuard).
+    TurboProbeGuard turbo_probe_guard_;
+    int turbo_probe_grace_log_budget_{0};
     // Frame-submission-thread only (resolved under the config lock at
     // EndFrame, consumed after it is released); the sequenced state machine
     // below is turbo_mutex_-guarded because WaitFrame/BeginFrame consult it.

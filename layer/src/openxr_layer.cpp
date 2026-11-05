@@ -7433,6 +7433,9 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
     // ahead while SteamVR is not presenting; when visibility returns, the
     // runtime rejects every submit with XR_ERROR_TIME_INVALID.
     const bool renderable_frame = runtime_should_render && submitting_layers;
+    if (renderable_frame) {
+        turbo_probe_guard_.AppFrame(std::chrono::steady_clock::now(), app_frame_delta_ms);
+    }
     if (renderable_frame && app_frame_delta_ms >= 0.0 && app_frame_delta_ms < kHealthyFrameMs) {
         ++turbo_cadence_healthy_streak_;
     } else {
@@ -7512,6 +7515,9 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
     }
     turbo_effective_async_.store(turbo_pacing_mode_ == TurboPacingMode::kAsync);
     const bool was_effective = turbo_effective_active_.exchange(turbo_engaged);
+    if (turbo_engaged && !was_effective && turbo_pacing_mode_ == TurboPacingMode::kAsync) {
+        turbo_probe_guard_.Engaged(std::chrono::steady_clock::now());
+    }
     if (turbo_engaged && !was_effective) {
         SoundPlayer::Instance().PlayTransition(ActingBinding(turbo_toggle_pressed_, resolved_settings_.turbo.toggle_bindings).sound, true,
             dll_directory_, resolved_settings_.core.sound_volume, L"turbo-on.wav", L"turbo-off.wav");
@@ -8405,6 +8411,7 @@ void OpenXrLayer::ResolveTurboPacingModeLocked() {
     turbo_stable_accumulated_ms_ = 0.0;
     turbo_drain_timeout_count_ = 0;
     turbo_timeout_window_start_.reset();
+    turbo_probe_grace_log_budget_ = 3;
 
     const TurboPacingSetting setting = turbo_experiment_.enabled ? TurboPacingSetting::kAsync
                                                                : resolved_settings_.turbo.pacing_mode;
@@ -8753,6 +8760,24 @@ void OpenXrLayer::HandOverTurboToFrameThread(const char* reason) {
 bool OpenXrLayer::HandleTurboDrainTimeout(std::chrono::steady_clock::time_point now) {
     turbo_stable_accumulated_ms_ = 0.0;
     ++turbo_probe_timeout_total_;
+
+    // Auto's async pacing right after it engages, or while the game still
+    // hitches: such a stall is not evidence against async (TurboProbeGuard).
+    // Forced and pinned modes keep their plain safety thresholds.
+    if (turbo_pacing_mode_ == TurboPacingMode::kAsync && turbo_pacing_source_ != TurboPacingSource::kForced &&
+        turbo_pacing_source_ != TurboPacingSource::kPinned && turbo_probe_guard_.InGrace(now)) {
+        turbo_trace_.Record("probe.grace", 0, turbo_probe_timeout_total_);
+        if (turbo_probe_grace_log_budget_ > 0) {
+            --turbo_probe_grace_log_budget_;
+            const auto since_engaged = turbo_probe_guard_.SinceEngaged(now);
+            const auto ms = since_engaged
+                ? std::chrono::duration_cast<std::chrono::milliseconds>(*since_engaged).count()
+                : 0;
+            logger_.Info("Turbo Auto: not counting an async xrWaitFrame stall " + std::to_string(ms) +
+                         "ms after async pacing engaged (grace while the game's pacing settles).");
+        }
+        return false;
+    }
 
     // Rolling-window count: stalled frames interleave with clean ones on
     // these runtimes, so a consecutive-streak check never fires.
@@ -9512,6 +9537,7 @@ void OpenXrLayer::ResetTurboFrameState(bool stop_recorder) {
     turbo_fabricated_wait_log_budget_ = 0;
     turbo_drain_timeout_count_ = 0;
     turbo_timeout_window_start_.reset();
+    turbo_probe_guard_.Reset();
     turbo_auto_suspended_.store(false, std::memory_order_relaxed);
     turbo_seq_state_ = TurboSequencedState::kInactive;
     turbo_begin_owed_ = false;

@@ -25,6 +25,7 @@
 #include "depthxr/openxr_layer.h"
 #include "depthxr/framegen_gpu.h"
 #include "depthxr/turbo_metrics.h"
+#include "depthxr/turbo_probe_guard.h"
 #include "depthxr/upstream_turbo.h"
 
 using namespace std::chrono_literals;
@@ -60,6 +61,7 @@ class TurboFrameTestPeer {
         OpenXrLayer& layer = Layer();
         layer.StopTurboAsyncWorker();
         layer.ResetTurboFrameState();
+        layer.turbo_probe_guard_.Configure({});
 
         {
             std::scoped_lock lock(layer.mutex_);
@@ -544,6 +546,17 @@ class TurboFrameTestPeer {
         layer.turbo_timeout_window_start_.reset();
         layer.turbo_pacing_verdict_pending_ = false;
         layer.turbo_auto_suspended_.store(false, std::memory_order_relaxed);
+        // These policy tests count every stall: no engagement grace. The
+        // probe-grace tests restore the shipping limits.
+        TurboProbeGuard::Limits immediate;
+        immediate.grace = immediate.hitch_grace = immediate.max_grace = 0ms;
+        layer.turbo_probe_guard_.Configure(immediate);
+    }
+
+    static void ProbeGuardDefaults() { Layer().turbo_probe_guard_.Configure({}); }
+    static void EngageProbe(std::chrono::steady_clock::time_point at) { Layer().turbo_probe_guard_.Engaged(at); }
+    static void ProbeAppFrame(std::chrono::steady_clock::time_point at, double app_frame_ms) {
+        Layer().turbo_probe_guard_.AppFrame(at, app_frame_ms);
     }
 
     static TurboPacingMode PacingMode() {
@@ -3111,6 +3124,126 @@ void TestSequencedStallPolicySuspends() {
     Expect(runtime.Calls().empty(), "A policy-only test unexpectedly issued runtime calls");
 }
 
+// The guard on scripted times: a grace after engaging, extended by game hitches
+// up to a cap, and "early" for the first ten seconds.
+void TestProbeGuardScriptedTimes() {
+    using depthxr::TurboProbeGuard;
+    const auto t0 = TurboProbeGuard::Clock::time_point{} + 1000s;
+    TurboProbeGuard guard;
+    Expect(!guard.InGrace(t0) && !guard.Early(t0) && !guard.SinceEngaged(t0),
+           "A guard that never engaged must count every stall");
+    guard.AppFrame(t0, 500.0);
+    Expect(!guard.InGrace(t0), "A hitch before engaging must not open a grace");
+    guard.Engaged(t0);
+    Expect(guard.InGrace(t0 + 250ms) && guard.InGrace(t0 + 1999ms) && !guard.InGrace(t0 + 2000ms),
+           "The engagement grace must last two seconds");
+    guard.AppFrame(t0 + 1500ms, 49.0);
+    Expect(!guard.InGrace(t0 + 2100ms), "A healthy frame must not extend the grace");
+    guard.AppFrame(t0 + 1800ms, 120.0);
+    Expect(guard.InGrace(t0 + 2700ms) && !guard.InGrace(t0 + 2800ms),
+           "A hitch must keep stalls uncounted for a second after it");
+    guard.AppFrame(t0 + 4500ms, 300.0);
+    Expect(guard.InGrace(t0 + 4999ms) && !guard.InGrace(t0 + 5000ms), "The grace must end five seconds in");
+    guard.AppFrame(t0 + 6s, 300.0);
+    Expect(!guard.InGrace(t0 + 6s + 1ms), "A hitch past the cap must not reopen the grace");
+    Expect(guard.Early(t0 + 9999ms) && !guard.Early(t0 + 10s), "A fallback is early for ten seconds");
+    guard.Engaged(t0 + 20s);
+    Expect(guard.InGrace(t0 + 21s) && guard.Early(t0 + 25s), "A re-engagement must start a new grace");
+    guard.Reset();
+    Expect(!guard.InGrace(t0 + 21s) && !guard.Early(t0 + 21s), "A reset guard must count every stall");
+}
+
+// S4 (DCS on Pimax, Oct 29): async engaged as the game left its loading screen
+// and the first two drains timed out within half a second, so Auto fell back
+// the moment it engaged. Those stalls are not counted now; stalls that persist
+// past the grace still fall back.
+void TestAutoProbeGraceIgnoresEngagementStalls() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    using Peer = depthxr::TurboFrameTestPeer;
+    Peer::SetPolicy(depthxr::TurboPacingMode::kAsync, Peer::Source::kProbing);
+    Peer::ProbeGuardDefaults();
+    const auto t0 = std::chrono::steady_clock::now();
+    Peer::EngageProbe(t0);
+    Expect(!Peer::HandleTimeout(t0 + 251ms) && !Peer::HandleTimeout(t0 + 503ms) &&
+               Peer::PacingMode() == depthxr::TurboPacingMode::kAsync,
+           "Two stalls in the first half second after engaging must not end the async probe");
+    Expect(!Peer::HandleTimeout(t0 + 1900ms) && Peer::PacingMode() == depthxr::TurboPacingMode::kAsync,
+           "A third stall inside the grace must not end the async probe");
+    Expect(!Peer::HandleTimeout(t0 + 3s) && Peer::PacingMode() == depthxr::TurboPacingMode::kAsync,
+           "The first counted stall must not end the probe on its own");
+    Expect(!Peer::HandleTimeout(t0 + 3250ms) && Peer::PacingMode() == depthxr::TurboPacingMode::kSequenced &&
+               !Peer::AutoSuspended(),
+           "Two counted stalls after the grace must fall back to sequenced");
+
+    // A game still hitching: stalls stay uncounted until a second after its
+    // last hitch, never past five seconds.
+    Peer::SetPolicy(depthxr::TurboPacingMode::kAsync, Peer::Source::kProbing);
+    Peer::ProbeGuardDefaults();
+    const auto t1 = t0 + 60s;
+    Peer::EngageProbe(t1);
+    Peer::ProbeAppFrame(t1 + 1800ms, 140.0);
+    Peer::ProbeAppFrame(t1 + 2600ms, 90.0);
+    Expect(!Peer::HandleTimeout(t1 + 2500ms) && !Peer::HandleTimeout(t1 + 3500ms) &&
+               Peer::PacingMode() == depthxr::TurboPacingMode::kAsync,
+           "Stalls while the game hitches must not count");
+    Expect(!Peer::HandleTimeout(t1 + 3700ms) && Peer::PacingMode() == depthxr::TurboPacingMode::kAsync,
+           "The first stall after the hitch grace must count, not fall back on its own");
+    Expect(!Peer::HandleTimeout(t1 + 3800ms) && Peer::PacingMode() == depthxr::TurboPacingMode::kSequenced,
+           "Two stalls after the hitch grace must fall back");
+
+    // Past the early window, a fallback is ordinary evidence.
+    Peer::SetPolicy(depthxr::TurboPacingMode::kAsync, Peer::Source::kProbing);
+    Peer::ProbeGuardDefaults();
+    const auto t2 = t0 + 120s;
+    Peer::EngageProbe(t2);
+    Expect(!Peer::HandleTimeout(t2 + 20s) && !Peer::HandleTimeout(t2 + 20100ms) &&
+               Peer::PacingMode() == depthxr::TurboPacingMode::kSequenced,
+           "Two stalls twenty seconds in must fall back");
+
+    // Forced async keeps its plain safety threshold: no grace.
+    Peer::SetPolicy(depthxr::TurboPacingMode::kAsync, Peer::Source::kForced);
+    Peer::ProbeGuardDefaults();
+    const auto t3 = t0 + 180s;
+    Peer::EngageProbe(t3);
+    for (int stall = 0; stall < 4; ++stall)
+        Expect(!Peer::HandleTimeout(t3 + std::chrono::milliseconds(100 * (stall + 1))),
+               "Forced async suspended before its five-stall threshold");
+    Expect(Peer::HandleTimeout(t3 + 500ms) && Peer::AutoSuspended(),
+           "Forced async stalls inside the probe grace must still suspend Turbo");
+    Expect(runtime.Calls().empty(), "A policy-only test unexpectedly issued runtime calls");
+}
+
+// The real frame loop on an interlocking runtime (every off-thread wait stalls
+// until the next submit) with the shipping grace: Auto still falls back to
+// sequenced, a few seconds after engaging instead of two frames.
+void TestInterlockedRuntimeAutoFallsBackAfterProbeGrace() {
+    FakeRuntime runtime;
+    runtime.InterlockOffThreadWaits();
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    using Peer = depthxr::TurboFrameTestPeer;
+    Peer::SetPolicy(depthxr::TurboPacingMode::kAsync, Peer::Source::kProbing);
+    Peer::ProbeGuardDefaults();
+    const auto start = std::chrono::steady_clock::now();
+    const auto end_info = FrameEndInfo();
+    Expect(Peer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS && runtime.WaitForWaitEntered(1),
+           "Interlock grace test could not establish async pacing");
+    int frames = 0;
+    while (Peer::SequencedState() != Peer::ActiveState() && frames < 24) {
+        Expect(AppFrame(end_info) == XR_SUCCESS, "An interlocked async frame failed during the probe grace");
+        ++frames;
+    }
+    const double elapsed = ElapsedMs(start);
+    Expect(Peer::PacingMode() == depthxr::TurboPacingMode::kSequenced &&
+               Peer::SequencedState() == Peer::ActiveState() && !Peer::AutoSuspended(),
+           "Auto did not fall back from an interlocked runtime after the probe grace (frames=" +
+               std::to_string(frames) + ")");
+    Expect(elapsed >= 2000.0 && elapsed < 4500.0 && frames >= 6,
+           "The interlocked fallback took " + std::to_string(elapsed) + " ms over " + std::to_string(frames) +
+               " frames; the grace is two seconds");
+    ExpectHealthyFrames(runtime, 32, "Interlocked fallback after the grace");
+}
+
 } // namespace
 
 // Frame Generation owns pacing through the layer's real hooks: Turbo yields,
@@ -4930,6 +5063,9 @@ int main() {
     TestAutoSubmissionErrorsTryBothModes();
     TestAutoHasNoRuntimeMappings();
     TestSequencedStallPolicySuspends();
+    TestProbeGuardScriptedTimes();
+    TestAutoProbeGraceIgnoresEngagementStalls();
+    TestInterlockedRuntimeAutoFallsBackAfterProbeGrace();
     Expect(depthxr::TurboFrameTestPeer::OsdStateTransitions(), "OSD lost enabled/off Turbo or applied/ready/disabled Pivot state");
     TestVarjoNativeSubmittedFocusCountsEveryFrame();
     TestVarjoDeferredReleasesKeepFrameGenUnblocked();
